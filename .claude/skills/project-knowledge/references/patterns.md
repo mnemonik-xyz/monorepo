@@ -7,9 +7,9 @@ For universal coding standards, see `~/.claude/skills/code-writing/references/un
 
 ## Project-Specific Code Patterns
 
-### Cargo workspace
+### Git submodules
 
-Root `Cargo.toml` defines `[workspace]` with members `["core", "mcp"]`. Always run tests from the repo root with `cargo test --workspace` to catch cross-crate regressions.
+`core/`, `mcp/`, and `webapp/` are independent git repositories registered as submodules. Clone with `git clone --recurse-submodules`. Update all submodules with `git submodule update --remote`. Each submodule has its own `Cargo.toml` and is released independently. Run tests in each submodule directory separately: `cd core && cargo test`, `cd mcp && cargo test`.
 
 ### Dual-target compilation
 

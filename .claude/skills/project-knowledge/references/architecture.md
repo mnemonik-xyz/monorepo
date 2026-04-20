@@ -32,13 +32,13 @@ Technical architecture overview for AI agents. Helps agents understand HOW the s
 
 ## Project Structure
 
-The repo is a Cargo workspace with two members (`core` and `mcp`) plus a TypeScript `webapp/` and a `docs/` directory.
+The root repo is a **git submodule container**. `core/`, `mcp/`, and `webapp/` are each independent git repositories registered as submodules. `docs/` is a regular directory inside the root repo.
 
-`core/src/` is split into modules by responsibility: `embed/` holds the Embedder trait and three provider implementations (fastembed, openai, hash); `compress/` holds TurboQuant scalar quantisation; `identity/` holds Ed25519 keypair generation, DID derivation, and signing; `attest/` holds the SHA-256 hashing and AttestationRecord type; `storage/` holds the SQLite store; `arweave/` holds the ANS-104 bundle builder including deep hash and Avro encoding; `solana/` holds the SPL Memo writer and reader; `wasm/` holds all `#[wasm_bindgen]` exports and is only compiled for the `wasm32-unknown-unknown` target.
+`core/` (submodule `mnemonic-core`) — Rust library crate. `src/` is split by responsibility: `embed/` holds the Embedder trait and three provider implementations (fastembed, openai, hash); `compress/` holds TurboQuant scalar quantisation; `identity/` holds Ed25519 keypair generation, DID derivation, and signing; `attest/` holds SHA-256 hashing and AttestationRecord; `storage/` holds the SQLite store; `arweave/` holds the ANS-104 bundle builder with deep hash and Avro encoding; `solana/` holds SPL Memo writer and reader; `wasm/` holds all `#[wasm_bindgen]` exports compiled only for `wasm32-unknown-unknown`.
 
-`mcp/src/` is split by concern: `main.rs` bootstraps the Axum server and McpState; `mcp.rs` is the JSON-RPC 2.0 dispatcher; `tools.rs` implements the five MCP tools; `payment.rs` implements the dual payment gate (balance + x402); `pricing.rs` is the dynamic pricing engine using Irys and CoinGecko; `config.rs` reads all configuration from environment variables.
+`mcp/` (submodule `mnemonic-mcp`) — MCP server binary. `src/` is split by concern: `main.rs` bootstraps Axum and McpState; `mcp.rs` is the JSON-RPC 2.0 dispatcher; `tools.rs` implements the five MCP tools; `payment.rs` implements the dual payment gate; `pricing.rs` is the dynamic pricing engine; `config.rs` reads configuration from env vars.
 
-`webapp/src/` contains React components, Tailwind styles, and a `wasm/` subfolder that imports the compiled WASM package from `core/`.
+`webapp/` (submodule `mnemonic-webapp`) — TypeScript + React demo app. `src/` contains React components, Tailwind styles, and a `wasm/` subfolder that imports the compiled WASM package from `core/`.
 
 ---
 
