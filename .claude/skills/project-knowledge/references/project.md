@@ -7,53 +7,53 @@ This file provides high-level project overview for AI agents. Helps agents under
 
 ## Project Overview
 
-**Name:** [Project Name]
+**Name:** mnemonic-protocol (monorepo)
 
-**Description:** [One-line description of what this project does]
+**Description:** Monorepo for the Mnemonic Protocol — verifiable, persistent memory for AI agents with cryptographic attestation on Arweave and Solana.
 
-[Optional: 1-2 additional sentences with key context]
+Contains four components: protocol documentation, a Rust core library, an MCP server for Cursor/Claude Desktop, and a demo web app. The core library compiles to both native Rust and WASM, so all components share one implementation. See architecture.md for the full directory structure.
 
 ---
 
 ## Target Audience
 
-**Primary users:** [Who uses this - e.g., "Developers building CLI tools", "Small business owners"]
+**Primary users:** Developers building AI agents who need persistent, tamper-proof memory across sessions and provider switches.
 
-**Use case:** [Why they need it - e.g., "Need to automate deployment workflows", "Want to track inventory without complex software"]
+**Use case:** Connect an AI agent to Mnemonic via MCP (Cursor, Claude Desktop) so it remembers decisions and context across sessions — and can cryptographically prove that memory has not been altered. Developers can also import `mnemonic-core` directly or use the WASM package in TypeScript.
 
 ---
 
 ## Core Problem
 
-[What pain point are we solving? 2-3 sentences describing the problem this project addresses]
+AI agents lose all context when a session ends. Even when memory is stored, there is no way to verify it has not been changed. Mnemonic solves both: it persists agent memory across sessions and anchors a cryptographic proof on-chain (Arweave for storage, Solana for timestamping), so any party can independently verify that a memory item is authentic and unmodified.
 
-[Example format: "Currently users have to [manual process]. This is slow/error-prone/expensive because [reason]. We solve this by [solution approach]."]
+Provider portability is the secondary problem: memory stored via Mnemonic is provider-agnostic — a user can switch from Claude to GPT to a local model and continue working with the same attested memory.
 
 ---
 
 ## Key Features
 
-[List 3-5 core capabilities - only the most important ones. Details belong in project backlog.]
+- **Semantic embedding + TurboQuant compression** — encodes content as a dense vector, scalar-quantises to 2–4 bits per dimension (up to 32× compression), making on-chain storage practical
+- **Cryptographic attestation** — SHA-256 content hash anchored via Solana SPL Memo; full payload stored as a signed ANS-104 bundle item on Arweave/Irys
+- **Ed25519 identity** — every agent has a deterministic keypair; DID-sol and DID-key derivation built in
+- **MCP server** — 5 tools (whoami, sign_memory, verify, prove_identity, recall) for Cursor and Claude Desktop; supports local mode (free, SQLite-only) and full mode (on-chain)
+- **Demo web app** — project landing page + live demo: chat with local Qwen2.5-7B about the protocol, export attested context to any MCP client
 
-- **[Feature 1 name]** - [What it does in 1 sentence]
-- **[Feature 2 name]** - [What it does in 1 sentence]
-- **[Feature 3 name]** - [What it does in 1 sentence]
-- **[Feature 4 name]** - [What it does in 1 sentence]
-- **[Feature 5 name]** - [What it does in 1 sentence]
+---
 
-<!--
-Feature backlog, detailed roadmap, and development phases live in the project backlog
-(see CLAUDE.md for backlog path), not here. This file is a stable overview.
--->
+## MVP Scope
+
+MVP consists of `core/` and `mcp/`. Core ships as both a native Rust crate and a WASM npm package. MCP server is fully functional in local mode for Cursor and Claude Desktop.
+
+`webapp/` and full `docs/` are prepared in parallel but not blocking MVP.
+
+Post-launch ideas: Python bindings via pyo3, Go bindings, hosted attestation API.
 
 ---
 
 ## Out of Scope
 
-[What we explicitly DON'T do - helps agents avoid scope creep]
-
-- [Thing 1 we don't support - e.g., "No mobile app version"]
-- [Thing 2 we don't support - e.g., "No multi-tenant support"]
-- [Thing 3 we don't support - e.g., "No real-time collaboration features"]
-
-<!-- Add more items as needed -->
+- No Python or Go implementations in this repo
+- No multi-tenant or shared-key scenarios in MVP
+- No mobile SDK
+- No collaborative memory pools

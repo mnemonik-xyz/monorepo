@@ -7,105 +7,92 @@ Deployment process, infrastructure, and production operations for AI agents.
 
 ## Deployment Platform
 
-**Platform:** [Where it deploys - e.g., "Vercel" / "Railway" / "AWS EC2" / "VPS"]
-
-**Type:** [e.g., "Serverless" / "Container (Docker)" / "Static hosting" / "Browser extension"]
-
-**Why this platform:** [One reason - e.g., "Free tier covers our needs" / "Need full server control"]
+| Component | Platform | Type |
+|---|---|---|
+| `core/` native | crates.io | Rust library crate |
+| `core/` WASM | npm (`@mnemonic/core`) | WASM npm package |
+| `mcp/` | GitHub Releases + Docker (GHCR) | Binary (x86_64, aarch64, linux/macos) |
+| `webapp/` | Cloudflare Pages | Static site |
+| `docs/` | Cloudflare Pages | Static docs |
 
 ---
 
 ## Access Information
 
-**SSH Access:**
-- Production: `ssh user@server-ip` [e.g., `ssh root@123.45.67.89`]
-- Staging: [if applicable]
+No server access needed. `mcp/` runs locally on user's machine. `webapp/` is static.
 
-> If not configured, agent will request: server address, username, and port.
-
-**Credentials location:** [e.g., "GitHub Actions secrets" / "1Password vault"]
+**CI/CD:** GitHub Actions.
+**Credentials:** GitHub Actions secrets (crates.io token, npm token, Cloudflare API token).
 
 ---
 
 ## Environment Variables
 
-**See:** [.env.example](../../.env.example) in project root
+**See:** `.env.example` in repo root.
 
-[List all required environment variables with their purpose - NO VALUES]
+Variables for `mcp/` (set by user):
 
-<!-- Keep .env.example updated. Comment each variable's purpose in that file. -->
+| Variable | Default | Purpose |
+|---|---|---|
+| `MNEMONIC_KEYPAIR_PATH` | `~/.mnemonic/id.json` | Ed25519 keypair |
+| `DATABASE_PATH` | `~/.mnemonic/attestations.db` | SQLite |
+| `STORAGE_MODE` | `local` | `local` or `full` |
+| `EMBED_PROVIDER` | `fastembed` | `fastembed`, `openai`, `hash` |
+| `OPENAI_API_KEY` | — | If `EMBED_PROVIDER=openai` |
+| `TURBO_BITS` | `4` | 2, 3, or 4 |
+| `ARWEAVE_URL` | `https://uploader.irys.xyz` | Arweave/Irys endpoint |
+| `SOLANA_RPC_URL` | `https://api.mainnet-beta.solana.com` | Solana RPC |
+| `MCP_TRANSPORT` | `http` | `stdio` or `http` |
+| `MCP_HTTP_PORT` | `3000` | HTTP transport port |
+| `PAYMENT_MODE` | `none` | `none`, `balance`, `x402`, `both` |
 
 ---
 
 ## Deployment Triggers
 
-**Production:** [e.g., "Auto-deploy on push to `main` after tests pass"]
+**crates.io + npm:** Manual on git tag `v*`. CI publishes both.
 
-**Staging:** [e.g., "Auto-deploy on push to `dev`"]
+**mcp/ binary:** Manual on git tag. CI cross-compiles and attaches to GitHub Release. Docker image pushed to GHCR.
 
-**Preview:** [e.g., "Auto-deploy for every PR" / "Not configured"]
+**webapp/ + docs/:** Auto-deploy on push to `main`. Preview on every PR (Cloudflare Pages).
+
+**CI tests:** Every push to `main` and `dev`, every PR.
 
 ---
 
 ## Pre-Deploy Checklist
 
-[Only critical manual steps - if fully automated, write "Fully automated via CI"]
-
-- [ ] [e.g., "Run `npm run migrate:prod` if schema changed"]
-- [ ] [e.g., "Verify env vars set in platform dashboard"]
+- [ ] Bump versions: `core/Cargo.toml`, `mcp/Cargo.toml`, `webapp/package.json`
+- [ ] Update `CHANGELOG.md`
+- [ ] `cargo test --workspace` + `wasm-pack test --headless --chrome` pass locally
+- [ ] `git tag v0.x.y && git push origin v0.x.y`
 
 ---
 
 ## Rollback Procedure
 
-**Platform rollback:** [e.g., "Vercel: 'Redeploy' on previous deployment" / "VPS: `git checkout <prev-commit>`"]
-
-**Manual steps if needed:** [e.g., "If DB migration broke: run rollback SQL from /migrations/rollbacks/"]
-
-**Approximate time:** [e.g., "~2 minutes" / "~10 minutes with DB rollback"]
+**crates.io:** `cargo yank --vers 0.x.y`, publish patch.
+**npm:** `npm deprecate @mnemonic/core@0.x.y`, publish patch.
+**Cloudflare Pages:** Instant rollback in dashboard.
+**GitHub Release:** Edit release, replace binary attachments.
+Time: ~5–10 minutes.
 
 ---
 
 ## Environments
 
-**Production:** [URL] - Deploys from `main` branch
-
-**Staging:** [URL] - Deploys from `dev` branch
-
-<!-- If single environment, only list Production -->
+**Production:** crates.io + npm + GitHub Releases + Cloudflare Pages — from `main`.
+**Preview:** Cloudflare Pages preview URLs — from PRs.
+**Local dev:** `cargo run -p mnemonic-mcp` + `npm run dev` (webapp).
 
 ---
 
 ## Monitoring & Observability
 
-<!--
-SCALING HINT: If this section grows beyond ~80 lines, extract to references/monitoring.md.
-If no monitoring configured, write: "Logs output to stdout only. No error tracking configured."
--->
+**Logging:** `tracing` crate in `mcp/`, level via `RUST_LOG`. Browser console in webapp.
 
-### Logging
+**Health check:** `GET /health` on `mcp/` HTTP transport — returns server version and storage mode.
 
-**Where:** [e.g., "stdout (Docker logs)" / "CloudWatch" / "Local files"]
-**Format:** [e.g., "JSON structured" / "Plain text" / "Default framework logging"]
+**Metrics:** crates.io + npm download stats only. No app-level metrics for MVP.
 
-### Error Tracking
-
-**Tool:** [e.g., "Sentry" / "Rollbar" / "None"]
-**Config:** [e.g., "SENTRY_DSN in .env" / "Not configured"]
-
-### Health Checks
-
-**Endpoint:** [e.g., "GET /health" / "None"]
-**Checks:** [e.g., "DB connectivity, external API status" / "N/A"]
-
-<!-- Optional sections below — delete if not applicable -->
-
-### Metrics
-
-**Analytics:** [e.g., "Google Analytics" / "Vercel Analytics" / "None"]
-**Key metrics:** [e.g., "API response time, error rate" / "N/A"]
-
-### Alerts
-
-**Tool:** [e.g., "Sentry email alerts" / "PagerDuty" / "None"]
-**Rules:** [e.g., "Error rate > 5%" / "N/A"]
+**Error tracking:** Not configured. Errors surface in MCP client (Cursor/Claude Desktop) via JSON-RPC error responses.

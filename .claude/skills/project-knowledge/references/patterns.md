@@ -7,97 +7,80 @@ For universal coding standards, see `~/.claude/skills/code-writing/references/un
 
 ## Project-Specific Code Patterns
 
-<!--
-ADD PROJECT-SPECIFIC PATTERNS HERE:
+### Cargo workspace
 
-1. Framework conventions (React hooks, Django patterns, FastAPI dependencies, etc.)
-2. Domain naming (Order/Cart/Product vs Purchase/Basket/Item)
-3. External integration patterns (Stripe webhooks, API retry logic, etc.)
-4. Database patterns (transactions, query optimization, caching)
+Root `Cargo.toml` defines `[workspace]` with members `["core", "mcp"]`. Always run tests from the repo root with `cargo test --workspace` to catch cross-crate regressions.
 
-Only add patterns SPECIFIC to this project. Don't add generic advice.
-Empty section is fine for simple projects.
--->
+### Dual-target compilation
+
+Feature-gate anything requiring network or OS I/O behind `#[cfg(not(target_arch = "wasm32"))]`. WASM builds must not depend on `tokio`, `std::fs`, or `std::net`. Use `wasm-bindgen-futures` for async in WASM context. WASM-specific exports live in `core/src/wasm/mod.rs`.
+
+### Embedder trait
+
+All providers implement the `Embedder` trait in `core/src/embed/mod.rs`. Never call a concrete provider directly from business logic — always go through the trait. This keeps the hash fallback and WASM-safe stub transparent to callers.
+
+### Storage lock discipline
+
+`AttestationStore` wraps `rusqlite::Connection` which is `!Send`. In async contexts, wrap in `std::sync::Mutex` and never hold the lock across an `.await` point.
+
+### Error handling
+
+Use `anyhow::Result` for all fallible functions in `core/` and `mcp/`. Convert to `JsValue` only at the WASM boundary in `core/src/wasm/`. Avoid `unwrap()` outside tests.
+
+### Storage modes
+
+`local` (default) uses SQLite only with synthetic IDs prefixed `local:` — free, instant, offline. `full` uses Arweave + Solana + SQLite and requires a funded keypair. The mode is set at server startup, not per-call. Never mix modes in one database.
 
 ---
 
 ## Git Workflow
 
-<!--
-SCALING HINT: If this section grows beyond ~80 lines, extract to references/git-workflow.md.
--->
-
 ### Branch Structure
 
-- **`main`** - Production-ready code (protected). Only merge from `dev` after full testing. Triggers production deployment.
-- **`dev`** - Active development. All work happens here. Triggers staging deployment.
+- **`main`** — production, tagged releases. Protected. Merge from `dev` after full CI passes.
+- **`dev`** — active development. All feature branches merge here.
+- **`feat/*`** — branch from `dev`, PR back to `dev`.
+
+### Commit Convention
+
+Conventional Commits with component scope: `feat(core):`, `fix(mcp):`, `feat(webapp):`, `docs:`, `chore:`.
 
 ### Testing Requirements
 
-- **On commit:** Code changed → Unit + Integration tests. Docs only → Skip tests.
-- **On merge to dev:** Unit + Integration (auto). E2E (optional).
-- **On merge to main:** Unit + Integration (auto). E2E (strongly recommended).
+On every commit: run `cargo test --workspace` and `cargo clippy --workspace -- -D warnings`. On merge to `dev`: add `wasm-pack test --headless --chrome` for the WASM target. On merge to `main`: full CI including WASM tests.
 
 ### Security & Quality Gates
 
-- **Pre-commit:** Gitleaks scans for secrets (API keys, tokens, credentials). Commit blocked if detected.
-- **Pre-push:** Code review agent validates changes. All checks must pass.
+Pre-commit: Gitleaks scans for secrets — API keys, private keys, tokens. Commit is blocked if any are detected. Pre-push: `cargo clippy --workspace` must pass with zero warnings.
 
 ---
 
 ## Testing & Verification
 
-<!--
-SCALING HINT: If this section grows beyond ~60 lines, extract to references/testing.md.
-This section stores proven verification approaches discovered during development.
-Generic testing methodology lives in ~/.claude/skills/test-master/.
--->
-
 ### Test Infrastructure
 
-[How to run tests: framework, runner, test DB setup, environment requirements.]
+Tests run with `cargo test --workspace` from repo root. WASM-specific tests run with `wasm-pack test --headless --chrome` inside `core/`. Benchmarks run with `cargo bench -p mnemonic-core`.
+
+For full-mode integration tests that need blockchain: start arlocal on port 1984 (`npx arlocal`) and `solana-test-validator` on port 8899. Set `STORAGE_MODE=local` to skip blockchain calls in all other tests.
 
 ### Agent Verification Methods
 
-[Proven methods for agent to verify features. Updated as new methods are discovered.]
+Attestation round-trip: call `sign_memory`, capture `solana_tx` and `arweave_tx`, call `verify`, assert `status == "verified"`.
 
-<!-- Example:
-### Telegram Bot
-**Method:** Telegram MCP
-**Setup:** Bot must be running, test user configured
-**Discovered:** 2026-01-15, during messaging feature
--->
+Recall: save five items with known content, call `recall` with a related query, assert the top result matches the expected item.
 
-### User Verification Methods
+WASM smoke test: build with `wasm-pack build --target web` inside `core/`, import in a minimal HTML page, call `whoami()`, assert the response contains a valid `public_key`.
 
-[Methods that require user involvement.]
-
-<!-- Example:
-### Visual UI Check
-**What to check:** Layout renders correctly on mobile
-**How:** Open on phone, verify responsive layout
-**Why agent can't:** No visual rendering capability
--->
+MCP smoke test: start the `mcp/` server in local mode, send a `tools/list` JSON-RPC request, assert five tools are returned, call `mnemonic_whoami`, assert a valid response.
 
 ---
 
 ## Business Rules
 
-<!--
-SCALING HINT: If this section grows beyond ~60 lines, extract to references/business-rules.md.
-DELETE THIS SECTION if project has no complex domain logic (simple CRUD, CLI tool, utility).
+### TurboQuant bit width
 
-Use for: multi-step workflows, state machines, calculation formulas, domain constraints.
--->
+Default is 4 bits (best recall quality). Do not change the bit width for an existing database — old and new embeddings become incomparable for recall ranking. Changing this setting effectively starts a new memory store.
 
-<!-- Example:
-### Order Lifecycle
-pending → paid → shipped → delivered
-- Cancel: only if pending or paid
-- Refund: full if pending, partial if paid, none after shipped
+### Compression is lossy
 
-### Pricing
-final_price = (subtotal - discount) * (1 + tax_rate) + shipping
-- Discount applies BEFORE tax
-- Free shipping if subtotal > $50
--->
+The compressed bytes stored on Arweave are not used for recall. The uncompressed float32 embeddings in SQLite are used for cosine search. The compressed bytes prove the embedding existed at attestation time and enable future cross-node comparison.
