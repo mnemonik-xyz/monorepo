@@ -22,7 +22,17 @@ Deployment process, infrastructure, and production operations for AI agents.
 No server access needed. `mcp/` runs locally on user's machine. `webapp/` is static.
 
 **CI/CD:** GitHub Actions.
-**Credentials:** GitHub Actions secrets (crates.io token, npm token, Cloudflare API token).
+
+**GitHub Actions secrets:**
+
+| Secret name | Purpose |
+|---|---|
+| `CRATES_IO_TOKEN` | Publish `mnemonic-core` to crates.io |
+| `NPM_TOKEN` | Publish `@mnemonic/core` to npm |
+| `CLOUDFLARE_API_TOKEN` | Deploy `webapp/` and `docs/` to Cloudflare Pages |
+| `CLOUDFLARE_ACCOUNT_ID` | Cloudflare account identifier |
+
+**Cloudflare Pages projects:** `mnemonic-webapp` (webapp/) and `mnemonic-docs` (docs/) — TBD, confirm names after first deploy.
 
 ---
 
@@ -83,7 +93,10 @@ Time: ~5–10 minutes.
 
 **Production:** crates.io + npm + GitHub Releases + Cloudflare Pages — from `main`.
 **Preview:** Cloudflare Pages preview URLs — from PRs.
-**Local dev:** `cargo run -p mnemonic-mcp` + `npm run dev` (webapp).
+**Local dev:** Prerequisites: Rust toolchain, wasm-pack, Node.js, Ollama running with Qwen2.5-7B-Instruct pulled.
+1. `cd core && wasm-pack build --target web` — build WASM package (required before webapp dev server)
+2. `cd mcp && STORAGE_MODE=local cargo run` — start MCP server in local mode (no funded keypair needed)
+3. `cd webapp && npm install && npm run dev` — start webapp dev server
 
 ---
 

@@ -1,145 +1,122 @@
 # UX Guidelines
 
-<!--
-OPTIONAL FILE — DELETE if project has no significant UI (CLI tools, bots with minimal text, backend-only).
-For projects with minimal UI, add a brief "UX" section in patterns.md instead.
--->
-
 ## Purpose
 UX standards and user-facing communication for AI agents. Helps agents write consistent UI text and follow design patterns.
+Applies to `webapp/` only. `core/` and `mcp/` have no UI.
 
 ---
 
 ## Interface Language
 
-**Primary language:** [e.g., "Russian" / "English" / "Both (i18n support)"]
+**Primary language:** English
 
-**Localization:** [e.g., "Single language - no i18n" / "Multi-language via `/locales/`" / "Using react-i18next"]
-
-<!-- If multilingual, specify which language is default and where translation files are -->
+**Localization:** English-only for MVP. Post-launch: extend to additional languages via i18n. No i18n framework configured yet — no need to extract strings into translation keys during MVP development.
 
 ---
 
 ## Tone of Voice
 
-**Overall tone:** [Choose: Formal / Professional / Casual / Friendly / Technical / Simple]
+**Overall tone:** Technical / Precise
 
-**Writing style:** [Describe in detail - not just keywords. E.g., "Short, direct sentences. Active voice. Focus on user actions. Avoid corporate jargon and passive constructions. Technical accuracy without overwhelming with details."]
+**Writing style:** Short, direct sentences. Active voice. No filler words or marketing language. Assume a developer audience that understands cryptographic concepts. Prefer exact terms over approximations ("attestation" not "proof of memory", "Ed25519 keypair" not "your identity").
 
 **Voice characteristics:**
-- **Formality level:** [e.g., "Professional but approachable - use 'you' but avoid slang" / "Casual and friendly - contractions OK, conversational"]
-- **Emotional tone:** [e.g., "Warm and supportive" / "Neutral and factual" / "Confident and authoritative"]
-- **Technical complexity:** [e.g., "Explain technical concepts simply" / "Assume technical audience" / "Balance - simple for common tasks, detailed for advanced"]
-- **Humor:** [e.g., "Light humor in empty states, serious in errors" / "No humor - strictly professional" / "Playful but not distracting"]
+- **Formality level:** Professional. No contractions in UI labels. Conversational only in empty states.
+- **Emotional tone:** Neutral and factual. No cheerful affirmations.
+- **Technical complexity:** High — audience is developers. Do not simplify domain terms.
+- **Humor:** None.
 
 **Example phrases by context:**
 
-- ✅ Good: ""
-
-- ❌ Avoid: ""
-
+- ✅ Good: "Memory attested on Arweave. Solana anchor: `5xQ3...`"
+- ✅ Good: "Recall returned 0 results."
+- ❌ Avoid: "Great news! Your memory has been saved!"
+- ❌ Avoid: "Oops, something went wrong."
 
 ---
 
 ## Domain Glossary
 
-[**Instructions - remove this section after filling:**
+- **Attestation** — a signed, on-chain-anchored memory record. Use "attestation", not "memory proof" or "entry".
+  *UI example: "Attestation created · arweave_tx: `abc...`"*
 
-**When to add terms:**
-- Domain-specific concepts that appear frequently in UI (e.g., in fintech: "wallet" vs "account" vs "balance")
-- Terms that might be confused with similar concepts (e.g., "order" vs "booking" vs "reservation")
-- Product-specific jargon that needs consistent naming across all text
+- **Recall** — semantic search over stored attestations. Use "recall", not "search" or "find".
+  *UI example: "Recall · top 5 results"*
 
-**What NOT to add:**
-- Generic UI words (button, form, page, menu, settings, etc.)
-- Self-explanatory terms that don't need clarification
-- One-time mentions or obvious concepts
+- **Local mode** — SQLite-only, no blockchain. Use "local mode", not "offline" or "free mode".
+  *UI example: "Running in local mode — attestations are not on-chain."*
 
-**Important:** Empty glossary is perfectly fine. Only add terms when real naming conflicts or domain complexity emerges during development.
+- **Full mode** — Arweave + Solana + SQLite. Use "full mode", not "on-chain mode".
 
-**Format:**
-- **[Term]** — [What it means specifically in your product context]
-  *UI example: "[Where/how users see it]"*
-
-]
-
-<!-- Start empty. Fill only when domain terminology actually appears and needs consistency -->
+- **Agent identity** — the Ed25519 keypair that signs attestations. Use "agent identity" or "keypair", not "account" or "wallet".
 
 ---
 
 ## Text Patterns
 
-[How we write specific UI elements - keep examples SHORT]
-
 ### Buttons
-**Style:** [e.g., "Action verb + object: 'Save changes', 'Create account'" / "Single verb: 'Save', 'Cancel'"]
+**Style:** Action verb + object when space allows; single verb for icon buttons.
 
 **Examples:**
-- Primary actions: [e.g., "Save changes", "Create workspace"]
-- Secondary actions: [e.g., "Cancel", "Go back"]
-- Destructive actions: [e.g., "Delete account", "Remove workspace"]
+- Primary: "Sign memory", "Export context", "Verify"
+- Secondary: "Cancel", "Copy"
+- Destructive: "Clear local store"
 
 ### Error Messages
-**Format:** [e.g., "Problem + what to do: 'Invalid email. Please check and try again.'" / "Just state the problem: 'Invalid email address'"]
+**Format:** State the problem precisely. Include the relevant identifier if known. No apologies.
 
 **Examples:**
-- Validation: [e.g., "Email is required"]
-- Auth errors: [e.g., "Incorrect password. Try again or reset password."]
-- System errors: [e.g., "Something went wrong. Please try again."]
+- Validation: "Content must not be empty."
+- Auth / keypair: "Keypair file not found at `~/.mnemonic/id.json`."
+- Network: "Arweave upload failed (HTTP 503). Retry or switch to local mode."
+- Verification: "Verification failed: content hash mismatch."
 
 ### Success Messages
-**Format:** [e.g., "Confirmation + next step" / "Just confirmation"]
+**Format:** Confirmation + key identifiers. No exclamation marks.
 
 **Examples:**
-- [e.g., "Account created! Check your email to verify."]
-- [e.g., "Changes saved successfully."]
+- "Memory attested · solana_tx: `5xQ3...` · arweave_tx: `kL9m...`"
+- "Verification passed."
+- "Context exported."
 
 ### Loading States
-**Style:** [e.g., "Present continuous: 'Loading...', 'Saving changes...'" / "Please wait: 'Please wait...'"]
+**Style:** Present continuous, lowercase, no ellipsis animation in text (use spinner component).
 
 **Examples:**
-- [e.g., "Loading workspace..."]
-- [e.g., "Saving..."]
+- "Signing memory..."
+- "Uploading to Arweave..."
+- "Recalling..."
 
----
+### Empty States
+**Style:** One factual sentence describing the state. One short action prompt.
 
-## Copy Reference
-
-[If you have a separate file with all UI texts, link it here]
-
-**Location:** [e.g., "See `/src/copy/ui-messages.ts` for all user-facing text" / "All text in `/locales/en.json`"]
-
-<!-- If no separate file, write: "N/A - UI copy defined inline in components" -->
+**Examples:**
+- "No attestations yet. Sign a memory to get started."
+- "Recall returned no results for this query."
 
 ---
 
 ## Design System
 
-[Visual design specifications - only if custom design exists]
-
-**Design files:** [e.g., "Figma: [link]" / "No design files - using default [framework] components"]
+**Design files:** No Figma — built directly in Tailwind CSS.
 
 **Color palette:**
-- Primary: [e.g., "#0066FF" / "Default Material Blue"]
-- Secondary: [e.g., "#FF6B00" / "N/A"]
-- Error/Warning/Success: [e.g., "#FF0000, #FFA500, #00CC00" / "Standard"]
+- Background: `#0A0F1E` (deep navy-black)
+- Primary accent: `#00D4B4` (teal/cyan)
+- Secondary accent: `#9945FF` (Solana purple)
+- Text primary: `#FFFFFF`
+- Text muted: `#8B9BC0`
+- Error: `#FF4747`
+- Success: `#00CC88`
 
 **Key components:**
-- [e.g., "Custom Button with rounded corners + shadow"]
-- [e.g., "Modal with blur backdrop"]
-- [e.g., "Using standard [Chakra UI / Material UI / Ant Design] components"]
-
-<!-- Only include if there are custom visual elements. If using standard framework components, write: "Standard [framework name] components with default theme" -->
+- Dark card surface over `#0A0F1E` background
+- Monospace font for all hashes, tx IDs, public keys, and code
+- Minimal borders — subtle `#8B9BC0` at low opacity
+- No heavy drop shadows — flat with subtle glow on primary accent elements
 
 ---
 
 ## Accessibility
 
-[Only include if there are specific requirements beyond standard practices]
-
-**Requirements:**
-- [e.g., "All buttons must have aria-label if icon-only"]
-- [e.g., "Forms must have explicit <label> elements, no placeholder-only"]
-- [e.g., "Color contrast ratio minimum 4.5:1"]
-
-<!-- If following standard a11y practices with no special requirements, write: "Follow standard WCAG 2.1 AA guidelines" -->
+Follow standard WCAG 2.1 AA guidelines. Ensure all hash/tx displays have `aria-label` with a human-readable description (e.g., `aria-label="Solana transaction ID"`).

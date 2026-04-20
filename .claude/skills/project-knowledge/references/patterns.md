@@ -9,7 +9,7 @@ For universal coding standards, see `~/.claude/skills/code-writing/references/un
 
 ### Git submodules
 
-`core/`, `mcp/`, and `webapp/` are independent git repositories registered as submodules. Clone with `git clone --recurse-submodules`. Update all submodules with `git submodule update --remote`. Each submodule has its own `Cargo.toml` and is released independently. Run tests in each submodule directory separately: `cd core && cargo test`, `cd mcp && cargo test`.
+See architecture.md for submodule structure and directory layout. Each submodule has its own `Cargo.toml` and is released independently. Commits that touch multiple submodules require a separate commit per submodule, plus a root-repo commit updating the submodule pointers.
 
 ### Dual-target compilation
 
@@ -57,21 +57,7 @@ Pre-commit: Gitleaks scans for secrets — API keys, private keys, tokens. Commi
 
 ## Testing & Verification
 
-### Test Infrastructure
-
-Tests run with `cargo test --workspace` from repo root. WASM-specific tests run with `wasm-pack test --headless --chrome` inside `core/`. Benchmarks run with `cargo bench -p mnemonic-core`.
-
-For full-mode integration tests that need blockchain: start arlocal on port 1984 (`npx arlocal`) and `solana-test-validator` on port 8899. Set `STORAGE_MODE=local` to skip blockchain calls in all other tests.
-
-### Agent Verification Methods
-
-Attestation round-trip: call `sign_memory`, capture `solana_tx` and `arweave_tx`, call `verify`, assert `status == "verified"`.
-
-Recall: save five items with known content, call `recall` with a related query, assert the top result matches the expected item.
-
-WASM smoke test: build with `wasm-pack build --target web` inside `core/`, import in a minimal HTML page, call `whoami()`, assert the response contains a valid `public_key`.
-
-MCP smoke test: start the `mcp/` server in local mode, send a `tools/list` JSON-RPC request, assert five tools are returned, call `mnemonic_whoami`, assert a valid response.
+`cargo test --workspace` runs all unit and integration tests from the repo root. WASM tests run with `wasm-pack test --headless --chrome` inside `core/`. Benchmarks run with `cargo bench -p mnemonic-core`. Full-mode integration tests require arlocal on `:1984` and `solana-test-validator` on `:8899`; set `STORAGE_MODE=local` to skip blockchain in all other tests. See each submodule's README for full invocation details and smoke test procedures.
 
 ---
 
