@@ -116,7 +116,7 @@ Struct types (`AttestationRow`, `SearchResult`, `PnlStats`, `CompressedEmbedding
 All existing dependencies split between core and mcp per code-research.md section 3:
 
 **core/Cargo.toml:**
-`sha2`, `hex`, `base64`, `serde`, `serde_json`, `blake3`, `ciborium`, `coset`, `chrono`, `anyhow`, `thiserror`, `uuid`, `bs58`, `bincode`, `ndarray`, `turboquant-plus-rs`, `solana-sdk`, `spl-memo`, `rusqlite` (bundled), `reqwest` (json), `futures`, `tracing` (optional), `fastembed` (optional, feature = "local-embed"), `tokio` (features: `time`, `rt` — needed for async fns in arweave/solana modules)
+`sha2`, `hex`, `base64`, `serde`, `serde_json`, `blake3`, `ciborium`, `coset`, `chrono`, `anyhow`, `thiserror`, `uuid`, `bs58`, `bincode`, `ndarray`, `turboquant-plus-rs`, `solana-sdk`, `spl-memo`, `rusqlite` (bundled), `reqwest` (features: `json`, `blocking` — `blocking` needed for `OpenAIEmbedder`), `futures`, `tracing` (optional), `fastembed` (optional, feature = "local-embed"), `tokio` (features: `time`, `rt` — needed for async fns in arweave/solana modules)
 
 **core/Cargo.toml [dev-dependencies]:**
 `httpmock`, `tempfile`, `proptest`, `criterion`, `tokio` (features: `macros`, `rt-multi-thread` — for `#[tokio::test]`)
@@ -240,7 +240,7 @@ Technical acceptance criteria (supplement user-spec criteria):
 - **Files to modify:** `core/src/codec/` (new: mod.rs, schema.rs, canonical.rs, hash.rs, sign.rs), `core/src/lib.rs`, `core/Cargo.toml`, `mcp/src/tools.rs`, `mcp/src/mcp.rs`
 - **Files to read:** `mcp/src/codec/` (current source)
 
-### Wave 3: Identity + Embed + Compress (depends on Wave 2, sequential)
+### Wave 3: Identity extraction (depends on Wave 2)
 
 #### Task 3: Extract identity module
 - **Description:** Move identity.rs from mcp/src/ to core/src/identity/. Contains keypair loading, DID derivation, signing. Depends only on solana-sdk. Update mcp imports.
@@ -250,6 +250,8 @@ Technical acceptance criteria (supplement user-spec criteria):
 - **Files to modify:** `core/src/identity/` (new), `core/src/lib.rs`, `core/Cargo.toml`, `mcp/src/main.rs`, `mcp/src/tools.rs`
 - **Files to read:** `mcp/src/identity.rs`
 
+### Wave 4: Embed extraction (depends on Wave 3)
+
 #### Task 4: Extract embed module + remove HashEmbedder
 - **Description:** Move embed.rs to core/src/embed/. Define Embedder trait, move OpenAIEmbedder and FastEmbedder. Remove HashEmbedder, introduce MockEmbedder (#[cfg(test)]) returning deterministic fixed vectors. Update all tests.
 - **Skill:** code-writing
@@ -257,6 +259,8 @@ Technical acceptance criteria (supplement user-spec criteria):
 - **Verify-smoke:** `cargo test -p mnemonic-core -- embed && grep -r "HashEmbedder" core/src/` (second must be empty)
 - **Files to modify:** `core/src/embed/` (new), `core/src/lib.rs`, `core/Cargo.toml` (fastembed optional dep), `mcp/src/main.rs`, `mcp/src/tools.rs`
 - **Files to read:** `mcp/src/embed.rs`, `mcp/src/db.rs` (HashEmbedder usage in tests)
+
+### Wave 5: Compress extraction (depends on Wave 4)
 
 #### Task 5: Extract compress module
 - **Description:** Move compress.rs to core/src/compress/. Uses turboquant-plus-rs (migrated in Task 1) and ndarray. Add numerical fidelity roundtrip test verifying MSE stays below threshold after namespace change.
@@ -266,7 +270,7 @@ Technical acceptance criteria (supplement user-spec criteria):
 - **Files to modify:** `core/src/compress/` (new), `core/src/lib.rs`, `core/Cargo.toml`, `mcp/src/main.rs`, `mcp/src/tools.rs`
 - **Files to read:** `mcp/src/compress.rs`
 
-### Wave 4: Storage + Network modules (depends on Wave 3, sequential)
+### Wave 6: Storage extraction (depends on Wave 5)
 
 #### Task 6: Extract storage with trait split
 - **Description:** Create AttestationStore and LineageStore traits in core/src/storage/. Move SQLite implementation from db.rs, excluding payment methods. Add contract tests verifying trait methods through SQLite impl. Document that authorization is caller's responsibility.
@@ -276,6 +280,8 @@ Technical acceptance criteria (supplement user-spec criteria):
 - **Files to modify:** `core/src/storage/` (new: mod.rs, traits.rs, sqlite.rs), `core/src/lib.rs`, `core/Cargo.toml`, `mcp/src/payment.rs`, `mcp/src/tools.rs`, `mcp/src/main.rs`
 - **Files to read:** `mcp/src/db.rs`, `mcp/src/payment.rs`
 
+### Wave 7: Arweave extraction (depends on Wave 6)
+
 #### Task 7: Extract arweave module + add httpmock tests
 - **Description:** Move arweave.rs to core/src/arweave/. Add ~6 httpmock tests: write, read, write_bytes, health_check, network timeout, malformed response. No real mainnet URLs or funded keypairs in test code.
 - **Skill:** code-writing
@@ -283,6 +289,8 @@ Technical acceptance criteria (supplement user-spec criteria):
 - **Verify-smoke:** `cargo test -p mnemonic-core -- arweave && cargo clippy -p mnemonic-core -- -D warnings`
 - **Files to modify:** `core/src/arweave/` (new), `core/src/lib.rs`, `core/Cargo.toml` (httpmock dev-dep, tokio dev features), `mcp/src/main.rs`, `mcp/src/tools.rs`
 - **Files to read:** `mcp/src/arweave.rs`
+
+### Wave 8: Solana extraction (depends on Wave 7)
 
 #### Task 8: Extract solana module + add httpmock tests + isolate verify_usdc_transfer
 - **Description:** Move solana.rs to core/src/solana/, but extract verify_usdc_transfer out of SolanaClient into mcp/src/payment.rs as a standalone async fn taking &SolanaClient. Add ~7 httpmock tests for core SolanaClient methods. No real mainnet URLs or funded keypairs.
@@ -292,7 +300,7 @@ Technical acceptance criteria (supplement user-spec criteria):
 - **Files to modify:** `core/src/solana/` (new), `core/src/lib.rs`, `core/Cargo.toml`, `mcp/src/payment.rs`, `mcp/src/main.rs`, `mcp/src/tools.rs`
 - **Files to read:** `mcp/src/solana.rs`, `mcp/src/payment.rs`
 
-### Wave 5: Lineage + test artifacts (depends on Wave 4, sequential)
+### Wave 9: Lineage extraction (depends on Wave 8)
 
 #### Task 9: Extract lineage module + cleanup
 - **Description:** Move lineage.rs to core/src/lineage/. Apply three fixes: Direction becomes enum, chain_valid becomes Option<bool>, DB errors propagate via ?. Add test for error propagation. Update all 9 existing tests.
@@ -302,6 +310,8 @@ Technical acceptance criteria (supplement user-spec criteria):
 - **Files to modify:** `core/src/lineage/` (new), `core/src/lib.rs`, `core/Cargo.toml`, `mcp/src/tools.rs`
 - **Files to read:** `mcp/src/lineage.rs`, `core/src/codec/schema.rs` (ParentRef, MAX_* constants)
 
+### Wave 10: Test artifacts (depends on Wave 9)
+
 #### Task 10: Move integration tests, proptests, and benchmarks
 - **Description:** Move tests/integration_cbor.rs and tests/proptest_canonical.rs to core/tests/. Move benches/ to core/benches/. Remove inline helper duplication — import from mnemonic_core directly.
 - **Skill:** code-writing
@@ -310,7 +320,7 @@ Technical acceptance criteria (supplement user-spec criteria):
 - **Files to modify:** `core/tests/` (new), `core/benches/` (new), `core/Cargo.toml` (criterion dev-dep, bench targets)
 - **Files to read:** `mcp/tests/integration_cbor.rs`, `mcp/tests/proptest_canonical.rs`, `mcp/benches/decompress.rs`, `mcp/benches/cbor_codec.rs`
 
-### Wave 6: Final rewiring (depends on Wave 5)
+### Wave 11: Final rewiring (depends on Wave 10)
 
 #### Task 11: MCP server rewiring + full verification
 - **Description:** Final cleanup of mcp/ imports — all domain types from mnemonic_core::. Remove leftover module files from mcp/src/. Verify MCP local mode round-trip via JSON-RPC stdio. Confirm no domain logic remains in mcp/.
@@ -321,13 +331,13 @@ Technical acceptance criteria (supplement user-spec criteria):
 - **Files to modify:** `mcp/src/tools.rs`, `mcp/src/mcp.rs`, `mcp/src/main.rs`, `mcp/src/payment.rs`, `mcp/Cargo.toml`
 - **Files to read:** `core/src/lib.rs` (public API), `mcp/src/` (all remaining files)
 
-#### Task 12: Update architecture.md documentation
-- **Description:** Update architecture.md to reflect new core/ structure with codec/ and lineage/ modules. Remove stale references: attest/ (now codec/), wasm/ (out of scope), HashEmbedder (removed), three-provider embed description (now two).
+#### Task 12: Update architecture.md and patterns.md documentation
+- **Description:** Update architecture.md to reflect new core/ structure with codec/ and lineage/ modules. Remove stale references: attest/ (now codec/), wasm/ (out of scope), HashEmbedder (removed), three-provider embed (now two). Update patterns.md: remove "hash fallback" from Embedder trait section, remove wasm/mod.rs reference.
 - **Skill:** documentation-writing
 - **Reviewers:** code-reviewer
 - **Verify-smoke:** `grep -E "codec/|lineage/" .claude/skills/project-knowledge/references/architecture.md` (both found)
-- **Files to modify:** `.claude/skills/project-knowledge/references/architecture.md`
-- **Files to read:** `core/src/lib.rs`, `.claude/skills/project-knowledge/references/architecture.md` (current)
+- **Files to modify:** `.claude/skills/project-knowledge/references/architecture.md`, `.claude/skills/project-knowledge/references/patterns.md`
+- **Files to read:** `core/src/lib.rs`, `.claude/skills/project-knowledge/references/architecture.md`, `.claude/skills/project-knowledge/references/patterns.md`
 
 ### Audit Wave
 
