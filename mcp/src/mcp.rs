@@ -5,9 +5,10 @@ use serde_json::Value;
 use solana_sdk::signature::Keypair;
 
 use std::sync::Arc;
-use mnemonic_core::embed::Embedder;
 use mnemonic_core::compress::EmbeddingCompressor;
-use crate::{arweave::ArweaveClient, db::AttestationStore, pricing::PricingEngine, solana::SolanaClient, tools};
+use mnemonic_core::embed::Embedder;
+use mnemonic_core::storage::SqliteStore;
+use crate::{arweave::ArweaveClient, pricing::PricingEngine, solana::SolanaClient, tools};
 
 /// JSON-RPC 2.0 request.
 #[derive(Debug, Deserialize)]
@@ -43,7 +44,7 @@ pub struct McpState {
     pub keypair: Keypair,
     pub solana: SolanaClient,
     pub arweave: ArweaveClient,
-    pub store: std::sync::Mutex<AttestationStore>,
+    pub store: std::sync::Mutex<SqliteStore>,
     pub embedder: Box<dyn Embedder>,
     pub compressor: EmbeddingCompressor,
 

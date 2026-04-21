@@ -11,7 +11,8 @@
 use axum::http::HeaderMap;
 use serde::{Deserialize, Serialize};
 
-use crate::{db::AttestationStore, solana::SolanaClient};
+use mnemonic_core::storage::SqliteStore;
+use crate::{db, solana::SolanaClient};
 
 // ── x402 wire types ──────────────────────────────────────────────────────────
 
@@ -97,7 +98,7 @@ pub fn extract_x402_proof(headers: &HeaderMap) -> Option<X402PaymentProof> {
 pub async fn check_payment(
     headers: &HeaderMap,
     mode: &str,
-    store: &std::sync::Mutex<AttestationStore>,
+    store: &std::sync::Mutex<SqliteStore>,
     solana: &SolanaClient,
     treasury: &str,
     usdc_mint: &str,
@@ -136,7 +137,7 @@ pub async fn check_payment(
 
 fn check_balance(
     headers: &HeaderMap,
-    store: &std::sync::Mutex<AttestationStore>,
+    store: &std::sync::Mutex<SqliteStore>,
     cost: i64,
 ) -> PaymentGate {
     let key = match extract_api_key(headers) {
@@ -145,7 +146,7 @@ fn check_balance(
     };
 
     let store = store.lock().unwrap();
-    match store.get_balance(&key) {
+    match db::get_balance(&store, &key) {
         Ok(Some(bal)) if bal >= cost => PaymentGate::Proceed(Some(key)),
         Ok(Some(bal)) => PaymentGate::Unauthorized(
             format!("insufficient balance: have {bal} micro-USDC, need {cost}")
@@ -160,7 +161,7 @@ fn check_balance(
 async fn check_x402(
     headers: &HeaderMap,
     solana: &SolanaClient,
-    store: &std::sync::Mutex<AttestationStore>,
+    store: &std::sync::Mutex<SqliteStore>,
     treasury: &str,
     usdc_mint: &str,
     cost: i64,
@@ -186,7 +187,7 @@ async fn check_x402(
     // Mark nonce to prevent replay
     {
         let store = store.lock().unwrap();
-        if let Err(e) = store.mark_x402_nonce(&proof.tx_sig) {
+        if let Err(e) = db::mark_x402_nonce(&store, &proof.tx_sig) {
             return PaymentGate::Unauthorized(e.to_string());
         }
     }

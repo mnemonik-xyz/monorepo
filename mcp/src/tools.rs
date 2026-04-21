@@ -18,16 +18,17 @@ use mnemonic_core::embed::Embedder;
 use mnemonic_core::identity;
 
 use mnemonic_core::compress::EmbeddingCompressor;
+use mnemonic_core::storage::{self, SqliteStore, AttestationStore};
 
 use crate::{
     arweave::ArweaveClient,
-    db::AttestationStore,
+    db,
     pricing::CostHint,
     solana::SolanaClient,
 };
 
 /// Tool 1: whoami (sync — DB only)
-pub fn whoami(keypair: &Keypair, store: &AttestationStore, storage_mode: &str) -> serde_json::Value {
+pub fn whoami(keypair: &Keypair, store: &SqliteStore, storage_mode: &str) -> serde_json::Value {
     let pubkey = identity::pubkey_base58(keypair);
     let count = store.count(&pubkey).unwrap_or(0);
     serde_json::json!({
@@ -52,7 +53,7 @@ pub async fn sign_memory(
     keypair: &Keypair,
     solana: &SolanaClient,
     arweave: &ArweaveClient,
-    store: &std::sync::Mutex<AttestationStore>,
+    store: &std::sync::Mutex<SqliteStore>,
     embedder: &dyn Embedder,
     compressor: &EmbeddingCompressor,
     content: &str,
@@ -127,7 +128,8 @@ pub async fn sign_memory(
             &solana_tx, &arweave_tx, &pubkey, &now, &embedding,
         )?;
         if storage_mode != "local" {
-            let _ = store.record_attestation_cost(
+            let _ = db::record_attestation_cost(
+                &store,
                 &attestation_id,
                 cost_hint.irys_lamports,
                 cost_hint.sol_tx_fee_lamports,
@@ -172,7 +174,7 @@ pub async fn sign_memory(
 pub async fn verify(
     solana: &SolanaClient,
     arweave: &ArweaveClient,
-    store: &std::sync::Mutex<AttestationStore>,
+    store: &std::sync::Mutex<SqliteStore>,
     solana_tx: Option<&str>,
     arweave_tx: Option<&str>,
     storage_mode: &str,
@@ -302,7 +304,7 @@ fn verify_legacy_json(
 
 /// Local-mode verification: SQLite lookup + blake3 recompute.
 fn verify_local(
-    store: &std::sync::Mutex<AttestationStore>,
+    store: &std::sync::Mutex<SqliteStore>,
     solana_tx: Option<&str>,
     arweave_tx: Option<&str>,
 ) -> anyhow::Result<serde_json::Value> {
@@ -375,7 +377,7 @@ pub fn prove_identity(keypair: &Keypair, challenge: &str) -> serde_json::Value {
 /// Tool 5: recall (sync — DB search)
 pub fn recall(
     keypair: &Keypair,
-    store: &AttestationStore,
+    store: &SqliteStore,
     embedder: &dyn Embedder,
     query: &str,
     limit: usize,
