@@ -1,0 +1,97 @@
+[package]
+name = "mnemonic-mcp"
+version = "0.1.0"
+edition = "2021"
+description = "Mnemonic MCP server — verifiable memory attestation primitive for AI agents"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# HTTP server (remote MCP transport)
+axum = { version = "0.8", features = ["json", "macros"] }
+axum-extra = { version = "0.10", features = ["typed-header"] }
+tower-http = { version = "0.6", features = ["cors"] }
+
+# HTTP client
+reqwest = { version = "0.12", features = ["json", "blocking"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Crypto / Solana
+solana-sdk = "2.2"
+spl-memo = "6"
+bs58 = "0.5"
+
+# Hashing
+sha2 = "0.10"
+hex = "0.4"
+
+# Encoding
+base64 = "0.22"
+
+# SQLite
+rusqlite = { version = "0.34", features = ["bundled"] }
+
+# Binary serialization (Solana tx)
+bincode = "1"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Config
+dotenvy = "0.15"
+
+# Timestamps
+chrono = { version = "0.4", features = ["serde"] }
+
+# Error handling
+anyhow = "1"
+thiserror = "2"
+
+# UUID
+uuid = { version = "1", features = ["v4"] }
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Async streams (for SSE)
+tokio-stream = "0.1"
+futures = "0.3"
+
+# TurboQuant compression (PolarQuant + QJL)
+turboquant-plus-rs = "0.1.0"
+ndarray = "0.16"
+
+# Local embeddings (ONNX, all-MiniLM-L6-v2) — optional, needs ONNX runtime
+fastembed = { version = "5", optional = true }
+
+# CBOR / COSE / VAA canonical encoding
+ciborium = "0.2"
+coset = "0.3"
+blake3 = "1"
+zstd = "0.13"
+
+# Core library
+mnemonic-core = { path = "../core" }
+
+[features]
+default = []
+local-embed = ["fastembed"]
+
+[dev-dependencies]
+tokio-test = "0.4"
+tempfile = "3"
+criterion = "0.5"
+proptest = "1"
+
+[[bench]]
+name = "decompress"
+harness = false
+
+[[bench]]
+name = "cbor_codec"
+harness = false
