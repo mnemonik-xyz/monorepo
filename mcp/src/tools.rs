@@ -14,12 +14,13 @@ use mnemonic_core::codec::{
     sign::{sign_artifact, verify_artifact as cose_verify},
 };
 
+use mnemonic_core::identity;
+
 use crate::{
     arweave::ArweaveClient,
     compress::EmbeddingCompressor,
     db::AttestationStore,
     embed::Embedder,
-    identity,
     pricing::CostHint,
     solana::SolanaClient,
 };

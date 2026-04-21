@@ -3,7 +3,6 @@ mod compress;
 mod config;
 mod db;
 mod embed;
-mod identity;
 mod lineage;
 mod mcp;
 mod payment;
@@ -20,6 +19,7 @@ use axum::{
     Json, Router,
 };
 use clap::Parser;
+use mnemonic_core::identity;
 use serde::Deserialize;
 use solana_sdk::signer::Signer;
 
