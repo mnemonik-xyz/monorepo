@@ -1,11 +1,11 @@
-//! Content hashing — blake3 over canonical CBOR bytes.
+//! Content hashing -- blake3 over canonical CBOR bytes.
 //!
 //! The content hash is the single value anchored on-chain (Solana SPL Memo).
 //! It is computed AFTER CBOR canonicalization, BEFORE COSE wrapping.
 //!
 //! ```text
-//! artifact JSON → canonical CBOR → blake3 hash → anchor on Solana
-//!                                              → COSE sign (week 2)
+//! artifact JSON -> canonical CBOR -> blake3 hash -> anchor on Solana
+//!                                                -> COSE sign (week 2)
 //! ```
 
 use super::canonical::to_canonical_cbor;

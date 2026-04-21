@@ -1,9 +1,9 @@
-//! Canonical CBOR encoding — deterministic serialization for verifiable artifacts.
+//! Canonical CBOR encoding -- deterministic serialization for verifiable artifacts.
 //!
 //! Guarantees:
-//! - Same logical artifact → same bytes → same hash, always
+//! - Same logical artifact -> same bytes -> same hash, always
 //! - Fields ordered per schema's `cbor_field_order` (not alphabetical)
-//! - Uses deterministic CBOR (RFC 8949 §4.2): sorted map keys, no indefinite lengths
+//! - Uses deterministic CBOR (RFC 8949 S4.2): sorted map keys, no indefinite lengths
 //! - Timestamps encoded as CBOR tag 1 (epoch-based datetime)
 //! - Null/missing optional fields are omitted (not encoded as CBOR null)
 
@@ -14,7 +14,7 @@ use super::schema::ArtifactSchema;
 
 /// Convert a JSON artifact to canonical CBOR bytes using the schema's field order.
 ///
-/// This function is **pure and deterministic** — calling it N times on the same
+/// This function is **pure and deterministic** -- calling it N times on the same
 /// input always produces identical bytes.
 pub fn to_canonical_cbor(artifact: &JsonValue, schema: &ArtifactSchema) -> Result<Vec<u8>, String> {
     let obj = artifact.as_object()
@@ -62,7 +62,7 @@ fn json_to_cbor(json: &JsonValue) -> CborValue {
             } else if let Some(u) = n.as_u64() {
                 CborValue::Integer(u.into())
             } else {
-                // Avoid floats in canonical encoding — encode as text
+                // Avoid floats in canonical encoding -- encode as text
                 CborValue::Text(n.to_string())
             }
         }
@@ -132,7 +132,7 @@ fn cbor_to_json(cbor: &CborValue) -> JsonValue {
             JsonValue::Object(obj)
         }
         CborValue::Tag(1, inner) => {
-            // CBOR tag 1 = epoch timestamp → convert back to ISO 8601
+            // CBOR tag 1 = epoch timestamp -> convert back to ISO 8601
             if let CborValue::Integer(epoch) = inner.as_ref() {
                 let n: i128 = (*epoch).into();
                 if let Some(dt) = chrono::DateTime::from_timestamp(n as i64, 0) {

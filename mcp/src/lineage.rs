@@ -6,7 +6,7 @@
 use rusqlite::{params, Connection};
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use crate::codec::schema::{ParentRef, MAX_DEPTH, MAX_PARENTS};
+use mnemonic_core::codec::schema::{ParentRef, MAX_DEPTH, MAX_PARENTS};
 
 const LINEAGE_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS artifact_lineage (

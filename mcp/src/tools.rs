@@ -7,14 +7,15 @@
 
 use solana_sdk::signature::Keypair;
 
+use mnemonic_core::codec::{
+    canonical::from_canonical_cbor,
+    hash::hash_bytes as blake3_hash,
+    schema::{self, ArtifactSchema},
+    sign::{sign_artifact, verify_artifact as cose_verify},
+};
+
 use crate::{
     arweave::ArweaveClient,
-    codec::{
-        canonical::from_canonical_cbor,
-        hash::hash_bytes as blake3_hash,
-        schema::{self, ArtifactSchema},
-        sign::{sign_artifact, verify_artifact as cose_verify},
-    },
     compress::EmbeddingCompressor,
     db::AttestationStore,
     embed::Embedder,

@@ -1,7 +1,7 @@
 //! COSE_Sign1 signing and verification for verifiable artifacts.
 //!
 //! Uses RFC 9052 COSE_Sign1 structure with Ed25519 (COSE alg: -8).
-//! The existing Solana Ed25519 keypair is reused — no new key material needed.
+//! The existing Solana Ed25519 keypair is reused -- no new key material needed.
 
 use coset::{
     iana, CborSerializable, CoseSign1, CoseSign1Builder, HeaderBuilder,
@@ -25,7 +25,7 @@ pub struct SignedArtifact {
 
 /// Sign an artifact JSON using COSE_Sign1 with Ed25519 keypair.
 ///
-/// Pipeline: JSON → canonical CBOR → blake3 hash → COSE_Sign1
+/// Pipeline: JSON -> canonical CBOR -> blake3 hash -> COSE_Sign1
 pub fn sign_artifact(
     artifact: &serde_json::Value,
     schema: &ArtifactSchema,
@@ -53,7 +53,7 @@ pub fn sign_artifact(
         .payload(canonical_cbor.clone())
         .build();
 
-    // Compute Sig_structure (the bytes to sign per RFC 9052 §4.4)
+    // Compute Sig_structure (the bytes to sign per RFC 9052 S4.4)
     let tbs = unsigned.tbs_data(&[]);
 
     // Sign with Ed25519

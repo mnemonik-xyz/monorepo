@@ -1,4 +1,4 @@
-//! Artifact schema registry — versioned, immutable schemas for typed artifacts.
+//! Artifact schema registry -- versioned, immutable schemas for typed artifacts.
 //!
 //! Each schema defines:
 //! - required and optional fields
@@ -9,14 +9,13 @@
 //! field addition. Field order MUST NOT change within a schema version.
 
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
 
 /// Maximum parent references per artifact.
 pub const MAX_PARENTS: usize = 16;
 /// Maximum DAG depth for cycle detection and traversal.
 pub const MAX_DEPTH: usize = 64;
 
-/// Parent reference — links an artifact to its parent(s) in the DAG.
+/// Parent reference -- links an artifact to its parent(s) in the DAG.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ParentRef {
     pub artifact_id: String,
@@ -51,6 +50,7 @@ impl ArtifactType {
         }
     }
 
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Option<Self> {
         match s {
             "rag.context" => Some(Self::RagContext),
@@ -70,14 +70,14 @@ pub struct ArtifactSchema {
     pub version: u32,
     pub required_fields: &'static [&'static str],
     pub optional_fields: &'static [&'static str],
-    /// Canonical CBOR field order — determines serialization byte sequence.
+    /// Canonical CBOR field order -- determines serialization byte sequence.
     /// This order MUST NOT change within a schema version.
     pub cbor_field_order: &'static [&'static str],
 }
 
-// ── Schema definitions ──────────────────────────────────────────────────────
+// -- Schema definitions --
 
-/// rag.context.v1 — retrieved chunks + source references
+/// rag.context.v1 -- retrieved chunks + source references
 pub const RAG_CONTEXT_V1: ArtifactSchema = ArtifactSchema {
     artifact_type: ArtifactType::RagContext,
     version: 1,
@@ -89,7 +89,7 @@ pub const RAG_CONTEXT_V1: ArtifactSchema = ArtifactSchema {
     ],
 };
 
-/// rag.result.v1 — answer + context_artifact refs + citations
+/// rag.result.v1 -- answer + context_artifact refs + citations
 pub const RAG_RESULT_V1: ArtifactSchema = ArtifactSchema {
     artifact_type: ArtifactType::RagResult,
     version: 1,
@@ -102,7 +102,7 @@ pub const RAG_RESULT_V1: ArtifactSchema = ArtifactSchema {
     ],
 };
 
-/// agent.state.v1 — memory snapshot with parent state ref
+/// agent.state.v1 -- memory snapshot with parent state ref
 pub const AGENT_STATE_V1: ArtifactSchema = ArtifactSchema {
     artifact_type: ArtifactType::AgentState,
     version: 1,
@@ -114,7 +114,7 @@ pub const AGENT_STATE_V1: ArtifactSchema = ArtifactSchema {
     ],
 };
 
-/// receipt.v1 — execution/retrieval receipt
+/// receipt.v1 -- execution/retrieval receipt
 pub const RECEIPT_V1: ArtifactSchema = ArtifactSchema {
     artifact_type: ArtifactType::Receipt,
     version: 1,
@@ -127,7 +127,7 @@ pub const RECEIPT_V1: ArtifactSchema = ArtifactSchema {
     ],
 };
 
-/// memory.v1 — backward-compatible with existing sign_memory attestations
+/// memory.v1 -- backward-compatible with existing sign_memory attestations
 pub const MEMORY_V1: ArtifactSchema = ArtifactSchema {
     artifact_type: ArtifactType::Memory,
     version: 1,
