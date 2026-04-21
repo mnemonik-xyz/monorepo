@@ -20,8 +20,9 @@ use mnemonic_core::identity;
 use mnemonic_core::compress::EmbeddingCompressor;
 use mnemonic_core::storage::{self, SqliteStore, AttestationStore};
 
+use mnemonic_core::arweave::ArweaveClient;
+
 use crate::{
-    arweave::ArweaveClient,
     db,
     pricing::CostHint,
     solana::SolanaClient,

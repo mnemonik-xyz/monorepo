@@ -8,7 +8,8 @@ use std::sync::Arc;
 use mnemonic_core::compress::EmbeddingCompressor;
 use mnemonic_core::embed::Embedder;
 use mnemonic_core::storage::SqliteStore;
-use crate::{arweave::ArweaveClient, pricing::PricingEngine, solana::SolanaClient, tools};
+use mnemonic_core::arweave::ArweaveClient;
+use crate::{pricing::PricingEngine, solana::SolanaClient, tools};
 
 /// JSON-RPC 2.0 request.
 #[derive(Debug, Deserialize)]

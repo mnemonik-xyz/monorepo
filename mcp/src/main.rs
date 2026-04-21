@@ -1,4 +1,3 @@
-mod arweave;
 mod config;
 mod db;
 mod lineage;
@@ -17,7 +16,7 @@ use axum::{
     Json, Router,
 };
 use clap::Parser;
-use mnemonic_core::{compress, embed, identity, storage::SqliteStore};
+use mnemonic_core::{arweave, compress, embed, identity, storage::SqliteStore};
 use serde::Deserialize;
 use solana_sdk::signer::Signer;
 
