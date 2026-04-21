@@ -17,9 +17,10 @@ use mnemonic_core::codec::{
 use mnemonic_core::embed::Embedder;
 use mnemonic_core::identity;
 
+use mnemonic_core::compress::EmbeddingCompressor;
+
 use crate::{
     arweave::ArweaveClient,
-    compress::EmbeddingCompressor,
     db::AttestationStore,
     pricing::CostHint,
     solana::SolanaClient,
