@@ -436,9 +436,17 @@ fn l2_norm(v: &[f32]) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::embed::{HashEmbedder, Embedder};
+    use mnemonic_core::embed::Embedder;
 
-    fn embedder() -> HashEmbedder { HashEmbedder::default() }
+    struct TestEmbedder;
+    impl Embedder for TestEmbedder {
+        fn embed(&self, _text: &str) -> Vec<f32> { vec![1.0, 0.0] }
+        fn dim(&self) -> usize { 2 }
+        fn provider_name(&self) -> &str { "test" }
+        fn model_id(&self) -> &str { "test" }
+    }
+
+    fn embedder() -> TestEmbedder { TestEmbedder }
 
     #[test]
     fn test_save_and_count() {

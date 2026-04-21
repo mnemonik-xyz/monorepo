@@ -5,7 +5,8 @@ use serde_json::Value;
 use solana_sdk::signature::Keypair;
 
 use std::sync::Arc;
-use crate::{arweave::ArweaveClient, compress::EmbeddingCompressor, db::AttestationStore, embed::Embedder, pricing::PricingEngine, solana::SolanaClient, tools};
+use mnemonic_core::embed::Embedder;
+use crate::{arweave::ArweaveClient, compress::EmbeddingCompressor, db::AttestationStore, pricing::PricingEngine, solana::SolanaClient, tools};
 
 /// JSON-RPC 2.0 request.
 #[derive(Debug, Deserialize)]

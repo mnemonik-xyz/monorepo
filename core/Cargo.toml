@@ -28,7 +28,7 @@ spl-memo = "6"
 rusqlite = { version = "0.34", features = ["bundled"] }
 reqwest = { version = "0.12", features = ["json", "blocking"] }
 futures = "0.3"
-tracing = { version = "0.1", optional = true }
+tracing = "0.1"
 fastembed = { version = "5", optional = true }
 tokio = { version = "1", features = ["time", "rt"] }
 
