@@ -196,3 +196,34 @@ Addressed findings from `code-reviewer-round1.json` (approved; 2 nits + 1 minor)
 - `cargo clippy -p mnemonic-core -- -D warnings` -> clean
 - `cargo build -p mnemonic-mcp` -> success
 - `grep -rn "mod lineage" mcp/src/` -> empty
+
+## Task 12: Update architecture.md and patterns.md documentation
+
+**Status:** Done
+**Commit:** a4cd38c
+**Agent:** main agent
+**Summary:** Updated `.claude/skills/project-knowledge/references/architecture.md` Project Structure to list the actual post-extraction `core/src/` module layout: replaced `attest/` with `codec/` (SHA-256, schema, canonical CBOR, COSE_Sign1), reduced the embed provider list to two (fastembed, openai) with HashEmbedder gone, dropped the `wasm/` entry, added `lineage/` (parent-child DAG), and named the `AttestationStore`/`LineageStore` traits in the storage description. Changed the OpenAI fallback chain from "openai -> fastembed -> hash" to "openai -> fastembed -> Err". Updated patterns.md: the Embedder trait section now mentions the provider fallback chain and the test-only MockEmbedder instead of "hash fallback", and the Dual-target compilation section no longer references `core/src/wasm/mod.rs`. Left the error-handling note about the WASM boundary intact since task spec scoped the wasm removal to the specific `wasm/mod.rs` path reference.
+**Deviations:** None.
+
+**Verification:**
+- `grep -E "codec/|lineage/" .claude/skills/project-knowledge/references/architecture.md` -> both found
+- `grep "attest/" .claude/skills/project-knowledge/references/architecture.md` -> empty
+- `grep "wasm/" .claude/skills/project-knowledge/references/architecture.md` -> only the webapp `src/wasm/` subfolder reference (not a core module list entry)
+- `grep "HashEmbedder" .claude/skills/project-knowledge/references/architecture.md` -> empty
+- `grep "hash fallback" .claude/skills/project-knowledge/references/patterns.md` -> empty
+- `grep "wasm/mod.rs" .claude/skills/project-knowledge/references/patterns.md` -> empty
+- Both files render as valid Markdown with all other sections intact
+
+**Round 2 (after review):**
+
+Addressed findings from `code-reviewer-round1.json` (changes-required; 1 major + 2 minor).
+
+- **MAJOR — surviving `core/src/wasm/` reference in patterns.md Error handling section:** Round 1 missed a second occurrence of the `core/src/wasm/` path. The `wasm/` module was removed from the core module list (the wasm-bindgen bridge now lives in `webapp/src/wasm/`). Updated the Error handling line in `patterns.md` from "Convert to `JsValue` only at the WASM boundary in `core/src/wasm/`." to "Convert to `JsValue` only at the WASM boundary (the wasm-bindgen bridge lives in `webapp/src/wasm/`).". Keeps the general principle (WASM boundary is where `anyhow::Error → JsValue` conversion happens) but fixes the stale path. Revises the Round 1 scope note — the spec's "wasm removal" covers any surviving `core/src/wasm/` reference, not just the `wasm/mod.rs` path.
+- **MINOR — fallback chain framing in architecture.md:83:** The OpenAI-centric phrasing "openai → fastembed → Err" could mislead agents about provider priority. `core/src/embed/mod.rs` `build_embedder()` establishes fastembed > openai (fastembed is the open, verifiable default). Reframed as: "Provider priority (per `core/src/embed/mod.rs` `build_embedder`): fastembed (open, verifiable) > openai (proprietary but semantic). When `EMBED_PROVIDER=openai`, fallback chain is openai → fastembed → Err." This keeps the OpenAI fallback chain accurate while clarifying the default preference.
+- **MINOR — `Direction` enum missing from lineage/ description:** The `Direction` enum (`Ancestors` / `Descendants` / `Both`) is the primary public traversal API and was added to `core/src/lineage/` in Task 9. Appended to the `lineage/` sentence in architecture.md Project Structure: "...exposes a `Direction` enum (`Ancestors` / `Descendants` / `Both`) for BFS traversal."
+
+**Round 2 verification:**
+- `grep -n "wasm" .claude/skills/project-knowledge/references/patterns.md` -> only legitimate refs: WASM target cfg, `webapp/src/wasm/`, `wasm-pack test`
+- `grep -n "wasm" .claude/skills/project-knowledge/references/architecture.md` -> only legitimate refs: `wasm-bindgen`, webapp `wasm/` subfolder, WASM export
+- `grep -rn "core/src/wasm" .claude/skills/project-knowledge/references/` -> empty (no matches)
+- Both files render as valid Markdown
