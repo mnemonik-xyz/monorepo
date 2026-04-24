@@ -9,7 +9,8 @@ use mnemonic_core::compress::EmbeddingCompressor;
 use mnemonic_core::embed::Embedder;
 use mnemonic_core::storage::SqliteStore;
 use mnemonic_core::arweave::ArweaveClient;
-use crate::{pricing::PricingEngine, solana::SolanaClient, tools};
+use mnemonic_core::solana::SolanaClient;
+use crate::{pricing::PricingEngine, tools};
 
 /// JSON-RPC 2.0 request.
 #[derive(Debug, Deserialize)]
