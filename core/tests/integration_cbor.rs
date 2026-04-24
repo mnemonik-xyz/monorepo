@@ -153,10 +153,12 @@ fn test_cbor_is_smaller_than_json() {
         json_bytes.len() as f64 / cbor_bytes.len() as f64
     );
 
-    // CBOR should be smaller or comparable to JSON
+    // CBOR must be strictly smaller than JSON for a payload of this shape.
+    // Savings come from removing quote/colon/comma delimiters around every value
+    // and encoding the ISO-8601 `created_at` as a CBOR tag-1 epoch integer.
     assert!(
-        cbor_bytes.len() <= json_bytes.len() + 50,
-        "CBOR ({}) should not be much larger than JSON ({})",
+        cbor_bytes.len() < json_bytes.len(),
+        "CBOR ({}) should be strictly smaller than JSON ({})",
         cbor_bytes.len(),
         json_bytes.len()
     );
