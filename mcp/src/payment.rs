@@ -304,7 +304,7 @@ pub struct PnlStats {
 
 /// Create a new API key with zero balance. Returns the key.
 pub fn create_api_key(store: &SqliteStore, owner_pubkey: &str) -> anyhow::Result<String> {
-    let key = format!("mnm_{}", hex::encode(random_bytes::<24>()));
+    let key = format!("mnm_{}", hex::encode(random_bytes::<24>()?));
     let now = chrono::Utc::now().to_rfc3339();
     store.conn().execute(
         "INSERT INTO api_keys (api_key, owner_pubkey, balance_micro_usdc, created_at) VALUES (?,?,0,?)",
@@ -332,18 +332,40 @@ pub fn get_balance(store: &SqliteStore, api_key: &str) -> anyhow::Result<Option<
 }
 
 /// Deduct `amount` from balance. Returns Err if insufficient funds or key not found.
+///
+/// The read + decrement is atomic: we issue a single conditional `UPDATE ...
+/// WHERE api_key = ? AND balance_micro_usdc >= ?`, then look at
+/// `conn.changes()` to distinguish "no such key" from "insufficient funds".
+/// Two concurrent calls on the same key can never both pass the guard
+/// because SQLite serializes writes to the same table.
 pub fn deduct_balance(store: &SqliteStore, api_key: &str, amount: i64, description: &str) -> anyhow::Result<()> {
-    let balance = get_balance(store, api_key)?
-        .ok_or_else(|| anyhow::anyhow!("api key not found"))?;
-    if balance < amount {
-        anyhow::bail!("insufficient balance: have {balance} micro-USDC, need {amount}");
-    }
+    let conn = store.conn();
     let now = chrono::Utc::now().to_rfc3339();
-    store.conn().execute(
-        "UPDATE api_keys SET balance_micro_usdc = balance_micro_usdc - ?, last_used_at = ? WHERE api_key = ?",
+
+    // Single-statement atomic check + decrement.
+    let changed = conn.execute(
+        "UPDATE api_keys
+             SET balance_micro_usdc = balance_micro_usdc - ?1,
+                 last_used_at = ?2
+           WHERE api_key = ?3
+             AND balance_micro_usdc >= ?1",
         params![amount, now, api_key],
     )?;
-    store.conn().execute(
+
+    if changed == 0 {
+        // Either the key does not exist or the balance is too low. We reuse
+        // get_balance to produce the precise error message the client expects
+        // (it's read-only, so there is no race here — worst case the message
+        // is slightly stale, which is fine for a rejection path).
+        match get_balance(store, api_key)? {
+            None => anyhow::bail!("api key not found"),
+            Some(balance) => anyhow::bail!(
+                "insufficient balance: have {balance} micro-USDC, need {amount}"
+            ),
+        }
+    }
+
+    conn.execute(
         "INSERT INTO payment_events (event_id, api_key, amount_micro_usdc, event_type, description, created_at) VALUES (?,?,?,'charge',?,?)",
         params![uuid::Uuid::new_v4().to_string(), api_key, amount, description, now],
     )?;
@@ -351,31 +373,129 @@ pub fn deduct_balance(store: &SqliteStore, api_key: &str, amount: i64, descripti
 }
 
 /// Credit a deposit. Returns new balance.
+///
+/// Idempotency is enforced at the SQL level via the UNIQUE index on
+/// `payment_events.tx_sig` (see `core/src/storage/sqlite.rs`). Two concurrent
+/// calls with the same `tx_sig` cannot both succeed: the second one's INSERT
+/// fails with `ConstraintViolation`, which we convert to a user-visible error.
+/// The INSERT + UPDATE are wrapped in an `IMMEDIATE` transaction so the
+/// balance is only credited when the idempotency row is actually inserted.
 pub fn credit_deposit(store: &SqliteStore, api_key: &str, amount: i64, tx_sig: &str) -> anyhow::Result<i64> {
     let conn = store.conn();
     let now = chrono::Utc::now().to_rfc3339();
-    let existing: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM payment_events WHERE tx_sig = ?",
-        params![tx_sig], |r| r.get(0),
-    )?;
-    if existing > 0 {
-        anyhow::bail!("deposit tx already applied: {tx_sig}");
-    }
-    conn.execute(
-        "UPDATE api_keys SET balance_micro_usdc = balance_micro_usdc + ? WHERE api_key = ?",
-        params![amount, api_key],
-    )?;
-    if conn.changes() == 0 {
-        anyhow::bail!("api key not found: {api_key}");
-    }
-    conn.execute(
+
+    // BEGIN IMMEDIATE: acquire the write lock at transaction start so the
+    // UNIQUE-constraint check races cleanly against concurrent writers.
+    conn.execute("BEGIN IMMEDIATE", [])?;
+
+    // The idempotency-gating INSERT. If tx_sig already exists, this returns
+    // SqliteFailure(ConstraintViolation) — we translate that into a typed
+    // bail so the caller can tell apart "duplicate" from "other DB error".
+    let insert_res = conn.execute(
         "INSERT INTO payment_events (event_id, api_key, amount_micro_usdc, event_type, tx_sig, description, created_at) VALUES (?,?,?,'deposit',?,?,?)",
         params![uuid::Uuid::new_v4().to_string(), api_key, amount, tx_sig, "USDC deposit", now],
-    )?;
-    let new_balance: i64 = conn.query_row(
+    );
+
+    if let Err(rusqlite::Error::SqliteFailure(e, _)) = &insert_res {
+        if e.code == rusqlite::ErrorCode::ConstraintViolation {
+            let _ = conn.execute("ROLLBACK", []);
+            anyhow::bail!("deposit tx already applied: {tx_sig}");
+        }
+    }
+    if let Err(e) = insert_res {
+        let _ = conn.execute("ROLLBACK", []);
+        return Err(e.into());
+    }
+
+    // Credit the balance.
+    let update_res = conn.execute(
+        "UPDATE api_keys SET balance_micro_usdc = balance_micro_usdc + ? WHERE api_key = ?",
+        params![amount, api_key],
+    );
+    let changed = match update_res {
+        Ok(n) => n,
+        Err(e) => {
+            let _ = conn.execute("ROLLBACK", []);
+            return Err(e.into());
+        }
+    };
+    if changed == 0 {
+        let _ = conn.execute("ROLLBACK", []);
+        anyhow::bail!("api key not found: {api_key}");
+    }
+
+    let new_balance: i64 = match conn.query_row(
         "SELECT balance_micro_usdc FROM api_keys WHERE api_key = ?",
         params![api_key], |r| r.get(0),
-    )?;
+    ) {
+        Ok(b) => b,
+        Err(e) => {
+            let _ = conn.execute("ROLLBACK", []);
+            return Err(e.into());
+        }
+    };
+
+    conn.execute("COMMIT", [])?;
+    Ok(new_balance)
+}
+
+/// Refund `amount` to `api_key`'s balance after a failed tool call.
+///
+/// This is the reverse of `deduct_balance` and intentionally does NOT use
+/// `credit_deposit`: deposits are gated by the UNIQUE(tx_sig) idempotency
+/// index, but a tool can legitimately fail the same way multiple times for
+/// the same key and each refund must apply. Refund rows are written with
+/// `tx_sig = NULL` (exempt from the partial index) and `event_type='refund'`.
+/// The read + update is wrapped in an IMMEDIATE transaction.
+pub fn refund_balance(
+    store: &SqliteStore,
+    api_key: &str,
+    amount: i64,
+    reason: &str,
+) -> anyhow::Result<i64> {
+    let conn = store.conn();
+    let now = chrono::Utc::now().to_rfc3339();
+
+    conn.execute("BEGIN IMMEDIATE", [])?;
+
+    let update_res = conn.execute(
+        "UPDATE api_keys SET balance_micro_usdc = balance_micro_usdc + ? WHERE api_key = ?",
+        params![amount, api_key],
+    );
+    let changed = match update_res {
+        Ok(n) => n,
+        Err(e) => {
+            let _ = conn.execute("ROLLBACK", []);
+            return Err(e.into());
+        }
+    };
+    if changed == 0 {
+        let _ = conn.execute("ROLLBACK", []);
+        anyhow::bail!("api key not found: {api_key}");
+    }
+
+    let description = format!("refund: {reason}");
+    let insert_res = conn.execute(
+        "INSERT INTO payment_events (event_id, api_key, amount_micro_usdc, event_type, tx_sig, description, created_at) VALUES (?,?,?,'refund',NULL,?,?)",
+        params![uuid::Uuid::new_v4().to_string(), api_key, amount, description, now],
+    );
+    if let Err(e) = insert_res {
+        let _ = conn.execute("ROLLBACK", []);
+        return Err(e.into());
+    }
+
+    let new_balance: i64 = match conn.query_row(
+        "SELECT balance_micro_usdc FROM api_keys WHERE api_key = ?",
+        params![api_key], |r| r.get(0),
+    ) {
+        Ok(b) => b,
+        Err(e) => {
+            let _ = conn.execute("ROLLBACK", []);
+            return Err(e.into());
+        }
+    };
+
+    conn.execute("COMMIT", [])?;
     Ok(new_balance)
 }
 
@@ -466,26 +586,219 @@ pub fn get_pnl_stats(store: &SqliteStore, days: u64) -> anyhow::Result<PnlStats>
     })
 }
 
-/// Cryptographically secure random bytes using OS entropy.
-fn random_bytes<const N: usize>() -> [u8; N] {
+/// Cryptographically secure random bytes from `/dev/urandom`.
+///
+/// Fails loudly if OS entropy is unavailable. API keys derive directly from
+/// this output, so silently substituting a weak PRNG (time+PID+counter) on
+/// entropy-source failure would let an attacker narrow the key search space.
+/// Callers propagate the error; the caller of `create_api_key` surfaces it
+/// as a 500 to the client, which is the correct behavior.
+fn random_bytes<const N: usize>() -> anyhow::Result<[u8; N]> {
     use std::io::Read;
     let mut out = [0u8; N];
-    if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
-        let _ = f.read_exact(&mut out);
-    } else {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        use sha2::{Digest, Sha256};
-        static CTR: AtomicU64 = AtomicU64::new(0);
-        let seed = format!(
-            "{}:{}:{}",
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos(),
-            std::process::id(),
-            CTR.fetch_add(1, Ordering::Relaxed),
-        );
-        let hash = Sha256::digest(seed.as_bytes());
-        for (i, byte) in out.iter_mut().enumerate() {
-            *byte = hash[i % 32];
-        }
+    let mut f = std::fs::File::open("/dev/urandom")
+        .map_err(|e| anyhow::anyhow!("entropy source /dev/urandom unavailable: {e}"))?;
+    f.read_exact(&mut out)
+        .map_err(|e| anyhow::anyhow!("reading from /dev/urandom failed: {e}"))?;
+    Ok(out)
+}
+
+// ── Tests ────────────────────────────────────────────────────────────────────
+#[cfg(test)]
+mod tests {
+    //! Unit tests for the atomicity + idempotency properties of the payment
+    //! DB helpers. Each test opens an in-memory SqliteStore so there is no
+    //! filesystem dependency. For "concurrent" assertions we open a second
+    //! connection to the same file-backed DB via tempfile::NamedTempFile and
+    //! spawn threads — `SqliteStore::in_memory()` gives each caller its own
+    //! empty DB, which is the wrong semantic for race tests.
+    use super::*;
+    use mnemonic_core::storage::SqliteStore;
+    use std::sync::Arc;
+    use std::thread;
+
+    fn fresh_store() -> SqliteStore {
+        SqliteStore::in_memory().expect("in-memory store")
     }
-    out
+
+    fn fresh_file_store() -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("mcp-test.db");
+        // Create the schema by opening + dropping.
+        let _ = SqliteStore::open(&path).expect("open store");
+        (dir, path)
+    }
+
+    #[test]
+    fn refund_balance_allows_duplicate_reasons() {
+        // Covers: review round1 major finding — refund via credit_deposit
+        // silently dropped the second refund when tx_sig collided.
+        let store = fresh_store();
+        let key = create_api_key(&store, "owner_a").unwrap();
+        // Pre-fund the key by crediting two distinct deposits.
+        credit_deposit(&store, &key, 1_000, "sig_deposit_1").unwrap();
+
+        // Two refunds with the same reason — both must apply.
+        let after_1 = refund_balance(&store, &key, 100, "arweave upload failed").unwrap();
+        let after_2 = refund_balance(&store, &key, 100, "arweave upload failed").unwrap();
+
+        assert_eq!(after_1, 1_100, "first refund credits balance");
+        assert_eq!(after_2, 1_200, "second identical refund ALSO credits balance");
+
+        // Both rows must exist in payment_events with event_type='refund'.
+        let refund_count: i64 = store
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM payment_events WHERE api_key = ? AND event_type = 'refund'",
+                params![key],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(refund_count, 2);
+    }
+
+    #[test]
+    fn credit_deposit_concurrent_same_tx_sig_applies_once() {
+        // Covers: security-auditor major finding — TOCTOU on credit_deposit.
+        // Two threads attempt to credit the SAME tx_sig at the same time.
+        // Exactly one must succeed; balance must increase by exactly one
+        // credit amount (not two).
+        let (_dir, path) = fresh_file_store();
+
+        // Pre-create the api_key using a short-lived connection.
+        let key = {
+            let s = SqliteStore::open(&path).unwrap();
+            create_api_key(&s, "owner_concurrent").unwrap()
+        };
+
+        let tx_sig = "same_tx_abc_123".to_string();
+        let amount = 5_000;
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+
+        let p1 = path.clone();
+        let k1 = key.clone();
+        let s1 = tx_sig.clone();
+        let b1 = barrier.clone();
+        let t1 = thread::spawn(move || -> Result<i64, String> {
+            let s = SqliteStore::open(&p1).map_err(|e| e.to_string())?;
+            b1.wait();
+            credit_deposit(&s, &k1, amount, &s1).map_err(|e| e.to_string())
+        });
+
+        let p2 = path.clone();
+        let k2 = key.clone();
+        let s2 = tx_sig.clone();
+        let b2 = barrier.clone();
+        let t2 = thread::spawn(move || -> Result<i64, String> {
+            let s = SqliteStore::open(&p2).map_err(|e| e.to_string())?;
+            b2.wait();
+            credit_deposit(&s, &k2, amount, &s2).map_err(|e| e.to_string())
+        });
+
+        let r1 = t1.join().unwrap();
+        let r2 = t2.join().unwrap();
+
+        let successes = [&r1, &r2].iter().filter(|r| r.is_ok()).count();
+        let failures = [&r1, &r2].iter().filter(|r| r.is_err()).count();
+        assert_eq!(successes, 1, "exactly one credit must succeed: {r1:?} {r2:?}");
+        assert_eq!(failures, 1, "the other must fail with duplicate: {r1:?} {r2:?}");
+
+        let err_msg = [&r1, &r2].iter().find(|r| r.is_err()).unwrap().as_ref().err().unwrap();
+        assert!(
+            err_msg.contains("deposit tx already applied"),
+            "duplicate error should surface: {err_msg}"
+        );
+
+        // Final balance: exactly one credit amount.
+        let final_store = SqliteStore::open(&path).unwrap();
+        assert_eq!(get_balance(&final_store, &key).unwrap(), Some(amount));
+
+        // Exactly one deposit row in payment_events (UNIQUE index enforced).
+        let deposit_rows: i64 = final_store
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM payment_events WHERE tx_sig = ?",
+                params![tx_sig],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(deposit_rows, 1);
+    }
+
+    #[test]
+    fn deduct_balance_concurrent_cannot_overdraw() {
+        // Covers: security-auditor major finding — TOCTOU on deduct_balance.
+        // Seed balance = 100. Two threads each try to deduct 75. At most
+        // ONE must succeed; the final balance must never be negative.
+        let (_dir, path) = fresh_file_store();
+
+        // Seed the key with exactly 100 micro-USDC.
+        let key = {
+            let s = SqliteStore::open(&path).unwrap();
+            let k = create_api_key(&s, "owner_overdraft").unwrap();
+            credit_deposit(&s, &k, 100, "seed_tx").unwrap();
+            k
+        };
+
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let p1 = path.clone();
+        let k1 = key.clone();
+        let b1 = barrier.clone();
+        let t1 = thread::spawn(move || -> Result<(), String> {
+            let s = SqliteStore::open(&p1).map_err(|e| e.to_string())?;
+            b1.wait();
+            deduct_balance(&s, &k1, 75, "t1").map_err(|e| e.to_string())
+        });
+
+        let p2 = path.clone();
+        let k2 = key.clone();
+        let b2 = barrier.clone();
+        let t2 = thread::spawn(move || -> Result<(), String> {
+            let s = SqliteStore::open(&p2).map_err(|e| e.to_string())?;
+            b2.wait();
+            deduct_balance(&s, &k2, 75, "t2").map_err(|e| e.to_string())
+        });
+
+        let r1 = t1.join().unwrap();
+        let r2 = t2.join().unwrap();
+
+        let ok_count = [&r1, &r2].iter().filter(|r| r.is_ok()).count();
+        assert_eq!(ok_count, 1, "exactly one deduct succeeds: {r1:?} {r2:?}");
+
+        let final_store = SqliteStore::open(&path).unwrap();
+        let final_bal = get_balance(&final_store, &key).unwrap().unwrap();
+        assert_eq!(final_bal, 25, "balance = 100 - 75 = 25, never negative");
+        assert!(final_bal >= 0);
+    }
+
+    #[test]
+    fn deduct_balance_insufficient_leaves_balance_unchanged() {
+        let store = fresh_store();
+        let key = create_api_key(&store, "owner_b").unwrap();
+        credit_deposit(&store, &key, 50, "seed_tx_2").unwrap();
+
+        let err = deduct_balance(&store, &key, 100, "too big").unwrap_err();
+        assert!(err.to_string().contains("insufficient balance"), "err = {err}");
+        assert_eq!(get_balance(&store, &key).unwrap(), Some(50));
+    }
+
+    #[test]
+    fn deduct_balance_unknown_key_reports_not_found() {
+        let store = fresh_store();
+        let err = deduct_balance(&store, "mnm_nonexistent", 10, "whoops").unwrap_err();
+        assert!(err.to_string().contains("api key not found"), "err = {err}");
+    }
+
+    #[test]
+    fn credit_deposit_sequential_duplicate_is_rejected() {
+        // Baseline idempotency test: sequential (same-thread) second call
+        // with the same tx_sig must be rejected, mirroring the concurrent
+        // test above but removing thread-scheduling variance.
+        let store = fresh_store();
+        let key = create_api_key(&store, "owner_c").unwrap();
+        credit_deposit(&store, &key, 500, "unique_sig").unwrap();
+        let err = credit_deposit(&store, &key, 500, "unique_sig").unwrap_err();
+        assert!(err.to_string().contains("deposit tx already applied"), "err = {err}");
+        assert_eq!(get_balance(&store, &key).unwrap(), Some(500));
+    }
 }
