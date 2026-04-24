@@ -13,11 +13,11 @@ See architecture.md for submodule structure and directory layout. Each submodule
 
 ### Dual-target compilation
 
-Feature-gate anything requiring network or OS I/O behind `#[cfg(not(target_arch = "wasm32"))]`. WASM builds must not depend on `tokio`, `std::fs`, or `std::net`. Use `wasm-bindgen-futures` for async in WASM context. WASM-specific exports live in `core/src/wasm/mod.rs`.
+Feature-gate anything requiring network or OS I/O behind `#[cfg(not(target_arch = "wasm32"))]`. WASM builds must not depend on `tokio`, `std::fs`, or `std::net`. Use `wasm-bindgen-futures` for async in WASM context.
 
 ### Embedder trait
 
-All providers implement the `Embedder` trait in `core/src/embed/mod.rs`. Never call a concrete provider directly from business logic — always go through the trait. This keeps the hash fallback and WASM-safe stub transparent to callers.
+All providers implement the `Embedder` trait in `core/src/embed/mod.rs`. Never call a concrete provider directly from business logic — always go through the trait. This keeps the provider fallback chain and the test-only `MockEmbedder` transparent to callers.
 
 ### Storage lock discipline
 
@@ -25,7 +25,7 @@ All providers implement the `Embedder` trait in `core/src/embed/mod.rs`. Never c
 
 ### Error handling
 
-Use `anyhow::Result` for all fallible functions in `core/` and `mcp/`. Convert to `JsValue` only at the WASM boundary in `core/src/wasm/`. Avoid `unwrap()` outside tests.
+Use `anyhow::Result` for all fallible functions in `core/` and `mcp/`. Convert to `JsValue` only at the WASM boundary (the wasm-bindgen bridge lives in `webapp/src/wasm/`). Avoid `unwrap()` outside tests.
 
 ### Storage modes
 
