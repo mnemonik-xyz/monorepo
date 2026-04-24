@@ -99,17 +99,24 @@ async fn mcp_handler(
 
                 let resp = mcp::handle_request(&req, &state).await;
 
-                // Refund on tool failure
+                // Refund on tool failure. Uses `refund_balance` (not
+                // `credit_deposit`) so the per-tx_sig idempotency guard does
+                // not silently swallow repeated refunds for the same
+                // underlying failure class.
                 if resp.error.is_some() {
                     if let Some(ref key) = api_key {
+                        let reason = resp.error.as_ref()
+                            .map(|e| e.message.as_str())
+                            .unwrap_or("error");
                         let store = state.store.lock().unwrap();
-                        let _ = payment::credit_deposit(
+                        if let Err(e) = payment::refund_balance(
                             &store,
                             key,
                             current_cost,
-                            &format!("refund:{}",
-                                resp.error.as_ref().map(|e| e.message.as_str()).unwrap_or("error")),
-                        );
+                            reason,
+                        ) {
+                            tracing::warn!(api_key = %key, error = %e, "refund failed");
+                        }
                     }
                 }
 
@@ -250,15 +257,20 @@ async fn deposit(
     };
 
     if !signers.iter().any(|s| s == &owner_pubkey) {
+        // Log full identifiers server-side for operator debugging, but do
+        // NOT leak any pubkey/tx_sig prefix to the client. The caller already
+        // knows their own pubkey + tx_sig; adding partial values to the
+        // response body only narrows key space for third-party observers.
+        tracing::warn!(
+            owner_pubkey = %owner_pubkey,
+            tx_sig = %body.tx_sig,
+            signers = ?signers,
+            "deposit rejected: API key owner is not a signer of this transaction"
+        );
         return (
             StatusCode::FORBIDDEN,
             Json(serde_json::json!({
-                "error": format!(
-                    "deposit rejected: API key owner ({}) is not a signer of tx {}. \
-                     Only the wallet that signed the deposit can credit this key.",
-                    &owner_pubkey[..owner_pubkey.len().min(12)],
-                    &body.tx_sig[..body.tx_sig.len().min(16)],
-                ),
+                "error": "deposit rejected: API key owner is not a signer of this transaction"
             })),
         ).into_response();
     }

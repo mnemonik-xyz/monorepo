@@ -201,6 +201,33 @@ Addressed findings from `code-reviewer-round1.json` (approved; 2 nits + 1 minor)
 - `grep "use crate::" mcp/src/` → only `crate::{payment, pricing, tools}` (no domain types)
 - `ls mcp/src/` → `config.rs main.rs mcp.rs payment.rs pricing.rs tools.rs` (exactly per spec; `pricing.rs` unchanged vs b2e52e6)
 
+**Round 2 (after review):**
+
+Addressed findings from `code-reviewer-round1.json`, `security-auditor-round1.json`, and `test-reviewer-round1.json`:
+
+- **MAJOR (code-reviewer + security-auditor) — refund via `credit_deposit` silently dropped duplicates:** Added `refund_balance(store, api_key, amount, reason)` in `payment.rs`. Writes an `event_type='refund'` row with `tx_sig = NULL` (exempt from the UNIQUE partial index so two identical refunds both apply). Wrapped INSERT + UPDATE in `BEGIN IMMEDIATE` / `COMMIT` with explicit rollback on error. Updated `main.rs` refund site to call `refund_balance(key, current_cost, error_message)`; failures now log via `tracing::warn!` rather than being silently discarded with `let _ =`. Added unit test `refund_balance_allows_duplicate_reasons` — seeds a key, fires two refunds with identical `reason`, asserts both credit the balance and two `event_type='refund'` rows exist.
+- **MAJOR (security-auditor) — TOCTOU on `credit_deposit`:** Added partial UNIQUE index `uq_payment_events_tx_sig ON payment_events(tx_sig) WHERE tx_sig IS NOT NULL` in `core/src/storage/sqlite.rs` (CREATE IF NOT EXISTS, so existing DBs on restart pick it up). Rewrote `credit_deposit` to wrap INSERT (which now gates idempotency via the UNIQUE constraint) + UPDATE + balance-read in `BEGIN IMMEDIATE` / `COMMIT`. Translates `SqliteFailure(ConstraintViolation)` into "deposit tx already applied". Added multithreaded test `credit_deposit_concurrent_same_tx_sig_applies_once` — two threads call `credit_deposit` with the same tx_sig against a shared file-backed DB using a `Barrier` for lockstep; asserts exactly one succeeds, balance is credited once, and exactly one `payment_events` row exists.
+- **MAJOR (security-auditor) — TOCTOU on `deduct_balance`:** Replaced the read-then-update pattern with a single conditional `UPDATE api_keys SET balance = balance - ?1 ... WHERE api_key = ? AND balance >= ?1`, checking `conn.changes()` to distinguish "no such key" from "insufficient funds" via a read-only `get_balance` fallback for the error message. Added multithreaded test `deduct_balance_concurrent_cannot_overdraw` — seeds balance=100, fires two concurrent 75-deducts with a `Barrier`, asserts exactly one succeeds and final balance is 25 (never negative). Also added `deduct_balance_insufficient_leaves_balance_unchanged` and `deduct_balance_unknown_key_reports_not_found` for the error paths.
+- **MINOR (code-reviewer) — stale `mnemonic_sign_memory` tool description:** Updated from "SHA-256 hash / SPL Memo" to "canonical CBOR + blake3 hash, signed with COSE_Sign1 (Ed25519), stored on Arweave, hash anchored as SPL Memo on Solana" to reflect the task-2 pipeline.
+- **MINOR (security-auditor) — `random_bytes` CSPRNG fallback:** Removed the SHA-256(time+PID+counter) fallback entirely. `random_bytes` now returns `anyhow::Result<[u8; N]>` and surfaces a clear error if `/dev/urandom` is missing or unreadable. `create_api_key` propagates the error via `?`, so the HTTP 500 path returns "entropy source /dev/urandom unavailable" instead of silently minting a weak key.
+- **MINOR (security-auditor) — deposit-rejected error leaked pubkey+tx_sig prefixes:** Replaced the prefixed message with generic text "deposit rejected: API key owner is not a signer of this transaction". Full `owner_pubkey`, `tx_sig`, and `signers` list are now logged via `tracing::warn!` for operator debugging.
+- **Baseline:** Also added `credit_deposit_sequential_duplicate_is_rejected` to lock in the sequential idempotency path as a regression guard.
+
+**Follow-ups (explicitly deferred from round 2, tracked as pre-existing debt):**
+
+- Add coverage to the remaining payment helpers (`get_balance`, `create_api_key`, `mark_x402_nonce`, `get_pnl_stats`, `record_attestation_cost`, `check_balance`/`check_x402`/`check_payment`, `extract_api_key`, `extract_x402_proof`) — test-reviewer major. Not in round-2 scope because scoping all 9 helpers would expand the review loop; the three financial-safety helpers (deduct, credit, refund) are now covered.
+- Automated MCP round-trip smoke test that spawns the binary and asserts 5 tools on `tools/list` — test-reviewer major. Follow-up.
+- Cold-init timing regression guard (#[ignore] perf test) — test-reviewer minor. Follow-up.
+- CORS `allow_origin(Any)` on `/deposit` / `/admin/stats` — security-auditor nit. Pre-existing. Follow-up.
+- `/admin/stats` endpoint has no auth — security-auditor nit. Pre-existing. Follow-up.
+- Refactor `sign_memory` 10-arg signature into a `SignMemoryCtx<'_>` struct — code-reviewer nit. Follow-up.
+
+**Round 2 verification:**
+- `cargo build --workspace` → Finished (0 errors)
+- `cargo test --workspace` → 83 mnemonic-core tests + 6 new mnemonic-mcp payment tests = 89 passed
+- `cargo clippy --workspace --all-targets -- -D warnings` → clean
+- New tests: `refund_balance_allows_duplicate_reasons`, `credit_deposit_concurrent_same_tx_sig_applies_once`, `deduct_balance_concurrent_cannot_overdraw`, `deduct_balance_insufficient_leaves_balance_unchanged`, `deduct_balance_unknown_key_reports_not_found`, `credit_deposit_sequential_duplicate_is_rejected`
+
 ## Task 9: Extract lineage module + cleanup
 
 **Status:** Done

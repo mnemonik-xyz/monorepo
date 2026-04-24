@@ -46,6 +46,13 @@ CREATE TABLE IF NOT EXISTS payment_events (
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_payment_events_key ON payment_events(api_key);
+-- Deposits use the on-chain tx_sig as a unique idempotency key so concurrent
+-- deposits for the same signature collapse atomically via a UNIQUE-constraint
+-- violation (mirrors x402_nonces). The partial index lets refund/charge rows
+-- (tx_sig IS NULL) remain unconstrained.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_payment_events_tx_sig
+    ON payment_events(tx_sig)
+    WHERE tx_sig IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS x402_nonces (
     tx_sig TEXT PRIMARY KEY,
