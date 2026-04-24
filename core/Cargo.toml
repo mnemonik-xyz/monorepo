@@ -40,5 +40,13 @@ local-embed = ["fastembed"]
 httpmock = "0.8"
 tempfile = "3"
 proptest = "1"
-criterion = "0.5"
+criterion = { version = "0.5", features = [] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util"] }
+
+[[bench]]
+name = "decompress"
+harness = false
+
+[[bench]]
+name = "cbor_codec"
+harness = false
