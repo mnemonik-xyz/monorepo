@@ -5,38 +5,36 @@ edition = "2021"
 description = "Mnemonic MCP server — verifiable memory attestation primitive for AI agents"
 
 [dependencies]
+# Core library (all domain types: codec, identity, embed, compress, storage,
+# arweave, solana, lineage flow in from here).
+mnemonic-core = { path = "../core" }
+
 # Async runtime
 tokio = { version = "1", features = ["full"] }
 
 # HTTP server (remote MCP transport)
 axum = { version = "0.8", features = ["json", "macros"] }
-axum-extra = { version = "0.10", features = ["typed-header"] }
 tower-http = { version = "0.6", features = ["cors"] }
 
-# HTTP client
-reqwest = { version = "0.12", features = ["json", "blocking"] }
+# HTTP client (used by pricing.rs for Irys + SOL/USDC price fetches)
+reqwest = { version = "0.12", features = ["json"] }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
-# Crypto / Solana
+# Crypto / Solana (Keypair type used in McpState and tool signatures)
 solana-sdk = "2.2"
-spl-memo = "6"
-bs58 = "0.5"
 
-# Hashing
+# Hashing (legacy v1 artifact verification in tools.rs)
 sha2 = "0.10"
 hex = "0.4"
 
 # Encoding
 base64 = "0.22"
 
-# SQLite
+# SQLite (payment.rs uses rusqlite::params + error types on SqliteStore::conn())
 rusqlite = { version = "0.34", features = ["bundled"] }
-
-# Binary serialization (Solana tx)
-bincode = "1"
 
 # CLI
 clap = { version = "4", features = ["derive"] }
@@ -49,7 +47,6 @@ chrono = { version = "0.4", features = ["serde"] }
 
 # Error handling
 anyhow = "1"
-thiserror = "2"
 
 # UUID
 uuid = { version = "1", features = ["v4"] }
@@ -58,30 +55,10 @@ uuid = { version = "1", features = ["v4"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
-# Async streams (for SSE)
-tokio-stream = "0.1"
-futures = "0.3"
-
-# TurboQuant compression (PolarQuant + QJL)
-turboquant-plus-rs = "0.1.0"
-ndarray = "0.16"
-
-# Local embeddings (ONNX, all-MiniLM-L6-v2) — optional, needs ONNX runtime
-fastembed = { version = "5", optional = true }
-
-# CBOR / COSE / VAA canonical encoding
-ciborium = "0.2"
-coset = "0.3"
-blake3 = "1"
-zstd = "0.13"
-
-# Core library
-mnemonic-core = { path = "../core" }
-
 [features]
 default = []
-local-embed = ["fastembed"]
+# Forwards to mnemonic-core's local-embed feature (fastembed ONNX runtime).
+local-embed = ["mnemonic-core/local-embed"]
 
 [dev-dependencies]
-tokio-test = "0.4"
 tempfile = "3"

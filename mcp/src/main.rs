@@ -1,5 +1,4 @@
 mod config;
-mod db;
 mod mcp;
 mod payment;
 mod pricing;
@@ -84,7 +83,7 @@ async fn mcp_handler(
                 // Deduct balance BEFORE executing the tool (reserve funds)
                 if let Some(ref key) = api_key {
                     let store = state.store.lock().unwrap();
-                    if let Err(e) = db::deduct_balance(
+                    if let Err(e) = payment::deduct_balance(
                         &store,
                         key,
                         state.sign_memory_cost_micro_usdc,
@@ -104,7 +103,7 @@ async fn mcp_handler(
                 if resp.error.is_some() {
                     if let Some(ref key) = api_key {
                         let store = state.store.lock().unwrap();
-                        let _ = db::credit_deposit(
+                        let _ = payment::credit_deposit(
                             &store,
                             key,
                             current_cost,
@@ -139,7 +138,7 @@ async fn create_api_key(
 ) -> Response {
     let owner = body.owner_pubkey.as_deref().unwrap_or("");
     let store = state.store.lock().unwrap();
-    match db::create_api_key(&store, owner) {
+    match payment::create_api_key(&store, owner) {
         Ok(key) => Json(serde_json::json!({
             "api_key": key,
             "balance_micro_usdc": 0,
@@ -159,7 +158,7 @@ async fn get_balance(
     Query(q): Query<BalanceQuery>,
 ) -> Response {
     let store = state.store.lock().unwrap();
-    match db::get_balance(&store, &q.api_key) {
+    match payment::get_balance(&store, &q.api_key) {
         Ok(Some(bal)) => Json(serde_json::json!({
             "api_key": q.api_key,
             "balance_micro_usdc": bal,
@@ -219,7 +218,7 @@ async fn deposit(
     // Look up the API key's owner_pubkey (short lock scope, no await)
     let owner_pubkey = {
         let store = state.store.lock().unwrap();
-        match db::get_owner_pubkey(&store, &body.api_key) {
+        match payment::get_owner_pubkey(&store, &body.api_key) {
             Ok(Some(pk)) if !pk.is_empty() => pk,
             Ok(_) => {
                 return (
@@ -265,7 +264,7 @@ async fn deposit(
     }
 
     let store = state.store.lock().unwrap();
-    match db::credit_deposit(&store, &body.api_key, amount as i64, &body.tx_sig) {
+    match payment::credit_deposit(&store, &body.api_key, amount as i64, &body.tx_sig) {
         Ok(new_balance) => Json(serde_json::json!({
             "api_key": body.api_key,
             "deposited_micro_usdc": amount,
@@ -287,7 +286,7 @@ async fn admin_stats(
 ) -> Response {
     let days = q.days.unwrap_or(7);
     let store = state.store.lock().unwrap();
-    match db::get_pnl_stats(&store, days) {
+    match payment::get_pnl_stats(&store, days) {
         Ok(stats) => Json(serde_json::json!({
             "period_days": stats.period_days,
             "attestations": stats.attestations,

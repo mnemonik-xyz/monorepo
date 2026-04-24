@@ -183,6 +183,24 @@ Addressed findings from `code-reviewer-round1.json` (approved; 2 nits + 1 minor)
 - `cargo bench -p mnemonic-core --no-run` -> both bench binaries compiled
 - `cargo build -p mnemonic-mcp` -> success
 
+## Task 11: MCP server rewiring + full verification
+
+**Status:** Done
+**Commit:** (pending)
+**Agent:** mcp-rewirer
+**Summary:** Final rewire: consolidated all payment-related DB helpers (`create_api_key`, `get_owner_pubkey`, `get_balance`, `deduct_balance`, `credit_deposit`, `mark_x402_nonce`, `record_attestation_cost`, `get_pnl_stats`, plus `PnlStats` and the `random_bytes` helper) from `mcp/src/db.rs` into `mcp/src/payment.rs` (reversing Task 6's deviation). Deleted `mcp/src/db.rs` and the `mod db;` declaration from `main.rs`. Updated all `db::` call sites in `main.rs` and `tools.rs` to `payment::`. Reorganized the `use` block in `tools.rs` into a single alphabetized group of `mnemonic_core::` imports and dropped the unused `ArtifactSchema` and `storage::self` imports. Trimmed `mcp/Cargo.toml` to the deps actually referenced by mcp sources (removed `axum-extra`, `spl-memo`, `bs58`, `bincode`, `turboquant-plus-rs`, `ndarray`, `ciborium`, `coset`, `blake3`, `zstd`, `thiserror`, `tokio-stream`, `futures`, `tokio-test`, dropped the `reqwest blocking` feature, dropped the orphan `mnemonic-mcp` `fastembed` optional dep; forwarded `local-embed` to `mnemonic-core/local-embed`). Added targeted `#[allow(dead_code)]` to three fields that exist for protocol/env parity but are not read at runtime (`Config.http_host`, `Config.http_port`, `JsonRpcRequest.jsonrpc`, `X402PaymentProof.network`), reflowed a doc list in `payment.rs` module docstring to avoid `doc_overindented_list_items`, and added `#[allow(clippy::too_many_arguments)]` to `tools::sign_memory` — all needed because `cargo clippy --workspace -- -D warnings` (new acceptance criterion in this task) is stricter than the previous per-crate clippy runs on core. `pricing.rs` is byte-identical to `b2e52e6` (user-spec AC).
+**Deviations:** `cargo build -p mnemonic-mcp && echo '{...tools/list...}' | cargo run -p mnemonic-mcp -- --transport stdio` returns 5 tools successfully, but cold TurboQuant initialization for 1536-dim (OpenAI embedder default) takes ~90s before the server accepts stdin — a pre-existing performance trait of `turboquant_plus_rs`, not a regression introduced by this task. Running the smoke test with a longer deadline (>= 120s) succeeds; the default 10s timeout in CI scripts would need adjusting.
+
+**Verification:**
+- `cargo build --workspace` → Finished (0 errors)
+- `cargo test --workspace` → 75 core unit + 5 integration + 3 proptest = 83 passed; 0 mcp binary tests (no test modules in mcp src, as before)
+- `cargo clippy --workspace --all-targets -- -D warnings` → clean
+- MCP stdio round-trip → `{"jsonrpc":"2.0","id":1,"result":{"tools":[...5 entries...]}}` with names `mnemonic_whoami`, `mnemonic_sign_memory`, `mnemonic_verify`, `mnemonic_prove_identity`, `mnemonic_recall`
+- `grep -r "HashEmbedder" core/src/` → empty
+- `grep -r "create_api_key|deduct_balance|credit_deposit|mark_x402_nonce|record_attestation_cost|get_pnl_stats|get_owner_pubkey|verify_usdc_transfer|get_balance" core/src/` → empty
+- `grep "use crate::" mcp/src/` → only `crate::{payment, pricing, tools}` (no domain types)
+- `ls mcp/src/` → `config.rs main.rs mcp.rs payment.rs pricing.rs tools.rs` (exactly per spec; `pricing.rs` unchanged vs b2e52e6)
+
 ## Task 9: Extract lineage module + cleanup
 
 **Status:** Done

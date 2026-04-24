@@ -7,27 +7,20 @@
 
 use solana_sdk::signature::Keypair;
 
+use mnemonic_core::arweave::ArweaveClient;
 use mnemonic_core::codec::{
     canonical::from_canonical_cbor,
     hash::hash_bytes as blake3_hash,
-    schema::{self, ArtifactSchema},
+    schema,
     sign::{sign_artifact, verify_artifact as cose_verify},
 };
-
+use mnemonic_core::compress::EmbeddingCompressor;
 use mnemonic_core::embed::Embedder;
 use mnemonic_core::identity;
-
-use mnemonic_core::compress::EmbeddingCompressor;
-use mnemonic_core::storage::{self, SqliteStore, AttestationStore};
-
-use mnemonic_core::arweave::ArweaveClient;
-
 use mnemonic_core::solana::SolanaClient;
+use mnemonic_core::storage::{AttestationStore, SqliteStore};
 
-use crate::{
-    db,
-    pricing::CostHint,
-};
+use crate::{payment, pricing::CostHint};
 
 /// Tool 1: whoami (sync — DB only)
 pub fn whoami(keypair: &Keypair, store: &SqliteStore, storage_mode: &str) -> serde_json::Value {
@@ -51,6 +44,7 @@ pub fn whoami(keypair: &Keypair, store: &SqliteStore, storage_mode: &str) -> ser
 /// Pipeline (local mode):
 ///   JSON artifact → canonical CBOR → blake3 hash → COSE_Sign1
 ///   → SQLite only (synthetic tx IDs)
+#[allow(clippy::too_many_arguments)]
 pub async fn sign_memory(
     keypair: &Keypair,
     solana: &SolanaClient,
@@ -130,7 +124,7 @@ pub async fn sign_memory(
             &solana_tx, &arweave_tx, &pubkey, &now, &embedding,
         )?;
         if storage_mode != "local" {
-            let _ = db::record_attestation_cost(
+            let _ = payment::record_attestation_cost(
                 &store,
                 &attestation_id,
                 cost_hint.irys_lamports,

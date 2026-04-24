@@ -15,6 +15,9 @@ use crate::{pricing::PricingEngine, tools};
 /// JSON-RPC 2.0 request.
 #[derive(Debug, Deserialize)]
 pub struct JsonRpcRequest {
+    /// JSON-RPC protocol version — deserialized so callers must supply it, but
+    /// we do not branch on the value (we always respond with "2.0").
+    #[allow(dead_code)]
     pub jsonrpc: String,
     pub id: Value,
     pub method: String,
