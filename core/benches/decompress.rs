@@ -1,9 +1,7 @@
+//! Benchmark: EmbeddingCompressor decompression throughput.
+
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-
-#[path = "../src/compress.rs"]
-mod compress;
-
-use compress::EmbeddingCompressor;
+use mnemonic_core::compress::EmbeddingCompressor;
 
 fn sample_vector(dim: usize) -> Vec<f32> {
     (0..dim).map(|i| ((i as f32) * 0.01).sin()).collect()

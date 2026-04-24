@@ -85,13 +85,3 @@ local-embed = ["fastembed"]
 [dev-dependencies]
 tokio-test = "0.4"
 tempfile = "3"
-criterion = "0.5"
-proptest = "1"
-
-[[bench]]
-name = "decompress"
-harness = false
-
-[[bench]]
-name = "cbor_codec"
-harness = false
