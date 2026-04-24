@@ -34,7 +34,7 @@ Technical architecture overview for AI agents. Helps agents understand HOW the s
 
 The root repo is a **git submodule container**. `core/`, `mcp/`, and `webapp/` are each independent git repositories registered as submodules. `docs/` is a regular directory inside the root repo.
 
-`core/` (submodule `mnemonic-core`) — Rust library crate. `src/` is split by responsibility: `codec/` holds SHA-256 hashing, schema encoding, canonical CBOR serialisation, and COSE_Sign1 signing; `embed/` holds the Embedder trait and two provider implementations (fastembed, openai); `compress/` holds TurboQuant scalar quantisation; `identity/` holds Ed25519 keypair generation, DID derivation, and signing; `storage/` holds the `AttestationStore` and `LineageStore` traits with a SQLite implementation; `arweave/` holds the ANS-104 bundle builder with deep hash and Avro encoding; `solana/` holds SPL Memo writer and reader; `lineage/` holds the directed acyclic graph of parent–child relationships between attestations.
+`core/` (submodule `mnemonic-core`) — Rust library crate. `src/` is split by responsibility: `codec/` holds SHA-256 hashing, schema encoding, canonical CBOR serialisation, and COSE_Sign1 signing; `embed/` holds the Embedder trait and two provider implementations (fastembed, openai); `compress/` holds TurboQuant scalar quantisation; `identity/` holds Ed25519 keypair generation, DID derivation, and signing; `storage/` holds the `AttestationStore` and `LineageStore` traits with a SQLite implementation; `arweave/` holds the ANS-104 bundle builder with deep hash and Avro encoding; `solana/` holds SPL Memo writer and reader; `lineage/` holds the directed acyclic graph of parent–child relationships between attestations and exposes a `Direction` enum (`Ancestors` / `Descendants` / `Both`) for BFS traversal.
 
 `mcp/` (submodule `mnemonic-mcp`) — MCP server binary. `src/` is split by concern: `main.rs` bootstraps Axum and McpState; `mcp.rs` is the JSON-RPC 2.0 dispatcher; `tools.rs` implements the five MCP tools; `payment.rs` implements the dual payment gate; `pricing.rs` is the dynamic pricing engine; `config.rs` reads configuration from env vars.
 
@@ -80,7 +80,7 @@ The root repo is a **git submodule container**. `core/`, `mcp/`, and `webapp/` a
 **OpenAI (optional)**
 - Purpose: higher-quality embeddings
 - Auth: `OPENAI_API_KEY` env var
-- Fallback chain: openai → fastembed → Err
+- Provider priority (per `core/src/embed/mod.rs` `build_embedder`): fastembed (open, verifiable) > openai (proprietary but semantic). When `EMBED_PROVIDER=openai`, fallback chain is openai → fastembed → Err.
 
 ---
 
