@@ -7,11 +7,11 @@
 //! Computes:  price = max(min_price, (irys + tx_fee) × sol_usd × (1 + margin))
 //! Stores result atomically so reads are always wait-free.
 
+use anyhow::Context;
 use std::sync::{
     atomic::{AtomicI64, AtomicU64, Ordering},
     Arc,
 };
-use anyhow::Context;
 
 // ── Config ────────────────────────────────────────────────────────────────────
 
@@ -107,8 +107,10 @@ impl PricingEngine {
             config.min_price_micro_usdc,
         );
 
-        self.irys_lamports.store(irys_lamports as i64, Ordering::Relaxed);
-        self.sol_price_bits.store(sol_price.to_bits(), Ordering::Relaxed);
+        self.irys_lamports
+            .store(irys_lamports as i64, Ordering::Relaxed);
+        self.sol_price_bits
+            .store(sol_price.to_bits(), Ordering::Relaxed);
         self.price_micro_usdc.store(new_price, Ordering::Relaxed);
 
         tracing::info!(

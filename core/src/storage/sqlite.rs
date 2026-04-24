@@ -4,7 +4,7 @@
 //! callers must wrap it in `std::sync::Mutex` and never hold the lock across an `.await` point.
 
 use anyhow::Context;
-use rusqlite::{Connection, params};
+use rusqlite::{params, Connection};
 use std::path::Path;
 
 use super::traits::{AttestationRow, AttestationStore, LineageStore, SearchResult};
@@ -162,8 +162,16 @@ impl AttestationStore for SqliteStore {
         let tags_json = serde_json::to_string(tags)?;
         self.conn.execute(
             "INSERT OR REPLACE INTO attestations VALUES (?,?,?,?,?,?,?,?)",
-            params![attestation_id, content, content_hash, tags_json,
-                    solana_tx, arweave_tx, signer_pubkey, created_at],
+            params![
+                attestation_id,
+                content,
+                content_hash,
+                tags_json,
+                solana_tx,
+                arweave_tx,
+                signer_pubkey,
+                created_at
+            ],
         )?;
         let emb_bytes = floats_to_bytes(embedding);
         self.conn.execute(
@@ -176,7 +184,7 @@ impl AttestationStore for SqliteStore {
     fn find_by_tx(&self, tx_id: &str) -> anyhow::Result<Option<AttestationRow>> {
         let mut stmt = self.conn.prepare(
             "SELECT attestation_id, content, content_hash, solana_tx, arweave_tx, signer_pubkey
-             FROM attestations WHERE solana_tx = ?1 OR arweave_tx = ?1 LIMIT 1"
+             FROM attestations WHERE solana_tx = ?1 OR arweave_tx = ?1 LIMIT 1",
         )?;
         let mut rows = stmt.query(params![tx_id])?;
         match rows.next()? {
@@ -195,7 +203,8 @@ impl AttestationStore for SqliteStore {
     fn count(&self, signer: &str) -> anyhow::Result<i64> {
         let count: i64 = self.conn.query_row(
             "SELECT COUNT(*) FROM attestations WHERE signer_pubkey = ?",
-            params![signer], |row| row.get(0),
+            params![signer],
+            |row| row.get(0),
         )?;
         Ok(count)
     }
@@ -211,7 +220,7 @@ impl AttestationStore for SqliteStore {
                     a.solana_tx, a.arweave_tx, a.created_at, ae.embedding
              FROM attestations a
              JOIN attestation_embeddings ae ON a.attestation_id = ae.attestation_id
-             WHERE a.signer_pubkey = ?"
+             WHERE a.signer_pubkey = ?",
         )?;
 
         let q_norm = l2_norm(query_embedding);
@@ -227,7 +236,11 @@ impl AttestationStore for SqliteStore {
                 let emb = bytes_to_floats(&emb_blob);
                 let e_norm = l2_norm(&emb);
                 let score = if e_norm > 0.0 {
-                    q_normalized.iter().zip(emb.iter()).map(|(a, b)| a * b / e_norm).sum::<f32>()
+                    q_normalized
+                        .iter()
+                        .zip(emb.iter())
+                        .map(|(a, b)| a * b / e_norm)
+                        .sum::<f32>()
                 } else {
                     0.0
                 };
@@ -262,9 +275,9 @@ impl LineageStore for SqliteStore {
     }
 
     fn get_edges(&self, child_id: &str) -> anyhow::Result<Vec<(String, i64)>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT parent_id, depth FROM lineage_edges WHERE child_id = ?"
-        )?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT parent_id, depth FROM lineage_edges WHERE child_id = ?")?;
         let rows = stmt.query_map(params![child_id], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
         })?;
@@ -301,11 +314,19 @@ mod tests {
     #[test]
     fn test_save_and_find_by_tx() {
         let store = SqliteStore::in_memory().unwrap();
-        store.save_attestation(
-            "att-1", "content", "hash1", &["tag".into()],
-            "sol_tx_1", "ar_tx_1", "signer1", "2026-04-13T00:00:00Z",
-            &[1.0, 0.0],
-        ).unwrap();
+        store
+            .save_attestation(
+                "att-1",
+                "content",
+                "hash1",
+                &["tag".into()],
+                "sol_tx_1",
+                "ar_tx_1",
+                "signer1",
+                "2026-04-13T00:00:00Z",
+                &[1.0, 0.0],
+            )
+            .unwrap();
 
         let found = store.find_by_tx("sol_tx_1").unwrap();
         assert!(found.is_some());
@@ -319,15 +340,33 @@ mod tests {
     fn test_count_by_signer() {
         let store = SqliteStore::in_memory().unwrap();
         for i in 0..2 {
-            store.save_attestation(
-                &format!("att-{i}"), "c", "h", &[], "sol", "ar",
-                "signer_a", "2026-01-01", &[1.0, 0.0],
-            ).unwrap();
+            store
+                .save_attestation(
+                    &format!("att-{i}"),
+                    "c",
+                    "h",
+                    &[],
+                    "sol",
+                    "ar",
+                    "signer_a",
+                    "2026-01-01",
+                    &[1.0, 0.0],
+                )
+                .unwrap();
         }
-        store.save_attestation(
-            "att-other", "c", "h", &[], "sol2", "ar2",
-            "signer_b", "2026-01-01", &[1.0, 0.0],
-        ).unwrap();
+        store
+            .save_attestation(
+                "att-other",
+                "c",
+                "h",
+                &[],
+                "sol2",
+                "ar2",
+                "signer_b",
+                "2026-01-01",
+                &[1.0, 0.0],
+            )
+            .unwrap();
 
         assert_eq!(store.count("signer_a").unwrap(), 2);
         assert_eq!(store.count("signer_b").unwrap(), 1);
@@ -337,14 +376,32 @@ mod tests {
     fn test_search_ranking() {
         let store = SqliteStore::in_memory().unwrap();
         // Two attestations with distinct embeddings
-        store.save_attestation(
-            "att-0", "topic zero", "h0", &[], "s0", "a0",
-            "agent", "2026-01-01", &[1.0, 0.0],
-        ).unwrap();
-        store.save_attestation(
-            "att-1", "topic one", "h1", &[], "s1", "a1",
-            "agent", "2026-01-01", &[0.0, 1.0],
-        ).unwrap();
+        store
+            .save_attestation(
+                "att-0",
+                "topic zero",
+                "h0",
+                &[],
+                "s0",
+                "a0",
+                "agent",
+                "2026-01-01",
+                &[1.0, 0.0],
+            )
+            .unwrap();
+        store
+            .save_attestation(
+                "att-1",
+                "topic one",
+                "h1",
+                &[],
+                "s1",
+                "a1",
+                "agent",
+                "2026-01-01",
+                &[0.0, 1.0],
+            )
+            .unwrap();
 
         // Query closer to att-0's embedding
         let results = store.search(&[1.0, 0.0], "agent", 2).unwrap();
@@ -362,14 +419,30 @@ mod tests {
     #[test]
     fn test_duplicate_attestation_id() {
         let store = SqliteStore::in_memory().unwrap();
-        store.save_attestation(
-            "att-dup", "c1", "h1", &[], "sol1", "ar1",
-            "s1", "2026-01-01", &[1.0],
-        ).unwrap();
+        store
+            .save_attestation(
+                "att-dup",
+                "c1",
+                "h1",
+                &[],
+                "sol1",
+                "ar1",
+                "s1",
+                "2026-01-01",
+                &[1.0],
+            )
+            .unwrap();
         // INSERT OR REPLACE so this succeeds (replaces)
         let result = store.save_attestation(
-            "att-dup", "c2", "h2", &[], "sol2", "ar2",
-            "s1", "2026-01-01", &[1.0],
+            "att-dup",
+            "c2",
+            "h2",
+            &[],
+            "sol2",
+            "ar2",
+            "s1",
+            "2026-01-01",
+            &[1.0],
         );
         assert!(result.is_ok());
         // Content should be updated

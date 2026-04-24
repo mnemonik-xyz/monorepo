@@ -1,6 +1,6 @@
 use anyhow::Context;
-use solana_sdk::signature::{Keypair, Signer};
 use solana_sdk::pubkey::Pubkey;
+use solana_sdk::signature::{Keypair, Signer};
 use std::path::Path;
 
 /// Load keypair from JSON file, or generate and save a new one.
