@@ -1,6 +1,5 @@
 mod config;
 mod db;
-mod lineage;
 mod mcp;
 mod payment;
 mod pricing;
