@@ -25,7 +25,7 @@ All providers implement the `Embedder` trait in `core/src/embed/mod.rs`. Never c
 
 ### Error handling
 
-Use `anyhow::Result` for all fallible functions in `core/` and `mcp/`. Convert to `JsValue` only at the WASM boundary in `core/src/wasm/`. Avoid `unwrap()` outside tests.
+Use `anyhow::Result` for all fallible functions in `core/` and `mcp/`. Convert to `JsValue` only at the WASM boundary (the wasm-bindgen bridge lives in `webapp/src/wasm/`). Avoid `unwrap()` outside tests.
 
 ### Storage modes
 
