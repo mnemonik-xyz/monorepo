@@ -183,6 +183,65 @@ Addressed findings from `code-reviewer-round1.json` (approved; 2 nits + 1 minor)
 - `cargo bench -p mnemonic-core --no-run` -> both bench binaries compiled
 - `cargo build -p mnemonic-mcp` -> success
 
+## Task 11: MCP server rewiring + full verification
+
+**Status:** Done
+**Commit:** (pending)
+**Agent:** mcp-rewirer
+**Summary:** Final rewire: consolidated all payment-related DB helpers (`create_api_key`, `get_owner_pubkey`, `get_balance`, `deduct_balance`, `credit_deposit`, `mark_x402_nonce`, `record_attestation_cost`, `get_pnl_stats`, plus `PnlStats` and the `random_bytes` helper) from `mcp/src/db.rs` into `mcp/src/payment.rs` (reversing Task 6's deviation). Deleted `mcp/src/db.rs` and the `mod db;` declaration from `main.rs`. Updated all `db::` call sites in `main.rs` and `tools.rs` to `payment::`. Reorganized the `use` block in `tools.rs` into a single alphabetized group of `mnemonic_core::` imports and dropped the unused `ArtifactSchema` and `storage::self` imports. Trimmed `mcp/Cargo.toml` to the deps actually referenced by mcp sources (removed `axum-extra`, `spl-memo`, `bs58`, `bincode`, `turboquant-plus-rs`, `ndarray`, `ciborium`, `coset`, `blake3`, `zstd`, `thiserror`, `tokio-stream`, `futures`, `tokio-test`, dropped the `reqwest blocking` feature, dropped the orphan `mnemonic-mcp` `fastembed` optional dep; forwarded `local-embed` to `mnemonic-core/local-embed`). Added targeted `#[allow(dead_code)]` to three fields that exist for protocol/env parity but are not read at runtime (`Config.http_host`, `Config.http_port`, `JsonRpcRequest.jsonrpc`, `X402PaymentProof.network`), reflowed a doc list in `payment.rs` module docstring to avoid `doc_overindented_list_items`, and added `#[allow(clippy::too_many_arguments)]` to `tools::sign_memory` — all needed because `cargo clippy --workspace -- -D warnings` (new acceptance criterion in this task) is stricter than the previous per-crate clippy runs on core. `pricing.rs` is byte-identical to `b2e52e6` (user-spec AC).
+**Deviations:** `cargo build -p mnemonic-mcp && echo '{...tools/list...}' | cargo run -p mnemonic-mcp -- --transport stdio` returns 5 tools successfully, but cold TurboQuant initialization for 1536-dim (OpenAI embedder default) takes ~90s before the server accepts stdin — a pre-existing performance trait of `turboquant_plus_rs`, not a regression introduced by this task. Running the smoke test with a longer deadline (>= 120s) succeeds; the default 10s timeout in CI scripts would need adjusting.
+
+**Verification:**
+- `cargo build --workspace` → Finished (0 errors)
+- `cargo test --workspace` → 75 core unit + 5 integration + 3 proptest = 83 passed; 0 mcp binary tests (no test modules in mcp src, as before)
+- `cargo clippy --workspace --all-targets -- -D warnings` → clean
+- MCP stdio round-trip → `{"jsonrpc":"2.0","id":1,"result":{"tools":[...5 entries...]}}` with names `mnemonic_whoami`, `mnemonic_sign_memory`, `mnemonic_verify`, `mnemonic_prove_identity`, `mnemonic_recall`
+- `grep -r "HashEmbedder" core/src/` → empty
+- `grep -r "create_api_key|deduct_balance|credit_deposit|mark_x402_nonce|record_attestation_cost|get_pnl_stats|get_owner_pubkey|verify_usdc_transfer|get_balance" core/src/` → empty
+- `grep "use crate::" mcp/src/` → only `crate::{payment, pricing, tools}` (no domain types)
+- `ls mcp/src/` → `config.rs main.rs mcp.rs payment.rs pricing.rs tools.rs` (exactly per spec; `pricing.rs` unchanged vs b2e52e6)
+
+**Round 2 (after review):**
+
+Addressed findings from `code-reviewer-round1.json`, `security-auditor-round1.json`, and `test-reviewer-round1.json`:
+
+- **MAJOR (code-reviewer + security-auditor) — refund via `credit_deposit` silently dropped duplicates:** Added `refund_balance(store, api_key, amount, reason)` in `payment.rs`. Writes an `event_type='refund'` row with `tx_sig = NULL` (exempt from the UNIQUE partial index so two identical refunds both apply). Wrapped INSERT + UPDATE in `BEGIN IMMEDIATE` / `COMMIT` with explicit rollback on error. Updated `main.rs` refund site to call `refund_balance(key, current_cost, error_message)`; failures now log via `tracing::warn!` rather than being silently discarded with `let _ =`. Added unit test `refund_balance_allows_duplicate_reasons` — seeds a key, fires two refunds with identical `reason`, asserts both credit the balance and two `event_type='refund'` rows exist.
+- **MAJOR (security-auditor) — TOCTOU on `credit_deposit`:** Added partial UNIQUE index `uq_payment_events_tx_sig ON payment_events(tx_sig) WHERE tx_sig IS NOT NULL` in `core/src/storage/sqlite.rs` (CREATE IF NOT EXISTS, so existing DBs on restart pick it up). Rewrote `credit_deposit` to wrap INSERT (which now gates idempotency via the UNIQUE constraint) + UPDATE + balance-read in `BEGIN IMMEDIATE` / `COMMIT`. Translates `SqliteFailure(ConstraintViolation)` into "deposit tx already applied". Added multithreaded test `credit_deposit_concurrent_same_tx_sig_applies_once` — two threads call `credit_deposit` with the same tx_sig against a shared file-backed DB using a `Barrier` for lockstep; asserts exactly one succeeds, balance is credited once, and exactly one `payment_events` row exists.
+- **MAJOR (security-auditor) — TOCTOU on `deduct_balance`:** Replaced the read-then-update pattern with a single conditional `UPDATE api_keys SET balance = balance - ?1 ... WHERE api_key = ? AND balance >= ?1`, checking `conn.changes()` to distinguish "no such key" from "insufficient funds" via a read-only `get_balance` fallback for the error message. Added multithreaded test `deduct_balance_concurrent_cannot_overdraw` — seeds balance=100, fires two concurrent 75-deducts with a `Barrier`, asserts exactly one succeeds and final balance is 25 (never negative). Also added `deduct_balance_insufficient_leaves_balance_unchanged` and `deduct_balance_unknown_key_reports_not_found` for the error paths.
+- **MINOR (code-reviewer) — stale `mnemonic_sign_memory` tool description:** Updated from "SHA-256 hash / SPL Memo" to "canonical CBOR + blake3 hash, signed with COSE_Sign1 (Ed25519), stored on Arweave, hash anchored as SPL Memo on Solana" to reflect the task-2 pipeline.
+- **MINOR (security-auditor) — `random_bytes` CSPRNG fallback:** Removed the SHA-256(time+PID+counter) fallback entirely. `random_bytes` now returns `anyhow::Result<[u8; N]>` and surfaces a clear error if `/dev/urandom` is missing or unreadable. `create_api_key` propagates the error via `?`, so the HTTP 500 path returns "entropy source /dev/urandom unavailable" instead of silently minting a weak key.
+- **MINOR (security-auditor) — deposit-rejected error leaked pubkey+tx_sig prefixes:** Replaced the prefixed message with generic text "deposit rejected: API key owner is not a signer of this transaction". Full `owner_pubkey`, `tx_sig`, and `signers` list are now logged via `tracing::warn!` for operator debugging.
+- **Baseline:** Also added `credit_deposit_sequential_duplicate_is_rejected` to lock in the sequential idempotency path as a regression guard.
+
+**Follow-ups (explicitly deferred from round 2, tracked as pre-existing debt):**
+
+- Add coverage to the remaining payment helpers (`get_balance`, `create_api_key`, `mark_x402_nonce`, `get_pnl_stats`, `record_attestation_cost`, `check_balance`/`check_x402`/`check_payment`, `extract_api_key`, `extract_x402_proof`) — test-reviewer major. Not in round-2 scope because scoping all 9 helpers would expand the review loop; the three financial-safety helpers (deduct, credit, refund) are now covered.
+- Automated MCP round-trip smoke test that spawns the binary and asserts 5 tools on `tools/list` — test-reviewer major. Follow-up.
+- Cold-init timing regression guard (#[ignore] perf test) — test-reviewer minor. Follow-up.
+- CORS `allow_origin(Any)` on `/deposit` / `/admin/stats` — security-auditor nit. Pre-existing. Follow-up.
+- `/admin/stats` endpoint has no auth — security-auditor nit. Pre-existing. Follow-up.
+- Refactor `sign_memory` 10-arg signature into a `SignMemoryCtx<'_>` struct — code-reviewer nit. Follow-up.
+
+**Round 2 verification:**
+- `cargo build --workspace` → Finished (0 errors)
+- `cargo test --workspace` → 83 mnemonic-core tests + 6 new mnemonic-mcp payment tests = 89 passed
+- `cargo clippy --workspace --all-targets -- -D warnings` → clean
+- New tests: `refund_balance_allows_duplicate_reasons`, `credit_deposit_concurrent_same_tx_sig_applies_once`, `deduct_balance_concurrent_cannot_overdraw`, `deduct_balance_insufficient_leaves_balance_unchanged`, `deduct_balance_unknown_key_reports_not_found`, `credit_deposit_sequential_duplicate_is_rejected`
+
+**Round 3 (after review):**
+
+Addressed findings from `code-reviewer-round2.json` and `security-auditor-round2.json`:
+
+- **MAJOR (code-reviewer + security-auditor) — `deduct_balance` audit-trail INSERT not atomic with balance decrement:** Wrapped the balance UPDATE and the `payment_events` charge INSERT in `BEGIN IMMEDIATE` / `COMMIT`, matching the transaction discipline of `credit_deposit` and `refund_balance`. If `changes() == 0` (unknown key or insufficient balance), the transaction rolls back and we call the read-only `get_balance` to produce the precise user-visible error. If the INSERT fails (disk full, constraint error), the ROLLBACK reverts the decrement so the balance and ledger stay consistent. Added unit test `deduct_balance_audit_insert_failure_rolls_back_balance`: installs a BEFORE-INSERT trigger on `payment_events` that RAISEs ABORT for charge rows whose description equals `'__FORCE_FAIL__'`; seeds 500, attempts a 100-deduct with the sentinel description, asserts (1) the call errors, (2) the balance remains 500, (3) no charge row was written, and (4) after dropping the trigger, a subsequent normal deduct still works end-to-end (store is not stuck in a half-transaction state).
+- **MINOR (code-reviewer + security-auditor) — missing WAL + busy_timeout pragmas:** Added `PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;` to `SqliteStore::open` (file-backed). WAL lets concurrent readers (the pricing refresher) overlap with payment writers instead of blocking at the database level. `busy_timeout=5000` makes a losing `BEGIN IMMEDIATE` queue for up to 5s rather than returning `SQLITE_BUSY` immediately (rusqlite default is 0ms), which also stabilizes `credit_deposit_concurrent_same_tx_sig_applies_once` so the loser consistently sees `ConstraintViolation` ("deposit tx already applied") rather than a busy error. `SqliteStore::in_memory` sets only `busy_timeout=5000` (WAL is meaningless in memory).
+- **MINOR (security-auditor) — partial UNIQUE index migration safety on legacy DBs — chose option (a), automatic in-place dedup:** Reasoning: option (a) is the safer choice because it removes any operator-visible failure mode on upgrade. An operator who upgrades the binary and restarts without reading the release notes would otherwise see `SQLITE_CONSTRAINT` and a server that refuses to start. Automating the cleanup eliminates that footgun at the cost of ~10 lines of SQL. Implementation: moved `CREATE UNIQUE INDEX IF NOT EXISTS uq_payment_events_tx_sig` out of the `SCHEMA` const and into a new `migrate_payment_events_unique_index(&conn)` helper that runs after `SCHEMA` on both `open()` and `in_memory()`. The helper wraps everything in a single `BEGIN IMMEDIATE` / `COMMIT` and (1) DELETEs duplicate non-NULL `tx_sig` rows keeping the earliest per signature (`rowid NOT IN (SELECT MIN(rowid) ... GROUP BY tx_sig)`), then (2) creates the partial UNIQUE index. Idempotent: on fresh or clean DBs the DELETE is a no-op and `CREATE ... IF NOT EXISTS` is cheap. Legacy DBs with dupes from the pre-fix TOCTOU path get a one-shot cleanup before the index is applied, so the server starts cleanly on the first upgraded restart.
+
+**Round 3 verification:**
+- `cargo build --workspace` → Finished (0 errors)
+- `cargo test --workspace` → 75 mnemonic-core unit + 5 integration + 3 proptest + 7 mnemonic-mcp payment (1 new) = 90 passed
+- `cargo clippy --workspace --all-targets -- -D warnings` → clean
+- New test: `deduct_balance_audit_insert_failure_rolls_back_balance` (trigger-based INSERT failure + rollback assertion)
+
 ## Task 9: Extract lineage module + cleanup
 
 **Status:** Done
