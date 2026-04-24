@@ -333,30 +333,50 @@ pub fn get_balance(store: &SqliteStore, api_key: &str) -> anyhow::Result<Option<
 
 /// Deduct `amount` from balance. Returns Err if insufficient funds or key not found.
 ///
-/// The read + decrement is atomic: we issue a single conditional `UPDATE ...
-/// WHERE api_key = ? AND balance_micro_usdc >= ?`, then look at
-/// `conn.changes()` to distinguish "no such key" from "insufficient funds".
-/// Two concurrent calls on the same key can never both pass the guard
-/// because SQLite serializes writes to the same table.
+/// The balance UPDATE and the `payment_events` charge INSERT are wrapped in
+/// `BEGIN IMMEDIATE` / `COMMIT` so the balance decrement and audit-trail row
+/// commit together or not at all. If the INSERT fails (e.g. disk full or an
+/// `event_id` UUID collision), the transaction rolls back and the balance is
+/// left untouched — matching the atomicity discipline of `credit_deposit` and
+/// `refund_balance`.
+///
+/// The conditional UPDATE `WHERE api_key = ? AND balance_micro_usdc >= ?` is
+/// the idempotency gate: `conn.changes() == 0` means either the key is
+/// unknown or the balance is too low. In that case we ROLLBACK and use a
+/// read-only `get_balance` call to produce the precise user-visible error.
+/// Two concurrent deducts on the same key cannot both pass the guard because
+/// SQLite serializes writes to the same table under the IMMEDIATE write lock.
 pub fn deduct_balance(store: &SqliteStore, api_key: &str, amount: i64, description: &str) -> anyhow::Result<()> {
     let conn = store.conn();
     let now = chrono::Utc::now().to_rfc3339();
 
+    // Acquire the write lock at transaction open so the UPDATE + INSERT
+    // commit atomically.
+    conn.execute("BEGIN IMMEDIATE", [])?;
+
     // Single-statement atomic check + decrement.
-    let changed = conn.execute(
+    let update_res = conn.execute(
         "UPDATE api_keys
              SET balance_micro_usdc = balance_micro_usdc - ?1,
                  last_used_at = ?2
            WHERE api_key = ?3
              AND balance_micro_usdc >= ?1",
         params![amount, now, api_key],
-    )?;
+    );
+    let changed = match update_res {
+        Ok(n) => n,
+        Err(e) => {
+            let _ = conn.execute("ROLLBACK", []);
+            return Err(e.into());
+        }
+    };
 
     if changed == 0 {
         // Either the key does not exist or the balance is too low. We reuse
         // get_balance to produce the precise error message the client expects
         // (it's read-only, so there is no race here — worst case the message
         // is slightly stale, which is fine for a rejection path).
+        let _ = conn.execute("ROLLBACK", []);
         match get_balance(store, api_key)? {
             None => anyhow::bail!("api key not found"),
             Some(balance) => anyhow::bail!(
@@ -365,10 +385,20 @@ pub fn deduct_balance(store: &SqliteStore, api_key: &str, amount: i64, descripti
         }
     }
 
-    conn.execute(
+    let insert_res = conn.execute(
         "INSERT INTO payment_events (event_id, api_key, amount_micro_usdc, event_type, description, created_at) VALUES (?,?,?,'charge',?,?)",
         params![uuid::Uuid::new_v4().to_string(), api_key, amount, description, now],
-    )?;
+    );
+    if let Err(e) = insert_res {
+        // Audit-trail INSERT failed — roll back the balance decrement so the
+        // ledger and balance stay consistent. Without this, a disk-full or
+        // constraint error on the event row would leave the balance debited
+        // with no charge record.
+        let _ = conn.execute("ROLLBACK", []);
+        return Err(e.into());
+    }
+
+    conn.execute("COMMIT", [])?;
     Ok(())
 }
 
@@ -787,6 +817,72 @@ mod tests {
         let store = fresh_store();
         let err = deduct_balance(&store, "mnm_nonexistent", 10, "whoops").unwrap_err();
         assert!(err.to_string().contains("api key not found"), "err = {err}");
+    }
+
+    #[test]
+    fn deduct_balance_audit_insert_failure_rolls_back_balance() {
+        // Covers: review round2 major finding — balance decrement and audit-
+        // trail INSERT must be atomic. We install a temporary BEFORE INSERT
+        // trigger on payment_events that RAISEs ABORT when the charge row's
+        // description matches a sentinel. The balance UPDATE in
+        // deduct_balance runs first, so without transaction wrapping the
+        // balance would be debited with no matching charge row. With the
+        // round-3 fix, the failing INSERT triggers a ROLLBACK that undoes
+        // the UPDATE.
+        let store = fresh_store();
+        let key = create_api_key(&store, "owner_rollback").unwrap();
+        credit_deposit(&store, &key, 500, "seed_rollback_tx").unwrap();
+        assert_eq!(get_balance(&store, &key).unwrap(), Some(500));
+
+        // Trigger that fails only when the INSERT carries our sentinel
+        // description. Other charge rows (if any) are unaffected.
+        store
+            .conn()
+            .execute_batch(
+                "CREATE TRIGGER force_fail_charge
+                 BEFORE INSERT ON payment_events
+                 WHEN NEW.event_type = 'charge' AND NEW.description = '__FORCE_FAIL__'
+                 BEGIN SELECT RAISE(ABORT, 'forced audit insert failure'); END;",
+            )
+            .unwrap();
+
+        let err = deduct_balance(&store, &key, 100, "__FORCE_FAIL__").unwrap_err();
+        assert!(
+            err.to_string().contains("forced audit insert failure")
+                || err.to_string().to_lowercase().contains("abort"),
+            "expected INSERT-failure error, got: {err}"
+        );
+
+        // Balance must be unchanged: 500 minus the FAILED deduction = 500.
+        assert_eq!(
+            get_balance(&store, &key).unwrap(),
+            Some(500),
+            "rollback must leave balance untouched"
+        );
+
+        // No charge row must have been written for the failed attempt.
+        let charge_rows: i64 = store
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM payment_events WHERE api_key = ? AND event_type = 'charge'",
+                params![key],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            charge_rows, 0,
+            "no charge row should exist when the INSERT aborted"
+        );
+
+        // Drop the trigger and verify a subsequent successful deduct works
+        // normally, confirming the store is not left in a stuck state after
+        // the rolled-back transaction.
+        store
+            .conn()
+            .execute("DROP TRIGGER force_fail_charge", [])
+            .unwrap();
+        deduct_balance(&store, &key, 100, "normal").unwrap();
+        assert_eq!(get_balance(&store, &key).unwrap(), Some(400));
     }
 
     #[test]

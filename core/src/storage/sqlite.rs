@@ -46,13 +46,11 @@ CREATE TABLE IF NOT EXISTS payment_events (
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_payment_events_key ON payment_events(api_key);
--- Deposits use the on-chain tx_sig as a unique idempotency key so concurrent
--- deposits for the same signature collapse atomically via a UNIQUE-constraint
--- violation (mirrors x402_nonces). The partial index lets refund/charge rows
--- (tx_sig IS NULL) remain unconstrained.
-CREATE UNIQUE INDEX IF NOT EXISTS uq_payment_events_tx_sig
-    ON payment_events(tx_sig)
-    WHERE tx_sig IS NOT NULL;
+-- Note: the partial UNIQUE index on payment_events(tx_sig) is created
+-- separately in `SqliteStore::open` / `SqliteStore::in_memory` AFTER a
+-- one-shot dedup pass. Creating it here would fail on legacy databases
+-- that accumulated duplicate tx_sigs under the old TOCTOU-vulnerable
+-- code path. See `open()` for the migration sequence.
 
 CREATE TABLE IF NOT EXISTS x402_nonces (
     tx_sig TEXT PRIMARY KEY,
@@ -82,19 +80,63 @@ pub struct SqliteStore {
     conn: Connection,
 }
 
+/// Shared initialization step run after `SCHEMA` for every backing store
+/// (file-backed via `open` and in-memory via `in_memory`).
+///
+/// Dedups any pre-existing duplicate non-NULL `tx_sig` rows, then creates
+/// the partial UNIQUE index on `payment_events(tx_sig)`. The dedup keeps
+/// the earliest row per `tx_sig` (lowest `rowid`) and deletes the rest —
+/// it is a no-op on fresh or already-clean databases, and cleans up
+/// legacy rows produced by the old TOCTOU-vulnerable `credit_deposit`.
+///
+/// Wrapped in `BEGIN IMMEDIATE` / `COMMIT` so that a concurrent opener
+/// cannot see a half-migrated state. `CREATE UNIQUE INDEX IF NOT EXISTS`
+/// is idempotent, so repeated opens of a clean DB execute cheaply.
+fn migrate_payment_events_unique_index(conn: &Connection) -> anyhow::Result<()> {
+    conn.execute_batch(
+        "BEGIN IMMEDIATE;
+         DELETE FROM payment_events
+          WHERE tx_sig IS NOT NULL
+            AND rowid NOT IN (
+                SELECT MIN(rowid) FROM payment_events
+                 WHERE tx_sig IS NOT NULL
+                 GROUP BY tx_sig
+            );
+         CREATE UNIQUE INDEX IF NOT EXISTS uq_payment_events_tx_sig
+             ON payment_events(tx_sig) WHERE tx_sig IS NOT NULL;
+         COMMIT;",
+    )
+    .context("migrating payment_events UNIQUE(tx_sig) index")?;
+    Ok(())
+}
+
 impl SqliteStore {
     pub fn open(path: &Path) -> anyhow::Result<Self> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).context("creating db directory")?;
         }
         let conn = Connection::open(path).context("opening SQLite")?;
+        // WAL lets concurrent readers (e.g. the MCP server's pricing-refresh
+        // thread) overlap with payment writers instead of blocking on the
+        // database-level lock. busy_timeout=5000 ensures a BEGIN IMMEDIATE
+        // that loses the lock race queues for up to 5s rather than
+        // returning SQLITE_BUSY immediately (rusqlite default is 0ms),
+        // which also stabilizes the payment race tests.
+        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;")
+            .context("setting WAL + busy_timeout pragmas")?;
         conn.execute_batch(SCHEMA).context("initializing schema")?;
+        migrate_payment_events_unique_index(&conn)?;
         Ok(Self { conn })
     }
 
     pub fn in_memory() -> anyhow::Result<Self> {
         let conn = Connection::open_in_memory()?;
+        // busy_timeout is harmless on in-memory DBs and keeps behavior
+        // consistent with file-backed stores. WAL mode is meaningless in
+        // memory and not requested.
+        conn.execute_batch("PRAGMA busy_timeout=5000;")?;
         conn.execute_batch(SCHEMA)?;
+        migrate_payment_events_unique_index(&conn)?;
         Ok(Self { conn })
     }
 
