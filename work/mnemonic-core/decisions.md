@@ -196,3 +196,20 @@ Addressed findings from `code-reviewer-round1.json` (approved; 2 nits + 1 minor)
 - `cargo clippy -p mnemonic-core -- -D warnings` -> clean
 - `cargo build -p mnemonic-mcp` -> success
 - `grep -rn "mod lineage" mcp/src/` -> empty
+
+## Task 12: Update architecture.md and patterns.md documentation
+
+**Status:** Done
+**Commit:** a4cd38c
+**Agent:** main agent
+**Summary:** Updated `.claude/skills/project-knowledge/references/architecture.md` Project Structure to list the actual post-extraction `core/src/` module layout: replaced `attest/` with `codec/` (SHA-256, schema, canonical CBOR, COSE_Sign1), reduced the embed provider list to two (fastembed, openai) with HashEmbedder gone, dropped the `wasm/` entry, added `lineage/` (parent-child DAG), and named the `AttestationStore`/`LineageStore` traits in the storage description. Changed the OpenAI fallback chain from "openai -> fastembed -> hash" to "openai -> fastembed -> Err". Updated patterns.md: the Embedder trait section now mentions the provider fallback chain and the test-only MockEmbedder instead of "hash fallback", and the Dual-target compilation section no longer references `core/src/wasm/mod.rs`. Left the error-handling note about the WASM boundary intact since task spec scoped the wasm removal to the specific `wasm/mod.rs` path reference.
+**Deviations:** None.
+
+**Verification:**
+- `grep -E "codec/|lineage/" .claude/skills/project-knowledge/references/architecture.md` -> both found
+- `grep "attest/" .claude/skills/project-knowledge/references/architecture.md` -> empty
+- `grep "wasm/" .claude/skills/project-knowledge/references/architecture.md` -> only the webapp `src/wasm/` subfolder reference (not a core module list entry)
+- `grep "HashEmbedder" .claude/skills/project-knowledge/references/architecture.md` -> empty
+- `grep "hash fallback" .claude/skills/project-knowledge/references/patterns.md` -> empty
+- `grep "wasm/mod.rs" .claude/skills/project-knowledge/references/patterns.md` -> empty
+- Both files render as valid Markdown with all other sections intact
