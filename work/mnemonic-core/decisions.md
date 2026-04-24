@@ -150,6 +150,22 @@ Review details — in JSON files via links. QA report — in logs/working/.
 - `cargo test -p mnemonic-mcp` -> 3 passed (unchanged)
 - No real Solana RPC URLs or funded keypairs in tests
 
+## Task 10: Move integration tests, proptests, and benchmarks to core/
+
+**Status:** Done
+**Commit:** (pending)
+**Agent:** main agent
+**Summary:** Moved `integration_cbor.rs`, `proptest_canonical.rs`, `decompress.rs`, `cbor_codec.rs` from `mcp/tests/` and `mcp/benches/` into `core/tests/` and `core/benches/`. Replaced every inline helper (the `codec_helpers` module in `integration_cbor.rs`, the inline `to_canonical_cbor`/`json_to_cbor` in `proptest_canonical.rs` and `cbor_codec.rs`, and the `#[path = "../src/compress.rs"]` path-include in `decompress.rs`) with direct `mnemonic_core::codec::*` and `mnemonic_core::compress::EmbeddingCompressor` imports. Removed the now-unused `criterion` and `proptest` dev-deps plus the two `[[bench]]` entries from `mcp/Cargo.toml`; added two `[[bench]]` entries (harness=false) to `core/Cargo.toml` (`criterion` and `proptest` were already present from prior tasks). Removed the empty `mcp/tests/` and `mcp/benches/` directories.
+**Deviations:** The `full_pipeline` criterion group in `cbor_codec.rs` previously constructed COSE manually; now it calls `sign_artifact`, which is the library equivalent of the same pipeline (canonical CBOR + blake3 + COSE_Sign1). This matches the task's directive to replace inline helpers with library imports; the measured pipeline is equivalent.
+
+**Verification:**
+- `cargo test -p mnemonic-core` -> 75 unit + 5 integration + 3 proptest = 83 passed
+- `cargo test -p mnemonic-mcp` -> ok (no tests broken; integration tests were the ones moved)
+- `cargo build -p mnemonic-mcp` -> success
+- `cargo clippy -p mnemonic-core -- -D warnings` -> clean
+- `cargo clippy -p mnemonic-core --all-targets -- -D warnings` -> clean (tests + benches)
+- `cargo bench -p mnemonic-core --no-run` -> both bench binaries compiled
+
 ## Task 9: Extract lineage module + cleanup
 
 **Status:** Done
