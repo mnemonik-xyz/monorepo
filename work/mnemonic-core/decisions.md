@@ -133,3 +133,19 @@ Review details — in JSON files via links. QA report — in logs/working/.
 - `cargo clippy -p mnemonic-core -- -D warnings` -> clean
 - `cargo build -p mnemonic-mcp` -> success
 - No irys.xyz URLs in test code
+
+## Task 8: Extract solana module + httpmock tests + isolate verify_usdc_transfer
+
+**Status:** Done
+**Commit:** (pending)
+**Agent:** main agent
+**Summary:** Moved `solana.rs` to `core/src/solana/mod.rs` minus `verify_usdc_transfer`, which moved to `mcp/src/payment.rs` as a standalone `pub async fn verify_usdc_transfer(client: &SolanaClient, ...)`. Made `SolanaClient::rpc` public so the extracted fn can call it cross-crate (tests still go through public wrappers). Added `test-util` to the core tokio dev-feature so `#[tokio::test(start_paused = true)]` works for the retry-exhaustion test. Wrote 8 httpmock tests; fixed a `clippy::unnecessary_map_or` on the moved `confirm_tx` (`map_or(true, f)` → `is_none_or(f)`). Updated `mcp/src/{main.rs, mcp.rs, tools.rs, payment.rs}` imports; deleted `mcp/src/solana.rs`.
+**Deviations:** Made `rpc` `pub` (task said "no need to make rpc public" but that was about test access — verify_usdc_transfer cross-crate call forces it).
+
+**Verification:**
+- `cargo test -p mnemonic-core -- solana` -> 8 passed
+- `grep -r "verify_usdc_transfer" core/src/` -> empty
+- `cargo clippy -p mnemonic-core -- -D warnings` -> clean
+- `cargo build -p mnemonic-mcp` -> success
+- `cargo test -p mnemonic-mcp` -> 3 passed (unchanged)
+- No real Solana RPC URLs or funded keypairs in tests

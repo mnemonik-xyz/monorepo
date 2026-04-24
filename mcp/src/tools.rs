@@ -22,10 +22,11 @@ use mnemonic_core::storage::{self, SqliteStore, AttestationStore};
 
 use mnemonic_core::arweave::ArweaveClient;
 
+use mnemonic_core::solana::SolanaClient;
+
 use crate::{
     db,
     pricing::CostHint,
-    solana::SolanaClient,
 };
 
 /// Tool 1: whoami (sync — DB only)

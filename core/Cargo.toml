@@ -41,4 +41,4 @@ httpmock = "0.8"
 tempfile = "3"
 proptest = "1"
 criterion = "0.5"
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util"] }

@@ -4,7 +4,6 @@ mod lineage;
 mod mcp;
 mod payment;
 mod pricing;
-mod solana;
 mod tools;
 
 use std::sync::Arc;
@@ -16,7 +15,7 @@ use axum::{
     Json, Router,
 };
 use clap::Parser;
-use mnemonic_core::{arweave, compress, embed, identity, storage::SqliteStore};
+use mnemonic_core::{arweave, compress, embed, identity, solana, storage::SqliteStore};
 use serde::Deserialize;
 use solana_sdk::signer::Signer;
 
@@ -190,15 +189,14 @@ async fn deposit(
     Json(body): Json<DepositRequest>,
 ) -> Response {
     // Verify the on-chain USDC transfer and get the amount
-    let amount = match state
-        .solana
-        .verify_usdc_transfer(
-            &body.tx_sig,
-            &state.treasury_pubkey,
-            &state.usdc_mint,
-            1, // at least 1 micro-USDC
-        )
-        .await
+    let amount = match payment::verify_usdc_transfer(
+        &state.solana,
+        &body.tx_sig,
+        &state.treasury_pubkey,
+        &state.usdc_mint,
+        1, // at least 1 micro-USDC
+    )
+    .await
     {
         Ok(Some(a)) => a,
         Ok(None) => {

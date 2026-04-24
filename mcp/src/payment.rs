@@ -12,7 +12,8 @@ use axum::http::HeaderMap;
 use serde::{Deserialize, Serialize};
 
 use mnemonic_core::storage::SqliteStore;
-use crate::{db, solana::SolanaClient};
+use mnemonic_core::solana::SolanaClient;
+use crate::db;
 
 // ── x402 wire types ──────────────────────────────────────────────────────────
 
@@ -176,7 +177,7 @@ async fn check_x402(
     };
 
     // Verify the Solana USDC transfer
-    match solana.verify_usdc_transfer(&proof.tx_sig, treasury, usdc_mint, cost as u64).await {
+    match verify_usdc_transfer(solana, &proof.tx_sig, treasury, usdc_mint, cost as u64).await {
         Ok(Some(_)) => {}
         Ok(None) => return PaymentGate::Unauthorized(
             format!("x402 payment not valid: tx {} does not transfer >= {cost} micro-USDC to treasury", proof.tx_sig)
@@ -209,4 +210,64 @@ fn x402_required(treasury: &str, usdc_mint: &str, cost: i64, description: &str) 
             description: description.to_string(),
         }],
     }
+}
+
+// ── USDC transfer verification ───────────────────────────────────────────────
+
+/// Verify that `tx_sig` transfers at least `min_amount` micro-USDC of `usdc_mint`
+/// to `recipient`.  Returns the actual amount transferred (>= min_amount) on
+/// success, or `Ok(None)` if the transfer is absent / insufficient.
+///
+/// This is a payment concern and lives here (not in `mnemonic_core::solana`):
+/// core knows chain primitives; the `USDC vs recipient` policy is mcp's.
+pub async fn verify_usdc_transfer(
+    client: &SolanaClient,
+    tx_sig: &str,
+    recipient: &str,
+    usdc_mint: &str,
+    min_amount: u64,
+) -> anyhow::Result<Option<u64>> {
+    let result = client.rpc("getTransaction", serde_json::json!([
+        tx_sig,
+        {"encoding": "jsonParsed", "commitment": "confirmed", "maxSupportedTransactionVersion": 0}
+    ])).await?;
+
+    if result.is_null() {
+        return Ok(None);
+    }
+
+    // Reject failed transactions
+    if !result["meta"]["err"].is_null() {
+        return Ok(None);
+    }
+
+    // Walk postTokenBalances looking for recipient + mint with increased balance
+    let pre = result["meta"]["preTokenBalances"].as_array();
+    let post = result["meta"]["postTokenBalances"].as_array();
+
+    if let (Some(pre_balances), Some(post_balances)) = (pre, post) {
+        for post_entry in post_balances {
+            let owner = post_entry["owner"].as_str().unwrap_or("");
+            let mint  = post_entry["mint"].as_str().unwrap_or("");
+            if owner != recipient || mint != usdc_mint {
+                continue;
+            }
+            let post_amount: u64 = post_entry["uiTokenAmount"]["amount"]
+                .as_str().unwrap_or("0").parse().unwrap_or(0);
+
+            let account_index = post_entry["accountIndex"].as_u64().unwrap_or(u64::MAX);
+            let pre_amount: u64 = pre_balances.iter()
+                .find(|e| e["accountIndex"].as_u64() == Some(account_index))
+                .and_then(|e| e["uiTokenAmount"]["amount"].as_str())
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0);
+
+            let delta = post_amount.saturating_sub(pre_amount);
+            if delta >= min_amount {
+                return Ok(Some(delta));
+            }
+        }
+    }
+
+    Ok(None)
 }
