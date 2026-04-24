@@ -15,6 +15,9 @@ use crate::{pricing::PricingEngine, tools};
 /// JSON-RPC 2.0 request.
 #[derive(Debug, Deserialize)]
 pub struct JsonRpcRequest {
+    /// JSON-RPC protocol version — deserialized so callers must supply it, but
+    /// we do not branch on the value (we always respond with "2.0").
+    #[allow(dead_code)]
     pub jsonrpc: String,
     pub id: Value,
     pub method: String,
@@ -81,7 +84,7 @@ fn tool_definitions() -> Value {
         },
         {
             "name": "mnemonic_sign_memory",
-            "description": "Creates a verifiable memory attestation: embeds content, SHA-256 hash, stores on Arweave, anchors on Solana via SPL Memo",
+            "description": "Creates a verifiable memory attestation: canonical CBOR + blake3 hash, signed with COSE_Sign1 (Ed25519), stored on Arweave, hash anchored as SPL Memo on Solana",
             "inputSchema": {
                 "type": "object",
                 "properties": {
