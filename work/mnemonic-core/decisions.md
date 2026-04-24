@@ -166,6 +166,23 @@ Review details — in JSON files via links. QA report — in logs/working/.
 - `cargo clippy -p mnemonic-core --all-targets -- -D warnings` -> clean (tests + benches)
 - `cargo bench -p mnemonic-core --no-run` -> both bench binaries compiled
 
+**Round 2 (after review):**
+
+Addressed findings from `code-reviewer-round1.json` (approved; 2 nits + 1 minor) and `test-reviewer-round1.json` (changes-requested; 1 major + 2 minor + 1 nit).
+
+- **MAJOR (test-reviewer) / minor (code-reviewer) — `bench_cose_sign` vs `bench_full_pipeline` redundancy:** Chose **option (b)** — extracted a new `#[doc(hidden)] pub fn sign_cose(canonical_cbor: &[u8], keypair: &Keypair) -> Result<Vec<u8>, String>` in `core/src/codec/sign.rs` that performs only the COSE_Sign1 build + Ed25519 sign + serialize step. Refactored `sign_artifact` to call the new primitive (pure extraction; behavior unchanged, all existing sign tests still pass). Updated `bench_cose_sign` to pre-compute canonical CBOR once outside `b.iter()` and call `sign_cose` inside, so it now isolates the COSE stage. `bench_full_pipeline` still exercises the full `sign_artifact` chain, and the two groups now measure distinct stages.
+- **MINOR (test-reviewer) — `test_cbor_is_smaller_than_json` slack:** Replaced `<= json_bytes.len() + 50` with strict `< json_bytes.len()`. The assertion still holds for the test payload (JSON > CBOR because of quote/colon/comma removal + `created_at` encoded as CBOR tag-1 epoch integer). Added a comment explaining the source of the size reduction.
+- **MINOR (test-reviewer) — asymmetric bench sizes [100,500,2000,10000] vs [100,500,2000]:** Added an explicit comment in `bench_full_pipeline` (and a cross-reference in `bench_cose_sign`) stating that 10000B is excluded intentionally because COSE serialization dominates at that size and the canonicalization + hash benches already cover 10000B in isolation.
+- **NIT (code-reviewer) — black_box both args in `bench_cbor_canonicalization`:** Wrapped `&MEMORY_V1` in `black_box` alongside `&artifact`. Also wrapped `&kp` and `&MEMORY_V1` in `black_box` in `bench_full_pipeline` and `bench_cose_sign` for consistency.
+- **NIT (code-reviewer) — disjoint-ranges comment in `different_content_different_hash`:** Added the one-line comment `// Ranges [a-z] and [A-Z] are disjoint; content_a and content_b can never be equal.`
+- **NIT (test-reviewer) — `hash_is_deterministic` low coverage:** Chose to **replace** rather than delete. The test is now `sign_artifact_content_hash_matches_blake3_of_canonical_cbor`: a proptest that calls `sign_artifact`, asserts the recorded `content_hash` equals `blake3(signed.canonical_cbor)`, and cross-checks against an independent canonicalization. This wires the canonical codec, hash layer, and sign pipeline together — a true behavioral assertion not covered by the other two proptests.
+
+**Round 2 verification:**
+- `cargo test -p mnemonic-core` -> 75 unit + 5 integration + 3 proptest = 83 passed (same count, stronger proptest)
+- `cargo clippy -p mnemonic-core --all-targets -- -D warnings` -> clean
+- `cargo bench -p mnemonic-core --no-run` -> both bench binaries compiled
+- `cargo build -p mnemonic-mcp` -> success
+
 ## Task 9: Extract lineage module + cleanup
 
 **Status:** Done

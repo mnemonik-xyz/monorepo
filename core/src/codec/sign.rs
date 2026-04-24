@@ -33,7 +33,26 @@ pub fn sign_artifact(
 ) -> Result<SignedArtifact, String> {
     let canonical_cbor = to_canonical_cbor(artifact, schema)?;
     let content_hash = hash_bytes(&canonical_cbor);
+    let cose_bytes = sign_cose(&canonical_cbor, keypair)?;
 
+    Ok(SignedArtifact {
+        cose_bytes,
+        content_hash,
+        canonical_cbor,
+    })
+}
+
+/// Build and sign a COSE_Sign1 structure around pre-computed canonical CBOR bytes.
+///
+/// This is the COSE-only step of the sign pipeline: it takes already-canonicalized
+/// payload bytes and returns the serialized COSE_Sign1. Callers are responsible
+/// for canonicalizing/hashing the payload beforehand.
+///
+/// Exposed primarily for benchmarks that need to isolate the COSE stage from
+/// canonicalization + hashing. Production callers should normally use
+/// [`sign_artifact`], which runs the full pipeline.
+#[doc(hidden)]
+pub fn sign_cose(canonical_cbor: &[u8], keypair: &Keypair) -> Result<Vec<u8>, String> {
     // Protected header: algorithm = EdDSA, content_type = application/cbor
     let protected = HeaderBuilder::new()
         .algorithm(iana::Algorithm::EdDSA)
@@ -50,7 +69,7 @@ pub fn sign_artifact(
     let unsigned = CoseSign1Builder::new()
         .protected(protected.clone())
         .unprotected(unprotected.clone())
-        .payload(canonical_cbor.clone())
+        .payload(canonical_cbor.to_vec())
         .build();
 
     // Compute Sig_structure (the bytes to sign per RFC 9052 S4.4)
@@ -63,18 +82,12 @@ pub fn sign_artifact(
     let signed = CoseSign1Builder::new()
         .protected(protected)
         .unprotected(unprotected)
-        .payload(canonical_cbor.clone())
+        .payload(canonical_cbor.to_vec())
         .signature(signature.as_ref().to_vec())
         .build();
 
-    let cose_bytes = signed.to_vec()
-        .map_err(|e| format!("COSE serialization failed: {e}"))?;
-
-    Ok(SignedArtifact {
-        cose_bytes,
-        content_hash,
-        canonical_cbor,
-    })
+    signed.to_vec()
+        .map_err(|e| format!("COSE serialization failed: {e}"))
 }
 
 /// Verification result.
