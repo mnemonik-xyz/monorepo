@@ -228,6 +228,20 @@ Addressed findings from `code-reviewer-round1.json`, `security-auditor-round1.js
 - `cargo clippy --workspace --all-targets -- -D warnings` → clean
 - New tests: `refund_balance_allows_duplicate_reasons`, `credit_deposit_concurrent_same_tx_sig_applies_once`, `deduct_balance_concurrent_cannot_overdraw`, `deduct_balance_insufficient_leaves_balance_unchanged`, `deduct_balance_unknown_key_reports_not_found`, `credit_deposit_sequential_duplicate_is_rejected`
 
+**Round 3 (after review):**
+
+Addressed findings from `code-reviewer-round2.json` and `security-auditor-round2.json`:
+
+- **MAJOR (code-reviewer + security-auditor) — `deduct_balance` audit-trail INSERT not atomic with balance decrement:** Wrapped the balance UPDATE and the `payment_events` charge INSERT in `BEGIN IMMEDIATE` / `COMMIT`, matching the transaction discipline of `credit_deposit` and `refund_balance`. If `changes() == 0` (unknown key or insufficient balance), the transaction rolls back and we call the read-only `get_balance` to produce the precise user-visible error. If the INSERT fails (disk full, constraint error), the ROLLBACK reverts the decrement so the balance and ledger stay consistent. Added unit test `deduct_balance_audit_insert_failure_rolls_back_balance`: installs a BEFORE-INSERT trigger on `payment_events` that RAISEs ABORT for charge rows whose description equals `'__FORCE_FAIL__'`; seeds 500, attempts a 100-deduct with the sentinel description, asserts (1) the call errors, (2) the balance remains 500, (3) no charge row was written, and (4) after dropping the trigger, a subsequent normal deduct still works end-to-end (store is not stuck in a half-transaction state).
+- **MINOR (code-reviewer + security-auditor) — missing WAL + busy_timeout pragmas:** Added `PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;` to `SqliteStore::open` (file-backed). WAL lets concurrent readers (the pricing refresher) overlap with payment writers instead of blocking at the database level. `busy_timeout=5000` makes a losing `BEGIN IMMEDIATE` queue for up to 5s rather than returning `SQLITE_BUSY` immediately (rusqlite default is 0ms), which also stabilizes `credit_deposit_concurrent_same_tx_sig_applies_once` so the loser consistently sees `ConstraintViolation` ("deposit tx already applied") rather than a busy error. `SqliteStore::in_memory` sets only `busy_timeout=5000` (WAL is meaningless in memory).
+- **MINOR (security-auditor) — partial UNIQUE index migration safety on legacy DBs — chose option (a), automatic in-place dedup:** Reasoning: option (a) is the safer choice because it removes any operator-visible failure mode on upgrade. An operator who upgrades the binary and restarts without reading the release notes would otherwise see `SQLITE_CONSTRAINT` and a server that refuses to start. Automating the cleanup eliminates that footgun at the cost of ~10 lines of SQL. Implementation: moved `CREATE UNIQUE INDEX IF NOT EXISTS uq_payment_events_tx_sig` out of the `SCHEMA` const and into a new `migrate_payment_events_unique_index(&conn)` helper that runs after `SCHEMA` on both `open()` and `in_memory()`. The helper wraps everything in a single `BEGIN IMMEDIATE` / `COMMIT` and (1) DELETEs duplicate non-NULL `tx_sig` rows keeping the earliest per signature (`rowid NOT IN (SELECT MIN(rowid) ... GROUP BY tx_sig)`), then (2) creates the partial UNIQUE index. Idempotent: on fresh or clean DBs the DELETE is a no-op and `CREATE ... IF NOT EXISTS` is cheap. Legacy DBs with dupes from the pre-fix TOCTOU path get a one-shot cleanup before the index is applied, so the server starts cleanly on the first upgraded restart.
+
+**Round 3 verification:**
+- `cargo build --workspace` → Finished (0 errors)
+- `cargo test --workspace` → 75 mnemonic-core unit + 5 integration + 3 proptest + 7 mnemonic-mcp payment (1 new) = 90 passed
+- `cargo clippy --workspace --all-targets -- -D warnings` → clean
+- New test: `deduct_balance_audit_insert_failure_rolls_back_balance` (trigger-based INSERT failure + rollback assertion)
+
 ## Task 9: Extract lineage module + cleanup
 
 **Status:** Done
