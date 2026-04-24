@@ -3,7 +3,14 @@ use std::path::PathBuf;
 #[derive(Clone)]
 pub struct Config {
     pub transport: String,
+    /// Populated from MCP_HTTP_HOST. The CLI `--host` flag overrides this at
+    /// runtime; kept in `Config` for symmetry with the HTTP port and so that
+    /// external consumers (tests, future handlers) can read the env value
+    /// without re-parsing. See `main.rs::run_http` for the live binding.
+    #[allow(dead_code)]
     pub http_host: String,
+    /// See `http_host` — mirrors MCP_HTTP_PORT for env-level inspection.
+    #[allow(dead_code)]
     pub http_port: u16,
     pub solana_rpc_url: String,
     pub arweave_url: String,
