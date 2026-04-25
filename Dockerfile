@@ -8,7 +8,7 @@ COPY Cargo.toml Cargo.lock* ./
 COPY core/ core/
 COPY mcp/ mcp/
 
-RUN cargo build --release -p mnemonic-mcp
+RUN cargo build --release -p mnemonic-mcp --features local-embed
 
 FROM debian:bookworm-slim
 

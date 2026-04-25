@@ -1,4 +1,4 @@
-FROM ollama/ollama:0.6 AS model-puller
+FROM ollama/ollama:0.21.2 AS model-puller
 
 # Pre-pull the model at build time (Decision 11).
 # Start the server in the background, pull the model, then stop.
@@ -9,7 +9,7 @@ RUN ollama serve & \
     kill $SERVER_PID && \
     wait $SERVER_PID 2>/dev/null || true
 
-FROM ollama/ollama:0.6
+FROM ollama/ollama:0.21.2
 
 # Copy pre-pulled model data from builder stage
 COPY --from=model-puller /root/.ollama /root/.ollama
