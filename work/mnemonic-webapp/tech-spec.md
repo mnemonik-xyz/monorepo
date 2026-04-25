@@ -102,34 +102,67 @@ Browser (React webapp)
 **Alternatives considered:** Separate static hosting (Cloudflare Pages) + VPS for backend -- adds complexity for no MVP benefit.
 
 ### Decision 7: Pre-built artifact served as static file
-**Decision:** Generate the `.zip` artifact (Markdown + JSON sidecar) during the seeding step. Save to disk. `GET /download-knowledge` serves the file directly. No runtime SQLite queries.
+**Decision:** Generate the `.zip` artifact (Markdown + JSON sidecar) during the seeding step. Save to disk. `GET /download-knowledge` serves the file directly. No runtime SQLite queries. Artifact `.md` YAML frontmatter must include fields: `content_hash`, `signer_pubkey`, `timestamp`. Artifact `.json` sidecar includes same fields plus `arweave_tx` (or `local:*` in local mode). Artifact path is resolved to an absolute canonical path at startup and stored in `McpState` -- handler serves only that file, never a user-supplied filename.
 **Rationale:** The artifact content is static (whitepaper doesn't change at runtime). Serving a pre-built file is simpler and faster than dynamically assembling from database. Supports US-2 (download artifact).
 **Alternatives considered:** Dynamic assembly from SQLite -- rejected because it requires a `find_by_tag()` method not in current storage trait, and content is static anyway.
+
+### Decision 8: OLLAMA_URL whitelist validation + no-redirect HTTP client
+**Decision:** Validate `OLLAMA_URL` at startup -- must match `http://localhost:*` or `http://ollama:*`. Reject any other URL with a fatal error. The `reqwest::Client` used for Ollama calls must be configured with `redirect(Policy::none())` to prevent SSRF via redirects. `[TECHNICAL]`
+**Rationale:** OLLAMA_URL is read from env var. If misconfigured or tampered with, the MCP server becomes an SSRF vector against the Docker-internal network. Whitelist + no-redirect eliminates this risk.
+**Alternatives considered:** No validation -- rejected due to SSRF risk.
+
+### Decision 9: Chat API error response schema
+**Decision:** All `/chat` error responses follow the format `{"error": "<message>", "code": "<error_code>"}`. Codes: `rate_limited` (429), `invalid_input` (400), `service_unavailable` (503), `internal_error` (500). Supports US-4 (rate limit/error messages). `[TECHNICAL]`
+**Rationale:** Structured error responses enable the React frontend to display appropriate user-facing messages per UX guidelines.
+**Alternatives considered:** Plain text errors -- rejected because frontend needs to parse error types for different UI states.
+
+### Decision 10: Prompt injection mitigation
+**Decision:** The system prompt explicitly instructs the model to ignore any instructions embedded in user messages. User message is placed in a clearly delimited section (`[USER_QUERY]...[/USER_QUERY]`). No HTML/JS content from user reaches the DOM without sanitization. `[TECHNICAL]`
+**Rationale:** Without prompt-delimiter escaping, a crafted message could hijack the system prompt and bypass topic restrictions.
+**Alternatives considered:** Full input sanitization/stripping -- rejected as too aggressive for legitimate technical questions about the protocol.
+
+### Decision 11: Ollama model pull strategy
+**Decision:** Use a custom Ollama Dockerfile that pulls `qwen2.5:3b` at build time (`ollama pull qwen2.5:3b` in a build script). The compose entrypoint issues a warm-up inference request before accepting traffic. `[TECHNICAL]`
+**Rationale:** The official Ollama Docker image ships without any model. Without pre-pulling, first `docker compose up` fails or has a multi-minute delay downloading 2GB+ model.
+**Alternatives considered:** Pull at runtime in entrypoint -- slower first start but simpler. Noted as acceptable fallback.
+
+### Decision 12: SSL/TLS via Let's Encrypt
+**Decision:** Use certbot with nginx plugin for SSL certificate provisioning. The nginx service handles TLS termination. Certificate renewal runs as a cron job inside the nginx container (or a sidecar certbot container). `[TECHNICAL]`
+**Rationale:** HTTPS is required for production. Let's Encrypt is free and automated.
+**Alternatives considered:** Cloudflare proxy for SSL -- adds a dependency; manual certs -- doesn't auto-renew.
+
+### Decision 13: Block /admin/stats at nginx level
+**Decision:** nginx config does NOT proxy `/admin/stats` to the MCP server. Only `/mcp`, `/chat`, `/download-knowledge`, and `/health` are proxied. `[TECHNICAL]`
+**Rationale:** `/admin/stats` exposes pricing/revenue data. With CORS wildcard on the MCP server, it would be browser-accessible from any origin. Blocking at nginx is the simplest fix.
+**Alternatives considered:** Add auth header check on `/admin/stats` -- more complex, unnecessary for MVP.
 
 ## Testing Strategy
 
 **Size L -- full test pyramid.**
 
 **Unit tests (Rust):**
-- `/chat` handler with mocked Ollama + mocked recall (reqwest mock + injected recall results)
-- Seed module: whitepaper parsing, chunk splitting, artifact generation (verify .md/.json structure)
-- Rate limiter: injectable counter, verify 429 after threshold
-- Input validation: message > 2000 chars returns 400
+- `/chat` handler with mocked Ollama (httpmock) + mocked recall: success path, Ollama timeout/error → 503, empty recall results → graceful degradation
+- Seed module: whitepaper parsing, chunk splitting (including h3 sub-split for large sections, empty section edge case), artifact generation (verify .md YAML frontmatter contains content_hash/signer_pubkey/timestamp, .json structure valid)
+- Seed idempotency: second call with count() > 0 skips without error
+- Rate limiter: injectable clock/counter (not timing-dependent), verify 429 after threshold
+- Input validation: message > 2000 chars → 400, exactly 2000 chars → 200, empty message → 400, missing message field → 400
+- Download handler: artifact exists → 200 with zip, artifact missing → 404
 
 **Unit tests (React):**
-- Chat component: message send/receive, session counter, limit enforcement
+- Chat component: message send/receive, session counter, limit enforcement at 50, retry on error (2-3 attempts with backoff)
 - Landing page: renders protocol description, "Start chat" button
 - Download button: triggers correct URL
 
 **Integration tests (Rust):**
-- Full RAG pipeline: seed whitepaper → recall query → verify relevant content returned
-- Rate limit: 11 curl requests → 429 on 11th
+- Full RAG pipeline: seed whitepaper → recall query "What are the 5 MCP tools?" → verify response contains all five tool names
+- Rate limit: pre-saturated governor bucket, next request returns 429 (deterministic, no timing dependency)
+- Ollama error propagation: mock Ollama returning 500 → chat handler returns 503 with structured error JSON
 
 **E2E tests (Playwright):**
 - Golden path: open site → click "Start chat" → send question → receive answer → download artifact
-- Out-of-scope question: ask irrelevant question → get rejection
-- Session limit: send 50 messages → see limit notification
-- Error state: stop Ollama → send request → see error message
+- Out-of-scope question: ask irrelevant question → get rejection message
+- Session limit: inject initial counter state at 49, send 1 message → see limit notification (avoids 50 real round-trips)
+- Error state: stop Ollama → send request → see error message after retry
 
 ## Agent Verification Plan
 
@@ -167,45 +200,29 @@ Implement `mcp/src/seed.rs`: parse whitepaper by `##` headers, call `sign_memory
 - Files to create: `mcp/src/seed.rs`
 - Files to read: `mcp/src/tools.rs` (sign_memory), `docs/WHITEPAPER.md`
 
-### Wave 2: Backend -- Chat & Download Endpoints
+### Wave 2: Backend -- Chat Endpoint
 
-**Task 3: POST /chat endpoint with RAG + Ollama**
-Implement `mcp/src/chat.rs`: validate message length (max 2000 → 400), recall top-3 chunks, build prompt (system instruction + context + user message), POST to Ollama `/api/generate` with `stream: false`, return `{"response": "..."}`. Add route to axum Router in `main.rs`.
+**Task 3: POST /chat endpoint with RAG + Ollama + rate limiting + download endpoint**
+Implement chat handler, rate limiting, and download endpoint. Chat handler: validate input, recall top-3 chunks, build prompt with system instruction and delimited user query, call Ollama, return structured response/error JSON. Rate limit via governor (10 req/min per IP on /chat only). Download handler serves pre-built .zip artifact. Add all three routes to axum Router.
 
 - Skill: `code-writing`
 - Reviewers: `code-reviewer`, `security-auditor`
 - Verify-smoke: `curl -X POST http://localhost:3000/chat -d '{"message":"What is Mnemonic?","session_id":"t"}'` returns relevant answer
-- Files to modify: `mcp/src/main.rs`
+- Files to modify: `mcp/src/main.rs`, `mcp/Cargo.toml`
 - Files to create: `mcp/src/chat.rs`
 - Files to read: `mcp/src/tools.rs` (recall), `mcp/src/mcp.rs` (McpState)
 
-**Task 4: Rate limiting on /chat**
-Add `governor` + `tower_governor` to `mcp/Cargo.toml`. Apply rate-limit middleware (10 req/min per IP) to `/chat` route only. Return HTTP 429 with JSON body when exceeded.
+### Wave 3: Frontend -- React Webapp (sequential: Task 4 first, then 5+6 parallel)
 
-- Skill: `code-writing`
-- Reviewers: `code-reviewer`
-- Verify-smoke: 11 rapid curl requests to `/chat` → last returns 429
-- Files to modify: `mcp/src/main.rs`, `mcp/Cargo.toml`
-
-**Task 5: GET /download-knowledge endpoint**
-Serve the pre-built `.zip` artifact from disk. Return 404 if artifact not yet generated (seeding hasn't run). Set `Content-Type: application/zip` and `Content-Disposition: attachment`.
-
-- Skill: `code-writing`
-- Reviewers: `code-reviewer`
-- Verify-smoke: `curl -o knowledge.zip http://localhost:3000/download-knowledge && unzip -l knowledge.zip`
-- Files to modify: `mcp/src/main.rs`
-
-### Wave 3: Frontend -- React Webapp
-
-**Task 6: Initialize webapp project (React + Vite + Tailwind)**
-Create `webapp/` directory with Vite + React + TypeScript + Tailwind CSS. Configure dark theme colors from UX guidelines (#0A0F1E, #00D4B4, #9945FF). Add Playwright as dev dependency.
+**Task 4: Initialize webapp project (React + Vite + Tailwind)**
+Scaffold webapp/ with Vite + React + TypeScript + Tailwind CSS. Configure dark theme colors from UX guidelines. Add Playwright as dev dependency.
 
 - Skill: `infrastructure-setup`
 - Reviewers: `code-reviewer`
 - Files to create: `webapp/package.json`, `webapp/vite.config.ts`, `webapp/tailwind.config.js`, `webapp/src/`, `webapp/playwright.config.ts`
 
-**Task 7: Landing page**
-React landing page component with protocol description (static copy based on whitepaper abstract), "Start chat" button, and "Download protocol knowledge" button (always visible). Dark theme, responsive layout.
+**Task 5: Landing page**
+Landing page component with protocol description, "Start chat" button, and "Download protocol knowledge" button (always visible). Dark theme, responsive layout.
 
 - Skill: `code-writing`
 - Reviewers: `code-reviewer`
@@ -213,27 +230,27 @@ React landing page component with protocol description (static copy based on whi
 - Files to modify: `webapp/src/App.tsx`
 - Files to create: `webapp/src/components/LandingPage.tsx`
 
-**Task 8: Chat interface**
-Chat component with message list, input field, send button. Session counter (useState, max 50). Auto-retry on error (2-3 attempts). Error/limit messages per UX guidelines. Calls `POST /chat` on backend.
+**Task 6: Chat interface**
+Chat component with message list, input field, send button. Client-side session counter (max 50) with auto-retry on error (2-3 attempts, exponential backoff). Structured error display per UX guidelines. Calls `POST /chat` on backend.
 
 - Skill: `code-writing`
 - Reviewers: `code-reviewer`
-- Verify-user: Open chat, send a question about the protocol, verify answer appears. Send 50 messages, verify limit shown.
+- Verify-user: Open chat, send a question about the protocol, verify answer appears.
 - Files to create: `webapp/src/components/ChatPage.tsx`, `webapp/src/lib/api.ts`
 
-### Wave 4: Infrastructure -- Docker Compose & Deploy
+### Wave 4: Infrastructure -- Docker Compose & E2E
 
-**Task 9: Docker Compose + nginx config**
-Create `docker-compose.yml` with three services: nginx (serves static React build + reverse proxy to MCP), mcp (existing Dockerfile), ollama (official image with Qwen2.5-3B). Create `nginx.conf` for static serving + proxy. Add Ollama warm-up health check. Mount keypair as read-only volume.
+**Task 7: Docker Compose + nginx config + Ollama model**
+Create `docker-compose.yml` with three services: nginx (static React build + reverse proxy, blocks /admin/stats), mcp (existing Dockerfile), ollama (custom Dockerfile that pre-pulls qwen2.5:3b). Create `nginx.conf` proxying only /mcp, /chat, /download-knowledge, /health. Warm-up health check on Ollama. Mount keypair as read-only volume (chmod 400).
 
 - Skill: `deploy-pipeline`
 - Reviewers: `code-reviewer`, `security-auditor`
 - Verify-smoke: `docker compose up -d && docker compose ps` shows 3 services healthy
-- Files to create: `docker-compose.yml`, `nginx.conf`
+- Files to create: `docker-compose.yml`, `nginx.conf`, `ollama/Dockerfile`
 - Files to read: `Dockerfile`
 
-**Task 10: Playwright E2E tests**
-E2E tests: golden path (landing → chat → answer → download), out-of-scope question rejection, session limit (50 messages), error state (Ollama down).
+**Task 8: Playwright E2E tests**
+E2E tests covering golden path, out-of-scope question rejection, session limit (inject counter at 49 to avoid 50 round-trips), and error state (Ollama down).
 
 - Skill: `code-writing`
 - Reviewers: `test-reviewer`
@@ -242,34 +259,34 @@ E2E tests: golden path (landing → chat → answer → download), out-of-scope 
 
 ### Wave 5: Audit
 
-**Task 11: Code Audit**
-Holistic code quality review of all new code (chat.rs, seed.rs, chat handler, React components, Docker config).
+**Task 9: Code Audit**
+Holistic code quality review of all new code (chat.rs, seed.rs, React components, Docker config).
 
 - Skill: `code-reviewing`
 - Reviewers: none
 
-**Task 12: Security Audit**
-OWASP Top 10 review: input validation, rate limiting, CORS, keypair handling, Ollama proxy, Docker security.
+**Task 10: Security Audit**
+OWASP Top 10 review: input validation, prompt injection mitigation, rate limiting, CORS, OLLAMA_URL whitelist, keypair handling, nginx proxy restrictions.
 
 - Skill: `security-auditor`
 - Reviewers: none
 
-**Task 13: Test Audit**
-Test quality and coverage: unit test adequacy, integration test coverage, E2E scenario completeness.
+**Task 11: Test Audit**
+Test quality and coverage: unit test adequacy (including edge cases), integration test determinism, E2E scenario completeness.
 
 - Skill: `test-master`
 - Reviewers: none
 
 ### Wave 6: Final
 
-**Task 14: Pre-deploy QA**
-Run full test suite, verify all acceptance criteria from user-spec. Produce structured QA report.
+**Task 12: Pre-deploy QA**
+Run full test suite, verify all acceptance criteria from user-spec including benchmark question ("What are the 5 MCP tools?" must return all five). Produce structured QA report.
 
 - Skill: `pre-deploy-qa`
 - Reviewers: none
 
-**Task 15: Deploy to justhost.asia**
-Deploy Docker Compose to VPS. Configure domain/SSL. Verify all endpoints work in production.
+**Task 13: Deploy to justhost.asia**
+Deploy Docker Compose to VPS. Configure domain + SSL via Let's Encrypt (certbot + nginx). Verify all endpoints work in production.
 
 - Skill: `deploy-pipeline`
 - Reviewers: none
@@ -278,4 +295,4 @@ Deploy Docker Compose to VPS. Configure domain/SSL. Verify all endpoints work in
 
 ## User-Spec Deviations
 
-None. All decisions align with user-spec requirements.
+**session_id field in /chat API:** User-spec specifies `POST /chat` accepts `session_id`. Tech-spec Decision 3 makes session tracking client-side only, so `session_id` is accepted but unused server-side. Kept for API forward-compatibility when server-side sessions are added later. `[ACCEPTED]`
