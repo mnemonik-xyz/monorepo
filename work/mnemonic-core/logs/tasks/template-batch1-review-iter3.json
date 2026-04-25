@@ -1,0 +1,60 @@
+{
+  "validator": "task-validator",
+  "batch": "1-iter3",
+  "iteration": 3,
+  "tasks": {
+    "7": {
+      "status": "approved",
+      "findings": [
+        {
+          "severity": "minor",
+          "category": "content",
+          "task": 7,
+          "section": "Verification Steps",
+          "issue": "NOT FIXED from iter-1/iter-2: `cargo build -p mnemonic-mcp` is absent from the Automated section. Acceptance Criteria explicitly checks this compilation step (step 13) and What to do step 9 requires it. Only `cargo test` and `cargo clippy` appear in Automated.",
+          "fix": "Add to Automated section: `cargo build -p mnemonic-mcp` — compiles successfully after import updates from local mod to mnemonic_core::arweave"
+        },
+        {
+          "severity": "minor",
+          "category": "content",
+          "task": 7,
+          "section": "Reviewers",
+          "issue": "NOT FIXED from iter-1/iter-2: Reviewer report paths use absolute filesystem paths (/home/claude/.openclaw/workspace/mnemonic-refactored/work/mnemonic-core/logs/working/task-7/...) instead of project-root-anchored paths. Absolute paths are machine-specific.",
+          "fix": "Replace with: work/mnemonic-core/logs/working/task-7/code-reviewer-1.json (and similarly for security-auditor-1.json and test-reviewer-1.json)"
+        }
+      ],
+      "focused_checks_verified": [
+        "upload_url field approach: ArweaveClient gains `upload_url: String` field set to 'https://uploader.irys.xyz/upload' in new(), used by write_irys(). new_for_test sets upload_url to '{base_url}/upload'. Correct — no force_irys field.",
+        "Write tests mock POST /upload: TDD Anchor (test_write_success, test_write_bytes_success, test_malformed_json_response) and What to do step 5 all specify POST /upload. 'POST /tx is only arlocal path' explicitly noted. Correct.",
+        "GET /info for health_check: TDD Anchor line documents 'mock serves GET /info -> 200', Details health_check section shows when.method(GET).path(\"/info\"). Correct.",
+        "GET /{tx_id} for read: TDD Anchor documents 'GET /{tx_id} from mock (actual path: no /tx/ prefix, no /data suffix)', Details read() section shows path(format!(\"/{}\", tx_id)). Correct.",
+        "POST /upload for write: all three write-path tests (write, write_bytes, malformed) use POST /upload via new_for_test. Correct.",
+        "No hardcoded mainnet URLs in test code: AC and Security constraints section both require Keypair::new() and ban irys.xyz in cfg(test) blocks. Correct."
+      ]
+    },
+    "14": {
+      "status": "approved",
+      "findings": [
+        {
+          "severity": "minor",
+          "category": "content",
+          "task": 14,
+          "section": "Reviewers",
+          "issue": "Reviewers section prose still says 'No reviewers for Audit Wave tasks (wave 12).' The label 'Audit Wave' was the old non-numeric wave name — the partial fix adds '(wave 12)' but leaves the stale label. Minor inconsistency; wave number is now correct.",
+          "fix": "Change to: 'No downstream reviewers — this is the security audit task itself.' This removes the stale 'Audit Wave' reference entirely."
+        }
+      ],
+      "focused_checks_verified": [
+        "Required Skills path: Line 15 is `[SKILL.md](~/.claude/skills/security-auditor/SKILL.md)` — tilde-anchored home directory path, NOT the workspace-local path. Critical finding from iter-2 is FIXED.",
+        "wave=12: frontmatter line 4 shows `wave: 12` — numeric integer, correct.",
+        "reviewers: [] in frontmatter: correct for audit task. Consistent with Reviewers section body.",
+        "skills: [security-auditor]: correct array format.",
+        "No TDD Anchor section: correct for analysis-only non-code task.",
+        "All mandatory context files present with markdown links: user-spec.md, tech-spec.md, decisions.md, project.md, architecture.md, patterns.md all present.",
+        "Verification Steps present with concrete grep commands and expected outputs.",
+        "Post-completion checklist present."
+      ]
+    }
+  },
+  "summary": "2 approved, 0 need fixes. Task 7: focused checks all pass — upload_url field approach (not force_irys) is correctly specified throughout the task; all three mock paths correct (GET /info, GET /{tx_id}, POST /upload); write tests mock POST /upload not POST /tx. Two minor carry-forward findings remain (reviewer absolute paths, missing cargo build in Automated) but no critical or major issues. Task 14: critical finding from iter-2 is confirmed fixed — Required Skills now points to ~/.claude/skills/security-auditor/SKILL.md (tilde path); wave=12 is correct. One residual minor finding: Reviewers section prose still references 'Audit Wave' label. Both tasks are clear for execution."
+}

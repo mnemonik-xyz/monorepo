@@ -1,0 +1,99 @@
+{
+  "validator": "reality-checker",
+  "batch": 3,
+  "iteration": 1,
+  "tasks_checked": [7, 8, 9],
+  "tasks": {
+    "7": {
+      "status": "needs_fix",
+      "findings": [
+        {
+          "severity": "critical",
+          "category": "hallucination",
+          "task": 7,
+          "section": "What to do / TDD Anchor / Details",
+          "issue": "Task says `health_check()` mocks `GET /`. Actual code in `arweave.rs` line 62 uses `GET {base_url}/info`. The mock path `/` will never be hit — the test will fail with a connection error or timeout.",
+          "fix": "Change the health_check mock path from `/` to `/info` in the test definition and TDD Anchor."
+        },
+        {
+          "severity": "critical",
+          "category": "hallucination",
+          "task": 7,
+          "section": "TDD Anchor / Details",
+          "issue": "Task says `read()` mocks `GET /tx/{id}/data`. Actual code in `arweave.rs` line 41 uses `GET {base_url}/{tx_id}` (no `/tx/` prefix, no `/data` suffix). The mock will not match any request.",
+          "fix": "Change the read mock path to `/{tx_id}` (or a wildcard like `/{id}`)."
+        },
+        {
+          "severity": "critical",
+          "category": "feasibility",
+          "task": 7,
+          "section": "What to do / TDD Anchor / Details",
+          "issue": "All httpmock tests use `ArweaveClient::new(&server.base_url())` where `server.base_url()` returns `http://127.0.0.1:{port}`. The `is_local()` check in `arweave.rs` line 70 returns `true` for any URL containing `127.0.0.1` or `localhost`, causing `write_bytes()` to call the `write_arlocal()` code path — which generates its own fake tx ID from a local PRNG and does NOT parse the mock server response body for the `id` field. The tests for `test_write_success`, `test_write_bytes_success`, and especially `test_malformed_json_response` are all based on the wrong code path. `test_write_success` will return a locally-generated ID (not `test-tx-id-123`), making `assert_eq!(result.unwrap(), \"test-tx-id-123\")` fail. `test_malformed_json_response` will succeed (return `Ok`) instead of `Err` because `write_arlocal()` ignores the response body entirely on HTTP 200.",
+          "fix": "Either (a) override `is_local()` to be testable (e.g., add a `#[cfg(test)]` constructor that bypasses the localhost check), or (b) add an `irys_mode` flag to `ArweaveClient` so tests can force the Irys code path, or (c) use a non-localhost address in tests (not possible with httpmock's default behavior since it binds to 127.0.0.1). The cleanest fix is option (a): add `pub fn new_irys(base_url: &str) -> Self` that always uses `write_irys` regardless of URL, and use that constructor in tests for write/write_bytes scenarios. The arlocal test path should have its own test using the `write_arlocal` behavior (no JSON response parsing)."
+        }
+      ]
+    },
+    "8": {
+      "status": "needs_fix",
+      "findings": [
+        {
+          "severity": "major",
+          "category": "tdd",
+          "task": 8,
+          "section": "TDD Anchor / Description / Acceptance Criteria",
+          "issue": "The Description says '~7 httpmock-based unit tests'. The TDD Anchor section lists 8 named tests (test_write_memo_success, test_read_memo_success, test_read_memo_not_found, test_airdrop_success, test_get_tx_signers, test_confirm_tx_retry_exhaustion, test_health_check_ok, test_rpc_error_handling). Acceptance Criteria say 'All 7+ httpmock tests pass'. The count mismatch between description (~7) and TDD Anchor (8 entries) will cause confusion about the expected deliverable.",
+          "fix": "Update the Description to say '~8 httpmock-based unit tests' and update the Acceptance Criteria to 'All 8 httpmock tests pass: cargo test -p mnemonic-core -- solana'."
+        },
+        {
+          "severity": "major",
+          "category": "feasibility",
+          "task": 8,
+          "section": "Details — Writing httpmock tests",
+          "issue": "`test_confirm_tx_retry_exhaustion` mocks `getSignatureStatuses` to always return null, causing `confirm_tx()` to exhaust 30 retries at 500ms each. The task acknowledges '~15 seconds' duration but leaves resolution vague: 'consider using `#[tokio::test]` and accepting the delay, or testing the error path differently'. A 15-second unit test is a CI concern. The implementation hints are contradictory: `#[tokio::test]` is already required for all solana tests (async); it doesn't help reduce the 15s. The suggested alternative 'return an error status directly instead of null' would need different mock setup. The task does not prescribe a concrete solution.",
+          "fix": "Make the hint concrete: use `#[tokio::test(flavor = \"current_thread\", start_paused = true)]` with `tokio::time::pause()` so that `tokio::time::sleep` advances instantly. This is the standard approach for testing timeout/retry loops. Add this pattern explicitly to the test detail for `test_confirm_tx_retry_exhaustion`. Alternatively, reduce the retry mock to 2-3 iterations with a reduced sleep (passing a `max_retries` parameter), but that requires changing the source code."
+        }
+      ]
+    },
+    "9": {
+      "status": "needs_fix",
+      "findings": [
+        {
+          "severity": "critical",
+          "category": "missing_function",
+          "task": 9,
+          "section": "What to do step 6 / Acceptance Criteria / Details",
+          "issue": "Task step 6 says 'Update `mcp/src/tools.rs` to change all `use crate::lineage::` imports to `use mnemonic_core::lineage::`'. Actual codebase inspection shows `mcp/src/tools.rs` has ZERO lineage imports or calls — lineage is only declared via `mod lineage;` in `mcp/src/main.rs` and never called from tools.rs. The tools.rs file does not contain `use crate::lineage::` anywhere. The acceptance criterion '`mcp/src/tools.rs` uses `mnemonic_core::lineage::Direction` enum, not string literals' is therefore impossible to satisfy as written.",
+          "fix": "Replace 'Update `mcp/src/tools.rs`...' with 'Update `mcp/src/main.rs`: remove `mod lineage;` declaration and add `use mnemonic_core::lineage;` if lineage is initialized there. Also update the acceptance criterion to reference `main.rs` instead of `tools.rs`."
+        },
+        {
+          "severity": "critical",
+          "category": "hallucination",
+          "task": 9,
+          "section": "What to do step 3 / TDD Anchor",
+          "issue": "Task specifies Direction enum variants as `Direction::Forward` and `Direction::Backward`. The actual direction strings in `lineage.rs` are `\"ancestors\"`, `\"descendants\"`, and `\"both\"` (verified at lines 206, 220, 354). Two variants `Forward`/`Backward` do not map to the three operational values. The TDD Anchor `test_traverse_direction_enum` calls `traverse_lineage` with `Direction::Forward` and asserts `result.direction == Direction::Forward` — but \"ancestors\" is the actual concept, not \"forward\". Using only two variants loses the `\"both\"` traversal case.",
+          "fix": "Define the Direction enum with three variants matching the actual semantics: `pub enum Direction { Ancestors, Descendants, Both }`. Update all references in the task from `Direction::Forward`/`Direction::Backward` to `Direction::Ancestors`/`Direction::Descendants`, and include `Direction::Both`. The TDD Anchor test should use `Direction::Ancestors`. The Details section 'Replace any `direction: \"forward\".to_string()`' should be 'Replace any `direction: \"ancestors\".to_string()`'."
+        },
+        {
+          "severity": "major",
+          "category": "hints",
+          "task": 9,
+          "section": "Details — core/Cargo.toml",
+          "issue": "`rusqlite = { version = \"0.31\", features = [\"bundled\"] }` is specified in Task 9. The actual project `mcp/Cargo.toml` uses `rusqlite = { version = \"0.34\", features = [\"bundled\"] }` and the local cargo registry contains only rusqlite 0.34.0. Version 0.31 is outdated relative to the existing codebase. Using a mismatched version could cause resolution conflicts or introduce unintended API differences.",
+          "fix": "Change to `rusqlite = { version = \"0.34\", features = [\"bundled\"] }` to match the existing project dependency."
+        }
+      ]
+    }
+  },
+  "cross_task_findings": [],
+  "status": "changes_required",
+  "stats": {
+    "tasks_checked": 3,
+    "approved": 0,
+    "needs_fix": 3,
+    "issues_found": 7,
+    "critical": 5,
+    "major": 2,
+    "minor": 0
+  },
+  "summary": "0 approved, 3 need fixes. Task 7: 3 critical issues — health_check mocks wrong endpoint (/info not /), read mocks wrong path (no /tx/ prefix or /data suffix), and the is_local() branching makes all write/write_bytes httpmock tests exercise the wrong code path (arlocal instead of irys), breaking the write_success and malformed_json_response tests. Task 8: 1 major issue — test count inconsistency (8 TDD anchor entries vs '~7' description); 1 major feasibility issue — retry exhaustion test will take ~15 seconds without explicit tokio time-pause guidance. Task 9: 2 critical issues — tools.rs is the wrong target file (lineage lives only in main.rs); Direction enum needs 3 variants (Ancestors/Descendants/Both) not 2 (Forward/Backward). 1 major issue — rusqlite version 0.31 specified but project uses 0.34."
+}

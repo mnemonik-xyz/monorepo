@@ -1,0 +1,140 @@
+{
+  "validator": "task-validator",
+  "batch": 3,
+  "iteration": 1,
+  "tasks_checked": [11, 12, 13, 14, 15],
+  "tasks": {
+    "11": {
+      "status": "approved",
+      "findings": [
+        {
+          "severity": "minor",
+          "category": "content",
+          "task": 11,
+          "section": "TDD Anchor",
+          "issue": "TDD Anchor entries use cargo CLI commands (`cargo build -p mnemonic-mcp`, `cargo test --workspace`) instead of the required format `tests/path::test_name — description`. The section heading is present for a code task but contains no test path entries.",
+          "fix": "Either remove the TDD Anchor section (since this task introduces no new test logic — it is an import cleanup pass) and add a note that the compile+test chain serves as the anchor, OR keep only entries that map to actual test functions in the codebase. For a pure rewiring task with no new tests, deletion is cleaner."
+        },
+        {
+          "severity": "minor",
+          "category": "content",
+          "task": 11,
+          "section": "Reviewers",
+          "issue": "Reviewer paths use absolute filesystem paths (`/home/claude/.openclaw/workspace/mnemonic-refactored/work/mnemonic-core/logs/working/task-11/...`) rather than feature-path-anchored relative paths (`work/mnemonic-core/logs/working/task-11/...`). Absolute paths are machine-specific and will break in other environments.",
+          "fix": "Replace absolute paths with paths anchored to feature_path: `work/mnemonic-core/logs/working/task-11/code-reviewer-1.json`, etc."
+        }
+      ]
+    },
+    "12": {
+      "status": "needs_fix",
+      "findings": [
+        {
+          "severity": "critical",
+          "category": "content",
+          "task": 12,
+          "section": "Required Skills",
+          "issue": "The `documentation-writing` skill is listed in frontmatter `skills` but the Required Skills section links to the wrong SKILL.md. The path used is `/home/claude/.openclaw/workspace/mnemonic-refactored/.claude/skills/project-knowledge/SKILL.md` (project-knowledge skill), not the documentation-writing skill at `~/.claude/skills/documentation-writing/SKILL.md`.",
+          "fix": "Replace the SKILL.md link with: `/skill:documentation-writing` — [SKILL.md](/home/claude/.claude/skills/documentation-writing/SKILL.md)"
+        },
+        {
+          "severity": "minor",
+          "category": "content",
+          "task": 12,
+          "section": "Reviewers",
+          "issue": "Reviewer path uses absolute filesystem path (`/home/claude/.openclaw/workspace/mnemonic-refactored/work/mnemonic-core/logs/working/task-12/code-reviewer-1.json`) rather than feature-path-anchored path.",
+          "fix": "Use `work/mnemonic-core/logs/working/task-12/code-reviewer-1.json`."
+        }
+      ]
+    },
+    "13": {
+      "status": "needs_fix",
+      "findings": [
+        {
+          "severity": "critical",
+          "category": "frontmatter",
+          "task": 13,
+          "section": "Frontmatter",
+          "issue": "`wave` field value is the string `\"Audit Wave\"` instead of a number ≥ 1. The template requires `wave` to be a YAML integer.",
+          "fix": "Assign a numeric wave value. Since tasks 13/14/15 depend on tasks 11 and 12 (wave 11), the audit wave should be `wave: 13` (or another number greater than 11). Coordinate with tasks 14 and 15 to use the same number."
+        },
+        {
+          "severity": "minor",
+          "category": "content",
+          "task": 13,
+          "section": "Required Skills",
+          "issue": "Skill SKILL.md path uses a hardcoded absolute path (`/home/claude/.claude/skills/code-reviewing/SKILL.md`). While the path appears correct, absolute paths are environment-specific.",
+          "fix": "Use tilde-anchored path: `~/.claude/skills/code-reviewing/SKILL.md`."
+        }
+      ]
+    },
+    "14": {
+      "status": "needs_fix",
+      "findings": [
+        {
+          "severity": "critical",
+          "category": "frontmatter",
+          "task": 14,
+          "section": "Frontmatter",
+          "issue": "`wave` field value is the string `\"Audit Wave\"` instead of a number ≥ 1. The template requires `wave` to be a YAML integer.",
+          "fix": "Assign a numeric wave value consistent with tasks 13 and 15 (e.g., `wave: 13` if that is the audit wave number chosen)."
+        },
+        {
+          "severity": "minor",
+          "category": "content",
+          "task": 14,
+          "section": "Required Skills",
+          "issue": "Skill SKILL.md path uses absolute path. Not portable across environments.",
+          "fix": "Use tilde-anchored path: `~/.claude/skills/security-auditor/SKILL.md`."
+        }
+      ]
+    },
+    "15": {
+      "status": "needs_fix",
+      "findings": [
+        {
+          "severity": "critical",
+          "category": "frontmatter",
+          "task": 15,
+          "section": "Frontmatter",
+          "issue": "`wave` field value is the string `\"Audit Wave\"` instead of a number ≥ 1. The template requires `wave` to be a YAML integer.",
+          "fix": "Assign a numeric wave value consistent with tasks 13 and 14 (e.g., `wave: 13`)."
+        },
+        {
+          "severity": "minor",
+          "category": "content",
+          "task": 15,
+          "section": "Required Skills",
+          "issue": "Skill SKILL.md path uses absolute path. Not portable across environments.",
+          "fix": "Use tilde-anchored path: `~/.claude/skills/test-master/SKILL.md`."
+        }
+      ]
+    }
+  },
+  "cross_task_findings": [
+    {
+      "severity": "major",
+      "category": "decomposition",
+      "tasks": [13, 14, 15],
+      "issue": "All three audit tasks (13, 14, 15) declare `depends_on: [11, 12]` and use `wave: \"Audit Wave\"` — meaning they are intended to run in the same wave. Since they each read different file scopes and produce no code changes, running them in parallel is correct. However, the non-numeric wave value prevents automated wave scheduling. After fixing to a numeric wave value, ensure all three use the same number to preserve the intended parallelism.",
+      "fix": "Set `wave: 13` on tasks 13, 14, and 15. Confirm task 16 (Pre-deploy QA) has `wave: 14` (currently `wave: \"Final Wave\"` — also needs fixing, though outside this batch)."
+    },
+    {
+      "severity": "minor",
+      "category": "decomposition",
+      "tasks": [11, 12],
+      "issue": "Tasks 11 and 12 both have `wave: 11` and `depends_on: [10]`, which is correct for parallel execution. The Details section of task 12 notes that task 11 runs in the same wave but touches different files, which is valid. No merge or split recommendation needed.",
+      "fix": "No action required."
+    }
+  ],
+  "status": "changes_required",
+  "stats": {
+    "tasks_checked": 5,
+    "approved": 1,
+    "needs_fix": 4,
+    "issues_found": 10,
+    "critical": 4,
+    "major": 1,
+    "minor": 5
+  },
+  "summary": "1 approved (task 11), 4 need fixes (tasks 12, 13, 14, 15). Critical issues: wrong SKILL.md link in task 12 Required Skills; non-numeric `wave` field in tasks 13, 14, 15. Minor issues: TDD Anchor format in task 11; absolute reviewer paths in tasks 11-12; absolute SKILL.md paths in tasks 13-15."
+}

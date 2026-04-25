@@ -76,11 +76,16 @@ impl Config {
             treasury_pubkey: env_or("TREASURY_PUBKEY", ""),
             usdc_mint: env_or("USDC_MINT", "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"),
             sign_memory_cost_micro_usdc: env_or("SIGN_MEMORY_COST_MICRO_USDC", "1000")
-                .parse().unwrap_or(1000),
+                .parse()
+                .unwrap_or(1000),
             price_refresh_secs: env_or("PRICE_REFRESH_SECS", "1800").parse().unwrap_or(1800),
             pricing_margin_bps: env_or("PRICING_MARGIN_BPS", "2000").parse().unwrap_or(2000),
-            typical_payload_bytes: env_or("TYPICAL_PAYLOAD_BYTES", "2048").parse().unwrap_or(2048),
-            sol_tx_fee_lamports: env_or("SOL_TX_FEE_LAMPORTS", "5000").parse().unwrap_or(5000),
+            typical_payload_bytes: env_or("TYPICAL_PAYLOAD_BYTES", "2048")
+                .parse()
+                .unwrap_or(2048),
+            sol_tx_fee_lamports: env_or("SOL_TX_FEE_LAMPORTS", "5000")
+                .parse()
+                .unwrap_or(5000),
         }
     }
 }

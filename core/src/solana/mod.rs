@@ -2,12 +2,12 @@
 
 use anyhow::Context;
 use solana_sdk::{
+    hash::Hash,
     instruction::{AccountMeta, Instruction},
     message::Message,
     pubkey::Pubkey,
     signature::{Keypair, Signer},
     transaction::Transaction,
-    hash::Hash,
 };
 use std::str::FromStr;
 
@@ -26,7 +26,11 @@ impl SolanaClient {
         }
     }
 
-    pub async fn rpc(&self, method: &str, params: serde_json::Value) -> anyhow::Result<serde_json::Value> {
+    pub async fn rpc(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> anyhow::Result<serde_json::Value> {
         let body = serde_json::json!({
             "jsonrpc": "2.0", "id": 1, "method": method, "params": params
         });
@@ -46,9 +50,14 @@ impl SolanaClient {
             data: memo.as_bytes().to_vec(),
         };
 
-        let blockhash_result = self.rpc("getLatestBlockhash",
-            serde_json::json!([{"commitment": "confirmed"}])).await?;
-        let blockhash_str = blockhash_result["value"]["blockhash"].as_str()
+        let blockhash_result = self
+            .rpc(
+                "getLatestBlockhash",
+                serde_json::json!([{"commitment": "confirmed"}]),
+            )
+            .await?;
+        let blockhash_str = blockhash_result["value"]["blockhash"]
+            .as_str()
             .context("no blockhash")?;
         let blockhash = Hash::from_str(blockhash_str)?;
 
@@ -59,8 +68,12 @@ impl SolanaClient {
         let tx_bytes = bincode::serialize(&tx)?;
         let tx_b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &tx_bytes);
 
-        let result = self.rpc("sendTransaction",
-            serde_json::json!([tx_b64, {"encoding": "base64"}])).await?;
+        let result = self
+            .rpc(
+                "sendTransaction",
+                serde_json::json!([tx_b64, {"encoding": "base64"}]),
+            )
+            .await?;
         let sig = result.as_str().context("no tx signature")?.to_string();
 
         self.confirm_tx(&sig).await?;
@@ -85,7 +98,9 @@ impl SolanaClient {
                         if let (Some(start), Some(end)) = (s.find('"'), s.rfind('"')) {
                             if end > start {
                                 let memo_str = &s[start + 1..end];
-                                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(memo_str) {
+                                if let Ok(parsed) =
+                                    serde_json::from_str::<serde_json::Value>(memo_str)
+                                {
                                     return Ok(Some(parsed));
                                 }
                                 return Ok(Some(serde_json::json!({"raw": memo_str})));
@@ -99,8 +114,12 @@ impl SolanaClient {
     }
 
     pub async fn airdrop(&self, pubkey: &Pubkey, lamports: u64) -> anyhow::Result<String> {
-        let result = self.rpc("requestAirdrop",
-            serde_json::json!([pubkey.to_string(), lamports])).await?;
+        let result = self
+            .rpc(
+                "requestAirdrop",
+                serde_json::json!([pubkey.to_string(), lamports]),
+            )
+            .await?;
         let sig = result.as_str().context("no airdrop sig")?.to_string();
         self.confirm_tx(&sig).await?;
         Ok(sig)
@@ -140,8 +159,9 @@ impl SolanaClient {
 
     async fn confirm_tx(&self, sig: &str) -> anyhow::Result<()> {
         for _ in 0..30 {
-            let result = self.rpc("getSignatureStatuses",
-                serde_json::json!([[sig]])).await?;
+            let result = self
+                .rpc("getSignatureStatuses", serde_json::json!([[sig]]))
+                .await?;
             if let Some(statuses) = result["value"].as_array() {
                 if let Some(status) = statuses.first().and_then(|s| s.as_object()) {
                     if let Some(conf) = status.get("confirmationStatus").and_then(|c| c.as_str()) {
@@ -168,7 +188,8 @@ mod tests {
 
     // 32 zero bytes base58-encoded — a valid Hash value for testing.
     const ZERO_BLOCKHASH_B58: &str = "11111111111111111111111111111111";
-    const FAKE_SIG: &str = "5j7s6NiJS3JAkvgkoc18WVAsiSaci2pxB2A6ueCJP4tprA2TFg9wSyTLeYouxPBJEMzJinENTkpA52YStRW5Dia7";
+    const FAKE_SIG: &str =
+        "5j7s6NiJS3JAkvgkoc18WVAsiSaci2pxB2A6ueCJP4tprA2TFg9wSyTLeYouxPBJEMzJinENTkpA52YStRW5Dia7";
 
     fn mock_blockhash(server: &MockServer) {
         server.mock(|when, then| {
@@ -182,7 +203,8 @@ mod tests {
     fn mock_send_transaction(server: &MockServer, sig: &str) {
         server.mock(|when, then| {
             when.method(POST).path("/").body_includes("sendTransaction");
-            then.status(200).body(format!(r#"{{"jsonrpc":"2.0","id":1,"result":"{sig}"}}"#));
+            then.status(200)
+                .body(format!(r#"{{"jsonrpc":"2.0","id":1,"result":"{sig}"}}"#));
         });
     }
 
@@ -233,7 +255,8 @@ mod tests {
         let server = MockServer::start();
         server.mock(|when, then| {
             when.method(POST).path("/").body_includes("getTransaction");
-            then.status(200).body(r#"{"jsonrpc":"2.0","id":1,"result":null}"#);
+            then.status(200)
+                .body(r#"{"jsonrpc":"2.0","id":1,"result":null}"#);
         });
 
         let client = SolanaClient::new(&server.base_url());
@@ -246,7 +269,9 @@ mod tests {
         let server = MockServer::start();
         server.mock(|when, then| {
             when.method(POST).path("/").body_includes("requestAirdrop");
-            then.status(200).body(format!(r#"{{"jsonrpc":"2.0","id":1,"result":"{FAKE_SIG}"}}"#));
+            then.status(200).body(format!(
+                r#"{{"jsonrpc":"2.0","id":1,"result":"{FAKE_SIG}"}}"#
+            ));
         });
         mock_signature_confirmed(&server);
 
@@ -280,14 +305,17 @@ mod tests {
         let server = MockServer::start();
         server.mock(|when, then| {
             when.method(POST).path("/").body_includes("requestAirdrop");
-            then.status(200).body(format!(r#"{{"jsonrpc":"2.0","id":1,"result":"{FAKE_SIG}"}}"#));
+            then.status(200).body(format!(
+                r#"{{"jsonrpc":"2.0","id":1,"result":"{FAKE_SIG}"}}"#
+            ));
         });
         // getSignatureStatuses always returns null status (pending) — never confirms
         server.mock(|when, then| {
-            when.method(POST).path("/").body_includes("getSignatureStatuses");
-            then.status(200).body(
-                r#"{"jsonrpc":"2.0","id":1,"result":{"context":{"slot":1},"value":[null]}}"#
-            );
+            when.method(POST)
+                .path("/")
+                .body_includes("getSignatureStatuses");
+            then.status(200)
+                .body(r#"{"jsonrpc":"2.0","id":1,"result":{"context":{"slot":1},"value":[null]}}"#);
         });
 
         let client = SolanaClient::new(&server.base_url());
@@ -304,7 +332,8 @@ mod tests {
         let server = MockServer::start();
         server.mock(|when, then| {
             when.method(POST).path("/").body_includes("getHealth");
-            then.status(200).body(r#"{"jsonrpc":"2.0","id":1,"result":"ok"}"#);
+            then.status(200)
+                .body(r#"{"jsonrpc":"2.0","id":1,"result":"ok"}"#);
         });
 
         let client = SolanaClient::new(&server.base_url());
@@ -317,7 +346,7 @@ mod tests {
         server.mock(|when, then| {
             when.method(POST).path("/");
             then.status(200).body(
-                r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"method not found"}}"#
+                r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"method not found"}}"#,
             );
         });
 

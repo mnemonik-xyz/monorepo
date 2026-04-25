@@ -1,0 +1,66 @@
+{
+  "validator": "reality-checker",
+  "batch": 4,
+  "iteration": 1,
+  "tasks": {
+    "10": {
+      "status": "approved",
+      "findings": [
+        {
+          "severity": "minor",
+          "category": "feasibility",
+          "task": 10,
+          "issue": "Task notes that proptest 'may already be present from Task 7 or 8 (httpmock tests)'. proptest is not a dependency of httpmock tests — it was in the original mcp codebase for proptest_canonical.rs and may be added in Task 5 (compress) or Task 9 (lineage). The comment is directionally correct but the cited source tasks (7/8) are wrong.",
+          "fix": "Update the note to say 'proptest may already be present from Task 5 (compress) or an earlier extraction task — check core/Cargo.toml before adding a duplicate entry.'"
+        }
+      ]
+    },
+    "11": {
+      "status": "approved",
+      "findings": [
+        {
+          "severity": "minor",
+          "category": "hallucination",
+          "task": 11,
+          "issue": "Task details section describes AttestationStore as a trait: 'AttestationStore → mnemonic_core::storage::AttestationStore (the trait impl)'. After Task 6, AttestationStore becomes a trait defined in core/src/storage/traits.rs and the SQLite implementation is a separate struct. mcp/src/mcp.rs McpState field should hold the concrete SQLite impl type, not the trait itself (traits are not directly stored in structs without Box<dyn ...> or a concrete type). The phrasing is ambiguous and may mislead the agent.",
+          "fix": "Clarify that McpState holds the concrete SQLite implementation of AttestationStore (e.g. SqliteAttestationStore or similar concrete type name), not the trait object. The agent should read core/src/lib.rs to determine the exact exported concrete type name."
+        },
+        {
+          "severity": "minor",
+          "category": "feasibility",
+          "task": 11,
+          "issue": "The round-trip smoke check uses 'cargo run -p mnemonic-mcp -- --transport stdio' but transport flag availability depends on how the binary's CLI is configured in config.rs. If --transport is not a registered clap argument, the command will fail. Task acknowledges this risk in edge cases but does not provide a fallback invocation.",
+          "fix": "Add a note to check config.rs/main.rs for the exact CLI flag syntax before running the round-trip check. Acceptable fallback: run without --transport stdio if the binary defaults to stdio mode."
+        }
+      ]
+    },
+    "12": {
+      "status": "approved",
+      "findings": [
+        {
+          "severity": "minor",
+          "category": "hints",
+          "task": 12,
+          "issue": "The Required Skills section references the wrong SKILL.md path. It says: '/skill:documentation-writing — [SKILL.md](/home/claude/.openclaw/workspace/mnemonic-refactored/.claude/skills/project-knowledge/SKILL.md)'. The path resolves to the project-knowledge skill, not the documentation-writing skill. The actual documentation-writing SKILL.md lives at /home/claude/.claude/skills/documentation-writing/SKILL.md.",
+          "fix": "Update the SKILL.md link to /home/claude/.claude/skills/documentation-writing/SKILL.md. The skill name '/skill:documentation-writing' is correct — only the path hint is wrong."
+        },
+        {
+          "severity": "minor",
+          "category": "feasibility",
+          "task": 12,
+          "issue": "The architecture.md currently contains 'openai → fastembed → hash' as the fallback chain (confirmed by reading the file). Task 12 correctly identifies this as needing to change to 'openai → fastembed → Err'. However, the task only specifies updating the External Integrations section and does not mention the Project Structure section of architecture.md where core/src/ embed/ is described as having 'three provider implementations (fastembed, openai, hash)'. That description also needs HashEmbedder removed. The acceptance criteria do cover 'grep HashEmbedder returns no matches' so it will be caught, but the What to do steps only mention removing HashEmbedder from 'the embed provider list in the embed/ description' — this is consistent with the Project Structure section fix. No real gap, just noting the two locations are both covered.",
+          "fix": "No fix required — the acceptance criteria (grep for HashEmbedder returns empty) will catch any missed location. Issue is informational only."
+        }
+      ]
+    }
+  },
+  "summary": "3 approved, 0 need fixes",
+  "stats": {
+    "tasks_checked": 3,
+    "claims_verified": 31,
+    "issues_found": 4,
+    "critical": 0,
+    "major": 0,
+    "minor": 4
+  }
+}

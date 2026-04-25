@@ -3,9 +3,7 @@
 //! Uses RFC 9052 COSE_Sign1 structure with Ed25519 (COSE alg: -8).
 //! The existing Solana Ed25519 keypair is reused -- no new key material needed.
 
-use coset::{
-    iana, CborSerializable, CoseSign1, CoseSign1Builder, HeaderBuilder,
-};
+use coset::{iana, CborSerializable, CoseSign1, CoseSign1Builder, HeaderBuilder};
 use solana_sdk::signature::{Keypair, Signer};
 
 use super::canonical::to_canonical_cbor;
@@ -61,9 +59,7 @@ pub fn sign_cose(canonical_cbor: &[u8], keypair: &Keypair) -> Result<Vec<u8>, St
 
     // Unprotected header: kid = Solana pubkey base58
     let kid = keypair.pubkey().to_string().into_bytes();
-    let unprotected = HeaderBuilder::new()
-        .key_id(kid)
-        .build();
+    let unprotected = HeaderBuilder::new().key_id(kid).build();
 
     // Build unsigned COSE_Sign1 to compute Sig_structure
     let unsigned = CoseSign1Builder::new()
@@ -86,7 +82,8 @@ pub fn sign_cose(canonical_cbor: &[u8], keypair: &Keypair) -> Result<Vec<u8>, St
         .signature(signature.as_ref().to_vec())
         .build();
 
-    signed.to_vec()
+    signed
+        .to_vec()
         .map_err(|e| format!("COSE serialization failed: {e}"))
 }
 
@@ -107,16 +104,18 @@ pub fn verify_artifact(
     cose_bytes: &[u8],
     expected_hash: Option<&str>,
 ) -> Result<VerificationResult, String> {
-    let cose_sign1 = CoseSign1::from_slice(cose_bytes)
-        .map_err(|e| format!("invalid COSE_Sign1: {e}"))?;
+    let cose_sign1 =
+        CoseSign1::from_slice(cose_bytes).map_err(|e| format!("invalid COSE_Sign1: {e}"))?;
 
-    let payload = cose_sign1.payload.as_ref()
+    let payload = cose_sign1
+        .payload
+        .as_ref()
         .ok_or_else(|| "COSE_Sign1 has no payload".to_string())?;
 
     // Extract signer from kid
     let kid_bytes = &cose_sign1.unprotected.key_id;
-    let signer = String::from_utf8(kid_bytes.clone())
-        .unwrap_or_else(|_| "<invalid kid>".to_string());
+    let signer =
+        String::from_utf8(kid_bytes.clone()).unwrap_or_else(|_| "<invalid kid>".to_string());
 
     // Parse pubkey for signature verification
     let pubkey = solana_sdk::pubkey::Pubkey::from_str(&signer)
@@ -128,7 +127,7 @@ pub fn verify_artifact(
     // Verify Ed25519 signature
     let sig_valid = if cose_sign1.signature.len() == 64 {
         let sig = solana_sdk::signature::Signature::from(
-            <[u8; 64]>::try_from(&cose_sign1.signature[..]).unwrap()
+            <[u8; 64]>::try_from(&cose_sign1.signature[..]).unwrap(),
         );
         sig.verify(pubkey.as_ref(), &sig_structure)
     } else {
@@ -143,7 +142,9 @@ pub fn verify_artifact(
 
     // Check algorithm
     let alg_valid = cose_sign1.protected.header.alg
-        == Some(coset::RegisteredLabelWithPrivate::Assigned(iana::Algorithm::EdDSA));
+        == Some(coset::RegisteredLabelWithPrivate::Assigned(
+            iana::Algorithm::EdDSA,
+        ));
 
     Ok(VerificationResult {
         valid: sig_valid && hash_valid && alg_valid,
@@ -236,8 +237,10 @@ mod tests {
     fn test_all_schemas_sign_verify() {
         let kp = Keypair::new();
         for (schema, name) in [
-            (&RAG_CONTEXT_V1, "rag.context"), (&RAG_RESULT_V1, "rag.result"),
-            (&AGENT_STATE_V1, "agent.state"), (&RECEIPT_V1, "receipt"),
+            (&RAG_CONTEXT_V1, "rag.context"),
+            (&RAG_RESULT_V1, "rag.result"),
+            (&AGENT_STATE_V1, "agent.state"),
+            (&RECEIPT_V1, "receipt"),
             (&MEMORY_V1, "memory"),
         ] {
             let artifact = serde_json::json!({
@@ -246,7 +249,8 @@ mod tests {
                 "producer": "p", "created_at": "2026-01-01T00:00:00Z",
             });
             let signed = sign_artifact(&artifact, schema, &kp).expect(name);
-            let result = verify_artifact(&signed.cose_bytes, Some(&signed.content_hash)).expect(name);
+            let result =
+                verify_artifact(&signed.cose_bytes, Some(&signed.content_hash)).expect(name);
             assert!(result.valid, "{name} failed");
         }
     }

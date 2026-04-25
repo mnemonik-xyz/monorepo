@@ -1,0 +1,24 @@
+{
+  "task": 1,
+  "reviewer": "code-reviewer",
+  "round": 1,
+  "status": "approved",
+  "findings": [
+    {
+      "severity": "minor",
+      "location": "mcp/Cargo.toml:16-37",
+      "description": "mcp/Cargo.toml retains many dependencies that are also declared in core/Cargo.toml (solana-sdk, spl-memo, bs58, sha2, hex, base64, rusqlite, bincode, chrono, anyhow, thiserror, uuid, serde, serde_json, reqwest, futures, ciborium, coset, blake3, ndarray). These are legitimately kept for now because mcp/src/ still contains the full domain source files (compress.rs, embed.rs, db.rs, etc.) awaiting extraction in Tasks 2-9. This is expected for a scaffold task, but the duplication should be cleaned up progressively as each module is extracted. No action required in this task."
+    },
+    {
+      "severity": "minor",
+      "location": "core/Cargo.toml:6",
+      "description": "core/Cargo.toml includes a 'description' field which is good practice. However, the [lib] section at line 7 is declared with no explicit 'name' or 'path' — this relies on Cargo's convention of deriving the lib name from the package name ('mnemonic-core' → crate name 'mnemonic_core'). This is correct and idiomatic but worth noting that future consumers import it as 'mnemonic_core::'. No change needed."
+    },
+    {
+      "severity": "minor",
+      "location": "patterns.md (project patterns reference)",
+      "description": "patterns.md states: 'All providers implement the Embedder trait in core/src/embed/mod.rs. Never call a concrete provider directly from business logic — always go through the trait. This keeps the hash fallback and WASM-safe stub transparent to callers.' The phrase 'hash fallback' refers to HashEmbedder which the tech-spec and user-spec both mandate removing in Task 4. The patterns.md itself is flagged in Task 12 for cleanup. This is a documentation inconsistency that will be resolved in a later task — not a code defect in this task's scope."
+    }
+  ],
+  "summary": "All five focus areas pass review. (1) Workspace root Cargo.toml is correctly structured with members=[\"core\",\"mcp\"] and resolver=\"2\", no [package] section present. (2) core/Cargo.toml contains all 20 required dependencies from the tech-spec dependency list including turboquant-plus-rs=\"0.1.0\", tokio with [time,rt], fastembed as optional under local-embed feature, and all dev-dependencies (httpmock, tempfile, proptest, criterion, tokio with macros+rt-multi-thread). (3) Both turboquant:: occurrences in mcp/src/compress.rs are correctly renamed to turboquant_plus_rs:: — line 8 (use statement) and line 158 (CompressedVectors struct literal) — and no legacy turboquant:: references remain anywhere in mcp/src/. (4) mcp/Cargo.toml correctly adds mnemonic-core={path=\"../core\"}, adds turboquant-plus-rs=\"0.1.0\", and removes solana-client=\"2.2\" and solana-transaction-status=\"2.2\" (confirmed these were not used in any mcp/src/ file other than the source solana.rs — grep across mcp/src/ returns no matches for either crate). (5) core/src/lib.rs declares exactly 8 pub mod stubs matching the required set: codec, identity, embed, compress, storage, arweave, solana, lineage. Each has a corresponding empty core/src/<module>/mod.rs file present. The scaffold is clean and ready for Wave 2 extraction tasks."
+}

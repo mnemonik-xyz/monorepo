@@ -1,0 +1,62 @@
+{
+  "reviewer": "code-reviewer",
+  "round": 2,
+  "task": 10,
+  "verdict": "approved",
+  "status": "approved",
+  "summary": "All three round-1 findings are correctly addressed: bench_cose_sign now isolates the COSE stage via the extracted sign_cose primitive, black_box wraps both args in every bench iter closure, and the disjoint-ranges comment is present. The sign_artifact refactor is a clean extraction with identical observable behavior. The strengthened proptest and stricter CBOR size assertion are sound improvements with no regressions introduced.",
+  "criticalIssues": [],
+  "suggestions": [
+    {
+      "file": "core/src/codec/sign.rs",
+      "line": 54,
+      "severity": "minor",
+      "category": "maintainability",
+      "suggestion": "sign_cose is marked #[doc(hidden)] pub, which is the right call to discourage external callers while still exporting for the bench crate. One future concern: if a downstream consumer in the same workspace imports this symbol, the hidden doc annotation provides no compile-time barrier. Consider whether a pub(crate) or a dedicated #[cfg(any(test, bench))] guard would be more accurate — though this is a judgment call and the current approach is acceptable for bench isolation.",
+      "benefit": "Makes the intended visibility contract machine-enforced rather than documentation-only, reducing the chance that sign_cose is used as a stable public API by future contributors.",
+      "optional": true
+    },
+    {
+      "file": "core/src/codec/sign.rs",
+      "line": 69,
+      "severity": "minor",
+      "category": "performance",
+      "suggestion": "sign_cose calls canonical_cbor.to_vec() twice (lines 72 and 85) to populate both the unsigned and signed CoseSign1Builder. Each call is a heap allocation plus memcpy of the full payload. The first allocation (unsigned, line 72) is discarded immediately after tbs_data is computed. Consider cloning once for the signed builder or — if the coset API permits — reusing the unsigned builder by calling .signature() on a consuming method. This is a micro-optimization but inside a hot bench loop it adds measurable allocator overhead to what is supposed to be a pure COSE-only measurement.",
+      "benefit": "Eliminates one spurious heap allocation per signing call, keeping bench_cose_sign's measured cost strictly attributable to COSE construction and Ed25519 signing.",
+      "optional": true
+    }
+  ],
+  "roundOneFindingsResolution": {
+    "minor_bench_cose_sign_redundancy": {
+      "status": "resolved",
+      "approach": "Option (b): extracted sign_cose primitive. bench_cose_sign now pre-computes canonical CBOR outside iter and calls sign_cose inside. bench_full_pipeline calls sign_artifact end-to-end. The two groups now measure genuinely distinct pipeline stages.",
+      "assessment": "Correct and complete. The bench groups are now distinguishable: cose_sign measures COSE_Sign1 build + Ed25519 only; full_pipeline measures the entire chain including canonicalization and hashing."
+    },
+    "nit_black_box_schema": {
+      "status": "resolved",
+      "assessment": "black_box(&MEMORY_V1) added in bench_cbor_canonicalization. Additionally applied to &MEMORY_V1 and &kp in bench_full_pipeline and bench_cose_sign. Consistent and correct."
+    },
+    "nit_disjoint_ranges_comment": {
+      "status": "resolved",
+      "assessment": "Comment '// Ranges [a-z] and [A-Z] are disjoint; content_a and content_b can never be equal.' added verbatim as suggested."
+    }
+  },
+  "signCosePrimitiveAnalysis": {
+    "signatureAssessment": "sign_cose(canonical_cbor: &[u8], keypair: &Keypair) -> Result<Vec<u8>, String> is appropriate. Borrows both inputs (no unnecessary copies at call site), returns owned bytes for the serialized COSE_Sign1. Error type String is consistent with sign_artifact's existing error contract.",
+    "docHiddenAssessment": "#[doc(hidden)] pub is the idiomatic Rust approach for 'exported for sibling crates/benches, not intended as stable public API'. Correct choice. The accompanying rustdoc comment clearly states the primary consumer is benchmarks and directs production callers to sign_artifact.",
+    "maintenanceRisk": "Low. sign_cose is a pure function with no state. If sign_artifact's COSE construction ever changes, sign_cose is the single place to update and sign_artifact automatically inherits the fix. This is strictly better than the pre-refactor layout where the COSE logic lived inline in sign_artifact.",
+    "outputIdenticalityVerification": "sign_artifact now calls sign_cose(&canonical_cbor, keypair) and stores the returned Vec<u8> as cose_bytes. The field assignment order in SignedArtifact { cose_bytes, content_hash, canonical_cbor } is unchanged. The only textual change inside sign_cose relative to the prior inline code is canonical_cbor.clone() -> canonical_cbor.to_vec(), which is semantically identical on a &[u8] receiver. Output is byte-identical."
+  },
+  "additionalObservations": [
+    "proptest sign_artifact_content_hash_matches_blake3_of_canonical_cbor is a genuine behavioral improvement: it exercises the sign pipeline from three angles (stored hash vs stored cbor, stored cbor vs independent canonicalization, stored hash vs independently hashed cbor) and replaces a weaker determinism-only check. No issues.",
+    "test_cbor_is_smaller_than_json strict inequality is sound for the test payload (ISO-8601 timestamp encoded as CBOR tag-1 + binary integer, plus elimination of JSON structural characters). The tightened assertion is correct and the explanatory comment is accurate.",
+    "decisions.md round-2 section accurately describes all changes made. No discrepancies between the documented approach and the actual diff."
+  ],
+  "metrics": {
+    "filesReviewed": 5,
+    "criticalIssuesCount": 0,
+    "majorIssuesCount": 0,
+    "minorIssuesCount": 2,
+    "testCoverageAssessment": "excellent"
+  }
+}

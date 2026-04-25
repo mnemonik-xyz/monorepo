@@ -160,9 +160,9 @@ fn check_balance(
     let store = store.lock().unwrap();
     match get_balance(&store, &key) {
         Ok(Some(bal)) if bal >= cost => PaymentGate::Proceed(Some(key)),
-        Ok(Some(bal)) => PaymentGate::Unauthorized(
-            format!("insufficient balance: have {bal} micro-USDC, need {cost}")
-        ),
+        Ok(Some(bal)) => PaymentGate::Unauthorized(format!(
+            "insufficient balance: have {bal} micro-USDC, need {cost}"
+        )),
         Ok(None) => PaymentGate::Unauthorized("api key not found".into()),
         Err(e) => PaymentGate::Unauthorized(format!("balance lookup failed: {e}")),
     }
@@ -182,17 +182,24 @@ async fn check_x402(
         Some(p) => p,
         None => {
             // No payment header — return 402 payment required
-            return PaymentGate::NeedPayment(x402_required(treasury, usdc_mint, cost,
-                "mnemonic_sign_memory attestation fee"));
+            return PaymentGate::NeedPayment(x402_required(
+                treasury,
+                usdc_mint,
+                cost,
+                "mnemonic_sign_memory attestation fee",
+            ));
         }
     };
 
     // Verify the Solana USDC transfer
     match verify_usdc_transfer(solana, &proof.tx_sig, treasury, usdc_mint, cost as u64).await {
         Ok(Some(_)) => {}
-        Ok(None) => return PaymentGate::Unauthorized(
-            format!("x402 payment not valid: tx {} does not transfer >= {cost} micro-USDC to treasury", proof.tx_sig)
-        ),
+        Ok(None) => {
+            return PaymentGate::Unauthorized(format!(
+                "x402 payment not valid: tx {} does not transfer >= {cost} micro-USDC to treasury",
+                proof.tx_sig
+            ))
+        }
         Err(e) => return PaymentGate::Unauthorized(format!("x402 verification error: {e}")),
     }
 
@@ -259,15 +266,19 @@ pub async fn verify_usdc_transfer(
     if let (Some(pre_balances), Some(post_balances)) = (pre, post) {
         for post_entry in post_balances {
             let owner = post_entry["owner"].as_str().unwrap_or("");
-            let mint  = post_entry["mint"].as_str().unwrap_or("");
+            let mint = post_entry["mint"].as_str().unwrap_or("");
             if owner != recipient || mint != usdc_mint {
                 continue;
             }
             let post_amount: u64 = post_entry["uiTokenAmount"]["amount"]
-                .as_str().unwrap_or("0").parse().unwrap_or(0);
+                .as_str()
+                .unwrap_or("0")
+                .parse()
+                .unwrap_or(0);
 
             let account_index = post_entry["accountIndex"].as_u64().unwrap_or(u64::MAX);
-            let pre_amount: u64 = pre_balances.iter()
+            let pre_amount: u64 = pre_balances
+                .iter()
                 .find(|e| e["accountIndex"].as_u64() == Some(account_index))
                 .and_then(|e| e["uiTokenAmount"]["amount"].as_str())
                 .and_then(|s| s.parse().ok())
@@ -315,18 +326,18 @@ pub fn create_api_key(store: &SqliteStore, owner_pubkey: &str) -> anyhow::Result
 
 /// Get the owner pubkey for an API key. Returns None if key not found.
 pub fn get_owner_pubkey(store: &SqliteStore, api_key: &str) -> anyhow::Result<Option<String>> {
-    let mut stmt = store.conn().prepare(
-        "SELECT owner_pubkey FROM api_keys WHERE api_key = ?"
-    )?;
+    let mut stmt = store
+        .conn()
+        .prepare("SELECT owner_pubkey FROM api_keys WHERE api_key = ?")?;
     let mut rows = stmt.query(params![api_key])?;
     Ok(rows.next()?.map(|r| r.get(0)).transpose()?)
 }
 
 /// Get balance in micro-USDC for an API key. Returns None if key not found.
 pub fn get_balance(store: &SqliteStore, api_key: &str) -> anyhow::Result<Option<i64>> {
-    let mut stmt = store.conn().prepare(
-        "SELECT balance_micro_usdc FROM api_keys WHERE api_key = ?"
-    )?;
+    let mut stmt = store
+        .conn()
+        .prepare("SELECT balance_micro_usdc FROM api_keys WHERE api_key = ?")?;
     let mut rows = stmt.query(params![api_key])?;
     Ok(rows.next()?.map(|r| r.get(0)).transpose()?)
 }
@@ -346,7 +357,12 @@ pub fn get_balance(store: &SqliteStore, api_key: &str) -> anyhow::Result<Option<
 /// read-only `get_balance` call to produce the precise user-visible error.
 /// Two concurrent deducts on the same key cannot both pass the guard because
 /// SQLite serializes writes to the same table under the IMMEDIATE write lock.
-pub fn deduct_balance(store: &SqliteStore, api_key: &str, amount: i64, description: &str) -> anyhow::Result<()> {
+pub fn deduct_balance(
+    store: &SqliteStore,
+    api_key: &str,
+    amount: i64,
+    description: &str,
+) -> anyhow::Result<()> {
     let conn = store.conn();
     let now = chrono::Utc::now().to_rfc3339();
 
@@ -379,9 +395,9 @@ pub fn deduct_balance(store: &SqliteStore, api_key: &str, amount: i64, descripti
         let _ = conn.execute("ROLLBACK", []);
         match get_balance(store, api_key)? {
             None => anyhow::bail!("api key not found"),
-            Some(balance) => anyhow::bail!(
-                "insufficient balance: have {balance} micro-USDC, need {amount}"
-            ),
+            Some(balance) => {
+                anyhow::bail!("insufficient balance: have {balance} micro-USDC, need {amount}")
+            }
         }
     }
 
@@ -410,7 +426,12 @@ pub fn deduct_balance(store: &SqliteStore, api_key: &str, amount: i64, descripti
 /// fails with `ConstraintViolation`, which we convert to a user-visible error.
 /// The INSERT + UPDATE are wrapped in an `IMMEDIATE` transaction so the
 /// balance is only credited when the idempotency row is actually inserted.
-pub fn credit_deposit(store: &SqliteStore, api_key: &str, amount: i64, tx_sig: &str) -> anyhow::Result<i64> {
+pub fn credit_deposit(
+    store: &SqliteStore,
+    api_key: &str,
+    amount: i64,
+    tx_sig: &str,
+) -> anyhow::Result<i64> {
     let conn = store.conn();
     let now = chrono::Utc::now().to_rfc3339();
 
@@ -456,7 +477,8 @@ pub fn credit_deposit(store: &SqliteStore, api_key: &str, amount: i64, tx_sig: &
 
     let new_balance: i64 = match conn.query_row(
         "SELECT balance_micro_usdc FROM api_keys WHERE api_key = ?",
-        params![api_key], |r| r.get(0),
+        params![api_key],
+        |r| r.get(0),
     ) {
         Ok(b) => b,
         Err(e) => {
@@ -516,7 +538,8 @@ pub fn refund_balance(
 
     let new_balance: i64 = match conn.query_row(
         "SELECT balance_micro_usdc FROM api_keys WHERE api_key = ?",
-        params![api_key], |r| r.get(0),
+        params![api_key],
+        |r| r.get(0),
     ) {
         Ok(b) => b,
         Err(e) => {
@@ -538,7 +561,9 @@ pub fn mark_x402_nonce(store: &SqliteStore, tx_sig: &str) -> anyhow::Result<()> 
     );
     match result {
         Ok(_) => Ok(()),
-        Err(rusqlite::Error::SqliteFailure(e, _)) if e.code == rusqlite::ErrorCode::ConstraintViolation => {
+        Err(rusqlite::Error::SqliteFailure(e, _))
+            if e.code == rusqlite::ErrorCode::ConstraintViolation =>
+        {
             anyhow::bail!("x402 payment already used: {tx_sig}")
         }
         Err(e) => Err(e.into()),
@@ -673,7 +698,10 @@ mod tests {
         let after_2 = refund_balance(&store, &key, 100, "arweave upload failed").unwrap();
 
         assert_eq!(after_1, 1_100, "first refund credits balance");
-        assert_eq!(after_2, 1_200, "second identical refund ALSO credits balance");
+        assert_eq!(
+            after_2, 1_200,
+            "second identical refund ALSO credits balance"
+        );
 
         // Both rows must exist in payment_events with event_type='refund'.
         let refund_count: i64 = store
@@ -730,10 +758,22 @@ mod tests {
 
         let successes = [&r1, &r2].iter().filter(|r| r.is_ok()).count();
         let failures = [&r1, &r2].iter().filter(|r| r.is_err()).count();
-        assert_eq!(successes, 1, "exactly one credit must succeed: {r1:?} {r2:?}");
-        assert_eq!(failures, 1, "the other must fail with duplicate: {r1:?} {r2:?}");
+        assert_eq!(
+            successes, 1,
+            "exactly one credit must succeed: {r1:?} {r2:?}"
+        );
+        assert_eq!(
+            failures, 1,
+            "the other must fail with duplicate: {r1:?} {r2:?}"
+        );
 
-        let err_msg = [&r1, &r2].iter().find(|r| r.is_err()).unwrap().as_ref().err().unwrap();
+        let err_msg = [&r1, &r2]
+            .iter()
+            .find(|r| r.is_err())
+            .unwrap()
+            .as_ref()
+            .err()
+            .unwrap();
         assert!(
             err_msg.contains("deposit tx already applied"),
             "duplicate error should surface: {err_msg}"
@@ -808,7 +848,10 @@ mod tests {
         credit_deposit(&store, &key, 50, "seed_tx_2").unwrap();
 
         let err = deduct_balance(&store, &key, 100, "too big").unwrap_err();
-        assert!(err.to_string().contains("insufficient balance"), "err = {err}");
+        assert!(
+            err.to_string().contains("insufficient balance"),
+            "err = {err}"
+        );
         assert_eq!(get_balance(&store, &key).unwrap(), Some(50));
     }
 
@@ -894,7 +937,10 @@ mod tests {
         let key = create_api_key(&store, "owner_c").unwrap();
         credit_deposit(&store, &key, 500, "unique_sig").unwrap();
         let err = credit_deposit(&store, &key, 500, "unique_sig").unwrap_err();
-        assert!(err.to_string().contains("deposit tx already applied"), "err = {err}");
+        assert!(
+            err.to_string().contains("deposit tx already applied"),
+            "err = {err}"
+        );
         assert_eq!(get_balance(&store, &key).unwrap(), Some(500));
     }
 }

@@ -81,11 +81,26 @@ pub struct ArtifactSchema {
 pub const RAG_CONTEXT_V1: ArtifactSchema = ArtifactSchema {
     artifact_type: ArtifactType::RagContext,
     version: 1,
-    required_fields: &["artifact_id", "type", "schema_version", "content", "producer", "created_at"],
+    required_fields: &[
+        "artifact_id",
+        "type",
+        "schema_version",
+        "content",
+        "producer",
+        "created_at",
+    ],
     optional_fields: &["parents", "metadata", "tags", "sources"],
     cbor_field_order: &[
-        "artifact_id", "type", "schema_version", "content",
-        "metadata", "sources", "parents", "tags", "created_at", "producer",
+        "artifact_id",
+        "type",
+        "schema_version",
+        "content",
+        "metadata",
+        "sources",
+        "parents",
+        "tags",
+        "created_at",
+        "producer",
     ],
 };
 
@@ -93,12 +108,33 @@ pub const RAG_CONTEXT_V1: ArtifactSchema = ArtifactSchema {
 pub const RAG_RESULT_V1: ArtifactSchema = ArtifactSchema {
     artifact_type: ArtifactType::RagResult,
     version: 1,
-    required_fields: &["artifact_id", "type", "schema_version", "content", "producer", "created_at"],
-    optional_fields: &["context_artifacts", "citations", "parents", "metadata", "tags"],
+    required_fields: &[
+        "artifact_id",
+        "type",
+        "schema_version",
+        "content",
+        "producer",
+        "created_at",
+    ],
+    optional_fields: &[
+        "context_artifacts",
+        "citations",
+        "parents",
+        "metadata",
+        "tags",
+    ],
     cbor_field_order: &[
-        "artifact_id", "type", "schema_version", "content",
-        "context_artifacts", "citations", "metadata", "parents", "tags",
-        "created_at", "producer",
+        "artifact_id",
+        "type",
+        "schema_version",
+        "content",
+        "context_artifacts",
+        "citations",
+        "metadata",
+        "parents",
+        "tags",
+        "created_at",
+        "producer",
     ],
 };
 
@@ -106,11 +142,26 @@ pub const RAG_RESULT_V1: ArtifactSchema = ArtifactSchema {
 pub const AGENT_STATE_V1: ArtifactSchema = ArtifactSchema {
     artifact_type: ArtifactType::AgentState,
     version: 1,
-    required_fields: &["artifact_id", "type", "schema_version", "content", "producer", "created_at"],
+    required_fields: &[
+        "artifact_id",
+        "type",
+        "schema_version",
+        "content",
+        "producer",
+        "created_at",
+    ],
     optional_fields: &["parents", "metadata", "tags", "state_key"],
     cbor_field_order: &[
-        "artifact_id", "type", "schema_version", "content",
-        "state_key", "metadata", "parents", "tags", "created_at", "producer",
+        "artifact_id",
+        "type",
+        "schema_version",
+        "content",
+        "state_key",
+        "metadata",
+        "parents",
+        "tags",
+        "created_at",
+        "producer",
     ],
 };
 
@@ -118,12 +169,27 @@ pub const AGENT_STATE_V1: ArtifactSchema = ArtifactSchema {
 pub const RECEIPT_V1: ArtifactSchema = ArtifactSchema {
     artifact_type: ArtifactType::Receipt,
     version: 1,
-    required_fields: &["artifact_id", "type", "schema_version", "content", "producer", "created_at"],
+    required_fields: &[
+        "artifact_id",
+        "type",
+        "schema_version",
+        "content",
+        "producer",
+        "created_at",
+    ],
     optional_fields: &["parents", "metadata", "tags", "operation", "duration_ms"],
     cbor_field_order: &[
-        "artifact_id", "type", "schema_version", "content",
-        "operation", "duration_ms", "metadata", "parents", "tags",
-        "created_at", "producer",
+        "artifact_id",
+        "type",
+        "schema_version",
+        "content",
+        "operation",
+        "duration_ms",
+        "metadata",
+        "parents",
+        "tags",
+        "created_at",
+        "producer",
     ],
 };
 
@@ -131,11 +197,25 @@ pub const RECEIPT_V1: ArtifactSchema = ArtifactSchema {
 pub const MEMORY_V1: ArtifactSchema = ArtifactSchema {
     artifact_type: ArtifactType::Memory,
     version: 1,
-    required_fields: &["artifact_id", "type", "schema_version", "content", "producer", "created_at"],
+    required_fields: &[
+        "artifact_id",
+        "type",
+        "schema_version",
+        "content",
+        "producer",
+        "created_at",
+    ],
     optional_fields: &["parents", "metadata", "tags"],
     cbor_field_order: &[
-        "artifact_id", "type", "schema_version", "content",
-        "metadata", "parents", "tags", "created_at", "producer",
+        "artifact_id",
+        "type",
+        "schema_version",
+        "content",
+        "metadata",
+        "parents",
+        "tags",
+        "created_at",
+        "producer",
     ],
 };
 
@@ -152,8 +232,12 @@ pub fn get_schema(artifact_type: &str, version: u32) -> Option<&'static Artifact
 }
 
 /// Validate that an artifact JSON object has all required fields for its schema.
-pub fn validate_artifact(artifact: &serde_json::Value, schema: &ArtifactSchema) -> Result<(), String> {
-    let obj = artifact.as_object()
+pub fn validate_artifact(
+    artifact: &serde_json::Value,
+    schema: &ArtifactSchema,
+) -> Result<(), String> {
+    let obj = artifact
+        .as_object()
         .ok_or_else(|| "artifact must be a JSON object".to_string())?;
 
     for &field in schema.required_fields {
@@ -202,18 +286,29 @@ mod tests {
     #[test]
     fn test_artifact_type_strings() {
         assert_eq!(ArtifactType::RagContext.as_str(), "rag.context");
-        assert_eq!(ArtifactType::from_str("receipt"), Some(ArtifactType::Receipt));
+        assert_eq!(
+            ArtifactType::from_str("receipt"),
+            Some(ArtifactType::Receipt)
+        );
         assert_eq!(ArtifactType::from_str("invalid"), None);
     }
 
     #[test]
     fn test_cbor_field_order_covers_required() {
-        for schema in [&RAG_CONTEXT_V1, &RAG_RESULT_V1, &AGENT_STATE_V1, &RECEIPT_V1, &MEMORY_V1] {
+        for schema in [
+            &RAG_CONTEXT_V1,
+            &RAG_RESULT_V1,
+            &AGENT_STATE_V1,
+            &RECEIPT_V1,
+            &MEMORY_V1,
+        ] {
             for &field in schema.required_fields {
                 assert!(
                     schema.cbor_field_order.contains(&field),
                     "schema {:?} v{}: required field '{}' not in cbor_field_order",
-                    schema.artifact_type, schema.version, field,
+                    schema.artifact_type,
+                    schema.version,
+                    field,
                 );
             }
         }

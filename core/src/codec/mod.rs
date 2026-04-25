@@ -6,7 +6,7 @@
 //!
 //! This module is a prerequisite for the VAA (Verifiable Artifact Anchor) protocol.
 
-pub mod schema;
 pub mod canonical;
 pub mod hash;
+pub mod schema;
 pub mod sign;

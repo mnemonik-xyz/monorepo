@@ -58,7 +58,14 @@ impl CompressedEmbedding {
         let signs_len = u32::from_le_bytes(data.get(off..off + 4)?.try_into().ok()?) as usize;
         off += 4;
         let qjl_signs_packed = data.get(off..off + signs_len)?.to_vec();
-        Some(Self { dim, bit_width, mse_indices_packed, qjl_signs_packed, vector_norm, residual_norm })
+        Some(Self {
+            dim,
+            bit_width,
+            mse_indices_packed,
+            qjl_signs_packed,
+            vector_norm,
+            residual_norm,
+        })
     }
 
     fn from_bytes_legacy_v1(data: &[u8]) -> Option<Self> {
@@ -88,7 +95,14 @@ impl CompressedEmbedding {
         let qjl_signs_unpacked = Array1::from_iter(qjl_signs.iter().map(|&b| b as i8));
         let mse_indices_packed = pack_indices(&mse_indices_unpacked, bit_width - 1);
         let qjl_signs_packed = pack_bits(&qjl_signs_unpacked);
-        Some(Self { dim, bit_width, mse_indices_packed, qjl_signs_packed, vector_norm, residual_norm })
+        Some(Self {
+            dim,
+            bit_width,
+            mse_indices_packed,
+            qjl_signs_packed,
+            vector_norm,
+            residual_norm,
+        })
     }
 }
 
@@ -158,8 +172,12 @@ mod tests {
         let compressed = c.compress(&original);
         let restored = c.decompress(&compressed);
         assert_eq!(restored.len(), 128);
-        let mse: f32 = original.iter().zip(restored.iter())
-            .map(|(a, b)| (a - b).powi(2)).sum::<f32>() / original.len() as f32;
+        let mse: f32 = original
+            .iter()
+            .zip(restored.iter())
+            .map(|(a, b)| (a - b).powi(2))
+            .sum::<f32>()
+            / original.len() as f32;
         assert!(mse < 0.1, "MSE too high: {mse}");
     }
 
@@ -172,8 +190,14 @@ mod tests {
         let restored = CompressedEmbedding::from_bytes(&bytes).unwrap();
         assert_eq!(restored.dim, 128);
         assert_eq!(restored.bit_width, 4);
-        assert_eq!(restored.mse_indices_packed.len(), compressed.mse_indices_packed.len());
-        assert_eq!(restored.qjl_signs_packed.len(), compressed.qjl_signs_packed.len());
+        assert_eq!(
+            restored.mse_indices_packed.len(),
+            compressed.mse_indices_packed.len()
+        );
+        assert_eq!(
+            restored.qjl_signs_packed.len(),
+            compressed.qjl_signs_packed.len()
+        );
         assert!((restored.vector_norm - compressed.vector_norm).abs() < 1e-6);
     }
 
@@ -191,8 +215,12 @@ mod tests {
         let compressed = c.compress(&v);
         let bytes = compressed.to_bytes();
         let original_bytes = 384 * 4;
-        assert!(bytes.len() < original_bytes,
-            "compressed {} >= original {}", bytes.len(), original_bytes);
+        assert!(
+            bytes.len() < original_bytes,
+            "compressed {} >= original {}",
+            bytes.len(),
+            original_bytes
+        );
     }
 
     #[test]
@@ -201,9 +229,16 @@ mod tests {
         let original: Vec<f32> = (0..384).map(|i| ((i as f32) * 0.007).sin()).collect();
         let compressed = c.compress(&original);
         let restored = c.decompress(&compressed);
-        let mse: f32 = original.iter().zip(restored.iter())
-            .map(|(a, b)| (a - b).powi(2)).sum::<f32>() / original.len() as f32;
-        assert!(mse < 0.05, "MSE {mse} exceeds 0.05 threshold for 384-dim 4-bit");
+        let mse: f32 = original
+            .iter()
+            .zip(restored.iter())
+            .map(|(a, b)| (a - b).powi(2))
+            .sum::<f32>()
+            / original.len() as f32;
+        assert!(
+            mse < 0.05,
+            "MSE {mse} exceeds 0.05 threshold for 384-dim 4-bit"
+        );
     }
 
     #[test]

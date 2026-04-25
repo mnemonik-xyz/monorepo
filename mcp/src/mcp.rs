@@ -4,13 +4,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use solana_sdk::signature::Keypair;
 
-use std::sync::Arc;
+use crate::{pricing::PricingEngine, tools};
+use mnemonic_core::arweave::ArweaveClient;
 use mnemonic_core::compress::EmbeddingCompressor;
 use mnemonic_core::embed::Embedder;
-use mnemonic_core::storage::SqliteStore;
-use mnemonic_core::arweave::ArweaveClient;
 use mnemonic_core::solana::SolanaClient;
-use crate::{pricing::PricingEngine, tools};
+use mnemonic_core::storage::SqliteStore;
+use std::sync::Arc;
 
 /// JSON-RPC 2.0 request.
 #[derive(Debug, Deserialize)]
@@ -140,7 +140,11 @@ pub async fn handle_request(req: &JsonRpcRequest, state: &McpState) -> JsonRpcRe
         })),
         "tools/list" => Ok(serde_json::json!({"tools": tool_definitions()})),
         "tools/call" => {
-            let name = req.params.get("name").and_then(|n| n.as_str()).unwrap_or("");
+            let name = req
+                .params
+                .get("name")
+                .and_then(|n| n.as_str())
+                .unwrap_or("");
             let args = req.params.get("arguments").cloned().unwrap_or_default();
             handle_tool_call(name, &args, state).await
         }
@@ -150,11 +154,19 @@ pub async fn handle_request(req: &JsonRpcRequest, state: &McpState) -> JsonRpcRe
 
     match result {
         Ok(val) => JsonRpcResponse {
-            jsonrpc: "2.0".into(), id: req.id.clone(), result: Some(val), error: None,
+            jsonrpc: "2.0".into(),
+            id: req.id.clone(),
+            result: Some(val),
+            error: None,
         },
         Err(msg) => JsonRpcResponse {
-            jsonrpc: "2.0".into(), id: req.id.clone(), result: None,
-            error: Some(JsonRpcError { code: -32603, message: msg }),
+            jsonrpc: "2.0".into(),
+            id: req.id.clone(),
+            result: None,
+            error: Some(JsonRpcError {
+                code: -32603,
+                message: msg,
+            }),
         },
     }
 }
@@ -167,34 +179,68 @@ async fn handle_tool_call(name: &str, args: &Value, state: &McpState) -> Result<
             tools::whoami(&state.keypair, &store, &state.storage_mode)
         }
         "mnemonic_sign_memory" => {
-            let content = args["content"].as_str().ok_or("content required")?.to_string();
-            let tags: Vec<String> = args.get("tags")
+            let content = args["content"]
+                .as_str()
+                .ok_or("content required")?
+                .to_string();
+            let tags: Vec<String> = args
+                .get("tags")
                 .and_then(|t| t.as_array())
-                .map(|a| a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
                 .unwrap_or_default();
             let cost_hint = state.pricing.cost_hint(state.sol_tx_fee_lamports);
             tools::sign_memory(
-                &state.keypair, &state.solana, &state.arweave, &state.store,
-                state.embedder.as_ref(), &state.compressor,
-                &content, &tags, &cost_hint, &state.storage_mode,
-            ).await.map_err(|e| e.to_string())?
+                &state.keypair,
+                &state.solana,
+                &state.arweave,
+                &state.store,
+                state.embedder.as_ref(),
+                &state.compressor,
+                &content,
+                &tags,
+                &cost_hint,
+                &state.storage_mode,
+            )
+            .await
+            .map_err(|e| e.to_string())?
         }
         "mnemonic_verify" => {
             let sol = args.get("solana_tx").and_then(|v| v.as_str());
             let ar = args.get("arweave_tx").and_then(|v| v.as_str());
-            tools::verify(&state.solana, &state.arweave, &state.store, sol, ar, &state.storage_mode)
-                .await.map_err(|e| e.to_string())?
+            tools::verify(
+                &state.solana,
+                &state.arweave,
+                &state.store,
+                sol,
+                ar,
+                &state.storage_mode,
+            )
+            .await
+            .map_err(|e| e.to_string())?
         }
         "mnemonic_prove_identity" => {
             // Pure crypto, no DB or network
-            tools::prove_identity(&state.keypair, args["challenge"].as_str().ok_or("challenge required")?)
+            tools::prove_identity(
+                &state.keypair,
+                args["challenge"].as_str().ok_or("challenge required")?,
+            )
         }
         "mnemonic_recall" => {
             let query = args["query"].as_str().ok_or("query required")?;
             let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(5) as usize;
             // DB-only: lock, query, release
             let store = state.store.lock().unwrap();
-            tools::recall(&state.keypair, &store, state.embedder.as_ref(), query, limit)
+            tools::recall(
+                &state.keypair,
+                &store,
+                state.embedder.as_ref(),
+                query,
+                limit,
+            )
         }
         _ => return Err(format!("unknown tool: {name}")),
     };

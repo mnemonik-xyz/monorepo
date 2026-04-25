@@ -1,0 +1,52 @@
+{
+  "reviewer": "test-reviewer",
+  "round": 2,
+  "task": 10,
+  "verdict": "approved",
+  "round1_findings_resolution": {
+    "major_bench_redundancy": {
+      "status": "resolved",
+      "notes": "sign_cose was extracted cleanly from sign_artifact. sign_artifact calls sign_cose after computing canonical_cbor and content_hash — no canonicalization occurs inside sign_cose. bench_cose_sign pre-computes CBOR outside b.iter() and calls sign_cose inside, so it now measures only: COSE_Sign1 header construction, Ed25519 sign of tbs_data, COSE serialization. bench_full_pipeline still calls sign_artifact end-to-end. The two benchmark groups now measure distinct stages and their numbers can be subtracted to isolate canonicalization+hash cost from pure COSE cost. Isolation is genuine."
+    },
+    "minor_bench_size_asymmetry": {
+      "status": "resolved",
+      "notes": "Fixer chose to add a comment rather than add 10000-byte cases. Both bench_cose_sign and bench_full_pipeline now carry explicit comments explaining that 10000B is intentionally excluded because COSE serialization overhead dominates at that size and the canonicalization + hash benches already cover 10000B. The rationale is stated, the comment cross-references, the asymmetry is no longer silent. Acceptable resolution."
+    },
+    "minor_cbor_smaller_than_json_tolerance": {
+      "status": "resolved",
+      "notes": "Changed from cbor_bytes.len() <= json_bytes.len() + 50 to strict cbor_bytes.len() < json_bytes.len(). Comment explains the source of savings (delimiter removal + CBOR tag-1 epoch integer for created_at). Now rejects any regression where CBOR equals or exceeds JSON size."
+    },
+    "nit_hash_is_deterministic": {
+      "status": "resolved",
+      "notes": "Replaced with sign_artifact_content_hash_matches_blake3_of_canonical_cbor. The new proptest exercises sign_artifact under random content (regex .{1,500}), then makes three behavioral assertions: (1) content_hash == hash_bytes(signed.canonical_cbor), (2) fresh to_canonical_cbor produces identical bytes to what sign_artifact stored, (3) content_hash == hash_bytes of independently computed CBOR. Wires canonical codec, hash layer, and sign pipeline together. This would catch: a sign_artifact bug that stores wrong canonical_cbor, a hash layer that uses a different algorithm than blake3, or a canonicalization implementation that is not pure. Genuinely adds cross-layer coverage."
+    }
+  },
+  "additional_evaluation": {
+    "q5_proptest_input_variety": {
+      "assessment": "adequate",
+      "notes": "The .{1,500} regex draws from proptest's full Unicode character set (not just ASCII), with lengths from 1 to 500 characters. The artifact_id and producer fields are fixed for this proptest, but the content variation is the primary driver of CBOR byte variation. proptest will run 256 cases by default, providing meaningful coverage. One minor weakness: the fixed artifact_id='art:proptest' and producer='test' mean the proptest never exercises field variation for those keys, but these are constant-length and their CBOR encoding is deterministic, so the omission does not create a realistic failure gap. Adequate for the stated purpose."
+    },
+    "q6_bench_diagnostic_value": {
+      "assessment": "passes",
+      "notes": "Bench groups now give distinct signals: cbor_canonicalize measures pure serialization cost, blake3_hash measures pure hashing cost, cose_sign measures COSE construction + Ed25519 signing cost (all on pre-computed CBOR), full_pipeline measures the composite. A developer can now compare cose_sign vs full_pipeline numbers to determine how much of the pipeline cost is canonicalization+hash vs COSE signing. This is the diagnostic separation the round-1 finding requested."
+    }
+  },
+  "findings": [],
+  "metrics": {
+    "filesReviewed": 4,
+    "litmusTest": {
+      "checked": 11,
+      "passed": 11,
+      "failed": 0
+    },
+    "coverageAssessment": "excellent",
+    "pyramidBalance": {
+      "unit": 9,
+      "integration": 5,
+      "e2e": 0,
+      "proptest": 3,
+      "assessment": "healthy"
+    }
+  },
+  "notes": "All four round-1 findings fully addressed. sign_cose isolation is real and verifiable from the source: sign_cose takes &[u8] payload bytes and runs only COSE header construction, tbs_data computation, Ed25519 sign, and serialization. sign_artifact calls to_canonical_cbor and hash_bytes before delegating to sign_cose — no hidden canonicalization inside sign_cose. The new cross-layer proptest has three meaningful assertions wiring three separate modules together. The strict CBOR < JSON assertion now catches encoding regressions. Bench isolation enables bottleneck analysis. No new issues found."
+}
