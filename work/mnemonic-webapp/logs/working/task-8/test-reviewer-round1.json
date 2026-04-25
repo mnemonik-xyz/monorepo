@@ -1,0 +1,95 @@
+{
+  "reviewer": "test-reviewer-8",
+  "task": 8,
+  "round": 1,
+  "status": "fail",
+  "blocking": true,
+  "note": "No git diff received from e2e-engineer. The file webapp/tests/e2e/chat.spec.ts does not exist. The only existing E2E file is webapp/e2e/app.spec.ts (scaffold: single heading-visibility check). Review is based on what is required per tech-spec and what is observed in the webapp source.",
+  "pre_review_findings": [
+    {
+      "id": 1,
+      "severity": "critical",
+      "category": "missing_implementation",
+      "finding": "webapp/tests/e2e/chat.spec.ts does not exist. All four required E2E scenarios are unimplemented: golden path, out-of-scope rejection, session limit via counter injection, and error state.",
+      "action": "required",
+      "reason": "Task 8 requires creating this file. Without it the verify-smoke command 'npx playwright test' cannot pass the required scenarios."
+    },
+    {
+      "id": 2,
+      "severity": "critical",
+      "category": "test_dir_mismatch",
+      "finding": "playwright.config.ts sets testDir to './e2e' (resolving to webapp/e2e/). Task 8 says to create webapp/tests/e2e/chat.spec.ts. If the file is created at the task-specified path it will NOT be picked up by the existing Playwright config. The engineer must either: (a) place the file in webapp/e2e/chat.spec.ts, OR (b) update playwright.config.ts testDir to cover both paths.",
+      "action": "required",
+      "reason": "Mismatched testDir means tests are silently skipped. This is a configuration defect that must be resolved before code is submitted."
+    },
+    {
+      "id": 3,
+      "severity": "critical",
+      "category": "url_bug_in_source",
+      "finding": "LandingPage.tsx download link uses href='/api/download-knowledge' (with '/api/' prefix). The backend endpoint is mounted at '/download-knowledge' (no '/api/' prefix per tech-spec and nginx.conf proxy rules). E2E test for golden path must assert the download link points to '/download-knowledge' and the test will expose this bug if it clicks the link and follows the response.",
+      "action": "required",
+      "reason": "The source bug will cause the download step of the golden path E2E test to return 404. Test must surface this, and the bug must be fixed before the test can pass."
+    }
+  ],
+  "required_coverage": [
+    {
+      "scenario": "golden_path",
+      "description": "Open site (GET /) -> heading 'Mnemonic Protocol' visible -> click 'Start chat' -> chat page shown -> fill message input -> click Send (or Enter) -> mock POST /chat to return {response: 'answer text'} -> assert bot message 'answer text' appears in log -> click download link -> assert response Content-Disposition or file download initiated",
+      "mock_strategy": "page.route('/chat', ...) to return deterministic JSON; page.route('/download-knowledge', ...) to return a minimal zip buffer",
+      "required_selectors": [
+        "getByRole('heading', {name: 'Mnemonic Protocol'})",
+        "getByRole('button', {name: 'Start chat'})",
+        "getByLabel('Message input') or getByRole('textbox')",
+        "getByRole('button', {name: 'Send'})",
+        "getByRole('log') for message list",
+        "getByRole('link', {name: 'Download protocol knowledge'})"
+      ]
+    },
+    {
+      "scenario": "out_of_scope_rejection",
+      "description": "On chat page, mock POST /chat to return {response: 'I can only answer questions about the Mnemonic Protocol.'} -> send an off-topic message -> assert rejection text visible in message log",
+      "mock_strategy": "page.route('/chat', handler that returns the rejection text) -- must be deterministic, no live Ollama",
+      "note": "Rejection wording must match whatever the backend prompt instructs. Use a plausible rejection string and assert it appears."
+    },
+    {
+      "scenario": "session_limit_via_counter_injection",
+      "description": "Navigate to chat page, inject messageCount = 49 into React component state via page.evaluate() or by using window.__setMessageCount if exposed, OR send 1 message via mocked /chat which increments counter to 50 -- then assert: (1) 'Session limit reached' banner appears (role=alert), (2) textarea is disabled, (3) Send button is disabled, (4) textarea placeholder reads 'Session limit reached.'",
+      "mock_strategy": "page.route('/chat', ...) to return a valid response for the 50th message. Counter starts at 49 (injected or pre-loaded via 49 mocked round-trips at minimum). The spec says 'inject counter state at 49' -- preferred approach is React state injection via evaluate() or exposing a test hook.",
+      "note": "Do NOT do 50 real round-trips. The point of this test is fast counter injection. If React state cannot be injected via evaluate(), use 49 mocked route responses to pre-warm the counter, then assert limit on the 50th response."
+    },
+    {
+      "scenario": "error_state",
+      "description": "On chat page, mock POST /chat to return HTTP 503 with body {error: 'Service temporarily unavailable.', code: 'service_unavailable'} for all attempts (to exhaust retries) -> send message -> assert error message 'Service temporarily unavailable. Try again later.' appears in message log with error styling (border-error class or role=alert on message)",
+      "mock_strategy": "page.route('/chat', route => route.fulfill({status: 503, json: {error: '...', code: 'service_unavailable'}})) -- must be stable for 3 retry attempts",
+      "note": "The api.ts client retries 3x on 503. The mock must respond with 503 on all 3 attempts. This is naturally handled by a persistent page.route() handler. Do NOT use arbitrary timeouts to simulate Ollama being down."
+    }
+  ],
+  "playwright_best_practices": [
+    {
+      "requirement": "All network calls must be mocked via page.route(). No live backend dependency in E2E tests.",
+      "reason": "Test determinism. Live Ollama is non-deterministic and unavailable in CI."
+    },
+    {
+      "requirement": "Use semantic selectors: getByRole(), getByLabel(), getByText(). Avoid CSS class selectors or XPath.",
+      "reason": "Class names (bg-accent-primary, etc.) are implementation details and change with styling refactors."
+    },
+    {
+      "requirement": "Use expect(locator).toBeVisible() and expect(locator).toBeDisabled() -- not manual waitFor(). Playwright auto-waits.",
+      "reason": "Manual waitFor with fixed timeouts creates flaky tests."
+    },
+    {
+      "requirement": "Each test must use beforeEach to set up routes and navigate. Tests must be fully isolated.",
+      "reason": "fullyParallel: true in playwright.config.ts requires each test to be independent."
+    },
+    {
+      "requirement": "The error state test must account for retry delay (api.ts retries 3x with 1s, 2s backoff). Either mock timers via page.clock.install() or set a sufficient test timeout (>=10s).",
+      "reason": "Without mocked clocks or sufficient timeout, the test will time out waiting for all retries to complete."
+    }
+  ],
+  "test_isolation_notes": [
+    "App.tsx uses in-memory React state (useState). Page refresh resets all state. Each test that needs a fresh counter should navigate fresh.",
+    "Session ID is generated with crypto.randomUUID() on mount. No server-side state means tests are inherently isolated from each other.",
+    "The session limit counter injection is the trickiest isolation point -- document clearly how the initial counter value is set."
+  ],
+  "summary": "No code submitted. Cannot pass. E2E engineer must: (1) create the test file at the correct path matching playwright.config.ts testDir, (2) fix the /api/download-knowledge URL bug in LandingPage.tsx, (3) implement all four required scenarios with mocked network calls and proper Playwright selectors. Return git diff for round 2 review."
+}

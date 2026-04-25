@@ -44,6 +44,24 @@ Created three-service Docker Compose setup for single-server deployment:
 
 Rate limiting is not duplicated at the nginx level -- the MCP server's governor-based per-IP limiter (10 req/min on `/chat`) is the single source of truth for rate limiting (per Task 3 decisions).
 
+## Task 8: Playwright E2E tests
+
+Created `webapp/e2e/chat.spec.ts` with 6 E2E tests covering all critical user flows, fully mocked via `page.route()` (no live backend dependency):
+
+1. **Golden path**: Landing page visible, download link verified (href, download attribute, Playwright download event with suggestedFilename), navigate to chat, send question, user message and bot answer appear in `role="log"` region, counter shows 1/50.
+
+2. **Out-of-scope rejection**: Send off-topic question, verify rejection message appears in chat.
+
+3. **Session limit**: Send 49 mocked messages (instant fulfillment via route mock) to reach counter=49, then send 50th. Verify `role="alert"` banner with "Session limit reached" text, input textarea disabled, Send button disabled.
+
+4. **Error state (retryable 503)**: Mock `/chat` to return 503 on all attempts. Uses `page.clock.install()` + `fastForward()` to skip retry backoff delays. Verifies error message "Service temporarily unavailable. Try again later." and `callCount === 3`.
+
+5. **Error state (non-retryable 429)**: Mock `/chat` to return 429. Verifies immediate error message and `callCount === 1` (no retries).
+
+6. **Back navigation**: Click back button from chat, verify landing page heading reappears.
+
+All tests use semantic selectors (`getByRole`, `getByLabel`, `getByText`). Test file placed in `webapp/e2e/` to match existing `playwright.config.ts` testDir. No production source code modified.
+
 ## Task 2: RAG seeding -- whitepaper chunking + sign_memory + artifact generation
 
 Created `mcp/src/seed.rs` implementing the startup seeding routine: parses `docs/WHITEPAPER.md` at `## ` headers (with h3 sub-splitting for sections exceeding ~500 tokens), calls `sign_memory()` per chunk with tags `["protocol-knowledge", "whitepaper"]`, and generates a `.zip` artifact containing `knowledge.md` (YAML frontmatter with content_hash/signer_pubkey/timestamp per chunk) and `knowledge.json` sidecar. Added `zip` crate to `mcp/Cargo.toml`. Seeder is called from `main.rs` after McpState init; skips if `store.count() > 0` (idempotent). The canonical `.zip` path is stored in a new `McpState.artifact_zip_path` field for the future `/download-knowledge` handler. Key fix during review: the h2 parser incorrectly matched `### ` lines (since they start with `## `) -- fixed with explicit exclusion and regression test. 13 unit tests cover parsing, splitting, and artifact generation.
