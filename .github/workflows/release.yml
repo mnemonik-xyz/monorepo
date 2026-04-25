@@ -11,68 +11,63 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build-linux-x86:
-    name: Build x86_64-unknown-linux-gnu
+  build-linux:
+    name: Build ${{ matrix.target }}
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            cross: false
+          - target: aarch64-unknown-linux-gnu
+            cross: true
     steps:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: release-x86_64-linux
+          key: release-${{ matrix.target }}
 
-      - name: Install dependencies
+      - name: Install dependencies (native x86_64)
+        if: matrix.cross == false
         run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev
 
+      - name: Install dependencies (cross aarch64)
+        if: matrix.cross == true
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu pkg-config perl make
+
       - name: Build
-        run: cargo build --release --target x86_64-unknown-linux-gnu -p mnemonic-mcp
+        env:
+          OPENSSL_STATIC: ${{ matrix.cross && '1' || '' }}
+          OPENSSL_LIB_DIR: ${{ matrix.cross && '' || '' }}
+        run: |
+          if [ "${{ matrix.cross }}" = "true" ]; then
+            export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
+            export CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc
+            export CXX_aarch64_unknown_linux_gnu=aarch64-linux-gnu-g++
+            export OPENSSL_SRC_PERL=/usr/bin/perl
+          fi
+          cargo build --release --target ${{ matrix.target }} -p mnemonic-mcp --features openssl-vendored
 
       - name: Package
         run: |
           tag="${GITHUB_REF#refs/tags/}"
-          name="mnemonic-mcp-${tag}-x86_64-unknown-linux-gnu"
+          name="mnemonic-mcp-${tag}-${{ matrix.target }}"
           mkdir -p "$name"
-          cp target/x86_64-unknown-linux-gnu/release/mnemonic-mcp "$name/"
+          cp "target/${{ matrix.target }}/release/mnemonic-mcp" "$name/"
           cp README.md "$name/" 2>/dev/null || true
           tar czf "${name}.tar.gz" "$name"
           echo "ASSET=${name}.tar.gz" >> $GITHUB_ENV
 
       - uses: actions/upload-artifact@v4
         with:
-          name: x86_64-unknown-linux-gnu
-          path: ${{ env.ASSET }}
-
-  build-linux-arm:
-    name: Build aarch64-unknown-linux-gnu
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-unknown-linux-gnu
-
-      - name: Install cross
-        run: cargo install cross --locked
-
-      - name: Build
-        run: cross build --release --target aarch64-unknown-linux-gnu -p mnemonic-mcp
-
-      - name: Package
-        run: |
-          tag="${GITHUB_REF#refs/tags/}"
-          name="mnemonic-mcp-${tag}-aarch64-unknown-linux-gnu"
-          mkdir -p "$name"
-          cp target/aarch64-unknown-linux-gnu/release/mnemonic-mcp "$name/"
-          cp README.md "$name/" 2>/dev/null || true
-          tar czf "${name}.tar.gz" "$name"
-          echo "ASSET=${name}.tar.gz" >> $GITHUB_ENV
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: aarch64-unknown-linux-gnu
+          name: ${{ matrix.target }}
           path: ${{ env.ASSET }}
 
   build-macos:
@@ -114,7 +109,7 @@ jobs:
 
   release:
     name: Create Release
-    needs: [build-linux-x86, build-linux-arm, build-macos]
+    needs: [build-linux, build-macos]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

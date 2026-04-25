@@ -35,6 +35,11 @@ tokio = { version = "1", features = ["time", "rt"] }
 [features]
 default = []
 local-embed = ["fastembed"]
+openssl-vendored = ["openssl-sys/vendored"]
+
+[dependencies.openssl-sys]
+version = "0.9"
+optional = true
 
 [dev-dependencies]
 httpmock = "0.8"

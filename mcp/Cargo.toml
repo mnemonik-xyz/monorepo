@@ -59,6 +59,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 default = []
 # Forwards to mnemonic-core's local-embed feature (fastembed ONNX runtime).
 local-embed = ["mnemonic-core/local-embed"]
+# Vendor OpenSSL from source (used in CI cross-compilation).
+openssl-vendored = ["mnemonic-core/openssl-vendored"]
 
 [dev-dependencies]
 tempfile = "3"

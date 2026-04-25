@@ -1,5 +1,3 @@
 [target.aarch64-unknown-linux-gnu]
-pre-build = [
-    "dpkg --add-architecture arm64",
-    "apt-get update && apt-get install -y pkg-config libssl-dev:arm64"
-]
+[target.aarch64-unknown-linux-gnu.env]
+passthrough = ["OPENSSL_STATIC", "OPENSSL_LIB_DIR", "OPENSSL_INCLUDE_DIR"]
