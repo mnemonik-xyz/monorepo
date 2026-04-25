@@ -1,0 +1,74 @@
+metadata:
+  feature_name: mnemonic-webapp
+  work_type: feature
+  size: L
+  started: "2026-04-25"
+  last_updated: "2026-04-25"
+  status: "in_progress"
+  current_question_num: 0
+
+phase1_feature_overview:
+  feature_name:
+    value: "mnemonic-webapp"
+    score: 95
+    status: complete
+  work_type:
+    value: "feature"
+    score: 95
+    status: complete
+  problem_statement:
+    value: ""
+    score: 40
+    gaps: ["why webapp vs just MCP in Cursor", "target audience for webapp specifically"]
+    status: incomplete
+  expected_behavior:
+    value: ""
+    score: 50
+    gaps: ["chat UI flow details", "artifact export format", "cross-provider handoff specifics"]
+    status: incomplete
+  affected_components:
+    value: "webapp/ (new), mcp/ (backend)"
+    score: 60
+    gaps: ["Ollama integration details", "new endpoints needed on MCP"]
+    status: incomplete
+  testing_strategy:
+    value: ""
+    score: 0
+    gaps: ["unit/integration/E2E scope"]
+    status: incomplete
+
+phase2_user_experience:
+  user_flow:
+    value: ""
+    score: 30
+    gaps: ["step-by-step user journey", "what happens on first visit", "how artifacts are exported"]
+    status: incomplete
+  error_handling:
+    value: ""
+    score: 0
+    gaps: ["LLM unavailable", "MCP server down", "embedding failure"]
+    status: incomplete
+  edge_cases:
+    value: ""
+    score: 0
+    gaps: ["large conversations", "concurrent users", "empty knowledge base"]
+    status: incomplete
+
+phase3_integration:
+  deploy_approach:
+    value: ""
+    score: 0
+    gaps: ["hosting", "Ollama setup", "env config"]
+    status: incomplete
+  manual_user_actions:
+    value: ""
+    score: 0
+    gaps: ["what user needs to set up"]
+    status: incomplete
+  external_dependencies:
+    value: "Ollama, MCP server"
+    score: 40
+    gaps: ["model selection", "fallback if Ollama unavailable"]
+    status: incomplete
+
+conversation_history: []
