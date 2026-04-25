@@ -1,0 +1,130 @@
+{
+  "validator": "task-validator",
+  "batch": 2,
+  "iteration": 1,
+  "tasks_checked": [6, 7, 8, 9, 10],
+  "tasks": {
+    "6": {
+      "status": "approved",
+      "findings": [
+        {
+          "severity": "minor",
+          "category": "content",
+          "task": 6,
+          "section": "Reviewers",
+          "issue": "Reviewer report paths use absolute filesystem paths (/home/claude/.openclaw/...) instead of project-root-anchored paths. Template specifies: work/{feature}/logs/working/task-{N}/{reviewer}-{round}.json",
+          "fix": "Replace absolute paths with: work/mnemonic-core/logs/working/task-6/code-reviewer-1.json (and similarly for other reviewers)"
+        },
+        {
+          "severity": "minor",
+          "category": "content",
+          "task": 6,
+          "section": "Required Skills",
+          "issue": "Skill path uses absolute path /home/claude/.claude/skills/code-writing/SKILL.md instead of tilde-relative ~/.claude/skills/code-writing/SKILL.md as used in the template",
+          "fix": "Change to: /skill:code-writing — [SKILL.md](~/.claude/skills/code-writing/SKILL.md)"
+        }
+      ]
+    },
+    "7": {
+      "status": "approved",
+      "findings": [
+        {
+          "severity": "minor",
+          "category": "content",
+          "task": 7,
+          "section": "Verification Steps",
+          "issue": "Automated section omits cargo build -p mnemonic-mcp. The AC explicitly checks this and What to do step 8 mentions it, but it is absent from Verification Steps Automated, making it harder for the executing agent to know to run it during implementation.",
+          "fix": "Add to Automated: cargo build -p mnemonic-mcp — compiles successfully after import updates"
+        },
+        {
+          "severity": "minor",
+          "category": "content",
+          "task": 7,
+          "section": "Reviewers",
+          "issue": "Reviewer report paths use absolute filesystem paths instead of project-root-anchored paths",
+          "fix": "Replace absolute paths with: work/mnemonic-core/logs/working/task-7/{reviewer}-1.json"
+        }
+      ]
+    },
+    "8": {
+      "status": "approved",
+      "findings": [
+        {
+          "severity": "minor",
+          "category": "content",
+          "task": 8,
+          "section": "Reviewers",
+          "issue": "Reviewer report paths use absolute filesystem paths instead of project-root-anchored paths",
+          "fix": "Replace absolute paths with: work/mnemonic-core/logs/working/task-8/{reviewer}-1.json"
+        }
+      ]
+    },
+    "9": {
+      "status": "approved",
+      "findings": [
+        {
+          "severity": "minor",
+          "category": "content",
+          "task": 9,
+          "section": "Verification Steps",
+          "issue": "cargo clippy -p mnemonic-core -- -D warnings is placed in Smoke rather than Automated. Clippy is a static analysis tool run locally without any deployment and belongs in Automated alongside cargo test.",
+          "fix": "Move cargo clippy command to Automated section"
+        },
+        {
+          "severity": "minor",
+          "category": "content",
+          "task": 9,
+          "section": "Reviewers",
+          "issue": "Reviewer report paths use absolute filesystem paths instead of project-root-anchored paths",
+          "fix": "Replace absolute paths with: work/mnemonic-core/logs/working/task-9/{reviewer}-1.json"
+        }
+      ]
+    },
+    "10": {
+      "status": "approved",
+      "findings": [
+        {
+          "severity": "minor",
+          "category": "content",
+          "task": 10,
+          "section": "TDD Anchor",
+          "issue": "TDD Anchor entries describe files rather than individual test cases. Format should be `tests/path::test_name — description`. The entries use file paths like core/tests/integration_cbor.rs with a high-level description instead of per-test anchors (e.g., core/tests/integration_cbor.rs::test_schema_encode_decode — schema encoding round-trips correctly).",
+          "fix": "Replace file-level entries with individual test anchors in the format `core/tests/integration_cbor.rs::test_name — what it verifies` for each of the 5 known CBOR tests and the 1 proptest"
+        },
+        {
+          "severity": "minor",
+          "category": "content",
+          "task": 10,
+          "section": "Context Files",
+          "issue": "Source files to read (mcp/tests/integration_cbor.rs, mcp/tests/proptest_canonical.rs, mcp/benches/decompress.rs, mcp/benches/cbor_codec.rs, core/Cargo.toml, core/src/lib.rs) are listed as plain text with backticks rather than as markdown links [name](path)",
+          "fix": "Convert each to markdown link format: [integration_cbor.rs](../../mcp/tests/integration_cbor.rs) etc."
+        },
+        {
+          "severity": "minor",
+          "category": "content",
+          "task": 10,
+          "section": "Reviewers",
+          "issue": "Reviewer report paths use absolute filesystem paths instead of project-root-anchored paths",
+          "fix": "Replace absolute paths with: work/mnemonic-core/logs/working/task-10/{reviewer}-1.json"
+        }
+      ]
+    }
+  },
+  "cross_task": {
+    "dependency_chain": "valid — 5→6→7→8→9→10, wave numbers match dependency order, no cycles",
+    "wave_consistency": "valid — each task wave equals task number; depends_on references task with wave = current_wave - 1",
+    "shared_resources": "not applicable — tech-spec explicitly states Shared Resources: None",
+    "merge_candidates": "none — each task is a single-module extraction with cohesive file changes",
+    "split_candidates": "none — multi-file changes in tasks 6-9 are all required for a single extraction outcome",
+    "over_decomposition": "not applicable — 5 tasks covering 5 distinct module extractions is proportional to feature size (L)"
+  },
+  "status": "approved",
+  "summary": "5 approved, 0 need fixes. All tasks pass critical and major checks. 8 minor findings across all 5 tasks, all in two categories: (1) reviewer paths using absolute filesystem paths rather than project-root-relative paths (affects all 5 tasks), and (2) task-specific content gaps (TDD Anchor format in task 10, missing build step in task 7 Verification Steps, clippy placement in task 9, context file link format in task 10). No section omissions, no AC/TDD carry-forward losses, no frontmatter errors, no dependency violations.",
+  "stats": {
+    "tasks_checked": 5,
+    "issues_found": 8,
+    "critical": 0,
+    "major": 0,
+    "minor": 8
+  }
+}

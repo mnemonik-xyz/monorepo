@@ -1,0 +1,56 @@
+{
+  "validator": "reality-checker",
+  "batch": 1,
+  "iteration": 1,
+  "tasks": {
+    "1": {
+      "status": "needs_fix",
+      "findings": [
+        {
+          "severity": "major",
+          "category": "missing_function",
+          "task": 1,
+          "issue": "Task Step 6 says to update only one `turboquant::` import line in mcp/src/compress.rs: 'use turboquant::{pack_bits, pack_indices, TurboQuant};'. However, grep confirms there are TWO occurrences of 'turboquant::' in compress.rs — line 8 (the use statement) and line 158 ('let cv = turboquant::CompressedVectors {'). The task description in Step 6 only mentions the use-import line and says 'Scan the rest of the file for any other turboquant:: occurrences and update them all' — so the intent is correct. The Details section's one-liner about 'Before/After' only shows the import, which could mislead the agent into missing line 158. The instruction in Step 6 to scan is present but the Detail section's concrete example is incomplete.",
+          "fix": "Update the Details section to explicitly show BOTH replacements: (1) the use statement on line 8 and (2) the 'turboquant::CompressedVectors' struct literal on line 158. Both must become 'turboquant_plus_rs::'. The Step 6 scan instruction is correct but the worked example in Details should reflect both sites to avoid the agent stopping after the first substitution."
+        },
+        {
+          "severity": "minor",
+          "category": "feasibility",
+          "task": 1,
+          "issue": "Task Step 5 says to remove 'solana-client = \"2.2\"' and 'solana-transaction-status = \"2.2\"' from mcp/Cargo.toml, and instructs the agent to confirm they are only used in solana.rs before removing. Grep of mcp/src/ confirms neither 'solana_client::' nor 'solana_transaction_status::' appear anywhere in any .rs file — the crate was likely declared but not actually imported via 'use' in the source. This is a safe removal. The task's 'confirm before removing' guard is appropriate but creates minor ambiguity because the agent must also verify that removing these deps does not break a transitive re-export. The instruction is feasible and conservative enough, but a minor note helps.",
+          "fix": "No change required to task logic. Minor clarification: solana-client and solana-transaction-status have zero 'use' appearances in mcp/src/, so removal is safe. Agent should still run 'cargo build -p mnemonic-mcp' to confirm after removal."
+        }
+      ]
+    },
+    "2": {
+      "status": "approved",
+      "findings": [
+        {
+          "severity": "minor",
+          "category": "feasibility",
+          "task": 2,
+          "issue": "Task Details section (mcp/src/mcp.rs) states: 'No crate::codec present in the first 50 lines read; verify there are no codec references in the rest of the file.' Actual inspection of mcp/src/mcp.rs confirms no 'crate::codec' references exist anywhere in the file — only 'crate::{arweave, compress, db, embed, pricing, solana, tools}'. The task's instruction to verify is correct. However, the task Step 7 says 'Update mcp/src/mcp.rs: any crate::codec:: references become mnemonic_core::codec::' — there are none to update. This is a no-op step. Not a blocking issue since the step will correctly complete with zero edits, but it adds noise.",
+          "fix": "Minor: annotate Step 7 with 'If no codec references found in mcp.rs, this step is a no-op — confirmed by code-research.md.' Prevents the agent from second-guessing itself."
+        }
+      ]
+    },
+    "3": {
+      "status": "approved",
+      "findings": [
+        {
+          "severity": "minor",
+          "category": "feasibility",
+          "task": 3,
+          "issue": "Task Details section says 'mcp/src/main.rs (modify) — line 7 is mod identity;'. Actual main.rs confirms 'mod identity;' is on line 7 and identity call sites are on lines 344 and 346. These are accurate. However, the task says 'There are two call sites: identity::load_or_create_keypair and identity::did_sol' — confirmed correct. The task also says to add 'use mnemonic_core::identity;' near other imports and remove 'mod identity;'. This is fully feasible given the actual source structure.",
+          "fix": "No fix needed. All file references, line numbers, and function names verified against actual source."
+        }
+      ]
+    }
+  },
+  "summary": "1 needs fix (Task 1: incomplete turboquant replacement example in Details section), 2 approved (Tasks 2 and 3 are accurate and feasible)",
+  "stats": {
+    "tasks_checked": 3,
+    "claims_verified": 31,
+    "issues_found": 3
+  }
+}

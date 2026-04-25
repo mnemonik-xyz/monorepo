@@ -1,0 +1,162 @@
+{
+  "validator": "task-validator",
+  "batch": [1, 2, 3, 4, 5],
+  "batch_number": 1,
+  "iteration": 1,
+  "status": "changes_required",
+  "findings": [
+    {
+      "severity": "minor",
+      "category": "content",
+      "task": 1,
+      "section": "TDD Anchor",
+      "issue": "TDD Anchor entries are not in the required format `tests/path::test_name — description`. Instead, the section contains build/smoke commands (cargo build, cargo test) and prose explaining why unit tests don't apply. The section must either be deleted (non-code task) or contain properly formatted test anchor entries. Task 1 does produce code (Cargo.toml files, lib.rs stubs), so deletion is not appropriate, but the current content does not match the required format.",
+      "fix": "Replace the current prose with properly formatted entries. For a scaffold task where the primary test gate is compilation, use entries like: `cargo build -p mnemonic-core` — empty-stub library crate compiles without errors. Alternatively, if no Rust test functions are written, note explicitly in the section that compile verification replaces unit tests and provide one entry per build command in the standard anchor format."
+    },
+    {
+      "severity": "minor",
+      "category": "content",
+      "task": 1,
+      "section": "Context Files",
+      "issue": "The 'Files to create/modify (workspace target)' subsection lists 13 file paths as plain text (not markdown links). The checklist rule requires all context files to be markdown links with both name and path: `[name](path)`. Plain text paths like `mnemonic-refactored/Cargo.toml — new workspace root` do not satisfy this requirement.",
+      "fix": "Convert all plain text file paths in 'Files to create/modify' to markdown links. Example: `[Cargo.toml](../../../Cargo.toml) — new workspace root`. Use relative paths anchored to the task file location or absolute paths."
+    },
+    {
+      "severity": "minor",
+      "category": "content",
+      "task": 2,
+      "section": "Context Files",
+      "issue": "Lines 96-104 list source code files (mcp/src/codec/mod.rs, mcp/src/codec/schema.rs, mcp/src/codec/canonical.rs, mcp/src/codec/hash.rs, mcp/src/codec/sign.rs, mcp/src/tools.rs, mcp/src/mcp.rs, core/src/lib.rs, core/Cargo.toml) as backtick-quoted inline code with descriptions but without markdown link format. These are context files relevant to the task and should be formatted as `[name](path)` links.",
+      "fix": "Convert inline code file references to markdown links. Example: `[mcp/src/codec/mod.rs](/home/claude/.openclaw/workspace/mnemonic-protocol/mcp/src/codec/mod.rs) — current source: declares pub mod schema; pub mod canonical; pub mod hash; pub mod sign;`"
+    },
+    {
+      "severity": "minor",
+      "category": "content",
+      "task": 4,
+      "section": "Context Files",
+      "issue": "The 'Code files (to create/modify)' subsection on lines 108-114 lists 7 files as plain text paths without markdown link format: core/src/embed/mod.rs, core/src/lib.rs, core/Cargo.toml, mcp/src/main.rs, mcp/src/tools.rs, mcp/src/embed.rs, mcp/src/db.rs. Required format is markdown links.",
+      "fix": "Convert to markdown links. Example: `[mcp/src/embed.rs](/home/claude/.openclaw/workspace/mnemonic-protocol/mcp/src/embed.rs) — source to migrate (will be deleted after move)`"
+    },
+    {
+      "severity": "minor",
+      "category": "content",
+      "task": 4,
+      "section": "Context Files",
+      "issue": "code-research.md is referenced as `[code-research.md](../code-research.md)` but this file may not exist in the feature directory. Context file links should only reference files that exist. If code-research.md was produced during discovery, its presence should be verified.",
+      "fix": "Verify that `work/mnemonic-core/code-research.md` exists. If it does not exist, remove the link or replace it with the actual research notes location."
+    },
+    {
+      "severity": "major",
+      "category": "carry-forward",
+      "task": 5,
+      "section": "TDD Anchor",
+      "issue": "The tech-spec Testing Strategy states: 'compress module (existing 4 tests): move, update turboquant imports, add numerical fidelity test comparing compress→decompress roundtrip MSE stays below threshold after namespace change.' The task's TDD Anchor lists only 3 new tests (fidelity roundtrip, empty embedding, single-element) but does NOT list the 4 existing tests that must be moved from mcp/src/compress.rs. The body text says 'The 4 tests already in mcp/src/compress.rs must move and continue to pass — do not rewrite them' but they are absent from the TDD Anchor. Tests that must pass are missing from the anchor.",
+      "fix": "Add the 4 existing compress tests from mcp/src/compress.rs as TDD Anchor entries. Read the actual test function names from the source file and add them in the format: `core/src/compress/mod.rs::tests::{test_name}` — description of what the test verifies. The TDD Anchor must enumerate all tests expected to pass, not just new ones."
+    },
+    {
+      "severity": "minor",
+      "category": "content",
+      "task": 5,
+      "section": "Context Files",
+      "issue": "Lines 80-85 list 5 context files (mcp/src/compress.rs, core/src/lib.rs, core/Cargo.toml, mcp/src/main.rs, mcp/src/tools.rs) as plain text with backtick-quoted paths instead of markdown links. Required format is `[name](path)`.",
+      "fix": "Convert to markdown links. Example: `[mcp/src/compress.rs](/home/claude/.openclaw/workspace/mnemonic-protocol/mcp/src/compress.rs) — current EmbeddingCompressor implementation (source to migrate)`"
+    },
+    {
+      "severity": "minor",
+      "category": "consistency",
+      "task": 5,
+      "section": "Verification Steps",
+      "issue": "The Automated section claims '4 migrated + 3 new = 7 total' tests. However, the TDD Anchor only lists 3 tests (the new ones). The count of 4 migrated tests is asserted but those tests are not enumerated anywhere in the task document — they are only referenced by implication. This creates inconsistency between the verification claim and the actual anchor.",
+      "fix": "Either add the 4 migrated test names to the TDD Anchor (preferred), or correct the verification step to say '3 new tests (existing tests verified by running cargo test -p mnemonic-mcp first)'. The test count must be verifiable from the task document."
+    }
+  ],
+  "decomposition_findings": [
+    {
+      "severity": "none",
+      "category": "decomposition",
+      "note": "Dependency chain 1→2→3→4→5 is correct: no cycles, wave numbers strictly increase with dependencies. Task count (5 of 16 total for this feature) is proportional to feature scale (L). File scope per task is 4-8 files with related changes. No merge or split candidates identified in tasks 1-5."
+    }
+  ],
+  "stats": {
+    "tasks_checked": 5,
+    "critical_findings": 0,
+    "major_findings": 1,
+    "minor_findings": 7,
+    "issues_found": 8
+  },
+  "tasks": {
+    "1": {
+      "status": "approved",
+      "findings": [
+        {
+          "severity": "minor",
+          "section": "TDD Anchor",
+          "issue": "TDD Anchor entries use smoke/build command format rather than `tests/path::test_name — description` format. The section contains prose and build commands instead of formatted test anchors.",
+          "fix": "Reformat entries to use the standard anchor format, or add a clear note that compilation is the test gate and provide one entry per build command in the required format."
+        },
+        {
+          "severity": "minor",
+          "section": "Context Files",
+          "issue": "13 'Files to create/modify' listed as plain text without markdown link format.",
+          "fix": "Convert all file paths in the 'Files to create/modify' subsection to markdown links [name](path)."
+        }
+      ]
+    },
+    "2": {
+      "status": "approved",
+      "findings": [
+        {
+          "severity": "minor",
+          "section": "Context Files",
+          "issue": "9 source code files in the context section (lines 96-104) listed as backtick inline code without markdown link format.",
+          "fix": "Convert to markdown links [name](path)."
+        }
+      ]
+    },
+    "3": {
+      "status": "approved",
+      "findings": []
+    },
+    "4": {
+      "status": "approved",
+      "findings": [
+        {
+          "severity": "minor",
+          "section": "Context Files",
+          "issue": "7 'Code files (to create/modify)' listed as plain text without markdown link format.",
+          "fix": "Convert to markdown links [name](path)."
+        },
+        {
+          "severity": "minor",
+          "section": "Context Files",
+          "issue": "Link to code-research.md may reference a non-existent file.",
+          "fix": "Verify work/mnemonic-core/code-research.md exists; remove or correct the link if not."
+        }
+      ]
+    },
+    "5": {
+      "status": "needs_fix",
+      "findings": [
+        {
+          "severity": "major",
+          "section": "TDD Anchor",
+          "issue": "4 existing compress tests from mcp/src/compress.rs are not listed in TDD Anchor. Tech-spec requires them to be moved and pass. They are mentioned in body text but absent from the anchor, making them unverifiable from the task document.",
+          "fix": "Read test function names from mcp/src/compress.rs and add them as TDD anchor entries in format: `core/src/compress/mod.rs::tests::{name}` — what the test verifies."
+        },
+        {
+          "severity": "minor",
+          "section": "Context Files",
+          "issue": "5 context files listed as plain text without markdown link format.",
+          "fix": "Convert to markdown links [name](path)."
+        },
+        {
+          "severity": "minor",
+          "section": "Verification Steps",
+          "issue": "Claims '4 migrated + 3 new = 7 total' but TDD Anchor only enumerates 3 tests. Count is inconsistent with anchor.",
+          "fix": "Either add the 4 migrated test names to TDD Anchor, or correct the count to match what is actually enumerated."
+        }
+      ]
+    }
+  },
+  "summary": "4 approved (tasks 1-4 with minor findings only), 1 needs fix (task 5 has a major carry-forward issue: 4 existing compress tests missing from TDD Anchor). All 5 tasks have correct frontmatter, section structure, section order, dependency chain, and wave assignments. No critical findings. The recurring minor issue across tasks 1, 2, 4, 5 is that source code files in the Context Files section are listed as plain text rather than markdown links."
+}

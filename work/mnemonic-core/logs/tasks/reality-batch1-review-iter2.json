@@ -1,0 +1,49 @@
+{
+  "validator": "reality-checker",
+  "batch": "1-iter2",
+  "iteration": 2,
+  "tasks": {
+    "1": {
+      "status": "approved",
+      "findings": []
+    },
+    "4": {
+      "status": "approved",
+      "findings": []
+    },
+    "5": {
+      "status": "approved",
+      "findings": []
+    },
+    "6": {
+      "status": "approved",
+      "findings": []
+    },
+    "7": {
+      "status": "needs_fix",
+      "findings": [
+        {
+          "severity": "critical",
+          "category": "hallucination",
+          "task": 7,
+          "issue": "The new_for_test + force_irys bypass is fundamentally broken. When force_irys=true, write() routes to write_irys() (not write_arlocal()). But write_irys() posts to the hardcoded URL 'https://uploader.irys.xyz/upload' — it completely ignores self.base_url. The mock server URL from MockServer::start() is never used. Tests test_write_success, test_write_bytes_success, and test_malformed_json_response will actually attempt real HTTP connections to uploader.irys.xyz/upload — not to the mock server. The task claims mocking 'POST /tx' will intercept write() calls via new_for_test, but write_irys() never posts to {base_url}/tx.",
+          "fix": "The write_irys() method must be refactored to accept a configurable upload URL (defaulting to 'https://uploader.irys.xyz/upload' in production, but overridable in tests). Add an upload_url field to ArweaveClient or pass it to write_irys(). The new_for_test constructor should set both force_irys=true AND point write_irys() to the mock server URL (e.g., '{base_url}/upload' or a separate upload_url field). The mock must serve POST /upload (not POST /tx) for write tests, and POST /tx is only the arlocal path. Alternatively, re-architect write_irys to use self.base_url for the upload endpoint in test mode."
+        }
+      ]
+    },
+    "8": {
+      "status": "approved",
+      "findings": []
+    },
+    "9": {
+      "status": "approved",
+      "findings": []
+    }
+  },
+  "stats": {
+    "tasks_checked": 7,
+    "claims_verified": 52,
+    "issues_found": 1
+  },
+  "summary": "6 approved, 1 needs fix"
+}

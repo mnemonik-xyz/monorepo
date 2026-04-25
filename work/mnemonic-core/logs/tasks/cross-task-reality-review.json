@@ -1,0 +1,84 @@
+{
+  "check": "cross-task",
+  "status": "needs_fix",
+  "findings": [
+    {
+      "severity": "critical",
+      "category": "cross-task-integration",
+      "tasks": [6, 11, 13, 14, 15, 16],
+      "issue": "grep pattern for payment method isolation is inconsistent across tasks. Tech-spec Decision 2 lists 7 payment methods (create_api_key, deduct_balance, credit_deposit, mark_x402_nonce, record_attestation_cost, get_pnl_stats, get_owner_pubkey) plus verify_usdc_transfer as 8th. The tech-spec Agent Verification Plan and acceptance criteria DO NOT include get_balance in the grep pattern — they use the 7-method pattern plus verify_usdc_transfer. However, Task 6 correctly identifies get_balance as an 8th DB payment method and its grep patterns include get_balance. Tasks 11, 13, 14, 15, 16 all use the 7+1 (verify_usdc_transfer) pattern WITHOUT get_balance. This means the final verification steps will not catch get_balance leaking into core/. Verified: get_balance exists in mcp/src/db.rs (line 135) and is a genuine payment method that must stay in mcp/.",
+      "fix": "Add get_balance to the grep pattern in Tasks 11, 13, 14, 15, and 16 acceptance criteria and verification steps. The pattern should be: grep -r 'create_api_key|deduct_balance|credit_deposit|mark_x402_nonce|record_attestation_cost|get_pnl_stats|get_owner_pubkey|get_balance|verify_usdc_transfer' core/src/"
+    },
+    {
+      "severity": "critical",
+      "category": "cross-task-integration",
+      "tasks": [7],
+      "issue": "Task 7 arweave write_bytes routing guard is incomplete. The actual arweave.rs code shows write() delegates to write_bytes() (line 27), and write_bytes() has its own is_local() check (lines 32-38). Task 7 instructs adding bypass_local_routing guard only in write() routing logic, but the same is_local() check exists independently in write_bytes(). The test test_write_bytes_success calls write_bytes() directly via new_for_test(). With only write() patched, write_bytes() still takes the arlocal path for mock server addresses and test_write_bytes_success will produce a PRNG id instead of the mock-returned id. The task body does say 'Apply the same guard in write_bytes() if it has the same pattern' but this is a conditional hint, not a firm instruction — the acceptance criteria does not explicitly require it.",
+      "fix": "In Task 7's What to do step 4, change the write_bytes() routing guard from a conditional hint to a mandatory instruction: 'Apply the same bypass_local_routing guard to write_bytes() — it has the same is_local() routing pattern as write() and will fail test_write_bytes_success without this fix.' Update acceptance criteria to include a bullet: write_bytes() routing in write_bytes() is also guarded by bypass_local_routing."
+    },
+    {
+      "severity": "major",
+      "category": "cross-task-integration",
+      "tasks": [6, 9],
+      "issue": "Task 6 introduces LineageStore trait but lineage types (LineageResult, LineageNode, LineageEdge, ParentRef) are not moved to core/src/ until Task 9. Task 6's Details section acknowledges this with Option A / Option B workaround, but neither option is declared as the chosen approach in the task specification — it is left to the implementer to decide. This creates ambiguity: if the implementer picks Option B (placeholder structs) they will define LineageResult etc. in core/src/storage/ which is the wrong final location. Task 9 then must know to delete those placeholders and replace them. There is no explicit depends_on note in Task 9 about cleaning up Option B artifacts.",
+      "fix": "In Task 6 Details section, replace 'Option A (recommended): ... Option B: ...' with a firm decision: 'Use Option A. Do NOT define lineage types in storage/. Define LineageStore trait methods as taking conn: &rusqlite::Connection directly (same as the free functions in lineage.rs) rather than typed structs, OR defer the LineageStore trait implementation to Task 9 by adding only AttestationStore to Task 6 scope.' If Option A is chosen, update Task 6 acceptance criteria to remove the LineageStore trait requirement and move it to Task 9."
+    },
+    {
+      "severity": "major",
+      "category": "cross-task-integration",
+      "tasks": [4, 6],
+      "issue": "Task 4 instructs updating mcp/src/db.rs test code to use MockEmbedder from mnemonic_core::embed::MockEmbedder (Step 7). But MockEmbedder is behind #[cfg(test)] in core/src/embed/. In Rust, #[cfg(test)] items in a library crate are NOT visible to external crates — they are only available when that specific crate is under test. So mcp/src/db.rs cannot import mnemonic_core::embed::MockEmbedder even in its own #[cfg(test)] block. This is a fundamental Rust visibility constraint. Task 6 then moves db.rs tests to core/src/storage/sqlite.rs (where MockEmbedder would be visible within the same crate). But between Task 4 completion and Task 6 completion, the db.rs tests that need MockEmbedder will fail to compile.",
+      "fix": "Two options: (1) In Task 4, instruct the implementer that the db.rs #[cfg(test)] import of MockEmbedder will only work if MockEmbedder is re-exported with #[cfg(test)] pub use at the crate root of mnemonic_core — which still requires a special mechanism. More practically: (2) Update Task 4 Step 7 to read 'Do not update db.rs tests in this task — they will be moved to core/src/storage/sqlite.rs in Task 6 where MockEmbedder is directly accessible within the same crate.' Add a note to Task 6 that the db.rs HashEmbedder tests must be rewritten as MockEmbedder tests during the storage extraction."
+    },
+    {
+      "severity": "major",
+      "category": "cross-task-integration",
+      "tasks": [8],
+      "issue": "Task 8 TDD Anchor and What to do step 7 describe test test_confirm_tx_retry_exhaustion using tokio::time::pause() to skip the 30 x 500ms sleep (15 seconds total). Task 8 details say: 'annotate with #[tokio::test(flavor = \"current_thread\", start_paused = true)]'. However, Task 7 introduced httpmock dev-dependency which spawns a background HTTP server thread. httpmock's MockServer::start() uses a multi-threaded runtime internally. tokio::test with flavor = \"current_thread\" may conflict with httpmock's thread spawning depending on the httpmock version. The test is for confirm_tx retry — it does not need httpmock (it mocks getSignatureStatuses directly via MockServer). This is a test setup inconsistency that could cause flaky failures or require careful sequencing of the time::pause() call relative to the mock server startup.",
+      "fix": "In Task 8 Details, add a note: 'The retry exhaustion test should use MockServer::start_async() or MockServer::start() outside the async test, and call tokio::time::pause() inside the test body after mock server creation but before the client call. Alternatively, run the test in a separate thread using #[tokio::test(start_paused = true)] — this works with httpmock because MockServer runs its own OS thread, not a tokio task.' Verify the chosen httpmock version (0.8) supports concurrent use with paused tokio time."
+    },
+    {
+      "severity": "major",
+      "category": "cross-task-integration",
+      "tasks": [5],
+      "issue": "Task 5 states compress.rs depends on the Embedder trait from Task 4. The actual mcp/src/compress.rs (verified) does NOT import or use the Embedder trait at all — it only uses turboquant, ndarray, and its own CompressedEmbedding/EmbeddingCompressor types. The dependency claim in Task 5 Details section ('EmbeddingCompressor may reference embedding types from mnemonic_core::embed::') is factually incorrect based on the actual source code. This could cause the implementer to unnecessarily wait for Task 4 or add incorrect imports.",
+      "fix": "Correct Task 5 Dependencies section: 'compress.rs does NOT import the Embedder trait or any embed types. It only uses turboquant_plus_rs, ndarray, and its own types. The stated dependency on Task 4 is for sequencing only (core/src/lib.rs already has embed mod from Task 4), not for actual code imports.' Remove the misleading sentence 'EmbeddingCompressor may reference embedding types from mnemonic_core::embed::' from Task 5 Details."
+    },
+    {
+      "severity": "major",
+      "category": "cross-task-integration",
+      "tasks": [10],
+      "issue": "Task 10 moves mcp/benches/decompress.rs to core/benches/. The actual decompress.rs (verified) uses a path trick: '#[path = \"../src/compress.rs\"] mod compress;' — it directly includes the compress source file. After the move to core/benches/, this relative path '#[path = \"../src/compress.rs\"]' would resolve to core/src/compress.rs which now exists. However, the correct approach per Task 10 is to replace the inline mod include with 'use mnemonic_core::compress::EmbeddingCompressor'. If the implementer fails to replace the path trick and just moves the file, the bench will compile (because the path now happens to point to the right place) but will be using a private copy of compress.rs rather than the public mnemonic_core API — defeating the purpose of the migration. Task 10 hints say 'replace inline helpers with imports' but does not specifically call out this path trick.",
+      "fix": "Add an explicit instruction to Task 10 What to do step 4: 'In core/benches/decompress.rs, remove the #[path = \"../src/compress.rs\"] mod compress; declaration entirely and replace it with use mnemonic_core::compress::EmbeddingCompressor; — this is the path-include trick the original benchmark used to access the compress module directly.'"
+    },
+    {
+      "severity": "minor",
+      "category": "cross-task-integration",
+      "tasks": [1, 6, 8, 11, 13, 14, 15, 16],
+      "issue": "solana-client and solana-transaction-status are listed in mcp/Cargo.toml as dependencies. Verified: neither crate is imported anywhere in mcp/src/ (grep returns no matches for solana_client or solana_transaction_status). Task 1 says to remove them, Task 8 says to remove solana-client if present after extraction, Task 11 says to evaluate solana-transaction-status. However, since both are already unused in mcp/src/ (they appear to have been leftover or never actually used), their removal in Task 1 should be unconditional, not conditional on 'verify they are only used in solana.rs'. This minor inconsistency in wording could cause the implementer to do unnecessary verification work.",
+      "fix": "In Task 1 step 5, change 'confirm they are only used in solana.rs before removing' to 'grep confirms neither crate is imported in any mcp/src/ file — both can be removed unconditionally.'"
+    },
+    {
+      "severity": "minor",
+      "category": "cross-task-integration",
+      "tasks": [6, 9],
+      "issue": "Task 6 SqliteStore attempts to implement LineageStore (using free functions from lineage.rs as trait methods). But lineage functions in the actual mcp/src/lineage.rs take a raw rusqlite::Connection parameter — they are not methods on any struct. Task 6 creates SqliteStore wrapping rusqlite::Connection, and the LineageStore trait methods would need to pass self.conn to these free functions. This means SqliteStore's LineageStore impl in Task 6 is effectively calling lineage functions with a Connection reference before lineage is extracted to core. The types (LineageResult etc.) are also not yet in core. This creates a circular situation: SqliteStore implements LineageStore but needs lineage module types that live in mcp/src/lineage.rs — creating a cross-crate dependency that does not yet exist.",
+      "fix": "This reinforces the major finding above. Firm decision must be made in Task 6: either defer LineageStore to Task 9, or scope Task 6 SqliteStore to only implement AttestationStore, with LineageStore deferred. The acceptance criteria for Task 6 should be updated to reflect the chosen approach."
+    },
+    {
+      "severity": "minor",
+      "category": "hints",
+      "tasks": [7],
+      "issue": "Task 7 Details section contains complete pseudocode blocks for the new_for_test constructor, upload_url routing, and all 3 httpmock test patterns (write, health_check, read). These are not hints pointing to patterns — they are complete implementation blueprints with exact struct field names, exact Rust syntax, and exact test assertion code. This crosses from 'hint' into 'prescription', which is a hints-category finding per the validation rules.",
+      "fix": "Reduce the code blocks in Task 7 Details to pattern pointers: 'Add bypass_local_routing: bool field to ArweaveClient. In new(), set it false. In new_for_test(), set it true. Use this flag to guard the is_local() check. For test patterns, see how existing httpmock tests are structured in the project.' Remove the verbatim Rust snippets that implement the full logic."
+    },
+    {
+      "severity": "minor",
+      "category": "hints",
+      "tasks": [8],
+      "issue": "Task 8 Details section contains verbatim Rust implementation guidance for the verify_usdc_transfer extraction ('The function body is identical to the removed method — it calls client.rpc(...)'), the check_x402 call site change ('changes from solana.verify_usdc_transfer(...) to verify_usdc_transfer(solana, ...)'), and the full description of how the httpmock test for write_memo needs three sequential RPC mocks. While not full code blocks, the level of prescriptive detail for write_memo test structure goes beyond a pattern hint.",
+      "fix": "Acceptable as-is for complexity level, but the write_memo test setup description could be shortened to: 'write_memo requires mocking three sequential JSON-RPC calls — getLatestBlockhash, sendTransaction, getSignatureStatuses — refer to the Solana JSON-RPC spec for response shapes.'"
+    }
+  ],
+  "summary": "16 tasks checked across all waves. Two critical findings: (1) get_balance is a genuine payment method in db.rs but is missing from the grep isolation patterns in Tasks 11/13/14/15/16 — it will not be caught if it leaks into core/; (2) write_bytes() in arweave.rs has the same is_local() routing as write() but Task 7's bypass_local_routing fix instructions are ambiguous about whether write_bytes() is also patched. Two other major findings: MockEmbedder cannot be imported by external crates from #[cfg(test)] in Rust — Task 4's db.rs test update step is structurally broken and will fail to compile; and Task 6's LineageStore implementation creates a circular dependency on types not yet in core until Task 9. All 8 core modules (codec, identity, embed, compress, storage, arweave, solana, lineage) are correctly assigned across Tasks 2-9 with proper sequential wave ordering and no duplicate initialization of heavy resources. httpmock pattern is consistent between Tasks 7 and 8. MockEmbedder usage pattern is consistent across Tasks 4, 6, and 15."
+}

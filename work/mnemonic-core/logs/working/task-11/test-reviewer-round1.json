@@ -1,0 +1,63 @@
+{
+  "reviewer": "test-reviewer",
+  "round": 1,
+  "task": "11",
+  "verdict": "needs_improvement",
+  "status": "needs_improvement",
+  "summary": "Test count parity is acceptable: db.rs had zero tests before deletion, so no coverage was lost in the move. The 83 tests remain intact. However, payment.rs now contains 9 DB functions operating on real money (create_api_key, deduct_balance, credit_deposit, mark_x402_nonce, get_pnl_stats, etc.) with zero automated tests. The MCP round-trip smoke test and the cold-init regression concern are captured only by manual one-shot verification — neither is automated. These gaps are non-blocking for a pure rewiring task but represent accumulating debt on financial-critical code.",
+  "findings": [
+    {
+      "severity": "major",
+      "category": "missing_coverage",
+      "location": "mcp/src/payment.rs (entire file, 491 lines)",
+      "issue": "payment.rs contains 9 DB functions handling real money (create_api_key, get_owner_pubkey, get_balance, deduct_balance, credit_deposit, mark_x402_nonce, record_attestation_cost, get_pnl_stats, random_bytes) plus check_payment/check_balance/check_x402 payment-gating logic. No test module exists — not before deletion of db.rs and not after the merge. These functions contain non-trivial business logic: deduct_balance enforces an insufficient-funds guard, credit_deposit enforces idempotency via tx_sig deduplication, mark_x402_nonce enforces replay protection via UNIQUE constraint, get_pnl_stats performs a multi-column aggregation with margin-pct arithmetic. None of these code paths is covered by any automated test.",
+      "recommendation": "Add a #[cfg(test)] module to mcp/src/payment.rs using tempfile::NamedTempFile + SqliteStore::open_path to create an in-memory/temp SQLite database. Required test cases: (1) create_api_key returns a key with mnm_ prefix and persists a row; (2) deduct_balance succeeds when balance is sufficient and records a charge event; (3) deduct_balance returns Err when balance is insufficient — balance must be unchanged after the error; (4) credit_deposit increments balance and returns new balance; (5) credit_deposit returns Err on duplicate tx_sig (idempotency guard); (6) mark_x402_nonce returns Ok on first use and Err on second use with same sig; (7) get_pnl_stats returns margin_pct = 0.0 for empty attestation_costs, and correct arithmetic for a seeded row. These do not require network or async — all are synchronous SQLite operations on a temp DB.",
+      "litmusTestFailed": true,
+      "litmusNote": "Currently there are zero test assertions for this code — removing any of the 9 DB functions would not cause any test to fail."
+    },
+    {
+      "severity": "major",
+      "category": "missing_coverage",
+      "location": "MCP round-trip — no automated test, decisions.md task-11 verification section",
+      "issue": "The MCP stdio round-trip (echo tools/list JSON-RPC call, assert 5 tools returned with correct names) was verified once manually during task completion. It is not an automated test. Any future refactor of tools.rs, mcp.rs, or main.rs that drops or renames a tool will not be caught by cargo test. The decisions.md records 'MCP stdio round-trip -> 5 entries' as one-shot evidence — this does not protect against regression.",
+      "recommendation": "Add an integration test that spawns `cargo run -p mnemonic-mcp -- --transport stdio` as a child process (std::process::Command), writes the tools/list JSON-RPC request to stdin, reads stdout, and asserts: (a) response contains 'result', (b) the tools array has exactly 5 elements, (c) each of the 5 expected names is present (mnemonic_whoami, mnemonic_sign_memory, mnemonic_verify, mnemonic_prove_identity, mnemonic_recall). Place this in mcp/tests/smoke_rpc.rs. Gate it with a CI feature flag or #[ignore] to avoid blocking fast unit runs, and use a timeout of at least 120s to account for cold-init."
+    },
+    {
+      "severity": "minor",
+      "category": "missing_coverage",
+      "location": "Cold-init ~90s — noted in decisions.md task-11 deviations, no automated check",
+      "issue": "The teammate noted that TurboQuant cold-init for 1536-dim embeddings takes ~90s, and that a CI script with a 10s default timeout would fail. There is no automated performance guard. A future change (e.g., swapping the embedding backend, changing dim count, altering feature flags) could silently regress cold-init to 900s or fail it entirely. The 90s observation exists only as a prose note in decisions.md.",
+      "recommendation": "Add a timed smoke test (e.g., mcp/tests/cold_init_timing.rs, #[ignore] by default, run explicitly in CI nightly) that measures wall-clock time from process spawn to first valid JSON-RPC response and asserts it is under a configurable threshold (e.g., 180s). This provides a regression baseline without blocking PRs. Alternatively, document the expected range in a CI environment variable COLD_INIT_TIMEOUT_SECS and assert against it in the stdio smoke test."
+    },
+    {
+      "severity": "minor",
+      "category": "missing_coverage",
+      "location": "mcp/src/payment.rs:check_balance, check_x402, check_payment",
+      "issue": "The payment-gating logic (check_balance, check_x402, check_payment with modes 'balance', 'x402', 'both', 'none') has no unit tests. The 'both' mode has a fall-through logic (try balance, fall through to x402 on failure) that was refactored in this task (match -> if-let). The refactored path is untested — a bug in the fall-through would silently allow or block payments.",
+      "recommendation": "Unit-test check_balance with a mocked/temp SqliteStore: (1) Proceed when balance >= cost; (2) Unauthorized when balance < cost; (3) Unauthorized when key not found. For check_payment with mode 'none', assert PaymentGate::Proceed(None) is returned without any DB interaction. The x402 path requires a mock Solana RPC and is appropriately skipped in unit tests, but the balance portion of 'both' mode is testable synchronously."
+    }
+  ],
+  "notes": [
+    "Test count parity analysis: db.rs (deleted) contained 208 lines but zero tests — confirmed by reading the full deleted file in the diff. No coverage was lost by the deletion. The 83 passing tests (75 core unit + 5 integration + 3 proptest) all live in mnemonic-core, not mnemonic-mcp. This parity is expected and acceptable per the task spec's TDD anchor ('compile + test chain itself').",
+    "The task spec explicitly defines the TDD anchor as the compile+clippy+test chain, not new unit tests. The test gaps flagged here are pre-existing debt that this task's scope did not require addressing. The major findings are flagged to surface accumulating risk on financial logic, not to block the current rewiring.",
+    "db.rs did not have a #[cfg(test)] block before deletion — verified by reading the full 208-line deleted file in the diff. The move to payment.rs preserves the zero-test state of this code.",
+    "random_bytes has a fallback path (SHA256 from system time when /dev/urandom is unavailable) that is never tested. On production Linux this path is unreachable, but it is dead untested code that could produce weak entropy silently."
+  ],
+  "metrics": {
+    "filesReviewed": 6,
+    "litmusTest": {
+      "checked": 9,
+      "passed": 0,
+      "failed": 9,
+      "note": "All 9 DB helper functions in payment.rs fail the litmus test — removing any of them would not cause any automated test to fail, because no tests exist for them."
+    },
+    "coverageAssessment": "insufficient",
+    "pyramidBalance": {
+      "unit": 75,
+      "integration": 8,
+      "e2e": 0,
+      "assessment": "unbalanced",
+      "note": "All 83 tests cover mnemonic-core only. mnemonic-mcp has zero automated tests despite containing financial logic (payment gating, balance management, replay protection)."
+    }
+  }
+}

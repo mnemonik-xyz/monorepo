@@ -1,0 +1,131 @@
+{
+  "auditor": "code-auditor",
+  "task": 13,
+  "verdict": "issues-found",
+  "scope": "final-state-holistic",
+  "files_reviewed": [
+    "Cargo.toml",
+    "core/Cargo.toml",
+    "mcp/Cargo.toml",
+    "core/src/lib.rs",
+    "core/src/codec/mod.rs",
+    "core/src/codec/schema.rs",
+    "core/src/codec/canonical.rs",
+    "core/src/codec/hash.rs",
+    "core/src/codec/sign.rs",
+    "core/src/identity/mod.rs",
+    "core/src/embed/mod.rs",
+    "core/src/compress/mod.rs",
+    "core/src/storage/mod.rs",
+    "core/src/storage/traits.rs",
+    "core/src/storage/sqlite.rs",
+    "core/src/arweave/mod.rs",
+    "core/src/solana/mod.rs",
+    "core/src/lineage/mod.rs",
+    "core/tests/integration_cbor.rs",
+    "core/tests/proptest_canonical.rs",
+    "core/benches/cbor_codec.rs",
+    "core/benches/decompress.rs",
+    "mcp/src/main.rs",
+    "mcp/src/mcp.rs",
+    "mcp/src/tools.rs",
+    "mcp/src/payment.rs",
+    "mcp/src/pricing.rs",
+    "mcp/src/config.rs"
+  ],
+  "findings": [
+    {
+      "severity": "critical",
+      "location": "core/src/embed/mod.rs:22-63 + core/Cargo.toml:32",
+      "issue": "The `local-embed` feature does not compile. `cargo clippy --workspace --all-features` (and `cargo build --features local-embed`) fails with E0639 (`InitOptions` is `#[non_exhaustive]` in fastembed 5.x and cannot be constructed with a struct literal) and E0596 (`TextEmbedding::embed` now takes `&mut self`, but our trait method is `&self`). Because `local-embed` is opt-in, the default `cargo build --workspace` is green and every per-task verification passed — but fastembed is the documented default embedder for the product (\"open, verifiable default\" per patterns.md, and the DEFAULT `EMBED_PROVIDER` is `fastembed` in config.rs:70). Shipping mnemonic-core to crates.io in this state means anyone enabling `local-embed` gets a hard compile failure. Not caught by any CI gate because the workspace clippy does not include `--all-features`.",
+      "suggestion": "Pin fastembed to a compatible 4.x version (or update the API call: `InitOptions::new(EmbeddingModel::AllMiniLML6V2)` via the new builder; change `Embedder::embed` to `&mut self` OR wrap `TextEmbedding` in `RefCell` / `Mutex` to preserve the `&self` signature). Add `cargo clippy --workspace --all-features -- -D warnings` to the standard verification gate so future feature-gated regressions surface before merge."
+    },
+    {
+      "severity": "major",
+      "location": "core/src/storage/sqlite.rs:31-68, 95-111 + core/src/storage/traits.rs:62-70",
+      "issue": "Payment-domain schema + migrations leak into core. Tech Spec Decision 2 states \"payment methods stay in mcp/\", yet `core/src/storage/sqlite.rs` defines the full payment schema (`api_keys`, `payment_events`, `x402_nonces`, `attestation_costs`) and owns the `migrate_payment_events_unique_index` helper with its DELETE-then-CREATE-UNIQUE-INDEX logic. Separately, the `LineageStore` trait (`save_edge` / `get_edges` / `clear_edges` over a `lineage_edges` table) in core/src/storage/ is a vestigial stub left over from Task 6 — it is never consumed by mcp, contains a `TODO(task-9)` comment that was never followed up, and defines a DIFFERENT lineage table (`lineage_edges`) from the one `core/src/lineage/` actually uses (`artifact_lineage`). Two parallel lineage schemas coexist in core for the same conceptual DAG. This is classic cross-wave drift: Task 6 produced a trait + schema it couldn't predict Task 9 would supersede, and nobody re-unified them in Task 11's \"final rewiring\".",
+      "suggestion": "Two distinct cleanups: (a) move the payment table DDL (api_keys, payment_events, x402_nonces, attestation_costs, plus the `migrate_payment_events_unique_index` migration) out of core and into an mcp-side init step (e.g. `mcp/src/payment.rs::init_payment_schema(&SqliteStore)` run once at startup) — core should expose only the attestations + lineage schema. (b) Delete the `LineageStore` trait and the `lineage_edges` CREATE/SELECT/INSERT in sqlite.rs, and have `core/src/lineage/` be the single lineage surface (already takes `&Connection`). If a trait is genuinely wanted, rewrite it around the real lineage module API and wire it in."
+    },
+    {
+      "severity": "major",
+      "location": "core/src/storage/sqlite.rs:246, 271",
+      "issue": "`AttestationStore::search` and `LineageStore::get_edges` use `filter_map(|r| r.ok())` on `query_map` iterators — the exact pattern Task 9 fixed in lineage.rs (see decisions.md Task 9 summary: \"get_parents / get_children now collect rows into rusqlite::Result<Vec<_>> instead of filter_map(|r| r.ok())\"). Task 6 introduced the identical anti-pattern into the sqlite store and it wasn't cleaned up when Task 9 set the convention. Row-level DB errors are silently dropped. `search()` swallows a schema-drift or corrupted-blob failure as \"zero results\". This is also a cross-wave coherence failure.",
+      "suggestion": "Replace both sites with the Task 9 pattern: `let collected: rusqlite::Result<Vec<_>> = rows.collect(); Ok(collected?)`. Apply the same convention guard across the codebase."
+    },
+    {
+      "severity": "major",
+      "location": "mcp/src/mcp.rs:75-76",
+      "issue": "`unsafe impl Send for McpState {} / unsafe impl Sync for McpState {}` — load-bearing `unsafe` with only a comment justification. `SqliteStore` contains `rusqlite::Connection` which is `!Send`; the surrounding `Mutex<SqliteStore>` does NOT make the contained `!Send` type Send (`Mutex<T>: Sync` requires `T: Send`, it does not create Send from nothing). The unsafe impl is a workaround for axum's `State<Arc<McpState>>` requiring Send + Sync. This is pre-existing (likely copied from the original monolith) but the extraction is a natural moment to fix it — every other module cleaned up its pre-existing quirks (lineage Direction enum, db error propagation, etc.). If the store is really only touched with short critical sections and never `.await` is held across a lock, use `tokio::task::spawn_blocking` around DB ops, or switch to `tokio::sync::Mutex`, or use `parking_lot::Mutex` and move the `Connection` into a dedicated thread behind a channel. At minimum the `unsafe impl` should have a SAFETY comment that references the specific invariants being upheld.",
+      "suggestion": "Replace the unsafe impls with one of: (a) a dedicated `StoreHandle` that owns the connection in a worker thread and exposes a `async` API over a channel, (b) `std::sync::Mutex<rusqlite::Connection>` held via a Pool type where Connection is re-opened per call, or (c) a minimum remediation: add a `// SAFETY: ...` comment articulating the specific invariants (no await held across lock, Connection is used only inside `.lock()` critical sections, all public methods are called from the axum handlers which already ensure no await across the guard)."
+    },
+    {
+      "severity": "major",
+      "location": "core/src/solana/mod.rs:29 + mcp/src/payment.rs:241-244",
+      "issue": "`SolanaClient::rpc(&self, method, params)` is fully `pub` (not `#[doc(hidden)]`), exposing a general-purpose RPC escape hatch on the stable API surface. The only reason it's public is Task 8's cross-crate call: `verify_usdc_transfer` in mcp/payment.rs reaches into core and issues `client.rpc(\"getTransaction\", ...)` itself. That leaks a payment-layer JSON-RPC shape into a public method on the core client. Decisions.md Task 8 flagged this deviation: \"Made `rpc` `pub` (task said 'no need to make rpc public'...)\". For a library that's intended for crates.io, this is a permanent stain on the public API.",
+      "suggestion": "Either (a) add a high-level method on `SolanaClient` like `get_token_balances(tx_sig) -> Vec<TokenBalance>` that `verify_usdc_transfer` can call, letting `rpc` revert to `pub(crate)` or at least `#[doc(hidden)] pub` — matching the convention established for `codec::sign::sign_cose` (#[doc(hidden)] pub), or (b) move `verify_usdc_transfer` back into `SolanaClient` as a payment-aware helper method (reverses the Task 8 extraction but closes the surface — the original spec decision to move it was architecturally motivated, but the concrete result is worse). Option (a) is preferable."
+    },
+    {
+      "severity": "minor",
+      "location": "mcp/src/config.rs:19",
+      "issue": "Stale comment: `/// \"hash\" (default, offline) or \"openai\" (requires OPENAI_API_KEY)`. The `hash` provider was removed in Task 4 (HashEmbedder eliminated); current valid values per `embed::build_embedder` are `fastembed` and `openai`, and the `from_env` default is `fastembed` (line 70). The doc string misleads operators who read config.rs to understand `EMBED_PROVIDER`.",
+      "suggestion": "Update to `/// \"fastembed\" (default, open-weights, requires --features local-embed) or \"openai\" (requires OPENAI_API_KEY)`."
+    },
+    {
+      "severity": "minor",
+      "location": "core/Cargo.toml:20, 27, 30, 21",
+      "issue": "Unused dependencies in core: `thiserror = \"2\"`, `spl-memo = \"6\"`, `futures = \"0.3\"`, and `uuid = { version = \"1\", features = [\"v4\"] }`. `grep -rn \"thiserror\\|spl_memo\\|futures::\\|uuid::\" core/src/` returns zero matches. `uuid` is still used by mcp/tools.rs and mcp/payment.rs (which already declares it in mcp/Cargo.toml). `spl-memo` is no longer needed because the moved `solana/mod.rs` uses a string constant for `MemoSq4gqABAX...` rather than `spl_memo::id()`. `futures` and `thiserror` were never wired up. These add to compile time and lock file weight without providing value. Not caught because cargo does not emit a warning for declared-but-unused deps.",
+      "suggestion": "Remove the four unused deps from `core/Cargo.toml`. If any are truly needed for future work, add a comment justifying the declaration. Consider adding `cargo machete` or `cargo udeps` to CI to catch this automatically going forward."
+    },
+    {
+      "severity": "minor",
+      "location": "core/src/storage/sqlite.rs:249",
+      "issue": "`results.sort_by(|a, b| b.relevance_score.partial_cmp(&a.relevance_score).unwrap())` panics if any `relevance_score` is NaN. `relevance_score` is computed from `query_embedding`, stored `emb`, and their norms — if a stored embedding is all zeros (e_norm == 0.0) the code sets score=0.0 (fine), but if the query embedding contains NaN (caller bug or corrupted DB row) `partial_cmp` returns None and we panic. The core library is consumed by third parties who can't audit their own embedder outputs — a NaN-in-query crashing the server is a poor failure mode.",
+      "suggestion": "Use `partial_cmp(...).unwrap_or(std::cmp::Ordering::Equal)` — NaN-to-equal is the standard Rust idiom for total-ordering on floats and preserves relative ordering of valid scores. Alternatively: `f32::total_cmp` if we want NaNs sorted to the end deterministically."
+    },
+    {
+      "severity": "minor",
+      "location": "core/src/codec/mod.rs:9-12 vs core/src/storage/mod.rs:6-8",
+      "issue": "Inconsistent module-surface conventions. `storage/mod.rs` re-exports its key types (`AttestationStore`, `LineageStore`, `SqliteStore`, `AttestationRow`, `SearchResult`) at the module root. `codec/mod.rs` only declares submodules (`pub mod schema; pub mod canonical; pub mod hash; pub mod sign;`) with no re-exports — consumers have to write `mnemonic_core::codec::sign::sign_artifact`, `mnemonic_core::codec::schema::MEMORY_V1`, etc. (see mcp/tools.rs:11-16). Cross-task coherence drift: Task 2 (codec) chose one convention, Task 6 (storage) chose another, no one unified them in Task 11's final rewiring.",
+      "suggestion": "Pick one convention and apply uniformly. For a crates.io-published library, re-exporting in `mod.rs` (the storage pattern) is conventional — it shortens call sites and lets you rearrange internals without API churn. Add `pub use self::{schema::*, canonical::*, hash::*, sign::*};` at the codec root (or curated re-exports like storage does)."
+    },
+    {
+      "severity": "minor",
+      "location": "core/src/codec/schema.rs:155",
+      "issue": "`pub fn validate_artifact` is defined on the public API surface but never called from production code (only from its own inline test). It's documentation + dead-code on the surface. The companion `to_canonical_cbor` already enforces field presence indirectly via `cbor_field_order`, so `validate_artifact` is also conceptually redundant.",
+      "suggestion": "Either (a) wire it into `sign_artifact` as a pre-flight check (makes the library fail-fast on malformed inputs — strictly an API improvement), or (b) mark it `#[doc(hidden)] pub` / demote to `pub(crate)` until a real consumer emerges. (a) is recommended."
+    },
+    {
+      "severity": "minor",
+      "location": "core/src/codec/sign.rs:54",
+      "issue": "`#[doc(hidden)] pub fn sign_cose` was added in Task 10 round 2 specifically to let `core/benches/cbor_codec.rs` isolate the COSE stage. The review revisit: the `#[doc(hidden)]` attribute is correct (it's a benchmark-only extraction point, not a product API), but this is the kind of item that grows into accidental public API when a future contributor removes `#[doc(hidden)]` \"because the function is already pub\". The doc comment on line 51-53 does explain intent. Justified, but fragile.",
+      "suggestion": "Consider moving `sign_cose` to a crate-level `#[cfg(any(test, feature = \"__bench\"))]` helper so it's simply not in the prod build. Alternatively, accept the `#[doc(hidden)] pub` and add a `#[allow(unused)] #[cfg(test)]` assertion elsewhere that prevents accidental upgrade to a documented surface."
+    },
+    {
+      "severity": "nit",
+      "location": "core/src/embed/mod.rs:212",
+      "issue": "`#[allow(dead_code)] pub(crate) fn l2_normalize(vec: &mut [f32])` — only caller is the `#[cfg(test)] MockEmbedder::embed`, so in non-test builds it's genuinely dead. The `allow(dead_code)` is correct for the cfg shape but awkward; a cleaner fix is `#[cfg(test)]` on the function itself.",
+      "suggestion": "Change to `#[cfg(test)] fn l2_normalize(...)` and drop the `allow(dead_code)`. Symmetry with the surrounding `#[cfg(test)] pub struct MockEmbedder`."
+    },
+    {
+      "severity": "nit",
+      "location": "core/src/arweave/mod.rs:347-357",
+      "issue": "`test_network_timeout` asserts `client.write_bytes(b\"data\", ...)` returns `Err` but the comment admits it's exercising the arlocal path (is_local=true, bypass=false), not the Irys path — i.e. the test is named for a scenario it doesn't actually hit. The failure it detects is the arlocal POST timing out, not the Irys upload timing out.",
+      "suggestion": "Rename to `test_arlocal_unreachable_returns_err` or add a second test using `new_for_test` (bypass_local_routing=true) with a non-listening port to actually hit the Irys path and assert the expected error message. Current test is correct as a smoke-test of error propagation; only the name/intent comment misleads."
+    }
+  ],
+  "strengths": [
+    "Module extraction fully respected the payment-logic boundary for imperative code: no payment functions (create_api_key, deduct_balance, credit_deposit, mark_x402_nonce, record_attestation_cost, get_pnl_stats, get_owner_pubkey, verify_usdc_transfer) leaked into core/src/ — grep confirms. HashEmbedder is fully absent.",
+    "Task 9's lineage cleanup is high-quality: Direction is a proper enum with serde tags, chain_valid: Option<bool> has explicit None semantics documented inline, DB error propagation is tested via the negative-schema test, and cycle detection + MAX_DEPTH guard are sound.",
+    "Task 11's payment concurrency hardening (round 2 + round 3) is the strongest code in the workspace: atomic IMMEDIATE transactions around balance + ledger writes, partial UNIQUE index on tx_sig with a legacy-dedup migration, WAL + busy_timeout pragmas, and 7 unit tests including two true concurrent (Barrier-synchronized multi-thread) tests that would have caught all three TOCTOU findings.",
+    "httpmock tests for arweave (6) and solana (8) raised these modules from zero coverage to realistic behavioral coverage, including retry-exhaustion with `start_paused` virtual time, error-path JSON shapes, and the get_tx_signers jsonParsed account-key walk.",
+    "Workspace structure is clean: Cargo.toml root is minimal (just `members = [\"core\", \"mcp\"]` + resolver), core has a sensible dev/prod dep split, mcp's Cargo.toml was trimmed in Task 11 to only the deps actually imported (axum, tower-http, reqwest, clap, tracing-subscriber, dotenvy, tempfile).",
+    "Documentation trail is excellent: decisions.md is detailed per-task, round-by-round, and the Task 11 entry explicitly lists deferred follow-ups (CORS origin, admin/stats auth, sign_memory 10-arg refactor, MCP round-trip smoke test) rather than quietly dropping them. This is unusually good hygiene for a multi-agent workflow.",
+    "Default `cargo build --workspace`, `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings` are all green on a cold target dir. 90 tests across 4 binaries pass, no flakes observed, per-package clippy also clean."
+  ],
+  "verification": {
+    "cargo_build": "pass",
+    "cargo_test": "90 passed / 0 failed (75 core unit + 5 integration_cbor + 3 proptest_canonical + 7 mcp unit)",
+    "cargo_clippy": "clean with default features. FAILS with --all-features due to fastembed 5.x API incompatibility (see critical finding)."
+  },
+  "notes": "Audit ran in isolated worktree agent-a1f0c7a9 branched from main at commit 880ee42 (PR #5 merge). No code changes were made. The worktree is clean; the JSON report is written to the MAIN working-directory path per task instructions. The `local-embed` compile failure is the one genuinely blocking finding — everything else is normal extraction-residue that can ship and be cleaned in iteration 2. The lineage/payment schema leak into core is architecturally the next-most-important to address before any crates.io publication: a downstream consumer pulling mnemonic-core will receive a SQLite schema that creates four payment-specific tables they don't need and can't opt out of."
+}

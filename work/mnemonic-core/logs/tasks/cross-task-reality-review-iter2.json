@@ -1,0 +1,66 @@
+{
+  "check": "cross-task-iter2",
+  "status": "approved",
+  "findings": [
+    {
+      "severity": "minor",
+      "category": "cross-task-integration",
+      "task": "tech-spec",
+      "issue": "tech-spec.md Agent Verification Plan (line 174) and Acceptance Criteria (line 213) still use the 7-method payment grep pattern without get_balance. Tasks 11, 13, 14, 16 were all correctly patched to include get_balance. Task 15 (Test Audit) has no payment grep pattern at all (it is a test-coverage audit, not a grep checker — confirmed as acceptable). The tech-spec itself, which is a reference document rather than an executable task, still reads: 'grep -r \"create_api_key|...|verify_usdc_transfer\" core/src/' without get_balance. This is an inconsistency between the reference document and the task execution instructions but does not affect implementation — all executing tasks (11, 13, 14, 16) are correct.",
+      "fix": "Update tech-spec.md Agent Verification Plan step 6 and Acceptance Criteria line 213 to include get_balance in the grep pattern for completeness. This is a doc-only fix and does not block execution."
+    }
+  ],
+  "fix_verifications": [
+    {
+      "fix_id": "fix-1-get_balance",
+      "description": "Tasks 11, 13, 14, 16 grep pattern now includes get_balance",
+      "status": "VERIFIED",
+      "evidence": "Task 11 line 70 and 125: pattern includes get_balance. Task 13 lines 41, 59, 103: pattern includes get_balance. Task 14 lines 61, 95: pattern includes get_balance. Task 16 lines 48, 112, 137: pattern includes get_balance. Task 15 has no payment grep at all — confirmed acceptable (task 15 is test-audit only, not a grep-checker). Tech-spec itself still missing get_balance — flagged as minor doc inconsistency above."
+    },
+    {
+      "fix_id": "fix-2-write_bytes-bypass",
+      "description": "Task 7 write() AND write_bytes() both patched with bypass_local_routing guard; TDD anchor explains independent routing in both methods",
+      "status": "VERIFIED",
+      "evidence": "Task 7 step 4 explicitly states 'Update the routing logic in BOTH write() AND write_bytes(). Each method has its own independent is_local() check and must be patched separately — write_bytes() does NOT delegate to write()'. Code blocks show both methods with the guard. TDD Anchor for test_write_bytes_success (line 101-103) explicitly explains 'new_for_test sets bypass_local_routing: true so write_bytes() skips its own independent is_local() check'. Acceptance criteria bullet (line 115) lists write_bytes as one of the 6 required tests. Details section (line 162) has CRITICAL label: 'write_bytes() has its own independent is_local() check — it does NOT delegate to write().' Fix is fully applied."
+    },
+    {
+      "fix_id": "fix-3-db-rs-TestEmbedder",
+      "description": "Task 4 db.rs tests use inline struct TestEmbedder (NOT mnemonic_core::embed::MockEmbedder); note about #[cfg(test)] cross-crate visibility present",
+      "status": "VERIFIED",
+      "evidence": "Task 4 Description (lines 30, 59-70) explicitly states 'The 2 db.rs tests that used HashEmbedder cannot use MockEmbedder — #[cfg(test)] items from mnemonic_core are invisible to external crates.' Step 7 has the inline struct TestEmbedder with full implementation. Acceptance criteria (line 103) requires 'db.rs tests that used HashEmbedder now use an inline TestEmbedder struct (not MockEmbedder — #[cfg(test)] items from mnemonic_core are not visible to external crates)'. Details section (line 172) repeats the constraint. Fix is fully applied."
+    },
+    {
+      "fix_id": "fix-4-lineage-store-minimal",
+      "description": "Task 6 LineageStore is minimal (only save_edge, get_edges, clear_edges); no lineage result types; TODO(task-9) comment; Option A/B ambiguity removed",
+      "status": "VERIFIED",
+      "evidence": "Task 6 Description (line 25-26) explicitly states 'Important: LineageStore scope in Task 6 is intentionally minimal.' Step 2 defines LineageStore with only three methods: save_edge, get_edges, clear_edges using primitive types. Acceptance criteria (lines 79-80) require exactly these three methods and the TODO(task-9) comment. Details section (lines 172-177) explicitly states this is a 'firm decision — use minimal trait' with no Option A/B ambiguity. The TODO comment is specified as 'TODO(task-9): add get_lineage, get_ancestry, validate_chain methods after lineage types are in core'. Fix is fully applied."
+    },
+    {
+      "fix_id": "fix-5-compress-embed-dependency",
+      "description": "Task 5 false compress-depends-on-embed claim removed; dependency is wave-ordering only",
+      "status": "VERIFIED",
+      "evidence": "Task 5 Dependencies section (line 130) now explicitly reads: 'Depends on Task 4 (embed extraction) — wave ordering places compress after embed extraction for architectural consistency (compress is a higher-level concern than the embedding types). In practice compress.rs does not import the Embedder trait or any embed types — it only uses ndarray::Array1 and turboquant_plus_rs. Task 4 simply must complete before Task 5 starts.' The sentence about EmbeddingCompressor referencing embed types is absent. Note: Task 5 Description (line 19) still says 'compress depends on the Embedder trait and embedding types introduced in Task 4' which is technically still the old false claim in the Description prose, though the Dependencies section correctly contradicts it. This is a residual inconsistency between the Description and Dependencies sections within Task 5."
+    },
+    {
+      "fix_id": "fix-6-decompress-bench-path-hack",
+      "description": "Task 10 has explicit instruction to replace #[path = '../src/compress.rs'] with use mnemonic_core::compress::EmbeddingCompressor",
+      "status": "VERIFIED",
+      "evidence": "Task 10 step 4 (line 34) explicitly states: 'For decompress.rs specifically: it currently uses a #[path = \"../src/compress.rs\"] mod compress; path-include trick to reach the compressor without going through the public API. Replace this with use mnemonic_core::compress::EmbeddingCompressor;'. Details section (line 113) repeats with stronger language: 'Remove that line entirely and replace it with use mnemonic_core::compress::EmbeddingCompressor; — after the move the public API is available directly and the path hack no longer works'. Fix is fully applied."
+    }
+  ],
+  "new_issue_scan": {
+    "result": "One residual issue found in Task 5 Description text (not introduced by fixes — pre-existing inconsistency that the fix only partially resolved). No new cross-task issues introduced by the six fixes.",
+    "details": "Task 5 Description line 19 still says 'compress depends on the Embedder trait and embedding types introduced in Task 4' which contradicts the correctly-fixed Dependencies section. The fix was applied to the Dependencies section but the Description was not updated. This is minor — an implementer reading the full task will see the correct explanation in Dependencies before starting. Classified as minor/feasibility."
+  },
+  "summary": "All 6 claimed fixes are correctly applied. Fix 1 (get_balance): tasks 11/13/14/16 all have get_balance in their grep patterns — verified at multiple locations per file. Task 15 correctly has no payment grep (it is a test audit, not a grep checker). Fix 2 (write_bytes bypass_local_routing): both write() and write_bytes() are explicitly patched with the bypass guard, the critical note is present, and the TDD anchor explains independent routing. Fix 3 (TestEmbedder): Task 4 fully documents the inline TestEmbedder approach with code block, explains the #[cfg(test)] cross-crate visibility constraint, and has the requirement in acceptance criteria. Fix 4 (LineageStore minimal): Task 6 has a firm decision for minimal trait with only 3 primitive-type methods, Option A/B ambiguity eliminated, TODO(task-9) comment required. Fix 5 (compress false claim): Dependencies section correctly states wave-ordering only dependency, though Task 5 Description prose still carries the old false claim — minor residual inconsistency. Fix 6 (path-include replacement): Task 10 has explicit step and detailed instruction to replace the path hack with the public API import. One new finding: tech-spec.md Agent Verification Plan and Acceptance Criteria still use the 7-method grep without get_balance — minor doc inconsistency that does not affect task execution. Overall status: approved.",
+  "stats": {
+    "tasks_checked": 16,
+    "fixes_verified": 6,
+    "fixes_fully_applied": 5,
+    "fixes_partially_applied": 1,
+    "new_issues_found": 2,
+    "new_issues_critical": 0,
+    "new_issues_major": 0,
+    "new_issues_minor": 2
+  }
+}
