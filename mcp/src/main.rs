@@ -1,3 +1,4 @@
+mod chat;
 mod config;
 mod mcp;
 mod payment;
@@ -434,6 +435,14 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let store = SqliteStore::open(&cfg.database_path)?;
+    // Chat rate limiter: 10 requests per 60 seconds per IP
+    let chat_limiter = {
+        use governor::Quota;
+        use std::num::NonZeroU32;
+        let quota = Quota::per_minute(NonZeroU32::new(10).unwrap());
+        governor::RateLimiter::keyed(quota)
+    };
+
     let state = Arc::new(mcp::McpState {
         keypair,
         solana: solana::SolanaClient::new(&cfg.solana_rpc_url),
@@ -452,6 +461,7 @@ async fn main() -> anyhow::Result<()> {
         ollama_model: cfg.ollama_model.clone(),
         rag_chunk_dir: cfg.rag_chunk_dir.clone(),
         artifact_zip_path: std::sync::Mutex::new(None),
+        chat_limiter,
     });
 
     // ── RAG seeding (whitepaper chunking + artifact generation) ──────────
@@ -518,10 +528,15 @@ async fn run_http(state: Arc<mcp::McpState>, host: &str, port: u16) -> anyhow::R
 
     let app = Router::new()
         .route("/mcp", post(mcp_handler))
+        .route("/chat", post(chat::chat_handler))
         .route("/api-keys", post(create_api_key))
         .route("/balance", get(get_balance))
         .route("/deposit", post(deposit))
         .route("/admin/stats", get(admin_stats))
+        .route(
+            "/download-knowledge",
+            get(chat::download_knowledge_handler),
+        )
         .route(
             "/health",
             get(|| async { Json(serde_json::json!({"status": "ok"})) }),
@@ -537,6 +552,10 @@ async fn run_http(state: Arc<mcp::McpState>, host: &str, port: u16) -> anyhow::R
     let addr = format!("{host}:{port}");
     tracing::info!("MCP server listening on http://{addr}/mcp");
     let listener = tokio::net::TcpListener::bind(&addr).await?;
-    axum::serve(listener, app).await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .await?;
     Ok(())
 }

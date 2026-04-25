@@ -71,10 +71,8 @@ pub struct McpState {
 
     // Ollama / RAG (used by chat.rs and seed.rs in Tasks 2-3)
     /// Validated Ollama API base URL (e.g. "http://localhost:11434").
-    #[allow(dead_code)]
     pub ollama_url: String,
     /// Ollama model name for chat inference (e.g. "qwen2.5:3b").
-    #[allow(dead_code)]
     pub ollama_model: String,
     /// Directory where RAG artifacts (chunked knowledge .zip) are written.
     #[allow(dead_code)]
@@ -82,6 +80,13 @@ pub struct McpState {
     /// Absolute canonical path to the pre-built knowledge artifact .zip file.
     /// Set by seed::run() at startup; used by the /download-knowledge handler.
     pub artifact_zip_path: std::sync::Mutex<Option<std::path::PathBuf>>,
+    /// Per-IP rate limiter for the /chat endpoint (10 req/min).
+    pub chat_limiter: governor::RateLimiter<
+        String,
+        governor::state::keyed::DashMapStateStore<String>,
+        governor::clock::DefaultClock,
+        governor::middleware::NoOpMiddleware<governor::clock::QuantaInstant>,
+    >,
 }
 
 // Safety: We only access store through std::sync::Mutex (short critical sections, no await)

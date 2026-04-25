@@ -16,6 +16,9 @@ tokio = { version = "1", features = ["full"] }
 axum = { version = "0.8", features = ["json", "macros"] }
 tower-http = { version = "0.6", features = ["cors"] }
 
+# Rate limiting (POST /chat: 10 req/min per IP)
+governor = "0.8"
+
 # HTTP client (used by pricing.rs for Irys + SOL/USDC price fetches)
 reqwest = { version = "0.12", features = ["json"] }
 
