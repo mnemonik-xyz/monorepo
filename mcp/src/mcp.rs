@@ -68,6 +68,17 @@ pub struct McpState {
     // Storage mode
     /// "local" (default, free, SQLite only) or "full" (Arweave + Solana + SQLite)
     pub storage_mode: String,
+
+    // Ollama / RAG (used by chat.rs and seed.rs in Tasks 2-3)
+    /// Validated Ollama API base URL (e.g. "http://localhost:11434").
+    #[allow(dead_code)]
+    pub ollama_url: String,
+    /// Ollama model name for chat inference (e.g. "qwen2.5:3b").
+    #[allow(dead_code)]
+    pub ollama_model: String,
+    /// Directory where RAG artifacts (chunked knowledge .zip) are written.
+    #[allow(dead_code)]
+    pub rag_chunk_dir: std::path::PathBuf,
 }
 
 // Safety: We only access store through std::sync::Mutex (short critical sections, no await)

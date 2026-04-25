@@ -391,6 +391,14 @@ async fn main() -> anyhow::Result<()> {
     );
     tracing::info!("Payment mode: {}", cfg.payment_mode);
 
+    // ── Ollama URL validation (SSRF prevention, Decision 8) ──────────────────
+    if let Err(msg) = cfg.validate_ollama_url() {
+        tracing::error!("FATAL: {msg}");
+        std::process::exit(1);
+    }
+    tracing::info!("Ollama URL: {} (model: {})", cfg.ollama_url, cfg.ollama_model);
+    tracing::info!("RAG chunk dir: {}", cfg.rag_chunk_dir.display());
+
     // ── Pricing engine ────────────────────────────────────────────────────────
     let pricing_cfg = pricing::PricingConfig {
         margin_bps: cfg.pricing_margin_bps,
@@ -439,6 +447,9 @@ async fn main() -> anyhow::Result<()> {
         pricing,
         sol_tx_fee_lamports: cfg.sol_tx_fee_lamports,
         storage_mode: cfg.storage_mode.clone(),
+        ollama_url: cfg.ollama_url.clone(),
+        ollama_model: cfg.ollama_model.clone(),
+        rag_chunk_dir: cfg.rag_chunk_dir.clone(),
     });
 
     match transport.as_str() {

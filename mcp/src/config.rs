@@ -48,6 +48,15 @@ pub struct Config {
     pub typical_payload_bytes: usize,
     /// Solana memo tx fee in lamports (~5 000 on mainnet).
     pub sol_tx_fee_lamports: u64,
+
+    // ── Ollama / RAG ─────────────────────────────────────────────────────────
+    /// Ollama API base URL. Must match http://localhost:* or http://ollama:*
+    /// (SSRF prevention, Decision 8).
+    pub ollama_url: String,
+    /// Ollama model name for chat inference.
+    pub ollama_model: String,
+    /// Directory where RAG artifacts (chunked knowledge .zip) are written.
+    pub rag_chunk_dir: PathBuf,
 }
 
 impl Config {
@@ -86,7 +95,44 @@ impl Config {
             sol_tx_fee_lamports: env_or("SOL_TX_FEE_LAMPORTS", "5000")
                 .parse()
                 .unwrap_or(5000),
+            ollama_url: env_or("OLLAMA_URL", "http://localhost:11434"),
+            ollama_model: env_or("OLLAMA_MODEL", "qwen2.5:3b"),
+            rag_chunk_dir: expand_path(&env_or("RAG_CHUNK_DIR", "./rag_chunks")),
         }
+    }
+
+    /// Validate `ollama_url` against the allowed whitelist.
+    ///
+    /// Only `http://localhost:<port>` and `http://ollama:<port>` are accepted.
+    /// Any other URL is an SSRF risk (Decision 8). Returns `Err` with a
+    /// human-readable message on failure -- caller should treat this as fatal.
+    pub fn validate_ollama_url(&self) -> Result<(), String> {
+        validate_ollama_url(&self.ollama_url)
+    }
+}
+
+/// Validate that `url` matches the OLLAMA_URL whitelist.
+///
+/// Allowed patterns: `http://localhost:<port>[/...]` or `http://ollama:<port>[/...]`.
+/// Rejects HTTPS (Ollama is always plain HTTP on a local/Docker network),
+/// other hostnames, and malformed URLs.
+fn validate_ollama_url(url: &str) -> Result<(), String> {
+    let parsed = url::Url::parse(url).map_err(|e| {
+        format!("OLLAMA_URL is not a valid URL ({url}): {e}")
+    })?;
+
+    if parsed.scheme() != "http" {
+        return Err(format!(
+            "OLLAMA_URL must use http:// scheme, got: {url}"
+        ));
+    }
+
+    match parsed.host_str() {
+        Some("localhost") | Some("ollama") => Ok(()),
+        Some(host) => Err(format!(
+            "OLLAMA_URL host must be 'localhost' or 'ollama', got: {host}"
+        )),
+        None => Err(format!("OLLAMA_URL has no host: {url}")),
     }
 }
 
@@ -104,4 +150,63 @@ fn expand_path(p: &str) -> PathBuf {
 
 fn dirs_home() -> String {
     std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn accepts_localhost_with_port() {
+        assert!(validate_ollama_url("http://localhost:11434").is_ok());
+    }
+
+    #[test]
+    fn accepts_localhost_with_path() {
+        assert!(validate_ollama_url("http://localhost:11434/api/generate").is_ok());
+    }
+
+    #[test]
+    fn accepts_ollama_host() {
+        assert!(validate_ollama_url("http://ollama:11434").is_ok());
+    }
+
+    #[test]
+    fn rejects_https() {
+        let result = validate_ollama_url("https://localhost:11434");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("http://"));
+    }
+
+    #[test]
+    fn rejects_external_host() {
+        let result = validate_ollama_url("http://evil.com:11434");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("evil.com"));
+    }
+
+    #[test]
+    fn rejects_ip_address() {
+        let result = validate_ollama_url("http://10.0.0.1:11434");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn rejects_malformed_url() {
+        let result = validate_ollama_url("not-a-url");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn rejects_empty_string() {
+        let result = validate_ollama_url("");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn rejects_loopback_ip() {
+        // 127.0.0.1 is semantically localhost but must use the hostname form
+        let result = validate_ollama_url("http://127.0.0.1:11434");
+        assert!(result.is_err());
+    }
 }
