@@ -11,38 +11,68 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build-linux:
-    name: Build ${{ matrix.target }}
+  build-linux-x86:
+    name: Build x86_64-unknown-linux-gnu
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        target:
-          - x86_64-unknown-linux-gnu
-          - aarch64-unknown-linux-gnu
     steps:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
 
-      - name: Install cross
-        run: cargo install cross --locked
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-x86_64-linux
+
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev
 
       - name: Build
-        run: cross build --release --target ${{ matrix.target }} -p mnemonic-mcp
+        run: cargo build --release --target x86_64-unknown-linux-gnu -p mnemonic-mcp
 
       - name: Package
         run: |
           tag="${GITHUB_REF#refs/tags/}"
-          name="mnemonic-mcp-${tag}-${{ matrix.target }}"
+          name="mnemonic-mcp-${tag}-x86_64-unknown-linux-gnu"
           mkdir -p "$name"
-          cp "target/${{ matrix.target }}/release/mnemonic-mcp" "$name/"
+          cp target/x86_64-unknown-linux-gnu/release/mnemonic-mcp "$name/"
           cp README.md "$name/" 2>/dev/null || true
           tar czf "${name}.tar.gz" "$name"
           echo "ASSET=${name}.tar.gz" >> $GITHUB_ENV
 
       - uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.target }}
+          name: x86_64-unknown-linux-gnu
+          path: ${{ env.ASSET }}
+
+  build-linux-arm:
+    name: Build aarch64-unknown-linux-gnu
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-gnu
+
+      - name: Install cross
+        run: cargo install cross --locked
+
+      - name: Build
+        run: cross build --release --target aarch64-unknown-linux-gnu -p mnemonic-mcp
+
+      - name: Package
+        run: |
+          tag="${GITHUB_REF#refs/tags/}"
+          name="mnemonic-mcp-${tag}-aarch64-unknown-linux-gnu"
+          mkdir -p "$name"
+          cp target/aarch64-unknown-linux-gnu/release/mnemonic-mcp "$name/"
+          cp README.md "$name/" 2>/dev/null || true
+          tar czf "${name}.tar.gz" "$name"
+          echo "ASSET=${name}.tar.gz" >> $GITHUB_ENV
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: aarch64-unknown-linux-gnu
           path: ${{ env.ASSET }}
 
   build-macos:
@@ -84,7 +114,7 @@ jobs:
 
   release:
     name: Create Release
-    needs: [build-linux, build-macos]
+    needs: [build-linux-x86, build-linux-arm, build-macos]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
