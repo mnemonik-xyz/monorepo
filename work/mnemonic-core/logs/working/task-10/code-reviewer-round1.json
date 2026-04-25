@@ -1,0 +1,27 @@
+{
+  "reviewer": "code-reviewer",
+  "round": 1,
+  "task": 10,
+  "verdict": "approved",
+  "findings": [
+    {
+      "severity": "minor",
+      "location": "core/benches/cbor_codec.rs:51-62",
+      "issue": "bench_cose_sign and bench_full_pipeline measure identical work. bench_cose_sign calls sign_artifact with the full artifact, which internally runs canonical CBOR + blake3 + COSE_Sign1. bench_full_pipeline does exactly the same call. There is no observable difference in what the two groups measure.",
+      "suggestion": "Either (a) rename bench_cose_sign to reflect that it measures the full sign pipeline at input sizes [100,500,2000] and drop bench_full_pipeline as redundant, or (b) keep both but give bench_cose_sign a pre-computed cbor input so it isolates only the COSE signing step (call to_canonical_cbor outside the iter closure and pass the bytes to a lower-level sign helper if one is exported). This is a benchmark quality issue, not a correctness issue — both will compile and produce numbers, but the numbers will be indistinguishable."
+    },
+    {
+      "severity": "nit",
+      "location": "core/benches/cbor_codec.rs:31",
+      "issue": "bench_cbor_canonicalization calls to_canonical_cbor with &MEMORY_V1 inside iter, which includes the schema field-order lookup. The schema reference is a static borrow so it costs nothing at runtime, but the MEMORY_V1 reference is not wrapped in black_box, meaning the compiler could theoretically constant-fold it. In practice Criterion's black_box on the artifact argument is sufficient, but being explicit about both arguments would be more defensible.",
+      "suggestion": "Change the call to: to_canonical_cbor(black_box(&artifact), black_box(&MEMORY_V1)).unwrap()"
+    },
+    {
+      "severity": "nit",
+      "location": "core/tests/proptest_canonical.rs:57-75",
+      "issue": "different_content_different_hash uses disjoint regex ranges ([a-z] vs [A-Z]) to guarantee content_a != content_b, and the comment explains this correctly. However the old mcp version included an explicit equality guard (if content_a != content_b) to handle the edge case where proptest generates equal strings. The new version drops the guard, relying on the disjoint ranges instead. This is correct — lowercase and uppercase ASCII ranges cannot overlap — but the assumption is implicit. A one-line comment confirming the ranges are disjoint would make future readers confident the guard is intentionally absent.",
+      "suggestion": "Add: // Ranges [a-z] and [A-Z] are disjoint; content_a and content_b can never be equal."
+    }
+  ],
+  "notes": "Position on the sign_artifact substitution in bench_full_pipeline: the substitution is the right call. The original mcp bench hand-rolled COSE_Sign1 construction using raw coset primitives, but that inline code was a verbatim reimplementation of what sign_artifact does — same HeaderBuilder chain, same tbs_data call, same Keypair.sign_message, same CoseSign1Builder rebuild. The task spec explicitly directs replacing inline helpers that duplicate library exports, and sign_artifact is exactly the library export that encapsulates this pipeline. Benchmarking via sign_artifact is not a signal loss: it measures the real production code path, which is what a full-pipeline benchmark should measure. The only genuine signal loss is that bench_cose_sign now overlaps bench_full_pipeline almost completely (both call sign_artifact end-to-end), which is a benchmark design issue flagged as a minor finding above but does not block approval.\n\nAll acceptance criteria from tasks/10.md are satisfied: four files moved to correct locations, all inline helpers replaced with mnemonic_core imports (codec_helpers module in integration_cbor.rs gone, inline to_canonical_cbor/json_to_cbor in proptest_canonical.rs and cbor_codec.rs gone, #[path] hack in decompress.rs replaced with use mnemonic_core::compress::EmbeddingCompressor), mcp/Cargo.toml cleanly stripped of criterion, proptest, and both [[bench]] entries, core/Cargo.toml has both [[bench]] targets with harness=false plus both dev-deps, no use super::* patterns, and the Cargo.lock confirms the dependency migration is complete. The proptest test different_content_different_hash is strictly stronger than the old version (which had a conditional guard that silently skipped the assertion when strings were equal) — the new version is guaranteed to assert on every run. Cross-file consistency is clean: all imported symbols (to_canonical_cbor, hash_bytes, sign_artifact, verify_artifact, get_schema, EmbeddingCompressor, all schema constants) exist and are exported from their respective modules with matching signatures."
+}

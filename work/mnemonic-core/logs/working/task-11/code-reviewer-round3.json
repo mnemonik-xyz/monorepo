@@ -1,0 +1,41 @@
+{
+  "reviewer": "code-reviewer",
+  "round": 3,
+  "task": 11,
+  "status": "approved",
+  "summary": "All three round-2 findings are correctly addressed. `deduct_balance` now wraps UPDATE + INSERT in BEGIN IMMEDIATE / COMMIT with explicit ROLLBACK on every non-success path (UPDATE error, changes==0, INSERT error). The new rollback test uses a BEFORE INSERT trigger to force a genuine INSERT failure and verifies both balance integrity and absence of a stale charge row. The dedup migration helper is logically correct and idempotent. No new critical or major issues introduced.",
+  "fixer_claims_verified": {
+    "deduct_balance_audit_atomicity_major": {
+      "verdict": "VERIFIED",
+      "detail": "Three distinct rollback paths confirmed in payment.rs lines 355-401: (1) UPDATE error -> ROLLBACK + propagate Err (lines 368-371); (2) changed==0 -> ROLLBACK + read-only get_balance for precise message (lines 379-386); (3) INSERT error -> ROLLBACK + propagate Err (lines 392-398). COMMIT only reaches line 401 when both statements succeed. The `get_balance` call after ROLLBACK in path (2) is safe — the transaction is already rolled back, so the subsequent SELECT executes outside any transaction and reads committed state."
+    },
+    "wal_busy_timeout_minor": {
+      "verdict": "VERIFIED",
+      "detail": "SqliteStore::open sets `PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;` (line 125) before SCHEMA and migration. SqliteStore::in_memory sets only `PRAGMA busy_timeout=5000;` (line 137) with a correct comment explaining WAL is inapplicable in memory. Ordering is correct: pragmas before schema creation."
+    },
+    "migration_dedup_minor": {
+      "verdict": "VERIFIED",
+      "detail": "migrate_payment_events_unique_index() at lines 95-111 runs inside a single BEGIN IMMEDIATE / COMMIT. The DELETE keeps MIN(rowid) per tx_sig group among non-NULL tx_sigs only (WHERE tx_sig IS NOT NULL in both outer DELETE and inner subquery). NULL tx_sig rows (refunds/charges) are untouched. CREATE UNIQUE INDEX IF NOT EXISTS is idempotent on clean DBs. The function is called from both open() (line 128) and in_memory() (line 139). The UNIQUE index partial predicate `WHERE tx_sig IS NOT NULL` matches what was in SCHEMA previously, so existing code paths are unaffected."
+    },
+    "new_test_rollback": {
+      "verdict": "VERIFIED — GENUINE FAILURE PATH",
+      "detail": "Test at lines 822-886 installs a BEFORE INSERT trigger with RAISE(ABORT, ...) keyed on description='__FORCE_FAIL__'. SQLite RAISE(ABORT) aborts the current SQL statement and any enclosing transaction, so the trigger is a correct mechanism to simulate INSERT failure. The test seeds 500, attempts a 100-deduct with the sentinel, asserts: (a) error is returned, (b) balance remains 500, (c) no charge row exists. It then drops the trigger and executes a successful deduct to verify the store is not left in a stuck transaction state (400 balance final assertion). The test is not trivially passing — without the ROLLBACK in deduct_balance, the balance would be 400 after the first call even though it errored, failing assertion (b)."
+    }
+  },
+  "dedup_query_correctness": {
+    "preserves_earliest_row": "CORRECT — MIN(rowid) selects the earliest insert per tx_sig group. The NOT IN condition deletes all other rows with the same tx_sig.",
+    "null_tx_sig_safety": "CORRECT — Both the outer DELETE and the inner subquery include `WHERE tx_sig IS NOT NULL`. NULL rows (refunds, charges) are fully excluded from both sides of the NOT IN predicate. No risk of deleting NULL-tx_sig rows.",
+    "idempotency": "CORRECT — On a clean DB the DELETE is a no-op (no duplicates exist), and `CREATE UNIQUE INDEX IF NOT EXISTS` is cheap. On a legacy DB with duplicates, the earliest row per tx_sig survives.",
+    "concurrency": "CORRECT — BEGIN IMMEDIATE acquires the write lock before the DELETE, so two concurrent openers cannot see a half-migrated state."
+  },
+  "new_issues": [],
+  "criticalIssues": [],
+  "suggestions": [],
+  "metrics": {
+    "filesReviewed": 3,
+    "criticalIssuesCount": 0,
+    "majorIssuesCount": 0,
+    "minorIssuesCount": 0,
+    "testCoverageAssessment": "excellent"
+  }
+}

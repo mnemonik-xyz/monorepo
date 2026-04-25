@@ -22,7 +22,10 @@ pub trait Embedder: Send + Sync {
 /// Enable with: cargo build --features local-embed
 #[cfg(feature = "local-embed")]
 pub struct FastEmbedder {
-    model: fastembed::TextEmbedding,
+    // fastembed 5.x requires `&mut self` on `embed`; wrap in Mutex so the
+    // `Embedder` trait can keep its `&self` signature. Inference holds the
+    // lock briefly per call — no `.await` is held across the guard.
+    model: std::sync::Mutex<fastembed::TextEmbedding>,
     dim: usize,
 }
 
@@ -30,26 +33,32 @@ pub struct FastEmbedder {
 impl FastEmbedder {
     pub fn try_new() -> Result<Self, String> {
         use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
-        let model = TextEmbedding::try_new(InitOptions {
-            model_name: EmbeddingModel::AllMiniLML6V2,
-            ..Default::default()
-        })
-        .map_err(|e| format!("fastembed init failed: {e}"))?;
+        let mut model = TextEmbedding::try_new(InitOptions::new(EmbeddingModel::AllMiniLML6V2))
+            .map_err(|e| format!("fastembed init failed: {e}"))?;
 
-        // Probe dimension
         let sample = model
             .embed(vec!["test"], None)
             .map_err(|e| format!("fastembed probe failed: {e}"))?;
         let dim = sample.first().map(|v| v.len()).unwrap_or(384);
 
-        Ok(Self { model, dim })
+        Ok(Self {
+            model: std::sync::Mutex::new(model),
+            dim,
+        })
     }
 }
 
 #[cfg(feature = "local-embed")]
 impl Embedder for FastEmbedder {
     fn embed(&self, text: &str) -> Vec<f32> {
-        match self.model.embed(vec![text.to_string()], None) {
+        let mut guard = match self.model.lock() {
+            Ok(g) => g,
+            Err(poisoned) => {
+                tracing::error!("fastembed mutex poisoned, recovering");
+                poisoned.into_inner()
+            }
+        };
+        match guard.embed(vec![text.to_string()], None) {
             Ok(embeddings) => embeddings
                 .into_iter()
                 .next()

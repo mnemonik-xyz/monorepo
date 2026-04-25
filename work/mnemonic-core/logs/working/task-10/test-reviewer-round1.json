@@ -1,0 +1,33 @@
+{
+  "reviewer": "test-reviewer",
+  "round": 1,
+  "task": 10,
+  "verdict": "changes-requested",
+  "findings": [
+    {
+      "severity": "major",
+      "location": "core/benches/cbor_codec.rs:51-62 and core/benches/cbor_codec.rs:64-79",
+      "issue": "bench_cose_sign and bench_full_pipeline now measure identical operations. bench_cose_sign calls sign_artifact (which internally runs canonical CBOR + blake3 + COSE signing), and bench_full_pipeline also calls sign_artifact with the same inputs and sizes. These two benchmark groups produce identical numbers and one is redundant. The original bench distinguished isolated COSE signing (taking pre-computed cbor bytes as input) from the full pipeline. That distinction was lost in the refactor: bench_cose_sign used to take cbor as a pre-computed input and measure only the COSE build+sign step; now it conflates all three stages.",
+      "suggestion": "Restore the isolated COSE-only benchmark by splitting sign_artifact's stages. If the library exposes a lower-level sign function that takes pre-computed CBOR bytes (or if sign_artifact can be restructured to expose that), use it in bench_cose_sign. Alternatively, move the CBOR precomputation outside the bench_cose_sign closure: compute cbor before b.iter() and measure only the signing step inside the closure. If the library does not expose a CBOR-bytes-in signing primitive, rename bench_cose_sign to bench_sign_full to be honest, and remove bench_full_pipeline as genuinely redundant."
+    },
+    {
+      "severity": "minor",
+      "location": "core/benches/cbor_codec.rs:38-48",
+      "issue": "bench_blake3_hash computes the CBOR bytes outside the b.iter() closure (correct), but the artifact construction and CBOR encoding for each size group are done at setup time. This is fine. However, a 10000-byte content artifact is included in the canonicalization and hash benchmarks but omitted from bench_cose_sign and bench_full_pipeline (which stop at 2000). The asymmetry in size coverage is unexplained and means throughput at high content sizes is only measured for the cheaper operations.",
+      "suggestion": "Either add 10000-byte cases to bench_cose_sign and bench_full_pipeline (with a comment that it runs slower, acceptable for a bench), or add a comment explaining why large payloads were excluded from signing benchmarks (e.g., not realistic for on-chain artifacts). The current silent asymmetry makes the benchmark results misleading."
+    },
+    {
+      "severity": "minor",
+      "location": "core/tests/integration_cbor.rs:134-163",
+      "issue": "test_cbor_is_smaller_than_json uses a +50 byte tolerance in its assertion (cbor_bytes.len() <= json_bytes.len() + 50). This means CBOR could be up to 50 bytes *larger* than JSON and the test would still pass. If the library's canonical encoder adds unexpected overhead (e.g., a schema tag or header) and regresses to JSON-comparable size, this test provides no signal. The test intent says 'CBOR should be smaller or comparable' but the assertion accepts CBOR being larger.",
+      "suggestion": "Tighten the assertion to match the actual intent. If CBOR is expected to be smaller, assert cbor_bytes.len() < json_bytes.len(). If comparable is acceptable, define a ratio bound (e.g., assert cbor_bytes.len() as f64 / json_bytes.len() as f64 <= 1.1). The current +50 absolute slack is especially fragile for small payloads where +50 bytes could be a 30% regression."
+    },
+    {
+      "severity": "nit",
+      "location": "core/tests/proptest_canonical.rs:36-54",
+      "issue": "hash_is_deterministic calls to_canonical_cbor twice and hashes both results, but it never asserts that the CBOR bytes themselves are equal — only the hashes. The canonical_cbor_is_deterministic test already covers CBOR byte equality, so this test's unique contribution is that hash(same_cbor) == hash(same_cbor), which is trivially true for any deterministic hash function and adds near-zero marginal coverage beyond what canonical_cbor_is_deterministic already proves.",
+      "suggestion": "Remove hash_is_deterministic, or replace it with a test that adds distinct value: e.g., verify that hash_bytes of the canonical CBOR matches what sign_artifact records as content_hash, closing the loop between the hash and signing layers. That would be a true behavioral assertion not covered by the other two proptests."
+    }
+  ],
+  "notes": "DROPPED content_a != content_b GUARD: The teammate's reasoning is correct. The proptest strategies '[a-z]{10,50}' and '[A-Z]{10,50}' draw from disjoint character sets — any string from the lowercase alphabet and any string from the uppercase alphabet are guaranteed to differ. The original guard was defensive code written for an inline to_canonical_cbor where accidental collision was theoretically possible via shared code paths; here the two regex sets are mathematically disjoint. Dropping the guard is safe, and the unconditional prop_assert_ne is a stronger assertion (it never silently skips). No issue here.\n\nTAMPER TEST catch_unwind -> Result::Err: This is an improvement. The original test called catch_unwind around an infallible-looking verify_cose that contained unwrap() calls and could panic on parse errors. The new test uses verify_artifact which returns Result, and the match handles both Err (parse failure) and Ok with valid=false (signature mismatch) explicitly. No coverage is lost; the behavior being tested — that tampering is detected — is preserved. The new form is also safer because it does not suppress panics that would indicate bugs in verify_artifact itself.\n\nbench_full_pipeline sign_artifact SUBSTITUTION: The substitution is semantically correct — sign_artifact performs canonical CBOR + blake3 + COSE_Sign1 in sequence, which is the same pipeline the old full_pipeline measured. However, the refactor inadvertently made bench_cose_sign and bench_full_pipeline redundant with each other because both now call sign_artifact end-to-end. The original benchmarks had a meaningful distinction: bench_cose_sign isolated just the COSE building step by pre-computing CBOR outside the closure. That isolation was lost. This is flagged as a major finding because benchmark redundancy reduces the diagnostic value of the benchmark suite — you cannot tell which stage is the bottleneck if two benchmarks measure the same composite operation."
+}

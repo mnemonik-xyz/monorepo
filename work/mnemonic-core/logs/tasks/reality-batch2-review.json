@@ -1,0 +1,79 @@
+{
+  "validator": "reality-checker",
+  "batch": 2,
+  "iteration": 1,
+  "tasks": {
+    "4": {
+      "status": "needs_fix",
+      "findings": [
+        {
+          "severity": "major",
+          "category": "missing_file",
+          "task": 4,
+          "issue": "Task 4 lists 'Files to modify' as only mcp/src/main.rs, mcp/src/tools.rs, mcp/src/embed.rs, and mcp/src/db.rs. However, mcp/src/mcp.rs also imports embed::Embedder directly: `use crate::{arweave::ArweaveClient, compress::EmbeddingCompressor, db::AttestationStore, embed::Embedder, ...}` (mcp.rs line 8). After mcp/src/embed.rs is deleted, mcp/src/mcp.rs will fail to compile unless updated to `mnemonic_core::embed::Embedder`.",
+          "fix": "Add mcp/src/mcp.rs to the 'Files to modify' list and step 4/5 instructions. After moving embed to core, update the mcp.rs import from `embed::Embedder` to `mnemonic_core::embed::Embedder`."
+        },
+        {
+          "severity": "minor",
+          "category": "hints",
+          "task": 4,
+          "issue": "Task 4 says 'All 8 existing embed tests updated to use MockEmbedder'. However, 6 of the 8 existing tests (test_hash_deterministic, test_hash_dimension, test_hash_normalized, test_hash_model_id, test_cosine_self, test_build_test_embedder) specifically test HashEmbedder behavior and properties. These tests cannot simply be 'updated' — they test the thing being deleted. The TDD anchor provides 9 replacement tests, but the task description understates the scope by calling it an 'update'.",
+          "fix": "Clarify that the 6 HashEmbedder-specific tests are replaced (not updated) by the 9 TDD anchor tests. Only test_build_hash_rejected and test_build_openai_without_key_rejected survive as-is."
+        }
+      ]
+    },
+    "5": {
+      "status": "needs_fix",
+      "findings": [
+        {
+          "severity": "major",
+          "category": "missing_file",
+          "task": 5,
+          "issue": "Task 5 lists 'Files to modify' as mcp/src/main.rs, mcp/src/tools.rs, and mcp/src/compress.rs. However, mcp/src/mcp.rs also imports compress::EmbeddingCompressor directly: `use crate::{arweave::ArweaveClient, compress::EmbeddingCompressor, ...}` (mcp.rs line 8). After mcp/src/compress.rs is deleted, mcp/src/mcp.rs will fail to compile unless updated.",
+          "fix": "Add mcp/src/mcp.rs to the 'Files to modify' list. Update the mcp.rs import from `compress::EmbeddingCompressor` to `mnemonic_core::compress::EmbeddingCompressor`."
+        },
+        {
+          "severity": "minor",
+          "category": "feasibility",
+          "task": 5,
+          "issue": "Task 5 Dependencies section states: 'Depends on Task 4 (embed extraction) — EmbeddingCompressor may reference embedding types from mnemonic_core::embed::'. In reality, compress.rs has zero dependency on the embed module — it only imports `ndarray::Array1` and `turboquant::{pack_bits, pack_indices, TurboQuant}`. The compress task could technically run independently of Task 4 (aside from the workspace structure). The stated dependency rationale is incorrect.",
+          "fix": "Update the dependency rationale: 'Depends on Task 4 for wave ordering only; compress.rs has no runtime dependency on embed types — it accepts &[f32] slices directly.' This is a documentation accuracy issue, not a blocking problem since the wave order is still correct."
+        }
+      ]
+    },
+    "6": {
+      "status": "needs_fix",
+      "findings": [
+        {
+          "severity": "critical",
+          "category": "hallucination",
+          "task": 6,
+          "issue": "Task 6 repeatedly states that payment methods (create_api_key, deduct_balance, credit_deposit, mark_x402_nonce, record_attestation_cost, get_pnl_stats, get_owner_pubkey) 'stay in mcp/src/payment.rs' (Description line 21, AC line 80, Details line 134). These methods do NOT currently exist in payment.rs — they live on the AttestationStore struct in mcp/src/db.rs. payment.rs only contains check_payment, extract_api_key, extract_x402_proof, and the payment gate types. The task must MOVE these methods from db.rs into payment.rs, but the AC says 'retain all 7 payment methods untouched' which contradicts the required migration.",
+          "fix": "Correct the description and AC to reflect the actual source: 'Move payment methods from mcp/src/db.rs (currently on AttestationStore) into mcp/src/payment.rs as standalone functions or a new PaymentDb wrapper'. The Detail section (line 134) partially acknowledges this correctly but contradicts the Description and AC. Align all three sections."
+        },
+        {
+          "severity": "major",
+          "category": "missing_file",
+          "task": 6,
+          "issue": "Task 6 lists 'Files to modify' as mcp/src/payment.rs, mcp/src/tools.rs, mcp/src/main.rs — but omits mcp/src/mcp.rs. After db.rs is deleted, mcp.rs will fail to compile because it imports: `use crate::{..., db::AttestationStore, ...}` (mcp.rs line 8). This is the same pattern as the missing mcp.rs issue in Tasks 4 and 5.",
+          "fix": "Add mcp/src/mcp.rs to the 'Files to modify' list. Update its import from `db::AttestationStore` to `mnemonic_core::storage::{AttestationStore, SqliteStore}`."
+        },
+        {
+          "severity": "major",
+          "category": "hallucination",
+          "task": 6,
+          "issue": "Task 6 AC and verification grep check for 7 payment methods: `create_api_key|deduct_balance|credit_deposit|mark_x402_nonce|record_attestation_cost|get_pnl_stats|get_owner_pubkey`. The actual db.rs also has an 8th payment-related method: `get_balance` (used by payment.rs check_balance function to verify API key balance). get_balance is excluded from the verification grep list, meaning it could silently leak into core/src/ without being caught.",
+          "fix": "Add `get_balance` to the grep exclusion list in the AC and smoke verification: `grep -r 'create_api_key|deduct_balance|credit_deposit|mark_x402_nonce|record_attestation_cost|get_pnl_stats|get_owner_pubkey|get_balance' core/src/`"
+        },
+        {
+          "severity": "minor",
+          "category": "feasibility",
+          "task": 6,
+          "issue": "Task 6 says 'Move ONLY the non-payment methods from db.rs: save_attestation, find_by_tx, count, search; lineage methods from lineage.rs'. Pulling lineage methods into SqliteStore at Wave 6 while lineage.rs itself is not moved until Task 9 creates a structural awkwardness: lineage methods in storage/sqlite.rs will reference types (LineageResult, LineageNode, LineageEdge, ParentRef) that are still defined in mcp/src/lineage.rs (or codec/schema.rs). The implementation must re-export or import those types cross-boundary. This is feasible but the task doesn't acknowledge this complexity.",
+          "fix": "Add a note clarifying that lineage types (LineageResult, LineageNode, LineageEdge) will temporarily be imported from mcp/src/lineage.rs via `crate::lineage::*` in the sqlite.rs implementation until Task 9 moves them to core/src/lineage/. Alternatively, defer LineageStore trait to Task 9."
+        }
+      ]
+    }
+  },
+  "summary": "0 approved, 3 need fixes. Tasks 4 and 5 each have one major issue (mcp.rs missing from files-to-modify lists causing compile failures) and one minor issue. Task 6 has two major issues (payment methods misattributed to payment.rs, mcp.rs missing from files-to-modify) and one critical issue (task incorrectly states payment methods 'stay in' payment.rs when they must be MOVED there from db.rs — contradicting the AC which says 'retain untouched')."
+}

@@ -1,0 +1,73 @@
+{
+  "check": "cross-task",
+  "status": "approved",
+  "findings": [
+    {
+      "severity": "minor",
+      "category": "decomposition",
+      "tasks": [2, 3, 4, 5, 6, 7, 8, 9, 11],
+      "section": "What to do",
+      "issue": "Multiple extraction tasks (2–9) each state they will delete the source file from mcp/src/ AND update mcp/src/tools.rs and mcp/src/main.rs. Task 11 then performs a final pass to delete 'any remaining' source files and re-audit the same import files. This creates intentional redundancy (each task cleans up after itself, Task 11 is defensive), which is fine architecturally, but means Task 11's scope description is ambiguous about whether it is doing new work or verifying prior work. If a prior extraction task skips its cleanup step, Task 11 silently picks it up with no traceability.",
+      "fix": "In Task 11's Description and What to do, explicitly state which deletions are expected to already be done (by prior tasks) vs. which are Task 11's responsibility. Consider adding a pre-condition check: list the files that SHOULD already be absent and assert they are gone before proceeding."
+    },
+    {
+      "severity": "minor",
+      "category": "decomposition",
+      "tasks": [11, 12],
+      "section": "Frontmatter",
+      "issue": "Tasks 11 and 12 are both in wave 11 with depends_on: [10]. This is correct — they can run in parallel. However, Task 13 (code audit, wave 12) depends on both Task 11 AND Task 12 being complete. Task 13's description says 'Depends on Task 11 (MCP server rewiring) and Task 12 (architecture.md updated).' The frontmatter correctly encodes this as depends_on: [11, 12]. No structural defect, but if Task 11 and Task 12 are executed sequentially (not in parallel), the critical path is longer than necessary. This is a scheduling note, not a correctness issue.",
+      "fix": "No fix required. Confirm the feature-execution orchestrator is configured to run wave 11 tasks in parallel."
+    },
+    {
+      "severity": "minor",
+      "category": "consistency",
+      "tasks": [6],
+      "section": "What to do",
+      "issue": "Task 6 modifies mcp/src/payment.rs (receives 8 payment methods from db.rs). Task 8 also modifies mcp/src/payment.rs (adds standalone verify_usdc_transfer). These are in waves 6 and 8 respectively — sequential, no file conflict. However, Task 6 step 8 says payment methods 'can be free functions or methods on a new PaymentStore wrapper — whatever approach keeps payment.rs callers compiling.' Task 8 step 4 says verify_usdc_transfer becomes a 'module-level pub async fn'. If Task 6 chose a PaymentStore struct approach, Task 8's addition of a free function may be stylistically inconsistent. The spec does not mandate a uniform approach across both tasks.",
+      "fix": "Add a note in Task 8's Details section that the style of verify_usdc_transfer (free function) must be consistent with how Task 6 structured the payment methods in payment.rs. If Task 6 used a PaymentStore impl, consider whether verify_usdc_transfer should also be a method or remain a free function — and document the decision."
+    }
+  ],
+  "checks_performed": {
+    "dependency_cycles": {
+      "status": "pass",
+      "detail": "Directed graph of all 16 tasks has no cycles. Full chain: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → 9 → 10 → {11, 12} → {13, 14, 15} → 16."
+    },
+    "wave_sequencing": {
+      "status": "pass",
+      "detail": "All 16 tasks satisfy the invariant wave(task) > max(wave(dependency)) for every entry in depends_on. Sequential wave numbers 1–13 are correctly assigned."
+    },
+    "competing_instances_same_wave": {
+      "status": "pass",
+      "detail": "Wave 11: Tasks 11 and 12 modify completely disjoint files (mcp/src/* vs .claude/skills/project-knowledge/references/*). Wave 12: Tasks 13, 14, 15 are read-only audits — no file modifications. Wave 13: Task 16 is read-only QA. No two tasks in the same wave write to the same file."
+    },
+    "shared_resource_ownership": {
+      "status": "pass",
+      "detail": "Tech-spec declares 'Shared Resources: None.' Three files are modified by multiple tasks but always in strict sequential waves: core/src/lib.rs (owner: Task 1, consumers: Tasks 2–9), mcp/src/tools.rs (consumers: Tasks 2–9, 11), mcp/src/main.rs (consumers: Tasks 3–9, 11). Each consumer depends on all prior consumers through the linear chain — correct ownership by sequential ordering."
+    },
+    "skill_assignment_audit_wave": {
+      "status": "pass",
+      "detail": "Task 13 (wave 12): skills: [code-reviewing] — correct. Task 14 (wave 12): skills: [security-auditor] — correct. Task 15 (wave 12): skills: [test-master] — correct. Task 16 (wave 13): skills: [pre-deploy-qa] — correct. All audit-wave tasks use the appropriate specialized skill."
+    },
+    "reviewer_consistency_audit_tasks": {
+      "status": "pass",
+      "detail": "Tasks 13, 14, 15 correctly have reviewers: [] (they are the reviewer tasks). Task 16 correctly has reviewers: [] (pre-deploy-qa is self-contained). No audit task incorrectly assigns itself a reviewer."
+    },
+    "shared_file_mcp_tools_rs": {
+      "status": "pass",
+      "detail": "mcp/src/tools.rs is modified by Tasks 2, 3, 4, 5, 6, 7, 8, 9, 11. Each is in a distinct wave (2–9, 11) with strict sequential dependencies. Task N depends on Task N-1 for all N in this chain. No concurrent writes."
+    },
+    "shared_file_mcp_main_rs": {
+      "status": "pass",
+      "detail": "mcp/src/main.rs is modified by Tasks 3, 4, 5, 6, 7, 8, 9, 11. All in sequential waves with no parallel execution. Safe."
+    },
+    "shared_file_core_lib_rs": {
+      "status": "pass",
+      "detail": "core/src/lib.rs is created by Task 1 and extended by Tasks 2–9. All sequential. Task 10 reads it but does not modify it. Task 11 reads it. Safe."
+    },
+    "shared_file_mcp_payment_rs": {
+      "status": "pass",
+      "detail": "mcp/src/payment.rs is modified by Tasks 6 (wave 6) and 8 (wave 8). Task 8 depends on Task 7 which depends on Task 6 — sequential. No conflict."
+    }
+  },
+  "summary": "All 16 tasks pass cross-task integration checks. Dependency graph is acyclic. Wave sequencing is valid across all 13 waves. No two tasks in the same wave modify the same file. Audit-wave tasks (13, 14, 15) correctly use specialized audit skills. Final wave (16) correctly uses pre-deploy-qa. Three minor findings: (1) Task 11's cleanup scope is ambiguous about which file deletions are expected vs. new — defensive wording should be clarified; (2) Wave 11 parallel execution opportunity (Tasks 11 and 12) should be confirmed with the orchestrator; (3) payment.rs structure consistency between Task 6's chosen pattern and Task 8's free-function addition should be documented. No critical or major findings. Feature is cleared for execution."
+}

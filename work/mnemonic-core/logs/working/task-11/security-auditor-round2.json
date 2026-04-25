@@ -1,0 +1,113 @@
+{
+  "reviewer": "security-auditor",
+  "round": 2,
+  "task": 11,
+  "verdict": "approved",
+  "round1_fixes_verified": {
+    "credit_deposit_TOCTOU": {
+      "status": "fixed",
+      "notes": [
+        "Partial UNIQUE index `uq_payment_events_tx_sig ON payment_events(tx_sig) WHERE tx_sig IS NOT NULL` is correct. SQLite treats two NULL values as distinct under a partial index, so refund and charge rows (tx_sig=NULL) are exempt from the constraint while real tx sigs collide atomically.",
+        "BEGIN IMMEDIATE acquires the write lock at transaction open. INSERT payment_event is the idempotency gate (first); UPDATE balance is second. If INSERT fails with ConstraintViolation the ROLLBACK fires and balance is never touched. Ordering is correct.",
+        "ConstraintViolation mapping uses `rusqlite::ErrorCode::ConstraintViolation` which is the exact enum variant rusqlite raises for SQLITE_CONSTRAINT. Correct.",
+        "Concurrent test `credit_deposit_concurrent_same_tx_sig_applies_once` opens two independent file-backed SqliteStore connections and synchronizes with a Barrier. The UNIQUE constraint + BEGIN IMMEDIATE together guarantee exactly one success. Test methodology is sound — it does not rely on scheduling luck."
+      ]
+    },
+    "deduct_balance_TOCTOU": {
+      "status": "fixed",
+      "notes": [
+        "Single conditional UPDATE `WHERE api_key = ? AND balance_micro_usdc >= ?` is a single SQLite statement. SQLite serializes all writes, so two concurrent executions cannot both pass the guard. Atomic at the database level without an explicit transaction needed.",
+        "changes()==0 branch uses a follow-up read-only `get_balance` call to produce a precise error message (None => not found, Some(bal) => insufficient). This is semantically correct. The comment correctly notes that the balance read may be slightly stale — acceptable because the code is on a rejection path only; no financial side-effects can occur from stale diagnostics.",
+        "Concurrent test `deduct_balance_concurrent_cannot_overdraw` uses the same Barrier + file-backed dual-connection pattern. Final balance assertion (100 - 75 = 25) definitively proves no overdraft. Sound."
+      ]
+    },
+    "random_bytes_fallback": {
+      "status": "fixed",
+      "notes": [
+        "The SHA-256(timestamp+PID+counter) fallback branch is completely removed. `random_bytes` now returns `anyhow::Result<[u8; N]>` and fails loudly via `?` propagation if /dev/urandom is unavailable or unreadable. `create_api_key` propagates the error upward; the HTTP handler returns 500. No silent fallback path remains."
+      ]
+    },
+    "deposit_403_info_leak": {
+      "status": "fixed",
+      "notes": [
+        "The partial pubkey and tx_sig prefixes are removed from the 403 response body. The client now receives only: `{\"error\": \"deposit rejected: API key owner is not a signer of this transaction\"}`. Full owner_pubkey, tx_sig, and signers list are logged server-side via `tracing::warn!` for operator debugging. No identifier leaks in the 403 body."
+      ]
+    },
+    "refund_tx_sig_collision": {
+      "status": "fixed",
+      "notes": [
+        "Refunds now use the dedicated `refund_balance` function which writes `tx_sig=NULL` to payment_events and `event_type='refund'`. NULL values are exempt from the partial UNIQUE index (`WHERE tx_sig IS NOT NULL`), so repeated refunds with identical reasons all apply correctly.",
+        "Security soundness: NULL exemption is intentional and documented. An attacker cannot exploit this because refund_balance is only called from the authenticated mcp_handler after a deduct_balance has already succeeded. The balance can never increase beyond what was previously deducted (refund amount == deducted cost). No double-refund amplification is possible via NULL.",
+        "Accounting correctness: test `refund_balance_allows_duplicate_reasons` seeds a key, fires two identical-reason refunds, and asserts both increment the balance and both rows exist in payment_events. The accounting is correct."
+      ]
+    }
+  },
+  "deferred_findings_assessment": {
+    "CORS_allow_origin_Any": {
+      "deferred": true,
+      "acceptable": true,
+      "rationale": "Pre-existing, self-hosted server context. The payment routes are not credentialed (no cookies), and the api_key bearer token is the real auth control. A malicious cross-origin page cannot extract the bearer token from the client that submitted the request. Deferral is acceptable as a tracked debt item."
+    },
+    "admin_stats_no_auth": {
+      "deferred": true,
+      "acceptable": true,
+      "rationale": "Pre-existing. The endpoint exposes only aggregate P&L data (no keys, no tx sigs, no user-identifiable information). For a self-hosted single-operator server this is a low-impact exposure. Deferral is acceptable as tracked debt."
+    }
+  },
+  "status": "approved",
+  "summary": {
+    "totalFindings": 2,
+    "critical": 0,
+    "major": 0,
+    "minor": 2
+  },
+  "findings": [
+    {
+      "severity": "minor",
+      "category": "A04: Insecure Design / data integrity",
+      "title": "deduct_balance: payment_events charge INSERT is outside any transaction",
+      "description": "The atomic UPDATE in `deduct_balance` correctly prevents balance overdraft, but the subsequent `INSERT INTO payment_events` that records the charge event is a separate, unguarded statement outside any explicit transaction. If this INSERT fails (e.g. disk full, constraint on uuid collision), the balance has already been decremented but no audit trail exists for the charge. This creates a silent accounting discrepancy: the balance reflects the deduction but the payment_events ledger does not.",
+      "location": "mcp/src/payment.rs:368-371 (deduct_balance, charge INSERT)",
+      "impact": "If the INSERT fails, the operator's payment_events ledger is silently incomplete. The user was charged but there is no charge event. Financial reconciliation would show a balance deficit with no matching charge record. In practice the only failure mode is a SQLite error (disk full, process kill) which is unusual, but it is not protected against.",
+      "recommendation": "Wrap the UPDATE and INSERT in an IMMEDIATE transaction, matching the pattern used in `credit_deposit` and `refund_balance`:\n```rust\nconn.execute(\"BEGIN IMMEDIATE\", [])?;\n// existing UPDATE ...\n// existing INSERT ...\nconn.execute(\"COMMIT\", [])?;\n```\nThis ensures both statements are applied atomically or neither is.",
+      "cwe": "CWE-362"
+    },
+    {
+      "severity": "minor",
+      "category": "A05: Security Misconfiguration / migration safety",
+      "title": "Partial UNIQUE index migration fails on existing databases with duplicate tx_sigs",
+      "description": "`CREATE UNIQUE INDEX IF NOT EXISTS uq_payment_events_tx_sig ON payment_events(tx_sig) WHERE tx_sig IS NOT NULL` is executed via `execute_batch(SCHEMA)` every time `SqliteStore::open` is called. If a database on disk already has two payment_events rows where tx_sig is the same non-NULL value (produced by the old SELECT COUNT + INSERT pattern before this fix was deployed), the `CREATE UNIQUE INDEX` statement will fail with `SQLITE_CONSTRAINT` and the entire schema batch will be rejected — causing the server to fail to start on the first restart after deployment.",
+      "location": "core/src/storage/sqlite.rs:53-55 (uq_payment_events_tx_sig creation)",
+      "impact": "Operators upgrading from the pre-fix codebase on a database that experienced the TOCTOU race (i.e. a duplicate deposit was credited before this fix) will find the server refuses to start after the update. This is a deployment availability issue, not a data breach, but it could cause downtime if the schema migration is not handled before restart.",
+      "recommendation": "Before adding the UNIQUE index, deduplicate any existing offending rows, or use a two-step migration: (1) DELETE duplicate payment_events keeping only the earliest row per tx_sig (`DELETE FROM payment_events WHERE rowid NOT IN (SELECT MIN(rowid) FROM payment_events WHERE tx_sig IS NOT NULL GROUP BY tx_sig)`), then (2) CREATE the UNIQUE INDEX. Alternatively, document this as a breaking migration requirement in the deployment runbook and accept manual intervention on affected databases.",
+      "cwe": "CWE-440"
+    }
+  ],
+  "additional_axes_checked": {
+    "test_helpers_leak_real_keys_or_urls": {
+      "result": "clean",
+      "notes": "Test helper `fresh_store()` uses `SqliteStore::in_memory()`. `fresh_file_store()` uses `tempfile::tempdir()` with a synthetic path. All test api_key owner values are synthetic strings ('owner_a', 'owner_concurrent', 'owner_overdraft', 'owner_b', 'owner_c'). Test tx_sig values are synthetic ('same_tx_abc_123', 'seed_tx', 'unique_sig'). No real keys, pubkeys, or production URLs appear in the test module."
+    },
+    "new_partial_unique_index_migration_safety": {
+      "result": "flagged as minor finding above",
+      "notes": "CREATE UNIQUE INDEX IF NOT EXISTS will fail if pre-existing duplicate tx_sigs exist on disk. Flagged as minor finding."
+    },
+    "hardcoded_secrets_scan": {
+      "result": "clean",
+      "notes": "config.rs uses env_or() for all credentials (OPENAI_API_KEY, TREASURY_PUBKEY, SOLANA_RPC_URL, etc.) with safe defaults (empty strings or localhost URLs). The USDC mint address hardcoded as default ('EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v') is a public mainnet contract address — not a secret. No API keys, private keys, or passwords hardcoded in source."
+    },
+    "owasp_coverage": {
+      "A01_broken_access_control": "No new routes or privilege paths introduced. Existing deposit authz (signer check) unchanged and still correct.",
+      "A02_cryptographic_failures": "random_bytes fallback removed; /dev/urandom is now the only entropy source and failure is fatal. Improvement over round 1.",
+      "A03_injection": "No new SQL string interpolation. All new queries use params![] macro.",
+      "A04_insecure_design": "deduct_balance charge INSERT atomicity gap flagged as minor (new finding).",
+      "A05_misconfiguration": "UNIQUE index migration risk flagged as minor (new finding). CORS Any and admin_stats auth remain deferred pre-existing items.",
+      "A06_vulnerable_components": "No new dependencies added. tempfile added to dev-dependencies only; not in production binary.",
+      "A07_auth_failures": "No changes to auth paths. Bearer token extraction unchanged.",
+      "A08_software_data_integrity": "No deserialization changes. JSON parsing uses serde which is safe.",
+      "A09_logging_monitoring": "Improved: full identifiers now logged server-side via tracing::warn! on deposit rejection. Refund failures now logged via tracing::warn! instead of silently discarded with let _ =.",
+      "A10_SSRF": "No new URL construction from user input."
+    }
+  },
+  "notes": "All five round-1 findings are correctly addressed. Both major TOCTOU races are closed atomically. The random_bytes fallback is completely removed. The 403 info leak is remediated. The refund collision is resolved via a dedicated refund_balance function with NULL tx_sig. Two new minor findings are raised: (1) deduct_balance charge INSERT lacks transaction protection (accounting integrity gap, not a security vector), and (2) the UNIQUE index migration can fail on databases with pre-existing duplicate tx_sigs from the old code path. Neither is critical. The round-2 verdict is APPROVED."
+}

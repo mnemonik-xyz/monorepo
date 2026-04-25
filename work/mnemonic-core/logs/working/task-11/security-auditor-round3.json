@@ -1,0 +1,118 @@
+{
+  "reviewer": "security-auditor",
+  "round": 3,
+  "task": 11,
+  "verdict": "approved",
+  "round2_findings_resolved": {
+    "deduct_balance_audit_trail_not_in_txn": {
+      "status": "fixed",
+      "severity_was": "minor",
+      "analysis": [
+        "BEGIN IMMEDIATE is issued before the UPDATE, acquiring the SQLite write lock at transaction open. This is semantically correct for rusqlite: rusqlite's Connection does not auto-begin, so the explicit BEGIN IMMEDIATE is the only way to open a named transaction from Rust. Verified against rusqlite docs — execute(\"BEGIN IMMEDIATE\", []) works identically to conn.execute_batch(\"BEGIN IMMEDIATE;\").",
+        "The error-handling paths are exhaustive: (1) UPDATE fails -> ROLLBACK + return Err; (2) changed==0 (key not found or insufficient balance) -> ROLLBACK + produce diagnostic via read-only get_balance; (3) INSERT fails -> ROLLBACK + return Err; (4) all success -> COMMIT. No path exits without either committing or rolling back.",
+        "The ROLLBACK on the changed==0 path correctly releases the write lock before calling get_balance. get_balance issues a read-only SELECT that does not require the write lock. Under WAL mode (now enabled) readers never block on writers, so this is safe even if another connection is mid-write.",
+        "One subtle point: after ROLLBACK the in-flight get_balance call reads a committed view. Since the UPDATE was rolled back, the balance read is consistent. The comment notes it 'may be slightly stale' — this is acceptable because the path is diagnostic-only; no financial mutation follows.",
+        "The test deduct_balance_audit_insert_failure_rolls_back_balance installs a BEFORE INSERT trigger that raises ABORT, then asserts (1) the call errors, (2) balance is unchanged at 500, (3) no charge row was written, and (4) the store is not stuck after the rolled-back transaction. SQLITE_ABORT from a trigger causes rusqlite to return Err, which the Rust code maps correctly to the insert_res Err branch, issuing ROLLBACK. Test methodology is sound.",
+        "No concern: the manual ROLLBACK via conn.execute(\"ROLLBACK\", []) uses let _ = to suppress its own error. This is the correct pattern — if ROLLBACK itself errors (which can only happen if there is no active transaction, i.e. the BEGIN IMMEDIATE already errored), we are already in an error path and the suppression avoids a confusing double-error. The outer return Err(e.into()) is what the caller sees."
+      ]
+    },
+    "migration_fails_on_existing_dbs_with_duplicate_tx_sig": {
+      "status": "fixed",
+      "severity_was": "minor",
+      "analysis": [
+        "The migrate_payment_events_unique_index helper runs inside a single BEGIN IMMEDIATE / COMMIT block, so the DELETE and CREATE UNIQUE INDEX are atomic. A concurrent opener that loses the lock race will wait (up to busy_timeout=5000ms) and then observe the fully migrated state.",
+        "The dedup logic keeps MIN(rowid) per tx_sig, which is the earliest-inserted row. This is the correct forensic choice: the first row was the legitimate credit_deposit; duplicates were spurious second writes from the pre-fix TOCTOU race. No legitimate row is deleted.",
+        "The auto-dedup is a no-op on fresh or already-clean databases because the DELETE WHERE rowid NOT IN (...) sub-query returns an empty set when there are no duplicates. CREATE UNIQUE INDEX IF NOT EXISTS is idempotent and cheap once the index exists.",
+        "The migration runs on both open() (file-backed) and in_memory() (test). Running it on in-memory stores is harmless and ensures test stores behave identically to production stores with respect to schema constraints.",
+        "Forensic risk assessment: the deleted rows are duplicates produced by a TOCTOU race; they represent erroneous double-credits that should not have existed. Operators who suspect fraud (unusual duplicate deposits before upgrade) are advised in the decisions.md to audit payment_events before upgrading — but the code does not enforce this. This is an acceptable risk for a self-hosted operator-grade tool. The surviving row (MIN(rowid)) preserves the full audit record for the legitimate credit."
+      ]
+    }
+  },
+  "targeted_review": {
+    "transaction_pattern_correctness": {
+      "verdict": "correct",
+      "details": "BEGIN IMMEDIATE acquires an IMMEDIATE write lock in rusqlite, preventing any other connection from opening a RESERVED or EXCLUSIVE lock. The UPDATE executes within this lock. changes() is called (implicitly via the return value of execute()) before any other statement, which is the correct rusqlite API for reading the per-connection row-change counter. INSERT executes within the same transaction. COMMIT releases the lock. The sequence UPDATE-check-INSERT-COMMIT is logically sound. No re-entrant connection issue exists because SqliteStore is !Send and each store owns exactly one Connection."
+    },
+    "auto_dedup_migration_security_risks": {
+      "verdict": "acceptable — no new security risk introduced",
+      "details": [
+        "Silent deletion of duplicates: the deleted rows are TOCTOU artifacts (spurious second credits). Deleting them does not create a security hole because: (a) the balance was double-credited at the time of the race, and (b) the operator would need to reconcile balance against payment_events anyway. The surviving MIN(rowid) row is the complete audit record.",
+        "Wrong-row selection risk: MIN(rowid) reliably selects the row that SQLite assigned the lowest internal rowid, which is guaranteed to be the one inserted first in a single-connection sequential scenario. In the concurrent race scenario, rowid assignment is serialized by SQLite's write lock, so MIN(rowid) is still deterministic. There is no ambiguity about which row is 'correct'.",
+        "Forensic information loss: the deleted duplicate rows contained the same tx_sig, api_key, amount, and created_at as the surviving row (same function call, same inputs). The only information lost is proof that two rows existed, which is itself evidence of the old bug. Operators who want to preserve this evidence for audit should take a DB snapshot before the first post-upgrade restart. This is not documented in-code but is noted in decisions.md.",
+        "Recommendation (minor, informational): Consider logging a warning via tracing::warn! if the DELETE removes any rows, e.g. 'migrated N duplicate tx_sig rows from payment_events'. This would surface the event in operator logs without blocking startup or requiring manual intervention. Currently the dedup is completely silent."
+      ]
+    },
+    "wal_mode_security_implications": {
+      "verdict": "acceptable with operator awareness note",
+      "details": [
+        "WAL mode creates two additional files alongside the main DB: <name>-wal (write-ahead log) and <name>-shm (shared memory index). These files contain recent uncommitted and committed transactions and must be protected with the same filesystem permissions as the main DB file. If the main DB file is chmod 600 (owner-only) but the WAL/SHM files inherit a more permissive umask, an unprivileged user could read the WAL to reconstruct recent transactions including api_keys, balance changes, and payment_events.",
+        "The code does not set the WAL/SHM file permissions explicitly. std::fs::create_dir_all creates the parent directory but does not set a restrictive umask on the files SQLite creates. File permissions depend on the process umask at startup.",
+        "This is not a new vulnerability introduced by round 3 — the main DB file already had the same permission-dependency. WAL mode increases the attack surface slightly by adding two more files that must be protected.",
+        "The busy_timeout=5000 setting is not a security concern. It affects how long a loser of a lock race waits before returning SQLITE_BUSY. 5 seconds is reasonable for a payment workload and does not create a DoS amplification risk beyond what SQLite already allows.",
+        "WAL mode checkpoint behavior: WAL frames are merged back to the main DB on connection close or explicit PRAGMA wal_checkpoint. This is handled automatically by SQLite. No security implication beyond the file-permission note above.",
+        "Operator documentation recommendation (minor, informational): the deployment runbook should note that the DB directory (and all files within it, including -wal and -shm) must be restricted to the service account. This is not a code change but a documentation gap."
+      ]
+    },
+    "new_issues_in_round3": {
+      "verdict": "no new security issues found",
+      "details": [
+        "No new SQL queries or parameterization changes. All inserts/selects in the migration helper use literal SQL with no user-supplied values.",
+        "No new routes, auth paths, or input-handling code.",
+        "No new dependencies in Cargo.toml.",
+        "ROLLBACK-on-error pattern is consistent across the new deduct_balance code and the existing credit_deposit / refund_balance functions.",
+        "The test trigger (CREATE TRIGGER force_fail_charge) is installed only in a test-module function and is dropped at the end of the test. No production code path creates or depends on this trigger.",
+        "No hardcoded secrets, keys, or credentials introduced."
+      ]
+    }
+  },
+  "owasp_final_sweep": {
+    "A01_broken_access_control": "No new routes or privilege paths. Unchanged from round 2.",
+    "A02_cryptographic_failures": "No changes. random_bytes fallback was removed in round 2.",
+    "A03_injection": "No new SQL string interpolation. Migration SQL in migrate_payment_events_unique_index uses no user-supplied values — all literals.",
+    "A04_insecure_design": "deduct_balance atomicity gap is now closed. UPDATE + INSERT are in one BEGIN IMMEDIATE transaction.",
+    "A05_misconfiguration": "WAL/SHM file permissions are an operator-configuration concern, not a code defect. Noted as informational. UNIQUE index migration is now safe on legacy DBs.",
+    "A06_vulnerable_components": "No new production dependencies.",
+    "A07_auth_failures": "No changes to auth paths.",
+    "A08_software_data_integrity": "No deserialization changes.",
+    "A09_logging_monitoring": "Silent dedup during migration is a minor informational gap (no tracing::warn! if rows deleted). Not a security finding but noted.",
+    "A10_SSRF": "No new URL construction from user input."
+  },
+  "status": "approved",
+  "summary": {
+    "totalFindings": 2,
+    "critical": 0,
+    "major": 0,
+    "minor": 2
+  },
+  "findings": [
+    {
+      "severity": "minor",
+      "category": "A05: Security Misconfiguration",
+      "title": "WAL mode adds -wal and -shm files that must be protected with same permissions as main DB",
+      "description": "Enabling WAL mode (PRAGMA journal_mode=WAL) causes SQLite to create two companion files: <dbname>-wal and <dbname>-shm. These files contain recent committed and uncommitted transaction data, including payment_events and api_keys. The code does not explicitly set filesystem permissions on these files; their permissions depend on the process umask. If the umask is too permissive, an unprivileged local user could read the WAL file and reconstruct recent payment and key data.",
+      "location": "core/src/storage/sqlite.rs:125 (PRAGMA journal_mode=WAL)",
+      "impact": "Local privilege escalation to read payment data, api_keys, and balance information from WAL/SHM files if the operator runs the service with a permissive umask. This is a deployment configuration risk, not a remote exploitation vector.",
+      "recommendation": "Document in the deployment runbook that the DB directory (and all files, including -wal and -shm) must be chmod 700 / owned by the service account. Optionally, set a restrictive umask (0o077) in main() before SqliteStore::open is called, or set permissions on the DB directory explicitly in SqliteStore::open after create_dir_all.",
+      "cwe": "CWE-732"
+    },
+    {
+      "severity": "minor",
+      "category": "A09: Security Logging and Monitoring",
+      "title": "Auto-dedup migration silently removes rows — no operator-visible log entry",
+      "description": "migrate_payment_events_unique_index silently deletes duplicate tx_sig rows (TOCTOU artifacts from the old code path) and creates the UNIQUE index. If the DELETE removes any rows, the operator has no record of the cleanup in the application logs. A suspicious operator (or auditor) reviewing logs after an upgrade would see no indication that rows were removed, making forensic reconstruction harder.",
+      "location": "core/src/storage/sqlite.rs:96-110 (migrate_payment_events_unique_index)",
+      "impact": "Reduced auditability of the migration step. If duplicate rows existed due to an actual double-credit exploit rather than the TOCTOU race, the cleanup would be silent and the operator would be unaware.",
+      "recommendation": "After the DELETE, query the number of affected rows (or check sqlite3_changes()) and emit a tracing::warn! if count > 0. Example: 'Removed N duplicate tx_sig rows from payment_events during migration — these were TOCTOU artifacts from the pre-fix code path.' This makes the migration auditable without blocking startup.",
+      "cwe": "CWE-778"
+    }
+  ],
+  "round2_findings_closure": {
+    "minor_deduct_balance_audit_trail": "RESOLVED — BEGIN IMMEDIATE wraps UPDATE + INSERT; all error paths issue ROLLBACK; test confirms balance is untouched when INSERT fails.",
+    "minor_unique_index_migration_safety": "RESOLVED — migrate_payment_events_unique_index deletes duplicates (keeping MIN(rowid)) inside BEGIN IMMEDIATE before creating the UNIQUE index; idempotent and safe on fresh DBs."
+  },
+  "deferred_carried_items": {
+    "CORS_allow_origin_Any": "Still deferred, still acceptable. No change in round 3.",
+    "admin_stats_no_auth": "Still deferred, still acceptable. No change in round 3."
+  },
+  "notes": "Both round-2 minor findings are correctly resolved. The transaction pattern in deduct_balance is semantically correct under rusqlite semantics. The auto-dedup migration is safe, idempotent, and preserves the forensically relevant row (MIN(rowid) = earliest insert). WAL mode is operationally sound; the -wal/-shm file-permission concern is a pre-existing deployment configuration risk elevated slightly by WAL, not a new code defect. No new critical or major issues were found. The round-3 verdict is APPROVED."
+}
