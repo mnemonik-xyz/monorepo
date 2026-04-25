@@ -10,7 +10,9 @@ pub trait Embedder: Send + Sync {
     fn model_id(&self) -> &str;
     /// True if the model weights are publicly available (open source).
     /// Only open-weight models produce externally verifiable attestations.
-    fn is_open_weights(&self) -> bool { false }
+    fn is_open_weights(&self) -> bool {
+        false
+    }
 }
 
 // -- FastEmbed (local ONNX) --
@@ -20,35 +22,47 @@ pub trait Embedder: Send + Sync {
 /// Enable with: cargo build --features local-embed
 #[cfg(feature = "local-embed")]
 pub struct FastEmbedder {
-    model: fastembed::TextEmbedding,
+    // fastembed 5.x requires `&mut self` on `embed`; wrap in Mutex so the
+    // `Embedder` trait can keep its `&self` signature. Inference holds the
+    // lock briefly per call — no `.await` is held across the guard.
+    model: std::sync::Mutex<fastembed::TextEmbedding>,
     dim: usize,
 }
 
 #[cfg(feature = "local-embed")]
 impl FastEmbedder {
     pub fn try_new() -> Result<Self, String> {
-        use fastembed::{TextEmbedding, InitOptions, EmbeddingModel};
-        let model = TextEmbedding::try_new(InitOptions {
-            model_name: EmbeddingModel::AllMiniLML6V2,
-            ..Default::default()
-        }).map_err(|e| format!("fastembed init failed: {e}"))?;
+        use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
+        let mut model = TextEmbedding::try_new(InitOptions::new(EmbeddingModel::AllMiniLML6V2))
+            .map_err(|e| format!("fastembed init failed: {e}"))?;
 
-        // Probe dimension
-        let sample = model.embed(vec!["test"], None)
+        let sample = model
+            .embed(vec!["test"], None)
             .map_err(|e| format!("fastembed probe failed: {e}"))?;
         let dim = sample.first().map(|v| v.len()).unwrap_or(384);
 
-        Ok(Self { model, dim })
+        Ok(Self {
+            model: std::sync::Mutex::new(model),
+            dim,
+        })
     }
 }
 
 #[cfg(feature = "local-embed")]
 impl Embedder for FastEmbedder {
     fn embed(&self, text: &str) -> Vec<f32> {
-        match self.model.embed(vec![text.to_string()], None) {
-            Ok(embeddings) => {
-                embeddings.into_iter().next().unwrap_or_else(|| vec![0.0; self.dim])
+        let mut guard = match self.model.lock() {
+            Ok(g) => g,
+            Err(poisoned) => {
+                tracing::error!("fastembed mutex poisoned, recovering");
+                poisoned.into_inner()
             }
+        };
+        match guard.embed(vec![text.to_string()], None) {
+            Ok(embeddings) => embeddings
+                .into_iter()
+                .next()
+                .unwrap_or_else(|| vec![0.0; self.dim]),
             Err(e) => {
                 tracing::error!("fastembed inference failed: {e}");
                 vec![0.0; self.dim]
@@ -56,10 +70,18 @@ impl Embedder for FastEmbedder {
         }
     }
 
-    fn dim(&self) -> usize { self.dim }
-    fn provider_name(&self) -> &str { "fastembed" }
-    fn model_id(&self) -> &str { "all-MiniLM-L6-v2" }
-    fn is_open_weights(&self) -> bool { true } // Apache 2.0
+    fn dim(&self) -> usize {
+        self.dim
+    }
+    fn provider_name(&self) -> &str {
+        "fastembed"
+    }
+    fn model_id(&self) -> &str {
+        "all-MiniLM-L6-v2"
+    }
+    fn is_open_weights(&self) -> bool {
+        true
+    } // Apache 2.0
 }
 
 // -- OpenAI embedder --
@@ -86,7 +108,8 @@ impl Embedder for OpenAIEmbedder {
     fn embed(&self, text: &str) -> Vec<f32> {
         let client = reqwest::blocking::Client::new();
         let body = serde_json::json!({ "input": text, "model": self.model });
-        let resp = client.post("https://api.openai.com/v1/embeddings")
+        let resp = client
+            .post("https://api.openai.com/v1/embeddings")
             .header("Authorization", format!("Bearer {}", self.api_key))
             .header("Content-Type", "application/json")
             .json(&body)
@@ -96,7 +119,8 @@ impl Embedder for OpenAIEmbedder {
             Ok(r) => {
                 if let Ok(json) = r.json::<serde_json::Value>() {
                     if let Some(embedding) = json["data"][0]["embedding"].as_array() {
-                        return embedding.iter()
+                        return embedding
+                            .iter()
                             .filter_map(|v| v.as_f64().map(|f| f as f32))
                             .collect();
                     }
@@ -111,9 +135,15 @@ impl Embedder for OpenAIEmbedder {
         }
     }
 
-    fn dim(&self) -> usize { self.dim }
-    fn provider_name(&self) -> &str { "openai" }
-    fn model_id(&self) -> &str { &self.model }
+    fn dim(&self) -> usize {
+        self.dim
+    }
+    fn provider_name(&self) -> &str {
+        "openai"
+    }
+    fn model_id(&self) -> &str {
+        &self.model
+    }
 }
 
 // -- MockEmbedder (test only) --
@@ -126,7 +156,9 @@ pub struct MockEmbedder {
 
 #[cfg(test)]
 impl MockEmbedder {
-    pub fn new(dim: usize) -> Self { Self { dim } }
+    pub fn new(dim: usize) -> Self {
+        Self { dim }
+    }
 }
 
 #[cfg(test)]
@@ -140,9 +172,15 @@ impl Embedder for MockEmbedder {
         vec
     }
 
-    fn dim(&self) -> usize { self.dim }
-    fn provider_name(&self) -> &str { "mock" }
-    fn model_id(&self) -> &str { "mock-deterministic" }
+    fn dim(&self) -> usize {
+        self.dim
+    }
+    fn provider_name(&self) -> &str {
+        "mock"
+    }
+    fn model_id(&self) -> &str {
+        "mock-deterministic"
+    }
 }
 
 // -- Builder --
@@ -152,7 +190,11 @@ impl Embedder for MockEmbedder {
 /// Returns Ok(embedder) or Err with a message if no real embedder is available.
 ///
 /// Priority: fastembed (open, verifiable) > openai (proprietary but semantic)
-pub fn build_embedder(provider: &str, api_key: &str, model: &str) -> Result<Box<dyn Embedder>, String> {
+pub fn build_embedder(
+    provider: &str,
+    api_key: &str,
+    model: &str,
+) -> Result<Box<dyn Embedder>, String> {
     match provider {
         "fastembed" => {
             #[cfg(feature = "local-embed")]
@@ -161,7 +203,8 @@ pub fn build_embedder(provider: &str, api_key: &str, model: &str) -> Result<Box<
                     Ok(e) => {
                         tracing::info!(
                             "Embedder: fastembed ({}, {}-dim, open weights, verifiable)",
-                            e.model_id(), e.dim()
+                            e.model_id(),
+                            e.dim()
                         );
                         return Ok(Box::new(e));
                     }
@@ -172,11 +215,15 @@ pub fn build_embedder(provider: &str, api_key: &str, model: &str) -> Result<Box<
             }
             #[cfg(not(feature = "local-embed"))]
             {
-                tracing::warn!("fastembed not compiled in. Build with: cargo build --features local-embed");
+                tracing::warn!(
+                    "fastembed not compiled in. Build with: cargo build --features local-embed"
+                );
             }
             // Fallback to OpenAI if key available
             if !api_key.is_empty() {
-                tracing::info!("Falling back to OpenAI embeddings ({model}) -- NOT externally verifiable");
+                tracing::info!(
+                    "Falling back to OpenAI embeddings ({model}) -- NOT externally verifiable"
+                );
                 Ok(Box::new(OpenAIEmbedder::new(api_key, model)))
             } else {
                 Err(
@@ -188,15 +235,15 @@ pub fn build_embedder(provider: &str, api_key: &str, model: &str) -> Result<Box<
             }
         }
         "openai" if !api_key.is_empty() => {
-            tracing::info!("Embedder: OpenAI {model} -- NOT externally verifiable (proprietary model)");
+            tracing::info!(
+                "Embedder: OpenAI {model} -- NOT externally verifiable (proprietary model)"
+            );
             Ok(Box::new(OpenAIEmbedder::new(api_key, model)))
         }
-        "openai" => {
-            Err("EMBED_PROVIDER=openai but OPENAI_API_KEY not set.".to_string())
-        }
-        other => {
-            Err(format!("Unknown EMBED_PROVIDER={other}. Valid: fastembed, openai"))
-        }
+        "openai" => Err("EMBED_PROVIDER=openai but OPENAI_API_KEY not set.".to_string()),
+        other => Err(format!(
+            "Unknown EMBED_PROVIDER={other}. Valid: fastembed, openai"
+        )),
     }
 }
 
@@ -205,7 +252,9 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
     let na: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
     let nb: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
-    if na == 0.0 || nb == 0.0 { return 0.0; }
+    if na == 0.0 || nb == 0.0 {
+        return 0.0;
+    }
     dot / (na * nb)
 }
 
@@ -213,7 +262,9 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
 pub(crate) fn l2_normalize(vec: &mut [f32]) {
     let norm: f32 = vec.iter().map(|x| x * x).sum::<f32>().sqrt();
     if norm > 0.0 {
-        for v in vec.iter_mut() { *v /= norm; }
+        for v in vec.iter_mut() {
+            *v /= norm;
+        }
     }
 }
 
