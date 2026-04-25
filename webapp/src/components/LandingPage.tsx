@@ -68,7 +68,7 @@ function LandingPage({ onStartChat }: LandingPageProps) {
             Start chat
           </button>
           <a
-            href="/api/download-knowledge"
+            href="/download-knowledge"
             download
             className="rounded-md border border-text-muted/30 px-6 py-3 text-sm font-semibold text-text-primary transition-colors hover:border-accent-secondary hover:text-accent-secondary focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-secondary"
           >

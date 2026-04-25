@@ -1,0 +1,214 @@
+{
+  "task": 11,
+  "type": "test-audit",
+  "date": "2026-04-25",
+  "summary": "Test coverage has significant gaps. Unit tests for config and seed are solid. Chat handler unit tests only cover the build_context helper, not the handler itself. No React component tests exist. No Rust integration tests exist. E2E tests are well-structured but the session limit test is slow (49 real round-trips instead of counter injection).",
+  "overall_grade": "C+",
+  "coverage": {
+    "unit_rust": {
+      "config_rs": {
+        "status": "PASS",
+        "test_count": 9,
+        "covered": [
+          "localhost with port",
+          "localhost with path",
+          "ollama host",
+          "rejects https",
+          "rejects external host",
+          "rejects IP address",
+          "rejects malformed URL",
+          "rejects empty string",
+          "rejects loopback IP bypass"
+        ],
+        "missing": [],
+        "quality_notes": "Good edge case coverage for SSRF prevention. All assertions meaningful."
+      },
+      "seed_rs": {
+        "status": "PASS",
+        "test_count": 13,
+        "covered": [
+          "parse splits at h2",
+          "parse splits large sections at h3",
+          "parse keeps small sections intact",
+          "parse handles empty input",
+          "parse handles no h2 headers",
+          "approx token count",
+          "split_at_h3 preserves preamble",
+          "split_at_h3 no subsections",
+          "generate markdown YAML frontmatter (content_hash, signer_pubkey, timestamp)",
+          "generate json sidecar all fields",
+          "generate artifact creates zip with knowledge.md + knowledge.json",
+          "parse does not confuse h3 for h2 (regression)",
+          "parse real whitepaper structure"
+        ],
+        "missing": [
+          "Seed idempotency (count > 0 skips) -- requires McpState mock, not tested"
+        ],
+        "quality_notes": "Thorough parsing tests. Artifact generation verified with real zip extraction. Regression test for h3/h2 confusion is valuable."
+      },
+      "chat_rs": {
+        "status": "FAIL",
+        "test_count": 6,
+        "covered": [
+          "build_context with results",
+          "build_context empty results",
+          "build_context missing results key",
+          "build_context skips empty content",
+          "MAX_MESSAGE_LEN constant = 2000",
+          "RECALL_LIMIT constant = 3"
+        ],
+        "missing": [
+          "chat_handler with mocked Ollama (httpmock): success path",
+          "chat_handler with mocked Ollama: timeout/error returns 503",
+          "chat_handler: empty recall results -> graceful degradation",
+          "input validation: message > 2000 chars returns 400",
+          "input validation: exactly 2000 chars returns 200",
+          "input validation: empty message returns 400",
+          "input validation: missing message field returns 400",
+          "download_knowledge_handler: artifact exists returns 200 with zip",
+          "download_knowledge_handler: artifact missing returns 404",
+          "rate limiter: injectable counter, verify 429 after threshold"
+        ],
+        "quality_notes": "Only the build_context helper and two constants are tested. The actual chat_handler and download_knowledge_handler have ZERO test coverage. The constant-assertion tests (MAX_MESSAGE_LEN, RECALL_LIMIT) are low-value -- they test that a constant equals itself. The handler is where all the critical logic lives (validation, rate limiting, Ollama error handling, download 404) and none of it is exercised."
+      }
+    },
+    "unit_react": {
+      "status": "MISSING",
+      "test_count": 0,
+      "covered": [],
+      "missing": [
+        "ChatPage: message send/receive",
+        "ChatPage: session counter increment",
+        "ChatPage: limit enforcement at 50",
+        "ChatPage: retry on error (2-3 attempts with backoff)",
+        "LandingPage: renders protocol description",
+        "LandingPage: 'Start chat' button navigates",
+        "Download button: triggers correct URL"
+      ],
+      "quality_notes": "No React component tests exist at all. No vitest/jest setup detected in webapp/. Tech spec explicitly requires React unit tests. Some of this is partially covered by E2E but E2E cannot replace unit-level testing of retry logic, edge cases in counter state, etc."
+    },
+    "integration_rust": {
+      "status": "MISSING",
+      "test_count": 0,
+      "covered": [],
+      "missing": [
+        "Full RAG pipeline: seed whitepaper -> recall 'What are the 5 MCP tools?' -> verify all 5 tool names",
+        "Rate limit: pre-saturated governor bucket -> next request returns 429 (deterministic)",
+        "Ollama error propagation: mock Ollama returning 500 -> chat handler returns 503 with structured error JSON"
+      ],
+      "quality_notes": "No integration tests directory (mcp/tests/) exists. All three tech-spec integration test requirements are unmet."
+    },
+    "e2e_playwright": {
+      "status": "PARTIAL_PASS",
+      "test_count": 7,
+      "files": ["webapp/e2e/chat.spec.ts", "webapp/e2e/app.spec.ts"],
+      "covered": [
+        "Smoke: homepage renders heading (app.spec.ts)",
+        "Golden path: landing -> start chat -> send question -> receive answer",
+        "Golden path: download link href and download attribute verified",
+        "Golden path: download triggers with correct suggestedFilename",
+        "Golden path: counter shows 1/50 after first message",
+        "Out-of-scope question: rejection message appears",
+        "Session limit: counter reaches 50/50, alert banner, input+button disabled",
+        "Error state: retryable 503 with clock.fastForward, verifies 3 retry attempts",
+        "Error state: non-retryable 429, verifies exactly 1 call (no retries)",
+        "Back navigation: returns to landing page"
+      ],
+      "missing": [],
+      "quality_issues": [
+        {
+          "severity": "MEDIUM",
+          "test": "session limit",
+          "issue": "Sends 49 real messages in a loop instead of injecting counter state. Tech spec says 'inject initial counter state at 49' to avoid 50 real round-trips. Current implementation is slow and fragile -- any flakiness in the 49-message loop breaks the test.",
+          "recommendation": "Expose a way to set initial counter (e.g. via page.evaluate to set React state, or a test-only prop/URL param). Alternatively, use page.addInitScript to stub localStorage or a global."
+        },
+        {
+          "severity": "LOW",
+          "test": "error state (503)",
+          "issue": "callCount is declared with 'let' instead of a closure-safe pattern. In Playwright route callbacks, this works because routes run in Node context, but it is fragile if tests are parallelized.",
+          "recommendation": "Use an object property or atomic counter for robustness."
+        }
+      ],
+      "quality_notes": "Good use of semantic selectors (getByRole, getByLabel, getByText). Route mocking prevents backend dependency. Clock mocking for retry backoff is correct. Download verification is thorough (href, attribute, suggestedFilename). All 4 tech-spec E2E scenarios are covered."
+    }
+  },
+  "tech_spec_requirements_matrix": {
+    "unit_chat_handler_mocked": { "status": "NOT_COVERED", "severity": "HIGH" },
+    "unit_seed_parsing_edge_cases": { "status": "COVERED", "severity": "N/A" },
+    "unit_seed_h3_subsplit": { "status": "COVERED", "severity": "N/A" },
+    "unit_seed_empty_section": { "status": "COVERED", "severity": "N/A" },
+    "unit_artifact_validation": { "status": "COVERED", "severity": "N/A" },
+    "unit_rate_limiter_injectable": { "status": "NOT_COVERED", "severity": "HIGH" },
+    "unit_input_validation_2000_exact": { "status": "NOT_COVERED", "severity": "HIGH" },
+    "unit_input_validation_empty": { "status": "NOT_COVERED", "severity": "HIGH" },
+    "unit_input_validation_missing_field": { "status": "NOT_COVERED", "severity": "HIGH" },
+    "unit_download_404": { "status": "NOT_COVERED", "severity": "MEDIUM" },
+    "unit_seed_idempotency": { "status": "NOT_COVERED", "severity": "MEDIUM" },
+    "unit_react_chat_component": { "status": "NOT_COVERED", "severity": "MEDIUM" },
+    "unit_react_landing_page": { "status": "NOT_COVERED", "severity": "MEDIUM" },
+    "integration_rag_pipeline_benchmark": { "status": "NOT_COVERED", "severity": "HIGH" },
+    "integration_rate_limit_deterministic": { "status": "NOT_COVERED", "severity": "HIGH" },
+    "integration_ollama_error_propagation": { "status": "NOT_COVERED", "severity": "HIGH" },
+    "e2e_golden_path": { "status": "COVERED", "severity": "N/A" },
+    "e2e_out_of_scope": { "status": "COVERED", "severity": "N/A" },
+    "e2e_session_limit": { "status": "COVERED_WITH_ISSUES", "severity": "MEDIUM", "note": "No counter injection, uses 49 real messages" },
+    "e2e_error_state": { "status": "COVERED", "severity": "N/A" }
+  },
+  "findings": [
+    {
+      "id": "F1",
+      "severity": "HIGH",
+      "category": "missing_tests",
+      "title": "chat_handler has zero handler-level unit tests",
+      "detail": "The chat_handler function contains input validation, rate limiting, Ollama HTTP call, and error mapping -- all critical logic. Only the build_context helper is tested. The tech spec requires mocked Ollama tests (httpmock), input validation boundary tests (2000 exact, empty, missing), and injectable rate limiter tests. None exist.",
+      "recommendation": "Add axum test utilities (axum::test or tower::ServiceExt) with httpmock for Ollama. Test: (1) valid message -> 200, (2) >2000 chars -> 400, (3) exactly 2000 -> 200, (4) empty message -> 400, (5) missing message field -> 400, (6) Ollama timeout -> 503, (7) Ollama 500 -> 503, (8) rate limit exceeded -> 429."
+    },
+    {
+      "id": "F2",
+      "severity": "HIGH",
+      "category": "missing_tests",
+      "title": "No integration tests exist",
+      "detail": "The mcp/tests/ directory does not exist. All three tech-spec integration tests are missing: RAG pipeline benchmark, deterministic rate limit, Ollama error propagation.",
+      "recommendation": "Create mcp/tests/integration.rs (or mcp/tests/ directory with individual files). Use a real SqliteStore + hash embedder for RAG pipeline test. Use pre-saturated governor for rate limit test. Use httpmock for Ollama error test."
+    },
+    {
+      "id": "F3",
+      "severity": "MEDIUM",
+      "category": "missing_tests",
+      "title": "No React component unit tests",
+      "detail": "Tech spec requires unit tests for ChatPage (message send/receive, counter, limit, retry) and LandingPage (render, navigation, download URL). No test runner (vitest/jest) is configured in webapp/.",
+      "recommendation": "Add vitest + @testing-library/react to webapp. Write tests for: ChatPage counter logic, session limit at 50, retry backoff behavior, LandingPage rendering."
+    },
+    {
+      "id": "F4",
+      "severity": "MEDIUM",
+      "category": "quality_issue",
+      "title": "E2E session limit test uses 49 real round-trips",
+      "detail": "Tech spec explicitly states 'inject initial counter state at 49, send 1 message' to avoid 50 real round-trips. Current implementation loops 49 times sending messages, making the test slow and fragile.",
+      "recommendation": "Expose counter injection mechanism (e.g., test-only prop, URL param, or page.evaluate to set React state directly)."
+    },
+    {
+      "id": "F5",
+      "severity": "LOW",
+      "category": "quality_issue",
+      "title": "Two constant-assertion tests in chat.rs add no value",
+      "detail": "Tests max_message_len_constant and recall_limit_constant simply assert that MAX_MESSAGE_LEN == 2000 and RECALL_LIMIT == 3. These catch nothing that a compile error would not.",
+      "recommendation": "Remove these tests or replace with tests that exercise the constants through actual handler behavior (e.g., 2001-char message returns 400)."
+    },
+    {
+      "id": "F6",
+      "severity": "MEDIUM",
+      "category": "missing_tests",
+      "title": "download_knowledge_handler not tested",
+      "detail": "Tech spec requires: artifact exists -> 200 with zip content-type, artifact missing -> 404. No unit tests for this handler exist.",
+      "recommendation": "Add tests using axum test utilities with a temp file for the zip path."
+    }
+  ],
+  "statistics": {
+    "total_tech_spec_requirements": 20,
+    "covered": 9,
+    "covered_with_issues": 1,
+    "not_covered": 10,
+    "coverage_percentage": 47.5
+  }
+}

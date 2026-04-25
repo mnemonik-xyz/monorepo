@@ -73,3 +73,7 @@ openssl-vendored = ["mnemonic-core/openssl-vendored"]
 
 [dev-dependencies]
 tempfile = "3"
+httpmock = "0.8"
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
+hyper = "1"

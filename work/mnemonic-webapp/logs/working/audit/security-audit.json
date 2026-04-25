@@ -1,0 +1,143 @@
+{
+  "audit": {
+    "task": "Task 10: Security Audit",
+    "date": "2026-04-25",
+    "auditor": "security-auditor",
+    "scope": "OWASP Top 10 review of mnemonic-webapp feature code",
+    "verdict": "PASS with advisories",
+    "summary": "No critical or high-severity vulnerabilities found. The codebase demonstrates solid security design: SSRF prevention via OLLAMA_URL whitelist + no-redirect policy, input validation on /chat, per-IP rate limiting, prompt injection delimiters, nginx proxy restrictions blocking /admin paths, and read-only keypair mount. Six low/informational findings documented below as advisories for hardening."
+  },
+  "findings": [
+    {
+      "id": "SEC-01",
+      "severity": "LOW",
+      "category": "A01:2021 Broken Access Control",
+      "title": "CORS policy is Allow-Any on MCP HTTP server",
+      "file": "mcp/src/main.rs",
+      "lines": "546-550",
+      "description": "The axum CorsLayer is configured with allow_origin(Any), allow_methods(Any), allow_headers(Any). While nginx blocks /admin/stats at the reverse proxy level (Decision 13), if the MCP server is ever exposed directly (e.g., during development, or if nginx is misconfigured), all endpoints including /admin/stats, /api-keys, /balance, and /deposit become browser-accessible from any origin.",
+      "recommendation": "In production, restrict CORS origins to the deployment domain. Consider setting CORS to same-origin or a configured allowlist. The nginx blocking of /admin is effective defense-in-depth but should not be the sole access control mechanism.",
+      "risk_if_ignored": "Low -- nginx blocks the sensitive paths in production. Risk only materializes if MCP server is exposed without nginx."
+    },
+    {
+      "id": "SEC-02",
+      "severity": "LOW",
+      "category": "A05:2021 Security Misconfiguration",
+      "title": "keypair directory not excluded from Docker build context",
+      "file": ".dockerignore",
+      "lines": "1-12",
+      "description": "The .dockerignore file does not exclude the ./keypair/ directory. The Dockerfile COPY or build context will include the keypair directory contents. While the keypair is mounted at runtime as a read-only volume (/run/secrets/keypair), during docker build the keypair files are sent to the Docker daemon as part of the build context. If any Dockerfile layer copies the entire context (e.g., COPY . .) the keypair would be baked into the image layer.",
+      "recommendation": "Add 'keypair/' to .dockerignore to prevent the keypair from being included in the Docker build context. This is defense-in-depth -- even if the Dockerfile does not COPY it, excluding it from context prevents accidental inclusion in future Dockerfile changes.",
+      "risk_if_ignored": "Low -- depends on what the root Dockerfile copies. If it does 'COPY . .' or similar, the keypair could end up in an image layer."
+    },
+    {
+      "id": "SEC-03",
+      "severity": "INFORMATIONAL",
+      "category": "A03:2021 Injection (Prompt Injection)",
+      "title": "Prompt injection mitigation is best-effort, not bulletproof",
+      "file": "mcp/src/chat.rs",
+      "lines": "107-119",
+      "description": "The system prompt instructs the model to only use provided context and the user query is wrapped in [USER_QUERY]...[/USER_QUERY] delimiters (Decision 10). This is a reasonable mitigation but prompt injection in LLMs is fundamentally unsolvable via prompt engineering alone. A sufficiently crafted input could still bypass these delimiters, especially with a small 3B-parameter model.",
+      "recommendation": "Acceptable for MVP scope. For production hardening, consider: (1) output filtering to detect and strip hallucinated instructions, (2) a secondary classifier that flags off-topic or adversarial inputs before they reach the LLM, (3) limiting the model's output format to reduce attack surface. The current approach is aligned with industry best practice for the threat model (informational chatbot, no tool-calling capability).",
+      "risk_if_ignored": "Informational -- the model can only respond with text, has no tool access, and cannot mutate state. Worst case is off-topic or misleading text output."
+    },
+    {
+      "id": "SEC-04",
+      "severity": "INFORMATIONAL",
+      "category": "A07:2021 Cross-Site Scripting (XSS)",
+      "title": "React rendering is XSS-safe by default",
+      "file": "webapp/src/components/ChatPage.tsx",
+      "lines": "30-57",
+      "description": "The MessageContent component renders bot responses. React's JSX escapes content by default -- {content} and {code} are rendered as text nodes, not HTML. The code does not use dangerouslySetInnerHTML. The backtick-splitting logic in MessageContent correctly renders content via {part} text interpolation, which is auto-escaped. No XSS vector found.",
+      "recommendation": "No action needed. The current implementation is secure. Maintain the pattern of never using dangerouslySetInnerHTML for user-generated or LLM-generated content.",
+      "risk_if_ignored": "None -- correctly implemented."
+    },
+    {
+      "id": "SEC-05",
+      "severity": "LOW",
+      "category": "A05:2021 Security Misconfiguration",
+      "title": "Ollama Dockerfile uses :latest tag",
+      "file": "ollama/Dockerfile",
+      "lines": "1",
+      "description": "The Ollama Dockerfile uses 'ollama/ollama:latest' as the base image in both stages. Using :latest means builds are not reproducible and a compromised or buggy upstream image could be pulled silently during rebuild.",
+      "recommendation": "Pin to a specific version tag or digest (e.g., ollama/ollama:0.5.x or ollama/ollama@sha256:...) for reproducible and auditable builds.",
+      "risk_if_ignored": "Low -- supply chain risk. A malicious update to the :latest tag could introduce vulnerabilities."
+    },
+    {
+      "id": "SEC-06",
+      "severity": "INFORMATIONAL",
+      "category": "A04:2021 Insecure Design",
+      "title": "Rate limiter uses ConnectInfo IP which may be nginx proxy IP",
+      "file": "mcp/src/chat.rs",
+      "lines": "48-53",
+      "description": "The rate limiter extracts the client IP from ConnectInfo<SocketAddr>, which gives the TCP peer address. Behind nginx, this will always be the nginx container's Docker-internal IP (e.g., 172.x.x.x), not the real client IP. Nginx sets X-Real-IP and X-Forwarded-For headers, but the chat handler reads ConnectInfo, not these headers. This means all clients share a single rate-limit bucket in the Docker Compose deployment.",
+      "recommendation": "Extract the client IP from the X-Real-IP or X-Forwarded-For header (set by nginx) when running behind a reverse proxy. Consider a config flag to switch between direct-IP and proxy-header modes. Without this fix, the 10 req/min limit applies globally across all users rather than per-user.",
+      "risk_if_ignored": "Low-to-Medium -- rate limiting is effectively disabled per-user in the Docker Compose deployment. All users share one 10 req/min bucket, which is more restrictive than intended (blocks legitimate users) but also means a single user cannot be individually throttled."
+    },
+    {
+      "id": "SEC-07",
+      "severity": "INFORMATIONAL",
+      "category": "A09:2021 Security Logging and Monitoring Failures",
+      "title": "No Content-Security-Policy header in nginx",
+      "file": "nginx.conf",
+      "lines": "45-48",
+      "description": "The nginx config sets X-Frame-Options, X-Content-Type-Options, and X-XSS-Protection security headers, but does not set a Content-Security-Policy (CSP) header. CSP provides the strongest defense against XSS by whitelisting allowed script sources.",
+      "recommendation": "Add a Content-Security-Policy header, e.g.: add_header Content-Security-Policy \"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; font-src 'self';\" always; Adjust as needed for the React build's requirements.",
+      "risk_if_ignored": "Informational -- React's default XSS protection is strong, but CSP adds defense-in-depth against injection via third-party scripts or future changes."
+    }
+  ],
+  "owasp_coverage": {
+    "A01_Broken_Access_Control": {
+      "status": "PASS",
+      "notes": "nginx blocks /admin paths (403). Payment endpoints not proxied. Keypair mounted read-only. CORS is overly permissive at the MCP level but nginx compensates (SEC-01)."
+    },
+    "A02_Cryptographic_Failures": {
+      "status": "PASS",
+      "notes": "Keypair loaded from file, not hardcoded. No secrets in env vars beyond standard config. .env excluded from Docker context."
+    },
+    "A03_Injection": {
+      "status": "PASS",
+      "notes": "Input validation enforces 2000-char max via chars().count() (Unicode-safe). Prompt injection mitigated with delimiters and system instruction (SEC-03). No SQL injection risk (uses typed ORM). No command injection in entrypoint.sh (no user input)."
+    },
+    "A04_Insecure_Design": {
+      "status": "PASS",
+      "notes": "SSRF prevented by OLLAMA_URL whitelist + no-redirect policy. Download handler serves only the canonical artifact path, not user-supplied filenames. Rate limiter IP extraction issue noted (SEC-06)."
+    },
+    "A05_Security_Misconfiguration": {
+      "status": "PASS",
+      "notes": "server_tokens off in nginx. Security headers present. Docker image uses :latest tag (SEC-05). Keypair not in .dockerignore (SEC-02)."
+    },
+    "A06_Vulnerable_Components": {
+      "status": "PASS",
+      "notes": "Ollama :latest tag is a supply chain concern (SEC-05) but not an active vulnerability. Rust dependencies managed via Cargo.lock."
+    },
+    "A07_XSS": {
+      "status": "PASS",
+      "notes": "React JSX auto-escapes all rendered content. No dangerouslySetInnerHTML usage. No CSP header (SEC-07) but XSS risk is minimal."
+    },
+    "A08_Software_Integrity": {
+      "status": "PASS",
+      "notes": "Docker images built from source. Ollama model pulled at build time. No CDN-loaded scripts in webapp."
+    },
+    "A09_Logging_Monitoring": {
+      "status": "PASS",
+      "notes": "tracing crate used for structured logging. Nginx access/error logs configured. No sensitive data logged to client responses (internal errors return generic messages)."
+    },
+    "A10_SSRF": {
+      "status": "PASS",
+      "notes": "OLLAMA_URL validated against strict hostname whitelist (localhost, ollama only). IP addresses rejected (including 127.0.0.1). reqwest client configured with redirect(Policy::none()). Ollama is on internal Docker network only."
+    }
+  },
+  "positive_findings": [
+    "OLLAMA_URL whitelist validation with hostname-only matching (no IP bypass) and unit tests covering edge cases",
+    "reqwest redirect Policy::none() prevents SSRF via HTTP redirects",
+    "Input validation uses chars().count() not len() -- correctly handles multi-byte Unicode",
+    "Download handler resolves artifact path to canonical absolute path at startup, never serves user-supplied filenames",
+    "Mutex lock on SqliteStore is dropped before any .await (no deadlock risk with async)",
+    "Error responses never leak internal details (Ollama errors mapped to generic 503)",
+    "Keypair mounted as read-only Docker volume at /run/secrets/keypair",
+    "nginx blocks all /admin/* paths with 403",
+    "client_max_body_size 64k limits request body at nginx level",
+    "Entrypoint.sh uses set -e and has no user-controllable input"
+  ]
+}

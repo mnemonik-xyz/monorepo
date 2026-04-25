@@ -45,7 +45,7 @@ test.describe("Chat E2E", () => {
     await mockChatSuccess(page, botAnswer);
 
     // Mock the download endpoint so the link click succeeds
-    await page.route("**/api/download-knowledge", (route) => {
+    await page.route("**/download-knowledge", (route) => {
       route.fulfill({
         status: 200,
         contentType: "application/zip",
@@ -67,10 +67,7 @@ test.describe("Chat E2E", () => {
       name: "Download protocol knowledge",
     });
     await expect(downloadLink).toBeVisible();
-    await expect(downloadLink).toHaveAttribute(
-      "href",
-      "/api/download-knowledge"
-    );
+    await expect(downloadLink).toHaveAttribute("href", "/download-knowledge");
     await expect(downloadLink).toHaveAttribute("download", "");
 
     // Verify download triggers (intercept the navigation/download)

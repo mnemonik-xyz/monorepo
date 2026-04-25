@@ -80,6 +80,9 @@ pub struct McpState {
     /// Absolute canonical path to the pre-built knowledge artifact .zip file.
     /// Set by seed::run() at startup; used by the /download-knowledge handler.
     pub artifact_zip_path: std::sync::Mutex<Option<std::path::PathBuf>>,
+    /// Shared reqwest client for Ollama HTTP calls (connection pooling,
+    /// redirect Policy::none() for SSRF prevention -- Decision 8).
+    pub ollama_client: reqwest::Client,
     /// Per-IP rate limiter for the /chat endpoint (10 req/min).
     pub chat_limiter: governor::RateLimiter<
         String,

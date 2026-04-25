@@ -5,6 +5,7 @@ work/
 docs/
 webapp/
 .claude/
+keypair/
 .env
 .env.*
 !.env.example

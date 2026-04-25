@@ -443,6 +443,12 @@ async fn main() -> anyhow::Result<()> {
         governor::RateLimiter::keyed(quota)
     };
 
+    // Shared reqwest client for Ollama calls -- redirect(Policy::none()) for SSRF prevention (Decision 8).
+    let ollama_client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .expect("failed to build reqwest client for Ollama");
+
     let state = Arc::new(mcp::McpState {
         keypair,
         solana: solana::SolanaClient::new(&cfg.solana_rpc_url),
@@ -461,6 +467,7 @@ async fn main() -> anyhow::Result<()> {
         ollama_model: cfg.ollama_model.clone(),
         rag_chunk_dir: cfg.rag_chunk_dir.clone(),
         artifact_zip_path: std::sync::Mutex::new(None),
+        ollama_client,
         chat_limiter,
     });
 

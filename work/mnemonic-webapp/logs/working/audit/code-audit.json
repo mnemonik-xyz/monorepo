@@ -1,0 +1,135 @@
+{
+  "task": 9,
+  "type": "code-audit",
+  "timestamp": "2026-04-25",
+  "summary": "Holistic code quality review of all new code for the mnemonic-webapp feature. 14 files reviewed across Rust backend, React frontend, API client, E2E tests, and Docker infrastructure.",
+  "files_reviewed": [
+    "mcp/src/chat.rs",
+    "mcp/src/seed.rs",
+    "mcp/src/config.rs",
+    "mcp/src/mcp.rs",
+    "mcp/src/main.rs",
+    "webapp/src/App.tsx",
+    "webapp/src/components/LandingPage.tsx",
+    "webapp/src/components/ChatPage.tsx",
+    "webapp/src/lib/api.ts",
+    "webapp/e2e/chat.spec.ts",
+    "docker-compose.yml",
+    "nginx.conf",
+    "ollama/Dockerfile",
+    "ollama/entrypoint.sh"
+  ],
+  "issues": [
+    {
+      "id": "BUG-1",
+      "severity": "major",
+      "dimension": "cross-file-consistency",
+      "file": "webapp/src/components/LandingPage.tsx:71",
+      "title": "Download URL mismatch: frontend uses /api/download-knowledge but backend registers /download-knowledge",
+      "description": "LandingPage.tsx links to '/api/download-knowledge' but the backend route in main.rs is registered as '/download-knowledge' (no /api prefix). In dev mode, the Vite proxy only rewrites /api -> localhost:3000, so the request reaches the backend as /api/download-knowledge which does not match any route. In production (nginx), the proxy location is '/download-knowledge' -- so /api/download-knowledge falls through to the SPA catch-all and returns index.html instead of the zip file.",
+      "recommendation": "Change LandingPage.tsx href to '/download-knowledge' to match the actual backend route. Alternatively add a rewrite rule, but matching the actual route name is simpler and more consistent with how /chat is called directly.",
+      "affected_files": ["webapp/src/components/LandingPage.tsx", "mcp/src/main.rs", "nginx.conf", "webapp/vite.config.ts"]
+    },
+    {
+      "id": "BUG-2",
+      "severity": "major",
+      "dimension": "cross-file-consistency",
+      "title": "E2E test mocks /api/download-knowledge -- matches broken frontend URL, will break when URL is fixed",
+      "file": "webapp/e2e/chat.spec.ts:48,72",
+      "description": "The E2E golden path test mocks '**/api/download-knowledge' and asserts href='/api/download-knowledge'. This matches the current (broken) LandingPage URL. When BUG-1 is fixed, the E2E test must be updated to use '/download-knowledge'.",
+      "recommendation": "Fix alongside BUG-1."
+    },
+    {
+      "id": "PERF-1",
+      "severity": "minor",
+      "dimension": "performance",
+      "file": "mcp/src/chat.rs:125-141",
+      "title": "reqwest::Client created per request instead of shared",
+      "description": "A new reqwest::Client is built for every POST /chat request. reqwest::Client maintains an internal connection pool and is designed to be reused. Creating it per-request means no connection reuse, extra TLS setup overhead (though here it's plain HTTP to Ollama, so the impact is limited to missed keepalive), and unnecessary allocation.",
+      "recommendation": "Store a reqwest::Client (with redirect Policy::none()) in McpState and reuse it across requests. This is a standard pattern for reqwest."
+    },
+    {
+      "id": "ERR-1",
+      "severity": "minor",
+      "dimension": "error-handling",
+      "file": "mcp/src/chat.rs:93",
+      "title": "Mutex lock unwrap in chat_handler could panic on poisoned mutex",
+      "description": "state.store.lock().unwrap() will panic if the mutex is poisoned (a previous holder panicked while holding it). This is consistent with the existing pattern throughout the codebase (mcp.rs, main.rs all do the same), so it's a pre-existing design choice rather than a new issue. However, a poisoned store lock would crash every subsequent request.",
+      "recommendation": "No immediate action needed since this is an existing pattern. For hardening, consider lock().unwrap_or_else(|e| e.into_inner()) to recover from poisoned state, or use parking_lot::Mutex which does not poison."
+    },
+    {
+      "id": "SEC-1",
+      "severity": "minor",
+      "dimension": "security",
+      "file": "mcp/src/chat.rs:192-195",
+      "title": "Empty Ollama response silently returns empty string",
+      "description": "If ollama_json['response'] is missing or null, the handler returns {\"response\": \"\"} with HTTP 200. The user sees a blank bot message. This is not a security issue but a poor UX edge case.",
+      "recommendation": "Check for empty response and return an appropriate error or fallback message like 'No response generated.'"
+    },
+    {
+      "id": "QUAL-1",
+      "severity": "minor",
+      "dimension": "code-readability",
+      "file": "mcp/src/seed.rs:204-209",
+      "title": "CostHint with zeroed fields is a code smell",
+      "description": "The seeder creates a CostHint with irys_lamports=0, sol_price_usdc=0.0, charge_micro_usdc=0 because 'values are ignored in local mode'. This works but couples the seeder to the assumption of local mode. If the storage_mode is ever changed, these zero values could cause silent bugs.",
+      "recommendation": "Consider adding a CostHint::local_default() constructor or using the pricing engine even in the seeder path to make intent explicit."
+    },
+    {
+      "id": "QUAL-2",
+      "severity": "minor",
+      "dimension": "code-readability",
+      "file": "mcp/src/chat.rs:36-38",
+      "title": "ChatError struct reused for non-chat endpoints (download-knowledge 404)",
+      "description": "The ChatError struct is used in download_knowledge_handler for the 404 response. The struct name implies it's specific to the chat endpoint. This works fine but the naming is slightly misleading.",
+      "recommendation": "Rename to ApiError or ErrorResponse if it's used across multiple handlers."
+    },
+    {
+      "id": "INFRA-1",
+      "severity": "minor",
+      "dimension": "security",
+      "file": "nginx.conf:51-58",
+      "title": "nginx /admin/stats block is redundant given the broader /admin block",
+      "description": "Both 'location /admin/stats' and 'location /admin' are defined. Since nginx uses prefix matching, /admin already blocks /admin/stats. The explicit /admin/stats block is harmless but redundant.",
+      "recommendation": "Remove the '/admin/stats' block since '/admin' already covers it. Keep a comment explaining the intent."
+    },
+    {
+      "id": "INFRA-2",
+      "severity": "minor",
+      "dimension": "security",
+      "file": "nginx.conf:61-68",
+      "title": "nginx proxies do not strip/block payment endpoints (/api-keys, /deposit, /balance)",
+      "description": "The payment endpoints (/api-keys, /deposit, /balance) registered in main.rs are accessible through nginx's SPA fallback (try_files). Since these are POST/GET to paths not explicitly proxied, they would actually hit the static file server and get index.html, effectively blocking them. However, if a future change adds a catch-all proxy, these would be exposed. The intent should be made explicit.",
+      "recommendation": "Add explicit 'location /api-keys' and 'location /deposit' and 'location /balance' blocks with return 403 (like /admin), or add a comment explaining that they are intentionally not proxied."
+    },
+    {
+      "id": "TEST-1",
+      "severity": "minor",
+      "dimension": "testing",
+      "file": "webapp/e2e/chat.spec.ts:125-165",
+      "title": "Session limit test sends 49 sequential messages -- slow and fragile",
+      "description": "The session limit test iterates 49 times, each time filling input, clicking send, and waiting for the counter text to update. This is correct but will be slow (~5-10s depending on CI). Since the counter is client-side state, this could be faster by directly setting React state or by reducing the SESSION_MESSAGE_LIMIT for tests.",
+      "recommendation": "Acceptable for now since correctness matters more than speed for E2E. Consider a test-only override for SESSION_MESSAGE_LIMIT if this test becomes a CI bottleneck."
+    }
+  ],
+  "good_practices_observed": [
+    "SSRF prevention: Ollama URL whitelist validated at startup with strict hostname check (config.rs). reqwest client built with redirect(Policy::none()) (chat.rs).",
+    "Mutex safety: store lock is always dropped before any .await point in chat_handler (line 101 comment).",
+    "Error schema consistency: all error responses follow Decision 9 format {error, code} with appropriate HTTP status codes.",
+    "Rate limiting: governor-based per-IP limiter is clean and correctly placed at the start of the handler.",
+    "Whitepaper parser: h2/h3 confusion bug was caught and fixed with regression test (seed.rs:559-568).",
+    "API client retry logic: exponential backoff with correct non-retryable short-circuit for 400/429.",
+    "E2E tests: fully mocked with semantic selectors (getByRole, getByLabel), no flaky waits for network.",
+    "Docker: multi-stage Ollama build pulls model at build time, entrypoint has proper warm-up and readiness check.",
+    "Idempotent seeding: seed::run() checks store.count() > 0 before re-seeding.",
+    "Clean component architecture: App.tsx is minimal with state-based view switching, no over-engineering."
+  ],
+  "verdict": "PASS with required fixes",
+  "blocking_issues": ["BUG-1"],
+  "summary_stats": {
+    "total_issues": 10,
+    "critical": 0,
+    "major": 2,
+    "minor": 8
+  }
+}

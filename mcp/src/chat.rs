@@ -119,26 +119,8 @@ pub async fn chat_handler(
          [USER_QUERY]{message}[/USER_QUERY]"
     );
 
-    // -- Call Ollama (Decision 8: redirect Policy::none()) --
+    // -- Call Ollama (shared client with redirect Policy::none() -- Decision 8) --
     let ollama_url = format!("{}/api/generate", state.ollama_url.trim_end_matches('/'));
-
-    let client = match reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-    {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::error!("failed to build reqwest client: {e}");
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ChatError {
-                    error: "internal error".into(),
-                    code: "internal_error".into(),
-                }),
-            )
-                .into_response();
-        }
-    };
 
     let ollama_body = serde_json::json!({
         "model": state.ollama_model,
@@ -146,7 +128,7 @@ pub async fn chat_handler(
         "stream": false,
     });
 
-    let resp = match client.post(&ollama_url).json(&ollama_body).send().await {
+    let resp = match state.ollama_client.post(&ollama_url).json(&ollama_body).send().await {
         Ok(r) => r,
         Err(e) => {
             tracing::error!("Ollama request failed: {e}");
@@ -325,13 +307,238 @@ mod tests {
         assert!(ctx.contains("Real content"));
     }
 
-    #[test]
-    fn max_message_len_constant() {
-        assert_eq!(MAX_MESSAGE_LEN, 2000);
+}
+
+/// Handler-level tests using tower::ServiceExt with httpmock for Ollama.
+#[cfg(test)]
+mod handler_tests {
+    use super::*;
+    use axum::{routing::{get, post}, Router};
+    use http_body_util::BodyExt;
+    use httpmock::MockServer;
+    use mnemonic_core::arweave::ArweaveClient;
+    use mnemonic_core::compress::EmbeddingCompressor;
+    use mnemonic_core::embed::Embedder;
+    use mnemonic_core::solana::SolanaClient;
+    use mnemonic_core::storage::SqliteStore;
+    use std::path::PathBuf;
+    use tower::ServiceExt;
+
+    /// Minimal embedder for handler tests. Returns zero vectors.
+    struct StubEmbedder;
+    impl Embedder for StubEmbedder {
+        fn embed(&self, _text: &str) -> Vec<f32> { vec![0.0; 8] }
+        fn dim(&self) -> usize { 8 }
+        fn provider_name(&self) -> &str { "stub" }
+        fn model_id(&self) -> &str { "stub-zero" }
     }
 
-    #[test]
-    fn recall_limit_constant() {
-        assert_eq!(RECALL_LIMIT, 3);
+    /// Build a test McpState pointing at the given Ollama URL.
+    fn build_test_state(ollama_url: &str) -> Arc<McpState> {
+        use governor::Quota;
+        use std::num::NonZeroU32;
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let store = SqliteStore::open(tmp.path()).unwrap();
+        let compressor = EmbeddingCompressor::new(8, 4, 42);
+        let quota = Quota::per_minute(NonZeroU32::new(10).unwrap());
+        let chat_limiter = governor::RateLimiter::keyed(quota);
+        let ollama_client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap();
+
+        Arc::new(McpState {
+            keypair: solana_sdk::signature::Keypair::new(),
+            solana: SolanaClient::new("http://localhost:0"),
+            arweave: ArweaveClient::new("http://localhost:0"),
+            store: std::sync::Mutex::new(store),
+            embedder: Box::new(StubEmbedder),
+            compressor,
+            payment_mode: "none".into(),
+            treasury_pubkey: String::new(),
+            usdc_mint: String::new(),
+            sign_memory_cost_micro_usdc: 0,
+            pricing: crate::pricing::PricingEngine::new(0),
+            sol_tx_fee_lamports: 0,
+            storage_mode: "local".into(),
+            ollama_url: ollama_url.to_string(),
+            ollama_model: "test-model".into(),
+            rag_chunk_dir: PathBuf::from("/tmp"),
+            artifact_zip_path: std::sync::Mutex::new(None),
+            ollama_client,
+            chat_limiter,
+        })
+    }
+
+    /// Build an axum app with /chat and /download-knowledge routes for testing.
+    fn build_app(state: Arc<McpState>) -> Router {
+        Router::new()
+            .route("/chat", post(chat_handler))
+            .route("/download-knowledge", get(download_knowledge_handler))
+            .with_state(state)
+    }
+
+    /// Send a POST /chat request with JSON body, returning (status, body bytes).
+    async fn post_chat(app: Router, body: serde_json::Value) -> (StatusCode, serde_json::Value) {
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/chat")
+            .header("content-type", "application/json")
+            .extension(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 9999))))
+            .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or_default();
+        (status, json)
+    }
+
+    // -- Input validation tests --
+
+    #[tokio::test]
+    async fn chat_empty_message_returns_400() {
+        let state = build_test_state("http://localhost:0");
+        let app = build_app(state);
+        let (status, body) = post_chat(app, serde_json::json!({"message": ""})).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "invalid_input");
+    }
+
+    #[tokio::test]
+    async fn chat_missing_message_field_returns_400() {
+        let state = build_test_state("http://localhost:0");
+        let app = build_app(state);
+        let (status, body) = post_chat(app, serde_json::json!({})).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "invalid_input");
+    }
+
+    #[tokio::test]
+    async fn chat_whitespace_only_message_returns_400() {
+        let state = build_test_state("http://localhost:0");
+        let app = build_app(state);
+        let (status, body) = post_chat(app, serde_json::json!({"message": "   "})).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "invalid_input");
+    }
+
+    #[tokio::test]
+    async fn chat_message_over_2000_chars_returns_400() {
+        let state = build_test_state("http://localhost:0");
+        let app = build_app(state);
+        let long_msg: String = "a".repeat(2001);
+        let (status, body) = post_chat(app, serde_json::json!({"message": long_msg})).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "invalid_input");
+        assert!(body["error"].as_str().unwrap().contains("2000"));
+    }
+
+    #[tokio::test]
+    async fn chat_message_exactly_2000_chars_passes_validation() {
+        // This should pass validation and reach Ollama (which will fail since no mock).
+        // We check that we do NOT get a 400 -- any other status is fine (503 from Ollama being down).
+        let state = build_test_state("http://localhost:0");
+        let app = build_app(state);
+        let exact_msg: String = "a".repeat(2000);
+        let (status, _body) = post_chat(app, serde_json::json!({"message": exact_msg})).await;
+        assert_ne!(status, StatusCode::BAD_REQUEST, "2000-char message should pass validation");
+    }
+
+    // -- Ollama error handling tests --
+
+    #[tokio::test]
+    async fn chat_ollama_error_returns_503() {
+        let mock_server = MockServer::start();
+        mock_server.mock(|when, then| {
+            when.method(httpmock::Method::POST).path("/api/generate");
+            then.status(500)
+                .header("content-type", "application/json")
+                .body(r#"{"error":"internal"}"#);
+        });
+
+        let state = build_test_state(&mock_server.base_url());
+        let app = build_app(state);
+        let (status, body) = post_chat(app, serde_json::json!({"message": "hello"})).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["code"], "service_unavailable");
+    }
+
+    #[tokio::test]
+    async fn chat_ollama_timeout_returns_503() {
+        // Point to a non-listening port to simulate timeout/connection refused.
+        let state = build_test_state("http://127.0.0.1:1");
+        let app = build_app(state);
+        let (status, body) = post_chat(app, serde_json::json!({"message": "hello"})).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["code"], "service_unavailable");
+    }
+
+    #[tokio::test]
+    async fn chat_ollama_success_returns_200() {
+        let mock_server = MockServer::start();
+        mock_server.mock(|when, then| {
+            when.method(httpmock::Method::POST).path("/api/generate");
+            then.status(200)
+                .header("content-type", "application/json")
+                .body(r#"{"response":"Test answer from Ollama"}"#);
+        });
+
+        let state = build_test_state(&mock_server.base_url());
+        let app = build_app(state);
+        let (status, body) = post_chat(app, serde_json::json!({"message": "hello"})).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["response"], "Test answer from Ollama");
+    }
+
+    // -- Download handler tests --
+
+    #[tokio::test]
+    async fn download_artifact_missing_returns_404() {
+        let state = build_test_state("http://localhost:0");
+        let app = build_app(state);
+
+        let req = axum::http::Request::builder()
+            .method("GET")
+            .uri("/download-knowledge")
+            .body(axum::body::Body::empty())
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn download_artifact_exists_returns_200_zip() {
+        let state = build_test_state("http://localhost:0");
+        // Create a temp file to act as the zip artifact.
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), b"PK-fake-zip-content").unwrap();
+        {
+            let mut guard = state.artifact_zip_path.lock().unwrap();
+            *guard = Some(tmp.path().to_path_buf());
+        }
+
+        let app = build_app(state);
+
+        let req = axum::http::Request::builder()
+            .method("GET")
+            .uri("/download-knowledge")
+            .body(axum::body::Body::empty())
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let content_type = resp.headers().get("content-type").unwrap().to_str().unwrap();
+        assert_eq!(content_type, "application/zip");
+
+        let disposition = resp.headers().get("content-disposition").unwrap().to_str().unwrap();
+        assert!(disposition.contains("attachment"));
+
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&bytes[..], b"PK-fake-zip-content");
     }
 }

@@ -62,6 +62,74 @@ Created `webapp/e2e/chat.spec.ts` with 6 E2E tests covering all critical user fl
 
 All tests use semantic selectors (`getByRole`, `getByLabel`, `getByText`). Test file placed in `webapp/e2e/` to match existing `playwright.config.ts` testDir. No production source code modified.
 
+## Task 11: Test Audit
+
+Test coverage audit found 47.5% of tech-spec test requirements covered (9/20 fully covered, 1 with issues, 10 not covered). Grade: C+.
+
+**What is covered well:** config.rs URL validation (9 tests, solid SSRF edge cases), seed.rs parsing/chunking/artifact (13 tests including h3 sub-split, empty input, regression for h3/h2 confusion, zip extraction verification), E2E Playwright (6 tests covering all 4 tech-spec scenarios with semantic selectors, route mocking, clock mocking for retries, download verification).
+
+**Critical gaps (HIGH severity):** (1) chat_handler has zero handler-level tests -- only the build_context helper is covered. All input validation, rate limiting, Ollama error handling, and download 404 logic is untested at the unit level. (2) No integration tests exist at all -- no mcp/tests/ directory. The RAG pipeline benchmark, deterministic rate limit, and Ollama error propagation tests are completely absent.
+
+**Medium gaps:** (1) No React component unit tests -- no vitest/jest configured in webapp/. (2) E2E session limit test sends 49 real messages instead of injecting counter state as tech spec requires. (3) download_knowledge_handler untested. (4) Seed idempotency (count > 0 skips) untested.
+
+**Low-value tests:** chat.rs has two constant-assertion tests (MAX_MESSAGE_LEN == 2000, RECALL_LIMIT == 3) that add no regression protection.
+
+Full report at `logs/working/audit/test-audit.json`.
+
 ## Task 2: RAG seeding -- whitepaper chunking + sign_memory + artifact generation
 
 Created `mcp/src/seed.rs` implementing the startup seeding routine: parses `docs/WHITEPAPER.md` at `## ` headers (with h3 sub-splitting for sections exceeding ~500 tokens), calls `sign_memory()` per chunk with tags `["protocol-knowledge", "whitepaper"]`, and generates a `.zip` artifact containing `knowledge.md` (YAML frontmatter with content_hash/signer_pubkey/timestamp per chunk) and `knowledge.json` sidecar. Added `zip` crate to `mcp/Cargo.toml`. Seeder is called from `main.rs` after McpState init; skips if `store.count() > 0` (idempotent). The canonical `.zip` path is stored in a new `McpState.artifact_zip_path` field for the future `/download-knowledge` handler. Key fix during review: the h2 parser incorrectly matched `### ` lines (since they start with `## `) -- fixed with explicit exclusion and regression test. 13 unit tests cover parsing, splitting, and artifact generation.
+
+## Task 9: Code Audit
+
+Holistic code quality review of all 14 new files across Rust backend, React frontend, API client, E2E tests, and Docker infrastructure. Found 10 issues (0 critical, 2 major, 8 minor).
+
+**Blocking bug (BUG-1):** Download URL mismatch -- `LandingPage.tsx` links to `/api/download-knowledge` but the backend route is `/download-knowledge` (no `/api` prefix). In production via nginx, this path falls through to the SPA catch-all and returns `index.html` instead of the zip. The Vite dev proxy also does not rewrite correctly. The E2E test (BUG-2) mocks the broken URL, masking the issue. Fix: change href to `/download-knowledge` and update the E2E mock/assertion.
+
+**Minor improvements identified:** reqwest Client created per-request instead of shared (PERF-1), empty Ollama response silently returned as blank string (SEC-1), ChatError struct naming reused across unrelated handlers (QUAL-2), redundant nginx /admin/stats block (INFRA-1), payment endpoints not explicitly blocked in nginx (INFRA-2).
+
+**Good practices observed:** SSRF prevention (URL whitelist + no-redirect policy), mutex lock always dropped before await, consistent error schema, idempotent seeding, clean retry logic with exponential backoff, semantic E2E selectors, multi-stage Docker build with warm-up.
+
+Report: `work/mnemonic-webapp/logs/working/audit/code-audit.json`
+
+## Task 10: Security Audit
+
+OWASP Top 10 security review of all new code. Verdict: PASS with advisories. No critical or high-severity vulnerabilities found.
+
+**7 findings (0 critical, 0 high, 3 low, 4 informational):**
+
+- **SEC-01 (LOW):** CORS is Allow-Any on the MCP HTTP server. Mitigated by nginx blocking sensitive paths, but if MCP is exposed directly, /admin/stats and payment endpoints become browser-accessible from any origin.
+- **SEC-02 (LOW):** `keypair/` directory not excluded from `.dockerignore`. If the root Dockerfile copies the full context, keypair files could be baked into image layers.
+- **SEC-03 (INFO):** Prompt injection mitigation via delimiters and system instructions is best-effort. Acceptable for MVP since the LLM has no tool-calling capability.
+- **SEC-04 (INFO):** React JSX rendering is XSS-safe by default. No dangerouslySetInnerHTML usage found. No action needed.
+- **SEC-05 (LOW):** Ollama Dockerfile uses `:latest` tag. Pin to a specific version for reproducible builds.
+- **SEC-06 (INFO):** Rate limiter uses `ConnectInfo` (TCP peer IP) which behind nginx will be the nginx container IP, not the real client. All clients share one rate-limit bucket in Docker Compose deployment. Fix: extract IP from `X-Real-IP` header.
+- **SEC-07 (INFO):** No Content-Security-Policy header in nginx config. Add CSP for defense-in-depth against XSS.
+
+**Positive findings:** OLLAMA_URL whitelist with hostname-only matching and IP rejection, reqwest no-redirect policy, Unicode-safe input length validation via `chars().count()`, canonical artifact path resolution (no user-supplied filenames), mutex dropped before await, error responses never leak internals, keypair mounted read-only, nginx blocks /admin/* paths, `client_max_body_size 64k`, entrypoint.sh uses `set -e` with no user input.
+
+Report: `work/mnemonic-webapp/logs/working/audit/security-audit.json`
+
+## Wave 5 Audit Fixes
+
+Applied blocking and low-priority fixes from code-audit, security-audit, and test-audit reports.
+
+**Blocking fixes applied:**
+
+1. **BUG-1 + BUG-2 (Code Audit):** Fixed download URL mismatch. `LandingPage.tsx` href changed from `/api/download-knowledge` to `/download-knowledge` to match the backend route registered in `main.rs`. Updated E2E test `chat.spec.ts` to mock and assert the corrected URL.
+
+2. **TEST GAPS (Test Audit F1, HIGH):** Added 10 handler-level unit tests to `mcp/src/chat.rs` in a new `handler_tests` module using `tower::ServiceExt` + `httpmock`:
+   - Input validation: empty message -> 400, missing message field -> 400, whitespace-only -> 400, >2000 chars -> 400, exactly 2000 chars -> passes validation
+   - Ollama error handling: Ollama returns 500 -> handler returns 503, connection refused -> 503, success -> 200
+   - Download handler: artifact missing -> 404, artifact exists -> 200 with correct content-type and body
+
+3. **PERF-1 (Code Audit):** Moved `reqwest::Client` from per-request construction in `chat_handler` to a shared `ollama_client` field on `McpState`, built once at startup with `redirect(Policy::none())`. Updated `main.rs` to construct and pass the client, updated `chat.rs` to use `state.ollama_client`.
+
+**Low-priority fixes applied:**
+
+- **SEC-02:** Added `keypair/` to `.dockerignore` to prevent accidental inclusion of key material in Docker build context.
+- **SEC-05:** Pinned Ollama base image from `:latest` to `:0.6` in `ollama/Dockerfile` for reproducible builds.
+
+**Low-priority deferred (SEC-06):** Rate limiter IP extraction from `X-Real-IP`/`X-Forwarded-For` header behind nginx -- requires careful trust boundary design (which proxies to trust). Deferred to a dedicated hardening pass.
+
+**Verification:** `cargo test --workspace` passes (43 tests), `cargo clippy --workspace -- -D warnings` clean.
