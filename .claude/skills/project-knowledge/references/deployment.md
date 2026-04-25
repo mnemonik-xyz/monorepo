@@ -28,7 +28,7 @@ No server access needed. `mcp/` runs locally on user's machine. `webapp/` is sta
 | Secret name | Purpose |
 |---|---|
 | `CRATES_IO_TOKEN` | Publish `mnemonic-core` to crates.io |
-| `NPM_TOKEN` | Publish `@mnemonic/core` to npm |
+| `NPM_TOKEN` | Publish `@mnemonic/core` WASM package to npm (future) |
 | `CLOUDFLARE_API_TOKEN` | Deploy `webapp/` and `docs/` to Cloudflare Pages |
 | `CLOUDFLARE_ACCOUNT_ID` | Cloudflare account identifier |
 

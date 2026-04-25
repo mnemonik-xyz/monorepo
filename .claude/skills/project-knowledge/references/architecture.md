@@ -11,6 +11,7 @@ Technical architecture overview for AI agents. Helps agents understand HOW the s
 - Language: Rust stable, 2021 edition
 - WASM export: wasm-bindgen + wasm-pack
 - Why: single codebase compiles to native (for MCP server) and WASM (for webapp). No code duplication.
+- WASM embedding: when building the WASM webapp, include a local embedding model that runs in-browser (e.g. `ort` web backend or `transformers.js`) so users don't need an AI provider API key.
 
 **`mcp/` — MCP server (Rust binary)**
 - HTTP server: axum
