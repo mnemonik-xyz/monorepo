@@ -1,0 +1,61 @@
+{
+  "validator": "task-validator",
+  "batch": 4,
+  "iteration": 1,
+  "tasks": {
+    "16": {
+      "status": "needs_fix",
+      "findings": [
+        {
+          "severity": "critical",
+          "category": "frontmatter",
+          "task": 16,
+          "section": "Frontmatter",
+          "issue": "wave field is a string 'Final Wave' instead of a number >= 1. The template specifies wave must be a numeric value (e.g., wave: 4). String wave values cannot be used for dependency ordering or parallel execution scheduling.",
+          "fix": "Replace 'wave: Final Wave' with a numeric value. Based on the task sequence (Audit Wave tasks 13-15 are the preceding wave, which also use string values — see cross-task note), assign wave: 4 or higher. Recommend wave: 4 if Audit Wave tasks are wave: 3, and tasks 11-12 are wave: 2, etc. Verify consistent numeric wave assignment across all tasks."
+        },
+        {
+          "severity": "minor",
+          "category": "content",
+          "task": 16,
+          "section": "Context Files",
+          "issue": "Code files in Context Files section are listed as plain text strings (e.g., 'core/src/**/*.rs') rather than markdown links. Template requires all files as markdown links '[name](path)'.",
+          "fix": "Convert plain text file references to markdown links where possible. For glob patterns, either link to the directory (e.g., [core/src/](../../../core/src/)) or acknowledge that glob patterns cannot be linked and list representative concrete files as links instead."
+        },
+        {
+          "severity": "minor",
+          "category": "content",
+          "task": 16,
+          "section": "Details",
+          "issue": "Details section does not use the canonical subsection structure from the template: Files, Dependencies, Edge cases, Implementation hints. The section has custom subsections instead ('What this task verifies', 'Verification scope', 'User-spec acceptance criteria', etc.). While the content is substantive, the 'Dependencies' subsection label is missing entirely.",
+          "fix": "Add a labeled '**Dependencies:**' subsection listing task dependencies (tasks 13, 14, 15) and any external tools required (cargo, grep). Keep existing content. Edge cases subsection is present and well-written — no change needed there."
+        },
+        {
+          "severity": "minor",
+          "category": "content",
+          "task": 16,
+          "section": "Post-completion",
+          "issue": "Post-completion checklist is missing the standard template item: '- [ ] If deviated from spec — describe deviation and reason'. Only decisions.md entry, not_verifiable deferral, and spec update items are present.",
+          "fix": "Add '- [ ] If any deviations from spec were found during QA — describe deviation and reason in decisions.md entry'."
+        },
+        {
+          "severity": "minor",
+          "category": "decomposition",
+          "task": 16,
+          "section": "Frontmatter",
+          "issue": "Cross-task note: tasks 13, 14, 15 also use string wave values ('Audit Wave') instead of numeric values. The dependency chain between task 16 (wave: 'Final Wave') and tasks 13-15 (wave: 'Audit Wave') cannot be numerically validated. The conceptual ordering is correct but the numeric constraint (wave of dependent > wave of dependency) is unverifiable with string values.",
+          "fix": "When fixing wave: 'Final Wave' in task 16, also fix tasks 13-15 to use numeric wave values. Suggested: tasks 1-11 use waves 1-11 as defined in tech-spec; tasks 12 shares wave 11; tasks 13-15 use wave 12 (Audit Wave); task 16 uses wave 13 (Final Wave)."
+        }
+      ]
+    }
+  },
+  "stats": {
+    "tasks_checked": 1,
+    "issues_found": 5,
+    "critical": 1,
+    "major": 0,
+    "minor": 4
+  },
+  "status": "changes_required",
+  "summary": "0 approved, 1 needs fix. 1 critical issue: wave field is a string ('Final Wave') instead of a required numeric value >= 1. 4 minor issues: glob patterns in Context Files not formatted as markdown links, Details section missing labeled Dependencies subsection, Post-completion missing deviation item, cross-task wave string issue in tasks 13-15."
+}

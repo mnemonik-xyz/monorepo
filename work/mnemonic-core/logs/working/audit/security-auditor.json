@@ -1,0 +1,94 @@
+{
+  "auditor": "security-auditor",
+  "task": 14,
+  "verdict": "issues-found",
+  "scope": "final-state-holistic-owasp",
+  "summary": {
+    "critical": 0,
+    "major": 0,
+    "minor": 4,
+    "nit": 3
+  },
+  "findings": [
+    {
+      "severity": "minor",
+      "location": "core/src/identity/mod.rs:7-21 (load_or_create_keypair)",
+      "issue": "Ed25519 keypair is written to disk as a 64-byte JSON array via `std::fs::write` with no explicit permission bits set. The file inherits the process umask — on typical systems that is 0644 (world-readable). The server's Solana signing key is the root of trust for every attestation (COSE_Sign1 signer, Arweave ANS-104 signer, SPL Memo signer). Any local user on the host that can read ~/.mnemonic/id.json can clone the agent identity and forge attestations.",
+      "owasp_category": "A02: Cryptographic Failures",
+      "suggestion": "After `std::fs::write(path, ...)`, set permissions explicitly: `#[cfg(unix)] std::fs::set_permissions(path, std::os::unix::fs::PermissionsExt::from_mode(0o600))?`. Additionally, when the keypair file already exists, check its mode on load and `tracing::warn!` if it is group/world-readable so operators see the problem before production rollout. This was flagged in task-1 round 1 as pre-existing and was not addressed during the refactor — it should be called out again as an unresolved major-ish item that should be fixed before on-chain production use.",
+      "cwe": "CWE-732"
+    },
+    {
+      "severity": "minor",
+      "location": "core/src/embed/mod.rs:86-112 (OpenAIEmbedder::embed)",
+      "issue": "`OpenAIEmbedder::embed` uses `reqwest::blocking::Client::new()` inside the non-async `Embedder::embed` signature. The call is executed from inside `tools::sign_memory`, which is an async function awaited from the tokio runtime (via axum handlers). Blocking reqwest internally calls `tokio::task::block_on` on its own runtime — running it from a tokio worker thread can block the worker. Under concurrent sign_memory load with `EMBED_PROVIDER=openai`, all tokio workers may become occupied in blocking HTTP calls, leading to a tokio stall / liveness loss (a DoS-equivalent). core/Cargo.toml still declares `reqwest = { features = [\"json\", \"blocking\"] }` specifically for this call site.",
+      "owasp_category": "A04: Insecure Design (liveness / DoS risk)",
+      "suggestion": "Either (a) wrap the OpenAI call in `tokio::task::spawn_blocking` at the call site in tools.rs, or (b) make `Embedder::embed` async and switch `OpenAIEmbedder` to the non-blocking `reqwest::Client`. Option (b) is cleaner — the trait is under the project's control, and the only implementations are `OpenAIEmbedder` and `FastEmbedder`; making the signature async propagates naturally. This was flagged in task-1 round 1 as pre-existing; the refactor moved the code to core/ without touching it.",
+      "cwe": "CWE-833"
+    },
+    {
+      "severity": "minor",
+      "location": "core/src/embed/mod.rs:104-111 (OpenAIEmbedder::embed error branch)",
+      "issue": "On OpenAI API failure (HTTP error, non-2xx, malformed JSON) `OpenAIEmbedder::embed` returns `vec![0.0; self.dim]` — an all-zero embedding — and only logs `tracing::error!`. The signing pipeline then compresses + signs an attestation whose embedding is semantically meaningless. Downstream `recall` queries will silently match against garbage vectors. While not a direct security vector, it is an integrity gap: an on-chain attestation (signed + hashed) is created with invalid semantic content the caller cannot distinguish from a real one. Under an adversarial outage (e.g. DNS spoofing of api.openai.com) this could be exploited to cause a uniformly zero-vector collision pattern in the recall index.",
+      "owasp_category": "A08: Software and Data Integrity Failures",
+      "suggestion": "Change `Embedder::embed` to return `Result<Vec<f32>, _>`; propagate the error up to tools::sign_memory so the tool call fails cleanly and funds are refunded via the existing refund path (already wired in main.rs). Zero-filling is silent data corruption and should not survive the async-embed refactor.",
+      "cwe": "CWE-754"
+    },
+    {
+      "severity": "minor",
+      "location": "mcp/src/main.rs:481-497 (axum CorsLayer) and /admin/stats route (lines 489, 294-327)",
+      "issue": "CORS is configured with `allow_origin(Any).allow_methods(Any).allow_headers(Any)` at the router level, applied to every route including /deposit, /api-keys, /admin/stats, and /balance. Separately, /admin/stats has no authentication whatsoever — any network caller who can reach the HTTP port receives full P&L data (attestations count, revenue, cost breakdown, margin, current pricing, Irys lamports, SOL/USDC rate). Both items are pre-existing findings from task-1 round 1 and were carried through to round 3 of task-11 as deferred follow-ups. Restating here to confirm they are still unresolved in the final state. Acceptable because: (a) the service is single-operator self-hosted, (b) no cookie-based credentials so CORS is the lesser concern, (c) admin/stats leaks aggregate numbers not keys. But an operator running this behind a public IP without a reverse-proxy-level auth shim is exposed.",
+      "owasp_category": "A05: Security Misconfiguration / A01: Broken Access Control",
+      "suggestion": "Track in a follow-up ticket titled 'pre-production: admin auth + CORS allowlist'. Minimum fix: gate /admin/stats on an env-configurable bearer token (`ADMIN_TOKEN`), and restrict CORS to a config-driven origin list with `Any` allowed only when `MCP_DEV_CORS=1` is set. No code change requested in this audit.",
+      "cwe": "CWE-306"
+    },
+    {
+      "severity": "nit",
+      "location": "mcp/src/payment.rs:191-196 (check_x402 error string) and mcp/src/payment.rs:533-546 (mark_x402_nonce error)",
+      "issue": "When x402 verification fails or a nonce is replayed, the full tx_sig is echoed back into the 401 response body (`\"x402 payment not valid: tx {tx_sig} does not transfer ...\"` and `\"x402 payment already used: {tx_sig}\"`). The caller submitted that tx_sig so they already know it, but echoing it into the Unauthorized message means it also ends up in any upstream reverse-proxy access log / error-response store that captures response bodies. Full Solana signatures are correlation handles: if the same tx_sig was reused from another identity, logs of the two servers can be joined. Minor info-disclosure.",
+      "owasp_category": "A09: Security Logging and Monitoring Failures",
+      "suggestion": "Return a generic \"x402 payment rejected\" to clients and log the tx_sig via `tracing::warn!` server-side only, mirroring the pattern applied to the deposit-rejected flow in round 2 (main.rs:264-275).",
+      "cwe": "CWE-532"
+    },
+    {
+      "severity": "nit",
+      "location": "core/src/storage/sqlite.rs:114-130 (SqliteStore::open / WAL mode)",
+      "issue": "WAL mode creates two companion files, `<dbname>-wal` and `<dbname>-shm`, which SQLite writes using the process umask. If the operator sets a restrictive mode on `attestations.db` itself but runs the service with the default umask, the WAL/SHM files may end up world-readable and leak recent balance mutations and api_keys. This was flagged in task-11 round 3 as a deployment concern, not a code defect. Calling it out again here so it stays in the follow-up list after task-14.",
+      "owasp_category": "A05: Security Misconfiguration",
+      "suggestion": "Either (a) explicitly `chmod 0o600` the DB directory and both companion files after open, or (b) document the umask requirement in the deployment runbook and/or set a restrictive umask in `main()` before `SqliteStore::open`. No code change requested in this audit.",
+      "cwe": "CWE-732"
+    },
+    {
+      "severity": "nit",
+      "location": "core/src/arweave/mod.rs:267-280 (prng_fill used in write_arlocal)",
+      "issue": "`write_arlocal` fills the 512-byte `signature` and 256-byte `owner` fields with a linear-congruential PRNG seeded only on `SystemTime::now().as_nanos()`. The resulting SHA-256 of the sig bytes is used as the tx_id. This path is dev/local-only (guarded by `is_local()` which checks for `localhost` / `127.0.0.1`). However, the PRNG output is predictable to a local attacker who can observe the process start time and collision rate. Because arlocal is not a trust boundary (it's a local dev server by definition), this is not a production risk. Flagging only to document the intent: if `prng_fill` is ever reused elsewhere (e.g. for real signature material in a future refactor), it must be replaced with a CSPRNG.",
+      "owasp_category": "A02: Cryptographic Failures (dev-only, not exploitable in production)",
+      "suggestion": "Add a doc comment on `prng_fill` stating 'INSECURE — dev-only stub for arlocal tx_id padding. Do not use for real signature material.' to prevent future misuse. No behavioral change needed.",
+      "cwe": "CWE-338"
+    }
+  ],
+  "strengths": [
+    "Payment-layer atomicity is now fully correct. `credit_deposit`, `deduct_balance`, and `refund_balance` all wrap their INSERT+UPDATE sequences in `BEGIN IMMEDIATE`/`COMMIT` with explicit rollback on every error branch. The partial UNIQUE index on `payment_events(tx_sig) WHERE tx_sig IS NOT NULL` is the idempotency gate for deposits, with a one-shot in-place dedup migration on startup so legacy DBs do not refuse to boot. The three concurrent-execution tests (`credit_deposit_concurrent_same_tx_sig_applies_once`, `deduct_balance_concurrent_cannot_overdraw`, `deduct_balance_audit_insert_failure_rolls_back_balance`) are methodologically sound — they use file-backed stores with dual connections and a `Barrier` for lockstep, plus a BEFORE-INSERT trigger to simulate audit-row failure. This is a strong regression guard.",
+    "No hardcoded secrets found in `core/src/` or `mcp/src/`. All credentials (`OPENAI_API_KEY`, `TREASURY_PUBKEY`, `SOLANA_RPC_URL`, `ARWEAVE_URL`) come from env via `config.rs::env_or` with safe defaults (empty strings or localhost URLs). The USDC mint address `EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v` hardcoded as a default is a public mainnet contract, not a secret. Cargo.toml declares no `git = \"...\"` dependencies and uses published crates.io versions exclusively.",
+    "All SQL in `core/src/storage/sqlite.rs`, `core/src/lineage/mod.rs`, and `mcp/src/payment.rs` uses `rusqlite::params![]` parameterization. Two potential-looking string interpolations were verified: `get_pnl_stats` builds `interval = format!(\"-{days} days\")` where `days: u64` is an integer, then passes it as a bound parameter (not interpolated into SQL); this is safe. No raw SQL string concatenation from user input anywhere.",
+    "x402 nonce replay protection is atomic. `mark_x402_nonce` uses INSERT with the `x402_nonces.tx_sig PRIMARY KEY` constraint and correctly catches `ConstraintViolation` to surface a 'payment already used' error. The deposit flow verifies the Solana USDC transfer + USDC-mint + treasury-recipient policy AND verifies the API key owner is a signer of the deposit tx (`main.rs:259`) before crediting — preventing front-running where an observer could credit another party's tx_sig to their own key.",
+    "`random_bytes` now fails loudly if `/dev/urandom` is unreadable. The SHA-256(timestamp+PID+counter) fallback that task-11 round 1 flagged as weak has been removed entirely. API key generation now propagates an error up to the HTTP 500 handler rather than silently producing a predictable key.",
+    "The COSE_Sign1 signing pipeline (core/src/codec/sign.rs) is implemented correctly: canonical CBOR per schema-defined field order → blake3 hash → COSE_Sign1 with EdDSA (COSE alg -8) over the RFC 9052 Sig_structure. The `signature.len() == 64` guard before `.unwrap()` in `verify_artifact` means the unwrap is infallible. Canonical CBOR is deterministic (RFC 8949 S4.2: sorted keys for nested maps, no indefinite lengths, timestamps as CBOR tag 1). A roundtrip determinism test runs 1000 iterations (`test_canonical_cbor_deterministic_1000x`). No crypto footguns found: no legacy algorithm fallback, no MD5/SHA-1, no homemade hash, no custom elliptic curve.",
+    "`httpmock` test hygiene is clean. No real mainnet URLs (`api.mainnet-beta.solana.com`, `api.devnet.solana.com`, `uploader.irys.xyz`, `api.coingecko.com`) appear in `#[cfg(test)]` blocks in `core/src/`. All test clients are constructed with `MockServer::start().base_url()` (127.0.0.1 with a dynamic port). All test keypairs use `Keypair::new()` — freshly generated ephemeral keys, no funded-keypair seeds or hardcoded secret bytes. The `ArweaveClient::new_for_test` constructor explicitly sets `bypass_local_routing=true` so tests cannot accidentally hit production Irys even through the routing gate.",
+    "Cargo.toml dependency surface is narrow and healthy. `rusqlite 0.34 bundled`, `blake3 1.8`, `coset 0.3.8`, `ciborium 0.2.2`, `solana-sdk 2.3.1`, `reqwest 0.12.28`, `ring 0.17.14`, `rustls 0.23.38` are all current. `turboquant-plus-rs 0.1.0` remains a low-history crate (noted in task-1); no CVEs. No `openssl-sys` with system-linked OpenSSL — everything uses rustls + ring via reqwest's default features. No abandoned crates.",
+    "Storage trait design isolates payment code to mcp/. `grep -r 'create_api_key|deduct_balance|credit_deposit|mark_x402_nonce|record_attestation_cost|get_pnl_stats|get_owner_pubkey|verify_usdc_transfer' core/src/` is empty. `SqliteStore::conn()` is public so mcp/src/payment.rs can build its own parameterized queries without bypassing the trait abstraction. The `AttestationStore` and `LineageStore` trait-level rustdoc explicitly states authorization is caller's responsibility.",
+    "Error messages are non-leaky. The deposit-rejected path no longer echoes owner_pubkey or tx_sig prefixes to clients (round-2 fix still in place at main.rs:264-275). Refund failures now log via `tracing::warn!` rather than being silently discarded with `let _ =`.",
+    "Transport separation is sensible. stdio transport (Claude Code local) skips the payment gate entirely (`main.rs:437-477`) — correct since local stdio clients are by definition trusted and there is no network exposure. HTTP transport applies payment gate to `mnemonic_sign_memory` only when `payment_mode != none` AND `storage_mode != local` — other tools (whoami, verify, prove_identity, recall) are gated at zero cost, preventing grief-free scraping of the attestation search endpoint without also allowing free signing."
+  ],
+  "residual_risks_accepted_as_followups": [
+    "CORS allow_origin(Any) on all routes (pre-existing, tracked in task-1 and task-11 round-2 follow-ups)",
+    "/admin/stats has no authentication (pre-existing, tracked in task-1 and task-11 round-2 follow-ups)",
+    "Keypair file written without explicit chmod 0o600 (pre-existing in identity::load_or_create_keypair, flagged in task-1 round-1 and reiterated here — should become an explicit follow-up line item for pre-production)",
+    "OpenAIEmbedder uses reqwest::blocking in async context (pre-existing, tracked in task-1 round-1 follow-ups)",
+    "WAL/SHM file permissions depend on process umask (noted in task-11 round-3 as deployment doc gap)",
+    "Auto-dedup migration of legacy duplicate tx_sig rows is silent — no tracing::warn! when rows are removed (noted in task-11 round-3 as a minor logging gap)",
+    "SOLANA_RPC_URL and ARWEAVE_URL loaded from env with no scheme/hostname allowlist (pre-existing SSRF-adjacent gap from task-1 round-1; operator-controlled input, still tracked)",
+    "turboquant-plus-rs 0.1.0 is a low-history self-published crate (supply-chain monitoring item from task-1 round-1)"
+  ],
+  "notes": "The final state resolves every substantive issue raised during the per-task security reviews (TOCTOU on credit_deposit and deduct_balance, weak random_bytes fallback, deposit 403 info leak, refund tx_sig collision, deduct_balance audit-trail atomicity, legacy-DB migration safety). The payment-integrity property — balance cannot be overdrawn, deposits cannot be applied twice, every balance mutation has a matching audit row that is written atomically with the mutation — is now provably correct under concurrency, with multithreaded tests that exercise a shared file-backed DB via Barrier-synchronized threads.\n\nThe remaining findings are a mix of (a) pre-existing items that predate the refactor and were explicitly deferred as follow-ups (CORS, admin auth, keypair permissions, OpenAI blocking client, WAL file permissions, SSRF-adjacent URL validation) and (b) two additional minor items that surfaced during the holistic review: OpenAI embed zero-fill on failure (integrity gap, could become a signature footgun under adversarial network conditions) and the x402 error messages echoing the tx_sig to clients (minor info-disclosure / log-correlation handle).\n\nNo critical or major findings. Verdict is issues-found because of the four minor items, but every finding is either a pre-existing deferred item tracked in decisions.md or a narrow nit with no immediate exploitation path. The refactor itself introduced no new vulnerabilities: it moved code into core/ without expanding the trust-boundary surface, it correctly isolated payment logic in mcp/, and it materially improved payment atomicity and nonce handling. The feature is safe to ship for a single-operator self-hosted deployment; production-grade multi-tenant or public-internet deployment should close the four minor items (keypair permissions, OpenAI blocking client, admin auth, CORS allowlist) first.\n\nAudit covered all files in core/src/ and mcp/src/ as well as Cargo.toml / Cargo.lock. OWASP Top 10 2021 coverage: A01 (deferred admin_stats), A02 (keypair permissions minor, random_bytes resolved), A03 (no findings — all SQL parameterized), A04 (TOCTOU resolved, OpenAI blocking DoS minor), A05 (deferred CORS, deferred WAL perms), A06 (no findings — all deps current), A07 (no findings), A08 (OpenAI zero-fill on failure minor), A09 (x402 tx_sig echo nit), A10 (deferred URL validation). Cryptography: COSE_Sign1 + Ed25519 + blake3 + canonical CBOR implementation is correct and deterministic."
+}

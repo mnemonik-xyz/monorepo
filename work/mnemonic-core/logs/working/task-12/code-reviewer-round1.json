@@ -1,0 +1,48 @@
+{
+  "status": "changes_required",
+  "summary": "Task 12 correctly removes attest/, wasm/ module entries, HashEmbedder, and hash fallback from the module list and external integrations section. However, one dead reference was not cleaned up: patterns.md line 28 still references `core/src/wasm/` in the error handling section, a path that does not exist post-refactor. Additionally, the fallback chain description in architecture.md is slightly misleading about provider priority order. Both are accuracy issues with the stated goal of the task.",
+  "criticalIssues": [],
+  "suggestions": [
+    {
+      "file": "/home/claude/.openclaw/workspace/mnemonic-refactored/.claude/worktrees/agent-ae0729cb/.claude/skills/project-knowledge/references/patterns.md",
+      "line": 28,
+      "severity": "major",
+      "category": "accuracy",
+      "suggestion": "Surviving dead reference: the Error handling section reads 'Convert to `JsValue` only at the WASM boundary in `core/src/wasm/`.' The directory `core/src/wasm/` does not exist — it was removed as part of the post-task-10 refactor. The task spec required removing the `wasm/mod.rs` path reference from the Dual-target compilation section (done) but missed this second occurrence in the Error handling section. The sentence should be updated to remove the path reference, e.g., 'Convert to `JsValue` only at the WASM boundary.' or removed entirely if WASM boundary error conversion is no longer applicable.",
+      "benefit": "Eliminates the only remaining dead path reference in patterns.md, completing the stale-reference cleanup this task was scoped to do. An agent reading this line would attempt to navigate to a non-existent module.",
+      "optional": false
+    },
+    {
+      "file": "/home/claude/.openclaw/workspace/mnemonic-refactored/.claude/worktrees/agent-ae0729cb/.claude/skills/project-knowledge/references/architecture.md",
+      "line": 83,
+      "severity": "minor",
+      "category": "accuracy",
+      "suggestion": "The fallback chain 'openai → fastembed → Err' implies OpenAI is the primary provider and fastembed is the fallback, but `core/src/embed/mod.rs` build_embedder() comments and logic establish the opposite priority: 'Priority: fastembed (open, verifiable) > openai (proprietary but semantic)'. The chain description is written from the OpenAI integration entry, so framing it as an OpenAI-centric fallback is plausible, but it may mislead agents about which provider is preferred. Consider revising to 'Fallback (when EMBED_PROVIDER=openai or fastembed fails): openai → fastembed → Err' or moving the priority note to the embed/ description in Project Structure.",
+      "benefit": "Accurately reflects the provider selection logic, preventing agents from misunderstanding which embedder is preferred for verifiable attestations.",
+      "optional": true
+    },
+    {
+      "file": "/home/claude/.openclaw/workspace/mnemonic-refactored/.claude/worktrees/agent-ae0729cb/.claude/skills/project-knowledge/references/architecture.md",
+      "line": 37,
+      "severity": "minor",
+      "category": "completeness",
+      "suggestion": "The lineage/ description covers the DAG of parent-child relationships but omits the `Direction` enum (Ancestors/Descendants/Both) which is the primary public API surface for graph traversal. This is a real exported type that agents working on lineage queries will need to know about. Consider adding: 'exposes a `Direction` enum (Ancestors/Descendants/Both) for BFS traversal.'",
+      "benefit": "Agents implementing or extending lineage queries will find the key traversal API documented without needing to read source.",
+      "optional": true
+    }
+  ],
+  "metrics": {
+    "filesReviewed": 2,
+    "criticalIssuesCount": 0,
+    "majorIssuesCount": 1,
+    "minorIssuesCount": 2,
+    "testCoverageAssessment": "adequate"
+  },
+  "reviewAxesVerdict": {
+    "accuracy": "PARTIAL — core module list, embed provider list, storage trait names, fallback chain all match lib.rs and source. One inaccuracy: patterns.md line 28 references core/src/wasm/ which does not exist.",
+    "completeness": "ACCEPTABLE — Direction enum and sign_cose are not mentioned but are within scope of optional depth. sign_cose is #[doc(hidden)] by design so omitting it is correct. Direction enum is a minor gap.",
+    "styleConsistency": "PASS — edits match the existing prose style of each file. No code blocks introduced. Inline backtick refs used consistently.",
+    "noSpeculation": "PASS — no forward-looking statements about task 11+ detected.",
+    "deadRefs": "FAIL — one surviving dead ref: patterns.md line 28 still contains 'core/src/wasm/' path. All other target refs (attest/, HashEmbedder, hash fallback, wasm/mod.rs in dual-target section) are confirmed removed."
+  }
+}

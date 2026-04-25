@@ -1,0 +1,74 @@
+{
+  "status": "changes_required",
+  "checks": {
+    "completeness": "pass",
+    "edge_cases": "pass",
+    "acceptance_criteria": "pass",
+    "contradictions": "pass",
+    "template_compliance": "fail",
+    "size_check": "warning"
+  },
+  "findings": [
+    {
+      "check": "template_compliance",
+      "severity": "critical",
+      "issue": "'Как проверить' section contains only the 'Агент проверяет' subsection. The required 'Пользователь проверяет' subsection is completely absent. The template mandates both subsections. Without it, there is no documented manual verification path for a human reviewer — for an L-size feature this is a meaningful gap since some checks (e.g. confirming MCP round-trip behavior end-to-end) require human judgment.",
+      "location": "## Как проверить — отсутствует подраздел '### Пользователь проверяет'",
+      "fix": "Add a '### Пользователь проверяет' subsection below '### Агент проверяет'. Minimum content: (1) Запустить mnemonic-mcp в local mode, выполнить sign_memory через CLI/stdio — убедиться что content возвращается при recall; (2) Проверить что ~/.mnemonic/attestations.db существует и содержит записи после sign_memory; (3) Убедиться что cargo test вывод содержит '8 passed' для lineage-тестов."
+    },
+    {
+      "check": "completeness",
+      "severity": "major",
+      "issue": "The interview.yml conversation_history is empty (conversation_history: []) and questions_asked: 0, yet status is 'completed' and all scores are populated. The interview was pre-seeded with values rather than built through actual Q&A dialogue. This means there is no verifiable record that the user actually confirmed the scope reduction from dual-target (native+WASM) to native-only — a significant scope change from the original feature_description which described full WASM extraction.",
+      "location": "logs/userspec/interview.yml — conversation_history: [], questions_asked: 0",
+      "fix": "Update interview.yml to reflect actual session provenance: set a brief conversation_history entry documenting the source (e.g. 'Spec created from existing codebase analysis; user confirmed native-only scope for iteration 1 via [date/channel]'). This ensures future agents can trace the scope decision and avoids false audit confidence."
+    },
+    {
+      "check": "completeness",
+      "severity": "major",
+      "issue": "The interview extensively covered the WASM 'no embedder configured' error path (recall() without OpenAI key in WASM returns Err) and localStorage overflow ('storage full') error. The spec correctly scopes WASM to iteration 2, but the NATIVE-side equivalent is not addressed: what does recall() return when no embedder is configured in native mode (e.g. no fastembed model downloaded, no OPENAI_API_KEY set)? The interview error_scenarios value mentions this only for WASM context. For a user depending on mnemonic-core natively, this is an observable behavior that should be defined.",
+      "location": "Как должно работать — Сценарий 1 (разработчик на Rust); Критерии приёмки",
+      "fix": "Add a sentence to Сценарий 1 describing behavior when no embedder is available (e.g. 'Если ни fastembed модель, ни OPENAI_API_KEY не настроены, embed() возвращает Err — caller обязан обрабатывать'). Optionally add an acceptance criterion: 'embed() без настроенного embedder возвращает Err, не паникует — проверяется unit-тестом с пустым конфигом'."
+    },
+    {
+      "check": "size_check",
+      "severity": "minor",
+      "issue": "11 acceptance criteria exceeds the >10 warning threshold. For an L-size feature this is expected and justified by scope, but the threshold is formally exceeded per check rules.",
+      "location": "Критерии приёмки — 11 пунктов",
+      "fix": "No action required if all 11 criteria reflect real acceptance gates. Consider whether criterion 5 (CI blocks PR) is an acceptance criterion or an infrastructure requirement — moving it to 'Ограничения' or 'Тестирование' would reduce count to 10."
+    }
+  ],
+  "interview_coverage": {
+    "covered": [
+      "Step-by-step migration order: codec → identity → embed → compress → db → arweave/solana → lineage",
+      "turboquant-plus-rs = '0.1.0' from crates.io (not git), API-verified compatible",
+      "lineage.rs bug fixes: Direction enum, chain_valid Option<bool>, error propagation in traverse_lineage",
+      "HashEmbedder removal (cannot decompress embeddings, useless)",
+      "httpmock tests for arweave.rs and solana.rs (happy path + network error)",
+      "Payment methods (create_api_key, deduct_balance, etc.) stay in mcp/, do not migrate to core",
+      "Benchmarks and proptest migrate to core/benches/ and core/tests/",
+      "architecture.md update: codec/ and lineage/ appear in Project Structure description of core/src/",
+      "Storage trait abstraction: AttestationStore + LineageStore traits in core, SQLite impl in core/src/storage/ and core/src/lineage/",
+      "Workspace structure: root Cargo.toml [core, mcp], resolver = '2'",
+      "crates.io/npm publication is explicitly out of scope (separate task after iteration 2)",
+      "codec/sign.rs keeps solana-sdk (WASM-compatible for crypto, noted as relevant to iteration 2)",
+      "Integration: all 5 MCP tools work in local mode after migration",
+      "CI blocks PR on cargo test or cargo build failure",
+      "Three test levels: unit per module, integration MCP local mode, no E2E in iteration 1",
+      "SQLite backward compatibility: no schema changes, existing ~/.mnemonic/attestations.db continues to work",
+      "pricing.rs stays in mcp/ unchanged",
+      "Rust developer scenario: imports mnemonic_core::identity, embed, compress — no HTTP deps",
+      "MCP-as-wrapper scenario: 5 tools work identically, internal changes invisible to callers",
+      "Risk: turboquant API divergence — mitigated by changing dep first and running cargo test",
+      "Risk: zero arweave/solana test coverage — mitigated by adding httpmock tests during migration",
+      "Risk: payment methods leaking into core — mitigated by grep criterion in acceptance + CI"
+    ],
+    "missing": [
+      "WASM topics (wasm-pack build, localStorage, web_sys::Storage, WASM keypair, OpenAI in WASM via reqwest, fastembed native-only gate, recall without embedder in WASM, wasm/mod.rs exports) — legitimately excluded: spec explicitly scopes WASM to iteration 2, Ограничения clearly states 'WASM-таргет ... вне scope этой итерации'",
+      "Native-side 'no embedder configured' error behavior — discussed in interview only in WASM context but the native equivalent is not defined in the spec (see major finding in completeness check)",
+      "WASM bundle efficiency research and SQLite local mode research — correctly absent: interview.yml notes mark these as SEPARATE RESEARCH out of scope",
+      "turboquant vs turboquant-rs comparison — correctly absent: interview.yml notes mark this as SEPARATE TASK out of scope"
+    ]
+  },
+  "summary": "Спек качественный и хорошо проработан для native-only итерации 1. Одна критическая проблема: отсутствует обязательный подраздел 'Пользователь проверяет' в секции 'Как проверить'. Две значимые (major) проблемы: пустой conversation_history при 'completed' статусе интервью не позволяет верифицировать согласование scope-reduction с native-only; поведение embed() при отсутствии embedder в native-режиме не определено. После добавления 'Пользователь проверяет' спек готов к апрувалу."
+}

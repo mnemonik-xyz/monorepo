@@ -1,0 +1,332 @@
+# Interview Plan for Feature Planning
+#
+# Tracks progress of adaptive discovery interview for a new feature/bug/refactoring.
+# Updated after EACH user response with scoring, values, and remaining gaps.
+#
+# Scoring: 0-100% (how well we understand this aspect)
+# Status: pending → partial → complete
+# Required: true = must reach threshold, false = cover if relevant
+
+# ============================================================================
+# Interview Metadata (Session Recovery)
+# ============================================================================
+interview_metadata:
+  started: "2026-04-20 00:00:00"
+  last_updated: "2026-04-20 12:00:00"
+  status: "completed"  # approved by user 2026-04-20
+  can_resume: true
+  current_question_num: 0
+  feature_size: "L"  # S | M | L
+
+# ============================================================================
+# Conversation History (for session recovery)
+# ============================================================================
+# Preserves complete Q&A. Update after EVERY user response.
+#
+conversation_history: []
+# Format:
+# - question_num: 1
+#   timestamp: "2025-11-12 15:20:33"
+#   topic: "user_problem"
+#   agent_question: |
+#     [Full question text]
+#   user_answer: |
+#     [Full answer text]
+#   summary: "Brief summary"
+
+# ============================================================================
+# Phase 1: High-Level Feature Understanding
+# ============================================================================
+# Interview Cycle 1 scope
+phase1_feature_overview:
+
+  feature_name:
+    score: 95
+    status: "complete"
+    value: "mnemonic-core"
+    gaps: ""
+    required: true
+
+  feature_description:
+    score: 92
+    status: "complete"
+    value: "Extract all core logic from mnemonic-protocol/mcp monolith into mnemonic-core Rust lib crate (dual-target: native + wasm32). Modules: embed, compress, identity, db, arweave, solana, codec, lineage. Step-by-step migration, cargo test green after each step. WASM exports: whoami/sign_memory/recall/verify via wasm/mod.rs. Storage trait abstraction: AttestationStore + LineageStore in core; SQLite impl native-only; WebStorage impl for wasm32. Payment/billing methods (create_api_key, deduct_balance etc) stay in mcp/. HashEmbedder removed. turboquant-plus-rs = '0.1.0' from crates.io. Fix 2 major lineage.rs bugs. Benchmarks + proptest migrate to core/. arweave/solana get httpmock tests. pricing.rs stays in mcp unchanged. MCP becomes thin binary. codec/sign.rs uses solana-sdk (WASM-compatible for crypto). architecture.md updated after migration."
+    gaps: ""
+    required: true
+
+  work_type:
+    score: 90
+    status: "complete"
+    value: "feature"
+    gaps: ""
+    required: true
+
+  user_problem:
+    score: 88
+    status: "complete"
+    value: "All three motivations confirmed: (a) webapp without backend - WASM in browser so no server needed (feasibility TBD, rusqlite blocks this, needs SQLite-WASM or in-memory strategy); (b) reuse - other projects can depend on mnemonic-core without MCP; (c) publication - @mnemonic/core on npm + crates.io as standalone protocol artifact. User is uncertain if (a) is achievable with full persistence."
+    gaps: ""
+    required: true
+
+  target_users:
+    score: 60
+    status: "partial"
+    value: "Developers building AI agents; projects wanting to embed mnemonic protocol logic; webapp (browser WASM)"
+    gaps: ""
+    required: false
+
+  success_criteria:
+    score: 88
+    status: "complete"
+    value: "Level 2: cargo test -p mnemonic-core passes; wasm-pack build --target web builds successfully; mnemonic-mcp compiles using core as workspace dep. Publishing to crates.io/npm is a separate later task."
+    gaps: ""
+    required: true
+
+  constraints:
+    score: 90
+    status: "complete"
+    value: "Step-by-step migration (codec→identity→embed→compress→db→arweave/solana→lineage), cargo test green after each step. Workspace: root Cargo.toml [core, mcp]. WASM target: in-memory only (no rusqlite), browser localStorage for any webapp persistence. Local mode (SQLite) is under question - needs separate research on whether it's needed at all. WASM download efficiency needs research (is WASM worth bundling or per-session?). turboquant dependency: published as 'turboquant-plus-rs' on crates.io. MCP API can change but protocol logic preserved."
+    gaps: ""
+    required: true
+
+  testing_strategy:
+    score: 88
+    status: "complete"
+    value: "Three levels: (1) unit tests per module - embed, compress, identity, db, lineage each tested independently (existing tests in lineage.rs carry over); (2) integration test - mnemonic-mcp with new core dep, all 5 MCP tools work in local mode; (3) WASM smoke test - wasm-pack test --headless --chrome, whoami() returns valid pubkey. turboquant-rs publish is prerequisite parallel task."
+    gaps: ""
+    required: true
+
+# ============================================================================
+# Phase 2: User Experience & Scenarios
+# ============================================================================
+# Interview Cycle 2 scope (together with Phase 3)
+phase2_user_experience:
+
+  user_stories:
+    score: 72
+    status: "partial"
+    value: "Developer adds mnemonic-core to Cargo.toml, calls identity/embed/compress/codec APIs. Webapp loads WASM, generates keypair on first run, saves to localStorage, reuses on next visit. MCP binary depends on core as workspace member."
+    gaps: "Happy path for each migration stage not fully described"
+    required: true
+
+  acceptance_criteria:
+    score: 90
+    status: "complete"
+    value: |
+      - cargo test -p mnemonic-core passes (incl. 8 lineage tests)
+      - wasm-pack build --target web in core/ compiles without errors
+      - wasm-pack test --headless --chrome: whoami() returns valid Ed25519 pubkey
+      - cargo build -p mnemonic-mcp compiles with core as workspace dep
+      - MCP local mode: tools/list returns 5 tools, mnemonic_whoami responds
+      - CI blocks PR on any above failure
+      - Cargo.toml uses turboquant-plus-rs from crates.io (not git)
+      - lineage.rs: traverse_lineage propagates errors, chain_valid is Option<bool>
+      - HashEmbedder removed (does not allow embedding decompression - useless)
+      - architecture.md updated to reflect codec/ and lineage/ in core/src/
+    gaps: ""
+    required: true
+
+  edge_cases:
+    score: 88
+    status: "complete"
+    value: |
+      - WASM keypair: generate new Ed25519 keypair if not in localStorage, reuse if exists
+      - localStorage overflow: return error "storage full", caller handles gracefully
+      - localStorage serialization: JSON strings per attestation, keyed by attestation_id
+      - OpenAI embedder in WASM via reqwest wasm feature (browser fetch API)
+      - fastembed: native-only feature gate, excluded from wasm32 target
+      - No embedder in WASM (no OpenAI key): recall returns Err("no embedder configured")
+      - pricing.rs stays in mcp/ unchanged (no core imports)
+      - codec/sign.rs uses solana-sdk keypair (WASM-compatible for crypto ops)
+      - Benchmarks + proptest_canonical migrate to core/benches/ and core/tests/
+      - arweave.rs + solana.rs: httpmock tests added during migration
+    gaps: ""
+    required: true
+
+  error_scenarios:
+    score: 87
+    status: "complete"
+    value: "CI blocks merge if: WASM build fails, mcp fails to compile with new core dep, cargo test fails. turboquant API compatibility: pin turboquant-plus-rs = '0.1.0' in Cargo.toml, CI cargo test catches breakage. WASM recall with no embedder: returns error 'no embedder configured' (option a). Error handling: anyhow::Result throughout core, convert to JsValue only at wasm/ boundary."
+    gaps: ""
+    required: true
+
+  verification_strategy:
+    score: 75
+    status: "partial"
+    value: "Per-module cargo test after each migration step. After all modules: wasm-pack test --headless --chrome (whoami returns valid pubkey). Integration: mcp in local mode, tools/list returns 5 tools, mnemonic_whoami responds. CI on every PR."
+    gaps: ""
+    required: true
+
+  ui_ux_requirements:
+    score: 0
+    status: "pending"
+    value: ""
+    gaps: "Specific UI/UX requirements if applicable"
+    required: false
+
+  risks:
+    score: 90
+    status: "complete"
+    value: |
+      1. turboquant-plus-rs API divergence: checked crates.io v0.1.0 - ndarray ^0.16 matches old MCP dep, swap is safe. First step of migration.
+      2. HashEmbedder removed: WASM has OpenAI embedder (reqwest wasm feature = browser fetch) or no embedder. No embedder → recall returns error "no embedder configured". Acceptable for demo.
+      3. localStorage WASM storage: Storage trait in core, SQLite impl native-only, web_sys::Storage impl for wasm32. localStorage sync = good, 5-10MB limit acceptable for demo.
+      4. turboquant-plus-rs missing repository field on crates.io - not blocking, fix later.
+    gaps: ""
+    required: true
+
+  technical_decisions:
+    score: 90
+    status: "complete"
+    value: |
+      - Storage trait abstraction: AttestationStore + LineageStore traits in core; SQLite impl behind cfg(not(wasm32)); web_sys::Storage impl for wasm32
+      - Payment methods (create_api_key, deduct_balance, etc): stay in mcp/, not part of core API
+      - wasm/mod.rs exports: whoami(), sign_memory(), recall(), verify() — all returning JsValue or String
+      - HashEmbedder: removed (doesn't allow decompression, useless)
+      - turboquant-plus-rs = '0.1.0' from crates.io (not git), verified API-compatible
+      - lineage.rs: Direction enum (not &str), chain_valid: Option<bool>, errors propagated
+      - codec/sign.rs: keep solana-sdk (WASM-compatible for crypto), no need for ed25519-dalek refactor
+      - Publishing (crates.io + npm): separate task, not in this scope
+    gaps: ""
+    required: false
+
+  deploy_approach:
+    score: 0
+    status: "pending"
+    value: ""
+    gaps: "How to deploy: CI/CD, manual, Docker? What needs setup?"
+    required: false
+
+  manual_user_actions:
+    score: 0
+    status: "pending"
+    value: ""
+    gaps: "Steps user must do manually (create bot, get API keys, configure service)"
+    required: false
+
+# ============================================================================
+# Phase 3: Integration & Technical Context
+# ============================================================================
+# Interview Cycle 2 scope (together with Phase 2)
+phase3_integration:
+
+  integration_points:
+    score: 85
+    status: "complete"
+    value: "mnemonic-core is consumed by: (1) mnemonic-mcp as workspace dep path='../core'; (2) mnemonic-webapp via wasm-pack WASM build. Old mnemonic-protocol/mcp becomes archive. Clean cut - no git history migration needed."
+    gaps: ""
+    required: true
+
+  dependencies:
+    score: 88
+    status: "complete"
+    value: "turboquant-plus-rs = '0.1.0' (crates.io, verified compatible). ndarray ^0.16, solana-sdk 2.2, rusqlite (native-only), reqwest (split: blocking native, async wasm feature), fastembed (native optional feature), web_sys (wasm32 target). No new dependencies needed."
+    gaps: ""
+    required: false
+
+  technical_constraints:
+    score: 0
+    status: "pending"
+    value: ""
+    gaps: "Technical limitations, performance, security"
+    required: false
+
+  data_requirements:
+    score: 0
+    status: "pending"
+    value: ""
+    gaps: "What data needed, where from, how stored"
+    required: false
+
+  migration_needs:
+    score: 0
+    status: "pending"
+    value: ""
+    gaps: "Migration plan for existing users/data"
+    required: false
+
+# ============================================================================
+# Phase 4: Completion
+# ============================================================================
+phase4_completion:
+  userspec_file: ""  # work/{feature}/user-spec.md
+  status: "pending"  # pending | created | approved
+
+# ============================================================================
+# Decision Rules
+# ============================================================================
+decision_rules:
+
+  required_threshold: 85
+  optional_threshold: 50
+
+  # Stop criteria (BOTH must be true to exit a cycle)
+  stop_criteria:
+    - "All required items in current cycle scope score >= 85%"
+    - "Structural: every required item has non-empty value, no TBD, gaps empty or conscious limitations"
+
+  priority_order:
+    - "Required items with score < 85% (lowest score first)"
+    - "Optional items mentioned by user in context"
+    - "Other optional items if user seems knowledgeable"
+
+  question_strategy:
+    - "3-4 questions per batch about different gaps"
+    - "Run as many batches as needed — batch size is NOT cycle limit"
+    - "Propose solutions based on PK, not just ask questions"
+    - "Challenge with substance: counterexamples, code references, unexplored scenarios"
+    - "After each response: update scores, values, gaps, conversation_history, save"
+
+# ============================================================================
+# Interview Progress
+# ============================================================================
+progress:
+  current_phase: "phase1_feature_overview"
+  questions_asked: 0
+  last_question: ""
+  total_required_score: 0
+  total_optional_score: 0
+  completion_estimate: "0%"
+  user_detail_level: "unknown"  # brief | moderate | detailed
+
+# ============================================================================
+# Notes
+# ============================================================================
+notes: |
+  - turboquant dependency: published on crates.io as "turboquant-plus-rs" by the owner. Cargo.toml dep must be updated from git to crates.io version.
+  - SEPARATE TASK (not in this scope): research turboquant vs turboquant-rs crates — compare efficiency, API, maintenance, choose best.
+  - SEPARATE RESEARCH (not in this scope): WASM bundle efficiency — is it better to download WASM once (PWA/cache) or keep in-memory per session? Also evaluate if SQLite local mode is needed at all.
+  - lineage.rs: 2 major bugs to fix during migration (silent error swallowing in traverse_lineage, chain_valid hardcoded true).
+  - lineage.rs: needs LineageStore trait abstraction to be WASM-compatible (DAG logic in core, SQLite impl in mcp or native feature gate).
+
+# ============================================================================
+# USAGE INSTRUCTIONS
+# ============================================================================
+#
+# 1. INIT: Created by init-feature-folder.sh at work/{feature}/logs/userspec/interview.yml
+#    Set metadata.started, metadata.status: in_progress
+#
+# 2. INITIAL SCORING: After user's free-form description, score ALL items
+#    Detailed 80-95%, brief 50-70%, vague 20-40%, not mentioned 0%
+#
+# 3. INTERVIEW LOOP (save after EVERY response):
+#    a) Find required items with score < 85% in current cycle scope
+#    b) Ask 3-4 questions about different gaps
+#    c) Propose solutions based on PK
+#    d) User answers
+#    e) Update: conversation_history, scores, values, gaps, metadata
+#    f) Save immediately
+#    g) Check stop criteria (score >= 85% AND structural: value filled, no TBD, gaps resolved)
+#    h) Not done → repeat. Done → next cycle.
+#
+# 4. CYCLES:
+#    Cycle 1: phase1_feature_overview items
+#    Cycle 2: phase2_user_experience + phase3_integration items
+#    Cycle 3: ALL items still below threshold (cleanup pass)
+#
+# 5. RESUME: If metadata.status is "in_progress"
+#    Load, show conversation summary, resume from current state
+#
+# 6. COMPLETION: After user approves user-spec.md
+#    Set phase4_completion.status: approved
+#    Set metadata.status: completed
