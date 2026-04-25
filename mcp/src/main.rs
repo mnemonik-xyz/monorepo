@@ -4,7 +4,6 @@ mod payment;
 mod pricing;
 mod tools;
 
-use std::sync::Arc;
 use axum::{
     extract::{Query, State},
     http::{HeaderMap, StatusCode},
@@ -16,11 +15,15 @@ use clap::Parser;
 use mnemonic_core::{arweave, compress, embed, identity, solana, storage::SqliteStore};
 use serde::Deserialize;
 use solana_sdk::signer::Signer;
+use std::sync::Arc;
 
 // ── CLI ───────────────────────────────────────────────────────────────────────
 
 #[derive(Parser)]
-#[command(name = "mnemonic-mcp", about = "Mnemonic MCP server — verifiable memory attestation")]
+#[command(
+    name = "mnemonic-mcp",
+    about = "Mnemonic MCP server — verifiable memory attestation"
+)]
 struct Cli {
     /// Transport: "stdio" or "http"
     #[arg(long, default_value = "http")]
@@ -105,16 +108,13 @@ async fn mcp_handler(
                 // underlying failure class.
                 if resp.error.is_some() {
                     if let Some(ref key) = api_key {
-                        let reason = resp.error.as_ref()
+                        let reason = resp
+                            .error
+                            .as_ref()
                             .map(|e| e.message.as_str())
                             .unwrap_or("error");
                         let store = state.store.lock().unwrap();
-                        if let Err(e) = payment::refund_balance(
-                            &store,
-                            key,
-                            current_cost,
-                            reason,
-                        ) {
+                        if let Err(e) = payment::refund_balance(&store, key, current_cost, reason) {
                             tracing::warn!(api_key = %key, error = %e, "refund failed");
                         }
                     }
@@ -233,13 +233,15 @@ async fn deposit(
                     Json(serde_json::json!({
                         "error": "api key has no owner_pubkey — cannot verify deposit sender"
                     })),
-                ).into_response()
+                )
+                    .into_response()
             }
             Err(e) => {
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(serde_json::json!({"error": e.to_string()})),
-                ).into_response()
+                )
+                    .into_response()
             }
         }
     }; // lock released here
@@ -252,7 +254,8 @@ async fn deposit(
             return (
                 StatusCode::BAD_GATEWAY,
                 Json(serde_json::json!({"error": format!("failed to fetch tx signers: {e}")})),
-            ).into_response()
+            )
+                .into_response()
         }
     };
 
@@ -272,7 +275,8 @@ async fn deposit(
             Json(serde_json::json!({
                 "error": "deposit rejected: API key owner is not a signer of this transaction"
             })),
-        ).into_response();
+        )
+            .into_response();
     }
 
     let store = state.store.lock().unwrap();
@@ -355,14 +359,18 @@ async fn main() -> anyhow::Result<()> {
         &cfg.embed_provider,
         &cfg.openai_api_key,
         &cfg.openai_embed_model,
-    ).unwrap_or_else(|e| {
+    )
+    .unwrap_or_else(|e| {
         tracing::error!("FATAL: {e}");
         std::process::exit(1);
     });
     let dim = embedder.dim();
     tracing::info!(
         "Embedder: {} ({}-dim, model={}, verifiable={})",
-        embedder.provider_name(), dim, embedder.model_id(), embedder.is_open_weights(),
+        embedder.provider_name(),
+        dim,
+        embedder.model_id(),
+        embedder.is_open_weights(),
     );
 
     let compressor = compress::EmbeddingCompressor::new(dim, cfg.turbo_bits, 42);
@@ -372,8 +380,15 @@ async fn main() -> anyhow::Result<()> {
         compressor.compression_ratio()
     );
 
-    tracing::info!("Storage mode: {} ({})", cfg.storage_mode,
-        if cfg.storage_mode == "local" { "free, SQLite only" } else { "Arweave + Solana + SQLite" });
+    tracing::info!(
+        "Storage mode: {} ({})",
+        cfg.storage_mode,
+        if cfg.storage_mode == "local" {
+            "free, SQLite only"
+        } else {
+            "Arweave + Solana + SQLite"
+        }
+    );
     tracing::info!("Payment mode: {}", cfg.payment_mode);
 
     // ── Pricing engine ────────────────────────────────────────────────────────
@@ -487,7 +502,10 @@ async fn run_http(state: Arc<mcp::McpState>, host: &str, port: u16) -> anyhow::R
         .route("/balance", get(get_balance))
         .route("/deposit", post(deposit))
         .route("/admin/stats", get(admin_stats))
-        .route("/health", get(|| async { Json(serde_json::json!({"status": "ok"})) }))
+        .route(
+            "/health",
+            get(|| async { Json(serde_json::json!({"status": "ok"})) }),
+        )
         .with_state(state)
         .layer(
             CorsLayer::new()

@@ -81,8 +81,14 @@ fn test_determinism_across_multiple_keypairs() {
     let kp2 = Keypair::new();
     let s1 = sign_artifact(&artifact, &MEMORY_V1, &kp1).unwrap();
     let s2 = sign_artifact(&artifact, &MEMORY_V1, &kp2).unwrap();
-    assert_ne!(s1.cose_bytes, s2.cose_bytes, "different signers produce different COSE");
-    assert_eq!(s1.content_hash, s2.content_hash, "content hashes must match");
+    assert_ne!(
+        s1.cose_bytes, s2.cose_bytes,
+        "different signers produce different COSE"
+    );
+    assert_eq!(
+        s1.content_hash, s2.content_hash,
+        "content hashes must match"
+    );
 
     let r1 = verify_artifact(&s1.cose_bytes, Some(&s1.content_hash)).unwrap();
     let r2 = verify_artifact(&s2.cose_bytes, Some(&s2.content_hash)).unwrap();
@@ -122,11 +128,16 @@ fn test_all_artifact_schemas() {
         let hash = hash_bytes(&cbor);
 
         let signed = sign_artifact(&artifact, schema, &kp).expect(type_name);
-        let result = verify_artifact(&signed.cose_bytes, Some(&signed.content_hash)).expect(type_name);
+        let result =
+            verify_artifact(&signed.cose_bytes, Some(&signed.content_hash)).expect(type_name);
 
         assert!(result.valid, "{type_name}: COSE verification failed");
         assert_eq!(result.payload, cbor, "{type_name}: payload mismatch");
-        assert_eq!(hash_bytes(&result.payload), hash, "{type_name}: hash mismatch");
+        assert_eq!(
+            hash_bytes(&result.payload),
+            hash,
+            "{type_name}: hash mismatch"
+        );
     }
 }
 
