@@ -26,6 +26,10 @@ build/
 .next/
 out/
 
+# Rust
+target/
+**/*.rs.bk
+
 # IDE
 .vscode/
 .idea/
