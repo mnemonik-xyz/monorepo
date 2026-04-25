@@ -70,6 +70,8 @@ Mnemonic is designed around the following goals:
 - Extend memory records into provenance attestations for artifacts and decisions.
 - Provide settlement-aware memory infrastructure that agents can pay for directly.
 - Add stronger privacy, lifecycle, and multi-writer semantics before broad multi-party deployment.
+- Ship core protocol primitives as both a native Rust crate and a WebAssembly module, so identical verification logic runs in servers, browsers, and embedded agents.
+- Provide a browser-based demo client that recalls and verifies signed memory artifacts without a server dependency.
 
 ## 4. Core Insight
 
@@ -91,13 +93,13 @@ content
   -> recall and verify through MCP
 ```
 
-The current implementation uses full embeddings in SQLite for recall. Compressed embeddings are produced and embedded in artifact metadata, supporting portability and future cross-node verification work. Historical research explored compressed candidate generation plus exact reranking; that remains a protocol design direction rather than the current local recall path.
+The current implementation uses full embeddings in SQLite for recall. Compressed embeddings are produced and embedded in artifact metadata, supporting portability and future cross-node verification work. Compression uses TurboQuant scalar quantization to 2–4 bits per dimension, yielding up to roughly 32× size reduction so embeddings remain cheap to carry across systems and to anchor on durable storage. Historical research explored compressed candidate generation plus exact reranking; that remains a protocol design direction rather than the current local recall path.
 
 ## 5. Architecture Overview
 
 Mnemonic has two layers:
 
-- **`mnemonic-core`** provides protocol primitives: canonical encoding, hashing, signing, identity, embedding, compression, storage traits, Solana integration, Arweave integration, and lineage helpers.
+- **`mnemonic-core`** provides protocol primitives: canonical CBOR encoding, blake3 hashing, COSE_Sign1 signing, identity (Ed25519 keypairs with DID-sol and DID-key derivation), embedding, TurboQuant compression, storage traits, Solana integration, Arweave integration, and lineage helpers (a parent–child artifact DAG with directional traversal).
 - **`mnemonic-mcp`** exposes those primitives through MCP over HTTP and stdio, plus payment and pricing logic for networked operation.
 
 The MCP server exposes five tools:
@@ -172,7 +174,7 @@ Mnemonic can record what an agent produced, what inputs it used, when it produce
 
 ### 9.3 Portable Memory Wallet
 
-Mnemonic points toward memory that belongs to the agent or its operator rather than a provider. An agent should be able to carry durable memory across providers, frameworks, hosts, orchestration environments, and model upgrades.
+Mnemonic points toward memory that belongs to the agent or its operator rather than a provider. An agent should be able to carry durable memory across providers, frameworks, hosts, orchestration environments, and model upgrades. Concretely, an operator should be able to write memory while running on Claude, switch the agent runtime to GPT or a local model, and continue working from the same attested store without re-signing or re-attesting prior records.
 
 ### 9.4 Settlement-Aware Memory Infrastructure
 
@@ -199,11 +201,13 @@ Implemented today:
 
 - HTTP and stdio MCP transports.
 - Five Mnemonic tools.
-- Ed25519 server identity.
+- Ed25519 server identity, with DID-sol and DID-key derivation exposed through `mnemonic_whoami`.
 - Canonical CBOR artifact encoding.
 - COSE_Sign1 artifact signing.
 - blake3 hashing for current artifacts.
+- TurboQuant compression of embeddings (2–4 bits per dimension) carried in artifact metadata.
 - SQLite local recall over full embeddings.
+- Local lineage index: parent–child artifact DAG with cycle detection and directional BFS traversal (`Ancestors`, `Descendants`, `Both`).
 - `local` and `full` storage modes.
 - Optional Solana and Arweave persistence in full mode.
 - Payment modes: `none`, `balance`, `x402`, and `both`.
@@ -313,13 +317,19 @@ The long-term goal is broader: memory that agents can own, share, pay for, audit
 
 **COSE_Sign1:** A COSE structure for a single digital signature over CBOR data. Mnemonic signs artifacts as COSE_Sign1 objects so verifiers can check that a memory artifact was produced by the holder of the corresponding Ed25519 key.
 
+**DID (Decentralized Identifier):** A self-describing identifier scheme that can be resolved without a central registry. Mnemonic derives both a `did:sol` and a `did:key` from the server's Ed25519 keypair so the same identity is addressable on-chain and off-chain.
+
 **Ed25519:** A public-key signature algorithm. Mnemonic uses Ed25519 keypairs for agent identity and artifact signing.
+
+**Lineage / Artifact DAG:** A directed acyclic graph linking child artifacts to their parents. Mnemonic maintains a local lineage index so a recalled memory can be traced back through the artifacts it was derived from, supporting provenance audits and chain verification.
 
 **MCP:** Model Context Protocol. The interface layer Mnemonic uses to expose memory tools to agent clients over HTTP or stdio.
 
 **Semantic Memory Item:** The core unit of Mnemonic memory: human-readable content plus embedding, metadata, identity, and verification data. It is portable in a way raw model attention state is not.
 
 **Solana Anchor:** A Solana transaction or memo used to timestamp and externally commit to artifact data. In full mode, Mnemonic can use Solana as an ordering and verification layer.
+
+**TurboQuant:** A scalar quantization scheme that compresses embedding vectors to 2–4 bits per dimension. Mnemonic uses TurboQuant to shrink embeddings by up to roughly 32× so they remain cheap to anchor on durable storage and to transmit between systems.
 
 **x402:** A machine-native payment pattern based on HTTP 402 Payment Required. Mnemonic's HTTP payment layer supports x402-style flows for agent-payable memory services.
 
