@@ -54,6 +54,9 @@ anyhow = "1"
 # UUID
 uuid = { version = "1", features = ["v4"] }
 
+# ZIP archive (artifact generation in seed.rs)
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
 # Logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

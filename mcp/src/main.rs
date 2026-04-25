@@ -2,6 +2,7 @@ mod config;
 mod mcp;
 mod payment;
 mod pricing;
+mod seed;
 mod tools;
 
 use axum::{
@@ -450,7 +451,15 @@ async fn main() -> anyhow::Result<()> {
         ollama_url: cfg.ollama_url.clone(),
         ollama_model: cfg.ollama_model.clone(),
         rag_chunk_dir: cfg.rag_chunk_dir.clone(),
+        artifact_zip_path: std::sync::Mutex::new(None),
     });
+
+    // ── RAG seeding (whitepaper chunking + artifact generation) ──────────
+    if let Err(e) = seed::run(&state).await {
+        tracing::error!("RAG seeding failed: {e}");
+        // Non-fatal: server can still run without pre-seeded knowledge.
+        // Chat endpoint will have empty recall results until manually seeded.
+    }
 
     match transport.as_str() {
         "stdio" => run_stdio(state).await,

@@ -79,6 +79,9 @@ pub struct McpState {
     /// Directory where RAG artifacts (chunked knowledge .zip) are written.
     #[allow(dead_code)]
     pub rag_chunk_dir: std::path::PathBuf,
+    /// Absolute canonical path to the pre-built knowledge artifact .zip file.
+    /// Set by seed::run() at startup; used by the /download-knowledge handler.
+    pub artifact_zip_path: std::sync::Mutex<Option<std::path::PathBuf>>,
 }
 
 // Safety: We only access store through std::sync::Mutex (short critical sections, no await)
