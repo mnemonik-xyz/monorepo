@@ -30,13 +30,17 @@ React webapp с бэкендом на MCP-сервере. Протокольны
 Пользователь видит кнопку "Download protocol knowledge" (всегда видна в UI, не зависит от чата). Нажимает -- скачивает `.zip` с двумя файлами:
 
 - `mnemonic-protocol-knowledge.md` -- Markdown с YAML frontmatter (content_hash, signer_pubkey, timestamp, arweave_tx) и текстовым содержимым всех протокольных знаний.
-- `mnemonic-protocol-knowledge.json` -- JSON с структурированными метаданными, подписями, и опционально quantized embeddings в base64.
+- `mnemonic-protocol-knowledge.json` -- JSON с структурированными метаданными (content_hash, signer_pubkey, timestamp, arweave_tx).
 
 Пользователь загружает `.md` файл в ChatGPT/Claude/Gemini как context file или вставляет текст в system prompt локальной LLM -- и продолжает разговор о протоколе с полным контекстом.
 
-### Сценарий 3 -- Ограничения сессии
+### Сценарий 3 -- Вопрос вне scope протокола
 
-При достижении 50 сообщений в сессии пользователь видит "Session limit reached. Refresh to start a new session." При rate limit (10 req/min) -- "Too many requests. Please wait a moment." При ошибке сервера -- автоматический retry (2-3 попытки), затем "Service temporarily unavailable. Try again later."
+Пользователь спрашивает "What is the weather today?" -- чатбот отвечает "I can only answer questions about the Mnemonic Protocol. Try asking about attestations, recall, or how the protocol works."
+
+### Сценарий 4 -- Ограничения сессии
+
+При достижении 50 сообщений в сессии (счётчик на стороне клиента) пользователь видит "Session limit reached. Start a new session to continue." При rate limit (10 req/min) -- "Rate limit exceeded. Wait before sending another request." При ошибке сервера -- автоматический retry (2-3 попытки), затем "Service temporarily unavailable. Try again later."
 
 ## Критерии приёмки
 
@@ -49,9 +53,12 @@ React webapp с бэкендом на MCP-сервере. Протокольны
 - [ ] `.zip` содержит `.json` файл с теми же метаданными в структурированном формате
 - [ ] Предзагрузка знаний: при первом запуске сервера whitepaper разбивается на секции и сохраняется через `sign_memory`; при повторном запуске -- пропускается (проверка `attestation_count > 0`)
 - [ ] Rate limit: 11-й запрос в минуту с одного IP возвращает HTTP 429 с сообщением
-- [ ] Session limit: после 50 сообщений UI показывает уведомление и блокирует ввод
+- [ ] Session limit: после 50 сообщений UI показывает уведомление и блокирует ввод (client-side counter)
 - [ ] При недоступности Ollama -- после 2-3 retry отображается "Service temporarily unavailable"
-- [ ] `POST /chat` endpoint на MCP-сервере принимает `{"message": "...", "session_id": "..."}` и возвращает `{"response": "..."}`
+- [ ] При вопросе вне scope протокола -- чатбот отвечает что может отвечать только о Mnemonic Protocol
+- [ ] Первый ответ после холодного старта контейнера -- в течение 90 секунд (Ollama warm-up)
+- [ ] `POST /chat` endpoint на MCP-сервере принимает `{"message": "...", "session_id": "..."}` (max 2000 chars) и возвращает `{"response": "..."}`
+- [ ] Сообщение длиннее 2000 символов возвращает HTTP 400
 - [ ] `docker compose up` на сервере с 6 vCPU / 12GB RAM поднимает nginx + MCP + Ollama
 - [ ] Playwright E2E: открыть сайт → нажать "Start chat" → отправить вопрос → получить ответ → скачать artifact
 
@@ -59,7 +66,8 @@ React webapp с бэкендом на MCP-сервере. Протокольны
 
 - **Без подписания пользователем.** Keypair, client-side signing, COSE_Sign1 в браузере -- deferred. Артефакты подписаны серверным keypair.
 - **Без аутентификации.** Open access, нет логина/регистрации.
-- **Без истории сессий.** Обновление страницы = новая сессия. Нет persist между визитами.
+- **Без истории сессий.** Обновление страницы = новая сессия. Нет persist между визитами. Session limit (50 сообщений) считается client-side.
+- **Hosted MCP server.** Это архитектурный pivot: MCP-сервер развёрнут на VPS как shared сервис (не локальный бинарник у каждого пользователя). Все пользователи разделяют серверный keypair и SQLite store. Это допустимо для MVP с read-only протокольными знаниями.
 - **Один shared knowledge store.** Все пользователи видят одни и те же предзагруженные знания.
 - **Только протокольные знания.** Чатбот не отвечает на вопросы вне контекста Mnemonic Protocol.
 - **Research agent** -- отдельная фича, вне scope.
@@ -77,19 +85,22 @@ React webapp с бэкендом на MCP-сервере. Протокольны
 - **Backend:** Существующий MCP-сервер + новый `POST /chat` endpoint. Endpoint flow: recall top-3 chunks → build prompt (system instruction + context + user message) → POST to Ollama `/api/generate` → stream/return response.
 - **RAG seeding:** Startup скрипт разбивает `docs/WHITEPAPER.md` по `##` секциям. Каждая секция -- отдельный вызов `sign_memory` с тегом `["protocol-knowledge", "whitepaper"]`. Пропускается если `attestation_count > 0`.
 - **LLM:** Ollama + `qwen2.5:3b` model. System prompt: "You are an expert on the Mnemonic Protocol. Answer questions ONLY based on the provided context. If the context does not contain the answer, say so."
-- **Artifact download:** `/download-knowledge` endpoint собирает все аттестации с тегом `protocol-knowledge`, генерирует Markdown (YAML frontmatter + content) и JSON sidecar, возвращает `.zip`.
-- **Deploy:** Docker Compose с тремя сервисами: `nginx` (static React + reverse proxy), `mcp` (MCP-сервер), `ollama` (Qwen2.5-3B). Один сервер justhost.asia, 6+ vCPU, 12GB+ RAM.
+- **Artifact download:** При RAG seeding скрипт генерирует `mnemonic-protocol-knowledge.md` (Markdown с YAML frontmatter) и `mnemonic-protocol-knowledge.json` (метаданные), упаковывает в `.zip` и сохраняет на диск. `GET /download-knowledge` отдаёт предсобранный файл. Не требует runtime-запросов в SQLite.
+- **Rate limiting:** `governor` + `tower_governor` crate в `mcp/Cargo.toml`. Применяется только к `/chat` route. Существующий `/mcp` endpoint не rate-limited (у него есть payment gating).
+- **ZIP generation:** `zip` crate в `mcp/Cargo.toml` для генерации artifact при seeding.
+- **Input validation:** `/chat` handler отклоняет сообщения > 2000 chars с HTTP 400.
+- **Deploy:** Docker Compose с тремя сервисами: `nginx` (static React + reverse proxy), `mcp` (MCP-сервер), `ollama` (Qwen2.5-3B). Один сервер justhost.asia, 6+ vCPU, 12GB+ RAM. Keypair монтируется как read-only volume, не коммитится в репо.
 
 ## Тестирование
 
-**Unit-тесты:** `/chat` endpoint (mock Ollama, mock recall), artifact generation (проверка структуры .md и .json), rate limiter, session counter.
+**Unit-тесты:** `/chat` endpoint (mock Ollama, mock recall), artifact generation (проверка структуры .md и .json), rate limiter (injectable counter, не timing-dependent), message length validation.
 
-**Интеграционные тесты:** Полный RAG pipeline -- реальный recall с предзагруженными знаниями → формирование prompt → вызов Ollama → проверка что ответ содержит релевантную информацию.
+**Интеграционные тесты:** Полный RAG pipeline -- реальный recall с предзагруженными знаниями → формирование prompt → вызов Ollama → проверка что ответ содержит релевантную информацию. Rate limit: curl-based (11 запросов → 429).
 
 **E2E тесты (Playwright):** 
 - Golden path: открыть → chat → получить ответ → скачать artifact
-- Rate limit: отправить 11 запросов за минуту → увидеть ошибку
-- Session limit: отправить 50 сообщений → увидеть уведомление
+- Out-of-scope question: задать нерелевантный вопрос → получить отказ
+- Session limit: отправить 50 сообщений → увидеть уведомление (client-side)
 - Error state: остановить Ollama → отправить запрос → увидеть error message
 
 ## Как проверить

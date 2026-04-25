@@ -21,7 +21,7 @@ Technical architecture overview for AI agents. Helps agents understand HOW the s
 **`webapp/` — Demo web app (TypeScript + React)**
 - Bundler: Vite
 - UI: React + Tailwind CSS
-- Local model: Ollama API (Qwen2.5-7B-Instruct)
+- Local model: Ollama API (Qwen2.5-3B)
 - Core logic: WASM build of `core/` (no backend needed)
 - Deploy: Cloudflare Pages (static)
 
