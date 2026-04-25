@@ -32,6 +32,18 @@ Created `webapp/src/components/ChatPage.tsx` and `webapp/src/lib/api.ts`.
 
 **Vite proxy**: Added `/chat` proxy rule alongside existing `/api` rule so dev server forwards chat requests to `http://localhost:3000`. Fetch URL uses `/chat` to match the backend route directly (no `/api` prefix).
 
+## Task 7: Docker Compose + nginx config + Ollama model
+
+Created three-service Docker Compose setup for single-server deployment:
+
+1. **docker-compose.yml**: Three services (nginx, mcp, ollama) on a shared `mnemonic` bridge network. nginx serves static React build from `webapp/dist/` and reverse-proxies to MCP. MCP service uses the existing root `Dockerfile` with env vars for Ollama URL (`http://ollama:11434`), model, and RAG config. Ollama service uses a custom `ollama/Dockerfile`. Keypair mounted as read-only volume at `/run/secrets/keypair` (host directory `./keypair` must have 400 permissions). Service dependency chain: ollama (healthy) -> mcp (healthy) -> nginx. MCP healthcheck uses bash `/dev/tcp` probe (no curl in slim Debian image). Removed deprecated `version` field per Compose V2 spec.
+
+2. **nginx.conf**: Proxies only `/mcp`, `/chat`, `/download-knowledge`, `/health` to MCP backend (Decision 13: `/admin/stats` and all `/admin` paths return 403). Security hardening: `server_tokens off`, `X-Frame-Options SAMEORIGIN`, `X-Content-Type-Options nosniff`, `client_max_body_size 64k`. Chat endpoint gets 60s proxy_read_timeout (LLM inference can take 5-15s). SPA fallback via `try_files $uri $uri/ /index.html`. ACME challenge location for certbot (Decision 12). HTTPS server block is commented out as a template for post-certbot activation.
+
+3. **ollama/Dockerfile**: Multi-stage build -- first stage starts ollama server and pulls `qwen2.5:3b` at build time (Decision 11), second stage copies model data and installs curl for healthchecks. Custom `entrypoint.sh` starts ollama, waits for readiness, issues a warm-up inference (`num_predict:1`) to load the model into memory, then `wait`s on the server PID.
+
+Rate limiting is not duplicated at the nginx level -- the MCP server's governor-based per-IP limiter (10 req/min on `/chat`) is the single source of truth for rate limiting (per Task 3 decisions).
+
 ## Task 2: RAG seeding -- whitepaper chunking + sign_memory + artifact generation
 
 Created `mcp/src/seed.rs` implementing the startup seeding routine: parses `docs/WHITEPAPER.md` at `## ` headers (with h3 sub-splitting for sections exceeding ~500 tokens), calls `sign_memory()` per chunk with tags `["protocol-knowledge", "whitepaper"]`, and generates a `.zip` artifact containing `knowledge.md` (YAML frontmatter with content_hash/signer_pubkey/timestamp per chunk) and `knowledge.json` sidecar. Added `zip` crate to `mcp/Cargo.toml`. Seeder is called from `main.rs` after McpState init; skips if `store.count() > 0` (idempotent). The canonical `.zip` path is stored in a new `McpState.artifact_zip_path` field for the future `/download-knowledge` handler. Key fix during review: the h2 parser incorrectly matched `### ` lines (since they start with `## `) -- fixed with explicit exclusion and regression test. 13 unit tests cover parsing, splitting, and artifact generation.
