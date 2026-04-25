@@ -1,0 +1,96 @@
+{
+  "reviewer": "test-reviewer",
+  "round": 2,
+  "task": "11",
+  "verdict": "passed",
+  "status": "passed",
+  "summary": "The 6 new tests are well-designed and directly address the two round-1 major findings on financial logic. The concurrent tests use the correct ingredients (file-backed DB, separate connections, Barrier synchronization) and carry assertions strong enough to catch regressions. The three-function set (deduct, credit, refund) now has deterministic coverage of all safety-critical paths. The deferred items (remaining helpers, MCP stdio smoke, cold-init timing) are reasonable scoping decisions for a rewiring task: the financial-safety-critical paths are now covered and the deferred debt is tracked explicitly in decisions.md.",
+  "findings": [
+    {
+      "severity": "minor",
+      "category": "missing_coverage",
+      "location": "mcp/src/payment.rs — deduct_balance_concurrent_cannot_overdraw",
+      "issue": "The concurrent overdraft test uses `ok_count == 1` to assert exactly one deduct succeeds and `final_bal == 25` to verify no double-deduct. However, both threads open independent SqliteStore handles to the same file. SQLite WAL-mode or journal-mode differences could cause one thread to receive `SQLITE_BUSY` (returned as a rusqlite Err) rather than the 'insufficient balance' error. In that scenario ok_count == 0 and the assertion fails spuriously on a slow CI runner. The test is mostly deterministic because SQLite serializes writers, but busy-timeout behaviour (default 0ms) can cause false failures under I/O contention. This is a minor flakiness risk, not a logic gap — the core assertion (final_bal == 25, never negative) is sound.",
+      "recommendation": "Add `PRAGMA busy_timeout = 5000;` immediately after each `SqliteStore::open` call inside the thread closures, or configure it via `SqliteStore::open` if the API supports it. This eliminates SQLITE_BUSY false failures without changing the race semantics. Alternatively, accept-and-document: if either thread returns an Err, assert that the error message is either 'insufficient balance' OR contains 'database is locked', then re-check the balance."
+    },
+    {
+      "severity": "minor",
+      "category": "missing_coverage",
+      "location": "mcp/src/payment.rs — entire #[cfg(test)] module",
+      "issue": "The test module has no coverage for create_api_key (key format/prefix), mark_x402_nonce (replay protection), get_pnl_stats (arithmetic), record_attestation_cost, or the check_balance/check_payment payment-gating logic. These were flagged as round-1 minor items and are explicitly deferred in decisions.md with team-lead approval. Calling them out for completeness — they remain open debt.",
+      "recommendation": "Track as follow-up: add tests for mark_x402_nonce (first call Ok, second Err), get_pnl_stats (zero-row returns margin 0.0, seeded row returns correct arithmetic), and create_api_key (result starts with 'mnm_', length correct, row persisted). These are all synchronous SQLite operations on a fresh_store() — no network or async required."
+    },
+    {
+      "severity": "minor",
+      "category": "missing_coverage",
+      "location": "MCP stdio round-trip — still no automated test",
+      "issue": "The round-1 major finding on MCP stdio round-trip automation remains deferred. This is explicitly approved in decisions.md. Not escalated to major because the financial-safety code (the higher-priority gap) is now covered.",
+      "recommendation": "Follow-up task: add mcp/tests/smoke_rpc.rs that spawns the binary via std::process::Command, sends tools/list JSON-RPC to stdin, and asserts exactly 5 tool names in the response. Gate with #[ignore] for CI speed."
+    }
+  ],
+  "roundOneResolution": {
+    "major_payment_tests": {
+      "status": "resolved",
+      "detail": "Round-1 major finding (zero tests for payment.rs DB functions) is substantially resolved. The three financial-safety-critical functions — deduct_balance, credit_deposit, refund_balance — now have 6 tests covering: normal success paths, insufficient-funds path, unknown-key path, sequential idempotency, concurrent double-credit prevention (UNIQUE constraint + BEGIN IMMEDIATE), concurrent overdraft prevention (atomic conditional UPDATE), and duplicate-refund allowance (tx_sig=NULL partial index exemption). Litmus test now passes for all 3 functions."
+    },
+    "major_mcp_smoke": {
+      "status": "deferred",
+      "detail": "MCP stdio round-trip smoke test was not added. Deferred with explicit team-lead approval in decisions.md. Downgraded from major to minor given that the higher-priority financial code is now covered."
+    },
+    "minor_cold_init": {
+      "status": "deferred",
+      "detail": "Cold-init timing regression guard deferred. No change from round 1. Remains minor."
+    },
+    "minor_check_balance_logic": {
+      "status": "deferred",
+      "detail": "check_balance/check_x402/check_payment gating logic still has no unit tests. Deferred. Remains minor."
+    }
+  },
+  "concurrentTestAnalysis": {
+    "credit_deposit_concurrent_same_tx_sig_applies_once": {
+      "raceIngredients": "correct — file-backed DB (not in-memory), two separate SqliteStore::open calls creating independent connections, Barrier::wait() synchronizes thread entry, BEGIN IMMEDIATE in credit_deposit serializes at DB level",
+      "determinism": "high — UNIQUE index violation is deterministic regardless of thread ordering; one thread wins the IMMEDIATE lock and commits, the other receives ConstraintViolation on rollback",
+      "assertionStrength": "strong — asserts exactly 1 success AND exactly 1 failure AND error message contains 'deposit tx already applied' AND balance equals exactly one amount (not two) AND payment_events has exactly 1 deposit row for the tx_sig",
+      "flakiness": "low — the only non-determinism is which thread wins the lock (r1 or r2), but the outcome counts are invariant regardless"
+    },
+    "deduct_balance_concurrent_cannot_overdraw": {
+      "raceIngredients": "correct — file-backed DB, two independent connections, Barrier synchronizes entry; deduct_balance uses single conditional UPDATE (no BEGIN IMMEDIATE needed for atomic read+write since SQLite serializes writers at statement level)",
+      "determinism": "high — the conditional UPDATE WHERE balance >= amount atomically checks and deducts; second thread sees updated balance and fails the WHERE clause",
+      "assertionStrength": "good — asserts ok_count == 1 (exactly one deduct succeeds) AND final_bal == 25 (balance is 100 - 75, never negative). The exact-balance assertion is the critical regression guard",
+      "flakiness": "low-to-medium — slight risk if SqliteStore busy_timeout is 0ms and one thread gets SQLITE_BUSY before executing the UPDATE, producing ok_count == 0 and a spurious failure. In practice SQLite WAL serializes write-lock acquisition, but CI I/O pressure could trigger this"
+    }
+  },
+  "newFunctionCoverage": {
+    "refund_balance": "covered by refund_balance_allows_duplicate_reasons (success + duplicate-reason both apply + event rows counted)",
+    "credit_deposit": "covered by credit_deposit_concurrent_same_tx_sig_applies_once (concurrent idempotency) + credit_deposit_sequential_duplicate_is_rejected (sequential idempotency) + balance-verification in both",
+    "deduct_balance": "covered by deduct_balance_concurrent_cannot_overdraw (overdraft prevention) + deduct_balance_insufficient_leaves_balance_unchanged (error path + balance unchanged) + deduct_balance_unknown_key_reports_not_found (missing key path)",
+    "get_balance": "indirectly exercised as setup/verification in every test but has no dedicated test",
+    "create_api_key": "indirectly exercised as setup in every test but key format/persistence not directly asserted",
+    "mark_x402_nonce": "not covered — deferred",
+    "get_pnl_stats": "not covered — deferred",
+    "record_attestation_cost": "not covered — deferred",
+    "check_balance_check_x402_check_payment": "not covered — deferred"
+  },
+  "deferralReasonableness": {
+    "assessment": "reasonable",
+    "detail": "Task 11 scope is 'db.rs -> payment.rs rewiring + verification'. The three functions with live-money safety properties (deduct, credit, refund) are now tested. The remaining helpers (mark_x402_nonce, get_pnl_stats, record_attestation_cost) have simpler logic and lower real-money-at-risk severity. The MCP smoke test and cold-init guard are infrastructure concerns that belong in a dedicated test-coverage task. The deferral is explicitly documented in decisions.md with specific follow-up items listed — this is the correct practice.",
+    "escalate": "None — no deferred item is severe enough to re-block the task. The most important follow-up (mark_x402_nonce replay protection) should be prioritized in the next test-coverage task since it guards against x402 payment replay."
+  },
+  "metrics": {
+    "filesReviewed": 3,
+    "litmusTest": {
+      "checked": 6,
+      "passed": 6,
+      "failed": 0,
+      "note": "All 6 new tests fail the litmus test in the intended direction: removing deduct_balance causes 3 tests to fail, removing credit_deposit causes 2 tests to fail, removing refund_balance causes 1 test to fail. Each test is tied to specific behavior that would regress without the implementation."
+    },
+    "coverageAssessment": "adequate",
+    "pyramidBalance": {
+      "unit": 81,
+      "integration": 8,
+      "e2e": 0,
+      "assessment": "healthy",
+      "note": "89 total tests (83 mnemonic-core + 6 new mnemonic-mcp). The 6 new tests are unit/integration hybrids (real SQLite, no network) — appropriate for DB logic. The pyramid remains unit-heavy, which is correct for this codebase type. E2E gap is acceptable given no user-facing UI."
+    }
+  }
+}

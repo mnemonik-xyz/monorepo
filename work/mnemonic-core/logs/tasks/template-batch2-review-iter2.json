@@ -1,0 +1,110 @@
+{
+  "validator": "task-validator",
+  "batch": "2-iter2",
+  "iteration": 2,
+  "tasks": {
+    "6": {
+      "status": "needs_fix",
+      "findings": [
+        {
+          "severity": "minor",
+          "category": "content",
+          "task": 6,
+          "section": "Required Skills",
+          "issue": "Skill path still uses absolute path /home/claude/.claude/skills/code-writing/SKILL.md — NOT FIXED from iter-1. Template requires tilde-relative path.",
+          "fix": "Change to: `/skill:code-writing` — [SKILL.md](~/.claude/skills/code-writing/SKILL.md)"
+        },
+        {
+          "severity": "minor",
+          "category": "content",
+          "task": 6,
+          "section": "Reviewers",
+          "issue": "Reviewer report paths still use absolute filesystem paths (/home/claude/.openclaw/...) — NOT FIXED from iter-1. Template specifies project-root-anchored paths.",
+          "fix": "Replace with: work/mnemonic-core/logs/working/task-6/code-reviewer-1.json (and similarly for security-auditor and test-reviewer)"
+        }
+      ],
+      "fixes_verified": [
+        "get_balance added to payment-methods grep in Description and Acceptance Criteria",
+        "mcp/src/mcp.rs added to Code files to modify in Context Files",
+        "Lineage types timing note (Options A/B + TODO comment) added to Details"
+      ]
+    },
+    "7": {
+      "status": "needs_fix",
+      "findings": [
+        {
+          "severity": "minor",
+          "category": "content",
+          "task": 7,
+          "section": "Verification Steps",
+          "issue": "cargo build -p mnemonic-mcp still absent from Automated section — NOT FIXED from iter-1. AC explicitly checks this compilation and What to do step 9 mentions it.",
+          "fix": "Add to Automated: `cargo build -p mnemonic-mcp` — compiles successfully after import updates"
+        },
+        {
+          "severity": "minor",
+          "category": "content",
+          "task": 7,
+          "section": "Reviewers",
+          "issue": "Reviewer report paths still use absolute filesystem paths — NOT FIXED from iter-1.",
+          "fix": "Replace with: work/mnemonic-core/logs/working/task-7/code-reviewer-1.json (and similarly for security-auditor and test-reviewer)"
+        }
+      ],
+      "fixes_verified": [
+        "health_check mock correctly described as GET /info (not GET /)",
+        "read() mock correctly described as GET /{tx_id} with no /tx/ prefix or /data suffix",
+        "is_local() bypass handled via new_for_test constructor with force_irys field — present in What to do step 4, TDD Anchor, and Details"
+      ]
+    },
+    "8": {
+      "status": "needs_fix",
+      "findings": [
+        {
+          "severity": "minor",
+          "category": "content",
+          "task": 8,
+          "section": "Reviewers",
+          "issue": "Reviewer report paths still use absolute filesystem paths — NOT FIXED from iter-1.",
+          "fix": "Replace with: work/mnemonic-core/logs/working/task-8/code-reviewer-1.json (and similarly for security-auditor and test-reviewer)"
+        }
+      ],
+      "fixes_verified": [
+        "TDD Anchor now lists exactly 8 tests matching the Acceptance Criteria count: test_write_memo_success, test_read_memo_success, test_read_memo_not_found, test_airdrop_success, test_get_tx_signers, test_confirm_tx_retry_exhaustion, test_health_check_ok, test_rpc_error_handling",
+        "Retry loop tokio time pause hint present in Details: #[tokio::test(flavor = \"current_thread\", start_paused = true)] with tokio::time::pause() explanation"
+      ]
+    },
+    "9": {
+      "status": "needs_fix",
+      "findings": [
+        {
+          "severity": "minor",
+          "category": "content",
+          "task": 9,
+          "section": "Verification Steps",
+          "issue": "cargo clippy -p mnemonic-core -- -D warnings still only appears in Smoke section, not in Automated — NOT FIXED from iter-1. Clippy is static analysis requiring no deployment and belongs in Automated.",
+          "fix": "Add `cargo clippy -p mnemonic-core -- -D warnings` — zero warnings to the Automated section (alongside the existing cargo test and cargo build lines)"
+        },
+        {
+          "severity": "minor",
+          "category": "content",
+          "task": 9,
+          "section": "Reviewers",
+          "issue": "Reviewer report paths still use absolute filesystem paths — NOT FIXED from iter-1.",
+          "fix": "Replace with: work/mnemonic-core/logs/working/task-9/code-reviewer-1.json (and similarly for security-auditor and test-reviewer)"
+        }
+      ],
+      "fixes_verified": [
+        "Target file correctly references mcp/src/main.rs (not tools.rs) for mod lineage update in What to do step 6 and Details",
+        "Direction enum correctly defined with 3 variants: Ancestors, Descendants, Both (matching TDD Anchor test_traverse_direction_enum and Acceptance Criteria)",
+        "rusqlite version correctly set to 0.34 in Details Cargo.toml block"
+      ]
+    }
+  },
+  "summary": "0 approved, 4 need fixes. All findings are minor — no critical or major issues. The new content fixes requested in iter-2 briefing were all applied correctly (get_balance, mcp.rs context, lineage timing note, health_check path, read path, is_local bypass, 8-test count, tokio pause hint, main.rs target, Direction 3 variants, rusqlite 0.34). However, the four minor findings from iter-1 were not addressed: reviewer paths remain as absolute /home/claude/... paths in all four tasks, Required Skills path in task 6 remains absolute, cargo build missing from task 7 Automated, and cargo clippy remains in Smoke only in task 9.",
+  "stats": {
+    "tasks_checked": 4,
+    "issues_found": 7,
+    "critical": 0,
+    "major": 0,
+    "minor": 7
+  }
+}

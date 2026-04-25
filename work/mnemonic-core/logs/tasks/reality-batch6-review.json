@@ -1,0 +1,50 @@
+{
+  "validator": "reality-checker",
+  "batch": 6,
+  "iteration": 1,
+  "tasks": {
+    "16": {
+      "status": "approved",
+      "findings": [
+        {
+          "severity": "minor",
+          "category": "feasibility",
+          "task": 16,
+          "issue": "grep checks against core/src/ and mcp/src/ (steps 5, 6 in Verification Steps) will produce an error or empty output if the directories do not exist at QA time rather than returning the expected \"empty\" result. If tasks 1-15 failed to create these directories, the grep will silently pass (no output = 0 exit code) rather than flagging missing content. Task does not guard against this scenario.",
+          "fix": "Add a pre-condition check that core/src/ and mcp/src/ exist and are non-empty before running grep checks. A simple `test -d core/src/` with a clear failure message would prevent false-green grep results on empty directories."
+        },
+        {
+          "severity": "minor",
+          "category": "missing_function",
+          "task": 16,
+          "issue": "Task AC checklist (lines 41-53) omits two tech-spec acceptance criteria that are present in the 'Tech-spec acceptance criteria to verify' block in Details (lines 155-174): (a) `pricing.rs` unchanged in mcp/src/ — no grep/check planned; (b) All SQL in core/src/storage/ uses rusqlite parameterized queries — no verification step defined. Both are in tech-spec Acceptance Criteria section but absent from the formal AC checklist and Verification Steps blocks.",
+          "fix": "Add to AC checklist and Verification Steps: `grep -r 'pricing' mcp/src/ | grep -v 'mnemonic_core'` to confirm pricing.rs stays in mcp/, and a manual read of core/src/storage/sqlite.rs to confirm all SQL uses `?` placeholder syntax (parameterized queries)."
+        },
+        {
+          "severity": "minor",
+          "category": "feasibility",
+          "task": 16,
+          "issue": "AC item 'cargo test -p mnemonic-core succeeds independently without building mnemonic-mcp (standalone usability)' and the corresponding verification step (step 8 in Details) are identical to AC item 2 ('cargo test -p mnemonic-core — all tests green including httpmock tests'). Running `cargo test -p mnemonic-core` does not build mnemonic-mcp as a side effect in a Cargo workspace — the -p flag scopes the build. The verification note 'confirm it does NOT trigger a build of mnemonic-mcp' is correct in intent but there is no concrete mechanism to verify this (e.g., checking build output for mnemonic-mcp compilation). The task could be clearer on what 'independently usable' means in a practical verification sense.",
+          "fix": "Clarify the standalone check: run `cargo test -p mnemonic-core` and verify the output does NOT contain 'Compiling mnemonic-mcp'. This makes the check concrete and distinguishable from the regular test run."
+        },
+        {
+          "severity": "minor",
+          "category": "feasibility",
+          "task": 16,
+          "issue": "The `grep -E \"codec/|lineage/\" .claude/skills/project-knowledge/references/architecture.md` check (step 7 in Verification Steps) is a path-dependent command. It uses a relative path that only works if the QA agent runs from the workspace root `/home/claude/.openclaw/workspace/mnemonic-refactored`. The task does not specify the working directory for bash commands. The current architecture.md also references 'attest/' (not 'codec/') and does not list lineage/ as a module — so this check will fail against the current pre-implementation state, which is expected. However, task 12 (documentation update) must complete before this check can pass.",
+          "fix": "No structural fix needed — dependency on task 12 is implicitly covered by depends_on: [13, 14, 15] → task 12 must be done before audits. Minor: add absolute path or a note that commands run from workspace root."
+        }
+      ]
+    }
+  },
+  "stats": {
+    "tasks_checked": 1,
+    "claims_verified": 31,
+    "issues_found": 4,
+    "critical": 0,
+    "major": 0,
+    "minor": 4
+  },
+  "status": "approved",
+  "summary": "1 approved, 0 need fixes. Task 16 is well-structured and comprehensive. All verification commands are real, all referenced paths exist or are expected to exist post-implementation, all acceptance criteria from both specs are covered in the Details section. Four minor findings: (1) grep on potentially missing directories may produce false-green results; (2) two tech-spec AC items (pricing.rs unchanged, parameterized SQL) are missing from the formal AC checklist; (3) standalone usability check is indistinguishable from the regular test run without a build-output check; (4) grep command uses relative path requiring workspace root CWD. No critical or major issues."
+}

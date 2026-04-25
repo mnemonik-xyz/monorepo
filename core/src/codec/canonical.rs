@@ -17,7 +17,8 @@ use super::schema::ArtifactSchema;
 /// This function is **pure and deterministic** -- calling it N times on the same
 /// input always produces identical bytes.
 pub fn to_canonical_cbor(artifact: &JsonValue, schema: &ArtifactSchema) -> Result<Vec<u8>, String> {
-    let obj = artifact.as_object()
+    let obj = artifact
+        .as_object()
         .ok_or_else(|| "artifact must be a JSON object".to_string())?;
 
     // Build CBOR map with fields in schema-defined order.
@@ -45,8 +46,8 @@ pub fn to_canonical_cbor(artifact: &JsonValue, schema: &ArtifactSchema) -> Resul
 
 /// Deserialize canonical CBOR bytes back to a JSON value.
 pub fn from_canonical_cbor(bytes: &[u8]) -> Result<JsonValue, String> {
-    let cbor: CborValue = ciborium::from_reader(bytes)
-        .map_err(|e| format!("CBOR deserialization failed: {e}"))?;
+    let cbor: CborValue =
+        ciborium::from_reader(bytes).map_err(|e| format!("CBOR deserialization failed: {e}"))?;
 
     Ok(cbor_to_json(&cbor))
 }
@@ -74,18 +75,25 @@ fn json_to_cbor(json: &JsonValue) -> CborValue {
                 CborValue::Text(s.clone())
             }
         }
-        JsonValue::Array(arr) => {
-            CborValue::Array(arr.iter().map(json_to_cbor).collect())
-        }
+        JsonValue::Array(arr) => CborValue::Array(arr.iter().map(json_to_cbor).collect()),
         JsonValue::Object(obj) => {
             // For nested objects: use sorted keys (deterministic CBOR)
-            let mut entries: Vec<(CborValue, CborValue)> = obj.iter()
+            let mut entries: Vec<(CborValue, CborValue)> = obj
+                .iter()
                 .map(|(k, v)| (CborValue::Text(k.clone()), json_to_cbor(v)))
                 .collect();
             entries.sort_by(|a, b| {
                 // Sort by key text (canonical CBOR requires sorted map keys)
-                let ka = if let CborValue::Text(s) = &a.0 { s.as_str() } else { "" };
-                let kb = if let CborValue::Text(s) = &b.0 { s.as_str() } else { "" };
+                let ka = if let CborValue::Text(s) = &a.0 {
+                    s.as_str()
+                } else {
+                    ""
+                };
+                let kb = if let CborValue::Text(s) = &b.0 {
+                    s.as_str()
+                } else {
+                    ""
+                };
                 ka.cmp(kb)
             });
             CborValue::Map(entries)
@@ -106,20 +114,15 @@ fn cbor_to_json(cbor: &CborValue) -> JsonValue {
                 JsonValue::String(n.to_string())
             }
         }
-        CborValue::Float(f) => {
-            serde_json::Number::from_f64(*f)
-                .map(JsonValue::Number)
-                .unwrap_or(JsonValue::Null)
-        }
+        CborValue::Float(f) => serde_json::Number::from_f64(*f)
+            .map(JsonValue::Number)
+            .unwrap_or(JsonValue::Null),
         CborValue::Text(s) => JsonValue::String(s.clone()),
-        CborValue::Bytes(b) => {
-            JsonValue::String(base64::Engine::encode(
-                &base64::engine::general_purpose::STANDARD, b,
-            ))
-        }
-        CborValue::Array(arr) => {
-            JsonValue::Array(arr.iter().map(cbor_to_json).collect())
-        }
+        CborValue::Bytes(b) => JsonValue::String(base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            b,
+        )),
+        CborValue::Array(arr) => JsonValue::Array(arr.iter().map(cbor_to_json).collect()),
         CborValue::Map(entries) => {
             let mut obj = serde_json::Map::new();
             for (k, v) in entries {
@@ -191,7 +194,10 @@ mod tests {
         // Check key fields survived the round-trip
         assert_eq!(recovered["artifact_id"], "art:01JTEST");
         assert_eq!(recovered["type"], "rag.context");
-        assert_eq!(recovered["content"], "The quick brown fox jumps over the lazy dog");
+        assert_eq!(
+            recovered["content"],
+            "The quick brown fox jumps over the lazy dog"
+        );
         assert_eq!(recovered["schema_version"], 1);
     }
 
@@ -202,12 +208,21 @@ mod tests {
         let cbor: CborValue = ciborium::from_reader(&cbor_bytes[..]).unwrap();
 
         if let CborValue::Map(entries) = cbor {
-            let keys: Vec<&str> = entries.iter()
-                .filter_map(|(k, _)| if let CborValue::Text(s) = k { Some(s.as_str()) } else { None })
+            let keys: Vec<&str> = entries
+                .iter()
+                .filter_map(|(k, _)| {
+                    if let CborValue::Text(s) = k {
+                        Some(s.as_str())
+                    } else {
+                        None
+                    }
+                })
                 .collect();
 
             // Verify ordering matches schema (for present fields only)
-            let expected: Vec<&str> = RAG_CONTEXT_V1.cbor_field_order.iter()
+            let expected: Vec<&str> = RAG_CONTEXT_V1
+                .cbor_field_order
+                .iter()
                 .copied()
                 .filter(|f| keys.contains(f))
                 .collect();
@@ -260,7 +275,8 @@ mod tests {
         let cbor: CborValue = ciborium::from_reader(&cbor_bytes[..]).unwrap();
 
         if let CborValue::Map(entries) = cbor {
-            let created_at = entries.iter()
+            let created_at = entries
+                .iter()
                 .find(|(k, _)| matches!(k, CborValue::Text(s) if s == "created_at"))
                 .map(|(_, v)| v);
             assert!(

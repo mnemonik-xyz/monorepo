@@ -235,16 +235,7 @@ fn build_data_item(keypair: &Keypair, data: &[u8], tags: &[(&str, &str)]) -> Vec
     let pubkey = keypair.pubkey().to_bytes();
     let avro_tags = avro_encode_tags(tags);
 
-    let msg = deep_hash_list(&[
-        b"dataitem",
-        b"1",
-        b"3",
-        &pubkey,
-        b"",
-        b"",
-        &avro_tags,
-        data,
-    ]);
+    let msg = deep_hash_list(&[b"dataitem", b"1", b"3", &pubkey, b"", b"", &avro_tags, data]);
 
     let sig = keypair.sign_message(&msg);
 

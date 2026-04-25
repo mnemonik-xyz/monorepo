@@ -120,8 +120,15 @@ pub async fn sign_memory(
     {
         let store = store.lock().unwrap();
         store.save_attestation(
-            &attestation_id, content, &content_hash, tags,
-            &solana_tx, &arweave_tx, &pubkey, &now, &embedding,
+            &attestation_id,
+            content,
+            &content_hash,
+            tags,
+            &solana_tx,
+            &arweave_tx,
+            &pubkey,
+            &now,
+            &embedding,
         )?;
         if storage_mode != "local" {
             let _ = payment::record_attestation_cost(
@@ -181,7 +188,9 @@ pub async fn verify(
 
     // Full mode
     if solana_tx.is_none() && arweave_tx.is_none() {
-        return Ok(serde_json::json!({"status": "error", "message": "Provide solana_tx or arweave_tx"}));
+        return Ok(
+            serde_json::json!({"status": "error", "message": "Provide solana_tx or arweave_tx"}),
+        );
     }
 
     let mut expected_hash: Option<String> = None;
@@ -197,14 +206,18 @@ pub async fn verify(
                 }
                 anchor_version = memo["v"].as_u64().unwrap_or(1);
             }
-            None => return Ok(serde_json::json!({"status": "anchor_not_found", "solana_tx": sol_tx})),
+            None => {
+                return Ok(serde_json::json!({"status": "anchor_not_found", "solana_tx": sol_tx}))
+            }
         }
     }
 
     let ar_tx_id = ar_tx.as_deref().unwrap_or("");
     let raw_bytes = match arweave.read(ar_tx_id).await {
         Ok(b) => b,
-        Err(_) => return Ok(serde_json::json!({"status": "arweave_not_found", "arweave_tx": ar_tx_id})),
+        Err(_) => {
+            return Ok(serde_json::json!({"status": "arweave_not_found", "arweave_tx": ar_tx_id}))
+        }
     };
 
     // Detect artifact format:
@@ -241,7 +254,11 @@ fn verify_cose(
     // Try to recover content preview from the CBOR payload
     let content_preview = from_canonical_cbor(&result.payload)
         .ok()
-        .and_then(|json| json["content"].as_str().map(|s| s[..s.len().min(200)].to_string()))
+        .and_then(|json| {
+            json["content"]
+                .as_str()
+                .map(|s| s[..s.len().min(200)].to_string())
+        })
         .unwrap_or_default();
 
     Ok(serde_json::json!({
@@ -268,7 +285,7 @@ fn verify_legacy_json(
     solana_tx: Option<&str>,
     arweave_tx: &str,
 ) -> anyhow::Result<serde_json::Value> {
-    use sha2::{Sha256, Digest};
+    use sha2::{Digest, Sha256};
 
     let payload: serde_json::Value = serde_json::from_slice(raw_bytes).unwrap_or_default();
     let content = payload["content"].as_str().unwrap_or("");
@@ -304,7 +321,8 @@ fn verify_local(
     solana_tx: Option<&str>,
     arweave_tx: Option<&str>,
 ) -> anyhow::Result<serde_json::Value> {
-    let lookup_id = solana_tx.or(arweave_tx)
+    let lookup_id = solana_tx
+        .or(arweave_tx)
         .ok_or_else(|| anyhow::anyhow!("provide solana_tx or arweave_tx"))?;
 
     let store = store.lock().unwrap();
@@ -320,12 +338,11 @@ fn verify_local(
             // hash won't match exactly — but if the content was tampered, both hashes
             // will differ from what was originally stored.
             let content_hash_check = blake3_hash(a.content.as_bytes());
-            let content_untampered = content_hash_check == a.content_hash
-                || {
-                    // Fallback: the stored hash might be SHA-256 from legacy v1
-                    use sha2::{Sha256, Digest};
-                    hex::encode(Sha256::digest(a.content.as_bytes())) == a.content_hash
-                };
+            let content_untampered = content_hash_check == a.content_hash || {
+                // Fallback: the stored hash might be SHA-256 from legacy v1
+                use sha2::{Digest, Sha256};
+                hex::encode(Sha256::digest(a.content.as_bytes())) == a.content_hash
+            };
 
             // If raw content hash doesn't match AND it's not a legacy hash,
             // the content has been tampered in SQLite

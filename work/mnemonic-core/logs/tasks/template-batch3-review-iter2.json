@@ -1,0 +1,70 @@
+{
+  "validator": "task-validator",
+  "batch": "3-iter2",
+  "iteration": 2,
+  "tasks": {
+    "12": {
+      "status": "approved",
+      "findings": []
+    },
+    "13": {
+      "status": "approved",
+      "findings": [
+        {
+          "severity": "minor",
+          "category": "content",
+          "task": 13,
+          "section": "Context Files",
+          "issue": "Audit scope files listed as backtick code spans (`core/src/**/*.rs`, `mcp/src/**/*.rs`, `Cargo.toml`, `core/Cargo.toml`, `mcp/Cargo.toml`) rather than markdown links. Checklist requires all context files as `[name](path)` links.",
+          "fix": "Convert to markdown links where a specific file is referenced. For glob patterns that cannot be linked, add a brief explanatory note — e.g. `All .rs files under core/src/` — and list any specific anchor files (e.g. `core/src/lib.rs`) as proper links."
+        }
+      ]
+    },
+    "14": {
+      "status": "needs_fix",
+      "findings": [
+        {
+          "severity": "critical",
+          "category": "structure",
+          "task": 14,
+          "section": "Required Skills",
+          "issue": "Skill path points to workspace-local `.claude/skills/security-auditor/SKILL.md` (line 15: `/home/claude/.openclaw/workspace/mnemonic-refactored/.claude/skills/security-auditor/SKILL.md`), which does not exist. The `security-auditor` skill lives at `~/.claude/skills/security-auditor/SKILL.md` (global skills directory). The implementing agent will fail to load the skill.",
+          "fix": "Change the SKILL.md link to `~/.claude/skills/security-auditor/SKILL.md` (or its absolute equivalent `/home/claude/.claude/skills/security-auditor/SKILL.md`)."
+        },
+        {
+          "severity": "minor",
+          "category": "content",
+          "task": 14,
+          "section": "Reviewers",
+          "issue": "Reviewers section still contains stale text: 'No reviewers for Audit Wave tasks.' The wave name was changed from 'Audit Wave' to numeric 12, so this prose reference is now inconsistent.",
+          "fix": "Change to: 'No reviewers — this IS the audit task. The security-auditor agent is the executor.' or simply 'No downstream reviewers for this audit task.'"
+        }
+      ]
+    },
+    "15": {
+      "status": "approved",
+      "findings": [
+        {
+          "severity": "minor",
+          "category": "content",
+          "task": 15,
+          "section": "Reviewers",
+          "issue": "Reviewers section still says 'No reviewers for Audit Wave tasks.' The wave label was updated to numeric 12 but this prose reference to 'Audit Wave' was not cleaned up.",
+          "fix": "Change to: 'No downstream reviewers for this audit task.' or equivalent prose not referencing 'Audit Wave'."
+        }
+      ]
+    },
+    "16": {
+      "status": "approved",
+      "findings": []
+    }
+  },
+  "summary": "3 approved (12, 15, 16), 1 needs fix (14), 1 approved with minor findings (13). Task 14 has a critical broken skill path: Required Skills links to a non-existent workspace-local path for security-auditor SKILL.md. All wave numeric fixes (13→12, 14→12, 15→12, 16→13) were correctly applied. Task 12 documentation-writing skill path and reviewer path are correct.",
+  "stats": {
+    "tasks_checked": 5,
+    "issues_found": 4,
+    "critical": 1,
+    "major": 0,
+    "minor": 3
+  }
+}

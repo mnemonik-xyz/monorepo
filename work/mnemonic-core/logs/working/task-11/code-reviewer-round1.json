@@ -1,0 +1,33 @@
+{
+  "reviewer": "code-reviewer",
+  "round": 1,
+  "task": 11,
+  "verdict": "approved_with_suggestions",
+  "findings": [
+    {
+      "severity": "major",
+      "location": "mcp/src/main.rs:106-113 (refund path)",
+      "issue": "Refund uses credit_deposit with a synthetic tx_sig ('refund:<error-message>'), but credit_deposit has an idempotency guard that rejects any tx_sig already seen in payment_events. If the same error message recurs on repeated failures for the same API key, the second refund silently fails (result is discarded with `let _ = ...`). Additionally, credit_deposit inserts the synthetic string into the tx_sig column of payment_events, polluting deposit records with refund entries.",
+      "suggestion": "Introduce a dedicated refund_balance helper in payment.rs that performs a direct UPDATE (no idempotency check, no tx_sig column insertion) and emits an event_type='refund' row. The refund path is a charge reversal, not a deposit, and should not share the deposit code path. This is pre-existing behavior from before task 11, not a regression introduced here, but the task-11 consolidation makes it clearly visible and the correct fix is cheap."
+    },
+    {
+      "severity": "minor",
+      "location": "mcp/src/mcp.rs:87 — tool_definitions()",
+      "issue": "The mnemonic_sign_memory tool description still says 'SHA-256 hash' and 'anchors on Solana via SPL Memo'. Since task 2 the implementation uses blake3(canonical_cbor) as the content hash and the Solana memo anchor has been v3 since at least task 8. The stale description propagates to every MCP client that calls tools/list.",
+      "suggestion": "Update to: 'Creates a verifiable memory attestation: embeds content, blake3 hash of CBOR-canonical artifact, stores COSE_Sign1 envelope on Arweave, anchors hash on Solana memo (v3)'. This is client-facing metadata."
+    },
+    {
+      "severity": "nit",
+      "location": "mcp/src/payment.rs:469-491 — random_bytes<N>",
+      "issue": "The SHA-256 fallback in random_bytes (used when /dev/urandom is unavailable) produces only 32 bytes of entropy and repeats them cyclically for N > 32. The constant N=24 in the call site means the cycling never triggers for the current use case, but the pattern is fragile and slightly misleading for future callers who might pass N > 32.",
+      "suggestion": "Add a const assert or comment noting that the fallback is only safe for N <= 32, or better, loop the Sha256 counter increment to generate additional blocks. Alternatively, consider using getrandom crate which is already a transitive dependency via solana-sdk and works on all platforms without the manual /dev/urandom fallback."
+    },
+    {
+      "severity": "nit",
+      "location": "mcp/src/tools.rs:47 — #[allow(clippy::too_many_arguments)]",
+      "issue": "sign_memory has 10 parameters. Suppressing the lint is understandable for this task (import cleanup only, no logic changes), but the underlying design pressure is real: the function signature couples the entire McpState decomposition to the tool implementation.",
+      "suggestion": "Track as follow-up debt: introduce a SignMemoryCtx<'_> reference struct grouping keypair, solana, arweave, store, embedder, compressor, storage_mode. This eliminates the allow and makes the call site in mcp.rs more readable. Not required for this task."
+    }
+  ],
+  "notes": "The db.rs consolidation into payment.rs is architecturally clean and correct. All moved helpers are genuine payment concerns (API key lifecycle, balance, P&L, replay protection, cost accounting). The file is ~490 lines but well-organized in two clearly delineated sections with a section comment. Cohesion is high — every function either gates/checks payment or persists payment state. The four #[allow(dead_code)] suppressions are all justified: http_host/http_port exist for env-level inspection symmetry while CLI flags take precedence at runtime; jsonrpc is deserialized for protocol compliance but never branched on; network is deserialized for spec compliance but verification is network-agnostic. Cargo.toml cleanup is thorough and correct — all 14 removed deps are confirmed absent from mcp sources; the local-embed feature forwarding to mnemonic-core/local-embed is the right pattern. pricing.rs byte-identity confirmed (md5 match against b2e52e6). The TurboQuant 90s cold-init is correctly characterized as a pre-existing trait of turboquant_plus_rs, not a task-11 regression. All acceptance criteria from the task spec are met: mcp/src/ contains exactly {config.rs, main.rs, mcp.rs, payment.rs, pricing.rs, tools.rs}; no domain types flow from crate:: imports (only crate::{payment, pricing, tools}); workspace build, tests, and clippy are all clean per teammate verification."
+}

@@ -1,0 +1,99 @@
+{
+  "task": 1,
+  "reviewer": "security-auditor",
+  "round": 1,
+  "status": "approved",
+  "findings": [
+    {
+      "severity": "major",
+      "category": "A01: Broken Access Control",
+      "title": "Admin stats endpoint lacks authentication",
+      "location": "mcp/src/main.rs:289-321",
+      "description": "GET /admin/stats exposes P&L data (attestation counts, revenue, cost breakdown) with no authentication check. Any unauthenticated caller who can reach the HTTP port can read this financial data. The route is registered at the router level with no middleware guard.",
+      "impact": "Exposure of business-sensitive financial and operational metrics to any network peer that can reach the MCP port. In a cloud deployment with a public IP this is a direct information leak.",
+      "recommendation": "Gate /admin/stats behind a pre-shared admin token checked in a middleware or in the handler itself, e.g. validate an Authorization header against a value loaded from env (ADMIN_TOKEN). Alternatively, bind the admin endpoints to a separate listener on a non-public interface.",
+      "cwe": "CWE-306"
+    },
+    {
+      "severity": "major",
+      "category": "A05: Security Misconfiguration",
+      "title": "CORS configured to allow all origins, methods, and headers",
+      "location": "mcp/src/main.rs:487-491",
+      "description": "The Axum CORS layer is configured with .allow_origin(Any).allow_methods(Any).allow_headers(Any). This means any browser page on the internet can make credentialed cross-origin requests to the MCP server. For a server that handles payments and attestation signing, this is a significant misconfiguration.",
+      "impact": "A malicious web page can trigger sign_memory or deposit calls from a victim's browser context, or read balance information, if the victim has the MCP server accessible on a local port (common in dev). For publicly deployed servers this widens the attack surface substantially.",
+      "recommendation": "Restrict allowed origins to a known list (e.g. only the dashboard domain). If wildcard is needed for developer convenience, guard it behind a build-time feature flag and ensure it is never used in production. At minimum restrict allowed methods to POST for /mcp and GET for /balance.",
+      "cwe": "CWE-942"
+    },
+    {
+      "severity": "major",
+      "category": "A10: SSRF",
+      "title": "ArweaveClient base_url accepted from environment with no validation — SSRF risk",
+      "location": "mcp/src/arweave.rs:18-23, mcp/src/config.rs:54",
+      "description": "ARWEAVE_URL is loaded directly from environment and passed into ArweaveClient::new() without validation. The is_local() check at line 70 only decides between arlocal and Irys code paths — it does not prevent an operator-supplied URL that points to an internal network endpoint (e.g. http://169.254.169.254/ on AWS, http://metadata.google.internal/ on GCP). While this is operator-controlled and not directly user-controlled, a misconfigured or compromised deployment variable becomes an SSRF vector. Additionally, SOLANA_RPC_URL has the same property.",
+      "impact": "If an attacker can influence ARWEAVE_URL or SOLANA_RPC_URL (e.g. via a compromised secrets manager, a CI/CD injection, or a misconfigured .env), the server will make HTTP requests to arbitrary internal hosts, potentially leaking cloud metadata or accessing internal services.",
+      "recommendation": "Validate the URL scheme (must be https in production, or http only for localhost/127.0.0.1) and optionally allowlist valid hostnames. Log a startup warning if a non-HTTPS Arweave URL is configured in non-local mode.",
+      "cwe": "CWE-918"
+    },
+    {
+      "severity": "major",
+      "category": "A02: Cryptographic Failures",
+      "title": "Keypair stored as plain JSON array on disk with no file permission enforcement",
+      "location": "mcp/src/identity.rs:17-19",
+      "description": "load_or_create_keypair writes the 64-byte Ed25519 private key as a JSON array using std::fs::write, which creates the file with the process umask (typically 0644 or 0022, resulting in world-readable files on many systems). No explicit mode-600 permission is set on the file after creation.",
+      "impact": "On a multi-user system or a container with a permissive umask, any local process can read the keypair file and extract the server's signing key. This key is used for all attestations and Arweave uploads — compromise means an attacker can forge attestations.",
+      "recommendation": "After writing the keypair, explicitly set file permissions to 0o600 using std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o600)). Also add a startup check that warns (or errors) if the file has group/world-readable permissions.",
+      "cwe": "CWE-732"
+    },
+    {
+      "severity": "minor",
+      "category": "best-practice",
+      "title": "turboquant-plus-rs is a low-activity crate — supply-chain risk worth monitoring",
+      "location": "core/Cargo.toml:25, mcp/Cargo.toml:66",
+      "description": "turboquant-plus-rs 0.1.0 resolves from the crates.io registry (checksum 92a035fc... confirmed in Cargo.lock). The crate is legitimate and resolves correctly. However, it has a very low version number (0.1.0) and minimal public history, which is typical of self-published crates that may not receive security patches. No CVEs are currently known.",
+      "impact": "If the crate author publishes a malicious update or the crate is abandoned, the project depends on a dependency with no community auditing.",
+      "recommendation": "Pin to the exact version in Cargo.toml (already done — version = '0.1.0'). Consider vendoring the crate or adding a cargo-deny rule to block future unexpected version bumps. Periodically run cargo audit to detect if any advisories are published.",
+      "cwe": "CWE-1395"
+    },
+    {
+      "severity": "minor",
+      "category": "best-practice",
+      "title": "rusqlite 'bundled' feature compiles SQLite from source — acceptable but increases build surface",
+      "location": "core/Cargo.toml:28",
+      "description": "The bundled feature vendors a specific SQLite version into the binary. The resolved rusqlite version is 0.34.0 (checksum 37e34486). This is a well-maintained crate. The bundled approach is safe and commonly used in Rust projects. The bundled SQLite is SQLite 3.x which has a strong security track record. No known vulnerabilities in the bundled version at this time.",
+      "impact": "Minimal. The bundled SQLite will not receive OS-level security patches automatically, but rusqlite releases track SQLite releases reasonably well.",
+      "recommendation": "Track rusqlite releases and update when new SQLite security advisories are published. Run cargo audit periodically. No immediate action required.",
+      "cwe": null
+    },
+    {
+      "severity": "minor",
+      "category": "A09: Security Logging and Monitoring",
+      "title": "Payment failure refund path uses credit_deposit with tx_sig='refund:...' which is not a real nonce — could bypass idempotency check",
+      "location": "mcp/src/main.rs:111-119",
+      "description": "When a tool call fails after funds were deducted, main.rs calls store.credit_deposit(key, cost, 'refund:<error>') to return funds. However, credit_deposit checks tx_sig uniqueness to prevent replay (line 167 of db.rs). Using a synthetic string like 'refund:error_message' means the same error message for the same key would cause the second refund to fail silently (the _ = store.credit_deposit(...) result is discarded). The user would permanently lose funds in that edge case.",
+      "impact": "Funds lost silently if two identical tool failures occur for the same key. No security escalation — this is a correctness issue with a payment-integrity impact.",
+      "recommendation": "Use a unique refund nonce per attempt, e.g. format!('refund:{}:{}', uuid::Uuid::new_v4(), attestation_id). Also surface the error instead of discarding with _.",
+      "cwe": "CWE-459"
+    },
+    {
+      "severity": "minor",
+      "category": "best-practice",
+      "title": "reqwest blocking feature enabled in core — potential deadlock in async contexts",
+      "location": "core/Cargo.toml:29",
+      "description": "core/Cargo.toml declares reqwest with features = ['json', 'blocking']. The blocking client (used in OpenAIEmbedder::embed in mcp/src/embed.rs:132) spawns a thread pool internally. Calling a blocking reqwest method from inside a tokio async task without tokio::task::spawn_blocking can deadlock the tokio runtime. The current call site in embed.rs is reached from sign_memory which is an async function.",
+      "impact": "Under concurrent load, the Mnemonic MCP server could deadlock when using OpenAI embeddings if all tokio worker threads are consumed by blocking calls. This is a denial-of-service risk.",
+      "recommendation": "Wrap the blocking reqwest call in tokio::task::spawn_blocking: let result = tokio::task::spawn_blocking(move || { /* blocking reqwest call */ }).await?. Alternatively, refactor OpenAIEmbedder to use the async reqwest client.",
+      "cwe": "CWE-833"
+    },
+    {
+      "severity": "minor",
+      "category": "A04: Insecure Design",
+      "title": "HashEmbedder present in mcp/ source being copied — tech-spec mandates its removal",
+      "location": "mcp/src/embed.rs:72-108",
+      "description": "The tech-spec (Decision 4) and acceptance criteria mandate that HashEmbedder be absent in core/src/. Task 1 copies mcp/src/ files verbatim. HashEmbedder is still present in mcp/src/embed.rs. While the acceptance criteria apply to core/, having HashEmbedder in mcp/ means future extraction tasks will carry it forward unless it is explicitly removed during the embed extraction wave. This is a pre-condition risk, not a current violation.",
+      "impact": "If HashEmbedder is accidentally exported from core/ during Task 4, attestations generated with it would be non-verifiable, undermining the core security property of the system.",
+      "recommendation": "No action required for Task 1 scope — HashEmbedder removal is deferred to Task 4. Flag for the Task 4 implementer to remove it from mcp/src/embed.rs during extraction. Add a TODO comment or grep-check in the Task 4 acceptance criteria.",
+      "cwe": null
+    }
+  ],
+  "summary": "Task 1 is approved. No critical findings (no hardcoded secrets, no private keys in source, turboquant-plus-rs resolves correctly from crates.io at the expected checksum, all SQL uses rusqlite parameterized queries, turboquant:: import rename completed cleanly with zero remaining references). Four major findings are identified that should be addressed before production deployment: unauthenticated admin stats endpoint, overly permissive CORS, SSRF-adjacent URL validation gap for ARWEAVE_URL/SOLANA_RPC_URL, and insecure keypair file permissions on creation. These issues pre-exist in the source being migrated and are out of scope for Task 1's scaffold-only mandate, but are flagged here for tracking. Four minor findings cover supply-chain monitoring, tokio blocking deadlock risk, rusqlite bundled tracking, and HashEmbedder removal reminder. The workspace scaffold itself (Cargo.toml, core stubs, dependency declarations) is clean."
+}

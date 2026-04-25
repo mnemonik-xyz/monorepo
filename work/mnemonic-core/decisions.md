@@ -286,3 +286,51 @@ Addressed findings from `code-reviewer-round1.json` (changes-required; 1 major +
 - `grep -n "wasm" .claude/skills/project-knowledge/references/architecture.md` -> only legitimate refs: `wasm-bindgen`, webapp `wasm/` subfolder, WASM export
 - `grep -rn "core/src/wasm" .claude/skills/project-knowledge/references/` -> empty (no matches)
 - Both files render as valid Markdown
+
+## Task 13: Code Audit
+
+**Status:** Done
+**Commit:** (pending — team lead commits audit wave together)
+**Agent:** code-auditor
+**Summary:** Issues-found verdict with 13 findings (1 critical, 4 major, 7 minor, 1 nit). Default `cargo build/test/clippy --workspace` all green (90 tests pass), but `cargo build --features local-embed` fails: fastembed 5.x is API-incompatible with the current `FastEmbedder` impl (`InitOptions` is non-exhaustive; `TextEmbedding::embed` takes `&mut self`). Other notable findings: payment schema + migration live in core despite Decision 2 saying payment stays in mcp; a vestigial `LineageStore` trait (Task 6) defines a second parallel lineage table never unified with Task 9's `core/src/lineage/`; `AttestationStore::search` still uses `filter_map(|r| r.ok())` — the same error-swallowing pattern Task 9 fixed in lineage.rs; `unsafe impl Send/Sync for McpState` is load-bearing without a SAFETY comment; `SolanaClient::rpc` is fully `pub` as a cross-crate escape hatch for `verify_usdc_transfer`.
+**Deviations:** None — audit only, no code changes.
+
+**Reviews:** N/A (audit task, no reviewers per tech-spec task 13).
+
+**Verification:**
+- Report: [logs/working/audit/code-auditor.json](logs/working/audit/code-auditor.json)
+- `cargo build --workspace` → pass
+- `cargo test --workspace` → 90 passed / 0 failed
+- `cargo clippy --workspace --all-targets -- -D warnings` → clean (default features)
+- `cargo clippy --workspace --all-targets --all-features -- -D warnings` → FAILS (fastembed API break, see critical finding)
+
+## Task 14: Security Audit (holistic final-state)
+
+**Status:** Done
+**Agent:** security-auditor-final
+**Summary:** Holistic OWASP Top 10 sweep of the final post-refactor state. Verdict: issues-found, but zero critical/major — 4 minor + 3 nit findings, all of which are either pre-existing deferred items (CORS, /admin/stats auth, keypair file permissions, OpenAI blocking client, WAL file permissions, SSRF-adjacent URL validation) already tracked as follow-ups in task-1 / task-11, or narrow nits with no immediate exploitation path (OpenAI embed zero-fill on failure, x402 tx_sig echo in error bodies, arlocal dev-only PRNG). Payment-layer atomicity is fully correct end-to-end: the three concurrent-execution tests on a shared file-backed DB methodologically prove that balance cannot be overdrawn, deposits cannot be applied twice, and every balance mutation has a matching audit row written atomically with it. No hardcoded secrets, all SQL parameterized, COSE_Sign1 + Ed25519 + blake3 + canonical CBOR cryptography implementation is correct and deterministic, httpmock tests contain no real mainnet URLs or funded keypairs.
+**Deviations:** None — audit-only, no code changes.
+
+**Report:** [logs/working/audit/security-auditor.json](logs/working/audit/security-auditor.json)
+
+## Task 15: Test Audit
+
+**Status:** Done
+**Agent:** test-auditor (test-master)
+**Summary:** Verdict: issues-found with 0 critical, 3 major, 4 minor, 1 nit findings. 83 tests registered (75 lib unit + 5 integration_cbor + 3 proptest_canonical), all pass. Test pyramid is healthy at 90.4% unit. 9 of 12 acceptance criteria PASS, 2 PARTIAL, 1 FAIL. The qualitative gaps the count-based gates masked: (a) MAJOR — storage tests use the concrete `SqliteStore` directly, never through `&dyn AttestationStore` / `&dyn LineageStore` references, so they are concrete-impl tests rather than the trait contract tests the spec requires; (b) MAJOR — `test_compress_roundtrip_mse` uses the magic number `0.05` rather than a named `const MAX_ROUNDTRIP_MSE_4BIT_384` (AC #7 explicitly requires a named threshold); (c) MAJOR — `test_compress_empty_embedding` and `test_compress_single_element` wrap the call in `catch_unwind` then discard the result with `let _ = result;`, passing regardless of whether the implementation panics or succeeds (Category 1 empty tests, litmus-test failures); (d) MINOR — no concurrent-SQLite-access test on the AttestationStore/LineageStore surface (payment side is fully covered in mcp/payment.rs, core side is not); (e) MINOR — MAX_DEPTH=64 boundary not tested; (f) MINOR — direct self-reference cycle (A→A) not tested; (g) MINOR — `embed::tests::empty_string_input` does not actually verify empty-string handling because MockEmbedder ignores its input text. Strengths: MockEmbedder is correctly `#[cfg(test)]`-gated with deterministic L2-normalized output; all 6 arweave + 8 solana httpmock scenarios are present; lineage tests use `Direction` enum and `Option<bool>` chain_valid; both bench files use criterion harness with no network deps; zero `#[ignore]` tests; zero real mainnet URLs or funded keypairs in test code.
+**Deviations:** None — audit-only, no code changes.
+
+**Reviews:** N/A (audit task, no reviewers per tech-spec task 15).
+
+**Verification:**
+- Report: [logs/working/audit/test-auditor.json](logs/working/audit/test-auditor.json)
+- `cargo test -p mnemonic-core --no-run` → pass (3 binaries compiled)
+- `cargo test -p mnemonic-core -- --list` → 83 tests registered (75 lib + 5 integration + 3 proptest)
+- `cargo test -p mnemonic-core` → 83 passed / 0 failed / 0 ignored
+- `cargo bench -p mnemonic-core --no-run` → both bench binaries (decompress, cbor_codec) compiled
+- `grep -n "MockEmbedder" core/src/embed/*.rs` → struct + impl gated with `#[cfg(test)]` at lines 122-146
+- `grep -rn "#\[ignore\]" core/src/ core/tests/` → 0 matches
+- `grep -rn "uploader.irys.xyz\|mainnet.*solana\|api.mainnet-beta" core/` → 2 matches, both in non-test code (production default URL constant + module doc comment)
+
+**Follow-up note for pre-deploy QA (task 16):** No findings are blocking pre-deploy QA. The two non-trivial items to address in a follow-up cycle are TEST-STORAGE-CONTRACT-1 (cast to `&dyn AttestationStore` / `&dyn LineageStore` in storage tests so the trait abstraction provides actual contract guarantees) and TEST-COMPRESS-EDGE-1 (replace the `let _ = result;` discard with a real assertion on the empty/single-element edge cases). Both can be addressed by editing existing test functions; no new test infrastructure required.
+

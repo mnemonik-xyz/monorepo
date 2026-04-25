@@ -1,0 +1,70 @@
+{
+  "status": "changes_required",
+  "findings": [
+    {
+      "category": "feasibility",
+      "severity": "critical",
+      "issue": "Crate name mismatch: user-spec says `turboquant-plus-rs = \"0.1.0\"` but the current git dependency resolves to crate name `turboquant` (Cargo.toml package name is `turboquant`, repo is `sivo4kin/turboquant-rs`). `turboquant-plus-rs` on crates.io is a different crate with potentially different API surface.",
+      "why_matters": "Switching from `turboquant` (git) to `turboquant-plus-rs` (crates.io) is not a simple dep source change -- it is a different crate entirely. The compress.rs code imports `turboquant::CompressedVectors` and other types. If `turboquant-plus-rs` has different type names, struct fields, or function signatures, the first migration step fails and cascades through the entire plan. Both crates exist on crates.io (`turboquant = \"0.1.1\"`, `turboquant-plus-rs = \"0.1.0\"`, `turboquant-rs = \"0.4.1\"`), so the spec must clarify exactly which one replaces the git dep and confirm API compatibility.",
+      "fix": "Verify which crates.io package is the correct replacement: (a) compare the API of `turboquant-plus-rs 0.1.0` against the current git checkout's API surface (especially `CompressedVectors`, quantize/dequantize functions, `ndarray` version); (b) update the spec with the correct crate name; (c) if `turboquant-plus-rs` is genuinely correct, add a risk note that the API may differ from the git dep and the compress.rs module may need adaptation."
+    },
+    {
+      "category": "overengineering",
+      "severity": "major",
+      "issue": "User-spec contains implementation details that belong in tech-spec: specific trait names (AttestationStore, LineageStore), internal module paths (core/src/storage/, core/src/lineage/), specific enum type (Direction), specific field type (chain_valid: Option<bool>), error propagation mechanics (? operator), workspace resolver setting (resolver = \"2\"), and codec/sign.rs dependency choice (solana-sdk for Keypair/Signature).",
+      "why_matters": "User-spec defines WHAT and WHY, not HOW. The 'Technical decisions' section (lines 59-65) prescribes implementation approach that should be evaluated in tech-spec where alternatives can be weighed. Baking trait names and module paths into user-spec prevents the implementing agent from discovering better decompositions during implementation. Acceptance criteria that reference internal types (line 36: `Direction` enum, `chain_valid: Option<bool>`) also cross the boundary.",
+      "fix": "Move the entire 'Technical decisions' section to tech-spec. In user-spec, replace with behavioral requirements: (1) 'payment methods must not be accessible from core public API', (2) 'lineage traversal must report validation status accurately, not return hardcoded true', (3) 'lineage direction must be type-safe, not raw strings', (4) 'DB errors in lineage operations must propagate to callers, not be silently swallowed'. Rewrite acceptance criterion line 36 as behavioral: 'lineage module errors propagate correctly; validation status is computed, not hardcoded; direction parameter is type-safe'."
+    },
+    {
+      "category": "underengineering",
+      "severity": "major",
+      "issue": "No edge cases listed for either user flow. The spec describes two scenarios (Rust developer using core, MCP server backward compatibility) but neither has edge cases. For an L-sized feature, this is a significant gap.",
+      "why_matters": "Without edge cases, the implementing agent will make assumptions about behavior in failure scenarios. Unaddressed edge cases for Scenario 1: what if fastembed model download fails on first FastEmbedder::try_new()? What if load_or_create_keypair receives a path to a directory instead of a file? What if compress is called with an embedding of wrong dimension? Unaddressed edge cases for Scenario 2: what if the existing SQLite DB was created by an older version? What if MCP receives concurrent tool calls that both write to SQLite? What if the keypair file permissions prevent reading?",
+      "fix": "Add an 'Edge cases' subsection under each scenario. For Scenario 1 (library consumer): (1) FastEmbedder model not downloaded yet, (2) invalid keypair path, (3) dimension mismatch between embedder output and compressor, (4) empty string input to embed. For Scenario 2 (MCP backward compat): (1) existing DB from current monolith version continues working, (2) concurrent tool calls, (3) DB file locked by another process. Even brief bullet points suffice -- the goal is to force the tech-spec to address them."
+    },
+    {
+      "category": "underengineering",
+      "severity": "major",
+      "issue": "Payment-method exclusion list in acceptance criteria is incomplete. The grep criterion (line 41) checks only for `create_api_key` and `deduct_balance`, but code-research shows additional payment methods: `get_owner_pubkey`, `get_balance`, `credit_deposit`, `mark_x402_nonce`, `record_attestation_cost`, `get_pnl_stats`. Additionally, `verify_usdc_transfer` in solana.rs is payment-specific but would migrate to core along with the rest of solana.rs.",
+      "why_matters": "If only two method names are grep-checked, the remaining payment methods could silently leak into core. The `verify_usdc_transfer` function in solana.rs is used exclusively by the payment gate but lives in the solana module -- it would migrate to core unless explicitly excluded. This violates the stated intent of keeping payment logic in MCP.",
+      "fix": "Expand the grep exclusion criterion to include all payment-related methods: `create_api_key`, `deduct_balance`, `credit_deposit`, `mark_x402_nonce`, `record_attestation_cost`, `get_pnl_stats`, `get_owner_pubkey`, `get_balance`. Also decide whether `verify_usdc_transfer` belongs in core (as a general Solana utility) or stays in MCP (as payment logic) and document the decision."
+    },
+    {
+      "category": "feasibility",
+      "severity": "major",
+      "issue": "Architecture.md module names diverge from the spec. Current architecture.md describes core/src/ with directories `attest/`, `storage/`, `arweave/`, `solana/`, `wasm/`. The spec introduces `codec/` and `lineage/` (acceptance criterion line 39 requires grep to find these in architecture.md). The relationship between existing `attest/` and new `codec/` is not explained.",
+      "why_matters": "Acceptance criterion 10 requires `grep -E 'codec/|lineage/' architecture.md` to succeed. The current architecture.md does not contain these strings. The spec does not explicitly list 'update architecture.md' as a migration step, which means the agent might treat it as an afterthought rather than validating the directory structure matches reality.",
+      "fix": "Add an explicit constraint: 'architecture.md Project Structure section must be updated to reflect the actual core/src/ directory layout after migration, replacing attest/ with codec/ and adding lineage/'. Clarify whether `attest/` is renamed to `codec/` or if they coexist."
+    },
+    {
+      "category": "underengineering",
+      "severity": "minor",
+      "issue": "No tokio dependency strategy for core. The arweave.rs and solana.rs modules use async functions (including `tokio::time::sleep` in solana.rs confirm_tx). Moving them to core means core either depends on tokio or needs refactoring.",
+      "why_matters": "Pulling tokio into a library crate is a heavyweight decision that affects compile times and constrains consumers. The spec should state whether core depends on tokio directly, uses feature-gated async, or expects the consumer to provide the runtime. The solana.rs `confirm_tx` function explicitly uses `tokio::time::sleep`, which is not runtime-agnostic.",
+      "fix": "Add a constraint: 'core async functions must work with any tokio-compatible runtime provided by the consumer' or 'core depends on tokio as a required dependency for native builds'. Also note that `tokio::time::sleep` in solana.rs ties core to tokio specifically -- consider replacing with a polling approach or making the sleep strategy injectable."
+    },
+    {
+      "category": "underengineering",
+      "severity": "minor",
+      "issue": "No acceptance criterion for cargo clippy. Project patterns.md requires `cargo clippy --workspace -- -D warnings` on every commit, but the spec only gates on `cargo test` and `cargo build`.",
+      "why_matters": "Extracting ~4400 lines into a new crate commonly triggers clippy warnings (unused imports, dead code during transition, type complexity). Without an explicit clippy gate, the PR may pass tests but violate project quality standards defined in patterns.md.",
+      "fix": "Add acceptance criterion: `cargo clippy -p mnemonic-core -- -D warnings` passes with zero warnings."
+    },
+    {
+      "category": "sizing",
+      "severity": "minor",
+      "issue": "The 7-step sequential migration (codec -> identity -> embed -> compress -> db/storage -> arweave/solana -> lineage) plus httpmock test creation, benchmark migration, HashEmbedder removal, lineage bug fixes, and architecture.md update is at the upper bound of L. No fallback checkpoint is defined.",
+      "why_matters": "If the turboquant crate switch or httpmock test creation encounters unexpected friction, the iteration risks exceeding budget. With no defined checkpoint, the feature is all-or-nothing.",
+      "fix": "Add a checkpoint: 'If after step 4 (compress migration) the iteration budget is strained, db/storage, arweave/solana, and lineage can be deferred to iteration 1b. The core crate is usable for codec, identity, embed, and compress at that checkpoint.' This keeps each checkpoint shippable."
+    },
+    {
+      "category": "better_alternative",
+      "severity": "minor",
+      "issue": "SQLite implementations (AttestationStore, lineage functions) are placed inside core, but SQLite is inherently native-only and will require feature-gating in iteration 2 (WASM). Placing them in a separate crate or behind a feature flag from the start would avoid iteration-2 surgery.",
+      "why_matters": "In iteration 2, WASM compilation will fail if rusqlite is not gated. If SQLite code is deeply integrated into core/src/storage/ and core/src/lineage/ without feature flags, iteration 2 must refactor core's module structure. Patterns.md already states: 'Feature-gate anything requiring network or OS I/O behind #[cfg(not(target_arch = \"wasm32\"))]'.",
+      "fix": "This is a design consideration for tech-spec, not a blocker. Note in constraints: 'SQLite-dependent modules should be structured to allow WASM exclusion in iteration 2 (e.g., behind a cargo feature or cfg gate). Tech-spec should plan for this.' Alternatively, user-spec can simply note that iteration 2 may restructure storage, which is acceptable."
+    }
+  ],
+  "worst_category": "feasibility",
+  "summary": "The spec is well-structured and the native-only extraction approach is sound. Deferring WASM to iteration 2 eliminates the largest previous risk category. However, there is a critical crate name mismatch (the spec says `turboquant-plus-rs` but the current codebase uses `turboquant` -- these are different crates on crates.io) that would break the first migration step. Additionally, implementation details leak from user-spec into tech-spec territory, edge cases are absent for an L-sized feature, and the payment-method exclusion grep is incomplete (catches 2 of ~8 payment methods)."
+}
