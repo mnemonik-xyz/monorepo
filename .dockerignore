@@ -1,0 +1,11 @@
+target/
+.git/
+.github/
+work/
+docs/
+webapp/
+.claude/
+.env
+.env.*
+!.env.example
+*.md
