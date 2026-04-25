@@ -1,0 +1,325 @@
+# Mnemonic Protocol: Verifiable Memory Infrastructure for AI Agents
+
+**Draft:** v0.1  
+**Date:** April 2026  
+**Status:** Working draft  
+
+---
+
+## Abstract
+
+AI agents increasingly operate across long-running tasks, tools, sessions, and providers, but their memory remains fragile. Context windows are temporary, vendor-native memory is hard to audit, and conventional vector stores provide persistence without cryptographic provenance. As a result, an agent can claim that it remembered a fact, produced an artifact, or acted on prior context, but external parties have no standard way to verify what was stored, who stored it, when it existed, or whether it was later changed.
+
+Mnemonic Protocol introduces a verifiable memory layer for AI agents. It treats memory as a portable, signed artifact rather than an opaque database row: something an agent can recall, carry across systems, and prove has not been silently changed. Memories can run fully locally for speed and development, or be persisted to decentralized infrastructure so third parties can independently verify integrity, authorship, and timestamped existence.
+
+Mnemonic is exposed through the Model Context Protocol (MCP), making it usable by current agent clients over HTTP or stdio. The current implementation is a Rust MCP server with five tools for identity, memory signing, verification, challenge signing, and recall. The broader protocol roadmap extends this foundation toward shared project memory, provenance attestations, portable memory wallets, settlement-aware memory services, and multi-agent trust infrastructure.
+
+The core thesis is simple: trustless agents cannot work without trustless agentic memory. A2A protocols make agents interoperable in motion; Mnemonic makes them coherent over time.
+
+---
+
+## 1. Introduction
+
+AI agents forget. Their working context disappears when a session ends, when a provider restarts, when a model changes, or when a workflow moves between tools. Even when a system stores memory, that memory is usually controlled by a single provider, shaped by a private database, and unverifiable by outside parties.
+
+For simple assistants, this is inconvenient. For agents that produce research, compliance artifacts, security findings, financial decisions, or operational plans, it is a trust problem. The question is not only whether an agent can remember, but whether anyone can verify what the agent remembered, when it remembered it, who wrote it, and whether the record was later modified.
+
+The common instinct is to make context windows longer or to snapshot more internal model state. That helps with continuity inside one runtime, but it does not solve portability or auditability. Raw attention state is model-specific, opaque, expensive to move, and hard for independent systems to interpret. A proprietary chat history is more readable, but still belongs to the platform that stores it.
+
+Mnemonic starts from a different unit: the semantic memory item. A memory item is human-readable content linked to embeddings, metadata, cryptographic identity, and a verifiable commitment trail. It can be recalled by meaning, inspected by people, signed by agents, and independently checked by other systems.
+
+This shift matters for multi-agent systems. A2A protocols can move messages and tasks between agents, but they do not by themselves provide durable, portable, attestable memory. Mnemonic fits underneath coordination protocols as memory infrastructure: the substrate that lets agents remain coherent over time.
+
+## 2. Problem Statement
+
+Current agent memory systems typically fall into three categories:
+
+1. **Context windows** are fast and accurate but temporary.
+2. **Application-native memory** can persist but is locked to one product or provider.
+3. **External vector stores** support retrieval but usually do not prove provenance, integrity, ordering, or non-repudiation.
+
+These systems are useful, but they do not provide a portable trust layer. If an agent moves from one runtime to another, its accumulated state may not move with it. If a memory record changes, consumers may not notice. If an agent produces an answer based on prior context, downstream systems may not be able to audit which context existed at the time.
+
+A verifiable agent memory system needs six properties:
+
+- **Persistence:** memory survives sessions, providers, and runtime changes.
+- **Semantic recall:** memory can be retrieved by meaning, not only by keyword.
+- **Provenance:** each memory is linked to a cryptographic identity.
+- **Integrity:** tampering can be detected independently.
+- **Portability:** memory is not trapped inside one vendor or framework.
+- **Economic viability:** storage and verification costs remain low enough for real agent workflows.
+
+## 3. Design Goals
+
+Mnemonic is designed around the following goals:
+
+### 3.1 Current Implementation Goals
+
+- Provide a working MCP server that existing agent clients can use today.
+- Support local development with no blockchain dependency.
+- Produce deterministic, typed, signed artifacts using canonical CBOR and COSE_Sign1.
+- Use blake3 hashes over canonical artifact bytes for current artifacts.
+- Store searchable local state in SQLite.
+- Support optional full-mode persistence through Arweave and Solana.
+- Keep verification available as a first-class operation.
+
+### 3.2 Protocol Roadmap Goals
+
+- Make memory portable across models, providers, agents, and hosts.
+- Support shared project memory namespaces for multi-agent workflows.
+- Extend memory records into provenance attestations for artifacts and decisions.
+- Provide settlement-aware memory infrastructure that agents can pay for directly.
+- Add stronger privacy, lifecycle, and multi-writer semantics before broad multi-party deployment.
+
+## 4. Core Insight
+
+Agent memory should be semantically meaningful, cryptographically attributable, and operationally cheap.
+
+Raw transformer state is the wrong abstraction for portable memory. Attention caches are model-specific, opaque, large, and difficult for humans or independent systems to interpret. Semantic memory items are smaller, inspectable, portable, and compatible with retrieval systems.
+
+Mnemonic applies this principle through a layered pipeline:
+
+```text
+content
+  -> embed
+  -> compress
+  -> build typed artifact
+  -> canonicalize to CBOR
+  -> hash canonical bytes with blake3
+  -> sign with Ed25519 as COSE_Sign1
+  -> persist locally or externally
+  -> recall and verify through MCP
+```
+
+The current implementation uses full embeddings in SQLite for recall. Compressed embeddings are produced and embedded in artifact metadata, supporting portability and future cross-node verification work. Historical research explored compressed candidate generation plus exact reranking; that remains a protocol design direction rather than the current local recall path.
+
+## 5. Architecture Overview
+
+Mnemonic has two layers:
+
+- **`mnemonic-core`** provides protocol primitives: canonical encoding, hashing, signing, identity, embedding, compression, storage traits, Solana integration, Arweave integration, and lineage helpers.
+- **`mnemonic-mcp`** exposes those primitives through MCP over HTTP and stdio, plus payment and pricing logic for networked operation.
+
+The MCP server exposes five tools:
+
+- `mnemonic_whoami`
+- `mnemonic_sign_memory`
+- `mnemonic_verify`
+- `mnemonic_prove_identity`
+- `mnemonic_recall`
+
+Storage is selected by mode:
+
+- **Local mode:** SQLite only, synthetic local transaction IDs, no payment gate.
+- **Full mode:** signed artifact bytes can be persisted to Arweave, anchored on Solana, and indexed locally in SQLite.
+
+## 6. Artifact Model
+
+Mnemonic artifacts are typed, versioned, and canonical.
+
+The current schema registry includes:
+
+- `memory`
+- `rag.context`
+- `rag.result`
+- `agent.state`
+- `receipt`
+
+Each schema defines required fields, optional fields, and stable canonical CBOR field ordering. Published schemas are immutable within a version. Changes require version bumps.
+
+This model lets Mnemonic evolve beyond single memory items into a general attestation layer for agent workflows: retrieved context, generated results, state snapshots, receipts, and lineage-linked artifacts.
+
+## 7. Trust Model
+
+Mnemonic currently guarantees:
+
+- **Integrity:** current artifacts are hashed over canonical CBOR bytes.
+- **Authorship:** artifacts are signed by an Ed25519 identity.
+- **Local verifiability:** local-mode records can be checked against SQLite state.
+- **External verifiability:** full-mode records can be checked against persisted artifacts and chain anchors when available.
+- **Version awareness:** current CBOR+COSE artifacts and legacy JSON/SHA-256 artifacts are handled separately.
+
+Mnemonic does not yet guarantee:
+
+- End-to-end encryption in the active MCP sign/verify path.
+- Correctness of the memory content itself.
+- Completeness of an agent's memory history.
+- ZK proof that an embedding was computed faithfully.
+- ZK proof that a retrieval result is the true top-k from a committed corpus.
+- Safe multi-party shared memory semantics.
+
+These limitations are intentional to state clearly: Mnemonic V1 prioritizes practical memory integrity and provenance before more expensive proof systems.
+
+## 8. Positioning In The Agent Stack
+
+Mnemonic is not a replacement for A2A protocols, orchestration systems, or vector databases.
+
+A2A protocols handle discovery, coordination, task exchange, and message passing. Mnemonic fits underneath that layer as durable memory, provenance, portability, and trust infrastructure.
+
+In one sentence:
+
+> A2A makes agents interoperable in motion; Mnemonic makes them coherent over time.
+
+## 9. Use Cases
+
+### 9.1 Shared Project Memory
+
+Multiple agents working on the same research project, codebase, investigation, or operational workflow can write to a shared memory namespace. New agents can join the workflow and retrieve accumulated context instead of starting from zero.
+
+### 9.2 Provenance And Attestation
+
+Mnemonic can record what an agent produced, what inputs it used, when it produced the output, and how the output connects to earlier artifacts. This turns opaque agent message passing into auditable knowledge production.
+
+### 9.3 Portable Memory Wallet
+
+Mnemonic points toward memory that belongs to the agent or its operator rather than a provider. An agent should be able to carry durable memory across providers, frameworks, hosts, orchestration environments, and model upgrades.
+
+### 9.4 Settlement-Aware Memory Infrastructure
+
+Networked memory services need metering and payment. Mnemonic already includes payment-mode support for HTTP operation, including balance and x402-style flows. This can evolve into agent-payable memory infrastructure where verification remains open and paid operations sustain node operators.
+
+## 10. Related Work
+
+Mnemonic sits at the intersection of:
+
+- agent memory systems
+- vector databases and RAG infrastructure
+- decentralized storage
+- blockchain commitments
+- verifiable computation
+- machine-native payments
+
+The closest research and product directions include decentralized RAG, trustless agentic memory, ZK embedding proofs, verifiable ANN retrieval, and source reliability oracles. Mnemonic's current bet is pragmatic: hash commitments and signed artifacts are cheaper and deployable today, while ZK embedding or retrieval proofs remain credible future extensions.
+
+## 11. Current Implementation Status
+
+The current canonical implementation is the Rust MCP server in this repository.
+
+Implemented today:
+
+- HTTP and stdio MCP transports.
+- Five Mnemonic tools.
+- Ed25519 server identity.
+- Canonical CBOR artifact encoding.
+- COSE_Sign1 artifact signing.
+- blake3 hashing for current artifacts.
+- SQLite local recall over full embeddings.
+- `local` and `full` storage modes.
+- Optional Solana and Arweave persistence in full mode.
+- Payment modes: `none`, `balance`, `x402`, and `both`.
+
+Not current implementation behavior:
+
+- End-to-end encrypted snapshots.
+- Compressed shadow-index retrieval as the local recall path.
+- Multi-party shared namespaces.
+- Reliability oracle.
+- On-chain node registry.
+- Agent SDK abstraction.
+- ZK proof of embedding or retrieval correctness.
+
+## 12. Evaluation Plan
+
+A production-grade whitepaper should include empirical results for:
+
+- Artifact signing and verification latency.
+- Local recall quality across realistic corpora.
+- Embedding provider behavior (`fastembed`, OpenAI, future open embedders).
+- Compression ratios and reconstruction error.
+- Full-mode persistence latency and cost.
+- Payment-gated HTTP overhead.
+- Failure modes: missing Arweave data, missing Solana anchors, tampered artifacts, stale local rows.
+
+Historical prototype documents include retrieval and compression benchmarks, but this paper should only publish results that match the current Rust implementation or are clearly labeled as prior research.
+
+## 13. Limitations And Open Questions
+
+Open areas before broad production deployment:
+
+- Security and privacy boundaries.
+- Encryption architecture and key recovery.
+- Memory write semantics: append, merge, overwrite, contradiction handling.
+- Lifecycle policy: pruning, compaction, export, deletion, retention classes.
+- Multi-writer consistency and shared namespace authorization.
+- Robustness to noisy, duplicate, contradictory, or adversarial memories.
+- Product packaging: local tool, SDK, node network, hosted service, or hybrid.
+- Compliance and governance for sensitive memory data.
+
+## 14. Roadmap
+
+### Phase 1: Practical Verifiable Memory
+
+- Harden the Rust MCP implementation.
+- Document the artifact format and verification model.
+- Improve local developer experience.
+- Keep local mode fast, free, and offline.
+
+### Phase 2: Product-Grade Memory Semantics
+
+- Define memory write/update/delete policy.
+- Add lifecycle and compaction primitives.
+- Specify export and recovery guarantees.
+- Clarify privacy and encryption boundaries.
+
+### Phase 3: Shared And Portable Memory
+
+- Introduce shared namespaces.
+- Add multi-writer consistency semantics.
+- Support portable memory restore workflows.
+- Expand provenance artifacts beyond simple memory items.
+
+### Phase 4: Trust And Settlement Network
+
+- Add node discovery and operator economics.
+- Mature x402-style agent payment flows.
+- Introduce reliability scoring for shared-memory contributors.
+- Explore ZK proofs for embedding correctness and retrieval correctness.
+
+## 15. Conclusion
+
+Agents need more than longer context windows. They need memory that persists, travels, and can be verified.
+
+Mnemonic Protocol provides a practical foundation: semantic memory items encoded as canonical, signed artifacts; local recall for developer usability; optional external persistence for independent verification; and an MCP interface that works with today's agent clients.
+
+The long-term goal is broader: memory that agents can own, share, pay for, audit, and carry across the agent ecosystem. Trustless agents cannot work without trustless agentic memory. Mnemonic is the memory layer for that stack.
+
+---
+
+## References
+
+1. Model Context Protocol. https://modelcontextprotocol.io/
+2. Arweave Protocol. https://arweave.org/
+3. Solana Documentation. https://solana.com/docs
+4. COSE: CBOR Object Signing and Encryption. RFC 9052.
+5. BLAKE3 Cryptographic Hash Function. https://github.com/BLAKE3-team/BLAKE3
+6. Zandieh, A. and Mirrokni, V. *TurboQuant: Online Vector Quantization with Near-Optimal Distortion Rate.*
+7. Coinbase. *x402: HTTP 402 Payment Required for Machine-to-Machine Payments.* https://x402.org/
+
+---
+
+## Glossary
+
+**A2A:** Agent-to-Agent. A broad category of protocols and patterns for agent discovery, coordination, task exchange, and message passing. Mnemonic is complementary: A2A moves work between agents; Mnemonic gives agents durable memory across time.
+
+**Arweave:** A decentralized permanent storage network. In Mnemonic full mode, Arweave can store signed artifact bytes so memory records remain available outside a single provider database.
+
+**blake3:** A modern cryptographic hash function used by the current Mnemonic artifact format. Mnemonic hashes canonical CBOR bytes with blake3 so artifact integrity can be checked deterministically.
+
+**CBOR:** Concise Binary Object Representation. A compact binary serialization format. Mnemonic uses canonical CBOR so the same artifact fields serialize into the same byte sequence, which is required for stable hashing and signing.
+
+**Canonical Encoding:** A serialization rule that produces one deterministic byte representation for the same logical data. Without canonical encoding, two equivalent JSON-like objects could produce different bytes and therefore different hashes.
+
+**COSE:** CBOR Object Signing and Encryption. A standards family for signing and encrypting CBOR-encoded data.
+
+**COSE_Sign1:** A COSE structure for a single digital signature over CBOR data. Mnemonic signs artifacts as COSE_Sign1 objects so verifiers can check that a memory artifact was produced by the holder of the corresponding Ed25519 key.
+
+**Ed25519:** A public-key signature algorithm. Mnemonic uses Ed25519 keypairs for agent identity and artifact signing.
+
+**MCP:** Model Context Protocol. The interface layer Mnemonic uses to expose memory tools to agent clients over HTTP or stdio.
+
+**Semantic Memory Item:** The core unit of Mnemonic memory: human-readable content plus embedding, metadata, identity, and verification data. It is portable in a way raw model attention state is not.
+
+**Solana Anchor:** A Solana transaction or memo used to timestamp and externally commit to artifact data. In full mode, Mnemonic can use Solana as an ordering and verification layer.
+
+**x402:** A machine-native payment pattern based on HTTP 402 Payment Required. Mnemonic's HTTP payment layer supports x402-style flows for agent-payable memory services.
+
