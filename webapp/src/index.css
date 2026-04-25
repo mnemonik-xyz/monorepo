@@ -1,0 +1,17 @@
+@import "tailwindcss";
+@config "../tailwind.config.js";
+
+@theme {
+  --color-background: #0A0F1E;
+  --color-accent-primary: #00D4B4;
+  --color-accent-secondary: #9945FF;
+  --color-text-primary: #FFFFFF;
+  --color-text-muted: #8B9BC0;
+  --color-error: #FF4747;
+  --color-success: #00CC88;
+}
+
+body {
+  background-color: var(--color-background);
+  color: var(--color-text-primary);
+}
