@@ -1,7 +1,7 @@
 feature: mnemonic-webapp
 total_waves: 6
-last_completed_wave: 3
-next_wave: 4
+last_completed_wave: 4
+next_wave: 5
 tasks:
   1: done
   2: done
@@ -9,8 +9,8 @@ tasks:
   4: done
   5: done
   6: done
-  7: planned
-  8: planned
+  7: done
+  8: done
   9: planned
   10: planned
   11: planned

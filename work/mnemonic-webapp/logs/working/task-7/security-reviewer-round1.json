@@ -1,0 +1,64 @@
+{
+  "reviewer": "security-reviewer-7",
+  "round": 1,
+  "task": 7,
+  "status": "fail",
+  "findings": [
+    {
+      "id": "SEC-7-1",
+      "severity": "high",
+      "criterion": "keypair not in image layers (.dockerignore)",
+      "status": "fail",
+      "detail": ".dockerignore does not explicitly exclude the `keypair/` directory. While Dockerfile COPY commands do not copy it, defense-in-depth requires an explicit exclusion. A future COPY change or wildcard could accidentally bake the keypair into the image layer. Add `keypair/` to .dockerignore.",
+      "fix": "Add `keypair/` to .dockerignore"
+    },
+    {
+      "id": "SEC-7-2",
+      "severity": "high",
+      "criterion": "keypair not committable to git",
+      "status": "fail",
+      "detail": ".gitignore does not exclude the `keypair/` directory. The keypair file is `id.json` which does not match any existing gitignore pattern (*.key, *.pem, credentials.json, secrets/). Running `git add .` could accidentally commit the keypair to the repository.",
+      "fix": "Add `keypair/` to .gitignore"
+    },
+    {
+      "id": "SEC-7-3",
+      "severity": "high",
+      "criterion": "/admin/stats blocked at nginx",
+      "status": "fail",
+      "detail": "nginx.conf is missing entirely. Cannot verify that /admin/stats is blocked. This is a required file for task 7 and a security-critical configuration (Decision 13 in tech-spec). Without nginx.conf, the /admin/stats endpoint may be proxied and accessible.",
+      "fix": "Create nginx.conf that proxies only /mcp, /chat, /download-knowledge, /health and returns 403 or 404 for /admin/stats"
+    },
+    {
+      "id": "SEC-7-4",
+      "severity": "high",
+      "criterion": "ollama/Dockerfile missing",
+      "status": "fail",
+      "detail": "ollama/Dockerfile is missing. docker-compose.yml references `build: context: ./ollama dockerfile: Dockerfile` but the file does not exist. The compose file will fail on `docker compose up`. This also means the pre-pull strategy and warm-up request (Decision 11) cannot be verified.",
+      "fix": "Create ollama/Dockerfile with pre-pull of qwen2.5:3b and warm-up entrypoint"
+    }
+  ],
+  "passed": [
+    {
+      "criterion": "read-only volume mount for keypair",
+      "detail": "./keypair:/run/secrets/keypair:ro -- correctly mounted read-only in docker-compose.yml"
+    },
+    {
+      "criterion": "no exposed ports beyond 80/443",
+      "detail": "nginx exposes 80 and 443 only. mcp service has no ports mapping (internal only). ollama service has no ports mapping (internal only)."
+    },
+    {
+      "criterion": "docker network isolation",
+      "detail": "All three services share the `mnemonic` bridge network. No cross-network exposure. mcp and ollama are unreachable from outside Docker."
+    },
+    {
+      "criterion": "no secrets in compose file",
+      "detail": "No hardcoded credentials, tokens, or private keys. Sensitive config uses environment variable references with ${VAR:-default} pattern. MNEMONIC_KEYPAIR_PATH references a volume-mounted path, not a secret value."
+    },
+    {
+      "criterion": "ollama not directly exposed",
+      "detail": "ollama service has no `ports:` section. Port 11434 is only accessible within the mnemonic Docker network."
+    }
+  ],
+  "blocking": true,
+  "summary": "4 blocking findings: (1) .dockerignore missing explicit keypair/ exclusion risks keypair baking into image layers; (2) .gitignore missing keypair/ exclusion risks accidental commit of the keypair file id.json; (3) nginx.conf is absent -- /admin/stats block and proxy restrictions cannot be verified; (4) ollama/Dockerfile is absent -- compose will fail on build. Compose structure is otherwise sound: read-only keypair mount, correct port exposure (80/443 only), network isolation, no hardcoded secrets, Ollama not externally accessible. Resolve all 4 findings before re-review."
+}

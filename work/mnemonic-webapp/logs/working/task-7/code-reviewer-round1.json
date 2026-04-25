@@ -1,0 +1,101 @@
+{
+  "reviewer": "code-reviewer-7",
+  "round": 1,
+  "task": 7,
+  "status": "fail",
+  "blocking_issues": [
+    {
+      "severity": "blocker",
+      "file": "nginx.conf",
+      "finding": "File is missing entirely. nginx.conf is required by docker-compose.yml (mounted as ./nginx.conf:/etc/nginx/nginx.conf:ro). Without it, 'docker compose up' will fail at nginx container start. Tech-spec requires: proxy /mcp, /chat, /download-knowledge, /health to MCP; block /admin/stats; serve static React build from /usr/share/nginx/html.",
+      "action": "required"
+    },
+    {
+      "severity": "blocker",
+      "file": "ollama/Dockerfile",
+      "finding": "File is missing entirely. docker-compose.yml references 'context: ./ollama, dockerfile: Dockerfile' for the ollama service. Without it, 'docker compose build' fails. Tech-spec Decision 11 requires a custom Ollama Dockerfile that pre-pulls qwen2.5:3b at build time and issues a warm-up inference request before accepting traffic.",
+      "action": "required"
+    }
+  ],
+  "findings": [
+    {
+      "severity": "minor",
+      "file": "docker-compose.yml",
+      "line": 42,
+      "finding": "MCP healthcheck uses 'curl' but the mcp service is built from debian:bookworm-slim (see Dockerfile) which does not include curl by default. The CMD healthcheck will silently fail or cause container restart loops.",
+      "action": "required",
+      "suggestion": "Either add curl to the Dockerfile runtime stage (RUN apt-get install -y curl) or use a wget-based healthcheck (wget -qO- http://localhost:3000/health) or use a shell form that exits non-zero on failure."
+    },
+    {
+      "severity": "minor",
+      "file": "docker-compose.yml",
+      "line": 61,
+      "finding": "Ollama healthcheck also uses 'curl'. The official ollama image includes curl, so this is fine for the ollama service — but note this relies on build-time pull succeeding. If qwen2.5:3b pull fails during docker build, the container will start but warm-up will fail. The healthcheck does not verify the model is loaded, only that the API responds.",
+      "action": "suggestion",
+      "suggestion": "Consider adding a healthcheck that verifies the model exists: curl -sf http://localhost:11434/api/tags | grep qwen2.5"
+    },
+    {
+      "severity": "minor",
+      "file": "docker-compose.yml",
+      "line": 13,
+      "finding": "certbot-var volume is mounted without :ro restriction on the nginx service. certbot-etc is :ro (correct for reading certs), but certbot-var at /var/lib/letsencrypt likely needs write access for renewal. This is probably intentional but should be documented. If a certbot sidecar is not included in this compose file, automatic renewal will not work.",
+      "action": "informational",
+      "suggestion": "Clarify in a comment whether certbot renewal is handled by a cron job inside nginx container or a separate process. If a certbot service is planned, add it to this compose file or document the manual renewal step."
+    },
+    {
+      "severity": "minor",
+      "file": "docker-compose.yml",
+      "line": 40,
+      "finding": "Keypair volume mount './keypair:/run/secrets/keypair:ro' is correct (read-only as required by tech-spec Decision 6). However, docker-compose does not enforce file permissions on the host side. The tech-spec states 'chmod 400 permissions' — this must be enforced on the host before running docker compose up. A comment or a README note should document this requirement.",
+      "action": "suggestion",
+      "suggestion": "Add a comment: # Host must run: chmod 400 ./keypair/id.json before starting"
+    },
+    {
+      "severity": "info",
+      "file": "docker-compose.yml",
+      "line": 1,
+      "finding": "'version: 3.8' is deprecated in recent Docker Compose v2. Not a functional issue but generates a warning on compose up.",
+      "action": "suggestion",
+      "suggestion": "Remove the 'version' key entirely — Docker Compose v2 auto-detects format and the key is no longer needed."
+    },
+    {
+      "severity": "info",
+      "file": "docker-compose.yml",
+      "line": 26,
+      "finding": "MNEMONIC_KEYPAIR_PATH is set to /run/secrets/keypair/id.json. The keypair volume mounts ./keypair directory to /run/secrets/keypair. This assumes the keypair directory on the host contains a file named id.json. This convention should be documented.",
+      "action": "suggestion",
+      "suggestion": "Add a comment: # Place keypair at ./keypair/id.json (chmod 400) before starting"
+    }
+  ],
+  "review_of_present_content": {
+    "docker_compose_services": {
+      "count": 3,
+      "services": ["nginx", "mcp", "ollama"],
+      "verdict": "Correct — matches tech-spec requirement of 3 services"
+    },
+    "networking": {
+      "verdict": "All services on shared 'mnemonic' bridge network. Correct — services communicate over Docker internal network. ollama is not exposed externally. mcp is not exposed externally. Only nginx exposes ports 80 and 443."
+    },
+    "volumes": {
+      "verdict": "mcp-data (persistent DB + RAG chunks), ollama-data (model weights), certbot-etc/certbot-var (SSL). All correct."
+    },
+    "dependency_chain": {
+      "verdict": "ollama must be healthy before mcp starts; mcp must be healthy before nginx starts. This is correct — prevents nginx from proxying to an unavailable MCP, and MCP from calling Ollama before it is ready."
+    },
+    "keypair_mount": {
+      "verdict": "Read-only (:ro) as required. Correct."
+    },
+    "restart_policy": {
+      "verdict": "unless-stopped on all services. Correct for production VPS."
+    },
+    "env_vars": {
+      "verdict": "OLLAMA_URL=http://ollama:11434 matches the Docker service name and Decision 8 whitelist (http://ollama:*). OLLAMA_MODEL defaults to qwen2.5:3b. RAG_CHUNK_DIR=/data/rag_chunks persists on mcp-data volume. Correct."
+    }
+  },
+  "summary": "docker-compose.yml is structurally sound — correct 3 services, correct networking isolation, correct dependency chain, read-only keypair mount, appropriate env vars. Two blocking files are entirely absent: nginx.conf and ollama/Dockerfile. Without these the compose stack cannot start. Additionally, the MCP healthcheck references 'curl' which is not available in the debian:bookworm-slim runtime image — this will cause health check failures and container restart loops. These three issues must be resolved before this task can pass.",
+  "required_before_round_2": [
+    "nginx.conf must be created with: proxy_pass for /mcp, /chat, /download-knowledge, /health to http://mcp:3000; explicit 404 for /admin/stats (no proxy_pass); root /usr/share/nginx/html for static files; try_files for SPA routing",
+    "ollama/Dockerfile must be created: FROM ollama/ollama, RUN build-time model pull with ollama serve & sleep + ollama pull qwen2.5:3b, ENTRYPOINT with warm-up inference before accepting traffic",
+    "Fix MCP healthcheck: add curl to runtime Dockerfile or switch to wget-based check"
+  ]
+}
