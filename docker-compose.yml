@@ -1,0 +1,76 @@
+services:
+  nginx:
+    image: nginx:1.27-alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./webapp/dist:/usr/share/nginx/html:ro
+      - certbot-etc:/etc/letsencrypt:ro
+      - certbot-var:/var/lib/letsencrypt
+    depends_on:
+      mcp:
+        condition: service_healthy
+    networks:
+      - mnemonic
+    restart: unless-stopped
+
+  mcp:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      - MNEMONIC_KEYPAIR_PATH=/run/secrets/keypair/id.json
+      - DATABASE_PATH=/data/attestations.db
+      - STORAGE_MODE=${STORAGE_MODE:-local}
+      - EMBED_PROVIDER=${EMBED_PROVIDER:-fastembed}
+      - TURBO_BITS=${TURBO_BITS:-4}
+      - MCP_TRANSPORT=http
+      - MCP_HTTP_PORT=3000
+      - PAYMENT_MODE=${PAYMENT_MODE:-none}
+      - OLLAMA_URL=http://ollama:11434
+      - OLLAMA_MODEL=${OLLAMA_MODEL:-qwen2.5:3b}
+      - RAG_CHUNK_DIR=/data/rag_chunks
+      - RUST_LOG=${RUST_LOG:-info}
+    volumes:
+      - mcp-data:/data
+      - ./keypair:/run/secrets/keypair:ro
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/3000' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    depends_on:
+      ollama:
+        condition: service_healthy
+    networks:
+      - mnemonic
+    restart: unless-stopped
+
+  ollama:
+    build:
+      context: ./ollama
+      dockerfile: Dockerfile
+    volumes:
+      - ollama-data:/root/.ollama
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:11434/api/tags"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
+    networks:
+      - mnemonic
+    restart: unless-stopped
+
+volumes:
+  mcp-data:
+  ollama-data:
+  certbot-etc:
+  certbot-var:
+
+networks:
+  mnemonic:
+    driver: bridge
