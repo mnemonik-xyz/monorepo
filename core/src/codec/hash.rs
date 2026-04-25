@@ -14,7 +14,10 @@ use super::schema::ArtifactSchema;
 /// Compute blake3 hash of a JSON artifact's canonical CBOR representation.
 ///
 /// Returns lowercase hex string (64 chars).
-pub fn hash_artifact(artifact: &serde_json::Value, schema: &ArtifactSchema) -> Result<String, String> {
+pub fn hash_artifact(
+    artifact: &serde_json::Value,
+    schema: &ArtifactSchema,
+) -> Result<String, String> {
     let cbor_bytes = to_canonical_cbor(artifact, schema)?;
     Ok(hash_bytes(&cbor_bytes))
 }

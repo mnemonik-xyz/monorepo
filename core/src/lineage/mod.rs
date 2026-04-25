@@ -53,9 +53,8 @@ pub fn record_parents(
 
 /// Get parents of an artifact.
 pub fn get_parents(conn: &Connection, artifact_id: &str) -> anyhow::Result<Vec<ParentRef>> {
-    let mut stmt = conn.prepare(
-        "SELECT parent_id, role FROM artifact_lineage WHERE child_id = ?"
-    )?;
+    let mut stmt =
+        conn.prepare("SELECT parent_id, role FROM artifact_lineage WHERE child_id = ?")?;
     let rows = stmt.query_map(params![artifact_id], |row| {
         Ok(ParentRef {
             artifact_id: row.get(0)?,
@@ -68,9 +67,7 @@ pub fn get_parents(conn: &Connection, artifact_id: &str) -> anyhow::Result<Vec<P
 
 /// Get children of an artifact.
 pub fn get_children(conn: &Connection, artifact_id: &str) -> anyhow::Result<Vec<String>> {
-    let mut stmt = conn.prepare(
-        "SELECT child_id FROM artifact_lineage WHERE parent_id = ?"
-    )?;
+    let mut stmt = conn.prepare("SELECT child_id FROM artifact_lineage WHERE parent_id = ?")?;
     let rows = stmt.query_map(params![artifact_id], |row| row.get(0))?;
     let collected: rusqlite::Result<Vec<_>> = rows.collect();
     Ok(collected?)
@@ -263,8 +260,14 @@ mod tests {
     fn test_record_and_get_parents() {
         let conn = setup_db();
         let parents = vec![
-            ParentRef { artifact_id: "art:parent1".into(), role: Some("context".into()) },
-            ParentRef { artifact_id: "art:parent2".into(), role: None },
+            ParentRef {
+                artifact_id: "art:parent1".into(),
+                role: Some("context".into()),
+            },
+            ParentRef {
+                artifact_id: "art:parent2".into(),
+                role: None,
+            },
         ];
         record_parents(&conn, "art:child", &parents, "2026-04-14").unwrap();
 
@@ -276,7 +279,10 @@ mod tests {
     #[test]
     fn test_get_children() {
         let conn = setup_db();
-        let parents = vec![ParentRef { artifact_id: "art:root".into(), role: None }];
+        let parents = vec![ParentRef {
+            artifact_id: "art:root".into(),
+            role: None,
+        }];
         record_parents(&conn, "art:child1", &parents, "2026-04-14").unwrap();
         record_parents(&conn, "art:child2", &parents, "2026-04-14").unwrap();
 
@@ -287,14 +293,20 @@ mod tests {
     #[test]
     fn test_validate_parents_ok() {
         let conn = setup_db();
-        let parents = vec![ParentRef { artifact_id: "art:p1".into(), role: None }];
+        let parents = vec![ParentRef {
+            artifact_id: "art:p1".into(),
+            role: None,
+        }];
         assert!(validate_parents(&conn, "art:new", &parents, &mock_exists).is_ok());
     }
 
     #[test]
     fn test_validate_parents_not_found() {
         let conn = setup_db();
-        let parents = vec![ParentRef { artifact_id: "missing:x".into(), role: None }];
+        let parents = vec![ParentRef {
+            artifact_id: "missing:x".into(),
+            role: None,
+        }];
         let err = validate_parents(&conn, "art:new", &parents, &mock_exists).unwrap_err();
         assert!(err.contains("PARENT_NOT_FOUND"));
     }
@@ -303,7 +315,10 @@ mod tests {
     fn test_validate_too_many_parents() {
         let conn = setup_db();
         let parents: Vec<ParentRef> = (0..MAX_PARENTS + 1)
-            .map(|i| ParentRef { artifact_id: format!("art:p{i}"), role: None })
+            .map(|i| ParentRef {
+                artifact_id: format!("art:p{i}"),
+                role: None,
+            })
             .collect();
         let err = validate_parents(&conn, "art:new", &parents, &mock_exists).unwrap_err();
         assert!(err.contains("TOO_MANY_PARENTS"));
@@ -313,11 +328,32 @@ mod tests {
     fn test_cycle_detection() {
         let conn = setup_db();
         // Build chain: A -> B -> C
-        record_parents(&conn, "art:B", &[ParentRef { artifact_id: "art:A".into(), role: None }], "t").unwrap();
-        record_parents(&conn, "art:C", &[ParentRef { artifact_id: "art:B".into(), role: None }], "t").unwrap();
+        record_parents(
+            &conn,
+            "art:B",
+            &[ParentRef {
+                artifact_id: "art:A".into(),
+                role: None,
+            }],
+            "t",
+        )
+        .unwrap();
+        record_parents(
+            &conn,
+            "art:C",
+            &[ParentRef {
+                artifact_id: "art:B".into(),
+                role: None,
+            }],
+            "t",
+        )
+        .unwrap();
 
         // Try to make A -> C (which would create a cycle)
-        let parents = vec![ParentRef { artifact_id: "art:C".into(), role: None }];
+        let parents = vec![ParentRef {
+            artifact_id: "art:C".into(),
+            role: None,
+        }];
         let err = validate_parents(&conn, "art:A", &parents, &mock_exists).unwrap_err();
         assert!(err.contains("CYCLE_DETECTED"), "got: {err}");
     }
@@ -326,10 +362,31 @@ mod tests {
     fn test_no_false_cycle() {
         let conn = setup_db();
         // Chain: A -> B -> C. Adding D -> C is fine (no cycle)
-        record_parents(&conn, "art:B", &[ParentRef { artifact_id: "art:A".into(), role: None }], "t").unwrap();
-        record_parents(&conn, "art:C", &[ParentRef { artifact_id: "art:B".into(), role: None }], "t").unwrap();
+        record_parents(
+            &conn,
+            "art:B",
+            &[ParentRef {
+                artifact_id: "art:A".into(),
+                role: None,
+            }],
+            "t",
+        )
+        .unwrap();
+        record_parents(
+            &conn,
+            "art:C",
+            &[ParentRef {
+                artifact_id: "art:B".into(),
+                role: None,
+            }],
+            "t",
+        )
+        .unwrap();
 
-        let parents = vec![ParentRef { artifact_id: "art:C".into(), role: None }];
+        let parents = vec![ParentRef {
+            artifact_id: "art:C".into(),
+            role: None,
+        }];
         assert!(validate_parents(&conn, "art:D", &parents, &mock_exists).is_ok());
     }
 
@@ -342,8 +399,26 @@ mod tests {
     #[test]
     fn test_traverse_ancestors() {
         let conn = setup_db();
-        record_parents(&conn, "art:B", &[ParentRef { artifact_id: "art:A".into(), role: Some("context".into()) }], "t").unwrap();
-        record_parents(&conn, "art:C", &[ParentRef { artifact_id: "art:B".into(), role: Some("trigger".into()) }], "t").unwrap();
+        record_parents(
+            &conn,
+            "art:B",
+            &[ParentRef {
+                artifact_id: "art:A".into(),
+                role: Some("context".into()),
+            }],
+            "t",
+        )
+        .unwrap();
+        record_parents(
+            &conn,
+            "art:C",
+            &[ParentRef {
+                artifact_id: "art:B".into(),
+                role: Some("trigger".into()),
+            }],
+            "t",
+        )
+        .unwrap();
 
         let node_fn = |id: &str| -> Option<LineageNode> {
             Some(LineageNode {
