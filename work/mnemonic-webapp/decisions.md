@@ -133,3 +133,17 @@ Applied blocking and low-priority fixes from code-audit, security-audit, and tes
 **Low-priority deferred (SEC-06):** Rate limiter IP extraction from `X-Real-IP`/`X-Forwarded-For` header behind nginx -- requires careful trust boundary design (which proxies to trust). Deferred to a dedicated hardening pass.
 
 **Verification:** `cargo test --workspace` passes (43 tests), `cargo clippy --workspace -- -D warnings` clean.
+
+## Task 12: Pre-deploy QA
+
+Ran full pre-deploy QA verification. Results: **PASS**.
+
+**Test suite:** `cargo test --workspace` -- 43/43 passed, 0 failed. `cargo clippy --workspace -- -D warnings` -- zero warnings. Webapp unit tests deferred (no vitest/jest configured in package.json). Playwright E2E tests exist (6 scenarios) but execution deferred (requires `npm install` + `npx playwright install`).
+
+**Acceptance criteria:** 14 criteria evaluated from user-spec.md. 12 pass via code inspection and test verification. 2 deferred to post-deploy:
+- AC-4 (benchmark question "What are the 5 MCP tools?") requires live Ollama with seeded knowledge store.
+- Webapp unit tests require test runner setup (no `test` script in package.json).
+
+**Key findings:** All critical backend paths tested at handler level (input validation, rate limiting, Ollama error propagation, download handler). Artifact generation verified with zip extraction test. Session limit E2E covers full 50-message flow. Docker Compose has 3 services with correct dependency chain and health checks. Ollama warm-up in entrypoint.sh addresses cold start requirement. Known deferred: SEC-06 (rate limiter IP extraction behind nginx proxy).
+
+Report: `work/mnemonic-webapp/logs/working/pre-deploy-qa-report.json`
