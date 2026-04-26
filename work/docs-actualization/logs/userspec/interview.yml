@@ -1,0 +1,684 @@
+# Interview Plan for docs-actualization
+#
+# Tracks progress of adaptive discovery interview.
+# Updated after EACH user response with scoring, values, and remaining gaps.
+#
+# Scoring: 0-100% (how well we understand this aspect)
+# Status: pending → partial → complete
+# Required: true = must reach threshold, false = cover if relevant
+
+# ============================================================================
+# Interview Metadata (Session Recovery)
+# ============================================================================
+interview_metadata:
+  started: "2026-04-26 00:00:00"
+  last_updated: "2026-04-26 00:00:00"
+  status: "completed"
+  can_resume: false
+  current_question_num: 11
+  feature_size: "M"  # M: restore + promote + automated lint + targeted edits, no code changes
+
+# ============================================================================
+# Conversation History (for session recovery)
+# ============================================================================
+conversation_history:
+  - question_num: 1
+    timestamp: "2026-04-26 00:00:00"
+    topic: "scope_clarification"
+    agent_question: |
+      Batch 1 (4 questions): scope of feature; what "enrich documentation" means;
+      what "direct further development" produces; how to handle missing recovered files.
+    user_answer: |
+      1) mnemonic-integrations is a separate feature; here we actualize project documentation.
+      2) (a) promote evergreen docs to public docs/ + (c) edits to .claude/skills/project-knowledge/references/.
+      3) (c) follow-ups in decisions.md of this feature only — no new user-specs spawned.
+      4) competitive-landscape files (and research/*) are present in sivo4kin/mnemonic-protocol@docs/usecases
+         and need to be restored as part of this feature.
+    summary: |
+      Scope = recovered/ only. Output = docs/ promotion + project-knowledge edits + decisions.md follow-ups.
+      Restoration of missing files (competitive-landscape/*.md, research/*.md) is in-scope.
+  - question_num: 2
+    timestamp: "2026-04-26 00:00:00"
+    topic: "feature_name"
+    agent_question: "Approve name docs-actualization?"
+    user_answer: "approve"
+    summary: "Feature name: docs-actualization."
+  - question_num: 3
+    timestamp: "2026-04-26 00:00:00"
+    topic: "validation_authority"
+    agent_question: |
+      Accept recovered/README.md classification as authoritative + minimal sanity-grep,
+      or full revalidation against current Rust code?
+    user_answer: |
+      Agree with classification + partial validation against code in mnemonik-xyz/monorepo.
+    summary: |
+      Trust upstream classification; perform partial code-cross-checks (sanity grep
+      against current core/ + mcp/) for critical contradictions only.
+  - question_num: 4
+    timestamp: "2026-04-26 00:00:00"
+    topic: "whitepaper_expansion"
+    agent_question: |
+      WHITEPAPER §9 (Use Cases): (a) keep + add link, (b) expand to all 10 with short descriptions,
+      (c) leave WHITEPAPER untouched.
+    user_answer: "(b)"
+    summary: |
+      WHITEPAPER §9 will be expanded to cover all 10 use cases from recovered/usecases/
+      with short descriptions. WHITEPAPER edits are in scope.
+  - question_num: 5
+    timestamp: "2026-04-26 00:00:00"
+    topic: "validation_strategy"
+    agent_question: |
+      Acceptance + testing strategy with sanity-grep, lychee link-check, markdownlint;
+      keep recovered/ as audit trail post-promotion. Manual file-by-file review in/out?
+    user_answer: |
+      No manual check of every file. Strategy: only actual information added; outdated or
+      not-relevant content deleted.
+    summary: |
+      Delete-outdated policy: no per-line manual review; promote evergreen verbatim;
+      grep against current code reveals stale claims, those sections (or whole files)
+      get deleted rather than rewritten.
+  - question_num: 6
+    timestamp: "2026-04-26 00:00:00"
+    topic: "restoration_mechanism"
+    agent_question: |
+      Restoration: (A) clone-and-copy from sivo4kin/mnemonic-protocol@docs/usecases,
+      (B) git fetch + checkout, (C) git subtree.
+    user_answer: "A"
+    summary: |
+      Use clone-and-copy (variant A): mirror what was already done for usecases/ in
+      commit afa20da. Commit-message-attribution; no upstream git history preserved.
+  - question_num: 7
+    timestamp: "2026-04-26 00:00:00"
+    topic: "edge_cases_policy"
+    agent_question: |
+      (a) TURBOQUANT_DEEP_ANALYSIS truncated upstream: keep with recovery note or drop?
+      (b) Sanity-grep ≥50% stale: drop file entirely or keep stub?
+      (c) WHITEPAPER §9 expansion: short descriptions + link, or only headlines?
+    user_answer: |
+      (a) agree (keep truncated with recovery note)
+      (b) drop (entirely)
+      (c) short description with a link to full doc
+    summary: |
+      Edge cases pinned: TURBOQUANT_DEEP_ANALYSIS kept with recovery note;
+      sanity-grep >50% stale → drop file entirely; WHITEPAPER §9 = short
+      description + link per use case.
+  - question_num: 8
+    timestamp: "2026-04-26 00:00:00"
+    topic: "commit_pr_strategy"
+    agent_question: |
+      Single feature branch feat/docs-actualization, 10 atomic commits, one PR to dev,
+      title "feat(docs): actualize protocol documentation from recovered staging".
+      CODEOWNERS / reviewers?
+    user_answer: |
+      Agree. No CODEOWNERS at the moment.
+    summary: |
+      One feature branch, 10 atomic commits, single PR. No reviewer assignment
+      (no CODEOWNERS in repo).
+  - question_num: 9
+    timestamp: "2026-04-26 00:00:00"
+    topic: "decisions_followups"
+    agent_question: |
+      decisions.md follow-ups: 7 candidate items (encryption, ZK proofs,
+      shared-namespaces, reliability oracle, compressed shadow-index recall,
+      lifecycle policy, browser-WASM verification UI). Format paragraph-each,
+      or bullet-list?
+    user_answer: |
+      Only WASM seems serious — present in detail. The rest — bullet-list with
+      short descriptions for further validation.
+    summary: |
+      Browser-WASM verification UI gets a full sub-section in decisions.md
+      (problem + proposed approach + dependencies + open questions). Other
+      6 items: bullet-list (1-2 sentences each + ref to source recovered doc),
+      flagged "for further validation" — explicitly NOT yet committed roadmap.
+  - question_num: 10
+    timestamp: "2026-04-26 00:00:00"
+    topic: "per_file_review"
+    agent_question: |
+      Iterative per-file confirmation: which upstream docs to keep / drop /
+      re-classify (DECENTRALIZED_RAG_LANDSCAPE, WEB_RESEARCH_TRUSTLESS_RAG,
+      apply-to-agent-memory-architecture, condensed-principles, TURBOQUANT_DEEP_ANALYSIS,
+      MEMORY_EVICTION, CONCURRENT_WRITERS, ARWEAVE_PRICING_VALIDATION,
+      Agent-Identity.pdf, paper.pdf, MCP_SERVER_BACKEND_FEATURES_COMPARISON.md,
+      CRITICAL_REVIEW.md).
+    user_answer: |
+      All confirmed keeps: usecases (10), competitive-landscape (3 — drop
+      MCP_SERVER_BACKEND_FEATURES_COMPARISON), research (3 .md + Agent-Identity.pdf
+      + paper.pdf — foundational, must ref in WHITEPAPER + README), problems (3).
+      CRITICAL_REVIEW.md outdated → follow-up bullet only.
+    summary: |
+      Final scope: 9 .md + 2 PDF restored. MCP_SERVER_BACKEND_FEATURES_COMPARISON.md
+      and CRITICAL_REVIEW.md fully dropped. paper.pdf is foundational and gets
+      explicit refs in docs/WHITEPAPER.md §References and repo README.md.
+      No docs/historical/ folder created.
+  - question_num: 11
+    timestamp: "2026-04-26 00:00:00"
+    topic: "stale_hits_policy"
+    agent_question: |
+      Pre-flight sanity-grep surfaced 6 stale-hits in 3 files (DRAG_ANALYSIS:37;
+      WEB_RESEARCH:45,64,132; CONCURRENT_WRITERS:157,217). Strict delete-only
+      policy breaks tables / leaves stranded references. Allow 1-token
+      replacements (A) or strict delete-only (B)?
+    user_answer: "A"
+    summary: |
+      Minimal override on delete-only policy: 1-token replacements permitted for
+      readability-critical hits. Each override logged in code-research.md with
+      before/after. Pre-flight 6 hits will be applied as: SHA3 → blake3 (×3),
+      Pre-V1, prototype validated → active Rust MCP server (×1), Pre-V1 → v1.0
+      (active) (×1), (SHA3 hash) → deletion of parenthetical (×1).
+
+# ============================================================================
+# Phase 1: High-Level Feature Understanding
+# ============================================================================
+phase1_feature_overview:
+
+  feature_name:
+    score: 95
+    status: "complete"
+    value: "docs-actualization"
+    gaps: ""
+    required: true
+
+  feature_description:
+    score: 90
+    status: "complete"
+    value: |
+      Actualize protocol documentation by processing the staging area at
+      .claude/skills/project-knowledge/recovered/ in five steps:
+      (1) Restore missing files (recovered/competitive-landscape/{DRAG_ANALYSIS,
+          WEB_RESEARCH_TRUSTLESS_RAG,DECENTRALIZED_RAG_LANDSCAPE,
+          MCP_SERVER_BACKEND_FEATURES_COMPARISON}.md and recovered/research/*) by
+          clone-and-copy from sivo4kin/mnemonic-protocol@docs/usecases (variant A,
+          consistent with commit afa20da).
+      (2) Sanity-grep restored content against current core/ + mcp/ for stale claims
+          (SHA3, Python backend, mcp-server-rs, "pre-V1 prototype", HashEmbedder,
+          old crates, retired endpoints). Where found: delete outdated sections or
+          whole files (delete-outdated policy, no surgical rewrites). recovered/README.md
+          classification is authoritative for verbatim vs validated vs archived.
+      (3) Promote surviving docs to public docs/:
+          docs/usecases/ (10 + README), docs/competitive-landscape/ (3 surviving + README),
+          docs/research/ (3 + README), docs/historical/MCP_SERVER_BACKEND_FEATURES_COMPARISON.md.
+      (4) Targeted PK edits in .claude/skills/project-knowledge/references/: project.md
+          gains use-case role list with links; architecture.md links to
+          docs/competitive-landscape/; WHITEPAPER.md §9 expanded to cover all 10 use
+          cases with short descriptions linking to docs/usecases/ deep dives;
+          patterns.md untouched unless grep finds an issue.
+      (5) Append "Follow-up roadmap items" section to work/docs-actualization/decisions.md
+          with seed-descriptions of further-development directions surfaced by recovered docs
+          (encryption, ZK proofs, shared namespaces, etc.). No new user-specs spawned in this feature.
+      recovered/ kept as audit trail post-promotion with a note pointing to the promotion commit.
+      mnemonic-integrations and ai-tools-integration are out of scope.
+    gaps: ""
+    required: true
+
+  work_type:
+    score: 90
+    status: "complete"
+    value: "feature"  # documentation feature: new content shipping to public docs + PK edits
+    gaps: ""
+    required: true
+
+  user_problem:
+    score: 88
+    status: "complete"
+    value: |
+      Evergreen protocol knowledge written for the prototype repo
+      (sivo4kin/mnemonic-protocol) was destroyed and partially recovered into
+      .claude/skills/project-knowledge/recovered/. Without promoting evergreen items to
+      docs/ and folding insights into project-knowledge, the project loses positioning
+      context (A2A use cases, competitive landscape, TurboQuant rationale) and further
+      development drifts from documented intent. Goal: actualize protocol documentation
+      so docs/ reflects shipped Rust monorepo state, project-knowledge agents have
+      up-to-date positioning, and decisions.md follow-ups become a feed for future
+      tech-spec authors when they pick up encryption, ZK proofs, shared namespaces,
+      or reliability oracle work.
+    gaps: ""
+    required: true
+
+  target_users:
+    score: 50
+    status: "partial"
+    value: |
+      Primary: protocol contributors and AI agents reading project-knowledge to keep code aligned
+      with documented intent. Secondary: external developers/researchers reading docs/ for
+      positioning, competitive context, and use-case patterns. Tertiary: future automation/agents
+      working from decisions.md follow-ups.
+    gaps: ""
+    required: false
+
+  success_criteria:
+    score: 88
+    status: "complete"
+    value: |
+      1. All missing files restored: recovered/competitive-landscape/{DRAG_ANALYSIS,
+         WEB_RESEARCH_TRUSTLESS_RAG,DECENTRALIZED_RAG_LANDSCAPE,
+         MCP_SERVER_BACKEND_FEATURES_COMPARISON}.md and recovered/research/{TURBOQUANT_DEEP_ANALYSIS,
+         apply-to-agent-memory-architecture,condensed-principles}.md exist in tree.
+      2. Sanity-grep run against current core/ + mcp/ produces report; flagged
+         outdated sections deleted (or whole files dropped) per delete-outdated policy.
+      3. Promotion to docs/ complete:
+            docs/usecases/                 — 10 docs + README
+            docs/competitive-landscape/    — surviving subset + README
+            docs/research/                 — surviving subset + README
+            docs/historical/MCP_SERVER_BACKEND_FEATURES_COMPARISON.md
+      4. WHITEPAPER.md §9 expanded to cover all 10 use cases with short descriptions
+         linking to docs/usecases/ deep-dives. §10 and §13 reviewed for consistency
+         with new competitive-landscape/ and follow-ups; updated only if grep finds contradictions.
+      5. PK edits committed: project.md gains use-case role list with links;
+         architecture.md links to docs/competitive-landscape/.
+      6. work/docs-actualization/decisions.md has "Follow-up roadmap items" section
+         with seed-descriptions for each surfaced direction (1 paragraph each).
+      7. Validation gates pass: lychee --offline docs/ (zero broken links);
+         no occurrences of pinned stale terms (SHA3, mcp-server-rs, "pre-V1 prototype",
+         HashEmbedder, "Python backend") in docs/ except inside docs/historical/
+         and explicit lineage notes.
+      8. recovered/ retained with promotion note in recovered/README.md pointing to
+         the promotion commit hash.
+    gaps: ""
+    required: true
+
+  constraints:
+    score: 90
+    status: "complete"
+    value: |
+      - Source-of-truth for restoration: sivo4kin/mnemonic-protocol@docs/usecases
+        (commit 7a68a973 per recovered/README.md). Variant A: clone-and-copy.
+      - recovered/README.md classification is authoritative for verbatim vs validated
+        vs archived; the team trusts the upstream's already-applied edits.
+      - Delete-outdated, do-not-rewrite: where sanity-grep surfaces a stale claim, the
+        section (or whole file) is deleted, not surgically reworded. No line-by-line
+        manual review; only automated grep + targeted human attention to flagged hits.
+      - WHITEPAPER.md is editable in this feature (§9 expansion) but other sections
+        are only touched if grep shows contradictions.
+      - docs/ tree must remain link-clean (lychee gate). docs CI uses paths-ignore for
+        docs-only changes (per ci.yml after dd395fd) — this feature won't run cargo CI.
+      - No code changes in core/ or mcp/. No Cargo.toml edits.
+      - mnemonic-integrations and ai-tools-integration explicitly out of scope.
+    gaps: ""
+    required: true
+
+  testing_strategy:
+    score: 85
+    status: "complete"
+    value: |
+      No code tests (this is a docs-only feature). Three automated validation gates:
+      (1) lychee --offline docs/ — zero broken internal links.
+      (2) Markdownlint on changed files — config-default rules, advisory only if no
+          existing config in repo; otherwise blocking.
+      (3) Sanity-grep against current core/ + mcp/ for pinned stale terms (SHA3,
+          mcp-server-rs, "pre-V1 prototype", HashEmbedder, "Python backend",
+          "Pre-V1, prototype validated"); zero occurrences expected outside
+          docs/historical/. Output captured in work/docs-actualization/code-research.md.
+      Manual gate: PR review by feature owner of: (a) decisions.md follow-up bullets,
+      (b) WHITEPAPER §9 expansion, (c) PK edits. Per-file content review of recovered
+      docs is skipped (delete-outdated trust policy).
+    gaps: ""
+    required: true
+
+# ============================================================================
+# Phase 2: User Experience & Scenarios
+# ============================================================================
+phase2_user_experience:
+
+  user_stories:
+    score: 88
+    status: "complete"
+    value: |
+      1. External developer / researcher opens https://mnemonik.xyz docs (or browses
+         docs/ on GitHub), navigates docs/usecases/ to understand A2A integration patterns,
+         docs/competitive-landscape/ to compare with D-RAG / zkTAM, docs/research/ for
+         TurboQuant rationale. WHITEPAPER §9 gives them a one-page overview of all 10
+         use cases with deep-dive links.
+      2. Project-knowledge agent (loaded by skills like project-knowledge,
+         tech-spec-planning, code-writing) reads
+         .claude/skills/project-knowledge/references/{project,architecture,patterns}.md
+         and now sees a current use-case role list and competitive-landscape pointer,
+         so generated specs reference shipped Rust state instead of the prototype
+         (sivo4kin) state.
+      3. Future tech-spec author picks up a follow-up from
+         work/docs-actualization/decisions.md (e.g. browser-WASM verification UI),
+         reads the seed description, opens the linked recovered/ doc for context,
+         and starts a new user-spec via /new-user-spec.
+      4. Contributor reading docs/historical/MCP_SERVER_BACKEND_FEATURES_COMPARISON.md
+         understands the codebase consolidation decision (Python → Rust) without being
+         misled into thinking the Python backend is current.
+    gaps: ""
+    required: true
+
+  acceptance_criteria:
+    score: 92
+    status: "complete"
+    value: |
+      RESTORATION
+      - recovered/competitive-landscape/{DRAG_ANALYSIS,WEB_RESEARCH_TRUSTLESS_RAG,
+        DECENTRALIZED_RAG_LANDSCAPE,MCP_SERVER_BACKEND_FEATURES_COMPARISON}.md exist.
+      - recovered/research/{TURBOQUANT_DEEP_ANALYSIS,apply-to-agent-memory-architecture,
+        condensed-principles}.md exist.
+      - Restoration commits reference sivo4kin/mnemonic-protocol@docs/usecases (commit
+        7a68a973 or later equivalent).
+
+      VALIDATION
+      - work/docs-actualization/code-research.md exists, lists every sanity-grep hit for
+        SHA3, mcp-server-rs, "pre-V1 prototype", HashEmbedder, "Python backend" against
+        recovered/ contents, with a per-hit verdict (delete-section | drop-file | keep-as-historical).
+      - Each "drop-file" verdict triggered by ≥50% stale content rule.
+      - lychee --offline docs/ exits 0.
+      - grep -RE 'SHA3|mcp-server-rs|pre-V1 prototype|HashEmbedder|Python backend' docs/
+        returns matches only inside docs/historical/.
+
+      PROMOTION
+      - docs/usecases/ contains 10 use-case docs + README.
+      - docs/competitive-landscape/ contains the surviving subset + README.
+      - docs/research/ contains the surviving subset + a new README.
+      - docs/historical/MCP_SERVER_BACKEND_FEATURES_COMPARISON.md present with archive header.
+
+      DOCUMENTATION EDITS
+      - WHITEPAPER.md §9 lists all 10 use cases; each entry = 1-2 sentences + link to
+        docs/usecases/<file>.md.
+      - .claude/skills/project-knowledge/references/project.md has a "Use Case Roles"
+        section linking to docs/usecases/.
+      - .claude/skills/project-knowledge/references/architecture.md has a pointer
+        paragraph to docs/competitive-landscape/.
+      - patterns.md unchanged unless sanity-grep flagged something.
+
+      DECISIONS
+      - work/docs-actualization/decisions.md has "Follow-up roadmap items" section:
+        one detailed sub-section for "Browser-WASM verification UI" (problem, proposed
+        approach, dependencies, open questions, source-doc refs) and a bullet-list of
+        the 6 other candidates with short descriptions and source-doc refs, each marked
+        "for further validation".
+
+      AUDIT TRAIL
+      - recovered/README.md updated with "Promoted on <date> in commit <hash>" note.
+      - recovered/ tree retained; not deleted.
+    gaps: ""
+    required: true
+
+  edge_cases:
+    score: 90
+    status: "complete"
+    value: |
+      - Truncated upstream (TURBOQUANT_DEEP_ANALYSIS.md was cut mid-Mermaid in
+        sivo4kin@7a68a973): restore as-is with the upstream recovery note kept inline;
+        do not attempt to reconstruct.
+      - Sanity-grep flags ≥50% of a file as stale: drop the entire file. Log the
+        decision and the grep evidence in code-research.md. Do not commit a stub.
+      - sivo4kin upstream branch deleted/moved between recovery and now: pin to a
+        local clone snapshot in /tmp; if branch missing, fall back to whatever Git
+        ref still resolves and document the fallback in code-research.md.
+      - Merge conflict in docs/ during PR: docs/ has no concurrent feature work in
+        flight (verified at start of feature); regenerate from main if conflict
+        appears. Submodules untouched.
+      - WHITEPAPER §9 expansion contradicts §10 (Related Work) or §13 (Limitations):
+        prefer §9 phrasing (sourced from recovered/usecases/), update §10/§13 to
+        match. If §13 still mentions a limitation that recovered/usecases/ also flags
+        as a roadmap item, keep both — they reinforce.
+      - File classified VALIDATED in recovered/README.md but sanity-grep finds a stale
+        claim: trust the grep, not the README; delete the section (or drop the file
+        per ≥50% rule). Note disagreement in code-research.md.
+      - Drop conflict with archive: MCP_SERVER_BACKEND_FEATURES_COMPARISON.md is
+        explicitly classified ARCHIVED in recovered/README.md → goes to docs/historical/
+        verbatim with archive header, not subject to the >50% drop rule (archive
+        intent overrides).
+    gaps: ""
+    required: true
+
+  error_scenarios:
+    score: 88
+    status: "complete"
+    value: |
+      - lychee fails (broken internal link): blocks PR. Fix the link in the same
+        commit or revert the offending file move.
+      - markdownlint advisory failure: not blocking unless repo gains a config later.
+      - Sanity-grep finds zero stale terms: still emit code-research.md with explicit
+        "no stale terms detected" note + the grep commands run, so the audit trail
+        exists.
+      - User decides mid-feature to widen scope (e.g., "also restore IMPLEMENTATION_AUDIT.md
+        from sivo4kin@fix/restore-docs"): flagged as scope-creep, deferred to a new
+        feature; recorded in decisions.md as a follow-up bullet.
+      - Cloudflare Pages docs deploy fails on push to main: out-of-scope for this
+        feature (docs deploy infrastructure is in deployment.md, not this PR);
+        report and triage separately.
+    gaps: ""
+    required: true
+
+  verification_strategy:
+    score: 88
+    status: "complete"
+    value: |
+      Pre-merge (CI on PR):
+      - lychee --offline docs/ (zero broken internal links) — gating.
+      - markdownlint changed *.md files — advisory unless repo config exists.
+      - cargo CI not run (paths-ignore covers docs-only changes per ci.yml dd395fd).
+
+      Pre-merge (manual / locally):
+      - Re-run sanity-grep against current core/ + mcp/; commit refreshed
+        code-research.md if any new hit appears since last run.
+      - Spot-read: WHITEPAPER §9 expansion, PK edits, decisions.md follow-ups,
+        recovered/README.md promotion note. No per-file content review of docs/usecases/,
+        docs/competitive-landscape/, docs/research/ — delete-outdated trust policy.
+
+      Post-merge:
+      - Cloudflare Pages preview (per deployment.md) auto-rebuilds docs site;
+        spot-check landing.
+    gaps: ""
+    required: true
+
+  ui_ux_requirements:
+    score: 0
+    status: "pending"
+    value: "N/A — no UI work in this feature; webapp/ is unaffected."
+    gaps: ""
+    required: false
+
+  risks:
+    score: 90
+    status: "complete"
+    value: |
+      1. Scope creep into a doc-rewrite project. Mitigation: delete-outdated, no
+         surgical rewrites; recovered/README.md classification authoritative.
+      2. Factual error from partial validation: a stale claim survives because
+         sanity-grep terms list missed it. Mitigation: code-research.md is reviewable;
+         add terms to grep list as discovered. Acceptable residual risk for docs feature.
+      3. WHITEPAPER §9 expansion duplicates docs/usecases/ content. Mitigation:
+         §9 uses 1-2-sentence summaries + deep-dive links — accepted overlap pattern
+         (overview vs deep-dive).
+      4. decisions.md follow-ups misread as committed roadmap by future authors.
+         Mitigation: explicit "for further validation" tag on the bullet-list items;
+         only Browser-WASM verification UI gets full sub-section.
+      5. sivo4kin upstream branch disappears or rewrites history. Mitigation: pin
+         to local /tmp clone snapshot; restoration commits cite branch + commit hash.
+      6. Loss of staging audit trail if recovered/ is deleted prematurely.
+         Mitigation: explicit acceptance criterion that recovered/ is retained with
+         promotion note.
+      7. CI false-positive on lychee due to external links: lychee runs --offline
+         only; external link breakage is post-merge concern.
+    gaps: ""
+    required: true
+
+  technical_decisions:
+    score: 88
+    status: "complete"
+    value: |
+      - Restoration mechanism: clone-and-copy (variant A). Mirror commit afa20da's
+        approach for usecases/. Commit messages cite source branch + commit hash.
+      - Single feature branch feat/docs-actualization, ~10 atomic commits, one PR to dev.
+        PR title: feat(docs): actualize protocol documentation from recovered staging.
+      - No CODEOWNERS today → no automatic reviewer assignment.
+      - Delete-outdated > rewrite. ≥50% stale ⇒ drop entire file (ARCHIVED-classified
+        files exempt: they go to docs/historical/ verbatim with archive header).
+      - WHITEPAPER §9 expansion = 1-2 sentences + link per use case. §10 and §13
+        edited only if grep finds contradictions.
+      - decisions.md follow-ups: 1 detailed sub-section (Browser-WASM verification UI),
+        6-item bullet-list (encryption, ZK proofs, shared-namespaces, reliability oracle,
+        compressed shadow-index recall, lifecycle policy) flagged "for further validation".
+      - recovered/ kept post-promotion with promotion note in recovered/README.md.
+    gaps: ""
+    required: false
+
+  deploy_approach:
+    score: 80
+    status: "complete"
+    value: |
+      No new deploy infrastructure. Per deployment.md:
+      - docs/ auto-deploys to Cloudflare Pages on push to main (via the docs project),
+        no manual steps. Verify post-merge that the preview rebuilds.
+      - .claude/skills/project-knowledge/references/* edits load on next agent run
+        (no deploy).
+      - work/docs-actualization/* is local working state; no deploy concern.
+      cargo CI is skipped via paths-ignore for docs-only changes (dd395fd).
+    gaps: ""
+    required: false
+
+  manual_user_actions:
+    score: 80
+    status: "complete"
+    value: |
+      None during normal flow. One-time setup: developer must have a local
+      clone of sivo4kin/mnemonic-protocol available (or be able to clone it on
+      demand) so commit 7a68a973 (or branch docs/usecases) is reachable for restoration.
+      No new accounts, API keys, or external services.
+    gaps: ""
+    required: false
+
+# ============================================================================
+# Phase 3: Integration & Technical Context
+# ============================================================================
+phase3_integration:
+
+  integration_points:
+    score: 88
+    status: "complete"
+    value: |
+      - docs/WHITEPAPER.md ⇄ docs/usecases/: §9 entries cross-link to deep-dive files.
+      - docs/WHITEPAPER.md ⇄ docs/competitive-landscape/: §10 (Related Work) optionally
+        links if grep finds clear alignment; otherwise left untouched.
+      - .claude/skills/project-knowledge/references/project.md ⇄ docs/usecases/:
+        new "Use Case Roles" section links out.
+      - .claude/skills/project-knowledge/references/architecture.md ⇄
+        docs/competitive-landscape/: pointer paragraph links out.
+      - work/docs-actualization/decisions.md feeds future /new-tech-spec runs as
+        a roadmap-seed source; the Browser-WASM verification UI sub-section is the
+        first candidate for promotion to its own user-spec.
+      - recovered/ stays in .claude/skills/project-knowledge/recovered/ as audit trail
+        — referenced from promotion commits and from recovered/README.md.
+      - Cloudflare Pages docs project auto-rebuilds on push to main (deployment.md).
+    gaps: ""
+    required: true
+
+  dependencies:
+    score: 80
+    status: "complete"
+    value: |
+      Tooling needed locally and in CI:
+      - git (clone-and-copy + commits)
+      - lychee (link checker) — install in CI workflow if not present
+      - markdownlint (advisory, optional)
+      - ripgrep / grep (sanity-grep)
+      No code dependencies, no Cargo.toml or package.json edits.
+    gaps: ""
+    required: false
+
+  technical_constraints:
+    score: 85
+    status: "complete"
+    value: |
+      - No code changes in core/, mcp/, webapp/. No Cargo.toml or package.json edits.
+      - docs/ tree must remain link-clean (lychee gate).
+      - Stale-term grep against docs/ must yield zero hits outside docs/historical/.
+      - ci.yml paths-ignore (dd395fd) keeps cargo CI off; this feature must not
+        accidentally edit non-docs paths that would re-trigger the heavy CI.
+      - Conventional Commits with component scope (docs:, chore:) per patterns.md.
+      - Branch convention: feat/* from dev, PR back to dev.
+    gaps: ""
+    required: false
+
+  data_requirements:
+    score: 100
+    status: "complete"
+    value: "N/A — pure documentation feature; no data model, no DB, no migration."
+    gaps: ""
+    required: false
+
+  migration_needs:
+    score: 90
+    status: "complete"
+    value: |
+      No data migration. recovered/ folder retained as audit trail with a promotion
+      note in recovered/README.md pointing to the promotion commit hash. Future
+      cleanup (deleting recovered/ once docs are stable) deferred — out of scope.
+    gaps: ""
+    required: false
+
+# ============================================================================
+# Phase 4: Completion
+# ============================================================================
+phase4_completion:
+  userspec_file: "work/docs-actualization/user-spec.md"
+  status: "approved"
+
+# ============================================================================
+# Decision Rules
+# ============================================================================
+decision_rules:
+  required_threshold: 85
+  optional_threshold: 50
+  stop_criteria:
+    - "All required items in current cycle scope score >= 85%"
+    - "Structural: every required item has non-empty value, no TBD, gaps empty or conscious limitations"
+  priority_order:
+    - "Required items with score < 85% (lowest score first)"
+    - "Optional items mentioned by user in context"
+    - "Other optional items if user seems knowledgeable"
+  question_strategy:
+    - "3-4 questions per batch about different gaps"
+    - "Run as many batches as needed — batch size is NOT cycle limit"
+    - "Propose solutions based on PK, not just ask questions"
+    - "Challenge with substance: counterexamples, code references, unexplored scenarios"
+    - "After each response: update scores, values, gaps, conversation_history, save"
+
+# ============================================================================
+# Interview Progress
+# ============================================================================
+progress:
+  current_phase: "phase4_completion"
+  questions_asked: 9
+  last_question: "decisions.md follow-ups format and scope"
+  total_required_score: 0
+  total_optional_score: 0
+  completion_estimate: "95%"
+  user_detail_level: "moderate"
+
+# ============================================================================
+# Notes
+# ============================================================================
+notes: |
+  - Source-of-truth pin: sivo4kin/mnemonic-protocol@docs/usecases (commit 7a68a973 per recovered/README.md).
+  - Local clone available at /Users/syi/src/mnemonic-protocol; origin/docs/usecases HEAD verified
+    as 7a68a973 (matches pin). All 7 missing files present at docs/<filename> (flat).
+  - Restoration uses `git -C /Users/syi/src/mnemonic-protocol show origin/docs/usecases:docs/<file>`
+    instead of cloning to /tmp. No need to clone fresh.
+  - File mapping (upstream → recovered/):
+      docs/DRAG_ANALYSIS.md                       → recovered/competitive-landscape/
+      docs/WEB_RESEARCH_TRUSTLESS_RAG.md          → recovered/competitive-landscape/  [explicit keep]
+      docs/DECENTRALIZED_RAG_LANDSCAPE.md         → recovered/competitive-landscape/  [explicit keep, "field landscape"]
+      docs/MCP_SERVER_BACKEND_FEATURES_COMPARISON.md → DROPPED  [owner override; not restored, not archived]
+      docs/TURBOQUANT_DEEP_ANALYSIS.md            → recovered/research/                [explicit keep, truncated upstream]
+      docs/apply-to-agent-memory-architecture.md  → recovered/research/                [explicit keep]
+      docs/condensed-principles.md                → recovered/research/
+      <root>/Agent Identity for Autonomous AI_... → recovered/research/                [explicit keep, PDF]
+      research/paper.pdf                          → recovered/research/paper.pdf       [explicit keep, foundational scientific paper, ref in WHITEPAPER + README]
+      docs/MEMORY_EVICTION.md                     → recovered/problems/                [explicit keep, system problem]
+      docs/CONCURRENT_WRITERS.md                  → recovered/problems/                [explicit keep, multi-agent context]
+      docs/ARWEAVE_PRICING_VALIDATION.md          → recovered/problems/                [explicit keep, economic model]
+  - Out of scope (upstream files explicitly classified outdated by owner):
+      docs/CRITICAL_REVIEW.md       → drop; add follow-up bullet "redo critical review"
+      docs/MVP_SPEC.md, MVP_VERIFICATION.md, DEMO_SPEC.md, PROJECT_STATE.md,
+      v0/SCOPE.md, v1/V1_*.md (×9), v1.1/SCOPE.md,
+      mcp_server_rs/{API,SPEC}.md, diagrams/*.mmd, report.md → drop, not restored.
+  - Recovered/README.md classifies competitive-landscape items as VALIDATED/ARCHIVED.
+  - work/ai-tools-integration/research.md and work/mnemonic-integrations/research.md are out of scope —
+    they belong to mnemonic-integrations feature.
+  - docs CI: .github/workflows/ci.yml has paths-ignore for docs-only changes (per recent commit dd395fd).
+  - Upstream branch also contains additional content (CRITICAL_REVIEW.md, MEMORY_EVICTION.md,
+    CONCURRENT_WRITERS.md, SCHEMA.md, MVP_SPEC.md, v0/v1/v1.1 SCOPE docs, mcp_server_rs/{API,SPEC}.md,
+    diagrams/) — explicitly out of scope for this feature; can be considered as future restore.
