@@ -1,18 +1,8 @@
-import { useState, useRef, useEffect, useCallback } from "react";
+import { useRef, useEffect, useCallback, useState } from "react";
 import { sendChatMessage, ChatApiError } from "../lib/api";
+import type { Message } from "../App";
 
 const SESSION_MESSAGE_LIMIT = 50;
-
-interface Message {
-  id: string;
-  role: "user" | "bot";
-  content: string;
-  isError?: boolean;
-}
-
-function generateSessionId(): string {
-  return crypto.randomUUID();
-}
 
 function generateMessageId(): string {
   return crypto.randomUUID();
@@ -23,12 +13,7 @@ function containsTechnicalContent(text: string): boolean {
   return /[A-Fa-f0-9]{32,}|[1-9A-HJ-NP-Za-km-z]{32,}/.test(text);
 }
 
-/**
- * Renders message content. Wraps backtick-delimited code in monospace spans.
- * Falls back to monospace for the entire message if it contains hash-like content.
- */
 function MessageContent({ content }: { content: string }) {
-  // Split on inline code backticks
   const parts = content.split(/(`[^`]+`)/g);
   const hasCode = parts.length > 1;
 
@@ -58,26 +43,33 @@ function MessageContent({ content }: { content: string }) {
 
 interface ChatPageProps {
   onBack: () => void;
+  messages: Message[];
+  setMessages: React.Dispatch<React.SetStateAction<Message[]>>;
+  messageCount: number;
+  setMessageCount: React.Dispatch<React.SetStateAction<number>>;
+  sessionId: string;
 }
 
-export default function ChatPage({ onBack }: ChatPageProps) {
-  const [messages, setMessages] = useState<Message[]>([]);
+export default function ChatPage({
+  onBack,
+  messages,
+  setMessages,
+  messageCount,
+  setMessageCount,
+  sessionId,
+}: ChatPageProps) {
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
-  const [messageCount, setMessageCount] = useState(0);
-  const [sessionId] = useState(generateSessionId);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
   const isLimitReached = messageCount >= SESSION_MESSAGE_LIMIT;
 
-  // Auto-scroll to bottom on new messages
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
-  // Focus input on mount
   useEffect(() => {
     inputRef.current?.focus();
   }, []);
@@ -112,7 +104,6 @@ export default function ChatPage({ onBack }: ChatPageProps) {
       setMessageCount((prev) => prev + 1);
     } catch (err) {
       let errorText = "Unexpected error.";
-
       if (err instanceof ChatApiError) {
         errorText = err.message;
       }
@@ -129,7 +120,14 @@ export default function ChatPage({ onBack }: ChatPageProps) {
     } finally {
       setIsLoading(false);
     }
-  }, [input, isLoading, isLimitReached, sessionId]);
+  }, [
+    input,
+    isLoading,
+    isLimitReached,
+    sessionId,
+    setMessages,
+    setMessageCount,
+  ]);
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -143,7 +141,6 @@ export default function ChatPage({ onBack }: ChatPageProps) {
 
   return (
     <div className="flex h-screen flex-col bg-background">
-      {/* Header */}
       <header className="flex shrink-0 items-center justify-between border-b border-text-muted/20 px-6 py-4">
         <div className="flex items-center gap-3">
           <button
@@ -180,7 +177,6 @@ export default function ChatPage({ onBack }: ChatPageProps) {
         </span>
       </header>
 
-      {/* Messages area */}
       <div
         className="flex-1 overflow-y-auto px-4 py-6"
         role="log"
@@ -232,7 +228,6 @@ export default function ChatPage({ onBack }: ChatPageProps) {
         </div>
       </div>
 
-      {/* Session limit banner */}
       {isLimitReached && (
         <div
           className="border-t border-error/30 bg-error/10 px-6 py-3 text-center text-sm text-error"
@@ -242,7 +237,6 @@ export default function ChatPage({ onBack }: ChatPageProps) {
         </div>
       )}
 
-      {/* Input area */}
       <div className="shrink-0 border-t border-text-muted/20 px-4 py-4">
         <div className="mx-auto flex max-w-3xl gap-3">
           <textarea

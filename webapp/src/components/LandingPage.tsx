@@ -1,8 +1,115 @@
-interface LandingPageProps {
-  onStartChat: () => void;
+import { useState, useCallback, useRef, useEffect } from "react";
+import { sendChatMessage, ChatApiError } from "../lib/api";
+import type { Message } from "../App";
+
+const SESSION_MESSAGE_LIMIT = 50;
+
+function generateMessageId(): string {
+  return crypto.randomUUID();
 }
 
-function LandingPage({ onStartChat }: LandingPageProps) {
+interface LandingPageProps {
+  onStartChat: () => void;
+  messages: Message[];
+  setMessages: React.Dispatch<React.SetStateAction<Message[]>>;
+  messageCount: number;
+  setMessageCount: React.Dispatch<React.SetStateAction<number>>;
+  sessionId: string;
+  onNavigateToChat: () => void;
+}
+
+function LandingPage({
+  onStartChat,
+  messages,
+  setMessages,
+  messageCount,
+  setMessageCount,
+  sessionId,
+  onNavigateToChat,
+}: LandingPageProps) {
+  const [input, setInput] = useState("");
+  const [isLoading, setIsLoading] = useState(false);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
+
+  const isLimitReached = messageCount >= SESSION_MESSAGE_LIMIT;
+  const hasMessages = messages.length > 0;
+
+  useEffect(() => {
+    inputRef.current?.focus();
+  }, []);
+
+  const handleSend = useCallback(async () => {
+    const trimmed = input.trim();
+    if (!trimmed || isLoading || isLimitReached) return;
+
+    const userMessage: Message = {
+      id: generateMessageId(),
+      role: "user",
+      content: trimmed,
+    };
+
+    setMessages((prev) => [...prev, userMessage]);
+    setInput("");
+    setIsLoading(true);
+
+    // Navigate to chat view immediately on first message
+    if (!hasMessages) {
+      onStartChat();
+    }
+
+    try {
+      const response = await sendChatMessage({
+        message: trimmed,
+        session_id: sessionId,
+      });
+
+      const botMessage: Message = {
+        id: generateMessageId(),
+        role: "bot",
+        content: response.response,
+      };
+
+      setMessages((prev) => [...prev, botMessage]);
+      setMessageCount((prev) => prev + 1);
+    } catch (err) {
+      let errorText = "Unexpected error.";
+      if (err instanceof ChatApiError) {
+        errorText = err.message;
+      }
+
+      const errorMessage: Message = {
+        id: generateMessageId(),
+        role: "bot",
+        content: errorText,
+        isError: true,
+      };
+
+      setMessages((prev) => [...prev, errorMessage]);
+      setMessageCount((prev) => prev + 1);
+    } finally {
+      setIsLoading(false);
+    }
+  }, [
+    input,
+    isLoading,
+    isLimitReached,
+    sessionId,
+    hasMessages,
+    onStartChat,
+    setMessages,
+    setMessageCount,
+  ]);
+
+  const handleKeyDown = useCallback(
+    (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+      if (e.key === "Enter" && !e.shiftKey) {
+        e.preventDefault();
+        handleSend();
+      }
+    },
+    [handleSend]
+  );
+
   return (
     <main className="flex min-h-screen flex-col items-center justify-center px-4 py-12">
       <div className="w-full max-w-2xl space-y-10 text-center">
@@ -32,26 +139,7 @@ function LandingPage({ onStartChat }: LandingPageProps) {
             agents. It treats memory as a portable, signed artifact rather than
             an opaque database row: something an agent can{" "}
             <span className="font-mono text-accent-primary">recall</span>, carry
-            across systems, and prove has not been silently changed. Memories
-            can run fully locally for speed and development, or be persisted to
-            decentralized infrastructure so third parties can independently
-            verify integrity, authorship, and timestamped existence.
-          </p>
-
-          <p className="leading-relaxed text-text-primary">
-            Exposed through the{" "}
-            <span className="font-mono text-accent-primary">
-              Model Context Protocol (MCP)
-            </span>
-            , Mnemonic is usable by current agent clients over{" "}
-            <span className="font-mono text-text-muted">HTTP</span> or{" "}
-            <span className="font-mono text-text-muted">stdio</span>. The core
-            implementation provides tools for identity,{" "}
-            <span className="font-mono text-accent-primary">
-              memory signing
-            </span>
-            , verification, challenge signing, and{" "}
-            <span className="font-mono text-accent-primary">recall</span>.
+            across systems, and prove has not been silently changed.
           </p>
 
           <p className="leading-relaxed text-text-muted italic">
@@ -59,14 +147,41 @@ function LandingPage({ onStartChat }: LandingPageProps) {
           </p>
         </section>
 
+        {/* Chat input on landing page */}
+        <div className="mx-auto w-full max-w-2xl">
+          <div className="flex gap-3">
+            <textarea
+              ref={inputRef}
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={handleKeyDown}
+              disabled={isLoading || isLimitReached}
+              placeholder="Ask about the Mnemonic Protocol..."
+              rows={1}
+              className="flex-1 resize-none rounded-lg border border-text-muted/20 bg-white/5 px-4 py-3 text-sm text-text-primary placeholder-text-muted/50 outline-none transition-colors focus:border-accent-primary/50 disabled:cursor-not-allowed disabled:opacity-50"
+              aria-label="Message input"
+            />
+            <button
+              onClick={handleSend}
+              disabled={isLoading || isLimitReached || !input.trim()}
+              className="shrink-0 rounded-lg bg-accent-primary px-5 py-3 text-sm font-medium text-background transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
+              aria-label="Send message"
+            >
+              {isLoading ? "..." : "Ask"}
+            </button>
+          </div>
+          {hasMessages && (
+            <button
+              type="button"
+              onClick={onNavigateToChat}
+              className="mt-3 text-sm text-accent-primary transition-opacity hover:opacity-80"
+            >
+              Continue chat ({messages.length} messages)
+            </button>
+          )}
+        </div>
+
         <nav className="flex flex-col items-center gap-4 sm:flex-row sm:justify-center">
-          <button
-            type="button"
-            onClick={onStartChat}
-            className="rounded-md bg-accent-primary px-6 py-3 text-sm font-semibold text-background transition-opacity hover:opacity-90 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-primary"
-          >
-            Start chat
-          </button>
           <a
             href="/download-knowledge"
             download
