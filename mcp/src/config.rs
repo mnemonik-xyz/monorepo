@@ -57,6 +57,18 @@ pub struct Config {
     pub ollama_model: String,
     /// Directory where RAG artifacts (chunked knowledge .zip) are written.
     pub rag_chunk_dir: PathBuf,
+
+    // ── LLM provider (universal chat inference) ─────────────────────────────
+    /// Provider name: ollama, groq, openrouter, together, cerebras, openai, anthropic
+    pub llm_provider: String,
+    /// API key for the LLM provider (not needed for ollama).
+    pub llm_api_key: String,
+    /// Model override. If empty, uses the provider's default model.
+    pub llm_model: String,
+    /// API URL override. If empty, uses the provider's default base URL.
+    pub llm_api_url: String,
+    /// Maximum tokens for LLM responses.
+    pub llm_max_tokens: u32,
 }
 
 impl Config {
@@ -98,6 +110,11 @@ impl Config {
             ollama_url: env_or("OLLAMA_URL", "http://localhost:11434"),
             ollama_model: env_or("OLLAMA_MODEL", "qwen2.5:3b"),
             rag_chunk_dir: expand_path(&env_or("RAG_CHUNK_DIR", "./rag_chunks")),
+            llm_provider: env_or("LLM_PROVIDER", "ollama"),
+            llm_api_key: env_or("LLM_API_KEY", ""),
+            llm_model: env_or("LLM_MODEL", ""),
+            llm_api_url: env_or("LLM_API_URL", ""),
+            llm_max_tokens: env_or("LLM_MAX_TOKENS", "512").parse().unwrap_or(512),
         }
     }
 

@@ -147,3 +147,11 @@ Ran full pre-deploy QA verification. Results: **PASS**.
 **Key findings:** All critical backend paths tested at handler level (input validation, rate limiting, Ollama error propagation, download handler). Artifact generation verified with zip extraction test. Session limit E2E covers full 50-message flow. Docker Compose has 3 services with correct dependency chain and health checks. Ollama warm-up in entrypoint.sh addresses cold start requirement. Known deferred: SEC-06 (rate limiter IP extraction behind nginx proxy).
 
 Report: `work/mnemonic-webapp/logs/working/pre-deploy-qa-report.json`
+
+## Universal LLM Provider Abstraction
+
+Created `mcp/src/llm.rs` with a `LlmClient` struct supporting 7 providers via `LLM_PROVIDER` env var: ollama (local, no key), groq, openrouter, together, cerebras, openai (all OpenAI-compatible `/v1/chat/completions`), and anthropic (Messages API at `/v1/messages` with `x-api-key` + `anthropic-version` headers). Each provider has a default model and base URL; both are overridable via `LLM_MODEL` and `LLM_API_URL`. `LLM_MAX_TOKENS` caps response length (default 512). API key validation rejects empty keys for non-ollama providers at startup.
+
+`chat.rs` updated from direct Ollama `/api/generate` calls to `LlmClient::chat()` which dispatches to the correct API format. The shared `reqwest::Client` (with `redirect(Policy::none())` for SSRF prevention) is reused. Handler tests updated to mock `/v1/chat/completions` with OpenAI response format. 13 unit tests in `llm.rs` cover provider parsing, client construction validation, and request body structure for both OpenAI and Anthropic formats. All 55 MCP tests pass, clippy clean.
+
+Legacy `ollama_url`/`ollama_model` fields kept on `McpState` (marked `#[allow(dead_code)]`) for backward compatibility with OLLAMA_URL validation at startup. The OLLAMA_URL SSRF whitelist still runs but only applies when `LLM_PROVIDER=ollama` with default URL.

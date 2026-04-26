@@ -1,5 +1,6 @@
 mod chat;
 mod config;
+mod llm;
 mod mcp;
 mod payment;
 mod pricing;
@@ -443,6 +444,26 @@ async fn main() -> anyhow::Result<()> {
         governor::RateLimiter::keyed(quota)
     };
 
+    // ── LLM provider abstraction ────────────────────────────────────────────
+    let llm_client = llm::LlmClient::new(
+        &cfg.llm_provider,
+        &cfg.llm_api_key,
+        &cfg.llm_model,
+        &cfg.llm_api_url,
+        cfg.llm_max_tokens,
+    )
+    .unwrap_or_else(|e| {
+        tracing::error!("FATAL: {e}");
+        std::process::exit(1);
+    });
+    tracing::info!(
+        "LLM provider: {} (model: {}, url: {}, max_tokens: {})",
+        cfg.llm_provider,
+        llm_client.model,
+        llm_client.base_url,
+        llm_client.max_tokens,
+    );
+
     // Shared reqwest client for Ollama calls -- redirect(Policy::none()) for SSRF prevention (Decision 8).
     let ollama_client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
@@ -466,6 +487,7 @@ async fn main() -> anyhow::Result<()> {
         ollama_url: cfg.ollama_url.clone(),
         ollama_model: cfg.ollama_model.clone(),
         rag_chunk_dir: cfg.rag_chunk_dir.clone(),
+        llm_client,
         artifact_zip_path: std::sync::Mutex::new(None),
         ollama_client,
         chat_limiter,

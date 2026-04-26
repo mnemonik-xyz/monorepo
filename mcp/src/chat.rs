@@ -111,27 +111,22 @@ pub async fn chat_handler(
         "Do not make up information.",
     );
 
-    let full_prompt = format!(
-        "{system_prompt}\n\n\
-         --- Context ---\n\
+    let user_message = format!(
+        "--- Context ---\n\
          {context}\n\
          --- End Context ---\n\n\
          [USER_QUERY]{message}[/USER_QUERY]"
     );
 
-    // -- Call Ollama (shared client with redirect Policy::none() -- Decision 8) --
-    let ollama_url = format!("{}/api/generate", state.ollama_url.trim_end_matches('/'));
-
-    let ollama_body = serde_json::json!({
-        "model": state.ollama_model,
-        "prompt": full_prompt,
-        "stream": false,
-    });
-
-    let resp = match state.ollama_client.post(&ollama_url).json(&ollama_body).send().await {
-        Ok(r) => r,
+    // -- Call LLM provider (shared client with redirect Policy::none() -- Decision 8) --
+    let answer = match state
+        .llm_client
+        .chat(&state.ollama_client, system_prompt, &user_message)
+        .await
+    {
+        Ok(text) => text,
         Err(e) => {
-            tracing::error!("Ollama request failed: {e}");
+            tracing::error!("LLM request failed: {e}");
             return (
                 StatusCode::SERVICE_UNAVAILABLE,
                 Json(ChatError {
@@ -142,39 +137,6 @@ pub async fn chat_handler(
                 .into_response();
         }
     };
-
-    if !resp.status().is_success() {
-        let status = resp.status().as_u16();
-        tracing::warn!("Ollama returned status {status}");
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(ChatError {
-                error: format!("inference service returned status {status}"),
-                code: "service_unavailable".into(),
-            }),
-        )
-            .into_response();
-    }
-
-    let ollama_json: serde_json::Value = match resp.json().await {
-        Ok(v) => v,
-        Err(e) => {
-            tracing::error!("failed to parse Ollama response: {e}");
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ChatError {
-                    error: "failed to parse inference response".into(),
-                    code: "internal_error".into(),
-                }),
-            )
-                .into_response();
-        }
-    };
-
-    let answer = ollama_json["response"]
-        .as_str()
-        .unwrap_or("")
-        .to_string();
 
     (StatusCode::OK, Json(ChatSuccess { response: answer })).into_response()
 }
@@ -333,8 +295,8 @@ mod handler_tests {
         fn model_id(&self) -> &str { "stub-zero" }
     }
 
-    /// Build a test McpState pointing at the given Ollama URL.
-    fn build_test_state(ollama_url: &str) -> Arc<McpState> {
+    /// Build a test McpState pointing at the given LLM base URL.
+    fn build_test_state(llm_base_url: &str) -> Arc<McpState> {
         use governor::Quota;
         use std::num::NonZeroU32;
 
@@ -347,6 +309,15 @@ mod handler_tests {
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .unwrap();
+        // Use ollama provider with custom URL override so no API key is needed
+        let llm_client = crate::llm::LlmClient::new(
+            "ollama",
+            "",
+            "test-model",
+            llm_base_url,
+            512,
+        )
+        .unwrap();
 
         Arc::new(McpState {
             keypair: solana_sdk::signature::Keypair::new(),
@@ -362,9 +333,10 @@ mod handler_tests {
             pricing: crate::pricing::PricingEngine::new(0),
             sol_tx_fee_lamports: 0,
             storage_mode: "local".into(),
-            ollama_url: ollama_url.to_string(),
+            ollama_url: llm_base_url.to_string(),
             ollama_model: "test-model".into(),
             rag_chunk_dir: PathBuf::from("/tmp"),
+            llm_client,
             artifact_zip_path: std::sync::Mutex::new(None),
             ollama_client,
             chat_limiter,
@@ -450,10 +422,10 @@ mod handler_tests {
     // -- Ollama error handling tests --
 
     #[tokio::test]
-    async fn chat_ollama_error_returns_503() {
+    async fn chat_llm_error_returns_503() {
         let mock_server = MockServer::start();
         mock_server.mock(|when, then| {
-            when.method(httpmock::Method::POST).path("/api/generate");
+            when.method(httpmock::Method::POST).path("/v1/chat/completions");
             then.status(500)
                 .header("content-type", "application/json")
                 .body(r#"{"error":"internal"}"#);
@@ -467,7 +439,7 @@ mod handler_tests {
     }
 
     #[tokio::test]
-    async fn chat_ollama_timeout_returns_503() {
+    async fn chat_llm_timeout_returns_503() {
         // Point to a non-listening port to simulate timeout/connection refused.
         let state = build_test_state("http://127.0.0.1:1");
         let app = build_app(state);
@@ -477,20 +449,20 @@ mod handler_tests {
     }
 
     #[tokio::test]
-    async fn chat_ollama_success_returns_200() {
+    async fn chat_llm_success_returns_200() {
         let mock_server = MockServer::start();
         mock_server.mock(|when, then| {
-            when.method(httpmock::Method::POST).path("/api/generate");
+            when.method(httpmock::Method::POST).path("/v1/chat/completions");
             then.status(200)
                 .header("content-type", "application/json")
-                .body(r#"{"response":"Test answer from Ollama"}"#);
+                .body(r#"{"choices":[{"message":{"content":"Test answer from LLM"}}]}"#);
         });
 
         let state = build_test_state(&mock_server.base_url());
         let app = build_app(state);
         let (status, body) = post_chat(app, serde_json::json!({"message": "hello"})).await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(body["response"], "Test answer from Ollama");
+        assert_eq!(body["response"], "Test answer from LLM");
     }
 
     // -- Download handler tests --

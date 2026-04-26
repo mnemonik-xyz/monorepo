@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use solana_sdk::signature::Keypair;
 
-use crate::{pricing::PricingEngine, tools};
+use crate::{llm::LlmClient, pricing::PricingEngine, tools};
 use mnemonic_core::arweave::ArweaveClient;
 use mnemonic_core::compress::EmbeddingCompressor;
 use mnemonic_core::embed::Embedder;
@@ -71,8 +71,12 @@ pub struct McpState {
 
     // Ollama / RAG (used by chat.rs and seed.rs in Tasks 2-3)
     /// Validated Ollama API base URL (e.g. "http://localhost:11434").
+    /// Kept for backward compatibility with OLLAMA_URL validation and seed.rs.
+    #[allow(dead_code)]
     pub ollama_url: String,
     /// Ollama model name for chat inference (e.g. "qwen2.5:3b").
+    /// Kept for backward compatibility; chat now uses llm_client.model.
+    #[allow(dead_code)]
     pub ollama_model: String,
     /// Directory where RAG artifacts (chunked knowledge .zip) are written.
     #[allow(dead_code)]
@@ -80,6 +84,8 @@ pub struct McpState {
     /// Absolute canonical path to the pre-built knowledge artifact .zip file.
     /// Set by seed::run() at startup; used by the /download-knowledge handler.
     pub artifact_zip_path: std::sync::Mutex<Option<std::path::PathBuf>>,
+    /// Universal LLM client for chat inference (replaces direct Ollama calls).
+    pub llm_client: LlmClient,
     /// Shared reqwest client for Ollama HTTP calls (connection pooling,
     /// redirect Policy::none() for SSRF prevention -- Decision 8).
     pub ollama_client: reqwest::Client,
