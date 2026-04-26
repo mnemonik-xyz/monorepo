@@ -3,7 +3,19 @@ name: CI
 on:
   push:
     branches: [main, dev]
+    paths-ignore:
+      - '*.md'
+      - 'docs/**'
+      - 'work/**'
+      - '.claude/**'
+      - 'LICENSE'
   pull_request:
+    paths-ignore:
+      - '*.md'
+      - 'docs/**'
+      - 'work/**'
+      - '.claude/**'
+      - 'LICENSE'
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -47,11 +59,6 @@ jobs:
         with:
           shared-key: workspace
       - run: cargo test --workspace --no-fail-fast
-
-  # NOTE: mcp local-mode round-trip (sign_memory → recall over stdio) is not
-  # run in PR gates because it requires either the `local-embed` feature (pulls
-  # a ~22MB fastembed ONNX model at runtime) or OPENAI_API_KEY. It belongs in a
-  # dedicated release workflow with a model cache — tracked as a follow-up.
 
   gitleaks:
     name: gitleaks
