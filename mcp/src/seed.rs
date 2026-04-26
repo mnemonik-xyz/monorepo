@@ -177,6 +177,16 @@ pub async fn run(state: &McpState) -> Result<()> {
             tracing::info!(
                 "RAG seeding skipped: store already has {count} attestation(s) for {pubkey}"
             );
+            // Still set artifact path if the zip exists on disk
+            let artifact_dir = std::path::Path::new(&state.rag_chunk_dir);
+            let zip_path = artifact_dir.join("protocol-knowledge.zip");
+            if zip_path.exists() {
+                if let Ok(canonical) = zip_path.canonicalize() {
+                    let mut path_guard = state.artifact_zip_path.lock().unwrap();
+                    *path_guard = Some(canonical.clone());
+                    tracing::info!("Artifact path set: {}", canonical.display());
+                }
+            }
             return Ok(());
         }
     }
