@@ -91,12 +91,204 @@ Time: ~5–10 minutes.
 
 ## Environments
 
-**Production:** crates.io + npm + GitHub Releases + Cloudflare Pages — from `main`.
-**Preview:** Cloudflare Pages preview URLs — from PRs.
-**Local dev:** Prerequisites: Rust toolchain, wasm-pack, Node.js, Ollama running with Qwen2.5-7B-Instruct pulled.
-1. `cd core && wasm-pack build --target web` — build WASM package (required before webapp dev server)
-2. `cd mcp && STORAGE_MODE=local cargo run` — start MCP server in local mode (no funded keypair needed)
-3. `cd webapp && npm install && npm run dev` — start webapp dev server
+**Production VPS (mnemonik.xyz):** justhost.asia, 4 vCPU / 4GB RAM / 120GB NVMe, user `claude`.
+**Preview:** Cloudflare Pages preview URLs — from PRs (future).
+**Local dev:** Prerequisites: Rust toolchain, Node.js, Ollama with qwen2.5:3b pulled.
+1. `cd mcp && STORAGE_MODE=local OLLAMA_URL=http://localhost:11434 OLLAMA_MODEL=qwen2.5:3b cargo run --features local-embed` — start MCP server
+2. `cd webapp && npm install && npm run dev` — start webapp dev server (Vite proxies /api to localhost:3000)
+
+---
+
+## VPS Deploy Process (150.251.147.215 / mnemonik.xyz)
+
+### Architecture
+
+Hybrid deploy: native MCP binary + Docker Ollama + native nginx.
+
+```
+Internet → nginx (:80/:443) → proxy to MCP (:3000) → Ollama (:11434, Docker)
+                             → static files (webapp/dist/)
+```
+
+### Server Setup (one-time)
+
+```bash
+# SSH access
+ssh claude@150.251.147.215
+
+# 1. Swap (4GB on NVMe — required for 4GB RAM server)
+sudo fallocate -l 4G /swapfile && sudo chmod 600 /swapfile
+sudo mkswap /swapfile && sudo swapon /swapfile
+echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
+
+# 2. Docker (for Ollama)
+sudo apt-get update
+sudo apt-get install -y ca-certificates curl
+sudo install -m 0755 -d /etc/apt/keyrings
+sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo $VERSION_CODENAME) stable" | sudo tee /etc/apt/sources.list.d/docker.list
+sudo apt-get update && sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+sudo usermod -aG docker claude
+
+# 3. Rust toolchain (for building MCP binary)
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+source ~/.cargo/env
+sudo apt-get install -y pkg-config libssl-dev g++
+
+# 4. Node.js (for building webapp)
+curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
+sudo apt-get install -y nodejs
+
+# 5. nginx
+sudo apt-get install -y nginx certbot python3-certbot-nginx
+```
+
+### Deploy Steps
+
+```bash
+ssh claude@150.251.147.215
+
+# 1. Clone/pull repo
+cd /home/claude
+git clone https://github.com/mnemonik-xyz/monorepo.git  # first time
+# or: cd monorepo && git pull origin main                # updates
+
+cd /home/claude/monorepo
+
+# 2. Build MCP binary (native, with fastembed)
+source ~/.cargo/env
+cargo build --release -p mnemonic-mcp --features local-embed
+
+# 3. Build webapp
+cd webapp && npm install && npm run build && cd ..
+
+# 4. Build Ollama Docker image (pre-pulls model)
+# Note: edit ollama/Dockerfile to set correct model (qwen2.5:1.5b or qwen2.5:3b)
+docker build -t monorepo-ollama ollama/
+
+# 5. Start Ollama container
+docker run -d --name ollama --restart unless-stopped \
+  -p 11434:11434 -v ollama-data:/root/.ollama monorepo-ollama
+
+# 6. Generate keypair (first deploy only)
+mkdir -p keypair
+docker run --rm --entrypoint /bin/sh \
+  -v $(pwd)/keypair:/run/secrets/keypair \
+  -e MNEMONIC_KEYPAIR_PATH=/run/secrets/keypair/id.json \
+  -e DATABASE_PATH=/tmp/test.db -e MCP_TRANSPORT=http \
+  -e STORAGE_MODE=local -e EMBED_PROVIDER=fastembed \
+  -e OLLAMA_URL=http://localhost:11434 \
+  monorepo-mcp -c 'timeout 10 mnemonic-mcp --transport http 2>&1 || true'
+
+# 7. Create env file
+cat > /home/claude/mcp.env << 'EOF'
+MNEMONIC_KEYPAIR_PATH=/home/claude/monorepo/keypair/id.json
+DATABASE_PATH=/home/claude/data/attestations.db
+STORAGE_MODE=local
+EMBED_PROVIDER=fastembed
+TURBO_BITS=4
+MCP_TRANSPORT=http
+MCP_HTTP_PORT=3000
+PAYMENT_MODE=none
+OLLAMA_URL=http://localhost:11434
+OLLAMA_MODEL=qwen2.5:1.5b
+RAG_CHUNK_DIR=/home/claude/data/rag_chunks
+RUST_LOG=info
+EOF
+mkdir -p /home/claude/data
+
+# 8. Create systemd service (first deploy only)
+sudo tee /etc/systemd/system/mnemonic-mcp.service << 'EOF'
+[Unit]
+Description=Mnemonic MCP Server
+After=network.target docker.service
+Wants=docker.service
+[Service]
+Type=simple
+User=claude
+WorkingDirectory=/home/claude/monorepo
+EnvironmentFile=/home/claude/mcp.env
+ExecStart=/home/claude/monorepo/target/release/mnemonic-mcp --transport http --port 3000
+Restart=on-failure
+RestartSec=5
+[Install]
+WantedBy=multi-user.target
+EOF
+sudo systemctl daemon-reload && sudo systemctl enable mnemonic-mcp
+
+# 9. Start/restart MCP
+sudo systemctl restart mnemonic-mcp
+
+# 10. Configure nginx (first deploy only)
+sudo tee /etc/nginx/sites-available/mnemonic << 'NGINX'
+server {
+    listen 80;
+    server_name mnemonik.xyz;
+    root /home/claude/monorepo/webapp/dist;
+    index index.html;
+    location / { try_files $uri $uri/ /index.html; }
+    location /mcp { proxy_pass http://127.0.0.1:3000; proxy_set_header Host $host; proxy_set_header X-Real-IP $remote_addr; }
+    location /chat { proxy_pass http://127.0.0.1:3000; proxy_set_header Host $host; proxy_set_header X-Real-IP $remote_addr; proxy_read_timeout 120s; }
+    location /download-knowledge { proxy_pass http://127.0.0.1:3000; proxy_set_header Host $host; }
+    location /health { proxy_pass http://127.0.0.1:3000; }
+    location /admin { return 403; }
+}
+NGINX
+sudo ln -sf /etc/nginx/sites-available/mnemonic /etc/nginx/sites-enabled/mnemonic
+sudo rm -f /etc/nginx/sites-enabled/default
+chmod 755 /home/claude /home/claude/monorepo /home/claude/monorepo/webapp/dist
+sudo nginx -t && sudo systemctl reload nginx
+
+# 11. SSL (after DNS points to VPS)
+sudo certbot --nginx -d mnemonik.xyz --non-interactive --agree-tos --email bogdan.sivochkin@gmail.com
+```
+
+### Update Deploy (after code changes)
+
+```bash
+ssh claude@150.251.147.215
+cd /home/claude/monorepo && git pull origin main
+source ~/.cargo/env && cargo build --release -p mnemonic-mcp --features local-embed
+cd webapp && npm install && npm run build && cd ..
+sudo systemctl restart mnemonic-mcp
+```
+
+### Key Paths
+
+| Path | Purpose |
+|------|---------|
+| `/home/claude/monorepo/` | Git repo |
+| `/home/claude/monorepo/target/release/mnemonic-mcp` | MCP binary |
+| `/home/claude/monorepo/webapp/dist/` | Static webapp build |
+| `/home/claude/monorepo/keypair/id.json` | Ed25519 keypair (pubkey: DYVu4Bry3BzGVsR3Hj2iGVT5fNdWFoHw2zRxsdTmrG25) |
+| `/home/claude/mcp.env` | Environment variables |
+| `/home/claude/data/attestations.db` | SQLite database |
+| `/home/claude/data/rag_chunks/protocol-knowledge.zip` | Downloadable knowledge artifact |
+| `/etc/nginx/sites-available/mnemonic` | nginx config |
+| `/etc/systemd/system/mnemonic-mcp.service` | systemd service |
+
+### Troubleshooting
+
+```bash
+# Check service status
+sudo systemctl status mnemonic-mcp
+docker ps  # Ollama container
+
+# Logs
+journalctl -u mnemonic-mcp -f          # MCP server logs
+docker logs ollama --tail 50            # Ollama logs
+sudo tail -f /var/log/nginx/error.log   # nginx logs
+
+# Health checks
+curl http://localhost:3000/health               # MCP direct
+curl http://localhost:11434/api/tags            # Ollama models
+curl https://mnemonik.xyz/health                # via nginx+SSL
+```
+
+### Known Issues
+
+- **LLM response slow (30-60s):** 4GB RAM VPS with qwen2.5:1.5b on CPU. Upgrade VPS to 8GB+ RAM and use qwen2.5:3b or 7b for faster responses.
+- **Dockerfile local-embed:** `rust:1-slim` base image needs `g++` (`libstdc++`) for fastembed/ONNX. Native build on VPS avoids this.
 
 ---
 
