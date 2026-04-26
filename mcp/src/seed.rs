@@ -142,10 +142,7 @@ fn split_at_h3(parent_heading: &str, body: &str) -> Vec<Section> {
 /// Locate the whitepaper relative to the project root. Tries several paths
 /// so the binary works from the repo root or from `mcp/`.
 fn find_whitepaper() -> Result<PathBuf> {
-    let candidates = [
-        "docs/WHITEPAPER.md",
-        "../docs/WHITEPAPER.md",
-    ];
+    let candidates = ["docs/WHITEPAPER.md", "../docs/WHITEPAPER.md"];
     for candidate in &candidates {
         let path = PathBuf::from(candidate);
         if path.exists() {
@@ -159,10 +156,7 @@ fn find_whitepaper() -> Result<PathBuf> {
             return Ok(path.canonicalize()?);
         }
     }
-    anyhow::bail!(
-        "docs/WHITEPAPER.md not found. Tried: {:?}",
-        candidates
-    )
+    anyhow::bail!("docs/WHITEPAPER.md not found. Tried: {:?}", candidates)
 }
 
 /// Run the RAG seeding routine. Idempotent: skips if store already has entries.
@@ -205,10 +199,7 @@ pub async fn run(state: &McpState) -> Result<()> {
 
     tracing::info!("RAG seeding: {} chunks to sign", sections.len());
 
-    let tags = vec![
-        "protocol-knowledge".to_string(),
-        "whitepaper".to_string(),
-    ];
+    let tags = vec!["protocol-knowledge".to_string(), "whitepaper".to_string()];
 
     // sign_memory needs a CostHint even in local mode (values are ignored)
     let cost_hint = CostHint {
@@ -246,17 +237,11 @@ pub async fn run(state: &McpState) -> Result<()> {
         signed_chunks.push(SignedChunk {
             heading: section.heading.clone(),
             content: chunk_content,
-            content_hash: result["content_hash"]
-                .as_str()
-                .unwrap_or("")
-                .to_string(),
+            content_hash: result["content_hash"].as_str().unwrap_or("").to_string(),
             signer_pubkey: result["signer"].as_str().unwrap_or("").to_string(),
             timestamp: result["timestamp"].as_str().unwrap_or("").to_string(),
             arweave_tx: result["arweave_tx"].as_str().unwrap_or("").to_string(),
-            attestation_id: result["attestation_id"]
-                .as_str()
-                .unwrap_or("")
-                .to_string(),
+            attestation_id: result["attestation_id"].as_str().unwrap_or("").to_string(),
         });
 
         tracing::debug!("RAG seeding: signed chunk {}/{}", i + 1, sections.len());
@@ -424,7 +409,11 @@ Design goals overview paragraph.
         let sections = parse_whitepaper(SAMPLE_WHITEPAPER, 5000);
         // Should have: preamble (before Abstract), Abstract, 1. Introduction, 3. Design Goals
         // Preamble has heading="" but has body "# Title\n\nSome preamble text."
-        assert!(sections.len() >= 3, "expected at least 3 sections, got {}", sections.len());
+        assert!(
+            sections.len() >= 3,
+            "expected at least 3 sections, got {}",
+            sections.len()
+        );
 
         let headings: Vec<&str> = sections.iter().map(|s| s.heading.as_str()).collect();
         assert!(headings.contains(&"Abstract"));
@@ -482,7 +471,10 @@ Design goals overview paragraph.
         let body = "Preamble text.\n\n### Sub A\n\nContent A\n\n### Sub B\n\nContent B";
         let subs = split_at_h3("Parent", body);
         assert_eq!(subs.len(), 2);
-        assert!(subs[0].body.contains("Preamble text."), "preamble should be prepended to first sub");
+        assert!(
+            subs[0].body.contains("Preamble text."),
+            "preamble should be prepended to first sub"
+        );
         assert!(subs[0].heading.contains("Sub A"));
         assert!(subs[1].heading.contains("Sub B"));
     }
@@ -567,7 +559,8 @@ Design goals overview paragraph.
 
     #[test]
     fn parse_does_not_confuse_h3_for_h2() {
-        let input = "## Section A\n\nSome text.\n\n### Sub 1\n\nSub content.\n\n## Section B\n\nMore text.";
+        let input =
+            "## Section A\n\nSome text.\n\n### Sub 1\n\nSub content.\n\n## Section B\n\nMore text.";
         let sections = parse_whitepaper(input, 5000);
         let headings: Vec<&str> = sections.iter().map(|s| s.heading.as_str()).collect();
         // h3 "### Sub 1" must NOT create a separate h2-level section

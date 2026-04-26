@@ -93,9 +93,7 @@ impl LlmClient {
         let prov = LlmProvider::from_str(provider)?;
 
         if prov.requires_api_key() && api_key.is_empty() {
-            return Err(format!(
-                "LLM_API_KEY is required for provider '{provider}'"
-            ));
+            return Err(format!("LLM_API_KEY is required for provider '{provider}'"));
         }
 
         let resolved_model = if model.is_empty() {
@@ -177,9 +175,10 @@ impl LlmClient {
             req = req.bearer_auth(&self.api_key);
         }
 
-        let resp = req.send().await.map_err(|e| {
-            format!("LLM request failed ({}): {e}", self.provider_name())
-        })?;
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| format!("LLM request failed ({}): {e}", self.provider_name()))?;
 
         if !resp.status().is_success() {
             let status = resp.status().as_u16();
@@ -191,7 +190,10 @@ impl LlmClient {
         }
 
         let json: Value = resp.json().await.map_err(|e| {
-            format!("failed to parse LLM response ({}): {e}", self.provider_name())
+            format!(
+                "failed to parse LLM response ({}): {e}",
+                self.provider_name()
+            )
         })?;
 
         // OpenAI format: choices[0].message.content
@@ -235,9 +237,10 @@ impl LlmClient {
             ));
         }
 
-        let json: Value = resp.json().await.map_err(|e| {
-            format!("failed to parse LLM response (anthropic): {e}")
-        })?;
+        let json: Value = resp
+            .json()
+            .await
+            .map_err(|e| format!("failed to parse LLM response (anthropic): {e}"))?;
 
         // Anthropic format: content[0].text
         json["content"][0]["text"]
@@ -272,19 +275,40 @@ mod tests {
 
     #[test]
     fn parse_all_providers() {
-        assert_eq!(LlmProvider::from_str("ollama").unwrap(), LlmProvider::Ollama);
+        assert_eq!(
+            LlmProvider::from_str("ollama").unwrap(),
+            LlmProvider::Ollama
+        );
         assert_eq!(LlmProvider::from_str("groq").unwrap(), LlmProvider::Groq);
-        assert_eq!(LlmProvider::from_str("openrouter").unwrap(), LlmProvider::OpenRouter);
-        assert_eq!(LlmProvider::from_str("together").unwrap(), LlmProvider::Together);
-        assert_eq!(LlmProvider::from_str("cerebras").unwrap(), LlmProvider::Cerebras);
-        assert_eq!(LlmProvider::from_str("openai").unwrap(), LlmProvider::OpenAi);
-        assert_eq!(LlmProvider::from_str("anthropic").unwrap(), LlmProvider::Anthropic);
+        assert_eq!(
+            LlmProvider::from_str("openrouter").unwrap(),
+            LlmProvider::OpenRouter
+        );
+        assert_eq!(
+            LlmProvider::from_str("together").unwrap(),
+            LlmProvider::Together
+        );
+        assert_eq!(
+            LlmProvider::from_str("cerebras").unwrap(),
+            LlmProvider::Cerebras
+        );
+        assert_eq!(
+            LlmProvider::from_str("openai").unwrap(),
+            LlmProvider::OpenAi
+        );
+        assert_eq!(
+            LlmProvider::from_str("anthropic").unwrap(),
+            LlmProvider::Anthropic
+        );
     }
 
     #[test]
     fn parse_case_insensitive() {
         assert_eq!(LlmProvider::from_str("GROQ").unwrap(), LlmProvider::Groq);
-        assert_eq!(LlmProvider::from_str("Anthropic").unwrap(), LlmProvider::Anthropic);
+        assert_eq!(
+            LlmProvider::from_str("Anthropic").unwrap(),
+            LlmProvider::Anthropic
+        );
     }
 
     #[test]
@@ -319,7 +343,14 @@ mod tests {
 
     #[test]
     fn new_custom_model_and_url() {
-        let client = LlmClient::new("openai", "sk-test", "gpt-4", "https://custom.api.com/", 1024).unwrap();
+        let client = LlmClient::new(
+            "openai",
+            "sk-test",
+            "gpt-4",
+            "https://custom.api.com/",
+            1024,
+        )
+        .unwrap();
         assert_eq!(client.model, "gpt-4");
         assert_eq!(client.base_url, "https://custom.api.com");
         assert_eq!(client.max_tokens, 1024);

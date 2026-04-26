@@ -163,9 +163,7 @@ fn build_context(recall: &serde_json::Value) -> String {
 
 // ── GET /download-knowledge ──────────────────────────────────────────────────
 
-pub async fn download_knowledge_handler(
-    State(state): State<Arc<McpState>>,
-) -> Response {
+pub async fn download_knowledge_handler(State(state): State<Arc<McpState>>) -> Response {
     let zip_path = {
         let guard = state.artifact_zip_path.lock().unwrap();
         guard.clone()
@@ -268,14 +266,16 @@ mod tests {
         assert!(ctx.contains("[Chunk 2]"));
         assert!(ctx.contains("Real content"));
     }
-
 }
 
 /// Handler-level tests using tower::ServiceExt with httpmock for Ollama.
 #[cfg(test)]
 mod handler_tests {
     use super::*;
-    use axum::{routing::{get, post}, Router};
+    use axum::{
+        routing::{get, post},
+        Router,
+    };
     use http_body_util::BodyExt;
     use httpmock::MockServer;
     use mnemonic_core::arweave::ArweaveClient;
@@ -289,10 +289,18 @@ mod handler_tests {
     /// Minimal embedder for handler tests. Returns zero vectors.
     struct StubEmbedder;
     impl Embedder for StubEmbedder {
-        fn embed(&self, _text: &str) -> Vec<f32> { vec![0.0; 8] }
-        fn dim(&self) -> usize { 8 }
-        fn provider_name(&self) -> &str { "stub" }
-        fn model_id(&self) -> &str { "stub-zero" }
+        fn embed(&self, _text: &str) -> Vec<f32> {
+            vec![0.0; 8]
+        }
+        fn dim(&self) -> usize {
+            8
+        }
+        fn provider_name(&self) -> &str {
+            "stub"
+        }
+        fn model_id(&self) -> &str {
+            "stub-zero"
+        }
     }
 
     /// Build a test McpState pointing at the given LLM base URL.
@@ -310,14 +318,8 @@ mod handler_tests {
             .build()
             .unwrap();
         // Use ollama provider with custom URL override so no API key is needed
-        let llm_client = crate::llm::LlmClient::new(
-            "ollama",
-            "",
-            "test-model",
-            llm_base_url,
-            512,
-        )
-        .unwrap();
+        let llm_client =
+            crate::llm::LlmClient::new("ollama", "", "test-model", llm_base_url, 512).unwrap();
 
         Arc::new(McpState {
             keypair: solana_sdk::signature::Keypair::new(),
@@ -416,7 +418,11 @@ mod handler_tests {
         let app = build_app(state);
         let exact_msg: String = "a".repeat(2000);
         let (status, _body) = post_chat(app, serde_json::json!({"message": exact_msg})).await;
-        assert_ne!(status, StatusCode::BAD_REQUEST, "2000-char message should pass validation");
+        assert_ne!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "2000-char message should pass validation"
+        );
     }
 
     // -- Ollama error handling tests --
@@ -425,7 +431,8 @@ mod handler_tests {
     async fn chat_llm_error_returns_503() {
         let mock_server = MockServer::start();
         mock_server.mock(|when, then| {
-            when.method(httpmock::Method::POST).path("/v1/chat/completions");
+            when.method(httpmock::Method::POST)
+                .path("/v1/chat/completions");
             then.status(500)
                 .header("content-type", "application/json")
                 .body(r#"{"error":"internal"}"#);
@@ -452,7 +459,8 @@ mod handler_tests {
     async fn chat_llm_success_returns_200() {
         let mock_server = MockServer::start();
         mock_server.mock(|when, then| {
-            when.method(httpmock::Method::POST).path("/v1/chat/completions");
+            when.method(httpmock::Method::POST)
+                .path("/v1/chat/completions");
             then.status(200)
                 .header("content-type", "application/json")
                 .body(r#"{"choices":[{"message":{"content":"Test answer from LLM"}}]}"#);
@@ -504,10 +512,20 @@ mod handler_tests {
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
 
-        let content_type = resp.headers().get("content-type").unwrap().to_str().unwrap();
+        let content_type = resp
+            .headers()
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap();
         assert_eq!(content_type, "application/zip");
 
-        let disposition = resp.headers().get("content-disposition").unwrap().to_str().unwrap();
+        let disposition = resp
+            .headers()
+            .get("content-disposition")
+            .unwrap()
+            .to_str()
+            .unwrap();
         assert!(disposition.contains("attachment"));
 
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();

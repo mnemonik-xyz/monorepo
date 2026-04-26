@@ -399,7 +399,11 @@ async fn main() -> anyhow::Result<()> {
         tracing::error!("FATAL: {msg}");
         std::process::exit(1);
     }
-    tracing::info!("Ollama URL: {} (model: {})", cfg.ollama_url, cfg.ollama_model);
+    tracing::info!(
+        "Ollama URL: {} (model: {})",
+        cfg.ollama_url,
+        cfg.ollama_model
+    );
     tracing::info!("RAG chunk dir: {}", cfg.rag_chunk_dir.display());
 
     // ── Pricing engine ────────────────────────────────────────────────────────
@@ -562,10 +566,7 @@ async fn run_http(state: Arc<mcp::McpState>, host: &str, port: u16) -> anyhow::R
         .route("/balance", get(get_balance))
         .route("/deposit", post(deposit))
         .route("/admin/stats", get(admin_stats))
-        .route(
-            "/download-knowledge",
-            get(chat::download_knowledge_handler),
-        )
+        .route("/download-knowledge", get(chat::download_knowledge_handler))
         .route(
             "/health",
             get(|| async { Json(serde_json::json!({"status": "ok"})) }),

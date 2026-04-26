@@ -134,14 +134,11 @@ impl Config {
 /// Rejects HTTPS (Ollama is always plain HTTP on a local/Docker network),
 /// other hostnames, and malformed URLs.
 fn validate_ollama_url(url: &str) -> Result<(), String> {
-    let parsed = url::Url::parse(url).map_err(|e| {
-        format!("OLLAMA_URL is not a valid URL ({url}): {e}")
-    })?;
+    let parsed =
+        url::Url::parse(url).map_err(|e| format!("OLLAMA_URL is not a valid URL ({url}): {e}"))?;
 
     if parsed.scheme() != "http" {
-        return Err(format!(
-            "OLLAMA_URL must use http:// scheme, got: {url}"
-        ));
+        return Err(format!("OLLAMA_URL must use http:// scheme, got: {url}"));
     }
 
     match parsed.host_str() {
