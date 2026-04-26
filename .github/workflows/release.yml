@@ -34,13 +34,13 @@ jobs:
 
       - name: Install dependencies (native x86_64)
         if: matrix.cross == false
-        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev g++
 
       - name: Install dependencies (cross aarch64)
         if: matrix.cross == true
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu pkg-config perl make
+          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu pkg-config perl make
 
       - name: Build
         env:
@@ -53,7 +53,7 @@ jobs:
             export CXX_aarch64_unknown_linux_gnu=aarch64-linux-gnu-g++
             export OPENSSL_SRC_PERL=/usr/bin/perl
           fi
-          cargo build --release --target ${{ matrix.target }} -p mnemonic-mcp --features openssl-vendored
+          cargo build --release --target ${{ matrix.target }} -p mnemonic-mcp --features "openssl-vendored,local-embed"
 
       - name: Package
         run: |
@@ -90,7 +90,7 @@ jobs:
           key: release-${{ matrix.target }}
 
       - name: Build
-        run: cargo build --release --target ${{ matrix.target }} -p mnemonic-mcp
+        run: cargo build --release --target ${{ matrix.target }} -p mnemonic-mcp --features local-embed
 
       - name: Package
         run: |
