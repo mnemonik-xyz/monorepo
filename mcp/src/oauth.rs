@@ -693,6 +693,47 @@ fn oauth_error(status: StatusCode, msg: &str) -> Response {
     (status, Json(serde_json::json!({"error": msg}))).into_response()
 }
 
+// ── /.well-known discovery endpoints (RFC 8414 + MCP spec) ───────────────────
+//
+// Anthropic's MCP connector probes `GET /.well-known/oauth-authorization-server`
+// (RFC 8414) and `GET /.well-known/oauth-protected-resource` (MCP spec)
+// BEFORE attempting the OAuth flow. Without these the connector reports
+// "Couldn't reach the MCP server" with a reference id even though
+// `/mcp initialize` and `/mcp tools/list` work fine.
+//
+// Both endpoints are public metadata — no auth, no body inspection. They are
+// allowlisted in `bearer_auth_middleware` by URI prefix (`/.well-known/`).
+
+/// `GET /.well-known/oauth-authorization-server` — RFC 8414 metadata document.
+///
+/// Returned fields are the minimum the MCP spec + Anthropic connector probe
+/// require. The `code_challenge_methods_supported` advertises only `S256`
+/// because Decision 10 enforces S256-only PKCE.
+pub async fn oauth_authorization_server_metadata() -> Response {
+    let body = serde_json::json!({
+        "issuer": SERVER_ORIGIN,
+        "authorization_endpoint": format!("{SERVER_ORIGIN}/oauth/authorize"),
+        "token_endpoint": format!("{SERVER_ORIGIN}/oauth/token"),
+        "response_types_supported": ["code"],
+        "grant_types_supported": ["authorization_code"],
+        "code_challenge_methods_supported": ["S256"],
+        "token_endpoint_auth_methods_supported": ["none"],
+        "scopes_supported": ["mcp"],
+    });
+    (StatusCode::OK, Json(body)).into_response()
+}
+
+/// `GET /.well-known/oauth-protected-resource` — MCP spec metadata document.
+pub async fn oauth_protected_resource_metadata() -> Response {
+    let body = serde_json::json!({
+        "resource": SERVER_ORIGIN,
+        "authorization_servers": [SERVER_ORIGIN],
+        "scopes_supported": ["mcp"],
+        "bearer_methods_supported": ["header"],
+    });
+    (StatusCode::OK, Json(body)).into_response()
+}
+
 // ── Bearer-auth middleware (Decision 9) ──────────────────────────────────────
 
 /// Maximum body size accepted by the body-peeking middleware (1 MiB).
@@ -730,8 +771,11 @@ pub async fn bearer_auth_middleware(
 ) -> Response {
     let path = request.uri().path().to_string();
 
-    // URI-based allowlist — never inspect the body for these.
-    if path.starts_with("/oauth/") || path == "/health" {
+    // URI-based allowlist — never inspect the body for these. `.well-known/`
+    // endpoints (RFC 8414 OAuth discovery + MCP protected-resource metadata)
+    // are public by design — Anthropic's MCP connector probes them BEFORE
+    // attempting OAuth.
+    if path.starts_with("/oauth/") || path == "/health" || path.starts_with("/.well-known/") {
         return next.run(request).await;
     }
 
@@ -1602,5 +1646,99 @@ mod tests {
         assert_eq!(extract_json_rpc_method(body).as_deref(), Some("tools/list"));
         assert_eq!(extract_json_rpc_method(b"not-json"), None);
         assert_eq!(extract_json_rpc_method(b"{}"), None);
+    }
+
+    // ── /.well-known discovery tests ─────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_oauth_authorization_server_metadata() {
+        // RFC 8414 — Anthropic's MCP connector probes this endpoint before
+        // starting the OAuth flow. Verify the JSON shape exposes all required
+        // fields with stable values.
+        use axum::routing::get;
+        let app: Router = Router::new().route(
+            "/.well-known/oauth-authorization-server",
+            get(oauth_authorization_server_metadata),
+        );
+        let req = Request::builder()
+            .method("GET")
+            .uri("/.well-known/oauth-authorization-server")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body_bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let parsed: Value = serde_json::from_slice(&body_bytes).unwrap();
+        assert_eq!(parsed["issuer"], SERVER_ORIGIN);
+        assert_eq!(
+            parsed["authorization_endpoint"],
+            format!("{SERVER_ORIGIN}/oauth/authorize")
+        );
+        assert_eq!(
+            parsed["token_endpoint"],
+            format!("{SERVER_ORIGIN}/oauth/token")
+        );
+        assert_eq!(parsed["response_types_supported"][0], "code");
+        assert_eq!(parsed["grant_types_supported"][0], "authorization_code");
+        assert_eq!(parsed["code_challenge_methods_supported"][0], "S256");
+        assert_eq!(parsed["token_endpoint_auth_methods_supported"][0], "none");
+        assert_eq!(parsed["scopes_supported"][0], "mcp");
+    }
+
+    #[tokio::test]
+    async fn test_oauth_protected_resource_metadata() {
+        use axum::routing::get;
+        let app: Router = Router::new().route(
+            "/.well-known/oauth-protected-resource",
+            get(oauth_protected_resource_metadata),
+        );
+        let req = Request::builder()
+            .method("GET")
+            .uri("/.well-known/oauth-protected-resource")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body_bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let parsed: Value = serde_json::from_slice(&body_bytes).unwrap();
+        assert_eq!(parsed["resource"], SERVER_ORIGIN);
+        assert_eq!(parsed["authorization_servers"][0], SERVER_ORIGIN);
+        assert_eq!(parsed["scopes_supported"][0], "mcp");
+        assert_eq!(parsed["bearer_methods_supported"][0], "header");
+    }
+
+    #[tokio::test]
+    async fn test_middleware_well_known_bypasses_auth() {
+        // `.well-known/*` must bypass bearer-auth — Anthropic's connector
+        // probes it WITHOUT a JWT.
+        use axum::routing::get;
+        let st = fresh_state();
+        let app: Router = Router::new()
+            .route(
+                "/.well-known/oauth-authorization-server",
+                get(oauth_authorization_server_metadata),
+            )
+            .route(
+                "/.well-known/oauth-protected-resource",
+                get(oauth_protected_resource_metadata),
+            )
+            .layer(axum_middleware::from_fn_with_state(
+                st.clone(),
+                bearer_auth_middleware,
+            ))
+            .with_state(st);
+
+        for uri in [
+            "/.well-known/oauth-authorization-server",
+            "/.well-known/oauth-protected-resource",
+        ] {
+            let req = Request::builder()
+                .method("GET")
+                .uri(uri)
+                .body(Body::empty())
+                .unwrap();
+            let resp = app.clone().oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK, "uri={uri}");
+        }
     }
 }

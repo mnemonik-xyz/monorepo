@@ -16,14 +16,20 @@ describe("InstallButtons", () => {
     const decodedConfig = JSON.parse(atob(cursorConfigB64!));
     expect(decodedConfig).toEqual({ url: "https://mcp.mnemonik.xyz/mcp" });
 
-    // VS Code deeplink: scheme + url-encoded MCP URL.
+    // VS Code deeplink: scheme + url-encoded JSON config (single param, NOT
+    // separate `name=&url=` query params — VS Code MCP install dialog only
+    // recognizes the JSON-blob format).
     const vscode = screen.getByTestId("install-vscode") as HTMLAnchorElement;
-    expect(vscode.href.startsWith("vscode:")).toBe(true);
-    // URLSearchParams decodes percent-encoding, so we read the raw href.
-    expect(vscode.href).toContain(
-      encodeURIComponent("https://mcp.mnemonik.xyz/mcp")
+    expect(vscode.href.startsWith("vscode:mcp/install?")).toBe(true);
+    const vscodeConfig = decodeURIComponent(
+      vscode.href.replace("vscode:mcp/install?", "")
     );
-    expect(vscode.href).toContain("name=Mnemonic");
+    const parsedVscode = JSON.parse(vscodeConfig);
+    expect(parsedVscode).toEqual({
+      name: "Mnemonic",
+      type: "http",
+      url: "https://mcp.mnemonik.xyz/mcp",
+    });
 
     // Claude.ai is a button, not an anchor — it opens a modal that exposes
     // the paste URL `mcp.mnemonik.xyz`.

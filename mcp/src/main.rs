@@ -1,6 +1,7 @@
 mod api;
 mod chat;
 mod config;
+mod cors_policy;
 mod llm;
 mod mcp;
 mod oauth;
@@ -496,10 +497,8 @@ async fn run_stdio(state: Arc<mcp::McpState>) -> anyhow::Result<()> {
 
 // ── HTTP transport ────────────────────────────────────────────────────────────
 
-/// CORS-allowed origin for the public hosted deploy. Decision 9 narrows the
-/// previous `Any` policy to a single exact origin — the webapp at
-/// `mnemonik.xyz` is the only first-party caller.
-const CORS_ORIGIN: &str = "https://mnemonik.xyz";
+// CORS allow-origin policy moved to `mcp/src/cors_policy.rs` so integration
+// tests under `mcp/tests/cors.rs` can reach it via the library facade.
 
 /// Load and decode `MCP_JWT_SECRET` from env. Per Decision 11 the secret must
 /// be a base64-encoded value that decodes to >= 32 bytes. Aborts startup if
@@ -520,9 +519,9 @@ fn load_jwt_secret() -> anyhow::Result<Vec<u8>> {
 }
 
 async fn run_http(state: Arc<mcp::McpState>, host: &str, port: u16) -> anyhow::Result<()> {
-    use axum::http::{header, HeaderValue, Method};
+    use axum::http::{header, Method};
     use tower_governor::{governor::GovernorConfigBuilder, GovernorLayer};
-    use tower_http::cors::CorsLayer;
+    use tower_http::cors::{AllowOrigin, CorsLayer};
 
     // ── OAuth state + JWT secret (Decisions 9 + 11) ──────────────────────────
     let secret = load_jwt_secret()?;
@@ -605,15 +604,35 @@ async fn run_http(state: Arc<mcp::McpState>, host: &str, port: u16) -> anyhow::R
         })
         .with_state(oauth_state);
 
-    // ── Tightened CORS (Decision 9) ──────────────────────────────────────────
+    // ── CORS (Decision 9 + hotfix: widen for MCP-client origins) ─────────────
+    // Anthropic / Cursor / ChatGPT connectors run inside the user's browser
+    // and originate requests from `https://claude.ai`, `https://*.claude.ai`,
+    // `https://cursor.sh`, `https://chatgpt.com` etc. The previous narrow
+    // single-origin policy returned ACAO=mnemonik.xyz for ALL preflights,
+    // breaking connector reachability with "Couldn't reach the MCP server".
+    //
+    // Predicate-based allow-origin echoes back the request origin if it
+    // matches a trusted MCP-client root domain — see `is_allowed_cors_origin`.
     let cors = CorsLayer::new()
-        .allow_origin(
-            CORS_ORIGIN
-                .parse::<HeaderValue>()
-                .map_err(|e| anyhow::anyhow!("invalid CORS_ORIGIN: {e}"))?,
-        )
+        .allow_origin(AllowOrigin::predicate(|origin, _parts| {
+            cors_policy::is_allowed_cors_origin(origin.as_bytes())
+        }))
         .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
         .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE]);
+
+    // ── /.well-known discovery (RFC 8414 + MCP spec) ─────────────────────────
+    // Anthropic's MCP connector probes these BEFORE attempting OAuth. Public
+    // metadata, no auth, no state — a separate sub-router avoids dragging
+    // bearer-auth or governor onto a 200-byte JSON response.
+    let well_known_routes = Router::new()
+        .route(
+            "/.well-known/oauth-authorization-server",
+            get(oauth::oauth_authorization_server_metadata),
+        )
+        .route(
+            "/.well-known/oauth-protected-resource",
+            get(oauth::oauth_protected_resource_metadata),
+        );
 
     let app = Router::new()
         .route("/chat", post(chat::chat_handler))
@@ -630,6 +649,7 @@ async fn run_http(state: Arc<mcp::McpState>, host: &str, port: u16) -> anyhow::R
         .merge(mcp_subrouter)
         .merge(api_subrouter)
         .merge(oauth_routes)
+        .merge(well_known_routes)
         .layer(cors);
 
     let addr = format!("{host}:{port}");

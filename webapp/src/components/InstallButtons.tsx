@@ -29,11 +29,23 @@ function cursorDeeplink(): string {
 }
 
 function vscodeDeeplink(): string {
-  // VS Code's `vscode:mcp/install` accepts the URL directly as a query
-  // parameter. URL-encode strictly (encodeURIComponent) so the colon and
-  // slashes survive.
-  const params = new URLSearchParams({ name: "Mnemonic", url: MCP_URL });
-  return `vscode:mcp/install?${params.toString()}`;
+  // VS Code 1.93+ MCP install deeplink format:
+  //
+  //     vscode:mcp/install?<URL-encoded-JSON-config>
+  //
+  // The whole query string is a single URL-encoded JSON object, NOT
+  // multiple `key=value` query params. Using URLSearchParams here would
+  // produce `?name=Mnemonic&url=...` which VS Code does not parse — the
+  // browser opens VS Code but the install dialog never appears (this is
+  // exactly the bug a user hit during T15 post-deploy QA).
+  //
+  // Per VS Code MCP docs (code.visualstudio.com/docs/copilot/customization/mcp-servers
+  // → "Use MCP install links"):
+  //   - HTTP transport: { name, type: "http", url }
+  //   - stdio transport: { name, command, args }
+  // We use HTTP (streamable per Decision 1).
+  const config = { name: "Mnemonic", type: "http", url: MCP_URL };
+  return `vscode:mcp/install?${encodeURIComponent(JSON.stringify(config))}`;
 }
 
 interface InstallButtonsProps {

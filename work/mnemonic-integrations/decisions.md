@@ -1594,3 +1594,91 @@ Production is operational and handling requests correctly:
 5. **Phase 2 ticket:** bump MCP Inspector pin in CI to `0.21.x` (or pin runner Node ≤ 20.18).
 6. **No re-pull on VPS needed** — `c99377f..be73805` diff is docs-only (decisions.md + tasks/14.md), live binaries and nginx config already correct. T15 commit will push cleanly without operator intervention on VPS.
 
+
+---
+
+## Hotfix: OAuth Discovery + CORS Widening (post-T15)
+
+**Date:** 2026-04-26
+**Trigger:** User reported "Couldn't reach the MCP server" (ref `ofid_0de88117f1fe868f`) when adding `mcp.mnemonik.xyz` as a Claude.ai connector.
+
+### Root cause analysis
+
+Two independent blockers in the Claude.ai / Cursor / ChatGPT MCP-connector handshake:
+
+1. **Missing `.well-known/` discovery endpoints.** Anthropic's MCP connector probes `GET /.well-known/oauth-authorization-server` (RFC 8414) and `GET /.well-known/oauth-protected-resource` (MCP spec) BEFORE any OAuth flow. Both returned 404. The connector treats 404 here as "server unreachable" and aborts with the user-facing reference id, even though `/health`, `/mcp initialize`, and `/mcp tools/list` were all responding 200.
+
+2. **Narrow CORS allow-origin.** The previous policy was a static exact-match on `https://mnemonik.xyz` (Decision 9). Connectors run inside the user's browser at `https://claude.ai`, `https://cursor.sh`, `https://chatgpt.com`, etc. Preflight `OPTIONS` from those origins received `Access-Control-Allow-Origin: https://mnemonik.xyz` — a header the browser rejects because it does not match the request `Origin`. The body of `/mcp initialize` was never delivered to the connector.
+
+### Fix 1 — RFC 8414 metadata + MCP protected-resource metadata
+
+Two new public handlers in `mcp/src/oauth.rs`:
+
+- `oauth_authorization_server_metadata` — returns RFC 8414 fields with `S256`-only PKCE, `authorization_code` grant, `none` token-endpoint auth (matches our PKCE-only client model).
+- `oauth_protected_resource_metadata` — MCP spec shape: `resource`, `authorization_servers`, `scopes_supported`, `bearer_methods_supported`.
+
+Both endpoints are allowlisted in `bearer_auth_middleware` via a new URI-prefix branch (`path.starts_with("/.well-known/")` joins the existing `/oauth/`, `/health` allowlist). They are mounted in a dedicated `well_known_routes` sub-router in `main.rs::run_http` so the `bearer-auth` and `tower_governor` layers do NOT apply — discovery probes must be free of all middleware overhead.
+
+### Fix 2 — CORS widened via predicate
+
+New module `mcp/src/cors_policy.rs` exposes `is_allowed_cors_origin(origin: &[u8]) -> bool`. Trust list:
+
+| Domain root | Apex | `*.subdomain` |
+| --- | --- | --- |
+| `mnemonik.xyz` | yes | yes |
+| `claude.ai` | yes | yes |
+| `anthropic.com` | yes | yes |
+| `cursor.sh` | yes | yes |
+| `cursor.com` | yes | yes |
+| `chatgpt.com` | yes | yes |
+| `openai.com` | yes | yes |
+| `chat.openai.com` | yes | (already covered by `*.openai.com`) |
+
+Subdomain matching uses a leading-dot suffix (`.claude.ai`) to defeat the `evilclaude.ai` look-alike attack. HTTPS-only — `http://` origins return `false`.
+
+`run_http` swaps the static `allow_origin([HeaderValue])` for `AllowOrigin::predicate(|origin, _| is_allowed_cors_origin(origin.as_bytes()))`. The predicate echoes back the EXACT request origin in `Access-Control-Allow-Origin` when it matches — mandatory for browser-side CORS validation.
+
+### Tests
+
+- `mcp/src/cors_policy.rs::tests` — 6 unit tests (allow first-party, allow Anthropic + subdomains, allow Cursor + ChatGPT, reject lookalikes, reject http://, reject unknown).
+- `mcp/src/oauth.rs::tests::test_oauth_authorization_server_metadata` — RFC 8414 JSON shape.
+- `mcp/src/oauth.rs::tests::test_oauth_protected_resource_metadata` — MCP spec JSON shape.
+- `mcp/src/oauth.rs::tests::test_middleware_well_known_bypasses_auth` — both `.well-known/*` paths return 200 with no Authorization header.
+- `mcp/tests/cors.rs` — extended from 1 to 4 integration tests including preflight from `https://claude.ai` (must echo `claude.ai`, NOT `mnemonik.xyz`), `https://console.claude.ai`, `https://cursor.sh`, `https://chatgpt.com`, plus the `evilclaude.ai` lookalike-rejection assertion.
+
+Full `cargo test --workspace --features mnemonic-mcp/test-support` green; clippy `-D warnings` zero, fmt clean.
+
+### Live verification (post-deploy)
+
+| Probe | Expectation | Status |
+| --- | --- | --- |
+| `GET /.well-known/oauth-authorization-server` | 200, RFC 8414 JSON | _pending VPS rebuild_ |
+| `GET /.well-known/oauth-protected-resource` | 200, MCP-spec JSON | _pending VPS rebuild_ |
+| Preflight from `Origin: https://claude.ai` | 200 + `Access-Control-Allow-Origin: https://claude.ai` | _pending VPS rebuild_ |
+| Preflight from `Origin: https://cursor.sh` | 200 + `Access-Control-Allow-Origin: https://cursor.sh` | _pending VPS rebuild_ |
+| `POST /mcp initialize` (no auth) | 200, server info envelope | unchanged from baseline (still 200) |
+| Anthropic Claude.ai connector setup | "Connected" — no `ofid_*` reference | _re-test after VPS deploy_ |
+
+### Files touched
+
+- `mcp/src/cors_policy.rs` (new)
+- `mcp/src/lib.rs` (+ `pub mod cors_policy;`)
+- `mcp/src/main.rs` (+ `mod cors_policy;`, swap CORS layer to predicate, register `well_known_routes`)
+- `mcp/src/oauth.rs` (+ 2 metadata handlers, + `.well-known/` allowlist branch in middleware, + 3 unit tests)
+- `mcp/tests/cors.rs` (extended from 1 to 4 integration tests)
+- `work/mnemonic-integrations/decisions.md` (this entry)
+
+### Connector-readiness re-test plan
+
+After VPS rebuild + restart:
+
+```bash
+curl -fsI https://mcp.mnemonik.xyz/.well-known/oauth-authorization-server
+curl -fsS https://mcp.mnemonik.xyz/.well-known/oauth-authorization-server | jq .
+curl -fsI https://mcp.mnemonik.xyz/.well-known/oauth-protected-resource
+curl -sI -X OPTIONS https://mcp.mnemonik.xyz/mcp \
+  -H "Origin: https://claude.ai" \
+  -H "Access-Control-Request-Method: POST" | grep -i access-control
+```
+
+User then re-tries the Claude.ai connector add flow. Expected outcome: connector reports "Connected" and `tools/list` returns the 5 MCP tools without any `ofid_*` reference id.
