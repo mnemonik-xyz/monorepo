@@ -26,17 +26,33 @@ use mnemonic_core::storage::SqliteStore;
 use std::convert::Infallible;
 use std::sync::Arc;
 
-/// JSON-RPC 2.0 request.
+/// JSON-RPC 2.0 request or notification.
+///
+/// Per JSON-RPC 2.0 spec, notifications (e.g. MCP `notifications/initialized`,
+/// `notifications/cancelled`, `notifications/progress`) MUST NOT have an `id`
+/// field — and the server MUST NOT respond to them. Requiring `id` here would
+/// reject every MCP notification with a parse error, breaking connector setup
+/// (Cursor / Claude.ai send `notifications/initialized` immediately after the
+/// `initialize` response per MCP spec).
 #[derive(Debug, Deserialize)]
 pub struct JsonRpcRequest {
     /// JSON-RPC protocol version — deserialized so callers must supply it, but
     /// we do not branch on the value (we always respond with "2.0").
     #[allow(dead_code)]
     pub jsonrpc: String,
-    pub id: Value,
+    /// `None` = notification (no response sent); `Some` = request expecting a response.
+    #[serde(default)]
+    pub id: Option<Value>,
     pub method: String,
     #[serde(default)]
     pub params: Value,
+}
+
+impl JsonRpcRequest {
+    /// True if this is a JSON-RPC notification (no `id` field, no response expected).
+    pub fn is_notification(&self) -> bool {
+        self.id.is_none()
+    }
 }
 
 /// JSON-RPC 2.0 response.
@@ -205,16 +221,24 @@ pub async fn handle_request(
         _ => Err(format!("unknown method: {}", req.method)),
     };
 
+    // For notifications (no `id`), JSON-RPC 2.0 forbids a response. Callers
+    // must check `req.is_notification()` before using this function's return
+    // value — `mcp_handler` returns 204 No Content for notifications and never
+    // serializes this response. We still construct one so the call shape is
+    // uniform (avoids dual return types). Use `Value::Null` as a placeholder
+    // when `id` is absent.
+    let response_id = req.id.clone().unwrap_or(Value::Null);
+
     match result {
         Ok(val) => JsonRpcResponse {
             jsonrpc: "2.0".into(),
-            id: req.id.clone(),
+            id: response_id,
             result: Some(val),
             error: None,
         },
         Err(msg) => JsonRpcResponse {
             jsonrpc: "2.0".into(),
-            id: req.id.clone(),
+            id: response_id,
             result: None,
             error: Some(JsonRpcError {
                 code: -32603,
@@ -329,6 +353,21 @@ pub async fn mcp_handler(
             );
         }
     };
+
+    // JSON-RPC 2.0 spec: notifications (no `id`) MUST NOT receive a response.
+    // MCP clients (Cursor/Claude.ai) send `notifications/initialized` after
+    // the `initialize` handshake — replying to it breaks the connection.
+    // Run any side effects (currently none for the supported notifications)
+    // and return 204 No Content with empty body.
+    if req.is_notification() {
+        // Currently `notifications/initialized` and `notifications/cancelled`
+        // are no-ops on our side. If we ever need stateful notification
+        // handling, dispatch here.
+        return axum::http::Response::builder()
+            .status(StatusCode::NO_CONTENT)
+            .body(axum::body::Body::empty())
+            .expect("static response builds");
+    }
 
     // Resolve owner_pubkey:
     //   - If JWT-authenticated (Decision 9): use `claims.sub`.
