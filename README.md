@@ -46,6 +46,12 @@ The MCP server is the user-facing entrypoint. The core library is where the prot
 
 ---
 
+## Foundational research
+
+Mnemonic builds on the [Mnemonic Protocol Foundational Paper](docs/research/paper.pdf), which motivates the project's core thesis: agent memory must be semantic, attributable, and operationally cheap. Deeper protocol design notes live in [docs/research/](docs/research/).
+
+---
+
 ## Quick start
 
 Requires Rust stable.
