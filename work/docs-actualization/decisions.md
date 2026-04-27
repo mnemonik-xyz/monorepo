@@ -197,3 +197,43 @@ Evergreen direction-of-travel hints surfaced during the docs-actualization featu
 **Summary:** Created `.github/workflows/docs-link-check.yml`. Triggers on push to dev/main and pull_request, paths-filtered to `docs/**` and `*.md`. Single `lychee-link-check` job on `ubuntu-latest` using `actions/checkout@v4` + `lycheeverse/lychee-action@v2` with `--offline` and fail-on-broken-links. ci.yml untouched.
 **Verify-smoke:** `test -f .github/workflows/docs-link-check.yml` — pass. Local lychee run skipped (CLI not installed); CI will validate.
 **Reviewers:** code-reviewer round 1 approved (1 minor non-blocking redundancy nit).
+
+---
+
+## Task 12 — Documentation Audit (read-only)
+
+**Status:** done · **Wave:** 5 · **Date:** 2026-04-27
+**Verdict:** issues_found
+**Summary:** Link integrity, README presence in all 4 subdirs, WHITEPAPER §9 deep-dive targets, PK reference paths, and the sanity-grep regression all pass. Two minor findings about `recovered/README.md` staleness ("working drafts, not yet promoted" claim and pending-Wave-3 annotations are no longer accurate) — these are scheduled for normalization in Task 15 (QA), which must populate the "Promoted on YYYY-MM-DD in commit <hash>" line. Three cosmetic nits about naming/linking style. No blocking or major issues.
+**Report:** logs/working/audit/documentation-auditor.json
+**Findings count:** blocking=0, major=0, minor=2, nit=3
+
+---
+
+## Task 13 — Security Audit (read-only)
+
+**Status:** done · **Wave:** 5 · **Date:** 2026-04-27
+**Verdict:** clean
+**Summary:** Comprehensive secret scan over all restored content (50 files across `docs/` and `.claude/skills/project-knowledge/recovered/`, including 2 unique PDFs extracted with `pdftotext`). Patterns checked: OpenAI/Anthropic/HuggingFace API keys, Telegram bot tokens, AWS access keys, PEM private keys, GitHub/Google/JWT tokens, Solana base58 keypairs and byte-array keypair JSON, `.env`-style env assignments, generic password/secret/token/api_key/private_key assignments, internal hostnames and RFC1918 IPs, redacted-looking placeholders, raw 64-hex hash strings. The only secret-shaped match was `MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr` in the Agent-Identity PDF — the well-known public Solana SPL Memo program ID, intentionally cited as a protocol primitive (no private key, no remediation). All HTTP(S) URLs encountered are public references. Token-replacement focus areas (DRAG_ANALYSIS, WEB_RESEARCH_TRUSTLESS_RAG, CONCURRENT_WRITERS, ARWEAVE_PRICING_VALIDATION) contain no hard-coded keys/addresses or redacted strings.
+**Report:** logs/working/audit/security-auditor.json
+**Findings count:** blocking=0, major=0, minor=0, nit=0
+**Stats:** files_scanned=50, pdfs_scanned=2, secret_candidates_found=1 (explained as public Solana SPL Memo program ID), confirmed_real_secrets=0
+
+---
+
+## Task 14 — Validation Audit (read-only)
+
+**Status:** done · **Wave:** 5 · **Date:** 2026-04-27
+**Verdict:** issues_found
+**Summary:** Validation evidence is substantively complete and reproducible. All 6 token-replace overrides are logged with before/after pairs in `code-research.md` §4.3 (verdict table) and §4.4/§4.5 (post-promotion logs); spot-checks against commits `d8df681` and `eacb6ff` plus on-disk lines (DRAG_ANALYSIS:37 blank, WEB_RESEARCH:45/64/132, CONCURRENT_WRITERS:157/217) all match the claims. The lychee CI workflow correctly filters on `docs/**` + `*.md`, uses `--offline`, sets `fail: true`, and pins both `actions/checkout@v4` and `lycheeverse/lychee-action@v2`. The `decisions.md` follow-up roadmap has the required Browser-WASM sub-section (5 parts) plus 8 numbered bullets each tagged `for further validation`. Sanity regression `grep -RIE 'SHA3|mcp-server-rs|pre-V1|Pre-V1|HashEmbedder|Python backend' docs/ README.md` returns exit 1 (zero hits). Two non-blocking gaps remain that Task 15 must close: (a) `recovered/README.md` still lacks the required `Promoted on YYYY-MM-DD in commit <hash>` line and three rows still say `(token replacements pending Wave 3)` despite Wave 3 being complete — these are explicit acceptance criteria; (b) sanity-grep term set drift between tech-spec/user-spec (6 patterns) and code-research.md §4 (9 patterns; adds `SHA-3`, `sha3`, `mcp-server.py`) — silent today since none of the dropped terms appear in `docs/`, but a future agent reproducing from tech-spec alone gets a narrower sweep than what was actually run.
+**Report:** logs/working/audit/validation-auditor.json
+**Findings count:** blocking=0, major=1, minor=2, info=4
+**Stats:** files_audited=6, commits_spot_checked=3, on-disk_lines_verified=6, replace-token_entries_validated=6/6, sanity_regression=clean
+
+---
+
+## Audit fixer — recovered/README.md promotion stamp
+
+**Status:** done · **Wave:** 5 (post-audit) · **Date:** 2026-04-27
+**Commit:** c57c492
+**Summary:** Addressed major finding from Task 12 + 14 audits. recovered/README.md now carries the "Promoted on 2026-04-27" stamp with all 4 promotion commit hashes; validation-table rows reworded to past tense reflecting completed Wave 3.
