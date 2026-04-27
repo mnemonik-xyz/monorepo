@@ -35,8 +35,11 @@ if ! command -v wasm-pack >/dev/null 2>&1; then
 fi
 
 cd "$REPO_ROOT"
+# wasm-pack interprets `--out-dir` relative to the crate manifest (core/), so
+# we pass an absolute path to keep the output anchored at webapp/src/wasm/
+# regardless of the build cwd.
 wasm-pack build core \
   --target web \
-  --out-dir webapp/src/wasm \
+  --out-dir "$REPO_ROOT/webapp/src/wasm" \
   --release \
   --features wasm

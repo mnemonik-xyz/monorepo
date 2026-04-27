@@ -3,6 +3,16 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!--
+      CSP must also be enforced as an HTTP response header by the static host
+      (nginx config in mcp/deploy/). The meta tag below is the in-document
+      defense-in-depth layer. Header and meta MUST stay in sync — see Risks
+      table (XSS row) in work/mnemonic-integrations/tech-spec.md.
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; connect-src 'self' https://mcp.mnemonik.xyz; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; frame-ancestors 'none'; base-uri 'self'; object-src 'none'; form-action 'self'"
+    />
     <title>Mnemonic Protocol</title>
   </head>
   <body class="bg-background text-text-primary min-h-screen antialiased">

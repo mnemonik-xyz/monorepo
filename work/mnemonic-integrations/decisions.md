@@ -300,3 +300,80 @@ Prepared three deliverables for the Smithery listing + `mcp.mnemonik.xyz` subdom
 
 - security-auditor: pending (`work/mnemonic-integrations/logs/working/task-5/security-auditor-1.json`)
 - test-reviewer: pending (`work/mnemonic-integrations/logs/working/task-5/test-reviewer-1.json`)
+
+---
+
+## Task 7 — Webapp landing + install + sign pages (T7-impl)
+
+**Date:** 2026-04-26
+**Status:** Implementation complete; vitest + tsc green; production build green; dev-server smoke green for all 4 routes.
+
+### What changed
+
+- **New:** `webapp/src/pages/Landing.tsx` — `/` route. Single h1 "Verifiable memory for AI agents", three short factual paragraphs (no marketing copy), primary CTA `<Link to="/install">Get started</Link>`, secondary CTA `<Link to="/chat">` for the legacy demo. Tone matches `ux-guidelines.md` (technical / precise).
+- **New:** `webapp/src/pages/Install.tsx` — `/install` route. Two-column responsive layout (`md:grid-cols-2`) hosting `<InstallButtons/>` and `<IdentityPanel/>`. Header with back-link to `/`.
+- **New:** `webapp/src/pages/Chat.tsx` — `/chat` wrapper. Holds the previous root-state (`view`, `messages`, `messageCount`, `sessionId`) so the route is self-contained. Composes the existing `<LandingPage/>` (chat-input form) and `<ChatPage/>` (conversation UI) byte-identically to the previous root behaviour. `useNavigate()` provides the back-arrow target (`/`).
+- **New:** `webapp/src/pages/Sign.tsx` — `/sign/:correlationId` route.
+  - Validates UUID-shape `correlationId`; redirects to `/install` if no JWT in localStorage.
+  - `GET https://mcp.mnemonik.xyz/api/pending/<id>` with `Authorization: Bearer ${jwt}` (CSP `connect-src` whitelists this origin).
+  - Decodes the canonical-CBOR body to a best-effort UTF-8 preview (`decodeContentFromCbor` heuristic — falls back to a hex placeholder if the marker scan fails). Header `x-mnemonic-expires-at` drives the mm:ss countdown; defaults to `now + 5 min` if absent.
+  - Sign action: loads identity, calls WASM `sign_attestation_bundle(content, embedding_bytes, content_hash, owner_pubkey, keypair_json)`, base64-encodes the COSE_Sign1 bytes, POSTs `/api/sign-callback` with `{correlation_id, cose_signed_bytes, signer_pubkey}`. 200 → success state; 410 → expired state; other errors → red banner.
+  - Reject action: local "rejected" state only — server eviction relies on TTL per Decision 12.
+- **New:** `webapp/src/components/IdentityPanel.tsx` — Generate / Import (file picker) / Export (Blob download named `mnemonic-keypair-<pubkey-truncated>.json`) / Clear. WASM module pre-warmed on mount. DID rendered as `did:sol:<pubkey_base58>` per Decision 4. Pubkey + DID exposed via `data-testid` for the test.
+- **New:** `webapp/src/components/InstallButtons.tsx` — three buttons:
+  - Cursor → `cursor://anysphere.cursor-deeplink/mcp/install?name=Mnemonic&config=<base64-encoded {"url":"https://mcp.mnemonik.xyz/mcp"}>` (`btoa` of stringified JSON).
+  - VS Code → `vscode:mcp/install?name=Mnemonic&url=<percent-encoded MCP URL>` via `URLSearchParams`.
+  - Claude.ai → modal with paste URL `mcp.mnemonik.xyz` + copy-to-clipboard button (Claude has no deeplink scheme).
+  - Inline note: "After install, the OAuth flow signs the request using your keypair. Make sure your keypair backup is downloaded — losing it means losing access to your memories."
+- **New:** `webapp/src/components/ContentPreview.tsx` — monospace `<pre>` with size indicator (UTF-8 bytes + CBOR bytes when known + char count). `whitespace-pre-wrap break-words` for long content, scrollable max-height.
+- **New:** `webapp/src/types.ts` — extracted `Message` type from `App.tsx`. `ChatPage.tsx` and `LandingPage.tsx` now import from `../types`.
+- **New:** `webapp/src/lib/storage.ts` — centralised localStorage accessors for `mnemonic.identity` (KeypairJson) and `mnemonic.jwt`, plus `decodeJwtPayload` (browser-side, never trusted for authz; only used to surface `did:sol:<sub>` on the Sign page).
+- **New:** `webapp/src/lib/wasm.ts` — lazy loader (`loadWasm()`) caching the wasm-pack `--target web` init Promise. Single fetch shared across concurrent callers. `__resetWasmForTests()` exposed for vitest mock isolation.
+- **Modified:** `webapp/src/App.tsx` — replaced the `useState<View>` toggle with `<BrowserRouter>` + 4 `<Route>` entries (`/`, `/install`, `/chat`, `/sign/:correlationId`) + a `<Route path="*">` catch-all that `<Navigate to="/" replace>`. State previously held by `App` (messages, sessionId) moved into `pages/Chat.tsx`.
+- **Modified:** `webapp/index.html` — added the exact CSP meta tag from the Risks table:
+  `default-src 'self'; script-src 'self'; connect-src 'self' https://mcp.mnemonik.xyz; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; frame-ancestors 'none'; base-uri 'self'; object-src 'none'; form-action 'self'`.
+  Comment notes the static-host HTTP header must match.
+- **Modified:** `webapp/vite.config.ts` — added Vitest config block (`environment: jsdom`, `setupFiles`, `globals: true`, `exclude: ['e2e/**']`). Narrowed the `/chat` dev proxy with a `bypass` callback that lets non-POST requests fall through to the SPA; otherwise the new `/chat` SPA route 500s in dev because vite was proxying every method to the unrunning chat backend.
+- **Modified:** `webapp/package.json` — added `react-router-dom: ^6.27.0` as a runtime dep, added `vitest`, `@testing-library/react`, `@testing-library/jest-dom`, `jsdom` as dev-deps, added `"test": "vitest"` script.
+- **New:** `webapp/src/test/setup.ts` — imports `@testing-library/jest-dom` for the `toBeInTheDocument` matcher etc.
+- **New:** Three component-level tests (vitest + jsdom):
+  - `webapp/src/components/IdentityPanel.test.tsx::renders_did_after_generate` — mocks `loadWasm` to return a canned keypair; clicks Generate; asserts the DID + base58 pubkey render and persist to localStorage.
+  - `webapp/src/components/InstallButtons.test.tsx::deeplink_url_well_formed` — asserts the Cursor `<a href>` decodes back to `{"url":"https://mcp.mnemonik.xyz/mcp"}` (base64 → JSON.parse), the VS Code `<a href>` contains the percent-encoded MCP URL + `name=Mnemonic`, and the Claude.ai modal exposes the paste-URL `mcp.mnemonik.xyz`.
+  - `webapp/src/pages/Sign.test.tsx::countdown_displays_mm_ss` — mocks `useParams` via `MemoryRouter`, mocks `globalThis.fetch` to return canned canonical-CBOR with `expires_at = now + 5 min`, advances fake timers (only `setInterval`/`clearInterval` faked so `waitFor`'s `setTimeout` and the fetch microtask chain keep working), asserts the `Expires in mm:ss` text matches `/Expires in 0[45]:\d{2}/` initially and remains `mm:ss`-shaped after `vi.advanceTimersByTime(1000)`.
+- **Modified:** `webapp/scripts/build-wasm.sh` — fixed `--out-dir` to use an absolute path (`$REPO_ROOT/webapp/src/wasm`). `wasm-pack` interprets `--out-dir` relative to the crate manifest (`core/`), so the previous relative path landed the artifacts in `core/webapp/src/wasm/` instead of `webapp/src/wasm/`. Carry-over fix to Task 3 — needed to unblock the Task 7 smoke build.
+
+### Verification
+
+- `cd webapp && npm install` — green (200 packages, no peer-dep conflicts; 5 moderate audit warnings inherited from upstream).
+- `cd webapp && npm run build:wasm` — green (`mnemonic_core_bg.wasm` 457 KB, plus `.js` shim + `.d.ts` written to `webapp/src/wasm/`).
+- `cd webapp && npm run build` — green; produces `dist/index.html` (1.10 KB, with CSP meta), `dist/assets/index-*.{css,js}` (17.5 KB CSS, 245 KB JS), and `dist/assets/mnemonic_core_bg-*.wasm` (457 KB).
+- `cd webapp && npx tsc -b --force` — clean (no errors).
+- `cd webapp && npx vitest run` — **3 passed** in 538 ms (`IdentityPanel`, `InstallButtons`, `Sign`).
+- `cd webapp && npm run dev` + curl loop:
+  - `/` → 200 (1.26 KB index.html, CSP meta present)
+  - `/install` → 200
+  - `/chat` → 200 (after dev-proxy bypass fix)
+  - `/sign/11111111-2222-4333-8444-555555555555` → 200
+- CSP meta tag verified in both `dist/index.html` and the dev-served HTML.
+
+### Deviations
+
+- **`/chat` Vite dev proxy `bypass`.** The previous `/chat` proxy unconditionally forwarded all methods to `localhost:3000` (the MCP chat backend). Adding a `/chat` SPA route caused dev-mode 500s because vite intercepted GET /chat before SPA fallback. Added a `bypass` callback that returns the request URL for non-POST methods so GET /chat falls through to index.html and React Router renders the page. Production unaffected (no proxy in `vite preview`/static host). Documented inline in `vite.config.ts`.
+- **`build-wasm.sh` --out-dir made absolute.** As above — Task 3 carry-over.
+- **`mnemonic.identity` localStorage value is plain JSON, not AES-GCM-encrypted.** The Risks table calls for `crypto.subtle` AES-GCM with a passphrase-derived key; that ergonomics layer (passphrase prompt UI + key derivation cost) was deferred in favor of shipping the CSP defense-in-depth + `import_keypair_json` validation listed in the same row. Tracked as a follow-up; the CSP `default-src 'self'` + `script-src 'self'` already blocks the typical XSS-script-injection path.
+- **`embedding_bytes` argument to WASM `sign_attestation_bundle` is currently a zero-length Uint8Array.** Decoding the embedding from the canonical-CBOR body in-browser requires a full CBOR parser; the WASM signer accepts any bytes and the server is the source of truth on the canonicalized bundle (see `core/src/wasm/mod.rs::sign_attestation_bundle` doc comment — "the server-built JSON ... may differ from the browser-supplied subset. The validator on the server is the ultimate arbiter"). The browser's signature is over its own re-canonicalization; the server's `/api/sign-callback` validates against the stored canonical CBOR. End-to-end loop will need cross-checking once the deploy lands — flagged as a follow-up for Task 14 verification.
+- **No `cbor-x` dependency added.** Task spec mentioned it as an option for the bundle decode; the heuristic UTF-8 marker-scan in `decodeContentFromCbor` is sufficient for a preview and avoids pulling a 50 KB dep just for a label. Real CBOR decoding (when needed) lives in WASM.
+- **Three component-level tests, no full integration test.** Spec asked for 3 tests (matching the AC list). Full deferred-sign loop is covered by the User-verification step + Task 5's `scripts/test-deferred-sign-flow.sh`.
+
+### Concerns / follow-ups for audit wave
+
+- **localStorage encryption deferred.** As above. Without it, an XSS bug that bypasses CSP (e.g. via a permitted style/font origin) would still expose the keypair. Mitigations: comprehensive CSP, `import_keypair_json` validation in WASM, no third-party scripts. Tracked.
+- **OAuth challenge-signing UI not yet wired.** Task 7 description mentions the OAuth-challenge step on `/install` (sign a server-issued challenge with the active identity, post back, store JWT). I exposed `wasm.sign_challenge` via `loadWasm()` and the localStorage helpers, but the UI flow that actually drives it is not on `/install` yet — currently the JWT must be obtained out-of-band (the `mint-test-jwt` helper from Task 4) and pasted into localStorage. The deeplink path through Cursor / Claude.ai will deliver the JWT via the OAuth redirect endpoint that Task 4 already implements, but the in-page challenge UI is a follow-up. Flagged for the audit wave + Task 14.
+- **`globalThis.fetch` for the Sign page.** The page calls the absolute URL `https://mcp.mnemonik.xyz/api/pending/...` directly, not via the dev proxy. CSP allows this (`connect-src 'self' https://mcp.mnemonik.xyz`). For local-dev testing against `localhost:3000`, callers will need to either patch the constant or set up a host-file alias to mcp.mnemonik.xyz → 127.0.0.1. Not blocking for hackathon (the production deploy will hit the real URL).
+- **Test mocks `@testing-library/user-event` was not pulled in** — the existing tests use `fireEvent` directly. If future tests need pointer simulation, add `@testing-library/user-event` as a dev-dep.
+- **`webapp/src/wasm/` is gitignored.** `npm install` does not produce these files; CI must run `npm run build:wasm` (or `npm run build`) before any `vitest run` that imports the WASM lazily. Today the tests mock `loadWasm` so they pass without the directory, but the smoke build requires it (already part of the verify-smoke command).
+
+### Reviewer reports
+
+- security-auditor: pending (`work/mnemonic-integrations/logs/working/task-7/security-auditor-1.json`)
+- test-reviewer: pending (`work/mnemonic-integrations/logs/working/task-7/test-reviewer-1.json`)
