@@ -27,3 +27,14 @@ pub mod pending;
 pub mod pricing;
 pub mod seed;
 pub mod tools;
+
+/// Shared test helpers for `mcp/tests/*.rs` — `mock_state()` and `mint_jwt()`.
+/// Gated behind the `test-support` feature so production binaries never
+/// compile this in. Cargo integration tests must run with
+/// `cargo test --features test-support` (CI does this; the local smoke
+/// command in the task spec also lists it). We deliberately do NOT include
+/// `cfg(test)` here — the library compiled as a dependency for the
+/// `tests/*.rs` integration files is not built with `cfg(test)` set, so
+/// only the feature flag works as a gate.
+#[cfg(feature = "test-support")]
+pub mod test_support;

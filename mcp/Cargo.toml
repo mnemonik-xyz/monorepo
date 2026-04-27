@@ -85,12 +85,24 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
+# Optional dep — gated by the `test-support` feature so it does NOT enter
+# production builds. The same crate is also a regular `[dev-dependencies]`
+# entry below so plain `cargo test` keeps working without enabling features.
+tempfile = { version = "3", optional = true }
+
 [features]
 default = []
 # Forwards to mnemonic-core's local-embed feature (fastembed ONNX runtime).
 local-embed = ["mnemonic-core/local-embed"]
 # Vendor OpenSSL from source (used in CI cross-compilation).
 openssl-vendored = ["mnemonic-core/openssl-vendored"]
+# Exposes `mnemonic_mcp::test_support` (mock_state + mint_jwt) outside `#[cfg(test)]`
+# so the `mint-test-jwt` binary and CI helpers can reach the same JWT-issue path
+# the integration tests use. Not enabled by default — production builds NEVER
+# compile this in. See Task 8 § Step 1 in work/mnemonic-integrations/tasks/8.md.
+# Activates the optional `tempfile` dep so `mock_state()` can mint per-test
+# scratch SQLite databases.
+test-support = ["dep:tempfile"]
 
 [dev-dependencies]
 tempfile = "3"
@@ -98,3 +110,7 @@ httpmock = "0.8"
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 hyper = "1"
+# Adversarial JSON re-encoder used by tests/roundtrip_cose_via_http_proxy.rs to
+# mutate envelope bytes (key reorder, whitespace normalize) and prove the
+# base64 cose_bundle field survives byte-identical (Decision 7 + Risks R1).
+simd-json = "0.13"

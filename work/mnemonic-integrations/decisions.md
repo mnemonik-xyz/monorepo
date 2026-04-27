@@ -377,3 +377,83 @@ Prepared three deliverables for the Smithery listing + `mcp.mnemonik.xyz` subdom
 
 - security-auditor: pending (`work/mnemonic-integrations/logs/working/task-7/security-auditor-1.json`)
 - test-reviewer: pending (`work/mnemonic-integrations/logs/working/task-7/test-reviewer-1.json`)
+
+---
+
+## Task 8 — Integration tests + MCP Inspector CI (T8-impl)
+
+**Date:** 2026-04-26
+**Status:** Implementation complete; smoke verified locally; CI changes shipped (will validate on push).
+
+### What changed
+
+- **8 new integration test files in `mcp/tests/`** (4 already existed from Tasks 4 + 5):
+  - `auth_allowlist.rs` — tools/list + initialize anonymous → 200; tools/call sign_memory anonymous → 401; valid JWT clears auth gate.
+  - `oauth_tool_call.rs` — JWT-issued token, then `tools/list` returns 5 canonical tools; `tools/call mnemonic_sign_memory` returns deferred `awaiting_signature` envelope with UUID v4 correlation_id and approve_url.
+  - `cors.rs` — preflight allowed origin echoes ACAO; evil origin gets no ACAO header.
+  - `deferred_sign_flow.rs` — full lifecycle (sign_memory → fetch pending → sign locally → callback → recall → replay-callback → 410 Gone).
+  - `recall_owner_isolation.rs` (**CRITICAL**) — alice signs 2, bob signs 1; bob's recall returns exactly bob's row, anonymous recall → 401. Guards the SQL `WHERE owner_pubkey = ?` filter against regression.
+  - `roundtrip_cose_via_http_proxy.rs` — adversarial `simd-json` re-encoder with key reorder + whitespace normalization. Asserts base64 `cose_bundle` field survives byte-identical and `verify_artifact` accepts the recovered COSE_Sign1. Pins Decision 7 wire format.
+  - `pending_expiry.rs` — 1s-TTL store, 1100ms wall-clock sleep, GET → 410 Gone, callback → 410 Gone.
+  - `pending_user_cap.rs` — 50 successful sign_memory under one JWT; 51st surfaces the per-user cap error (either 429 or JSON-RPC error envelope mentioning the cap).
+  - `stdio_backward_compat.rs` — drives the pre-built `CARGO_BIN_EXE_mnemonic-mcp` with stdio JSON-RPC. **#[ignore]'d by default** (depends on outbound HTTPS for `pricing.refresh()`); runs in the new `test-stdio` workflow on dispatch + schedule.
+- **`mcp/src/test_support.rs` (new)** — `mock_state()` builds a fully-formed `Arc<McpState>` with a fresh `tempfile::NamedTempFile` SQLite, `StubEmbedder` (8-dim, all-0.1), localhost:0 RPC clients, no-pricing engine, production-default `PendingBundles`. `mint_jwt(sub, secret)` issues HS256 JWTs with the same claim shape as `oauth::Claims`. Re-exported from `lib.rs` under `pub mod test_support` (gated `#[cfg(feature = "test-support")]`).
+- **`mcp/Cargo.toml`** — added `test-support = ["dep:tempfile"]` feature, optional `tempfile = { version = "3", optional = true }` dep, and `simd-json = "0.13"` to `[dev-dependencies]`. Existing `tempfile = "3"` in `[dev-dependencies]` is kept so `cargo test` without the feature still has the dep — both entries name the same crate; cargo deduplicates at the lockfile level.
+- **`.github/workflows/ci.yml`** — three new jobs:
+  - `mcp-inspector` — builds `mnemonic-mcp` with `--features local-embed`, mints a JWT via the existing `mint-test-jwt` binary (Task 4 artifact), spawns the server in background with a `for i in $(seq 1 30)` `/health` readiness probe, then runs `npx --yes @modelcontextprotocol/inspector@0.6.x --validate http://localhost:3000/mcp -H "Authorization: Bearer ${TOKEN}"`. Pinned at 0.6.x.
+  - `cargo-audit` — `cargo install cargo-audit --locked` then `cargo audit --deny warnings`. Exceptions live in `audit.toml` (currently empty `[advisories] ignore = []`).
+  - `smithery-schema` — `pip install yamale==4.*` + `yamale -s scripts/smithery-schema.yaml smithery.yaml`. Schema covers `version`, `name`, `description`, `homepage`, `mcp_servers[].url`, `mcp_servers[].transport`, `mcp_servers[].auth.flows.authorizationCode.{authorizationUrl,tokenUrl}` — locks the public-listing fields the OAuth flow depends on.
+  - Modified `clippy` job to run twice — once `--lib --bins` (production surface) and once `--all-targets --features mnemonic-mcp/test-support` (test surface incl. integration tests).
+  - Modified `test` job to use `cargo test --workspace --no-fail-fast --features mnemonic-mcp/test-support`.
+  - Added `test-stdio` workflow_dispatch + schedule job that runs `cargo test ... --test stdio_backward_compat -- --ignored` on a network-allowed runner.
+- **`audit.toml` (new)** — empty advisories ignore list with shape ready for future exceptions.
+- **`scripts/smithery-schema.yaml` (new)** — yamale schema, ~40 lines, covers the smithery.yaml fields the listing page actually uses.
+
+### Verification
+
+- `cargo test --workspace --no-fail-fast --features mnemonic-mcp/test-support` → 91 unit + 24 integration tests pass; 1 `stdio_backward_compat` ignored.
+- `cargo clippy --workspace --lib --bins -- -D warnings` → clean.
+- `cargo clippy --workspace --all-targets --features mnemonic-mcp/test-support -- -D warnings` → clean.
+- `cargo fmt --all -- --check` → clean.
+- `MCP_JWT_SECRET=$(openssl rand -base64 32) cargo run -p mnemonic-mcp --features test-support --bin mint-test-jwt -- --sub ci-test` → emits a valid JWT (decodes via `oauth::verify_jwt` round-trip).
+- `python3 -c 'import yamale; ...'` against the new schema + smithery.yaml → "Validation success! 👍".
+
+### Deviations from task spec
+
+- **`stdio_backward_compat.rs` is `#[ignore]`d by default.** The mcp binary's `pricing.refresh()` at startup makes outbound HTTPS calls to `uploader.irys.xyz` and `api.coingecko.com` (10s reqwest timeout each). On a sandboxed test runner without internet, startup blocks for ~20s before the stdio-loop ever reads stdin — exceeding any reasonable per-test budget. Spec says "5s timeout per request", which only fits if startup completes before the first request. Mitigation: dedicated CI job (`test-stdio`) on dispatch + schedule; local devs run `cargo test --features test-support -- --ignored`. Compile-only coverage stays in the default test run.
+- **`pending_expiry.rs` uses `tokio::time::sleep(1100ms)` not `tokio::time::pause/advance`.** `PendingBundles` reads wall-clock `chrono::Utc::now()` for entry expiry; tokio's instrumented clock can't influence it. Spec hint #1 mentions `start_paused = true`; that's a no-op against `Utc::now()`. Real fix is a Phase-2 swap to `tokio::time::Instant`; for Phase 1 we cross the boundary with a 1100ms wall-clock sleep on a 1s TTL — total test duration < 2s. Logged so Phase 2 can pick this up.
+- **`pending_user_cap.rs` accepts EITHER HTTP 429 OR HTTP 200 with a JSON-RPC `-32603` error envelope mentioning "per-user pending bundle cap"**. The current `tools.rs::sign_memory_deferred` wraps `PendingError::PerUserCapExceeded` via `anyhow::anyhow!` which surfaces as a 200 OK with the JSON-RPC error body. Production-shape preference is HTTP 429 (the `IntoResponse` mapping for the error already exists); a follow-up task can rewire the dispatcher to lift the error code through. Either shape proves the cap fired, which is the regression assertion.
+- **`rate_limit_routing.rs`** boots only the `tower_governor` layer + a stub handler, not the full `main_router`. Task spec line 232 says "boots the actual `mcp/src/main.rs` Axum router"; T4's existing implementation tests the limiter at the same `.layer()` ordering as production, just without the surrounding handlers. Keeps the test under 200ms and decoupled from `pricing.refresh()` startup. The structural assertion (governor rejects N+1) is identical.
+- **No two-config clippy without test-support did pass.** New tests need `--features test-support`. Adjusted CI clippy job to do `--lib --bins` for the prod surface + `--all-targets --features ...` for the test surface, getting equivalent coverage.
+- **MCP Inspector CI uses `EMBED_PROVIDER=fastembed` (local-embed feature) not `mock`.** Task spec dispatcher prompt suggested `EMBED_PROVIDER=mock` but the production embedder builder doesn't have a `mock` provider — `MockEmbedder` is `#[cfg(test)]`-gated only. fastembed downloads ~22MB ONNX on first run; rust-cache + a cache key for `~/.cache/fastembed` would shave 30s on subsequent runs (follow-up if CI minutes become a concern).
+
+### Concerns / follow-ups for audit wave
+
+- **`mock_state()`'s SQLite tempfile is leaked.** `into_temp_path().keep()` retains the file for OS cleanup at process exit. Acceptable for short-lived `cargo test` runs; long-running test suites could accumulate `/tmp` clutter. Mitigation: convert callers to `(state, _guard)` returning the `NamedTempFile` alongside.
+- **MCP Inspector pin `0.6.x`.** When the inspector publishes a 0.7 with breaking schema, this CI job will fail. Bump in tandem with `modelcontextprotocol` spec releases (documented in `decisions.md` per spec line 201).
+- **`stdio_backward_compat`'s ignored-by-default state.** Production stdio path is exercised manually via `mnemonic-mcp --transport stdio` and via Claude Code; the CI job runs only on dispatch + schedule. Phase 2 should add a `--no-pricing` startup flag to make this test runnable without internet.
+- **`cargo-audit` exceptions are empty today.** First run on CI may surface real RUSTSEC ids in the dep graph (likely transitive `solana-sdk` chain). When that happens, populate `audit.toml` with both the id and a comment justifying acceptance + a target removal date.
+- **`smithery.yaml` schema completeness.** Schema covers fields the OAuth + listing flows depend on; Smithery may add new optional fields. Yamale's `required=False` permissive mode means unknown fields are silently allowed, so the schema is a "must-have" floor, not an exhaustive whitelist.
+
+### Files changed
+
+- `mcp/Cargo.toml` (test-support feature, optional tempfile, simd-json dev-dep)
+- `mcp/src/lib.rs` (test_support module re-export, gated)
+- `mcp/src/test_support.rs` (new — 178 LOC)
+- `mcp/tests/auth_allowlist.rs` (new)
+- `mcp/tests/oauth_tool_call.rs` (new)
+- `mcp/tests/cors.rs` (new)
+- `mcp/tests/deferred_sign_flow.rs` (new)
+- `mcp/tests/recall_owner_isolation.rs` (new — CRITICAL)
+- `mcp/tests/roundtrip_cose_via_http_proxy.rs` (new)
+- `mcp/tests/pending_expiry.rs` (new)
+- `mcp/tests/pending_user_cap.rs` (new)
+- `mcp/tests/stdio_backward_compat.rs` (new — `#[ignore]`'d)
+- `.github/workflows/ci.yml` (mcp-inspector + cargo-audit + smithery-schema + test-stdio jobs)
+- `audit.toml` (new)
+- `scripts/smithery-schema.yaml` (new)
+
+### Reviewer reports
+
+- security-auditor: pending (`work/mnemonic-integrations/logs/working/task-8/security-auditor-1.json`)
+- test-reviewer: pending (`work/mnemonic-integrations/logs/working/task-8/test-reviewer-1.json`)
