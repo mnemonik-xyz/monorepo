@@ -25,10 +25,16 @@ recovered/
 │   ├── DRAG_ANALYSIS.md                        <- VALIDATED (blake3/CBOR/COSE corrections applied)
 │   ├── WEB_RESEARCH_TRUSTLESS_RAG.md           <- VALIDATED (status updated, encryption framing fixed)
 │   └── MCP_SERVER_BACKEND_FEATURES_COMPARISON.md <- ARCHIVED (Python backend retired; links to old code)
-└── research/
+├── problems/                                   <- 3 problem-statement docs (NEW)
+│   ├── MEMORY_EVICTION.md                      <- open system problem statement
+│   ├── CONCURRENT_WRITERS.md                   <- multi-agent shared-context write semantics
+│   └── ARWEAVE_PRICING_VALIDATION.md           <- economic-model validation for full-mode persistence
+└── research/                                   <- 3 .md + 2 PDFs incl. foundational paper.pdf (NEW)
     ├── TURBOQUANT_DEEP_ANALYSIS.md             <- evergreen (source was truncated; closed cleanly)
     ├── apply-to-agent-memory-architecture.md   <- evergreen
-    └── condensed-principles.md                 <- evergreen
+    ├── condensed-principles.md                 <- evergreen
+    ├── Agent Identity for Autonomous AI_ ... .pdf  <- mnemonic-positioning analysis paper (PDF)
+    └── paper.pdf                               <- foundational scientific paper (PDF)
 ```
 
 ## Validation status per document
@@ -43,6 +49,16 @@ recovered/
 | `research/TURBOQUANT_DEEP_ANALYSIS.md` | Source was truncated mid-Mermaid block; closed cleanly with a recovery note | Ready to promote |
 | `research/apply-to-agent-memory-architecture.md` | Architectural recommendations from TurboQuant — generic enough to apply to current `core/src/compress/` design | Ready to promote |
 | `research/condensed-principles.md` | TurboQuant design principles, evergreen | Ready to promote |
+| `problems/MEMORY_EVICTION.md` | Open system problem statement: lifecycle/retention/pruning policy. | Promoted to docs/problems/ |
+| `problems/CONCURRENT_WRITERS.md` | Open problem: shared-context multi-agent write semantics. | Promoted to docs/problems/ with 2 token replaces (SHA3-256 → blake3, encrypted_blob → canonical CBOR bytes). |
+| `problems/ARWEAVE_PRICING_VALIDATION.md` | Economic-model validation for full-mode persistence. | Promoted to docs/problems/ |
+| `research/Agent Identity for Autonomous AI_...pdf` | Mnemonic-positioning analysis paper (PDF). | Promoted to docs/research/ |
+| `research/paper.pdf` | **Foundational scientific paper that motivated the project.** | Promoted to docs/research/; referenced from WHITEPAPER §References and root README. |
+
+## Dropped per owner decision
+
+- `competitive-landscape/MCP_SERVER_BACKEND_FEATURES_COMPARISON.md` — not restored, not archived. `docs/historical/` is not created.
+- `CRITICAL_REVIEW.md` (upstream `docs/CRITICAL_REVIEW.md`) — not restored. Outdated. Tracked as a follow-up bullet in `work/docs-actualization/decisions.md` ("Critical review redo against current Rust impl").
 
 ## Next steps
 
