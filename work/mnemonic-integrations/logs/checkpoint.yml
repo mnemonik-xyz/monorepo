@@ -1,0 +1,29 @@
+---
+feature: mnemonic-integrations
+created: 2026-04-26
+status: pending_approval
+total_waves: 5
+last_completed_wave: 0
+next_wave: 1
+team_name: mnemonic-integrations
+total_tasks: 15
+tasks:
+  1:  { wave: 1, status: pending }
+  2:  { wave: 1, status: pending }
+  3:  { wave: 1, status: pending }
+  4:  { wave: 2, status: pending }
+  5:  { wave: 2, status: pending }
+  6:  { wave: 2, status: pending }
+  7:  { wave: 3, status: pending }
+  8:  { wave: 3, status: pending }
+  9:  { wave: 3, status: pending }
+  10: { wave: 4, status: pending }
+  11: { wave: 4, status: pending }
+  12: { wave: 4, status: pending }
+  13: { wave: 5, status: pending }
+  14: { wave: 5, status: pending }
+  15: { wave: 5, status: pending }
+notes: |
+  - 3 git submodules: core/, mcp/, webapp/. Submodule-aware commits.
+  - High-risk tasks (T6 DNS+nginx, T14 deploy) require user confirmation.
+  - Default proposal: autonomous Waves 1-4, manual gate before W5 (QA + deploy).
