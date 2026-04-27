@@ -257,46 +257,52 @@ pub async fn handle_request(
 // multi-frame support (progress notifications, async tool results from Task 4b
 // PendingBundles) is wired but unused.
 
-const NDJSON_CONTENT_TYPE: &str = "application/x-ndjson";
+const JSON_CONTENT_TYPE: &str = "application/json";
 
-/// Build a streaming `Response` with `Content-Type: application/x-ndjson` from
-/// a single JSON-RPC envelope. Status code is set per call site (200 for happy
-/// path, 401/402/400 for payment / parse errors).
+/// Build an MCP streamable-HTTP response. Per MCP spec 2025-06-18, a single
+/// JSON-RPC response uses `Content-Type: application/json` with the response
+/// body being one JSON envelope (NOT NDJSON, NOT SSE — those formats are for
+/// multi-frame streaming responses, which we do not currently emit).
 ///
-/// The body is a `Body::from_stream` of one `Bytes` chunk so axum emits it as
-/// chunked transfer-encoding without a `Content-Length` header. Multi-frame
-/// callers can extend this with `stream::iter(...)` or an `mpsc::Receiver`
-/// without changing the public shape.
+/// Cursor / Claude.ai / VS Code MCP clients reject `application/x-ndjson`
+/// (which the spec does not define for the single-response case) with
+/// "Unexpected content type" — observed during T15 post-deploy QA.
+///
+/// We keep the body as a `Body::from_stream` of one `Bytes` chunk so axum
+/// emits it as chunked transfer-encoding without a `Content-Length` header.
+/// This is compatible with `application/json` (clients parse the body as a
+/// single JSON value regardless of transfer-encoding). When we eventually
+/// emit progress-notification frames the response shape will switch to
+/// `Content-Type: text/event-stream` (SSE) per the same spec.
 fn ndjson_response<T: Serialize>(status: StatusCode, frame: &T) -> Response {
-    let mut line = match serde_json::to_string(frame) {
+    let body_str = match serde_json::to_string(frame) {
         Ok(s) => s,
         Err(e) => {
             // Last-ditch fallback — produce a JSON-RPC parse error envelope.
             // Logged because reaching here means our own response type failed
             // to serialize, which is a programmer error, not a client one.
-            tracing::error!(error = %e, "failed to serialize NDJSON frame");
+            tracing::error!(error = %e, "failed to serialize JSON-RPC frame");
             "{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-32603,\"message\":\"internal serialize error\"}}"
                 .to_string()
         }
     };
-    line.push('\n');
 
     let body = Body::from_stream(stream::once(async move {
-        Ok::<Bytes, Infallible>(Bytes::from(line))
+        Ok::<Bytes, Infallible>(Bytes::from(body_str))
     }));
 
     let mut resp = Response::new(body);
     *resp.status_mut() = status;
     resp.headers_mut().insert(
         axum::http::header::CONTENT_TYPE,
-        HeaderValue::from_static(NDJSON_CONTENT_TYPE),
+        HeaderValue::from_static(JSON_CONTENT_TYPE),
     );
     resp
 }
 
 /// Build a non-streaming JSON error response for cases where the *request*
 /// itself was malformed (e.g. JSON parse error before we even know the
-/// JSON-RPC id). Still emitted as one NDJSON frame for protocol consistency.
+/// JSON-RPC id). Emitted as one `application/json` envelope per MCP spec.
 fn ndjson_error(status: StatusCode, code: i32, message: &str) -> Response {
     let body = serde_json::json!({
         "jsonrpc": "2.0",
