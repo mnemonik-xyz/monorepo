@@ -25,7 +25,7 @@ use std::sync::Arc;
 
 use axum::{
     body::Body,
-    extract::{Extension, Path, State},
+    extract::{Path, State},
     http::{header, HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     Json,
@@ -35,17 +35,22 @@ use mnemonic_core::storage::AttestationStore;
 use serde::{Deserialize, Serialize};
 
 use crate::mcp::McpState;
-use crate::oauth::Claims;
 use crate::pending::PendingError;
 
 /// `GET /api/pending/{correlation_id}` — webapp fetches the unsigned
 /// canonical-CBOR bytes for the user to sign.
+///
+/// Auth: capability-based — `correlation_id` IS the capability. No Bearer
+/// JWT required because the webapp on `mnemonik.xyz` does not hold the JWT
+/// that the AI-tool client received from `/oauth/token`. The unsigned CBOR
+/// leak is bounded (5-min TTL, content the user just typed); the actual
+/// signing chain is gated by `consume_by_id` + COSE verification in
+/// `sign_callback_handler`, where keypair ownership is the auth.
 pub async fn get_pending_handler(
     State(state): State<Arc<McpState>>,
-    Extension(claims): Extension<Claims>,
     Path(correlation_id): Path<String>,
 ) -> Response {
-    let entry = match state.pending.get(&correlation_id, &claims.sub).await {
+    let entry = match state.pending.peek_by_id(&correlation_id).await {
         Ok(e) => e,
         Err(e) => return e.into_response(),
     };
@@ -91,20 +96,16 @@ pub struct SignCallbackResponse {
 }
 
 /// `POST /api/sign-callback` — webapp delivers the user's COSE_Sign1.
+///
+/// Auth: capability + cryptographic chain — no Bearer JWT required. The
+/// body's `signer_pubkey` MUST equal the pending entry's stored `jwt_sub`
+/// (validated atomically by `consume_by_id`), AND the COSE signature MUST
+/// verify against that same pubkey. An attacker holding only a guessed
+/// `correlation_id` cannot forge this without the user's private key.
 pub async fn sign_callback_handler(
     State(state): State<Arc<McpState>>,
-    Extension(claims): Extension<Claims>,
     Json(req): Json<SignCallbackRequest>,
 ) -> Response {
-    // 1. Body's `signer_pubkey` must equal jwt.sub. This is the cheapest
-    //    of the four checks; do it before touching the LRU.
-    if req.signer_pubkey != claims.sub {
-        return error_resp(
-            StatusCode::FORBIDDEN,
-            "signer_pubkey does not match authenticated jwt.sub",
-        );
-    }
-
     // 2. Decode the COSE bytes.
     let cose_bytes = match base64::Engine::decode(
         &base64::engine::general_purpose::STANDARD,
@@ -127,7 +128,7 @@ pub async fn sign_callback_handler(
     //    same logical attestation.
     let entry = match state
         .pending
-        .consume(&req.correlation_id, &claims.sub)
+        .consume_by_id(&req.correlation_id, &req.signer_pubkey)
         .await
     {
         Ok(e) => e,
@@ -166,8 +167,9 @@ pub async fn sign_callback_handler(
         return error_resp(StatusCode::UNAUTHORIZED, "COSE signature invalid");
     }
     // The COSE kid (recovered as `result.signer`) must equal the body's
-    // `signer_pubkey`, which we already proved equals `claims.sub`. This
-    // closes the chain "JWT → body → COSE kid → Ed25519 signature".
+    // `signer_pubkey`, which `consume_by_id` already validated against the
+    // pending entry's stored `jwt_sub`. This closes the chain:
+    // "correlation_id capability → entry.jwt_sub → body.signer_pubkey → COSE kid → Ed25519 signature".
     if result.signer != req.signer_pubkey {
         return error_resp(
             StatusCode::UNAUTHORIZED,
@@ -215,8 +217,8 @@ pub async fn sign_callback_handler(
             &entry.tags,
             &local_sol,
             &local_ar,
-            &claims.sub, // signer = jwt.sub (the user's COSE-Sign1 kid we just verified)
-            &claims.sub, // owner = jwt.sub (Decision 9)
+            &req.signer_pubkey, // signer = pubkey we just verified via COSE
+            &req.signer_pubkey, // owner = same pubkey (Decision 9 — webapp flow uses keypair as identity)
             &now,
             &entry.embedding,
         )

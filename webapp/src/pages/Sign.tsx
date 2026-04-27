@@ -69,6 +69,15 @@ export default function Sign() {
   const [now, setNow] = useState<number>(() => Date.now());
   const tickRef = useRef<number | null>(null);
 
+  // Pre-Decision-12-fix the page required a JWT in localStorage. That broke
+  // the cross-tool flow: the AI tool (VS Code/Cursor/Claude.ai) holds the
+  // JWT issued by /oauth/token, but the user's browser DOES NOT — auth
+  // contexts are separate. Now /api/* endpoints accept the correlation_id
+  // as a capability and rely on COSE signature verification for security
+  // (see api.rs::sign_callback_handler doc comment).
+  //
+  // We still read JWT opportunistically so the DID display works when the
+  // user authenticated to the webapp directly (not through an AI tool).
   const jwt = useMemo(() => readJwt(), []);
   const did = useMemo(() => {
     if (!jwt) return null;
@@ -78,32 +87,36 @@ export default function Sign() {
     return sub ? `did:sol:${sub}` : null;
   }, [jwt]);
 
-  // Redirect to /install if there is no JWT in localStorage.
+  // Redirect to /install ONLY if the user has no keypair AT ALL — without
+  // a keypair there is nothing to sign with. With a keypair, proceed even
+  // without a JWT (cross-tool case: VS Code holds the JWT, browser holds
+  // the keypair).
   useEffect(() => {
-    if (!jwt) {
+    if (
+      typeof localStorage !== "undefined" &&
+      !localStorage.getItem("mnemonic.identity")
+    ) {
       navigate("/install", { replace: true });
     }
-  }, [jwt, navigate]);
+  }, [navigate]);
 
   // Validate correlationId shape before fetching.
   const validCorrelation = correlationId && UUID_RE.test(correlationId);
 
-  // Initial fetch of the pending bundle.
+  // Initial fetch of the pending bundle. JWT is optional — if present we
+  // include it (server still accepts), otherwise we use capability-based
+  // auth via correlation_id alone.
   useEffect(() => {
-    if (!jwt || !validCorrelation || !correlationId) return;
+    if (!validCorrelation || !correlationId) return;
 
     let cancelled = false;
     (async () => {
       try {
+        const headers: Record<string, string> = { Accept: "application/cbor" };
+        if (jwt) headers.Authorization = `Bearer ${jwt}`;
         const res = await fetch(
           `${MCP_BASE}/api/pending/${encodeURIComponent(correlationId)}`,
-          {
-            method: "GET",
-            headers: {
-              Authorization: `Bearer ${jwt}`,
-              Accept: "application/cbor",
-            },
-          }
+          { method: "GET", headers }
         );
 
         if (cancelled) return;
@@ -174,7 +187,9 @@ export default function Sign() {
   const handleSign = useCallback(async () => {
     if (status.kind !== "ready") return;
     const identity: KeypairJson | null = readIdentity();
-    if (!identity || !jwt || !correlationId) return;
+    // JWT is optional — capability via correlation_id + keypair-signed COSE
+    // is the auth path for cross-tool flow (see api.rs::sign_callback_handler).
+    if (!identity || !correlationId) return;
 
     setStatus({ kind: "signing" });
 
@@ -190,12 +205,13 @@ export default function Sign() {
 
       const cose_signed_bytes_b64 = uint8ToBase64(cose);
 
+      const cbHeaders: Record<string, string> = {
+        "Content-Type": "application/json",
+      };
+      if (jwt) cbHeaders.Authorization = `Bearer ${jwt}`;
       const res = await fetch(`${MCP_BASE}/api/sign-callback`, {
         method: "POST",
-        headers: {
-          Authorization: `Bearer ${jwt}`,
-          "Content-Type": "application/json",
-        },
+        headers: cbHeaders,
         body: JSON.stringify({
           correlation_id: correlationId,
           cose_signed_bytes: cose_signed_bytes_b64,

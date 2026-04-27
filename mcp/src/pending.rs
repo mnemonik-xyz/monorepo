@@ -256,6 +256,60 @@ impl PendingBundles {
         Ok(correlation_id)
     }
 
+    /// Capability-based lookup — validates TTL only, NOT owner. Used by
+    /// `GET /api/pending/{id}` when the request authenticates via the
+    /// `correlation_id` capability instead of an OAuth Bearer JWT (Decision
+    /// 12 browser-mediated flow: webapp on mnemonik.xyz holds the localStorage
+    /// keypair but not a JWT). Reading the unsigned canonical-CBOR is a
+    /// bounded leak (5-min TTL, content the user just submitted to their AI
+    /// tool); the actual signing chain is gated by COSE verification in
+    /// `consume_by_id` + `sign-callback` handler.
+    pub async fn peek_by_id(&self, correlation_id: &str) -> Result<PendingEntry, PendingError> {
+        let mut guard = self.inner.lock().await;
+        let entry = match guard.lru.get(correlation_id) {
+            Some(e) => e.clone(),
+            None => return Err(PendingError::NotFound),
+        };
+        if entry.exp <= Utc::now() {
+            guard.lru.pop(correlation_id);
+            guard.dec_user(&entry.jwt_sub);
+            return Err(PendingError::Expired);
+        }
+        Ok(entry)
+    }
+
+    /// Atomic consume that validates against the ENTRY'S OWN stored owner
+    /// (not a request-supplied jwt.sub). Used by `/api/sign-callback` when
+    /// the body's `signer_pubkey` IS the auth — the COSE signature itself
+    /// proves keypair ownership. Peek-then-pop preserves "wrong-owner attempts
+    /// don't evict the rightful owner's bundle".
+    pub async fn consume_by_id(
+        &self,
+        correlation_id: &str,
+        signer_pubkey: &str,
+    ) -> Result<PendingEntry, PendingError> {
+        let mut guard = self.inner.lock().await;
+        let preview = match guard.lru.peek(correlation_id) {
+            Some(e) => e.clone(),
+            None => return Err(PendingError::NotFound),
+        };
+        if preview.exp <= Utc::now() {
+            guard.lru.pop(correlation_id);
+            guard.dec_user(&preview.jwt_sub);
+            return Err(PendingError::Expired);
+        }
+        if preview.jwt_sub != signer_pubkey {
+            return Err(PendingError::Forbidden);
+        }
+        // Now pop atomically.
+        let entry = guard
+            .lru
+            .pop(correlation_id)
+            .expect("entry was peeked above so it must still exist under same lock");
+        guard.dec_user(&entry.jwt_sub);
+        Ok(entry)
+    }
+
     /// Look up a pending bundle for read-only access (used by
     /// `GET /api/pending/{id}` to return the canonical-CBOR bytes).
     /// Validates owner + TTL; does NOT remove the entry.

@@ -927,7 +927,23 @@ pub async fn bearer_auth_middleware(
     // endpoints (RFC 8414 OAuth discovery + MCP protected-resource metadata)
     // are public by design — Anthropic's MCP connector probes them BEFORE
     // attempting OAuth.
-    if path.starts_with("/oauth/") || path == "/health" || path.starts_with("/.well-known/") {
+    //
+    // `/api/pending/*` and `/api/sign-callback` are also public — Decision 12's
+    // browser-mediated signing flow opens these from the user's webapp on
+    // `mnemonik.xyz`, which has its OWN identity (the localStorage keypair)
+    // but does NOT have the JWT that the AI-tool client (Cursor/VS Code/etc.)
+    // received from /oauth/token. Auth on these endpoints is enforced via the
+    // cryptographic chain instead: `correlation_id` is a capability, and
+    // `sign-callback` validates `signer_pubkey == entry.jwt_sub` plus a valid
+    // COSE_Sign1 signature over the canonical-CBOR bundle. An attacker
+    // holding only a guessed correlation_id cannot forge a valid sign-back
+    // because they don't have the user's private key.
+    if path.starts_with("/oauth/")
+        || path == "/health"
+        || path.starts_with("/.well-known/")
+        || path.starts_with("/api/pending/")
+        || path == "/api/sign-callback"
+    {
         return next.run(request).await;
     }
 
