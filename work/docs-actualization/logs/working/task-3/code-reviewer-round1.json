@@ -1,0 +1,34 @@
+{
+  "task": 3,
+  "round": 1,
+  "reviewer": "code-reviewer",
+  "verdict": "approved",
+  "summary": "Commit 8ed0b6c is a clean verbatim copy of recovered/usecases/ to docs/usecases/. Scope is confined to docs/usecases/ (11 files, 628 insertions). All 11 destination files diff-empty against source. ls docs/usecases/*.md returns 11. Sanity-grep regression passes (no SHA3/mcp-server-rs/pre-V1/HashEmbedder/Python backend hits). Acceptance criteria fully met.",
+  "findings": [
+    {
+      "dimension": "scope",
+      "severity": "info",
+      "note": "git show 8ed0b6c --stat: 11 files changed, 628 insertions(+), 0 deletions(-); all under docs/usecases/. No core/, mcp/, webapp/, Cargo.toml, or Cargo.lock diffs."
+    },
+    {
+      "dimension": "byte-equality",
+      "severity": "info",
+      "note": "Loop diff over docs/usecases/*.md against .claude/skills/project-knowledge/recovered/usecases/<basename>: all empty diffs. Verbatim copy confirmed."
+    },
+    {
+      "dimension": "file-count",
+      "severity": "info",
+      "note": "ls docs/usecases/*.md | wc -l = 11 (10 use-case docs + README.md). Matches Verify-smoke spec."
+    },
+    {
+      "dimension": "sanity-grep",
+      "severity": "info",
+      "note": "grep -RIE 'SHA3|mcp-server-rs|pre-V1|Pre-V1|HashEmbedder|Python backend' docs/usecases/ returns empty. Recovered usecases tree confirmed evergreen."
+    },
+    {
+      "dimension": "commit-message",
+      "severity": "info",
+      "note": "Commit message 'docs: promote recovered/usecases -> docs/usecases/' matches the form prescribed in tasks/3.md step 5."
+    }
+  ]
+}

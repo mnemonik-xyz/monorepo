@@ -1,0 +1,51 @@
+{
+  "task": 6,
+  "round": 1,
+  "reviewer": "code-reviewer",
+  "verdict": "approved",
+  "summary": "Task 6 promotion is correct and surgical. Commit eacb6ff scope is exactly the 4 docs/problems/ files plus the code-research.md log entry — no out-of-scope edits. The 2 token replaces in CONCURRENT_WRITERS.md (lines 157, 217) match code-research.md §4.5 verbatim. MEMORY_EVICTION.md and ARWEAVE_PRICING_VALIDATION.md are byte-equal to recovered/. New docs/problems/README.md frames the section per tech-spec and links back to decisions.md. grep -RIE 'SHA3' on docs/problems/ is empty.",
+  "findings": [
+    {
+      "severity": "info",
+      "dimension": "scope",
+      "file": "(commit eacb6ff)",
+      "note": "git show eacb6ff --stat shows 5 files: docs/problems/{ARWEAVE_PRICING_VALIDATION,CONCURRENT_WRITERS,MEMORY_EVICTION,README}.md (new) and work/docs-actualization/code-research.md (+14 lines). Matches Task 6 'Files to modify' exactly. No edits to core/, mcp/, webapp/, Cargo.toml, or any other path."
+    },
+    {
+      "severity": "info",
+      "dimension": "token-replace correctness",
+      "file": "docs/problems/CONCURRENT_WRITERS.md",
+      "note": "Line 157: 'each SHA3-256 hash = 64 hex chars' -> 'each blake3 hash = 64 hex chars' — matches code-research.md §4.5 Entry 5 byte-for-byte (memo size paragraph preserved, table sizing claim still true since blake3 also emits 32 bytes / 64 hex chars). Line 217: '`SHA3-256(encrypted_blob)`' -> '`blake3(canonical CBOR bytes)`' — matches Entry 6 byte-for-byte and aligns with the shipped data flow described in architecture.md (`codec::canonical::to_canonical_cbor` -> `blake3` hash). Diff against recovered/ confirms only these 2 lines changed."
+    },
+    {
+      "severity": "info",
+      "dimension": "byte-equality",
+      "file": "docs/problems/{MEMORY_EVICTION,ARWEAVE_PRICING_VALIDATION}.md",
+      "note": "cmp against recovered/problems/ counterparts exits 0 for both files. No accidental edits during copy."
+    },
+    {
+      "severity": "info",
+      "dimension": "README authoring",
+      "file": "docs/problems/README.md",
+      "note": "27 lines, frames section as 'open system problem statements and pricing validation' per tech-spec Task 6 description. Lists all 3 documents with concise descriptions matching their actual content. Includes the required link to ../../work/docs-actualization/decisions.md follow-up roadmap. Relative path resolves correctly from docs/problems/ to repo root."
+    },
+    {
+      "severity": "info",
+      "dimension": "sanity-grep regression",
+      "file": "docs/problems/",
+      "note": "Grep tool with pattern 'SHA3' on /Users/syi/src/sessions/monorepo/docs/problems/ returns 'No matches found'. Wider pattern 'SHA3|Pre-V1|pre-V1' would also be empty (only SHA3 was applicable here per the per-hit table). Acceptance criterion satisfied."
+    },
+    {
+      "severity": "info",
+      "dimension": "audit trail",
+      "file": "work/docs-actualization/code-research.md",
+      "note": "§4.5 'Wave 3 Task 6 — promotion log' added with Entry 5 (line 157) and Entry 6 (line 217), each with explicit Before/After matching the actual edits. Verify-smoke note at end confirms grep -RIE 'SHA3' docs/problems/ empty and ls returns 4. Section is append-only after §4.4 (Task 4 log), preserving prior history."
+    },
+    {
+      "severity": "info",
+      "dimension": "commit message",
+      "file": "(commit eacb6ff)",
+      "note": "Subject 'docs: promote recovered/problems → docs/problems/ (apply 2 token replaces in CONCURRENT_WRITERS)' matches Task 6 acceptance criterion exactly. Body explains the 2 replacements, references architecture.md alignment, and links to code-research.md §4.5. Conforms to Conventional Commits with docs scope."
+    }
+  ]
+}
