@@ -1,5 +1,6 @@
 import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 import Chat from "./pages/Chat";
+import Consent from "./pages/Consent";
 import Install from "./pages/Install";
 import Landing from "./pages/Landing";
 import Sign from "./pages/Sign";
@@ -17,6 +18,7 @@ function App() {
         <Route path="/install" element={<Install />} />
         <Route path="/chat" element={<Chat />} />
         <Route path="/sign/:correlationId" element={<Sign />} />
+        <Route path="/oauth/consent" element={<Consent />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
     </BrowserRouter>
