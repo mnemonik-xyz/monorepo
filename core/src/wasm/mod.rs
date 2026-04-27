@@ -175,6 +175,31 @@ pub fn sign_attestation_bundle(
         .map_err(|e| JsValue::from_str(&format!("COSE signing failed: {e}")))
 }
 
+/// Wrap server-provided canonical-CBOR payload bytes in a COSE_Sign1 envelope
+/// signed by the user's keypair.
+///
+/// Use this when the canonical-CBOR was BUILT BY THE SERVER (e.g. /api/pending
+/// returns the bytes the server stored — full metadata: embed_provider,
+/// embed_dim, turbo_bits, etc). Re-deriving the bytes in the browser would
+/// produce a DIFFERENT byte sequence (subset of metadata), and the server's
+/// `verify_artifact` would fail `content_integrity` because the embedded
+/// content_hash references the server's full bytes, not the browser's subset.
+///
+/// This function wraps `payload` verbatim — it does NOT rebuild CBOR.
+/// The COSE_Sign1 protected header carries `alg=EdDSA` and `kid=<pubkey>`,
+/// and the signature is computed over `Sig_structure1(protected, payload)`
+/// per RFC 8152.
+#[wasm_bindgen]
+pub fn sign_cose_payload(
+    payload: &[u8],
+    keypair_json: JsValue,
+) -> Result<Vec<u8>, JsValue> {
+    let kpj = keypair_json_from_value(keypair_json)?;
+    let kp = keypair_from_json(kpj)?;
+    sign_cose(payload, &kp)
+        .map_err(|e| JsValue::from_str(&format!("COSE signing failed: {e}")))
+}
+
 /// Serialize a keypair JSON object to a string for download/backup.
 ///
 /// The returned string is plain JSON — the webapp wraps it in a `Blob` for

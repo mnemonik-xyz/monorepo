@@ -24,6 +24,15 @@ export interface MnemonicWasm {
     owner_pubkey: string,
     keypair_json: unknown
   ) => Uint8Array;
+  /**
+   * Wrap server-provided canonical-CBOR bytes in a COSE_Sign1 envelope —
+   * use this for /api/sign-callback so the signed payload byte-matches
+   * what the server stored. (sign_attestation_bundle rebuilds CBOR
+   * client-side from a SUBSET of metadata fields, which produces
+   * different bytes than the server's original — verify_artifact fails
+   * content_integrity in that case.)
+   */
+  sign_cose_payload: (payload: Uint8Array, keypair_json: unknown) => Uint8Array;
   export_keypair_json: (keypair_json: unknown) => string;
   import_keypair_json: (json_str: string) => unknown;
 }

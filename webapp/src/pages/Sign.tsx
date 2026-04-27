@@ -195,11 +195,12 @@ export default function Sign() {
 
     try {
       const wasm = await loadWasm();
-      const cose = wasm.sign_attestation_bundle(
-        status.bundle.content,
-        status.bundle.embeddingBytes,
-        status.bundle.contentHash,
-        identity.pubkey_base58,
+      // Sign the SERVER-PROVIDED canonical-CBOR bytes verbatim. Using
+      // sign_attestation_bundle here produces different bytes (subset of
+      // metadata fields) and verify_artifact fails content_integrity on
+      // the server. sign_cose_payload wraps the exact bytes in COSE_Sign1.
+      const cose = wasm.sign_cose_payload(
+        status.bundle.cborBytes,
         identity
       ) as Uint8Array;
 
