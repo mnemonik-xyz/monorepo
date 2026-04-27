@@ -50,24 +50,45 @@ For PDF files: same command, redirect captures binary bytes correctly.
 
 If local clone is not at `origin/docs/usecases`: `git -C /Users/syi/src/mnemonic-protocol fetch origin` (branch already tracked).
 
-## 4. Sanity-grep results (pre-flight against upstream content)
+## 4. Sanity-grep results
 
-Initial term set: `SHA3`, `SHA-3`, `mcp-server-rs`, `pre-V1`, `Pre-V1`, `HashEmbedder`, `Python backend`, `mcp-server.py`, `sha3`.
+Term set (final): `SHA3`, `SHA-3`, `sha3`, `mcp-server-rs`, `pre-V1`, `Pre-V1`, `HashEmbedder`, `Python backend`, `mcp-server.py`.
 
-**Hits requiring action (6 token replaces in 3 files; ≪50% per file → drop-rule not triggered):**
+### 4.1 Pre-flight expectations (against upstream `sivo4kin@7a68a973`)
 
-| File | Line | Original | Replacement |
-|---|---|---|---|
-| DRAG_ANALYSIS.md | 37 | `Mnemonic records: SHA3-256 hash of the encrypted memory blob via Solana memo.` | delete the line (encryption is roadmap, not shipped) |
-| WEB_RESEARCH_TRUSTLESS_RAG.md | 45 | `\| Status \| Pre-V1, prototype validated \| Live (Kinic-CLI shipped) \|` | replace `Pre-V1, prototype validated` → `active Rust MCP server` |
-| WEB_RESEARCH_TRUSTLESS_RAG.md | 64 | `Mnemonic commits the memory blob (SHA3 hash); V3DB proves the retrieval result` | delete `(SHA3 hash)` |
-| WEB_RESEARCH_TRUSTLESS_RAG.md | 132 | `\| Mnemonic \| Memory integrity (hash) \| ✅ 4/8-bit \| ✅ \| Arweave+Solana \| Pre-V1 \|` | replace `Pre-V1` → `v1.0 (active)` |
-| CONCURRENT_WRITERS.md | 157 | `Adding parent_hashes for DAG structure: each SHA3-256 hash = 64 hex chars.` | replace `SHA3-256` → `blake3` (sizes match) |
-| CONCURRENT_WRITERS.md | 217 | `The current system commits SHA3-256(encrypted_blob) to Solana.` | replace `SHA3-256(encrypted_blob)` → `blake3(canonical CBOR bytes)` |
+6 token-replace hits in 3 files; ≪50% per file → drop-rule not triggered. All 6 are `replace-token` overrides per Decision 3 (1-token replacement override on delete-only policy).
 
-All 6 are `replace-token` overrides per user-spec policy A. Each must be re-logged in this file with before/after during implementation Wave 3 (promotion).
+### 4.2 Final sanity-grep run against restored `recovered/<subdir>/` (run 2026-04-27)
 
-**Files passing verbatim (no hits):** all PDFs (binary, skipped), DECENTRALIZED_RAG_LANDSCAPE.md, TURBOQUANT_DEEP_ANALYSIS.md, apply-to-agent-memory-architecture.md, condensed-principles.md, MEMORY_EVICTION.md, ARWEAVE_PRICING_VALIDATION.md.
+```bash
+grep -rInE 'SHA3|SHA-3|sha3|mcp-server-rs|pre-V1|Pre-V1|HashEmbedder|Python backend|mcp-server\.py' \
+  .claude/skills/project-knowledge/recovered/competitive-landscape/ \
+  .claude/skills/project-knowledge/recovered/research/ \
+  .claude/skills/project-knowledge/recovered/problems/
+```
+
+**Result:** 9 raw hits across 4 files. 6 hits in restored content files (parity with pre-flight). 3 hits in `recovered/competitive-landscape/README.md` (lines 8, 9, 10) are descriptive prose authored by the upstream owner about the validation work itself ("SHA3 references replaced with `blake3 over canonical CBOR + COSE_Sign1`", "`Pre-V1, prototype validated` → `active Rust MCP server`", "Python (`mcp-server/`) vs Rust (`mcp-server-rs/`) backend comparison") — not stale claims, but historical narrative referencing the very tokens being replaced. Verdict for those: `keep` in `recovered/`; the README will be adapted (drop the MCP_SERVER... bullet) during Task 4 promotion to `docs/competitive-landscape/README.md`, which is a separate, owner-driven rewrite of that index.
+
+**Cross-check against current code (`core/src/**/*.rs`, `mcp/src/**/*.rs`):** zero hits for `SHA3|sha3|HashEmbedder|mcp-server-rs|Pre-V1|pre-V1|Python backend|mcp-server.py`. Only false positive: `core/src/arweave/mod.rs` defines `fn sha384(...)` (Arweave deep-hash), which is the correct shipped algorithm and not a member of the term set. **Conclusion:** all 6 in-content hits are confirmed stale; no new stale terms surfaced; term set unchanged from pre-flight.
+
+### 4.3 Per-hit table (final, with verdicts)
+
+| File | Line | Original | Replacement | Verdict |
+|---|---|---|---|---|
+| competitive-landscape/DRAG_ANALYSIS.md | 37 | `Mnemonic records: SHA3-256 hash of the encrypted memory blob via Solana memo.` | delete the entire line (encryption is roadmap, not shipped; line is standalone in the table-context and removing it preserves paragraph coherence) | `replace-token` (delete-line variant) |
+| competitive-landscape/WEB_RESEARCH_TRUSTLESS_RAG.md | 45 | `\| Status \| Pre-V1, prototype validated \| Live (Kinic-CLI shipped) \|` | `\| Status \| active Rust MCP server \| Live (Kinic-CLI shipped) \|` (replace `Pre-V1, prototype validated` → `active Rust MCP server`) | `replace-token` |
+| competitive-landscape/WEB_RESEARCH_TRUSTLESS_RAG.md | 64 | `Mnemonic commits the memory blob (SHA3 hash); V3DB proves the retrieval result` | `Mnemonic commits the memory blob; V3DB proves the retrieval result` (delete ` (SHA3 hash)`) | `replace-token` (delete-tokens variant) |
+| competitive-landscape/WEB_RESEARCH_TRUSTLESS_RAG.md | 132 | `\| Mnemonic \| Memory integrity (hash) \| ✅ 4/8-bit \| ✅ \| Arweave+Solana \| Pre-V1 \|` | `\| Mnemonic \| Memory integrity (hash) \| ✅ 4/8-bit \| ✅ \| Arweave+Solana \| v1.0 (active) \|` (replace `Pre-V1` → `v1.0 (active)`) | `replace-token` |
+| problems/CONCURRENT_WRITERS.md | 157 | `Adding parent_hashes for DAG structure: each SHA3-256 hash = 64 hex chars.` | `Adding parent_hashes for DAG structure: each blake3 hash = 64 hex chars.` (replace `SHA3-256` → `blake3`; both produce 32-byte / 64-hex-char outputs, table sizing preserved) | `replace-token` |
+| problems/CONCURRENT_WRITERS.md | 217 | `The current system commits SHA3-256(encrypted_blob) to Solana.` | `The current system commits blake3(canonical CBOR bytes) to Solana.` (replace `SHA3-256(encrypted_blob)` → `blake3(canonical CBOR bytes)`; aligns with shipped data-flow per architecture.md) | `replace-token` |
+
+All 6 hits are `replace-token` overrides per Decision 3. Each before/after will be re-logged in this file during Wave 3 (Tasks 4 and 6) at promotion time.
+
+**Files passing verbatim (no hits):** all PDFs (binary, skipped by grep without `-a`), `competitive-landscape/DECENTRALIZED_RAG_LANDSCAPE.md`, `research/TURBOQUANT_DEEP_ANALYSIS.md`, `research/apply-to-agent-memory-architecture.md`, `research/condensed-principles.md`, `problems/MEMORY_EVICTION.md`, `problems/ARWEAVE_PRICING_VALIDATION.md`.
+
+**No `drop-file` verdicts.** No `keep` verdicts on stale-content lines. Owner-policy drops (`MCP_SERVER_BACKEND_FEATURES_COMPARISON.md`, `CRITICAL_REVIEW.md`) are handled in Wave 1 (not restored at all) per Decision 2 and remain out of scope for the sanity-grep table.
+
+Sanity-grep run completed 2026-04-27 against `recovered/{competitive-landscape,research,problems}/`. Total 6 in-content hits across 3 files (plus 3 narrative mentions in `recovered/competitive-landscape/README.md` classified `keep`). 6 token-replace overrides applied; no further stale terms detected; no drop-file verdicts.
 
 ## 5. Current state of monorepo paths affected
 
