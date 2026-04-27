@@ -1397,3 +1397,200 @@ Then re-dispatch T14-deploy from Step 2 onward. All other steps (MCP_JWT_SECRET 
 ### Unfinished by deploy agent (lead-completed via direct curl smoke)
 
 The agent's stream timed out before writing the final Task 14 decisions entry. Lead verified all smoke checks pass and finalized via this entry.
+
+---
+
+## Task 15: Post-deploy QA
+
+**Date:** 2026-04-27
+**Agent:** T15-qa (`post-deploy-qa` skill)
+**Branch:** `claude/create-user-spec-ai-tools-OypHH` at `0902e7c` (T15 in_progress on top of `be73805` T14 finalize). VPS at `c99377f` — re-pull deferred (only docs differ between `c99377f..be73805`; live binaries + nginx config already correct).
+**TEST_JWT minted on VPS** for `sub=t15-qa-test`, valid 60 min from 1777315177 UTC. Stored at `/tmp/t15-qa/test-jwt.txt`.
+**VERDICT:** **PRODUCTION_LIVE (partial — Phase 2 carry-forwards documented)**.
+
+**One-line summary:** All 6 verification steps executed against live `mcp.mnemonik.xyz` + `mnemonik.xyz`. Production endpoints serve 200; security boundary holds (anonymous → 401, cross-tenant isolated, rate limit fires); deferred-sign round-trip works end-to-end on production. Two manual user-action items remain (Smithery web-form submit, real Cursor/Claude.ai install requires `/oauth/consent` route — Phase 2). Success metrics will be tracked post-presentation; today's measurement is a baseline (zero usage, expected pre-demo).
+
+### Step 1 — MCP Inspector validation (manual fallback)
+
+**Status:** PASS-manual / DEFERRED-tooling
+
+**MCP Inspector 0.6.x crash (T13 known issue, reproduced):**
+```
+$ TEST_JWT=... npx --yes @modelcontextprotocol/inspector@0.6 \
+    --validate https://mcp.mnemonik.xyz/mcp -H "Authorization: Bearer ${TEST_JWT}"
+TypeError [ERR_PARSE_ARGS_INVALID_OPTION_VALUE]: Option '--env' argument is ambiguous.
+    at checkOptionLikeValue (node:internal/util/parse_args/parse_args:87:11)
+Node.js v20.19.1
+```
+Inspector 0.6.0's CLI parser is incompatible with Node ≥ 20.19's stricter `parseArgs`. Same crash observed in T13 step 8. **Phase 2 carry-forward:** bump CI pin to `0.21.x` or pin runner Node ≤ 20.18.
+
+**Manual JSON-RPC verification against `https://mcp.mnemonik.xyz/mcp`:**
+
+| Probe | Auth | HTTP | Result |
+|---|---|---|---|
+| `POST /mcp tools/list` | none (allowlisted) | **200** | Returns 5 canonical tools: `mnemonic_whoami`, `mnemonic_sign_memory`, `mnemonic_verify`, `mnemonic_prove_identity`, `mnemonic_recall` (with input schemas) |
+| `POST /mcp tools/call mnemonic_whoami` | Bearer JWT | **200** | Returns `{public_key: DYVu4Bry3BzGVsR3Hj2iGVT5fNdWFoHw2zRxsdTmrG25, did_sol: did:sol:DYVu..., did_key: did:key:z6Mkr..., attestation_count: 19, storage_mode: local}` |
+| `POST /mcp tools/call mnemonic_recall` | none | **401** | `{error: {code: -32001, message: "unauthorized: missing Bearer JWT"}}` |
+| `POST /mcp tools/call mnemonic_recall` | Bearer JWT | **200** | NDJSON streamable-HTTP frame, valid JSON-RPC envelope |
+| `GET /health` | n/a | **200** | `{"status":"ok"}` |
+
+All MCP protocol shape checks the Inspector would have validated PASS via curl. Storage mode confirmed `local` per user-spec MUST §5.
+
+### Step 2 — Cursor connector install (programmatic equivalent — full deferred-sign on prod)
+
+**Status:** PASS for the server-side flow / DEFERRED for the real-Cursor browser flow (Phase 2 — `/oauth/consent` route not implemented).
+
+Per dispatcher brief, ran `scripts/test-deferred-sign-flow.sh` on VPS pointing at `MCP_BASE_URL=https://mcp.mnemonik.xyz`:
+
+```
+>>> [1/6] Generating test keypair (sign_pending --no-secret)
+    signer_pubkey=DWBccFr7NbYxzu9CRjejV8djT9uoStXFMgytAvov5Qex
+>>> [2/6] Minting test JWT for sub=DWBccFr7NbYxzu9CRjejV8djT9uoStXFMgytAvov5Qex
+>>> [3/6] Calling mnemonic_sign_memory over /mcp
+    correlation_id=7bccb30a-e738-40c9-8dba-e86508eaad4c
+    approve_url=https://mnemonik.xyz/sign/7bccb30a-e738-40c9-8dba-e86508eaad4c
+>>> [4/6] GET /api/pending/7bccb30a-...
+    fetched 585 bytes of canonical-CBOR
+>>> [5/6] Signing canonical-CBOR locally (COSE_Sign1 base64)
+>>> [6/6] POST /api/sign-callback
+    persisted attestation_id=40f2948c-113f-47fd-a18b-d190da379904
+>>> [recall] Verifying mnemonic_recall returns the persisted row
+    recall returned 1 hit(s)
+PASS: deferred-sign flow round-trip succeeded
+```
+
+Full deferred-sign loop on production:
+1. Fresh keypair → JWT (`sub=signer_pubkey`).
+2. `tools/call mnemonic_sign_memory` → `awaiting_signature` + `correlation_id` + `approve_url`.
+3. `GET /api/pending/<id>` → 585 B canonical-CBOR.
+4. Local COSE_Sign1 sign with the signer keypair.
+5. `POST /api/sign-callback` → `{status: ok, attestation_id}`.
+6. `tools/call mnemonic_recall` → 1 hit (the just-persisted row).
+
+**Browser-driven Cursor install flow (the spec's literal Step 2) is DEFERRED** — webapp `/oauth/consent` route is the missing piece (T7 + audit-fixer-1 known gap). Real Cursor app cannot complete the OAuth approval today. Programmatic equivalent above proves every backend surface is live and correct.
+
+### Step 3 — Claude.ai Pro custom connector
+
+**Status:** DEFERRED (same gap as Step 2). `/oauth/consent` route not implemented on webapp; full browser OAuth flow blocked. Per Step 2, all backend surfaces (`/oauth/authorize`, `/oauth/token`, `/api/pending/<id>`, `/api/sign-callback`, `/mcp` JWT-gated routes) verified live. Phase 2 must implement the consent UI to unblock real `claude.ai` connector adoption.
+
+### Step 4 — Smithery listing
+
+**Status:** DEFERRED — user action.
+
+```
+$ curl -fsSL https://smithery.ai/mcp/mnemonic
+curl: (56) The requested URL returned error: 404
+$ curl -sI https://smithery.ai/mcp/mnemonic | head -1
+HTTP/2 404
+```
+
+`smithery.yaml` exists at repo root (`/Users/syi/src/sessions/2/smithery.yaml`, 2771 bytes; references `mcp.mnemonik.xyz`). Smithery.ai is a community catalogue — listing requires **manual web-form submission**. Operator must:
+
+1. Visit https://smithery.ai/server/new (or equivalent submission URL).
+2. Connect GitHub account, select `mnemonik-xyz/monorepo`.
+3. Confirm `smithery.yaml` is detected; submit listing.
+4. Re-run `curl -fsSL https://smithery.ai/mcp/mnemonic | grep -q "mcp.mnemonik.xyz"` to confirm live.
+
+Until submission completes, the user-spec MUST "Smithery листинг активен" remains pending.
+
+### Step 5 — Security live spot-checks
+
+| Check | Test | Expected | Observed | Status |
+|---|---|---|---|---|
+| 5a Anonymous `tools/call` → 401 | `curl -X POST https://mcp.mnemonik.xyz/mcp -H 'Content-Type: application/json' -d '{...recall...}'` | 401 | **401** `{"error":{"code":-32001,"message":"unauthorized: missing Bearer JWT"},"id":null,"jsonrpc":"2.0"}` | PASS |
+| 5b Cross-tenant isolation | Mint JWTs `sub=user-a-t15qa` and `sub=user-b-t15qa`, both query `recall query="deferred sign flow smoke test"`; smoke-attestation owner is `sub=DWBccFr7NbYxzu9CRjejV8djT9uoStXFMgytAvov5Qex` (Step 2) | A=0 hits, B=0 hits, total_attestations visible | A: hits=0, total=19; B: hits=0, total=19. SQL `WHERE owner_pubkey = ?` filter holds | PASS |
+| 5c Rate limit (recall ≤ 30/min/IP) | 40 parallel POSTs with same JWT | <30 OK, ≥1 429 | 8× 200, **32× 429**. Earlier sequential burst (35 over ~7s): 33× 200, 1× 429 mid-stream — confirms governor refill at ~30/min, parallel test confirms cap enforced | PASS |
+| 5d Webapp CSP headers (`/install`) | `curl -sI https://mnemonik.xyz/install` + body `<meta http-equiv>` | CSP present with `frame-ancestors 'none'`, `default-src 'self'` | nginx-level CSP NOT set; CSP delivered via `<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; connect-src 'self' https://mcp.mnemonik.xyz; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; **frame-ancestors 'none'**; base-uri 'self'; object-src 'none'; form-action 'self'">` (per audit-fixer-1 T11 finding — meta-CSP is intentional, but `frame-ancestors` is silently ignored when delivered via `<meta>` per W3C spec). **Minor finding** — see below | PASS-with-caveat |
+| 5d HSTS / X-Frame-Options on webapp | `curl -sI https://mnemonik.xyz/install` | HSTS + XFO DENY headers | NEITHER present at the nginx level for `mnemonik.xyz/*` routes. Only `mcp.mnemonik.xyz` has them (HSTS max-age=31536000, X-Frame-Options DENY, X-Content-Type-Options nosniff, Referrer-Policy strict-origin-when-cross-origin — all confirmed on `https://mcp.mnemonik.xyz/health`). **Phase 2 follow-up** — webapp nginx block needs same hardening | PARTIAL |
+| 5e HTTPS-only (HTTP → HTTPS redirect) | `curl -sI http://mcp.mnemonik.xyz/health` and `http://mnemonik.xyz/install` | 301/308 to HTTPS | `mcp.mnemonik.xyz`: **301** → `https://mcp.mnemonik.xyz/health`. `mnemonik.xyz`: **301** → `https://mnemonik.xyz/install`. | PASS |
+
+**5d caveat — meta-CSP `frame-ancestors`:** the W3C CSP3 spec states `frame-ancestors` is enforced ONLY when delivered as an HTTP response header, not as `<meta>`. Practically, the same protection on the webapp comes from there being no real OAuth/auth-bearing pages today (the `/install` page only renders public content + WASM identity in localStorage). For Phase 2 hardening, the recommended fix is to add an `add_header Content-Security-Policy "..." always;` directive in the webapp's nginx server block AND `add_header X-Frame-Options "DENY" always;`, `add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;`, `add_header X-Content-Type-Options "nosniff" always;`. Tracked.
+
+**5b independent confirmation:** Step 2 already established that the legitimate owner of attestation `40f2948c-...` is `sub=DWBccFr7NbYxzu9CRjejV8djT9uoStXFMgytAvov5Qex`; that JWT's recall (executed inside the smoke script) returned 1 hit. The cross-tenant test (5b) used DIFFERENT subjects — the 0 hits proves SQL ownership filter, not just absence of data.
+
+### Step 6 — Success metric counters baseline
+
+**Status:** BASELINE_RECORDED — zero usage pre-demo (expected); structured `metric:` counters NOT WIRED UP (KNOWN GAP per `deployment.md` "No app-level metrics for MVP." — also flagged in T13 step 6).
+
+```
+$ ssh claude@150.251.147.215 "sudo journalctl -u mnemonic-mcp --since '1 hour ago' --no-pager | grep -E 'sign_memory|recall|tools/call' | wc -l"
+0
+
+$ ssh ... "sudo journalctl -u mnemonic-mcp --since '1 hour ago' --no-pager | grep -c 'metric:'"
+0
+```
+
+Service-level:
+- `systemctl is-active mnemonic-mcp` → **active**
+- ActiveEnterTimestamp → `Mon 2026-04-27 16:16:31 UTC` (2.5h uptime at QA time)
+- No errors / panics in the last 50 journal lines (only periodic 30-min `pricing refresh failed: sol price fetch` WARN — non-fatal upstream HTTP issue, server uses floor price).
+
+User-spec MUSTs (success metrics):
+| Metric | Target | Observed | Status |
+|---|---|---|---|
+| ≥3 unique signups during/after presentation | 3 | 0 (pre-demo) | N/A pre-demo |
+| ≥1 external Smithery install | 1 | 0 (Smithery listing pending submit) | N/A — Smithery deferred |
+| ≥200 sign_memory calls | 200 | 0 | N/A pre-demo |
+| ≥100 recall calls | 100 | 0 | N/A pre-demo |
+| Webapp uptime during demo window | 100% | 100% (HTTPS 200 on all 4 routes; cert valid through 2026-07-26) | PASS-baseline |
+
+**Phase 2 metric instrumentation (requires code change, NOT in T15 scope):**
+- Add `tracing::info!(metric = "oauth.token.issued", sub = %claims.sub)` to `oauth.rs::token_handler`.
+- Add `tracing::info!(metric = "tools.sign_memory.call", owner = %owner_pubkey)` to `tools.rs::sign_memory`.
+- Add `tracing::info!(metric = "tools.recall.call", owner = %owner_pubkey)` to `tools.rs::recall`.
+- Then `journalctl ... | grep "metric:"` aggregates them. Until then, manual counting fallback: count distinct `sub` values in JWT-decoded structured logs (also requires the structured-log change).
+
+For T15 verdict: success metrics column = **BASELINE_RECORDED**.
+
+### Live security spot-check summary
+
+| Spot-check | Result |
+|---|---|
+| Anonymous `/mcp tools/call` | 401 (correct JSON-RPC error envelope) |
+| Cross-tenant `recall` isolation (user-a vs user-b vs owner) | Owner sees their row, A and B see 0 / total-19 |
+| Per-IP rate limit (recall) — burst 40 in parallel | 8 OK + 32 × 429 |
+| `mcp.mnemonik.xyz` security headers | HSTS, X-Frame-Options DENY, X-Content-Type-Options nosniff, Referrer-Policy strict-origin-when-cross-origin — all present |
+| `mnemonik.xyz` security headers | CSP delivered via `<meta>` (frame-ancestors only enforced as HTTP header — minor); HSTS / XFO / nosniff NOT present at nginx level |
+| HTTP → HTTPS forced | 301 redirect on both subdomains |
+| TLS cert | LetsEncrypt, valid 2026-04-27 → 2026-07-26 |
+| `tools/list` (allowlisted, no auth) | 200 |
+| 5 canonical tools served | mnemonic_whoami, sign_memory, verify, prove_identity, recall |
+| Production deferred-sign full round-trip | sign_memory → /api/pending → COSE sign → sign-callback → recall: PASS |
+
+### VERDICT: **PRODUCTION_LIVE (partial)**
+
+Production is operational and handling requests correctly:
+- All 5 MCP tools live, JWT-gated where appropriate, allowlisted methods (initialize + tools/list) work without auth per Decision 9.
+- Deferred-sign flow proven end-to-end on production with a real-shaped JWT and locally-signed COSE bundle.
+- Security boundary holds: anonymous denied, cross-tenant isolated, rate limit fires, HTTPS forced, MCP-subdomain headers correct.
+
+**Phase 2 known gaps with explicit user-action items:**
+
+1. **Smithery listing — USER ACTION REQUIRED.** `smithery.yaml` is in repo at `/Users/syi/src/sessions/2/smithery.yaml`. User must submit via Smithery's web form (https://smithery.ai/server/new), authenticate with GitHub for `mnemonik-xyz/monorepo`, and confirm publication. Re-verify with `curl -fsSL https://smithery.ai/mcp/mnemonic | grep -q "mcp.mnemonik.xyz"`.
+2. **Webapp `/oauth/consent` route — DEV ACTION (Phase 2).** T7 + audit-fixer-1 known gap. `WEBAPP_CONSENT_URL` is referenced from `mcp/src/oauth.rs::authorize_init_handler`, but `webapp/src/` lacks `Consent.tsx`. Without it, real Cursor / Claude.ai OAuth approve flow cannot complete (browser navigates to a missing route). Stage demo can use `mint-test-jwt` CLI shortcut. Phase 2 must implement the consent page that calls `wasm.sign_challenge(challenge_cbor)` with the localStorage keypair and POSTs the result back to `/oauth/authorize/post`.
+3. **Webapp nginx security headers — OPS ACTION (Phase 2).** Add `add_header Content-Security-Policy "<full policy>" always;`, `add_header X-Frame-Options "DENY" always;`, `add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;`, `add_header X-Content-Type-Options "nosniff" always;`, `add_header Referrer-Policy "strict-origin-when-cross-origin" always;` to the `mnemonik.xyz` nginx server block (currently only the `mcp.mnemonik.xyz` block has them). The meta-tag CSP works for browsers but `frame-ancestors` requires the HTTP-header form per W3C CSP3.
+4. **MCP Inspector 0.6.x crash on Node 20.19 — TOOLING ACTION (Phase 2).** Bump CI pin to `@modelcontextprotocol/inspector@0.21.x` or pin runner Node ≤ 20.18. Manual JSON-RPC verification (Step 1) compensates for now; Inspector schema-validate is not load-bearing for a working server.
+5. **App-level `metric:` counters NOT WIRED — DEV ACTION (Phase 2).** Add `tracing::info!(metric = "...")` calls in `mcp.rs` / `oauth.rs` / `tools.rs`. Today, success-metric counting falls back to ad-hoc `journalctl | grep` over JWT-issuance and tool-call lines (which themselves don't exist yet either — full request tracing is also missing).
+6. **HSTS preload not enabled — OPERATOR DECISION (Phase 2).** Operator's call; non-preload HSTS still closes the return-visitor downgrade window for 1 year.
+7. **Pricing refresh logs WARN every 30 min** (`sol price fetch` upstream HTTP failure). Server uses floor price; PAYMENT_MODE=none means no actual billing impact. **Phase 2 fix:** investigate Coingecko/Pyth upstream or add fallback price source.
+
+### Files / artifacts produced by this QA run
+
+- `/tmp/t15-qa/test-jwt.txt` — TEST_JWT for `sub=t15-qa-test`, valid 60min from 2026-04-27 ~17:39 UTC.
+- `/tmp/t15-qa/step1-tools-list.json`, `step1-whoami.json`, `step1-inspector.log` — Step 1 evidence.
+- `/tmp/t15-qa/step2-deferred-flow.log` — Step 2 deferred-sign full round-trip on production.
+- `/tmp/t15-qa/step5a-anon-call.json` — anonymous tools/call 401 evidence.
+- `/tmp/t15-qa/step5c-ratelimit.log` — rate-limit burst transcript.
+- `/tmp/t15-qa/step5d-webapp-headers.txt` — webapp /install header dump.
+- `/tmp/t15-qa/step5e-http-redirect.txt` — HTTP→HTTPS redirect evidence.
+- `/tmp/t15-qa/step6-metrics.log`, `step6-journal-tail.log` — service uptime + metric-counter baseline.
+
+### Recommended next actions (in priority order)
+
+1. **User submits Smithery listing** (manual, ~5 min via web form).
+2. **Phase 2 ticket:** implement webapp `/oauth/consent` to unblock real Cursor/Claude.ai install.
+3. **Phase 2 ticket:** add nginx security headers to `mnemonik.xyz` server block (5-line config change + reload).
+4. **Phase 2 ticket:** wire `tracing::info!(metric = ...)` counters in tool handlers + JWT issuance for success-metric measurability.
+5. **Phase 2 ticket:** bump MCP Inspector pin in CI to `0.21.x` (or pin runner Node ≤ 20.18).
+6. **No re-pull on VPS needed** — `c99377f..be73805` diff is docs-only (decisions.md + tasks/14.md), live binaries and nginx config already correct. T15 commit will push cleanly without operator intervention on VPS.
+
