@@ -1293,3 +1293,107 @@ Then re-dispatch T14-deploy from Step 2 onward. All other steps (MCP_JWT_SECRET 
 - This `decisions.md` block.
 - No logs in `/tmp/` on VPS (no commands ran past `git fetch` + the failed `git checkout`).
 
+---
+
+## Task 14: Deploy — 2026-04-26 (resumed by T14-deploy-2)
+
+**Agent:** T14-deploy-2 (`deploy-pipeline` skill).
+**Branch:** `claude/create-user-spec-ai-tools-OypHH`.
+**VPS HEAD post-pull:** `c99377f` (preempt agent advanced VPS to current branch tip; `webapp/package-lock.json` was forensics-preserved at `/tmp/package-lock.json.t14-preempt-<ts>`).
+**Restart timestamp:** `Mon 2026-04-27 16:16:31 UTC`.
+**Verdict:** **DEPLOYED**.
+
+### Step-by-step evidence
+
+| Step | Action | Evidence | Result |
+|------|--------|----------|--------|
+| 2 | Append `MCP_JWT_SECRET` to `/home/claude/mcp.env` (idempotent) | `grep -c "^MCP_JWT_SECRET=" /home/claude/mcp.env` → `1`; `grep "^MCP_JWT_SECRET=" /home/claude/mcp.env \| grep -c "="` → `1` (single `KEY=VALUE` line) | PASS |
+| 3 | `cargo build --release -p mnemonic-mcp --features local-embed` on VPS | `Finished release profile [optimized] target(s) in 2m 25s` | PASS |
+| 4 | `sudo systemctl restart mnemonic-mcp` | `Active: active (running) since Mon 2026-04-27 16:16:31 UTC`; clean startup logs (Identity, did:sol, fastembed 384-dim, TurboQuant 4-bit, Storage local, Payment none, OAuth state init, listening on `0.0.0.0:3000/mcp`); zero panics, zero `MCP_JWT_SECRET` value in journal | PASS |
+| 5 | nginx subdomain wired up — encountered cert chicken-and-egg + duplicate-directive issue | (a) Created HTTP-only stub `/etc/nginx/sites-available/mnemonic-mcp-stub` for ACME; (b) `sudo certbot --nginx -d mcp.mnemonik.xyz --non-interactive --agree-tos -m bogdan.sivochkin@gmail.com` → cert at `/etc/letsencrypt/live/mcp.mnemonik.xyz/`, expires 2026-07-26; (c) Removed stub, copied hardened `mcp/deploy/nginx-mcp-subdomain.conf` → `/etc/nginx/sites-available/mnemonic-mcp`, symlinked into `sites-enabled`; (d) `nginx -t` initially **failed** with `duplicate value "TLSv1.2"` and `"ssl_prefer_server_ciphers" directive is duplicate` — root cause: certbot's `/etc/letsencrypt/options-ssl-nginx.conf` already pins TLS 1.2/1.3 + prefer_server_ciphers off; audit-fixer-1's defense-in-depth lines collided. **Fix:** edited in-tree `mcp/deploy/nginx-mcp-subdomain.conf` to comment out the redundant directives with operator note explaining when to re-enable (if certbot's include drops the pin); re-copied to VPS. `nginx -t` PASS, `systemctl reload nginx` PASS. | PASS (with in-tree fix) |
+| 5b | `server_tokens off` in `/etc/nginx/nginx.conf` | Line was present-but-commented (`# server_tokens off;` at line 21). Uncommented via `sed`. Verified: `Server: nginx` (no version) on `/health` response. | PASS |
+| 6 | Skipped — certbot already executed in step 5 | n/a | PASS |
+| 7 | Smoke verify hosted MCP | See verification table below | PASS |
+| Part B 1-2 | Webapp build + rsync | `npm run build:wasm` → `Finished release profile`; `npm run build` → `vite v6.4.2 built in 513ms`, 5 dist assets emitted; `rsync -avz --delete dist/ → /home/claude/monorepo/webapp/dist/` → 7 files transferred | PASS |
+| Part B 3 | Webapp endpoint smoke + CSP | `/install` 200, `/sign/test-uuid` 200 (SPA fallback works), CSP delivered as `<meta http-equiv="Content-Security-Policy">` (no `unsafe-eval`, includes `connect-src 'self' https://mcp.mnemonik.xyz`) — per audit-fixer T11 finding the CSP-as-meta is the intended approach | PASS |
+
+### Final smoke verify table
+
+| Check | Expected | Result |
+|---|---|---|
+| `curl -fI https://mcp.mnemonik.xyz/health` | HTTP 200 | **HTTP/2 200**, `server: nginx` (no version) |
+| `curl -fI https://mnemonik.xyz/install` | HTTP 200 | **HTTP/2 200** |
+| `curl -fI https://mnemonik.xyz/sign/test-uuid` | HTTP 200 | **HTTP/2 200** (SPA `try_files` fallback) |
+| Anonymous `tools/call` | HTTP 401 | **401** |
+| `tools/list` no auth | HTTP 200 | **200** (allowlisted method) |
+| `dig +short mcp.mnemonik.xyz` | `150.251.147.215` | **150.251.147.215** |
+| HSTS header on MCP | present, max-age 1y, includeSubDomains | `strict-transport-security: max-age=31536000; includeSubDomains` |
+| X-Frame-Options on MCP | `DENY` | `x-frame-options: DENY` |
+| X-Content-Type-Options on MCP | `nosniff` | `x-content-type-options: nosniff` |
+| Referrer-Policy on MCP | `strict-origin-when-cross-origin` | `referrer-policy: strict-origin-when-cross-origin` |
+| `journalctl -u mnemonic-mcp --since "5 min ago" \| grep -iE 'panic\|backtrace\|ERROR'` | (empty) | (empty) |
+| `grep -c MCP_JWT_SECRET /home/claude/mcp.env` | 1 | **1** |
+| `systemctl is-active mnemonic-mcp` | active | **active** |
+
+### VPS state changes summary
+
+- `/home/claude/monorepo` checked out at `c99377f` on `claude/create-user-spec-ai-tools-OypHH` (preempt agent's advance, this agent did not run `git pull`).
+- `/home/claude/mcp.env`: appended one line `MCP_JWT_SECRET=...` (file now 18 lines, perms unchanged `-rw-rw-r--`).
+- `/etc/nginx/nginx.conf`: uncommented `server_tokens off;` at line 21.
+- `/etc/nginx/sites-available/mnemonic-mcp`: new file (hardened conf from `mcp/deploy/nginx-mcp-subdomain.conf` after duplicate-directive fix).
+- `/etc/nginx/sites-enabled/mnemonic-mcp`: new symlink → above.
+- `/etc/letsencrypt/live/mcp.mnemonik.xyz/`: new cert + key (LetsEncrypt, expires 2026-07-26, auto-renew configured by certbot).
+- `mnemonic-mcp.service`: restarted at `2026-04-27 16:16:31 UTC` running freshly built binary at `/home/claude/monorepo/target/release/mnemonic-mcp`.
+- `/home/claude/monorepo/webapp/dist/`: 5 assets refreshed via rsync (index.html + 4 hashed assets).
+
+### In-tree change required during deploy
+
+`mcp/deploy/nginx-mcp-subdomain.conf` — commented out the duplicate `ssl_protocols` and `ssl_prefer_server_ciphers` directives (lines 58-59 of audit-fixer-1's version) because nginx rejects duplicate `ssl_prefer_server_ciphers` in the same server block when the certbot include `/etc/letsencrypt/options-ssl-nginx.conf` is present (which it always is in our deploy flow). Audit-fixer-1's defense-in-depth intent is preserved as a documented uncomment-instruction in the file header note. This change is committed alongside the T14 deploy commit.
+
+### Phase 2 carry-forwards (unchanged)
+
+- Webapp `/oauth/consent` route still missing (audit-fixer-1 known gap).
+- MCP Inspector 0.6.x crashes on Node 20.19 (T13 finding) — tooling-only.
+- Smithery web-form submission is manual — operator action post-deploy.
+- HSTS preload not enabled — operator decision (non-preload HSTS is live for 1y).
+
+### Files / artifacts produced
+
+- This `decisions.md` block.
+- `/etc/letsencrypt/live/mcp.mnemonik.xyz/` (LetsEncrypt cert).
+- Updated `mcp/deploy/nginx-mcp-subdomain.conf` (in-tree, committed).
+
+
+---
+
+## Task 14: Deploy (lead-finalized)
+
+**Teammate:** T14-deploy-2 (re-spawn after unblock); stream idle timeout at 7560s but 63 tool calls completed
+**Status:** done
+
+### Live smoke verification (lead, 2026-04-27)
+
+| Endpoint | HTTP | Result |
+|---|---|---|
+| `https://mcp.mnemonik.xyz/health` | 200 | hosted MCP live, HTTPS via Let's Encrypt |
+| `https://mnemonik.xyz/install` | 200 | webapp live |
+| `POST /mcp tools/list` (no auth) | 200 | allowlist enforced (Decision 9) |
+| `POST /mcp tools/call recall` (no auth) | 401 | security boundary holds |
+
+### VPS state
+
+- `mnemonic-mcp.service`: `active` (running new `cargo build --release -p mnemonic-mcp --features local-embed`)
+- SSL cert at `/etc/letsencrypt/live/mcp.mnemonik.xyz/{fullchain,privkey,cert,chain}.pem`
+- nginx sites-enabled: `mnemonic` (existing webapp + chat) + `mnemonic-mcp` (new subdomain) — both symlinked
+- Branch checked out: `claude/create-user-spec-ai-tools-OypHH` at HEAD `c99377f`
+- DNS `mcp.mnemonik.xyz` → 150.251.147.215 (pre-existing)
+
+### Concerns / carry-forwards
+
+- Webapp `/oauth/consent` route still missing (T7 known gap; not added by audit-fixer-1). Real Cursor connector OAuth flow won't complete until Phase 2 — demo uses `mint-test-jwt` CLI shortcut.
+- MCP Inspector 0.6.x crashes on Node 20.19 (T13 finding). CI gate may show error; manual curl-based MCP protocol verification compensates.
+- `webapp/package-lock.json` was moved to `/tmp/package-lock.json.t14-preempt-<ts>` on VPS to unblock `git checkout` (was an untracked artifact from prior `npm install`). Branch-tracked version now in place.
+
+### Unfinished by deploy agent (lead-completed via direct curl smoke)
+
+The agent's stream timed out before writing the final Task 14 decisions entry. Lead verified all smoke checks pass and finalized via this entry.
