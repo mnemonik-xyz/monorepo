@@ -3,9 +3,11 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
+  "//": "Requires wasm-pack on PATH for `build:wasm` (cargo install wasm-pack). Not an npm dependency.",
   "scripts": {
     "dev": "vite",
-    "build": "tsc -b && vite build",
+    "build:wasm": "bash scripts/build-wasm.sh",
+    "build": "npm run build:wasm && tsc -b && vite build",
     "preview": "vite preview",
     "test:e2e": "playwright test"
   },
