@@ -41,6 +41,23 @@ Provider portability is the secondary problem: memory stored via Mnemonic is pro
 
 ---
 
+## Use Case Roles
+
+The protocol serves 10 role-framed use cases. Deep-dives live in `docs/usecases/`.
+
+- **Shared Memory Layer** — durable common substrate. [docs/usecases/shared-memory-layer.md](../../../../docs/usecases/shared-memory-layer.md)
+- **Provenance and Attestation Layer** — auditable knowledge production. [docs/usecases/provenance-attestation-layer.md](../../../../docs/usecases/provenance-attestation-layer.md)
+- **Trust and Reputation Layer** — source-quality scoring across writers. [docs/usecases/trust-reputation-layer.md](../../../../docs/usecases/trust-reputation-layer.md)
+- **Portable Memory Wallet** — operator-owned memory across providers. [docs/usecases/portable-memory-wallet.md](../../../../docs/usecases/portable-memory-wallet.md)
+- **Settlement-Aware Memory Infrastructure** — agent-payable memory services. [docs/usecases/settlement-aware-memory-infrastructure.md](../../../../docs/usecases/settlement-aware-memory-infrastructure.md)
+- **Task Memory Ledger** — per-task attested artefacts. [docs/usecases/task-memory-ledger.md](../../../../docs/usecases/task-memory-ledger.md)
+- **Shared Project Memory Namespace** — multi-agent project workflow memory. [docs/usecases/shared-project-memory-namespace.md](../../../../docs/usecases/shared-project-memory-namespace.md)
+- **Artifact Attestation Service** — signed artefacts with lineage. [docs/usecases/artifact-attestation-service.md](../../../../docs/usecases/artifact-attestation-service.md)
+- **Agent Continuity Layer** — cross-session/runtime continuity. [docs/usecases/agent-continuity-layer.md](../../../../docs/usecases/agent-continuity-layer.md)
+- **Reliability Oracle for Orchestration** — quality oracle for shared memory. [docs/usecases/reliability-oracle-for-orchestration.md](../../../../docs/usecases/reliability-oracle-for-orchestration.md)
+
+---
+
 ## MVP Scope
 
 MVP consists of `core/` and `mcp/`. Core ships as both a native Rust crate and a WASM npm package. MCP server is fully functional in local mode for Cursor and Claude Desktop.

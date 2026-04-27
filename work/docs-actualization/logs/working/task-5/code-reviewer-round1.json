@@ -1,0 +1,34 @@
+{
+  "task": 5,
+  "round": 1,
+  "reviewer": "code-reviewer",
+  "verdict": "approved",
+  "summary": "Commit 82704c7 promotes 3 .md + 2 PDFs from recovered/research to docs/research/ with a new README. Scope is confined to docs/research/ (plus the tasks/5.md status bump). Both PDFs are byte-equal to recovered (cmp exit 0); paper.pdf is 861881 bytes as expected. All 3 .md files are byte-equal to recovered (verbatim, no token rewrites — consistent with research-tier policy). New README.md lists all 5 contents, attributes provenance to upstream commit sivo4kin@7a68a973, and explicitly flags the upstream mid-Mermaid truncation in TURBOQUANT_DEEP_ANALYSIS.md so future readers do not try to repair it. Sanity-grep for SHA3|Pre-V1|pre-V1|HashEmbedder|'Python backend' over docs/research/ returns no matches — including TURBOQUANT_DEEP_ANALYSIS.md, so the optional flag-for-owner caveat is not triggered. Acceptance criteria (file count, byte equality, README presence, sanity-grep) all satisfied.",
+  "findings": [
+    {
+      "severity": "info",
+      "dimension": "scope",
+      "note": "git show 82704c7 --stat: 7 files changed, 773 insertions(+), 1 deletion(-). Touched paths are exclusively docs/research/* and work/docs-actualization/tasks/5.md (status update). No collateral edits to core/, mcp/, or other docs."
+    },
+    {
+      "severity": "info",
+      "dimension": "fidelity",
+      "note": "PDF byte-equality verified: paper.pdf and 'Agent Identity ... Minimal Primitive.pdf' both cmp-clean against recovered/research/. paper.pdf size = 861881 bytes (matches expectation)."
+    },
+    {
+      "severity": "info",
+      "dimension": "fidelity",
+      "note": "All 3 .md files (TURBOQUANT_DEEP_ANALYSIS.md, apply-to-agent-memory-architecture.md, condensed-principles.md) cmp-clean against recovered originals. Verbatim promotion is correct for research-tier content per task-5 spec."
+    },
+    {
+      "severity": "info",
+      "dimension": "documentation",
+      "note": "docs/research/README.md present (15 lines); enumerates all 5 contents, cross-links paper.pdf to WHITEPAPER.md and root README.md, documents the upstream mid-Mermaid truncation in TURBOQUANT_DEEP_ANALYSIS.md with a clear 'do not attempt to repair' instruction, and records provenance (sivo4kin@7a68a973)."
+    },
+    {
+      "severity": "info",
+      "dimension": "regression",
+      "note": "Sanity-grep over docs/research/ for SHA3|Pre-V1|pre-V1|HashEmbedder|'Python backend' returns zero matches. Optional owner-discussion flag for TURBOQUANT_DEEP_ANALYSIS SHA3 references is not triggered — file is clean."
+    }
+  ]
+}
