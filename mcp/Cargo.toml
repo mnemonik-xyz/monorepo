@@ -24,6 +24,10 @@ bytes = "1"
 # HTTP server (remote MCP transport)
 axum = { version = "0.8", features = ["json", "macros"] }
 tower-http = { version = "0.6", features = ["cors"] }
+# Form-urlencoded body parsing for /oauth/token (RFC 6749 §3.2 mandates
+# Content-Type: application/x-www-form-urlencoded; VS Code, Claude.ai,
+# and most OAuth client libraries default to that — only Cursor sends JSON).
+serde_urlencoded = "0.7"
 
 # Rate limiting (POST /chat: 10 req/min per IP)
 governor = "0.8"

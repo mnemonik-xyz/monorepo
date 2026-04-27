@@ -682,10 +682,52 @@ pub struct TokenResponse {
 ///
 /// PKCE: `SHA256(code_verifier)` (base64url, no padding) must equal the
 /// stored `code_challenge`. Single-use — code is removed atomically.
+///
+/// Per OAuth 2.1 (RFC 6749 §3.2), the token endpoint accepts requests
+/// with `Content-Type: application/x-www-form-urlencoded` — VS Code,
+/// Claude.ai, and most OAuth client libraries default to that.
+/// Cursor sends `application/json`, so we accept BOTH and ignore any
+/// extra standard fields (`grant_type`, `redirect_uri`, `client_id`)
+/// that we do not need to validate (PKCE alone closes the auth-code
+/// confused-deputy attack — `redirect_uri` was bound at bootstrap and
+/// `client_id` is opaque to us per Decision 11 / DCR comments).
 pub async fn token_handler(
     State(state): State<Arc<OAuthState>>,
-    Json(req): Json<TokenRequest>,
+    headers: axum::http::HeaderMap,
+    body: axum::body::Bytes,
 ) -> Response {
+    // Decide between JSON and x-www-form-urlencoded. Default to JSON if
+    // the header is missing — keeps existing programmatic clients
+    // (`scripts/test-oauth-flow.sh`, integration tests) working.
+    let ct = headers
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("application/json")
+        .to_lowercase();
+
+    let req: TokenRequest = if ct.starts_with("application/x-www-form-urlencoded") {
+        match serde_urlencoded::from_bytes(&body) {
+            Ok(r) => r,
+            Err(e) => {
+                return oauth_error(
+                    StatusCode::BAD_REQUEST,
+                    &format!("token request form parse failed: {e}"),
+                );
+            }
+        }
+    } else {
+        // JSON (or unknown content-type — JSON is our default).
+        match serde_json::from_slice(&body) {
+            Ok(r) => r,
+            Err(e) => {
+                return oauth_error(
+                    StatusCode::BAD_REQUEST,
+                    &format!("token request JSON parse failed: {e}"),
+                );
+            }
+        }
+    };
+
     let issued = {
         let mut guard = state.codes.lock().expect("codes mutex poisoned");
         guard.pop(&req.code)
