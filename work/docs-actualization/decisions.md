@@ -237,3 +237,14 @@ Evergreen direction-of-travel hints surfaced during the docs-actualization featu
 **Status:** done · **Wave:** 5 (post-audit) · **Date:** 2026-04-27
 **Commit:** c57c492
 **Summary:** Addressed major finding from Task 12 + 14 audits. recovered/README.md now carries the "Promoted on 2026-04-27" stamp with all 4 promotion commit hashes; validation-table rows reworded to past tense reflecting completed Wave 3.
+
+---
+
+## Task 15 — Pre-deploy QA
+
+**Status:** done · **Wave:** 6 · **Date:** 2026-04-27
+**Verdict:** pass
+**Summary:** All 15 Agent Verification Plan steps passed (14 verified locally, 1 deferred to CI). Restoration counts 3/3/2/3, promotion 11/4/6/4, no docs/historical, zero stale-term hits in docs/+README.md, WHITEPAPER §9 expanded to 10 subsections with paper.pdf §References entry, README foundational-research section, PK pointers in project.md + architecture.md, decisions.md follow-ups complete, code-research.md token-replace log has 13 entries, recovered/README.md carries the promotion stamp, docs-link-check workflow file exists, and no diff under core/, mcp/, webapp/, Cargo.toml, Cargo.lock since the feature began (since 2839122).
+**Report:** logs/working/task-15/qa-report.json
+**Deferred to CI:** lychee --offline docs/ README.md docs/WHITEPAPER.md — runs via .github/workflows/docs-link-check.yml on PR (lychee CLI not installed locally).
+**Deferred to user (Verify-user):** (a) Open PR and confirm only docs-link-check job runs (cargo jobs skipped via paths-ignore). (b) After merge to dev, spot-check Cloudflare Pages preview rebuild and visit a sample doc URL — non-blocking per tech-spec if the docs project is not yet wired in Cloudflare.

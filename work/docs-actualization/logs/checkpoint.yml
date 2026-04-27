@@ -1,9 +1,9 @@
 feature: docs-actualization
 team_name: docs-actualization-team
 total_waves: 6
-last_completed_wave: 5
-next_wave: 6
-status: in_progress
+last_completed_wave: 6
+next_wave: null
+status: done
 started: "2026-04-27"
 notes: |
   Session 2026-04-27: completed Wave 1 (formalized review of prior-session
@@ -29,4 +29,4 @@ task_status:
   12: done
   13: done
   14: done
-  15: todo
+  15: done

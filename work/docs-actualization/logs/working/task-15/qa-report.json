@@ -1,0 +1,104 @@
+{
+  "task": 15,
+  "verdict": "pass",
+  "summary": "All 15 Agent Verification Plan steps pass; 14 verified locally and 1 (lychee link check) deferred to the docs-link-check CI workflow which will run on the PR. Restoration (11 files), promotion (11/4/6/4 layout), no docs/historical, zero sanity-grep hits, WHITEPAPER §9 fully expanded to 10 subsections + paper.pdf reference, README foundational-research section, PK pointers, decisions.md follow-ups, code-research.md token-replace log (13 entries), recovered/README.md promotion stamp, lychee CI workflow file, and zero diff under core/, mcp/, webapp/, Cargo.toml, Cargo.lock since feature start at 2839122.",
+  "checks": [
+    {
+      "step": 1,
+      "name": "Restoration completeness",
+      "result": "pass",
+      "details": "competitive-landscape: 3 .md (DRAG_ANALYSIS, WEB_RESEARCH_TRUSTLESS_RAG, DECENTRALIZED_RAG_LANDSCAPE) + README; research: 3 .md (TURBOQUANT_DEEP_ANALYSIS, apply-to-agent-memory-architecture, condensed-principles); research PDFs: 2 (Agent-Identity .pdf + paper.pdf); problems: 3 .md (ARWEAVE_PRICING_VALIDATION, CONCURRENT_WRITERS, MEMORY_EVICTION). Counts 3/3/2/3 match expected."
+    },
+    {
+      "step": 2,
+      "name": "Promotion completeness",
+      "result": "pass",
+      "details": "docs/usecases: 10 .md + README = 11; docs/competitive-landscape: 3 .md + README = 4; docs/research: 3 .md + 2 PDF + README = 6; docs/problems: 3 .md + README = 4. All match expected counts."
+    },
+    {
+      "step": 3,
+      "name": "No docs/historical/",
+      "result": "pass",
+      "details": "test ! -d docs/historical confirmed."
+    },
+    {
+      "step": 4,
+      "name": "lychee link check",
+      "result": "deferred",
+      "details": "lychee CLI not installed on local machine. Deferred to CI: .github/workflows/docs-link-check.yml runs lycheeverse/lychee-action@v2 with --offline on PR. The workflow exists, is paths-filtered to docs/** and *.md, and pins both action versions per Task 14 audit."
+    },
+    {
+      "step": 5,
+      "name": "Sanity-grep regression",
+      "result": "pass",
+      "details": "grep -RIE 'SHA3|mcp-server-rs|pre-V1|Pre-V1|HashEmbedder|Python backend' docs/ README.md returned zero hits (exit 1)."
+    },
+    {
+      "step": 6,
+      "name": "WHITEPAPER §9 fully expanded",
+      "result": "pass",
+      "details": "grep -cE '^### 9\\.' docs/WHITEPAPER.md = 10 (>= 10)."
+    },
+    {
+      "step": 7,
+      "name": "WHITEPAPER references paper.pdf",
+      "result": "pass",
+      "details": "Line 337: '8. [Mnemonic Protocol Foundational Paper](./research/paper.pdf)'. WHITEPAPER uses ./research/paper.pdf relative form per Decision 6 — accepted."
+    },
+    {
+      "step": 8,
+      "name": "README references paper.pdf",
+      "result": "pass",
+      "details": "README.md line 51 references docs/research/paper.pdf in 'Foundational research' H2 section."
+    },
+    {
+      "step": 9,
+      "name": "PK project.md updated",
+      "result": "pass",
+      "details": "Use Case Roles H2 section at line 44 with 10 bulleted docs/usecases/ links."
+    },
+    {
+      "step": 10,
+      "name": "PK architecture.md updated",
+      "result": "pass",
+      "details": "architecture.md line 116-117 contains 'Further reading' with pointers to docs/competitive-landscape/ and docs/research/condensed-principles.md."
+    },
+    {
+      "step": 11,
+      "name": "decisions.md follow-ups",
+      "result": "pass",
+      "details": "All 3 patterns matched: 'Follow-up roadmap items' (line 127), 'Browser-WASM verification UI' (line 131), 'for further validation' (8 occurrences, lines 129/152-159)."
+    },
+    {
+      "step": 12,
+      "name": "code-research.md token-replace log",
+      "result": "pass",
+      "details": "grep -c 'replace-token' work/docs-actualization/code-research.md = 13 (>= 6). Includes per-hit verdict table (§4.3) plus Wave 3 promotion logs §4.4 and §4.5."
+    },
+    {
+      "step": 13,
+      "name": "recovered/README.md promotion note",
+      "result": "pass",
+      "details": "Line 4: '**Promoted on 2026-04-27 in commits 8ed0b6c (usecases), d8df681 (competitive-landscape), 82704c7 (research), eacb6ff (problems).**' (added in commit c57c492 per audit fixer)."
+    },
+    {
+      "step": 14,
+      "name": "lychee CI workflow exists",
+      "result": "pass",
+      "details": ".github/workflows/docs-link-check.yml present (commit 124e663)."
+    },
+    {
+      "step": 15,
+      "name": "No diff under core/, mcp/, webapp/, Cargo.*",
+      "result": "pass",
+      "details": "git log --since='2026-04-26' for core/ mcp/ webapp/ Cargo.toml Cargo.lock returns 0 commits in the feature window (since 2839122 chore(userspec) approval). The earlier code commits (0353a6b cargo fmt, ef48df6 chat persist, d997f9a LLM abstraction, 0e9636f seed fix) all predate the docs-actualization feature."
+    }
+  ],
+  "deferred_to_ci": [
+    "Step 4: lychee --offline docs/ README.md docs/WHITEPAPER.md — runs via .github/workflows/docs-link-check.yml on PR (lychee CLI not installed locally)."
+  ],
+  "deferred_to_user": [
+    "Verify-user step 1: Open PR on GitHub and confirm only docs-link-check job runs (cargo jobs skipped via paths-ignore in ci.yml).",
+    "Verify-user step 2: After PR merges to dev (and later to main), spot-check Cloudflare Pages preview rebuild and visit a sample doc URL once preview is live. Per tech-spec: if the docs project is not yet wired in Cloudflare, log as follow-up but do not block QA."
+  ]
+}
