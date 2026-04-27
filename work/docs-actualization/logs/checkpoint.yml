@@ -6,8 +6,14 @@ next_wave: 3
 status: in_progress
 started: "2026-04-27"
 notes: |
-  Single-task kick-off in this session: Task 1 only (Restoration).
-  Waves 2-6 to be executed in a fresh session via /do-feature or /do-task.
+  Session 2026-04-27: completed Wave 1 (formalized review of prior-session
+  Task 1 work — round 1 changes_requested → fixed in a9dcd99 → round 2
+  approved), Wave 2 (Task 2 sanity-grep, both reviewers approved), and
+  Wave 3 implementations (Tasks 3/4/5/6 committed: 8ed0b6c, d8df681,
+  82704c7, eacb6ff). Wave 3 REVIEWERS NOT YET RUN — hit Anthropic API
+  usage limit before spawning code-reviewer/test-reviewer for Tasks 3-6.
+  Resume in next session: spawn reviewers for Tasks 3-6, then commit
+  wave 3, then proceed to Wave 4 (Tasks 7-11 in parallel).
 task_status:
   1: done
   2: done
