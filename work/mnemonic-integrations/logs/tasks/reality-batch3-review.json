@@ -1,0 +1,131 @@
+{
+  "validator": "reality-checker",
+  "batch": [7, 8, 9],
+  "status": "changes_required",
+  "findings": [
+    {
+      "severity": "critical",
+      "category": "missing_file",
+      "task": 7,
+      "issue": "webapp/src/wasm/ does not exist. Task 7 imports WASM functions (generate_keypair, import_keypair_json, export_keypair_json, sign_attestation_bundle) from 'webapp/src/wasm/' which is produced by Task 3. Task 7 declares depends_on: [3, 4, 5], so the dependency is declared, but the directory is absent at codebase-read time. This is a hard blocker for IdentityPanel.tsx and Sign.tsx compilation — both directly import from this path.",
+      "fix": "No fix needed in the task file itself — dependency is correctly declared. However, Task 7 must not be started until Task 3 is complete and webapp/src/wasm/ is confirmed to exist. Add an explicit gate check in Verification Steps: 'confirm ls webapp/src/wasm/*.js exits 0 before proceeding'."
+    },
+    {
+      "severity": "critical",
+      "category": "missing_function",
+      "task": 7,
+      "issue": "Task 7 step 5 describes a 'sign_challenge' WASM function used in the OAuth consent page (Verification Steps User step 5: 'WASM sign_challenge runs'). This function name appears in tech-spec / user-spec flow but is NOT listed in Task 7's own Acceptance Criteria or TDD Anchor — only generate_keypair, import_keypair_json, export_keypair_json, sign_attestation_bundle are listed. Task 3's description references sign_attestation_bundle but not sign_challenge. There is a name mismatch risk: Task 3 may not export sign_challenge at all.",
+      "fix": "Verify with Task 3 author that sign_challenge is in the WASM export surface. If OAuth consent is handled by Task 5/6 (not Task 7), remove the reference from Task 7's Verification Steps User section. If needed, add sign_challenge to the WASM function list in Acceptance Criteria."
+    },
+    {
+      "severity": "critical",
+      "category": "hallucination",
+      "task": 8,
+      "issue": "Task 8 references mcp::build_router(McpState {...}) and mcp::main_router(state) as functions that tests can call to construct the Axum router. Neither function exists in the current codebase. main.rs has an inline run_http() function that builds the router locally — there is no exported build_router or main_router function in mcp/src/main.rs or any lib.rs (mcp/src/lib.rs does not exist). The entire integration test harness depends on this non-existent API.",
+      "fix": "Task 8 must first refactor mcp/src/main.rs to extract the router construction into a pub fn main_router(state: Arc<McpState>) -> Router function (as the Implementation hints suggest, but this must be an explicit step, not an assumption). Alternatively, tests can boot a real TCP listener and drive via reqwest — but that must be specified explicitly."
+    },
+    {
+      "severity": "critical",
+      "category": "missing_function",
+      "task": 8,
+      "issue": "Task 8 references mcp::oauth::test_helpers::mint_jwt(sub: &str) from mcp/src/oauth.rs, and mcp::pending (the PendingBundles module) from mcp/src/pending.rs. Neither mcp/src/oauth.rs nor mcp/src/pending.rs exist today — they are produced by Tasks 4 and 5 respectively. Task 8 depends_on: [4, 5] which is correct, but tasks 4 and 5 are not in the same batch and their output has not been verified. If Tasks 4/5 don't produce the exact module paths and function signatures assumed by Task 8, all 12 test files will fail to compile.",
+      "fix": "Before Task 8 executes, confirm mcp/src/oauth.rs exports oauth::test_helpers::mint_jwt and mcp/src/pending.rs exports the PendingBundles type. Cross-reference with Task 4 and Task 5 task files to verify these exact paths."
+    },
+    {
+      "severity": "critical",
+      "category": "hallucination",
+      "task": 8,
+      "issue": "Task 8 uses tower_governor for rate-limit-routing test (step 8: 'boot the actual mcp::main_router() with tower_governor configured per Decision 9'). The word 'tower_governor' does not appear anywhere in mcp/Cargo.toml. governor = '0.8' is present (used for the chat rate limiter in main.rs), but tower_governor is a separate crate (tower-governor) and is not listed as a dependency. The rate_limit_routing.rs test that wraps the router in tower_governor will fail to compile.",
+      "fix": "Either add tower-governor to mcp/Cargo.toml [dev-dependencies] or, if the rate limit is implemented with governor only (no tower layer), update the test approach to exercise the actual rate limit code path rather than referencing tower_governor."
+    },
+    {
+      "severity": "critical",
+      "category": "hallucination",
+      "task": 8,
+      "issue": "Task 8 step 7 describes using simd-json to re-serialize JSON in roundtrip_cose_via_http_proxy.rs ('re-encodes via simd-json'). simd-json (simd_json crate) is not present in mcp/Cargo.toml dev-dependencies. The test will not compile.",
+      "fix": "Add simd-json to mcp/Cargo.toml [dev-dependencies], or use a different re-serialization approach (e.g. serde_json with sorted keys) and update the test description accordingly."
+    },
+    {
+      "severity": "major",
+      "category": "missing_function",
+      "task": 8,
+      "issue": "Task 8 references mcp::test_support::mock_state(jwt_secret) helper in mcp/src/lib.rs or mcp/src/test_support.rs. Neither file exists — mcp/ has no lib.rs and no test_support.rs. The helper must be added as part of this task, but the 'What to do' section instructs 'add it under #[cfg(test)] in mcp/src/lib.rs or a new mcp/src/test_support.rs if missing' as if it might already exist. This is a significant implicit prerequisite.",
+      "fix": "Make the creation of mcp/src/lib.rs (or test_support.rs) with mock_state helper an explicit numbered step in What to do, before creating the test files. Also note that adding lib.rs to a binary crate requires updating Cargo.toml [[bin]] configuration."
+    },
+    {
+      "severity": "major",
+      "category": "feasibility",
+      "task": 8,
+      "issue": "Task 8 step 15 references cargo run -p mnemonic-mcp --bin mint-test-jwt as a CI helper binary added in Task 4. There is no [[bin]] section in mcp/Cargo.toml beyond the default binary (mnemonic-mcp). If Task 4 does not add a mint-test-jwt binary, the CI mcp-inspector job will fail at that step.",
+      "fix": "Verify Task 4 explicitly adds a [[bin]] entry for mint-test-jwt. If not, Task 8 must add it, or the CI job must use an alternative mechanism (e.g., a shell script or the test_helpers::mint_jwt function called via a test harness)."
+    },
+    {
+      "severity": "major",
+      "category": "feasibility",
+      "task": 8,
+      "issue": "Task 8 count mismatch: the task description says '12 integration tests' and the title says '12 integration test files', but the TDD Anchor and 'Files to create/modify' sections list exactly 12 files/fns. However, the What to do steps 3-14 describe 12 test files (steps 3-14), plus step 15 (CI) and step 16 (local verify). The Description also says '12 tests are exactly those listed in tech-spec Testing Strategy'. But the What to do section numbers these as steps 3-14 which is 12 items — this is consistent. However step 6 (stdio_backward_compat.rs) claims to use env!(\"CARGO_BIN_EXE_mnemonic-mcp\") 'the pre-built binary, not cargo run'. In CI the binary must be built before the test runs; the existing CI test job uses cargo test --workspace which does not build with --release. This could cause CARGO_BIN_EXE_mnemonic-mcp to reference a debug binary that is not yet compiled with the features needed.",
+      "fix": "Add cargo build -p mnemonic-mcp as a step before cargo test -p mnemonic-mcp --tests in CI, or use a test setup that compiles the binary. Alternatively note in the task that CARGO_BIN_EXE resolves to the debug build path, which cargo test builds automatically."
+    },
+    {
+      "severity": "major",
+      "category": "feasibility",
+      "task": 8,
+      "issue": "Task 8 step 15 smithery-schema job references scripts/smithery-schema.yaml and smithery.yaml (produced by Task 5). The scripts/ directory does not exist in the repo. Task 8 must create it. The scripts/ directory creation is not listed as an explicit step.",
+      "fix": "Add 'create scripts/ directory and scripts/smithery-schema.yaml' as an explicit numbered step in What to do."
+    },
+    {
+      "severity": "major",
+      "category": "hints",
+      "task": 8,
+      "issue": "The Implementation hints section contains pseudocode-level algorithm descriptions: 'httpmock::Mock whose then() body re-serializes via simd_json::to_string(value)', 'for i in $(seq 1 30); do curl -fsS http://localhost:3000/health && break; sleep 1; done' shell loop, and 'until <check>; do sleep 2; done' style polling loops with specific shell syntax. These go beyond pointing to a pattern — they prescribe specific implementation with exact API calls and code blocks.",
+      "fix": "Replace the shell loop pseudocode and specific simd_json call with higher-level guidance pointing to the httpmock and tower ServiceExt patterns in the codebase, removing the prescriptive code logic."
+    },
+    {
+      "severity": "major",
+      "category": "tdd",
+      "task": 7,
+      "issue": "Task 7's TDD Anchor requires Vitest + @testing-library/react. The current webapp/package.json has no 'test' script, no vitest dependency, and no @testing-library/react. Task 7 step 11 says to add vitest + @testing-library/react 'as part of this task' — the dependency list in the Details section includes 'vitest: ^2', '@testing-library/react: ^16', 'jsdom: ^25'. However, the Acceptance Criteria only checks that 'all component/page tests above pass' without confirming the test runner is wired into Vite config (vitest needs a config block in vite.config.ts referencing jsdom as testEnvironment). If vite.config.ts is not updated, vitest will run tests in Node environment, breaking React DOM tests.",
+      "fix": "Add an explicit step to update vite.config.ts with a test: { environment: 'jsdom', globals: true } block. Add this to the Acceptance Criteria checklist."
+    },
+    {
+      "severity": "major",
+      "category": "feasibility",
+      "task": 7,
+      "issue": "ChatPage.tsx and LandingPage.tsx both import 'import type { Message } from \"../App\"'. When Task 7 moves chat state into pages/Chat.tsx, the Message type will need to be re-exported or moved to a shared location. Task 7 says to 'keep as-is' the existing components but also to 'move chat-related state into the new Chat page'. If Message stays in App.tsx the relative import path from pages/ components will be '../App' (one more level up), but from components/ it would be '../App'. The task does not address updating these imports, which will cause TypeScript errors.",
+      "fix": "Add an explicit step to move the Message interface to webapp/src/types.ts (or webapp/src/lib/types.ts) and update all imports in ChatPage.tsx, LandingPage.tsx, and the new pages."
+    },
+    {
+      "severity": "minor",
+      "category": "feasibility",
+      "task": 7,
+      "issue": "Task 7 says 'keep LandingPage.tsx and ChatPage.tsx as-is; Chat.tsx page composes them'. However, ChatPage.tsx requires an onBack prop (function). In the router-based setup, back navigation becomes react-router navigate(-1) or <Link to='/'>. The Chat.tsx page wrapper will need to pass an onBack handler that calls useNavigate(). This is a small but real integration point not mentioned in the task.",
+      "fix": "Note in the Details section that Chat.tsx must pass onBack={() => navigate('/')} to ChatPage, referencing the useNavigate hook from react-router-dom."
+    },
+    {
+      "severity": "minor",
+      "category": "feasibility",
+      "task": 8,
+      "issue": "Task 8 Acceptance Criteria says 'recall_owner_isolation.rs covers both cross-tenant filter AND anonymous-returns-401 assertions'. However, the existing mcp/src/main.rs CORS layer uses CorsLayer::new().allow_origin(Any), which allows all origins. The CORS test (cors.rs) asserts that 'evil.example.com' returns 403 and no Access-Control-Allow-Origin header. This is inconsistent with the current allow_origin(Any) configuration. The cors.rs test will fail against the current router unless CORS is tightened as part of Tasks 1/4.",
+      "fix": "Confirm Tasks 1/4 tighten the CORS origin allowlist to mnemonik.xyz only. If not, Task 8 must add that CORS tightening or mark the cors.rs test as documenting a desired future state rather than a passing integration test."
+    },
+    {
+      "severity": "minor",
+      "category": "feasibility",
+      "task": 9,
+      "issue": "Task 9 targets file length 80-120 lines for the smoke checklist, but the content requirement (ten steps x four sub-headings each, plus preamble, plus run-log table) is unlikely to fit in 120 lines without violating the 'no hand-waving' and 'verbatim strings' requirements. Each step needs at minimum 6-8 lines (sub-heading labels + content). Ten steps x 7 lines = 70 lines plus preamble (~10) plus table (~15) = ~95 lines minimum, which is feasible — but the constraint is tight and may force abbreviation that conflicts with the 'unambiguous' requirement.",
+      "fix": "Minor tension only — acceptable if each sub-heading is kept to 1-2 lines. No code change needed, but the reviewer executing Task 11 should flag if verbatim strings are dropped to meet the line limit."
+    },
+    {
+      "severity": "minor",
+      "category": "feasibility",
+      "task": 9,
+      "issue": "Task 9 step 4 (Install deeplink to Cursor) references 'OS prompts to open Cursor; accept.' This step works differently on macOS vs Windows/Linux. On Linux the cursor:// deeplink may not register at OS level without manual xdg-mime setup. The checklist does not call out the platform requirement even though it says 'prerequisites' should be enumerated.",
+      "fix": "Add 'macOS or Windows required for Cursor deeplink step (step 4); Linux not supported' to the Prerequisites section of the checklist."
+    }
+  ],
+  "stats": {
+    "tasks_checked": 3,
+    "claims_verified": 47,
+    "issues_found": 16
+  }
+}

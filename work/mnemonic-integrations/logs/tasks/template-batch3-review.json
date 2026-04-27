@@ -1,0 +1,107 @@
+{
+  "validator": "task-validator",
+  "batch": [11, 12, 13, 14, 15],
+  "status": "changes_required",
+  "findings": [
+    {
+      "severity": "critical",
+      "category": "frontmatter",
+      "task": 11,
+      "section": "frontmatter.status",
+      "issue": "status is 'pending'; on first validation (iteration=1) the template requires strictly 'planned'.",
+      "fix": "Change `status: pending` to `status: planned` in the YAML frontmatter."
+    },
+    {
+      "severity": "critical",
+      "category": "frontmatter",
+      "task": 12,
+      "section": "frontmatter.status",
+      "issue": "status is 'pending'; on first validation (iteration=1) the template requires strictly 'planned'.",
+      "fix": "Change `status: pending` to `status: planned` in the YAML frontmatter."
+    },
+    {
+      "severity": "critical",
+      "category": "frontmatter",
+      "task": 13,
+      "section": "frontmatter.status",
+      "issue": "status is 'pending'; on first validation (iteration=1) the template requires strictly 'planned'.",
+      "fix": "Change `status: pending` to `status: planned` in the YAML frontmatter."
+    },
+    {
+      "severity": "critical",
+      "category": "frontmatter",
+      "task": 14,
+      "section": "frontmatter.status",
+      "issue": "status is 'pending'; on first validation (iteration=1) the template requires strictly 'planned'.",
+      "fix": "Change `status: pending` to `status: planned` in the YAML frontmatter."
+    },
+    {
+      "severity": "critical",
+      "category": "frontmatter",
+      "task": 15,
+      "section": "frontmatter.status",
+      "issue": "status is 'pending'; on first validation (iteration=1) the template requires strictly 'planned'.",
+      "fix": "Change `status: pending` to `status: planned` in the YAML frontmatter."
+    },
+    {
+      "severity": "minor",
+      "category": "structure",
+      "task": 13,
+      "section": "TDD Anchor",
+      "issue": "Pre-deploy QA is a non-code task (it runs existing tests, walks AC, executes the smoke checklist) but file 13.md still contains a `## TDD Anchor` section. Per task-creator rules, non-code tasks should have this section deleted entirely. The current text 'every test added in Tasks 1-9 is the anchor' is a stub, not new tests.",
+      "fix": "Delete the entire `## TDD Anchor` section from 13.md (its content already lives in Acceptance Criteria step 1 and Verification Steps → Automated)."
+    },
+    {
+      "severity": "minor",
+      "category": "structure",
+      "task": 15,
+      "section": "TDD Anchor",
+      "issue": "Post-deploy QA is a non-code, live-environment verification task. The `## TDD Anchor` section is present but its content explicitly states 'No new code'. Per task-creator rules, non-code tasks should not have a TDD Anchor section.",
+      "fix": "Delete the entire `## TDD Anchor` section from 15.md. The 'each numbered step is its own gate' framing is already covered by Verification Steps → Smoke."
+    },
+    {
+      "severity": "minor",
+      "category": "content",
+      "task": 13,
+      "section": "Required Skills",
+      "issue": "Skill link points to `/Users/syi/src/sessions/2/.claude/skills/pre-deploy-qa/SKILL.md` which does not exist. The pre-deploy-qa skill lives at `/Users/syi/.claude/skills/pre-deploy-qa/SKILL.md` (global skills dir).",
+      "fix": "Update the link target to `/Users/syi/.claude/skills/pre-deploy-qa/SKILL.md` (drop the `src/sessions/2/` project prefix)."
+    },
+    {
+      "severity": "minor",
+      "category": "content",
+      "task": 14,
+      "section": "Required Skills",
+      "issue": "Skill link points to `/Users/syi/src/sessions/2/.claude/skills/deploy-pipeline/SKILL.md` which does not exist. The deploy-pipeline skill lives at `/Users/syi/.claude/skills/deploy-pipeline/SKILL.md` (global skills dir).",
+      "fix": "Update the link target to `/Users/syi/.claude/skills/deploy-pipeline/SKILL.md` (drop the `src/sessions/2/` project prefix)."
+    },
+    {
+      "severity": "minor",
+      "category": "content",
+      "task": 13,
+      "section": "Context Files",
+      "issue": "References `[smoke-checklist.md](./smoke-checklist.md)` but the file does not yet exist at `work/mnemonic-integrations/tasks/smoke-checklist.md`. It is a forward reference produced by Task 8 (file 9.md) in Wave 3 before this task runs in Wave 5, so the dependency chain is satisfiable, but verify that Task 8 actually emits the file at this path.",
+      "fix": "No change required if Task 8's deliverable is `work/mnemonic-integrations/tasks/smoke-checklist.md`. Otherwise, align Task 8's output path or update the link here."
+    },
+    {
+      "severity": "minor",
+      "category": "content",
+      "task": 12,
+      "section": "Context Files",
+      "issue": "References `[smoke-checklist.md](./smoke-checklist.md)` — same forward-reference note as Task 13.",
+      "fix": "Confirm Task 8 writes to `work/mnemonic-integrations/tasks/smoke-checklist.md`."
+    },
+    {
+      "severity": "minor",
+      "category": "content",
+      "task": 15,
+      "section": "Context Files",
+      "issue": "References `[tasks/smoke-checklist.md](./smoke-checklist.md)` — same forward-reference note as Tasks 12 and 13.",
+      "fix": "Confirm Task 8 writes to `work/mnemonic-integrations/tasks/smoke-checklist.md`."
+    }
+  ],
+  "stats": {
+    "tasks_checked": 5,
+    "issues_found": 12
+  }
+}

@@ -1,0 +1,112 @@
+{
+  "verdict": "needs_fixes",
+  "summary": "All 5 tasks have correct frontmatter (per user-defined convention), required structure, and traceable AC carry-forward from tech-spec. One major content contradiction in Task 4 (sign_memory rate-limit: 5/min vs 10/min) and several minor consistency issues warrant fixes before execution.",
+  "tasks_reviewed": [1, 2, 3, 4, 5],
+  "findings": [
+    {
+      "task": 4,
+      "severity": "major",
+      "category": "ac_mismatch",
+      "issue": "Internal contradiction on sign_memory rate-limit threshold. Step 6 of 'What to do' and Acceptance Criteria item say '10/min on sign_memory' (line ~80), but the TDD Anchor names the test 'test_sign_memory_ratelimit_429_after_5' (line ~63), which implies 5/min (6th request triggers 429). Tech-spec is authoritative: AC line 357 says '5 sign_memory/min, 30 recall/min' and Testing Strategy line 217 says '6th sign_memory request from same IP within 60s -> HTTP 429'. The task currently encodes the wrong value in description + AC.",
+      "fix_suggestion": "Change 'sign_memory <= 10 req/min/IP' to 'sign_memory <= 5 req/min/IP' in step 6 of 'What to do' and in the AC bullet 'tower_governor enforces ... 10/min on sign_memory ...' to '... 5/min on sign_memory ...'. Keep the TDD anchor name as-is (it already matches tech-spec)."
+    },
+    {
+      "task": 1,
+      "severity": "minor",
+      "category": "frontmatter",
+      "issue": "Frontmatter status is 'pending'. Template (~/.claude/shared/work-templates/tasks/task.md.template) prescribes 'planned' on first iteration. Acceptable if 'pending' is a project-local convention adopted by task-creator (user instructions confirm 'pending' as expected), but not template-conformant.",
+      "fix_suggestion": "Either update the local template/task-creator agent to standardise on 'pending' as the initial status, or change all 5 tasks to use 'planned'. Consistency across the project is what matters; flagging once for the batch."
+    },
+    {
+      "task": 2,
+      "severity": "minor",
+      "category": "frontmatter",
+      "issue": "Same as task 1: status: pending instead of template-mandated 'planned'.",
+      "fix_suggestion": "Pick one convention project-wide and apply consistently."
+    },
+    {
+      "task": 3,
+      "severity": "minor",
+      "category": "frontmatter",
+      "issue": "Same as task 1: status: pending instead of template-mandated 'planned'.",
+      "fix_suggestion": "Pick one convention project-wide and apply consistently."
+    },
+    {
+      "task": 4,
+      "severity": "minor",
+      "category": "frontmatter",
+      "issue": "Same as task 1: status: pending instead of template-mandated 'planned'.",
+      "fix_suggestion": "Pick one convention project-wide and apply consistently."
+    },
+    {
+      "task": 5,
+      "severity": "minor",
+      "category": "frontmatter",
+      "issue": "Same as task 1: status: pending instead of template-mandated 'planned'.",
+      "fix_suggestion": "Pick one convention project-wide and apply consistently."
+    },
+    {
+      "task": 4,
+      "severity": "minor",
+      "category": "other",
+      "issue": "Title is '# Task 4: OAuth 2.1 + PKCE server module' but the source-of-truth tech-spec calls this 'Task 4a'. The user-provided mapping accepts the renumbering, but the title silently drops the 'a' suffix without any in-file note linking back to tech-spec Task 4a. Future readers cross-referencing decisions.md / tech-spec may be confused.",
+      "fix_suggestion": "Add a short note in the Description (e.g., 'Implements tech-spec Task 4a.') so the renumbering is auditable. Same applies to task 5 (tech-spec Task 4b)."
+    },
+    {
+      "task": 5,
+      "severity": "minor",
+      "category": "other",
+      "issue": "Title '# Task 5: Browser-mediated signing infrastructure' silently maps to tech-spec 'Task 4b'. No in-file note linking back.",
+      "fix_suggestion": "Add 'Implements tech-spec Task 4b.' in the Description."
+    },
+    {
+      "task": 5,
+      "severity": "minor",
+      "category": "ac_mismatch",
+      "issue": "Tech-spec Task 4b description says 'Per-user soft cap (50 pending bundles per jwt.sub) returns 429 above limit'. Task 5 step 2 implements this correctly with cap 50. However, the AC bullet '51st pending bundle for the same jwt.sub returns HTTP 429' phrases the threshold one off. With cap=50 the 50th insert is the last accepted; the 51st returns 429 — wording is correct, but the TDD anchor 'test_per_user_cap_returns_429' note says '50 OK, 51st returns PerUserCapExceeded' which is consistent. No actual mismatch; flagged only because the reading is slightly easier to misinterpret. Verify the implementation accepts exactly 50 inserts, not 49.",
+      "fix_suggestion": "Add a one-line note in 'Edge cases' clarifying: 'cap=50 means inserts 1..=50 succeed; insert #51 returns 429.'"
+    },
+    {
+      "task": 5,
+      "severity": "minor",
+      "category": "tdd_anchor",
+      "issue": "TDD Anchor lists tests in 'mcp/tests/sign_callback.rs' but tech-spec Acceptance Criteria (line 345) enumerates 'mcp/tests/deferred_sign_flow.rs, mcp/tests/pending_authz.rs, mcp/tests/pending_expiry.rs, mcp/tests/pending_user_cap.rs' — there is no 'sign_callback.rs' file expected. The four sign_callback tests should be redistributed across pending_authz / pending_expiry / pending_user_cap / deferred_sign_flow, or sign_callback.rs added to the expected test set in tech-spec.",
+      "fix_suggestion": "Either rename the test file path in the TDD Anchor list to one of the four files declared in tech-spec, or update tech-spec AC to add mcp/tests/sign_callback.rs to the expected file set. Recommended: keep sign_callback tests inside mcp/tests/deferred_sign_flow.rs (which is already declared) since the deferred-sign flow naturally exercises the callback path."
+    },
+    {
+      "task": 4,
+      "severity": "minor",
+      "category": "tdd_anchor",
+      "issue": "TDD Anchor declares the integration test file 'mcp/tests/oauth_flow.rs' as 'authored here' (Task 4) but tech-spec assigns the integration tests file authoring to Task 7 (line 426: 'mcp/tests/...oauth_flow.rs...'). Two tasks claiming ownership of the same file invites merge conflicts.",
+      "fix_suggestion": "Clarify whether Task 4 stubs only an in-crate unit test inside mcp/src/oauth.rs and leaves mcp/tests/oauth_flow.rs to Task 7, or whether Task 7's expanded oauth_flow.rs simply augments what Task 4 created. Add a sentence to either Task 4 step 13 / Edge cases or Task 7's description making the hand-off explicit."
+    },
+    {
+      "task": 1,
+      "severity": "minor",
+      "category": "other",
+      "issue": "Task 1 'What to do' step 1 references 'mcp/src/main.rs:559-591' and 'mcp_handler' lines 65-100. Hard-coded line ranges go stale on the very first refactor. The user instruction explicitly cautions against 'implementation steps with line numbers' for the Description (which is fine — Description is line-free), but step 1 of 'What to do' uses line numbers heavily.",
+      "fix_suggestion": "Replace exact line ranges with symbol names ('the run_http function in mcp/src/main.rs', 'the mcp_handler function'). Optional — line ranges are documented as a hint, not an invariant."
+    },
+    {
+      "task": 4,
+      "severity": "minor",
+      "category": "other",
+      "issue": "Same line-number-fragility issue as Task 1: many references like 'core/src/storage/sqlite.rs::migrate_payment_events_unique_index (line 95)', 'sqlite.rs:212', 'traits.rs:50'. These will rot fast.",
+      "fix_suggestion": "Replace with symbol-anchored references where possible (function/method names) and reserve line numbers for low-traffic call-out comments."
+    },
+    {
+      "task": 2,
+      "severity": "minor",
+      "category": "tdd_anchor",
+      "issue": "Acceptance Criterion 'WASM sign_attestation_bundle ... produces COSE_Sign1 bytes that core/src/codec/sign::verify_payload accepts (covered by test #2 plus Task 7 integration test)' refers to 'test #2' but task 2 actually exposes test #2 as 'sign_challenge_roundtrip_with_native_verifier' which exercises sign_challenge, not sign_attestation_bundle. The cross-verifier check for sign_attestation_bundle is deferred to Task 7's roundtrip_cose_via_http_proxy.rs, which is fine, but the AC wording mis-attributes coverage to Task 2's test #2.",
+      "fix_suggestion": "Either add a 7th test 'sign_attestation_bundle_roundtrip_native_verify' to the wasm-bindgen test suite (recommended for fast-feedback), or rephrase the AC to say 'covered by Task 7 integration test roundtrip_cose_via_http_proxy.rs'."
+    },
+    {
+      "task": 3,
+      "severity": "minor",
+      "category": "depends_on",
+      "issue": "Task 3 declares depends_on: [] (wave 1 parallel). However, 'Verify-smoke' requires Task 2's wasm feature on core/Cargo.toml to exist before 'wasm-pack build core --features wasm' can resolve. The task itself acknowledges this in 'Dependencies' subsection ('Coordinate the smoke verification accordingly — run it after Task 2 merges, not before') but the depends_on field does not reflect the smoke-time coupling.",
+      "fix_suggestion": "Either keep wave 1 + depends_on: [] (matching tech-spec wave layout) and accept the smoke-test ordering as a coordination note, or move Task 3 to depends_on: [2] for safety. Tech-spec authoritative wave assignment is wave 1, so the current frontmatter is correct against the spec — flag is informational only."
+    }
+  ]
+}

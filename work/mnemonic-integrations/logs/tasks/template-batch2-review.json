@@ -1,0 +1,107 @@
+{
+  "validator": "task-validator",
+  "batch": [6, 7, 8, 9, 10],
+  "status": "approved",
+  "findings": [
+    {
+      "severity": "minor",
+      "category": "frontmatter",
+      "task": 6,
+      "section": "frontmatter.status",
+      "issue": "status is 'pending'; the task.md.template canonical value on first validation is 'planned'. Same deviation occurs across tasks 7, 8, 9, 10 (and the entire 1-15 batch) — appears to be a project-wide convention.",
+      "fix": "Either align all task files to use status: planned (template default), or codify 'pending' as the project-local convention in tech-spec / task-creator notes so future validators do not flag it. No functional impact."
+    },
+    {
+      "severity": "minor",
+      "category": "frontmatter",
+      "task": 7,
+      "section": "frontmatter.status",
+      "issue": "status is 'pending' instead of template-canonical 'planned' (same as task 6).",
+      "fix": "See task 6 finding."
+    },
+    {
+      "severity": "minor",
+      "category": "frontmatter",
+      "task": 8,
+      "section": "frontmatter.status",
+      "issue": "status is 'pending' instead of template-canonical 'planned' (same as task 6).",
+      "fix": "See task 6 finding."
+    },
+    {
+      "severity": "minor",
+      "category": "frontmatter",
+      "task": 9,
+      "section": "frontmatter.status",
+      "issue": "status is 'pending' instead of template-canonical 'planned' (same as task 6).",
+      "fix": "See task 6 finding."
+    },
+    {
+      "severity": "minor",
+      "category": "frontmatter",
+      "task": 10,
+      "section": "frontmatter.status",
+      "issue": "status is 'pending' instead of template-canonical 'planned' (same as task 6).",
+      "fix": "See task 6 finding."
+    },
+    {
+      "severity": "minor",
+      "category": "structure",
+      "task": 7,
+      "section": "Verification Steps",
+      "issue": "Verification Steps contains an '### Automated' subsection in addition to '### Smoke' and '### User'. The task.md.template defines only 'Smoke' and 'User' subsections under Verification Steps.",
+      "fix": "Either fold the 'Automated' subsection contents into '### Smoke' (since `npm test` is itself a smoke gate) or extend the project-local template to allow an 'Automated' subsection. Cosmetic only."
+    },
+    {
+      "severity": "minor",
+      "category": "structure",
+      "task": 8,
+      "section": "Verification Steps",
+      "issue": "Verification Steps contains an '### Automated' subsection in addition to '### Smoke'. Template defines only Smoke / User.",
+      "fix": "Same as task 7 — fold 'Automated' into 'Smoke' or extend the template definition."
+    },
+    {
+      "severity": "minor",
+      "category": "consistency",
+      "task": 6,
+      "section": "Details / Dependencies",
+      "issue": "depends_on is [] (correct for the smithery.yaml file authoring + DNS update steps), but the Details section explicitly notes that the Smithery submission step (step 7) only works once Wave 1 + Task 4a (file 5.md) are deployed. The smoke gate `curl https://mcp.mnemonik.xyz/health` will return 502 until then. The author chose to keep depends_on=[] and document the soft dependency in prose — this is a deliberate trade-off, but it complicates wave orchestration if a runner kicks step 7 before Wave 1 ships.",
+      "fix": "Optional. Either (a) leave as-is and rely on the prose note, or (b) split this task into '6a: smithery.yaml + DNS + nginx + cert (depends_on: [])' and '6b: Smithery submission (depends_on: [1, 5])'. The current single-task structure is acceptable for a manual-coordinated infra task."
+    },
+    {
+      "severity": "minor",
+      "category": "carry-forward",
+      "task": 8,
+      "section": "Description",
+      "issue": "Task implements 12 integration tests. Tech-spec Implementation Tasks line 426 says '7 integration tests' but tech-spec Acceptance Criteria line 345 enumerates exactly the 12 files listed in this task. The task correctly follows the AC enumeration (the canonical list); the '7' figure in line 426 is a stale tech-spec inconsistency.",
+      "fix": "No change needed in the task. Note for the spec author: update tech-spec Implementation Tasks line 426 from '7 integration tests' to '12 integration tests' so the tech-spec is internally consistent."
+    },
+    {
+      "severity": "minor",
+      "category": "carry-forward",
+      "task": 9,
+      "section": "What to do (steps 3 and 10)",
+      "issue": "The smoke checklist adds step 3 ('Keypair backup download') and step 10 ('Cross-device flow') that are not explicitly listed in tech-spec line 434 ('fresh-browser onboarding, keypair gen, install deeplink, OAuth approve, sign_memory, switch to second browser/tool, recall'). Both extensions are well-grounded in user-spec Сценарий 1 (lines 145, 148: backup-JSON + cross-device flow) and user-spec R2 (line 95: localStorage keypair loss mitigation), so they are legitimate carry-forward from the user-spec rather than scope creep.",
+      "fix": "No change needed — the extension makes the checklist a stronger gate. Optionally, the task could note 'extends tech-spec checklist scope to cover user-spec Сценарий 1 backup + cross-device leg'."
+    },
+    {
+      "severity": "minor",
+      "category": "content",
+      "task": 9,
+      "section": "Acceptance Criteria",
+      "issue": "AC includes 'File length is between 80 and 120 lines (documentation density target — concise but unambiguous)'. This is a stylistic constraint rather than a behavioral acceptance criterion; it could end up driving the author to compress legitimate content or pad short content to hit the range.",
+      "fix": "Optional. Consider rewording as 'File is concise — targets ~100 lines, accepted in the 80-150 range' or drop the line-count AC entirely and rely on the Verify-user gate (a non-author runs the checklist end-to-end without ambiguity)."
+    },
+    {
+      "severity": "minor",
+      "category": "consistency",
+      "task": 7,
+      "section": "Verification Steps / Smoke",
+      "issue": "Smoke step uses `curl -fsS http://localhost:5173/...` to probe Vite dev-server routes. SPA dev servers always return 200 on any path (because the router is client-side); the curl loop verifies the server is up but does not actually exercise the React routes. The 'open in browser' instruction below it is the real check.",
+      "fix": "Either (a) drop the curl loop and lean entirely on the manual browser walk-through, or (b) keep the curl loop as a 'server-up' liveness check and add an explicit note that route content verification is browser-only."
+    }
+  ],
+  "stats": {
+    "tasks_checked": 5,
+    "issues_found": 12
+  }
+}

@@ -1,0 +1,103 @@
+{
+  "validator": "reality-checker",
+  "batch": [13, 14, 15],
+  "status": "changes_required",
+  "findings": [
+    {
+      "severity": "critical",
+      "category": "missing_file",
+      "task": 13,
+      "issue": "Task 13 step 8 and AC reference `work/mnemonic-integrations/tasks/smoke-checklist.md`, but the file does not exist in the repo. Task 9 is supposed to create it, and Task 13 depends_on [10, 11, 12] — not on Task 9. Task 9 is therefore not in Task 13's transitive dependency chain, meaning the smoke-checklist.md file may not exist when Task 13 runs.",
+      "fix": "Add Task 9 to Task 13's depends_on list (or verify Task 9 is a transitive dependency via another task). Also verify smoke-checklist.md is actually created by Task 9 before Task 13 executes."
+    },
+    {
+      "severity": "critical",
+      "category": "missing_function",
+      "task": 13,
+      "issue": "Task 13 step 5 and the Verification Steps block use `EMBED_PROVIDER=mock` to start the local server. The current `mcp/src/config.rs` (line 19, 91) only knows about `fastembed` and `openai` providers (comment reads: '\"hash\" (default, offline) or \"openai\"'). There is no `mock` provider value handled in the config or embed dispatch. CLAUDE.md rule 4 forbids `HashEmbedder` and mandates `MockEmbedder` only in `#[cfg(test)]` blocks — `EMBED_PROVIDER=mock` as a runtime env var is not wired up in current code.",
+      "fix": "Either: (a) Task 13 must substitute `EMBED_PROVIDER=fastembed` (requires model download, not hermetic) or `EMBED_PROVIDER=hash` if that is still accepted at runtime, or (b) prior implementation tasks must wire a runtime `mock` provider for non-test use. Clarify which provider value is actually valid at runtime for hermetic local server startup."
+    },
+    {
+      "severity": "critical",
+      "category": "missing_file",
+      "task": 13,
+      "issue": "Task 13 step 3 and AC require `npm run build:wasm`. The current `webapp/package.json` has no `build:wasm` script — its scripts block only contains `dev`, `build`, `preview`, and `test:e2e`. This script is supposed to be added by Task 3 (infrastructure-setup), but Task 13 depends_on [10, 11, 12], not Task 3 directly. If Task 3 was not completed or skipped, `npm run build:wasm` will fail with 'Missing script: build:wasm'.",
+      "fix": "Verify Task 3 is a transitive dependency of Task 13 (through the wave chain). If the dependency chain does not cover it, add Task 3 to depends_on. Additionally, at execution time verify `webapp/package.json` contains the `build:wasm` script before running step 3."
+    },
+    {
+      "severity": "critical",
+      "category": "missing_file",
+      "task": 13,
+      "issue": "Task 13 step 3 requires `react-router-dom` for the webapp build. The current `webapp/package.json` has no `react-router-dom` dependency (dependencies block only has `react` and `react-dom`). The tech-spec (Decision 8, Deviation 4) mandates adding it, but it is not present in the baseline codebase. If implementation tasks have not added it, `npm run build` will fail on missing import.",
+      "fix": "Confirm Task 8 (webapp pages) or Task 3 (build pipeline) adds `react-router-dom` to `webapp/package.json`. Treat missing dep as FAIL in step 3 per task instructions."
+    },
+    {
+      "severity": "major",
+      "category": "feasibility",
+      "task": 13,
+      "issue": "Task 13 step 5 uses `npx @modelcontextprotocol/inspector@0.6.x --validate` with a `--validate` flag and `-H` header flag. The actual MCP Inspector CLI interface may not support `--validate` as a standalone flag or `-H` for custom headers — these are not documented in standard MCP Inspector CLI usage. If the flag names are wrong, the inspector command will fail at step 5.",
+      "fix": "Verify the exact CLI signature of `@modelcontextprotocol/inspector@0.6.x` before executing. The same command appears in Task 15 step 1 against the live endpoint; both tasks should be consistent with the actual flag names."
+    },
+    {
+      "severity": "major",
+      "category": "feasibility",
+      "task": 14,
+      "issue": "Task 14 step 3 builds with `cargo build --release -p mnemonic-mcp --features local-embed`, which matches `deployment.md` line 160 and the Update Deploy block (line 251). However, the `mcp.mnemonik.xyz` nginx subdomain server-block is described as 'already provisioned in Task 6' — but deployment.md's nginx config (`/etc/nginx/sites-available/mnemonic`) only shows the `mnemonik.xyz` main domain block with no subdomain server. Task 6 is supposed to add the subdomain block, but Task 14's step 5 only runs `sudo nginx -t` and checks for the cert; it does not verify the nginx config block exists or contains the proxy pass for the subdomain. If Task 6 did not run or did not correctly add the subdomain server-block, the subdomain will return 502 or 404 with no indication during Task 14's verification.",
+      "fix": "Add an explicit check in Task 14 step 5: `grep -r 'mcp.mnemonik.xyz' /etc/nginx/sites-available/` to confirm the subdomain server-block is present before proceeding. Document the expected nginx block in the task or reference Task 6's output explicitly."
+    },
+    {
+      "severity": "major",
+      "category": "feasibility",
+      "task": 14,
+      "issue": "Task 14 Details block states deployment.md 'currently documents the single-domain mnemonik.xyz deploy (lines 102–254)' and directs appending notes under 'VPS Deploy Process → Update Deploy'. The actual deployment.md section name is 'Update Deploy' (line 247), not 'VPS Deploy Process → Update Deploy'. The path is ambiguous — the task author should reference the exact section heading to avoid appending to the wrong section.",
+      "fix": "Change the reference to match the exact section heading 'Update Deploy' in deployment.md, or provide the line number range explicitly."
+    },
+    {
+      "severity": "major",
+      "category": "feasibility",
+      "task": 14,
+      "issue": "Task 14 implementation hint instructs: 'Generate the JWT secret on the VPS: `openssl rand -base64 32 | sudo tee -a /home/claude/mcp.env >/dev/null` after first writing the `MCP_JWT_SECRET=` prefix'. This two-step approach (write prefix then pipe value) is awkward and error-prone — the `tee -a` appends a bare base64 value on a new line, not `MCP_JWT_SECRET=<value>` on one line. The actual env file format requires `KEY=VALUE` on a single line.",
+      "fix": "Replace hint with a single atomic command: `echo \"MCP_JWT_SECRET=$(openssl rand -base64 32)\" >> /home/claude/mcp.env`. Warn that this still briefly echoes nothing to terminal but the shell expands the subshell. Alternatively use an editor as suggested in step 4."
+    },
+    {
+      "severity": "major",
+      "category": "feasibility",
+      "task": 15,
+      "issue": "Task 15 step 4 instructs: `curl -fsSL https://smithery.ai/mcp/mnemonic` returns 200 with an install-deeplink referencing `mcp.mnemonik.xyz`. The Smithery URL format `smithery.ai/mcp/mnemonic` is a website path, not an API endpoint — a `curl` to a browser page may return an HTML page (200) or redirect, but extracting the install-deeplink from raw HTML is fragile and non-deterministic. There is no indication of a stable JSON API at this URL. If Smithery changed their URL structure since the spec was written, this check will give a false positive (200 HTML) even if the listing is misconfigured.",
+      "fix": "Use the Smithery API endpoint if one exists (e.g. `https://smithery.ai/api/mcp/mnemonic`), or parse the install-deeplink from the page source with a specific grep for `mcp.mnemonik.xyz`. Add a note that this check is best-effort and requires manual visual confirmation."
+    },
+    {
+      "severity": "major",
+      "category": "feasibility",
+      "task": 15,
+      "issue": "Task 15 step 5 rate-limit check fires '6 sign_memory requests from the same IP within 60s; the 6th must return HTTP 429'. But tech-spec Decision 9 (line 143) sets `sign_memory ≤ 10 req/min/IP` (not 5), and the testing strategy (line 217) also describes '6th sign_memory request from same IP within 60s → HTTP 429' which implies a threshold of 5, contradicting Decision 9's stated 10/min limit. The AC in tech-spec line 357 reads '5 sign_memory/min'. There is an internal inconsistency: Decision 9 says 10/min, testing strategy and Task 15 use 6 requests (implies threshold of 5/min). Task 15 step 5 may falsely pass (no 429 if threshold is actually 10) or falsely fail.",
+      "fix": "Reconcile the rate limit in the tech-spec: Decision 9 should consistently state 5/min or 10/min. Update Task 15 step 5 to fire (threshold+1) requests using the authoritative number. The implementation tasks (Task 4) should be checked to confirm which value was actually implemented."
+    },
+    {
+      "severity": "minor",
+      "category": "feasibility",
+      "task": 13,
+      "issue": "Task 13 step 4 runs `cargo build -p mnemonic-core --features wasm --target wasm32-unknown-unknown` (not a workspace build). The CLAUDE.md and tech-spec AC both note that workspace-wide wasm32 build will fail because mcp/ pulls tokio/axum/solana-sdk — only core/ is wasm32-compatible. This is correctly scoped to `-p mnemonic-core`, so the step is fine, but the step description does not note the workspace limitation, which could cause confusion if an executor tries `cargo build --workspace --target wasm32-unknown-unknown` instead.",
+      "fix": "Add a note in the step: 'Do not run the workspace-wide build with the wasm32 target — only core/ is wasm32-compatible; mcp/ pulls axum/tokio which are not.'  This is documented in tech-spec AC but not in the task step itself."
+    },
+    {
+      "severity": "minor",
+      "category": "feasibility",
+      "task": 14,
+      "issue": "Task 14 AC requires `curl -fI https://mnemonik.xyz/sign/test-uuid` to return HTTP 200 even with no pending bundle. This relies on nginx `try_files $uri $uri/ /index.html` SPA fallback, which is already in the deployment.md nginx config. However the task does not include a step to verify the SPA fallback is actually present in the running nginx config for the `mcp.mnemonik.xyz` subdomain server-block (as opposed to the main `mnemonik.xyz` block). The implementation hint calls this out but it is not an explicit verification step.",
+      "fix": "Add explicit verification of the SPA fallback in the nginx subdomain block as part of step 5's nginx check."
+    },
+    {
+      "severity": "minor",
+      "category": "feasibility",
+      "task": 15,
+      "issue": "Task 15 step 6 requires `journalctl -u mnemonic-mcp | grep 'metric:'` to produce sample lines for install counter, sign_memory counter, and recall counter. This assumes `tracing::info!` calls with `metric:` prefix are emitted by the implementation. However, deployment.md's Monitoring & Observability section (line 300) explicitly states 'No app-level metrics for MVP'. There is no existing implementation of these metrics counters in the codebase — they are new code to be added in implementation tasks. If those tasks did not add the counters, step 6 will find nothing and the report should mark it FAIL.",
+      "fix": "Add a note that step 6 is contingent on implementation tasks having added the `tracing::info!` metric counters. If the counters are absent, the step fails — do not treat empty grep output as acceptable. Also cross-check that one of the implementation tasks (likely Task 4 or 4b) explicitly includes adding these counters."
+    }
+  ],
+  "stats": {
+    "tasks_checked": 3,
+    "claims_verified": 38,
+    "issues_found": 13
+  }
+}
