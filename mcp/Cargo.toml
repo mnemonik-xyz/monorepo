@@ -78,6 +78,11 @@ anyhow = "1"
 # UUID
 uuid = { version = "1", features = ["v4"] }
 
+# RNG — used by oauth::authorize_init_handler for the 16-byte server nonce
+# (Decision 10). Pinned to 0.8 to match the existing transitive used by
+# solana-sdk; bumping to 0.9 introduces a duplicate major.
+rand = "0.8"
+
 # ZIP archive (artifact generation in seed.rs)
 zip = { version = "2", default-features = false, features = ["deflate"] }
 

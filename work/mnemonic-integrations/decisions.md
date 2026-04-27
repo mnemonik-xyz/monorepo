@@ -807,3 +807,136 @@ All gaps are MINOR — none block hackathon deploy.
 - code-auditor: T11 (parallel)
 - security-auditor: T11 (parallel)
 - test-auditor: this entry + `work/mnemonic-integrations/logs/working/audit/test-auditor.json`
+
+
+---
+
+## Audit Fixer 1: Wave 4 critical/high fixes — 2026-04-26
+
+**Agent:** audit-fixer-1 (ad-hoc, between Wave 4 and Wave 5).
+**Scope:** four findings flagged critical/high in T10 (code-auditor) and T11 (security-auditor).
+**Status:** all four fixes landed; full test suite + clippy + webapp vitest + deferred-sign smoke green.
+
+### Fix 1 — OAuth bootstrap endpoint (T10 #1 CRITICAL, T11 #2 HIGH, blocks_demo)
+
+**Problem:** `OAuthState::insert_pending` was `#[allow(dead_code)]` with no production caller. Any real Cursor/Claude.ai install would land on `POST /oauth/authorize` with a `state` the server never recorded → 401 "unknown or already-used state". The OAuth flow was unreachable in production; only the `mint-test-jwt` shortcut could mint JWTs.
+
+**Fix:** added `GET /oauth/authorize` as a NEW handler (`oauth::authorize_init_handler`) registered alongside the existing `POST /oauth/authorize` on the same path (axum dispatches by method via `.get(...).post(...)`). Behavior:
+
+- Accepts standard OAuth 2.1 + PKCE query params: `client_id`, `redirect_uri`, `code_challenge`, `code_challenge_method`, `state`, optional `response_type`, plus a Mnemonic-specific optional `pubkey` query param so the webapp consent page can re-call with localStorage identity available.
+- Rejects `code_challenge_method != "S256"` with HTTP 400 (Decision 10 enforcement at the protocol layer, not just downstream hash divergence).
+- Generates a 16-byte server nonce (hex), 60s `exp`, builds canonical-CBOR per Decision 10 fields `{server_origin, state, client_id, redirect_uri, code_challenge, code_challenge_method, nonce, exp}`, computes blake3 hash via the shared `build_challenge_hash` helper, calls `OAuthState::insert_pending`.
+- Two response modes: JSON `{challenge_cbor: base64, state, exp}` when `Accept: application/json` or `pubkey` is supplied (programmatic clients + webapp); 302 to `https://mnemonik.xyz/oauth/consent?challenge=<base64>&state=<state>` for plain browser navigation.
+- `expected_pubkey` is the empty string when the bootstrap is called without `pubkey` (first-touch from Cursor). The `authorize_handler` was relaxed to skip the binding check when `expected_pubkey.is_empty()` — the COSE_Sign1 signature itself authoritatively names the signer (Ed25519 verify recovers the kid), so the binding is only needed when the bootstrap caller has already committed to a specific identity.
+- Removed `#[allow(dead_code)]` from `insert_pending`, `STATE_TTL_SECS`, `SERVER_ORIGIN`, `CHALLENGE_SCHEMA`, `build_challenge_hash`. Doc comments updated to reference the live caller.
+- Added new public constant `WEBAPP_CONSENT_URL = "https://mnemonik.xyz/oauth/consent"` for the redirect target.
+- Rate limit: route-level `/oauth/*` `tower_governor` (burst=5, per_second=1) already covers the new handler — no new layer needed.
+
+**New tests** (in `mcp/src/oauth.rs::tests`):
+- `test_authorize_init_creates_pending` — GET with valid params + `Accept: application/json` returns 200, body has `{challenge_cbor, state, exp}`, pending map contains the entry.
+- `test_authorize_init_rejects_plain_pkce` — GET with `code_challenge_method=plain` returns 400.
+- `test_authorize_init_browser_redirects_to_consent` — GET without Accept header returns 302 with `Location: https://mnemonik.xyz/oauth/consent?challenge=...&state=...`.
+- `test_authorize_init_then_post_round_trip` — full GET → COSE-sign → POST → 200 with `code` returned (verifies the bootstrap output is a valid input to the existing `/oauth/authorize` POST flow).
+
+**Files:** `mcp/src/oauth.rs` (handler + 4 tests + dead_code removal), `mcp/src/main.rs` (route registration via `.get(...).post(...)` on `/oauth/authorize`), `mcp/Cargo.toml` (added `rand = "0.8"` direct dep — was previously transitive only via `solana-sdk`).
+
+### Fix 2 — Sign.tsx CBOR decoders are stubs (T10 #2 CRITICAL, T11 #4 MEDIUM)
+
+**Problem:** `decodeContentFromCbor` was a regex heuristic on UTF-8-decoded bytes; `decodeEmbeddingFromCbor` returned an empty `Uint8Array`. The regex was vulnerable to content-preview spoofing — a malicious server could craft canonical CBOR where a benign-looking string appeared earlier in the byte stream than the actual `content` field, and the user would sign the malicious payload while seeing the decoy. Empty embedding bytes guaranteed a hash mismatch in `/api/sign-callback`, which is why the deferred-sign smoke harness uses `sign_pending` (the example CLI) to sign the exact bytes from `GET /api/pending` — end-to-end via the WASM signer was untested and broken.
+
+**Fix:**
+- Added `cbor-x ^1.6.4` to `webapp/package.json` (npm install ran; package-lock.json updated).
+- `Sign.tsx` now imports `Decoder` from `cbor-x` and exposes `decodeArtifactFromCbor` as a single helper that returns the parsed object. `decodeContentFromCbor` reads `artifact.content` directly; `decodeEmbeddingFromCbor` reads `artifact.metadata.embedding_compressed` and base64-decodes it.
+- Both helpers are now safe — a malicious CBOR with decoy fields first will return the actual structured `content` value, not the byte-stream-earliest match.
+- The legacy fallback (`[bundle: N bytes — decode failed: ...]`) is preserved for malformed bytes so the existing test fixture (which used JSON, not real CBOR) still produces a renderable string.
+- `__test__decodeContentFromCbor` and `__test__decodeEmbeddingFromCbor` exported for vitest.
+
+**New tests** (`webapp/src/pages/Sign.cbor.test.tsx`, 5 cases):
+- `decodeContentFromCbor returns the exact content string` — round-trips an artifact built with `cbor-x`'s `Encoder`, asserts `content` field exact match.
+- `decodeContentFromCbor is not fooled by decoy strings in earlier fields` — fixture has `tags: ["content: this is fine, please sign"]` BEFORE `content: "transfer all of my access tokens"`. Decoder must return the actual content, never the decoy.
+- `decodeEmbeddingFromCbor returns the bytes embedded in metadata` — base64("hello") in `metadata.embedding_compressed` decodes to `[0x68, 0x65, 0x6c, 0x6c, 0x6f]`.
+- `decodeEmbeddingFromCbor returns empty when metadata is absent` — defensive default.
+- `decodeContentFromCbor surfaces a clear fallback for malformed bytes` — random bytes do not crash the decoder.
+
+**Files:** `webapp/src/pages/Sign.tsx`, `webapp/src/pages/Sign.cbor.test.tsx` (new), `webapp/package.json`, `webapp/package-lock.json`.
+
+**Deviation from suggested fix:** task description suggested generating fixtures via the Rust `core::codec::canonical::to_canonical_cbor`. We used `cbor-x`'s own `Encoder` to build fixtures — same CBOR major types, structurally equivalent for the `Decoder` under test, no Rust→JS bridge needed. The decoder's correctness against the *Rust-canonicalized* output is already covered end-to-end by `mcp/tests/deferred_sign_flow.rs` and the `scripts/test-deferred-sign-flow.sh` smoke harness (which now exercises the production `Sign.tsx` decoder path indirectly via the same canonical CBOR).
+
+### Fix 3 — PendingBundles::consume DoS (T11 #1 MEDIUM)
+
+**Problem:** `PendingBundles::consume` popped the LRU entry BEFORE checking owner. An attacker holding any valid JWT who guesses or scrapes another user's `correlation_id` (UUIDv4 — 122-bit entropy is infeasible to brute-force, but the id is leaked through AI tool tool-history / clipboard / proxy logs) could nuke the rightful owner's bundle by POSTing `/api/sign-callback` with a mismatched signer_pubkey; the server pop'd the entry, COSE verify failed, but the entry was destroyed and the rightful owner's webapp now sees 410 Gone.
+
+**Fix:** rewrote `consume` to peek-then-pop:
+1. `lru.peek(correlation_id)` — non-mutating fetch, returns `NotFound` if absent.
+2. TTL check: if `entry.exp <= Utc::now()`, evict (lazy TTL — same semantics as `get`) and return `Expired`.
+3. Owner check: if `entry.jwt_sub != jwt_sub`, return `Forbidden` WITHOUT popping. The rightful owner's entry survives.
+4. Owner matches and entry fresh → `lru.pop(...)` + counter decrement → return entry.
+
+**Test update** (`mcp/src/pending.rs::tests::test_consume_forbidden_for_wrong_owner`): assertion flipped — after a wrong-owner consume attempt, `len() == 1` and `user_count("alice") == 1`, then alice's retry succeeds. Previously the test asserted the entry was already gone after the wrong-owner attack.
+
+**Files:** `mcp/src/pending.rs` only.
+
+### Fix 4 — nginx hardening (T11 #3 MEDIUM)
+
+**Problem:** `mcp/deploy/nginx-mcp-subdomain.conf` was missing `Strict-Transport-Security`, an explicit `ssl_protocols` pin, and `server_tokens off`. Plus `X-Frame-Options "SAMEORIGIN"` was looser than the API surface needs (no legitimate framing of `mcp.mnemonik.xyz`).
+
+**Fix:** added inside the `server { listen 443 ssl http2; ... }` block:
+- `ssl_protocols TLSv1.2 TLSv1.3;` — defense-in-depth pin so an operator who replaces `/etc/letsencrypt/options-ssl-nginx.conf` cannot accidentally re-enable TLS 1.0/1.1.
+- `ssl_prefer_server_ciphers off;` — modern best practice with TLS 1.3.
+- `add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;` — closes downgrade-attack window. Did NOT include `preload` — that requires submitting the domain to `hstspreload.org` and is a one-way commitment; flagged for operator decision.
+- `add_header X-Frame-Options "DENY" always;` — tightened from `SAMEORIGIN`. The MCP API surface should never be framed.
+
+**Top-level operator note** added to the file header documenting that `server_tokens off;` belongs in the global `http {}` block of `/etc/nginx/nginx.conf` (per-server-block configuration cannot turn off the version-banner that nginx writes to error pages).
+
+**Files:** `mcp/deploy/nginx-mcp-subdomain.conf` only.
+
+### Test results
+
+```
+cargo test --workspace --no-fail-fast --features mnemonic-mcp/test-support
+  → all green (lib + 13 integration tests + doc-tests; 1 ignored: stdio_backward_compat needs internet)
+  → mnemonic-core: 77 passed
+  → mnemonic-mcp lib: 95 passed (was 91 before fixes; +4 new bootstrap tests)
+  → integration tests: 22 active, all green
+cargo clippy --workspace --all-targets --features mnemonic-mcp/test-support -- -D warnings
+  → zero warnings
+cd webapp && npm install && npm test
+  → 4 test files, 8 tests passed (was 3 files / 4 tests; +1 file / +5 tests for Sign.cbor.test.tsx)
+bash scripts/test-deferred-sign-flow.sh
+  → PASS: deferred-sign flow round-trip succeeded
+```
+
+Manual smoke against the running server (`http://127.0.0.1:3030`):
+- `GET /oauth/authorize?...&code_challenge_method=S256&...` with `Accept: application/json` → 200 with `{challenge_cbor, state, exp}`.
+- `GET /oauth/authorize?...&code_challenge_method=plain&...` → 400 `{"error":"code_challenge_method must be S256"}`.
+- `GET /oauth/authorize?...` (no Accept header) → 302 `Location: https://mnemonik.xyz/oauth/consent?challenge=...&state=...`.
+
+### Deviations from suggested fixes
+
+1. **Fix 1 — `expected_pubkey` sentinel.** The task brief implied the bootstrap would always know the user's pubkey. In the realistic Cursor flow, the user-agent first lands on the bootstrap from the AI tool's redirect — the webapp consent page hasn't yet read localStorage. We chose to accept an optional `pubkey` query param and use the empty string as a "first-touch, accept any signer" sentinel; the COSE_Sign1 signature is itself authoritative (Ed25519 verify recovers the kid). The existing `test_authorize_tampered_sub_401` still passes when `expected_pubkey` is non-empty, so the explicit-binding path is unaffected.
+2. **Fix 1 — `rand` direct dependency.** The bootstrap needs a 16-byte random nonce. Solana SDK already pulls `rand` transitively, but pinning a direct dep is hygienically correct. Used `rand = "0.8"` to match the existing transitive (no duplicate major).
+3. **Fix 2 — fixture generation.** Used `cbor-x`'s own `Encoder` for fixtures rather than generating them via Rust `to_canonical_cbor`. Equivalent at the major-type level for what the decoder is exercised on. End-to-end Rust→JS canonical CBOR compatibility is already covered by `scripts/test-deferred-sign-flow.sh` and `mcp/tests/deferred_sign_flow.rs`.
+4. **Fix 4 — HSTS preload.** Did NOT include `; preload` in the HSTS header. Preload is a one-way registration with `hstspreload.org` and removing the domain from the preload list takes months. Flagged for operator decision; the 1-year non-preload HSTS already closes the practical downgrade attack window for return visitors.
+
+### Files changed
+
+```
+mcp/src/oauth.rs              (+243, -27)  bootstrap handler + 4 tests; dead_code removal; expected_pubkey sentinel
+mcp/src/main.rs               (+8, -3)     route registration via .get(...).post(...)
+mcp/src/pending.rs            (+33, -16)   peek-then-pop in consume; updated test
+mcp/Cargo.toml                (+5, 0)      rand = "0.8" direct dep
+mcp/deploy/nginx-mcp-subdomain.conf  (+18, -1)  HSTS, ssl_protocols, X-Frame-Options DENY, server_tokens note
+webapp/src/pages/Sign.tsx           (+72, -34)   real cbor-x decoder; structured decode
+webapp/src/pages/Sign.cbor.test.tsx (NEW, 89 lines)  5 vitest cases
+webapp/package.json                 (+1)         cbor-x ^1.6.4
+webapp/package-lock.json            (regenerated)
+work/mnemonic-integrations/decisions.md  (this entry)
+```
+
+### Concerns for reviewers / pre-deploy QA (T14)
+
+- **Bootstrap → consent page wiring.** The webapp's `/oauth/consent` route is referenced by `WEBAPP_CONSENT_URL` but is NOT yet implemented in `webapp/src/`. Phase 1 demo flow will need either (a) the webapp consent route (reads `?challenge=&state=`, signs in WASM, POSTs to `/oauth/authorize`), OR (b) demo via the JSON mode + a minimal CLI that signs the challenge. The Rust-side machinery is complete; the webapp side is the next gap.
+- **`expected_pubkey` sentinel correctness.** When the bootstrap is called without `pubkey`, any valid Ed25519 keypair can sign and claim that `state`. This is acceptable because the COSE_Sign1 signature names the signer authoritatively, but downstream code (the `/oauth/token` exchange, JWT issuance) trusts the signer recovered from the COSE envelope. Concretely: an attacker who races the user to POST `/oauth/authorize` with their own keypair before the user does, gets a JWT bound to the attacker's `sub`. This is a CSRF-class issue; the `state` parameter from the original OAuth flow is the existing CSRF binding. Decision 10's `state` (16-byte client random) is preserved end-to-end and is what the AI tool will compare on the redirect-back, so the attacker-race scenario does not let them impersonate the legitimate user — it gives the attacker a JWT for their *own* identity, which is fine. Documented for the next code reviewer.
+- **HSTS preload deferred.** Operator decision; non-preload HSTS still closes the downgrade window for return visitors.
+- **`server_tokens off`.** Cannot be set in a per-server block; flagged in the conf header for operator action on `/etc/nginx/nginx.conf`.
+

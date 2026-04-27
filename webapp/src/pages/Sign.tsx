@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
+import { Decoder } from "cbor-x";
 import ContentPreview from "../components/ContentPreview";
 import {
   decodeJwtPayload,
@@ -372,44 +373,92 @@ export default function Sign() {
 }
 
 /**
- * Best-effort decode of the user-visible `content` field from canonical CBOR.
+ * Shared CBOR decoder. The server emits canonical CBOR via
+ * `mnemonic_core::codec::canonical::to_canonical_cbor` — keys sorted, no
+ * tags. `cbor-x`'s default `Decoder` reads that without configuration.
+ */
+const cborDecoder = new Decoder();
+
+/**
+ * Decode the canonical-CBOR memory artifact into a plain JS object.
  *
- * Canonical CBOR with the MEMORY_V1 schema embeds the content as a UTF-8 text
- * string. Rather than pulling in a full CBOR decoder for a preview, this scans
- * for the text-string major type (0x60-0x7B) immediately following the key
- * `"content"` (text string). Best-effort: if the heuristic fails, we fall back
- * to a hex preview so the user still sees the bundle bytes.
+ * Schema (MEMORY_V1):
+ *   {
+ *     artifact_id: string,
+ *     type: "memory",
+ *     schema_version: 1,
+ *     content: string,            // user-visible text
+ *     producer: string,           // "did:sol:<base58>"
+ *     created_at: string,         // RFC3339
+ *     metadata?: { embedding_compressed?: base64 string, ... },
+ *     parents?: string[],
+ *     tags?: string[],
+ *   }
+ *
+ * Throws on malformed CBOR — callers should treat that as a bundle-load
+ * failure (the server should have produced canonical CBOR; if we can't
+ * parse it the bundle is corrupt).
+ */
+function decodeArtifactFromCbor(buf: Uint8Array): Record<string, unknown> {
+  // Decoder.decode wants a Buffer in node and a Uint8Array in the browser.
+  // The browser path is what we need — pass the underlying bytes directly.
+  const decoded = cborDecoder.decode(buf) as unknown;
+  if (!decoded || typeof decoded !== "object") {
+    throw new Error("canonical CBOR did not decode to an object");
+  }
+  return decoded as Record<string, unknown>;
+}
+
+/**
+ * Extract the user-visible `content` field from the decoded artifact.
+ *
+ * Replaces the previous regex heuristic (T10 #2 / T11 #4): a malicious or
+ * compromised server could craft canonical CBOR where a benign-looking
+ * string appears earlier in the byte stream than the actual `content`
+ * field, and the heuristic would surface the decoy to the user — who
+ * would then sign the malicious payload. A real CBOR decoder reads the
+ * structured `content` value verbatim.
  */
 function decodeContentFromCbor(buf: Uint8Array): string {
   try {
-    const text = new TextDecoder("utf-8", { fatal: false }).decode(buf);
-    const marker = "content";
-    const idx = text.indexOf(marker);
-    if (idx >= 0) {
-      // Heuristic: take the longest printable run after the marker.
-      const after = text.slice(idx + marker.length);
-      const run = after.match(/[\x20-\x7E\s]{8,}/);
-      if (run) return run[0].trim();
-    }
-    return `[bundle: ${buf.byteLength} bytes — preview unavailable]`;
-  } catch {
-    return `[bundle: ${buf.byteLength} bytes]`;
+    const artifact = decodeArtifactFromCbor(buf);
+    const content = artifact.content;
+    if (typeof content === "string") return content;
+    return `[bundle: ${buf.byteLength} bytes — content field missing or non-string]`;
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return `[bundle: ${buf.byteLength} bytes — decode failed: ${msg}]`;
   }
 }
 
 /**
- * Stub: extract the embedding bytes from the canonical CBOR. Today the
- * server-stored bundle includes `embedding_compressed` as a base64 string;
- * decoding it precisely requires a full CBOR parser. For Phase 1 we pass an
- * empty Uint8Array — the WASM `sign_attestation_bundle` accepts any bytes and
- * the server validates the resulting COSE_Sign1 against the originally-stored
- * canonical CBOR, so the embedding bytes the browser supplies do not change
- * the final signature outcome (the server is the source of truth on the
- * canonicalized bundle). Documented in the WASM module: see
- * `core/src/wasm/mod.rs::sign_attestation_bundle` doc comment.
+ * Decode and base64-decode the TurboQuant-compressed embedding bytes from
+ * `metadata.embedding_compressed`. Returns an empty Uint8Array if the
+ * field is missing — the server's sign-callback validator is the source
+ * of truth on whether the resulting COSE_Sign1 verifies, so a missing
+ * embedding will surface as a 401 there rather than silently passing.
  */
-function decodeEmbeddingFromCbor(_buf: Uint8Array): Uint8Array {
-  return new Uint8Array(0);
+function decodeEmbeddingFromCbor(buf: Uint8Array): Uint8Array {
+  try {
+    const artifact = decodeArtifactFromCbor(buf);
+    const metadata = artifact.metadata;
+    if (metadata && typeof metadata === "object") {
+      const ec = (metadata as Record<string, unknown>).embedding_compressed;
+      if (typeof ec === "string") return base64ToUint8(ec);
+      if (ec instanceof Uint8Array) return ec;
+    }
+    return new Uint8Array(0);
+  } catch {
+    return new Uint8Array(0);
+  }
+}
+
+/** base64 (standard alphabet, padded) → Uint8Array. Browser-safe. */
+function base64ToUint8(b64: string): Uint8Array {
+  const bin = atob(b64);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
 }
 
 function formatMmSs(ms: number): string {
@@ -436,6 +485,11 @@ function formatError(e: unknown): string {
     return "unknown error";
   }
 }
+
+// Test-only re-exports — internal helpers that vitest exercises directly.
+// Prefixed with `__test__` to discourage accidental production use.
+export const __test__decodeContentFromCbor = decodeContentFromCbor;
+export const __test__decodeEmbeddingFromCbor = decodeEmbeddingFromCbor;
 
 function ErrorShell({
   title,

@@ -30,7 +30,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::{
     body::Body,
-    extract::State,
+    extract::{Query, State},
     http::{Request, StatusCode},
     middleware::Next,
     response::{IntoResponse, Response},
@@ -53,8 +53,7 @@ pub const JWT_AUDIENCE: &str = "mcp";
 /// JWT TTL: 1 hour per Decision 11.
 pub const JWT_TTL_SECS: u64 = 3600;
 /// Pending-state TTL: 60s per Decision 10. Consumed by the consent-page
-/// bootstrap (future webapp endpoint) when inserting a fresh challenge.
-#[allow(dead_code)]
+/// bootstrap endpoint (`GET /oauth/authorize`) when inserting a fresh challenge.
 pub const STATE_TTL_SECS: u64 = 60;
 /// Issued-code TTL: 60s — code must be redeemed at /oauth/token within this.
 pub const CODE_TTL_SECS: u64 = 60;
@@ -62,8 +61,12 @@ pub const CODE_TTL_SECS: u64 = 60;
 pub const OAUTH_STATE_CAPACITY: usize = 10_000;
 /// Server origin used in the canonical-CBOR challenge (Decision 10).
 /// Public so the consent-page bootstrap and tests can reuse the same value.
-#[allow(dead_code)]
 pub const SERVER_ORIGIN: &str = "https://mcp.mnemonik.xyz";
+/// Frontend webapp origin — the consent page lives here. The bootstrap
+/// endpoint `GET /oauth/authorize` redirects the user-agent (browser) to
+/// `WEBAPP_CONSENT_URL?challenge=<base64-cbor>&state=<state>` so the WASM
+/// signer can produce the COSE_Sign1 over the canonical-CBOR challenge.
+pub const WEBAPP_CONSENT_URL: &str = "https://mnemonik.xyz/oauth/consent";
 
 /// JWT claim set per Decision 11.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -143,9 +146,9 @@ impl OAuthState {
     }
 
     /// Insert a pending authorize record before issuing the challenge to the
-    /// browser. Called by the consent-page bootstrap (future webapp endpoint)
-    /// and by unit tests in this module.
-    #[allow(clippy::too_many_arguments, dead_code)]
+    /// browser. Called by the consent-page bootstrap (`GET /oauth/authorize`)
+    /// in `authorize_init_handler` and by unit tests in this module.
+    #[allow(clippy::too_many_arguments)]
     pub fn insert_pending(
         &self,
         state: String,
@@ -178,7 +181,7 @@ impl OAuthState {
 /// object (no `cbor_field_order` schema). This deterministic ordering is the
 /// security property that closes the length-extension / delimiter ambiguity
 /// attack mentioned in Decision 10.
-#[allow(clippy::too_many_arguments, dead_code)]
+#[allow(clippy::too_many_arguments)]
 pub fn build_challenge_hash(
     server_origin: &str,
     state: &str,
@@ -212,7 +215,6 @@ pub fn build_challenge_hash(
 /// Schema for the OAuth challenge envelope. The `cbor_field_order` array
 /// drives `to_canonical_cbor`'s top-level field order — listing every field
 /// explicitly here pins the byte layout against future schema additions.
-#[allow(dead_code)]
 static CHALLENGE_SCHEMA: mnemonic_core::codec::schema::ArtifactSchema =
     mnemonic_core::codec::schema::ArtifactSchema {
         artifact_type: mnemonic_core::codec::schema::ArtifactType::Receipt, // unused — the schema is consumed only for `cbor_field_order`
@@ -292,6 +294,224 @@ pub fn verify_jwt(state: &OAuthState, token: &str) -> Result<Claims, String> {
     Ok(data.claims)
 }
 
+// ── /oauth/authorize-init handler (Decision 10 bootstrap) ───────────────────
+
+/// Query parameters for `GET /oauth/authorize` (the bootstrap endpoint).
+/// Standard OAuth 2.1 + PKCE shape. `pubkey` is a Mnemonic-specific extension
+/// — the base58 user pubkey from localStorage, supplied by the webapp consent
+/// page when it has identity available; absent on the very first hop from
+/// Cursor/Claude.ai when the user-agent has not yet been redirected to
+/// `mnemonik.xyz/oauth/consent`.
+#[derive(Debug, Deserialize)]
+pub struct AuthorizeInitQuery {
+    pub client_id: String,
+    pub redirect_uri: String,
+    pub code_challenge: String,
+    pub code_challenge_method: String,
+    pub state: String,
+    /// Optional response_type — accepted but only `code` is honored.
+    #[serde(default)]
+    pub response_type: Option<String>,
+    /// Base58 user pubkey from webapp localStorage. When present we insert
+    /// the pending challenge immediately and return JSON to the caller (or
+    /// redirect to the consent page with the challenge embedded). When
+    /// absent we redirect to the consent page so the webapp can read
+    /// localStorage and re-call this endpoint with `pubkey` filled in.
+    #[serde(default)]
+    pub pubkey: Option<String>,
+}
+
+/// JSON body returned by `GET /oauth/authorize` when the caller is
+/// programmatic (Accept: application/json) or supplies a `pubkey`. The
+/// browser variant returns a 302 redirect to the consent page instead.
+#[derive(Debug, Serialize)]
+pub struct AuthorizeInitResponse {
+    /// base64-encoded canonical-CBOR challenge bytes — exact bytes the user
+    /// must sign with their Ed25519 key (via WASM `sign_challenge`).
+    pub challenge_cbor: String,
+    /// Echoed for client correlation; same `state` the caller supplied.
+    pub state: String,
+    /// Unix-second expiry — challenge is rejected if redeemed after this.
+    pub exp: u64,
+}
+
+/// `GET /oauth/authorize` — OAuth 2.1 + PKCE bootstrap. Validates
+/// `code_challenge_method == "S256"` (Decision 10), generates a server
+/// nonce + 60s expiry, builds the canonical-CBOR challenge per Decision 10,
+/// computes its blake3 hash, and inserts a pending record under `state`.
+///
+/// Two modes:
+///
+/// - **JSON mode** (Accept: application/json or `pubkey` query param
+///   present): returns `{challenge_cbor, state, exp}` for programmatic
+///   clients (the webapp's fetch flow + integration tests). The webapp
+///   uses the bytes directly with WASM `sign_challenge`, then POSTs the
+///   COSE_Sign1 to `POST /oauth/authorize`.
+///
+/// - **Redirect mode** (browser default): 302 to the webapp consent page
+///   with `?challenge=<base64-cbor>&state=<state>` so the webapp can read
+///   the localStorage keypair, sign in WASM, and POST back to
+///   `POST /oauth/authorize`.
+///
+/// The handler is rate-limited at the route layer (`/oauth/*` governor in
+/// `main.rs::run_http`).
+pub async fn authorize_init_handler(
+    State(state): State<Arc<OAuthState>>,
+    Query(q): Query<AuthorizeInitQuery>,
+    request: Request<Body>,
+) -> Response {
+    use rand::RngCore;
+
+    // S256-only PKCE per Decision 10 — reject everything else at the
+    // protocol layer rather than relying on hash-mismatch downstream.
+    if q.code_challenge_method != "S256" {
+        return oauth_error(
+            StatusCode::BAD_REQUEST,
+            "code_challenge_method must be S256",
+        );
+    }
+    if q.client_id.is_empty() || q.redirect_uri.is_empty() || q.code_challenge.is_empty() {
+        return oauth_error(
+            StatusCode::BAD_REQUEST,
+            "client_id, redirect_uri, and code_challenge are required",
+        );
+    }
+    if q.state.is_empty() {
+        return oauth_error(StatusCode::BAD_REQUEST, "state is required");
+    }
+    if let Some(rt) = q.response_type.as_deref() {
+        if !rt.is_empty() && rt != "code" {
+            return oauth_error(
+                StatusCode::BAD_REQUEST,
+                "response_type must be 'code' if supplied",
+            );
+        }
+    }
+
+    let now = now_secs();
+    let exp = now + STATE_TTL_SECS;
+
+    // Server-generated 16-byte random nonce. Hex-encoded for stable string
+    // representation in the canonical-CBOR map.
+    let mut nonce_bytes = [0u8; 16];
+    rand::thread_rng().fill_bytes(&mut nonce_bytes);
+    let nonce = hex::encode(nonce_bytes);
+
+    let challenge_obj = serde_json::json!({
+        "server_origin": SERVER_ORIGIN,
+        "state": q.state,
+        "client_id": q.client_id,
+        "redirect_uri": q.redirect_uri,
+        "code_challenge": q.code_challenge,
+        "code_challenge_method": q.code_challenge_method,
+        "nonce": nonce,
+        "exp": exp,
+    });
+    let challenge_bytes = match to_canonical_cbor(&challenge_obj, &CHALLENGE_SCHEMA) {
+        Ok(b) => b,
+        Err(e) => {
+            return oauth_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("canonical CBOR build failed: {e}"),
+            );
+        }
+    };
+    // Hash via the shared `build_challenge_hash` to keep the bootstrap and
+    // any external recomputation (tests, future caller-side validators) on
+    // a single helper.
+    let challenge_hash = match build_challenge_hash(
+        SERVER_ORIGIN,
+        &q.state,
+        &q.client_id,
+        &q.redirect_uri,
+        &q.code_challenge,
+        &q.code_challenge_method,
+        &nonce,
+        exp,
+    ) {
+        Ok(h) => h,
+        Err(e) => {
+            return oauth_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("challenge hash build failed: {e}"),
+            );
+        }
+    };
+    // Defense-in-depth: the bootstrap-side `to_canonical_cbor` and the
+    // `build_challenge_hash` call must produce the same bytes. If they
+    // ever drift the hash chain breaks; surface immediately.
+    debug_assert_eq!(blake3_hex(&challenge_bytes), challenge_hash);
+
+    // Decide JSON vs redirect mode. JSON if Accept includes application/json
+    // OR if `pubkey` was supplied (programmatic clients always know their
+    // identity ahead of time).
+    let wants_json = q.pubkey.is_some()
+        || request
+            .headers()
+            .get(axum::http::header::ACCEPT)
+            .and_then(|v| v.to_str().ok())
+            .map(|v| v.contains("application/json"))
+            .unwrap_or(false);
+
+    // Bind to expected pubkey if the caller supplied one — otherwise the
+    // sentinel empty string lets the consent page resolve the binding when
+    // the user clicks Sign and the webapp re-calls with `pubkey` filled.
+    let expected_pubkey = q.pubkey.clone().unwrap_or_default();
+
+    state.insert_pending(
+        q.state.clone(),
+        challenge_hash,
+        expected_pubkey,
+        q.redirect_uri.clone(),
+        q.code_challenge.clone(),
+        q.state.clone(),
+        exp,
+    );
+
+    let challenge_b64 =
+        base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &challenge_bytes);
+
+    if wants_json {
+        let body = AuthorizeInitResponse {
+            challenge_cbor: challenge_b64,
+            state: q.state,
+            exp,
+        };
+        return (StatusCode::OK, Json(body)).into_response();
+    }
+
+    // Redirect mode — point the browser at the webapp consent page.
+    // URL-encode the base64 (it can contain `+/=`).
+    let challenge_param = urlencoding_encode(&challenge_b64);
+    let state_param = urlencoding_encode(&q.state);
+    let location = format!(
+        "{WEBAPP_CONSENT_URL}?challenge={challenge_param}&state={state_param}"
+    );
+    let mut resp = Response::new(Body::empty());
+    *resp.status_mut() = StatusCode::FOUND;
+    if let Ok(hv) = axum::http::HeaderValue::from_str(&location) {
+        resp.headers_mut().insert(axum::http::header::LOCATION, hv);
+    }
+    resp
+}
+
+/// Minimal URL-encoder for application/x-www-form-urlencoded values.
+/// Avoids pulling in a new dependency for the one redirect target.
+fn urlencoding_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.as_bytes() {
+        match *b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(*b as char);
+            }
+            other => {
+                out.push_str(&format!("%{other:02X}"));
+            }
+        }
+    }
+    out
+}
+
 // ── /oauth/authorize handler (Decision 10) ───────────────────────────────────
 
 /// Request body for `POST /oauth/authorize`. The browser fetches the unsigned
@@ -366,11 +586,21 @@ pub async fn authorize_handler(
     {
         return oauth_error(StatusCode::UNAUTHORIZED, "challenge signature invalid");
     }
-    // Bind to expected pubkey: the kid embedded in the COSE header must match
-    // the pubkey we recorded when the pending record was created. This
-    // closes the "tampered sub" attack — the attacker can't sign with their
-    // own key and claim to be someone else.
-    if result.signer != pending.expected_pubkey {
+    // Bind to expected pubkey: the kid embedded in the COSE header must
+    // match the pubkey we recorded when the pending record was created.
+    // This closes the "tampered sub" attack — the attacker can't sign
+    // with their own key and claim to be someone else.
+    //
+    // Empty `expected_pubkey` is the bootstrap sentinel — the webapp
+    // consent flow doesn't yet know the user's pubkey when the bootstrap
+    // first runs (user-agent is still on the AI tool's redirect; webapp
+    // localStorage hasn't been read). In that case we accept the COSE
+    // signer's recovered pubkey as the binding identity. This is safe
+    // because the signature itself authoritatively names the signer
+    // (Ed25519 verify recovers the pubkey via kid lookup) — there's no
+    // "claim to be someone else" attack surface when nobody else is
+    // claimed.
+    if !pending.expected_pubkey.is_empty() && result.signer != pending.expected_pubkey {
         return oauth_error(
             StatusCode::UNAUTHORIZED,
             "signer pubkey does not match expected pubkey",
@@ -1115,6 +1345,163 @@ mod tests {
         let c1 = verify_jwt(&st, &t1).unwrap();
         let c2 = verify_jwt(&st, &t2).unwrap();
         assert_ne!(c1.jti, c2.jti, "consecutive jti must differ");
+    }
+
+    // ── /oauth/authorize-init (bootstrap) tests ──────────────────────────────
+
+    fn build_init_router(state: Arc<OAuthState>) -> Router {
+        use axum::routing::get;
+        Router::new()
+            .route(
+                "/oauth/authorize",
+                get(authorize_init_handler).post(authorize_handler),
+            )
+            .with_state(state)
+    }
+
+    #[tokio::test]
+    async fn test_authorize_init_creates_pending() {
+        // Given a fresh OAuthState, GET /oauth/authorize?...code_challenge_method=S256
+        // with Accept: application/json must respond 200, return a base64-encoded
+        // canonical-CBOR challenge, and insert exactly one pending entry under
+        // the provided `state`.
+        let st = fresh_state();
+        let app = build_init_router(st.clone());
+        let req = Request::builder()
+            .method("GET")
+            .uri(
+                "/oauth/authorize\
+                 ?client_id=cursor\
+                 &redirect_uri=https%3A%2F%2Fapp%2Fcb\
+                 &code_challenge=abc123\
+                 &code_challenge_method=S256\
+                 &state=csrf-init-1\
+                 &response_type=code",
+            )
+            .header("accept", "application/json")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body_bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let parsed: Value = serde_json::from_slice(&body_bytes).unwrap();
+        assert_eq!(parsed["state"], "csrf-init-1");
+        assert!(parsed["challenge_cbor"].as_str().unwrap().len() > 8);
+        assert!(parsed["exp"].as_u64().unwrap() > now_secs());
+        // Pending map now contains the entry.
+        let pending_present = {
+            let g = st.pending.lock().unwrap();
+            g.peek("csrf-init-1").is_some()
+        };
+        assert!(pending_present, "insert_pending must have been called");
+    }
+
+    #[tokio::test]
+    async fn test_authorize_init_rejects_plain_pkce() {
+        let st = fresh_state();
+        let app = build_init_router(st);
+        let req = Request::builder()
+            .method("GET")
+            .uri(
+                "/oauth/authorize\
+                 ?client_id=cursor\
+                 &redirect_uri=https%3A%2F%2Fapp%2Fcb\
+                 &code_challenge=abc\
+                 &code_challenge_method=plain\
+                 &state=csrf-plain-rejected",
+            )
+            .header("accept", "application/json")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn test_authorize_init_browser_redirects_to_consent() {
+        // No Accept header + no `pubkey` → 302 to the webapp consent page.
+        let st = fresh_state();
+        let app = build_init_router(st.clone());
+        let req = Request::builder()
+            .method("GET")
+            .uri(
+                "/oauth/authorize\
+                 ?client_id=cursor\
+                 &redirect_uri=https%3A%2F%2Fapp%2Fcb\
+                 &code_challenge=abc\
+                 &code_challenge_method=S256\
+                 &state=csrf-redir",
+            )
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FOUND);
+        let location = resp
+            .headers()
+            .get(axum::http::header::LOCATION)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+        assert!(location.starts_with(WEBAPP_CONSENT_URL), "got {location}");
+        assert!(location.contains("challenge="));
+        assert!(location.contains("state=csrf-redir"));
+        // Pending entry inserted regardless of redirect vs JSON mode.
+        let present = {
+            let g = st.pending.lock().unwrap();
+            g.peek("csrf-redir").is_some()
+        };
+        assert!(present);
+    }
+
+    #[tokio::test]
+    async fn test_authorize_init_then_post_round_trip() {
+        // End-to-end: GET /oauth/authorize with a pubkey query param (so the
+        // expected_pubkey binding is set); decode the returned base64 CBOR;
+        // sign it with the matching keypair; POST /oauth/authorize succeeds.
+        let st = fresh_state();
+        let kp = Keypair::new();
+        let pubkey = kp.pubkey().to_string();
+        let app = build_init_router(st.clone());
+
+        let init_uri = format!(
+            "/oauth/authorize?client_id=cursor&redirect_uri=https%3A%2F%2Fapp%2Fcb\
+             &code_challenge=ch&code_challenge_method=S256&state=rt-state\
+             &pubkey={pubkey}"
+        );
+        let req = Request::builder()
+            .method("GET")
+            .uri(init_uri)
+            .header("accept", "application/json")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body_bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let parsed: Value = serde_json::from_slice(&body_bytes).unwrap();
+        let cbor_b64 = parsed["challenge_cbor"].as_str().unwrap().to_string();
+        let cbor_bytes =
+            base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &cbor_b64).unwrap();
+
+        // Sign the canonical-CBOR with the user's keypair.
+        let cose = sign_cose(&cbor_bytes, &kp).expect("sign_cose");
+        let cose_b64 =
+            base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &cose);
+
+        // POST /oauth/authorize → success (200 with `code`).
+        let app2 = build_init_router(st);
+        let post_req = Request::builder()
+            .method("POST")
+            .uri("/oauth/authorize")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::to_vec(
+                    &serde_json::json!({"state": "rt-state", "cose_signed": cose_b64}),
+                )
+                .unwrap(),
+            ))
+            .unwrap();
+        let resp2 = app2.oneshot(post_req).await.unwrap();
+        assert_eq!(resp2.status(), StatusCode::OK);
     }
 
     #[tokio::test]

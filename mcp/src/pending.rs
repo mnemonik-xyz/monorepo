@@ -285,29 +285,46 @@ impl PendingBundles {
     /// `POST /api/sign-callback` after COSE verification. The eviction
     /// happens under the same lock as the lookup so concurrent callbacks
     /// cannot both observe the entry as live.
+    ///
+    /// Peek-then-pop semantics (T11 security audit fix): an attacker holding
+    /// any valid JWT who guesses or scrapes another user's `correlation_id`
+    /// MUST NOT be able to nuke the rightful owner's entry. The lookup
+    /// validates ownership BEFORE removing the entry from the LRU so a
+    /// `Forbidden` consume leaves the bundle intact for the rightful owner.
+    /// Expired entries are still evicted on access (lazy TTL, matches
+    /// `get`).
     pub async fn consume(
         &self,
         correlation_id: &str,
         jwt_sub: &str,
     ) -> Result<PendingEntry, PendingError> {
         let mut guard = self.inner.lock().await;
-        let entry = match guard.lru.pop(correlation_id) {
-            Some(e) => e,
+        // Peek without mutating LRU recency / removal order so we can validate
+        // owner before committing to a destructive pop.
+        let preview = match guard.lru.peek(correlation_id) {
+            Some(e) => e.clone(),
             None => return Err(PendingError::NotFound),
         };
-        // Decrement counter regardless of expiry/owner outcome — the entry
-        // is gone from the LRU now.
-        guard.dec_user(&entry.jwt_sub);
 
-        if entry.exp <= Utc::now() {
+        if preview.exp <= Utc::now() {
+            // Lazy TTL eviction on read — drop the stale entry now so a
+            // subsequent attempt sees NotFound rather than the same Expired.
+            guard.lru.pop(correlation_id);
+            guard.dec_user(&preview.jwt_sub);
             return Err(PendingError::Expired);
         }
-        if entry.jwt_sub != jwt_sub {
-            // Mismatch: we already popped it, so the rightful owner can
-            // still no longer retrieve it. This is acceptable because a
-            // mismatched consume is an attack signal, not a user error.
+        if preview.jwt_sub != jwt_sub {
+            // DO NOT pop — wrong owner attempting consume must NOT be able
+            // to destroy the rightful owner's bundle (T11 #1: DoS vector).
             return Err(PendingError::Forbidden);
         }
+
+        // Owner matches and entry is fresh — atomic pop + counter decrement.
+        let entry = guard
+            .lru
+            .pop(correlation_id)
+            .expect("entry was peek-visible under the same guard");
+        guard.dec_user(&entry.jwt_sub);
         Ok(entry)
     }
 
@@ -496,16 +513,27 @@ mod tests {
 
     #[tokio::test]
     async fn test_consume_forbidden_for_wrong_owner() {
+        // Peek-then-pop semantics (T11 #1 fix): a wrong-owner consume must
+        // NOT destroy the rightful owner's entry. Otherwise an attacker
+        // holding any valid JWT who guesses a victim's correlation_id can
+        // DoS the victim by forcing eviction.
         let p = PendingBundles::new(10, 300, 5);
         let (c, e, h, cb, tg, md) = dummy_entry("c");
         let id = p.insert("alice".into(), c, e, h, cb, tg, md).await.unwrap();
         let result = p.consume(&id, "bob").await;
         assert!(matches!(result, Err(PendingError::Forbidden)));
-        // The entry is gone (popped under the lock), so even alice's retry fails.
-        // This is the intended behavior — a mismatched consume is an attack
-        // signal, not a typo.
+        // Entry remains intact for the rightful owner.
+        assert_eq!(p.len().await, 1, "wrong-owner consume must NOT evict");
+        assert_eq!(
+            p.user_count("alice").await,
+            1,
+            "user counter must NOT decrement on wrong-owner consume"
+        );
+        // Alice's retry succeeds.
         let r = p.consume(&id, "alice").await;
-        assert!(matches!(r, Err(PendingError::NotFound)), "got {r:?}");
+        assert!(r.is_ok(), "rightful owner consume must succeed, got {r:?}");
+        // Now the entry is gone for everyone.
+        assert_eq!(p.len().await, 0);
     }
 
     #[test]

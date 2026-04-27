@@ -589,8 +589,16 @@ async fn run_http(state: Arc<mcp::McpState>, host: &str, port: u16) -> anyhow::R
         .with_state(state.clone());
 
     // ── OAuth routes (Decision 10) ────────────────────────────────────────────
+    // GET /oauth/authorize — bootstrap (per-method dispatch in axum).
+    //   Accepts standard OAuth 2.1 + PKCE query params; validates S256;
+    //   inserts a pending challenge under `state`; returns either JSON
+    //   (programmatic clients) or 302 to the webapp consent page (browsers).
+    // POST /oauth/authorize — challenge-signed callback (existing behavior).
     let oauth_routes = Router::new()
-        .route("/oauth/authorize", post(oauth::authorize_handler))
+        .route(
+            "/oauth/authorize",
+            get(oauth::authorize_init_handler).post(oauth::authorize_handler),
+        )
         .route("/oauth/token", post(oauth::token_handler))
         .layer(GovernorLayer {
             config: oauth_governor_conf,
