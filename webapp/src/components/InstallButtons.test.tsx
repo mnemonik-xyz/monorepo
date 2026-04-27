@@ -14,7 +14,10 @@ describe("InstallButtons", () => {
     const cursorConfigB64 = cursorUrl.searchParams.get("config");
     expect(cursorConfigB64).not.toBeNull();
     const decodedConfig = JSON.parse(atob(cursorConfigB64!));
-    expect(decodedConfig).toEqual({ url: "https://mcp.mnemonik.xyz/mcp" });
+    expect(decodedConfig).toEqual({
+      url: "https://mcp.mnemonik.xyz/mcp",
+      type: "http",
+    });
 
     // VS Code deeplink: scheme + url-encoded JSON config (single param, NOT
     // separate `name=&url=` query params — VS Code MCP install dialog only

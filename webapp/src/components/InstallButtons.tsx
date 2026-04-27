@@ -20,9 +20,15 @@ const MCP_URL = "https://mcp.mnemonik.xyz/mcp";
 const MCP_HOST = "mcp.mnemonik.xyz";
 
 function cursorDeeplink(): string {
-  const config = JSON.stringify({ url: MCP_URL });
   // Cursor's `cursor://anysphere.cursor-deeplink/mcp/install` accepts a
-  // base64-encoded config payload — see https://docs.cursor.com/deeplinks
+  // base64-encoded JSON config. For HTTP MCP servers (streamable HTTP per
+  // MCP spec 2025) Cursor expects `{url, type: "http"}` — a `{url}`-only
+  // payload is recognized as a URL handle but doesn't open the install
+  // dialog reliably across Cursor versions. Including `type: "http"`
+  // matches the explicit-transport pattern Cursor docs recommend for
+  // remote MCP servers.
+  // Reference: https://cursor.com/docs/context/mcp/install-links
+  const config = JSON.stringify({ url: MCP_URL, type: "http" });
   const b64 = btoa(config);
   const params = new URLSearchParams({ name: "Mnemonic", config: b64 });
   return `cursor://anysphere.cursor-deeplink/mcp/install?${params.toString()}`;
