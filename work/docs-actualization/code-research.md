@@ -112,6 +112,20 @@ Applied during promotion of `recovered/competitive-landscape/` → `docs/competi
 
 Verify-smoke: `grep -RIE 'SHA3|Pre-V1|pre-V1' docs/competitive-landscape/` returned empty; `ls docs/competitive-landscape/*.md | wc -l` returned `4`.
 
+### 4.5 Wave 3 Task 6 — promotion log
+
+Applied during promotion of `recovered/problems/` → `docs/problems/` on 2026-04-27. Each entry quotes the exact line as written in the destination file after edit.
+
+**Entry 5 — `docs/problems/CONCURRENT_WRITERS.md` line 157 (replace-token)**
+- Before: `The Memo program accepts up to ~566 bytes of UTF-8 data per instruction. Current memo payload in `commit.mjs` is ~200-300 bytes of JSON. Adding `parent_hashes` for DAG structure: each SHA3-256 hash = 64 hex chars. Two parents = 128 chars. Fits comfortably.`
+- After: `The Memo program accepts up to ~566 bytes of UTF-8 data per instruction. Current memo payload in `commit.mjs` is ~200-300 bytes of JSON. Adding `parent_hashes` for DAG structure: each blake3 hash = 64 hex chars. Two parents = 128 chars. Fits comfortably.`
+
+**Entry 6 — `docs/problems/CONCURRENT_WRITERS.md` line 217 (replace-token)**
+- Before: `The current system commits `SHA3-256(encrypted_blob)` to Solana. With multiple concurrent writers, two approaches for history verification:`
+- After: `The current system commits `blake3(canonical CBOR bytes)` to Solana. With multiple concurrent writers, two approaches for history verification:`
+
+Verify-smoke: `grep -RIE 'SHA3' docs/problems/` returned empty; `ls docs/problems/*.md | wc -l` returned `4`.
+
 ## 5. Current state of monorepo paths affected
 
 | path | current state | action in feature |
