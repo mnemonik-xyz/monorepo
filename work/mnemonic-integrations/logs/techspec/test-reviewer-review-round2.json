@@ -1,0 +1,156 @@
+{
+  "verdict": "improved_with_remaining_gaps",
+  "status": "needs_improvement",
+  "summary": "Round 1 critical and all three high findings are credibly closed by tech-spec changes (recall_owner_isolation.rs, expanded OAuth tests, adversarial mock proxy, stdio_backward_compat.rs). Most mediums are addressed (WASM 4 to 6, HTTP 3 to 5, MCP Inspector hardening, smithery.yaml schema validation, cargo audit). Webapp coverage remains zero (consciously deferred — acceptable for hackathon). Two genuinely new concerns surface from the round 1 fixes: (a) several of the 12 OAuth tests duplicate behavior that jsonwebtoken crate already enforces, inflating the count without proportional value, and (b) the stdio_backward_compat subprocess test has known CI flake characteristics that need pinning before merge. Test pyramid is healthy for an L hackathon MVP. Decisions 9, 10, 11 each have at least one explicit test. Verdict: improved with two minor remaining gaps and one duplicate-coverage callout — proportional to ship.",
+  "round1_closure_check": {
+    "round1_critical_recall_ownership": {
+      "closed": true,
+      "evidence": "New mcp/tests/recall_owner_isolation.rs explicitly lists cross-tenant assertion (user A cannot see user B's row) AND anonymous-401 path. Decision 9 makes the SQL filter mandatory at the function-signature level (search_attestations requires owner_pubkey parameter). Acceptance Criteria includes the matching curl-based AC line. This is a complete closure.",
+      "remaining_concern": "The integration test covers HTTP transport only. For stdio (no JWT) the spec says 'filter resolves to local-keypair pubkey'. There is no test that exercises this stdio resolution path with a multi-row DB to confirm the local-keypair pubkey actually scopes correctly. Low-severity — single-tenant by construction in stdio."
+    },
+    "round1_high_oauth_depth": {
+      "closed": true,
+      "evidence": "OAuth unit tests expanded from 6 to 12 with explicit list: alg=none, alg-confusion, single-use replay, tampered sub, missing state, concurrent jti, expired-code, mismatched iss/aud. All six round-1-listed gaps (a-f) are covered."
+    },
+    "round1_high_mock_proxy": {
+      "closed": true,
+      "evidence": "Test renamed 'COSE round-trip via adversarial mock proxy'; description explicitly mutates JSON byte order and whitespace, re-encodes via simd-json (different lib than serde_json round-trip). Risk-table mitigation now commits to 'Default to base64-encoded CBOR in JSON string field' — option (b) from round 1. Both halves of the round-1 fix landed."
+    },
+    "round1_high_stdio_compat": {
+      "closed": true,
+      "evidence": "New mcp/tests/stdio_backward_compat.rs listed under integration tests. Description matches round-1 prescription (subprocess + tools/list + sign_memory + recall round-trip). AC line 'No regressions in existing stdio MCP behavior' now has a corresponding automated test."
+    },
+    "round1_medium_wasm_sparse": {
+      "closed": true,
+      "evidence": "Expanded from 4 to 6 wasm-bindgen-tests including malformed JSON rejection and getrandom non-zero-entropy sanity check. Round-1 finding called for 7-8; landed at 6 — close enough for hackathon scope."
+    },
+    "round1_medium_inspector_brittle": {
+      "closed": true,
+      "evidence": "Testing Strategy now specifies wait-for-port readiness probe (30s timeout polling /health), pinned inspector version (@modelcontextprotocol/inspector@<pinned>), and test JWT mechanism. Round-1 prescription matched."
+    },
+    "round1_medium_http_edges": {
+      "closed": true,
+      "evidence": "Streamable HTTP transport tests expanded from 3 to 5 including 'partial-response on client disconnect mid-stream' and 'missing-Authorization-header request returns 401'. Round-1 fix matched."
+    },
+    "round1_medium_smoke_clarity": {
+      "closed": false,
+      "evidence": "Manual smoke checklist (4 numbered steps in tech-spec) is unchanged from round 1. Task 8 description retains generic 'exhaustive manual flow' language. The round-1 prescription (per-step Action/Expected/Recovery/ETA tuple format, plus stdio scenario) is not visible in the spec. Verify-user line is present but the structural format is not enforced.",
+      "severity_now": "minor",
+      "rationale": "Task 8 reviewers field is 'none' and Verify-user implies a clean-laptop walkthrough exists. For hackathon scope this is acceptable but the rigor gap remains."
+    },
+    "round1_medium_webapp_coverage": {
+      "closed": false,
+      "evidence": "User explicitly deferred webapp tests to backlog. No deeplink-builder unit test, no IdentityPanel Vitest. This is a conscious scope decision documented in the user message.",
+      "severity_now": "minor",
+      "rationale": "Acceptable for L hackathon MVP given time budget. Should be tracked in backlog.md explicitly."
+    },
+    "round1_medium_smithery_schema": {
+      "closed": true,
+      "evidence": "Task 7 description adds 'schema validation step for smithery.yaml'. Acceptance criteria includes 'cargo audit on PR' (related but separate). Round-1 fix landed."
+    },
+    "round1_low_inspector_validate_only": {
+      "closed": false,
+      "evidence": "Tech-spec still reads '--validate' (schema check) without explicit tools/call exercise. AVP line 8 uses '--validate'. The round-1 finding remains unaddressed.",
+      "severity_now": "minor",
+      "rationale": "The manual smoke checklist (Task 8) and integration tests (oauth_tool_call.rs) cover tools/call behavior in some form. Live AVP coverage in CI for tools/call is still missing but proportionally low for hackathon."
+    },
+    "round1_low_cors_test": {
+      "closed": false,
+      "evidence": "OAuth integration test description does not mention CORS Origin assertions. Risks table still says 'Test in CI with a request from a different origin asserting 403/CORS-rejected' but no test bullet implements it.",
+      "severity_now": "minor",
+      "rationale": "Tightened CORS to exact origin per Decision 9-related text and Task 4 description. Without a test, regressions are silent. ~5 min of test code."
+    }
+  },
+  "findings": [
+    {
+      "severity": "minor",
+      "category": "redundant_testing",
+      "location": "Testing Strategy → Unit tests → mcp/src/oauth.rs (12 tests)",
+      "issue": "Some of the 12 OAuth unit tests duplicate behavior the jsonwebtoken crate already enforces by construction, inflating test count without proportional risk reduction. Specifically: (1) 'alg=none JWT submission expects 401' — jsonwebtoken's Validation::new(Algorithm::HS256) rejects alg=none by default; the test verifies library behavior, not our code. (2) 'tampered sub claim expects 401' — any byte mutation of a signed JWT fails signature check; this is testing the HMAC, not our authorization logic. (3) 'mismatched iss/aud rejection' is meaningful only if our code explicitly sets validation.set_issuer / set_audience; otherwise it tests library defaults. Litmus test: if we delete our oauth.rs claim-validation lines, do these tests still fail? For (1) and (2), only if jsonwebtoken's defaults are correctly invoked — which is one assertion, not three. The tests are not harmful, but they create maintenance load and a false sense of depth.",
+      "recommendation": "Keep the 12 tests but consolidate (1) and (2) into a single 'JWT validator rejects all forms of forged token (alg=none, alg-confusion HS256↔RS256, tampered signature, tampered claims)' test that asserts ONE thing: our verify_jwt() function returns Err for each of N forged inputs. This protects against accidentally calling jsonwebtoken with insecure_disable_signature_validation() or wrong Validation config — which IS our code. For iss/aud: explicitly assert our code sets validation.set_issuer(['mcp.mnemonik.xyz']) and set_audience(['mcp']) — verify the configuration line, not just library behavior. This converts library-behavior tests into our-config tests and reclaims the litmus property."
+    },
+    {
+      "severity": "minor",
+      "category": "anti_pattern",
+      "location": "Testing Strategy → Integration tests → mcp/tests/stdio_backward_compat.rs",
+      "issue": "Subprocess-based stdio test has well-known CI flake characteristics: (1) cargo build cold-cache on CI runner can race the subprocess startup; (2) stdin/stdout buffering modes differ between local TTY and CI runners — test passes locally, fails on GitHub Actions; (3) no timeout policy specified; if the binary hangs (e.g., embedder model download in test mode), the CI job times out at the global limit (often 6h on GHA free tier) instead of a useful per-test failure; (4) no specification of how the embedder is configured for the subprocess — if it tries to download fastembed ONNX on a clean CI runner with no cache, the test takes minutes and may fail on network blips.",
+      "recommendation": "Add explicit guardrails to Task 7 description: (a) build the binary once with 'cargo build -p mnemonic-mcp --release' before the test (not inside the test); (b) wrap the subprocess interaction in a tokio::time::timeout(Duration::from_secs(10), ...) around each request/response pair; (c) configure the subprocess with EMBED_PROVIDER=mock or use a deterministic test embedder so the binary boots in <2s; (d) explicitly flush stdin after each write and use line-buffered reads on stdout. Without these the test will become the most-flaked test in CI within the first month and will be disabled. Listed as minor because the test exists and has the right shape — these are operational concerns, not correctness ones."
+    },
+    {
+      "severity": "minor",
+      "category": "missing_coverage",
+      "location": "Testing Strategy + Risks table 'webapp ↔ MCP CORS could block POST'",
+      "issue": "CORS configuration is called out in Decision 9 ('exact origin https://mnemonik.xyz, no Any wildcard') and Risks ('Test in CI with a request from a different origin asserting 403/CORS-rejected') but no test bullet implements this. Round 1 flagged this; round 2 retains the gap. For an OAuth flow that depends on cross-origin POST from the webapp to mcp.mnemonik.xyz, a misconfigured CORS layer is a silent demo-killer.",
+      "recommendation": "Add to oauth_flow.rs (or as a separate 5-line test): preflight OPTIONS /oauth/authorize with Origin: https://mnemonik.xyz returns Access-Control-Allow-Origin: https://mnemonik.xyz; preflight with Origin: https://evil.example does NOT include that header. Total cost ~10 lines of test code; closes the round-1 low and matches the Risks-table mitigation literally."
+    },
+    {
+      "severity": "minor",
+      "category": "missing_coverage",
+      "location": "Acceptance Criteria 'Per-IP rate limit returns 429 after threshold' + Decision 9",
+      "issue": "Decision 9 introduces 3 unit tests for rate limiting (6th sign_memory → 429, 31st recall → 429, stdio bypass). The unit tests are sufficient for the limit logic itself, but no test verifies the limiter is actually wired into the /mcp router (vs. only constructed in McpState). A common bug: tower_governor layer is created but missing from .layer() chain on the route. The unit tests would still pass because they test the limiter directly; the integration would silently allow unlimited traffic.",
+      "recommendation": "Either (a) make the rate-limit tests integration tests against the actual Axum router (POST /mcp 6 times in a loop, assert 6th returns 429), OR (b) add a single integration test 'rate_limit_wired.rs' that fires 31 recall calls through the full HTTP stack and asserts 429 on the 31st. Option (b) is ~20 lines. The existing 3 'unit' tests can stay — but at least one must hit the real router."
+    },
+    {
+      "severity": "minor",
+      "category": "missing_coverage",
+      "location": "Decision 10 OAuth signed-challenge contents — replay/staleness window",
+      "issue": "Decision 10 specifies the challenge format blake3(state || client_id || redirect_uri || code_challenge || nonce) with 60s expiry stored keyed by state. The 12 OAuth tests cover 'expired-code rejection (TTL 60s)' which likely refers to the authorization code TTL after issuance. The /authorize challenge itself (pre-signature, 60s window per Decision 10) is a separate timer. There is no explicit test that a challenge presented after the 60s window for state binding is rejected. Under load or slow signing (e.g., user opens webapp, gets distracted, signs 90s later), this is a real path.",
+      "recommendation": "Add one test to the OAuth unit suite: 'challenge presented at /authorize after Decision-10 60s TTL is rejected with state_expired'. Either as a 13th test or by parameterizing the existing expired-code test to cover both timers. Use a mockable clock (mock_instant or similar) so the test runs in milliseconds."
+    },
+    {
+      "severity": "minor",
+      "category": "anti_pattern",
+      "location": "Testing Strategy → Manual smoke tests (4 numbered steps)",
+      "issue": "Round 1 medium remains: smoke checklist text in tech-spec lacks per-step Expected/Recovery/ETA structure; Task 8 description still says 'exhaustive manual flow' without committing to the tuple format. Verify-user line for Task 8 says a non-author teammate executes 'without ambiguity' — good intent but unenforceable without the format. Also, no step explicitly covers stdio backward-compat (covered automatically by stdio_backward_compat.rs now, so this part is closed).",
+      "recommendation": "In Task 8 description, add one sentence: 'Each step is structured as (Action, Expected output verbatim, Failure recovery, ETA in seconds)'. This is documentation guidance, not test code; ~30 seconds to add to the spec. Closes the round-1 medium proportionally."
+    }
+  ],
+  "metrics": {
+    "filesReviewed": 4,
+    "litmusTest": {
+      "checked": 26,
+      "passed": 22,
+      "failed": 4,
+      "notes": "4 OAuth tests (alg=none, alg-confusion, tampered-sub, tampered-claims) test library behavior more than our code — would still pass if our oauth.rs validation lines were a single Validation::new(HS256) call. Recommendation: consolidate or rewrite to assert config, not library defaults."
+    },
+    "coverageAssessment": "adequate",
+    "pyramidBalance": {
+      "unit": 26,
+      "integration": 5,
+      "e2e": 0,
+      "manual_e2e": 4,
+      "assessment": "healthy",
+      "notes": "26 unit (12 OAuth + 3 rate-limit + 6 WASM + 5 HTTP transport), 5 integration (oauth_flow, oauth_tool_call, recall_owner_isolation, stdio_backward_compat, roundtrip_cose_via_http_proxy), 0 automated E2E (Playwright deferred to backlog), 4 manual E2E steps + MCP Inspector CI step. Ratio 26:5:0+4 is healthy for an L hackathon MVP where webapp E2E is consciously deferred. Not inverted."
+    },
+    "decisions_coverage": {
+      "D9_rate_limit_and_ownership_filter": {
+        "covered": true,
+        "tests": "3 rate-limit unit tests + recall_owner_isolation integration test"
+      },
+      "D10_oauth_challenge_contents": {
+        "covered": true,
+        "tests": "Several of the 12 OAuth tests (missing-state CSRF, replay/single-use, tampered-pubkey)",
+        "gap": "Challenge 60s TTL (Decision 10 specific timer) not explicitly tested separately from authorization-code TTL"
+      },
+      "D11_jwt_format_HS256_1h_TTL": {
+        "covered": true,
+        "tests": "12 OAuth tests cover JWT issue/validate roundtrip, expired-code rejection, alg=none rejection, mismatched iss/aud rejection",
+        "note": "See finding #1 — some of these tests verify jsonwebtoken library defaults rather than our config"
+      }
+    },
+    "user_spec_must_trace": {
+      "tools_list_streamable_http": "Covered: Streamable HTTP transport unit tests (5)",
+      "oauth_pkce_jwt_bound_to_pubkey": "Covered: oauth.rs unit tests (12) + oauth_flow.rs integration",
+      "wasm_core_4_exports": "Covered: core/src/wasm/ unit tests (6 wasm-bindgen-tests)",
+      "webapp_2_pages_landing_install": "NOT covered by automated tests (deferred to backlog per user, manual smoke step 1)",
+      "storage_mode_local_synthetic_ids": "Covered: oauth_tool_call.rs asserts 'local:' ID prefix",
+      "smithery_yaml_listing": "Partial: schema-validation step in CI; live listing visibility is manual smoke only",
+      "ci_mcp_inspector": "Covered: CI step with wait-for-port + pinned inspector version + test JWT",
+      "cargo_test_clippy_green": "Covered: AVP item 3, 4",
+      "stdio_backward_compat": "Covered: stdio_backward_compat.rs integration test",
+      "payment_rs_not_refactored": "Covered: AVP item 7 (git diff grep)",
+      "core_no_oauth_http_axum": "Covered: AVP item 6 (grep)",
+      "cose_roundtrip_byte_stable": "Covered: roundtrip_cose_via_http_proxy.rs (now adversarial)"
+    }
+  }
+}

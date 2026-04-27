@@ -1,0 +1,66 @@
+{
+  "status": "approved",
+  "summary": "Round 1: 8/9 findings resolved; 1 minor cosmetic remains (subdomain certbot phrasing tightened in Risks). Round 2 introduces 3 new minor mirages around SQL helper naming (`search_attestations` and `ensure_schema` functions are invented — actual names are `search` and ad-hoc `execute_batch(SCHEMA)`), and 1 minor about the existing `governor = \"0.8\"` dep in mcp/Cargo.toml not being acknowledged when adding `tower_governor`. No critical issues. Pinned crate versions are all realistic.",
+  "findings": [
+    {
+      "severity": "minor",
+      "type": "name_mismatch",
+      "claim": "tech-spec line 117: '`recall` SQL query in `core/src/storage/sqlite.rs::search_attestations` adds a mandatory `WHERE owner_pubkey = ?` clause' (also Decision 9 line 97, Risks line 212 'SQL helper function `search_attestations(owner_pubkey, query, limit)`')",
+      "reality": "No function named `search_attestations` exists in `core/src/storage/`. The actual cosine-search implementation is `fn search(&self, query_embedding, signer, limit)` in both `core/src/storage/traits.rs:50` (trait) and `core/src/storage/sqlite.rs:212` (impl). The current parameter name is `signer: &str`, not `owner_pubkey`.",
+      "source": "tech-spec.md Data Models (line 117), Decision 9 (line 97), Risks table (line 212)",
+      "fix": "Rename to the actual function (`AttestationStore::search` / `SqliteStore::search`) or explicitly state the function will be renamed/extended as part of Task 4. Either way, align all three references."
+    },
+    {
+      "severity": "minor",
+      "type": "missing_function",
+      "claim": "tech-spec line 115: 'Schema migrations — both run idempotently on first connection in `core/src/storage/sqlite.rs::ensure_schema`'",
+      "reality": "There is no `ensure_schema` function in `core/src/storage/sqlite.rs`. Schema is initialized inline via `conn.execute_batch(SCHEMA)` inside `SqliteStore::open` (line 127) and `SqliteStore::in_memory` (line 138), and a separate `migrate_payment_events_unique_index(&conn)` helper runs the only existing migration. Task 4 will need to either add an `ensure_schema` function or extend the existing inline `execute_batch` calls.",
+      "source": "tech-spec.md Data Models (line 115)",
+      "fix": "Replace `core/src/storage/sqlite.rs::ensure_schema` with an accurate description, e.g. 'extend the existing `SqliteStore::open`/`in_memory` schema-init blocks with two idempotent ADD COLUMN migrations alongside `migrate_payment_events_unique_index`'. Or commit to creating a new `ensure_schema` helper in Task 4 and say so explicitly."
+    },
+    {
+      "severity": "minor",
+      "type": "missing_dependency",
+      "claim": "tech-spec line 130: 'tower_governor = \"=0.4.2\" (pinned) — per-IP rate limiting on `/mcp` (Decision 9)' is added as a NEW package; existing deps (line 149) list `tower-http (incl. cors feature)` but not `governor`",
+      "reality": "`mcp/Cargo.toml:20` already includes `governor = \"0.8\"` with the comment 'Rate limiting (POST /chat: 10 req/min per IP)'. The new `tower_governor` crate is an Axum/Tower middleware layer that depends on `governor`. The spec doesn't acknowledge the existing `governor` dep or whether it stays / is upgraded.",
+      "source": "tech-spec.md Dependencies (line 130, 149)",
+      "fix": "Note that `governor = \"0.8\"` is already present in `mcp/Cargo.toml:20` and used by an existing rate limiter. Either reuse it directly (skip `tower_governor`) or document that `tower_governor` brings its own pinned `governor` and explain whether the existing one stays. Verify version compatibility — `tower_governor 0.4.x` typically requires `governor 0.6` or `0.7`, not `0.8`."
+    },
+    {
+      "severity": "minor",
+      "type": "name_mismatch",
+      "claim": "tech-spec line 119: '`save_attestation` (in `core/src/storage/sqlite.rs:149-182`) signature gains a non-optional `owner_pubkey: &str` parameter'",
+      "reality": "`save_attestation` impl is at lines 150-182 (off-by-one) and the trait definition is in `core/src/storage/traits.rs:33-44`. Adding a parameter requires modifying BOTH (trait + impl). The spec only mentions sqlite.rs.",
+      "source": "tech-spec.md Data Models (line 119)",
+      "fix": "Update line numbers to `core/src/storage/sqlite.rs:150-182` and explicitly mention the trait `AttestationStore::save_attestation` in `core/src/storage/traits.rs` must also gain the parameter."
+    }
+  ],
+  "stats": {
+    "total_claims_checked": 47,
+    "confirmed": 43,
+    "mirages_found": 4,
+    "round1_resolved": "8 of 9 round-1 findings resolved (the remaining round-1 minor on certbot wording was rewritten acceptably). Critical findings 1 (owner_pubkey schema) and 2 (react-router-dom) are fully addressed; major finding 3 (identity wrappers) reframed as composing primitives; minor finding on cargo build flags fixed; Task 8 path typo fixed.",
+    "verified_claims": [
+      "core/src/storage/sqlite.rs schema lacks owner_pubkey on attestations (confirmed lines 13-22)",
+      "api_keys.owner_pubkey already exists with deposit-owner semantics (sqlite.rs:33)",
+      "core/src/identity/mod.rs exposes load_or_create_keypair, pubkey_base58, did_sol, did_key, sign_bytes, verify_signature only — no generate_keypair / sign_challenge / export_keypair_json / import_keypair_json",
+      "Keypair::new() is the underlying primitive for generate_keypair (solana_sdk)",
+      "webapp/package.json has no react-router-dom currently — only react and react-dom (line 12-15)",
+      "Decision 8 correctly identifies state-based view switching in webapp/src/App.tsx (verified lines 18-48)",
+      "mcp/tests/ directory does not exist — all 5 referenced test files are net-new (legit)",
+      "AC line 255 correctly scopes wasm build to `cargo build -p mnemonic-core --features wasm --target wasm32-unknown-unknown`",
+      "Task 8 file-read list line 343 correctly says `code-research.md`",
+      "Decisions 1 and 5 still cite `research.md` — file exists at work/mnemonic-integrations/research.md (legit, distinct from code-research.md)",
+      "MCP_JWT_SECRET added as Deviation 5 with [PENDING USER APPROVAL]",
+      "react-router-dom = ^6.27.0 listed as NEW dep with proper Decision 8 + Deviation 4 acknowledgement",
+      "Pinned crate versions are realistic: oauth2 4.4.2, jsonwebtoken 9.3.0, wasm-bindgen 0.2.95, wasm-bindgen-test 0.3.45, getrandom 0.2.15 (all match published crates.io lines)",
+      "CSP directive `default-src 'self'; script-src 'self'; connect-src 'self' mcp.mnemonik.xyz` is syntactically valid CSP3",
+      "CORS scope to exact origin https://mnemonik.xyz on /oauth/* is correct guidance (tower-http::cors::CorsLayer)",
+      "Risks table now includes hosted server keypair compromise mitigation, OAuth DoS LRU cap, CSP/CORS specifics",
+      "Decision 9 ownership-filter mandate aligns with security-auditor findings",
+      "Decision 10 signed-challenge contents (state || client_id || redirect_uri || code_challenge || nonce) is a sound binding for OAuth replay/swap defense",
+      "Decision 11 HS256 fixed-algorithm + iss/aud verification is a correct alg-confusion mitigation",
+      "Existing `governor = \"0.8\"` dep in mcp/Cargo.toml:20 (used by chat rate limiter)"
+    ]
+  }
+}

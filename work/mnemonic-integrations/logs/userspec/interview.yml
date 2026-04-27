@@ -1,0 +1,258 @@
+# Interview Plan for mnemonic-integrations
+# Pre-scored from existing user-spec.md draft + research.md
+
+interview_metadata:
+  started: "2026-04-26 22:00:00"
+  last_updated: "2026-04-26 23:30:00"
+  status: "completed"
+  can_resume: false
+  current_question_num: 19
+  feature_size: "L"
+
+conversation_history: []
+
+# ============================================================================
+# Phase 1: High-Level Feature Understanding
+# ============================================================================
+phase1_feature_overview:
+
+  feature_name:
+    score: 95
+    status: "complete"
+    value: "mnemonic-integrations"
+    gaps: ""
+    required: true
+
+  feature_description:
+    score: 70
+    status: "partial"
+    value: "Phase 1 из research.md — три механизма: hosted remote MCP (mcp.mnemonic.dev, streamable HTTP + OAuth 2.1) + per-bundle landing page (mnemonic.dev/b/<id>) + clipboard fallback с self-contained markdown."
+    gaps: "Что именно делает recall в чужом чате — RAG retrieval, system prompt injection, tool call by model? Кто визитор landing page — marketing visitor или existing user? Multi-tenancy: bundle ID — общий demo или per-user attestations?"
+    required: true
+
+  work_type:
+    score: 95
+    status: "complete"
+    value: "feature"
+    gaps: ""
+    required: true
+
+  user_problem:
+    score: 80
+    status: "partial"
+    value: "Cross-provider context portability: пользователь делает research в ChatGPT (или любом другом AI tool), хочет продолжить в Claude.ai/Cursor/etc. БЕЗ потери контекста. Текущий путь — копировать-вставлять вручную, теряется attestation, теряется semantic structure. Mnemonic = capture в одном tool, attestation, replay в другом — сохраняется и контекст и доказуемость целостности."
+    gaps: "Уточнить capture механизм (manual paste / extension DOM grab / something else) и replay механизм (copy-as-prompt / extension inject / MCP tool call). Кто триггерит attestation — юзер вручную или auto?"
+    required: true
+
+  target_users:
+    score: 50
+    status: "partial"
+    value: "Developers + AI-tool юзеры (Cursor/Claude.ai Pro/ChatGPT)"
+    gaps: "Какой именно сегмент — marketing-leads (новые юзеры), existing developers (Rust/MCP-savvy), или crypto-skeptical AI users? Tone и onboarding меняются radically."
+    required: false
+
+  success_criteria:
+    score: 70
+    status: "partial"
+    value: "12 testable criteria в текущем draft (HTTP transport, OAuth, landing page, deeplinks ручные тесты, COSE round-trip)"
+    gaps: "Нет product-success метрик. После шиппа — что считаем успехом? Кол-во connector installs? Retention? Verify-ratio? Без этого не понять, был ли Phase 1 правильным."
+    required: true
+
+  constraints:
+    score: 80
+    status: "complete"
+    value: "Phase 1 only; Apps SDK / .mcpb / extension вне scope; payment.rs не трогаем; нет WASM; не используем Claude.ai `?q=`; OAuth provider TBD; hosting TBD"
+    gaps: ""
+    required: true
+
+  testing_strategy:
+    score: 65
+    status: "partial"
+    value: "Unit + httpmock + 5 ручных E2E на реальных аккаунтах"
+    gaps: "Real-world COSE round-trip через Anthropic/OpenAI MCP прокси — как именно тестировать в CI до GA? Это критический риск, но в draft только 'httpmock' — это не тест прохождения через реальный прокси."
+    required: true
+
+# ============================================================================
+# Phase 2: User Experience & Scenarios
+# ============================================================================
+phase2_user_experience:
+
+  user_stories:
+    score: 65
+    status: "partial"
+    value: "4 сценария: Cursor/VS Code one-click, Claude.ai Pro 3-click, ChatGPT Plus clipboard, Perplexity copy-MCP-URL"
+    gaps: "Нет user story для marketing visitor. Откуда бере́тся bundle-id в URL? Кто и когда генерит landing page?"
+    required: true
+
+  acceptance_criteria:
+    score: 78
+    status: "partial"
+    value: "12 criteria в draft"
+    gaps: "Нужно переделать после уточнения user_problem — критерии для marketing flow vs personal-attestation flow разные"
+    required: true
+
+  edge_cases:
+    score: 30
+    status: "partial"
+    value: "В draft упомянут только COSE через прокси, IP allowlist, CursorJack"
+    gaps: "Что если у юзера несколько MCP коннекторов с одинаковыми tool names? Что если bundle отозван (revoked)? Что если OAuth токен expired в середине tool call? Что если Cursor/VS Code не установлены и deeplink ничего не делает?"
+    required: true
+
+  error_scenarios:
+    score: 40
+    status: "partial"
+    value: "OAuth complexity для free-tier упомянут"
+    gaps: "Connector install fail; OAuth denied; прокси меняет CBOR байты; bundle 404; rate-limit от Anthropic/OpenAI на tool call?"
+    required: true
+
+  verification_strategy:
+    score: 70
+    status: "partial"
+    value: "7 агентских проверок (cargo test/clippy/curl) + 4 ручных сценария"
+    gaps: "Как проверить что hosted MCP правильно ведёт себя multi-tenant (если применимо)? Как проверить deeplink trust UI после CursorJack patch?"
+    required: true
+
+  ui_ux_requirements:
+    score: 35
+    status: "partial"
+    value: "5 кнопок на landing page, copy-as-prompt модалка для ChatGPT"
+    gaps: "Tone landing page — нейтральный технический (per ux-guidelines.md) или more-marketing для onboarding? 'Verifiability badge' UX — как показать пользователю что bundle проверен? Что в empty state когда юзер не имеет ни одной integration?"
+    required: false
+
+  risks:
+    score: 80
+    status: "complete"
+    value: "5 рисков в draft (COSE через прокси, IP allowlist, CursorJack, ?q= deprecation, OAuth complexity)"
+    gaps: "Не упомянут риск что Anthropic/OpenAI catalogs могут отказать в листинге crypto-related серверов"
+    required: true
+
+  technical_decisions:
+    score: 50
+    status: "partial"
+    value: "Transport=streamable HTTP; OAuth=TBD; hosting=TBD; landing page в webapp; markdown server-side"
+    gaps: "Главные TBD не закрыты. Хотя бы предпочтения должны быть на user-spec уровне (чтобы не open-ended). Auth0 vs свой OAuth — критично для security и стоимости."
+    required: false
+
+  deploy_approach:
+    score: 30
+    status: "partial"
+    value: "VPS у нас уже есть (mnemonik.xyz, см. deployment.md), но в draft hosting называется TBD"
+    gaps: "Можем ли использовать existing VPS для mcp.mnemonic.dev? Какой DNS, какой SSL flow? Как scaling — single-instance до GA?"
+    required: false
+
+  manual_user_actions:
+    score: 20
+    status: "partial"
+    value: "User кликает 'Open in Cursor', проходит OAuth"
+    gaps: "Кто настраивает DNS mcp.mnemonic.dev? Кто регистрирует OAuth с Anthropic/OpenAI (если требуется)? Какие манипуляции до go-live?"
+    required: false
+
+# ============================================================================
+# Phase 3: Integration & Technical Context
+# ============================================================================
+phase3_integration:
+
+  integration_points:
+    score: 60
+    status: "partial"
+    value: "mnemonic-mcp получает streamable HTTP transport; webapp получает /b/<id> route; интеграция с 5 внешними AI tools через MCP/deeplinks"
+    gaps: "Связь с pricing.rs — hosted MCP бесплатный или платный? Если платный — payment.rs становится мульти-тенант?"
+    required: true
+
+  dependencies:
+    score: 50
+    status: "partial"
+    value: "MCP Rust SDK поддерживает streamable HTTP. Нужна OAuth lib (oauth2 crate), JWT, possibly axum-server"
+    gaps: "Конкретный OAuth provider — нужно решить до tech-spec"
+    required: false
+
+  technical_constraints:
+    score: 55
+    status: "partial"
+    value: "Public-internet reachable с Anthropic/OpenAI IP диапазонов; OAuth 2.1 + PKCE; не ломаем COSE round-trip через прокси; payment.rs изоляция; core/ не трогаем"
+    gaps: "Latency требования для tool calls? Concurrency на single VPS instance?"
+    required: false
+
+  data_requirements:
+    score: 30
+    status: "partial"
+    value: "Hosted MCP пишет attestations.db"
+    gaps: "Multi-tenant DB schema? Per-user keypair или shared protocol keypair? Где хранятся OAuth tokens — в SQLite или Redis?"
+    required: false
+
+  migration_needs:
+    score: 60
+    status: "complete"
+    value: "Backward-compat: stdio transport продолжает работать; existing 5 tools API не меняется"
+    gaps: ""
+    required: false
+
+# ============================================================================
+# Phase 4: Completion
+# ============================================================================
+phase4_completion:
+  userspec_file: "work/mnemonic-integrations/user-spec.md"
+  status: "draft"
+
+# ============================================================================
+# Decision Rules
+# ============================================================================
+decision_rules:
+  required_threshold: 85
+  optional_threshold: 50
+  stop_criteria:
+    - "All required items in current cycle scope score >= 85%"
+    - "Structural: every required item has non-empty value, no TBD, gaps empty"
+
+# ============================================================================
+# Notes
+# ============================================================================
+notes: |
+  - Existing user-spec.md draft (commit 72bd8eb) is starting point — but scope CHANGED in round 2.
+  - research.md is comprehensive — 14 surfaces, 11 mechanisms, 3 phases, 8 open questions.
+
+  ROUND 2 CLARIFICATIONS (2026-04-26):
+  - Use case = cross-provider context portability for individual users.
+    Capture artifacts in Tool A (ChatGPT/etc), attest, replay in Tool B (Claude/etc) without losing context.
+    NOT marketing/distribution flow.
+  - Browser extension IS in Phase 1 scope but with mitigation via in-extension verification
+    (acknowledge ShadowPrompt risk but want to mitigate, not defer).
+  - Tests: protocol conformance (cargo) + headless agent in CI. Smithery validator NOT required.
+  - "User should not be obligated to run anything besides browser" — hosted server path is mandatory.
+
+  ROUND 3 CLARIFICATIONS (2026-04-26):
+  - THREE delivery channels, each with distinct audience:
+    1. MCP — for agents and power-users. Hosted (`mcp.mnemonic.dev`) + docker image + Smithery/registry listings.
+    2. WASM — `mnemonic-core` compiled via wasm-pack. Powers webapp + browser extension (and possibly npm @mnemonic/core for 3rd-party devs).
+    3. Website — `mnemonik.xyz` — primarily marketing/advertising. Drives installs of MCP/extension. NOT the capture/replay tool itself.
+
+  ROUND 4 CRITICAL SHIFT (2026-04-26):
+  - MNEMONIC IS NOT A CAPTURE TOOL. The integration IS the MCP connector itself.
+  - Flow: Tool A & Tool B both have Mnemonic MCP installed. User in Tool A says natural-language
+    "save this onchain" → model calls `sign_memory` (user approves prompt) → Arweave + Solana.
+    User in Tool B says "recall my X" → model calls `recall` → cosine search → context returned.
+  - NO DOM scraping, NO copy-paste, NO chat history extraction. Capture is explicit
+    user-triggered tool call via natural language.
+  - Storage = Arweave (decentralized) for attested bundles. localStorage only for user-specific
+    data (keypair, prefs, bundle index for browse UI).
+  - Webapp scope SHIFTS: not capture/replay UI, but install hub + identity manager + bundle browser.
+
+  ROUND 5 CONFIRMATIONS (2026-04-26):
+  - Webapp scope = 7 features (preferably all in P1):
+    (1) marketing landing, (2) install hub with deeplinks, (3) identity (keypair),
+    (4) your bundles browser, (5) top-up balance UI, (6) bundle delete/privacy,
+    (7) stats dashboard
+  - Auth: Sign-in-with-Solana via Turnkey MPC (email-based wallet creation/recovery,
+    Ed25519-native, MPC custody, cross-device via email login). NOT raw localStorage keypair.
+    Self-host docker = local keypair file (current MCP behavior).
+  - Tests: (III) MCP Inspector on PR + Claude Code in CI on nightly/pre-release smoke.
+  - Browser extension — Phase 1.5, deferred. Not blocker.
+  - NPM `@mnemonic/core` publish — aim, scope-decision in Phase 1 still TBD.
+
+  CRITICAL GAPS still open after round 2:
+  - Capture mechanism — manual paste / extension DOM grab / clipboard hook
+  - Storage location — browser localStorage / hosted DB / both with sync
+  - Replay mechanism — clipboard+?q= / extension inject / MCP tool call (model-driven retrieval)
+  - Auth for hosted server (cross-device sync requires account)
+  - WASM webapp — reuse existing mnemonic-webapp or new one
+  - Extension scope (Phase 1 inclusive? P1.5? P2?)
