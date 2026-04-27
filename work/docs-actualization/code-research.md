@@ -90,6 +90,28 @@ All 6 hits are `replace-token` overrides per Decision 3. Each before/after will 
 
 Sanity-grep run completed 2026-04-27 against `recovered/{competitive-landscape,research,problems}/`. Total 6 in-content hits across 3 files (plus 3 narrative mentions in `recovered/competitive-landscape/README.md` classified `keep`). 6 token-replace overrides applied; no further stale terms detected; no drop-file verdicts.
 
+### 4.4 Wave 3 Task 4 — promotion log
+
+Applied during promotion of `recovered/competitive-landscape/` → `docs/competitive-landscape/` on 2026-04-27. Each entry quotes the exact line as written in the destination file after edit.
+
+**Entry 1 — `docs/competitive-landscape/DRAG_ANALYSIS.md` line 37 (delete-line)**
+- Before: `Mnemonic records: SHA3-256 hash of the encrypted memory blob via Solana memo.`
+- After: (line removed; preceding line `D-RAG records: source reliability scores via smart contracts.` is now followed by the blank line and the `Both systems are cheap to run on-chain ...` paragraph)
+
+**Entry 2 — `docs/competitive-landscape/WEB_RESEARCH_TRUSTLESS_RAG.md` line 45 (replace-token)**
+- Before: `| Status | Pre-V1, prototype validated | Live (Kinic-CLI shipped) |`
+- After: `| Status | active Rust MCP server | Live (Kinic-CLI shipped) |`
+
+**Entry 3 — `docs/competitive-landscape/WEB_RESEARCH_TRUSTLESS_RAG.md` line 64 (replace-token, delete-tokens variant)**
+- Before: `- Mnemonic commits the memory blob (SHA3 hash); V3DB proves the retrieval result`
+- After: `- Mnemonic commits the memory blob; V3DB proves the retrieval result`
+
+**Entry 4 — `docs/competitive-landscape/WEB_RESEARCH_TRUSTLESS_RAG.md` line 132 (replace-token)**
+- Before: `| Mnemonic | Memory integrity (hash) | ✅ 4/8-bit | ✅ | Arweave+Solana | Pre-V1 |`
+- After: `| Mnemonic | Memory integrity (hash) | ✅ 4/8-bit | ✅ | Arweave+Solana | v1.0 (active) |`
+
+Verify-smoke: `grep -RIE 'SHA3|Pre-V1|pre-V1' docs/competitive-landscape/` returned empty; `ls docs/competitive-landscape/*.md | wc -l` returned `4`.
+
 ## 5. Current state of monorepo paths affected
 
 | path | current state | action in feature |
