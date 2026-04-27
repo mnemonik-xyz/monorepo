@@ -93,12 +93,22 @@ export default function Consent() {
     setPhase({ kind: "signing" });
     try {
       const wasm = await loadWasm();
-      const cose = wasm.sign_challenge(identity, challengeBytes);
-      const coseB64 = btoa(String.fromCharCode(...cose));
+      // sign_challenge returns a 64-byte raw Ed25519 signature, NOT a
+      // COSE_Sign1 envelope. The server's /oauth/authorize accepts both
+      // (legacy `cose_signed` is a serde alias for `signature`) and now
+      // verifies raw Ed25519 against the stored challenge bytes — this
+      // closes the "extraneous data in CBOR" failure mode that came from
+      // mistakenly treating the 64-byte signature as a COSE envelope.
+      const sig = wasm.sign_challenge(identity, challengeBytes);
+      const sigB64 = btoa(String.fromCharCode(...sig));
       const resp = await fetch(MCP_AUTHORIZE_URL, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ state, cose_signed: coseB64 }),
+        body: JSON.stringify({
+          state,
+          signature: sigB64,
+          signer_pubkey: identity.pubkey_base58,
+        }),
       });
       if (!resp.ok) {
         const text = await resp.text();

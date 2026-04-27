@@ -88,10 +88,16 @@ pub struct Claims {
 /// Pending authorize record (state → expected pubkey + challenge metadata).
 #[derive(Debug, Clone)]
 struct PendingAuthorize {
-    /// blake3 hex of canonical_cbor(challenge_fields). Recomputed on
-    /// `/authorize` POST and compared against the supplied COSE payload's
-    /// `expected_hash`.
+    /// blake3 hex of canonical_cbor(challenge_fields). Kept for debug/log
+    /// continuity; raw Ed25519 verification uses `challenge_bytes` directly.
     challenge_hash: String,
+    /// Canonical-CBOR bytes of the challenge map. The webapp signs THESE
+    /// bytes with WASM `sign_challenge` (raw Ed25519); the server verifies
+    /// the signature against them via `identity::verify_signature`.
+    /// Storing the bytes (not just the hash) avoids the COSE_Sign1
+    /// round-trip — webapp `sign_challenge` returns a 64-byte signature,
+    /// not a COSE envelope.
+    challenge_bytes: Vec<u8>,
     /// The base58 pubkey expected to sign — encoded into the challenge fields.
     expected_pubkey: String,
     /// `redirect_uri` from the original authorize request.
@@ -153,6 +159,7 @@ impl OAuthState {
         &self,
         state: String,
         challenge_hash: String,
+        challenge_bytes: Vec<u8>,
         expected_pubkey: String,
         redirect_uri: String,
         code_challenge: String,
@@ -161,6 +168,7 @@ impl OAuthState {
     ) {
         let entry = PendingAuthorize {
             challenge_hash,
+            challenge_bytes,
             expected_pubkey,
             redirect_uri,
             code_challenge,
@@ -461,6 +469,7 @@ pub async fn authorize_init_handler(
     state.insert_pending(
         q.state.clone(),
         challenge_hash,
+        challenge_bytes.clone(),
         expected_pubkey,
         q.redirect_uri.clone(),
         q.code_challenge.clone(),
@@ -512,16 +521,30 @@ fn urlencoding_encode(s: &str) -> String {
 
 // ── /oauth/authorize handler (Decision 10) ───────────────────────────────────
 
-/// Request body for `POST /oauth/authorize`. The browser fetches the unsigned
-/// challenge fields, signs `blake3(canonical_cbor(fields))` with the user's
-/// localStorage Ed25519 key (via WASM `sign_challenge`), and POSTs the
-/// COSE_Sign1 bytes back here.
+/// Request body for `POST /oauth/authorize`. The browser receives the
+/// canonical-CBOR challenge bytes from `GET /oauth/authorize`, signs them
+/// with the user's localStorage Ed25519 key via WASM `sign_challenge`
+/// (returns raw 64-byte signature, NOT a COSE_Sign1 envelope), and POSTs
+/// the signature + signer pubkey back here. The server re-derives the
+/// challenge bytes from the pending record and verifies with Ed25519.
 #[derive(Debug, Deserialize)]
 pub struct AuthorizeRequest {
     /// Original CSRF state — must match a record in OAuthState.pending.
     pub state: String,
-    /// COSE_Sign1 bytes (base64) — payload is the canonical-CBOR challenge.
-    pub cose_signed: String,
+    /// Raw 64-byte Ed25519 signature (base64) over the challenge bytes
+    /// the server returned from the bootstrap. The legacy `cose_signed`
+    /// field name is preserved as a deserialization alias for older
+    /// clients that still wrap in COSE_Sign1; we no longer prefer that
+    /// path because in-browser COSE wrapping was the principal source of
+    /// hard-to-debug "extraneous data in CBOR" failures.
+    #[serde(alias = "cose_signed")]
+    pub signature: String,
+    /// Base58 Ed25519 pubkey of the signer. The server verifies the
+    /// signature against the pending entry's `challenge_bytes` using
+    /// THIS pubkey. The pending entry's `expected_pubkey` (when set)
+    /// must equal this — otherwise we reject the cross-identity claim.
+    #[serde(default)]
+    pub signer_pubkey: String,
 }
 
 /// Response for a successful `/oauth/authorize` POST. Mirrors the OAuth 2.1
@@ -556,53 +579,66 @@ pub async fn authorize_handler(
         return oauth_error(StatusCode::UNAUTHORIZED, "challenge expired");
     }
 
-    // Decode the COSE_Sign1 envelope from base64.
-    let cose_bytes = match base64::Engine::decode(
+    // Decode the raw 64-byte Ed25519 signature from base64. (Field name is
+    // `signature`; legacy `cose_signed` is accepted via serde alias.)
+    let sig_bytes = match base64::Engine::decode(
         &base64::engine::general_purpose::STANDARD,
-        req.cose_signed.as_bytes(),
+        req.signature.as_bytes(),
     ) {
         Ok(b) => b,
         Err(e) => {
             return oauth_error(
                 StatusCode::BAD_REQUEST,
-                &format!("cose_signed is not valid base64: {e}"),
+                &format!("signature is not valid base64: {e}"),
             );
         }
     };
 
-    // Verify COSE_Sign1 — checks Ed25519 signature, content integrity vs
-    // expected hash, and the algorithm field. Decision 10 requires ALL
-    // checks pass.
-    let result = match verify_artifact(&cose_bytes, Some(&pending.challenge_hash)) {
-        Ok(r) => r,
-        Err(e) => return oauth_error(StatusCode::UNAUTHORIZED, &format!("COSE verify: {e}")),
-    };
-    if !result.valid
-        || !result.cose_signature
-        || !result.content_integrity
-        || !result.algorithm_valid
-    {
-        return oauth_error(StatusCode::UNAUTHORIZED, "challenge signature invalid");
+    // Validate signature length (Ed25519 = 64 bytes).
+    if sig_bytes.len() != 64 {
+        return oauth_error(
+            StatusCode::BAD_REQUEST,
+            &format!("signature must be 64 bytes, got {}", sig_bytes.len()),
+        );
     }
-    // Bind to expected pubkey: the kid embedded in the COSE header must
-    // match the pubkey we recorded when the pending record was created.
-    // This closes the "tampered sub" attack — the attacker can't sign
-    // with their own key and claim to be someone else.
-    //
-    // Empty `expected_pubkey` is the bootstrap sentinel — the webapp
-    // consent flow doesn't yet know the user's pubkey when the bootstrap
-    // first runs (user-agent is still on the AI tool's redirect; webapp
-    // localStorage hasn't been read). In that case we accept the COSE
-    // signer's recovered pubkey as the binding identity. This is safe
-    // because the signature itself authoritatively names the signer
-    // (Ed25519 verify recovers the pubkey via kid lookup) — there's no
-    // "claim to be someone else" attack surface when nobody else is
-    // claimed.
-    if !pending.expected_pubkey.is_empty() && result.signer != pending.expected_pubkey {
+
+    // Validate signer_pubkey is non-empty + parseable base58 Ed25519 pubkey.
+    if req.signer_pubkey.trim().is_empty() {
+        return oauth_error(StatusCode::BAD_REQUEST, "signer_pubkey is required");
+    }
+    let signer_pubkey: solana_sdk::pubkey::Pubkey = match req.signer_pubkey.parse() {
+        Ok(pk) => pk,
+        Err(e) => {
+            return oauth_error(
+                StatusCode::BAD_REQUEST,
+                &format!("signer_pubkey is not valid base58 Ed25519 pubkey: {e}"),
+            );
+        }
+    };
+
+    // Bind to expected pubkey when present (bootstrap-with-pubkey path).
+    // Empty `expected_pubkey` is the sentinel for "any keypair valid for
+    // first-touch consent" — the signature itself authoritatively names
+    // the signer, and there's no cross-identity claim to defeat. When
+    // populated, the expected_pubkey was bound at bootstrap time and
+    // must match the submitted signer.
+    if !pending.expected_pubkey.is_empty() && req.signer_pubkey != pending.expected_pubkey {
         return oauth_error(
             StatusCode::UNAUTHORIZED,
             "signer pubkey does not match expected pubkey",
         );
+    }
+
+    // Verify the raw Ed25519 signature against the canonical-CBOR challenge
+    // bytes the server stored at bootstrap. This is the gate Decision 10
+    // depends on — a valid signature proves the user authorizes the
+    // client's redirect_uri/state pair, since both are part of the bytes.
+    if !mnemonic_core::identity::verify_signature(
+        &signer_pubkey,
+        &pending.challenge_bytes,
+        &sig_bytes,
+    ) {
+        return oauth_error(StatusCode::UNAUTHORIZED, "Ed25519 signature invalid");
     }
 
     // Issue a single-use code, store binding for /token.
@@ -612,7 +648,7 @@ pub async fn authorize_handler(
         guard.put(
             code.clone(),
             IssuedCode {
-                sub: result.signer.clone(),
+                sub: req.signer_pubkey.clone(),
                 code_challenge: pending.code_challenge.clone(),
                 exp: now_secs() + CODE_TTL_SECS,
             },
@@ -1017,6 +1053,7 @@ mod tests {
         st.insert_pending(
             "csrf-state-1".to_string(),
             hash,
+            Vec::new(),
             pubkey.clone(),
             "https://app/callback".to_string(),
             challenge.clone(),
@@ -1070,6 +1107,7 @@ mod tests {
         st.insert_pending(
             "csrf-2".to_string(),
             hash,
+            Vec::new(),
             pubkey,
             "https://app/cb".to_string(),
             challenge,
@@ -1105,6 +1143,7 @@ mod tests {
         st.insert_pending(
             "csrf-tamper".to_string(),
             hash,
+            Vec::new(),
             pubkey_a, // attacker's keypair signed but we expect somebody else
             "https://app/cb".to_string(),
             challenge,
@@ -1134,6 +1173,7 @@ mod tests {
         st.insert_pending(
             "csrf-exp".to_string(),
             hash,
+            Vec::new(),
             pubkey,
             "https://app/cb".to_string(),
             challenge,
@@ -1196,6 +1236,7 @@ mod tests {
         st.insert_pending(
             "csrf-plain".to_string(),
             s256_hash,
+            Vec::new(),
             pubkey,
             "https://app/cb".to_string(),
             plain_challenge.to_string(),
@@ -1243,6 +1284,7 @@ mod tests {
         st.insert_pending(
             "csrf-replay".to_string(),
             hash,
+            Vec::new(),
             pubkey,
             "https://app/cb".to_string(),
             challenge,
@@ -1286,6 +1328,7 @@ mod tests {
         st.insert_pending(
             "tok-state".to_string(),
             hash,
+            Vec::new(),
             pubkey.clone(),
             "https://app/cb".to_string(),
             challenge,
@@ -1332,6 +1375,7 @@ mod tests {
         st.insert_pending(
             "tok-bad".to_string(),
             hash,
+            Vec::new(),
             pubkey,
             "https://app/cb".to_string(),
             challenge,
