@@ -744,8 +744,13 @@ const MAX_PEEK_BODY: usize = 1024 * 1024;
 /// Allowlist of JSON-RPC methods that bypass JWT validation. `initialize`
 /// and `tools/list` are required for MCP discovery — Cursor / Claude.ai
 /// post these BEFORE completing OAuth, so blocking them breaks the install
-/// handshake.
-const ALLOWLIST_METHODS: &[&str] = &["initialize", "tools/list"];
+/// handshake. JSON-RPC notifications (no `id`) and MCP `notifications/*`
+/// methods (e.g. `notifications/initialized`, `notifications/cancelled`,
+/// `notifications/progress`) are also pass-through: they are sent during
+/// the connection lifecycle and rejecting them with 401 breaks
+/// streamable-HTTP transport (observed during T15 — Cursor sends
+/// `notifications/initialized` immediately after `initialize` response).
+const ALLOWLIST_METHODS: &[&str] = &["initialize", "tools/list", "ping"];
 
 /// Extract the JSON-RPC `method` field from a request body without consuming
 /// the parser state. Returns `None` if the body is not valid JSON or the
@@ -796,7 +801,14 @@ pub async fn bearer_auth_middleware(
     let method = extract_json_rpc_method(&body_bytes);
     let allowlisted = method
         .as_deref()
-        .map(|m| ALLOWLIST_METHODS.contains(&m))
+        .map(|m| {
+            // Explicit allowlist: discovery + lifecycle methods.
+            // Notifications (per JSON-RPC 2.0 spec — no `id` field) and MCP
+            // `notifications/*` methods are also pass-through. Without this
+            // Cursor's post-initialize `notifications/initialized` is rejected
+            // with 401, breaking the handshake.
+            ALLOWLIST_METHODS.contains(&m) || m.starts_with("notifications/")
+        })
         .unwrap_or(false);
 
     if !allowlisted {
