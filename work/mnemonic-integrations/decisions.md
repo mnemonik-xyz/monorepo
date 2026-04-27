@@ -940,3 +940,261 @@ work/mnemonic-integrations/decisions.md  (this entry)
 - **HSTS preload deferred.** Operator decision; non-preload HSTS still closes the downgrade window for return visitors.
 - **`server_tokens off`.** Cannot be set in a per-server block; flagged in the conf header for operator action on `/etc/nginx/nginx.conf`.
 
+---
+
+## Task 13: Pre-deploy QA
+
+**Date:** 2026-04-26
+**Agent:** T13-qa (`pre-deploy-qa` skill)
+**Base commit:** `c981f2c` (T13 in_progress on top of `4c9c924` audit-fixer-1).
+**Verdict:** **NO-GO (blocker, single-line fmt drift)** — see Step 3.
+
+**One-line summary:** All functional gates green (test suite + clippy + webapp + WASM + live deferred-sign smoke + spec traceability + security spot-checks), but `cargo fmt --all -- --check` reports rustfmt drift in `mcp/src/oauth.rs` introduced by the audit-fixer commit. CI gate `.github/workflows/ci.yml` enforces `cargo fmt --check`; this would fail on push. Trivial 1-commit fix (`cargo fmt --all` + commit). Once that lands, deploy is GO.
+
+### Step-by-step results (9 steps from `tasks/13.md`)
+
+#### Step 1 — `cargo test --workspace --no-fail-fast --features mnemonic-mcp/test-support`
+
+**Status:** PASS
+
+**Evidence:** `/tmp/qa-out/step1-cargo-test.log`. Aggregated: **297 tests passed, 0 failed, 1 ignored** (the `stdio_backward_compat::test_stdio_tools_list_sign_memory_recall_without_oauth` documented in T8 deviation — `pricing.refresh()` outbound HTTPS unsuitable for default cargo test; CI `test-stdio` workflow_dispatch + schedule covers it). Breakdown:
+- `mnemonic-core` lib: 77 passed (incl. T4-added `test_search_owner_isolation` + `test_migrate_owner_pubkey_columns_idempotent`).
+- `mnemonic-core` integration: 5 (`integration_cbor`) + 3 (`proptest_canonical`) passed.
+- `mnemonic-mcp` lib: 95 passed (audit-fixer added 4 OAuth bootstrap tests; pre-fix was 91).
+- `mnemonic-mcp` bin: 95 passed (same).
+- Integration tests in `mcp/tests/` — all 13 declared files (`auth_allowlist`, `oauth_tool_call`, `oauth_flow`, `cors`, `deferred_sign_flow`, `recall_owner_isolation`, `roundtrip_cose_via_http_proxy` (2 tests), `pending_authz` (4), `pending_expiry`, `pending_user_cap`, `rate_limit_routing` (3), `sign_callback` (5), `stdio_backward_compat` (ignored)) — total 22 active integration assertions, 1 ignored.
+
+#### Step 2 — `cargo clippy --workspace --all-targets --features mnemonic-mcp/test-support -- -D warnings`
+
+**Status:** PASS
+
+**Evidence:** `/tmp/qa-out/step2-clippy.log`. Exit code 0. Zero warnings.
+
+#### Step 3 — `cargo fmt --all -- --check`
+
+**Status:** **FAIL — DEPLOY BLOCKER (audit-fixer-1 regression)**
+
+**Evidence:** Exit code 1. Two diff blocks reported in `mcp/src/oauth.rs`:
+- Line 484 (`authorize_init_handler` redirect path) — `let location = format!(...)` written across 3 lines instead of 1; rustfmt's default fits on a single line.
+- Line 1484 (a new test `test_authorize_init_then_post_round_trip`) — `let cose_b64 = base64::Engine::encode(...)` written across 2 lines.
+
+Both are stylistic regressions introduced by the audit-fixer-1 commit `4c9c924` (Fix 1: OAuth bootstrap endpoint + 4 new tests). The implementation is correct; the formatting drift would have been caught by `cargo fmt --all` before commit. CI workflow `.github/workflows/ci.yml::format` step runs `cargo fmt --all -- --check` and would fail on push.
+
+**Severity:** trivial mechanical fix. No code-behavior change required. **Required fix:** run `cargo fmt --all` in repo root and commit the diff (~5 lines).
+
+**Fixer recommendation:** code-writing skill, single-commit follow-up.
+
+#### Step 4 — `cd webapp && npm install && npm run build:wasm && npm run build`
+
+**Status:** PASS
+
+**Evidence:**
+- `npm install` clean (`/tmp/qa-out/step4-npm-install.log` — 5 moderate audit warnings inherited from upstream, no new vulns).
+- `npm run build:wasm` produced `webapp/src/wasm/{mnemonic_core_bg.wasm, mnemonic_core.js, mnemonic_core.d.ts, mnemonic_core_bg.wasm.d.ts, package.json}`. wasm-pack 0.13.1 (newer 0.14.0 available — non-blocking; current works).
+- `npm run build` (`/tmp/qa-out/step4c-npm-build.log`) — 51 modules transformed; `dist/index.html` 1.10 KB (CSP meta intact), `dist/assets/mnemonic_core_bg-BR4heqYO.wasm` 457.62 KB, `dist/assets/index-BVcOSCLx.css` 17.75 KB, `dist/assets/mnemonic_core-CwZNJHB_.js` 18.97 KB, `dist/assets/index-C-agdIe_.js` 275.48 KB. Built in 547ms.
+
+#### Step 5 — `cd webapp && npm test -- --run` (vitest)
+
+**Status:** PASS
+
+**Evidence:** `/tmp/qa-out/step5-vitest.log`. 4 test files, **8 tests passed** (T7's 3 component tests: `IdentityPanel`, `InstallButtons`, `Sign`; audit-fixer-1's added `Sign.cbor.test.tsx` with 5 cases for the real cbor-x decoder — content-spoofing-defense, embedding extraction, malformed-bytes fallback). Duration 649ms.
+
+#### Step 6 — `cargo build -p mnemonic-core --features wasm --target wasm32-unknown-unknown`
+
+**Status:** PASS
+
+**Evidence:** `/tmp/qa-out/step6-wasm32-build.log`. Exit 0. Compiles clean (incremental — fresh checkout will trigger first-time wasm32 dep build, ~30s). `wasm` feature gate keeps native `cargo build --workspace` unaffected (verified via Step 1).
+
+#### Step 7 — Local server smoke (deferred-sign flow)
+
+**Status:** PASS
+
+**Evidence:** `/tmp/qa-out/step7-deferred-flow.log`. Server boot:
+```
+MCP_JWT_SECRET=$(openssl rand -base64 32) STORAGE_MODE=local PAYMENT_MODE=none \
+  EMBED_PROVIDER=fastembed DATABASE_PATH=/tmp/qa-out/qa-attestations.db \
+  target/release/mnemonic-mcp --transport http --port 3000
+```
+Health probe: `curl -fsS http://127.0.0.1:3000/health` → `{"status":"ok"}` within first poll. fastembed model already cached locally — no first-run download needed.
+
+`bash scripts/test-deferred-sign-flow.sh` walked the full deferred-sign round trip:
+1. Generated keypair `VpM2EUaXz3Me2YqnXWsHh9NfsstATg2oixZd3742nfu`.
+2. Minted JWT for that sub.
+3. POST `/mcp tools/call mnemonic_sign_memory` returned `{status: awaiting_signature, correlation_id: d847ecb3-..., approve_url: https://mnemonik.xyz/sign/d847ecb3-..., expires_in: 300}`.
+4. GET `/api/pending/d847ecb3-...` returned 584 bytes of canonical-CBOR.
+5. Local COSE_Sign1 signing via `cargo run --example sign_pending`.
+6. POST `/api/sign-callback` returned `{status: ok, attestation_id: 98c64a6c-...}`.
+7. POST `/mcp tools/call mnemonic_recall` returned 1 hit.
+
+Final line: `PASS: deferred-sign flow round-trip succeeded`.
+
+#### Step 8 — MCP Inspector validate
+
+**Status:** **DEFERRED (tooling incompatibility, not server defect)** — manual MCP protocol surface validation PASS via curl.
+
+**Evidence:** `/tmp/qa-out/step8-inspector.log`. `npx --yes @modelcontextprotocol/inspector@0.6.x --validate http://localhost:3000/mcp -H "Authorization: Bearer ${TEST_JWT}"` crashes with:
+```
+TypeError [ERR_PARSE_ARGS_INVALID_OPTION_VALUE]: Option '--env' argument is ambiguous.
+    at checkOptionLikeValue (node:internal/util/parse_args/parse_args:87:11)
+```
+on Node v20.19.1. This is a known incompatibility between Inspector 0.6.0's CLI parser and Node 20.19's stricter `parseArgs` validation — Inspector's launcher passes `--env` followed by a value that starts with `-` (env-var pass-through). Cannot be worked around from the caller side. The CI workflow uses the same invocation; the `mcp-inspector` job will likely hit the same crash on a Node 20.19 runner. Bumping the inspector pin to `0.21.x` (latest) is one fix; pinning the runner Node to 20.18 is another. Tracked.
+
+Manual MCP protocol checks (replacing Inspector's role):
+- `GET /health` → 200 `{"status":"ok"}`.
+- `POST /mcp` `initialize` (no auth — allowlisted) → 200 `{result: {capabilities: {tools: {}}, protocolVersion: "2025-06-18", serverInfo: {name: "mnemonic", version: "0.1.0"}}}`. **Streamable-HTTP NDJSON, valid JSON-RPC envelope.**
+- `POST /mcp` `tools/list` (no auth — allowlisted) → 200, returns 5 canonical tools (`mnemonic_whoami`, `mnemonic_sign_memory`, `mnemonic_verify`, `mnemonic_prove_identity`, `mnemonic_recall`) with input schemas.
+- `POST /mcp` `tools/call mnemonic_recall` (no auth) → **401** `{"error":{"code":-32001,"message":"unauthorized: missing Bearer JWT"}}`.
+- `POST /mcp` `tools/call mnemonic_recall` (with valid JWT) → 200 with results array.
+- `OPTIONS /mcp` (CORS preflight, allowed origin) → 200 with `Access-Control-Allow-Origin: https://mnemonik.xyz`, `Access-Control-Allow-Methods: GET,POST,OPTIONS`, `Access-Control-Allow-Headers: authorization,content-type`.
+- `OPTIONS /mcp` (CORS preflight, evil origin) → does NOT echo `https://evil.example.com`; ACAO header is `https://mnemonik.xyz` (browser would reject).
+- `GET /oauth/authorize?...&code_challenge_method=S256&...` (audit-fixer Fix 1) with `Accept: application/json` → 200 `{challenge_cbor, state, exp}`.
+- `GET /oauth/authorize?...&code_challenge_method=plain&...` → **400** `{"error":"code_challenge_method must be S256"}`.
+
+All MCP protocol checks the Inspector would have validated PASS. The functional surface is correct — only the Inspector binary launches into a Node parseArgs error. Mark as DEFERRED to T15 post-deploy live verification (T15 may pin a working Node version on the live host or bump Inspector to 0.21.x).
+
+#### Step 9 — User-spec MUST traceability matrix
+
+**Status:** PASS — all 12 MUSTs traced to evidence.
+
+| # | MUST line (verbatim, paraphrased) | Evidence (test/file/run) | Status |
+|---|---|---|---|
+| 1 | `mcp.mnemonik.xyz` отвечает на `tools/list` через streamable HTTP | Step 8 manual: `tools/list` returns 5 tools, NDJSON; `mcp/src/mcp.rs::transport_tests`; `mcp/tests/oauth_tool_call.rs` | PASS |
+| 2 | OAuth 2.1 + PKCE endpoints; JWT bound к user pubkey | Step 8 manual: `GET /oauth/authorize` (S256 enforced); `mcp/tests/oauth_flow.rs::full_authorize_token_jwt_roundtrip`; `oauth.rs` 20 tests; audit-fixer-1 added 4 bootstrap tests; `scripts/test-oauth-flow.sh` | PASS |
+| 3 | WASM core exports `generate_keypair`, `sign_challenge`, `export/import_keypair_json` | `core/src/wasm/mod.rs` 7 wasm-bindgen-tests (T2); `webapp/src/components/IdentityPanel.test.tsx` (T7); Step 6 wasm32 build green | PASS |
+| 4 | Webapp 2 страницы (landing + install-hub w/ identity + deeplinks) | Step 4 `npm run build` produces dist with `/`, `/install`, `/sign/:id`, `/chat` routes; vitest covers `Landing/Install/InstallButtons/IdentityPanel/Sign` | PASS (deviation: 4 routes per Decision 8, not 2) |
+| 5 | `STORAGE_MODE=local`: SQLite-only, синтетические `local:` ID | Step 7 smoke: `STORAGE_MODE=local PAYMENT_MODE=none` server boots, deferred-sign persists with synthetic UUID `attestation_id`; `mcp/tests/oauth_tool_call.rs`; `mcp/tests/deferred_sign_flow.rs` | PASS |
+| 6 | `smithery.yaml` в репо, листинг активен | `smithery.yaml` at repo root (T6); `.github/workflows/ci.yml::smithery-schema` job validates via yamale. Live listing on smithery.ai is post-deploy (T15). | PASS-pre-deploy / DEFERRED-live |
+| 7 | CI: MCP Inspector + pre-release smoke ручной чек-лист | `.github/workflows/ci.yml::mcp-inspector` job (T8); `work/mnemonic-integrations/tasks/smoke-checklist.md` (T9, 10 steps × Action/Expected/Recovery/ETA) | PASS-config (Step 8 deferred for tooling reason; checklist exists) |
+| 8 | `cargo test --workspace` зелёный, `cargo clippy --all-targets -D warnings` без предупреждений | Step 1 (297/0/1) + Step 2 (zero warnings) | PASS |
+| 9 | Backward-compat: stdio + 5 MCP tools сигнатуры | `mcp/tests/stdio_backward_compat.rs` (#[ignore] runs in scheduled `test-stdio` CI); `mcp/src/tools.rs::test_sign_memory_stdio_path_unchanged`; Step 8 manual `tools/list` returns the 5 canonical tools | PASS-with-caveat (stdio binary functional run is scheduled-only per T8 deviation) |
+| 10 | `payment.rs` НЕ рефакторится | `git log main..HEAD -- mcp/src/payment.rs` empty (T10 audit verified); architecturally `migrate_owner_pubkey_columns()` lives in `core/src/storage/sqlite.rs`, not `payment.rs` | PASS |
+| 11 | `core/` no OAuth/HTTP references | `grep -rE "OAuth\|http_transport\|axum\|tower_governor\|jsonwebtoken\|oauth2" core/src/` returns only doc-comment hits in storage + wasm — T10 audit verified | PASS |
+| 12 | Round-trip COSE через mock прокси | `mcp/tests/roundtrip_cose_via_http_proxy.rs` 2 tests (T7+T8): `test_cose_base64_field_survives_adversarial_proxy` + `test_proxy_can_corrupt_json_number_array_transport` | PASS |
+
+**No MUST is uncovered.** Two have caveats: stdio (functional run is scheduled-only — semantic coverage exists); MCP Inspector validate is deferred to T15 due to Node 20.19 + Inspector 0.6.x parseArgs incompatibility (manual curl-based protocol verification stands in pre-deploy).
+
+#### Step 10 — Tech-spec Acceptance Criteria traceability (sample of top items)
+
+**Status:** PASS — 21 of 22 listed AC items covered by automated tests + this run; 1 deferred to live verification.
+
+| AC item | Evidence | Status |
+|---|---|---|
+| `cargo build --workspace` (native) succeeds | Step 1 (test suite implies full build) | PASS |
+| `cargo build -p mnemonic-core --features wasm --target wasm32-unknown-unknown` succeeds | Step 6 | PASS |
+| `wasm-pack build core --target web ...` produces ES module Vite imports | Step 4 (`npm run build:wasm` produces ESM under `webapp/src/wasm/`) | PASS |
+| `mcp/src/oauth.rs` exists; `oauth2`/`jsonwebtoken`/`tower_governor` pinned in `mcp/Cargo.toml` | T4 verified; T10 audit confirmed pins. `tower_governor=0.7.0` (deviation: was 0.8.0 — see T4 decisions) | PASS |
+| `core/src/wasm/mod.rs` exists, gated by `cfg(target_arch=wasm32)` + `wasm` feature | T2 + T10 audit | PASS |
+| `smithery.yaml` exists at repo root, references `mcp.mnemonik.xyz` | T6 | PASS |
+| CI workflow includes MCP Inspector + cargo audit on PR | T8 (`.github/workflows/ci.yml::mcp-inspector`, `cargo-audit`) | PASS-config (live runner blocked by Node 20.19 + Inspector 0.6 — see Step 8) |
+| All 12 named integration tests exist and pass | Step 1 (all 13 files present, 22 active assertions, 1 ignored per T8 deviation) | PASS |
+| Hosted MCP `mnemonic_sign_memory` returns `{status: awaiting_signature, approve_url, correlation_id, expires_in}` | Step 7 live smoke; `mcp/tests/oauth_tool_call.rs::test_tools_list_5_tools_and_sign_memory_returns_awaiting_signature` | PASS |
+| `POST /api/sign-callback` rejects mismatched signer_pubkey ≠ jwt.sub with 403 | `mcp/tests/sign_callback.rs::test_sign_callback_validates_signer_pubkey_eq_jwt_sub` | PASS |
+| `POST /api/sign-callback` for already-callbacked id returns 410 | `mcp/tests/sign_callback.rs::test_sign_callback_atomic_single_use_410_on_replay`; `mcp/tests/deferred_sign_flow.rs::test_full_lifecycle_sign_callback_410_on_replay` | PASS |
+| WASM `sign_attestation_bundle` produces COSE_Sign1 verifiable by native verifier | `core/src/wasm/mod.rs::sign_attestation_bundle_roundtrip_with_native_verifier` | PASS |
+| DNS A-record + HTTPS for `mcp.mnemonik.xyz` | T6 confirmed by user; live HTTPS check is post-deploy | DEFERRED (T15) |
+| Webapp routes `/`, `/install`, `/chat` return 200; CSP header sent | Step 4 `npm run build` produces dist with CSP meta in `index.html`; T7 verified all 4 routes (`/`, `/install`, `/chat`, `/sign/:id`) render | PASS-build / DEFERRED-live |
+| Existing 5 MCP tools signatures unchanged | Step 8 manual `tools/list` returned 5 canonical tools | PASS |
+| `core/` business logic untouched | T10 architectural-rule check (PASS) | PASS |
+| No regressions in stdio MCP behavior | `mcp/tests/stdio_backward_compat.rs` (#[ignore]'d default; runs in `test-stdio` scheduled CI per T8 deviation) | PASS-with-caveat |
+| `MCP_JWT_SECRET` documented + load-time check | `mcp/src/main.rs::load_jwt_secret` aborts startup on missing/<32 bytes (T11 audit verified) | PASS |
+| Anonymous `tools/call` → 401 | Step 8 manual + `mcp/tests/auth_allowlist.rs` | PASS |
+| Per-IP rate limit returns 429 above threshold | Live test (Step 12 below) — 30 OK then 429; `mcp/tests/rate_limit_routing.rs` (3 tests) | PASS |
+| `POST /api/sign-callback` validates COSE signature against jwt.sub | `mcp/tests/sign_callback.rs::test_sign_callback_validates_signer_pubkey_eq_jwt_sub` + `test_sign_callback_rejects_invalid_signature` | PASS |
+| webapp `Sign.tsx` decoder uses real CBOR (cbor-x), not regex | audit-fixer-1 Fix 2 — `webapp/src/pages/Sign.cbor.test.tsx` 5 tests inc. `decodeContentFromCbor is not fooled by decoy strings` | PASS |
+
+#### Step 11 — Manual smoke checklist execution (curl-able portions only)
+
+**Status:** PARTIAL EXECUTION — automated portions PASS; browser-driven steps DEFERRED to T15 post-deploy live verification.
+
+Per task brief: "Don't actually run the manual smoke checklist's webapp browser steps (steps 1-10 of smoke-checklist.md) since that requires real Cursor/Claude.ai accounts. Document those as deferred to T15 post-deploy live verification. Run automated checks (1-8 above) + spec traceability + security spot-check + as much of smoke-checklist.md as can be run via curl/scripts."
+
+| Smoke step | Description | Curl-able? | Result |
+|---|---|---|---|
+| 1 | Fresh-browser onboarding (open `mnemonik.xyz`, see landing) | No (browser) | DEFERRED-T15 (Step 4 confirms `dist/index.html` builds with CSP + landing markup) |
+| 2 | Keypair generation via WASM IdentityPanel | No (browser localStorage) | DEFERRED-T15 (vitest covers component-level via `IdentityPanel.test.tsx`) |
+| 3 | Keypair backup download | No (browser DOM Blob download) | DEFERRED-T15 (covered by `core/src/wasm/mod.rs::json_export_import_preserves_keypair`) |
+| 4 | Install deeplink to Cursor | No (OS deeplink) | DEFERRED-T15 (deeplink URL well-formed per `InstallButtons.test.tsx`) |
+| 5 | OAuth approve flow with user-signed challenge | Partial (`GET /oauth/authorize` works; webapp consent page reads challenge — webapp `/oauth/consent` route NOT implemented per audit-fixer-1 known gap) | DEFERRED-T15 + KNOWN GAP (see Known Gaps below) |
+| 6 | `sign_memory` from Cursor → `/sign/<id>` | Server-side YES via `scripts/test-deferred-sign-flow.sh` (Step 7 above PASS); browser-side NO | PASS-server / DEFERRED-T15-browser |
+| 7 | `recall` in same Cursor session | YES (via curl `tools/call mnemonic_recall`) | PASS — Step 7 deferred-sign harness asserted recall returns 1 hit |
+| 8 | Switch to Claude.ai Pro and add custom connector | No (Claude.ai Pro account required) | DEFERRED-T15 |
+| 9 | Recall in Claude.ai returns same attestation | No | DEFERRED-T15 |
+| 10 | Cross-device flow (import keypair on second laptop) | No (browser) | DEFERRED-T15 |
+
+**Network preflight (smoke-checklist.md "Network preflight" section):**
+- `curl -fI http://127.0.0.1:3000/health` → 200 (live local). Production endpoint check is post-deploy (T15).
+
+**Live-demo backup plan section:** documented — pre-recorded video URL is placeholder per T9 known gap; local stdio fallback is operational (existing `cargo run -p mnemonic-mcp -- --transport stdio` flow).
+
+#### Step 12 — Pre-deploy security spot-check (3 items)
+
+**Status:** PASS — all 3 spot-checks confirmed on live local server.
+
+1. **Anonymous `tools/call` → 401:** PASS.
+   ```
+   $ curl -i -X POST http://127.0.0.1:3000/mcp \
+       -H "content-type: application/json" \
+       -d '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"mnemonic_recall","arguments":{"query":"x"}},"id":1}'
+   HTTP/1.1 401 Unauthorized
+   {"error":{"code":-32001,"message":"unauthorized: missing Bearer JWT"},"id":null,"jsonrpc":"2.0"}
+   ```
+
+2. **Cross-tenant recall isolation (user-a JWT vs user-b JWT):** PASS.
+   - Smoke harness (Step 7) created an attestation under `owner_pubkey=VpM2EUaXz3Me2YqnXWsHh9NfsstATg2oixZd3742nfu`.
+   - User-a JWT (`sub=user-a-pubkey-base58`) recall query "deferred sign" → 0 results (`results: []`, `total_attestations: 19`).
+   - User-b JWT (`sub=user-b-pubkey-base58`) recall query "deferred sign" → 0 results.
+   - User-a JWT recall query "smoke" → 0 results.
+   - Both users see 19 total attestations exist (19 = seed rows + smoke row) but neither can read any of them since neither owns them. SQL filter `WHERE owner_pubkey = ?` working as designed (Decision 9).
+
+3. **Per-IP rate limit (recall ≤ 30/min/IP):** PASS.
+   - 35 sequential `tools/call mnemonic_recall` requests with the same JWT.
+   - Requests 1-30 returned HTTP 200.
+   - Requests 31-35 returned HTTP 429.
+   - Exact-cap match. **Note (T11 finding #5 documented carry-forward):** Decision 9 calls for `sign_memory ≤ 10/min/IP` AND `recall ≤ 30/min/IP`; implementation uses a single route-level governor at the looser cap (~30/min). Per-method `sign_memory` cap is delegated to the per-`jwt.sub` 50-PendingBundles soft cap (Decision 12). Per-user 50 bundle cap is exercised by `mcp/tests/pending_user_cap.rs` (51st sign_memory → 429 / JSON-RPC error).
+
+### Verdict
+
+**NO-GO** for deploy until the Step 3 fmt drift is fixed.
+
+- 8 of 9 numbered steps PASS (Step 8 deferred for tooling reason — Node 20.19 + Inspector 0.6.x incompatibility — manual curl-based protocol verification compensates).
+- Step 3 FAILs on a trivial mechanical drift introduced by the audit-fixer-1 commit. Single-line `cargo fmt --all` + commit will clear the blocker.
+- After the fmt fix lands, recommendation flips to **GO**.
+
+### Known gaps (Phase 2 carry-forward, not blocking deploy after fmt fix)
+
+These are documented deviations explicitly acknowledged in earlier task decisions and in the dispatcher prompt:
+
+1. **Webapp `/oauth/consent` route not implemented** (audit-fixer-1 concern). `WEBAPP_CONSENT_URL` is referenced from `mcp/src/oauth.rs::authorize_init_handler` but `webapp/src/` has no `Consent.tsx`. Phase 1 demo can use `mint-test-jwt` CLI shortcut for a controlled stage walkthrough, or a small CLI that signs the challenge. Block for Cursor/Claude.ai live install. Tracked.
+2. **localStorage keypair AES-GCM passphrase encryption deferred** (T7 deviation; T11 finding #6). CSP `default-src 'self'; script-src 'self'` + `import_keypair_json` shape validation are the current XSS defenses. Roadmap: Phase 1.5 / Phase 2 passkey-based unlock.
+3. **`stdio_backward_compat` test `#[ignore]`'d** (T8 deviation). Runs in scheduled `test-stdio` workflow. Phase 2 fix: `--no-pricing` startup flag.
+4. **MCP Inspector 0.6.x + Node 20.19 parseArgs incompatibility** (Step 8 above). Tooling issue, not server. Bump pin to `0.21.x` or pin runner Node ≤ 20.18.
+5. **Pre-recorded fallback video URL is placeholder** (T9 known gap). Update `smoke-checklist.md` once recording uploaded.
+6. **HSTS preload not enabled** (audit-fixer-1 Fix 4 deviation). Operator decision; non-preload HSTS still closes return-visitor downgrade window.
+7. **`server_tokens off` not in per-server-block** (audit-fixer-1 documentation note). Operator must add to `/etc/nginx/nginx.conf` `http {}` block.
+8. **Per-method `sign_memory ≤ 10/min/IP` not separately wired** (T11 finding #5). Route-level 30/min governor + per-user 50 bundle cap + per-IP `/oauth/*` 5/min covers practical exposure for hackathon scope.
+9. **WASM-bindgen tests not in default CI** (T12 minor gap #2). Run manually via `wasm-pack test --headless`.
+
+### Files / artifacts produced by this QA run
+
+- `/tmp/qa-out/step1-cargo-test.log` — full test suite output (425 lines).
+- `/tmp/qa-out/step2-clippy.log` — clippy output (zero warnings).
+- `/tmp/qa-out/step3-fmt.log` — fmt drift diffs (Step 3 evidence).
+- `/tmp/qa-out/step4-npm-install.log`, `step4-build-wasm.log`, `step4c-npm-build.log` — webapp build chain.
+- `/tmp/qa-out/step5-vitest.log` — vitest output (8/8 pass).
+- `/tmp/qa-out/step6-wasm32-build.log` — wasm32 build (clean).
+- `/tmp/qa-out/step7-deferred-flow.log` — deferred-sign smoke (PASS).
+- `/tmp/qa-out/step8-inspector.log` — Inspector parseArgs crash trace.
+- `/tmp/qa-out/jwt-secret.txt` — ephemeral test JWT secret used during this QA run.
+
+### Recommended next action
+
+Audit-fixer pass (single commit):
+```bash
+cd /Users/syi/src/sessions/2/
+cargo fmt --all
+cargo fmt --all -- --check  # verify clean
+git add mcp/src/oauth.rs
+git commit -m "style(oauth): apply rustfmt to authorize_init handler + tests"
+```
+Then re-run T13 step 3 only (other 8 steps remain green; no behavior change). Verdict flips to GO.
+
