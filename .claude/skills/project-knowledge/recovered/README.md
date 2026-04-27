@@ -22,9 +22,8 @@ recovered/
 ├── usecases/                                   <- 10 use-case docs + index (evergreen, ready to promote)
 ├── competitive-landscape/
 │   ├── DECENTRALIZED_RAG_LANDSCAPE.md          <- academic survey (evergreen)
-│   ├── DRAG_ANALYSIS.md                        <- VALIDATED (blake3/CBOR/COSE corrections applied)
-│   ├── WEB_RESEARCH_TRUSTLESS_RAG.md           <- VALIDATED (status updated, encryption framing fixed)
-│   └── MCP_SERVER_BACKEND_FEATURES_COMPARISON.md <- ARCHIVED (Python backend retired; links to old code)
+│   ├── DRAG_ANALYSIS.md                        <- restored verbatim (token replacements pending Wave 3)
+│   └── WEB_RESEARCH_TRUSTLESS_RAG.md           <- restored verbatim (token replacements pending Wave 3)
 ├── problems/                                   <- 3 problem-statement docs (NEW)
 │   ├── MEMORY_EVICTION.md                      <- open system problem statement
 │   ├── CONCURRENT_WRITERS.md                   <- multi-agent shared-context write semantics
@@ -43,17 +42,16 @@ recovered/
 |---|---|---|
 | `usecases/*.md` (×10 + README) | Evergreen, aligns with WHITEPAPER §9 | Ready to promote verbatim |
 | `competitive-landscape/DECENTRALIZED_RAG_LANDSCAPE.md` | Academic survey, no Mnemonic-specific claims | Ready to promote verbatim |
-| `competitive-landscape/DRAG_ANALYSIS.md` | Edited: blake3 over canonical CBOR + COSE_Sign1; encryption reframed as roadmap; ADR refs reframed as design-lineage refs; capability table updated to reflect current `core/` modules | Review and promote |
-| `competitive-landscape/WEB_RESEARCH_TRUSTLESS_RAG.md` | Edited: zkTAM table updated; status "Pre-V1" → "active Rust MCP server"; SHA3 → blake3+CBOR+COSE; encryption framing fixed | Review and promote |
-| `competitive-landscape/MCP_SERVER_BACKEND_FEATURES_COMPARISON.md` | Archive header added; links to `feat/auth` and `legacy` branches in `sivo4kin/mnemonic-protocol`; current backend pointed at `mcp/` in this monorepo | Keep as historical reference |
+| `competitive-landscape/DRAG_ANALYSIS.md` | Restored verbatim. Pending: blake3/CBOR/COSE token replacements during promotion (Wave 3, Task 4). | Review and promote |
+| `competitive-landscape/WEB_RESEARCH_TRUSTLESS_RAG.md` | Restored verbatim. Pending: 3 token replacements at promotion (DRAG/WEB lines 45/64/132). | Review and promote |
 | `research/TURBOQUANT_DEEP_ANALYSIS.md` | Source was truncated mid-Mermaid block; closed cleanly with a recovery note | Ready to promote |
 | `research/apply-to-agent-memory-architecture.md` | Architectural recommendations from TurboQuant — generic enough to apply to current `core/src/compress/` design | Ready to promote |
 | `research/condensed-principles.md` | TurboQuant design principles, evergreen | Ready to promote |
-| `problems/MEMORY_EVICTION.md` | Open system problem statement: lifecycle/retention/pruning policy. | Promoted to docs/problems/ |
-| `problems/CONCURRENT_WRITERS.md` | Open problem: shared-context multi-agent write semantics. | Promoted to docs/problems/ with 2 token replaces (SHA3-256 → blake3, encrypted_blob → canonical CBOR bytes). |
-| `problems/ARWEAVE_PRICING_VALIDATION.md` | Economic-model validation for full-mode persistence. | Promoted to docs/problems/ |
-| `research/Agent Identity for Autonomous AI_...pdf` | Mnemonic-positioning analysis paper (PDF). | Promoted to docs/research/ |
-| `research/paper.pdf` | **Foundational scientific paper that motivated the project.** | Promoted to docs/research/; referenced from WHITEPAPER §References and root README. |
+| `problems/MEMORY_EVICTION.md` | Open system problem statement: lifecycle/retention/pruning policy. | Ready to promote to docs/problems/ |
+| `problems/CONCURRENT_WRITERS.md` | Open problem: shared-context multi-agent write semantics. | Ready to promote to docs/problems/ with 2 token replaces (SHA3-256 → blake3, encrypted_blob → canonical CBOR bytes). |
+| `problems/ARWEAVE_PRICING_VALIDATION.md` | Economic-model validation for full-mode persistence. | Ready to promote to docs/problems/ |
+| `research/Agent Identity for Autonomous AI_...pdf` | Mnemonic-positioning analysis paper (PDF). | Ready to promote to docs/research/ |
+| `research/paper.pdf` | **Foundational scientific paper that motivated the project.** | Ready to promote to docs/research/ + reference from WHITEPAPER §References and root README. |
 
 ## Dropped per owner decision
 
@@ -63,7 +61,7 @@ recovered/
 ## Next steps
 
 1. Walk through each document in this folder against the current `core/` and `mcp/` source.
-2. Move ready docs to the public `docs/` tree (suggested: `docs/usecases/`, `docs/competitive-landscape/`, `docs/research/`, `docs/historical/MCP_SERVER_BACKEND_FEATURES_COMPARISON.md`).
+2. Move ready docs to the public `docs/` tree (`docs/usecases/`, `docs/competitive-landscape/`, `docs/research/`, `docs/problems/`).
 3. Drop or summarize anything that no longer matches the shipped implementation.
 
 ## Source pointers
