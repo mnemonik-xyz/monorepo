@@ -11,6 +11,15 @@ mnemonic-core = { path = "../core" }
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
+# Stream wrappers for streamable HTTP NDJSON framing (Decision 1)
+tokio-stream = "0.1"
+# Streams + futures combinators (used by Body::from_stream for chunked responses).
+# Pinned explicitly — do NOT rely on it being a transitive of axum/tokio.
+futures = "0.3"
+# Frame buffers used in the streamable HTTP NDJSON pipeline. Pinned explicitly
+# rather than relying on the axum/tokio transitive — Body::from_stream emits
+# `Bytes` directly.
+bytes = "1"
 
 # HTTP server (remote MCP transport)
 axum = { version = "0.8", features = ["json", "macros"] }

@@ -1,15 +1,30 @@
 //! MCP protocol handler — JSON-RPC 2.0 dispatcher for both stdio and HTTP.
+//!
+//! HTTP transport uses MCP **streamable HTTP** per the 2025 specification
+//! (`Content-Type: application/x-ndjson`, `Transfer-Encoding: chunked`,
+//! one JSON-RPC envelope per newline-terminated frame). See Decision 1 in
+//! `work/mnemonic-integrations/tech-spec.md`.
 
+use axum::{
+    body::Body,
+    extract::State,
+    http::{HeaderMap, HeaderValue, Request, StatusCode},
+    middleware::Next,
+    response::Response,
+};
+use bytes::Bytes;
+use futures::stream;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use solana_sdk::signature::Keypair;
 
-use crate::{llm::LlmClient, pricing::PricingEngine, tools};
+use crate::{llm::LlmClient, payment, pricing::PricingEngine, tools};
 use mnemonic_core::arweave::ArweaveClient;
 use mnemonic_core::compress::EmbeddingCompressor;
 use mnemonic_core::embed::Embedder;
 use mnemonic_core::solana::SolanaClient;
 use mnemonic_core::storage::SqliteStore;
+use std::convert::Infallible;
 use std::sync::Arc;
 
 /// JSON-RPC 2.0 request.
@@ -199,6 +214,194 @@ pub async fn handle_request(req: &JsonRpcRequest, state: &McpState) -> JsonRpcRe
     }
 }
 
+// ── Streamable HTTP transport (MCP spec 2025) ────────────────────────────────
+//
+// Per Decision 1 the `/mcp` endpoint serves chunked NDJSON: `Content-Type:
+// application/x-ndjson`, no `Content-Length` (axum auto-sets
+// `Transfer-Encoding: chunked` when the response body is a stream), one JSON
+// frame per newline. Today we emit exactly one frame per inbound request —
+// multi-frame support (progress notifications, async tool results from Task 4b
+// PendingBundles) is wired but unused.
+
+const NDJSON_CONTENT_TYPE: &str = "application/x-ndjson";
+
+/// Build a streaming `Response` with `Content-Type: application/x-ndjson` from
+/// a single JSON-RPC envelope. Status code is set per call site (200 for happy
+/// path, 401/402/400 for payment / parse errors).
+///
+/// The body is a `Body::from_stream` of one `Bytes` chunk so axum emits it as
+/// chunked transfer-encoding without a `Content-Length` header. Multi-frame
+/// callers can extend this with `stream::iter(...)` or an `mpsc::Receiver`
+/// without changing the public shape.
+fn ndjson_response<T: Serialize>(status: StatusCode, frame: &T) -> Response {
+    let mut line = match serde_json::to_string(frame) {
+        Ok(s) => s,
+        Err(e) => {
+            // Last-ditch fallback — produce a JSON-RPC parse error envelope.
+            // Logged because reaching here means our own response type failed
+            // to serialize, which is a programmer error, not a client one.
+            tracing::error!(error = %e, "failed to serialize NDJSON frame");
+            "{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-32603,\"message\":\"internal serialize error\"}}"
+                .to_string()
+        }
+    };
+    line.push('\n');
+
+    let body = Body::from_stream(stream::once(async move {
+        Ok::<Bytes, Infallible>(Bytes::from(line))
+    }));
+
+    let mut resp = Response::new(body);
+    *resp.status_mut() = status;
+    resp.headers_mut().insert(
+        axum::http::header::CONTENT_TYPE,
+        HeaderValue::from_static(NDJSON_CONTENT_TYPE),
+    );
+    resp
+}
+
+/// Build a non-streaming JSON error response for cases where the *request*
+/// itself was malformed (e.g. JSON parse error before we even know the
+/// JSON-RPC id). Still emitted as one NDJSON frame for protocol consistency.
+fn ndjson_error(status: StatusCode, code: i32, message: &str) -> Response {
+    let body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": Value::Null,
+        "error": {"code": code, "message": message},
+    });
+    ndjson_response(status, &body)
+}
+
+/// Streamable-HTTP `/mcp` handler. Returns chunked NDJSON; one frame today,
+/// extensible to many (progress notifications, deferred sign-callback frames
+/// from Task 4b).
+///
+/// Payment-gating semantics from the previous request-response handler are
+/// preserved: when `mnemonic_sign_memory` is invoked under
+/// `payment_mode != "none" && storage_mode != "local"`, we run the full
+/// `payment::check_payment` -> `deduct_balance` -> dispatch -> refund flow.
+/// Each terminal state emits exactly one NDJSON frame.
+pub async fn mcp_handler(
+    State(state): State<Arc<McpState>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    // Parse the JSON-RPC envelope manually so we control the error shape (we
+    // need to emit a single NDJSON frame on parse failure, not the default
+    // axum `Json` rejection HTML).
+    let req: JsonRpcRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => {
+            return ndjson_error(
+                StatusCode::BAD_REQUEST,
+                -32700,
+                &format!("parse error: {e}"),
+            );
+        }
+    };
+
+    let is_sign_memory = req.method == "tools/call"
+        && req.params.get("name").and_then(|n| n.as_str()) == Some("mnemonic_sign_memory");
+
+    if is_sign_memory && state.payment_mode != "none" && state.storage_mode != "local" {
+        // Use live price from pricing engine (refreshed in background).
+        let current_cost = state.pricing.current_price();
+        let gate = payment::check_payment(
+            &headers,
+            &state.payment_mode,
+            &state.store,
+            &state.solana,
+            &state.treasury_pubkey,
+            &state.usdc_mint,
+            current_cost,
+        )
+        .await;
+
+        match gate {
+            payment::PaymentGate::Proceed(api_key) => {
+                // Deduct balance BEFORE executing the tool (reserve funds).
+                if let Some(ref key) = api_key {
+                    let store = state.store.lock().expect("store mutex poisoned");
+                    if let Err(e) = payment::deduct_balance(
+                        &store,
+                        key,
+                        state.sign_memory_cost_micro_usdc,
+                        "mnemonic_sign_memory",
+                    ) {
+                        let err_body = serde_json::json!({
+                            "jsonrpc": "2.0", "id": req.id,
+                            "error": {"code": -32600, "message": format!("payment failed: {e}")}
+                        });
+                        return ndjson_response(StatusCode::PAYMENT_REQUIRED, &err_body);
+                    }
+                }
+
+                let resp = handle_request(&req, &state).await;
+
+                // Refund on tool failure. Uses `refund_balance` (not
+                // `credit_deposit`) so the per-tx_sig idempotency guard does
+                // not silently swallow repeated refunds for the same
+                // underlying failure class.
+                if resp.error.is_some() {
+                    if let Some(ref key) = api_key {
+                        let reason = resp
+                            .error
+                            .as_ref()
+                            .map(|e| e.message.as_str())
+                            .unwrap_or("error");
+                        let store = state.store.lock().expect("store mutex poisoned");
+                        if let Err(e) = payment::refund_balance(&store, key, current_cost, reason) {
+                            tracing::warn!(api_key = %key, error = %e, "refund failed");
+                        }
+                    }
+                }
+
+                ndjson_response(StatusCode::OK, &resp)
+            }
+            payment::PaymentGate::NeedPayment(x402) => {
+                ndjson_response(StatusCode::PAYMENT_REQUIRED, &x402)
+            }
+            payment::PaymentGate::Unauthorized(msg) => {
+                let err_body = serde_json::json!({
+                    "jsonrpc": "2.0", "id": req.id,
+                    "error": {"code": -32600, "message": msg}
+                });
+                ndjson_response(StatusCode::UNAUTHORIZED, &err_body)
+            }
+        }
+    } else {
+        let resp = handle_request(&req, &state).await;
+        ndjson_response(StatusCode::OK, &resp)
+    }
+}
+
+/// No-op Bearer-auth middleware scaffolding.
+///
+/// Today this layer inspects the `Authorization` header for telemetry only
+/// and unconditionally calls `next.run(req)`. Task 4a (OAuth 2.1 + PKCE) will
+/// flip this into JWT validation: parse `Authorization: Bearer <jwt>`,
+/// verify HS256 signature against `MCP_JWT_SECRET`, and inject the
+/// resolved `pubkey` into request extensions for downstream handlers. The
+/// Decision 9 allowlist (`tools/list`, `initialize`, plus health/oauth
+/// routes) hooks in here.
+///
+/// Attached to the `/mcp` route only — health, oauth, and chat endpoints
+/// have their own auth/rate-limit layers (or none).
+//
+// TODO(task-4a): replace this body with JWT validation. Allowlist
+// `initialize` + `tools/list` JSON-RPC methods so MCP discovery works pre-
+// OAuth (Decision 9). Reject other methods without a valid Bearer with a
+// JSON-RPC error frame + HTTP 401.
+pub async fn bearer_auth_layer(headers: HeaderMap, request: Request<Body>, next: Next) -> Response {
+    // Read-only inspection; no enforcement today.
+    let _has_bearer = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.starts_with("Bearer "))
+        .unwrap_or(false);
+    next.run(request).await
+}
+
 async fn handle_tool_call(name: &str, args: &Value, state: &McpState) -> Result<Value, String> {
     let result = match name {
         "mnemonic_whoami" => {
@@ -276,4 +479,279 @@ async fn handle_tool_call(name: &str, args: &Value, state: &McpState) -> Result<
     Ok(serde_json::json!({
         "content": [{"type": "text", "text": serde_json::to_string_pretty(&result).unwrap_or_default()}]
     }))
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+//
+// Per Decision 1 + Task 1 acceptance criteria: the streamable-HTTP transport
+// must emit chunked NDJSON, survive client disconnect mid-stream without
+// panicking, and have the bearer-auth middleware *registered* on `/mcp`
+// today (Task 4a flips its body from no-op to JWT validation, hence the
+// `#[ignore]` on the auth test which is wired now so Task 4a only has to
+// flip the ignore + assertion).
+
+#[cfg(test)]
+mod transport_tests {
+    use super::*;
+    use axum::{middleware as axum_middleware, routing::post, Router};
+    use http_body_util::BodyExt;
+    use mnemonic_core::embed::Embedder;
+    use std::path::PathBuf;
+    use tower::ServiceExt;
+
+    /// Minimal embedder for transport tests. Returns zero vectors — the
+    /// transport tests never hit the embed path (we only call `tools/list`
+    /// and similar pure-RPC methods).
+    struct StubEmbedder;
+    impl Embedder for StubEmbedder {
+        fn embed(&self, _text: &str) -> Vec<f32> {
+            vec![0.0; 8]
+        }
+        fn dim(&self) -> usize {
+            8
+        }
+        fn provider_name(&self) -> &str {
+            "stub"
+        }
+        fn model_id(&self) -> &str {
+            "stub-zero"
+        }
+    }
+
+    /// Build a minimal `McpState` for transport tests. Storage is an
+    /// in-memory SQLite (tempfile would also work; in-memory is faster and
+    /// has no on-disk side effects). No external services are dialed.
+    fn build_test_state() -> Arc<McpState> {
+        use governor::Quota;
+        use std::num::NonZeroU32;
+
+        let tmp = tempfile::NamedTempFile::new().expect("create tmp file");
+        let store = SqliteStore::open(tmp.path()).expect("open sqlite store");
+        let compressor = EmbeddingCompressor::new(8, 4, 42);
+        let quota = Quota::per_minute(NonZeroU32::new(10).expect("nonzero quota"));
+        let chat_limiter = governor::RateLimiter::keyed(quota);
+        let ollama_client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .expect("build reqwest client");
+        let llm_client =
+            crate::llm::LlmClient::new("ollama", "", "test-model", "http://localhost:0", 512)
+                .expect("build llm client");
+
+        Arc::new(McpState {
+            keypair: solana_sdk::signature::Keypair::new(),
+            solana: SolanaClient::new("http://localhost:0"),
+            arweave: ArweaveClient::new("http://localhost:0"),
+            store: std::sync::Mutex::new(store),
+            embedder: Box::new(StubEmbedder),
+            compressor,
+            payment_mode: "none".into(),
+            treasury_pubkey: String::new(),
+            usdc_mint: String::new(),
+            sign_memory_cost_micro_usdc: 0,
+            pricing: crate::pricing::PricingEngine::new(0),
+            sol_tx_fee_lamports: 0,
+            storage_mode: "local".into(),
+            ollama_url: "http://localhost:0".into(),
+            ollama_model: "test-model".into(),
+            rag_chunk_dir: PathBuf::from("/tmp"),
+            llm_client,
+            artifact_zip_path: std::sync::Mutex::new(None),
+            ollama_client,
+            chat_limiter,
+        })
+    }
+
+    /// Build a `Router` with the `/mcp` route plus the bearer-auth middleware
+    /// scaffolding. Mirrors the production wiring in `main.rs::run_http`
+    /// — keep them in sync; if Task 4a tightens enforcement, both must
+    /// reflect the change.
+    fn build_test_router(state: Arc<McpState>) -> Router {
+        let mcp_route = post(mcp_handler).layer(axum_middleware::from_fn(bearer_auth_layer));
+        Router::new().route("/mcp", mcp_route).with_state(state)
+    }
+
+    /// Drives `Body::collect()` and returns the full bytes. Helper because
+    /// `BodyExt::collect().await.unwrap().to_bytes()` is verbose.
+    async fn collect_body(resp: Response) -> (StatusCode, axum::http::HeaderMap, Bytes) {
+        let status = resp.status();
+        let headers = resp.headers().clone();
+        let bytes = resp
+            .into_body()
+            .collect()
+            .await
+            .expect("body collect failed")
+            .to_bytes();
+        (status, headers, bytes)
+    }
+
+    /// Drives: streamable-HTTP refactor + header setup. Asserts:
+    /// (a) `content-type: application/x-ndjson`,
+    /// (b) no `content-length` header (axum auto-emits chunked transfer-
+    ///     encoding when the body is a stream without a known length),
+    /// (c) body is exactly one newline-terminated JSON line that round-trips
+    ///     to the `tools/list` envelope with the 5 expected tools.
+    #[tokio::test]
+    async fn test_chunked_response_encoding() {
+        let state = build_test_state();
+        let app = build_test_router(state);
+
+        let req_body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "tools/list",
+            "id": 1,
+        });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/mcp")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::to_vec(&req_body).expect("serialize req"),
+            ))
+            .expect("build request");
+
+        let resp = app.oneshot(req).await.expect("oneshot");
+        let (status, headers, body) = collect_body(resp).await;
+
+        assert_eq!(status, StatusCode::OK, "tools/list must return 200");
+        assert_eq!(
+            headers
+                .get("content-type")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or(""),
+            "application/x-ndjson",
+            "streamable-HTTP frames must use application/x-ndjson",
+        );
+        assert!(
+            headers.get("content-length").is_none(),
+            "chunked response must not advertise Content-Length (got {:?})",
+            headers.get("content-length"),
+        );
+
+        let body_str = std::str::from_utf8(&body).expect("body utf-8");
+        // Exactly one frame today — exactly one `\n` and it's the trailer.
+        assert!(
+            body_str.ends_with('\n'),
+            "NDJSON frame must end with newline; body={body_str:?}",
+        );
+        assert_eq!(
+            body_str.matches('\n').count(),
+            1,
+            "exactly one frame expected today; body={body_str:?}",
+        );
+        let line = body_str.trim_end_matches('\n');
+        let envelope: Value = serde_json::from_str(line).expect("frame is valid JSON");
+        assert_eq!(envelope["jsonrpc"], "2.0");
+        assert_eq!(envelope["id"], 1);
+        let tools = envelope["result"]["tools"]
+            .as_array()
+            .expect("tools array present");
+        assert_eq!(
+            tools.len(),
+            5,
+            "expected 5 MCP tools in tools/list response",
+        );
+    }
+
+    /// Drives: cancellation safety of `Body::from_stream`. Sends a request,
+    /// collects the response, then drops the response without reading the
+    /// body. Then sends a second request to prove the server is still
+    /// healthy (no poisoned mutex, no panicked task). Today the body is a
+    /// single `Bytes` chunk so cancellation is trivially safe; the test is
+    /// the regression guard for when Task 4b adds multi-frame mpsc-backed
+    /// streaming.
+    #[tokio::test]
+    async fn test_partial_response_client_disconnect() {
+        let state = build_test_state();
+        let app = build_test_router(state);
+
+        let req_body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "tools/list",
+            "id": 7,
+        });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/mcp")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::to_vec(&req_body).expect("serialize req"),
+            ))
+            .expect("build request");
+
+        // Get the response, then drop it without consuming the body — this
+        // simulates the client closing the TCP socket before reading any
+        // chunks. Must not panic, must not poison the store mutex.
+        let resp = app.clone().oneshot(req).await.expect("oneshot");
+        let _status = resp.status();
+        drop(resp);
+
+        // Yield to give any spawned tasks a chance to observe the drop.
+        tokio::task::yield_now().await;
+
+        // Second request must still succeed — proves no global state corruption.
+        let req2_body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "tools/list",
+            "id": 8,
+        });
+        let req2 = Request::builder()
+            .method("POST")
+            .uri("/mcp")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::to_vec(&req2_body).expect("serialize req"),
+            ))
+            .expect("build request");
+
+        let resp2 = app.oneshot(req2).await.expect("second oneshot");
+        let (status2, _headers2, body2) = collect_body(resp2).await;
+        assert_eq!(
+            status2,
+            StatusCode::OK,
+            "second request after dropped response must still succeed",
+        );
+        let line = std::str::from_utf8(&body2)
+            .expect("body utf-8")
+            .trim_end_matches('\n');
+        let env: Value = serde_json::from_str(line).expect("frame valid JSON");
+        assert_eq!(env["id"], 8);
+    }
+
+    /// Sentinel for Task 4a. The middleware is *registered* today (proving
+    /// the wire-up holds) but enforcement is deferred. Task 4a flips
+    /// `#[ignore]` off and changes the expected status to 401 + JSON-RPC
+    /// error code. Today's no-op layer means a request without an
+    /// `Authorization` header still returns 200 — that is intentional.
+    //
+    // Activated by Task 4a — flip ignore + assert 401.
+    #[tokio::test]
+    #[ignore]
+    async fn test_missing_authorization_header_returns_401() {
+        let state = build_test_state();
+        let app = build_test_router(state);
+
+        let req_body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "tools/call",
+            "params": {"name": "mnemonic_recall", "arguments": {"query": "x"}},
+            "id": 99,
+        });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/mcp")
+            .header("content-type", "application/json")
+            // NO Authorization header — Task 4a will reject this.
+            .body(Body::from(
+                serde_json::to_vec(&req_body).expect("serialize req"),
+            ))
+            .expect("build request");
+
+        let resp = app.oneshot(req).await.expect("oneshot");
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "Task 4a must reject /mcp tools/call without Bearer JWT",
+        );
+    }
 }

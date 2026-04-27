@@ -9,7 +9,8 @@ mod tools;
 
 use axum::{
     extract::{Query, State},
-    http::{HeaderMap, StatusCode},
+    http::StatusCode,
+    middleware,
     response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
@@ -60,86 +61,11 @@ struct DepositRequest {
 }
 
 // ── Axum handlers ─────────────────────────────────────────────────────────────
-
-/// /mcp — payment-aware MCP JSON-RPC dispatcher.
-async fn mcp_handler(
-    State(state): State<Arc<mcp::McpState>>,
-    headers: HeaderMap,
-    Json(req): Json<mcp::JsonRpcRequest>,
-) -> Response {
-    let is_sign_memory = req.method == "tools/call"
-        && req.params.get("name").and_then(|n| n.as_str()) == Some("mnemonic_sign_memory");
-
-    if is_sign_memory && state.payment_mode != "none" && state.storage_mode != "local" {
-        // Use live price from pricing engine (refreshed in background)
-        let current_cost = state.pricing.current_price();
-        let gate = payment::check_payment(
-            &headers,
-            &state.payment_mode,
-            &state.store,
-            &state.solana,
-            &state.treasury_pubkey,
-            &state.usdc_mint,
-            current_cost,
-        )
-        .await;
-
-        match gate {
-            payment::PaymentGate::Proceed(api_key) => {
-                // Deduct balance BEFORE executing the tool (reserve funds)
-                if let Some(ref key) = api_key {
-                    let store = state.store.lock().unwrap();
-                    if let Err(e) = payment::deduct_balance(
-                        &store,
-                        key,
-                        state.sign_memory_cost_micro_usdc,
-                        "mnemonic_sign_memory",
-                    ) {
-                        let err_body = serde_json::json!({
-                            "jsonrpc": "2.0", "id": req.id,
-                            "error": {"code": -32600, "message": format!("payment failed: {e}")}
-                        });
-                        return (StatusCode::PAYMENT_REQUIRED, Json(err_body)).into_response();
-                    }
-                }
-
-                let resp = mcp::handle_request(&req, &state).await;
-
-                // Refund on tool failure. Uses `refund_balance` (not
-                // `credit_deposit`) so the per-tx_sig idempotency guard does
-                // not silently swallow repeated refunds for the same
-                // underlying failure class.
-                if resp.error.is_some() {
-                    if let Some(ref key) = api_key {
-                        let reason = resp
-                            .error
-                            .as_ref()
-                            .map(|e| e.message.as_str())
-                            .unwrap_or("error");
-                        let store = state.store.lock().unwrap();
-                        if let Err(e) = payment::refund_balance(&store, key, current_cost, reason) {
-                            tracing::warn!(api_key = %key, error = %e, "refund failed");
-                        }
-                    }
-                }
-
-                Json(resp).into_response()
-            }
-            payment::PaymentGate::NeedPayment(x402) => {
-                (StatusCode::PAYMENT_REQUIRED, Json(x402)).into_response()
-            }
-            payment::PaymentGate::Unauthorized(msg) => {
-                let err_body = serde_json::json!({
-                    "jsonrpc": "2.0", "id": req.id,
-                    "error": {"code": -32600, "message": msg}
-                });
-                (StatusCode::UNAUTHORIZED, Json(err_body)).into_response()
-            }
-        }
-    } else {
-        Json(mcp::handle_request(&req, &state).await).into_response()
-    }
-}
+//
+// The `/mcp` JSON-RPC dispatcher (streamable HTTP per Decision 1) lives in
+// `mcp::mcp_handler` so it can be unit-tested directly from `mcp.rs::tests`.
+// The other endpoints below (api keys, balance, deposit, admin) are plain
+// JSON request/response — they do not need the streaming envelope.
 
 /// POST /api-keys — create a pre-funded API key (zero initial balance).
 async fn create_api_key(
@@ -559,8 +485,14 @@ async fn run_stdio(state: Arc<mcp::McpState>) -> anyhow::Result<()> {
 async fn run_http(state: Arc<mcp::McpState>, host: &str, port: u16) -> anyhow::Result<()> {
     use tower_http::cors::{Any, CorsLayer};
 
+    // The `/mcp` route is the streamable-HTTP endpoint (chunked NDJSON per
+    // MCP spec 2025, Decision 1). It carries a Bearer-auth middleware
+    // scaffold that today is a no-op pass-through; Task 4a swaps in JWT
+    // validation without touching transport code.
+    let mcp_route = post(mcp::mcp_handler).layer(middleware::from_fn(mcp::bearer_auth_layer));
+
     let app = Router::new()
-        .route("/mcp", post(mcp_handler))
+        .route("/mcp", mcp_route)
         .route("/chat", post(chat::chat_handler))
         .route("/api-keys", post(create_api_key))
         .route("/balance", get(get_balance))
