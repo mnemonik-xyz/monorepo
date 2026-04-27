@@ -1,0 +1,26 @@
+feature: docs-actualization
+team_name: docs-actualization-team
+total_waves: 6
+last_completed_wave: 1
+next_wave: 2
+status: in_progress
+started: "2026-04-27"
+notes: |
+  Single-task kick-off in this session: Task 1 only (Restoration).
+  Waves 2-6 to be executed in a fresh session via /do-feature or /do-task.
+task_status:
+  1: done
+  2: todo
+  3: todo
+  4: todo
+  5: todo
+  6: todo
+  7: todo
+  8: todo
+  9: todo
+  10: todo
+  11: todo
+  12: todo
+  13: todo
+  14: todo
+  15: todo
