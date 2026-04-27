@@ -12,7 +12,7 @@ size: L
 Превращаем Mnemonic из локального протокола в **доступный сервис cross-provider памяти для AI-агентов**. Ключевая идея: интеграция = установка Mnemonic MCP в нужный AI-tool. После установки модель в Tool A (например, ChatGPT) вызывает `mnemonic_sign_memory` на естественноязыковую команду пользователя ("save findings onchain"), модель в Tool B (например, Claude.ai) вызывает `mnemonic_recall` и получает атестованный контекст. Всё через MCP-протокол, без скрейпинга, копи-паста или DOM-инъекций.
 
 Phase 1 шипает три delivery-канала:
-1. **MCP сервер** — hosted `mcp.mnemonic.dev` (streamable HTTP + OAuth 2.1 + PKCE) для browser-only юзеров, плюс docker-образ для self-host и листинг в Smithery для discovery.
+1. **MCP сервер** — hosted `mcp.mnemonik.xyz` (streamable HTTP + OAuth 2.1 + PKCE) для browser-only юзеров, плюс docker-образ для self-host и листинг в Smithery для discovery.
 2. **WASM webapp** на `mnemonik.xyz` — onboarding + install-хаб. Базируется на `mnemonic-core` через wasm-pack.
 3. **Marketing site** — landing-страница на том же `mnemonik.xyz`, объясняет протокол, ведёт на install-хаб.
 
@@ -32,7 +32,7 @@ Phase 1 (хакатонный MVP) использует **localStorage Ed25519 k
 
 ### Сценарий 2 — Установка Mnemonic в Tool A (Cursor)
 
-На webapp юзер кликает "Install in Cursor" → deeplink `cursor://anysphere.cursor-deeplink/mcp/install?...` открывает Cursor → коннектор `mcp.mnemonic.dev` устанавливается → запускается OAuth 2.1 PKCE flow → юзер на webapp подтверждает "Allow Cursor to access your Mnemonic" → WASM core подписывает OAuth challenge localStorage-ключом → JWT токен в Cursor. Идентично для VS Code, Claude.ai (через Settings → Connectors → Add custom), Perplexity Pro.
+На webapp юзер кликает "Install in Cursor" → deeplink `cursor://anysphere.cursor-deeplink/mcp/install?...` открывает Cursor → коннектор `mcp.mnemonik.xyz` устанавливается → запускается OAuth 2.1 PKCE flow → юзер на webapp подтверждает "Allow Cursor to access your Mnemonic" → WASM core подписывает OAuth challenge localStorage-ключом → JWT токен в Cursor. Идентично для VS Code, Claude.ai (через Settings → Connectors → Add custom), Perplexity Pro.
 
 ### Сценарий 3 — sign_memory в Tool A
 
@@ -42,9 +42,9 @@ Phase 1 (хакатонный MVP) использует **localStorage Ed25519 k
 
 Юзер открывает свежий чат в Claude.ai (с уже установленным Mnemonic коннектором). Говорит "recall my recent blockchain research". Claude вызывает `mnemonic_recall(query="recent blockchain research", limit=5)`. Hosted MCP: cosine search по user's attestations → top-K с подписью → Claude видит контент, продолжает работу. Recall бесплатный.
 
-### Сценарий 5 — Self-host через Docker
+### Сценарий 5 — Self-host через Docker (backlog)
 
-Технический юзер делает `docker pull ghcr.io/mnemonik-xyz/mnemonic-mcp:latest`, запускает с локальным keypair (`MNEMONIC_KEYPAIR_PATH=...`), без Turnkey, без OAuth — текущий stdio-режим работает как сейчас. Опционально юзер настраивает свой Cursor через `mcpb` или ручную stdio-конфигурацию.
+Self-host docker image публикация в GHCR — backlog (см. `backlog.md`). Существующий локальный `cargo run -p mnemonic-mcp` self-host работает как сейчас, без OAuth, с локальным keypair-файлом и stdio transport.
 
 ### Сценарий 6 — Discovery через Smithery
 
@@ -52,29 +52,22 @@ Phase 1 (хакатонный MVP) использует **localStorage Ed25519 k
 
 ## Критерии приёмки
 
-**MUST для Phase 1 (hackathon MVP):**
+**MUST для Phase 1 (hackathon MVP, ≤2 недели, ~11 dev-days):**
 
-- [ ] `mcp.mnemonic.dev` отвечает на `tools/list` через streamable HTTP, доступен из IP-диапазонов Anthropic и OpenAI
+- [ ] `mcp.mnemonik.xyz` отвечает на `tools/list` через streamable HTTP (per MCP spec 2025), доступен публично
 - [ ] OAuth 2.1 + PKCE endpoints (`/oauth/authorize`, `/oauth/token`) работают; JWT токен issued bound к user pubkey
-- [ ] WASM core генерит Ed25519 keypair в браузере, хранит в localStorage; export/import через JSON-файл; OAuth challenge подписывается этим ключом
-- [ ] Webapp `mnemonik.xyz` имеет 2 страницы (MUST): (1) landing с объяснением протокола, (2) install-hub с deeplinks для Cursor / VS Code / Claude.ai + identity-блок (показ DID/pubkey, export/import keypair)
-- [ ] Docker image `ghcr.io/mnemonik-xyz/mnemonic-mcp:latest` собирается в CI на git tag, поддерживает stdio + http transports
-- [ ] `smithery.yaml` в репо, листинг на smithery.ai активен, install-deeplink работает
-- [ ] CI: MCP Inspector валидирует JSON-RPC + tool descriptions на каждый PR; pre-release smoke: ручной прогон `whoami → sign_memory → recall` через Cursor с auth, документированный в `tasks/`
+- [ ] WASM core (через wasm-bindgen + wasm-pack) экспортирует `generate_keypair`, `sign_challenge`, `export_keypair_json`, `import_keypair_json`; webapp использует это для in-browser identity в localStorage; OAuth challenge подписывается этим ключом
+- [ ] Webapp `mnemonik.xyz` имеет 2 страницы: (1) landing с объяснением протокола, (2) install-hub с deeplinks для Cursor / VS Code / Claude.ai + identity-блок (показ DID/pubkey, export/import keypair)
+- [ ] **`STORAGE_MODE=local`** для хакатон-демо: SQLite-only, синтетические `local:` ID, без Arweave/Solana RPC вызовов. Демо работает offline на сцене.
+- [ ] `smithery.yaml` в репо, листинг на smithery.ai активен с install-deeplink на `mcp.mnemonik.xyz`
+- [ ] CI: MCP Inspector валидирует JSON-RPC + tool descriptions на каждый PR; pre-release smoke: ручной чек-лист (Cursor + Claude.ai прогон), документированный в `tasks/`
 - [ ] `cargo test --workspace` зелёный, `cargo clippy --workspace --all-targets -- -D warnings` без предупреждений
 - [ ] Backward-compat: stdio transport работает как сейчас; existing 5 MCP tools сохраняют JSON-RPC сигнатуры
-- [ ] `payment.rs` НЕ рефакторится: для хакатона `PAYMENT_MODE=none` (free demo); хук на pubkey-as-user-identity для billing post-хакатон
+- [ ] `payment.rs` НЕ рефакторится: `PAYMENT_MODE=none` для хакатона; pubkey-as-user-identity hook готовится без активации billing
 - [ ] `core/` не имеет references на OAuth/HTTP transport — изоляция архитектуры сохранена
-- [ ] Round-trip: COSE-signed CBOR проходит через Anthropic/OpenAI MCP прокси байт-в-байт без re-encoding (тест в CI)
+- [ ] Round-trip: COSE-signed CBOR проходит через mock MCP-прокси байт-в-байт без re-encoding (test в CI)
 
-**SHOULD для Phase 1.5 (post-hackathon):**
-
-- [ ] **Turnkey MPC integration** — заменяет localStorage keypair на email-onboarded MPC-wallet с recovery; existing pubkey мигрирует в Turnkey custody без потери identity
-- [ ] Webapp дополнительные страницы: (3) bundles browser (список attestations + Arweave/Solana ссылки), (4) top-up balance UI, (5) bundle delete/privacy controls, (6) stats dashboard
-- [ ] `PAYMENT_MODE=balance` включён, billing работает per-call
-- [ ] Headless Claude Code прогон в CI (nightly + pre-release)
-- [ ] Листинг в Anthropic Connectors Directory (partner outreach), mcp.directory, Glama
-- [ ] `@mnemonic/core` опубликован на npm
+**Backlog (всё post-hackathon)** — см. `work/mnemonic-integrations/backlog.md` для полного списка: Turnkey MPC integration, Docker GHCR publish, npm `@mnemonic/core`, browser extension, дополнительные webapp страницы (bundles browser / top-up / privacy / stats), `PAYMENT_MODE=balance`, headless Claude Code CI, Anthropic Connectors / mcp.directory / Glama listings, full `STORAGE_MODE=full` (Arweave + Solana) на демо.
 
 **Success metrics для хакатон-демо:**
 
@@ -85,15 +78,16 @@ Phase 1 (хакатонный MVP) использует **localStorage Ed25519 k
 
 ## Ограничения
 
-- **Только Phase 1 (хакатонный MVP)**. Browser extension, Apps SDK submission, `.mcpb` для Claude Desktop, mobile share-sheet, Gemini CLI extension — отдельные итерации.
-- **Turnkey MPC — Phase 1.5**. Хакатон-MVP использует localStorage keypair с JSON export/import. Миграция в Turnkey custody — без смены user pubkey (тот же DID).
-- **`payment.rs` не рефакторится**. Для хакатона `PAYMENT_MODE=none` (бесплатное демо). Pubkey-as-user-identity hook готовится без активации billing-логики до post-хакатон.
-- **`core/` не модифицируется** — HTTP/OAuth код живёт только в `mcp/`. Архитектурное правило (см. CLAUDE.md) нерушимо.
-- **Self-host docker остаётся с локальным keypair** — никакого OAuth для self-host пути, текущий stdio-режим работает как сейчас.
-- **WASM используется только в webapp** — не в hosted MCP.
-- **Storage** — Arweave для attestations, localStorage только для keypair и UI-state. Никаких user attestations в localStorage — теряется durability.
-- **Один реестр в Phase 1** — Smithery. Anthropic Connectors / mcp.directory / Glama — параллельный outreach без deadline, реализация в P1.5+.
-- **Webapp в Phase 1 — 2 страницы** (landing + install-hub с identity-блоком). Bundles browser, top-up, privacy, stats — Phase 1.5.
+- **Phase 1 = хакатон-MVP, ≤2 недели, ~11 dev-days.** Всё что не in MUST → `backlog.md`.
+- **Storage на демо = `STORAGE_MODE=local`** (SQLite-only, синтетические IDs). Arweave/Solana код в `core/` не трогаем — он остаётся работоспособным, но не вызывается на сцене. Полная on-chain атестация в demo — backlog.
+- **Identity = WASM-генерируемый Ed25519 keypair в браузере + localStorage**. JSON export/import для cross-device. **Turnkey MPC — backlog**: тот же pubkey мигрирует в Turnkey custody без смены DID.
+- **`payment.rs` не рефакторится**. `PAYMENT_MODE=none` для хакатон-демо. Pubkey-as-user-identity hook готовится без активации billing.
+- **`core/` не модифицируется по бизнес-логике** — HTTP/OAuth/Turnkey код живёт только в `mcp/`. Единственное допустимое изменение в `core/` — добавление `#[wasm_bindgen]` обёрток над existing identity-функциями (gated `#[cfg(target_arch = "wasm32")]`).
+- **Self-host текущий — без изменений**. Docker GHCR publish — backlog.
+- **WASM используется только в webapp** — не в hosted MCP server.
+- **Один реестр в Phase 1** — Smithery. Остальное (Anthropic Connectors, mcp.directory, Glama, Apps SDK) — backlog.
+- **Webapp в Phase 1 — 2 страницы** (landing + install-hub с identity-блоком). Bundles browser, top-up, privacy, stats — backlog.
+- **Browser extension — backlog.**
 
 ## Риски
 
@@ -134,15 +128,15 @@ Phase 1 (хакатонный MVP) использует **localStorage Ed25519 k
 
 | Шаг | Инструмент | Ожидаемый результат |
 |-----|-----------|---------------------|
-| 1. Hosted MCP отвечает | `bash: curl -X POST https://mcp.mnemonic.dev -d '{"method":"tools/list"}'` | 5 tools returned |
+| 1. Hosted MCP отвечает | `bash: curl -X POST https://mcp.mnemonik.xyz -d '{"method":"tools/list"}'` | 5 tools returned |
 | 2. OAuth flow работает | `bash: scripts/test-oauth-flow.sh` | JWT issued, payload содержит user pubkey |
 | 3. Tests зелёные | `bash: cargo test --workspace --no-fail-fast` | Все тесты, включая httpmock proxy |
 | 4. Clippy чистый | `bash: cargo clippy --workspace --all-targets -- -D warnings` | Ноль warnings |
-| 5. Docker image | `bash: docker pull ghcr.io/mnemonik-xyz/mnemonic-mcp:latest && docker run --rm ghcr.io/mnemonik-xyz/mnemonic-mcp:latest --version` | Тег latest присутствует, бинарь запускается |
+| 5. STORAGE_MODE=local на демо | `bash: curl -X POST https://mcp.mnemonik.xyz/mcp -d '{"method":"tools/call","params":{"name":"mnemonic_sign_memory","arguments":{"content":"test"}}}'` | attestation_id с префиксом `local:`, без Arweave/Solana вызовов |
 | 6. Smithery листинг | `bash: curl -fsSL https://smithery.ai/mcp/mnemonic` | 200 OK, install-deeplink в HTML |
 | 7. core/ не тронут OAuth/HTTP | `bash: grep -rE "OAuth\|http_transport\|axum" core/src/` | Пустой результат |
 | 8. payment.rs неизменён по схеме | `bash: git diff main -- mcp/src/payment.rs \| grep -E "^-CREATE TABLE\|^-ALTER TABLE"` | Пустой результат |
-| 9. MCP Inspector | `bash: npx @modelcontextprotocol/inspector --validate https://mcp.mnemonic.dev` | All checks pass |
+| 9. MCP Inspector | `bash: npx @modelcontextprotocol/inspector --validate https://mcp.mnemonik.xyz` | All checks pass |
 | 10. Round-trip COSE через прокси | `bash: cargo test -p mnemonic-mcp roundtrip_cose_via_http_proxy` | Подпись валидна после passthrough |
 | 11. Webapp routes | `bash: for r in / /install; do curl -fI https://mnemonik.xyz$r; done` | Оба возвращают 200 |
 
@@ -150,6 +144,6 @@ Phase 1 (хакатонный MVP) использует **localStorage Ed25519 k
 
 - На свежем браузере без cookies: открыть `mnemonik.xyz`, кликнуть "Get started" → WASM генерит keypair → видишь свой DID/pubkey + кнопку "Download backup". Скачать backup-JSON, проверить что содержит pubkey + private bytes.
 - На Cursor (свежий профиль): кликнуть "Install in Cursor" на webapp → deeplink → OAuth approve → в новом чате сказать "save this onchain: hello world from cursor" → модель вызовет sign_memory с user approval → получить attestation_id, Arweave URL. Открыть Arweave URL — видеть содержимое.
-- На Claude.ai Pro: добавить custom connector `mcp.mnemonic.dev` через Settings → авторизоваться тем же pubkey → в свежем чате сказать "recall my recent saves" → модель вызовет recall → увидеть "hello world from cursor" с COSE-подписью.
+- На Claude.ai Pro: добавить custom connector `mcp.mnemonik.xyz` через Settings → авторизоваться тем же pubkey → в свежем чате сказать "recall my recent saves" → модель вызовет recall → увидеть "hello world from cursor" с COSE-подписью.
 - На втором устройстве: импортировать backup-JSON в webapp → войти под тем же DID → cursor coupling работает идентично.
-- Self-host: `docker pull ghcr.io/mnemonik-xyz/mnemonic-mcp:latest`, запустить локально с stdio, подключить к локальному Cursor — работает как сейчас, без OAuth, с локальным keypair.
+- Self-host (текущее, без изменений): `cargo run -p mnemonic-mcp -- --transport stdio` локально, подключить к локальному Cursor — работает как сейчас, без OAuth, с локальным keypair-файлом. Docker GHCR publish — backlog.
