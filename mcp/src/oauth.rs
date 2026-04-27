@@ -676,6 +676,9 @@ pub struct TokenResponse {
     pub access_token: String,
     pub token_type: String,
     pub expires_in: u64,
+    /// OAuth 2.1 / RFC 6749 §5.1 — the scope the token was granted.
+    /// We only have one scope (`mcp`); echoed for clients that read it.
+    pub scope: String,
 }
 
 /// `POST /oauth/token` — exchange a fresh authorization code for a JWT.
@@ -762,6 +765,7 @@ pub async fn token_handler(
         access_token: token,
         token_type: "Bearer".to_string(),
         expires_in: JWT_TTL_SECS,
+        scope: "mcp".to_string(),
     };
     (StatusCode::OK, Json(body)).into_response()
 }

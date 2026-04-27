@@ -361,16 +361,15 @@ pub async fn mcp_handler(
     };
 
     // JSON-RPC 2.0 spec: notifications (no `id`) MUST NOT receive a response.
-    // MCP clients (Cursor/Claude.ai) send `notifications/initialized` after
-    // the `initialize` handshake — replying to it breaks the connection.
-    // Run any side effects (currently none for the supported notifications)
-    // and return 204 No Content with empty body.
+    // MCP streamable-HTTP spec (2025-06-18 §2.4) further specifies:
+    //   "If the input consists solely of (any number of) JSON-RPC responses
+    //    or notifications, the server MUST return HTTP status code 202
+    //    Accepted with no body."
+    // VS Code's MCP client logs `Unexpected 204 response` when we return 204
+    // — switch to 202 for spec compliance. Cursor accepts both, no harm.
     if req.is_notification() {
-        // Currently `notifications/initialized` and `notifications/cancelled`
-        // are no-ops on our side. If we ever need stateful notification
-        // handling, dispatch here.
         return axum::http::Response::builder()
-            .status(StatusCode::NO_CONTENT)
+            .status(StatusCode::ACCEPTED)
             .body(axum::body::Body::empty())
             .expect("static response builds");
     }
