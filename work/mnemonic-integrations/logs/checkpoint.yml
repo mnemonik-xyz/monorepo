@@ -3,17 +3,17 @@ feature: mnemonic-integrations
 created: 2026-04-26
 status: pending_approval
 total_waves: 5
-last_completed_wave: 1
-next_wave: 2
+last_completed_wave: 2
+next_wave: 3
 team_name: mnemonic-integrations
 total_tasks: 15
 tasks:
   1:  { wave: 1, status: done, commit: 317b95c }
   2:  { wave: 1, status: done, commit: a3dc0a6 }
   3:  { wave: 1, status: done, commit: 03f4b58 }
-  4:  { wave: 2, status: pending }
-  5:  { wave: 2, status: pending }
-  6:  { wave: 2, status: pending }
+  4:  { wave: 2, status: done, commit: ba4a63c }
+  5:  { wave: 2, status: done, commit: 5916617 }
+  6:  { wave: 2, status: done, commit: 07d6551 }
   7:  { wave: 3, status: pending }
   8:  { wave: 3, status: pending }
   9:  { wave: 3, status: pending }
