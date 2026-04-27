@@ -484,9 +484,7 @@ pub async fn authorize_init_handler(
     // URL-encode the base64 (it can contain `+/=`).
     let challenge_param = urlencoding_encode(&challenge_b64);
     let state_param = urlencoding_encode(&q.state);
-    let location = format!(
-        "{WEBAPP_CONSENT_URL}?challenge={challenge_param}&state={state_param}"
-    );
+    let location = format!("{WEBAPP_CONSENT_URL}?challenge={challenge_param}&state={state_param}");
     let mut resp = Response::new(Body::empty());
     *resp.status_mut() = StatusCode::FOUND;
     if let Ok(hv) = axum::http::HeaderValue::from_str(&location) {
@@ -1484,8 +1482,7 @@ mod tests {
 
         // Sign the canonical-CBOR with the user's keypair.
         let cose = sign_cose(&cbor_bytes, &kp).expect("sign_cose");
-        let cose_b64 =
-            base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &cose);
+        let cose_b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &cose);
 
         // POST /oauth/authorize → success (200 with `code`).
         let app2 = build_init_router(st);
