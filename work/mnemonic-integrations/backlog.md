@@ -62,6 +62,12 @@ status: backlog
 
 ## P3 — Opportunistic / Risk-Heavy
 
+### WebSocket-pushed signing notification (instead of polling)
+**Что:** Заменить current click-to-approve UX (юзер открывает webapp tab вручную) на WebSocket — webapp держит persistent connection с hosted MCP; когда AI tool вызывает `sign_memory`, server push-ит prompt в открытую webapp вкладку, юзер сразу видит modal "Sign memory: ..." без клика по линку из Cursor.
+**Зачем:** Убирает interruption "go to webapp tab" из flow. Особенно ценно для частых signs.
+**Trade-off:** Работает только если webapp tab открыт. Полировка для частых юзеров; первый раз всё равно через approve_url линк.
+**Эффорт:** ~2 dev-days.
+
 ### Browser extension
 **Что:** Chrome/Firefox extension с одной кнопкой "Save to Mnemonic" на chatgpt.com / claude.ai / cursor.com — клик подписывает текущий чат через WASM core, отправляет на hosted MCP.
 **Риски:** ShadowPrompt-class XSS (Anthropic's own extension shipped a critical zero-click prompt-injection vuln в марте 2026). Maintenance burden — UI каждой target меняется, парсер ломается. Permission grant friction ("read & change all data").

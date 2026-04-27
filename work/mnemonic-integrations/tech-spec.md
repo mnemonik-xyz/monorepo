@@ -1,6 +1,6 @@
 ---
 created: 2026-04-26
-status: draft
+status: approved
 branch: dev
 size: L
 ---
@@ -9,13 +9,17 @@ size: L
 
 ## Solution
 
-Ship a public `mcp.mnemonik.xyz` endpoint that any MCP-capable AI tool (Cursor, VS Code, Claude.ai Pro, Perplexity Pro) can install as a remote connector. Identity is generated client-side: the existing `mnemonic-core` Rust crate is wrapped with `#[wasm_bindgen]` to expose `generate_keypair`, `sign_challenge`, `export_keypair_json`, `import_keypair_json` to JavaScript. The webapp at `mnemonik.xyz` adds two routes: a landing page and an install-hub (with deeplink buttons + identity panel). OAuth 2.1 + PKCE is implemented as a small Axum module in `mcp/`; the user signs the OAuth challenge in-browser with their localStorage keypair, the server issues a JWT bound to the pubkey.
+Ship a public `mcp.mnemonik.xyz` endpoint that any MCP-capable AI tool (Cursor, VS Code, Claude.ai Pro, Perplexity Pro) can install as a remote connector. Identity AND attestation signing are both client-side: the existing `mnemonic-core` Rust crate is wrapped with `#[wasm_bindgen]` to expose `generate_keypair`, `sign_challenge`, `sign_attestation_bundle`, `export_keypair_json`, `import_keypair_json` to JavaScript. The webapp at `mnemonik.xyz` has three routes: landing page, install-hub (deeplinks + identity panel), and `/sign/<correlation_id>` (browser-mediated signing approval).
+
+**Browser-mediated signing flow** (the architectural core of Phase 1, post-DDoS analysis): when an AI tool calls `mnemonic_sign_memory`, the hosted MCP **does not sign**. It stores the unsigned bundle in an in-memory `PendingBundles` map (LRU 10k entries, TTL 300s) and returns `{status: "awaiting_signature", approve_url}` to the AI tool. The user opens the URL on `mnemonik.xyz/sign/<id>`, the webapp fetches the unsigned bundle, the user clicks "Sign", WASM produces a COSE_Sign1 signed by the user's localStorage keypair, the signature posts back to `/api/sign-callback`, the MCP validates the signature against the JWT-resolved pubkey and persists the attestation. The user then returns to the AI tool, where the next `recall` sees the saved attestation. This eliminates the server-keypair single-point-of-trust and reduces server CPU per `sign_memory` to near-zero (just store + validate).
+
+OAuth 2.1 + PKCE is implemented as a small Axum module in `mcp/`; the user signs the OAuth challenge in-browser with their localStorage keypair, the server issues a JWT bound to the pubkey. The same keypair signs both the auth challenge and the attestation bundle — single user identity throughout.
 
 For the hackathon demo, the server runs in `STORAGE_MODE=local` — synthetic `local:` IDs, SQLite-only, no Arweave/Solana RPC dependency. This keeps the live demo fast and offline-tolerant. The full on-chain mode is preserved in code but unused on stage.
 
-Smithery listing is the single discovery surface for Phase 1; Anthropic Connectors / mcp.directory / Glama are deferred. Docker GHCR publish, Turnkey MPC migration, browser extension, and additional webapp pages are explicitly in `backlog.md`.
+Smithery listing is the single discovery surface for Phase 1; Anthropic Connectors / mcp.directory / Glama are deferred. Docker GHCR publish, Turnkey MPC migration, browser extension, additional webapp pages, and WebSocket-pushed signing notification (instead of polling) are explicitly in `backlog.md`.
 
-Total scope: ~11 dev-days, 14 implementation tasks across 4 waves + audit + final.
+Total scope: ~13 dev-days (was 11; +2 days for browser-mediated signing flow), 15 implementation tasks across 4 waves + audit + final.
 
 ## Architecture
 
@@ -39,17 +43,46 @@ Total scope: ~11 dev-days, 14 implementation tasks across 4 waves + audit + fina
 5. Cursor exchanges the code at `/oauth/token` (with `code_verifier`); server issues a JWT containing `sub=<pubkey_b58>`.
 6. Subsequent tool calls from Cursor carry `Authorization: Bearer <jwt>`. The Axum middleware resolves `pubkey` and passes it down as request-scoped state into tool handlers.
 
-**Tool call (sign_memory in `STORAGE_MODE=local`):**
+**Tool call (sign_memory in `STORAGE_MODE=local`, browser-mediated):**
 
-`Cursor → POST /mcp { method: tools/call, params: { name: mnemonic_sign_memory, ... } }` → middleware validates JWT → dispatch to existing `tools::sign_memory` handler → embedder + compressor + COSE sign with **server-managed** identity (the existing keypair file at `MNEMONIC_KEYPAIR_PATH` — single shared signer for the whole hosted instance in Phase 1) → SQLite write with synthetic `local:<uuid>` ID → response.
+```
+Cursor                          MCP                         Webapp                     WASM
+  │                              │                             │                         │
+  │── POST /mcp tools/call ─────>│                             │                         │
+  │   {sign_memory, content}     │                             │                         │
+  │                              │  embed content             │                         │
+  │                              │  compress                  │                         │
+  │                              │  build canonical CBOR      │                         │
+  │                              │  store PendingBundles[id]  │                         │
+  │<── {status:"awaiting_sig",   │                             │                         │
+  │     approve_url:"/sign/<id>",│                             │                         │
+  │     correlation_id, exp}     │                             │                         │
+  │                              │                             │                         │
+       user opens approve_url     │                             │                         │
+                                 │<── GET /api/pending/<id>───│                         │
+                                 │── unsigned bundle (CBOR)──>│                         │
+                                 │                             │── sign_attestation_bundle─>│
+                                 │                             │<── COSE_Sign1 bytes ────│
+                                 │<── POST /api/sign-callback │                         │
+                                 │    {id, cose_bytes,        │                         │
+                                 │     signer_pubkey}         │                         │
+                                 │  validate sig vs jwt.sub   │                         │
+                                 │  persist attestation       │                         │
+                                 │  evict PendingBundles[id]  │                         │
+                                 │── 200 OK ─────────────────>│                         │
+       user returns to Cursor    │                             │                         │
+  │── tools/call recall ────────>│                             │                         │
+  │<── attestation rows ─────────│                             │                         │
+```
 
-**Rationale for shared signer in `local` mode:** the hackathon demo signs all attestations with the hosted server's keypair (DID = server's), not the user's per-OAuth pubkey. The OAuth pubkey is used only for **identity scope** (which user owns which row) and for billing in P1.5. Per-user signing identity is a P1.5 task that requires server-side key management or Turnkey MPC.
+**Rationale for browser-mediated signing:** server-side signing is a DDoS magnet (CPU per call) and a security single-point-of-trust (server compromise → forge all attestations retroactively). Browser-mediated signing puts the cryptographic authority in the user's hands, drops server CPU per `sign_memory` to near-zero, and provides a clear demo moment ("crypto-confirmation in browser, even when called from Cursor"). The 5-minute TTL on PendingBundles tolerates user response time.
 
 ### Shared Resources
 
-- **Hosted MCP server keypair** — single Ed25519 keypair file at `MNEMONIC_KEYPAIR_PATH` on the VPS. Used for COSE signing of all `sign_memory` calls in Phase 1. Generated once during deploy. Owner: deploy-pipeline task; consumers: all `tools::sign_memory` calls.
 - **`SqliteStore` + DB connection** — single `attestations.db` file at `DATABASE_PATH` shared across all users (scoped by `owner_pubkey` column = OAuth user pubkey). Owner: `McpState`; consumers: tool handlers + OAuth code/token storage.
-- **`OAuthState`** (new) — in-memory map of `code → (pubkey, code_challenge, expiry)` and JWT signing key. Lives inside `McpState`. Single instance.
+- **`OAuthState`** (new) — in-memory map of `state → (challenge_hash, expected_pubkey, exp)` and JWT signing key. LRU 10k entries, TTL 60s. Lives inside `McpState`. Single instance.
+- **`PendingBundles`** (new) — in-memory map of `correlation_id → {jwt_sub, content, embedding_bytes, content_hash, expiry}`. LRU 10k entries, TTL 300s (5min). Each entry capped at 32 KB content + 4 KB metadata. Lives inside `McpState`. Single instance.
+- **NO server-side signing keypair** — Phase 1 server is auth + storage + signature validator. The hosted MCP no longer requires `MNEMONIC_KEYPAIR_PATH`; the existing keypair file remains operational for stdio self-host but is unused for HTTP-transport `sign_memory` calls.
 
 ## Decisions
 
@@ -68,10 +101,19 @@ Total scope: ~11 dev-days, 14 implementation tasks across 4 waves + audit + fina
 **Rationale:** Avoid touching business logic in `core/`. Gating ensures native compilation stays identical, satisfying the architecture rule from CLAUDE.md ("`core/` has zero references to anything in `mcp/`"). Supports user-spec MUST: "WASM core ... экспортирует `generate_keypair`, `sign_challenge`, `export_keypair_json`, `import_keypair_json`".
 **Alternatives:** Wrap from outside (separate `core-wasm` crate) — rejected, doubles maintenance burden and introduces a duplicate crate. Inline wrappers without feature gate — rejected, pollutes the native compilation graph with `wasm-bindgen` types.
 
-### Decision 4: `STORAGE_MODE=local` on hosted demo, single-signer identity
-**Decision:** Hosted `mcp.mnemonik.xyz` runs with `STORAGE_MODE=local`. Synthetic `local:<uuid>` attestation IDs. The hosted server's keypair signs all attestations (server is the COSE signer); the OAuth user pubkey defines **ownership scope** (`owner_pubkey` column) but not signing identity.
-**Rationale:** Demo on stage must not depend on Solana RPC reachability, Arweave costs, or funded keypair operational concerns. Per-user signing keys would require server-side custody or Turnkey — both backlog. Supports user-spec MUST: "`STORAGE_MODE=local` для хакатон-демо: SQLite-only, синтетические `local:` ID".
-**Alternatives:** Per-user signing in Phase 1 — rejected, requires Turnkey or server-side key management (~5+ days). Full mode — rejected, demo brittleness.
+### Decision 4: `STORAGE_MODE=local` on hosted demo + browser-mediated signing
+**Decision:** Hosted `mcp.mnemonik.xyz` runs with `STORAGE_MODE=local`. Synthetic `local:<uuid>` attestation IDs. **The user's localStorage Ed25519 keypair signs all attestations via WASM in the browser** — the hosted server is auth + storage + signature validator only, never holds a signing key. The OAuth user pubkey is BOTH the signing identity AND the ownership scope (`owner_pubkey = signer_pubkey = jwt.sub`). The `sign_memory` MCP tool is asynchronous: it returns `{status: "awaiting_signature", approve_url}` and stores the unsigned bundle in `PendingBundles` (TTL 300s); the webapp's `/sign/<id>` page handles the actual signing via WASM and posts back to `/api/sign-callback`.
+**Rationale:** Server-side signing is (a) a DDoS magnet — adversary forces the server to do crypto work per request, (b) a security single point of trust — server compromise lets the attacker forge attestations retroactively for all users, (c) a custody concern — user's identity is owned by the operator. Browser-mediated signing eliminates all three: server CPU per `sign_memory` drops to ~zero (only validate, no sign), server compromise can't forge new attestations (no signing key onboard), and user retains custody. The DDoS surface that remains is `recall` (read query — bounded cost) and `PendingBundles` storage (bounded by LRU + TTL + per-user cap). Supports user-spec MUST: "`STORAGE_MODE=local` для хакатон-демо: SQLite-only, синтетические `local:` ID" + addresses post-validation DDoS analysis (round 2).
+**Alternatives:**
+- Server-side signing with per-IP rate limit only — rejected, easily bypassed via Tor / Sybil JWTs.
+- Server-side signing with custodied per-user keys (Turnkey-equivalent) — rejected for Phase 1, ~5+ days, custody concerns persist.
+- Synchronous WebSocket-based signing (server pushes sign request to webapp WebSocket, no polling) — rejected for Phase 1 ergonomics; requires open browser tab AND WebSocket plumbing. Backlog candidate.
+- Hybrid (webapp-originated signs use WASM, AI-tool-originated still server-side) — rejected, two codepaths and AI-tool path remains DDoS surface.
+
+### Decision 12: PendingBundles store + sign-callback validation
+**Decision:** `PendingBundles` is an LRU-backed in-memory map (`correlation_id` UUIDv4 → `{jwt_sub, content, embedding_bytes, content_hash, exp}`) with cap 10000 and TTL 300s. Per-user soft cap: 50 pending bundles per JWT.sub (insertion fails fast with HTTP 429 above the cap). `sign_memory` tool dispatcher generates the correlation_id, computes the embedding (this is the only CPU cost per call), stores the bundle, and returns `{status, approve_url, correlation_id, expires_in}` to the AI tool. `GET /api/pending/<correlation_id>` (auth required, `jwt.sub` must match stored `jwt_sub`, else 403) returns the unsigned bundle. `POST /api/sign-callback` accepts `{correlation_id, cose_signed_bytes, signer_pubkey}` (auth required), validates: (a) `signer_pubkey == jwt.sub`, (b) COSE_Sign1 verification against `signer_pubkey` succeeds, (c) the embedded content_hash matches the stored hash; on success persists the attestation and atomically evicts the bundle. Single-use guarantee: post-callback for the same correlation_id returns 410 Gone.
+**Rationale:** Centralizing state in PendingBundles keeps the rest of the architecture simple. LRU + TTL + per-user cap bound memory exhaustion. Atomic eviction prevents replay (sign-callback is single-use). Validating `signer_pubkey == jwt.sub` ensures the attestation is signed by the same identity that requested it (no cross-user attestation). Validating `content_hash` ensures the webapp didn't alter the content client-side.
+**Alternatives:** Persist PendingBundles in SQLite — rejected, premature; in-memory is sufficient and simpler. Allow `signer_pubkey != jwt.sub` (multi-signer attestation) — rejected, out of scope and adds complexity. WebSocket push instead of polling — backlog.
 
 ### Decision 5: Smithery as the single registry, repo-root `smithery.yaml`
 **Decision:** Add `smithery.yaml` at repo root with the `mcp.mnemonik.xyz` HTTP endpoint and OAuth flow declaration. Submit to Smithery once webapp + MCP are deployed. No simultaneous submission to other registries.
@@ -98,7 +140,7 @@ Total scope: ~11 dev-days, 14 implementation tasks across 4 waves + audit + fina
 
 The HTTP middleware uses an **explicit allowlist** for unauthenticated routes: `/oauth/authorize`, `/oauth/token`, `/health`, plus the MCP discovery methods `initialize` and `tools/list` (the latter two needed for connector-install handshake before OAuth completes — Cursor/Claude.ai POST `tools/list` first to confirm the server is reachable, then trigger OAuth). All other JSON-RPC methods including `tools/call` (sign_memory, recall, etc.) require valid Bearer JWT or return HTTP 401.
 
-Add `tower_governor` per-IP rate limit on `/mcp`: `sign_memory ≤ 5 req/min/IP`, `recall ≤ 30 req/min/IP`, applied regardless of `PAYMENT_MODE`. Rate limits don't apply to stdio transport. **Note**: the existing `mcp/Cargo.toml` already has `governor = "0.8"` (used by `pricing.rs` for CoinGecko throttling). Task 4 must reconcile — pin `tower_governor` to the version compatible with `governor = "0.8"` (likely `tower_governor = "0.5"` or higher); pre-condition check: `cargo tree -p tower_governor` after adding the dep, must not introduce duplicate `governor` versions.
+Add `tower_governor` per-IP rate limit on `/mcp`: `sign_memory ≤ 10 req/min/IP` (PendingBundles insertion guard), `recall ≤ 30 req/min/IP`, applied regardless of `PAYMENT_MODE`. Plus per-`jwt.sub` rate limit: `recall ≤ 200/hour/user`, `sign_memory ≤ 50 pending bundles/user` (enforced by Decision 12 PendingBundles cap, returns 429 above limit). `/api/sign-callback` not rate-limited (gated by valid correlation_id which is single-use). Rate limits don't apply to stdio transport. **Note**: the existing `mcp/Cargo.toml` already has `governor = "0.8"` (used by `pricing.rs` for CoinGecko throttling). Task 4a must reconcile — pin `tower_governor` to the version compatible with `governor = "0.8"` (likely `tower_governor = "0.5"` or higher); pre-condition check: `cargo tree -p tower_governor` after adding the dep, must not introduce duplicate `governor` versions.
 
 CORS on `/mcp` is narrowed to `Authorization, Content-Type` headers only and explicit origin `https://mnemonik.xyz` (no `Any` wildcard); `/oauth/*` and `/health` already use this same origin allowlist.
 **Rationale:** Hackathon demo on a public Smithery-listed endpoint with `PAYMENT_MODE=none` is a DoS / data-fill / fee-burn target. Anonymous `/mcp` recall returning rows from any tenant is a privacy disaster. Without `initialize`/`tools/list` allowlist, MCP connector install fails because clients can't discover tools before completing OAuth. Supports user-spec MUST: "Backward-compat: stdio transport работает как сейчас" and addresses security-auditor critical findings 1 & 2 + round-2 critical regression.
@@ -144,6 +186,7 @@ Canonical CBOR encoding (per `core/src/codec/canonical.rs`) ensures unambiguous 
 **`mcp/Cargo.toml`:**
 - `oauth2 = "=4.4.2"` (pinned) — OAuth 2.1 client/server primitives for `code_verifier`/`code_challenge` validation
 - `jsonwebtoken = "=9.3.0"` (pinned) — JWT issue + validate
+- `lru = "=0.12.5"` (pinned) — LRU map backing for PendingBundles + OAuthState (Decisions 12 + 9)
 - `tower_governor` — per-IP rate limiting on `/mcp` (Decision 9). **Version selection deferred to Task 4 implementation:** `mcp/Cargo.toml` already contains `governor = "0.8"` (used by `pricing.rs`). The chosen `tower_governor` version must be compatible — Task 4 author runs `cargo tree -p tower_governor -p governor` after adding the dep and pins to a version that does not introduce a duplicate `governor` major version. Prefer `tower_governor = "0.5"` or later (compatible with `governor = "0.8"`).
 - Tech-spec author MUST verify each pinned version on crates.io before Task 4 starts; if a pinned version is yanked, update spec and re-run dependency audit.
 - CI gains `cargo audit` step on every PR to catch newly-disclosed CVEs in pinned versions.
@@ -178,7 +221,11 @@ None.
 ### Integration tests
 - **OAuth full flow** (`mcp/tests/oauth_flow.rs`, 1 test): boot Axum app in test mode, simulate browser flow (POST /authorize with signed challenge containing `state`, `client_id`, `redirect_uri`, `code_challenge`, `nonce`; GET /token with code+verifier; parse JWT), assert pubkey roundtrip + JWT claims (`iss`, `aud`, `sub`, `exp`)
 - **MCP tool call with OAuth** (`mcp/tests/oauth_tool_call.rs`, 1 test): obtain JWT via flow above, call `tools/list` with Bearer header, assert 5 tools returned and `tools/call sign_memory` succeeds, attestation row has `owner_pubkey = <jwt.sub>` and `local:` ID prefix
-- **Recall ownership isolation** (`mcp/tests/recall_owner_isolation.rs`, 1 test, **CRITICAL** — addresses test-reviewer / security-auditor critical findings): boot Axum app, mint 2 distinct JWTs (user A + user B); user A signs 2 attestations, user B signs 1; user B's recall returns ONLY user B's row, never user A's; anonymous request to `/mcp` recall (no Bearer) returns 401 (not 200 with rows)
+- **Recall ownership isolation** (`mcp/tests/recall_owner_isolation.rs`, 1 test, **CRITICAL** — addresses test-reviewer / security-auditor critical findings): boot Axum app, mint 2 distinct JWTs (user A + user B); user A completes deferred-sign flow for 2 attestations, user B for 1; user B's recall returns ONLY user B's row, never user A's; anonymous request to `/mcp tools/call` recall (no Bearer) returns 401 (not 200 with rows)
+- **Deferred sign-flow lifecycle** (`mcp/tests/deferred_sign_flow.rs`, 1 test): full path — POST /mcp tools/call sign_memory → assert response is `awaiting_signature` with valid correlation_id; GET /api/pending/<id> with JWT → assert unsigned bundle returned; sign locally with test keypair, POST /api/sign-callback → 200 OK; subsequent recall returns the persisted attestation; second POST callback for same id → 410 Gone
+- **Pending bundle authorization** (`mcp/tests/pending_authz.rs`, 1 test): user A creates pending bundle; user B (different JWT) tries GET /api/pending/<userA_id> → 403 Forbidden; user B tries POST /api/sign-callback for userA's id → 403 Forbidden
+- **Pending bundle expiry** (`mcp/tests/pending_expiry.rs`, 1 test): create pending, mock-advance time +301s (`tokio::time::pause` + `advance`), GET /api/pending/<id> → 410 Gone; POST /api/sign-callback → 410 Gone; bundle removed from PendingBundles
+- **Per-user pending cap** (`mcp/tests/pending_user_cap.rs`, 1 test): single JWT creates 50 pending bundles successfully; 51st sign_memory call → HTTP 429 with retry-after hint
 - **Stdio backward-compat** (`mcp/tests/stdio_backward_compat.rs`, 1 test): spawn pre-built `mnemonic-mcp --transport stdio` binary (cached from build step; not `cargo run` to avoid build-vs-run race) with `EMBED_PROVIDER=mock` and `STORAGE_MODE=local`, pipe `tools/list` then `tools/call sign_memory` then `tools/call recall` JSON-RPC, each request wrapped in `tokio::time::timeout(Duration::from_secs(5))`; assert round-trip succeeds without OAuth (single-tenant with local keypair)
 - **COSE round-trip via adversarial mock proxy** (`mcp/tests/roundtrip_cose_via_http_proxy.rs`, 1 test): boot mock proxy that **mutates** JSON byte-for-byte differently from std `serde_json` (e.g., re-orders object keys alphabetically, normalizes whitespace, re-encodes numbers using `simd-json` instead of `serde_json`); send `sign_memory` through it; verify base64-encoded CBOR field survives unmutated (committing to base64-string-field encoding per Decision 7 + R1 mitigation, not relying on JSON-byte-stability)
 - **MCP Inspector** (CI-only, GitHub Action step): start server with test JWT in background (`EMBED_PROVIDER=mock STORAGE_MODE=local mnemonic-mcp --transport http --port 3000 &`), `wait-for-port 3000` script with 30s timeout polling `curl -fsS http://localhost:3000/health`, then `npx @modelcontextprotocol/inspector@0.6.x --validate http://localhost:3000/mcp -H "Authorization: Bearer ${TEST_JWT}"`. Pinned npx version (currently latest 0.6.x at time of writing — bump in tandem with MCP spec releases).
@@ -232,16 +279,21 @@ bash (cargo, curl, grep, git, npx). No MCP tools needed for verification — the
 | `STORAGE_MODE=local` ownership scope (`owner_pubkey`) leaks across users if filter forgotten | Decision 9 makes the SQL-level filter mandatory. Test `recall_owner_isolation` enforces cross-tenant assertion in CI. SQL helper function `search_attestations(owner_pubkey, query, limit)` requires the parameter at compile time — no signature without it. |
 | Smithery review rejects crypto-related listing | Position as "verifiable knowledge memory"; lead utility, blockchain framing as "plumbing". Smithery is community-driven so risk is low; if rejected, escalate to mcp.directory in P1.5. |
 | Live-demo network failure on stage | Pre-recorded fallback video; local stdio MCP (existing) as backup demo without hosted-service dependency. |
-| Hosted server keypair (`MNEMONIC_KEYPAIR_PATH`) compromise = all attestations forgeable retroactively | File mode `0600`, owned by `claude` user (not root or world-readable). Generated once during deploy via `sodium randombytes_buf`; not committed to git. Deployment runbook in `deployment.md` specifies generation. P1.5 migrates to per-user signing via Turnkey, eliminating this attack surface. |
 | OAuth `OAuthState` in-memory map → DoS by exhausting memory with `/oauth/authorize` storms | Per-IP rate limit on `/oauth/*` (5 req/min/IP); `OAuthState` map size cap of 10000 entries with LRU eviction; entries TTL 60s. |
+| `PendingBundles` map exhaustion via Sybil flood | LRU 10000 cap + TTL 300s + per-`jwt.sub` cap 50 pending → bounded memory regardless of attacker effort. Each entry capped 32 KB content. Post-LRU-eviction request that gets dropped returns the user a friendly "demo at capacity" error. |
+| User abandons sign approval — bundle expires after 5 min | Cursor's response includes `expires_in` field; webapp shows countdown timer on `/sign/<id>` page. Expired correlation_id returns HTTP 410 with retry guidance. |
+| Sign-callback replay (attacker captures cose-signed bytes + correlation_id, replays) | Atomic single-use eviction in Decision 12 — second callback with same correlation_id returns 410. No need for separate nonce. |
+| Wrong-pubkey signature attempt (attacker tries to sign someone else's bundle) | Sign-callback validates `signer_pubkey == jwt.sub` AND verifies COSE signature; mismatch returns 403. Stored bundle still evicted on TTL. |
+| User signs malicious content prompted by AI (model halucinates safe-looking content but it's harmful) | Webapp `/sign/<id>` page shows full content preview with monospace formatting + length indicator before approval. User explicit consent. Documented in UX guidelines. |
+| Browser tab not open during AI tool flow → user can't approve | Cursor's tool result includes the approve_url as plain text the model can render to the user. UX accepts the friction. WebSocket-based push notification — backlog. |
 
 ## User-Spec Deviations
 
-### Deviation 1: per-attestation signer is server, not user
-**User-spec says:** Sign-with-Solana via WASM keypair → user is signer. JWT issued bound to user Turnkey/localStorage pubkey, OAuth challenge signed by user.
-**Tech-spec does:** OAuth challenge IS signed by the user's localStorage keypair (matches user-spec). But the COSE signature on each attestation is from the **hosted server's keypair**, not the user's. The user pubkey appears as `owner_pubkey` (ownership scope) only.
-**Why:** Per-user COSE signing requires server-side custody of user keys (or Turnkey MPC) — both deferred to backlog.
-**Status:** `[PENDING USER APPROVAL]` — already discussed in interview round 6 (Q-A `STORAGE_MODE=local`); spec text re-confirms.
+### Deviation 1: browser-mediated signing introduces async sign_memory + new endpoints
+**User-spec says:** "WASM core ... экспортирует `generate_keypair`, `sign_challenge`, `export_keypair_json`, `import_keypair_json`" + sign_memory tool returns attestation_id directly.
+**Tech-spec does:** Per Decisions 4 + 12 (revised post-DDoS analysis), `mnemonic_sign_memory` is **asynchronous**: it returns `{status: "awaiting_signature", approve_url, correlation_id, expires_in}` instead of an attestation_id. The user is redirected to `mnemonik.xyz/sign/<id>` to complete signing in-browser via WASM. New WASM export `sign_attestation_bundle` is added. New server endpoints: `GET /api/pending/<id>`, `POST /api/sign-callback`. New webapp route: `/sign/<id>`.
+**Why:** Server-side signing was identified as a DDoS magnet AND security single-point-of-trust. Browser-mediated signing eliminates both (server CPU drops to ~zero per `sign_memory`; no signing key on server to compromise). The single user-localStorage keypair becomes both the auth identity AND the signing identity — no two-key system.
+**Status:** `[APPROVED 2026-04-26]` — discussed in DDoS analysis post-validation round 2; user explicitly chose option (2-B) over hardening-only (option 1) and per-user custody (option 2-A).
 
 ### Deviation 2: `mcp.mnemonik.xyz` subdomain (not `mcp.mnemonic.dev`)
 **User-spec says:** Original draft mentioned `mcp.mnemonic.dev`; updated to `mcp.mnemonik.xyz` after user clarification.
@@ -253,25 +305,31 @@ bash (cargo, curl, grep, git, npx). No MCP tools needed for verification — the
 **User-spec says:** "`payment.rs` НЕ рефакторится: для хакатона `PAYMENT_MODE=none`".
 **Tech-spec does:** Adds two `ALTER TABLE` migrations (idempotent `ADD COLUMN`). No code changes in `payment.rs`. The new `attestations.owner_pubkey` is required for ownership scope per Decision 9 (recall isolation). The new `api_keys.oauth_pubkey` links existing API key rows to OAuth-issued pubkeys for P1.5 billing wiring.
 **Why:** Schema additions are forward-only and backwards-compatible — existing rows remain valid. Without `attestations.owner_pubkey`, multi-tenant recall on hosted MCP cannot be safely scoped. Decision 9 mandates this.
-**Status:** `[PENDING USER APPROVAL]` — minor, but technically a deviation from "не рефакторится" if interpreted strictly.
+**Status:** `[APPROVED 2026-04-26]` — minor, but technically a deviation from "не рефакторится" if interpreted strictly.
 
 ### Deviation 4: `react-router-dom` added as new webapp dep
 **User-spec says:** Webapp implementation details not specified — the user-spec says only "Webapp `mnemonik.xyz` имеет 2 страницы". Routing tech is implicit choice.
 **Tech-spec does:** Adds `react-router-dom = ^6.27.0` to `webapp/package.json`. Current webapp uses internal state-based view switching with no router installed; URL routing (`/`, `/install`, `/chat`) requires a router (Decision 8). Skeptic validation flagged this as unstated.
 **Why:** URL routes are necessary for Smithery / Cursor / Claude.ai deeplinks to land on `/install` directly. Hash routing would break SSR/static-host expectations.
-**Status:** `[PENDING USER APPROVAL]` — minor, dependency addition needs explicit acknowledgement.
+**Status:** `[APPROVED 2026-04-26]` — minor, dependency addition needs explicit acknowledgement.
 
 ### Deviation 5: `MCP_JWT_SECRET` env var added
 **User-spec says:** Env vars for hosting not specified beyond existing `STORAGE_MODE` / `EMBED_PROVIDER` / etc.
 **Tech-spec does:** Adds `MCP_JWT_SECRET` (32-byte base64) to env vars. Generated once during deploy. Required by Decision 11 (HS256 JWT).
 **Why:** Without a stable secret, JWT validation breaks across server restarts.
-**Status:** `[PENDING USER APPROVAL]` — minor, deploy runbook addition.
+**Status:** `[APPROVED 2026-04-26]` — minor, deploy runbook addition.
+
+### Deviation 7: Server keypair (`MNEMONIC_KEYPAIR_PATH`) NO LONGER required for hosted MCP
+**User-spec says:** Hosted MCP runs in `STORAGE_MODE=local`; no explicit statement on signing identity.
+**Tech-spec does:** Per Decision 4 (revised), the hosted MCP does not perform COSE signing — the user's localStorage keypair signs all attestations via WASM. The `MNEMONIC_KEYPAIR_PATH` env var becomes optional for hosted deploys (only used by stdio self-host, where the existing single-tenant local CLI flow continues to work).
+**Why:** Browser-mediated signing eliminates the server's signing role. Removing the deploy-time keypair generation step simplifies hosted deploys and removes a security single-point-of-trust.
+**Status:** `[APPROVED 2026-04-26]` — discussed in DDoS analysis post-validation round 2.
 
 ### Deviation 6: Reviewer agent substitution for missing installed agents
 **User-spec says:** No specific reviewer constraint.
 **Tech-spec does:** Substitutes installed `security-auditor + test-reviewer` everywhere the catalog (`~/.claude/skills/tech-spec-planning/references/skills-and-reviewers.md`) lists `code-reviewer`, `infrastructure-reviewer`, or `deploy-reviewer` — those reviewer agents are NOT installed in `~/.claude/agents/` for this environment. Audit-wave skills `code-reviewing` and `test-master` are installed as skills (dispatched via the Skill tool), not as agents — acceptable per Audit Wave dispatch model.
 **Why:** Without the substitution, no review agent could actually run on tasks 1-7. The chosen substitutes cover code quality (via security-auditor's broader scope) and test quality (test-reviewer).
-**Status:** `[PENDING USER APPROVAL]` — operational reality, but technically deviation from catalog defaults.
+**Status:** `[APPROVED 2026-04-26]` — operational reality, but technically deviation from catalog defaults.
 
 ## Acceptance Criteria
 
@@ -284,7 +342,11 @@ Technical AC supplementing user-spec MUST:
 - [ ] `core/src/wasm/mod.rs` exists; gated by `#[cfg(target_arch = "wasm32")]` and `wasm` feature; native build does not include wasm-bindgen
 - [ ] `smithery.yaml` exists at repo root, references `mcp.mnemonik.xyz`
 - [ ] CI workflow includes MCP Inspector validation step on PR + `cargo audit` on PR
-- [ ] `mcp/tests/roundtrip_cose_via_http_proxy.rs`, `mcp/tests/recall_owner_isolation.rs`, `mcp/tests/stdio_backward_compat.rs`, `mcp/tests/oauth_flow.rs`, `mcp/tests/oauth_tool_call.rs`, `mcp/tests/rate_limit_routing.rs`, `mcp/tests/cors.rs`, `mcp/tests/auth_allowlist.rs` all exist and pass
+- [ ] `mcp/tests/roundtrip_cose_via_http_proxy.rs`, `mcp/tests/recall_owner_isolation.rs`, `mcp/tests/stdio_backward_compat.rs`, `mcp/tests/oauth_flow.rs`, `mcp/tests/oauth_tool_call.rs`, `mcp/tests/rate_limit_routing.rs`, `mcp/tests/cors.rs`, `mcp/tests/auth_allowlist.rs`, `mcp/tests/deferred_sign_flow.rs`, `mcp/tests/pending_authz.rs`, `mcp/tests/pending_expiry.rs`, `mcp/tests/pending_user_cap.rs` all exist and pass
+- [ ] Hosted MCP `mnemonic_sign_memory` returns `{status: "awaiting_signature", approve_url, correlation_id, expires_in}` (not an attestation_id)
+- [ ] `POST /api/sign-callback` rejects mismatched signer_pubkey ≠ jwt.sub with 403
+- [ ] `POST /api/sign-callback` for already-callbacked correlation_id returns 410 Gone (single-use)
+- [ ] WASM `sign_attestation_bundle(content, embedding, hash, owner_pubkey)` produces COSE_Sign1 verifiable by native `core/codec/sign::verify_payload`
 - [ ] DNS A-record for `mcp.mnemonik.xyz` resolves to VPS IP; HTTPS cert valid
 - [ ] Webapp routes `/`, `/install`, `/chat` all return 200; CSP header `default-src 'self'; ...` sent on each
 - [ ] Existing 5 MCP tools (`whoami`, `sign_memory`, `verify`, `prove_identity`, `recall`) signatures unchanged
@@ -306,8 +368,8 @@ Technical AC supplementing user-spec MUST:
 - **Files to modify:** `mcp/src/main.rs`, `mcp/src/mcp.rs`, `mcp/Cargo.toml`
 - **Files to read:** `mcp/src/main.rs`, `mcp/src/mcp.rs`, `work/mnemonic-integrations/code-research.md` §1
 
-#### Task 2: WASM bindgen wrappers in core
-- **Description:** Add `core/src/wasm/mod.rs` with `#[wasm_bindgen]` exports `generate_keypair`, `sign_challenge`, `export_keypair_json`, `import_keypair_json`. These are NEW helper wrappers — `core/src/identity/mod.rs` currently exports `load_or_create_keypair`, `pubkey_base58`, `did_sol`, `did_key`, `sign_bytes`, `verify_signature`. The new helpers compose the existing primitives: `generate_keypair = solana_sdk::Keypair::new()`, `sign_challenge = sign_bytes`, `export_keypair_json` / `import_keypair_json` are JSON serializers around the keypair byte array. Gate the entire `wasm` module behind `#[cfg(target_arch = "wasm32")]` AND a `wasm` feature flag in `core/Cargo.toml`. Add `wasm-bindgen-test`-driven unit tests per Testing Strategy.
+#### Task 2: WASM bindgen wrappers in core (incl. attestation signing)
+- **Description:** Add `core/src/wasm/mod.rs` with 5 `#[wasm_bindgen]` exports: `generate_keypair`, `sign_challenge`, `sign_attestation_bundle`, `export_keypair_json`, `import_keypair_json`. The first four are NEW helpers — `core/src/identity/mod.rs` exports primitives like `load_or_create_keypair`, `sign_bytes`, etc. `sign_attestation_bundle(content, embedding_bytes, content_hash, owner_pubkey)` builds the canonical-CBOR bundle (reusing `core/src/codec/canonical.rs`), blake3-hashes per existing flow, and signs via `core/src/codec/sign.rs::sign_payload` returning COSE_Sign1 bytes. Gate the entire `wasm` module behind `#[cfg(target_arch = "wasm32")]` AND a `wasm` feature flag in `core/Cargo.toml`. Add `wasm-bindgen-test`-driven unit tests per Testing Strategy (incl. `sign_attestation_bundle` round-trip with a native-side `verify`).
 - **Skill:** code-writing
 - **Reviewers:** security-auditor, test-reviewer
 - **Verify-smoke:** `cargo build -p mnemonic-core --features wasm --target wasm32-unknown-unknown && wasm-pack test --headless --chrome core --features wasm`
@@ -324,13 +386,21 @@ Technical AC supplementing user-spec MUST:
 
 ### Wave 2: OAuth + Smithery (parallel)
 
-#### Task 4: OAuth 2.1 + PKCE server module
-- **Description:** Implement `mcp/src/oauth.rs` per Decisions 9, 10, 11 — authorize and token endpoints, signed-challenge validation, HS256 JWT issuance, Bearer middleware with mandatory auth on `/mcp` (anonymous → 401), per-IP rate limiting via `tower_governor`. Run idempotent schema migrations on first connection (see Data Models section). Update `recall` SQL to require `owner_pubkey` parameter. Tighten CORS to exact origin `https://mnemonik.xyz`.
+#### Task 4a: OAuth 2.1 + PKCE server module
+- **Description:** Implement `mcp/src/oauth.rs` per Decisions 9, 10, 11 — authorize and token endpoints, signed-challenge validation (canonical CBOR contents per Decision 10), HS256 JWT issuance, Bearer middleware with explicit allowlist (`/oauth/*`, `/health`, `initialize`, `tools/list` open; `tools/call` requires JWT), per-IP rate limiting via `tower_governor`. Run idempotent schema migrations on first connection (see Data Models). Update `recall` SQL to require `owner_pubkey` parameter. Tighten CORS to exact origin `https://mnemonik.xyz`.
 - **Skill:** code-writing
 - **Reviewers:** security-auditor, test-reviewer
 - **Verify-smoke:** `cargo test -p mnemonic-mcp -- oauth && bash scripts/test-oauth-flow.sh` returns valid JWT
-- **Files to modify:** `mcp/src/oauth.rs` (new), `mcp/src/mcp.rs` (route registration + middleware), `mcp/src/main.rs` (state init), `mcp/src/tools.rs` (recall filter by `owner_pubkey`), `mcp/Cargo.toml`, `core/src/storage/sqlite.rs` (migration runner)
-- **Files to read:** `mcp/src/payment.rs`, `mcp/src/tools.rs`, `core/src/storage/sqlite.rs`, `work/mnemonic-integrations/code-research.md` §2, §6
+- **Files to modify:** `mcp/src/oauth.rs` (new), `mcp/src/mcp.rs` (route registration + middleware), `mcp/src/main.rs` (state init), `mcp/src/tools.rs` (recall filter by `owner_pubkey`), `mcp/Cargo.toml`, `core/src/storage/sqlite.rs` (migration runner), `core/src/storage/traits.rs` (search/save signature update)
+- **Files to read:** `mcp/src/payment.rs`, `mcp/src/tools.rs`, `core/src/storage/sqlite.rs`, `core/src/storage/traits.rs`, `work/mnemonic-integrations/code-research.md` §2, §6
+
+#### Task 4b: Browser-mediated signing infrastructure
+- **Description:** Implement `mcp/src/pending.rs` (new) hosting the `PendingBundles` LRU + TTL store per Decision 12. Rewrite `mcp/src/tools.rs::sign_memory` to: embed content, store unsigned bundle keyed by correlation_id, return `{status, approve_url, correlation_id, expires_in}` instead of completing inline. Add `GET /api/pending/<correlation_id>` endpoint (auth required, jwt.sub-scoped) returning the unsigned canonical-CBOR bundle. Add `POST /api/sign-callback` endpoint validating COSE signature against jwt.sub, persisting attestation, atomically evicting the bundle. Per-user soft cap (50 pending bundles per jwt.sub) returns 429 above limit.
+- **Skill:** code-writing
+- **Reviewers:** security-auditor, test-reviewer
+- **Verify-smoke:** `cargo test -p mnemonic-mcp -- pending sign_callback && bash scripts/test-deferred-sign-flow.sh` (helper script: OAuth → sign_memory → fetch pending → sign with test keypair → callback → recall returns it)
+- **Files to modify:** `mcp/src/pending.rs` (new), `mcp/src/tools.rs` (sign_memory rewrite), `mcp/src/mcp.rs` (route registration), `mcp/src/main.rs` (state init), `mcp/Cargo.toml` (lru crate)
+- **Files to read:** `mcp/src/tools.rs` (current sign_memory), `core/src/codec/canonical.rs`, `core/src/codec/sign.rs`, `core/src/codec/hash.rs`
 
 #### Task 5: Smithery listing + DNS subdomain + nginx
 - **Description:** Create `smithery.yaml` at repo root with `mcp.mnemonik.xyz` endpoint and OAuth flow declaration. Coordinate DNS A-record for `mcp.mnemonik.xyz` → VPS. Update nginx config (`/etc/nginx/sites-available/mnemonic` per `deployment.md`) to add subdomain server-block proxying to `localhost:3000`. Run `certbot --nginx -d mcp.mnemonik.xyz`. Submit listing to smithery.ai.
@@ -343,13 +413,13 @@ Technical AC supplementing user-spec MUST:
 
 ### Wave 3: UI + tests (parallel)
 
-#### Task 6: Webapp landing + install-hub + identity panel
-- **Description:** Add `webapp/src/pages/Landing.tsx` (route `/`) — protocol pitch + "Get started" CTA leading to `/install`. Add `webapp/src/pages/Install.tsx` (route `/install`) — identity panel (Generate / Import / Export keypair via WASM core) + deeplink buttons for Cursor / VS Code / Claude.ai. Move existing chat demo from `/` to `/chat`. Use existing Tailwind tokens from `ux-guidelines.md`.
+#### Task 6: Webapp landing + install-hub + identity panel + sign-approval page
+- **Description:** Add 3 new routes to webapp: `/` (Landing — protocol pitch + Get started CTA), `/install` (install-hub — deeplinks for Cursor/VS Code/Claude.ai + identity panel: Generate/Import/Export keypair via WASM), `/sign/<correlation_id>` (sign-approval — fetches pending bundle from `GET /api/pending/<id>` using JWT, displays content preview with monospace formatting + countdown timer for 5-min TTL + "Sign with my Mnemonic identity" / "Reject" buttons; on Sign calls `sign_attestation_bundle` via WASM, posts result to `POST /api/sign-callback`). Move existing chat demo from `/` to `/chat`. Use existing Tailwind tokens from `ux-guidelines.md`.
 - **Skill:** code-writing
 - **Reviewers:** security-auditor, test-reviewer
-- **Verify-smoke:** `cd webapp && npm run dev` — open localhost:5173/, /install, /chat — all render without console errors
-- **Verify-user:** On `/install`, click "Generate keypair" → DID/pubkey appears → click "Download backup" → JSON file with valid Ed25519 keypair
-- **Files to modify:** `webapp/src/App.tsx` (router), `webapp/src/pages/Landing.tsx` (new), `webapp/src/pages/Install.tsx` (new), `webapp/src/components/IdentityPanel.tsx` (new), `webapp/src/components/InstallButtons.tsx` (new)
+- **Verify-smoke:** `cd webapp && npm run dev` — open localhost:5173/, /install, /chat, /sign/test-uuid — all render without console errors
+- **Verify-user:** Full flow on localhost: Generate keypair on /install → fake POST to /mcp tools/call sign_memory (via curl with test JWT) → open returned approve_url → see content preview → click Sign → 200 OK back → next /mcp tools/call recall returns the persisted attestation
+- **Files to modify:** `webapp/src/App.tsx` (router setup with react-router-dom), `webapp/src/pages/Landing.tsx` (new), `webapp/src/pages/Install.tsx` (new), `webapp/src/pages/Sign.tsx` (new), `webapp/src/components/IdentityPanel.tsx` (new), `webapp/src/components/InstallButtons.tsx` (new), `webapp/src/components/ContentPreview.tsx` (new)
 - **Files to read:** `webapp/src/App.tsx`, `.claude/skills/project-knowledge/references/ux-guidelines.md`, `webapp/src/wasm/` (generated by Task 3)
 
 #### Task 7: Integration tests + MCP Inspector CI
