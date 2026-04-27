@@ -457,3 +457,46 @@ Prepared three deliverables for the Smithery listing + `mcp.mnemonik.xyz` subdom
 
 - security-auditor: pending (`work/mnemonic-integrations/logs/working/task-8/security-auditor-1.json`)
 - test-reviewer: pending (`work/mnemonic-integrations/logs/working/task-8/test-reviewer-1.json`)
+
+---
+
+## Task 9 — Pre-demo manual smoke checklist (T9-impl)
+
+**Date:** 2026-04-26
+**Status:** Authored. Awaiting first dry run.
+
+### What changed
+
+- **New:** `work/mnemonic-integrations/tasks/smoke-checklist.md` — single-operator end-to-end manual smoke checklist for the Phase 1 deferred-sign flow. Ten sequential steps (fresh-browser onboarding → keypair gen → backup → Cursor deeplink → OAuth → sign_memory + /sign/<id> → recall → Claude.ai Pro custom connector → cross-tool recall → cross-device import). Each step has `Action / Expected / Recovery / ETA` sub-headings; per-step ETAs sum to 750s (12.5 min) inside the 30 min cap, leaving ~17 min slack for OS/browser idiosyncrasies.
+- Includes a **Prerequisites** block (Cursor + Claude.ai Pro + fresh Chrome profile + second laptop + admin emergency keypair + deployed MCP/webapp), a **Pre-demo dry run** section (run 24h before stage demo, log results in `decisions.md`), a **Live-demo backup plan** section addressing user-spec Risk R7 (pre-recorded video URL placeholder + local stdio MCP fallback procedure + network preflight curl commands), and a **Run log template** (table with start/end/pass-fail/notes per step) intended to be filled in once per dry run and once per live run, then attached to the QA reports for Tasks 12 and 14.
+- All Recovery notes are concrete fallback actions (never "debug it"), referencing localStorage clear, deeplink href copy, JWT reset, TTL re-issue, or abort-and-report when integrity guarantees break (e.g. cross-device DID mismatch).
+
+### Verification
+
+- File exists at `work/mnemonic-integrations/tasks/smoke-checklist.md`.
+- Ten steps, in the order listed in Task 9 description.
+- All ten steps have all four sub-headings (`Action`, `Expected`, `Recovery`, `ETA`).
+- Per-step ETAs: 30s + 30s + 30s + 60s + 30s + 120s + 30s + 60s + 60s + 300s = 750s ≤ 1800s.
+- No emojis (verified via Unicode-range scan).
+
+### Deviations
+
+- **File length is 306 lines, not 80–120 as Task 9.md AC suggests.** The dispatcher prompt asked for thorough coverage including the Live-demo backup plan, Pre-demo dry-run section, and a copy-paste Run log table; together with ten 4-tuple steps + Prerequisites + Purpose/Failure-policy preamble, the content density floor sits around 280–310 lines while remaining concise (no redundant prose, every Action/Expected/Recovery/ETA is single-purpose). The 80–120 target is not achievable without sacrificing verbatim strings and explicit URL/command quotes that make the file executable by a stranger.
+- **Live-demo backup video URL is a placeholder** (`https://mnemonik.xyz/demo-fallback.mp4`). Update once the recording is uploaded; until then, a verbal "fallback to local stdio" remains the only mitigation.
+- **Local stdio fallback uses a different DID** (file-based keypair, not the operator's localStorage keypair). Documented inline so the operator frames it as a "self-host preview", not as continuity of the prior recall.
+
+### Concerns / follow-ups
+
+- **First dry run not yet executed.** Per Task 9 post-completion checklist, the dry run should be logged in `decisions.md` with operator + wall-clock time. To be appended after the run.
+- **No screenshot embedding.** Intentional (per Task 9.md implementation hint — "screenshots drift"). Verbatim text + URLs only.
+- **Step 8 (Claude.ai Pro)** depends on the deployed `https://mcp.mnemonik.xyz` being reachable from Anthropic's egress IPs. Risk R3 (IP allowlist) — the dry run is the first time we exercise that path against the live deploy; if it fails, file a bug under Task 13/14 and update the checklist with the WAF / Cloudflare-rule fix.
+
+### Files changed
+
+- `work/mnemonic-integrations/tasks/smoke-checklist.md` (new — 306 lines)
+- `work/mnemonic-integrations/decisions.md` (this entry)
+
+### Reviewer reports
+
+- No reviewers assigned to Task 9 (per `tasks/9.md` frontmatter `reviewers: []`).
+- Acceptance gate: Verify-user run by a non-author team member; Test Audit (Task 11) inspects for unambiguity.
