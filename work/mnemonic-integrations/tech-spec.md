@@ -93,15 +93,29 @@ Total scope: ~11 dev-days, 14 implementation tasks across 4 waves + audit + fina
 **Rationale:** Landing must be the entry point for hackathon visitors — the chat demo is supplementary content, not the primary CTA. Preserves existing demo for users who arrive via direct link to `/chat`.
 **Alternatives:** Replace `/chat` entirely — rejected, removes existing functionality without user-spec authorization. Leave root unchanged — rejected, no clear entry point for the integration story. Hash-based routing without `react-router-dom` — rejected, doesn't match Smithery / deeplink patterns expected by external services.
 
-### Decision 9: Mandatory ownership filter + per-IP rate limit on `/mcp`
-**Decision:** `recall` SQL query in `core/src/storage/sqlite.rs::search_attestations` adds a mandatory `WHERE owner_pubkey = ?` clause — no anonymous/unfiltered path. The HTTP middleware rejects requests to `/mcp` without a valid Bearer JWT (HTTP 401), except `/oauth/*` and `/health`. Add `tower_governor`-based per-IP rate limit on `/mcp`: `sign_memory ≤ 5 req/min/IP`, `recall ≤ 30 req/min/IP`, applied regardless of `PAYMENT_MODE`. Rate limits don't apply to stdio transport.
-**Rationale:** Hackathon demo on a public Smithery-listed endpoint with `PAYMENT_MODE=none` is a DoS / data-fill / fee-burn target. Plus: an unauthenticated `/mcp` recall returning rows from any tenant is a privacy disaster regardless of payment. Supports user-spec MUST: "Backward-compat: stdio transport работает как сейчас" (stdio bypass) and addresses security-auditor critical findings 1 & 2.
-**Alternatives:** Accept anonymous `/mcp` for demo simplicity — rejected, security boundary is non-negotiable. Auth-gate `/mcp` but skip rate limit — rejected, public endpoint without rate limit is exploit-bait.
+### Decision 9: Mandatory ownership filter + per-IP rate limit on `/mcp` + auth allowlist
+**Decision:** `recall` SQL query in `core/src/storage/sqlite.rs::search` adds a mandatory `owner_pubkey: &str` parameter; the trait definition in `core/src/storage/traits.rs` is updated to match. SQL gains `WHERE owner_pubkey = ?` — no anonymous/unfiltered path.
 
-### Decision 10: OAuth signed-challenge contents
-**Decision:** The challenge the user signs at `/oauth/authorize` is `blake3(state || client_id || redirect_uri || code_challenge || nonce)` where `nonce` is a server-generated 16-byte random per-authorization. The server stores `(challenge_hash, expected_pubkey, expiry=60s)` keyed by `state`; rejects mismatched signature, replay (single-use), and stale challenges.
-**Rationale:** Without binding the signature to `client_id`/`redirect_uri`/`code_challenge`, an attacker can replay a captured signature against a different client config (token theft / authorize-request injection). `state` binds CSRF; `nonce` prevents pre-computed-signature replay. Supports security-auditor finding #3.
-**Alternatives:** Sign just the `code_challenge` — rejected, allows authorize-request swap. No `state` — rejected, classic CSRF.
+The HTTP middleware uses an **explicit allowlist** for unauthenticated routes: `/oauth/authorize`, `/oauth/token`, `/health`, plus the MCP discovery methods `initialize` and `tools/list` (the latter two needed for connector-install handshake before OAuth completes — Cursor/Claude.ai POST `tools/list` first to confirm the server is reachable, then trigger OAuth). All other JSON-RPC methods including `tools/call` (sign_memory, recall, etc.) require valid Bearer JWT or return HTTP 401.
+
+Add `tower_governor` per-IP rate limit on `/mcp`: `sign_memory ≤ 5 req/min/IP`, `recall ≤ 30 req/min/IP`, applied regardless of `PAYMENT_MODE`. Rate limits don't apply to stdio transport. **Note**: the existing `mcp/Cargo.toml` already has `governor = "0.8"` (used by `pricing.rs` for CoinGecko throttling). Task 4 must reconcile — pin `tower_governor` to the version compatible with `governor = "0.8"` (likely `tower_governor = "0.5"` or higher); pre-condition check: `cargo tree -p tower_governor` after adding the dep, must not introduce duplicate `governor` versions.
+
+CORS on `/mcp` is narrowed to `Authorization, Content-Type` headers only and explicit origin `https://mnemonik.xyz` (no `Any` wildcard); `/oauth/*` and `/health` already use this same origin allowlist.
+**Rationale:** Hackathon demo on a public Smithery-listed endpoint with `PAYMENT_MODE=none` is a DoS / data-fill / fee-burn target. Anonymous `/mcp` recall returning rows from any tenant is a privacy disaster. Without `initialize`/`tools/list` allowlist, MCP connector install fails because clients can't discover tools before completing OAuth. Supports user-spec MUST: "Backward-compat: stdio transport работает как сейчас" and addresses security-auditor critical findings 1 & 2 + round-2 critical regression.
+**Alternatives:** Accept anonymous `/mcp` for demo simplicity — rejected, security boundary is non-negotiable. Require auth on `tools/list` — rejected, breaks MCP discovery flow. Auth-gate `/mcp` but skip rate limit — rejected, public endpoint without rate limit is exploit-bait.
+
+### Decision 10: OAuth signed-challenge contents — canonical CBOR encoding
+**Decision:** The challenge the user signs at `/oauth/authorize` is `blake3(canonical_cbor({server_origin, state, client_id, redirect_uri, code_challenge, code_challenge_method, nonce, exp}))` where:
+- `server_origin = "https://mcp.mnemonik.xyz"` — binds challenge to this server's origin (defeats CursorJack typo-squat where attacker spoofs a malicious endpoint)
+- `state` — 16-byte random from client (CSRF binding)
+- `client_id`, `redirect_uri` — from authorize request
+- `code_challenge`, `code_challenge_method` — must be `"S256"` (rejected if other method)
+- `nonce` — 16-byte server-generated random
+- `exp` — 60-second expiry timestamp
+
+Canonical CBOR encoding (per `core/src/codec/canonical.rs`) ensures unambiguous serialization — no length-extension or delimiter-injection ambiguity. The server stores `(challenge_hash, expected_pubkey, exp)` keyed by `state`; on `/oauth/authorize` callback, validates signature, atomically removes the entry from the store (single-use, prevents replay), and rejects stale (exp passed) or unknown state.
+**Rationale:** Concatenation without delimiters allows ambiguous-encoding attacks (`a || bc` vs `ab || c`). Canonical CBOR is already used in `core/codec` for COSE — reuse the same primitive. Server-origin binding closes CursorJack residual risk. S256-only enforcement at the protocol layer prevents PKCE downgrade. Atomic single-use prevents TOCTOU replay between sig-verify and code-issue. Supports security-auditor round 2 majors #2 + #3.
+**Alternatives:** Length-prefix concatenation — rejected, ad-hoc and easy to mis-implement. Plain string join with `|` — rejected, ambiguous if any field contains `|`. JSON canonical — rejected, less stable than CBOR (key ordering, whitespace).
 
 ### Decision 11: JWT format — HS256, 1-hour TTL, secret in env
 **Decision:** JWT uses HS256 with secret loaded from `MCP_JWT_SECRET` env var (32-byte base64). Claims: `iss=mcp.mnemonik.xyz`, `aud=mcp`, `sub=<user_pubkey_b58>`, `iat`, `exp` (1 hour TTL), `jti` (UUIDv4 for tracking). Server verifies `iss` and `aud` on every request. No refresh tokens in Phase 1 — re-auth required after expiry. Algorithm is fixed at HS256 in code (no `alg=none` or RS256 acceptance) to prevent algorithm confusion attacks.
@@ -116,9 +130,12 @@ Total scope: ~11 dev-days, 14 implementation tasks across 4 waves + audit + fina
 
 - `attestations` table: **`ALTER TABLE attestations ADD COLUMN owner_pubkey TEXT;`** — base58 OAuth user pubkey for ownership scope. The existing `signer_pubkey` column already exists (set to the hosted server's keypair per Decision 4) and is **distinct** from `owner_pubkey`. NOTE: `attestations` table does **not** currently have a `owner_pubkey` column (see `core/src/storage/sqlite.rs:13-29` schema). This migration adds it.
 - `api_keys` table: **`ALTER TABLE api_keys ADD COLUMN oauth_pubkey TEXT;`** — links existing API key rows to the OAuth-issued pubkey. The existing `owner_pubkey` column on `api_keys` is unrelated to the new `attestations.owner_pubkey` (different semantic — `api_keys.owner_pubkey` is the deposit owner; `attestations.owner_pubkey` is the per-attestation tenant scope).
-- `save_attestation` (in `core/src/storage/sqlite.rs:149-182`) signature gains a non-optional `owner_pubkey: &str` parameter. The MCP tool dispatcher passes the JWT-resolved pubkey down. CLI/stdio callers (without JWT) pass the keypair-loaded pubkey from `MNEMONIC_KEYPAIR_PATH` so existing local CLI flows continue to work.
 
-**`recall` query** filters by `owner_pubkey = ?` **always** in HTTP transport. No "returns all rows" carve-out — that path was removed after security audit (see Decision 9). For stdio transport (no JWT), the filter resolves to the local-keypair pubkey — preserving single-tenant local CLI semantics.
+**Migration mechanism:** the existing `SqliteStore::open` in `core/src/storage/sqlite.rs` runs `conn.execute_batch(SCHEMA)` on first connection and has one ad-hoc helper `migrate_payment_events_unique_index`. Add a parallel helper `migrate_owner_pubkey_columns(conn: &Connection) -> Result<()>` invoked from `open` and `in_memory` constructors. The helper queries `PRAGMA table_info(attestations)` / `table_info(api_keys)`, runs the `ALTER` only if the column is absent — idempotent across deploys.
+
+`save` (in `core/src/storage/traits.rs:33-44` + `core/src/storage/sqlite.rs:150-182`) gains a non-optional `owner_pubkey: &str` parameter. The MCP tool dispatcher passes the JWT-resolved pubkey down. CLI/stdio callers (without JWT) pass the keypair-loaded pubkey from `MNEMONIC_KEYPAIR_PATH` so existing local CLI flows continue to work.
+
+**`search` query** (in `core/src/storage/traits.rs:50` + `core/src/storage/sqlite.rs:212`) gains a non-optional `owner_pubkey: &str` parameter. SQL filters by `WHERE owner_pubkey = ?` **always**. No "returns all rows" carve-out. For stdio transport (no JWT), the filter resolves to the local-keypair pubkey — preserving single-tenant local CLI semantics.
 
 ## Dependencies
 
@@ -127,7 +144,7 @@ Total scope: ~11 dev-days, 14 implementation tasks across 4 waves + audit + fina
 **`mcp/Cargo.toml`:**
 - `oauth2 = "=4.4.2"` (pinned) — OAuth 2.1 client/server primitives for `code_verifier`/`code_challenge` validation
 - `jsonwebtoken = "=9.3.0"` (pinned) — JWT issue + validate
-- `tower_governor = "=0.4.2"` (pinned) — per-IP rate limiting on `/mcp` (Decision 9)
+- `tower_governor` — per-IP rate limiting on `/mcp` (Decision 9). **Version selection deferred to Task 4 implementation:** `mcp/Cargo.toml` already contains `governor = "0.8"` (used by `pricing.rs`). The chosen `tower_governor` version must be compatible — Task 4 author runs `cargo tree -p tower_governor -p governor` after adding the dep and pins to a version that does not introduce a duplicate `governor` major version. Prefer `tower_governor = "0.5"` or later (compatible with `governor = "0.8"`).
 - Tech-spec author MUST verify each pinned version on crates.io before Task 4 starts; if a pinned version is yanked, update spec and re-run dependency audit.
 - CI gains `cargo audit` step on every PR to catch newly-disclosed CVEs in pinned versions.
 
@@ -162,9 +179,12 @@ None.
 - **OAuth full flow** (`mcp/tests/oauth_flow.rs`, 1 test): boot Axum app in test mode, simulate browser flow (POST /authorize with signed challenge containing `state`, `client_id`, `redirect_uri`, `code_challenge`, `nonce`; GET /token with code+verifier; parse JWT), assert pubkey roundtrip + JWT claims (`iss`, `aud`, `sub`, `exp`)
 - **MCP tool call with OAuth** (`mcp/tests/oauth_tool_call.rs`, 1 test): obtain JWT via flow above, call `tools/list` with Bearer header, assert 5 tools returned and `tools/call sign_memory` succeeds, attestation row has `owner_pubkey = <jwt.sub>` and `local:` ID prefix
 - **Recall ownership isolation** (`mcp/tests/recall_owner_isolation.rs`, 1 test, **CRITICAL** — addresses test-reviewer / security-auditor critical findings): boot Axum app, mint 2 distinct JWTs (user A + user B); user A signs 2 attestations, user B signs 1; user B's recall returns ONLY user B's row, never user A's; anonymous request to `/mcp` recall (no Bearer) returns 401 (not 200 with rows)
-- **Stdio backward-compat** (`mcp/tests/stdio_backward_compat.rs`, 1 test): spawn `mnemonic-mcp --transport stdio` subprocess, pipe `tools/list` then `tools/call sign_memory` then `tools/call recall` JSON-RPC; assert round-trip succeeds without OAuth (single-tenant with local keypair)
+- **Stdio backward-compat** (`mcp/tests/stdio_backward_compat.rs`, 1 test): spawn pre-built `mnemonic-mcp --transport stdio` binary (cached from build step; not `cargo run` to avoid build-vs-run race) with `EMBED_PROVIDER=mock` and `STORAGE_MODE=local`, pipe `tools/list` then `tools/call sign_memory` then `tools/call recall` JSON-RPC, each request wrapped in `tokio::time::timeout(Duration::from_secs(5))`; assert round-trip succeeds without OAuth (single-tenant with local keypair)
 - **COSE round-trip via adversarial mock proxy** (`mcp/tests/roundtrip_cose_via_http_proxy.rs`, 1 test): boot mock proxy that **mutates** JSON byte-for-byte differently from std `serde_json` (e.g., re-orders object keys alphabetically, normalizes whitespace, re-encodes numbers using `simd-json` instead of `serde_json`); send `sign_memory` through it; verify base64-encoded CBOR field survives unmutated (committing to base64-string-field encoding per Decision 7 + R1 mitigation, not relying on JSON-byte-stability)
-- **MCP Inspector** (CI-only, GitHub Action step): start server with test JWT in background, `wait-for-port 3000` script with 30s timeout polling `curl http://localhost:3000/health`, then `npx @modelcontextprotocol/inspector@<pinned> --validate http://localhost:3000/mcp -H "Authorization: Bearer ${TEST_JWT}"`
+- **MCP Inspector** (CI-only, GitHub Action step): start server with test JWT in background (`EMBED_PROVIDER=mock STORAGE_MODE=local mnemonic-mcp --transport http --port 3000 &`), `wait-for-port 3000` script with 30s timeout polling `curl -fsS http://localhost:3000/health`, then `npx @modelcontextprotocol/inspector@0.6.x --validate http://localhost:3000/mcp -H "Authorization: Bearer ${TEST_JWT}"`. Pinned npx version (currently latest 0.6.x at time of writing — bump in tandem with MCP spec releases).
+- **Rate-limit wired** (`mcp/tests/rate_limit_routing.rs`, 1 test): boots the actual `mcp/src/main.rs` Axum router (not just the limiter logic) with `tower_governor` configured per Decision 9; sends 6 `sign_memory` requests from the same simulated IP within 60s, asserts the 6th returns HTTP 429. Catches `.layer()` ordering regressions where the limiter is defined but not wired.
+- **CORS exact-origin** (`mcp/tests/cors.rs`, 1 test): sends two preflight `OPTIONS` requests with `Origin: https://mnemonik.xyz` (allowed) and `Origin: https://evil.example.com` (rejected); asserts `Access-Control-Allow-Origin` header on the first only and 403 on the second. Implements Risks-table mitigation requirement.
+- **Authorize-allowlist coverage** (`mcp/tests/auth_allowlist.rs`, 1 test): sends `tools/list` and `initialize` JSON-RPC without Authorization header — asserts both return 200 (per Decision 9 allowlist). Sends `tools/call sign_memory` without auth — asserts 401. Catches future regressions if someone tightens the allowlist to break MCP discovery.
 
 ### Manual smoke tests (pre-demo checklist in `tasks/`)
 1. Open `mnemonik.xyz` on fresh browser (no localStorage) → see landing → "Get Started" → identity panel shows new keypair → click "Download backup" → verify JSON file content
@@ -206,7 +226,7 @@ bash (cargo, curl, grep, git, npx). No MCP tools needed for verification — the
 | Streamable HTTP spec compliance is moving target — Anthropic/OpenAI proxies may have undocumented quirks | Implement against `modelcontextprotocol` Rust SDK reference; test with pinned `npx @modelcontextprotocol/inspector` on every PR. Live-validate with Cursor + Claude.ai before demo. |
 | OAuth flow needs user-signed challenge but webapp ↔ MCP CORS could block POST | Configure `tower-http::cors::CorsLayer` allow-listed to **exact** origin `https://mnemonik.xyz` (no `Any` wildcard) on `/oauth/*` endpoints. Test in CI with a request from a different origin asserting 403/CORS-rejected. |
 | WASM keypair lost when user clears browser → identity loss → demo embarrassment | Aggressive "Download backup" prompt on first generation; warning before page exit if backup not downloaded. Demo dry-run with a pre-saved backup as fallback. localStorage value is encrypted via `crypto.subtle` AES-GCM with passphrase derived from a session secret + user-entered PIN (P1.5 may upgrade to passkey). |
-| XSS in webapp → localStorage keypair theft | Strict CSP header (`default-src 'self'; script-src 'self'; connect-src 'self' mcp.mnemonik.xyz`) on webapp. `import_keypair_json` validates JSON shape + Ed25519 byte length before storing; suspicious input rejected with user-visible error. |
+| XSS in webapp → localStorage keypair theft | Comprehensive CSP header on webapp: `default-src 'self'; script-src 'self'; connect-src 'self' https://mcp.mnemonik.xyz; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; frame-ancestors 'none'; base-uri 'self'; object-src 'none'; form-action 'self'`. `import_keypair_json` validates JSON shape + Ed25519 byte length (32-byte secret + 32-byte public) before storing; suspicious input rejected with user-visible error. localStorage value encrypted via `crypto.subtle` AES-GCM with passphrase-derived key (P1.5 → passkey). |
 | `mcp.mnemonik.xyz` subdomain needs DNS + SSL cert before demo | Schedule DNS update in Wave 2 (Smithery task); use existing `certbot` flow per `deployment.md`. Validate DNS propagation 24h before demo. |
 | COSE byte-stability through proxies fails despite mock test | **Default to base64-encoded CBOR in JSON string field** (not JSON-byte-stability). Adversarial mock proxy in CI test forces this encoding to be the only safe one. |
 | `STORAGE_MODE=local` ownership scope (`owner_pubkey`) leaks across users if filter forgotten | Decision 9 makes the SQL-level filter mandatory. Test `recall_owner_isolation` enforces cross-tenant assertion in CI. SQL helper function `search_attestations(owner_pubkey, query, limit)` requires the parameter at compile time — no signature without it. |
@@ -247,6 +267,12 @@ bash (cargo, curl, grep, git, npx). No MCP tools needed for verification — the
 **Why:** Without a stable secret, JWT validation breaks across server restarts.
 **Status:** `[PENDING USER APPROVAL]` — minor, deploy runbook addition.
 
+### Deviation 6: Reviewer agent substitution for missing installed agents
+**User-spec says:** No specific reviewer constraint.
+**Tech-spec does:** Substitutes installed `security-auditor + test-reviewer` everywhere the catalog (`~/.claude/skills/tech-spec-planning/references/skills-and-reviewers.md`) lists `code-reviewer`, `infrastructure-reviewer`, or `deploy-reviewer` — those reviewer agents are NOT installed in `~/.claude/agents/` for this environment. Audit-wave skills `code-reviewing` and `test-master` are installed as skills (dispatched via the Skill tool), not as agents — acceptable per Audit Wave dispatch model.
+**Why:** Without the substitution, no review agent could actually run on tasks 1-7. The chosen substitutes cover code quality (via security-auditor's broader scope) and test quality (test-reviewer).
+**Status:** `[PENDING USER APPROVAL]` — operational reality, but technically deviation from catalog defaults.
+
 ## Acceptance Criteria
 
 Technical AC supplementing user-spec MUST:
@@ -258,7 +284,7 @@ Technical AC supplementing user-spec MUST:
 - [ ] `core/src/wasm/mod.rs` exists; gated by `#[cfg(target_arch = "wasm32")]` and `wasm` feature; native build does not include wasm-bindgen
 - [ ] `smithery.yaml` exists at repo root, references `mcp.mnemonik.xyz`
 - [ ] CI workflow includes MCP Inspector validation step on PR + `cargo audit` on PR
-- [ ] `mcp/tests/roundtrip_cose_via_http_proxy.rs`, `mcp/tests/recall_owner_isolation.rs`, `mcp/tests/stdio_backward_compat.rs`, `mcp/tests/oauth_flow.rs`, `mcp/tests/oauth_tool_call.rs` all exist and pass
+- [ ] `mcp/tests/roundtrip_cose_via_http_proxy.rs`, `mcp/tests/recall_owner_isolation.rs`, `mcp/tests/stdio_backward_compat.rs`, `mcp/tests/oauth_flow.rs`, `mcp/tests/oauth_tool_call.rs`, `mcp/tests/rate_limit_routing.rs`, `mcp/tests/cors.rs`, `mcp/tests/auth_allowlist.rs` all exist and pass
 - [ ] DNS A-record for `mcp.mnemonik.xyz` resolves to VPS IP; HTTPS cert valid
 - [ ] Webapp routes `/`, `/install`, `/chat` all return 200; CSP header `default-src 'self'; ...` sent on each
 - [ ] Existing 5 MCP tools (`whoami`, `sign_memory`, `verify`, `prove_identity`, `recall`) signatures unchanged
@@ -326,8 +352,8 @@ Technical AC supplementing user-spec MUST:
 - **Files to modify:** `webapp/src/App.tsx` (router), `webapp/src/pages/Landing.tsx` (new), `webapp/src/pages/Install.tsx` (new), `webapp/src/components/IdentityPanel.tsx` (new), `webapp/src/components/InstallButtons.tsx` (new)
 - **Files to read:** `webapp/src/App.tsx`, `.claude/skills/project-knowledge/references/ux-guidelines.md`, `webapp/src/wasm/` (generated by Task 3)
 
-#### Task 7: COSE round-trip + ownership-isolation + stdio-compat tests + MCP Inspector CI
-- **Description:** Add 4 integration tests per Testing Strategy: `roundtrip_cose_via_http_proxy.rs` (adversarial mock proxy that mutates JSON byte order/whitespace), `recall_owner_isolation.rs` (cross-tenant assertion + 401 for anonymous), `stdio_backward_compat.rs` (subprocess test confirming stdio round-trip), and expand `oauth_flow.rs` per finding-driven test list. Update `.github/workflows/ci.yml` to add: MCP Inspector validation step (with `wait-for-port` readiness probe + test JWT), `cargo audit` step, schema validation step for `smithery.yaml`.
+#### Task 7: Integration tests + MCP Inspector CI
+- **Description:** Add 7 integration tests per Testing Strategy: `roundtrip_cose_via_http_proxy.rs`, `recall_owner_isolation.rs`, `stdio_backward_compat.rs`, `rate_limit_routing.rs`, `cors.rs`, `auth_allowlist.rs`, plus expanded `oauth_flow.rs`. Update `.github/workflows/ci.yml` to add: MCP Inspector validation step (with `wait-for-port` readiness probe + pre-built binary + test JWT), `cargo audit` step, schema validation step for `smithery.yaml`.
 - **Skill:** code-writing
 - **Reviewers:** security-auditor, test-reviewer
 - **Verify-smoke:** `cargo test -p mnemonic-mcp roundtrip_cose_via_http_proxy` passes; CI run shows MCP Inspector step green

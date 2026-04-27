@@ -1,0 +1,54 @@
+{
+  "status": "approved",
+  "findings": [
+    {
+      "severity": "major",
+      "category": "task_quality",
+      "issue": "Task 11 (Test Audit) declares Skill `test-master`, but `test-master` is NOT installed as an agent file in ~/.claude/agents/ (only `pytest-master.md` exists). The catalog references `test-master` as an Audit Wave skill, but if Task 11 is dispatched as an audit task that runs an agent, it will fail to launch. Round 1 noted similar reviewer-agent absences as critical; the test-master skill has the same operational issue but as a skill/agent rather than a reviewer. Note: `test-master` IS a skill in `~/.claude/skills/` (per Skill tool listing), so if the spec uses the Skill tool path it works; if it uses an Agent path it breaks.",
+      "fix": "Confirm with feature-execution which dispatch path applies. If audit tasks invoke a skill (Skill tool), keep `test-master` and add a brief note. If they invoke an agent, switch to `test-reviewer` (which IS installed) or install a `test-master` agent file. Same applies to Task 9 (`code-reviewing`) — the skill exists, but no agent file by that name exists. Consider explicit notation: `Skill: test-master (skill path, not agent)`."
+    },
+    {
+      "severity": "major",
+      "category": "task_quality",
+      "issue": "Task 2 (WASM bindgen wrappers) description grew to ~5 sentences and now embeds implementation-step detail: 'generate_keypair = solana_sdk::Keypair::new()', 'sign_challenge = sign_bytes', 'export_keypair_json / import_keypair_json are JSON serializers around the keypair byte array'. This crosses from scope-description into implementation steps. The detail belongs in the task file generated during decomposition, not in the tech-spec.",
+      "fix": "Trim Task 2 description to 3 sentences: (1) the four `#[wasm_bindgen]` exports the module must provide, (2) note that wrappers compose existing `core/src/identity/mod.rs` primitives, (3) feature-flag/cfg-gate scope. Move the per-function mapping (generate_keypair = Keypair::new, sign_challenge = sign_bytes, etc.) into the task file during decomposition."
+    },
+    {
+      "severity": "major",
+      "category": "task_quality",
+      "issue": "Task 4 (OAuth 2.1 + PKCE server module) description is now 4-5 sentences and still implicitly references SQL migrations via 'Run idempotent schema migrations on first connection (see Data Models section)'. While the literal SQL is no longer duplicated (improvement vs round 1), the description still bundles 5 concerns: OAuth endpoints, JWT issuance, Bearer middleware, recall SQL change, CORS tightening. This is borderline; flagging as major because the task touches 6 files and is the highest-risk task in the spec.",
+      "fix": "Acceptable to leave as-is given the cross-cutting nature of OAuth + middleware, but consider splitting into Task 4a (OAuth endpoints + JWT) and Task 4b (Bearer middleware + recall ownership filter + CORS). At minimum, ensure decomposition produces atomic task files per Decision (9, 10, 11) so the integration task doesn't balloon."
+    },
+    {
+      "severity": "minor",
+      "category": "task_quality",
+      "issue": "Round 1 minor finding about Task 12 / Task 14 missing `Files to modify` field is partially fixed — Task 12 has `- **Files to modify:** N/A (testing only — produces report in decisions.md)` and Task 14 has the same N/A pattern. Good. However Task 13 still lists `VPS nginx config (out-of-tree)` and `GitHub Actions workflow if Cloudflare Pages deploy is added` (conditional) — round 1 minor finding on Task 13 unaddressed.",
+      "fix": "Specify concrete in-tree paths only for Task 13 Files to modify. Move out-of-tree nginx changes into a runbook (deployment.md) and reference it from the description."
+    },
+    {
+      "severity": "minor",
+      "category": "task_quality",
+      "issue": "Audit tasks (9, 10, 11) still lack `Verify-smoke` / `Verify-user` / `Verify` field. Round 1 minor finding unaddressed. Per the validator's section 5b, audit tasks may legitimately omit these (audit IS the verification), so this is informational only.",
+      "fix": "Optional: add `- **Verify:** Audit report appended to work/mnemonic-integrations/decisions.md` to each audit task for consistency."
+    },
+    {
+      "severity": "minor",
+      "category": "time_estimates",
+      "issue": "Solution paragraph (line 18) still mentions '~11 dev-days, 14 implementation tasks'. Round 1 minor finding unaddressed. Per validator section 7, time-based estimates are out of place in tech-spec.",
+      "fix": "Either remove '~11 dev-days' from the Solution paragraph, or move it to a `## Scope (informational)` line citing the user-spec constraint. Tasks/waves themselves correctly carry no time estimates."
+    },
+    {
+      "severity": "minor",
+      "category": "task_quality",
+      "issue": "Reviewer catalog deviation: per the catalog, `code-writing` skill defaults to `[code-reviewer, security-auditor, test-reviewer]` and `infrastructure-setup` defaults to `[code-reviewer, security-auditor, infrastructure-reviewer]`. The author has substituted `[security-auditor, test-reviewer]` everywhere because the catalog-listed `code-reviewer` and `infrastructure-reviewer` agents are not installed. This is the correct pragmatic choice given the agent absence, but it is technically a deviation from the catalog.",
+      "fix": "Add a User-Spec Deviation 6 (or a 'Reviewer Catalog Deviation' note) explicitly stating: 'Catalog defaults reference `code-reviewer` and `infrastructure-reviewer` agents that are not installed in this environment. Tasks substitute `security-auditor + test-reviewer` (the closest installed alternatives). This deviates from catalog defaults but matches the operational reality.' This makes the deviation auditable instead of silently inconsistent."
+    },
+    {
+      "severity": "minor",
+      "category": "task_quality",
+      "issue": "Task 5 (Smithery + DNS + nginx) still bundles three loosely related infrastructure concerns. Round 1 minor finding unaddressed; flagged for awareness, not blocking.",
+      "fix": "Optional: split into Task 5a (smithery.yaml authoring) and Task 5b (DNS + nginx + certbot). Acceptable to leave bundled."
+    }
+  ],
+  "summary": "Approved. All 3 round-1 critical reviewer-agent issues are resolved — no occurrences of `code-reviewer`, `infrastructure-reviewer`, or `deploy-reviewer` remain in Implementation Tasks. Tasks now use installed agents (`security-auditor`, `test-reviewer`). Decisions 9/10/11 added with full Decision/Rationale/Alternatives structure addressing security-auditor findings. Deviations 4 and 5 added covering react-router-dom and MCP_JWT_SECRET. Frontmatter unchanged (size: L, status: draft, branch: dev, created: 2026-04-26). All sections present including Shared Resources subsection and 14 tasks across Wave 1-3 + Audit Wave + Final Wave with no wave conflicts. Major findings remaining: Task 2 description grew with implementation-step detail, Task 4 still bundles 5 concerns, and `test-master` / `code-reviewing` are skill names but not installed agent files (operational concern depending on dispatch path). Minor findings carry over from round 1 (Task 13 out-of-tree paths, audit task verify field, time estimate in Solution, Task 5 bundling) plus a new minor recommending an explicit reviewer-catalog-deviation note. None are blocking; status is approved."
+}

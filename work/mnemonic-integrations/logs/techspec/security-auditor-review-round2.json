@@ -1,0 +1,158 @@
+{
+  "verdict": "still_needs_fixes",
+  "round1_comparison": "improved",
+  "summary": "Round 1's two criticals (cross-tenant recall, unbounded sign_memory) and most highs are closed by Decisions 9-11 and Risks-table additions. However, Decision 9's middleware allowlist is too narrow: requiring Bearer for all `/mcp` (except `/oauth/*` and `/health`) breaks MCP discovery — Cursor/Claude.ai call `initialize` and `tools/list` BEFORE OAuth. This is a new critical that will block connector install at demo time. Two other notable gaps remain: OAuth signed-challenge concatenation lacks unambiguous field delimiting (theoretical canonicalization issue, low practical risk for this scheme but trivial to fix), and CSP directive list is incomplete (missing object-src/base-uri/frame-ancestors at minimum). Round-1 high #7 (CursorJack typo-squat phishing) is partially addressed by CSP and origin-pinning of CORS but the signed challenge still does not commit to `server_origin`/MCP-URL — a victim on a clone domain will produce a valid-looking signature against the attacker's MCP. Treated as deferred-acceptable with explicit user-facing fingerprint UI as backlog. Overall the spec is materially better; one critical fix to the middleware allowlist plus the small encoding/CSP/lifecycle clarifications and the spec is demo-safe.",
+  "status": "changes_required",
+  "totalFindings": 9,
+  "critical": 1,
+  "major": 3,
+  "minor": 5,
+  "round1_resolution": {
+    "critical_1_cross_tenant_recall": "closed — Decision 9 mandates owner_pubkey filter; new test recall_owner_isolation.rs covers cross-tenant + 401 anonymous case",
+    "critical_2_unbounded_sign_memory": "closed — Decision 9 + tower_governor rate limit (5/min sign_memory, 30/min recall) + 429 acceptance test",
+    "high_3_oauth_challenge_contents": "mostly closed — Decision 10 binds state|client_id|redirect_uri|code_challenge|nonce; remaining ambiguity in concatenation encoding (see new finding)",
+    "high_4_jwt_spec": "closed — Decision 11 specifies HS256 fixed, MCP_JWT_SECRET env var, 1h TTL, iss+aud+sub+jti claims",
+    "high_5_server_keypair_storage": "closed — Risks table specifies 0600 perms, owned by claude user, sodium randombytes_buf, deploy-runbook reference",
+    "high_6_middleware_method_allowlist": "REGRESSED — Decision 9 names only /oauth/* and /health as exempt; tools/list and initialize NOT exempted, will break connector install (see new critical)",
+    "high_7_deeplink_phishing": "partially closed — CSP + exact-origin CORS help, but signed challenge does NOT bind server_origin/MCP-URL; still possible for typo-squat domain to harvest signatures (see new major)",
+    "high_8_xss_localstorage": "mostly closed — CSP added, import_keypair_json validates JSON shape, AES-GCM encryption with passphrase; CSP directive set incomplete (see new minor)",
+    "medium_9_cors_on_mcp": "partially closed — Risks table narrows CORS to mnemonik.xyz on /oauth/*; Task 4 description says 'tighten CORS to exact origin' but doesn't explicitly state /mcp is also narrowed",
+    "medium_10_oauth_code_lifecycle": "mostly closed — Decision 10 says single-use 60s TTL; doesn't explicitly require S256-only code_challenge_method, atomic compare-and-delete, or log-redaction (see new minor)",
+    "medium_11_oauth_rate_limit_and_state_cap": "closed — Risks table: 5 req/min/IP on /oauth/*, 10000-entry LRU cap, 60s TTL",
+    "medium_12_deeplink_opacity_test_script_secrets": "not addressed — minor, deferred",
+    "medium_13_dependency_pinning": "closed — all crates pinned with =, cargo audit in CI",
+    "medium_14_tenantscopedstore_type_guard": "closed — Risks table: 'search_attestations(owner_pubkey, query, limit) requires the parameter at compile time'",
+    "low_15_migration_idempotency": "partially closed — Data Models says 'run idempotently on first connection' but doesn't show mechanism (IF NOT EXISTS / PRAGMA table_info check)",
+    "low_16_npx_pinning": "partially closed — Task 7 says 'npx @modelcontextprotocol/inspector@<pinned>' but version placeholder still TBD",
+    "low_17_hsts_consent_page_origin": "not addressed — minor, deferred"
+  },
+  "findings": [
+    {
+      "severity": "critical",
+      "category": "A07-auth-failures",
+      "title": "Mandatory Bearer on /mcp blocks MCP discovery — connectors cannot install",
+      "description": "Decision 9 states the middleware 'rejects requests to /mcp without a valid Bearer JWT (HTTP 401), except /oauth/* and /health'. But the MCP protocol requires clients to call `initialize`, `tools/list`, and `notifications/initialized` BEFORE they can begin the OAuth flow — the OAuth metadata (authorization endpoint, token endpoint, scopes) is itself published via a `/.well-known/oauth-authorization-server` document or via `tools/list` introspection. If those discovery JSON-RPC methods get HTTP 401 with no token, Cursor / Claude.ai / Smithery cannot fetch the server capability set, cannot find the OAuth endpoint, and the connector install flow fails. Round 1 finding #6 explicitly called this out and the round-2 fix went too aggressive (closes the fail-open vector but introduces a new fail-closed vector that breaks connector install). The earlier finding's recommended allowlist (`initialize`, `tools/list`, `notifications/initialized`, `ping`) is missing.",
+      "location": "Section: Decision 9 (Mandatory ownership filter + per-IP rate limit on /mcp); also Acceptance Criteria line: 'Anonymous curl ... returns HTTP 401 (not 200 with rows from any tenant)'",
+      "impact": "Demo-day stage failure. Cursor or Claude.ai user clicks 'Install Mnemonic' from Smithery; client issues `POST /mcp {method: initialize}`; gets HTTP 401; aborts install with no recovery path. Smithery validation step (`npx @modelcontextprotocol/inspector --validate`) will likely also call `initialize` with no token and fail. Hackathon connector-install scenario is the primary user-spec MUST and this blocks it.",
+      "recommendation": "Amend Decision 9 to specify the JSON-RPC method allowlist explicitly: `initialize`, `tools/list`, `notifications/initialized`, `ping`, `/.well-known/*`, `/health`, `/oauth/*` are anonymous-allowed (anonymous + within the rate limit). All other JSON-RPC methods, ESPECIALLY `tools/call` for any tool, require a valid Bearer JWT or HTTP 401 with `WWW-Authenticate: Bearer realm=\"mcp.mnemonik.xyz\", error=\"invalid_token\"`. Recall must additionally be anonymous-rejected at the tool dispatch layer (so even if some future change exempts it from middleware, the tool handler refuses without owner_pubkey). Add an explicit acceptance test: anonymous `tools/list` returns 200 with the 5-tool list; anonymous `tools/call mnemonic_recall` returns 401; anonymous `tools/call mnemonic_sign_memory` returns 401.",
+      "cwe": "CWE-863 (incorrect authorization) / CWE-285 (improper authorization)"
+    },
+    {
+      "severity": "major",
+      "category": "A02-cryptographic-failures",
+      "title": "OAuth signed-challenge concatenation lacks unambiguous field delimiting",
+      "description": "Decision 10 defines the signed challenge as `blake3(state || client_id || redirect_uri || code_challenge || nonce)` — a raw byte concatenation of five variable-length string fields. This is the classic canonicalization-ambiguity pattern: two distinct field tuples can produce identical hashes if a delimiter-free concatenation collides under shifted field boundaries. Concrete example: `state=\"abc\", client_id=\"def\"` and `state=\"abcdef\", client_id=\"\"` both serialize to bytes `\"abcdef\"` and hash to the same value. While client_id and code_challenge are typically server-controlled or PKCE-S256 (fixed length), `state` and `redirect_uri` are attacker-influenceable. Blake3 itself has no length-extension issue (it's a tree-mode KDF/MAC), but the SCHEME above does not domain-separate field boundaries. An attacker who can influence `state` or `redirect_uri` may be able to construct a tuple that hashes the same as a legitimate authorize request, swapping the semantically-bound fields under one signature.",
+      "location": "Section: Decision 10 (OAuth signed-challenge contents)",
+      "impact": "Theoretical authorize-request cross-binding: attacker-controlled `state` shifts the boundary, signature accepted for a redirect_uri the user did not see. Practical exploitability depends on whether the server validates `state` and `redirect_uri` against an allowlist BEFORE hashing (which would constrain them to known-distinct shapes) — Decision 10 does not specify such validation. For a hackathon, exploitability is low but the fix is one-line.",
+      "recommendation": "Use a domain-separated, length-prefixed encoding. Either: (a) `blake3(canonical_cbor({state, client_id, redirect_uri, code_challenge, nonce}))` reusing the existing canonical CBOR codec already in `core/src/codec/canonical.rs`; or (b) blake3-keyed with each field length-prefixed: `blake3(u32_len(state) || state || u32_len(client_id) || client_id || ...)`. CBOR is preferable because it matches the rest of the codebase. Update Decision 10 to specify the chosen encoding explicitly; add an OAuth unit test that asserts shifting field boundaries produces a different hash.",
+      "cwe": "CWE-345 (insufficient verification of data authenticity) / CWE-707 (improper neutralization)"
+    },
+    {
+      "severity": "major",
+      "category": "A05-security-misconfiguration",
+      "title": "CSP directive set is incomplete — missing object-src, base-uri, frame-ancestors, font-src, img-src",
+      "description": "Risks table specifies CSP `default-src 'self'; script-src 'self'; connect-src 'self' mcp.mnemonik.xyz`. While `default-src 'self'` covers most resource types, it does NOT cover: `frame-ancestors` (clickjacking — allows mnemonik.xyz to be embedded in iframe by attacker), `base-uri` (allows attacker injection of `<base href>` to redirect relative URLs), `object-src` (defaults to `default-src` in CSP-2, but explicit `'none'` is hardening best-practice for Flash/Java). Additionally, the webapp likely loads fonts (Tailwind/web fonts) and images — without explicit `font-src` and `img-src`, `default-src 'self'` will block them or fall back unpredictably, which forces the team to relax CSP last-minute (a common pattern that ends up with `unsafe-inline` or wildcards). For a webapp holding a localStorage Ed25519 keypair, clickjacking is a real concern: a victim in an iframe `<iframe src=mnemonik.xyz/install>` controlled by attacker.com may sign an OAuth challenge they didn't intend to.",
+      "location": "Section: Risks table, line 'XSS in webapp → localStorage keypair theft'; also Acceptance Criteria 'CSP header default-src self; ... sent on each'",
+      "impact": "Clickjacking via iframe (no frame-ancestors) — attacker page embeds mnemonik.xyz/install in a transparent iframe and overlays a 'Click to win' button positioned over 'Sign OAuth challenge' button. Secondary: `<base>` injection via XSS could redirect relative-URL fetches to attacker.com despite `default-src 'self'`. Hardening posture is below standard for an app holding a private signing key.",
+      "recommendation": "Expand CSP to: `default-src 'self'; script-src 'self'; connect-src 'self' https://mcp.mnemonik.xyz; img-src 'self' data:; font-src 'self'; style-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'`. Add `'unsafe-inline'` for style-src ONLY if Tailwind generates inline styles (which it does at runtime in some configs); otherwise drop. Update Risks-table mitigation and the Acceptance Criteria checkbox to reference the full directive list. Test in CI by curling `/install` and asserting each directive token is present.",
+      "cwe": "CWE-1021 (improper restriction of rendered UI / clickjacking) / CWE-693 (protection mechanism failure)"
+    },
+    {
+      "severity": "major",
+      "category": "A04-insecure-design",
+      "title": "Signed OAuth challenge does not commit to server_origin — typo-squat phishing still viable",
+      "description": "Round 1 finding #7 (CursorJack-class deeplink phishing via `mnem0nik.xyz` clone) was about a cloned landing page pushing a deeplink that points Cursor at attacker's MCP; victim's localStorage keypair signs an OAuth challenge against attacker's server. Round 2 mitigations: CSP (helps prevent the SAME-origin XSS path) and exact-origin CORS (prevents cross-origin POST to real /oauth/authorize from clone). Neither mitigation closes the actual attack: victim is on `mnem0nik.xyz`, signs challenge for `mcp.mnem0nik.xyz`, attacker now has a JWT for victim's pubkey on attacker's MCP. The signed challenge in Decision 10 includes `client_id || redirect_uri` but NOT `server_origin` (the MCP endpoint the user is authorizing). A signature produced for one server is structurally distinguishable from another only by `nonce` (which is server-issued and therefore attacker-controlled in the clone scenario).",
+      "location": "Section: Decision 10 (challenge contents); Risks table line 'COSE byte-stability through proxies' indirectly references the same trust boundary",
+      "impact": "Phishing victim's keypair is bound to attacker's MCP. Subsequent prompts in attacker-installed Cursor connector send memory writes to attacker's DB. Victim sees their own DID/pubkey echoed (legitimate), so social-engineering plausibility is high. This is the same risk class as round-1 finding #7 — partially mitigated but not closed.",
+      "recommendation": "Either: (a) add `server_origin` (the canonical MCP base URL, e.g., `https://mcp.mnemonik.xyz`) to the signed challenge — server validates that it matches its own origin before issuing the auth code; user-side WASM displays the server origin in the consent UI before signing; OR (b) document explicitly that this attack vector is accepted-risk for Phase 1 and the mitigation is the user-facing fingerprint shown in the install UI (which Risks table doesn't currently require). Option (a) is one-line in Decision 10 and one extra `display: server_origin` line in the install consent panel — recommended. Update Risks table to reference whichever option is chosen.",
+      "cwe": "CWE-290 (authentication bypass by spoofing) / CWE-294 (authentication bypass via captured credential reuse)"
+    },
+    {
+      "severity": "minor",
+      "category": "A07-auth-failures",
+      "title": "OAuth lifecycle gaps — code_challenge_method not pinned to S256, atomic delete and log redaction not specified",
+      "description": "Decision 10 says auth codes are 'single-use 60s TTL' but doesn't specify three implementation details called out in round-1 finding #10: (1) `code_challenge_method` MUST be `S256` (OAuth 2.1 forbids `plain`); spec doesn't say what happens if client sends `plain`. (2) Single-use must be enforced ATOMICALLY (compare-and-delete on first /oauth/token call) — without atomicity, a captured code can be race-exchanged in the microseconds before legitimate exchange. (3) Auth codes must not appear in tracing/log output (Axum default INFO level can log query params, capturing codes in production logs).",
+      "location": "Section: Decision 10",
+      "impact": "Race condition on stolen code; downgrade to `plain` PKCE if client requests it; log-shipper compromise leaks codes. Each is low practical risk in a hackathon but together they're trivial-to-spec.",
+      "recommendation": "Append to Decision 10: 'code_challenge_method MUST be S256 (plain rejected with HTTP 400). Single-use is enforced via atomic compare-and-delete on /oauth/token (rusqlite transaction or Mutex<HashMap> swap). Auth codes are redacted from tracing output via tracing field filter — never logged at INFO level.' Add a unit test for plain-rejection and a test for race-replay.",
+      "cwe": "CWE-294 (authentication bypass via captured credential reuse) / CWE-532 (insertion of sensitive information into log file)"
+    },
+    {
+      "severity": "minor",
+      "category": "A07-auth-failures",
+      "title": "Rate limit is per-IP only — Tor/IP rotation bypass; no per-JWT-sub rate limit",
+      "description": "Decision 9 specifies `tower_governor` per-IP rate limit. An attacker behind Tor or with a botnet rotating IPs can issue 5 sign_memory + 30 recall per IP per minute — at 1000 IPs that's 5k sign_memory/min, large enough to fill the demo SQLite DB and burn OpenAI quota if EMBED_PROVIDER=openai. For a hackathon demo this is acceptable risk (cost of a botnet > cost of the demo), but a defense-in-depth account-bound rate limit (per JWT `sub`) would close the gap cheaply: each authenticated user gets ≤5 sign_memory/min/sub regardless of IP.",
+      "location": "Section: Decision 9",
+      "impact": "Determined attacker with IP-rotation can DoS the demo. Most likely vector is a competitor or malicious hackathon attendee, not a sophisticated APT. Demo-day fragility.",
+      "recommendation": "Add to Decision 9: 'Authenticated requests ALSO subject to per-JWT-sub rate limit (5 sign_memory/min/sub, 30 recall/min/sub). Anonymous-allowed methods (initialize, tools/list) keep per-IP only.' Implementation: `tower_governor` supports keyed extractors — extract sub from validated JWT and use as rate-limit key. Optional for hackathon if scope-pressured; document as backlog otherwise.",
+      "cwe": "CWE-770 (allocation of resources without limits or throttling)"
+    },
+    {
+      "severity": "minor",
+      "category": "A02-cryptographic-failures",
+      "title": "JWT secret rotation strategy not specified",
+      "description": "Decision 11 specifies `MCP_JWT_SECRET` as a single 32-byte base64 env var. No `kid` (key ID) header is included in the JWT, no overlap-rotation mechanism is specified, no rotation cadence is documented. If the secret is leaked (Heroku-style accidental git commit, log-shipper bug, etc.) the only remediation is rotate-and-invalidate-everyone — every active Claude.ai connector breaks. This is acceptable for a hackathon (single hosted instance, ephemeral demo) but should be backlogged.",
+      "location": "Section: Decision 11",
+      "impact": "Leaked secret = full JWT-mint capability for any pubkey until manual rotation; rotation event invalidates all live sessions with no overlap. Acceptable for demo; not for production.",
+      "recommendation": "No spec change required for hackathon. Add a backlog item: 'Phase 1.5: JWT signing key rotation with `kid` header and overlapping accept-set; rotate every 90 days or on suspicion of compromise.' Reference in `backlog.md`. Optionally add a single-line note in Decision 11: 'Rotation strategy deferred to Phase 1.5; for hackathon, single static secret is acceptable.'",
+      "cwe": "CWE-321 (use of hard-coded cryptographic key — borderline; stored secret rather than hard-coded, but rotation absence is the gap)"
+    },
+    {
+      "severity": "minor",
+      "category": "A05-security-misconfiguration",
+      "title": "CORS narrowing on /mcp not explicitly stated",
+      "description": "Round 1 finding #9 flagged that the existing CORS is `Any` origin on /mcp (per code-research §1). Round 2 Risks table narrows /oauth/* to `https://mnemonik.xyz`. Task 4 description says 'Tighten CORS to exact origin https://mnemonik.xyz' but doesn't explicitly state this applies to `/mcp` as well. If `/mcp` retains `Any` origin and the JWT-bearing fetch is made from a browser context (future webapp-based MCP host, or a malicious page tricking a legitimate client), JWT exfiltration is possible.",
+      "location": "Section: Task 4 description; Risks table",
+      "impact": "Currently low — Cursor and Claude.ai are server-side connectors that don't honor CORS. Future browser-based MCP clients would expose JWTs cross-origin.",
+      "recommendation": "Clarify in Task 4 / Risks table: 'CORS for /mcp: Access-Control-Allow-Origin: https://mnemonik.xyz only (or omit entirely for server-side connectors that don't need it). Wildcard / Any rejected.' Add an integration test that asserts a cross-origin OPTIONS preflight from `https://attacker.example` on /mcp returns 403/no-CORS-headers.",
+      "cwe": "CWE-942 (permissive cross-domain policy with untrusted domains)"
+    },
+    {
+      "severity": "minor",
+      "category": "A06-vulnerable-components",
+      "title": "MCP Inspector npx version still placeholder; SQLite migration idempotency mechanism unspecified",
+      "description": "Two leftover round-1 lows partially addressed: (1) Task 7 says `npx @modelcontextprotocol/inspector@<pinned>` — version literal still TBD. Until the placeholder is replaced with a real version, the supply-chain pin is not in effect. (2) Data Models says ALTER TABLE migrations 'run idempotently on first connection' but doesn't show the mechanism. Without `IF NOT EXISTS`-equivalent (SQLite has no IF NOT EXISTS for ADD COLUMN, requires `PRAGMA table_info` check) or transaction wrapping, second-run fails with `duplicate column`. Reliability concern, not security per se, but tied to deploy posture.",
+      "location": "Section: Task 7 description; Section: Data Models",
+      "impact": "(1) Unpinned npx executes whatever is the latest @modelcontextprotocol/inspector; if compromised, CI runner is exposed. (2) Failed migration on re-run could prevent service restart during demo window.",
+      "recommendation": "(1) Replace `<pinned>` with concrete version before Task 7 starts; verify version exists on npm and is signed/published by the official org. (2) Specify migration mechanism in Data Models: 'Migrations check `PRAGMA table_info(<table>)` for existing column before issuing ALTER; wrapped in transaction; second-run is no-op'. Add a unit test that runs ensure_schema twice consecutively and asserts no error.",
+      "cwe": "CWE-1357 (reliance on un-trusted component) / CWE-209 (information exposure through error message)"
+    }
+  ],
+  "out_of_scope_or_not_concerns": [
+    {
+      "topic": "tower_governor 0.4.2 trustworthiness",
+      "verdict": "acceptable",
+      "rationale": "Crate is maintained by `benwis`, ~150k+ downloads, no advisories on rustsec.org as of 2026-04-26. Pinning to =0.4.2 + cargo audit in CI is appropriate. No action needed."
+    },
+    {
+      "topic": "smithery.yaml PII risk",
+      "verdict": "acceptable",
+      "rationale": "Tech-spec describes smithery.yaml as containing only the mcp.mnemonik.xyz endpoint and one-click install URL. No user data referenced. Recommend a final review of the actual file contents before submission to confirm no env-var leak (e.g., a misconfigured example MCP_JWT_SECRET) ends up in the manifest."
+    },
+    {
+      "topic": "Hardcoded secrets scan of tech-spec",
+      "verdict": "clean",
+      "rationale": "No hardcoded API keys, passwords, or credentials in the tech-spec text. References to secrets are env-var-based (MCP_JWT_SECRET, OPENAI_API_KEY, MNEMONIC_KEYPAIR_PATH). Gitleaks already in CI."
+    },
+    {
+      "topic": "OWASP A03 injection (SQL/NoSQL/command)",
+      "verdict": "clean",
+      "rationale": "All SQL queries documented in tech-spec use rusqlite parameterized queries (per CLAUDE.md convention). No new untrusted-input-to-shell paths introduced."
+    },
+    {
+      "topic": "OWASP A08 software/data integrity / deserialization",
+      "verdict": "clean",
+      "rationale": "Adversarial mock-proxy COSE round-trip test (Decision 7 + revised mock that reorders keys / normalizes whitespace) covers the only deserialization concern (JSON-RPC re-encoding). import_keypair_json validates schema before storing. No pickle/yaml unsafe-load equivalents."
+    },
+    {
+      "topic": "OWASP A09 logging and monitoring",
+      "verdict": "partial — minor gap",
+      "rationale": "Tech-spec doesn't specify audit logging for OAuth events (authorize success/failure, token issue, JWT validation failures). For hackathon scope this is acceptable; for production, recommend logging auth events with redacted secrets to a separate audit log."
+    },
+    {
+      "topic": "OWASP A10 SSRF",
+      "verdict": "clean",
+      "rationale": "No user-input URL is passed to server-side fetch in the new code paths. The OAuth redirect_uri is on a server-managed allowlist (per recommendation in finding 4 — should be made explicit but practice is correct)."
+    }
+  ]
+}
