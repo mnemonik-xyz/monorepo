@@ -121,3 +121,39 @@ Authored new `docs/problems/README.md` framing the section as open system proble
 - `cmp docs/problems/MEMORY_EVICTION.md .claude/skills/project-knowledge/recovered/problems/MEMORY_EVICTION.md` → exit 0 — pass
 - `cmp docs/problems/ARWEAVE_PRICING_VALIDATION.md .claude/skills/project-knowledge/recovered/problems/ARWEAVE_PRICING_VALIDATION.md` → exit 0 — pass
 - `grep 'decisions.md' docs/problems/README.md` → non-empty — pass
+
+---
+
+## Follow-up roadmap items
+
+Evergreen direction-of-travel hints surfaced during the docs-actualization feature. The Browser-WASM verification UI is the only candidate the owner flagged as "serious" and so receives a full sub-section. The remaining 8 items are listed once each as research / scoping leads tagged `for further validation` — they are NOT committed roadmap and must be validated against current code before any of them is promoted to a feature spec.
+
+### Browser-WASM verification UI
+
+**Problem:** Today's verification path requires a runtime that can run the Rust `verify` tool — the MCP server or the native binary. Browser users cannot independently verify a recalled attestation without contacting a backend, which weakens the core "anyone can verify" property of the Mnemonic Protocol.
+
+**Proposed Approach:** Surface the existing `verify` and `whoami` exports from the `mnemonic-core` WASM build inside the webapp as a verification panel. The panel takes an `attestation_id` (or full bundle), fetches the Arweave payload, runs blake3 + COSE_Sign1 verification entirely in-browser, optionally cross-checks the Solana SPL Memo anchor, and renders OK / tampered / not-found badges. Reuse design tokens from `ux-guidelines.md`.
+
+**Dependencies:**
+- `mnemonic-core` WASM target — completed feature, `whoami` and `verify` exports already available.
+- Webapp Vite build already imports the WASM package; only a UI surface is missing.
+
+**Open Questions:**
+- Does verifying a >10MB Arweave payload entirely in-browser create UX issues (memory, time-to-result, mobile)?
+- Should the panel accept a user-supplied Solana RPC URL, or rely on a public default with graceful degradation?
+- How to surface `tampered` vs `not_found` distinctively without alarming users for legitimate not-yet-anchored attestations?
+- Should the panel optionally render the full COSE_Sign1 protected header for transparency / auditor inspection?
+- Mobile browsers — feasible target, or desktop-first with explicit "verify on desktop" affordance on mobile?
+
+**Source-doc refs:** [docs/usecases/agent-continuity-layer.md](../../docs/usecases/agent-continuity-layer.md); [docs/research/apply-to-agent-memory-architecture.md](../../docs/research/apply-to-agent-memory-architecture.md); [docs/WHITEPAPER.md](../../docs/WHITEPAPER.md) §4 layered pipeline.
+
+### Open follow-ups (8)
+
+1. **Encryption / privacy** — AES-256-GCM at-rest+in-transit and a key-recovery story; today artifacts are signed-and-public, encryption was an upstream "default" and is now framed as roadmap rather than a current property. Ref: [docs/competitive-landscape/DRAG_ANALYSIS.md](../../docs/competitive-landscape/DRAG_ANALYSIS.md), [docs/WHITEPAPER.md](../../docs/WHITEPAPER.md) §13.2. _for further validation._
+2. **ZK proofs / verifiable recall** — zkTAM-style proofs of embedding correctness and retrieval correctness; credible long-horizon direction once prover cost and proof latency settle, complementing today's hash-and-sign integrity guarantee. Ref: [docs/competitive-landscape/WEB_RESEARCH_TRUSTLESS_RAG.md](../../docs/competitive-landscape/WEB_RESEARCH_TRUSTLESS_RAG.md) §4. _for further validation._
+3. **Shared namespaces semantics** — multi-writer authorization, conflict resolution, and namespace isolation rules for multi-agent collaboration on a shared memory surface. Ref: [docs/problems/CONCURRENT_WRITERS.md](../../docs/problems/CONCURRENT_WRITERS.md), [docs/usecases/shared-project-memory-namespace.md](../../docs/usecases/shared-project-memory-namespace.md). _for further validation._
+4. **Reliability oracle (full design)** — source-quality scoring across shared-memory contributors, used by orchestrators to weight retrieval results; needs a full design pass covering signal definition, gaming resistance, and on-chain vs off-chain placement. Ref: [docs/usecases/reliability-oracle-for-orchestration.md](../../docs/usecases/reliability-oracle-for-orchestration.md). _for further validation._
+5. **Compressed shadow-index recall** — first-stage candidate generation over compressed (TurboQuant) embeddings, full-precision rerank on the short list; a path to scale recall beyond what the current SQLite + uncompressed-f32 cosine path supports. Ref: [docs/WHITEPAPER.md](../../docs/WHITEPAPER.md) §4, [docs/research/apply-to-agent-memory-architecture.md](../../docs/research/apply-to-agent-memory-architecture.md). _for further validation._
+6. **Lifecycle policy / eviction tuning** — append/merge/overwrite semantics, retention classes, and deletion semantics across local SQLite vs anchored full-mode storage. Ref: [docs/problems/MEMORY_EVICTION.md](../../docs/problems/MEMORY_EVICTION.md), [docs/WHITEPAPER.md](../../docs/WHITEPAPER.md) §13. _for further validation._
+7. **Economic model validation (Arweave pricing, x402 micropayments)** — refresh full-mode persistence cost calibration against current Arweave $/GB and validate the x402 micropayment path end-to-end against the live pricing engine. Ref: [docs/problems/ARWEAVE_PRICING_VALIDATION.md](../../docs/problems/ARWEAVE_PRICING_VALIDATION.md). _for further validation._
+8. **Critical review redo** — the upstream `CRITICAL_REVIEW.md` was outdated and intentionally not restored; a fresh critical review against the current Rust implementation is needed to retire or refute its findings. Ref: `sivo4kin/mnemonic-protocol@7a68a973:docs/CRITICAL_REVIEW.md` (not in this repo). _for further validation._
