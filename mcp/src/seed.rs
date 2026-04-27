@@ -223,6 +223,8 @@ pub async fn run(state: &McpState) -> Result<()> {
             format!("## {}\n\n{}", section.heading, section.body)
         };
 
+        // Seeding always takes the inline (server-signing) path —
+        // `jwt_sub = None` per Decision 12.
         let result = tools::sign_memory(
             &state.keypair,
             &state.solana,
@@ -230,11 +232,13 @@ pub async fn run(state: &McpState) -> Result<()> {
             &state.store,
             state.embedder.as_ref(),
             &state.compressor,
+            &state.pending,
             &chunk_content,
             &tags,
             &cost_hint,
             &state.storage_mode,
             &server_owner_pubkey,
+            None,
         )
         .await
         .with_context(|| format!("sign_memory failed for chunk {i}"))?;

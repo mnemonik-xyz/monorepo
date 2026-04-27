@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use solana_sdk::signature::Keypair;
 
-use crate::{llm::LlmClient, payment, pricing::PricingEngine, tools};
+use crate::{llm::LlmClient, payment, pending::PendingBundles, pricing::PricingEngine, tools};
 use mnemonic_core::arweave::ArweaveClient;
 use mnemonic_core::compress::EmbeddingCompressor;
 use mnemonic_core::embed::Embedder;
@@ -110,6 +110,12 @@ pub struct McpState {
         governor::clock::DefaultClock,
         governor::middleware::NoOpMiddleware<governor::clock::QuantaInstant>,
     >,
+
+    /// Browser-mediated signing — unsigned bundles parked between
+    /// `mnemonic_sign_memory` (HTTP path) and `POST /api/sign-callback`.
+    /// LRU-bounded (10k), TTL-bounded (300s), per-`jwt.sub` capped (50).
+    /// See `pending.rs` for the Decision-12 design.
+    pub pending: Arc<PendingBundles>,
 }
 
 // Safety: We only access store through std::sync::Mutex (short critical sections, no await)
@@ -177,6 +183,7 @@ pub async fn handle_request(
     req: &JsonRpcRequest,
     state: &McpState,
     owner_pubkey: &str,
+    jwt_sub: Option<&str>,
 ) -> JsonRpcResponse {
     let result = match req.method.as_str() {
         "initialize" => Ok(serde_json::json!({
@@ -192,7 +199,7 @@ pub async fn handle_request(
                 .and_then(|n| n.as_str())
                 .unwrap_or("");
             let args = req.params.get("arguments").cloned().unwrap_or_default();
-            handle_tool_call(name, &args, state, owner_pubkey).await
+            handle_tool_call(name, &args, state, owner_pubkey, jwt_sub).await
         }
         "notifications/initialized" | "ping" => Ok(serde_json::json!({})),
         _ => Err(format!("unknown method: {}", req.method)),
@@ -329,10 +336,13 @@ pub async fn mcp_handler(
     //     the local server keypair so legacy code paths in tools.rs do not
     //     blow up. `tools/list` and `initialize` never touch storage so the
     //     value is unused on those paths.
-    let owner_pubkey: String = match claims {
-        Some(c) => c.sub,
+    let owner_pubkey: String = match &claims {
+        Some(c) => c.sub.clone(),
         None => mnemonic_core::identity::pubkey_base58(&state.keypair),
     };
+    // Decision 12: HTTP/JWT presence is the trigger for the deferred-signing
+    // branch in `tools::sign_memory`. Stdio path always passes `None` here.
+    let jwt_sub: Option<String> = claims.map(|c| c.sub);
 
     let is_sign_memory = req.method == "tools/call"
         && req.params.get("name").and_then(|n| n.as_str()) == Some("mnemonic_sign_memory");
@@ -370,7 +380,7 @@ pub async fn mcp_handler(
                     }
                 }
 
-                let resp = handle_request(&req, &state, &owner_pubkey).await;
+                let resp = handle_request(&req, &state, &owner_pubkey, jwt_sub.as_deref()).await;
 
                 // Refund on tool failure. Uses `refund_balance` (not
                 // `credit_deposit`) so the per-tx_sig idempotency guard does
@@ -404,7 +414,7 @@ pub async fn mcp_handler(
             }
         }
     } else {
-        let resp = handle_request(&req, &state, &owner_pubkey).await;
+        let resp = handle_request(&req, &state, &owner_pubkey, jwt_sub.as_deref()).await;
         ndjson_response(StatusCode::OK, &resp)
     }
 }
@@ -419,6 +429,7 @@ async fn handle_tool_call(
     args: &Value,
     state: &McpState,
     owner_pubkey: &str,
+    jwt_sub: Option<&str>,
 ) -> Result<Value, String> {
     let result = match name {
         "mnemonic_whoami" => {
@@ -448,11 +459,13 @@ async fn handle_tool_call(
                 &state.store,
                 state.embedder.as_ref(),
                 &state.compressor,
+                &state.pending,
                 &content,
                 &tags,
                 &cost_hint,
                 &state.storage_mode,
                 owner_pubkey,
+                jwt_sub,
             )
             .await
             .map_err(|e| e.to_string())?
@@ -578,6 +591,7 @@ mod transport_tests {
             artifact_zip_path: std::sync::Mutex::new(None),
             ollama_client,
             chat_limiter,
+            pending: Arc::new(crate::pending::PendingBundles::with_defaults()),
         })
     }
 

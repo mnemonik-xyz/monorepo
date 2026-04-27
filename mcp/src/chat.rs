@@ -348,6 +348,7 @@ mod handler_tests {
             artifact_zip_path: std::sync::Mutex::new(None),
             ollama_client,
             chat_limiter,
+            pending: Arc::new(crate::pending::PendingBundles::with_defaults()),
         })
     }
 

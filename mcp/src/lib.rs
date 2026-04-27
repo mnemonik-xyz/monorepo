@@ -16,12 +16,14 @@
 //! binary as before; `cargo test -p mnemonic-mcp` now also compiles and
 //! runs `tests/oauth_flow.rs` etc.
 
+pub mod api;
 pub mod chat;
 pub mod config;
 pub mod llm;
 pub mod mcp;
 pub mod oauth;
 pub mod payment;
+pub mod pending;
 pub mod pricing;
 pub mod seed;
 pub mod tools;

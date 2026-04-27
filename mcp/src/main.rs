@@ -1,9 +1,11 @@
+mod api;
 mod chat;
 mod config;
 mod llm;
 mod mcp;
 mod oauth;
 mod payment;
+mod pending;
 mod pricing;
 mod seed;
 mod tools;
@@ -401,6 +403,10 @@ async fn main() -> anyhow::Result<()> {
         .build()
         .expect("failed to build reqwest client for Ollama");
 
+    // Browser-mediated signing buffer — Decision 12. Production caps:
+    // 10k LRU entries, 300s TTL, 50 pending bundles per jwt.sub.
+    let pending = Arc::new(pending::PendingBundles::with_defaults());
+
     let state = Arc::new(mcp::McpState {
         keypair,
         solana: solana::SolanaClient::new(&cfg.solana_rpc_url),
@@ -422,6 +428,7 @@ async fn main() -> anyhow::Result<()> {
         artifact_zip_path: std::sync::Mutex::new(None),
         ollama_client,
         chat_limiter,
+        pending,
     });
 
     // ── RAG seeding (whitepaper chunking + artifact generation) ──────────
@@ -473,9 +480,11 @@ async fn run_stdio(state: Arc<mcp::McpState>) -> anyhow::Result<()> {
 
         // Stdio path: no JWT, single-tenant CLI mode. Use the local keypair
         // pubkey as owner scope so attestations land under a stable owner
-        // and `recall` returns the local user's rows.
+        // and `recall` returns the local user's rows. `jwt_sub = None`
+        // routes `sign_memory` through the inline (server-signing) branch
+        // rather than the deferred (PendingBundles) one — Decision 12.
         let owner_pubkey = state.keypair.pubkey().to_string();
-        let resp = mcp::handle_request(&req, &state, &owner_pubkey).await;
+        let resp = mcp::handle_request(&req, &state, &owner_pubkey, None).await;
         stdout
             .write_all(serde_json::to_string(&resp)?.as_bytes())
             .await?;
@@ -560,6 +569,25 @@ async fn run_http(state: Arc<mcp::McpState>, host: &str, port: u16) -> anyhow::R
         })
         .with_state(state.clone());
 
+    // ── /api/* webapp surface (Decision 12) ──────────────────────────────────
+    // GET /api/pending/{id} returns the unsigned canonical-CBOR for the
+    // browser to sign; POST /api/sign-callback ingests the COSE_Sign1 and
+    // persists the attestation. Both routes sit behind the same Bearer-auth
+    // middleware as /mcp; non-JSON-RPC, so the body-peek allowlist
+    // (`initialize` / `tools/list`) does not apply — every /api/* request
+    // requires a valid JWT.
+    let api_subrouter = Router::new()
+        .route(
+            "/api/pending/{correlation_id}",
+            axum::routing::get(api::get_pending_handler),
+        )
+        .route("/api/sign-callback", post(api::sign_callback_handler))
+        .layer(middleware::from_fn_with_state(
+            oauth_state.clone(),
+            oauth::bearer_auth_middleware,
+        ))
+        .with_state(state.clone());
+
     // ── OAuth routes (Decision 10) ────────────────────────────────────────────
     let oauth_routes = Router::new()
         .route("/oauth/authorize", post(oauth::authorize_handler))
@@ -592,6 +620,7 @@ async fn run_http(state: Arc<mcp::McpState>, host: &str, port: u16) -> anyhow::R
         )
         .with_state(state)
         .merge(mcp_subrouter)
+        .merge(api_subrouter)
         .merge(oauth_routes)
         .layer(cors);
 
