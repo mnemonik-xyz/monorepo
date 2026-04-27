@@ -1,0 +1,481 @@
+{
+  "task": "T12 — Test Audit (Audit Wave)",
+  "auditor": "T12-audit",
+  "date": "2026-04-26",
+  "scope": "mnemonic-integrations Tasks 1-9 — test pyramid balance, per-area quality, traceability matrices",
+  "verdict": "PASS_WITH_NOTES",
+  "block_deploy": false,
+
+  "test_count_summary": {
+    "unit_tests_native": {
+      "mcp/src/oauth.rs": 20,
+      "mcp/src/pending.rs": 11,
+      "mcp/src/tools.rs": 2,
+      "mcp/src/mcp.rs": 3,
+      "mcp/src/seed.rs": 13,
+      "mcp/src/llm.rs": 12,
+      "mcp/src/config.rs": 9,
+      "mcp/src/chat.rs": 14,
+      "mcp/src/payment.rs": 7,
+      "mcp_total": 91,
+      "mcp_phase1_attributable": "20+11+2+3 = 36 (oauth+pending+tools-deferred+transport)",
+      "wasm_bindgen_tests": {
+        "core/src/wasm/mod.rs": 7,
+        "comment": "wasm32 only via wasm-pack test --headless"
+      },
+      "core_lib": "77 (all native, ~2 attributable to T4 — owner_pubkey isolation + migration idempotency)"
+    },
+    "integration_tests_mcp_tests_dir": {
+      "auth_allowlist.rs": 1,
+      "cors.rs": 1,
+      "deferred_sign_flow.rs": 1,
+      "oauth_flow.rs": 1,
+      "oauth_tool_call.rs": 1,
+      "pending_authz.rs": 4,
+      "pending_expiry.rs": 1,
+      "pending_user_cap.rs": 1,
+      "rate_limit_routing.rs": 3,
+      "recall_owner_isolation.rs": 1,
+      "roundtrip_cose_via_http_proxy.rs": 2,
+      "sign_callback.rs": 5,
+      "stdio_backward_compat.rs": "1 (#[ignore]'d → counts as 0 in default CI run)",
+      "total_attributable": "22 active + 1 ignored = 23 declared",
+      "active_in_default_ci": 22
+    },
+    "webapp_component_tests_vitest": {
+      "IdentityPanel.test.tsx": 1,
+      "InstallButtons.test.tsx": 1,
+      "Sign.test.tsx": 1,
+      "total": 3
+    },
+    "manual_e2e_smoke_steps": {
+      "smoke-checklist.md": 10,
+      "comment": "Authored, not yet dry-run executed; ETA budget 750s within 1800s cap"
+    },
+    "pyramid_target_size_L": {
+      "unit": "25-30",
+      "integration": "12",
+      "e2e_automated": "0 (manual only)"
+    },
+    "pyramid_actual": {
+      "unit_phase1": 36,
+      "wasm_bindgen": 7,
+      "integration_active": 22,
+      "webapp_component": 3,
+      "manual_smoke_steps": 10,
+      "automated_e2e": 0
+    },
+    "pyramid_recomputation": "Above target. 36 unit + 7 wasm + 22 integration + 3 webapp = 68 active automated tests for size-L Phase 1. Target was 25-30 unit / 12 integration. Actual integration count (22) is ~2x target — defensible because each test guards a Decision-9/10/11/12 invariant with single-purpose assertions; not redundant. Unit count (36) is ~25% above target due to oauth.rs's 20 tests covering 6 round-1 attack vectors with branched negative paths."
+  },
+
+  "per_area_findings": [
+    {
+      "area": "OAuth flow",
+      "verdict": "PASS",
+      "severity": "minor",
+      "tests_audited": "mcp/src/oauth.rs:653-1222 (20 tests) + mcp/tests/oauth_flow.rs:73 (1 integration)",
+      "round1_attack_vectors": {
+        "alg_none_rejection": "PASS — oauth.rs:1050 test_jwt_alg_none_rejected_401",
+        "alg_confusion_rs256_against_hs256": "MINOR_GAP — verify_jwt at oauth.rs:275 uses Validation::new(Algorithm::HS256) which fixes the algorithm; test_jwt_alg_none_rejected_401 covers the policy mechanism but no explicit RS256 token is forged against HS256 secret. The fixed-algorithm validation IS the defense; gap is test surface only.",
+        "replay_single_use": "PASS — oauth.rs:880 test_authorize_single_use_replay_401",
+        "tampered_sub": "PASS — oauth.rs:740 test_authorize_tampered_sub_401",
+        "missing_state_csrf": "PASS — oauth.rs:1120 test_authorize_missing_state_csrf_401 (asserts is_client_error rather than strict 401 because axum's Json extractor 422s on missing required field — semantically equivalent)",
+        "expired_code_60s_ttl": "PASS — oauth.rs:775 test_authorize_expired_challenge_401 + oauth.rs:1010 test_token_expired_code_60s_401"
+      },
+      "additional_passes": [
+        "test_authorize_valid_signature (positive control)",
+        "test_authorize_invalid_signature_401",
+        "test_authorize_unknown_state_401",
+        "test_authorize_pkce_method_must_be_s256",
+        "test_token_valid_verifier_returns_jwt",
+        "test_token_invalid_verifier_401",
+        "test_jwt_roundtrip_iss_aud_sub",
+        "test_jwt_iss_aud_mismatch_rejected",
+        "test_jwt_concurrent_unique_jti",
+        "test_middleware_initialize_method_allowlisted",
+        "test_middleware_tools_call_requires_jwt",
+        "test_middleware_tools_call_with_valid_jwt_passes",
+        "test_middleware_health_bypasses_auth",
+        "test_extract_json_rpc_method_helper"
+      ],
+      "missing_coverage_suggestions": [
+        "oauth.rs::test_jwt_rs256_signed_against_hs256_secret_rejected — forge an RS256 JWT, decode with HS256 validator, assert error. Closes the named alg-confusion attack vector explicitly."
+      ]
+    },
+    {
+      "area": "WASM coverage",
+      "verdict": "PASS",
+      "severity": "none",
+      "tests_audited": "core/src/wasm/mod.rs:234-343 (7 wasm-bindgen tests)",
+      "checklist": {
+        "keypair_gen_valid_ed25519": "PASS — line 234, asserts 64-byte secret + 32-byte pubkey parses",
+        "sign_challenge_roundtrip_native_verifier": "PASS — line 243, calls crate::identity::verify_signature on WASM-produced sig",
+        "json_export_import": "PASS — line 257",
+        "repeated_gen_distinct": "PASS — line 268",
+        "malformed_input_returns_err_not_panic": "PASS — line 279, three negative cases (non-JSON, empty obj, short secret)",
+        "getrandom_non_zero_entropy": "PASS — line 296",
+        "sign_attestation_bundle_roundtrip_native_verifier": "PASS — line 308, asserts valid + cose_signature + content_integrity + algorithm_valid + signer kid"
+      },
+      "notes": "Browser-side WASM tests run only on wasm32 via `wasm-pack test --headless` — they do NOT run in the default `cargo test --workspace` CI step. Decisions log Task 2 confirms manual headless Firefox run was clean; no scheduled CI job runs these. Recommendation deferred to backlog (no automated regression guard between Task-2 author's local run and the next manual one)."
+    },
+    {
+      "area": "COSE-via-proxy mock realism",
+      "verdict": "PASS",
+      "severity": "none",
+      "tests_audited": "mcp/tests/roundtrip_cose_via_http_proxy.rs:33-170",
+      "criterion_check": "Adversarial proxy at line 33 uses `simd_json::to_owned_value` + `simd_json::to_string` AND additionally re-walks top-level Object keys, alphabetically sorts them, and rebuilds the JSON manually (lines 45-59). assert_ne!(envelope_bytes, mutated) at line 100 fails the test if mutation did NOT happen — guards against the failure mode the audit task explicitly named (mock that re-emits identical bytes). Whitespace normalization + key reorder both occur. Per Decision 7, base64-string field is opaque to JSON parser, so cose_bundle survives byte-identical (line 116). Second test (line 144) documents the corruption mode for naive number-array transport.",
+      "extra_pass": "Verifies COSE_Sign1 still validates with verify_artifact post-passthrough including content_integrity flag (line 137)."
+    },
+    {
+      "area": "Recall ownership isolation",
+      "verdict": "PASS",
+      "severity": "critical_passed",
+      "tests_audited": "mcp/tests/recall_owner_isolation.rs:155-232",
+      "criterion_check": "Explicit cross-tenant assertion at line 201 — alice signs 2, bob signs 1, bob's recall returns exactly 1 row whose content equals 'bob memory 1' (line 210 — also explicitly checks NOT alice's row). Anonymous request returns 401 (line 227). This is the CRITICAL test guarding Decision 9's mandatory ownership filter. Router built with `oauth::bearer_auth_middleware` engaged so the auth gate is exercised, not bypassed."
+    },
+    {
+      "area": "Stdio backward-compat",
+      "verdict": "PASS_WITH_KNOWN_GAP",
+      "severity": "minor",
+      "tests_audited": "mcp/tests/stdio_backward_compat.rs:62-234",
+      "criterion_check": {
+        "pre_built_binary": "PASS — uses env!(\"CARGO_BIN_EXE_mnemonic-mcp\") at line 65, not cargo run",
+        "EMBED_PROVIDER": "PARTIAL — uses EMBED_PROVIDER=openai with stub key at line 107; tools/list + initialize don't call embed() so test stays safe. EMBED_PROVIDER=mock not available (MockEmbedder is #[cfg(test)]-gated). Acceptable.",
+        "tokio_time_timeout": "PASS — must_round_trip macro at line 176 wraps every round_trip call in tokio::time::timeout (STARTUP_TIMEOUT for first, REQ_TIMEOUT for rest)",
+        "race_condition_safety": "PASS — stderr drained on a separate spawn task (line 135), tracing-on-stdout filtered with starts_with('{') at line 167, single-line JSON-RPC framing"
+      },
+      "known_gap": "Test is `#[ignore]`'d by default (line 63) due to pricing.refresh() outbound HTTPS at startup → ~20s blocking call exceeds reasonable per-test budget on sandboxed runners. CI test-stdio job (.github/workflows/ci.yml:197) runs on workflow_dispatch + schedule only, NOT on every PR. T8 decisions log explicitly flagged this. Phase 2 fix: --no-pricing startup flag.",
+      "audit_severity": "MINOR — compile-only coverage in default CI proves the API surface stays buildable; functional regression caught only by scheduled job. Non-blocking for hackathon; document for Phase 2."
+    },
+    {
+      "area": "Rate-limit wired",
+      "verdict": "PASS_WITH_DEVIATION",
+      "severity": "minor",
+      "tests_audited": "mcp/tests/rate_limit_routing.rs:87-153 (3 tests)",
+      "criterion_check": {
+        "boots_actual_router": "DEVIATION — builds a stub Router with the GovernorLayer at the same `.layer()` ordering as production (rate_limit_routing.rs:54-66) but does NOT mount mcp_handler. T8 decisions log line 426 explicitly flagged this: '`rate_limit_routing.rs` boots only the tower_governor layer + a stub handler, not the full main_router'. Justification: avoids pricing.refresh() startup cost; structural assertion (governor rejects N+1) is identical.",
+        "real_429_response": "PASS — line 109 + 134 assert StatusCode::TOO_MANY_REQUESTS",
+        "burst_caps": "burst=5 for sign_memory (test_sign_memory_ratelimit_429_after_5), burst=30 for recall, no-limiter for stdio control"
+      },
+      "per_method_5_min_sign_memory": "DEFERRED_TO_T5 — T4 mounted /mcp under tower_governor with burst=30 (recall cap dominates). Per-method 5/min sign_memory cap is enforced by Decision 12's PendingBundles per-user cap (50 pending bundles), not a tower_governor layer. T5's pending_user_cap.rs guards this at the per-jwt-sub level rather than per-IP. Acceptable architectural choice.",
+      "audit_severity": "MINOR — both gaps are documented and acceptable for hackathon; route-level limiter exists, downstream layer covers per-user cap."
+    },
+    {
+      "area": "CORS preflight",
+      "verdict": "PASS",
+      "severity": "none",
+      "tests_audited": "mcp/tests/cors.rs:66-91",
+      "criterion_check": "Single test exercises both branches: ALLOWED_ORIGIN https://mnemonik.xyz (line 73, asserts ACAO header echoes origin + 2xx) and EVIL_ORIGIN https://evil.example.com (line 88, asserts ACAO absent or non-echoing). Router uses tower-http CorsLayer with explicit allow_origin, not Any wildcard. Production uses identical CORS at main.rs."
+    },
+    {
+      "area": "Auth allowlist",
+      "verdict": "PASS",
+      "severity": "none",
+      "tests_audited": "mcp/tests/auth_allowlist.rs:64-135",
+      "criterion_check": "tools/list anon → 200 (line 77), initialize anon → 200 (line 91), tools/call sign_memory anon → 401 with -32001 envelope (line 113), tools/call sign_memory + valid JWT → not 401 (line 131). All 4 branches covered in a single test. Plus 5 unit-level middleware tests in oauth.rs (test_middleware_*) provide redundant coverage."
+    },
+    {
+      "area": "Deferred-sign flow lifecycle",
+      "verdict": "PASS",
+      "severity": "none",
+      "tests_audited": "mcp/tests/deferred_sign_flow.rs:125-189 (1 test, full lifecycle) + mcp/tests/sign_callback.rs:190-340 (5 tests)",
+      "criterion_check": {
+        "tools_call_to_awaiting_signature": "PASS — line 152 status OK + correlation_id extraction at 153",
+        "GET_pending": "PASS — line 156, asserts non-empty CBOR body",
+        "sign_locally_post_callback": "PASS — line 167",
+        "recall_returns": "PASS — line 178 store.search asserts persistence (recall envelope itself covered by recall_owner_isolation)",
+        "single_use_410_on_replay": "PASS — line 188 second callback returns StatusCode::GONE",
+        "cross_user_403": "PASS — pending_authz.rs:138 test_pending_get_403_for_wrong_jwt_sub + sign_callback.rs:191 test_sign_callback_validates_signer_pubkey_eq_jwt_sub",
+        "tampered_content_hash_rejected": "PASS — sign_callback.rs:284",
+        "invalid_signature_rejected": "PASS — sign_callback.rs:318"
+      }
+    },
+    {
+      "area": "Pending bundle expiry",
+      "verdict": "PASS_WITH_DEVIATION",
+      "severity": "minor",
+      "tests_audited": "mcp/tests/pending_expiry.rs:123-189",
+      "criterion_check": {
+        "uses_tokio_time_pause_advance": "DEVIATION — line 151 uses tokio::time::sleep(Duration::from_millis(1100)) wall-clock against a 1s TTL store. T8 decisions log line 424 flagged this explicitly: PendingBundles reads chrono::Utc::now() which tokio's instrumented clock cannot influence. tech-spec line 227 prescribed tokio::time::pause+advance; it would not work against wall-clock without refactoring PendingBundles to tokio::time::Instant.",
+        "410_after_expiry": "PASS — line 165 GET → 410 Gone, line 187 POST callback → 410 Gone",
+        "lazy_eviction": "PASS — implicit, callback gets NotFound after first 410 GET evicts"
+      },
+      "audit_severity": "MINOR — adds 1.1s wall-clock to test runtime, marginal CI cost. Phase 2 should swap chrono::Utc::now() inside PendingBundles for tokio::time::Instant to enable virtual-clock testing."
+    },
+    {
+      "area": "Pending user cap",
+      "verdict": "PASS_WITH_DEVIATION",
+      "severity": "minor",
+      "tests_audited": "mcp/tests/pending_user_cap.rs:91-132",
+      "criterion_check": {
+        "50_successful_then_51st_429": "DEVIATION — accepts EITHER HTTP 429 OR HTTP 200 with JSON-RPC error envelope mentioning 'per-user pending bundle cap' (line 124-131). T8 decisions log line 425 flagged this: current tools.rs::sign_memory_deferred wraps PendingError::PerUserCapExceeded via anyhow::anyhow! which surfaces as HTTP 200 + -32603 envelope, not the 429 the spec calls for. The IntoResponse mapping for the error already exists in pending.rs but the dispatcher doesn't lift it through.",
+        "regression_assertion_held": "PASS — both shapes prove the cap fired. Either is acceptable for the regression assertion per T8 author's rationale."
+      },
+      "missing_coverage_suggestions": [
+        "Tighten to strict HTTP 429 once tools::sign_memory_deferred maps PendingError into the JSON-RPC dispatcher response — track in a follow-up task. Until then this MINOR deviation is documented and self-explaining."
+      ]
+    },
+    {
+      "area": "MCP Inspector CI step",
+      "verdict": "PASS",
+      "severity": "none",
+      "tests_audited": ".github/workflows/ci.yml:93-161",
+      "criterion_check": {
+        "pinned_npx_version": "PASS — line 154 pins @modelcontextprotocol/inspector@0.6.x (no floating latest)",
+        "wait_for_port_readiness": "PASS — line 137-149 implements `for i in $(seq 1 30); do curl -fsS /health …; sleep 1; done` (30s timeout)",
+        "pre_built_binary": "PASS — line 109-110 builds via `cargo build` with --features local-embed before spawning; spawned via ./target/debug/mnemonic-mcp at line 135 (NOT cargo run race)",
+        "test_jwt_minted": "PASS — line 117-120 uses ./target/debug/mint-test-jwt --sub ci-test, MCP_JWT_SECRET injected from openssl rand"
+      }
+    },
+    {
+      "area": "smithery.yaml schema validation",
+      "verdict": "PASS",
+      "severity": "minor",
+      "tests_audited": ".github/workflows/ci.yml:180-191 + scripts/smithery-schema.yaml + smithery.yaml",
+      "criterion_check": "yamale 4.x pinned (line 189). yamale -s scripts/smithery-schema.yaml smithery.yaml at line 191. Schema covers version, name, description, homepage, mcp_servers[].url, mcp_servers[].transport, mcp_servers[].auth.flows.authorizationCode.{authorizationUrl,tokenUrl} per T8 decisions log.",
+      "minor_note": "Yamale's permissive default allows unknown fields silently. Schema is a 'must-have' floor, not a whitelist. Smithery may evolve the v1 manifest. Acceptable for Phase 1."
+    },
+    {
+      "area": "Smoke checklist clarity",
+      "verdict": "PASS",
+      "severity": "minor",
+      "tests_audited": "work/mnemonic-integrations/tasks/smoke-checklist.md (10 steps, 306 lines)",
+      "criterion_check": {
+        "executable_by_stranger": "PASS — every step has Action / Expected / Recovery / ETA quartet, verbatim URLs and DevTools paths quoted, no project context required beyond Prerequisites block",
+        "all_four_subheadings_per_step": "PASS — confirmed by T9 decisions log + spot-check of steps 1, 4, 6, 10",
+        "total_eta_under_30min": "PASS — 30+30+30+60+30+120+30+60+60+300 = 750s (12.5 min) within 1800s cap, ~17 min slack",
+        "recovery_concrete_actions": "PASS — every Recovery names a concrete fallback (clear localStorage, copy <a href>, check /health, abort+report); no 'debug it' platitudes"
+      },
+      "minor_notes": [
+        "Live-demo backup video URL is a placeholder per T9 decisions log — acceptable, will be filled before demo",
+        "First dry-run not yet executed — T9 post-completion checklist requires logging in decisions.md after run; this is operational not a test-design gap"
+      ]
+    }
+  ],
+
+  "user_spec_must_traceability_matrix": [
+    {
+      "must": "mcp.mnemonik.xyz отвечает на tools/list через streamable HTTP (per MCP spec 2025), доступен публично",
+      "tests": [
+        "mcp/src/mcp.rs::transport_tests (3 tests, T1) — chunked NDJSON encoding",
+        "mcp/tests/oauth_tool_call.rs::test_tools_list_5_tools_and_sign_memory_returns_awaiting_signature",
+        ".github/workflows/ci.yml::mcp-inspector job (validates JSON-RPC + tool descriptions)"
+      ],
+      "status": "covered"
+    },
+    {
+      "must": "OAuth 2.1 + PKCE endpoints (/oauth/authorize, /oauth/token) работают; JWT токен issued bound к user pubkey",
+      "tests": [
+        "mcp/src/oauth.rs::test_authorize_valid_signature",
+        "mcp/src/oauth.rs::test_token_valid_verifier_returns_jwt",
+        "mcp/src/oauth.rs::test_jwt_roundtrip_iss_aud_sub",
+        "mcp/tests/oauth_flow.rs::full_authorize_token_jwt_roundtrip",
+        "scripts/test-oauth-flow.sh"
+      ],
+      "status": "covered"
+    },
+    {
+      "must": "WASM core экспортирует generate_keypair, sign_challenge, export_keypair_json, import_keypair_json; webapp использует это для in-browser identity",
+      "tests": [
+        "core/src/wasm/mod.rs::keypair_gen_produces_valid_ed25519",
+        "core/src/wasm/mod.rs::sign_challenge_roundtrip_with_native_verifier",
+        "core/src/wasm/mod.rs::json_export_import_preserves_keypair",
+        "core/src/wasm/mod.rs::malformed_import_returns_err_not_panic",
+        "core/src/wasm/mod.rs::sign_attestation_bundle_roundtrip_with_native_verifier (extra)",
+        "webapp/src/components/IdentityPanel.test.tsx::renders_did_after_generate"
+      ],
+      "status": "covered"
+    },
+    {
+      "must": "Webapp mnemonik.xyz имеет 2 страницы (landing + install-hub с identity-блоком + deeplinks)",
+      "tests": [
+        "webapp/src/components/InstallButtons.test.tsx::deeplink_url_well_formed",
+        "webapp/src/components/IdentityPanel.test.tsx::renders_did_after_generate",
+        "smoke-checklist.md Steps 1-3"
+      ],
+      "status": "covered"
+    },
+    {
+      "must": "STORAGE_MODE=local для хакатон-демо: SQLite-only, синтетические local: ID, без Arweave/Solana",
+      "tests": [
+        "mcp/tests/oauth_tool_call.rs (state built with local: synthetic IDs by mock_state())",
+        "mcp/tests/deferred_sign_flow.rs::test_full_lifecycle_sign_callback_410_on_replay (asserts attestation_id present)",
+        "smoke-checklist.md Step 6"
+      ],
+      "status": "covered"
+    },
+    {
+      "must": "smithery.yaml в репо, листинг на smithery.ai активен с install-deeplink",
+      "tests": [
+        ".github/workflows/ci.yml::smithery-schema job (yamale validate against scripts/smithery-schema.yaml)"
+      ],
+      "status": "covered (schema), listing live-check is manual"
+    },
+    {
+      "must": "CI: MCP Inspector валидирует JSON-RPC + tool descriptions на каждый PR; pre-release smoke ручной чек-лист",
+      "tests": [
+        ".github/workflows/ci.yml::mcp-inspector job (npx @modelcontextprotocol/inspector@0.6.x --validate)",
+        "work/mnemonic-integrations/tasks/smoke-checklist.md (10 steps)"
+      ],
+      "status": "covered"
+    },
+    {
+      "must": "cargo test --workspace зелёный, cargo clippy --all-targets -D warnings без предупреждений",
+      "tests": [
+        ".github/workflows/ci.yml::test job (cargo test --workspace --no-fail-fast --features mnemonic-mcp/test-support)",
+        ".github/workflows/ci.yml::clippy job (lib+bins, then all-targets)"
+      ],
+      "status": "covered"
+    },
+    {
+      "must": "Backward-compat: stdio transport работает как сейчас; existing 5 MCP tools сохраняют JSON-RPC сигнатуры",
+      "tests": [
+        "mcp/tests/stdio_backward_compat.rs::test_stdio_tools_list_sign_memory_recall_without_oauth (#[ignore]'d → CI test-stdio scheduled job)",
+        "mcp/src/tools.rs::test_sign_memory_stdio_path_unchanged (asserts inline path returns attestation_id, persists)",
+        "mcp/tests/oauth_tool_call.rs (asserts 5 tools)"
+      ],
+      "status": "covered_with_caveat",
+      "caveat": "stdio_backward_compat is ignored in default CI; only the test-stdio scheduled job exercises the binary functionally. tools.rs unit test covers the inline-path semantic without binary-level boot."
+    },
+    {
+      "must": "payment.rs НЕ рефакторится: PAYMENT_MODE=none для хакатона",
+      "tests": [
+        "Architectural assertion in T4/T5 decisions.md (no schema regression in mcp/src/payment.rs)",
+        "AVP item 8: git diff main -- mcp/src/payment.rs | grep -E '^-CREATE TABLE|^-ALTER TABLE' → empty"
+      ],
+      "status": "covered_via_avp"
+    },
+    {
+      "must": "core/ не имеет references на OAuth/HTTP transport — изоляция архитектуры",
+      "tests": [
+        "AVP item 7: grep -rE 'OAuth|http_transport|axum' core/src/ (modulo core/src/wasm/) → empty",
+        "T4 decisions.md verification confirmed clean"
+      ],
+      "status": "covered_via_avp"
+    },
+    {
+      "must": "Round-trip COSE-signed CBOR через mock MCP-прокси байт-в-байт без re-encoding (test в CI)",
+      "tests": [
+        "mcp/tests/roundtrip_cose_via_http_proxy.rs::test_cose_base64_field_survives_adversarial_proxy"
+      ],
+      "status": "covered"
+    }
+  ],
+
+  "decision_traceability_matrix": [
+    {
+      "decision": "Decision 9 — Mandatory ownership filter + per-IP rate limit on /mcp + auth allowlist + tightened CORS",
+      "tests_that_would_fail_if_reverted": [
+        "mcp/tests/recall_owner_isolation.rs::test_recall_filters_by_owner_pubkey_and_anonymous_returns_401 (cross-tenant leak guard)",
+        "core/src/storage/sqlite.rs::test_search_owner_isolation (T4 unit)",
+        "mcp/tests/auth_allowlist.rs::test_tools_list_initialize_no_auth_200_sign_memory_no_auth_401 (allowlist)",
+        "mcp/tests/rate_limit_routing.rs (3 tests) — burst=5/burst=30/no-stdio",
+        "mcp/tests/cors.rs::test_preflight_allows_mnemonik_xyz_rejects_evil_example_com (exact-origin)",
+        "mcp/src/oauth.rs::test_middleware_tools_call_requires_jwt"
+      ],
+      "status": "covered"
+    },
+    {
+      "decision": "Decision 10 — OAuth signed-challenge contents in canonical CBOR (server_origin, state, client_id, redirect_uri, code_challenge, code_challenge_method=S256, nonce, exp)",
+      "tests_that_would_fail_if_reverted": [
+        "mcp/src/oauth.rs::test_authorize_valid_signature (canonical CBOR roundtrip)",
+        "mcp/src/oauth.rs::test_authorize_pkce_method_must_be_s256 (S256-only enforcement)",
+        "mcp/src/oauth.rs::test_authorize_expired_challenge_401 (60s exp)",
+        "mcp/src/oauth.rs::test_authorize_single_use_replay_401 (atomic single-use)",
+        "mcp/src/oauth.rs::test_authorize_tampered_sub_401 (server_origin/pubkey binding)",
+        "mcp/src/oauth.rs::test_authorize_missing_state_csrf_401 (state CSRF binding)"
+      ],
+      "status": "covered"
+    },
+    {
+      "decision": "Decision 11 — JWT format HS256, 1-hour TTL, secret in env, alg fixed in code",
+      "tests_that_would_fail_if_reverted": [
+        "mcp/src/oauth.rs::test_jwt_alg_none_rejected_401 (algorithm fixing)",
+        "mcp/src/oauth.rs::test_jwt_iss_aud_mismatch_rejected (iss + aud explicit validation)",
+        "mcp/src/oauth.rs::test_jwt_roundtrip_iss_aud_sub (positive control)",
+        "mcp/src/oauth.rs::test_jwt_concurrent_unique_jti (jti UUIDv4)",
+        "mcp/tests/oauth_flow.rs::full_authorize_token_jwt_roundtrip (HS256 round-trip + decode)",
+        "scripts/test-oauth-flow.sh (asserts alg=HS256 in header)"
+      ],
+      "status": "covered",
+      "minor_gap": "RS256-against-HS256-secret is defended by Validation::new(Algorithm::HS256) but no explicit test forges the exact attack token. Suggest: test_jwt_rs256_signed_against_hs256_secret_rejected."
+    },
+    {
+      "decision": "Decision 12 — PendingBundles LRU+TTL+per-user cap; sign-callback validates signer_pubkey==jwt.sub, COSE verify, content_hash match, atomic single-use eviction",
+      "tests_that_would_fail_if_reverted": [
+        "mcp/src/pending.rs (11 unit tests covering LRU cap, 300s TTL, per-user cap, oversize, GET 403, atomic single-use, owner-mismatch consume, error→status mapping, counter decrement)",
+        "mcp/tests/pending_authz.rs (4 tests) — wrong jwt 403, unknown id 404, canonical CBOR Content-Type, anon 401",
+        "mcp/tests/pending_expiry.rs::test_after_301s_pending_returns_410_and_evicts",
+        "mcp/tests/pending_user_cap.rs::test_51st_sign_memory_returns_429_with_retry_after",
+        "mcp/tests/sign_callback.rs (5 tests) — signer==jwt.sub, single-use 410 replay, persistence+eviction, tampered content_hash, invalid signature",
+        "mcp/tests/deferred_sign_flow.rs::test_full_lifecycle_sign_callback_410_on_replay",
+        "mcp/src/tools.rs::test_sign_memory_returns_awaiting_signature_for_jwt_path",
+        "mcp/src/tools.rs::test_sign_memory_stdio_path_unchanged"
+      ],
+      "status": "covered"
+    }
+  ],
+
+  "missing_coverage_gaps": [
+    {
+      "severity": "minor",
+      "area": "OAuth alg-confusion specificity",
+      "gap": "Validation::new(Algorithm::HS256) is the policy mechanism, but no test forges an RS256 token with a publicly-known RSA public key matching the HS256 secret-as-PEM-bytes attack pattern.",
+      "suggested_test": "mcp/src/oauth.rs::test_jwt_rs256_signed_against_hs256_secret_rejected — encode() with Algorithm::RS256 + EncodingKey::from_rsa_pem(...), then verify_jwt with HS256 validator, assert is_err()",
+      "block_deploy": false
+    },
+    {
+      "severity": "minor",
+      "area": "WASM tests are not in default CI",
+      "gap": "core/src/wasm/mod.rs's 7 wasm-bindgen tests run via `wasm-pack test --headless --firefox` only — no CI job invokes this. Manual run by Task 2 author was clean per decisions.md.",
+      "suggested_test": "Add a `wasm-pack-test` CI job to .github/workflows/ci.yml gated on changes to core/src/wasm/** or core/Cargo.toml",
+      "block_deploy": false
+    },
+    {
+      "severity": "minor",
+      "area": "Stdio backward-compat ignored in default CI",
+      "gap": "mcp/tests/stdio_backward_compat.rs is #[ignore]'d due to pricing.refresh() outbound HTTPS at startup. Default CI does not exercise the binary functionally — only the scheduled test-stdio job does.",
+      "suggested_fix": "Phase 2: add --no-pricing startup flag to mnemonic-mcp; remove #[ignore] when present.",
+      "block_deploy": false
+    },
+    {
+      "severity": "minor",
+      "area": "Pending bundle expiry uses wall-clock sleep",
+      "gap": "PendingBundles reads chrono::Utc::now() rather than tokio::time::Instant; tokio::time::pause/advance cannot influence it. Test uses 1100ms wall-clock against 1s TTL.",
+      "suggested_fix": "Phase 2: swap chrono::Utc::now() for tokio::time::Instant inside PendingBundles to enable virtual-clock testing per tech-spec line 227.",
+      "block_deploy": false
+    },
+    {
+      "severity": "minor",
+      "area": "Pending user cap surfaces JSON-RPC error envelope, not HTTP 429",
+      "gap": "tools.rs::sign_memory_deferred wraps PendingError::PerUserCapExceeded via anyhow! → HTTP 200 + -32603 envelope. PendingError's IntoResponse maps to 429 but the dispatcher loses that mapping.",
+      "suggested_fix": "Refactor sign_memory_deferred to lift PendingError through the dispatcher response. Tighten pending_user_cap.rs to assert strict 429.",
+      "block_deploy": false
+    },
+    {
+      "severity": "minor",
+      "area": "Rate-limit test uses stub router",
+      "gap": "mcp/tests/rate_limit_routing.rs builds Router with tower_governor + echo handler, not the production main_router. Catches `.layer()` ordering correctness but not handler-specific behavior post-limiter.",
+      "suggested_fix": "Phase 2: refactor main.rs::run_http to expose a build_app(state) function callable from tests; switch rate_limit_routing.rs to call it.",
+      "block_deploy": false
+    },
+    {
+      "severity": "minor",
+      "area": "Webapp UI tests are component-level only",
+      "gap": "3 vitest tests cover IdentityPanel + InstallButtons + Sign page in isolation. No integration test boots the React Router + WASM + a mock /api/pending fetch end-to-end. Smoke checklist covers UI behavior manually.",
+      "block_deploy": false,
+      "note": "Acceptable for size-L hackathon MVP per spec edge-case rule (webapp may have zero *.test.tsx)."
+    }
+  ],
+
+  "block_deploy_gaps": [],
+
+  "recommendations": [
+    "Track all 7 minor gaps in a follow-up backlog item — none block hackathon deploy.",
+    "After first dry-run of smoke-checklist.md, append timing log to decisions.md per T9 post-completion checklist.",
+    "When Phase 2 begins, prioritize: (a) tokio::time::Instant in PendingBundles for virtual-clock TTL tests, (b) --no-pricing flag for stdio_backward_compat to remove #[ignore], (c) build_app(state) extraction so rate_limit_routing tests the production router.",
+    "Document MCP Inspector pin (0.6.x) in tandem-bump alongside MCP spec releases per T8 follow-up note."
+  ],
+
+  "summary": "All 13 focus areas pass the audit, with 7 minor deviations explicitly documented in T1-T9 decisions.md and acceptable for a size-L hackathon MVP. Test pyramid is healthy (36 unit + 7 wasm + 22 integration + 3 webapp + 10 manual smoke steps), slightly above the size-L target but each test is single-purpose and traceable to a user-spec MUST or Decision-9/10/11/12 invariant. Critical recall ownership isolation passes with explicit cross-tenant assertion. No deploy-blocking gaps. Test Audit verdict: PASS_WITH_NOTES."
+}

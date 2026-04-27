@@ -500,3 +500,310 @@ Prepared three deliverables for the Smithery listing + `mcp.mnemonik.xyz` subdom
 
 - No reviewers assigned to Task 9 (per `tasks/9.md` frontmatter `reviewers: []`).
 - Acceptance gate: Verify-user run by a non-author team member; Test Audit (Task 11) inspects for unambiguity.
+
+---
+
+## Task 10: Code Audit
+
+**Date:** 2026-04-26
+**Auditor:** T10-audit (read-only, advisory only)
+**Verdict:** `minor_issues` with one **critical-for-deploy** flag.
+**Structured findings:** `work/mnemonic-integrations/logs/working/audit/code-auditor.json`
+
+### Architectural rule verification
+
+| Rule | Result | Evidence |
+|---|---|---|
+| `core/` has zero references to OAuth / HTTP / axum | **PASS** | `grep -rE "OAuth\|http_transport\|axum\|tower_governor\|jsonwebtoken\|oauth2" core/src/` returns only 6 doc-comment matches in `storage/sqlite.rs`, `storage/traits.rs`, `wasm/mod.rs` (legitimate caller-context refs). `core/Cargo.toml` has no axum / oauth2 / jsonwebtoken / tower-http / lru deps. |
+| `mcp/src/payment.rs` not refactored beyond schema migration helper | **PASS** | `git log main..HEAD -- mcp/src/payment.rs` is empty — file untouched in this feature branch. The `migrate_owner_pubkey_columns()` helper lives in `core/src/storage/sqlite.rs` (correct location), not in `payment.rs`. |
+| No payment methods added to `core/` | **PASS** | grep for `verify_usdc_transfer\|create_api_key\|deduct_balance\|credit_deposit\|mark_x402_nonce\|record_attestation_cost\|get_pnl_stats\|get_owner_pubkey` in `core/src/` finds only one hit, a comment in `sqlite.rs:95` referencing the (legacy) `credit_deposit` for context. No code defs in `core/`. |
+| No `HashEmbedder` references | **PASS** | `grep HashEmbedder core/src/ mcp/src/ webapp/src/` returns nothing. Only historical refs in `work/mnemonic-core/*` documentation. |
+| `verify_usdc_transfer` remains standalone in `mcp/src/payment.rs` | **PASS** | `mcp/src/payment.rs:241` is `pub async fn verify_usdc_transfer(solana: &SolanaClient, ...)` (free function, not a method on `SolanaClient`). `main.rs:129` calls it as `payment::verify_usdc_transfer(&state.solana, ...)`. |
+| `pricing.rs` lives in `mcp/`, not `core/` | **PASS** | Glob `**/pricing.rs` returns only `mcp/src/pricing.rs`. |
+
+All six architectural rules pass.
+
+### Findings by focus area
+
+#### Streamable HTTP transport (Task 1)
+
+- **No findings.** `mcp/src/mcp.rs` correctly emits `Content-Type: application/x-ndjson` with `Body::from_stream(stream::once(...))` — chunked transfer-encoding falls out automatically (no `Content-Length`). The cancellation-safe single-frame today is wired so multi-frame Task 4b extensions plug in without the route shape changing. No leftover SSE / `text/event-stream` hits anywhere. `transport_tests::test_chunked_response_encoding` and `test_partial_response_client_disconnect` provide regression guards.
+
+#### WASM bindgen wrappers (Task 2)
+
+- **No findings.** `core/src/wasm/mod.rs` is gated by `#![cfg(all(target_arch = "wasm32", feature = "wasm"))]` at the file level — native builds of `mcp/` literally do not see this file. Errors are surfaced as `Result<_, JsValue>` everywhere; no `unwrap()`/`panic!()` outside `#[cfg(test)]`. Five exports route through `keypair_from_json` which validates the secret-pubkey roundtrip. `core/src/lib.rs` correctly gates the native modules behind `cfg(not(target_arch = "wasm32"))` so wasm builds skip rusqlite/reqwest/fastembed.
+
+#### Webapp WASM build pipeline (Task 3)
+
+- **No findings.** `webapp/scripts/build-wasm.sh` uses `set -euo pipefail`, anchors on `REPO_ROOT` via `cd "$SCRIPT_DIR/../.."`, checks `wasm-pack` is on PATH, and uses `--out-dir "$REPO_ROOT/webapp/src/wasm"` (absolute path — fixes the wasm-pack `--out-dir` relative-to-crate-manifest gotcha). `.gitignore` excludes `src/wasm/`. Exit codes propagate (no manual `exit` swallowing). Header comments document the prereq.
+
+#### OAuth + auth middleware (Task 4)
+
+- **CRITICAL-FOR-DEPLOY** (audit.json finding 1): `OAuthState::insert_pending` is annotated `#[allow(dead_code)]` and is only ever called from `#[cfg(test)]` code (oauth.rs unit tests + mcp/tests/oauth_flow.rs). There is NO production endpoint that builds a pending challenge before the browser POSTs `/oauth/authorize`. End-to-end, no client can mint a real production JWT today: the Cursor / Claude.ai install flow described in tech-spec Decision 10 is not reachable. The only route to a JWT in production is `mint-test-jwt`. T7-decisions called this out as 'OAuth challenge-signing UI not yet wired'; this audit elevates it to a deploy blocker. **Recommendation:** Add a `POST /oauth/init` (or equivalent webapp endpoint) that calls `build_challenge_hash` + `insert_pending` before deploy. Pre-deploy QA (T14) must fail closed if this remains gap-filled by `mint-test-jwt` alone.
+- **Major** (audit.json finding 4): The route-level rate limit on `/mcp` uses `burst_size=30` (the looser of the two Decision 9 caps), and the per-method `sign_memory ≤ 5/min/IP` cap from Decision 9 is delegated to PendingBundles' per-user 50-outstanding cap — which is per-`jwt.sub`, not per-IP. T4-decisions flagged this. Either tighten the spec wording or wire a per-method governor.
+- **Minor** (audit.json finding 5): `mcp.rs:437,498` use `lock().unwrap()` while `mcp.rs:368,396` use `lock().expect("store mutex poisoned")`. Same code path, different patterns; standardize.
+- **Minor** (audit.json finding 6): `#[allow(dead_code)]` on `insert_pending`, `build_challenge_hash`, `STATE_TTL_SECS`, `SERVER_ORIGIN`, `CHALLENGE_SCHEMA` masks the critical OAuth-bootstrap gap. Once production callers exist, all five attributes drop.
+- **Minor** (audit.json finding 7): `bearer_auth_middleware` calls `to_bytes` on every non-allowlisted request including GET `/api/pending/{id}` which has no body. Wasteful but harmless.
+- **Minor** (audit.json finding 11): JWT EncodingKey + DecodingKey duplicated in `OAuthState` — required by the jsonwebtoken API; informational only.
+- **Minor** (audit.json finding 13): Doc comments reference 'consent-page bootstrap (future webapp endpoint)' — non-existent caller. Reinforces the critical finding.
+
+#### Browser-mediated signing infra (Task 5)
+
+- **Minor** (audit.json finding 8): Two-UUID design — `sign_memory_deferred` pre-allocates an `artifact_id` UUID baked into the canonical CBOR while `PendingBundles::insert` separately generates a `correlation_id`. They diverge. T5-decisions flagged this. No user-facing breakage today, but a fragile invariant.
+- **Minor** (audit.json finding 10): `PendingEntry.metadata` is `#[allow(dead_code)]` — every clone (`get`) carries an unused `serde_json::Value`. Drop or wire a real reader.
+- **Otherwise:** `pending.rs` LRU+TTL+per-user-cap is correctly atomic (single `tokio::sync::Mutex<Inner>` covers LRU mutations and per-user counter). Lock discipline is right (no `.await` while held; SQLite writes happen AFTER the LRU guard drops in `api.rs::sign_callback_handler`). Sign-callback validation order — body signer == jwt.sub → b64 decode → atomic consume → COSE verify against stored hash → recompute hash defense-in-depth — is correct. Replay returns 410 Gone via the explicit override at `api.rs:138-143`. The `force_expire` test helper is `#[cfg(test)]` only.
+
+#### Smithery + DNS (Task 6)
+
+- **Minor** (audit.json finding 9): `smithery.yaml::install.cursor` uses `?url=...` but `webapp/src/components/InstallButtons.tsx` uses `?config=<base64>`. Pick one.
+- **Otherwise:** `smithery.yaml` validates against `scripts/smithery-schema.yaml` (T8 CI step). The five tools listed match `mcp/src/tools.rs::tool_definitions`. nginx `mcp/deploy/nginx-mcp-subdomain.conf` correctly sets `proxy_buffering off` + `proxy_request_buffering off` + `proxy_read_timeout 120s` for the streamable HTTP path; security headers (`X-Frame-Options`, `X-Content-Type-Options`, `Referrer-Policy`) added at the edge; `/admin` blocked at the edge with 403. `client_max_body_size 256k` caps Smithery probe abuse.
+
+#### Webapp pages (Task 7)
+
+- **Major** (audit.json finding 2): `Sign.tsx:130` reads `x-mnemonic-expires-at` header that `api.rs::get_pending_handler` never emits. Webapp falls back to `now + 5 min`, which is correct for today's 300s TTL but will lie if TTL ever changes. **Fix:** add the header in api.rs.
+- **Minor** (audit.json finding 12): `decodeEmbeddingFromCbor` returns a zero-length Uint8Array. The browser-signed COSE_Sign1 therefore canonicalizes a different `metadata.embedding_compressed` than the server stored, so the SHA256 of the recovered COSE payload != `entry.content_hash`, and `api.rs::sign_callback_handler` will reject the signature with 401. End-to-end via the WASM signer is untested today (the smoke harness signs the EXACT bytes from `GET /api/pending/<id>` using the `sign_pending` example, not the WASM signer). T7-decisions flagged this. **Cannot deploy without resolving** — see audit.json for two fix paths.
+- **Minor** (audit.json finding 14): localStorage keypair stored unencrypted. T7-decisions explicitly deferred AES-GCM encryption. Acceptable for hackathon scope; track as a Phase-2 hardening.
+- **Otherwise:** React idioms are clean (no missing `key` props observed; hooks rules respected; `useEffect` cleanups for the countdown timer are present). CSP meta tag in `webapp/index.html` matches the Risks-table spec exactly: `default-src 'self'; script-src 'self'; connect-src 'self' https://mcp.mnemonik.xyz; ...`. No `unsafe-inline` on scripts. The `style-src 'unsafe-inline'` is required by Tailwind's runtime style injection — documented inline.
+
+#### Integration tests (Task 8)
+
+- **Out of scope** for this audit (T12 owns test pyramid review). Spot-checks: tests mostly avoid `sleep()`-based waits except `pending_expiry.rs` which uses `tokio::time::sleep(1100ms)` against a 1s TTL (T8-decisions explained the wall-clock dependency on `chrono::Utc::now()`); `stdio_backward_compat.rs` is `#[ignore]`'d by default and runs in a separate `test-stdio` workflow.
+- **Minor** (audit.json finding 13): `audit.toml` is empty with a stub comment block. Pre-populate triage instructions before first cargo-audit failure.
+
+#### Smoke checklist (Task 9)
+
+- **Out of scope** for code audit; T12 (Test Audit) owns. Spot-check: `work/mnemonic-integrations/tasks/smoke-checklist.md` has Action / Expected / Recovery / ETA per step, totals 750s of step ETAs against a 1800s cap. Recovery notes are concrete fallback actions.
+
+### Critical findings flagged for pre-deploy QA pickup
+
+1. **OAuth `/oauth/init` endpoint missing** (audit.json finding 1) — production cannot mint JWTs without out-of-band tooling. Block deploy until wired.
+2. **WASM-signed `embedding_bytes` mismatch with server-stored canonical CBOR** (audit.json finding 12) — end-to-end webapp signing flow will fail with 401 'COSE verification failed' until the embedding-bytes contract is resolved (either decode CBOR in browser, or have WASM accept the server-supplied canonical_cbor blob untouched).
+
+Both findings are deploy-blocking but not architectural-rule violations — they are integration gaps that the spec describes but the implementation defers. Pre-deploy QA (Task 12 / 14) should fail closed if either remains.
+
+### Tech-spec deviations noted
+
+- T4-decisions: `tower_governor` pinned to `=0.7.0` (not `=0.8.0` as tech-spec Decision 9 suggested) due to `governor` major-version conflict with `pricing.rs`. Verified single resolved version. Update tech-spec.md Dependencies note.
+- T2-decisions: `wasm-bindgen` pinned to `=0.2.100` (not `=0.2.95` as tech-spec Decision 3 suggested) because `solana-sdk = "2.2"` transitively forces `js-sys = "^0.3.77"` which forces `wasm-bindgen = "=0.2.100"`. Update tech-spec.md Dependencies note.
+
+### Reviewer reports
+
+- code-auditor: this entry + `work/mnemonic-integrations/logs/working/audit/code-auditor.json`
+- security-auditor: T11 (parallel)
+- test-auditor: T12 (parallel)
+
+---
+
+## Task 11: Security Audit (Audit Wave) — 2026-04-26
+
+**Auditor:** T11-audit (`security-auditor` skill)
+**Scope:** OWASP Top 10 (2021) + spec-mandated focus areas covering Tasks 1-9 outputs (auth + signing surface). Read-only review of source files listed in `tasks/11.md`.
+**Output artefact:** `work/mnemonic-integrations/logs/working/audit/security-auditor.json` (JSON-shaped findings)
+**Verdict:** No critical findings. **1 high** (functional gap — blocks demo), **4 medium**, **3 low**. Hackathon MVP scope; no signs of compromise; no compliance risk.
+
+### Verdict table
+
+| Focus area | Verdict | Severity | Note |
+|---|---|---|---|
+| OAuth 2.1 + PKCE correctness (S256-only, atomic single-use, expiry, state binding) | pass | — | S256 enforced via canonical-CBOR hash divergence; pop-before-verify atomicity; 60s exp |
+| JWT issuance (HS256 fixed alg, iss/aud validation, alg=none rejection) | pass | — | `Validation::new(Algorithm::HS256)`, explicit iss/aud HashSet, post-decode defense-in-depth; `test_jwt_alg_none_rejected_401` confirms |
+| MCP_JWT_SECRET handling (env-only, length check, no log leak) | pass | — | `load_jwt_secret` aborts startup on missing/<32 bytes; no `tracing!`/`println!` of secret |
+| Bearer middleware allowlist correctness | pass | — | `/oauth/*`, `/health` URI-allowlisted; `initialize`+`tools/list` method-allowlisted; `tools/call` requires JWT |
+| CORS (exact origin, no wildcard) | pass | — | `https://mnemonik.xyz` pinned; `[GET,POST,OPTIONS]`; `[AUTHORIZATION,CONTENT_TYPE]`; `allow_credentials` default-false |
+| Sign-callback validation (signer_pubkey==jwt.sub, COSE verify, atomic eviction) | pass | — | signer_pubkey first, atomic consume before COSE verify, recomputed hash defense-in-depth, 410 on replay |
+| localStorage keypair encryption | fail | medium | T7 deferred AES-GCM — plain JSON in localStorage. Documented gap; CSP defense-in-depth in place. (Finding #6) |
+| `import_keypair_json` validation | pass | — | `keypair_from_json` checks 64-byte length AND derived pubkey matches embedded base58; `storage.ts::readIdentity` shape-checks defensively |
+| PendingBundles bounds (LRU 10k, TTL 300s, per-user 50, content 32 KB, metadata 4 KB) | pass | — | All Decision-12 caps enforced; lazy TTL eviction; counter decrements on consume/eviction |
+| Pending bundle authorization (403 not 404) | fail | medium | GET returns 403 (good); **`consume()` pops entry BEFORE owner check** — destructive on attacker-guessed UUID. (Finding #1) |
+| Rate limiting (per-IP `/mcp` + `/oauth/*`) | fail | low | Decision 9 calls for sign_memory ≤10/min/IP, recall ≤30/min/IP; route applies the looser 30/min/IP only. PendingBundles per-user 50 cap covers part of the gap. (Finding #5) |
+| OAuth pending-state insertion path wired in production | fail | **high** | `OAuthState::insert_pending` is `#[allow(dead_code)]` — no production handler invokes it. The consent-page bootstrap that issues challenges is unimplemented. (Finding #2 — blocks demo) |
+| Smithery yaml — no PII / secrets / internal hostnames | pass | — | `dev@mnemonik.xyz` is operational/public; no JWT, no internal IPs, no API keys |
+| nginx server-block (HSTS, ssl_protocols, server_tokens) | fail | medium | Missing `Strict-Transport-Security`, missing explicit `ssl_protocols`, missing `server_tokens off`. (Finding #3) |
+| Dependencies (cargo audit + pinned versions) | pass | — | `cargo audit --deny warnings` in CI; `=` pinned `jsonwebtoken=9.3.0`, `oauth2=4.4.2`, `lru=0.12.5`, `tower_governor=0.7.0` |
+| A04 Insecure Design — deferred-sign threat model | fail | medium | `approve_url` server-built (good). But `decodeContentFromCbor` regex heuristic decouples WHAT user reads from WHAT they sign. (Finding #4) |
+| Cross-tenant recall isolation | pass | — | `WHERE a.owner_pubkey = ?` parameterized, no carve-out; `recall_owner_isolation` integration test guards regression |
+
+### Findings
+
+1. **[medium] Pending-bundle `consume()` pops before owner check.**
+   - **Location:** `mcp/src/pending.rs:288-312` (`PendingBundles::consume`)
+   - **Issue:** `lru.pop(correlation_id)` runs BEFORE the `entry.jwt_sub != jwt_sub` check. A holder of any valid JWT who guesses or scrapes another user's `correlation_id` (122 bits — infeasible to brute-force, but the value travels through AI-tool response, proxy logs, clipboard) can DoS the rightful owner: server pops the entry, COSE verification fails because the COSE was signed by the attacker, but Alice's bundle is now gone and her webapp sees 410 Gone.
+   - **Exploitation:** Attacker A obtains a valid JWT (any user can OAuth). A POSTs `/api/sign-callback` with Alice's `correlation_id` and A's own keypair → entry destroyed. Alice's `/sign/<id>` page surfaces "expired or already signed."
+   - **Remediation:** In `pending.rs::consume`, replace the initial `lru.pop` with `lru.peek`, return `Forbidden` without mutation if owner mismatches, then `lru.pop` only on successful match. Existing test `test_consume_forbidden_for_wrong_owner` will need its assertion flipped (entry should survive a mismatched consume so the rightful owner can retry).
+
+2. **[high — blocks demo] OAuth pending-state insertion path is dead code.**
+   - **Location:** `mcp/src/oauth.rs:148` (`#[allow(clippy::too_many_arguments, dead_code)] pub fn insert_pending(...)`)
+   - **Issue:** No production handler invokes `OAuthState::insert_pending`. The "consent-page bootstrap (future webapp endpoint)" referenced in the doc comment is unimplemented. Every `POST /oauth/authorize` in production will fall into `oauth.rs:333` ("unknown or already-used state") and return 401. No JWT can be issued to real AI clients (Cursor / Claude.ai Pro) — the demo would have to bypass via the `mint-test-jwt` CLI shortcut, which is an unrelated trust path.
+   - **Exploitation:** Not directly exploitable as a vulnerability — but adding the bootstrap endpoint post-audit risks shipping with weaker controls than the existing `/authorize` POST already enforces.
+   - **Remediation:** Add a `GET /oauth/authorize` (or separate `/oauth/bootstrap`) endpoint that: (a) accepts `client_id`/`redirect_uri`/`code_challenge`/`code_challenge_method`/`state` from query string, (b) **rejects `code_challenge_method != "S256"` server-side** (S256-only enforcement at the protocol gate), (c) generates a server `nonce`, (d) calls `insert_pending` under the existing `/oauth/*` per-IP governor (5 req/min), (e) returns the challenge fields the browser needs to sign. Re-audit after the endpoint is added — it is the formal CSRF binding point.
+
+3. **[medium] nginx server-block missing HSTS + explicit TLS pin + `server_tokens off`.**
+   - **Location:** `mcp/deploy/nginx-mcp-subdomain.conf`
+   - **Issue:** Three hardening directives absent: (a) `Strict-Transport-Security` header — first-request downgrade attack possible; (b) explicit `ssl_protocols` — relies on `/etc/letsencrypt/options-ssl-nginx.conf` (currently TLSv1.2+TLSv1.3, but external dep that an operator could regress); (c) `server_tokens off` — nginx version leaked in error pages and `Server:` header.
+   - **Exploitation:** (a) HSTS: hostile-network MITM intercepts port-80 first request before the 301 redirect, presents a fake OAuth challenge, harvests the COSE-signed challenge. HSTS preload would make the browser refuse the http:// request. (b) Operator system-update could revert `options-ssl-nginx.conf` to a permissive default. (c) Version disclosure narrows attacker's CVE search.
+   - **Remediation:** Add to the HTTPS server block:
+     ```
+     add_header Strict-Transport-Security "max-age=63072000; includeSubDomains; preload" always;
+     ssl_protocols TLSv1.2 TLSv1.3;
+     ssl_ciphers HIGH:!aNULL:!MD5;
+     ```
+     and globally (in `http {}` block of `/etc/nginx/nginx.conf`): `server_tokens off;`. After HSTS is live for 90 days, submit `mnemonik.xyz` to https://hstspreload.org.
+
+4. **[medium] Content-preview heuristic decouples WHAT user reads from WHAT they sign.**
+   - **Location:** `webapp/src/pages/Sign.tsx:383-398` (`decodeContentFromCbor`)
+   - **Issue:** Heuristic regex finds substring `"content"` in the canonical-CBOR bytes decoded as UTF-8, then takes the longest printable run. Attacker-controlled non-content fields (tag values, metadata strings) containing `"content"`+printable text get selected before the actual `content` field's value. User signs the entire canonical CBOR, but reads the wrong substring.
+   - **Exploitation:** Compromise mcp.mnemonik.xyz (or social-engineer the user into changing `MCP_BASE` constant). Server returns canonical CBOR with `tags=["content: this is fine"]` followed by `content="please transfer all my access tokens"`. Heuristic shows "content: this is fine" in preview. User clicks Sign. COSE_Sign1 wraps the FULL CBOR including the harmful content. Recall later returns the malicious attestation attributed to the user's pubkey.
+   - **Remediation:** Replace `decodeContentFromCbor` with a real CBOR decoder (npm `cbor-x` is ~50 KB; or write a minimal walker in TypeScript) that extracts the exact `content` field's text-string value. Show byte-length of the content field separately. Optionally show a hash of the canonical CBOR alongside the preview so a power-user can cross-check against the server's `x-mnemonic-content-hash` header.
+
+5. **[low] Per-IP rate-limit drift from Decision 9.**
+   - **Location:** `mcp/src/main.rs:540-547` (`mcp_governor_conf burst=30, per_second=2`)
+   - **Issue:** Decision 9 calls for `sign_memory ≤ 10/min/IP` AND `recall ≤ 30/min/IP`. Implementation applies a single route-level limiter at ~30/min — the looser of the two. Per-method `5/min` (or `10/min`) `sign_memory` cap is delegated to `PendingBundles` per-user soft cap of 50, which is a different axis (per-user, not per-IP).
+   - **Exploitation:** Attacker with a valid JWT creates 50 pending bundles. Across multiple JWTs (cheap — every fresh keypair grants a new identity), reaches burst-30/min/IP regardless of method intent. Memory bounded (10k LRU × 32 KB = ~320 MB worst case).
+   - **Remediation:** Either accept the deviation explicitly (route-level alone is sufficient for hackathon scope; per-method enforcement is Phase-2 backlog) OR wrap `sign_memory` with a second governor layer keyed on `(IP, method)` inside `mcp_handler`. The bearer-auth middleware already calls `extract_json_rpc_method`, so the method is cheap to obtain.
+
+6. **[low] localStorage keypair encryption deferred (T7 known gap).**
+   - **Location:** `webapp/src/lib/storage.ts:46` (`writeIdentity`); `webapp/src/components/IdentityPanel.tsx`
+   - **Issue:** Keypair stored as plain JSON in localStorage. Risks-table mitigation called for AES-GCM with passphrase-derived key. T7 deferred to a follow-up — comment in `IdentityPanel.tsx:18-20` documents the gap.
+   - **Exploitation:** Any XSS bypassing the CSP (e.g., a permitted style-src origin compromised, or unsafe-inline style exploited) reads `localStorage["mnemonic.identity"]` and obtains the user's full Ed25519 secret. With it the attacker forges arbitrary attestations under the user's identity until the user rotates the keypair.
+   - **Remediation:** Implement passphrase-prompt UI on `/install`. Derive AES-GCM key via Argon2id (or PBKDF2-SHA256 ≥600k iterations). Encrypt with a fresh IV per write; store `{ciphertext, iv, salt, kdf_params}`. Decrypt at sign/export. Defer Passkey-based unlock to P1.5 per Risks-table.
+
+7. **[low] OAuthState mutex `.expect("...")` poisoning.**
+   - **Location:** `mcp/src/oauth.rs:167, 328, 383, 426` (`.lock().expect("...")`)
+   - **Issue:** `std::sync::Mutex` guards in `OAuthState` use `.expect("pending mutex poisoned")` / `.expect("codes mutex poisoned")`. If a panic occurs inside any earlier critical section the mutex is poisoned and all subsequent OAuth requests panic and 500. Same pattern in `mcp/src/api.rs:202` is already handled with proper error matching.
+   - **Exploitation:** Low-likelihood — the body of the critical section is just an LRU `put`/`pop` which doesn't panic. But a future contributor adding logic inside the guard could introduce a panic that takes the OAuth subsystem down for the lifetime of the process.
+   - **Remediation:** Replace `.expect("...")` with `.map_err(|e| oauth_error(StatusCode::INTERNAL_SERVER_ERROR, &format!("oauth state poisoned: {e}")))?` returning a JSON-RPC error envelope. Mutex stays poisoned but the request handler doesn't panic.
+
+8. **[low] `GET /api/pending/<id>` response missing `x-mnemonic-expires-at` header.**
+   - **Location:** `mcp/src/api.rs:43-73` (`get_pending_handler`); `webapp/src/pages/Sign.tsx:130-134` (header consumer)
+   - **Issue:** Handler sets `x-mnemonic-content-hash` and `x-mnemonic-correlation-id` but NOT `x-mnemonic-expires-at`. Webapp falls back to `now + 5 min` — countdown drifts from server-side TTL.
+   - **Exploitation:** Not directly exploitable. Functional drift — user clicks Sign at 0:01 webapp time, server returns 410 Gone (slow request, server already evicted), user surprised. UX, not security.
+   - **Remediation:** In `api.rs::get_pending_handler` add `if let Ok(hv) = HeaderValue::from_str(&entry.exp.timestamp().to_string()) { headers.insert("x-mnemonic-expires-at", hv); }`. Webapp already consumes the header.
+
+### OWASP Top 10 (2021) mapping
+
+- **A01 Broken Access Control** → Bearer allowlist (pass) + sign-callback `signer_pubkey==jwt.sub` (pass) + `owner_pubkey` SQL filter (pass). **Finding #1** is partial fail (consume-before-owner pop).
+- **A02 Cryptographic Failures** → HS256 fixed alg + iss/aud validation + COSE verify (pass). **Finding #6** localStorage encryption is a known T7 deferred gap.
+- **A03 Injection** → All SQL parameterized via `rusqlite::params![]`. No string-interpolation SQL anywhere in `core/src/storage`. Pass.
+- **A04 Insecure Design** → Server-built `approve_url` (pass) + bounded PendingBundles (pass) + atomic consume (partial — see #1). **Finding #4** content-preview spoofing is the main gap.
+- **A05 Security Misconfiguration** → CORS exact origin (pass) + CSP meta tag complete (pass). **Finding #3** nginx HSTS+ssl_protocols+server_tokens missing.
+- **A06 Vulnerable & Outdated Components** → `cargo audit --deny warnings` in CI; `=` pinned security-critical deps. Pass.
+- **A07 Identification & Auth Failures** → PKCE S256-only enforced (pass), single-use atomic state pop (pass), 60s TTL (pass), iss/aud (pass). **Finding #2** functional gap — pending-state insertion path is dead code, blocks the demo.
+- **A08 Software & Data Integrity** → base64-encoded CBOR commitment (Decision 7) + recomputed hash defense-in-depth + roundtrip_cose_via_http_proxy CI test. Pass.
+- **A09 Logging & Monitoring** → No JWT secret/token/COSE bytes in any `tracing!`/`println!` line. Pass.
+- **A10 SSRF** → No user-controllable URLs on the integration surface. nginx `/admin` blocked, default 404. Pass.
+
+### Summary
+
+| Severity | Count | Findings |
+|---|---|---|
+| Critical | 0 | — |
+| High | 1 | #2 (OAuth pending-state insertion path not wired — blocks demo) |
+| Medium | 4 | #1 (consume-before-owner pop), #3 (nginx hardening), #4 (content-preview spoofing), #6 (localStorage encryption deferred) |
+| Low | 3 | #5 (rate-limit per-method drift), #7 (mutex `.expect`), #8 (`x-mnemonic-expires-at` header) |
+
+**Demo gate (for Task 12 Pre-deploy QA):** Finding #2 is the only blocker. Without an OAuth bootstrap endpoint that calls `insert_pending`, the `/oauth/authorize` POST returns 401 against any real client and Cursor / Claude.ai Pro cannot complete connector install. Findings #1, #3, #4 should be fixed before public access but do not block a controlled demo. Findings #5, #6, #7, #8 are acceptable carry-forward for Phase 1.
+
+**Architectural rule check:** `grep -rE "OAuth|axum|tower_governor|jsonwebtoken|oauth2|PendingBundles" core/src/` returns no code references — only doc-comment mentions in `core/src/storage/sqlite.rs` and `core/src/storage/traits.rs`. `core/` graph stays one-way.
+
+**Files audited:** `mcp/src/oauth.rs`, `mcp/src/pending.rs`, `mcp/src/api.rs`, `mcp/src/main.rs`, `mcp/src/mcp.rs`, `mcp/src/tools.rs`, `mcp/Cargo.toml`, `core/src/wasm/mod.rs`, `core/src/storage/sqlite.rs`, `webapp/src/components/IdentityPanel.tsx`, `webapp/src/pages/Sign.tsx`, `webapp/src/lib/wasm.ts`, `webapp/src/lib/storage.ts`, `webapp/index.html`, `mcp/deploy/nginx-mcp-subdomain.conf`, `smithery.yaml`, `.github/workflows/ci.yml`, `audit.toml`. No source file modified by this task (read-only audit per `tasks/11.md` AC).
+
+
+---
+
+## Task 12: Test Audit — 2026-04-26
+
+**Auditor:** T12-audit
+**Status:** done — report appended; analysis-only, no source files modified.
+**Verdict:** PASS_WITH_NOTES — no deploy-blocking gaps. 7 minor deviations are explicitly documented in T1–T9 entries above and are acceptable for a size-L hackathon MVP.
+**Artifact:** `work/mnemonic-integrations/logs/working/audit/test-auditor.json`
+
+### Test count summary
+
+| Layer | Count | Notes |
+|------|------|------|
+| Unit (mcp/) | 91 total; **36 attributable** to Phase 1 (oauth.rs 20 + pending.rs 11 + tools.rs sign_memory 2 + mcp.rs transport 3) | rest are pre-existing seed/llm/config/chat/payment |
+| Unit (core/) | 77 total; **2 attributable** to Phase 1 (`test_search_owner_isolation`, `test_migrate_owner_pubkey_columns_idempotent`) | rest are pre-existing |
+| WASM-bindgen | 7 (`core/src/wasm/mod.rs`) | wasm32 only via `wasm-pack test --headless`; **NOT in default CI** |
+| Integration (mcp/tests/) | **22 active + 1 ignored** = 23 declared | `stdio_backward_compat` ignored by default; runs in scheduled `test-stdio` CI job |
+| Webapp (vitest) | 3 (`IdentityPanel`, `InstallButtons`, `Sign`) | Phase 1 component-level coverage |
+| Manual smoke steps | 10 (`smoke-checklist.md`) | ETA budget 750s within 1800s cap |
+
+### Test pyramid recomputation (size-L MVP)
+
+| Layer | Target | Actual | Verdict |
+|------|------|------|------|
+| Unit | 25-30 | 36 (Phase 1 attributable) + 7 wasm | Slightly above target (~25%); justified by 6-vector OAuth attack matrix and 11-test PendingBundles state machine. Each test single-purpose. |
+| Integration | 12 | 22 active | ~2x target. Defensible: each guards a Decision-9/10/11/12 invariant or a single user-spec MUST. No redundancy detected. |
+| Automated E2E | 0 | 0 | Per spec — manual smoke only. Headless Claude Code in CI is `backlog.md`. |
+| Manual smoke | yes | 10 steps | Authored, awaiting first dry-run. |
+
+### Per-area pass/fail (13 focus areas from `tasks/12.md` step 2)
+
+| Area | Verdict | Severity | Notes / file:line |
+|------|------|------|------|
+| OAuth flow (6 round-1 vectors) | PASS | minor | `mcp/src/oauth.rs:653-1222` (20 tests) + `mcp/tests/oauth_flow.rs:73`. All 6 vectors covered: `alg=none` (oauth.rs:1050), tampered sub (oauth.rs:740), replay/single-use (oauth.rs:880), expired code (oauth.rs:775 + 1010), missing-state CSRF (oauth.rs:1120), PKCE-S256-only (oauth.rs:817). RS256-against-HS256 covered policy-wise (`Validation::new(Algorithm::HS256)` at oauth.rs:275) but no explicit forged-token test — minor gap. |
+| WASM coverage (7 tests) | PASS | none | `core/src/wasm/mod.rs:234-343`. Includes `sign_attestation_bundle_roundtrip_with_native_verifier` (line 308) which is the COSE_Sign1 round-trip the audit task explicitly named. |
+| COSE-via-proxy mock realism | PASS | none | `mcp/tests/roundtrip_cose_via_http_proxy.rs:33-170`. Adversarial proxy uses `simd-json` re-encode + alphabetical key reorder; `assert_ne!(envelope_bytes, mutated)` at line 100 fails the test if the mock did not actually mutate — guards against the failure mode the audit task specifically named. |
+| Recall ownership isolation (CRITICAL) | PASS | critical_passed | `mcp/tests/recall_owner_isolation.rs:155-232`. Explicit cross-tenant: bob's recall returns exactly bob's row, never alice's (line 210). Anonymous → 401 (line 227). Plus `core/src/storage/sqlite.rs::test_search_owner_isolation`. |
+| Stdio backward-compat | PASS_WITH_KNOWN_GAP | minor | `mcp/tests/stdio_backward_compat.rs:62-234`. Pre-built binary via `env!("CARGO_BIN_EXE_mnemonic-mcp")`, `tokio::time::timeout` per request. **`#[ignore]`'d** due to `pricing.refresh()` outbound HTTPS — runs in scheduled `test-stdio` CI job only. T8 flagged this; Phase 2 fix: `--no-pricing` flag. |
+| Rate-limit wired | PASS_WITH_DEVIATION | minor | `mcp/tests/rate_limit_routing.rs:87-153` (3 tests). T8 deviation: builds stub Router with GovernorLayer at production `.layer()` ordering, NOT full `main_router`. Per-method 5/min `sign_memory` enforced by Decision 12's PendingBundles per-user cap (50), not a separate tower_governor layer. |
+| CORS preflight | PASS | none | `mcp/tests/cors.rs:66-91`. Both branches: allowed origin echoes ACAO + 2xx; evil origin → no echo. |
+| Auth allowlist | PASS | none | `mcp/tests/auth_allowlist.rs:64-135`. tools/list anon → 200, initialize anon → 200, sign_memory anon → 401 (-32001 envelope), valid JWT clears gate. |
+| Deferred-sign flow lifecycle | PASS | none | `mcp/tests/deferred_sign_flow.rs:125-189` full lifecycle + 410 on replay. `mcp/tests/sign_callback.rs` (5 tests) cover signer==jwt.sub, atomic single-use, persist+evict, tampered hash, invalid sig. `mcp/tests/pending_authz.rs:138` cross-user 403. |
+| Pending bundle expiry | PASS_WITH_DEVIATION | minor | `mcp/tests/pending_expiry.rs:123-189`. Uses 1100ms wall-clock `tokio::time::sleep` against 1s TTL, NOT `tokio::time::pause/advance` (PendingBundles reads `chrono::Utc::now()` which tokio's instrumented clock can't influence). T8 flagged. |
+| Pending user cap | PASS_WITH_DEVIATION | minor | `mcp/tests/pending_user_cap.rs:91-132`. Accepts EITHER 429 OR 200+JSON-RPC-error envelope mentioning the cap (line 124-131) — current `tools::sign_memory_deferred` wraps via `anyhow!`, surfacing the latter. T8 flagged for follow-up. |
+| MCP Inspector CI | PASS | none | `.github/workflows/ci.yml:93-161`. Pinned `@modelcontextprotocol/inspector@0.6.x` (line 154). Pre-built binary via `cargo build` then spawn (line 109+135). 30s `wait-for-port` at line 137-149. JWT minted via `mint-test-jwt` at line 117-120. |
+| smithery.yaml schema | PASS | minor | `.github/workflows/ci.yml:180-191` + `scripts/smithery-schema.yaml`. yamale 4.x pinned. Permissive default (unknown fields silently allowed) — schema is a floor, not a whitelist. |
+| Smoke checklist clarity | PASS | minor | `work/mnemonic-integrations/tasks/smoke-checklist.md` 10 steps × Action/Expected/Recovery/ETA × per-step ETA totalling 750s ≤ 1800s. Backup-video URL is placeholder; first dry-run not yet logged. |
+
+### User-spec MUST traceability matrix
+
+| MUST line (verbatim) | Test(s) | Status |
+|------|------|------|
+| mcp.mnemonik.xyz отвечает на tools/list через streamable HTTP | `mcp/src/mcp.rs::transport_tests`; `mcp/tests/oauth_tool_call.rs::test_tools_list_5_tools_and_sign_memory_returns_awaiting_signature`; CI `mcp-inspector` job | covered |
+| OAuth 2.1 + PKCE endpoints работают; JWT bound к user pubkey | `oauth.rs::test_authorize_valid_signature`, `test_token_valid_verifier_returns_jwt`, `test_jwt_roundtrip_iss_aud_sub`; `oauth_flow.rs::full_authorize_token_jwt_roundtrip`; `scripts/test-oauth-flow.sh` | covered |
+| WASM core экспортирует generate_keypair, sign_challenge, export_keypair_json, import_keypair_json | `core/src/wasm/mod.rs::keypair_gen_produces_valid_ed25519`, `sign_challenge_roundtrip_with_native_verifier`, `json_export_import_preserves_keypair`, `malformed_import_returns_err_not_panic`, `sign_attestation_bundle_roundtrip_with_native_verifier`; `webapp/src/components/IdentityPanel.test.tsx` | covered |
+| Webapp 2 страницы (landing + install-hub с identity + deeplinks) | `webapp/src/components/InstallButtons.test.tsx::deeplink_url_well_formed`; `webapp/src/components/IdentityPanel.test.tsx::renders_did_after_generate`; smoke checklist Steps 1-3 | covered |
+| STORAGE_MODE=local: SQLite-only, синтетические local: ID | `mcp/tests/oauth_tool_call.rs` (mock_state synthetic IDs); `mcp/tests/deferred_sign_flow.rs` (asserts attestation_id present); smoke checklist Step 6 | covered |
+| smithery.yaml в репо, листинг активен | CI `smithery-schema` job (yamale validate) | covered (schema); listing live-check is manual |
+| CI: MCP Inspector + pre-release smoke ручной чек-лист | CI `mcp-inspector` job; `smoke-checklist.md` (10 steps) | covered |
+| cargo test workspace зелёный, clippy без warnings | CI `test` + `clippy` jobs | covered |
+| Backward-compat: stdio + 5 MCP tools сигнатуры | `mcp/tests/stdio_backward_compat.rs` (`#[ignore]` → scheduled `test-stdio`); `mcp/src/tools.rs::test_sign_memory_stdio_path_unchanged`; `mcp/tests/oauth_tool_call.rs` (5 tools assertion) | covered_with_caveat (stdio binary functional check is scheduled-only) |
+| payment.rs НЕ рефакторится | AVP item 8 (no schema diff); architectural assertion in T4/T5 decisions | covered_via_avp |
+| core/ no OAuth/HTTP references | AVP item 7 grep; T4 verification clean | covered_via_avp |
+| Round-trip COSE через mock прокси | `mcp/tests/roundtrip_cose_via_http_proxy.rs::test_cose_base64_field_survives_adversarial_proxy` | covered |
+
+**No MUST is uncovered.** Stdio MUST has a caveat (binary-level functional run is scheduled-only); semantic coverage exists via `tools.rs::test_sign_memory_stdio_path_unchanged`.
+
+### Decisions 9/10/11/12 traceability matrix
+
+| Decision | Tests that fail if reverted |
+|------|------|
+| **Decision 9** — Mandatory ownership filter + per-IP rate limit + auth allowlist + tightened CORS | `mcp/tests/recall_owner_isolation.rs::test_recall_filters_by_owner_pubkey_and_anonymous_returns_401`; `core/src/storage/sqlite.rs::test_search_owner_isolation`; `mcp/tests/auth_allowlist.rs::test_tools_list_initialize_no_auth_200_sign_memory_no_auth_401`; `mcp/tests/rate_limit_routing.rs` (3 tests); `mcp/tests/cors.rs::test_preflight_allows_mnemonik_xyz_rejects_evil_example_com`; `mcp/src/oauth.rs::test_middleware_tools_call_requires_jwt` |
+| **Decision 10** — Canonical-CBOR signed challenge (server_origin + state + client_id + redirect_uri + code_challenge + S256 + nonce + 60s exp + atomic single-use) | `oauth.rs::test_authorize_valid_signature`; `test_authorize_pkce_method_must_be_s256`; `test_authorize_expired_challenge_401`; `test_authorize_single_use_replay_401`; `test_authorize_tampered_sub_401`; `test_authorize_missing_state_csrf_401` |
+| **Decision 11** — JWT HS256, 1h TTL, secret in env, alg fixed | `oauth.rs::test_jwt_alg_none_rejected_401`; `test_jwt_iss_aud_mismatch_rejected`; `test_jwt_roundtrip_iss_aud_sub`; `test_jwt_concurrent_unique_jti`; `oauth_flow.rs::full_authorize_token_jwt_roundtrip`; `scripts/test-oauth-flow.sh` (asserts alg=HS256). Minor gap: no explicit RS256-against-HS256-secret forged-token test (policy enforced by `Validation::new(Algorithm::HS256)`). |
+| **Decision 12** — PendingBundles LRU+TTL+per-user cap; sign-callback validates signer==jwt.sub + COSE + content_hash; atomic single-use eviction | `mcp/src/pending.rs` (11 unit tests); `mcp/tests/pending_authz.rs` (4 tests); `mcp/tests/pending_expiry.rs::test_after_301s_pending_returns_410_and_evicts`; `mcp/tests/pending_user_cap.rs::test_51st_sign_memory_returns_429_with_retry_after`; `mcp/tests/sign_callback.rs` (5 tests); `mcp/tests/deferred_sign_flow.rs::test_full_lifecycle_sign_callback_410_on_replay`; `mcp/src/tools.rs::test_sign_memory_returns_awaiting_signature_for_jwt_path`; `test_sign_memory_stdio_path_unchanged` |
+
+**Every Decision 9/10/11/12 has at least one test that would fail if the decision were silently reverted.** No coverage gaps for these four decisions.
+
+### Missing-coverage gaps with suggested test names
+
+All gaps are MINOR — none block hackathon deploy.
+
+1. **`oauth.rs::test_jwt_rs256_signed_against_hs256_secret_rejected`** — forge an RS256 token, attempt verification with HS256 validator, assert error. Closes the named alg-confusion attack vector explicitly. Policy is already enforced by `Validation::new(Algorithm::HS256)` (oauth.rs:275).
+2. **CI job for wasm-pack tests** — add `.github/workflows/ci.yml::wasm-pack-test` step gated on `core/src/wasm/**` paths. Currently 7 wasm-bindgen tests run only when an author manually executes `wasm-pack test --headless`.
+3. **`--no-pricing` startup flag for `mnemonic-mcp`** — would let `mcp/tests/stdio_backward_compat.rs` drop `#[ignore]` and join default CI. Phase 2 fix.
+4. **`tokio::time::Instant` inside `PendingBundles`** — replace `chrono::Utc::now()` reads to enable virtual-clock testing per tech-spec line 227. Phase 2.
+5. **Lift `PendingError` through `tools::sign_memory_deferred`** — surface strict 429 instead of JSON-RPC error envelope; tighten `pending_user_cap.rs` to assert HTTP 429 strictly.
+6. **`build_app(state)` extraction in `main.rs::run_http`** — would let `rate_limit_routing.rs` exercise the production router rather than a stub. Phase 2.
+7. **Webapp integration test** — boots React Router + WASM stub + mocked /api/pending fetch end-to-end. Currently smoke checklist covers UI behavior manually; acceptable for size-L MVP per spec edge-case rule.
+
+### Deploy-blocking gaps
+
+**None.** All 13 focus areas pass; all 12 user-spec MUSTs are covered (one with a caveat for stdio binary-level functional run that is acceptable given scheduled CI coverage); all 4 Decisions (9/10/11/12) have failing-on-revert tests.
+
+### Reviewer reports
+
+- code-auditor: T11 (parallel)
+- security-auditor: T11 (parallel)
+- test-auditor: this entry + `work/mnemonic-integrations/logs/working/audit/test-auditor.json`
