@@ -28,3 +28,21 @@ Append-only log of decisions and audit findings during feature execution.
 **Review:** Code-reviewer review JSON at `logs/working/task-1/code-reviewer-round1.json`.
 
 **Round 1 fixes:** Addressed 3 major + 3 minor findings on recovered/README.md (commit a9dcd99).
+
+---
+
+## Task 2 — Run final sanity-grep + finalize code-research.md
+
+**Status:** done
+**Wave:** 2
+**Date:** 2026-04-27
+
+**Summary:** Ran the sanity-grep term set against the restored `recovered/{competitive-landscape,research,problems}/` tree. Confirmed parity with the pre-flight 6 in-content hits (DRAG_ANALYSIS:37, WEB_RESEARCH:45/64/132, CONCURRENT_WRITERS:157/217). Cross-checked `core/src/**/*.rs` and `mcp/src/**/*.rs` — zero stale-term hits, only the expected `sha384` Arweave deep-hash false-positive. Extended `code-research.md` §4 with a per-hit table including `verdict` column (all 6 = `replace-token`), and appended the closing run paragraph. No new stale terms surfaced; no drop-file verdicts.
+
+**Commit:** `4e9d929`
+
+**Verify-smoke results:**
+- `grep -c 'replace-token' work/docs-actualization/code-research.md` → 8 (>=6) — pass
+- `grep -c 'Sanity-grep run completed' work/docs-actualization/code-research.md` → 1 — pass
+
+**Reviewers:** code-reviewer, test-reviewer (round 1 in progress)
