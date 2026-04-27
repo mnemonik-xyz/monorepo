@@ -28,6 +28,18 @@ tower-http = { version = "0.6", features = ["cors"] }
 # Rate limiting (POST /chat: 10 req/min per IP)
 governor = "0.8"
 
+# OAuth 2.1 + PKCE server primitives (Decision 9-11, Task 4)
+# Pinned per tech-spec; cargo tree -p governor must show one major version after add.
+oauth2 = "=4.4.2"
+jsonwebtoken = "=9.3.0"
+# LRU cache for OAuthState pending challenges + issued codes; Task 5 reuses this dep.
+lru = "=0.12.5"
+# Per-IP rate limiting on /mcp + /oauth/*. Pinned to 0.7.0 — the latest version
+# whose transitive `governor` crate matches the existing `governor = "0.8"` dep
+# from `pricing.rs`. Tech-spec suggested `=0.8.0` but that version pulls in
+# `governor 0.10`, producing a duplicate major. Logged in decisions.md.
+tower_governor = "=0.7.0"
+
 # HTTP client (used by pricing.rs for Irys + SOL/USDC price fetches)
 reqwest = { version = "0.12", features = ["json"] }
 

@@ -2,6 +2,7 @@ mod chat;
 mod config;
 mod llm;
 mod mcp;
+mod oauth;
 mod payment;
 mod pricing;
 mod seed;
@@ -470,7 +471,11 @@ async fn run_stdio(state: Arc<mcp::McpState>) -> anyhow::Result<()> {
             }
         };
 
-        let resp = mcp::handle_request(&req, &state).await;
+        // Stdio path: no JWT, single-tenant CLI mode. Use the local keypair
+        // pubkey as owner scope so attestations land under a stable owner
+        // and `recall` returns the local user's rows.
+        let owner_pubkey = state.keypair.pubkey().to_string();
+        let resp = mcp::handle_request(&req, &state, &owner_pubkey).await;
         stdout
             .write_all(serde_json::to_string(&resp)?.as_bytes())
             .await?;
@@ -482,17 +487,99 @@ async fn run_stdio(state: Arc<mcp::McpState>) -> anyhow::Result<()> {
 
 // ── HTTP transport ────────────────────────────────────────────────────────────
 
-async fn run_http(state: Arc<mcp::McpState>, host: &str, port: u16) -> anyhow::Result<()> {
-    use tower_http::cors::{Any, CorsLayer};
+/// CORS-allowed origin for the public hosted deploy. Decision 9 narrows the
+/// previous `Any` policy to a single exact origin — the webapp at
+/// `mnemonik.xyz` is the only first-party caller.
+const CORS_ORIGIN: &str = "https://mnemonik.xyz";
 
-    // The `/mcp` route is the streamable-HTTP endpoint (chunked NDJSON per
-    // MCP spec 2025, Decision 1). It carries a Bearer-auth middleware
-    // scaffold that today is a no-op pass-through; Task 4a swaps in JWT
-    // validation without touching transport code.
-    let mcp_route = post(mcp::mcp_handler).layer(middleware::from_fn(mcp::bearer_auth_layer));
+/// Load and decode `MCP_JWT_SECRET` from env. Per Decision 11 the secret must
+/// be a base64-encoded value that decodes to >= 32 bytes. Aborts startup if
+/// the env var is missing or shorter — silent fallback to a default secret
+/// would be the kind of misconfiguration that leaks live JWTs.
+fn load_jwt_secret() -> anyhow::Result<Vec<u8>> {
+    let raw = std::env::var("MCP_JWT_SECRET")
+        .map_err(|_| anyhow::anyhow!("MCP_JWT_SECRET env var is required (32-byte base64)"))?;
+    let bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, raw.trim())
+        .map_err(|e| anyhow::anyhow!("MCP_JWT_SECRET is not valid base64: {e}"))?;
+    if bytes.len() < 32 {
+        anyhow::bail!(
+            "MCP_JWT_SECRET decoded to {} bytes — must be >= 32",
+            bytes.len()
+        );
+    }
+    Ok(bytes)
+}
+
+async fn run_http(state: Arc<mcp::McpState>, host: &str, port: u16) -> anyhow::Result<()> {
+    use axum::http::{header, HeaderValue, Method};
+    use tower_governor::{governor::GovernorConfigBuilder, GovernorLayer};
+    use tower_http::cors::CorsLayer;
+
+    // ── OAuth state + JWT secret (Decisions 9 + 11) ──────────────────────────
+    let secret = load_jwt_secret()?;
+    let oauth_state = Arc::new(oauth::OAuthState::new(&secret));
+    tracing::info!(
+        "OAuth state initialized (LRU cap {})",
+        oauth::OAUTH_STATE_CAPACITY
+    );
+
+    // ── Per-IP rate limiters (Decision 9, tech-spec AC line 357) ─────────────
+    // /mcp aggregates sign_memory + recall traffic. tower_governor caps by IP
+    // before the bearer-auth check so 429s short-circuit before JWT verify.
+    // sign_memory ≤ 5/min/IP, recall ≤ 30/min/IP — we apply the looser of the
+    // two (30/min) at the route-level limiter and rely on PendingBundles
+    // (Task 5) for the per-method 5/min cap on sign_memory.
+    let mcp_governor_conf = Arc::new(
+        GovernorConfigBuilder::default()
+            .per_second(2) // 30 / 60 = 0.5/s smoothed; per_second uses int
+            .burst_size(30)
+            .finish()
+            .ok_or_else(|| anyhow::anyhow!("failed to build /mcp governor config"))?,
+    );
+    let oauth_governor_conf = Arc::new(
+        GovernorConfigBuilder::default()
+            .per_second(1)
+            .burst_size(5)
+            .finish()
+            .ok_or_else(|| anyhow::anyhow!("failed to build /oauth/* governor config"))?,
+    );
+
+    // ── Bearer-auth middleware on /mcp (Decision 9) ──────────────────────────
+    // /oauth/* and /health are URI-allowlisted INSIDE the middleware; we still
+    // attach the layer to the whole MCP-protected subset because the body-peek
+    // logic for JSON-RPC method allowlisting (initialize / tools/list) only
+    // makes sense on /mcp.
+    let mcp_subrouter = Router::new()
+        .route("/mcp", post(mcp::mcp_handler))
+        .layer(middleware::from_fn_with_state(
+            oauth_state.clone(),
+            oauth::bearer_auth_middleware,
+        ))
+        .layer(GovernorLayer {
+            config: mcp_governor_conf,
+        })
+        .with_state(state.clone());
+
+    // ── OAuth routes (Decision 10) ────────────────────────────────────────────
+    let oauth_routes = Router::new()
+        .route("/oauth/authorize", post(oauth::authorize_handler))
+        .route("/oauth/token", post(oauth::token_handler))
+        .layer(GovernorLayer {
+            config: oauth_governor_conf,
+        })
+        .with_state(oauth_state);
+
+    // ── Tightened CORS (Decision 9) ──────────────────────────────────────────
+    let cors = CorsLayer::new()
+        .allow_origin(
+            CORS_ORIGIN
+                .parse::<HeaderValue>()
+                .map_err(|e| anyhow::anyhow!("invalid CORS_ORIGIN: {e}"))?,
+        )
+        .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
+        .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE]);
 
     let app = Router::new()
-        .route("/mcp", mcp_route)
         .route("/chat", post(chat::chat_handler))
         .route("/api-keys", post(create_api_key))
         .route("/balance", get(get_balance))
@@ -504,12 +591,9 @@ async fn run_http(state: Arc<mcp::McpState>, host: &str, port: u16) -> anyhow::R
             get(|| async { Json(serde_json::json!({"status": "ok"})) }),
         )
         .with_state(state)
-        .layer(
-            CorsLayer::new()
-                .allow_origin(Any)
-                .allow_methods(Any)
-                .allow_headers(Any),
-        );
+        .merge(mcp_subrouter)
+        .merge(oauth_routes)
+        .layer(cors);
 
     let addr = format!("{host}:{port}");
     tracing::info!("MCP server listening on http://{addr}/mcp");

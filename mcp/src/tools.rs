@@ -44,6 +44,10 @@ pub fn whoami(keypair: &Keypair, store: &SqliteStore, storage_mode: &str) -> ser
 /// Pipeline (local mode):
 ///   JSON artifact → canonical CBOR → blake3 hash → COSE_Sign1
 ///   → SQLite only (synthetic tx IDs)
+///
+/// `owner_pubkey` (Decision 9) is the OAuth-resolved tenant scope used by
+/// `recall`. HTTP transport passes the JWT subject; stdio transport passes
+/// the local keypair pubkey so single-tenant CLI flows keep working.
 #[allow(clippy::too_many_arguments)]
 pub async fn sign_memory(
     keypair: &Keypair,
@@ -56,6 +60,7 @@ pub async fn sign_memory(
     tags: &[String],
     cost_hint: &CostHint,
     storage_mode: &str,
+    owner_pubkey: &str,
 ) -> anyhow::Result<serde_json::Value> {
     let pubkey = identity::pubkey_base58(keypair);
     let attestation_id = uuid::Uuid::new_v4().to_string();
@@ -127,6 +132,7 @@ pub async fn sign_memory(
             &solana_tx,
             &arweave_tx,
             &pubkey,
+            owner_pubkey,
             &now,
             &embedding,
         )?;
@@ -388,21 +394,32 @@ pub fn prove_identity(keypair: &Keypair, challenge: &str) -> serde_json::Value {
 }
 
 /// Tool 5: recall (sync — DB search)
+///
+/// `owner_pubkey` (Decision 9) is the mandatory tenant scope. HTTP transport
+/// resolves it from the JWT subject; stdio transport passes the local
+/// keypair pubkey. `keypair` remains in the signature for the `total_attestations`
+/// count (per-signer, distinct from per-owner search) and forward
+/// compatibility with the `signer_pubkey` field.
 pub fn recall(
     keypair: &Keypair,
     store: &SqliteStore,
     embedder: &dyn Embedder,
     query: &str,
     limit: usize,
+    owner_pubkey: &str,
 ) -> serde_json::Value {
-    let pubkey = identity::pubkey_base58(keypair);
+    let signer_pubkey = identity::pubkey_base58(keypair);
     let query_emb = embedder.embed(query);
-    let results = store.search(&query_emb, &pubkey, limit).unwrap_or_default();
-    let total = store.count(&pubkey).unwrap_or(0);
+    let results = store
+        .search(&query_emb, owner_pubkey, limit)
+        .unwrap_or_default();
+    // count() is signer-scoped (legacy semantic); search() is owner-scoped.
+    let total = store.count(&signer_pubkey).unwrap_or(0);
     serde_json::json!({
         "query": query,
         "results": results,
         "total_attestations": total,
+        "owner_pubkey": owner_pubkey,
         "embed_provider": embedder.provider_name(),
         "embed_model": embedder.model_id(),
         "verifiable": embedder.is_open_weights(),

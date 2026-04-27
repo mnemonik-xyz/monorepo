@@ -19,6 +19,11 @@ CREATE TABLE IF NOT EXISTS attestations (
     arweave_tx TEXT NOT NULL,
     signer_pubkey TEXT NOT NULL,
     created_at TEXT NOT NULL
+    -- owner_pubkey TEXT is added by migrate_owner_pubkey_columns().
+    -- It is intentionally NOT in this CREATE so the migration helper is the
+    -- single source of truth for both fresh DBs (where it ALTERs immediately)
+    -- and legacy DBs (where it backfills). PRAGMA table_info gates the ALTER
+    -- so it runs at most once per DB.
 );
 CREATE TABLE IF NOT EXISTS attestation_embeddings (
     attestation_id TEXT PRIMARY KEY,
@@ -110,6 +115,78 @@ fn migrate_payment_events_unique_index(conn: &Connection) -> anyhow::Result<()> 
     Ok(())
 }
 
+/// Idempotent ADD-COLUMN migration for OAuth ownership scope (Decision 9 + 11).
+///
+/// Adds two columns:
+///   - `attestations.owner_pubkey TEXT` — the OAuth-resolved tenant scope
+///     used by `AttestationStore::search`. Distinct from the existing
+///     `signer_pubkey` column (the COSE_Sign1 signer identity). New rows
+///     bind both; legacy rows have NULL `owner_pubkey` and will not match
+///     any owner filter (effectively hidden until backfilled).
+///   - `api_keys.oauth_pubkey TEXT` — links an API key to the OAuth user
+///     pubkey. Distinct from the existing `api_keys.owner_pubkey` (deposit
+///     owner — wallet that funds the key). Both can coexist.
+///
+/// SQLite `ALTER TABLE ... ADD COLUMN` does not support `IF NOT EXISTS`, so
+/// presence is checked via `PRAGMA table_info(...)` and the ALTER runs only
+/// when absent — making the function idempotent across deploys. Wrapped in
+/// `BEGIN IMMEDIATE` to serialize against any concurrent opener.
+fn migrate_owner_pubkey_columns(conn: &Connection) -> anyhow::Result<()> {
+    fn has_column(conn: &Connection, table: &str, column: &str) -> anyhow::Result<bool> {
+        let mut stmt = conn
+            .prepare(&format!("PRAGMA table_info({table})"))
+            .with_context(|| format!("preparing PRAGMA table_info({table})"))?;
+        let mut rows = stmt.query([])?;
+        while let Some(row) = rows.next()? {
+            let name: String = row.get(1)?;
+            if name == column {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    let need_attestations_col = !has_column(conn, "attestations", "owner_pubkey")?;
+    let need_api_keys_col = !has_column(conn, "api_keys", "oauth_pubkey")?;
+
+    if !need_attestations_col && !need_api_keys_col {
+        return Ok(());
+    }
+
+    conn.execute_batch("BEGIN IMMEDIATE;")
+        .context("opening owner_pubkey migration transaction")?;
+
+    let do_migration = || -> anyhow::Result<()> {
+        if need_attestations_col {
+            conn.execute("ALTER TABLE attestations ADD COLUMN owner_pubkey TEXT", [])
+                .context("adding attestations.owner_pubkey")?;
+            // Index speeds up the per-owner search query (mandatory filter).
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_attestations_owner ON attestations(owner_pubkey)",
+                [],
+            )
+            .context("creating idx_attestations_owner")?;
+        }
+        if need_api_keys_col {
+            conn.execute("ALTER TABLE api_keys ADD COLUMN oauth_pubkey TEXT", [])
+                .context("adding api_keys.oauth_pubkey")?;
+        }
+        Ok(())
+    };
+
+    match do_migration() {
+        Ok(()) => {
+            conn.execute_batch("COMMIT;")
+                .context("committing owner_pubkey migration")?;
+            Ok(())
+        }
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK;");
+            Err(e)
+        }
+    }
+}
+
 impl SqliteStore {
     pub fn open(path: &Path) -> anyhow::Result<Self> {
         if let Some(parent) = path.parent() {
@@ -126,6 +203,7 @@ impl SqliteStore {
             .context("setting WAL + busy_timeout pragmas")?;
         conn.execute_batch(SCHEMA).context("initializing schema")?;
         migrate_payment_events_unique_index(&conn)?;
+        migrate_owner_pubkey_columns(&conn)?;
         Ok(Self { conn })
     }
 
@@ -137,6 +215,7 @@ impl SqliteStore {
         conn.execute_batch("PRAGMA busy_timeout=5000;")?;
         conn.execute_batch(SCHEMA)?;
         migrate_payment_events_unique_index(&conn)?;
+        migrate_owner_pubkey_columns(&conn)?;
         Ok(Self { conn })
     }
 
@@ -156,12 +235,20 @@ impl AttestationStore for SqliteStore {
         solana_tx: &str,
         arweave_tx: &str,
         signer_pubkey: &str,
+        owner_pubkey: &str,
         created_at: &str,
         embedding: &[f32],
     ) -> anyhow::Result<()> {
         let tags_json = serde_json::to_string(tags)?;
+        // Explicit column list — `owner_pubkey` was added by
+        // `migrate_owner_pubkey_columns` after the original table CREATE,
+        // so the column count and order in `INSERT OR REPLACE INTO ...
+        // VALUES (...)` would otherwise drift between fresh and migrated DBs.
         self.conn.execute(
-            "INSERT OR REPLACE INTO attestations VALUES (?,?,?,?,?,?,?,?)",
+            "INSERT OR REPLACE INTO attestations
+                 (attestation_id, content, content_hash, tags,
+                  solana_tx, arweave_tx, signer_pubkey, created_at, owner_pubkey)
+             VALUES (?,?,?,?,?,?,?,?,?)",
             params![
                 attestation_id,
                 content,
@@ -170,7 +257,8 @@ impl AttestationStore for SqliteStore {
                 solana_tx,
                 arweave_tx,
                 signer_pubkey,
-                created_at
+                created_at,
+                owner_pubkey,
             ],
         )?;
         let emb_bytes = floats_to_bytes(embedding);
@@ -212,15 +300,17 @@ impl AttestationStore for SqliteStore {
     fn search(
         &self,
         query_embedding: &[f32],
-        signer: &str,
+        owner_pubkey: &str,
         limit: usize,
     ) -> anyhow::Result<Vec<SearchResult>> {
+        // Mandatory ownership filter (Decision 9). No carve-out; legacy rows
+        // with NULL `owner_pubkey` will not match any caller.
         let mut stmt = self.conn.prepare(
             "SELECT a.attestation_id, a.content, a.content_hash, a.tags,
                     a.solana_tx, a.arweave_tx, a.created_at, ae.embedding
              FROM attestations a
              JOIN attestation_embeddings ae ON a.attestation_id = ae.attestation_id
-             WHERE a.signer_pubkey = ?",
+             WHERE a.owner_pubkey = ?",
         )?;
 
         let q_norm = l2_norm(query_embedding);
@@ -231,7 +321,7 @@ impl AttestationStore for SqliteStore {
         };
 
         let mut results: Vec<SearchResult> = stmt
-            .query_map(params![signer], |row| {
+            .query_map(params![owner_pubkey], |row| {
                 let emb_blob: Vec<u8> = row.get(7)?;
                 let emb = bytes_to_floats(&emb_blob);
                 let e_norm = l2_norm(&emb);
@@ -311,6 +401,12 @@ fn l2_norm(v: &[f32]) -> f32 {
 mod tests {
     use super::*;
 
+    /// Test owner pubkey for in-file unit tests. After Task 4's signature
+    /// change, every `save_attestation` callsite must pass an owner; using a
+    /// constant here keeps the assertions identical to pre-migration semantics
+    /// (single tenant, single owner) while exercising the new column.
+    const TEST_OWNER: &str = "test-owner-pubkey";
+
     #[test]
     fn test_save_and_find_by_tx() {
         let store = SqliteStore::in_memory().unwrap();
@@ -323,6 +419,7 @@ mod tests {
                 "sol_tx_1",
                 "ar_tx_1",
                 "signer1",
+                TEST_OWNER,
                 "2026-04-13T00:00:00Z",
                 &[1.0, 0.0],
             )
@@ -349,6 +446,7 @@ mod tests {
                     "sol",
                     "ar",
                     "signer_a",
+                    TEST_OWNER,
                     "2026-01-01",
                     &[1.0, 0.0],
                 )
@@ -363,11 +461,13 @@ mod tests {
                 "sol2",
                 "ar2",
                 "signer_b",
+                TEST_OWNER,
                 "2026-01-01",
                 &[1.0, 0.0],
             )
             .unwrap();
 
+        // count() is unchanged — still by signer_pubkey, not owner.
         assert_eq!(store.count("signer_a").unwrap(), 2);
         assert_eq!(store.count("signer_b").unwrap(), 1);
     }
@@ -375,7 +475,8 @@ mod tests {
     #[test]
     fn test_search_ranking() {
         let store = SqliteStore::in_memory().unwrap();
-        // Two attestations with distinct embeddings
+        // Two attestations with distinct embeddings, both owned by the same
+        // tenant so the post-Decision-9 owner filter does not drop them.
         store
             .save_attestation(
                 "att-0",
@@ -385,6 +486,7 @@ mod tests {
                 "s0",
                 "a0",
                 "agent",
+                "owner_agent",
                 "2026-01-01",
                 &[1.0, 0.0],
             )
@@ -398,15 +500,96 @@ mod tests {
                 "s1",
                 "a1",
                 "agent",
+                "owner_agent",
                 "2026-01-01",
                 &[0.0, 1.0],
             )
             .unwrap();
 
-        // Query closer to att-0's embedding
-        let results = store.search(&[1.0, 0.0], "agent", 2).unwrap();
+        // Query closer to att-0's embedding; search is now scoped by
+        // `owner_pubkey`, not by `signer_pubkey`.
+        let results = store.search(&[1.0, 0.0], "owner_agent", 2).unwrap();
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].attestation_id, "att-0");
+    }
+
+    #[test]
+    fn test_search_owner_isolation() {
+        // Decision 9 — search must filter by owner, never leak across tenants.
+        let store = SqliteStore::in_memory().unwrap();
+        store
+            .save_attestation(
+                "att-alice",
+                "alice's note",
+                "h-a",
+                &[],
+                "s-a",
+                "a-a",
+                "signer_x",
+                "owner_alice",
+                "2026-01-01",
+                &[1.0, 0.0],
+            )
+            .unwrap();
+        store
+            .save_attestation(
+                "att-bob",
+                "bob's note",
+                "h-b",
+                &[],
+                "s-b",
+                "a-b",
+                "signer_x",
+                "owner_bob",
+                "2026-01-01",
+                &[1.0, 0.0],
+            )
+            .unwrap();
+
+        let alice_results = store.search(&[1.0, 0.0], "owner_alice", 10).unwrap();
+        assert_eq!(alice_results.len(), 1);
+        assert_eq!(alice_results[0].attestation_id, "att-alice");
+
+        let bob_results = store.search(&[1.0, 0.0], "owner_bob", 10).unwrap();
+        assert_eq!(bob_results.len(), 1);
+        assert_eq!(bob_results[0].attestation_id, "att-bob");
+
+        // Owner with no rows must return empty, even though same signer
+        // produced rows under other owners.
+        let unknown = store.search(&[1.0, 0.0], "owner_carol", 10).unwrap();
+        assert!(unknown.is_empty());
+    }
+
+    #[test]
+    fn test_migrate_owner_pubkey_columns_idempotent() {
+        // Decision 9 — migration must run cleanly twice in a row.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("migration.db");
+        let store = SqliteStore::open(&path).unwrap();
+        // Re-running the migration on an already-migrated DB must be a no-op.
+        super::migrate_owner_pubkey_columns(store.conn()).unwrap();
+        super::migrate_owner_pubkey_columns(store.conn()).unwrap();
+
+        // Both columns should be present.
+        let attestations_cols: Vec<String> = store
+            .conn()
+            .prepare("PRAGMA table_info(attestations)")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+        assert!(attestations_cols.contains(&"owner_pubkey".to_string()));
+
+        let api_keys_cols: Vec<String> = store
+            .conn()
+            .prepare("PRAGMA table_info(api_keys)")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+        assert!(api_keys_cols.contains(&"oauth_pubkey".to_string()));
     }
 
     #[test]
@@ -428,6 +611,7 @@ mod tests {
                 "sol1",
                 "ar1",
                 "s1",
+                TEST_OWNER,
                 "2026-01-01",
                 &[1.0],
             )
@@ -441,6 +625,7 @@ mod tests {
             "sol2",
             "ar2",
             "s1",
+            TEST_OWNER,
             "2026-01-01",
             &[1.0],
         );

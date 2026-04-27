@@ -8,8 +8,7 @@
 use axum::{
     body::Body,
     extract::State,
-    http::{HeaderMap, HeaderValue, Request, StatusCode},
-    middleware::Next,
+    http::{HeaderMap, HeaderValue, StatusCode},
     response::Response,
 };
 use bytes::Bytes;
@@ -174,7 +173,11 @@ fn tool_definitions() -> Value {
     ])
 }
 
-pub async fn handle_request(req: &JsonRpcRequest, state: &McpState) -> JsonRpcResponse {
+pub async fn handle_request(
+    req: &JsonRpcRequest,
+    state: &McpState,
+    owner_pubkey: &str,
+) -> JsonRpcResponse {
     let result = match req.method.as_str() {
         "initialize" => Ok(serde_json::json!({
             "protocolVersion": "2025-06-18",
@@ -189,7 +192,7 @@ pub async fn handle_request(req: &JsonRpcRequest, state: &McpState) -> JsonRpcRe
                 .and_then(|n| n.as_str())
                 .unwrap_or("");
             let args = req.params.get("arguments").cloned().unwrap_or_default();
-            handle_tool_call(name, &args, state).await
+            handle_tool_call(name, &args, state, owner_pubkey).await
         }
         "notifications/initialized" | "ping" => Ok(serde_json::json!({})),
         _ => Err(format!("unknown method: {}", req.method)),
@@ -284,8 +287,28 @@ fn ndjson_error(status: StatusCode, code: i32, message: &str) -> Response {
 pub async fn mcp_handler(
     State(state): State<Arc<McpState>>,
     headers: HeaderMap,
-    body: Bytes,
+    request: axum::http::Request<axum::body::Body>,
 ) -> Response {
+    // Pull the JWT-resolved Claims out of request extensions (set by
+    // `oauth::bearer_auth_middleware` on success). Allowlisted methods
+    // (`initialize`, `tools/list`) reach this handler without Claims —
+    // those paths never touch storage so the fallback below is safe.
+    let claims = request.extensions().get::<crate::oauth::Claims>().cloned();
+
+    // Buffer the body — middleware already consumed and re-injected once;
+    // a second consumption is fine.
+    let body_bytes = match axum::body::to_bytes(request.into_body(), 2 * 1024 * 1024).await {
+        Ok(b) => b,
+        Err(e) => {
+            return ndjson_error(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                -32700,
+                &format!("body read failed: {e}"),
+            );
+        }
+    };
+    let body = body_bytes;
+
     // Parse the JSON-RPC envelope manually so we control the error shape (we
     // need to emit a single NDJSON frame on parse failure, not the default
     // axum `Json` rejection HTML).
@@ -298,6 +321,17 @@ pub async fn mcp_handler(
                 &format!("parse error: {e}"),
             );
         }
+    };
+
+    // Resolve owner_pubkey:
+    //   - If JWT-authenticated (Decision 9): use `claims.sub`.
+    //   - Otherwise (allowlisted methods like `tools/list`): fall back to
+    //     the local server keypair so legacy code paths in tools.rs do not
+    //     blow up. `tools/list` and `initialize` never touch storage so the
+    //     value is unused on those paths.
+    let owner_pubkey: String = match claims {
+        Some(c) => c.sub,
+        None => mnemonic_core::identity::pubkey_base58(&state.keypair),
     };
 
     let is_sign_memory = req.method == "tools/call"
@@ -336,7 +370,7 @@ pub async fn mcp_handler(
                     }
                 }
 
-                let resp = handle_request(&req, &state).await;
+                let resp = handle_request(&req, &state, &owner_pubkey).await;
 
                 // Refund on tool failure. Uses `refund_balance` (not
                 // `credit_deposit`) so the per-tx_sig idempotency guard does
@@ -370,39 +404,22 @@ pub async fn mcp_handler(
             }
         }
     } else {
-        let resp = handle_request(&req, &state).await;
+        let resp = handle_request(&req, &state, &owner_pubkey).await;
         ndjson_response(StatusCode::OK, &resp)
     }
 }
 
-/// No-op Bearer-auth middleware scaffolding.
-///
-/// Today this layer inspects the `Authorization` header for telemetry only
-/// and unconditionally calls `next.run(req)`. Task 4a (OAuth 2.1 + PKCE) will
-/// flip this into JWT validation: parse `Authorization: Bearer <jwt>`,
-/// verify HS256 signature against `MCP_JWT_SECRET`, and inject the
-/// resolved `pubkey` into request extensions for downstream handlers. The
-/// Decision 9 allowlist (`tools/list`, `initialize`, plus health/oauth
-/// routes) hooks in here.
-///
-/// Attached to the `/mcp` route only — health, oauth, and chat endpoints
-/// have their own auth/rate-limit layers (or none).
-//
-// TODO(task-4a): replace this body with JWT validation. Allowlist
-// `initialize` + `tools/list` JSON-RPC methods so MCP discovery works pre-
-// OAuth (Decision 9). Reject other methods without a valid Bearer with a
-// JSON-RPC error frame + HTTP 401.
-pub async fn bearer_auth_layer(headers: HeaderMap, request: Request<Body>, next: Next) -> Response {
-    // Read-only inspection; no enforcement today.
-    let _has_bearer = headers
-        .get(axum::http::header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.starts_with("Bearer "))
-        .unwrap_or(false);
-    next.run(request).await
-}
+// Bearer-auth middleware lives in `oauth.rs::bearer_auth_middleware`. The
+// `bearer_auth_layer` scaffolding from Task 1 has been removed as part of
+// Task 4 — there is no longer a "no-op" path. `main.rs::run_http` wires
+// `oauth::bearer_auth_middleware` with the OAuthState directly.
 
-async fn handle_tool_call(name: &str, args: &Value, state: &McpState) -> Result<Value, String> {
+async fn handle_tool_call(
+    name: &str,
+    args: &Value,
+    state: &McpState,
+    owner_pubkey: &str,
+) -> Result<Value, String> {
     let result = match name {
         "mnemonic_whoami" => {
             // DB-only: lock, query, release before returning
@@ -435,6 +452,7 @@ async fn handle_tool_call(name: &str, args: &Value, state: &McpState) -> Result<
                 &tags,
                 &cost_hint,
                 &state.storage_mode,
+                owner_pubkey,
             )
             .await
             .map_err(|e| e.to_string())?
@@ -471,6 +489,7 @@ async fn handle_tool_call(name: &str, args: &Value, state: &McpState) -> Result<
                 state.embedder.as_ref(),
                 query,
                 limit,
+                owner_pubkey,
             )
         }
         _ => return Err(format!("unknown tool: {name}")),
@@ -493,7 +512,7 @@ async fn handle_tool_call(name: &str, args: &Value, state: &McpState) -> Result<
 #[cfg(test)]
 mod transport_tests {
     use super::*;
-    use axum::{middleware as axum_middleware, routing::post, Router};
+    use axum::{http::Request, middleware as axum_middleware, routing::post, Router};
     use http_body_util::BodyExt;
     use mnemonic_core::embed::Embedder;
     use std::path::PathBuf;
@@ -562,12 +581,21 @@ mod transport_tests {
         })
     }
 
+    /// 32-byte test secret for OAuth JWT verification. Matches the
+    /// production length requirement (Decision 11).
+    const TEST_JWT_SECRET: &[u8; 32] = b"unit-test-secret-32-bytes-long!!";
+
     /// Build a `Router` with the `/mcp` route plus the bearer-auth middleware
-    /// scaffolding. Mirrors the production wiring in `main.rs::run_http`
-    /// — keep them in sync; if Task 4a tightens enforcement, both must
-    /// reflect the change.
+    /// (Task 4 — `oauth::bearer_auth_middleware`). Mirrors the production
+    /// wiring in `main.rs::run_http`. The middleware allows JSON-RPC
+    /// `initialize` and `tools/list` without a JWT (per Decision 9) so the
+    /// existing `test_chunked_response_encoding` test keeps passing.
     fn build_test_router(state: Arc<McpState>) -> Router {
-        let mcp_route = post(mcp_handler).layer(axum_middleware::from_fn(bearer_auth_layer));
+        let oauth_state = Arc::new(crate::oauth::OAuthState::new(TEST_JWT_SECRET));
+        let mcp_route = post(mcp_handler).layer(axum_middleware::from_fn_with_state(
+            oauth_state,
+            crate::oauth::bearer_auth_middleware,
+        ));
         Router::new().route("/mcp", mcp_route).with_state(state)
     }
 
@@ -718,15 +746,11 @@ mod transport_tests {
         assert_eq!(env["id"], 8);
     }
 
-    /// Sentinel for Task 4a. The middleware is *registered* today (proving
-    /// the wire-up holds) but enforcement is deferred. Task 4a flips
-    /// `#[ignore]` off and changes the expected status to 401 + JSON-RPC
-    /// error code. Today's no-op layer means a request without an
-    /// `Authorization` header still returns 200 — that is intentional.
-    //
-    // Activated by Task 4a — flip ignore + assert 401.
+    /// Active under Task 4 — `oauth::bearer_auth_middleware` rejects
+    /// unauthenticated `tools/call` with HTTP 401 and a JSON-RPC error
+    /// envelope (`code: -32001`). `initialize` and `tools/list` remain
+    /// allowlisted (Decision 9).
     #[tokio::test]
-    #[ignore]
     async fn test_missing_authorization_header_returns_401() {
         let state = build_test_state();
         let app = build_test_router(state);
