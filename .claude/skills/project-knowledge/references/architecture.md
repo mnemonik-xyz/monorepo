@@ -108,3 +108,11 @@ The root repo is a **git submodule container**. `core/`, `mcp/`, and `webapp/` a
 **attestation_costs** — P&L tracking, full mode only. Key fields: `attestation_id` FK, `irys_lamports`, `sol_tx_fee_lamports`, `sol_price_usdc`, `charge_micro_usdc`.
 
 Schema is applied on first DB connection via `CREATE TABLE IF NOT EXISTS`. No migration tooling for MVP. Private keys are never stored in SQLite — loaded from a keypair file at runtime only.
+
+---
+
+## Further reading
+
+- Competitive positioning vs decentralized RAG, zkTAM, V3DB and related directions: [docs/competitive-landscape/](../../../../docs/competitive-landscape/).
+- Condensed TurboQuant compression principles (knowledge-DB ref for `compress/` design decisions): [docs/research/condensed-principles.md](../../../../docs/research/condensed-principles.md).
+- Foundational paper that motivated the protocol: [docs/research/paper.pdf](../../../../docs/research/paper.pdf).
