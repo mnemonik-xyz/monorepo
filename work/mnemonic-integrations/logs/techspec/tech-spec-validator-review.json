@@ -1,0 +1,83 @@
+{
+  "verdict": "needs_fixes",
+  "summary": "Tech-spec is well-structured with all required sections, sensible decisions, and no wave conflicts. Main issue: several tasks reference reviewer agents (code-reviewer, infrastructure-reviewer, deploy-reviewer) that exist in the catalog but are NOT installed as agent files in ~/.claude/agents/. A few minor task-format and brevity nits.",
+  "issues": [
+    {
+      "severity": "critical",
+      "category": "skill_mismatch",
+      "location": "Tasks 1, 2, 3, 4, 5, 6, 7, 8, 13",
+      "issue": "Reviewer agent `code-reviewer` is listed in skills-and-reviewers.md catalog but does NOT exist as a file in ~/.claude/agents/. Confirmed installed agent files: prompt-reviewer.md, security-auditor.md, skill-checker.md, test-reviewer.md. Tasks 1-8 and 13 all list `code-reviewer` as a reviewer — these reviews cannot execute as written.",
+      "fix_suggestion": "Either (a) install the missing agent file at ~/.claude/agents/code-reviewer.md, or (b) remove `code-reviewer` from each task's Reviewers field and rely on security-auditor + test-reviewer (skill-checker doesn't apply). Recommend option (a) since the catalog is the source of truth."
+    },
+    {
+      "severity": "critical",
+      "category": "skill_mismatch",
+      "location": "Tasks 3, 5",
+      "issue": "Reviewer `infrastructure-reviewer` is in the catalog but does not exist as an agent file in ~/.claude/agents/. Both Task 3 (Webapp WASM build pipeline) and Task 5 (Smithery + DNS + nginx) include it.",
+      "fix_suggestion": "Install ~/.claude/agents/infrastructure-reviewer.md, or replace with a fallback reviewer like `code-reviewer` (after that agent is installed) or `security-auditor` only."
+    },
+    {
+      "severity": "critical",
+      "category": "skill_mismatch",
+      "location": "Task 13 (Deploy)",
+      "issue": "Reviewer `deploy-reviewer` is in the catalog but does not exist as an agent file in ~/.claude/agents/.",
+      "fix_suggestion": "Install ~/.claude/agents/deploy-reviewer.md, or replace with security-auditor + a manual deploy checklist."
+    },
+    {
+      "severity": "major",
+      "category": "task_format",
+      "location": "Task 4 (OAuth 2.1 + PKCE server module)",
+      "issue": "Description is 6 sentences and embeds SQL ALTER TABLE statements verbatim. This crosses the boundary from scope-description into implementation steps. The exact migration SQL is also duplicated between Decisions text (Data Models section), User-Spec Deviation 3, and this task description.",
+      "fix_suggestion": "Trim description to 3 sentences: (1) OAuth endpoints + JWT scope, (2) Bearer middleware role, (3) reference Decision 4 + Data Models for the migration. Move the literal SQL out of the task description; keep it only in the Data Models section where it already lives."
+    },
+    {
+      "severity": "major",
+      "category": "task_format",
+      "location": "Task 12 (Pre-deploy QA), Task 14 (Post-deploy QA)",
+      "issue": "Both tasks lack a `Files to modify` field. Even if QA tasks typically do not modify files, the template field should appear with `N/A (analysis only)` or equivalent for consistency with audit tasks 9-11 (which all include `Files to modify: N/A`).",
+      "fix_suggestion": "Add `- **Files to modify:** N/A (verification only — report to decisions.md)` to Task 12 and Task 14."
+    },
+    {
+      "severity": "minor",
+      "category": "task_format",
+      "location": "Task 13 (Deploy)",
+      "issue": "Lists `Files to modify: VPS nginx config (out-of-tree)` — out-of-tree configs cannot be reviewed by file-based agents and are awkward for the do-task workflow. Also `GitHub Actions workflow if Cloudflare Pages deploy is added` is conditional, which makes wave-conflict analysis harder.",
+      "fix_suggestion": "Specify concrete in-tree paths only (e.g. `.github/workflows/deploy.yml`). Move out-of-tree nginx changes to a runbook/checklist referenced in the description; do not list them as `Files to modify`."
+    },
+    {
+      "severity": "minor",
+      "category": "task_format",
+      "location": "Tasks 9, 10, 11 (Audit Wave)",
+      "issue": "Audit tasks lack a `Verify-smoke` or `Verify-user` field. Per the validator's section 5b, audit tasks may legitimately omit these (audit IS the verification), but consistency would benefit from an explicit `- **Verify:** Audit report appended to decisions.md` line.",
+      "fix_suggestion": "Add a one-line `- **Verify:** Audit report appended to work/mnemonic-integrations/decisions.md` to each audit task. Optional but improves consistency."
+    },
+    {
+      "severity": "minor",
+      "category": "decision_format",
+      "location": "Decision 6 (Webapp WASM integration via wasm-pack + Vite plugin), Decision 8 (chat route preserved)",
+      "issue": "Decisions 6 and 8 do not explicitly reference a user-spec MUST or carry a `[TECHNICAL]` tag. They are reasonable technical choices that fall outside the user-spec, but the convention is to mark such decisions explicitly.",
+      "fix_suggestion": "Append `[TECHNICAL]` to the headings of Decisions 6 and 8, or add one line `User-spec link: N/A (technical decision)` to each."
+    },
+    {
+      "severity": "minor",
+      "category": "other",
+      "location": "Architecture / Solution",
+      "issue": "Solution paragraph mentions `~11 dev-days` as scope. Section 7 of the validator flags time-based estimates as out of place in tech-specs (tech-specs should sequence by dependency/wave, not time). The user-spec carries the same `≤2 недели, ~11 dev-days` constraint, so this is informational rather than novel scope-creep.",
+      "fix_suggestion": "Either remove `~11 dev-days` from the Solution paragraph, or move it to a `## Scope (informational)` line that explicitly cites the user-spec constraint. Tasks/waves themselves correctly carry no time estimates — good."
+    },
+    {
+      "severity": "minor",
+      "category": "task_format",
+      "location": "Task 5 (Smithery + DNS + nginx)",
+      "issue": "Task bundles three loosely related infrastructure concerns: (a) smithery.yaml authoring, (b) DNS A-record provisioning, (c) nginx server-block + certbot. These have very different rollback profiles and the task can fail partially in ways that confuse reviewers.",
+      "fix_suggestion": "Consider splitting into Task 5a (smithery.yaml — code-writing/infra-setup) and Task 5b (DNS + nginx + certbot — deploy-pipeline or infrastructure-setup with sysadmin verification). Acceptable to leave bundled if author prefers; flagging for awareness."
+    },
+    {
+      "severity": "minor",
+      "category": "missing_section",
+      "location": "Architecture",
+      "issue": "Architecture section uses subsections `### What we're building / modifying`, `### How it works`, and `### Shared Resources` — matches the requested template exactly. Good.",
+      "fix_suggestion": "No fix needed — confirmation that Architecture structure passes."
+    }
+  ]
+}

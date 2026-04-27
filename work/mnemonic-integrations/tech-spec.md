@@ -78,7 +78,7 @@ Total scope: ~11 dev-days, 14 implementation tasks across 4 waves + audit + fina
 **Rationale:** Smithery is the highest-leverage MCP registry per research.md §4. Other registries (Anthropic Connectors — partner-led no-portal, mcp.directory / Glama — community) are non-blocking and deferred. Supports user-spec MUST: "`smithery.yaml` в репо, листинг на smithery.ai активен".
 **Alternatives:** Multi-registry submission — rejected per user-spec ("Один реестр в Phase 1").
 
-### Decision 6: Webapp WASM integration via `wasm-pack` + Vite plugin
+### Decision 6: Webapp WASM integration via `wasm-pack` + Vite plugin `[TECHNICAL]`
 **Decision:** Build `core/` to WASM via `wasm-pack build core --target web --out-dir webapp/src/wasm`. Vite imports the generated bindings as ES modules. A `package.json` script `build:wasm` runs before `vite build`. No webpack, no `wasm-loader`.
 **Rationale:** wasm-pack with `--target web` produces ESM-compatible output that Vite consumes natively. Industry-standard for Rust+React WASM integration.
 **Alternatives:** wasm-bindgen-cli + manual glue — rejected, more boilerplate. wasm-pack `--target bundler` — rejected, requires webpack.
@@ -88,35 +88,57 @@ Total scope: ~11 dev-days, 14 implementation tasks across 4 waves + audit + fina
 **Rationale:** User-spec R1 risk — "COSE подпись invalidates через Anthropic/OpenAI MCP прокси". Without this test, we can't confidently submit to Smithery or trust live Cursor/Claude.ai integration. Mock proxy is sufficient because the threat model is JSON re-encoding, not vendor-specific quirks.
 **Alternatives:** Live test against Anthropic prod proxy — rejected, requires real API key + flaky CI. No test — rejected, R1 is critical.
 
-### Decision 8: Existing webapp `/chat` route preserved; landing replaces root
-**Decision:** Current root `/` (Qwen2.5 chat demo) becomes `/chat`. New `/` is the integration landing page; `/install` is the install hub.
+### Decision 8: Existing webapp `/chat` route preserved; landing replaces root `[TECHNICAL]`
+**Decision:** Current root `/` (existing chat-input page that transitions into the chat demo) becomes `/chat`. New `/` is the integration landing page; `/install` is the install hub. URL routing requires adding `react-router-dom` as a new webapp dependency (current `webapp/src/App.tsx` uses internal state-based view switching, not URL routing).
 **Rationale:** Landing must be the entry point for hackathon visitors — the chat demo is supplementary content, not the primary CTA. Preserves existing demo for users who arrive via direct link to `/chat`.
-**Alternatives:** Replace `/chat` entirely — rejected, removes existing functionality without user-spec authorization. Leave root unchanged — rejected, no clear entry point for the integration story.
+**Alternatives:** Replace `/chat` entirely — rejected, removes existing functionality without user-spec authorization. Leave root unchanged — rejected, no clear entry point for the integration story. Hash-based routing without `react-router-dom` — rejected, doesn't match Smithery / deeplink patterns expected by external services.
+
+### Decision 9: Mandatory ownership filter + per-IP rate limit on `/mcp`
+**Decision:** `recall` SQL query in `core/src/storage/sqlite.rs::search_attestations` adds a mandatory `WHERE owner_pubkey = ?` clause — no anonymous/unfiltered path. The HTTP middleware rejects requests to `/mcp` without a valid Bearer JWT (HTTP 401), except `/oauth/*` and `/health`. Add `tower_governor`-based per-IP rate limit on `/mcp`: `sign_memory ≤ 5 req/min/IP`, `recall ≤ 30 req/min/IP`, applied regardless of `PAYMENT_MODE`. Rate limits don't apply to stdio transport.
+**Rationale:** Hackathon demo on a public Smithery-listed endpoint with `PAYMENT_MODE=none` is a DoS / data-fill / fee-burn target. Plus: an unauthenticated `/mcp` recall returning rows from any tenant is a privacy disaster regardless of payment. Supports user-spec MUST: "Backward-compat: stdio transport работает как сейчас" (stdio bypass) and addresses security-auditor critical findings 1 & 2.
+**Alternatives:** Accept anonymous `/mcp` for demo simplicity — rejected, security boundary is non-negotiable. Auth-gate `/mcp` but skip rate limit — rejected, public endpoint without rate limit is exploit-bait.
+
+### Decision 10: OAuth signed-challenge contents
+**Decision:** The challenge the user signs at `/oauth/authorize` is `blake3(state || client_id || redirect_uri || code_challenge || nonce)` where `nonce` is a server-generated 16-byte random per-authorization. The server stores `(challenge_hash, expected_pubkey, expiry=60s)` keyed by `state`; rejects mismatched signature, replay (single-use), and stale challenges.
+**Rationale:** Without binding the signature to `client_id`/`redirect_uri`/`code_challenge`, an attacker can replay a captured signature against a different client config (token theft / authorize-request injection). `state` binds CSRF; `nonce` prevents pre-computed-signature replay. Supports security-auditor finding #3.
+**Alternatives:** Sign just the `code_challenge` — rejected, allows authorize-request swap. No `state` — rejected, classic CSRF.
+
+### Decision 11: JWT format — HS256, 1-hour TTL, secret in env
+**Decision:** JWT uses HS256 with secret loaded from `MCP_JWT_SECRET` env var (32-byte base64). Claims: `iss=mcp.mnemonik.xyz`, `aud=mcp`, `sub=<user_pubkey_b58>`, `iat`, `exp` (1 hour TTL), `jti` (UUIDv4 for tracking). Server verifies `iss` and `aud` on every request. No refresh tokens in Phase 1 — re-auth required after expiry. Algorithm is fixed at HS256 in code (no `alg=none` or RS256 acceptance) to prevent algorithm confusion attacks.
+**Rationale:** Hackathon scope — single hosted instance, single secret. Asymmetric keys (RS256/ES256) add operational burden without proportional benefit at this scale. Fixed algorithm prevents `alg=none` exploits. Supports security-auditor finding #4.
+**Alternatives:** Refresh tokens — backlog. RS256 — backlog. Longer TTL — rejected, hackathon demo doesn't need long sessions.
 
 ## Data Models
 
 **No new tables.** OAuth state is in-memory only (Phase 1 scope — restart loses pending auth codes; acceptable for demo).
 
-**One new column on existing `api_keys` table** — `oauth_pubkey TEXT` (nullable, base58-encoded). Rows are created on first OAuth token issue and looked up on Bearer token validation. Backwards-compatible: `ALTER TABLE api_keys ADD COLUMN oauth_pubkey TEXT;` runs idempotently on first connection.
+**Schema migrations** — both run idempotently on first connection in `core/src/storage/sqlite.rs::ensure_schema`:
 
-The existing `attestations` table gains no schema change. The `signer_pubkey` column already exists and is set to the hosted server's keypair (Decision 4). A new column `owner_pubkey TEXT` is added (nullable, base58 OAuth user pubkey) for ownership scope. `ALTER TABLE attestations ADD COLUMN owner_pubkey TEXT;` runs idempotently.
+- `attestations` table: **`ALTER TABLE attestations ADD COLUMN owner_pubkey TEXT;`** — base58 OAuth user pubkey for ownership scope. The existing `signer_pubkey` column already exists (set to the hosted server's keypair per Decision 4) and is **distinct** from `owner_pubkey`. NOTE: `attestations` table does **not** currently have a `owner_pubkey` column (see `core/src/storage/sqlite.rs:13-29` schema). This migration adds it.
+- `api_keys` table: **`ALTER TABLE api_keys ADD COLUMN oauth_pubkey TEXT;`** — links existing API key rows to the OAuth-issued pubkey. The existing `owner_pubkey` column on `api_keys` is unrelated to the new `attestations.owner_pubkey` (different semantic — `api_keys.owner_pubkey` is the deposit owner; `attestations.owner_pubkey` is the per-attestation tenant scope).
+- `save_attestation` (in `core/src/storage/sqlite.rs:149-182`) signature gains a non-optional `owner_pubkey: &str` parameter. The MCP tool dispatcher passes the JWT-resolved pubkey down. CLI/stdio callers (without JWT) pass the keypair-loaded pubkey from `MNEMONIC_KEYPAIR_PATH` so existing local CLI flows continue to work.
 
-`recall` filters by `owner_pubkey = <jwt.sub>` (or returns all rows if `JWT.sub` is unset, for backward-compat with existing CLI-based calls in the same DB).
+**`recall` query** filters by `owner_pubkey = ?` **always** in HTTP transport. No "returns all rows" carve-out — that path was removed after security audit (see Decision 9). For stdio transport (no JWT), the filter resolves to the local-keypair pubkey — preserving single-tenant local CLI semantics.
 
 ## Dependencies
 
 ### New packages
 
 **`mcp/Cargo.toml`:**
-- `oauth2 = "4.4"` — OAuth 2.1 client/server primitives for `code_verifier`/`code_challenge` validation
-- `jsonwebtoken = "9.3"` — JWT issue + validate
+- `oauth2 = "=4.4.2"` (pinned) — OAuth 2.1 client/server primitives for `code_verifier`/`code_challenge` validation
+- `jsonwebtoken = "=9.3.0"` (pinned) — JWT issue + validate
+- `tower_governor = "=0.4.2"` (pinned) — per-IP rate limiting on `/mcp` (Decision 9)
+- Tech-spec author MUST verify each pinned version on crates.io before Task 4 starts; if a pinned version is yanked, update spec and re-run dependency audit.
+- CI gains `cargo audit` step on every PR to catch newly-disclosed CVEs in pinned versions.
 
 **`core/Cargo.toml`:**
-- `wasm-bindgen = "0.2"` — Rust↔JS bridge (added under `[target.'cfg(target_arch = "wasm32")'.dependencies]`)
-- `getrandom = { version = "0.2", features = ["js"] }` — required for Ed25519 keypair gen in browser
+- `wasm-bindgen = "=0.2.95"` (pinned) — Rust↔JS bridge (added under `[target.'cfg(target_arch = "wasm32")'.dependencies]`)
+- `getrandom = { version = "=0.2.15", features = ["js"] }` — required for Ed25519 keypair gen in browser
+- `wasm-bindgen-test = "=0.3.45"` (dev-dependency, gated to wasm32 target) — for in-browser keypair tests
 
 **`webapp/package.json`:**
-- No new npm deps; `wasm-pack` is a build-time tool installed via `cargo install wasm-pack` in CI / dev setup.
+- `react-router-dom = "^6.27.0"` — **NEW dep** for URL routing (`/`, `/install`, `/chat`). Required by Decision 8 — current webapp uses internal state-based view switching, no router installed.
+- `wasm-pack` is a build-time tool installed via `cargo install wasm-pack` in CI / dev setup, not an npm dep.
 
 ### Removed packages
 
@@ -124,22 +146,25 @@ None.
 
 ### Existing (used as-is)
 
-`axum`, `tokio`, `tower-http`, `serde_json`, `tracing`, `solana-sdk` (mcp/), `mnemonic-core` (path dep), `react`, `vite`, `tailwindcss`, `react-router` (webapp/).
+`axum`, `tokio`, `tower-http` (incl. `cors` feature), `serde_json`, `tracing`, `solana-sdk` (mcp/), `mnemonic-core` (path dep), `react`, `react-dom`, `vite`, `tailwindcss` (webapp/).
 
 ## Testing Strategy
 
 **Feature size:** L
 
 ### Unit tests
-- **`mcp/src/oauth.rs`** (~6 tests): authorize endpoint with valid/invalid signature, token exchange with valid/invalid `code_verifier`, JWT issue + validate roundtrip, expired-code rejection
-- **`core/src/wasm/`** (gated `#[cfg(target_arch = "wasm32")]`, ~4 tests via `wasm-bindgen-test`): keypair gen produces valid Ed25519, sign_challenge round-trip with native verifier, JSON export-import preserves keypair, repeated gen produces distinct keys
-- **Streamable HTTP transport** (in `mcp/src/mcp.rs` test module, ~3 tests): chunked response encoding, error path returns valid JSON-RPC error, large response splits across chunks
+- **`mcp/src/oauth.rs`** (~12 tests, expanded from 6 per security-auditor / test-reviewer): authorize endpoint with valid signature, invalid signature (expects 401), tampered `sub` claim (expects 401), `alg=none` JWT submission (expects 401, asserting algorithm-confusion mitigation), token exchange with valid/invalid `code_verifier`, JWT issue + validate roundtrip, expired-code rejection (TTL 60s), single-use code rejection (replay → 401), concurrent-session unique-`jti` collision check, mismatched `iss`/`aud` rejection, missing-`state` CSRF rejection
+- **`mcp/src/oauth.rs` rate-limit tests** (~3 tests): 6th `sign_memory` request from same IP within 60s → HTTP 429; 31st `recall` request → HTTP 429; rate limit doesn't apply when `transport=stdio`
+- **`core/src/wasm/`** (gated `#[cfg(target_arch = "wasm32")]`, ~6 tests via `wasm-bindgen-test`): keypair gen produces valid Ed25519, sign_challenge round-trip with native verifier, JSON export-import preserves keypair, repeated gen produces distinct keys, malformed JSON in `import_keypair_json` returns Err (not panic), `getrandom` produces non-zero entropy after page reload
+- **Streamable HTTP transport** (in `mcp/src/mcp.rs` test module, ~5 tests): chunked response encoding, error path returns valid JSON-RPC error, large response splits across chunks, partial-response on client disconnect mid-stream (no server panic), missing-Authorization-header request returns 401 (not 200 with empty body)
 
 ### Integration tests
-- **OAuth full flow** (`mcp/tests/oauth_flow.rs`, 1 test): boot Axum app in test mode, simulate browser flow (POST /authorize with signed challenge, GET /token with code+verifier, parse JWT), assert pubkey roundtrip
+- **OAuth full flow** (`mcp/tests/oauth_flow.rs`, 1 test): boot Axum app in test mode, simulate browser flow (POST /authorize with signed challenge containing `state`, `client_id`, `redirect_uri`, `code_challenge`, `nonce`; GET /token with code+verifier; parse JWT), assert pubkey roundtrip + JWT claims (`iss`, `aud`, `sub`, `exp`)
 - **MCP tool call with OAuth** (`mcp/tests/oauth_tool_call.rs`, 1 test): obtain JWT via flow above, call `tools/list` with Bearer header, assert 5 tools returned and `tools/call sign_memory` succeeds, attestation row has `owner_pubkey = <jwt.sub>` and `local:` ID prefix
-- **COSE round-trip via mock proxy** (`mcp/tests/roundtrip_cose_via_http_proxy.rs`, 1 test): boot mock proxy that re-serializes JSON, send `sign_memory` through it, re-fetch the bundle, verify COSE_Sign1 still validates byte-for-byte
-- **MCP Inspector** (CI-only, GitHub Action step): `npx @modelcontextprotocol/inspector --validate http://localhost:3000/mcp` after spinning up the server with a test JWT
+- **Recall ownership isolation** (`mcp/tests/recall_owner_isolation.rs`, 1 test, **CRITICAL** — addresses test-reviewer / security-auditor critical findings): boot Axum app, mint 2 distinct JWTs (user A + user B); user A signs 2 attestations, user B signs 1; user B's recall returns ONLY user B's row, never user A's; anonymous request to `/mcp` recall (no Bearer) returns 401 (not 200 with rows)
+- **Stdio backward-compat** (`mcp/tests/stdio_backward_compat.rs`, 1 test): spawn `mnemonic-mcp --transport stdio` subprocess, pipe `tools/list` then `tools/call sign_memory` then `tools/call recall` JSON-RPC; assert round-trip succeeds without OAuth (single-tenant with local keypair)
+- **COSE round-trip via adversarial mock proxy** (`mcp/tests/roundtrip_cose_via_http_proxy.rs`, 1 test): boot mock proxy that **mutates** JSON byte-for-byte differently from std `serde_json` (e.g., re-orders object keys alphabetically, normalizes whitespace, re-encodes numbers using `simd-json` instead of `serde_json`); send `sign_memory` through it; verify base64-encoded CBOR field survives unmutated (committing to base64-string-field encoding per Decision 7 + R1 mitigation, not relying on JSON-byte-stability)
+- **MCP Inspector** (CI-only, GitHub Action step): start server with test JWT in background, `wait-for-port 3000` script with 30s timeout polling `curl http://localhost:3000/health`, then `npx @modelcontextprotocol/inspector@<pinned> --validate http://localhost:3000/mcp -H "Authorization: Bearer ${TEST_JWT}"`
 
 ### Manual smoke tests (pre-demo checklist in `tasks/`)
 1. Open `mnemonik.xyz` on fresh browser (no localStorage) → see landing → "Get Started" → identity panel shows new keypair → click "Download backup" → verify JSON file content
@@ -178,14 +203,17 @@ bash (cargo, curl, grep, git, npx). No MCP tools needed for verification — the
 
 | Risk | Mitigation |
 |------|-----------|
-| Streamable HTTP spec compliance is moving target — Anthropic/OpenAI proxies may have undocumented quirks | Implement against `modelcontextprotocol` Rust SDK reference; test with `npx @modelcontextprotocol/inspector` on every PR. Live-validate with Cursor + Claude.ai before demo. |
-| OAuth flow needs user-signed challenge but webapp ↔ MCP CORS could block POST | Configure `tower-http::cors::CorsLayer` to allow `mnemonik.xyz` origin on `/oauth/*` endpoints. Test in CI. |
-| WASM keypair lost when user clears browser → identity loss → demo embarrassment | Aggressive "Download backup" prompt on first generation; warning before page exit if backup not downloaded. Demo dry-run with a pre-saved backup as fallback. |
+| Streamable HTTP spec compliance is moving target — Anthropic/OpenAI proxies may have undocumented quirks | Implement against `modelcontextprotocol` Rust SDK reference; test with pinned `npx @modelcontextprotocol/inspector` on every PR. Live-validate with Cursor + Claude.ai before demo. |
+| OAuth flow needs user-signed challenge but webapp ↔ MCP CORS could block POST | Configure `tower-http::cors::CorsLayer` allow-listed to **exact** origin `https://mnemonik.xyz` (no `Any` wildcard) on `/oauth/*` endpoints. Test in CI with a request from a different origin asserting 403/CORS-rejected. |
+| WASM keypair lost when user clears browser → identity loss → demo embarrassment | Aggressive "Download backup" prompt on first generation; warning before page exit if backup not downloaded. Demo dry-run with a pre-saved backup as fallback. localStorage value is encrypted via `crypto.subtle` AES-GCM with passphrase derived from a session secret + user-entered PIN (P1.5 may upgrade to passkey). |
+| XSS in webapp → localStorage keypair theft | Strict CSP header (`default-src 'self'; script-src 'self'; connect-src 'self' mcp.mnemonik.xyz`) on webapp. `import_keypair_json` validates JSON shape + Ed25519 byte length before storing; suspicious input rejected with user-visible error. |
 | `mcp.mnemonik.xyz` subdomain needs DNS + SSL cert before demo | Schedule DNS update in Wave 2 (Smithery task); use existing `certbot` flow per `deployment.md`. Validate DNS propagation 24h before demo. |
-| COSE byte-stability through proxies fails despite mock test | Fallback: encode bundle as `base64(cbor_bytes)` in a JSON string field rather than relying on JSON-RPC payload byte-stability. Test both encodings in CI. |
-| `STORAGE_MODE=local` ownership scope (`owner_pubkey`) leaks across users if filter forgotten | Add a SQL-level guard: every `recall` query MUST include `owner_pubkey = ?` clause; add a clippy-style lint or unit test that asserts this on every code path. |
+| COSE byte-stability through proxies fails despite mock test | **Default to base64-encoded CBOR in JSON string field** (not JSON-byte-stability). Adversarial mock proxy in CI test forces this encoding to be the only safe one. |
+| `STORAGE_MODE=local` ownership scope (`owner_pubkey`) leaks across users if filter forgotten | Decision 9 makes the SQL-level filter mandatory. Test `recall_owner_isolation` enforces cross-tenant assertion in CI. SQL helper function `search_attestations(owner_pubkey, query, limit)` requires the parameter at compile time — no signature without it. |
 | Smithery review rejects crypto-related listing | Position as "verifiable knowledge memory"; lead utility, blockchain framing as "plumbing". Smithery is community-driven so risk is low; if rejected, escalate to mcp.directory in P1.5. |
-| Live-demo network failure on stage | Pre-recorded fallback video; local docker self-host (existing) as backup demo without hosted-service dependency. |
+| Live-demo network failure on stage | Pre-recorded fallback video; local stdio MCP (existing) as backup demo without hosted-service dependency. |
+| Hosted server keypair (`MNEMONIC_KEYPAIR_PATH`) compromise = all attestations forgeable retroactively | File mode `0600`, owned by `claude` user (not root or world-readable). Generated once during deploy via `sodium randombytes_buf`; not committed to git. Deployment runbook in `deployment.md` specifies generation. P1.5 migrates to per-user signing via Turnkey, eliminating this attack surface. |
+| OAuth `OAuthState` in-memory map → DoS by exhausting memory with `/oauth/authorize` storms | Per-IP rate limit on `/oauth/*` (5 req/min/IP); `OAuthState` map size cap of 10000 entries with LRU eviction; entries TTL 60s. |
 
 ## User-Spec Deviations
 
@@ -203,26 +231,42 @@ bash (cargo, curl, grep, git, npx). No MCP tools needed for verification — the
 
 ### Deviation 3: `oauth_pubkey` column added to `api_keys` and `owner_pubkey` to `attestations`
 **User-spec says:** "`payment.rs` НЕ рефакторится: для хакатона `PAYMENT_MODE=none`".
-**Tech-spec does:** Adds two `ALTER TABLE` migrations (idempotent `ADD COLUMN`). No code changes in `payment.rs`. New columns are nullable and unused when `PAYMENT_MODE=none`.
-**Why:** Schema additions are forward-only and backwards-compatible — existing rows remain valid. The hook is needed for ownership scope in `STORAGE_MODE=local` (Decision 4).
+**Tech-spec does:** Adds two `ALTER TABLE` migrations (idempotent `ADD COLUMN`). No code changes in `payment.rs`. The new `attestations.owner_pubkey` is required for ownership scope per Decision 9 (recall isolation). The new `api_keys.oauth_pubkey` links existing API key rows to OAuth-issued pubkeys for P1.5 billing wiring.
+**Why:** Schema additions are forward-only and backwards-compatible — existing rows remain valid. Without `attestations.owner_pubkey`, multi-tenant recall on hosted MCP cannot be safely scoped. Decision 9 mandates this.
 **Status:** `[PENDING USER APPROVAL]` — minor, but technically a deviation from "не рефакторится" if interpreted strictly.
+
+### Deviation 4: `react-router-dom` added as new webapp dep
+**User-spec says:** Webapp implementation details not specified — the user-spec says only "Webapp `mnemonik.xyz` имеет 2 страницы". Routing tech is implicit choice.
+**Tech-spec does:** Adds `react-router-dom = ^6.27.0` to `webapp/package.json`. Current webapp uses internal state-based view switching with no router installed; URL routing (`/`, `/install`, `/chat`) requires a router (Decision 8). Skeptic validation flagged this as unstated.
+**Why:** URL routes are necessary for Smithery / Cursor / Claude.ai deeplinks to land on `/install` directly. Hash routing would break SSR/static-host expectations.
+**Status:** `[PENDING USER APPROVAL]` — minor, dependency addition needs explicit acknowledgement.
+
+### Deviation 5: `MCP_JWT_SECRET` env var added
+**User-spec says:** Env vars for hosting not specified beyond existing `STORAGE_MODE` / `EMBED_PROVIDER` / etc.
+**Tech-spec does:** Adds `MCP_JWT_SECRET` (32-byte base64) to env vars. Generated once during deploy. Required by Decision 11 (HS256 JWT).
+**Why:** Without a stable secret, JWT validation breaks across server restarts.
+**Status:** `[PENDING USER APPROVAL]` — minor, deploy runbook addition.
 
 ## Acceptance Criteria
 
 Technical AC supplementing user-spec MUST:
 
-- [ ] `cargo build --workspace` and `cargo build --workspace --features wasm --target wasm32-unknown-unknown` both succeed
-- [ ] `wasm-pack build core --target web --out-dir webapp/src/wasm --release` produces a valid ES module that imports cleanly in Vite
-- [ ] `mcp/src/oauth.rs` exists; `oauth2`, `jsonwebtoken` in `mcp/Cargo.toml`
-- [ ] `core/src/wasm/mod.rs` exists; gated by `#[cfg(target_arch = "wasm32")]`; native build does not include wasm-bindgen
+- [ ] `cargo build --workspace` (native, no wasm feature) succeeds
+- [ ] `cargo build -p mnemonic-core --features wasm --target wasm32-unknown-unknown` succeeds (NB: workspace-wide wasm32 build will fail because `mcp/` pulls tokio-full/axum/solana-sdk; only `core/` is wasm32-compatible)
+- [ ] `wasm-pack build core --target web --out-dir ../webapp/src/wasm --release` produces a valid ES module that imports cleanly in Vite
+- [ ] `mcp/src/oauth.rs` exists; `oauth2`, `jsonwebtoken`, `tower_governor` in `mcp/Cargo.toml` (pinned versions)
+- [ ] `core/src/wasm/mod.rs` exists; gated by `#[cfg(target_arch = "wasm32")]` and `wasm` feature; native build does not include wasm-bindgen
 - [ ] `smithery.yaml` exists at repo root, references `mcp.mnemonik.xyz`
-- [ ] CI workflow includes MCP Inspector validation step on PR
-- [ ] `mcp/tests/roundtrip_cose_via_http_proxy.rs` exists and passes
+- [ ] CI workflow includes MCP Inspector validation step on PR + `cargo audit` on PR
+- [ ] `mcp/tests/roundtrip_cose_via_http_proxy.rs`, `mcp/tests/recall_owner_isolation.rs`, `mcp/tests/stdio_backward_compat.rs`, `mcp/tests/oauth_flow.rs`, `mcp/tests/oauth_tool_call.rs` all exist and pass
 - [ ] DNS A-record for `mcp.mnemonik.xyz` resolves to VPS IP; HTTPS cert valid
-- [ ] Webapp routes `/`, `/install`, `/chat` all return 200
+- [ ] Webapp routes `/`, `/install`, `/chat` all return 200; CSP header `default-src 'self'; ...` sent on each
 - [ ] Existing 5 MCP tools (`whoami`, `sign_memory`, `verify`, `prove_identity`, `recall`) signatures unchanged
 - [ ] `grep -rE "OAuth|http_transport|axum" core/src/ | grep -v "core/src/wasm"` is empty (`core/` business logic untouched)
-- [ ] No regressions in existing stdio MCP behavior — round-trip `sign_memory → recall` via stdio still works locally
+- [ ] No regressions in existing stdio MCP behavior — round-trip `sign_memory → recall` via stdio still works locally (asserted by `stdio_backward_compat` test)
+- [ ] `MCP_JWT_SECRET` env var documented in `deployment.md` and `.env.example`
+- [ ] Anonymous `curl https://mcp.mnemonik.xyz/mcp -d '{"method":"tools/call",...}'` returns HTTP 401 (not 200 with rows from any tenant)
+- [ ] Per-IP rate limit returns 429 after threshold (5 sign_memory/min, 30 recall/min)
 
 ## Implementation Tasks
 
@@ -231,15 +275,15 @@ Technical AC supplementing user-spec MUST:
 #### Task 1: Streamable HTTP transport upgrade
 - **Description:** Upgrade `mcp/src/main.rs` and `mcp/src/mcp.rs` HTTP path to MCP streamable HTTP per spec 2025 (chunked response, NDJSON event framing). Add Axum middleware scaffolding (no-op now) where OAuth Bearer validation will plug in (Task 4). Stdio transport unchanged.
 - **Skill:** code-writing
-- **Reviewers:** code-reviewer, security-auditor, test-reviewer
+- **Reviewers:** security-auditor, test-reviewer
 - **Verify-smoke:** `cargo test -p mnemonic-mcp -- transport && curl -N -X POST http://localhost:3000/mcp -d '{"jsonrpc":"2.0","method":"tools/list","id":1}'` returns chunked NDJSON
 - **Files to modify:** `mcp/src/main.rs`, `mcp/src/mcp.rs`, `mcp/Cargo.toml`
 - **Files to read:** `mcp/src/main.rs`, `mcp/src/mcp.rs`, `work/mnemonic-integrations/code-research.md` §1
 
 #### Task 2: WASM bindgen wrappers in core
-- **Description:** Add `core/src/wasm/mod.rs` with `#[wasm_bindgen]` exports — `generate_keypair`, `sign_challenge`, `export_keypair_json`, `import_keypair_json` — calling existing `core/src/identity/` functions. Gate behind `#[cfg(target_arch = "wasm32")]` and a new `wasm` feature in `core/Cargo.toml`. Add `wasm-bindgen-test`-driven unit tests.
+- **Description:** Add `core/src/wasm/mod.rs` with `#[wasm_bindgen]` exports `generate_keypair`, `sign_challenge`, `export_keypair_json`, `import_keypair_json`. These are NEW helper wrappers — `core/src/identity/mod.rs` currently exports `load_or_create_keypair`, `pubkey_base58`, `did_sol`, `did_key`, `sign_bytes`, `verify_signature`. The new helpers compose the existing primitives: `generate_keypair = solana_sdk::Keypair::new()`, `sign_challenge = sign_bytes`, `export_keypair_json` / `import_keypair_json` are JSON serializers around the keypair byte array. Gate the entire `wasm` module behind `#[cfg(target_arch = "wasm32")]` AND a `wasm` feature flag in `core/Cargo.toml`. Add `wasm-bindgen-test`-driven unit tests per Testing Strategy.
 - **Skill:** code-writing
-- **Reviewers:** code-reviewer, security-auditor, test-reviewer
+- **Reviewers:** security-auditor, test-reviewer
 - **Verify-smoke:** `cargo build -p mnemonic-core --features wasm --target wasm32-unknown-unknown && wasm-pack test --headless --chrome core --features wasm`
 - **Files to modify:** `core/src/wasm/mod.rs` (new), `core/src/lib.rs` (mod gate), `core/Cargo.toml` (wasm-bindgen, getrandom features, `wasm` feature flag)
 - **Files to read:** `core/src/identity/mod.rs`, `work/mnemonic-integrations/code-research.md` §3
@@ -247,7 +291,7 @@ Technical AC supplementing user-spec MUST:
 #### Task 3: Webapp WASM build pipeline
 - **Description:** Add `webapp/scripts/build-wasm.sh` invoking `wasm-pack build core --target web --out-dir webapp/src/wasm --release`. Wire into `webapp/package.json` as `build:wasm` and as a pre-step for `build`. Update `webapp/.gitignore` to exclude generated `webapp/src/wasm/`. Verify Vite imports the `.js` ES module without configuration tweaks.
 - **Skill:** infrastructure-setup
-- **Reviewers:** code-reviewer, security-auditor, infrastructure-reviewer
+- **Reviewers:** security-auditor, test-reviewer
 - **Verify-smoke:** `cd webapp && npm run build:wasm && npm run build` produces `dist/` with WASM assets
 - **Files to modify:** `webapp/scripts/build-wasm.sh` (new), `webapp/package.json`, `webapp/.gitignore`, `webapp/vite.config.ts` (only if needed for WASM mime type)
 - **Files to read:** `webapp/package.json`, `webapp/vite.config.ts`
@@ -255,9 +299,9 @@ Technical AC supplementing user-spec MUST:
 ### Wave 2: OAuth + Smithery (parallel)
 
 #### Task 4: OAuth 2.1 + PKCE server module
-- **Description:** Implement `mcp/src/oauth.rs` with `/oauth/authorize` (validates user-signed challenge against pubkey, issues code) and `/oauth/token` (validates `code_verifier`, issues HS256 JWT with `sub=<pubkey_b58>`). Wire as Axum routes. Add Bearer-token validation middleware that resolves pubkey for downstream tool dispatch. Apply migrations: `ALTER TABLE api_keys ADD COLUMN oauth_pubkey TEXT;` and `ALTER TABLE attestations ADD COLUMN owner_pubkey TEXT;` (idempotent). `recall` filters by `owner_pubkey = jwt.sub`.
+- **Description:** Implement `mcp/src/oauth.rs` per Decisions 9, 10, 11 — authorize and token endpoints, signed-challenge validation, HS256 JWT issuance, Bearer middleware with mandatory auth on `/mcp` (anonymous → 401), per-IP rate limiting via `tower_governor`. Run idempotent schema migrations on first connection (see Data Models section). Update `recall` SQL to require `owner_pubkey` parameter. Tighten CORS to exact origin `https://mnemonik.xyz`.
 - **Skill:** code-writing
-- **Reviewers:** code-reviewer, security-auditor, test-reviewer
+- **Reviewers:** security-auditor, test-reviewer
 - **Verify-smoke:** `cargo test -p mnemonic-mcp -- oauth && bash scripts/test-oauth-flow.sh` returns valid JWT
 - **Files to modify:** `mcp/src/oauth.rs` (new), `mcp/src/mcp.rs` (route registration + middleware), `mcp/src/main.rs` (state init), `mcp/src/tools.rs` (recall filter by `owner_pubkey`), `mcp/Cargo.toml`, `core/src/storage/sqlite.rs` (migration runner)
 - **Files to read:** `mcp/src/payment.rs`, `mcp/src/tools.rs`, `core/src/storage/sqlite.rs`, `work/mnemonic-integrations/code-research.md` §2, §6
@@ -265,7 +309,7 @@ Technical AC supplementing user-spec MUST:
 #### Task 5: Smithery listing + DNS subdomain + nginx
 - **Description:** Create `smithery.yaml` at repo root with `mcp.mnemonik.xyz` endpoint and OAuth flow declaration. Coordinate DNS A-record for `mcp.mnemonik.xyz` → VPS. Update nginx config (`/etc/nginx/sites-available/mnemonic` per `deployment.md`) to add subdomain server-block proxying to `localhost:3000`. Run `certbot --nginx -d mcp.mnemonik.xyz`. Submit listing to smithery.ai.
 - **Skill:** infrastructure-setup
-- **Reviewers:** code-reviewer, security-auditor, infrastructure-reviewer
+- **Reviewers:** security-auditor, test-reviewer
 - **Verify-smoke:** `dig +short mcp.mnemonik.xyz` returns VPS IP; `curl -fI https://mcp.mnemonik.xyz/health` returns 200
 - **Verify-user:** Visit `smithery.ai/mcp/mnemonic` — listing visible with install-deeplink
 - **Files to modify:** `smithery.yaml` (new), `deployment.md` (subdomain section), nginx config on VPS (out-of-tree)
@@ -276,16 +320,16 @@ Technical AC supplementing user-spec MUST:
 #### Task 6: Webapp landing + install-hub + identity panel
 - **Description:** Add `webapp/src/pages/Landing.tsx` (route `/`) — protocol pitch + "Get started" CTA leading to `/install`. Add `webapp/src/pages/Install.tsx` (route `/install`) — identity panel (Generate / Import / Export keypair via WASM core) + deeplink buttons for Cursor / VS Code / Claude.ai. Move existing chat demo from `/` to `/chat`. Use existing Tailwind tokens from `ux-guidelines.md`.
 - **Skill:** code-writing
-- **Reviewers:** code-reviewer, security-auditor, test-reviewer
+- **Reviewers:** security-auditor, test-reviewer
 - **Verify-smoke:** `cd webapp && npm run dev` — open localhost:5173/, /install, /chat — all render without console errors
 - **Verify-user:** On `/install`, click "Generate keypair" → DID/pubkey appears → click "Download backup" → JSON file with valid Ed25519 keypair
 - **Files to modify:** `webapp/src/App.tsx` (router), `webapp/src/pages/Landing.tsx` (new), `webapp/src/pages/Install.tsx` (new), `webapp/src/components/IdentityPanel.tsx` (new), `webapp/src/components/InstallButtons.tsx` (new)
 - **Files to read:** `webapp/src/App.tsx`, `.claude/skills/project-knowledge/references/ux-guidelines.md`, `webapp/src/wasm/` (generated by Task 3)
 
-#### Task 7: COSE round-trip-via-proxy test + MCP Inspector CI step
-- **Description:** Add `mcp/tests/roundtrip_cose_via_http_proxy.rs` — boot a local Axum mock proxy that re-serializes JSON-RPC bodies, send `sign_memory` through it, verify COSE_Sign1 bytes survive. Update `.github/workflows/ci.yml` to add MCP Inspector validation step running against `cargo run -p mnemonic-mcp` started in background.
+#### Task 7: COSE round-trip + ownership-isolation + stdio-compat tests + MCP Inspector CI
+- **Description:** Add 4 integration tests per Testing Strategy: `roundtrip_cose_via_http_proxy.rs` (adversarial mock proxy that mutates JSON byte order/whitespace), `recall_owner_isolation.rs` (cross-tenant assertion + 401 for anonymous), `stdio_backward_compat.rs` (subprocess test confirming stdio round-trip), and expand `oauth_flow.rs` per finding-driven test list. Update `.github/workflows/ci.yml` to add: MCP Inspector validation step (with `wait-for-port` readiness probe + test JWT), `cargo audit` step, schema validation step for `smithery.yaml`.
 - **Skill:** code-writing
-- **Reviewers:** code-reviewer, test-reviewer
+- **Reviewers:** security-auditor, test-reviewer
 - **Verify-smoke:** `cargo test -p mnemonic-mcp roundtrip_cose_via_http_proxy` passes; CI run shows MCP Inspector step green
 - **Files to modify:** `mcp/tests/roundtrip_cose_via_http_proxy.rs` (new), `.github/workflows/ci.yml`
 - **Files to read:** `core/src/codec/sign.rs`, `core/tests/integration_cbor.rs`, `.github/workflows/ci.yml`, `work/mnemonic-integrations/code-research.md` §8
@@ -293,10 +337,10 @@ Technical AC supplementing user-spec MUST:
 #### Task 8: Pre-demo manual smoke checklist
 - **Description:** Author `work/mnemonic-integrations/tasks/smoke-checklist.md` — exhaustive manual flow on Cursor + Claude.ai Pro covering: fresh-browser onboarding, keypair gen, install deeplink, OAuth approve, sign_memory, switch to second browser/tool, recall. Each step has expected result and rollback note. Document used during pre-release smoke and live demo dry-run.
 - **Skill:** documentation-writing
-- **Reviewers:** code-reviewer
+- **Reviewers:** none (manual review via `Verify-user`)
 - **Verify-user:** A team member who didn't write the spec executes the checklist on a fresh laptop end-to-end without ambiguity
 - **Files to modify:** `work/mnemonic-integrations/tasks/smoke-checklist.md` (new)
-- **Files to read:** `work/mnemonic-integrations/user-spec.md` (Сценарии), `work/mnemonic-integrations/research.md`
+- **Files to read:** `work/mnemonic-integrations/user-spec.md` (Сценарии), `work/mnemonic-integrations/code-research.md`
 
 ### Audit Wave (parallel, reviewers: none)
 
@@ -327,18 +371,20 @@ Technical AC supplementing user-spec MUST:
 - **Description:** Run full test suite (`cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, `cd webapp && npm run build`). Walk through every user-spec MUST and tech-spec AC line — confirm pass or document failures. Execute the Wave-3 manual smoke checklist on a clean laptop.
 - **Skill:** pre-deploy-qa
 - **Reviewers:** none
+- **Files to modify:** N/A (testing only — produces report in `decisions.md`)
 - **Files to read:** `work/mnemonic-integrations/user-spec.md`, `work/mnemonic-integrations/tech-spec.md`, `work/mnemonic-integrations/tasks/smoke-checklist.md`, all modified source files
 
 #### Task 13: Deploy
 - **Description:** Deploy hosted MCP to `mcp.mnemonik.xyz` subdomain on existing VPS (per `deployment.md` flow — `cargo build --release`, restart `mnemonic-mcp.service`, verify systemd status). Deploy webapp to Cloudflare Pages (or VPS nginx, per existing flow). Verify both endpoints return 200 over HTTPS. Submit Smithery listing.
 - **Skill:** deploy-pipeline
-- **Reviewers:** code-reviewer, security-auditor, deploy-reviewer
+- **Reviewers:** security-auditor, test-reviewer
 - **Verify-smoke:** `curl -fI https://mcp.mnemonik.xyz/health && curl -fI https://mnemonik.xyz/install`
 - **Files to modify:** VPS nginx config (out-of-tree), GitHub Actions workflow if Cloudflare Pages deploy is added
 - **Files to read:** `.claude/skills/project-knowledge/references/deployment.md`
 
 #### Task 14: Post-deploy QA
-- **Description:** On the live `mcp.mnemonik.xyz` endpoint, run `npx @modelcontextprotocol/inspector --validate https://mcp.mnemonik.xyz/mcp`. Trigger full OAuth flow via real Cursor connector install on a clean Cursor profile; verify `sign_memory → recall` round-trip. Verify Smithery listing is live and the install-deeplink works. Mark all user-spec success metrics measurable (install counter wired up).
+- **Description:** On the live `mcp.mnemonik.xyz` endpoint, run `npx @modelcontextprotocol/inspector --validate https://mcp.mnemonik.xyz/mcp`. Trigger full OAuth flow via real Cursor connector install on a clean Cursor profile; verify `sign_memory → recall` round-trip. Verify Smithery listing is live and the install-deeplink works. Verify anonymous `curl` to `/mcp` returns 401. Mark all user-spec success metrics measurable (install counter wired up).
 - **Skill:** post-deploy-qa
 - **Reviewers:** none
+- **Files to modify:** N/A (live verification only — produces report in `decisions.md`)
 - **Files to read:** `work/mnemonic-integrations/user-spec.md` (success metrics + verification table), `work/mnemonic-integrations/tasks/smoke-checklist.md`

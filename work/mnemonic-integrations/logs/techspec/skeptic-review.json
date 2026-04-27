@@ -1,0 +1,78 @@
+{
+  "verdict": "has_mirages",
+  "summary": "Tech-spec contains several factual errors against the actual codebase: the most critical is that the `attestations` table has `signer_pubkey` only — there is NO `owner_pubkey` column to filter on, and the spec also claims `react-router` is an existing dependency when it is not in webapp/package.json.",
+  "findings": [
+    {
+      "severity": "critical",
+      "type": "missing_table",
+      "location_in_techspec": "Data Models (lines 102-104) and Task 4 (line 258)",
+      "claim": "The existing `attestations` table gains... `A new column `owner_pubkey TEXT` is added (nullable, base58 OAuth user pubkey) for ownership scope. `recall` filters by `owner_pubkey = <jwt.sub>`.",
+      "reality": "core/src/storage/sqlite.rs:13-22 defines `attestations` with columns: attestation_id, content, content_hash, tags, solana_tx, arweave_tx, signer_pubkey, created_at — there is NO owner_pubkey column. `recall`/`search` (sqlite.rs:223) filters by `signer_pubkey = ?`. The api_keys table DOES have owner_pubkey (sqlite.rs:33), but the spec conflates the two tables.",
+      "fix_suggestion": "Either (a) clarify that the new `owner_pubkey` column on `attestations` is being ADDED (this is technically what the spec says, but the verification example in user-spec table line 137 uses `signer_pubkey` and existing recall logic uses `signer_pubkey`); AND update the SQL filter to actually be `owner_pubkey` after the migration runs; AND update `save_attestation` to also persist owner_pubkey. Or (b) reuse the existing `signer_pubkey` column (since under Decision 4 server is the signer, this would defeat the ownership-scope purpose). Recommend option (a) but make the read-path migration explicit in Task 4 — currently the spec is silent on how `save_attestation` learns the owner_pubkey value."
+    },
+    {
+      "severity": "critical",
+      "type": "non_existent_api",
+      "location_in_techspec": "Dependencies (line 127) and implicit in Task 6 (line 277)",
+      "claim": "Existing (used as-is): `axum`, `tokio`, `tower-http`, `serde_json`, `tracing`, `solana-sdk` (mcp/), `mnemonic-core` (path dep), `react`, `vite`, `tailwindcss`, `react-router` (webapp/).",
+      "reality": "webapp/package.json (lines 12-25) has only `react`, `react-dom` as dependencies and `vite`, `tailwindcss`, `@playwright/test`, etc. as devDependencies. There is NO `react-router` package. webapp/src/App.tsx uses internal state-based view switching (`view === 'chat'`), not URL-based routing.",
+      "fix_suggestion": "Remove `react-router` from the 'used as-is' list. Add `react-router-dom` (or `@tanstack/react-router`) as a NEW dependency in the New packages → webapp/package.json section, since the spec creates URL-based routes `/`, `/install`, `/chat` (Decision 8, line 92). Also note that webapp/src/App.tsx (the existing internal state router) needs replacement, not just modification."
+    },
+    {
+      "severity": "major",
+      "type": "wrong_signature",
+      "location_in_techspec": "Solution overview (line 12) and Task 2 (line 240)",
+      "claim": "the existing `mnemonic-core` Rust crate is wrapped with `#[wasm_bindgen]` to expose `generate_keypair`, `sign_challenge`, `export_keypair_json`, `import_keypair_json` to JavaScript. ... Add `core/src/wasm/mod.rs` with `#[wasm_bindgen]` exports — `generate_keypair`, `sign_challenge`, `export_keypair_json`, `import_keypair_json` — calling existing `core/src/identity/` functions.",
+      "reality": "core/src/identity/mod.rs exposes `load_or_create_keypair`, `pubkey_base58`, `did_sol`, `did_key`, `sign_bytes`, `verify_signature`. None of `generate_keypair`, `sign_challenge`, `export_keypair_json`, `import_keypair_json` exist. The native equivalents would be `Keypair::new()` (no wrapper), `sign_bytes` (close to sign_challenge), and Keypair JSON I/O is inlined in `load_or_create_keypair` — not exposed as standalone functions.",
+      "fix_suggestion": "Mark Task 2 as creating wrapper functions atop existing primitives (not 'calling existing functions of the same name'). Specifically: `generate_keypair` wraps `Keypair::new() + Keypair::to_bytes()`; `sign_challenge` wraps `identity::sign_bytes`; `export_keypair_json` and `import_keypair_json` need new logic mirroring the JSON serialization inside `load_or_create_keypair`. Add the corresponding helper extractions in core/src/identity/mod.rs as part of Task 2."
+    },
+    {
+      "severity": "major",
+      "type": "wrong_version",
+      "location_in_techspec": "Dependencies (line 113)",
+      "claim": "`jsonwebtoken = \"9.3\"`",
+      "reality": "code-research.md §6 (line 384) recommends `jsonwebtoken = \"9.2\"`. The crate's latest 9.x line on crates.io has versions like 9.2.x and 9.3 may exist, but the cited version (9.3) is suspicious because it differs from the research and the next-tier minor was a recent release. Worth pinning to a verified version.",
+      "fix_suggestion": "Verify on crates.io that `jsonwebtoken = \"9.3\"` resolves. If the latest stable 9.x line is `9.3.0`, leave as-is; otherwise pin to `9.2` per code-research.md. Either way, document the chosen version in `decisions.md` since this is a security-sensitive crate."
+    },
+    {
+      "severity": "minor",
+      "type": "non_existent_api",
+      "location_in_techspec": "Architecture > What we're building (line 26) and Decision 8 (line 92)",
+      "claim": "Current root `/` (Qwen2.5 chat demo) becomes `/chat`. New `/` is the integration landing page",
+      "reality": "webapp/src/App.tsx mounts `LandingPage` (the existing root) which is a Qwen-backed chat input box per webapp/src/components/LandingPage.tsx and code-research.md §4. The current root view name is `landing` (state machine), and the chat demo is reached after the first message. Calling the current root a 'Qwen2.5 chat demo' is loose — it's a chat *input page* that transitions to a chat view. There is currently no static 'landing page' content separate from the chat UI.",
+      "fix_suggestion": "Rephrase Decision 8: 'Current root `/` (chat input + transition to chat demo, backed by Qwen2.5 via /chat backend) is split: existing chat UI moves to `/chat` route; new `/` becomes a static integration landing page'. Make explicit that today's `LandingPage.tsx` is repurposed or replaced wholesale, not 'preserved at /chat'."
+    },
+    {
+      "severity": "minor",
+      "type": "other",
+      "location_in_techspec": "Acceptance Criteria (line 222) and Task 3 (line 247)",
+      "claim": "wasm-pack build core --target web --out-dir webapp/src/wasm --release",
+      "reality": "wasm-pack is a real CLI and `--target web` and `--out-dir <path>` are valid flags. However the spec also uses `cargo build --workspace --features wasm --target wasm32-unknown-unknown` (line 214). The Cargo workspace contains mcp/ which depends on solana-sdk + tokio[full] + axum — none of these compile to wasm32-unknown-unknown. A workspace-wide wasm build will fail unless the spec also adds `--package mnemonic-core` or feature-gates the mcp crate out.",
+      "fix_suggestion": "Replace `cargo build --workspace --features wasm --target wasm32-unknown-unknown` with `cargo build -p mnemonic-core --features wasm --target wasm32-unknown-unknown`. Same fix for any other workspace-wide wasm invocations."
+    },
+    {
+      "severity": "minor",
+      "type": "other",
+      "location_in_techspec": "Decision 6 (line 84) and Task 3 (line 247)",
+      "claim": "`webapp/scripts/build-wasm.sh`, `webapp/.gitignore`",
+      "reality": "webapp/ does not currently have a `scripts/` subdirectory and does not have a top-level `.gitignore` (root .gitignore covers webapp). These are file creations, not modifications.",
+      "fix_suggestion": "Mark `webapp/scripts/build-wasm.sh` and `webapp/.gitignore` as `(new)` in Task 3's 'Files to modify' list, consistent with how other new files are marked elsewhere in the spec."
+    },
+    {
+      "severity": "minor",
+      "type": "non_existent_file",
+      "location_in_techspec": "Task 8 (line 299)",
+      "claim": "Files to read: ... `work/mnemonic-integrations/research.md`",
+      "reality": "The feature folder contains `code-research.md` (read confirmed) but no `research.md`. References to `research.md` appear in user-spec.md too but the file in the feature directory is `code-research.md`.",
+      "fix_suggestion": "Replace `work/mnemonic-integrations/research.md` with `work/mnemonic-integrations/code-research.md` in Task 8's read list (and verify the broader-research file referenced elsewhere in user-spec.md / Decision 5 actually exists at the expected path — Decision 5 cites 'research.md §4', which is also stale)."
+    },
+    {
+      "severity": "minor",
+      "type": "other",
+      "location_in_techspec": "Risks table (line 184)",
+      "claim": "use existing `certbot` flow per `deployment.md`",
+      "reality": "deployment.md line 243 confirms `sudo certbot --nginx -d mnemonik.xyz --non-interactive --agree-tos` for the apex domain. No prior subdomain certbot run is documented. The flow is real but 'existing' overstates it — it has only ever been run once for the apex.",
+      "fix_suggestion": "Rephrase to 'follow the certbot pattern documented in deployment.md (line 243), adapted for the new `mcp.mnemonik.xyz` subdomain'. Optional but improves accuracy."
+    }
+  ]
+}

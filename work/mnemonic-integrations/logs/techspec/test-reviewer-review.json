@@ -1,0 +1,91 @@
+{
+  "verdict": "gaps_present",
+  "summary": "Testing strategy is broadly proportional for an L hackathon MVP, but has several security-critical gaps (recall ownership filter, OAuth replay/expired-code, backward-compat stdio) and false-confidence risks (mock-proxy realism, MCP Inspector CI reliability) that should be tightened before demo.",
+  "size_appropriate": true,
+  "findings": [
+    {
+      "severity": "critical",
+      "category": "missing_test",
+      "location_in_techspec": "Testing Strategy → Integration tests; Risks row 'STORAGE_MODE=local ownership scope leaks across users'",
+      "gap": "No explicit test for the recall ownership filter. The Risks table flags 'owner_pubkey leaks across users if filter forgotten' as a tier-1 risk and proposes 'a clippy-style lint or unit test that asserts this on every code path', but the Testing Strategy section never lists this test. The 'MCP tool call with OAuth' integration test only asserts that one user's row has the correct owner_pubkey — it does NOT verify that user A's recall returns zero rows belonging to user B. Because Decision 4 makes ownership-scope the only privacy boundary in STORAGE_MODE=local (the COSE signer is shared), a missing filter is a direct cross-tenant data leak.",
+      "fix_suggestion": "Add a dedicated integration test mcp/tests/recall_owner_isolation.rs: (1) obtain JWT_A and JWT_B for two distinct user pubkeys via the OAuth helper; (2) sign_memory(content='secret-A') with Bearer JWT_A and sign_memory(content='secret-B') with Bearer JWT_B; (3) call recall(query='secret') with Bearer JWT_A and assert results contain only the row whose owner_pubkey == jwt_A.sub AND assert NO row with owner_pubkey == jwt_B.sub appears; (4) repeat symmetrically for B; (5) call recall WITHOUT Bearer header and assert it does not return JWT-scoped rows (or returns 401 — pin the chosen behavior). Add this as an explicit Testing Strategy bullet and reference it from the Risks table mitigation column."
+    },
+    {
+      "severity": "high",
+      "category": "weak_coverage",
+      "location_in_techspec": "Testing Strategy → Unit tests → mcp/src/oauth.rs (~6 tests)",
+      "gap": "Six unit tests for an OAuth 2.1 + PKCE server is light for a security-sensitive flow that is the only thing standing between an attacker and another user's attestations. Listed coverage (valid/invalid signature, valid/invalid code_verifier, JWT roundtrip, expired-code rejection) misses several attack-surface cases enumerated in the OWASP OAuth checklist: (a) replay of an already-redeemed authorization code (must be rejected — single-use), (b) PKCE downgrade where client_id reuses a code without code_verifier, (c) malformed/oversized JWT (alg=none, alg confusion HS256↔RS256), (d) authorization code bound to one PKCE challenge being redeemed with a different code_verifier from a concurrent flow (state mix-up / session collision), (e) JWT with valid signature but tampered `sub` field, (f) clock-skew at expiry boundary (token issued at iat=now, exp=now-1).",
+      "fix_suggestion": "Expand oauth.rs unit tests from 6 to ~10–12: add explicit cases for (1) authorization code single-use — second redemption returns invalid_grant; (2) code_verifier mismatch on token exchange returns invalid_grant; (3) JWT with `alg=none` is rejected; (4) JWT with tampered sub fails signature check; (5) two concurrent /authorize sessions for the same client do not let session B's code be redeemed with session A's verifier; (6) expired code (TTL boundary) rejected. These are pure logic tests, ~1–2 hours of work, and they directly cover OWASP A07 (Auth failures) which the security audit task (T10) will otherwise have to flag."
+    },
+    {
+      "severity": "high",
+      "category": "false_confidence",
+      "location_in_techspec": "Decision 7 + Testing Strategy → Integration tests → COSE round-trip via mock proxy",
+      "gap": "The mock proxy 'deserialize-and-reserialize JSON-RPC bodies' is asserted to be 'sufficient because the threat model is JSON re-encoding, not vendor-specific quirks' — but R1 in user-spec explicitly says the threat IS Anthropic/OpenAI proxy quirks ('Streamable HTTP коннектор-прокси могут re-encode CBOR байты'). A serde_json round-trip in a Rust test will preserve all bytes the Rust serializer produces because the exact same library normalizes both sides. The realistic threats are: (a) JSON number reformatting (e.g., 1.0 → 1, 1e10 → 10000000000), (b) UTF-8 normalization (NFC vs NFD, BOM stripping), (c) key-order changes, (d) trailing-whitespace insertion, (e) base64 padding/line-wrapping changes. The current test will pass even if the implementation has zero defenses against any of these. This is precisely the 'mock-only test' anti-pattern: the mock's behavior is identical to the production serializer.",
+      "fix_suggestion": "Either (a) make the mock adversarial — explicitly reorder JSON keys, recompute numbers via f64 round-trip, NFC-normalize all strings, strip whitespace, and re-base64 with different line lengths before the response is signed-then-checked, OR (b) commit to the documented fallback up-front: encode the CBOR bundle as a single base64 string field inside JSON (per Risks row 5 mitigation) and write the test to verify the base64 string survives round-trip. Option (b) is cheaper and more defensive; option (a) requires research into actual proxy behavior. Recommend (b) for hackathon. Also add at least one of the adversarial transforms to the mock so the test is non-trivial."
+    },
+    {
+      "severity": "high",
+      "category": "missing_test",
+      "location_in_techspec": "Acceptance Criteria last bullet ('No regressions in existing stdio MCP behavior') + Testing Strategy",
+      "gap": "AC explicitly mandates 'No regressions in existing stdio MCP behavior — round-trip sign_memory → recall via stdio still works locally', but no test in the Testing Strategy section covers this. The streamable-HTTP transport upgrade (Task 1) modifies mcp/src/main.rs and mcp/src/mcp.rs — the same files that wire up stdio. There is no automated guard preventing a regression where, e.g., the new Axum middleware accidentally short-circuits stdio dispatch, or the response-chunking logic gets reused on stdio and breaks JSON-RPC framing. The manual smoke checklist (T8) covers Cursor/Claude.ai but is silent on stdio.",
+      "fix_suggestion": "Add a unit/integration test mcp/tests/stdio_backward_compat.rs that spawns mnemonic-mcp with --transport stdio, writes a tools/list JSON-RPC request to stdin, reads stdout, and asserts (a) exactly 5 tools returned, (b) response is single-line JSON (not chunked NDJSON), (c) JSON-RPC envelope shape matches pre-feature snapshot. Then sign_memory + recall round-trip in the same process. This is ~30 lines of test code and directly satisfies the AC line. Add as an explicit bullet under 'Integration tests'."
+    },
+    {
+      "severity": "medium",
+      "category": "weak_coverage",
+      "location_in_techspec": "Testing Strategy → Unit tests → core/src/wasm/ (~4 tests via wasm-bindgen-test)",
+      "gap": "Four wasm-bindgen-tests for four exported functions is one assertion per function — barely above smoke. The functions handle untrusted user input on import_keypair_json (parse path) and produce material that becomes a long-lived identity. Missing: (a) import_keypair_json with malformed JSON returns Err (not panic) — wasm panics in browsers are unrecoverable; (b) import_keypair_json with valid JSON but wrong/short key bytes is rejected; (c) sign_challenge with empty buffer / oversized buffer behaves predictably; (d) export → import → re-export produces byte-identical JSON (idempotency); (e) keypair generation in browser actually uses crypto.getRandomValues (the getrandom 'js' feature must be wired correctly — a wrong feature gate would silently fall back to a non-CSPRNG).",
+      "fix_suggestion": "Expand to 7–8 wasm-bindgen-tests: add malformed-JSON rejection, wrong-length key rejection, export/import idempotency, and a statistical sanity check on generate_keypair (10 keypairs, all distinct, byte distribution not all-zero — catches getrandom misconfig). Frame these as error-handling and edge-case coverage, not just happy-path."
+    },
+    {
+      "severity": "medium",
+      "category": "false_confidence",
+      "location_in_techspec": "Task 7 + Testing Strategy → 'MCP Inspector (CI-only, GitHub Action step)'",
+      "gap": "Task 7 says 'MCP Inspector validation step running against `cargo run -p mnemonic-mcp` started in background'. Three reliability concerns: (1) `cargo run` in CI is slow and brittle — first compile can take >5min on a cold cache, racing the inspector before the server is listening; (2) no readiness probe is specified — the inspector may attack a half-booted server and return spurious failures, causing flaky CI that gets ignored; (3) the inspector requires a JWT for protected routes (post-Task 4), but the AC says 'after spinning up the server with a test JWT' — the mechanism for issuing that JWT in CI is unspecified, which means the inspector is likely run against the unauthenticated /mcp surface and won't catch OAuth-gated tool regressions.",
+      "fix_suggestion": "In Task 7 description add: (a) build the binary first with `cargo build -p mnemonic-mcp --release`, then run the binary directly (not `cargo run`); (b) use a wait-for-port loop (`until curl -fs http://localhost:3000/health; do sleep 1; done` with 30s timeout); (c) document how the test JWT is obtained — either (i) a CI-only env var MCP_TEST_JWT_BYPASS that disables auth on /mcp/_test_inspector, or (ii) a small bash helper that runs the OAuth flow against the local server and extracts the JWT for the inspector's --header flag. Pin the inspector version (`@modelcontextprotocol/inspector@<pinned>`) to avoid upstream-induced flakes."
+    },
+    {
+      "severity": "medium",
+      "category": "weak_coverage",
+      "location_in_techspec": "Testing Strategy → Unit tests → Streamable HTTP transport (~3 tests)",
+      "gap": "Three transport tests (chunked encoding, error path, large response splits across chunks) miss two edge cases user explicitly called out: (a) partial response — server crashes or panics mid-stream after header but before final chunk; the connector must not be left hanging or interpret a partial JSON-RPC envelope as success; (b) client disconnect mid-stream — the server should drop the in-flight request without leaking the SQLite lock or the embedder's CPU work. Also missing: malformed Bearer header, oversized request body (DoS surface).",
+      "fix_suggestion": "Expand transport tests from 3 to ~5: add (1) panic-mid-stream test using a panicking handler hook — assert client receives a well-formed terminal error chunk OR a clean connection close, not silent hang; (2) client-disconnect test using a hyper client that closes the connection after the first chunk — assert server logs cancellation and SQLite Mutex is released (probe by issuing a follow-up request that needs the lock). Optional: (3) Bearer header parsing with malformed/oversized values returns 401 immediately, not 500."
+    },
+    {
+      "severity": "medium",
+      "category": "missing_test",
+      "location_in_techspec": "Testing Strategy → Manual smoke tests (4 numbered steps)",
+      "gap": "Manual smoke checklist exists in tech-spec text but Task 8 only commits to authoring the document — there is no acceptance criterion that the checklist is rehearsable by someone who didn't write it. Each numbered step lacks (a) an explicit 'expected result' line for every action, (b) a rollback note (what to do if step N fails), (c) timing/duration estimate (so demo dry-run can be scheduled). Several steps have ambiguous endpoints: 'attestation row visible via webapp/devtools' — which surface? localStorage? a /me endpoint? SQL query on the VPS? The checklist as currently sketched would yield divergent results between operators.",
+      "fix_suggestion": "In Task 8 add explicit acceptance: 'A team member who did NOT write the spec executes the checklist on a fresh laptop end-to-end without asking clarification questions; if any step requires clarification, rewrite that step.' Specify the format: each step is a tuple (Action, Expected output verbatim, Failure recovery, ETA). Add a fifth step covering the stdio backward-compat scenario (run `cargo run -p mnemonic-mcp -- --transport stdio` locally, connect Cursor to local stdio MCP, sign+recall — confirms AC line about no-stdio-regression that no automated test currently covers if finding #4 isn't addressed)."
+    },
+    {
+      "severity": "medium",
+      "category": "test_pyramid",
+      "location_in_techspec": "Testing Strategy: 13 unit, 3 integration, 0 E2E (manual only)",
+      "gap": "For an L feature with 14 implementation tasks spanning Rust crate + WASM + Axum HTTP + React webapp + CI + nginx/DNS, the integration count of 3 is thin. The webapp pages (Landing, Install, IdentityPanel) have zero automated coverage at any level — neither component tests nor a Playwright/Cypress flow. The 'Generate keypair → Export → Import' flow is in the user-spec MUST list and the manual smoke checklist, but if it regresses between PRs the only catch is a human running through the manual list before demo. Additionally, the deeplink URL builder (mentioned in user-spec Testing section: 'deeplink URL builder' as a unit test target) is not listed in tech-spec Testing Strategy.",
+      "fix_suggestion": "For a hackathon MVP, do NOT add full Playwright — that's the right backlog deferral. But do add: (1) a unit test for the deeplink URL builder (pure function, base64 encoding correctness, special-character handling) — listed in user-spec but missing in tech-spec; (2) a Vitest component test for IdentityPanel covering generate → display DID → click Export → verify File blob content matches WASM export_keypair_json output. These are <1 dev-day combined and recover the 'webapp has zero tests' gap proportionally."
+    },
+    {
+      "severity": "medium",
+      "category": "weak_coverage",
+      "location_in_techspec": "Decisions Decision 5 + Acceptance Criteria + manual smoke",
+      "gap": "Smithery listing live + install-deeplink working appears in user-spec MUST and AC, but the only test is a manual `curl` to smithery.ai/mcp/mnemonic. No automated check that smithery.yaml is well-formed (schema-valid against Smithery's manifest spec). If the YAML is malformed, listing fails silently in their pipeline and the team discovers this only when manually clicking the deeplink during demo.",
+      "fix_suggestion": "Add a tiny CI step (or unit test) that validates smithery.yaml against the Smithery JSON schema (yamllint + a curl of their schema URL or a vendored copy). Fail the build on parse error. ~15 minutes of work, prevents a category of demo-day surprise."
+    },
+    {
+      "severity": "low",
+      "category": "false_confidence",
+      "location_in_techspec": "Phase 1.5 deferral — 'Headless Claude Code in CI is backlog.md'",
+      "gap": "User-spec explicitly says 'E2E (CI): MCP Inspector прогон tools/list + tools/call для всех 5 инструментов на каждом PR' — implying Inspector exercises tools/call, not just tools/list. Tech-spec Task 7 says inspector runs `--validate` which is a schema check, not a tool/call exercise. There's a subtle gap: the Inspector schema validation is NOT equivalent to actually calling the 5 tools end-to-end. Combined with the manual-only smoke checklist, the team is one missed manual step from shipping a regression in (e.g.) the recall response shape.",
+      "fix_suggestion": "Either (a) extend the CI Inspector step to also exercise tools/call for at least whoami and recall (read-only, idempotent), with assertions on response shape, or (b) commit explicitly in tech-spec text that 'Inspector --validate covers schema only; tools/call coverage is in the manual smoke checklist (Task 8)' so the deferral is documented and not implicit. (a) is preferred and is ~1h of work."
+    },
+    {
+      "severity": "low",
+      "category": "weak_coverage",
+      "location_in_techspec": "Testing Strategy → Integration tests → 'OAuth full flow' (1 test)",
+      "gap": "One integration test 'simulate browser flow' is the minimum. CORS configuration is called out in Risks ('webapp ↔ MCP CORS could block POST') with mitigation 'Test in CI', but no explicit CORS test is listed. The OAuth integration test is described in same-origin Rust — it won't catch a missing CorsLayer Allow-Origin: https://mnemonik.xyz header.",
+      "fix_suggestion": "Add to the OAuth integration test (or as a separate 5-line test): a request to /oauth/authorize with `Origin: https://mnemonik.xyz` header, assert the response includes `Access-Control-Allow-Origin: https://mnemonik.xyz`. And a negative test: `Origin: https://evil.example`, assert that header is absent or denied. Directly satisfies the Risks-table mitigation 'Test in CI'."
+    }
+  ]
+}
