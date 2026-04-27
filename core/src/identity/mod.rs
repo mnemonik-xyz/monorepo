@@ -1,9 +1,16 @@
-use anyhow::Context;
 use solana_sdk::pubkey::Pubkey;
 use solana_sdk::signature::{Keypair, Signer};
+
+#[cfg(not(target_arch = "wasm32"))]
+use anyhow::Context;
+#[cfg(not(target_arch = "wasm32"))]
 use std::path::Path;
 
 /// Load keypair from JSON file, or generate and save a new one.
+///
+/// Filesystem-backed; native-only. The browser (`core::wasm`) uses
+/// `localStorage` instead and never touches this function.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn load_or_create_keypair(path: &Path) -> anyhow::Result<Keypair> {
     if path.exists() {
         let data = std::fs::read_to_string(path).context("reading keypair file")?;
@@ -85,6 +92,7 @@ mod tests {
         assert!(!verify_signature(&kp.pubkey(), b"wrong", &sig));
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn test_keypair_roundtrip() {
         let dir = tempfile::tempdir().unwrap();

@@ -5,6 +5,11 @@ edition = "2021"
 description = "Mnemonic Protocol core library — verifiable memory attestation for AI agents"
 
 [lib]
+# `cdylib` is required for `wasm-pack build core --target web` to emit a `.wasm`
+# binary; `rlib` keeps the crate usable as a normal Rust dependency from `mcp/`.
+# Both are necessary — emitting only `cdylib` would break the native workspace
+# build because `mnemonic-mcp` links to `mnemonic-core` as an rlib.
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 sha2 = "0.10"
@@ -18,30 +23,40 @@ coset = "0.3"
 chrono = { version = "0.4", features = ["serde"] }
 anyhow = "1"
 thiserror = "2"
-uuid = { version = "1", features = ["v4"] }
+uuid = { version = "1", features = ["v4", "js"] }
 bs58 = "0.5"
 bincode = "1"
 ndarray = "0.16"
 turboquant-plus-rs = "0.1.0"
 solana-sdk = "2.2"
 spl-memo = "6"
-rusqlite = { version = "0.34", features = ["bundled"] }
-reqwest = { version = "0.12", features = ["json", "blocking"] }
 futures = "0.3"
 tracing = "0.1"
 fastembed = { version = "5", optional = true }
 tokio = { version = "1", features = ["time", "rt"] }
 
+# Native-only deps: rusqlite (bundled C SQLite) and reqwest do not compile for
+# wasm32-unknown-unknown. The storage/arweave/solana modules that use them are
+# also gated to non-wasm32 in core/src/lib.rs.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+rusqlite = { version = "0.34", features = ["bundled"] }
+reqwest = { version = "0.12", features = ["json", "blocking"] }
+
 [features]
 default = []
 local-embed = ["fastembed"]
 openssl-vendored = ["openssl-sys/vendored"]
+# Enables the `core::wasm` module (wasm-bindgen wrappers around identity +
+# attestation signing). The actual WASM dependencies are gated by
+# `cfg(target_arch = "wasm32")`; this feature is the explicit opt-in so
+# native builds never compile the module body.
+wasm = []
 
 [dependencies.openssl-sys]
 version = "0.9"
 optional = true
 
-[dev-dependencies]
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 httpmock = "0.8"
 tempfile = "3"
 proptest = "1"
@@ -55,3 +70,29 @@ harness = false
 [[bench]]
 name = "cbor_codec"
 harness = false
+
+# WASM target dependencies — only pulled in when building for wasm32-unknown-unknown.
+# Native (`cargo build --workspace`) builds do not see any of these.
+#
+# Version note (deviation from tech-spec Decision 3 pinning):
+#   tech-spec.md pinned `wasm-bindgen = "=0.2.95"` and `wasm-bindgen-test = "=0.3.45"`,
+#   but `solana-sdk = "2.2"` transitively depends on `js-sys = "^0.3.77"`, which itself
+#   depends on `wasm-bindgen = "=0.2.100"`. The exact 0.2.95 pin is unsatisfiable in
+#   the current dependency graph. Bumped to 0.2.100 (the version forced by the
+#   transitive constraint) and matched `wasm-bindgen-test = 0.3.50` (compatible with
+#   0.2.100). Logged in work/mnemonic-integrations/decisions.md.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "=0.2.100"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+serde-wasm-bindgen = "0.6"
+# Two `getrandom` versions appear in the dependency graph (transitive via
+# solana-sdk + ahash). Each needs its WebCrypto backend enabled explicitly:
+#   - 0.2 → `js` feature
+#   - 0.3 → `wasm_js` feature
+# Without these, getrandom fails to compile (0.3) or panics at runtime (0.2).
+getrandom = { version = "0.2", features = ["js"] }
+getrandom_v03 = { package = "getrandom", version = "0.3", features = ["wasm_js"] }
+
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen-test = "=0.3.50"

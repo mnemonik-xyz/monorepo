@@ -4,6 +4,9 @@
 //! `mnemonic_core::codec::canonical::to_canonical_cbor` always produces
 //! identical bytes for the same input.
 
+// Native-only — proptest is gated to non-wasm32 dev-deps.
+#![cfg(not(target_arch = "wasm32"))]
+
 use mnemonic_core::codec::canonical::to_canonical_cbor;
 use mnemonic_core::codec::hash::hash_bytes;
 use mnemonic_core::codec::schema::MEMORY_V1;
