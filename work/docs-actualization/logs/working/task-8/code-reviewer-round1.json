@@ -1,0 +1,8 @@
+{
+  "task": 8,
+  "round": 1,
+  "reviewer": "code-reviewer",
+  "verdict": "approved",
+  "summary": "Commit f64dac6 scope is README.md only (+6/-0). A new '## Foundational research' H2 is inserted after the Introduction block, between hr separators, with a one-sentence summary and a relative link to docs/research/paper.pdf plus a pointer to docs/research/. Introduction copy unchanged. All acceptance criteria from task 8 verified: grep -A2 'Foundational research' returns the paper.pdf line; H2 count is exactly 1; total H2 headings is one greater than before; link is relative; PDF target file exists at docs/research/paper.pdf.",
+  "findings": []
+}

@@ -1,8 +1,8 @@
 feature: docs-actualization
 team_name: docs-actualization-team
 total_waves: 6
-last_completed_wave: 3
-next_wave: 4
+last_completed_wave: 4
+next_wave: 5
 status: in_progress
 started: "2026-04-27"
 notes: |
@@ -21,11 +21,11 @@ task_status:
   4: done
   5: done
   6: done
-  7: todo
-  8: todo
-  9: todo
-  10: todo
-  11: todo
+  7: done
+  8: done
+  9: done
+  10: done
+  11: done
   12: todo
   13: todo
   14: todo

@@ -157,3 +157,43 @@ Evergreen direction-of-travel hints surfaced during the docs-actualization featu
 6. **Lifecycle policy / eviction tuning** — append/merge/overwrite semantics, retention classes, and deletion semantics across local SQLite vs anchored full-mode storage. Ref: [docs/problems/MEMORY_EVICTION.md](../../docs/problems/MEMORY_EVICTION.md), [docs/WHITEPAPER.md](../../docs/WHITEPAPER.md) §13. _for further validation._
 7. **Economic model validation (Arweave pricing, x402 micropayments)** — refresh full-mode persistence cost calibration against current Arweave $/GB and validate the x402 micropayment path end-to-end against the live pricing engine. Ref: [docs/problems/ARWEAVE_PRICING_VALIDATION.md](../../docs/problems/ARWEAVE_PRICING_VALIDATION.md). _for further validation._
 8. **Critical review redo** — the upstream `CRITICAL_REVIEW.md` was outdated and intentionally not restored; a fresh critical review against the current Rust implementation is needed to retire or refute its findings. Ref: `sivo4kin/mnemonic-protocol@7a68a973:docs/CRITICAL_REVIEW.md` (not in this repo). _for further validation._
+
+---
+
+## Task 7 — Expand WHITEPAPER §9 + add §References paper.pdf
+
+**Status:** done · **Wave:** 4 · **Date:** 2026-04-27
+**Commit:** `654178d`
+**Summary:** Expanded `docs/WHITEPAPER.md` §9 from 4 to 10 subsections (one per use-case doc), each closing with `[See deep-dive in docs/usecases/<file>.md.]`; added 8th `## References` entry pointing to `./research/paper.pdf`.
+**Verify-smoke:** `grep -cE '^### 9\.' docs/WHITEPAPER.md` == 10 — pass; `./research/paper.pdf` link present — pass.
+**Reviewers:** code-reviewer round 1 approved.
+
+---
+
+## Task 8 — README.md Foundational research section
+
+**Status:** done · **Wave:** 4 · **Date:** 2026-04-27
+**Commit:** `f64dac6`
+**Summary:** Inserted `## Foundational research` H2 in repo `README.md` after the Introduction with one-sentence summary and relative link `docs/research/paper.pdf`. Introduction copy unchanged.
+**Verify-smoke:** `grep -A2 'Foundational research' README.md | grep 'docs/research/paper.pdf'` non-empty — pass.
+**Reviewers:** code-reviewer round 1 approved.
+
+---
+
+## Task 9 — PK project.md + architecture.md updates
+
+**Status:** done · **Wave:** 4 · **Date:** 2026-04-27
+**Commit:** `bc8cbd6`
+**Summary:** Added `## Use Case Roles` H2 (10 bulleted roles linking to `docs/usecases/<file>.md`) to `.claude/skills/project-knowledge/references/project.md`. Appended `## Further reading` to `.claude/skills/project-knowledge/references/architecture.md` linking `docs/competitive-landscape/`, `docs/research/condensed-principles.md`, and `docs/research/paper.pdf`. patterns.md untouched.
+**Verify-smoke:** both grep patterns matched — pass.
+**Reviewers:** code-reviewer round 1 approved (3 minor non-blocking nits noted).
+
+---
+
+## Task 11 — lychee CI workflow
+
+**Status:** done · **Wave:** 4 · **Date:** 2026-04-27
+**Commit:** `124e663`
+**Summary:** Created `.github/workflows/docs-link-check.yml`. Triggers on push to dev/main and pull_request, paths-filtered to `docs/**` and `*.md`. Single `lychee-link-check` job on `ubuntu-latest` using `actions/checkout@v4` + `lycheeverse/lychee-action@v2` with `--offline` and fail-on-broken-links. ci.yml untouched.
+**Verify-smoke:** `test -f .github/workflows/docs-link-check.yml` — pass. Local lychee run skipped (CLI not installed); CI will validate.
+**Reviewers:** code-reviewer round 1 approved (1 minor non-blocking redundancy nit).
