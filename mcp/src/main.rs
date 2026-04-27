@@ -599,6 +599,11 @@ async fn run_http(state: Arc<mcp::McpState>, host: &str, port: u16) -> anyhow::R
             get(oauth::authorize_init_handler).post(oauth::authorize_handler),
         )
         .route("/oauth/token", post(oauth::token_handler))
+        // RFC 7591 Dynamic Client Registration. Open registration: any client
+        // POSTs its redirect_uris and gets back a client_id. Required for VS
+        // Code / Claude.ai connector flows that abort with "DCR not supported"
+        // when registration_endpoint is missing from the metadata.
+        .route("/oauth/register", post(oauth::oauth_register_handler))
         .layer(GovernorLayer {
             config: oauth_governor_conf,
         })

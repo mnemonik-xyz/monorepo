@@ -714,6 +714,7 @@ pub async fn oauth_authorization_server_metadata() -> Response {
         "issuer": SERVER_ORIGIN,
         "authorization_endpoint": format!("{SERVER_ORIGIN}/oauth/authorize"),
         "token_endpoint": format!("{SERVER_ORIGIN}/oauth/token"),
+        "registration_endpoint": format!("{SERVER_ORIGIN}/oauth/register"),
         "response_types_supported": ["code"],
         "grant_types_supported": ["authorization_code"],
         "code_challenge_methods_supported": ["S256"],
@@ -732,6 +733,70 @@ pub async fn oauth_protected_resource_metadata() -> Response {
         "bearer_methods_supported": ["header"],
     });
     (StatusCode::OK, Json(body)).into_response()
+}
+
+/// `POST /oauth/register` — RFC 7591 Dynamic Client Registration.
+///
+/// Open registration: any client may register without authentication.
+/// We return a generated `client_id` and echo back the request fields.
+/// No `client_secret` is issued (we are a public OAuth client per
+/// `token_endpoint_auth_methods_supported: ["none"]`); MCP clients use PKCE
+/// (S256) for the auth-code flow instead of client authentication.
+///
+/// This endpoint exists so VS Code / Claude.ai do not stall at the
+/// "Dynamic Client Registration not supported" prompt — they POST the
+/// `redirect_uris` they intend to use (e.g., `http://127.0.0.1:33418`,
+/// `https://vscode.dev/redirect`, `https://claude.ai/...`) and we mint a
+/// `client_id` for them to use against `/oauth/authorize` and `/oauth/token`.
+///
+/// We do not persist registrations — `client_id` is opaque to us beyond
+/// participating in the canonical-CBOR challenge construction (Decision 10).
+/// A client that loses its `client_id` re-registers; replay risk is bounded
+/// by the per-`state` single-use guard already in place.
+pub async fn oauth_register_handler(body: axum::body::Bytes) -> Response {
+    // Parse request body opportunistically — most fields are echoed back as-is
+    // per RFC 7591. Tolerate empty / non-JSON bodies (return defaults).
+    let req: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+
+    let client_id = uuid::Uuid::new_v4().to_string();
+    let issued_at = chrono::Utc::now().timestamp();
+
+    // Echo back the registration metadata RFC 7591 §3.2.1 spec-mandates.
+    // Empty / missing fields use sane defaults.
+    let redirect_uris = req
+        .get("redirect_uris")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!([]));
+    let client_name = req
+        .get("client_name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("mcp-client")
+        .to_string();
+    let grant_types = req
+        .get("grant_types")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!(["authorization_code"]));
+    let response_types = req
+        .get("response_types")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!(["code"]));
+    let token_endpoint_auth_method = req
+        .get("token_endpoint_auth_method")
+        .and_then(|v| v.as_str())
+        .unwrap_or("none")
+        .to_string();
+
+    let resp = serde_json::json!({
+        "client_id": client_id,
+        "client_id_issued_at": issued_at,
+        "redirect_uris": redirect_uris,
+        "client_name": client_name,
+        "grant_types": grant_types,
+        "response_types": response_types,
+        "token_endpoint_auth_method": token_endpoint_auth_method,
+    });
+
+    (StatusCode::CREATED, Json(resp)).into_response()
 }
 
 // ── Bearer-auth middleware (Decision 9) ──────────────────────────────────────
