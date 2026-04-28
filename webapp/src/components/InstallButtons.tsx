@@ -1,7 +1,7 @@
 import { useState } from "react";
 
 /**
- * Three deeplink buttons for the supported AI tools.
+ * Four install entry points for the supported AI tools.
  *
  * Cursor + VS Code use their respective custom URI schemes — both encode the
  * MCP server config in the URL so the user lands directly in the
@@ -11,8 +11,16 @@ import { useState } from "react";
  * with copy-to-clipboard instructions for `Settings → Connectors → Add custom
  * connector`.
  *
+ * WindSurf's `windsurf://windsurf-mcp-registry?serverName=` deeplink only
+ * accepts entries from WindSurf's first-party MCP registry — it cannot encode
+ * an arbitrary remote HTTP MCP URL. Until Mnemonic is published to that
+ * registry, we mirror the Claude.ai modal: a copy-the-URL prompt that
+ * instructs the user to paste the JSON snippet into
+ * `~/.codeium/windsurf/mcp_config.json`.
+ * Reference: https://docs.windsurf.com/windsurf/cascade/mcp
+ *
  * The MCP HTTP endpoint is `https://mcp.mnemonik.xyz/mcp` (per smithery.yaml +
- * Decision 5). All three integrations point to the same endpoint and reuse the
+ * Decision 5). All four integrations point to the same endpoint and reuse the
  * same OAuth flow established in Task 4.
  */
 
@@ -57,19 +65,45 @@ function vscodeDeeplink(): string {
   return `vscode:mcp/install?${encodeURIComponent(JSON.stringify(config))}`;
 }
 
+// JSON snippet that goes into `~/.codeium/windsurf/mcp_config.json`. WindSurf
+// accepts either `serverUrl` or `url` for remote HTTP MCP entries; we use
+// `serverUrl` to match the WindSurf docs' canonical example. Pretty-printed
+// (2-space indent) so a paste into the user's config file produces a
+// readable diff.
+const WINDSURF_CONFIG_SNIPPET = JSON.stringify(
+  {
+    mcpServers: {
+      mnemonic: {
+        serverUrl: MCP_URL,
+      },
+    },
+  },
+  null,
+  2
+);
+
 interface InstallButtonsProps {
   onClaudeAiClick?: () => void;
+  onWindsurfClick?: () => void;
 }
 
 export default function InstallButtons({
   onClaudeAiClick,
+  onWindsurfClick,
 }: InstallButtonsProps) {
   const [showClaudeModal, setShowClaudeModal] = useState(false);
+  const [showWindsurfModal, setShowWindsurfModal] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [windsurfCopied, setWindsurfCopied] = useState(false);
 
   const handleClaudeAi = () => {
     setShowClaudeModal(true);
     onClaudeAiClick?.();
+  };
+
+  const handleWindsurf = () => {
+    setShowWindsurfModal(true);
+    onWindsurfClick?.();
   };
 
   const handleCopy = async () => {
@@ -77,6 +111,16 @@ export default function InstallButtons({
       await navigator.clipboard.writeText(MCP_HOST);
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
+    } catch {
+      // clipboard may be unavailable (HTTP, no user gesture) — ignore.
+    }
+  };
+
+  const handleCopyWindsurf = async () => {
+    try {
+      await navigator.clipboard.writeText(WINDSURF_CONFIG_SNIPPET);
+      setWindsurfCopied(true);
+      setTimeout(() => setWindsurfCopied(false), 2000);
     } catch {
       // clipboard may be unavailable (HTTP, no user gesture) — ignore.
     }
@@ -110,6 +154,14 @@ export default function InstallButtons({
           data-testid="install-claude-ai"
         >
           Add to Claude.ai
+        </button>
+        <button
+          type="button"
+          onClick={handleWindsurf}
+          className="rounded-md border border-text-muted/30 bg-white/5 px-4 py-3 text-left text-sm font-medium text-text-primary transition-colors hover:border-accent-primary hover:text-accent-primary focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-primary"
+          data-testid="install-windsurf"
+        >
+          Install in WindSurf
         </button>
       </div>
 
@@ -160,6 +212,63 @@ export default function InstallButtons({
               <button
                 type="button"
                 onClick={() => setShowClaudeModal(false)}
+                className="rounded-md border border-text-muted/30 px-4 py-2 text-sm text-text-primary transition-colors hover:border-accent-primary"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showWindsurfModal && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="windsurf-modal-title"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-background/80 px-4"
+        >
+          <div className="w-full max-w-md rounded-lg border border-text-muted/30 bg-background p-6 shadow-lg">
+            <h3
+              id="windsurf-modal-title"
+              className="text-base font-semibold text-text-primary"
+            >
+              Install in WindSurf
+            </h3>
+            <p className="mt-3 text-sm text-text-muted">
+              WindSurf&rsquo;s deeplink registry only accepts first-party
+              entries, so add Mnemonic by editing{" "}
+              <span className="font-mono text-text-primary">
+                ~/.codeium/windsurf/mcp_config.json
+              </span>{" "}
+              and pasting:
+            </p>
+            <div className="mt-4 rounded-md border border-text-muted/20 bg-white/5 px-3 py-2">
+              <pre
+                className="overflow-x-auto font-mono text-xs text-accent-primary"
+                data-testid="windsurf-config-snippet"
+              >
+                {WINDSURF_CONFIG_SNIPPET}
+              </pre>
+              <div className="mt-2 flex justify-end">
+                <button
+                  type="button"
+                  onClick={handleCopyWindsurf}
+                  className="shrink-0 rounded bg-accent-primary px-3 py-1 text-xs font-medium text-background transition-opacity hover:opacity-90"
+                  aria-label="Copy WindSurf config snippet"
+                >
+                  {windsurfCopied ? "Copied" : "Copy"}
+                </button>
+              </div>
+            </div>
+            <p className="mt-3 text-xs text-text-muted">
+              Reload WindSurf, then run any tool — Cascade prompts the OAuth
+              flow on the first call.
+            </p>
+            <div className="mt-5 flex justify-end">
+              <button
+                type="button"
+                onClick={() => setShowWindsurfModal(false)}
                 className="rounded-md border border-text-muted/30 px-4 py-2 text-sm text-text-primary transition-colors hover:border-accent-primary"
               >
                 Close

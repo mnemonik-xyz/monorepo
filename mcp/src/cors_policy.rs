@@ -25,6 +25,9 @@
 ///     `*.cursor.com`
 ///   - OpenAI: `https://chatgpt.com` + `*.chatgpt.com`,
 ///     `https://chat.openai.com`, `https://openai.com` + `*.openai.com`
+///   - WindSurf / Codeium: `https://windsurf.com` + `*.windsurf.com`,
+///     `https://codeium.com` + `*.codeium.com` (the Cascade web preview and
+///     Codeium dashboard share the OAuth surface)
 ///
 /// All entries are HTTPS-only — `http://` origins return `false` to keep
 /// production traffic on TLS. Subdomain suffix-matching preserves a leading
@@ -69,6 +72,8 @@ pub fn is_allowed_cors_origin(origin: &[u8]) -> bool {
         "chatgpt.com",
         "chat.openai.com",
         "openai.com",
+        "windsurf.com",
+        "codeium.com",
     ];
     if exact_allow.contains(&host) {
         return true;
@@ -82,6 +87,8 @@ pub fn is_allowed_cors_origin(origin: &[u8]) -> bool {
         ".cursor.com",
         ".chatgpt.com",
         ".openai.com",
+        ".windsurf.com",
+        ".codeium.com",
     ];
     suffix_allow.iter().any(|suf| host.ends_with(suf))
 }
@@ -110,6 +117,14 @@ mod tests {
         assert!(is_allowed_cors_origin(b"https://chatgpt.com"));
         assert!(is_allowed_cors_origin(b"https://chat.openai.com"));
         assert!(is_allowed_cors_origin(b"https://platform.openai.com"));
+    }
+
+    #[test]
+    fn allows_windsurf_and_codeium() {
+        assert!(is_allowed_cors_origin(b"https://windsurf.com"));
+        assert!(is_allowed_cors_origin(b"https://app.windsurf.com"));
+        assert!(is_allowed_cors_origin(b"https://codeium.com"));
+        assert!(is_allowed_cors_origin(b"https://www.codeium.com"));
     }
 
     #[test]

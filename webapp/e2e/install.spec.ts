@@ -7,8 +7,9 @@ import { mcpBase } from "./_helpers";
  *   - Clicking "Generate keypair" runs the WASM `generate_keypair`,
  *     persists `mnemonic.identity` to localStorage, and renders the
  *     base58 pubkey
- *   - The Cursor / VS Code / Claude.ai install buttons emit deeplinks
- *     in the formats the respective clients accept (per
+ *   - The Cursor / VS Code / Claude.ai / WindSurf install buttons emit
+ *     deeplinks (or, for Claude.ai + WindSurf, modal copy-paste flows) in
+ *     the formats the respective clients accept (per
  *     `InstallButtons.tsx::cursorDeeplink/vscodeDeeplink`)
  */
 
@@ -91,6 +92,30 @@ test.describe("/install page", () => {
     // Must include scheme — Claude.ai rejects bare hostnames in
     // "Add custom connector" with "Invalid connector URL".
     expect(pasteUrl?.trim()).toMatch(/^https:\/\/mcp\.[\w.-]+\/mcp$/);
+
+    // WindSurf — no deeplink for custom remote MCPs (the
+    // `windsurf://windsurf-mcp-registry?serverName=` scheme is registry-only).
+    // The control is a <button> (not an anchor) and clicking it opens a modal
+    // with the JSON snippet for `~/.codeium/windsurf/mcp_config.json`. The
+    // browser must NOT navigate away when clicked.
+    const windsurfBtn = page.getByTestId("install-windsurf");
+    await expect(windsurfBtn).toHaveJSProperty("tagName", "BUTTON");
+    await expect(windsurfBtn).not.toHaveAttribute("href", /.+/);
+    const urlBeforeClick = page.url();
+    await windsurfBtn.click();
+    expect(page.url()).toBe(urlBeforeClick);
+
+    const snippet = await page
+      .getByTestId("windsurf-config-snippet")
+      .textContent();
+    const parsedWindsurf = JSON.parse(snippet ?? "{}");
+    expect(parsedWindsurf).toEqual({
+      mcpServers: {
+        mnemonic: {
+          serverUrl: expect.stringMatching(/^https:\/\/mcp\.[\w.-]+\/mcp$/),
+        },
+      },
+    });
   });
 });
 

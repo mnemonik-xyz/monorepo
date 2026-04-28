@@ -4,7 +4,7 @@ import InstallButtons from "../components/InstallButtons";
 
 /**
  * Install hub (`/install`). Two columns on desktop, stacked on mobile:
- *   - Install buttons (Cursor / VS Code / Claude.ai).
+ *   - Install buttons (Cursor / VS Code / Claude.ai / WindSurf).
  *   - Identity panel (Generate / Import / Export keypair).
  */
 export default function Install() {
@@ -48,7 +48,7 @@ export default function Install() {
             OAuth, which signs the request with the local Ed25519 secret.
           </p>
 
-          <div className="grid gap-4 md:grid-cols-3">
+          <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
             <article className="rounded-md border border-text-muted/20 bg-white/5 p-4">
               <h3 className="text-sm font-semibold text-accent-primary">
                 Cursor
@@ -112,6 +112,32 @@ export default function Install() {
                 </li>
                 <li>3. Paste the URL and submit.</li>
                 <li>4. Complete OAuth and approve the connector.</li>
+              </ol>
+            </article>
+
+            <article className="rounded-md border border-text-muted/20 bg-white/5 p-4">
+              <h3 className="text-sm font-semibold text-accent-primary">
+                WindSurf
+              </h3>
+              <ol className="mt-2 space-y-1 text-sm text-text-muted">
+                <li>
+                  1. Click{" "}
+                  <span className="text-text-primary">Install in WindSurf</span>{" "}
+                  above and copy the JSON snippet.
+                </li>
+                <li>
+                  2. Open{" "}
+                  <span className="font-mono text-text-primary">
+                    ~/.codeium/windsurf/mcp_config.json
+                  </span>{" "}
+                  and merge it into{" "}
+                  <span className="font-mono text-text-primary">
+                    mcpServers
+                  </span>
+                  .
+                </li>
+                <li>3. Reload WindSurf so Cascade picks up the new server.</li>
+                <li>4. Complete OAuth on the first tool call.</li>
               </ol>
             </article>
           </div>
