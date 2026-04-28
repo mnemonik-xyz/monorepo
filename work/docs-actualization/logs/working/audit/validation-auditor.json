@@ -1,0 +1,88 @@
+{
+  "task": 14,
+  "auditor": "validation-auditor",
+  "verdict": "issues_found",
+  "summary": "Validation evidence is substantively complete and reproducible. All 6 token-replace overrides are logged with before/after pairs in code-research.md §4.3 (verdict table) and §4.4/§4.5 (post-promotion logs); spot-checks against commits d8df681 and eacb6ff and the on-disk lines confirm the claims. The lychee CI workflow paths-filter, --offline flag, fail-on-broken-links, and pinned action versions all match Decision 5 / tech-spec acceptance criteria. The decisions.md follow-up roadmap has the required Browser-WASM sub-section + 8 numbered bullets each tagged 'for further validation'. Two non-blocking gaps remain that Task 15 QA must close before merge: (a) recovered/README.md still lacks the required 'Promoted on YYYY-MM-DD in commit <hash>' line and still describes itself as 'working drafts, not yet promoted' with 'pending Wave 3' annotations on three rows — these claims have been falsified by Wave 3 completion; (b) the tech-spec sanity-grep regression command (Testing Strategy §Integration tests and AVP step 5) targets 'docs/ README.md' but the term set in tech-spec lacks 'mcp-server.py', which IS in code-research.md §4 and the user-spec acceptance pattern omits it too. Minor drift, not breaking — both grep variants currently return zero hits — but worth aligning so a future agent reproduces the same scan. One additional forward note: lychee workflow uses glob 'docs/**/*.md' which silently skips PDFs and the workflow filename's '*.md' top-level paths filter does not match nested paths like 'core/foo.md' (intended; matches user-spec scope). Future agents can reproduce all verifications using the documented commands plus the `git show <hash>` references in decisions.md.",
+  "findings": [
+    {
+      "id": "F1",
+      "severity": "minor",
+      "dimension": "code-research.md per-hit table completeness",
+      "title": "Per-hit table and §4.4/§4.5 promotion logs complete and accurate",
+      "evidence": "code-research.md §4.3 contains 6 rows covering DRAG_ANALYSIS:37, WEB_RESEARCH:45/64/132, CONCURRENT_WRITERS:157/217 — each tagged `replace-token` (one as `delete-line`, one as `delete-tokens`). §4.4 logs 4 promotion entries (Task 4 / commit d8df681). §4.5 logs 2 promotion entries (Task 6 / commit eacb6ff). `grep -c 'replace-token' code-research.md` ≥ 6 per Task 2 verify-smoke. No missing term-set hits; cross-check against current code reported zero false negatives (only the expected sha384 Arweave deep-hash false positive).",
+      "verdict": "complete",
+      "remediation": "None."
+    },
+    {
+      "id": "F2",
+      "severity": "info",
+      "dimension": "Token-replace before/after log accuracy (spot-check)",
+      "title": "Spot-checked entries match the actual diff and on-disk content",
+      "evidence": "Line 45 of docs/competitive-landscape/WEB_RESEARCH_TRUSTLESS_RAG.md = `| Status | active Rust MCP server | Live (Kinic-CLI shipped) |` (matches §4.4 Entry 2 'after'). Line 64 = `- Mnemonic commits the memory blob; V3DB proves the retrieval result` (matches Entry 3 'after'). Line 132 = `| Mnemonic | Memory integrity (hash) | ✅ 4/8-bit | ✅ | Arweave+Solana | v1.0 (active) |` (matches Entry 4 'after'). Line 157 of docs/problems/CONCURRENT_WRITERS.md contains `each blake3 hash = 64 hex chars` (matches §4.5 Entry 5 'after'). Line 217 contains `blake3(canonical CBOR bytes)` (matches Entry 6 'after'). Line 37 of DRAG_ANALYSIS.md is blank with surrounding context preserved (line 36 = `D-RAG records: source reliability scores via smart contracts.`, line 38 = `Both systems are cheap to run on-chain ...`) — confirms the delete-line variant of Entry 1. Commit d8df681 message lists all 4 replacements. Commit eacb6ff message lists the 2 problems replacements. Sanity regression `grep -RIE 'SHA3|mcp-server-rs|pre-V1|Pre-V1|HashEmbedder|Python backend' docs/ README.md` returns exit 1 (zero matches).",
+      "verdict": "accurate",
+      "remediation": "None."
+    },
+    {
+      "id": "F3",
+      "severity": "info",
+      "dimension": "lychee workflow correctness",
+      "title": "Workflow matches Decision 5 and tech-spec acceptance criteria",
+      "evidence": ".github/workflows/docs-link-check.yml: triggers on push to dev/main and pull_request; paths filter includes 'docs/**', '*.md', and the workflow file itself; uses concurrency cancel-in-progress; runs lycheeverse/lychee-action@v2 (pinned tag) with `--offline --no-progress 'docs/**/*.md' 'README.md' 'docs/WHITEPAPER.md'` and `fail: true` (== fail-on-broken-links). actions/checkout pinned at @v4. Single ubuntu-latest job named lychee-link-check.",
+      "verdict": "correct",
+      "remediation": "Optional follow-up only: Tech-spec Testing Strategy invokes lychee with bare positional args `docs/ README.md docs/WHITEPAPER.md`, while the workflow uses the more precise glob `docs/**/*.md`. Both forms exit 0 against the current tree, but documenting the canonical form in tech-spec for QA reproducibility would prevent future drift."
+    },
+    {
+      "id": "F4",
+      "severity": "minor",
+      "dimension": "Sanity-grep regression command alignment",
+      "title": "Sanity-grep term set drift between tech-spec, user-spec, and code-research.md",
+      "evidence": "code-research.md §4 final term set: `SHA3|SHA-3|sha3|mcp-server-rs|pre-V1|Pre-V1|HashEmbedder|Python backend|mcp-server\\.py` (9 patterns). Tech-spec Testing Strategy §Integration tests and AVP step 5: `SHA3|mcp-server-rs|pre-V1|Pre-V1|HashEmbedder|Python backend` (6 patterns) — drops `SHA-3`, `sha3` (lowercase), and `mcp-server.py`. User-spec acceptance criterion §4.4: same 6 patterns. The drift is silent because none of the dropped terms currently appear in `docs/` or `README.md`, but a future agent reproducing the scan from tech-spec alone gets a narrower sweep than the one this feature actually used.",
+      "verdict": "drift",
+      "remediation": "Suggest a Task 15 QA touch-up: in tech-spec.md Testing Strategy and AVP step 5 (and ideally in user-spec.md acceptance criteria) widen the regex to match code-research.md §4: `SHA3|SHA-3|sha3|mcp-server-rs|pre-V1|Pre-V1|HashEmbedder|Python backend|mcp-server\\.py`. Non-blocking — current state passes both forms."
+    },
+    {
+      "id": "F5",
+      "severity": "major",
+      "dimension": "recovered/README.md promotion note (Task 15 forward action)",
+      "title": "Required 'Promoted on YYYY-MM-DD in commit <hash>' line not yet present; staleness annotations remain",
+      "evidence": "Tech-spec acceptance criterion: `recovered/README.md top section gains 'Promoted on YYYY-MM-DD in commit `<hash>`' line`. User-spec audit-trail criterion: `recovered/README.md обновлён: 'Promoted on 2026-04-XX in commit <hash>'`. Current state of .claude/skills/project-knowledge/recovered/README.md line 2: `**Status:** working drafts, not yet promoted to public docs/.` and rows for DRAG_ANALYSIS / WEB_RESEARCH still say `(token replacements pending Wave 3)`, despite Wave 3 (Tasks 4, 5, 6) being complete in commits 82704c7, d8df681, eacb6ff. Documentation Auditor (Task 12) flagged the same condition as 'scheduled for normalization in Task 15 (QA)'. This audit confirms the line is still missing as of Task 14.",
+      "verdict": "forward action item",
+      "remediation": "Task 15 (pre-deploy QA) must (a) flip the top-of-file Status line to 'Promoted on 2026-04-27 in commit <merge-hash>' (replace placeholder with the actual feature merge commit, or fall back to the latest Task-15 commit hash if not yet merged); (b) update the three 'pending Wave 3' annotations in the per-document table to reflect the applied state and link to the docs/ destination. Both are explicit acceptance criteria — failing to land them blocks pre-deploy QA sign-off."
+    },
+    {
+      "id": "F6",
+      "severity": "info",
+      "dimension": "decisions.md follow-up roadmap completeness",
+      "title": "Browser-WASM sub-section + 8 numbered bullets present and well-structured",
+      "evidence": "decisions.md §`Follow-up roadmap items` opens at line 127. Browser-WASM verification UI sub-section contains all 5 required parts: Problem (1 paragraph), Proposed Approach (1 paragraph), Dependencies (2 bullets), Open Questions (5 bullets), Source-doc refs (3 links). `Open follow-ups (8)` lists encryption, ZK proofs, shared namespaces, reliability oracle, compressed shadow-index recall, lifecycle policy, economic model validation, critical review redo — each 1-2 sentences with at least one source-doc ref and a `for further validation` italic tag. Order matches code-research.md §9 mapping. `grep -E 'Follow-up roadmap items|Browser-WASM verification UI|for further validation' decisions.md` matches all 3 patterns (AVP step 11).",
+      "verdict": "complete",
+      "remediation": "None."
+    },
+    {
+      "id": "F7",
+      "severity": "info",
+      "dimension": "Verifiability for future agents",
+      "title": "All verifications reproducible from documented evidence",
+      "evidence": "code-research.md §3 documents the restoration command pattern. §4.2 includes the executable sanity-grep command. §4.4/§4.5 quote the exact 'after' lines for every replacement. decisions.md per-task entries cite specific commit hashes (584001f, 39946a4, 6387f69, 21ac4a1, 4e9d929, 8ed0b6c, 82704c7, d8df681, eacb6ff, 654178d, f64dac6, bc8cbd6, 124e663). tech-spec AVP gives 15 numbered verification steps with concrete bash commands. A future agent can: re-run sanity-grep, `wc -c` the PDFs against upstream `git show ... | wc -c` byte counts, `cmp` the recovered/ vs docs/ research PDFs, re-execute lychee workflow locally, and cross-check the §4.3 verdict table against the docs/ tree via `awk 'NR==<line>' <file>`. All these checks succeed against current HEAD.",
+      "verdict": "reproducible",
+      "remediation": "None."
+    }
+  ],
+  "checks_run": [
+    "Read code-research.md (§4.3 verdict table, §4.4 Task 4 promotion log with 4 entries, §4.5 Task 6 promotion log with 2 entries)",
+    "Read tech-spec.md Testing Strategy, Agent Verification Plan, Decision 7, Decision 5",
+    "Read user-spec.md acceptance criteria (Validation, Audit trail blocks)",
+    "Read decisions.md (Tasks 1–13 entries; Follow-up roadmap items section incl. Browser-WASM sub-section)",
+    "Read .github/workflows/docs-link-check.yml (verified paths filter, --offline, fail: true, action versions @v4 / @v2)",
+    "Read .claude/skills/project-knowledge/recovered/README.md (verified absence of 'Promoted on' line + 'pending Wave 3' staleness)",
+    "git show 654178d --stat (WHITEPAPER expansion commit; 45 insertions / 8 deletions across docs/WHITEPAPER.md)",
+    "git show d8df681 -- docs/competitive-landscape/{WEB_RESEARCH_TRUSTLESS_RAG,DRAG_ANALYSIS}.md (commit message lists all 4 token replacements)",
+    "git show eacb6ff -- docs/problems/CONCURRENT_WRITERS.md (commit message documents 2 SHA3-era replacements aligned with shipped blake3-over-CBOR)",
+    "Spot-check on-disk line 45 / 64 / 132 of docs/competitive-landscape/WEB_RESEARCH_TRUSTLESS_RAG.md against §4.4 Entries 2/3/4",
+    "Spot-check on-disk line 157 / 217 of docs/problems/CONCURRENT_WRITERS.md against §4.5 Entries 5/6",
+    "Spot-check on-disk line 37 (and surrounding 33–42) of docs/competitive-landscape/DRAG_ANALYSIS.md confirming delete-line for Entry 1",
+    "Sanity-grep regression: `grep -RIE 'SHA3|mcp-server-rs|pre-V1|Pre-V1|HashEmbedder|Python backend' docs/ README.md` returns exit 1 (zero hits)",
+    "Cross-checked sanity-grep term set drift: code-research.md §4 (9 patterns) vs tech-spec Testing Strategy §Integration tests + AVP step 5 (6 patterns) vs user-spec criterion §4.4 (6 patterns)",
+    "Validated audit working directory contents (documentation-auditor.json, security-auditor.json present; this report extends with validation-auditor.json)"
+  ]
+}

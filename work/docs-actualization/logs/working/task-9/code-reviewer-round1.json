@@ -1,0 +1,51 @@
+{
+  "task": 9,
+  "round": 1,
+  "reviewer": "code-reviewer",
+  "verdict": "approved",
+  "summary": "Commit bc8cbd6 cleanly delivers Task 9 scope: project.md gains a `## Use Case Roles` H2 with 10 correctly-named bullets (each linking to docs/usecases/<file>.md via ../../../../docs/usecases/<file>.md) and architecture.md gets a `## Further reading` section pointing to docs/competitive-landscape/, docs/research/condensed-principles.md, and docs/research/paper.pdf. patterns.md is untouched. All relative links resolve on disk (4-up from .claude/skills/project-knowledge/references/ lands at repo root). All Task 9 acceptance criteria pass: AC1 grep returns 12 lines (>=11), AC2 grep non-empty, AC3 file ends with `## Further reading`, AC4 patterns.md diff is 0 lines, AC5 single commit with the prescribed conventional-commit form (chore vs docs scope is a minor variance from spec wording but acceptable).",
+  "findings": [
+    {
+      "severity": "minor",
+      "dimension": "cross-file consistency",
+      "location": ".claude/skills/project-knowledge/references/project.md",
+      "issue": "Tech-spec / task description says insert the Use Case Roles section after 'Key Features'; the commit inserts it after 'Core Problem' (between Core Problem and MVP Scope). The section is present, well-structured, and discoverable, so this is a placement nit rather than a correctness issue.",
+      "recommendation": "Optional: relocate the `## Use Case Roles` block to immediately follow the `## Key Features` H2 if strict adherence to task instruction is desired. Not blocking."
+    },
+    {
+      "severity": "minor",
+      "dimension": "scope",
+      "location": ".claude/skills/project-knowledge/references/architecture.md",
+      "issue": "The `## Further reading` block adds a third bullet pointing to docs/research/paper.pdf, which is not explicitly required by Task 9's two-pointer instruction (competitive-landscape + condensed-principles). The link is valid and the addition is coherent with the docs-actualization feature's foundational-paper theme (Decision 6, Task 7/8), so it improves discoverability.",
+      "recommendation": "Accept as a small enhancement; if a reviewer wants strict scope minimalism the third bullet could be removed, but keeping it is consistent with WHITEPAPER §References and README's Foundational research section being added in the same wave."
+    },
+    {
+      "severity": "minor",
+      "dimension": "convention",
+      "location": "commit message",
+      "issue": "Task 9 prescribes `chore(pk): update project-knowledge references`; actual commit subject is `docs(pk): add Use Case Roles to project.md + competitive/research pointers to architecture.md`. The `docs(pk):` scope is arguably more accurate for a pure docs change and the subject is more descriptive, so this is a positive deviation but still a deviation from the AC's exact-string expectation.",
+      "recommendation": "No change required; the conventional-commit type/scope is appropriate. Note for AC bookkeeping in pre-deploy QA."
+    },
+    {
+      "severity": "minor",
+      "dimension": "readability",
+      "location": "both files",
+      "issue": "Each bullet duplicates the file path as the link text (e.g. `[docs/usecases/shared-memory-layer.md](../../../../docs/usecases/shared-memory-layer.md)`). On GitHub web the relative target is fine, but the link text is the literal repo-root path while the href is a relative `../../../../` path — mildly redundant.",
+      "recommendation": "Optional: shorten link text to the filename or use a friendlier label. Not blocking; current form is unambiguous."
+    },
+    {
+      "severity": "minor",
+      "dimension": "correctness",
+      "location": ".claude/skills/project-knowledge/references/architecture.md (paper.pdf link)",
+      "issue": "Bonus paper.pdf link relies on Wave 3 Task 5 having promoted docs/research/paper.pdf. Verified locally that the file exists (cmp-equal restoration). Behavior on GitHub web for relative links to PDFs is supported.",
+      "recommendation": "No action required; documenting that the dependency is satisfied at HEAD."
+    }
+  ],
+  "verifications_run": [
+    "git show bc8cbd6 --stat: confirmed scope is project.md (+17) and architecture.md (+8), patterns.md untouched.",
+    "Path resolution: from .claude/skills/project-knowledge/references/ the prefix ../../../../ lands at repo root; ls of all 10 usecase targets, docs/competitive-landscape/, docs/research/condensed-principles.md, docs/research/paper.pdf all succeed.",
+    "AC grep on project.md returned 12 lines (heading + 10 bullets + 1 in-line phrase) >= 11.",
+    "AC grep on architecture.md returned non-empty for both required tokens.",
+    "git diff main vs HEAD for patterns.md: empty (0 lines)."
+  ]
+}

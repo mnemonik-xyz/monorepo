@@ -1,0 +1,42 @@
+{
+  "task": 13,
+  "auditor": "security-auditor",
+  "verdict": "clean",
+  "summary": "Full-coverage secret scan of all restored documentation (50 files: 26 in docs/, 24 in .claude/skills/project-knowledge/recovered/, including 4 PDF copies — 2 unique PDFs extracted with pdftotext) found zero secrets, zero API keys, zero private keys, zero internal infrastructure references, and zero accidentally-captured sensitive material. The single Solana base58 string detected (`MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr` in agent-identity.txt:156) is the public Solana SPL Memo program ID — a well-known on-chain program address with no associated private key, intentionally cited as a protocol primitive. All HTTP(S) URLs encountered are public references (arxiv, GitHub, W3C, Ethereum/Solana docs, HuggingFace public datasets, anthropic.com, x402.org, blog/research sites). The single `https://api.mainnet-beta.solana.com` endpoint in agent-identity PDF is the public Solana mainnet RPC (a documented config example, not infra). Token-replacement focus areas (DRAG_ANALYSIS, WEB_RESEARCH_TRUSTLESS_RAG, CONCURRENT_WRITERS, ARWEAVE_PRICING_VALIDATION) contain no hard-coded keys/addresses, no redacted-looking strings, no env-var assignments, no PEM headers, no Telegram bot tokens, no AWS/Cloudflare/GitHub/Anthropic/OpenAI/HuggingFace tokens. PDFs scanned via pdftotext (poppler 26.01.0).",
+  "findings": [],
+  "checks_run": [
+    "OpenAI/Anthropic/HuggingFace API key prefixes (sk-..., sk-ant-..., hf_...)",
+    "Telegram bot token pattern ([0-9]{8,10}:[A-Za-z0-9_-]{35})",
+    "AWS access keys (AKIA[0-9A-Z]{16})",
+    "PEM private-key headers (-----BEGIN .* PRIVATE KEY-----)",
+    "Bitcoin/HD extended private keys (xprv...)",
+    "GitHub tokens (ghp_/gho_/ghu_/ghs_/ghr_)",
+    "Google API keys (AIza...)",
+    "JWT tokens (eyJ...)",
+    "Solana base58 keypair-like strings (43-44 char [1-9A-HJ-NP-Za-km-z])",
+    "Solana keypair JSON byte arrays (8+ comma-separated u8s)",
+    ".env-style env-var assignments (^[A-Z_]{3,}=...)",
+    "Generic password/secret/token/api_key/auth_token/private_key assignments (case-insensitive)",
+    "Internal hostnames / RFC1918 IPs (.internal, .local, .corp, .lan, 10.x, 192.168.x, 172.16-31.x)",
+    "Redacted-looking placeholders (REDACTED, *****, xxxxx, XXXX)",
+    "64-char hex strings (raw blake3/sha256 hashes embedded inline)",
+    "All HTTP(S) URLs reviewed for internal infrastructure",
+    "PDF text extraction via pdftotext (paper.pdf 2266 lines, Agent-Identity.pdf 405 lines)",
+    "Focused review of competitive-landscape tables (DRAG_ANALYSIS, WEB_RESEARCH_TRUSTLESS_RAG)",
+    "Focused review of problems/ (CONCURRENT_WRITERS, ARWEAVE_PRICING_VALIDATION)"
+  ],
+  "stats": {
+    "files_scanned": 50,
+    "pdfs_scanned": 2,
+    "secret_candidates_found": 1,
+    "secret_candidates_confirmed_real": 0,
+    "secret_candidates_explained_as_public_data": 1
+  },
+  "notes": [
+    "pdftotext was available (poppler 26.01.0 at /opt/homebrew/bin/pdftotext) — both PDFs extracted to text and grepped against the full pattern set; no WARN-skip required.",
+    "The 1 secret-shaped match was MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr — public Solana SPL Memo program ID, documented in https://spl.solana.com/memo. No remediation required.",
+    "PDFs are byte-equal in docs/research/ and recovered/research/ (cmp passed in Task 5 verify-smoke), so scanning the docs/ copies plus extracted text covers both trees for binary-embedded secrets.",
+    "No .env files, no Cargo.toml, no source-code paths under audit (per Decision 7 — docs-only feature; core/, mcp/, webapp/ untouched).",
+    "Recovered/README.md and the 4 docs/<subdir>/README.md files were also covered by the recursive grep — no findings."
+  ]
+}

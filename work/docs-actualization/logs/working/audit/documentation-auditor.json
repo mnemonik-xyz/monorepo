@@ -1,0 +1,63 @@
+{
+  "task": 12,
+  "auditor": "documentation-auditor",
+  "verdict": "issues_found",
+  "summary": "All link integrity, README presence, WHITEPAPER §9 cross-references, PK references, and the sanity-grep regression pass cleanly. Two minor findings: recovered/README.md still claims 'working drafts, not yet promoted' and lacks the 'Promoted on YYYY-MM-DD' line that QA Task 15 must populate; research/ subdir mixes UPPER_SNAKE_CASE and kebab-case filenames (preserved verbatim from upstream — acceptable). No blocking or major issues.",
+  "findings": [
+    {
+      "severity": "minor",
+      "file": ".claude/skills/project-knowledge/recovered/README.md",
+      "line": 3,
+      "issue": "Status line still reads 'working drafts, not yet promoted to public docs/' even though Wave 3 (Tasks 3-6) has already promoted all four subdirs into docs/. The acceptance criterion in tech-spec.md ('Promoted on YYYY-MM-DD in commit <hash>' line) and Verify-smoke step 13 (`grep 'Promoted on' .claude/skills/project-knowledge/recovered/README.md`) are not yet satisfied.",
+      "suggestion": "Task 15 (pre-deploy QA) is the planned moment to add the 'Promoted on 2026-04-27 in commit <hash>' line and update the Status field. Confirm this is wired into the QA checklist; flagging here so QA does not miss it."
+    },
+    {
+      "severity": "minor",
+      "file": ".claude/skills/project-knowledge/recovered/README.md",
+      "line": 25,
+      "issue": "Layout tree still shows 'token replacements pending Wave 3' annotations on DRAG_ANALYSIS.md and WEB_RESEARCH_TRUSTLESS_RAG.md, and the validation-status table still lists 'Pending: ... token replacements during promotion' for those two files. Wave 3 Tasks 4 and 6 are already done (commits d8df681, eacb6ff) and the replacements are applied in docs/. The recovered/ tree still holds the un-replaced sources (correct, by design — recovered/ is audit trail), but the README annotations now read as stale forward-looking statements.",
+      "suggestion": "Either let Task 15 normalize these annotations together with the 'Promoted on' line, or re-word them to past tense ('token replacements applied during promotion in commit d8df681 / eacb6ff'). Non-blocking — recovered/ still functions as audit trail."
+    },
+    {
+      "severity": "nit",
+      "file": "docs/research/",
+      "line": null,
+      "issue": "File naming convention is mixed in this subdir: TURBOQUANT_DEEP_ANALYSIS.md (UPPER_SNAKE_CASE) coexists with apply-to-agent-memory-architecture.md and condensed-principles.md (kebab-case). The other three subdirs are uniform (usecases/ all kebab-case; competitive-landscape/ and problems/ all UPPER_SNAKE_CASE).",
+      "suggestion": "Acceptable as-is — promotion was verbatim per user-spec policy and renaming would break upstream provenance. If consistency is desired later, rename in a follow-up chore that updates references in research/README.md and PK architecture.md (which links docs/research/condensed-principles.md, the kebab-case file)."
+    },
+    {
+      "severity": "nit",
+      "file": "docs/usecases/README.md",
+      "line": null,
+      "issue": "The README lists each use-case file as inline-code text (e.g. `shared-memory-layer.md`) without making them clickable Markdown links. Other subfolder READMEs (problems/README.md, research/README.md) wrap filenames in real `[label](./file.md)` links. Inconsistent reader experience on GitHub web rendering.",
+      "suggestion": "Optional: convert each `filename.md` bullet to `[filename.md](./filename.md)` to match problems/README.md and research/README.md conventions and improve navigability. Pure cosmetic; no link-integrity impact since nothing currently links to these as URLs."
+    },
+    {
+      "severity": "nit",
+      "file": "docs/competitive-landscape/README.md",
+      "line": null,
+      "issue": "Same as usecases/README.md — files listed in bold (`**DECENTRALIZED_RAG_LANDSCAPE.md**`) without clickable links. Inconsistent with problems/README.md style.",
+      "suggestion": "Optional: convert bold filenames to `[**FILE.md**](./FILE.md)` for clickability. Cosmetic only."
+    }
+  ],
+  "checks_run": [
+    "link-integrity",
+    "readme-presence",
+    "naming-consistency",
+    "whitepaper-section9-deepdive-targets",
+    "pk-references-resolution",
+    "recovered-readme-accuracy",
+    "sanity-grep-regression"
+  ],
+  "stats": {
+    "links_checked": 28,
+    "broken_links": 0,
+    "subdirs_with_readme": 4,
+    "subdirs_total": 4,
+    "whitepaper_deepdive_refs": 10,
+    "whitepaper_deepdive_targets_resolved": 10,
+    "pk_links_resolved": 13,
+    "pk_links_broken": 0,
+    "sanity_grep_hits": 0
+  }
+}

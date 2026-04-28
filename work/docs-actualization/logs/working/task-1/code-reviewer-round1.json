@@ -1,0 +1,65 @@
+{
+  "task": 1,
+  "round": 1,
+  "reviewer": "code-reviewer",
+  "verdict": "changes_requested",
+  "summary": "Task 1 restoration is mechanically correct: all 11 files (9 .md + 2 PDF) are byte-verbatim identical to sivo4kin/mnemonic-protocol@docs/usecases (HEAD 7a68a973a37fb0cc4df548bf13e0687f4ff2b39c, confirmed). paper.pdf is exactly 861881 bytes as the AC requires; the Agent-Identity PDF is byte-equal to upstream. Three of four commits include the required 7a68a973 hash pin. New subdirs (problems/, plus filling competitive-landscape/ and research/) are populated. recovered/README.md was extended with new layout entries, validation rows for problems/* and both PDFs, and a 'Dropped per owner decision' section listing both MCP_SERVER_BACKEND_FEATURES_COMPARISON.md and CRITICAL_REVIEW.md. However, the README extension contains internal inconsistencies that contradict Decision 2 in tech-spec and misstate the current state of the staging area: (a) the Layout block and the validation table still carry MCP_SERVER_BACKEND_FEATURES_COMPARISON.md as a recovered/ARCHIVED artifact, but per owner decision that file was never restored to the tree (verified: not in recovered/competitive-landscape/); (b) the Next-steps block still references docs/historical/MCP_SERVER_BACKEND_FEATURES_COMPARISON.md as a promotion destination, contradicting the explicit 'docs/historical/ is not created' constraint; (c) a few validation-table rows (DRAG_ANALYSIS, WEB_RESEARCH, problems/*, both PDFs) describe Wave-3 promotion outcomes ('Promoted to docs/problems/...', 'Edited: ... corrections applied') that have not happened yet — Task 1 only restored verbatim. These should be tightened to keep the staging README a faithful snapshot of what Task 1 actually did, leaving promotion claims to Wave 3. Restoration content itself is approved; the README is the only file with issues.",
+  "findings": [
+    {
+      "severity": "major",
+      "file": ".claude/skills/project-knowledge/recovered/README.md",
+      "line": 27,
+      "issue": "Layout diagram still lists 'MCP_SERVER_BACKEND_FEATURES_COMPARISON.md <- ARCHIVED' under competitive-landscape/, but per tech-spec Decision 2 this file is dropped entirely (not restored, not archived). The file is in fact NOT present in recovered/competitive-landscape/ (only DRAG_ANALYSIS.md, WEB_RESEARCH_TRUSTLESS_RAG.md, DECENTRALIZED_RAG_LANDSCAPE.md, README.md). The layout block misrepresents the working tree.",
+      "suggestion": "Remove the MCP_SERVER... line from the layout diagram. Optionally replace it with a brief comment line noting the file was intentionally dropped, or rely on the new 'Dropped per owner decision' section below for that fact."
+    },
+    {
+      "severity": "major",
+      "file": ".claude/skills/project-knowledge/recovered/README.md",
+      "line": 48,
+      "issue": "Validation-status table still has a row 'competitive-landscape/MCP_SERVER_BACKEND_FEATURES_COMPARISON.md | Archive header added; ... | Keep as historical reference'. This contradicts the new 'Dropped per owner decision' section and tech-spec Decision 2. It also implies the file is in the tree, which it is not.",
+      "suggestion": "Delete this table row. The 'Dropped per owner decision' section already records the decision; the validation table should only list files that were actually restored."
+    },
+    {
+      "severity": "major",
+      "file": ".claude/skills/project-knowledge/recovered/README.md",
+      "line": 66,
+      "issue": "'Next steps' item 2 still suggests promoting MCP_SERVER... to 'docs/historical/MCP_SERVER_BACKEND_FEATURES_COMPARISON.md'. Per user-spec acceptance criterion ('docs/historical/ НЕ создаётся') and tech-spec Decision 2, docs/historical/ is not created and that file is not promoted anywhere. Leaving this hint in the README will mislead any future reader (human or agent).",
+      "suggestion": "Edit the Next-steps line to drop the docs/historical/MCP_SERVER... destination. For example: 'Move ready docs to the public docs/ tree (docs/usecases/, docs/competitive-landscape/, docs/research/, docs/problems/).'"
+    },
+    {
+      "severity": "minor",
+      "file": ".claude/skills/project-knowledge/recovered/README.md",
+      "line": 46,
+      "issue": "DRAG_ANALYSIS.md row says 'Edited: blake3 over canonical CBOR + COSE_Sign1; encryption reframed as roadmap; ADR refs reframed as design-lineage refs; capability table updated...'. Verified by diff: the restored file is byte-verbatim from upstream — no edits applied. Token replacements are scheduled for Wave 3 (Task 4) per tech-spec. The current wording reads as if Task 1 has already done that work, which is misleading for an audit trail.",
+      "suggestion": "Reword to reflect actual Task-1 state, e.g.: 'Restored verbatim. Pending: blake3/CBOR/COSE token replacements during promotion (Wave 3, Task 4).' Same idea for the next row (WEB_RESEARCH_TRUSTLESS_RAG.md)."
+    },
+    {
+      "severity": "minor",
+      "file": ".claude/skills/project-knowledge/recovered/README.md",
+      "line": 47,
+      "issue": "WEB_RESEARCH_TRUSTLESS_RAG.md row says 'Edited: zkTAM table updated; status \"Pre-V1\" → \"active Rust MCP server\"; SHA3 → blake3+CBOR+COSE; encryption framing fixed'. Restored content is byte-verbatim from upstream; no edits have been applied yet. The token replacements live in Wave 3.",
+      "suggestion": "Same as previous: reword to 'Restored verbatim. Pending: 3 token replacements at promotion (DRAG/WEB lines 45/64/132).' Keep the Wave-3 plan visible but separate from current state."
+    },
+    {
+      "severity": "minor",
+      "file": ".claude/skills/project-knowledge/recovered/README.md",
+      "line": 52,
+      "issue": "Action column for problems/MEMORY_EVICTION.md says 'Promoted to docs/problems/'. Wave 3 has not run yet; docs/problems/ does not exist at this commit (21ac4a1). Same applies to lines 53, 54, 55, 56 (CONCURRENT_WRITERS, ARWEAVE_PRICING_VALIDATION, both PDFs).",
+      "suggestion": "Change Action wording from past tense ('Promoted to ...') to forward-looking ('Ready to promote to docs/problems/' / 'Ready to promote to docs/research/ + reference from WHITEPAPER §References and root README'). The README will be updated again post-merge with the actual promotion-commit hash per the user-spec audit-trail criterion ('Promoted on 2026-04-XX in commit <hash>')."
+    },
+    {
+      "severity": "nit",
+      "file": ".claude/skills/project-knowledge/recovered/README.md",
+      "line": null,
+      "issue": "User-spec acceptance criterion 'recovered/README.md обновлён: \"Promoted on 2026-04-XX in commit <hash>\"' and tech-spec acceptance criterion 'recovered/README.md top section gains \"Promoted on YYYY-MM-DD in commit <hash>\" line' are not satisfied yet. Strictly that line lands later (post-promotion in Wave 3 or Task 15), not in Task 1, but it is worth flagging now so it is not forgotten.",
+      "suggestion": "Track in the post-Wave-3 / Task 15 follow-up: after promotion commits exist, append a 'Promoted on YYYY-MM-DD in commit <hash>' line to the top of recovered/README.md. Not blocking for Task 1 merge if that work is captured in a later task."
+    },
+    {
+      "severity": "nit",
+      "file": ".claude/skills/project-knowledge/recovered/README.md",
+      "line": 36,
+      "issue": "Layout entry for the Agent-Identity PDF is truncated to 'Agent Identity for Autonomous AI_ ... .pdf'. The actual filename is 'Agent Identity for Autonomous AI_ Protocols, Mnemonic Analysis, and the Path to a Minimal Primitive.pdf'. The shortened form is fine for an ASCII tree but readers grepping for the file by name will miss it.",
+      "suggestion": "Either keep the truncation (it is harmless) or expand to the full filename for greppability. If kept short, ensure the validation-table row uses a substring that matches the file (currently 'Agent Identity for Autonomous AI_...pdf' — fine)."
+    }
+  ]
+}

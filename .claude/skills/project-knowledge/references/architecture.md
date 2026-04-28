@@ -128,3 +128,11 @@ Top-level repo files added during the AI-tools integration phase: `smithery.yaml
 **attestation_costs** — P&L tracking, full mode only. Key fields: `attestation_id` FK, `irys_lamports`, `sol_tx_fee_lamports`, `sol_price_usdc`, `charge_micro_usdc`.
 
 Schema is applied on first DB connection via `CREATE TABLE IF NOT EXISTS`; the `owner_pubkey` / `oauth_pubkey` columns are added idempotently by `migrate_owner_pubkey_columns` (SQLite has no `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`, so the helper inspects `pragma_table_info` first). No general migration tooling for MVP. Private keys are never stored in SQLite — loaded from a keypair file at runtime (server) or `localStorage["mnemonic.identity"]` (browser).
+
+---
+
+## Further reading
+
+- Competitive positioning vs decentralized RAG, zkTAM, V3DB and related directions: [docs/competitive-landscape/](../../../../docs/competitive-landscape/).
+- Condensed TurboQuant compression principles (knowledge-DB ref for `compress/` design decisions): [docs/research/condensed-principles.md](../../../../docs/research/condensed-principles.md).
+- Foundational paper that motivated the protocol: [docs/research/paper.pdf](../../../../docs/research/paper.pdf).

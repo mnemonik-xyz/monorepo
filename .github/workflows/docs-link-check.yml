@@ -1,0 +1,29 @@
+name: Docs link check
+
+on:
+  push:
+    branches: [main, dev]
+    paths:
+      - 'docs/**'
+      - '*.md'
+      - '.github/workflows/docs-link-check.yml'
+  pull_request:
+    paths:
+      - 'docs/**'
+      - '*.md'
+      - '.github/workflows/docs-link-check.yml'
+
+concurrency:
+  group: docs-link-check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lychee-link-check:
+    name: lychee
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: lycheeverse/lychee-action@v2
+        with:
+          args: --offline --no-progress 'docs/**/*.md' 'README.md' 'docs/WHITEPAPER.md'
+          fail: true
