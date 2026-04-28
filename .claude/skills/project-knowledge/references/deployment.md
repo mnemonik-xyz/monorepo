@@ -55,6 +55,9 @@ Variables for `mcp/` (set by user):
 | `MCP_TRANSPORT` | `http` | `stdio` or `http` |
 | `MCP_HTTP_PORT` | `3000` | HTTP transport port |
 | `PAYMENT_MODE` | `none` | `none`, `balance`, `x402`, `both` |
+| `MCP_JWT_SECRET` | — | HS256 secret for OAuth Bearer JWTs (required in hosted mode; ≥32 random bytes — `openssl rand -base64 32`) |
+| `MCP_PUBLIC_BASE_URL` | — | Public origin advertised in OAuth metadata + `/sign/{id}` redirect (e.g. `https://mcp.mnemonik.xyz`) |
+| `OAUTH_RATELIMIT_DISABLE` | `0` | Set to `1` only in CI / Playwright runs to bypass the `tower_governor` per-IP limiter on `/oauth/*` |
 
 ---
 
@@ -253,6 +256,29 @@ cd webapp && npm install && npm run build && cd ..
 sudo systemctl restart mnemonic-mcp
 ```
 
+#### Hosted MCP subdomain — `mcp.mnemonik.xyz` (T14, 2026-04-26)
+
+The hosted MCP for the Smithery / Cursor / Claude.ai OAuth flow lives on the
+subdomain `mcp.mnemonik.xyz` (DNS A → 150.251.147.215). nginx config:
+`/etc/nginx/sites-available/mnemonic-mcp` (in-tree source:
+`mcp/deploy/nginx-mcp-subdomain.conf`); LetsEncrypt cert at
+`/etc/letsencrypt/live/mcp.mnemonik.xyz/`. The same `mnemonic-mcp.service`
+serves both `mnemonik.xyz/mcp` and `mcp.mnemonik.xyz/mcp` — only nginx
+routing differs.
+
+Hosted-mode env vars in `/home/claude/mcp.env` now require **`MCP_JWT_SECRET`**
+(Decision 11 of the `mnemonic-integrations` tech-spec: HS256-signed JWT, 1h
+TTL, claims bound to user pubkey). Generate once on the VPS:
+
+```bash
+echo "MCP_JWT_SECRET=$(openssl rand -base64 32)" >> /home/claude/mcp.env
+```
+
+Per Deviation 7 of the same tech-spec, `MNEMONIC_KEYPAIR_PATH` is **no
+longer required for the OAuth flow** — signing happens client-side in the
+webapp's WASM identity. The keypair is still required for legacy `full`
+storage mode (Arweave + Solana writes) but irrelevant to OAuth bootstrap.
+
 ### Key Paths
 
 | Path | Purpose |
@@ -264,7 +290,8 @@ sudo systemctl restart mnemonic-mcp
 | `/home/claude/mcp.env` | Environment variables |
 | `/home/claude/data/attestations.db` | SQLite database |
 | `/home/claude/data/rag_chunks/protocol-knowledge.zip` | Downloadable knowledge artifact |
-| `/etc/nginx/sites-available/mnemonic` | nginx config |
+| `/etc/nginx/sites-available/mnemonic` | nginx config (webapp + `mnemonik.xyz/mcp`) |
+| `/etc/nginx/sites-available/mnemonic-mcp` | nginx config (`mcp.mnemonik.xyz` subdomain, T14) |
 | `/etc/systemd/system/mnemonic-mcp.service` | systemd service |
 
 ### Troubleshooting
@@ -284,6 +311,14 @@ curl http://localhost:3000/health               # MCP direct
 curl http://localhost:11434/api/tags            # Ollama models
 curl https://mnemonik.xyz/health                # via nginx+SSL
 ```
+
+### MCP-client Distribution
+
+The hosted MCP at `mcp.mnemonik.xyz` is distributed three ways, all driven by the public `webapp/install` page:
+
+1. **Cursor / VS Code deeplinks** — clicking the install button opens the editor with a pre-filled MCP HTTP config (Cursor: `cursor://anysphere.cursor-deeplink/mcp/install?...&config=<base64>`; VS Code: `vscode:mcp/install?<urlencoded JSON>`). Both clients then run the OAuth 2.1 + PKCE flow against `/.well-known/oauth-authorization-server`.
+2. **Claude.ai custom connector** — paste `https://mcp.mnemonik.xyz/mcp` into Claude.ai's "Add custom connector" dialog. Claude.ai performs RFC 7591 dynamic client registration via `POST /oauth/register` and POSTs JSON-RPC to the apex `/` (not `/mcp`) — both routes mount the same handler.
+3. **Smithery catalogue** — `smithery.yaml` at repo root advertises the hosted endpoint. Submission to Smithery is **manual** via the Smithery dashboard; CI does not auto-publish. Re-submit only when the protocol contract or transport changes.
 
 ### Known Issues
 

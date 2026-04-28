@@ -31,6 +31,30 @@ Use `anyhow::Result` for all fallible functions in `core/` and `mcp/`. Convert t
 
 `local` (default) uses SQLite only with synthetic IDs prefixed `local:` — free, instant, offline. `full` uses Arweave + Solana + SQLite and requires a funded keypair. The mode is set at server startup, not per-call. Never mix modes in one database.
 
+### Tenant isolation via `owner_pubkey`
+
+Every attestation row in hosted mode carries an `owner_pubkey` derived from the OAuth Bearer token's `sub` claim, set at write time by `tools.rs::sign_memory` and filtered at read time by `recall`/`verify`. Legacy rows with NULL `owner_pubkey` cannot match any caller — there is no escape hatch. The OAuth user pubkey is the only identity that crosses the trust boundary; never look up rows by `signer_pubkey` for tenant scoping (that's the server's signing key, not the user's).
+
+### Browser-mediated signing for hosted-mode `sign_memory`
+
+In hosted deployments the server never sees the user's private key. `sign_memory` returns a `pending` envelope containing a `correlation_id` and a redirect URL; the webapp `Sign.tsx` page completes the COSE_Sign1 envelope in-browser via the WASM `sign_cose_payload` export, then POSTs the signed bytes to `/api/sign-callback`. The capability is the unguessable UUID — `/api/pending/{id}` and `/api/sign-callback` deliberately do **not** require a Bearer JWT, because the calling browser tab may be a different OAuth tenant from the MCP client (e.g. Cursor authorized one identity, the user's webapp tab is logged into another). Tenant binding is enforced inside the callback handler against `entry.jwt_sub` recorded when the bundle was queued.
+
+### COSE vs raw Ed25519 signing surfaces
+
+Two distinct browser signing entry points: `sign_cose_payload(server_cbor_bytes, keypair)` wraps server-provided canonical-CBOR bytes verbatim in a COSE_Sign1 envelope (used by `Sign.tsx` for `mnemonic_sign_memory` finalization). `sign_challenge(challenge_bytes, keypair)` produces a raw Ed25519 signature over the OAuth PKCE-bound challenge (used by `Consent.tsx` for `/oauth/authorize`). Don't confuse the two — the OAuth flow expects raw Ed25519 over the challenge blob, not a COSE wrapper.
+
+### CORS allowlist via predicate, not literal list
+
+`mcp/src/cors_policy.rs` exposes `allowed_origin` as a `tower-http` predicate that allows the literal first-party origins (`https://mnemonik.xyz`, `https://mcp.mnemonik.xyz`), suffix-matches the AI-tool family (`*.claude.ai`, `*.cursor.sh`, `*.chatgpt.com`, `*.anthropic.com`, `*.openai.com`), and accepts `http://localhost:*` / `http://127.0.0.1:*` only over HTTP for dev. Add new clients here, not as `allow_any_origin`.
+
+### JSON-RPC notifications return 202
+
+Per MCP spec 2025-06-18 §2.4, JSON-RPC requests with no `id` field are notifications — the server must accept and dispatch them but must not return a response body. `mcp.rs::JsonRpcRequest.id` is `Option<Value>`; when `None`, `mcp_handler` short-circuits to `StatusCode::ACCEPTED` (202) with an empty body. The MCP transport response Content-Type is plain `application/json` (not `application/x-ndjson`) — most clients reject NDJSON.
+
+### OAuth Bearer-auth allowlist
+
+`mcp/src/oauth.rs::bearer_auth_layer` enforces JWT validation on `/mcp` and `/` POSTs *except* for: discovery (`/.well-known/*`), liveness (`/health`), the OAuth flow itself (`/oauth/*`), the capability-authed pending APIs (`/api/pending/*`, `/api/sign-callback`), and JSON-RPC methods `initialize`, `tools/list`, plus any `notifications/*`. Any new tool added to `tools.rs` is paid + authenticated by default; explicit allowlist edits are required to expose anonymous methods.
+
 ---
 
 ## Git Workflow
