@@ -120,12 +120,18 @@ fn migrate_payment_events_unique_index(conn: &Connection) -> anyhow::Result<()> 
 /// Adds two columns:
 ///   - `attestations.owner_pubkey TEXT` — the OAuth-resolved tenant scope
 ///     used by `AttestationStore::search`. Distinct from the existing
-///     `signer_pubkey` column (the COSE_Sign1 signer identity). New rows
-///     bind both; legacy rows have NULL `owner_pubkey` and will not match
-///     any owner filter (effectively hidden until backfilled).
+///     `signer_pubkey` column (the COSE_Sign1 signer identity).
 ///   - `api_keys.oauth_pubkey TEXT` — links an API key to the OAuth user
 ///     pubkey. Distinct from the existing `api_keys.owner_pubkey` (deposit
 ///     owner — wallet that funds the key). Both can coexist.
+///
+/// After ensuring the columns exist, backfills any pre-OAuth rows where
+/// `owner_pubkey` is NULL or empty by copying `signer_pubkey` into it. Pre-
+/// OAuth attestations were single-tenant by construction (server signs and
+/// implicitly owns), and without this backfill the mandatory owner filter in
+/// `search` hides them — including the RAG seed corpus that powers `/chat`.
+/// The backfill runs unconditionally and is idempotent (UPDATE only touches
+/// matching rows).
 ///
 /// SQLite `ALTER TABLE ... ADD COLUMN` does not support `IF NOT EXISTS`, so
 /// presence is checked via `PRAGMA table_info(...)` and the ALTER runs only
@@ -149,10 +155,6 @@ fn migrate_owner_pubkey_columns(conn: &Connection) -> anyhow::Result<()> {
     let need_attestations_col = !has_column(conn, "attestations", "owner_pubkey")?;
     let need_api_keys_col = !has_column(conn, "api_keys", "oauth_pubkey")?;
 
-    if !need_attestations_col && !need_api_keys_col {
-        return Ok(());
-    }
-
     conn.execute_batch("BEGIN IMMEDIATE;")
         .context("opening owner_pubkey migration transaction")?;
 
@@ -171,6 +173,16 @@ fn migrate_owner_pubkey_columns(conn: &Connection) -> anyhow::Result<()> {
             conn.execute("ALTER TABLE api_keys ADD COLUMN oauth_pubkey TEXT", [])
                 .context("adding api_keys.oauth_pubkey")?;
         }
+        // Backfill legacy rows. Runs every open: cheap on clean DBs (zero
+        // matches), correct on DBs that had the column added without a
+        // backfill in an earlier release.
+        conn.execute(
+            "UPDATE attestations
+                SET owner_pubkey = signer_pubkey
+              WHERE owner_pubkey IS NULL OR owner_pubkey = ''",
+            [],
+        )
+        .context("backfilling attestations.owner_pubkey from signer_pubkey")?;
         Ok(())
     };
 
@@ -590,6 +602,52 @@ mod tests {
             .filter_map(|r| r.ok())
             .collect();
         assert!(api_keys_cols.contains(&"oauth_pubkey".to_string()));
+    }
+
+    #[test]
+    fn test_migrate_backfills_legacy_null_owner_pubkey() {
+        // Regression: legacy seed rows had NULL `owner_pubkey` and were hidden
+        // from /chat's owner-scoped search, surfacing as "No relevant context
+        // found." for every question. The migration must backfill them with
+        // signer_pubkey so single-tenant data stays visible after upgrade.
+        let store = SqliteStore::in_memory().unwrap();
+        let server = "server_keypair";
+
+        // Insert a row, then null out owner_pubkey to simulate a pre-OAuth row
+        // (column existed but no value was written by the legacy save path).
+        store
+            .save_attestation(
+                "att-legacy",
+                "seeded chunk",
+                "h-legacy",
+                &[],
+                "s-legacy",
+                "a-legacy",
+                server,
+                server,
+                "2026-01-01",
+                &[1.0, 0.0],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "UPDATE attestations SET owner_pubkey = NULL WHERE attestation_id = ?",
+                params!["att-legacy"],
+            )
+            .unwrap();
+
+        // Pre-migration: search by owner returns nothing.
+        let before = store.search(&[1.0, 0.0], server, 10).unwrap();
+        assert!(before.is_empty(), "NULL owner_pubkey must hide the row");
+
+        // Re-run the migration on the live connection.
+        super::migrate_owner_pubkey_columns(store.conn()).unwrap();
+
+        // Post-migration: row is visible to its signer-as-owner.
+        let after = store.search(&[1.0, 0.0], server, 10).unwrap();
+        assert_eq!(after.len(), 1, "backfill must restore visibility");
+        assert_eq!(after[0].attestation_id, "att-legacy");
     }
 
     #[test]
