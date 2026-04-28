@@ -115,6 +115,18 @@ Storage is selected by mode:
 - **Local mode:** SQLite only, synthetic local transaction IDs, no payment gate.
 - **Full mode:** signed artifact bytes can be persisted to Arweave, anchored on Solana, and indexed locally in SQLite.
 
+### 5.3 Pipeline Walkthrough (sign / recall / verify)
+
+The MCP server exposes three primary operational flows. Each is a thin orchestration layer over `mnemonic-core` primitives.
+
+**`mnemonic_sign_memory`.** A request carrying content text and tags traverses a fixed pipeline. The active embedder (FastEmbed local, OpenAI remote, or `MockEmbedder` in tests) produces a full-precision f32 vector. The vector is run through the TurboQuant scalar quantizer at the configured bit width (2, 3, or 4 bits per dimension; default 4) so the compressed form can be carried inside artifact metadata. The artifact — content, producer DID, timestamp, tags, embedding metadata — is encoded to canonical CBOR with stable field ordering, hashed with blake3, and signed as a COSE_Sign1 envelope using the server's Ed25519 identity. In `local` mode the COSE bytes plus the uncompressed embedding are written to SQLite and the operation returns synthetic `local:` transaction IDs at zero cost. In `full` mode the COSE bytes are uploaded to Arweave (via Irys) and the blake3 hash plus Arweave tx ID are anchored on Solana via an SPL Memo instruction; both real tx IDs are then committed alongside the row in the SQLite `AttestationStore`.
+
+**`mnemonic_recall`.** Recall is local-only by design. The query string is embedded with the same provider used at sign time, then scored against every stored uncompressed f32 embedding in SQLite via cosine similarity, and the top-k rows are returned ordered by score. The compressed bytes that traveled to Arweave are not consulted here: they are proof-of-existence artifacts for third-party verification, not a retrieval index. Recall therefore costs one embed call and one full table scan, with no chain reads.
+
+**`mnemonic_verify`.** Verification reads the stored artifact (locally, or by fetching the COSE bytes from Arweave in full mode), recomputes the blake3 hash over the canonical CBOR payload, and validates the COSE_Sign1 signature against the claimed Ed25519 producer identity. In full mode the verifier additionally confirms that the on-chain SPL Memo on Solana exists and references the same blake3 hash and Arweave tx ID. The result is one of `verified`, `tampered`, or `not_found`.
+
+For a deeper walkthrough including module boundaries and lock discipline, see [docs/how-it-works.md](./how-it-works.md).
+
 ## 6. Artifact Model
 
 Mnemonic artifacts are typed, versioned, and canonical.
