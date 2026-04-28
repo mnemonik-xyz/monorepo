@@ -1,0 +1,26 @@
+feature: mnemonic-cli
+total_waves: 7
+last_completed_wave: 0
+next_wave: 1
+team_name: mnemonic-cli-team
+tasks:
+  "1": planned
+  "2": planned
+  "3": planned
+  "4": planned
+  "5": planned
+  "6": planned
+  "7": planned
+  "8": planned
+  "9": planned
+  "10": planned
+  "11": planned
+  "12": planned
+  "13": planned
+  "14": planned
+  "15": planned
+notes: |
+  TeamCreate / inter-agent SendMessage tooling not available in this environment.
+  Lead orchestrates teammate + reviewer cycles serially: spawn teammate → wait →
+  collect diff → spawn each reviewer with diff → collect findings → spawn fixer
+  (or instruct same teammate to fix) → re-review. Max 3 review rounds.
