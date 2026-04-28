@@ -1,12 +1,17 @@
-//! RAG seeding: parse whitepaper, sign each chunk, generate downloadable artifact.
+//! RAG seeding: walk all `docs/**/*.md`, parse each markdown into chunks,
+//! sign each chunk, and generate a downloadable knowledge artifact.
 //!
 //! Runs once at MCP server startup. Skips if the store already has attestations
-//! for the server's pubkey (idempotent).
+//! for the server's pubkey (idempotent). Operators wipe the local SQLite DB to
+//! re-seed when the corpus changes — we deliberately avoid versioned tags so
+//! the chat consumer ([crate::chat]) can keep using the static
+//! `protocol-knowledge` tag for filtering.
 
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use walkdir::WalkDir;
 
 use mnemonic_core::identity;
 use mnemonic_core::storage::AttestationStore;
@@ -28,9 +33,12 @@ struct Section {
     body: String,
 }
 
-/// Parse whitepaper markdown into sections split at `## ` (h2) headers.
+/// Parse a markdown document into sections split at `## ` (h2) headers.
 /// Sections exceeding `max_tokens` are further split at `### ` (h3) level.
-fn parse_whitepaper(content: &str, max_tokens: usize) -> Vec<Section> {
+///
+/// Used for every file under `docs/` — the chunk-boundary algorithm itself is
+/// document-agnostic.
+fn parse_markdown(content: &str, max_tokens: usize) -> Vec<Section> {
     let mut sections: Vec<Section> = Vec::new();
     let mut current_heading = String::new();
     let mut current_body = String::new();
@@ -139,24 +147,92 @@ fn split_at_h3(parent_heading: &str, body: &str) -> Vec<Section> {
     sub_sections
 }
 
-/// Locate the whitepaper relative to the project root. Tries several paths
-/// so the binary works from the repo root or from `mcp/`.
-fn find_whitepaper() -> Result<PathBuf> {
-    let candidates = ["docs/WHITEPAPER.md", "../docs/WHITEPAPER.md"];
+/// Locate the `docs/` directory relative to the project root. Tries several
+/// paths so the binary works from the repo root or from `mcp/`.
+fn find_docs_root() -> Result<PathBuf> {
+    let candidates = ["docs", "../docs"];
     for candidate in &candidates {
         let path = PathBuf::from(candidate);
-        if path.exists() {
+        if path.is_dir() {
             return Ok(path.canonicalize()?);
         }
     }
-    // Also try from CARGO_MANIFEST_DIR (works during cargo run)
+    // Also try from CARGO_MANIFEST_DIR (works during cargo run from mcp/)
     if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") {
-        let path = PathBuf::from(&manifest_dir).join("../docs/WHITEPAPER.md");
-        if path.exists() {
+        let path = PathBuf::from(&manifest_dir).join("../docs");
+        if path.is_dir() {
             return Ok(path.canonicalize()?);
         }
     }
-    anyhow::bail!("docs/WHITEPAPER.md not found. Tried: {:?}", candidates)
+    anyhow::bail!("docs/ directory not found. Tried: {:?}", candidates)
+}
+
+/// Recursively walk `root` and return every `.md` file underneath, sorted by
+/// relative path for deterministic ingestion order.
+///
+/// Skips:
+/// - non-`.md` files (PDFs, images, etc.)
+/// - anything inside a top-level `historical/` directory (defensive: lets us
+///   drop deprecated docs without seeding them into the chat)
+/// - hidden files / dirs (any path component starting with `.`)
+fn walk_docs_tree(root: &Path) -> Result<Vec<PathBuf>> {
+    let mut files: Vec<PathBuf> = Vec::new();
+
+    for entry in WalkDir::new(root).follow_links(false) {
+        let entry = entry.with_context(|| format!("walking {}", root.display()))?;
+        if !entry.file_type().is_file() {
+            continue;
+        }
+
+        let path = entry.path();
+        let rel = match path.strip_prefix(root) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+
+        // Skip hidden components and the historical/ subtree.
+        let mut skip = false;
+        for component in rel.components() {
+            let s = component.as_os_str().to_string_lossy();
+            if s.starts_with('.') || s == "historical" {
+                skip = true;
+                break;
+            }
+        }
+        if skip {
+            continue;
+        }
+
+        // Only `.md` files.
+        let ext_is_md = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.eq_ignore_ascii_case("md"))
+            .unwrap_or(false);
+        if !ext_is_md {
+            continue;
+        }
+
+        files.push(path.to_path_buf());
+    }
+
+    // Deterministic order based on the path relative to the docs root.
+    files.sort_by(|a, b| {
+        let ra = a.strip_prefix(root).unwrap_or(a);
+        let rb = b.strip_prefix(root).unwrap_or(b);
+        ra.cmp(rb)
+    });
+
+    Ok(files)
+}
+
+/// Render a relative path as a forward-slash string for tags / headings.
+/// Stays stable across operating systems (Windows backslashes get normalized).
+fn rel_path_string(path: &Path) -> String {
+    path.components()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 /// Run the RAG seeding routine. Idempotent: skips if store already has entries.
@@ -185,21 +261,23 @@ pub async fn run(state: &McpState) -> Result<()> {
         }
     }
 
-    tracing::info!("RAG seeding: parsing whitepaper...");
+    tracing::info!("RAG seeding: walking docs tree...");
 
-    let whitepaper_path = find_whitepaper()?;
-    let whitepaper_content = std::fs::read_to_string(&whitepaper_path)
-        .with_context(|| format!("failed to read {}", whitepaper_path.display()))?;
-
-    let sections = parse_whitepaper(&whitepaper_content, 500);
-    if sections.is_empty() {
-        tracing::warn!("RAG seeding: whitepaper produced 0 chunks, nothing to seed");
+    let docs_root = find_docs_root()?;
+    let md_files = walk_docs_tree(&docs_root)?;
+    if md_files.is_empty() {
+        tracing::warn!(
+            "RAG seeding: no .md files found under {}, nothing to seed",
+            docs_root.display()
+        );
         return Ok(());
     }
 
-    tracing::info!("RAG seeding: {} chunks to sign", sections.len());
-
-    let tags = vec!["protocol-knowledge".to_string(), "whitepaper".to_string()];
+    tracing::info!(
+        "RAG seeding: {} markdown file(s) under {}",
+        md_files.len(),
+        docs_root.display()
+    );
 
     // sign_memory needs a CostHint even in local mode (values are ignored)
     let cost_hint = CostHint {
@@ -212,39 +290,72 @@ pub async fn run(state: &McpState) -> Result<()> {
     // Collect sign_memory results for artifact generation
     let mut signed_chunks: Vec<SignedChunk> = Vec::new();
 
-    for (i, section) in sections.iter().enumerate() {
-        let chunk_content = if section.heading.is_empty() {
-            section.body.clone()
-        } else {
-            format!("## {}\n\n{}", section.heading, section.body)
-        };
+    for md_file in &md_files {
+        let rel = md_file.strip_prefix(&docs_root).unwrap_or(md_file);
+        let rel_str = rel_path_string(rel);
 
-        let result = tools::sign_memory(
-            &state.keypair,
-            &state.solana,
-            &state.arweave,
-            &state.store,
-            state.embedder.as_ref(),
-            &state.compressor,
-            &chunk_content,
-            &tags,
-            &cost_hint,
-            &state.storage_mode,
-        )
-        .await
-        .with_context(|| format!("sign_memory failed for chunk {i}"))?;
+        let content = std::fs::read_to_string(md_file)
+            .with_context(|| format!("failed to read {}", md_file.display()))?;
 
-        signed_chunks.push(SignedChunk {
-            heading: section.heading.clone(),
-            content: chunk_content,
-            content_hash: result["content_hash"].as_str().unwrap_or("").to_string(),
-            signer_pubkey: result["signer"].as_str().unwrap_or("").to_string(),
-            timestamp: result["timestamp"].as_str().unwrap_or("").to_string(),
-            arweave_tx: result["arweave_tx"].as_str().unwrap_or("").to_string(),
-            attestation_id: result["attestation_id"].as_str().unwrap_or("").to_string(),
-        });
+        let sections = parse_markdown(&content, 500);
+        if sections.is_empty() {
+            tracing::debug!("RAG seeding: {} produced 0 chunks, skipping", rel_str);
+            continue;
+        }
 
-        tracing::debug!("RAG seeding: signed chunk {}/{}", i + 1, sections.len());
+        // Per-file tags: "protocol-knowledge" lets the chat handler filter the
+        // whole corpus; the relative path disambiguates a chunk's source so the
+        // LLM can cite it. We deliberately do NOT include "whitepaper" anymore.
+        let tags = vec!["protocol-knowledge".to_string(), rel_str.clone()];
+
+        for (i, section) in sections.iter().enumerate() {
+            let body_block = if section.heading.is_empty() {
+                section.body.clone()
+            } else {
+                format!("## {}\n\n{}", section.heading, section.body)
+            };
+            // Prefix every chunk with the source path so the LLM sees provenance
+            // and so two docs sharing a heading (e.g. "## Overview") don't collide.
+            let chunk_content = format!("# {rel_str}\n\n{body_block}");
+            let chunk_heading = if section.heading.is_empty() {
+                rel_str.clone()
+            } else {
+                format!("{} > {}", rel_str, section.heading)
+            };
+
+            let result = tools::sign_memory(
+                &state.keypair,
+                &state.solana,
+                &state.arweave,
+                &state.store,
+                state.embedder.as_ref(),
+                &state.compressor,
+                &chunk_content,
+                &tags,
+                &cost_hint,
+                &state.storage_mode,
+            )
+            .await
+            .with_context(|| format!("sign_memory failed for {rel_str} chunk {i}"))?;
+
+            signed_chunks.push(SignedChunk {
+                heading: chunk_heading,
+                content: chunk_content,
+                tags: tags.clone(),
+                content_hash: result["content_hash"].as_str().unwrap_or("").to_string(),
+                signer_pubkey: result["signer"].as_str().unwrap_or("").to_string(),
+                timestamp: result["timestamp"].as_str().unwrap_or("").to_string(),
+                arweave_tx: result["arweave_tx"].as_str().unwrap_or("").to_string(),
+                attestation_id: result["attestation_id"].as_str().unwrap_or("").to_string(),
+            });
+
+            tracing::debug!("RAG seeding: signed chunk {} from {}", i + 1, rel_str);
+        }
+    }
+
+    if signed_chunks.is_empty() {
+        tracing::warn!("RAG seeding: every markdown file produced 0 chunks");
+        return Ok(());
     }
 
     tracing::info!(
@@ -276,10 +387,11 @@ pub async fn run(state: &McpState) -> Result<()> {
     Ok(())
 }
 
-/// Metadata for a signed whitepaper chunk, used to generate the artifact.
+/// Metadata for a signed knowledge chunk, used to generate the artifact.
 struct SignedChunk {
     heading: String,
     content: String,
+    tags: Vec<String>,
     content_hash: String,
     signer_pubkey: String,
     timestamp: String,
@@ -358,7 +470,7 @@ fn generate_json_sidecar(chunks: &[SignedChunk]) -> String {
                 "signer_pubkey": c.signer_pubkey,
                 "timestamp": c.timestamp,
                 "arweave_tx": c.arweave_tx,
-                "tags": ["protocol-knowledge", "whitepaper"],
+                "tags": c.tags,
             })
         })
         .collect();
@@ -406,7 +518,7 @@ Design goals overview paragraph.
 
     #[test]
     fn parse_splits_at_h2() {
-        let sections = parse_whitepaper(SAMPLE_WHITEPAPER, 5000);
+        let sections = parse_markdown(SAMPLE_WHITEPAPER, 5000);
         // Should have: preamble (before Abstract), Abstract, 1. Introduction, 3. Design Goals
         // Preamble has heading="" but has body "# Title\n\nSome preamble text."
         assert!(
@@ -423,7 +535,7 @@ Design goals overview paragraph.
     #[test]
     fn parse_splits_large_sections_at_h3() {
         // With max_tokens=10, the "3. Design Goals" section should be split at ### level
-        let sections = parse_whitepaper(SAMPLE_WHITEPAPER, 10);
+        let sections = parse_markdown(SAMPLE_WHITEPAPER, 10);
         let headings: Vec<&str> = sections.iter().map(|s| s.heading.as_str()).collect();
         // The sub-split sections should have parent > child format
         assert!(
@@ -435,7 +547,7 @@ Design goals overview paragraph.
 
     #[test]
     fn parse_keeps_small_sections_intact() {
-        let sections = parse_whitepaper(SAMPLE_WHITEPAPER, 5000);
+        let sections = parse_markdown(SAMPLE_WHITEPAPER, 5000);
         let headings: Vec<&str> = sections.iter().map(|s| s.heading.as_str()).collect();
         // "3. Design Goals" should NOT be split since all sections fit within 5000 tokens
         assert!(
@@ -447,13 +559,13 @@ Design goals overview paragraph.
 
     #[test]
     fn parse_handles_empty_input() {
-        let sections = parse_whitepaper("", 500);
+        let sections = parse_markdown("", 500);
         assert!(sections.is_empty());
     }
 
     #[test]
     fn parse_handles_no_h2_headers() {
-        let sections = parse_whitepaper("Just some text\nwith no headers", 500);
+        let sections = parse_markdown("Just some text\nwith no headers", 500);
         // Should produce one section with empty heading
         assert_eq!(sections.len(), 1);
         assert!(sections[0].body.contains("Just some text"));
@@ -493,6 +605,7 @@ Design goals overview paragraph.
         let chunks = vec![SignedChunk {
             heading: "Test Section".to_string(),
             content: "Some content".to_string(),
+            tags: vec!["protocol-knowledge".into(), "WHITEPAPER.md".into()],
             content_hash: "abc123".to_string(),
             signer_pubkey: "pub456".to_string(),
             timestamp: "2026-04-25T00:00:00Z".to_string(),
@@ -512,6 +625,7 @@ Design goals overview paragraph.
         let chunks = vec![SignedChunk {
             heading: "Test".to_string(),
             content: "body".to_string(),
+            tags: vec!["protocol-knowledge".into(), "usecases/foo.md".into()],
             content_hash: "hash1".to_string(),
             signer_pubkey: "pub1".to_string(),
             timestamp: "ts1".to_string(),
@@ -526,6 +640,9 @@ Design goals overview paragraph.
         assert_eq!(parsed["chunks"][0]["content_hash"], "hash1");
         assert_eq!(parsed["chunks"][0]["signer_pubkey"], "pub1");
         assert_eq!(parsed["chunks"][0]["arweave_tx"], "ar1");
+        // Tags must reflect the per-chunk source path, not a hard-coded default.
+        assert_eq!(parsed["chunks"][0]["tags"][0], "protocol-knowledge");
+        assert_eq!(parsed["chunks"][0]["tags"][1], "usecases/foo.md");
     }
 
     #[test]
@@ -534,6 +651,7 @@ Design goals overview paragraph.
         let chunks = vec![SignedChunk {
             heading: "Test".to_string(),
             content: "body text".to_string(),
+            tags: vec!["protocol-knowledge".into(), "WHITEPAPER.md".into()],
             content_hash: "h1".to_string(),
             signer_pubkey: "p1".to_string(),
             timestamp: "t1".to_string(),
@@ -561,7 +679,7 @@ Design goals overview paragraph.
     fn parse_does_not_confuse_h3_for_h2() {
         let input =
             "## Section A\n\nSome text.\n\n### Sub 1\n\nSub content.\n\n## Section B\n\nMore text.";
-        let sections = parse_whitepaper(input, 5000);
+        let sections = parse_markdown(input, 5000);
         let headings: Vec<&str> = sections.iter().map(|s| s.heading.as_str()).collect();
         // h3 "### Sub 1" must NOT create a separate h2-level section
         assert_eq!(headings, vec!["Section A", "Section B"]);
@@ -574,11 +692,76 @@ Design goals overview paragraph.
     fn parse_real_whitepaper_structure() {
         // Test with the actual whitepaper section structure to ensure
         // we get a reasonable number of chunks
-        let sections = parse_whitepaper(
+        let sections = parse_markdown(
             "## Abstract\n\nShort.\n\n## 1. Introduction\n\nIntro.\n\n## 3. Design Goals\n\nGoals.\n\n### 3.1 Current\n\n- A\n\n### 3.2 Roadmap\n\n- B\n",
             500,
         );
         // Abstract, Introduction, Design Goals (not split since under 500 tokens)
         assert!(sections.len() >= 3);
+    }
+
+    #[test]
+    fn walks_docs_tree_finds_markdown_files() {
+        // Build a tmp tree:
+        //   <root>/usecases/foo.md       -> kept
+        //   <root>/research/bar.md       -> kept
+        //   <root>/research/baz.pdf      -> skipped (not .md)
+        //   <root>/historical/old.md     -> skipped (defensive)
+        //   <root>/.hidden/secret.md     -> skipped (hidden component)
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+
+        for (rel, body) in &[
+            ("usecases/foo.md", "# foo"),
+            ("research/bar.md", "# bar"),
+            ("research/baz.pdf", "%PDF-1.4"),
+            ("historical/old.md", "# legacy"),
+            (".hidden/secret.md", "# hidden"),
+        ] {
+            let full = root.join(rel);
+            std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+            std::fs::write(&full, body).unwrap();
+        }
+
+        let files = walk_docs_tree(root).unwrap();
+        let rels: Vec<String> = files
+            .iter()
+            .map(|p| rel_path_string(p.strip_prefix(root).unwrap()))
+            .collect();
+
+        assert_eq!(
+            rels,
+            vec!["research/bar.md".to_string(), "usecases/foo.md".to_string(),],
+            "walker must return only non-hidden, non-historical .md files in sorted order"
+        );
+    }
+
+    #[test]
+    fn parse_markdown_disambiguates_via_path() {
+        // The seeding loop synthesizes chunk content as
+        //   "# <relative-path>\n\n## <heading>\n\n<body>"
+        // so two docs sharing a heading don't collide. This test mirrors that
+        // synthesis and asserts the prefix is present.
+        let content = "## Overview\n\nSome shared overview body text.\n";
+        let sections = parse_markdown(content, 500);
+        assert_eq!(sections.len(), 1);
+        let section = &sections[0];
+
+        let rel = "usecases/shared-memory-layer.md";
+        let body_block = format!("## {}\n\n{}", section.heading, section.body);
+        let chunk = format!("# {rel}\n\n{body_block}");
+
+        assert!(
+            chunk.starts_with("# usecases/shared-memory-layer.md\n"),
+            "chunk must be prefixed with the source relative path"
+        );
+        assert!(
+            chunk.contains("## Overview"),
+            "chunk must retain the original heading"
+        );
+        assert!(
+            chunk.contains("Some shared overview body text."),
+            "chunk must retain the body"
+        );
     }
 }

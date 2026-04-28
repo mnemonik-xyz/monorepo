@@ -1,0 +1,40 @@
+{
+  "task": "seed-enrichment",
+  "round": 1,
+  "reviewer": "code-reviewer",
+  "verdict": "approved",
+  "summary": "Commit fea7a17 cleanly generalizes RAG seeding from a single WHITEPAPER.md to recursive docs/**/*.md ingestion. Diff is well-scoped: only mcp/Cargo.toml (walkdir = \"2\"), Cargo.lock, and mcp/src/seed.rs change. core/ is not touched, no payment methods moved, no HashEmbedder introduced -- architectural rules from CLAUDE.md are preserved. Renames (parse_whitepaper -> parse_markdown, find_whitepaper -> find_docs_root) are consistently propagated through 7 unit tests. New helpers (walk_docs_tree, rel_path_string) are pure, deterministic (sorted by relpath), and well-tested (walks_docs_tree_finds_markdown_files exercises hidden/historical/.pdf skip rules and sort order). Per-chunk content is prefixed with `# <relpath>` and tags become [\"protocol-knowledge\", \"<relpath>\"], giving the LLM provenance and disambiguating duplicate headings across docs. Idempotency guard unchanged. Empty-corpus and zero-chunk edge cases both log warn + return Ok. Verified chat.rs consumer: it does NOT filter by tag at all -- chat_handler calls tools::recall, which delegates to SqliteStore::search (cosine over embeddings, signer-scoped, no tag predicate), so dropping the \"whitepaper\" tag is a no-op for the chat path. Build/lint/test all green. Approved with two nits below for follow-up polish.",
+  "findings": [
+    {
+      "severity": "nit",
+      "file": "mcp/src/seed.rs",
+      "line": 29,
+      "issue": "Stale doc comment on `Section`: '/// Section extracted from the whitepaper markdown.' still says 'whitepaper' although the parser is now document-agnostic.",
+      "suggestion": "Update to '/// Section extracted from a markdown document.' for consistency with the renamed parse_markdown."
+    },
+    {
+      "severity": "nit",
+      "file": "mcp/src/seed.rs",
+      "line": 220,
+      "issue": "walk_docs_tree silently skips hidden / historical components but does not emit a tracing::debug for what was skipped, making it harder to diagnose 'why is doc X not in chat?' in prod.",
+      "suggestion": "Optional: add a `tracing::debug!(\"seed: skipping {}\", rel.display())` inside the skip branch. Non-blocking; current behavior is acceptable since the test asserts the skip set explicitly."
+    },
+    {
+      "severity": "nit",
+      "file": "mcp/src/main.rs",
+      "line": 500,
+      "issue": "Comment '// RAG seeding (whitepaper chunking + artifact generation)' is now stale; corpus is no longer just whitepaper.",
+      "suggestion": "Change to 'RAG seeding (docs/**/*.md chunking + artifact generation)'."
+    }
+  ],
+  "verification": {
+    "git_show_stat": "Cargo.lock(+1), mcp/Cargo.toml(+3), mcp/src/seed.rs(+248/-65). core/ untouched.",
+    "walkdir_version": "walkdir = \"2\" (caret implied; allows patch+minor updates within 2.x).",
+    "cargo_fmt": "pass (no output)",
+    "cargo_clippy_mcp": "pass with -D warnings (cached: 'Finished dev profile' only)",
+    "cargo_test_seed": "15 passed; 0 failed; 0 ignored (incl. new walks_docs_tree_finds_markdown_files and parse_markdown_disambiguates_via_path)",
+    "chat_consumer_check": "mcp/src/chat.rs has zero references to 'whitepaper'. chat_handler -> tools::recall -> SqliteStore::search uses cosine similarity scoped by signer pubkey only (no tag filter). Dropping the 'whitepaper' tag is safe; no regression.",
+    "architectural_rules": "core/ not modified. Payment methods unchanged in mcp/src/payment.rs. No HashEmbedder anywhere. Dependency direction core <- mcp preserved (mnemonic_core::identity / storage / tools imports only).",
+    "idempotency": "Unchanged: skip branch on `count_by_signer(pubkey) > 0` still gates the whole run."
+  }
+}
