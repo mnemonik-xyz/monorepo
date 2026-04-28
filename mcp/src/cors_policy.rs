@@ -34,7 +34,24 @@ pub fn is_allowed_cors_origin(origin: &[u8]) -> bool {
         Ok(s) => s,
         Err(_) => return false,
     };
-    // HTTPS-only.
+    // Localhost dev convenience — Playwright e2e tests, vite dev server,
+    // and CLI smoke scripts run from `http://localhost:*` or
+    // `http://127.0.0.1:*`. Loopback HTTP is not exposed to the public
+    // internet, so allowing it does not widen the attack surface.
+    // Boundary check: after "localhost" / "127.0.0.1" the next char must be
+    // `:` (port), `/` (path), or end-of-string. Without this guard,
+    // `http://localhost.evil.com` would prefix-match.
+    let is_loopback_origin = |prefix: &str| -> bool {
+        if let Some(rest) = s.strip_prefix(prefix) {
+            rest.is_empty() || rest.starts_with(':') || rest.starts_with('/')
+        } else {
+            false
+        }
+    };
+    if is_loopback_origin("http://localhost") || is_loopback_origin("http://127.0.0.1") {
+        return true;
+    }
+    // HTTPS-only for non-loopback origins.
     let host = match s.strip_prefix("https://") {
         Some(h) => h,
         None => return false,
@@ -107,6 +124,16 @@ mod tests {
     fn rejects_http_scheme() {
         assert!(!is_allowed_cors_origin(b"http://claude.ai"));
         assert!(!is_allowed_cors_origin(b"http://mnemonik.xyz"));
+    }
+
+    #[test]
+    fn allows_localhost_dev_origins() {
+        // Playwright e2e + vite dev — loopback HTTP is acceptable.
+        assert!(is_allowed_cors_origin(b"http://localhost:5173"));
+        assert!(is_allowed_cors_origin(b"http://localhost:3000"));
+        assert!(is_allowed_cors_origin(b"http://127.0.0.1:5173"));
+        // But http on a non-loopback host stays blocked.
+        assert!(!is_allowed_cors_origin(b"http://localhost.evil.com"));
     }
 
     #[test]

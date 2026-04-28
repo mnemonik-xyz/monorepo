@@ -33,7 +33,12 @@ import { loadWasm } from "../lib/wasm";
  * `connect-src` allows this origin.
  */
 
-const MCP_BASE = "https://mcp.mnemonik.xyz";
+// Configurable for e2e tests + local dev. Override via Vite env:
+// `VITE_MCP_BASE=http://localhost:3000 npm run dev` runs against a
+// locally-built mnemonic-mcp release binary.
+const MCP_BASE =
+  (import.meta.env?.VITE_MCP_BASE as string | undefined) ??
+  "https://mcp.mnemonik.xyz";
 
 type Status =
   | { kind: "loading" }
@@ -302,7 +307,9 @@ export default function Sign() {
         </header>
 
         {status.kind === "loading" && (
-          <p className="text-sm text-text-muted">Loading bundle...</p>
+          <p className="text-sm text-text-muted" data-testid="sign-loading">
+            Loading bundle...
+          </p>
         )}
 
         {status.kind === "ready" && (
@@ -340,17 +347,23 @@ export default function Sign() {
         )}
 
         {status.kind === "signing" && (
-          <p className="text-sm text-text-muted">Signing memory...</p>
+          <p className="text-sm text-text-muted" data-testid="sign-signing">
+            Signing memory...
+          </p>
         )}
 
         {status.kind === "success" && (
           <div
             className="rounded-md border border-success/30 bg-success/10 p-4 text-sm text-success"
             role="status"
+            data-testid="sign-success"
           >
             Saved to onchain memory. Return to your AI tool and ask to recall.
             {status.attestationId && (
-              <div className="mt-2 font-mono text-xs">
+              <div
+                className="mt-2 font-mono text-xs"
+                data-testid="sign-success-attestation-id"
+              >
                 attestation_id: {status.attestationId}
               </div>
             )}
@@ -361,6 +374,7 @@ export default function Sign() {
           <div
             className="rounded-md border border-text-muted/30 bg-white/5 p-4 text-sm text-text-muted"
             role="status"
+            data-testid="sign-rejected"
           >
             Rejected. The bundle will be evicted server-side at TTL. Return to
             your AI tool.
@@ -371,6 +385,7 @@ export default function Sign() {
           <div
             className="rounded-md border border-text-muted/30 bg-white/5 p-4 text-sm text-text-muted"
             role="status"
+            data-testid="sign-expired"
           >
             {status.reason}
           </div>
@@ -380,6 +395,7 @@ export default function Sign() {
           <div
             className="rounded-md border border-error/30 bg-error/10 p-4 text-sm text-error"
             role="alert"
+            data-testid="sign-error"
           >
             {status.message}
           </div>

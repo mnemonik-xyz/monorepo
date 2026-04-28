@@ -30,7 +30,11 @@ import { readIdentity } from "../lib/storage";
  * AuthorizeResponse so the browser can complete the handoff.
  */
 
-const MCP_AUTHORIZE_URL = "https://mcp.mnemonik.xyz/oauth/authorize";
+// Configurable for e2e tests + local dev (parallel to Sign.tsx::MCP_BASE).
+const MCP_BASE =
+  (import.meta.env?.VITE_MCP_BASE as string | undefined) ??
+  "https://mcp.mnemonik.xyz";
+const MCP_AUTHORIZE_URL = `${MCP_BASE}/oauth/authorize`;
 
 type Phase =
   | { kind: "loading" }
