@@ -17,7 +17,10 @@ import { useState } from "react";
  */
 
 const MCP_URL = "https://mcp.mnemonik.xyz/mcp";
-const MCP_HOST = "mcp.mnemonik.xyz";
+// Claude.ai's "Add custom connector" form expects a full URL incl.
+// scheme (https://). Without it, Claude shows "Invalid connector URL"
+// before the OAuth flow even starts.
+const MCP_HOST = "https://mcp.mnemonik.xyz/mcp";
 
 function cursorDeeplink(): string {
   // Cursor's `cursor://anysphere.cursor-deeplink/mcp/install` accepts a

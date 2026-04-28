@@ -35,10 +35,10 @@ describe("InstallButtons", () => {
     });
 
     // Claude.ai is a button, not an anchor — it opens a modal that exposes
-    // the paste URL `mcp.mnemonik.xyz`.
+    // the paste URL — must include scheme so Claude.ai accepts it.
     const claude = screen.getByTestId("install-claude-ai");
     fireEvent.click(claude);
     const pasteUrl = screen.getByTestId("claude-paste-url");
-    expect(pasteUrl.textContent).toBe("mcp.mnemonik.xyz");
+    expect(pasteUrl.textContent).toBe("https://mcp.mnemonik.xyz/mcp");
   });
 });

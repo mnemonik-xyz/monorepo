@@ -573,8 +573,21 @@ async fn run_http(state: Arc<mcp::McpState>, host: &str, port: u16) -> anyhow::R
     // attach the layer to the whole MCP-protected subset because the body-peek
     // logic for JSON-RPC method allowlisting (initialize / tools/list) only
     // makes sense on /mcp.
+    // Two paths point to the SAME handler:
+    //   - `/mcp` — explicit, used by Cursor + VS Code (deeplinks pass
+    //     this URL verbatim, MCP_URL = "https://mcp.mnemonik.xyz/mcp")
+    //   - `/`    — apex, used by Claude.ai (Anthropic's connector
+    //     strips the path from the user-supplied URL and POSTs to root;
+    //     we observed `Claude-User` POST/GET hitting `/` after a
+    //     successful OAuth flow, returning 404 because we only had
+    //     `/mcp` registered)
+    //
+    // Both routes are equivalent and run under the same bearer-auth +
+    // governor stack. The duplication is intentional for client
+    // compatibility — pruning either one breaks one of the connectors.
     let mcp_subrouter = Router::new()
         .route("/mcp", post(mcp::mcp_handler))
+        .route("/", post(mcp::mcp_handler))
         .layer(middleware::from_fn_with_state(
             oauth_state.clone(),
             oauth::bearer_auth_middleware,

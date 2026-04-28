@@ -88,7 +88,9 @@ test.describe("/install page", () => {
     // Claude.ai — opens a modal with the paste URL.
     await page.getByTestId("install-claude-ai").click();
     const pasteUrl = await page.getByTestId("claude-paste-url").textContent();
-    expect(pasteUrl?.trim()).toMatch(/^mcp\.[\w.-]+$/);
+    // Must include scheme — Claude.ai rejects bare hostnames in
+    // "Add custom connector" with "Invalid connector URL".
+    expect(pasteUrl?.trim()).toMatch(/^https:\/\/mcp\.[\w.-]+\/mcp$/);
   });
 });
 
