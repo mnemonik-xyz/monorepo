@@ -124,9 +124,17 @@ test("deferred sign + cross-tool recall (browser + API in one harness)", async (
   expect(recallResp.status()).toBe(200);
   const recallBody = await recallResp.json();
   const recallText = recallBody.result.content[0].text as string;
-  // The recall response includes the matched content verbatim — assert
-  // our just-saved string is in there.
-  expect(recallText).toContain(memoryContent);
+  // The server echoes `query` verbatim in the JSON so a plain substring
+  // check passes on the query alone — assert the STRUCTURED `results`
+  // array contains a hit whose content includes our just-saved string.
+  const recallJson = JSON.parse(recallText);
+  expect(Array.isArray(recallJson.results)).toBe(true);
+  expect(recallJson.results.length).toBeGreaterThan(0);
+  const found = recallJson.results.some(
+    (hit: { content?: string }) =>
+      typeof hit.content === "string" && hit.content.includes(memoryContent)
+  );
+  expect(found).toBe(true);
 
   // 6. Cross-tenant isolation — Bob recalls with Alice's content,
   //    server returns zero hits.
@@ -158,9 +166,18 @@ test("deferred sign + cross-tool recall (browser + API in one harness)", async (
   expect(bobRecallResp.status()).toBe(200);
   const bobRecallBody = await bobRecallResp.json();
   const bobText = bobRecallBody.result.content[0].text as string;
-  // Bob must NOT see Alice's content. The server emits "0 results" or
-  // similar empty-set framing when no rows match the owner-scoped query.
-  expect(bobText).not.toContain(memoryContent);
+  // Bob must NOT see Alice's content. The server echoes the query
+  // string verbatim in the response JSON ("query": memoryContent), so
+  // a substring check would false-positive — assert the structured
+  // `results: []` instead. That's the field the AI tool actually reads.
+  const bobJson = JSON.parse(bobText);
+  expect(Array.isArray(bobJson.results)).toBe(true);
+  expect(bobJson.results.length).toBe(0);
+  // Belt-and-braces: scan the structured results for any content that
+  // contains Alice's marker. Defends against future format changes.
+  for (const hit of bobJson.results) {
+    expect(JSON.stringify(hit)).not.toContain(memoryContent);
+  }
 });
 
 test("/sign/<id> with no keypair redirects to /install", async ({ page }) => {
