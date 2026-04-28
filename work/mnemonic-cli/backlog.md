@@ -4,6 +4,33 @@ Items deliberately out of scope for Phase 1 (≤5 dev-days, hackathon MVP). Arch
 
 ---
 
+## TOP PRIORITY — On-chain storage + billing (Phase 1.5)
+
+Flip `STORAGE_MODE=local` → `STORAGE_MODE=full` (Arweave + Solana anchoring) AND `PAYMENT_MODE=none` → `PAYMENT_MODE=balance` (USDC top-up). These two are inseparable economically — see [`.claude/skills/project-knowledge/references/economics.md`](../../.claude/skills/project-knowledge/references/economics.md) for full cost analysis and open economic questions.
+
+**Why this is #1:**
+- Currently all attestations live in SQLite on the VPS only. If `/home/claude/data/attestations.db` is wiped, all memories of all users are lost. There is no recovery — that's the protocol's central value gap right now.
+- Without on-chain anchoring, `mnemonic verify` returns synthetic `local:` IDs. The protocol's headline pitch (verifiable, cross-node, third-party-checkable memory) is invisible until this flips.
+- Without billing, flipping storage to `full` creates an unbounded cost burn — operator funds every user's writes at ~$0.003/sign.
+- Both surfaces touch the CLI: new `mnemonic balance`, `mnemonic top-up`, low-balance warnings; new `verify` output showing real `arweave_tx` + `solana_tx`.
+
+**Approximate scope:**
+- Server config flip + funding: ~½ dev-day + $50 capital outlay (SOL + Irys credits).
+- Async write path (write to SQLite immediately, anchor in background): ~1 dev-day.
+- `PAYMENT_MODE=balance` user surface: top-up flow on webapp, balance display, refund-on-error UX, CLI commands: ~3–5 dev-days.
+- Operational monitoring: SOL/Irys balance alerts, graceful degradation, treasury management policy.
+
+**Open economic questions (need proper deliberation before flipping):**
+- Pricing surface — per-call cost surfaced to user vs flat-rate tier?
+- Free tier shape — first N attestations free, free if private, free for specific identity tiers?
+- Refund-on-error semantics for partial failures.
+- Treasury — where USDC collected goes, multisig vs single-sig, auto-swap.
+- KYC threshold for high-spending identities.
+
+**Recommended order:** spin up a separate user-spec / tech-spec for "on-chain + billing" after `mnemonic-cli` Phase 1 ships. It's not a one-day flip — the economics deserve their own deliberation.
+
+---
+
 ## Auth & Identity
 
 - **TurnkeySigner** — drop-in `Signer` impl that delegates to Turnkey MPC API. Same pubkey survives migration; user moves keypair into Turnkey custody without changing SDK API. Phase 1.5.
