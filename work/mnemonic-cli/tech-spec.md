@@ -11,11 +11,11 @@ branch: dev
 
 Ship two pure-ESM npm packages under the `@mnemonik-xyz` scope:
 
-1. **`@mnemonik-xyz/sdk`** — runtime-agnostic JavaScript/TypeScript library that wraps the public Mnemonic MCP HTTP surface. Provides a `MnemonicClient` with the 5 tool methods (`whoami`, `signMemory`, `recall`, `verify`, `proveIdentity`), an OAuth 2.1 + PKCE helper supporting both interactive (browser-spawn) and headless (pre-issued JWT) modes, and a pluggable `Signer` interface (Phase 1 ships only `LocalSigner`; future `TurnkeySigner` / `WebAuthnSigner` are drop-in replacements). Distributed as ESM only. Targets: Node ≥20, Bun, Deno, Cloudflare Workers, modern browsers (for future Chrome extension).
+1. **`@mnemonik-xyz/sdk`** — runtime-agnostic JavaScript/TypeScript library that wraps the public Mnemonic MCP HTTP surface. Provides a `MnemonicClient` with the 5 tool methods (`whoami`, `signMemory`, `recall`, `verify`, `proveIdentity`), an OAuth 2.1 + PKCE helper supporting both interactive (browser-spawn) and headless (pre-issued JWT) modes, and a pluggable `Signer` interface (Phase 1 ships only `LocalSigner`; future `TurnkeySigner` / `WebAuthnSigner` are drop-in replacements). Distributed as ESM only. Targets: Node ≥20, Bun, Deno, Cloudflare Workers, modern browsers.
 
-2. **`@mnemonik-xyz/cli`** — Node-only CLI binary built on top of the SDK. Implements 7 commands: `init` (generate keypair to `~/.mnemonic/identity.json`), `login` (interactive OAuth or `--token <jwt>` headless), `sign`, `recall`, `verify`, `whoami`, `prove`. Output: human-readable on TTY (ANSI color), `--json` for machine consumption, `--quiet` for CI. Persistence is the CLI's responsibility — SDK itself is stateless beyond its in-memory client.
+2. **`@mnemonik-xyz/cli`** — Node-only CLI binary built on top of the SDK. Implements 7 commands: `init`, `login` (interactive OAuth or `--token <jwt>` headless), `sign`, `recall`, `verify`, `whoami`, `prove`, plus identity bootstrap subcommand (`identity import --file <path>` / `identity export --file <path>`). Output: human-readable on TTY (ANSI color), `--json` for machine consumption, `--quiet` for CI. Persistence (identity file + JWT) is the CLI's responsibility — SDK is stateless.
 
-Both packages live in a new top-level `packages/` directory (npm workspace, not Cargo workspace). The Rust workspace is unaffected. The existing `core/src/wasm/` build (already producing `pkg/` artifacts via `wasm-pack --target web`) is consumed by the SDK as a private dependency; we add a new `wasm-pack --target bundler` build step alongside the existing `--target web` build so the resulting `.wasm` resolves correctly under Node's ESM loader, Bun's runtime, and bundlers (Vite/esbuild) used by webapp + future Chrome extension.
+Both packages live in a new top-level `packages/` directory (npm workspace, not Cargo workspace). The Rust workspace is unaffected. The existing `core/src/wasm/` build (already producing `pkg/` artifacts via `wasm-pack --target web`) is consumed by the SDK as a private workspace dependency. Investigation of correct wasm-pack target for SDK is part of Task 1 (see Decision 3).
 
 ## Architecture
 
@@ -23,101 +23,124 @@ Both packages live in a new top-level `packages/` directory (npm workspace, not 
 
 **New packages (top-level `packages/` directory, npm workspace):**
 
-- `packages/sdk/` — `@mnemonik-xyz/sdk` source. Modules: `client.ts` (MnemonicClient class + 5 tool methods), `oauth.ts` (PKCE helper, interactive + headless modes), `signer.ts` (`Signer` interface + `LocalSigner` impl), `cose.ts` (thin wrapper around `@mnemonic/core` WASM `sign_cose_payload`), `keypair.ts` (Keypair JSON parse/serialize/generate), `errors.ts` (typed error hierarchy), `types.ts` (public TS types). `index.ts` re-exports the public surface.
-- `packages/cli/` — `@mnemonik-xyz/cli` source. Modules: `bin/mnemonic.ts` (the binary entrypoint registered as `mnemonic` in `package.json`'s `bin` field), `commands/{init,login,sign,recall,verify,whoami,prove}.ts`, `output.ts` (TTY-aware formatter with `--json`/`--quiet` modes), `config.ts` (XDG-compliant `~/.mnemonic/` paths + persistence), `errors.ts` (CLI-specific exit code mapping).
+- `packages/sdk/` — `@mnemonik-xyz/sdk` source. Modules: `client.ts` (MnemonicClient + 5 tool methods), `oauth.ts` (PKCE helper + interactive/headless modes), `signer.ts` (`Signer` interface + `LocalSigner` impl), `cose.ts` (thin wrapper around `@mnemonic/core` WASM `sign_cose_payload` / `sign_challenge`), `keypair.ts` (Keypair JSON parse/serialize/generate via WASM `generate_keypair`), `errors.ts` (typed error hierarchy + redaction helpers), `types.ts` (public TS types). `index.ts` re-exports the public surface.
+- `packages/cli/` — `@mnemonik-xyz/cli` source. Modules: `bin/mnemonic.ts` (binary entrypoint), `commands/{init,login,sign,recall,verify,whoami,prove,identity}.ts`, `output.ts` (TTY-aware formatter), `config.ts` (`~/.mnemonic/` paths + persistence with proper file-mode enforcement), `errors.ts`.
 
-**New `packages/core-wasm-bundler/`** — build pipeline only, not a published package. Produces `core/pkg-bundler/` via `wasm-pack build core --target bundler --features wasm` alongside the existing `core/pkg/` (web target). The SDK depends on `pkg-bundler` (works in Node + Bun + bundlers) rather than `pkg` (browser-only ESM with `import.meta.url` resolution).
+**Modified files (server side — Decisions 5 + 7):**
 
-**Modified files:**
+- `mcp/src/oauth.rs` — add a redirect-URI allowlist (does not exist today; current code accepts any `redirect_uri`). Allowlist entries: existing webapp / Cursor / VS Code / Claude.ai redirect schemes plus a regex for `http://127.0.0.1:<port>/callback` and `http://[::1]:<port>/callback` gated to `client_id=mnemonic-cli`. Adding the allowlist is a security improvement over today's behavior. PKCE state is bound to verifier per RFC 7636 §4.4.
+- `mcp/src/api.rs` — new endpoint `POST /api/cli-bootstrap/issue` (authenticated via Bearer JWT; issues a one-time bootstrap-ticket signed by the server, TTL 10 min) and `GET /api/cli-bootstrap/redeem/:ticket` (CLI fetches keypair via this ticket exactly once; ticket invalidated after first read or TTL expiry). Tickets are stored in-memory only (an LRU+TTL map keyed by ticket UUID, similar to existing `pending::PendingBundles`).
 
-- `package.json` (repo root) — convert to npm workspace root: `"workspaces": ["packages/*", "webapp"]`. Webapp already has its own `package.json`; bringing it into the workspace de-duplicates `node_modules`. Backward-compat: webapp still builds standalone via its existing `npm run build`.
-- `webapp/scripts/build-wasm.sh` — additive only: keeps the existing `--target web` build for webapp, adds a parallel `--target bundler` build for SDK consumption.
-- `core/Cargo.toml` — already has `[lib] crate-type = ["cdylib", "rlib"]`. No change.
-- `.github/workflows/ci.yml` — add `node-test.yml` matrix step (Node 20 + Node 22 + Bun latest) running `cd packages/sdk && bun test` and `cd packages/cli && bun test`.
+**Modified files (webapp side — Decision 7):**
 
-**Unchanged (consumed as-is via the public MCP HTTP surface):**
+- `webapp/src/components/IdentityPanel.tsx` — add a "Send to CLI" button that calls `/api/cli-bootstrap/issue` and displays the resulting one-time ticket as `mnemonic identity import --ticket <uuid>` for the user to paste in their terminal.
 
-- `mcp/src/*` — server-side surface stays exactly as-is. CLI is a third MCP client (alongside Cursor/VS Code/Claude.ai) and uses the same `/mcp`, `/oauth/*`, `/api/sign-callback` endpoints.
-- `core/src/wasm/mod.rs` — the existing `sign_cose_payload`, `sign_challenge`, `generate_keypair`, etc. exports are exactly what the SDK needs. No new WASM exports.
-- `core/src/codec/canonical.rs` — canonical CBOR encoder is the source of truth; SDK does not re-implement it (calls `to_canonical_cbor` via WASM).
-- All Rust tests, MCP server, webapp source.
+**Modified files (build pipeline):**
+
+- `package.json` (repo root) — convert to npm workspace: `"workspaces": ["packages/*", "webapp"]`. Webapp keeps its own `package.json` and standalone build chain.
+- `webapp/scripts/build-wasm.sh` — keep existing `--target web` for webapp; add a parallel `wasm-pack` build for SDK consumption (target chosen during Task 1 investigation per Decision 3).
+- `core/Cargo.toml` — add a `golden-fixtures` cargo feature flag (does not exist today) used by Task 4 to emit byte-for-byte CBOR/COSE fixtures the SDK validates against.
+- `.github/workflows/node-test.yml` (new) — Node 20 / Node 22 / Bun matrix.
+
+**Unchanged (consumed as-is via the existing public MCP HTTP surface):**
+
+- `mcp/src/mcp.rs`, `tools.rs`, `payment.rs`, `pricing.rs` — server-side tool dispatch, payment, pricing untouched. CLI is a third MCP client (alongside Cursor/VS Code/Claude.ai) and uses the same `/mcp`, `/oauth/*`, `/api/sign-callback` endpoints.
+- `core/src/wasm/mod.rs` — existing WASM exports (`generate_keypair`, `sign_challenge`, `sign_cose_payload`, `sign_attestation_bundle`, `export_keypair_json`, `import_keypair_json`) cover everything the SDK needs.
+- `core/src/codec/canonical.rs` and `core/src/codec/sign.rs` — canonical CBOR + COSE_Sign1 source of truth in Rust; SDK never re-implements them.
+- All existing Rust tests, the rest of the MCP server, webapp source.
 
 ### How it works
 
 **Onboarding flow (`mnemonic init`):**
 
-1. CLI reads `~/.mnemonic/` — if `identity.json` exists and `--force` is not set, refuse and print existing pubkey.
-2. CLI calls `Keypair.generate()` from SDK, which calls WASM `generate_keypair()` (uses `getrandom` with the `js` feature → `crypto.getRandomValues` on Node/Bun).
-3. CLI writes `~/.mnemonic/identity.json` with mode 0600 (Unix) / NTFS ACL restricting to current user (Windows).
+1. CLI checks `~/.mnemonic/`. If `identity.json` exists and `--force` is absent, refuse and print existing pubkey.
+2. CLI calls `Keypair.generate()` from SDK, which calls WASM `generate_keypair()` (uses `getrandom` with `js` feature → `crypto.getRandomValues`).
+3. CLI writes `~/.mnemonic/identity.json` with mode 0600 (Unix). On Windows, uses `node:fs.fchmod` + sets ACLs via `fs-extra`'s `setReadOnlyForOwner` helper or falls back to a `winston-fs-acl` shim — concrete library choice in Task 1.
 4. Prints pubkey + DID to stdout.
 
 **Auth flow (`mnemonic login`):**
 
 Interactive (default):
-1. CLI generates PKCE verifier (32 random bytes, base64url-encoded) + challenge (`SHA-256(verifier)` base64url).
-2. CLI starts a one-shot HTTP server on `127.0.0.1:<random-free-port>` to receive the OAuth callback. Times out after 5 minutes.
+1. CLI generates PKCE verifier (32 bytes from `crypto.getRandomValues`, base64url) + challenge (`SHA-256(verifier)` base64url) + state (32 bytes random base64url).
+2. CLI binds a one-shot HTTP server on a free port via `node:net.createServer().listen(0)`, addressing `127.0.0.1` only (never `0.0.0.0`). Server times out after 5 minutes and accepts exactly one `GET /callback` before shutting down.
 3. CLI opens the system browser to `https://mc.mnemonik.xyz/oauth/authorize?response_type=code&client_id=mnemonic-cli&redirect_uri=http://127.0.0.1:<port>/callback&code_challenge=<base64url>&code_challenge_method=S256&state=<random>&scope=mcp`.
-4. The browser is redirected to `mnemonik.xyz/oauth/consent` (existing webapp page), which signs the challenge using the localStorage keypair (existing flow). The user clicks "Approve". The webapp POSTs the signature to `/oauth/authorize` (existing endpoint), the server verifies and issues an authorization code, redirects browser back to `http://127.0.0.1:<port>/callback?code=<code>&state=<state>`.
-5. CLI's local HTTP server receives the GET, validates `state`, exchanges `code + verifier` for a JWT via `POST /oauth/token` (existing endpoint, accepts both JSON and form-urlencoded — CLI uses JSON).
+4. The browser redirects to `mnemonik.xyz/oauth/consent`. The user clicks "Approve" — webapp signs the OAuth challenge with the browser-stored keypair (existing flow). The webapp POSTs the signature to `/oauth/authorize`, the server verifies, issues an authorization code, redirects browser back to `http://127.0.0.1:<port>/callback?code=<code>&state=<state>`.
+5. CLI's loopback server validates `state` matches its stored value (PKCE state-to-verifier binding per RFC 7636 §4.4 — verifier and state are stored together in a single Map keyed by state, so a state mismatch terminates the flow before any code exchange), then exchanges code+verifier for a JWT via `POST /oauth/token` (existing endpoint).
 6. CLI writes JWT to `~/.mnemonic/token.json` (mode 0600), shuts down the loopback server, prints "Logged in as `<pubkey>`".
 
-The wrinkle: the user's webapp identity may not match the CLI's local keypair. Two failure modes the design must handle gracefully:
-
-- **Different pubkeys.** CLI's local `~/.mnemonic/identity.json` may be a fresh keypair, but webapp's `localStorage["mnemonic.identity"]` is a different one. The OAuth flow signs with the **webapp** keypair (because consent runs in the webapp). The CLI gets a JWT bound to the webapp's pubkey via `sub`. Then `mnemonic sign` would attempt to sign locally with the CLI's keypair — server rejects because COSE signer ≠ JWT `sub`. **Solution:** CLI's `mnemonic sign` always reads `~/.mnemonic/identity.json` AND the JWT — if their pubkeys disagree, abort with an error: "CLI keypair does not match logged-in identity. Run `mnemonic login --as <pubkey>` to align, or import your webapp keypair via `mnemonic identity import`." `mnemonic identity import` is in scope (see Decision 7).
-
-- **No webapp keypair yet.** First-time CLI user runs `mnemonic init` → has only a CLI keypair. Calling `mnemonic login` opens the consent page in a fresh browser (no localStorage). The webapp's OAuth flow today depends on an already-existing localStorage keypair. **Solution:** CLI `init` writes a new keypair AND opens `https://mnemonik.xyz/install?cli-bootstrap=1&pubkey=<base58>&signature=<>` — webapp recognizes the query string, prompts "Import this keypair into your browser identity?", user clicks Import, webapp populates localStorage from the URL params (signed with same key to prevent tampering). After that, the same CLI keypair is the webapp keypair, and `mnemonic login` works against a unified identity. See Decision 7 for the full bootstrap protocol.
+The keypair-mismatch problem (CLI's local keypair ≠ webapp's browser keypair) is solved by the bootstrap-ticket flow described below — `mnemonic init` for a webapp user prompts to import the existing browser keypair via ticket, so the CLI and webapp always share one identity before login.
 
 Headless (`mnemonic login --token <jwt>`):
-1. CLI receives the pre-issued JWT via flag.
-2. CLI verifies basic shape (HS256 algorithm, has `sub`, `exp` not in past). Does NOT verify signature — server will reject if invalid.
+1. CLI receives the pre-issued JWT.
+2. CLI parses the header, asserts `alg=HS256` and `exp` not in past. Does not verify signature client-side; server rejects on first request.
 3. CLI writes `~/.mnemonic/token.json`. No browser, no callback server.
+
+**Identity bootstrap (`mnemonic identity import --ticket <uuid>` / `--file <path>`):**
+
+Two paths to align CLI's `~/.mnemonic/identity.json` with the webapp's `localStorage["mnemonic.identity"]`:
+
+1. **Server-mediated ticket** (the typical flow). User clicks "Send to CLI" in webapp's IdentityPanel. Webapp POSTs `/api/cli-bootstrap/issue` with Bearer JWT — server creates a one-time bootstrap ticket (random UUID), stores `{ticket_id, ciphertext_of_keypair_json, jwt_sub, expires_at}` in an in-memory LRU+TTL map (10-minute TTL, per-user limit 3 active tickets). Server returns the ticket_id. Webapp displays `mnemonic identity import --ticket <ticket_id>`. User pastes in terminal. CLI calls `GET /api/cli-bootstrap/redeem/:ticket` with no auth (the ticket UUID itself is the capability, like `correlation_id` in browser-mediated signing). Server returns the keypair_json exactly once (atomic remove on first read). CLI writes `~/.mnemonic/identity.json` mode 0600.
+
+2. **File-based** (offline / advanced users). `mnemonic identity export --file ./keypair.json` writes the local keypair as JSON to the path (mode 0600). `mnemonic identity import --file ./keypair.json` reads and writes to `~/.mnemonic/identity.json`. Webapp also exposes its existing IdentityPanel "Download keypair" button which produces a compatible JSON file. No clipboard option in either direction (security: clipboards leak to all OS apps + clipboard managers).
 
 **Sign flow (`mnemonic sign`):**
 
-1. CLI loads `~/.mnemonic/identity.json` (or fails with exit 1 if missing) and `~/.mnemonic/token.json` (or fails with exit 4 if missing/expired).
-2. CLI calls `client.signMemory(content, { tags })` on the SDK.
-3. SDK `client.signMemory` does the following over HTTP:
-   - POST `/mcp` JSON-RPC `tools/call name=mnemonic_sign_memory params={content, tags}` with `Authorization: Bearer <jwt>`.
-   - Server returns either:
-     - **Inline-signed result** (if server is configured for inline-server-signing — current `STORAGE_MODE=local` server path with no browser handoff): SDK gets `attestation_id` directly. Done.
-     - **Pending bundle** (if server is configured for browser-mediated signing — current production path): SDK receives `{correlation_id, sign_url, payload_cbor_base64, expires_at}`. SDK then takes the `payload_cbor_base64`, decodes it, runs WASM `sign_cose_payload(cbor_bytes, keypair)` to produce the COSE_Sign1 envelope, then POSTs it to `/api/sign-callback` with the `correlation_id` and `signer_pubkey`. Server validates the envelope (signer_pubkey matches `sub` of the JWT used to create the pending bundle), persists the attestation, returns `attestation_id`.
-4. CLI formats the result (human/JSON/quiet) and exits 0.
+Server-side reality (confirmed in code review of `mcp/src/tools.rs::sign_memory`): hosted MCP server **always** returns a pending-bundle response for HTTP+JWT clients. There is no inline-signed code path the CLI can take server-side. The SDK ALWAYS handles the pending-bundle:
 
-Crucial: the SDK does NOT use the webapp's `/sign/<id>` browser flow. It uses the same `/api/sign-callback` endpoint that the webapp uses, but bypasses the browser UI because the CLI has the keypair locally. This is the "Inline COSE signing" path described in user-spec § Сценарий 3.
+1. CLI loads `~/.mnemonic/{identity,token}.json` (or fails with exit 1 / 4 if missing).
+2. CLI calls `client.signMemory(content, { tags })`.
+3. SDK posts JSON-RPC `tools/call name=mnemonic_sign_memory` to `/mcp` with `Authorization: Bearer <jwt>`.
+4. Server returns `{correlation_id, sign_url, payload_cbor_base64, expires_at}`. SDK ignores `sign_url` (that's the webapp browser handoff path), decodes `payload_cbor_base64`, runs WASM `sign_cose_payload(cbor_bytes, keypair_json)` to produce the COSE_Sign1 envelope.
+5. SDK POSTs `{correlation_id, signer_pubkey, cose_signed: <base64>}` to `/api/sign-callback` (no Bearer JWT — capability auth via correlation_id, identical to the webapp flow). Server validates the COSE envelope, checks `signer_pubkey` matches the JWT `sub` recorded with the pending bundle, persists the attestation, returns `{attestation_id, signed_at}`.
+6. CLI formats output and exits 0.
 
-**Recall / verify / whoami / prove flows:** straightforward HTTP POST to `/mcp` `tools/call` with the named tool. Output formatting per `--json`/`--quiet`/TTY auto-detect. No COSE signing, no PKCE — just authenticated JSON-RPC.
+This is the same `/api/sign-callback` endpoint the webapp uses; the only difference is the SDK does the COSE signing in-process via WASM instead of in a browser tab. No server changes needed for the sign flow itself.
+
+**Recall / verify flows:** straightforward HTTP `tools/call` to `/mcp` with `Authorization: Bearer <jwt>`. Output formatting per `--json`/`--quiet`/TTY auto-detect.
+
+**Whoami / prove flows (client-side):** these commands do not call server tools, because the existing server-side `mnemonic_whoami` and `mnemonic_prove_identity` tools return the **server**'s identity, not the user's. CLI implements them locally:
+
+- `mnemonic whoami` reads `~/.mnemonic/identity.json` and `~/.mnemonic/token.json`, prints `{pubkey, did, signer_match, jwt_pubkey, attestation_count}`. The `attestation_count` is fetched via `recall(query=' ', topK=0)` against the server (returns total count for the user). If `signer_pubkey != jwt_sub_pubkey`, the output flags the mismatch ("identity ≠ logged-in identity — run `mnemonic identity import` to align").
+- `mnemonic prove [--challenge=<hex>]` reads identity, calls WASM `sign_challenge(keypair_json, challenge_bytes)`, returns `{pubkey, challenge: hex, signature: hex, did}` for the caller to verify with a stock Ed25519 library.
 
 ### Shared Resources
 
-**SDK runtime — none.** SDK is stateless: each `MnemonicClient` instance holds only `{baseUrl, jwt, signer}` in memory. Multiple clients in one process don't share state. No connection pool (uses native `fetch`), no DB, no model. WASM module is loaded once per Node process (cached by the loader), but that's a runtime concern, not application state.
+**SDK runtime — none.** Stateless — `MnemonicClient` instances hold `{baseUrl, jwt, signer}` only. Multiple clients share nothing. Native `fetch`, no connection pool managed by SDK. WASM module is loaded once per JS runtime (cached by the loader).
 
-**CLI runtime — none.** Each CLI invocation is one-shot: read config files, do one HTTP exchange, print result, exit. No daemon, no long-lived state, no shared resources.
+**CLI runtime — none.** One-shot invocation: read config, do one HTTP exchange, print, exit.
 
-**Build-time — `core/pkg-bundler/`.** Produced by `wasm-pack build core --target bundler --features wasm`. Owner: the new `core-wasm-bundler` build script. Consumers: SDK (imports types + WASM module via `import { sign_cose_payload, ... } from '../../../core/pkg-bundler'` — relative path inside the npm workspace, no published package). Single instance per build.
+**Server runtime — bootstrap-ticket store.** New in-memory `BootstrapTickets` LRU+TTL map in `mcp/src/api.rs` (modeled on existing `pending::PendingBundles`). Single instance per `mnemonic-mcp` process, stored in `McpState`. TTL 10 min, max 100 entries, per-user limit 3 active tickets. Owner: API endpoint handlers. Consumers: only the issue + redeem handlers.
+
+**Build-time — wasm-pack output for SDK.** Produced via a `wasm-pack` invocation alongside the existing `--target web` build. Target choice (`bundler` vs `nodejs` vs custom) is investigated in Task 1 — see Decision 3.
 
 ## Decisions
 
 ### Decision 1: Two packages, one substrate (`@mnemonik-xyz/sdk` + `@mnemonik-xyz/cli`)
 
-Ships SDK and CLI as separate npm packages, with CLI depending on SDK. Supports user-spec § "Что делаем" — the explicit requirement that future Chrome extension and agent frameworks reuse the same substrate without re-implementing OAuth, COSE, or MCP wire format. CLI alone is not enough; SDK alone has no immediate consumer. Two packages cleanly partition runtime concerns: SDK is universal (Web APIs only), CLI is Node-only (filesystem, child_process, OS keychain).
+Ships SDK and CLI as separate npm packages, with CLI depending on SDK. Supports user-spec § "Что делаем" — explicit requirement that future Chrome extension and agent frameworks reuse the same substrate without re-implementing OAuth, COSE, or MCP wire format. Two packages cleanly partition runtime concerns: SDK is universal (Web APIs only), CLI is Node-only (filesystem, child_process, OS keychain).
 
-Alternative considered: single combined `@mnemonik-xyz/cli` with internal but unpublished modules. Rejected because user-spec § Зачем explicitly cites Chrome extension and agent framework consumers as primary motivation.
+Alternative considered: single combined `@mnemonik-xyz/cli` with internal but unpublished modules. Rejected — user-spec § Зачем cites Chrome extension and agent framework consumers as primary motivation.
 
 ### Decision 2: Pure ESM, Web APIs only in SDK; Node-specific code stays in CLI
 
-SDK uses only `fetch`, `crypto.subtle`, `URL`, `TextEncoder`, `TextDecoder`. No `node:fs`, `node:http`, `node:child_process` imports. This makes SDK universal across Node ≥20, Bun, Deno, Cloudflare Workers, and modern browsers without bundler-level conditional exports.
-
-Consequence: the OAuth interactive flow's loopback HTTP server cannot live in SDK (uses `node:http`). It lives in CLI's `commands/login.ts`. SDK exposes a primitive: `oauth.buildAuthorizeUrl({...})` returns the URL to open + the verifier+state to remember; CLI's command opens the URL via `open` package, listens on `node:http`, receives callback, calls `oauth.exchangeCodeForToken(...)` from SDK. This split lets a Chrome extension do its own `chrome.identity.launchWebAuthFlow` while reusing the same `buildAuthorizeUrl` + `exchangeCodeForToken`.
+SDK uses only `fetch`, `crypto.subtle`, `URL`, `TextEncoder`, `TextDecoder`. No `node:fs`, `node:http`, `node:child_process`. The OAuth interactive flow's loopback HTTP server lives in CLI's `commands/login.ts` (uses `node:http`); SDK exposes primitives `oauth.buildAuthorizeUrl({...})` and `oauth.exchangeCodeForToken(...)` so a Chrome extension or other host can do its own redirect-handling (e.g. `chrome.identity.launchWebAuthFlow`) while reusing the same primitives.
 
 Supports user-spec MUST "Pure ESM, runtime-agnostic. No `node:*` imports in `sdk/`."
 
-### Decision 3: COSE backend = `@mnemonic/core` WASM (`pkg-bundler` build target)
+### Decision 3: SDK consumes `@mnemonic/core` WASM via workspace path; correct wasm-pack target investigated in Task 1
 
-SDK consumes the existing Rust → WASM core via a new `wasm-pack build core --target bundler --features wasm` build output (alongside the existing `--target web` output for webapp). The bundler target produces ESM that resolves correctly under Node's native ESM loader (uses `fs.readFile` for the `.wasm` blob), Bun's loader, and esbuild/Vite/webpack bundlers. The web target uses `import.meta.url` + `fetch`, which works in browsers but breaks in Node CJS-leaning environments.
+SDK depends on the existing `core/` Rust crate compiled to WASM via `wasm-pack`. Phase 1 does NOT publish `@mnemonic/core` to npm — SDK consumes the WASM artifact via a relative workspace path (`../../core/pkg-{target}/`).
 
-Same canonical CBOR + COSE_Sign1 logic the server uses to verify — byte-for-byte identical, because it IS the same code. Eliminates the entire class of bugs around "JS canonical CBOR almost matches Rust canonical CBOR but differs in 0.1% of edge cases."
+The correct `wasm-pack` target for SDK consumption is **the first deliverable of Task 1**. Three viable options to evaluate:
+- `--target web` — the existing build. Uses `import.meta.url` + `fetch` for `.wasm` loading. Works in browsers; works in Node 20 ESM with native `fetch`; needs verification under Bun.
+- `--target nodejs` — emits `require('fs').readFileSync`. Works in Node CJS-leaning paths; not pure ESM.
+- `--target bundler` — emits ESM with synchronous WASM imports, requires a bundler that understands `.wasm` (Vite, esbuild, webpack 5+). Works in browsers via bundler; **does not load standalone in Node or Bun**.
 
-Cost: 442KB WASM in SDK bundle. Acceptable for Phase 1; swap to `@noble/curves` + custom CBOR is in backlog if size complaints arrive. Public SDK API does not depend on the COSE backend, so swap is invisible to consumers.
+Task 1's smoke test exercises `import { sign_cose_payload } from '@mnemonik-xyz/core-wasm'` from a Node 20 process AND a Bun process. Whichever target passes both is the target the SDK uses. If none passes both, the fallback is to ship two builds (`pkg-web` for browsers, `pkg-nodejs` for Node/Bun) and use `package.json` conditional exports (`{exports: { ".": { "import": "./web.js", "node": "./node.js" }}}`).
+
+The same canonical CBOR + COSE_Sign1 Rust code that the server uses to verify is what the SDK calls — byte-for-byte identical, eliminating the entire class of bugs around "JS canonical CBOR almost matches Rust canonical CBOR but differs in 0.1% of edge cases".
+
+Cost: ~442KB WASM in SDK bundle. Acceptable for Phase 1; swap to `@noble/curves` + custom CBOR is in backlog if size complaints arrive. Public SDK API does not depend on the COSE backend.
 
 Supports user-spec "COSE round-trip CBOR byte-for-byte without re-encoding".
 
@@ -130,97 +153,99 @@ interface Signer {
 }
 ```
 
-Phase 1 ships `LocalSigner` (in-memory secret, signs via WASM `sign_with_secret`). Future `TurnkeySigner` (Phase 1.5), `WebAuthnSigner` (Phase 2) are drop-in replacements without API change.
+Phase 1 ships `LocalSigner`, which holds the secret in memory and signs by calling WASM `sign_challenge(keypair_json, bytes)` — that's the existing WASM export for raw Ed25519 signatures over arbitrary byte payloads (NOT to be confused with `sign_cose_payload`, which wraps server-canonical-CBOR in a COSE_Sign1 envelope and is used in the sign-flow only).
 
-`MnemonicClient` accepts `signer: Signer` in its constructor; never inspects the secret directly. This is the architectural opening for the user-spec § "future Turnkey compatibility" requirement.
+Future `TurnkeySigner` (Phase 1.5), `WebAuthnSigner` (Phase 2) are drop-in replacements without API change. `MnemonicClient` accepts `signer: Signer` in its constructor; never inspects the secret directly.
 
-### Decision 5: OAuth interactive mode uses loopback redirect (`http://127.0.0.1:<random-port>/callback`)
+### Decision 5: OAuth — create redirect-URI allowlist (it does not exist today) including loopback for CLI
 
-Standard practice for native CLI OAuth (RFC 8252). The CLI binds to a random free port via `node:net.createServer().listen(0)`, then registers `http://127.0.0.1:<port>/callback` as the `redirect_uri` in the authorize URL. PKCE (`S256`) + a server-side `redirect_uri` allowlist are sufficient mitigations against malicious local apps stealing the code (see RFC 8252 §7).
+`mcp/src/oauth.rs` currently accepts **any** `redirect_uri` from the authorize request — verified by reviewing the existing code. This is a latent vulnerability (RFC 8252 §7) regardless of CLI: a malicious client could direct the redirect to an attacker-controlled domain. Phase 1 of mnemonic-cli adds a redirect-URI allowlist, with these entries:
 
-**Server-side change required:** `mcp/src/oauth.rs` currently allows the webapp origin and a static set of client redirect URIs (Cursor, VS Code, Claude.ai). It needs to allow loopback URIs of the form `http://127.0.0.1:*` and `http://[::1]:*` for `client_id=mnemonic-cli`. This is a single regex/predicate addition in the existing redirect-URI allowlist. Documented in Deviation 1 below — the user-spec did not anticipate that server config change.
+- `https://mnemonik.xyz/oauth/consent` (existing webapp consent page).
+- `cursor://anysphere.cursor-deeplink/mcp/install`, the VS Code variant, the Claude.ai variant — copied from current `cors_policy.rs` and the OAuth flow's effective redirect-URIs as observed in production.
+- A regex matcher for `^http://127\.0\.0\.1:[0-9]+/callback$` and `^http://\[::1\]:[0-9]+/callback$`, gated to `client_id=mnemonic-cli`.
+
+PKCE verifier and state are stored together in the server's PKCE-state map (`{state -> {verifier_challenge, redirect_uri, client_id}}`). Token-exchange validates that `verifier`, `state`, and `redirect_uri` all match the originally-issued tuple; mismatch → 400. Per RFC 7636 §4.4 + RFC 8252 §7.
+
+This is a security improvement over today's behavior — the unauthenticated redirect-URI acceptance was not on the user-spec radar, but is dangerous regardless of CLI shipping. **Documented in Deviation 1.**
 
 ### Decision 6: OAuth headless mode = `--token <jwt>` opaque pass-through
 
-`mnemonic login --token <jwt>` writes the user-supplied JWT to `~/.mnemonic/token.json` after minimal shape validation (header is HS256, payload has `sub`, `exp` is in the future). Signature is not verified on the client — server rejects invalid JWTs on first request, which the CLI surfaces as exit code 4.
+`mnemonic login --token <jwt>` writes the user-supplied JWT after parsing header (assert `alg=HS256`, `exp` in future). Signature is not verified client-side — server rejects invalid JWTs on first request, surfaced as exit code 4. Works for CI / serverless / no-display environments. Token's 1-hour TTL applies; refresh tokens are explicitly backlog.
 
-This shape works for: CI environments (token issued via webapp, pasted into env var), serverless functions, headless Docker. The token's 1-hour TTL applies — refresh tokens are explicitly backlog (user-spec ограничения "JWT TTL = 1h").
+### Decision 7: CLI ↔ webapp identity bootstrap via server-issued one-time tickets
 
-### Decision 7: CLI ↔ webapp identity bootstrap
+The earlier draft proposed a `--cli-bootstrap` URL with a self-signed pubkey blob. **Security audit flagged this as replayable** — signing a pubkey with the same keypair proves possession of the secret to the holder of either side, but the URL itself is freely replayable: anyone who intercepts it can re-import the keypair into a fresh webapp localStorage. Replaced with a server-mediated bootstrap-ticket flow:
 
-Two bootstrap paths to handle the keypair-mismatch problem identified in § "Architecture → How it works":
+1. **Webapp → CLI direction.** User has a browser-side keypair (`localStorage["mnemonic.identity"]`) and wants to import it on the CLI. In webapp's IdentityPanel, user clicks "Send to CLI". Webapp POSTs the localStorage keypair JSON to `/api/cli-bootstrap/issue` with `Authorization: Bearer <webapp-JWT>`. Server stores the keypair_json in `BootstrapTickets` (new in-memory LRU+TTL map: 10-min TTL, max 100 entries, max 3 per `jwt.sub`), returns `ticket_id` (UUID v4). Webapp displays `mnemonic identity import --ticket <uuid>`. User pastes in terminal. CLI calls `GET /api/cli-bootstrap/redeem/:ticket` with no auth (the UUID is the capability — same pattern as `correlation_id` in browser-mediated signing). Server **atomically** removes-and-returns the entry on first call (subsequent calls return 410 Gone). CLI parses keypair, writes to `~/.mnemonic/identity.json` mode 0600.
+2. **CLI → webapp direction.** Less common; user has CLI-generated keypair and wants to import to browser. `mnemonic identity export --file ./keypair.json` writes file. User uploads via webapp IdentityPanel's existing "Import keypair" button (already exists — accepts a JSON file from `<input type=file>`).
 
-1. **CLI-first user (typical):** `mnemonic init` generates a keypair locally. On the next `mnemonic login`, CLI detects no `~/.mnemonic/token.json`, opens the browser to `https://mnemonik.xyz/install?cli-bootstrap=1&pubkey=<base58>&signature=<base64url-sig-of-pubkey>`. The webapp's `/install` page checks for the `cli-bootstrap` flag, prompts "Import CLI keypair into browser identity?". Verifies the signature is over the pubkey using that same pubkey (proves possession of secret). On user approval, the user pastes the secret bytes manually (or the CLI supports `mnemonic identity export --to-clipboard` and the webapp reads from clipboard). After import, both sides share the same identity, OAuth flow proceeds normally.
+**No clipboard option** in either direction (security: clipboards are read by every OS app and most clipboard managers).
 
-2. **Webapp-first user:** user already has `localStorage["mnemonic.identity"]` set up. They run `mnemonic init --import-from-webapp`, which prints a URL `https://mnemonik.xyz/install?cli-export=1`. Webapp shows "Export keypair to CLI: copy this command" and renders `mnemonic identity import '<base64-of-keypair-json>'` for the user to copy and paste in their terminal. CLI command parses, validates, writes `~/.mnemonic/identity.json`. After this, both sides share identity.
+The flow eliminates phishing replays: tickets are server-issued, single-use, time-bound, scoped to the issuing user's JWT. The keypair never crosses an unencrypted URL.
 
-This is the ugly part of the design. Reason: the OAuth challenge-signing happens in the webapp (existing flow), but the COSE-signing for `sign_memory` happens in the CLI (Decision 3 of user-spec). They MUST use the same key, otherwise server rejects the COSE envelope after issuing the JWT against a different pubkey.
+Supports user-spec § "MCP-compatible identity portability between webapp and CLI".
 
-Three CLI commands implement this: `mnemonic identity export [--to-clipboard]`, `mnemonic identity import <base64-or-path>`, and the implicit `--cli-bootstrap` URL parameter on `mnemonic init` to pre-fill the import on the webapp side. Adds a small `mnemonic identity` subcommand surface beyond the user-spec's 7 commands.
+### Decision 8: CLI persistence at `~/.mnemonic/{identity,token}.json`, mode 0600 / Windows ACL
 
-### Decision 8: CLI persistence at `~/.mnemonic/{identity.json,token.json}`, mode 0600
+Plain JSON files in user's home directory. Unix: mode 0600 via `node:fs.chmodSync`. Windows: explicit ACL setting via `fs.chmod` (no-op) plus `winston-fs-acl` or equivalent shim that calls Windows `icacls` to restrict access to current user only. Concrete library choice in Task 1 — recommend `fs-extra`'s `setReadOnlyForOwner` which wraps the platform-specific calls. If no library covers all targets, use `child_process.execSync('icacls "${file}" /inheritance:r /grant:r "${process.env.USERNAME}:F"')` on Windows specifically.
 
-Plain JSON files in the user's home directory. Mode 0600 on Unix; on Windows, NTFS ACL setting `Restrict to current user` (via `node:fs.chmodSync` is a no-op on Windows; we use `winston` or `acl-windows`-style helper). Plain JSON, not encrypted at rest — same security model as Cursor's `~/.cursor/`, `gh`'s `~/.config/gh/`, `npm`'s `~/.npmrc`. OS keychain integration (macOS Keychain / Linux Secret Service / Windows Credential Manager) is in backlog.
+Plain JSON, not encrypted at rest — matches Cursor's `~/.cursor/`, gh's `~/.config/gh/`, npm's `~/.npmrc`. OS keychain (macOS Keychain / Linux Secret Service / Windows Credential Manager) is in backlog.
 
-XDG support via `XDG_CONFIG_HOME` env (`~/.config/mnemonic/` if set) is in backlog — Phase 1 just uses `~/.mnemonic/` for simplicity.
+XDG support via `XDG_CONFIG_HOME` is in backlog — Phase 1 uses `~/.mnemonic/`.
 
 ### Decision 9: npm scope = `@mnemonik-xyz`
 
-User-confirmed: org `mnemonik-xyz` is registered on npm; the more compact `@mnemonik` and `@mnemonic` scopes were already taken. Publishing under `@mnemonik-xyz/sdk` and `@mnemonik-xyz/cli`. Migration to a shorter scope is a future deploy task if either becomes available.
+User-confirmed: org `mnemonik-xyz` registered on npm; `@mnemonik` and `@mnemonic` were taken. Publishing under `@mnemonik-xyz/sdk` and `@mnemonik-xyz/cli`. Migration is a future deploy task.
 
-### Decision 10: Output format details
+### Decision 10: Output format + exit codes + logging redaction
 
-- **Default (TTY):** ANSI color, human-readable, structured per command.
-- **Default (pipe / non-TTY):** plain text, no color.
-- **`--json`:** machine-readable JSON to stdout, all human-oriented messages (progress, hints) to stderr.
-- **`--quiet`:** suppress all stdout except `--json` payload (still emitted) and exit code.
-- **`--no-color`:** force plain text on TTY.
+- **TTY default:** ANSI color, human-readable.
+- **Pipe / non-TTY default:** plain text, no color.
+- **`--json`:** machine-readable JSON to stdout; human messages (progress, hints) to stderr.
+- **`--quiet`:** suppress stdout except `--json` payload + exit code.
+- **`--no-color`:** force plain text.
 
-Exit codes: `0` success, `1` user error (bad args, missing files), `2` server/network error (5xx, connection refused), `3` integrity failure (verify=tampered), `4` auth error (no token, expired, invalid signature). These match user-spec § Критерии приёмки.
+Exit codes: `0` success, `1` user error, `2` server/network error, `3` integrity failure (verify=tampered), `4` auth error.
 
-### Decision 11: Cross-runtime CI matrix
+**Logging redaction** (in `packages/{sdk,cli}/src/errors.ts`): never include JWT, identity secret, OAuth code, or PKCE verifier in error messages, exception payloads, or `console.error` output. Errors carry a redacted `safe_message` field (no secrets) and a developer-facing `cause` chain. Tests in Task 8 assert that JWT-shaped strings (`eyJ...`) and 64-byte hex-encoded secrets never appear in `process.stderr.write`.
 
-CI runs unit + integration on **Node 20, Node 22, Bun latest**. Deno + Cloudflare Workers smoke is manual pre-release (backlog → automate). Bun is included from day 1 because user-spec § Q10 explicitly chose Bun-included as a primary runtime; treating it as a first-class CI target prevents Bun-specific regressions (e.g. `crypto.subtle` Ed25519 support, ESM resolution edge cases).
+### Decision 11: Cross-runtime CI matrix on every PR
 
-### Decision 12: Test fixture: "golden COSE round-trip" against Rust
+CI runs unit + integration on **Node 20, Node 22, Bun latest, Deno 1.40+** — Deno is upgraded from "manual smoke" to a CI matrix entry because the test-reviewer flagged Medium-likelihood Deno-specific risks (Ed25519 in `crypto.subtle`, ESM resolution edge cases). Cloudflare Workers smoke remains pre-release manual (no Workers test runner integrates well today; revisit when `workerd` exposes one).
 
-A test fixture in `packages/sdk/test/fixtures/golden-cose.json` containing pairs `{input_bytes_hex, expected_canonical_cbor_hex, expected_cose_envelope_hex}` generated by running the existing Rust `core` crate and capturing outputs. SDK unit test asserts WASM `sign_cose_payload` produces byte-identical output. If WASM ever drifts from Rust (e.g. wasm-bindgen ABI change), this test catches it before any server-side rejection.
+### Decision 12: Test fixture: golden COSE round-trip with enforced lockstep
 
-The fixture is regenerated whenever Rust core's CBOR/COSE encoder changes, via a small `cargo test --features golden-fixtures` target that emits JSON. CI runs `cargo test --features golden-fixtures` and the SDK test in a single workflow so they stay in lockstep.
+A new `golden-fixtures` cargo feature flag is added to `core/` (does not exist today). Under this feature, a Rust integration test in `core/tests/golden_fixtures.rs` emits a JSON file of `{input_bytes_hex, expected_canonical_cbor_hex, expected_cose_envelope_hex}` triples (deterministic, ~50 cases covering edge cases of CBOR canonical encoding). The JSON file is committed to `packages/sdk/test/fixtures/golden-cose.json` via a script `cargo run --features golden-fixtures --bin gen-fixtures > packages/sdk/test/fixtures/golden-cose.json`.
 
-[TECHNICAL] Justification: user-spec MUST mentions "COSE-signed CBOR byte-for-byte" but doesn't prescribe how. This fixture is the implementation mechanism.
+**Lockstep enforcement** (test-reviewer requirement): the file's checksum is also written to `packages/sdk/test/fixtures/golden-cose.sha256`. CI workflow (`.github/workflows/node-test.yml`) runs `cargo run --features golden-fixtures --bin gen-fixtures | sha256sum | diff - packages/sdk/test/fixtures/golden-cose.sha256`. If the Rust fixture generator output drifts from the committed checksum, CI fails the SDK test workflow. Forces regeneration whenever Rust core's CBOR/COSE encoder changes.
 
-### Decision 13: SDK is published, CLI bin is published; no internal packages published
+[TECHNICAL] Justification: user-spec MUST mentions "byte-for-byte" without prescribing how. This is the implementation mechanism with concrete CI enforcement.
 
-`@mnemonik-xyz/sdk` and `@mnemonik-xyz/cli` are public npm packages. Internal helpers (`packages/core-wasm-bundler/` build script, golden fixtures, etc.) live in the monorepo but are not published. `package.json` of each public package lists only the public surface in `exports`.
+### Decision 13: Public surface only — `@mnemonik-xyz/sdk` + `@mnemonik-xyz/cli`
 
-[TECHNICAL] Justification: prevents accidental publishing of internal helpers + keeps the npm-published surface small.
+Internal helpers (build scripts, golden fixtures, mock server, etc.) live in the monorepo but are not published. `package.json` of each public package lists only public surface in `exports`. NPM provenance attestations (`npm publish --provenance`) are required on every release — see Task 15.
+
+[TECHNICAL] Justification: prevents accidental publishing of internal helpers + adds supply-chain integrity (sigstore-backed provenance lets consumers verify the package was built from a specific git commit).
+
+### Decision 14: Server tools `mnemonic_whoami` / `mnemonic_prove_identity` are NOT used by CLI
+
+The existing server-side tools `mnemonic_whoami` (returns server keypair pubkey) and `mnemonic_prove_identity` (signs a challenge with server keypair) are **not the user-facing semantics** the CLI's `whoami` / `prove` commands need. The CLI implements them client-side instead: `whoami` reads local identity + JWT and prints user's pubkey/DID; `prove` calls WASM `sign_challenge` locally and prints `{pubkey, challenge, signature}`. No server changes required for these commands.
+
+[TECHNICAL] Justification: completeness validator surfaced this — the existing server tools return server identity, not user identity. Reframing whoami/prove as client-side fixes the semantics without adding new server tools.
 
 ## Data Models
 
-**No new SQLite tables.** CLI is a client of the existing MCP server; all writes go through the existing `attestations` / `memory_embeddings` / `attestation_costs` tables, scoped by the existing `owner_pubkey` column.
+**No new SQLite tables.** CLI is a client of the existing MCP server; all writes go through existing `attestations` / `memory_embeddings` / `attestation_costs` tables, scoped by `owner_pubkey`.
 
 **New file formats (CLI-local):**
 
-- `~/.mnemonic/identity.json`:
-  ```json
-  {
-    "secret": [/* 64-byte Solana keypair (32 seed + 32 pubkey), as number[64] */],
-    "pubkey_base58": "..."
-  }
-  ```
-  Identical shape to `localStorage["mnemonic.identity"]` in webapp. Mode 0600.
+- `~/.mnemonic/identity.json`: `{secret: number[64], pubkey_base58: string}`. Mode 0600. Identical shape to webapp's `localStorage["mnemonic.identity"]`.
+- `~/.mnemonic/token.json`: `{jwt: string, pubkey_base58: string, issued_at: ISO-8601, expires_at: ISO-8601}`. Mode 0600. `pubkey_base58` decoded from JWT `sub` for fast lookup.
 
-- `~/.mnemonic/token.json`:
-  ```json
-  {
-    "jwt": "eyJ...",
-    "pubkey_base58": "...",
-    "issued_at": "2026-04-29T10:23:45Z",
-    "expires_at": "2026-04-29T11:23:45Z"
-  }
-  ```
-  `pubkey_base58` is decoded from the JWT's `sub` claim and stored for fast lookup without parsing JWT every command. Mode 0600.
+**New server data (in-memory only):**
+
+- `BootstrapTickets` map: `{ticket_id: string, keypair_json: string, jwt_sub: string, expires_at: i64}`. LRU+TTL store. Lives in `mcp/src/api.rs`. 10-min TTL, max 100 entries, max 3 active per `jwt_sub`. Cleared on server restart (acceptable — tickets are short-lived).
 
 **SDK public types (TypeScript):**
 
@@ -231,9 +256,9 @@ export interface SignerInterface {
 }
 
 export interface MnemonicClientConfig {
-  baseUrl: string;                    // e.g. "https://mc.mnemonik.xyz"
+  baseUrl: string;
   signer: SignerInterface;
-  jwt?: string;                       // headless mode
+  jwt?: string;
 }
 
 export interface SignMemoryOptions {
@@ -258,174 +283,215 @@ export type VerifyResult =
 
 ### New packages (`packages/sdk/package.json`)
 
-- `@mnemonik-xyz/core-wasm` (workspace-internal, built from `core/pkg-bundler/`) — COSE / canonical CBOR / Ed25519 via WASM.
-- `@noble/ed25519` ≥ 2.1 (≈ 12KB) — fallback signer for runtimes where `crypto.subtle.sign({name:'Ed25519'})` is unavailable. Loaded lazily.
+- `@mnemonic/core-wasm` (workspace-internal, built from `core/pkg-<target>/`) — COSE / canonical CBOR / Ed25519 via WASM.
+- `@noble/ed25519` ≥ 2.1 (≈ 12KB) — fallback signer for runtimes without `crypto.subtle.sign({name:'Ed25519'})`.
 
 ### New packages (`packages/cli/package.json`)
 
 - `@mnemonik-xyz/sdk` (workspace dependency).
-- `commander` ≥ 12 — argv parsing.
-- `kleur` (≈ 1KB) — ANSI color, no dependencies. Smaller than `chalk`.
-- `open` ≥ 10 — cross-platform browser open (replaces `node:child_process` boilerplate).
+- `commander` ≥ 12.
+- `kleur` (≈ 1KB).
+- `open` ≥ 10.
+- A Windows-ACL helper (concrete library chosen in Task 1; candidates: `fs-extra` `setReadOnlyForOwner`, or `child_process.execSync` shelling to `icacls`).
 
-### Devdependencies (both packages)
+### Devdependencies
 
-- `vitest` ≥ 1.6 — unit + integration test runner. Already used in webapp.
+- `vitest` ≥ 1.6.
 - `typescript` ≥ 5.4.
-- `@types/node` for CLI only.
+- `@types/node` for CLI.
 
 ### Removed packages — None.
 
 ### Existing (used as-is)
 
 - `wasm-pack` (already installed on dev + VPS).
-- Existing `@mnemonic/core` Rust crate code in `core/`. No Rust source changes.
+- Existing `@mnemonic/core` Rust crate code in `core/`. No Rust source changes for the SDK consumption itself; the only Rust changes are `mcp/src/oauth.rs` (Decision 5), `mcp/src/api.rs` (Decision 7's new endpoints), `core/Cargo.toml` (`golden-fixtures` feature flag), and `core/tests/golden_fixtures.rs` (new test).
 
 ## Testing Strategy
 
-Per user-spec size **M** and § "Тестирование": four layers.
+Per user-spec size **M**: four layers + redaction tests.
 
 ### Unit tests (vitest, every PR)
 
-- **SDK:** mock `fetch`, assert request shapes for each of the 5 tool methods. Specifically: OAuth `buildAuthorizeUrl` produces correct PKCE+state params; `exchangeCodeForToken` POSTs to `/oauth/token` with correct body; `signMemory` correctly handles both inline-signed and pending-bundle response shapes; `LocalSigner.sign(bytes)` produces deterministic 64-byte Ed25519 signature verifiable via `verify_signature` (round-trip check).
-- **`Signer` contract:** abstract test suite that any `Signer` impl must pass. `LocalSigner` passes it; future `TurnkeySigner` is required to pass it.
-- **Golden COSE fixture:** see Decision 12.
-- **CLI:** argv parser per command, output formatter for TTY/pipe/json/quiet, exit-code mapping for known errors.
+- **SDK:** mock `fetch`, assert request shapes for each of the 5 tool methods. OAuth `buildAuthorizeUrl` emits correct PKCE+state params; `exchangeCodeForToken` POSTs to `/oauth/token` with correct body. `signMemory` correctly handles the **pending-bundle** response shape (the only shape the server returns); SDK never assumes inline-signed responses. `LocalSigner.sign(bytes)` produces deterministic 64-byte Ed25519 signatures verifiable via `sign_challenge` round-trip.
+- **`Signer` contract suite:** `packages/sdk/test/signer-contract.ts` exports a function `runSignerContract(signer: Signer)` that asserts: `pubkey` is non-empty base58, `sign(bytes)` returns 64 bytes, signature verifies via WASM `verify_signature(pubkey_base58, bytes, sig)`, signing identical input twice produces identical signature (Ed25519 deterministic), signing rejects on null/empty input. `LocalSigner` runs through the contract; future `TurnkeySigner` is required to.
+- **Golden COSE fixture:** Decision 12. SDK test reads `packages/sdk/test/fixtures/golden-cose.json`, runs each input through WASM `sign_cose_payload` + `to_canonical_cbor`, asserts byte-for-byte equality. CI lockstep gate ensures Rust-side regeneration is in sync.
+- **Identity bootstrap (Decision 7):** unit tests for `mnemonic identity import --ticket <uuid>` against a mock `BootstrapTickets` server (success, expired ticket → 410, double-redeem → 410, malformed UUID → 400, server-issued keypair → identity.json written with mode 0600).
+- **Logging redaction:** assert no JWT-shape strings (`/^eyJ[A-Za-z0-9_-]+$/`) or 128-hex-char secrets ever appear in captured stderr/stdout during error paths.
+- **CLI:** argv parser per command, output formatter for TTY/pipe/json/quiet, exit-code mapping for known errors. Concrete file: `packages/cli/test/{init,login,sign,recall,verify,whoami,prove,identity,output}.test.ts`.
 
-Coverage target: SDK ≥85% lines / ≥80% branches. CLI ≥75% lines.
+Coverage: SDK ≥85% lines / ≥80% branches. CLI ≥75% lines.
 
-### Integration tests (vitest + mock HTTP server, every PR)
+### Integration tests (vitest + in-process mock MCP server, every PR)
 
-- Spin up a mock MCP server in-process (handlers for `/mcp`, `/oauth/authorize`, `/oauth/token`, `/api/sign-callback`). Assert SDK end-to-end flows: OAuth interactive (skipping browser, calling `exchangeCodeForToken` directly with mocked code), `signMemory` against pending-bundle response, recall, verify.
-- CLI through `execa` against the same mock server. Asserts: correct stdout/stderr/exit code per scenario.
+`packages/sdk/test/mock-server.ts` exposes:
+- `/mcp` JSON-RPC endpoint (handles `tools/list`, `tools/call` with all 5 tools)
+- `/oauth/{authorize,token,register}` endpoints (full PKCE round-trip)
+- `/api/sign-callback` (validates COSE envelope, emits `attestation_id`)
+- `/api/cli-bootstrap/{issue,redeem}` (one-time ticket pattern matching server)
+- **Fault-injection toggles** (test-reviewer requirement): `withFault('5xx-on-token-exchange')`, `withFault('malformed-cbor-in-pending')`, `withFault('expired-jwt-after-N-requests')`, `withFault('signer-pubkey-mismatch')`, `withFault('callback-timeout')`. Each integration test exercises at least one fault path.
+
+CLI integration tests via `execa` against the same mock server.
 
 ### Manual smoke tests (pre-release checklist in `tasks/`)
 
-- `npm install -g @mnemonik-xyz/cli` from a freshly built `.tgz`.
-- `mnemonic init` → identity file appears, mode 0600.
-- `mnemonic login` → browser opens, OAuth flow completes, token appears.
-- `mnemonic sign "hello"` → attestation_id returned within 5s.
-- `mnemonic recall "hello"` → finds the just-signed attestation.
-- `mnemonic verify <id>` → exit 0.
-- Cross-tool check: same pubkey logged into Claude.ai sees the CLI-signed attestation via `mnemonic_recall`.
+`packages/cli/SMOKE.md`:
+
+1. `npm install -g @mnemonik-xyz/cli` from a freshly built `.tgz`.
+2. `mnemonic init` → `~/.mnemonic/identity.json` appears, mode 0600 (verify with `stat`).
+3. `mnemonic login` → browser opens, OAuth flow completes, token persisted.
+4. `mnemonic sign "hello"` → attestation_id returned within 5s.
+5. `mnemonic recall "hello"` → finds the attestation.
+6. `mnemonic verify <id>` → exit 0.
+7. `mnemonic identity export --file /tmp/k.json` → file mode 0600.
+8. `mnemonic identity import --ticket <issued-via-webapp>` round-trip works.
+9. Cross-tool: same pubkey logged into Claude.ai sees the CLI-signed attestation via `mnemonic_recall`.
+10. Negative paths: `mnemonic verify <stranger-attestation-id>` → exit 1 with not_found.
 
 ### E2E tests (release pipeline, not PR-gating)
 
-- One scenario: `init → login --token <pre-issued> → sign → recall` against a real `STORAGE_MODE=local` self-hosted MCP server on the CI runner. Token pre-issued via `mcp/src/bin/mint-test-jwt.rs`. Validates that real network + real WASM + real CBOR + real OAuth actually compose end-to-end.
+One full scenario: `init → login --token <pre-issued via mint-test-jwt> → sign → recall` against a real `STORAGE_MODE=local` self-hosted MCP on a CI runner.
 
 ### Cross-runtime matrix
 
-Unit + integration suites run on **Node 20, Node 22, Bun latest** in CI. Deno + Cloudflare Workers smoke runs manually before each release (automate → backlog).
+Unit + integration suites on **Node 20, Node 22, Bun latest, Deno 1.40+** in CI. Cloudflare Workers smoke pre-release manual.
 
 ## Agent Verification Plan
 
 ### Verification approach
 
-Most of the spec is internally testable via unit + integration tests against mocks. Two areas need real-environment verification:
-
-1. **OAuth interactive flow against live `mc.mnemonik.xyz`.** Mock can't replicate the full PKCE round-trip including loopback callback. Verified manually pre-release.
-2. **WASM bundler-target build resolves correctly under Node 20, Node 22, Bun.** Smoke-tested in CI matrix; manually verified once before merge.
-3. **`mnemonic install` deeplink + `cli-bootstrap` URL on webapp** (Decision 7) — webapp-side verification needs Playwright MCP since it's a UI flow.
+1. **OAuth interactive flow against live `mc.mnemonik.xyz`** — manual pre-release verification (mock can't fully replicate real PKCE with loopback callback against real CertificateAuthority TLS termination).
+2. **wasm-pack target choice** — Task 1's smoke test (Node + Bun import works) is the deciding artifact.
+3. **Webapp `cli-bootstrap` UI flow** (Decision 7 / Task 7) — Playwright MCP verifies "Send to CLI" button, ticket display, end-to-end import.
 
 ### Tools required
 
-- **Bash MCP** (basic) — install package, run smoke commands, inspect file modes.
-- **Playwright MCP** — verify the webapp `cli-bootstrap` page renders, accepts the URL params, and writes localStorage on user approval.
-- **None of:** browser/macOS-use, third-party API credentials. CLI is fully client-side; verification is in CI + one manual smoke pass.
+- **Bash MCP** — install package, run smoke commands, inspect file modes.
+- **Playwright MCP** — verify webapp's IdentityPanel "Send to CLI" UI.
+- **None of:** browser/macOS-use, third-party API credentials.
 
 ## Risks
 
 | Risk | Likelihood | Impact | Mitigation |
 |---|---|---|---|
-| `wasm-pack --target bundler` produces ESM that breaks under Bun's module resolution | Medium | High (SDK dead-on-arrival) | CI matrix runs `bun test` on every PR. Fallback: ship `--target nodejs` build alongside, conditional export based on package consumer. |
-| `crypto.subtle.sign({name:'Ed25519'})` not implemented in Cloudflare Workers / Deno older versions | Medium | Medium | Lazy-load `@noble/ed25519` (12KB) as fallback if `subtle.sign` rejects with `NotSupportedError`. Detected in `LocalSigner.sign()`. |
-| User runs `mnemonic init` on a machine that already had a webapp identity → mismatch on next `sign` | High | Medium (UX confusion) | `mnemonic init` checks for an existing `~/.mnemonic/identity.json` AND warns "you may want `--import-from-webapp` if you've used Mnemonic in a browser before." Documented in `--help`. |
-| OAuth loopback redirect blocked by corporate firewall / strict no-localhost-http policy | Low | High for affected users | Documented headless `--token` fallback; webapp's `/install` page shows a "copy JWT for CLI" button that issues a long-lived token (15 min) for one-shot pasting. Not implemented in Phase 1, in backlog if reports come in. |
-| 442KB WASM bloats `@mnemonik-xyz/sdk` to >500KB | Medium | Low (slower install, fine for CLI users; fine for Chrome ext via lazy-load) | Bundle size budget in CI; alert if exceeds 600KB. Swap to `@noble/curves` listed in backlog. |
-| Server `mcp/src/oauth.rs` redirect-URI allowlist doesn't allow loopback URIs → CLI OAuth fails on day 1 | High (without the change) | High (CLI cannot login interactively at all) | Decision 5: add the loopback allowlist as one of the implementation tasks. Documented in Deviation 1. |
-| Webapp `cli-bootstrap` import flow (Decision 7) introduces a phishing vector — attacker hosts a fake `?cli-bootstrap=1&pubkey=...&signature=...` page | Low | Medium | Webapp validates the signature is over the pubkey using that pubkey before importing. Same as importing any keypair-shaped JSON: the user must trust the source. Documented in webapp UI as "Only import from your own CLI." |
-| Hackathon judges don't see CLI on stage — same risk as user-spec | High | Medium | Demo plan: open terminal alongside Claude.ai, do `mnemonic sign` in terminal, switch to Claude.ai, ask "recall what I just signed via terminal" — Claude finds it. Tangible cross-tool demo. |
+| `wasm-pack` target output breaks under one of Node 20 / Node 22 / Bun / Deno | High | High (SDK dead) | Task 1's smoke test is the gate. Fallback: ship two builds (`pkg-web` + `pkg-nodejs`) with `package.json` conditional exports. |
+| `crypto.subtle.sign({name:'Ed25519'})` not implemented in older Cloudflare Workers / Deno | Medium | Medium | Lazy-load `@noble/ed25519` (12KB) in `LocalSigner.sign()` if `subtle.sign` rejects with `NotSupportedError`. |
+| User runs `mnemonic init` after using webapp → mismatched identities → silent failure on first `sign` | High | Medium | Decision 7's bootstrap-ticket flow makes this an explicit, documented step. `mnemonic init` checks for existing webapp use via a one-line tooltip in `--help` ("Used Mnemonic in a browser? Run `mnemonic identity import --ticket` instead."). |
+| OAuth loopback redirect blocked by corporate firewall / strict no-localhost-http policy | Low | High for affected users | Headless `--token` fallback documented. Webapp's `/install` page can show a "copy JWT for CLI" button (longer-lived ticket, ~15 min) for pasting — backlog if reports come in. |
+| 442KB WASM bloats SDK install | Medium | Low | CI bundle-size budget (≤500KB SDK, ≤200KB CLI). Swap to `@noble/curves` listed in backlog. |
+| Server-side `BootstrapTickets` LRU evicts an in-flight ticket if 100+ users issue simultaneously | Low | Medium | Eviction returns 410 Gone — user retries. If real, raise the cap or move to Redis. Phase 1 in-memory is fine. |
+| Server-side OAuth allowlist regex misses an edge case (`http://[::1]` ipv6 vs `http://0.0.0.0`) | Low | High (CLI cannot login) | Task 7's unit tests cover the regex with positive + negative cases; manual smoke validates ipv4 + ipv6 loopback both work. |
+| Hackathon judges don't see CLI on stage | High | Medium | Demo flow: `mnemonic sign` in terminal alongside Claude.ai prompted "recall what I signed via terminal" — Claude finds it. Cross-tool demo. |
+| Decision 5's allowlist breaks existing webapp/Cursor/VS Code/Claude.ai if entries are misconfigured | Medium | Critical (prod outage) | Task 7's smoke test against `mc.mnemonik.xyz` staging includes login from each existing client before deploy. Rollback plan: revert oauth.rs commit, redeploy. |
 
 ## User-Spec Deviations
 
 Each entry is `[PENDING USER APPROVAL]` until you accept it.
 
-### Deviation 1: Server-side change to `mcp/src/oauth.rs` (loopback redirect URIs)
+### Deviation 1: Server-side OAuth redirect-URI allowlist (CREATES, does not extend)
 
-**User-spec says:** "no server changes needed beyond loading the CLI as another MCP client."
-**Tech-spec does:** adds a single allowlist entry for `http://127.0.0.1:*` and `http://[::1]:*` redirect URIs, gated to `client_id=mnemonic-cli`. This is a ~10 LOC change in `mcp/src/oauth.rs`.
-**Why:** OAuth 2.1 requires the server to validate redirect URIs against an allowlist. The existing list contains only the three editor-MCP redirect schemes. CLI's loopback URI doesn't match any of them. RFC 8252 is the standard pattern; the alternative (some other auth mechanism) is much worse architecturally. **`[PENDING USER APPROVAL]`**
+**User-spec implies:** no server changes beyond loading CLI as another MCP client.
+**Tech-spec does:** ADDS a redirect-URI allowlist to `mcp/src/oauth.rs` (today the server accepts any `redirect_uri`). Loopback regex (`http://127.0.0.1:*` / `http://[::1]:*`) is one entry; existing webapp / Cursor / VS Code / Claude.ai schemes are also added. PKCE state is also bound to verifier at the same time (RFC 7636 §4.4).
+**Why:** This is a security improvement over today's behavior, not just a CLI accommodation. The latent vulnerability (any redirect_uri accepted) is a finding from the security audit and should be fixed regardless of CLI shipping. **`[PENDING USER APPROVAL]`**
 
-### Deviation 2: New CLI subcommand `mnemonic identity export|import`
+### Deviation 2: Server-side `/api/cli-bootstrap/{issue,redeem}` endpoints + `BootstrapTickets` LRU/TTL store
 
-**User-spec says:** 7 commands (init, login, sign, recall, verify, whoami, prove).
-**Tech-spec adds:** `mnemonic identity export [--to-clipboard]` and `mnemonic identity import <base64-or-path>`, plus the implicit `--cli-bootstrap` URL on `mnemonic init`.
-**Why:** Decision 7 — the CLI ↔ webapp identity bootstrap problem. Without these, the OAuth flow can issue a JWT bound to a pubkey that the CLI cannot sign for, breaking `mnemonic sign`. Forcing users to manually copy keypair JSON via filesystem is worse UX. **`[PENDING USER APPROVAL]`**
+**User-spec implies:** identity bootstrap is a CLI-local concern.
+**Tech-spec adds:** two new server endpoints + an in-memory ticket store in `mcp/src/api.rs`. Required to safely move keypair from webapp to CLI without phishing-replayable URLs (security audit finding).
+**Why:** The originally-proposed self-signed bootstrap URL was replayable. Server-issued one-time tickets are the correct pattern. Adds ~½ dev-day of server work, but avoids a critical security flaw. **`[PENDING USER APPROVAL]`**
 
-### Deviation 3: Cross-runtime CI matrix includes Node 22 (not just Node 20)
+### Deviation 3: Webapp `IdentityPanel` "Send to CLI" button
 
-**User-spec says:** Node ≥20.
-**Tech-spec runs CI on:** Node 20, Node 22, Bun latest.
-**Why:** Node 22 is current LTS-track; we want to catch regressions early. Trivial cost (just another job in the matrix). **`[PENDING USER APPROVAL]`** — could drop to just Node 20 + Bun if CI minutes matter.
+**User-spec says:** webapp surface unchanged in Phase 1.
+**Tech-spec adds:** one new button in `webapp/src/components/IdentityPanel.tsx` that calls `/api/cli-bootstrap/issue` and displays the resulting ticket.
+**Why:** Companion to Deviation 2. Trivial UI change (~½ day) that closes the bootstrap UX loop. **`[PENDING USER APPROVAL]`**
 
-### Deviation 4: New top-level `packages/` directory + npm workspaces at repo root
+### Deviation 4: New CLI subcommand `mnemonic identity {import,export}`
+
+**User-spec says:** 7 commands.
+**Tech-spec adds:** `mnemonic identity import --ticket <uuid>` / `--file <path>` and `mnemonic identity export --file <path>`. **No `--to-clipboard` option** (security audit: clipboard leaks).
+**Why:** Closes the bootstrap UX loop. **`[PENDING USER APPROVAL]`**
+
+### Deviation 5: CI matrix expanded — Node 20 + Node 22 + Bun + Deno
+
+**User-spec says:** Node ≥20, Bun mentioned as a target.
+**Tech-spec runs CI on:** Node 20, Node 22, Bun latest, Deno 1.40+. Cloudflare Workers manual pre-release.
+**Why:** Test-reviewer flagged Medium-likelihood Deno-specific risks (Ed25519 in `crypto.subtle`, ESM resolution). Adding Deno as a CI matrix entry catches regressions early. Trivial cost. **`[PENDING USER APPROVAL]`**
+
+### Deviation 6: New top-level `packages/` directory + npm workspace at repo root
 
 **User-spec implies:** packages live somewhere reasonable.
-**Tech-spec specifies:** `packages/sdk/`, `packages/cli/`, repo-root `package.json` becomes an npm workspace with `"workspaces": ["packages/*", "webapp"]`.
-**Why:** Standard JS monorepo pattern; lets webapp eventually consume SDK without duplicate `node_modules`. Brings `webapp/` into the workspace too, but its own build chain is unaffected (same `npm run build`). **`[PENDING USER APPROVAL]`** — alternative: put SDK + CLI in webapp/ subfolder. Worse separation of concerns.
+**Tech-spec specifies:** `packages/sdk/`, `packages/cli/`, repo root `package.json` becomes an npm workspace `"workspaces": ["packages/*", "webapp"]`.
+**Why:** Standard JS monorepo pattern; webapp brought into workspace too (its own build chain unchanged). **`[PENDING USER APPROVAL]`**
 
-### Deviation 5: New `wasm-pack --target bundler` build alongside existing `--target web`
+### Deviation 7: `wasm-pack` target investigated in Task 1 (multiple options possible)
 
-**User-spec implies:** WASM is consumed by SDK.
-**Tech-spec specifies:** add a parallel build to produce `core/pkg-bundler/`. The existing `--target web` build for webapp stays.
-**Why:** Decision 3. Necessary for SDK to load WASM correctly under Node, Bun, and bundlers. **`[PENDING USER APPROVAL]`**
+**User-spec implies:** SDK consumes WASM via wasm-pack.
+**Tech-spec specifies:** the correct wasm-pack target is empirically determined by Task 1's Node + Bun smoke test. Possible outcomes: existing `--target web` works for SDK too (simplest), or a parallel `--target nodejs` build, or two builds with `package.json` conditional exports. Decision deferred to implementation. **`[PENDING USER APPROVAL]`**
+
+### Deviation 8: New `golden-fixtures` cargo feature flag in `core/`
+
+**User-spec says:** "byte-for-byte" CBOR/COSE round-trip.
+**Tech-spec specifies:** new `golden-fixtures` cargo feature in `core/Cargo.toml` + new `core/tests/golden_fixtures.rs` test that emits JSON triples. CI lockstep gate via SHA-256 checksum diff.
+**Why:** Implementation mechanism for the user-spec MUST. **`[PENDING USER APPROVAL]`**
+
+### Deviation 9: `whoami` and `prove` are client-side; do NOT use server tools
+
+**User-spec says:** CLI exposes all 5 MCP tools.
+**Tech-spec specifies:** `whoami` and `prove` are implemented client-side (read local files, sign with WASM). The existing server tools `mnemonic_whoami` and `mnemonic_prove_identity` return server keypair, not user keypair, so they're not the right semantics for the CLI's user-facing commands.
+**Why:** Completeness validator surfaced this — the existing server tools have different semantics. Reframing as client-side fixes the semantics without adding new server tools. **`[PENDING USER APPROVAL]`**
 
 ## Acceptance Criteria
 
-(carried through from user-spec § Критерии приёмки; tech-spec adds concrete artifact/tooling references)
+(carried through from user-spec § Критерии приёмки; tech-spec adds concrete artifacts)
 
-- [ ] **`packages/sdk/dist/`** is published to npm as `@mnemonik-xyz/sdk` (or ready: `npm pack` produces tgz ≤500KB, `npm publish --dry-run` clean).
-- [ ] **`packages/cli/dist/bin/mnemonic`** is published as `@mnemonik-xyz/cli`; `npm install -g @mnemonik-xyz/cli` registers `mnemonic` on PATH.
-- [ ] **Pure ESM, runtime-agnostic.** `grep -r 'node:' packages/sdk/src/` returns empty. CI green on Node 20 + Node 22 + Bun.
-- [ ] **CLI has 7 user-spec commands + 2 deviation commands** (`identity export`, `identity import`), all with `--help`.
-- [ ] **Output:** TTY-aware default; `--json`, `--quiet`, `--no-color` all observable in tests.
+- [ ] `@mnemonik-xyz/sdk` published to npm (or ready: `npm pack` ≤500KB, `npm publish --dry-run --provenance` clean).
+- [ ] `@mnemonik-xyz/cli` published; `npm install -g @mnemonik-xyz/cli` registers `mnemonic` on PATH.
+- [ ] **Pure ESM, runtime-agnostic.** `grep -r 'node:' packages/sdk/src/` empty. CI green on Node 20 + Node 22 + Bun + Deno.
+- [ ] **CLI commands:** `init`, `login [--token <jwt>]`, `sign`, `recall`, `verify`, `whoami`, `prove` (user-spec 7) + `identity import [--ticket <uuid> | --file <path>]` / `identity export --file <path>` (Deviation 4). All with `--help`.
+- [ ] **Output:** TTY-aware default; `--json`, `--quiet`, `--no-color` observable in tests.
 - [ ] **Exit codes** per Decision 10, asserted in CLI integration tests.
-- [ ] **OAuth interactive** end-to-end against `mc.mnemonik.xyz`: browser opens, callback received, JWT in `~/.mnemonic/token.json`.
-- [ ] **OAuth headless** end-to-end: `--token <jwt>` skips browser, JWT persisted.
-- [ ] **Inline COSE signing:** SDK does WASM `sign_cose_payload` locally, POSTs `/api/sign-callback`. Verified via golden fixture.
-- [ ] **`Signer` interface** decoupled from `LocalSigner` — abstract contract test suite passes for `LocalSigner`, ready for future impls.
-- [ ] **Webapp browser-mediated signing** continues to work (regression test: existing webapp e2e tests pass unchanged).
-- [ ] **CI:** unit + integration tests on Node 20 / Node 22 / Bun. SDK + CLI test suites pass without network.
-- [ ] **Documentation:** `packages/sdk/README.md` (quick-start + types), `packages/cli/README.md` (commands + examples), JSDoc on all public SDK methods.
-- [ ] **Demo:** `npm install -g @mnemonik-xyz/cli && mnemonic init && mnemonic login && mnemonic sign "..."` works on a fresh macOS / Linux box.
+- [ ] **OAuth interactive** end-to-end against `mc.mnemonik.xyz`: browser opens, callback received via 127.0.0.1 loopback, JWT persisted.
+- [ ] **OAuth headless** end-to-end: `--token <jwt>` skips browser.
+- [ ] **Identity bootstrap (server-mediated):** `mnemonic identity import --ticket <uuid>` works against `mc.mnemonik.xyz/api/cli-bootstrap/redeem/:ticket`. Webapp IdentityPanel issues tickets via `/api/cli-bootstrap/issue`.
+- [ ] **Inline COSE signing in sign flow:** SDK's `signMemory` always uses pending-bundle response, signs locally via WASM, POSTs `/api/sign-callback`. Verified by golden COSE fixture (Decision 12).
+- [ ] **`Signer` interface** decoupled — abstract contract suite in SDK passes for `LocalSigner`, ready for future impls.
+- [ ] **Logging redaction** asserted in tests — no JWT or secrets in stderr/stdout error paths.
+- [ ] **OAuth allowlist** in `mcp/src/oauth.rs` rejects arbitrary redirect URIs (regression test) AND existing clients still work (smoke).
+- [ ] **`whoami` / `prove` client-side**: read local files, sign with WASM, no server tool calls for these two commands.
+- [ ] **Golden fixture CI gate** fails the workflow if Rust fixture generator output drifts from committed `golden-cose.sha256`.
+- [ ] **NPM provenance** attestations on every published version (`npm publish --provenance`).
+- [ ] **CI:** unit + integration tests on Node 20 / Node 22 / Bun / Deno. SDK + CLI test suites pass without network.
+- [ ] **Documentation:** `packages/sdk/README.md`, `packages/cli/README.md`, JSDoc on public SDK methods, repo-root `README.md` updated.
+- [ ] **Demo:** `npm install -g @mnemonik-xyz/cli && mnemonic identity import --ticket <web-issued> && mnemonic login && mnemonic sign "..."` works on a fresh box.
 
 ## Implementation Tasks
 
 ### Wave 1: Foundation (parallel)
 
-#### Task 1: npm workspace + `packages/` skeleton + Rust bundler-target build
+#### Task 1: npm workspace + `packages/` skeleton + wasm-pack target investigation
 
-Convert the repo root `package.json` to an npm workspace including `packages/*` and the existing `webapp`. Create empty `packages/sdk/` and `packages/cli/` skeletons with `package.json`, `tsconfig.json`, `vitest.config.ts`. Add `wasm-pack build core --target bundler --features wasm --out-dir core/pkg-bundler` to `webapp/scripts/build-wasm.sh` and a new `packages/sdk/scripts/build-wasm.sh`. Verify the bundler-target build produces `.wasm` + `.js` glue that loads under Node 20 + Bun.
+Convert repo root `package.json` to an npm workspace including `packages/*` and the existing `webapp`. Create empty `packages/sdk/` and `packages/cli/` skeletons. Smoke-test all viable wasm-pack targets (`web`, `nodejs`, `bundler`) under Node 20 + Node 22 + Bun + Deno: import `sign_cose_payload` from each compiled artifact, verify it loads and runs. Pick the target (or pair of targets via conditional exports) that works on all four runtimes. Document the choice in `packages/sdk/README.md`.
 
 - Skill: `code-writing`
 - Reviewers: code-reviewer, security-auditor
-- Verify-smoke: `cd packages/sdk && bun -e "import('@mnemonic/core-wasm-bundler').then(m => console.log(typeof m.sign_cose_payload))"` prints `function`.
-- Files to modify: `package.json` (root), `webapp/scripts/build-wasm.sh`, `webapp/package.json` (move into workspace).
-- Files to read: existing `webapp/package.json`, `webapp/scripts/build-wasm.sh`, `core/Cargo.toml`, `core/src/wasm/mod.rs`.
+- Verify-smoke: `for runtime in node bun deno; do $runtime -e "import('@mnemonik-xyz/core-wasm').then(m => console.log(typeof m.sign_cose_payload))"; done` prints `function` four times.
+- Files to modify: `package.json` (root), `webapp/scripts/build-wasm.sh`, `packages/sdk/package.json`, `packages/cli/package.json`, `packages/sdk/scripts/build-wasm.sh`.
+- Files to read: `webapp/package.json`, `webapp/scripts/build-wasm.sh`, `core/Cargo.toml`, `core/src/wasm/mod.rs`, wasm-pack docs.
 
-#### Task 2: SDK core — `MnemonicClient` + `Signer` interface + `LocalSigner` + `Keypair`
+#### Task 2: SDK core — `MnemonicClient` + `Signer` interface + `LocalSigner` + `Keypair` + contract suite
 
-Implement the SDK's stateless client surface: `MnemonicClient` class with HTTP-based methods for the 5 MCP tools, `Signer` interface and the `LocalSigner` implementation (signs via WASM `sign_with_secret`), `Keypair` helpers (generate, fromJSON, toJSON), and the public TS types from § Data Models. No OAuth code in this task — that lives in Task 3.
+Implement the SDK's stateless client surface: `MnemonicClient` class with HTTP-based methods for the 5 MCP tools (sign always handles pending-bundle path, no inline assumption), `Signer` interface, `LocalSigner` impl using WASM `sign_challenge` for raw Ed25519, `Keypair` helpers (generate, fromJSON, toJSON via WASM `export_keypair_json`/`import_keypair_json`), public TS types per § Data Models. Includes the `runSignerContract(signer)` abstract test suite that future signer impls must pass. No OAuth code in this task — that lives in Task 3.
 
 - Skill: `code-writing`
 - Reviewers: code-reviewer, security-auditor, test-reviewer
-- Verify-smoke: SDK unit-test file `packages/sdk/test/client.test.ts` runs and `signMemory()` mock-test passes.
-- Files to modify: `packages/sdk/src/{client,signer,keypair,types,errors,index}.ts`, `packages/sdk/test/{client,signer}.test.ts`.
-- Files to read: `mcp/src/{tools,oauth,api}.rs`, `core/src/wasm/mod.rs`, `webapp/src/pages/Sign.tsx` (for the inline-signing model used by SDK).
+- Verify-smoke: `bun test packages/sdk/test/{client,signer,signer-contract}.test.ts` passes.
+- Files to modify: `packages/sdk/src/{client,signer,keypair,types,errors,index}.ts`, `packages/sdk/test/{client,signer,signer-contract}.test.ts`.
+- Files to read: `mcp/src/{tools,oauth,api}.rs`, `core/src/wasm/mod.rs`, `webapp/src/pages/Sign.tsx`.
 
 #### Task 3: SDK OAuth — `buildAuthorizeUrl`, `exchangeCodeForToken`, headless mode
 
-Implement the OAuth 2.1 + PKCE primitives in `packages/sdk/src/oauth.ts`. PKCE verifier+challenge generation via `crypto.subtle.digest`. State token via `crypto.getRandomValues`. `exchangeCodeForToken(code, verifier, redirectUri)` POSTs `/oauth/token` with JSON body and returns JWT. Headless mode is just the absence of these calls — `MnemonicClient({jwt})` constructor accepts the pre-issued token directly. No `node:http` server here — that lives in CLI's `commands/login.ts`.
+Implement OAuth 2.1 + PKCE primitives in `packages/sdk/src/oauth.ts`. PKCE verifier+challenge via `crypto.subtle.digest`. State token via `crypto.getRandomValues`. State+verifier+redirect_uri stored together in a Map for matching during code exchange. Headless mode = `MnemonicClient({jwt})` constructor accepts pre-issued JWT directly. No `node:http` server here — that's CLI's responsibility.
 
 - Skill: `code-writing`
 - Reviewers: code-reviewer, security-auditor, test-reviewer
@@ -433,123 +499,113 @@ Implement the OAuth 2.1 + PKCE primitives in `packages/sdk/src/oauth.ts`. PKCE v
 - Files to modify: `packages/sdk/src/oauth.ts`, `packages/sdk/test/oauth.test.ts`.
 - Files to read: `mcp/src/oauth.rs`, `webapp/src/pages/Consent.tsx`.
 
-### Wave 2: COSE round-trip + CLI commands (parallel)
+### Wave 2: COSE + commands + server changes (parallel)
 
-#### Task 4: SDK COSE wrapper + golden fixture
+#### Task 4: SDK COSE wrapper + golden fixture + CI lockstep gate
 
-Implement `packages/sdk/src/cose.ts` as a thin wrapper around the WASM `sign_cose_payload` export. Build the golden-fixture pipeline: a `cargo test --features golden-fixtures` target in `core/tests/` that emits `{input, canonical_cbor, cose_envelope}` JSON triples; SDK unit test asserts WASM output matches each triple byte-for-byte. Wire into CI so any CBOR/COSE encoder change in Rust runs both halves of the test in lockstep.
-
-- Skill: `code-writing`
-- Reviewers: code-reviewer, security-auditor, test-reviewer
-- Verify-smoke: `cargo test --features golden-fixtures -p mnemonic-core && bun test packages/sdk/test/cose.golden.test.ts` both green.
-- Files to modify: `packages/sdk/src/cose.ts`, `packages/sdk/test/cose.golden.test.ts`, `core/tests/golden_fixtures.rs`, `core/Cargo.toml` (golden-fixtures feature flag).
-- Files to read: `core/src/codec/canonical.rs`, `core/src/codec/cose.rs`, `core/src/wasm/mod.rs`.
-
-#### Task 5: CLI commands — init, login, identity {export, import}
-
-Implement `packages/cli/bin/mnemonic.ts` (argv routing via `commander`) plus the four lifecycle commands: `init` (generates keypair, supports `--cli-bootstrap` URL emission), `login` (interactive OAuth via loopback HTTP server using `node:http` + `open`; `--token <jwt>` headless path), `identity export [--to-clipboard]`, `identity import <base64-or-path>`. Implements the bootstrap protocol of Decision 7. Persistence to `~/.mnemonic/{identity,token}.json` mode 0600 (Unix) / restricted ACL (Windows).
+Implement `packages/sdk/src/cose.ts` as wrapper around WASM `sign_cose_payload`. Add `golden-fixtures` cargo feature flag to `core/Cargo.toml` (does not exist today). Add `core/tests/golden_fixtures.rs` integration test that emits JSON of `{input_bytes_hex, expected_canonical_cbor_hex, expected_cose_envelope_hex}` triples. Generate `packages/sdk/test/fixtures/golden-cose.json` + `golden-cose.sha256` checksum. SDK unit test asserts byte-equality. CI workflow includes a lockstep gate: regenerate fixture, diff checksum, fail if drift.
 
 - Skill: `code-writing`
 - Reviewers: code-reviewer, security-auditor, test-reviewer
-- Verify-smoke: `bun test packages/cli/test/{init,login,identity}.test.ts` passes (mock OAuth server in fixture).
-- Verify-user: on a fresh dev machine: `cd packages/cli && bun link && mnemonic init && cat ~/.mnemonic/identity.json` — file exists, mode 0600, contains `pubkey_base58`.
-- Files to modify: `packages/cli/bin/mnemonic.ts`, `packages/cli/src/commands/{init,login,identity}.ts`, `packages/cli/src/{config,output,errors}.ts`.
-- Files to read: `webapp/src/components/IdentityPanel.tsx` (for the localStorage shape compatibility), `mcp/src/oauth.rs`, `webapp/src/pages/Consent.tsx`.
+- Verify-smoke: `cargo test --features golden-fixtures -p mnemonic-core && bun test packages/sdk/test/cose.golden.test.ts` both green; `cargo run --features golden-fixtures --bin gen-fixtures | sha256sum | diff - packages/sdk/test/fixtures/golden-cose.sha256` exits 0.
+- Files to modify: `packages/sdk/src/cose.ts`, `packages/sdk/test/cose.golden.test.ts`, `packages/sdk/test/fixtures/golden-cose.{json,sha256}`, `core/Cargo.toml`, `core/tests/golden_fixtures.rs`, `.github/workflows/node-test.yml` (lockstep gate).
+- Files to read: `core/src/codec/canonical.rs`, `core/src/codec/sign.rs`, `core/src/wasm/mod.rs`.
 
-#### Task 6: CLI commands — sign, recall, verify, whoami, prove + output formatter
+#### Task 5: CLI commands — all of them
 
-Implement the five MCP-tool-mapped commands: each loads identity + token from `~/.mnemonic/`, instantiates `MnemonicClient`, calls the corresponding SDK method, formats and prints. Implements `packages/cli/src/output.ts` with TTY detection + `--json`/`--quiet`/`--no-color`. Exit codes per Decision 10.
+Implement `packages/cli/bin/mnemonic.ts` (argv routing via `commander`) plus all commands: `init`, `login` (interactive loopback OAuth + `--token` headless), `sign`, `recall`, `verify`, `whoami` (client-side per Decision 14), `prove` (client-side), `identity import [--ticket | --file]`, `identity export --file`. Implements `packages/cli/src/output.ts` (TTY detection + `--json`/`--quiet`/`--no-color`), `packages/cli/src/config.ts` (XDG-respecting `~/.mnemonic/` paths, file-mode 0600 enforcement on Unix + Windows ACL via the library chosen in Task 1), `packages/cli/src/errors.ts` (typed errors + redaction helper for JWTs and secrets). Exit codes per Decision 10.
 
 - Skill: `code-writing`
 - Reviewers: code-reviewer, security-auditor, test-reviewer
-- Verify-smoke: `bun test packages/cli/test/{sign,recall,verify,whoami,prove,output}.test.ts` passes.
-- Files to modify: `packages/cli/src/commands/{sign,recall,verify,whoami,prove}.ts`, `packages/cli/src/output.ts`.
-- Files to read: SDK from Task 2, `mcp/src/tools.rs`.
+- Verify-smoke: `bun test packages/cli/test/*.test.ts` passes (mock OAuth/MCP server in fixture).
+- Verify-user: on a fresh dev machine: `cd packages/cli && bun link && mnemonic init` — `~/.mnemonic/identity.json` exists, mode 0600, contains `pubkey_base58`. Then `mnemonic --json whoami` prints valid JSON with the pubkey.
+- Files to modify: `packages/cli/bin/mnemonic.ts`, `packages/cli/src/commands/{init,login,sign,recall,verify,whoami,prove,identity}.ts`, `packages/cli/src/{config,output,errors}.ts`.
+- Files to read: `webapp/src/components/IdentityPanel.tsx` (localStorage shape compatibility), `mcp/src/{oauth,api}.rs`, `webapp/src/pages/Consent.tsx`, `core/src/wasm/mod.rs`.
 
-#### Task 7: Server-side OAuth loopback allowlist
+#### Task 6: Server-side — OAuth redirect-URI allowlist + bootstrap-ticket endpoints + PKCE state binding
 
-In `mcp/src/oauth.rs`, extend the redirect-URI allowlist to accept `http://127.0.0.1:<any-port>/callback` and `http://[::1]:<any-port>/callback` for `client_id=mnemonic-cli`. Add unit tests for the new allowlist entries (positive: localhost loopback accepted; negative: arbitrary HTTP redirect rejected). Documented in Deviation 1.
-
-- Skill: `code-writing`
-- Reviewers: code-reviewer, security-auditor
-- Verify-smoke: `cargo test -p mnemonic-mcp oauth_allowlist` green.
-- Files to modify: `mcp/src/oauth.rs`, `mcp/src/cors_policy.rs` if relevant.
-- Files to read: existing `mcp/src/oauth.rs`, RFC 8252 § 7.
-
-### Wave 3: Tests + docs + cross-runtime CI (parallel)
-
-#### Task 8: Integration tests against in-process mock MCP server
-
-Build a mock MCP server in `packages/sdk/test/mock-server.ts` that listens on a free port and responds to `/mcp`, `/oauth/authorize`, `/oauth/token`, `/api/sign-callback`. SDK integration tests run end-to-end flows (login, sign-via-pending-bundle, recall, verify) against it. CLI integration tests via `execa`.
+In `mcp/src/oauth.rs`: introduce a redirect-URI allowlist (does not exist today). Allowlist entries: webapp consent page, Cursor/VS Code/Claude.ai redirect schemes, regex for `http://127.0.0.1:*/callback` and `http://[::1]:*/callback` gated to `client_id=mnemonic-cli`. PKCE state is bound to verifier + redirect_uri at authorize-time and validated at token-exchange-time. In `mcp/src/api.rs`: implement `POST /api/cli-bootstrap/issue` (auth: Bearer JWT, payload: keypair_json, returns: ticket_id) and `GET /api/cli-bootstrap/redeem/:ticket` (no auth — capability via UUID). Add `BootstrapTickets` LRU+TTL store (10-min TTL, max 100, max 3 per jwt_sub) to `mcp/src/`. Atomic remove-and-return on first redeem, 410 Gone subsequent.
 
 - Skill: `code-writing`
-- Reviewers: code-reviewer, test-reviewer
-- Verify-smoke: `bun test packages/sdk/test/integration/ packages/cli/test/integration/` passes without network access.
-- Files to modify: `packages/sdk/test/mock-server.ts`, `packages/sdk/test/integration/*.test.ts`, `packages/cli/test/integration/*.test.ts`.
-- Files to read: SDK + CLI source; `mcp/src/{mcp,oauth,api}.rs` to mirror handler shapes.
+- Reviewers: code-reviewer, security-auditor, test-reviewer
+- Verify-smoke: `cargo test -p mnemonic-mcp -- oauth_allowlist bootstrap_tickets` green. Manual: `curl https://staging.mc.mnemonik.xyz/oauth/authorize?...&redirect_uri=https://evil.com` returns 400.
+- Files to modify: `mcp/src/oauth.rs`, `mcp/src/api.rs`, `mcp/src/main.rs` (route registration), possibly `mcp/src/cors_policy.rs`.
+- Files to read: existing `mcp/src/oauth.rs`, `mcp/src/pending.rs` (LRU+TTL pattern reference), RFC 7636 §4.4, RFC 8252 §7.
 
-#### Task 9: CI matrix (Node 20 / Node 22 / Bun) + bundle-size budget
+#### Task 7: Webapp — `IdentityPanel` "Send to CLI" button + bootstrap-ticket display
 
-Add `.github/workflows/node-test.yml` that runs `bun install && bun test` per package on Node 20, Node 22, Bun latest. Adds a `bundle-size-check` job that runs `npm pack` on each package, asserts `<500KB` for SDK and `<200KB` for CLI (tighter — CLI is mostly argv parsing). Fails if exceeded.
+Add a "Send to CLI" button to `webapp/src/components/IdentityPanel.tsx`. On click: POSTs the localStorage keypair_json to `/api/cli-bootstrap/issue` with the webapp's JWT in `Authorization`. Server returns ticket_id. UI displays a copyable code block: `mnemonic identity import --ticket <uuid>`. Also add unit tests for the new button and `playwright` e2e test verifying the ticket display + copy-to-clipboard works.
 
-- Skill: `deploy-pipeline`
-- Reviewers: code-reviewer, deploy-reviewer
-- Verify-smoke: open a draft PR, observe matrix runs all three runtimes green; bundle-size job reports actual sizes.
-- Files to modify: `.github/workflows/node-test.yml` (new), `packages/{sdk,cli}/package.json` (any test scripts).
-- Files to read: existing `.github/workflows/ci.yml` for Rust matrix patterns.
+- Skill: `code-writing`
+- Reviewers: code-reviewer, security-auditor, test-reviewer
+- Verify-smoke: `cd webapp && npx vitest run src/components/IdentityPanel.test.tsx` passes; `cd webapp && npx playwright test e2e/cli-bootstrap.spec.ts` passes against staging.
+- Files to modify: `webapp/src/components/IdentityPanel.tsx`, `webapp/src/components/IdentityPanel.test.tsx`, `webapp/e2e/cli-bootstrap.spec.ts` (new).
+- Files to read: existing `IdentityPanel.tsx`, server endpoints from Task 6.
 
-#### Task 10: Documentation — SDK README, CLI README, JSDoc, repo-root pointer
+### Wave 3: Tests + CI + docs (parallel)
 
-`packages/sdk/README.md`: 5-line quick-start, public API reference, runtime-target table, link to backlog. `packages/cli/README.md`: command reference (`init / login / sign / recall / verify / whoami / prove / identity`), examples, exit-code table. JSDoc on all `MnemonicClient` methods + `Signer` interface (rendered to types-only `.d.ts`). Repo-root `README.md` gets a "Programmatic access" section linking to both packages.
+#### Task 8: Integration tests (mock server with fault injection) + CI matrix
+
+Build mock MCP server in `packages/sdk/test/mock-server.ts` covering `/mcp`, `/oauth/{authorize,token,register}`, `/api/sign-callback`, `/api/cli-bootstrap/{issue,redeem}`. Includes `withFault('5xx-on-token-exchange' | 'malformed-cbor-in-pending' | 'expired-jwt-after-N-requests' | 'signer-pubkey-mismatch' | 'callback-timeout')` fault-injection. SDK + CLI integration tests use the mock + at least one fault path each. Add `.github/workflows/node-test.yml` matrix (Node 20 / Node 22 / Bun / Deno). Add bundle-size gate (`<500KB` SDK, `<200KB` CLI).
+
+- Skill: `code-writing`
+- Reviewers: code-reviewer, test-reviewer, deploy-reviewer
+- Verify-smoke: open a draft PR, observe matrix runs all four runtimes green; bundle-size job reports actual sizes.
+- Files to modify: `packages/sdk/test/mock-server.ts`, `packages/sdk/test/integration/*.test.ts`, `packages/cli/test/integration/*.test.ts`, `.github/workflows/node-test.yml`.
+- Files to read: SDK + CLI source from Wave 1+2; `mcp/src/{mcp,oauth,api}.rs` for handler shapes.
+
+#### Task 9: Documentation — SDK README, CLI README, JSDoc, repo-root pointer
+
+`packages/sdk/README.md` (5-line quick-start, public API reference, runtime-target table, link to backlog), `packages/cli/README.md` (command reference, examples, exit-code table, smoke checklist link), JSDoc on all `MnemonicClient` methods + `Signer` interface (rendered to `.d.ts`). Repo-root `README.md` adds a "Programmatic access" section linking to both packages. `packages/cli/SMOKE.md` with the manual smoke checklist.
 
 - Skill: `documentation-writing`
 - Reviewers: documentation-reviewer
 - Verify-smoke: `npx typedoc packages/sdk/src/index.ts --emit none` clean (no missing-doc warnings).
-- Files to modify: `packages/sdk/README.md`, `packages/cli/README.md`, repo-root `README.md` (one-paragraph addition).
+- Files to modify: `packages/sdk/README.md`, `packages/cli/README.md`, `packages/cli/SMOKE.md`, repo-root `README.md`.
 - Files to read: SDK + CLI source for accurate API reference.
 
 ### Audit Wave (parallel, reviewers: none)
 
-#### Task 11: Code Audit
+#### Task 10: Code Audit
 
-Holistic code-quality audit across all SDK + CLI source. Read every file under `packages/sdk/src/` and `packages/cli/src/`. Look for: maintainability, idiomatic TypeScript, correct ESM/Web-API usage (no `node:*` leak in SDK), error handling coverage, naming consistency.
+Holistic code-quality audit across SDK + CLI. Read every file under `packages/sdk/src/` and `packages/cli/src/` and the new server changes in `mcp/src/{oauth,api}.rs`. Look for: maintainability, idiomatic TypeScript and Rust, ESM/Web-API correctness in SDK, error handling coverage, naming consistency.
 
 - Skill: `code-reviewing`
 - Reviewers: none
 
-#### Task 12: Security Audit
+#### Task 11: Security Audit
 
-OWASP Top 10 against SDK + CLI. Specifically: PKCE state validation, JWT handling (no leak in logs/errors), keypair file mode enforcement, `--cli-bootstrap` URL phishing surface, redirect-URI canonicalization on the server side, CLI's loopback HTTP server hardening (single-shot, IP filtering, CSRF state, port binding to 127.0.0.1 only).
+OWASP Top 10 against SDK + CLI + server changes. Specifically: PKCE state-to-verifier-and-redirect-URI binding, JWT handling + redaction, keypair file mode enforcement on Unix + Windows, bootstrap-ticket replay protection, redirect-URI allowlist regex coverage (ipv4 + ipv6 + edge cases), CLI loopback HTTP server hardening (single-shot, 127.0.0.1-only bind, state validation), supply-chain integrity (npm provenance), no `--to-clipboard` flag exists.
 
 - Skill: `security-auditor`
 - Reviewers: none
 
-#### Task 13: Test Audit
+#### Task 12: Test Audit
 
-Test quality + coverage across SDK + CLI test suites. Verify the golden-COSE fixture, mock-server fidelity, exit-code coverage, edge cases (expired JWT, mismatched pubkeys, offline scenarios). Confirm the cross-runtime CI matrix actually catches Bun-specific regressions (try one synthetic Bun-only failure to validate the matrix).
+Test quality + coverage across SDK + CLI + server-side test additions. Verify: golden COSE fixture lockstep gate fails on drift, mock-server fault-injection coverage, bootstrap-ticket replay test, redaction tests, exit-code coverage, edge cases (expired JWT, mismatched pubkeys, offline, double-redeem). Confirm cross-runtime CI matrix catches Bun/Deno-specific regressions.
 
 - Skill: `test-master`
 - Reviewers: none
 
 ### Final Wave
 
-#### Task 14: Pre-deploy QA
+#### Task 13: Pre-deploy QA
 
-Run all unit + integration suites on Node 20 / Node 22 / Bun. Validate every acceptance criterion in user-spec + tech-spec. Run the manual smoke checklist. Confirm `npm pack` outputs are within size budgets. Confirm regression: existing webapp e2e tests still green.
+Run all unit + integration suites on Node 20 / Node 22 / Bun / Deno. Validate every acceptance criterion. Run manual smoke checklist (`packages/cli/SMOKE.md`). Verify `npm pack` outputs are within size budgets. Confirm regression: existing webapp e2e tests still green, existing Cursor / VS Code / Claude.ai OAuth flows still work against staging.
 
 - Skill: `pre-deploy-qa`
 - Reviewers: none
 
-#### Task 15: Deploy — npm publish + GitHub release
+#### Task 14: Deploy — npm publish + GitHub release + server config + webapp deploy
 
-`npm publish --access public` for both `@mnemonik-xyz/sdk` and `@mnemonik-xyz/cli`. Tag `v0.1.0` on git. GitHub Release page with changelog from this tech-spec. Update `mnemonik.xyz/install` page (webapp) with a new "Install in terminal" card pointing at `npm install -g @mnemonik-xyz/cli`.
+`npm publish --access public --provenance` for both `@mnemonik-xyz/sdk` and `@mnemonik-xyz/cli`. Tag `v0.1.0` on git. GitHub Release page with changelog. Deploy server changes (`mcp/src/oauth.rs` allowlist + `mcp/src/api.rs` bootstrap endpoints) and webapp changes (`IdentityPanel`) to the VPS. Update `mnemonik.xyz/install` page with a "Install in terminal" card pointing at `npm install -g @mnemonik-xyz/cli`.
 
 - Skill: `deploy-pipeline`
 - Reviewers: none
 
-#### Task 16: Post-deploy verification
+#### Task 15: Post-deploy verification
 
-On a fresh machine (or container): `npm install -g @mnemonik-xyz/cli`, run the full demo flow: `init → login → sign "..." → recall → verify`. Verify cross-tool: same identity logged into Claude.ai sees the CLI-signed attestation. Verify negative path: `mnemonic verify <some-other-user-id>` returns `not_found` (cross-tenant isolation holds).
+On a fresh machine (or container): `npm install -g @mnemonik-xyz/cli`, run full demo flow with bootstrap-ticket: open `mnemonik.xyz/install` in browser → "Send to CLI" → paste ticket command → `mnemonic login` → `mnemonic sign "..."` → `mnemonic recall`. Verify cross-tool: same identity logged into Claude.ai sees the CLI-signed attestation. Verify negative paths: arbitrary `redirect_uri` → 400 (regression), double-redeem of bootstrap ticket → 410, `mnemonic verify <stranger-id>` → not_found.
 
 - Skill: `post-deploy-qa`
 - Reviewers: none
@@ -557,4 +613,4 @@ On a fresh machine (or container): `npm install -g @mnemonik-xyz/cli`, run the f
 
 ---
 
-**Task count: 16.** Above the 15-task soft cap by one. Tasks 5 and 6 could be merged into a single CLI commands task (saves 1 task), but separating them keeps each one atomic enough to parallelize and review independently. **`[PENDING USER APPROVAL]`** to keep at 16, or merge.
+**Task count: 15.** Within the 15-task cap (down from 16 in the prior draft after merging the original CLI-lifecycle and CLI-tools tasks per validator feedback).
