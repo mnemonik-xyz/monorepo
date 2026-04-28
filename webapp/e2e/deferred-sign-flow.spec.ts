@@ -1,6 +1,12 @@
 import { test, expect, type Page } from "@playwright/test";
 import { mcpBase, randomHex, pkceChallenge } from "./_helpers";
 
+// Serial + no retries — same /oauth/* + /mcp rate-limit reasoning as
+// oauth-flow.spec.ts. Each test mints a fresh JWT (4 /oauth/* hits per
+// handshake) and burns sign_memory / recall budget; running parallel +
+// 2 retries against the live backend immediately blows the per-IP cap.
+test.describe.configure({ mode: "serial", retries: 0 });
+
 /**
  * The big one — full Decision-12 deferred-signing round trip from the
  * AI-tool perspective, covering ALL the bugs the user hit in T15:

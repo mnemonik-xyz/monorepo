@@ -544,13 +544,29 @@ async fn run_http(state: Arc<mcp::McpState>, host: &str, port: u16) -> anyhow::R
             .finish()
             .ok_or_else(|| anyhow::anyhow!("failed to build /mcp governor config"))?,
     );
+    // /oauth/* per-IP rate limit: 5 burst + 1 req/s refill ≈ 5 req/min/IP
+    // production cap. Set OAUTH_RATELIMIT_DISABLE=1 to widen for e2e tests
+    // (Playwright on a single dev IP runs ~12 /oauth/* calls per test
+    // suite; 5/min would short-circuit them with HTTP 429).
+    let oauth_disabled =
+        std::env::var("OAUTH_RATELIMIT_DISABLE").ok().as_deref() == Some("1");
+    let (oauth_per_sec, oauth_burst) = if oauth_disabled {
+        (100u64, 1000u32) // effectively unlimited for test runs
+    } else {
+        (1u64, 5u32)
+    };
     let oauth_governor_conf = Arc::new(
         GovernorConfigBuilder::default()
-            .per_second(1)
-            .burst_size(5)
+            .per_second(oauth_per_sec)
+            .burst_size(oauth_burst)
             .finish()
             .ok_or_else(|| anyhow::anyhow!("failed to build /oauth/* governor config"))?,
     );
+    if oauth_disabled {
+        tracing::warn!(
+            "OAUTH_RATELIMIT_DISABLE=1 — /oauth/* rate limit relaxed; do NOT use in production"
+        );
+    }
 
     // ── Bearer-auth middleware on /mcp (Decision 9) ──────────────────────────
     // /oauth/* and /health are URI-allowlisted INSIDE the middleware; we still

@@ -7,6 +7,12 @@ import {
   pkceChallenge,
 } from "./_helpers";
 
+// Serial + no retries — /oauth/* is rate-limited at 5 req/min/IP by
+// tower_governor (Decision 9). Each OAuth handshake makes 4 /oauth/*
+// calls; with default 2 retries on failure that's 12 calls/test = blows
+// the cap immediately. Disable retries: a real failure is fail, period.
+test.describe.configure({ mode: "serial", retries: 0 });
+
 /**
  * Browser-driven OAuth 2.1 + PKCE happy path against the live (or local)
  * mnemonic-mcp backend.

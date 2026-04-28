@@ -10,7 +10,8 @@
     "build": "npm run build:wasm && tsc -b && vite build",
     "preview": "vite preview",
     "test": "vitest",
-    "test:e2e": "playwright test"
+    "test:e2e": "playwright test",
+    "test:e2e:integrations": "playwright test e2e/install.spec.ts e2e/oauth-flow.spec.ts e2e/deferred-sign-flow.spec.ts"
   },
   "dependencies": {
     "cbor-x": "^1.6.4",
