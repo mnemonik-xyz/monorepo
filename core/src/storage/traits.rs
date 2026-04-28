@@ -26,9 +26,18 @@ pub struct SearchResult {
 
 /// Attestation CRUD and cosine search.
 ///
-/// Authorization is the caller's responsibility. These methods operate on the
-/// full database and do not enforce per-signer scoping.
+/// Authorization is the caller's responsibility for `find_by_tx` / `count`.
+/// `save_attestation` and `search` enforce a mandatory `owner_pubkey` filter:
+/// each row stores `owner_pubkey` and `search` returns only rows matching the
+/// supplied owner. Per Decision 9 there is no anonymous / unfiltered path.
 pub trait AttestationStore {
+    /// Persist an attestation row scoped to `owner_pubkey`.
+    ///
+    /// `signer_pubkey` is the COSE_Sign1 signer (cryptographic identity that
+    /// produced the attestation). `owner_pubkey` is the OAuth-resolved tenant
+    /// scope used by `search`. In the single-tenant browser-mediated flow they
+    /// are equal (Decision 4); in stdio/CLI mode the caller passes the local
+    /// keypair pubkey for both.
     #[allow(clippy::too_many_arguments)]
     fn save_attestation(
         &self,
@@ -39,6 +48,7 @@ pub trait AttestationStore {
         solana_tx: &str,
         arweave_tx: &str,
         signer_pubkey: &str,
+        owner_pubkey: &str,
         created_at: &str,
         embedding: &[f32],
     ) -> anyhow::Result<()>;
@@ -47,10 +57,15 @@ pub trait AttestationStore {
 
     fn count(&self, signer: &str) -> anyhow::Result<i64>;
 
+    /// Cosine-similarity search scoped to `owner_pubkey`.
+    ///
+    /// SQL filter is `WHERE owner_pubkey = ?` — there is no carve-out. Pass
+    /// the JWT-resolved pubkey (HTTP transport) or the local keypair pubkey
+    /// (stdio transport).
     fn search(
         &self,
         query_embedding: &[f32],
-        signer: &str,
+        owner_pubkey: &str,
         limit: usize,
     ) -> anyhow::Result<Vec<SearchResult>>;
 }

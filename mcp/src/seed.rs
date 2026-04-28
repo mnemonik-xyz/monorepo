@@ -290,6 +290,10 @@ pub async fn run(state: &McpState) -> Result<()> {
     // Collect sign_memory results for artifact generation
     let mut signed_chunks: Vec<SignedChunk> = Vec::new();
 
+    // Seeding runs at startup with no JWT context — owner is the local
+    // server keypair, matching the stdio single-tenant convention.
+    let server_owner_pubkey = solana_sdk::signer::Signer::pubkey(&state.keypair).to_string();
+
     for md_file in &md_files {
         let rel = md_file.strip_prefix(&docs_root).unwrap_or(md_file);
         let rel_str = rel_path_string(rel);
@@ -323,6 +327,8 @@ pub async fn run(state: &McpState) -> Result<()> {
                 format!("{} > {}", rel_str, section.heading)
             };
 
+            // Seeding always takes the inline (server-signing) path —
+            // `jwt_sub = None` per Decision 12.
             let result = tools::sign_memory(
                 &state.keypair,
                 &state.solana,
@@ -330,10 +336,13 @@ pub async fn run(state: &McpState) -> Result<()> {
                 &state.store,
                 state.embedder.as_ref(),
                 &state.compressor,
+                &state.pending,
                 &chunk_content,
                 &tags,
                 &cost_hint,
                 &state.storage_mode,
+                &server_owner_pubkey,
+                None,
             )
             .await
             .with_context(|| format!("sign_memory failed for {rel_str} chunk {i}"))?;

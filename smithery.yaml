@@ -1,0 +1,68 @@
+# Smithery manifest for Mnemonic Memory MCP server
+# Listed at https://smithery.ai/mcp/mnemonic once submitted via the Smithery web UI.
+#
+# Decision 5 of work/mnemonic-integrations/tech-spec.md: Smithery is the single registry
+# in Phase 1. Other registries (Anthropic Connectors, mcp.directory, Glama) are deferred.
+#
+# Notes:
+# - URL points to mcp.mnemonik.xyz (NOT mcp.mnemonic.dev — Deviation 2 of tech-spec).
+# - Description leads with utility ("verifiable knowledge memory"), avoids leading
+#   with crypto framing per the Risks-table mitigation (tech-spec line 280):
+#   Smithery community review may reject heavy crypto framing.
+# - Five tools listed match mcp/src/tools.rs.
+
+version: "1"
+name: "mnemonic"
+description: "Verifiable, persistent memory for AI agents — cross-provider context portability via attestation"
+homepage: "https://mnemonik.xyz"
+repository: "https://github.com/mnemonik-xyz/monorepo"
+license: "MIT OR Apache-2.0"
+
+author:
+  name: "Mnemonic Team"
+  email: "dev@mnemonik.xyz"
+
+tags:
+  - memory
+  - attestation
+  - identity
+  - knowledge
+  - context-portability
+
+mcp_servers:
+  - id: "mnemonic"
+    name: "Mnemonic Memory"
+    description: >
+      Sign and recall attested memory bundles across AI tools. Memories are
+      semantically embedded, content-hashed, and signed with the user's own
+      Ed25519 identity so they survive across providers (Cursor, Claude.ai,
+      Claude Desktop) and remain verifiable by anyone.
+    url: "https://mcp.mnemonik.xyz"
+    transport: "streamable-http"
+    auth:
+      type: "oauth2"
+      flows:
+        authorizationCode:
+          authorizationUrl: "https://mcp.mnemonik.xyz/oauth/authorize"
+          tokenUrl: "https://mcp.mnemonik.xyz/oauth/token"
+          scopes:
+            identity: "Read user identity (DID + pubkey)"
+            memory: "Sign and recall the user's own attested memories"
+    features:
+      - "tools"
+    tools:
+      - name: "mnemonic_whoami"
+        description: "Return the caller's DID and pubkey resolved from the OAuth identity"
+      - name: "mnemonic_sign_memory"
+        description: "Sign a memory bundle (async — completes via browser-mediated WASM signing)"
+      - name: "mnemonic_recall"
+        description: "Semantic recall over the caller's own attested memories"
+      - name: "mnemonic_verify"
+        description: "Verify a COSE_Sign1 attestation against its declared signer"
+      - name: "mnemonic_prove_identity"
+        description: "Produce a fresh signed identity proof for cross-tool linking"
+
+install:
+  cursor: "cursor://anysphere.cursor-deeplink/mcp/install?name=Mnemonic&url=https%3A%2F%2Fmcp.mnemonik.xyz"
+  vscode: "vscode:mcp/install?name=Mnemonic&url=https%3A%2F%2Fmcp.mnemonik.xyz"
+  claude_desktop: "https://mnemonik.xyz/install"

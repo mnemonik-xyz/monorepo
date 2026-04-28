@@ -89,6 +89,11 @@ pub async fn chat_handler(
     }
 
     // -- Recall top-k knowledge chunks (sync: lock, query, drop) --
+    // /chat is a public RAG endpoint over the server-seeded whitepaper
+    // chunks (Decision 9 ownership filter scopes search by owner_pubkey).
+    // Use the local server keypair so /chat returns the seeded knowledge
+    // base regardless of the caller's auth state — chat is not personalized.
+    let chat_owner_pubkey = solana_sdk::signer::Signer::pubkey(&state.keypair).to_string();
     let recall_result = {
         let store = state.store.lock().unwrap();
         tools::recall(
@@ -97,6 +102,7 @@ pub async fn chat_handler(
             state.embedder.as_ref(),
             message,
             RECALL_LIMIT,
+            &chat_owner_pubkey,
         )
     }; // lock dropped here -- safe to .await below
 
@@ -342,6 +348,7 @@ mod handler_tests {
             artifact_zip_path: std::sync::Mutex::new(None),
             ollama_client,
             chat_limiter,
+            pending: Arc::new(crate::pending::PendingBundles::with_defaults()),
         })
     }
 

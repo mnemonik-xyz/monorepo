@@ -1,0 +1,53 @@
+# Yamale schema for `smithery.yaml`.
+#
+# Validated in CI (`.github/workflows/ci.yml::smithery-schema`). The schema
+# locks the public-listing fields `mcp.mnemonik.xyz` claims to expose, so
+# accidental drops or renames are caught before merge.
+#
+# Tightening rules:
+# - `version` is a string ("1") to match Smithery's published format
+#   (see https://smithery.ai/docs).
+# - `name`, `description`, `homepage` are required strings.
+# - `mcp_servers` is a non-empty list whose entries each carry
+#   `id`, `name`, `description`, `url`, and `transport` ("streamable-http").
+# - The `auth.type=oauth2` block exists with the
+#   authorize / token URLs the OAuth Decision-10 flow depends on.
+#
+# Yamale lookup table:
+# https://github.com/23andMe/Yamale/blob/main/docs/schema.md
+
+version: str()
+name: str()
+description: str()
+homepage: str()
+repository: str(required=False)
+license: str(required=False)
+author: include('author', required=False)
+tags: list(str(), required=False)
+mcp_servers: list(include('server'), min=1)
+install: map(str(), required=False)
+---
+author:
+  name: str()
+  email: str(required=False)
+server:
+  id: str()
+  name: str()
+  description: str()
+  url: str()
+  transport: str()
+  auth: include('auth', required=False)
+  features: list(str(), required=False)
+  tools: list(include('tool'), required=False)
+auth:
+  type: str()
+  flows: include('flows')
+flows:
+  authorizationCode: include('authcode')
+authcode:
+  authorizationUrl: str()
+  tokenUrl: str()
+  scopes: map(str(), required=False)
+tool:
+  name: str()
+  description: str()

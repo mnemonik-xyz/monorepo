@@ -3,24 +3,34 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
+  "//": "Requires wasm-pack on PATH for `build:wasm` (cargo install wasm-pack). Not an npm dependency.",
   "scripts": {
     "dev": "vite",
-    "build": "tsc -b && vite build",
+    "build:wasm": "bash scripts/build-wasm.sh",
+    "build": "npm run build:wasm && tsc -b && vite build",
     "preview": "vite preview",
-    "test:e2e": "playwright test"
+    "test": "vitest",
+    "test:e2e": "playwright test",
+    "test:e2e:integrations": "playwright test e2e/install.spec.ts e2e/oauth-flow.spec.ts e2e/deferred-sign-flow.spec.ts"
   },
   "dependencies": {
+    "cbor-x": "^1.6.4",
     "react": "^19.1.0",
-    "react-dom": "^19.1.0"
+    "react-dom": "^19.1.0",
+    "react-router-dom": "^6.27.0"
   },
   "devDependencies": {
     "@playwright/test": "^1.52.0",
     "@tailwindcss/vite": "^4.1.5",
+    "@testing-library/jest-dom": "^6.6.3",
+    "@testing-library/react": "^16.1.0",
     "@types/react": "^19.1.2",
     "@types/react-dom": "^19.1.2",
     "@vitejs/plugin-react": "^4.4.1",
+    "jsdom": "^25.0.1",
     "tailwindcss": "^4.1.5",
     "typescript": "~5.7.2",
-    "vite": "^6.3.3"
+    "vite": "^6.3.3",
+    "vitest": "^2.1.5"
   }
 }

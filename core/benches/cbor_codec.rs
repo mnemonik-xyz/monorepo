@@ -2,13 +2,27 @@
 //!
 //! All canonicalization/signing primitives come from `mnemonic_core::codec`.
 
+// Native-only — criterion is a non-wasm dev-dep. The whole bench body is gated
+// behind `not(target_arch = "wasm32")`. On wasm32 we provide a no-op `main` so
+// `cargo clippy --all-targets --target wasm32-unknown-unknown` does not error
+// with E0601 ("main not found"); the bench is never actually run on wasm32.
+#[cfg(target_arch = "wasm32")]
+fn main() {}
+
+#[cfg(not(target_arch = "wasm32"))]
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
+#[cfg(not(target_arch = "wasm32"))]
 use mnemonic_core::codec::canonical::to_canonical_cbor;
+#[cfg(not(target_arch = "wasm32"))]
 use mnemonic_core::codec::hash::hash_bytes;
+#[cfg(not(target_arch = "wasm32"))]
 use mnemonic_core::codec::schema::MEMORY_V1;
+#[cfg(not(target_arch = "wasm32"))]
 use mnemonic_core::codec::sign::{sign_artifact, sign_cose};
+#[cfg(not(target_arch = "wasm32"))]
 use solana_sdk::signature::Keypair;
 
+#[cfg(not(target_arch = "wasm32"))]
 fn sample_artifact(content_size: usize) -> serde_json::Value {
     let content: String = "x".repeat(content_size);
     serde_json::json!({
@@ -23,6 +37,7 @@ fn sample_artifact(content_size: usize) -> serde_json::Value {
     })
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn bench_cbor_canonicalization(c: &mut Criterion) {
     let mut group = c.benchmark_group("cbor_canonicalize");
 
@@ -35,6 +50,7 @@ fn bench_cbor_canonicalization(c: &mut Criterion) {
     group.finish();
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn bench_blake3_hash(c: &mut Criterion) {
     let mut group = c.benchmark_group("blake3_hash");
 
@@ -48,6 +64,7 @@ fn bench_blake3_hash(c: &mut Criterion) {
     group.finish();
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn bench_cose_sign(c: &mut Criterion) {
     let kp = Keypair::new();
     let mut group = c.benchmark_group("cose_sign");
@@ -65,6 +82,7 @@ fn bench_cose_sign(c: &mut Criterion) {
     group.finish();
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn bench_full_pipeline(c: &mut Criterion) {
     let kp = Keypair::new();
     let mut group = c.benchmark_group("full_pipeline");
@@ -84,6 +102,7 @@ fn bench_full_pipeline(c: &mut Criterion) {
     group.finish();
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 criterion_group!(
     benches,
     bench_cbor_canonicalization,
@@ -91,4 +110,5 @@ criterion_group!(
     bench_cose_sign,
     bench_full_pipeline,
 );
+#[cfg(not(target_arch = "wasm32"))]
 criterion_main!(benches);

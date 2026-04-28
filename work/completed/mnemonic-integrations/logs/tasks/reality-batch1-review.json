@@ -1,0 +1,76 @@
+{
+  "validator": "reality-checker",
+  "batch": [1, 2, 3],
+  "status": "changes_required",
+  "findings": [
+    {
+      "task": 1,
+      "severity": "critical",
+      "category": "non_existent_api",
+      "claim": "Task references `payment::PaymentGate::Pay402` as the variant name for the HTTP-402 payment gate branch (line 31: 'On `PaymentGate::Pay402`, emit the 402 body as a single NDJSON frame')",
+      "reality": "The actual variant in `mcp/src/main.rs` (line 128) is `payment::PaymentGate::NeedPayment(x402)`, not `Pay402`. There is no `Pay402` variant anywhere in the codebase.",
+      "fix_suggestion": "Replace every reference to `PaymentGate::Pay402` with `PaymentGate::NeedPayment(x402)` in the task description and implementation."
+    },
+    {
+      "task": 1,
+      "severity": "minor",
+      "category": "other",
+      "claim": "Task says `futures` is 'probably already transitive' and may need explicit addition to `mcp/Cargo.toml`",
+      "reality": "`futures = \"0.3\"` is a direct dependency in `core/Cargo.toml` but is NOT listed in `mcp/Cargo.toml`. It may be transitively available but relying on transitive deps is fragile. The task's suggested fix (add explicitly if `cargo build` complains) is correct, but the description understates the likelihood.",
+      "fix_suggestion": "Add `futures = \"0.3\"` explicitly to `mcp/Cargo.toml` `[dependencies]` rather than waiting for a build failure."
+    },
+    {
+      "task": 2,
+      "severity": "critical",
+      "category": "non_existent_api",
+      "claim": "Task references `codec::sign::sign_payload` as the function to call for COSE signing (line 47: 'signs via `codec::sign::sign_payload`', line 172: `use crate::codec::{canonical::to_canonical_cbor, sign::sign_payload}`)",
+      "reality": "`sign_payload` does not exist in `core/src/codec/sign.rs`. The actual public signing functions are `sign_artifact(artifact, schema, keypair)`, `sign_cose(canonical_cbor, keypair)`, and `verify_artifact(cose_bytes, expected_hash)`. The closest match for raw COSE signing is `sign_cose`.",
+      "fix_suggestion": "Replace `sign_payload` with `sign_cose(canonical_cbor: &[u8], keypair: &Keypair) -> Result<Vec<u8>, String>` for raw COSE_Sign1 signing, or `sign_artifact(artifact, schema, keypair)` for the full pipeline. Update the import in the implementation hints accordingly."
+    },
+    {
+      "task": 2,
+      "severity": "critical",
+      "category": "non_existent_api",
+      "claim": "Task references `codec::sign::verify_payload` as what the native verifier calls (acceptance criteria line 88: '`core/src/codec/sign::verify_payload` accepts')",
+      "reality": "`verify_payload` does not exist in `core/src/codec/sign.rs`. The actual function is `verify_artifact(cose_bytes: &[u8], expected_hash: Option<&str>) -> Result<VerificationResult, String>`.",
+      "fix_suggestion": "Replace `verify_payload` with `verify_artifact` in the acceptance criteria and any implementation guidance."
+    },
+    {
+      "task": 2,
+      "severity": "critical",
+      "category": "wrong_signature",
+      "claim": "Task instructs: 'calls `codec::canonical::to_canonical_cbor`' and shows usage `to_canonical_cbor(...)` with just the artifact value (line 47, 172–176)",
+      "reality": "`to_canonical_cbor` has signature `fn to_canonical_cbor(artifact: &JsonValue, schema: &ArtifactSchema) -> Result<Vec<u8>, String>`. It requires a second `&ArtifactSchema` argument. The task omits this required parameter entirely — calling `to_canonical_cbor(artifact)` will not compile.",
+      "fix_suggestion": "The WASM implementation must pass an `ArtifactSchema`. Import a schema constant from `crate::codec::schema` (e.g. `MEMORY_V1`) and pass it as the second argument: `to_canonical_cbor(&artifact_json, &crate::codec::schema::MEMORY_V1)`. Confirm the field layout matches by cross-referencing with `mcp/src/tools.rs`."
+    },
+    {
+      "task": 2,
+      "severity": "critical",
+      "category": "non_existent_api",
+      "claim": "Task references `codec::hash::blake3` as the hashing helper to call in `sign_attestation_bundle` (line 47: 'blake3-hashes per the existing pipeline', hint 'Reuse ... `codec::hash::blake3` (or whichever helper exists)')",
+      "reality": "There is no function named `blake3` in `core/src/codec/hash.rs`. The actual public functions are `hash_artifact(artifact, schema)` and `hash_bytes(data: &[u8]) -> String`. The `blake3` crate is a dependency but the module does not re-export a function by that name.",
+      "fix_suggestion": "Replace references to `codec::hash::blake3` with `codec::hash::hash_bytes(data: &[u8]) -> String` for hashing raw bytes, or `codec::hash::hash_artifact(artifact, schema)` for the full artifact pipeline."
+    },
+    {
+      "task": 2,
+      "severity": "major",
+      "category": "non_existent_api",
+      "claim": "Task TDD anchor test `sign_challenge_roundtrip_with_native_verifier` calls `identity::verify_signature(pubkey, challenge, sig)` passing a pubkey directly",
+      "reality": "`verify_signature` in `core/src/identity/mod.rs` has signature `fn verify_signature(pubkey: &Pubkey, message: &[u8], signature: &[u8]) -> bool` where `Pubkey` is `solana_sdk::pubkey::Pubkey`, not a string or raw bytes. In the WASM context the pubkey will be a base58 string — the test must first parse it via `pubkey.parse::<Pubkey>()` before calling `verify_signature`.",
+      "fix_suggestion": "In the test, parse the base58 pubkey string from `generate_keypair()` into a `solana_sdk::pubkey::Pubkey` before calling `identity::verify_signature`. Note that `solana-sdk` must resolve correctly on wasm32 — if it pulls non-WASM-compatible deps, switch to `ed25519-dalek` as the edge-case note already suggests and implement a local verify helper."
+    },
+    {
+      "task": 3,
+      "severity": "minor",
+      "category": "other",
+      "claim": "Task 3 marks itself `depends_on: []` and states it is wave 1, parallel with Tasks 1 and 2, but also explicitly notes: 'npm run build:wasm only succeeds after Task 2 has added the wasm feature on core/Cargo.toml'",
+      "reality": "The smoke verification for Task 3 hard-depends on Task 2's output (`core/Cargo.toml` wasm feature and `#[wasm_bindgen]` exports). The task itself acknowledges this but the `depends_on` frontmatter is empty, which could mislead the task executor into running the smoke before Task 2 is merged.",
+      "fix_suggestion": "Add `depends_on: [2]` to Task 3's frontmatter, or at minimum add a prominent note in the Description that the smoke step requires Task 2 to be merged first. The build pipeline scaffolding (script creation, package.json edit) can proceed in wave 1, but the smoke verification must be gated on Task 2."
+    }
+  ],
+  "stats": {
+    "tasks_checked": 3,
+    "claims_verified": 38,
+    "issues_found": 7
+  }
+}

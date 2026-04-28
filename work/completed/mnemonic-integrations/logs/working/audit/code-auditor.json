@@ -1,0 +1,126 @@
+{
+  "auditor": "code-auditor",
+  "verdict": "minor_issues",
+  "summary": "All five architectural rules pass. Code quality is high (idiomatic Rust/TS, anyhow::Result everywhere, no unwrap() outside tests/mutex.lock). One critical-for-deploy finding: the OAuth flow is unreachable in production because insert_pending() is only ever called from tests (no consent-page endpoint, no /oauth/init bootstrap). One major: the Sign.tsx page reads the x-mnemonic-expires-at header that the server never emits. Several minor consistency / dead-code / lock-discipline-style findings listed below.",
+  "architectural_rules": {
+    "core_no_oauth_axum": "pass",
+    "payment_rs_unchanged": "pass",
+    "no_hashembedder": "pass",
+    "verify_usdc_transfer_standalone": "pass",
+    "pricing_rs_unchanged": "pass"
+  },
+  "rule_evidence": {
+    "core_no_oauth_axum": "Grep for 'OAuth|http_transport|axum|tower_governor|jsonwebtoken|oauth2' in core/src/ returns only 6 doc-comment matches in storage/sqlite.rs, storage/traits.rs, and core/src/wasm/mod.rs (legitimate caller-context references). No code or dependency reaches into mcp/. core/Cargo.toml dependency list contains no axum/oauth2/jsonwebtoken/tower-http/lru.",
+    "payment_rs_unchanged": "git log main..HEAD -- mcp/src/payment.rs is empty — the file was not touched in this feature branch. Schema migration helper migrate_owner_pubkey_columns() lives in core/src/storage/sqlite.rs as the tech-spec required, NOT in payment.rs.",
+    "no_hashembedder": "Grep for HashEmbedder across the workspace yields zero hits in any /src/ tree. Only historical references in work/mnemonic-core/* docs, all of which describe its removal.",
+    "verify_usdc_transfer_standalone": "mcp/src/payment.rs:241 declares `pub async fn verify_usdc_transfer(solana: &SolanaClient, ...)` — standalone function taking the client by reference, not a method on SolanaClient. main.rs:129 calls it as `payment::verify_usdc_transfer(&state.solana, ...)`.",
+    "pricing_rs_unchanged": "mcp/src/pricing.rs exists and is referenced by mcp/src/main.rs / mcp.rs. core/src/ contains no pricing.rs. Glob for **/pricing.rs returns only mcp/src/pricing.rs."
+  },
+  "findings": [
+    {
+      "severity": "critical",
+      "category": "Missing production wiring (OAuth flow)",
+      "location": "mcp/src/oauth.rs::insert_pending — caller graph",
+      "issue": "OAuthState::insert_pending is annotated `#[allow(dead_code)]` and is only ever called from #[cfg(test)] code (oauth.rs unit tests + mcp/tests/oauth_flow.rs). There is no production endpoint that builds a pending challenge before the browser POSTs /oauth/authorize, which means the /oauth/authorize handler in production always returns 401 'unknown or already-used state'. End-to-end, no client can mint a real production JWT today: the Cursor/Claude.ai install flow described in tech-spec Decision 10 is not reachable from the deployed surface. T7's decisions log called this out as 'OAuth challenge-signing UI not yet wired,' but it should be elevated — without a /oauth/init or equivalent bootstrap, the only route to a JWT is `mint-test-jwt`, which means production traffic depends on out-of-band JWT minting.",
+      "recommendation": "Before deploy, add a `POST /oauth/init` (or equivalent webapp/server endpoint) that generates the unsigned challenge fields, hashes them with build_challenge_hash, calls OAuthState::insert_pending, and returns the challenge to the browser to sign. Drop `#[allow(dead_code)]` once a non-test caller exists. Pre-deploy QA (T14) should fail closed if this remains gap-filled by mint-test-jwt only."
+    },
+    {
+      "severity": "major",
+      "category": "Cross-component contract drift",
+      "location": "webapp/src/pages/Sign.tsx:130 vs mcp/src/api.rs::get_pending_handler",
+      "issue": "Sign.tsx reads `res.headers.get(\"x-mnemonic-expires-at\")` for the countdown but mcp/src/api.rs only emits `x-mnemonic-content-hash` and `x-mnemonic-correlation-id`. The webapp falls back to `Date.now() + 5 * 60 * 1000`, which is correct numerically (300s TTL), but if the server ever changes the TTL (e.g. shortens it on cap pressure) the webapp's countdown will lie. The header was advertised in T7's commit message and is asserted by webapp/src/pages/Sign.test.tsx.",
+      "recommendation": "Add `x-mnemonic-expires-at` to api.rs::get_pending_handler — emit the entry's `exp` as a unix-second timestamp (the same format Sign.tsx parses with `parseInt(...) * 1000`). One-line addition next to the existing two `x-mnemonic-*` headers."
+    },
+    {
+      "severity": "major",
+      "category": "Architectural duplication risk",
+      "location": "mcp/src/lib.rs vs mcp/src/main.rs",
+      "issue": "Both files declare the same module set (`mod api; mod chat; ...`). Rust treats them as independent compilation units — a developer who adds a module to one may forget the other, producing a confusing 'compiles in tests but not in the binary' failure. The lib.rs comment block notes this but doesn't enforce it. test_support.rs has the same drift surface (it's listed in lib.rs only, gated behind a feature).",
+      "recommendation": "Refactor main.rs to a thin wrapper that calls `mnemonic_mcp::run()` so module declarations live only in lib.rs. Out-of-scope for the audit but tracked for a follow-up cleanup PR; T7-decisions log already flagged it."
+    },
+    {
+      "severity": "major",
+      "category": "Per-method rate limiting (Decision 9 partial)",
+      "location": "mcp/src/main.rs:541-547 (mcp_governor_conf)",
+      "issue": "Decision 9 specifies `sign_memory ≤ 5/min/IP` and `recall ≤ 30/min/IP`. The code applies the looser 30/min on the entire `/mcp` route. The 5/min cap on `sign_memory` is delegated to the per-user PendingBundles cap (50 outstanding) — which is per-jwt.sub, not per-IP, and 50 outstanding bundles is much looser than 5/min. A coordinated user with one valid JWT can burst sign_memory at ~50 calls before 429 hits. T4-decisions flagged this. Acceptable for hackathon scope, but not literally what Decision 9 promises.",
+      "recommendation": "Either (a) tighten the spec to 30/min for the route and document per-user 50-outstanding as the sign_memory cap, or (b) wire a per-method tower_governor on the JSON-RPC dispatcher level. Option (a) is simpler and matches what's deployed; update tech-spec.md Decision 9 wording in T13/T14 to reflect reality."
+    },
+    {
+      "severity": "minor",
+      "category": "Lock-poison error handling consistency",
+      "location": "mcp/src/mcp.rs:437,498 vs mcp/src/mcp.rs:368,396",
+      "issue": "Lines 437 and 498 inside `handle_tool_call` use `state.store.lock().unwrap()` while the payment-flow lines 368/396 use `state.store.lock().expect(\"store mutex poisoned\")`. Same code path, different patterns. CLAUDE.md disallows `unwrap()` outside tests; mutex.lock().unwrap() is conventionally tolerated, but the inconsistency suggests the audit-tooling exemption was applied inconsistently.",
+      "recommendation": "Standardize on `.expect(\"store mutex poisoned\")` for all production `store.lock()` callsites in mcp.rs / tools.rs / main.rs / payment.rs / seed.rs / chat.rs. Pure cosmetic; no behavior change."
+    },
+    {
+      "severity": "minor",
+      "category": "Dead code attribute hides production gap",
+      "location": "mcp/src/oauth.rs:148,180,57,65",
+      "issue": "`#[allow(dead_code)]` is attached to `insert_pending`, `build_challenge_hash`, `STATE_TTL_SECS`, `SERVER_ORIGIN`, and `CHALLENGE_SCHEMA`. Each is used only by tests. Suppressing dead-code on a production module is masking the critical finding above (OAuth bootstrap not wired). Once a production caller exists, all five attributes can drop.",
+      "recommendation": "Treat these as a checklist for the OAuth-init wiring task: when the production bootstrap lands, every `#[allow(dead_code)]` here should be removed. If the wiring is deferred, leave the attributes BUT add a TODO comment with a tracking issue id."
+    },
+    {
+      "severity": "minor",
+      "category": "Body-peek waste on GET requests",
+      "location": "mcp/src/oauth.rs::bearer_auth_middleware:514",
+      "issue": "`bearer_auth_middleware` calls `axum::body::to_bytes(...)` for every request that's not `/oauth/*` or `/health`, even for GET `/api/pending/{id}` which has no body. The 1 MiB cap means this is harmless but wasteful — every GET /api/pending request allocates a `Bytes::new()` and re-injects it. Cheap, but cumulative.",
+      "recommendation": "Skip body-peek when `request.method() == Method::GET`. Saves one allocation per GET. Optional polish."
+    },
+    {
+      "severity": "minor",
+      "category": "Two-UUID design (artifact_id ≠ correlation_id)",
+      "location": "mcp/src/tools.rs::sign_memory_deferred:118-186",
+      "issue": "`sign_memory_deferred` generates a UUID for `artifact_id` (baked into the canonical CBOR) and discards it; `PendingBundles::insert` then generates a SECOND UUID for `correlation_id` (used as the route token). The artifact_id baked into the user-signed bytes therefore differs from the correlation_id used by the URL flow. Sign.tsx never inspects the artifact_id, so today this is opaque, but if a future feature ever surfaces artifact_id to the user (e.g. for attestation lookup), the inconsistency will confuse the audit trail. T5-decisions flagged it.",
+      "recommendation": "Either (a) pass the pre-allocated correlation_id through PendingBundles::insert as an optional `caller_id`, or (b) drop the pre-allocated artifact_id and use the post-insert correlation_id as the artifact_id (would require a tiny rewrite of the canonical-CBOR build step). (b) is the cleaner refactor; defer to a follow-up PR."
+    },
+    {
+      "severity": "minor",
+      "category": "API consistency — install deeplinks differ between smithery.yaml and webapp",
+      "location": "smithery.yaml:65-68 vs webapp/src/components/InstallButtons.tsx:22-29",
+      "issue": "smithery.yaml uses `cursor://anysphere.cursor-deeplink/mcp/install?name=Mnemonic&url=...` (URL-encoded `url=` parameter). InstallButtons.tsx uses `?name=Mnemonic&config=<base64-of-{\"url\":\"...\"}>` (base64 config). Both formats are documented by Cursor; using one in the registry listing and the other in the webapp deeplink will produce two different install pages depending on origin.",
+      "recommendation": "Pick one format and use it in both places — base64 `config` is more flexible (multi-arg). If Smithery's listing renderer supports `config`, switch smithery.yaml. Otherwise, switch InstallButtons.tsx to the simpler `url=` form. Document the chosen format in `decisions.md` so the next contributor doesn't drift."
+    },
+    {
+      "severity": "minor",
+      "category": "Dead-code on test helper exposed via #[allow]",
+      "location": "mcp/src/pending.rs:80 (`PendingEntry.metadata` field)",
+      "issue": "`PendingEntry.metadata` carries `#[allow(dead_code)]`. The doc comment notes 'kept on the entry for forward compatibility with future audit hooks'. Carrying dead fields through every clone (`get` clones the whole entry) costs memory at scale.",
+      "recommendation": "Either drop the field if the canonical_cbor blob already contains it, or wire a real reader (`pub fn metadata(&self) -> &serde_json::Value`). If forward-compat is genuinely the rationale, a comment-with-issue-id is better than `#[allow]`."
+    },
+    {
+      "severity": "minor",
+      "category": "Documentation drift — Decision 4 vs Sign.tsx fallback",
+      "location": "webapp/src/pages/Sign.tsx:411 (`decodeEmbeddingFromCbor` returns empty Uint8Array)",
+      "issue": "Sign.tsx passes a zero-length Uint8Array as `embedding_bytes` to `wasm.sign_attestation_bundle`. The WASM signer accepts any bytes; the server's /api/sign-callback validates against the originally-stored canonical_cbor (which already contains the real compressed embedding). So the user's signed bundle and the server's stored bundle differ in `metadata.embedding_compressed`. The COSE signature is still valid against what the browser canonicalized, but the COSE_Sign1 payload's hash != entry.content_hash; api.rs::sign_callback_handler line 152's verify_artifact compares against entry.content_hash which the server computed over its OWN canonical_cbor (with the real embedding). Mismatch should reject the signature with 401 'COSE verification failed' (Sign.tsx test mocks this).",
+      "recommendation": "This is currently saved by the fact that the deferred-sign smoke harness (scripts/test-deferred-sign-flow.sh) signs the EXACT bytes from GET /api/pending/<id> using `sign_pending` example, not the WASM signer. End-to-end via the webapp's WASM signer is therefore untested. Either (a) decode the canonical_cbor in the browser (cbor-x or hand-rolled) and pass the real embedding bytes through, or (b) make the WASM signer accept the raw canonical_cbor blob from the server and sign that directly (no re-canonicalization). (b) is what the api.rs validator expects today. T7-decisions flagged this; T14 deploy should NOT proceed without resolving it."
+    },
+    {
+      "severity": "minor",
+      "category": "Lock-poison — JWT decoding key created twice",
+      "location": "mcp/src/oauth.rs::OAuthState::new:140-141",
+      "issue": "OAuthState::new constructs `EncodingKey::from_secret(secret)` and `DecodingKey::from_secret(secret)` from the same byte slice. Both are stored in fields. jsonwebtoken's keys are themselves Arc-clonable; the duplication is harmless but cosmetic.",
+      "recommendation": "No action — the duplication is required by the jsonwebtoken API (encode and decode take different key types). Logged for completeness."
+    },
+    {
+      "severity": "minor",
+      "category": "Stale comment hints at unfinished feature",
+      "location": "mcp/src/oauth.rs:54-58 (STATE_TTL_SECS)",
+      "issue": "Doc comment on `STATE_TTL_SECS` references 'consumed by the consent-page bootstrap (future webapp endpoint) when inserting a fresh challenge.' Same for SERVER_ORIGIN and build_challenge_hash. These docs describe a non-existent caller, reinforcing the critical OAuth-bootstrap-missing finding above.",
+      "recommendation": "Update the doc comments once the consent-page bootstrap lands; in the meantime, reference the tracking issue for the wiring."
+    },
+    {
+      "severity": "minor",
+      "category": "Audit.toml stub — empty exception list",
+      "location": "audit.toml",
+      "issue": "Empty advisories/ignore list. `cargo audit --deny warnings` will fail loudly the first time a transitive RUSTSEC drops on the solana-sdk dependency chain (likely scenario per T8 decisions). Without a documented triage path in this file, every CI failure becomes ad-hoc.",
+      "recommendation": "Pre-populate audit.toml with the (today empty) ignore list AND a comment block listing 'how to triage a new advisory': link to RUSTSEC search, expected resolution path (dep upgrade vs accept-with-comment), and the 30-day stale-exception SLO. T8 already noted this."
+    },
+    {
+      "severity": "minor",
+      "category": "Webapp keypair stored unencrypted in localStorage",
+      "location": "webapp/src/lib/storage.ts::writeIdentity, IdentityPanel.tsx",
+      "issue": "The user's Ed25519 secret is stored as plain JSON in localStorage. tech-spec Risks table calls for AES-GCM encryption with a passphrase-derived key as a hardening step. T7-decisions explicitly deferred this, citing CSP defense-in-depth. Accept the deferral but note: any XSS that bypasses the static CSP (extension injection, reflected from a connect-src origin) would lift the keypair in plaintext.",
+      "recommendation": "Track as a Phase-2 task. CSP today already covers the common XSS surface; the deferral is reasonable for hackathon scope. Update Risks-table to mark this row as 'mitigated by CSP, deferred to Phase 2.'"
+    }
+  ]
+}

@@ -1,0 +1,167 @@
+{
+  "task": "T11-audit",
+  "auditor": "security-auditor",
+  "date": "2026-04-26",
+  "scope": "mnemonic-integrations Phase 1 — auth + signing surface (Tasks 1-9 outputs)",
+  "methodology": "OWASP Top 10 (2021) + spec-mandated focus areas; read-only review of source files listed in tasks/11.md",
+  "verdict_table": [
+    {"focus_area": "OAuth 2.1 + PKCE correctness (S256-only, atomic single-use, expiry, state binding)", "verdict": "pass", "severity": null, "note": "S256 enforced via canonical-CBOR hash divergence on method mismatch; pop-before-verify atomicity; 60s exp checked"},
+    {"focus_area": "JWT issuance (HS256 fixed alg, iss/aud validation, alg=none rejection)", "verdict": "pass", "severity": null, "note": "Validation::new(Algorithm::HS256), explicit iss/aud HashSet, defense-in-depth re-check post-decode; alg=none unit test confirms rejection"},
+    {"focus_area": "MCP_JWT_SECRET handling (env-only, length check, no log leak)", "verdict": "pass", "severity": null, "note": "load_jwt_secret aborts startup on missing/<32 bytes; no tracing/println of secret value"},
+    {"focus_area": "Bearer middleware allowlist correctness (URI + JSON-RPC method)", "verdict": "pass", "severity": null, "note": "/oauth/*, /health URI-allowlisted; initialize + tools/list method-allowlisted; tools/call requires JWT (test confirms 401)"},
+    {"focus_area": "CORS (exact origin, no wildcard)", "verdict": "pass", "severity": null, "note": "CorsLayer pinned to https://mnemonik.xyz; allow_methods=[GET,POST,OPTIONS]; allow_headers=[AUTHORIZATION,CONTENT_TYPE]; allow_credentials default-false (not enabled)"},
+    {"focus_area": "Sign-callback validation (signer_pubkey==jwt.sub, COSE verify, atomic eviction)", "verdict": "pass", "severity": null, "note": "signer_pubkey checked first, atomic consume before COSE verify, recomputed hash defense-in-depth, 410 Gone on replay"},
+    {"focus_area": "localStorage keypair encryption", "verdict": "fail", "severity": "medium", "note": "T7 deferred AES-GCM encryption; plain-JSON keypair in localStorage. Documented gap in tech-spec Risks table — XSS surfacing through CSP bypass would expose the secret. CSP defense-in-depth is in place."},
+    {"focus_area": "import_keypair_json validation (32-byte secret, pubkey-secret match)", "verdict": "pass", "severity": null, "note": "core/src/wasm/mod.rs::keypair_from_json checks 64-byte secret length AND derived pubkey matches embedded base58; storage.ts::readIdentity also defensively shape-checks"},
+    {"focus_area": "PendingBundles bounds (LRU 10k, TTL 300s, per-user 50)", "verdict": "pass", "severity": null, "note": "Decision-12 caps applied; 32 KB content + 4 KB metadata hard caps; lazy TTL eviction on read; per-user counter decrements on consume/eviction"},
+    {"focus_area": "Pending bundle authorization (403 not 404 on owner mismatch)", "verdict": "fail", "severity": "medium", "note": "GET /api/pending returns 403 on mismatch (good). POST /api/sign-callback's consume() POPS the entry when owner mismatch occurs (returns Forbidden) — destructive on attacker-guessed UUID. See finding #1."},
+    {"focus_area": "Rate limiting (per-IP /mcp + /oauth/*, 429 with Retry-After)", "verdict": "fail", "severity": "low", "note": "tower_governor wired with burst+per_second; Decision 9 calls for sign_memory ≤ 10/min/IP but route-level applies recall's looser 30/min/IP cap. PendingBundles per-user 50 cap covers part of the gap; pure per-IP sign_memory cap missing. See finding #5."},
+    {"focus_area": "OAuth pending-state population (insertion path actually wired)", "verdict": "fail", "severity": "high", "note": "OAuthState::insert_pending is #[allow(dead_code)] — NO production handler invokes it. The consent-page bootstrap that issues challenges to the browser is a 'future webapp endpoint' per the doc comment. Without it the /oauth/authorize POST will always return 401 'unknown or already-used state' against any real client. See finding #2."},
+    {"focus_area": "Smithery yaml — no PII / secrets / internal hostnames", "verdict": "pass", "severity": null, "note": "Public author email is dev@mnemonik.xyz (operational, intentional). No JWT secret, no internal IPs, no API keys."},
+    {"focus_area": "nginx server-block (HSTS, TLS pin, server_tokens, error_page leak)", "verdict": "fail", "severity": "medium", "note": "Missing Strict-Transport-Security header, missing explicit ssl_protocols directive (relies on certbot's options-ssl-nginx.conf which is external), missing server_tokens off. See finding #3."},
+    {"focus_area": "Dependencies (cargo audit, pinned versions)", "verdict": "pass", "severity": null, "note": "cargo-audit step in CI with --deny warnings; jsonwebtoken=9.3.0, oauth2=4.4.2, lru=0.12.5, tower_governor=0.7.0 all '=' pinned. tower_governor at 0.7.0 vs tech-spec's 0.8.0 is a documented deviation that avoids duplicate governor majors."},
+    {"focus_area": "A04 Insecure Design — deferred-sign threat model (approve_url, content-preview spoofing)", "verdict": "fail", "severity": "medium", "note": "approve_url is server-constructed (not user-influenced) — good. But content-preview heuristic (decodeContentFromCbor regex scan after 'content' marker) can mislead user about WHAT they sign. See finding #4."},
+    {"focus_area": "Cross-tenant recall isolation", "verdict": "pass", "severity": null, "note": "core/src/storage/sqlite.rs::search uses parameterized 'WHERE a.owner_pubkey = ?' with no carve-out; recall_owner_isolation integration test guards against regression"}
+  ],
+  "owasp_mapping": {
+    "A01_BrokenAccessControl": {
+      "covered_by": ["Bearer middleware allowlist", "Sign-callback signer_pubkey==jwt.sub", "PendingBundles owner check", "owner_pubkey SQL filter"],
+      "verdict": "pass with one medium finding (consume-before-owner-check pop)"
+    },
+    "A02_CryptographicFailures": {
+      "covered_by": ["HS256 fixed alg", "iss/aud validation", "MCP_JWT_SECRET length check", "COSE_Sign1 native verify"],
+      "verdict": "pass; localStorage keypair encryption is a known deferred gap (T7 deviation)"
+    },
+    "A03_Injection": {
+      "covered_by": ["rusqlite parameterized queries throughout core/src/storage/sqlite.rs"],
+      "verdict": "pass — all SQL uses params![]; no string-interpolated query construction"
+    },
+    "A04_InsecureDesign": {
+      "covered_by": ["Server-built approve_url", "PendingBundles bounds", "Atomic consume before COSE verify"],
+      "verdict": "medium — content-preview heuristic could mislead user (intent-confirmation gap); see finding #4"
+    },
+    "A05_SecurityMisconfiguration": {
+      "covered_by": ["CORS exact origin", "CSP meta tag", "nginx headers"],
+      "verdict": "medium — nginx HSTS + ssl_protocols + server_tokens missing; see finding #3"
+    },
+    "A06_VulnerableAndOutdatedComponents": {
+      "covered_by": ["cargo-audit CI step", "= pinned security-critical deps"],
+      "verdict": "pass"
+    },
+    "A07_IdentificationAndAuthFailures": {
+      "covered_by": ["PKCE S256-only enforcement", "single-use atomic state pop", "60s TTL", "expired-code rejection"],
+      "verdict": "pass; HIGH functional gap — pending-state insertion path not wired (finding #2) means full /authorize flow currently dead-ends"
+    },
+    "A08_SoftwareAndDataIntegrityFailures": {
+      "covered_by": ["base64-encoded CBOR commitment (Decision 7)", "recomputed hash defense-in-depth in sign-callback", "roundtrip_cose_via_http_proxy CI test"],
+      "verdict": "pass"
+    },
+    "A09_LoggingAndMonitoringFailures": {
+      "covered_by": ["No JWT secret/token in tracing", "No COSE bytes in logs"],
+      "verdict": "pass"
+    },
+    "A10_ServerSideRequestForgery": {
+      "covered_by": ["No user-controllable URLs on integration surface", "Ollama URL whitelist (Decision 8 from prior work)", "nginx default 404 + explicit /admin block"],
+      "verdict": "pass"
+    }
+  },
+  "findings": [
+    {
+      "id": 1,
+      "severity": "medium",
+      "category": "A01 Broken Access Control + A04 Insecure Design",
+      "location": "mcp/src/pending.rs:288-312 (PendingBundles::consume)",
+      "issue": "consume() pops the LRU entry BEFORE checking owner. If the supplied jwt_sub does not match the stored entry, the entry is destroyed and PendingError::Forbidden is returned. A holder of any valid JWT who guesses or scrapes another user's correlation_id can DoS the rightful owner's pending bundle (force them to retry).",
+      "exploitation_scenario": "Attacker A obtains a valid JWT (any user can complete OAuth). Attacker observes or guesses Alice's correlation_id (a UUIDv4 — 122 bits of entropy, infeasible to brute-force, but it is leaked through the AI tool's response which may pass through proxy logs / tool history / clipboard). A POSTs /api/sign-callback with Alice's correlation_id and A's own keypair. Server pops the entry, COSE verification fails, but the entry is gone — Alice's webapp now sees 410 Gone when fetching the bundle. Attacker has nuked Alice's pending state.",
+      "recommendation": "Reorder consume() to peek+verify owner first, then pop on success. Concretely: in pending.rs::consume, replace `lru.pop` with `lru.peek` for the initial fetch, return Forbidden without mutation if owner mismatches, then `lru.pop` only when owner matches (or after a successful verify). Alternatively, accept the destructive behavior but flag in docs that the entry destruction is intentional to discourage probing — but that contradicts the 'destructive on attack signal' comment which only protects against same-attacker retries, not victim retries.",
+      "blocks_demo": false
+    },
+    {
+      "id": 2,
+      "severity": "high",
+      "category": "A07 Identification & Auth Failures (functional)",
+      "location": "mcp/src/oauth.rs:148 (insert_pending #[allow(dead_code)]) — no production caller",
+      "issue": "OAuthState::insert_pending is annotated #[allow(dead_code)] and has NO production caller. The 'consent-page bootstrap (future webapp endpoint)' that should generate a fresh state, populate the pending map, and serve the challenge to the browser is not implemented. Without it, every POST /oauth/authorize will fall into the 'unknown or already-used state' branch (oauth.rs:333) and return 401 — no JWT can ever be issued through the public OAuth flow.",
+      "exploitation_scenario": "Not directly exploitable as a security issue, but a HIGH functional gap that means the entire MCP server is unreachable from production AI tools (Cursor / Claude.ai Pro). Demo would have to use the mint-test-jwt CLI shortcut, which is an unrelated trust path. From a security view, this means any future implementation of the bootstrap endpoint MUST also add CSRF protection, rate limiting, and ensure the challenge is bound to a session — adding it post-audit risks shipping with weaker controls than the existing /authorize POST.",
+      "recommendation": "(a) Add a /oauth/bootstrap endpoint (or fold into /oauth/authorize GET) that: (1) accepts client_id/redirect_uri/code_challenge/code_challenge_method/state from query string, (2) validates code_challenge_method=='S256' and rejects otherwise, (3) generates a server nonce, (4) calls insert_pending under a per-IP rate limit (already in place via the /oauth/* governor), (5) returns the challenge fields the browser needs to sign. (b) Track the bootstrap endpoint as the formal CSRF binding point — state must be generated AND validated server-side, not echoed from the client. (c) Re-audit once added.",
+      "blocks_demo": true
+    },
+    {
+      "id": 3,
+      "severity": "medium",
+      "category": "A05 Security Misconfiguration",
+      "location": "mcp/deploy/nginx-mcp-subdomain.conf",
+      "issue": "Three nginx hardening directives are missing: (a) Strict-Transport-Security header (HSTS) — without it, a downgrade attacker who controls DNS or BGP can intercept the first non-HTTPS request and never see the redirect-to-HTTPS. (b) ssl_protocols directive — the config relies on /etc/letsencrypt/options-ssl-nginx.conf (which DOES set TLSv1.2+TLSv1.3 in current letsencrypt distributions) but that's an external dependency; explicit pin in this config is defense-in-depth. (c) server_tokens off — nginx version is leaked in error pages and Server: header.",
+      "exploitation_scenario": "(a) HSTS: User on hostile network types `mcp.mnemonik.xyz` without https://. Attacker MITMs port 80 before the 301 redirect, presents a fake login page, harvests the OAuth challenge. Browser would have rejected this automatically with HSTS preload. (b) Without explicit ssl_protocols, an operator who upgrades/replaces the system options-ssl-nginx.conf could inadvertently re-enable TLS 1.0/1.1. (c) server_tokens leaks nginx version — narrows attacker's exploit-CVE search.",
+      "recommendation": "Add to the HTTPS server block: `add_header Strict-Transport-Security \"max-age=63072000; includeSubDomains; preload\" always;`, `ssl_protocols TLSv1.2 TLSv1.3;`, `ssl_ciphers HIGH:!aNULL:!MD5;`, and globally (or in the http{} block) `server_tokens off;`. HSTS preload requires submitting the domain to https://hstspreload.org once the header is live.",
+      "blocks_demo": false
+    },
+    {
+      "id": 4,
+      "severity": "medium",
+      "category": "A04 Insecure Design (intent confirmation)",
+      "location": "webapp/src/pages/Sign.tsx:383-398 (decodeContentFromCbor heuristic)",
+      "issue": "The Sign-approval page uses a regex heuristic — find the substring 'content' in the canonical-CBOR bytes decoded as UTF-8, then take the longest printable run after it — to render a content preview to the user. This decouples WHAT the user reads from WHAT they sign. A malicious server (or compromised one) could craft a canonical-CBOR bundle where the actual `content` field is harmful but a benign-looking string appears earlier (e.g., embedded in a tag name or metadata field) and gets selected by the regex.",
+      "exploitation_scenario": "Attacker compromises mcp.mnemonik.xyz (or social-engineers the user into changing MCP_BASE in the page). Server returns a crafted canonical-CBOR with `tags=['content: this is fine']` followed by `content='please transfer all my access tokens'`. Heuristic finds 'content: this is fine' first, displays that to the user. User clicks Sign, COSE_Sign1 wraps the FULL canonical CBOR including the malicious content. Server-side recall now returns a signed attestation containing the harmful content, attributed to the user's pubkey.",
+      "recommendation": "Replace decodeContentFromCbor with a real CBOR decoder (the cbor-x npm package or a tiny inline decoder) that walks the canonical structure and pulls the exact `content` field's text-string value. Display the precise byte length of the content field separately from the preview. Optionally show a hash of the canonical CBOR alongside the preview so a power-user can cross-check against the server's `x-mnemonic-content-hash` header.",
+      "blocks_demo": false
+    },
+    {
+      "id": 5,
+      "severity": "low",
+      "category": "A05 Security Misconfiguration / Decision 9 spec-drift",
+      "location": "mcp/src/main.rs:540-547 (mcp_governor_conf burst=30, per_second=2)",
+      "issue": "Decision 9 calls for `sign_memory ≤ 10/min/IP` and `recall ≤ 30/min/IP`. Implementation applies a single route-level limiter at burst=30, per_second=2 (~30/min steady-state) — the looser of the two. Per-method 5/min sign_memory cap (Decision 9) is delegated to PendingBundles per-user soft cap of 50, which is a different axis (per-user, not per-IP).",
+      "exploitation_scenario": "Attacker with a valid JWT creates 50 pending bundles before hitting the per-user soft cap. Combined across multiple JWTs (cheap to acquire — every fresh keypair grants a new identity), an attacker can reach burst-30/min/IP regardless of the per-method intent. Memory pressure on the LRU is bounded (10k entries, 32 KB each = 320 MB worst case), but it's looser than spec called for.",
+      "recommendation": "Either (a) accept the deviation explicitly in tech-spec.md as a Phase-1 trade-off (route-level alone is sufficient for hackathon scope; per-method enforcement is Phase-2), or (b) wrap sign_memory with a second governor layer keyed on (IP, method) inside `mcp_handler` — requires extracting method before the limiter, which is what extract_json_rpc_method already does in the bearer middleware. Documented in Task 4 decisions log already.",
+      "blocks_demo": false
+    },
+    {
+      "id": 6,
+      "severity": "low",
+      "category": "A02 Cryptographic Failures (deferred per T7)",
+      "location": "webapp/src/lib/storage.ts:46 (writeIdentity), webapp/src/components/IdentityPanel.tsx",
+      "issue": "Keypair stored as plain JSON in localStorage. Risks-table mitigation called for AES-GCM with passphrase-derived key. T7 deferred to a follow-up.",
+      "exploitation_scenario": "If any XSS bypasses the CSP (e.g., a permitted style-src origin gets compromised, or an unsafe-inline style is exploited), the attacker reads `localStorage['mnemonic.identity']` and obtains the user's full Ed25519 secret. With it they can forge any future attestation under the user's identity until the user rotates the keypair.",
+      "recommendation": "Implement passphrase-prompt UI on /install. Derive AES-GCM key via Argon2id or PBKDF2-SHA256 (≥600k iterations). Encrypt the keypair with a fresh IV per write; store {ciphertext, iv, salt, kdf_params} in localStorage. Decrypt on demand at sign/export time. Defer Passkey-based unlock to P1.5 per Risks-table.",
+      "blocks_demo": false
+    },
+    {
+      "id": 7,
+      "severity": "low",
+      "category": "A06 — operational",
+      "location": "mcp/src/oauth.rs (multiple .lock().expect() calls)",
+      "issue": "OAuthState's std::sync::Mutex guards use `.expect(\"pending mutex poisoned\")` / `.expect(\"codes mutex poisoned\")`. If a panic occurs inside any earlier critical section, the mutex is poisoned and all subsequent OAuth requests panic and 500. Same pattern in mcp/src/api.rs:202 (`state.store.lock()`) but with proper error handling via match.",
+      "exploitation_scenario": "Low-likelihood in practice — the body of the critical section is just an LRU put/pop, which doesn't panic. But a future contributor adding logic inside the guard could introduce a panic that poisons the mutex, taking the OAuth subsystem down for the lifetime of the process. The fix is mechanical and prevents the regression.",
+      "recommendation": "Replace `.expect(\"...\")` with `.map_err(|e| oauth_error(StatusCode::INTERNAL_SERVER_ERROR, &format!(\"oauth state poisoned: {e}\")))?` returning a JSON-RPC error envelope. Leaves the mutex poisoned but at least does not panic the request handler.",
+      "blocks_demo": false
+    },
+    {
+      "id": 8,
+      "severity": "low",
+      "category": "A04 Insecure Design (functional)",
+      "location": "mcp/src/api.rs:43-73 (get_pending_handler) — no x-mnemonic-expires-at header",
+      "issue": "GET /api/pending/<id> sets x-mnemonic-content-hash and x-mnemonic-correlation-id but NOT x-mnemonic-expires-at. The webapp Sign.tsx reads the header (line 130) and falls back to `now + 5 min` when absent. Effect: countdown timer drifts from server-side TTL.",
+      "exploitation_scenario": "Not directly exploitable. Functional drift — user sees timer hit zero before server actually evicts (or vice versa). Worst case: user clicks Sign at 0:01 webapp time, server returns 410 Gone (slow request, server already evicted), user surprised.",
+      "recommendation": "In api.rs::get_pending_handler add: `if let Ok(hv) = HeaderValue::from_str(&entry.exp.timestamp().to_string()) { headers.insert(\"x-mnemonic-expires-at\", hv); }`. Webapp already consumes this header.",
+      "blocks_demo": false
+    }
+  ],
+  "summary": {
+    "total_findings": 8,
+    "critical": 0,
+    "high": 1,
+    "medium": 4,
+    "low": 3,
+    "blocks_demo": ["finding #2 (OAuth pending-state insertion path not wired)"],
+    "recommend_pre_public_access": ["finding #1 (consume-before-owner-check)", "finding #3 (nginx hardening)", "finding #4 (content-preview spoofing)"],
+    "deferred_acceptable": ["finding #5 (rate-limit per-method drift)", "finding #6 (localStorage encryption — T7 known gap)", "finding #7 (mutex expect)", "finding #8 (expires-at header)"]
+  },
+  "notes": [
+    "Hackathon MVP context — proportional severity. No critical vulnerabilities found; no signs of compromise; no compliance risk.",
+    "Core architectural rule (core/ no references to mcp/) verified — grep -rE 'OAuth|axum|tower_governor|jsonwebtoken|oauth2|PendingBundles' core/src/ returns no code refs (only doc-comment mentions in storage trait/sqlite).",
+    "OAuth /authorize POST handler logic is sound — it's the missing /authorize GET (or /bootstrap) that prevents the flow from completing. This is what finding #2 calls out as HIGH.",
+    "All SQL is parameterized via rusqlite::params!. No string-interpolation SQL construction anywhere in core/src/storage.",
+    "JWT validation in oauth.rs::verify_jwt explicitly uses Validation::new(Algorithm::HS256) — NOT Validation::default() — and adds belt-and-suspenders post-decode checks. Confirmed by test_jwt_alg_none_rejected_401."
+  ]
+}

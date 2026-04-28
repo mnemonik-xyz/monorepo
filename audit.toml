@@ -1,0 +1,15 @@
+# cargo-audit configuration — exceptions to the default
+# `cargo audit --deny warnings` gate in CI.
+#
+# To add an exception:
+#   1. Run `cargo audit` locally and copy the RUSTSEC-XXXX-YYYY id.
+#   2. Add it to `[advisories] ignore` below.
+#   3. Add a comment justifying why we accept the risk and tracking
+#      when it can be removed (upstream fix, dep upgrade, etc).
+#
+# Empty ignore list today — no transitive advisories outstanding.
+# Re-runs of `cargo audit --deny warnings` will fail loudly when a new
+# CVE drops, surfacing it for prompt triage.
+
+[advisories]
+ignore = []

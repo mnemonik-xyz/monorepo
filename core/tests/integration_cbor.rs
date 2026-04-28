@@ -5,6 +5,10 @@
 //!
 //! All helpers come from `mnemonic_core::codec` directly -- no inline duplicates.
 
+// Native-only — the test binary uses tempfile/proptest/tokio dev-deps which
+// don't compile for wasm32-unknown-unknown.
+#![cfg(not(target_arch = "wasm32"))]
+
 use mnemonic_core::codec::canonical::to_canonical_cbor;
 use mnemonic_core::codec::hash::hash_bytes;
 use mnemonic_core::codec::schema::{

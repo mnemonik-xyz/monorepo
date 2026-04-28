@@ -1,0 +1,82 @@
+{
+  "validator": "reality-checker",
+  "batch": [4, 5, 6],
+  "status": "changes_required",
+  "findings": [
+    {
+      "severity": "critical",
+      "category": "hallucination",
+      "task": 4,
+      "issue": "Task 4 step 3 and the TDD anchor reference `mnemonic_core::codec::sign::verify_payload` for COSE_Sign1 signature verification. This function does not exist. The actual function exported from `core/src/codec/sign.rs` is `verify_artifact(cose_bytes: &[u8], expected_hash: Option<&str>) -> Result<VerificationResult, String>`. There is no `verify_payload` anywhere in the codebase (Grep confirms zero matches).",
+      "fix": "Replace every reference to `verify_payload` in Task 4 with `verify_artifact`. The signed-challenge validation in `oauth.rs` should call `mnemonic_core::codec::sign::verify_artifact(&cose_bytes, Some(&challenge_hash))` and check `result.valid && result.signer == signer_pubkey`."
+    },
+    {
+      "severity": "critical",
+      "category": "hallucination",
+      "task": 5,
+      "issue": "Task 5 step 6 says `verify_artifact` 'returns `(payload_pubkey, _)`' (a tuple). The actual return type is `Result<VerificationResult, String>` where `VerificationResult` is a struct with fields `valid`, `content_integrity`, `cose_signature`, `algorithm_valid`, `content_hash`, `signer: String`, `payload: Vec<u8>`. The signer pubkey is at `result.signer`, not destructured as `(payload_pubkey, _)`. Code written against the tuple description will not compile.",
+      "fix": "In the sign-callback handler, call `verify_artifact(&cose_bytes, Some(&entry.content_hash_hex))` and then assert `result.signer == signer_pubkey` and `result.valid == true`. Remove all references to tuple destructuring of `verify_artifact`'s return value."
+    },
+    {
+      "severity": "critical",
+      "category": "cross-task-integration",
+      "task": 5,
+      "issue": "Task 4 step 1 and Task 5 step 1 both independently add `lru = \"=0.12.5\"` to `mcp/Cargo.toml`. Both tasks are in wave 2 and touch the same file. When the second task lands, Cargo will reject a duplicate `[dependencies]` key for `lru`, causing a build failure. There is no coordination between the tasks on who owns this dependency.",
+      "fix": "Assign ownership of the `lru` dep addition to exactly one task. Since Task 4 declares it first (step 1) and Task 5 depends_on Task 4 (frontmatter `depends_on: [2, 4]`), remove the `lru` addition from Task 5 step 1 and add a note that Task 4 already pins it. The Task 5 step 1 verification (`cargo tree -p lru`) can remain as a sanity check."
+    },
+    {
+      "severity": "major",
+      "category": "hallucination",
+      "task": 5,
+      "issue": "Task 5 step 2 defines `PendingEntry` with field `embedding_bytes: Vec<u8>`, but the edge-cases section of the same task states 'keep as `Vec<f32>`... the SQLite `save_attestation` requires `&[f32]`'. These two descriptions are mutually contradictory. If the implementer follows the struct definition they will need to convert `Vec<u8>` back to `&[f32]` on callback; if they follow the edge-case guidance they will need a different field name than `embedding_bytes`.",
+      "fix": "Decide on one representation. Given that `save_attestation` takes `&[f32]` and re-embedding on callback is explicitly prohibited, the field should be typed `embedding: Vec<f32>` (not `embedding_bytes: Vec<u8>`). Update the `PendingEntry` struct description in step 2 to use `embedding: Vec<f32>` consistent with the edge-cases guidance."
+    },
+    {
+      "severity": "major",
+      "category": "feasibility",
+      "task": 4,
+      "issue": "Task 4 step 11 says to update `core/src/storage/traits.rs::search` (line 50) to take `owner_pubkey: &str` instead of the current `signer: &str`. However the existing `recall` tool in `mcp/src/tools.rs` calls `store.search(&query_emb, &pubkey, limit)` (line 400) and `save_attestation` with positional args. All existing tests in `core/src/storage/sqlite.rs` (e.g. `test_search_ranking` at line 407) pass the signer as a plain string. Changing the trait signature is a breaking change that will cascade to: (1) all `sqlite.rs` tests, (2) `mcp/src/tools.rs::recall` and `sign_memory`, (3) any other trait implementations. The task only explicitly lists `tools.rs` as a file to update, but test files in `core/` are not mentioned and will fail to compile.",
+      "fix": "Add `core/src/storage/sqlite.rs` (test section) and any other test files that call `search` or `save_attestation` directly to the list of files to modify in the task. Ensure the implementer updates call sites in tests as well as production code."
+    },
+    {
+      "severity": "major",
+      "category": "feasibility",
+      "task": 4,
+      "issue": "Task 4 acceptance criterion states `tower_governor` must be compatible with `governor = \"0.8\"` and references selecting `\"0.5\" or higher`. The latest published version of `tower_governor` is `0.8.0` (confirmed via `cargo search`). `tower_governor 0.8.0` targets `governor 0.8`, so compatibility is achievable. However the task's guidance 'target `tower_governor = \"0.5\"` or higher' is misleading: versions 0.5.x of tower_governor target `governor 0.6`, not 0.8. The correct selection is `tower_governor = \"0.8\"` (not 0.5). Picking 0.5 would introduce a duplicate `governor` major, violating the stated constraint.",
+      "fix": "Update step 1 to say: pin `tower_governor = \"=0.8.0\"` (the current latest, which targets `governor 0.8` — matching the already-resolved version). Remove the confusing '0.5 or higher' language."
+    },
+    {
+      "severity": "minor",
+      "category": "feasibility",
+      "task": 4,
+      "issue": "Task 4 step 10 says to add `ALTER TABLE api_keys ADD COLUMN oauth_pubkey TEXT` via the migration helper. The existing `api_keys` schema already has `owner_pubkey TEXT NOT NULL DEFAULT ''` (sqlite.rs line 34). The two columns serve distinct purposes (`owner_pubkey` is the payment-key owner; `oauth_pubkey` is the OAuth-bound Solana pubkey). This is architecturally valid but the task should clarify why a new column is needed rather than reusing `owner_pubkey`, to prevent implementers from conflating them.",
+      "fix": "Add a clarifying comment in the task explaining that `oauth_pubkey` is separate from `owner_pubkey` (the latter is for balance-key ownership; the former links an API key to an OAuth-issued identity). This avoids implementers 'fixing' the migration by reusing the existing column."
+    },
+    {
+      "severity": "minor",
+      "category": "feasibility",
+      "task": 4,
+      "issue": "Task 4 specifies that `mcp/src/mcp.rs::McpState` is 'at line 47'. The actual `McpState` struct begins at line 48. This is a one-line off-by-one. Not a blocking issue but the implementer will search around line 47 and find `// Safety` comment instead of the struct definition.",
+      "fix": "Update the task to reference `McpState` at line 48."
+    },
+    {
+      "severity": "minor",
+      "category": "hints",
+      "task": 4,
+      "issue": "The implementation hint for `jsonwebtoken::Validation` includes inline Rust syntax: `validation.set_audience(&[\"mcp\"])` and `validation.iss = Some([(...].into_iter().collect())`. This crosses from a pattern hint into prescribed implementation code, violating the hints-are-hints rule.",
+      "fix": "Replace the code snippet with a prose description: 'Use `Validation::new(Algorithm::HS256)` and configure audience + issuer checks explicitly; consult jsonwebtoken 9.x docs for the exact API to avoid the `alg=none` confusion attack.'"
+    },
+    {
+      "severity": "minor",
+      "category": "hints",
+      "task": 5,
+      "issue": "Task 5 implementation hints include detailed algorithmic guidance for the per-user counter: 'use `LruCache::peek_lru` + manual `pop` rather than push-and-let-it-evict, so the eviction site can decrement the counter for the displaced `jwt_sub`'. This is prescriptive algorithmic pseudocode, not a pattern reference.",
+      "fix": "Rephrase as: 'Ensure the per-user counter is decremented on every removal path including LRU eviction — check `lru::LruCache` docs for hooks that allow observing evicted entries.'"
+    }
+  ],
+  "stats": {
+    "tasks_checked": 3,
+    "claims_verified": 41,
+    "issues_found": 10
+  }
+}

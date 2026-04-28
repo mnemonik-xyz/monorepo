@@ -1,6 +1,6 @@
 import { useState, useCallback, useRef, useEffect } from "react";
 import { sendChatMessage, ChatApiError } from "../lib/api";
-import type { Message } from "../App";
+import type { Message } from "../types";
 
 const SESSION_MESSAGE_LIMIT = 50;
 

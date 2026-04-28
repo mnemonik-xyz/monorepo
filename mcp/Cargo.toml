@@ -11,13 +11,38 @@ mnemonic-core = { path = "../core" }
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
+# Stream wrappers for streamable HTTP NDJSON framing (Decision 1)
+tokio-stream = "0.1"
+# Streams + futures combinators (used by Body::from_stream for chunked responses).
+# Pinned explicitly — do NOT rely on it being a transitive of axum/tokio.
+futures = "0.3"
+# Frame buffers used in the streamable HTTP NDJSON pipeline. Pinned explicitly
+# rather than relying on the axum/tokio transitive — Body::from_stream emits
+# `Bytes` directly.
+bytes = "1"
 
 # HTTP server (remote MCP transport)
 axum = { version = "0.8", features = ["json", "macros"] }
 tower-http = { version = "0.6", features = ["cors"] }
+# Form-urlencoded body parsing for /oauth/token (RFC 6749 §3.2 mandates
+# Content-Type: application/x-www-form-urlencoded; VS Code, Claude.ai,
+# and most OAuth client libraries default to that — only Cursor sends JSON).
+serde_urlencoded = "0.7"
 
 # Rate limiting (POST /chat: 10 req/min per IP)
 governor = "0.8"
+
+# OAuth 2.1 + PKCE server primitives (Decision 9-11, Task 4)
+# Pinned per tech-spec; cargo tree -p governor must show one major version after add.
+oauth2 = "=4.4.2"
+jsonwebtoken = "=9.3.0"
+# LRU cache for OAuthState pending challenges + issued codes; Task 5 reuses this dep.
+lru = "=0.12.5"
+# Per-IP rate limiting on /mcp + /oauth/*. Pinned to 0.7.0 — the latest version
+# whose transitive `governor` crate matches the existing `governor = "0.8"` dep
+# from `pricing.rs`. Tech-spec suggested `=0.8.0` but that version pulls in
+# `governor 0.10`, producing a duplicate major. Logged in decisions.md.
+tower_governor = "=0.7.0"
 
 # HTTP client (used by pricing.rs for Irys + SOL/USDC price fetches)
 reqwest = { version = "0.12", features = ["json"] }
@@ -57,6 +82,11 @@ anyhow = "1"
 # UUID
 uuid = { version = "1", features = ["v4"] }
 
+# RNG — used by oauth::authorize_init_handler for the 16-byte server nonce
+# (Decision 10). Pinned to 0.8 to match the existing transitive used by
+# solana-sdk; bumping to 0.9 introduces a duplicate major.
+rand = "0.8"
+
 # ZIP archive (artifact generation in seed.rs)
 zip = { version = "2", default-features = false, features = ["deflate"] }
 
@@ -67,12 +97,24 @@ walkdir = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
+# Optional dep — gated by the `test-support` feature so it does NOT enter
+# production builds. The same crate is also a regular `[dev-dependencies]`
+# entry below so plain `cargo test` keeps working without enabling features.
+tempfile = { version = "3", optional = true }
+
 [features]
 default = []
 # Forwards to mnemonic-core's local-embed feature (fastembed ONNX runtime).
 local-embed = ["mnemonic-core/local-embed"]
 # Vendor OpenSSL from source (used in CI cross-compilation).
 openssl-vendored = ["mnemonic-core/openssl-vendored"]
+# Exposes `mnemonic_mcp::test_support` (mock_state + mint_jwt) outside `#[cfg(test)]`
+# so the `mint-test-jwt` binary and CI helpers can reach the same JWT-issue path
+# the integration tests use. Not enabled by default — production builds NEVER
+# compile this in. See Task 8 § Step 1 in work/mnemonic-integrations/tasks/8.md.
+# Activates the optional `tempfile` dep so `mock_state()` can mint per-test
+# scratch SQLite databases.
+test-support = ["dep:tempfile"]
 
 [dev-dependencies]
 tempfile = "3"
@@ -80,3 +122,7 @@ httpmock = "0.8"
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 hyper = "1"
+# Adversarial JSON re-encoder used by tests/roundtrip_cose_via_http_proxy.rs to
+# mutate envelope bytes (key reorder, whitespace normalize) and prove the
+# base64 cose_bundle field survives byte-identical (Decision 7 + Risks R1).
+simd-json = "0.13"

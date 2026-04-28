@@ -1,15 +1,20 @@
+mod api;
 mod chat;
 mod config;
+mod cors_policy;
 mod llm;
 mod mcp;
+mod oauth;
 mod payment;
+mod pending;
 mod pricing;
 mod seed;
 mod tools;
 
 use axum::{
     extract::{Query, State},
-    http::{HeaderMap, StatusCode},
+    http::StatusCode,
+    middleware,
     response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
@@ -60,86 +65,11 @@ struct DepositRequest {
 }
 
 // ── Axum handlers ─────────────────────────────────────────────────────────────
-
-/// /mcp — payment-aware MCP JSON-RPC dispatcher.
-async fn mcp_handler(
-    State(state): State<Arc<mcp::McpState>>,
-    headers: HeaderMap,
-    Json(req): Json<mcp::JsonRpcRequest>,
-) -> Response {
-    let is_sign_memory = req.method == "tools/call"
-        && req.params.get("name").and_then(|n| n.as_str()) == Some("mnemonic_sign_memory");
-
-    if is_sign_memory && state.payment_mode != "none" && state.storage_mode != "local" {
-        // Use live price from pricing engine (refreshed in background)
-        let current_cost = state.pricing.current_price();
-        let gate = payment::check_payment(
-            &headers,
-            &state.payment_mode,
-            &state.store,
-            &state.solana,
-            &state.treasury_pubkey,
-            &state.usdc_mint,
-            current_cost,
-        )
-        .await;
-
-        match gate {
-            payment::PaymentGate::Proceed(api_key) => {
-                // Deduct balance BEFORE executing the tool (reserve funds)
-                if let Some(ref key) = api_key {
-                    let store = state.store.lock().unwrap();
-                    if let Err(e) = payment::deduct_balance(
-                        &store,
-                        key,
-                        state.sign_memory_cost_micro_usdc,
-                        "mnemonic_sign_memory",
-                    ) {
-                        let err_body = serde_json::json!({
-                            "jsonrpc": "2.0", "id": req.id,
-                            "error": {"code": -32600, "message": format!("payment failed: {e}")}
-                        });
-                        return (StatusCode::PAYMENT_REQUIRED, Json(err_body)).into_response();
-                    }
-                }
-
-                let resp = mcp::handle_request(&req, &state).await;
-
-                // Refund on tool failure. Uses `refund_balance` (not
-                // `credit_deposit`) so the per-tx_sig idempotency guard does
-                // not silently swallow repeated refunds for the same
-                // underlying failure class.
-                if resp.error.is_some() {
-                    if let Some(ref key) = api_key {
-                        let reason = resp
-                            .error
-                            .as_ref()
-                            .map(|e| e.message.as_str())
-                            .unwrap_or("error");
-                        let store = state.store.lock().unwrap();
-                        if let Err(e) = payment::refund_balance(&store, key, current_cost, reason) {
-                            tracing::warn!(api_key = %key, error = %e, "refund failed");
-                        }
-                    }
-                }
-
-                Json(resp).into_response()
-            }
-            payment::PaymentGate::NeedPayment(x402) => {
-                (StatusCode::PAYMENT_REQUIRED, Json(x402)).into_response()
-            }
-            payment::PaymentGate::Unauthorized(msg) => {
-                let err_body = serde_json::json!({
-                    "jsonrpc": "2.0", "id": req.id,
-                    "error": {"code": -32600, "message": msg}
-                });
-                (StatusCode::UNAUTHORIZED, Json(err_body)).into_response()
-            }
-        }
-    } else {
-        Json(mcp::handle_request(&req, &state).await).into_response()
-    }
-}
+//
+// The `/mcp` JSON-RPC dispatcher (streamable HTTP per Decision 1) lives in
+// `mcp::mcp_handler` so it can be unit-tested directly from `mcp.rs::tests`.
+// The other endpoints below (api keys, balance, deposit, admin) are plain
+// JSON request/response — they do not need the streaming envelope.
 
 /// POST /api-keys — create a pre-funded API key (zero initial balance).
 async fn create_api_key(
@@ -474,6 +404,10 @@ async fn main() -> anyhow::Result<()> {
         .build()
         .expect("failed to build reqwest client for Ollama");
 
+    // Browser-mediated signing buffer — Decision 12. Production caps:
+    // 10k LRU entries, 300s TTL, 50 pending bundles per jwt.sub.
+    let pending = Arc::new(pending::PendingBundles::with_defaults());
+
     let state = Arc::new(mcp::McpState {
         keypair,
         solana: solana::SolanaClient::new(&cfg.solana_rpc_url),
@@ -495,6 +429,7 @@ async fn main() -> anyhow::Result<()> {
         artifact_zip_path: std::sync::Mutex::new(None),
         ollama_client,
         chat_limiter,
+        pending,
     });
 
     // ── RAG seeding (whitepaper chunking + artifact generation) ──────────
@@ -544,7 +479,13 @@ async fn run_stdio(state: Arc<mcp::McpState>) -> anyhow::Result<()> {
             }
         };
 
-        let resp = mcp::handle_request(&req, &state).await;
+        // Stdio path: no JWT, single-tenant CLI mode. Use the local keypair
+        // pubkey as owner scope so attestations land under a stable owner
+        // and `recall` returns the local user's rows. `jwt_sub = None`
+        // routes `sign_memory` through the inline (server-signing) branch
+        // rather than the deferred (PendingBundles) one — Decision 12.
+        let owner_pubkey = state.keypair.pubkey().to_string();
+        let resp = mcp::handle_request(&req, &state, &owner_pubkey, None).await;
         stdout
             .write_all(serde_json::to_string(&resp)?.as_bytes())
             .await?;
@@ -556,11 +497,178 @@ async fn run_stdio(state: Arc<mcp::McpState>) -> anyhow::Result<()> {
 
 // ── HTTP transport ────────────────────────────────────────────────────────────
 
+// CORS allow-origin policy moved to `mcp/src/cors_policy.rs` so integration
+// tests under `mcp/tests/cors.rs` can reach it via the library facade.
+
+/// Load and decode `MCP_JWT_SECRET` from env. Per Decision 11 the secret must
+/// be a base64-encoded value that decodes to >= 32 bytes. Aborts startup if
+/// the env var is missing or shorter — silent fallback to a default secret
+/// would be the kind of misconfiguration that leaks live JWTs.
+fn load_jwt_secret() -> anyhow::Result<Vec<u8>> {
+    let raw = std::env::var("MCP_JWT_SECRET")
+        .map_err(|_| anyhow::anyhow!("MCP_JWT_SECRET env var is required (32-byte base64)"))?;
+    let bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, raw.trim())
+        .map_err(|e| anyhow::anyhow!("MCP_JWT_SECRET is not valid base64: {e}"))?;
+    if bytes.len() < 32 {
+        anyhow::bail!(
+            "MCP_JWT_SECRET decoded to {} bytes — must be >= 32",
+            bytes.len()
+        );
+    }
+    Ok(bytes)
+}
+
 async fn run_http(state: Arc<mcp::McpState>, host: &str, port: u16) -> anyhow::Result<()> {
-    use tower_http::cors::{Any, CorsLayer};
+    use axum::http::{header, Method};
+    use tower_governor::{governor::GovernorConfigBuilder, GovernorLayer};
+    use tower_http::cors::{AllowOrigin, CorsLayer};
+
+    // ── OAuth state + JWT secret (Decisions 9 + 11) ──────────────────────────
+    let secret = load_jwt_secret()?;
+    let oauth_state = Arc::new(oauth::OAuthState::new(&secret));
+    tracing::info!(
+        "OAuth state initialized (LRU cap {})",
+        oauth::OAUTH_STATE_CAPACITY
+    );
+
+    // ── Per-IP rate limiters (Decision 9, tech-spec AC line 357) ─────────────
+    // /mcp aggregates sign_memory + recall traffic. tower_governor caps by IP
+    // before the bearer-auth check so 429s short-circuit before JWT verify.
+    // sign_memory ≤ 5/min/IP, recall ≤ 30/min/IP — we apply the looser of the
+    // two (30/min) at the route-level limiter and rely on PendingBundles
+    // (Task 5) for the per-method 5/min cap on sign_memory.
+    let mcp_governor_conf = Arc::new(
+        GovernorConfigBuilder::default()
+            .per_second(2) // 30 / 60 = 0.5/s smoothed; per_second uses int
+            .burst_size(30)
+            .finish()
+            .ok_or_else(|| anyhow::anyhow!("failed to build /mcp governor config"))?,
+    );
+    // /oauth/* per-IP rate limit: 5 burst + 1 req/s refill ≈ 5 req/min/IP
+    // production cap. Set OAUTH_RATELIMIT_DISABLE=1 to widen for e2e tests
+    // (Playwright on a single dev IP runs ~12 /oauth/* calls per test
+    // suite; 5/min would short-circuit them with HTTP 429).
+    let oauth_disabled =
+        std::env::var("OAUTH_RATELIMIT_DISABLE").ok().as_deref() == Some("1");
+    let (oauth_per_sec, oauth_burst) = if oauth_disabled {
+        (100u64, 1000u32) // effectively unlimited for test runs
+    } else {
+        (1u64, 5u32)
+    };
+    let oauth_governor_conf = Arc::new(
+        GovernorConfigBuilder::default()
+            .per_second(oauth_per_sec)
+            .burst_size(oauth_burst)
+            .finish()
+            .ok_or_else(|| anyhow::anyhow!("failed to build /oauth/* governor config"))?,
+    );
+    if oauth_disabled {
+        tracing::warn!(
+            "OAUTH_RATELIMIT_DISABLE=1 — /oauth/* rate limit relaxed; do NOT use in production"
+        );
+    }
+
+    // ── Bearer-auth middleware on /mcp (Decision 9) ──────────────────────────
+    // /oauth/* and /health are URI-allowlisted INSIDE the middleware; we still
+    // attach the layer to the whole MCP-protected subset because the body-peek
+    // logic for JSON-RPC method allowlisting (initialize / tools/list) only
+    // makes sense on /mcp.
+    // Two paths point to the SAME handler:
+    //   - `/mcp` — explicit, used by Cursor + VS Code (deeplinks pass
+    //     this URL verbatim, MCP_URL = "https://mcp.mnemonik.xyz/mcp")
+    //   - `/`    — apex, used by Claude.ai (Anthropic's connector
+    //     strips the path from the user-supplied URL and POSTs to root;
+    //     we observed `Claude-User` POST/GET hitting `/` after a
+    //     successful OAuth flow, returning 404 because we only had
+    //     `/mcp` registered)
+    //
+    // Both routes are equivalent and run under the same bearer-auth +
+    // governor stack. The duplication is intentional for client
+    // compatibility — pruning either one breaks one of the connectors.
+    let mcp_subrouter = Router::new()
+        .route("/mcp", post(mcp::mcp_handler))
+        .route("/", post(mcp::mcp_handler))
+        .layer(middleware::from_fn_with_state(
+            oauth_state.clone(),
+            oauth::bearer_auth_middleware,
+        ))
+        .layer(GovernorLayer {
+            config: mcp_governor_conf,
+        })
+        .with_state(state.clone());
+
+    // ── /api/* webapp surface (Decision 12) ──────────────────────────────────
+    // GET /api/pending/{id} returns the unsigned canonical-CBOR for the
+    // browser to sign; POST /api/sign-callback ingests the COSE_Sign1 and
+    // persists the attestation. Both routes sit behind the same Bearer-auth
+    // middleware as /mcp; non-JSON-RPC, so the body-peek allowlist
+    // (`initialize` / `tools/list`) does not apply — every /api/* request
+    // requires a valid JWT.
+    let api_subrouter = Router::new()
+        .route(
+            "/api/pending/{correlation_id}",
+            axum::routing::get(api::get_pending_handler),
+        )
+        .route("/api/sign-callback", post(api::sign_callback_handler))
+        .layer(middleware::from_fn_with_state(
+            oauth_state.clone(),
+            oauth::bearer_auth_middleware,
+        ))
+        .with_state(state.clone());
+
+    // ── OAuth routes (Decision 10) ────────────────────────────────────────────
+    // GET /oauth/authorize — bootstrap (per-method dispatch in axum).
+    //   Accepts standard OAuth 2.1 + PKCE query params; validates S256;
+    //   inserts a pending challenge under `state`; returns either JSON
+    //   (programmatic clients) or 302 to the webapp consent page (browsers).
+    // POST /oauth/authorize — challenge-signed callback (existing behavior).
+    let oauth_routes = Router::new()
+        .route(
+            "/oauth/authorize",
+            get(oauth::authorize_init_handler).post(oauth::authorize_handler),
+        )
+        .route("/oauth/token", post(oauth::token_handler))
+        // RFC 7591 Dynamic Client Registration. Open registration: any client
+        // POSTs its redirect_uris and gets back a client_id. Required for VS
+        // Code / Claude.ai connector flows that abort with "DCR not supported"
+        // when registration_endpoint is missing from the metadata.
+        .route("/oauth/register", post(oauth::oauth_register_handler))
+        .layer(GovernorLayer {
+            config: oauth_governor_conf,
+        })
+        .with_state(oauth_state);
+
+    // ── CORS (Decision 9 + hotfix: widen for MCP-client origins) ─────────────
+    // Anthropic / Cursor / ChatGPT connectors run inside the user's browser
+    // and originate requests from `https://claude.ai`, `https://*.claude.ai`,
+    // `https://cursor.sh`, `https://chatgpt.com` etc. The previous narrow
+    // single-origin policy returned ACAO=mnemonik.xyz for ALL preflights,
+    // breaking connector reachability with "Couldn't reach the MCP server".
+    //
+    // Predicate-based allow-origin echoes back the request origin if it
+    // matches a trusted MCP-client root domain — see `is_allowed_cors_origin`.
+    let cors = CorsLayer::new()
+        .allow_origin(AllowOrigin::predicate(|origin, _parts| {
+            cors_policy::is_allowed_cors_origin(origin.as_bytes())
+        }))
+        .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
+        .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE]);
+
+    // ── /.well-known discovery (RFC 8414 + MCP spec) ─────────────────────────
+    // Anthropic's MCP connector probes these BEFORE attempting OAuth. Public
+    // metadata, no auth, no state — a separate sub-router avoids dragging
+    // bearer-auth or governor onto a 200-byte JSON response.
+    let well_known_routes = Router::new()
+        .route(
+            "/.well-known/oauth-authorization-server",
+            get(oauth::oauth_authorization_server_metadata),
+        )
+        .route(
+            "/.well-known/oauth-protected-resource",
+            get(oauth::oauth_protected_resource_metadata),
+        );
 
     let app = Router::new()
-        .route("/mcp", post(mcp_handler))
         .route("/chat", post(chat::chat_handler))
         .route("/api-keys", post(create_api_key))
         .route("/balance", get(get_balance))
@@ -572,12 +680,11 @@ async fn run_http(state: Arc<mcp::McpState>, host: &str, port: u16) -> anyhow::R
             get(|| async { Json(serde_json::json!({"status": "ok"})) }),
         )
         .with_state(state)
-        .layer(
-            CorsLayer::new()
-                .allow_origin(Any)
-                .allow_methods(Any)
-                .allow_headers(Any),
-        );
+        .merge(mcp_subrouter)
+        .merge(api_subrouter)
+        .merge(oauth_routes)
+        .merge(well_known_routes)
+        .layer(cors);
 
     let addr = format!("{host}:{port}");
     tracing::info!("MCP server listening on http://{addr}/mcp");

@@ -1,0 +1,138 @@
+{
+  "validator": "reality-checker",
+  "batch": [10, 11, 12],
+  "status": "changes_required",
+  "findings": [
+    {
+      "severity": "critical",
+      "category": "missing_file",
+      "task": 10,
+      "issue": "mcp/src/oauth.rs is listed as a source file to read (Context Files) but does not exist in the codebase. This file is an artifact of Task 4 (wave 2). Task 10 depends_on includes 4, so dependency is declared. However the file is genuinely absent right now — when the audit executes it will find this file missing and must record it as a focus-area gap per the task's own Edge cases rule ('If a focus-area file does not exist, record that as a major finding').",
+      "fix": "This is acceptable only if Task 4 has completed before Task 10 executes. Wave ordering (wave 4 after wave 2/3) ensures this. Add a note in the task Description: 'All context files listed here are artifacts of Tasks 1-9; they will exist when this wave-4 task runs.' This clarifies intent and prevents a false alarm for any pre-execution validator."
+    },
+    {
+      "severity": "critical",
+      "category": "missing_file",
+      "task": 10,
+      "issue": "mcp/src/pending.rs is listed as a source file to read but does not exist in the codebase. Same wave-ordering caveat as oauth.rs applies (Task 5 creates it). Currently absent.",
+      "fix": "Same fix as above — annotate that file list is wave-2/3 artifact inventory, not current-state inventory."
+    },
+    {
+      "severity": "critical",
+      "category": "missing_file",
+      "task": 10,
+      "issue": "core/src/wasm/ directory does not exist (no files match /Users/syi/src/sessions/2/core/src/wasm/**). This is the artifact of Task 2. The task instructs reading 'core/src/wasm/ (entire directory)' as a context file.",
+      "fix": "Same wave-ordering note needed. The directory will be created by Task 2 before wave 4 runs."
+    },
+    {
+      "severity": "critical",
+      "category": "missing_file",
+      "task": 10,
+      "issue": "mcp/tests/ directory does not exist (no files match /Users/syi/src/sessions/2/mcp/tests/**). The task lists it implicitly through focus area 'Integration tests (Task 8)'. When the audit runs, if Task 8 hasn't completed, this is a blocking gap with no fallback described.",
+      "fix": "Add explicit Edge case: 'If mcp/tests/ does not exist, record a major finding against Task 8 and skip the integration-test focus area.'"
+    },
+    {
+      "severity": "critical",
+      "category": "missing_file",
+      "task": 10,
+      "issue": "smithery.yaml is listed as a context file but does not exist at repo root (Glob found no match). Artifact of Task 6.",
+      "fix": "Same wave-ordering annotation needed."
+    },
+    {
+      "severity": "critical",
+      "category": "missing_file",
+      "task": 10,
+      "issue": "work/mnemonic-integrations/decisions.md does not exist. All three audit tasks (10, 11, 12) are instructed to append to this file. If it doesn't exist at wave-4 execution time, the append-only invariant cannot be maintained and the first task to run must create the file rather than append. No task in waves 1-3 is explicitly designated as the creator of decisions.md.",
+      "fix": "Add an explicit note in all three audit tasks: 'Create decisions.md if it does not yet exist, then append.' Alternatively, designate Task 1 or a setup task as the owner that initializes decisions.md with a header."
+    },
+    {
+      "severity": "critical",
+      "category": "missing_file",
+      "task": 11,
+      "issue": "mcp/src/oauth.rs, mcp/src/pending.rs — both listed in Context Files → Source code to read but absent from codebase. Same wave-ordering situation as Task 10. Additionally Task 11 references webapp/src/wasm/ which also does not exist (wasm-pack output directory created by Task 3).",
+      "fix": "Add wave-ordering annotation. The audit is blocked if Task 3 (wasm build pipeline) has not run, because webapp/src/wasm/ is generated output checked into .gitignore per the task spec."
+    },
+    {
+      "severity": "critical",
+      "category": "missing_file",
+      "task": 11,
+      "issue": "webapp/src/pages/ directory does not exist (no files match /Users/syi/src/sessions/2/webapp/src/pages/**). Task 11 lists webapp/src/pages/Sign.tsx as a source file to read for the sign-callback caller audit. This is an artifact of Task 7.",
+      "fix": "Annotate as Task 7 artifact. Add Edge case: 'If Sign.tsx missing, record major finding against Task 7 and mark sign-callback area n/a.'"
+    },
+    {
+      "severity": "critical",
+      "category": "missing_file",
+      "task": 12,
+      "issue": "work/mnemonic-integrations/tasks/smoke-checklist.md is listed as a Context File for Task 12 but does not exist. It is the output of Task 9. Task 12 depends_on includes [1,2,3,4,5,6,7,8,9] so dependency is declared. However step 1 says to inventory ALL tests 'written by Tasks 1-9' and step 2 references 'Manual smoke checklist' as a specific focus area requiring the file. If smoke-checklist.md is absent at audit time, the test audit for this focus area has no input.",
+      "fix": "Add explicit Edge case: 'If smoke-checklist.md does not exist, record a critical finding against Task 9 and mark the Manual smoke checklist focus area as blocked.' Currently the task says nothing about what to do if the file is missing."
+    },
+    {
+      "severity": "critical",
+      "category": "missing_file",
+      "task": 12,
+      "issue": "mcp/src/oauth.rs, mcp/src/pending.rs, mcp/tests/ (entire directory), core/src/wasm/mod.rs — all listed as source code to read but none exist in the current codebase. The test audit cannot produce a meaningful per-area pass/fail table or pyramid count without these files.",
+      "fix": "Add wave-ordering annotation to Context Files section making clear these are Task 1-9 artifacts required to exist before wave 4 executes."
+    },
+    {
+      "severity": "major",
+      "category": "feasibility",
+      "task": 11,
+      "issue": "OWASP Top 10 (2021) coverage list in 'What to do' step 3 skips A04 (Insecure Design) and A06 (Vulnerable and Outdated Components) without explaining the omission. The Acceptance Criteria says 'any category not covered by focus areas is explicitly marked n/a with reason' — but this requirement applies to the output report, not to the task instruction itself. The task instruction omitting A04/A06 from the checklist list creates ambiguity: should the auditor check them or not? A06 (dependency audit via cargo audit) IS effectively covered by the 'Dependencies' focus area, but it's not cross-referenced. A04 (Insecure Design) has no coverage.",
+      "fix": "Add A04 and A06 explicitly to the OWASP list in step 3, with inline notes: A04 → 'covered by architectural-rule check in Task 10; mark n/a here unless design issues are surfaced by focus areas'; A06 → 'covered by Dependencies focus area (cargo audit CI step)'. This makes the mapping unambiguous for the auditor."
+    },
+    {
+      "severity": "major",
+      "category": "feasibility",
+      "task": 11,
+      "issue": "The Description says Task 7 is '(CI integration)' — 'tasks 4 (streamable HTTP + OAuth + JWT middleware), 5 (WASM signing wrappers + webapp identity flow), and 7 (CI integration)'. But Task 7 in the task list is 'Webapp pages (React: Landing, Install, Sign)' per the tech-spec and Task 10's focus areas. CI changes are in Task 8. This is a mislabeled scope statement that could cause the auditor to audit the wrong task's artifacts.",
+      "fix": "Correct Task 11 Description to read: 'tasks 4 (streamable HTTP + OAuth + JWT middleware), 5 (WASM signing wrappers + webapp identity flow), 7 (webapp pages including Sign.tsx), and 8 (CI integration — cargo audit step, MCP Inspector).' The security-relevant CI additions (cargo audit) come from Task 8."
+    },
+    {
+      "severity": "major",
+      "category": "feasibility",
+      "task": 12,
+      "issue": "Step 1 instructs to use grep pattern '#[test]|#[tokio::test]|#[wasm_bindgen_test]' — this is embedded in an implementation hints section as a bash command. The backslash escaping shown is for shell grep, but the task's approach section also says this. The pattern would miss `#[test]` annotations that have a space before the attribute or are preceded by other attributes. More importantly, using grep to count tests is described as 'the approach' rather than as a hint — this prescribes the implementation method, which is borderline implementation-hint-as-instructions.",
+      "fix": "Minor: rephrase as a hint. The specific grep pattern is acceptable guidance but should not be the only method described. Add: 'Also check for test modules via Glob on **/tests/*.rs and **/mod.rs files containing cfg(test).'"
+    },
+    {
+      "severity": "major",
+      "category": "feasibility",
+      "task": 12,
+      "issue": "Acceptance Criteria item: 'Tech-spec Decision 9, 10, 11, 12 traceability matrix included'. The tech-spec decisions are numbered 1-12 but are not in sequential order in the document — Decision 12 appears before Decision 5 in the file (PendingBundles store is listed as Decision 12 on line 113, then Decision 5 on line 118). The task refers to 'Decisions 9, 10, 11, 12' which the auditor must locate by section title. Decision 12 exists (PendingBundles), 11 (JWT format), 10 (OAuth challenge encoding), 9 (ownership filter + rate limit + auth allowlist). This is not an error but a navigation hazard — the auditor must search by heading, not by line order.",
+      "fix": "Add a note: 'Tech-spec decisions are listed non-sequentially; search by heading text (e.g. grep for \"### Decision 9\") rather than by position in the file.'"
+    },
+    {
+      "severity": "minor",
+      "category": "feasibility",
+      "task": 10,
+      "issue": "Focus area for 'Streamable HTTP transport (Task 1)' mentions 'no leftover SSE code paths or text/event-stream headers'. The current mcp/src/mcp.rs does not have SSE code (the existing server uses request-response JSON-RPC per CLAUDE.md). The focus area implies SSE was previously present and might linger, but that's not the current codebase state. The audit may produce false positives or a trivially vacuous finding here.",
+      "fix": "Rephrase: 'Verify no text/event-stream Content-Type or SSE-style data: prefix in response serialization (even if no prior SSE code existed, verify the new NDJSON path doesn't accidentally use SSE framing).'"
+    },
+    {
+      "severity": "minor",
+      "category": "feasibility",
+      "task": 10,
+      "issue": "The webapp focus areas reference webapp/src/pages/ and webapp/src/components/ but neither directory currently exists. The existing webapp has components at webapp/src/components/ (ChatPage.tsx, LandingPage.tsx) — components exist but pages/ does not. The audit instructions for 'Webapp pages (Task 7)' reference webapp/src/pages/ which is a new directory created by Task 7.",
+      "fix": "Add note: 'webapp/src/pages/ is created by Task 7; webapp/src/components/ already exists with ChatPage and LandingPage; the audit should cover both the pre-existing and new component files.'"
+    },
+    {
+      "severity": "minor",
+      "category": "feasibility",
+      "task": 11,
+      "issue": "The nginx server-block focus area is described as 'out-of-tree on VPS' and the task says to audit deployment.md description if inaccessible. The file deployment.md is referenced as a context file. This is sound guidance. However the finding category for nginx gaps is described as 'medium' in Edge cases, which is a severity level that is not consistent with the findings table format (critical/high/medium/low) vs the general task format (critical/major/minor). The security audit uses OWASP-aligned severity (critical/high/medium/low) which differs from the code audit. This inconsistency is acceptable within a single audit task but should be noted so downstream triage doesn't confuse the two scales.",
+      "fix": "Add a note to the findings format description clarifying: 'This security audit uses OWASP severity scale (critical/high/medium/low). The code audit (Task 10) uses project severity scale (critical/major/minor). Triage in decisions.md should note which scale is being used.'"
+    },
+    {
+      "severity": "minor",
+      "category": "hints",
+      "task": 12,
+      "issue": "Implementation hints section says 'For the COSE-via-proxy realism check, look for the mock's mutation strategy explicitly. If the mock re-serializes via serde_json::to_vec with default options, it produces identical output to the original — that is the failure mode to catch.' This is a substantive analysis hint that tells the auditor exactly what to look for and what the failure mode is. This approaches implementation guidance rather than audit guidance, but for an audit task (not a code-writing task) this level of specificity is appropriate.",
+      "fix": "No change required — audit tasks benefit from specific hints about what failure modes to catch. Acceptable."
+    }
+  ],
+  "stats": {
+    "tasks_checked": 3,
+    "claims_verified": 41,
+    "issues_found": 16
+  }
+}
