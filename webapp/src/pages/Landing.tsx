@@ -51,6 +51,62 @@ export default function Landing() {
             Try the protocol chat
           </Link>
         </nav>
+
+        <section
+          aria-labelledby="how-it-works"
+          className="space-y-6 text-left"
+          data-testid="how-it-works"
+        >
+          <h2
+            id="how-it-works"
+            className="text-2xl font-semibold text-text-primary"
+          >
+            How it works
+          </h2>
+          <ol className="space-y-4">
+            <li className="rounded-md border border-text-muted/20 bg-white/5 p-4">
+              <p className="text-sm font-semibold text-accent-primary">
+                1 · Generate an Ed25519 keypair
+              </p>
+              <p className="mt-1 text-sm text-text-muted">
+                The keypair lives in your browser&rsquo;s local storage. The
+                public key is your portable identity across providers; the
+                secret key never leaves the device.
+              </p>
+            </li>
+            <li className="rounded-md border border-text-muted/20 bg-white/5 p-4">
+              <p className="text-sm font-semibold text-accent-primary">
+                2 · Install the MCP connector in your AI tool
+              </p>
+              <p className="mt-1 text-sm text-text-muted">
+                Cursor and VS Code accept a deeplink; Claude.ai accepts a custom
+                connector URL. All three negotiate OAuth 2.1 + PKCE against{" "}
+                <code>mcp.mnemonik.xyz</code>.
+              </p>
+            </li>
+            <li className="rounded-md border border-text-muted/20 bg-white/5 p-4">
+              <p className="text-sm font-semibold text-accent-primary">
+                3 · Sign memories from any tool
+              </p>
+              <p className="mt-1 text-sm text-text-muted">
+                When the agent calls <code>mnemonic_sign_memory</code>, the
+                server prepares the canonical-CBOR payload and redirects to this
+                webapp; you approve in-browser, your keypair signs a COSE_Sign1
+                envelope, and the server persists the attestation.
+              </p>
+            </li>
+            <li className="rounded-md border border-text-muted/20 bg-white/5 p-4">
+              <p className="text-sm font-semibold text-accent-primary">
+                4 · Recall and verify across providers
+              </p>
+              <p className="mt-1 text-sm text-text-muted">
+                Any tool authenticated with the same keypair can recall by
+                semantic similarity and verify the Arweave + Solana anchors.
+                Tampering is detectable; provenance is cryptographic.
+              </p>
+            </li>
+          </ol>
+        </section>
       </div>
     </main>
   );
