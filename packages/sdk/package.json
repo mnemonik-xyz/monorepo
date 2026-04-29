@@ -1,0 +1,30 @@
+{
+  "name": "@mnemonik-xyz/sdk",
+  "version": "0.0.0",
+  "description": "Runtime-agnostic JavaScript/TypeScript SDK for the Mnemonic Protocol — wraps the hosted MCP HTTP surface, OAuth 2.1 + PKCE, COSE_Sign1 signing via WASM. Pure ESM. Targets Node ≥20, Bun, Deno, Cloudflare Workers, modern browsers.",
+  "license": "Apache-2.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build:wasm": "bash scripts/build-wasm.sh",
+    "build": "tsc -b",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0",
+    "vitest": "^1.6.0"
+  }
+}
