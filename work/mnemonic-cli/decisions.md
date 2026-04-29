@@ -74,3 +74,11 @@ Append-only. Each entry: task, date, status, summary, verification, concerns.
      under the webapp, so risk is low.
   6. **Phase 1 does not need `package.json` conditional exports** in the SDK
      because a single artifact covers all four target runtimes.
+
+---
+
+### Task 1 — Round 2 fixes
+
+- Date: 2026-04-29
+- Fixed: CLI bin exit code 64 -> 1 (Decision 10 alignment); package.json `private: true` clarifying comments; SDK `engines.node >= 20`.
+- Deferred to backlog: build-script duplication, README polish, bun.lock policy, wasm-pack version pin.

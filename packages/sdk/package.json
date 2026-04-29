@@ -3,6 +3,7 @@
   "version": "0.0.0",
   "description": "Runtime-agnostic JavaScript/TypeScript SDK for the Mnemonic Protocol — wraps the hosted MCP HTTP surface, OAuth 2.1 + PKCE, COSE_Sign1 signing via WASM. Pure ESM. Targets Node ≥20, Bun, Deno, Cloudflare Workers, modern browsers.",
   "license": "Apache-2.0",
+  "//": "private: true while the workspace is pre-publish; T14 will flip to false at npm publish time",
   "private": true,
   "type": "module",
   "main": "./dist/index.js",
@@ -17,6 +18,9 @@
     "dist",
     "README.md"
   ],
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "build:wasm": "bash scripts/build-wasm.sh",
     "build": "tsc -b",

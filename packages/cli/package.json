@@ -3,6 +3,7 @@
   "version": "0.0.0",
   "description": "Command-line interface for the Mnemonic Protocol. Thin wrapper around @mnemonik-xyz/sdk that adds Node-only persistence (~/.mnemonic/), interactive OAuth loopback, and TTY-aware output formatting.",
   "license": "Apache-2.0",
+  "//": "private: true while the workspace is pre-publish; T14 will flip to false at npm publish time",
   "private": true,
   "type": "module",
   "main": "./dist/src/index.js",
