@@ -619,30 +619,51 @@ mod tests {
 
     use super::*;
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_bootstrap_ticket_atomic_consume() {
         // Concurrent two-thread consume of the SAME ticket: exactly one
         // returns Some, the other returns None. Drives Decision 7's atomic
         // single-use guarantee.
-        let store = Arc::new(BootstrapTickets::new(10, 5, 600));
-        let id = store
-            .insert("user-a".into(), "[1,2,3]".into())
-            .await
-            .unwrap();
+        //
+        // Round-2 fix: use a multi_thread runtime so spawned tasks can
+        // genuinely race on real OS threads (the previous current_thread
+        // runtime serialised them by the scheduler, masking any locking
+        // bug). A `tokio::sync::Barrier` synchronises both tasks at the
+        // call site so the two `consume` invocations cross the mutex
+        // boundary at (effectively) the same instant. Looped 64 times to
+        // amplify any race window — a regression where `consume` was
+        // reduced to `peek` would flip `some_count` to 2 with very high
+        // probability somewhere in the iteration count.
+        for _iter in 0..64 {
+            let store = Arc::new(BootstrapTickets::new(10, 5, 600));
+            let id = store
+                .insert("user-a".into(), "[1,2,3]".into())
+                .await
+                .unwrap();
 
-        let s1 = store.clone();
-        let s2 = store.clone();
-        let h1 = tokio::spawn(async move { s1.consume(id).await });
-        let h2 = tokio::spawn(async move { s2.consume(id).await });
-        let r1 = h1.await.unwrap();
-        let r2 = h2.await.unwrap();
-        let some_count = [&r1, &r2].iter().filter(|x| x.is_some()).count();
-        assert_eq!(
-            some_count, 1,
-            "exactly one concurrent consume must succeed (got r1={r1:?}, r2={r2:?})"
-        );
-        // Per-user counter zeroed after the successful consume.
-        assert_eq!(store.user_count("user-a").await, 0);
+            let barrier = Arc::new(tokio::sync::Barrier::new(2));
+            let s1 = store.clone();
+            let s2 = store.clone();
+            let b1 = barrier.clone();
+            let b2 = barrier.clone();
+            let h1 = tokio::spawn(async move {
+                b1.wait().await;
+                s1.consume(id).await
+            });
+            let h2 = tokio::spawn(async move {
+                b2.wait().await;
+                s2.consume(id).await
+            });
+            let r1 = h1.await.unwrap();
+            let r2 = h2.await.unwrap();
+            let some_count = [&r1, &r2].iter().filter(|x| x.is_some()).count();
+            assert_eq!(
+                some_count, 1,
+                "exactly one concurrent consume must succeed on iter {_iter} (r1={r1:?}, r2={r2:?})"
+            );
+            // Per-user counter zeroed after the successful consume.
+            assert_eq!(store.user_count("user-a").await, 0);
+        }
     }
 
     #[tokio::test]

@@ -604,3 +604,144 @@ Append-only. Each entry: task, date, status, summary, verification, concerns.
     now succeeds against the new wire shape; `bytes.len() != 64` guard
     remains the only post-parse check, and the 64-element array we send
     satisfies it.
+
+## 2026-04-28 — Task 6 review round 1 fixes (T6-impl-r2)
+
+- **Reviews consumed:**
+  - test-reviewer round 1: 1 high (production handlers untested behind
+    real middleware), 2 medium (atomic-consume on single-thread runtime,
+    no 429 HTTP-mapping coverage). Other findings (localhost-by-name,
+    LruExhausted dead branch, all-zero-pubkey fixture, pending.rs
+    `#[allow(dead_code)]` revert, ambiguous positive-path on
+    `state_binding_validates_redirect_uri_too`) deferred to backlog per
+    fix scope.
+  - code-reviewer round 1: 9 minor (non-blocking) — all backlog.
+  - security-auditor round 1: 5 low/info, none blocking — all backlog.
+- **High fix — real-handler integration test:**
+  Added `mcp/tests/cli_bootstrap_auth_allowlist.rs` (5 tests) that builds
+  an axum Router with the production `bootstrap_issue_handler` and
+  `bootstrap_redeem_handler` from `mnemonic_mcp::api`, layered with the
+  real `oauth::bearer_auth_middleware`. Asserts:
+  1. Issue with valid JWT → 200 + UUID `ticket_id`.
+  2. Redeem with NO Authorization header → 200 + `secret[64]` +
+     `pubkey_base58` (proves `/api/cli-bootstrap/redeem/` is on the
+     middleware URI allowlist).
+  3. Second redeem of the same ticket → 404 (single-use).
+  4. Redeem with garbage UUID and NO auth → 404 (NOT 401 — pins the
+     allowlist so a regression that drops the prefix flips this to 401).
+  5. Issue with NO Bearer → 401 (middleware bites — `extract_json_rpc_method`
+     on `{"keypair_json":...}` returns None → not allowlisted → required JWT
+     missing).
+  6. Per-user 429 HTTP mapping: 4 tickets for the same `jwt.sub` — 4th
+     returns `StatusCode::TOO_MANY_REQUESTS` with a JSON `error` body.
+     A different `sub` is unaffected (proves keying is per-user, not
+     global).
+  Wired `BootstrapTickets` and the two handlers through the public
+  library facade (`mnemonic_mcp::api::*`) and used the existing
+  `test_support::{mock_state, mint_jwt}` fixtures (model:
+  `mcp/tests/auth_allowlist.rs`).
+- **Medium fix — multi-thread atomic consume:**
+  Promoted `mcp/src/api.rs::tests::test_bootstrap_ticket_atomic_consume`
+  from default `#[tokio::test]` (current_thread) to
+  `#[tokio::test(flavor = "multi_thread", worker_threads = 2)]`.
+  Inserted a `tokio::sync::Barrier` so both spawned tasks cross the
+  consume-mutex boundary at the same instant, and looped 64 iterations
+  to amplify any race window. A regression where `consume` was reduced
+  to `peek` (returning Some twice) would now flip the `some_count == 1`
+  assertion with very high probability across iterations.
+- **Medium fix — 429 HTTP mapping test:**
+  Covered by integration test #6 above. Previously only the underlying
+  `BootstrapInsertError::PerUserCapExceeded` enum value was asserted at
+  the unit-store level; the handler's mapping to
+  `StatusCode::TOO_MANY_REQUESTS` plus the `{"error": "..."}` body shape
+  were uncovered.
+- **Deferred (per scope):**
+  - localhost-by-name DNS-rebinding negative test → backlog.
+  - Unreachable `BootstrapInsertError::LruExhausted` variant + 503
+    branch → backlog (YAGNI; remove or test once LRU policy changes).
+  - All-zero-pubkey fixture inconsistency in
+    `test_bootstrap_redeem_no_auth_required` → backlog (already covered
+    by the new integration test which uses a non-trivial trailing 32
+    bytes).
+  - 9 minor code-review nits + 5 low/info security findings → backlog.
+- **Verification:**
+  - `cargo test -p mnemonic-mcp --features test-support --test cli_bootstrap_auth_allowlist`
+    → 5 passed / 0 failed.
+  - `cargo test -p mnemonic-mcp --lib --features local-embed test_bootstrap_ticket_atomic_consume`
+    → 1 passed / 0 failed (multi_thread runtime confirmed via test
+    annotation).
+  - `cargo test -p mnemonic-mcp --lib --features local-embed -- bootstrap_`
+    → 7 passed / 0 failed (all 6 pre-existing + 1 modified bootstrap
+    unit tests stable).
+  - `cargo clippy -p mnemonic-mcp --all-targets --features local-embed,test-support -- -D warnings`
+    → clean.
+  - `cargo fmt -p mnemonic-mcp -- --check` → clean.
+  - Pre-existing baseline failures (9 lib + 1 oauth_flow + 2 pending_authz)
+    re-verified unchanged — none introduced or reactivated by this round.
+
+---
+
+## Task 5 — Round 2 review fixes (5xx coverage + icacls execFile + minors)
+
+- **Task:** 5 (round 2)
+- **Date:** 2026-04-28
+- **Status:** complete
+- **Reviewer findings addressed:**
+
+  | id     | source            | severity | action |
+  |--------|-------------------|----------|--------|
+  | R2-1   | test-reviewer     | high     | applied — added 5xx tests on sign / recall / verify / identity (--ticket) + login (token endpoint 500 path) |
+  | F-1    | security-auditor  | low      | applied — `restrictFileMode` switched from `execSync` template-literal to `execFileSync` argv array (CWE-78 mitigation); new `test/config.test.ts` asserts the argv shape |
+  | L1     | code-reviewer     | minor    | applied — `awaitCallback` now removes the request listener inside `settle()` so post-settle stray probes are dropped (close-after-settle preserved via outer `finally`) |
+  | S1     | code-reviewer     | minor    | applied — `whoami.ts` adds `Keypair` to the static SDK import, removes the dynamic `import('@mnemonik-xyz/sdk').then(...)` |
+  | S3     | code-reviewer     | minor    | applied — removed dead `(color ? l : l)` ternary in `init.ts` |
+  | O1     | code-reviewer     | minor    | deferred to backlog (tech-spec Decision 10 colour wiring) |
+  | T1     | code-reviewer     | minor    | deferred to backlog (Server.prototype.listen → DI is a bigger refactor) |
+  | S2/S4/S5 | code-reviewer   | minor    | deferred to backlog (cosmetic / build-ordering documentation) |
+  | R2-3..R2-6 | test-reviewer | low/med  | deferred to backlog (malformed-JWT shapes, branch-coverage lift via login error-callback tests, bin smoke) |
+
+- **5xx test coverage — deviation note (login):**
+  The brief asked for ServerError (exit 2) on login `--token` or interactive
+  `/oauth/token` 500. The headless `--token` path performs no fetch (it only
+  decodes a JWT locally), so 5xx is not reachable there. On the interactive
+  path, the SDK's `exchangeCodeForToken` (oauth.ts:306) explicitly maps a
+  non-2xx token endpoint response to `AuthError` — it is in the OAuth-protocol
+  layer, not the generic-fetch layer. The CLI's `fromSdkError` therefore
+  surfaces this as `AuthError` (exit 4), not `ServerError` (exit 2). The new
+  test (`login.test.ts:: token endpoint 500 → AuthError (exit 4), no token
+  persisted`) asserts the **actual** contract: 5xx surfaces cleanly, with
+  redaction, no token written, and a typed exit code. This is consistent
+  with sign/recall/verify/identity which DO route through the generic-fetch
+  ServerError path (exit 2). Changing the SDK's OAuth error mapping was out
+  of T5 scope.
+
+- **Verification:**
+
+  ```
+  cd packages/cli
+  npx tsc -p . --noEmit         # clean
+  bun test                       # 51 pass (was 43; +8 = 5 server-error + 3 icacls)
+  npx vitest run --coverage     # lines 80.02% (was 77.63%), branches 71.31% (was 68.14%)
+  ```
+
+- **Files changed:**
+  - `packages/cli/src/config.ts` — execSync → execFileSync (F-1)
+  - `packages/cli/src/commands/login.ts` — removeListener inside settle (L1)
+  - `packages/cli/src/commands/whoami.ts` — static Keypair import (S1)
+  - `packages/cli/src/commands/init.ts` — drop dead ternary (S3)
+  - `packages/cli/test/sign.test.ts` — +1 ServerError test
+  - `packages/cli/test/recall.test.ts` — +1 ServerError test
+  - `packages/cli/test/verify.test.ts` — +1 ServerError test
+  - `packages/cli/test/identity.test.ts` — +1 ServerError test (--ticket 500)
+  - `packages/cli/test/login.test.ts` — +1 AuthError-on-token-500 test (deviation noted above)
+  - `packages/cli/test/config.test.ts` — NEW; 3 tests for icacls argv shape + best-effort failure modes
+
+- **Carried-forward concerns (round 3 backlog, none blocking T5 merge):**
+  1. O1 — wire `colors.{green,yellow,cyan}` into at least one renderer to
+     make `--no-color` observable (currently a no-op end-to-end).
+  2. T1 — replace `Server.prototype.listen` patch with an injectable
+     `_serverFactory` test hook in `LoginOptions`.
+  3. R2-3 — expand malformed-JWT coverage (missing exp, non-string sub,
+     alg=RS256, malformed base64).
+  4. S5 — promote SDK test helpers via package.json `exports` so CLI tests
+     stop reaching into `../../sdk/dist/*` directly.
