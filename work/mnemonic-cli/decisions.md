@@ -408,3 +408,82 @@ Append-only. Each entry: task, date, status, summary, verification, concerns.
      legitimately needs to write outside the committed range, the gate
      will still catch it because we compare the working-tree file directly.
 
+
+---
+
+### Task 5 — completion (T5-impl-cont)
+
+- Date: 2026-04-29
+- Status: complete (cut-off T5-impl finished here)
+- Summary:
+  Finished `packages/cli/` end to end after T5-impl ran out of context. Wrote
+  the missing `src/commands/identity.ts` (`import --ticket <uuid>` /
+  `import --file <path>` / `export --file <path>`, no clipboard flag), wired
+  `identity` + `import` + `export` into `bin/mnemonic.ts` via commander parent
+  + child commands, fixed `bin/mnemonic.ts` so all eight top-level commands
+  (init/login/sign/recall/verify/whoami/prove/identity) route through
+  `OutputOptions` + `handleError`. Added the auto-run guard so test files can
+  `import { buildProgram }` without triggering `parseAsync(process.argv)`.
+  Authored 10 vitest files with 43 tests covering every command, all four
+  TDD anchors (login state-mismatch, identity ticket atomic-redeem, whoami
+  no-server-call, output --json --quiet) plus a bin smoke test that lists
+  registered commands and parses top-level flags. Tests use a tmpdir-scoped
+  `MNEMONIC_CONFIG_DIR` and the SDK's existing WASM mock via
+  `__setWasmForTesting`. Two TS errors fixed during integration:
+  `node:net::AddressInfo` requires `import type` under
+  `verbatimModuleSyntax`, and `init`'s `force` flag had to be conditionally
+  spread under `exactOptionalPropertyTypes`.
+- Verification:
+  - `cd packages/cli && bun install` (no diff — workspace-resolved deps).
+  - `bun test` -> 43 pass / 0 fail / 73 expect() calls / 83 ms.
+  - `vitest run` -> 10 test files, 43 / 43 pass, 320 ms.
+  - `vitest run --coverage` -> **lines 77.63%** (above the 75% gate),
+    branches 68.14%, functions 78.46%. Per-module: `init.ts` 96%,
+    `verify.ts` 97%, `recall.ts` 94%, `whoami.ts` 77%, `output.ts` 89%,
+    `identity.ts` 81%, `sign.ts` 78%, `login.ts` 68%, `errors.ts` 80%,
+    `config.ts` 79%, `bin/mnemonic.ts` 61%. Branch coverage is below the
+    typical 80% bar; the misses are all in the human-render paths (no
+    `--json` branch) and the loopback `awaitCallback` error-path branches
+    (timeout, 405, 404, error params). See concerns below.
+  - `npx tsc -p packages/cli --noEmit` -> clean (0 errors).
+  - `tsc -b` -> clean build of `dist/`.
+  - `bun packages/cli/bin/mnemonic.ts --help` -> all 8 commands listed.
+  - `bun packages/cli/bin/mnemonic.ts identity --help` -> import + export.
+  - `node dist/bin/mnemonic.js --help` -> identical output (built path OK).
+- Concerns / follow-ups:
+  1. **Branch coverage 68%** is below a notional 80% gate. The hot misses
+     are: `login.ts::awaitCallback` 405/404/missing-code branches, the
+     `error_description` callback path, and several `colorEnabled` /
+     `paint` branches that only fire on a TTY. None of these are
+     business-logic gaps — they're all renderer + defensive branches that
+     a unit test cannot hit without simulating a real browser callback.
+     A T8 follow-up could add a focused loopback test that POSTs each error
+     shape (405, 404, missing-state, idp-error) and observes the recovered
+     AuthError.
+  2. **`bin/mnemonic.ts` 61% lines.** Tests cover `buildProgram` and flag
+     parsing; the auto-run path (`if (invokedDirectly)`), `main()` wrapper,
+     and the per-command `.action()` closures themselves are unreached by
+     in-process tests. An `execa`-driven smoke would close this gap but
+     was kept out per spec (we directly import command modules instead).
+  3. **`whoami` 28.6% branch coverage** is misleading — most of the
+     uncovered branches are the optional `--with-count` server-call path,
+     which the TDD anchor explicitly rejects. Lines coverage is 77%; the
+     gap is intentional.
+  4. **No tests for `--with-count`** because exercising it pulls in the
+     full SDK signMemory/recall fetch chain. If we want it covered, the
+     test would mirror `recall.test.ts`'s mock and pass `withCount: true`.
+  5. **Login interactive test patches `Server.prototype.listen`** to drive
+     the wrong-state callback. This is brittle if commander or login.ts
+     ever switches HTTP libraries, but it's the only way to drive the
+     loopback synchronously without an external port-discovery race.
+     `vi.spyOn(http, "createServer")` cannot be used directly because the
+     ESM export is frozen (`TypeError: Cannot redefine property`).
+  6. **No `execa` dep added** — every test runs in-process via direct
+     module imports, which is faster (sub-second total) and avoids the
+     `bin/mnemonic.ts` auto-run heuristic edge cases. Spec allowed either
+     route.
+  7. **Identity import refuses-to-overwrite test** uses `--force` to
+     bypass the refusal on the second 410 fetch (otherwise we'd never
+     reach the server's 410 path). This is a deliberate test fixture
+     choice; production users should NOT pass `--force` on a re-redeem
+     attempt.
