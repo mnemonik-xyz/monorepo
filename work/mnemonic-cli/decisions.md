@@ -487,3 +487,49 @@ Append-only. Each entry: task, date, status, summary, verification, concerns.
      reach the server's 410 path). This is a deliberate test fixture
      choice; production users should NOT pass `--force` on a re-redeem
      attempt.
+
+## 2026-04-28 — Task 4 review round 1 fixes (T4-impl-r2)
+
+- **Reviews consumed:**
+  - code-reviewer round 1: 1 major (CR-T4-1) + 6 minor.
+  - security-auditor round 1: 2 low (T4-S1, T4-S2).
+  - test-reviewer round 1: non-blocking concerns (schema coverage gap,
+    pubkey value pinning).
+- **Major fix — CI ANSI escape bug (CR-T4-1):**
+  CI workflow `.github/workflows/node-test.yml` sets
+  `CARGO_TERM_COLOR: always` workspace-wide. The regen script's python
+  slice used `text.find("[")`, which would land on the ANSI escape
+  prefix `\x1b[` instead of the JSON `[`, corrupting the fixture in CI
+  while passing locally. Fix in
+  `packages/sdk/scripts/regen-golden-fixtures.sh`:
+  - Inline-override `CARGO_TERM_COLOR=never` and pass `--color=never`
+    on the cargo invocation (belt-and-braces).
+  - Strip residual ANSI CSI sequences (`\x1b\[[0-9;]*m`) inside the
+    python slicer as defense-in-depth.
+  - Verified by running `CARGO_TERM_COLOR=always bash
+    packages/sdk/scripts/regen-golden-fixtures.sh`: SHA still
+    `15ed6eac…7337fc`, matching the committed file. Also re-ran without
+    the override (baseline) — still matches.
+- **Low fix — script quote-escape footgun (T4-S1):**
+  `regen-golden-fixtures.sh:75` previously interpolated `$FIXTURE_JSON`
+  into a python single-quoted literal — a developer footgun for repo
+  paths containing `'`. Fixed by passing the path through the
+  `REGEN_OUT_PATH` env var (mirroring the pattern already used for
+  `RAW_CARGO_OUTPUT`). Applied to both the heredoc slicer and the
+  inline `python3 -c` entry-counter.
+- **Deferred (per scope):**
+  - Schema coverage expansion (4 of 5 schemas untested) → backlog post-MVP.
+  - Pubkey value pinning → backlog (deterministic seed already pins
+    upstream output).
+  - Spec count discrepancy (~50 specced vs 22 fixtures delivered) →
+    spec/decisions adjustment, not a code change.
+- **Verification:**
+  - `CARGO_TERM_COLOR=always bash packages/sdk/scripts/regen-golden-fixtures.sh`
+    → SHA `15ed6eac…7337fc`, `git diff --exit-code packages/sdk/test/fixtures/`
+    clean.
+  - `unset CARGO_TERM_COLOR; bash packages/sdk/scripts/regen-golden-fixtures.sh`
+    → same SHA, no drift.
+  - `cd packages/sdk && bun test test/cose.golden.test.ts` → 2 pass,
+    0 fail.
+  - `cargo test --features golden-fixtures -p mnemonic-core --test
+    golden_fixtures` → 3 pass, 1 ignored (the gated `emit_fixtures`).

@@ -29,9 +29,16 @@ FIXTURE_SHA="$FIXTURE_DIR/golden-cose.sha256"
 mkdir -p "$FIXTURE_DIR"
 
 echo "[regen] running cargo emit_fixtures ..." >&2
+# Force-disable cargo's ANSI color codes for this invocation. CI sets
+# `CARGO_TERM_COLOR=always` workspace-wide, which would inject `\x1b[…m`
+# escapes into RAW_OUTPUT — and since the fixture is sliced by `text.find("[")`,
+# an early `\x1b[` would shift `start` to the escape sequence instead of the
+# real JSON `[`. We override the env var inline AND pass `--color=never` as
+# belt-and-braces. Python additionally strips any residual escapes below.
 RAW_OUTPUT="$(
   cd "$REPO_ROOT" \
-    && cargo test --features golden-fixtures -p mnemonic-core \
+    && CARGO_TERM_COLOR=never cargo test --color=never \
+         --features golden-fixtures -p mnemonic-core \
          --test golden_fixtures emit_fixtures \
          -- --ignored --nocapture 2>/dev/null
 )"
@@ -40,19 +47,27 @@ RAW_OUTPUT="$(
 # fixture is a JSON array, so the first `[` and the matching closing `]`
 # bracket the payload. We use python3 (universally available on dev + CI
 # images) to slice deterministically. The raw output is passed via an env
-# var to avoid clashing with python's own stdin (heredoc).
+# var to avoid clashing with python's own stdin (heredoc), and the output
+# path is also passed via env to avoid quote-escape footguns when the repo
+# path contains a single quote.
 export RAW_CARGO_OUTPUT="$RAW_OUTPUT"
-python3 - "$FIXTURE_JSON" <<'PY'
+export REGEN_OUT_PATH="$FIXTURE_JSON"
+python3 <<'PY'
 import os
+import re
 import sys
 
 text = os.environ.get("RAW_CARGO_OUTPUT", "")
+# Defense-in-depth: even with CARGO_TERM_COLOR=never + --color=never, strip
+# any ANSI CSI escape sequences (`\x1b[…m`) before slicing. Otherwise an
+# escape preceding the JSON would shift `start` and corrupt the fixture.
+text = re.sub(r"\x1b\[[0-9;]*m", "", text)
 start = text.find("[")
 end = text.rfind("]")
 if start == -1 or end == -1 or end <= start:
     sys.stderr.write("regen: could not locate JSON array in cargo output\n")
     sys.exit(1)
-out_path = sys.argv[1]
+out_path = os.environ["REGEN_OUT_PATH"]
 with open(out_path, "w", encoding="utf-8") as f:
     f.write(text[start : end + 1])
     f.write("\n")
@@ -72,7 +87,7 @@ fi
 
 printf '%s\n' "$DIGEST" > "$FIXTURE_SHA"
 
-ENTRIES_COUNT="$(python3 -c "import json,sys; print(len(json.load(open('$FIXTURE_JSON'))))")"
+ENTRIES_COUNT="$(REGEN_OUT_PATH="$FIXTURE_JSON" python3 -c "import json,os; print(len(json.load(open(os.environ['REGEN_OUT_PATH']))))")"
 
 echo "[regen] wrote $FIXTURE_JSON ($ENTRIES_COUNT entries)" >&2
 echo "[regen] wrote $FIXTURE_SHA  ($DIGEST)" >&2
