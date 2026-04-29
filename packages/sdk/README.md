@@ -59,6 +59,27 @@ bash packages/sdk/scripts/build-wasm.sh
 The script wraps `wasm-pack build core --target web --features wasm` and writes
 to `core/pkg-web/`. Output is `.gitignore`d.
 
+## Golden COSE fixture
+
+`test/fixtures/golden-cose.json` (and its checksum `golden-cose.sha256`) is the
+byte-for-byte parity contract between Rust core's canonical CBOR + COSE_Sign1
+encoder and the SDK's WASM-driven `coseSignPayload`. The fixture is generated
+from `core/tests/golden_fixtures.rs::emit_fixtures` (gated behind the
+`golden-fixtures` cargo feature) using a hardcoded test keypair, so re-running
+the regenerator produces byte-identical output.
+
+Regenerate (run from anywhere):
+
+```bash
+bash packages/sdk/scripts/regen-golden-fixtures.sh
+```
+
+This rewrites both `golden-cose.json` (~22 entries) and `golden-cose.sha256`.
+Commit the result. The CI lockstep gate in `.github/workflows/node-test.yml`
+re-runs the regenerator on every PR and fails if the checksum drifts from the
+committed file — that is, any change to Rust core's CBOR/COSE encoder forces a
+fixture refresh.
+
 ## Roadmap
 
 Wave 2 lands the public surface — see `work/mnemonic-cli/tasks/2.md` (client

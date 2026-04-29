@@ -1,0 +1,66 @@
+name: Node Test
+
+# SDK + CLI test workflow.
+#
+# Currently this file owns ONE job: the lockstep gate from Task 4.
+# Task 8 extends this file with the cross-runtime matrix (Node 20 / Node 22 /
+# Bun / Deno) for SDK + CLI unit + integration tests.
+#
+# The lockstep gate enforces tech-spec Decision 12: the committed
+# `packages/sdk/test/fixtures/golden-cose.{json,sha256}` must be byte-identical
+# to what `core/tests/golden_fixtures.rs::emit_fixtures` produces for the
+# current Rust source. If a PR changes Rust core's canonical CBOR or COSE
+# encoder without re-running the regenerator, this gate fails the PR.
+
+on:
+  push:
+    branches: [main, dev]
+    paths-ignore:
+      - '*.md'
+      - 'docs/**'
+      - 'work/**'
+      - '.claude/**'
+      - 'LICENSE'
+  pull_request:
+    paths-ignore:
+      - '*.md'
+      - 'docs/**'
+      - 'work/**'
+      - '.claude/**'
+      - 'LICENSE'
+
+concurrency:
+  group: node-test-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  golden-fixture-lockstep:
+    name: golden COSE fixture lockstep
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: workspace
+
+      - name: Regenerate golden fixture from Rust core
+        run: bash packages/sdk/scripts/regen-golden-fixtures.sh
+
+      - name: Verify checksum matches committed file
+        # If the regenerator wrote a different SHA than what's in the
+        # committed `golden-cose.sha256`, `git diff --exit-code` reports
+        # the change as a non-zero exit, failing the workflow.
+        # We diff both the JSON and the SHA file so the failure log shows
+        # exactly which entries drifted.
+        run: |
+          git diff --exit-code packages/sdk/test/fixtures/golden-cose.sha256 \
+            || (echo "::error::golden-cose.sha256 drift — re-run packages/sdk/scripts/regen-golden-fixtures.sh and commit the result" && exit 1)
+          git diff --exit-code packages/sdk/test/fixtures/golden-cose.json \
+            || (echo "::error::golden-cose.json drift — re-run packages/sdk/scripts/regen-golden-fixtures.sh and commit the result" && exit 1)

@@ -329,3 +329,82 @@ Append-only. Each entry: task, date, status, summary, verification, concerns.
      posts it verbatim; the server stores it without inspection (api.rs
      comment confirms). Encryption-at-rest is still tracked as a separate
      hardening item.
+
+---
+
+## Task 4 — COSE wrapper + golden fixture + CI lockstep gate
+
+- **Task:** 4
+- **Date:** 2026-04-29
+- **Status:** complete
+- **Summary:**
+  Added the `golden-fixtures` cargo feature flag to `core/Cargo.toml` (does
+  not exist before this task). Implemented `core/tests/golden_fixtures.rs` —
+  an `#[ignore]`-gated integration test that emits a JSON array of 22 fixture
+  triples (`name`, `input_hex`, `canonical_cbor_hex`, `cose_envelope_hex`,
+  `keypair_secret_hex`). Coverage: empty content, ASCII, UTF-8 (Cyrillic /
+  emoji / CJK / mixed scripts), control chars, embedded NUL, quotes/backslashes,
+  long content (1KB and 5KB), single/many/empty tags, JSON metadata variants,
+  high-byte UTF-8 boundaries. All cases share one hardcoded 32-byte test seed
+  (`00112233...eeff`) so output is deterministic — `test_emitter_deterministic`
+  asserts that two consecutive runs produce identical JSON.
+
+  Wrote `packages/sdk/scripts/regen-golden-fixtures.sh`: invokes the cargo
+  test, slices the JSON body out of cargo's framing using a python heredoc with
+  RAW input passed via env var (heredoc owns stdin), writes
+  `packages/sdk/test/fixtures/golden-cose.json` (76 KB, 22 entries) and the
+  matching SHA-256 to `golden-cose.sha256`. Re-running the script verified
+  byte-identical output.
+
+  Wrote `packages/sdk/test/cose.golden.test.ts` — pure ESM vitest. Loads the
+  fixture, installs the real `core/pkg-nodejs/mnemonic_core.js` WASM artifact
+  via the SDK's `__setWasmForTesting` hook, then for each entry calls
+  `coseSignPayload(canonicalCbor, keypairJson)` and asserts byte-equality
+  against `cose_envelope_hex`. The pkg-nodejs target is used (not pkg-web)
+  because vitest runs under Node, where pkg-web's `fetch(file://)` init path
+  does not work without polyfills; pkg-nodejs and pkg-web link the same Rust
+  code and produce bit-identical COSE bytes by construction.
+
+  Wrote `.github/workflows/node-test.yml` with the lockstep gate as job
+  `golden-fixture-lockstep`: re-runs the regenerator on every PR and `git
+  diff --exit-code` against the committed JSON + SHA. Drift fails CI with an
+  error annotation pointing to the regenerator command. Task 8 will extend
+  this workflow with the cross-runtime matrix (Node 20 / Node 22 / Bun / Deno).
+
+- **Verification:**
+  - `cargo test --features golden-fixtures -p mnemonic-core --test golden_fixtures` —
+    3 passed (test_emitter_deterministic, test_fixture_count_and_unique_names,
+    test_fixed_keypair_pubkey_stable), 1 ignored (emit_fixtures itself).
+  - `bash packages/sdk/scripts/regen-golden-fixtures.sh` — produced
+    SHA `15ed6eac683679ae79234879a72e38ecad2c8eb0cae451aca268ad435b7337fc`,
+    22 entries, deterministic across two consecutive invocations.
+  - `cd packages/sdk && npx vitest run` — 8 files, 106 tests, all pass
+    (including the 2 new golden tests + the existing 104).
+  - `cargo fmt --all -- --check` clean. `cargo clippy --features
+    golden-fixtures -p mnemonic-core --tests -- -D warnings` clean.
+    (Workspace-wide clippy reports pre-existing failures in `mnemonic-mcp`
+    `test-support` feature gating that are unrelated to this task.)
+
+- **Concerns / follow-ups:**
+  1. **pkg-nodejs as the test artifact** — the golden test imports
+     `core/pkg-nodejs/`, but the SDK's runtime default is pkg-web. Both
+     targets link the same Rust code so output is bit-identical, but a
+     follow-up should wire CI to also exercise the pkg-web artifact under
+     Bun + Deno (those runtimes can load pkg-web natively); Task 8 owns
+     the runtime matrix.
+  2. **Fixture file size** — 76 KB at 22 entries; if the catalogue grows
+     past 50 entries we'll cross the 100 KB soft cap stated in the task.
+     Current entries cover the documented edge cases (CBOR length-prefix
+     boundaries at 256-byte mark, UTF-8 multi-byte, embedded NUL, control
+     chars, empty/long tags, metadata variants); further additions should
+     justify themselves.
+  3. **`input_hex` field is purely documentary** — the SDK does not
+     consume it; we keep it so future debuggers can round-trip canonical
+     CBOR back to the JSON artifact via `from_canonical_cbor` if a
+     fixture mismatch arises.
+  4. **Lockstep gate uses `git diff --exit-code`** — depends on
+     `actions/checkout@v4` defaults (full clone, not shallow). If a
+     future caller switches to `fetch-depth: 1` and the regenerator
+     legitimately needs to write outside the committed range, the gate
+     will still catch it because we compare the working-tree file directly.
+
