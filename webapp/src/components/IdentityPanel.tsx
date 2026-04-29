@@ -1,11 +1,39 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   clearIdentity,
   readIdentity,
+  readJwt,
   writeIdentity,
   type KeypairJson,
 } from "../lib/storage";
 import { loadWasm } from "../lib/wasm";
+
+/**
+ * MCP backend host — mirrors the resolution used in `Sign.tsx` and
+ * `Consent.tsx`. The CLI bootstrap endpoints (`/api/cli-bootstrap/issue`
+ * and `/api/cli-bootstrap/redeem/:ticket`) live on the MCP server, not the
+ * webapp origin, so we always go through this base URL.
+ */
+const MCP_BASE =
+  (import.meta.env?.VITE_MCP_BASE as string | undefined) ??
+  "https://mcp.mnemonik.xyz";
+
+/** Bootstrap-ticket TTL fallback when the server omits `expires_at`. */
+const BOOTSTRAP_TTL_MS = 10 * 60 * 1000;
+
+/**
+ * "Send to CLI" UI state machine.
+ *
+ *   `idle`    — button is shown, no ticket outstanding
+ *   `issuing` — POST in flight; button disabled, no ticket yet
+ *   `issued`  — ticket UUID returned by server; show paste-command + countdown
+ *   `error`   — issue failed; show inline error message
+ */
+type CliBootstrapState =
+  | { kind: "idle" }
+  | { kind: "issuing" }
+  | { kind: "issued"; ticketId: string; expiresAtMs: number }
+  | { kind: "error"; message: string };
 
 /**
  * Identity panel — renders the active DID/pubkey and exposes Generate / Import
@@ -25,6 +53,13 @@ export default function IdentityPanel() {
   const [error, setError] = useState<string | null>(null);
   const [isWorking, setIsWorking] = useState(false);
   const importInputRef = useRef<HTMLInputElement>(null);
+
+  // "Send to CLI" state — separate from the panel's main `error` channel so
+  // a failed bootstrap-ticket issue doesn't clobber a previously-shown
+  // generate/import/export error and vice-versa.
+  const [cliState, setCliState] = useState<CliBootstrapState>({ kind: "idle" });
+  const [copied, setCopied] = useState(false);
+  const [now, setNow] = useState<number>(() => Date.now());
 
   useEffect(() => {
     // Pre-warm the WASM module so the first user action feels instant.
@@ -110,6 +145,149 @@ export default function IdentityPanel() {
     setIdentity(null);
   };
 
+  /**
+   * "Send to CLI" — POST the localStorage keypair JSON to
+   * `/api/cli-bootstrap/issue` (Bearer JWT required). On success the server
+   * returns `{ticket_id}`; we render the resulting one-line `mnemonic
+   * identity import --ticket <uuid>` command for the user to paste in their
+   * terminal. On 401 we redirect to `/oauth/consent` to re-auth; on 429 we
+   * surface the per-user cap message; other errors render inline.
+   */
+  const handleSendToCli = async () => {
+    setCopied(false);
+    // Identity must exist — the button is disabled when it doesn't, but we
+    // re-check in case the user clears localStorage in another tab.
+    const stored = localStorage.getItem("mnemonic.identity");
+    if (!stored) {
+      setCliState({
+        kind: "error",
+        message: "No identity to send. Generate or import one first.",
+      });
+      return;
+    }
+    const jwt = readJwt();
+    if (!jwt) {
+      // Without a JWT there is no way to authenticate the issue request.
+      // Send the user through OAuth consent; they'll return with a token.
+      window.location.assign("/oauth/consent");
+      return;
+    }
+
+    setCliState({ kind: "issuing" });
+    try {
+      const res = await fetch(`${MCP_BASE}/api/cli-bootstrap/issue`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${jwt}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ keypair_json: stored }),
+      });
+
+      if (res.status === 401) {
+        // Token expired or rejected — re-auth.
+        window.location.assign("/oauth/consent");
+        return;
+      }
+      if (res.status === 429) {
+        setCliState({
+          kind: "error",
+          message:
+            "You have 3 active CLI tickets. Wait for one to expire (10 min) or revoke later.",
+        });
+        return;
+      }
+      if (!res.ok) {
+        let detail = `HTTP ${res.status}`;
+        try {
+          const body = await res.json();
+          if (body && typeof body.error === "string") detail = body.error;
+        } catch {
+          // ignore parse error — keep generic detail
+        }
+        setCliState({
+          kind: "error",
+          message: `Could not issue ticket: ${detail}`,
+        });
+        return;
+      }
+
+      const body = (await res.json()) as {
+        ticket_id?: unknown;
+        expires_at?: unknown;
+      };
+      if (typeof body.ticket_id !== "string" || body.ticket_id.length === 0) {
+        setCliState({
+          kind: "error",
+          message: "Could not issue ticket: server returned no ticket_id.",
+        });
+        return;
+      }
+      // Server may include an absolute `expires_at` (unix seconds). If
+      // absent, fall back to "now + 10 minutes" per Decision 7.
+      const expiresAtMs =
+        typeof body.expires_at === "number"
+          ? body.expires_at * 1000
+          : Date.now() + BOOTSTRAP_TTL_MS;
+      setCliState({
+        kind: "issued",
+        ticketId: body.ticket_id,
+        expiresAtMs,
+      });
+    } catch (e) {
+      setCliState({
+        kind: "error",
+        message: `Could not issue ticket: ${formatError(e)}`,
+      });
+    }
+  };
+
+  /**
+   * Copy the paste-command to the clipboard. Uses the modern Clipboard API;
+   * older browsers (or test environments without `navigator.clipboard`)
+   * surface the failure inline rather than crashing the panel.
+   */
+  const handleCopyTicket = async () => {
+    if (cliState.kind !== "issued") return;
+    const command = `mnemonic identity import --ticket ${cliState.ticketId}`;
+    try {
+      await navigator.clipboard.writeText(command);
+      setCopied(true);
+      // Reset the "Copied" label after a short delay so a second copy
+      // attempt re-flashes the confirmation.
+      window.setTimeout(() => setCopied(false), 2000);
+    } catch (e) {
+      setCliState({
+        kind: "error",
+        message: `Copy failed: ${formatError(e)}`,
+      });
+    }
+  };
+
+  // Tick the countdown every second only while a ticket is outstanding.
+  // Outside the `issued` state the interval is a waste of cycles.
+  useEffect(() => {
+    if (cliState.kind !== "issued") return;
+    const id = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(id);
+  }, [cliState.kind]);
+
+  const ticketRemainingMs = useMemo(() => {
+    if (cliState.kind !== "issued") return 0;
+    return Math.max(0, cliState.expiresAtMs - now);
+  }, [cliState, now]);
+  const ticketRemainingLabel = formatMmSs(ticketRemainingMs);
+  // Auto-expire the displayed ticket when the timer hits zero. The server
+  // already drops the entry at TTL; this just stops misleading the user.
+  useEffect(() => {
+    if (cliState.kind === "issued" && ticketRemainingMs === 0) {
+      setCliState({
+        kind: "error",
+        message: "Ticket expired. Click Send to CLI to issue a new one.",
+      });
+    }
+  }, [cliState, ticketRemainingMs]);
+
   return (
     <section className="space-y-4" aria-label="Agent identity">
       <h2 className="text-lg font-semibold text-text-primary">
@@ -191,7 +369,60 @@ export default function IdentityPanel() {
             Clear local store
           </button>
         )}
+        <button
+          type="button"
+          onClick={handleSendToCli}
+          disabled={isWorking || !identity || cliState.kind === "issuing"}
+          className="rounded-md border border-text-muted/30 px-4 py-2 text-sm text-text-primary transition-colors hover:border-accent-primary hover:text-accent-primary disabled:cursor-not-allowed disabled:opacity-40"
+          data-testid="identity-send-to-cli"
+        >
+          {cliState.kind === "issuing" ? "Issuing..." : "Send to CLI"}
+        </button>
       </div>
+
+      {cliState.kind === "issued" && (
+        <div
+          className="space-y-2 rounded-md border border-accent-primary/30 bg-accent-primary/5 p-4"
+          data-testid="identity-cli-ticket"
+        >
+          <p className="text-xs uppercase tracking-wide text-text-muted">
+            Run this in your terminal within {ticketRemainingLabel}
+          </p>
+          <div className="flex items-center gap-2">
+            <code
+              className="flex-1 overflow-x-auto rounded bg-black/30 px-3 py-2 font-mono text-xs text-accent-primary"
+              data-testid="identity-cli-command"
+            >
+              mnemonic identity import --ticket {cliState.ticketId}
+            </code>
+            <button
+              type="button"
+              onClick={handleCopyTicket}
+              className="rounded-md border border-text-muted/30 px-3 py-2 text-xs text-text-primary transition-colors hover:border-accent-primary hover:text-accent-primary"
+              data-testid="identity-cli-copy"
+            >
+              {copied ? "Copied" : "Copy"}
+            </button>
+          </div>
+          <p
+            className="font-mono text-xs text-text-muted"
+            data-testid="identity-cli-countdown"
+            aria-live="polite"
+          >
+            Expires in {ticketRemainingLabel}
+          </p>
+        </div>
+      )}
+
+      {cliState.kind === "error" && (
+        <p
+          className="rounded-md border border-error/30 bg-error/10 p-3 text-sm text-error"
+          role="alert"
+          data-testid="identity-cli-error"
+        >
+          {cliState.message}
+        </p>
+      )}
 
       <input
         ref={importInputRef}
@@ -222,4 +453,14 @@ function formatError(e: unknown): string {
   } catch {
     return "unknown error";
   }
+}
+
+/** mm:ss countdown — shared shape with `Sign.tsx::formatMmSs`. */
+function formatMmSs(ms: number): string {
+  const totalSec = Math.max(0, Math.floor(ms / 1000));
+  const mm = Math.floor(totalSec / 60)
+    .toString()
+    .padStart(2, "0");
+  const ss = (totalSec % 60).toString().padStart(2, "0");
+  return `${mm}:${ss}`;
 }

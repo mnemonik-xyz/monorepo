@@ -256,3 +256,76 @@ Append-only. Each entry: task, date, status, summary, verification, concerns.
 - Date: 2026-04-29
 - Fixed: parseJwtPayload now enforces alg=HS256 (rejects none/RS256/missing); pendingAuthSessions has 10min TTL + 100-entry FIFO cap; malformed base64 throws AuthError not DOMException; null/non-object JWT payloads covered.
 - Deferred to backlog: clientId asymmetry, cause-chain redaction, response-body discarded, micro-perf nits.
+
+---
+
+## Task 7 — Webapp `IdentityPanel` "Send to CLI" button
+
+- **Task:** 7
+- **Date:** 2026-04-29
+- **Status:** complete
+- **Summary:**
+  Added a "Send to CLI" button to `webapp/src/components/IdentityPanel.tsx`
+  (`data-testid="identity-send-to-cli"`) that closes the webapp ↔ CLI identity
+  loop per Decision 7. Click handler reads `localStorage["mnemonic.identity"]`
+  and the JWT from `lib/storage::readJwt` (key `mnemonic.jwt`), POSTs
+  `{keypair_json}` to `${VITE_MCP_BASE}/api/cli-bootstrap/issue` with
+  `Authorization: Bearer <jwt>`, and on 200 renders a code block
+  `mnemonic identity import --ticket <uuid>` plus a Copy button that calls
+  `navigator.clipboard.writeText(...)`. The component owns a separate
+  `CliBootstrapState` discriminated union (`idle | issuing | issued | error`)
+  so a failed bootstrap does not clobber the panel's main `error` channel.
+  A 1Hz `setInterval` ticks a `mm:ss` countdown only while a ticket is
+  outstanding; the timer auto-flips to `error` at 0 so the user is never
+  shown a stale ticket. Server may include `expires_at` (unix seconds);
+  fallback is "now + 10 min" per Decision 7.
+
+  HTTP error mapping:
+    - **401** → `window.location.assign("/oauth/consent")` so the user
+      re-runs OAuth and returns with a fresh JWT.
+    - **429** → inline message "You have 3 active CLI tickets. Wait for one
+      to expire (10 min) or revoke later." (matches per-user cap from
+      `BOOTSTRAP_PER_USER_CAP=3` in `mcp/src/api.rs`).
+    - other 4xx/5xx → "Could not issue ticket: ${error.message}" with the
+      server's `error` field if JSON-parseable.
+
+- **Verification:**
+  - `cd webapp && npx vitest run src/components/IdentityPanel.test.tsx` — 4
+    tests pass: existing `renders_did_after_generate` (regression),
+    `send_to_cli_calls_endpoint_and_displays_ticket` (TDD anchor — drives
+    Decision 7 frontend; asserts Bearer header, body shape, paste-command
+    text, and `navigator.clipboard.writeText` exact-string),
+    `send_to_cli_429_shows_per_user_cap_message`,
+    `send_to_cli_401_redirects_to_oauth_consent`.
+  - `cd webapp && npx tsc -b --noEmit` clean (one type cast required:
+    `fetchMock.mock.calls[0]` typed as `unknown as [string, RequestInit]`
+    because vitest's mock-call element type is `[]` under strict mode).
+  - `cd webapp && npm run build` succeeds end-to-end (vite + wasm-pack);
+    `dist/assets/index-*.js` is 292 kB gzipped 91 kB — a 0.4 kB increase
+    over the pre-task baseline.
+  - `npx playwright test --list e2e/cli-bootstrap.spec.ts` enumerates 2
+    tests: an offline `page.route(...)`-stubbed render check and a
+    live-backend redeem-twice check that asserts the second `/redeem`
+    returns 404 (single-use). The live test is skipped when
+    `PLAYWRIGHT_SKIP_BACKEND_E2E=1` or `PLAYWRIGHT_TEST_JWT` is unset.
+
+- **Concerns / follow-ups:**
+  1. **JWT acquisition for the live e2e** — currently gated on a manually-
+     supplied `PLAYWRIGHT_TEST_JWT`. A future task could exercise the
+     full headless OAuth helper from `@mnemonik-xyz/sdk` (Task 3) inside
+     Playwright so the live redeem check runs unattended.
+  2. **`navigator.clipboard.writeText` failure modes** — under non-secure
+     contexts (e.g. plain `http://`) the call rejects with a DOMException.
+     The handler surfaces a "Copy failed: ..." inline error rather than
+     falling back to `document.execCommand("copy")`; this matches the
+     existing webapp's clipboard discipline (no IE/legacy fallbacks
+     elsewhere).
+  3. **No "revoke ticket" surface yet** — the 429 message tells the user to
+     wait or revoke "later"; the SDK / CLI side will gain `mnemonic
+     identity list` + `revoke` in a follow-up task. Leaving the message
+     forward-compatible.
+  4. **Storage caveat unchanged** — keypair still lives unencrypted in
+     localStorage. The "Send to CLI" handler reads the raw string and
+     posts it verbatim; the server stores it without inspection (api.rs
+     comment confirms). Encryption-at-rest is still tracked as a separate
+     hardening item.
