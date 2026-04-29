@@ -444,7 +444,11 @@ async function safeFetch(
 async function readBodySafely(res: Response): Promise<string> {
   try {
     const txt = await res.text();
-    return redactJWT(txt.slice(0, 500));
+    // Redact BEFORE slicing — slicing first can cut a JWT mid-string and
+    // leave the trailing portion (a partial header < 20 chars or the
+    // signature segment) below the regex's {20,} threshold, which would
+    // skip the redaction. See security-auditor round 1, finding #2.
+    return redactJWT(txt).slice(0, 500);
   } catch {
     return "";
   }

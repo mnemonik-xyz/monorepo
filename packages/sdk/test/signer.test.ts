@@ -52,3 +52,67 @@ describe("LocalSigner", () => {
     );
   });
 });
+
+// ── Defense-in-depth: WASM drift / corruption catch-paths ──────────────────
+//
+// These tests pin the three internal `LocalSigner.sign` guards that exist
+// purely to surface SDK/WASM drift in production with a typed error rather
+// than letting a silent bad signature reach the server. Each test installs
+// a custom WASM mock with a single overridden `sign_challenge`.
+
+describe("LocalSigner defense-in-depth", () => {
+  function installSignChallenge(
+    impl: (kp: unknown, bytes: Uint8Array) => Uint8Array
+  ): void {
+    // Build the standard mock then patch sign_challenge so KeypairJson
+    // round-tripping (used by Keypair.generate) still works.
+    const base = buildWasmMock();
+    const patched = {
+      ...base,
+      sign_challenge: impl,
+    };
+    __setWasmForTesting(patched as never);
+  }
+
+  it("wraps thrown WASM errors as UserError", async () => {
+    const kp = await Keypair.generate();
+    installSignChallenge(() => {
+      throw new Error("wasm panic: stack overflow");
+    });
+    const signer = new LocalSigner(kp);
+    await expect(signer.sign(new Uint8Array([1, 2, 3]))).rejects.toBeInstanceOf(
+      UserError
+    );
+    await expect(signer.sign(new Uint8Array([1, 2, 3]))).rejects.toThrow(
+      /sign_challenge failed/
+    );
+  });
+
+  it("rejects non-Uint8Array WASM return as UserError", async () => {
+    const kp = await Keypair.generate();
+    installSignChallenge(
+      () =>
+        // intentional bad return: a string masquerading as Uint8Array.
+        "not-a-uint8array" as unknown as Uint8Array
+    );
+    const signer = new LocalSigner(kp);
+    await expect(signer.sign(new Uint8Array([1, 2, 3]))).rejects.toBeInstanceOf(
+      UserError
+    );
+    await expect(signer.sign(new Uint8Array([1, 2, 3]))).rejects.toThrow(
+      /did not return Uint8Array/
+    );
+  });
+
+  it("rejects wrong-length WASM signature as UserError", async () => {
+    const kp = await Keypair.generate();
+    installSignChallenge(() => new Uint8Array(63)); // off-by-one
+    const signer = new LocalSigner(kp);
+    await expect(signer.sign(new Uint8Array([1, 2, 3]))).rejects.toBeInstanceOf(
+      UserError
+    );
+    await expect(signer.sign(new Uint8Array([1, 2, 3]))).rejects.toThrow(
+      /must be 64 bytes/
+    );
+  });
+});

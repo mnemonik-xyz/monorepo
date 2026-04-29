@@ -12,7 +12,12 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { MnemonicClient } from "../src/client.js";
-import { AuthError, ServerError } from "../src/errors.js";
+import {
+  AuthError,
+  IntegrityError,
+  ServerError,
+  UserError,
+} from "../src/errors.js";
 import { Keypair } from "../src/keypair.js";
 import { LocalSigner } from "../src/signer.js";
 import { __setWasmForTesting } from "../src/wasm.js";
@@ -475,5 +480,244 @@ describe("JWT redaction in error messages", () => {
     const msg = (caught as Error).message;
     expect(msg).not.toContain(leakyJwt);
     expect(msg).toContain("[REDACTED-JWT]");
+  });
+});
+
+// ── 5xx, malformed JSON, network failure (callTool error branches) ─────────
+
+describe("callTool error branches", () => {
+  it("throws ServerError on 500 from /mcp with redacted body", async () => {
+    const leakyJwt =
+      "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c";
+    const { client } = await makeClient({
+      jwt: leakyJwt,
+      responses: [
+        {
+          status: 500,
+          body: { error: `internal: ${leakyJwt}` },
+        },
+      ],
+    });
+    let caught: unknown = null;
+    try {
+      await client.whoami();
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(ServerError);
+    expect((caught as ServerError).status).toBe(500);
+    const msg = (caught as Error).message;
+    expect(msg).toContain("HTTP 500");
+    // Body content is surfaced and redacted.
+    expect(msg).not.toContain(leakyJwt);
+    expect(msg).toContain("[REDACTED-JWT]");
+  });
+
+  it("throws ServerError with malformed-JSON message on non-JSON 200", async () => {
+    const { client } = await makeClient({
+      responses: [{ status: 200, body: "<<<not json>>>" }],
+    });
+    let caught: unknown = null;
+    try {
+      await client.whoami();
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(ServerError);
+    expect((caught as Error).message).toMatch(/malformed JSON/);
+  });
+
+  it("throws ServerError when JSON-RPC body is not an object", async () => {
+    // res.json() returns an array → isRecord(parsed) is false.
+    const { client } = await makeClient({
+      responses: [{ status: 200, body: ["unexpected"] }],
+    });
+    await expect(client.whoami()).rejects.toBeInstanceOf(ServerError);
+  });
+
+  it("maps JSON-RPC error.code 401 to AuthError", async () => {
+    const { client } = await makeClient({
+      responses: [
+        {
+          status: 200,
+          body: {
+            jsonrpc: "2.0",
+            id: 1,
+            error: { code: 401, message: "token expired" },
+          },
+        },
+      ],
+    });
+    await expect(client.whoami()).rejects.toBeInstanceOf(AuthError);
+  });
+
+  it("propagates JSON-RPC error.message via ServerError when no auth code", async () => {
+    const { client } = await makeClient({
+      responses: [
+        {
+          status: 200,
+          body: {
+            jsonrpc: "2.0",
+            id: 1,
+            error: { code: -32603, message: "boom" },
+          },
+        },
+      ],
+    });
+    await expect(client.whoami()).rejects.toMatchObject({
+      name: "ServerError",
+      message: expect.stringContaining("boom"),
+    });
+  });
+
+  it("surfaces network failure (fetch throws) as ServerError", async () => {
+    const kp = await Keypair.generate();
+    const signer = new LocalSigner(kp);
+    const fetchImpl: typeof fetch = (async () => {
+      throw new TypeError("fetch failed");
+    }) as typeof fetch;
+    const client = new MnemonicClient({
+      baseUrl: "https://example.test",
+      signer,
+      fetch: fetchImpl,
+    });
+    let caught: unknown = null;
+    try {
+      await client.whoami();
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(ServerError);
+    expect((caught as Error).message).toMatch(/network error/);
+  });
+});
+
+// ── signMemory edge cases ──────────────────────────────────────────────────
+
+describe("signMemory missing keypair", () => {
+  it("throws UserError when setKeypair has not been called", async () => {
+    const kp = await Keypair.generate();
+    const signer = new LocalSigner(kp);
+    const { fetchImpl } = makeMockFetch([]);
+    const client = new MnemonicClient({
+      baseUrl: "https://example.test",
+      signer,
+      fetch: fetchImpl,
+    });
+    // NOTE: no client.setKeypair(...) call.
+    await expect(client.signMemory("hello")).rejects.toBeInstanceOf(UserError);
+    await expect(client.signMemory("hello")).rejects.toThrow(/no keypair/);
+  });
+
+  it("throws IntegrityError when sign-callback omits attestation_id", async () => {
+    const { client } = await makeClient({
+      responses: [
+        { body: mcpResult({ correlation_id: "c1" }) },
+        { body: new Uint8Array([0xa0]) },
+        { status: 200, body: { signed_at: "2026-04-29T00:00:00Z" } },
+      ],
+    });
+    await expect(client.signMemory("x")).rejects.toBeInstanceOf(IntegrityError);
+  });
+});
+
+// ── verify tampered + recall alternate shape + setJwt ──────────────────────
+
+describe("verify tampered discriminant", () => {
+  it("propagates tampered status with reason and signer", async () => {
+    const { client } = await makeClient({
+      responses: [
+        {
+          body: mcpResult({
+            status: "tampered",
+            signer: "PubX",
+            reason: "hash_mismatch",
+          }),
+        },
+      ],
+    });
+    const out = await client.verify("att-bad");
+    expect(out.status).toBe("tampered");
+    if (out.status === "tampered") {
+      expect(out.signer).toBe("PubX");
+      expect(out.reason).toBe("hash_mismatch");
+    }
+  });
+});
+
+describe("recall alternate response shapes", () => {
+  it("accepts results-key alternate (results[] vs hits[])", async () => {
+    const { client } = await makeClient({
+      responses: [
+        {
+          body: mcpResult({
+            results: [
+              { attestation_id: "att-r", content: "alt", similarity: 0.5 },
+            ],
+          }),
+        },
+      ],
+    });
+    const out = await client.recall("query");
+    expect(out.hits.length).toBe(1);
+    expect(out.hits[0]!.attestationId).toBe("att-r");
+    // total falls back to hits.length when missing on the wire.
+    expect(out.total).toBe(1);
+  });
+
+  it("returns empty hits when neither hits nor results is present", async () => {
+    const { client } = await makeClient({
+      responses: [{ body: mcpResult({}) }],
+    });
+    const out = await client.recall("query");
+    expect(out.hits).toEqual([]);
+    expect(out.total).toBe(0);
+  });
+});
+
+describe("setJwt setter", () => {
+  it("attaches Bearer header to subsequent calls when setJwt() is called", async () => {
+    const kp = await Keypair.generate();
+    const signer = new LocalSigner(kp);
+    const { fetchImpl, calls } = makeMockFetch([
+      { body: mcpResult({ server_pubkey: "Pub1" }) },
+    ]);
+    const client = new MnemonicClient({
+      baseUrl: "https://example.test",
+      signer,
+      fetch: fetchImpl,
+    });
+    // No JWT at construction.
+    client.setJwt("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.payload.sig");
+    await client.whoami();
+    expect(calls[0]!.headers.authorization).toMatch(/^Bearer eyJ/);
+  });
+});
+
+// ── readBodySafely redact-then-slice (security-auditor finding #2) ─────────
+
+describe("readBodySafely redact-then-slice", () => {
+  it("redacts a JWT that would otherwise straddle the 500-char slice", async () => {
+    // Build a body where a real JWT lands at offset 480 (so a slice-first
+    // implementation would cut the JWT in half, leaving the head < 20 chars
+    // after `eyJ` and skipping the regex). After this fix, redact runs first.
+    const filler = "x".repeat(480);
+    const leakyJwt =
+      "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c";
+    const body = `${filler}${leakyJwt}`;
+    const { client } = await makeClient({
+      responses: [{ status: 500, body: { error: body } }],
+    });
+    let caught: unknown = null;
+    try {
+      await client.whoami();
+    } catch (e) {
+      caught = e;
+    }
+    const msg = (caught as Error).message;
+    // The full JWT must NOT appear in the surfaced message.
+    expect(msg).not.toContain(leakyJwt);
+    // And no JWT-shape substring should leak past the slice/truncation.
+    expect(msg).not.toMatch(/eyJ[A-Za-z0-9_-]{20,}/);
   });
 });

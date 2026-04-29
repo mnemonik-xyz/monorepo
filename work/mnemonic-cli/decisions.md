@@ -153,6 +153,31 @@ Append-only. Each entry: task, date, status, summary, verification, concerns.
   - `client.ts` line 81 (`setJwt`) is uncovered — minor. Could add a one-liner test if desired.
   - `errors.ts` lines 74-75 (`IntegrityError` constructor) currently uncovered — `signMemory` only throws `IntegrityError` when the callback omits `attestation_id`, which is hard to reach without a fragile mock. Could add later.
 
+### Task 2 — Round 2 fixes
+
+- Date: 2026-04-29
+- Status: review-fixes applied
+- Fixed:
+  - **Branch coverage 75.74% -> 81.25%** (line coverage 85.02% -> 93.98%, both above tech-spec gates of 80% / 85%). Added 16 new tests:
+    - `client.test.ts`: 5xx surfaces ServerError with redacted body + status 500; malformed JSON-on-/mcp throws ServerError with `/malformed JSON/`; non-object JSON-RPC body throws ServerError; JSON-RPC `error.code === 401` maps to AuthError; JSON-RPC `error.message` propagates through ServerError; network failure (fetch throws) → ServerError `/network error/`; signMemory without setKeypair → UserError `/no keypair/`; sign-callback returning 200 sans `attestation_id` → IntegrityError; verify tampered discriminant propagates `signer` + `reason`; recall normalises `results[]` alternate to `hits[]`; recall handles missing hits/total; setJwt setter attaches Bearer header on next call; readBodySafely redacts a JWT straddling the 500-char boundary.
+    - `signer.test.ts`: defense-in-depth: WASM `sign_challenge` throws → UserError `/sign_challenge failed/`; WASM returns non-Uint8Array → UserError `/did not return Uint8Array/`; WASM returns wrong-length sig → UserError `/must be 64 bytes/`.
+    - `index.test.ts` (new): smoke test of public barrel re-exports, taking `src/index.ts` from 0% to 100%.
+  - **Security low #2 (redact-then-slice):** `client.ts::readBodySafely` now runs `redactJWT(txt).slice(0, 500)` (was `redactJWT(txt.slice(0, 500))`). A JWT straddling the 500-char cutoff no longer leaks its prefix below the regex's `{20,}` threshold. Covered by the new `readBodySafely redact-then-slice` test.
+- Verification:
+  - `npx vitest run --coverage` (cwd `packages/sdk`): **92 tests passing**, lines 93.98%, **branches 81.25%**, funcs 100% — exit 0, threshold gate satisfied.
+  - `bun test`: 92 / 92 pass.
+  - `npx tsc -p packages/sdk --noEmit`: clean.
+- Deferred to backlog (per spec: "skip — defer"):
+  - code-reviewer minor #1 (Signer/keypair dual-bind architecture for future TurnkeySigner/WebAuthnSigner) — Phase 1.5+ concern.
+  - code-reviewer minor #2 (extend JWT regex to also catch the third signature segment of full three-part JWTs) — current Decision-10 contract is met.
+  - code-reviewer minor #3 (`MnemonicError.cause` redaction) — `cause` is documented developer-facing per Decision 10; option (a) of the recommendation already in JSDoc spirit.
+  - code-reviewer minor #6 (defense-in-depth comment in `readBodySafely` flagging double redaction is intentional) — superseded by the redact-then-slice fix; double-redaction comment no longer applies cleanly.
+  - test-reviewer minor (delete redundant `signer-contract.test.ts` OR remove inline `runSignerContract` from `signer.test.ts`) — kept both for now; the duplication is intentional belt-and-suspenders for the contract suite.
+  - test-reviewer minor (large-content >32KB chunking branch in `bytesToBase64`) — robustness gap, not correctness.
+  - test-reviewer minor (signer-contract.ts comment about WebAuthn non-determinism) — documentation polish, no behaviour change.
+  - security-auditor low #1 (full-three-segment JWT regex) — same as code-reviewer #2.
+  - security-auditor low #3 (Keypair zeroize / dispose surface) — Phase 2 concern documented in `signer.ts` JSDoc; Phase 1 threat model accepts heap exposure.
+
 ---
 
 ## Task 6 — Server OAuth allowlist + bootstrap-ticket endpoints
