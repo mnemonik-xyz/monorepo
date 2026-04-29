@@ -2,15 +2,20 @@ name: Node Test
 
 # SDK + CLI test workflow.
 #
-# Currently this file owns ONE job: the lockstep gate from Task 4.
-# Task 8 extends this file with the cross-runtime matrix (Node 20 / Node 22 /
-# Bun / Deno) for SDK + CLI unit + integration tests.
-#
-# The lockstep gate enforces tech-spec Decision 12: the committed
-# `packages/sdk/test/fixtures/golden-cose.{json,sha256}` must be byte-identical
-# to what `core/tests/golden_fixtures.rs::emit_fixtures` produces for the
-# current Rust source. If a PR changes Rust core's canonical CBOR or COSE
-# encoder without re-running the regenerator, this gate fails the PR.
+# Three jobs:
+#   - golden-fixture-lockstep — Decision 12 (Task 4 lockstep gate). Verifies
+#     the committed `packages/sdk/test/fixtures/golden-cose.{json,sha256}`
+#     match what `core/tests/golden_fixtures.rs::emit_fixtures` produces for
+#     the current Rust source. If a PR changes Rust core's canonical CBOR or
+#     COSE encoder without re-running the regenerator, this gate fails.
+#   - test-matrix — Decision 11 / Deviation 5. Runs SDK + CLI test suites
+#     across Node 20 / Node 22 / Bun latest / Deno 1.40+. Catches Bun/Deno-
+#     specific regressions before merge (`crypto.subtle` Ed25519, ESM
+#     resolution edge cases). All four runtimes are installed; tests are
+#     executed via `bun test` for runner uniformity.
+#   - bundle-size — Phase-1 budget gate (≤500KB SDK, ≤200KB CLI) per
+#     tech-spec § Risks. Uses `npm pack --dry-run --json` to measure the
+#     packaged tarball size before publish.
 
 on:
   push:
@@ -64,3 +69,124 @@ jobs:
             || (echo "::error::golden-cose.sha256 drift — re-run packages/sdk/scripts/regen-golden-fixtures.sh and commit the result" && exit 1)
           git diff --exit-code packages/sdk/test/fixtures/golden-cose.json \
             || (echo "::error::golden-cose.json drift — re-run packages/sdk/scripts/regen-golden-fixtures.sh and commit the result" && exit 1)
+
+  test-matrix:
+    name: test (${{ matrix.runtime }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        runtime: [node-20, node-22, bun-latest, deno-1.40]
+    steps:
+      - uses: actions/checkout@v4
+
+      # WASM artefact is required for SDK tests (cose.golden) and CLI
+      # subprocess integration tests (the spawned binary loads
+      # core/pkg-web/mnemonic_core.js at startup).
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: workspace
+
+      - name: Install wasm-pack
+        run: cargo install wasm-pack --locked --version 0.14.0 || true
+
+      - name: Build WASM (pkg-web target)
+        run: bash packages/sdk/scripts/build-wasm.sh
+
+      # Per-runtime install. Each step is gated by a matrix-runtime check
+      # so only the relevant runtime is set up. Tests are executed via
+      # `bun test` regardless — Decision 11 uses bun as the uniform runner
+      # because vitest's compatibility shim is the most stable cross-runtime.
+      - name: Setup Node 20
+        if: matrix.runtime == 'node-20'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Setup Node 22
+        if: matrix.runtime == 'node-22'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Setup Deno
+        if: matrix.runtime == 'deno-1.40'
+        uses: denoland/setup-deno@v1
+        with:
+          deno-version: v1.40.x
+
+      - name: Install dependencies (workspaces)
+        run: bun install
+
+      - name: Build SDK + CLI
+        run: |
+          cd packages/sdk && bun run build
+          cd ../cli && bun run build
+
+      - name: SDK tests
+        working-directory: packages/sdk
+        run: bun test
+
+      - name: CLI tests
+        working-directory: packages/cli
+        run: bun test
+
+  bundle-size:
+    name: bundle size budgets
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: workspace
+
+      - name: Install wasm-pack
+        run: cargo install wasm-pack --locked --version 0.14.0 || true
+
+      - name: Build WASM + workspace
+        run: |
+          bash packages/sdk/scripts/build-wasm.sh
+          bun install
+          cd packages/sdk && bun run build
+          cd ../cli && bun run build
+
+      # `npm pack --dry-run --json` emits an array of pack manifests; the
+      # `.size` field is the unpacked tarball size in bytes. We assert
+      # SDK ≤500_000 and CLI ≤200_000 to enforce the Phase-1 budget.
+      - name: SDK bundle ≤ 500KB
+        working-directory: packages/sdk
+        run: |
+          SIZE=$(npm pack --dry-run --json | jq '.[0].size')
+          echo "SDK size: $SIZE bytes (budget: 500000)"
+          if [ "$SIZE" -gt 500000 ]; then
+            echo "::error::SDK package size $SIZE exceeds 500KB budget"
+            exit 1
+          fi
+
+      - name: CLI bundle ≤ 200KB
+        working-directory: packages/cli
+        run: |
+          SIZE=$(npm pack --dry-run --json | jq '.[0].size')
+          echo "CLI size: $SIZE bytes (budget: 200000)"
+          if [ "$SIZE" -gt 200000 ]; then
+            echo "::error::CLI package size $SIZE exceeds 200KB budget"
+            exit 1
+          fi

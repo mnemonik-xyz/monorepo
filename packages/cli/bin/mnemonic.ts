@@ -218,5 +218,10 @@ const invokedDirectly =
     process.argv[1].endsWith("/bin/mnemonic"));
 
 if (invokedDirectly) {
-  void main(process.argv);
+  // Top-level await — without this, Bun's runtime can exit before the
+  // async chain resolves under certain timing conditions (the parent
+  // script ends, no I/O is registered, the event loop drains the
+  // microtask queue and exits). Surfaced by Task 8's CLI integration
+  // tests (subprocess flakiness when spawning many bun children).
+  await main(process.argv);
 }
