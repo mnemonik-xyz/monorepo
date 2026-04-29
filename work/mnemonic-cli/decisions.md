@@ -141,3 +141,14 @@ Append-only. Each entry: task, date, status, summary, verification, concerns.
     of `vi.stubGlobal` (which bun's compat shim doesn't expose) so the same
     test file passes under both runners. Cross-runtime CI matrix (Node 20 /
     Node 22 / Bun / Deno per Decision 11) should pick this up cleanly.
+
+### Task 2 — completion (T2-impl-cont)
+- Date: 2026-04-29
+- Status: complete (cut-off T2-impl finished here)
+- Summary: SDK core surface + Signer contract suite + LocalSigner + Keypair + COSE wrapper + JWT-redacting errors. WASM injection for tests via `__setWasmForTesting` in `wasm.ts`. Wrote `client.test.ts` (18 tests) covering all 5 tool methods, the pending-bundle / sign-callback flow (asserts NO `Authorization` header on `/api/sign-callback`, capability auth via `correlation_id` + `signer_pubkey` + COSE chain), and JWT-redaction in error paths. Added `cose.test.ts` and `keypair.test.ts` for envelope-shape + round-trip coverage. Note: T2-impl ran out of context just before client.test.ts.
+- Verification: `bun test packages/sdk/test/` ALL pass (75 total, 189 expect calls). Coverage: lines 89.55%, funcs 91.18% overall — `client.ts` 98.68% lines, `keypair.ts` 100%, `cose.ts` 94.12%, `oauth.ts` 94.64%, `errors.ts` 94.29%. Only `wasm.ts` dynamic-import path (33%) is unreached because tests inject the mock via `__setWasmForTesting`; that path is exercised by Task 4's golden fixture against real WASM. `npx tsc -p packages/sdk --noEmit` clean. `grep -r 'node:' packages/sdk/src/` returns only doc-comment mentions, no actual `node:*` imports.
+- Bug fix: `test/helpers/wasm-mock.ts` imported from `@noble/hashes/sha2` — Bun's strict ESM resolver couldn't resolve that against `@noble/hashes` v2.2.0's exports map (which lists `./sha2.js`). Changed to `@noble/hashes/sha2.js`. No new dependency added; package was already a devDep.
+- Concerns / follow-ups:
+  - `wasm.ts` lines 31-46 (the real dynamic-import + `init()` path) remain uncovered by SDK unit tests by design. Task 4's golden-fixture test should hit them; if not, add a smoke test there.
+  - `client.ts` line 81 (`setJwt`) is uncovered — minor. Could add a one-liner test if desired.
+  - `errors.ts` lines 74-75 (`IntegrityError` constructor) currently uncovered — `signMemory` only throws `IntegrityError` when the callback omits `attestation_id`, which is hard to reach without a fragile mock. Could add later.
