@@ -20,8 +20,16 @@ import { loadWasm } from "./wasm.js";
  * Wrap server-built canonical-CBOR bytes in a COSE_Sign1 envelope signed
  * by the keypair encoded in `keypairJson`.
  *
- * Returns the COSE_Sign1 bytes ready to base64-encode and POST to
- * `/api/sign-callback`.
+ * @param canonicalCbor - Non-empty canonical-CBOR payload, exactly as
+ *                        returned by the server's `/api/pending/...`
+ *                        endpoint. Do NOT re-encode in JS — any drift
+ *                        breaks `content_integrity`.
+ * @param keypairJson   - The Ed25519 keypair (JSON shape) used to sign.
+ * @returns The COSE_Sign1 envelope bytes, ready to base64-encode and POST
+ *          to `/api/sign-callback`.
+ * @throws `UserError` on empty / non-`Uint8Array` input, on any WASM
+ *         failure, or if the WASM-emitted envelope does not start with
+ *         the expected CBOR-array prefix `0x84`.
  */
 export async function coseSignPayload(
   canonicalCbor: Uint8Array,

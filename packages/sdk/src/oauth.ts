@@ -21,7 +21,7 @@ export interface PendingAuthSession {
   redirectUri: string;
   sessionId: string;
   /** Wall-clock millisecond timestamp at which this session was inserted.
-   *  Used to enforce {@link PENDING_SESSION_TTL_MS}. */
+   *  Used to enforce `PENDING_SESSION_TTL_MS`. */
   createdAt: number;
 }
 
@@ -48,9 +48,11 @@ export const PENDING_SESSION_MAX = 100;
 /**
  * In-memory map of pending auth sessions, keyed by `sessionId` (UUIDv4).
  *
- * IMPORTANT: callers should prefer the {@link setSession} / {@link getSession}
- * / {@link deleteSession} helpers which enforce the TTL + size cap. Direct
- * mutation of this Map bypasses those guards and is reserved for tests.
+ * IMPORTANT: callers should prefer the internal `setSession` / `getSession`
+ * / `deleteSession` helpers (used by `buildAuthorizeUrl` and
+ * `exchangeCodeForToken` already), which enforce the TTL + size cap.
+ * Direct mutation of this Map bypasses those guards and is reserved for
+ * tests.
  *
  * Caller manages the OAuth lifecycle by passing `sessionId` back to
  * {@link exchangeCodeForToken}.
@@ -67,9 +69,13 @@ function pruneExpiredSessions(now: number): void {
 }
 
 /**
- * Insert a session, enforcing TTL pruning + FIFO eviction at the size cap.
- * Map iteration order is insertion order (ECMA-262 §24.1.3.6) so the first
- * key returned by `keys()` is the oldest entry.
+ * Insert a session, enforcing TTL pruning + FIFO eviction at the size
+ * cap. Map iteration order is insertion order (ECMA-262 §24.1.3.6) so
+ * the first key returned by `keys()` is the oldest entry.
+ *
+ * @param id    - Session identifier (UUIDv4).
+ * @param value - The session payload to store.
+ * @returns void.
  */
 export function setSession(id: string, value: PendingAuthSession): void {
   const now = Date.now();
@@ -83,8 +89,11 @@ export function setSession(id: string, value: PendingAuthSession): void {
 }
 
 /**
- * Look up a session, enforcing TTL on read. Returns `undefined` if the
- * session is missing OR expired (in which case it is also evicted).
+ * Look up a session, enforcing TTL on read.
+ *
+ * @param id - Session identifier (UUIDv4).
+ * @returns The stored `PendingAuthSession`, or `undefined` if the session
+ *          is missing OR expired (in which case it is also evicted).
  */
 export function getSession(id: string): PendingAuthSession | undefined {
   const entry = pendingAuthSessions.get(id);
@@ -96,7 +105,12 @@ export function getSession(id: string): PendingAuthSession | undefined {
   return entry;
 }
 
-/** Remove a session by id. */
+/**
+ * Remove a session by id.
+ *
+ * @param id - Session identifier (UUIDv4).
+ * @returns `true` if a session was removed, `false` otherwise.
+ */
 export function deleteSession(id: string): boolean {
   return pendingAuthSessions.delete(id);
 }
@@ -147,8 +161,10 @@ function uuidv4(): string {
 
 /**
  * Generate a PKCE `code_verifier`: 32 cryptographically random bytes,
- * base64url-encoded (43 chars, no padding). Per RFC 7636 §4.1 the verifier
- * MUST be 43–128 characters from the unreserved character set.
+ * base64url-encoded (43 chars, no padding). Per RFC 7636 §4.1 the
+ * verifier MUST be 43–128 characters from the unreserved character set.
+ *
+ * @returns A fresh base64url-encoded verifier string.
  */
 export function generatePkceVerifier(): string {
   return bytesToBase64Url(randomBytes(32));
@@ -157,6 +173,10 @@ export function generatePkceVerifier(): string {
 /**
  * Compute the PKCE S256 `code_challenge` from a verifier:
  * `base64url(SHA-256(utf8(verifier)))`. RFC 7636 §4.2.
+ *
+ * @param verifier - A code_verifier produced by
+ *                   {@link generatePkceVerifier}.
+ * @returns The base64url-encoded S256 challenge.
  */
 export async function pkceChallenge(verifier: string): Promise<string> {
   // `crypto.subtle.digest` is typed as accepting a `BufferSource` whose
@@ -174,7 +194,12 @@ export async function pkceChallenge(verifier: string): Promise<string> {
   return bytesToBase64Url(new Uint8Array(digest));
 }
 
-/** Generate a 32-byte random `state` value, base64url-encoded. */
+/**
+ * Generate a 32-byte random `state` value, base64url-encoded.
+ *
+ * @returns A fresh base64url-encoded state string suitable for use as
+ *          the OAuth `state` parameter.
+ */
 export function randomState(): string {
   return bytesToBase64Url(randomBytes(32));
 }
@@ -196,11 +221,19 @@ export interface BuildAuthorizeUrlResult {
 }
 
 /**
- * Build an OAuth 2.1 authorize URL (PKCE S256). Stores the `{verifier, state,
- * redirectUri, sessionId}` tuple in {@link pendingAuthSessions} so that
- * {@link exchangeCodeForToken} can validate the callback.
+ * Build an OAuth 2.1 authorize URL (PKCE S256). Stores the
+ * `{verifier, state, redirectUri, sessionId}` tuple in
+ * {@link pendingAuthSessions} so that {@link exchangeCodeForToken} can
+ * validate the callback.
  *
  * `scope` defaults to `"mcp"`.
+ *
+ * @param input - `{baseUrl, clientId, redirectUri, scope?}` — `baseUrl`
+ *                must be the origin of the OAuth server (path is appended).
+ * @returns `{url, state, verifier, sessionId}`. The caller drives the
+ *          browser to `url` and later passes `sessionId` (and the
+ *          callback's `state` + `code`) into
+ *          {@link exchangeCodeForToken}.
  */
 export async function buildAuthorizeUrl(
   input: BuildAuthorizeUrlInput
@@ -254,11 +287,19 @@ export interface ExchangeCodeForTokenResult {
 /**
  * Exchange an authorization `code` for a JWT at `POST /oauth/token`.
  *
- * Validates that `state` and `redirectUri` match the stored session before
- * issuing any HTTP request (Decision 5 — RFC 7636 §4.4 / RFC 8252 §7).
- * The session entry is removed on success OR on validation failure
- * (one-shot semantics). Throws {@link AuthError} for any validation or
- * server failure.
+ * Validates that `state` and `redirectUri` match the stored session
+ * before issuing any HTTP request (Decision 5 — RFC 7636 §4.4 /
+ * RFC 8252 §7). The session entry is removed on success OR on
+ * validation failure (one-shot semantics).
+ *
+ * @param input - `{baseUrl, code, state, redirectUri, sessionId}` from the
+ *                callback URL plus the `sessionId` returned by
+ *                {@link buildAuthorizeUrl}.
+ * @returns `{jwt, expiresAt}`. `expiresAt` falls back to "now + 1h" if
+ *          the server omits the field.
+ * @throws `AuthError` for session-not-found, state mismatch, redirect_uri
+ *         mismatch, network failure, non-2xx token response, or malformed
+ *         JSON / missing `jwt` claim.
  */
 export async function exchangeCodeForToken(
   input: ExchangeCodeForTokenInput
@@ -384,13 +425,15 @@ const JWT_ALLOWED_ALGS = new Set(["HS256"]);
  * headless flow to surface obvious problems (missing claims, expired)
  * before persisting the token to disk.
  *
- * The header is decoded too, and `alg` is asserted against
- * {@link JWT_ALLOWED_ALGS} (currently `HS256` only — Decision 6). Tokens
- * signed with `alg=none`, `alg=RS256`, or any other algorithm are rejected
- * even though signature verification itself is server-side.
+ * The header is decoded too, and `alg` is asserted against the allowlist
+ * (currently `HS256` only — Decision 6). Tokens signed with `alg=none`,
+ * `alg=RS256`, or any other algorithm are rejected even though signature
+ * verification itself is server-side.
  *
- * Throws {@link AuthError} for malformed tokens, disallowed `alg`, missing
- * required claims, or `exp` strictly in the past.
+ * @param jwt - A three-segment JWT string.
+ * @returns The decoded `{sub, exp, iat}` payload.
+ * @throws `AuthError` for malformed tokens, disallowed `alg`, missing
+ *         required claims, or `exp` strictly in the past.
  */
 export function parseJwtPayload(jwt: string): JwtPayload {
   if (typeof jwt !== "string" || jwt.length === 0) {

@@ -48,8 +48,13 @@ export class Keypair {
 
   /**
    * Serialize to a backup-safe JSON string via WASM `export_keypair_json`.
-   * The export validates that the secret/pubkey pair is internally consistent
-   * before emitting the string — a corrupted keypair refuses to export.
+   * The export validates that the secret/pubkey pair is internally
+   * consistent before emitting the string — a corrupted keypair refuses
+   * to export.
+   *
+   * @returns A JSON string identical to the webapp's "Download keypair"
+   *          format.
+   * @throws Any WASM-level error if validation fails.
    */
   async toBackupString(): Promise<string> {
     const wasm = await loadWasm();
@@ -58,7 +63,10 @@ export class Keypair {
 
   /**
    * Generate a fresh keypair using WASM `generate_keypair` (entropy from
-   * `crypto.getRandomValues` via `getrandom` `js` feature).
+   * `crypto.getRandomValues` via `getrandom`'s `js` feature).
+   *
+   * @returns A freshly generated, validated `Keypair`.
+   * @throws `UserError` if the WASM module returns an unexpected shape.
    */
   static async generate(): Promise<Keypair> {
     const wasm = await loadWasm();
@@ -67,10 +75,18 @@ export class Keypair {
   }
 
   /**
-   * Construct from an existing `KeypairJson` shape. Validation is performed
-   * via WASM `import_keypair_json` (round-trip through canonical JSON) so
-   * we get the same secret-length + pubkey-derivation checks the WASM
-   * boundary enforces server-side.
+   * Construct from an existing `KeypairJson` shape. Validation is
+   * performed via WASM `import_keypair_json` (round-trip through canonical
+   * JSON) so we get the same secret-length + pubkey-derivation checks the
+   * WASM boundary enforces server-side.
+   *
+   * @param json - A `KeypairJson` (or candidate) — typically read from
+   *               `localStorage["mnemonic.identity"]` or
+   *               `~/.mnemonic/identity.json`.
+   * @returns The validated `Keypair`.
+   * @throws `UserError` if `json` does not match the expected shape, the
+   *         secret is the wrong length, or the pubkey does not derive
+   *         from the secret.
    */
   static async fromJSON(json: KeypairJson | unknown): Promise<Keypair> {
     if (!isKeypairJsonShape(json)) {
@@ -97,8 +113,14 @@ export class Keypair {
   }
 
   /**
-   * Parse a backup-string (the output of `toBackupString` or the webapp's
-   * "Download keypair" button) and return a validated Keypair.
+   * Parse a backup-string (the output of {@link toBackupString} or the
+   * webapp's "Download keypair" button) and return a validated `Keypair`.
+   *
+   * @param json - The backup string previously emitted by
+   *               {@link toBackupString}.
+   * @returns The validated `Keypair`.
+   * @throws `UserError` if the input is malformed or fails WASM
+   *         validation.
    */
   static async fromBackupString(json: string): Promise<Keypair> {
     const wasm = await loadWasm();

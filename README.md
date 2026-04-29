@@ -112,6 +112,15 @@ Current artifact format: **canonical CBOR + COSE_Sign1, blake3 hashing**. Older 
 
 ---
 
+## Programmatic access
+
+Two npm packages let you drive the same hosted MCP server without writing your own JSON-RPC client. Both reuse the OAuth 2.1 + PKCE handshake and the COSE_Sign1 signing substrate that the Cursor / VS Code / Claude.ai connectors and the webapp use — only the renderer differs.
+
+- [`@mnemonik-xyz/cli`](packages/cli/) — `mnemonic` binary for terminal use. `mnemonic init && mnemonic login && mnemonic sign "hello"`.
+- [`@mnemonik-xyz/sdk`](packages/sdk/) — runtime-agnostic TypeScript SDK (`MnemonicClient`, `LocalSigner`, `Keypair`, OAuth helpers). Pure ESM; runs on Node 20+, Bun, Deno, and modern browsers.
+
+---
+
 ## Storage modes
 
 Selected via `STORAGE_MODE`:

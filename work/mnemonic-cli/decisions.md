@@ -745,3 +745,70 @@ Append-only. Each entry: task, date, status, summary, verification, concerns.
      alg=RS256, malformed base64).
   4. S5 — promote SDK test helpers via package.json `exports` so CLI tests
      stop reaching into `../../sdk/dist/*` directly.
+
+---
+
+## Task 9 — Documentation: SDK README + CLI README + SMOKE.md + JSDoc + repo pointer
+
+- **Task:** 9
+- **Date:** 2026-04-28
+- **Status:** complete
+- **Summary:**
+  Wrote the public-facing documentation for `@mnemonik-xyz/sdk` and
+  `@mnemonik-xyz/cli`. Replaced the Wave-1 placeholder SDK README with a
+  full quick-start (5-line snippet using `Keypair.fromJSON` +
+  `MnemonicClient.setKeypair`), the runtime-targets table from Task 1's
+  smoke matrix (decision: `--target web` covers Node 20/22, Bun, Deno;
+  Cloudflare Workers deferred to pre-release), the API reference for
+  every public export (client / signer / keypair / OAuth / errors / COSE
+  helper), the golden-fixture regen pointer, and a backlog link. Replaced
+  the Wave-1 placeholder CLI README with the full command reference for
+  all eight commands (`init`, `login`, `sign`, `recall`, `verify`,
+  `whoami`, `prove`, `identity import`, `identity export`) plus output
+  flags, exit-code table per Decision 10, and SMOKE link. Synopses and
+  option names verified against `mnemonic <cmd> --help` of the built CLI
+  bundle. Wrote `packages/cli/SMOKE.md` — a 10-step pre-release manual
+  smoke checklist adapted from § "Manual smoke tests" in tech-spec.
+  Tightened JSDoc on every exported function/class/interface in
+  `packages/sdk/src/{client,signer,keypair,oauth,types,cose,errors,
+  index}.ts` — added explicit `@param`, `@returns`, `@throws` lines on
+  the methods that previously had only narrative comments
+  (`MnemonicClient.{whoami, signMemory, recall, verify, proveIdentity,
+  setJwt, setKeypair}`, `LocalSigner.sign`, `coseSignPayload`,
+  `Keypair.{generate, fromJSON, fromBackupString, toBackupString}`, every
+  OAuth public function and session helper, `redactJWT`, all five error
+  classes). Removed three `{@link …}` references to non-exported OAuth
+  internals (`JWT_ALLOWED_ALGS`, `setSession`/`getSession`/`deleteSession`,
+  `PENDING_SESSION_TTL_MS`) that produced typedoc warnings. Added a
+  "Programmatic access" section to the repo-root `README.md` after MCP
+  tools, with one paragraph + two links and the OAuth/COSE substrate
+  shared-with-Cursor/VS Code/Claude.ai blurb.
+
+- **Verification:**
+  - `npx typedoc packages/sdk/src/index.ts --emit none` → exit 0,
+    **0 errors / 0 warnings**.
+  - `cd packages/sdk && npx tsc -p . --noEmit` → clean.
+  - `cd packages/cli && npx tsc -p . --noEmit` → clean.
+  - `cd packages/sdk && npx vitest run` → **12 files / 120 tests pass**
+    (no regressions from JSDoc changes).
+  - CLI synopses cross-checked against `node packages/cli/dist/bin/mnemonic.js
+    <cmd> --help` for each of init / login / sign / recall / verify /
+    whoami / prove / identity / identity import / identity export —
+    every option flag and argument shape in the README matches the
+    actual help output.
+
+- **Concerns / follow-ups:**
+  1. The runtime-targets table omits a Cloudflare Workers row; revisit
+     when `workerd` exposes an automated test runner (deferred from
+     Task 1, listed in backlog).
+  2. SMOKE.md step 1 references a `0.0.x` semver — the actual published
+     version comes from `packages/cli/package.json` at publish time
+     (currently still `0.0.0` because the workspace is `private: true`
+     until Task 14 flips publication).
+  3. JSDoc `@example` blocks were not added to every method (task spec
+     mentioned them but they bloat the surface). The README quick-start
+     covers the canonical flow; per-method examples can be added in a
+     follow-up if typedoc-rendered HTML is published.
+  4. No tests asserted as part of this task — documentation is verified
+     visually plus by typedoc's missing-doc gate. Existing SDK / CLI
+     tests are unchanged and still pass.

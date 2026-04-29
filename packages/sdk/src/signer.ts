@@ -44,9 +44,15 @@ export class LocalSigner implements SignerInterface {
   /**
    * Produce a 64-byte raw Ed25519 signature over `bytes`.
    *
-   * Empty input is rejected up front — `sign_challenge` would happily sign
-   * a zero-length challenge, but the contract suite requires the empty
-   * case throw, since signing `b""` is almost always a caller bug.
+   * Empty input is rejected up front — `sign_challenge` would happily
+   * sign a zero-length challenge, but the contract suite requires the
+   * empty case to throw, since signing `b""` is almost always a caller
+   * bug.
+   *
+   * @param bytes - Non-empty payload to sign.
+   * @returns The 64-byte raw Ed25519 signature.
+   * @throws `UserError` on empty / non-`Uint8Array` input or any WASM
+   *         failure (re-thrown with redacted message).
    */
   async sign(bytes: Uint8Array): Promise<Uint8Array> {
     if (!(bytes instanceof Uint8Array)) {

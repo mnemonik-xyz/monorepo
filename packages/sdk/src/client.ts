@@ -77,14 +77,24 @@ export class MnemonicClient {
     this.fetchImpl = config.fetch ?? globalThis.fetch.bind(globalThis);
   }
 
-  /** Set or replace the JWT after construction (e.g. after OAuth login). */
+  /**
+   * Set or replace the JWT after construction (e.g. after the OAuth login
+   * flow finishes). Pass `undefined` to detach the current token.
+   *
+   * @param jwt - HS256-signed bearer token, or `undefined` to clear.
+   * @returns void.
+   */
   setJwt(jwt: string | undefined): void {
     this.jwt = jwt;
   }
 
   /**
    * Bind a `Keypair` so that `signMemory` can produce the COSE envelope.
-   * Required only for sign flows; recall/verify/whoami/prove do not need it.
+   * Required only for sign flows; `recall`, `verify`, `whoami`, and
+   * `proveIdentity` do not need it.
+   *
+   * @param keypair - The local Ed25519 keypair to bind.
+   * @returns void.
    */
   setKeypair(keypair: Keypair): void {
     this.keypairJson = keypair.toJSON();
@@ -95,8 +105,15 @@ export class MnemonicClient {
   // ------------------------------------------------------------------------
 
   /**
-   * Server-side `mnemonic_whoami`. Returns the **server's** identity, NOT
-   * the user's (Decision 14 — CLI implements its own whoami client-side).
+   * Call the server's `mnemonic_whoami` MCP tool.
+   *
+   * Returns the **server's** identity (its Ed25519 pubkey + DID), NOT the
+   * caller's. Per Decision 14 the CLI implements its own client-side
+   * `whoami` instead of calling this; SDK consumers may still find it
+   * useful for a generic server-pubkey check.
+   *
+   * @returns The decoded `WhoamiResult` plus the raw server payload.
+   * @throws `AuthError` on 401/403, `ServerError` on 5xx / network failure.
    */
   async whoami(): Promise<WhoamiResult> {
     const result = await this.callTool("mnemonic_whoami", {});
@@ -113,13 +130,29 @@ export class MnemonicClient {
   }
 
   /**
-   * Sign a memory. Always uses the pending-bundle / sign-callback flow.
+   * Sign a memory. Always uses the deferred pending-bundle / sign-callback
+   * flow:
    *
-   * Throws `UserError` if no keypair is bound (call `setKeypair` first).
-   * Throws `AuthError` on 401, `ServerError` on 5xx / network failure,
-   * `IntegrityError` if the server's content_hash header disagrees with
-   * the COSE envelope after signing (defense-in-depth: the server
-   * re-verifies, but failing fast here gives a better error).
+   * 1. `POST /mcp tools/call mnemonic_sign_memory` returns a `correlation_id`.
+   * 2. `GET /api/pending/{correlation_id}` fetches the canonical-CBOR bytes
+   *    (verbatim — never re-encoded in JS).
+   * 3. `coseSignPayload(cbor, keypair)` wraps in COSE_Sign1 locally.
+   * 4. `POST /api/sign-callback` (no Bearer JWT — capability auth via
+   *    `correlation_id` + `signer_pubkey` + signature chain) returns
+   *    `attestation_id`.
+   *
+   * @param content - Non-empty UTF-8 string to sign.
+   * @param opts    - Optional tags array (forwarded to the server verbatim).
+   * @returns The `attestation_id`, server-issued `signed_at`, the terminal
+   *          `status` (`signed` / `pending` / `anchored`), and any optional
+   *          `arweave_tx` / `solana_tx` / `content_hash` echoes.
+   * @throws `UserError` if `content` is empty or no keypair is bound (call
+   *         {@link setKeypair} first).
+   * @throws `AuthError` on 401 / 403 from `/mcp` or the sign-callback.
+   * @throws `ServerError` on 5xx, network failure, or malformed JSON.
+   * @throws `IntegrityError` if the sign-callback omits `attestation_id`
+   *         (defence-in-depth — the server re-verifies, but failing fast
+   *         here gives a better error).
    */
   async signMemory(
     content: string,
@@ -241,7 +274,14 @@ export class MnemonicClient {
     };
   }
 
-  /** Server-side `mnemonic_recall`. */
+  /**
+   * Call the server's `mnemonic_recall` MCP tool.
+   *
+   * @param query - Query string used for semantic search.
+   * @param opts  - Optional `topK` (default server-side) and `tags` filter.
+   * @returns A `RecallResult` with normalised `hits` and a `total` count.
+   * @throws `AuthError` on 401/403, `ServerError` on 5xx / network failure.
+   */
   async recall(
     query: string,
     opts: { topK?: number; tags?: string[] } = {}
@@ -270,7 +310,17 @@ export class MnemonicClient {
     return { hits, total };
   }
 
-  /** Server-side `mnemonic_verify`. */
+  /**
+   * Call the server's `mnemonic_verify` MCP tool.
+   *
+   * @param attestationId - Non-empty attestation identifier returned by a
+   *                        prior `signMemory` call.
+   * @returns A discriminated union: `verified` (with `signer` + optional
+   *          `arweave_tx` / `solana_tx`), `tampered` (with `signer` +
+   *          `reason`), or `not_found`.
+   * @throws `UserError` if `attestationId` is empty / non-string.
+   * @throws `AuthError` on 401/403, `ServerError` on 5xx / network failure.
+   */
   async verify(attestationId: string): Promise<VerifyResult> {
     if (!attestationId || typeof attestationId !== "string") {
       throw new UserError("verify: attestationId must be a non-empty string");
@@ -299,7 +349,18 @@ export class MnemonicClient {
     return { status: "not_found" };
   }
 
-  /** Server-side `mnemonic_prove_identity`. (Not used by CLI — Decision 14.) */
+  /**
+   * Call the server's `mnemonic_prove_identity` MCP tool — the **server**
+   * signs the supplied challenge with its own keypair. Not used by the
+   * CLI (Decision 14 — `mnemonic prove` signs locally instead) but
+   * exposed for SDK consumers.
+   *
+   * @param challenge - Non-empty hex / base58 challenge string.
+   * @returns `{pubkey, challenge, signature}` plus optional `did` and the
+   *          raw server payload.
+   * @throws `UserError` if `challenge` is empty / non-string.
+   * @throws `AuthError` on 401/403, `ServerError` on 5xx / network failure.
+   */
   async proveIdentity(challenge: string): Promise<ProveResult> {
     if (!challenge || typeof challenge !== "string") {
       throw new UserError(

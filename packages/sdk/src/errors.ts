@@ -27,11 +27,17 @@ const JWT_RE = /eyJ[A-Za-z0-9_-]{20,}/g;
 const HEX_SECRET_RE = /\b[0-9a-fA-F]{128}\b/g;
 
 /**
- * Replace JWT-shaped runs and 128-hex secret runs with `[REDACTED-JWT]` /
- * `[REDACTED-SECRET]`.
+ * Replace JWT-shaped runs and 128-hex secret runs in a string with
+ * `[REDACTED-JWT]` / `[REDACTED-SECRET]` placeholders.
  *
  * Idempotent: running it twice on the same string produces the same output.
  * Safe on `undefined` / `null` — coerced to empty string.
+ *
+ * @param input - Arbitrary value; non-string inputs are coerced via
+ *                `String(...)` before redaction. `null` / `undefined`
+ *                map to the empty string.
+ * @returns The input with all JWT-shaped substrings and 128-hex-char
+ *          secret runs replaced.
  */
 export function redactJWT(input: unknown): string {
   if (input === undefined || input === null) return "";
@@ -41,7 +47,15 @@ export function redactJWT(input: unknown): string {
     .replace(HEX_SECRET_RE, "[REDACTED-SECRET]");
 }
 
-/** Base class. All SDK errors extend this so consumers can `instanceof`-check. */
+/**
+ * Base class for every error thrown by the SDK. Consumers can
+ * `instanceof MnemonicError` to catch any SDK-originated failure.
+ *
+ * @param message - Human-readable message; runs through {@link redactJWT}
+ *                  before being stored on the `Error`.
+ * @param cause   - Optional underlying cause (Error or any value). Not
+ *                  redacted — developer-facing diagnostic chain only.
+ */
 export class MnemonicError extends Error {
   readonly cause?: unknown;
   constructor(message: string, cause?: unknown) {
@@ -51,7 +65,13 @@ export class MnemonicError extends Error {
   }
 }
 
-/** 401 / 403 from server, missing/expired JWT, signer mismatch, etc. */
+/**
+ * Thrown for 401 / 403, missing or expired JWT, signer mismatch, OAuth
+ * state / redirect_uri mismatch. Maps to CLI exit code `4`.
+ *
+ * @param message - Human-readable message (will be JWT-redacted).
+ * @param cause   - Optional underlying cause.
+ */
 export class AuthError extends MnemonicError {
   constructor(message: string, cause?: unknown) {
     super(message, cause);
@@ -59,7 +79,14 @@ export class AuthError extends MnemonicError {
   }
 }
 
-/** 5xx, network failure, malformed JSON, etc. */
+/**
+ * Thrown for 5xx responses, network failures, and malformed server
+ * payloads. Maps to CLI exit code `2`.
+ *
+ * @param message - Human-readable message (will be JWT-redacted).
+ * @param status  - Optional HTTP status code from the failing response.
+ * @param cause   - Optional underlying cause.
+ */
 export class ServerError extends MnemonicError {
   readonly status?: number;
   constructor(message: string, status?: number, cause?: unknown) {
@@ -69,7 +96,14 @@ export class ServerError extends MnemonicError {
   }
 }
 
-/** Verification mismatch: COSE bytes don't match the server's content_hash. */
+/**
+ * Thrown when a verification step fails — e.g. the COSE envelope's
+ * content_hash disagrees with what the server stored, or
+ * `verify(<id>)` returned `tampered`. Maps to CLI exit code `3`.
+ *
+ * @param message - Human-readable message (will be JWT-redacted).
+ * @param cause   - Optional underlying cause.
+ */
 export class IntegrityError extends MnemonicError {
   constructor(message: string, cause?: unknown) {
     super(message, cause);
@@ -77,7 +111,13 @@ export class IntegrityError extends MnemonicError {
   }
 }
 
-/** Caller-side bad input: empty content, malformed UUID, etc. */
+/**
+ * Thrown for caller-side bad input — empty content, malformed UUID,
+ * missing keypair before `signMemory`. Maps to CLI exit code `1`.
+ *
+ * @param message - Human-readable message (will be JWT-redacted).
+ * @param cause   - Optional underlying cause.
+ */
 export class UserError extends MnemonicError {
   constructor(message: string, cause?: unknown) {
     super(message, cause);
