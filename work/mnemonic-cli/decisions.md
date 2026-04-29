@@ -82,3 +82,62 @@ Append-only. Each entry: task, date, status, summary, verification, concerns.
 - Date: 2026-04-29
 - Fixed: CLI bin exit code 64 -> 1 (Decision 10 alignment); package.json `private: true` clarifying comments; SDK `engines.node >= 20`.
 - Deferred to backlog: build-script duplication, README polish, bun.lock policy, wasm-pack version pin.
+
+---
+
+## Task 3 — SDK OAuth primitives (PKCE + headless)
+
+- **Task:** 3
+- **Date:** 2026-04-29
+- **Status:** complete
+- **Summary:**
+  Implemented `packages/sdk/src/oauth.ts` with the OAuth 2.1 + PKCE primitives:
+  `generatePkceVerifier()` (32 random bytes -> base64url), `pkceChallenge()`
+  (`SHA-256(utf8(verifier))` via `crypto.subtle.digest`, base64url),
+  `randomState()`, `buildAuthorizeUrl({...})` returning `{url, state, verifier,
+  sessionId}` and storing the `{verifier, state, redirectUri, sessionId}`
+  tuple in a module-level `pendingAuthSessions` Map keyed by `sessionId`,
+  `exchangeCodeForToken({...})` enforcing Decision 5 binding (state +
+  redirect_uri match before any HTTP), and `parseJwtPayload()` extracting
+  `{sub, exp, iat}` with full validation (no signature check — server's job).
+  Pure ESM, Web APIs only — no `node:*` imports anywhere.
+
+- **Verification:**
+  - `bun test test/oauth.test.ts` -> **29 pass / 0 fail / 95 expect() calls**.
+  - `npx vitest run test/oauth.test.ts` -> 29/29 pass under vitest.
+  - `npx tsc -p packages/sdk --noEmit` -> clean.
+  - `grep -n 'node:' packages/sdk/src/oauth.ts` -> empty.
+  - **Coverage** (vitest v8 against `src/oauth.ts`): **96.61% statements,
+    96.15% branches, 100% functions, 96.61% lines** — comfortably above the
+    85% / 80% gate. Uncovered: UUID-v4 fallback (only fires when
+    `crypto.randomUUID` is missing) and one already-functionally-covered
+    branch in `parseJwtPayload`.
+  - RFC 7636 Appendix B fixture asserted byte-for-byte
+    (`dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk` ->
+    `E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM`).
+  - State-mismatch and redirect_uri-mismatch tests assert `fetch` is
+    NOT called (Decision 5 enforcement — pre-HTTP rejection).
+  - Session cleared on success (second call same `sessionId` throws
+    session-not-found AuthError).
+
+- **Concerns / follow-ups:**
+  - **T2 status:** T2 already landed `errors.ts` (with `AuthError` accepting
+    `(message, cause?)` positional, NOT options-bag) and updated `index.ts`
+    in parallel, including the OAuth re-exports as `./oauth.js`. Both T2 and
+    T3 changes are reconciled — `oauth.ts` imports `./errors.js`, tests
+    import `../src/errors.js`, and the index.ts barrel re-exports the full
+    OAuth surface. No integration risk remaining.
+  - **Server contract assumption:** the SDK accepts response shape
+    `{jwt, expires_at}` from `POST /oauth/token`. If T6 changes the server
+    response shape, this needs to change too. Falls back to a synthetic
+    `expiresAt` (`now + 1h` ISO string) when `expires_at` is omitted.
+  - **`client_id` is hardcoded** to `"mnemonic-cli"` in
+    `exchangeCodeForToken`. Per task spec — Chrome extension / other hosts
+    that need a different client_id can add a parameter later (backlog).
+  - **JWT validation is intentionally minimal:** parses payload only,
+    does NOT verify the HS256 signature (server is the authority). Throws
+    on missing `sub`/`exp`/`iat`, malformed JSON, or `exp <= now`.
+  - **Bun-vs-vitest fetch mocking:** used `globalThis.fetch = mock` instead
+    of `vi.stubGlobal` (which bun's compat shim doesn't expose) so the same
+    test file passes under both runners. Cross-runtime CI matrix (Node 20 /
+    Node 22 / Bun / Deno per Decision 11) should pick this up cleanly.
