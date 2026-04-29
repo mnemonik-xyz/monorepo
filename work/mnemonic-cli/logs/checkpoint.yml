@@ -1,15 +1,15 @@
 feature: mnemonic-cli
 total_waves: 7
-last_completed_wave: 1
-next_wave: 2
+last_completed_wave: 2
+next_wave: 3
 team_name: mnemonic-cli-team
 tasks:
   "1": done
-  "2": planned
-  "3": planned
+  "2": done
+  "3": done
   "4": planned
   "5": planned
-  "6": planned
+  "6": done
   "7": planned
   "8": planned
   "9": planned
