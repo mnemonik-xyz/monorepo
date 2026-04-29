@@ -251,3 +251,8 @@ Append-only. Each entry: task, date, status, summary, verification, concerns.
      LRU always evicts an older entry instead). Variant retained as
      documented dead code so future LRU changes can surface 503 without an
      API break.
+
+### Task 3 — Round 2 fixes
+- Date: 2026-04-29
+- Fixed: parseJwtPayload now enforces alg=HS256 (rejects none/RS256/missing); pendingAuthSessions has 10min TTL + 100-entry FIFO cap; malformed base64 throws AuthError not DOMException; null/non-object JWT payloads covered.
+- Deferred to backlog: clientId asymmetry, cause-chain redaction, response-body discarded, micro-perf nits.

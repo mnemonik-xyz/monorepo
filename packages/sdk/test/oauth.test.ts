@@ -9,10 +9,14 @@ import {
   buildAuthorizeUrl,
   exchangeCodeForToken,
   generatePkceVerifier,
+  getSession,
   parseJwtPayload,
+  PENDING_SESSION_MAX,
+  PENDING_SESSION_TTL_MS,
   pendingAuthSessions,
   pkceChallenge,
   randomState,
+  setSession,
 } from "../src/oauth.js";
 import { AuthError } from "../src/errors.js";
 
@@ -27,10 +31,13 @@ function base64UrlEncode(input: string | Uint8Array): string {
 }
 
 /** Minimal JWT builder for tests — header/payload only, signature is dummy. */
-function makeJwt(payload: Record<string, unknown>): string {
-  const header = base64UrlEncode(JSON.stringify({ alg: "HS256", typ: "JWT" }));
+function makeJwt(
+  payload: Record<string, unknown>,
+  header: Record<string, unknown> = { alg: "HS256", typ: "JWT" }
+): string {
+  const h = base64UrlEncode(JSON.stringify(header));
   const body = base64UrlEncode(JSON.stringify(payload));
-  return `${header}.${body}.signature`;
+  return `${h}.${body}.signature`;
 }
 
 const ORIGINAL_FETCH = globalThis.fetch;
@@ -510,8 +517,188 @@ describe("parseJwtPayload", () => {
     );
     const arrPayload = base64UrlEncode(JSON.stringify([1, 2, 3]));
     const jwt = `${header}.${arrPayload}.sig`;
-    // JSON arrays parse as objects via typeof but should still fail on missing
-    // sub claim — exercises the post-JSON-parse validation chain.
+    // Array.isArray guard rejects this before the missing-sub check fires.
+    expect(() => parseJwtPayload(jwt)).toThrow(/payload is not an object/);
+  });
+
+  // ── header alg whitelist (Decision 6, security defence-in-depth) ─────────
+
+  it("rejects alg=none (security)", () => {
+    const now = Math.floor(Date.now() / 1000);
+    const jwt = makeJwt(
+      { sub: "abc", exp: now + 3600, iat: now },
+      { alg: "none", typ: "JWT" }
+    );
     expect(() => parseJwtPayload(jwt)).toThrow(AuthError);
+    expect(() => parseJwtPayload(jwt)).toThrow(/alg must be HS256, got: none/);
+  });
+
+  it("rejects alg=RS256 (non-whitelisted algorithm)", () => {
+    const now = Math.floor(Date.now() / 1000);
+    const jwt = makeJwt(
+      { sub: "abc", exp: now + 3600, iat: now },
+      { alg: "RS256", typ: "JWT" }
+    );
+    expect(() => parseJwtPayload(jwt)).toThrow(/alg must be HS256, got: RS256/);
+  });
+
+  it("rejects header missing alg", () => {
+    const now = Math.floor(Date.now() / 1000);
+    const jwt = makeJwt(
+      { sub: "abc", exp: now + 3600, iat: now },
+      { typ: "JWT" }
+    );
+    expect(() => parseJwtPayload(jwt)).toThrow(/header missing `alg`/);
+  });
+
+  it("rejects header that is JSON but not an object (array)", () => {
+    const headerSeg = base64UrlEncode(JSON.stringify(["HS256"]));
+    const bodySeg = base64UrlEncode(
+      JSON.stringify({
+        sub: "abc",
+        exp: Math.floor(Date.now() / 1000) + 3600,
+        iat: Math.floor(Date.now() / 1000),
+      })
+    );
+    const jwt = `${headerSeg}.${bodySeg}.sig`;
+    expect(() => parseJwtPayload(jwt)).toThrow(/header is not an object/);
+  });
+
+  // ── malformed base64 → AuthError, not DOMException (F8) ──────────────────
+
+  it("throws AuthError (not DOMException) on payload with invalid base64url chars", () => {
+    const headerSeg = base64UrlEncode(
+      JSON.stringify({ alg: "HS256", typ: "JWT" })
+    );
+    // '!@#$' are outside the base64url alphabet → atob throws DOMException.
+    const jwt = `${headerSeg}.!@#$.sig`;
+    let thrown: unknown;
+    try {
+      parseJwtPayload(jwt);
+    } catch (e) {
+      thrown = e;
+    }
+    expect(thrown).toBeInstanceOf(AuthError);
+    // Pin the class name explicitly — guards against a future change that
+    // accidentally lets the raw DOMException leak.
+    expect((thrown as Error).name).toBe("AuthError");
+  });
+
+  it("throws AuthError on header with invalid base64url chars", () => {
+    const bodySeg = base64UrlEncode(
+      JSON.stringify({
+        sub: "abc",
+        exp: Math.floor(Date.now() / 1000) + 3600,
+        iat: Math.floor(Date.now() / 1000),
+      })
+    );
+    const jwt = `%%%.${bodySeg}.sig`;
+    let thrown: unknown;
+    try {
+      parseJwtPayload(jwt);
+    } catch (e) {
+      thrown = e;
+    }
+    expect(thrown).toBeInstanceOf(AuthError);
+  });
+
+  // ── F9: close coverage of !json / typeof !== "object" branches ───────────
+
+  it.each([
+    ["null", "null"],
+    ["number", "42"],
+    ["string", '"hello"'],
+  ])("throws when payload JSON is %s (not an object)", (_label, jsonText) => {
+    const headerSeg = base64UrlEncode(
+      JSON.stringify({ alg: "HS256", typ: "JWT" })
+    );
+    const bodySeg = base64UrlEncode(jsonText);
+    const jwt = `${headerSeg}.${bodySeg}.sig`;
+    expect(() => parseJwtPayload(jwt)).toThrow(AuthError);
+  });
+});
+
+// ── pendingAuthSessions TTL + size cap (C1) ─────────────────────────────────
+
+describe("pendingAuthSessions TTL + size cap", () => {
+  // We avoid `vi.useFakeTimers()` / `vi.setSystemTime` because the bun-vitest
+  // compatibility shim doesn't implement `setSystemTime`. Spying on Date.now
+  // directly is portable across both runners and is sufficient for TTL math.
+  // `withMockedNow` is async-aware: the spy stays installed until `fn`'s
+  // returned promise settles (otherwise the `finally` would restore Date.now
+  // before any awaited continuation runs).
+  async function withMockedNow<T>(
+    fn: (advance: (ms: number) => void) => T | Promise<T>
+  ): Promise<T> {
+    let current = 1_700_000_000_000; // arbitrary fixed epoch
+    const spy = vi.spyOn(Date, "now").mockImplementation(() => current);
+    try {
+      return await fn((ms) => {
+        current += ms;
+      });
+    } finally {
+      spy.mockRestore();
+    }
+  }
+
+  it("getSession returns undefined for expired entry and evicts it", async () => {
+    await withMockedNow((advance) => {
+      setSession("s-1", {
+        verifier: "v",
+        state: "st",
+        redirectUri: "http://127.0.0.1:1/cb",
+        sessionId: "s-1",
+        createdAt: Date.now(),
+      });
+
+      // Within TTL — still present.
+      advance(PENDING_SESSION_TTL_MS - 1000);
+      expect(getSession("s-1")).toBeDefined();
+
+      // Past TTL — gone, and the underlying map no longer holds it.
+      advance(2000);
+      expect(getSession("s-1")).toBeUndefined();
+      expect(pendingAuthSessions.has("s-1")).toBe(false);
+    });
+  });
+
+  it("setSession evicts the oldest entry when the cap is exceeded (FIFO)", () => {
+    // Fill to the cap.
+    for (let i = 0; i < PENDING_SESSION_MAX; i++) {
+      setSession(`id-${i}`, {
+        verifier: "v",
+        state: "st",
+        redirectUri: "http://127.0.0.1:1/cb",
+        sessionId: `id-${i}`,
+        createdAt: Date.now(),
+      });
+    }
+    expect(pendingAuthSessions.size).toBe(PENDING_SESSION_MAX);
+    expect(pendingAuthSessions.has("id-0")).toBe(true);
+
+    // Inserting one more evicts the oldest (FIFO = first insertion).
+    setSession("id-extra", {
+      verifier: "v",
+      state: "st",
+      redirectUri: "http://127.0.0.1:1/cb",
+      sessionId: "id-extra",
+      createdAt: Date.now(),
+    });
+    expect(pendingAuthSessions.size).toBe(PENDING_SESSION_MAX);
+    expect(pendingAuthSessions.has("id-0")).toBe(false);
+    expect(pendingAuthSessions.has("id-extra")).toBe(true);
+  });
+
+  it("buildAuthorizeUrl-stored session expires after TTL (integration)", async () => {
+    await withMockedNow(async (advance) => {
+      const seeded = await buildAuthorizeUrl({
+        baseUrl: "https://mc.mnemonik.xyz",
+        clientId: "mnemonic-cli",
+        redirectUri: "http://127.0.0.1:1/cb",
+      });
+      expect(getSession(seeded.sessionId)).toBeDefined();
+      advance(PENDING_SESSION_TTL_MS + 1);
+      expect(getSession(seeded.sessionId)).toBeUndefined();
+    });
   });
 });

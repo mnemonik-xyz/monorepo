@@ -20,11 +20,86 @@ export interface PendingAuthSession {
   state: string;
   redirectUri: string;
   sessionId: string;
+  /** Wall-clock millisecond timestamp at which this session was inserted.
+   *  Used to enforce {@link PENDING_SESSION_TTL_MS}. */
+  createdAt: number;
 }
 
-/** In-memory map of pending auth sessions. Caller manages the lifecycle by
- *  passing `sessionId` back to {@link exchangeCodeForToken}. */
+/**
+ * Maximum age of a pending auth session, in milliseconds. Sessions older
+ * than this are dropped on access (and on insert-time pruning). Set to
+ * 10 minutes — long enough for a slow human to drive a browser through
+ * the IdP, short enough that abandoned flows don't accumulate.
+ *
+ * The exact value is not mandated by tech-spec; chosen to mirror the
+ * typical server-side PKCE `code` TTL (RFC 7636 §6.1 implementation note).
+ */
+export const PENDING_SESSION_TTL_MS = 10 * 60 * 1000;
+
+/**
+ * Maximum number of concurrent pending auth sessions. When the cap is hit,
+ * a new insert evicts the oldest entry (FIFO). Chosen as 100 — far above
+ * any realistic concurrent-flow count, far below the threshold at which
+ * unbounded growth becomes a memory-pressure problem in long-lived hosts
+ * (Chrome extensions, agent frameworks).
+ */
+export const PENDING_SESSION_MAX = 100;
+
+/**
+ * In-memory map of pending auth sessions, keyed by `sessionId` (UUIDv4).
+ *
+ * IMPORTANT: callers should prefer the {@link setSession} / {@link getSession}
+ * / {@link deleteSession} helpers which enforce the TTL + size cap. Direct
+ * mutation of this Map bypasses those guards and is reserved for tests.
+ *
+ * Caller manages the OAuth lifecycle by passing `sessionId` back to
+ * {@link exchangeCodeForToken}.
+ */
 export const pendingAuthSessions = new Map<string, PendingAuthSession>();
+
+/** Drop entries older than {@link PENDING_SESSION_TTL_MS}. O(n). */
+function pruneExpiredSessions(now: number): void {
+  for (const [id, entry] of pendingAuthSessions) {
+    if (now - entry.createdAt >= PENDING_SESSION_TTL_MS) {
+      pendingAuthSessions.delete(id);
+    }
+  }
+}
+
+/**
+ * Insert a session, enforcing TTL pruning + FIFO eviction at the size cap.
+ * Map iteration order is insertion order (ECMA-262 §24.1.3.6) so the first
+ * key returned by `keys()` is the oldest entry.
+ */
+export function setSession(id: string, value: PendingAuthSession): void {
+  const now = Date.now();
+  pruneExpiredSessions(now);
+  while (pendingAuthSessions.size >= PENDING_SESSION_MAX) {
+    const oldest = pendingAuthSessions.keys().next();
+    if (oldest.done) break;
+    pendingAuthSessions.delete(oldest.value);
+  }
+  pendingAuthSessions.set(id, value);
+}
+
+/**
+ * Look up a session, enforcing TTL on read. Returns `undefined` if the
+ * session is missing OR expired (in which case it is also evicted).
+ */
+export function getSession(id: string): PendingAuthSession | undefined {
+  const entry = pendingAuthSessions.get(id);
+  if (!entry) return undefined;
+  if (Date.now() - entry.createdAt >= PENDING_SESSION_TTL_MS) {
+    pendingAuthSessions.delete(id);
+    return undefined;
+  }
+  return entry;
+}
+
+/** Remove a session by id. */
+export function deleteSession(id: string): boolean {
+  return pendingAuthSessions.delete(id);
+}
 
 // ── helpers ─────────────────────────────────────────────────────────────────
 
@@ -147,11 +222,12 @@ export async function buildAuthorizeUrl(
   url.searchParams.set("state", state);
   url.searchParams.set("scope", scope);
 
-  pendingAuthSessions.set(sessionId, {
+  setSession(sessionId, {
     verifier,
     state,
     redirectUri,
     sessionId,
+    createdAt: Date.now(),
   });
 
   return {
@@ -189,7 +265,7 @@ export async function exchangeCodeForToken(
 ): Promise<ExchangeCodeForTokenResult> {
   const { baseUrl, code, state, redirectUri, sessionId } = input;
 
-  const session = pendingAuthSessions.get(sessionId);
+  const session = getSession(sessionId);
   if (!session) {
     throw new AuthError("oauth: session not found or already consumed");
   }
@@ -197,11 +273,11 @@ export async function exchangeCodeForToken(
   // Validate state + redirectUri match the originally-issued tuple BEFORE
   // any HTTP call — a mismatch is fatal and consumes the session.
   if (session.state !== state) {
-    pendingAuthSessions.delete(sessionId);
+    deleteSession(sessionId);
     throw new AuthError("oauth: state mismatch");
   }
   if (session.redirectUri !== redirectUri) {
-    pendingAuthSessions.delete(sessionId);
+    deleteSession(sessionId);
     throw new AuthError("oauth: redirect_uri mismatch");
   }
 
@@ -226,7 +302,7 @@ export async function exchangeCodeForToken(
   }
 
   if (!response.ok) {
-    pendingAuthSessions.delete(sessionId);
+    deleteSession(sessionId);
     throw new AuthError(`oauth: token endpoint returned ${response.status}`);
   }
 
@@ -234,7 +310,7 @@ export async function exchangeCodeForToken(
   try {
     body = await response.json();
   } catch (cause) {
-    pendingAuthSessions.delete(sessionId);
+    deleteSession(sessionId);
     throw new AuthError("oauth: token endpoint returned non-JSON body", cause);
   }
 
@@ -245,7 +321,7 @@ export async function exchangeCodeForToken(
     typeof body !== "object" ||
     typeof (body as { jwt?: unknown }).jwt !== "string"
   ) {
-    pendingAuthSessions.delete(sessionId);
+    deleteSession(sessionId);
     throw new AuthError("oauth: token endpoint returned malformed body");
   }
 
@@ -256,7 +332,7 @@ export async function exchangeCodeForToken(
       ? expiresAtRaw
       : new Date(Date.now() + 3600 * 1000).toISOString();
 
-  pendingAuthSessions.delete(sessionId);
+  deleteSession(sessionId);
   return { jwt, expiresAt };
 }
 
@@ -268,16 +344,39 @@ export interface JwtPayload {
   iat: number;
 }
 
-/** Decode a base64url-encoded segment to UTF-8 string. */
+/**
+ * Decode a base64url-encoded segment to UTF-8 string. Wraps the underlying
+ * `atob` call so that an invalid base64url alphabet surfaces as a plain
+ * `Error` rather than leaking a host-specific `DOMException` /
+ * `InvalidCharacterError` to the caller.
+ */
 function decodeBase64UrlToString(seg: string): string {
   const padded =
     seg.replace(/-/g, "+").replace(/_/g, "/") +
     "===".slice((seg.length + 3) % 4);
-  const bin = atob(padded);
+  let bin: string;
+  try {
+    bin = atob(padded);
+  } catch (cause) {
+    // atob throws DOMException("InvalidCharacterError") on out-of-alphabet
+    // input. Rethrow as a plain Error so the caller's catch can wrap it
+    // into a redacted AuthError without exposing host-specific exception
+    // types to consumers.
+    throw new Error("base64url: invalid character in segment", { cause });
+  }
   const bytes = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
   return new TextDecoder("utf-8").decode(bytes);
 }
+
+/**
+ * Acceptable JWT `alg` header values for {@link parseJwtPayload}. Per
+ * Decision 6 the server signs tokens with HS256; defence-in-depth at the
+ * SDK boundary rejects `none` and any non-whitelisted algorithm so that a
+ * spoofed or downgraded token never reaches host code (Chrome ext, agent
+ * framework, CLI) without explicit opt-in.
+ */
+const JWT_ALLOWED_ALGS = new Set(["HS256"]);
 
 /**
  * Parse a JWT's payload without verifying its signature (server is the
@@ -285,8 +384,13 @@ function decodeBase64UrlToString(seg: string): string {
  * headless flow to surface obvious problems (missing claims, expired)
  * before persisting the token to disk.
  *
- * Throws {@link AuthError} for malformed tokens, missing required claims,
- * or `exp` strictly in the past.
+ * The header is decoded too, and `alg` is asserted against
+ * {@link JWT_ALLOWED_ALGS} (currently `HS256` only — Decision 6). Tokens
+ * signed with `alg=none`, `alg=RS256`, or any other algorithm are rejected
+ * even though signature verification itself is server-side.
+ *
+ * Throws {@link AuthError} for malformed tokens, disallowed `alg`, missing
+ * required claims, or `exp` strictly in the past.
  */
 export function parseJwtPayload(jwt: string): JwtPayload {
   if (typeof jwt !== "string" || jwt.length === 0) {
@@ -296,13 +400,33 @@ export function parseJwtPayload(jwt: string): JwtPayload {
   if (parts.length !== 3) {
     throw new AuthError("jwt: malformed (expected 3 segments)");
   }
+
+  // Header — assert alg whitelist before touching the payload.
+  let header: unknown;
+  try {
+    header = JSON.parse(decodeBase64UrlToString(parts[0]!));
+  } catch (cause) {
+    throw new AuthError("jwt: header is not valid JSON or base64url", cause);
+  }
+  if (!header || typeof header !== "object" || Array.isArray(header)) {
+    throw new AuthError("jwt: header is not an object");
+  }
+  const algRaw = (header as Record<string, unknown>).alg;
+  if (typeof algRaw !== "string") {
+    throw new AuthError("jwt: header missing `alg`");
+  }
+  if (!JWT_ALLOWED_ALGS.has(algRaw)) {
+    throw new AuthError(`jwt: alg must be HS256, got: ${algRaw}`);
+  }
+
+  // Payload — extract sub/exp/iat and validate freshness.
   let json: unknown;
   try {
     json = JSON.parse(decodeBase64UrlToString(parts[1]!));
   } catch (cause) {
-    throw new AuthError("jwt: payload is not valid JSON", cause);
+    throw new AuthError("jwt: payload is not valid JSON or base64url", cause);
   }
-  if (!json || typeof json !== "object") {
+  if (!json || typeof json !== "object" || Array.isArray(json)) {
     throw new AuthError("jwt: payload is not an object");
   }
   const obj = json as Record<string, unknown>;
