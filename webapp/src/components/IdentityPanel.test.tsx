@@ -39,6 +39,10 @@ describe("IdentityPanel", () => {
   afterEach(() => {
     localStorage.clear();
     vi.restoreAllMocks();
+    // `vi.restoreAllMocks` does NOT undo `vi.stubGlobal` — the fetch stub
+    // installed by individual tests would leak into the next test (which
+    // can flake test-order dependent suites). Explicitly unstub globals.
+    vi.unstubAllGlobals();
   });
 
   it("renders_did_after_generate", async () => {
@@ -119,12 +123,14 @@ describe("IdentityPanel", () => {
     expect(headers["Content-Type"]).toBe("application/json");
     const body = JSON.parse((init.body as string) ?? "{}");
     expect(typeof body.keypair_json).toBe("string");
-    // The webapp posts the raw localStorage value verbatim — server stores
-    // it without inspection (see api.rs::bootstrap_issue_handler).
-    const parsedKp = JSON.parse(body.keypair_json);
-    expect(parsedKp.pubkey_base58).toBe(
-      "FakePubKeyBase58Test1234567890ABCDEFG"
-    );
+    // Wire-shape contract: keypair_json must be a stringified bare
+    // 64-element JSON byte array — `bootstrap_redeem_handler` parses it
+    // as `Vec<u8>` (see mcp/src/api.rs:563). Posting the object form
+    // `{secret, pubkey_base58}` would 500 on redeem.
+    const innerKp = JSON.parse(body.keypair_json);
+    expect(Array.isArray(innerKp)).toBe(true);
+    expect(innerKp.length).toBe(64);
+    expect(innerKp.every((n: unknown) => typeof n === "number")).toBe(true);
 
     // Ticket is rendered inside the code block as the paste-command.
     const command = await screen.findByTestId("identity-cli-command");
@@ -205,6 +211,62 @@ describe("IdentityPanel", () => {
       expect(assign).toHaveBeenCalledWith("/oauth/consent");
     });
     // No ticket displayed on the redirect path.
+    expect(screen.queryByTestId("identity-cli-command")).toBeNull();
+  });
+
+  it("send_to_cli_5xx_shows_generic_error_with_server_message", async () => {
+    // Generic-error branch (test-reviewer F1). 500 with a server-provided
+    // `error` field should surface as `Could not issue ticket: <detail>`.
+    localStorage.setItem(
+      "mnemonic.identity",
+      JSON.stringify({
+        secret: Array.from({ length: 64 }, (_, i) => i % 256),
+        pubkey_base58: "FakePubKeyBase58Test1234567890ABCDEFG",
+      })
+    );
+    localStorage.setItem("mnemonic.jwt", "test-jwt-abc");
+
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(JSON.stringify({ error: "internal" }), {
+          status: 500,
+          headers: { "Content-Type": "application/json" },
+        })
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<IdentityPanel />);
+    fireEvent.click(screen.getByTestId("identity-send-to-cli"));
+
+    const errorMsg = await screen.findByTestId("identity-cli-error");
+    expect(errorMsg.textContent).toBe("Could not issue ticket: internal");
+    expect(screen.queryByTestId("identity-cli-command")).toBeNull();
+  });
+
+  it("send_to_cli_malformed_local_identity_shows_error_no_fetch", async () => {
+    // T7-CR-1 fix: the click handler must validate the localStorage shape
+    // before issuing the request. `readIdentity` only checks that `secret`
+    // is an array (so the button is enabled), but the issue handler must
+    // additionally enforce length=64 / numeric entries before posting.
+    // Wrong-length secret should produce an inline error and never `fetch`.
+    localStorage.setItem(
+      "mnemonic.identity",
+      JSON.stringify({
+        secret: Array.from({ length: 32 }, (_, i) => i),
+        pubkey_base58: "FakePubKeyBase58Test1234567890ABCDEFG",
+      })
+    );
+    localStorage.setItem("mnemonic.jwt", "test-jwt-abc");
+
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<IdentityPanel />);
+    fireEvent.click(screen.getByTestId("identity-send-to-cli"));
+
+    const errorMsg = await screen.findByTestId("identity-cli-error");
+    expect(errorMsg.textContent).toMatch(/Local identity is malformed/);
+    expect(fetchMock).not.toHaveBeenCalled();
     expect(screen.queryByTestId("identity-cli-command")).toBeNull();
   });
 });

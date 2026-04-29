@@ -533,3 +533,74 @@ Append-only. Each entry: task, date, status, summary, verification, concerns.
     0 fail.
   - `cargo test --features golden-fixtures -p mnemonic-core --test
     golden_fixtures` → 3 pass, 1 ignored (the gated `emit_fixtures`).
+
+---
+
+## Task 7 — review round 2 (CRITICAL wire-shape fix)
+
+- **Task:** 7
+- **Date:** 2026-04-28
+- **Status:** review-round-2
+- **Summary:**
+  Address `T7-CR-1` (critical) plus the two minor follow-ups (`T7-CR-2`,
+  test-reviewer F1). The round-1 implementation posted the entire
+  localStorage payload (`{secret: number[64], pubkey_base58: string}`) as
+  `keypair_json`, but the T6 redeem handler at
+  `mcp/src/api.rs:563` parses it as a flat byte array via
+  `serde_json::from_str::<Vec<u8>>(...)`. End-to-end the CLI could never
+  redeem a webapp-issued ticket — the call would 500 with `stored
+  keypair_json is not a JSON byte array`.
+
+  Fix: in `IdentityPanel.handleSendToCli`, parse the localStorage entry,
+  validate `parsed.secret` is exactly 64 numbers, and send
+  `JSON.stringify(parsed.secret)` as `keypair_json`. The server now sees
+  the bare 64-element array it already knows how to parse. Cross-validated
+  against `bootstrap_redeem_handler` — the new wire shape feeds straight
+  into `Vec<u8>::deserialize` and into the `bytes.len() != 64` guard
+  unchanged.
+
+- **Other fixes folded in:**
+  - `T7-CR-2`: `IdentityPanel.test.tsx::afterEach` now calls
+    `vi.unstubAllGlobals()` in addition to `vi.restoreAllMocks()` so the
+    `vi.stubGlobal('fetch', ...)` calls in individual tests cannot leak
+    across tests (vitest's `restoreAllMocks` does NOT undo `stubGlobal`).
+  - Test-reviewer F1: added `send_to_cli_5xx_shows_generic_error_with_server_message`
+    asserting the `Could not issue ticket: <detail>` branch when the server
+    returns 500 + `{error: "internal"}`.
+  - Added `send_to_cli_malformed_local_identity_shows_error_no_fetch` to
+    pin the new client-side validation: a wrong-length `secret` (32 bytes)
+    surfaces an inline error and never calls `fetch`.
+
+- **Skipped (per task brief):**
+  - T7-CR-3 (`MCP_BASE` constant duplication across three components) →
+    backlog refactor.
+  - T7-CR-4 (auto-expire transitions to `error` rather than `idle`) →
+    UX polish.
+  - T7-CR-5 (401 redirect drops the bootstrap intent) → design choice,
+    matches existing `Sign.tsx` / `Consent.tsx` behavior.
+
+- **TDD anchor update:**
+  `send_to_cli_calls_endpoint_and_displays_ticket` now asserts the wire
+  shape directly:
+
+  ```ts
+  const innerKp = JSON.parse(body.keypair_json);
+  expect(Array.isArray(innerKp)).toBe(true);
+  expect(innerKp.length).toBe(64);
+  expect(innerKp.every((n: unknown) => typeof n === "number")).toBe(true);
+  ```
+
+  This locks the contract symmetrical to the server's `Vec<u8>` parser —
+  any future regression that re-introduces the object-form payload will
+  fail this test before reaching live backends.
+
+- **Verification:**
+  - `cd webapp && npx vitest run src/components/IdentityPanel.test.tsx`
+    → 6/6 pass (was 4/4; +2 new cases).
+  - `cd webapp && npx tsc -b --noEmit` → clean.
+  - `cd webapp && npm run build` → succeeds (vite build + wasm rebuild).
+  - Cross-validated server side: re-read
+    `mcp/src/api.rs::bootstrap_redeem_handler`. `serde_json::from_str::<Vec<u8>>`
+    now succeeds against the new wire shape; `bytes.len() != 64` guard
+    remains the only post-parse check, and the 64-element array we send
+    satisfies it.

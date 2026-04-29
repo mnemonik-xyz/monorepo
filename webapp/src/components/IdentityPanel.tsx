@@ -152,6 +152,15 @@ export default function IdentityPanel() {
    * identity import --ticket <uuid>` command for the user to paste in their
    * terminal. On 401 we redirect to `/oauth/consent` to re-auth; on 429 we
    * surface the per-user cap message; other errors render inline.
+   *
+   * Wire-shape note: localStorage holds the rich object form
+   * `{secret: number[64], pubkey_base58: string}` (see `lib/storage.ts`),
+   * but the T6 redeem handler parses the stored `keypair_json` as a bare
+   * 64-byte JSON array — `serde_json::from_str::<Vec<u8>>(&keypair_json)`
+   * in `mcp/src/api.rs::bootstrap_redeem_handler`. We therefore extract
+   * `parsed.secret` and post that flat array (stringified) so the redeem
+   * round-trip succeeds end-to-end. Posting the object form verbatim would
+   * 500 on redeem with "stored keypair_json is not a JSON byte array".
    */
   const handleSendToCli = async () => {
     setCopied(false);
@@ -162,6 +171,36 @@ export default function IdentityPanel() {
       setCliState({
         kind: "error",
         message: "No identity to send. Generate or import one first.",
+      });
+      return;
+    }
+    // Parse the stored identity and extract the bare 64-byte secret. The
+    // server expects a flat JSON byte array (Solana on-disk convention), so
+    // we re-stringify just `parsed.secret` rather than the wrapping object.
+    let secretWire: string;
+    try {
+      const parsed = JSON.parse(stored) as unknown;
+      if (
+        !parsed ||
+        typeof parsed !== "object" ||
+        !("secret" in parsed) ||
+        !Array.isArray((parsed as { secret: unknown }).secret)
+      ) {
+        throw new Error("stored identity has no `secret` array");
+      }
+      const secret = (parsed as { secret: unknown[] }).secret;
+      if (secret.length !== 64 || !secret.every((n) => typeof n === "number")) {
+        throw new Error(
+          `stored secret must be exactly 64 numbers, got ${secret.length}`
+        );
+      }
+      secretWire = JSON.stringify(secret);
+    } catch (e) {
+      setCliState({
+        kind: "error",
+        message: `Local identity is malformed: ${formatError(
+          e
+        )}. Re-generate or re-import a keypair.`,
       });
       return;
     }
@@ -181,7 +220,7 @@ export default function IdentityPanel() {
           Authorization: `Bearer ${jwt}`,
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ keypair_json: stored }),
+        body: JSON.stringify({ keypair_json: secretWire }),
       });
 
       if (res.status === 401) {
