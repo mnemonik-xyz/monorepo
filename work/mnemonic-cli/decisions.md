@@ -152,3 +152,77 @@ Append-only. Each entry: task, date, status, summary, verification, concerns.
   - `wasm.ts` lines 31-46 (the real dynamic-import + `init()` path) remain uncovered by SDK unit tests by design. Task 4's golden-fixture test should hit them; if not, add a smoke test there.
   - `client.ts` line 81 (`setJwt`) is uncovered — minor. Could add a one-liner test if desired.
   - `errors.ts` lines 74-75 (`IntegrityError` constructor) currently uncovered — `signMemory` only throws `IntegrityError` when the callback omits `attestation_id`, which is hard to reach without a fragile mock. Could add later.
+
+---
+
+## Task 6 — Server OAuth allowlist + bootstrap-ticket endpoints
+
+- **Task:** 6
+- **Date:** 2026-04-29
+- **Status:** complete
+- **Summary:**
+  Added `oauth::allowed_redirect(uri, client_id) -> bool` (exact-match webapp,
+  exact-prefix Cursor / VS Code / Claude.ai, hand-rolled loopback regex gated
+  to `client_id == "mnemonic-cli"`) and wired it into `authorize_init_handler`
+  so non-allowlisted `redirect_uri` values are rejected with 400 BEFORE pending
+  state is stored. PKCE state map now binds `redirect_uri` alongside verifier
+  + state; `/oauth/token` validates the body's optional `redirect_uri` field
+  against the value bound at /authorize and rejects mismatches with 400 (RFC
+  6749 §4.1.3 / RFC 7636 §4.4). Added new `BootstrapTickets` LRU+TTL store
+  in `mcp/src/api.rs` modeled on `pending::PendingBundles` (LRU 100, TTL 600s,
+  per-`jwt_sub` cap 3, atomic remove-and-return), plus `POST /api/cli-bootstrap/issue`
+  (Bearer JWT'd, returns `{ticket_id}`) and `GET /api/cli-bootstrap/redeem/:ticket`
+  (UUID-as-capability, no auth, returns `{secret: number[64], pubkey_base58}`).
+  The redeem endpoint is added to the `bearer_auth_middleware` URI allowlist;
+  the issue endpoint runs through the same middleware so `Claims` is injected
+  via request extension. New field `McpState::bootstrap_tickets: Arc<BootstrapTickets>`
+  threaded through `main.rs`, `chat.rs` test scaffolding, `mcp.rs` test
+  scaffolding, `test_support.rs::mock_state`, and three integration test
+  fixtures (`pending_authz.rs`, `pending_expiry.rs`, `sign_callback.rs`).
+
+- **Verification:**
+
+  ```
+  cargo test -p mnemonic-mcp --lib --features local-embed -- oauth_ bootstrap_
+  test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 106 filtered out
+  ```
+
+  Build / lint gates clean:
+
+  - `cargo build -p mnemonic-mcp --release --features local-embed` → success.
+  - `cargo clippy -p mnemonic-mcp --all-targets --features local-embed,test-support -- -D warnings` → clean.
+  - `cargo fmt -p mnemonic-mcp -- --check` → clean.
+
+  Full lib suite: 110 passed / 9 pre-existing failures (none introduced by
+  this task — `test_authorize_valid_signature` etc. were already failing on
+  the branch before my changes; confirmed via `git stash` baseline).
+
+- **Concerns / follow-ups:**
+  1. **Pre-existing baseline test failures** (`test_authorize_valid_signature`
+     and 8 sibling tests using `cose_signed`) signal a drift between the
+     `authorize_handler` (now requires raw 64-byte Ed25519 signature) and
+     the legacy COSE_Sign1 wrapper the tests still build. Out of scope for
+     T6 but flagged as a documentation /-test debt — the live POST flow uses
+     the new raw-signature shape (covered by my new
+     `test_oauth_state_binding_validates_redirect_uri_too`), so the failures
+     are stale tests, not a regression.
+  2. **Pre-existing pending_authz integration tests** (`test_pending_get_403_for_wrong_jwt_sub`,
+     `test_pending_get_requires_jwt`) fail because the production allowlist
+     in `bearer_auth_middleware` exempts `/api/pending/*` (Decision 12
+     browser-mediated flow). Tests were not updated when that decision
+     landed. Out of scope for T6.
+  3. **`redirect_uri` is bound on /token by EQUALITY** to the value
+     supplied at /authorize. The legacy webapp client did not send a
+     `redirect_uri` on the token call; we therefore made the field
+     `Option<String>` and only validate when present. A future hardening
+     pass should make it required for the `client_id=mnemonic-cli` path
+     specifically — in line with RFC 6749 §4.1.3's "if redirect_uri was
+     supplied at authorize then it MUST be supplied at token."
+  4. **Bootstrap tickets are in-memory only** — server restart drops every
+     pending ticket. Acceptable for the Phase-1 hackathon scope; if we
+     later need durability, persisting tickets behind the same SQLite
+     boundary as `attestations` is straightforward.
+  5. **`BootstrapInsertError::LruExhausted`** is currently unreachable (the
+     LRU always evicts an older entry instead). Variant retained as
+     documented dead code so future LRU changes can surface 503 without an
+     API break.

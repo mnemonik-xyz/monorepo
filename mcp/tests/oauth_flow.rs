@@ -140,10 +140,14 @@ async fn full_authorize_token_jwt_roundtrip() {
     let cose = sign_cose(&cbor, &kp).expect("sign_cose");
     let cose_b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, cose);
 
-    // Insert the pending record on the server side.
+    // Insert the pending record on the server side. The 8-arg signature
+    // includes `challenge_bytes` (the canonical-CBOR bytes the user signs),
+    // which this test does not exercise — the legacy COSE_Sign1 path bound
+    // to `challenge_hash` is what the assertion below validates.
     st.insert_pending(
         client_state.to_string(),
         challenge_hash,
+        Vec::new(),
         pubkey.clone(),
         redirect_uri.to_string(),
         code_challenge.clone(),

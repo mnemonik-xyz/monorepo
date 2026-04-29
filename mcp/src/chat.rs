@@ -349,6 +349,7 @@ mod handler_tests {
             ollama_client,
             chat_limiter,
             pending: Arc::new(crate::pending::PendingBundles::with_defaults()),
+            bootstrap_tickets: Arc::new(crate::api::BootstrapTickets::with_defaults()),
         })
     }
 

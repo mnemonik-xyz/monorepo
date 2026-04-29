@@ -313,6 +313,12 @@ impl PendingBundles {
     /// Look up a pending bundle for read-only access (used by
     /// `GET /api/pending/{id}` to return the canonical-CBOR bytes).
     /// Validates owner + TTL; does NOT remove the entry.
+    ///
+    /// `#[allow(dead_code)]` because the production HTTP wiring uses the
+    /// capability-only `peek_by_id` (Decision 12 — webapp does not present
+    /// a JWT). This owner-validating variant is retained for future
+    /// JWT-bound flows and the existing unit tests under `tests` below.
+    #[allow(dead_code)]
     pub async fn get(
         &self,
         correlation_id: &str,
@@ -347,6 +353,11 @@ impl PendingBundles {
     /// `Forbidden` consume leaves the bundle intact for the rightful owner.
     /// Expired entries are still evicted on access (lazy TTL, matches
     /// `get`).
+    ///
+    /// `#[allow(dead_code)]` matching `get` above — the production callback
+    /// uses the capability-only `consume_by_id`. Retained for future JWT
+    /// flows and unit-test coverage of the JWT-binding semantics.
+    #[allow(dead_code)]
     pub async fn consume(
         &self,
         correlation_id: &str,

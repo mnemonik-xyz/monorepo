@@ -77,6 +77,7 @@ fn state_with_short_ttl(ttl_secs: i64) -> Arc<McpState> {
         ollama_client,
         chat_limiter,
         pending: Arc::new(PendingBundles::new(10, ttl_secs, 5)),
+        bootstrap_tickets: Arc::new(mnemonic_mcp::api::BootstrapTickets::with_defaults()),
     })
 }
 

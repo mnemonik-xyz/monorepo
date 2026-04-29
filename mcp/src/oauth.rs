@@ -38,9 +38,7 @@ use axum::{
 };
 use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
 use lru::LruCache;
-use mnemonic_core::codec::{
-    canonical::to_canonical_cbor, hash::hash_bytes as blake3_hex, sign::verify_artifact,
-};
+use mnemonic_core::codec::{canonical::to_canonical_cbor, hash::hash_bytes as blake3_hex};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashSet;
@@ -90,6 +88,7 @@ pub struct Claims {
 struct PendingAuthorize {
     /// blake3 hex of canonical_cbor(challenge_fields). Kept for debug/log
     /// continuity; raw Ed25519 verification uses `challenge_bytes` directly.
+    #[allow(dead_code)]
     challenge_hash: String,
     /// Canonical-CBOR bytes of the challenge map. The webapp signs THESE
     /// bytes with WASM `sign_challenge` (raw Ed25519); the server verifies
@@ -118,6 +117,13 @@ struct IssuedCode {
     sub: String,
     /// PKCE code_challenge (S256) — verifier supplied at /token must hash to this.
     code_challenge: String,
+    /// `redirect_uri` from the original authorize request. Bound at code-issue
+    /// time per RFC 7636 §4.4 (PKCE) + RFC 6749 §4.1.3 (auth-code redirect_uri
+    /// binding). The `/oauth/token` exchange compares the supplied redirect_uri
+    /// (when present) against this value and rejects mismatches with 400 —
+    /// closes a swap-redirect attack where an attacker who guessed `code` would
+    /// otherwise drive the JWT to an attacker-controlled callback.
+    redirect_uri: String,
     /// Unix-seconds expiry.
     exp: u64,
 }
@@ -387,6 +393,17 @@ pub async fn authorize_init_handler(
     if q.state.is_empty() {
         return oauth_error(StatusCode::BAD_REQUEST, "state is required");
     }
+    // redirect_uri allowlist (mnemonic-cli tech-spec Decision 5). Reject
+    // arbitrary URIs at the bootstrap so a downstream pending entry is never
+    // created with an attacker-controlled callback. Without this gate any
+    // `client_id` could ride the OAuth flow to drive the issued code at any
+    // origin — open-redirect via the OAuth surface.
+    if !allowed_redirect(&q.redirect_uri, &q.client_id) {
+        return oauth_error(
+            StatusCode::BAD_REQUEST,
+            "redirect_uri is not on the server allowlist",
+        );
+    }
     if let Some(rt) = q.response_type.as_deref() {
         if !rt.is_empty() && rt != "code" {
             return oauth_error(
@@ -519,6 +536,79 @@ fn urlencoding_encode(s: &str) -> String {
     out
 }
 
+// ── redirect_uri allowlist (mnemonic-cli tech-spec Decision 5) ──────────────
+
+/// Exact-match allowlisted `redirect_uri`.
+const REDIRECT_EXACT: &[&str] = &["https://mnemonik.xyz/oauth/consent"];
+
+/// Exact-prefix allowlisted `redirect_uri`. The submitted URI must START with
+/// one of these byte-for-byte. Used for AI-tool deeplinks and the Anthropic
+/// connector callback whose path varies per session.
+const REDIRECT_PREFIXES: &[&str] = &[
+    "cursor://anysphere.cursor-deeplink/",
+    "vscode:mcp/",
+    "https://claude.ai/api/",
+];
+
+/// Validate `redirect_uri` against the allowlist (mnemonic-cli tech-spec
+/// Decision 5 + RFC 8252 §7). Loopback regex is gated to `client_id ==
+/// "mnemonic-cli"` so a Cursor / Claude.ai client cannot point us at a
+/// `127.0.0.1` callback that bypasses the OS deeplink handler.
+///
+/// Returns `true` if the URI is on one of three lists:
+/// 1. Exact match of `REDIRECT_EXACT` (e.g. webapp consent page).
+/// 2. Exact-prefix match of `REDIRECT_PREFIXES` (deeplink schemes).
+/// 3. Loopback callback `http://127.0.0.1:<port>/callback` or
+///    `http://[::1]:<port>/callback`, ONLY when `client_id == "mnemonic-cli"`.
+///
+/// All other URIs (`https://evil.com`, `http://0.0.0.0:1234`, loopback
+/// without the `/callback` suffix, loopback for any non-CLI client) → false.
+pub fn allowed_redirect(uri: &str, client_id: &str) -> bool {
+    if REDIRECT_EXACT.contains(&uri) {
+        return true;
+    }
+    if REDIRECT_PREFIXES
+        .iter()
+        .any(|prefix| uri.starts_with(prefix))
+    {
+        return true;
+    }
+    // Loopback regex — only `mnemonic-cli` may use this path. RFC 8252 §7
+    // recommends loopback for native clients; we narrow that to one
+    // `client_id` so `mnemonic-cli` cannot be impersonated by another client
+    // using the same loopback callback.
+    if client_id == "mnemonic-cli" && is_loopback_callback(uri) {
+        return true;
+    }
+    false
+}
+
+/// Match `^http://127\.0\.0\.1:\d+/callback$` and
+/// `^http://\[::1\]:\d+/callback$` without pulling in a `regex` crate.
+/// Hand-rolled is cheaper and fully covered by unit tests. The port must be
+/// non-empty digits, the path must be the literal `/callback`, and there must
+/// be no trailing path / query / fragment beyond that.
+fn is_loopback_callback(uri: &str) -> bool {
+    // Strip the scheme + host prefix; require the EXACT host string so
+    // `http://127.0.0.1.evil.com:80/callback` does not match.
+    let rest = if let Some(r) = uri.strip_prefix("http://127.0.0.1:") {
+        r
+    } else if let Some(r) = uri.strip_prefix("http://[::1]:") {
+        r
+    } else {
+        return false;
+    };
+    // `rest` must look like `<digits>/callback` with no trailing path bytes.
+    let (port, path) = match rest.find('/') {
+        Some(i) => (&rest[..i], &rest[i..]),
+        None => return false,
+    };
+    if port.is_empty() || !port.bytes().all(|b| b.is_ascii_digit()) {
+        return false;
+    }
+    path == "/callback"
+}
+
 // ── /oauth/authorize handler (Decision 10) ───────────────────────────────────
 
 /// Request body for `POST /oauth/authorize`. The browser receives the
@@ -641,7 +731,12 @@ pub async fn authorize_handler(
         return oauth_error(StatusCode::UNAUTHORIZED, "Ed25519 signature invalid");
     }
 
-    // Issue a single-use code, store binding for /token.
+    // Issue a single-use code, store binding for /token. The `redirect_uri`
+    // recorded here is the same one the client supplied to /oauth/authorize
+    // (the GET bootstrap) and that we already gated through
+    // `allowed_redirect`. Storing it on the IssuedCode lets /oauth/token
+    // verify the body's `redirect_uri` matches — RFC 6749 §4.1.3 binding
+    // that closes a swap-redirect attack against a leaked authorization code.
     let code = uuid::Uuid::new_v4().to_string();
     {
         let mut guard = state.codes.lock().expect("codes mutex poisoned");
@@ -650,6 +745,7 @@ pub async fn authorize_handler(
             IssuedCode {
                 sub: req.signer_pubkey.clone(),
                 code_challenge: pending.code_challenge.clone(),
+                redirect_uri: pending.redirect_uri.clone(),
                 exp: now_secs() + CODE_TTL_SECS,
             },
         );
@@ -669,6 +765,13 @@ pub async fn authorize_handler(
 pub struct TokenRequest {
     pub code: String,
     pub code_verifier: String,
+    /// `redirect_uri` from the original authorize request. Optional for
+    /// backward compatibility with clients that omit it (legacy webapp,
+    /// integration tests). When present, MUST equal the value bound at
+    /// `/oauth/authorize` time — RFC 6749 §4.1.3 + RFC 7636 §4.4 require this
+    /// equality check to defeat a swap-redirect attack on a leaked code.
+    #[serde(default)]
+    pub redirect_uri: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -742,6 +845,22 @@ pub async fn token_handler(
 
     if now_secs() > issued.exp {
         return oauth_error(StatusCode::UNAUTHORIZED, "code expired");
+    }
+
+    // Bind /oauth/token's `redirect_uri` to the value supplied at
+    // /oauth/authorize. RFC 6749 §4.1.3: when the authorize request included
+    // a redirect_uri, the token request MUST include the IDENTICAL value.
+    // We treat the field as optional for legacy clients but reject any
+    // mismatch — silent acceptance of a wrong `redirect_uri` would let an
+    // attacker who guessed/leaked the auth code drive the JWT to a callback
+    // they control.
+    if let Some(supplied) = req.redirect_uri.as_deref() {
+        if supplied != issued.redirect_uri {
+            return oauth_error(
+                StatusCode::BAD_REQUEST,
+                "redirect_uri does not match the value bound at /oauth/authorize",
+            );
+        }
     }
 
     // Verify PKCE: SHA256(verifier) base64url-no-pad == challenge.
@@ -943,6 +1062,13 @@ pub async fn bearer_auth_middleware(
         || path.starts_with("/.well-known/")
         || path.starts_with("/api/pending/")
         || path == "/api/sign-callback"
+        // CLI bootstrap-ticket redeem endpoint (mnemonic-cli tech-spec
+        // Decision 7). The UUID in the path IS the capability — the CLI
+        // does not yet have a JWT at redeem time (the whole point of
+        // this flow is to bootstrap one). The /issue counterpart is NOT
+        // on this allowlist; it uses standard Bearer-JWT auth so only an
+        // already-authenticated webapp can mint tickets for its own user.
+        || path.starts_with("/api/cli-bootstrap/redeem/")
     {
         return next.run(request).await;
     }
@@ -1473,6 +1599,7 @@ mod tests {
                 IssuedCode {
                     sub: "test-pubkey".to_string(),
                     code_challenge: pkce_challenge("v"),
+                    redirect_uri: "https://app/cb".to_string(),
                     exp: now_secs().saturating_sub(120),
                 },
             );
@@ -1597,7 +1724,7 @@ mod tests {
             .uri(
                 "/oauth/authorize\
                  ?client_id=cursor\
-                 &redirect_uri=https%3A%2F%2Fapp%2Fcb\
+                 &redirect_uri=https%3A%2F%2Fclaude.ai%2Fapi%2Fcb\
                  &code_challenge=abc123\
                  &code_challenge_method=S256\
                  &state=csrf-init-1\
@@ -1630,7 +1757,7 @@ mod tests {
             .uri(
                 "/oauth/authorize\
                  ?client_id=cursor\
-                 &redirect_uri=https%3A%2F%2Fapp%2Fcb\
+                 &redirect_uri=https%3A%2F%2Fclaude.ai%2Fapi%2Fcb\
                  &code_challenge=abc\
                  &code_challenge_method=plain\
                  &state=csrf-plain-rejected",
@@ -1652,7 +1779,7 @@ mod tests {
             .uri(
                 "/oauth/authorize\
                  ?client_id=cursor\
-                 &redirect_uri=https%3A%2F%2Fapp%2Fcb\
+                 &redirect_uri=https%3A%2F%2Fclaude.ai%2Fapi%2Fcb\
                  &code_challenge=abc\
                  &code_challenge_method=S256\
                  &state=csrf-redir",
@@ -1689,7 +1816,7 @@ mod tests {
         let app = build_init_router(st.clone());
 
         let init_uri = format!(
-            "/oauth/authorize?client_id=cursor&redirect_uri=https%3A%2F%2Fapp%2Fcb\
+            "/oauth/authorize?client_id=cursor&redirect_uri=https%3A%2F%2Fclaude.ai%2Fapi%2Fcb\
              &code_challenge=ch&code_challenge_method=S256&state=rt-state\
              &pubkey={pubkey}"
         );
@@ -1923,5 +2050,213 @@ mod tests {
             let resp = app.clone().oneshot(req).await.unwrap();
             assert_eq!(resp.status(), StatusCode::OK, "uri={uri}");
         }
+    }
+
+    // ── allowed_redirect tests (Decision 5: redirect_uri allowlist) ──────────
+
+    #[test]
+    fn test_oauth_allowed_redirect_exact_and_prefix() {
+        // Exact-match webapp consent page.
+        assert!(allowed_redirect(
+            "https://mnemonik.xyz/oauth/consent",
+            "anything"
+        ));
+        // Cursor / VS Code / Claude.ai deeplink prefixes.
+        assert!(allowed_redirect(
+            "cursor://anysphere.cursor-deeplink/abc",
+            "cursor"
+        ));
+        assert!(allowed_redirect("vscode:mcp/handle", "vscode"));
+        assert!(allowed_redirect("https://claude.ai/api/return", "claude"));
+        // Negative: arbitrary URLs must be rejected for every client.
+        assert!(!allowed_redirect("https://evil.com", "mnemonic-cli"));
+        assert!(!allowed_redirect("https://evil.com", "cursor"));
+        // Negative: non-host-equal lookalike (cursor:// without the
+        // exact-prefix tail is rejected).
+        assert!(!allowed_redirect("cursor://other-vendor/", "cursor"));
+        // Negative: 0.0.0.0 is NOT loopback under the regex.
+        assert!(!allowed_redirect(
+            "http://0.0.0.0:1234/callback",
+            "mnemonic-cli"
+        ));
+        // Negative: loopback without /callback suffix is rejected.
+        assert!(!allowed_redirect("http://127.0.0.1:1234/", "mnemonic-cli"));
+        assert!(!allowed_redirect(
+            "http://127.0.0.1:1234/foo",
+            "mnemonic-cli"
+        ));
+        // Negative: loopback with trailing path beyond /callback rejected.
+        assert!(!allowed_redirect(
+            "http://127.0.0.1:1234/callback/extra",
+            "mnemonic-cli"
+        ));
+        // Negative: lookalike host (127.0.0.1.evil.com) rejected.
+        assert!(!allowed_redirect(
+            "http://127.0.0.1.evil.com:1234/callback",
+            "mnemonic-cli"
+        ));
+        // Negative: non-numeric port rejected.
+        assert!(!allowed_redirect(
+            "http://127.0.0.1:abc/callback",
+            "mnemonic-cli"
+        ));
+        // Negative: missing port rejected.
+        assert!(!allowed_redirect(
+            "http://127.0.0.1/callback",
+            "mnemonic-cli"
+        ));
+    }
+
+    #[test]
+    fn test_oauth_allowed_redirect_loopback_only_for_cli() {
+        // TDD anchor (tasks/6.md): loopback URI accepted ONLY when client_id
+        // is mnemonic-cli; the same URI submitted by any other client (cursor,
+        // claude, vscode, evil) is rejected.
+        let v4 = "http://127.0.0.1:1234/callback";
+        let v6 = "http://[::1]:8080/callback";
+        // Positive — mnemonic-cli is the gated client_id.
+        assert!(allowed_redirect(v4, "mnemonic-cli"));
+        assert!(allowed_redirect(v6, "mnemonic-cli"));
+        // Negative — every other client_id rejects loopback.
+        for other in ["cursor", "claude", "vscode", "evil-client", ""] {
+            assert!(
+                !allowed_redirect(v4, other),
+                "loopback ipv4 must reject client_id={other:?}"
+            );
+            assert!(
+                !allowed_redirect(v6, other),
+                "loopback ipv6 must reject client_id={other:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_oauth_authorize_init_rejects_non_allowlisted_redirect() {
+        // Bootstrap with redirect_uri=https://evil.com → 400.
+        let st = fresh_state();
+        let app = build_init_router(st.clone());
+        let req = Request::builder()
+            .method("GET")
+            .uri(
+                "/oauth/authorize\
+                 ?client_id=cursor\
+                 &redirect_uri=https%3A%2F%2Fevil.com\
+                 &code_challenge=abc\
+                 &code_challenge_method=S256\
+                 &state=csrf-evil",
+            )
+            .header("accept", "application/json")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        // Pending map remains empty — rejection short-circuits BEFORE insert.
+        let present = {
+            let g = st.pending.lock().unwrap();
+            g.peek("csrf-evil").is_some()
+        };
+        assert!(!present, "rejected redirect_uri must not store pending");
+    }
+
+    #[tokio::test]
+    async fn test_oauth_state_binding_validates_redirect_uri_too() {
+        // Bind redirect_uri at /oauth/authorize, then submit /oauth/token with
+        // a different value → 400. RFC 6749 §4.1.3.
+        //
+        // The current `authorize_handler` consumes a raw 64-byte Ed25519
+        // signature over the canonical-CBOR challenge bytes (the
+        // `signature` field with `cose_signed` legacy alias). We sign the
+        // exact bytes we insert as `pending.challenge_bytes` so the server-
+        // side verifier (`mnemonic_core::identity::verify_signature`) accepts.
+        let st = fresh_state();
+        let kp = Keypair::new();
+        let pubkey = kp.pubkey().to_string();
+        let verifier = "v-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let challenge = pkce_challenge(verifier);
+        let bound_uri = "https://claude.ai/api/cb-bound";
+
+        // Build the challenge canonical-CBOR bytes deterministically and
+        // sign them with the user's keypair. Same fields the bootstrap
+        // handler would store.
+        let challenge_obj = serde_json::json!({
+            "server_origin": SERVER_ORIGIN,
+            "state": "rb-state",
+            "client_id": "test-client",
+            "redirect_uri": bound_uri,
+            "code_challenge": challenge,
+            "code_challenge_method": "S256",
+            "nonce": "n",
+            "exp": now_secs() + 30,
+        });
+        let cbor_bytes = to_canonical_cbor(&challenge_obj, &CHALLENGE_SCHEMA).unwrap();
+        let raw_sig = mnemonic_core::identity::sign_bytes(&kp, &cbor_bytes);
+        assert_eq!(raw_sig.len(), 64);
+        let sig_b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &raw_sig);
+        let hash = blake3_hex(&cbor_bytes);
+
+        st.insert_pending(
+            "rb-state".to_string(),
+            hash,
+            cbor_bytes,
+            pubkey.clone(),
+            bound_uri.to_string(),
+            challenge.clone(),
+            "rb-state".to_string(),
+            now_secs() + 30,
+        );
+
+        let app = build_authorize_router(st.clone());
+        let (s1, body) = post_json(
+            app,
+            "/oauth/authorize",
+            serde_json::json!({
+                "state": "rb-state",
+                "signature": sig_b64,
+                "signer_pubkey": pubkey,
+            }),
+        )
+        .await;
+        assert_eq!(s1, StatusCode::OK, "authorize must succeed (body={body})");
+        let code = body["code"].as_str().unwrap().to_string();
+
+        // Token exchange with a DIFFERENT redirect_uri → 400.
+        let app2 = build_authorize_router(st.clone());
+        let (s2, _) = post_json(
+            app2,
+            "/oauth/token",
+            serde_json::json!({
+                "code": code.clone(),
+                "code_verifier": verifier,
+                "redirect_uri": "https://claude.ai/api/cb-other",
+            }),
+        )
+        .await;
+        assert_eq!(
+            s2,
+            StatusCode::BAD_REQUEST,
+            "mismatched redirect_uri must be rejected"
+        );
+
+        // After the 400 above the code was already popped from the LRU
+        // (`codes.lock().pop` runs BEFORE the redirect_uri check). A second
+        // attempt — even with the correct value — must therefore fail with
+        // 401, proving the code is single-use even after a 400 mismatch
+        // (security property: a failed exchange must not leak a usable code).
+        let app3 = build_authorize_router(st);
+        let (s3, body3) = post_json(
+            app3,
+            "/oauth/token",
+            serde_json::json!({
+                "code": code,
+                "code_verifier": verifier,
+                "redirect_uri": bound_uri,
+            }),
+        )
+        .await;
+        assert_eq!(
+            s3,
+            StatusCode::UNAUTHORIZED,
+            "code must be single-use even after a 400 mismatch, got body={body3}"
+        );
     }
 }

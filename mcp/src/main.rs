@@ -408,6 +408,13 @@ async fn main() -> anyhow::Result<()> {
     // 10k LRU entries, 300s TTL, 50 pending bundles per jwt.sub.
     let pending = Arc::new(pending::PendingBundles::with_defaults());
 
+    // CLI bootstrap-ticket store (mnemonic-cli tech-spec Decision 7).
+    // Production caps: 100 LRU entries, 600s TTL, 3 active tickets per
+    // jwt.sub. Webapp issues tickets via /api/cli-bootstrap/issue (Bearer
+    // JWT'd), CLI redeems via /api/cli-bootstrap/redeem/:ticket (UUID is
+    // the capability — no Authorization header required).
+    let bootstrap_tickets = Arc::new(api::BootstrapTickets::with_defaults());
+
     let state = Arc::new(mcp::McpState {
         keypair,
         solana: solana::SolanaClient::new(&cfg.solana_rpc_url),
@@ -430,6 +437,7 @@ async fn main() -> anyhow::Result<()> {
         ollama_client,
         chat_limiter,
         pending,
+        bootstrap_tickets,
     });
 
     // ── RAG seeding (whitepaper chunking + artifact generation) ──────────
@@ -548,8 +556,7 @@ async fn run_http(state: Arc<mcp::McpState>, host: &str, port: u16) -> anyhow::R
     // production cap. Set OAUTH_RATELIMIT_DISABLE=1 to widen for e2e tests
     // (Playwright on a single dev IP runs ~12 /oauth/* calls per test
     // suite; 5/min would short-circuit them with HTTP 429).
-    let oauth_disabled =
-        std::env::var("OAUTH_RATELIMIT_DISABLE").ok().as_deref() == Some("1");
+    let oauth_disabled = std::env::var("OAUTH_RATELIMIT_DISABLE").ok().as_deref() == Some("1");
     let (oauth_per_sec, oauth_burst) = if oauth_disabled {
         (100u64, 1000u32) // effectively unlimited for test runs
     } else {
@@ -610,6 +617,19 @@ async fn run_http(state: Arc<mcp::McpState>, host: &str, port: u16) -> anyhow::R
             axum::routing::get(api::get_pending_handler),
         )
         .route("/api/sign-callback", post(api::sign_callback_handler))
+        // CLI bootstrap-ticket flow — mnemonic-cli tech-spec Decision 7.
+        // /issue requires Bearer JWT (enforced by bearer_auth_middleware,
+        // which inserts Claims into the request extension before the
+        // handler runs). /redeem/:ticket is UUID-as-capability, exempt
+        // from the middleware via the URI allowlist above.
+        .route(
+            "/api/cli-bootstrap/issue",
+            post(api::bootstrap_issue_handler),
+        )
+        .route(
+            "/api/cli-bootstrap/redeem/{ticket}",
+            axum::routing::get(api::bootstrap_redeem_handler),
+        )
         .layer(middleware::from_fn_with_state(
             oauth_state.clone(),
             oauth::bearer_auth_middleware,
