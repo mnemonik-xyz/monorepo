@@ -10,6 +10,7 @@
 // asserts `whoami` makes ≤ 1 fetch by default.
 
 import {
+  Keypair,
   LocalSigner,
   MnemonicClient,
   parseJwtPayload,
@@ -81,9 +82,7 @@ export async function runWhoami(opts: WhoamiOptions): Promise<void> {
     const baseUrl =
       opts.baseUrl ?? process.env.MNEMONIC_BASE_URL ?? DEFAULT_BASE_URL;
     const id = loadIdentityJson();
-    const kp = await import("@mnemonik-xyz/sdk").then((m) =>
-      m.Keypair.fromJSON(id)
-    );
+    const kp = await Keypair.fromJSON(id);
     const tok = loadToken();
     const client = new MnemonicClient({
       baseUrl,

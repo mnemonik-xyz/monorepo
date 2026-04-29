@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { runRecall } from "../src/commands/recall.js";
 import { saveIdentityJson, saveToken } from "../src/config.js";
+import { ServerError } from "../src/errors.js";
 import {
   clearWasmMock,
   installWasmMock,
@@ -118,5 +119,22 @@ describe("runRecall", () => {
     ).rejects.toMatchObject({
       exitCode: 1,
     });
+  });
+
+  it("ServerError (exit 2) when /mcp returns 500", async () => {
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(JSON.stringify({ error: "internal" }), {
+          status: 500,
+          headers: { "content-type": "application/json" },
+        })
+    );
+    globalThis.fetch = fetchMock as never;
+    await expect(
+      runRecall("hello", { baseUrl: "http://test" })
+    ).rejects.toMatchObject({ exitCode: 2 });
+    await expect(
+      runRecall("hello", { baseUrl: "http://test" })
+    ).rejects.toBeInstanceOf(ServerError);
   });
 });

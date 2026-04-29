@@ -211,6 +211,10 @@ function awaitCallback(
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      // Detach the request listener immediately so any stray probe arriving
+      // after settle() does not trigger another response. The outer `finally`
+      // in runInteractive still calls server.close() to release the port.
+      server.removeListener("request", onRequest);
       fn();
     };
 

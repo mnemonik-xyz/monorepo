@@ -9,7 +9,7 @@
 //   <dir>/identity.json   {secret: number[64], pubkey_base58: string}
 //   <dir>/token.json      {jwt, expires_at, sub}
 
-import { execSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import {
   existsSync,
   chmodSync,
@@ -69,11 +69,15 @@ export function restrictFileMode(path: string): void {
     }
     // `/inheritance:r` removes inherited ACEs (so a parent-directory ACL
     // cannot leak read permissions). `/grant:r` replaces existing user-grants.
-    // Quote both arguments to defeat path/username spaces.
+    // execFileSync with an argv array bypasses cmd.exe entirely — embedded
+    // quotes in `path` or `user` are passed literally to icacls, defeating
+    // shell-injection (CWE-78) via user-supplied --file paths.
     try {
-      execSync(`icacls "${path}" /inheritance:r /grant:r "${user}:F"`, {
-        stdio: "ignore",
-      });
+      execFileSync(
+        "icacls",
+        [path, "/inheritance:r", "/grant:r", `${user}:F`],
+        { stdio: "ignore" }
+      );
     } catch {
       // Non-fatal — the file is written; ACL hardening is best-effort on
       // Windows. Surface no warning here (it would be noisy on every save).

@@ -11,7 +11,7 @@ import {
   runIdentityImport,
 } from "../src/commands/identity.js";
 import { loadIdentityJson, saveIdentityJson } from "../src/config.js";
-import { UserError } from "../src/errors.js";
+import { ServerError, UserError } from "../src/errors.js";
 import { clearWasmMock, installWasmMock, withTmpConfigDir } from "./helpers.js";
 
 describe("runIdentityImport / runIdentityExport", () => {
@@ -147,5 +147,22 @@ describe("runIdentityImport / runIdentityExport", () => {
     await expect(runIdentityExport({ file: out })).rejects.toBeInstanceOf(
       UserError
     );
+  });
+
+  it("--ticket: ServerError (exit 2) when redeem endpoint returns 500", async () => {
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(JSON.stringify({ error: "boom" }), {
+          status: 500,
+          headers: { "content-type": "application/json" },
+        })
+    );
+    globalThis.fetch = fetchMock as never;
+    await expect(
+      runIdentityImport({ ticket: "t-1", baseUrl: "http://srv" })
+    ).rejects.toMatchObject({ exitCode: 2 });
+    await expect(
+      runIdentityImport({ ticket: "t-1", baseUrl: "http://srv" })
+    ).rejects.toBeInstanceOf(ServerError);
   });
 });

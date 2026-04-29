@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { runVerify } from "../src/commands/verify.js";
 import { saveIdentityJson, saveToken } from "../src/config.js";
-import { IntegrityError, UserError } from "../src/errors.js";
+import { IntegrityError, ServerError, UserError } from "../src/errors.js";
 import {
   clearWasmMock,
   installWasmMock,
@@ -92,5 +92,19 @@ describe("runVerify", () => {
     await expect(runVerify("", { baseUrl: "http://t" })).rejects.toBeInstanceOf(
       UserError
     );
+  });
+
+  it("ServerError (exit 2) when /mcp returns 500", async () => {
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({ error: "internal" }), {
+        status: 500,
+        headers: { "content-type": "application/json" },
+      })) as never;
+    await expect(
+      runVerify("att-1", { baseUrl: "http://t" })
+    ).rejects.toMatchObject({ exitCode: 2 });
+    await expect(
+      runVerify("att-1", { baseUrl: "http://t" })
+    ).rejects.toBeInstanceOf(ServerError);
   });
 });

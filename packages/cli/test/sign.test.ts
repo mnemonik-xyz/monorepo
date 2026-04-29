@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { runSign } from "../src/commands/sign.js";
 import { saveIdentityJson, saveToken } from "../src/config.js";
-import { UserError } from "../src/errors.js";
+import { ServerError, UserError } from "../src/errors.js";
 import {
   clearWasmMock,
   installWasmMock,
@@ -117,5 +117,34 @@ describe("runSign", () => {
     expect(calls.some((u) => u.endsWith("/mcp"))).toBe(true);
     expect(calls.some((u) => u.includes("/api/pending/corr-1"))).toBe(true);
     expect(calls.some((u) => u.includes("/api/sign-callback"))).toBe(true);
+  });
+
+  it("ServerError (exit 2) when /mcp returns 500", async () => {
+    const kp = mock.generate_keypair();
+    saveIdentityJson(kp);
+    const sub = kp.pubkey_base58;
+    saveToken({
+      jwt: makeJwt(sub),
+      expires_at: new Date(Date.now() + 3600_000).toISOString(),
+      sub,
+    });
+
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(JSON.stringify({ error: "boom" }), {
+          status: 500,
+          headers: { "content-type": "application/json" },
+        })
+    );
+    globalThis.fetch = fetchMock as never;
+
+    await expect(
+      runSign("hello", { content: "hello", baseUrl: "http://test" })
+    ).rejects.toMatchObject({ exitCode: 2 });
+    // Re-run a fresh call to assert the error class — vitest rejects.toBeInstanceOf
+    // collapses with toMatchObject above so we re-run a second time.
+    await expect(
+      runSign("hello", { content: "hello", baseUrl: "http://test" })
+    ).rejects.toBeInstanceOf(ServerError);
   });
 });

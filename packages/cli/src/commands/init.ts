@@ -36,13 +36,13 @@ export async function runInit(opts: InitOptions): Promise<void> {
     did: `did:sol:${kp.pubkey}`,
     path: identityPath(),
   };
-  format(data, opts, (_d, color) => {
+  format(data, opts, () => {
     const lines = [
       `identity created: ${identityPath()}`,
       `pubkey: ${kp.pubkey}`,
       `did:    did:sol:${kp.pubkey}`,
     ];
-    return lines.map((l) => (color ? l : l)).join("\n");
+    return lines.join("\n");
   });
   hint(
     "tip: used Mnemonic in a browser? `mnemonic identity import --ticket <uuid>` " +
