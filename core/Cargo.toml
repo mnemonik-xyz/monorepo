@@ -51,6 +51,13 @@ openssl-vendored = ["openssl-sys/vendored"]
 # `cfg(target_arch = "wasm32")`; this feature is the explicit opt-in so
 # native builds never compile the module body.
 wasm = []
+# Enables `core/tests/golden_fixtures.rs`, which emits a deterministic JSON
+# array of `{name, input_hex, canonical_cbor_hex, cose_envelope_hex,
+# keypair_secret_hex}` triples for SDK byte-for-byte parity tests. The
+# emitter is a `#[ignore]`d integration test invoked via
+# `cargo test --features golden-fixtures -p mnemonic-core --test golden_fixtures emit_fixtures -- --ignored --nocapture`.
+# See work/mnemonic-cli/tech-spec.md Decision 12.
+golden-fixtures = []
 
 [dependencies.openssl-sys]
 version = "0.9"

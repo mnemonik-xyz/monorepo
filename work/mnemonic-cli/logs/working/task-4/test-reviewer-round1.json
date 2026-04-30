@@ -1,0 +1,169 @@
+{
+  "task": 4,
+  "task_title": "COSE wrapper + golden fixture + CI lockstep gate",
+  "commit": "5ae0e35",
+  "reviewer": "test-reviewer",
+  "round": 1,
+  "date": "2026-04-29",
+  "verdict": "approve_with_concerns",
+  "summary": "Test infrastructure is sound: byte-EXACT equality is enforced (no substring/loose matches), determinism is verified, the CI lockstep gate is strong (regen script + git diff --exit-code on both .json and .sha256), and emit_fixtures is correctly #[ignore]'d. However, the fixture catalogue at 22 entries falls well short of tech-spec/task description's '~50' target, and several documented CBOR-canonical edge cases are absent from coverage (floats, negative integers, booleans, nested objects, map-key sort verification, length-prefix boundaries above 5KB, alternate artifact schemas, parents field, timestamp variations). One latent weakness: test_fixed_keypair_pubkey_stable does not pin the actual pubkey value (only non-empty + round-trip), so a silent change in seed-to-pubkey derivation would pass.",
+  "strengths": [
+    {
+      "area": "byte_exact_equality",
+      "detail": "packages/sdk/test/cose.golden.test.ts line 169 compares hex strings exactly: `if (actualHex !== entry.cose_envelope_hex)`. Length is checked separately (line 159). No substring/regex/loose match anywhere — a single-byte drift fails the test with a diffable hex log."
+    },
+    {
+      "area": "determinism_guard",
+      "detail": "core/tests/golden_fixtures.rs::test_emitter_deterministic builds the full entry list twice and asserts byte-identical pretty-printed JSON. Catches non-deterministic field ordering, random seeds, and timestamp drift."
+    },
+    {
+      "area": "lockstep_gate_strength",
+      "detail": ".github/workflows/node-test.yml runs the regen script and then `git diff --exit-code` against BOTH `golden-cose.json` AND `golden-cose.sha256`. Mutating either file (or having Rust core's encoder drift) makes the diff non-empty and CI fails with an explicit `::error::` annotation pointing at the regen command. This is a stronger check than just diffing the SHA."
+    },
+    {
+      "area": "ignored_emitter",
+      "detail": "emit_fixtures is `#[ignore]`'d (golden_fixtures.rs:351), so default `cargo test --features golden-fixtures` runs only the 3 sanity tests (deterministic, count_and_unique_names, pubkey_stable) and not the noisy emitter — correct behavior."
+    },
+    {
+      "area": "name_uniqueness",
+      "detail": "test_fixture_count_and_unique_names asserts >=20 cases AND deduplicates names — catches accidental duplicate test labels."
+    },
+    {
+      "area": "real_wasm_under_test",
+      "detail": "cose.golden.test.ts loads the actual `core/pkg-nodejs/mnemonic_core.js` artifact (line 109), not a mock. Closes the wasm.ts:31-46 coverage gap T2-impl flagged. This is the highest-fidelity path possible without a Bun/Deno runner."
+    }
+  ],
+  "concerns": [
+    {
+      "severity": "medium",
+      "category": "fixture_coverage_gap",
+      "title": "22 fixtures vs tech-spec '~50 cases'",
+      "detail": "Task spec § What to do calls for '~50 input cases'; tech-spec Decision 12 says '~50 cases'. Implementation ships 22. The 22 chosen ARE all reasonable, but several documented CBOR-canonical edge cases are absent. The decisions.md follow-up #2 acknowledges this and gates further additions on size budget, which is reasonable — but the size budget (76KB at 22 entries -> ~170KB at 50) is well below the 'past 100KB soft cap' concern stated; even doubling fixtures keeps the file under typical npm tarball thresholds. Recommend expanding before lockstep is set in stone, since each fixture is committed-forever.",
+      "recommendation": "Add fixtures for the gaps below. Aim for ~40 — preserves full edge-case coverage at <140KB."
+    },
+    {
+      "severity": "medium",
+      "category": "fixture_coverage_gap",
+      "title": "No fixture exercises non-MEMORY_V1 schemas",
+      "detail": "core/src/codec/schema.rs defines 5 schemas (RAG_CONTEXT_V1, RAG_RESULT_V1, AGENT_STATE_V1, RECEIPT_V1, MEMORY_V1) with DIFFERENT cbor_field_order arrays. Every fixture uses MEMORY_V1 only. A bug in any other schema's field-order array would NOT be caught by the lockstep gate. Since the SDK is intended to round-trip artifacts of any registered type, this is a real coverage hole.",
+      "recommendation": "Add at least one fixture per schema (5 total) — `rag_context_basic`, `agent_state_with_state_key`, `receipt_with_operation_and_duration`, etc. Wires up the schema-specific fields (sources, state_key, operation, duration_ms, citations, context_artifacts, parents) at least once."
+    },
+    {
+      "severity": "medium",
+      "category": "fixture_coverage_gap",
+      "title": "No nested objects, no map-key-sort verification, no boolean / float / negative-integer values",
+      "detail": "json_to_cbor (core/src/codec/canonical.rs:56-101) has branches for Bool, Number (i64/u64/float→text), Array, and Object (with key-sort). Coverage in fixtures: only Text and Number(u64) and (single-level) Object are exercised through metadata. No fixture has: (a) nested object 2+ levels deep — recursive json_to_cbor is untested; (b) metadata with deliberately UNSORTED keys to verify the sort_by branch produces canonical output (e.g. `{z: 1, a: 2, m: 3}` should encode in a, m, z order); (c) a boolean value (the Bool arm); (d) a negative integer (i64 negative branch); (e) a float value (the fallback `Text(n.to_string())` branch — important because if ciborium ever changes its serialization, this could silently regress).",
+      "recommendation": "Add at minimum: `metadata_nested_two_levels` ({outer: {inner: 'value'}}), `metadata_unsorted_keys` ({z: 1, a: 2, m: 3}), `metadata_with_bool` ({flag: true, retired: false}), `metadata_with_negative_int` ({offset: -42}), `metadata_with_float` ({score: 0.95})."
+    },
+    {
+      "severity": "low",
+      "category": "fixture_coverage_gap",
+      "title": "CBOR length-prefix boundaries: u16->u32 transition not exercised",
+      "detail": "Long content tops out at 5KB. CBOR text/array length encoding has boundaries at 24, 256 (u8->u16), 65536 (u16->u32). The 5K case (`long_content_5k`) crosses the 256 boundary, but the u16->u32 transition at 64KiB is unverified. A bug in ciborium's length-prefix encoding for content >65535 bytes would not be caught.",
+      "recommendation": "Either add `long_content_70k` (one fixture with 70KB content) — adds ~140KB to fixture file via two hex encodings (input_hex + canonical_cbor_hex + cose_envelope_hex), so weigh against size budget — OR document explicitly in decisions.md that >64KiB content is out of scope for golden coverage."
+    },
+    {
+      "severity": "low",
+      "category": "fixture_coverage_gap",
+      "title": "No empty array / empty map / null-omission fixtures",
+      "detail": "to_canonical_cbor explicitly skips fields whose value is null (canonical.rs:30). No fixture has `metadata: null` to verify the omission, vs `metadata: {}` (empty map) which IS encoded, vs absent key. The 3-way distinction is canonicalization-critical — webapp users feeding null vs {} vs missing should produce DIFFERENT byte sequences, and a bug here would silently break content-integrity verification.",
+      "recommendation": "Add `metadata_explicit_null` (verifies omission), `metadata_empty_object` ({}), and ensure the canonical CBOR bytes differ between them — even if just inline-asserted in the fixture data."
+    },
+    {
+      "severity": "low",
+      "category": "fixture_coverage_gap",
+      "title": "Indefinite-length encoding not negatively asserted",
+      "detail": "RFC 8949 §4.2.1 says canonical CBOR MUST use definite-length encoding (no 0x5f/0x7f/0x9f/0xbf prefix-byte markers). Ciborium produces definite-length by default, but no fixture/test verifies this — if a future ciborium upgrade or a configuration mistake enabled indefinite encoding, the fixture-level test would still pass (since regen would produce the new bytes and lockstep would diff, BUT the lockstep failure would mask the real issue: 'why did all 22 fixture bytes change?'). A negative test asserting `canonical_cbor_hex` never contains `5f`, `7f`, `9f`, `bf` as length-prefix markers in canonical position would surface it cleanly.",
+      "recommendation": "In cose.golden.test.ts, add a per-fixture assertion: scan canonical CBOR bytes and ensure no major-type-2/3/4/5 with additional info 31 (indefinite) appears. OR add a Rust-side property test `prop_no_indefinite_length`."
+    },
+    {
+      "severity": "low",
+      "category": "fixture_coverage_gap",
+      "title": "Timestamp tagging variations not exercised",
+      "detail": "json_to_cbor parses ISO 8601 strings into CBOR Tag(1, epoch_seconds). All fixtures use the same `2026-01-01T00:00:NNZ` UTC format. No fixture exercises: (a) timezone offsets (`+05:30`), (b) fractional seconds (`.123`), (c) pre-epoch dates (`1969-12-31`), (d) the boundary cases where chrono accepts/rejects formats. A regression in chrono's RFC 3339 parser (or a ciborium tag encoding change) would only be caught for the trivial UTC case.",
+      "recommendation": "Add `timestamp_with_offset` (`2026-01-01T05:00:00+05:30`), `timestamp_pre_epoch` (`1969-06-15T00:00:00Z`), and `timestamp_unparseable` (an arbitrary string that does NOT parse as RFC3339, exercising the Text fallback branch on canonical.rs:75)."
+    },
+    {
+      "severity": "low",
+      "category": "fixture_coverage_gap",
+      "title": "Many-tags array stays under CBOR small-array boundary",
+      "detail": "many_tags has 6 entries. CBOR array length encoding has a boundary at 24 (after which length is encoded as a separate byte). No fixture exercises 24+ tags or a parents array near MAX_PARENTS (16) or above.",
+      "recommendation": "Add `tags_at_array_boundary` with exactly 24 tags, `tags_above_boundary` with 25+ tags, and `parents_array_full` with MAX_PARENTS entries to cover schema-imposed bounds + CBOR length-prefix for arrays."
+    },
+    {
+      "severity": "low",
+      "category": "weak_pubkey_stability_test",
+      "title": "test_fixed_keypair_pubkey_stable does NOT pin the actual pubkey value",
+      "detail": "golden_fixtures.rs:393-404 only asserts `pubkey != ''` and a `to_bytes -> try_from` round-trip. The doc comment at line 395 says 'The pubkey derived from FIXED_SEED_HEX' but no equality check against an expected base58 pubkey is performed. If `Keypair::new_from_array`'s derivation algorithm changed silently (Solana SDK upgrade, ed25519-dalek bump), every fixture's COSE envelope would change, the lockstep gate would fire, BUT this dedicated 'anchor' test would still pass — providing no diagnostic clarity. The committed fixture file shows the pubkey resolves to `56LtbqTNScYQqjGpec1TW7himmeeGF1L7cGbDt6BfFuU` (visible in input_hex of every fixture).",
+      "recommendation": "Pin the pubkey explicitly: `assert_eq!(kp.pubkey().to_string(), \"56LtbqTNScYQqjGpec1TW7himmeeGF1L7cGbDt6BfFuU\");` Provides a clear, fail-fast diagnostic when the underlying derivation changes, separate from the broader fixture lockstep."
+    },
+    {
+      "severity": "low",
+      "category": "lockstep_gate_robustness",
+      "title": "SHA-256 file is regenerated by the same script CI runs",
+      "detail": "regen-golden-fixtures.sh writes BOTH golden-cose.json AND golden-cose.sha256. CI re-runs the script and diffs both. The diff on the JSON is a strong gate; the SHA file is essentially redundant since it's derived from the JSON the regen just wrote. If a contributor manually edited the JSON without running regen, the JSON-diff catches it; if they edit the SHA file, the SHA-diff catches it. The gate is sound, but has a small attack-surface: a contributor could edit BOTH files inconsistently (json + recomputed sha but with the regen disabled), and CI would catch the JSON drift first. Acceptable.",
+      "recommendation": "Optional: as belt-and-suspenders, add a third CI step that independently computes `shasum -a 256 packages/sdk/test/fixtures/golden-cose.json` and asserts it equals the contents of golden-cose.sha256 — without invoking the regen script. This adds defense against an attacker who managed to inject a regen-script change that produces stale SHAs. Low priority for hackathon scope."
+    },
+    {
+      "severity": "info",
+      "category": "fixture_coverage_documentation",
+      "title": "Decision 12 acceptance criterion mentions fault paths but golden test does not exercise them",
+      "detail": "Tech-spec Testing Strategy § Integration tests requires fault injection (`malformed-cbor-in-pending`, etc.) — but this is correctly Task 8's responsibility, not Task 4's. Just flagging that the golden fixture test by design only covers the happy path. The CI matrix gate from Task 8 will cover the fault paths.",
+      "recommendation": "No action needed for T4."
+    }
+  ],
+  "verifications_run": [
+    {
+      "check": "lockstep_gate_actually_fires_on_drift",
+      "method": "Inspected workflow YAML — runs regen script then `git diff --exit-code` on both files. Both diff steps are tied to non-zero exit + ::error:: annotation. Verified the regen script uses `set -euo pipefail` and exits non-zero on any sub-failure.",
+      "result": "PASS — gate is correctly wired. A mutation to golden-cose.json (without rerunning regen) WOULD show up in the second `git diff --exit-code packages/sdk/test/fixtures/golden-cose.json` step and fail the workflow."
+    },
+    {
+      "check": "byte_exact_equality_in_ts_test",
+      "method": "Read every assertion in cose.golden.test.ts. The active equality is `actualHex !== entry.cose_envelope_hex` (line 169) — a strict string compare on hex. Length compare at line 159 short-circuits with diagnostic. No `toContain`, `toMatch`, or substring usage anywhere.",
+      "result": "PASS"
+    },
+    {
+      "check": "ignore_attribute_on_emitter",
+      "method": "Read golden_fixtures.rs:350-356. `#[test]` followed by `#[ignore]` followed by `fn emit_fixtures()`.",
+      "result": "PASS"
+    },
+    {
+      "check": "determinism_test_actually_runs_twice",
+      "method": "test_emitter_deterministic calls `build_all_entries()` twice on independent Vec instances, then `serde_json::to_string_pretty` on each, then `assert_eq!` on the two strings. Catches in-process non-determinism (random RNG, HashMap iteration order, etc.).",
+      "result": "PASS — but does NOT catch cross-process non-determinism (e.g., if Rust were ever changed to depend on env vars or files). For the hackathon this is sufficient."
+    },
+    {
+      "check": "fixture_count_matches_decisions_log",
+      "method": "wc -l on golden-cose.json shows 156 lines; entry count claimed in decisions.md is 22. JSON has 22 entries (each entry ~7 lines + outer brackets).",
+      "result": "PASS — count is internally consistent. NOTE: 22 << ~50 target stated in tech-spec / task spec. Flagged as Medium concern above."
+    }
+  ],
+  "redundant_tests_check": {
+    "found_redundancy": false,
+    "detail": "Each Rust test in golden_fixtures.rs has a distinct purpose: emit_fixtures (production output, gated #[ignore]); test_emitter_deterministic (intra-run determinism); test_fixture_count_and_unique_names (catalogue invariant); test_fixed_keypair_pubkey_stable (seed->pubkey anchor). cose.golden.test.ts has 2 test cases: 'fixture has at least 20 entries with unique names' and 'all entries match WASM-produced COSE byte-for-byte' — distinct concerns. No tests duplicate each other."
+  },
+  "test_quality_principles_applied": {
+    "tests_real_behavior": true,
+    "no_excessive_mocking": true,
+    "tests_assert_actual_results": true,
+    "fast_tests": true,
+    "isolated_tests": true,
+    "clear_test_names": true,
+    "single_concern_per_test": true,
+    "every_test_earns_its_place": true,
+    "notes": "All tests run against real WASM (pkg-nodejs) or real Rust core code. No 3+ dependency mocking; the only test setup is reading a file and importing the WASM module. Tests would fail on real regressions, not just mock invocation count."
+  },
+  "recommendations_priority_ordered": [
+    "1. (medium) Add ~5 fixtures covering non-MEMORY_V1 schemas (RAG_CONTEXT_V1, RAG_RESULT_V1, AGENT_STATE_V1, RECEIPT_V1) — this is the largest practical coverage gap because field-order arrays differ per schema and a bug in any of them would not be caught.",
+    "2. (medium) Add 5 fixtures covering canonical.rs::json_to_cbor branches not currently exercised: nested object, unsorted-key map (verifies sort), boolean, negative integer, float.",
+    "3. (low) Pin the pubkey value in test_fixed_keypair_pubkey_stable: `assert_eq!(kp.pubkey().to_string(), \"56LtbqTNScYQqjGpec1TW7himmeeGF1L7cGbDt6BfFuU\")`.",
+    "4. (low) Add timestamp variation fixtures: timezone offset, pre-epoch, and one unparseable-as-RFC3339 string (Text fallback).",
+    "5. (low) Add empty-array, empty-map, and explicit-null-metadata fixtures to verify omission distinction.",
+    "6. (low) Add CBOR small-array boundary fixture (24+ tags) and parents array near MAX_PARENTS.",
+    "7. (low) Document or assert: golden output never contains indefinite-length CBOR markers (0x5f/0x7f/0x9f/0xbf).",
+    "8. (info) Document or skip the >64KiB content boundary; current 5KB max does not exercise u16->u32 length-prefix transition."
+  ],
+  "blocking_for_merge": false,
+  "summary_one_line": "Test infrastructure is structurally correct (byte-exact, deterministic, lockstep-gated), but the 22-fixture catalogue undershoots the '~50' target and misses several CBOR-canonical edge cases (alternate schemas, nested objects, boolean/float/negative-int branches, empty containers, length-prefix u16->u32 boundary); the pubkey-stability test is also weaker than its name implies. Recommend expanding fixtures to ~35-40 and pinning the pubkey value before merge."
+}

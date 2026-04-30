@@ -1,0 +1,97 @@
+{
+  "task": 7,
+  "commit": "51b6508",
+  "reviewer": "code-reviewer",
+  "round": 1,
+  "verdict": "needs_changes",
+  "summary": "T7 implements the webapp 'Send to CLI' button per Decision 7. UI / state-machine / error mapping / countdown / Tailwind styling / data-testid / strict-TS handling are all correct, and the existing IdentityPanel regression test was preserved cleanly. However there is one critical end-to-end correctness bug: the webapp posts the entire localStorage object shape ({secret,pubkey_base58}) as keypair_json, but the T6 server's redeem handler parses it as a bare 64-byte JSON array (Vec<u8>). Live redemption will 500 with 'stored keypair_json is not a JSON byte array'. The committed e2e live-backend test would catch this if PLAYWRIGHT_TEST_JWT were ever supplied — currently it is the only path that exercises the round-trip and it is gated off by default, so vitest+offline-Playwright are both green while the production flow is broken.",
+  "findings": [
+    {
+      "id": "T7-CR-1",
+      "severity": "critical",
+      "dimension": "cross_file_consistency",
+      "title": "keypair_json wire shape mismatch between webapp POST and server redeem parser",
+      "files": [
+        "webapp/src/components/IdentityPanel.tsx:160-184",
+        "mcp/src/api.rs:560-589"
+      ],
+      "evidence": "IdentityPanel.tsx reads `localStorage.getItem('mnemonic.identity')` (which is `JSON.stringify({secret: number[64], pubkey_base58: string})` — see webapp/src/lib/storage.ts::writeIdentity) and posts it verbatim as `body.keypair_json`. The T6 server stores it verbatim and on redeem does `serde_json::from_str::<Vec<u8>>(&entry.keypair_json)` (api.rs:563), expecting a flat JSON byte array like `[0,1,2,...,63]`. Parsing the object form `{secret: [...], pubkey_base58: '...'}` as `Vec<u8>` fails with `invalid type: map, expected sequence`, returning HTTP 500 'stored keypair_json is not a JSON byte array'. The live-backend e2e test (`webapp/e2e/cli-bootstrap.spec.ts:79-117`) explicitly asserts r1.status() === 200 — so the moment that suite runs against a real server with a real JWT, it will fail. Decision 7 in tech-spec.md specifies redeem must return `{secret: number[64], pubkey_base58: string}`; the only way to make that contract work with the current server is to send the bare 64-byte secret array, not the localStorage object. Decisions.md note #4 ('keypair still lives unencrypted in localStorage. The Send to CLI handler reads the raw string and posts it verbatim') restates the bug — it is consistent with what the code does, but inconsistent with what the server consumes.",
+      "recommendation": "Pick one of two fixes; (a) is preferred because it does not leak the unused `pubkey_base58` field over the wire and matches the Solana on-disk convention the server already uses. (a) Webapp side: derive the 64-byte secret from the parsed identity and post `JSON.stringify(parsed.secret)` as `keypair_json`. Concretely:\n  const parsed = readIdentity();\n  if (!parsed) { ...error... }\n  const wire = JSON.stringify(parsed.secret);\n  ... body: JSON.stringify({ keypair_json: wire }) ...\nUpdate the existing unit test `send_to_cli_calls_endpoint_and_displays_ticket` to assert `JSON.parse(body.keypair_json).length === 64` and that every entry is a number, instead of `parsedKp.pubkey_base58 === '...'`. (b) Server side: change `bootstrap_redeem_handler` to also accept the object form `{secret: Vec<u8>, pubkey_base58: String}` and prefer it. Either fix unblocks the round-trip; without one of them the CLI will never successfully redeem a ticket issued from the webapp.",
+      "blocking": true
+    },
+    {
+      "id": "T7-CR-2",
+      "severity": "minor",
+      "dimension": "testing",
+      "title": "vi.stubGlobal('fetch') and Object.defineProperty(window, 'location') are not unwound between tests",
+      "files": [
+        "webapp/src/components/IdentityPanel.test.tsx:39-42",
+        "webapp/src/components/IdentityPanel.test.tsx:196-199"
+      ],
+      "evidence": "afterEach calls vi.restoreAllMocks(), but vitest's restoreAllMocks does NOT undo vi.stubGlobal — that needs vi.unstubAllGlobals(). Object.defineProperty(window, 'location', { value: { ...window.location, assign } }) in the 401 test is also not restored. This works today because the 401 test runs last and each test re-stubs fetch with its own vi.fn, but adding any new test below the 401 case will inherit the spy'd window.location.assign and a stale fetch global, leading to flaky failures.",
+      "recommendation": "Add `vi.unstubAllGlobals()` to afterEach. For window.location, capture the original descriptor before defineProperty and restore it in afterEach (or use vi.spyOn(window.location, 'assign') if a spy on the existing object is enough). Both changes are low-risk and prevent future test-order coupling.",
+      "blocking": false
+    },
+    {
+      "id": "T7-CR-3",
+      "severity": "minor",
+      "dimension": "readability",
+      "title": "MCP_BASE constant duplicated across three files",
+      "files": [
+        "webapp/src/components/IdentityPanel.tsx:17-19",
+        "webapp/src/pages/Sign.tsx:39-41",
+        "webapp/src/pages/Consent.tsx:34-36"
+      ],
+      "evidence": "Same `(import.meta.env?.VITE_MCP_BASE as string | undefined) ?? 'https://mcp.mnemonik.xyz'` block now exists in three places. Adding it here is consistent with the existing pattern (no regression), but the duplication is now load-bearing — a future change to the default URL or env-var name has to be made in three places to keep behavior in sync.",
+      "recommendation": "Extract to `webapp/src/lib/config.ts::mcpBase()` (or co-locate with `_helpers.ts::mcpBase`'s logic) and import from one place. Out of scope for T7 per the task description, but worth tracking as a tiny follow-up.",
+      "blocking": false
+    },
+    {
+      "id": "T7-CR-4",
+      "severity": "minor",
+      "dimension": "ux",
+      "title": "Auto-expire transition replaces the issued ticket with an inline error rather than returning to idle",
+      "files": [
+        "webapp/src/components/IdentityPanel.tsx:282-289"
+      ],
+      "evidence": "When the countdown hits 00:00 the component sets `cliState = { kind: 'error', message: 'Ticket expired. Click Send to CLI to issue a new one.' }`. That works, but it means the user now sees a red error banner for a benign 'TTL elapsed' state, and the button label flips back to 'Send to CLI' so the visual cue duplicates. A friendlier UX is to drop straight to `idle` and rely on the button being available; or stay in `issued` but flip the ticket display to a 'Ticket expired' state without the error chrome. This is purely cosmetic and not blocking.",
+      "recommendation": "Optional: replace `setCliState({ kind: 'error', ... })` with `setCliState({ kind: 'idle' })` and let the user re-click. Or add a fifth state `expired` that uses the muted-text styling instead of the error styling.",
+      "blocking": false
+    },
+    {
+      "id": "T7-CR-5",
+      "severity": "minor",
+      "dimension": "ux_consistency",
+      "title": "401 redirect-on-prefetch path swallows reason; user lands on /oauth/consent with no signal why",
+      "files": [
+        "webapp/src/components/IdentityPanel.tsx:168-174",
+        "webapp/src/components/IdentityPanel.tsx:187-191"
+      ],
+      "evidence": "Both the 'no JWT in localStorage' branch (line 169-174) and the '401 from server' branch (line 187-191) call `window.location.assign('/oauth/consent')` with no query parameter or session-storage breadcrumb. The user clicked 'Send to CLI', then bounces to OAuth consent without context — and after a successful re-auth they land on /install with no automatic resumption of the bootstrap flow. Sign.tsx has the same shape today, so this is consistent (not a regression), but worth flagging for the follow-up that Decision 7 already lists as 'No revoke ticket surface yet'.",
+      "recommendation": "Optional: append `?return_to=/install&action=send-to-cli` (or sessionStorage-stash the intent) so post-OAuth the panel can auto-trigger the issue. Out of scope for T7.",
+      "blocking": false
+    }
+  ],
+  "passed_checks": [
+    "data-testid='identity-send-to-cli' is present on the new button (line 377), and additional testids cover ticket/command/copy/countdown/error sub-elements.",
+    "Click handler reads localStorage['mnemonic.identity'] (line 160) and JWT via readJwt() (line 168, from lib/storage), and POSTs to `${MCP_BASE}/api/cli-bootstrap/issue` with `Authorization: Bearer ${jwt}` and `Content-Type: application/json` (lines 178-185). All three matches the task spec.",
+    "Display state renders an exact `mnemonic identity import --ticket <uuid>` template literal in a <code> block (line 396) — no string drift from the task wording.",
+    "Copy button calls `navigator.clipboard.writeText(\\`mnemonic identity import --ticket ${cliState.ticketId}\\`)` (line 252-254) — exact same string as the displayed code block, and the unit test pins this with a `toHaveBeenCalledWith` assertion on the literal.",
+    "Countdown timer logic uses `expires_at` (unix seconds, multiplied by 1000) when the server returns it, falls back to `Date.now() + BOOTSTRAP_TTL_MS` (10 minutes) otherwise (lines 226-231).",
+    "Error mapping is correct: 401 → window.location.assign('/oauth/consent') (lines 187-191), 429 → '3 active CLI tickets' message (lines 192-199), other → 'Could not issue ticket: ${detail}' with server's `error` field when JSON-parseable (lines 200-213). Each branch is covered by a dedicated unit test.",
+    "Existing `renders_did_after_generate` regression test still runs (the diff hoisted the `fireEvent` import and added vi.restoreAllMocks() to afterEach without altering the assertion body). Reported by decisions.md verification: 4/4 vitest tests pass.",
+    "TypeScript strict mode honored: no `any` in the production code; the discriminated union `CliBootstrapState` narrows correctly throughout; response body is typed as `{ ticket_id?: unknown; expires_at?: unknown }` and narrowed with typeof checks before use. The single `as unknown as` cast lives only in the test (justified in decisions.md to satisfy vitest's strict mock-call element type).",
+    "E2E spec at `webapp/e2e/cli-bootstrap.spec.ts` is properly skippable: live test gates on `PLAYWRIGHT_SKIP_BACKEND_E2E` and on `PLAYWRIGHT_TEST_JWT` presence; offline test uses `page.route(...)` to stub fetch entirely.",
+    "Tailwind classes for the new button match the existing 'Import keypair' / 'Export backup' style (`rounded-md border border-text-muted/30 px-4 py-2 text-sm text-text-primary transition-colors hover:border-accent-primary hover:text-accent-primary disabled:cursor-not-allowed disabled:opacity-40`) — visual consistency preserved. The new ticket panel uses `border-accent-primary/30 bg-accent-primary/5` which matches the visual vocabulary used elsewhere in the webapp.",
+    "Separate `cliState` state channel keeps the bootstrap error from clobbering the existing `error` channel — sensible separation of concerns and explicitly called out in decisions.md.",
+    "Timer interval cleans up via the effect's return function (line 272), and the effect's guard `if (cliState.kind !== 'issued') return` prevents the interval from running when no ticket is outstanding."
+  ],
+  "out_of_scope_observations": [
+    "The server-side keypair-shape parser (api.rs:563) was added in T6 and is the symmetric half of finding T7-CR-1. If T7 fixes the bug on the webapp side (option a), no server change is required; if the project would rather standardise on the object shape, this is a small T6 follow-up.",
+    "decisions.md concern #2 ('navigator.clipboard.writeText failure modes') is faithfully captured by the try/catch + inline error in handleCopyTicket. No legacy fallback needed.",
+    "Per-user cap message hardcodes '3 active' — matches `BOOTSTRAP_PER_USER_CAP=3` in api.rs but is a magic number. Acceptable for now; if the cap ever moves to env-driven config the webapp string will have to follow."
+  ],
+  "blocking_items": [
+    "T7-CR-1"
+  ]
+}

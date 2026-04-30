@@ -89,6 +89,7 @@ fn build_state() -> Arc<McpState> {
         ollama_client,
         chat_limiter,
         pending: Arc::new(PendingBundles::with_defaults()),
+        bootstrap_tickets: Arc::new(mnemonic_mcp::api::BootstrapTickets::with_defaults()),
     })
 }
 

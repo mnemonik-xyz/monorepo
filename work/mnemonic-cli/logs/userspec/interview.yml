@@ -1,0 +1,167 @@
+# Interview Plan for mnemonic-cli
+# Phase 1: command-line utility for interacting with Mnemonic Protocol
+
+interview_metadata:
+  started: "2026-04-29"
+  last_updated: "2026-04-29"
+  status: "completed"
+  can_resume: false
+  current_question_num: 15
+  feature_size: "M"
+
+conversation_history: []
+
+# ============================================================================
+# Phase 1: High-Level Feature Understanding
+# ============================================================================
+phase1_feature_overview:
+
+  feature_name:
+    score: 95
+    status: "complete"
+    value: "mnemonic-cli"
+    gaps: ""
+    required: true
+
+  feature_description:
+    score: 40
+    status: "partial"
+    value: "Command-line utility for working with Mnemonic Protocol, similar to claude/codex/qwen CLIs for AI tools."
+    gaps: "What commands? Speaks to hosted MCP via HTTP+OAuth, or stdio to a local mnemonic-mcp binary, or both? Auth UX (keypair file vs browser login)?"
+    required: true
+
+  work_type:
+    score: 100
+    status: "complete"
+    value: "feature"
+    gaps: ""
+    required: true
+
+  user_problem:
+    score: 30
+    status: "partial"
+    value: "Power users / developers want a scriptable surface for sign_memory / recall / verify without an MCP-aware editor."
+    gaps: "Concrete user — script automation, terminal-only workflows, CI usage, agent integration?"
+    required: true
+
+  target_users:
+    score: 30
+    status: "partial"
+    value: "Developers comfortable with terminal CLIs."
+    gaps: "Mnemonic protocol authors only? Or end-users who don't run Cursor/VS Code/Claude.ai? Hackathon judges?"
+    required: true
+
+  feature_size:
+    score: 70
+    status: "partial"
+    value: "M (3-5 dev-days, new workspace member)"
+    gaps: "Confirm after scope is clear."
+    required: true
+
+  testing_strategy:
+    score: 0
+    status: "missing"
+    value: ""
+    gaps: "Unit tests for command parsing, integration tests against stdio MCP server, e2e against hosted MCP — which subset?"
+    required: true
+
+# ============================================================================
+# Phase 2: User Experience
+# ============================================================================
+phase2_user_experience:
+
+  primary_user_flow:
+    score: 0
+    status: "missing"
+    value: ""
+    gaps: "Onboarding (install + first sign), recall, verify, key management."
+    required: true
+
+  command_surface:
+    score: 0
+    status: "missing"
+    value: ""
+    gaps: "sign / recall / verify / whoami / prove? keypair generate/import/export? config management?"
+    required: true
+
+  output_format:
+    score: 0
+    status: "missing"
+    value: ""
+    gaps: "Pretty-print for humans, --json for piping. Color/no-color. Quiet mode."
+    required: true
+
+  auth_ux:
+    score: 0
+    status: "missing"
+    value: ""
+    gaps: "Keypair file path (--keypair), env var, browser OAuth login flow (mnemonic login), or all three?"
+    required: true
+
+  config_ux:
+    score: 0
+    status: "missing"
+    value: ""
+    gaps: "$HOME/.mnemonic/config.toml, env vars, --flags. Profile support?"
+    required: true
+
+  error_handling:
+    score: 0
+    status: "missing"
+    value: ""
+    gaps: "Network down, expired token, mismatched keypair, server returning errors. Exit codes?"
+    required: true
+
+# ============================================================================
+# Phase 3: Integration & Deployment
+# ============================================================================
+phase3_integration:
+
+  transport_strategy:
+    score: 0
+    status: "missing"
+    value: ""
+    gaps: "Stdio to local binary (zero-config offline), HTTP to mc.mnemonik.xyz, or --remote toggle?"
+    required: true
+
+  reuse_strategy:
+    score: 0
+    status: "missing"
+    value: ""
+    gaps: "Reuse mnemonic-core directly (in-process, no MCP layer) or always go through MCP JSON-RPC?"
+    required: true
+
+  distribution:
+    score: 0
+    status: "missing"
+    value: ""
+    gaps: "cargo install mnemonic-cli, homebrew tap, GHCR docker, prebuilt binaries on GitHub Releases?"
+    required: true
+
+  deploy_approach:
+    score: 0
+    status: "missing"
+    value: ""
+    gaps: "CI/CD for releases, version tagging, signed binaries?"
+    required: true
+
+  manual_user_actions:
+    score: 0
+    status: "missing"
+    value: ""
+    gaps: "First-time setup steps (generate keypair, save somewhere, login), update flow."
+    required: true
+
+  out_of_scope:
+    score: 0
+    status: "missing"
+    value: ""
+    gaps: "TUI/REPL? Plugin system? Webapp embed? GUI? Self-host setup commands?"
+    required: true
+
+notes: |
+  User explicitly compared to claude/codex/qwen CLIs. Open questions:
+  - Is this for Mnemonic protocol authors (debugging, scripting), or for end users
+    who don't have a supported MCP editor (terminal-only personas)?
+  - Should it embed the agent loop (an actual chat REPL with LLM + tool calls)
+    or be purely a thin client for the 5 MCP tools?

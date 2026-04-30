@@ -1,0 +1,198 @@
+{
+  "task": 6,
+  "round": 1,
+  "reviewer": "security-auditor",
+  "skill": "security-auditor",
+  "commit": "3e0752c",
+  "branch": "feat/mnemonic-cli-userspec",
+  "verdict": "approved-with-followups",
+  "summary": "T6 implementation correctly hardens the OAuth surface (redirect_uri allowlist + RFC 6749 §4.1.3 / RFC 7636 §4.4 binding) and adds the bootstrap-ticket capability flow (LRU+TTL, atomic consume, per-user cap, UUIDv4 capability auth) per Decisions 5 and 7. No critical or high findings. The hand-rolled loopback parser correctly rejects 0.0.0.0, literal `localhost`, lookalike hosts (`127.0.0.1.evil.com`), suffix-bearing paths, non-numeric ports, and missing ports. Loopback acceptance is gated to `client_id == \"mnemonic-cli\"` and explicitly tested against cursor / claude / vscode / empty. Bootstrap tickets use `Uuid::new_v4()` (122-bit CSPRNG) — unguessable. `BootstrapInner::consume` removes-and-returns under a single tokio mutex guard with no `.await` while held — atomicity verified by `test_bootstrap_ticket_atomic_consume`. The 4th issue per `jwt_sub` returns 429. TTL eviction tested via `force_expire`. Redeem endpoint exempted from `bearer_auth_middleware` via path-prefix allowlist `/api/cli-bootstrap/redeem/`; issue endpoint runs through the middleware and depends on `Extension(Claims)` injection (proven middleware-extracted, not body-derived). No tracing / log statements introduced in api.rs or oauth.rs — A09 (logging-of-sensitive-values) inherently satisfied for this diff.",
+  "files_audited": [
+    "mcp/src/oauth.rs (allowed_redirect, is_loopback_callback, IssuedCode.redirect_uri binding, token_handler equality check, bearer_auth_middleware allowlist update)",
+    "mcp/src/api.rs (BootstrapTickets, BootstrapTicket, bootstrap_issue_handler, bootstrap_redeem_handler, bootstrap_not_found, tests)",
+    "mcp/src/main.rs (route wiring + McpState construction)",
+    "mcp/src/mcp.rs (McpState::bootstrap_tickets field)",
+    "mcp/src/{chat,test_support}.rs + integration test fixtures (state-construction plumbing)"
+  ],
+  "owasp_categories_reviewed": [
+    "A01:2021 Broken Access Control",
+    "A02:2021 Cryptographic Failures",
+    "A04:2021 Insecure Design",
+    "A05:2021 Security Misconfiguration",
+    "A07:2021 Identification & Authentication Failures",
+    "A09:2021 Security Logging & Monitoring Failures",
+    "A10:2021 SSRF (open-redirect adjacent)"
+  ],
+  "rfcs_referenced": [
+    "RFC 6749 §4.1.3 (redirect_uri equality at /token)",
+    "RFC 7636 §4.4 (PKCE state→verifier binding)",
+    "RFC 8252 §7 (loopback redirect for native clients)"
+  ],
+  "findings": [
+    {
+      "id": "T6-SEC-001",
+      "severity": "low",
+      "owasp": "A04",
+      "category": "Test coverage gap (defense-in-depth verification)",
+      "title": "No explicit unit test asserts `http://localhost:<port>/callback` is rejected",
+      "file": "mcp/src/oauth.rs",
+      "lines": "962-1014 (test_oauth_allowed_redirect_exact_and_prefix)",
+      "description": "The `is_loopback_callback` helper only matches `http://127.0.0.1:` or `http://[::1]:` byte-prefixes, so the literal `http://localhost:1234/callback` correctly returns false. The reviewer-supplied focus list called this out explicitly, but no test asserts the negative. The implementation is correct today — this is a regression-prevention gap, not an exploitable bug.",
+      "impact": "If a future refactor (e.g., adding hostname-aware matching or pulling in a `url` crate parser) accidentally accepts `localhost`, an attacker controlling DNS for `localhost.<their-domain>` (in unusual setups) could exploit. Currently inert.",
+      "recommendation": "Add one assertion to `test_oauth_allowed_redirect_exact_and_prefix` (or a new test): `assert!(!allowed_redirect(\"http://localhost:1234/callback\", \"mnemonic-cli\"));` Then add a comment near `is_loopback_callback` explaining the intentional IP-literal-only policy.",
+      "blocking": false
+    },
+    {
+      "id": "T6-SEC-002",
+      "severity": "low",
+      "owasp": "A04",
+      "category": "Insecure design — completeness",
+      "title": "`redirect_uri` on `/oauth/token` is `Option<String>`; mismatch is rejected only when present",
+      "file": "mcp/src/oauth.rs",
+      "lines": "765-773, 857-864",
+      "description": "The token-handler treats `redirect_uri` as optional `Option<String>` for backward compatibility (legacy webapp client never sent it). RFC 6749 §4.1.3 requires that if `redirect_uri` was supplied at /authorize then it MUST be supplied at /token. As implemented, the equality check is only run when the client supplies the field — an attacker who steals a code can therefore exchange it WITHOUT supplying any `redirect_uri` and the binding check is skipped. PKCE verifier check still gates the exchange, so this is not directly exploitable today (the attacker would also need the verifier), but it weakens defense-in-depth.",
+      "impact": "Reduces RFC 6749 §4.1.3 mitigation strength against code-injection. Code stays single-use (popped from LRU before any check), so a successful exchange still consumes the code; this is not a code-replay vector.",
+      "recommendation": "Already noted as a follow-up in `decisions.md` § Concerns 3. Acceptable for Phase 1; track as backlog. Future hardening: when `client_id == \"mnemonic-cli\"`, require `redirect_uri` on /token (Option::None → 400). Decisions.md captures this — leaving it in backlog is acceptable.",
+      "blocking": false
+    },
+    {
+      "id": "T6-SEC-003",
+      "severity": "informational",
+      "owasp": "A04",
+      "category": "DoS / quota-exhaustion (LRU mediation)",
+      "title": "Cross-user LRU eviction allows a passive DoS by 100 distinct attackers",
+      "file": "mcp/src/api.rs",
+      "lines": "374-413 (BootstrapTickets::insert)",
+      "description": "Production caps are LRU=100, per-user=3. 34 distinct authenticated attackers each issuing 3 tickets (102 tickets total) will saturate the LRU, evicting one legitimate user's ticket per fresh issue. Per-user cap prevents single-attacker amplification, but the LRU is shared. Eviction returns 410-Gone-equivalent (404 — uniform), so legitimate users see a transient failure that is recoverable by re-issuing. No data leak.",
+      "impact": "Bounded annoyance, recoverable via retry. Risk note in tech-spec § Risks already documents this.",
+      "recommendation": "Already documented in tech-spec § Risks (\"raise the cap or move to Redis\"). No code change needed for Phase 1.",
+      "blocking": false
+    },
+    {
+      "id": "T6-SEC-004",
+      "severity": "informational",
+      "owasp": "A05",
+      "category": "Defensive code legibility",
+      "title": "`dec_user` after `lru.push` has a tautological `peek().is_some()` clause",
+      "file": "mcp/src/api.rs",
+      "lines": "397-409",
+      "description": "The condition `if guard.lru.peek(&ticket_id).is_some() || evicted.jwt_sub != jwt_sub { dec_user(...) }` is effectively always-true after a successful `push`, since `peek(ticket_id)` returns Some for the just-inserted entry (UUIDv4 collision is a non-event). The OR clause is dead. Code is correct; the comment explains the defensiveness, but the redundancy can confuse a future maintainer into thinking there's a code path where `dec_user` is skipped.",
+      "impact": "None. Logic is correct.",
+      "recommendation": "Optional cleanup: simplify to `guard.dec_user(&evicted.jwt_sub);` unconditional. Drop the OR clause and the comment about it being defensive. Not required for security correctness.",
+      "blocking": false
+    },
+    {
+      "id": "T6-SEC-005",
+      "severity": "informational",
+      "owasp": "A04",
+      "category": "Capability/replay surface (validated, no defect)",
+      "title": "No cross-user keypair leak vector — confirmed by design",
+      "file": "mcp/src/api.rs",
+      "lines": "374-413, 461-478 (insert + redeem-handler)",
+      "description": "Reviewed scenario: a malicious authenticated user (Alice) calls /issue with a keypair_json of her choice (could be garbage, could be Bob's keypair if she somehow obtained it). Server stores it under `jwt_sub=Alice` and returns `ticket_id`. Alice could only redeem it herself or share it. The keypair returned at /redeem is whatever Alice POSTed at /issue — there is no way for Alice to redeem a ticket bound to Bob (because Bob's tickets have different UUIDs which Alice cannot guess: `Uuid::new_v4()` is 122-bit random). The /issue endpoint cannot be used to overwrite an existing ticket (UUID is freshly minted server-side, not client-supplied). Per-user cap is enforced before insert. Confirmed no cross-user pollution path.",
+      "impact": "None — by-design behavior, no defect.",
+      "recommendation": "None.",
+      "blocking": false
+    }
+  ],
+  "verified_properties": [
+    {
+      "property": "redirect_uri allowlist regex coverage — IPv4 and IPv6 loopback",
+      "evidence": "test_oauth_allowed_redirect_loopback_only_for_cli (oauth.rs:1018-1038) iterates v4 and v6 against client_ids cursor/claude/vscode/evil-client/\"\"; production v4+v6 positive tested. is_loopback_callback (oauth.rs:816-835) requires literal `127.0.0.1` or `[::1]` host token, exact-match path `/callback`, all-ASCII-digit non-empty port."
+    },
+    {
+      "property": "redirect_uri allowlist rejects http://0.0.0.0",
+      "evidence": "test_oauth_allowed_redirect_exact_and_prefix:984-988"
+    },
+    {
+      "property": "redirect_uri allowlist rejects http://localhost (literal hostname)",
+      "evidence": "implementation correctness (strip_prefix on `http://127.0.0.1:` and `http://[::1]:` only); NO explicit test (T6-SEC-001 — minor gap)"
+    },
+    {
+      "property": "redirect_uri allowlist rejects loopback paths without /callback suffix",
+      "evidence": "test_oauth_allowed_redirect_exact_and_prefix:990-998 covers `/`, `/foo`, `/callback/extra`"
+    },
+    {
+      "property": "Loopback URIs gated to client_id=mnemonic-cli only",
+      "evidence": "test_oauth_allowed_redirect_loopback_only_for_cli (1018-1038): asserts cursor/claude/vscode/evil-client/empty all reject loopback v4 and v6"
+    },
+    {
+      "property": "IssuedCode.redirect_uri binding enforced at /oauth/token",
+      "evidence": "test_oauth_state_binding_validates_redirect_uri_too (oauth.rs:2069+); also asserts code is single-use even after a 400 mismatch (proves codes.lock().pop runs BEFORE the redirect_uri check, defense-in-depth)"
+    },
+    {
+      "property": "BootstrapTickets atomic consume",
+      "evidence": "test_bootstrap_ticket_atomic_consume (api.rs:402-426): two concurrent consumes against same UUID; some_count exactly 1"
+    },
+    {
+      "property": "Per-user cap of 3 → 4th issue rejected",
+      "evidence": "test_bootstrap_ticket_per_user_cap (api.rs:438-448) — returns BootstrapInsertError::PerUserCapExceeded → 429 in handler (api.rs:286-295)"
+    },
+    {
+      "property": "TTL eviction",
+      "evidence": "test_bootstrap_ticket_ttl_expiry (api.rs:451-463) via force_expire helper"
+    },
+    {
+      "property": "/issue endpoint requires Bearer JWT",
+      "evidence": "Handler signature `Extension(claims): Extension<Claims>` (api.rs:261); /issue is NOT on `bearer_auth_middleware` URL allowlist (oauth.rs:1060-1074); main.rs:617-660 wires /issue under the middleware-protected route group. Without JWT the middleware returns 401 BEFORE the handler executes."
+    },
+    {
+      "property": "/redeem endpoint requires NO auth (capability via UUID)",
+      "evidence": "bearer_auth_middleware allowlists path.starts_with(\"/api/cli-bootstrap/redeem/\") (oauth.rs:1071); test_bootstrap_redeem_no_auth_required (api.rs:489-548) sends GET with no Authorization header and asserts 200 OK"
+    },
+    {
+      "property": "Ticket UUID is unguessable (`Uuid::new_v4()` not v3/v5)",
+      "evidence": "api.rs:387 — `Uuid::new_v4()`; relies on `getrandom` (CSPRNG). 122 bits of entropy; collision probability negligible for LRU lifetime."
+    },
+    {
+      "property": "No cross-user keypair leak via per-user-cap or LRU mechanics",
+      "evidence": "T6-SEC-005 walkthrough; per-user counter is keyed by jwt_sub; insert checks count BEFORE generating ticket_id; eviction decrements the EVICTED entry's user counter (not the inserter's)"
+    },
+    {
+      "property": "A09 — no JWT / redirect_uri / ticket_id at INFO level",
+      "evidence": "grep `tracing::|info!|warn!|debug!|error!|log::` against api.rs and oauth.rs returns no matches; no logging code added in this diff. Existing logging elsewhere (main.rs etc.) was not touched."
+    },
+    {
+      "property": "Uniform 404 for missing/expired/consumed/garbage-UUID redeem (timing+content)",
+      "evidence": "bootstrap_not_found helper (api.rs:483-491); test_bootstrap_redeem_unknown_ticket_404 (api.rs:551-596) covers garbage UUID and never-inserted UUID — both 404 with identical body"
+    },
+    {
+      "property": "Body limit prevents memory exhaustion via large keypair_json",
+      "evidence": "bearer_auth_middleware reads up to MAX_PEEK_BODY=1MB (oauth.rs:1008,1080) before forwarding; /issue is not on the URL allowlist so it goes through the buffered path. Per-user cap 3 × 1MB = 3MB max per attacker; LRU 100 × 1MB = 100MB ceiling."
+    }
+  ],
+  "deferred_or_out_of_scope": [
+    {
+      "item": "Pre-existing baseline test failures in cose_signed-using oauth tests + pending_authz integration tests",
+      "note": "Documented in decisions.md § Concerns 1–2. Not introduced by T6, not in scope for this audit.",
+      "owner": "future test-debt task"
+    },
+    {
+      "item": "Make `redirect_uri` REQUIRED on /token for client_id=mnemonic-cli",
+      "note": "T6-SEC-002. Documented in decisions.md § Concerns 3.",
+      "owner": "Phase 1.1 hardening backlog"
+    },
+    {
+      "item": "Bootstrap tickets in-memory only (lost on server restart)",
+      "note": "Documented in decisions.md § Concerns 4. Acceptable for hackathon scope.",
+      "owner": "future durability work if reports come in"
+    },
+    {
+      "item": "BootstrapInsertError::LruExhausted is unreachable in current LRU (eviction wins)",
+      "note": "Documented in decisions.md § Concerns 5; variant kept for future-API-stability.",
+      "owner": "no action"
+    }
+  ],
+  "recommendations_priority": {
+    "must_fix_before_merge": [],
+    "should_fix_followup": [
+      "T6-SEC-001 — add explicit `assert!(!allowed_redirect(\"http://localhost:1234/callback\", \"mnemonic-cli\"))` test"
+    ],
+    "nice_to_have": [
+      "T6-SEC-004 — simplify the tautological dec_user condition",
+      "T6-SEC-002 — track in backlog: require redirect_uri on /token for mnemonic-cli"
+    ]
+  },
+  "merge_recommendation": "approve",
+  "rationale": "All critical security properties from the task spec are implemented and tested. The single coverage gap (T6-SEC-001, literal `localhost` test) is a defense-in-depth nit, not an exploit vector — the implementation correctly rejects it today. The hand-rolled loopback parser is conservative and well-tested. Bootstrap-ticket flow is correctly minimal (no logging, capability-via-UUID, atomic consume, uniform 404). RFC 6749 §4.1.3 binding is in place with a documented Phase-1 allowance for missing `redirect_uri` on /token (mitigated by PKCE verifier check). No CRITICAL or HIGH findings; one LOW (test gap), one LOW (option-not-required redirect_uri), three INFORMATIONAL."
+}

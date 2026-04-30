@@ -1,0 +1,133 @@
+{
+  "task": 3,
+  "round": 1,
+  "reviewer": "security-auditor",
+  "commit": "f41116c",
+  "branch": "feat/mnemonic-cli-userspec",
+  "verdict": "approve",
+  "summary": "Task 3 SDK OAuth implementation in packages/sdk/src/oauth.ts is sound against the targeted OAuth 2.1 + PKCE threat model (RFC 7636, RFC 8252). All six critical-focus checks pass cleanly. State and redirect_uri are atomically validated against the stored {verifier, state, redirectUri} tuple BEFORE any HTTP exchange; mismatch deletes the session entry and throws AuthError without ever calling fetch (verified via assertions in oauth.test.ts that fetchMock is not invoked on either branch). Entropy sources are correct (crypto.getRandomValues, 32 bytes for both verifier and state). Base64url encoding is RFC 4648 §5 compliant (URL-safe charset, no padding). parseJwtPayload makes no trust decisions based on the unverified header (server is the authority), rejects expired tokens (exp <= now), missing sub, missing iat, missing exp, malformed JSON, malformed segment count, and array payloads (via missing-sub fallthrough). No eval / new Function / dynamic-code paths. No node:* imports — runtime-agnostic per Task 3 spec. The === comparisons for state / redirectUri are explicitly acceptable per the brief since there is no remote timing oracle.",
+  "files_reviewed": [
+    "packages/sdk/src/oauth.ts",
+    "packages/sdk/test/oauth.test.ts",
+    "packages/sdk/src/errors.ts (context for AuthError + redactJWT)"
+  ],
+  "critical_focus_checklist": {
+    "pkce_verifier_entropy": {
+      "status": "pass",
+      "evidence": "oauth.ts:47-51 randomBytes() uses crypto.getRandomValues; oauth.ts:78-80 generatePkceVerifier() calls randomBytes(32). No Math.random anywhere. Test oauth.test.ts:75-79 asserts uniqueness across 32 calls.",
+      "notes": "32 bytes -> 43 base64url chars, satisfies RFC 7636 §4.1 verifier length range (43-128)."
+    },
+    "state_token_entropy": {
+      "status": "pass",
+      "evidence": "oauth.ts:103-105 randomState() shares randomBytes(32) with verifier. Test oauth.test.ts:81-89 asserts uniqueness across 32 calls.",
+      "notes": "256 bits state — sufficient against guessing/replay."
+    },
+    "state_redirect_uri_binding_atomic_pre_http": {
+      "status": "pass",
+      "evidence": "oauth.ts:192-206: lookup session by sessionId, then strict === checks for state and redirectUri, with pendingAuthSessions.delete() on each mismatch path BEFORE the fetch on line 211. Tests oauth.test.ts:183-203 (state mismatch) and 205-224 (redirect_uri mismatch) both assert fetchMock.not.toHaveBeenCalled().",
+      "notes": "Decision 5 (RFC 7636 §4.4 + RFC 8252 §7) correctly enforced. One-shot semantics — session consumed on validation failure prevents replay against a fresh callback."
+    },
+    "base64url_encoding": {
+      "status": "pass",
+      "evidence": "oauth.ts:32-39 bytesToBase64Url uses btoa then s/+/-/, s/\\//_/, strips trailing =. RFC 4648 §5 compliant (URL-safe alphabet, no padding). Test oauth.test.ts:50-55 asserts byte-for-byte against RFC 7636 Appendix B fixture (dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk -> E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM).",
+      "notes": "decodeBase64UrlToString (lines 272-280) correctly re-pads via slice((len+3)%4), reverses URL-safe substitutions before atob."
+    },
+    "parsejwtpayload_does_not_trust_alg_none": {
+      "status": "pass",
+      "evidence": "oauth.ts:291-325 reads only segment[1] (payload) via JSON.parse(decodeBase64UrlToString(parts[1])). The header is never inspected, never used for any verification decision — this is appropriate because the SDK explicitly defers signature verification to the server (documented in oauth.ts:283-284, decisions.md line 132 'no signature verification — server's job'). Therefore the alg=none confusion attack is structurally not applicable here.",
+      "notes": "Caveat: tech-spec Decision 6 mentions 'assert alg=HS256' for the CLI's --token flow. That assertion lives in Task 5 (login.ts), not this module. Out of scope for T3 — flagged for T5 review."
+    },
+    "parsejwtpayload_rejects_expired": {
+      "status": "pass",
+      "evidence": "oauth.ts:319-322 computes nowSec = floor(Date.now()/1000); if obj.exp <= nowSec throws AuthError('jwt: token expired'). Test oauth.test.ts:501-505 covers this with exp = now-60.",
+      "notes": "Strict <= comparison correctly rejects exactly-now tokens too."
+    },
+    "parsejwtpayload_rejects_missing_sub": {
+      "status": "pass",
+      "evidence": "oauth.ts:309-311: typeof obj.sub !== 'string' || obj.sub.length === 0 -> throws. Empty-string sub also rejected. Test oauth.test.ts:477-483 covers missing-sub case.",
+      "notes": "Also rejects missing exp (oauth.ts:312-314, test 485-491) and missing iat (oauth.ts:315-317, test 493-499). Array payload edge case (test 507-516) falls through to the missing-sub branch correctly."
+    },
+    "no_dynamic_code_paths": {
+      "status": "pass",
+      "evidence": "grep -E 'eval\\(|new Function|Function\\(' over oauth.ts returned 0 matches. No node:* imports either (grep 'node:|require\\(' returned 0).",
+      "notes": "Pure ESM, Web APIs only, as specified. JSON.parse is the only deserializer used — safe."
+    },
+    "timing_comparisons_no_oracle": {
+      "status": "pass",
+      "evidence": "oauth.ts:199 (state) and 203 (redirectUri) use ===. Per the brief, this is acceptable because the attacker has no remote timing oracle into the SDK's local Map lookup — pendingAuthSessions is process-local, the comparisons happen before any network I/O, and timing variations cannot be observed across the OAuth boundary.",
+      "notes": "If this code were ever moved to a server-side context (it isn't), constant-time comparison would be warranted. Not applicable here."
+    }
+  },
+  "additional_findings": [
+    {
+      "severity": "info",
+      "title": "Module-level mutable Map (pendingAuthSessions) is process-wide state",
+      "location": "packages/sdk/src/oauth.ts:27",
+      "impact": "In a single-process multi-tenant scenario (e.g. SDK reused inside a shared service), all callers share one Map. Not a vulnerability for the intended single-user CLI / Chrome-extension hosts, where the SDK runs in a per-user process. Documented intent.",
+      "recommendation": "No change required for Phase 1. If the SDK is later embedded in a server, consider exposing a SessionStore interface so callers can inject a per-tenant store."
+    },
+    {
+      "severity": "info",
+      "title": "Network failure preserves session for retry",
+      "location": "packages/sdk/src/oauth.ts:222-226",
+      "impact": "On fetch-level error (TypeError), session is not deleted. This is intentional per the comment ('keep the session so the caller can retry'), and tested at oauth.test.ts:395-413. Slight tension with strict one-shot semantics — a mid-flight network error followed by a retry could in theory race with another /authorize callback firing for the same sessionId. In practice the loopback callback only fires once and the session is uniquely tied to a single callback URL, so the risk is theoretical.",
+      "recommendation": "No change required. If T5's CLI implementation has a retry budget, ensure it is bounded so a stuck verifier+state pair cannot live forever in memory."
+    },
+    {
+      "severity": "info",
+      "title": "AuthError cause chain is not redaction-passed-through",
+      "location": "packages/sdk/src/errors.ts:46-51",
+      "impact": "MnemonicError.redactJWT runs only on the constructor's message argument; the cause field is preserved as-is. If the underlying fetch error message contains a JWT or secret (highly unlikely — fetch errors carry status/URL only), it would leak when consumers call err.cause.message. Decision 10 lists redaction as a Task 8 deliverable (CLI-side redaction tests).",
+      "recommendation": "Out of scope for Task 3. T8 should validate redaction transitively across cause chains."
+    },
+    {
+      "severity": "info",
+      "title": "Synthetic 1h expiresAt fallback when server omits expires_at",
+      "location": "packages/sdk/src/oauth.ts:253-257",
+      "impact": "Could mislead callers if server issues a shorter token but omits the claim. In practice the server (mcp/src/oauth.rs) always emits expires_at — and server's true exp is encoded inside the JWT itself, which the SDK separately parses via parseJwtPayload. No security impact; the JWT's exp is the authority.",
+      "recommendation": "No change required."
+    },
+    {
+      "severity": "info",
+      "title": "client_id is hardcoded to 'mnemonic-cli'",
+      "location": "packages/sdk/src/oauth.ts:219",
+      "impact": "buildAuthorizeUrl accepts a clientId param but exchangeCodeForToken always sends client_id='mnemonic-cli' on the token call. If a Chrome extension uses a different client_id, the token request would mismatch the authorize request. Documented in decisions.md as backlog ('Chrome extension can add a parameter later').",
+      "recommendation": "Out of scope for Task 3. Track in backlog."
+    }
+  ],
+  "rfc_compliance": {
+    "rfc_7636_pkce": {
+      "section_4_1_verifier": "PASS — 32 random bytes -> 43 base64url chars (within 43-128 range), URL-safe charset.",
+      "section_4_2_challenge_method": "PASS — S256 used; SHA-256 over UTF-8 verifier; base64url encoding.",
+      "section_4_4_state_binding": "PASS — state stored alongside verifier and redirect_uri; verified before token exchange.",
+      "appendix_b_fixture": "PASS — verified byte-for-byte in oauth.test.ts:50-55."
+    },
+    "rfc_8252_native_apps": {
+      "section_7_redirect_uri_validation": "PASS — redirect_uri is bound at /authorize and validated at /token before any network call. Server-side allowlist (Task 6) layers defense in depth.",
+      "section_8_3_loopback": "PASS — SDK accepts loopback redirect_uri opaquely; CLI (Task 5) will bind to 127.0.0.1 with ephemeral port."
+    },
+    "owasp_top_10_2021": {
+      "A02_cryptographic_failures": "PASS — Web Crypto API used everywhere; SHA-256 + crypto.getRandomValues.",
+      "A03_injection": "N/A — no SQL, no shell, no template rendering. JSON body uses JSON.stringify.",
+      "A07_identification_and_auth_failures": "PASS — state mismatch fatal, expired JWT rejected, missing sub rejected.",
+      "A08_software_and_data_integrity": "PASS — token endpoint response shape strictly validated; non-JSON / missing-jwt branches throw."
+    }
+  },
+  "tests_observed": {
+    "count": 29,
+    "key_assertions": [
+      "RFC 7636 Appendix B fixture byte-for-byte (oauth.test.ts:50-55)",
+      "fetchMock NOT called on state mismatch (oauth.test.ts:200)",
+      "fetchMock NOT called on redirect_uri mismatch (oauth.test.ts:222)",
+      "fetchMock NOT called on unknown sessionId (oauth.test.ts:236)",
+      "session deleted on validation failure AND on success (oauth.test.ts:202, 223, 315)",
+      "expired JWT rejected (oauth.test.ts:501-505)",
+      "missing sub/exp/iat all rejected (oauth.test.ts:477-499)",
+      "happy-path JSON body shape exact-match (oauth.test.ts:279-285)",
+      "verifier and state both 43 base64url chars (oauth.test.ts:70-89)"
+    ]
+  },
+  "open_questions": [],
+  "blockers": [],
+  "recommendation": "Approve. The implementation is RFC-correct, test coverage on the security-critical paths is strong (state+redirect_uri pre-HTTP rejection, expired-JWT, missing-claim, malformed JSON, fixture). No changes required for Task 3 to merge. Carry forward to T5: Decision 6's alg=HS256 assertion belongs in CLI's --token handler, not this module."
+}

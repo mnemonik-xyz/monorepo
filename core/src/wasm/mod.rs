@@ -190,14 +190,10 @@ pub fn sign_attestation_bundle(
 /// and the signature is computed over `Sig_structure1(protected, payload)`
 /// per RFC 8152.
 #[wasm_bindgen]
-pub fn sign_cose_payload(
-    payload: &[u8],
-    keypair_json: JsValue,
-) -> Result<Vec<u8>, JsValue> {
+pub fn sign_cose_payload(payload: &[u8], keypair_json: JsValue) -> Result<Vec<u8>, JsValue> {
     let kpj = keypair_json_from_value(keypair_json)?;
     let kp = keypair_from_json(kpj)?;
-    sign_cose(payload, &kp)
-        .map_err(|e| JsValue::from_str(&format!("COSE signing failed: {e}")))
+    sign_cose(payload, &kp).map_err(|e| JsValue::from_str(&format!("COSE signing failed: {e}")))
 }
 
 /// Serialize a keypair JSON object to a string for download/backup.

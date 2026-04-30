@@ -79,9 +79,10 @@ export default function Landing() {
                 2 · Install the MCP connector in your AI tool
               </p>
               <p className="mt-1 text-sm text-text-muted">
-                Cursor and VS Code accept a deeplink; Claude.ai accepts a custom
-                connector URL. All three negotiate OAuth 2.1 + PKCE against{" "}
-                <code>mcp.mnemonik.xyz</code>.
+                Cursor and VS Code accept a deeplink; Claude.ai takes a custom
+                connector URL; WindSurf takes a JSON snippet for
+                <code>mcp_config.json</code>. All four negotiate OAuth 2.1 +
+                PKCE against <code>mcp.mnemonik.xyz</code>.
               </p>
             </li>
             <li className="rounded-md border border-text-muted/20 bg-white/5 p-4">

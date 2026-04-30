@@ -1,0 +1,55 @@
+{
+  "name": "@mnemonik-xyz/sdk",
+  "version": "0.1.0",
+  "description": "Runtime-agnostic JavaScript/TypeScript SDK for the Mnemonic Protocol — wraps the hosted MCP HTTP surface, OAuth 2.1 + PKCE, COSE_Sign1 signing via WASM. Pure ESM. Targets Node ≥20, Bun, Deno, Cloudflare Workers, modern browsers.",
+  "license": "Apache-2.0",
+  "//": "private: false — npm publish-ready (T14). Scoped package, public access set explicitly.",
+  "private": false,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mnemonik-xyz/monorepo.git",
+    "directory": "packages/sdk"
+  },
+  "homepage": "https://github.com/mnemonik-xyz/monorepo#readme",
+  "bugs": "https://github.com/mnemonik-xyz/monorepo/issues",
+  "keywords": [
+    "mnemonic",
+    "mcp",
+    "ai",
+    "memory",
+    "ed25519",
+    "cose"
+  ],
+  "scripts": {
+    "build:wasm": "bash scripts/build-wasm.sh",
+    "build": "tsc -b && bash scripts/build-wasm.sh",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "prepublishOnly": "npm run build && npm test"
+  },
+  "devDependencies": {
+    "@noble/ed25519": "^2.3.0",
+    "@noble/hashes": "^2.2.0",
+    "typescript": "^5.4.0",
+    "vitest": "^1.6.0"
+  }
+}

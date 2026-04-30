@@ -1,0 +1,14 @@
+{
+  "name": "mnemonic-monorepo",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Mnemonic Protocol monorepo — JS/TS workspace root. Hosts @mnemonik-xyz/sdk, @mnemonik-xyz/cli and the existing webapp. The Rust workspace (Cargo.toml) is unaffected.",
+  "workspaces": [
+    "packages/*",
+    "webapp"
+  ],
+  "scripts": {
+    "build:wasm:webapp": "bash webapp/scripts/build-wasm.sh",
+    "build:wasm:sdk": "bash packages/sdk/scripts/build-wasm.sh"
+  }
+}

@@ -1,0 +1,51 @@
+{
+  "task": 2,
+  "round": 1,
+  "reviewer": "code-reviewer",
+  "status": "approved",
+  "summary": "Task 2 implements MnemonicClient + Signer interface + LocalSigner + Keypair + COSE wrapper + redacting errors per Decisions 4, 7, 10, 14. All 46 unit tests pass (18 client + 9 signer + 6 signer-contract + 7 keypair + 6 cose). Implementation is pure ESM, zero `node:*` imports in src, capability-auth on /api/sign-callback verified, JWT redaction works on JWT-shape strings, LocalSigner correctly uses sign_challenge (raw Ed25519) not sign_cose_payload. Commits 720877b. Several minor observations below — none blocking.",
+  "findings": [
+    {
+      "severity": "minor",
+      "category": "architecture",
+      "issue": "MnemonicClient requires BOTH `signer` (in constructor) AND `keypair` (via `setKeypair()`) for signMemory. The Signer abstraction (Decision 4) cannot supply keypair JSON since it only exposes `pubkey` + `sign(bytes)`. So signMemory tightly couples to LocalSigner-style keypair JSON via the side-channel `setKeypair` call. Future TurnkeySigner/WebAuthnSigner won't have keypair_json — they'll need a different code path for COSE signing entirely (e.g. signer.signCose(payload)). The Phase 1 design is OK for LocalSigner only, but the comment in client.ts:55-60 acknowledges the wart.",
+      "file": "packages/sdk/src/client.ts:54-91",
+      "recommendation": "Phase 1.5+: extend Signer interface with an optional `signCose(payload: Uint8Array): Promise<Uint8Array>` method (or expose keypair-only impls via a sub-interface). For Phase 1 the current dual-bind pattern is acceptable but document the limitation in JSDoc on `setKeypair`."
+    },
+    {
+      "severity": "minor",
+      "category": "security",
+      "issue": "JWT redaction regex `/eyJ[A-Za-z0-9_-]{20,}/g` catches header+payload segments (which both start with `eyJ`) but does NOT redact the third (signature) segment of a real three-part JWT, since signatures don't start with `eyJ`. So `eyJh.eyJp.SIGNATUREBYTES` becomes `[REDACTED-JWT].[REDACTED-JWT].SIGNATUREBYTES`. Standalone signature segments are not directly reversible, but they leak token-structure information. Decision 10 says JWT-shape strings must not appear — this is satisfied for the prefixed segments.",
+      "file": "packages/sdk/src/errors.ts:24",
+      "recommendation": "Optionally augment the regex to also catch full three-segment JWTs: `/eyJ[A-Za-z0-9_-]{20,}(?:\\.[A-Za-z0-9_-]+){0,2}/g`. Not blocking for Phase 1; the current behavior matches the user-spec test assertion `/^eyJ[A-Za-z0-9_-]+$/`."
+    },
+    {
+      "severity": "minor",
+      "category": "error_handling",
+      "issue": "MnemonicError stores `cause` verbatim (line 50); cause objects can carry sensitive info (response bodies with JWTs, etc.) into `error.cause` that consumers might `console.error()`. The `message` is redacted but the cause is not. At client.ts:375 `new ServerError(..., res.status, e)` passes the JSON parse error as cause, and that error may quote the malformed body containing a JWT.",
+      "file": "packages/sdk/src/errors.ts:46-51",
+      "recommendation": "Either (a) document in JSDoc that `cause` may contain unredacted detail and is for developers, OR (b) shallowly stringify-and-redact cause's message before storing. Decision 10 explicitly says 'cause chain' is developer-facing, so option (a) is sufficient — add a one-line JSDoc note on the cause field."
+    },
+    {
+      "severity": "minor",
+      "category": "naming",
+      "issue": "Task 2 description says SDK should POST `cose_signed` field to /api/sign-callback, but the implementation correctly posts `cose_signed_bytes` matching the actual server contract in `mcp/src/api.rs:91` (`SignCallbackRequest.cose_signed_bytes`). The task description was wrong; the implementation is right. No action needed but flagging for traceability.",
+      "file": "packages/sdk/src/client.ts:189",
+      "recommendation": "No code change. Optionally update task description in retrospect for future audit consistency."
+    },
+    {
+      "severity": "minor",
+      "category": "testing",
+      "issue": "decisions.md T2 entry notes uncovered lines: `client.ts:81` (setJwt one-liner), `errors.ts:74-75` (IntegrityError constructor), and the real-WASM dynamic-import path in `wasm.ts:31-46` (intentional — Task 4's golden-fixture test covers it). IntegrityError is reachable only when the callback omits `attestation_id`; not a load-bearing path but worth a one-line test.",
+      "file": "packages/sdk/test/client.test.ts",
+      "recommendation": "Add a single test asserting `IntegrityError` is thrown when the callback returns 200 but body lacks `attestation_id`. Trivial addition."
+    },
+    {
+      "severity": "minor",
+      "category": "consistency",
+      "issue": "redactJWT is invoked on the message via the base MnemonicError constructor, AND ALSO pre-applied in `readBodySafely` at client.ts:447. Double redaction is idempotent so this is harmless but slightly redundant. The intent (defense in depth) is fine.",
+      "file": "packages/sdk/src/client.ts:444-451",
+      "recommendation": "Add a one-line comment in `readBodySafely` clarifying that the second redaction is intentional defense-in-depth so future maintainers don't remove it."
+    }
+  ]
+}

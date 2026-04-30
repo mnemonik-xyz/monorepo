@@ -1,22 +1,35 @@
 #!/usr/bin/env bash
 #
-# build-wasm.sh — Build the mnemonic-core Rust crate to WebAssembly for the webapp.
+# build-wasm.sh — Build the mnemonic-core Rust crate to WebAssembly for both
+# the webapp (`webapp/src/wasm/`) AND the SDK (`core/pkg-web/`).
+#
+# Both consumers use the same `--target web` artifact bytes; the webapp loads
+# them from `src/wasm/` (Vite-bundled), the SDK loads them from `core/pkg-web/`
+# (workspace-internal). Building both in one pass keeps them in lockstep —
+# every webapp build automatically refreshes the SDK artifact too. Decision 3
+# of work/mnemonic-cli/tech-spec.md picked `--target web` for the SDK; see
+# packages/sdk/README.md "Runtime targets" for the smoke matrix.
 #
 # Prerequisites:
-#   - wasm-pack must be installed (one-time, NOT an npm dependency):
+#   - wasm-pack ≥ 0.14 must be installed (NOT an npm dependency):
 #       cargo install wasm-pack
-#   - The sibling crate core/Cargo.toml must declare a `wasm` feature
-#     (added by Task 2 of mnemonic-integrations). Without it, the build below
-#     fails with "feature `wasm` not found".
+#   - The sibling crate core/Cargo.toml must declare the `wasm` feature
+#     (already added by mnemonic-integrations Task 2).
 #
-# Output:
-#   webapp/src/wasm/ contains the wasm-pack `--target web` ES module:
-#     - mnemonic_core.js          (JS shim, default export = init())
-#     - mnemonic_core.d.ts        (TypeScript types)
-#     - mnemonic_core_bg.wasm     (the compiled WebAssembly)
-#     - mnemonic_core_bg.wasm.d.ts
-#     - package.json              (wasm-pack metadata, ignored by Vite)
-#   This directory is git-ignored — it is regenerated on every `npm run build`.
+# wasm-pack quirk: cargo ≥ 1.92 renamed `--out-dir` to `--artifact-dir`, which
+# breaks wasm-pack's `--out-dir <PATH>` for any path other than the default
+# `pkg`. Workaround: build into the default `core/pkg/` first, then mirror to
+# both consumer-facing destinations.
+#
+# Output layout:
+#   webapp/src/wasm/        — git-ignored, regenerated on every `npm run build`
+#     mnemonic_core.js          (JS shim, default export = init())
+#     mnemonic_core.d.ts        (TypeScript types)
+#     mnemonic_core_bg.wasm     (compiled WebAssembly)
+#     mnemonic_core_bg.wasm.d.ts
+#     package.json              (wasm-pack metadata, ignored by Vite)
+#   core/pkg-web/           — git-ignored, consumed by @mnemonik-xyz/sdk
+#     same files, identical bytes.
 #
 # Usage:
 #   bash webapp/scripts/build-wasm.sh
@@ -35,11 +48,21 @@ if ! command -v wasm-pack >/dev/null 2>&1; then
 fi
 
 cd "$REPO_ROOT"
-# wasm-pack interprets `--out-dir` relative to the crate manifest (core/), so
-# we pass an absolute path to keep the output anchored at webapp/src/wasm/
-# regardless of the build cwd.
-wasm-pack build core \
-  --target web \
-  --out-dir "$REPO_ROOT/webapp/src/wasm" \
-  --release \
-  --features wasm
+
+# Wipe stale outputs so the post-build mirror operations cannot pick up old
+# files left over from a previous failed build.
+rm -rf core/pkg core/pkg-web webapp/src/wasm
+
+# Build into the default `core/pkg/` directory — the only `--out-dir` value
+# wasm-pack reliably supports under cargo ≥ 1.92.
+wasm-pack build core --target web --features wasm
+
+# Mirror the artifact to both consumers. Using `cp -R` (not `mv`) so the
+# webapp and SDK have independent copies — touching one doesn't perturb the
+# other if a downstream tool decides to mutate files in place.
+mkdir -p webapp/src
+cp -R core/pkg webapp/src/wasm
+mv core/pkg core/pkg-web
+
+echo "✓ webapp wasm  -> $REPO_ROOT/webapp/src/wasm/"
+echo "✓ sdk wasm     -> $REPO_ROOT/core/pkg-web/"

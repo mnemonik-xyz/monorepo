@@ -1,0 +1,65 @@
+{
+  "task": 1,
+  "round": 1,
+  "reviewer": "code-reviewer",
+  "status": "issues_found",
+  "summary": "Skeleton is well-structured, decisions.md is excellent, smoke matrix is rigorous and the --target web choice is justified. A handful of minor maintainability and consistency issues; no blockers.",
+  "findings": [
+    {
+      "severity": "minor",
+      "category": "reuse",
+      "issue": "packages/sdk/scripts/build-wasm.sh and webapp/scripts/build-wasm.sh duplicate ~80% of logic (wasm-pack invocation, rm-then-build pattern, the cargo --out-dir workaround commentary). They diverge only in whether webapp/src/wasm is also populated. Future drift risk: e.g. flag changes (release profile, feature additions) will need to be synced manually in two places.",
+      "file": "packages/sdk/scripts/build-wasm.sh:1-43, webapp/scripts/build-wasm.sh:1-69",
+      "recommendation": "Optional follow-up (not blocking): factor the wasm-pack invocation into a single shared script (e.g. scripts/build-wasm-core.sh at repo root) that takes a target dir list, and have both webapp/scripts and packages/sdk/scripts thin-wrap it. Alternatively, have webapp/scripts/build-wasm.sh call packages/sdk/scripts/build-wasm.sh and then `cp -R core/pkg-web webapp/src/wasm`. Acceptable to defer to T2/T8 if a refactor wave touches build."
+    },
+    {
+      "severity": "minor",
+      "category": "correctness",
+      "issue": "CLI bin stub exits with code 64 (EX_USAGE — sysexits.h 'command line usage error'). The user-spec § Критерии приёмки defines exit codes 0..4 (1=user error, 2=server, 3=integrity, 4=auth) and Decision 10 of the tech-spec reiterates this. 64 is outside that scheme and would set a misleading precedent if any wrapper learns to special-case it before T5 lands the real argv router.",
+      "file": "packages/cli/bin/mnemonic.ts:8",
+      "recommendation": "Use `process.exit(1)` for the not-yet-implemented stub (matches the user-spec 'user error' code, and is what every CLI defaults to for unknown failure). Add a TODO comment so T5 knows to keep all production exits within the documented 0..4 range."
+    },
+    {
+      "severity": "minor",
+      "category": "naming",
+      "issue": "packages/cli/package.json sets `\"main\": \"./dist/src/index.js\"` (note the `src/` segment), whereas packages/sdk/package.json sets `\"main\": \"./dist/index.js\"` (no `src/`). Both are correct given each tsconfig (CLI has rootDir=\".\", SDK has rootDir=\"src\"), but the asymmetry is a footgun: anyone opening both files back-to-back assumes they're the same shape. Also, with tsc's rootDir=\".\" + include=[\"src/**/*\",\"bin/**/*\"], the CLI dist tree mirrors the source layout, leaving an awkward `dist/src/index.js` path.",
+      "file": "packages/cli/package.json:8-9, packages/cli/tsconfig.json:8",
+      "recommendation": "Either (a) align CLI to mirror SDK by using a separate src-only tsconfig and treating `bin/mnemonic.ts` as a separate compile unit (cleaner long-term), or (b) document the asymmetry inline with a short comment in cli/tsconfig.json so reviewers don't assume it's a typo. Not blocking; T5 may revisit when adding the real bin."
+    },
+    {
+      "severity": "minor",
+      "category": "correctness",
+      "issue": "Both package.json files declare `\"private\": true`. Tech-spec Decision 13 + acceptance criteria require the SDK and CLI to be publishable to npm (with provenance). The flag is correct for Wave 1 (prevents accidental publish during scaffolding), but if a teammate or T14 misses the flip, `npm publish` will silently fail with a confusing 'private package' error.",
+      "file": "packages/sdk/package.json:6, packages/cli/package.json:6",
+      "recommendation": "Add a one-line TODO comment in each package.json (npm tolerates `\"//\"` keys) or in decisions.md follow-ups, e.g. `\"//\": \"private:true is a Wave-1 guard; T14 (publish) must flip to false.\"`. The decisions.md log already has 6 follow-ups; adding this as item 7 would be sufficient."
+    },
+    {
+      "severity": "minor",
+      "category": "docs",
+      "issue": "packages/sdk/README.md 'Runtime targets' table claims that under Bun the bundler artifact fails with `__wbindgen_start is not a function`, and that under Deno the nodejs artifact fails with 'no default export'. The decisions.md log has the verbatim error trace. README is slightly less precise — readers can't immediately tell whether 'fails' means startup error or runtime error. Minor accuracy issue.",
+      "file": "packages/sdk/README.md:14-16",
+      "recommendation": "Either link the table cells to decisions.md anchor for the verbatim error log, or extend the cells with the short error reason in parentheses (e.g. 'fails (no default export)'). Decisions.md already has the canonical version, so a single link from the table would be ideal."
+    },
+    {
+      "severity": "minor",
+      "category": "workaround",
+      "issue": "Both build-wasm.sh scripts include a multi-paragraph comment about the cargo>=1.92 / wasm-pack `--out-dir` upstream bug. The comment is identical in spirit but worded differently in each file, and decisions.md follow-up #1 documents the same thing a third time. The workaround itself (build into core/pkg, then mv) is reasonable per the task brief, but the documentation is now scattered across three places.",
+      "file": "packages/sdk/scripts/build-wasm.sh:13-17, webapp/scripts/build-wasm.sh:19-22, work/mnemonic-cli/decisions.md (follow-up 1)",
+      "recommendation": "Consolidate to a single source of truth: keep the canonical explanation in decisions.md, and shorten the in-script comments to a one-liner pointing at decisions.md ('# wasm-pack/cargo --out-dir workaround — see work/mnemonic-cli/decisions.md task 1 follow-up 1'). Reduces maintenance churn when wasm-pack fixes the upstream issue."
+    },
+    {
+      "severity": "minor",
+      "category": "correctness",
+      "issue": "decisions.md follow-up #4 says 'the web target's loader resolves the .wasm via import.meta.url + fetch/fs.readFile — works out-of-the-box on Node 20+, Bun, Deno.' This is the runtime-bound assertion that T2's signer-contract suite still has to validate (the smoke only tested `typeof sign_cose_payload`, which is static). This caveat is accurately flagged in the decisions.md follow-up, but the README's confident 'Just Works' wording (line 39) doesn't carry that caveat for SDK consumers reading just the README.",
+      "file": "packages/sdk/README.md:38-41",
+      "recommendation": "Add a one-liner above 'Trade-offs' acknowledging the smoke only verified static export resolution, and the runtime-bound init() loader is still pending T2 validation. Aligns the README's confidence level with reality."
+    },
+    {
+      "severity": "minor",
+      "category": "maintainability",
+      "issue": "The CLI vitest.config.ts sets `coverage.thresholds.lines: 75` but lacks a `branches:` threshold (SDK has both lines:85 + branches:80). Tech-spec § Testing Strategy says 'CLI ≥75% lines' without specifying branches, so this is consistent with the spec — but inconsistent across the two packages. New tests landing in T5 won't be branch-coverage-gated for CLI.",
+      "file": "packages/cli/vitest.config.ts:11-13",
+      "recommendation": "Either explicitly document that branches are intentionally ungated for CLI (matching tech-spec), or add a 70% branch threshold to surface regressions. Minor — the tech-spec itself only mandates lines, so this is a 'nice to have' for symmetry."
+    }
+  ]
+}

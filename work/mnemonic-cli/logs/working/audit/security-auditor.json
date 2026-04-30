@@ -1,0 +1,91 @@
+{
+  "auditor": "security-auditor",
+  "status": "issues_found",
+  "summary": "Core security posture is solid (PKCE state-to-verifier-and-redirect-URI binding, alg=HS256 enforcement, atomic single-use bootstrap-ticket consume, 127.0.0.1-only loopback, no clipboard for keypair, no node:* in SDK, redirect-URI allowlist with proper loopback regex narrowing). One CRITICAL wire-shape mismatch between SDK exchangeCodeForToken (expects {jwt, expires_at}) and the production server's /oauth/token response ({access_token, token_type, expires_in, scope}) — the CLI will fail to log in against the live server, and the integration mock-server hides the bug because it emits the SDK-shaped response. Two HIGH issues: redactJWT regex misses Solana-style JSON-array-encoded secrets ([n,n,...]), and there is no npm publish --provenance step in release.yml even though the acceptance criterion requires it. Several Medium/Low findings around defense-in-depth, rate-limiting, and information-disclosure surface area.",
+  "findings": [
+    {
+      "severity": "critical",
+      "owasp": "A04",
+      "file": "packages/sdk/src/oauth.ts:358-369 + packages/sdk/test/mock-server.ts:217",
+      "issue": "exchangeCodeForToken requires response body field `jwt` (string) and falls back to `expires_at`. The actual production server in mcp/src/oauth.rs::token_handler returns the standard OAuth 2.1 shape `{access_token, token_type:'Bearer', expires_in:<seconds>, scope:'mcp'}` (see oauth.rs:778-785, 882-889) — no `jwt` field exists. The SDK will throw AuthError('oauth: token endpoint returned malformed body') on every real-server interactive login, blocking the entire CLI OAuth flow. The bug is hidden by the integration mock-server which emits the SDK-shaped `{jwt, expires_at, sub}` instead of the real RFC 6749 shape, so existing tests are green. This is a security-relevant defect because (a) the headless `--token` path becomes the only viable login, (b) users may silently fall back to less-audited alternative flows, and (c) the divergence between mock contract and production contract degrades the value of all OAuth integration tests.",
+      "recommendation": "Make exchangeCodeForToken accept BOTH shapes: prefer `body.access_token` (canonical RFC 6749 §5.1), fall back to `body.jwt` for legacy clients; derive `expiresAt` from `body.expires_in` (number, seconds) when present, fall back to `body.expires_at`. Update the mock-server.ts /oauth/token handler to emit the canonical RFC 6749 shape so integration tests fail when the SDK breaks. Add a regression integration test that mocks the real server's exact JSON shape."
+    },
+    {
+      "severity": "high",
+      "owasp": "A09",
+      "file": "packages/sdk/src/errors.ts:24-27",
+      "issue": "redactJWT only matches `eyJ...` (JWT) and 128-hex-char strings. The Solana keypair format used throughout this codebase is a 64-element JSON number array `[n0,n1,...,n63]` (see KeypairJson in keypair.ts and the wire format on /api/cli-bootstrap/redeem). If a WASM error or a server error response leaks a serialized keypair (e.g., `signer.ts:73` rethrows WASM errors with describeError(e), and WASM-bindgen messages can echo the input), the secret bytes will appear unredacted in stderr/stdout/logs. The current regexes won't catch them.",
+      "recommendation": "Add a regex `/\\[\\s*(?:\\d{1,3}\\s*,\\s*){63}\\d{1,3}\\s*\\]/g` (or a tighter version that only matches values 0-255) to redactJWT and apply across SDK + CLI redactSecrets. Alternatively, in `LocalSigner.sign` and `Keypair.fromJSON`, do not include the original error message in re-thrown messages — collapse to a generic 'WASM signer error' / 'invalid keypair shape' and stash the cause for developer eyes only."
+    },
+    {
+      "severity": "high",
+      "owasp": "A08",
+      "file": ".github/workflows/release.yml:1-125",
+      "issue": "Decision 13 + tech-spec acceptance criterion line 463 require `npm publish --provenance` for both @mnemonik-xyz/sdk and @mnemonik-xyz/cli. The release workflow only builds Rust binaries and produces a GitHub release; there is no `npm publish` step at all, let alone with `--provenance`. The Phase-1 supply-chain integrity claim is unenforced — any maintainer with npm-write access could publish a tampered package and consumers would have no sigstore attestation to verify against.",
+      "recommendation": "Add a publish job to release.yml that runs after the test matrix on tag push: `npm publish --access public --provenance --workspace packages/sdk && npm publish --access public --provenance --workspace packages/cli`. Configure `id-token: write` permission for the job (sigstore needs it). Gate the publish on green CI matrix + golden-fixture lockstep. Add an integrity test (e.g., `npm install @mnemonik-xyz/cli && npm view @mnemonik-xyz/cli dist.attestations`) to post-deploy verification (Task 15)."
+    },
+    {
+      "severity": "medium",
+      "owasp": "A04",
+      "file": "packages/cli/src/output.ts:42-58",
+      "issue": "`format()` writes JSON output via `JSON.stringify(data, null, 2)` without running it through `redactSecrets`. Today no command's `data` payload contains a JWT or secret (whoami strips JWT to {sub, issued_at, expires_at}), but defense-in-depth would route every stdout/stderr write through redaction. A future change that adds a token to the data parameter (e.g., a `--show-token` debug flag) would silently leak.",
+      "recommendation": "Wrap the JSON output and the human-rendered output through redactSecrets before `process.stdout.write`. Add a unit test asserting that if `data` is `{jwt: 'eyJabc...'}`, the printed output contains `[REDACTED-JWT]`. Cost is microseconds per call."
+    },
+    {
+      "severity": "medium",
+      "owasp": "A04",
+      "file": "mcp/src/main.rs:614-637 (api_subrouter)",
+      "issue": "The /api/cli-bootstrap/redeem/{ticket} route is exempt from bearer auth (correct — UUID is the capability) but the api_subrouter has NO rate-limit GovernorLayer. UUIDv4 brute force is computationally infeasible (~122 bits), so this is not exploitable; however, a flood of /redeem requests against random UUIDs would lock the BootstrapTickets mutex (single tokio Mutex covering the LRU + per_user map) and degrade webapp /api/sign-callback latency under sustained attack. /oauth/* is governor-rate-limited; /api/* is not.",
+      "recommendation": "Attach a per-IP GovernorLayer to api_subrouter (e.g., 30 req/s burst) or specifically to /api/cli-bootstrap/redeem. Tune so legitimate single-user redeem (one shot per import) is unaffected. This also limits the same-mutex contention with /api/sign-callback that real users depend on."
+    },
+    {
+      "severity": "medium",
+      "owasp": "A02",
+      "file": "packages/sdk/src/signer.ts:65-86",
+      "issue": "LocalSigner.sign re-throws WASM errors with `${describeError(e)}`. WASM-bindgen errors from `sign_challenge` may include argument echoes that contain secret bytes (depending on rust-side error messages). Combined with finding A09 above (redactJWT misses array-encoded secrets), this is a leak vector. UserError's constructor calls redactJWT but the regex won't match `[1,2,...]`.",
+      "recommendation": "Sanitize the WASM error message before embedding: `throw new UserError('LocalSigner: WASM sign_challenge failed', e)` (no message interpolation), preserving the original on the .cause for developer diagnostics — process.stderr only prints .message at the CLI top-level handler."
+    },
+    {
+      "severity": "medium",
+      "owasp": "A05",
+      "file": "packages/cli/src/config.ts:63-88",
+      "issue": "restrictFileMode on Windows uses execFileSync('icacls', [...]) with `stdio: 'ignore'` and a try/catch that swallows ALL errors silently. If icacls is missing from PATH, the calling user lacks privilege, or a future Windows version returns a non-zero exit, the file is written without ACL hardening AND the user receives no warning. The token.json / identity.json silently inherits the parent directory ACL, which on most systems includes Authenticated Users with Read.",
+      "recommendation": "On Windows: after icacls, verify the resulting ACL via `icacls $path` (read-only, then parse) OR at minimum surface a warning to stderr if icacls returned non-zero. Add a manual smoke step in SMOKE.md to verify ACL on a real Windows box. Better long-term: switch to a maintained ACL crate or a tiny Rust helper compiled into the package."
+    },
+    {
+      "severity": "medium",
+      "owasp": "A07",
+      "file": "packages/sdk/src/oauth.ts:339-343",
+      "issue": "exchangeCodeForToken catches network failures (line 339-343) and KEEPS the session in pendingAuthSessions for retry. State+verifier remain replayable until TTL expires. Combined with the SDK's exposed mutable `pendingAuthSessions` Map (line 60, exported from index.ts), a host-side bug or test that doesn't clean up could leave verifiers in memory long after the user thought login completed. RFC 7636 §6 recommends one-shot.",
+      "recommendation": "Decide policy: either delete the session on network failure too (forces user to restart login flow — safer, matches the redirect_uri-mismatch and state-mismatch paths) or document that retry is intentional and clamp the retry window to 30 seconds. Don't export `pendingAuthSessions` from index.ts — the helpers (setSession/getSession/deleteSession) are the only sanctioned interface."
+    },
+    {
+      "severity": "low",
+      "owasp": "A04",
+      "file": "packages/sdk/src/oauth.ts:60",
+      "issue": "`pendingAuthSessions` Map is exported as a module-level mutable singleton. Any consumer can read or mutate the verifier/state of in-flight OAuth sessions. Documented as 'reserved for tests' but TypeScript won't enforce it.",
+      "recommendation": "Remove from the public re-export in index.ts. Keep internal helpers only. Add a dev-only `__resetSessionsForTests()` if tests truly need state-reset access."
+    },
+    {
+      "severity": "low",
+      "owasp": "A07",
+      "file": "mcp/src/oauth.rs:566-610 (allowed_redirect / is_loopback_callback)",
+      "issue": "The loopback regex accepts any digits-only port string of any length, so `http://127.0.0.1:99999999/callback` is allowed. The OS rejects the bind, so this is not exploitable, but the regex is more permissive than necessary and exposes future maintainers to mistakes.",
+      "recommendation": "Cap port to 1-5 ASCII digits and parse to u16; reject if value > 65535. Add unit-test cases for boundary ports (0, 1, 65535, 65536, 999999)."
+    },
+    {
+      "severity": "low",
+      "owasp": "A09",
+      "file": "packages/cli/src/commands/login.ts:105-109",
+      "issue": "`hint(\\`opening browser: ${authz.url}\\`)` writes the full authorize URL to stderr. The URL contains state + code_challenge but NOT the verifier; this is informational, not a secret. However, terminal scrollback / CI logs persist; if a future change embeds verifier or token in the URL it would leak.",
+      "recommendation": "No fix needed today. Add a unit test asserting that no PKCE verifier substring appears in `process.stderr.write` during login (companion to the JWT-shape assertion already in T8 redaction tests)."
+    },
+    {
+      "severity": "low",
+      "owasp": "A05",
+      "file": "mcp/src/api.rs:543-599 (bootstrap_redeem_handler)",
+      "issue": "On 500 (stored keypair_json corrupt or wrong length) the response body returns `format!(\"stored keypair_json is not a JSON byte array: {e}\")`. The serde_json::Error::to_string() implementation does not echo input bytes, so the leak surface is small, but in principle a future serde_json change could include offsets and partial input.",
+      "recommendation": "Replace the formatted detail with a generic 'stored keypair_json could not be parsed; ticket has been consumed'. Log the cause server-side via tracing; do not surface to the unauthenticated /redeem caller."
+    }
+  ]
+}

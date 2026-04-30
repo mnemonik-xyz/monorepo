@@ -17,7 +17,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use solana_sdk::signature::Keypair;
 
-use crate::{llm::LlmClient, payment, pending::PendingBundles, pricing::PricingEngine, tools};
+use crate::{
+    api::BootstrapTickets, llm::LlmClient, payment, pending::PendingBundles,
+    pricing::PricingEngine, tools,
+};
 use mnemonic_core::arweave::ArweaveClient;
 use mnemonic_core::compress::EmbeddingCompressor;
 use mnemonic_core::embed::Embedder;
@@ -132,6 +135,14 @@ pub struct McpState {
     /// LRU-bounded (10k), TTL-bounded (300s), per-`jwt.sub` capped (50).
     /// See `pending.rs` for the Decision-12 design.
     pub pending: Arc<PendingBundles>,
+
+    /// CLI bootstrap-ticket store (mnemonic-cli tech-spec Decision 7).
+    /// Webapp issues a ticket via `POST /api/cli-bootstrap/issue` (Bearer
+    /// JWT'd); CLI redeems with `GET /api/cli-bootstrap/redeem/:ticket`
+    /// (UUID is the capability — no auth header required). Tickets are
+    /// in-memory only; server restart drops every pending ticket.
+    /// LRU 100, TTL 600s, per-user cap 3. See `api.rs` for the design.
+    pub bootstrap_tickets: Arc<BootstrapTickets>,
 }
 
 // Safety: We only access store through std::sync::Mutex (short critical sections, no await)
@@ -636,6 +647,7 @@ mod transport_tests {
             ollama_client,
             chat_limiter,
             pending: Arc::new(crate::pending::PendingBundles::with_defaults()),
+            bootstrap_tickets: Arc::new(crate::api::BootstrapTickets::with_defaults()),
         })
     }
 

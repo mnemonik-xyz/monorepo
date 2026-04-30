@@ -1,0 +1,148 @@
+{
+  "reviewer": "code-reviewer",
+  "task": "Task 5 — CLI commands (init/login/sign/recall/verify/whoami/prove/identity)",
+  "task_file": "work/mnemonic-cli/tasks/5.md",
+  "round": 1,
+  "commit_under_review": "6de72db (note: prompt referenced 4d18bf1 which does not exist; reviewed actual T5 commit 6de72db)",
+  "scope": "packages/cli/ — bin/mnemonic.ts, src/commands/*, src/{config,output,errors}.ts, test/*",
+  "verdict": "approve_with_minor_changes",
+  "summary": "Implementation is solid and correctly drives the four TDD anchors. All eight commands route through commander, whoami/prove are truly client-side per Decision 14, the loopback HTTP server binds 127.0.0.1 only with a 5-minute timeout, identity --ticket uses GET /api/cli-bootstrap/redeem/:ticket without Bearer (UUID is the capability), identity export refuses without --file and writes mode 0600, no --to-clipboard flag exists, Windows ACL via icacls is implemented, exit codes 0/1/2/3/4 are mapped correctly, output formatter respects --json/--quiet/--no-color and TTY detection, TypeScript strict + verbatimModuleSyntax + exactOptionalPropertyTypes + noUncheckedIndexedAccess all pass, no `any` in source (one in a comment), and node:* imports are confined to CLI as expected. Findings are ergonomic/defensive; none are blocking.",
+  "checked_focus_items": {
+    "all_8_commands_present_routed_via_commander": "yes — bin/mnemonic.ts:50-195 registers init, login, sign, recall, verify, whoami, prove, plus identity parent with import + export children. bin/test asserts the exact set.",
+    "whoami_prove_client_side_no_server_call": "yes — whoami.ts only fetches when --with-count flag is passed; default path makes zero fetches (TDD anchor whoami.test.ts:39 asserts toHaveBeenCalledTimes(0)). prove.ts has no fetch at all.",
+    "loopback_binds_127_0_0_1_only": "yes — login.ts:186 server.listen(0, '127.0.0.1', ...). Comment explicitly notes 'never 0.0.0.0'.",
+    "loopback_single_shot": "partial — `settled` flag prevents double-resolve, but `server.on('request', ...)` (not `once`) means additional requests during the code-exchange window are accepted and respond with the success HTML. Server only closes in the outer `finally`. Functionally safe, but not strictly single-shot. See finding L1.",
+    "loopback_validates_state_before_code_processing": "yes — login.ts:139-143 cb.state !== authz.state throws AuthError BEFORE exchangeCodeForToken is called (defence-in-depth; SDK validates again).",
+    "identity_import_ticket_uses_get_no_bearer": "yes — identity.ts:121-123 fetch(url, { method: 'GET' }), no Authorization header. URL is `${base}/api/cli-bootstrap/redeem/${encodeURIComponent(ticket)}`.",
+    "identity_export_mode_0600_enforced": "yes — identity.ts:200 writeFileSync(path, ..., { mode: 0o600 }) followed by restrictFileMode(path) (chmod 0o600 on Unix, icacls on Windows). Test identity.test.ts:127 asserts statSync mode === 0o600.",
+    "no_to_clipboard_flag": "yes — confirmed by grep on entire packages/cli/. No clipboard option exists in identity import or export.",
+    "windows_acl_via_icacls": "yes — config.ts:74 execSync(`icacls \"${path}\" /inheritance:r /grant:r \"${user}:F\"`, { stdio: 'ignore' }). Wrapped in try/catch (best-effort). USERNAME/USER fallback. See finding C1 for a quoting concern.",
+    "tty_json_quiet_no_color_per_decision_10": "yes — output.ts:42 format() switches modes correctly. --json wins over --quiet (still emits JSON to stdout; stderr stays empty under --quiet+--json — TDD anchor passes). hint() goes to stderr and is suppressed under --quiet. warn() always to stderr. colorEnabled() respects --no-color, NO_COLOR env, and process.stdout.isTTY. NOTE: see finding O1 — color helper is defined but not actually wired into any command renderer, so --no-color is essentially a no-op and TTY default does not emit color.",
+    "exit_codes_0_1_2_3_4_mapped": "yes — errors.ts: UserError=1, ServerError=2, IntegrityError=3, AuthError=4. handleError uses err.exitCode. fromSdkError translates SDK errors. Test login.test.ts asserts exitCode:4 on expired/alg=none JWT. Test identity.test.ts asserts exitCode:1 on 410-Gone. verify.ts maps verified→0 (no throw), tampered→IntegrityError(3), not_found→UserError(1).",
+    "typescript_strict_no_any_esm": "yes — tsconfig.json: strict, noUncheckedIndexedAccess, exactOptionalPropertyTypes, verbatimModuleSyntax, isolatedModules, esModuleInterop. No `any` anywhere in src/ or bin/ (one match in a comment in src/index.ts). All imports are ESM with .js extensions for relative paths.",
+    "node_only_in_cli_no_sdk_leak_into_source": "yes — node:child_process, node:fs, node:os, node:path, node:crypto, node:http, node:net only in packages/cli/. SDK imports are via `@mnemonik-xyz/sdk` package barrel. No reaching into SDK internals from src/. (Test helpers do `import from '../../sdk/dist/wasm.js'` for the test-only WASM injector — acceptable since it's gated by the SDK's own `__setWasmForTesting` export and lives in test/ only.)",
+    "t5_cont_brittle_listen_patch_alternative": "noted — see finding T1. The Server.prototype.listen patch is functional but works around 'frozen ESM exports'. A cleaner approach would be dependency injection via a `serverFactory` option in LoginOptions (already has `noOpen` and `timeoutMs` test hooks; adding a factory hook would be consistent and remove the prototype mutation)."
+  },
+  "findings": [
+    {
+      "id": "L1",
+      "severity": "minor",
+      "dimension": "Architecture / Resource Management",
+      "file": "packages/cli/src/commands/login.ts",
+      "lines": "204-288, 122-134",
+      "issue": "Loopback HTTP server is not strictly single-shot in the kernel sense. `server.on('request', onRequest)` (not `once`) attaches a persistent listener; the `settled` flag prevents double-resolve of the promise, but during the window between callback receipt and `exchangeCodeForToken` completing (potentially several seconds against a real IdP), additional incoming requests are still accepted and responded to with the success HTML. server.close() runs only in the outer `finally`.",
+      "impact": "Minimal. The window is short and the surface is loopback-only on a randomly chosen port, so an attacker would have to guess both the port and the timing. But the spec says 'shuts down after one callback' — the implementation shuts down after the entire login function returns.",
+      "recommendation": "After settle() resolves, immediately call `server.close()` and remove the request listener. Alternatively, switch `server.on('request', onRequest)` to `server.once('request', onRequest)` and let subsequent requests (e.g. favicon.ico) drop with ECONNREFUSED — but that breaks browsers that fetch favicon during the success page, so closing-after-settle is the cleaner option. Sketch: at the end of the resolve branch, call `server.close()` synchronously before resolving."
+    },
+    {
+      "id": "O1",
+      "severity": "minor",
+      "dimension": "Code Readability / Decision 10 compliance",
+      "file": "packages/cli/src/output.ts, packages/cli/src/commands/*.ts",
+      "lines": "output.ts:96-103; init.ts:39-46; all command renderers using `(_d, _color)`",
+      "issue": "Decision 10 states 'TTY default: ANSI color, human-readable'. The output module exposes a `colors` palette and a `paint` helper, and `colorEnabled()` is wired into format() via a passed-in flag. But NO command renderer actually consumes the color flag — every renderer ignores it via `_color` or, in init.ts:45, has the cosmetic-only `lines.map((l) => (color ? l : l))` (both branches identical). Effect: --no-color is observable in a unit test of `colorEnabled()` but is functionally a no-op end-to-end; TTY default does not emit color.",
+      "impact": "Spec drift from Decision 10. Feature flag exists but the user-visible behavior doesn't match the documented promise. This is also why test branch coverage on the color paths is low (T5-cont concern #1).",
+      "recommendation": "Either (a) wire at least one prominent renderer to use `colors.green` for success / `colors.yellow` for warnings (e.g. login OK, init pubkey banner, verify status line) so --no-color has an observable effect, OR (b) update Decision 10 in tech-spec.md to state that color is deferred to Phase 2 and remove the unused `colors`/`paint` helpers. The current state is half-done. Recommend (a) — small change, satisfies the spec, also lifts branch coverage organically."
+    },
+    {
+      "id": "C1",
+      "severity": "minor",
+      "dimension": "Security / Cross-File Consistency",
+      "file": "packages/cli/src/config.ts",
+      "lines": "63-84",
+      "issue": "Windows icacls invocation uses `execSync` with shell-interpolated arguments: `icacls \"${path}\" /inheritance:r /grant:r \"${user}:F\"`. The path is double-quoted but a path containing a literal `\"` (rare on Windows but legal in some configurations) or a backslash sequence could break out of the quoted argument. Same for `process.env.USERNAME`, which on Windows can contain unusual characters in some AD-joined environments.",
+      "impact": "Low — the path is `~/.mnemonic/{identity,token}.json` or a user-supplied `--file <path>` for export. A user passing `mnemonic identity export --file 'C:\\Users\\foo\"bar.json'` would shell-inject. USERNAME injection requires control of the env var, which already implies higher privilege.",
+      "recommendation": "Pass argv as an array to avoid the shell, e.g. `execFileSync('icacls', [path, '/inheritance:r', '/grant:r', `${user}:F`], { stdio: 'ignore' })`. This bypasses cmd.exe's quoting rules entirely."
+    },
+    {
+      "id": "T1",
+      "severity": "minor",
+      "dimension": "Testing / Maintainability",
+      "file": "packages/cli/test/login.test.ts",
+      "lines": "104-143",
+      "issue": "T5-cont raised this: the state-mismatch test patches `Server.prototype.listen` to drive a wrong-state callback at the bound port. This is brittle to changes in the http library and pollutes a Node prototype during the test (restored in `finally`). Vitest's per-file process isolation makes the prototype pollution local, but the technique is hostile to future refactors (e.g. switching to `https`, swapping `node:http` for a higher-level library, or reusing the test infra in a Bun runner).",
+      "impact": "Test fragility, not production correctness. Coverage is achieved.",
+      "recommendation": "Add an internal hook in LoginOptions, e.g. `_serverFactory?: () => http.Server` (underscore-prefixed to mark it test-only — same pattern as `noOpen` and `timeoutMs`). Tests inject a factory that returns an http.Server instance the test already controls; production code gets the default. This swaps a prototype patch for a 1-line dependency injection. Consistent with the existing `noOpen`/`timeoutMs` test escape hatches."
+    },
+    {
+      "id": "S1",
+      "severity": "minor",
+      "dimension": "Code Readability",
+      "file": "packages/cli/src/commands/whoami.ts",
+      "lines": "84-86",
+      "issue": "Inside the `--with-count` branch, `Keypair` is dynamically imported with `await import('@mnemonik-xyz/sdk').then((m) => m.Keypair.fromJSON(id))` even though the file already statically imports `LocalSigner, MnemonicClient, parseJwtPayload` from the same module at the top. The dynamic import provides no real laziness benefit (the module is already loaded) and adds a microtask + an opaque-looking call.",
+      "impact": "Cosmetic.",
+      "recommendation": "Add `Keypair` to the static import at the top: `import { Keypair, LocalSigner, MnemonicClient, parseJwtPayload } from '@mnemonik-xyz/sdk';`. Remove the dynamic import."
+    },
+    {
+      "id": "S2",
+      "severity": "minor",
+      "dimension": "Code Readability",
+      "file": "packages/cli/src/commands/whoami.ts",
+      "lines": "78-99",
+      "issue": "When `--with-count` is set, `loadIdentityJson()` and `loadToken()` are each called twice: once in the main result-building block (lines 54-72) and again in the with-count block (lines 83 and 87).",
+      "impact": "Cosmetic — redundant filesystem reads only on the with-count path.",
+      "recommendation": "Reuse the variables from the earlier block. The earlier `id` and `tok` references are local to a narrower scope; promote them or thread them through."
+    },
+    {
+      "id": "S3",
+      "severity": "minor",
+      "dimension": "Cosmetic",
+      "file": "packages/cli/src/commands/init.ts",
+      "lines": "45",
+      "issue": "`return lines.map((l) => (color ? l : l)).join('\\n')` — both ternary branches are identical (`l`). Looks like a placeholder where coloring was intended but never filled in. Will trip a linter and also a code reviewer's first read.",
+      "impact": "None at runtime; signals incomplete intent.",
+      "recommendation": "Remove the .map() entirely (`return lines.join('\\n')`) or actually wire up `colors.cyan(l, color)` for the pubkey/did lines. Pairs with finding O1."
+    },
+    {
+      "id": "S4",
+      "severity": "minor",
+      "dimension": "Robustness",
+      "file": "packages/cli/src/commands/login.ts",
+      "lines": "227-240",
+      "issue": "`awaitCallback` attaches the request listener at line 280, AFTER `listenLoopback()` resolved AND AFTER `await buildAuthorizeUrl(...)` (lines 87-103) and the browser open. If the browser races to the loopback callback before the request handler is attached, Node will buffer the connection (the handler will fire when attached), so this is safe in the common case. Worth a comment noting the deliberate ordering.",
+      "impact": "Defensive — no current bug. A future refactor that flips the order could regress.",
+      "recommendation": "Add a short comment in runInteractive between listenLoopback and buildAuthorizeUrl: 'Request handler is attached later in awaitCallback() — node:http buffers incoming connections until a request listener is registered, so this ordering is safe.'"
+    },
+    {
+      "id": "S5",
+      "severity": "minor",
+      "dimension": "Cross-File Consistency",
+      "file": "packages/cli/test/helpers.ts",
+      "lines": "11-13",
+      "issue": "Test helpers reach into `../../sdk/dist/wasm.js` and `../../sdk/test/helpers/wasm-mock.ts` directly, bypassing the SDK's package.json `exports` map. This works because vitest with moduleResolution=Bundler accepts the path, but it depends on the SDK having been pre-built (`tsc -b`) before CLI tests run. A clean `bun test` from a fresh checkout fails until `packages/sdk` builds.",
+      "impact": "Test reproducibility — first-run friction. A CI build that runs `bun install && bun test` in packages/cli without first building packages/sdk would fail.",
+      "recommendation": "Either (a) export `__setWasmForTesting` and `buildWasmMock` from a `@mnemonik-xyz/sdk/testing` subpath via package.json `exports` so the import path is package-relative not file-system-relative, OR (b) document the build dependency in packages/cli/README.md and ensure CI ordering builds SDK first. (a) is cleaner."
+    }
+  ],
+  "good_practices_observed": [
+    "Typed error hierarchy with `redactSecrets()` applied at construction (errors.ts:43) — JWTs and 64-char hex secrets cannot leak into stderr regardless of how the error is later rendered.",
+    "Strict TypeScript flags enabled (noUncheckedIndexedAccess, exactOptionalPropertyTypes, verbatimModuleSyntax) — and the implementation respects them: every conditional spread `...(opts.x !== undefined ? { x: opts.x } : {})` is correct under exactOptionalPropertyTypes.",
+    "Defence-in-depth on OAuth state: validated in CLI before sending code (login.ts:139), then again in SDK's exchangeCodeForToken (oauth.ts:275). Token endpoint never sees a code with a wrong state.",
+    "Explicit `if (process.platform === 'win32')` branch in restrictFileMode with try/catch making icacls non-fatal — write succeeds even on locked-down environments, mode is best-effort.",
+    "TDD anchor coverage is honest: login interactive state-mismatch, identity ticket atomic-redeem (410), whoami no-server-call, output --json --quiet — all four anchors are present and pass.",
+    "encodeURIComponent on the ticket UUID in identity.ts:117-118 — defends against `..`, `?`, `#` injection in the path segment.",
+    "Stdin piping in sign.ts:79 only triggers when stdin is not a TTY (process.stdin.isTTY check) — won't hang waiting for input when the user runs `mnemonic sign` without a positional or pipe.",
+    "Auto-run guard in bin/mnemonic.ts:210-221 — test files can `import { buildProgram }` without process.argv side effects.",
+    "redactSecrets() handles JWT-shape AND 64-byte hex secrets with idempotent regex replacement.",
+    "Identity import refuses to overwrite without --force (identity.ts:77-82) and points the user to `mnemonic identity export` for the safe path."
+  ],
+  "tdd_anchor_status": {
+    "no_server_call_for_whoami": "PASS — whoami.test.ts:39 asserts toHaveBeenCalledTimes(0).",
+    "interactive_loopback_state_validation": "PASS — login.test.ts:101-146 drives a wrong-state callback and asserts AuthError + token.json absent.",
+    "import_ticket_atomic_redeem": "PASS — identity.test.ts:40-78 asserts first 200 succeeds, second 410 surfaces UserError exitCode 1.",
+    "quiet_json_emits_only_json": "PASS — output.test.ts:121-128 asserts stdout is one JSON.parse-able blob and stderr is empty."
+  },
+  "scope_caveats": [
+    "Reviewed commit 6de72db (the actual T5 commit). The prompt referenced 4d18bf1, which is not present in this branch. Confirmed via `git log --all --oneline | grep 'task 5'` that 6de72db is the correct sha.",
+    "Server-side OAuth allowlist + bootstrap-ticket endpoint hardening live in T6 (commit 3e0512f, mcp/src/{oauth,api}.rs) — out of scope for this review of packages/cli/.",
+    "SDK source quality (e.g. signMemory pending-bundle flow correctness, parseJwtPayload alg whitelist) was reviewed in T2/T3 rounds — only the integration with CLI (correct method names, correct option shapes) is rechecked here, and matches.",
+    "Branch coverage 68% < typical 80% bar — primarily uncovered are color-rendering branches (no command uses color, see O1) and defensive 405/404 branches in awaitCallback (only triggered by a stray HTTP request to the loopback). Per T5-cont concern #1, considered acceptable. Closing O1 would lift this organically.",
+    "Decision 7 deviation #4 ('No --to-clipboard flag') is correctly enforced — confirmed by grep across the entire packages/cli/."
+  ],
+  "next_actions": [
+    "Author addresses L1 (close server immediately on settle), O1 (wire color into at least login/init/verify renderers OR remove the unused helpers), C1 (use execFileSync for icacls), T1 (replace prototype patch with a serverFactory hook), S3 (remove dead `(color ? l : l)`).",
+    "Optional: address S1, S2, S4, S5 as polish.",
+    "After fixes, re-run `tsc -b && vitest run` in packages/cli/ and confirm 43/43 still passes plus any new color-render tests."
+  ]
+}

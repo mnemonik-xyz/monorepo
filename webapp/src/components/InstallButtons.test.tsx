@@ -40,5 +40,21 @@ describe("InstallButtons", () => {
     fireEvent.click(claude);
     const pasteUrl = screen.getByTestId("claude-paste-url");
     expect(pasteUrl.textContent).toBe("https://mcp.mnemonik.xyz/mcp");
+
+    // WindSurf has no deeplink for arbitrary remote MCP URLs — its
+    // `windsurf://windsurf-mcp-registry?serverName=` scheme only resolves
+    // first-party registry entries (per docs.windsurf.com/windsurf/cascade/mcp).
+    // We mirror the Claude.ai flow instead: a button opens a modal with the
+    // JSON snippet that goes into `~/.codeium/windsurf/mcp_config.json`.
+    const windsurf = screen.getByTestId("install-windsurf");
+    expect(windsurf.tagName).toBe("BUTTON"); // not an anchor — no deeplink.
+    fireEvent.click(windsurf);
+    const snippetEl = screen.getByTestId("windsurf-config-snippet");
+    const parsedWindsurf = JSON.parse(snippetEl.textContent ?? "{}");
+    expect(parsedWindsurf).toEqual({
+      mcpServers: {
+        mnemonic: { serverUrl: "https://mcp.mnemonik.xyz/mcp" },
+      },
+    });
   });
 });

@@ -1,0 +1,82 @@
+{
+  "task": 2,
+  "round": 1,
+  "reviewer": "security-auditor",
+  "status": "approved",
+  "scope": "packages/sdk/ diff at 720877b vs 720877b~1",
+  "owasp_focus": ["A01", "A02", "A03", "A06", "A09"],
+  "summary": "Task 2 SDK core meets the OWASP focus areas. Ed25519 signing is exclusively via WASM (sign_challenge/sign_cose_payload) — no homemade crypto, no crypto.subtle.sign Ed25519 path, and no @noble/ed25519 import in src/. The /api/sign-callback POST never carries an Authorization header (asserted in client.test.ts:280). All HTTP bodies use JSON.stringify; tag arrays/content/correlation_id are properly serialized/encoded — no string concatenation. Error messages run through redactJWT before throw; redactJWT covers the JWT header+payload segments (both eyJ-prefixed) plus 128-hex Ed25519 secret. New devDependencies (@noble/ed25519@^2.3.0, @noble/hashes@^2.2.0) are scoped to test/ only, are paulmillr's audited libs, contain no postinstall scripts (verified), and exact versions are pinned via bun.lock + package-lock.json. Three low-severity hardening notes recorded below — none block approval.",
+  "findings": [
+    {
+      "severity": "low",
+      "owasp": "A09",
+      "issue": "redactJWT regex /eyJ[A-Za-z0-9_-]{20,}/g does not redact the third (signature) segment of a JWT in isolation. Standard 3-segment JWTs have header+payload both base64url-encoded JSON starting with eyJ, so both are redacted (test client.test.ts:430-451 confirms). However, if only the signature segment leaks into an error string (e.g. a server message like 'invalid signature: SflKxw...'), the regex will not match it because base64url signatures rarely start with eyJ. Practical impact is low: an Ed25519 signature alone is not a forgery primitive and contains no payload claims.",
+      "file": "packages/sdk/src/errors.ts:24",
+      "recommendation": "Consider augmenting redaction with a JWT-shape pattern that catches the full three-segment form, e.g. /eyJ[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+/g, before falling back to the per-segment regex. Or add an explicit base64url-blob ≥40-char regex when the SDK knows the surrounding context is an auth error."
+    },
+    {
+      "severity": "low",
+      "owasp": "A09",
+      "issue": "readBodySafely (client.ts:444-451) truncates the response body to 500 chars BEFORE running redactJWT. If a JWT straddles position 500, the suffix beyond the cutoff is silently dropped (fine) but the prefix that remains may be <20 base64url chars after 'eyJ' and thus skip the redaction. Real JWT headers are ~36 chars so the regex's {20,} threshold typically still matches; the edge case is exotic.",
+      "file": "packages/sdk/src/client.ts:444",
+      "recommendation": "Reverse the order: redact first, truncate second. `return redactJWT(txt).slice(0, 500);` — same memory cost, eliminates the slice-then-redact gap entirely."
+    },
+    {
+      "severity": "low",
+      "owasp": "A02",
+      "issue": "MnemonicClient.keypairJson holds the in-memory secret (64 bytes including the 32-byte Ed25519 seed) as a plain JS array for the lifetime of the client instance after setKeypair(). There is no zeroize/dispose surface (the signer.ts JSDoc explicitly acknowledges this — see signer.ts:32-34). Defense-in-depth concern only: V8 garbage collection is non-deterministic and JS lacks deterministic destructors. Already partially mitigated by the keypair.toJSON() defensive copy on line 90 (an attacker mutating the original Keypair object cannot tamper with the in-flight signer state).",
+      "file": "packages/sdk/src/client.ts:89-91",
+      "recommendation": "Track in backlog as a Phase 2 concern: a TurnkeySigner / WebAuthnSigner removes the secret from JS heap entirely. For Phase 1 (LocalSigner) the threat model accepts heap exposure — document this explicitly in packages/sdk/README.md when it is added in Task 9."
+    }
+  ],
+  "verified_controls": [
+    {
+      "control": "/api/sign-callback POST sends NO Authorization header — capability via correlation_id",
+      "evidence": "client.ts:184-193 omits Authorization; client.test.ts:280 asserts callbackCall.headers.authorization is undefined"
+    },
+    {
+      "control": "All HTTP request bodies use JSON.stringify; no string concatenation/template-literal injection",
+      "evidence": "client.ts:188 (sign-callback body), client.ts:354 (tools/call body), oauth.ts:214 (token-exchange body) — all JSON.stringify"
+    },
+    {
+      "control": "correlation_id URL-encoded before path interpolation",
+      "evidence": "client.ts:154-156 uses encodeURIComponent(correlationId)"
+    },
+    {
+      "control": "Ed25519 signing always via WASM; no homemade signing in src/",
+      "evidence": "signer.ts:65 calls wasm.sign_challenge; cose.ts:39 calls wasm.sign_cose_payload; @noble/ed25519 imports present only under test/ (signer-contract.ts:18, helpers/wasm-mock.ts:18)"
+    },
+    {
+      "control": "crypto.subtle used only for SHA-256 PKCE digest (T3), not for Ed25519 signing",
+      "evidence": "grep crypto.subtle in packages/sdk/src/ → only oauth.ts:92 (digest call)"
+    },
+    {
+      "control": "redactJWT applied at MnemonicError base constructor — every thrown error message is redacted before super() runs",
+      "evidence": "errors.ts:48 super(redactJWT(message)); covered by client.test.ts:427-478 (asserts JWT body echo and unrelated-message JWT both redacted)"
+    },
+    {
+      "control": "128-hex Ed25519 secret regex redacts hex-encoded secrets in addition to JWT-shaped strings",
+      "evidence": "errors.ts:27 HEX_SECRET_RE; errors.ts:41 .replace(HEX_SECRET_RE, '[REDACTED-SECRET]')"
+    },
+    {
+      "control": "No console.log/error in production source — all output is via thrown typed errors",
+      "evidence": "grep 'console\\.|stderr|stdout' packages/sdk/src/ → only doc-comment mention in errors.ts:4"
+    },
+    {
+      "control": "New devDependencies @noble/ed25519@^2.3.0 + @noble/hashes@^2.2.0 are test-only, not bundled to npm publish (would-be `dependencies` is empty in the diff)",
+      "evidence": "packages/sdk/package.json:30-35 (devDependencies block); src/ has no @noble imports"
+    },
+    {
+      "control": "No postinstall/preinstall scripts in @noble packages",
+      "evidence": "grep postinstall|preinstall in node_modules/@noble → no matches"
+    },
+    {
+      "control": "Lockfile-pinned versions reproducible across CI/dev",
+      "evidence": "bun.lock + package-lock.json both committed at repo root"
+    },
+    {
+      "control": "Defensive copy of keypair secret on .toJSON() prevents external mutation of in-flight signer state",
+      "evidence": "keypair.ts:42-47 spread-copies secret array on every toJSON call"
+    }
+  ]
+}

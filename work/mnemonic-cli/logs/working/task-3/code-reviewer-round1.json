@@ -1,0 +1,176 @@
+{
+  "reviewer": "code-reviewer",
+  "task": 3,
+  "task_title": "SDK OAuth — buildAuthorizeUrl, exchangeCodeForToken, headless mode",
+  "round": 1,
+  "commit": "f41116c",
+  "branch": "feat/mnemonic-cli-userspec",
+  "date": "2026-04-28",
+  "files_reviewed": [
+    "packages/sdk/src/oauth.ts",
+    "packages/sdk/test/oauth.test.ts",
+    "packages/sdk/src/index.ts (T3 re-exports already landed by T2)"
+  ],
+  "summary": "Solid implementation of the OAuth 2.1 + PKCE primitives. Decision 5 (state + verifier + redirect_uri stored together in pendingAuthSessions Map and validated before any HTTP call) is correctly enforced and tested. RFC 7636 Appendix B fixture matches. Pure ESM, no node:* imports. parseJwtPayload correctly skips signature verification. Two notable gaps: parseJwtPayload validates exp/iat/sub but never inspects the JWT header for `alg` (focus area called out by reviewer), and pendingAuthSessions has no TTL/eviction policy so abandoned authorize flows accumulate forever in long-lived processes. A handful of minor robustness/consistency items below.",
+  "verdict": "approve_with_minors",
+  "decision_5_compliance": {
+    "state_verifier_redirect_stored_together": true,
+    "where": "oauth.ts:150-155 — pendingAuthSessions.set(sessionId, {verifier, state, redirectUri, sessionId})",
+    "validation_before_http": true,
+    "validation_evidence": "oauth.ts:199-206 — both state and redirectUri compared to stored values BEFORE the fetch() call at line 211; on mismatch the session is deleted and AuthError thrown. Tests at oauth.test.ts:183-224 assert fetchMock not called on either mismatch.",
+    "session_one_shot_semantics": true,
+    "session_one_shot_evidence": "Session deleted on validation failure (lines 200, 204), on non-2xx response (229), on malformed body (237/248), and on success (259). Network failure preserves the session for retry (line 222-226). Behaviour is covered by oauth.test.ts:288-327 (success clears) and oauth.test.ts:395-413 (network failure preserves)."
+  },
+  "issues": [
+    {
+      "id": "C1",
+      "severity": "major",
+      "dimension": "security_and_state_management",
+      "file": "packages/sdk/src/oauth.ts",
+      "lines": "27, 150-155",
+      "title": "pendingAuthSessions has no TTL or size cap — memory growth / DoS in long-lived hosts",
+      "details": "The module-level `pendingAuthSessions` Map is mutated by `buildAuthorizeUrl` but only cleaned up on a successful exchange or a validation failure. Any flow that starts a `buildAuthorizeUrl` and never calls `exchangeCodeForToken` (user closes browser, callback never arrives, network error, callback timeout) leaves the entry in the Map forever. For the CLI this is OK (process exits) but the SDK is explicitly runtime-agnostic and is intended for long-lived hosts (Chrome extensions, agent frameworks, server-side workers). In those hosts each abandoned flow accumulates ~200 bytes of state plus the verifier, and there is no upper bound — an attacker who can trigger `buildAuthorizeUrl` can grow the Map without bound (DoS) and a benign user with poor connectivity can leak sessions slowly.",
+      "recommendation": "Either (a) add a per-entry creation timestamp + a max age (e.g., 10 min, matching server's PKCE state TTL) and prune on insert, or (b) add a max-size cap with FIFO eviction (e.g., 64 entries — far more than any real concurrent flow). The simplest implementation is to record `createdAt: number` on each PendingAuthSession and on every `buildAuthorizeUrl` call iterate to drop entries older than `PENDING_TTL_MS`. Document the chosen policy in the JSDoc on `pendingAuthSessions`."
+    },
+    {
+      "id": "C2",
+      "severity": "major",
+      "dimension": "spec_compliance",
+      "file": "packages/sdk/src/oauth.ts",
+      "lines": "291-325",
+      "title": "parseJwtPayload does not inspect the JWT header — `alg` is never asserted",
+      "details": "The reviewer focus called out: `parseJwtPayload` does not verify signature (correct) but should perform `assertions on alg, exp present`. The current implementation only decodes parts[1] (payload) and never inspects parts[0] (header). Decision 6 specifies the CLI headless flow `asserts alg=HS256` before persisting the JWT to disk; tech-spec.md line 75 reiterates this. Today an attacker-issued JWT with `alg: none` or `alg: ES256` would pass `parseJwtPayload` as long as the payload has sub/exp/iat — the SDK provides no defence-in-depth and the entire alg check lives in the un-implemented CLI Task 5.\n\nThis is the SDK boundary that *should* contain the alg assertion since Decision 6 says the same JWT may be passed in by Chrome extensions, agent frameworks, etc. — every host should not have to re-implement it.",
+      "recommendation": "Add a header parse + `alg` whitelist check inside `parseJwtPayload`. Minimum: parse parts[0] as JSON, assert `alg === 'HS256'` (matches server, per Decision 6), reject `none`. Consider widening to `['HS256', 'EdDSA', 'ES256']` if other algs are anticipated later. Update tests to cover `alg: none` rejection and `alg: HS512` rejection."
+    },
+    {
+      "id": "C3",
+      "severity": "minor",
+      "dimension": "consistency_and_api_design",
+      "file": "packages/sdk/src/oauth.ts",
+      "lines": "219",
+      "title": "client_id hardcoded to \"mnemonic-cli\" in exchangeCodeForToken",
+      "details": "`buildAuthorizeUrl` correctly takes `clientId` as input and propagates it into the authorize URL (line 143). But `exchangeCodeForToken` ignores `session.clientId` (which isn't even stored) and hardcodes `client_id: \"mnemonic-cli\"` in the token-exchange body. Two consequences: (1) Chrome extension or agent-framework consumers must fork the SDK to use a different client_id; (2) if a caller passes a different clientId to `buildAuthorizeUrl`, the authorize URL and token URL will silently disagree on `client_id`, and the server allowlist (Decision 5 / Task 6) will reject the token exchange with a confusing 400. T3-impl flagged this as a backlog item in decisions.md — acknowledging is not enough since the inconsistency between `buildAuthorizeUrl` taking `clientId` and `exchangeCodeForToken` discarding it is actively misleading.",
+      "recommendation": "Either store `clientId` in `PendingAuthSession` and propagate it into the token body (preferred — keeps the one-tuple-per-session invariant intact), or remove `clientId` from `BuildAuthorizeUrlInput` and document `mnemonic-cli` as the only supported value with a TODO for Chrome-ext support. Don't leave the asymmetry latent."
+    },
+    {
+      "id": "C4",
+      "severity": "minor",
+      "dimension": "error_handling_and_redaction",
+      "file": "packages/sdk/src/errors.ts (cross-cutting; surfaces in oauth.ts catch blocks)",
+      "lines": "errors.ts:46-51, oauth.ts:222-225, 236-238, 302-303",
+      "title": "MnemonicError redacts the message but leaves `cause` unredacted",
+      "details": "`redactJWT` is applied to the `message` argument in `MnemonicError`'s constructor (errors.ts:48). The `cause` is stored as-is. `oauth.ts` passes the raw fetch / JSON.parse error as `cause` to AuthError. If a future logger walks the cause chain (e.g., `console.error(err)` → V8's default formatting prints `[cause]: ...`) and the underlying fetch error contains the request URL with a JWT in a query param, the JWT will leak despite Decision 10's redaction guarantee. For OAuth specifically the input space is mostly safe (no JWTs in `code` or `state`), but Decision 10's tests are supposed to assert the invariant in stderr; a property-based / pretty-printed formatter could break that invariant.",
+      "recommendation": "In `MnemonicError`'s constructor, also coerce `cause` through `redactJWT(String(cause))` and store the redacted string (lose the prototype chain), or wrap it in a `{ message: redactJWT(...) }` shape so `console.error` can't bypass the redaction. Trade-off: developer-facing diagnostics lose stack traces. Recommend the `String(cause)`-redact pattern with an opt-in `cause: unknown` retained as a non-enumerable property when `process.env.MNEMONIC_DEBUG === 'true'`. This is a Task 8 (logging redaction tests) gate concern more than a T3 concern, but worth fixing now while the surface is small."
+    },
+    {
+      "id": "C5",
+      "severity": "minor",
+      "dimension": "type_safety",
+      "file": "packages/sdk/src/oauth.ts",
+      "lines": "305-307",
+      "title": "JSON arrays bypass the `typeof === \"object\"` early-return",
+      "details": "`Array.isArray([1,2,3])` and `typeof [1,2,3] === 'object'` are both true. The early-return at line 305 (`if (!json || typeof json !== \"object\")`) does not reject arrays. Today the next check (`obj.sub` typeof string) catches the array case and surfaces a misleading error message: 'missing or empty `sub` claim' rather than 'payload is not an object'. The test at oauth.test.ts:507-516 documents this as intentional (\"JSON arrays parse as objects via typeof but should still fail on missing sub claim\"), so the bug is at the comment / spec-fidelity level, not a security gap.",
+      "recommendation": "Add `Array.isArray(json)` to the guard: `if (!json || typeof json !== \"object\" || Array.isArray(json)) throw ...`. Update the test to assert the error message clearly mentions 'payload is not an object' (or whatever you choose) rather than 'missing sub'."
+    },
+    {
+      "id": "C6",
+      "severity": "minor",
+      "dimension": "robustness",
+      "file": "packages/sdk/src/oauth.ts",
+      "lines": "228-231, 233-239",
+      "title": "Non-2xx response body is discarded — debugging blind spot",
+      "details": "On non-2xx the SDK throws `AuthError` with only the status code. The server's response body (e.g., `{error: \"invalid_grant\", error_description: \"PKCE verifier mismatch\"}`) is dropped. RFC 6749 §5.2 mandates the server emit a structured error response on /token failures; surfacing the `error` field would let callers distinguish `invalid_grant` from `invalid_redirect_uri` from `server_error`. Currently every non-2xx looks the same to the CLI's exit-code mapping.",
+      "recommendation": "Read `response.text()` (or `response.json()` if `content-type === application/json`) on non-2xx and include the redacted body in the AuthError message. Bonus: parse `error` and `error_description` and pass them as separate fields on AuthError so the CLI can map `invalid_grant` → exit 4, `server_error` → exit 2."
+    },
+    {
+      "id": "C7",
+      "severity": "minor",
+      "dimension": "test_coverage",
+      "file": "packages/sdk/test/oauth.test.ts",
+      "lines": "n/a — gap, not a fault",
+      "title": "Missing tests for parseJwtPayload alg-header validation (would land with C2)",
+      "details": "Once C2 is fixed, the test suite needs at minimum:\n- alg: 'none' rejected\n- alg: 'HS512' rejected (or accepted, per chosen whitelist)\n- header is base64url-decoded successfully but is not JSON\n- header is JSON but missing `alg`",
+      "recommendation": "Add four tests in the parseJwtPayload describe block once C2 is addressed."
+    },
+    {
+      "id": "C8",
+      "severity": "minor",
+      "dimension": "performance_micro",
+      "file": "packages/sdk/src/oauth.ts",
+      "lines": "33-39",
+      "title": "bytesToBase64Url builds a binary string with String.fromCharCode in a loop",
+      "details": "For 32-byte inputs (the only sizes used in this module) the loop is fine. But the helper is exported-by-implication via `pkceChallenge` and could be reached by callers passing larger inputs, and `String.fromCharCode.apply(null, [...bytes])` or `Uint8Array.prototype.reduce` is measurably faster on 1KB+ inputs. Not a perf issue for OAuth specifically (32-byte SHA-256 outputs).",
+      "recommendation": "Leave as-is for now — flag if someone reuses this helper for larger payloads (e.g., COSE bytes). Could swap to `btoa(String.fromCharCode(...bytes))` for short inputs but that hits the call-stack limit at ~64KB. No change required."
+    }
+  ],
+  "passing_observations": [
+    {
+      "topic": "PKCE state binding (Decision 5)",
+      "note": "State and redirectUri both validated BEFORE fetch — verified at oauth.ts:199-206 and oauth.test.ts:183-224 (fetchMock asserted not called on either mismatch). Session deleted on either validation failure. Implementation matches RFC 7636 §4.4 + RFC 8252 §7."
+    },
+    {
+      "topic": "RFC 7636 Appendix B fixture",
+      "note": "pkceChallenge('dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk') === 'E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM' — verified at oauth.test.ts:50-55."
+    },
+    {
+      "topic": "Pure ESM, no node:* imports",
+      "note": "grep `node:` over oauth.ts and oauth.test.ts returns no actual imports — only documentation comments. No `require(...)`. Web APIs only: `crypto.subtle.digest`, `crypto.getRandomValues`, `crypto.randomUUID`, `TextEncoder`, `TextDecoder`, `URL`, `btoa`, `atob`, `fetch`, `Response`. All present in Node ≥20, Bun, Deno, modern browsers."
+    },
+    {
+      "topic": "No node:http server in SDK",
+      "note": "Confirmed — SDK exposes pure primitives. CLI Task 5 will own the loopback HTTP server."
+    },
+    {
+      "topic": "Module-level Map concurrency analysis",
+      "note": "Per ECMAScript module semantics, ESM modules are realm-singletons — multi-import within one process all see the same Map. UUIDv4 sessionIds make collision negligible (~5×10^-37 per pair). No `await`-during-mutation race because all mutations are synchronous Map ops; the only async edge is between `pendingAuthSessions.get(sessionId)` (line 192) and the validation check, but the Map is JS-single-threaded so no TOCTOU. Concurrency-safe for the same realm. The major concern (C1) is unbounded memory growth, not a race."
+    },
+    {
+      "topic": "Test isolation",
+      "note": "afterEach clears pendingAuthSessions and restores fetch — clean isolation across tests. ORIGINAL_FETCH stash + restore is portable across vitest and bun (decisions.md confirms this rationale)."
+    },
+    {
+      "topic": "JWT signature verification correctly skipped",
+      "note": "parseJwtPayload only parses the payload — server is the authority on signature validity. Doc comment at oauth.ts:282-287 spells this out clearly. Comment also explicitly says 'parses header + payload' but the implementation never inspects the header — see C2."
+    },
+    {
+      "topic": "Coverage",
+      "note": "T3-impl reports 96.61% statements / 96.15% branches / 100% functions on src/oauth.ts. Above the 85%/80% gate. Uncovered: uuidv4 fallback (only fires when crypto.randomUUID is missing — Node ≥19 has it) + one functionally-covered branch."
+    },
+    {
+      "topic": "Index re-exports",
+      "note": "T3 OAuth surface re-exported via index.ts (added by T2 in parallel per the decisions.md note — confirmed in git log). All seven public exports + six type exports present. CLI / Chrome ext consumers can import from the package root."
+    }
+  ],
+  "spec_drift_observations": [
+    {
+      "topic": "Task spec line 33 says parseJwtPayload 'parses header + payload'",
+      "drift": "Implementation parses payload only. The header parsing claim in the spec is unfulfilled. C2 above is the recommended fix — actually implement header parsing + alg assertion."
+    },
+    {
+      "topic": "Decision 6 says 'CLI headless flow asserts alg=HS256'",
+      "drift": "If header alg-checking stays in CLI (Task 5), then the SDK's parseJwtPayload doesn't fulfil it — but that means three host runtimes (CLI, Chrome ext, agent framework) all must reimplement the same alg check. Cleaner to put it in the SDK boundary. C2 recommends moving it down."
+    },
+    {
+      "topic": "Task spec line 32 — exchangeCodeForToken takes `state` parameter",
+      "drift": "Implementation accepts `state` and validates it (oauth.ts:190, 199). Aligned with spec — listed here only because the spec line uses `state` while the redirect callback's typical inputs are also `state` + `code`; clear naming."
+    }
+  ],
+  "verification_run": {
+    "tests_executed": "Not re-run by reviewer (relying on T3-impl's reported `bun test` and `vitest run`: 29/29 pass).",
+    "tsc_check": "Not re-run (T3-impl reports `npx tsc -p packages/sdk --noEmit` clean).",
+    "node_imports_grep": "Confirmed via Grep tool — only doc-comment mention, no actual imports."
+  },
+  "blocking": false,
+  "blocking_rationale": "C1 and C2 are major but non-blocking for round 1: C1 (TTL/eviction) is a fix on top of a correct foundation, not a redo; C2 (alg header check) is a one-function addition. Both can be addressed in round 2 without invalidating any T3 work. C3-C8 are all minors. None of the issues touch the core Decision 5 binding logic, which is correct.",
+  "recommended_for_round_2": [
+    "C1 — add TTL or max-size eviction policy to pendingAuthSessions",
+    "C2 — implement alg-header parsing + HS256 whitelist in parseJwtPayload (and add tests per C7)",
+    "C3 — fix the clientId asymmetry (store + propagate, OR remove the parameter)",
+    "C5 — add Array.isArray guard in parseJwtPayload"
+  ],
+  "deferrable_to_followup_tasks": [
+    "C4 — cause-chain redaction (more naturally addressed in Task 8's redaction test pass)",
+    "C6 — server error-body propagation (depends on Task 6's final /oauth/token error shape)",
+    "C8 — perf micro-opt (no real impact at OAuth payload sizes)"
+  ]
+}

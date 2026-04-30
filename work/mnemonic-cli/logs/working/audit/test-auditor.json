@@ -1,0 +1,83 @@
+{
+  "auditor": "test-auditor",
+  "status": "issues_found",
+  "summary": "Coverage exceeds gates (SDK lines 86.51%, branches above 80% per T2-R2 vitest run; CLI bun-line 80%+/branches 71% per T5-R2). All four TDD anchors are present and named in code (state-mismatch, atomic-redeem 410, whoami no-server-call, --json --quiet). Golden-fixture lockstep is wired (Task 4) and CI re-runs the regenerator with git diff --exit-code. Cross-runtime CI matrix names 4 runtimes (Node 20 / Node 22 / Bun / Deno-1.40) but executes the test suite via bun test on every cell — Decision 11 spirit only partially upheld (already documented as known follow-up in T8). Five mock-server fault modes are defined; only 4 are exercised — `expired-jwt-after-N-requests` is wired in mock-server.ts:160 but no test calls withFault('expired-jwt-after-N-requests'). Decision 7 bootstrap CLI-side coverage misses (a) HTTP 400 malformed-UUID branch and (b) explicit 0600 mode assertion on identity-import-write (init/export both assert it). CLI-layer redaction tests do not assert no JWT/secret leaks on stderr/stdout — redaction is asserted only at SDK layer; CLI inherits via fromSdkError but lacks an explicit /eyJ[A-Za-z0-9_-]{20,}/ negative assertion. Single it() block in cli-flows.test.ts hides per-step granularity (documented intentional but reduces failure-localization). signer-contract.test.ts duplicates inline coverage from signer.test.ts (deferred, marked redundant in T2 R2).",
+  "coverage": {
+    "sdk_lines_pct": 86.51,
+    "sdk_branches_pct": 81.25,
+    "cli_lines_pct": 80.02,
+    "cli_branches_pct": 71.31
+  },
+  "findings": [
+    {
+      "severity": "medium",
+      "category": "fault-coverage",
+      "file": "packages/sdk/test/mock-server.ts:160 (and absent in test/integration/*.test.ts)",
+      "issue": "Fault mode `expired-jwt-after-N-requests` is implemented in mock-server.ts but no integration test calls withFault('expired-jwt-after-N-requests'). Tech-spec § Testing Strategy line 332 lists this as one of the five required fault paths, and explicitly states 'Each integration test exercises at least one fault path'.",
+      "recommendation": "Add a test in sdk/test/integration/recall-verify.test.ts or a new jwt-expiry.test.ts that issues N+1 successive recall/verify calls and asserts the SDK surfaces AuthError on the (N+1)th call when the server flips to 401. Closes the contract gap and protects against regressions where the SDK swallows auth errors mid-flight."
+    },
+    {
+      "severity": "medium",
+      "category": "redaction",
+      "file": "packages/cli/test/{login,sign,recall,verify,identity}.test.ts",
+      "issue": "Tech-spec line 320 demands: 'assert no JWT-shape strings (/^eyJ[A-Za-z0-9_-]+$/) or 128-hex-char secrets ever appear in captured stderr/stdout during error paths.' The SDK layer asserts this (client.test.ts:455 /eyJ[A-Za-z0-9_-]{20,}/), but the CLI's fromSdkError → handleError pipeline is not pinned by an end-to-end stderr-content assertion. A regression that re-introduces leak on the CLI (e.g. accidental console.error of err.cause) would not fail current tests.",
+      "recommendation": "Add at minimum one CLI test per command that injects a leaky JWT into a server error response and asserts the captured stderr does not match /eyJ[A-Za-z0-9_-]{20,}/ AND does not match /[0-9a-f]{128}/. Best target: login.test.ts (already mocks token-endpoint 5xx with leaky bodies)."
+    },
+    {
+      "severity": "medium",
+      "category": "decision-7-coverage",
+      "file": "packages/cli/test/identity.test.ts and packages/sdk/test/integration/bootstrap-ticket.test.ts",
+      "issue": "Tech-spec § 319 lists five Decision-7 import failure modes: success, expired ticket → 410, double-redeem → 410, malformed UUID → 400, server-issued keypair → identity.json mode 0600. Only success + double-redeem (as 410, mock) and the malformed-JSON-file path are covered. Missing: explicit 'expired ticket → 410' (server returns 404 for expired-or-consumed; CLI test only mocks one 410), 'malformed UUID → 400', and 'identity.json written mode 0600 after import'.",
+      "recommendation": "Three small additions to identity.test.ts: (1) expired-ticket: server returns 410 fresh, no prior consume — assert UserError exit 1; (2) malformed-UUID: pass non-UUID to --ticket, assert local validation fails before fetch; (3) post-import stat: assert (st.mode & 0o777).toString(8) === '600' on the imported file (mirrors export test at identity.test.ts:135)."
+    },
+    {
+      "severity": "medium",
+      "category": "ci-matrix",
+      "file": ".github/workflows/node-test.yml:133-139",
+      "issue": "Decision 11 / Deviation 5 mandate Node 20, Node 22, Bun, Deno cross-runtime tests. The matrix declares all four cells but every cell runs `bun test` regardless of `matrix.runtime`. Node 20 / 22 / Deno installations are validated only via setup but their actual ESM/JIT path never executes the test code. T8 already documented this as deferred but it weakens the gate against runtime-specific regressions (e.g. Deno crypto.subtle, Node 22 fetch, Node 20 dynamic-import semantics).",
+      "recommendation": "Split job into 'import-only smoke' (per-runtime, runs `<runtime> -e 'await import(...)'` against the built dist) plus the existing 'bun test' for full suite. This reclaims per-runtime ESM resolution coverage without paying the vitest-cross-compat cost. Or, gate by runtime: when matrix.runtime starts with 'node', `node --experimental-vm-modules ./node_modules/.bin/vitest run`."
+    },
+    {
+      "severity": "low",
+      "category": "redundancy",
+      "file": "packages/sdk/test/signer-contract.test.ts (0 inline tests, runs runSignerContract) vs packages/sdk/test/signer.test.ts (also runs runSignerContract inline)",
+      "issue": "Per test-master rule 'each test must justify its existence', the standalone signer-contract.test.ts duplicates coverage already provided in signer.test.ts (T2 R2 deferred this consolidation). Removing either would reduce zero confidence.",
+      "recommendation": "Keep one of the two: prefer signer-contract.test.ts (it's the future surface for TurnkeySigner / WebAuthnSigner) and inline its content into signer.test.ts becomes a 'LocalSigner-only' regression file. Or vice-versa. Backlog item already exists; flagging here for completeness."
+    },
+    {
+      "severity": "low",
+      "category": "test-pollution-risk",
+      "file": "packages/cli/test/integration/cli-flows.test.ts (single it() block)",
+      "issue": "All nine end-to-end CLI scenarios (init, login, sign, recall, verify(verified|tampered|not_found), bootstrap) are sequenced inside ONE it() block to avoid bun's concurrent-it() filesystem races. This is documented but means a failure on step 7 fails the whole block with no localization, and the test runner cannot retry just the failing step.",
+      "recommendation": "When bun ships `describe.sequential` (tracked upstream), split into per-scenario it() blocks. As an interim, wrap each step in a labeled try/catch so the failure message identifies which step blew up. Not blocking — this is a known tradeoff."
+    },
+    {
+      "severity": "low",
+      "category": "contract-drift",
+      "file": "packages/cli/test/identity.test.ts:54 (asserts 410) vs mcp/tests/cli_bootstrap_auth_allowlist.rs:157 (asserts 404)",
+      "issue": "Server returns 404 for second-redeem (NOT_FOUND, single-use); CLI test mocks 410 (Gone). Both 'work' because SDK maps both 4xx to UserError, but the contract is not pinned end-to-end. A regression where the server changes to 410 (per spec § 319's 'double-redeem → 410') would not be caught by either layer's tests.",
+      "recommendation": "Either align mock to 404 to match production, OR (better) update server to return 410 to match spec, then update both tests. The integration test at packages/sdk/test/integration/bootstrap-ticket.test.ts already uses 404; sync the CLI mock to match (or vice-versa once the server side is decided)."
+    },
+    {
+      "severity": "low",
+      "category": "edge-case",
+      "file": "packages/sdk/test/oauth.test.ts (38 tests, but…)",
+      "issue": "Solid coverage of state-mismatch, redirect-mismatch, expired JWT (exp <= now), alg=HS256 enforcement, malformed base64, null/non-object payloads, FIFO TTL eviction. Missing explicit case: a JWT whose `iat` is in the future (clock-skew attack). parseJwtPayload validates `exp` but not `iat`, and there is no test asserting either behavior. Minor — Decision 5/6 don't strictly require it.",
+      "recommendation": "Add one oauth.test.ts case: `iat = now + 60s` should either be accepted (current behavior) or rejected (recommended) — pin whichever is the contract. Closes a small fuzz-the-spec gap."
+    },
+    {
+      "severity": "low",
+      "category": "test-quality",
+      "file": "packages/cli/test/integration/cli-flows.test.ts:131",
+      "issue": "Each step uses mkdtempSync but the cleanup (rmSync) is in a finally that runs AFTER the entire it() block — if the test process dies mid-block, /tmp accumulates mnemonic-cli-int-* dirs. Small disk-pollution footprint.",
+      "recommendation": "Register a `afterAll` (or t.after.always under bun) that runs `rmSync(cfgDir, { recursive: true, force: true })` defensively. Cosmetic."
+    },
+    {
+      "severity": "info",
+      "category": "coverage-shape",
+      "file": "packages/sdk/src/wasm.ts (lines 31-46 uncovered, 33% lines)",
+      "issue": "The real dynamic-import + init() path is uncovered in unit tests by design (tests inject mock via __setWasmForTesting). cose.golden.test.ts hits it indirectly via pkg-nodejs, but the pkg-web import path the SDK runtime actually uses is exercised only at production runtime.",
+      "recommendation": "T8 mock-server CI matrix already runs the build+test loop on bun + node + deno via cose.golden.test.ts. Consider adding a smoke test that imports the SDK from `dist/` on each runtime and calls Keypair.generate() once — that hits wasm.ts dynamic-import end-to-end. Backlog."
+    }
+  ]
+}

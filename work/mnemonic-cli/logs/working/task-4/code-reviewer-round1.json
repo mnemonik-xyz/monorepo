@@ -1,0 +1,57 @@
+{
+  "task": 4,
+  "round": 1,
+  "reviewer": "code-reviewer",
+  "status": "issues_found",
+  "findings": [
+    {
+      "severity": "major",
+      "category": "ci_correctness",
+      "issue": "Workflow env sets `CARGO_TERM_COLOR: always` (.github/workflows/node-test.yml line 37), which makes cargo emit ANSI escape sequences (e.g. `\\x1b[32m`) on stdout. The regenerator script uses `text.find('[')` / `text.rfind(']')` to slice the JSON body out of cargo's framing. ANSI escapes contain `[`, so `find('[')` will match the first ANSI escape (somewhere in cargo's `running 1 test` / `test ... ok` framing) instead of the JSON array's opening `[`. The script will then write garbage into `golden-cose.json`, the SHA will mismatch the committed value, and the CI lockstep gate fails not because Rust core drifted but because of color codes. Locally cargo defaults to non-TTY = no color, which is why the developer's two consecutive runs reproduced the same SHA — CI has never actually exercised the slicer with `--color=always`.",
+      "file": "/Users/syi/src/sessions/2/.github/workflows/node-test.yml",
+      "recommendation": "Either (a) drop `CARGO_TERM_COLOR: always` from the workflow env, (b) override it for the regen step (`env: CARGO_TERM_COLOR: never`), (c) pass `--color=never` to the cargo invocation inside `regen-golden-fixtures.sh`, or (d) make the slicer ANSI-safe by stripping escape sequences before `find('[')`. Option (c) is the most robust because it survives future workflow callers who keep colors on globally. Add a one-line ANSI strip in the python heredoc as belt-and-braces."
+    },
+    {
+      "severity": "minor",
+      "category": "robustness",
+      "issue": "`regen-golden-fixtures.sh` extracts the JSON payload with `text.find('[')` and `text.rfind(']')`. This is fragile: any stray `[` in cargo's framing (panic dumps, ANSI codes, future libtest changes that print things like `[ok]`) will mis-slice. A panic from `to_canonical_cbor` would currently produce a corrupted-but-valid-looking fixture rather than failing loudly.",
+      "file": "/Users/syi/src/sessions/2/packages/sdk/scripts/regen-golden-fixtures.sh",
+      "recommendation": "Have the Rust emitter wrap its JSON output in unambiguous sentinel markers (e.g. `---BEGIN_FIXTURE---\\n...\\n---END_FIXTURE---`) and slice between those sentinels. This decouples the script from cargo/libtest output format. Alternatively, write the JSON directly to a known file from inside the Rust test (using `std::env::var(\"OUT_FIXTURE\")`) and skip the stdout-slicing entirely."
+    },
+    {
+      "severity": "minor",
+      "category": "spec_deviation",
+      "issue": "Tech-spec Decision 12 calls for `~50 cases` and the task description repeats `~50 input cases` four times. Implementation delivers 22 cases. The 22 do cover the documented edge categories (empty/short/long, UTF-8 boundary, control chars, embedded NUL, CBOR length-prefix boundary at 256, tag variants, metadata variants), but the count is materially below spec. `decisions.md` calls this out as a follow-up but does not justify why 22 is sufficient — only flags the 100KB file-size concern at >50 entries.",
+      "file": "/Users/syi/src/sessions/2/core/tests/golden_fixtures.rs",
+      "recommendation": "Either expand the catalogue to ~50 (good additions: NaN/Infinity floats, max-int boundaries u32/u64, deeply nested metadata, parents array with multiple entries, content at exactly 65536 bytes for the u16 length-prefix boundary, repeated identical content + identical timestamp to verify deterministic-different-art-id, schema_version edge values) — or amend Decision 12 in tech-spec to reflect the agreed lower count and mark the deviation explicitly. Right now the spec and implementation disagree silently."
+    },
+    {
+      "severity": "minor",
+      "category": "spec_deviation",
+      "issue": "Tech-spec Decision 12 specifies the CI gate as `cargo run --features golden-fixtures --bin gen-fixtures | sha256sum | diff - packages/sdk/test/fixtures/golden-cose.sha256`. Implementation uses `bash regen-golden-fixtures.sh && git diff --exit-code packages/sdk/test/fixtures/golden-cose.sha256`. The new mechanism is arguably better (writes both the JSON and the SHA, so error annotations point to specific entries), but it is a deviation from the spec wording.",
+      "file": "/Users/syi/src/sessions/2/.github/workflows/node-test.yml",
+      "recommendation": "Add a one-line decision note to `decisions.md` (or amend Decision 12 in tech-spec) documenting the switch from `cargo run --bin gen-fixtures` to the regen-script + `git diff --exit-code` mechanism, with the rationale (better failure log granularity, no need for a separate `[[bin]]` target). Currently this divergence is invisible to anyone reading the spec."
+    },
+    {
+      "severity": "minor",
+      "category": "type_safety",
+      "issue": "`packages/sdk/test/cose.golden.test.ts` line ~125: `__setWasmForTesting(realWasm as never)`. The `as never` cast bypasses TypeScript's structural checks between the pkg-nodejs surface (just dynamic-imported) and the `typeof MnemonicCore` alias (which references pkg-web). If pkg-nodejs ever drops or renames `sign_cose_payload`, this test will fail at runtime instead of at `tsc --noEmit`.",
+      "file": "/Users/syi/src/sessions/2/packages/sdk/test/cose.golden.test.ts",
+      "recommendation": "Replace `as never` with `as typeof MnemonicCore` — the same alias used in `wasm.ts`. If the pkg-nodejs and pkg-web type surfaces genuinely differ in test-relevant shape, narrow the cast to the specific symbol used (`as { sign_cose_payload: typeof realWasm.sign_cose_payload }`). The fewer `as never` casts the SDK has, the easier WASM-target drift is to catch."
+    },
+    {
+      "severity": "minor",
+      "category": "testing_coverage",
+      "issue": "No automated negative test demonstrates that the lockstep gate actually fails on encoder drift. The mechanism (`git diff --exit-code` against the working tree after re-running the regenerator) is straightforward, but the failure path has only been reasoned about, not exercised. A future `cargo fmt` change or a libtest output-format tweak could silently break the gate without any test catching it.",
+      "file": "/Users/syi/src/sessions/2/.github/workflows/node-test.yml",
+      "recommendation": "Add a small companion test in `core/tests/golden_fixtures.rs` (or a separate one-shot `bash` script under `packages/sdk/scripts/test-lockstep-fails-on-drift.sh`) that: temporarily mutates one byte of `cose_envelope_hex` in the committed fixture, runs the regenerator, asserts the SHA differs, restores the original. Wire it as a follow-on CI step. Worst case it catches one regression and pays for itself."
+    },
+    {
+      "severity": "minor",
+      "category": "determinism",
+      "issue": "`build_artifact()` in `core/tests/golden_fixtures.rs` calls `fixture_keypair()` once per case to derive the `producer` DID string. This is wasteful (re-derives the keypair 22 times) but not incorrect. The bigger concern: the function is called inside `serde_json::Map::insert` calls, and any future change that makes `Keypair::pubkey().to_string()` non-deterministic (e.g. solana-sdk 2.x rotation) would cascade through every fixture entry without an obvious test signal. `test_fixed_keypair_pubkey_stable` checks the pubkey is non-empty + roundtrips, but does not compare it to a captured constant.",
+      "file": "/Users/syi/src/sessions/2/core/tests/golden_fixtures.rs",
+      "recommendation": "(1) Compute the keypair + producer DID once at the top of `build_all_entries` and pass into `build_artifact`. (2) In `test_fixed_keypair_pubkey_stable`, assert against the captured pubkey constant `\"56Ltbq...BfFuU\"` (visible in the existing fixture). That way an upstream solana-sdk change that silently rotates the derivation fails this test loudly with a one-line diff, instead of corrupting all 22 fixtures."
+    }
+  ]
+}
