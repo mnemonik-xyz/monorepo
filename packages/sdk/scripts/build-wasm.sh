@@ -33,7 +33,7 @@ fi
 cd "$REPO_ROOT"
 
 # Wipe any stale default-output directory before building.
-rm -rf core/pkg core/pkg-web
+rm -rf core/pkg core/pkg-web core/pkg-nodejs
 
 wasm-pack build core --target web --features wasm
 
@@ -41,6 +41,14 @@ wasm-pack build core --target web --features wasm
 # and the path is unambiguous from the SDK side.
 mv core/pkg core/pkg-web
 echo "✓ SDK wasm artifact at $REPO_ROOT/core/pkg-web/"
+
+# Also produce the `--target nodejs` build for the SDK's golden-fixture
+# test (`packages/sdk/test/cose.golden.test.ts`) which loads the WASM via
+# Node's CJS-friendly `import()` path. This artifact is NOT shipped in the
+# npm tarball — production consumers use the `--target web` build above.
+wasm-pack build core --target nodejs --features wasm
+mv core/pkg core/pkg-nodejs
+echo "✓ test wasm artifact at $REPO_ROOT/core/pkg-nodejs/"
 
 # Post-build size optimization. wasm-pack 0.14 already runs `wasm-opt -O`,
 # but a follow-up `-Oz --strip-debug --strip-producers` shaves a further
