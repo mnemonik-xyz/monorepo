@@ -46,10 +46,12 @@ Touchpoints (Option B):
 
 Phase 1's `Signer` interface in SDK was deliberately abstract precisely to enable this. The blocker is server-side + WASM exports + storage schema + migration UX.
 
-### Recommended sequencing
+### Recommended sequencing — LOCKED IN (2026-04-30)
 
-Phase 2: Option B — off-chain crypto-flex. Pulls in passkey-based identity. Anchor stays Solana for now.
-Phase 3: Option A — full chain-flex. Anchor adapter pattern (Ethereum, Bitcoin, etc.). Frees the protocol from the SVM dependency.
+- **Phase 2 — confirmed:** Option B → unblock'ает passkey + KMS users. Anchor stays Solana.
+- **Phase 3 — confirmed:** Option A → free protocol from SVM dependency. Chain-pluggable anchor (Ethereum, Bitcoin, ICP, etc.).
+
+This sequencing is treated as an architectural decision, not a "maybe". Phase 1.5 (on-chain + billing) lands first because real anchoring is the protocol's headline value. Phase 2 follows because passkey / KMS unlocks corporate + consumer-grade identity. Phase 3 closes the SVM dependency.
 
 ---
 

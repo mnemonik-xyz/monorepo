@@ -24,6 +24,124 @@ bundle, COSE-signs it locally, and POSTs the envelope back. The SDK never
 re-encodes the CBOR in JS, so the byte-level content_hash matches what the
 server stores.
 
+## Examples
+
+### Sign + recall + verify
+
+```typescript
+import { MnemonicClient, LocalSigner, Keypair } from '@mnemonik-xyz/sdk';
+
+const kp = Keypair.fromJSON(JSON.parse(identityJson));        // your stored keypair
+const client = new MnemonicClient({
+  baseUrl: 'https://mcp.mnemonik.xyz',
+  signer: new LocalSigner(kp),
+  jwt: storedJwt,
+});
+client.setKeypair(kp);
+
+const { attestationId } = await client.signMemory(
+  'Findings from market research: TAM ~$2B, top-3 competitors are X, Y, Z.',
+  { tags: ['research', 'q2-2026'] },
+);
+
+const hits = await client.recall('what did I find about market research', { topK: 5 });
+hits.forEach(h => console.log(`[${h.score.toFixed(2)}] ${h.attestationId}: ${h.content}`));
+
+const status = await client.verify(attestationId);
+//   { status: 'verified', signer: '6ZsT...3kQp' }      — happy path
+//   { status: 'tampered', signer: '...', reason: ... } — content_hash mismatch
+//   { status: 'not_found' }                            — unknown id or wrong tenant
+```
+
+### Headless OAuth (CI / serverless / agent)
+
+For environments where you cannot open a browser, mint a JWT through the
+webapp once and pass it to the SDK directly. The SDK does not validate the
+signature client-side — the server rejects an invalid token on first use.
+
+```typescript
+import { MnemonicClient, LocalSigner, Keypair, parseJwtPayload } from '@mnemonik-xyz/sdk';
+
+const claims = parseJwtPayload(process.env.MNEMONIC_JWT!);
+//   { sub, exp, iat }   — throws AuthError on alg=none, expired, malformed.
+
+const kp = Keypair.fromJSON(JSON.parse(process.env.MNEMONIC_IDENTITY!));
+const client = new MnemonicClient({
+  baseUrl: 'https://mcp.mnemonik.xyz',
+  signer: new LocalSigner(kp),
+  jwt: process.env.MNEMONIC_JWT,
+});
+client.setKeypair(kp);
+
+await client.signMemory('CI run #1234 succeeded', { tags: ['ci', 'release'] });
+```
+
+### Interactive OAuth (browser, Chrome extension, custom flow)
+
+The SDK exposes the OAuth primitives without binding to any host. Wrap them
+with whatever redirect mechanism your runtime offers — `chrome.identity.launchWebAuthFlow`
+in an extension, a popup window in a webapp, the loopback server `mnemonic
+login` uses in `node:http`, etc.
+
+```typescript
+import { buildAuthorizeUrl, exchangeCodeForToken } from '@mnemonik-xyz/sdk';
+
+const { url, state, sessionId } = buildAuthorizeUrl({
+  baseUrl: 'https://mcp.mnemonik.xyz',
+  clientId: 'my-app',
+  redirectUri: 'https://my-app.example/oauth/callback',
+});
+
+window.location = url;                     // OR open a popup, OR launchWebAuthFlow
+
+// ... after the redirect with ?code=&state= ...
+
+const { jwt, expiresAt } = await exchangeCodeForToken({
+  baseUrl: 'https://mcp.mnemonik.xyz',
+  code: callbackParams.code,
+  state: callbackParams.state,
+  redirectUri: 'https://my-app.example/oauth/callback',
+  sessionId,                               // returned by buildAuthorizeUrl, validated against stored state
+});
+```
+
+State + verifier + redirectUri are bound at `buildAuthorizeUrl` time and
+re-validated at `exchangeCodeForToken` time. A mismatch throws `AuthError`
+before any HTTP request.
+
+### LangChain / agent framework
+
+```typescript
+import { DynamicTool } from '@langchain/core/tools';
+import { MnemonicClient, LocalSigner, Keypair } from '@mnemonik-xyz/sdk';
+
+const kp = Keypair.fromJSON(JSON.parse(process.env.MNEMONIC_IDENTITY!));
+const mnemonic = new MnemonicClient({
+  baseUrl: 'https://mcp.mnemonik.xyz',
+  signer: new LocalSigner(kp),
+  jwt: process.env.MNEMONIC_JWT,
+});
+mnemonic.setKeypair(kp);
+
+export const signMemoryTool = new DynamicTool({
+  name: 'mnemonic_sign_memory',
+  description: 'Persist a verifiable memory. Use for research findings, decisions, and any fact you want to recall later.',
+  func: async (content: string) => {
+    const { attestationId } = await mnemonic.signMemory(content);
+    return `signed: ${attestationId}`;
+  },
+});
+
+export const recallTool = new DynamicTool({
+  name: 'mnemonic_recall',
+  description: 'Search prior signed memories by semantic similarity.',
+  func: async (query: string) => {
+    const hits = await mnemonic.recall(query, { topK: 5 });
+    return JSON.stringify(hits, null, 2);
+  },
+});
+```
+
 ## Runtime targets
 
 The SDK consumes the `mnemonic-core` Rust crate compiled to WebAssembly via

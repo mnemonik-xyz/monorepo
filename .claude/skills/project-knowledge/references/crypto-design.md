@@ -119,14 +119,135 @@ Recommendation: keep WASM-first signing (current Phase 1 design) for Option B. P
 
 ---
 
-## Recommended sequencing
+## Recommended sequencing — LOCKED IN (2026-04-30)
 
-| Phase | Scope | Why now |
+| Phase | Scope | Status |
 |---|---|---|
-| Phase 1 (current) | Single Ed25519 signer, Solana anchor | Hackathon MVP. `Signer` interface ready for future swaps. |
-| Phase 1.5 | On-chain `STORAGE_MODE=full` + billing | Headline value of "verifiable memory" needs real anchoring before crypto-flex matters publicly |
-| Phase 2 | **Option B** — off-chain crypto-flex | Unblocks WebAuthn / passkey users. Anchor stays Solana. ~6–8 dev-days. |
-| Phase 3 | **Option A** — chain-pluggable anchor | Frees protocol from SVM dependency. Adds Ethereum/Bitcoin anchors. ~3–5 dev-days on top of Option B. |
+| Phase 1 (current) | Single Ed25519 signer, Solana anchor | Shipped via mnemonic-cli. `Signer` interface ready for future swaps. |
+| **Phase 1.x — confirmed** | **Turnkey custody (`TurnkeySigner`)** | Drop-in `Signer` impl. Email/passkey recovery, no protocol change. ~3–5 dev-days. Pre-requisite for public launch. |
+| Phase 1.5 | On-chain `STORAGE_MODE=full` + billing | Backlog TOP PRIORITY 1. Headline value of "verifiable memory" needs real anchoring before crypto-flex matters publicly. |
+| **Phase 2 — confirmed** | **Option B** — off-chain crypto-flex | Unblocks passkey + KMS users. Anchor stays Solana. ~6–8 dev-days. |
+| **Phase 3 — confirmed** | **Option A** — chain-pluggable anchor | Frees protocol from SVM dependency. Adds Ethereum/Bitcoin/etc. anchors. ~3–5 dev-days on top of Option B. |
+
+---
+
+## Phase 1.x — Turnkey custody integration (detailed)
+
+**Why it slots between Phase 1 and Phase 1.5:** Phase 1's `LocalSigner` stores raw Ed25519 secret in `localStorage` (browser) or `~/.mnemonic/identity.json` (CLI). If user loses the device or clears storage — keypair gone, attestations unrecoverable. Public launch requires email/passkey recovery; Turnkey is the cleanest path.
+
+**Why it doesn't need full Option B:** Turnkey supports Ed25519 natively. Same alg, same protocol contract — only the `Signer.sign()` path goes through Turnkey API instead of WASM. Server side, COSE envelope, anchor — unchanged.
+
+### Architectural picture
+
+```
+SDK
+├── Signer (interface, Phase 1)
+│   ├── LocalSigner (Phase 1) — secret in memory, signs via WASM sign_challenge
+│   └── TurnkeySigner (Phase 1.x) — secret in Turnkey Sub-Org, signs via signRawPayload activity
+```
+
+Turnkey supports: **Ed25519** (✓ Phase 1.x), secp256k1 (Phase 3 Ethereum), secp256r1/ES256 (Phase 2 passkeys). Same vendor, multiple algorithms — Phases 2 and 3 can reuse the same Turnkey integration without re-platforming.
+
+### `TurnkeySigner` skeleton
+
+```typescript
+import type { Signer } from '@mnemonik-xyz/sdk';
+import { TurnkeyClient } from '@turnkey/sdk-server';
+
+export class TurnkeySigner implements Signer {
+  constructor(
+    private client: TurnkeyClient,
+    public readonly pubkey: string,
+    private readonly privateKeyId: string,
+  ) {}
+
+  async sign(bytes: Uint8Array): Promise<Uint8Array> {
+    const { activity } = await this.client.signRawPayload({
+      organizationId: this.client.organizationId,
+      privateKeyId: this.privateKeyId,
+      payload: Buffer.from(bytes).toString('hex'),
+      encoding: 'PAYLOAD_ENCODING_HEXADECIMAL',
+      hashFunction: 'HASH_FUNCTION_NOT_APPLICABLE',  // Ed25519 has no pre-hash
+    });
+    const signatureHex = activity.result.signRawPayloadResult.signature;
+    return Uint8Array.from(Buffer.from(signatureHex, 'hex'));
+  }
+}
+```
+
+Drop-in for `MnemonicClient`:
+
+```typescript
+const client = new MnemonicClient({
+  baseUrl: 'https://mcp.mnemonik.xyz',
+  signer: new TurnkeySigner(turnkeyClient, pubkey, privateKeyId),
+  jwt,  // OAuth JWT, same flow
+});
+```
+
+### Webapp `localStorage` migration
+
+Current shape (Phase 1):
+```json
+{ "secret": [n0, n1, …, n63], "pubkey_base58": "…" }
+```
+
+Turnkey-aware versioned shape (Phase 1.x):
+```json
+{
+  "version": 2,
+  "type": "turnkey",
+  "sub_org_id": "…",
+  "private_key_id": "…",
+  "pubkey_base58": "…"
+}
+```
+
+Or a `LocalSigner` profile under the same envelope:
+```json
+{ "version": 2, "type": "local", "secret": [n0, …, n63], "pubkey_base58": "…" }
+```
+
+Migration: missing `version` → assumed `type: local` legacy shape. Webapp's `IdentityPanel` switches between local/turnkey based on `type` field.
+
+### Server-side impact
+
+**None.** Server validates COSE_Sign1 envelope with raw Ed25519 signature and base58 pubkey. Doesn't care whether the signature came from a local secret or a Turnkey API call. The OAuth challenge sign flow uses `Signer.sign()` polymorphically — both `LocalSigner` and `TurnkeySigner` satisfy it.
+
+### CLI integration
+
+`mnemonic identity import --turnkey` flow:
+1. CLI invokes Turnkey's email-auth or passkey-auth flow (browser-based, similar to OAuth `mnemonic login`).
+2. Receives Turnkey API credentials + `sub_org_id`.
+3. Creates a Sub-Org with one Ed25519 wallet (or imports existing).
+4. Saves `~/.mnemonic/identity.json` with the versioned `{type: 'turnkey', ...}` shape.
+5. Subsequent `mnemonic sign` uses `TurnkeySigner` instead of `LocalSigner`. Network call per signature — adds ~200ms latency.
+
+### Cost & operational considerations
+
+- **Turnkey pricing:** ~$0.001 per signing operation at typical tiers. Free tier usually covers hackathon/dev. Production: `mnemonic sign` cost = `STORAGE_MODE=full` cost + Turnkey sig cost. Add to economics.md when Phase 1.x lands.
+- **Latency:** ~150–300ms round-trip per `sign()` call. Local sign is <1ms. UX-wise: visible but tolerable.
+- **Uptime dependency:** if Turnkey is unavailable, users with Turnkey-managed identities cannot sign. Mitigation: `LocalSigner` remains supported for users who prefer self-custody.
+- **Vendor lock-in:** soft — `TurnkeySigner` is one impl of `Signer`. Any alternative MPC provider (Privy, Web3Auth, Lit Protocol) is also drop-in. Architecturally not locked.
+- **Recovery UX:** main reason to ship Phase 1.x. Lost device + Turnkey passkey/email recovery → keypair restored → all attestations still verifiable. Without this, public launch has too much "user loses everything" risk.
+
+### Effort
+
+| Item | Days |
+|---|---|
+| `TurnkeySigner` SDK class + tests + integration with mock Turnkey | 1 |
+| Webapp `IdentityPanel` Turnkey enrollment + localStorage versioned shape + migration | 2 |
+| CLI `mnemonic identity import --turnkey` flow | 1 |
+| Server-side audit (verify nothing assumes secret is local) — should be no-op but worth a sweep | 0.5 |
+| Docs + README example update | 0.5 |
+| **Total** | **~3–5 dev-days** |
+
+### Open decisions before Phase 1.x
+
+- **Sub-Org per user vs shared Org with read-only sub-orgs?** Sub-Org-per-user is industry standard for end-user MPC; allow user to revoke / export.
+- **Authentication chain:** Mnemonic OAuth → Turnkey passkey, or Turnkey passkey → Mnemonic OAuth, or both side-by-side? Recommend: OAuth issues Mnemonic JWT, Turnkey passkey is the actual signing authority. Two factors, complementary.
+- **Pricing pass-through:** does Mnemonic absorb the Turnkey sig cost or surface to user? Tied to Phase 1.5 billing decisions.
+- **Self-custody escape hatch:** can a user export their Turnkey-managed key to a `LocalSigner` profile? Turnkey allows export — UX flow needed.
 
 ---
 
