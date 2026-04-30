@@ -44,7 +44,8 @@
     "build": "tsc -b && bash scripts/build-wasm.sh",
     "test": "vitest run",
     "test:watch": "vitest",
-    "prepublishOnly": "npm run build && npm test"
+    "test:publish": "vitest run --exclude='test/cose.golden.test.ts'",
+    "prepublishOnly": "npm run build && npm run test:publish"
   },
   "devDependencies": {
     "@noble/ed25519": "^2.3.0",
