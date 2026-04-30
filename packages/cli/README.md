@@ -1,5 +1,7 @@
 # @mnemonik-xyz/cli
 
+> Project site: [mnemonik.xyz](https://mnemonik.xyz) · Hosted MCP: `https://mcp.mnemonik.xyz/mcp`
+
 `mnemonic` — command-line interface for the Mnemonic Protocol. A thin
 wrapper over [`@mnemonik-xyz/sdk`](../sdk/) that adds Node-only persistence
 under `~/.mnemonic/`, an interactive PKCE loopback OAuth flow, and

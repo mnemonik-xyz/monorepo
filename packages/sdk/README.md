@@ -1,5 +1,7 @@
 # @mnemonik-xyz/sdk
 
+> Project site: [mnemonik.xyz](https://mnemonik.xyz) · Hosted MCP: `https://mcp.mnemonik.xyz/mcp`
+
 Runtime-agnostic JavaScript/TypeScript SDK for the Mnemonic Protocol. Wraps
 the hosted MCP HTTP surface, the OAuth 2.1 + PKCE handshake, and COSE_Sign1
 canonical-CBOR signing through a WASM-compiled `mnemonic-core`. Pure ESM,

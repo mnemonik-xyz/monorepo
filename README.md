@@ -2,6 +2,8 @@
 
 > Verifiable, persistent memory for AI agents — with cryptographic attestation on Arweave and Solana, exposed over MCP.
 
+**Live:** [mnemonik.xyz](https://mnemonik.xyz) · **Hosted MCP:** `https://mcp.mnemonik.xyz/mcp`
+
 Mnemonic gives an AI agent a persistent and verifiable artifact/memory layer: signed memories that can be semantically recalled, independently verified, and optionally anchored on-chain.
 
 ---

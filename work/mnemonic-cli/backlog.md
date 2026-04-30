@@ -4,6 +4,83 @@ Items deliberately out of scope for Phase 1 (≤5 dev-days, hackathon MVP). Arch
 
 ---
 
+## TOP PRIORITY 2 — Crypto-flexibility (decouple from Solana / Ed25519 lock-in)
+
+**Status (Phase 1):** Identity is hard-pinned to Solana Ed25519 because the on-chain anchor uses Solana SPL Memo (Ed25519-required by SVM) and the same keypair is reused for the off-chain attestation envelope. Webapp localStorage shape, server keypair file format, DID format `did:sol:`, all WASM exports — every layer assumes Ed25519.
+
+### Why this matters
+
+- **WebAuthn / passkeys** use ES256 (secp256r1) or RS256, not Ed25519 — Touch ID / Yubikey can't sign attestations today.
+- **Hardware wallets** (Ledger, Trezor) are mostly secp256k1 — same problem.
+- **HSMs / KMS** (AWS, GCP, Cloudflare) support various algs but not all support Ed25519.
+- **Corporate / SAML identities** are typically RSA or ECDSA-P256.
+- **Post-quantum migration** (ML-DSA / Falcon) — being locked to Ed25519 forecloses the upgrade path.
+
+### Architectural decoupling needed
+
+Today: `Identity == Anchor ID` (must be Ed25519 because anchor is Solana).
+
+Target: **two separate signers** per attestation, recorded on the row:
+- **Off-chain envelope signer** (alg-pluggable: Ed25519, secp256k1, ES256, RS256, future PQ algs). COSE_Sign1 supports this natively via the alg field.
+- **Anchor signer** (chain-pluggable: Solana, Ethereum, Bitcoin, ICP, Arweave-only, none). Stays alg-bound to whatever the chain requires.
+
+User picks the combination. Default = Solana Ed25519 for both (current behavior). Verification checks both independently.
+
+### Cost estimate
+
+| Scope | Days |
+|---|---|
+| **Option A — full multi-alg (off-chain + on-chain pluggable)** | 10–12 dev-days |
+| **Option B — off-chain pluggable only (anchor stays Solana Ed25519)** | 6–8 dev-days |
+
+Option B is the right starting point — unblocks WebAuthn / KMS users without touching the on-chain story.
+
+Touchpoints (Option B):
+- `core/src/identity/mod.rs` — generic `Signer` trait + Ed25519/secp256k1/ES256 implementations
+- `core/src/codec/sign.rs` — set COSE alg field from signer; verify any registered alg
+- `core/src/storage/sqlite.rs` — add `signer_alg TEXT NOT NULL DEFAULT 'EdDSA'` column (idempotent migration)
+- `core/src/wasm/mod.rs` — generic sign/verify exports parameterized by alg
+- `packages/sdk/src/signer.ts` — already abstract via `Signer` interface (Phase 1 prep), drop-in for new impls
+- Webapp localStorage shape — version flag + new shape `{alg, secret_*, pubkey_*}`
+- Migration: legacy NULL `signer_alg` rows assumed `EdDSA` (Ed25519)
+
+Phase 1's `Signer` interface in SDK was deliberately abstract precisely to enable this. The blocker is server-side + WASM exports + storage schema + migration UX.
+
+### Recommended sequencing
+
+Phase 2: Option B — off-chain crypto-flex. Pulls in passkey-based identity. Anchor stays Solana for now.
+Phase 3: Option A — full chain-flex. Anchor adapter pattern (Ethereum, Bitcoin, etc.). Frees the protocol from the SVM dependency.
+
+---
+
+## TOP PRIORITY 3 — Bundle-size optimization for SDK consumers
+
+**Status (Phase 1, post-publish):** SDK packs to 254KB (most of it the 458KB WASM unpacked). For CLI users `npm install -g` once = fine. For programmatic SDK consumers (Chrome extension, Cloudflare Workers, LangChain agents) loading 442KB on every cold start is a real cost.
+
+### Concrete actions
+
+| Action | Estimated saving | Effort | Notes |
+|---|---|---|---|
+| `wasm-opt -O4` + `wasm-strip` | 30–50KB | 1 hour | **Done in Phase 1 pre-publish if possible** — no architectural change |
+| Lean `core-wasm` Rust crate (split from `core/`, drop full `solana-sdk` dep, keep only what WASM needs) | 200–250KB | 1–2 days | Loses some shared code with server; needs careful boundary |
+| Single `wasm-pack` build target (currently 2: `pkg/` + `pkg-web/`) | minor (build pipeline simplification) | 0.5 day | Doesn't reduce shipped size — code-hygiene win |
+| Pure-JS swap (`@noble/curves` Ed25519 + custom canonical CBOR) — replaces WASM entirely | drops WASM 458KB → ~50KB JS | 2–3 days | Risk: drift from server's Rust CBOR encoder unless golden fixture covers exhaustively |
+| Dual publish: `@mnemonik-xyz/sdk` (full WASM) + `@mnemonik-xyz/sdk-light` (pure JS, edge-friendly) | n/a | 1–2 days on top of pure-JS work | Best UX — consumer picks per-use-case |
+
+### Bundle analyzer first
+
+Before any of these — actually profile the WASM. `wasm-objdump -h` + `twiggy top` to identify the 250KB of `solana-sdk` transitive bloat. ~30 minutes. Otherwise we're guessing.
+
+---
+
+## TOP PRIORITY 1 — On-chain storage + billing (Phase 1.5)
+
+(Already documented earlier — kept here for ordering reference; see [.claude/skills/project-knowledge/references/economics.md](../../.claude/skills/project-knowledge/references/economics.md))
+
+Flip `STORAGE_MODE=local` → `STORAGE_MODE=full` AND `PAYMENT_MODE=none` → `PAYMENT_MODE=balance`. Inseparable economically. Without on-chain anchoring, `mnemonic verify` returns synthetic `local:` IDs — protocol's headline value invisible.
+
+---
+
 ## TOP PRIORITY — On-chain storage + billing (Phase 1.5)
 
 Flip `STORAGE_MODE=local` → `STORAGE_MODE=full` (Arweave + Solana anchoring) AND `PAYMENT_MODE=none` → `PAYMENT_MODE=balance` (USDC top-up). These two are inseparable economically — see [`.claude/skills/project-knowledge/references/economics.md`](../../.claude/skills/project-knowledge/references/economics.md) for full cost analysis and open economic questions.
