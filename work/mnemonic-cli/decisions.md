@@ -1280,3 +1280,11 @@ caught. Audit is **issues_found** (1 critical, 1 major, 8 minor).
 - **Remaining concerns:** Cloudflare Workers untested — the detection
   falls through to the web target, which is correct in theory (Workers
   bundlers inline the WASM), but no CI smoke yet. Future task.
+
+### SDK 0.1.2 — fs-shim WASM loader
+- Date: 2026-04-30
+- Root cause: --target nodejs artifact crashes at module-eval on Node 20+ macOS (WebAssembly.Table.grow). Inconsistent across envs.
+- Fix: ship only --target web artifact; in wasm.ts, browser path uses default() (fetch over HTTPS), Node/Bun/Deno path readFile + default(bytes) — bypasses fetch(file://) entirely.
+- Local smoke (mandatory before publish): Node 20 / Bun / Deno all return OK pubkey.
+- Tarball size: ~256KB (back to 0.1.0 size; +0KB net after dropping double-mirror).
+- Sub-fix during implementation: Node 20 ESM does not define `self` as a global, which made the Rust `getrandom` 0.2 (`js` feature) backend's WebCrypto probe (`self.crypto.getRandomValues`) throw, falling through to its `require('crypto')` Node-CJS branch — which then crashed with `arg0.require is not a function` because we run in ESM. Fixed by setting `globalThis.self = globalThis` in the Node/Bun/Deno init path before calling `default(bytes)`. Bun/Deno already define `self`, so it's a no-op there.

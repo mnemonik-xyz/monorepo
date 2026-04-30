@@ -1,34 +1,36 @@
-// Internal WASM loader for `mnemonic-core`. Picks the right wasm-pack
-// artifact at runtime based on the host environment. NOT re-exported in
-// `index.ts` — only the SDK's own modules use it.
+// Internal WASM loader for `mnemonic-core`. Loads the SINGLE published
+// `--target web` artifact and initializes it correctly on every host.
+// NOT re-exported in `index.ts` — only the SDK's own modules use it.
 //
-// Why two artifacts (0.1.1 hotfix — see T15 + decisions.md "SDK 0.1.1"):
-//   - `--target web` uses `fetch(import.meta.url)` to load the .wasm.
-//     Browsers happy. Node 20+/22 undici `fetch()` does NOT support
-//     `file://` URLs and crashes (cannot find native binding). Bun/Deno
-//     hit a related WebAssembly.Table.grow() error. EVERY WASM-touching
-//     CLI command was broken on all 3 target runtimes.
-//   - `--target nodejs` emits CJS-shaped JS that loads the .wasm via
-//     `fs.readFileSync` at module-eval. No fetch, no URL resolution —
-//     works under Node, Bun, Deno without a shim.
-//
-// Strategy: detect host at runtime. If `window` is undefined and we look
-// like Node (process.versions.node), pick `./wasm/nodejs/`. Otherwise
-// (browsers, Cloudflare Workers via bundler) pick `./wasm/web/`.
+// History (decisions.md):
+//   - 0.1.0: shipped `--target web` only; broken on Node because
+//     `fetch(file://)` crashes inside undici.
+//   - 0.1.1: shipped BOTH `--target web` and `--target nodejs`; runtime
+//     detect picked one. The `--target nodejs` artifact crashes at
+//     module-eval on Node 20+ macOS with
+//     `WebAssembly.Table.grow(): failed to grow table by 4` — a known
+//     wasm-bindgen issue with `--reference-types` table init. Inconsistent
+//     across envs (worked in CI, failed on fresh user installs).
+//   - 0.1.2 (this file): ship ONLY `--target web`. On the browser path use
+//     `default()` (its own `fetch(import.meta.url)` over HTTPS — fine).
+//     On Node/Bun/Deno read the `.wasm` file from disk via
+//     `node:fs/promises.readFile` and pass the bytes directly to
+//     `default(bytes)` — `--target web`'s init function accepts BufferSource
+//     and skips the broken `fetch(file://)` path entirely. Single artifact,
+//     smaller tarball, no CJS/ESM mode-flip subdir.
 //
 // We cache the initialized module behind a single Promise so concurrent
 // callers share one init.
 //
-// Packaging note (npm): both WASM artifacts are mirrored into
-// `dist/wasm/{web,nodejs}/` by `scripts/build-wasm.sh` and ship inside
-// the published tarball (`files: ["dist", ...]` in `package.json`).
+// Packaging note (npm): the WASM artifact is mirrored into `dist/wasm/`
+// by `scripts/build-wasm.sh` and ships inside the published tarball
+// (`files: ["dist", ...]` in `package.json`).
 //
 // Why not a static `import` specifier:
-// - The published paths (`./wasm/{web,nodejs}/mnemonic_core.js` from
-//   `dist/wasm.js`) do not exist on the source side. Tests bypass the
-//   dynamic-import path entirely via `__setWasmForTesting`, so the
-//   non-existent source-side paths are never hit during `vitest run`.
-//   See `test/helpers/wasm-mock.ts`.
+// - The published path (`./wasm/mnemonic_core.js` from `dist/wasm.js`) does
+//   not exist on the source side. Tests bypass the dynamic-import path
+//   entirely via `__setWasmForTesting`, so the non-existent source-side
+//   path is never hit during `vitest run`. See `test/helpers/wasm-mock.ts`.
 // - `new URL(specifier, import.meta.url)` defers resolution to runtime,
 //   which means the only place the path needs to exist is `dist/wasm/`.
 
@@ -38,9 +40,10 @@
 // `tsc -b` does not require the WASM artifact to exist before
 // `build:wasm` runs.
 interface MnemonicCoreModule {
-  // `--target web` exports a `default` init function. `--target nodejs`
-  // does not — WASM is initialized synchronously at module-eval via
-  // `fs.readFileSync`. We optional-chain the call below.
+  // `--target web` exports a `default` init function. With no argument it
+  // resolves the .wasm via `fetch(import.meta.url)`; with a BufferSource
+  // argument it instantiates from those bytes directly (used on Node/Bun/Deno
+  // to bypass the broken `fetch(file://)` path).
   default?: (input?: unknown) => Promise<unknown>;
   generate_keypair: () => unknown;
   sign_challenge: (kp: unknown, bytes: Uint8Array) => Uint8Array;
@@ -64,35 +67,69 @@ export async function loadWasm(): Promise<MnemonicCoreModule> {
   if (WASM_OVERRIDE) return WASM_OVERRIDE;
   if (modulePromise) return modulePromise;
   modulePromise = (async () => {
-    // Runtime environment detection. We treat anything that has a
-    // Node-shaped `process.versions.node` AND no `window` as a Node-like
-    // host (covers Node, Bun, Deno via their Node-compat surfaces). All
-    // other hosts — browsers, Cloudflare Workers, Web Workers — get the
-    // `--target web` artifact. See file header for why.
+    // Always import the SAME `--target web` artifact. It's a thin JS
+    // module that exports a `default()` initializer accepting an optional
+    // BufferSource — we use that to skip the broken `fetch(file://)` path
+    // on Node/Bun/Deno.
+    const wasmJsUrl = new URL("./wasm/mnemonic_core.js", import.meta.url);
+    const mod = (await import(wasmJsUrl.href)) as MnemonicCoreModule;
+
+    // Host detection. Anything that's NOT a browser (no `window` +
+    // `window.document`) gets the fs-shim path: Node, Bun, Deno via their
+    // Node-compat surfaces, Cloudflare Workers (rare for an SDK consumer
+    // but covered by the early-return on `default()`).
     //
     // `globalThis as any` to avoid pulling in `@types/node` here; the SDK
     // ships zero runtime deps and we want the type-check footprint small.
     const g = globalThis as unknown as {
-      process?: { versions?: { node?: string } };
-      window?: unknown;
+      window?: { document?: unknown };
     };
-    const isNodeLike =
-      typeof g.window === "undefined" &&
-      typeof g.process !== "undefined" &&
-      typeof g.process.versions?.node === "string";
-    const subdir = isNodeLike ? "nodejs" : "web";
-    // Resolve the published artifact path relative to the compiled
-    // `dist/wasm.js`. At runtime under Node/Bun/Deno/browsers, this
-    // produces a URL pointing at `dist/wasm/{web,nodejs}/mnemonic_core.js`,
-    // which ships inside the npm tarball.
-    const url = new URL(`./wasm/${subdir}/mnemonic_core.js`, import.meta.url);
-    const mod = (await import(url.href)) as MnemonicCoreModule;
-    // `--target web` exposes an explicit `default()` init that must be
-    // awaited before any export is invoked. `--target nodejs` initializes
-    // synchronously at module-eval and does not export `default`. Call
-    // it conditionally.
-    if (typeof mod.default === "function") {
+    const isBrowser =
+      typeof g.window !== "undefined" &&
+      typeof g.window.document !== "undefined";
+
+    if (typeof mod.default !== "function") {
+      // Defensive: `--target web` always exports default(). If a custom
+      // mock somehow ends up here it can omit init.
+      return mod;
+    }
+
+    if (isBrowser) {
+      // Browser: `default()` resolves the .wasm via `fetch(import.meta.url)`
+      // over HTTPS — fine.
       await mod.default();
+    } else {
+      // Node / Bun / Deno: read the .wasm file from disk and pass bytes
+      // directly to `default(bytes)`. Bypasses the broken `fetch(file://)`
+      // path entirely. `--target web`'s init accepts BufferSource.
+      //
+      // Self-shim: the Rust `getrandom` 0.2 (`js` feature) backend probes
+      // `self.crypto.getRandomValues` first and only falls back to
+      // `require('crypto').randomFillSync` when that lookup throws. In Node
+      // 20+ ESM, `globalThis.crypto` exists but `self` is NOT a global, so
+      // the WebCrypto probe fails and the fallback kicks in — which then
+      // crashes with `arg0.require is not a function` because we're not in
+      // CJS so there is no `module.require`. Patching `globalThis.self =
+      // globalThis` (well-known wasm-bindgen-on-Node workaround) makes the
+      // WebCrypto branch resolve correctly. Idempotent, scoped to
+      // initialization. Bun and Deno already define `self` as a global, so
+      // this is a no-op for them.
+      const gt = globalThis as unknown as { self?: unknown };
+      if (typeof gt.self === "undefined") {
+        gt.self = globalThis;
+      }
+      const wasmBgUrl = new URL(
+        "./wasm/mnemonic_core_bg.wasm",
+        import.meta.url
+      );
+      const fs = (await import("node:fs/promises")) as {
+        readFile: (p: URL) => Promise<Uint8Array>;
+      };
+      const bytes = await fs.readFile(wasmBgUrl);
+      // Pass as `{ module_or_path: bytes }` rather than positional bytes —
+      // the positional form prints a deprecation warning to stderr in
+      // wasm-bindgen ≥ 0.2.95.
+      await mod.default({ module_or_path: bytes });
     }
     return mod;
   })();
