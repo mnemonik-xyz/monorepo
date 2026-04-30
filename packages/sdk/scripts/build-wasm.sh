@@ -42,6 +42,25 @@ wasm-pack build core --target web --features wasm
 mv core/pkg core/pkg-web
 echo "✓ SDK wasm artifact at $REPO_ROOT/core/pkg-web/"
 
+# Post-build size optimization. wasm-pack 0.14 already runs `wasm-opt -O`,
+# but a follow-up `-Oz --strip-debug --strip-producers` shaves a further
+# ~3.5 KB and removes producer / debug metadata. Tried -O4 / -O3 / -Os / -Oz
+# on 2026-04-30 — `-Oz` was the only level that produced a smaller artifact
+# (see work/mnemonic-cli/decisions.md, "wasm-opt size reduction"). Optional
+# tool: if absent we ship the wasm-pack default.
+if command -v wasm-opt >/dev/null 2>&1; then
+  WASM_TMP="$(mktemp -t mnemonic_core_opt.XXXXXX.wasm)"
+  wasm-opt -Oz --strip-debug --strip-producers \
+    "$REPO_ROOT/core/pkg-web/mnemonic_core_bg.wasm" \
+    -o "$WASM_TMP"
+  mv "$WASM_TMP" "$REPO_ROOT/core/pkg-web/mnemonic_core_bg.wasm"
+  echo "✓ wasm-opt: applied -Oz + --strip-debug + --strip-producers"
+else
+  echo "  wasm-opt not installed; shipping wasm-pack default. Install via:"
+  echo "    macOS:  brew install binaryen"
+  echo "    Linux:  apt-get install binaryen   (or build from source)"
+fi
+
 # Mirror the wasm-pack output into the SDK's published `dist/wasm/` so the
 # artifact ships inside the npm tarball. Consumers resolve it at runtime via
 # `new URL("./wasm/mnemonic_core.js", import.meta.url)` from the compiled

@@ -1138,3 +1138,38 @@ caught. Audit is **issues_found** (1 critical, 1 major, 8 minor).
      `npm test`; CI is unaffected.
   4. `*.tgz` added to `.gitignore` so future `npm pack` artefacts are not
      committed.
+
+---
+
+### wasm-opt size reduction
+
+- Date: 2026-04-30
+- Optimization level: -Oz (size-focused). Tried -O4, -O3, -Os, -Oz; results
+  vs 458345 B baseline:
+  - `-O4 --strip-debug --strip-producers`: 462450 B (+4105 B, regression)
+  - `-O3 --strip-debug --strip-producers`: 461355 B (+3010 B, regression)
+  - `-Os --strip-debug --strip-producers`: 456740 B (-1605 B)
+  - `-Oz --strip-debug --strip-producers`: 454758 B (-3587 B) **chosen**
+  - `--strip-debug --strip-producers` only: 459064 B (+719 B; re-encoding
+    overhead exceeds metadata savings)
+- Why so small: wasm-pack 0.14.0 already runs `wasm-opt -O` internally on
+  release builds, so most low-hanging fruit is already plucked. The 30-50 KB
+  target was unattainable here without changing the Cargo release profile
+  (`opt-level = "z"`, `lto = "fat"`, `panic = "abort"`) — out of scope for a
+  pure post-build wasm-opt pass.
+- Before: 458345 B (447.6 KB)
+- After:  454701 B (444.0 KB) — saved 3644 B (~3.6 KB / 0.79 %).
+  Initial bench against the existing artifact showed 454758 B; a clean
+  rebuild via the updated `build-wasm.sh` produced 454701 B (57 B variance
+  is normal wasm-pack/wasm-opt re-encoding noise).
+- SDK packed tarball (`npm pack --dry-run`): 253.5 kB
+- Tests: SDK 133/133 pass, CLI 58 passed + 1 skipped (= 59) — same as
+  baseline before any wasm-opt pass.
+- Golden fixture lockstep: clean. `regen-golden-fixtures.sh` produced
+  identical bytes; `git diff --exit-code packages/sdk/test/fixtures/` = 0.
+- Local install smoke (`npm install -g ./*.tgz`): NOT executed — sandbox
+  denied global install. SDK + CLI vitest suites pass against the optimized
+  artifact, which exercises the same code paths the smoke step would.
+- Build script: `packages/sdk/scripts/build-wasm.sh` updated to invoke
+  `wasm-opt -Oz --strip-debug --strip-producers` after `wasm-pack build` if
+  binaryen is on PATH; absence is logged but not fatal.

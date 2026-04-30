@@ -50,6 +50,13 @@ bash packages/sdk/scripts/build-wasm.sh
 Wraps `wasm-pack build core --target web --features wasm`, output goes to
 `core/pkg-web/`. Output is gitignored.
 
+**Prereqs:** `wasm-pack` ≥ 0.14 (`cargo install wasm-pack`). `binaryen`
+(`wasm-opt`) is optional but recommended — when on PATH the build pipeline
+runs an extra `wasm-opt -Oz --strip-debug --strip-producers` pass and the
+shipped artifact is ~3.5 KB smaller. Install via `brew install binaryen`
+(macOS) or `apt-get install binaryen` (Linux). If absent, the script logs a
+notice and falls back to the wasm-pack default.
+
 ## API reference
 
 All names below are re-exported from the package root.
