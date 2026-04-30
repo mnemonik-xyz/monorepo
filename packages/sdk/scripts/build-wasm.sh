@@ -69,16 +69,49 @@ else
   echo "    Linux:  apt-get install binaryen   (or build from source)"
 fi
 
-# Mirror the wasm-pack output into the SDK's published `dist/wasm/` so the
-# artifact ships inside the npm tarball. Consumers resolve it at runtime via
-# `new URL("./wasm/mnemonic_core.js", import.meta.url)` from the compiled
-# `dist/wasm.js` — see packages/sdk/src/wasm.ts.
+# Mirror BOTH wasm-pack outputs into the SDK's published `dist/wasm/` so the
+# artifacts ship inside the npm tarball. The SDK runtime-detects host env
+# (Node/Bun/Deno vs. browser) and picks the matching subdir — see
+# packages/sdk/src/wasm.ts.
+#
+# Why both:
+#   - `--target web` uses `fetch(import.meta.url)` to load the .wasm. Browsers
+#     are happy. Node 20+/22 undici fetch() does NOT support `file://` URLs,
+#     and Bun/Deno hit a related WebAssembly.Table.grow() crash. T15 P0.
+#   - `--target nodejs` emits CJS-shaped JS that loads the .wasm via
+#     `fs.readFileSync` at module-eval — works under Node/Bun/Deno without
+#     any fetch shim.
 SDK_DIST_WASM="$REPO_ROOT/packages/sdk/dist/wasm"
-mkdir -p "$SDK_DIST_WASM"
+rm -rf "$SDK_DIST_WASM"
+mkdir -p "$SDK_DIST_WASM/web" "$SDK_DIST_WASM/nodejs"
+
 cp \
   "$REPO_ROOT/core/pkg-web/mnemonic_core.js" \
   "$REPO_ROOT/core/pkg-web/mnemonic_core_bg.wasm" \
   "$REPO_ROOT/core/pkg-web/mnemonic_core.d.ts" \
   "$REPO_ROOT/core/pkg-web/mnemonic_core_bg.wasm.d.ts" \
-  "$SDK_DIST_WASM/"
-echo "✓ SDK wasm artifact mirrored to $SDK_DIST_WASM/"
+  "$SDK_DIST_WASM/web/"
+echo "✓ SDK wasm artifact (web) mirrored to $SDK_DIST_WASM/web/"
+
+cp \
+  "$REPO_ROOT/core/pkg-nodejs/mnemonic_core.js" \
+  "$REPO_ROOT/core/pkg-nodejs/mnemonic_core_bg.wasm" \
+  "$REPO_ROOT/core/pkg-nodejs/mnemonic_core.d.ts" \
+  "$REPO_ROOT/core/pkg-nodejs/mnemonic_core_bg.wasm.d.ts" \
+  "$SDK_DIST_WASM/nodejs/"
+# wasm-pack --target nodejs also emits a `mnemonic_core_bg.js` CJS shim
+# alongside `mnemonic_core.js`. Copy it too — `mnemonic_core.js` requires it.
+if [ -f "$REPO_ROOT/core/pkg-nodejs/mnemonic_core_bg.js" ]; then
+  cp "$REPO_ROOT/core/pkg-nodejs/mnemonic_core_bg.js" "$SDK_DIST_WASM/nodejs/"
+fi
+# CRITICAL: the SDK's own `package.json` has `"type": "module"`, which makes
+# Node interpret every `.js` under it as ESM. The `--target nodejs` artifact
+# is CommonJS (uses `require()` and `module.exports`). Drop a scoped
+# `package.json` that flips the directory to CJS so Node loads the artifact
+# correctly when SDK code dynamic-imports it.
+cat > "$SDK_DIST_WASM/nodejs/package.json" <<'EOF'
+{
+  "type": "commonjs"
+}
+EOF
+echo "✓ SDK wasm artifact (nodejs) mirrored to $SDK_DIST_WASM/nodejs/"

@@ -1173,3 +1173,110 @@ caught. Audit is **issues_found** (1 critical, 1 major, 8 minor).
 - Build script: `packages/sdk/scripts/build-wasm.sh` updated to invoke
   `wasm-opt -Oz --strip-debug --strip-producers` after `wasm-pack build` if
   binaryen is on PATH; absence is logged but not fatal.
+
+### Post-deploy verification (T15)
+
+- Date: 2026-04-30
+- Status: fail
+- Fresh install: pass — `npm install -g @mnemonik-xyz/cli` from public registry
+  succeeds on Node 20.19.1; binary symlinks correctly; `mnemonic --version`
+  prints `0.1.0`; `--help` lists all 8 commands (init, login, sign, recall,
+  verify, whoami, prove, identity). Total install size 1.5 MB. Sigstore
+  provenance attestations present and valid for both `@mnemonik-xyz/sdk@0.1.0`
+  and `@mnemonik-xyz/cli@0.1.0` (predicateType `slsa.dev/provenance/v1`,
+  tlog index 1410216727 for cli, signature verified by npm registry pubkey
+  `SHA256:DhQ8wR5APBvFHLF/+Tc+AYvPOdTpcIDqOhxsBHRwC7U`).
+- Demo flow: FAIL — `mnemonic init` exits 1 with `UserError: fetch failed` on
+  Node 20.19.1 + Node 22.22.0. Root cause: `dist/wasm.js` calls `await
+  mod.default()` (the `--target web` `__wbg_init`), which uses `fetch(import.
+  meta.url)` to load the `.wasm` file. Undici's `fetch()` does not implement
+  the `file://` URL scheme (`schemeFetch -> not implemented... yet...`), so
+  the WASM module never instantiates. On Bun 1.3.13: `WebAssembly.Table.
+  prototype.grow could not grow the table`. On Deno 2.7.5 (`deno install
+  --global -A npm:@mnemonik-xyz/cli/dist/bin/mnemonic.js`): `WebAssembly.
+  Table.grow(): failed to grow table by 4`. Every CLI command that hits
+  `Keypair.generate / fromJSON`, `LocalSigner.sign`, or `signCosePayload`
+  is therefore broken on the published 0.1.0 — i.e. init / login / sign /
+  recall / verify / whoami --with-count / prove / identity import|export.
+  Pre-deploy QA missed it because `__setWasmForTesting` mocks the loader,
+  so the dynamic `import(url.href) + mod.default()` path is never executed
+  by vitest.
+- Negative paths: server-side regressions all PASS (re-verified against
+  live `mcp.mnemonik.xyz`):
+  - GET /oauth/authorize?redirect_uri=https://evil.com&... -> HTTP 400
+    `{"error":"redirect_uri is not on the server allowlist"}`.
+  - GET /oauth/authorize?redirect_uri=http://127.0.0.1:12345/callback&...
+    (client_id=mnemonic-cli) -> HTTP 302 (allowlist permits loopback).
+  - GET /api/cli-bootstrap/redeem/00000000-0000-0000-0000-000000000000
+    -> HTTP 404 `{"error":"ticket not found, already consumed, or expired"}`.
+  - POST /api/cli-bootstrap/issue without Bearer -> HTTP 401.
+  CLI-side `mnemonic verify <random-uuid>` could not be exercised end-to-end
+  (blocked by WASM bug + JWT availability).
+- Cross-runtime install spot-check:
+  - Bun: `bun install -g @mnemonik-xyz/cli` succeeds; `mnemonic --version`
+    + `--help` work; runtime WASM init fails (table grow).
+  - Deno: `deno install --global -A npm:@mnemonik-xyz/cli/...` succeeds;
+    `--version` + `--help` work; runtime WASM init fails (table grow).
+- Report: logs/working/post-deploy.json
+- Outstanding for manual user verification (all blocked on patch republish):
+  - Interactive `mnemonic login` browser PKCE loopback round-trip.
+  - Headless `mnemonic login --token <jwt>` with a server-side-minted JWT.
+  - `mnemonic sign` + `mnemonic recall` + `mnemonic verify <id>` end-to-end
+    against live MCP, plus exit-1 path for unknown `<random-uuid>`.
+  - Bootstrap-ticket round-trip from webapp Send-to-CLI button -> `mnemonic
+    identity import --ticket <uuid>` -> identity.json mode 0600 + pubkey
+    matches webapp localStorage; ticket replay HTTP 404/410.
+  - Cross-tool semantics: same identity in Claude.ai / Cursor recalls the
+    CLI-signed attestation; second identity sees `not_found`.
+- Recommended remediation: ship the `--target nodejs` wasm-pack artifact
+  alongside `--target web` and use conditional exports
+  (`"node": "./dist/wasm-node.js"`, `"default": "./dist/wasm.js"`), OR add a
+  `file://` -> `node:fs.readFile` shim in `dist/wasm.js` that synthesizes a
+  `WebAssembly.Module` and passes it to `__wbg_init({module})`. Republish
+  `@mnemonik-xyz/sdk@0.1.1` + `@mnemonik-xyz/cli@0.1.1`, re-run T15. Do NOT
+  mark the feature complete until the demo flow runs green on at least Node
+  20 (the `engines.node` floor).
+
+---
+
+### SDK 0.1.1 — WASM loader fix
+
+- **Date:** 2026-04-30
+- **Status:** complete (local smoke green; awaiting publish-npm via tag push)
+- **Root cause (T15):** Published `@mnemonik-xyz/sdk@0.1.0` shipped only the
+  wasm-pack `--target web` artifact. Its `__wbg_init()` resolves the `.wasm`
+  via `fetch(import.meta.url)`. Under Node 20+/22, undici's `fetch()` does
+  NOT accept `file://` URLs and crashes with a `Cannot find native binding`
+  style error. Bun and Deno hit a related `WebAssembly.Table.grow()` failure
+  (different env, same root cause: the loader is browser-shaped, the host
+  is not). Every WASM-touching CLI command was broken on all three target
+  runtimes; webapp was unaffected because browsers fetch over HTTPS.
+- **Fix (Option B from the dispatch):** runtime-detect host in
+  `packages/sdk/src/wasm.ts` and dynamic-import the matching wasm-pack
+  artifact. Node-like hosts (`process.versions.node` set, `window`
+  undefined) load `./wasm/nodejs/mnemonic_core.js` (CJS, initializes via
+  `fs.readFileSync` at module-eval, no fetch). Browsers / Workers load
+  `./wasm/web/mnemonic_core.js` and we still call its `default()` init.
+  `mod.default` is now optional in the type and conditionally awaited.
+- **Build script:** `packages/sdk/scripts/build-wasm.sh` mirrors BOTH
+  wasm-pack outputs (`core/pkg-web/`, `core/pkg-nodejs/`) into
+  `packages/sdk/dist/wasm/{web,nodejs}/`. The nodejs subdir gets a tiny
+  scoped `package.json` with `"type": "commonjs"` so Node's ESM resolver
+  treats the CJS artifact as CJS (the SDK package itself is `"type":
+  "module"`, which would otherwise propagate down).
+- **Tarball size:** 466.7 kB packed / 1.2 MB unpacked, 47 files (was
+  249 kB packed, 1 WASM artifact). Within the 700 kB packed budget.
+- **Local smoke (Keypair.generate + pubkey print, all from installed
+  tarball at /tmp/t):**
+  - Node 20.19.1: PASS — `OK pubkey=DMM6G8Kdz...` (base58, 44 chars).
+  - Bun: PASS — `OK pubkey=9RWzAS89...`.
+  - Deno: PASS — `OK pubkey=CUsgrNmi...`.
+- **Test suite:** `vitest run` 133/133 green (tests bypass the real loader
+  via `__setWasmForTesting`, so they don't exercise the change directly —
+  the smoke loop above is the actual coverage).
+- **Versions bumped:** `@mnemonik-xyz/sdk` 0.1.0 → 0.1.1.
+  `@mnemonik-xyz/cli` 0.1.0 → 0.1.1, `dependencies.@mnemonik-xyz/sdk` to
+  `^0.1.1`.
+- **Remaining concerns:** Cloudflare Workers untested — the detection
+  falls through to the web target, which is correct in theory (Workers
+  bundlers inline the WASM), but no CI smoke yet. Future task.
