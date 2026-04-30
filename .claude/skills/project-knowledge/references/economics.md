@@ -148,6 +148,136 @@ Free-tier cost is negligible (just SQL storage) — operator burn comes from pai
 
 ---
 
+## Alternatives considered (kept open for re-evaluation)
+
+The recommended free/paid split is the **current candidate**, not a frozen decision. Other viable models, with the trade-offs they imply:
+
+### Pure pay-as-you-go (Option A from earlier)
+
+`PAYMENT_MODE=balance` only — every `sign_memory` deducts USDC. No subscription tier. No free tier (or trivial $1 free credit on signup).
+
+**Why we didn't pick:** cognitive friction every action; user reads "this will cost $0.003" on every `mnemonic sign` — kills demo flow. But: cleanest economic alignment (user pays exactly cost + margin, no over/under-use risk).
+
+**When to revisit:** if subscription tier abusers consistently exceed quota and the support load grows. Per-call billing scales linearly without quota enforcement complexity.
+
+### Subscription-only (no free tier)
+
+$5/mo entry, no $0 tier. Stripe + waitlist before launch.
+
+**Why we didn't pick:** kills viral / demo / "try it" path. Hackathon judges and curious developers won't pay $5 just to read the README.
+
+**When to revisit:** if the free tier turns out to be 99% of users and 0% of revenue (no upgrade path landing). Forced subscription is a stronger signal of actual demand.
+
+### Operator absorbs everything (Option F from earlier)
+
+"It's free for everyone, forever." Project pays for all signs, all anchors, all Turnkey ops.
+
+**Why we didn't pick:** unsustainable past beta. At 10K users that's $4K/mo burn with no revenue path.
+
+**When to revisit:** if a sponsor / grant / VC underwrites the operator burn for a defined period (e.g., "first 12 months free, then we flip"). Common open-source-protocol playbook.
+
+### Self-sovereign (Option D from earlier)
+
+User brings own Turnkey Sub-Org, own Irys account, own Solana keypair. Mnemonic operator only charges for compute (server / RPC / monitoring) flat-fee.
+
+**Why we didn't pick as default:** UX is rough — multi-vendor signup, three account creations before first `sign`. Most users want hosted convenience.
+
+**When to revisit:** for enterprise deals (see below — already in recommended hybrid as the enterprise tier).
+
+### Capacity-based pricing (storage GB / month)
+
+Charge by total stored memory size, not by signing count. $5/mo for 100MB equivalent, $20 for 1GB.
+
+**Why we didn't pick:** doesn't track the real costs. A 1KB-memory and a 100KB-memory cost roughly the same on Solana (fixed fee) but very different on Irys (linear). Storage-based billing under-charges power users and over-charges casual users.
+
+**When to revisit:** if attestation sizes start varying wildly (e.g., users start signing PDFs / images). Right now they're all small text + 1.5KB embedding.
+
+### Token-based (memory units, like Anthropic API tokens)
+
+$0.001 per "memory unit", where unit = ~1KB content + embedding. Bills predictably regardless of underlying tx fees.
+
+**Why we didn't pick:** abstracts away the Solana/Irys cost — when fees spike, operator eats it. When fees drop, operator pockets margin. Adds opacity vs the cleaner "cost + 30% margin" model.
+
+**When to revisit:** if Solana/Irys pricing becomes too volatile to pass through directly. Stable-coin pricing layer is industry-standard for this.
+
+### "Crypto-native" pricing (token / NFT gated)
+
+Hold $MNEMONIC token to access paid tier. Or: NFT-gated tiers ("Founder Pass" = lifetime free).
+
+**Why we didn't pick:** out of scope until/if there's a token. Premature crypto-economics distraction. Subscription via USDC top-up is already crypto-native enough.
+
+**When to revisit:** if a token launch makes sense for protocol governance / decentralization. Not before.
+
+---
+
+## Enterprise self-host (locked candidate, expanded)
+
+User flagged interest in this — expanding to make it concrete.
+
+### Use cases (who buys this)
+
+- **Privacy-sensitive companies** — law firms, healthcare orgs, financial services. Their data doesn't leave their VPC. Compliance: HIPAA, SOC2, GDPR data-residency.
+- **Research labs / universities** — IRB-protected research data, internal-only attestations.
+- **AI agent platforms** — companies building agentic products on top of Mnemonic want dedicated capacity, custom rate limits, no shared multi-tenancy noise.
+- **Crypto-native builders** — DAOs, web3 protocols. Want their own Solana keypair, treasury, no operator dependency.
+- **Sovereign deploys** — governments, NGOs. Independence from any single hosted operator.
+
+Enterprise self-host removes Mnemonic operator from the per-sign cost loop entirely. The customer runs the binary on their infra, brings their own Solana keypair / Irys account / optional Turnkey Org.
+
+### What's already built (Phase 1 ready)
+
+- `mnemonic-mcp` is a Rust binary — runs anywhere with Linux + libssl. Nothing operator-specific in the code.
+- `STORAGE_MODE`, `PAYMENT_MODE`, `MCP_JWT_SECRET`, `MNEMONIC_KEYPAIR_PATH`, all anchor URLs are env vars — fully configurable.
+- Database: SQLite by default (single file, trivial backup); could swap to Postgres in Phase 2 for multi-instance.
+- Smithery / Cursor / VS Code / Claude.ai connectors work against any deployed `mcp.<customer-domain>/mcp` — not tied to `mcp.mnemonik.xyz`.
+
+### What's needed to ship enterprise self-host
+
+| Item | Effort | Notes |
+|---|---|---|
+| Docker image (multi-arch: linux/amd64, linux/arm64) | 1 day | Existing release.yml builds binaries; add docker step |
+| GHCR + Docker Hub publish | 0.5 day | `ghcr.io/mnemonik-xyz/mnemonic-mcp:v0.1.0` |
+| Helm chart (K8s) | 1–2 days | Optional; many enterprises run K8s |
+| Quickstart docs (`docker run` → `init` → first sign) | 0.5 day | |
+| Configuration reference (every env var, threat model) | 1 day | |
+| License gate or telemetry (anonymous opt-in usage stats) | 1–2 days | Allows tracking adoption without violating privacy |
+| Compliance documentation (SOC2 readiness checklist, HIPAA disclaimer, GDPR data flow diagram) | 2–4 days | Required for enterprise sales |
+| Support tier infra (Slack channel / email / on-call) | Operational, not engineering | |
+| **Total Phase 2 self-host MVP** | **~6–10 dev-days** | |
+
+### Pricing models for self-host
+
+| Model | Description | Pros | Cons |
+|---|---|---|---|
+| **Open-source free** | Apache-2.0, anyone runs it | Maximum adoption, signals commitment to open protocol | Zero direct revenue; relies on hosted tier funnel |
+| **Per-seat license** | $X/seat/month for commercial use | Predictable revenue per customer | Per-seat metering is hard if customer isn't honest |
+| **Per-attestation license** | $X per million attestations / month | Aligns with usage | Telemetry / honor-system challenges; hard to enforce |
+| **Tiered support** | Open-source binary free; paid support / SLA / migration help | Common open-core pattern | Revenue depends on customer volume × support price |
+| **Feature-gate** | Self-host has subset of features; paid tier unlocks (e.g., advanced auth, multi-region replication) | Clean upsell path | Forks the codebase psychologically; risks "open" reputation |
+| **Dual-license** | Apache-2.0 for non-commercial; commercial license required for revenue use | Standard for protocols (MongoDB AGPL → SSPL pattern) | Legal complexity; needs licensing infra |
+
+**Recommended for Phase 2:** **Apache-2.0 binary + paid support tier**. Customers can run free indefinitely. Mnemonic earns from:
+- **Hosted tier** — for customers who don't want to run infra (the $5/mo "Verifiable" tier)
+- **Enterprise support contracts** — $500–5K/mo per customer for SLA, custom integrations, migration assistance, security audits
+- **Custom development** — bespoke features funded by customer
+
+This pattern works for: Postgres (community + enterprise support vendors), HashiCorp pre-relicense, Elastic pre-relicense, Mattermost. Apache-2.0 keeps "real open-source" credibility.
+
+### Operator → enterprise customer transition
+
+Some Mnemonic operators today (running `mnemonic-mcp` for their own AI agents) might want to graduate from "casual self-host" to "supported deployment". Phase 2 self-host doc + commercial license offer should make this explicit.
+
+### Open questions for enterprise self-host
+
+1. **License choice** — Apache-2.0 (permissive, fork-friendly) vs MIT (similar) vs AGPL (network-use copyleft, forces SaaS forks back). Tech-spec already says Apache-2.0; reaffirm.
+2. **Trademark policy** — can a fork call itself "Mnemonic"? Recommended: trademark the name, allow forks but require renaming. Standard for protocols.
+3. **Data export** — enterprise customer must be able to export all attestations as JSONL / SQL dump for audit / migration. Trivial via SQLite backup; should be one CLI command (`mnemonic-mcp dump`).
+4. **Multi-tenant within enterprise** — does a single enterprise deploy serve multiple internal teams? Already supported via `owner_pubkey` scoping; just needs documentation.
+5. **Federation** — can enterprise A's MCP server verify attestations issued by enterprise B's MCP server? YES — Arweave + Solana are global; cross-tenant verification is the protocol's strength. Needs explicit Phase 2 docs to highlight this.
+6. **Update / patch policy** — security updates: do customers auto-pull new docker tags? Do we backport critical fixes to LTS branches? Operational decision once customers exist.
+
+---
+
 ## Cost layer separation
 
 Three orthogonal cost layers should be modeled separately in `attestation_costs` and any future billing report:
