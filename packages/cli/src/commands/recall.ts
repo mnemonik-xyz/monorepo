@@ -16,7 +16,7 @@ export interface RecallOptions extends OutputOptions {
   baseUrl?: string;
 }
 
-const DEFAULT_BASE_URL = "https://mc.mnemonik.xyz";
+const DEFAULT_BASE_URL = "https://mcp.mnemonik.xyz";
 const DEFAULT_TOP_K = 5;
 
 export async function runRecall(

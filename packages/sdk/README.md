@@ -11,7 +11,7 @@ Node 20+, Bun, Deno, and modern browsers.
 ```typescript
 import { MnemonicClient, LocalSigner, Keypair } from '@mnemonik-xyz/sdk';
 const kp = await Keypair.fromJSON(JSON.parse(localStorage.getItem('mnemonic.identity')!));
-const client = new MnemonicClient({ baseUrl: 'https://mc.mnemonik.xyz', signer: new LocalSigner(kp), jwt });
+const client = new MnemonicClient({ baseUrl: 'https://mcp.mnemonik.xyz', signer: new LocalSigner(kp), jwt });
 client.setKeypair(kp);
 const { attestationId } = await client.signMemory('hello', { tags: ['demo'] });
 ```

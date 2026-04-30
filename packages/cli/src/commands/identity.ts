@@ -23,7 +23,7 @@ import {
 import { AuthError, fromSdkError, ServerError, UserError } from "../errors.js";
 import { format, hint, type OutputOptions } from "../output.js";
 
-const DEFAULT_BASE_URL = "https://mc.mnemonik.xyz";
+const DEFAULT_BASE_URL = "https://mcp.mnemonik.xyz";
 
 export interface IdentityImportOptions extends OutputOptions {
   ticket?: string;

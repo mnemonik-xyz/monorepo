@@ -33,11 +33,16 @@ describe("cli-bootstrap ticket", () => {
       body: JSON.stringify(payload),
     });
     expect(issueRes.status).toBe(200);
-    const { ticket } = (await issueRes.json()) as { ticket: string };
-    expect(ticket).toMatch(/^[0-9a-f-]+$/);
+    // Production server returns `{ticket_id}` (mcp/src/api.rs::BootstrapIssueResponse).
+    // The webapp IdentityPanel consumes `body.ticket_id`; pin the mock to the
+    // same shape so a regression that drops the field fails the integration suite.
+    const { ticket_id: ticketId } = (await issueRes.json()) as {
+      ticket_id: string;
+    };
+    expect(ticketId).toMatch(/^[0-9a-f-]+$/);
 
     const redeemRes = await fetch(
-      `${server.url}/api/cli-bootstrap/redeem/${encodeURIComponent(ticket)}`
+      `${server.url}/api/cli-bootstrap/redeem/${encodeURIComponent(ticketId)}`
     );
     expect(redeemRes.status).toBe(200);
     const got = (await redeemRes.json()) as typeof payload;

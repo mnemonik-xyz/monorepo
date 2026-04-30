@@ -35,7 +35,7 @@ export interface SignerInterface {
  * Constructor configuration for `MnemonicClient`.
  *
  * `baseUrl` should be the origin of the hosted MCP server, e.g.
- * `https://mc.mnemonik.xyz`. The SDK appends path segments (`/mcp`,
+ * `https://mcp.mnemonik.xyz`. The SDK appends path segments (`/mcp`,
  * `/api/sign-callback`, `/api/pending/...`) — do NOT include a trailing
  * slash or path here.
  *

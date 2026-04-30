@@ -39,7 +39,7 @@ export interface LoginOptions extends OutputOptions {
   timeoutMs?: number;
 }
 
-const DEFAULT_BASE_URL = "https://mc.mnemonik.xyz";
+const DEFAULT_BASE_URL = "https://mcp.mnemonik.xyz";
 const CLIENT_ID = "mnemonic-cli";
 const DEFAULT_TIMEOUT_MS = 5 * 60 * 1000;
 

@@ -21,7 +21,7 @@ export interface SignOptions extends OutputOptions {
   content?: string;
 }
 
-const DEFAULT_BASE_URL = "https://mc.mnemonik.xyz";
+const DEFAULT_BASE_URL = "https://mcp.mnemonik.xyz";
 
 export async function runSign(
   positional: string | undefined,

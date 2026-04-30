@@ -12,6 +12,7 @@ import {
 } from "vitest";
 
 import { MnemonicClient } from "../../src/client.js";
+import { AuthError } from "../../src/errors.js";
 import { Keypair } from "../../src/keypair.js";
 import { LocalSigner } from "../../src/signer.js";
 import { __setWasmForTesting } from "../../src/wasm.js";
@@ -87,5 +88,30 @@ describe("verify discriminants", () => {
     const client = await makeClient();
     const result = await client.verify("missing-1");
     expect(result.status).toBe("not_found");
+  });
+});
+
+// ── fault: expired-jwt-after-N-requests ─────────────────────────────────────
+// Tech-spec § Testing Strategy lists this as one of five required fault paths
+// and demands "each integration test exercises at least one fault path".
+// The fault gates /mcp + /api/* with HTTP 401 after N successful requests;
+// the SDK MUST surface that as `AuthError` (CLI exit 4 per Decision 10),
+// never silently degrade or swallow it mid-flight.
+describe("fault: expired-jwt-after-N-requests", () => {
+  it("after N OK calls, the (N+1)th surfaces AuthError on /mcp", async () => {
+    server.withFault("expired-jwt-after-N-requests", {
+      requestsBeforeExpiry: 2,
+    });
+    const client = await makeClient();
+
+    // Two recall calls succeed (the mock counts /mcp + /api/* hits;
+    // each recall is a single /mcp POST).
+    await client.recall("first", { topK: 1 });
+    await client.recall("second", { topK: 1 });
+
+    // Third call: server flips to 401, SDK MUST throw AuthError.
+    await expect(client.recall("third", { topK: 1 })).rejects.toBeInstanceOf(
+      AuthError
+    );
   });
 });

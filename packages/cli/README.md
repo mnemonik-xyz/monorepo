@@ -25,7 +25,7 @@ mnemonic init && mnemonic login && mnemonic sign "hello"
 
 `init` creates `~/.mnemonic/identity.json` (mode 0600). `login` opens
 your browser, completes the OAuth 2.1 + PKCE handshake against
-`https://mc.mnemonik.xyz`, and persists the JWT to
+`https://mcp.mnemonik.xyz`, and persists the JWT to
 `~/.mnemonic/token.json` (mode 0600). `sign` produces a verifiable
 attestation backed by the COSE_Sign1 envelope of your local keypair.
 
@@ -57,7 +57,7 @@ Two modes:
 
 ```bash
 $ mnemonic login
-opening browser: https://mc.mnemonik.xyz/oauth/authorize?...
+opening browser: https://mcp.mnemonik.xyz/oauth/authorize?...
 login OK
 sub: 6ZsT...3kQp
 expires: 2026-04-29T18:32:11.000Z

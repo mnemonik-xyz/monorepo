@@ -4,7 +4,7 @@ Run this before tagging a release. Each step has a single expected
 outcome; a failed step blocks the release.
 
 Prerequisites: a clean shell environment (no stale `~/.mnemonic/`),
-network access to `mc.mnemonik.xyz`, an existing webapp session for
+network access to `mcp.mnemonik.xyz`, an existing webapp session for
 step 8, an attestation_id minted by another identity for step 10.
 
 ---
@@ -40,7 +40,7 @@ step 8, an attestation_id minted by another identity for step 10.
    mnemonic login
    ```
 
-   Expected: the browser opens at `mc.mnemonik.xyz/oauth/authorize`,
+   Expected: the browser opens at `mcp.mnemonik.xyz/oauth/authorize`,
    the OAuth flow completes, and `~/.mnemonic/token.json` appears
    with mode `600`. Stdout shows `login OK`, the JWT `sub`, and a
    future `expires_at`. Exit 0.
@@ -102,7 +102,7 @@ step 8, an attestation_id minted by another identity for step 10.
 9. **Cross-tool recall.**
 
    With the same identity logged into Claude.ai (or any MCP client
-   pointed at `mc.mnemonik.xyz`), prompt the agent to recall the
+   pointed at `mcp.mnemonik.xyz`), prompt the agent to recall the
    memory signed in step 4.
 
    Expected: the agent's `mnemonic_recall` finds the CLI-signed

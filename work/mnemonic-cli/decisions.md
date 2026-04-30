@@ -1059,3 +1059,9 @@ caught. Audit is **issues_found** (1 critical, 1 major, 8 minor).
 - Date: 2026-04-30
 - Fixed: OAuth token-endpoint dual-shape (RFC 6749 + legacy jwt); redactJWT extended for Solana keypair arrays; release.yml gains npm publish --provenance.
 - Deferred to backlog: all Medium/Low audit findings.
+
+### Audit fixer round 2 — T10 critical + T10 major + T12 mediums
+- Date: 2026-04-30
+- Fixed: DEFAULT_BASE_URL DNS typo (mc → mcp); mock-server returns ticket_id matching production; expired-jwt fault now exercised; CLI redaction end-to-end pinned.
+- Deferred to backlog: 8 minors (CI cross-runtime sham, redundancy, drift, etc.)
+- Note: historical references to `mc.mnemonik.xyz` in `work/mnemonic-cli/{user-spec,tech-spec,decisions}.md` and `work/mnemonic-cli/tasks/*.md` are intentionally left unchanged as historical record. Only production source/docs (packages/cli/src/commands/*, packages/sdk/src/types.ts, packages/{sdk,cli}/README.md, packages/cli/SMOKE.md) corrected. Synthetic test-fixture URLs in packages/sdk/test/oauth.test.ts left as-is (they never resolve DNS — only used for local string-equality assertions).

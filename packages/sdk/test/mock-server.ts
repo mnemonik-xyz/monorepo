@@ -364,7 +364,11 @@ export async function startMockServer(): Promise<MockServer> {
       const ticket = uuid();
       tickets.set(ticket, { payload, redeemed: false });
       res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify({ ticket }));
+      // Mirrors mcp/src/api.rs::BootstrapIssueResponse — the canonical
+      // production wire shape uses `ticket_id`. Webapp IdentityPanel
+      // reads `body.ticket_id`. Audit-fixer R2: align mock with prod
+      // so a regression that drops `ticket_id` fails the integration suite.
+      res.end(JSON.stringify({ ticket_id: ticket }));
       return;
     }
 

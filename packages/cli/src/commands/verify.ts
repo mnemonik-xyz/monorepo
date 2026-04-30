@@ -15,7 +15,7 @@ export interface VerifyOptions extends OutputOptions {
   baseUrl?: string;
 }
 
-const DEFAULT_BASE_URL = "https://mc.mnemonik.xyz";
+const DEFAULT_BASE_URL = "https://mcp.mnemonik.xyz";
 
 export async function runVerify(
   attestationId: string,
