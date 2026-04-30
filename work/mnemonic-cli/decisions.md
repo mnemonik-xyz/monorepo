@@ -909,3 +909,153 @@ Append-only. Each entry: task, date, status, summary, verification, concerns.
      "import-only smoke" + "run-suite" so each runtime actually
      executes the test harness — currently blocked by vitest
      compatibility quirks across Deno / Node-with-undici.
+
+---
+
+### Audit — Test Audit (T12)
+
+- **Auditor:** test-auditor (T12-audit-retry, after rate-limit on first run)
+- **Date:** 2026-04-28
+- **Status:** issues_found (none blocking — 4 medium, 4 low, 1 info)
+- **Coverage measured:** SDK lines 86.51% / branches 81.25% (T2-R2 vitest);
+  CLI lines 80.02% / branches 71.31% (T5-R2 vitest). All gates met
+  (SDK ≥85/80, CLI ≥75 lines).
+- **TDD anchors:** all 4 present and named:
+  `pending_bundle_to_callback_round_trip` (sign-flow.test.ts:63),
+  `malformed_cbor_throws_integrity_error` (sign-flow.test.ts:81),
+  identity-ticket atomic redeem (identity.test.ts:40), state-mismatch
+  (login.test.ts:82), `--json --quiet whoami` (output.test.ts:77).
+- **Fault coverage:** 4 of 5 mock-server fault modes exercised.
+  `expired-jwt-after-N-requests` is wired in mock-server.ts:160 but
+  no integration test calls `withFault('expired-jwt-after-N-requests')`.
+  Tech-spec § 332 requires all five — flagged medium.
+- **CI matrix:** declares Node 20 / Node 22 / Bun / Deno-1.40 cells
+  but every cell runs `bun test` regardless of `matrix.runtime`.
+  Decision 11 spirit only partially upheld (T8 already documented
+  this as deferred). Flagged medium.
+- **Decision-7 gaps:** CLI-side identity import lacks (a) explicit
+  expired-ticket → 410 case (only double-redeem 410 mocked), (b)
+  malformed-UUID → 400 path, (c) post-import 0600 mode assertion
+  (init/export both have it). Flagged medium.
+- **Redaction:** SDK layer asserts `/eyJ[A-Za-z0-9_-]{20,}/` not
+  present in error messages (client.test.ts:455). CLI layer relies
+  on inheritance via `fromSdkError` — no explicit stderr/stdout
+  negative regex. Tech-spec § 320 demands this at every layer.
+  Flagged medium.
+- **Redundancy:** `signer-contract.test.ts` (0 inline `it`) duplicates
+  the inline `runSignerContract` block in `signer.test.ts`. T2 R2
+  already deferred consolidation; reaffirmed as low.
+- **Other lows:** single-`it()` block in cli-flows.test.ts (intentional
+  bun race-avoidance, but failure-localization cost), 404-vs-410
+  contract drift between CLI mock and Rust integration test, missing
+  `iat`-in-future oauth case, `/tmp/mnemonic-cli-int-*` cleanup is
+  best-effort.
+- **Output:** `work/mnemonic-cli/logs/working/audit/test-auditor.json`.
+- **Recommendation:** ship as-is for Phase 1; lift the 4 medium
+  findings before Phase 2 (esp. the expired-jwt fault-mode gap and
+  CLI-layer redaction assertions — both are spec-mandated).
+
+---
+
+### Audit — Code Audit (T10)
+
+- Date: 2026-04-28
+- Auditor: code-auditor (T10-audit-retry, previous attempt rate-limited)
+- Status: issues_found
+- Scope: SDK src (`packages/sdk/src/*.ts`, 9 files), CLI src
+  (`packages/cli/bin/mnemonic.ts`, `packages/cli/src/**/*.ts`, 13 files),
+  T6 server diff (`mcp/src/oauth.rs`, `mcp/src/api.rs`,
+  `mcp/src/main.rs`), `mcp/tests/cli_bootstrap_auth_allowlist.rs`,
+  `core/Cargo.toml` golden-fixtures feature, `core/tests/golden_fixtures.rs`,
+  `webapp/src/components/IdentityPanel.tsx`, `.github/workflows/node-test.yml`,
+  `packages/sdk/scripts/regen-golden-fixtures.sh`,
+  `packages/sdk/test/mock-server.ts`.
+- Process: read final-state files; cross-checked T6 oauth.rs against
+  prior-commit diff; sampled integration tests for contract assertions;
+  searched for `node:` imports in SDK src (clean — only `wasm.ts`
+  doc-comment mentions); searched for hostname constants and base-URL
+  defaults; verified Decisions 1–14 against implementation.
+
+**Findings (full JSON at logs/working/audit/code-auditor.json):**
+
+- **CRITICAL** — CLI `DEFAULT_BASE_URL` is `https://mc.mnemonik.xyz`
+  (no 'p') in 6 command files + SDK README/JSDoc; production server
+  canonicalises itself as `https://mcp.mnemonik.xyz` (with 'p') in
+  `mcp/src/oauth.rs::SERVER_ORIGIN`, in every webapp component, in
+  `smithery.yaml`, in CSP `connect-src`, and in OAuth `/.well-known`
+  metadata. Out-of-the-box `mnemonic login`/`sign`/`recall`/`verify`/
+  `identity import --ticket` will DNS-fail. Tech-spec + user-spec carry
+  the same typo; completeness-validator already flagged this in
+  techspec review (logs/techspec/completeness-validator-review.json:85)
+  and the resolution was not applied. Fix in 6 command files + 5 doc
+  files + spec.
+- **MAJOR** — `packages/sdk/test/mock-server.ts:357` returns
+  `{ ticket }` from `POST /api/cli-bootstrap/issue`; production
+  (`mcp/src/api.rs:474::BootstrapIssueResponse`) returns
+  `{ ticket_id }`; webapp consumes `body.ticket_id`. Integration test
+  asserts the wrong shape (`bootstrap-ticket.test.ts:36`). A regression
+  on either end would not fail any test. Webapp button ↔ server
+  contract is therefore not under any automated guard; only the
+  manual T7 Playwright check exercises the real shape.
+- **Minor (8)** — `colors`/`paint` exported but unused (Decision 10's
+  `--no-color` is effectively a no-op end-to-end, deferred from T5
+  R2); five duplications (`DEFAULT_BASE_URL`, `JWT_RE`/`HEX_SECRET_RE`,
+  `describeError`, `bytesToBase64`, loopback callback URL construction
+  ↔ Rust regex); `verify.ts` `--json` path emits both stdout JSON and
+  stderr error message; IdentityPanel auto-expire `useEffect` depends
+  on full `cliState` instead of `cliState.kind`; `MnemonicError.cause`
+  is unredacted (Decision 10 documents this as developer-facing but
+  the invariant is fragile — one `console.log(err)` from a leak);
+  `BootstrapInsertError::LruExhausted` + 503 handler branch unreachable;
+  `identity.ts::fetchTicket` maps malformed-JSON to `UserError`
+  (exit 1) instead of `ServerError` (exit 2);
+  `client.ts::recall` accepts both `hits` and `results` (silent
+  contract drift surface) plus `signMemory` swallows JSON parse
+  failure with `.catch(() => ({}))` masking the real cause;
+  `prove.ts` uses `node:crypto.randomBytes` while the SDK already uses
+  `crypto.getRandomValues`; lockstep gate relies on
+  `actions/checkout@v4` default depth — should add a `test -s` guard.
+
+**Decision-fidelity** — Decisions 1–14 are all visibly implemented:
+two packages (D1) ✓, pure-ESM SDK with no `node:*` imports (D2 — `grep`
+clean) ✓, `--target web` wasm-pack (D3) ✓, `Signer` interface +
+`LocalSigner` (D4) ✓, redirect_uri allowlist with loopback gated to
+`mnemonic-cli` (D5) ✓, headless `--token` JWT flow (D6) ✓,
+bootstrap-ticket (D7) ✓ (modulo MAJOR finding above), file-mode 0600
++ icacls argv (D8) ✓, `@mnemonik-xyz` scope (D9) ✓, output formats +
+exit codes + JWT redaction (D10) ✓ (modulo `--no-color` minor), CI
+matrix Node 20/22/Bun/Deno (D11) ✓, golden fixture lockstep gate
+(D12) ✓, npm provenance (D13) — pinned in workflows, not yet exercised,
+client-side whoami/prove (D14) ✓.
+
+**Strengths** — Module boundaries are clean (SDK stateless, CLI
+owns persistence, server changes additive). Error redaction is
+defended in two layers (`redactJWT` + `redactSecrets` are
+idempotent, regex covers the realistic JWT prefix and 64-byte hex
+secrets, redact-then-slice fix from T2 R2 prevents straddle leaks).
+T6's `is_loopback_callback` is hand-rolled but exhaustively tested
+(10+ negatives including `127.0.0.1.evil.com` DNS-rebinding lookalike).
+`BootstrapTickets::consume` is genuinely atomic (multi-thread test
+with `tokio::sync::Barrier` and a 64-iter race amplifier).
+Golden-fixture regen script is hardened against the `CARGO_TERM_COLOR=always`
+ANSI bug from R1. JSDoc coverage of the public SDK surface is
+comprehensive (typedoc clean per T9).
+
+**Recommended next steps** —
+1. Fix the hostname (CRITICAL) — 1-line change in 6 CLI files plus
+   doc updates; pre-deploy QA must add a hostname-resolution smoke.
+2. Align mock-server `/issue` shape with production (MAJOR) — 2-line
+   change in mock-server.ts + 1-line change in
+   `bootstrap-ticket.test.ts`.
+3. Either remove or wire `colors`/`paint` (minor, 5-line decision).
+4. The other 7 minors are valid backlog items, none blocking.
+
+No new architectural concerns surfaced beyond what prior audits
+caught. Audit is **issues_found** (1 critical, 1 major, 8 minor).
+
+---
+
+### Audit fixer round 1 — T11 critical + high
+- Date: 2026-04-30
+- Fixed: OAuth token-endpoint dual-shape (RFC 6749 + legacy jwt); redactJWT extended for Solana keypair arrays; release.yml gains npm publish --provenance.
+- Deferred to backlog: all Medium/Low audit findings.

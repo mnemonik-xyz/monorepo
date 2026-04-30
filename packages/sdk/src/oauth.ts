@@ -292,14 +292,22 @@ export interface ExchangeCodeForTokenResult {
  * RFC 8252 §7). The session entry is removed on success OR on
  * validation failure (one-shot semantics).
  *
+ * Accepts BOTH server response shapes (T11 audit-fix, A04):
+ *   1. RFC 6749 §5.1 canonical: `{access_token, token_type, expires_in, scope}`.
+ *      `expires_in` is an integer number of seconds; we compute
+ *      `expiresAt = ISO(now + expires_in*1000)`.
+ *   2. Legacy SDK contract: `{jwt, expires_at}`. Used by older mock servers
+ *      and the pre-T11 webapp test harness. `expires_at` is forwarded as-is.
+ * The canonical shape is preferred when both are present.
+ *
  * @param input - `{baseUrl, code, state, redirectUri, sessionId}` from the
  *                callback URL plus the `sessionId` returned by
  *                {@link buildAuthorizeUrl}.
  * @returns `{jwt, expiresAt}`. `expiresAt` falls back to "now + 1h" if
- *          the server omits the field.
+ *          the server omits both `expires_in` and `expires_at`.
  * @throws `AuthError` for session-not-found, state mismatch, redirect_uri
  *         mismatch, network failure, non-2xx token response, or malformed
- *         JSON / missing `jwt` claim.
+ *         JSON / missing both `access_token` and `jwt` fields.
  */
 export async function exchangeCodeForToken(
   input: ExchangeCodeForTokenInput
@@ -355,23 +363,34 @@ export async function exchangeCodeForToken(
     throw new AuthError("oauth: token endpoint returned non-JSON body", cause);
   }
 
-  // Server-spec contract: { jwt, expires_at } or { access_token, expires_in }.
-  // Match the existing mcp/src/oauth.rs response shape (jwt + expires_at).
-  if (
-    !body ||
-    typeof body !== "object" ||
-    typeof (body as { jwt?: unknown }).jwt !== "string"
-  ) {
+  if (!body || typeof body !== "object") {
     deleteSession(sessionId);
     throw new AuthError("oauth: token endpoint returned malformed body");
   }
 
-  const jwt = (body as { jwt: string }).jwt;
+  // Prefer RFC 6749 §5.1 `access_token`; fall back to legacy `jwt`.
+  const obj = body as { access_token?: unknown; jwt?: unknown };
+  const accessToken =
+    typeof obj.access_token === "string" ? obj.access_token : undefined;
+  const legacyJwt = typeof obj.jwt === "string" ? obj.jwt : undefined;
+  const jwt = accessToken ?? legacyJwt;
+  if (typeof jwt !== "string" || jwt.length === 0) {
+    deleteSession(sessionId);
+    throw new AuthError("oauth: token endpoint returned malformed body");
+  }
+
+  // Compute expiresAt: prefer `expires_in` (seconds, RFC 6749), then
+  // fall back to legacy `expires_at` ISO string, then synthetic +1h.
+  const expiresInRaw = (body as { expires_in?: unknown }).expires_in;
   const expiresAtRaw = (body as { expires_at?: unknown }).expires_at;
-  const expiresAt =
-    typeof expiresAtRaw === "string"
-      ? expiresAtRaw
-      : new Date(Date.now() + 3600 * 1000).toISOString();
+  let expiresAt: string;
+  if (typeof expiresInRaw === "number" && Number.isFinite(expiresInRaw)) {
+    expiresAt = new Date(Date.now() + expiresInRaw * 1000).toISOString();
+  } else if (typeof expiresAtRaw === "string") {
+    expiresAt = expiresAtRaw;
+  } else {
+    expiresAt = new Date(Date.now() + 3600 * 1000).toISOString();
+  }
 
   deleteSession(sessionId);
   return { jwt, expiresAt };

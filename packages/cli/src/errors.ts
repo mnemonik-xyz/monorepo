@@ -22,9 +22,17 @@ import {
 const JWT_RE = /eyJ[A-Za-z0-9_-]{20,}/g;
 /** 64-byte ed25519 secret (128 hex chars). */
 const HEX_SECRET_RE = /\b[0-9a-fA-F]{128}\b/g;
+/**
+ * Solana / `KeypairJson` 64-element JSON byte-array shape:
+ * `[n0, n1, ..., n63]`. T11 audit (A09): wasm-bindgen error messages and
+ * server payloads (`/api/cli-bootstrap/redeem`) carry this shape. Mirrors
+ * the SDK's `SOLANA_KEYPAIR_ARRAY_RE` so CLI-side redaction is exhaustive.
+ */
+const SOLANA_KEYPAIR_ARRAY_RE = /\[\s*(?:\d{1,3}\s*,\s*){63}\d{1,3}\s*\]/g;
 
 /**
- * Replace JWT-shaped runs and 128-hex secret runs with redaction markers.
+ * Replace JWT-shaped runs, 128-hex secret runs, and 64-element
+ * Solana-keypair JSON arrays with redaction markers.
  * Idempotent: running it twice on the same string is a no-op.
  */
 export function redactSecrets(input: unknown): string {
@@ -32,7 +40,8 @@ export function redactSecrets(input: unknown): string {
   const s = typeof input === "string" ? input : String(input);
   return s
     .replace(JWT_RE, "[REDACTED-JWT]")
-    .replace(HEX_SECRET_RE, "[REDACTED-SECRET]");
+    .replace(HEX_SECRET_RE, "[REDACTED-SECRET]")
+    .replace(SOLANA_KEYPAIR_ARRAY_RE, "[REDACTED-KEYPAIR]");
 }
 
 /** Base class — every CLI typed error carries an exit code. */

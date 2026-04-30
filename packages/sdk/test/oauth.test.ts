@@ -379,14 +379,17 @@ describe("exchangeCodeForToken", () => {
     expect(pendingAuthSessions.has(seeded.sessionId)).toBe(false);
   });
 
-  it("missing jwt field throws AuthError", async () => {
+  it("body with neither access_token nor jwt throws AuthError", async () => {
+    // T11 audit (A04): SDK accepts both `access_token` (RFC 6749 canonical)
+    // and `jwt` (legacy). A response that has NEITHER must surface as
+    // malformed-body AuthError.
     const seeded = await buildAuthorizeUrl({
       baseUrl: BASE,
       clientId: "mnemonic-cli",
       redirectUri: REDIRECT,
     });
     fetchMock.mockResolvedValueOnce(
-      new Response(JSON.stringify({ access_token: "oops" }), { status: 200 })
+      new Response(JSON.stringify({ token_type: "Bearer" }), { status: 200 })
     );
     await expect(
       exchangeCodeForToken({

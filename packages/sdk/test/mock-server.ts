@@ -212,9 +212,19 @@ export async function startMockServer(): Promise<MockServer> {
       entry.consumed = true;
       const sub = "test-user-pubkey";
       const jwt = makeFakeJwt(sub, 3600);
-      const expiresAt = new Date(Date.now() + 3600 * 1000).toISOString();
+      // Emit the canonical RFC 6749 §5.1 shape produced by mcp/src/oauth.rs::token_handler.
+      // The SDK accepts both this shape and the legacy {jwt, expires_at} shape;
+      // the mock now mirrors production so an SDK regression that drops
+      // `access_token` support fails the integration suite immediately.
       res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify({ jwt, expires_at: expiresAt, sub }));
+      res.end(
+        JSON.stringify({
+          access_token: jwt,
+          token_type: "Bearer",
+          expires_in: 3600,
+          scope: "mcp",
+        })
+      );
       return;
     }
 

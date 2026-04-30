@@ -27,8 +27,20 @@ const JWT_RE = /eyJ[A-Za-z0-9_-]{20,}/g;
 const HEX_SECRET_RE = /\b[0-9a-fA-F]{128}\b/g;
 
 /**
- * Replace JWT-shaped runs and 128-hex secret runs in a string with
- * `[REDACTED-JWT]` / `[REDACTED-SECRET]` placeholders.
+ * Solana / `KeypairJson` 64-element JSON byte-array shape:
+ * `[n0, n1, ..., n63]` where each `n` is a 1-3 digit decimal byte.
+ *
+ * T11 audit (A09): wasm-bindgen errors and stored-keypair payloads
+ * (`/api/cli-bootstrap/redeem`) carry this shape. The hex regex above
+ * doesn't catch it. We intentionally over-match (any `\d{1,3}`, not
+ * strictly 0-255) — values >255 only appear in this shape if the array
+ * is malformed, in which case redacting is still the safer outcome.
+ */
+const SOLANA_KEYPAIR_ARRAY_RE = /\[\s*(?:\d{1,3}\s*,\s*){63}\d{1,3}\s*\]/g;
+
+/**
+ * Replace JWT-shaped runs, 128-hex secret runs, and 64-element
+ * Solana-keypair JSON arrays with redaction placeholders.
  *
  * Idempotent: running it twice on the same string produces the same output.
  * Safe on `undefined` / `null` — coerced to empty string.
@@ -36,15 +48,16 @@ const HEX_SECRET_RE = /\b[0-9a-fA-F]{128}\b/g;
  * @param input - Arbitrary value; non-string inputs are coerced via
  *                `String(...)` before redaction. `null` / `undefined`
  *                map to the empty string.
- * @returns The input with all JWT-shaped substrings and 128-hex-char
- *          secret runs replaced.
+ * @returns The input with all JWT-shaped substrings, 128-hex-char
+ *          secret runs, and 64-element decimal-byte arrays replaced.
  */
 export function redactJWT(input: unknown): string {
   if (input === undefined || input === null) return "";
   const s = typeof input === "string" ? input : String(input);
   return s
     .replace(JWT_RE, "[REDACTED-JWT]")
-    .replace(HEX_SECRET_RE, "[REDACTED-SECRET]");
+    .replace(HEX_SECRET_RE, "[REDACTED-SECRET]")
+    .replace(SOLANA_KEYPAIR_ARRAY_RE, "[REDACTED-KEYPAIR]");
 }
 
 /**
