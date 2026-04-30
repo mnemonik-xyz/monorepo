@@ -1,0 +1,124 @@
+{
+  "task": 7,
+  "reviewer": "security-auditor",
+  "round": 1,
+  "commit": "51b6508",
+  "scope": [
+    "webapp/src/components/IdentityPanel.tsx",
+    "webapp/src/components/IdentityPanel.test.tsx",
+    "webapp/e2e/cli-bootstrap.spec.ts"
+  ],
+  "context_reviewed": [
+    "work/mnemonic-cli/tasks/7.md",
+    "work/mnemonic-cli/tech-spec.md (Decision 7)",
+    "work/mnemonic-cli/decisions.md (Task 7 entry)",
+    "webapp/index.html (CSP)",
+    "webapp/src/lib/storage.ts (readJwt)"
+  ],
+  "verdict": "approve",
+  "summary": "Task 7 implements the webapp side of the Decision-7 server-mediated bootstrap-ticket flow correctly. The Bearer JWT travels only in the Authorization header; the keypair_json is sent as a JSON body over HTTPS to the CSP-allowed origin (mcp.mnemonik.xyz); the clipboard receives only the public ticket UUID command; the countdown timer leaks no secrets; 401 redirects to /oauth/consent without echoing the failed JWT; and there is no console.log of either the JWT or the keypair. All checks against the reviewer's critical-focus list pass. No new high or critical findings; two low/informational notes recorded.",
+  "checks": [
+    {
+      "id": "C1-bearer-jwt-header-only",
+      "focus": "Bearer JWT in Authorization header (NOT in URL, NOT in body, NOT in localStorage send)",
+      "result": "pass",
+      "evidence": "IdentityPanel.tsx:225-232 — fetch(`${MCP_BASE}/api/cli-bootstrap/issue`, { method: 'POST', headers: { Authorization: `Bearer ${jwt}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ keypair_json: stored }) }). The JWT is interpolated only into the Authorization header. The URL is a static path (no query string, no JWT). The body contains only `keypair_json`. The JWT itself is never serialized into the body or persisted anywhere new — readJwt() pulls the existing localStorage value the rest of the webapp already uses.",
+      "owasp": "A07-Identification-and-Authentication-Failures"
+    },
+    {
+      "id": "C2-content-type-json-not-form",
+      "focus": "Content-Type is JSON, not form-urlencoded (no leak via referrer / browser history)",
+      "result": "pass",
+      "evidence": "IdentityPanel.tsx:228 sets `Content-Type: application/json` explicitly and the body is JSON.stringify({...}). POST body bytes never appear in URL/referrer; CSRF surface is not increased (this is a same-effective-site Bearer-authed request, no cookies). HTTPS in production (https://mcp.mnemonik.xyz default at IdentityPanel.tsx:19); HTTP allowed only in dev when VITE_MCP_BASE is overridden — acceptable.",
+      "owasp": "A02-Cryptographic-Failures"
+    },
+    {
+      "id": "C3-clipboard-public-uuid-only",
+      "focus": "navigator.clipboard.writeText writes only the ticket-UUID command, never the keypair or JWT",
+      "result": "pass",
+      "evidence": "IdentityPanel.tsx:283-286 — handleCopyTicket constructs `mnemonic identity import --ticket ${cliState.ticketId}` and that exact string is the sole argument to navigator.clipboard.writeText. The discriminated-union state guarantees `cliState.kind === 'issued'` is the only branch that exposes a ticketId; the keypair_json is held only in `localStorage` and the in-flight POST body — never copied. Test IdentityPanel.test.tsx:130-135 explicitly asserts the clipboard call shape is `mnemonic identity import --ticket <uuid>`. UUID-as-capability is acceptable per Decision 7 (server enforces single-use + 10-min TTL + 3-per-user cap).",
+      "owasp": "A04-Insecure-Design (clipboard hygiene)"
+    },
+    {
+      "id": "C4-countdown-no-timing-leak",
+      "focus": "Countdown timer doesn't leak timing info beyond cleartext expires_at",
+      "result": "pass",
+      "evidence": "IdentityPanel.tsx:294-309 — setInterval ticks `now` every 1000ms; `ticketRemainingMs = expiresAtMs - now` is a public mm:ss label (formatMmSs at IdentityPanel.tsx:464-471). No constant-time comparison is required because the timer value is itself non-secret (server discloses `expires_at` in the public response). No high-resolution timestamps are emitted. Auto-flip to error at 0 (IdentityPanel.tsx:303-308) prevents stale-ticket display.",
+      "owasp": "A04-Insecure-Design"
+    },
+    {
+      "id": "C5-401-redirect-no-jwt-echo",
+      "focus": "401 redirect to /oauth/consent does not leak the failed JWT",
+      "result": "pass",
+      "evidence": "IdentityPanel.tsx:235-238 — on 401, the handler calls `window.location.assign('/oauth/consent')` with no query parameters and no JWT echoed back. The state machine transitions away from `issuing` without rendering a ticket or persisting the failed JWT to a new location. Test `send_to_cli_401_redirects_to_oauth_consent` (IdentityPanel.test.tsx:185-208) asserts `assign` is called with the literal string `/oauth/consent` — no parameters.",
+      "owasp": "A07-Identification-and-Authentication-Failures"
+    },
+    {
+      "id": "C6-csp-fetch-destination-allowed",
+      "focus": "Existing CSP allows the new fetch destination",
+      "result": "pass",
+      "evidence": "webapp/index.html:14 — CSP header includes `connect-src 'self' https://mcp.mnemonik.xyz`. IdentityPanel.tsx:19 sets MCP_BASE to `https://mcp.mnemonik.xyz` by default. The fetch in handleSendToCli targets that origin; CSP does not need to be modified by this task. (Reviewer's prompt referenced `mc.mnemonik.xyz` — the actual host throughout the codebase is `mcp.mnemonik.xyz`; both are covered by the existing connect-src directive only because `mcp.mnemonik.xyz` is the literal entry. Confirmed identical hosts.)",
+      "owasp": "A05-Security-Misconfiguration"
+    },
+    {
+      "id": "C7-A09-no-secret-logging",
+      "focus": "A09 — no console.log of jwt, keypair_json, or response body",
+      "result": "pass",
+      "evidence": "Grep for console.(log|error|warn|info|debug) over IdentityPanel.tsx returns zero matches in the patched file. Errors flow into the `cliState.error.message` UI channel via `formatError(e)` (IdentityPanel.tsx:445-453), which stringifies an Error.message but is invoked only on (a) catch blocks for fetch/JSON parse exceptions and (b) clipboard rejections — none of these paths receive the JWT or keypair_json as inputs. The `detail` extraction at IdentityPanel.tsx:248-256 reads only `body.error` (server-controlled, intended for display) and renders it inline. No request body, header value, or stored secret is ever fed to a logging sink.",
+      "owasp": "A09-Security-Logging-and-Monitoring-Failures"
+    },
+    {
+      "id": "C8-replay-resistance",
+      "focus": "Replay: only the ticket UUID is emitted; server enforces single-use; webapp can't reissue without re-auth",
+      "result": "pass",
+      "evidence": "IdentityPanel.tsx emits the ticket UUID inside a code block + clipboard string only; the keypair never leaves localStorage in any user-visible form (no `<code>` or `<pre>` containing keypair material). Reissue requires a fresh handleSendToCli click, which re-reads readJwt() and re-POSTs — server tracks `BootstrapTickets` per `jwt_sub` (Decision 7, max 3 active, 10-min TTL, single-use removal). The 429 path explicitly informs the user of the cap (IdentityPanel.tsx:241-247). Idempotency is bounded by the server, not by client trust. The earlier Decision-7 replay vector (URL-based --cli-bootstrap with self-signed pubkey) is fully avoided.",
+      "owasp": "A07-Identification-and-Authentication-Failures"
+    },
+    {
+      "id": "C9-input-validation-server-response",
+      "focus": "Server response shape is validated before rendering",
+      "result": "pass",
+      "evidence": "IdentityPanel.tsx:264-271 type-narrows `body.ticket_id` to a non-empty string before transitioning to `issued`; rejects any other shape with a generic 'server returned no ticket_id' error. `expires_at` is type-checked to `number` before *1000; falls back to `Date.now() + BOOTSTRAP_TTL_MS` otherwise — prevents NaN and prevents a malicious server from forcing an absurdly-large countdown that could grant a dangling display. No DOM injection because the ticket_id is rendered via React text-interpolation inside a `<code>` element, not dangerouslySetInnerHTML."
+    }
+  ],
+  "findings": [
+    {
+      "severity": "low",
+      "id": "F1-jwt-localstorage-pre-existing",
+      "title": "JWT lives in localStorage (XSS exfiltration surface) — pre-existing, not introduced by T7",
+      "where": "webapp/src/lib/storage.ts:54 (readJwt) — used by IdentityPanel.tsx:217",
+      "description": "The webapp stores the OAuth Bearer JWT in localStorage[\"mnemonic.jwt\"]. Any successful XSS in the webapp can exfiltrate the JWT. T7 reads it via the existing readJwt() helper — it does not change the storage location, lifetime, or transport, so this finding is a pre-existing webapp risk that T7 inherits. CSP (default-src 'self'; script-src 'self' 'wasm-unsafe-eval') already mitigates trivial inline-XSS; React's default text-escaping mitigates DOM XSS; no dangerouslySetInnerHTML in the patch.",
+      "recommendation": "No T7-scoped change required. Tracking item: long-term, migrate JWT to a same-site, secure, http-only cookie set by the OAuth callback page so XSS cannot read it. This is webapp-wide hardening and out of scope for this task.",
+      "owasp": "A07-Identification-and-Authentication-Failures"
+    },
+    {
+      "severity": "informational",
+      "id": "F2-host-name-doc-mismatch",
+      "title": "Reviewer prompt referenced `mc.mnemonik.xyz`; actual host is `mcp.mnemonik.xyz`",
+      "where": "webapp/index.html:14, webapp/src/components/IdentityPanel.tsx:19, all other webapp call sites",
+      "description": "The reviewer instructions mention CSP allowing `mc.mnemonik.xyz`. The codebase uniformly uses `mcp.mnemonik.xyz`. This is a doc-side typo, not a security issue — CSP is consistent with code: the connect-src entry and the MCP_BASE default both name `mcp.mnemonik.xyz`.",
+      "recommendation": "Optionally correct the reviewer/architecture note to read `mcp.mnemonik.xyz`. No code change required."
+    }
+  ],
+  "false_positives_considered": [
+    "Mixed-content / HTTP fallback — VITE_MCP_BASE can in principle be set to http:// in dev. This is a dev-mode-only override of a build-time env var; not exploitable in production. Not a finding.",
+    "Clipboard exposure — the clipboard receives a non-secret UUID-bearing command; the UUID is the capability and is single-use server-side. Acceptable per Decision 7 explicit design.",
+    "navigator.clipboard.writeText rejection in non-secure contexts — surfaces as inline error per decisions.md follow-up #2; does not crash the panel and does not leak secrets. Not a finding.",
+    "JSON.parse on body.keypair_json in tests — test-only reflection; production code does not parse the keypair, just forwards it as a string. Not a finding.",
+    "window.location.assign mocked in tests — test scaffolding only; real path uses the standard navigation API. Not a finding."
+  ],
+  "owasp_top10_coverage": {
+    "A01_Broken_Access_Control": "covered — server enforces JWT scope on /api/cli-bootstrap/issue; UI does not bypass.",
+    "A02_Cryptographic_Failures": "covered — HTTPS to mcp.mnemonik.xyz; no plaintext credential transport in URL.",
+    "A03_Injection": "n/a — no SQL/HTML/template injection surface in patch (React text-escaping; static URL).",
+    "A04_Insecure_Design": "covered — Decision 7 server-mediated single-use ticket replaces the rejected URL-replay design.",
+    "A05_Security_Misconfiguration": "covered — CSP unchanged and already permits the fetch destination.",
+    "A06_Vulnerable_Components": "n/a for this patch — no new npm deps added.",
+    "A07_Identification_Auth": "covered — Bearer header only; 401 re-auth redirect; replay bounded by server single-use.",
+    "A08_Software_Data_Integrity": "n/a — no deserialization of untrusted CBOR/COSE in this UI patch.",
+    "A09_Logging_Monitoring": "covered — no secret-bearing logs introduced.",
+    "A10_SSRF": "n/a — fetch URL is hardcoded to the configured MCP base; no user-controlled URL component."
+  },
+  "recommendations": [],
+  "blockers": []
+}

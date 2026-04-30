@@ -1,0 +1,93 @@
+{
+  "task": 2,
+  "round": 1,
+  "reviewer": "test-reviewer",
+  "status": "issues_found",
+  "summary": "All 75 tests pass cleanly under vitest. Test design is solid: `runSignerContract` is genuinely portable (uses `@noble/ed25519` for verification, no LocalSigner-specific assumptions in factory or assertions), pending-bundle round-trip is exercised end-to-end (POST /mcp -> GET /api/pending/<id> -> POST /api/sign-callback), capability auth is asserted (NO Authorization header on /api/sign-callback at client.test.ts:280), JWT redaction is verified across two error paths, and WASM injection cleanly resets between tests via `__setWasmForTesting(null)` in `afterEach` (which also nulls modulePromise). However: (1) BRANCH COVERAGE GATE FAILS: 75.74% < 80% required by tech-spec. The vitest config (vitest.config.ts:14) declares `branches: 80` threshold, and v8 reports global branches at 75.74%. CI will block this. (2) Several edge cases are missing — no 500 server error path, no malformed JSON test, no `signMemory` without setKeypair, no `verify` tampered discriminant, no `recall` results-shape alternate, no setJwt test, no signer defense-in-depth catch-paths (WASM throw / non-Uint8Array return / wrong-length sig). (3) Minor: `signer-contract.test.ts` duplicates `signer.test.ts`'s contract run (both invoke runSignerContract against fresh LocalSigner via Keypair.generate), producing 6 redundant tests with identical assertions but no extra failure-mode coverage. No flaky timing-dependent tests; no test pollution between cases.",
+  "findings": [
+    {
+      "severity": "critical",
+      "category": "coverage",
+      "issue": "Branch coverage 75.74% fails the tech-spec ≥80% gate. vitest.config.ts:14 declares `branches: 80` and CI will exit non-zero on the coverage step. Lines coverage at 85.02% just barely meets the 85% gate; client.ts is at 66.37% branches (worst offender) due to many untested error / discriminant / projection branches.",
+      "file": "packages/sdk/vitest.config.ts:14 (threshold) + packages/sdk/src/client.ts (worst file)",
+      "recommendation": "Add ~6-8 targeted tests covering the listed edge cases below (5xx, malformed JSON, missing keypair, verify tampered, signer defense-in-depth catch paths). Each adds 2-4 branches; together they should clear the 80% gate."
+    },
+    {
+      "severity": "major",
+      "category": "edge",
+      "issue": "No test for `signMemory` thrown when no keypair is bound (client.ts:131-135 UserError path). Explicit edge case the SDK raises that callers will hit when they forget to call setKeypair.",
+      "file": "packages/sdk/test/client.test.ts (signMemory pending-bundle flow describe block)",
+      "recommendation": "Add a test that constructs MnemonicClient WITHOUT calling setKeypair, calls signMemory, and asserts UserError with message matching /no keypair bound/."
+    },
+    {
+      "severity": "major",
+      "category": "edge",
+      "issue": "No test for 5xx (e.g. 500/502/503) server response on /mcp. The whole `!res.ok` branch in client.ts:363-369 (callTool's ServerError path) is exercised only via 410 indirectly but never with a 5xx that would surface as a typical server outage. Tech-spec § Testing Strategy explicitly lists `5xx-on-token-exchange` as a fault-injection toggle for integration tests, but unit tests should still cover the response-path branch.",
+      "file": "packages/sdk/test/client.test.ts",
+      "recommendation": "Add `it('throws ServerError on 500 from /mcp', ...)` staging `{status: 500, body: {error: 'boom'}}` and asserting `rejects.toBeInstanceOf(ServerError)` plus `.status === 500`."
+    },
+    {
+      "severity": "major",
+      "category": "edge",
+      "issue": "No test for malformed JSON body on /mcp success path. client.ts:373-376 catches `res.json()` parse failure and throws ServerError with /malformed JSON/. This branch is untested.",
+      "file": "packages/sdk/test/client.test.ts",
+      "recommendation": "Stage a 200 response with `body: '<<<not json>>>'` (raw string) and assert ServerError with message containing /malformed JSON/."
+    },
+    {
+      "severity": "major",
+      "category": "edge",
+      "issue": "No test for `verify` tampered discriminant. The whole `if (status === 'tampered')` branch in client.ts:292-298 is uncovered. Verify result is the most security-relevant projection — `tampered` is the discriminant CLI maps to exit code 3 per Decision 10.",
+      "file": "packages/sdk/test/client.test.ts (verify describe block)",
+      "recommendation": "Add `it('returns tampered discriminant', ...)` staging `{status: 'tampered', signer: 'PubX', reason: 'hash_mismatch'}` and asserting `out.status === 'tampered'` + `out.reason`."
+    },
+    {
+      "severity": "major",
+      "category": "edge",
+      "issue": "No test for LocalSigner defense-in-depth paths: WASM `sign_challenge` throws (signer.ts:67-68 UserError catch), WASM returns non-Uint8Array (signer.ts:69-73), and WASM returns wrong-length sig (signer.ts:74-78). These are all the most likely indicators of WASM/SDK drift in production.",
+      "file": "packages/sdk/test/signer.test.ts",
+      "recommendation": "Add three tests using `__setWasmForTesting` with overridden `sign_challenge` (a) throwing, (b) returning a string, (c) returning Uint8Array(63) — assert UserError in each."
+    },
+    {
+      "severity": "minor",
+      "category": "edge",
+      "issue": "No test for `recall` alternate shape (`results` array vs `hits`) at client.ts:255-258, no test for empty/missing hits, no test for `recall` with no opts. Minor branches but represent server-shape robustness.",
+      "file": "packages/sdk/test/client.test.ts (recall describe block)",
+      "recommendation": "Add `it('handles results-shape alternate', ...)` and `it('handles empty hits + missing total', ...)`."
+    },
+    {
+      "severity": "minor",
+      "category": "fidelity",
+      "issue": "`signer-contract.test.ts` duplicates `signer.test.ts`'s contract run — both call `runSignerContract(async () => new LocalSigner(await Keypair.generate()))` against the same factory. Net: 6 redundant tests with identical assertions but zero added failure-mode coverage. Per the test-master skill, redundant tests waste time and add maintenance burden without earning their place.",
+      "file": "packages/sdk/test/signer-contract.test.ts:26-29 vs packages/sdk/test/signer.test.ts:29-32",
+      "recommendation": "Delete `signer-contract.test.ts` entirely — the inline `runSignerContract` call inside `signer.test.ts`'s describe('LocalSigner', ...) block already proves the contract for LocalSigner. Keep `signer-contract.ts` (the helper) as-is; it'll be re-used by future TurnkeySigner / WebAuthnSigner test files. Alternatively, if the goal is to test the bare-module style of how future signers will be added (no describe wrapper), keep this file but remove the LocalSigner inline run from signer.test.ts to avoid duplication."
+    },
+    {
+      "severity": "minor",
+      "category": "edge",
+      "issue": "No test for network failure (fetch throws) — `safeFetch` catch path at client.ts:438-441 (`new ServerError('network error: ...', undefined, e)`) is uncovered. Common in CI flakiness / DNS failure scenarios.",
+      "file": "packages/sdk/test/client.test.ts",
+      "recommendation": "Add a test where the mock fetch throws (`async () => { throw new TypeError('fetch failed'); }`) and assert the SDK surfaces ServerError with message containing /network error/."
+    },
+    {
+      "severity": "minor",
+      "category": "edge",
+      "issue": "No test for `setJwt` (already noted in decisions.md line 153 as known gap). client.ts:81-83 is uncovered.",
+      "file": "packages/sdk/test/client.test.ts",
+      "recommendation": "Add a one-liner: construct client without jwt, call setJwt('eyJ...'), invoke whoami, assert Authorization header on the captured call."
+    },
+    {
+      "severity": "minor",
+      "category": "edge",
+      "issue": "No test for large content payload on signMemory. Tech-spec doesn't pin a max size, but large content exercises `bytesToBase64`'s chunking loop (client.ts:466-468) which only kicks in for >32KB outputs. Minor: this is a robustness gap not a correctness gap.",
+      "file": "packages/sdk/test/client.test.ts",
+      "recommendation": "Add `it('handles large content', ...)` with content of e.g. 100KB so the COSE envelope crosses 32KB and exercises the chunking path."
+    },
+    {
+      "severity": "minor",
+      "category": "fidelity",
+      "issue": "`runSignerContract` deterministic-signing assertion (signer-contract.ts:61-67) is correct for any RFC 8032 Ed25519 byte-signer, but Phase 2 WebAuthnSigner returns sigs over `authenticatorData || hash(clientDataJSON)` not the raw bytes — so `sign(message)` is not deterministic from the caller's perspective. The Signer interface contract (`sign(bytes) -> 64-byte raw Ed25519`) excludes WebAuthn semantics by design — but the comment at signer-contract.ts:11-15 should explicitly note that WebAuthn-style signers wouldn't satisfy the deterministic clause and would need a different abstraction.",
+      "file": "packages/sdk/test/signer-contract.ts:11-15 (comment block)",
+      "recommendation": "Add a sentence to the leading comment: `// Note: deterministic-signing applies only to raw-Ed25519 byte-signers. A WebAuthn signer that bundles authenticatorData would NOT satisfy this clause and would need a different Signer subtype.`"
+    }
+  ]
+}

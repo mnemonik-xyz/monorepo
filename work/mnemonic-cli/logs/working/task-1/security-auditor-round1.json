@@ -1,0 +1,64 @@
+{
+  "task": 1,
+  "round": 1,
+  "reviewer": "security-auditor",
+  "status": "approved",
+  "summary": "T1 is a workspace skeleton + wasm-pack target investigation. Security surface is small and the implementation is clean: dependencies use sane caret pins on the public npm registry, package-lock.json is committed (153 resolved entries; the only non-registry resolutions are the three workspace-internal symlinks, which is correct), root package.json sets `private: true` to prevent accidental publish, the two build scripts use `set -euo pipefail` with all variable expansions quoted (no eval, no curl|sh), .gitignore covers .env/*.key/*.pem/secrets/credentials.json plus node_modules/dist/target/core/pkg-*, and both tsconfigs enable `strict`, `noUncheckedIndexedAccess`, and `exactOptionalPropertyTypes`. The substantive security work (PKCE binding, JWT redaction, file-mode 0600, redirect-URI allowlist, bootstrap-ticket replay protection) lands in T2-T7 and will be audited there.",
+  "scope_reviewed": [
+    "/Users/syi/src/sessions/2/package.json",
+    "/Users/syi/src/sessions/2/.gitignore",
+    "/Users/syi/src/sessions/2/packages/sdk/package.json",
+    "/Users/syi/src/sessions/2/packages/sdk/tsconfig.json",
+    "/Users/syi/src/sessions/2/packages/sdk/vitest.config.ts",
+    "/Users/syi/src/sessions/2/packages/sdk/scripts/build-wasm.sh",
+    "/Users/syi/src/sessions/2/packages/sdk/scripts/smoke-web.mjs",
+    "/Users/syi/src/sessions/2/packages/sdk/scripts/smoke-nodejs.mjs",
+    "/Users/syi/src/sessions/2/packages/sdk/scripts/smoke-bundler.mjs",
+    "/Users/syi/src/sessions/2/packages/sdk/src/index.ts",
+    "/Users/syi/src/sessions/2/packages/sdk/README.md",
+    "/Users/syi/src/sessions/2/packages/cli/package.json",
+    "/Users/syi/src/sessions/2/packages/cli/tsconfig.json",
+    "/Users/syi/src/sessions/2/packages/cli/vitest.config.ts",
+    "/Users/syi/src/sessions/2/packages/cli/bin/mnemonic.ts",
+    "/Users/syi/src/sessions/2/packages/cli/src/index.ts",
+    "/Users/syi/src/sessions/2/packages/cli/README.md",
+    "/Users/syi/src/sessions/2/webapp/scripts/build-wasm.sh",
+    "/Users/syi/src/sessions/2/package-lock.json (presence + first-line shape only)"
+  ],
+  "findings": [
+    {
+      "severity": "low",
+      "owasp": "A06",
+      "issue": "`packages/sdk/package.json` does not declare an `engines.node` constraint, while `packages/cli/package.json` correctly pins `>=20`. The SDK is runtime-agnostic (Node/Bun/Deno/Workers/browsers), so an exclusive Node range is wrong, but the absence of any constraint means npm will not warn consumers that the package targets modern ESM-only runtimes. Not exploitable; minor supply-chain hygiene gap.",
+      "recommendation": "When the SDK starts shipping real code (T2), add `\"engines\": { \"node\": \">=20\" }` to `packages/sdk/package.json` (matching tech-spec § Solution: 'Targets: Node ≥20, Bun, Deno, Cloudflare Workers, modern browsers') and document Bun/Deno minimums in README. Optional for skeleton commit; raise at T2.",
+      "file": "/Users/syi/src/sessions/2/packages/sdk/package.json"
+    },
+    {
+      "severity": "low",
+      "owasp": "A08",
+      "issue": "`bun.lock` is `.gitignore`d in favor of npm's `package-lock.json` as the canonical lockfile. This is a defensible choice (one canonical lockfile beats two competing ones) but means a contributor who runs `bun install` will produce a lockfile that is not committed; if their bun resolution differs from npm's (different transitive picks), CI green will not match local. No vulnerability today since CI uses npm and Bun is only a runtime target, but worth documenting so a future contributor does not assume bun.lock is committed and accidentally introduce dependency drift between local Bun installs and CI npm installs.",
+      "recommendation": "Add a one-liner in `package.json` (e.g. `\"packageManager\": \"npm@10\"`) or a CONTRIBUTING note clarifying npm is the canonical manager and `bun install` is for runtime smoke only, not for resolving deps. Defer to T8/T9 (CI + docs).",
+      "file": "/Users/syi/src/sessions/2/.gitignore:39"
+    },
+    {
+      "severity": "low",
+      "owasp": "A06",
+      "issue": "`webapp/scripts/build-wasm.sh` and `packages/sdk/scripts/build-wasm.sh` do not pin the `wasm-pack` minor version (the in-script comment notes `wasm-pack ≥ 0.14`, but the `command -v wasm-pack` check accepts any version on PATH). A compromised `wasm-pack` on a developer's PATH could inject arbitrary code into the WASM artifact (which then propagates to the webapp build and SDK consumers). Same risk exists for the existing webapp build; T1 inherits, does not introduce. Note `decisions.md` § Concern 2 already flags 0.13 vs 0.14 inconsistency across dev machines.",
+      "recommendation": "Long-term: T8/T14 should pin wasm-pack via `cargo install wasm-pack --version <X.Y.Z> --locked` in CI and document the same for dev setup. Verify the GHCR/release workflow in `.github/workflows/release.yml` pins the version as well. Not blocking T1.",
+      "file": "/Users/syi/src/sessions/2/webapp/scripts/build-wasm.sh:34-37"
+    }
+  ],
+  "non_findings_verified": [
+    "package.json deps are caret-pinned (`^1.6.0`, `^5.4.0`, `^20.12.0`) — no `*` or `latest` from a registry; the only `\"*\"` is the workspace-internal `@mnemonik-xyz/sdk` reference in CLI deps which npm resolves to the workspace symlink, not the registry.",
+    "package-lock.json is committed (134 KB, name `mnemonic-monorepo`, 153 resolved entries; sampled non-`registry.npmjs.org` resolutions are all three workspace paths — `packages/sdk`, `packages/cli`, `webapp` — never an external mirror).",
+    "Root `package.json` has `\"private\": true`, preventing accidental `npm publish` from the monorepo root.",
+    "Skeleton packages also declare `\"private\": true`, blocking accidental publish before they are ready.",
+    "Both build scripts (`packages/sdk/scripts/build-wasm.sh`, `webapp/scripts/build-wasm.sh`) use `set -euo pipefail`, all `${VAR}` expansions are double-quoted, no `eval`, no `curl | sh`, no `wget`, no shell-format injection vectors.",
+    ".gitignore covers `.env`, `.env.*`, `*.key`, `*.pem`, `credentials.json`, `secrets/`, `.secrets/`, `*api-key*`, `*apikey*`, `*secret*`, `node_modules/`, `dist/`, `build/`, `target/`, `core/pkg/`, `core/pkg-*/`, `*.log`, `coverage/`. Nothing sensitive (keypair, JWT, API key) appears in the diff.",
+    "`packages/sdk/tsconfig.json` and `packages/cli/tsconfig.json` both enable `strict: true`, `noUncheckedIndexedAccess: true`, `exactOptionalPropertyTypes: true`, `verbatimModuleSyntax: true` — strong type safety baseline that catches null-deref / undefined-access bugs in later waves.",
+    "Workspace config (`workspaces: [\"packages/*\", \"webapp\"]`) is standard npm/yarn syntax, no glob escapes, no parent-directory references.",
+    "wasm-pack `--target web` choice produces ESM that uses `import.meta.url + fetch` for `.wasm` loading. Identical artifact already runs in webapp production, no new attack surface introduced. Loader path is bound to `import.meta.url` (relative to the .js shim) rather than user-controlled input — no SSRF risk from the loader itself.",
+    "Bin shim `packages/cli/bin/mnemonic.ts` simply prints a not-yet-implemented stderr message and exits 64 — no argv processing, no filesystem access, no network. Zero runtime attack surface in T1.",
+    "`packages/cli/package.json` specifies `engines.node: \">=20\"`, blocking installs on EOL Node 16/18 which lack modern crypto.subtle Ed25519 surface."
+  ]
+}

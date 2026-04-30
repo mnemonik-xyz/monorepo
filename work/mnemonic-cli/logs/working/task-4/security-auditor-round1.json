@@ -1,0 +1,114 @@
+{
+  "reviewer": "security-auditor",
+  "task": 4,
+  "round": 1,
+  "date": "2026-04-28",
+  "commit": "5ae0e35",
+  "branch": "feat/mnemonic-cli-userspec",
+  "verdict": "approve",
+  "summary": "Task 4 ships test-only fixture infrastructure. The hardcoded 32-byte Ed25519 seed is properly isolated behind a default-OFF cargo feature (`golden-fixtures`) and an additional integration-test gate (`#![cfg(all(feature = \"golden-fixtures\", not(target_arch = \"wasm32\")))]`). Seed cannot reach production binaries. No new runtime dependencies, no shell-injection or path-traversal exposure in the regenerator script (paths are repo-derived from BASH_SOURCE, not user input). The lockstep CI gate correctly catches silent CBOR/COSE encoder drift, which itself is a defense-in-depth control against accidental cryptographic envelope mutation. Two LOW findings only — neither blocks merge.",
+  "owasp_focus": {
+    "A02_cryptographic_failures": {
+      "status": "pass",
+      "notes": [
+        "FIXED_SEED_HEX = 00112233...eeff is documented as test-only ('MUST NOT be used to sign any real attestation') in core/tests/golden_fixtures.rs:55-61.",
+        "Seed lives ONLY inside core/tests/golden_fixtures.rs — confirmed via grep across the entire repo (only other occurrence is the matching keypair_secret_hex in the committed fixture JSON, which is the expected test artifact).",
+        "core/Cargo.toml:46 sets `default = []`; `golden-fixtures = []` (line 60) is opt-in, not in the default feature set.",
+        "Native and WASM release builds do NOT compile core/tests/golden_fixtures.rs because (a) `tests/` is only built under `cargo test`, and (b) the file has `#![cfg(all(feature = \"golden-fixtures\", not(target_arch = \"wasm32\")))]` as defense in depth.",
+        "Ed25519 is RFC 8032 deterministic, so the fixed seed produces stable signatures — no reliance on a random source the seed could mask. No reuse of nonces (Ed25519 doesn't have user-supplied nonces).",
+        "The pinned 32-byte seed is intentional and a security-positive: it makes the lockstep gate detectable. A random-per-run seed would defeat byte-for-byte comparison."
+      ]
+    },
+    "A04_insecure_design": {
+      "status": "pass",
+      "notes": [
+        "Feature flag `golden-fixtures` is OFF by default (core/Cargo.toml:46-60). `cargo build --workspace` in CI/release does not enable it — confirmed by grepping .github/ for `--all-features` (no match) and `golden-fixtures` (only appears in the dedicated lockstep job).",
+        "The release workflow (.github/workflows/release.yml — out of T4 scope but checked) does not enable the feature.",
+        "Test seed is never used to sign real attestations — `sign_cose` consumers in production code paths receive keypairs from `Keypair::generate()` or `import_keypair_json` originating from user-controlled material.",
+        "Lockstep design correctly forces fixture regeneration as a coupled commit when the encoder changes, so an attacker who silently mutates `to_canonical_cbor` or `sign_cose` to produce different bytes would also have to regenerate the fixture, which would surface in code review."
+      ]
+    },
+    "A05_security_misconfiguration": {
+      "status": "pass",
+      "notes": [
+        "The `golden-fixtures` feature only enables the test file body. No new runtime modules, no extra `pub` exports from `core/src/lib.rs`."
+      ]
+    },
+    "A06_vulnerable_components": {
+      "status": "pass",
+      "notes": [
+        "No new runtime dependencies in core/Cargo.toml. Existing `serde_json`, `hex`, `solana-sdk`, `chrono` already in the dependency graph.",
+        "No new test deps (the test reuses already-present `serde_json`, `serde`, `solana-sdk`, `hex`).",
+        "No new npm runtime deps in packages/sdk/package.json. The new test file imports only `vitest` (existing devDep), `node:fs`, `node:path`, `node:url` (built-ins), and the local `core/pkg-nodejs/mnemonic_core.js` artifact (workspace-internal).",
+        "Note: `pkg-nodejs/` is gitignored and built per-environment; it is not vendored into the repo and not published to npm. Supply-chain surface is unchanged."
+      ]
+    },
+    "A08_software_data_integrity": {
+      "status": "pass",
+      "notes": [
+        "The lockstep gate IS the integrity control for this task: `git diff --exit-code` against both the SHA-256 file and the JSON itself catches any divergence between Rust encoder output and the committed fixture (.github/workflows/node-test.yml:62-66).",
+        "Belt-and-suspenders: the workflow diffs both `golden-cose.sha256` AND `golden-cose.json` directly. Even if a malicious PR updated only the SHA file but left the JSON stale, the second diff catches it.",
+        "Determinism is asserted programmatically by `test_emitter_deterministic` (golden_fixtures.rs:362) and `test_fixed_keypair_pubkey_stable` (line 393), so a regression in `Keypair::from_bytes` derivation would fail-closed.",
+        "Caveat (informational, not a finding): the lockstep gate runs on `ubuntu-latest` only. If the Rust encoder ever produced platform-dependent output, a developer regenerating on macOS would commit a fixture CI cannot reproduce. Currently `to_canonical_cbor` and `sign_cose` are pure byte-deterministic, so this is theoretical."
+      ]
+    },
+    "A09_logging_monitoring": {
+      "status": "pass",
+      "notes": [
+        "Committed fixture JSON contains `keypair_secret_hex` for every entry. This IS a 64-byte Ed25519 secret, but it is the *test* secret and is intentionally exposed — required for the SDK to reproduce the COSE envelope client-side. The seed half (`00112233...eeff`) is documented as test-only in the source, and the derived pubkey (56LtbqTNScYQqjGpec1TW7himmeeGF1L7cGbDt6BfFuU) is consistent across all 22 entries, confirming determinism.",
+        "If a future contributor copies the fixture seed thinking it's safe randomness, they get a clearly-labeled test-only string. The `MUST NOT be used to sign any real attestation` comment in golden_fixtures.rs:58-60 is sufficient documentation. Could be repeated in the README for extra defense (LOW finding below).",
+        "No JWTs, OAuth codes, PKCE verifiers, or user secrets in the fixture. Only test-keypair material."
+      ]
+    }
+  },
+  "regenerator_script_audit": {
+    "file": "packages/sdk/scripts/regen-golden-fixtures.sh",
+    "shell_injection": "no",
+    "path_traversal": "no",
+    "notes": [
+      "set -euo pipefail (line 20) — fails fast on any error or unset var.",
+      "REPO_ROOT is derived from BASH_SOURCE via `cd ... && pwd`, NOT from $1/$2/env. Cannot be influenced by an attacker invoking the script with crafted args.",
+      "FIXTURE_JSON is constructed from REPO_ROOT + literal path components — no user input flows into shell commands.",
+      "RAW_OUTPUT is captured via $(...) and then exported as RAW_CARGO_OUTPUT for the python3 heredoc (line 44). The python3 heredoc is single-quoted (`<<'PY'`), so no shell expansion happens inside the heredoc body. RAW_CARGO_OUTPUT is read via os.environ.get, never via shell substitution. Safe.",
+      "The shasum/sha256sum calls properly quote `$FIXTURE_JSON` (lines 65, 67). Awk pipes are positional (`{print $1}`).",
+      "The `git diff --exit-code` lockstep step (node-test.yml:63-66) operates on fixed paths inside the workspace; no user-controlled arguments."
+    ]
+  },
+  "findings": [
+    {
+      "id": "T4-S1",
+      "severity": "low",
+      "category": "A03 / minor robustness — quoting in inline python",
+      "file": "packages/sdk/scripts/regen-golden-fixtures.sh:75",
+      "line": 75,
+      "snippet": "ENTRIES_COUNT=\"$(python3 -c \"import json,sys; print(len(json.load(open('$FIXTURE_JSON'))))\")\"",
+      "issue": "$FIXTURE_JSON is interpolated directly into a Python single-quoted string. If a developer happens to place the repo at a path containing a single-quote character (e.g., `/Users/o'brien/src/...`), Python's quoted literal breaks and the script fails — or, in a pathological clone path, could be coerced to evaluate adjacent text. Not a remote injection: the script is local-only and the path is filesystem-derived from BASH_SOURCE. Pure local-developer footgun.",
+      "impact": "LOW. Not exploitable from a network attacker. At worst, breaks regen in unusual repo paths.",
+      "recommendation": "Pass the path via env var, mirroring the safe pattern already used for RAW_CARGO_OUTPUT above:\n  FIXTURE_JSON_FOR_PY=\"$FIXTURE_JSON\" python3 -c 'import json,os; print(len(json.load(open(os.environ[\"FIXTURE_JSON_FOR_PY\"]))))'",
+      "blocking": false
+    },
+    {
+      "id": "T4-S2",
+      "severity": "low",
+      "category": "A09 — defense-in-depth labeling",
+      "file": "packages/sdk/test/fixtures/golden-cose.json",
+      "line": 7,
+      "snippet": "\"keypair_secret_hex\": \"00112233...eeff3ccd241cffc9b3618044b97d036d8614593d8b017c340f1dee8773385517654b\"",
+      "issue": "The fixture JSON exposes the 64-byte test-only Ed25519 keypair (32-byte seed + 32-byte derived pubkey) in plain hex on every entry. This is intentional and required, but the JSON itself contains no inline marker that the value is test-only. A future developer skimming the file (or grep'ing for high-entropy strings) might be confused.",
+      "impact": "LOW. Documentation/clarity only. No real-world cryptographic risk — the seed is published in the source comment and the derived pubkey will appear in any new git history.",
+      "recommendation": "Optional: add a top-level metadata comment field to the fixture (e.g., a leading `_meta` object) explicitly tagging the seed as 'TEST_ONLY' and pointing to core/tests/golden_fixtures.rs:55-61. This requires the JSON to become an object instead of an array, which would propagate to cose.golden.test.ts. Lower cost: add a one-line comment in packages/sdk/README.md's 'Golden COSE fixture' section explicitly flagging that the fixture contains a publicly-known test seed and MUST NOT be used to sign real attestations. Tracked as a hardening nice-to-have, not a security defect.",
+      "blocking": false
+    }
+  ],
+  "positive_observations": [
+    "Feature flag is correctly default-OFF and namespaced (core/Cargo.toml:60).",
+    "Cfg gate at top of golden_fixtures.rs:28 prevents the file from compiling on wasm32 even if the feature were accidentally enabled.",
+    "test_emitter_deterministic + test_fixed_keypair_pubkey_stable provide strong invariants that the lockstep gate relies on.",
+    "Lockstep gate diffs BOTH the SHA file and the JSON file (node-test.yml:62-66) — closes the 'forge the SHA, leave JSON stale' loophole.",
+    "Regenerator script uses `set -euo pipefail` and properly-scoped path derivation.",
+    "Python heredoc uses RAW_CARGO_OUTPUT env-var passthrough (line 44) rather than shell-substituting raw cargo stdout into a python literal — exactly the right pattern.",
+    "No new runtime dependencies, no new npm packages, no broadened public surface in core/src/lib.rs."
+  ],
+  "blocking_issues": [],
+  "recommendation": "approve — no blocking findings. Optional follow-ups (T4-S1, T4-S2) can be addressed opportunistically or filed to backlog."
+}

@@ -1,0 +1,210 @@
+{
+  "audit": "security-auditor round 1",
+  "task": "T5 — CLI commands (init/login/sign/recall/verify/whoami/prove/identity)",
+  "commit_audited": "6de72db (note: review request cited 4d18bf1 which does not exist in this repo; 6de72db is the only T5 commit and matches the diff scope in tasks/5.md)",
+  "scope": [
+    "packages/cli/bin/mnemonic.ts",
+    "packages/cli/src/{config,output,errors,index}.ts",
+    "packages/cli/src/commands/{init,login,sign,recall,verify,whoami,prove,identity}.ts"
+  ],
+  "owasp_2021_coverage": {
+    "A01_broken_access_control": "ok — identity/token files written 0600 on Unix, icacls /inheritance:r /grant:r on Windows; dir 0700 via mkdirSync. Identity import refuses overwrite without --force.",
+    "A02_crypto_failures": "ok — JWT alg pinned to HS256 in SDK parseJwtPayload (defence-in-depth on CLI headless path); 32-byte challenge via crypto.randomBytes; ed25519 signing via WASM/SDK.",
+    "A03_injection": "see findings F-1 (icacls command-injection latent on user-controlled --file path).",
+    "A04_insecure_design": "ok — loopback bound 127.0.0.1 only (RFC 8252 §7), single-shot, 5min timeout, state validated BEFORE token exchange (RFC 7636 §4.4 belt+braces with SDK's own check).",
+    "A05_misconfiguration": "ok — kleur color disabled when piped, no debug verbosity by default.",
+    "A06_vulnerable_components": "5 moderate npm-audit advisories — ALL in dev-only deps (vitest/vite/esbuild/vite-node/@vitest/mocker). No production CLI runtime impact. open ^11.0.0, commander ^14.0.3, kleur ^4.1.5 — no current advisories.",
+    "A07_auth_failures": "ok — state mismatch produces AuthError (exit 4) and JWT is NOT persisted (verified by login.test.ts::aborts with AuthError when callback state ≠ stored state). loadToken refuses expired tokens. signer_match surfaced in whoami.",
+    "A08_data_integrity": "ok — bootstrap-ticket flow per Decision 7 (single-use UUID capability), 410 Gone handled, atomic redeem on server side.",
+    "A09_logging_failures": "ok — redactSecrets applied on every CliError construction, JWT_RE matches eyJ[A-Za-z0-9_-]{20,}, HEX_SECRET_RE matches 128-hex secrets. No console.log/console.error anywhere in src/. handleError emits redacted stack only.",
+    "A10_ssrf": "ok — fetch URLs derived from baseUrl env or default https://mc.mnemonik.xyz. open() invoked only on SDK-built authorize URL (trusted-base). No user-supplied URL substitution into requests."
+  },
+  "verifications_requested_by_caller": {
+    "loopback_binds_127001_only": {
+      "status": "verified",
+      "evidence": [
+        "packages/cli/src/commands/login.ts:186 — server.listen(0, '127.0.0.1', ...)",
+        "packages/cli/src/commands/login.ts:185 — comment '127.0.0.1 ONLY — never 0.0.0.0'",
+        "tech-spec.md:65 — 'addressing 127.0.0.1 only (never 0.0.0.0)'"
+      ]
+    },
+    "single_shot_terminator": {
+      "status": "verified",
+      "evidence": [
+        "awaitCallback uses a `settled` flag (line 209) so only one resolve/reject fires",
+        "server.close() in finally block on every exit path (line 133)"
+      ]
+    },
+    "state_validated_before_token_exchange": {
+      "status": "verified",
+      "evidence": [
+        "login.ts:139 — `if (cb.state !== authz.state)` check fires BEFORE exchangeCodeForToken at line 148",
+        "Defence-in-depth: SDK's exchangeCodeForToken also validates state internally (oauth.ts:275)"
+      ]
+    },
+    "server_5min_timeout": {
+      "status": "verified",
+      "evidence": [
+        "login.ts:44 — DEFAULT_TIMEOUT_MS = 5*60*1000",
+        "login.ts:217 — setTimeout rejects with AuthError at deadline"
+      ]
+    },
+    "pkce_state_mismatch_exit_4": {
+      "status": "verified",
+      "evidence": [
+        "errors.ts:75-80 — AuthError carries exitCode=4",
+        "login.test.ts:101-146 — TDD anchor asserts AuthError + token.json NOT created"
+      ]
+    },
+    "jwt_alg_HS256_exp_future_sub_present": {
+      "status": "verified (SDK-enforced)",
+      "evidence": [
+        "sdk/src/oauth.ts:418 — `if (!JWT_ALLOWED_ALGS.has(algRaw)) throw AuthError`",
+        "sdk/src/oauth.ts:444 — `if (obj.exp <= nowSec) throw AuthError('jwt: token expired')`",
+        "sdk/src/oauth.ts:433 — `if (typeof obj.sub !== 'string' || obj.sub.length === 0) throw`",
+        "CLI login.ts:62 + 162 wraps these via parseJwtPayload",
+        "login.test.ts:54 — explicit `rejects an alg=none JWT` test"
+      ]
+    },
+    "file_mode_0600_unix": {
+      "status": "verified",
+      "evidence": [
+        "config.ts:148 — writeFileSync(path, ..., {mode: 0o600}) for identity",
+        "config.ts:215 — same for token",
+        "config.ts:83 — chmodSync(path, 0o600) (re-chmod-after-write for safety against truncate-then-recreate behaviour)"
+      ]
+    },
+    "file_mode_windows_icacls": {
+      "status": "verified — but see F-1 for shell-quoting concern",
+      "evidence": [
+        "config.ts:74 — execSync('icacls \"${path}\" /inheritance:r /grant:r \"${user}:F\"')",
+        "Wrapped in if (process.platform === 'win32') guard"
+      ]
+    },
+    "no_to_clipboard_flag": {
+      "status": "verified",
+      "evidence": [
+        "grep -r 'clipboard' packages/cli/ — only one comment match in identity.ts:10 documenting NO clipboard flag",
+        "bin/mnemonic.ts:186-195 — `identity export` only registers --file, no --to-clipboard"
+      ]
+    },
+    "jwt_redaction_in_logs": {
+      "status": "verified",
+      "evidence": [
+        "errors.ts:22 — JWT_RE = /eyJ[A-Za-z0-9_-]{20,}/g",
+        "errors.ts:24 — HEX_SECRET_RE = /\\b[0-9a-fA-F]{128}\\b/g",
+        "errors.ts:43 — CliError ctor runs redactSecrets on every message",
+        "errors.ts:118 — handleError unknown branch redacts the stack too",
+        "tech-spec.md:320 — logging-redaction unit-test contract holds",
+        "Zero console.log / console.error in packages/cli/src/ (grep returned no matches)"
+      ]
+    },
+    "browser_open_via_open_package": {
+      "status": "verified — no direct shell-out",
+      "evidence": [
+        "login.ts:115-116 — dynamic import of `open` package, called as `await open(authz.url)`",
+        "No use of `child_process.exec(\"xdg-open ...\")` or similar in the codebase",
+        "URL passed to open() is the SDK-built authorize URL — not user-controllable"
+      ]
+    },
+    "no_jwt_in_thrown_error_messages": {
+      "status": "verified",
+      "evidence": [
+        "All thrown errors flow through CliError ctor (errors.ts:43) which applies redactSecrets",
+        "Login error paths use generic phrases ('state mismatch (possible CSRF)', 'loopback callback timed out')",
+        "exchangeCodeForToken errors come from SDK (which itself redacts via redactJWT — sdk/src/errors.ts)"
+      ]
+    },
+    "username_user_controlled_in_icacls": {
+      "status": "acceptable per spec — the local user is the username",
+      "evidence": [
+        "config.ts:65 — process.env.USERNAME on Windows (set by OS); fallback USER (cross-platform-safe but only used on Win branch)",
+        "Threat model: a user who can set USERNAME has already won — they're running under that account"
+      ]
+    }
+  },
+  "findings": [
+    {
+      "id": "F-1",
+      "severity": "low",
+      "category": "A03 Injection (CWE-78 OS Command Injection — local self-impact)",
+      "file": "packages/cli/src/config.ts",
+      "lines": "63-84",
+      "title": "icacls execSync uses string-interpolation, not argv array — quote-escape bypass possible if `path` or `user` contain double-quotes",
+      "description": "restrictFileMode builds the icacls command with template-literal interpolation: `icacls \"${path}\" /inheritance:r /grant:r \"${user}:F\"`. While both arguments are wrapped in double-quotes, neither is escaped. On Windows, if `path` contains a literal `\"` (e.g. a user-supplied --file path like `C:\\foo\".bat`), the quote terminates the icacls argument and remaining bytes are interpreted as further shell tokens. `restrictFileMode` is callable via `runIdentityExport` (identity.ts:207) where `opts.file` is direct user CLI input. The same concern applies — much less plausibly — to `process.env.USERNAME`. Additionally the `path` for identity.json/token.json is derived from `homedir()` which on Windows could legitimately contain a space (handled by the quotes) but not a double-quote (rare but not impossible if a user has a maliciously-named profile dir).",
+      "exploit_scenario": "User runs `mnemonic identity export --file 'C:\\Users\\me\\foo\".bat\" & calc.exe & x'`. On Windows, after writeFileSync succeeds, restrictFileMode would execSync `icacls \"C:\\Users\\me\\foo\".bat\" & calc.exe & x\" /inheritance:r /grant:r \"USER:F\"` — the embedded quote terminates the first argument and `calc.exe` runs. Because the user typed the path themselves, this is local self-impact (the user attacks themselves), not a remote/network vulnerability.",
+      "impact": "Local self-impact only. No privilege escalation (icacls runs as the same user). Worst case: shell command injection via the user's own input. Not a credential-exfil vector unless wrapped by a higher-level tool that lets a remote actor smuggle the --file path.",
+      "recommendation": "Switch to argv-array execFileSync to avoid shell parsing entirely:\n```ts\nimport { execFileSync } from 'node:child_process';\nexecFileSync('icacls', [path, '/inheritance:r', '/grant:r', `${user}:F`], { stdio: 'ignore', shell: false });\n```\nargv-array form passes arguments directly to the OS without involving cmd.exe, so embedded quotes are passed literally to icacls (which handles them itself). Alternatively, validate `path` rejects characters in `[\"<>|&]` before shelling out.",
+      "blocking": false,
+      "notes": "Comment on line 72 claims 'Quote both arguments to defeat path/username spaces' — quoting handles spaces but not embedded quotes. Comment is misleading and should be corrected if the fix is not applied."
+    },
+    {
+      "id": "F-2",
+      "severity": "info",
+      "category": "Defensive coding",
+      "file": "packages/cli/src/commands/login.ts",
+      "lines": "105-109",
+      "title": "Authorize URL printed to stderr on every interactive login — exposes state + code_challenge in scrollback",
+      "description": "`hint('opening browser: ${authz.url}', opts)` echoes the full authorize URL — including `state` (random nonce) and `code_challenge` (PKCE S256 derivative) — to stderr. Neither is a secret per RFC 7636 (state is a CSRF token; code_challenge is a one-way SHA-256 hash). However if a user pipes stderr to a shared log, an observer who also has access to the in-memory `verifier` could in principle replay; but verifier is never persisted, so this is moot.",
+      "impact": "None — `state` and `code_challenge` are not secrets. Listed for completeness only.",
+      "recommendation": "No action required. If desired, redact the query string from the printed URL: `hint('opening browser: ${baseUrl}/oauth/authorize?...', opts)` — but this hurts diagnosability when something goes wrong.",
+      "blocking": false
+    },
+    {
+      "id": "F-3",
+      "severity": "info",
+      "category": "Defensive coding",
+      "file": "packages/cli/src/config.ts",
+      "lines": "199-203",
+      "title": "Token expiry uses wall-clock (Date.now()) — no leeway for clock skew",
+      "description": "loadToken throws if `Date.parse(expires_at) <= Date.now()`. There is no clock-skew window. If the user's clock is fast, a not-yet-expired JWT could be rejected by the CLI even though the server still accepts it.",
+      "impact": "Low — at worst the user re-runs `mnemonic login`. Conservative direction (fail-closed).",
+      "recommendation": "No action required for security. SDK's parseJwtPayload uses the same strict comparison so behaviour is consistent.",
+      "blocking": false
+    },
+    {
+      "id": "F-4",
+      "severity": "info",
+      "category": "A04 Insecure Design — minor",
+      "file": "packages/cli/src/commands/login.ts",
+      "lines": "227-238",
+      "title": "Loopback callback responder accepts any GET path (not just /callback) — but rejects with 404",
+      "description": "The HTTP server is bound only to 127.0.0.1, which RFC 8252 §7.3 explicitly endorses for native apps. A scanner on the loopback interface could probe the random port; the server replies 405 to non-GET and 404 to non-/callback paths and does not consume the single-shot. This is correct behaviour. No timing-side-channel in the path comparison.",
+      "impact": "None.",
+      "recommendation": "No action required.",
+      "blocking": false
+    }
+  ],
+  "rfc_8252_compliance": {
+    "loopback_redirect_uri": "✓ http://127.0.0.1:<random_port>/callback (§7.3)",
+    "no_localhost_string": "✓ uses literal 127.0.0.1 (§7.3 explicitly disallows ‘localhost’ DNS resolution risk)",
+    "ipv6_loopback": "✗ not implemented — IPv4 only; tech-spec.md:31 mentions ::1 in server allowlist but CLI binds 127.0.0.1 only. ACCEPTABLE — IPv6 loopback is optional per RFC and most native CLIs use v4 only.",
+    "ephemeral_port": "✓ listen(0, ...) — kernel-assigned random port",
+    "single_use_redirect": "✓ awaitCallback resolves once, server.close() in finally",
+    "state_parameter": "✓ generated cryptographically (SDK randomState), validated before code exchange",
+    "pkce_S256": "✓ verifier 32 random bytes base64url-encoded, challenge SHA-256-of-verifier base64url",
+    "user_agent_message": "✓ /callback responds with HTML 'Login complete — close this tab'"
+  },
+  "owasp_top10_summary": "No critical/high issues. One low-severity finding (F-1 icacls quote-escape) — local self-impact only, easily fixed by switching to execFileSync argv-array. State-validation-before-exchange, JWT alg whitelist, redaction pipeline, loopback hardening, and 0600 file modes are all correctly implemented and tested.",
+  "dependency_audit": {
+    "command": "npm audit (workspace root)",
+    "summary": "5 moderate, 0 high, 0 critical",
+    "findings": [
+      {
+        "package": "vitest / vite / vite-node / esbuild / @vitest/mocker",
+        "severity": "moderate",
+        "scope": "devDependency only — does NOT ship with the published CLI",
+        "advisory": "GHSA-67mh-4wv8-2f99 (esbuild dev-server CORS), GHSA-4w7w-66w2-5vf9 (vite path-traversal in optimized .map)",
+        "production_impact": "none — these are test-time tools, never run on a user's machine after `npm i -g @mnemonik-xyz/cli`",
+        "fix": "Bump vitest to 4.x in a future task; not blocking T5"
+      }
+    ],
+    "production_runtime_deps_audit": {
+      "open@11.x": "no known advisories",
+      "commander@14.x": "no known advisories",
+      "kleur@4.x": "no known advisories",
+      "@mnemonik-xyz/sdk": "workspace-internal (audited under T2/T3)"
+    }
+  },
+  "round_1_decision": "APPROVED with one low-severity follow-up (F-1). No blocking issues. The core security invariants requested by Decision 5 (loopback 127.0.0.1, state-before-exchange, single-shot, 5-min timeout) and Decision 8 (0600 / icacls ACL) are all implemented and tested. The TDD anchor `interactive_loopback_state_validation` is present and passing. F-1 should be addressed before publish but does not block T5 completion."
+}

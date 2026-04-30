@@ -1,0 +1,127 @@
+{
+  "task": 7,
+  "round": 1,
+  "reviewer": "test-reviewer",
+  "commit": "51b6508",
+  "scope": "webapp/src/components/IdentityPanel.tsx, webapp/src/components/IdentityPanel.test.tsx, webapp/e2e/cli-bootstrap.spec.ts",
+  "verdict": "approve_with_minor_findings",
+  "summary": "Test coverage for Task 7 substantially meets the TDD anchor and Decision 7 surface. All four required vitest tests pass locally (4/4 green, 90ms). The TDD anchor `send_to_cli_calls_endpoint_and_displays_ticket` is implemented exactly as required: mocks fetch with the precise UUID `550e8400-e29b-41d4-a716-446655440000`, asserts the code-block text matches the exact `mnemonic identity import --ticket <uuid>` string, and asserts `navigator.clipboard.writeText` was called with the exact same paste-command string. 401 and 429 paths are individually covered. The e2e suite is properly env-skippable and validates single-use redeem against the live backend. One material gap: the 'other-error' (5xx / generic 4xx) path has no unit test even though the production handler implements it. One minor gap: the legacy `renders_did_after_generate` test was modified (its inline `await import('@testing-library/react')` was removed in favor of the top-level import); the test still passes but this should be flagged as touched-collateral. The e2e asserts 404 on the second redeem (matches the server's actual uniform-404 behavior in `mcp/src/api.rs::bootstrap_not_found`), which is correct even though the tech-spec narrative mentions '410 Gone' — the e2e file comment correctly explains this is the deliberate uniform-error surface.",
+  "tdd_anchor_check": {
+    "name": "send_to_cli_calls_endpoint_and_displays_ticket",
+    "present": true,
+    "mock_returns_specific_uuid": true,
+    "uuid_used": "550e8400-e29b-41d4-a716-446655440000",
+    "asserts_paste_command_text": true,
+    "asserts_clipboard_writeText_exact_string": true,
+    "asserts_bearer_header": true,
+    "asserts_post_method_and_body_shape": true,
+    "notes": "Anchor satisfied. Bearer header value asserted as `Bearer test-jwt-abc`; body parsed as JSON and `keypair_json.pubkey_base58` re-asserted. Code block text matched verbatim against `mnemonic identity import --ticket 550e8400-e29b-41d4-a716-446655440000`. Copy-button writes exact same string."
+  },
+  "error_path_coverage": {
+    "h429_per_user_cap": {
+      "covered": true,
+      "test": "send_to_cli_429_shows_per_user_cap_message",
+      "asserts_message_visible": true,
+      "asserts_no_code_block_rendered": true,
+      "notes": "Asserts `errorMsg.textContent.toContain('3 active CLI tickets')` and that `identity-cli-command` is null. Matches BOOTSTRAP_PER_USER_CAP=3 from server."
+    },
+    "h401_redirect": {
+      "covered": true,
+      "test": "send_to_cli_401_redirects_to_oauth_consent",
+      "asserts_window_location_assign_called": true,
+      "asserts_target": "/oauth/consent",
+      "asserts_no_ticket_displayed": true,
+      "notes": "Replaces window.location with a stub object whose `assign` is a vi.fn(); asserts `assign` called with `/oauth/consent`. Correct."
+    },
+    "h_other_errors_generic": {
+      "covered": false,
+      "severity": "low",
+      "notes": "The production handler in IdentityPanel.tsx lines 209–219 implements a generic-error path that surfaces `Could not issue ticket: ${detail}` from the response body's `error` field, plus an outer try/catch wrapping the entire `fetch` (network failure). Neither branch has a unit test. Recommend adding `send_to_cli_5xx_shows_generic_error_with_server_message` (e.g., 500 + `{error: 'internal'}` → assert error contains 'Could not issue ticket: internal') and optionally `send_to_cli_network_failure_shows_generic_error` (fetchMock rejects → assert message starts with 'Could not issue ticket:'). Not blocking — the happy-path + 401 + 429 already exercise the state machine — but one of the explicit task review focus items."
+    }
+  },
+  "e2e_coverage": {
+    "file": "webapp/e2e/cli-bootstrap.spec.ts",
+    "skippable": true,
+    "skip_envs": ["PLAYWRIGHT_SKIP_BACKEND_E2E", "PLAYWRIGHT_TEST_JWT (unset)"],
+    "skip_logic_correct": true,
+    "single_use_redeem_covered": true,
+    "second_redeem_status_asserted": 404,
+    "tech_spec_says_410": true,
+    "discrepancy_explained_in_comment": true,
+    "offline_render_test_present": true,
+    "offline_test_uses_page_route_stub": true,
+    "live_test_validates_response_shape": true,
+    "live_test_asserts_secret_64_bytes": true,
+    "live_test_asserts_pubkey_base58_string": true,
+    "notes": "Two-test design is sound: an offline `page.route('**/api/cli-bootstrap/issue', ...)`-stubbed render-only check that runs in any CI, plus a live-backend redeem-twice check gated on both PLAYWRIGHT_SKIP_BACKEND_E2E (off) AND PLAYWRIGHT_TEST_JWT (set). Skip ordering is correct (skip if env=='1' OR JWT unset). The live test is the actual single-use validator and uses Playwright's `request` fixture for the raw GET, decoupled from the React render. The 404 vs 410 deviation from tech-spec wording is intentional and matches `mcp/src/api.rs::bootstrap_not_found` (uniform error surface to defeat probing) — file comment makes this explicit. TDD anchor `issued_ticket_redeemable_once` is satisfied by the live test."
+  },
+  "regression_check": {
+    "existing_test_preserved": true,
+    "existing_test_modified": true,
+    "test": "renders_did_after_generate",
+    "modification": "removed inline `const { fireEvent } = await import('@testing-library/react');` in favor of a top-level `fireEvent` import that is also used by the new tests",
+    "still_passes": true,
+    "behavior_changed": false,
+    "severity": "info",
+    "notes": "Pure refactor — test asserts the same DID + pubkey + localStorage outcomes against the same WASM mock. Vitest run shows 4/4 green including this case. Acceptable."
+  },
+  "test_quality_assessment": {
+    "follows_pyramid": true,
+    "no_excessive_mocking": true,
+    "mocks_per_unit_test": "1–2 (fetch + clipboard, or fetch + window.location)",
+    "asserts_real_behavior": true,
+    "no_redundant_tests": true,
+    "test_names_descriptive": true,
+    "isolation_correct": true,
+    "vi_restoreAllMocks_in_afterEach": true,
+    "localStorage_clear_in_beforeEach_and_afterEach": true,
+    "notes": "Each unit test is tightly scoped to one branch of the CliBootstrapState machine. `vi.restoreAllMocks()` was added to `afterEach` to prevent the new fetch/clipboard/location stubs from leaking between tests — good hygiene. The clipboard stub uses `Object.defineProperty(navigator, 'clipboard', ...)` because jsdom omits it; the location stub uses the same pattern for `window.location`. Both are appropriate for jsdom. No assertion is mock-call-only without behavioral consequence."
+  },
+  "findings": [
+    {
+      "id": "F1",
+      "severity": "low",
+      "category": "coverage",
+      "title": "Other-error path (5xx / generic 4xx / network failure) has no unit test",
+      "location": "webapp/src/components/IdentityPanel.test.tsx",
+      "details": "The handler implements three distinct error sub-branches: 401 (covered), 429 (covered), `!res.ok` generic (NOT covered) returning `Could not issue ticket: ${detail}`, and an outer try/catch on `fetch` rejection (NOT covered) returning `Could not issue ticket: ${formatError(e)}`. The task review focus item explicitly listed 'Other-error path: shows generic error message' as a check. Adding one test that returns 500 with `{error: 'internal'}` and asserts the inline error text matches `Could not issue ticket: internal` would close the gap.",
+      "blocking": false
+    },
+    {
+      "id": "F2",
+      "severity": "info",
+      "category": "consistency",
+      "title": "Tech-spec narrative says 410 Gone, server returns 404, e2e asserts 404",
+      "location": "webapp/e2e/cli-bootstrap.spec.ts:104, work/mnemonic-cli/tech-spec.md (Decision 7, line 180)",
+      "details": "Tech-spec Decision 7 paragraph reads 'subsequent calls return 410 Gone'. The server (`mcp/src/api.rs::bootstrap_not_found`, line 605) returns 404 NOT_FOUND uniformly across missing/expired/consumed tickets, and the e2e test asserts 404. The e2e file's comment block correctly explains this as the 'uniform error surface per Decision 7' for security reasons (defeats probing). This is consistent with the implementation and Task 6's server tests; only the tech-spec prose is stale. Not a test issue — flagging so a doc-update follow-up can land.",
+      "blocking": false
+    },
+    {
+      "id": "F3",
+      "severity": "info",
+      "category": "regression",
+      "title": "Existing renders_did_after_generate test was touched but not broken",
+      "location": "webapp/src/components/IdentityPanel.test.tsx:5,50",
+      "details": "The legacy test was modified to use a top-level `fireEvent` import instead of an inline `await import(...)`. Behavior unchanged; assertions identical; passes locally. Mention only because the review focus item 'Existing IdentityPanel tests not broken by new button' explicitly asked.",
+      "blocking": false
+    }
+  ],
+  "verification_run": {
+    "command": "cd webapp && npx vitest run src/components/IdentityPanel.test.tsx",
+    "result": "pass",
+    "tests_passed": 4,
+    "tests_failed": 0,
+    "duration_ms": 90,
+    "tests": [
+      "renders_did_after_generate",
+      "send_to_cli_calls_endpoint_and_displays_ticket",
+      "send_to_cli_429_shows_per_user_cap_message",
+      "send_to_cli_401_redirects_to_oauth_consent"
+    ]
+  },
+  "recommendations": [
+    "Add one more unit test for the generic-error branch (5xx + JSON body) to fully cover the four-state machine documented in IdentityPanel.tsx. Optional companion test for fetch-rejection (network failure).",
+    "Update tech-spec Decision 7 to read '404' instead of '410 Gone' so prose matches server + e2e (separate doc task).",
+    "Consider extracting the location-spy helper from the 401 test into a tiny shared util if any future test needs `window.location.assign` — not required now, just a maintainability nudge."
+  ]
+}

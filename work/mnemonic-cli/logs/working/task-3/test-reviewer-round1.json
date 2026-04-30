@@ -1,0 +1,142 @@
+{
+  "reviewer": "test-reviewer",
+  "task": 3,
+  "round": 1,
+  "branch": "feat/mnemonic-cli-userspec",
+  "commit": "f41116c",
+  "subject": {
+    "test_file": "packages/sdk/test/oauth.test.ts",
+    "src_file": "packages/sdk/src/oauth.ts",
+    "tests_total": 29,
+    "tests_pass": 29,
+    "tests_fail": 0,
+    "expect_calls": 95,
+    "coverage_statements": 96.61,
+    "coverage_branches": 96.15,
+    "coverage_functions": 100,
+    "coverage_lines": 96.61
+  },
+  "verdict": "approve_with_minor",
+  "summary": "Test suite is solid for the OAuth 2.1 + PKCE surface. RFC 7636 Appendix B fixture is asserted byte-for-byte exactly as specified; state and redirect_uri mismatches are proven to terminate before fetch (assertion present); session-cleared-on-success and session-cleared-on-validation-failure are both proven; coverage is 96.61% with the gap (UUID-v4 manual fallback) reasonably justified. Two minor gaps in parseJwtPayload — no explicit test for `alg=none` and no explicit test for malformed base64 (only malformed JSON inside a valid base64 envelope). These are low-severity because the implementation does not consult the header at all (signature verification is the server's job per task spec line 33), but adding them would make the security posture explicit and prevent regression if signature checking is ever bolted on.",
+  "focus_findings": [
+    {
+      "id": "F1",
+      "area": "RFC 7636 Appendix B fixture",
+      "status": "pass",
+      "evidence": "test/oauth.test.ts:51-55 — verifier 'dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk' -> challenge 'E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM' asserted via expect(got).toBe(expected). Matches RFC 7636 Appendix B verbatim.",
+      "severity": "n/a"
+    },
+    {
+      "id": "F2",
+      "area": "29 tests adequate for OAuth surface",
+      "status": "pass",
+      "evidence": "Surface = 6 exports (generatePkceVerifier, pkceChallenge, randomState, buildAuthorizeUrl, exchangeCodeForToken, parseJwtPayload) + pendingAuthSessions map. Tests: 2 (pkceChallenge) + 3 (verifier+state) + 5 (buildAuthorizeUrl) + 10 (exchangeCodeForToken) + 9 (parseJwtPayload) = 29. All branches of public API exercised. No redundant or filler tests detected.",
+      "severity": "n/a"
+    },
+    {
+      "id": "F3",
+      "area": "State mismatch terminates without HTTP",
+      "status": "pass",
+      "evidence": "test/oauth.test.ts:201-220 — 'rejects on state mismatch and does NOT issue HTTP'. After expecting AuthError, asserts expect(fetchMock).not.toHaveBeenCalled() AND expect(pendingAuthSessions.has(seeded.sessionId)).toBe(false). Same pattern for redirect_uri mismatch (lines 222-241) and unknown-sessionId (lines 243-254).",
+      "severity": "n/a"
+    },
+    {
+      "id": "F4",
+      "area": "Session cleared on success AND on validation failure",
+      "status": "pass",
+      "evidence": "Cleared-on-success: lines 270-289 (TDD-anchored 'session_cleared_on_success' test). Cleared-on-validation-failure: state-mismatch (line 218), redirect_uri-mismatch (line 240), non-2xx (line 308), malformed-JSON-body (line 329), missing-jwt-field (implicit via 'rejects.toBeInstanceOf'). Network-failure case (line 350) DELIBERATELY preserves session for retry — this is documented in oauth.ts:223-225 ('keep the session so the caller can retry') and the test asserts expect(pendingAuthSessions.has(seeded.sessionId)).toBe(true). Behavior is consistent and well-asserted.",
+      "severity": "n/a"
+    },
+    {
+      "id": "F5",
+      "area": "parseJwtPayload rejects alg=none",
+      "status": "fail",
+      "evidence": "No test inspects the JWT header at all. Test helper makeJwt always sets alg='HS256'. No negative test for alg='none'. Inspecting oauth.ts:291-325, parseJwtPayload NEVER reads parts[0] (the header) — it parses parts[1] (payload) only. Per task spec line 33 ('no signature verification — that's server's job'), this may be intentional; but the request explicitly asks for an alg=none rejection assertion. Either: (a) add a test that asserts parseJwtPayload accepts alg=none because signature is not verified (documenting the choice), or (b) tighten parseJwtPayload to reject alg=none and add the test. Recommendation: option (a) — add an explicit test 'tolerates alg=none header (signature verification is server-side)' to make the security boundary unambiguous.",
+      "severity": "minor",
+      "recommendation": "Add a test asserting parseJwtPayload behaviour on alg=none. Keeps the security model explicit and prevents regression if a future change adds local signature checks.",
+      "blocks_merge": false
+    },
+    {
+      "id": "F6",
+      "area": "parseJwtPayload rejects expired exp",
+      "status": "pass",
+      "evidence": "test/oauth.test.ts:464-468 — 'throws on expired token' with exp = now-60. Matches oauth.ts:319-322 (exp <= nowSec).",
+      "severity": "n/a"
+    },
+    {
+      "id": "F7",
+      "area": "parseJwtPayload rejects missing sub",
+      "status": "pass",
+      "evidence": "test/oauth.test.ts:444-450 — 'throws on missing sub'. Also covered: missing exp (452-456), missing iat (458-462).",
+      "severity": "n/a"
+    },
+    {
+      "id": "F8",
+      "area": "parseJwtPayload rejects malformed base64",
+      "status": "partial",
+      "evidence": "Test 'throws when payload is not valid JSON' (lines 432-440) uses base64UrlEncode('not-json{{{'), which is VALID base64url containing INVALID JSON — exercises the JSON.parse catch (oauth.ts:302). NO test sends a payload with characters outside the base64url alphabet (e.g. '!@#') that would make atob throw. Looking at decodeBase64UrlToString (oauth.ts:272-280): atob() will throw DOMException on invalid characters. That throw propagates out unwrapped — it does NOT become an AuthError. This is an actual bug surface: a malformed base64 segment in parts[1] yields a raw DOMException (or InvalidCharacterError) rather than a redacted AuthError, leaking implementation details. Test gap and a minor implementation gap.",
+      "severity": "minor",
+      "recommendation": "Add test 'throws AuthError on payload with invalid base64url chars' using e.g. `header.???.sig`. If the test fails (raw atob exception escapes), wrap decodeBase64UrlToString in try/catch inside parseJwtPayload and convert to AuthError. Same hardening recommended for the header segment if alg-none rejection is added.",
+      "blocks_merge": false
+    },
+    {
+      "id": "F9",
+      "area": "Coverage 96.61% — gaps justified",
+      "status": "pass_with_note",
+      "evidence": "Per decisions.md, the 3.39% gap is: (i) UUID-v4 hand-rolled fallback (oauth.ts:61-68) — only fires when crypto.randomUUID is missing (Node <19). All current SDK target runtimes per Decision 11 (Node 20, Node 22, Bun, Deno 1.40+) have crypto.randomUUID, so this branch is dead in supported runtimes; (ii) one branch in parseJwtPayload — likely the `!json || typeof json !== \"object\"` branch (oauth.ts:305-307). The 'JSON array' test (lines 510-515) hits the path but falls through to the missing-sub check because arrays are typeof === 'object' && truthy. The `!json` branch (e.g. JSON.parse('null')) and the `typeof json !== 'object'` branch (e.g. JSON.parse('42')) are not exercised. Justification is reasonable for the UUID fallback. The parseJwtPayload branch is a 1-line addition (test 'throws when payload is JSON null' and/or 'throws when payload is JSON number'). Not blocking.",
+      "severity": "trivial",
+      "recommendation": "Optionally add one parametrized test covering JSON.parse('null') and JSON.parse('42') payloads to close the parseJwtPayload branch and document the validation contract.",
+      "blocks_merge": false
+    }
+  ],
+  "additional_observations": [
+    {
+      "id": "O1",
+      "category": "test_quality_positive",
+      "note": "Tests assert real state/results rather than only that mocks were called. The happy-path test (line 256-291) inspects the full POST body fields and the tokenUrl, not just that fetch fired. State-mismatch tests assert both 'AuthError thrown' AND 'fetch not called' AND 'session removed' — tri-axis assertion."
+    },
+    {
+      "id": "O2",
+      "category": "test_quality_positive",
+      "note": "afterEach (lines 36-40) clears pendingAuthSessions, restores mocks, and restores ORIGINAL_FETCH. No shared-state leakage between tests."
+    },
+    {
+      "id": "O3",
+      "category": "test_quality_positive",
+      "note": "TDD anchors from tasks/3.md are all present: pkce_challenge_matches_rfc_fixture (line 51), exchange_rejects_state_mismatch (line 195), session_cleared_on_success (line 270)."
+    },
+    {
+      "id": "O4",
+      "category": "test_quality_positive",
+      "note": "Network-failure-preserves-session (line 340-356) is a thoughtful add-on that tests an async fault path (fetch throw) and pins the documented retry contract (oauth.ts:223-225)."
+    },
+    {
+      "id": "O5",
+      "category": "redundancy_check",
+      "note": "No redundant tests detected. Each test catches a distinct failure mode (state, redirect_uri, sessionId, 5xx, malformed body, missing jwt, network, expires_at fallback, etc.)."
+    },
+    {
+      "id": "O6",
+      "category": "tech_spec_alignment",
+      "note": "Tech-spec testing strategy (line 312 'Per user-spec size M: four layers + redaction tests') puts unit tests in vitest with mocked fetch — matches. The redaction layer (Decision 10) is tested separately in T2's tests; T3 inherits AuthError from errors.ts which already runs through redactJWT in MnemonicError super() call. No duplicate redaction tests required at T3 layer."
+    },
+    {
+      "id": "O7",
+      "category": "implementation_gap_surfaced_by_review",
+      "note": "Per F8: decodeBase64UrlToString does not wrap atob, so malformed base64 yields a raw DOMException rather than an AuthError with redacted message. Low severity (the JWT chars themselves are not secret) but breaks the AuthError contract documented at oauth.ts:288-289. Recommend a follow-up fix paired with a test, OR explicit acceptance in decisions.md that header-shape errors propagate raw."
+    },
+    {
+      "id": "O8",
+      "category": "scope",
+      "note": "Tests do NOT cover the cross-runtime matrix (Node 20 / Node 22 / Bun / Deno per Decision 11). Per task description, that matrix is wave-8 / CI work (T8). Scope-correct for T3. The decisions.md note about using globalThis.fetch instead of vi.stubGlobal correctly anticipates Bun + vitest dual-runner requirement."
+    }
+  ],
+  "blocks_merge": false,
+  "must_fix_before_merge": [],
+  "should_fix_followup": [
+    "F5: Add explicit test for parseJwtPayload behaviour on alg=none (documenting that header is intentionally not inspected).",
+    "F8: Add test for malformed base64url payload + harden decodeBase64UrlToString to convert atob exceptions into AuthError.",
+    "F9: Optionally add a test for JSON.parse('null') / JSON.parse('42') payloads to close the last parseJwtPayload branch."
+  ],
+  "approval": "approve"
+}

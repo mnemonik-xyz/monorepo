@@ -1,0 +1,241 @@
+{
+  "reviewer": "test-reviewer",
+  "task": 5,
+  "feature": "mnemonic-cli",
+  "round": 1,
+  "commit_reviewed": "6de72db",
+  "note_on_commit_hash": "Brief mentioned 4d18bf1 but actual T5 commit is 6de72db (feat: task 5 — CLI commands). Reviewed 6de72db.",
+  "scope": "packages/cli/test/ — 10 vitest files, 43 tests",
+  "verdict": "approve_with_concerns",
+  "summary": "All four spec-required TDD anchors are present and correctly drive their underlying decisions. Test isolation via MNEMONIC_CONFIG_DIR + tmpdir is clean throughout (every suite uses withTmpConfigDir/cleanup). Network is mocked exclusively via vi.fn-wrapped globalThis.fetch — no real network calls. Lines coverage 77.63% clears the spec-mandated 75% gate. Major gaps: zero 5xx server-error tests on any happy-path command, malformed-JWT tested only for alg=none, and the login interactive anchor relies on Server.prototype.listen monkey-patching (correctly self-flagged in decisions.md). Branch coverage 68.14% is below a typical 80% bar but the spec only sets a lines gate for CLI, so this is acceptable per spec — flagging for round 2 follow-up not blocking.",
+  "spec_compliance": {
+    "lines_coverage_gate_75pct": {
+      "required": 75,
+      "actual": 77.63,
+      "passes": true,
+      "source": "decisions.md T5-impl-cont"
+    },
+    "branch_coverage": {
+      "actual": 68.14,
+      "spec_gate": "none for CLI (tech-spec.md line 323: CLI ≥75% lines only)",
+      "passes": true,
+      "note": "below typical 80% bar but spec did not set a CLI branch gate; SDK was the package with ≥80% branch requirement"
+    },
+    "tdd_anchors_present": {
+      "login_interactive_loopback_state_validation": {
+        "file": "packages/cli/test/login.test.ts",
+        "line_range": "L73-L146",
+        "present": true,
+        "asserts_exit_code_4": true,
+        "asserts_no_jwt_written": true,
+        "drives_decision_5_state_binding": true
+      },
+      "identity_import_ticket_atomic_redeem": {
+        "file": "packages/cli/test/identity.test.ts",
+        "line_range": "L42-L80",
+        "present": true,
+        "first_call_succeeds": true,
+        "second_call_410_gone": true,
+        "drives_decision_7_atomic_single_use": true
+      },
+      "output_quiet_json_emits_only_json": {
+        "file": "packages/cli/test/output.test.ts",
+        "line_range": "L78-L128",
+        "present": true,
+        "stdout_one_json_object": true,
+        "stderr_empty": true,
+        "drives_decision_10_output_modes": true
+      },
+      "whoami_no_server_call_for_whoami": {
+        "file": "packages/cli/test/whoami.test.ts",
+        "line_range": "L37-L46",
+        "present": true,
+        "asserts_fetch_called_zero_times": true,
+        "drives_decision_14_client_side_whoami": true,
+        "note": "spec said '≤ 1 (optional count)'; impl asserts strict 0 because default whoami does not pass --with-count. Stricter than spec but correct per Decision 14."
+      }
+    },
+    "tmpdir_isolation": {
+      "uses_MNEMONIC_CONFIG_DIR": true,
+      "helper": "packages/cli/test/helpers.ts::withTmpConfigDir",
+      "all_test_files_use_it": true,
+      "cleanup_in_afterEach": true,
+      "preserves_pre_existing_env_var": true
+    },
+    "fetch_mocking": {
+      "method": "vi.fn() wrapping globalThis.fetch with realFetch backup + restore",
+      "no_real_network": true,
+      "no_msw_used": "spec allowed either MSW or injected fetch; chose fetch injection",
+      "consistent_across_files": true
+    }
+  },
+  "edge_case_coverage": {
+    "missing_identity": {
+      "covered": true,
+      "evidence": [
+        "sign.test.ts: 'throws UserError if no identity / token'",
+        "identity.test.ts: 'export refuses if no identity to export'",
+        "whoami.test.ts: 'works without identity (prints null fields)'"
+      ]
+    },
+    "expired_token": {
+      "covered": true,
+      "evidence": "login.test.ts: 'rejects an expired JWT (AuthError, exit 4)' uses makeJwt(sub, -10)"
+    },
+    "malformed_jwt": {
+      "covered": "partial",
+      "covered_cases": ["alg=none rejected"],
+      "missing_cases": [
+        "missing/non-base64 segments (e.g. 'eyJ.bad' or 'one.two')",
+        "missing exp claim",
+        "non-string sub",
+        "header that is base64-decodable but missing alg field",
+        "alg=RS256 or other non-HS256 (spec requires alg=HS256 specifically)"
+      ],
+      "severity": "medium"
+    },
+    "server_5xx": {
+      "covered": false,
+      "missing_cases": [
+        "sign.ts: /mcp returns 500 → ServerError (exit 2)",
+        "sign.ts: /api/pending/<corr> returns 503",
+        "sign.ts: /api/sign-callback returns 500",
+        "recall.ts: /mcp returns 500 → ServerError",
+        "verify.ts: /mcp returns 500 → ServerError",
+        "identity.ts: /api/cli-bootstrap/redeem returns 500 (vs the 410 already covered)"
+      ],
+      "severity": "high",
+      "rationale": "Spec calls out ServerError exitCode 2 explicitly; no test currently exercises a 5xx response on any command. This is the most material gap."
+    },
+    "ticket_already_redeemed_410": {
+      "covered": true,
+      "evidence": "identity.test.ts TDD anchor — second call returns 410 → exit 1"
+    },
+    "invalid_oauth_state": {
+      "covered": true,
+      "evidence": "login.test.ts TDD anchor — wrong state on callback → AuthError + no token written"
+    },
+    "additional_edges_covered_well": [
+      "init refuses to overwrite without --force",
+      "init overwrites with --force",
+      "identity import requires --ticket XOR --file (mutex check)",
+      "identity import refuses to overwrite without --force",
+      "identity import --file rejects malformed JSON and bad shape",
+      "identity export writes mode 0600 (Unix only — Windows correctly skipped)",
+      "verify maps verified→0, tampered→IntegrityError(3), not_found→UserError(1)",
+      "recall validates default top-k=5 + passes topK + tag through to /mcp",
+      "recall rejects empty query",
+      "prove generates 32-byte random challenge by default; rejects malformed hex",
+      "output: --quiet alone suppresses stdout, hint() goes to stderr and is suppressed by --quiet, warn() always writes to stderr"
+    ]
+  },
+  "test_quality_review": {
+    "redundant_tests": "none found — every test asserts a distinct behavior",
+    "tests_that_test_nothing": "none — every it() has concrete expect() assertions on real state or values",
+    "excessive_mocking": {
+      "found": false,
+      "note": "Tests mock fetch + WASM (via SDK __setWasmForTesting). Two-mock ceiling is reasonable for a CLI testing the SDK boundary."
+    },
+    "good_practices_observed": [
+      "Real file-system writes into tmpdir (not mocked fs) — verifies actual mode 0600 via statSync",
+      "JSON parse round-trip on captured stdout (output.test.ts, prove.test.ts, whoami.test.ts) — asserts exact shape, not just 'something was printed'",
+      "fetchMock URL-shape assertions inline (recall.test.ts, sign.test.ts) — verifies request body has correct top_k / tags / correlation",
+      "Real Ed25519 signature regex check (prove.test.ts: /^[0-9a-f]{128}$/) and pubkey identity round-trip",
+      "WASM call counter via mock.__calls.sign_challenge.length — asserts side effect, not just absence of error"
+    ],
+    "anti_patterns_observed": []
+  },
+  "concerns_round_2": [
+    {
+      "id": "R2-1",
+      "severity": "high",
+      "topic": "5xx server-error coverage missing across all server-calling commands",
+      "files": ["sign.test.ts", "recall.test.ts", "verify.test.ts", "identity.test.ts"],
+      "ask": "Add at least one 'returns ServerError (exit 2) on 5xx' test per command. The spec defines errors.ts::ServerError with exitCode=2 and tech-spec calls out fault-injection toggles including '5xx-on-token-exchange'. Without these tests, a regression that swallows 5xx as UserError would not be caught.",
+      "suggested_minimal_addition": "5 tests (one per command + login token exchange 5xx). Reuse existing fetchMock pattern; switch status to 500/503 and assert ServerError instance with exitCode 2."
+    },
+    {
+      "id": "R2-2",
+      "severity": "medium",
+      "topic": "Server.prototype.listen monkey-patch is brittle (already self-flagged in decisions.md concern #5)",
+      "files": ["login.test.ts L106-L131"],
+      "ask": "Refactor login.ts to accept an injectable HTTP server factory (DI) — e.g. `runLogin({ httpFactory?: typeof http.createServer })`. Test then passes a fake factory that returns a mock server, eliminating the prototype patch. Recommended for round 2 but not blocking — the current test does work and decisions.md acknowledges the trade-off (frozen ESM exports prevent vi.spyOn on http.createServer).",
+      "alternative_if_DI_too_invasive": "Accept the patch as-is and add a defensive try/finally restore even if the test throws synchronously (current code already has finally — check this is bullet-proof under expect-rejects path)."
+    },
+    {
+      "id": "R2-3",
+      "severity": "medium",
+      "topic": "Malformed JWT coverage is thin (only alg=none)",
+      "files": ["login.test.ts"],
+      "ask": "Add 3-4 cases: (a) JWT with missing exp, (b) JWT with non-string sub, (c) JWT with alg=RS256 (spec requires HS256), (d) JWT with malformed base64 in any segment. All should produce AuthError exit 4."
+    },
+    {
+      "id": "R2-4",
+      "severity": "low",
+      "topic": "bin/mnemonic.ts 61% line coverage — auto-run guard path uncovered",
+      "files": ["bin.test.ts"],
+      "ask": "Acceptable to leave uncovered. The auto-run guard (`if (invokedDirectly) parseAsync(process.argv)`) and per-command `.action()` closures are integration-shape code; testing them requires execa subprocess invocation which spec explicitly allowed avoiding. Recommend a single execa-driven smoke test (1-2 invocations: `--version` and `init --force`) to lift bin coverage to ~85% and serve as a deployment regression guard. NOT a blocker — current 61% is justified.",
+      "decision": "stub-test-recommended-but-not-required"
+    },
+    {
+      "id": "R2-5",
+      "severity": "low",
+      "topic": "Branch coverage 68% below typical 80%",
+      "files": ["all"],
+      "ask": "Self-flagged in decisions.md as concerns #1 and #3. Hot misses are renderer (TTY-only) branches and login.ts::awaitCallback error paths (405/404/missing-code). Tech-spec line 323 only sets a CLI lines gate (≥75%), so this passes spec literally. Recommend a focused login error-callback test in round 2 that POSTs each shape (405, 404, missing-state, error_description) and observes AuthError. Lifts branches to ~78% without new infrastructure.",
+      "decision": "acceptable per spec — flag for follow-up"
+    },
+    {
+      "id": "R2-6",
+      "severity": "low",
+      "topic": "whoami --with-count path untested (decisions.md concern #4)",
+      "files": ["whoami.test.ts"],
+      "ask": "Acceptable. The TDD anchor explicitly asserts default whoami calls fetch ZERO times (Decision 14). Adding a --with-count test would be supplementary, not regression-protecting, since the path reuses recall.test.ts's tested machinery. Skip unless --with-count becomes default in a future iteration."
+    }
+  ],
+  "blocking_issues": [],
+  "non_blocking_recommendations": [
+    "Round 2: add 5xx tests (R2-1) — high impact, low effort",
+    "Round 2: malformed JWT shapes (R2-3) — medium impact, very low effort",
+    "Round 2: refactor login interactive test to DI (R2-2) — defensive improvement",
+    "Backlog: branch coverage to 78% via login error-callback tests (R2-5)",
+    "Optional: single execa smoke for bin/mnemonic.ts (R2-4) to lift bin coverage"
+  ],
+  "files_reviewed": [
+    "packages/cli/test/bin.test.ts",
+    "packages/cli/test/helpers.ts",
+    "packages/cli/test/identity.test.ts",
+    "packages/cli/test/init.test.ts",
+    "packages/cli/test/login.test.ts",
+    "packages/cli/test/output.test.ts",
+    "packages/cli/test/prove.test.ts",
+    "packages/cli/test/recall.test.ts",
+    "packages/cli/test/sign.test.ts",
+    "packages/cli/test/verify.test.ts",
+    "packages/cli/test/whoami.test.ts"
+  ],
+  "metrics": {
+    "test_files": 10,
+    "test_count": 43,
+    "test_runtime_ms": "320 (vitest), 83 (bun test)",
+    "lines_coverage_pct": 77.63,
+    "branches_coverage_pct": 68.14,
+    "functions_coverage_pct": 78.46,
+    "per_module_lines": {
+      "init.ts": 96,
+      "verify.ts": 97,
+      "recall.ts": 94,
+      "output.ts": 89,
+      "identity.ts": 81,
+      "errors.ts": 80,
+      "config.ts": 79,
+      "sign.ts": 78,
+      "whoami.ts": 77,
+      "login.ts": 68,
+      "bin/mnemonic.ts": 61
+    }
+  },
+  "approve_to_merge_wave": true,
+  "round_2_required": false,
+  "round_2_recommended": true
+}

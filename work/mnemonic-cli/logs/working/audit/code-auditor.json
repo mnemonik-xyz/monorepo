@@ -1,0 +1,91 @@
+{
+  "auditor": "code-auditor",
+  "status": "issues_found",
+  "summary": "T10 Code Audit (retry). Read all SDK + CLI source, T6 server diffs, mock server, IdentityPanel, golden-fixtures harness, and node-test.yml. Code is well-structured (clear module boundaries, idiomatic TS/Rust, comprehensive JSDoc, redaction discipline, and test isolation). Decisions 1–14 are visibly implemented. Two issues are material: (1) CRITICAL — CLI/SDK `DEFAULT_BASE_URL` hostname is `mc.mnemonik.xyz` while the production server canonicalizes itself as `mcp.mnemonik.xyz` (`SERVER_ORIGIN` const, webapp default, OAuth metadata, CSP) — every CLI command will hit a non-existent host out-of-the-box, and the OAuth allowlist regex won't match the redirect_uri the CLI advertises against issuer metadata; the user-spec/tech-spec carry the same typo and the completeness-validator already flagged it. (2) MAJOR — mock-server.ts returns `{ ticket }` from `/api/cli-bootstrap/issue`, but the real server returns `{ ticket_id }`; the integration test asserts the wrong shape, so a regression that broke the contract end-to-end (e.g. webapp consuming the wrong field) could land green. Several minor maintainability nits below.",
+  "findings": [
+    {
+      "severity": "critical",
+      "category": "decision-fidelity / cross-file consistency",
+      "file": "packages/cli/src/commands/{login,sign,recall,verify,whoami,identity}.ts:DEFAULT_BASE_URL + packages/sdk/src/types.ts:38 + packages/sdk/README.md + packages/cli/README.md + packages/cli/SMOKE.md",
+      "issue": "Default base URL is hard-coded to `https://mc.mnemonik.xyz` (no 'p') in 6 CLI command modules and SDK doc strings/READMEs. The production server hostname — set as `SERVER_ORIGIN` in mcp/src/oauth.rs:62 and used everywhere on the server side, in the webapp (`webapp/src/components/IdentityPanel.tsx:19`, `webapp/src/pages/{Sign,Consent}.tsx`, `webapp/src/components/InstallButtons.tsx`), in `smithery.yaml`, in CSP `connect-src`, and in OAuth `/.well-known` metadata — is `https://mcp.mnemonik.xyz` (with 'p'). With the current default, `mnemonic init` is fine (offline) but `mnemonic login`, `mnemonic sign`, `mnemonic recall`, `mnemonic verify`, `mnemonic identity import --ticket` and the OAuth loopback flow will all DNS-fail unless the user explicitly passes `--base-url` or sets `MNEMONIC_BASE_URL`. The completeness-validator review (work/mnemonic-cli/logs/techspec/completeness-validator-review.json:85) already raised this exact concern during tech-spec review and asked it to be confirmed; it was not. The user-spec/tech-spec inherit the same typo.",
+      "recommendation": "Decide canonical hostname (`mcp.mnemonik.xyz`, matching SERVER_ORIGIN and every existing client). Replace `DEFAULT_BASE_URL` in all 6 CLI command modules with a single shared constant in `packages/cli/src/config.ts` (or `packages/sdk/src/constants.ts`) so future drift is a one-line change. Update `packages/sdk/README.md`, `packages/cli/README.md`, `packages/cli/SMOKE.md`, JSDoc in `packages/sdk/src/types.ts`, plus the user-spec/tech-spec. Pre-deploy QA (T13) needs to add a smoke that resolves the host."
+    },
+    {
+      "severity": "major",
+      "category": "test infrastructure / cross-file consistency",
+      "file": "packages/sdk/test/mock-server.ts:357 + packages/sdk/test/integration/bootstrap-ticket.test.ts:36",
+      "issue": "Mock server returns `{ ticket }` from `POST /api/cli-bootstrap/issue` (mock-server.ts:357: `JSON.stringify({ ticket })`). The production server in `mcp/src/api.rs::BootstrapIssueResponse` (line 474) returns `{ ticket_id }`. The webapp's IdentityPanel.tsx:254 reads `body.ticket_id`. The bootstrap integration test (bootstrap-ticket.test.ts:36) asserts the mock shape (`const { ticket } = await issueRes.json()`), so the production contract is silently divergent from the only end-to-end mock. A regression where the server renamed `ticket_id` (or the webapp started reading `ticket`) would not be caught by the test suite. The CLI itself never calls `/issue` so the runtime impact is limited to the webapp button — but Decision 7 explicitly ties the two together and Task 8 mock-server is supposed to reflect the production wire shape.",
+      "recommendation": "Change mock-server.ts:357 to return `{ ticket_id: ticket }` and update the integration test to read `body.ticket_id`. While there, also align `/redeem` shape: the server returns `{secret, pubkey_base58}` — mock returns whatever was issued, which works because the test stuffs `{secret, pubkey_base58}` directly via `issueTicketSync`, but a `withFault('malformed-keypair-payload')` would round it out."
+    },
+    {
+      "severity": "minor",
+      "category": "maintainability",
+      "file": "packages/cli/src/output.ts:96-103",
+      "issue": "`colors` map (green/red/yellow/cyan/dim/bold) and `paint` are exported but never imported anywhere in `packages/cli/src/`. Every command's `format()` call uses the second `humanRender(_d, _color)` parameter and ignores `_color` (signaled by the leading underscore). End-to-end this means `--no-color` only affects the `warn()` path (one call site) — TTY default + `--no-color` are functionally indistinguishable in normal command output, contradicting Decision 10's promise that `--no-color` is observable. T5 round-2 fixes acknowledged this as deferred (decisions.md `O1`).",
+      "recommendation": "Either remove `colors` + `paint` (YAGNI, since no command uses them) or wire them into at least one renderer (e.g. `verify.ts` could paint `verified`/`tampered`/`not_found` with `colors.green/red/yellow`). Pick one path so the export surface matches what the CLI actually does."
+    },
+    {
+      "severity": "minor",
+      "category": "maintainability / DRY",
+      "file": "packages/cli/src/commands/{login,sign,recall,verify,whoami,identity}.ts (DEFAULT_BASE_URL constant) + packages/cli/src/{config.ts, errors.ts} + packages/sdk/src/errors.ts",
+      "issue": "Several constants and helpers are duplicated. (1) `DEFAULT_BASE_URL` is declared verbatim in 6 command files (compounding the critical hostname issue above). (2) `JWT_RE` and `HEX_SECRET_RE` are duplicated between `packages/sdk/src/errors.ts:24-27` and `packages/cli/src/errors.ts:22-24`. (3) `describeError()` (the `e instanceof Error ? e.message : ...` helper) is duplicated 4 times: `client.ts:518`, `cose.ts:69`, `keypair.ts:168`, `signer.ts:89`. (4) `bytesToBase64` (chunked btoa) appears in `client.ts:525` and `oauth.ts:121` (the latter as `bytesToBase64Url` with one extra replacement step) and `webapp/src/pages/Sign.tsx`. (5) `is_loopback_callback` regex logic in `mcp/src/oauth.rs:585` is hand-rolled in Rust and the equivalent path is constructed in `packages/cli/src/commands/login.ts:88` — mismatch is theoretically possible if one side ever evolves.",
+      "recommendation": "Internal `packages/sdk/src/internal/encoding.ts` for `bytesToBase64` / `describeError` (still tree-shakeable; not exported from `index.ts`). For CLI, keep the SDK redaction helper imported (already exported as `redactJWT` from SDK) and drop the CLI-side duplicate, OR document the intent that the CLI runs an extra defense-in-depth pass and add a comment. Phase-1 follow-up — not blocking."
+    },
+    {
+      "severity": "minor",
+      "category": "idiomatic TS / control flow",
+      "file": "packages/cli/src/commands/verify.ts:46-69",
+      "issue": "`format()` is called BEFORE the terminal-status `throw new IntegrityError(...)`. Under `--quiet` non-`--json` mode, `format()` writes nothing to stdout AND then throws — fine. But under `--json` mode the JSON payload is written, then a typed error is thrown, then `handleError` writes a second non-JSON line to stderr. Mixing JSON to stdout with a free-form message to stderr violates the contract that `--json` consumers can pipe stdout to `jq` and ignore stderr; here, stderr matters because it carries the exit code semantics. Not a bug in any test but surprising for downstream agents.",
+      "recommendation": "When `opts.json` is set on a tampered/not_found verify, include the failure status in the JSON payload (e.g. `{status: 'tampered', exit_code: 3}`) and don't `throw` after `format()` — instead `process.exit(3)` directly. Or document in JSDoc that JSON-mode `verify` always emits one line to stdout PLUS an `IntegrityError:` line on stderr."
+    },
+    {
+      "severity": "minor",
+      "category": "react correctness",
+      "file": "webapp/src/components/IdentityPanel.tsx:321-328",
+      "issue": "Auto-expire `useEffect` depends on `[cliState, ticketRemainingMs]`. The effect calls `setCliState({kind: 'error', ...})` whenever `kind === 'issued' && ticketRemainingMs === 0`. When `ticketRemainingMs` reaches 0, the state flips to `error`, which immediately re-runs the effect with the new `cliState`. The guard prevents an infinite loop because `kind !== 'issued'` after the flip — but the dependency on the full `cliState` object plus the call to `setCliState` inside an effect that also reads `cliState` is brittle. A future addition that sets a non-error state inside the effect could loop.",
+      "recommendation": "Replace the `cliState` dep with `cliState.kind` (referentially stable across re-renders for the same value). Move the auto-expire side-effect into the countdown interval that already runs in the other useEffect — when `Date.now() >= expiresAtMs`, call setCliState there and clearInterval, eliminating one effect entirely."
+    },
+    {
+      "severity": "minor",
+      "category": "logging / hygiene",
+      "file": "packages/cli/src/errors.ts:118 + packages/sdk/src/errors.ts:60-65",
+      "issue": "`MnemonicError.cause` is stored unredacted — Decision 10 documents this as developer-facing. CLI's `handleError` only redacts `err.stack ?? err.message` for unknown errors; for typed `CliError` it prints `err.name: err.message` (already redacted) but does NOT walk the cause chain. If a future code path does `console.error(err.cause)` or `console.error(err)` (which JS prints with the cause chain by default in Node 18+), an unredacted JWT could leak. The current call sites are clean, but the invariant is fragile — one `console.log(err)` away from a regression.",
+      "recommendation": "Either (a) redact `cause` too at the SDK boundary (lose some debug info but match the strict reading of Decision 10), or (b) add a comment in handleError that `console.log(err)` is forbidden and `redactSecrets(util.inspect(err))` must be used. Tests already assert no JWT-shape strings reach stderr; add one that prints `JSON.stringify(err)` for a wrapped SDK error and asserts the same."
+    },
+    {
+      "severity": "minor",
+      "category": "rust idioms / dead code",
+      "file": "mcp/src/api.rs:328-338 (BootstrapInsertError::LruExhausted) + mcp/src/api.rs:286-291 (BootstrapTicket.ticket_id #[allow(dead_code)])",
+      "issue": "Two structurally-dead surfaces are documented but never reachable: `BootstrapInsertError::LruExhausted` (the LRU always evicts on push, so the variant is unused — tagged `#[allow(dead_code)]`) and `BootstrapTicket.ticket_id` (the LRU key already holds the same UUID). The handler's `=> 503` branch (api.rs:516) is therefore unreachable. T6 round-2 deferred this. Keeping unreachable variants tagged with `#[allow(dead_code)]` is correct in the short term, but the comment explaining WHY they remain only lives in api.rs:332-338. A future refactor could flip the LruCache implementation and accidentally turn a non-error path into a 503 without any test coverage.",
+      "recommendation": "Either (a) drop both fields and the 503 branch — the `LruCache::push` API is public so the assumption is stable, and `Uuid` LRU keys are universally accessible — or (b) write a test that ASSERTS the LRU evicts rather than rejects when at capacity. The latter is the smaller change and pins the contract."
+    },
+    {
+      "severity": "minor",
+      "category": "error handling coverage",
+      "file": "packages/cli/src/commands/identity.ts:159-164",
+      "issue": "`fetchTicket` calls `fromSdkError(e)` for malformed JSON from `/api/cli-bootstrap/redeem/:ticket`. But `fromSdkError` only maps SDK error classes — a plain `SyntaxError` from `res.json()` falls through to `new UserError(e.message, e)` (exit code 1) when it should arguably be a `ServerError` (exit 2 — server returned bad data, not the user's fault). Compare with `client.ts::callTool` which correctly raises `ServerError(\"...malformed JSON response\", ...)`.",
+      "recommendation": "Replace `fromSdkError(e)` with `throw new ServerError('ticket redemption returned non-JSON body', e)` at identity.ts:162. Adds one test."
+    },
+    {
+      "severity": "minor",
+      "category": "type safety",
+      "file": "packages/sdk/src/client.ts:294-298 + 244-247",
+      "issue": "The `recall` response normalisation accepts both `raw.hits` and `raw.results` (line 294). This 'be liberal in what you accept' creates a silent contract drift: the server can rename the field with no SDK-side test failing. `recall` and `signMemory` also use `await callbackRes.json().catch(() => ({}))` (line 244), which silently swallows JSON parse failures and returns an empty record — meaning a malformed sign-callback response degrades to `IntegrityError(\"sign-callback did not return attestation_id\")` instead of the more descriptive `ServerError(\"malformed JSON\")`.",
+      "recommendation": "(a) Drop the `raw.results` fallback in `recall` (or document it as a deprecation alias with a comment). (b) Replace the `.catch(() => ({}))` in signMemory with the same try/catch pattern as `callTool` so the user sees `ServerError: malformed sign-callback JSON` instead of `IntegrityError: missing attestation_id`."
+    },
+    {
+      "severity": "minor",
+      "category": "platform compatibility",
+      "file": "packages/cli/src/commands/prove.ts:11-12",
+      "issue": "`prove.ts` imports `randomBytes` from `node:crypto`. CLI is Node-only by design, so this is fine. However the SDK's `oauth.ts:138` already uses `crypto.getRandomValues` (Web API, pure ESM). For internal consistency — and to make the CLI command work unmodified if someone ever ports `runProve` into a non-Node host — the same Web API would suffice (`crypto.getRandomValues(new Uint8Array(32))`). Two random-byte primitives in one CLI repo is mild noise.",
+      "recommendation": "Replace `randomBytes(32)` with `crypto.getRandomValues(new Uint8Array(32))` (the global crypto is available in Node 19+, which `engines.node >= 20` already pins). Drops the `node:crypto` import. Optional polish."
+    },
+    {
+      "severity": "minor",
+      "category": "test scope / decision fidelity",
+      "file": "packages/sdk/test/cose.golden.test.ts (referenced by Task 4 decisions, not re-read here) + .github/workflows/node-test.yml:56-71",
+      "issue": "The lockstep gate uses `git diff --exit-code` against the committed `golden-cose.{json,sha256}`. This works as long as `actions/checkout@v4` retains its default fetch depth — but if any future job opts into `fetch-depth: 1` or shallow checkouts that strip the working-tree files, `git diff` could pass spuriously. The decisions.md note at Task 4 follow-up #4 already flagged this. Not a present bug; an architectural note worth pinning.",
+      "recommendation": "Add a sanity step before `git diff`: `test -s packages/sdk/test/fixtures/golden-cose.json || (echo 'fixture missing'; exit 1)`. One line; closes the gap."
+    }
+  ]
+}

@@ -1,0 +1,192 @@
+{
+  "task": 6,
+  "reviewer": "test-reviewer",
+  "round": 1,
+  "commit": "3e0752c",
+  "status": "needs_improvement",
+  "summary": "11 new tests added (reviewer prompt + decisions.md mention 13 — the 13-count comes from the cargo filter `oauth_ bootstrap_` which also matches 2 pre-existing oauth tests; only 11 are net-new). All 13 filtered tests pass. Pre-existing baseline failures (9 lib + 3 integration) re-verified — they pre-date T6 because production `authorize_handler` already required raw 64-byte Ed25519 sigs while legacy tests still produce ~365-byte COSE_Sign1 envelopes; T6 did not introduce them. Coverage of the new surface is solid for the in-process LRU/TTL store and the loopback-allowlist function, but two material gaps exist: (1) the production HTTP handlers `bootstrap_issue_handler` and `bootstrap_redeem_handler` are NEVER exercised by any test — the closest test (`test_bootstrap_redeem_no_auth_required`) re-implements the handler in a closure rather than routing the real production handler through the real `bearer_auth_middleware` allowlist, so a regression that removes `/api/cli-bootstrap/redeem/` from the middleware allowlist would NOT be caught; (2) the per-user 429 mapping, the 401-on-missing-JWT path for /issue, and the 503-LruExhausted path for /issue are all untested at the HTTP level. Atomic-consume test correctly verifies single-use semantics but runs on a single-threaded `#[tokio::test]` runtime so true parallel contention is not exercised. State-binding test covers the negative (mismatched redirect_uri → 400) but the positive (matching → 200) is ambiguous because the second token attempt is rejected by code-pop, not by URI equality. No `localhost`-by-name negative test (DNS-rebinding adjacent). No test pollution found — every test constructs its own `BootstrapTickets::new(...)` so there is no shared state. Pre-existing failures correctly excluded from the T6 scope.",
+  "metrics": {
+    "newTestsAdded": 11,
+    "passingFilteredTests": 13,
+    "preExistingLibFailures": 9,
+    "preExistingIntegrationFailures": 3,
+    "preExistingFailuresIntroducedByT6": 0,
+    "newProductionHandlersWithoutHandlerLevelTests": 2,
+    "testRunCommand": "cargo test -p mnemonic-mcp --lib --features local-embed -- oauth_ bootstrap_"
+  },
+  "preExistingFailuresVerified": {
+    "lib": [
+      "oauth::tests::test_authorize_valid_signature",
+      "oauth::tests::test_authorize_invalid_signature_401",
+      "oauth::tests::test_authorize_pkce_method_must_be_s256",
+      "oauth::tests::test_authorize_single_use_replay_401",
+      "oauth::tests::test_authorize_tampered_sub_401",
+      "oauth::tests::test_authorize_init_then_post_round_trip",
+      "oauth::tests::test_token_invalid_verifier_401",
+      "oauth::tests::test_token_valid_verifier_returns_jwt",
+      "mcp::transport_tests::test_chunked_response_encoding"
+    ],
+    "integration": [
+      "oauth_flow::full_authorize_token_jwt_roundtrip",
+      "pending_authz::test_pending_get_403_for_wrong_jwt_sub (assumed from decisions.md)",
+      "pending_authz::test_pending_get_requires_jwt (assumed from decisions.md)"
+    ],
+    "rootCause": "production code expects raw 64-byte Ed25519 signature; legacy tests sign via `sign_cose` producing 364-380 byte COSE_Sign1 envelopes. The relevant code path (`signature must be 64 bytes, got N`) was already in baseline `mcp/src/oauth.rs` line 601 before T6 — confirmed via `git show 3e0752c~1:mcp/src/oauth.rs`.",
+    "introducedByT6": "no"
+  },
+  "promptCoverageMatrix": {
+    "allowlistPositiveExactMatch": "covered (test_oauth_allowed_redirect_exact_and_prefix asserts https://mnemonik.xyz/oauth/consent)",
+    "allowlistPositiveCursorPrefix": "covered (cursor://anysphere.cursor-deeplink/abc)",
+    "allowlistPositiveVscodePrefix": "covered (vscode:mcp/handle)",
+    "allowlistPositiveClaudePrefix": "covered (https://claude.ai/api/return)",
+    "allowlistPositiveLoopbackV4ForCli": "covered (test_oauth_allowed_redirect_loopback_only_for_cli)",
+    "allowlistPositiveLoopbackV6ForCli": "covered (http://[::1]:8080/callback for mnemonic-cli)",
+    "allowlistNegativeEvilCom": "covered",
+    "allowlistNegativeAnyHostInjection": "covered (127.0.0.1.evil.com:1234/callback)",
+    "allowlistNegativeZeroAddr": "covered (0.0.0.0:1234/callback)",
+    "allowlistNegativeMissingPort": "covered (http://127.0.0.1/callback)",
+    "allowlistNegativeNonNumericPort": "covered (http://127.0.0.1:abc/callback)",
+    "allowlistNegativeNoCallbackSuffix": "covered (http://127.0.0.1:1234/, /foo)",
+    "allowlistNegativeTrailingPathBeyondCallback": "covered (http://127.0.0.1:1234/callback/extra)",
+    "allowlistNegativeLocalhostByName": "MISSING — http://localhost:1234/callback never tested. RFC 8252 §7.3 explicitly warns about DNS-rebinding via 'localhost'; production code correctly rejects (the strip_prefix only matches `127.0.0.1` and `[::1]`), but no test pins this down.",
+    "loopbackGatingPerClientId": "covered (cursor/claude/vscode/evil-client/empty all rejected)",
+    "pkceStateBindingValidatesRedirectUri": "covered (test_oauth_state_binding_validates_redirect_uri_too) — but only the negative path; positive path is ambiguous because the second token attempt is rejected by code-pop, not by URI equality.",
+    "atomicConcurrentConsume": "covered functionally but on single-threaded #[tokio::test] runtime. The `consume` await on `tokio::sync::Mutex` does serialize tasks so the assertion still holds, but the spec said 'spawn 2 threads, not just sequential' — current test is two tokio tasks in a current-thread runtime, not threads. Recommend `#[tokio::test(flavor = \"multi_thread\", worker_threads = 2)]` to match intent.",
+    "perUserCap429": "PARTIAL — only the `BootstrapInsertError::PerUserCapExceeded` enum return is tested. The HTTP 429 status mapping in `bootstrap_issue_handler` is uncovered.",
+    "ttlEvictionMockClock": "covered via `force_expire` (no real sleep, fast).",
+    "lruEvictionOldest": "covered (capacity=3, insert 4 distinct users; oldest is evicted).",
+    "redeemRequiresNoAuthIntegrationTest": "FAIL — `test_bootstrap_redeem_no_auth_required` re-implements the handler in a closure rather than routing the real `api::bootstrap_redeem_handler` through `bearer_auth_middleware`. The test would still pass if a developer accidentally removed `/api/cli-bootstrap/redeem/` from the middleware allowlist."
+  },
+  "testQualityFindings": [
+    {
+      "severity": "high",
+      "category": "missing-coverage",
+      "issue": "Production HTTP handlers `api::bootstrap_issue_handler` and `api::bootstrap_redeem_handler` are never invoked by any test. The closest test (`test_bootstrap_redeem_no_auth_required`) inlines a near-copy `redeem` closure with the same body, then routes that closure under a bare `Router` with no middleware. So the test does not exercise: (a) the production handler's `serde_json::from_str::<Vec<u8>>` failure path returning 500, (b) the production handler's bytes.len() != 64 path, (c) the `Pubkey::try_from` derivation, (d) the actual route binding in `main.rs`, and most importantly (e) the `bearer_auth_middleware` allowlist that exempts `/api/cli-bootstrap/redeem/` — a regression there would silently break the 'no auth' contract without failing any test.",
+      "litmusTestFailed": true,
+      "evidence": "mcp/src/api.rs lines 703-768; the inline `async fn redeem` reimplements `bootstrap_redeem_handler` and is routed under `Router::new().route(...).with_state(store)` with no auth layer.",
+      "replacement": {
+        "approach": "Add an integration test in `mcp/tests/cli_bootstrap_auth_allowlist.rs` modeled on the existing `mcp/tests/auth_allowlist.rs`. Build the production router with `oauth::bearer_auth_middleware` layered, route `api::bootstrap_redeem_handler` and `api::bootstrap_issue_handler` from real `McpState`. Then assert: (a) GET /api/cli-bootstrap/redeem/<id> with NO Authorization → 200/404 from the handler (not 401 from middleware), (b) GET /api/cli-bootstrap/redeem/<id> with Authorization: Bearer garbage → still bypasses middleware (or uniformly proxied through), (c) POST /api/cli-bootstrap/issue with NO Authorization → 401 from middleware, (d) POST /api/cli-bootstrap/issue with Authorization: Bearer <valid-mint-test-jwt> → 200 with ticket_id, (e) POST issue 4 times for same JWT sub → 4th returns 429.",
+        "files": [
+          "mcp/tests/cli_bootstrap_auth_allowlist.rs (new)"
+        ],
+        "fixtureUsed": "test_support::{mock_state, mint_jwt} (already exists; pattern from auth_allowlist.rs)"
+      }
+    },
+    {
+      "severity": "medium",
+      "category": "concurrency-test-not-actually-concurrent",
+      "issue": "`test_bootstrap_ticket_atomic_consume` uses default `#[tokio::test]` (current_thread runtime) and `tokio::spawn`. On a single-threaded runtime the two tasks cannot run in parallel; one wins the lock and the other awaits it. The test verifies the API contract (single-use) but does NOT verify mutex behavior under genuine concurrency. Reviewer prompt explicitly flagged this: 'verify race actually exercised — test should spawn 2 threads, not just sequential'.",
+      "litmusTestFailed": false,
+      "replacement": {
+        "approach": "Annotate with `#[tokio::test(flavor = \"multi_thread\", worker_threads = 2)]` so the spawned tasks can race on real OS threads. Optionally add a barrier so both tasks attempt `consume` at the same instant (currently the second `tokio::spawn` resolves slightly later than the first by construction). Also consider a `for _ in 0..1000` loop variant to amplify the race window."
+      }
+    },
+    {
+      "severity": "medium",
+      "category": "missing-coverage",
+      "issue": "Per-user 429 HTTP mapping in `bootstrap_issue_handler` is uncovered. The unit test `test_bootstrap_ticket_per_user_cap` only asserts `BootstrapInsertError::PerUserCapExceeded` from the underlying store — the handler's mapping to `StatusCode::TOO_MANY_REQUESTS` and the JSON error body shape are never executed. A bug where the handler mapped PerUserCapExceeded to 200 or to 503 would not be caught.",
+      "replacement": {
+        "approach": "Covered by the integration test recommended above (assertion `e`). Alternatively a unit test that calls `bootstrap_issue_handler` directly with a mock `Extension(Claims{...})` and asserts response status."
+      }
+    },
+    {
+      "severity": "medium",
+      "category": "ambiguous-positive-path",
+      "issue": "`test_oauth_state_binding_validates_redirect_uri_too` tests the negative path (mismatched redirect_uri → 400) but NOT the positive equality path. The third sub-assertion (matching redirect_uri after a 400 → 401 because code already popped) verifies single-use after a failed exchange, NOT the equality semantic. A bug inverting the comparison (`==` instead of `!=`) — i.e. always rejecting — would still pass because (a) the mismatch leg sees 400, (b) the matching leg sees 401 from code-pop. The matching-redirect-uri-returns-200 path needs an independent positive assertion.",
+      "replacement": {
+        "approach": "Add a sibling test `test_oauth_state_binding_accepts_matching_redirect_uri` that issues a fresh authorize → token round-trip with `redirect_uri` matching the bound value, asserts 200 + JWT body. Or restructure the existing test to use TWO separate codes (bind redirect_uri once, exchange with matching → 200; bind again with new state, exchange with mismatched → 400)."
+      }
+    },
+    {
+      "severity": "low",
+      "category": "missing-coverage",
+      "issue": "No test for `http://localhost:<port>/callback` (loopback-by-name). Per RFC 8252 §7.3 'localhost' is NOT recommended as a redirect-URI host because of DNS rebinding (an attacker can resolve `localhost` to a non-loopback IP under attacker control, or via /etc/hosts manipulation). Production code correctly rejects (`is_loopback_callback` only strips `http://127.0.0.1:` and `http://[::1]:`), but no assertion pins this down. Reviewer prompt explicitly listed 'localhost-by-name' as a desired negative case.",
+      "replacement": {
+        "approach": "Add `assert!(!allowed_redirect(\"http://localhost:1234/callback\", \"mnemonic-cli\"));` to `test_oauth_allowed_redirect_exact_and_prefix`."
+      }
+    },
+    {
+      "severity": "low",
+      "category": "missing-coverage",
+      "issue": "`BootstrapInsertError::LruExhausted` variant is annotated `#[allow(dead_code)]` and is unreachable per the LRU semantics (push always evicts an older entry instead of failing). The handler maps this to 503. Even though the variant is documented as latent, the 503 mapping is dead code and could rot silently. If the LRU policy is ever changed to fail-fast, this branch will be untested.",
+      "replacement": {
+        "approach": "Either (a) remove the variant + 503 branch entirely until needed (simpler), or (b) construct the variant directly via a test-only fn `BootstrapTickets::__force_lru_exhausted_error()` and assert the handler emits 503. Option (a) is preferable per YAGNI."
+      }
+    },
+    {
+      "severity": "low",
+      "category": "scattered-issue",
+      "issue": "Newly added `#[allow(dead_code)]` on `mcp/src/pending.rs::PendingBundles::{get, consume}` is unrelated to T6's scope. These methods ARE called by tests in the same module (lines 481-632 use them extensively) — so the `dead_code` attribute is misleading at best. The methods are also still `pub`, so they're part of the crate API.",
+      "replacement": {
+        "approach": "Revert the `#[allow(dead_code)]` additions to pending.rs unless there's a documented `cargo clippy` warning the agent was suppressing. If there is, the suppression should be scoped (e.g. `#[cfg_attr(not(test), allow(dead_code))]`)."
+      }
+    },
+    {
+      "severity": "low",
+      "category": "test-coverage-fidelity",
+      "issue": "The redeem test's keypair is a 64-zero-byte fixture. The pubkey derived (last 32 bytes of zeros) base58-encodes to `11111111111111111111111111111111` (32 chars), and the test asserts `pubkey_base58.len() > 30`. This passes for the all-zero keypair but would also pass for any garbage; a stricter assertion would help. More importantly, real Solana keypair JSON typically holds an Ed25519 keypair where bytes[32..64] is the public key derived from bytes[0..32]; a zero seed produces a non-zero pubkey. The test fixture is internally inconsistent (secret=0 but pubkey field is also 0), so it doesn't validate that the response's pubkey actually matches what a CLI would derive from the secret.",
+      "replacement": {
+        "approach": "Generate a real `solana_sdk::signature::Keypair`, serialize via `keypair.to_bytes().to_vec()`, store as JSON, and assert the response `pubkey_base58 == kp.pubkey().to_string()`."
+      }
+    }
+  ],
+  "testPollutionAssessment": {
+    "sharedInMemoryStoreAcrossTests": "no — each test constructs its own `BootstrapTickets::new(...)` instance. No `lazy_static`, no `OnceLock`, no shared module-level state.",
+    "ttlTestUsesRealSleep": "no — uses `force_expire` to advance the stored expiry; no wall-clock dependency.",
+    "atomicityTestParallelism": "tasks run on a current-thread runtime; serialization is provided by tokio task scheduling not OS threads (see medium finding above).",
+    "cleanupRequired": "none — every test owns its store; tokio runtime tears down after each test."
+  },
+  "additionalGaps": [
+    {
+      "gap": "No test exercising the full LRU+per-user accounting eviction path: when a fresh ticket evicts an unrelated user's ticket, does the evicted user's counter actually decrement? The `dec_user` branch in `BootstrapTickets::insert` (api.rs lines 391-396) is reached but the assertion 'evicted user's counter goes down' is not made. A future bug where the eviction does not decrement would let bogus 429s appear.",
+      "severity": "low",
+      "replacement": "Add a test that fills LRU with N entries by user A, then inserts one by user B which evicts user A's oldest; assert `user_count(\"A\") == N - 1`."
+    },
+    {
+      "gap": "No test for `BootstrapIssueRequest::keypair_json` empty/whitespace 400 path (api.rs lines 488-494).",
+      "severity": "low",
+      "replacement": "Add to integration test: POST /issue with `keypair_json: \"\"` → 400; POST with `keypair_json: \"   \"` → 400."
+    },
+    {
+      "gap": "No test for `bootstrap_redeem_handler`'s 500 path when stored keypair_json fails to deserialize as `Vec<u8>` or has wrong length. These branches handle programmer error rather than user input, but coverage is still good hygiene.",
+      "severity": "low",
+      "replacement": "Use `force_insert` test helper (would need to add) to seed a malformed `keypair_json`, redeem, assert 500."
+    }
+  ],
+  "litmusChecks": [
+    {
+      "test": "test_oauth_allowed_redirect_loopback_only_for_cli",
+      "result": "passes — would catch any change to `is_loopback_callback` or removal of the `client_id == \"mnemonic-cli\"` gate."
+    },
+    {
+      "test": "test_bootstrap_ticket_atomic_consume",
+      "result": "passes — would catch a regression where `consume` returns Some twice (e.g. if `lru.pop` was changed to `lru.peek`). Single-use semantic is verified at the API level."
+    },
+    {
+      "test": "test_bootstrap_redeem_no_auth_required",
+      "result": "FAILS the litmus test for the 'no auth' contract — removing `/api/cli-bootstrap/redeem/` from the production middleware allowlist would not cause this test to fail, because the test does not include the middleware. A developer 'hardening' the middleware would silently break the CLI."
+    },
+    {
+      "test": "test_oauth_state_binding_validates_redirect_uri_too",
+      "result": "PARTIAL pass — catches the 'comparison missing' case (handler returns 200 without checking) because mismatched URI would unexpectedly succeed; but does NOT catch the 'comparison inverted' case (always rejecting) because the matching-leg assertion is masked by code-pop's 401."
+    }
+  ],
+  "taskRequired": {
+    "needed": true,
+    "reason": "One high-severity coverage gap (no integration test for the production handlers + middleware allowlist for /api/cli-bootstrap/{issue,redeem}) plus three medium-severity issues (single-threaded concurrency test, missing 429 HTTP mapping coverage, ambiguous positive-path for redirect_uri equality). Per Status Decision Criteria: high>=1 AND medium>=3 → needs_improvement. Suggested fix-up task is small (one new integration-test file + 4 small edits to existing tests).",
+    "scope": [
+      "Add `mcp/tests/cli_bootstrap_auth_allowlist.rs` modeled on `mcp/tests/auth_allowlist.rs` covering: redeem-no-auth (production handler), issue-401-without-jwt, issue-200-with-jwt, issue-429-on-4th, optional issue-400-on-empty-keypair.",
+      "Promote `test_bootstrap_ticket_atomic_consume` to `#[tokio::test(flavor = \"multi_thread\", worker_threads = 2)]`.",
+      "Add positive-path sub-assertion to `test_oauth_state_binding_validates_redirect_uri_too` (or a sibling test) verifying matching-redirect_uri returns 200.",
+      "Add `localhost:<port>/callback` negative case to `test_oauth_allowed_redirect_exact_and_prefix`.",
+      "Either remove the unreachable `BootstrapInsertError::LruExhausted` variant + 503 branch (preferred) or add a synthetic test.",
+      "Revert or scope the unrelated `#[allow(dead_code)]` additions in `mcp/src/pending.rs`."
+    ],
+    "estimatedEffort": "1-2 hours; localized changes; no production behaviour change required."
+  },
+  "verificationCommands": {
+    "filteredTests": "cargo test -p mnemonic-mcp --lib --features local-embed -- oauth_ bootstrap_",
+    "fullLib": "cargo test -p mnemonic-mcp --lib --features local-embed",
+    "integrationSuite": "cargo test -p mnemonic-mcp --tests --features local-embed,test-support --no-fail-fast"
+  }
+}
