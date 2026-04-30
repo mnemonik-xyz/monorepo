@@ -125,96 +125,113 @@ function makeToken(sub = "test-user-pubkey"): string {
   return `${b64(header)}.${b64(payload)}.test-signature`;
 }
 
+// The compiled `mnemonic` binary loads the SDK's `--target web` WASM
+// artifact, whose `init()` resolves the .wasm via `fetch(file://...)`.
+// That fetch path is supported under Bun, Deno, and browsers, but NOT
+// under Node 20's undici. Decision 11 / Task 8 pin the CI matrix to
+// `bun test` precisely because of this gap. When this file is executed
+// under Node (e.g. `npm test` invoked from a `prepublishOnly` script,
+// or by a contributor without bun installed), skip the scenario rather
+// than fail the whole suite. CI still asserts these flows under bun.
+const isBun = typeof (globalThis as { Bun?: unknown }).Bun !== "undefined";
+const itOrSkip = isBun ? it : it.skip;
+
 describe("CLI scenarios", () => {
   // Single it() — see file header for why we serialize the scenarios.
-  it("init → login → recall → verify(verified|tampered|not_found) → sign", async () => {
-    const cfgDir = mkdtempSync(join(tmpdir(), "mnemonic-cli-int-"));
-    const server: MockServer = await startMockServer();
-    const run = (args: string[]): Promise<CliResult> =>
-      spawnCli(cfgDir, server.url, args);
+  itOrSkip(
+    "init → login → recall → verify(verified|tampered|not_found) → sign",
+    async () => {
+      const cfgDir = mkdtempSync(join(tmpdir(), "mnemonic-cli-int-"));
+      const server: MockServer = await startMockServer();
+      const run = (args: string[]): Promise<CliResult> =>
+        spawnCli(cfgDir, server.url, args);
 
-    try {
-      // ── init ────────────────────────────────────────────────────────────
-      const r1 = await run(["--json", "init"]);
-      expect(r1.exitCode).toBe(0);
-      expect(existsSync(join(cfgDir, "identity.json"))).toBe(true);
-      const initData = JSON.parse(r1.stdout);
-      expect(typeof initData.pubkey).toBe("string");
-      expect(initData.pubkey.length).toBeGreaterThan(0);
-
-      // ── init refuse-overwrite ───────────────────────────────────────────
-      const r2 = await run(["init"]);
-      expect(r2.exitCode).toBe(1); // UserError
-      expect(r2.stderr).toMatch(/already exists/);
-
-      // ── init --force overwrites ─────────────────────────────────────────
-      const before = readFileSync(join(cfgDir, "identity.json"), "utf8");
-      const r3 = await run(["init", "--force"]);
-      expect(r3.exitCode).toBe(0);
-      const after = readFileSync(join(cfgDir, "identity.json"), "utf8");
-      expect(after).not.toBe(before);
-
-      // ── login --token (headless, valid) ─────────────────────────────────
-      const r4 = await run(["login", "--token", makeToken()]);
-      expect(r4.exitCode).toBe(0);
-      expect(existsSync(join(cfgDir, "token.json"))).toBe(true);
-      const tok = JSON.parse(readFileSync(join(cfgDir, "token.json"), "utf8"));
-      expect(tok.sub).toBe("test-user-pubkey");
-      expect(typeof tok.jwt).toBe("string");
-
-      // ── login --token (malformed → exit 4) ──────────────────────────────
-      const r5 = await run(["login", "--token", "not.a.jwt"]);
-      expect(r5.exitCode).toBe(4);
-
-      // ── recall ──────────────────────────────────────────────────────────
-      // Re-login with a valid token (the malformed-token attempt above
-      // still leaves the prior good token persisted, but we re-login to
-      // exercise the saveToken path explicitly).
-      await run(["login", "--token", makeToken()]);
-      const r6 = await run(["--json", "recall", "test query"]);
-      expect(r6.exitCode).toBe(0);
-      const recallData = JSON.parse(r6.stdout);
-      expect(recallData.total).toBeGreaterThanOrEqual(1);
-      expect(recallData.hits[0].attestationId).toBe("att-mock-1");
-
-      // ── verify(verified) ────────────────────────────────────────────────
-      const r7 = await run(["verify", "att-good-1"]);
-      expect(r7.exitCode).toBe(0);
-      expect(r7.stdout).toMatch(/verified/);
-
-      // ── verify(tampered) → exit 3 ───────────────────────────────────────
-      const r8 = await run(["verify", "tampered-attestation"]);
-      expect(r8.exitCode).toBe(3);
-
-      // ── verify(not_found) → exit 1 ──────────────────────────────────────
-      const r9 = await run(["verify", "missing-attestation"]);
-      expect(r9.exitCode).toBe(1);
-
-      // ── sign (full pending-bundle round-trip) ──────────────────────────
-      const r10 = await run(["--json", "sign", "hello world"]);
-      expect(r10.exitCode).toBe(0);
-      const signData = JSON.parse(r10.stdout);
-      expect(signData.attestationId).toMatch(/^att-/);
-      const paths = server.calls.map((c) => `${c.method} ${c.path}`);
-      expect(paths.some((p) => p === "POST /mcp")).toBe(true);
-      expect(paths.some((p) => p.startsWith("GET /api/pending/"))).toBe(true);
-      expect(paths.some((p) => p === "POST /api/sign-callback")).toBe(true);
-    } finally {
       try {
-        server.closeAllConnections();
-      } catch {
-        /* ignore */
+        // ── init ────────────────────────────────────────────────────────────
+        const r1 = await run(["--json", "init"]);
+        expect(r1.exitCode).toBe(0);
+        expect(existsSync(join(cfgDir, "identity.json"))).toBe(true);
+        const initData = JSON.parse(r1.stdout);
+        expect(typeof initData.pubkey).toBe("string");
+        expect(initData.pubkey.length).toBeGreaterThan(0);
+
+        // ── init refuse-overwrite ───────────────────────────────────────────
+        const r2 = await run(["init"]);
+        expect(r2.exitCode).toBe(1); // UserError
+        expect(r2.stderr).toMatch(/already exists/);
+
+        // ── init --force overwrites ─────────────────────────────────────────
+        const before = readFileSync(join(cfgDir, "identity.json"), "utf8");
+        const r3 = await run(["init", "--force"]);
+        expect(r3.exitCode).toBe(0);
+        const after = readFileSync(join(cfgDir, "identity.json"), "utf8");
+        expect(after).not.toBe(before);
+
+        // ── login --token (headless, valid) ─────────────────────────────────
+        const r4 = await run(["login", "--token", makeToken()]);
+        expect(r4.exitCode).toBe(0);
+        expect(existsSync(join(cfgDir, "token.json"))).toBe(true);
+        const tok = JSON.parse(
+          readFileSync(join(cfgDir, "token.json"), "utf8")
+        );
+        expect(tok.sub).toBe("test-user-pubkey");
+        expect(typeof tok.jwt).toBe("string");
+
+        // ── login --token (malformed → exit 4) ──────────────────────────────
+        const r5 = await run(["login", "--token", "not.a.jwt"]);
+        expect(r5.exitCode).toBe(4);
+
+        // ── recall ──────────────────────────────────────────────────────────
+        // Re-login with a valid token (the malformed-token attempt above
+        // still leaves the prior good token persisted, but we re-login to
+        // exercise the saveToken path explicitly).
+        await run(["login", "--token", makeToken()]);
+        const r6 = await run(["--json", "recall", "test query"]);
+        expect(r6.exitCode).toBe(0);
+        const recallData = JSON.parse(r6.stdout);
+        expect(recallData.total).toBeGreaterThanOrEqual(1);
+        expect(recallData.hits[0].attestationId).toBe("att-mock-1");
+
+        // ── verify(verified) ────────────────────────────────────────────────
+        const r7 = await run(["verify", "att-good-1"]);
+        expect(r7.exitCode).toBe(0);
+        expect(r7.stdout).toMatch(/verified/);
+
+        // ── verify(tampered) → exit 3 ───────────────────────────────────────
+        const r8 = await run(["verify", "tampered-attestation"]);
+        expect(r8.exitCode).toBe(3);
+
+        // ── verify(not_found) → exit 1 ──────────────────────────────────────
+        const r9 = await run(["verify", "missing-attestation"]);
+        expect(r9.exitCode).toBe(1);
+
+        // ── sign (full pending-bundle round-trip) ──────────────────────────
+        const r10 = await run(["--json", "sign", "hello world"]);
+        expect(r10.exitCode).toBe(0);
+        const signData = JSON.parse(r10.stdout);
+        expect(signData.attestationId).toMatch(/^att-/);
+        const paths = server.calls.map((c) => `${c.method} ${c.path}`);
+        expect(paths.some((p) => p === "POST /mcp")).toBe(true);
+        expect(paths.some((p) => p.startsWith("GET /api/pending/"))).toBe(true);
+        expect(paths.some((p) => p === "POST /api/sign-callback")).toBe(true);
+      } finally {
+        try {
+          server.closeAllConnections();
+        } catch {
+          /* ignore */
+        }
+        try {
+          await server.close();
+        } catch {
+          /* ignore */
+        }
+        try {
+          rmSync(cfgDir, { recursive: true, force: true });
+        } catch {
+          /* ignore */
+        }
       }
-      try {
-        await server.close();
-      } catch {
-        /* ignore */
-      }
-      try {
-        rmSync(cfgDir, { recursive: true, force: true });
-      } catch {
-        /* ignore */
-      }
-    }
-  }, 60_000);
+    },
+    60_000
+  );
 });

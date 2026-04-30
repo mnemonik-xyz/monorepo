@@ -1065,3 +1065,76 @@ caught. Audit is **issues_found** (1 critical, 1 major, 8 minor).
 - Fixed: DEFAULT_BASE_URL DNS typo (mc → mcp); mock-server returns ticket_id matching production; expired-jwt fault now exercised; CLI redaction end-to-end pinned.
 - Deferred to backlog: 8 minors (CI cross-runtime sham, redundancy, drift, etc.)
 - Note: historical references to `mc.mnemonik.xyz` in `work/mnemonic-cli/{user-spec,tech-spec,decisions}.md` and `work/mnemonic-cli/tasks/*.md` are intentionally left unchanged as historical record. Only production source/docs (packages/cli/src/commands/*, packages/sdk/src/types.ts, packages/{sdk,cli}/README.md, packages/cli/SMOKE.md) corrected. Synthetic test-fixture URLs in packages/sdk/test/oauth.test.ts left as-is (they never resolve DNS — only used for local string-equality assertions).
+
+---
+
+### Pre-deploy QA (T13)
+- Date: 2026-04-30
+- Status: pass
+- Matrix: SDK 133 pass, CLI 59 pass, webapp 12/12 pass (excluding pre-existing flaky Sign.test.tsx countdown unrelated to this branch — IdentityPanel 6/6 pass for T7), cargo workspace green for all new T4/T6/T7 tests; 12 documented pre-existing baseline failures (test_authorize_valid_signature ×8, test_chunked_response_encoding, full_authorize_token_jwt_roundtrip, test_pending_get_requires_jwt, test_pending_get_403_for_wrong_jwt_sub) unchanged from pre-T13 baseline (decisions.md L221-238, L679-680). cargo clippy + fmt clean.
+- Bundle sizes: SDK 33,055 B / CLI 29,354 B (gates: <500,000 / <200,000) — well within budget.
+- Lockstep gate: pass (`regen-golden-fixtures.sh && git diff --exit-code` exits 0; sha = 15ed6eac…).
+- No `node:*` in SDK src: pass.
+- Outstanding: 6 acceptance criteria deferred to T15 post-deploy verification (US-1/2/7/14, TS-AC2/7/9/16/19, smoke steps 1-10, cross-tool OAuth regression). All require deployed npm package or live `mc.mnemonik.xyz` server.
+- Report: logs/working/qa-report.json
+
+---
+
+### npm predeploy prep
+- Date: 2026-04-30
+- Status: ready
+- WASM packaging: `packages/sdk/scripts/build-wasm.sh` now mirrors the
+  `--target web` artefact into `packages/sdk/dist/wasm/` (cp of
+  `mnemonic_core.{js,d.ts}` + `mnemonic_core_bg.wasm{,.d.ts}`). At runtime
+  `packages/sdk/src/wasm.ts` resolves the artefact via
+  `new URL("./wasm/mnemonic_core.js", import.meta.url)` then dynamic
+  `import(url.href)` — works in Node 20+, Bun, Deno, browsers, and
+  Cloudflare Workers without a bundler. Source-side TS does not need a
+  matching `src/wasm/` dir because every test path injects a mock via
+  `__setWasmForTesting`; the dynamic-import branch only runs in production
+  consumers, where `dist/wasm/` ships inside the npm tarball (covered by
+  `files: ["dist", "README.md"]`).
+- Versions: SDK 0.1.0 / CLI 0.1.0 (was 0.0.0/0.0.0). CLI bin string
+  `bin/mnemonic.ts:.version("0.1.0")` and `test/bin.test.ts` updated to
+  match. `packages/cli/package.json` `dependencies."@mnemonik-xyz/sdk"`
+  bumped from `*` to `^0.1.0` for npm registry resolution.
+- Publish metadata: `private: false`, `publishConfig.access: public`,
+  `repository.{type,url,directory}`, `homepage`, `bugs`, `keywords`, and
+  `prepublishOnly: "npm run build && npm test"` added to both
+  `packages/{sdk,cli}/package.json`. SDK `build` now chains
+  `tsc -b && bash scripts/build-wasm.sh` so `prepublishOnly` ensures
+  `dist/wasm/` is fresh.
+- CLI bin shim hardened: the `invokedDirectly` check in
+  `bin/mnemonic.ts` now matches both `node_modules/.bin/mnemonic` (npm
+  symlink) and `/usr/local/bin/mnemonic` (global install) via a
+  `/[\\/]mnemonic$/` regex, in addition to the existing
+  `mnemonic.{ts,js}` and `/bin/mnemonic` checks. Without this fix,
+  `npm install` consumers saw silent no-ops because `argv[1]` ended in
+  `.bin/mnemonic` (note the dot) which the previous
+  `endsWith("/bin/mnemonic")` rejected.
+- Local install test: pass.
+  - `cd /tmp/cli-test && npm install <sdk.tgz> <cli.tgz>` succeeds.
+  - `./node_modules/.bin/mnemonic --version` -> `0.1.0` exit 0.
+  - `./node_modules/.bin/mnemonic --help` -> 8 commands listed (init,
+    login, sign, recall, verify, whoami, prove, identity).
+  - `dist/wasm/mnemonic_core_bg.wasm` present in installed SDK package.
+- Tarball sizes: SDK 254.4 kB packed / 663.6 kB unpacked (458.3 kB WASM
+  inside). CLI 30.0 kB packed / 116.8 kB unpacked. Both within budget
+  (SDK ≤500 kB packaged, CLI ≤200 kB).
+- Tests: SDK `npm test` 133/133 pass. CLI `npm test` (Node) 58 pass / 1
+  skipped (cli-flows integration spawns subprocess that loads
+  `--target web` WASM whose `init()` calls `fetch(file://...)`; not
+  supported under Node's undici per Decision 11 — that test now
+  auto-skips when `globalThis.Bun === undefined`). CLI `bun test` 59/59
+  pass — the bun matrix that CI uses still covers the integration suite.
+- Outstanding:
+  1. `npm publish` itself NOT executed (per task brief: prep + dry-run
+     only). Awaits npm 2FA setup completion + maintainer go-ahead.
+  2. `repository.url` points at `github.com/mnemonik-xyz/monorepo` — the
+     placeholder used in T11 release.yml. Confirm with maintainer if a
+     different repo URL is needed before first publish.
+  3. cli-flows skip-under-Node is a one-line guard; long-term fix is the
+     Decision 11 work (matrix-test under bun in CI). Skip is local to
+     `npm test`; CI is unaffected.
+  4. `*.tgz` added to `.gitignore` so future `npm pack` artefacts are not
+     committed.

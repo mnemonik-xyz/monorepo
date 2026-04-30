@@ -41,3 +41,17 @@ wasm-pack build core --target web --features wasm
 # and the path is unambiguous from the SDK side.
 mv core/pkg core/pkg-web
 echo "✓ SDK wasm artifact at $REPO_ROOT/core/pkg-web/"
+
+# Mirror the wasm-pack output into the SDK's published `dist/wasm/` so the
+# artifact ships inside the npm tarball. Consumers resolve it at runtime via
+# `new URL("./wasm/mnemonic_core.js", import.meta.url)` from the compiled
+# `dist/wasm.js` — see packages/sdk/src/wasm.ts.
+SDK_DIST_WASM="$REPO_ROOT/packages/sdk/dist/wasm"
+mkdir -p "$SDK_DIST_WASM"
+cp \
+  "$REPO_ROOT/core/pkg-web/mnemonic_core.js" \
+  "$REPO_ROOT/core/pkg-web/mnemonic_core_bg.wasm" \
+  "$REPO_ROOT/core/pkg-web/mnemonic_core.d.ts" \
+  "$REPO_ROOT/core/pkg-web/mnemonic_core_bg.wasm.d.ts" \
+  "$SDK_DIST_WASM/"
+echo "✓ SDK wasm artifact mirrored to $SDK_DIST_WASM/"

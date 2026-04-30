@@ -42,7 +42,7 @@ export function buildProgram(): Command {
   program
     .name("mnemonic")
     .description("Mnemonic Protocol CLI — verifiable persistent memory")
-    .version("0.0.0")
+    .version("0.1.0")
     .option("--json", "machine-readable JSON output")
     .option("--quiet", "suppress non-essential output")
     .option("--no-color", "disable ANSI color");
@@ -207,15 +207,26 @@ export async function main(argv: string[]): Promise<void> {
 }
 
 // Only run when invoked directly (so test files can `import { buildProgram }`).
+//
+// Invocation paths we must recognize:
+//   - dev/source: `bun run bin/mnemonic.ts` -> argv[1] ends with `/mnemonic.ts`
+//   - compiled local: `node dist/bin/mnemonic.js` -> ends with `/mnemonic.js`
+//   - npm-installed: `node_modules/.bin/mnemonic` (a symlink npm creates from
+//     the `bin` field) -> argv[1] ends with `/.bin/mnemonic` or with no
+//     extension at all on Windows shim variants.
+//   - global install: `/usr/local/bin/mnemonic` -> ends with `/bin/mnemonic`
+const argv1 = process.argv[1] ?? "";
 const invokedDirectly =
   typeof process !== "undefined" &&
   Array.isArray(process.argv) &&
-  process.argv[1] !== undefined &&
-  (process.argv[1].endsWith("/mnemonic.ts") ||
-    process.argv[1].endsWith("/mnemonic.js") ||
-    process.argv[1].endsWith("\\mnemonic.ts") ||
-    process.argv[1].endsWith("\\mnemonic.js") ||
-    process.argv[1].endsWith("/bin/mnemonic"));
+  argv1.length > 0 &&
+  (argv1.endsWith("/mnemonic.ts") ||
+    argv1.endsWith("/mnemonic.js") ||
+    argv1.endsWith("\\mnemonic.ts") ||
+    argv1.endsWith("\\mnemonic.js") ||
+    // Matches `/usr/local/bin/mnemonic`, `node_modules/.bin/mnemonic`, and
+    // any other directory whose basename is exactly `mnemonic`.
+    /[\\/]mnemonic$/.test(argv1));
 
 if (invokedDirectly) {
   // Top-level await — without this, Bun's runtime can exit before the

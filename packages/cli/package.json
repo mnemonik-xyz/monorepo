@@ -1,10 +1,10 @@
 {
   "name": "@mnemonik-xyz/cli",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "Command-line interface for the Mnemonic Protocol. Thin wrapper around @mnemonik-xyz/sdk that adds Node-only persistence (~/.mnemonic/), interactive OAuth loopback, and TTY-aware output formatting.",
   "license": "Apache-2.0",
-  "//": "private: true while the workspace is pre-publish; T14 will flip to false at npm publish time",
-  "private": true,
+  "//": "private: false — npm publish-ready (T14). Scoped package, public access set explicitly.",
+  "private": false,
   "type": "module",
   "main": "./dist/src/index.js",
   "types": "./dist/src/index.d.ts",
@@ -18,13 +18,33 @@
   "engines": {
     "node": ">=20"
   },
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mnemonik-xyz/monorepo.git",
+    "directory": "packages/cli"
+  },
+  "homepage": "https://github.com/mnemonik-xyz/monorepo#readme",
+  "bugs": "https://github.com/mnemonik-xyz/monorepo/issues",
+  "keywords": [
+    "mnemonic",
+    "mcp",
+    "ai",
+    "memory",
+    "ed25519",
+    "cose",
+    "cli"
+  ],
   "scripts": {
     "build": "tsc -b",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "prepublishOnly": "npm run build && npm test"
   },
   "dependencies": {
-    "@mnemonik-xyz/sdk": "*",
+    "@mnemonik-xyz/sdk": "^0.1.0",
     "commander": "^14.0.3",
     "kleur": "^4.1.5",
     "open": "^11.0.0"
