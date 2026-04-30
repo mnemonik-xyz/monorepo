@@ -36,13 +36,125 @@ Effort to flip: **~½ dev-day** (config + smoke test).
 
 ## Per-attestation marginal cost
 
-| Component | Cost | Notes |
-|---|---|---|
-| Solana SPL Memo tx fee | ~5,000 lamports ≈ **$0.001** | Fixed minimum fee. Anchors blake3(payload) + arweave_tx_id on-chain. |
-| Irys upload (~1KB COSE-signed CBOR) | **$0.001–0.003** | Variable with payload size. Bigger embeddings or larger content scale linearly. |
-| **Total per `sign_memory`** | **~$0.002–0.004** | |
+| Component | Cost | Bears | Notes |
+|---|---|---|---|
+| Solana SPL Memo tx fee | ~5,000 lamports ≈ **$0.001** | Operator (sender keypair) | Fixed minimum fee. Anchors blake3(payload) + arweave_tx_id on-chain. |
+| Irys upload (~1KB COSE-signed CBOR) | **$0.001–0.003** | Operator (Irys credit) | Variable with payload size. Bigger embeddings or larger content scale linearly. |
+| **Turnkey user-sig** (Phase 1.x onwards) | **~$0.001** | TBD — see pricing model | Per signing op. User-side custody adds ~$0.001 per `sign_memory` + per OAuth login (1h TTL). |
+| Server compute (embed + DB) | ~$0.0001 amortized | Operator (VPS fixed cost) | Constant regardless of attestation rate at the current scale. |
+| **Total per `sign_memory`** | **$0.002–0.004 (LocalSigner)** | | |
+| **Total per `sign_memory`** | **$0.003–0.005 (Turnkey)** | | |
 
 `recall` and `verify` stay free — they read SQLite locally + optionally re-fetch from Arweave (free GET) and Solana RPC (free reads).
+
+Plus per-OAuth-login (every 1h JWT TTL): 1× challenge sig. With `LocalSigner` it's free (WASM in-browser); with Turnkey it's $0.001 per login.
+
+---
+
+## Cost projections at scale
+
+Assumes Turnkey adoption rate of 50% (LocalSigner free, Turnkey opt-in for custody). Avg signs/user/month grows with engagement.
+
+| Monthly active users | Avg signs/user | Total signs | Operator burn (free for all) | Operator burn (free LocalSigner + paid Turnkey at 50% adoption pass-through) |
+|---|---|---|---|---|
+| 100 (early) | 30 | 3,000 | ~$15/mo | ~$8/mo |
+| 1,000 (beta) | 50 | 50,000 | ~$250/mo | ~$125/mo |
+| 10,000 (launch) | 80 | 800,000 | **~$4,000/mo** | ~$2,000/mo (with 50% paying users) |
+| 100,000 (scale) | 100 | 10,000,000 | **~$50,000/mo** | ~$25,000/mo |
+
+**At 10K users, "free for everyone" = $4K/mo operator burn.** Unsustainable past beta. Pricing must kick in before then.
+
+---
+
+## Pricing model options
+
+| Option | UX surface | User-side predictability | Operator risk | Implementation cost |
+|---|---|---|---|---|
+| **A. Per-call USDC top-up** | $0.01/sign visible per call | Low (cognitive friction every action) | None — pay-as-you-go | Phase 1.5 `PAYMENT_MODE=balance` (already wired in `mcp/src/payment.rs`) |
+| **B. Subscription** ($5/mo for 500 signs) | "I subscribed, just works" | High | Medium (over-usage by power users absorbs margin) | Stripe + usage-tracking middleware (~3 days) |
+| **C. Free tier + paid upgrade** (50 free/mo, then $5/mo) | "Try free, pay when needed" | Medium | Medium | Both A + B + tier-tracking (~5 days) |
+| **D. Self-sovereign** (user pays Turnkey directly, Mnemonic charges only compute) | Cleaner separation | Variable per user | Low (no usage cost on operator) | Webapp UX to walk user through Turnkey signup + own Sub-Org (~4 days) |
+| **E. LocalSigner free + Turnkey opt-in metered** | Default = free, custody-want users pay extra | High | Low | Phase 1.x ships LocalSigner+Turnkey side-by-side; Turnkey signs gated through metered endpoint |
+| **F. Operator absorbs everything** | "It's free!" | High | **Catastrophic at scale** | Trivial (do nothing) — only viable in beta/hackathon |
+
+---
+
+## Recommended pricing model (locked candidate, 2026-04-30)
+
+**Cleaner split: free tier = SQL-only "try it" mode, paid tier = real protocol value (anchor + permanence + recovery).** Aligns with existing `STORAGE_MODE` infrastructure — same code path as today's `local` mode, just per-user instead of global.
+
+```
+Free tier — "Try it"  ($0/month)
+  - LocalSigner (browser localStorage / CLI ~/.mnemonic/identity.json)
+  - sign_memory persists to mcp-server's SQLite ONLY
+  - synthetic local: tx IDs (no Solana memo, no Arweave upload)
+  - recall works (semantic search over user's own attestations)
+  - verify returns not_found (no on-chain anchor to validate)
+  - NOT portable across MCP servers
+  - NO recovery — if operator's DB dies or evicts, attestations are gone
+  - Up to 1000 signs/month (high cap because zero marginal cost)
+  - Rate limit: 10/min, 500/day
+
+Paid tier — "Verifiable"  ($5/month)
+  - LocalSigner OR Turnkey custody (Phase 1.x)
+  - Full STORAGE_MODE=full pipeline: Solana SPL Memo + Arweave/Irys upload
+  - verify works end-to-end (third party can independently re-hash + check)
+  - Portable across any MCP server with same identity
+  - Recovery: Turnkey email/passkey if Turnkey-managed; otherwise self-custody backup
+  - Up to 1000 signs/month
+  - Project absorbs ~$3-4/user/month operating cost; ~$1-2/user/mo margin
+
+Enterprise (custom)
+  - Self-hosted MCP option (zero operator cost, license-based pricing)
+  - Hosted with custom quotas / SLAs / dedicated VPS / dedicated Turnkey Org
+  - Bring-your-own Turnkey Sub-Org / Irys account / Solana keypair
+  - Pricing: per-seat or per-attestation contract
+```
+
+### Why this design works
+
+- **Free tier marginal cost is essentially zero.** SQL row storage at ~5KB (content + 1.5KB f32 embedding) means 1000 signs/user/mo = ~6MB/user/year. 10K free users = 60GB/year — trivial on VPS. No Solana fees, no Irys credits consumed.
+- **Free tier "no guarantee" disclaimer is honest** — we keep rows as long as operator is healthy, no eviction policy is the default, but no contractual durability promise. If user wants durability → pay.
+- **Paid tier value prop is unambiguous:** the on-chain anchor is the protocol's headline feature. Without it, `verify` is theatrical. Free tier explicitly opts out of verifiability.
+- **No customer cannibalization:** free user who needs verifiability has a clear forced upgrade. No middle-ground "kinda anchored" tier to confuse the message.
+- **Implementation alignment:** existing `mcp/src/tools.rs::sign_memory` already branches on `STORAGE_MODE=local` vs `full`. Per-user version of the same branch — read user's tier from `api_keys` table, choose path. Small refactor, same primitives.
+
+### Free tier abuse handling
+
+Free tier abuse vector is low because:
+- No on-chain cost to pump. Storage is cheap (~$0.000001/row at SSD prices). Adversary spamming 1M rows costs operator ~$1.
+- Rate limit per JWT (10/min, 500/day) catches trivial spam.
+- LocalSigner-only — adversary loses key on device wipe, can't accumulate identities easily.
+- DB capacity monitoring: alert if a single `owner_pubkey` exceeds, say, 10K rows. Manual review.
+- Worst case: prune oldest free-tier rows when DB hits cap. Document the eviction policy in ToS.
+
+### Free → Paid migration UX
+
+When a free user upgrades, two questions:
+
+1. **Backfill historical free-tier attestations to on-chain?** Cost: ~$0.003 × N rows. At 100 free attestations = $0.30 — absorb-able as upgrade incentive. At 1000 free = $3 — break-even on first month. **Recommended: backfill last N rows up to a cap (e.g., last 30 days), older rows stay SQL-only with explicit "from free tier, not anchored" badge.**
+2. **What happens on downgrade?** Existing on-chain rows stay verifiable forever (Arweave is paid). Future signs revert to SQL-only. Clean.
+
+### Cost projections (free + paid hybrid, refined)
+
+| MAU | Free ratio | Paid ratio | Free signs/user/mo | Paid signs/user/mo | Operator marginal cost | Subscription revenue | Net |
+|---|---|---|---|---|---|---|---|
+| 100 | 80% | 20% | 100 | 50 | $20 (paid only — Solana+Irys) | $100 | **+$80** |
+| 1,000 | 70% | 30% | 100 | 100 | $300 | $1,500 | **+$1,200** |
+| 10,000 | 60% | 40% | 80 | 150 | $4,500 | $20,000 | **+$15,500** |
+| 100,000 | 50% | 50% | 80 | 200 | $50,000 | $250,000 | **+$200,000** |
+
+Free-tier cost is negligible (just SQL storage) — operator burn comes from paid users (~$3-4/user/mo Solana+Irys+Turnkey). Subscription revenue covers it with comfortable margin.
+
+---
+
+## Cost layer separation
+
+Three orthogonal cost layers should be modeled separately in `attestation_costs` and any future billing report:
+
+1. **Operator-fixed** — server compute, RPC subscription, monitoring. Monthly OpEx (~$50–200/mo at current VPS scale; scales to ~$500–1500/mo at 10K-user scale with Helius RPC).
+2. **On-chain anchor** — Solana fee + Irys per attestation. Linear in `sign_memory` count. Already tracked in `attestation_costs` table.
+3. **Custody fee** — Turnkey per signing op (Phase 1.x onwards). Currently NOT tracked. Need new column `turnkey_lamports_or_usdc_cents` or similar when Phase 1.x lands.
 
 ---
 
@@ -103,14 +215,18 @@ Cons: kills the "open MCP server anyone can connect" pitch.
 
 These are the things that need proper deliberation before flipping the switch in production:
 
-1. **Pricing surface to user.** When `mnemonic sign "..."` costs $0.003, do we surface that or hide it under a flat-rate tier? Per-call pricing has cognitive friction; flat-rate ($X/mo for unlimited) is cleaner UX but exposes the operator to abuse.
-2. **Margin & sustainability.** What's the `pricing.rs` markup? At $0.003 marginal cost + $0.001 ops + $0.002 margin = $0.006 charged. Is that competitive against alternatives (storage on Notion / Obsidian Sync / Mem.ai)?
-3. **Free tier shape.** First N attestations free? Free recall always? Free if private? Free if signed by specific identity tier?
-4. **Refund-on-error semantics.** If Solana confirmation times out but Arweave succeeds, do we refund? Charge half? Retry async? `payment.rs::refund_balance` exists but is currently called only on full failure.
-5. **KYC threshold.** Spending limits per identity before requiring stronger identity proof. None today.
-6. **Cross-tenant cost attribution.** Each `attestation_costs` row already has `irys_lamports`, `sol_tx_fee_lamports`, `sol_price_usdc`, `charge_micro_usdc`. Reporting / dashboard / per-user invoicing — backlog.
-7. **Treasury management.** Where do collected USDC go? Multisig? Single-sig? Auto-swap to USDC stable? Operator's responsibility — no in-product UX yet.
-8. **Demo vs product mode.** Hackathon demo: `STORAGE_MODE=full + PAYMENT_MODE=none + RATE_LIMIT=on` works for ~hour-long demo, $50 budget. Real product: requires PAYMENT_MODE=balance + treasury + monitoring + support docs.
+1. **Pricing surface to user.** When `mnemonic sign "..."` costs $0.003 (LocalSigner) or $0.004 (Turnkey), do we surface that or hide it under a flat-rate tier? Per-call pricing has cognitive friction; flat-rate ($5/mo for 1000 signs) is cleaner UX but exposes the operator to abuse. **Recommended hybrid above** picks flat-rate for paid tier + free LocalSigner tier.
+2. **Margin & sustainability.** Free tier with rate limits absorbs ~$0.30/user/mo. Paid tier $5/mo charges ~$4 in costs (Solana + Irys + Turnkey + margin) → ~$1/user/mo margin. At 10K paying users → $10K/mo margin. At 100K → $100K/mo. Need to build to ~5K paying users before sustainability.
+3. **Free tier abuse.** LocalSigner+rate-limit gates casual abuse (5/min, 100/day, 100/month). But coordinated multi-account abuse possible. Need: per-IP rate limit on signup; CAPTCHA on `/oauth/register`; KYC-lite for identities crossing thresholds (>$10/mo equivalent).
+4. **Free tier shape.** 100 signs/mo, 5/min rate, 100/day cap — first cut. Tunable per usage telemetry. Recall stays free (read-only, no on-chain cost). Verify free.
+5. **Refund-on-error semantics.** If Solana confirmation times out but Arweave succeeds, do we refund? Charge half? Retry async? `payment.rs::refund_balance` exists but is currently called only on full failure.
+6. **KYC threshold.** Spending >$50/mo or >5000 signs/mo → require email verification + stronger identity. Current Turnkey email-passkey flow naturally gates this.
+7. **Cross-tenant cost attribution.** `attestation_costs` row has `irys_lamports`, `sol_tx_fee_lamports`, `sol_price_usdc`, `charge_micro_usdc`. Need new `turnkey_micro_usdc` column for Phase 1.x. Then per-user invoicing dashboard. Backlog.
+8. **Treasury management.** Where do collected USDC go? Operator multisig (recommended for protocol legitimacy). Auto-swap to fiat or stable? Stripe payouts vs direct USDC retention? Decision deferred until Phase 1.5 billing UX lands.
+9. **Demo vs product mode.** Hackathon demo: `STORAGE_MODE=full + PAYMENT_MODE=none + RATE_LIMIT=on` works for ~hour-long demo, $50 budget. Real product: requires PAYMENT_MODE=balance + treasury + monitoring + support docs.
+10. **Turnkey vendor cost passthrough vs absorption.** Even at "free LocalSigner" tier, if a free user opts to use Turnkey for recovery without paying, who eats the $0.001/sig? Current recommended hybrid forces paid tier for Turnkey use — locks the vendor cost into the paid line item. Alternative: free Turnkey for first N signs, then forced upgrade.
+11. **Self-sovereign escape hatch.** Can a user export their Turnkey-managed key to a `LocalSigner` profile and switch tiers retroactively? Turnkey supports export — need UX flow + tier-downgrade logic.
+12. **Enterprise self-host.** Companies running their own MCP server pay zero per-sign costs (their own keypair, their own Irys account, their own Turnkey Sub-Org). Mnemonic charges enterprise license per seat or contract-based. UX flow: docker-compose + config docs + support tier.
 
 ---
 
