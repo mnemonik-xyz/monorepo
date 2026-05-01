@@ -45,6 +45,37 @@ Why: A2A messages are mostly short and structured; embedding them adds noise and
 
 ---
 
+## 2026-05-01 — Decision: Positioning lock-in — "verifiable memory for trustless agents"
+
+The body of work in this folder + ERC-8004 follow-on commits the project to a single positioning statement:
+
+> Mnemonic is verifiable memory for trustless agents.
+
+Explicit consequences:
+
+- Adjacent positions are foreclosed: general AI-agent memory (head-to-head with letta / zep / mem0 / cognee on retrieval quality), agent identity standard (head-to-head with DIDs / ERC-8004), execution attestation (head-to-head with TEEs), pure on-chain protocol. We compose with these standards; we do not compete on their primary axis.
+- Story is true *only if* all four pieces ship: A2A bridge V1, ERC-8004 V1 (four paths), Phase 3α anchor pluggability, `did:mnemonic:` resolver. Any one missing collapses the pitch back to "we have a nice memory format" — competitive but not differentiated.
+- Any future pull toward an adjacent position must revisit `research/positioning-trustless-agents.md` before re-pivoting.
+
+Downstream: this decision drives the sequencing in `backlog.md`, the table reorderings in `.claude/skills/project-knowledge/references/protocol-integrations.md`, and the public roadmap rewrite in `docs/WHITEPAPER.md` §14 (new Phase 5).
+
+---
+
+## 2026-05-01 — Decision: ERC-8004 trigger pulls Phase 3α (anchor pluggability) forward
+
+ERC-8004 V1 has a hard prerequisite that the SVM lock be broken **during or before** the integration work. Path-b ("ship ERC-8004 while keeping Solana SPL Memo as the only anchor") is rejected: it would deepen the SVM dependency the protocol is trying to escape (`work/mnemonic-cli/backlog.md` Phase 3) at exactly the moment we extend the anchor surface to a new chain.
+
+Scope clarification — "Phase 3α":
+
+- *In scope for the ERC-8004 trigger:* anchor-layer pluggability only. `core/src/storage/sqlite.rs` schema migrates from solana-specific anchor columns to a discriminated `Anchor::{Solana, Ethereum, Arweave, None}` enum. New `AnchorWriter` trait under `core/src/anchor/`. Solana SPL Memo path becomes one impl; Ethereum-via-ERC-8004-Validation-Registry becomes another. Idempotent SQLite migration; legacy rows = `Anchor::Solana(...)`.
+- *Out of scope:* off-chain envelope alg-pluggability (Option B of `mnemonic-cli` Phase 2). Ed25519 stays as the off-chain signer in this stage. That work remains separately tracked under `mnemonic-cli` Phase 2 / Phase 3 Option A.
+
+Architectural insight that makes this cheap: the ERC-8004 `validationResponse` Ethereum tx **is** the anchor for any attestation routed through Path 1 (validator-as-a-service). We do not add a new anchor backend on top of Solana; we replace the anchor for ERC-8004-routed flows with the registry call itself. ~5 dev-days for `erc8004-0`.
+
+Cross-link: a corresponding note has been added to `work/mnemonic-cli/backlog.md` "TOP PRIORITY 2 — Crypto-flexibility" so future readers there know Phase 3 is no longer purely sequential — a strict subset is pulled forward.
+
+---
+
 ## Audit findings (placeholder)
 
 To be populated by code-reviewer / security-auditor / test-writer agents during their respective audit waves. Format: `### YYYY-MM-DD — <agent> — <severity>: <one-line>` then bullet body.

@@ -4,6 +4,20 @@ Items deliberately out of A2A-V1 scope. Architecture must remain open for them �
 
 ---
 
+## Positioning (locked-in 2026-05-01)
+
+This entire body of work — A2A bridge V1, ERC-8004 follow-on, MCP-to-MCP delegation, ACP, AGNTCY, framework adapters — exists to deliver a single positioning:
+
+> **Mnemonic is verifiable memory for trustless agents.**
+
+Not "memory for AI agents" (head-to-head with letta / zep / mem0 / cognee on retrieval quality, where we lose). Not "agent identity" (head-to-head with ERC-8004 / DIDs, where we compose rather than compete). Not "execution attestation" (TEE territory). The defensible niche is **cryptographic provenance over content the agent itself claims to remember**, composed underneath the trustless-agent stack (A2A + ERC-8004).
+
+Full gap analysis, what we explicitly do not close, three-regime decision rationale, and what the positioning forecloses: see [`research/positioning-trustless-agents.md`](research/positioning-trustless-agents.md). Anyone touching this backlog should read that document first — every sequencing decision below derives from it.
+
+Decision log entry: `decisions.md` → "2026-05-01 — Positioning lock-in: verifiable memory for trustless agents".
+
+---
+
 ## A2A — V2 / future scope
 
 - **Streaming chunk attestation (`A2A_STREAM_CHUNK_V1`)** — per-SSE-chunk attestations for `SendStreamingMessage` / `SubscribeToTask`. V1 only fixes the final task state. Cost: high write-amplification; needs batched / Merkle-root strategy.

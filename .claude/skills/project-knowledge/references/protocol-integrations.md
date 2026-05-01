@@ -4,9 +4,19 @@ Status of Mnemonic's integration with external multi-agent protocols. Source of 
 
 ---
 
+## Positioning
+
+The protocol-integration roadmap exists to deliver one positioning, locked in 2026-05-01:
+
+> **Mnemonic is verifiable memory for trustless agents.**
+
+The trustless-agent stack as it exists in May 2026 (A2A v1.0.0-rc + ERC-8004 mainnet + TEE / crypto-economic validators) is missing the layer that proves what an agent claims to remember. Mnemonic fills that gap. Full rationale, gap analysis, three-regime decision matrix, and what the positioning forecloses live in [`work/a2a-bridge/research/positioning-trustless-agents.md`](../../../../work/a2a-bridge/research/positioning-trustless-agents.md). That document is the strategic charter for everything in the table below.
+
+---
+
 ## TL;DR
 
-Mnemonic's whitepaper positions the protocol underneath multi-agent coordination layers as durable, signed memory. Today the only wire surface is Mnemonic's own MCP tools (5 of them). No protocol bindings ship yet. The active backlog item is the **A2A bridge** — see `work/a2a-bridge/`.
+Today the only wire surface is Mnemonic's own MCP tools (5 of them). No protocol bindings ship yet. The active backlog item is the **A2A bridge** (`work/a2a-bridge/`); the next is the **ERC-8004 follow-on** detailed in `work/a2a-bridge/backlog.md`. Both are required to land the positioning above; they are sequenced together because they share substrate.
 
 ---
 
@@ -15,10 +25,10 @@ Mnemonic's whitepaper positions the protocol underneath multi-agent coordination
 | Protocol | Status | Folder | Schema family |
 |---|---|---|---|
 | **A2A (Agent2Agent)** | Backlog → V1 in flight | `work/a2a-bridge/` | `A2A_TASK_V1`, `A2A_MESSAGE_V1`, `A2A_ARTIFACT_V1` |
+| **ERC-8004 (Trustless Agents, Ethereum mainnet 2026-01-29)** | Backlog — V1 plan locked, anchor pluggability co-required | `work/a2a-bridge/backlog.md` (Phase 2 of the bridge stack) | reuses A2A schemas + new `MNEMONIC_FEEDBACK_V1` for Reputation Registry payloads |
 | **MCP-to-MCP delegation** | Backlog | `work/a2a-bridge/backlog.md` | `MCP_DELEGATION_V1` (planned) |
 | **ACP (IBM/BeeAI)** | Backlog | `work/a2a-bridge/backlog.md` | `ACP_RUN_V1`, `ACP_MESSAGE_V1`, `ACP_AWAIT_V1` (planned) |
 | **AGNTCY (Cisco)** | Watch & wait | `work/a2a-bridge/backlog.md` | TBD post-AGNTCY-v1 |
-| **ERC-8004 / on-chain identity** | Foreclosed pre-Phase-3 | `work/mnemonic-cli/backlog.md` | n/a (anchor-layer) |
 | **LangGraph / AutoGen / CrewAI** | Frameworks, not protocols | `work/a2a-bridge/backlog.md` | reuse A2A / ACP / MCP-delegation envelopes |
 
 ---
@@ -62,6 +72,29 @@ IBM / Linux Foundation / BeeAI's protocol — REST-based (not JSON-RPC), message
 
 ---
 
+## ERC-8004 — Trustless Agents (Ethereum mainnet, live since 2026-01-29)
+
+ERC-8004 is the on-chain trust layer designed to extend A2A. Three registries on Ethereum mainnet:
+
+- **Identity Registry** — ERC-721 NFT per agent. `agentId = tokenId`. `tokenURI` resolves to off-chain JSON registration file with `services[]`, `supportedTrust[]`, cross-chain `registrations[]`.
+- **Reputation Registry** — `giveFeedback` / `appendResponse` / `revokeFeedback` / `readAllFeedback` / `getSummary`; on-chain commits a hash, off-chain JSON carries the rich payload.
+- **Validation Registry** — `validationRequest` / `validationResponse` with `responseURI` + `responseHash` for off-chain attestations. Spec note: still under active update with the TEE community.
+
+**Why Mnemonic plugs in cleanly.** The Validation Registry is *literally designed* for off-chain signed attestations like Mnemonic's COSE_Sign1-over-deterministic-CBOR. Two existing validator categories are filling fast (TEE — Phala / Marlin; crypto-economic — staking-based). Mnemonic occupies a third, distinct trust category — **signed-memory** — that no current ERC-8004 participant holds. First-mover window is months, not years.
+
+**Four integration paths** (full detail in `work/a2a-bridge/backlog.md` § "ERC-8004 — Phase 2 of the bridge stack"):
+
+1. Mnemonic as a registered validator on the Validation Registry (validator-as-a-service).
+2. Mnemonic declared in agents' own registration files (minimal binding).
+3. Mnemonic-attested entries in the Reputation Registry (long-lived signing identity behind every feedback).
+4. Three-way identity reconciliation via `did:mnemonic:` — closes the chain `tokenId → registration file → AgentCard URL → x-mnemonic.ed25519_pubkey`.
+
+**Hard prerequisite — Solana decoupling.** Path-b ("ship ERC-8004 while keeping Solana SPL Memo as the only anchor") is rejected because it deepens the SVM dependency the protocol is trying to escape (`work/mnemonic-cli/backlog.md` Phase 3). The chain-pluggable anchor work — narrowed to "Phase 3α", anchor-only, off-chain envelope alg unchanged — must land *during or before* erc8004-1. This is treated as a sequencing constraint, not a "maybe", and is recorded in `work/a2a-bridge/decisions.md`.
+
+**Scope.** ~20 dev-days across six tasks (`erc8004-0` anchor pluggability through `erc8004-5` Ethereum anchor end-to-end), riding entirely on the A2A bridge substrate.
+
+---
+
 ## AGNTCY (watch & wait)
 
 Cisco / Outshift's Agent Connect initiative — broader than a single wire protocol; standardizes agent identity, discovery, and message-passing with their own AgentCard-like spec (`agp`). Less mature than A2A or ACP. Their identity layer is closer to DIDs than A2A's JWS model — the integration that would force `did:mnemonic:` design is this one.
@@ -84,8 +117,8 @@ These do not change the off-chain envelope and so do not belong in this doc beyo
 
 - **Solana** — current default anchor (SPL Memo). See `core/src/solana/`.
 - **Arweave** — current default durable storage. See `core/src/arweave/`.
-- **Chain-pluggable anchor** (Ethereum / Bitcoin / ICP / Arweave-only / none) — Phase 3 of `mnemonic-cli`. See `work/mnemonic-cli/backlog.md`.
-- **ERC-8004 on-chain agent identity** — foreclosed until chain-pluggable anchor lands. Re-evaluate post-Phase-3.
+- **Chain-pluggable anchor** (Ethereum / Bitcoin / ICP / Arweave-only / none) — Phase 3 of `mnemonic-cli`. The narrowed subset "Phase 3α" (anchor-only, off-chain envelope alg unchanged) is upgraded to **prerequisite or co-requisite of ERC-8004 V1** — see `work/a2a-bridge/backlog.md` and the cross-link in `work/mnemonic-cli/backlog.md` "TOP PRIORITY 2".
+- **ERC-8004 on-chain agent identity** — see the dedicated section above. No longer foreclosed.
 
 ---
 

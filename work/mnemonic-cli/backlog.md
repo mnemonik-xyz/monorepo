@@ -46,12 +46,13 @@ Touchpoints (Option B):
 
 Phase 1's `Signer` interface in SDK was deliberately abstract precisely to enable this. The blocker is server-side + WASM exports + storage schema + migration UX.
 
-### Recommended sequencing — LOCKED IN (2026-04-30)
+### Recommended sequencing — LOCKED IN (2026-04-30, amended 2026-05-01)
 
 - **Phase 2 — confirmed:** Option B → unblock'ает passkey + KMS users. Anchor stays Solana.
 - **Phase 3 — confirmed:** Option A → free protocol from SVM dependency. Chain-pluggable anchor (Ethereum, Bitcoin, ICP, etc.).
+- **Phase 3α — pulled forward (2026-05-01) by ERC-8004 trigger:** the *anchor-only* subset of Phase 3 (chain-pluggable anchor; off-chain envelope alg unchanged) is no longer purely sequential after Phase 2. It is now a **prerequisite or co-requisite** of ERC-8004 V1 (`work/a2a-bridge/backlog.md` § "ERC-8004 — Phase 2 of the bridge stack"). Reason: shipping ERC-8004 while keeping Solana SPL Memo as the only anchor would deepen the SVM dependency at exactly the moment we extend the anchor surface to a new chain. Path-b ("validator-as-a-service that still anchors via Solana") is explicitly REJECTED. The Ethereum-via-ERC-8004-Validation-Registry call **is** the anchor for ERC-8004-routed flows — we do not double-anchor.
 
-This sequencing is treated as an architectural decision, not a "maybe". Phase 1.5 (on-chain + billing) lands first because real anchoring is the protocol's headline value. Phase 2 follows because passkey / KMS unlocks corporate + consumer-grade identity. Phase 3 closes the SVM dependency.
+This sequencing is treated as an architectural decision, not a "maybe". Phase 1.5 (on-chain + billing) lands first because real anchoring is the protocol's headline value. Phase 2 follows because passkey / KMS unlocks corporate + consumer-grade identity. Phase 3α follows alongside or before ERC-8004 V1 to close the SVM lock without shipping a second anchor on top of the first. Phase 3 (full off-chain alg pluggability) remains separately tracked as the Option-A finish-line.
 
 ---
 
