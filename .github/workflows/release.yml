@@ -172,12 +172,31 @@ jobs:
       - name: Install workspace dependencies
         run: npm ci
 
+      # Skip-if-already-published guard: when only one of sdk/cli bumps for
+      # a tag (e.g. cli-only patch), the other workspace's npm publish would
+      # 403 with "cannot publish over previously published versions". Compare
+      # local package.json version to npm registry; skip if equal.
+
       - name: Publish @mnemonik-xyz/sdk
-        run: npm publish --access public --provenance --workspace packages/sdk
+        run: |
+          LOCAL=$(node -p "require('./packages/sdk/package.json').version")
+          REMOTE=$(npm view @mnemonik-xyz/sdk version 2>/dev/null || echo "")
+          if [ "$LOCAL" = "$REMOTE" ]; then
+            echo "SDK $LOCAL already on registry — skipping publish"
+          else
+            npm publish --access public --provenance --workspace packages/sdk
+          fi
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Publish @mnemonik-xyz/cli
-        run: npm publish --access public --provenance --workspace packages/cli
+        run: |
+          LOCAL=$(node -p "require('./packages/cli/package.json').version")
+          REMOTE=$(npm view @mnemonik-xyz/cli version 2>/dev/null || echo "")
+          if [ "$LOCAL" = "$REMOTE" ]; then
+            echo "CLI $LOCAL already on registry — skipping publish"
+          else
+            npm publish --access public --provenance --workspace packages/cli
+          fi
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
