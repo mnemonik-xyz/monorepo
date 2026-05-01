@@ -299,6 +299,8 @@ Open areas before broad production deployment:
 
 ## 14. Roadmap
 
+The roadmap below is organized around a single positioning, locked in 2026-05-01: **Mnemonic is verifiable memory for trustless agents.** Phases 1–3 deliver the core memory primitive; Phases 4–5 compose it into the trustless-agent stack (A2A + ERC-8004) so signed memory becomes a first-class layer underneath multi-agent coordination and on-chain identity.
+
 ### Phase 1: Practical Verifiable Memory
 
 - Harden the Rust MCP implementation.
@@ -319,6 +321,7 @@ Open areas before broad production deployment:
 - Add multi-writer consistency semantics.
 - Support portable memory restore workflows.
 - Expand provenance artifacts beyond simple memory items.
+- Anchor-layer pluggability ("Phase 3α") — narrowed subset that decouples the storage path from Solana SPL Memo, so any chain (or no chain) can serve as anchor. Pulled forward as a prerequisite of Phase 5.
 
 ### Phase 4: Trust And Settlement Network
 
@@ -326,6 +329,19 @@ Open areas before broad production deployment:
 - Mature x402-style agent payment flows.
 - Introduce reliability scoring for shared-memory contributors.
 - Explore ZK proofs for embedding correctness and retrieval correctness.
+
+### Phase 5: Trustless-Agent Stack Integration
+
+This phase locks in the "verifiable memory for trustless agents" positioning by composing Mnemonic's signed-memory primitive into the multi-agent and on-chain identity standards that shipped during 2026.
+
+- **A2A bridge V1.** First-class binding to Google's Agent2Agent protocol (v1.0.0-rc, JSON-RPC + SSE). Three new CBOR schemas (`A2A_TASK_V1`, `A2A_MESSAGE_V1`, `A2A_ARTIFACT_V1`), an adapter crate, two new MCP tools (`mnemonic_attest_a2a`, `mnemonic_recall_a2a`), reference middleware sidecar, and a published byte-for-byte conformance suite. Turns six A2A-shaped use cases (`task-memory-ledger`, `shared-memory-layer`, `shared-project-memory-namespace`, `artifact-attestation-service`, `provenance-attestation-layer`, `reliability-oracle-for-orchestration`) from aspirational into executable.
+- **ERC-8004 follow-on.** Integration with the on-chain trustless-agent registries (Identity / Reputation / Validation), live on Ethereum mainnet since 2026-01-29. Four paths: validator-as-a-service on the Validation Registry, agent registration-file binding, Mnemonic-attested entries in the Reputation Registry, and `did:mnemonic:` resolver for cross-ecosystem identity reconciliation. Mnemonic occupies a third trust category — *signed-memory* — distinct from the TEE and crypto-economic validators already filling.
+- **AgentCard `x-mnemonic` extension.** Publishes the agent's Ed25519 attestation key alongside its A2A capability declaration, so any A2A-native verifier can locate the Mnemonic verification key without a separate lookup. Composes with A2A's existing AgentCard JWS authentication.
+- **Threat model and conformance.** Publishes the first formal threat-model document covering the A2A and ERC-8004 boundaries (canonicalization mismatches, replay, identity substitution, contextId forking) and a portable conformance vector suite (`@mnemonik-xyz/conformance`) so any third-party implementation in any language can prove byte-for-byte parity.
+
+After Phase 5: Mnemonic is the only primitive in the trustless-agent stack that gives cryptographic provenance over content the agent itself claims to remember, cross-vendor temporal coherence via lineage, and semantic recall over that signed history — composable underneath A2A, anchored through ERC-8004's existing on-chain commitments without binding the agent's signing identity to a wallet.
+
+Detailed plan, task breakdown, and decision rationale: `work/a2a-bridge/` (`user-spec.md`, `tech-spec.md`, `tasks/`, `backlog.md`, `decisions.md`, `research/positioning-trustless-agents.md`).
 
 ## 15. Conclusion
 

@@ -9,7 +9,9 @@ This file provides high-level project overview for AI agents. Helps agents under
 
 **Name:** mnemonic-protocol (monorepo)
 
-**Description:** Monorepo for the Mnemonic Protocol — verifiable, persistent memory for AI agents with cryptographic attestation on Arweave and Solana.
+**Positioning (locked-in 2026-05-01):** Mnemonic is **verifiable memory for trustless agents**. Cryptographic provenance over content the agent itself claims to remember, composed underneath the trustless-agent stack (A2A + ERC-8004) rather than competing with general-purpose AI memory products on retrieval quality. Strategic rationale, gap analysis, and what this positioning explicitly forecloses: see [`work/a2a-bridge/research/positioning-trustless-agents.md`](../../../../work/a2a-bridge/research/positioning-trustless-agents.md).
+
+**Description:** Monorepo for the Mnemonic Protocol — verifiable, persistent memory for AI agents with cryptographic attestation. Today anchors on Arweave (durable storage) + Solana (SPL Memo timestamp); the anchor layer is being decoupled to support Ethereum (via ERC-8004 Validation Registry) as part of the Phase 5 trustless-agent stack integration.
 
 Contains four components: protocol documentation, a Rust core library, an MCP server for Cursor/Claude Desktop, and a demo web app. The core library compiles to both native Rust and WASM, so all components share one implementation. See architecture.md for the full directory structure.
 

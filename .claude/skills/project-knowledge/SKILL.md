@@ -32,6 +32,9 @@ All documentation is in the `references/` folder:
 ## Optional references
 
 - **[ux-guidelines.md](references/ux-guidelines.md)** - Interface language, tone of voice, domain glossary, text patterns, design system (only for projects with significant UI)
+- **[crypto-design.md](references/crypto-design.md)** - Cryptographic primitives, COSE_Sign1 envelope, deterministic CBOR canonicalization, Ed25519 identity, blake3 hashing
+- **[economics.md](references/economics.md)** - Pricing engine, payment modes, attestation cost accounting, x402 + balance flows
+- **[protocol-integrations.md](references/protocol-integrations.md)** - Status of bindings to external multi-agent protocols (A2A, MCP-to-MCP delegation, ACP, AGNTCY, frameworks); index over `work/a2a-bridge/` and the protocol-integrations backlog
 - **{custom}.md** - Domain-specific files added per project (e.g., vault.md, bot.md, mcp.md)
 
 ## How to use
