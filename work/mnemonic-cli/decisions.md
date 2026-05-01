@@ -1308,3 +1308,9 @@ caught. Audit is **issues_found** (1 critical, 1 major, 8 minor).
 - Bug 2 (cosmetic): --version hardcoded "0.1.0" in bin/mnemonic.ts. Bumped to "0.1.4" with TODO for read-from-package.json in 0.1.5.
 - Smoke: id.json-only scenario whoami pass; identity.json-only still works.
 - Tarball size: ~250KB (no change).
+
+### CLI 0.1.5 — identity-mismatch pre-flight detection
+- Date: 2026-05-01
+- Bug 3 (real): user reproed `init` (new local keypair) + `login` (webapp's localStorage keypair signs OAuth) → `sign` 403 from server. Per Decision 7 of tech-spec, mismatch is the documented gotcha; CLI surfaces server 403 instead of catching client-side.
+- Fix: pre-flight check in sign/recall/verify/whoami. UserError BEFORE HTTP. init auto-clears stale token. login emits warning on mismatch (still saves JWT, lets user choose path).
+- Smoke: bug 3 scenario now produces actionable error, no fetch made.

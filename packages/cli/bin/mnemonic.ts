@@ -42,9 +42,9 @@ export function buildProgram(): Command {
   program
     .name("mnemonic")
     .description("Mnemonic Protocol CLI — verifiable persistent memory")
-    // TODO(0.1.5): read from package.json at build/runtime so we don't have
-    // to hand-bump on every release. Hardcoded for 0.1.4 to ship the fix today.
-    .version("0.1.4")
+    // TODO(0.1.6): read from package.json at build/runtime so we don't have
+    // to hand-bump on every release. Hardcoded for 0.1.5 to ship the fix today.
+    .version("0.1.5")
     .option("--json", "machine-readable JSON output")
     .option("--quiet", "suppress non-essential output")
     .option("--no-color", "disable ANSI color");

@@ -9,6 +9,7 @@ import { LocalSigner, MnemonicClient } from "@mnemonik-xyz/sdk";
 import { loadIdentity, loadToken } from "../config.js";
 import { fromSdkError, UserError } from "../errors.js";
 import { format, type OutputOptions } from "../output.js";
+import { assertIdentityMatchesToken } from "../preflight.js";
 
 export interface RecallOptions extends OutputOptions {
   topK?: number;
@@ -30,6 +31,8 @@ export async function runRecall(
   const baseUrl =
     opts.baseUrl ?? process.env.MNEMONIC_BASE_URL ?? DEFAULT_BASE_URL;
   const topK = typeof opts.topK === "number" ? opts.topK : DEFAULT_TOP_K;
+  // Pre-flight: catch identity/JWT mismatch BEFORE any fetch is built.
+  assertIdentityMatchesToken();
   const kp = await loadIdentity();
   const tok = loadToken();
 

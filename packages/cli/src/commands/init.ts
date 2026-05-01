@@ -5,10 +5,19 @@
 // Surfaces the new pubkey + DID so users can verify the file matches what
 // the server will see.
 
+import { unlinkSync } from "node:fs";
+
 import { Keypair } from "@mnemonik-xyz/sdk";
 
-import { identityExists, identityPath, saveIdentity } from "../config.js";
-import { fromSdkError, UserError } from "../errors.js";
+import {
+  identityExists,
+  identityPath,
+  loadToken,
+  saveIdentity,
+  tokenExists,
+  tokenPath,
+} from "../config.js";
+import { CliError, fromSdkError, UserError } from "../errors.js";
 import { format, hint, type OutputOptions } from "../output.js";
 
 export interface InitOptions extends OutputOptions {
@@ -30,6 +39,35 @@ export async function runInit(opts: InitOptions): Promise<void> {
     throw fromSdkError(e);
   }
   saveIdentity(kp);
+
+  // 0.1.5: a stale token.json (logged-in JWT.sub ≠ new keypair.pubkey) would
+  // immediately trip the pre-flight check on the next sign/recall/verify.
+  // Auto-clear it here and emit a warning so the user knows what changed.
+  // If the token's sub already matches the new pubkey (rare — re-init of the
+  // same keypair), keep it.
+  if (tokenExists()) {
+    let staleSub: string | null = null;
+    try {
+      const tok = loadToken();
+      if (tok.sub !== kp.pubkey) staleSub = tok.sub;
+    } catch (e) {
+      // Token unreadable or expired — treat as stale and clear it. Bubble
+      // unexpected (non-CliError) failures up.
+      if (!(e instanceof CliError)) throw e;
+      staleSub = "(unreadable)";
+    }
+    if (staleSub !== null) {
+      try {
+        unlinkSync(tokenPath());
+      } catch {
+        /* best-effort — ENOENT is fine */
+      }
+      process.stderr.write(
+        `warning: cleared stale logged-in JWT (sub ${staleSub} != new pubkey ${kp.pubkey})\n` +
+          `         re-run \`mnemonic login\` to authenticate as new identity.\n`
+      );
+    }
+  }
 
   const data = {
     pubkey: kp.pubkey,
