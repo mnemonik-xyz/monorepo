@@ -172,6 +172,12 @@ jobs:
       - name: Install workspace dependencies
         run: npm ci
 
+      # Always build SDK first — CLI's prepublishOnly tsc -b needs SDK's
+      # dist/index.d.ts to resolve `@mnemonik-xyz/sdk` even when SDK skips
+      # the actual npm publish (skip-if-already-published guard below).
+      - name: Build @mnemonik-xyz/sdk
+        run: npm run build --workspace packages/sdk
+
       # Skip-if-already-published guard: when only one of sdk/cli bumps for
       # a tag (e.g. cli-only patch), the other workspace's npm publish would
       # 403 with "cannot publish over previously published versions". Compare
