@@ -180,11 +180,18 @@ fn sha384(data: &[u8]) -> [u8; 48] {
 }
 
 fn deep_hash_blob(data: &[u8]) -> [u8; 48] {
+    // Per arweave-js deepHash spec:
+    //   sha384( sha384("blob" + len_str) || sha384(data) )
+    // Hashing tag and data SEPARATELY then combining is required —
+    // hashing the concatenation in one pass produces a different digest
+    // and Irys rejects with "Invalid signature".
     let tag = format!("blob{}", data.len());
-    let mut h = Sha384::new();
-    h.update(tag.as_bytes());
-    h.update(data);
-    h.finalize().into()
+    let tag_hash = sha384(tag.as_bytes());
+    let data_hash = sha384(data);
+    let mut combined = [0u8; 96];
+    combined[..48].copy_from_slice(&tag_hash);
+    combined[48..].copy_from_slice(&data_hash);
+    sha384(&combined)
 }
 
 fn deep_hash_list(items: &[&[u8]]) -> [u8; 48] {
