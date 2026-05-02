@@ -20,7 +20,12 @@ impl ArweaveClient {
     pub fn new(base_url: &str) -> Self {
         Self {
             base_url: base_url.trim_end_matches('/').to_string(),
-            upload_url: "https://uploader.irys.xyz/upload".to_string(),
+            // Irys ANS-104 upload endpoint. Per the bundler API,
+            // path is `/tx/<token>` where <token> identifies the
+            // signing currency. Solana-signed data items go to
+            // `/tx/solana`. The legacy `/upload` path returns 404
+            // — likely renamed when Bundlr migrated to Irys L1.
+            upload_url: "https://uploader.irys.xyz/tx/solana".to_string(),
             bypass_local_routing: false,
             client: reqwest::Client::new(),
         }
