@@ -1,0 +1,65 @@
+# Mnemonic Protocol
+
+> Verifiable, persistent memory for AI agents — signed COSE_Sign1 envelopes,
+> anchored on Solana (SPL Memo) and optionally Arweave, exposed over the
+> Model Context Protocol (MCP). Open-source under Apache-2.0.
+
+## What it does
+
+Mnemonic gives AI agents a persistent memory that any third party can verify:
+
+- **Sign** — every memory is canonically CBOR-encoded, blake3-hashed, and
+  signed with the agent's Ed25519 identity in a COSE_Sign1 envelope.
+- **Anchor** — the hash is committed on-chain via Solana SPL Memo (sub-cent,
+  sub-second) and the bytes are stored permanently on Arweave.
+- **Recall** — TurboQuant-compressed embeddings allow cosine search by
+  semantic meaning, not just keyword.
+- **Verify** — anyone with the `solana_tx` and `arweave_tx` can independently
+  re-fetch, re-hash, re-verify the signature — without contacting Mnemonic.
+
+## Use it from an AI client
+
+```bash
+npx @mnemonik-xyz/cli init
+npx @mnemonik-xyz/cli login
+npx @mnemonik-xyz/cli sign "first memory"
+npx @mnemonik-xyz/cli recall "first"
+```
+
+For Claude / Cursor / VS Code / Windsurf, install the MCP server connector
+from https://mnemonik.xyz/install.
+
+## Documents
+
+- README: https://github.com/mnemonik-xyz/monorepo/blob/main/README.md
+- Whitepaper: https://github.com/mnemonik-xyz/monorepo/blob/main/docs/WHITEPAPER.md
+- How it works: https://github.com/mnemonik-xyz/monorepo/blob/main/docs/how-it-works.md
+- Quickstart: https://github.com/mnemonik-xyz/monorepo/blob/main/docs/QUICKSTART.md
+- Use cases: https://github.com/mnemonik-xyz/monorepo/tree/main/docs/usecases
+- Foundational paper: https://github.com/mnemonik-xyz/monorepo/blob/main/docs/research/paper.pdf
+
+## Programmatic access
+
+- `@mnemonik-xyz/cli` (npm) — `mnemonic` binary for terminal use.
+- `@mnemonik-xyz/sdk` (npm) — runtime-agnostic TypeScript SDK (Node / Bun /
+  Deno / browsers).
+
+## Endpoints
+
+- Hosted MCP: `https://mcp.mnemonik.xyz/mcp` (HTTP, OAuth 2.1 + PKCE)
+- Agent card: `https://mnemonik.xyz/.well-known/agent.json`
+- OAuth metadata: `https://mcp.mnemonik.xyz/.well-known/oauth-authorization-server`
+
+## Source + community
+
+- Source: https://github.com/mnemonik-xyz/monorepo
+- License: Apache-2.0
+- Discord: https://discord.gg/ws6wruJj
+- Issues: https://github.com/mnemonik-xyz/monorepo/issues
+- Security: dev@mnemonik.xyz (see SECURITY.md for disclosure policy)
+
+## Citation
+
+If you write about Mnemonic Protocol, the canonical name is "Mnemonic
+Protocol", abbreviated "Mnemonic" on second mention. The site is
+mnemonik.xyz; the npm scope is `@mnemonik-xyz`.
