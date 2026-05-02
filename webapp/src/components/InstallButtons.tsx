@@ -30,6 +30,59 @@ const MCP_URL = "https://mcp.mnemonik.xyz/mcp";
 // before the OAuth flow even starts.
 const MCP_HOST = "https://mcp.mnemonik.xyz/mcp";
 
+/**
+ * Read the webapp's current JWT from localStorage IF it exists AND has not
+ * expired. Returns null otherwise.
+ *
+ * Used by the install deeplinks so a logged-in webapp user can hand-off
+ * their JWT to the IDE in one click — bypasses Cursor's broken MCP-OAuth
+ * UI gap (where the Connect button never appears for non-directory servers
+ * and the SDK silently fails to launch the browser on 401).
+ *
+ * The JWT is short-lived (1h TTL) but rotating once is far cheaper than
+ * the manual `~/.cursor/mcp.json` paste workaround.
+ */
+function readWebappJwt(): string | null {
+  if (typeof localStorage === "undefined") return null;
+  const jwt = localStorage.getItem("mnemonic.jwt");
+  if (!jwt) return null;
+  try {
+    const parts = jwt.split(".");
+    if (parts.length !== 3) return null;
+    const payloadB64 = parts[1] ?? "";
+    const padded = payloadB64 + "=".repeat((4 - (payloadB64.length % 4)) % 4);
+    const payload = JSON.parse(
+      atob(padded.replace(/-/g, "+").replace(/_/g, "/"))
+    );
+    const exp = typeof payload?.exp === "number" ? payload.exp : 0;
+    if (exp * 1000 <= Date.now()) return null;
+  } catch {
+    return null;
+  }
+  return jwt;
+}
+
+/**
+ * Build the IDE config object passed via the install deeplink. When the
+ * webapp has a non-expired JWT, bake it into the `headers` field so the
+ * IDE sends `Authorization: Bearer <jwt>` on every MCP call from the
+ * moment of install — no OAuth dance needed inside the IDE.
+ */
+function buildInstallConfig(
+  extras: Record<string, unknown> = {}
+): Record<string, unknown> {
+  const config: Record<string, unknown> = {
+    url: MCP_URL,
+    type: "http",
+    ...extras,
+  };
+  const jwt = readWebappJwt();
+  if (jwt) {
+    config.headers = { Authorization: `Bearer ${jwt}` };
+  }
+  return config;
+}
+
 function cursorDeeplink(): string {
   // Cursor's `cursor://anysphere.cursor-deeplink/mcp/install` accepts a
   // base64-encoded JSON config. For HTTP MCP servers (streamable HTTP per
@@ -38,8 +91,14 @@ function cursorDeeplink(): string {
   // dialog reliably across Cursor versions. Including `type: "http"`
   // matches the explicit-transport pattern Cursor docs recommend for
   // remote MCP servers.
+  //
+  // When the webapp user is logged in, we ALSO include `headers` carrying
+  // the current JWT — Cursor's deeplink handler stores it in mcp.json,
+  // and every subsequent /mcp call sends `Authorization: Bearer <jwt>`.
+  // This bypasses Cursor's MCP-OAuth UI (which doesn't render a Connect
+  // button for non-directory servers) and skips the OAuth dance entirely.
   // Reference: https://cursor.com/docs/context/mcp/install-links
-  const config = JSON.stringify({ url: MCP_URL, type: "http" });
+  const config = JSON.stringify(buildInstallConfig());
   const b64 = btoa(config);
   const params = new URLSearchParams({ name: "Mnemonic", config: b64 });
   return `cursor://anysphere.cursor-deeplink/mcp/install?${params.toString()}`;
@@ -61,8 +120,19 @@ function vscodeDeeplink(): string {
   //   - HTTP transport: { name, type: "http", url }
   //   - stdio transport: { name, command, args }
   // We use HTTP (streamable per Decision 1).
-  const config = { name: "Mnemonic", type: "http", url: MCP_URL };
-  return `vscode:mcp/install?${encodeURIComponent(JSON.stringify(config))}`;
+  //
+  // The double-slash after the scheme matters for Safari (16+) and some
+  // mobile browsers: they reject opaque URIs (`vscode:mcp/...` with no
+  // authority component) as malformed and surface "address is invalid"
+  // before the OS scheme handler ever sees the URL. macOS's URL routing
+  // accepts both `vscode:` and `vscode://` for VS Code, so always emit the
+  // hierarchical form for cross-browser compatibility. (Confirmed-failing
+  // user report on Safari with the single-slash form on 2026-05-02.)
+  //
+  // Same JWT-baked-in-headers pattern as cursorDeeplink — gives the user
+  // a one-click install that works without OAuth round-trips inside the IDE.
+  const config = buildInstallConfig({ name: "Mnemonic" });
+  return `vscode://mcp/install?${encodeURIComponent(JSON.stringify(config))}`;
 }
 
 // JSON snippet that goes into `~/.codeium/windsurf/mcp_config.json`. WindSurf
@@ -79,7 +149,7 @@ const WINDSURF_CONFIG_SNIPPET = JSON.stringify(
     },
   },
   null,
-  2,
+  2
 );
 
 interface InstallButtonsProps {

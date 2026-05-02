@@ -1,8 +1,12 @@
 import { fireEvent, render, screen } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import InstallButtons from "./InstallButtons";
 
 describe("InstallButtons", () => {
+  afterEach(() => {
+    localStorage.clear();
+  });
+
   it("deeplink_url_well_formed", () => {
     render(<InstallButtons />);
 
@@ -23,9 +27,9 @@ describe("InstallButtons", () => {
     // separate `name=&url=` query params — VS Code MCP install dialog only
     // recognizes the JSON-blob format).
     const vscode = screen.getByTestId("install-vscode") as HTMLAnchorElement;
-    expect(vscode.href.startsWith("vscode:mcp/install?")).toBe(true);
+    expect(vscode.href.startsWith("vscode://mcp/install?")).toBe(true);
     const vscodeConfig = decodeURIComponent(
-      vscode.href.replace("vscode:mcp/install?", ""),
+      vscode.href.replace("vscode://mcp/install?", "")
     );
     const parsedVscode = JSON.parse(vscodeConfig);
     expect(parsedVscode).toEqual({
@@ -56,5 +60,73 @@ describe("InstallButtons", () => {
         mnemonic: { serverUrl: "https://mcp.mnemonik.xyz/mcp" },
       },
     });
+  });
+
+  it("install_deeplinks_bake_jwt_when_logged_in", () => {
+    // When the webapp has a non-expired JWT in localStorage, both Cursor
+    // and VS Code deeplinks include the JWT in `headers.Authorization`.
+    // The IDE's deeplink handler stores it in mcp.json and sends it on
+    // every MCP call — bypasses the IDE's broken OAuth UX.
+    const futureExp = Math.floor(Date.now() / 1000) + 3600; // 1h from now
+    const headerB64 = btoa(JSON.stringify({ alg: "HS256", typ: "JWT" }))
+      .replace(/=+$/, "")
+      .replace(/\+/g, "-")
+      .replace(/\//g, "_");
+    const payloadB64 = btoa(
+      JSON.stringify({ sub: "test-pubkey", exp: futureExp })
+    )
+      .replace(/=+$/, "")
+      .replace(/\+/g, "-")
+      .replace(/\//g, "_");
+    const jwt = `${headerB64}.${payloadB64}.fakesignature`;
+    localStorage.setItem("mnemonic.jwt", jwt);
+
+    render(<InstallButtons />);
+
+    const cursor = screen.getByTestId("install-cursor") as HTMLAnchorElement;
+    const cursorUrl = new URL(cursor.href);
+    const cursorConfig = JSON.parse(
+      atob(cursorUrl.searchParams.get("config")!)
+    );
+    expect(cursorConfig.headers).toEqual({
+      Authorization: `Bearer ${jwt}`,
+    });
+
+    const vscode = screen.getByTestId("install-vscode") as HTMLAnchorElement;
+    const vscodeConfig = JSON.parse(
+      decodeURIComponent(vscode.href.replace("vscode://mcp/install?", ""))
+    );
+    expect(vscodeConfig.headers).toEqual({
+      Authorization: `Bearer ${jwt}`,
+    });
+  });
+
+  it("install_deeplinks_skip_jwt_when_expired", () => {
+    // Expired JWT in localStorage MUST NOT be baked in — would cause
+    // every IDE call to 401 from the moment of install.
+    const pastExp = Math.floor(Date.now() / 1000) - 3600; // 1h ago
+    const headerB64 = btoa(JSON.stringify({ alg: "HS256", typ: "JWT" }))
+      .replace(/=+$/, "")
+      .replace(/\+/g, "-")
+      .replace(/\//g, "_");
+    const payloadB64 = btoa(
+      JSON.stringify({ sub: "test-pubkey", exp: pastExp })
+    )
+      .replace(/=+$/, "")
+      .replace(/\+/g, "-")
+      .replace(/\//g, "_");
+    localStorage.setItem(
+      "mnemonic.jwt",
+      `${headerB64}.${payloadB64}.fakesignature`
+    );
+
+    render(<InstallButtons />);
+
+    const cursor = screen.getByTestId("install-cursor") as HTMLAnchorElement;
+    const cursorUrl = new URL(cursor.href);
+    const cursorConfig = JSON.parse(
+      atob(cursorUrl.searchParams.get("config")!)
+    );
+    expect(cursorConfig.headers).toBeUndefined();
   });
 });
