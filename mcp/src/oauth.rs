@@ -925,10 +925,31 @@ pub async fn oauth_authorization_server_metadata() -> Response {
     (StatusCode::OK, Json(body)).into_response()
 }
 
-/// `GET /.well-known/oauth-protected-resource` — MCP spec metadata document.
+/// `GET /.well-known/oauth-protected-resource` — MCP spec metadata document
+/// for the server origin as a whole.
 pub async fn oauth_protected_resource_metadata() -> Response {
     let body = serde_json::json!({
         "resource": SERVER_ORIGIN,
+        "authorization_servers": [SERVER_ORIGIN],
+        "scopes_supported": ["mcp"],
+        "bearer_methods_supported": ["header"],
+    });
+    (StatusCode::OK, Json(body)).into_response()
+}
+
+/// `GET /.well-known/oauth-protected-resource/mcp` — RFC 9728 §3.1
+/// path-specific protected-resource metadata. The `resource` value here is
+/// `<origin>/mcp` to match the URL the MCP client is actually connecting to.
+///
+/// Cursor's MCP OAuth provider (3.2+) requests this path-specific endpoint
+/// FIRST, falls back to the root `/.well-known/oauth-protected-resource`
+/// only if missing, and silently aborts the OAuth flow if the `resource`
+/// claim does not match the URL it is connecting to. Without this endpoint
+/// returning the path-qualified resource value, Cursor never opens the
+/// browser to launch /oauth/authorize.
+pub async fn oauth_protected_resource_metadata_mcp() -> Response {
+    let body = serde_json::json!({
+        "resource": format!("{SERVER_ORIGIN}/mcp"),
         "authorization_servers": [SERVER_ORIGIN],
         "scopes_supported": ["mcp"],
         "bearer_methods_supported": ["header"],
