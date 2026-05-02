@@ -48,7 +48,7 @@ function cursorDeeplink(): string {
 function vscodeDeeplink(): string {
   // VS Code 1.93+ MCP install deeplink format:
   //
-  //     vscode:mcp/install?<URL-encoded-JSON-config>
+  //     vscode://mcp/install?<URL-encoded-JSON-config>
   //
   // The whole query string is a single URL-encoded JSON object, NOT
   // multiple `key=value` query params. Using URLSearchParams here would
@@ -56,13 +56,20 @@ function vscodeDeeplink(): string {
   // browser opens VS Code but the install dialog never appears (this is
   // exactly the bug a user hit during T15 post-deploy QA).
   //
+  // The double-slash after the scheme matters for Safari (16+) and some
+  // mobile browsers: they reject opaque URIs (`vscode:mcp/...` with no
+  // authority component) as malformed and surface "address is invalid"
+  // before the OS scheme handler ever sees the URL. macOS's URL routing
+  // accepts both `vscode:` and `vscode://` for VS Code, so always emit the
+  // hierarchical form for cross-browser compatibility.
+  //
   // Per VS Code MCP docs (code.visualstudio.com/docs/copilot/customization/mcp-servers
   // → "Use MCP install links"):
   //   - HTTP transport: { name, type: "http", url }
   //   - stdio transport: { name, command, args }
   // We use HTTP (streamable per Decision 1).
   const config = { name: "Mnemonic", type: "http", url: MCP_URL };
-  return `vscode:mcp/install?${encodeURIComponent(JSON.stringify(config))}`;
+  return `vscode://mcp/install?${encodeURIComponent(JSON.stringify(config))}`;
 }
 
 // JSON snippet that goes into `~/.codeium/windsurf/mcp_config.json`. WindSurf

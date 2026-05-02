@@ -23,9 +23,9 @@ describe("InstallButtons", () => {
     // separate `name=&url=` query params — VS Code MCP install dialog only
     // recognizes the JSON-blob format).
     const vscode = screen.getByTestId("install-vscode") as HTMLAnchorElement;
-    expect(vscode.href.startsWith("vscode:mcp/install?")).toBe(true);
+    expect(vscode.href.startsWith("vscode://mcp/install?")).toBe(true);
     const vscodeConfig = decodeURIComponent(
-      vscode.href.replace("vscode:mcp/install?", "")
+      vscode.href.replace("vscode://mcp/install?", "")
     );
     const parsedVscode = JSON.parse(vscodeConfig);
     expect(parsedVscode).toEqual({
