@@ -1039,6 +1039,29 @@ const MAX_PEEK_BODY: usize = 1024 * 1024;
 /// `notifications/initialized` immediately after `initialize` response).
 const ALLOWLIST_METHODS: &[&str] = &["initialize", "tools/list", "ping"];
 
+/// Tool names within `tools/call` that bypass JWT validation. Used by
+/// `mcp_auth` so an MCP client (Cursor, Claude.ai) can ask the server "am I
+/// authenticated and where do I authorize" without first having a token.
+/// Cursor's MCP UI has no native Connect/Authorize button for non-directory
+/// servers; without an unauth-callable hint tool, the chat agent has no way
+/// to surface the install/authorize URL to the user.
+const ALLOWLIST_UNAUTH_TOOLS: &[&str] = &["mcp_auth"];
+
+/// Inspect a JSON-RPC body for `tools/call` invocations whose `params.name`
+/// is in `ALLOWLIST_UNAUTH_TOOLS`. Returns true iff the request is one of
+/// those tool calls (so the middleware can let it through without a JWT).
+fn is_unauth_tool_call(bytes: &[u8]) -> bool {
+    let val: Value = match serde_json::from_slice(bytes) {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+    let name = val
+        .pointer("/params/name")
+        .and_then(|n| n.as_str())
+        .unwrap_or("");
+    ALLOWLIST_UNAUTH_TOOLS.contains(&name)
+}
+
 /// Extract the JSON-RPC `method` field from a request body without consuming
 /// the parser state. Returns `None` if the body is not valid JSON or the
 /// `method` field is missing/non-string. Cheap — does not allocate the full
@@ -1117,7 +1140,17 @@ pub async fn bearer_auth_middleware(
             // `notifications/*` methods are also pass-through. Without this
             // Cursor's post-initialize `notifications/initialized` is rejected
             // with 401, breaking the handshake.
-            ALLOWLIST_METHODS.contains(&m) || m.starts_with("notifications/")
+            if ALLOWLIST_METHODS.contains(&m) || m.starts_with("notifications/") {
+                return true;
+            }
+            // `tools/call` is normally gated, but specific tool names listed
+            // in ALLOWLIST_UNAUTH_TOOLS (e.g. `mcp_auth`) are callable
+            // without a JWT so the agent can fetch authorize hints before it
+            // has a token.
+            if m == "tools/call" {
+                return is_unauth_tool_call(&body_bytes);
+            }
+            false
         })
         .unwrap_or(false);
 
