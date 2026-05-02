@@ -5,10 +5,15 @@
 ## TL;DR
 
 ```bash
-npx @mnemonik-xyz/cli init
+# 1. Open https://mnemonik.xyz/install in your browser
+# 2. Click "Send to CLI" → copy the ticket UUID
+# 3. Run:
+npx @mnemonik-xyz/cli init --ticket <uuid>
 npx @mnemonik-xyz/cli login
 npx @mnemonik-xyz/cli sign "first memory"
 ```
+
+(If you prefer a standalone CLI-only keypair without webapp pairing, replace step 3's first command with `npx @mnemonik-xyz/cli init --standalone`.)
 
 That's it. You now have a verifiable, persistent memory anchored against the production Mnemonic server.
 
@@ -16,15 +21,31 @@ That's it. You now have a verifiable, persistent memory anchored against the pro
 
 ## Step-by-step
 
-### 1. Generate your identity (5 seconds)
+### 1. Set up your identity (10 seconds)
+
+Two paths — pick one:
+
+**Recommended — pair with the webapp** (keeps CLI + browser keypairs in sync, so signs from Cursor / Claude.ai / VS Code Just Work):
+
+1. Open `https://mnemonik.xyz/install` in your browser.
+2. Click **"Send to CLI"** → copy the ticket UUID it shows.
+3. Run:
+
+   ```bash
+   npx @mnemonik-xyz/cli init --ticket <uuid>
+   ```
+
+   This imports the webapp's localStorage Ed25519 keypair into `~/.mnemonic/identity.json` (mode 0600). Same keypair on both sides → no `pending bundle owner mismatch` later.
+
+**Standalone** — CLI-only, no webapp pairing (advanced; use only if you do not plan to use the webapp / IDE integrations):
 
 ```bash
-npx @mnemonik-xyz/cli init
+npx @mnemonik-xyz/cli init --standalone
 ```
 
-Creates an Ed25519 keypair at `~/.mnemonic/identity.json` (mode 0600 — only readable by you). This key proves *you* signed every memory; it never leaves the host.
+Generates a fresh Ed25519 keypair, also at `~/.mnemonic/identity.json` mode 0600. The key never leaves the host.
 
-If `~/.mnemonic/identity.json` already exists, the command refuses to overwrite. Pass `--force` to replace it (only if you have a backup — losing the key means losing access to memories signed under it).
+If `~/.mnemonic/identity.json` already exists, both modes refuse to overwrite. Pass `--force` to replace it (only if you have a backup — losing the key means losing access to memories signed under it).
 
 ### 2. Authenticate against the hosted server (10 seconds)
 

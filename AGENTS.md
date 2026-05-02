@@ -8,9 +8,12 @@ Mnemonic Protocol is itself an *agent service*: an MCP server that any AI agent 
 
 ```bash
 # Terminal
-npx @mnemonik-xyz/cli init
+# Pair with the webapp identity (open mnemonik.xyz/install, click Send to CLI):
+npx @mnemonik-xyz/cli init --ticket <uuid>
 npx @mnemonik-xyz/cli login
 npx @mnemonik-xyz/cli sign "first memory"
+
+# Or standalone (CLI-only): npx @mnemonik-xyz/cli init --standalone
 ```
 
 For Claude / Cursor / VS Code / Windsurf — install from [mnemonik.xyz/install](https://mnemonik.xyz/install) (one-click connector). HTTP MCP endpoint: `https://mcp.mnemonik.xyz/mcp`. OAuth 2.1 + PKCE.

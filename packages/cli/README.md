@@ -21,29 +21,50 @@ Requires Node ≥ 20 (or equivalent Bun / Deno).
 
 ## Quick start
 
+**Recommended (paired with the webapp — keeps CLI + browser keypairs in sync):**
+
 ```bash
-mnemonic init && mnemonic login && mnemonic sign "hello"
+# 1. Open https://mnemonik.xyz/install in your browser
+# 2. Click "Send to CLI" — copy the ticket UUID
+# 3. Paste it back into the terminal:
+mnemonic init --ticket <uuid>
+mnemonic login
+mnemonic sign "hello"
 ```
 
-`init` creates `~/.mnemonic/identity.json` (mode 0600). `login` opens
-your browser, completes the OAuth 2.1 + PKCE handshake against
-`https://mcp.mnemonik.xyz`, and persists the JWT to
-`~/.mnemonic/token.json` (mode 0600). `sign` produces a verifiable
-attestation backed by the COSE_Sign1 envelope of your local keypair.
+**Standalone (CLI-only, no webapp pairing):**
+
+```bash
+mnemonic init --standalone && mnemonic login && mnemonic sign "hello"
+```
+
+> **Why the mode flag?** Pre-0.1.6, `mnemonic init` (no flags) silently generated a fresh keypair that did NOT match the webapp's localStorage keypair. That caused "pending bundle owner mismatch" 403s on every browser-mediated sign. From 0.1.6 forward you must explicitly pick a mode.
 
 ## Commands
 
-### `mnemonic init [--force]`
+### `mnemonic init [--ticket <uuid> | --standalone] [--force]`
 
-Generate a fresh keypair at `~/.mnemonic/identity.json`. Refuses to
-overwrite an existing identity unless `--force` is passed.
+Set up the CLI identity at `~/.mnemonic/identity.json`. Pick exactly one mode:
 
-```bash
-$ mnemonic init
-identity created: /Users/you/.mnemonic/identity.json
-pubkey: 6ZsT...3kQp
-did:    did:sol:6ZsT...3kQp
-```
+- **`--ticket <uuid>`** (recommended) — redeem a one-time ticket from the webapp's "Send to CLI" button. The CLI imports the webapp's localStorage keypair, so future browser-mediated signs Just Work.
+
+  ```bash
+  $ mnemonic init --ticket 550e8400-e29b-41d4-a716-446655440000
+  identity imported: /Users/you/.mnemonic/identity.json
+  pubkey: 6ZsT...3kQp
+  did:    did:sol:6ZsT...3kQp
+  ```
+
+- **`--standalone`** — generate a fresh, CLI-only keypair. The keypair will NOT match any browser localStorage; signs from Cursor / VS Code / Claude.ai will fail until you align the keys via `mnemonic identity import`. Pre-0.1.6 default behavior, opt-in for advanced use.
+
+  ```bash
+  $ mnemonic init --standalone
+  identity created: /Users/you/.mnemonic/identity.json
+  pubkey: 6ZsT...3kQp
+  did:    did:sol:6ZsT...3kQp
+  ```
+
+`--force` overwrites an existing `identity.json`. Use with care — losing the previous keypair means losing access to memories signed under it. Run `mnemonic identity export --file backup.json` first.
 
 ### `mnemonic login [--token <jwt>] [--base-url <url>]`
 

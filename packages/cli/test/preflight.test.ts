@@ -65,7 +65,7 @@ describe("init clears stale token on pubkey mismatch", () => {
     );
     expect(existsSync(stalePath)).toBe(true);
 
-    await runInit({});
+    await runInit({ standalone: true });
 
     // token.json deleted.
     expect(existsSync(stalePath)).toBe(false);
@@ -80,7 +80,7 @@ describe("init clears stale token on pubkey mismatch", () => {
   it("init_keeps_matching_token", async () => {
     // Run init once to learn what pubkey the WASM mock will emit, then save
     // a token whose sub matches that very pubkey, then re-run init --force.
-    await runInit({});
+    await runInit({ standalone: true });
     const idPath = join(dir, "identity.json");
     const id = JSON.parse(readFileSync(idPath, "utf8")) as {
       pubkey_base58: string;
@@ -111,7 +111,9 @@ describe("init clears stale token on pubkey mismatch", () => {
     });
     // init without --force throws because identity.json exists; token is
     // untouched.
-    await expect(runInit({})).rejects.toBeInstanceOf(UserError);
+    await expect(runInit({ standalone: true })).rejects.toBeInstanceOf(
+      UserError
+    );
     expect(existsSync(stalePath)).toBe(true);
     const tok = JSON.parse(readFileSync(stalePath, "utf8")) as {
       sub: string;

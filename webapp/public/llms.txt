@@ -20,10 +20,14 @@ Mnemonic gives AI agents a persistent memory that any third party can verify:
 ## Use it from an AI client
 
 ```bash
-npx @mnemonik-xyz/cli init
+# Recommended: pair with the webapp (open mnemonik.xyz/install,
+# click "Send to CLI", paste the ticket UUID below).
+npx @mnemonik-xyz/cli init --ticket <uuid>
 npx @mnemonik-xyz/cli login
 npx @mnemonik-xyz/cli sign "first memory"
 npx @mnemonik-xyz/cli recall "first"
+
+# Or standalone CLI-only:  npx @mnemonik-xyz/cli init --standalone
 ```
 
 For Claude / Cursor / VS Code / Windsurf, install the MCP server connector
