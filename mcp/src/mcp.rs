@@ -590,9 +590,30 @@ async fn handle_tool_call(
         _ => return Err(format!("unknown tool: {name}")),
     };
 
-    Ok(serde_json::json!({
+    // MCP tool envelope. The `isError: true` flag is what makes a tool
+    // call surface as a "tool execution failed" in MCP clients (Cursor /
+    // Claude.ai / VS Code chat UIs) instead of as "successfully called".
+    //
+    // For `mcp_auth` specifically: the user reported that Cursor renders
+    // a successful tool-call envelope (HTTP 200, valid JSON) as
+    // "Successfully authenticated MCP server" regardless of the JSON
+    // payload's `status` field. The fix is to mark the response as an
+    // error WHEN our payload's `status` is "unauthorized" — that way
+    // Cursor displays the error text (which contains the install_url
+    // hint) rather than masking it under a misleading success message.
+    let is_unauth_response = name == "mcp_auth"
+        && result
+            .get("status")
+            .and_then(|s| s.as_str())
+            .map(|s| s == "unauthorized" || s == "not_found")
+            .unwrap_or(false);
+    let mut envelope = serde_json::json!({
         "content": [{"type": "text", "text": serde_json::to_string_pretty(&result).unwrap_or_default()}]
-    }))
+    });
+    if is_unauth_response {
+        envelope["isError"] = serde_json::Value::Bool(true);
+    }
+    Ok(envelope)
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

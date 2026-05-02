@@ -147,22 +147,27 @@ describe("CLI scenarios", () => {
         spawnCli(cfgDir, server.url, args);
 
       try {
-        // ── init ────────────────────────────────────────────────────────────
-        const r1 = await run(["--json", "init"]);
+        // ── init (no flags) — 0.1.6 BREAKING: must error with "pick a mode"
+        const r0 = await run(["init"]);
+        expect(r0.exitCode).toBe(1);
+        expect(r0.stderr).toMatch(/pick a mode/i);
+
+        // ── init --standalone ───────────────────────────────────────────────
+        const r1 = await run(["--json", "init", "--standalone"]);
         expect(r1.exitCode).toBe(0);
         expect(existsSync(join(cfgDir, "identity.json"))).toBe(true);
         const initData = JSON.parse(r1.stdout);
         expect(typeof initData.pubkey).toBe("string");
         expect(initData.pubkey.length).toBeGreaterThan(0);
 
-        // ── init refuse-overwrite ───────────────────────────────────────────
-        const r2 = await run(["init"]);
+        // ── init --standalone refuse-overwrite ──────────────────────────────
+        const r2 = await run(["init", "--standalone"]);
         expect(r2.exitCode).toBe(1); // UserError
         expect(r2.stderr).toMatch(/already exists/);
 
-        // ── init --force overwrites ─────────────────────────────────────────
+        // ── init --standalone --force overwrites ────────────────────────────
         const before = readFileSync(join(cfgDir, "identity.json"), "utf8");
-        const r3 = await run(["init", "--force"]);
+        const r3 = await run(["init", "--standalone", "--force"]);
         expect(r3.exitCode).toBe(0);
         const after = readFileSync(join(cfgDir, "identity.json"), "utf8");
         expect(after).not.toBe(before);
