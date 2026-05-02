@@ -1133,13 +1133,44 @@ pub async fn bearer_auth_middleware(
 }
 
 /// Emit a JSON-RPC-shaped 401 envelope for failed bearer-auth checks.
+///
+/// MCP authorization spec + RFC 6750 §3 require a `WWW-Authenticate` header
+/// on any 401 from a Bearer-protected resource. The `resource_metadata`
+/// parameter tells the MCP client where the protected-resource metadata
+/// lives (`/.well-known/oauth-protected-resource`); without this header,
+/// some MCP-OAuth clients (Cursor's recent versions) fail the connection
+/// silently instead of prompting the user to authenticate.
+///
+/// We always emit the same realm + resource_metadata pair regardless of
+/// `status` because the client behavior is the same for any 401-class auth
+/// failure (missing/invalid/expired Bearer).
 fn jsonrpc_unauthorized(status: StatusCode, msg: &str) -> Response {
     let body = serde_json::json!({
         "jsonrpc": "2.0",
         "id": Value::Null,
         "error": {"code": -32001, "message": format!("unauthorized: {msg}")}
     });
-    (status, Json(body)).into_response()
+    let mut resp = (status, Json(body)).into_response();
+    if status == StatusCode::UNAUTHORIZED {
+        // Must be a single header value per RFC 7235 §4.1. Choose `error=` per
+        // RFC 6750 §3.1 to match invalid_token semantics; `error_description`
+        // is the human-readable hint the client may surface to the user.
+        let www_auth = format!(
+            "Bearer realm=\"{issuer}\", error=\"invalid_token\", \
+             error_description=\"{esc_msg}\", \
+             resource_metadata=\"{issuer}/.well-known/oauth-protected-resource\"",
+            issuer = "https://mcp.mnemonik.xyz",
+            // Strip embedded double-quotes / CR / LF from the message to keep
+            // the header well-formed; we don't expect any in caller-supplied
+            // strings but defense-in-depth is cheap.
+            esc_msg = msg.replace('"', "'").replace(['\r', '\n'], " "),
+        );
+        if let Ok(hv) = axum::http::HeaderValue::from_str(&www_auth) {
+            resp.headers_mut()
+                .insert(axum::http::header::WWW_AUTHENTICATE, hv);
+        }
+    }
+    resp
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────
