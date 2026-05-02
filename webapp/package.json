@@ -32,5 +32,18 @@
     "typescript": "~5.7.2",
     "vite": "^6.3.3",
     "vitest": "^2.1.5"
+  },
+  "//optionalDependencies": "Platform-specific native bindings for @tailwindcss/oxide and lightningcss. npm has a long-standing bug (https://github.com/npm/cli/issues/4828) where optional native subpackages of transitive deps are not installed cross-platform — a package-lock generated on macOS arm64 will not install the Linux x64 binding when re-installed on Linux, breaking VPS deploy. Pinning all dev + deploy targets here as direct optionalDependencies forces `npm install` to fetch them on the running platform regardless of which platform produced the lockfile. Versions MUST track the parent package version exactly (npm enforces strict match on optional native subpackages).",
+  "optionalDependencies": {
+    "@tailwindcss/oxide-darwin-arm64": "4.2.4",
+    "@tailwindcss/oxide-darwin-x64": "4.2.4",
+    "@tailwindcss/oxide-linux-x64-gnu": "4.2.4",
+    "@tailwindcss/oxide-linux-arm64-gnu": "4.2.4",
+    "@tailwindcss/oxide-win32-x64-msvc": "4.2.4",
+    "lightningcss-darwin-arm64": "1.32.0",
+    "lightningcss-darwin-x64": "1.32.0",
+    "lightningcss-linux-x64-gnu": "1.32.0",
+    "lightningcss-linux-arm64-gnu": "1.32.0",
+    "lightningcss-win32-x64-msvc": "1.32.0"
   }
 }
