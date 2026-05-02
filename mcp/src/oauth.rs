@@ -128,11 +128,18 @@ struct IssuedCode {
     exp: u64,
 }
 
+/// Dynamic Client Registration record (client_id -> allowed redirect URIs).
+#[derive(Debug, Clone)]
+struct RegisteredClient {
+    redirect_uris: Vec<String>,
+}
+
 /// Shared OAuth state — pending challenges + issued codes, both LRU+TTL bound.
 /// Wrap in `Arc` and inject into Axum routers via `with_state`.
 pub struct OAuthState {
     pending: Mutex<LruCache<String, PendingAuthorize>>,
     codes: Mutex<LruCache<String, IssuedCode>>,
+    clients: Mutex<LruCache<String, RegisteredClient>>,
     /// HS256 signing key. Constructed once from `MCP_JWT_SECRET` at startup.
     jwt_encoding_key: EncodingKey,
     jwt_decoding_key: DecodingKey,
@@ -152,6 +159,7 @@ impl OAuthState {
         Self {
             pending: Mutex::new(LruCache::new(cap)),
             codes: Mutex::new(LruCache::new(cap)),
+            clients: Mutex::new(LruCache::new(cap)),
             jwt_encoding_key: EncodingKey::from_secret(secret),
             jwt_decoding_key: DecodingKey::from_secret(secret),
         }
@@ -183,6 +191,33 @@ impl OAuthState {
         };
         let mut guard = self.pending.lock().expect("pending mutex poisoned");
         guard.put(state, entry);
+    }
+
+    /// Persist Dynamic Client Registration redirects for the issued client_id.
+    pub fn register_client(&self, client_id: String, redirect_uris: Vec<String>) {
+        let mut guard = self.clients.lock().expect("clients mutex poisoned");
+        guard.put(client_id, RegisteredClient { redirect_uris });
+    }
+
+    /// Validate redirect_uri against DCR first, then the static fallback list.
+    pub fn allows_redirect(&self, uri: &str, client_id: &str) -> bool {
+        if self.registered_redirect_allowed(uri, client_id) {
+            return true;
+        }
+        allowed_redirect(uri, client_id)
+    }
+
+    fn registered_redirect_allowed(&self, uri: &str, client_id: &str) -> bool {
+        let mut guard = self.clients.lock().expect("clients mutex poisoned");
+        guard
+            .get(client_id)
+            .map(|client| {
+                client
+                    .redirect_uris
+                    .iter()
+                    .any(|registered| registered_redirect_matches(registered, uri))
+            })
+            .unwrap_or(false)
     }
 }
 
@@ -398,7 +433,7 @@ pub async fn authorize_init_handler(
     // created with an attacker-controlled callback. Without this gate any
     // `client_id` could ride the OAuth flow to drive the issued code at any
     // origin — open-redirect via the OAuth surface.
-    if !allowed_redirect(&q.redirect_uri, &q.client_id) {
+    if !state.allows_redirect(&q.redirect_uri, &q.client_id) {
         return oauth_error(
             StatusCode::BAD_REQUEST,
             "redirect_uri is not on the server allowlist",
@@ -581,6 +616,50 @@ pub fn allowed_redirect(uri: &str, client_id: &str) -> bool {
         return true;
     }
     false
+}
+
+/// DCR redirect matching. Exact matches always pass. Loopback callbacks also
+/// match when host and path are identical but the port differs, per RFC 8252
+/// section 7.3 and VS Code's MCP OAuth behavior.
+fn registered_redirect_matches(registered: &str, requested: &str) -> bool {
+    if registered == requested {
+        return true;
+    }
+
+    match (
+        split_loopback_redirect(registered),
+        split_loopback_redirect(requested),
+    ) {
+        (Some((registered_host, registered_path)), Some((requested_host, requested_path))) => {
+            registered_host == requested_host && registered_path == requested_path
+        }
+        _ => false,
+    }
+}
+
+fn split_loopback_redirect(uri: &str) -> Option<(&'static str, &str)> {
+    let (host, rest) = if let Some(rest) = uri.strip_prefix("http://127.0.0.1") {
+        ("127.0.0.1", rest)
+    } else if let Some(rest) = uri.strip_prefix("http://[::1]") {
+        ("::1", rest)
+    } else {
+        return None;
+    };
+
+    let path = if let Some(rest) = rest.strip_prefix(':') {
+        let slash = rest.find('/')?;
+        let port = &rest[..slash];
+        if port.is_empty() || !port.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        &rest[slash..]
+    } else if rest.starts_with('/') {
+        rest
+    } else {
+        return None;
+    };
+
+    Some((host, path))
 }
 
 /// Match `^http://127\.0\.0\.1:\d+/callback$` and
@@ -971,11 +1050,13 @@ pub async fn oauth_protected_resource_metadata_mcp() -> Response {
 /// `https://vscode.dev/redirect`, `https://claude.ai/...`) and we mint a
 /// `client_id` for them to use against `/oauth/authorize` and `/oauth/token`.
 ///
-/// We do not persist registrations — `client_id` is opaque to us beyond
-/// participating in the canonical-CBOR challenge construction (Decision 10).
-/// A client that loses its `client_id` re-registers; replay risk is bounded
-/// by the per-`state` single-use guard already in place.
-pub async fn oauth_register_handler(body: axum::body::Bytes) -> Response {
+/// Registrations are stored in-memory and bounded by the same LRU cap as
+/// pending auth state. A client that loses its `client_id` re-registers; replay
+/// risk is bounded by the per-`state` single-use guard already in place.
+pub async fn oauth_register_handler(
+    State(state): State<Arc<OAuthState>>,
+    body: axum::body::Bytes,
+) -> Response {
     // Parse request body opportunistically — most fields are echoed back as-is
     // per RFC 7591. Tolerate empty / non-JSON bodies (return defaults).
     let req: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
@@ -989,6 +1070,15 @@ pub async fn oauth_register_handler(body: axum::body::Bytes) -> Response {
         .get("redirect_uris")
         .cloned()
         .unwrap_or_else(|| serde_json::json!([]));
+    let registered_redirects = redirect_uris
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.as_str().map(str::to_string))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
     let client_name = req
         .get("client_name")
         .and_then(|v| v.as_str())
@@ -1009,7 +1099,7 @@ pub async fn oauth_register_handler(body: axum::body::Bytes) -> Response {
         .to_string();
 
     let resp = serde_json::json!({
-        "client_id": client_id,
+        "client_id": client_id.clone(),
         "client_id_issued_at": issued_at,
         "redirect_uris": redirect_uris,
         "client_name": client_name,
@@ -1017,6 +1107,8 @@ pub async fn oauth_register_handler(body: axum::body::Bytes) -> Response {
         "response_types": response_types,
         "token_endpoint_auth_method": token_endpoint_auth_method,
     });
+
+    state.register_client(client_id, registered_redirects);
 
     (StatusCode::CREATED, Json(resp)).into_response()
 }
@@ -1813,6 +1905,17 @@ mod tests {
             .with_state(state)
     }
 
+    fn build_init_register_router(state: Arc<OAuthState>) -> Router {
+        use axum::routing::get;
+        Router::new()
+            .route(
+                "/oauth/authorize",
+                get(authorize_init_handler).post(authorize_handler),
+            )
+            .route("/oauth/register", post(oauth_register_handler))
+            .with_state(state)
+    }
+
     #[tokio::test]
     async fn test_authorize_init_creates_pending() {
         // Given a fresh OAuthState, GET /oauth/authorize?...code_challenge_method=S256
@@ -1955,6 +2058,59 @@ mod tests {
             .unwrap();
         let resp2 = app2.oneshot(post_req).await.unwrap();
         assert_eq!(resp2.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_oauth_register_then_authorize_accepts_vscode_redirects() {
+        let app = build_init_register_router(fresh_state());
+
+        let register_req = Request::builder()
+            .method("POST")
+            .uri("/oauth/register")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "client_name": "VS Code",
+                    "redirect_uris": [
+                        "https://vscode.dev/redirect",
+                        "http://127.0.0.1:33418/"
+                    ],
+                    "grant_types": ["authorization_code"],
+                    "response_types": ["code"],
+                    "token_endpoint_auth_method": "none"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let register_resp = app.clone().oneshot(register_req).await.unwrap();
+        assert_eq!(register_resp.status(), StatusCode::CREATED);
+        let register_body: Value = serde_json::from_slice(
+            &register_resp
+                .into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes(),
+        )
+        .unwrap();
+        let client_id = register_body["client_id"].as_str().expect("client_id");
+
+        let authorize_uri = format!(
+            "/oauth/authorize\
+             ?client_id={client_id}\
+             &redirect_uri=http%3A%2F%2F127.0.0.1%3A59656%2F\
+             &code_challenge=abc\
+             &code_challenge_method=S256\
+             &state=vs-code-state"
+        );
+        let authorize_req = Request::builder()
+            .method("GET")
+            .uri(authorize_uri)
+            .header("accept", "application/json")
+            .body(Body::empty())
+            .unwrap();
+        let authorize_resp = app.oneshot(authorize_req).await.unwrap();
+        assert_eq!(authorize_resp.status(), StatusCode::OK);
     }
 
     #[tokio::test]
@@ -2143,7 +2299,8 @@ mod tests {
         let body_bytes = resp.into_body().collect().await.unwrap().to_bytes();
         let parsed: Value = serde_json::from_slice(&body_bytes).unwrap();
         assert_eq!(
-            parsed["resource"], format!("{SERVER_ORIGIN}/mcp"),
+            parsed["resource"],
+            format!("{SERVER_ORIGIN}/mcp"),
             "resource MUST equal the URL the MCP client connects to (path-specific)"
         );
         assert_eq!(parsed["authorization_servers"][0], SERVER_ORIGIN);
@@ -2309,16 +2466,28 @@ mod tests {
     fn test_is_unauth_tool_call_helper() {
         // Helper function: peeks params.name within tools/call body.
         let yes = b"{\"jsonrpc\":\"2.0\",\"method\":\"tools/call\",\"params\":{\"name\":\"mcp_auth\"},\"id\":1}";
-        assert!(is_unauth_tool_call(yes), "mcp_auth must be in unauth tool allowlist");
+        assert!(
+            is_unauth_tool_call(yes),
+            "mcp_auth must be in unauth tool allowlist"
+        );
 
         let no = b"{\"jsonrpc\":\"2.0\",\"method\":\"tools/call\",\"params\":{\"name\":\"mnemonic_whoami\"},\"id\":1}";
-        assert!(!is_unauth_tool_call(no), "non-allowlisted tools must not bypass auth");
+        assert!(
+            !is_unauth_tool_call(no),
+            "non-allowlisted tools must not bypass auth"
+        );
 
         let malformed = b"not-json-at-all";
-        assert!(!is_unauth_tool_call(malformed), "malformed body falls back to gated");
+        assert!(
+            !is_unauth_tool_call(malformed),
+            "malformed body falls back to gated"
+        );
 
         let no_params = b"{\"jsonrpc\":\"2.0\",\"method\":\"tools/call\",\"id\":1}";
-        assert!(!is_unauth_tool_call(no_params), "missing params.name falls back to gated");
+        assert!(
+            !is_unauth_tool_call(no_params),
+            "missing params.name falls back to gated"
+        );
     }
 
     #[tokio::test]
@@ -2432,6 +2601,39 @@ mod tests {
                 "loopback ipv6 must reject client_id={other:?}"
             );
         }
+    }
+
+    #[test]
+    fn test_oauth_registered_redirects_allow_vscode_callbacks() {
+        let st = fresh_state();
+        let client_id = "vscode-dcr-client".to_string();
+        st.register_client(
+            client_id.clone(),
+            vec![
+                "https://vscode.dev/redirect".to_string(),
+                "http://127.0.0.1:33418/".to_string(),
+                "http://[::1]:33418/".to_string(),
+            ],
+        );
+
+        assert!(st.allows_redirect("https://vscode.dev/redirect", &client_id));
+        assert!(st.allows_redirect("http://127.0.0.1:59656/", &client_id));
+        assert!(st.allows_redirect("http://[::1]:59656/", &client_id));
+        assert!(!st.allows_redirect("https://evil.com/redirect", &client_id));
+        assert!(!st.allows_redirect("http://127.0.0.1.evil.com:59656/", &client_id));
+    }
+
+    #[test]
+    fn test_oauth_registered_redirect_loopback_preserves_path() {
+        let st = fresh_state();
+        let client_id = "registered-client".to_string();
+        st.register_client(
+            client_id.clone(),
+            vec!["http://127.0.0.1:33418/callback".to_string()],
+        );
+
+        assert!(st.allows_redirect("http://127.0.0.1:50000/callback", &client_id));
+        assert!(!st.allows_redirect("http://127.0.0.1:50000/other", &client_id));
     }
 
     #[tokio::test]
