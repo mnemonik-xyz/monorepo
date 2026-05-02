@@ -184,7 +184,90 @@ async fn sign_memory_deferred(
         "approve_url": format!("https://mnemonik.xyz/sign/{assigned_id}"),
         "correlation_id": assigned_id,
         "expires_in": 300,
+        "next_step": format!(
+            "Tell the user to open approve_url in their browser and click \
+             Approve. After they approve (typically 10-30 seconds), call \
+             mnemonic_check_pending with correlation_id={assigned_id} to \
+             retrieve the on-chain solana_tx + arweave_tx for this memory."
+        ),
     }))
+}
+
+/// `mnemonic_check_pending` — resolve a deferred-sign correlation_id to its
+/// final on-chain state once the user has approved the COSE envelope in the
+/// browser. Returns one of:
+///
+///   - `{status: "signed", attestation_id, content_hash, solana_tx,
+///     arweave_tx, signer_pubkey, signed_at, solana_explorer_url,
+///     arweave_url}` — sign-callback completed, row persisted.
+///   - `{status: "awaiting_signature", correlation_id, expires_at}` —
+///     bundle still parked in the LRU; user has not yet approved.
+///   - `{status: "not_found", correlation_id}` — never issued, expired
+///     past TTL without sign, or already consumed and never persisted
+///     (rare — implies a sign-callback failure).
+///
+/// Capability auth: `correlation_id` is the only credential. Same model as
+/// `/api/sign-callback` — the signed bytes are content-addressed via
+/// blake3, so leaking the routing token does not enable forgery.
+pub async fn check_pending(
+    pending: &PendingBundles,
+    store: &std::sync::Mutex<SqliteStore>,
+    correlation_id: &str,
+) -> serde_json::Value {
+    // 1. DB lookup first — happy path is "row already persisted".
+    let signed = {
+        let store_g = match store.lock() {
+            Ok(g) => g,
+            Err(_) => {
+                return serde_json::json!({
+                    "status": "error",
+                    "message": "store mutex poisoned",
+                    "correlation_id": correlation_id,
+                });
+            }
+        };
+        store_g.find_by_correlation_id(correlation_id).ok().flatten()
+    };
+    if let Some((attestation_id, content_hash, solana_tx, arweave_tx, signer_pubkey, created_at)) =
+        signed
+    {
+        let solana_explorer_url = if solana_tx.starts_with("local:") {
+            String::new()
+        } else {
+            format!("https://solscan.io/tx/{solana_tx}")
+        };
+        let arweave_url = if arweave_tx.starts_with("local:") {
+            String::new()
+        } else {
+            format!("https://arweave.net/{arweave_tx}")
+        };
+        return serde_json::json!({
+            "status": "signed",
+            "attestation_id": attestation_id,
+            "content_hash": content_hash,
+            "solana_tx": solana_tx,
+            "arweave_tx": arweave_tx,
+            "signer_pubkey": signer_pubkey,
+            "signed_at": created_at,
+            "solana_explorer_url": solana_explorer_url,
+            "arweave_url": arweave_url,
+        });
+    }
+
+    // 2. Pending LRU — bundle parked, awaiting user approval.
+    match pending.peek_by_id(correlation_id).await {
+        Ok(entry) => serde_json::json!({
+            "status": "awaiting_signature",
+            "correlation_id": correlation_id,
+            "expires_at": entry.exp.to_rfc3339(),
+            "hint": "User has not clicked Approve yet. Poll again in a few seconds.",
+        }),
+        Err(_) => serde_json::json!({
+            "status": "not_found",
+            "correlation_id": correlation_id,
+            "hint": "Either the correlation_id was never issued, the 5-minute TTL elapsed without user approval, or the sign-callback failed mid-write. Re-issue mnemonic_sign_memory if you want a fresh bundle.",
+        }),
+    }
 }
 
 /// Stdio branch — inline server-side signing (Decision 4 single-tenant flow).

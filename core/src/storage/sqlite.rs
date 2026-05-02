@@ -199,6 +199,50 @@ fn migrate_owner_pubkey_columns(conn: &Connection) -> anyhow::Result<()> {
     }
 }
 
+/// Idempotent ADD-COLUMN migration for the deferred-sign correlation routing.
+///
+/// Adds `attestations.correlation_id TEXT` (nullable) — the routing token the
+/// HTTP/JWT browser-mediated flow uses between `mnemonic_sign_memory` (server
+/// returns `awaiting_signature` + correlation_id) and `/api/sign-callback`
+/// (webapp posts the COSE envelope back). Storing it on the persisted row
+/// lets `mnemonic_check_pending(correlation_id)` resolve the final
+/// `solana_tx` + `arweave_tx` after the user approves in the browser.
+///
+/// Partial index `WHERE correlation_id IS NOT NULL` keeps lookups O(log n)
+/// without bloating against legacy rows that pre-date the column. SQLite
+/// `ALTER TABLE ... ADD COLUMN` lacks `IF NOT EXISTS`, so presence is gated
+/// by `PRAGMA table_info`.
+fn migrate_correlation_id_column(conn: &Connection) -> anyhow::Result<()> {
+    fn has_column(conn: &Connection, table: &str, column: &str) -> anyhow::Result<bool> {
+        let mut stmt = conn
+            .prepare(&format!("PRAGMA table_info({table})"))
+            .with_context(|| format!("preparing PRAGMA table_info({table})"))?;
+        let mut rows = stmt.query([])?;
+        while let Some(row) = rows.next()? {
+            let name: String = row.get(1)?;
+            if name == column {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    if !has_column(conn, "attestations", "correlation_id")? {
+        conn.execute(
+            "ALTER TABLE attestations ADD COLUMN correlation_id TEXT",
+            [],
+        )
+        .context("adding attestations.correlation_id")?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_attestations_correlation_id
+                 ON attestations(correlation_id) WHERE correlation_id IS NOT NULL",
+            [],
+        )
+        .context("creating idx_attestations_correlation_id")?;
+    }
+    Ok(())
+}
+
 impl SqliteStore {
     pub fn open(path: &Path) -> anyhow::Result<Self> {
         if let Some(parent) = path.parent() {
@@ -216,6 +260,7 @@ impl SqliteStore {
         conn.execute_batch(SCHEMA).context("initializing schema")?;
         migrate_payment_events_unique_index(&conn)?;
         migrate_owner_pubkey_columns(&conn)?;
+        migrate_correlation_id_column(&conn)?;
         Ok(Self { conn })
     }
 
@@ -228,12 +273,59 @@ impl SqliteStore {
         conn.execute_batch(SCHEMA)?;
         migrate_payment_events_unique_index(&conn)?;
         migrate_owner_pubkey_columns(&conn)?;
+        migrate_correlation_id_column(&conn)?;
         Ok(Self { conn })
     }
 
     /// Direct access to the underlying connection for payment methods in mcp/.
     pub fn conn(&self) -> &Connection {
         &self.conn
+    }
+
+    /// Stamp `correlation_id` onto an already-persisted attestation row.
+    /// Used by `/api/sign-callback` after `save_attestation` succeeds, so
+    /// `mnemonic_check_pending(correlation_id)` can later resolve the row.
+    /// No-op (zero rows updated) if `attestation_id` is unknown.
+    pub fn set_correlation_id(
+        &self,
+        attestation_id: &str,
+        correlation_id: &str,
+    ) -> anyhow::Result<()> {
+        self.conn.execute(
+            "UPDATE attestations SET correlation_id = ?1 WHERE attestation_id = ?2",
+            params![correlation_id, attestation_id],
+        )?;
+        Ok(())
+    }
+
+    /// Resolve a persisted attestation by the deferred-sign correlation_id.
+    /// Returns `(attestation_id, content_hash, solana_tx, arweave_tx,
+    /// signer_pubkey, created_at)` or `None`.
+    ///
+    /// Bounded by the partial index `idx_attestations_correlation_id`.
+    #[allow(clippy::type_complexity)]
+    pub fn find_by_correlation_id(
+        &self,
+        correlation_id: &str,
+    ) -> anyhow::Result<Option<(String, String, String, String, String, String)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT attestation_id, content_hash, solana_tx, arweave_tx,
+                    signer_pubkey, created_at
+             FROM attestations
+             WHERE correlation_id = ?1 LIMIT 1",
+        )?;
+        let mut rows = stmt.query(params![correlation_id])?;
+        match rows.next()? {
+            Some(row) => Ok(Some((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+            ))),
+            None => Ok(None),
+        }
     }
 }
 

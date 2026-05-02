@@ -203,6 +203,17 @@ fn tool_definitions() -> Value {
                 "required": ["query"],
             },
         },
+        {
+            "name": "mnemonic_check_pending",
+            "description": "Resolves a deferred-sign correlation_id to its on-chain state. Use this AFTER mnemonic_sign_memory returns awaiting_signature and the user has approved in the browser. Returns {status: 'signed', solana_tx, arweave_tx, solana_explorer_url, arweave_url, attestation_id, ...} on success, {status: 'awaiting_signature'} if user has not approved yet, or {status: 'not_found'} if expired.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "correlation_id": {"type": "string", "description": "The correlation_id returned by mnemonic_sign_memory's awaiting_signature response"},
+                },
+                "required": ["correlation_id"],
+            },
+        },
     ])
 }
 
@@ -560,6 +571,13 @@ async fn handle_tool_call(
                 owner_pubkey,
             )
         }
+        "mnemonic_check_pending" => {
+            let cid = args["correlation_id"]
+                .as_str()
+                .ok_or("correlation_id required")?
+                .to_string();
+            tools::check_pending(&state.pending, &state.store, &cid).await
+        }
         _ => return Err(format!("unknown tool: {name}")),
     };
 
@@ -746,8 +764,8 @@ mod transport_tests {
             .expect("tools array present");
         assert_eq!(
             tools.len(),
-            5,
-            "expected 5 MCP tools in tools/list response",
+            6,
+            "expected 6 MCP tools in tools/list response (whoami, sign_memory, verify, prove_identity, recall, check_pending)",
         );
     }
 
