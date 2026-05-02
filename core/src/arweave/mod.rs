@@ -236,11 +236,15 @@ fn avro_encode_tags(tags: &[(&str, &str)]) -> Vec<u8> {
 }
 
 fn build_data_item(keypair: &Keypair, data: &[u8], tags: &[(&str, &str)]) -> Vec<u8> {
-    let sig_type: u16 = 3; // SOLANA
+    // Per ANS-104 / Irys SignatureConfig: SOLANA = 4 (sig 64B, pubkey 32B).
+    // Sending sig_type=3 (Ethereum: 65B sig + 65B pubkey) makes Irys parse
+    // the buffer at wrong offsets and read random bytes as numberOfTagsBytes,
+    // producing the misleading "Tags are too large" 400.
+    let sig_type: u16 = 4;
     let pubkey = keypair.pubkey().to_bytes();
     let avro_tags = avro_encode_tags(tags);
 
-    let msg = deep_hash_list(&[b"dataitem", b"1", b"3", &pubkey, b"", b"", &avro_tags, data]);
+    let msg = deep_hash_list(&[b"dataitem", b"1", b"4", &pubkey, b"", b"", &avro_tags, data]);
 
     let sig = keypair.sign_message(&msg);
 
