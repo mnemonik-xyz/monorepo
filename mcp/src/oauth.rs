@@ -2119,6 +2119,208 @@ mod tests {
         assert_eq!(parsed["bearer_methods_supported"][0], "header");
     }
 
+    // ── New tests for today's changes (cursor-vscode-e2e-tests feature) ────
+
+    #[tokio::test]
+    async fn test_oauth_protected_resource_metadata_mcp_path_specific() {
+        // RFC 9728 §3.1: path-specific protected-resource metadata. Cursor's
+        // MCP OAuth provider (3.2+) requests this URL FIRST and silently
+        // aborts if it 404s — falling back to the root variant whose
+        // `resource` claim doesn't match the URL the client connects to. This
+        // test guards against regression.
+        use axum::routing::get;
+        let app: Router = Router::new().route(
+            "/.well-known/oauth-protected-resource/mcp",
+            get(oauth_protected_resource_metadata_mcp),
+        );
+        let req = Request::builder()
+            .method("GET")
+            .uri("/.well-known/oauth-protected-resource/mcp")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body_bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let parsed: Value = serde_json::from_slice(&body_bytes).unwrap();
+        assert_eq!(
+            parsed["resource"], format!("{SERVER_ORIGIN}/mcp"),
+            "resource MUST equal the URL the MCP client connects to (path-specific)"
+        );
+        assert_eq!(parsed["authorization_servers"][0], SERVER_ORIGIN);
+        assert_eq!(parsed["scopes_supported"][0], "mcp");
+        assert_eq!(parsed["bearer_methods_supported"][0], "header");
+    }
+
+    #[tokio::test]
+    async fn test_401_includes_www_authenticate_header() {
+        // MCP authorization spec + RFC 6750 §3 require 401 responses from a
+        // Bearer-protected resource to advertise the realm + protected-
+        // resource metadata URL via WWW-Authenticate. Cursor / Claude.ai
+        // recent MCP OAuth providers fail silently when this header is
+        // missing. Regression guard.
+        let st = fresh_state();
+        let app = build_authn_router(st);
+        let body = serde_json::json!({"jsonrpc": "2.0", "method": "tools/call", "id": 1});
+        let req = Request::builder()
+            .method("POST")
+            .uri("/mcp")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        let www_auth = resp
+            .headers()
+            .get(axum::http::header::WWW_AUTHENTICATE)
+            .expect("401 MUST include WWW-Authenticate header (RFC 6750 §3)")
+            .to_str()
+            .expect("WWW-Authenticate must be a valid header value");
+        assert!(
+            www_auth.starts_with("Bearer "),
+            "WWW-Authenticate scheme MUST be Bearer, got: {www_auth}"
+        );
+        assert!(
+            www_auth.contains("resource_metadata="),
+            "WWW-Authenticate MUST include resource_metadata param so MCP clients can discover the metadata URL: {www_auth}"
+        );
+        assert!(
+            www_auth.contains("error=\"invalid_token\""),
+            "WWW-Authenticate SHOULD include error=invalid_token per RFC 6750: {www_auth}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_middleware_extracts_claims_on_allowlisted_request_with_valid_jwt() {
+        // The `mcp_auth` tool (and any future allowlisted-but-claims-aware
+        // tool) needs the bearer middleware to extract Claims when a valid
+        // JWT IS present, even though the request is allowlisted. Without
+        // this, allowlisted tools always see jwt_sub=None and cannot
+        // distinguish authenticated callers from unauthenticated ones.
+        use axum::{routing::post, Extension};
+        async fn echo_claims(claims: Option<Extension<Claims>>) -> String {
+            match claims {
+                Some(Extension(c)) => format!("authed:{}", c.sub),
+                None => "unauth".to_string(),
+            }
+        }
+
+        let st = fresh_state();
+        let token = issue_jwt(&st, "test-claims-sub").unwrap();
+        let app: Router = Router::new()
+            .route("/mcp", post(echo_claims))
+            .layer(axum_middleware::from_fn_with_state(
+                st.clone(),
+                bearer_auth_middleware,
+            ))
+            .with_state(st);
+
+        // Allowlisted call (mcp_auth) WITH a valid Bearer JWT — Claims must
+        // be attached to the request extensions.
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "tools/call",
+            "params": {"name": "mcp_auth", "arguments": {}},
+            "id": 1
+        });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/mcp")
+            .header("content-type", "application/json")
+            .header("authorization", format!("Bearer {token}"))
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body_bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let body_str = std::str::from_utf8(&body_bytes).unwrap();
+        assert_eq!(
+            body_str, "authed:test-claims-sub",
+            "Allowlisted handler MUST see Claims when valid JWT is present"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_middleware_allowlisted_request_without_jwt_passes_no_claims() {
+        // Mirror of the above: allowlisted call WITHOUT a Bearer header
+        // passes through, handler sees jwt_sub=None. The whole point of the
+        // allowlist is to NOT 401 when the caller has no token yet.
+        use axum::{routing::post, Extension};
+        async fn echo_claims(claims: Option<Extension<Claims>>) -> String {
+            match claims {
+                Some(Extension(_)) => "authed".to_string(),
+                None => "unauth".to_string(),
+            }
+        }
+
+        let st = fresh_state();
+        let app: Router = Router::new()
+            .route("/mcp", post(echo_claims))
+            .layer(axum_middleware::from_fn_with_state(
+                st.clone(),
+                bearer_auth_middleware,
+            ))
+            .with_state(st);
+
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "tools/call",
+            "params": {"name": "mcp_auth", "arguments": {}},
+            "id": 1
+        });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/mcp")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body_bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(std::str::from_utf8(&body_bytes).unwrap(), "unauth");
+    }
+
+    #[tokio::test]
+    async fn test_middleware_non_allowlisted_tool_call_still_requires_jwt() {
+        // The unauth-tool allowlist is NARROW: only `mcp_auth` (and future
+        // additions) bypass JWT. Other `tools/call` requests must still 401.
+        let st = fresh_state();
+        let app = build_authn_router(st);
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "tools/call",
+            "params": {"name": "mnemonic_whoami", "arguments": {}},
+            "id": 1
+        });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/mcp")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "Non-allowlisted tool calls MUST 401 without JWT"
+        );
+    }
+
+    #[test]
+    fn test_is_unauth_tool_call_helper() {
+        // Helper function: peeks params.name within tools/call body.
+        let yes = b"{\"jsonrpc\":\"2.0\",\"method\":\"tools/call\",\"params\":{\"name\":\"mcp_auth\"},\"id\":1}";
+        assert!(is_unauth_tool_call(yes), "mcp_auth must be in unauth tool allowlist");
+
+        let no = b"{\"jsonrpc\":\"2.0\",\"method\":\"tools/call\",\"params\":{\"name\":\"mnemonic_whoami\"},\"id\":1}";
+        assert!(!is_unauth_tool_call(no), "non-allowlisted tools must not bypass auth");
+
+        let malformed = b"not-json-at-all";
+        assert!(!is_unauth_tool_call(malformed), "malformed body falls back to gated");
+
+        let no_params = b"{\"jsonrpc\":\"2.0\",\"method\":\"tools/call\",\"id\":1}";
+        assert!(!is_unauth_tool_call(no_params), "missing params.name falls back to gated");
+    }
+
     #[tokio::test]
     async fn test_middleware_well_known_bypasses_auth() {
         // `.well-known/*` must bypass bearer-auth — Anthropic's connector
