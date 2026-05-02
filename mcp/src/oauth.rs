@@ -1154,14 +1154,22 @@ pub async fn bearer_auth_middleware(
         })
         .unwrap_or(false);
 
+    // Try to extract a Bearer JWT from the Authorization header. We do this
+    // for BOTH gated and allowlisted requests so the downstream handler can
+    // see `Claims` when present — the allowlist only relaxes "JWT MUST be
+    // present and valid", it does not mean "ignore the JWT if the client
+    // sent one". `mcp_auth` specifically depends on this: it is allowlisted
+    // (so unauthenticated callers get the install hint) AND it reports
+    // `status: "authenticated"` when a valid JWT IS attached.
+    let bearer = parts
+        .headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.strip_prefix("Bearer "))
+        .map(|s| s.trim().to_string());
+
     if !allowlisted {
-        // Require Bearer JWT.
-        let bearer = parts
-            .headers
-            .get(axum::http::header::AUTHORIZATION)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|s| s.strip_prefix("Bearer "))
-            .map(|s| s.trim().to_string());
+        // Gated path — JWT is required AND must verify.
         let token = match bearer {
             Some(t) if !t.is_empty() => t,
             _ => return jsonrpc_unauthorized(StatusCode::UNAUTHORIZED, "missing Bearer JWT"),
@@ -1181,8 +1189,17 @@ pub async fn bearer_auth_middleware(
         return next.run(new_req).await;
     }
 
-    // Allowlisted — re-inject the body untouched.
-    let new_req = Request::from_parts(parts, Body::from(body_bytes));
+    // Allowlisted path — JWT is OPTIONAL. If a Bearer header is present and
+    // verifies, attach Claims so `mcp_auth` (and any future allowlisted tool
+    // that wants to know the caller identity) can branch on it. If absent or
+    // invalid, proceed without Claims (allowlisted requests must not 401 on
+    // bad tokens — the whole point is the user might not yet have one).
+    let mut new_req = Request::from_parts(parts, Body::from(body_bytes));
+    if let Some(token) = bearer.filter(|t| !t.is_empty()) {
+        if let Ok(claims) = verify_jwt(&state, &token) {
+            new_req.extensions_mut().insert(claims);
+        }
+    }
     next.run(new_req).await
 }
 
