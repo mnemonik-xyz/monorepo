@@ -4,6 +4,32 @@ Items deliberately out of scope for Phase 1 (≤5 dev-days, hackathon MVP). Arch
 
 ---
 
+## Bugs (open)
+
+### BUG — `mnemonic sign` fails with `sign-callback rejected: HTTP 403` after fresh OAuth login (cli 0.1.5 / sdk 0.1.4)
+
+- **Reported:** 2026-05-02
+- **Severity:** P0 — primary demo path is broken end-to-end on a clean install. `init` + `login` succeed, `sign` fails immediately.
+- **Repro:** `yarn add @mnemonik-xyz/cli@0.1.5` → `mnemonic init` (existing `~/.mnemonic/identity.json`, no `--force`, OK) → `mnemonic login` (OAuth completes, `sub=B3hTWwBvx2RjEwcCrq9cmybpg6g6NRapD2R9n9caP4uX`, JWT stored) → `mnemonic sign "hello"` → `AuthError: sign-callback rejected: HTTP 403`.
+- **Webapp side (concurrent):** Browser-signing UI loads with title "Authorize MCP client", body "An external AI tool is asking to act on your behalf via the Mnemonic protocol. Approving will sign a one-time challenge with your localStorage keypair so the client can call /mcp as you." Then renders **State (none)** + **Failed: Missing `challenge` or `state` query parameter. Restart the OAuth flow from your MCP client.** — i.e. the URL the CLI opened lacks `challenge=` and `state=`.
+- **Working hypothesis:** `sign` is taking the browser-mediated signing fallback (because local `identity.json` pubkey ≠ JWT `sub`, or the 0.1.5 pre-flight is mis-routing to fallback instead of erroring). The fallback URL builder omits `challenge` and `state`, so the webapp can't verify and returns 403 to the polling CLI. Two issues stacked: (a) why is CLI not signing locally with the file at `/Users/syi/.mnemonic/identity.json`?  (b) the browser-signing handoff URL is malformed.
+- **Likely fixes:**
+  1. CLI: `sign` should always attempt **local** Ed25519 signing first when `~/.mnemonic/identity.json` (or `id.json`) is present — only fall back to browser when there is genuinely no local key.
+  2. If pre-flight detects identity/JWT mismatch (Decision 7), it must **error with the recovery hint** ("rerun `mnemonic login` from the device that holds the matching key, or `mnemonic init --force` to replace identity") — never silently switch to browser-sign.
+  3. If browser-sign is intentional for some path, the URL builder must include both `challenge` (random nonce, base64url) and `state` (PKCE-style anti-CSRF token). Webapp currently expects both per the error string.
+- **Verbatim trace:**
+  ```
+  $ mnemonic sign "hello"
+  signing memory...
+  AuthError: sign-callback rejected: HTTP 403
+  ```
+- **Diagnostic to gather first:** `mnemonic whoami` (identity pubkey) vs JWT sub `B3hTWwBvx2RjEwcCrq9cmybpg6g6NRapD2R9n9caP4uX` — confirms or rules out hypothesis (a). Add `--verbose` log of the OAuth URL the CLI opens to confirm hypothesis (b) (missing `challenge`/`state`).
+- **Blocks:** all auth-gated commands (`sign`, `recall`, `verify`, `whoami` over the wire). Post-deploy QA cannot pass until this is closed.
+- **Workaround:** none confirmed. `--token <jwt>` minted with prod `MCP_JWT_SECRET` would bypass OAuth entirely but the prod secret is not accessible from this environment (same blocker as T15-rerun).
+- **Fix target:** CLI 0.1.6.
+
+---
+
 ## TOP PRIORITY 2 — Crypto-flexibility (decouple from Solana / Ed25519 lock-in)
 
 **Status (Phase 1):** Identity is hard-pinned to Solana Ed25519 because the on-chain anchor uses Solana SPL Memo (Ed25519-required by SVM) and the same keypair is reused for the off-chain attestation envelope. Webapp localStorage shape, server keypair file format, DID format `did:sol:`, all WASM exports — every layer assumes Ed25519.

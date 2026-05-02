@@ -14,6 +14,19 @@ secrets/
 # Local settings (not shared)
 .claude/settings.local.json
 
+# Internal launch / go-to-market planning (NOT for public repo)
+work/public-launch/
+
+# Workspace working logs (per-feature scratch)
+work/*/logs/
+
+# Embedder + retrieval caches
+.fastembed_cache/
+rag_chunks/
+
+# TypeScript incremental build cache
+*.tsbuildinfo
+
 # Dependencies
 node_modules/
 venv/

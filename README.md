@@ -1,8 +1,19 @@
 # Mnemonic Protocol
 
-> Verifiable, persistent memory for AI agents — with cryptographic attestation on Arweave and Solana, exposed over MCP.
+> **Verifiable, persistent memory for AI agents — signed, anchored on Solana, exposed over MCP.**
 
-**Live:** [mnemonik.xyz](https://mnemonik.xyz) · **Hosted MCP:** `https://mcp.mnemonik.xyz/mcp`
+[![CI](https://github.com/mnemonik-xyz/monorepo/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/mnemonik-xyz/monorepo/actions/workflows/ci.yml)
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](./LICENSE)
+[![npm: cli](https://img.shields.io/npm/v/%40mnemonik-xyz%2Fcli.svg?label=%40mnemonik-xyz%2Fcli)](https://www.npmjs.com/package/@mnemonik-xyz/cli)
+[![npm: sdk](https://img.shields.io/npm/v/%40mnemonik-xyz%2Fsdk.svg?label=%40mnemonik-xyz%2Fsdk)](https://www.npmjs.com/package/@mnemonik-xyz/sdk)
+
+**Live:** [mnemonik.xyz](https://mnemonik.xyz) · **Hosted MCP:** `https://mcp.mnemonik.xyz/mcp` · **Discord:** [discord.gg/ws6wruJj](https://discord.gg/ws6wruJj)
+
+**Docs:** [Quickstart](./docs/QUICKSTART.md) · [Whitepaper](./docs/WHITEPAPER.md) · [How it works](./docs/how-it-works.md) · [Comparisons](./docs/comparisons.md) · [AGENTS.md](./AGENTS.md)
+
+```bash
+npx @mnemonik-xyz/cli init && npx @mnemonik-xyz/cli login && npx @mnemonik-xyz/cli sign "first memory"
+```
 
 Mnemonic gives an AI agent a persistent and verifiable artifact/memory layer: signed memories that can be semantically recalled, independently verified, and optionally anchored on-chain.
 
@@ -195,6 +206,14 @@ Deeper specification and API docs are maintained in the sibling `mnemonic-protoc
 
 ---
 
+## Community
+
+- **GitHub Discussions** — long-form Q&A and design proposals.
+- **Discord** — [discord.gg/ws6wruJj](https://discord.gg/ws6wruJj)
+- **Issues** — file bugs at [github.com/mnemonik-xyz/monorepo/issues](https://github.com/mnemonik-xyz/monorepo/issues). For security reports see [`SECURITY.md`](./SECURITY.md) — do **not** file public issues for vulnerabilities.
+
+Before contributing, please read [`CONTRIBUTING.md`](./CONTRIBUTING.md) and [`CODE_OF_CONDUCT.md`](./CODE_OF_CONDUCT.md).
+
 ## License
 
-TBD.
+Apache License 2.0 — see [`LICENSE`](./LICENSE) for the full text. By contributing you agree your contribution is licensed under the same terms (inbound = outbound). No CLA required.
