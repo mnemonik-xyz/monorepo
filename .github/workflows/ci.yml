@@ -81,10 +81,14 @@ jobs:
             https://github.com/gitleaks/gitleaks/releases/download/v8.21.2/gitleaks_8.21.2_linux_x64.tar.gz
           tar -xzf /tmp/gitleaks.tar.gz -C /tmp gitleaks
           sudo install -m 0755 /tmp/gitleaks /usr/local/bin/gitleaks
+      # `--config .gitleaks.toml` extends the default ruleset with a
+      # path allowlist for test fixtures (synthetic JWTs / pubkeys) so
+      # the gate flags real secrets and stays quiet on intentionally
+      # fake test data. See `.gitleaks.toml` for the rationale.
       - name: Scan working tree
-        run: gitleaks detect --source . --redact --no-banner --verbose
+        run: gitleaks detect --source . --config .gitleaks.toml --redact --no-banner --verbose
       - name: Scan full git history
-        run: gitleaks detect --source . --redact --no-banner --log-opts='--all'
+        run: gitleaks detect --source . --config .gitleaks.toml --redact --no-banner --log-opts='--all'
 
   # ── Task 8 additions ──────────────────────────────────────────────────────
   # Three new gates: MCP Inspector validation, cargo audit (CVE pickup), and
@@ -184,7 +188,14 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.x'
+          # Pinned to 3.13 — yamale 4.x relies on `ast.Num` which was
+          # removed in Python 3.12+ runtime modules and absent in 3.14
+          # (see CPython "Deprecated since 3.12, removed in 3.14"). The
+          # default `3.x` resolved to 3.14 on the runner and crashed
+          # at schema-load time with `module 'ast' has no attribute 'Num'`.
+          # Pin until upstream yamale ships a fix or we move to a
+          # different schema validator.
+          python-version: '3.13'
       - name: Install yamale
         run: pip install 'yamale==4.*'
       - name: Validate smithery.yaml against schema
