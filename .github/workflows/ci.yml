@@ -190,6 +190,45 @@ jobs:
       - name: Validate smithery.yaml against schema
         run: yamale -s scripts/smithery-schema.yaml smithery.yaml
 
+  # Webapp gates — vitest unit tests + tsc typecheck.
+  #
+  # Why this exists: on 2026-05-02 commits a5ee738 and 2fad606 broke the
+  # VS Code MCP install deeplink for every user (URL-form regression +
+  # JWT-headers regression). Both shipped because the webapp had NO CI
+  # coverage — vitest unit tests had to be run manually, the Playwright
+  # e2e (which would have caught it) also wasn't gated. Adding this gate
+  # so install-button regressions are caught before merge, not in prod.
+  webapp:
+    name: webapp (vitest + tsc)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: webapp
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      # No `npm ci` because the lockfile lives at repo root.
+      # `npm install --no-audit --no-fund` resolves devDeps from webapp/package.json.
+      - name: Install webapp deps
+        run: npm install --no-audit --no-fund
+      # Typecheck. Catches drifted types (e.g. removed exports referenced
+      # by tests) without running the WASM build pipeline.
+      - name: Typecheck
+        run: npx tsc -b --noEmit
+      # Vitest — scoped to InstallButtons for now. The full suite has a
+      # pre-existing flake in Sign.test.tsx (`countdown_displays_mm_ss`,
+      # timer race) that fails on `dev` too — broaden this run to
+      # `npx vitest run` once that's fixed.
+      #
+      # The InstallButtons.test.tsx file holds the regression guards
+      # against the 2026-05-02 install-deeplink breakages:
+      #   - opaque vs hierarchical URL form (`vscode:` vs `vscode://`)
+      #   - extra `headers` field in the install JSON
+      - name: Vitest (InstallButtons regression guards)
+        run: npx vitest run src/components/InstallButtons.test.tsx
+
   # Optional opt-in job: runs the network-touching `stdio_backward_compat`
   # integration test that's `#[ignore]`d by default. Triggered manually via
   # workflow_dispatch or scheduled (daily) — not on every PR — because it
