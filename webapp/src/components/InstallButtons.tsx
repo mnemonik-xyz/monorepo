@@ -31,6 +31,23 @@ const MCP_URL = "https://mcp.mnemonik.xyz/mcp";
 const MCP_HOST = "https://mcp.mnemonik.xyz/mcp";
 
 /**
+ * VS Code MCP install-link scheme — opaque URI form per VS Code docs:
+ *   https://code.visualstudio.com/docs/copilot/customization/mcp-servers
+ *   §"Use MCP install links"
+ *
+ * MUST be `vscode:mcp/install?<JSON>` (single colon, NO `//`). With the
+ * hierarchical `vscode://mcp/install?...` form, VS Code's URI parser
+ * yields authority="mcp" + path="/install", which does not match the
+ * MCP install handler (registered for path `mcp/install`). Result:
+ * VS Code window opens, install dialog never appears.
+ *
+ * Do not change without verifying in actual VS Code on macOS+Windows.
+ * Both InstallButtons.test.tsx (unit) and webapp/e2e/install.spec.ts
+ * (Playwright) assert this exact prefix as a regression guard.
+ */
+export const VSCODE_INSTALL_PREFIX = "vscode:mcp/install?";
+
+/**
  * Read the webapp's current JWT from localStorage IF it exists AND has not
  * expired. Returns null otherwise.
  *
@@ -63,22 +80,40 @@ function readWebappJwt(): string | null {
 }
 
 /**
- * Build the IDE config object passed via the install deeplink. When the
- * webapp has a non-expired JWT, bake it into the `headers` field so the
- * IDE sends `Authorization: Bearer <jwt>` on every MCP call from the
- * moment of install — no OAuth dance needed inside the IDE.
+ * Build the IDE config object passed via the install deeplink.
+ *
+ * `bakeJwt` controls whether a non-expired webapp JWT is included as
+ * `headers: { Authorization: "Bearer <jwt>" }`. This is intentionally
+ * opt-in per IDE:
+ *
+ *   - Cursor: `bakeJwt = true`. Cursor 3.2.16's MCP UI does not surface
+ *     a Connect / Authorize button for non-directory MCP servers, so we
+ *     hand the JWT off via the install deeplink to skip OAuth entirely.
+ *     Cursor's deeplink JSON validator is lenient and forwards arbitrary
+ *     fields through to mcp.json.
+ *
+ *   - VS Code: `bakeJwt = false`. VS Code's install-link JSON validator
+ *     is STRICT — it accepts only `{name, type, url}` for HTTP MCP entries
+ *     (per the docs). Including `headers` causes the install dialog to
+ *     silently abort: VS Code opens but no UI appears. VS Code 1.93+
+ *     handles MCP OAuth natively, so the JWT bake-in isn't needed there
+ *     anyway. (Past regression: 2026-05-02 — `headers` field broke VS
+ *     Code install for every logged-in user.)
  */
 function buildInstallConfig(
-  extras: Record<string, unknown> = {}
+  extras: Record<string, unknown> = {},
+  bakeJwt: boolean = false
 ): Record<string, unknown> {
   const config: Record<string, unknown> = {
     url: MCP_URL,
     type: "http",
     ...extras,
   };
-  const jwt = readWebappJwt();
-  if (jwt) {
-    config.headers = { Authorization: `Bearer ${jwt}` };
+  if (bakeJwt) {
+    const jwt = readWebappJwt();
+    if (jwt) {
+      config.headers = { Authorization: `Bearer ${jwt}` };
+    }
   }
   return config;
 }
@@ -98,41 +133,52 @@ function cursorDeeplink(): string {
   // This bypasses Cursor's MCP-OAuth UI (which doesn't render a Connect
   // button for non-directory servers) and skips the OAuth dance entirely.
   // Reference: https://cursor.com/docs/context/mcp/install-links
-  const config = JSON.stringify(buildInstallConfig());
+  const config = JSON.stringify(buildInstallConfig({}, /* bakeJwt */ true));
   const b64 = btoa(config);
   const params = new URLSearchParams({ name: "Mnemonic", config: b64 });
   return `cursor://anysphere.cursor-deeplink/mcp/install?${params.toString()}`;
 }
 
 function vscodeDeeplink(): string {
-  // VS Code 1.93+ MCP install deeplink format:
+  // VS Code 1.93+ MCP install deeplink format (per VS Code docs
+  // code.visualstudio.com/docs/copilot/customization/mcp-servers
+  // → "Use MCP install links"):
   //
   //     vscode:mcp/install?<URL-encoded-JSON-config>
   //
+  // Two things are easy to get wrong here — both have shipped as
+  // regressions in this repo before, both produce the SAME symptom
+  // (VS Code window opens, no install dialog):
+  //
+  //  1. URL FORM: must be the opaque `vscode:` (single colon, no `//`).
+  //     With `vscode://mcp/install?...` VS Code's URI parser yields
+  //     authority="mcp" + path="/install"; the install handler matches
+  //     on path === "mcp/install" and never fires. macOS launches VS
+  //     Code for both forms (scheme-only dispatch), but only the opaque
+  //     form actually triggers the install handler. See
+  //     VSCODE_INSTALL_PREFIX above.
+  //
+  //  2. CONFIG SHAPE: VS Code's install-link JSON validator is strict —
+  //     accepts ONLY {name, type:"http", url} for HTTP. Extra fields
+  //     (e.g. `headers`) make the validator silently reject. The on-disk
+  //     mcp.json schema DOES allow `headers` for HTTP entries, but the
+  //     install-deeplink schema is a separate, stricter code path.
+  //     Therefore: never pass JWT/headers via this deeplink. VS Code
+  //     1.93+ handles MCP OAuth natively, so it's not needed.
+  //
+  // Both regressions actually shipped on 2026-05-02 (a5ee738 + 2fad606),
+  // breaking the install for every user until reverted.
+  //
   // The whole query string is a single URL-encoded JSON object, NOT
-  // multiple `key=value` query params. Using URLSearchParams here would
-  // produce `?name=Mnemonic&url=...` which VS Code does not parse — the
-  // browser opens VS Code but the install dialog never appears (this is
-  // exactly the bug a user hit during T15 post-deploy QA).
-  //
-  // Per VS Code MCP docs (code.visualstudio.com/docs/copilot/customization/mcp-servers
-  // → "Use MCP install links"):
-  //   - HTTP transport: { name, type: "http", url }
-  //   - stdio transport: { name, command, args }
-  // We use HTTP (streamable per Decision 1).
-  //
-  // The double-slash after the scheme matters for Safari (16+) and some
-  // mobile browsers: they reject opaque URIs (`vscode:mcp/...` with no
-  // authority component) as malformed and surface "address is invalid"
-  // before the OS scheme handler ever sees the URL. macOS's URL routing
-  // accepts both `vscode:` and `vscode://` for VS Code, so always emit the
-  // hierarchical form for cross-browser compatibility. (Confirmed-failing
-  // user report on Safari with the single-slash form on 2026-05-02.)
-  //
-  // Same JWT-baked-in-headers pattern as cursorDeeplink — gives the user
-  // a one-click install that works without OAuth round-trips inside the IDE.
-  const config = buildInstallConfig({ name: "Mnemonic" });
-  return `vscode://mcp/install?${encodeURIComponent(JSON.stringify(config))}`;
+  // multiple `key=value` query params (that's a third easy mis-step:
+  // URLSearchParams output is also unrecognized).
+  const config = buildInstallConfig(
+    { name: "Mnemonic" },
+    /* bakeJwt — see fn docs, MUST stay false for VS Code */ false
+  );
+  return `${VSCODE_INSTALL_PREFIX}${encodeURIComponent(
+    JSON.stringify(config)
+  )}`;
 }
 
 // JSON snippet that goes into `~/.codeium/windsurf/mcp_config.json`. WindSurf
