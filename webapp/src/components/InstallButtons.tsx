@@ -150,35 +150,17 @@ function vscodeDeeplink(): string {
   // regressions in this repo before, both produce the SAME symptom
   // (VS Code window opens, no install dialog):
   //
-  //  1. URL FORM: must be the opaque `vscode:` (single colon, no `//`).
-  //     With `vscode://mcp/install?...` VS Code's URI parser yields
-  //     authority="mcp" + path="/install"; the install handler matches
-  //     on path === "mcp/install" and never fires. macOS launches VS
-  //     Code for both forms (scheme-only dispatch), but only the opaque
-  //     form actually triggers the install handler. See
-  //     VSCODE_INSTALL_PREFIX above.
-  //
-  //  2. CONFIG SHAPE: VS Code's install-link JSON validator is strict —
-  //     accepts ONLY {name, type:"http", url} for HTTP. Extra fields
-  //     (e.g. `headers`) make the validator silently reject. The on-disk
-  //     mcp.json schema DOES allow `headers` for HTTP entries, but the
-  //     install-deeplink schema is a separate, stricter code path.
-  //     Therefore: never pass JWT/headers via this deeplink. VS Code
-  //     1.93+ handles MCP OAuth natively, so it's not needed.
-  //
-  // Both regressions actually shipped on 2026-05-02 (a5ee738 + 2fad606),
-  // breaking the install for every user until reverted.
-  //
-  // The whole query string is a single URL-encoded JSON object, NOT
-  // multiple `key=value` query params (that's a third easy mis-step:
-  // URLSearchParams output is also unrecognized).
-  const config = buildInstallConfig(
-    { name: "Mnemonic" },
-    /* bakeJwt — see fn docs, MUST stay false for VS Code */ false
-  );
-  return `${VSCODE_INSTALL_PREFIX}${encodeURIComponent(
-    JSON.stringify(config)
-  )}`;
+
+
+  // Per VS Code MCP docs (code.visualstudio.com/docs/copilot/customization/mcp-servers
+  // → "Use MCP install links"):
+  //   - HTTP transport: { name, type: "http", url }
+  //   - stdio transport: { name, command, args }
+  // We use HTTP (streamable per Decision 1).
+  const config = { name: "Mnemonic", type: "http", url: MCP_URL };
+  return `vscode:mcp/install?${encodeURIComponent(JSON.stringify(config))}`;
+
+
 }
 
 // JSON snippet that goes into `~/.codeium/windsurf/mcp_config.json`. WindSurf
@@ -195,7 +177,7 @@ const WINDSURF_CONFIG_SNIPPET = JSON.stringify(
     },
   },
   null,
-  2
+  2,
 );
 
 interface InstallButtonsProps {
