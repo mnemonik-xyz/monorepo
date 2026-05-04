@@ -173,13 +173,23 @@ describe("CLI scenarios", () => {
         expect(after).not.toBe(before);
 
         // ── login --token (headless, valid) ─────────────────────────────────
-        const r4 = await run(["login", "--token", makeToken()]);
+        // The 0.1.5 pre-flight check rejects sign/recall/verify when the
+        // identity's pubkey ≠ the JWT's `sub`. So mint the token with the
+        // identity's actual pubkey, NOT the placeholder "test-user-pubkey".
+        const idAfterForce = JSON.parse(
+          readFileSync(join(cfgDir, "identity.json"), "utf8")
+        ) as { pubkey_base58: string };
+        const r4 = await run([
+          "login",
+          "--token",
+          makeToken(idAfterForce.pubkey_base58),
+        ]);
         expect(r4.exitCode).toBe(0);
         expect(existsSync(join(cfgDir, "token.json"))).toBe(true);
         const tok = JSON.parse(
           readFileSync(join(cfgDir, "token.json"), "utf8")
         );
-        expect(tok.sub).toBe("test-user-pubkey");
+        expect(tok.sub).toBe(idAfterForce.pubkey_base58);
         expect(typeof tok.jwt).toBe("string");
 
         // ── login --token (malformed → exit 4) ──────────────────────────────
@@ -189,8 +199,9 @@ describe("CLI scenarios", () => {
         // ── recall ──────────────────────────────────────────────────────────
         // Re-login with a valid token (the malformed-token attempt above
         // still leaves the prior good token persisted, but we re-login to
-        // exercise the saveToken path explicitly).
-        await run(["login", "--token", makeToken()]);
+        // exercise the saveToken path explicitly). Sub must still match the
+        // current identity pubkey for the recall pre-flight to pass.
+        await run(["login", "--token", makeToken(idAfterForce.pubkey_base58)]);
         const r6 = await run(["--json", "recall", "test query"]);
         expect(r6.exitCode).toBe(0);
         const recallData = JSON.parse(r6.stdout);

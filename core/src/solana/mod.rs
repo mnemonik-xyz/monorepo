@@ -68,10 +68,17 @@ impl SolanaClient {
         let tx_bytes = bincode::serialize(&tx)?;
         let tx_b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &tx_bytes);
 
+        // preflightCommitment must match the commitment used for
+        // getLatestBlockhash above — otherwise the simulator runs
+        // against a more conservative (finalized) view that hasn't
+        // seen our confirmed blockhash yet, returning BlockhashNotFound.
         let result = self
             .rpc(
                 "sendTransaction",
-                serde_json::json!([tx_b64, {"encoding": "base64"}]),
+                serde_json::json!([
+                    tx_b64,
+                    {"encoding": "base64", "preflightCommitment": "confirmed"}
+                ]),
             )
             .await?;
         let sig = result.as_str().context("no tx signature")?.to_string();
