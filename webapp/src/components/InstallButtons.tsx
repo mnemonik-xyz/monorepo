@@ -151,6 +151,7 @@ function vscodeDeeplink(): string {
   // (VS Code window opens, no install dialog):
   //
 
+
   // Per VS Code MCP docs (code.visualstudio.com/docs/copilot/customization/mcp-servers
   // → "Use MCP install links"):
   //   - HTTP transport: { name, type: "http", url }
@@ -158,6 +159,7 @@ function vscodeDeeplink(): string {
   // We use HTTP (streamable per Decision 1).
   const config = { name: "Mnemonic", type: "http", url: MCP_URL };
   return `vscode:mcp/install?${encodeURIComponent(JSON.stringify(config))}`;
+
 
 }
 

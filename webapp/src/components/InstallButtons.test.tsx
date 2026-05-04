@@ -37,8 +37,10 @@ describe("InstallButtons", () => {
     const vscode = screen.getByTestId("install-vscode") as HTMLAnchorElement;
     expect(vscode.href.startsWith("vscode:mcp/install?")).toBe(true);
 
+
     const vscodeConfig = decodeURIComponent(
       vscode.href.replace("vscode:mcp/install?", ""),
+
 
     );
     const parsedVscode = JSON.parse(vscodeConfig);

@@ -399,9 +399,7 @@ mod tests {
 
         // Compute the deep hash that Irys would compute for this buffer.
         // sig_type=2 (ED25519) → ASCII "2" — matches Curve25519 signer.
-        let msg = deep_hash_list(&[
-            b"dataitem", b"1", b"2", owner, b"", b"", raw_tags, raw_data,
-        ]);
+        let msg = deep_hash_list(&[b"dataitem", b"1", b"2", owner, b"", b"", raw_tags, raw_data]);
 
         let sig = Signature::try_from(sig_bytes).expect("parse sig");
         assert!(
@@ -461,11 +459,12 @@ mod tests {
         let expected_avro = hex::decode(
             "0418436f6e74656e742d54797065206170706c69636174696f6e2f6a736f6e104170702d4e616d65226d6e656d6f6e69632d70726f746f636f6c00",
         ).unwrap();
-        assert_eq!(avro_tags, expected_avro, "avro_encode_tags diverges from spec");
+        assert_eq!(
+            avro_tags, expected_avro,
+            "avro_encode_tags diverges from spec"
+        );
 
-        let dh = deep_hash_list(&[
-            b"dataitem", b"1", b"2", &pubkey, b"", b"", &avro_tags, data,
-        ]);
+        let dh = deep_hash_list(&[b"dataitem", b"1", b"2", &pubkey, b"", b"", &avro_tags, data]);
         // Reference value from /tmp/deephash_ref.py with sigType=2.
         let expected =
             hex::decode("ec8618225e5424fef34953635059619fdb0ac65ef2d091133bd3ea86d48f5b1b84b2d620a6da895b21e517166511697b")

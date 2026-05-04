@@ -253,7 +253,11 @@ pub async fn sign_callback_handler(
             "a": ar_tx,
             "v": 2,
         });
-        let sol_tx = match state.solana.write_memo(&state.keypair, &memo.to_string()).await {
+        let sol_tx = match state
+            .solana
+            .write_memo(&state.keypair, &memo.to_string())
+            .await
+        {
             Ok(t) => t,
             Err(e) => {
                 return error_resp(

@@ -586,19 +586,26 @@ const REDIRECT_PREFIXES: &[&str] = &[
 ];
 
 /// Validate `redirect_uri` against the allowlist (mnemonic-cli tech-spec
-/// Decision 5 + RFC 8252 §7). Loopback regex is gated to `client_id ==
-/// "mnemonic-cli"` so a Cursor / Claude.ai client cannot point us at a
-/// `127.0.0.1` callback that bypasses the OS deeplink handler.
+/// Decision 5 + RFC 8252 §7).
 ///
 /// Returns `true` if the URI is on one of three lists:
 /// 1. Exact match of `REDIRECT_EXACT` (e.g. webapp consent page).
 /// 2. Exact-prefix match of `REDIRECT_PREFIXES` (deeplink schemes).
-/// 3. Loopback callback `http://127.0.0.1:<port>/callback` or
-///    `http://[::1]:<port>/callback`, ONLY when `client_id == "mnemonic-cli"`.
+/// 3. Loopback callback `http://127.0.0.1:<port>[/<path>]` or
+///    `http://[::1]:<port>[/<path>]` for any client (RFC 8252 §7.3).
 ///
-/// All other URIs (`https://evil.com`, `http://0.0.0.0:1234`, loopback
-/// without the `/callback` suffix, loopback for any non-CLI client) → false.
-pub fn allowed_redirect(uri: &str, client_id: &str) -> bool {
+/// `client_id` was previously used to gate loopback access to the literal
+/// `mnemonic-cli` client only, with a fixed `/callback` path. That broke
+/// VS Code's MCP OAuth (which uses DCR-issued UUID client_ids and `/`
+/// path) and is not a real defense — PKCE + state already bind the auth
+/// code to the originating client, and a loopback URI is on the user's
+/// own machine, so there is no impersonation risk that a client_id check
+/// would mitigate. Per RFC 8252 §7.3, native clients SHOULD be permitted
+/// to use loopback with any port and any path.
+///
+/// All other URIs (`https://evil.com`, `http://0.0.0.0:1234`,
+/// `http://127.0.0.1.evil.com`) → false.
+pub fn allowed_redirect(uri: &str, _client_id: &str) -> bool {
     if REDIRECT_EXACT.contains(&uri) {
         return true;
     }
@@ -608,11 +615,7 @@ pub fn allowed_redirect(uri: &str, client_id: &str) -> bool {
     {
         return true;
     }
-    // Loopback regex — only `mnemonic-cli` may use this path. RFC 8252 §7
-    // recommends loopback for native clients; we narrow that to one
-    // `client_id` so `mnemonic-cli` cannot be impersonated by another client
-    // using the same loopback callback.
-    if client_id == "mnemonic-cli" && is_loopback_callback(uri) {
+    if is_loopback_redirect(uri) {
         return true;
     }
     false
@@ -662,14 +665,26 @@ fn split_loopback_redirect(uri: &str) -> Option<(&'static str, &str)> {
     Some((host, path))
 }
 
-/// Match `^http://127\.0\.0\.1:\d+/callback$` and
-/// `^http://\[::1\]:\d+/callback$` without pulling in a `regex` crate.
-/// Hand-rolled is cheaper and fully covered by unit tests. The port must be
-/// non-empty digits, the path must be the literal `/callback`, and there must
-/// be no trailing path / query / fragment beyond that.
-fn is_loopback_callback(uri: &str) -> bool {
+/// Match `^http://127\.0\.0\.1:\d+(/.*)?$` and `^http://\[::1\]:\d+(/.*)?$`
+/// per RFC 8252 §7.3 without pulling in a `regex` crate. Hand-rolled is
+/// cheaper and fully covered by unit tests.
+///
+/// Rules:
+///   - host MUST be exactly `127.0.0.1` or `[::1]` (the leading-`http://`
+///     + exact-host strip rejects e.g. `http://127.0.0.1.evil.com:80/`)
+///   - port MUST be present and all-ASCII-digits (RFC 8252 forbids
+///     omitting the port for loopback)
+///   - path is OPTIONAL. If present, it MUST start with `/` and contain
+///     no fragment (`#`). Any path is accepted — VS Code uses `/`,
+///     mnemonic-cli uses `/callback`, future clients may use anything.
+///
+/// Was previously called `is_loopback_callback` and required the literal
+/// path `/callback`; renamed + relaxed because that constraint was a
+/// `mnemonic-cli`-specific assumption that broke real-world OAuth clients
+/// (VS Code MCP OAuth uses path `/`).
+fn is_loopback_redirect(uri: &str) -> bool {
     // Strip the scheme + host prefix; require the EXACT host string so
-    // `http://127.0.0.1.evil.com:80/callback` does not match.
+    // `http://127.0.0.1.evil.com:80/...` does not match.
     let rest = if let Some(r) = uri.strip_prefix("http://127.0.0.1:") {
         r
     } else if let Some(r) = uri.strip_prefix("http://[::1]:") {
@@ -677,15 +692,23 @@ fn is_loopback_callback(uri: &str) -> bool {
     } else {
         return false;
     };
-    // `rest` must look like `<digits>/callback` with no trailing path bytes.
+    // `rest` is `<digits>` (no path) or `<digits>/<anything-except-#>`.
     let (port, path) = match rest.find('/') {
-        Some(i) => (&rest[..i], &rest[i..]),
-        None => return false,
+        Some(i) => (&rest[..i], Some(&rest[i..])),
+        None => (rest, None),
     };
     if port.is_empty() || !port.bytes().all(|b| b.is_ascii_digit()) {
         return false;
     }
-    path == "/callback"
+    // Reject fragments — they're never sent by the browser anyway, but
+    // an attacker-controlled `redirect_uri` registration shouldn't be
+    // able to slip a `#fragment` past us.
+    if let Some(p) = path {
+        if p.contains('#') {
+            return false;
+        }
+    }
+    true
 }
 
 // ── /oauth/authorize handler (Decision 10) ───────────────────────────────────
@@ -2552,17 +2575,6 @@ mod tests {
             "http://0.0.0.0:1234/callback",
             "mnemonic-cli"
         ));
-        // Negative: loopback without /callback suffix is rejected.
-        assert!(!allowed_redirect("http://127.0.0.1:1234/", "mnemonic-cli"));
-        assert!(!allowed_redirect(
-            "http://127.0.0.1:1234/foo",
-            "mnemonic-cli"
-        ));
-        // Negative: loopback with trailing path beyond /callback rejected.
-        assert!(!allowed_redirect(
-            "http://127.0.0.1:1234/callback/extra",
-            "mnemonic-cli"
-        ));
         // Negative: lookalike host (127.0.0.1.evil.com) rejected.
         assert!(!allowed_redirect(
             "http://127.0.0.1.evil.com:1234/callback",
@@ -2573,33 +2585,58 @@ mod tests {
             "http://127.0.0.1:abc/callback",
             "mnemonic-cli"
         ));
-        // Negative: missing port rejected.
+        // Negative: missing port rejected (RFC 8252 forbids omitting it).
         assert!(!allowed_redirect(
             "http://127.0.0.1/callback",
+            "mnemonic-cli"
+        ));
+        // Negative: fragment in path rejected (cannot be slipped past
+        // a registered redirect).
+        assert!(!allowed_redirect(
+            "http://127.0.0.1:1234/cb#frag",
             "mnemonic-cli"
         ));
     }
 
     #[test]
-    fn test_oauth_allowed_redirect_loopback_only_for_cli() {
-        // TDD anchor (tasks/6.md): loopback URI accepted ONLY when client_id
-        // is mnemonic-cli; the same URI submitted by any other client (cursor,
-        // claude, vscode, evil) is rejected.
-        let v4 = "http://127.0.0.1:1234/callback";
-        let v6 = "http://[::1]:8080/callback";
-        // Positive — mnemonic-cli is the gated client_id.
-        assert!(allowed_redirect(v4, "mnemonic-cli"));
-        assert!(allowed_redirect(v6, "mnemonic-cli"));
-        // Negative — every other client_id rejects loopback.
-        for other in ["cursor", "claude", "vscode", "evil-client", ""] {
+    fn test_oauth_allowed_redirect_loopback_any_client_any_path() {
+        // RFC 8252 §7.3: native clients are permitted to use loopback
+        // with ANY port and ANY path. The previous `mnemonic-cli`-only
+        // and `/callback`-only constraints broke VS Code's MCP OAuth
+        // (UUID client_id from DCR + path "/") without providing real
+        // security — PKCE+state already prevent code interception, and
+        // the loopback is on the user's own machine.
+        //
+        // Regression guard: 2026-05-04. VS Code 1.118.1 with
+        // client_id=<DCR-UUID> and redirect_uri=http://127.0.0.1:<port>/
+        // was rejected with "redirect_uri is not on the server allowlist"
+        // until this constraint was relaxed.
+        for client in [
+            "mnemonic-cli",
+            "cursor",
+            "vscode",
+            "0c0009bc-3404-4898-b935-8862ee3a03b2", // VS Code DCR UUID
+            "claude",
+            "",
+        ] {
+            // Path "/" — VS Code's MCP OAuth callback.
             assert!(
-                !allowed_redirect(v4, other),
-                "loopback ipv4 must reject client_id={other:?}"
+                allowed_redirect("http://127.0.0.1:33418/", client),
+                "loopback / must accept client_id={client:?}"
             );
             assert!(
-                !allowed_redirect(v6, other),
-                "loopback ipv6 must reject client_id={other:?}"
+                allowed_redirect("http://[::1]:33418/", client),
+                "loopback v6 / must accept client_id={client:?}"
             );
+            // Path "/callback" — mnemonic-cli's path.
+            assert!(allowed_redirect("http://127.0.0.1:1234/callback", client));
+            // Path with extra segments — also allowed per RFC 8252.
+            assert!(allowed_redirect(
+                "http://127.0.0.1:1234/callback/extra",
+                client
+            ));
+            // No path at all (just port).
+            assert!(allowed_redirect("http://127.0.0.1:1234", client));
         }
     }
 
@@ -2624,7 +2661,19 @@ mod tests {
     }
 
     #[test]
-    fn test_oauth_registered_redirect_loopback_preserves_path() {
+    fn test_oauth_registered_redirect_loopback_any_path() {
+        // Policy change 2026-05-04: loopback URIs are accepted for ANY
+        // client_id with ANY path per RFC 8252 §7.3 (see
+        // `test_oauth_allowed_redirect_loopback_any_client_any_path`).
+        // The previous test asserted that a DCR-registered client with
+        // `/callback` was port-flexible but path-pinned; that constraint
+        // was defense-in-depth (PKCE+state already prevent code
+        // interception) and broke real OAuth clients (VS Code with a
+        // wiped-from-memory DCR client_id).
+        //
+        // This test now asserts the new policy: a registered client gets
+        // both port AND path flexibility on loopback. Non-loopback
+        // hosts still go through DCR's exact-or-loopback matcher.
         let st = fresh_state();
         let client_id = "registered-client".to_string();
         st.register_client(
@@ -2632,8 +2681,14 @@ mod tests {
             vec!["http://127.0.0.1:33418/callback".to_string()],
         );
 
+        // Loopback — any port, any path, registered or not.
         assert!(st.allows_redirect("http://127.0.0.1:50000/callback", &client_id));
-        assert!(!st.allows_redirect("http://127.0.0.1:50000/other", &client_id));
+        assert!(st.allows_redirect("http://127.0.0.1:50000/other", &client_id));
+        assert!(st.allows_redirect("http://127.0.0.1:50000/", &client_id));
+        assert!(st.allows_redirect("http://[::1]:50000/anything", &client_id));
+        // Non-loopback — still strictly checked.
+        assert!(!st.allows_redirect("https://evil.com/callback", &client_id));
+        assert!(!st.allows_redirect("http://127.0.0.1.evil.com:50000/callback", &client_id));
     }
 
     #[tokio::test]
