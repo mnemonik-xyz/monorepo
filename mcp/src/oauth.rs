@@ -2629,10 +2629,7 @@ mod tests {
                 "loopback v6 / must accept client_id={client:?}"
             );
             // Path "/callback" — mnemonic-cli's path.
-            assert!(allowed_redirect(
-                "http://127.0.0.1:1234/callback",
-                client
-            ));
+            assert!(allowed_redirect("http://127.0.0.1:1234/callback", client));
             // Path with extra segments — also allowed per RFC 8252.
             assert!(allowed_redirect(
                 "http://127.0.0.1:1234/callback/extra",

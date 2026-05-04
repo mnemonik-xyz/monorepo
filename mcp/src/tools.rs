@@ -274,7 +274,10 @@ pub async fn check_pending(
                 });
             }
         };
-        store_g.find_by_correlation_id(correlation_id).ok().flatten()
+        store_g
+            .find_by_correlation_id(correlation_id)
+            .ok()
+            .flatten()
     };
     if let Some((attestation_id, content_hash, solana_tx, arweave_tx, signer_pubkey, created_at)) =
         signed
