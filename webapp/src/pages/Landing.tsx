@@ -78,61 +78,57 @@ function BackdropMesh() {
 
 function Hero() {
   return (
-    <section className="mx-auto flex min-h-[78vh] max-w-6xl flex-col justify-center gap-14 px-4 py-20 sm:px-6 md:py-28">
+    <section className="mx-auto flex min-h-[78vh] max-w-6xl flex-col items-center justify-center gap-14 px-4 py-20 text-center sm:px-6 md:py-28">
       <ThesisBanner />
 
-      <div className="grid gap-12 md:grid-cols-[1.4fr_1fr] md:items-end">
-        <div className="space-y-7">
-          <div className="flex items-center gap-3 font-mono text-[11px] uppercase tracking-[0.22em] text-accent-primary">
-            <span
-              aria-hidden="true"
-              className="inline-block h-px w-10 bg-accent-primary"
-            />
-            <span>Mnemonic Protocol · v0.1</span>
-          </div>
-
-          <h1 className="text-balance text-5xl font-bold leading-[1.05] tracking-tight text-text-primary sm:text-6xl md:text-7xl">
-            Verifiable memory{" "}
-            <span className="block text-accent-primary">for AI agents.</span>
-          </h1>
-
-          <p className="max-w-xl text-balance text-lg leading-relaxed text-text-muted">
-            Persistent. Signed. Anchored on-chain. Memories your agents can
-            carry across providers, sessions, and tools — and any third party
-            can verify.
-          </p>
-
-          <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
-            <Link
-              to="/install"
-              className="group inline-flex items-center justify-center gap-2 rounded-md bg-accent-primary px-6 py-3 text-sm font-semibold text-background shadow-[0_0_24px_-6px_var(--color-accent-primary)] transition-all hover:-translate-y-0.5 hover:shadow-[0_0_32px_-4px_var(--color-accent-primary)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-primary"
-              data-testid="cta-get-started"
-            >
-              Get started
-              <span
-                aria-hidden="true"
-                className="transition-transform group-hover:translate-x-0.5"
-              >
-                →
-              </span>
-            </Link>
-            <Link
-              to="/chat"
-              className="inline-flex items-center justify-center gap-2 rounded-md border border-white/15 px-6 py-3 text-sm font-semibold text-text-primary transition-colors hover:border-accent-secondary hover:text-accent-secondary"
-            >
-              Try the protocol chat
-            </Link>
-          </div>
+      <div className="flex w-full max-w-3xl flex-col items-center gap-7">
+        <div className="flex items-center gap-3 font-mono text-[11px] uppercase tracking-[0.22em] text-accent-primary">
+          <span
+            aria-hidden="true"
+            className="inline-block h-px w-10 bg-accent-primary"
+          />
+          <span>Mnemonic Protocol · v0.1</span>
         </div>
 
-        <aside className="md:pl-6">
-          <dl className="grid grid-cols-3 gap-4 text-center">
-            <Stat label="Bits / dim" value="2–4" caption="TurboQuant" />
-            <Stat label="Anchor" value="Solana" caption="SPL Memo" />
-            <Stat label="Storage" value="Arweave" caption="Permanent" />
-          </dl>
-        </aside>
+        <h1 className="text-balance text-5xl font-bold leading-[1.05] tracking-tight text-text-primary sm:text-6xl md:text-7xl">
+          Verifiable memory{" "}
+          <span className="block text-accent-primary">for AI agents.</span>
+        </h1>
+
+        <p className="max-w-2xl text-balance text-lg leading-relaxed text-text-muted">
+          Persistent. Signed. Anchored on-chain. Memories your agents can carry
+          across providers, sessions, and tools — and any third party can
+          verify.
+        </p>
+
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-center">
+          <Link
+            to="/install"
+            className="group inline-flex items-center justify-center gap-2 rounded-md bg-accent-primary px-6 py-3 text-sm font-semibold text-background shadow-[0_0_24px_-6px_var(--color-accent-primary)] transition-all hover:-translate-y-0.5 hover:shadow-[0_0_32px_-4px_var(--color-accent-primary)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-primary"
+            data-testid="cta-get-started"
+          >
+            Get started
+            <span
+              aria-hidden="true"
+              className="transition-transform group-hover:translate-x-0.5"
+            >
+              →
+            </span>
+          </Link>
+          <Link
+            to="/chat"
+            className="inline-flex items-center justify-center gap-2 rounded-md border border-white/15 px-6 py-3 text-sm font-semibold text-text-primary transition-colors hover:border-accent-secondary hover:text-accent-secondary"
+          >
+            Try the protocol chat
+          </Link>
+        </div>
       </div>
+
+      <dl className="grid w-full max-w-2xl grid-cols-3 gap-4">
+        <Stat label="Bits / dim" value="2–4" caption="TurboQuant" />
+        <Stat label="Anchor" value="Solana" caption="SPL Memo" />
+        <Stat label="Storage" value="Arweave" caption="Permanent" />
+      </dl>
     </section>
   );
 }
