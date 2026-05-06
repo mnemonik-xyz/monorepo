@@ -39,6 +39,11 @@ export default function SiteHeader() {
             label="Whitepaper"
             srLabel="Read the whitepaper"
           />
+          <ResourceLink
+            href={EXTERNAL_LINKS.researchgate}
+            label="ResearchGate"
+            srLabel="ResearchGate publication"
+          />
           <Link
             to="/install"
             className="ml-2 hidden rounded-sm border border-accent-primary/40 bg-accent-primary/10 px-3 py-1.5 font-mono text-[11px] uppercase tracking-[0.16em] text-accent-primary transition-colors hover:border-accent-primary hover:bg-accent-primary/20 sm:inline-flex"
