@@ -332,67 +332,103 @@ function Index({ n }: { n: number }) {
 /*                              How it works                                  */
 /* -------------------------------------------------------------------------- */
 
-function HowItWorks() {
-  const steps = [
-    {
-      label: "01 · Identity",
-      title: "Generate an Ed25519 keypair",
-      body: "The keypair lives in your browser's local storage. The public key is your portable identity across providers; the secret never leaves the device.",
-    },
-    {
-      label: "02 · Install",
-      title: "Connect Mnemonic to your AI tool",
-      body: "Cursor and VS Code accept a deeplink; Claude.ai takes a custom connector URL; Windsurf takes a JSON snippet. All four negotiate OAuth 2.1 + PKCE against mcp.mnemonik.xyz.",
-    },
-    {
-      label: "03 · Sign",
-      title: "Sign memories from any tool",
-      body: "When the agent calls mnemonic_sign_memory, the server prepares the canonical-CBOR payload and redirects here; you approve in-browser, your keypair signs a COSE_Sign1 envelope, and the server persists the attestation.",
-    },
-    {
-      label: "04 · Recall",
-      title: "Recall and verify across providers",
-      body: "Any tool authenticated with the same keypair can recall by semantic similarity and verify the Arweave + Solana anchors. Tampering is detectable; provenance is cryptographic.",
-    },
-  ];
+const HOW_IT_WORKS_STEPS = [
+  {
+    chip: "Identity",
+    title: "Generate an Ed25519 keypair",
+    body: "The keypair lives in your browser's local storage. The public key is your portable identity across providers; the secret never leaves the device.",
+    meta: "ed25519",
+  },
+  {
+    chip: "Install",
+    title: "Connect Mnemonic to your AI tool",
+    body: "Cursor and VS Code accept a deeplink; Claude.ai takes a custom connector URL; Windsurf takes a JSON snippet. All four negotiate OAuth 2.1 + PKCE against mcp.mnemonik.xyz.",
+    meta: "OAuth 2.1",
+  },
+  {
+    chip: "Sign",
+    title: "Sign memories from any tool",
+    body: "When the agent calls mnemonic_sign_memory, the server prepares the canonical-CBOR payload and redirects here; you approve in-browser, your keypair signs a COSE_Sign1 envelope, and the server persists the attestation.",
+    meta: "COSE_Sign1",
+  },
+  {
+    chip: "Recall",
+    title: "Recall and verify across providers",
+    body: "Any tool authenticated with the same keypair can recall by semantic similarity and verify the Arweave + Solana anchors. Tampering is detectable; provenance is cryptographic.",
+    meta: "Arweave + Solana",
+  },
+];
 
+function HowItWorks() {
   return (
     <section
       aria-labelledby="how-it-works"
       className="mx-auto max-w-6xl px-4 py-20 sm:px-6 md:py-28"
       data-testid="how-it-works"
     >
-      <header className="mb-12 max-w-3xl space-y-3">
-        <p className="font-mono text-[11px] uppercase tracking-[0.22em] text-accent-secondary">
-          Under the hood
-        </p>
-        <h2
-          id="how-it-works"
-          className="text-balance text-4xl font-bold leading-tight tracking-tight text-text-primary sm:text-5xl"
+      <header className="mb-14 grid gap-6 md:grid-cols-[1fr_auto] md:items-end">
+        <div className="space-y-3">
+          <p className="font-mono text-[11px] uppercase tracking-[0.22em] text-accent-primary">
+            Under the hood · 4 parts
+          </p>
+          <h2
+            id="how-it-works"
+            className="text-balance text-4xl font-bold leading-tight tracking-tight text-text-primary sm:text-5xl"
+          >
+            How it{" "}
+            <em className="font-serif text-accent-primary not-italic">works</em>
+            .
+          </h2>
+          <p className="max-w-xl text-text-muted">
+            Four moving parts. Each one inspectable, each one independently
+            verifiable, no opaque vendor in the path.
+          </p>
+        </div>
+        <a
+          href={EXTERNAL_LINKS.howItWorks}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="group inline-flex items-center gap-2 self-start rounded-sm border border-white/10 px-3 py-1.5 font-mono text-[11px] uppercase tracking-[0.18em] text-text-muted transition-colors hover:border-accent-primary hover:text-accent-primary md:self-end"
         >
-          How it works
-        </h2>
-        <p className="text-text-muted">
-          Four moving parts. Each one inspectable, each one independently
-          verifiable, no opaque vendor in the path.
-        </p>
+          Read the deep dive
+          <span
+            aria-hidden="true"
+            className="transition-transform group-hover:translate-x-0.5"
+          >
+            ↗
+          </span>
+        </a>
       </header>
 
-      <ol className="grid gap-px overflow-hidden rounded-lg bg-white/5 md:grid-cols-2">
-        {steps.map((step) => (
+      <ol className="relative space-y-6">
+        {/* Vertical ledger rail */}
+        <div
+          aria-hidden="true"
+          className="absolute left-[2.65rem] top-2 bottom-2 hidden w-px bg-gradient-to-b from-accent-primary/40 via-white/5 to-transparent md:block"
+        />
+
+        {HOW_IT_WORKS_STEPS.map((step, idx) => (
           <li
-            key={step.label}
-            className="relative flex flex-col gap-3 bg-background/95 p-7 transition-colors hover:bg-background"
+            key={step.chip}
+            className="group relative grid grid-cols-[auto_1fr] gap-4 sm:grid-cols-[auto_1fr_auto] sm:gap-6"
           >
-            <span className="font-mono text-[11px] uppercase tracking-[0.2em] text-accent-primary">
-              {step.label}
+            <Index n={idx + 1} />
+            <div className="flex flex-col gap-2 rounded-md border border-white/5 bg-background/60 px-5 py-4 backdrop-blur-sm transition-colors group-hover:border-accent-primary/40">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="rounded-sm bg-accent-primary/10 px-2 py-0.5 font-mono text-[10px] uppercase tracking-[0.18em] text-accent-primary">
+                  {step.chip}
+                </span>
+                <h3 className="text-lg font-semibold tracking-tight text-text-primary">
+                  {step.title}
+                </h3>
+              </div>
+              <p className="text-[15px] leading-relaxed text-text-muted">
+                {step.body}
+              </p>
+            </div>
+            <span className="hidden self-center font-mono text-[10px] uppercase tracking-[0.18em] text-text-muted/70 sm:block">
+              {step.meta}
             </span>
-            <h3 className="text-lg font-semibold tracking-tight text-text-primary">
-              {step.title}
-            </h3>
-            <p className="text-[15px] leading-relaxed text-text-muted">
-              {step.body}
-            </p>
           </li>
         ))}
       </ol>
