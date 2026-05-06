@@ -15,8 +15,7 @@ export const EXTERNAL_LINKS = {
   paper:
     "https://github.com/mnemonik-xyz/monorepo/blob/main/docs/research/paper.pdf",
   discord: "https://discord.gg/ws6wruJj",
-  // Telegram group — placeholder; swap in the real invite link when issued.
-  telegram: "https://t.me/mnemonik_xyz",
+  telegram: "https://t.me/mnemonikprotocol",
   issues: "https://github.com/mnemonik-xyz/monorepo/issues",
 } as const;
 
