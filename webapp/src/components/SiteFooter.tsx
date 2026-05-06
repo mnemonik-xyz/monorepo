@@ -45,6 +45,9 @@ export default function SiteFooter() {
           <FooterLink external href={EXTERNAL_LINKS.paper}>
             Foundational paper
           </FooterLink>
+          <FooterLink external href={EXTERNAL_LINKS.researchgate}>
+            ResearchGate publication
+          </FooterLink>
         </FooterColumn>
 
         <FooterColumn title="Build">
