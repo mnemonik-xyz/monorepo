@@ -78,7 +78,9 @@ function BackdropMesh() {
 
 function Hero() {
   return (
-    <section className="mx-auto flex min-h-[78vh] max-w-6xl flex-col justify-center gap-12 px-4 py-20 sm:px-6 md:py-28">
+    <section className="mx-auto flex min-h-[78vh] max-w-6xl flex-col justify-center gap-14 px-4 py-20 sm:px-6 md:py-28">
+      <ThesisBanner />
+
       <div className="grid gap-12 md:grid-cols-[1.4fr_1fr] md:items-end">
         <div className="space-y-7">
           <div className="flex items-center gap-3 font-mono text-[11px] uppercase tracking-[0.22em] text-accent-primary">
@@ -124,16 +126,7 @@ function Hero() {
         </div>
 
         <aside className="md:pl-6">
-          <blockquote className="border-l border-accent-primary/40 pl-6">
-            <p className="font-serif text-2xl italic leading-snug text-text-primary/90">
-              Trustless agents cannot work without trustless agentic memory.
-            </p>
-            <footer className="mt-4 font-mono text-[11px] uppercase tracking-[0.2em] text-text-muted">
-              — Protocol thesis
-            </footer>
-          </blockquote>
-
-          <dl className="mt-10 grid grid-cols-3 gap-4 text-center">
+          <dl className="grid grid-cols-3 gap-4 text-center">
             <Stat label="Bits / dim" value="2–4" caption="TurboQuant" />
             <Stat label="Anchor" value="Solana" caption="SPL Memo" />
             <Stat label="Storage" value="Arweave" caption="Permanent" />
@@ -141,6 +134,32 @@ function Hero() {
         </aside>
       </div>
     </section>
+  );
+}
+
+function ThesisBanner() {
+  return (
+    <figure
+      className="mx-auto flex w-full max-w-3xl flex-col items-center text-center"
+      data-testid="protocol-thesis"
+    >
+      <div className="flex items-center gap-3 text-accent-primary">
+        <span
+          aria-hidden="true"
+          className="inline-block h-px w-12 bg-accent-primary/60"
+        />
+        <span className="font-mono text-[11px] uppercase tracking-[0.22em]">
+          Protocol thesis
+        </span>
+        <span
+          aria-hidden="true"
+          className="inline-block h-px w-12 bg-accent-primary/60"
+        />
+      </div>
+      <blockquote className="mt-5 text-balance font-serif text-2xl italic leading-snug text-text-primary/90 sm:text-3xl">
+        “Trustless agents cannot work without trustless agentic memory.”
+      </blockquote>
+    </figure>
   );
 }
 
