@@ -128,11 +128,18 @@ struct IssuedCode {
     exp: u64,
 }
 
+/// Dynamic Client Registration record (client_id -> allowed redirect URIs).
+#[derive(Debug, Clone)]
+struct RegisteredClient {
+    redirect_uris: Vec<String>,
+}
+
 /// Shared OAuth state — pending challenges + issued codes, both LRU+TTL bound.
 /// Wrap in `Arc` and inject into Axum routers via `with_state`.
 pub struct OAuthState {
     pending: Mutex<LruCache<String, PendingAuthorize>>,
     codes: Mutex<LruCache<String, IssuedCode>>,
+    clients: Mutex<LruCache<String, RegisteredClient>>,
     /// HS256 signing key. Constructed once from `MCP_JWT_SECRET` at startup.
     jwt_encoding_key: EncodingKey,
     jwt_decoding_key: DecodingKey,
@@ -152,6 +159,7 @@ impl OAuthState {
         Self {
             pending: Mutex::new(LruCache::new(cap)),
             codes: Mutex::new(LruCache::new(cap)),
+            clients: Mutex::new(LruCache::new(cap)),
             jwt_encoding_key: EncodingKey::from_secret(secret),
             jwt_decoding_key: DecodingKey::from_secret(secret),
         }
@@ -183,6 +191,33 @@ impl OAuthState {
         };
         let mut guard = self.pending.lock().expect("pending mutex poisoned");
         guard.put(state, entry);
+    }
+
+    /// Persist Dynamic Client Registration redirects for the issued client_id.
+    pub fn register_client(&self, client_id: String, redirect_uris: Vec<String>) {
+        let mut guard = self.clients.lock().expect("clients mutex poisoned");
+        guard.put(client_id, RegisteredClient { redirect_uris });
+    }
+
+    /// Validate redirect_uri against DCR first, then the static fallback list.
+    pub fn allows_redirect(&self, uri: &str, client_id: &str) -> bool {
+        if self.registered_redirect_allowed(uri, client_id) {
+            return true;
+        }
+        allowed_redirect(uri, client_id)
+    }
+
+    fn registered_redirect_allowed(&self, uri: &str, client_id: &str) -> bool {
+        let mut guard = self.clients.lock().expect("clients mutex poisoned");
+        guard
+            .get(client_id)
+            .map(|client| {
+                client
+                    .redirect_uris
+                    .iter()
+                    .any(|registered| registered_redirect_matches(registered, uri))
+            })
+            .unwrap_or(false)
     }
 }
 
@@ -398,7 +433,7 @@ pub async fn authorize_init_handler(
     // created with an attacker-controlled callback. Without this gate any
     // `client_id` could ride the OAuth flow to drive the issued code at any
     // origin — open-redirect via the OAuth surface.
-    if !allowed_redirect(&q.redirect_uri, &q.client_id) {
+    if !state.allows_redirect(&q.redirect_uri, &q.client_id) {
         return oauth_error(
             StatusCode::BAD_REQUEST,
             "redirect_uri is not on the server allowlist",
@@ -551,19 +586,26 @@ const REDIRECT_PREFIXES: &[&str] = &[
 ];
 
 /// Validate `redirect_uri` against the allowlist (mnemonic-cli tech-spec
-/// Decision 5 + RFC 8252 §7). Loopback regex is gated to `client_id ==
-/// "mnemonic-cli"` so a Cursor / Claude.ai client cannot point us at a
-/// `127.0.0.1` callback that bypasses the OS deeplink handler.
+/// Decision 5 + RFC 8252 §7).
 ///
 /// Returns `true` if the URI is on one of three lists:
 /// 1. Exact match of `REDIRECT_EXACT` (e.g. webapp consent page).
 /// 2. Exact-prefix match of `REDIRECT_PREFIXES` (deeplink schemes).
-/// 3. Loopback callback `http://127.0.0.1:<port>/callback` or
-///    `http://[::1]:<port>/callback`, ONLY when `client_id == "mnemonic-cli"`.
+/// 3. Loopback callback `http://127.0.0.1:<port>[/<path>]` or
+///    `http://[::1]:<port>[/<path>]` for any client (RFC 8252 §7.3).
 ///
-/// All other URIs (`https://evil.com`, `http://0.0.0.0:1234`, loopback
-/// without the `/callback` suffix, loopback for any non-CLI client) → false.
-pub fn allowed_redirect(uri: &str, client_id: &str) -> bool {
+/// `client_id` was previously used to gate loopback access to the literal
+/// `mnemonic-cli` client only, with a fixed `/callback` path. That broke
+/// VS Code's MCP OAuth (which uses DCR-issued UUID client_ids and `/`
+/// path) and is not a real defense — PKCE + state already bind the auth
+/// code to the originating client, and a loopback URI is on the user's
+/// own machine, so there is no impersonation risk that a client_id check
+/// would mitigate. Per RFC 8252 §7.3, native clients SHOULD be permitted
+/// to use loopback with any port and any path.
+///
+/// All other URIs (`https://evil.com`, `http://0.0.0.0:1234`,
+/// `http://127.0.0.1.evil.com`) → false.
+pub fn allowed_redirect(uri: &str, _client_id: &str) -> bool {
     if REDIRECT_EXACT.contains(&uri) {
         return true;
     }
@@ -573,24 +615,76 @@ pub fn allowed_redirect(uri: &str, client_id: &str) -> bool {
     {
         return true;
     }
-    // Loopback regex — only `mnemonic-cli` may use this path. RFC 8252 §7
-    // recommends loopback for native clients; we narrow that to one
-    // `client_id` so `mnemonic-cli` cannot be impersonated by another client
-    // using the same loopback callback.
-    if client_id == "mnemonic-cli" && is_loopback_callback(uri) {
+    if is_loopback_redirect(uri) {
         return true;
     }
     false
 }
 
-/// Match `^http://127\.0\.0\.1:\d+/callback$` and
-/// `^http://\[::1\]:\d+/callback$` without pulling in a `regex` crate.
-/// Hand-rolled is cheaper and fully covered by unit tests. The port must be
-/// non-empty digits, the path must be the literal `/callback`, and there must
-/// be no trailing path / query / fragment beyond that.
-fn is_loopback_callback(uri: &str) -> bool {
+/// DCR redirect matching. Exact matches always pass. Loopback callbacks also
+/// match when host and path are identical but the port differs, per RFC 8252
+/// section 7.3 and VS Code's MCP OAuth behavior.
+fn registered_redirect_matches(registered: &str, requested: &str) -> bool {
+    if registered == requested {
+        return true;
+    }
+
+    match (
+        split_loopback_redirect(registered),
+        split_loopback_redirect(requested),
+    ) {
+        (Some((registered_host, registered_path)), Some((requested_host, requested_path))) => {
+            registered_host == requested_host && registered_path == requested_path
+        }
+        _ => false,
+    }
+}
+
+fn split_loopback_redirect(uri: &str) -> Option<(&'static str, &str)> {
+    let (host, rest) = if let Some(rest) = uri.strip_prefix("http://127.0.0.1") {
+        ("127.0.0.1", rest)
+    } else if let Some(rest) = uri.strip_prefix("http://[::1]") {
+        ("::1", rest)
+    } else {
+        return None;
+    };
+
+    let path = if let Some(rest) = rest.strip_prefix(':') {
+        let slash = rest.find('/')?;
+        let port = &rest[..slash];
+        if port.is_empty() || !port.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        &rest[slash..]
+    } else if rest.starts_with('/') {
+        rest
+    } else {
+        return None;
+    };
+
+    Some((host, path))
+}
+
+/// Match `^http://127\.0\.0\.1:\d+(/.*)?$` and `^http://\[::1\]:\d+(/.*)?$`
+/// per RFC 8252 §7.3 without pulling in a `regex` crate. Hand-rolled is
+/// cheaper and fully covered by unit tests.
+///
+/// Rules:
+///   - host MUST be exactly `127.0.0.1` or `[::1]` (the leading-`http://`
+///     + exact-host strip rejects e.g. `http://127.0.0.1.evil.com:80/`)
+///   - port MUST be present and all-ASCII-digits (RFC 8252 forbids
+///     omitting the port for loopback)
+///   - path is OPTIONAL. If present, it MUST start with `/` and contain
+///     no fragment (`#`). Any path is accepted — VS Code uses `/`,
+///     mnemonic-cli uses `/callback`, future clients may use anything.
+///
+/// Was previously called `is_loopback_callback` and required the literal
+/// path `/callback`; renamed + relaxed because that constraint was a
+/// `mnemonic-cli`-specific assumption that broke real-world OAuth clients
+/// (VS Code MCP OAuth uses path `/`).
+fn is_loopback_redirect(uri: &str) -> bool {
     // Strip the scheme + host prefix; require the EXACT host string so
-    // `http://127.0.0.1.evil.com:80/callback` does not match.
+    // `http://127.0.0.1.evil.com:80/...` does not match.
     let rest = if let Some(r) = uri.strip_prefix("http://127.0.0.1:") {
         r
     } else if let Some(r) = uri.strip_prefix("http://[::1]:") {
@@ -598,15 +692,23 @@ fn is_loopback_callback(uri: &str) -> bool {
     } else {
         return false;
     };
-    // `rest` must look like `<digits>/callback` with no trailing path bytes.
+    // `rest` is `<digits>` (no path) or `<digits>/<anything-except-#>`.
     let (port, path) = match rest.find('/') {
-        Some(i) => (&rest[..i], &rest[i..]),
-        None => return false,
+        Some(i) => (&rest[..i], Some(&rest[i..])),
+        None => (rest, None),
     };
     if port.is_empty() || !port.bytes().all(|b| b.is_ascii_digit()) {
         return false;
     }
-    path == "/callback"
+    // Reject fragments — they're never sent by the browser anyway, but
+    // an attacker-controlled `redirect_uri` registration shouldn't be
+    // able to slip a `#fragment` past us.
+    if let Some(p) = path {
+        if p.contains('#') {
+            return false;
+        }
+    }
+    true
 }
 
 // ── /oauth/authorize handler (Decision 10) ───────────────────────────────────
@@ -925,10 +1027,31 @@ pub async fn oauth_authorization_server_metadata() -> Response {
     (StatusCode::OK, Json(body)).into_response()
 }
 
-/// `GET /.well-known/oauth-protected-resource` — MCP spec metadata document.
+/// `GET /.well-known/oauth-protected-resource` — MCP spec metadata document
+/// for the server origin as a whole.
 pub async fn oauth_protected_resource_metadata() -> Response {
     let body = serde_json::json!({
         "resource": SERVER_ORIGIN,
+        "authorization_servers": [SERVER_ORIGIN],
+        "scopes_supported": ["mcp"],
+        "bearer_methods_supported": ["header"],
+    });
+    (StatusCode::OK, Json(body)).into_response()
+}
+
+/// `GET /.well-known/oauth-protected-resource/mcp` — RFC 9728 §3.1
+/// path-specific protected-resource metadata. The `resource` value here is
+/// `<origin>/mcp` to match the URL the MCP client is actually connecting to.
+///
+/// Cursor's MCP OAuth provider (3.2+) requests this path-specific endpoint
+/// FIRST, falls back to the root `/.well-known/oauth-protected-resource`
+/// only if missing, and silently aborts the OAuth flow if the `resource`
+/// claim does not match the URL it is connecting to. Without this endpoint
+/// returning the path-qualified resource value, Cursor never opens the
+/// browser to launch /oauth/authorize.
+pub async fn oauth_protected_resource_metadata_mcp() -> Response {
+    let body = serde_json::json!({
+        "resource": format!("{SERVER_ORIGIN}/mcp"),
         "authorization_servers": [SERVER_ORIGIN],
         "scopes_supported": ["mcp"],
         "bearer_methods_supported": ["header"],
@@ -950,11 +1073,13 @@ pub async fn oauth_protected_resource_metadata() -> Response {
 /// `https://vscode.dev/redirect`, `https://claude.ai/...`) and we mint a
 /// `client_id` for them to use against `/oauth/authorize` and `/oauth/token`.
 ///
-/// We do not persist registrations — `client_id` is opaque to us beyond
-/// participating in the canonical-CBOR challenge construction (Decision 10).
-/// A client that loses its `client_id` re-registers; replay risk is bounded
-/// by the per-`state` single-use guard already in place.
-pub async fn oauth_register_handler(body: axum::body::Bytes) -> Response {
+/// Registrations are stored in-memory and bounded by the same LRU cap as
+/// pending auth state. A client that loses its `client_id` re-registers; replay
+/// risk is bounded by the per-`state` single-use guard already in place.
+pub async fn oauth_register_handler(
+    State(state): State<Arc<OAuthState>>,
+    body: axum::body::Bytes,
+) -> Response {
     // Parse request body opportunistically — most fields are echoed back as-is
     // per RFC 7591. Tolerate empty / non-JSON bodies (return defaults).
     let req: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
@@ -968,6 +1093,15 @@ pub async fn oauth_register_handler(body: axum::body::Bytes) -> Response {
         .get("redirect_uris")
         .cloned()
         .unwrap_or_else(|| serde_json::json!([]));
+    let registered_redirects = redirect_uris
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.as_str().map(str::to_string))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
     let client_name = req
         .get("client_name")
         .and_then(|v| v.as_str())
@@ -988,7 +1122,7 @@ pub async fn oauth_register_handler(body: axum::body::Bytes) -> Response {
         .to_string();
 
     let resp = serde_json::json!({
-        "client_id": client_id,
+        "client_id": client_id.clone(),
         "client_id_issued_at": issued_at,
         "redirect_uris": redirect_uris,
         "client_name": client_name,
@@ -996,6 +1130,8 @@ pub async fn oauth_register_handler(body: axum::body::Bytes) -> Response {
         "response_types": response_types,
         "token_endpoint_auth_method": token_endpoint_auth_method,
     });
+
+    state.register_client(client_id, registered_redirects);
 
     (StatusCode::CREATED, Json(resp)).into_response()
 }
@@ -1017,6 +1153,29 @@ const MAX_PEEK_BODY: usize = 1024 * 1024;
 /// streamable-HTTP transport (observed during T15 — Cursor sends
 /// `notifications/initialized` immediately after `initialize` response).
 const ALLOWLIST_METHODS: &[&str] = &["initialize", "tools/list", "ping"];
+
+/// Tool names within `tools/call` that bypass JWT validation. Used by
+/// `mcp_auth` so an MCP client (Cursor, Claude.ai) can ask the server "am I
+/// authenticated and where do I authorize" without first having a token.
+/// Cursor's MCP UI has no native Connect/Authorize button for non-directory
+/// servers; without an unauth-callable hint tool, the chat agent has no way
+/// to surface the install/authorize URL to the user.
+const ALLOWLIST_UNAUTH_TOOLS: &[&str] = &["mcp_auth"];
+
+/// Inspect a JSON-RPC body for `tools/call` invocations whose `params.name`
+/// is in `ALLOWLIST_UNAUTH_TOOLS`. Returns true iff the request is one of
+/// those tool calls (so the middleware can let it through without a JWT).
+fn is_unauth_tool_call(bytes: &[u8]) -> bool {
+    let val: Value = match serde_json::from_slice(bytes) {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+    let name = val
+        .pointer("/params/name")
+        .and_then(|n| n.as_str())
+        .unwrap_or("");
+    ALLOWLIST_UNAUTH_TOOLS.contains(&name)
+}
 
 /// Extract the JSON-RPC `method` field from a request body without consuming
 /// the parser state. Returns `None` if the body is not valid JSON or the
@@ -1096,18 +1255,36 @@ pub async fn bearer_auth_middleware(
             // `notifications/*` methods are also pass-through. Without this
             // Cursor's post-initialize `notifications/initialized` is rejected
             // with 401, breaking the handshake.
-            ALLOWLIST_METHODS.contains(&m) || m.starts_with("notifications/")
+            if ALLOWLIST_METHODS.contains(&m) || m.starts_with("notifications/") {
+                return true;
+            }
+            // `tools/call` is normally gated, but specific tool names listed
+            // in ALLOWLIST_UNAUTH_TOOLS (e.g. `mcp_auth`) are callable
+            // without a JWT so the agent can fetch authorize hints before it
+            // has a token.
+            if m == "tools/call" {
+                return is_unauth_tool_call(&body_bytes);
+            }
+            false
         })
         .unwrap_or(false);
 
+    // Try to extract a Bearer JWT from the Authorization header. We do this
+    // for BOTH gated and allowlisted requests so the downstream handler can
+    // see `Claims` when present — the allowlist only relaxes "JWT MUST be
+    // present and valid", it does not mean "ignore the JWT if the client
+    // sent one". `mcp_auth` specifically depends on this: it is allowlisted
+    // (so unauthenticated callers get the install hint) AND it reports
+    // `status: "authenticated"` when a valid JWT IS attached.
+    let bearer = parts
+        .headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.strip_prefix("Bearer "))
+        .map(|s| s.trim().to_string());
+
     if !allowlisted {
-        // Require Bearer JWT.
-        let bearer = parts
-            .headers
-            .get(axum::http::header::AUTHORIZATION)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|s| s.strip_prefix("Bearer "))
-            .map(|s| s.trim().to_string());
+        // Gated path — JWT is required AND must verify.
         let token = match bearer {
             Some(t) if !t.is_empty() => t,
             _ => return jsonrpc_unauthorized(StatusCode::UNAUTHORIZED, "missing Bearer JWT"),
@@ -1127,19 +1304,59 @@ pub async fn bearer_auth_middleware(
         return next.run(new_req).await;
     }
 
-    // Allowlisted — re-inject the body untouched.
-    let new_req = Request::from_parts(parts, Body::from(body_bytes));
+    // Allowlisted path — JWT is OPTIONAL. If a Bearer header is present and
+    // verifies, attach Claims so `mcp_auth` (and any future allowlisted tool
+    // that wants to know the caller identity) can branch on it. If absent or
+    // invalid, proceed without Claims (allowlisted requests must not 401 on
+    // bad tokens — the whole point is the user might not yet have one).
+    let mut new_req = Request::from_parts(parts, Body::from(body_bytes));
+    if let Some(token) = bearer.filter(|t| !t.is_empty()) {
+        if let Ok(claims) = verify_jwt(&state, &token) {
+            new_req.extensions_mut().insert(claims);
+        }
+    }
     next.run(new_req).await
 }
 
 /// Emit a JSON-RPC-shaped 401 envelope for failed bearer-auth checks.
+///
+/// MCP authorization spec + RFC 6750 §3 require a `WWW-Authenticate` header
+/// on any 401 from a Bearer-protected resource. The `resource_metadata`
+/// parameter tells the MCP client where the protected-resource metadata
+/// lives (`/.well-known/oauth-protected-resource`); without this header,
+/// some MCP-OAuth clients (Cursor's recent versions) fail the connection
+/// silently instead of prompting the user to authenticate.
+///
+/// We always emit the same realm + resource_metadata pair regardless of
+/// `status` because the client behavior is the same for any 401-class auth
+/// failure (missing/invalid/expired Bearer).
 fn jsonrpc_unauthorized(status: StatusCode, msg: &str) -> Response {
     let body = serde_json::json!({
         "jsonrpc": "2.0",
         "id": Value::Null,
         "error": {"code": -32001, "message": format!("unauthorized: {msg}")}
     });
-    (status, Json(body)).into_response()
+    let mut resp = (status, Json(body)).into_response();
+    if status == StatusCode::UNAUTHORIZED {
+        // Must be a single header value per RFC 7235 §4.1. Choose `error=` per
+        // RFC 6750 §3.1 to match invalid_token semantics; `error_description`
+        // is the human-readable hint the client may surface to the user.
+        let www_auth = format!(
+            "Bearer realm=\"{issuer}\", error=\"invalid_token\", \
+             error_description=\"{esc_msg}\", \
+             resource_metadata=\"{issuer}/.well-known/oauth-protected-resource\"",
+            issuer = "https://mcp.mnemonik.xyz",
+            // Strip embedded double-quotes / CR / LF from the message to keep
+            // the header well-formed; we don't expect any in caller-supplied
+            // strings but defense-in-depth is cheap.
+            esc_msg = msg.replace('"', "'").replace(['\r', '\n'], " "),
+        );
+        if let Ok(hv) = axum::http::HeaderValue::from_str(&www_auth) {
+            resp.headers_mut()
+                .insert(axum::http::header::WWW_AUTHENTICATE, hv);
+        }
+    }
+    resp
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────
@@ -1711,6 +1928,17 @@ mod tests {
             .with_state(state)
     }
 
+    fn build_init_register_router(state: Arc<OAuthState>) -> Router {
+        use axum::routing::get;
+        Router::new()
+            .route(
+                "/oauth/authorize",
+                get(authorize_init_handler).post(authorize_handler),
+            )
+            .route("/oauth/register", post(oauth_register_handler))
+            .with_state(state)
+    }
+
     #[tokio::test]
     async fn test_authorize_init_creates_pending() {
         // Given a fresh OAuthState, GET /oauth/authorize?...code_challenge_method=S256
@@ -1853,6 +2081,59 @@ mod tests {
             .unwrap();
         let resp2 = app2.oneshot(post_req).await.unwrap();
         assert_eq!(resp2.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_oauth_register_then_authorize_accepts_vscode_redirects() {
+        let app = build_init_register_router(fresh_state());
+
+        let register_req = Request::builder()
+            .method("POST")
+            .uri("/oauth/register")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "client_name": "VS Code",
+                    "redirect_uris": [
+                        "https://vscode.dev/redirect",
+                        "http://127.0.0.1:33418/"
+                    ],
+                    "grant_types": ["authorization_code"],
+                    "response_types": ["code"],
+                    "token_endpoint_auth_method": "none"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let register_resp = app.clone().oneshot(register_req).await.unwrap();
+        assert_eq!(register_resp.status(), StatusCode::CREATED);
+        let register_body: Value = serde_json::from_slice(
+            &register_resp
+                .into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes(),
+        )
+        .unwrap();
+        let client_id = register_body["client_id"].as_str().expect("client_id");
+
+        let authorize_uri = format!(
+            "/oauth/authorize\
+             ?client_id={client_id}\
+             &redirect_uri=http%3A%2F%2F127.0.0.1%3A59656%2F\
+             &code_challenge=abc\
+             &code_challenge_method=S256\
+             &state=vs-code-state"
+        );
+        let authorize_req = Request::builder()
+            .method("GET")
+            .uri(authorize_uri)
+            .header("accept", "application/json")
+            .body(Body::empty())
+            .unwrap();
+        let authorize_resp = app.oneshot(authorize_req).await.unwrap();
+        assert_eq!(authorize_resp.status(), StatusCode::OK);
     }
 
     #[tokio::test]
@@ -2017,6 +2298,221 @@ mod tests {
         assert_eq!(parsed["bearer_methods_supported"][0], "header");
     }
 
+    // ── New tests for today's changes (cursor-vscode-e2e-tests feature) ────
+
+    #[tokio::test]
+    async fn test_oauth_protected_resource_metadata_mcp_path_specific() {
+        // RFC 9728 §3.1: path-specific protected-resource metadata. Cursor's
+        // MCP OAuth provider (3.2+) requests this URL FIRST and silently
+        // aborts if it 404s — falling back to the root variant whose
+        // `resource` claim doesn't match the URL the client connects to. This
+        // test guards against regression.
+        use axum::routing::get;
+        let app: Router = Router::new().route(
+            "/.well-known/oauth-protected-resource/mcp",
+            get(oauth_protected_resource_metadata_mcp),
+        );
+        let req = Request::builder()
+            .method("GET")
+            .uri("/.well-known/oauth-protected-resource/mcp")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body_bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let parsed: Value = serde_json::from_slice(&body_bytes).unwrap();
+        assert_eq!(
+            parsed["resource"],
+            format!("{SERVER_ORIGIN}/mcp"),
+            "resource MUST equal the URL the MCP client connects to (path-specific)"
+        );
+        assert_eq!(parsed["authorization_servers"][0], SERVER_ORIGIN);
+        assert_eq!(parsed["scopes_supported"][0], "mcp");
+        assert_eq!(parsed["bearer_methods_supported"][0], "header");
+    }
+
+    #[tokio::test]
+    async fn test_401_includes_www_authenticate_header() {
+        // MCP authorization spec + RFC 6750 §3 require 401 responses from a
+        // Bearer-protected resource to advertise the realm + protected-
+        // resource metadata URL via WWW-Authenticate. Cursor / Claude.ai
+        // recent MCP OAuth providers fail silently when this header is
+        // missing. Regression guard.
+        let st = fresh_state();
+        let app = build_authn_router(st);
+        let body = serde_json::json!({"jsonrpc": "2.0", "method": "tools/call", "id": 1});
+        let req = Request::builder()
+            .method("POST")
+            .uri("/mcp")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        let www_auth = resp
+            .headers()
+            .get(axum::http::header::WWW_AUTHENTICATE)
+            .expect("401 MUST include WWW-Authenticate header (RFC 6750 §3)")
+            .to_str()
+            .expect("WWW-Authenticate must be a valid header value");
+        assert!(
+            www_auth.starts_with("Bearer "),
+            "WWW-Authenticate scheme MUST be Bearer, got: {www_auth}"
+        );
+        assert!(
+            www_auth.contains("resource_metadata="),
+            "WWW-Authenticate MUST include resource_metadata param so MCP clients can discover the metadata URL: {www_auth}"
+        );
+        assert!(
+            www_auth.contains("error=\"invalid_token\""),
+            "WWW-Authenticate SHOULD include error=invalid_token per RFC 6750: {www_auth}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_middleware_extracts_claims_on_allowlisted_request_with_valid_jwt() {
+        // The `mcp_auth` tool (and any future allowlisted-but-claims-aware
+        // tool) needs the bearer middleware to extract Claims when a valid
+        // JWT IS present, even though the request is allowlisted. Without
+        // this, allowlisted tools always see jwt_sub=None and cannot
+        // distinguish authenticated callers from unauthenticated ones.
+        use axum::{routing::post, Extension};
+        async fn echo_claims(claims: Option<Extension<Claims>>) -> String {
+            match claims {
+                Some(Extension(c)) => format!("authed:{}", c.sub),
+                None => "unauth".to_string(),
+            }
+        }
+
+        let st = fresh_state();
+        let token = issue_jwt(&st, "test-claims-sub").unwrap();
+        let app: Router = Router::new()
+            .route("/mcp", post(echo_claims))
+            .layer(axum_middleware::from_fn_with_state(
+                st.clone(),
+                bearer_auth_middleware,
+            ))
+            .with_state(st);
+
+        // Allowlisted call (mcp_auth) WITH a valid Bearer JWT — Claims must
+        // be attached to the request extensions.
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "tools/call",
+            "params": {"name": "mcp_auth", "arguments": {}},
+            "id": 1
+        });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/mcp")
+            .header("content-type", "application/json")
+            .header("authorization", format!("Bearer {token}"))
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body_bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let body_str = std::str::from_utf8(&body_bytes).unwrap();
+        assert_eq!(
+            body_str, "authed:test-claims-sub",
+            "Allowlisted handler MUST see Claims when valid JWT is present"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_middleware_allowlisted_request_without_jwt_passes_no_claims() {
+        // Mirror of the above: allowlisted call WITHOUT a Bearer header
+        // passes through, handler sees jwt_sub=None. The whole point of the
+        // allowlist is to NOT 401 when the caller has no token yet.
+        use axum::{routing::post, Extension};
+        async fn echo_claims(claims: Option<Extension<Claims>>) -> String {
+            match claims {
+                Some(Extension(_)) => "authed".to_string(),
+                None => "unauth".to_string(),
+            }
+        }
+
+        let st = fresh_state();
+        let app: Router = Router::new()
+            .route("/mcp", post(echo_claims))
+            .layer(axum_middleware::from_fn_with_state(
+                st.clone(),
+                bearer_auth_middleware,
+            ))
+            .with_state(st);
+
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "tools/call",
+            "params": {"name": "mcp_auth", "arguments": {}},
+            "id": 1
+        });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/mcp")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body_bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(std::str::from_utf8(&body_bytes).unwrap(), "unauth");
+    }
+
+    #[tokio::test]
+    async fn test_middleware_non_allowlisted_tool_call_still_requires_jwt() {
+        // The unauth-tool allowlist is NARROW: only `mcp_auth` (and future
+        // additions) bypass JWT. Other `tools/call` requests must still 401.
+        let st = fresh_state();
+        let app = build_authn_router(st);
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "tools/call",
+            "params": {"name": "mnemonic_whoami", "arguments": {}},
+            "id": 1
+        });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/mcp")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "Non-allowlisted tool calls MUST 401 without JWT"
+        );
+    }
+
+    #[test]
+    fn test_is_unauth_tool_call_helper() {
+        // Helper function: peeks params.name within tools/call body.
+        let yes = b"{\"jsonrpc\":\"2.0\",\"method\":\"tools/call\",\"params\":{\"name\":\"mcp_auth\"},\"id\":1}";
+        assert!(
+            is_unauth_tool_call(yes),
+            "mcp_auth must be in unauth tool allowlist"
+        );
+
+        let no = b"{\"jsonrpc\":\"2.0\",\"method\":\"tools/call\",\"params\":{\"name\":\"mnemonic_whoami\"},\"id\":1}";
+        assert!(
+            !is_unauth_tool_call(no),
+            "non-allowlisted tools must not bypass auth"
+        );
+
+        let malformed = b"not-json-at-all";
+        assert!(
+            !is_unauth_tool_call(malformed),
+            "malformed body falls back to gated"
+        );
+
+        let no_params = b"{\"jsonrpc\":\"2.0\",\"method\":\"tools/call\",\"id\":1}";
+        assert!(
+            !is_unauth_tool_call(no_params),
+            "missing params.name falls back to gated"
+        );
+    }
+
     #[tokio::test]
     async fn test_middleware_well_known_bypasses_auth() {
         // `.well-known/*` must bypass bearer-auth — Anthropic's connector
@@ -2079,17 +2575,6 @@ mod tests {
             "http://0.0.0.0:1234/callback",
             "mnemonic-cli"
         ));
-        // Negative: loopback without /callback suffix is rejected.
-        assert!(!allowed_redirect("http://127.0.0.1:1234/", "mnemonic-cli"));
-        assert!(!allowed_redirect(
-            "http://127.0.0.1:1234/foo",
-            "mnemonic-cli"
-        ));
-        // Negative: loopback with trailing path beyond /callback rejected.
-        assert!(!allowed_redirect(
-            "http://127.0.0.1:1234/callback/extra",
-            "mnemonic-cli"
-        ));
         // Negative: lookalike host (127.0.0.1.evil.com) rejected.
         assert!(!allowed_redirect(
             "http://127.0.0.1.evil.com:1234/callback",
@@ -2100,34 +2585,110 @@ mod tests {
             "http://127.0.0.1:abc/callback",
             "mnemonic-cli"
         ));
-        // Negative: missing port rejected.
+        // Negative: missing port rejected (RFC 8252 forbids omitting it).
         assert!(!allowed_redirect(
             "http://127.0.0.1/callback",
+            "mnemonic-cli"
+        ));
+        // Negative: fragment in path rejected (cannot be slipped past
+        // a registered redirect).
+        assert!(!allowed_redirect(
+            "http://127.0.0.1:1234/cb#frag",
             "mnemonic-cli"
         ));
     }
 
     #[test]
-    fn test_oauth_allowed_redirect_loopback_only_for_cli() {
-        // TDD anchor (tasks/6.md): loopback URI accepted ONLY when client_id
-        // is mnemonic-cli; the same URI submitted by any other client (cursor,
-        // claude, vscode, evil) is rejected.
-        let v4 = "http://127.0.0.1:1234/callback";
-        let v6 = "http://[::1]:8080/callback";
-        // Positive — mnemonic-cli is the gated client_id.
-        assert!(allowed_redirect(v4, "mnemonic-cli"));
-        assert!(allowed_redirect(v6, "mnemonic-cli"));
-        // Negative — every other client_id rejects loopback.
-        for other in ["cursor", "claude", "vscode", "evil-client", ""] {
+    fn test_oauth_allowed_redirect_loopback_any_client_any_path() {
+        // RFC 8252 §7.3: native clients are permitted to use loopback
+        // with ANY port and ANY path. The previous `mnemonic-cli`-only
+        // and `/callback`-only constraints broke VS Code's MCP OAuth
+        // (UUID client_id from DCR + path "/") without providing real
+        // security — PKCE+state already prevent code interception, and
+        // the loopback is on the user's own machine.
+        //
+        // Regression guard: 2026-05-04. VS Code 1.118.1 with
+        // client_id=<DCR-UUID> and redirect_uri=http://127.0.0.1:<port>/
+        // was rejected with "redirect_uri is not on the server allowlist"
+        // until this constraint was relaxed.
+        for client in [
+            "mnemonic-cli",
+            "cursor",
+            "vscode",
+            "0c0009bc-3404-4898-b935-8862ee3a03b2", // VS Code DCR UUID
+            "claude",
+            "",
+        ] {
+            // Path "/" — VS Code's MCP OAuth callback.
             assert!(
-                !allowed_redirect(v4, other),
-                "loopback ipv4 must reject client_id={other:?}"
+                allowed_redirect("http://127.0.0.1:33418/", client),
+                "loopback / must accept client_id={client:?}"
             );
             assert!(
-                !allowed_redirect(v6, other),
-                "loopback ipv6 must reject client_id={other:?}"
+                allowed_redirect("http://[::1]:33418/", client),
+                "loopback v6 / must accept client_id={client:?}"
             );
+            // Path "/callback" — mnemonic-cli's path.
+            assert!(allowed_redirect("http://127.0.0.1:1234/callback", client));
+            // Path with extra segments — also allowed per RFC 8252.
+            assert!(allowed_redirect(
+                "http://127.0.0.1:1234/callback/extra",
+                client
+            ));
+            // No path at all (just port).
+            assert!(allowed_redirect("http://127.0.0.1:1234", client));
         }
+    }
+
+    #[test]
+    fn test_oauth_registered_redirects_allow_vscode_callbacks() {
+        let st = fresh_state();
+        let client_id = "vscode-dcr-client".to_string();
+        st.register_client(
+            client_id.clone(),
+            vec![
+                "https://vscode.dev/redirect".to_string(),
+                "http://127.0.0.1:33418/".to_string(),
+                "http://[::1]:33418/".to_string(),
+            ],
+        );
+
+        assert!(st.allows_redirect("https://vscode.dev/redirect", &client_id));
+        assert!(st.allows_redirect("http://127.0.0.1:59656/", &client_id));
+        assert!(st.allows_redirect("http://[::1]:59656/", &client_id));
+        assert!(!st.allows_redirect("https://evil.com/redirect", &client_id));
+        assert!(!st.allows_redirect("http://127.0.0.1.evil.com:59656/", &client_id));
+    }
+
+    #[test]
+    fn test_oauth_registered_redirect_loopback_any_path() {
+        // Policy change 2026-05-04: loopback URIs are accepted for ANY
+        // client_id with ANY path per RFC 8252 §7.3 (see
+        // `test_oauth_allowed_redirect_loopback_any_client_any_path`).
+        // The previous test asserted that a DCR-registered client with
+        // `/callback` was port-flexible but path-pinned; that constraint
+        // was defense-in-depth (PKCE+state already prevent code
+        // interception) and broke real OAuth clients (VS Code with a
+        // wiped-from-memory DCR client_id).
+        //
+        // This test now asserts the new policy: a registered client gets
+        // both port AND path flexibility on loopback. Non-loopback
+        // hosts still go through DCR's exact-or-loopback matcher.
+        let st = fresh_state();
+        let client_id = "registered-client".to_string();
+        st.register_client(
+            client_id.clone(),
+            vec!["http://127.0.0.1:33418/callback".to_string()],
+        );
+
+        // Loopback — any port, any path, registered or not.
+        assert!(st.allows_redirect("http://127.0.0.1:50000/callback", &client_id));
+        assert!(st.allows_redirect("http://127.0.0.1:50000/other", &client_id));
+        assert!(st.allows_redirect("http://127.0.0.1:50000/", &client_id));
+        assert!(st.allows_redirect("http://[::1]:50000/anything", &client_id));
+        // Non-loopback — still strictly checked.
+        assert!(!st.allows_redirect("https://evil.com/callback", &client_id));
+        assert!(!st.allows_redirect("http://127.0.0.1.evil.com:50000/callback", &client_id));
     }
 
     #[tokio::test]

@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-labelledby="title">
+  <title id="title">Mnemonic Protocol — concept A: hexagonal seal monogram</title>
+  <!--
+    Concept A — "Hex seal".
+    Hexagon = cryptographic seal / commitment.
+    Monogram M = memory.
+    Stroke-only construction renders sharply at any scale and at small favicon sizes.
+    Color: monochrome (currentColor); recolor via CSS for site/app contexts.
+  -->
+  <defs>
+    <linearGradient id="grad-a" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#9945FF"/>
+      <stop offset="1" stop-color="#14F195"/>
+    </linearGradient>
+  </defs>
+  <g fill="none" stroke="url(#grad-a)" stroke-width="10" stroke-linecap="round" stroke-linejoin="round">
+    <!-- Hexagonal seal -->
+    <polygon points="128,20 220,72 220,184 128,236 36,184 36,72"/>
+    <!-- Monogram M (two strokes meeting at center) -->
+    <polyline points="76,176 76,90 128,150 180,90 180,176"/>
+  </g>
+</svg>

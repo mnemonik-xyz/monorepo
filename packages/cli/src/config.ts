@@ -8,6 +8,13 @@
 // File layout:
 //   <dir>/identity.json   {secret: number[64], pubkey_base58: string}
 //   <dir>/token.json      {jwt, expires_at, sub}
+//
+// Legacy fallback: existing self-host users (server's MNEMONIC_KEYPAIR_PATH)
+// have `<dir>/id.json` in Solana keypair file format — a bare JSON array of
+// 64 numbers `[n0, ..., n63]` (32 seed + 32 pubkey). `loadIdentityJson()`
+// transparently reads that file when `identity.json` is missing, deriving
+// `pubkey_base58` from `secret[32..64]`. The on-disk file is preserved
+// as-is (no auto-rewrite to identity.json).
 
 import { execFileSync } from "node:child_process";
 import {
@@ -41,6 +48,11 @@ export function configDir(): string {
 
 export function identityPath(): string {
   return join(configDir(), "identity.json");
+}
+
+/** Path to the legacy Solana-keypair-format file (server self-host layout). */
+export function legacyIdJsonPath(): string {
+  return join(configDir(), "id.json");
 }
 
 export function tokenPath(): string {
@@ -102,35 +114,127 @@ function isKeypairJson(v: unknown): v is KeypairJson {
   );
 }
 
+/** True iff `v` is a JSON array of exactly 64 numbers in 0..=255. */
+function isSolanaKeypairArray(v: unknown): v is number[] {
+  if (!Array.isArray(v) || v.length !== 64) return false;
+  for (const n of v) {
+    if (typeof n !== "number" || !Number.isInteger(n) || n < 0 || n > 255) {
+      return false;
+    }
+  }
+  return true;
+}
+
+// Minimal Bitcoin-alphabet base58 encoder. ~30 lines of arithmetic; we don't
+// pull in a third-party `bs58` dep for this single call site. Mirrors the
+// SDK's test-only encoder in `sdk/test/helpers/bs58.ts`. Correctness is
+// verified end-to-end via the WASM `Keypair.fromJSON` round-trip — the
+// derived pubkey must match what the secret derives to or import fails.
+const BASE58_ALPHABET =
+  "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+
+function base58Encode(bytes: Uint8Array): string {
+  if (bytes.length === 0) return "";
+  let zeros = 0;
+  while (zeros < bytes.length && bytes[zeros] === 0) zeros++;
+  const digits: number[] = [];
+  for (let i = zeros; i < bytes.length; i++) {
+    let carry = bytes[i]!;
+    for (let j = 0; j < digits.length; j++) {
+      carry += digits[j]! * 256;
+      digits[j] = carry % 58;
+      carry = (carry / 58) | 0;
+    }
+    while (carry > 0) {
+      digits.push(carry % 58);
+      carry = (carry / 58) | 0;
+    }
+  }
+  let s = "";
+  for (let i = 0; i < zeros; i++) s += BASE58_ALPHABET[0];
+  for (let i = digits.length - 1; i >= 0; i--) s += BASE58_ALPHABET[digits[i]!];
+  return s;
+}
+
+/**
+ * Convert a Solana keypair file (bare 64-number JSON array, 32-byte seed +
+ * 32-byte pubkey) into our `KeypairJson` shape. The pubkey is derived purely
+ * by base58-encoding `secret[32..64]` — no curve operation, just slice-and-
+ * encode, because the Solana keypair file format already includes the
+ * derived public key as its second 32-byte half.
+ */
+function solanaKeypairArrayToKeypairJson(secret: number[]): KeypairJson {
+  const pubBytes = new Uint8Array(secret.slice(32, 64));
+  return {
+    secret: [...secret],
+    pubkey_base58: base58Encode(pubBytes),
+  };
+}
+
+/** Multi-line UserError describing the three ways to obtain an identity. */
+function noIdentityError(): UserError {
+  return new UserError(
+    `no identity in ${configDir()}. Options:\n` +
+      `  • mnemonic init                              — generate fresh keypair\n` +
+      `  • mnemonic identity import --ticket <uuid>   — round-trip from webapp\n` +
+      `  • mnemonic identity import --file <path>     — import existing keypair JSON`
+  );
+}
+
 export function identityExists(): boolean {
-  return existsSync(identityPath());
+  return existsSync(identityPath()) || existsSync(legacyIdJsonPath());
 }
 
 export function loadIdentityJson(): KeypairJson {
   const path = identityPath();
-  if (!existsSync(path)) {
-    throw new UserError(
-      `no identity at ${path}; run \`mnemonic init\` to create one`
-    );
+  if (existsSync(path)) {
+    let raw: string;
+    try {
+      raw = readFileSync(path, "utf8");
+    } catch (e) {
+      throw new UserError(`identity unreadable: ${path}`, e);
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch (e) {
+      throw new UserError(`identity is not valid JSON: ${path}`, e);
+    }
+    if (!isKeypairJson(parsed)) {
+      throw new UserError(
+        `identity has wrong shape; expected {secret: number[64], pubkey_base58: string}`
+      );
+    }
+    return parsed;
   }
-  let raw: string;
-  try {
-    raw = readFileSync(path, "utf8");
-  } catch (e) {
-    throw new UserError(`identity unreadable: ${path}`, e);
+
+  // Fallback: server self-host layout `<dir>/id.json` — a bare JSON array of
+  // 64 numbers (Solana keypair file format). Convert in-memory only; do NOT
+  // rewrite to identity.json so the user's existing file stays canonical.
+  const legacy = legacyIdJsonPath();
+  if (existsSync(legacy)) {
+    let raw: string;
+    try {
+      raw = readFileSync(legacy, "utf8");
+    } catch (e) {
+      throw new UserError(`identity unreadable: ${legacy}`, e);
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch (e) {
+      throw new UserError(`identity is not valid JSON: ${legacy}`, e);
+    }
+    if (!isSolanaKeypairArray(parsed)) {
+      throw new UserError(
+        `${legacy} is not a Solana keypair file (expected JSON array of 64 numbers in 0..255)`
+      );
+    }
+    process.stderr.write("using legacy id.json (Solana keypair file format)\n");
+    return solanaKeypairArrayToKeypairJson(parsed);
   }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch (e) {
-    throw new UserError(`identity is not valid JSON: ${path}`, e);
-  }
-  if (!isKeypairJson(parsed)) {
-    throw new UserError(
-      `identity has wrong shape; expected {secret: number[64], pubkey_base58: string}`
-    );
-  }
-  return parsed;
+
+  throw noIdentityError();
 }
 
 /** Convenience: load + return as a `Keypair` instance. */

@@ -203,6 +203,25 @@ fn tool_definitions() -> Value {
                 "required": ["query"],
             },
         },
+        {
+            "name": "mcp_auth",
+            "description": "Check the OAuth authentication status of this MCP connection. Designed to be CALLED FIRST by an agent when the user reports unauthorized errors or when other Mnemonic tools fail with auth errors. Always callable WITHOUT a JWT (allowlisted in the bearer-auth middleware). Returns {status: 'authenticated', sub, hint} when a valid JWT was presented, or {status: 'unauthorized', install_url, instructions, alternative_cli} when not — in which case the agent should surface install_url as a clickable link in the chat reply so the user can complete authorization in their browser.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {},
+            },
+        },
+        {
+            "name": "mnemonic_check_pending",
+            "description": "Resolves a deferred-sign correlation_id to its on-chain state. Use this AFTER mnemonic_sign_memory returns awaiting_signature and the user has approved in the browser. Returns {status: 'signed', solana_tx, arweave_tx, solana_explorer_url, arweave_url, attestation_id, ...} on success, {status: 'awaiting_signature'} if user has not approved yet, or {status: 'not_found'} if expired.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "correlation_id": {"type": "string", "description": "The correlation_id returned by mnemonic_sign_memory's awaiting_signature response"},
+                },
+                "required": ["correlation_id"],
+            },
+        },
     ])
 }
 
@@ -560,12 +579,41 @@ async fn handle_tool_call(
                 owner_pubkey,
             )
         }
+        "mcp_auth" => tools::mcp_auth(jwt_sub),
+        "mnemonic_check_pending" => {
+            let cid = args["correlation_id"]
+                .as_str()
+                .ok_or("correlation_id required")?
+                .to_string();
+            tools::check_pending(&state.pending, &state.store, &cid).await
+        }
         _ => return Err(format!("unknown tool: {name}")),
     };
 
-    Ok(serde_json::json!({
+    // MCP tool envelope. The `isError: true` flag is what makes a tool
+    // call surface as a "tool execution failed" in MCP clients (Cursor /
+    // Claude.ai / VS Code chat UIs) instead of as "successfully called".
+    //
+    // For `mcp_auth` specifically: the user reported that Cursor renders
+    // a successful tool-call envelope (HTTP 200, valid JSON) as
+    // "Successfully authenticated MCP server" regardless of the JSON
+    // payload's `status` field. The fix is to mark the response as an
+    // error WHEN our payload's `status` is "unauthorized" — that way
+    // Cursor displays the error text (which contains the install_url
+    // hint) rather than masking it under a misleading success message.
+    let is_unauth_response = name == "mcp_auth"
+        && result
+            .get("status")
+            .and_then(|s| s.as_str())
+            .map(|s| s == "unauthorized" || s == "not_found")
+            .unwrap_or(false);
+    let mut envelope = serde_json::json!({
         "content": [{"type": "text", "text": serde_json::to_string_pretty(&result).unwrap_or_default()}]
-    }))
+    });
+    if is_unauth_response {
+        envelope["isError"] = serde_json::Value::Bool(true);
+    }
+    Ok(envelope)
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -746,8 +794,8 @@ mod transport_tests {
             .expect("tools array present");
         assert_eq!(
             tools.len(),
-            5,
-            "expected 5 MCP tools in tools/list response",
+            7,
+            "expected 7 MCP tools in tools/list response (whoami, sign_memory, verify, prove_identity, recall, mcp_auth, check_pending)",
         );
     }
 

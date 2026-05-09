@@ -42,21 +42,52 @@ export function buildProgram(): Command {
   program
     .name("mnemonic")
     .description("Mnemonic Protocol CLI — verifiable persistent memory")
-    .version("0.1.0")
+    // TODO: read from package.json at build/runtime so we don't have
+    // to hand-bump on every release. Hardcoded for 0.1.6 to ship the
+    // mode-flag fix today.
+    .version("0.1.6")
     .option("--json", "machine-readable JSON output")
     .option("--quiet", "suppress non-essential output")
     .option("--no-color", "disable ANSI color");
 
   program
     .command("init")
-    .description("generate a fresh keypair at ~/.mnemonic/identity.json")
+    .description(
+      "set up CLI identity — pair with webapp via --ticket (recommended) or --standalone"
+    )
+    .option(
+      "--ticket <uuid>",
+      "redeem a webapp 'Send to CLI' ticket (recommended — keeps CLI + webapp keypairs aligned)"
+    )
+    .option(
+      "--standalone",
+      "generate a fresh CLI-only keypair (advanced; will not match webapp localStorage)"
+    )
     .option("--force", "overwrite existing identity")
-    .action(async (cmdOpts: { force?: boolean }) => {
-      await runInit({
-        ...rootOpts(program),
-        ...(cmdOpts.force !== undefined ? { force: cmdOpts.force } : {}),
-      });
-    });
+    .option(
+      "--base-url <url>",
+      "override the server base URL (used with --ticket)"
+    )
+    .action(
+      async (cmdOpts: {
+        ticket?: string;
+        standalone?: boolean;
+        force?: boolean;
+        baseUrl?: string;
+      }) => {
+        await runInit({
+          ...rootOpts(program),
+          ...(cmdOpts.ticket !== undefined ? { ticket: cmdOpts.ticket } : {}),
+          ...(cmdOpts.standalone !== undefined
+            ? { standalone: cmdOpts.standalone }
+            : {}),
+          ...(cmdOpts.force !== undefined ? { force: cmdOpts.force } : {}),
+          ...(cmdOpts.baseUrl !== undefined
+            ? { baseUrl: cmdOpts.baseUrl }
+            : {}),
+        });
+      }
+    );
 
   program
     .command("login")

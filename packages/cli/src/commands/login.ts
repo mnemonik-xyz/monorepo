@@ -26,8 +26,8 @@ import {
   parseJwtPayload,
 } from "@mnemonik-xyz/sdk";
 
-import { saveToken } from "../config.js";
-import { AuthError, fromSdkError } from "../errors.js";
+import { identityExists, loadIdentityJson, saveToken } from "../config.js";
+import { AuthError, CliError, fromSdkError } from "../errors.js";
 import { format, hint, type OutputOptions } from "../output.js";
 
 export interface LoginOptions extends OutputOptions {
@@ -66,6 +66,7 @@ async function runHeadless(jwt: string, opts: LoginOptions): Promise<void> {
 
   const expiresAt = new Date(payload.exp * 1000).toISOString();
   saveToken({ jwt, expires_at: expiresAt, sub: payload.sub });
+  warnIfMismatch(payload.sub);
 
   format(
     { sub: payload.sub, expires_at: expiresAt, mode: "headless" },
@@ -164,11 +165,42 @@ async function runInteractive(
     throw fromSdkError(e);
   }
   saveToken({ jwt: token.jwt, expires_at: token.expiresAt, sub: payload.sub });
+  warnIfMismatch(payload.sub);
 
   format(
     { sub: payload.sub, expires_at: token.expiresAt, mode: "interactive" },
     opts,
     () => `login OK\nsub: ${payload.sub}\nexpires: ${token.expiresAt}`
+  );
+}
+
+/**
+ * 0.1.5: emit a stderr warning when the just-saved JWT.sub doesn't match the
+ * local CLI keypair pubkey. Per Decision 7 of tech-spec, the bug 3 root cause
+ * is that the webapp's localStorage keypair (which signs the OAuth challenge)
+ * is independent from `~/.mnemonic/identity.json`. We still save the token
+ * (Option C — minimum surprise; future commands' pre-flight check will
+ * surface the mismatch with the same actionable error). When no local
+ * identity exists yet, no warning is emitted (the user will run `init` next
+ * which has its own stale-token clear path).
+ */
+function warnIfMismatch(jwtSub: string): void {
+  if (!identityExists()) return;
+  let identityPub: string;
+  try {
+    identityPub = loadIdentityJson().pubkey_base58;
+  } catch (e) {
+    // Identity file present but unreadable — surface nothing here; the user
+    // already has bigger problems and the next command will report them.
+    if (!(e instanceof CliError)) throw e;
+    return;
+  }
+  if (identityPub === jwtSub) return;
+  process.stderr.write(
+    `\nWARNING: logged-in identity sub <${jwtSub}> doesn't match local keypair <${identityPub}>.\n` +
+      `         All sign/recall/verify will fail until aligned.\n` +
+      `         Fix: mnemonic identity import --ticket <uuid>   (from webapp)\n` +
+      `              OR mnemonic init --force   (replaces keypair, then re-login)\n`
   );
 }
 

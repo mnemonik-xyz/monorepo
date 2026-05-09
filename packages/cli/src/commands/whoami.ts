@@ -24,6 +24,7 @@ import {
 } from "../config.js";
 import { fromSdkError } from "../errors.js";
 import { format, type OutputOptions } from "../output.js";
+import { assertIdentityMatchesToken } from "../preflight.js";
 
 export interface WhoamiOptions extends OutputOptions {
   withCount?: boolean;
@@ -79,6 +80,10 @@ export async function runWhoami(opts: WhoamiOptions): Promise<void> {
   if (opts.withCount && result.pubkey && result.jwt) {
     // Optional one-shot server call — gated behind --with-count so the
     // TDD anchor's "no fetch by default" assertion holds.
+    // Pre-flight: catch identity/JWT mismatch BEFORE any fetch is built.
+    // Default (no --with-count) whoami remains diagnostic and never throws
+    // here; signer_match is surfaced in the rendered output instead.
+    assertIdentityMatchesToken();
     const baseUrl =
       opts.baseUrl ?? process.env.MNEMONIC_BASE_URL ?? DEFAULT_BASE_URL;
     const id = loadIdentityJson();

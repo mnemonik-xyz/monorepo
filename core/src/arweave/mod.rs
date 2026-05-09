@@ -20,7 +20,12 @@ impl ArweaveClient {
     pub fn new(base_url: &str) -> Self {
         Self {
             base_url: base_url.trim_end_matches('/').to_string(),
-            upload_url: "https://uploader.irys.xyz/upload".to_string(),
+            // Irys ANS-104 upload endpoint. Per the bundler API,
+            // path is `/tx/<token>` where <token> identifies the
+            // signing currency. Solana-signed data items go to
+            // `/tx/solana`. The legacy `/upload` path returns 404
+            // — likely renamed when Bundlr migrated to Irys L1.
+            upload_url: "https://uploader.irys.xyz/tx/solana".to_string(),
             bypass_local_routing: false,
             client: reqwest::Client::new(),
         }
@@ -175,11 +180,18 @@ fn sha384(data: &[u8]) -> [u8; 48] {
 }
 
 fn deep_hash_blob(data: &[u8]) -> [u8; 48] {
+    // Per arweave-js deepHash spec:
+    //   sha384( sha384("blob" + len_str) || sha384(data) )
+    // Hashing tag and data SEPARATELY then combining is required —
+    // hashing the concatenation in one pass produces a different digest
+    // and Irys rejects with "Invalid signature".
     let tag = format!("blob{}", data.len());
-    let mut h = Sha384::new();
-    h.update(tag.as_bytes());
-    h.update(data);
-    h.finalize().into()
+    let tag_hash = sha384(tag.as_bytes());
+    let data_hash = sha384(data);
+    let mut combined = [0u8; 96];
+    combined[..48].copy_from_slice(&tag_hash);
+    combined[48..].copy_from_slice(&data_hash);
+    sha384(&combined)
 }
 
 fn deep_hash_list(items: &[&[u8]]) -> [u8; 48] {
@@ -231,11 +243,17 @@ fn avro_encode_tags(tags: &[(&str, &str)]) -> Vec<u8> {
 }
 
 fn build_data_item(keypair: &Keypair, data: &[u8], tags: &[(&str, &str)]) -> Vec<u8> {
-    let sig_type: u16 = 3; // SOLANA
+    // Irys's SolanaSigner extends Curve25519, which sets signatureType=2
+    // (ED25519). The SOLANA=4 enum exists in @irys/bundles/constants.ts
+    // but is NEVER used by the Solana signer at runtime — sig_type=4 is
+    // routed to a different verifier and rejected as "Invalid signature".
+    // Solana keys ARE Ed25519 keys; sig_type=2 is the right wire value.
+    // Ref: @irys/bundles/src/signing/keys/curve25519.ts
+    let sig_type: u16 = 2;
     let pubkey = keypair.pubkey().to_bytes();
     let avro_tags = avro_encode_tags(tags);
 
-    let msg = deep_hash_list(&[b"dataitem", b"1", b"3", &pubkey, b"", b"", &avro_tags, data]);
+    let msg = deep_hash_list(&[b"dataitem", b"1", b"2", &pubkey, b"", b"", &avro_tags, data]);
 
     let sig = keypair.sign_message(&msg);
 
@@ -345,6 +363,133 @@ mod tests {
         let result = client.write_bytes(b"data", &keypair).await;
         // arlocal path will be taken (is_local=true, bypass=false) and also fail
         assert!(result.is_err());
+    }
+
+    /// Sign a data item, then re-derive the deep hash from the buffer's
+    /// own owner+tags+data fields and verify the signature against it.
+    /// If this fails, our build_data_item is internally broken (signing
+    /// over different bytes than what Irys would re-derive from the
+    /// buffer it receives). If it passes but Irys still says "Invalid
+    /// signature", the divergence is in the deep_hash formula vs. the
+    /// arweave-js spec.
+    #[test]
+    fn signature_self_verifies() {
+        use solana_sdk::signature::Signature;
+        let kp = Keypair::new();
+        let data = b"hello world";
+        let tags = [
+            ("Content-Type", "application/json"),
+            ("App-Name", "mnemonic-protocol"),
+        ];
+        let item = build_data_item(&kp, data, &tags);
+
+        // Re-derive owner + tags from the buffer (mirroring how Irys
+        // parses rawOwner / rawTags from the item it receives).
+        let sig_bytes = &item[2..66];
+        let owner = &item[66..98];
+        assert_eq!(item[98], 0, "target flag must be 0");
+        assert_eq!(item[99], 0, "anchor flag must be 0");
+        let num_tags = u64::from_le_bytes(item[100..108].try_into().unwrap());
+        let tags_bytes_size = u64::from_le_bytes(item[108..116].try_into().unwrap());
+        assert_eq!(num_tags, tags.len() as u64);
+        let tags_end = 116 + tags_bytes_size as usize;
+        let raw_tags = &item[116..tags_end];
+        let raw_data = &item[tags_end..];
+        assert_eq!(raw_data, data);
+
+        // Compute the deep hash that Irys would compute for this buffer.
+        // sig_type=2 (ED25519) → ASCII "2" — matches Curve25519 signer.
+        let msg = deep_hash_list(&[b"dataitem", b"1", b"2", owner, b"", b"", raw_tags, raw_data]);
+
+        let sig = Signature::try_from(sig_bytes).expect("parse sig");
+        assert!(
+            sig.verify(owner, &msg),
+            "data item signature failed self-verification — build_data_item is signing over different bytes than what re-derivation produces"
+        );
+    }
+
+    /// Diagnostic: dump a real data item to /tmp/item.bin and print hex
+    /// for each field. Then we verify it externally with pynacl using
+    /// Irys's exact verification path. Run with --nocapture.
+    #[test]
+    fn dump_data_item_for_external_verification() {
+        let kp = Keypair::new();
+        let data = b"hello world";
+        let tags = [
+            ("Content-Type", "application/json"),
+            ("App-Name", "mnemonic-protocol"),
+        ];
+        let item = build_data_item(&kp, data, &tags);
+        let pubkey = kp.pubkey().to_bytes();
+
+        std::fs::write("/tmp/item.bin", &item).unwrap();
+        std::fs::write("/tmp/item_pubkey.bin", pubkey).unwrap();
+        std::fs::write("/tmp/item_data.bin", data).unwrap();
+
+        println!("ITEM_LEN={}", item.len());
+        println!("PUBKEY_HEX={}", hex::encode(pubkey));
+        println!("SIG_HEX={}", hex::encode(&item[2..66]));
+        println!("OWNER_IN_BUFFER={}", hex::encode(&item[66..98]));
+        println!("TARGET_FLAG={}", item[98]);
+        println!("ANCHOR_FLAG={}", item[99]);
+        println!("NUM_TAGS_LE_BYTES={}", hex::encode(&item[100..108]));
+        println!("NUM_TAGS_BYTES_LE={}", hex::encode(&item[108..116]));
+        let tags_size = u64::from_le_bytes(item[108..116].try_into().unwrap()) as usize;
+        println!("TAGS_HEX={}", hex::encode(&item[116..116 + tags_size]));
+        println!("DATA_HEX={}", hex::encode(&item[116 + tags_size..]));
+    }
+
+    /// Cross-language oracle: a pure-python mirror of arweave-js deepHash
+    /// computed for fixed inputs (pubkey=32 zeros, data="hello world",
+    /// tags=[("Content-Type","application/json"),("App-Name","mnemonic-protocol")],
+    /// sigType=4). Our Rust deep_hash MUST produce the same digest, otherwise
+    /// our signature is over the wrong message and Irys will reject as
+    /// "Invalid signature".
+    #[test]
+    fn deep_hash_matches_python_reference() {
+        let pubkey = [0u8; 32];
+        let data = b"hello world";
+        let tags = [
+            ("Content-Type", "application/json"),
+            ("App-Name", "mnemonic-protocol"),
+        ];
+        let avro_tags = avro_encode_tags(&tags);
+
+        // Sanity: avro_tags must match the Python reference byte-for-byte.
+        let expected_avro = hex::decode(
+            "0418436f6e74656e742d54797065206170706c69636174696f6e2f6a736f6e104170702d4e616d65226d6e656d6f6e69632d70726f746f636f6c00",
+        ).unwrap();
+        assert_eq!(
+            avro_tags, expected_avro,
+            "avro_encode_tags diverges from spec"
+        );
+
+        let dh = deep_hash_list(&[b"dataitem", b"1", b"2", &pubkey, b"", b"", &avro_tags, data]);
+        // Reference value from /tmp/deephash_ref.py with sigType=2.
+        let expected =
+            hex::decode("ec8618225e5424fef34953635059619fdb0ac65ef2d091133bd3ea86d48f5b1b84b2d620a6da895b21e517166511697b")
+                .unwrap();
+        assert_eq!(
+            &dh[..],
+            &expected[..],
+            "deep_hash diverges from arweave-js reference — Irys will reject"
+        );
+    }
+
+    /// Spec-grounded reference test for the blob branch of deep_hash:
+    ///   sha384( sha384("blob" + len_str) || sha384(data) )
+    /// Computed with stdlib sha384 to catch any future regression in
+    /// deep_hash_blob.
+    #[test]
+    fn deep_hash_blob_matches_spec() {
+        let data = b"hello";
+        let tag_hash: [u8; 48] = Sha384::digest(b"blob5").into();
+        let data_hash: [u8; 48] = Sha384::digest(data).into();
+        let mut buf = [0u8; 96];
+        buf[..48].copy_from_slice(&tag_hash);
+        buf[48..].copy_from_slice(&data_hash);
+        let expected: [u8; 48] = Sha384::digest(buf).into();
+        assert_eq!(deep_hash_blob(data), expected);
     }
 
     #[tokio::test]

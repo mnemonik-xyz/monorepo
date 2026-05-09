@@ -1,0 +1,50 @@
+{
+  "$schema": "https://mnemonik.xyz/.well-known/agent.schema.json",
+  "name": "Mnemonic Protocol",
+  "description": "Verifiable, persistent memory for AI agents. Every memory is semantically embedded, canonically encoded as CBOR, blake3-hashed, signed with COSE_Sign1, and optionally anchored on Solana (SPL Memo) and Arweave. Exposed over the Model Context Protocol (MCP) for use by Claude, Cursor, VS Code, and any custom agent.",
+  "url": "https://mnemonik.xyz",
+  "documentation": "https://github.com/mnemonik-xyz/monorepo#readme",
+  "whitepaper": "https://github.com/mnemonik-xyz/monorepo/blob/main/docs/WHITEPAPER.md",
+  "source": "https://github.com/mnemonik-xyz/monorepo",
+  "license": "Apache-2.0",
+  "contact": {
+    "email": "dev@mnemonik.xyz",
+    "discord": "https://discord.gg/ws6wruJj"
+  },
+  "services": [
+    {
+      "type": "mcp",
+      "uri": "https://mcp.mnemonik.xyz/mcp",
+      "transport": "http",
+      "auth": "oauth2",
+      "auth_metadata": "https://mcp.mnemonik.xyz/.well-known/oauth-authorization-server"
+    },
+    {
+      "type": "mcp",
+      "uri": "stdio",
+      "transport": "stdio",
+      "install": "npx @mnemonik-xyz/cli"
+    }
+  ],
+  "tools": [
+    { "name": "mnemonic_whoami",        "summary": "Server identity, storage mode, attestation count" },
+    { "name": "mnemonic_sign_memory",   "summary": "Embed, compress, canonicalize (CBOR), hash (blake3), sign (COSE_Sign1), persist; optionally anchor on Solana + Arweave" },
+    { "name": "mnemonic_verify",        "summary": "Verify a memory by solana_tx and/or arweave_tx" },
+    { "name": "mnemonic_prove_identity","summary": "Sign an arbitrary challenge with the server key" },
+    { "name": "mnemonic_recall",        "summary": "Semantic search over stored embeddings" }
+  ],
+  "supportedTrust": [
+    "signed-memory-attestation",
+    "ed25519-identity",
+    "cose-sign1",
+    "blake3-content-hash",
+    "solana-spl-memo-anchor",
+    "arweave-bytes"
+  ],
+  "client_packages": [
+    { "name": "@mnemonik-xyz/cli", "registry": "npm", "url": "https://www.npmjs.com/package/@mnemonik-xyz/cli", "command": "npx @mnemonik-xyz/cli" },
+    { "name": "@mnemonik-xyz/sdk", "registry": "npm", "url": "https://www.npmjs.com/package/@mnemonik-xyz/sdk" }
+  ],
+  "version": "1",
+  "spec_version": "draft-2026-05"
+}

@@ -13,6 +13,7 @@ import { LocalSigner, MnemonicClient } from "@mnemonik-xyz/sdk";
 import { loadIdentity, loadToken } from "../config.js";
 import { fromSdkError, UserError } from "../errors.js";
 import { format, hint, type OutputOptions } from "../output.js";
+import { assertIdentityMatchesToken } from "../preflight.js";
 
 export interface SignOptions extends OutputOptions {
   tags?: string;
@@ -38,6 +39,9 @@ export async function runSign(
   }
 
   const tags = parseTags(opts.tags);
+  // Pre-flight: catch identity/JWT mismatch BEFORE any fetch is built (bug 3 /
+  // Decision 7). UserError points at three remediation paths.
+  assertIdentityMatchesToken();
   const kp = await loadIdentity();
   const tok = loadToken();
 

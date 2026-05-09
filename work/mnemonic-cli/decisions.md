@@ -1288,3 +1288,29 @@ caught. Audit is **issues_found** (1 critical, 1 major, 8 minor).
 - Local smoke (mandatory before publish): Node 20 / Bun / Deno all return OK pubkey.
 - Tarball size: ~256KB (back to 0.1.0 size; +0KB net after dropping double-mirror).
 - Sub-fix during implementation: Node 20 ESM does not define `self` as a global, which made the Rust `getrandom` 0.2 (`js` feature) backend's WebCrypto probe (`self.crypto.getRandomValues`) throw, falling through to its `require('crypto')` Node-CJS branch — which then crashed with `arg0.require is not a function` because we run in ESM. Fixed by setting `globalThis.self = globalThis` in the Node/Bun/Deno init path before calling `default(bytes)`. Bun/Deno already define `self`, so it's a no-op there.
+
+### Post-deploy verification rerun (T15-rerun)
+- Date: 2026-05-01
+- Status: fail
+- Demo flow against published @mnemonik-xyz/cli@0.1.3 + live mcp.mnemonik.xyz.
+- WASM loader regression from T15 baseline is FIXED in 0.1.3: `init` runs to completion on Node 20, identity.json written with mode 0600 (pubkey=7M7G489fBRwRnWi7EvEpL2RJ2gMRCWhKjzjyaoX6L8ex). WASM smoke (Node 20 + Bun) PASS. Steps A (init), C (login --token, local-only) PASS.
+- Step D (sign) FAILS at the live server: HTTP 401 `unauthorized: invalid JWT: JWT verify failed: InvalidSignature`. Root cause: production `MCP_JWT_SECRET` is not present in repo or this environment, so `mint-test-jwt` produces a token signed with a random local secret which the live server rejects. Same environmental blocker as the original T15 run; not a regression in 0.1.3 or in the live server.
+- Steps E (recall), F (verify), G (whoami) blocked by D — not chained per task instructions ("STOP on first failure").
+- Outstanding for 0.1.4:
+  - `--version` is hardcoded "0.1.0" in `dist/bin/mnemonic.js` (originally `bin/mnemonic.ts:45`). Cosmetic only — every other CLI command works. Read version from package.json in 0.1.4.
+- Manual verification plan for the auth-gated path: on a desktop run `MNEMONIC_CONFIG_DIR=/tmp/manual mnemonic login` (interactive OAuth/PKCE), approve in browser, then `mnemonic sign / recall / verify / whoami` against the same `https://mcp.mnemonik.xyz`. Alternatively, mint a JWT on the deploy host using the deployed `MCP_JWT_SECRET` and feed it to `mnemonic login --token`.
+- Output JSON: `work/mnemonic-cli/logs/working/post-deploy-rerun.json`.
+
+### CLI 0.1.4 — id.json fallback + version display
+- Date: 2026-05-01
+- Bug 1 (real): user with existing ~/.mnemonic/id.json (server self-host Solana keypair file) gets "no identity" error on `mnemonic sign`. Path-format mismatch.
+- Fix: loadIdentity falls back to id.json, parses bare 64-number array as Solana keypair, derives pubkey_base58 from secret[32..64]. Logs note to stderr.
+- Bug 2 (cosmetic): --version hardcoded "0.1.0" in bin/mnemonic.ts. Bumped to "0.1.4" with TODO for read-from-package.json in 0.1.5.
+- Smoke: id.json-only scenario whoami pass; identity.json-only still works.
+- Tarball size: ~250KB (no change).
+
+### CLI 0.1.5 — identity-mismatch pre-flight detection
+- Date: 2026-05-01
+- Bug 3 (real): user reproed `init` (new local keypair) + `login` (webapp's localStorage keypair signs OAuth) → `sign` 403 from server. Per Decision 7 of tech-spec, mismatch is the documented gotcha; CLI surfaces server 403 instead of catching client-side.
+- Fix: pre-flight check in sign/recall/verify/whoami. UserError BEFORE HTTP. init auto-clears stale token. login emits warning on mismatch (still saves JWT, lets user choose path).
+- Smoke: bug 3 scenario now produces actionable error, no fetch made.

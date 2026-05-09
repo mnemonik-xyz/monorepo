@@ -1,0 +1,36 @@
+# gitleaks configuration — extends the built-in default ruleset and adds
+# path-based allowlists for test fixtures and synthetic test data that
+# trip the `jwt` and `generic-api-key` heuristics with no actual secret.
+#
+# Why this exists: gitleaks default rules are tuned for production-secret
+# detection and produce false positives against:
+#   - Synthetic JWT-shaped strings used to verify CLI/SDK error redaction
+#     (the whole point of those tests is to assert we DON'T leak the
+#     fake JWT into stderr).
+#   - The committed COSE golden fixtures (`packages/sdk/test/fixtures/
+#     golden-cose.json`) — every entry has a base58-encoded
+#     pubkey/signature blob whose entropy looks like an API key but is
+#     output of `core/tests/golden_fixtures.rs::emit_fixtures`.
+#   - Audit findings + decision logs in `work/` that quote test fixtures
+#     verbatim.
+#
+# Each path entry is a regex anchored against repo-root-relative paths.
+# Discovered via `gh run view <run-id> --job <gitleaks> --log-failed`.
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "test fixtures + synthetic test JWTs / pubkeys"
+paths = [
+    # CLI test fixtures — synthetic pubkeys + JWTs assert error redaction.
+    '''packages/cli/test/.*\.test\.ts''',
+    # SDK test fixtures — JWT-shaped strings, mock OAuth flows.
+    '''packages/sdk/test/.*\.test\.ts''',
+    # Golden COSE fixtures — base58 pubkeys/sigs regenerated from Rust core.
+    '''packages/sdk/test/fixtures/golden-cose\.json''',
+    # Spec-driven workflow artefacts (audit logs + decision records) that
+    # quote the synthetic fixtures verbatim. `work/` is documentation, not
+    # production code.
+    '''work/.*''',
+]

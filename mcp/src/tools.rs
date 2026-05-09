@@ -184,7 +184,141 @@ async fn sign_memory_deferred(
         "approve_url": format!("https://mnemonik.xyz/sign/{assigned_id}"),
         "correlation_id": assigned_id,
         "expires_in": 300,
+        "next_step": format!(
+            "Tell the user to open approve_url in their browser and click \
+             Approve. After they approve (typically 10-30 seconds), call \
+             mnemonic_check_pending with correlation_id={assigned_id} to \
+             retrieve the on-chain solana_tx + arweave_tx for this memory."
+        ),
     }))
+}
+
+/// `mcp_auth` — bridge tool for IDE clients (Cursor 3.2+, Claude.ai) whose
+/// MCP UI does not surface a native Connect/Authorize button for
+/// non-directory servers.
+///
+/// Allowlisted in `bearer_auth_middleware::ALLOWLIST_UNAUTH_TOOLS` so it is
+/// callable WITHOUT a JWT — the explicit purpose of the tool is to tell an
+/// unauthenticated agent where to send the user to authorize.
+///
+/// When `jwt_sub` is present (caller did include a Bearer JWT), the tool
+/// reports the authenticated identity. When absent, it returns the install
+/// URL the agent should surface in chat as a clickable link, plus a fallback
+/// for agents that prefer the CLI path.
+pub fn mcp_auth(jwt_sub: Option<&str>) -> serde_json::Value {
+    if let Some(sub) = jwt_sub {
+        return serde_json::json!({
+            "status": "authenticated",
+            "sub": sub,
+            "did": format!("did:sol:{sub}"),
+            "hint": format!(
+                "Already authenticated as {sub}. All Mnemonic MCP tools \
+                 (mnemonic_whoami / mnemonic_sign_memory / mnemonic_recall / \
+                 mnemonic_verify / mnemonic_prove_identity / \
+                 mnemonic_check_pending) should work."
+            ),
+        });
+    }
+    serde_json::json!({
+        "status": "unauthorized",
+        "install_url": "https://mnemonik.xyz/install",
+        "instructions": "This Mnemonic MCP connection is not yet authorized. \
+                         To authorize, click the install_url above — it routes \
+                         through your IDE's MCP install handler, which will \
+                         (re)trigger the OAuth login flow. A browser tab pops \
+                         up to mnemonik.xyz to approve, then all Mnemonic \
+                         tools become available in this chat. The OAuth flow \
+                         signs a one-time challenge with your local Ed25519 \
+                         keypair (kept in your browser's localStorage); the \
+                         server never sees the secret.",
+        "alternative_cli": "If the install URL does not trigger the IDE's auth \
+                            flow, run `npx @mnemonik-xyz/cli init && npx \
+                            @mnemonik-xyz/cli login` in a terminal, then paste \
+                            the resulting JWT into your IDE's MCP server \
+                            configuration as `Authorization: Bearer <jwt>` \
+                            headers.",
+        "discord": "https://discord.gg/ws6wruJj",
+    })
+}
+
+/// `mnemonic_check_pending` — resolve a deferred-sign correlation_id to its
+/// final on-chain state once the user has approved the COSE envelope in the
+/// browser. Returns one of:
+///
+///   - `{status: "signed", attestation_id, content_hash, solana_tx,
+///     arweave_tx, signer_pubkey, signed_at, solana_explorer_url,
+///     arweave_url}` — sign-callback completed, row persisted.
+///   - `{status: "awaiting_signature", correlation_id, expires_at}` —
+///     bundle still parked in the LRU; user has not yet approved.
+///   - `{status: "not_found", correlation_id}` — never issued, expired
+///     past TTL without sign, or already consumed and never persisted
+///     (rare — implies a sign-callback failure).
+///
+/// Capability auth: `correlation_id` is the only credential. Same model as
+/// `/api/sign-callback` — the signed bytes are content-addressed via
+/// blake3, so leaking the routing token does not enable forgery.
+pub async fn check_pending(
+    pending: &PendingBundles,
+    store: &std::sync::Mutex<SqliteStore>,
+    correlation_id: &str,
+) -> serde_json::Value {
+    // 1. DB lookup first — happy path is "row already persisted".
+    let signed = {
+        let store_g = match store.lock() {
+            Ok(g) => g,
+            Err(_) => {
+                return serde_json::json!({
+                    "status": "error",
+                    "message": "store mutex poisoned",
+                    "correlation_id": correlation_id,
+                });
+            }
+        };
+        store_g
+            .find_by_correlation_id(correlation_id)
+            .ok()
+            .flatten()
+    };
+    if let Some((attestation_id, content_hash, solana_tx, arweave_tx, signer_pubkey, created_at)) =
+        signed
+    {
+        let solana_explorer_url = if solana_tx.starts_with("local:") {
+            String::new()
+        } else {
+            format!("https://solscan.io/tx/{solana_tx}")
+        };
+        let arweave_url = if arweave_tx.starts_with("local:") {
+            String::new()
+        } else {
+            format!("https://arweave.net/{arweave_tx}")
+        };
+        return serde_json::json!({
+            "status": "signed",
+            "attestation_id": attestation_id,
+            "content_hash": content_hash,
+            "solana_tx": solana_tx,
+            "arweave_tx": arweave_tx,
+            "signer_pubkey": signer_pubkey,
+            "signed_at": created_at,
+            "solana_explorer_url": solana_explorer_url,
+            "arweave_url": arweave_url,
+        });
+    }
+
+    // 2. Pending LRU — bundle parked, awaiting user approval.
+    match pending.peek_by_id(correlation_id).await {
+        Ok(entry) => serde_json::json!({
+            "status": "awaiting_signature",
+            "correlation_id": correlation_id,
+            "expires_at": entry.exp.to_rfc3339(),
+            "hint": "User has not clicked Approve yet. Poll again in a few seconds.",
+        }),
+        Err(_) => serde_json::json!({
+            "status": "not_found",
+            "correlation_id": correlation_id,
+            "hint": "Either the correlation_id was never issued, the 5-minute TTL elapsed without user approval, or the sign-callback failed mid-write. Re-issue mnemonic_sign_memory if you want a fresh bundle.",
+        }),
+    }
 }
 
 /// Stdio branch — inline server-side signing (Decision 4 single-tenant flow).

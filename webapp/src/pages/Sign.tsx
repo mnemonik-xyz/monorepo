@@ -45,7 +45,14 @@ type Status =
   | { kind: "ready"; bundle: PendingBundle }
   | { kind: "expired"; reason: string }
   | { kind: "signing" }
-  | { kind: "success"; attestationId: string | null }
+  | {
+      kind: "success";
+      attestationId: string | null;
+      solanaTx: string | null;
+      arweaveTx: string | null;
+      solanaExplorerUrl: string | null;
+      arweaveUrl: string | null;
+    }
   | { kind: "rejected" }
   | { kind: "error"; message: string };
 
@@ -231,7 +238,30 @@ export default function Sign() {
           body && typeof body.attestation_id === "string"
             ? body.attestation_id
             : null;
-        setStatus({ kind: "success", attestationId });
+        const solanaTx =
+          body && typeof body.solana_tx === "string" ? body.solana_tx : null;
+        const arweaveTx =
+          body && typeof body.arweave_tx === "string" ? body.arweave_tx : null;
+        const solanaExplorerUrl =
+          body &&
+          typeof body.solana_explorer_url === "string" &&
+          body.solana_explorer_url.length > 0
+            ? body.solana_explorer_url
+            : null;
+        const arweaveUrl =
+          body &&
+          typeof body.arweave_url === "string" &&
+          body.arweave_url.length > 0
+            ? body.arweave_url
+            : null;
+        setStatus({
+          kind: "success",
+          attestationId,
+          solanaTx,
+          arweaveTx,
+          solanaExplorerUrl,
+          arweaveUrl,
+        });
         return;
       }
       if (res.status === 410) {
@@ -354,17 +384,66 @@ export default function Sign() {
 
         {status.kind === "success" && (
           <div
-            className="rounded-md border border-success/30 bg-success/10 p-4 text-sm text-success"
+            className="space-y-3 rounded-md border border-success/30 bg-success/10 p-4 text-sm text-success"
             role="status"
             data-testid="sign-success"
           >
-            Saved to onchain memory. Return to your AI tool and ask to recall.
+            <div className="font-medium">
+              Saved. Return to your AI tool and ask it to recall — or follow the
+              on-chain trail below.
+            </div>
+
             {status.attestationId && (
               <div
-                className="mt-2 font-mono text-xs"
+                className="font-mono text-xs break-all"
                 data-testid="sign-success-attestation-id"
               >
                 attestation_id: {status.attestationId}
+              </div>
+            )}
+
+            {status.solanaTx && (
+              <div
+                className="font-mono text-xs break-all"
+                data-testid="sign-success-solana-tx"
+              >
+                solana_tx: {status.solanaTx}
+              </div>
+            )}
+
+            {status.arweaveTx && (
+              <div
+                className="font-mono text-xs break-all"
+                data-testid="sign-success-arweave-tx"
+              >
+                arweave_tx: {status.arweaveTx}
+              </div>
+            )}
+
+            {(status.solanaExplorerUrl || status.arweaveUrl) && (
+              <div className="flex flex-wrap gap-2 pt-2">
+                {status.solanaExplorerUrl && (
+                  <a
+                    href={status.solanaExplorerUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="rounded border border-success/40 bg-success/20 px-3 py-1 text-xs font-medium hover:border-success/70 hover:bg-success/30"
+                    data-testid="sign-success-solscan-link"
+                  >
+                    View on Solscan
+                  </a>
+                )}
+                {status.arweaveUrl && (
+                  <a
+                    href={status.arweaveUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="rounded border border-success/40 bg-success/20 px-3 py-1 text-xs font-medium hover:border-success/70 hover:bg-success/30"
+                    data-testid="sign-success-arweave-link"
+                  >
+                    View on Arweave
+                  </a>
+                )}
               </div>
             )}
           </div>

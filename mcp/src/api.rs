@@ -94,11 +94,24 @@ pub struct SignCallbackRequest {
 }
 
 /// Successful response of `POST /api/sign-callback`.
+///
+/// Includes the on-chain anchor identifiers so the webapp's success page can
+/// render Solscan / Arweave links without an extra round-trip. In `local`
+/// storage mode both fields carry synthetic `local:<...>` prefixes; in
+/// `full` mode they are real Solana SPL Memo signatures + Arweave tx ids.
 #[derive(Debug, Serialize)]
 pub struct SignCallbackResponse {
     pub status: &'static str,
     pub attestation_id: String,
     pub content_hash: String,
+    pub solana_tx: String,
+    pub arweave_tx: String,
+    /// Convenience explorer URL — `https://solscan.io/tx/{solana_tx}` for real
+    /// txs; empty string for synthetic `local:` ids.
+    pub solana_explorer_url: String,
+    /// Convenience gateway URL — `https://arweave.net/{arweave_tx}` for real
+    /// uploads; empty string for synthetic `local:` ids.
+    pub arweave_url: String,
 }
 
 /// `POST /api/sign-callback` — webapp delivers the user's COSE_Sign1.
@@ -195,15 +208,66 @@ pub async fn sign_callback_handler(
         );
     }
 
-    // 5. Persist. `attestation_id` is freshly generated for the SQLite
-    //    primary key — `correlation_id` was the routing token only. Synthetic
-    //    `local:` tx IDs per Decision 4 (no Arweave/Solana write on the
-    //    browser-mediated path; storage_mode is forced to local for the
-    //    HTTP/JWT trust model).
+    // 5. Persist + (optionally) anchor on-chain.
+    //
+    // Originally Decision 4 forced `local:` ids on the deferred path. That
+    // capped the protocol's headline value behind the inline (stdio) path
+    // only. We now branch on `state.storage_mode`:
+    //
+    //   - `local` — synthetic `local:` ids preserved (offline / dev / free
+    //     tier). Trust chain still works for in-store recall + verify.
+    //   - `full`  — real Arweave upload (server keypair signs the ANS-104
+    //     bundle) + Solana SPL Memo (server keypair pays the tx fee).
+    //     Memo data binds the user's blake3 content hash to the server's
+    //     on-chain anchor — a third party fetching the memo can re-fetch
+    //     the COSE bytes from Arweave and verify the user's COSE signature
+    //     end-to-end without contacting Mnemonic.
     let attestation_id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
-    let local_ar = format!("local:{}", &attestation_id[..8]);
-    let local_sol = format!("local:{}", &entry.content_hash[..16]);
+
+    let (solana_tx, arweave_tx) = if state.storage_mode == "local" {
+        let local_ar = format!("local:{}", &attestation_id[..8]);
+        let local_sol = format!("local:{}", &entry.content_hash[..16]);
+        (local_sol, local_ar)
+    } else {
+        // Arweave upload of the COSE_Sign1 envelope bytes.
+        let ar_tx = match state.arweave.write_bytes(&cose_bytes, &state.keypair).await {
+            Ok(t) => t,
+            Err(e) => {
+                return error_resp(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("arweave upload failed: {e}"),
+                );
+            }
+        };
+        // No-op for production Irys (mine() only writes against arlocal).
+        let _ = state.arweave.mine().await;
+
+        // Solana SPL Memo anchor — `v=2` schema (h=hash, a=arweave_tx) so
+        // existing verifiers continue to parse without an alg field. The
+        // inline path emits v=3 with embed_model; the deferred path's
+        // `entry` carries metadata in its CBOR but not as a flat string,
+        // so v=2 is the conservative choice to avoid embed-model drift.
+        let memo = serde_json::json!({
+            "h": entry.content_hash,
+            "a": ar_tx,
+            "v": 2,
+        });
+        let sol_tx = match state
+            .solana
+            .write_memo(&state.keypair, &memo.to_string())
+            .await
+        {
+            Ok(t) => t,
+            Err(e) => {
+                return error_resp(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("solana memo write failed: {e}"),
+                );
+            }
+        };
+        (sol_tx, ar_tx)
+    };
 
     let persist_res = {
         // Short, await-free critical section.
@@ -216,33 +280,56 @@ pub async fn sign_callback_handler(
                 );
             }
         };
-        store.save_attestation(
+        let save_res = store.save_attestation(
             &attestation_id,
             &entry.content,
             &entry.content_hash,
             &entry.tags,
-            &local_sol,
-            &local_ar,
+            &solana_tx,
+            &arweave_tx,
             &req.signer_pubkey, // signer = pubkey we just verified via COSE
             &req.signer_pubkey, // owner = same pubkey (Decision 9 — webapp flow uses keypair as identity)
             &now,
             &entry.embedding,
-        )
+        );
+        // Stamp the correlation_id onto the row so `mnemonic_check_pending`
+        // can resolve it later. Best-effort; an UPDATE failure here doesn't
+        // invalidate the attestation itself.
+        if save_res.is_ok() {
+            let _ = store.set_correlation_id(&attestation_id, &req.correlation_id);
+        }
+        save_res
     };
     if let Err(e) = persist_res {
-        // Persistence failed AFTER the LRU consumed the entry. The user's
-        // bundle is gone. Surface a 500 — the failure mode here is
-        // operator-visible (DB I/O / disk full) rather than user-fixable.
+        // Persistence failed AFTER the LRU consumed the entry AND after any
+        // on-chain anchor was written. The user's bundle is gone. Surface a
+        // 500 — the failure mode here is operator-visible (DB I/O / disk
+        // full) rather than user-fixable.
         return error_resp(
             StatusCode::INTERNAL_SERVER_ERROR,
             &format!("persist failed: {e}"),
         );
     }
 
+    let solana_explorer_url = if solana_tx.starts_with("local:") {
+        String::new()
+    } else {
+        format!("https://solscan.io/tx/{solana_tx}")
+    };
+    let arweave_url = if arweave_tx.starts_with("local:") {
+        String::new()
+    } else {
+        format!("https://arweave.net/{arweave_tx}")
+    };
+
     let body = SignCallbackResponse {
         status: "ok",
         attestation_id,
         content_hash: entry.content_hash,
+        solana_tx,
+        arweave_tx,
+        solana_explorer_url,
+        arweave_url,
     };
     (StatusCode::OK, Json(body)).into_response()
 }

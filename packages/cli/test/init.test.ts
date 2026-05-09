@@ -37,7 +37,7 @@ describe("runInit", () => {
   });
 
   it("creates identity.json with mode 0600", async () => {
-    await runInit({});
+    await runInit({ standalone: true });
     const path = join(dir, "identity.json");
     expect(existsSync(path)).toBe(true);
     if (process.platform !== "win32") {
@@ -54,7 +54,22 @@ describe("runInit", () => {
         pubkey_base58: "Existing",
       })
     );
-    await expect(runInit({})).rejects.toBeInstanceOf(UserError);
+    await expect(runInit({ standalone: true })).rejects.toBeInstanceOf(
+      UserError
+    );
+  });
+
+  it("init without flags errors with 'pick a mode' message (0.1.6 BREAKING)", async () => {
+    await expect(runInit({})).rejects.toThrow(/pick a mode/i);
+  });
+
+  it("init --ticket and --standalone are mutually exclusive", async () => {
+    await expect(
+      runInit({
+        standalone: true,
+        ticket: "00000000-0000-0000-0000-000000000000",
+      })
+    ).rejects.toThrow(/mutually exclusive/);
   });
 
   it("overwrites with --force", async () => {
@@ -65,7 +80,7 @@ describe("runInit", () => {
         pubkey_base58: "OldKey",
       })
     );
-    await runInit({ force: true });
+    await runInit({ standalone: true, force: true });
     // The mock generates a fresh keypair — pubkey will not be "OldKey".
     const { loadIdentityJson } = await import("../src/config.js");
     const id = loadIdentityJson();

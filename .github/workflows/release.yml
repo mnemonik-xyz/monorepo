@@ -162,20 +162,47 @@ jobs:
       - name: Install wasm-pack
         run: cargo install wasm-pack --version 0.14.0 --locked
 
-      # Optional binaryen (wasm-opt) for size reduction. Build script
-      # tolerates absence; install for a smaller published artifact.
-      - name: Install binaryen (wasm-opt)
-        run: sudo apt-get update && sudo apt-get install -y binaryen
+      # binaryen (wasm-opt) DISABLED on CI as of 0.1.3 — version drift between
+      # local macOS binaryen and ubuntu-latest's apt-binaryen produces different
+      # WASM bytes that crash on Node `WebAssembly.Table.grow()`. wasm-pack 0.14
+      # already runs an internal `wasm-opt -O` pass; the extra `-Oz` shaves
+      # ~3.6KB but is non-essential. Investigation of the root divergence
+      # tracked in work/mnemonic-cli/decisions.md.
 
       - name: Install workspace dependencies
         run: npm ci
 
+      # Always build SDK first — CLI's prepublishOnly tsc -b needs SDK's
+      # dist/index.d.ts to resolve `@mnemonik-xyz/sdk` even when SDK skips
+      # the actual npm publish (skip-if-already-published guard below).
+      - name: Build @mnemonik-xyz/sdk
+        run: npm run build --workspace packages/sdk
+
+      # Skip-if-already-published guard: when only one of sdk/cli bumps for
+      # a tag (e.g. cli-only patch), the other workspace's npm publish would
+      # 403 with "cannot publish over previously published versions". Compare
+      # local package.json version to npm registry; skip if equal.
+
       - name: Publish @mnemonik-xyz/sdk
-        run: npm publish --access public --provenance --workspace packages/sdk
+        run: |
+          LOCAL=$(node -p "require('./packages/sdk/package.json').version")
+          REMOTE=$(npm view @mnemonik-xyz/sdk version 2>/dev/null || echo "")
+          if [ "$LOCAL" = "$REMOTE" ]; then
+            echo "SDK $LOCAL already on registry — skipping publish"
+          else
+            npm publish --access public --provenance --workspace packages/sdk
+          fi
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Publish @mnemonik-xyz/cli
-        run: npm publish --access public --provenance --workspace packages/cli
+        run: |
+          LOCAL=$(node -p "require('./packages/cli/package.json').version")
+          REMOTE=$(npm view @mnemonik-xyz/cli version 2>/dev/null || echo "")
+          if [ "$LOCAL" = "$REMOTE" ]; then
+            echo "CLI $LOCAL already on registry — skipping publish"
+          else
+            npm publish --access public --provenance --workspace packages/cli
+          fi
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

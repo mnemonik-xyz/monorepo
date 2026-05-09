@@ -1,0 +1,24 @@
+/**
+ * Single source of truth for external resource URLs surfaced in the UI.
+ *
+ * Update here once and every header/footer/button picks it up.
+ */
+
+export const EXTERNAL_LINKS = {
+  github: "https://github.com/mnemonik-xyz/monorepo",
+  whitepaper:
+    "https://github.com/mnemonik-xyz/monorepo/blob/main/docs/WHITEPAPER.md",
+  quickstart:
+    "https://github.com/mnemonik-xyz/monorepo/blob/main/docs/quickstart.md",
+  howItWorks:
+    "https://github.com/mnemonik-xyz/monorepo/blob/main/docs/how-it-works.md",
+  paper:
+    "https://github.com/mnemonik-xyz/monorepo/blob/main/docs/research/paper.pdf",
+  researchgate:
+    "https://www.researchgate.net/publication/404381758_Sublinear_Verifiable_Recall_An_Inverted-File_Cascade_for_Compressed_Embedding_Retrieval_in_the_Mnemonic_Protocol",
+  discord: "https://discord.gg/ws6wruJj",
+  telegram: "https://t.me/mnemonikprotocol",
+  issues: "https://github.com/mnemonik-xyz/monorepo/issues",
+} as const;
+
+export type ExternalLinkKey = keyof typeof EXTERNAL_LINKS;

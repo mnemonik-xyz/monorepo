@@ -52,7 +52,7 @@ describe("buildProgram", () => {
     const p = buildProgram();
     p.exitOverride(); // throw instead of process.exit on --version
     expect(() => p.parse(["node", "mnemonic", "--version"])).toThrow();
-    expect(captured).toContain("0.1.0");
+    expect(captured).toContain("0.1.6");
   });
 
   it("recognises top-level flags --json / --quiet / --no-color", () => {

@@ -686,6 +686,10 @@ async fn run_http(state: Arc<mcp::McpState>, host: &str, port: u16) -> anyhow::R
         .route(
             "/.well-known/oauth-protected-resource",
             get(oauth::oauth_protected_resource_metadata),
+        )
+        .route(
+            "/.well-known/oauth-protected-resource/mcp",
+            get(oauth::oauth_protected_resource_metadata_mcp),
         );
 
     let app = Router::new()

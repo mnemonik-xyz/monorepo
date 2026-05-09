@@ -147,34 +147,49 @@ describe("CLI scenarios", () => {
         spawnCli(cfgDir, server.url, args);
 
       try {
-        // ── init ────────────────────────────────────────────────────────────
-        const r1 = await run(["--json", "init"]);
+        // ── init (no flags) — 0.1.6 BREAKING: must error with "pick a mode"
+        const r0 = await run(["init"]);
+        expect(r0.exitCode).toBe(1);
+        expect(r0.stderr).toMatch(/pick a mode/i);
+
+        // ── init --standalone ───────────────────────────────────────────────
+        const r1 = await run(["--json", "init", "--standalone"]);
         expect(r1.exitCode).toBe(0);
         expect(existsSync(join(cfgDir, "identity.json"))).toBe(true);
         const initData = JSON.parse(r1.stdout);
         expect(typeof initData.pubkey).toBe("string");
         expect(initData.pubkey.length).toBeGreaterThan(0);
 
-        // ── init refuse-overwrite ───────────────────────────────────────────
-        const r2 = await run(["init"]);
+        // ── init --standalone refuse-overwrite ──────────────────────────────
+        const r2 = await run(["init", "--standalone"]);
         expect(r2.exitCode).toBe(1); // UserError
         expect(r2.stderr).toMatch(/already exists/);
 
-        // ── init --force overwrites ─────────────────────────────────────────
+        // ── init --standalone --force overwrites ────────────────────────────
         const before = readFileSync(join(cfgDir, "identity.json"), "utf8");
-        const r3 = await run(["init", "--force"]);
+        const r3 = await run(["init", "--standalone", "--force"]);
         expect(r3.exitCode).toBe(0);
         const after = readFileSync(join(cfgDir, "identity.json"), "utf8");
         expect(after).not.toBe(before);
 
         // ── login --token (headless, valid) ─────────────────────────────────
-        const r4 = await run(["login", "--token", makeToken()]);
+        // The 0.1.5 pre-flight check rejects sign/recall/verify when the
+        // identity's pubkey ≠ the JWT's `sub`. So mint the token with the
+        // identity's actual pubkey, NOT the placeholder "test-user-pubkey".
+        const idAfterForce = JSON.parse(
+          readFileSync(join(cfgDir, "identity.json"), "utf8")
+        ) as { pubkey_base58: string };
+        const r4 = await run([
+          "login",
+          "--token",
+          makeToken(idAfterForce.pubkey_base58),
+        ]);
         expect(r4.exitCode).toBe(0);
         expect(existsSync(join(cfgDir, "token.json"))).toBe(true);
         const tok = JSON.parse(
           readFileSync(join(cfgDir, "token.json"), "utf8")
         );
-        expect(tok.sub).toBe("test-user-pubkey");
+        expect(tok.sub).toBe(idAfterForce.pubkey_base58);
         expect(typeof tok.jwt).toBe("string");
 
         // ── login --token (malformed → exit 4) ──────────────────────────────
@@ -184,8 +199,9 @@ describe("CLI scenarios", () => {
         // ── recall ──────────────────────────────────────────────────────────
         // Re-login with a valid token (the malformed-token attempt above
         // still leaves the prior good token persisted, but we re-login to
-        // exercise the saveToken path explicitly).
-        await run(["login", "--token", makeToken()]);
+        // exercise the saveToken path explicitly). Sub must still match the
+        // current identity pubkey for the recall pre-flight to pass.
+        await run(["login", "--token", makeToken(idAfterForce.pubkey_base58)]);
         const r6 = await run(["--json", "recall", "test query"]);
         expect(r6.exitCode).toBe(0);
         const recallData = JSON.parse(r6.stdout);

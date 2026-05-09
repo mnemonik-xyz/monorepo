@@ -10,6 +10,7 @@ import { LocalSigner, MnemonicClient } from "@mnemonik-xyz/sdk";
 import { loadIdentity, loadToken } from "../config.js";
 import { fromSdkError, IntegrityError, UserError } from "../errors.js";
 import { format, type OutputOptions } from "../output.js";
+import { assertIdentityMatchesToken } from "../preflight.js";
 
 export interface VerifyOptions extends OutputOptions {
   baseUrl?: string;
@@ -27,6 +28,8 @@ export async function runVerify(
 
   const baseUrl =
     opts.baseUrl ?? process.env.MNEMONIC_BASE_URL ?? DEFAULT_BASE_URL;
+  // Pre-flight: catch identity/JWT mismatch BEFORE any fetch is built.
+  assertIdentityMatchesToken();
   const kp = await loadIdentity();
   const tok = loadToken();
 

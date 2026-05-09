@@ -30,6 +30,94 @@ const MCP_URL = "https://mcp.mnemonik.xyz/mcp";
 // before the OAuth flow even starts.
 const MCP_HOST = "https://mcp.mnemonik.xyz/mcp";
 
+/**
+ * VS Code MCP install-link scheme — opaque URI form per VS Code docs:
+ *   https://code.visualstudio.com/docs/copilot/customization/mcp-servers
+ *   §"Use MCP install links"
+ *
+ * MUST be `vscode:mcp/install?<JSON>` (single colon, NO `//`). With the
+ * hierarchical `vscode://mcp/install?...` form, VS Code's URI parser
+ * yields authority="mcp" + path="/install", which does not match the
+ * MCP install handler (registered for path `mcp/install`). Result:
+ * VS Code window opens, install dialog never appears.
+ *
+ * Do not change without verifying in actual VS Code on macOS+Windows.
+ * Both InstallButtons.test.tsx (unit) and webapp/e2e/install.spec.ts
+ * (Playwright) assert this exact prefix as a regression guard.
+ */
+export const VSCODE_INSTALL_PREFIX = "vscode:mcp/install?";
+
+/**
+ * Read the webapp's current JWT from localStorage IF it exists AND has not
+ * expired. Returns null otherwise.
+ *
+ * Used by the install deeplinks so a logged-in webapp user can hand-off
+ * their JWT to the IDE in one click — bypasses Cursor's broken MCP-OAuth
+ * UI gap (where the Connect button never appears for non-directory servers
+ * and the SDK silently fails to launch the browser on 401).
+ *
+ * The JWT is short-lived (1h TTL) but rotating once is far cheaper than
+ * the manual `~/.cursor/mcp.json` paste workaround.
+ */
+function readWebappJwt(): string | null {
+  if (typeof localStorage === "undefined") return null;
+  const jwt = localStorage.getItem("mnemonic.jwt");
+  if (!jwt) return null;
+  try {
+    const parts = jwt.split(".");
+    if (parts.length !== 3) return null;
+    const payloadB64 = parts[1] ?? "";
+    const padded = payloadB64 + "=".repeat((4 - (payloadB64.length % 4)) % 4);
+    const payload = JSON.parse(
+      atob(padded.replace(/-/g, "+").replace(/_/g, "/"))
+    );
+    const exp = typeof payload?.exp === "number" ? payload.exp : 0;
+    if (exp * 1000 <= Date.now()) return null;
+  } catch {
+    return null;
+  }
+  return jwt;
+}
+
+/**
+ * Build the IDE config object passed via the install deeplink.
+ *
+ * `bakeJwt` controls whether a non-expired webapp JWT is included as
+ * `headers: { Authorization: "Bearer <jwt>" }`. This is intentionally
+ * opt-in per IDE:
+ *
+ *   - Cursor: `bakeJwt = true`. Cursor 3.2.16's MCP UI does not surface
+ *     a Connect / Authorize button for non-directory MCP servers, so we
+ *     hand the JWT off via the install deeplink to skip OAuth entirely.
+ *     Cursor's deeplink JSON validator is lenient and forwards arbitrary
+ *     fields through to mcp.json.
+ *
+ *   - VS Code: `bakeJwt = false`. VS Code's install-link JSON validator
+ *     is STRICT — it accepts only `{name, type, url}` for HTTP MCP entries
+ *     (per the docs). Including `headers` causes the install dialog to
+ *     silently abort: VS Code opens but no UI appears. VS Code 1.93+
+ *     handles MCP OAuth natively, so the JWT bake-in isn't needed there
+ *     anyway. (Past regression: 2026-05-02 — `headers` field broke VS
+ *     Code install for every logged-in user.)
+ */
+function buildInstallConfig(
+  extras: Record<string, unknown> = {},
+  bakeJwt: boolean = false
+): Record<string, unknown> {
+  const config: Record<string, unknown> = {
+    url: MCP_URL,
+    type: "http",
+    ...extras,
+  };
+  if (bakeJwt) {
+    const jwt = readWebappJwt();
+    if (jwt) {
+      config.headers = { Authorization: `Bearer ${jwt}` };
+    }
+  }
+  return config;
+}
+
 function cursorDeeplink(): string {
   // Cursor's `cursor://anysphere.cursor-deeplink/mcp/install` accepts a
   // base64-encoded JSON config. For HTTP MCP servers (streamable HTTP per
@@ -38,24 +126,32 @@ function cursorDeeplink(): string {
   // dialog reliably across Cursor versions. Including `type: "http"`
   // matches the explicit-transport pattern Cursor docs recommend for
   // remote MCP servers.
+  //
+  // When the webapp user is logged in, we ALSO include `headers` carrying
+  // the current JWT — Cursor's deeplink handler stores it in mcp.json,
+  // and every subsequent /mcp call sends `Authorization: Bearer <jwt>`.
+  // This bypasses Cursor's MCP-OAuth UI (which doesn't render a Connect
+  // button for non-directory servers) and skips the OAuth dance entirely.
   // Reference: https://cursor.com/docs/context/mcp/install-links
-  const config = JSON.stringify({ url: MCP_URL, type: "http" });
+  const config = JSON.stringify(buildInstallConfig({}, /* bakeJwt */ true));
   const b64 = btoa(config);
   const params = new URLSearchParams({ name: "Mnemonic", config: b64 });
   return `cursor://anysphere.cursor-deeplink/mcp/install?${params.toString()}`;
 }
 
 function vscodeDeeplink(): string {
-  // VS Code 1.93+ MCP install deeplink format:
+  // VS Code 1.93+ MCP install deeplink format (per VS Code docs
+  // code.visualstudio.com/docs/copilot/customization/mcp-servers
+  // → "Use MCP install links"):
   //
   //     vscode:mcp/install?<URL-encoded-JSON-config>
   //
-  // The whole query string is a single URL-encoded JSON object, NOT
-  // multiple `key=value` query params. Using URLSearchParams here would
-  // produce `?name=Mnemonic&url=...` which VS Code does not parse — the
-  // browser opens VS Code but the install dialog never appears (this is
-  // exactly the bug a user hit during T15 post-deploy QA).
+  // Two things are easy to get wrong here — both have shipped as
+  // regressions in this repo before, both produce the SAME symptom
+  // (VS Code window opens, no install dialog):
   //
+
+
   // Per VS Code MCP docs (code.visualstudio.com/docs/copilot/customization/mcp-servers
   // → "Use MCP install links"):
   //   - HTTP transport: { name, type: "http", url }
@@ -63,6 +159,8 @@ function vscodeDeeplink(): string {
   // We use HTTP (streamable per Decision 1).
   const config = { name: "Mnemonic", type: "http", url: MCP_URL };
   return `vscode:mcp/install?${encodeURIComponent(JSON.stringify(config))}`;
+
+
 }
 
 // JSON snippet that goes into `~/.codeium/windsurf/mcp_config.json`. WindSurf
@@ -79,7 +177,7 @@ const WINDSURF_CONFIG_SNIPPET = JSON.stringify(
     },
   },
   null,
-  2
+  2,
 );
 
 interface InstallButtonsProps {
