@@ -29,6 +29,8 @@ Today the only wire surface is Mnemonic's own MCP tools (5 of them). No protocol
 | **MCP-to-MCP delegation** | Backlog | `work/a2a-bridge/backlog.md` | `MCP_DELEGATION_V1` (planned) |
 | **ACP (IBM/BeeAI)** | Backlog | `work/a2a-bridge/backlog.md` | `ACP_RUN_V1`, `ACP_MESSAGE_V1`, `ACP_AWAIT_V1` (planned) |
 | **AGNTCY (Cisco)** | Watch & wait | `work/a2a-bridge/backlog.md` | TBD post-AGNTCY-v1 |
+| **Hermes Agent runtime (Nous Research)** | Backlog — proposal drafted, near-term reference deployment of the trustless-agent stack positioning | `.claude/skills/project-knowledge/recovered/research/mnemonik-hermes-integration.md` | reuses `MEMORY_V1`; no new schemas required |
+| **Hindsight memory architecture (Latimer et al., arXiv:2512.12818)** | Backlog — analysis + cost model drafted; adapter design includes Merkle-batch anchoring | `.claude/skills/project-knowledge/recovered/research/hindsight-mnemonik-analysis.md` | reuses `MEMORY_V1` per Hindsight network (W/B/O/S) |
 | **LangGraph / AutoGen / CrewAI** | Frameworks, not protocols | `work/a2a-bridge/backlog.md` | reuse A2A / ACP / MCP-delegation envelopes |
 
 ---
@@ -100,6 +102,39 @@ ERC-8004 is the on-chain trust layer designed to extend A2A. Three registries on
 Cisco / Outshift's Agent Connect initiative — broader than a single wire protocol; standardizes agent identity, discovery, and message-passing with their own AgentCard-like spec (`agp`). Less mature than A2A or ACP. Their identity layer is closer to DIDs than A2A's JWS model — the integration that would force `did:mnemonic:` design is this one.
 
 Re-evaluate when AGNTCY tags v1. Premature today: schema would churn.
+
+---
+
+## Hermes Agent runtime — Nous Research (concrete deployment of the positioning)
+
+Not a protocol. A multi-platform agent runtime with a pluggable architecture: MCP tool servers, seven memory providers (Honcho, OpenViking, Mem0, Hindsight, Holographic, RetainDB, ByteRover), an OpenAI-compatible API server, an ACP editor bridge, RL trajectory exporter, and plugin system. Hermes is the **near-term reference deployment** of the "verifiable memory for trustless agents" positioning — a specific runtime where Mnemonik can land as the only cryptographically verifiable memory provider in a registry that already takes new entries.
+
+Six integration surfaces, ordered by effort, in the proposal:
+
+1. **MCP server registration** (hours) — pure additive `config.yaml` line.
+2. **First-class Memory Provider** (1–2 wks, upstream PR) — the strategic move; Mnemonik becomes the 8th provider, the only one with COSE_Sign1 + Solana anchor + Arweave durability.
+3. **`hermes-mnemonik` plugin** (1 wk) — CLI re-exports + lifecycle hooks (`on_message_complete` auto-attest, `on_session_start` recall).
+4. **RL trajectory attestation** (1–2 wks) — ShareGPT export with Solana tx + Arweave tx + producing-agent DID per turn; the headline collab — "verifiable RL datasets" as a dataset-provenance pitch for Nous's open-training ethos.
+5. **API-server middleware** (2–3 days) — `X-Mnemonic-Attest` header on the OpenAI-compatible endpoint; every downstream client (Open WebUI, LibreChat, NextChat, ChatBox) inherits attestation transparently.
+6. **x402 as Hermes' agent-billing primitive** (longer horizon) — separate proposal; agents paying agents in stablecoins with payment-gated tool execution.
+
+Recommended sequencing in the proposal: MCP registration → RL attestation demo with Nous → upstream Memory Provider PR → plugin + middleware bundle.
+
+Full proposal: [`recovered/research/mnemonik-hermes-integration.md`](../recovered/research/mnemonik-hermes-integration.md).
+
+---
+
+## Hindsight × Mnemonik — composition with a cognitive memory architecture
+
+Not a protocol or runtime. **Hindsight** (Latimer et al., *arXiv:2512.12818*, Dec 2025; Vectorize.io + Virginia Tech) is a memory architecture that treats agent memory as a first-class reasoning substrate rather than a retrieval layer. Four logical networks — World (W), Experience (B), Opinion (O), Observation (S) — and three operations (Retain / Recall / Reflect) via TEMPR + CARA. Already a first-class Hermes memory provider; benchmark numbers on LongMemEval (39 → 83.6 % with a 20B backbone) and LoCoMo (89.6 %).
+
+The integration thesis is **composition, not competition**: Hindsight is the cognitive layer (how memory is organized and reasoned over); Mnemonik is the trust layer (how memory becomes verifiable across instances and time). The four Hindsight networks map cleanly onto Mnemonik's existing schema registry; TEMPR's narrative-fact extraction is the natural insertion point for `mnemonic_sign_memory`; CARA's reflect output co-signs alongside the retrieved memory set.
+
+Six contradictions are flagged and reconciled in the analysis: mutability vs. immutability (treat reinforcement as append-only deltas), async observation regeneration (versioned attestations rather than overwrites), missing agent identity in Hindsight (extend bank profile with DID + pubkey), latency (sync sign, async anchor), unverified LLM extraction (Mnemonik attests *that* extraction happened, not that facts are true), and closed evaluation (opening for Mnemonik to define a provenance benchmark).
+
+Cost model: per-attestation ~ $0.0003–$0.0005 today; naive "sign everything" integration of a Hindsight pipeline lands around $5,000–$7,500/mo per 1,000 heavy users; five mitigations (local-mode default, **Merkle batching ~1000× reduction**, selective per-network policy, sync-sign-async-anchor, x402 cost passthrough) drop the bill ~10×.
+
+Full analysis + cost model: [`recovered/research/hindsight-mnemonik-analysis.md`](../recovered/research/hindsight-mnemonik-analysis.md).
 
 ---
 
