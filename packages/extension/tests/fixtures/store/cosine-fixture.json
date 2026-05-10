@@ -1,0 +1,20 @@
+{
+  "$comment": "5 fixed 8-dim unit-ish vectors and a query whose top-3 cosine matches are known. Plain math, no Python needed — verifiable by hand. cosine([1,0,0,...], v) for each: a=1.0, c=1/√2≈0.7071, e=0.5/√0.75≈0.5774, b=0, d=0. Top-3 = [a, c, e].",
+  "dim": 8,
+  "vectors": [
+    { "id": "a", "embedding": [1, 0, 0, 0, 0, 0, 0, 0] },
+    { "id": "b", "embedding": [0, 1, 0, 0, 0, 0, 0, 0] },
+    { "id": "c", "embedding": [1, 1, 0, 0, 0, 0, 0, 0] },
+    { "id": "d", "embedding": [0, 0, 1, 0, 0, 0, 0, 0] },
+    { "id": "e", "embedding": [0.5, 0.5, 0.5, 0, 0, 0, 0, 0] }
+  ],
+  "query": [1, 0, 0, 0, 0, 0, 0, 0],
+  "expected_top_3": ["a", "c", "e"],
+  "expected_scores": {
+    "a": 1.0,
+    "c": 0.7071067811865475,
+    "e": 0.5773502691896258,
+    "b": 0,
+    "d": 0
+  }
+}
