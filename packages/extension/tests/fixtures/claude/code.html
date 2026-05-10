@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Claude — code chat</title>
+  </head>
+  <body>
+    <!--
+      Hand-crafted minimal Claude DOM for the
+      `code_blocks_preserved_with_language` TDD anchor. The real
+      claude.ai DOM has many wrapper divs we don't care about — only
+      `[data-testid^="message-"]`, the message-content node, and the
+      `<pre><code class="language-…">` shape matter for the adapter.
+    -->
+    <main>
+      <div data-testid="conversation-container">
+        <article data-testid="message-user-0">
+          <div data-testid="user-message-content">
+            <p>How do I reverse a string in Rust?</p>
+          </div>
+        </article>
+
+        <article data-testid="message-assistant-0">
+          <div data-testid="assistant-message-content">
+            <p>Use the iterator <code>.chars().rev()</code> like so:</p>
+            <pre><code class="language-rust">fn reverse(s: &amp;str) -&gt; String {
+    s.chars().rev().collect()
+}
+</code></pre>
+            <p>That works for any UTF-8 input.</p>
+            <div data-testid="action-bar">
+              <button data-testid="action-bar-copy" aria-label="Copy message">Copy</button>
+              <button data-testid="regenerate-button" aria-label="Regenerate">Regenerate</button>
+            </div>
+          </div>
+        </article>
+      </div>
+    </main>
+  </body>
+</html>

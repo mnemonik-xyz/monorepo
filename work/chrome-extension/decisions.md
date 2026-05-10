@@ -174,6 +174,32 @@ Task `07.md` held at `status: in_review` with `blocked_on: ci-verify` per D13 �
 
 ---
 
+## 2026-05-10 · T08 — Claude.ai adapter lands; awaiting CI verify
+
+`packages/extension/src/runtime/chat/adapters/claude.adapter.ts` implements the `ChatAdapter` contract for `claude.ai`:
+
+- `hostPattern = /^claude\.ai\//`, `platform = "claude"`.
+- `extractConversation` walks `[data-testid^="message-"]`; role is decoded from the testid suffix (`message-user-…`, `message-human-…`, `message-assistant-…`) with nested `data-testid` and class-name fallbacks for layout variants. Content goes through `domNodeToMarkdown` (T06) so `<pre><code class="language-X">` blocks fence cleanly.
+- `getChatId` extracts the v4 UUID from `/chat/<uuid>`; returns `null` for `/new`, `/`, and non-UUID suffixes.
+- `findInputBox` returns `null` (read-only Phase 1; insert-into-chat is backlog for Claude per task 08).
+- `onNewAssistantTurn` runs a `MutationObserver` on `<body>`, firing the callback once per assistant turn whose action bar (`copy` / `regenerate` / `retry`) has settled. Each turn fires at most once (`WeakSet` guard).
+- Self-registers on import via `registerAdapter(claudeAdapter)` (idempotent per T06).
+
+Both D13-binding TDD anchors pass (12 adapter tests + 6 scaffold tests + 23 framework tests = 41 chat/scaffold tests green):
+
+- `tests/unit/chat/claude.adapter.test.ts::extracts_multi_turn_conversation` — `long.html` → 6 alternating user/assistant turns.
+- `tests/unit/chat/claude.adapter.test.ts::code_blocks_preserved_with_language` — `code.html` → fenced `rust` block with body intact.
+
+`manifest.json` `host_permissions` now lists `"https://chatgpt.com/*"` (T07) and `"https://claude.ai/*"` (T08) in alphabetical order; T09 will append `"https://gemini.google.com/*"`. The scaffold test now asserts the enumerated set via `arrayContaining(["https://chatgpt.com/*", "https://claude.ai/*"])` plus the `^https://…/*$` shape and the explicit no-`<all_urls>` guard inherited from T07.
+
+**Fixture caveat:** the sandbox cannot fetch `claude.ai`, so `tests/fixtures/claude/{empty,code,long}.html` are hand-crafted minimal DOMs that match the documented selectors (`[data-testid^="message-"]`, `[data-testid$="-message-content"]`, `<pre><code class="language-rust">`, `[data-testid="action-bar-copy"]`). **A human reviewer must refresh these fixtures from a live capture before merge** to confirm the selectors still match production Claude.ai DOM (Anthropic ships layout changes without notice). If a refresh breaks tests, the fix is selector-only — adapter logic key off `data-testid` prefixes that are stable under typical refactors.
+
+Task `08.md` held at `status: in_review` with `blocked_on: ci-verify` per D13 — flips to `done` only after the PR's CI run reports green.
+
+**Note for parallel T09 implementer:** adapter / fixture / test files are physically isolated, so no cross-PR conflicts there. The only shared edits (`manifest.json` `host_permissions`, `tests/unit/scaffold.test.ts`) collide trivially — append `"https://gemini.google.com/*"` to the host_permissions array and the `arrayContaining` list, both already in alpha order.
+
+---
+
 ## 2026-05-10 · T06 — adapter framework lands; awaiting CI verify
 
 `packages/extension/src/runtime/chat/{types,registry,serializer}.ts` shipped, registry array intentionally empty per D10 (concrete adapters land T07–T09). 20 unit tests pass locally including both D13-binding TDD anchors:

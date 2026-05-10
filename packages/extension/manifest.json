@@ -35,7 +35,8 @@
     "alarms"
   ],
   "host_permissions": [
-    "https://chatgpt.com/*"
+    "https://chatgpt.com/*",
+    "https://claude.ai/*"
   ],
   "commands": {
     "_execute_action": {

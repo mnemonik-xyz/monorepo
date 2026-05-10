@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Claude — long chat</title>
+  </head>
+  <body>
+    <!--
+      Hand-crafted minimal Claude DOM for the
+      `extracts_multi_turn_conversation` TDD anchor. Six alternating
+      turns (user / assistant ×3) so the adapter's segmentation can be
+      verified without relying on a fragile live capture.
+    -->
+    <main>
+      <div data-testid="conversation-container">
+        <article data-testid="message-user-0">
+          <div data-testid="user-message-content">
+            <p>What is the capital of France?</p>
+          </div>
+        </article>
+
+        <article data-testid="message-assistant-0">
+          <div data-testid="assistant-message-content">
+            <p>Paris.</p>
+            <button data-testid="action-bar-copy" aria-label="Copy">Copy</button>
+          </div>
+        </article>
+
+        <article data-testid="message-user-1">
+          <div data-testid="user-message-content">
+            <p>How many people live there?</p>
+          </div>
+        </article>
+
+        <article data-testid="message-assistant-1">
+          <div data-testid="assistant-message-content">
+            <p>Around 2.1 million inside the city limits and ~12 million in the metro area.</p>
+            <button data-testid="action-bar-copy" aria-label="Copy">Copy</button>
+          </div>
+        </article>
+
+        <article data-testid="message-user-2">
+          <div data-testid="user-message-content">
+            <p>Name one famous landmark.</p>
+          </div>
+        </article>
+
+        <article data-testid="message-assistant-2">
+          <div data-testid="assistant-message-content">
+            <p>The Eiffel Tower.</p>
+            <button data-testid="action-bar-copy" aria-label="Copy">Copy</button>
+          </div>
+        </article>
+      </div>
+    </main>
+  </body>
+</html>
