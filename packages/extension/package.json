@@ -1,0 +1,40 @@
+{
+  "name": "@mnemonik-xyz/extension",
+  "version": "0.1.0",
+  "description": "Mnemonik Chrome extension — capture AI-chat context (ChatGPT, Claude.ai, Gemini), sign locally as verifiable memory, store in IndexedDB (free Local mode) or sync to managed Mnemonik infra (paid Cloud mode). MV3.",
+  "license": "Apache-2.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mnemonik-xyz/monorepo.git",
+    "directory": "packages/extension"
+  },
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b --noEmit && vite build",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "tsc -b --noEmit",
+    "lint:webext": "web-ext lint --source-dir=dist"
+  },
+  "dependencies": {
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0"
+  },
+  "devDependencies": {
+    "@crxjs/vite-plugin": "^2.0.0",
+    "@types/chrome": "^0.0.287",
+    "@types/react": "^19.1.0",
+    "@types/react-dom": "^19.1.0",
+    "@vitejs/plugin-react": "^4.3.4",
+    "typescript": "~5.7.2",
+    "vite": "^6.3.3",
+    "vitest": "^1.6.0",
+    "web-ext": "^8.3.0"
+  }
+}

@@ -42,6 +42,19 @@ Final pick during T1 spike.
 
 **Rationale:** WXT auto-handles MV3 quirks (HMR for service worker, content-script hot reload), reduces boilerplate. crxjs is more mature but slower dev loop.
 
+### 2026-05-10 · D4 ratification (T01)
+
+**Final pick: Vite 6 + `@crxjs/vite-plugin` 2.x.** WXT was the prior default; superseded after evaluating monorepo consistency.
+
+**Why Vite + crxjs over WXT:**
+
+- The webapp (`webapp/`) already runs on Vite 6.3.3 + React 19 + TypeScript 5.7.2; using the same toolchain in `packages/extension/` keeps a single Vite plugin/config story across the monorepo (one less moving part for new contributors).
+- `@crxjs/vite-plugin` is a thin layer that handles MV3 manifest entry-point resolution + HMR for popup/options + the service-worker reload dance, without imposing WXT's wholesale project structure or auto-generated routing.
+- WXT's main wins (file-system routing, auto-imports) are nice-to-have, not required for our flat 4-entry layout (popup + options + content + service-worker). The cost (extra abstraction layer + smaller community than Vite directly) outweighs the win at this scope.
+- Bundle-size / dev-loop comparison ran short of the planned 4h spike; observed both produce similar empty-extension output (~25KB JS + manifest). HMR works in both. Decision driven by consistency.
+
+**Backlog re-evaluation trigger:** if the extension grows past ~10 entry points or we find ourselves hand-rolling routing logic, revisit WXT.
+
 ---
 
 ## 2026-05-10 · D5 — Google OAuth via `chrome.identity.launchWebAuthFlow` + PKCE S256
@@ -118,5 +131,24 @@ Flat registry, one adapter per supported domain. Phase 1: ChatGPT, Claude.ai, Ge
 Privacy default. User explicitly enables in options page per supported domain.
 
 **Rationale:** silent capture of every assistant response is a privacy red flag and a Chrome Web Store review risk. Opt-in keeps trust and review-friendliness.
+
+---
+
+## 2026-05-10 · D13 — Test-coverage gate: no task is `done` without passing tests
+
+A task in `work/chrome-extension/tasks/` cannot be marked `status: done` until:
+
+1. Every test named in its `## TDD Anchor` section is implemented and passing locally.
+2. Every command in its `verify:` frontmatter (e.g. `pnpm-test`, `pnpm-build`, `web-ext-lint`) returns exit code 0 in CI on the task's PR.
+3. `test-reviewer` (or, for tasks without an explicit reviewer, the merging maintainer) signs off that the tests cover the task's acceptance criteria — not just smoke-paths.
+4. CI runs all four test layers from `tech-spec.md` `## Testing`: unit (vitest), component (Playwright + Vitest browser mode), E2E (Playwright `--load-extension`), and server-side Rust tests where the task touches `mcp/` or `core/`.
+
+A task that is functionally complete but missing tests stays at `status: in_review` with a `blocked_on: tests` note in `decisions.md` until coverage lands. Exceptions (e.g. a UI-only Playwright fixture spike) require an inline note in the task file naming the follow-up task that will add tests.
+
+**Rationale:** the convention was already implicit (every task has `verify:` + a `## TDD Anchor`, `test-reviewer` is on `reviewers:` for storage/embedder/auth tasks), but without a hard gate it slips. Making this explicit prevents the "I'll add tests later" pattern that has historically cost waves of audit rework. Aligned with the project's existing CI policy (`cargo test --workspace --no-fail-fast` on every PR — same posture extended to the extension's npm/Playwright pipeline).
+
+**Alternatives:** (a) advisory-only convention — rejected (current state, doesn't enforce); (b) hard coverage threshold (e.g. ≥80% line coverage gating merge) — rejected for MVP, too noisy on Playwright-heavy code where coverage instrumentation is brittle; can be revisited once the test pyramid stabilises.
+
+**Scope:** applies to all `work/chrome-extension/tasks/*.md`. Server changes (T11, T13, T14) ALSO inherit the existing `cargo test --workspace --no-fail-fast` gate from root `CLAUDE.md` — the rule is additive, not substitute.
 
 ---

@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **Mnemonic Protocol** — verifiable, persistent memory for AI agents. Memories are semantically embedded, TurboQuant-compressed, canonicalized to deterministic CBOR, blake3-hashed, COSE_Sign1-signed with an Ed25519 identity, and optionally anchored on Arweave (durable storage) + Solana (SPL Memo timestamp). Exposed over MCP.
 
-**Default branch:** `dev`. Feature branches are `feat/*`, PR back to `dev`. `main` is tagged releases only.
+**Default branch:** `main`. Feature branches are created from `main` (`feat/*`, `claude/*`, etc.) and PR'd back to `main`. Tagged releases (`v*`) are cut from `main`.
 
 **Library docs:** use Context7 MCP automatically when you need API/setup info — don't ask the user first.
 
@@ -94,7 +94,7 @@ Read these via the `project-knowledge` skill — they're the source of truth.
 
 ## CI
 
-`.github/workflows/ci.yml` runs on push to `main`/`dev` and every PR: rustfmt check, clippy with `-D warnings`, `cargo test --workspace`, gitleaks (working tree + full history). `.github/workflows/release.yml` runs on `v*` tags: cross-compile mcp binary, build Docker image, publish to GHCR/crates.io. Toolchain pinned via `rust-toolchain.toml`.
+`.github/workflows/ci.yml` runs on push to `main` and every PR: rustfmt check, clippy with `-D warnings`, `cargo test --workspace`, gitleaks (working tree + full history). `.github/workflows/release.yml` runs on `v*` tags: cross-compile mcp binary, build Docker image, publish to GHCR/crates.io. Toolchain pinned via `rust-toolchain.toml`.
 
 ## Stream Timeout Prevention
 
