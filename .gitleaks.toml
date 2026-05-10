@@ -26,9 +26,20 @@ paths = [
     # CLI test fixtures — synthetic pubkeys + JWTs assert error redaction.
     '''packages/cli/test/.*\.test\.ts''',
     # SDK test fixtures — JWT-shaped strings, mock OAuth flows.
+    # Both `test/` (sdk Phase 1 layout) and `tests/` (Phase 1.5+ T02
+    # browser-bundle layout) are covered — the project uses both naming
+    # conventions across packages.
     '''packages/sdk/test/.*\.test\.ts''',
+    '''packages/sdk/tests/.*\.test\.ts''',
     # Golden COSE fixtures — base58 pubkeys/sigs regenerated from Rust core.
     '''packages/sdk/test/fixtures/golden-cose\.json''',
+    # Extension tests + golden fixtures (T01 scaffolding, T05 WASM crypto
+    # parity). Fixture JSONs contain deterministic seed bytes (e.g.
+    # `00112233...deadbeef`) that look like API keys; placeholder JWTs like
+    # `test.jwt.token` in `.test.ts` trip the `jwt` heuristic. Same posture
+    # as the existing golden-cose.json entry — fixtures are reproducible
+    # output of Rust core test harnesses, not real secrets.
+    '''packages/extension/tests/.*''',
     # Spec-driven workflow artefacts (audit logs + decision records) that
     # quote the synthetic fixtures verbatim. `work/` is documentation, not
     # production code.
