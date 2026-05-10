@@ -138,6 +138,19 @@ jobs:
         working-directory: packages/cli
         run: bun test
 
+      # Extension tests (T01 manifest scaffold + T05 WASM crypto-pipeline
+      # parity). The T05 tests load the `--target web` artefact via
+      # `node:fs/promises` to bypass wasm-bindgen 0.2.100's CJS init
+      # bug, so they require the SDK's WASM build to have run already.
+      - name: Generate T05 golden fixtures
+        if: matrix.runtime == 'bun-latest'
+        run: cargo run -p mnemonic-core --features golden-fixtures --example emit_golden -- packages/extension/tests/fixtures/golden/
+
+      - name: Extension tests
+        if: matrix.runtime == 'bun-latest'
+        working-directory: packages/extension
+        run: bun test
+
   bundle-size:
     name: bundle size budgets
     runs-on: ubuntu-latest

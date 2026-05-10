@@ -78,6 +78,14 @@ harness = false
 name = "cbor_codec"
 harness = false
 
+# `cargo run --example emit_golden -- <out_dir>` writes the byte-for-byte
+# fixture set `packages/extension/tests/fixtures/golden/` consumes (T05).
+# Gated behind `golden-fixtures` so default `cargo build` ignores the
+# example entirely.
+[[example]]
+name = "emit_golden"
+required-features = ["golden-fixtures"]
+
 # WASM target dependencies — only pulled in when building for wasm32-unknown-unknown.
 # Native (`cargo build --workspace`) builds do not see any of these.
 #
