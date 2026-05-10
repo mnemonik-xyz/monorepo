@@ -109,6 +109,23 @@ export async function sendChatMessage(
   );
 }
 
+export interface PublicStats {
+  unique_users: number;
+  saved_on_node: number;
+  saved_onchain: number;
+}
+
+/** Fetches public traction counters from `GET /stats`. Returns null on error. */
+export async function fetchPublicStats(): Promise<PublicStats | null> {
+  try {
+    const res = await fetch("/stats", { method: "GET" });
+    if (!res.ok) return null;
+    return (await res.json()) as PublicStats;
+  } catch {
+    return null;
+  }
+}
+
 /** Structured error thrown by the API client. */
 export class ChatApiError extends Error {
   public readonly code: string;
