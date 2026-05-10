@@ -153,6 +153,27 @@ A task that is functionally complete but missing tests stays at `status: in_revi
 
 ---
 
+## 2026-05-10 · T07 — ChatGPT adapter lands; awaiting CI verify
+
+`packages/extension/src/runtime/chat/adapters/chatgpt.adapter.ts` implements the `ChatAdapter` contract for `chatgpt.com`. 14 unit tests pass locally including all three D13-binding TDD anchors:
+
+- `tests/unit/chat/chatgpt.adapter.test.ts::extracts_code_block_with_language`
+- `tests/unit/chat/chatgpt.adapter.test.ts::role_inferred_from_data_attr`
+- `tests/unit/chat/chatgpt.adapter.test.ts::findInputBox_returns_textarea`
+
+Plus: `getChatId` parsing (uuid path + null on landing + query/hash strip), multi-turn ordering with non-standard role fold-into-system, JSDOM-backed `MutationObserver` settle detection (streaming-attribute drop and fresh-settled-turn append), markdown serialization snapshot. Manifest `host_permissions` adds `https://chatgpt.com/*` (T08/T09 will append `claude.ai` and `gemini.google.com` per D11). Scaffold test updated to assert the enumerated entry instead of the empty-array invariant from T01.
+
+Task `07.md` held at `status: in_review` with `blocked_on: ci-verify` per D13 — flips to `done` only after the PR's CI run reports green.
+
+**Notes for T08/T09 implementers:**
+
+- `registry.ts` now exports `registerAdapter(adapter)` — concrete adapters call it once at module load. `__setAdaptersForTesting` is unchanged (test-only).
+- `runtime/chat/adapters/index.ts` is a barrel: each adapter file is imported here for its registration side-effect. Add `import "./claude.adapter.js"` / `import "./gemini.adapter.js"` on a fresh line, alphabetical order, so concurrent feature branches edit different lines and merge cleanly.
+- The MutationObserver in the auto-capture hook pulls its constructor from `doc.defaultView.MutationObserver` — Node's `globalThis` doesn't expose it, but JSDOM's window does, so unit tests don't need `environment: jsdom` set globally in vitest.
+- **Sandbox caveat:** the three fixtures in `tests/fixtures/chatgpt/` are hand-crafted to match the documented 2026 selectors (`[data-message-author-role]`, `pre > code.language-*`, `textarea[data-id="root"]`, `data-stream` while streaming) — the sandbox cannot reach `chatgpt.com`. A human must refresh them from a live capture before merge if the live DOM has drifted.
+
+---
+
 ## 2026-05-10 · T06 — adapter framework lands; awaiting CI verify
 
 `packages/extension/src/runtime/chat/{types,registry,serializer}.ts` shipped, registry array intentionally empty per D10 (concrete adapters land T07–T09). 20 unit tests pass locally including both D13-binding TDD anchors:

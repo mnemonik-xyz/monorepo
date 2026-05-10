@@ -34,7 +34,9 @@
     "clipboardWrite",
     "alarms"
   ],
-  "host_permissions": [],
+  "host_permissions": [
+    "https://chatgpt.com/*"
+  ],
   "commands": {
     "_execute_action": {
       "suggested_key": {

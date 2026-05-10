@@ -1,0 +1,22 @@
+<!doctype html>
+<!--
+  ChatGPT empty-chat fixture (hand-crafted, not a live capture — sandbox
+  cannot reach chatgpt.com). Mirrors the 2026 DOM described in T07:
+  - no `[data-message-author-role]` nodes (fresh chat)
+  - prompt textarea with `data-id="root"`
+  Refresh from a live capture before merge once a human can verify.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>ChatGPT</title>
+  </head>
+  <body>
+    <main>
+      <div id="thread"></div>
+      <form>
+        <textarea data-id="root" placeholder="Message ChatGPT"></textarea>
+      </form>
+    </main>
+  </body>
+</html>
