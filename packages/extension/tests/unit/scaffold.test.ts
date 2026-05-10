@@ -35,9 +35,17 @@ describe("scaffold · manifest.json", () => {
     );
   });
 
-  it("starts with empty host_permissions per D11", () => {
-    // Domain-specific entries land in T07–T09 as adapters arrive.
-    expect(manifest.host_permissions).toEqual([]);
+  it("declares only enumerated AI-chat host_permissions per D11", () => {
+    // T07 adds chatgpt.com; T08/T09 will append claude.ai and
+    // gemini.google.com. `<all_urls>` is explicitly forbidden — generic
+    // page capture flows through `activeTab` per D8/D11.
+    expect(manifest.host_permissions).toEqual(
+      expect.arrayContaining(["https://chatgpt.com/*"]),
+    );
+    expect(manifest.host_permissions).not.toContain("<all_urls>");
+    for (const entry of manifest.host_permissions) {
+      expect(entry).toMatch(/^https:\/\/[a-z0-9.-]+\/\*$/);
+    }
   });
 
   it("registers popup, options, and a service-worker entry point", () => {

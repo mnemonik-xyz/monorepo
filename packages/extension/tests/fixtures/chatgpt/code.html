@@ -1,0 +1,52 @@
+<!doctype html>
+<!--
+  ChatGPT multi-turn-with-code fixture (hand-crafted, not a live capture —
+  sandbox cannot reach chatgpt.com). Mirrors the 2026 DOM described in T07:
+  - per-turn `[data-message-author-role]` nodes alternating user/assistant
+  - assistant code blocks rendered as `<pre><code class="language-X">`
+  - prompt `<textarea data-id="root">` at the bottom
+  Two languages (Python + Rust) drive `extracts_code_block_with_language`
+  and adjacent serializer round-trip checks. Refresh from a live capture
+  before merge once a human can verify.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>ChatGPT — code blocks</title>
+  </head>
+  <body>
+    <main>
+      <article data-message-author-role="user" data-message-id="u1">
+        <div class="prose">
+          <p>How do I sort a list in Python?</p>
+        </div>
+      </article>
+      <article data-message-author-role="assistant" data-message-id="a1">
+        <div class="prose">
+          <p>Use the built-in <code>sorted</code>:</p>
+          <pre><code class="language-python">def sort_list(xs):
+    return sorted(xs)</code></pre>
+          <p>That returns a new list.</p>
+        </div>
+      </article>
+      <article data-message-author-role="user" data-message-id="u2">
+        <div class="prose">
+          <p>And in Rust?</p>
+        </div>
+      </article>
+      <article data-message-author-role="assistant" data-message-id="a2">
+        <div class="prose">
+          <p>Sort in place with <code>Vec::sort</code>:</p>
+          <pre><code class="language-rust">fn main() {
+    let mut xs = vec![3, 1, 2];
+    xs.sort();
+    println!("{:?}", xs);
+}</code></pre>
+        </div>
+      </article>
+      <form>
+        <textarea data-id="root" placeholder="Message ChatGPT"></textarea>
+      </form>
+    </main>
+  </body>
+</html>

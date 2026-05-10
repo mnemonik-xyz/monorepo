@@ -1,0 +1,57 @@
+<!doctype html>
+<!--
+  ChatGPT long-thread fixture (hand-crafted, not a live capture — sandbox
+  cannot reach chatgpt.com). Mirrors the 2026 DOM described in T07:
+  - many alternating turns to exercise multi-turn ordering + scrolling
+  - one assistant turn carries `data-stream` to mimic a still-streaming
+    response (drives `onNewAssistantTurn` settle detection)
+  - one short code block to keep markdown serialization realistic
+  Refresh from a live capture before merge once a human can verify.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>ChatGPT — long thread</title>
+  </head>
+  <body>
+    <main>
+      <article data-message-author-role="system" data-message-id="s0">
+        <div class="prose">You are a helpful assistant.</div>
+      </article>
+      <article data-message-author-role="user" data-message-id="u1">
+        <div class="prose"><p>What's 2 + 2?</p></div>
+      </article>
+      <article data-message-author-role="assistant" data-message-id="a1">
+        <div class="prose"><p>4.</p></div>
+      </article>
+      <article data-message-author-role="user" data-message-id="u2">
+        <div class="prose"><p>And 3 + 5?</p></div>
+      </article>
+      <article data-message-author-role="assistant" data-message-id="a2">
+        <div class="prose"><p>8.</p></div>
+      </article>
+      <article data-message-author-role="user" data-message-id="u3">
+        <div class="prose"><p>Show me a one-liner echo in bash.</p></div>
+      </article>
+      <article data-message-author-role="assistant" data-message-id="a3">
+        <div class="prose">
+          <p>Sure:</p>
+          <pre><code class="language-bash">echo "hello"</code></pre>
+        </div>
+      </article>
+      <article data-message-author-role="user" data-message-id="u4">
+        <div class="prose"><p>And a long answer please.</p></div>
+      </article>
+      <article
+        data-message-author-role="assistant"
+        data-message-id="a4"
+        data-stream="true"
+      >
+        <div class="prose"><p>Working on it…</p></div>
+      </article>
+      <form>
+        <textarea data-id="root" placeholder="Message ChatGPT"></textarea>
+      </form>
+    </main>
+  </body>
+</html>
