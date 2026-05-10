@@ -1,0 +1,54 @@
+{
+  "manifest_version": 3,
+  "name": "Mnemonik",
+  "version": "0.1.0",
+  "description": "Capture AI-chat context (ChatGPT, Claude, Gemini) and any web selection as verifiable memory. Local IndexedDB or managed Cloud sync. Cross-device under one Ed25519 identity.",
+  "minimum_chrome_version": "120",
+  "icons": {
+    "16": "src/assets/icon-16.png",
+    "32": "src/assets/icon-32.png",
+    "48": "src/assets/icon-48.png",
+    "128": "src/assets/icon-128.png"
+  },
+  "action": {
+    "default_popup": "src/popup/index.html",
+    "default_title": "Mnemonik",
+    "default_icon": {
+      "16": "src/assets/icon-16.png",
+      "32": "src/assets/icon-32.png"
+    }
+  },
+  "options_ui": {
+    "page": "src/options/index.html",
+    "open_in_tab": true
+  },
+  "background": {
+    "service_worker": "src/background/service-worker.ts",
+    "type": "module"
+  },
+  "permissions": [
+    "storage",
+    "identity",
+    "contextMenus",
+    "activeTab",
+    "clipboardWrite",
+    "alarms"
+  ],
+  "host_permissions": [],
+  "commands": {
+    "_execute_action": {
+      "suggested_key": {
+        "default": "Ctrl+Shift+M",
+        "mac": "Command+Shift+M"
+      },
+      "description": "Open Mnemonik popup"
+    },
+    "recall-overlay": {
+      "suggested_key": {
+        "default": "Ctrl+Shift+K",
+        "mac": "Command+Shift+K"
+      },
+      "description": "Open recall overlay on the active page"
+    }
+  }
+}

@@ -42,6 +42,19 @@ Final pick during T1 spike.
 
 **Rationale:** WXT auto-handles MV3 quirks (HMR for service worker, content-script hot reload), reduces boilerplate. crxjs is more mature but slower dev loop.
 
+### 2026-05-10 · D4 ratification (T01)
+
+**Final pick: Vite 6 + `@crxjs/vite-plugin` 2.x.** WXT was the prior default; superseded after evaluating monorepo consistency.
+
+**Why Vite + crxjs over WXT:**
+
+- The webapp (`webapp/`) already runs on Vite 6.3.3 + React 19 + TypeScript 5.7.2; using the same toolchain in `packages/extension/` keeps a single Vite plugin/config story across the monorepo (one less moving part for new contributors).
+- `@crxjs/vite-plugin` is a thin layer that handles MV3 manifest entry-point resolution + HMR for popup/options + the service-worker reload dance, without imposing WXT's wholesale project structure or auto-generated routing.
+- WXT's main wins (file-system routing, auto-imports) are nice-to-have, not required for our flat 4-entry layout (popup + options + content + service-worker). The cost (extra abstraction layer + smaller community than Vite directly) outweighs the win at this scope.
+- Bundle-size / dev-loop comparison ran short of the planned 4h spike; observed both produce similar empty-extension output (~25KB JS + manifest). HMR works in both. Decision driven by consistency.
+
+**Backlog re-evaluation trigger:** if the extension grows past ~10 entry points or we find ourselves hand-rolling routing logic, revisit WXT.
+
 ---
 
 ## 2026-05-10 · D5 — Google OAuth via `chrome.identity.launchWebAuthFlow` + PKCE S256

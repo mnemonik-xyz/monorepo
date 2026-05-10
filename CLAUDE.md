@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **Mnemonic Protocol** — verifiable, persistent memory for AI agents. Memories are semantically embedded, TurboQuant-compressed, canonicalized to deterministic CBOR, blake3-hashed, COSE_Sign1-signed with an Ed25519 identity, and optionally anchored on Arweave (durable storage) + Solana (SPL Memo timestamp). Exposed over MCP.
 
-**Default branch:** `dev`. Feature branches are `feat/*`, PR back to `dev`. `main` is tagged releases only.
+**Default branch:** `main`. Feature branches are created from `main` (`feat/*`, `claude/*`, etc.) and PR'd back to `main`. Tagged releases (`v*`) are cut from `main`.
 
 **Library docs:** use Context7 MCP automatically when you need API/setup info — don't ask the user first.
 
