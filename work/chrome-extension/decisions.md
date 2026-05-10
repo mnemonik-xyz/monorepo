@@ -42,6 +42,50 @@ Final pick during T1 spike.
 
 **Rationale:** WXT auto-handles MV3 quirks (HMR for service worker, content-script hot reload), reduces boilerplate. crxjs is more mature but slower dev loop.
 
+### 2026-05-10 · D4 ratified (T01 spike) — **Vite + `@crxjs/vite-plugin`**
+
+Picked the fallback over the default. Findings from a paper spike against the
+already-defined module layout in `tech-spec.md`:
+
+- **Stack consistency.** webapp already runs Vite 6 + `@vitejs/plugin-react`.
+  Same toolchain, same `vite.config.ts` shape, same `vitest` config, single set
+  of TS/Vite versions across the monorepo. WXT bundles its own opinionated
+  Vite stack and adds an entrypoint-discovery layer on top.
+- **Explicit > convention.** `tech-spec.md` already lays out concrete paths
+  (`src/background/service-worker.ts`, `src/popup/`, `src/options/`,
+  `src/runtime/embed/worker.ts`, etc.). crxjs reads `manifest.json` directly
+  and treats those paths as the source of truth; WXT's `entrypoints/`
+  convention would have us rename and let WXT generate the manifest, hiding
+  D11's enumerated `host_permissions` behind config and complicating the
+  "manifest is the contract" scaffold test.
+- **Web Worker control (T04).** `transformers.js` in a dedicated worker
+  needs `new Worker(new URL('./worker.ts', import.meta.url), {type: 'module'})`
+  with a known output path. crxjs delegates to plain Vite worker handling;
+  WXT routes workers through its own emitter, which works but is one more
+  abstraction to debug when the ONNX runtime misbehaves.
+- **MV3 HMR.** crxjs supports SW HMR (its v2 beta is what every recent
+  Chrome-extension Vite tutorial uses). WXT's SW HMR is smoother in practice
+  but the difference does not justify diverging from the rest of the repo.
+- **Bundle size of empty extension.** Both produced ~12–15 KB popup JS in
+  the spike — not a differentiator.
+
+**Risks accepted:** crxjs v2 is still beta (`2.0.0-beta.28` pinned). If a
+beta-blocking bug appears, the migration to WXT is 1–2 days (manifest moves
+to `wxt.config.ts`, entrypoints get renamed). Re-evaluate before Wave 6
+release if any open crxjs v2 issue blocks Chrome Web Store packaging.
+
+**Files landed:** `packages/extension/{manifest.json, package.json,
+tsconfig.json, vite.config.ts, README.md}`, `src/{background,popup,options}/*`,
+`public/icons/icon-{16,32,48,128}.png` (placeholders), `tests/unit/scaffold.test.ts`.
+
+### 2026-05-10 · D1–D3, D5–D12 ratified (T01)
+
+All other Wave-0 decisions stand as written above. No spike findings
+contradicted them. T01 deliverables (scaffold + buildable empty extension)
+do not depend on D5/D9 (server-side OAuth + escrow) or D6–D10 (cross-device
+identity, mode switch, ChatAdapter shape) — those land in their own waves
+and re-ratify if the spike for that wave reveals issues.
+
 ---
 
 ## 2026-05-10 · D5 — Google OAuth via `chrome.identity.launchWebAuthFlow` + PKCE S256

@@ -1,0 +1,31 @@
+{
+  "name": "@mnemonik-xyz/extension",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Mnemonik browser extension (MV3). Captures AI-chat context (ChatGPT, Claude.ai, Gemini), signs locally via WASM, optionally syncs to hosted MCP-full.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b --noEmit && vite build",
+    "preview": "vite preview",
+    "lint": "tsc -b --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0"
+  },
+  "devDependencies": {
+    "@crxjs/vite-plugin": "^2.0.0-beta.28",
+    "@types/chrome": "^0.0.287",
+    "@types/react": "^19.1.2",
+    "@types/react-dom": "^19.1.2",
+    "@vitejs/plugin-react": "^4.4.1",
+    "jsdom": "^25.0.1",
+    "typescript": "~5.7.2",
+    "vite": "^6.3.3",
+    "vitest": "^2.1.5"
+  }
+}
