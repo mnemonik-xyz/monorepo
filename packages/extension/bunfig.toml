@@ -1,0 +1,11 @@
+# `bun test` is the uniform JS-runner test driver per
+# .github/workflows/node-test.yml (decision 11 of the repo CI policy).
+#
+# The popup component tests under `tests/component/**` use
+# `@testing-library/react` (DOM rendering) and depend on vitest's
+# `environmentMatchGlobs: jsdom` opt-in, neither of which bun's
+# built-in test runner hosts today. Skip them here; they run under
+# vitest locally + can be picked up by a dedicated component-test
+# step if one is added to CI later.
+[test]
+pathIgnorePatterns = ["**/tests/component/**"]
