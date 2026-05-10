@@ -446,3 +446,151 @@ Total: 8 oauth_google tests (4 original + 4 new) pass locally; clippy
 invocation).
 
 ---
+
+## 2026-05-11 · T15 — Server key-escrow + extension-bootstrap endpoints land; awaiting CI verify
+
+`mcp/src/escrow.rs` + `mcp/tests/key_escrow.rs` ship the server side
+of Decision 9 (encrypted key escrow). Five HTTP endpoints under
+`/api/extension-bootstrap/*` and `/api/key-escrow`:
+
+- `POST /api/extension-bootstrap/issue` — auth: `aud=mcp` Bearer JWT
+  (enforced by the existing bearer-auth middleware). Mints a UUID
+  ticket bound to `(jwt_sub, google_sub)` with 10-min TTL, LRU 10k,
+  per-user cap 3. Mirrors the existing cli-bootstrap flow.
+- `GET /api/extension-bootstrap/redeem/{ticket}` — no auth (UUID is
+  the capability, same model as cli-bootstrap; URI-allowlisted in the
+  bearer-auth middleware). Pops the ticket atomically; on success
+  returns `{access_token, aud="extension", expires_in}` where
+  `access_token` is a fresh HS256 JWT signed with the same
+  `MCP_JWT_SECRET` as the production OAuth flow. Single-use; second
+  redeem of the same ticket → 404.
+- `PUT /api/key-escrow` — auth: `aud=extension` JWT with `google_sub`,
+  verified inline. Validates `pubkey_base58` matches the linked
+  `pubkey_base58` in `google_identity_links` (binding check). Atomic
+  `INSERT ... ON CONFLICT DO UPDATE` UPSERT; resets
+  `fetch_count_24h=0` and `last_fetch_at=NULL` on every PUT.
+- `GET /api/key-escrow` — auth: same. Single critical section: reads
+  the row, checks rate limit (5 GETs / 24h rolling window per
+  `google_sub`, configurable via `KEY_ESCROW_RATE_LIMIT`),
+  atomically increments via a single SQL `UPDATE ... CASE` that does
+  both the reset-on-elapsed and bump-in-window in one statement.
+  Returns 429 with `Retry-After: <seconds_until_window_resets>` once
+  the cap is exceeded.
+- `DELETE /api/key-escrow` — auth: same. Hard delete (D9 explicit
+  revocation); idempotent (200 with `removed: 0` on second call).
+
+**Key implementation deviations + clarifications:**
+
+- **Migration lives in `mcp/`, NOT `core/`** (deviation from the T15
+  task spec). The original spec said `core/src/storage/sqlite.rs`;
+  but per CLAUDE.md and Decision 9 the OAuth/escrow tables are
+  server concerns, and T14 already set the precedent by putting
+  `google_identity_links` in `oauth/google.rs::migrate_google_identity_links`.
+  The new `escrow::migrate_key_escrow_blobs` mirrors that pattern
+  and runs at startup alongside the T14 migration (only when
+  `GOOGLE_OAUTH_CLIENT_ID` is set — the FK in `key_escrow_blobs`
+  references `google_identity_links`, so both tables move together).
+  `core/` remains untouched.
+
+- **Schema-level zero-knowledge audit.** The migration string lives
+  as `pub const MIGRATION_SQL: &str` in `mcp/src/escrow.rs` so the
+  T15 TDD anchor `server_never_stores_plaintext` can read it via the
+  library facade and assert that no plaintext-leaking column name is
+  present (`plaintext`, `secret_key`, `secret_seed`, `raw_key`,
+  `private_key`, `unencrypted`, ` seed `). The same test also
+  positively asserts presence of the opaque columns (`ciphertext`,
+  `nonce`, `kdf`, `kdf_params`, `pubkey_base58`). This is a compile-
+  time-stable invariant that catches a future refactor that adds an
+  unintended plaintext column.
+
+- **`aud=extension` JWT split.** A fresh audience separate from the
+  production `aud=mcp` audience means the bearer-auth middleware on
+  `/mcp` rejects extension JWTs cleanly — they only validate at the
+  escrow endpoints, which verify inline via `extract_extension_claims`.
+  Both JWT shapes share a signing key (the same `MCP_JWT_SECRET` /
+  HS256) so the server only needs one secret to rotate. The new
+  `OAuthState::jwt_encoding_key()` / `jwt_decoding_key()` accessors
+  expose the key to the escrow module.
+
+- **Single source of truth for `KEY_ESCROW_RATE_LIMIT`.** `Config`
+  reads the env value once at startup; `main.rs::run_http` threads it
+  through a new `ExtensionSettings` struct (sibling of
+  `GoogleOAuthSettings`). No downstream `std::env::var` re-reads —
+  matches T14's round-2 fix #2.
+
+- **Atomic counter UPDATE.** The rate-limit increment is a single SQL
+  statement, not READ-then-WRITE. Two concurrent GETs both observe
+  the SAME pre-update count and both write `count = old + 1`, so the
+  counter cannot drift under race. The CASE expression handles
+  reset-on-elapsed + in-window-bump in one go.
+
+- **No in-memory rate-limit map** — the DB row IS the per-user
+  counter. This avoids the unbounded HashMap class of issues that
+  T14 round-2 had to LRU-bound. The DB row already has a primary key
+  so memory pressure is naturally bounded.
+
+- **Pubkey binding is enforced server-side, not via FK.** The PUT
+  handler explicitly looks up `google_identity_links.pubkey_base58`
+  before UPSERT and 403s on mismatch (with a generic error message
+  that doesn't leak the linked pubkey). The FK on the schema
+  cascades on DELETE of the parent row, which is a cleanup nicety,
+  not the security boundary.
+
+- **DELETE is hard.** No soft-delete column. The user's explicit
+  revocation removes the row permanently; on next PUT the rate-limit
+  counter starts fresh from zero. Matches D9's "explicit revocation"
+  language.
+
+**Endpoint allowlist additions** in `oauth::bearer_auth_middleware`:
+
+- `/api/extension-bootstrap/redeem/` — UUID-as-capability path,
+  bypasses bearer-auth.
+- `/api/key-escrow` — verifies its own `aud=extension` JWT inline.
+
+**TDD anchors implemented (all 10 tests pass locally):**
+
+- `mcp/tests/key_escrow.rs::rate_limit_blocks_brute_force` (TDD #1):
+  burns the 5-GET budget, asserts the 6th GET returns 429 with a
+  positive `Retry-After` header capped at 24h.
+- `mcp/tests/key_escrow.rs::pubkey_binding_enforced` (TDD #2):
+  PUT with a different `pubkey_base58` than the linked
+  `google_identity_links` row → 403; PUT with the correct pubkey →
+  200.
+- `mcp/tests/key_escrow.rs::server_never_stores_plaintext` (TDD #3):
+  Schema audit against the `MIGRATION_SQL` const.
+- `put_then_get_round_trip_identical_bytes`: end-to-end byte-identical
+  round-trip.
+- `stale_window_resets_counter`: seeds `last_fetch_at` to 25h ago via
+  direct SQL, asserts the next GET succeeds and the counter resets
+  to 1.
+- `delete_removes_row_subsequent_get_404`: GET after DELETE → 404;
+  second DELETE → 200 with `removed: 0` (idempotent).
+- `put_without_prior_google_identity_link_403`: app-level binding
+  check fires before any DB FK violation.
+- `key_escrow_rejects_mcp_aud_jwt`: an `aud=mcp` JWT must not be
+  accepted on `/api/key-escrow` (audience split is enforced).
+- `key_escrow_requires_google_sub_claim`: an `aud=extension` JWT
+  without `google_sub` → 401.
+- `bootstrap_ticket_round_trip_issues_extension_jwt`: full handshake
+  → issue ticket with `aud=mcp` JWT → redeem (no auth) → get
+  `aud=extension` JWT → use that on `/api/key-escrow` → second redeem
+  of same ticket → 404.
+
+**Cargo.toml gate.** Mirrors T14: `[[test]] name = "key_escrow"`
+with `required-features = ["test-support"]` so omitting the feature
+flag produces a clear "test requires feature" message instead of
+silently `0 tests`.
+
+Task `15.md` held at `status: in_review` with `blocked_on: ci-verify`
+per D13 — flips to `done` only after the PR's CI run reports green.
+
+**Note for downstream tasks.** The extension client side (T13's
+seed-restore flow + popup) calls these endpoints with the redeemed
+`aud=extension` JWT and the WASM `argon2id_wrap` helper builds the
+PUT body. The schema is opaque to the server beyond the format
+checks in `key_escrow_put_handler` (length bounds on each field,
+non-empty ciphertext, base64-decodable nonce). When T18 (cloud sync)
+needs a per-user revocation hook, it can reuse `DELETE /api/key-escrow`
+without server changes.
+
+---
