@@ -94,7 +94,7 @@ Read these via the `project-knowledge` skill — they're the source of truth.
 
 ## CI
 
-`.github/workflows/ci.yml` runs on push to `main`/`dev` and every PR: rustfmt check, clippy with `-D warnings`, `cargo test --workspace`, gitleaks (working tree + full history). `.github/workflows/release.yml` runs on `v*` tags: cross-compile mcp binary, build Docker image, publish to GHCR/crates.io. Toolchain pinned via `rust-toolchain.toml`.
+`.github/workflows/ci.yml` runs on push to `main` and every PR: rustfmt check, clippy with `-D warnings`, `cargo test --workspace`, gitleaks (working tree + full history). `.github/workflows/release.yml` runs on `v*` tags: cross-compile mcp binary, build Docker image, publish to GHCR/crates.io. Toolchain pinned via `rust-toolchain.toml`.
 
 ## Stream Timeout Prevention
 
