@@ -23,6 +23,7 @@
     "lint:webext": "web-ext lint --source-dir=dist"
   },
   "dependencies": {
+    "idb": "^8.0.3",
     "react": "^19.1.0",
     "react-dom": "^19.1.0"
   },
@@ -32,6 +33,7 @@
     "@types/react": "^19.1.0",
     "@types/react-dom": "^19.1.0",
     "@vitejs/plugin-react": "^4.3.4",
+    "fake-indexeddb": "^6.2.5",
     "typescript": "~5.7.2",
     "vite": "^6.3.3",
     "vitest": "^1.6.0",
