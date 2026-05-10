@@ -345,12 +345,31 @@ impl ExtensionBootstrapTickets {
             .inner
             .lock()
             .map_err(|_| ExtensionBootstrapInsertError::PerUserCapExceeded)?;
+
+        // Sweep TTL-expired entries belonging to this jwt_sub BEFORE counting
+        // toward the cap. Without this, a user who issues `per_user_cap`
+        // tickets and lets them all expire (10-min TTL) without redeeming is
+        // locked out of future bootstrap until the LRU evicts those entries —
+        // which in practice requires 10_000+ unrelated tickets to be inserted
+        // first. Security finding T15-M-02 (round 1).
+        let now = now_unix();
+        let expired_ids: Vec<uuid::Uuid> = guard
+            .lru
+            .iter()
+            .filter(|(_id, t)| t.jwt_sub == jwt_sub && now >= t.expires_at)
+            .map(|(id, _)| *id)
+            .collect();
+        for id in expired_ids {
+            if let Some(t) = guard.lru.pop(&id) {
+                guard.dec_user(&t.jwt_sub);
+            }
+        }
+
         let count = guard.per_user.get(&jwt_sub).copied().unwrap_or(0);
         if count >= guard.per_user_cap {
             return Err(ExtensionBootstrapInsertError::PerUserCapExceeded);
         }
         let ticket_id = uuid::Uuid::new_v4();
-        let now = now_unix();
         let expires_at = now + guard.ttl_seconds;
         let entry = ExtensionBootstrapTicket {
             jwt_sub: jwt_sub.clone(),
@@ -434,16 +453,22 @@ pub async fn extension_bootstrap_issue_handler(
             }),
         )
             .into_response(),
-        Err(ExtensionBootstrapInsertError::PerUserCapExceeded) => (
-            StatusCode::TOO_MANY_REQUESTS,
-            Json(serde_json::json!({
-                "error": format!(
-                    "per-user extension-bootstrap cap exceeded ({} active)",
-                    EXTENSION_BOOTSTRAP_PER_USER_CAP
-                ),
-            })),
-        )
-            .into_response(),
+        Err(ExtensionBootstrapInsertError::PerUserCapExceeded) => {
+            // Fixed opaque string — do not leak the numeric per-user cap
+            // constant into the response body. The server-side log carries
+            // the cap value for operators (security finding T15-L-01).
+            tracing::debug!(
+                "extension-bootstrap per-user cap exceeded (cap={})",
+                EXTENSION_BOOTSTRAP_PER_USER_CAP
+            );
+            (
+                StatusCode::TOO_MANY_REQUESTS,
+                Json(serde_json::json!({
+                    "error": "too_many_pending_tickets",
+                })),
+            )
+                .into_response()
+        }
     }
 }
 
@@ -560,9 +585,11 @@ pub async fn key_escrow_put_handler(
     }
     // AES-GCM-256 standard nonce is 96 bits = 12 bytes. We do not enforce
     // the wrap algorithm at the schema layer (D9 keeps the server agnostic),
-    // but reject obviously-malformed nonces.
-    if nonce.is_empty() || nonce.len() > 64 {
-        return bad_request("nonce_b64 must be 1..=64 bytes after base64-decode");
+    // but cap at 16 bytes to reject obviously-malformed nonces while still
+    // accommodating alternative AEAD constructions (some use a 128-bit
+    // nonce). 64-byte bound from round-1 was over-generous.
+    if nonce.is_empty() || nonce.len() > 16 {
+        return bad_request("nonce_b64 must be 1..=16 bytes after base64-decode");
     }
     if req.kdf.is_empty() || req.kdf.len() > 64 {
         return bad_request("kdf is required (1..=64 chars)");
@@ -570,8 +597,11 @@ pub async fn key_escrow_put_handler(
     if req.kdf_params.is_empty() || req.kdf_params.len() > 4096 {
         return bad_request("kdf_params is required (1..=4096 chars)");
     }
-    if req.pubkey_base58.is_empty() {
-        return bad_request("pubkey_base58 is required");
+    // Ed25519 base58-encoded pubkeys are 43–44 chars. 64-byte upper bound
+    // gives safe headroom while rejecting obvious storage-amplification
+    // payloads (security finding T15-L-03).
+    if req.pubkey_base58.is_empty() || req.pubkey_base58.len() > 64 {
+        return bad_request("pubkey_base58 is required (1..=64 chars)");
     }
 
     // Lookup-then-upsert under one critical section so the binding check is
@@ -645,8 +675,12 @@ pub async fn key_escrow_get_handler(
     };
 
     let rate_limit = state.rate_limit;
-    let now_rfc3339 = chrono::Utc::now().to_rfc3339();
-    let now_unix = chrono::Utc::now().timestamp();
+    // Single Utc::now() so the RFC3339 string and the unix timestamp used in
+    // the rate-limit check refer to exactly the same instant — eliminates a
+    // sub-millisecond skew that would otherwise appear on a contended lock.
+    let now = chrono::Utc::now();
+    let now_rfc3339 = now.to_rfc3339();
+    let now_unix = now.timestamp();
 
     // Single critical section: read → rate-check → increment → return.
     // No `.await` while the SQLite mutex is held.
@@ -791,10 +825,23 @@ fn extract_extension_claims(
     validation.iss = Some(iss_set);
     validation.validate_exp = true;
 
-    let data = decode::<Claims>(token.as_str(), oauth.jwt_decoding_key(), &validation)
-        .map_err(|e| Box::new(unauthorized(&format!("invalid JWT: {e}"))))?;
+    // jsonwebtoken's internal error strings (e.g. `InvalidSignature`,
+    // `ExpiredSignature`, `InvalidAudience`, `InvalidIssuer`) are logged
+    // server-side; clients receive a fixed `jwt_invalid` so they cannot
+    // calibrate forgery attempts against the exact failure mode. Mirrors
+    // the T14 round-2 fix for `id_token_invalid` in `oauth/google.rs`.
+    let data =
+        decode::<Claims>(token.as_str(), oauth.jwt_decoding_key(), &validation).map_err(|e| {
+            tracing::warn!("escrow JWT validation failed: {e:#}");
+            Box::new(unauthorized("jwt_invalid"))
+        })?;
     if data.claims.iss != JWT_ISSUER || data.claims.aud != EXTENSION_JWT_AUDIENCE {
-        return Err(Box::new(unauthorized("invalid JWT iss/aud")));
+        tracing::warn!(
+            "escrow JWT iss/aud mismatch: iss={:?} aud={:?}",
+            data.claims.iss,
+            data.claims.aud
+        );
+        return Err(Box::new(unauthorized("jwt_invalid")));
     }
     Ok(data.claims)
 }
@@ -837,13 +884,22 @@ fn rate_limited(retry_after_secs: i64) -> Response {
     let mut resp = (
         StatusCode::TOO_MANY_REQUESTS,
         Json(serde_json::json!({
-            "error": "rate limit exceeded: too many GETs in 24h window",
+            "error": "rate_limited",
             "retry_after_secs": retry_after_secs,
         })),
     )
         .into_response();
-    if let Ok(hv) = HeaderValue::from_str(&retry_after_secs.to_string()) {
-        resp.headers_mut().insert("Retry-After", hv);
+    // The header value is always a positive decimal integer, so this is
+    // expected to succeed. If construction ever fails (e.g. negative
+    // overflow into a non-ASCII string) we still return the 429 — but log
+    // at warn! so the missing Retry-After is observable in production.
+    match HeaderValue::from_str(&retry_after_secs.to_string()) {
+        Ok(hv) => {
+            resp.headers_mut().insert("Retry-After", hv);
+        }
+        Err(e) => {
+            tracing::warn!("Retry-After header construction failed: {e}");
+        }
     }
     resp
 }

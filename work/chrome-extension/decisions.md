@@ -594,3 +594,149 @@ needs a per-user revocation hook, it can reuse `DELETE /api/key-escrow`
 without server changes.
 
 ---
+
+## 2026-05-11 · T15 — Round-2 review fixes applied (PR #114)
+
+Three reviewer agents ran round 1 against the T15 commit
+(`73cdd8f feat(mcp): T15 — extension-bootstrap + key-escrow endpoints +
+migrations`). Reports landed at
+`work/chrome-extension/logs/working/task-15/{code-reviewer,security-auditor,test-reviewer}-round1.json`.
+Verdicts: `approve_with_nits`, `approve_with_nits`,
+`approve_with_blockers`. Two majors and two blockers; the remaining
+findings were mediums/lows/nits. All actionable findings addressed
+below.
+
+**Majors / blockers fixed**
+
+- **JWT error masking in `extract_extension_claims`** (code-reviewer
+  major; security-auditor T15-M-01). The 401 response body for an
+  invalid `aud=extension` Bearer JWT formatted the jsonwebtoken
+  internal error (`InvalidSignature`, `ExpiredSignature`,
+  `InvalidAudience`, `InvalidIssuer`) into the response — same leak
+  T14 round-2 fixed for `id_token_invalid` in `oauth/google.rs`. T15
+  reintroduced the pattern.
+  **Fix**: `tracing::warn!` logs the detail server-side; the client
+  receives the fixed string `{"error": "jwt_invalid"}`. The
+  `iss`/`aud` mismatch branch now logs the structural reason and
+  returns the same opaque token.
+- **`PRAGMA foreign_keys = ON` not set** (code-reviewer major). The
+  FK on `key_escrow_blobs(google_sub) REFERENCES google_identity_links
+  ON DELETE CASCADE` was decorative: SQLite defaults to FK OFF per
+  connection, so unlinking a Google account would never cascade.
+  **Fix**: `PRAGMA foreign_keys=ON` added to `SqliteStore::open()`
+  AND `SqliteStore::in_memory()` (the latter is what
+  `mock_state()` builds, so tests now also exercise FK enforcement).
+  This is the only `core/` touch this task requires; it's global DB
+  infrastructure, not OAuth/escrow domain.
+- **Expired-ticket per-user counter pinning** (security-auditor
+  T15-M-02). If a user issued `EXTENSION_BOOTSTRAP_PER_USER_CAP=3`
+  tickets and let them all expire (10-min TTL) without redeeming,
+  the in-memory `per_user` counter stayed at 3 — locking the user
+  out of new tickets until LRU eviction pushed those entries out
+  (which requires 10k+ unrelated tickets first). Self-DoS; also a
+  partial denial-of-service vector for a stolen `aud=mcp` JWT.
+  **Fix**: `ExtensionBootstrapTickets::insert` now sweeps
+  TTL-expired entries belonging to the inserting `jwt_sub` BEFORE
+  counting toward the cap (option (a) from the review). New test
+  `expired_tickets_do_not_pin_per_user_counter` constructs a
+  harness with `ttl_seconds=0` and asserts the 4th issue still 200s.
+- **F1: DELETE cross-user isolation untested** (test-reviewer
+  blocker). The handler scopes DELETE by the JWT claim's
+  `google_sub`, so a wrong-identity DELETE returns
+  `200 {removed: 0}` rather than 403, which is correct (idempotent
+  non-reveal) — but the invariant was never pinned by a test.
+  **Fix**: new test `delete_cross_user_isolation` PUTs as user B,
+  DELETEs with user A's JWT, asserts `removed=0`, and then reads
+  user B's row directly from SQLite to verify it survives. A
+  regression dropping the `WHERE google_sub = ?` clause from the
+  DELETE SQL would fail this test.
+- **F2: Expired bootstrap ticket → 404 untested** (test-reviewer
+  blocker). The TTL-expiry branch in `consume()` was never driven.
+  **Fix**: new test `expired_bootstrap_ticket_returns_404` builds a
+  harness with `ttl_seconds=0`, issues a ticket via the production
+  HTTP handler, and asserts redeem returns 404 with the same body
+  as the garbage-UUID case (no oracle).
+
+**Majors (test-reviewer) fixed**
+
+- **F3: 429 body error field not asserted**. The
+  `rate_limit_blocks_brute_force` test captured the 429 body but
+  never asserted its `error` field — a regression to `{"error":
+  null}` would silently pass.
+  **Fix**: the 429 body now carries the fixed token
+  `{"error": "rate_limited"}` and the test asserts on it. The
+  previous verbose message ("rate limit exceeded: too many GETs
+  in 24h window") is replaced by the opaque token; no
+  attacker-useful information was in it anyway.
+- **F4: replay-nonce test absent**. The tech-spec listed
+  "replay nonce" as a server-side test. **Deferred with reason**:
+  the escrow PUT/GET endpoints do not use a per-request nonce;
+  the AES-GCM nonce in the request body is a data-layer cipher
+  nonce, not a transport replay token. Bootstrap tickets ARE
+  single-use (covered by
+  `bootstrap_ticket_round_trip_issues_extension_jwt` second-redeem
+  → 404). Escrow PUTs are authenticated by `aud=extension` JWT
+  (idempotent under replay — repeating a PUT just rewraps the same
+  value). There is no per-request server-side nonce to test
+  replay against; the test-spec item was a draft carryover. No
+  test added; rationale recorded here.
+
+**Mediums / lows fixed (security-auditor + code-reviewer)**
+
+- **T15-L-01 / cap-constant leak**. The 429 body for per-user
+  cap exceeded ("3 active") leaked the numeric cap. **Fix**:
+  replaced with the fixed opaque token
+  `{"error": "too_many_pending_tickets"}`. Cap value logged at
+  `debug!` for operators. Test
+  `bootstrap_per_user_cap_blocks_fourth_ticket` asserts on the
+  fixed token.
+- **T15-L-03 / pubkey_base58 length cap**. PUT did not bound the
+  pubkey-string length; a 1MB payload would be stored. **Fix**:
+  added `if pubkey_base58.len() > 64 { return bad_request(...); }`.
+  Ed25519 base58 pubkeys are 43–44 chars; 64 gives safe headroom.
+- **T15-L-02 / explicit GET cross-user isolation test**. Added
+  `get_cross_user_isolation`: only user B has an escrow row, user
+  A's GET must 404 (never return B's data). The test also
+  defensively asserts that if a future regression returns 200, the
+  body must not carry user B's pubkey.
+- **Nonce upper bound 64 → 16 bytes**. The previous 64-byte cap
+  on the AES-GCM nonce was over-generous (AES-GCM-256 uses 12; some
+  AEADs use 16). **Fix**: tightened to `1..=16` bytes.
+- **`now_rfc3339` / `now_unix` skew in GET handler**. Two
+  `chrono::Utc::now()` calls captured. **Fix**: single
+  `let now = chrono::Utc::now();` derived into both
+  representations.
+- **`Retry-After` header construction failure silently dropped**.
+  **Fix**: replaced the `if let Ok(...)` with a `match` that warns
+  on error and still returns the 429 body. Behaviour is unchanged
+  in the success path; failures are now observable.
+- **F5: PUT/DELETE missing google_sub → 401**. The original
+  `key_escrow_requires_google_sub_claim` only exercised GET. **Fix**:
+  added `key_escrow_put_and_delete_require_google_sub_claim` that
+  drives the same negative path on the two write verbs.
+- **F6: linked_at INTEGER vs spec TEXT**. The T14 migration created
+  `google_identity_links.linked_at INTEGER` (unix seconds), not
+  TEXT as the T15 task spec described. The test helper `seed_link`
+  already inserted an integer; **Fix**: added a doc-comment on
+  `seed_link` clarifying T14's schema overrides the T15 spec text.
+- **F7: per-user bootstrap-ticket cap test**. New test
+  `bootstrap_per_user_cap_blocks_fourth_ticket` exercises the 3+1
+  case end-to-end via the HTTP handler.
+
+**Architectural constraint preserved**
+
+- The only `core/` change is the per-connection
+  `PRAGMA foreign_keys=ON` in `SqliteStore::{open,in_memory}`. No
+  OAuth/escrow tables, helpers, or constants moved into `core/`.
+  The dependency graph remains one-way (`mcp/` → `core/`).
+
+**Test count**
+
+`mcp/tests/key_escrow.rs` grew from 10 to 16 tests; all pass in
+0.29s. Workspace test run (`cargo test --workspace --features
+mnemonic-mcp/test-support`) green; T14 OAuth tests unchanged.
+
+Task `15.md` stays at `status: in_review` / `blocked_on: ci-verify`
+per D13 — flips to `done` only after PR #114 CI reports green.
+
+---
