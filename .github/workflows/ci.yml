@@ -177,8 +177,9 @@ jobs:
         run: cargo install cargo-audit --locked
       - name: Run cargo audit
         # `--deny warnings` upgrades unmaintained-crate warnings into errors.
-        # Documented exceptions live in `audit.toml` at the repo root
-        # (`[advisories] ignore = ["RUSTSEC-XXXX-YYYY"]`).
+        # Documented exceptions live in `.cargo/audit.toml` — the path
+        # cargo-audit loads by default. Schema:
+        # `[advisories] ignore = ["RUSTSEC-XXXX-YYYY"]`.
         run: cargo audit --deny warnings
 
   smithery-schema:

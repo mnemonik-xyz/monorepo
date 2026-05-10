@@ -732,11 +732,15 @@ mod transport_tests {
     }
 
     /// Drives: streamable-HTTP refactor + header setup. Asserts:
-    /// (a) `content-type: application/x-ndjson`,
+    /// (a) `content-type: application/json` — per MCP spec 2025-06-18 a
+    ///     single JSON-RPC response uses `application/json`, NOT
+    ///     `application/x-ndjson` (the latter was rejected by Cursor /
+    ///     Claude.ai / VS Code with "Unexpected content type" during T15
+    ///     post-deploy QA; see `ndjson_response` doc comment),
     /// (b) no `content-length` header (axum auto-emits chunked transfer-
     ///     encoding when the body is a stream without a known length),
-    /// (c) body is exactly one newline-terminated JSON line that round-trips
-    ///     to the `tools/list` envelope with the 5 expected tools.
+    /// (c) body is exactly one JSON envelope that round-trips to the
+    ///     `tools/list` shape with the 7 expected tools.
     #[tokio::test]
     async fn test_chunked_response_encoding() {
         let state = build_test_state();
@@ -765,8 +769,8 @@ mod transport_tests {
                 .get("content-type")
                 .and_then(|v| v.to_str().ok())
                 .unwrap_or(""),
-            "application/x-ndjson",
-            "streamable-HTTP frames must use application/x-ndjson",
+            "application/json",
+            "single JSON-RPC response must use application/json per MCP spec 2025-06-18",
         );
         assert!(
             headers.get("content-length").is_none(),
@@ -775,18 +779,7 @@ mod transport_tests {
         );
 
         let body_str = std::str::from_utf8(&body).expect("body utf-8");
-        // Exactly one frame today — exactly one `\n` and it's the trailer.
-        assert!(
-            body_str.ends_with('\n'),
-            "NDJSON frame must end with newline; body={body_str:?}",
-        );
-        assert_eq!(
-            body_str.matches('\n').count(),
-            1,
-            "exactly one frame expected today; body={body_str:?}",
-        );
-        let line = body_str.trim_end_matches('\n');
-        let envelope: Value = serde_json::from_str(line).expect("frame is valid JSON");
+        let envelope: Value = serde_json::from_str(body_str).expect("body is valid JSON");
         assert_eq!(envelope["jsonrpc"], "2.0");
         assert_eq!(envelope["id"], 1);
         let tools = envelope["result"]["tools"]

@@ -1,13 +1,21 @@
 //! Integration tests for `GET /api/pending/{correlation_id}` authz —
-//! Decision 12. Covers:
+//! Decision 12. The endpoint is capability-based: the `correlation_id` IS
+//! the capability, so any caller in possession of the UUIDv4 may read the
+//! unsigned canonical-CBOR bytes (the actual signing chain is gated by
+//! COSE + keypair ownership in `/api/sign-callback`, not by JWT here).
 //!
-//!   - `test_pending_get_403_for_wrong_jwt_sub` — alice parks, bob's JWT
-//!     on the GET → 403 Forbidden.
+//! Covers:
+//!
 //!   - `test_pending_get_404_for_unknown_correlation_id` — random id
 //!     never seen → 404 Not Found.
-//!   - `test_pending_get_returns_canonical_cbor_for_owner` — alice parks,
-//!     alice's JWT → 200 OK with `Content-Type: application/cbor` and
-//!     the byte-for-byte canonical CBOR.
+//!   - `test_pending_get_returns_canonical_cbor_for_owner` — alice parks
+//!     and reads back via her cid → 200 OK with `Content-Type: application/cbor`
+//!     and the byte-for-byte canonical CBOR.
+//!   - `test_pending_get_capability_any_jwt_succeeds` — capability access:
+//!     bob's JWT on alice's cid still succeeds, because the cid IS the auth.
+//!   - `test_pending_get_capability_no_jwt_succeeds` — capability access:
+//!     no JWT at all still succeeds for the same reason; the path is
+//!     allowlisted in `bearer_auth_middleware`.
 
 use std::sync::Arc;
 
@@ -136,7 +144,12 @@ async fn park_for(state: &Arc<McpState>, owner: &str, content: &str) -> (String,
 }
 
 #[tokio::test]
-async fn test_pending_get_403_for_wrong_jwt_sub() {
+async fn test_pending_get_capability_any_jwt_succeeds() {
+    // Decision 12 — `/api/pending/*` is capability-based. Any caller in
+    // possession of a valid `correlation_id` can fetch the unsigned
+    // canonical-CBOR bytes regardless of which JWT (if any) they hold;
+    // forging the actual sign-callback still requires the user's
+    // localStorage Ed25519 keypair, which the cid does not grant.
     let state = build_state();
     let oauth_state = Arc::new(OAuthState::new(TEST_SECRET));
     let app = build_router(state.clone(), oauth_state.clone());
@@ -146,7 +159,7 @@ async fn test_pending_get_403_for_wrong_jwt_sub() {
 
     let (cid, _cbor) = park_for(&state, &alice, "alice's secret").await;
 
-    // Bob's JWT on alice's correlation_id → 403.
+    // Bob's JWT on alice's cid still succeeds — capability is the cid itself.
     let bob_token = oauth::issue_jwt(&oauth_state, &bob).unwrap();
     let req = Request::builder()
         .method("GET")
@@ -155,9 +168,9 @@ async fn test_pending_get_403_for_wrong_jwt_sub() {
         .body(Body::empty())
         .unwrap();
     let resp = app.clone().oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    assert_eq!(resp.status(), StatusCode::OK);
 
-    // Sanity: alice CAN still fetch (entry not consumed by the failed GET).
+    // Sanity: alice's own JWT also still works (peek does not consume).
     let alice_token = oauth::issue_jwt(&oauth_state, &alice).unwrap();
     let req2 = Request::builder()
         .method("GET")
@@ -218,7 +231,11 @@ async fn test_pending_get_returns_canonical_cbor_for_owner() {
 }
 
 #[tokio::test]
-async fn test_pending_get_requires_jwt() {
+async fn test_pending_get_capability_no_jwt_succeeds() {
+    // Decision 12 — `/api/pending/*` is allowlisted in
+    // `bearer_auth_middleware` and the handler does not require a JWT;
+    // possession of the cid is the capability. A request without any
+    // Authorization header against a known cid must succeed.
     let state = build_state();
     let oauth_state = Arc::new(OAuthState::new(TEST_SECRET));
     let app = build_router(state.clone(), oauth_state.clone());
@@ -232,5 +249,5 @@ async fn test_pending_get_requires_jwt() {
         .body(Body::empty())
         .unwrap();
     let resp = app.clone().oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(resp.status(), StatusCode::OK);
 }
