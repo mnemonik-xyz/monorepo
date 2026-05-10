@@ -1,0 +1,104 @@
+name: Nightly
+
+# Long-running / spec-evolving validation jobs that don't need to gate
+# every PR. Triggers:
+#   - daily at 04:00 UTC (off-peak), so regressions surface within 24h.
+#   - manual `workflow_dispatch` for ad-hoc runs from the Actions tab.
+# Failures here do NOT block merges; investigate within one business day.
+
+on:
+  schedule:
+    - cron: '0 4 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: nightly-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # MCP Inspector validation against a live `mnemonic-mcp` instance. Used
+  # to live in `ci.yml` and ran on every PR; demoted to nightly because:
+  #   - the job is ~3min (Rust build + fastembed ONNX download + npx
+  #     resolution + server boot + /health wait), the slowest gate by far;
+  #   - the inspector tracks MCP spec drift on its own release cadence,
+  #     producing failures that PR authors can't fix in their PR;
+  #   - day-to-day PRs touch extension / webapp / docs that don't change
+  #     the MCP surface, so per-PR validation is wasted budget.
+  # Pin is exact (not `0.6.x`) — see the validate step.
+  mcp-inspector:
+    name: mcp-inspector
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: workspace
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Install build deps (g++ for fastembed local-embed)
+        run: sudo apt-get update && sudo apt-get install -y g++
+      - name: Build mnemonic-mcp + mint-test-jwt
+        run: |
+          cargo build -p mnemonic-mcp --features local-embed --bin mnemonic-mcp
+          cargo build -p mnemonic-mcp --features test-support --bin mint-test-jwt
+      - name: Generate JWT secret + test token
+        id: jwt
+        run: |
+          # 32-byte random base64 secret.
+          SECRET="$(openssl rand -base64 32)"
+          echo "secret=$SECRET" >> "$GITHUB_OUTPUT"
+          # Mint a JWT for the canonical CI subject.
+          TOKEN="$(MCP_JWT_SECRET="$SECRET" \
+            ./target/debug/mint-test-jwt --sub ci-test)"
+          echo "token=$TOKEN" >> "$GITHUB_OUTPUT"
+      - name: Start mcp server
+        env:
+          STORAGE_MODE: local
+          PAYMENT_MODE: none
+          # local-embed is compiled in; fastembed downloads the ONNX model
+          # on first run (~22MB). ONNX model is cached by rust-cache via the
+          # ~/.cache/fastembed dir on subsequent runs.
+          EMBED_PROVIDER: fastembed
+          MCP_JWT_SECRET: ${{ steps.jwt.outputs.secret }}
+          MNEMONIC_KEYPAIR_PATH: /tmp/ci-mcp-id.json
+          DATABASE_PATH: /tmp/ci-mcp.db
+          RAG_CHUNK_DIR: /tmp/ci-rag
+        run: |
+          mkdir -p /tmp/ci-rag
+          ./target/debug/mnemonic-mcp --transport http --port 3000 &
+          echo $! > /tmp/mcp.pid
+      - name: Wait for /health (30s timeout)
+        run: |
+          for i in $(seq 1 30); do
+            if curl -fsS http://localhost:3000/health >/dev/null 2>&1; then
+              echo "/health up after ${i}s"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "/health never came up"
+          # Surface mcp logs for debugging.
+          if [ -f /tmp/mcp.pid ]; then kill "$(cat /tmp/mcp.pid)" 2>/dev/null || true; fi
+          exit 1
+      - name: Validate MCP server with @modelcontextprotocol/inspector
+        run: |
+          # Exact pin to 0.5.1 — the last release before the 0.6.0 CLI
+          # rewrite that registered an `--env` option and tripped Node
+          # 20.20.2's stricter `util.parseArgs` with
+          # `ERR_PARSE_ARGS_INVALID_OPTION_VALUE: Option '--env'
+          # argument is ambiguous` before our own `--validate` flag was
+          # ever consumed. Bump deliberately, in lockstep with MCP spec
+          # releases — never via a `.x` wildcard.
+          npx --yes @modelcontextprotocol/inspector@0.5.1 \
+            --validate http://localhost:3000/mcp \
+            -H "Authorization: Bearer ${{ steps.jwt.outputs.token }}" \
+            || (echo "MCP Inspector validation failed"; exit 1)
+      - name: Stop mcp server
+        if: always()
+        run: |
+          if [ -f /tmp/mcp.pid ]; then kill "$(cat /tmp/mcp.pid)" 2>/dev/null || true; fi
