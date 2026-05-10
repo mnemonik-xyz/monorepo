@@ -1,6 +1,8 @@
+import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import SiteFooter from "../components/SiteFooter";
 import SiteHeader from "../components/SiteHeader";
+import { fetchPublicStats, type PublicStats } from "../lib/api";
 import { EXTERNAL_LINKS } from "../lib/links";
 
 /**
@@ -124,6 +126,8 @@ function Hero() {
         </div>
       </div>
 
+      <TractionStrip />
+
       <dl className="grid w-full max-w-2xl grid-cols-3 gap-4">
         <Stat label="Bits / dim" value="2–4" caption="TurboQuant" />
         <Stat label="Anchor" value="Solana" caption="SPL Memo" />
@@ -156,6 +160,42 @@ function ThesisBanner() {
         “Trustless agents cannot work without trustless agentic memory.”
       </blockquote>
     </figure>
+  );
+}
+
+function TractionStrip() {
+  const [stats, setStats] = useState<PublicStats | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetchPublicStats().then((s) => {
+      if (!cancelled) setStats(s);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const fmt = (n: number | undefined) =>
+    typeof n === "number" ? new Intl.NumberFormat("en-US").format(n) : "—";
+
+  return (
+    <dl
+      className="grid w-full max-w-2xl grid-cols-3 gap-4"
+      data-testid="traction-strip"
+    >
+      <Stat label="Users" value={fmt(stats?.unique_users)} caption="Distinct" />
+      <Stat
+        label="Memories"
+        value={fmt(stats?.saved_on_node)}
+        caption="Saved"
+      />
+      <Stat
+        label="On-chain"
+        value={fmt(stats?.saved_onchain)}
+        caption="Anchored"
+      />
+    </dl>
   );
 }
 
