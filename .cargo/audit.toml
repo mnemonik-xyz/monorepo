@@ -81,4 +81,16 @@ ignore = [
     # advisory is unreachable in our codepaths. Bump to 0.13.x tracked
     # in the broader dep-refresh sweep.
     "RUSTSEC-2026-0002",
+
+    # rsa 0.9.x — Marvin Attack (timing sidechannel during RSA decryption).
+    # No fixed upgrade is available upstream. We only pull this in as a
+    # `[dev-dependencies]` of `mnemonic-mcp` for the Google-OAuth integration
+    # test in `mcp/tests/oauth_google.rs`, which mints a fresh 2048-bit RSA
+    # key per test purely to sign mock `id_token` JWTs for our own
+    # JWKS verifier. The crate never enters production builds and never
+    # decrypts attacker-controlled ciphertext, so the timing sidechannel
+    # has no exploitable codepath. Tracked upstream
+    # (https://github.com/RustCrypto/RSA/issues/19); revisit when a fixed
+    # release lands.
+    "RUSTSEC-2023-0071",
 ]
