@@ -360,3 +360,89 @@ through the same inline `extract_bearer_claims` helper if you need
 JWT-aware handlers under `/oauth/*` or `/api/*`.
 
 ---
+
+## 2026-05-11 · T14 — Round-2 review fixes applied (PR #111)
+
+Three reviewer reports (code, security, test) returned
+`approve_with_nits`. Round-2 patches in `mcp/src/oauth/google.rs`,
+`mcp/src/config.rs`, `mcp/src/main.rs`, `mcp/Cargo.toml`, and
+`mcp/tests/oauth_google.rs`:
+
+- **TOCTOU race in `/oauth/google/link`** (security-auditor medium #3).
+  Replaced the `lookup_link` existence check + separate `insert_link`
+  call pair with a single `INSERT OR IGNORE` statement
+  (`insert_link_if_absent`). Concurrent racers no longer trip the
+  UNIQUE constraint and trigger a 500 against the legitimate user; the
+  loser now sees a clean `409 Conflict {"error":"already_linked"}`.
+- **Token-exchange error leak** (security medium #1). The detailed
+  upstream error (including any Google response body) is logged at
+  `error!` level; the client sees the fixed string
+  `google_token_exchange_failed`.
+- **`id_token` error leak** (security medium #2). jsonwebtoken's
+  `InvalidSignature` / `ExpiredSignature` / claim-mismatch strings are
+  logged at `warn!`; the client sees `id_token_invalid`.
+- **Unbounded `rate_counters` HashMap** (security low #7 / code major
+  #1). Converted to `LruCache<String, RateCounter>` with capacity
+  `RATE_COUNTERS_LRU_CAP = 10_000`, matching the other two LRUs.
+- **Config drift footgun** (code major #2). `main.rs::run_http` no
+  longer re-reads `GOOGLE_OAUTH_CLIENT_ID` / `_SECRET` / `_REDIRECT_URI`
+  via `std::env::var`. The three fields in `Config` are now the
+  single source of truth, threaded into `run_http` via a private
+  `GoogleOAuthSettings` struct. Removed `#[allow(dead_code)]` from
+  all three.
+- **`escrow_present` error swallowing** (code minor #5). Switched from
+  `query_row(...).unwrap_or(false)` to
+  `query_row(...).optional()?` so genuine I/O failures bubble while
+  the "table not yet created (T15 pending)" case still returns
+  `Ok(false)`.
+- **Migration runs unconditionally** (code minor #6). Wrapped
+  `migrate_google_identity_links` in
+  `if !cfg.google_oauth_client_id.is_empty() { ... }` so deployments
+  without Google OAuth don't write the table on every boot.
+- **`/lookup` rate-limit hits routine post-sign-in** (code minor #3).
+  Skip the per-`google_sub` 5/24h check when
+  `existing_pubkey.is_some()` AND the JWT was issued within
+  `FRESH_JWT_WINDOW_SECS = 60`. Already-linked users doing routine
+  sign-ins no longer eat their quota; first-link flows + stale-token
+  probes still go through the limit.
+- **Hand-rolled `url_encode`** (code nit #7). Replaced with
+  `percent_encoding::utf8_percent_encode(s, NON_ALPHANUMERIC)`. The
+  crate was already transitive via reqwest; promoted to a direct dep
+  in `mcp/Cargo.toml`.
+- **`let _ = &pubkey;` no-op** (code nit #8). Removed — `pubkey` is
+  already consumed by `verify_signature` upstream.
+- **Silent test-feature gate** (test major #1). Added a
+  `[[test]] name = "oauth_google"` entry with
+  `required-features = ["test-support"]` so `cargo test
+  --test oauth_google` (without the feature flag) prints "test
+  requires feature test-support, not running" instead of silently
+  reporting `0 tests`.
+- **Bare `.unwrap()` in shared mock helpers** (test nit). Replaced
+  with `.expect("descriptive message")` in `MockGoogle::sign_id_token`,
+  `spawn_mock_google`, and `mint_google_jwt`.
+- **New negative tests:**
+  - `id_token_expired_rejected` (test major #2) — exp two minutes in
+    the past → 401 + body `id_token_invalid`.
+  - `wrong_pkce_verifier_rejected` (test major #3) — happy callback,
+    `/oauth/token` with a verifier that doesn't hash to the stored
+    challenge → 4xx.
+  - `id_token_alg_none_rejected` (security low #5) — manually
+    constructed JWT with `alg: none` and empty signature → 401 +
+    `id_token_invalid`.
+  - `id_token_alg_hs256_rejected` (security low #5) — HS256-signed
+    token with shared secret → 401 + `id_token_invalid`.
+- **Body assertions on existing 401 tests** (test nit). Both
+  `id_token_bad_audience_rejected` and `id_token_bad_signature_rejected`
+  now assert `error == "id_token_invalid"` so a 401 from a different
+  guard (e.g. missing state) does not satisfy the test.
+
+**Deferred:** security low #4 (explicit `validation.leeway = 60` + iat
+sanity check) was not in the round-1 fix list and is a defense-in-depth
+nit; the jsonwebtoken default leeway is already 60s. Will fold into a
+follow-up if the security auditor reasserts in round 2.
+
+Total: 8 oauth_google tests (4 original + 4 new) pass locally; clippy
++ fmt clean under `--features mnemonic-mcp/test-support` (the CI
+invocation).
+
+---

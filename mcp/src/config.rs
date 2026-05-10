@@ -71,24 +71,18 @@ pub struct Config {
     pub llm_max_tokens: u32,
 
     // ── Google OAuth (chrome-extension T14, Decision 5) ─────────────────────
-    // These three fields are env-driven; `main.rs::run_http` reads them via
-    // `std::env::var` to construct `GoogleOAuthState` (which lives only in
-    // that function's scope, not the top-level Config). They are surfaced
-    // here for symmetry with the other env-driven settings and so that future
-    // consumers (config-driven test fixtures, admin endpoints) have one place
-    // to look. Marked `allow(dead_code)` because the binary build path does
-    // not currently read them after construction.
+    // `main.rs::run_http` reads these fields directly when constructing
+    // `GoogleOAuthState`. They are the single source of truth for the
+    // Google-OAuth env wiring — no `std::env::var` re-reads downstream
+    // (round-1 code-reviewer finding #2).
     /// Google OAuth public client id. When empty, the Google OAuth router is
     /// not wired in `main.rs` and the corresponding endpoints return 404.
-    #[allow(dead_code)]
     pub google_oauth_client_id: String,
     /// Google OAuth client secret. Server-side only — never sent to the
     /// extension. Used for the `https://oauth2.googleapis.com/token` exchange.
-    #[allow(dead_code)]
     pub google_oauth_client_secret: String,
     /// Google OAuth redirect URI configured in Google Cloud Console. Must be
     /// HTTPS in production; defaults to `https://mc.mnemonik.xyz/oauth/google/callback`.
-    #[allow(dead_code)]
     pub google_oauth_redirect_uri: String,
 }
 

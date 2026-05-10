@@ -73,6 +73,11 @@ dotenvy = "0.15"
 # URL parsing (OLLAMA_URL whitelist validation)
 url = "2"
 
+# Percent-encoding for OAuth query strings (Google start/callback redirects).
+# Already pulled in transitively via reqwest; surfaced as a direct dep so we
+# don't roll a custom encoder (round-1 code-reviewer finding #7).
+percent-encoding = "2"
+
 # Timestamps
 chrono = { version = "0.4", features = ["serde"] }
 
@@ -115,6 +120,16 @@ openssl-vendored = ["mnemonic-core/openssl-vendored"]
 # Activates the optional `tempfile` dep so `mock_state()` can mint per-test
 # scratch SQLite databases.
 test-support = ["dep:tempfile"]
+
+# Pin the Google OAuth integration test to the `test-support` feature so
+# Cargo emits a clear "test requires feature test-support, not running"
+# message when the flag is omitted instead of silently producing
+# `0 tests, 0 benchmarks` from the file-level `#![cfg(feature = ...)]` gate
+# (round-1 test-reviewer finding #1).
+[[test]]
+name = "oauth_google"
+path = "tests/oauth_google.rs"
+required-features = ["test-support"]
 
 [dev-dependencies]
 tempfile = "3"

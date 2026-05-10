@@ -107,11 +107,12 @@ impl MockGoogle {
         let pem = self
             .private_key
             .to_pkcs8_pem(rsa::pkcs8::LineEnding::LF)
-            .unwrap();
-        let key = EncodingKey::from_rsa_pem(pem.as_bytes()).unwrap();
+            .expect("serialize RSA key to PKCS8 PEM");
+        let key =
+            EncodingKey::from_rsa_pem(pem.as_bytes()).expect("build RSA EncodingKey from PEM");
         let mut header = Header::new(Algorithm::RS256);
         header.kid = Some(kid_override.unwrap_or(&self.kid).to_string());
-        jwt_encode(&header, claims, &key).unwrap()
+        jwt_encode(&header, claims, &key).expect("encode id_token JWT")
     }
 }
 
@@ -177,8 +178,12 @@ fn build_mock_google(mock: Arc<MockGoogle>) -> Router {
 /// Spawn the mock Google server on an ephemeral port; return its base URL.
 async fn spawn_mock_google(mock: Arc<MockGoogle>) -> String {
     let app = build_mock_google(mock);
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind ephemeral port for mock Google server");
+    let addr = listener
+        .local_addr()
+        .expect("read local_addr of mock Google listener");
     tokio::spawn(async move {
         let _ = axum::serve(listener, app).await;
     });
@@ -525,7 +530,18 @@ async fn link_requires_possession_proof() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    let challenge = val["link_challenge"].as_str().unwrap().to_string();
+    // Round-1 test-reviewer minor #1: pin the `escrow_present == false`
+    // default. The `key_escrow_blobs` table is not created in tests, so
+    // `escrow_present` should report `false`.
+    assert_eq!(
+        val["escrow_present"].as_bool(),
+        Some(false),
+        "escrow_present should default to false when key_escrow_blobs table is absent: {val:?}"
+    );
+    let challenge = val["link_challenge"]
+        .as_str()
+        .expect("link_challenge present on first lookup")
+        .to_string();
 
     // ── Case 1: bad signature (random bytes) → 401 ───────────────────────
     let kp = Keypair::new();
@@ -628,14 +644,27 @@ async fn id_token_bad_audience_rejected() {
         .uri(&cb_url)
         .body(Body::empty())
         .unwrap();
-    let resp = h.app.clone().oneshot(req).await.unwrap();
+    let resp = h.app.clone().oneshot(req).await.expect("call /callback");
     let status = resp.status();
-    let body_bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let body_bytes = resp
+        .into_body()
+        .collect()
+        .await
+        .expect("collect body")
+        .to_bytes();
     let val: Value = serde_json::from_slice(&body_bytes).unwrap_or(Value::Null);
     assert_eq!(
         status,
         StatusCode::UNAUTHORIZED,
         "bad aud must be rejected: {val:?}"
+    );
+    // Round-1 test-reviewer nit: pin the masked error string so a future
+    // refactor that returns 401 from a different guard (e.g. missing state)
+    // would fail the assertion.
+    assert_eq!(
+        val["error"].as_str(),
+        Some("id_token_invalid"),
+        "bad-aud body must surface id_token_invalid: {val:?}"
     );
 }
 
@@ -677,15 +706,241 @@ async fn id_token_bad_signature_rejected() {
         .method("GET")
         .uri(&cb_url)
         .body(Body::empty())
-        .unwrap();
-    let resp = h.app.clone().oneshot(req).await.unwrap();
+        .expect("build /callback request");
+    let resp = h.app.clone().oneshot(req).await.expect("call /callback");
     let status = resp.status();
-    let body_bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let body_bytes = resp
+        .into_body()
+        .collect()
+        .await
+        .expect("collect body")
+        .to_bytes();
     let val: Value = serde_json::from_slice(&body_bytes).unwrap_or(Value::Null);
     assert_eq!(
         status,
         StatusCode::UNAUTHORIZED,
         "bad signature must be rejected: {val:?}"
+    );
+    assert_eq!(
+        val["error"].as_str(),
+        Some("id_token_invalid"),
+        "bad-signature body must surface id_token_invalid: {val:?}"
+    );
+}
+
+// ── Round-2 added negative tests ─────────────────────────────────────────────
+//
+// Per round-1 reviews:
+//   - test-reviewer major #2: expired id_token must be rejected.
+//   - test-reviewer major #3: wrong code_verifier at /oauth/token must be rejected.
+//   - security-auditor low #5: alg=none / alg=HS256 id_tokens must be rejected
+//     so the JWKS validator's algorithm pinning cannot regress silently.
+
+/// Drive `/oauth/google/start` then `/callback` with a pre-armed id_token.
+/// Returns the final `(status, body)` from `/callback`. Centralized so the new
+/// negative tests don't re-implement the start-state plumbing.
+async fn callback_with_id_token(h: &Harness, id_token: String) -> (StatusCode, Value) {
+    *h.mock
+        .next_id_token
+        .lock()
+        .expect("mock next_id_token mutex") = Some(id_token);
+
+    let (_, code_challenge) = pkce_pair();
+    let ext_state = "round2-negative-state";
+    let ext_redirect = "https://abcdef.chromiumapp.org/google";
+    let start_url = format!(
+        "/oauth/google/start?client_id=mnemonic-extension&redirect_uri={}&code_challenge={}&code_challenge_method=S256&state={}",
+        urlencoding(ext_redirect),
+        urlencoding(&code_challenge),
+        urlencoding(ext_state),
+    );
+    let (_, loc, _) = get_redirect(&h.app, &start_url).await;
+    let q = extract_query(loc.as_deref().expect("start should redirect"));
+    let server_state = q
+        .get("state")
+        .expect("server-state param in /start redirect")
+        .clone();
+
+    let cb_url = format!(
+        "/oauth/google/callback?code=mock-google-code&state={}",
+        urlencoding(&server_state)
+    );
+    let req = Request::builder()
+        .method("GET")
+        .uri(&cb_url)
+        .body(Body::empty())
+        .expect("build /callback request");
+    let resp = h.app.clone().oneshot(req).await.expect("call /callback");
+    let status = resp.status();
+    let body_bytes = resp
+        .into_body()
+        .collect()
+        .await
+        .expect("collect /callback body")
+        .to_bytes();
+    let val: Value = serde_json::from_slice(&body_bytes).unwrap_or(Value::Null);
+    (status, val)
+}
+
+#[tokio::test]
+async fn id_token_expired_rejected() {
+    // Round-1 test-reviewer major #2. An id_token with `exp` in the past
+    // must be rejected by /oauth/google/callback. The jsonwebtoken default
+    // leeway is 60s, so we set exp two minutes in the past.
+    let h = make_harness().await;
+    let now = now_secs();
+    let claims = serde_json::json!({
+        "iss": "https://accounts.google.com",
+        "sub": "expired-token-sub",
+        "aud": TEST_CLIENT_ID,
+        "iat": now - 240,
+        "exp": now - 120,
+        "email": "user@example.com",
+        "email_verified": true,
+    });
+    let id_tok = h.mock.sign_id_token(&claims, None);
+    let (status, val) = callback_with_id_token(&h, id_tok).await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "expired id_token must be rejected: {val:?}"
+    );
+    assert_eq!(
+        val["error"].as_str(),
+        Some("id_token_invalid"),
+        "expired-token body must surface masked id_token_invalid: {val:?}"
+    );
+}
+
+#[tokio::test]
+async fn wrong_pkce_verifier_rejected() {
+    // Round-1 test-reviewer major #3. Drive a clean callback with the
+    // correct PKCE challenge from `pkce_pair()`, then call /oauth/token with
+    // a DIFFERENT code_verifier and assert 400.
+    let h = make_harness().await;
+    let google_sub = "wrong-pkce-sub";
+    let claims = id_token_claims(google_sub, TEST_CLIENT_ID);
+    *h.mock
+        .next_id_token
+        .lock()
+        .expect("mock next_id_token mutex") = Some(h.mock.sign_id_token(&claims, None));
+
+    let (_correct_verifier, code_challenge) = pkce_pair();
+    let ext_state = "pkce-fail-state";
+    let ext_redirect = "https://abcdef.chromiumapp.org/google";
+
+    let start_url = format!(
+        "/oauth/google/start?client_id=mnemonic-extension&redirect_uri={}&code_challenge={}&code_challenge_method=S256&state={}",
+        urlencoding(ext_redirect),
+        urlencoding(&code_challenge),
+        urlencoding(ext_state),
+    );
+    let (_, loc, _) = get_redirect(&h.app, &start_url).await;
+    let q = extract_query(loc.as_deref().expect("start redirect"));
+    let server_state = q.get("state").expect("server state").clone();
+
+    let cb_url = format!(
+        "/oauth/google/callback?code=mock-google-code&state={}",
+        urlencoding(&server_state)
+    );
+    let (status, loc, _) = get_redirect(&h.app, &cb_url).await;
+    assert_eq!(status, StatusCode::FOUND);
+    let final_url = loc.expect("callback Location");
+    let q = extract_query(&final_url);
+    let server_code = q
+        .get("code")
+        .expect("server code in callback redirect")
+        .clone();
+
+    // Submit /oauth/token with a verifier that does NOT hash to the
+    // stored challenge. PKCE enforcement must reject this with 4xx.
+    let wrong_verifier = "verifier-WRONG-different-43chars-xxxxxxxxxxxx";
+    assert!(wrong_verifier.len() >= 43, "wrong_verifier length");
+    let body = serde_json::json!({
+        "code": server_code,
+        "code_verifier": wrong_verifier,
+        "redirect_uri": ext_redirect,
+    });
+    let (status, val) = post_json_auth(&h.app, "/oauth/token", body, None).await;
+    assert!(
+        status.is_client_error(),
+        "wrong code_verifier must yield 4xx: got {status} body={val:?}"
+    );
+}
+
+#[tokio::test]
+async fn id_token_alg_none_rejected() {
+    // Round-1 security-auditor low #5 — guard the JWKS validator's
+    // algorithm pinning against future regression. A token with `alg=none`
+    // in the JWT header (no signature) must NOT decode successfully.
+    let h = make_harness().await;
+
+    let header = serde_json::json!({
+        "alg": "none",
+        "typ": "JWT",
+        "kid": TEST_KID,
+    });
+    let now = now_secs();
+    let payload = serde_json::json!({
+        "iss": "https://accounts.google.com",
+        "sub": "alg-none-sub",
+        "aud": TEST_CLIENT_ID,
+        "iat": now,
+        "exp": now + 3600,
+    });
+    let header_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .encode(serde_json::to_vec(&header).expect("encode header"));
+    let payload_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .encode(serde_json::to_vec(&payload).expect("encode payload"));
+    // Empty signature segment — the canonical alg=none representation.
+    let alg_none_token = format!("{header_b64}.{payload_b64}.");
+
+    let (status, val) = callback_with_id_token(&h, alg_none_token).await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "alg=none id_token must be rejected: {val:?}"
+    );
+    assert_eq!(
+        val["error"].as_str(),
+        Some("id_token_invalid"),
+        "alg=none body must surface masked id_token_invalid: {val:?}"
+    );
+}
+
+#[tokio::test]
+async fn id_token_alg_hs256_rejected() {
+    // Round-1 security-auditor low #5. A token whose JWT header advertises
+    // `alg=HS256` (signed with a shared secret) must be rejected by the
+    // JWKS validator, which is pinned to RS256.
+    let h = make_harness().await;
+    let now = now_secs();
+    let claims = serde_json::json!({
+        "iss": "https://accounts.google.com",
+        "sub": "alg-hs256-sub",
+        "aud": TEST_CLIENT_ID,
+        "iat": now,
+        "exp": now + 3600,
+    });
+    let mut header = Header::new(Algorithm::HS256);
+    header.kid = Some(TEST_KID.to_string());
+    let hs_token = jwt_encode(
+        &header,
+        &claims,
+        &EncodingKey::from_secret(b"any-shared-secret-attacker-controls"),
+    )
+    .expect("encode HS256 fake id_token");
+
+    let (status, val) = callback_with_id_token(&h, hs_token).await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "alg=HS256 id_token must be rejected: {val:?}"
+    );
+    assert_eq!(
+        val["error"].as_str(),
+        Some("id_token_invalid"),
+        "alg=HS256 body must surface masked id_token_invalid: {val:?}"
     );
 }
 
@@ -725,7 +980,7 @@ fn mint_google_jwt(google_sub: &str) -> String {
         &c,
         &EncodingKey::from_secret(TEST_SECRET),
     )
-    .unwrap()
+    .expect("encode HS256 fixture JWT")
 }
 
 fn urlencoding(s: &str) -> String {

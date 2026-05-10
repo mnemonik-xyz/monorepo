@@ -47,7 +47,6 @@
 //! - If `GOOGLE_OAUTH_CLIENT_ID` is unset, the handlers return 404 — the
 //!   feature is disabled at runtime without panic.
 
-use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -62,6 +61,7 @@ use axum::{
 };
 use base64::Engine;
 use lru::LruCache;
+use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use solana_sdk::pubkey::Pubkey;
@@ -86,10 +86,24 @@ pub const LINK_CHALLENGE_TTL_SECS: u64 = 300;
 /// LRU capacity for outstanding link challenges (keyed by google_sub).
 pub const LINK_CHALLENGE_LRU_CAP: usize = 10_000;
 
+/// LRU capacity for per-google_sub rate counters. Bounds memory under sybil
+/// load — without this cap, a high-volume attacker driving many distinct
+/// `google_sub` values through the flow would grow the map indefinitely
+/// (round-1 security finding #4). LRU eviction naturally purges stale
+/// entries; the rate-limit semantics for active users are unchanged.
+pub const RATE_COUNTERS_LRU_CAP: usize = 10_000;
+
 /// Rate-limit window for `/oauth/google/lookup` + `/oauth/google/link`:
 /// 5 calls per 24h per `google_sub`.
 pub const GOOGLE_RATE_LIMIT_PER_24H: u32 = 5;
 pub const GOOGLE_RATE_WINDOW_SECS: i64 = 24 * 3600;
+
+/// "Fresh JWT" window for the `/lookup` rate-limit skip. When a JWT was
+/// minted in the last `FRESH_JWT_WINDOW_SECS` AND `existing_pubkey.is_some()`,
+/// the lookup is treated as a routine post-sign-in identity resolution and is
+/// NOT charged against the 5/24h quota. Anything older or any first-touch
+/// flow still goes through the rate-limit. Round-1 code-reviewer finding #3.
+pub const FRESH_JWT_WINDOW_SECS: u64 = 60;
 
 /// Default Google authorization endpoint. Test harness overrides via
 /// `GoogleOAuthState::with_endpoints`.
@@ -167,7 +181,10 @@ pub struct GoogleOAuthState {
     pub jwks: Arc<GoogleJwksCache>,
     pending_flows: Mutex<LruCache<String, PendingGoogleFlow>>,
     link_challenges: Mutex<LruCache<String, LinkChallenge>>,
-    rate_counters: Mutex<HashMap<String, RateCounter>>,
+    /// Per-google_sub rate counters — LRU-bounded (`RATE_COUNTERS_LRU_CAP`) so
+    /// memory cannot grow unbounded under sybil load. Round-1 security
+    /// finding #4 / code-reviewer finding #1.
+    rate_counters: Mutex<LruCache<String, RateCounter>>,
     /// HTTP client for the Google token-exchange call.
     http: reqwest::Client,
 }
@@ -205,6 +222,8 @@ impl GoogleOAuthState {
         let cap_flows = NonZeroUsize::new(GOOGLE_STATE_LRU_CAP).expect("nonzero LRU capacity");
         let cap_challenges =
             NonZeroUsize::new(LINK_CHALLENGE_LRU_CAP).expect("nonzero challenge LRU capacity");
+        let cap_rate_counters =
+            NonZeroUsize::new(RATE_COUNTERS_LRU_CAP).expect("nonzero rate-counter LRU capacity");
         Self {
             client_id,
             client_secret,
@@ -214,7 +233,7 @@ impl GoogleOAuthState {
             jwks,
             pending_flows: Mutex::new(LruCache::new(cap_flows)),
             link_challenges: Mutex::new(LruCache::new(cap_challenges)),
-            rate_counters: Mutex::new(HashMap::new()),
+            rate_counters: Mutex::new(LruCache::new(cap_rate_counters)),
             http,
         }
     }
@@ -280,15 +299,27 @@ impl GoogleOAuthState {
             .rate_counters
             .lock()
             .map_err(|_| anyhow!("rate_counters mutex poisoned"))?;
-        let entry = guard.entry(google_sub.to_string()).or_default();
-        if now - entry.window_start >= GOOGLE_RATE_WINDOW_SECS {
-            entry.window_start = now;
-            entry.count = 0;
+        let key = google_sub.to_string();
+        // LruCache::get_mut both promotes the entry to MRU and gives us the
+        // mutable reference we need. Absence → fresh window starting now.
+        if let Some(entry) = guard.get_mut(&key) {
+            if now - entry.window_start >= GOOGLE_RATE_WINDOW_SECS {
+                entry.window_start = now;
+                entry.count = 0;
+            }
+            if entry.count >= GOOGLE_RATE_LIMIT_PER_24H {
+                return Ok(false);
+            }
+            entry.count += 1;
+        } else {
+            guard.put(
+                key,
+                RateCounter {
+                    count: 1,
+                    window_start: now,
+                },
+            );
         }
-        if entry.count >= GOOGLE_RATE_LIMIT_PER_24H {
-            return Ok(false);
-        }
-        entry.count += 1;
         Ok(true)
     }
 }
@@ -336,35 +367,54 @@ fn lookup_link(conn: &rusqlite::Connection, google_sub: &str) -> Result<Option<S
     }
 }
 
-/// Insert a fresh link. Errors if the row already exists (caller checked).
-fn insert_link(
+/// Insert a fresh link atomically. Returns `Ok(true)` when a new row was
+/// written and `Ok(false)` when a row for `google_sub` already existed.
+///
+/// Uses `INSERT OR IGNORE` so the check-then-insert sequence is a single SQL
+/// statement and immune to the TOCTOU race between a `lookup_link` check and
+/// a separately-issued `INSERT` (round-1 security finding #3). Two concurrent
+/// `/link` requests for the same `google_sub` now both reach this function;
+/// one wins (`Ok(true)`), the other gets `Ok(false)` and the handler returns
+/// `409 Conflict "already_linked"` instead of a 500.
+fn insert_link_if_absent(
     conn: &rusqlite::Connection,
     google_sub: &str,
     pubkey_base58: &str,
     linked_at: i64,
-) -> Result<()> {
-    conn.execute(
-        "INSERT INTO google_identity_links (google_sub, pubkey_base58, linked_at) \
-         VALUES (?1, ?2, ?3)",
-        params![google_sub, pubkey_base58, linked_at],
-    )
-    .context("insert google_identity_links row")?;
-    Ok(())
+) -> Result<bool> {
+    let changes = conn
+        .execute(
+            "INSERT OR IGNORE INTO google_identity_links \
+             (google_sub, pubkey_base58, linked_at) \
+             VALUES (?1, ?2, ?3)",
+            params![google_sub, pubkey_base58, linked_at],
+        )
+        .context("insert google_identity_links row")?;
+    Ok(changes == 1)
 }
 
 /// Whether a `key_escrow_blobs` row exists for `google_sub`. The table is
 /// created by T15; if it doesn't exist yet we treat it as "no escrow".
+///
+/// Distinguishes table-absent (returns `Ok(false)`) from genuine I/O failure
+/// (returns `Err`) — round-1 code-reviewer finding #5. We use
+/// `query_row(...).optional()` to make the "no row" case explicit and bubble
+/// any other rusqlite error.
 fn escrow_present(conn: &rusqlite::Connection, google_sub: &str) -> Result<bool> {
+    use rusqlite::OptionalExtension;
     // Detect whether the table exists yet (T15 may not have run). sqlite_master
-    // is the standard discovery path.
-    let table_present: bool = conn
+    // is the standard discovery path. `optional()` maps the "no row" arm to
+    // `Ok(None)` so we can treat it cleanly while still propagating real I/O
+    // errors (cf. swallowing them via `unwrap_or(false)`).
+    let table_present: Option<i64> = conn
         .query_row(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='key_escrow_blobs' LIMIT 1",
             [],
-            |_| Ok(true),
+            |r| r.get::<_, i64>(0),
         )
-        .unwrap_or(false);
-    if !table_present {
+        .optional()
+        .context("query sqlite_master for key_escrow_blobs")?;
+    if table_present.is_none() {
         return Ok(false);
     }
     let mut stmt = conn
@@ -512,25 +562,43 @@ pub async fn google_callback_handler(
         _ => return bad_request("code is required"),
     };
 
-    // Exchange Google code for tokens.
+    // Exchange Google code for tokens. The detailed upstream error
+    // (including any Google-side response body) is logged server-side; the
+    // client only ever sees a generic `google_token_exchange_failed` so we
+    // don't echo upstream payloads back to attacker-controlled callers
+    // (round-1 security finding #1).
     let token_resp = match exchange_google_code(&google, &code).await {
         Ok(t) => t,
-        Err(e) => return bad_gateway(&format!("Google token exchange failed: {e}")),
+        Err(e) => {
+            tracing::error!("Google token exchange failed: {e:#}");
+            return bad_gateway("google_token_exchange_failed");
+        }
     };
 
     let id_token = match token_resp.id_token {
         Some(t) if !t.is_empty() => t,
-        _ => return bad_gateway("Google response missing id_token"),
+        _ => {
+            tracing::error!("Google token endpoint returned no id_token");
+            return bad_gateway("google_token_exchange_failed");
+        }
     };
 
     // Verify id_token against cached JWKS (RS256 only, aud + iss + exp).
+    // jsonwebtoken's internal error strings (`InvalidSignature`,
+    // `ExpiredSignature`, claim-mismatch detail) are logged server-side;
+    // clients receive a fixed `id_token_invalid` so they cannot calibrate
+    // forgery attempts against the exact failure mode (round-1 security
+    // finding #2).
     let claims = match google
         .jwks
         .verify_id_token(&id_token, &google.client_id)
         .await
     {
         Ok(c) => c,
-        Err(e) => return unauthorized(&format!("id_token verification failed: {e}")),
+        Err(e) => {
+            tracing::warn!("id_token verification failed: {e:#}");
+            return unauthorized("id_token_invalid");
+        }
     };
 
     // Resolve existing link if any so the JWT's `sub` is the user's Ed25519
@@ -595,12 +663,11 @@ pub async fn google_lookup_handler(
         Some(s) if !s.is_empty() => s.to_string(),
         _ => return unauthorized("JWT missing google_sub claim"),
     };
-    match google.rate_check(&google_sub) {
-        Ok(true) => {}
-        Ok(false) => return too_many_requests(),
-        Err(e) => return internal_error(&format!("rate check: {e}")),
-    }
 
+    // Look up first so we can decide whether to skip the rate-limit on the
+    // post-link "routine sign-in" path. Round-1 finding #3: already-linked
+    // users with a fresh JWT should not consume the 5/24h quota intended for
+    // first-link / escrow-scrape protection.
     let (existing_pubkey, escrow) = {
         let store = match state.store.lock() {
             Ok(g) => g,
@@ -617,6 +684,22 @@ pub async fn google_lookup_handler(
         };
         (pk, esc)
     };
+
+    // Skip the per-google_sub rate-limit when:
+    //   (a) the user is already linked (so this is not a first-link attempt),
+    //   AND
+    //   (b) the JWT was issued in the last FRESH_JWT_WINDOW_SECS (so this is
+    //       a routine post-sign-in identity resolution, not a scripted
+    //       repeated probe with a stale token).
+    let fresh_jwt = now_secs().saturating_sub(claims.iat) <= FRESH_JWT_WINDOW_SECS;
+    let skip_rate_limit = existing_pubkey.is_some() && fresh_jwt;
+    if !skip_rate_limit {
+        match google.rate_check(&google_sub) {
+            Ok(true) => {}
+            Ok(false) => return too_many_requests(),
+            Err(e) => return internal_error(&format!("rate check: {e}")),
+        }
+    }
 
     let link_challenge = if existing_pubkey.is_none() {
         match google.issue_link_challenge(&google_sub) {
@@ -674,20 +757,6 @@ pub async fn google_link_handler(
         Err(_) => return bad_request("pubkey_base58 is not a valid Ed25519 base58 pubkey"),
     };
 
-    // Reject if a link already exists — first-link only per task spec.
-    {
-        let store = match mcp.store.lock() {
-            Ok(g) => g,
-            Err(_) => return internal_error("store mutex poisoned"),
-        };
-        let conn = store.conn();
-        match lookup_link(conn, &google_sub) {
-            Ok(Some(_)) => return conflict("google_sub already linked"),
-            Ok(None) => {}
-            Err(e) => return internal_error(&format!("lookup_link: {e}")),
-        }
-    }
-
     // Pop the outstanding challenge (single-use, atomic).
     let challenge = match google.pop_link_challenge(&google_sub) {
         Ok(Some(c)) => c,
@@ -724,7 +793,12 @@ pub async fn google_link_handler(
         return unauthorized("Ed25519 signature invalid");
     }
 
-    // Insert the row. Use parameterized SQL only (no string concat).
+    // Insert the row atomically. `INSERT OR IGNORE` collapses the
+    // check-then-insert into a single SQL statement, closing the TOCTOU race
+    // between a `lookup_link` existence check and a follow-up `INSERT`
+    // (round-1 security finding #3). A concurrent winner returns
+    // `Ok(true)`; the loser observes `Ok(false)` and gets a clean
+    // 409 Conflict instead of a 500.
     let linked_at = chrono::Utc::now().timestamp();
     {
         let store = match mcp.store.lock() {
@@ -732,8 +806,10 @@ pub async fn google_link_handler(
             Err(_) => return internal_error("store mutex poisoned"),
         };
         let conn = store.conn();
-        if let Err(e) = insert_link(conn, &google_sub, &req.pubkey_base58, linked_at) {
-            return internal_error(&format!("insert_link: {e}"));
+        match insert_link_if_absent(conn, &google_sub, &req.pubkey_base58, linked_at) {
+            Ok(true) => {}
+            Ok(false) => return conflict("already_linked"),
+            Err(e) => return internal_error(&format!("insert_link_if_absent: {e}")),
         }
     }
 
@@ -741,7 +817,6 @@ pub async fn google_link_handler(
     // extension uses this in place of the bootstrap token it minted via the
     // Google callback path. We always have an `OAuthState` because the
     // router only mounts this handler when JWT signing is configured.
-    let _ = &pubkey; // pubkey validated above; bytes are also embedded in the row
     let fresh_token =
         match issue_jwt_with_google_sub(&oauth, &req.pubkey_base58, Some(google_sub.clone())) {
             Ok(t) => t,
@@ -815,27 +890,20 @@ async fn exchange_google_code(
 }
 
 fn build_query(pairs: &[(&str, &str)]) -> String {
+    // Use the in-tree `percent_encoding` crate (transitive of reqwest, now
+    // an explicit dep) rather than a hand-rolled byte loop — round-1
+    // code-reviewer finding #7. `NON_ALPHANUMERIC` percent-encodes
+    // everything that is not `[A-Za-z0-9]`, which is a strict superset of
+    // RFC 3986's reserved set and so always produces a query-string-safe
+    // value (including `+`, which the old encoder left untouched).
     let mut out = String::new();
     for (i, (k, v)) in pairs.iter().enumerate() {
         if i > 0 {
             out.push('&');
         }
-        out.push_str(&url_encode(k));
+        out.extend(utf8_percent_encode(k, NON_ALPHANUMERIC));
         out.push('=');
-        out.push_str(&url_encode(v));
-    }
-    out
-}
-
-fn url_encode(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for b in s.as_bytes() {
-        match *b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(*b as char);
-            }
-            other => out.push_str(&format!("%{other:02X}")),
-        }
+        out.extend(utf8_percent_encode(v, NON_ALPHANUMERIC));
     }
     out
 }

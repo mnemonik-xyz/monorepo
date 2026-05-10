@@ -372,10 +372,15 @@ async fn main() -> anyhow::Result<()> {
     let store = SqliteStore::open(&cfg.database_path)?;
     // ── T14: Google OAuth identity-link table (idempotent migration) ─────────
     // Lives in `mcp/` per Decision 9 (`core/` reserved for the cross-client
-    // attestation schema). No-op when the table already exists.
-    if let Err(e) = oauth::google::migrate_google_identity_links(store.conn()) {
-        tracing::error!("FATAL: google_identity_links migration failed: {e}");
-        std::process::exit(1);
+    // attestation schema). No-op when the table already exists; skipped
+    // entirely on deployments that don't enable Google OAuth (round-1
+    // code-reviewer finding #6 — avoid a stray CREATE TABLE on boot when the
+    // feature is off).
+    if !cfg.google_oauth_client_id.is_empty() {
+        if let Err(e) = oauth::google::migrate_google_identity_links(store.conn()) {
+            tracing::error!("FATAL: google_identity_links migration failed: {e}");
+            std::process::exit(1);
+        }
     }
     // Chat rate limiter: 10 requests per 60 seconds per IP
     let chat_limiter = {
@@ -454,11 +459,30 @@ async fn main() -> anyhow::Result<()> {
         // Chat endpoint will have empty recall results until manually seeded.
     }
 
+    // Google OAuth env wiring lives in Config (single source of truth — round-1
+    // code-reviewer finding #2). Cloned out here because `run_http` consumes
+    // `state` but does not take `cfg`.
+    let google_oauth = GoogleOAuthSettings {
+        client_id: cfg.google_oauth_client_id.clone(),
+        client_secret: cfg.google_oauth_client_secret.clone(),
+        redirect_uri: cfg.google_oauth_redirect_uri.clone(),
+    };
+
     match transport.as_str() {
         "stdio" => run_stdio(state).await,
-        "http" => run_http(state, &cli.host, cli.port).await,
+        "http" => run_http(state, &cli.host, cli.port, google_oauth).await,
         other => anyhow::bail!("unknown transport: {other} (use 'stdio' or 'http')"),
     }
+}
+
+/// Bundle of Google-OAuth env values resolved from `Config`. Threaded into
+/// `run_http` so the HTTP transport reads from a single source of truth
+/// (round-1 code-reviewer finding #2 — eliminates the duplicate
+/// `std::env::var` reads that previously sat in `run_http`).
+struct GoogleOAuthSettings {
+    client_id: String,
+    client_secret: String,
+    redirect_uri: String,
 }
 
 // ── stdio transport ───────────────────────────────────────────────────────────
@@ -533,7 +557,12 @@ fn load_jwt_secret() -> anyhow::Result<Vec<u8>> {
     Ok(bytes)
 }
 
-async fn run_http(state: Arc<mcp::McpState>, host: &str, port: u16) -> anyhow::Result<()> {
+async fn run_http(
+    state: Arc<mcp::McpState>,
+    host: &str,
+    port: u16,
+    google_oauth: GoogleOAuthSettings,
+) -> anyhow::Result<()> {
     use axum::http::{header, Method};
     use tower_governor::{governor::GovernorConfigBuilder, GovernorLayer};
     use tower_http::cors::{AllowOrigin, CorsLayer};
@@ -647,12 +676,12 @@ async fn run_http(state: Arc<mcp::McpState>, host: &str, port: u16) -> anyhow::R
     // Initialized unconditionally so `is_disabled()` can return true and the
     // handlers can short-circuit with 404. Routes themselves are only wired
     // when `GOOGLE_OAUTH_CLIENT_ID` is set so disabled deployments don't
-    // mount unused handlers.
+    // mount unused handlers. Reads the single Config source of truth — no
+    // duplicate `std::env::var` here (round-1 code-reviewer finding #2).
     let google_oauth_state = Arc::new(oauth::google::GoogleOAuthState::new(
-        std::env::var("GOOGLE_OAUTH_CLIENT_ID").unwrap_or_default(),
-        std::env::var("GOOGLE_OAUTH_CLIENT_SECRET").unwrap_or_default(),
-        std::env::var("GOOGLE_OAUTH_REDIRECT_URI")
-            .unwrap_or_else(|_| "https://mc.mnemonik.xyz/oauth/google/callback".to_string()),
+        google_oauth.client_id,
+        google_oauth.client_secret,
+        google_oauth.redirect_uri,
     ));
     let google_enabled = !google_oauth_state.is_disabled();
     tracing::info!(
