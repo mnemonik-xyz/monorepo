@@ -1,0 +1,61 @@
+<!doctype html>
+<!--
+  Hand-crafted Gemini fixture: multi-turn conversation. Three user
+  prompts + three assistant replies, all wrapped in declarative shadow
+  DOM. Exercises ordering, nested structure, and shadow-pierce on
+  multiple roots.
+
+  See work/chrome-extension/decisions.md (T09 note): refresh from a
+  live HAR capture before this fixture is trusted in CI golden
+  comparisons.
+-->
+<html lang="en">
+  <head><title>Gemini · long</title></head>
+  <body>
+    <chat-window>
+      <conversations-container>
+        <user-query>
+          <template shadowrootmode="open">
+            <div class="query-content">What is the capital of France?</div>
+          </template>
+        </user-query>
+        <message-content>
+          <template shadowrootmode="open">
+            <div class="markdown">
+              <p>The capital of France is Paris.</p>
+            </div>
+          </template>
+        </message-content>
+
+        <user-query>
+          <template shadowrootmode="open">
+            <div class="query-content">And of Germany?</div>
+          </template>
+        </user-query>
+        <message-content>
+          <template shadowrootmode="open">
+            <div class="markdown">
+              <p>Berlin.</p>
+            </div>
+          </template>
+        </message-content>
+
+        <user-query>
+          <template shadowrootmode="open">
+            <div class="query-content">Thanks. List both as a CSV.</div>
+          </template>
+        </user-query>
+        <message-content>
+          <template shadowrootmode="open">
+            <div class="markdown">
+              <p>Sure:</p>
+              <pre><code>France,Paris
+Germany,Berlin
+</code></pre>
+            </div>
+          </template>
+        </message-content>
+      </conversations-container>
+    </chat-window>
+  </body>
+</html>
