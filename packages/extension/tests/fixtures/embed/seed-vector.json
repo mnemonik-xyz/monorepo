@@ -1,0 +1,10 @@
+{
+  "_comment": "Recorded reference vector for the deterministic-seed parity test in tests/unit/embed/transformers.test.ts. Drives D3 cross-client recall reproducibility. Regenerate with: MNEMONIK_RECORD_EMBED_FIXTURE=1 npm run -w @mnemonik-xyz/extension test -- transformers (the test will write the captured values back into this file when the env var is set, otherwise it compares).",
+  "model_id": "Xenova/all-MiniLM-L6-v2",
+  "quantized": true,
+  "input": "hello mnemonik",
+  "dim": 384,
+  "first_eight_dims": null,
+  "l2_norm": null,
+  "recorded_at": null
+}
