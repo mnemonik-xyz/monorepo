@@ -36,11 +36,14 @@ describe("scaffold · manifest.json", () => {
   });
 
   it("declares only enumerated AI-chat host_permissions per D11", () => {
-    // T07 adds chatgpt.com; T08/T09 will append claude.ai and
-    // gemini.google.com. `<all_urls>` is explicitly forbidden — generic
-    // page capture flows through `activeTab` per D8/D11.
+    // T07 added chatgpt.com; T08 adds claude.ai; T09 will append
+    // gemini.google.com. `<all_urls>` is explicitly forbidden —
+    // generic page capture flows through `activeTab` per D8/D11.
     expect(manifest.host_permissions).toEqual(
-      expect.arrayContaining(["https://chatgpt.com/*"]),
+      expect.arrayContaining([
+        "https://chatgpt.com/*",
+        "https://claude.ai/*",
+      ]),
     );
     expect(manifest.host_permissions).not.toContain("<all_urls>");
     for (const entry of manifest.host_permissions) {
