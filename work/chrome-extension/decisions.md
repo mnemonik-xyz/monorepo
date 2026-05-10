@@ -120,3 +120,22 @@ Privacy default. User explicitly enables in options page per supported domain.
 **Rationale:** silent capture of every assistant response is a privacy red flag and a Chrome Web Store review risk. Opt-in keeps trust and review-friendliness.
 
 ---
+
+## 2026-05-10 · D13 — Test-coverage gate: no task is `done` without passing tests
+
+A task in `work/chrome-extension/tasks/` cannot be marked `status: done` until:
+
+1. Every test named in its `## TDD Anchor` section is implemented and passing locally.
+2. Every command in its `verify:` frontmatter (e.g. `pnpm-test`, `pnpm-build`, `web-ext-lint`) returns exit code 0 in CI on the task's PR.
+3. `test-reviewer` (or, for tasks without an explicit reviewer, the merging maintainer) signs off that the tests cover the task's acceptance criteria — not just smoke-paths.
+4. CI runs all four test layers from `tech-spec.md` `## Testing`: unit (vitest), component (Playwright + Vitest browser mode), E2E (Playwright `--load-extension`), and server-side Rust tests where the task touches `mcp/` or `core/`.
+
+A task that is functionally complete but missing tests stays at `status: in_review` with a `blocked_on: tests` note in `decisions.md` until coverage lands. Exceptions (e.g. a UI-only Playwright fixture spike) require an inline note in the task file naming the follow-up task that will add tests.
+
+**Rationale:** the convention was already implicit (every task has `verify:` + a `## TDD Anchor`, `test-reviewer` is on `reviewers:` for storage/embedder/auth tasks), but without a hard gate it slips. Making this explicit prevents the "I'll add tests later" pattern that has historically cost waves of audit rework. Aligned with the project's existing CI policy (`cargo test --workspace --no-fail-fast` on every PR — same posture extended to the extension's npm/Playwright pipeline).
+
+**Alternatives:** (a) advisory-only convention — rejected (current state, doesn't enforce); (b) hard coverage threshold (e.g. ≥80% line coverage gating merge) — rejected for MVP, too noisy on Playwright-heavy code where coverage instrumentation is brittle; can be revisited once the test pyramid stabilises.
+
+**Scope:** applies to all `work/chrome-extension/tasks/*.md`. Server changes (T11, T13, T14) ALSO inherit the existing `cargo test --workspace --no-fail-fast` gate from root `CLAUDE.md` — the rule is additive, not substitute.
+
+---
