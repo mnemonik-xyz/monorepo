@@ -3,6 +3,7 @@ import Chat from "./pages/Chat";
 import Consent from "./pages/Consent";
 import Install from "./pages/Install";
 import Landing from "./pages/Landing";
+import Roadmap from "./pages/Roadmap";
 import Sign from "./pages/Sign";
 
 /**
@@ -16,6 +17,7 @@ function App() {
       <Routes>
         <Route path="/" element={<Landing />} />
         <Route path="/install" element={<Install />} />
+        <Route path="/roadmap" element={<Roadmap />} />
         <Route path="/chat" element={<Chat />} />
         <Route path="/sign/:correlationId" element={<Sign />} />
         <Route path="/oauth/consent" element={<Consent />} />

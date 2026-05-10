@@ -32,6 +32,17 @@ export default function SiteHeader() {
           className="flex items-center gap-1 sm:gap-3"
         >
           <DocsMenu />
+          <Link
+            to="/roadmap"
+            className="group relative px-1.5 py-1 font-mono text-[11px] uppercase tracking-[0.16em] text-text-muted transition-colors hover:text-text-primary sm:px-2"
+            aria-label="Project roadmap"
+          >
+            <span
+              aria-hidden="true"
+              className="absolute inset-x-1 -bottom-0.5 h-px origin-left scale-x-0 bg-accent-primary/70 transition-transform duration-300 group-hover:scale-x-100"
+            />
+            Roadmap
+          </Link>
           <ResourceLink
             href={EXTERNAL_LINKS.github}
             label="GitHub"
