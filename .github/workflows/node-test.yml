@@ -181,6 +181,14 @@ jobs:
             exit 1
           fi
 
+      # Browser-bundle budget (T02). dist/browser.js is the ESM entry the
+      # Chrome extension consumes; size-limit enforces the 120KB minified
+      # cap declared in packages/sdk/.size-limit.json. WASM is loaded
+      # separately at runtime and is excluded from this budget.
+      - name: SDK browser bundle ≤ 120KB
+        working-directory: packages/sdk
+        run: npx size-limit
+
       - name: CLI bundle ≤ 200KB
         working-directory: packages/cli
         run: |

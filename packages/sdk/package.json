@@ -10,8 +10,14 @@
   "types": "./dist/index.d.ts",
   "exports": {
     ".": {
+      "browser": "./dist/browser.js",
       "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./browser": {
+      "types": "./dist/browser.d.ts",
+      "import": "./dist/browser.js"
     }
   },
   "files": [
@@ -41,15 +47,21 @@
   ],
   "scripts": {
     "build:wasm": "bash scripts/build-wasm.sh",
-    "build": "tsc -b && bash scripts/build-wasm.sh",
+    "build:browser": "node scripts/build-browser.mjs",
+    "build": "tsc -b && bash scripts/build-wasm.sh && node scripts/build-browser.mjs",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:publish": "vitest run --exclude='test/cose.golden.test.ts'",
+    "size": "size-limit",
     "prepublishOnly": "npm run build && npm run test:publish"
   },
   "devDependencies": {
     "@noble/ed25519": "^2.3.0",
     "@noble/hashes": "^2.2.0",
+    "@size-limit/file": "^11.1.0",
+    "esbuild": "^0.20.0",
+    "jsdom": "^24.0.0",
+    "size-limit": "^11.1.0",
     "typescript": "^5.4.0",
     "vitest": "^1.6.0"
   }
