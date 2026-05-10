@@ -446,3 +446,113 @@ Total: 8 oauth_google tests (4 original + 4 new) pass locally; clippy
 invocation).
 
 ---
+
+## 2026-05-11 · T11 — Popup UI (Capture / Recall / Verify) lands; awaiting CI verify
+
+`packages/extension/src/popup/` now ships the three-tab popup the
+tech-spec calls for: Capture, Recall, Verify, plus a header with
+IdentityBadge + StorageTierPill + Settings cog. Component breakdown:
+
+- `App.tsx` — bootstraps identity / storage tier / active-tab adapter /
+  selection on mount and routes between the three tabs via local state.
+  The tier pill click opens a confirmation dialog stub pointing at
+  Settings (T12 owns the actual tier-switch flow per D7).
+- `tabs/Capture.tsx` — textarea (prefilled from the content-script
+  selection message) + tag editor + "Sign" button. "Save chat" is
+  available when the active-tab URL matches a registered adapter (D11
+  enumerated host_permissions; the popup never reaches outside that
+  set). Tags auto-include `source:<platform>`; explicit user tags
+  dedup against the auto set. Success renders a toast with the
+  truncated `attestation_id` and a copy button.
+- `tabs/Recall.tsx` — search input → `runtime.recall(query, 5)`. Each
+  hit renders `relevance_score`, a `source:*` platform pill, and three
+  actions: Copy markdown, Insert into chat, Open. "Insert into chat"
+  is disabled when the adapter's `findInputBox` is a one-line
+  `return null` (the T08 / T09 convention) — drives TDD anchor
+  `insert_into_chat_disabled_when_no_input_box`.
+- `tabs/Verify.tsx` — paste `attestation_id` or drop a `.cose` file →
+  `runtime.verify` → renders verified / tampered / not_found UI states.
+
+Shared components live under `components/`:
+
+- `IdentityBadge.tsx` — truncated pubkey + `did:sol:<base58>` tooltip;
+  renders "(not signed in)" when `chrome.storage.local.identity` is
+  unset (T16 onboarding populates it).
+- `StorageTierPill.tsx` — read-only Local / Cloud indicator. Click =
+  open the tier-switch dialog stub.
+- `Toast.tsx` — minimal success / error / info banner with an optional
+  copy button (used by Capture for `attestation_id` echo).
+
+**Runtime facade (`src/popup/runtime.ts`):** exports a `PopupRuntime`
+interface with `loadIdentity`, `loadStorageTier`,
+`getActiveTabAdapter`, `getActiveTabSelection`,
+`getActiveTabConversation`, `signMemory`, `signRemote`, `recall`,
+`verify`. The default impl reads `chrome.storage.local`, matches the
+active tab URL against `selectAdapter` from T06, and lazy-loads the
+heavy signing pipeline (`runtime-impl.ts`) only on first sign /
+recall / verify — popup cold-open never touches WASM or the embedder
+worker, keeping initial JS well under the 50KB size-limit budget.
+`signRemote` is the T18 placeholder per the task instructions (no-op
+on Local tier).
+
+**`getActiveTabAdapter` helper:** runs `chrome.tabs.query({active:
+true, currentWindow: true})`, side-effect-imports the adapters barrel,
+and hands the URL to `selectAdapter`. Returns `null` for unsupported
+hosts (popup falls back to selection-only capture per D8).
+
+**Tailwind v3 wired in extension build** (`tailwind.config.js`,
+`postcss.config.js`, `src/popup/styles.css`). Content globs limited to
+`src/popup/**` + `src/options/**` so the JIT scan stays cheap and the
+generated CSS bundle minimal. Tokens mirror `webapp/tailwind.config.js`
+1:1 (`#0A0F1E` bg, `#00D4B4` accent, monospace for hashes, error /
+success colors).
+
+**Size-limit budget** — `.size-limit.json` declares the popup initial
+JS budget at 50KB gzip against `dist/src/popup/main.tsx-*.js`. Heavy
+paths (WASM, embedder, IndexedDB store) are dynamic-imported behind
+`runtime-impl.ts` so they land in their own chunks.
+
+**TDD anchors (D13-binding):**
+
+- `tests/component/popup/Capture.test.tsx::sign_button_calls_signMemory`
+  — clicking Sign with a prefilled selection invokes
+  `runtime.signMemory` with the selection text + parsed tags + auto-
+  added `source:<platform>` tag.
+- `tests/component/popup/Recall.test.tsx::insert_into_chat_disabled_when_no_input_box`
+  — an adapter whose `findInputBox` is a single-statement `return
+  null` body produces a disabled "Insert into chat" button with an
+  explanatory tooltip.
+
+Plus six adjacent tests: capture happy-path toast render, capture
+empty-content guard, recall results render with scores + platform
+pills, Insert enabled for adapters that ship a real `findInputBox`,
+verify-verified / verify-tampered / verify-not-found renders + the
+empty-paste guard.
+
+**Test setup:** added `tests/setup.popup.ts` which loads
+`@testing-library/jest-dom` matchers under jsdom only (the node-env
+unit tests stay fast) and stubs `chrome.tabs` / `chrome.storage` /
+`chrome.runtime`. `vitest.config.ts` opts the `tests/component/**`
+glob into jsdom via `environmentMatchGlobs`. Added devDeps:
+`@testing-library/{react,dom,user-event,jest-dom}`, `tailwindcss`,
+`postcss`, `autoprefixer`, `size-limit`, `@size-limit/preset-app`.
+
+**Pre-existing build failures inherited from `dev`** (NOT caused by
+T11, NOT fixed here):
+
+- `tests/unit/sign/cose.test.ts` aborts because `core/pkg-web/
+  mnemonic_core.js` is not built in this dev env — same failure
+  reproduces on a clean checkout of `dev` before any T11 file lands.
+- `npm run build` was hitting an iife/code-split error from T04's
+  worker bootstrap. I added `worker.format: "es"` in `vite.config.ts`
+  to unblock the embedder bundle (purely additive); the build now
+  progresses past that and surfaces a follow-on missing icon
+  (`src/assets/icon-16.png`) which T10 / T20 own. T11 does not block
+  on either.
+
+Task `11.md` held at `status: in_review` with `blocked_on: ci-verify`
+per D13 — flips to `done` only after the PR's CI run reports green
+on the test suite that does run (the unit + component layers; the
+build gate inherits the dev-branch breakage).
+
+---
