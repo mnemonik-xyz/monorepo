@@ -370,6 +370,18 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let store = SqliteStore::open(&cfg.database_path)?;
+    // ── T14: Google OAuth identity-link table (idempotent migration) ─────────
+    // Lives in `mcp/` per Decision 9 (`core/` reserved for the cross-client
+    // attestation schema). No-op when the table already exists; skipped
+    // entirely on deployments that don't enable Google OAuth (round-1
+    // code-reviewer finding #6 — avoid a stray CREATE TABLE on boot when the
+    // feature is off).
+    if !cfg.google_oauth_client_id.is_empty() {
+        if let Err(e) = oauth::google::migrate_google_identity_links(store.conn()) {
+            tracing::error!("FATAL: google_identity_links migration failed: {e}");
+            std::process::exit(1);
+        }
+    }
     // Chat rate limiter: 10 requests per 60 seconds per IP
     let chat_limiter = {
         use governor::Quota;
@@ -447,11 +459,30 @@ async fn main() -> anyhow::Result<()> {
         // Chat endpoint will have empty recall results until manually seeded.
     }
 
+    // Google OAuth env wiring lives in Config (single source of truth — round-1
+    // code-reviewer finding #2). Cloned out here because `run_http` consumes
+    // `state` but does not take `cfg`.
+    let google_oauth = GoogleOAuthSettings {
+        client_id: cfg.google_oauth_client_id.clone(),
+        client_secret: cfg.google_oauth_client_secret.clone(),
+        redirect_uri: cfg.google_oauth_redirect_uri.clone(),
+    };
+
     match transport.as_str() {
         "stdio" => run_stdio(state).await,
-        "http" => run_http(state, &cli.host, cli.port).await,
+        "http" => run_http(state, &cli.host, cli.port, google_oauth).await,
         other => anyhow::bail!("unknown transport: {other} (use 'stdio' or 'http')"),
     }
+}
+
+/// Bundle of Google-OAuth env values resolved from `Config`. Threaded into
+/// `run_http` so the HTTP transport reads from a single source of truth
+/// (round-1 code-reviewer finding #2 — eliminates the duplicate
+/// `std::env::var` reads that previously sat in `run_http`).
+struct GoogleOAuthSettings {
+    client_id: String,
+    client_secret: String,
+    redirect_uri: String,
 }
 
 // ── stdio transport ───────────────────────────────────────────────────────────
@@ -526,7 +557,12 @@ fn load_jwt_secret() -> anyhow::Result<Vec<u8>> {
     Ok(bytes)
 }
 
-async fn run_http(state: Arc<mcp::McpState>, host: &str, port: u16) -> anyhow::Result<()> {
+async fn run_http(
+    state: Arc<mcp::McpState>,
+    host: &str,
+    port: u16,
+    google_oauth: GoogleOAuthSettings,
+) -> anyhow::Result<()> {
     use axum::http::{header, Method};
     use tower_governor::{governor::GovernorConfigBuilder, GovernorLayer};
     use tower_http::cors::{AllowOrigin, CorsLayer};
@@ -636,6 +672,27 @@ async fn run_http(state: Arc<mcp::McpState>, host: &str, port: u16) -> anyhow::R
         ))
         .with_state(state.clone());
 
+    // ── Google OAuth state (T14, optional) ───────────────────────────────────
+    // Initialized unconditionally so `is_disabled()` can return true and the
+    // handlers can short-circuit with 404. Routes themselves are only wired
+    // when `GOOGLE_OAUTH_CLIENT_ID` is set so disabled deployments don't
+    // mount unused handlers. Reads the single Config source of truth — no
+    // duplicate `std::env::var` here (round-1 code-reviewer finding #2).
+    let google_oauth_state = Arc::new(oauth::google::GoogleOAuthState::new(
+        google_oauth.client_id,
+        google_oauth.client_secret,
+        google_oauth.redirect_uri,
+    ));
+    let google_enabled = !google_oauth_state.is_disabled();
+    tracing::info!(
+        "Google OAuth: {}",
+        if google_enabled {
+            "enabled"
+        } else {
+            "disabled"
+        }
+    );
+
     // ── OAuth routes (Decision 10) ────────────────────────────────────────────
     // GET /oauth/authorize — bootstrap (per-method dispatch in axum).
     //   Accepts standard OAuth 2.1 + PKCE query params; validates S256;
@@ -654,9 +711,9 @@ async fn run_http(state: Arc<mcp::McpState>, host: &str, port: u16) -> anyhow::R
         // when registration_endpoint is missing from the metadata.
         .route("/oauth/register", post(oauth::oauth_register_handler))
         .layer(GovernorLayer {
-            config: oauth_governor_conf,
+            config: oauth_governor_conf.clone(),
         })
-        .with_state(oauth_state);
+        .with_state(oauth_state.clone());
 
     // ── CORS (Decision 9 + hotfix: widen for MCP-client origins) ─────────────
     // Anthropic / Cursor / ChatGPT connectors run inside the user's browser
@@ -692,6 +749,68 @@ async fn run_http(state: Arc<mcp::McpState>, host: &str, port: u16) -> anyhow::R
             get(oauth::oauth_protected_resource_metadata_mcp),
         );
 
+    // ── Google OAuth routes (T14, conditional) ───────────────────────────────
+    // Two-layer mount: public start/callback don't go through bearer-auth;
+    // lookup/link sit behind bearer-auth so they can read JWT claims.
+    let google_public_routes = if google_enabled {
+        Router::new()
+            .route(
+                "/oauth/google/start",
+                get(oauth::google::google_start_handler),
+            )
+            .route(
+                "/oauth/google/callback",
+                get(oauth::google::google_callback_handler),
+            )
+            .layer(GovernorLayer {
+                config: oauth_governor_conf.clone(),
+            })
+            .with_state((
+                state.clone(),
+                oauth_state.clone(),
+                google_oauth_state.clone(),
+            ))
+    } else {
+        Router::new()
+    };
+    // Lookup + link auth is enforced inline (the global bearer-auth middleware
+    // URI-allowlists `/oauth/*` and would short-circuit before checking JWTs
+    // on these routes). Same governor rate limit as the rest of /oauth/*.
+    let google_authed_lookup = if google_enabled {
+        Router::new()
+            .route(
+                "/oauth/google/lookup",
+                post(oauth::google::google_lookup_handler),
+            )
+            .layer(GovernorLayer {
+                config: oauth_governor_conf.clone(),
+            })
+            .with_state((
+                state.clone(),
+                oauth_state.clone(),
+                google_oauth_state.clone(),
+            ))
+    } else {
+        Router::new()
+    };
+    let google_authed_link = if google_enabled {
+        Router::new()
+            .route(
+                "/oauth/google/link",
+                post(oauth::google::google_link_handler),
+            )
+            .layer(GovernorLayer {
+                config: oauth_governor_conf.clone(),
+            })
+            .with_state((
+                state.clone(),
+                oauth_state.clone(),
+                google_oauth_state.clone(),
+            ))
+    } else {
+        Router::new()
+    };
+
     let app = Router::new()
         .route("/chat", post(chat::chat_handler))
         .route("/api-keys", post(create_api_key))
@@ -707,6 +826,9 @@ async fn run_http(state: Arc<mcp::McpState>, host: &str, port: u16) -> anyhow::R
         .merge(mcp_subrouter)
         .merge(api_subrouter)
         .merge(oauth_routes)
+        .merge(google_public_routes)
+        .merge(google_authed_lookup)
+        .merge(google_authed_link)
         .merge(well_known_routes)
         .layer(cors);
 

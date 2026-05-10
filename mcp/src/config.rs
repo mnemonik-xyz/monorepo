@@ -69,6 +69,21 @@ pub struct Config {
     pub llm_api_url: String,
     /// Maximum tokens for LLM responses.
     pub llm_max_tokens: u32,
+
+    // ── Google OAuth (chrome-extension T14, Decision 5) ─────────────────────
+    // `main.rs::run_http` reads these fields directly when constructing
+    // `GoogleOAuthState`. They are the single source of truth for the
+    // Google-OAuth env wiring — no `std::env::var` re-reads downstream
+    // (round-1 code-reviewer finding #2).
+    /// Google OAuth public client id. When empty, the Google OAuth router is
+    /// not wired in `main.rs` and the corresponding endpoints return 404.
+    pub google_oauth_client_id: String,
+    /// Google OAuth client secret. Server-side only — never sent to the
+    /// extension. Used for the `https://oauth2.googleapis.com/token` exchange.
+    pub google_oauth_client_secret: String,
+    /// Google OAuth redirect URI configured in Google Cloud Console. Must be
+    /// HTTPS in production; defaults to `https://mc.mnemonik.xyz/oauth/google/callback`.
+    pub google_oauth_redirect_uri: String,
 }
 
 impl Config {
@@ -115,6 +130,12 @@ impl Config {
             llm_model: env_or("LLM_MODEL", ""),
             llm_api_url: env_or("LLM_API_URL", ""),
             llm_max_tokens: env_or("LLM_MAX_TOKENS", "512").parse().unwrap_or(512),
+            google_oauth_client_id: env_or("GOOGLE_OAUTH_CLIENT_ID", ""),
+            google_oauth_client_secret: env_or("GOOGLE_OAUTH_CLIENT_SECRET", ""),
+            google_oauth_redirect_uri: env_or(
+                "GOOGLE_OAUTH_REDIRECT_URI",
+                "https://mc.mnemonik.xyz/oauth/google/callback",
+            ),
         }
     }
 

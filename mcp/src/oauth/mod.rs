@@ -24,6 +24,12 @@
 //! and `mnemonic_core::codec::sign::verify_artifact` for the challenge
 //! signature check (Decision 10) — the same primitives as COSE attestations.
 
+// ── Google OAuth submodules (chrome-extension T14, Decision 5) ───────────────
+// Sibling files under `mcp/src/oauth/`. Disabled at runtime when
+// `GOOGLE_OAUTH_CLIENT_ID` is unset (handlers return 404).
+pub mod google;
+pub mod google_jwks;
+
 use std::num::NonZeroUsize;
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -81,6 +87,13 @@ pub struct Claims {
     pub exp: u64,
     /// JWT ID — UUIDv4, unique per token.
     pub jti: String,
+    /// Google account `sub` claim — populated when the JWT was issued via the
+    /// Google OAuth provider (`/oauth/google/callback` → `/oauth/token`).
+    /// Absent for the original Solana-wallet OAuth path (Decision 10/11).
+    /// `serde(skip_serializing_if = "Option::is_none")` keeps existing tokens
+    /// byte-identical on the wire — the field appears only when populated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub google_sub: Option<String>,
 }
 
 /// Pending authorize record (state → expected pubkey + challenge metadata).
@@ -124,6 +137,11 @@ struct IssuedCode {
     /// closes a swap-redirect attack where an attacker who guessed `code` would
     /// otherwise drive the JWT to an attacker-controlled callback.
     redirect_uri: String,
+    /// Google account `sub` claim — populated only for codes minted by the
+    /// Google OAuth callback path (T14). The `/oauth/token` exchange copies
+    /// this onto the issued JWT's `google_sub` claim so downstream
+    /// `/oauth/google/lookup` + `/oauth/google/link` handlers can read it.
+    google_sub: Option<String>,
     /// Unix-seconds expiry.
     exp: u64,
 }
@@ -197,6 +215,34 @@ impl OAuthState {
     pub fn register_client(&self, client_id: String, redirect_uris: Vec<String>) {
         let mut guard = self.clients.lock().expect("clients mutex poisoned");
         guard.put(client_id, RegisteredClient { redirect_uris });
+    }
+
+    /// Mint a one-time authorization code bound to `sub` + `redirect_uri` +
+    /// `code_challenge` (PKCE S256) with an optional `google_sub` claim. The
+    /// caller (Google OAuth callback) returns the code string to the user-
+    /// agent in a redirect; the extension then exchanges it at `/oauth/token`
+    /// with the original `code_verifier`. Single-use — `/oauth/token` pops the
+    /// entry atomically.
+    ///
+    /// Returns the generated code (UUIDv4).
+    pub fn mint_issued_code(
+        &self,
+        sub: String,
+        code_challenge: String,
+        redirect_uri: String,
+        google_sub: Option<String>,
+    ) -> String {
+        let code = uuid::Uuid::new_v4().to_string();
+        let entry = IssuedCode {
+            sub,
+            code_challenge,
+            redirect_uri,
+            google_sub,
+            exp: now_secs() + CODE_TTL_SECS,
+        };
+        let mut guard = self.codes.lock().expect("codes mutex poisoned");
+        guard.put(code.clone(), entry);
+        code
     }
 
     /// Validate redirect_uri against DCR first, then the static fallback list.
@@ -302,8 +348,27 @@ fn now_secs() -> u64 {
 
 // ── JWT issuance + verification (Decision 11) ────────────────────────────────
 
-/// Issue an HS256 JWT bound to `sub` (base58 user pubkey).
+/// Issue an HS256 JWT bound to `sub` (base58 user pubkey). Convenience wrapper
+/// around `issue_jwt_with_google_sub(state, sub, None)` for the legacy
+/// Solana-wallet OAuth path (Decision 10/11).
+///
+/// Marked `allow(dead_code)` because the binary build path uses
+/// `issue_jwt_with_google_sub` directly; this thin wrapper is reachable from
+/// integration tests under `mcp/tests/*.rs` via the library facade in
+/// `lib.rs`. Removing it would cascade through ~12 test files.
+#[allow(dead_code)]
 pub fn issue_jwt(state: &OAuthState, sub: &str) -> Result<String, String> {
+    issue_jwt_with_google_sub(state, sub, None)
+}
+
+/// Issue an HS256 JWT bound to `sub` with an optional `google_sub` claim
+/// populated. Used by the Google OAuth path (T14) to carry the Google
+/// account identifier alongside the user's Ed25519 pubkey.
+pub fn issue_jwt_with_google_sub(
+    state: &OAuthState,
+    sub: &str,
+    google_sub: Option<String>,
+) -> Result<String, String> {
     let now = now_secs();
     let claims = Claims {
         iss: JWT_ISSUER.to_string(),
@@ -312,6 +377,7 @@ pub fn issue_jwt(state: &OAuthState, sub: &str) -> Result<String, String> {
         iat: now,
         exp: now + JWT_TTL_SECS,
         jti: uuid::Uuid::new_v4().to_string(),
+        google_sub,
     };
     let header = Header::new(Algorithm::HS256);
     encode(&header, &claims, &state.jwt_encoding_key).map_err(|e| format!("JWT encode failed: {e}"))
@@ -848,6 +914,7 @@ pub async fn authorize_handler(
                 sub: req.signer_pubkey.clone(),
                 code_challenge: pending.code_challenge.clone(),
                 redirect_uri: pending.redirect_uri.clone(),
+                google_sub: None,
                 exp: now_secs() + CODE_TTL_SECS,
             },
         );
@@ -973,7 +1040,7 @@ pub async fn token_handler(
         return oauth_error(StatusCode::UNAUTHORIZED, "code_verifier does not match");
     }
 
-    let token = match issue_jwt(&state, &issued.sub) {
+    let token = match issue_jwt_with_google_sub(&state, &issued.sub, issued.google_sub.clone()) {
         Ok(t) => t,
         Err(e) => {
             return oauth_error(
@@ -1878,6 +1945,7 @@ mod tests {
                     sub: "test-pubkey".to_string(),
                     code_challenge: pkce_challenge("v"),
                     redirect_uri: "https://app/cb".to_string(),
+                    google_sub: None,
                     exp: now_secs().saturating_sub(120),
                 },
             );
@@ -1919,6 +1987,7 @@ mod tests {
             iat: now_secs(),
             exp: now_secs() + 3600,
             jti: uuid::Uuid::new_v4().to_string(),
+            google_sub: None,
         };
         let h_b64 = base64::Engine::encode(
             &base64::engine::general_purpose::URL_SAFE_NO_PAD,
@@ -1945,6 +2014,7 @@ mod tests {
             iat: now_secs(),
             exp: now_secs() + 3600,
             jti: uuid::Uuid::new_v4().to_string(),
+            google_sub: None,
         };
         let token = encode(&header, &evil, &EncodingKey::from_secret(TEST_SECRET)).unwrap();
         assert!(
@@ -1959,6 +2029,7 @@ mod tests {
             iat: now_secs(),
             exp: now_secs() + 3600,
             jti: uuid::Uuid::new_v4().to_string(),
+            google_sub: None,
         };
         let token2 = encode(&header, &bad_aud, &EncodingKey::from_secret(TEST_SECRET)).unwrap();
         assert!(
