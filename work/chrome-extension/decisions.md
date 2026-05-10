@@ -152,3 +152,20 @@ A task that is functionally complete but missing tests stays at `status: in_revi
 **Scope:** applies to all `work/chrome-extension/tasks/*.md`. Server changes (T11, T13, T14) ALSO inherit the existing `cargo test --workspace --no-fail-fast` gate from root `CLAUDE.md` — the rule is additive, not substitute.
 
 ---
+
+## 2026-05-10 · T06 — adapter framework lands; awaiting CI verify
+
+`packages/extension/src/runtime/chat/{types,registry,serializer}.ts` shipped, registry array intentionally empty per D10 (concrete adapters land T07–T09). 20 unit tests pass locally including both D13-binding TDD anchors:
+
+- `tests/unit/chat/serializer.test.ts::markdown_round_trip_preserves_code_blocks`
+- `tests/unit/chat/registry.test.ts::unknown_host_returns_null`
+
+Task `06.md` held at `status: in_review` with `blocked_on: ci-verify` per D13 — flips to `done` only after the PR's CI run reports green.
+
+**Notes for T07–T09 implementers:**
+
+- `domNodeToMarkdown` (in `serializer.ts`) is the shared DOM → markdown helper. Adapters that need richer conversion (lists, tables, links) should extend their own pipelines rather than bloat the framework.
+- `__setAdaptersForTesting` is a test-only hook; production adapter registration happens by mutating the module-private `adapters` array directly from each adapter file's import side-effect.
+- `ChatMeta.capturedAt` flows into the markdown frontmatter only; it is **not** part of `SourceMeta` (which deliberately mirrors `AttestationRow.source_meta`'s narrower shape).
+
+---
