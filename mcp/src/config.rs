@@ -69,6 +69,27 @@ pub struct Config {
     pub llm_api_url: String,
     /// Maximum tokens for LLM responses.
     pub llm_max_tokens: u32,
+
+    // ── Google OAuth (chrome-extension T14, Decision 5) ─────────────────────
+    // These three fields are env-driven; `main.rs::run_http` reads them via
+    // `std::env::var` to construct `GoogleOAuthState` (which lives only in
+    // that function's scope, not the top-level Config). They are surfaced
+    // here for symmetry with the other env-driven settings and so that future
+    // consumers (config-driven test fixtures, admin endpoints) have one place
+    // to look. Marked `allow(dead_code)` because the binary build path does
+    // not currently read them after construction.
+    /// Google OAuth public client id. When empty, the Google OAuth router is
+    /// not wired in `main.rs` and the corresponding endpoints return 404.
+    #[allow(dead_code)]
+    pub google_oauth_client_id: String,
+    /// Google OAuth client secret. Server-side only — never sent to the
+    /// extension. Used for the `https://oauth2.googleapis.com/token` exchange.
+    #[allow(dead_code)]
+    pub google_oauth_client_secret: String,
+    /// Google OAuth redirect URI configured in Google Cloud Console. Must be
+    /// HTTPS in production; defaults to `https://mc.mnemonik.xyz/oauth/google/callback`.
+    #[allow(dead_code)]
+    pub google_oauth_redirect_uri: String,
 }
 
 impl Config {
@@ -115,6 +136,12 @@ impl Config {
             llm_model: env_or("LLM_MODEL", ""),
             llm_api_url: env_or("LLM_API_URL", ""),
             llm_max_tokens: env_or("LLM_MAX_TOKENS", "512").parse().unwrap_or(512),
+            google_oauth_client_id: env_or("GOOGLE_OAUTH_CLIENT_ID", ""),
+            google_oauth_client_secret: env_or("GOOGLE_OAUTH_CLIENT_SECRET", ""),
+            google_oauth_redirect_uri: env_or(
+                "GOOGLE_OAUTH_REDIRECT_URI",
+                "https://mc.mnemonik.xyz/oauth/google/callback",
+            ),
         }
     }
 

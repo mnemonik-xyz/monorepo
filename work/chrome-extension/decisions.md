@@ -280,3 +280,83 @@ scaffold-test assertion uses `toContain(...)` so it is order-independent
 `host_permissions` array.
 
 ---
+
+## 2026-05-11 · T14 — Server Google OAuth provider lands; awaiting CI verify
+
+`mcp/src/oauth/google.rs` + `mcp/src/oauth/google_jwks.rs` ship the
+server side of Decision 5: `GET /oauth/google/start` (PKCE-bound,
+S256-only), `GET /oauth/google/callback` (token exchange + RS256 JWKS
+verification with `aud` / `iss` / `exp` checks + kid-based key pick),
+`POST /oauth/google/lookup` (Bearer JWT, returns existing pubkey link
+state + a server-issued possession-proof nonce when not yet linked), and
+`POST /oauth/google/link` (Bearer JWT, body
+`{pubkey_base58, possession_proof_base64, challenge}`, atomically pops
+the nonce and verifies a 64-byte Ed25519 signature over it before
+inserting `google_identity_links`). PR #TBD.
+
+**Key implementation notes (deviations + clarifications from the task
+spec):**
+
+- `oauth.rs` is now `oauth/mod.rs` (directory module) so the new
+  `oauth/google.rs` and `oauth/google_jwks.rs` files sit next to it
+  without converting the existing 2.8k-line file's tests.
+- `Claims` gained an optional `google_sub: Option<String>` claim and
+  `IssuedCode` gained the same field; old token wire format is
+  byte-identical via `serde(skip_serializing_if = "Option::is_none")`,
+  and all 138 existing mcp tests still pass.
+- **Possession proof:** server-issued nonce returned by `/lookup` when
+  no existing link is present (not a separate `/link-challenge`
+  endpoint). 5-minute TTL, single-use; the LRU `pop` is atomic.
+- **Rate limit:** 5 calls / 24h / google_sub across `/lookup` +
+  `/link` combined (per the security checklist). Implementation uses a
+  per-`google_sub` window counter; a separate `OAUTH_RATELIMIT_DISABLE`
+  envelope already widens the route-level governor for e2e runs.
+- **Auth model:** the existing `bearer_auth_middleware` is URI-
+  allowlisted for everything under `/oauth/*`, so the lookup/link
+  handlers verify the Bearer JWT inline (`verify_jwt` is `pub`). The
+  route still sits under the `/oauth/*` governor for IP-level limits.
+- **HTTPS-only redirect URIs** except for loopback (`localhost`,
+  `127.0.0.1`, `[::1]`) for dev. Chrome extension callbacks
+  (`https://<extid>.chromiumapp.org/...`) are HTTPS by design.
+- **Migration:** new `google_identity_links` table created via
+  `oauth::google::migrate_google_identity_links(conn)` invoked at
+  startup. Lives in `mcp/` per Decision 9 (`core/` reserved for the
+  cross-client attestation schema). Idempotent — re-run safe.
+- **Disabled mode:** when `GOOGLE_OAUTH_CLIENT_ID` is unset, `main.rs`
+  skips wiring the four Google routes entirely (no 404 wrappers
+  mounted), and `GoogleOAuthState::is_disabled()` is true if any
+  handler is reached directly via a test harness.
+- **Logging:** `tracing::info!("Google OAuth: enabled/disabled")` at
+  startup per task spec; the migration log is silent on success.
+
+**TDD anchors implemented:**
+
+- `mcp/tests/oauth_google.rs::full_pkce_roundtrip` — start → mock
+  Google → callback → lookup → link → server JWT decoded with
+  `google_sub` set, both at first-touch and after link.
+- `mcp/tests/oauth_google.rs::link_requires_possession_proof` — bad
+  sig → 401; missing challenge → 401; valid sig → 200 + row inserted.
+- `mcp/tests/oauth_google.rs::id_token_bad_audience_rejected` — token
+  with `aud != GOOGLE_OAUTH_CLIENT_ID` → 401.
+- `mcp/tests/oauth_google.rs::id_token_bad_signature_rejected` —
+  token signed by a different RSA key (same `kid`) → 401.
+
+**Mock Google server:** spawns an axum sub-server on an ephemeral
+loopback port; mints a fresh 2048-bit RSA key per test via the `rsa`
+dev-dep crate (added to `mcp/Cargo.toml`); exposes JWKs at
+`/oauth2/v3/certs` and signs tokens at `/token`. `GoogleJwksCache` and
+`GoogleOAuthState` both expose `*::with_endpoints` constructors that
+take a base URL — production code uses the defaults
+(`accounts.google.com`, `oauth2.googleapis.com`).
+
+Task `14.md` held at `status: in_review` with `blocked_on: ci-verify`
+per D13 — flips to `done` only after the PR's CI run reports green.
+
+**Note for T15 implementer:** `key_escrow_blobs` schema is independent;
+the lookup handler already gracefully reports `escrow_present = false`
+when that table is absent (it checks `sqlite_master` first). Add the
+migration in `mcp/` (T14 set the precedent) and route the new endpoints
+through the same inline `extract_bearer_claims` helper if you need
+JWT-aware handlers under `/oauth/*` or `/api/*`.
+
+---
