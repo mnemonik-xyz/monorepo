@@ -1,76 +1,42 @@
+import type { ComponentPropsWithoutRef } from "react";
 import { Link } from "react-router-dom";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import SiteFooter from "../components/SiteFooter";
 import SiteHeader from "../components/SiteHeader";
-import {
-  ROADMAP_ITEMS,
-  type RoadmapItem,
-  type RoadmapStatus,
-} from "../lib/roadmap.generated";
-
-const COLUMNS: { status: RoadmapStatus; title: string; subtitle: string }[] = [
-  {
-    status: "shipped",
-    title: "Shipped",
-    subtitle: "Merged to dev, in production",
-  },
-  {
-    status: "in_progress",
-    title: "In progress",
-    subtitle: "Spec approved, tasks landing",
-  },
-  {
-    status: "planned",
-    title: "Planned",
-    subtitle: "Drafted, not started",
-  },
-];
+// Vite ?raw import: docs/ROADMAP.md is the single source of truth; this
+// inlines its contents as a string at build time. Updating the .md is
+// the only way to change the roadmap.
+import roadmapMd from "../../../docs/ROADMAP.md?raw";
 
 /**
- * `/roadmap` — three-column status board driven by work/<feature>/ specs.
- *
- * Items are generated at build time by `scripts/generate-roadmap.mjs` from
- * tech-spec.md + tasks/*.md frontmatter. Editing the page does not change
- * the items; edit the specs or re-run `npm run roadmap`.
+ * `/roadmap` — renders docs/ROADMAP.md as long-form prose. This is the
+ * first usage of the markdown-rendering pattern that we'll extend to the
+ * rest of docs/ (whitepaper, quickstart, etc.).
  */
 export default function Roadmap() {
   return (
     <div className="min-h-screen bg-background text-text-primary">
       <SiteHeader />
       <main className="px-4 py-10 sm:py-14">
-        <div className="mx-auto max-w-6xl space-y-10">
-          <header className="space-y-3">
-            <Link
-              to="/"
-              className="text-sm text-text-muted transition-colors hover:text-text-primary"
-            >
-              ← Back
-            </Link>
-            <h1 className="text-3xl font-bold tracking-tight text-text-primary sm:text-4xl">
-              Roadmap
-            </h1>
-            <p className="max-w-2xl text-sm leading-relaxed text-text-muted">
-              Drawn directly from the spec-driven workflow in{" "}
-              <code className="font-mono text-accent-primary">work/</code>. Each
-              card maps to one feature folder; status is computed from its
-              task-file frontmatter.
-            </p>
-          </header>
-
-          <section
-            aria-label="Roadmap status board"
-            className="grid gap-6 md:grid-cols-3"
-            data-testid="roadmap-board"
+        <div className="mx-auto max-w-3xl space-y-8">
+          <Link
+            to="/"
+            className="text-sm text-text-muted transition-colors hover:text-text-primary"
           >
-            {COLUMNS.map((col) => (
-              <RoadmapColumn
-                key={col.status}
-                title={col.title}
-                subtitle={col.subtitle}
-                status={col.status}
-                items={ROADMAP_ITEMS.filter((i) => i.status === col.status)}
-              />
-            ))}
-          </section>
+            ← Back
+          </Link>
+          <article
+            data-testid="roadmap-article"
+            className="space-y-6 text-text-primary"
+          >
+            <ReactMarkdown
+              remarkPlugins={[remarkGfm]}
+              components={MARKDOWN_COMPONENTS}
+            >
+              {roadmapMd}
+            </ReactMarkdown>
+          </article>
         </div>
       </main>
       <SiteFooter />
@@ -78,60 +44,49 @@ export default function Roadmap() {
   );
 }
 
-function RoadmapColumn({
-  title,
-  subtitle,
-  status,
-  items,
-}: {
-  title: string;
-  subtitle: string;
-  status: RoadmapStatus;
-  items: readonly RoadmapItem[];
-}) {
-  return (
-    <div
-      data-testid={`roadmap-column-${status}`}
-      className="flex flex-col gap-3"
-    >
-      <header className="border-b border-white/5 pb-2">
-        <div className="flex items-baseline justify-between gap-2">
-          <h2 className="font-mono text-xs uppercase tracking-[0.18em] text-accent-primary">
-            {title}
-          </h2>
-          <span className="font-mono text-[11px] text-text-muted/70">
-            {items.length}
-          </span>
-        </div>
-        <p className="mt-1 text-[11px] text-text-muted/70">{subtitle}</p>
-      </header>
-      {items.length === 0 ? (
-        <p className="font-mono text-[11px] text-text-muted/50">— nothing —</p>
-      ) : (
-        <ul className="flex flex-col gap-3">
-          {items.map((item) => (
-            <li key={item.id}>
-              <RoadmapCard item={item} />
-            </li>
-          ))}
-        </ul>
-      )}
-    </div>
-  );
-}
-
-function RoadmapCard({ item }: { item: RoadmapItem }) {
-  return (
-    <article className="rounded-lg border border-white/10 bg-white/[0.02] p-4 transition-colors hover:border-accent-primary/30">
-      <h3 className="font-mono text-sm font-semibold tracking-tight text-text-primary">
-        {item.title}
-      </h3>
-      <p className="mt-2 text-[13px] leading-relaxed text-text-muted">
-        {item.description}
-      </p>
-      <p className="mt-3 font-mono text-[10px] uppercase tracking-[0.14em] text-text-muted/50">
-        {item.sourcePath}
-      </p>
-    </article>
-  );
-}
+// Tailwind-styled overrides for the markdown renderer. Kept local to this
+// file for now; if we add more markdown pages we'll lift this into a shared
+// `<DocsMarkdown>` component.
+const MARKDOWN_COMPONENTS = {
+  h1: (props: ComponentPropsWithoutRef<"h1">) => (
+    <h1
+      className="text-3xl font-bold tracking-tight text-text-primary sm:text-4xl"
+      {...props}
+    />
+  ),
+  h2: (props: ComponentPropsWithoutRef<"h2">) => (
+    <h2
+      className="mt-10 border-b border-white/5 pb-2 font-mono text-xs uppercase tracking-[0.18em] text-accent-primary"
+      {...props}
+    />
+  ),
+  h3: (props: ComponentPropsWithoutRef<"h3">) => (
+    <h3
+      className="mt-6 font-mono text-sm font-semibold text-text-primary"
+      {...props}
+    />
+  ),
+  p: (props: ComponentPropsWithoutRef<"p">) => (
+    <p className="text-[14px] leading-relaxed text-text-muted" {...props} />
+  ),
+  a: (props: ComponentPropsWithoutRef<"a">) => (
+    <a
+      className="text-accent-primary underline-offset-2 hover:underline"
+      target={props.href?.startsWith("http") ? "_blank" : undefined}
+      rel={props.href?.startsWith("http") ? "noopener noreferrer" : undefined}
+      {...props}
+    />
+  ),
+  blockquote: (props: ComponentPropsWithoutRef<"blockquote">) => (
+    <blockquote
+      className="border-l-2 border-accent-primary/40 pl-3 font-mono text-[11px] uppercase tracking-[0.14em] text-text-muted/70"
+      {...props}
+    />
+  ),
+  code: (props: ComponentPropsWithoutRef<"code">) => (
+    <code
+      className="rounded bg-white/[0.06] px-1 py-0.5 font-mono text-[12px] text-text-primary"
+      {...props}
+    />
+  ),
+};
