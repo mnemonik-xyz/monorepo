@@ -6,7 +6,9 @@
 //! `tools/list` and `tools/call mnemonic_sign_memory` through the full
 //! stack with the bearer-auth middleware live, and asserts:
 //!
-//! 1. `tools/list` returns exactly 5 tools with the canonical names.
+//! 1. `tools/list` returns exactly 7 tools with the canonical names
+//!    (Decision 12 added `mcp_auth` + `mnemonic_check_pending` on top of
+//!    the original 5).
 //! 2. `tools/call mnemonic_sign_memory` (with valid JWT) returns the
 //!    deferred-signing envelope (`status: "awaiting_signature"`,
 //!    `correlation_id`, `approve_url`).
@@ -40,6 +42,8 @@ const EXPECTED_TOOLS: &[&str] = &[
     "mnemonic_verify",
     "mnemonic_prove_identity",
     "mnemonic_recall",
+    "mcp_auth",
+    "mnemonic_check_pending",
 ];
 
 fn build_router(state: Arc<McpState>, oauth_state: Arc<OAuthState>) -> Router {
@@ -80,7 +84,8 @@ async fn test_tools_list_5_tools_and_sign_memory_returns_awaiting_signature() {
     let user_pubkey = "test-user-pubkey-base58";
     let token = oauth::issue_jwt(&oauth_state, user_pubkey).expect("issue_jwt");
 
-    // 1. tools/list — assert exactly 5 expected tools by name.
+    // 1. tools/list — assert exactly 7 expected tools by name (Decision 12
+    // added `mcp_auth` + `mnemonic_check_pending` on top of the original 5).
     let (s1, body1) = post_jsonrpc(
         &app,
         serde_json::json!({"jsonrpc": "2.0", "method": "tools/list", "id": 1}),
@@ -89,7 +94,7 @@ async fn test_tools_list_5_tools_and_sign_memory_returns_awaiting_signature() {
     .await;
     assert_eq!(s1, StatusCode::OK, "tools/list failed: {body1}");
     let tools = body1["result"]["tools"].as_array().expect("tools is array");
-    assert_eq!(tools.len(), 5, "want 5 tools, got {}: {body1}", tools.len());
+    assert_eq!(tools.len(), 7, "want 7 tools, got {}: {body1}", tools.len());
     let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
     for expected in EXPECTED_TOOLS {
         assert!(
