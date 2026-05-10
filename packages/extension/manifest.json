@@ -39,6 +39,35 @@
     "https://claude.ai/*",
     "https://gemini.google.com/*"
   ],
+  "content_scripts": [
+    {
+      "matches": ["https://chatgpt.com/*"],
+      "js": [
+        "src/runtime/chat/adapters/chatgpt.adapter.ts",
+        "src/content/fab.ts",
+        "src/content/recall-overlay.ts"
+      ],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["https://claude.ai/*"],
+      "js": [
+        "src/runtime/chat/adapters/claude.adapter.ts",
+        "src/content/fab.ts",
+        "src/content/recall-overlay.ts"
+      ],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["https://gemini.google.com/*"],
+      "js": [
+        "src/runtime/chat/adapters/gemini.adapter.ts",
+        "src/content/fab.ts",
+        "src/content/recall-overlay.ts"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
   "commands": {
     "_execute_action": {
       "suggested_key": {
@@ -49,10 +78,29 @@
     },
     "recall-overlay": {
       "suggested_key": {
-        "default": "Ctrl+Shift+K",
-        "mac": "Command+Shift+K"
+        "default": "Ctrl+Shift+R",
+        "mac": "Command+Shift+R"
       },
       "description": "Open recall overlay on the active page"
     }
+  },
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "src/assets/*",
+        "src/content/recall-overlay.css",
+        "src/runtime/embed/worker.ts",
+        "wasm/*.wasm",
+        "models/*"
+      ],
+      "matches": [
+        "https://chatgpt.com/*",
+        "https://claude.ai/*",
+        "https://gemini.google.com/*"
+      ]
+    }
+  ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'; base-uri 'self'; connect-src 'self' https://mc.mnemonik.xyz https://huggingface.co https://cdn-lfs.huggingface.co"
   }
 }
