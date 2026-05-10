@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   __setAdaptersForTesting,
   listAdapters,
+  registerAdapter,
   selectAdapter,
 } from "../../../src/runtime/chat/registry.js";
 import type { ChatAdapter } from "../../../src/runtime/chat/types.js";
@@ -82,5 +83,28 @@ describe("registry · selectAdapter", () => {
     __setAdaptersForTesting([]);
     expect(listAdapters()).toEqual([]);
     expect(selectAdapter("https://chatgpt.com/")).toBeNull();
+  });
+});
+
+describe("registry · registerAdapter", () => {
+  it("appends adapters in call order", () => {
+    const a = stub("chatgpt", /^chatgpt\.com\//);
+    const b = stub("claude", /^claude\.ai\//);
+    registerAdapter(a);
+    registerAdapter(b);
+    expect(listAdapters()).toEqual([a, b]);
+  });
+
+  it("is idempotent for the same instance — supports double-import + HMR", () => {
+    const a = stub("chatgpt", /^chatgpt\.com\//);
+    registerAdapter(a);
+    registerAdapter(a);
+    expect(listAdapters()).toEqual([a]);
+  });
+
+  it("matches the registered adapter via selectAdapter", () => {
+    const adapter = stub("gemini", /^gemini\.google\.com\//);
+    registerAdapter(adapter);
+    expect(selectAdapter("https://gemini.google.com/app/abc")).toBe(adapter);
   });
 });

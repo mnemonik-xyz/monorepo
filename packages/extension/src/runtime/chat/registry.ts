@@ -1,13 +1,26 @@
 import type { ChatAdapter } from "./types.js";
 
 /**
- * Flat adapter registry. T07–T09 push concrete adapters
- * (ChatGPT / Claude.ai / Gemini); array order = match priority.
+ * Flat adapter registry. T07–T09 self-register concrete adapters
+ * (ChatGPT / Claude.ai / Gemini) via `registerAdapter`; array order
+ * follows registration order, which is match priority.
  *
  * Tests inject stubs via `__setAdaptersForTesting`; the production
  * registry stays empty in T06 (framework-only deliverable per D10).
  */
 const adapters: ChatAdapter[] = [];
+
+/**
+ * Append an adapter to the registry. Idempotent: registering the
+ * same adapter instance twice is a no-op (lets adapter modules
+ * call `registerAdapter` at the top level without worrying about
+ * double-import side effects from test runners or HMR).
+ */
+export function registerAdapter(adapter: ChatAdapter): void {
+  if (!adapters.includes(adapter)) {
+    adapters.push(adapter);
+  }
+}
 
 /**
  * Match `new URL(url).hostname + pathname` against each adapter's
