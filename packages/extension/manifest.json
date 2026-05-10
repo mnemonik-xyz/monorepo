@@ -36,7 +36,8 @@
   ],
   "host_permissions": [
     "https://chatgpt.com/*",
-    "https://claude.ai/*"
+    "https://claude.ai/*",
+    "https://gemini.google.com/*"
   ],
   "commands": {
     "_execute_action": {

@@ -36,13 +36,17 @@ describe("scaffold · manifest.json", () => {
   });
 
   it("declares only enumerated AI-chat host_permissions per D11", () => {
-    // T07 added chatgpt.com; T08 adds claude.ai; T09 will append
-    // gemini.google.com. `<all_urls>` is explicitly forbidden —
-    // generic page capture flows through `activeTab` per D8/D11.
+    // T07 added chatgpt.com; T08 added claude.ai; T09 appends
+    // gemini.google.com. `<all_urls>` is explicitly forbidden — generic
+    // page capture flows through `activeTab` per D8/D11. Uses
+    // `arrayContaining` so co-running adapter PRs can land in any
+    // order — resolving the conflict only requires alphabetising the
+    // host_permissions array.
     expect(manifest.host_permissions).toEqual(
       expect.arrayContaining([
         "https://chatgpt.com/*",
         "https://claude.ai/*",
+        "https://gemini.google.com/*",
       ]),
     );
     expect(manifest.host_permissions).not.toContain("<all_urls>");

@@ -216,3 +216,67 @@ Task `06.md` held at `status: in_review` with `blocked_on: ci-verify` per D13 �
 - `ChatMeta.capturedAt` flows into the markdown frontmatter only; it is **not** part of `SourceMeta` (which deliberately mirrors `AttestationRow.source_meta`'s narrower shape).
 
 ---
+
+## 2026-05-10 · T09 — Gemini adapter lands; awaiting CI verify
+
+`packages/extension/src/runtime/chat/adapters/gemini.adapter.ts` ships a
+`ChatAdapter` for `gemini.google.com`. Self-registers via the last-line
+`registerAdapter(geminiAdapter);` side effect. 14 unit tests pass locally
+including both D13 TDD anchors:
+
+- `tests/unit/chat/gemini.adapter.test.ts::shadow_dom_pierced_to_extract_content`
+- `tests/unit/chat/gemini.adapter.test.ts::role_correct_for_assistant_and_user`
+
+Task `09.md` held at `status: in_review` with `blocked_on: ci-verify` per
+D13 — flips to `done` only after the PR's CI run reports green.
+
+**Implementation notes:**
+
+- **Selectors.** Turn elements: `<user-query>` (+ optional inner
+  `<user-query-content>`) for the user; `<message-content>` and
+  `<model-response>` for the assistant. Nested-turn detection prevents
+  double-counting when Gemini wraps an inner content element inside the
+  outer turn (it climbs across shadow boundaries via the host
+  back-reference).
+- **Shadow-DOM piercing.** The shared `domNodeToMarkdown` is shadow-blind
+  per T06's "extend locally, don't bloat the framework" guidance. The
+  adapter ships its own `walkAll` (preorder DFS, host-then-shadow-then-
+  light-children) and `shadowAwareMarkdown` (recurses into open shadow
+  roots, defers to the shared helper for `<pre>` / `<code>`).
+- **`getChatId`.** Parses `/app/<id>` (also tolerates the `/u/<n>/`
+  account prefix). Pages that don't carry `/app/<id>` — root, settings,
+  share landing — return `null` so the popup falls back to generic
+  page-selection capture (D8). This convention is best-guess from
+  available URLs; refresh on capture day if Gemini changes the URL
+  shape.
+- **`onNewAssistantTurn`.** Attaches one `MutationObserver` per shadow
+  root encountered (re-attached when new shadow roots appear — a single
+  document-level observer cannot pierce a shadow boundary by spec).
+  Resolves the `MutationObserver` constructor off `doc.defaultView` so
+  the same code path runs in JSDOM unit tests where the global
+  constructor is missing.
+- **`findInputBox`.** Returns `null` (read-only Phase 1; paste UI lands
+  later).
+- **Fixtures.** `tests/fixtures/gemini/{empty,code,long}.html` are
+  hand-crafted. The sandbox cannot reach `gemini.google.com`, so element
+  names + nesting are reverse-engineered from prior captures rather than
+  scraped today. **Refresh from a live HAR capture before merging the
+  T09 PR** — element + class names may have drifted since the last
+  capture, in which case `USER_TAGS` / `ASSISTANT_TAGS` need an update.
+- **Declarative shadow DOM.** Fixtures use `<template
+  shadowrootmode="open">` so they read like the live DOM. JSDOM 24.1.x
+  parses these as plain `<template>` elements (declarative shadow DOM
+  isn't auto-applied by the `JSDOM` constructor in this minor); the
+  test file ships a `loadFixture` helper that applies them imperatively
+  at parse time so the shadow-pierce code path is exercised end-to-end.
+  When JSDOM gains automatic declarative-shadow-DOM support the helper
+  becomes a no-op — drop it then.
+
+**Shared-file merge note (T07 / T08 / T09 co-run):** the only shared
+edit surface is `manifest.json` (host_permissions array) +
+`tests/unit/scaffold.test.ts` (host_permissions assertion). The new
+scaffold-test assertion uses `toContain(...)` so it is order-independent
+— resolving a merge conflict only requires alphabetising the
+`host_permissions` array.
+
+---
