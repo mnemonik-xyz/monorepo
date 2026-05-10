@@ -93,6 +93,19 @@ That sentence is true *only if* all four pieces ship. Any one missing and the st
 
 ---
 
+## 5b. Ecosystem partners — concrete deployments of the positioning
+
+The standards-track work in §5 (A2A bridge, ERC-8004, `did:mnemonic:`) builds the durable surface. In parallel we land the same positioning against named runtimes and memory architectures with deployed users — these are the **near-term reference deployments** that prove the pitch in production while the standards work matures.
+
+- **Hermes Agent runtime (Nous Research)** — multi-platform agent runtime with an explicit Memory Provider extension point and seven existing providers (Honcho, OpenViking, Mem0, Hindsight, Holographic, RetainDB, ByteRover). Mnemonik lands as the 8th — and the only cryptographically verifiable one. Six integration surfaces, four-step rollout (MCP registration → RL trajectory attestation demo with Nous → upstream Memory Provider PR → plugin + middleware bundle). The RL trajectory attestation in particular gives Nous a "verifiable RL datasets" pitch aligned with their open-training ethos. Full proposal: [`../../../.claude/skills/project-knowledge/recovered/research/mnemonik-hermes-integration.md`](../../../.claude/skills/project-knowledge/recovered/research/mnemonik-hermes-integration.md).
+- **Hindsight × Mnemonik adapter (Latimer et al., arXiv:2512.12818)** — Hindsight is a four-network (W/B/O/S) cognitive memory architecture already shipped as a Hermes provider; Mnemonik composes underneath as the trust layer. Six contradictions reconciled (mutability, async observation regen, missing identity, latency, unverified extraction, closed evaluation). Cost model with five mitigations brings naive ~$5–7.5k/mo per 1k heavy users down to ~$500–1.5k via Merkle batching + selective per-network policy + sync-sign-async-anchor. Full analysis + cost model: [`../../../.claude/skills/project-knowledge/recovered/research/hindsight-mnemonik-analysis.md`](../../../.claude/skills/project-knowledge/recovered/research/hindsight-mnemonik-analysis.md).
+
+Why these two are tracked here rather than alongside protocol bindings: Hermes is a **runtime**, Hindsight is a **memory architecture**. Per the framework in `protocol-integrations.md`, runtimes and memory architectures compose with Mnemonik via SDK adapters and per-architecture mappings, not via new core schemas. Both reuse `MEMORY_V1` (Hindsight one envelope per W/B/O/S network; Hermes one envelope per attested turn) — no schema-lock pressure, which makes them safe to ship before the standards-track work GAs.
+
+Strategic role: the standards-track integrations build the long-horizon canonical surface; the ecosystem-partner deployments validate the positioning *now*, in front of named users, while we wait for A2A and ERC-8004 to compound.
+
+---
+
 ## 6. Three-regime decision analysis
 
 We commit to this work knowing the outcome depends on adoption beyond our control. Three plausible regimes:
