@@ -52,8 +52,7 @@ use std::path::{Path, PathBuf};
 /// Hardcoded 32-byte Ed25519 seed. Test-only; do NOT use to sign real
 /// attestations. Hex value:
 /// `00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff`.
-const FIXED_SEED_HEX: &str =
-    "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+const FIXED_SEED_HEX: &str = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
 
 /// Number of fixtures to emit. Five matches the task spec.
 const NUM_SEEDS: usize = 5;
@@ -130,12 +129,10 @@ fn emit_one(n: usize, kp: &Keypair, out_dir: &Path) -> ManifestEntry {
     let embedding = embedding_for_seed(n);
     let compressor = EmbeddingCompressor::new(DIM, BIT_WIDTH, COMPRESS_SEED);
     let compressed = compressor.compress(&embedding).to_bytes();
-    let compressed_b64 =
-        base64::engine::general_purpose::STANDARD.encode(&compressed);
+    let compressed_b64 = base64::engine::general_purpose::STANDARD.encode(&compressed);
 
     let artifact = build_artifact(n, kp, &compressed_b64);
-    let canonical =
-        to_canonical_cbor(&artifact, &MEMORY_V1).expect("canonical CBOR succeeds");
+    let canonical = to_canonical_cbor(&artifact, &MEMORY_V1).expect("canonical CBOR succeeds");
     let content_hash_hex = hash_bytes(&canonical);
     let cose = sign_cose(&canonical, kp).expect("sign_cose succeeds");
 
@@ -144,8 +141,7 @@ fn emit_one(n: usize, kp: &Keypair, out_dir: &Path) -> ManifestEntry {
         &canonical,
     )
     .expect("write canonical_cbor");
-    fs::write(out_dir.join(format!("cose_sign1_seed_{n}.bin")), &cose)
-        .expect("write cose_sign1");
+    fs::write(out_dir.join(format!("cose_sign1_seed_{n}.bin")), &cose).expect("write cose_sign1");
     fs::write(
         out_dir.join(format!("compressed_emb_seed_{n}.bin")),
         &compressed,
@@ -170,18 +166,14 @@ fn emit_one(n: usize, kp: &Keypair, out_dir: &Path) -> ManifestEntry {
 fn main() {
     let out_dir: PathBuf = std::env::args()
         .nth(1)
-        .unwrap_or_else(|| {
-            "packages/extension/tests/fixtures/golden/".to_string()
-        })
+        .unwrap_or_else(|| "packages/extension/tests/fixtures/golden/".to_string())
         .into();
     fs::create_dir_all(&out_dir).expect("create out dir");
 
     let kp = fixture_keypair();
-    let entries: Vec<ManifestEntry> =
-        (0..NUM_SEEDS).map(|n| emit_one(n, &kp, &out_dir)).collect();
+    let entries: Vec<ManifestEntry> = (0..NUM_SEEDS).map(|n| emit_one(n, &kp, &out_dir)).collect();
 
-    let manifest =
-        serde_json::to_string_pretty(&entries).expect("serialize manifest");
+    let manifest = serde_json::to_string_pretty(&entries).expect("serialize manifest");
     fs::write(out_dir.join("manifest.json"), &manifest).expect("write manifest");
 
     eprintln!(
@@ -190,4 +182,3 @@ fn main() {
         out_dir.display()
     );
 }
-

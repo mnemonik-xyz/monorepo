@@ -304,8 +304,9 @@ pub fn decompress_embedding(bytes: &[u8], dim: usize) -> Result<Vec<f32>, JsValu
 /// the native path's null-omission rule).
 #[wasm_bindgen]
 pub fn to_canonical_cbor_bytes(value: JsValue) -> Result<Vec<u8>, JsValue> {
-    let json: serde_json::Value = serde_wasm_bindgen::from_value(value)
-        .map_err(|e| JsValue::from_str(&format!("to_canonical_cbor_bytes: invalid JS value: {e}")))?;
+    let json: serde_json::Value = serde_wasm_bindgen::from_value(value).map_err(|e| {
+        JsValue::from_str(&format!("to_canonical_cbor_bytes: invalid JS value: {e}"))
+    })?;
     to_canonical_cbor(&json, &MEMORY_V1)
         .map_err(|e| JsValue::from_str(&format!("to_canonical_cbor_bytes: {e}")))
 }
