@@ -30,6 +30,7 @@ import {
   blake3HashHex,
   compressEmbedding,
   decompressEmbedding,
+  signAttestationBundle,
   signCosePayload,
   toCanonicalCbor,
   type KeypairJson,
@@ -76,7 +77,9 @@ beforeAll(async () => {
   if (typeof gt.self === "undefined") gt.self = globalThis;
   const wasm = (await import(
     /* @vite-ignore */ pathToFileURL(WEB_WASM_JS).href
-  )) as { default: (input: { module_or_path: Uint8Array }) => Promise<unknown> };
+  )) as {
+    default: (input: { module_or_path: Uint8Array }) => Promise<unknown>;
+  };
   const bytes = await readFile(WEB_WASM_BIN);
   await wasm.default({ module_or_path: bytes });
   __setWasmForTesting(wasm as never);
@@ -198,5 +201,37 @@ describe("WASM crypto pipeline parity (T05 golden fixtures)", () => {
         new Uint8Array(expected),
       );
     }
+  });
+
+  // PR134-C-04: ensure the new `signAttestationBundle` export is
+  // exercised. The function is the sole production signing entry
+  // point in `runtime-impl.ts::signMemory` and previously had zero
+  // unit-test coverage. We do not assert byte-identity here (the
+  // server-side fixture set was generated against `signCosePayload` +
+  // `toCanonicalCbor`, not the all-in-one bundle path) but we DO
+  // assert: (1) the call resolves to a non-empty buffer; (2) the
+  // first byte is 0x84 — the COSE_Sign1 marker the wrapper
+  // explicitly validates.
+  it("signAttestationBundle produces a non-empty COSE_Sign1-shaped envelope (PR134-C-04)", async () => {
+    const entry = manifest[0];
+    if (!entry) throw new Error("manifest missing");
+    const embedding = new Float32Array(entry.embedding_f32);
+    const compressed = await compressEmbedding(embedding, entry.bit_width);
+    const contentHash = await blake3HashHex(
+      new TextEncoder().encode(entry.plaintext),
+    );
+    const kp = keypairFromSecret(
+      entry.signer_secret_hex,
+      entry.signer_pubkey_b58,
+    );
+    const cose = await signAttestationBundle(
+      entry.plaintext,
+      compressed,
+      contentHash,
+      entry.signer_pubkey_b58,
+      kp,
+    );
+    expect(cose.length).toBeGreaterThan(0);
+    expect(cose[0]).toBe(0x84);
   });
 });

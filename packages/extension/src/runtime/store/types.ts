@@ -7,7 +7,25 @@ export interface AttestationRow {
   attestation_id: string;
   /** Plaintext memory content. UTF-8. */
   content: string;
-  /** Lowercase hex blake3 of the canonical CBOR. 64 chars. */
+  /**
+   * Lowercase hex blake3 digest, 64 chars.
+   *
+   * NOTE (PR134-C-01 / TODO(T18-content-hash)): the extension currently
+   * computes this as `blake3(utf8 content bytes)` while the server
+   * (`mcp/src/tools.rs::sign_memory`) computes it as
+   * `blake3(canonical_cbor(artifact))`. The two values are NOT
+   * equal — the extension's live-debug fix bypassed the broken
+   * `to_canonical_cbor_bytes` round-trip by hashing the raw UTF-8
+   * payload instead. The cloud-sync drain still uploads the COSE
+   * envelope (which contains the server-derived hash) so the
+   * server-side row is correct; the LOCAL `content_hash` field is
+   * only used for `attestation_id` derivation and Verify-tab UI.
+   *
+   * Cloud-sync round-trip MUST be re-verified after T18-cloud-client
+   * server-side change exposes a parallel `attest_full` WASM entry
+   * point that returns both the canonical-CBOR hash and the COSE
+   * bytes. Until then, do not assume this hash matches the
+   * server-side `content_hash` column. */
   content_hash: string;
   /** Free-form tags, persisted with multi-entry index for AND filters. */
   tags: string[];

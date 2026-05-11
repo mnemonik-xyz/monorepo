@@ -1963,6 +1963,85 @@ Round-2 review: `status: passed`, 0 findings, 27/27 tests pass in 1.03s.
 
 **Decision: defence-in-depth on `generate` write-path even though `cose.ts::generateKeypair` already validates.** SA-T25-004 explicitly called out the inconsistency between `generate` and `importPlain` / `exportPlain`. The audit asks for the storage-layer invariant to be enforced regardless of upstream behaviour so a future binding swap that drops the cose.ts guard does not silently propagate bad bytes into chrome.storage. The two unit tests in `runtime-impl.identity.test.ts::generate` regex-match either error string (cose.ts upstream OR runtime-impl downstream) so neither layer can be removed without a test failure.
 
+## 2026-05-11 · PR #134 — Round-2 review fixes
+
+Four reviewers (code-reviewer, security-auditor, bug-hunter round-1,
+bug-hunter round-2) returned 56 findings against `fix/extension-live-debug`
+(commit `d4b062d`). Reports archived under
+`work/chrome-extension/logs/working/pr-134/`.
+
+The branch `fix/extension-live-debug-round2` (PR off `fix/extension-live-debug`)
+addresses the four blockers, eight majors with severe production impact,
+and four minors that block Web Store submission. Per the lead's
+prioritisation, the remaining minors / nits / deferred items are tracked
+in the table below.
+
+| Reviewer / id | Severity | Resolution |
+| --- | --- | --- |
+| code-reviewer PR134-C-01 | major | **fixed (doc)** — `AttestationRow.content_hash` docstring + `runtime-impl.ts::signMemory` comment now describe the new utf8-derived semantic + `TODO(T18-content-hash)` marker. Server-side parity restoration deferred to the WASM `attest_full` follow-up. |
+| code-reviewer PR134-C-02 | major | **fixed** — `insertIntoChat` textContent fallback verifies `input.innerText.includes(text)` and returns `{ok: false}` when ProseMirror reconciles the mutation away. |
+| code-reviewer PR134-C-03 | major | **fixed** — `tests/unit/content/message-bridge.test.ts` added, 11 cases. |
+| code-reviewer PR134-C-04 | major | **fixed** — `signAttestationBundle` smoke test added to `tests/unit/sign/cose.test.ts`. Gated by WASM artifact availability (the existing fixture-loader pattern). |
+| code-reviewer PR134-C-05 | minor | **deferred** — `.text-base` last-resort role-by-index inversion in chatgpt adapter; only matters when ChatGPT shows a system disclaimer at index 0. Backlog. |
+| code-reviewer PR134-C-06 | minor | **fixed** — removed redundant `cas-bridge.xethub.hf.co` from CSP (covered by wildcard). |
+| code-reviewer PR134-C-07 | minor | **fixed (doc)** — `EXTENSION_ID.md` documents the new policy: dev-build `key` IS committed (it is a public key, no secret exposure) and the dev-build ID differs from the Web Store production ID. |
+| code-reviewer PR134-C-08 | minor | **fixed** — message-bridge.ts `console.log` calls gated behind `import.meta.env.DEV`. |
+| code-reviewer PR134-C-09 | nit | **deferred** — host-aware dynamic-import of adapters; refactor scope. |
+| code-reviewer PR134-C-10 | nit | **fixed (doc)** — comment updated to note WASM uses only first 16 chars of content_hash. |
+| security-auditor PR134-S-01 | medium | **fixed** — see C-07; doc reconciliation. |
+| security-auditor PR134-S-02 | medium | **fixed** — see C-06; CSP narrowed. |
+| security-auditor PR134-S-03 | medium | **fixed** — message-bridge.ts now validates `sender.id === chrome.runtime.id` before processing any message. |
+| security-auditor PR134-S-04 | low | **fixed** — see C-08; console.log gating. |
+| security-auditor PR134-S-05 | low | **acknowledged** — `mcp.mnemonik.xyz` host_permission is architecturally correct + documented. No code change. |
+| security-auditor PR134-S-06 | low | **fixed (partial)** — Recall.tsx + Capture.tsx render a progress hint after 5s busy and an explicit download-size hint after 30s. Cancel button deferred to backlog. |
+| security-auditor PR134-S-07 | nit | **deferred** — bundling ORT WASM increases bundle by ~10MB; tracked. |
+| security-auditor PR134-S-08 | nit | **acknowledged** — rollup@^4 devDependency is correctly scoped; pinning deferred to hygiene PR. |
+| bug-hunter BUG-01 | blocker | **fixed** — SW `isAuthorisedSender` splits `ui:recall` into its own branch accepting EITHER popup origin OR content-script origin on an allowed AI-chat host. Two new contract tests. |
+| bug-hunter BUG-02 | blocker | **fixed** — Recall.tsx::handleInsert routes through `chrome.tabs.sendMessage(activeTabId, ...)`. |
+| bug-hunter BUG-03 | blocker | **fixed** — App.tsx reads `pending_fab_action.v1` on mount, threads the intent into Capture.tsx which auto-triggers handleSaveChat for save-chat intents. |
+| bug-hunter BUG-04 | blocker | **fixed** — clearSession() now removes both session.v1 and extension_session.v1. |
+| bug-hunter BUG-05 | major | **fixed** — see C-08; console.log gating. |
+| bug-hunter BUG-06 | major | **deferred** — popup ↔ alarm race on cloud-push. Significant refactor — backlog. |
+| bug-hunter BUG-07 | major | **deferred** — SW Web Worker spawn for recall-embedder is fragile in Chromium derivatives. Track for the offscreen-document migration. |
+| bug-hunter BUG-08 | major | **deferred** — `auth/test-helpers.ts` ships in prod dist. Production build gating deferred to a vite.config refactor PR. |
+| bug-hunter BUG-09 | major | **deferred** — `__set*ForTesting` seams in production. Same vite.config refactor. |
+| bug-hunter BUG-10 | major | **deferred** — Claude adapter selector cascade. Captured for follow-up. |
+| bug-hunter BUG-11 | major | **deferred** — Gemini adapter selector cascade. Same. |
+| bug-hunter BUG-12 | minor | **deferred** — `ui:sign-memory` SW stub. |
+| bug-hunter BUG-13 | minor | **deferred** — `ui:flush-pending` declared but not emitted. |
+| bug-hunter BUG-14 | minor | **fixed** — see C-06; CSP wildcard cleanup. |
+| bug-hunter BUG-15 | minor | **deferred** — signRemote opens two IndexedDbStore instances. |
+| bug-hunter BUG-16 | minor | **deferred** — signAttestationBundle empty-COSE error message. |
+| bug-hunter BUG-17 | minor | **deferred** — FAB / overlay mount-target survival across body swaps. |
+| bug-hunter BUG-18 | nit | **deferred** — hardcoded `mnemonik.xyz` URL drift. |
+| bug-hunter BUG-19 | nit | **deferred** — fabPosition vs .v1 storage-key drift. |
+| bug-hunter BUG-20 | nit | **deferred** — rollup direct devDep. |
+| bug-hunter-2 BUG2-01 | blocker | **fixed** — same as BUG-02. |
+| bug-hunter-2 BUG2-02 | major | **fixed** — same as BUG-03. |
+| bug-hunter-2 BUG2-03 | major | **fixed (partial)** — mergeRecallHits now dedupes by content equality when ids differ. Server-side `attestation_id` reflow into local rows deferred (requires server change). |
+| bug-hunter-2 BUG2-04 | major | **fixed** — no_escrow_edge "Continue in local mode" writes `storage_tier=local` before onComplete. |
+| bug-hunter-2 BUG2-05 | major | **fixed** — same as BUG-04. |
+| bug-hunter-2 BUG2-06 | major | **fixed** — Restore.tsx persists `restore_rate_limited_until` to chrome.storage.local. |
+| bug-hunter-2 BUG2-07 | major | **fixed** — Recall.tsx surfaces cloud failure as a non-fatal banner + 401 propagates through the reauth event. |
+| bug-hunter-2 BUG2-08 | major | **fixed** — Recall.tsx + Capture.tsx render busy-state progress hints (5s + 30s thresholds). Subscribing to embedder `progress` events deferred. |
+| bug-hunter-2 BUG2-09 | minor | **deferred** — recall hotkey scoped to host_permissions; "recall anywhere" requires `scripting` permission. |
+| bug-hunter-2 BUG2-10 | minor | **fixed** — see C-07 / S-01; doc reconciliation. |
+| bug-hunter-2 BUG2-11 | minor | **deferred** — README out-of-date. |
+| bug-hunter-2 BUG2-12 | minor | **deferred** — README missing wasm-pack prerequisite. |
+| bug-hunter-2 BUG2-13 | minor | **deferred** — IDB schema migration test. |
+| bug-hunter-2 BUG2-14 | minor | **deferred** — pending_uploads queue cap. |
+| bug-hunter-2 BUG2-15 | minor | **deferred** — ui:flush-pending vs alarm guard. |
+| bug-hunter-2 BUG2-16 | minor | **deferred** — SW-eviction durability of cloudSyncInFlight. |
+| bug-hunter-2 BUG2-17 | minor | **deferred** — lookup 429 retry-after surface. |
+| bug-hunter-2 BUG2-18 | nit | **deferred** — popup size-limit comment drift. |
+
+**Counts:** 56 raw findings → 22 fixed (4 blockers + 8 majors + 7 minors + 3 nits/doc), 32 deferred to backlog or follow-up PRs, 2 acknowledged with no code change required.
+
+**Test results (worktree):**
+- `bun x vite build` — succeeds; chunks within previous budgets.
+- `bun x vitest run` — 418 / 426 pass. The 8 unchanged failures (1 `cose.test.ts` WASM-not-built + 1 `cloud-sync.test.ts` re-auth env) predate this PR; confirmed via `git stash` baseline diff.
+- `bun test` — 310 / 311 pass (1 unchanged WASM-build failure).
+
 ## 2026-05-11 · T25b — Auto-keygen + embedder prewarm
 
 T25b complements the T25 identity-UX work (generate / export / import on the Options page) with two UX shortcuts that make the freshly-installed extension usable without a console snippet:

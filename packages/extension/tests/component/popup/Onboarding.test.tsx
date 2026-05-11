@@ -533,6 +533,44 @@ describe("Onboarding — existing identity, no escrow", () => {
       expect(onComplete).toHaveBeenCalledTimes(1);
     });
   });
+
+  it("writes storage_tier=local before firing onComplete (BUG2-04)", async () => {
+    // Regression: without the explicit tier flip, App re-bootstraps
+    // in cloud mode with no identity and surfaces "identity not
+    // configured" on the next sign. The button MUST write
+    // `storage_tier: 'local'` to chrome.storage.local first.
+    const { store } = installChromeStub({ storage_tier: "cloud" });
+    setRuntime(
+      makeRuntime({
+        auth: {
+          signIn: async () => makeSignInResult(),
+          lookupExisting: async () => ({
+            existingPubkey: EXISTING_PUBKEY,
+            escrowPresent: false,
+            linkChallenge: null,
+          }),
+        },
+        session: { set: async () => undefined },
+      }),
+    );
+
+    const onComplete = vi.fn();
+    render(<Onboarding onComplete={onComplete} />);
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: /Sign in with Google/i }),
+    );
+    await screen.findByRole("heading", { name: /No escrow on server/i });
+
+    const localBtn = screen.getByRole("button", {
+      name: /Continue in local mode/i,
+    });
+    fireEvent.click(localBtn);
+    await waitFor(() => {
+      expect(onComplete).toHaveBeenCalledTimes(1);
+    });
+    expect(store.get("storage_tier")).toBe("local");
+  });
 });
 
 // ── Branch reset — error in sign-in then retry ─────────────────────────────

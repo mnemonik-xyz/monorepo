@@ -43,6 +43,11 @@ async function loadPipeline(
     // be reasoned about from one place.
     transformers.env.useBrowserCache = true;
     transformers.env.allowLocalModels = false;
+    // Disable ORT-WASM multi-threading. Default spawns workers via
+    // `URL.createObjectURL(new Blob([…]))` which Chrome MV3 CSP
+    // (`script-src 'self' 'wasm-unsafe-eval'`) blocks. Single-thread
+    // inference is ~3x slower per token but the only viable mode here.
+    transformers.env.backends.onnx.wasm.numThreads = 1;
     const pipe = await transformers.pipeline("feature-extraction", modelId, {
       quantized,
       progress_callback: (info: {

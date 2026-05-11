@@ -18,7 +18,13 @@ import {
 /** Server's fastembed default — see `core/src/embed/mod.rs:20`. */
 const SERVER_DEFAULT_DIM = 384;
 const DEFAULT_MODEL_ID = "Xenova/all-MiniLM-L6-v2";
-const DEFAULT_INIT_TIMEOUT_MS = 30_000;
+// Cold-init pulls the ORT WASM runtime from jsdelivr (~10 MB) + the
+// quantised ONNX model from Hugging Face (~25 MB), then runs single-
+// threaded ORT init (MV3 CSP blocks blob: workers). On a cold cache,
+// this can take 60-120s under poor network conditions. 180s gives
+// comfortable margin; subsequent inits hit the browser cache and
+// complete in <1s.
+const DEFAULT_INIT_TIMEOUT_MS = 180_000;
 
 export interface TransformersEmbedderOptions {
   modelId?: string;

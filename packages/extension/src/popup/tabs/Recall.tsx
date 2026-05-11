@@ -29,8 +29,13 @@ export function Recall(props: RecallProps): JSX.Element {
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<SearchResult[]>([]);
   const [busy, setBusy] = useState(false);
+  const [busyElapsedMs, setBusyElapsedMs] = useState(0);
   const [hasSearched, setHasSearched] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  /** BUG2-07: when cloud recall fails the popup falls back to local
+   *  results — surface that with a non-fatal banner rather than
+   *  silently mixing local-only results into a "cloud" view. */
+  const [cloudWarning, setCloudWarning] = useState<string | null>(null);
   const [storageTier, setStorageTier] = useState<StorageTier>("local");
 
   // Adapters declare insert support via a `supportsInsert: boolean`
@@ -57,8 +62,26 @@ export function Recall(props: RecallProps): JSX.Element {
     };
   }, []);
 
+  // BUG2-08: surface the embedder cold-start. The first sign or recall
+  // after install pulls ~25 MB of ONNX + ~10 MB of ORT WASM; without
+  // visible progress, the user sees a tiny aria-busy state for
+  // potentially 3 minutes. Tick `busyElapsedMs` every 500 ms while
+  // busy and render a hint after 5s.
+  useEffect(() => {
+    if (!busy) {
+      setBusyElapsedMs(0);
+      return;
+    }
+    const start = Date.now();
+    const id = setInterval(() => {
+      setBusyElapsedMs(Date.now() - start);
+    }, 500);
+    return () => clearInterval(id);
+  }, [busy]);
+
   const handleSearch = async (): Promise<void> => {
     setError(null);
+    setCloudWarning(null);
     const trimmed = query.trim();
     if (trimmed === "") {
       setResults([]);
@@ -71,16 +94,36 @@ export function Recall(props: RecallProps): JSX.Element {
       // Local search always runs (offline-first). Cloud merge layers
       // on top when the tier is `cloud` AND the user has a session.
       const localPromise = runtime.recall(trimmed, 5);
+      let cloudFailed: string | null = null;
       const cloudPromise: Promise<CloudRecallHit[] | null> =
         storageTier === "cloud"
           ? runtime.cloudSync.recallRemote(trimmed, 5).catch((e: unknown) => {
               // Cloud failure must NOT block local results — the
               // tech-spec's offline-first guarantee is the whole
-              // point. Surface the error but keep going.
-              console.warn(
-                "[mnemonik] cloud recall failed:",
-                e instanceof Error ? e.message : String(e),
-              );
+              // point. Surface the error but keep going (BUG2-07).
+              const msg = e instanceof Error ? e.message : String(e);
+              cloudFailed = msg;
+              // 401 → re-auth required; propagate through the global
+              // event the SW drain uses so App.tsx's reauth gate fires
+              // (consistent with signRemote's behaviour).
+              if (/401|unauthor|reauth/i.test(msg)) {
+                try {
+                  const g = globalThis as {
+                    dispatchEvent?: (e: Event) => boolean;
+                    CustomEvent?: typeof CustomEvent;
+                  };
+                  if (
+                    typeof g.dispatchEvent === "function" &&
+                    typeof g.CustomEvent === "function"
+                  ) {
+                    g.dispatchEvent(
+                      new g.CustomEvent("mnemonik:re-auth-required"),
+                    );
+                  }
+                } catch {
+                  // Best-effort.
+                }
+              }
               return null;
             })
           : Promise.resolve(null);
@@ -90,6 +133,11 @@ export function Recall(props: RecallProps): JSX.Element {
       ]);
       setResults(mergeRecallHits(localHits, cloudHits, 5));
       setHasSearched(true);
+      if (cloudFailed !== null) {
+        setCloudWarning(
+          "Cloud search unavailable — showing local results only.",
+        );
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -99,11 +147,31 @@ export function Recall(props: RecallProps): JSX.Element {
 
   const handleInsert = async (text: string): Promise<void> => {
     if (!insertSupported) return;
+    // PR134-BLK-1: route through `chrome.tabs.sendMessage` so the message
+    // reaches the content-script realm where `message-bridge.ts` owns
+    // `insertIntoChat`. `chrome.runtime.sendMessage` from the popup is
+    // delivered only to extension pages (SW, options, other popups), not
+    // to content scripts — so the previous wiring silently no-op'd.
     try {
-      await chrome.runtime.sendMessage({
+      const tabs = await chrome.tabs.query({
+        active: true,
+        currentWindow: true,
+      });
+      const tabId = tabs[0]?.id;
+      if (typeof tabId !== "number") {
+        setError("Could not find the active tab. Reload the chat tab.");
+        return;
+      }
+      const reply = (await chrome.tabs.sendMessage(tabId, {
         type: "ui:insert-into-chat",
         payload: { text },
-      });
+      })) as { ok?: boolean } | undefined;
+      if (!reply || reply.ok !== true) {
+        setError(
+          "Insert failed — the chat composer rejected the text. " +
+            "Copy markdown and paste manually.",
+        );
+      }
     } catch (e) {
       // Surface the failure — the button is enabled, so a silent
       // no-op would be misleading. The toast lives in <Recall> via
@@ -149,6 +217,27 @@ export function Recall(props: RecallProps): JSX.Element {
 
       {error ? (
         <div className="text-xs text-error font-mono">{error}</div>
+      ) : null}
+
+      {cloudWarning ? (
+        <div
+          role="status"
+          className="text-[11px] text-text-muted font-mono italic border border-white/10 rounded px-2 py-1"
+        >
+          {cloudWarning}
+        </div>
+      ) : null}
+
+      {busy && busyElapsedMs > 5000 ? (
+        <div
+          role="status"
+          aria-live="polite"
+          className="text-[11px] text-text-muted font-mono italic"
+        >
+          {busyElapsedMs > 30000
+            ? "First-time setup: downloading embedding model (~25 MB). This can take up to 3 minutes on a slow connection."
+            : "Loading embedding model — first sign / recall after install takes a moment."}
+        </div>
       ) : null}
 
       <ul className="flex flex-col gap-2" aria-label="Recall results">
@@ -248,8 +337,14 @@ function truncateMiddle(value: string, head: number, tail: number): string {
 /**
  * Merge local and cloud recall hits per the T18 spec:
  *
- *   1. Dedupe by `attestation_id`.
- *   2. When the same id appears on both sides, keep the higher
+ *   1. Dedupe by `attestation_id` first; fall back to dedupe by
+ *      `content` equality so cross-device round-trips don't surface
+ *      the same memory twice when the local id is `att_<blake3-prefix>`
+ *      and the server returned its own UUID (BUG2-03). Once the
+ *      cloud-side drain reflows server-issued ids back into local rows
+ *      (deferred follow-up), the id-equality path takes over and the
+ *      content fallback becomes a no-op.
+ *   2. When the same memory appears on both sides, keep the higher
  *      similarity score (cloud and local can disagree because cloud
  *      runs server-side cosine search on the canonical embedding
  *      vs. local TurboQuant-decompressed embeddings).
@@ -271,13 +366,24 @@ export function mergeRecallHits(
     return local.slice(0, limit);
   }
   const byId = new Map<string, SearchResult>();
+  // BUG2-03: parallel index by content so a cloud row with the
+  // server-issued UUID can find its local `att_<hash>` peer.
+  const byContent = new Map<string, string>();
   for (const r of local) {
     byId.set(r.attestation_id, r);
+    if (r.content) byContent.set(r.content, r.attestation_id);
   }
   for (const c of cloud) {
     if (!c.attestation_id) continue;
-    const existing = byId.get(c.attestation_id);
-    if (existing) {
+    let existingKey: string | null = null;
+    if (byId.has(c.attestation_id)) {
+      existingKey = c.attestation_id;
+    } else if (c.content && byContent.has(c.content)) {
+      existingKey = byContent.get(c.content) ?? null;
+    }
+    if (existingKey !== null) {
+      const existing = byId.get(existingKey);
+      if (!existing) continue;
       const better = c.similarity > existing.relevance_score;
       // Prefer cloud-side tx ids when local still carries synthetic
       // `local:` prefixes — the cloud row has been anchored.
@@ -289,7 +395,7 @@ export function mergeRecallHits(
         existing.arweave_tx.startsWith("local:") && c.arweave_tx
           ? c.arweave_tx
           : existing.arweave_tx;
-      byId.set(c.attestation_id, {
+      byId.set(existingKey, {
         ...existing,
         relevance_score: better ? c.similarity : existing.relevance_score,
         solana_tx,
@@ -309,6 +415,7 @@ export function mergeRecallHits(
         created_at: c.signed_at ?? "",
         relevance_score: c.similarity,
       });
+      if (c.content) byContent.set(c.content, c.attestation_id);
     }
   }
   return Array.from(byId.values())
