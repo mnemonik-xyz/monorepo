@@ -1333,6 +1333,20 @@ tests/unit/background/service-worker.contract.test.ts
 tests/unit/auth/extension-bootstrap.test.ts
 tests/unit/scripts/check-size-limit.test.ts
 tests/unit/messages.test.ts
-tests/unit/background/service-worker.test.ts` → 75 pass / 214
-assertions.
+tests/unit/background/service-worker.test.ts` → 76 pass / 220
+assertions (post round-1 review fixes).
+
+**Round-1 review (test-reviewer + code-reviewer):** seven findings,
+all minor / nit / low. Applied: T23-T-N1 (multi-prefix unknown-
+discriminant rejection), T23-T-N2 (Symbol/IPC scope comment),
+T23-T-N3 (malformed ui:recall does not touch embedder/store — pins
+defence-in-depth against the ~25MB cold-start as a resource-
+exhaustion vector), T23-T-N4 (size-limit exit-1 + valid-JSON
+always-parse contract pinned via parameterised shim exit code),
+T23-C-N1 (trust-model comment on the spawnSync `npx` call), T23-C-N3
+(temp-dir cleanup via afterAll), T23-C-N5 (toEqual over toMatchObject
+for the recall envelope). Skipped: T23-C-N2 (diagnostic style — pre-
+existing nit), T23-C-N4 (whitespace-discriminant comment — already
+present). Round-2 reports: approve / approve. Full reports at
+`work/chrome-extension/logs/working/task-23/{test,code}-reviewer-round{1,2}.json`.
 

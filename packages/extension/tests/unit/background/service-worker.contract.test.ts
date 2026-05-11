@@ -36,7 +36,7 @@
 // `chrome` global.
 
 import "fake-indexeddb/auto";
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
   installServiceWorker,
   type ServiceWorkerDeps,
@@ -196,6 +196,16 @@ beforeEach(() => {
   vi.clearAllMocks();
 });
 
+afterEach(() => {
+  // The SW-side recall handler imports `recall-embedder.js`, which
+  // caches its Embedder instance at module scope. Reset it on every
+  // teardown so a test that stubbed the embedder via
+  // `__setEmbedderForTesting(...)` can't bleed into a later test
+  // file's recall behaviour. Cheap (no-op when the cache is already
+  // null).
+  __setEmbedderForTesting(null);
+});
+
 // ── inbound message contract per variant ────────────────────────────
 
 describe("service-worker contract · accepted inbound variants", () => {
@@ -282,14 +292,29 @@ describe("service-worker contract · accepted inbound variants", () => {
     expect(searchSpy.mock.calls[0]?.[2]).toBe(5);
     expect(searchSpy.mock.calls[0]?.[3]).toEqual({ tags: ["framework"] });
 
-    expect(out).toMatchObject({
+    // T23-C-N5 round-1 review: prefer toEqual over toMatchObject so
+    // a future refactor that adds extra fields to the response
+    // (e.g. a debug envelope) trips this assertion rather than
+    // silently passing. The exact shape is the public contract the
+    // recall overlay parses; keep it pinned.
+    expect(out).toEqual({
       ok: true,
-      result: { ok: true, results: expect.any(Array) },
+      result: {
+        ok: true,
+        results: [
+          {
+            attestation_id: "att-1",
+            owner_pubkey: "z6Mk",
+            score: 0.9,
+            tags: ["framework"],
+            created_at: "2026-05-11T00:00:00.000Z",
+            source: { kind: "user-text" },
+          },
+        ],
+      },
     });
-
-    // Reset the module-scoped embedder so other test files start
-    // with a clean slate.
-    __setEmbedderForTesting(null);
+    // Module-scoped embedder cache is cleared by the `afterEach`
+    // hook so other test files start with a clean slate.
   });
 
   it("tab:fab-save-chat → persists pending_fab_action.v1 + tries openPopup (B5)", async () => {
@@ -539,6 +564,15 @@ describe("service-worker contract · sender authorisation", () => {
 
 // ── parser perimeter (unknown / malformed) ──────────────────────────
 
+// Note on coverage scope: Symbols / functions / Maps / Sets are
+// rejected by chrome.runtime's structured-clone before reaching this
+// router (the IPC boundary throws DataCloneError), so they are not
+// drilled here. The parser-layer guard against those primitives is
+// covered exhaustively in `tests/unit/messages.contract.test.ts`
+// (`returns null on null / undefined / primitives` and the array /
+// no-`type`-field cases). This file's perimeter focuses on inputs
+// the IPC will actually surface to the router.
+
 describe("service-worker contract · unknown / malformed inputs", () => {
   it("returns { ok:false, error:'unknown-message' } for an unknown discriminant", async () => {
     const { deps, cr } = makeDeps();
@@ -551,8 +585,20 @@ describe("service-worker contract · unknown / malformed inputs", () => {
     expect(out).toEqual({ ok: false, error: "unknown-message" });
   });
 
-  it("returns { ok:false, error:'unknown-message' } for a malformed ui:recall payload", async () => {
-    const { deps, cr } = makeDeps();
+  it("returns { ok:false, error:'unknown-message' } for a malformed ui:recall payload + does NOT touch the embedder/store (T23-T-N3)", async () => {
+    // Defence-in-depth: hostile input MUST be rejected at parseMsg
+    // before reaching the recall handler. If the parser drift ever
+    // lets a malformed payload through, the embedder cold-start
+    // path is a ~25MB model fetch — an unrejected hostile recall
+    // would be an easy resource-exhaustion vector. This test pins
+    // BOTH the response envelope AND the side-effect quiescence.
+    const { deps, cr, store } = makeDeps();
+    const embedderStub: Embedder = {
+      embed: vi.fn().mockResolvedValue(new Float32Array(384)),
+    } as unknown as Embedder;
+    __setEmbedderForTesting(embedderStub);
+    const searchSpy = vi.spyOn(store, "search").mockResolvedValue([]);
+
     installServiceWorker(deps);
     const out = await fireAndCapture(
       cr,
@@ -568,6 +614,8 @@ describe("service-worker contract · unknown / malformed inputs", () => {
       popupSender(),
     );
     expect(out).toEqual({ ok: false, error: "unknown-message" });
+    expect(embedderStub.embed).not.toHaveBeenCalled();
+    expect(searchSpy).not.toHaveBeenCalled();
   });
 
   it("returns { ok:false, error:'unknown-message' } for non-object input", async () => {

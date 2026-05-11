@@ -316,8 +316,14 @@ function buildSamples(t: MsgType): VariantSamples {
 
 /** Every `Msg` variant in source order. Adding a new variant without
  *  extending this list is caught by the exhaustive switch above —
- *  this list is for the test driver to iterate. */
-const ALL_VARIANTS: readonly MsgType[] = [
+ *  this list is for the test driver to iterate. The
+ *  `assertCoversAllMsgTypes` helper below double-locks this: the
+ *  array is typed as a tuple whose union of elements MUST equal
+ *  `MsgType`. Drop a variant from the list and the assertion's
+ *  generic-bound becomes unsatisfied (TS compile error). Add a
+ *  variant to the union without extending this list and the same
+ *  assertion fails. */
+const ALL_VARIANTS = [
   "sw:open-recall-overlay",
   "sw:save-selection",
   "ui:sign-memory",
@@ -327,7 +333,23 @@ const ALL_VARIANTS: readonly MsgType[] = [
   "tab:fab-save-chat",
   "tab:fab-save-selection",
   "tab:fab-open-popup",
-];
+] as const satisfies readonly MsgType[];
+
+/**
+ * Compile-time assertion that `ALL_VARIANTS` is BOTH a subset AND a
+ * superset of `MsgType`. The `Exclude` symmetric difference being
+ * `never` is the only way both bounds can hold; if a maintainer adds
+ * a `Msg` variant but forgets to update `ALL_VARIANTS`, this line
+ * becomes a TS error and CI fails. Mirrors the same trick used in
+ * `messages.ts`'s own exhaustive switch.
+ */
+type _ExhaustiveListCheck =
+  | Exclude<MsgType, (typeof ALL_VARIANTS)[number]>
+  | Exclude<(typeof ALL_VARIANTS)[number], MsgType>;
+const _exhaustiveListCheck: _ExhaustiveListCheck extends never ? true : never =
+  true;
+// Reference the binding so the unused-var lint doesn't strip it.
+void _exhaustiveListCheck;
 
 describe("parseMsg — every variant round-trips (every_variant_round_trips)", () => {
   for (const variant of ALL_VARIANTS) {
@@ -390,7 +412,11 @@ describe("parseMsg — generic defensive rejection", () => {
     expect(parseMsg({ type: { nested: "ui:recall" } })).toBeNull();
   });
 
-  it("returns null on unknown discriminants", () => {
+  it("returns null on unknown discriminants across every direction prefix", () => {
+    // Cover all three direction prefixes (`sw:`, `ui:`, `tab:`) so a
+    // regression in one branch can't hide behind the others. T23-T-N1
+    // round-1 review nit.
+    expect(parseMsg({ type: "sw:future-variant" })).toBeNull();
     expect(parseMsg({ type: "ui:unknown" })).toBeNull();
     expect(parseMsg({ type: "tab:fab-something-new" })).toBeNull();
     // Audit B5 / AUD-C-05 guard: dropping a `tab:fab-*` variant from

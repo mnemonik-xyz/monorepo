@@ -14,7 +14,7 @@
 // each subdir is a different scenario; the test prepends that subdir
 // to PATH before spawning the script.
 
-import { describe, it, expect, beforeAll } from "vitest";
+import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { spawnSync } from "node:child_process";
 import {
   mkdirSync,
@@ -31,9 +31,23 @@ const here = dirname(fileURLToPath(import.meta.url));
 const pkgRoot = resolve(here, "..", "..", "..");
 const scriptPath = join(pkgRoot, "scripts", "check-size-limit.mjs");
 
+/** Track temp dirs for cleanup. T23-C-N3 round-1 review nit. */
+const tempDirs: string[] = [];
+
 /** Build a temp PATH dir hosting a fake `npx` that echoes the
- *  supplied JSON to stdout and exits 0. */
-function fakeNpxPathDir(suffix: string, jsonStdout: string): string {
+ *  supplied JSON to stdout and exits with `exitCode` (default 0).
+ *
+ *  Why `exitCode` is parameterised: size-limit 12.x has a quirk
+ *  where some "no match" cases produce a clean-but-zero JSON report
+ *  AND a non-zero exit. The wrapper script keeps parsing the JSON
+ *  regardless of exit status (documented in the script header). We
+ *  use a shim that mimics that behaviour to lock the script's
+ *  always-parse contract. */
+function fakeNpxPathDir(
+  suffix: string,
+  jsonStdout: string,
+  exitCode = 0,
+): string {
   const dir = join(
     tmpdir(),
     `t23-fake-npx-${suffix}-${Math.random().toString(36).slice(2)}`,
@@ -44,10 +58,11 @@ function fakeNpxPathDir(suffix: string, jsonStdout: string): string {
   // POSIX shell shim — heredoc preserves the JSON byte-for-byte.
   writeFileSync(
     shim,
-    `#!/bin/sh\ncat <<'NPX_FAKE_EOF'\n${jsonStdout}\nNPX_FAKE_EOF\n`,
+    `#!/bin/sh\ncat <<'NPX_FAKE_EOF'\n${jsonStdout}\nNPX_FAKE_EOF\nexit ${String(exitCode)}\n`,
     { mode: 0o755 },
   );
   chmodSync(shim, 0o755);
+  tempDirs.push(dir);
   return dir;
 }
 
@@ -71,6 +86,20 @@ beforeAll(() => {
   // Sanity: the script we test must exist.
   if (!existsSync(scriptPath)) {
     throw new Error(`check-size-limit.mjs not found at ${scriptPath}`);
+  }
+});
+
+afterAll(() => {
+  // Tidy temp PATH shims created by `fakeNpxPathDir`. T23-C-N3
+  // round-1 review nit: avoids cumulative tmpdir pollution for
+  // developers running the suite repeatedly.
+  for (const dir of tempDirs) {
+    try {
+      rmSync(dir, { recursive: true, force: true });
+    } catch {
+      // Best-effort; safe to ignore — tmpdir contents are
+      // ephemeral on CI runners.
+    }
   }
 });
 
@@ -151,6 +180,34 @@ describe("check-size-limit.mjs", () => {
     const out = runScript(env);
     expect(out.status).toBe(1);
     expect(out.stderr).toMatch(/no entries/);
+  });
+
+  it("exits 1 even when size-limit itself exits non-zero with parsable JSON (always-parse contract, T23-T-N4)", () => {
+    // size-limit 12.x has a documented quirk where "no match" cases
+    // exit non-zero AND emit a valid zero-size JSON report. The
+    // script's header says it always tries to parse the JSON
+    // regardless of the child exit code so the diagnostic remains
+    // actionable. This test pins that contract.
+    const pathDir = fakeNpxPathDir(
+      "zero-exit-1",
+      JSON.stringify([
+        {
+          name: "popup-initial-js",
+          passed: true,
+          size: 0,
+          loading: 0,
+        },
+      ]),
+      1,
+    );
+    const env = {
+      ...process.env,
+      PATH: `${pathDir}:${process.env.PATH ?? ""}`,
+    };
+    const out = runScript(env);
+    expect(out.status).toBe(1);
+    expect(out.stderr).toMatch(/matched zero bytes/);
+    expect(out.stderr).toMatch(/popup-initial-js/);
   });
 
   it("exits 1 when size-limit output is not valid JSON", () => {

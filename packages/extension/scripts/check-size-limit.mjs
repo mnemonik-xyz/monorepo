@@ -29,6 +29,14 @@ import { dirname, resolve } from "node:path";
 const here = dirname(fileURLToPath(import.meta.url));
 const pkgRoot = resolve(here, "..");
 
+// Trust model: `npx` resolves through PATH. We trust the workspace
+// PATH on CI (GitHub Actions starts with a known runner image) and
+// the same PATH a developer uses when invoking other `bun run`
+// scripts locally. If your local PATH is hostile, that's the same
+// problem as every other workspace script — out of scope for this
+// gate. `--no` declines auto-install of a missing `size-limit` so a
+// missing dev-dependency surfaces as a fast hard failure rather than
+// an unattended download.
 const child = spawnSync("npx", ["--no", "size-limit", "--json"], {
   cwd: pkgRoot,
   encoding: "utf8",
