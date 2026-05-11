@@ -93,7 +93,7 @@ worker-src 'self';
 object-src 'self';
 base-uri 'self';
 connect-src 'self'
-  https://mc.mnemonik.xyz
+  https://mcp.mnemonik.xyz
   https://huggingface.co
   https://cdn-lfs.huggingface.co
   https://cdn-lfs-us-1.huggingface.co

@@ -17,7 +17,7 @@ policy disagree, the code is the bug.
   extension makes no network requests for the purpose of storing,
   syncing, or analysing your memories. No analytics. No telemetry.
 - **Cloud mode (optional, paid):** signed attestations are sent over
-  TLS to `mc.mnemonik.xyz`, stored encrypted at rest on AWS, and linked
+  TLS to `mcp.mnemonik.xyz`, stored encrypted at rest on AWS, and linked
   to your Google account by the opaque Google subject identifier
   (`sub`). The Mnemonik server can read the plaintext content of cloud
   attestations — there is no end-to-end encryption in this release
@@ -76,7 +76,7 @@ Once in Cloud mode, every `sign_memory` call:
 
 1. Builds and signs the attestation locally (your Ed25519 key — same
    as Local mode).
-2. Sends the COSE_Sign1 envelope over TLS 1.3 to `mc.mnemonik.xyz`.
+2. Sends the COSE_Sign1 envelope over TLS 1.3 to `mcp.mnemonik.xyz`.
 3. The server stores the envelope encrypted at rest (AWS KMS-wrapped
    AES-256 on S3 + RDS) and indexed by your Google `sub`.
 
@@ -205,7 +205,7 @@ The Options → Privacy section contains a single toggle: **"Send
 anonymous usage counters."** It is disabled out of the box.
 
 When (and only when) you enable it, the extension reports to
-`mc.mnemonik.xyz/telemetry`:
+`mcp.mnemonik.xyz/telemetry`:
 
 - counter: number of captures, recalls, and verifies in the last 24 h
 - counter: error code histogram (no message bodies, no stack traces)

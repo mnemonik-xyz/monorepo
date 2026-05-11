@@ -65,7 +65,7 @@ export class TransientSyncError extends Error {
 
 /** Hosted MCP origin. Phase 1 hard-code matches `auth/google-oauth.ts`;
  *  a future options-page seam will read this from `chrome.storage.sync`. */
-export const DEFAULT_CLOUD_ORIGIN = "https://mc.mnemonik.xyz";
+export const DEFAULT_CLOUD_ORIGIN = "https://mcp.mnemonik.xyz";
 
 /** Construction-time deps so tests can inject `fetch` + `now`. */
 export interface CloudClientOptions {

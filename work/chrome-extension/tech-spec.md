@@ -86,7 +86,7 @@ Adapter registry is a flat array exported from `src/content/adapters.ts`. Servic
 - `mcp/src/config.rs` — new env vars (all optional; if unset, Google login + escrow are disabled and server still boots):
   - `GOOGLE_OAUTH_CLIENT_ID`
   - `GOOGLE_OAUTH_CLIENT_SECRET`
-  - `GOOGLE_OAUTH_REDIRECT_URI` (default `https://mc.mnemonik.xyz/oauth/google/callback`)
+  - `GOOGLE_OAUTH_REDIRECT_URI` (default `https://mcp.mnemonik.xyz/oauth/google/callback`)
   - `KEY_ESCROW_RATE_LIMIT` (default 5, per 24h, per `google_sub`)
 - `mcp/src/main.rs` — wire Google OAuth router and key-escrow router conditionally (only if `GOOGLE_OAUTH_CLIENT_ID` set).
 - `core/src/storage/sqlite.rs` — migrations:

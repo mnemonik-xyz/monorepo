@@ -47,7 +47,7 @@ LOCAL MODE (DEFAULT, FREE)
 CLOUD MODE (OPTIONAL, PAID)
 
 • Sign in with Google in the popup. The extension uses chrome.identity.launchWebAuthFlow via our verified OAuth client, receives a signed id_token, and binds your account to that Google subject identifier (sub).
-• Every signed attestation is sent over TLS 1.3 to mc.mnemonik.xyz and stored encrypted at rest on AWS (KMS-wrapped AES-256). You can list, recall, and delete from any logged-in device.
+• Every signed attestation is sent over TLS 1.3 to mcp.mnemonik.xyz and stored encrypted at rest on AWS (KMS-wrapped AES-256). You can list, recall, and delete from any logged-in device.
 • Mnemonik can read the plaintext content of cloud attestations (no end-to-end encryption in this release — explicitly documented in our privacy policy). If that's not acceptable for your use case, stay in Local mode.
 • Billed per-attestation outside the Chrome Web Store. Local mode never asks for payment.
 
@@ -77,7 +77,6 @@ PERMISSIONS
 • identity — Google sign-in flow (Cloud mode only).
 • contextMenus — register the right-click "Save selection" item.
 • activeTab — read the current tab on a user gesture (capture / save selection).
-• clipboardWrite — copy a captured memory or a recall result as markdown.
 • alarms — retry the cloud sync queue on a schedule.
 • Host permissions: chatgpt.com, claude.ai, gemini.google.com — to run the per-platform conversation extractor.
 

@@ -332,7 +332,7 @@ test("welcome_back_then_passphrase_restores_identity", async () => {
     // depend on the cloud-client chunk's session resolver (which would
     // need a parallel session-write — orthogonal to the anchor).
     const recallHits = await popup.evaluate(async (jwt: string) => {
-      const res = await fetch("https://mc.mnemonik.xyz/mcp", {
+      const res = await fetch("https://mcp.mnemonik.xyz/mcp", {
         method: "POST",
         headers: {
           "content-type": "application/json",

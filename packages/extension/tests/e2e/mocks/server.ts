@@ -1,4 +1,4 @@
-// T19 — `mc.mnemonik.xyz` server-side mock for Playwright extension
+// T19 — `mcp.mnemonik.xyz` server-side mock for Playwright extension
 // tests. Routes are installed at the context level so every page (popup,
 // options, content scripts, service worker fetch) picks them up.
 //
