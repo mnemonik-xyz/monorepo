@@ -104,7 +104,33 @@ export function App(): JSX.Element {
       r.getActiveTabSelection(),
       r.session.get(),
     ]);
-    setIdentity(id);
+    // T25b: auto-mint a local Ed25519 identity if none exists yet so the
+    // header never renders "no identity" after first popup open. Two
+    // safe-to-auto-generate cases per the task spec:
+    //   - Local tier with no identity (no remote side could possibly own
+    //     anything).
+    //   - Cloud tier with no Google session — the server cannot have
+    //     linked an escrow blob to a user we haven't authenticated as,
+    //     so a fresh keypair is correct; the onboarding flow + key-
+    //     escrow restore (T17) re-derive identity *after* sign-in.
+    // When cloud tier + a session is already bound we leave identity
+    // alone — the existing onboarding / restore paths own that surface,
+    // and auto-minting here would risk clobbering a cloud-linked key
+    // when `escrow_present === true`.
+    let resolvedIdentity = id;
+    if (id === null && (t === "local" || sess === null)) {
+      try {
+        const { ensureLocalIdentity } =
+          await import("../auth/local-identity.js");
+        const fresh = await ensureLocalIdentity();
+        resolvedIdentity = { pubkey_base58: fresh.pubkey_base58 };
+      } catch {
+        // chrome.storage denied / WebCrypto missing — fall back to the
+        // legacy "no identity" header. The popup still renders; the
+        // user can mint manually via the Options page.
+      }
+    }
+    setIdentity(resolvedIdentity);
     setTier(t);
     setAdapter(ad);
     setSelection(sel);

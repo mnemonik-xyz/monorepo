@@ -77,6 +77,13 @@ export interface ServiceWorkerDeps {
   /** ISO-8601 clock — defaults to `() => new Date().toISOString()`;
    *  swappable for deterministic tests. */
   now: () => string;
+  /** T25b prewarm seam. Fires from `chrome.runtime.onInstalled` for
+   *  `install` + `update` reasons so the ORT WASM + ONNX embedder
+   *  model start downloading before the user's first capture. Tests
+   *  inject a spy/no-op to avoid the ~35MB network hop; production
+   *  defaults to {@link defaultPrewarmEmbedder}. Errors are absorbed
+   *  by the install listener so a slow network never wedges install. */
+  prewarmEmbedder?: () => Promise<void>;
 }
 
 /** Production deps factory — keep cheap; called once per SW boot. */
@@ -88,7 +95,20 @@ function defaultDeps(): ServiceWorkerDeps {
     cloudClientProvider: defaultCloudClientProvider,
     emitSyncEvent: defaultEmitSyncEvent,
     now: () => new Date().toISOString(),
+    prewarmEmbedder: defaultPrewarmEmbedder,
   };
+}
+
+/**
+ * Default prewarm: lazy-import the shared embedder bridge and trigger
+ * its idempotent init. Lazy so a SW cold-boot without an install /
+ * update event never pulls the transformers.js bundle. Errors here
+ * are non-fatal — the install listener absorbs them.
+ */
+async function defaultPrewarmEmbedder(): Promise<void> {
+  const { __ensureEmbedderInitialised } =
+    await import("../runtime/embed/embedder-bridge.js");
+  await __ensureEmbedderInitialised();
 }
 
 /**
@@ -148,7 +168,7 @@ export function installServiceWorker(deps: ServiceWorkerDeps): void {
   const { chrome: cr } = deps;
 
   // ── install / activation ─────────────────────────────────────────────
-  cr.runtime.onInstalled.addListener(() => {
+  cr.runtime.onInstalled.addListener((details) => {
     // `contextMenus.create` does NOT dedupe by id — on the `update`
     // reason Chrome sets `chrome.runtime.lastError` ("Cannot create
     // item with duplicate id") because context menus persist across SW
@@ -165,6 +185,28 @@ export function installServiceWorker(deps: ServiceWorkerDeps): void {
     cr.alarms.create(ALARM_CLOUD_SYNC_RETRY, {
       periodInMinutes: ALARM_PERIOD_MIN,
     });
+    // T25b: pre-warm the ORT WASM + ONNX embedder model on install /
+    // update so the user's first capture doesn't sit for 60-120s
+    // downloading ~35MB before sign. `browser_update` / `shared_module_-
+    // update` / `chrome_update` fire on Chrome's own updates and are
+    // skipped (model cache survives those untouched). Errors absorbed
+    // — slow networks just fall back to the cold-init cost on first
+    // capture, which is the pre-T25b behaviour.
+    const reason = details?.reason;
+    if (
+      (reason === "install" || reason === "update") &&
+      deps.prewarmEmbedder !== undefined
+    ) {
+      const prewarm = deps.prewarmEmbedder;
+      void (async () => {
+        try {
+          await prewarm();
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          console.warn("[mnemonik] embedder prewarm failed:", message);
+        }
+      })();
+    }
   });
 
   // ── context-menu → active tab ────────────────────────────────────────
