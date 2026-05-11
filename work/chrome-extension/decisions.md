@@ -447,6 +447,44 @@ invocation).
 
 ---
 
+## 2026-05-11 · T10 — MV3 manifest + service-worker router lands; awaiting CI verify
+
+`packages/extension/manifest.json` finalised + `packages/extension/src/background/service-worker.ts` now owns the typed dispatch surface:
+
+- **Permissions** (unchanged from T01 baseline): `storage`, `identity`, `contextMenus`, `activeTab`, `clipboardWrite`, `alarms`. **No `<all_urls>`** anywhere (D11). `host_permissions` stays enumerated: `https://chatgpt.com/*`, `https://claude.ai/*`, `https://gemini.google.com/*`.
+- **`content_scripts`** — one entry per supported AI-chat domain, loading the matching adapter + `src/content/fab.ts` + `src/content/recall-overlay.ts` at `document_idle`. The two content-script entry files are intentionally thin stubs in T10; T13 (FAB + recall overlay) owns the real UI. Without the stub files the manifest references would break the @crxjs/vite-plugin bundle.
+- **`commands`** — `_execute_action` (Ctrl/Cmd+Shift+M, opens popup) and `recall-overlay` (Ctrl/Cmd+Shift+R, dispatches `sw:open-recall-overlay` to active tab). The previous baseline used `Ctrl+Shift+K` for the overlay; updated to match the T10 spec.
+- **`web_accessible_resources`** — `src/assets/*`, `src/content/recall-overlay.css` (T13 will create), `src/runtime/embed/worker.ts` (T04), `wasm/*.wasm`, `models/*`, scoped to the three enumerated origins. No `<all_urls>` here either.
+- **CSP** — `extension_pages: "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'; base-uri 'self'; connect-src 'self' https://mc.mnemonik.xyz https://huggingface.co https://cdn-lfs.huggingface.co"`. No `unsafe-eval`, no remote script sources; `wasm-unsafe-eval` allowed for the `@mnemonic/core` WASM (and transformers.js). `connect-src` enumerates the hosted MCP server + Hugging Face CDNs (lazy-loaded embedder model from T04).
+- **Service worker** wiring (`installServiceWorker(deps)` is exported so the unit tests can mock `chrome.*`):
+  - `chrome.runtime.onInstalled` → registers the `save-selection` context menu (contexts: `['selection']`) and the `cloud-sync-retry` alarm (`periodInMinutes: 5`).
+  - `chrome.contextMenus.onClicked` → on `save-selection`, dispatches `{type: 'sw:save-selection', payload: {selectionText, pageUrl, pageTitle?, capturedAt}}` to the active tab. Empty selections / mismatched menu items are dropped silently. This is the user-gesture surface that satisfies D11/D12 for generic page capture.
+  - `chrome.commands.onCommand` → on `recall-overlay`, dispatches `{type: 'sw:open-recall-overlay', payload: {trigger: 'hotkey'}}` to the active tab. `_execute_action` is handled directly by Chrome and intentionally not routed through the SW.
+  - `chrome.runtime.onMessage` → narrows via `parseMsg(unknown): Msg | null` (no `any` in the public surface), async-dispatches to `handleMsg`, returns `true` to keep `sendResponse` alive across awaits (MV3 contract). Unknown shapes → `{ok: false, error: 'unknown-message'}`.
+  - `chrome.alarms.onAlarm` → on `cloud-sync-retry`, instantiates an `IndexedDbStore` and calls `flushPending({store})`. Errors are warn-logged but don't crash the SW.
+- **`src/messages.ts`** — discriminated union `Msg` over `sw:save-selection | sw:open-recall-overlay | ui:sign-memory | ui:recall | ui:flush-pending | tab:capture-candidate`. All payloads are JSON-serialisable (binary blobs travel as base64 at the runtime layer — popup/content/SW never carry typed-arrays through `chrome.runtime.sendMessage`). `parseMsg` is the only narrowing entry point; tests pin its rejection of unknown shapes.
+- **`src/runtime/sync/cloud-client.ts`** — T18-owned stub. Exports `flushPending({store}): Promise<{attempted, flushed}>` so the SW has a stable call site before T18 lands. The stub reads `listPending()` for telemetry and returns `{attempted: <n>, flushed: 0}`; T18 will swap in the real deferred-signing POST flow.
+
+**D13-binding TDD anchors pass locally:**
+
+- `tests/unit/background/service-worker.test.ts::context_menu_save_selection_emits_message` — fires `contextMenus.onClicked` with selectionText + pageUrl + tab → asserts `tabs.sendMessage(tabId, {type:'sw:save-selection', payload:{selectionText, pageUrl, ...}})`. Companion negative tests cover empty selection drop and non-save-selection menu-id drop.
+- `tests/unit/background/service-worker.test.ts::alarm_drains_pending_queue` — enqueues two attestation ids into a real `IndexedDbStore` (via `fake-indexeddb/auto`), fires `alarms.onAlarm` with name `cloud-sync-retry` → asserts the injected `flushPending` spy was called exactly once with `{store}` and the store still contains the two pending rows (T18 dequeues; T10 only wires the drain trigger). Companion test asserts other alarm names don't trigger flushPending.
+
+Plus: install handler creates both the context menu and the alarm with the right ids; commands.onCommand routes the overlay hotkey; the typed `onMessage` router accepts `ui:flush-pending` and rejects unknown shapes with a sentinel error.
+
+**Sandbox observations / pre-existing failures (not in scope for T10):**
+
+- `tests/unit/sign/cose.test.ts` fails to load `core/pkg-web/mnemonic_core.js` — the WASM bindings aren't built in the sandbox image. Pre-existing on `dev`; T05 / a CI build step owns producing that artifact. T10 does not touch the signing path.
+- `vite.config.ts` reports a `tsc -b` error from the duplicate `vite` install (root + nested `node_modules/vite` typings disagree under `exactOptionalPropertyTypes`). Pre-existing on `dev`; out of T10 scope. The crxjs build still runs.
+
+**Note for T13:** the manifest's `content_scripts` entries already point at `src/content/fab.ts` and `src/content/recall-overlay.ts`. T13 should replace these stubs in place rather than renaming, so the manifest stays untouched. The CSS file referenced from `web_accessible_resources` (`src/content/recall-overlay.css`) does not exist yet — T13 creates it; absent at build time it's a soft miss in `web-ext lint` (warning, not failure).
+
+**Note for T18:** `src/runtime/sync/cloud-client.ts::flushPending` is the stable entry point. Inject the `IndexedDbStore` via the `FlushPendingDeps` shape; the SW already constructs and passes the store. Iterate FIFO over `store.listPending()`, drain via the deferred-signing flow described in tech-spec §"Cloud-mode `signMemory`", and call `store.dequeue(attestation_id)` on success. Test the drain in isolation against the same `fake-indexeddb` fixture pattern.
+
+Task `10.md` held at `status: in_review` with `blocked_on: ci-verify` per D13 — flips to `done` only after the PR's CI run reports green.
+
+---
+
 ## 2026-05-11 · T15 — Server key-escrow + extension-bootstrap endpoints land; awaiting CI verify
 
 `mcp/src/escrow.rs` + `mcp/tests/key_escrow.rs` ship the server side
@@ -740,3 +778,18 @@ Task `15.md` stays at `status: in_review` / `blocked_on: ci-verify`
 per D13 — flips to `done` only after PR #114 CI reports green.
 
 ---
+
+## 2026-05-11 · T10 — Round-2 review fixes (security finding T10-N2-01)
+
+Round-2 security audit on PR #112 surfaced a low-severity logic flaw in
+`isAuthorisedSender`:
+
+- The early sender.id guard was `if (typeof ownId === "string" && sender.id && sender.id !== ownId)` — the `sender.id &&` short-circuit silently allowed undefined/empty `sender.id` to bypass the rejection. Tightened to `sender.id !== undefined && sender.id !== ownId` so any non-matching set value is rejected.
+- The `ui:*` branch had `if (sender.url === undefined) return true;` — when both `sender.id` and `sender.url` were absent, the message passed without positive identification. Replaced with a positive-identification requirement: at least one of `sender.id === ownId` or `sender.url.startsWith("chrome-extension://" + ownId + "/")` must hold; otherwise reject.
+- Added a regression test (`rejects ui:* messages with no positive sender identification (T10-N2-01)`) — bare `{}` MessageSender now resolves to `{ ok: false, error: "unauthorized-sender" }` and `flushPending` is never invoked.
+- Replaced `vi.waitFor` (added in the previous round-2 commit per nit #6) with a Promise-based polling loop, since `vi.waitFor` is vitest-only and `bun test` runs the same file. All 10 service-worker tests + the 104-test extension suite stay green.
+
+Deferred: T10-N2-02 nit (`scripting` permission pre-declared for T13).
+Same pattern as `clipboardWrite` was — keep for now since T13 is the
+next wave (Wave C) and lands within the same release. Will revisit if
+T13 slips.
