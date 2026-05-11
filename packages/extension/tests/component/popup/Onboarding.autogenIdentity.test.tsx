@@ -227,6 +227,90 @@ describe("Onboarding — T25 auto-generate identity on fresh sign-in", () => {
     }
   });
 
+  // PR136-C-03: regression-lock the "do NOT autogen when a keypair
+  // already exists" half of the contract. The pre-T25 deadlock was on
+  // fresh-user storage; if a future commit inverts the conditional
+  // (e.g. `if (keypair)` instead of `if (!keypair)`), it would silently
+  // overwrite the existing keypair on every sign-in. This test fails
+  // loudly in that case.
+  it("does NOT regenerate the keypair when one already exists in storage", async () => {
+    const { store } = installChromeStub();
+    // Pre-seed canonical identity layout: a 64-byte secret + the
+    // public-half row. The auto-gen path must NOT touch either.
+    const PRE_SEEDED_PUBKEY = "PreSeededPubKey0xCAFE";
+    const preSeededSecret: number[] = [];
+    for (let i = 0; i < 64; i++) preSeededSecret.push((i * 7 + 3) & 0xff);
+    store.set(IDENTITY_KEY, {
+      pubkey_base58: PRE_SEEDED_PUBKEY,
+      created_at: 1700000000000,
+    });
+    store.set(IDENTITY_SECRET_KEY, preSeededSecret);
+
+    // Install a WASM stub that would surface a different pubkey if the
+    // autogen path fires by mistake — the assertion compares the
+    // stored pubkey against PRE_SEEDED_PUBKEY, so this drift is what
+    // makes the test definitive.
+    const generateKeypairSpy = vi.fn(() => ({
+      pubkey_base58: "SHOULD_NOT_BE_USED",
+      secret: Array.from({ length: 64 }, () => 0),
+    }));
+    __setWasmForTesting({
+      default: () => Promise.resolve(undefined),
+      generate_keypair: generateKeypairSpy,
+      sign_challenge: () => new Uint8Array(64),
+      sign_cose_payload: () => new Uint8Array([0x84]),
+      import_keypair_json: () => ({}),
+      export_keypair_json: () => "{}",
+      compress_embedding: () => new Uint8Array(0),
+      decompress_embedding: () => new Float32Array(0),
+      to_canonical_cbor_bytes: () => new Uint8Array(0),
+      blake3_hash: () => new Uint8Array(32),
+      blake3_hash_hex: () => "00".repeat(32),
+    } as unknown as Parameters<typeof __setWasmForTesting>[0]);
+
+    const signIn = vi
+      .fn<[], Promise<GoogleSignInResult>>()
+      .mockResolvedValue(makeSignInResult());
+    // Fresh-user branch (existingPubkey === null) — exactly the branch
+    // that triggers mintAndPersistKeypair in the pre-T25 contract. The
+    // guard prevents autogen ONLY when storage already has a keypair.
+    const lookupExisting = vi
+      .fn<[string], Promise<LookupResult>>()
+      .mockResolvedValue({
+        existingPubkey: null,
+        escrowPresent: false,
+        linkChallenge: btoa("link-challenge-XYZ"),
+      });
+    setRuntime(makeRuntime({ signIn, lookupExisting }));
+
+    render(<Onboarding onComplete={() => undefined} />);
+    fireEvent.click(
+      screen.getByRole("button", { name: /Sign in with Google/i }),
+    );
+
+    // Wait until the flow reaches SetPassphrase so we know the
+    // orchestrator has finished its sign-in branch.
+    await waitFor(
+      () => {
+        expect(
+          screen.queryByText(/Set recovery passphrase/i),
+        ).toBeInTheDocument();
+      },
+      { timeout: 3000 },
+    );
+
+    // The stored values are byte-identical to the pre-seeded ones —
+    // mintAndPersistKeypair did NOT fire.
+    expect(generateKeypairSpy).not.toHaveBeenCalled();
+    const identity = store.get(IDENTITY_KEY) as {
+      pubkey_base58?: string;
+      created_at?: number;
+    };
+    expect(identity.pubkey_base58).toBe(PRE_SEEDED_PUBKEY);
+    expect(identity.created_at).toBe(1700000000000);
+    expect(store.get(IDENTITY_SECRET_KEY)).toEqual(preSeededSecret);
+  });
+
   it("surfaces a typed error when generate_keypair throws", async () => {
     installChromeStub();
     // Wasm stub whose generate_keypair throws synchronously — the
