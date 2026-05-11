@@ -175,7 +175,7 @@ describe("service-worker · context_menu_save_selection_emits_message", () => {
         id: 42,
         title: "Example",
         url: "https://example.com/post/1",
-      } as chrome.tabs.Tab
+      } as chrome.tabs.Tab,
     );
 
     expect(cr.tabs.sendMessage).toHaveBeenCalledTimes(1);
@@ -201,7 +201,7 @@ describe("service-worker · context_menu_save_selection_emits_message", () => {
         selectionText: "",
         pageUrl: "https://example.com/",
       } as chrome.contextMenus.OnClickData,
-      { id: 7 } as chrome.tabs.Tab
+      { id: 7 } as chrome.tabs.Tab,
     );
 
     expect(cr.tabs.sendMessage).not.toHaveBeenCalled();
@@ -218,7 +218,7 @@ describe("service-worker · context_menu_save_selection_emits_message", () => {
         selectionText: "x",
         pageUrl: "https://example.com/",
       } as chrome.contextMenus.OnClickData,
-      { id: 1 } as chrome.tabs.Tab
+      { id: 1 } as chrome.tabs.Tab,
     );
 
     expect(cr.tabs.sendMessage).not.toHaveBeenCalled();
@@ -282,6 +282,95 @@ describe("service-worker · alarm_drains_pending_queue", () => {
     await Promise.resolve();
     expect(flushSpy).not.toHaveBeenCalled();
   });
+
+  // Regression for test-reviewer F2 + code-review T18-C-04: a second
+  // alarm tick (or `ui:flush-pending` UI gesture) that fires while a
+  // previous drain is still awaiting the network MUST no-op rather
+  // than race a second drain against the same `pending_uploads` rows.
+  it("skips a second alarm while the previous drain is in-flight", async () => {
+    const { deps, cr } = makeDeps();
+    // Use a deferred so we can hold the first drain open while we
+    // fire the second alarm. The guard awaits flushPending; as long
+    // as this promise is pending, the guard stays set.
+    let release: (v: { attempted: number; flushed: number }) => void = () => {};
+    const pending = new Promise<{ attempted: number; flushed: number }>(
+      (resolve) => {
+        release = resolve;
+      },
+    );
+    const flushSpy = vi.fn().mockReturnValue(pending);
+    deps.flushPending =
+      flushSpy as unknown as ServiceWorkerDeps["flushPending"];
+
+    installServiceWorker(deps);
+
+    // First alarm — kicks off the drain (pending).
+    cr.alarms.onAlarm.fire({
+      name: "cloud-sync-retry",
+      scheduledTime: Date.now(),
+    } as chrome.alarms.Alarm);
+    await new Promise((r) => setTimeout(r, 5));
+    expect(flushSpy).toHaveBeenCalledTimes(1);
+
+    // Second alarm — guard must skip.
+    cr.alarms.onAlarm.fire({
+      name: "cloud-sync-retry",
+      scheduledTime: Date.now(),
+    } as chrome.alarms.Alarm);
+    await new Promise((r) => setTimeout(r, 5));
+    expect(flushSpy).toHaveBeenCalledTimes(1);
+
+    // Release the first drain so the guard clears.
+    release({ attempted: 0, flushed: 0 });
+    await new Promise((r) => setTimeout(r, 5));
+
+    // After release, a fresh alarm tick proceeds normally.
+    cr.alarms.onAlarm.fire({
+      name: "cloud-sync-retry",
+      scheduledTime: Date.now(),
+    } as chrome.alarms.Alarm);
+    await new Promise((r) => setTimeout(r, 5));
+    expect(flushSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it("ui:flush-pending also respects the in-flight guard (code-review T18-C-04)", async () => {
+    const { deps, cr } = makeDeps();
+    let release: (v: { attempted: number; flushed: number }) => void = () => {};
+    const pending = new Promise<{ attempted: number; flushed: number }>(
+      (resolve) => {
+        release = resolve;
+      },
+    );
+    const flushSpy = vi.fn().mockReturnValue(pending);
+    deps.flushPending =
+      flushSpy as unknown as ServiceWorkerDeps["flushPending"];
+
+    installServiceWorker(deps);
+
+    // Kick off via the alarm.
+    cr.alarms.onAlarm.fire({
+      name: "cloud-sync-retry",
+      scheduledTime: Date.now(),
+    } as chrome.alarms.Alarm);
+    await new Promise((r) => setTimeout(r, 5));
+    expect(flushSpy).toHaveBeenCalledTimes(1);
+
+    // Concurrent UI-driven flush — must observe `{ skipped: true }`
+    // and NOT call flushPending a second time.
+    const captured = await new Promise<unknown>((resolve) => {
+      cr.runtime.onMessage.fire(
+        { type: "ui:flush-pending" },
+        popupSender(),
+        (response: unknown) => resolve(response),
+      );
+    });
+    expect(flushSpy).toHaveBeenCalledTimes(1);
+    expect(captured).toEqual({ ok: true, result: { skipped: true } });
+
+    // Cleanup.
+    release({ attempted: 0, flushed: 0 });
+    await new Promise((r) => setTimeout(r, 5));
+  });
 });
 
 describe("service-worker · runtime.onMessage router", () => {
@@ -293,7 +382,7 @@ describe("service-worker · runtime.onMessage router", () => {
     cr.runtime.onMessage.fire(
       { type: "nope" },
       {} as chrome.runtime.MessageSender,
-      (response: unknown) => responses.push(response)
+      (response: unknown) => responses.push(response),
     );
 
     expect(responses[0]).toEqual({ ok: false, error: "unknown-message" });
@@ -307,7 +396,7 @@ describe("service-worker · runtime.onMessage router", () => {
       cr.runtime.onMessage.fire(
         { type: "ui:flush-pending" },
         popupSender(),
-        (response: unknown) => resolve(response)
+        (response: unknown) => resolve(response),
       );
     });
 
@@ -326,7 +415,7 @@ describe("service-worker · runtime.onMessage router", () => {
       cr.runtime.onMessage.fire(
         { type: "ui:flush-pending" },
         {} as chrome.runtime.MessageSender,
-        (response: unknown) => resolve(response)
+        (response: unknown) => resolve(response),
       );
     });
 

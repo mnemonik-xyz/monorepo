@@ -31,7 +31,6 @@
     "identity",
     "contextMenus",
     "activeTab",
-    "scripting",
     "alarms"
   ],
   "host_permissions": [
@@ -44,6 +43,7 @@
       "matches": ["https://chatgpt.com/*"],
       "js": [
         "src/runtime/chat/adapters/chatgpt.adapter.ts",
+        "src/content/adapter-bridge.ts",
         "src/content/fab.ts",
         "src/content/recall-overlay.ts"
       ],
@@ -53,6 +53,7 @@
       "matches": ["https://claude.ai/*"],
       "js": [
         "src/runtime/chat/adapters/claude.adapter.ts",
+        "src/content/adapter-bridge.ts",
         "src/content/fab.ts",
         "src/content/recall-overlay.ts"
       ],
@@ -62,6 +63,7 @@
       "matches": ["https://gemini.google.com/*"],
       "js": [
         "src/runtime/chat/adapters/gemini.adapter.ts",
+        "src/content/adapter-bridge.ts",
         "src/content/fab.ts",
         "src/content/recall-overlay.ts"
       ],

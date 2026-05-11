@@ -165,6 +165,11 @@ export function Restore(props: RestoreProps): JSX.Element {
     if (keyEscrow !== undefined) {
       keRef.current = keyEscrow;
     } else {
+      // Legacy test seam: tests inject `fetchImpl` + `serverOrigin` to
+      // pin the wire shape against a fake server. New callers should
+      // use `keyEscrow` (or rely on the popup runtime in production —
+      // `popup/runtime.ts` constructs the facade with the
+      // bootstrap-ticket-resolved aud=extension JWT under the hood).
       const httpOpts: { serverOrigin?: string; fetchImpl?: typeof fetch } = {};
       if (serverOrigin !== undefined) httpOpts.serverOrigin = serverOrigin;
       if (fetchImpl !== undefined) httpOpts.fetchImpl = fetchImpl;
@@ -323,6 +328,21 @@ export function Restore(props: RestoreProps): JSX.Element {
           });
           return;
         }
+      }
+
+      // FW-S-02: defence-in-depth. The server already binds the blob
+      // to `pubkey_base58` at PUT time, but a buggy / compromised
+      // server could deliver a different account's blob. Refuse the
+      // unwrap if the blob's bound pubkey does not match the pubkey
+      // surfaced by `/oauth/google/lookup`. Without this check, a
+      // mismatched blob would silently land an identity whose
+      // pubkey_base58 doesn't match the actually-decrypted secret.
+      if (blob.pubkey_base58 !== existingPubkey) {
+        setStep({
+          kind: "error",
+          message: "Server returned mismatched identity blob. Contact support.",
+        });
+        return;
       }
 
       // Local AES-GCM unwrap. Wrong passphrase surfaces here WITHOUT a

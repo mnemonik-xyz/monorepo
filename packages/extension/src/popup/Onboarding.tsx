@@ -350,7 +350,11 @@ async function loadLocalKeypair(): Promise<{
   }
   const pub = stored.identity?.pubkey_base58;
   const sec = stored.identity_secret;
-  if (!pub || !Array.isArray(sec) || sec.length === 0) return null;
+  // FW-S-06: enforce the 64-byte (seed||pubkey) length that
+  // runtime-impl::loadIdentity already requires. Stops a truncated
+  // identity_secret slipping into the wrap-and-upload path where the
+  // mismatch would only surface at sign time.
+  if (!pub || !Array.isArray(sec) || sec.length !== 64) return null;
   return { pubkey_base58: pub, secret: Uint8Array.from(sec) };
 }
 

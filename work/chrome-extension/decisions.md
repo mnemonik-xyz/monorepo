@@ -1232,3 +1232,143 @@ Three round-1 reviewers (code-reviewer, security-auditor, test-reviewer) returne
 - `vitest run tests/unit/auth/key-escrow.test.ts` → 50 pass (was 33 before round-1; +17 from this fix wave).
 - `bun test` (full extension) → 196 pass / 1 pre-existing `cose.test.ts` WASM failure (unchanged from the pre-fix baseline).
 
+
+---
+
+## 2026-05-11 · Final-Wave audit-fix integration pass
+
+Re-audit on `origin/dev` head `65e8a75` raised five blockers + six majors +
+selected minors; this commit closes them. Full audit reports under
+`work/chrome-extension/logs/working/audit/{code,security,test}-auditor.json`.
+
+**Blockers addressed:**
+
+- **FW-S-01 / code-blocker-1 — extension-bootstrap ticket dance.**
+  New `src/auth/bootstrap-ticket.ts` (`issueTicket` + `redeemTicket` +
+  `getOrRefreshExtensionJwt`). Caches the `aud=extension` JWT on
+  `Session.extensionJwt` / `Session.extensionJwtExpiresAt`. Popup
+  runtime + options runtime both call this helper before any
+  `/api/key-escrow` op; the `aud=mcp` JWT continues to authenticate
+  `/oauth/*` and `POST /api/extension-bootstrap/issue`. Five-case unit
+  test at `tests/unit/auth/bootstrap-ticket.test.ts` (handshake
+  sequence, Authorization-header invariants, cache reuse, 404 mapping).
+
+- **code-blocker-2 — options auth.signIn + cloudSync stubs.**
+  `options/runtime-impl.ts` `signIn` now dynamic-imports the real
+  `signInWithGoogle` and persists via the canonical `setSession`.
+  `cloudSync.{countCloudAttestations, enqueueAll, exportAll,
+  subscribeProgress}` rewired to live IndexedDB + CloudClient paths.
+  `exportAll` produces an .ndjson bundle (no new zip dep needed).
+
+- **code-blocker-3 — session schema unification.**
+  `auth/session.ts` is now the sole source of truth for the
+  `session.v1` slot. Options `getSession`/`clearSession` delegate to
+  it; the legacy snake_case top-level reader (`{google_sub, email}`)
+  is gone. `Session` type extended with optional `extensionJwt` /
+  `extensionJwtExpiresAt` and the shape guard updated accordingly.
+
+- **code-blocker-4 — SW ui:recall returns real results.**
+  `handleMsg('ui:recall')` now resolves the active identity,
+  dynamic-imports the embedder + IndexedDbStore, runs the local cosine
+  search, calls `cloudClient.recallRemote` when a session is bound,
+  and merges via the shared `mergeRecallHits` helper. The hotkey
+  overlay's `reply.results` field now carries real hits.
+
+- **code-blocker-5 — FAB tab:fab-* messages.**
+  Added `tab:fab-save-chat`, `tab:fab-save-selection`,
+  `tab:fab-open-popup` to the `Msg` discriminated union, with full
+  per-variant guards in `parseMsg`. SW `handleMsg` dispatches them
+  (open-popup → `chrome.action.openPopup()`); `isAuthorisedSender`
+  authorises the new variants alongside `tab:capture-candidate`.
+  Tests: `tests/unit/messages.test.ts` (6 new cases pin acceptance +
+  rejection of malformed payloads).
+
+- **FW-S-03 / code-major (runFlushGuarded) +
+  FW-S-04 (DRAIN_ROW_TIMEOUT_MS).** Recovered by cherry-pick of
+  `15f0bc8` from `claude/extension-t18-cloud-sync` — the T18 round-2
+  commit that PR #122's squash dropped. Brings back the shared
+  `runFlushGuarded(deps, origin)` wrapper around both alarm + UI
+  flushes, the 30s `DRAIN_ROW_TIMEOUT_MS` per-row sentinel, and the
+  accompanying two service-worker concurrency tests +
+  `merge-recall.ts` extraction.
+
+**Majors addressed:**
+
+- **#8 Claude+Gemini adapters in popup-realm registry index.**
+  `src/runtime/chat/adapters/index.ts` now imports all three adapters
+  alphabetically — popup `selectAdapter(url)` resolves on Claude.ai
+  and gemini.google.com instead of returning null.
+
+- **#9 FAB / settings camelCase vs snake_case.**
+  Picked snake_case as the canonical cross-task DTO shape (per
+  T-NIT-1 recommendation). `src/content/fab.ts` reads
+  `per_domain[domain].fab_visible`; the camelCase mirror types
+  removed. fab.test.ts updated accordingly.
+
+- **#10 Popup Save-chat content-script bridge.**
+  New `src/content/adapter-bridge.ts` registers a
+  `chrome.runtime.onMessage` listener that handles `ui:get-selection`
+  (via `window.getSelection`) and `ui:extract-conversation` (via
+  `selectAdapter(location.href).extractConversation(document)`).
+  Bridge added to each `content_scripts` entry in `manifest.json`.
+
+- **#11 Popup runtime facade discipline (partial).**
+  `popup/runtime.ts::keyEscrow.{upload,fetch,delete,rotate,hasBlob}`
+  now resolves the `aud=extension` JWT via the new bootstrap-ticket
+  helper before delegating to `auth/key-escrow.ts`. Restore.tsx +
+  SetPassphrase.tsx test seams keep the explicit `keyEscrow` prop,
+  with production fallbacks routed through the runtime where
+  practical. Direct `fetchEscrow`/`unwrapSecret` imports retained in
+  Restore.tsx ONLY for the legacy `{fetchImpl, serverOrigin}` test
+  injection path — documented inline.
+
+- **#12 Dead Popup.tsx deleted.** Confirmed no importers.
+
+- **FW-S-02 — Restore.tsx pubkey binding check.**
+  Immediately after `fetch(jwt)` and before `unwrap`, refuse the
+  unwrap if `blob.pubkey_base58 !== existingPubkey` — defence-in-depth
+  against a swapped blob landing a mismatched identity. Error copy:
+  "Server returned mismatched identity blob. Contact support."
+
+- **T-MAJ tests/unit/content/** in CI.**
+  `.github/workflows/node-test.yml` vitest step glob extended to
+  `tests/component tests/unit/content` so the 8 JSDOM-backed FAB +
+  recall-overlay tests now gate merges.
+
+**Minors addressed (cheap):**
+
+- **#15** `popup/runtime-impl.ts::verify` migrated from `findByTx` to
+  `findById` (T18-added primary-key path).
+- **#17 + #18** SW + popup file-header doc staleness corrected
+  (`background/cloud-sync.ts` reference; `signRemote` no longer
+  described as a stub).
+- **FW-S-06** `Onboarding.tsx::loadLocalKeypair` now enforces
+  `sec.length === 64` to mirror `runtime-impl::loadIdentity`.
+
+**Minors / nits acknowledged + deferred:**
+
+- **#16** new IndexedDbStore per `signRemote` call — kept for now;
+  `idb` handles concurrent opens gracefully and the per-call surface
+  is narrow. Cheap refactor; not blocking release.
+- **#19** double `as unknown as` cast in `readChromeStorage` — left
+  untouched to keep this PR focused.
+- **#20** `signRemote` swallows `TransientSyncError` — kept; the
+  alarm-drain still retries and the popup's queue-badge UX is
+  backlog.
+- **FW-S-05** `jwt-decode` adoption + id_token iss/aud client-side
+  validation — DEFERRED. Server-side T14 already validates against
+  Google's JWKS; the manual decoder is bounded by length caps in
+  `extractProfile`. Logged for a hardening follow-up wave.
+- **FW-S-07 / nit #24** Unused `scripting` permission REMOVED from
+  manifest.json so the Web Store reviewer doesn't ask.
+- **FW-S-08 / nit #25** CSP `https://*.huggingface.co` wildcard
+  KEPT — the exact LFS CDN host needs a DevTools-trace capture to
+  pin; defer to a network-trace-driven follow-up.
+
+**Test impact**
+
+- New test files: `tests/unit/auth/bootstrap-ticket.test.ts` (5 cases),
+  `tests/unit/messages.test.ts` (9 cases).
+- `bun test` → 242 pass, 1 pre-existing `cose.test.ts` WASM-load fail.
+- `bunx vitest run tests/component tests/unit/content` → 64 pass.
+

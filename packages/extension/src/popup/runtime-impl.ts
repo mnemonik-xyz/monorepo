@@ -135,12 +135,10 @@ function createPipeline(): RuntimePipeline {
         if (!id) {
           return { status: "not_found" };
         }
-        // The store keys attestations by `attestation_id`; today we only
-        // expose `findByTx`, so for `att_<hash>` we synthesise the
-        // matching `local:<hash>` tx-id and look up via that. T18 will
-        // add a direct `findById` helper for cloud rows.
-        const txCandidate = `local:${id.replace(/^att_/, "")}`;
-        const row = await getStore().findByTx(txCandidate);
+        // T18 added `findById` to the store — use the primary-key path
+        // (O(1)) instead of the legacy `local:<hash>` tx-id synthesis
+        // (O(N) cursor scan + fails for cloud-rewritten tx ids).
+        const row = await getStore().findById(id);
         if (!row) {
           return { status: "not_found", attestation_id: id };
         }

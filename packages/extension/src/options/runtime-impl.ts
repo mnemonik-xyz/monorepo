@@ -29,7 +29,8 @@ import {
   rotatePassphrase,
   EscrowNotFoundError,
 } from "../auth/key-escrow.js";
-import { SESSION_STORAGE_KEY } from "../auth/types.js";
+import { getSession, clearSession } from "../auth/session.js";
+import { getOrRefreshExtensionJwt } from "../auth/bootstrap-ticket.js";
 import type {
   AuthFacade,
   AuthSession,
@@ -41,12 +42,6 @@ import type {
   OptionsRuntime,
   SettingsFacade,
 } from "./runtime.js";
-
-// Canonical chrome.storage.local key for the cached Google session.
-// Must match auth/session.ts and the popup's session writer — otherwise
-// every keyEscrow.rotate / delete / hasBlob call from Security silently
-// gets null JWT and fails.
-const SESSION_KEY = SESSION_STORAGE_KEY;
 
 /** Build the production OptionsRuntime. Called once from `main.tsx`. */
 export function createDefaultOptionsRuntime(): OptionsRuntime {
@@ -70,37 +65,39 @@ function createSettingsFacade(): SettingsFacade {
 function createAuthFacade(): AuthFacade {
   return {
     async signIn(): Promise<AuthSession> {
-      // T16 stub — see file header. The Storage section's confirmation
-      // dialog surfaces this error in a toast.
-      throw new Error("Google sign-in is not yet wired (T16 pending)");
+      // Production: dynamic-import the same google-oauth flow the popup
+      // uses, persist the resulting session via auth/session.ts (the
+      // single source of truth for the `session.v1` slot), and project
+      // to the options-side AuthSession shape.
+      const { signInWithGoogle } = await import("../auth/google-oauth.js");
+      const { setSession } = await import("../auth/session.js");
+      const result = await signInWithGoogle();
+      const now = Date.now();
+      await setSession({
+        jwt: result.jwt,
+        googleSub: result.googleSub,
+        profile: result.profile,
+        jwtExpiresAt: result.jwtExpiresAt,
+        signedInAt: now,
+      });
+      return {
+        google_sub: result.googleSub,
+        email: result.profile.email,
+        jwt: result.jwt,
+      };
     },
     async getSession(): Promise<AuthSession | null> {
-      try {
-        const stored = (await chrome.storage.local.get([
-          SESSION_KEY,
-        ])) as Record<string, unknown>;
-        const raw = stored[SESSION_KEY];
-        if (!raw || typeof raw !== "object") return null;
-        const obj = raw as Record<string, unknown>;
-        if (
-          typeof obj.google_sub !== "string" ||
-          typeof obj.email !== "string" ||
-          typeof obj.jwt !== "string"
-        ) {
-          return null;
-        }
-        return {
-          google_sub: obj.google_sub,
-          email: obj.email,
-          jwt: obj.jwt,
-        };
-      } catch {
-        return null;
-      }
+      const session = await getSession();
+      if (!session) return null;
+      return {
+        google_sub: session.googleSub,
+        email: session.profile.email,
+        jwt: session.jwt,
+      };
     },
     async clearSession(): Promise<void> {
       try {
-        await chrome.storage.local.remove(SESSION_KEY);
+        await clearSession();
       } catch {
         // Best-effort.
       }
@@ -140,21 +137,18 @@ function createIdentityFacade(): IdentityFacade {
 function createKeyEscrowFacade(): KeyEscrowFacade {
   return {
     async rotate(oldPassphrase: string, nextPassphrase: string): Promise<void> {
-      // Production wiring (T17): forward to the real key-escrow client.
-      // The Security section's TDD anchor `rotate_passphrase_re_encrypts_blob`
-      // already mocks this seam directly; in production we forward the
-      // typed errors as-is so the Security toast surfaces the right copy
-      // (wrong-passphrase, 429 rate-limit, etc.).
-      const jwt = await readJwtOrThrow("rotate");
+      // FW-S-01 fix: key-escrow endpoints require aud=extension JWT, so
+      // drive the bootstrap-ticket dance and pass the resulting token.
+      const jwt = await readExtensionJwtOrThrow("rotate");
       await rotatePassphrase(jwt, oldPassphrase, nextPassphrase);
     },
     async delete(): Promise<void> {
-      const jwt = await readJwtOrThrow("delete");
+      const jwt = await readExtensionJwtOrThrow("delete");
       await deleteEscrow(jwt);
     },
     async hasBlob(): Promise<boolean> {
       try {
-        const jwt = await readJwt();
+        const jwt = await readExtensionJwt();
         if (!jwt) return false;
         await fetchEscrow(jwt);
         return true;
@@ -170,27 +164,18 @@ function createKeyEscrowFacade(): KeyEscrowFacade {
   };
 }
 
-/** Lift the current `session.v1.jwt` out of chrome.storage. Returns
- *  `null` when no session is cached or the blob is malformed. The
- *  keyEscrow facade calls this on every method so a stale JWT cached
- *  in module scope cannot leak into a fresh sign-in. */
-async function readJwt(): Promise<string | null> {
-  try {
-    const stored = (await chrome.storage.local.get([SESSION_KEY])) as Record<
-      string,
-      unknown
-    >;
-    const raw = stored[SESSION_KEY];
-    if (!raw || typeof raw !== "object") return null;
-    const jwt = (raw as Record<string, unknown>).jwt;
-    return typeof jwt === "string" && jwt.length > 0 ? jwt : null;
-  } catch {
-    return null;
-  }
+/** Drive the aud=mcp → aud=extension bootstrap-ticket dance for the
+ *  cached session. Returns the (fresh) aud=extension JWT or `null` when
+ *  no session is present. Bubbles errors from the bootstrap handshake
+ *  so the caller can surface them in a toast. */
+async function readExtensionJwt(): Promise<string | null> {
+  const session = await getSession();
+  if (!session) return null;
+  return getOrRefreshExtensionJwt(session);
 }
 
-async function readJwtOrThrow(where: string): Promise<string> {
-  const jwt = await readJwt();
+async function readExtensionJwtOrThrow(where: string): Promise<string> {
+  const jwt = await readExtensionJwt();
   if (!jwt) {
     throw new Error(
       `${where}: no Google session cached — sign in before managing escrow`,
@@ -223,30 +208,151 @@ function createCloudSyncFacade(): CloudSyncFacade {
       }
     },
     async countCloudAttestations(): Promise<number> {
-      // T18 will GET /api/attestations?count=true (or equivalent) and
-      // surface the real cloud-side row count for the active session.
-      // Until then, return 0 so the Cloud→Local dialog renders a stable
-      // placeholder rather than the misleading local count.
-      return 0;
+      // No dedicated server-side count endpoint yet (the MCP recall
+      // returns top-K hits, not a total). Probe with a generic recall
+      // and surface the cardinality as a soft lower-bound. Returns 0
+      // when no session is bound. The Cloud→Local dialog frames this
+      // as "approximately N rows" to set expectations.
+      try {
+        const session = await getSession();
+        if (!session) return 0;
+        const { CloudClient } = await import("../runtime/sync/cloud-client.js");
+        const client = new CloudClient({ jwt: session.jwt });
+        const hits = await client.recallRemote("memory", 1000);
+        return hits.length;
+      } catch {
+        return 0;
+      }
     },
     async enqueueAll(): Promise<void> {
-      // T18 will iterate every row and push to `pending_uploads`. Today
-      // this is a no-op — the SW alarm already has the cloud-sync drain
-      // stub (`runtime/sync/cloud-client.ts`) that T18 will fill in.
-      return;
+      // Iterate every local row for the active identity and enqueue
+      // each one. The SW alarm drain (T18) picks them up and drives
+      // the deferred-signing flow.
+      try {
+        const stored = (await chrome.storage.local.get(["identity"])) as Record<
+          string,
+          unknown
+        >;
+        const identity = stored.identity as
+          | { pubkey_base58?: string }
+          | undefined;
+        if (!identity?.pubkey_base58) return;
+        const { IndexedDbStore } =
+          await import("../runtime/store/indexeddb.js");
+        const store = new IndexedDbStore();
+        const rows = await store.listByOwner(identity.pubkey_base58, 10_000, 0);
+        for (const row of rows) {
+          try {
+            await store.enqueue(row.attestation_id);
+          } catch {
+            // Best-effort; continue with the rest.
+          }
+        }
+      } catch {
+        // Best-effort migration trigger; the SW alarm still runs on
+        // its own cadence.
+      }
     },
     subscribeProgress(cb: (e: MigrationProgressEvent) => void): () => void {
-      // Single synthetic done event so the migration UI doesn't hang
-      // waiting for progress that won't arrive until T18.
-      const handle = setTimeout(() => {
-        cb({ attempted: 0, flushed: 0, total: 0, done: true });
-      }, 0);
-      return () => clearTimeout(handle);
+      // Poll the pending_uploads count + recall row total so the UI
+      // surfaces real progress as the alarm-drain dequeues rows. We
+      // can't drive a true push-channel from inside the options page
+      // (the SW would need to broadcast), so a 1.5s poll is sufficient.
+      let cancelled = false;
+      let attempted = 0;
+      let total = 0;
+      const tick = async (): Promise<void> => {
+        if (cancelled) return;
+        try {
+          const { IndexedDbStore } =
+            await import("../runtime/store/indexeddb.js");
+          const store = new IndexedDbStore();
+          const pending = await store.listPending();
+          if (total === 0) {
+            total = pending.length + attempted;
+          }
+          const flushed = total - pending.length;
+          attempted = Math.max(attempted, flushed);
+          cb({
+            attempted,
+            flushed,
+            total,
+            done: pending.length === 0,
+          });
+          if (pending.length === 0) return;
+        } catch (err) {
+          cb({
+            attempted,
+            flushed: 0,
+            total,
+            done: true,
+            error: err instanceof Error ? err.message : String(err),
+          });
+          return;
+        }
+        setTimeout(() => void tick(), 1500);
+      };
+      setTimeout(() => void tick(), 0);
+      return () => {
+        cancelled = true;
+      };
     },
     async exportAll(): Promise<Uint8Array> {
-      throw new Error("Cloud → Local export is not yet wired (T18 pending)");
+      // Read every local attestation row + COSE bytes for the active
+      // identity and serialise to a single newline-delimited JSON
+      // bundle. We deliberately avoid pulling in a zip dep — the .ndjson
+      // bundle is small, self-describing, and easy to reconstruct.
+      try {
+        const stored = (await chrome.storage.local.get(["identity"])) as Record<
+          string,
+          unknown
+        >;
+        const identity = stored.identity as
+          | { pubkey_base58?: string }
+          | undefined;
+        if (!identity?.pubkey_base58) {
+          return new TextEncoder().encode("");
+        }
+        const { IndexedDbStore } =
+          await import("../runtime/store/indexeddb.js");
+        const store = new IndexedDbStore();
+        const rows = await store.listByOwner(identity.pubkey_base58, 10_000, 0);
+        const lines: string[] = [];
+        for (const row of rows) {
+          const cose = row.cose_bytes ? bytesToBase64(row.cose_bytes) : "";
+          lines.push(
+            JSON.stringify({
+              attestation_id: row.attestation_id,
+              content: row.content,
+              tags: row.tags,
+              source_meta: row.source_meta ?? null,
+              content_hash: row.content_hash,
+              signer_pubkey: row.signer_pubkey,
+              solana_tx: row.solana_tx,
+              arweave_tx: row.arweave_tx,
+              created_at: row.created_at,
+              cose_bytes_b64: cose,
+            }),
+          );
+        }
+        return new TextEncoder().encode(lines.join("\n"));
+      } catch (err) {
+        throw new Error(
+          `Cloud → Local export failed: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
     },
   };
+}
+
+function bytesToBase64(bytes: Uint8Array): string {
+  let bin = "";
+  for (let i = 0; i < bytes.length; i++) {
+    bin += String.fromCharCode(bytes[i] as number);
+  }
+  return btoa(bin);
 }
 
 function readAboutMeta(): { version: string; buildHash?: string } {

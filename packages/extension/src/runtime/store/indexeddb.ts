@@ -113,6 +113,30 @@ export class IndexedDbStore {
   }
 
   /**
+   * List every attestation row scoped to `owner_pubkey`. Returns raw
+   * rows (NOT search-projected) so callers can read the COSE bytes +
+   * lineage fields needed for migration / export. `limit` + `offset`
+   * support paging when a future caller wants chunked iteration; today
+   * the migration path takes all rows.
+   */
+  async listByOwner(
+    ownerPubkey: string,
+    limit = 10_000,
+    offset = 0,
+  ): Promise<AttestationRow[]> {
+    if (!ownerPubkey) {
+      throw new Error("listByOwner: ownerPubkey is mandatory");
+    }
+    const db = await this.db();
+    const rows = await db.getAllFromIndex(
+      "attestations",
+      "by_owner",
+      ownerPubkey,
+    );
+    return rows.slice(offset, offset + limit);
+  }
+
+  /**
    * Cosine-similarity top-K search scoped to `owner_pubkey`. Optional
    * `tags` filter is AND-applied (every supplied tag must be present).
    */

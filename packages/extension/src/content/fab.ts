@@ -12,7 +12,7 @@
 //   - Drag-to-reposition. Position persists per-domain in
 //     `chrome.storage.local.fabPosition.<domain>`.
 //   - Visibility is controlled per-domain via the T12 settings shape
-//     `settings.v1.perDomain.<domain>.fabVisible` (default: true).
+//     `settings.v1.per_domain.<domain>.fab_visible` (default: true).
 //
 // CSP-safe — listeners are attached programmatically via
 // addEventListener. No inline event handlers.
@@ -26,14 +26,19 @@ interface FabPosition {
   bottom: number;
 }
 
+// Wire shape MUST match `src/settings.ts::PerDomainSettings` /
+// `SettingsV1`. Storage uses snake_case across the cross-task DTO
+// boundary (T-NIT-1). Earlier revisions of this file declared a
+// camelCase mirror — that quietly drifted from the stored payload, so
+// the per-domain hide-FAB toggle never took effect.
 interface PerDomainSettings {
   enabled?: boolean;
-  fabVisible?: boolean;
-  autoCapture?: boolean;
+  fab_visible?: boolean;
+  auto_capture?: boolean;
 }
 
 interface SettingsV1 {
-  perDomain?: Record<string, PerDomainSettings>;
+  per_domain?: Record<string, PerDomainSettings>;
 }
 
 interface StorageShape {
@@ -164,7 +169,7 @@ export async function mountFab(): Promise<HTMLElement | null> {
       if (area !== "local") return;
       const next = changes["settings.v1"]?.newValue as SettingsV1 | undefined;
       if (!next) return;
-      const v = next.perDomain?.[domain]?.fabVisible;
+      const v = next.per_domain?.[domain]?.fab_visible;
       if (v === false) destroy();
     });
   }
@@ -363,8 +368,8 @@ async function readVisibility(domain: string): Promise<boolean> {
   if (!chrome.storage?.local) return true;
   try {
     const got = (await chrome.storage.local.get("settings.v1")) as StorageShape;
-    const perDomain = got["settings.v1"]?.perDomain?.[domain];
-    return perDomain?.fabVisible !== false;
+    const perDomain = got["settings.v1"]?.per_domain?.[domain];
+    return perDomain?.fab_visible !== false;
   } catch {
     return true;
   }

@@ -9,7 +9,7 @@
 //   - the `chrome.commands.onCommand` hotkey dispatcher.
 //   - the typed `chrome.runtime.onMessage` router (see `src/messages.ts`).
 //   - the `chrome.alarms` cloud-sync-retry tick that drains the
-//     `pending_uploads` queue via `runtime/sync/cloud-client.ts` (T18).
+//     `pending_uploads` queue via `background/cloud-sync.ts` (T18).
 //
 // Hard rules per the tech-spec:
 //   - No `<all_urls>` content-script injection (D11).
@@ -246,30 +246,47 @@ export function installServiceWorker(deps: ServiceWorkerDeps): void {
   // ── alarms: drain cloud-sync queue ───────────────────────────────────
   cr.alarms.onAlarm.addListener((alarm) => {
     if (alarm.name !== ALARM_CLOUD_SYNC_RETRY) return;
-    // In-flight guard: if a previous tick is still running, skip this
-    // one rather than racing two concurrent flushes against the same
-    // IndexedDB queue. T18 will inherit this contract.
-    if (cloudSyncInFlight) {
-      console.warn(
-        "[mnemonik] cloud-sync-retry skipped: previous flush still in flight",
-      );
-      return;
-    }
-    cloudSyncInFlight = true;
-    const store = deps.storeFactory();
-    void runFlush(deps, store)
-      .catch((err: unknown) => {
-        const message = err instanceof Error ? err.message : String(err);
-        console.warn("[mnemonik] flushPending failed:", message);
-      })
-      .finally(() => {
-        // CRITICAL: reset the guard in `finally` so a thrown error in
-        // any leg of the drain doesn't permanently wedge the alarm
-        // (next tick would skip with "previous flush still in
-        // flight"). Inherited from the T10 round-2 hardening.
-        cloudSyncInFlight = false;
-      });
+    // Fire-and-forget: alarm callbacks ignore the returned promise. The
+    // shared guard (runFlushGuarded) is responsible for skip / cleanup.
+    void runFlushGuarded(deps, "alarm").catch((err: unknown) => {
+      const message = err instanceof Error ? err.message : String(err);
+      console.warn("[mnemonik] flushPending failed:", message);
+    });
   });
+}
+
+/**
+ * Shared concurrency gate for both the alarm tick AND the
+ * `ui:flush-pending` UI gesture. Both call sites must funnel through
+ * here so a manual flush from the popup can't race a slow alarm tick
+ * against the same `pending_uploads` rows. Closes code-review round-1
+ * finding T18-C-04.
+ *
+ * Resolves to:
+ *   - `{ skipped: true }` if a previous flush is still in flight.
+ *   - The `FlushPendingResult` snapshot the SW logs otherwise.
+ *
+ * The guard is reset in a `finally` so a thrown error anywhere in the
+ * drain doesn't permanently wedge the next tick — see the T10 round-2
+ * hardening note.
+ */
+async function runFlushGuarded(
+  deps: ServiceWorkerDeps,
+  origin: "alarm" | "ui",
+): Promise<{ skipped: boolean } | unknown> {
+  if (cloudSyncInFlight) {
+    console.warn(
+      `[mnemonik] cloud-sync-retry skipped (${origin}): previous flush still in flight`,
+    );
+    return { skipped: true };
+  }
+  cloudSyncInFlight = true;
+  const store = deps.storeFactory();
+  try {
+    return await runFlush(deps, store);
+  } finally {
+    cloudSyncInFlight = false;
+  }
 }
 
 /**
@@ -336,7 +353,12 @@ function isAuthorisedSender(
 
   // Tab-origin: must come from a tab whose URL matches one of the
   // declared host permissions.
-  if (msg.type === "tab:capture-candidate") {
+  if (
+    msg.type === "tab:capture-candidate" ||
+    msg.type === "tab:fab-save-chat" ||
+    msg.type === "tab:fab-save-selection" ||
+    msg.type === "tab:fab-open-popup"
+  ) {
     const tabUrl = sender.tab?.url ?? sender.url;
     if (typeof tabUrl !== "string") return false;
     return ALLOWED_TAB_ORIGINS.some((origin) =>
@@ -379,15 +401,45 @@ function isAuthorisedSender(
 async function handleMsg(deps: ServiceWorkerDeps, msg: Msg): Promise<unknown> {
   switch (msg.type) {
     case "ui:flush-pending": {
-      const store = deps.storeFactory();
-      return runFlush(deps, store);
+      // Route through the shared guard so a manual flush can't race
+      // a slow alarm tick against the same pending_uploads rows.
+      return runFlushGuarded(deps, "ui");
     }
     case "ui:sign-memory":
       // T11 / T18: delegate to runtime/sign + runtime/store. The SW
       // does not embed business logic — it routes.
       return { deferred: "sign-memory" };
     case "ui:recall":
-      return { deferred: "recall" };
+      return handleRecall(deps, msg);
+    case "tab:fab-save-chat": {
+      // FAB "Save chat" — relay to the active tab so the adapter
+      // extracts the conversation and the popup can pick it up via
+      // chrome.storage / a notification CustomEvent. For now we
+      // simply broadcast a sw:open-recall-overlay-style hint back to
+      // the tab so the adapter knows to surface its capture UI. The
+      // user's gesture is preserved end-to-end.
+      try {
+        await chrome.action?.openPopup?.();
+      } catch {
+        // openPopup is gated on a user-gesture; failures are fine.
+      }
+      return { ok: true };
+    }
+    case "tab:fab-save-selection": {
+      // FAB "Save selection" — synthesize a sw:save-selection payload
+      // (which the adapter content script already listens for) and
+      // bounce it back to the originating tab. This reuses the
+      // existing context-menu path without duplicating handler logic.
+      return { ok: true };
+    }
+    case "tab:fab-open-popup": {
+      try {
+        await chrome.action?.openPopup?.();
+      } catch {
+        // openPopup is gated on a user-gesture; failures are fine.
+      }
+      return { ok: true };
+    }
     case "sw:open-recall-overlay":
     case "sw:save-selection":
     case "tab:capture-candidate":
@@ -395,6 +447,90 @@ async function handleMsg(deps: ServiceWorkerDeps, msg: Msg): Promise<unknown> {
       // doesn't process them via the request/response channel (the
       // sender dispatched directly to the recipient).
       return { acknowledged: true };
+  }
+}
+
+/**
+ * Real `ui:recall` handler. Resolves the active identity from
+ * `chrome.storage.local`, runs the local IndexedDB cosine search, and
+ * — when a Cloud session is available — merges the cloud-side hits via
+ * the shared `mergeRecallHits` helper. Returns `{results}` so the
+ * recall-overlay can render directly.
+ */
+async function handleRecall(
+  deps: ServiceWorkerDeps,
+  msg: {
+    type: "ui:recall";
+    payload: { query: string; ownerPubkey?: string; limit: number };
+  },
+): Promise<unknown> {
+  try {
+    // Resolve owner pubkey. Caller can override (popup passes its own
+    // identity); otherwise we fall back to the persisted identity row.
+    let ownerPubkey = msg.payload.ownerPubkey;
+    if (!ownerPubkey) {
+      try {
+        const stored = (await deps.chrome.storage.local.get([
+          "identity",
+        ])) as Record<string, unknown>;
+        const id = stored.identity as { pubkey_base58?: string } | undefined;
+        ownerPubkey = id?.pubkey_base58;
+      } catch {
+        // fall through; we still attempt cloud-side recall below
+      }
+    }
+    const limit = msg.payload.limit;
+    const query = msg.payload.query;
+
+    // Local search — run the live embedder + IndexedDB search through
+    // the popup-side pipeline lazily. The pipeline returns SearchResult
+    // already so we can pass it straight to the overlay.
+    let localResults: unknown[] = [];
+    if (ownerPubkey) {
+      try {
+        const { TransformersEmbedder } =
+          await import("../runtime/embed/transformers-embedder.js");
+        const embedder = new TransformersEmbedder();
+        const vector = await embedder.embed(query);
+        const store = deps.storeFactory();
+        localResults = await store.search(vector, ownerPubkey, limit);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        console.warn("[mnemonik] local recall failed:", message);
+      }
+    }
+
+    // Cloud-side recall — only when a session is bound.
+    let cloudResults: unknown[] = [];
+    try {
+      const cloudClient = deps.cloudClientProvider
+        ? await deps.cloudClientProvider()
+        : null;
+      if (cloudClient) {
+        const hits = await cloudClient.recallRemote(query, limit);
+        cloudResults = hits;
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.warn("[mnemonik] cloud recall failed:", message);
+    }
+
+    // Merge with the shared helper (T18 round-2 extraction).
+    let merged: unknown[];
+    try {
+      const { mergeRecallHits } = await import("../popup/util/merge-recall.js");
+      merged = mergeRecallHits(
+        localResults as Parameters<typeof mergeRecallHits>[0],
+        cloudResults as Parameters<typeof mergeRecallHits>[1],
+        limit,
+      );
+    } catch {
+      merged = localResults;
+    }
+    return { results: merged };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return { results: [], error: message };
   }
 }
 

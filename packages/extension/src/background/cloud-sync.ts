@@ -86,6 +86,12 @@ export interface DrainResult {
   }>;
 }
 
+/** Per-row hard timeout for `signRemote`. A browser `fetch` can hang
+ *  for minutes; we cap each row at 30s so a single bad upstream
+ *  doesn't starve the rest of the queue for a full alarm period.
+ *  Closes code-review round-1 nit T18-C-06. */
+export const DRAIN_ROW_TIMEOUT_MS = 30_000;
+
 /** SW-facing return shape. Matches the deps signature installed in
  *  T10 so the service-worker alarm handler is unchanged. */
 export interface FlushPendingResult {
@@ -183,18 +189,21 @@ export async function drainPendingUploads(
       continue;
     }
     try {
-      const upload = await deps.cloudClient.signRemote(
-        {
-          content: attestation.content,
-          tags: [...attestation.tags],
-          ...(attestation.source_meta
-            ? { source_meta: attestation.source_meta }
-            : {}),
-        },
-        {
-          cose_bytes: attestation.cose_bytes,
-          signer_pubkey: attestation.signer_pubkey,
-        },
+      const upload = await raceWithTimeout(
+        deps.cloudClient.signRemote(
+          {
+            content: attestation.content,
+            tags: [...attestation.tags],
+            ...(attestation.source_meta
+              ? { source_meta: attestation.source_meta }
+              : {}),
+          },
+          {
+            cose_bytes: attestation.cose_bytes,
+            signer_pubkey: attestation.signer_pubkey,
+          },
+        ),
+        DRAIN_ROW_TIMEOUT_MS,
       );
       // Persist the cloud-side tx ids onto the existing row. Keep
       // `attestation_id` stable — the server may return its own UUID
@@ -283,6 +292,30 @@ async function markPermanentFailure(
   if (row.sync_failed_permanent === true) return;
   const updated: AttestationRow = { ...row, sync_failed_permanent: true };
   await store.saveAttestation(updated);
+}
+
+/**
+ * Race `inner` against a `TransientSyncError("drain_timeout")` sentinel
+ * that fires after `ms` milliseconds. Bounds each row to
+ * `DRAIN_ROW_TIMEOUT_MS` so a single hung `fetch` cannot starve the
+ * drain for longer than the alarm period.
+ */
+function raceWithTimeout<T>(inner: Promise<T>, ms: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new TransientSyncError("drain_timeout", null));
+    }, ms);
+    inner.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (err) => {
+        clearTimeout(timer);
+        reject(err);
+      },
+    );
+  });
 }
 
 /**

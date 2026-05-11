@@ -160,7 +160,7 @@ jobs:
       - name: Extension popup component tests (vitest)
         if: matrix.runtime == 'bun-latest'
         working-directory: packages/extension
-        run: bunx vitest run tests/component
+        run: bunx vitest run tests/component tests/unit/content
 
   bundle-size:
     name: bundle size budgets

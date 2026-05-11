@@ -79,6 +79,19 @@ export interface Session {
   jwtExpiresAt: number;
   /** Wall-clock ms at which the session was minted. */
   signedInAt: number;
+  /**
+   * Optional `aud=extension` JWT obtained by redeeming a bootstrap
+   * ticket (see `auth/bootstrap-ticket.ts`). Required to authenticate
+   * calls to `/api/key-escrow`. The popup mints this lazily on first
+   * key-escrow op and caches it here so subsequent ops reuse it until
+   * `extensionJwtExpiresAt`.
+   *
+   * The MCP-audience JWT (`jwt` above) is still used for `/oauth/*`
+   * and the `POST /api/extension-bootstrap/issue` handshake itself.
+   */
+  extensionJwt?: string;
+  /** Wall-clock ms at which `extensionJwt` expires. */
+  extensionJwtExpiresAt?: number;
 }
 
 /** `chrome.storage.local` key for the persisted session blob. */

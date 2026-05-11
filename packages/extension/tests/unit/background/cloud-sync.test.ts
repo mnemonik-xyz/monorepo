@@ -364,25 +364,37 @@ describe("flushPending · re-auth CustomEvent dispatch", () => {
       },
     };
 
-    // Capture the CustomEvent — jsdom provides `addEventListener` on
-    // globalThis, so we can subscribe in-process.
-    const events: string[] = [];
-    const listener = (e: Event): void => {
-      events.push(e.type);
-    };
+    // The unit-test environment is `node`, which doesn't expose
+    // EventTarget on globalThis. Install a `dispatchEvent` mock
+    // (the brief allows this) plus a `CustomEvent` stub so the SW's
+    // `new g.CustomEvent(NAME)` constructor call resolves. Captures
+    // the dispatched event type without touching jsdom.
     const g = globalThis as {
-      addEventListener: (n: string, h: EventListener) => void;
-      removeEventListener: (n: string, h: EventListener) => void;
+      dispatchEvent?: unknown;
+      CustomEvent?: unknown;
     };
-    g.addEventListener(REAUTH_EVENT_NAME, listener as EventListener);
+    const prevDispatch = g.dispatchEvent;
+    const prevCustom = g.CustomEvent;
+    const dispatchSpy = vi.fn().mockReturnValue(true);
+    g.dispatchEvent = dispatchSpy;
+    class CustomEventStub {
+      public readonly type: string;
+      public constructor(type: string) {
+        this.type = type;
+      }
+    }
+    g.CustomEvent = CustomEventStub as unknown as typeof CustomEvent;
     try {
       const result = await flushPending({ store, cloudClient: client });
       expect(result.attempted).toBe(1);
       expect(result.flushed).toBe(0);
     } finally {
-      g.removeEventListener(REAUTH_EVENT_NAME, listener as EventListener);
+      g.dispatchEvent = prevDispatch;
+      g.CustomEvent = prevCustom;
     }
-    expect(events).toEqual([REAUTH_EVENT_NAME]);
+    expect(dispatchSpy).toHaveBeenCalledTimes(1);
+    const [event] = dispatchSpy.mock.calls[0] as [{ type: string }];
+    expect(event.type).toBe(REAUTH_EVENT_NAME);
   });
 
   it("also forwards re-auth via the deps.emit callback (both signals fire)", async () => {

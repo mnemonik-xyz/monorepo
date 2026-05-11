@@ -38,6 +38,34 @@ export function Capture(props: CaptureProps): JSX.Element {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [prefilledSelection]);
 
+  /**
+   * T18 round-2: `runtime.signRemote` attempts a live push first
+   * (Cloud tier) and only falls through to the alarm-drain queue on
+   * transient failure. Surface the three error types distinctly:
+   *   - `ReauthRequiredError`: runtime already dispatched the global
+   *     `mnemonik:re-auth-required` event; App.tsx re-routes to
+   *     onboarding. Local sign already succeeded — keep the success
+   *     toast, no extra error noise.
+   *   - `PermanentSyncError`: row was marked `sync_failed_permanent`
+   *     by the runtime. Local sign succeeded — surface "Cloud sync
+   *     rejected" alongside the success toast.
+   *   - `TransientSyncError` / unknown: runtime swallowed it and left
+   *     the row queued. No UI noise; drain retries on the next tick.
+   */
+  const surfaceRemoteError = async (
+    err: unknown,
+    res: SignMemoryResult,
+  ): Promise<void> => {
+    setResult(res);
+    if (err === null || err === undefined) return;
+    const cc = await import("../../runtime/sync/cloud-client.js");
+    if (err instanceof cc.PermanentSyncError) {
+      setError(`Cloud sync rejected: ${err.message}`);
+      return;
+    }
+    // ReauthRequiredError + TransientSyncError + unknown: no toast.
+  };
+
   const handleSaveSelection = async (): Promise<void> => {
     setError(null);
     setResult(null);
@@ -61,8 +89,15 @@ export function Capture(props: CaptureProps): JSX.Element {
             }
           : {}),
       });
-      await runtime.signRemote({ content: trimmed, tags, ...res });
-      setResult(res);
+      // Detach the local success from the remote-push outcome — the
+      // local sign already succeeded, the cloud push is best-effort.
+      let remoteErr: unknown = null;
+      try {
+        await runtime.signRemote({ content: trimmed, tags, ...res });
+      } catch (e) {
+        remoteErr = e;
+      }
+      await surfaceRemoteError(remoteErr, res);
     } catch (e) {
       setError(formatError(e));
     } finally {
@@ -92,8 +127,13 @@ export function Capture(props: CaptureProps): JSX.Element {
         tags,
         source: { platform: adapter.platform },
       });
-      await runtime.signRemote({ content: transcript, tags, ...res });
-      setResult(res);
+      let remoteErr: unknown = null;
+      try {
+        await runtime.signRemote({ content: transcript, tags, ...res });
+      } catch (e) {
+        remoteErr = e;
+      }
+      await surfaceRemoteError(remoteErr, res);
     } catch (e) {
       setError(formatError(e));
     } finally {

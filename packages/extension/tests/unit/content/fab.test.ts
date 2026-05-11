@@ -3,7 +3,7 @@
 // default CI image today). The Shadow-DOM isolation property lives
 // in the E2E spec; here we cover the wiring contract:
 //
-//   - mountFab respects per-domain `fabVisible: false` and returns null.
+//   - mountFab respects per-domain `fab_visible: false` and returns null.
 //   - mountFab inserts a host element with `all: initial` reset.
 //   - menu toggle / drag-vs-click discrimination in attachDragAndClick.
 //   - position read/write round-trips through chrome.storage.local.
@@ -41,10 +41,10 @@ beforeEach(() => {
 });
 
 describe("mountFab", () => {
-  it("returns null when settings.v1.perDomain.<domain>.fabVisible === false", async () => {
+  it("returns null when settings.v1.per_domain.<domain>.fab_visible === false", async () => {
     installChromeMock({
       "settings.v1": {
-        perDomain: { localhost: { fabVisible: false } },
+        per_domain: { localhost: { fab_visible: false } },
       },
     });
     const { mountFab } = await import("../../../src/content/fab.js");

@@ -19,6 +19,7 @@ import {
   type StorageTier,
 } from "../runtime.js";
 import type { SearchResult } from "../../runtime/store/types.js";
+import { mergeRecallHits as mergeRecallHitsImpl } from "../util/merge-recall.js";
 
 export interface RecallProps {
   adapter: ChatAdapter | null;
@@ -88,7 +89,7 @@ export function Recall(props: RecallProps): JSX.Element {
         localPromise,
         cloudPromise,
       ]);
-      setResults(mergeRecallHits(localHits, cloudHits, 5));
+      setResults(mergeRecallHitsImpl(localHits, cloudHits, 5));
       setHasSearched(true);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -246,72 +247,10 @@ function truncateMiddle(value: string, head: number, tail: number): string {
 }
 
 /**
- * Merge local and cloud recall hits per the T18 spec:
- *
- *   1. Dedupe by `attestation_id`.
- *   2. When the same id appears on both sides, keep the higher
- *      similarity score (cloud and local can disagree because cloud
- *      runs server-side cosine search on the canonical embedding
- *      vs. local TurboQuant-decompressed embeddings).
- *   3. Prefer cloud-side `solana_tx` / `arweave_tx` when the local
- *      row still carries synthetic `local:` ids — the cloud row has
- *      been anchored on-chain.
- *   4. Re-rank descending by score; truncate to `limit`.
- *
- * Local-only entries pass through unchanged. Cloud-only entries are
- * projected into the `SearchResult` shape so the existing renderer
- * works without a discriminated union.
+ * `mergeRecallHits` lives in `../util/merge-recall.ts` so the pure
+ * logic can be unit-tested without spinning up React + jsdom. Re-
+ * exported here so existing imports (`from "./Recall"`) keep
+ * resolving — the function is still considered part of the Recall
+ * tab's public surface. Closes code-review round-1 T18-C-05.
  */
-export function mergeRecallHits(
-  local: SearchResult[],
-  cloud: CloudRecallHit[] | null,
-  limit: number,
-): SearchResult[] {
-  if (!cloud || cloud.length === 0) {
-    return local.slice(0, limit);
-  }
-  const byId = new Map<string, SearchResult>();
-  for (const r of local) {
-    byId.set(r.attestation_id, r);
-  }
-  for (const c of cloud) {
-    if (!c.attestation_id) continue;
-    const existing = byId.get(c.attestation_id);
-    if (existing) {
-      const better = c.similarity > existing.relevance_score;
-      // Prefer cloud-side tx ids when local still carries synthetic
-      // `local:` prefixes — the cloud row has been anchored.
-      const solana_tx =
-        existing.solana_tx.startsWith("local:") && c.solana_tx
-          ? c.solana_tx
-          : existing.solana_tx;
-      const arweave_tx =
-        existing.arweave_tx.startsWith("local:") && c.arweave_tx
-          ? c.arweave_tx
-          : existing.arweave_tx;
-      byId.set(c.attestation_id, {
-        ...existing,
-        relevance_score: better ? c.similarity : existing.relevance_score,
-        solana_tx,
-        arweave_tx,
-      });
-    } else {
-      byId.set(c.attestation_id, {
-        attestation_id: c.attestation_id,
-        content: c.content,
-        // Cloud-only entries don't carry a content_hash today — render
-        // with an empty hash; the popup's Verify tab re-fetches the
-        // full row when the user clicks Open.
-        content_hash: "",
-        tags: c.tags ?? [],
-        solana_tx: c.solana_tx ?? "",
-        arweave_tx: c.arweave_tx ?? "",
-        created_at: c.signed_at ?? "",
-        relevance_score: c.similarity,
-      });
-    }
-  }
-  return Array.from(byId.values())
-    .sort((a, b) => b.relevance_score - a.relevance_score)
-    .slice(0, limit);
-}
+export { mergeRecallHits } from "../util/merge-recall.js";

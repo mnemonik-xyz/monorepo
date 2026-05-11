@@ -47,10 +47,12 @@ export interface SignMemoryRequest {
   };
 }
 
-/** Recall request from popup or overlay. */
+/** Recall request from popup or overlay. `ownerPubkey` is optional —
+ *  the SW falls back to the active identity in `chrome.storage.local`
+ *  so the hotkey overlay doesn't have to plumb it through. */
 export interface RecallRequest {
   query: string;
-  ownerPubkey: string;
+  ownerPubkey?: string;
   limit: number;
   tags?: string[];
 }
@@ -98,6 +100,37 @@ export type TabCaptureCandidate = {
   };
 };
 
+/** Tab → SW: FAB "Save chat" menu item — instructs the SW to capture the
+ *  active conversation. The SW routes the work back to the tab's adapter
+ *  via `chrome.tabs.sendMessage`. */
+export type TabFabSaveChat = {
+  type: "tab:fab-save-chat";
+  payload: {
+    /** Source URL (FAB lives in the active tab; SW gets origin from
+     *  `sender.url`, but the explicit payload value is convenient for
+     *  cross-realm logging). */
+    url: string;
+  };
+};
+
+/** Tab → SW: FAB "Save selection" menu item — relays the current
+ *  selection back to the tab so the adapter can stamp it via the
+ *  shared sw:save-selection path. */
+export type TabFabSaveSelection = {
+  type: "tab:fab-save-selection";
+  payload: {
+    selectionText: string;
+    pageUrl: string;
+    pageTitle?: string;
+  };
+};
+
+/** Tab → SW: FAB "Open popup" menu item — instructs the SW to call
+ *  `chrome.action.openPopup()`. */
+export type TabFabOpenPopup = {
+  type: "tab:fab-open-popup";
+};
+
 /** Discriminated union over every message the router knows about. */
 export type Msg =
   | SwOpenRecallOverlay
@@ -105,7 +138,10 @@ export type Msg =
   | UiSignMemory
   | UiRecall
   | UiFlushPending
-  | TabCaptureCandidate;
+  | TabCaptureCandidate
+  | TabFabSaveChat
+  | TabFabSaveSelection
+  | TabFabOpenPopup;
 
 /** Narrow `unknown` to `Msg`. Returns null when the shape doesn't match;
  *  callers decide whether to log / drop. Never throws on hostile input.
@@ -134,6 +170,12 @@ export function parseMsg(input: unknown): Msg | null {
       return { type: "ui:flush-pending" };
     case "tab:capture-candidate":
       return isTabCaptureCandidateMsg(input) ? input : null;
+    case "tab:fab-save-chat":
+      return isTabFabSaveChatMsg(input) ? input : null;
+    case "tab:fab-save-selection":
+      return isTabFabSaveSelectionMsg(input) ? input : null;
+    case "tab:fab-open-popup":
+      return { type: "tab:fab-open-popup" };
     default:
       return null;
   }
@@ -150,7 +192,7 @@ function isStringArray(v: unknown): v is string[] {
 }
 
 function isOpenRecallOverlayMsg(
-  input: Record<string, unknown>
+  input: Record<string, unknown>,
 ): input is SwOpenRecallOverlay {
   const p = input["payload"];
   if (!isPlainObject(p)) return false;
@@ -161,7 +203,7 @@ function isOpenRecallOverlayMsg(
 }
 
 function isSaveSelectionMsg(
-  input: Record<string, unknown>
+  input: Record<string, unknown>,
 ): input is SwSaveSelection {
   const p = input["payload"];
   if (!isPlainObject(p)) return false;
@@ -175,7 +217,7 @@ function isSaveSelectionMsg(
 }
 
 function isUiSignMemoryMsg(
-  input: Record<string, unknown>
+  input: Record<string, unknown>,
 ): input is UiSignMemory {
   const p = input["payload"];
   if (!isPlainObject(p)) return false;
@@ -198,8 +240,12 @@ function isUiRecallMsg(input: Record<string, unknown>): input is UiRecall {
   const p = input["payload"];
   if (!isPlainObject(p)) return false;
   if (typeof p["query"] !== "string" || p["query"].length === 0) return false;
-  if (typeof p["ownerPubkey"] !== "string" || p["ownerPubkey"].length === 0) {
-    return false;
+  // ownerPubkey is OPTIONAL — the SW resolves to the active identity
+  // when the caller (e.g. recall-overlay hotkey) doesn't supply one.
+  if (p["ownerPubkey"] !== undefined) {
+    if (typeof p["ownerPubkey"] !== "string" || p["ownerPubkey"].length === 0) {
+      return false;
+    }
   }
   const lim = p["limit"];
   if (
@@ -215,7 +261,7 @@ function isUiRecallMsg(input: Record<string, unknown>): input is UiRecall {
 }
 
 function isTabCaptureCandidateMsg(
-  input: Record<string, unknown>
+  input: Record<string, unknown>,
 ): input is TabCaptureCandidate {
   const p = input["payload"];
   if (!isPlainObject(p)) return false;
@@ -224,5 +270,27 @@ function isTabCaptureCandidateMsg(
   if (typeof p["content"] !== "string") return false;
   if (p["chatId"] !== undefined && typeof p["chatId"] !== "string")
     return false;
+  return true;
+}
+
+function isTabFabSaveChatMsg(
+  input: Record<string, unknown>,
+): input is TabFabSaveChat {
+  const p = input["payload"];
+  if (!isPlainObject(p)) return false;
+  if (typeof p["url"] !== "string" || p["url"].length === 0) return false;
+  return true;
+}
+
+function isTabFabSaveSelectionMsg(
+  input: Record<string, unknown>,
+): input is TabFabSaveSelection {
+  const p = input["payload"];
+  if (!isPlainObject(p)) return false;
+  if (typeof p["selectionText"] !== "string") return false;
+  if (typeof p["pageUrl"] !== "string") return false;
+  if (p["pageTitle"] !== undefined && typeof p["pageTitle"] !== "string") {
+    return false;
+  }
   return true;
 }

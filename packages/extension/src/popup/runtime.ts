@@ -5,9 +5,9 @@
 // here; tests replace the exported `setRuntime` function to inject
 // mocks (the popup never imports the implementation directly).
 //
-// `signRemote` is a no-op stub on Local tier. T18 will replace it with
-// the deferred-signing cloud-client; until then Cloud-tier writes fall
-// back to Local + the pending_uploads queue.
+// `signRemote` is the T18 deferred-signing cloud push. It enqueues the
+// row, attempts a live POST to /mcp + /api/sign-callback, and falls
+// back to the alarm-drain queue on transient failures.
 
 import type { ChatTurn, ChatAdapter } from "../runtime/chat/types.js";
 import type { SearchResult, SourceMeta } from "../runtime/store/types.js";
@@ -115,8 +115,9 @@ export interface PopupRuntime {
    *  Returns `null` when no adapter matches the active tab. */
   getActiveTabConversation(): Promise<ChatTurn[] | null>;
   signMemory(args: SignMemoryArgs): Promise<SignMemoryResult>;
-  /** T18 placeholder. On Local tier this is a no-op; on Cloud tier it
-   *  would push the attestation to the hosted MCP server. */
+  /** Cloud-tier deferred-signing push (T18). Enqueues + attempts the
+   *  live POST. Local-tier writes fall back to the pending_uploads
+   *  queue silently — Capture happy-path UX is not blocked. */
   signRemote(args: SignMemoryArgs & SignMemoryResult): Promise<void>;
   recall(query: string, limit: number): Promise<SearchResult[]>;
   verify(args: VerifyArgs): Promise<VerifyOutcome>;
@@ -448,24 +449,29 @@ export function createDefaultRuntime(): PopupRuntime {
       },
       async upload(jwt, blob) {
         const ke = await import("../auth/key-escrow.js");
-        return ke.uploadEscrow(jwt, blob);
+        const extensionJwt = await resolveExtensionJwt(jwt);
+        return ke.uploadEscrow(extensionJwt, blob);
       },
       async fetch(jwt) {
         const ke = await import("../auth/key-escrow.js");
-        return ke.fetchEscrow(jwt);
+        const extensionJwt = await resolveExtensionJwt(jwt);
+        return ke.fetchEscrow(extensionJwt);
       },
       async delete(jwt) {
         const ke = await import("../auth/key-escrow.js");
-        return ke.deleteEscrow(jwt);
+        const extensionJwt = await resolveExtensionJwt(jwt);
+        return ke.deleteEscrow(extensionJwt);
       },
       async rotate(jwt, oldPassphrase, newPassphrase) {
         const ke = await import("../auth/key-escrow.js");
-        return ke.rotatePassphrase(jwt, oldPassphrase, newPassphrase);
+        const extensionJwt = await resolveExtensionJwt(jwt);
+        return ke.rotatePassphrase(extensionJwt, oldPassphrase, newPassphrase);
       },
       async hasBlob(jwt) {
         const ke = await import("../auth/key-escrow.js");
+        const extensionJwt = await resolveExtensionJwt(jwt);
         try {
-          await ke.fetchEscrow(jwt);
+          await ke.fetchEscrow(extensionJwt);
           return true;
         } catch (err) {
           if (err instanceof ke.EscrowNotFoundError) return false;
@@ -495,6 +501,28 @@ async function buildCloudClient(): Promise<
   if (!session) return null;
   const { CloudClient } = await import("../runtime/sync/cloud-client.js");
   return new CloudClient({ jwt: session.jwt });
+}
+
+/**
+ * Resolve the `aud=extension` JWT for a key-escrow call. Callers hand
+ * the `aud=mcp` JWT from `Session.jwt`; this helper drives the
+ * `POST /api/extension-bootstrap/issue` → `GET /redeem/:ticket` dance
+ * (with caching) to obtain the correctly-audienced token. Falls back to
+ * the input JWT only when no session is cached (tests inject their own
+ * JWT and never persist a session). Closes FW-S-01.
+ */
+async function resolveExtensionJwt(jwtMcp: string): Promise<string> {
+  const { getSession } = await import("../auth/session.js");
+  const session = await getSession();
+  if (!session) {
+    // No persisted session — caller is a test driving the seam
+    // directly. Return the supplied JWT as-is and let the test's mock
+    // fetch handle the audience.
+    return jwtMcp;
+  }
+  const { getOrRefreshExtensionJwt } =
+    await import("../auth/bootstrap-ticket.js");
+  return getOrRefreshExtensionJwt(session);
 }
 
 // ── chrome.* helpers (test-friendly) ────────────────────────────────────────

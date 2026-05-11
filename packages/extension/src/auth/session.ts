@@ -177,5 +177,20 @@ function isPersistedSession(value: unknown): value is Session {
   if (typeof p.email_verified !== "boolean") return false;
   if (typeof p.name !== "string") return false;
   if (typeof p.picture !== "string") return false;
+  // Optional aud=extension JWT cache. Both fields must be present
+  // together (or both absent) and well-typed when present.
+  if (v.extensionJwt !== undefined) {
+    if (typeof v.extensionJwt !== "string" || v.extensionJwt.length === 0) {
+      return false;
+    }
+  }
+  if (v.extensionJwtExpiresAt !== undefined) {
+    if (
+      typeof v.extensionJwtExpiresAt !== "number" ||
+      !Number.isFinite(v.extensionJwtExpiresAt)
+    ) {
+      return false;
+    }
+  }
   return true;
 }
