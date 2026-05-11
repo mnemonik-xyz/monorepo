@@ -245,6 +245,19 @@ impl OAuthState {
         code
     }
 
+    /// Accessor for the HS256 encoding key. Used by the extension key-escrow
+    /// module (T15) to mint `aud=extension` JWTs signed by the same secret as
+    /// the main `aud=mcp` flow — a single `MCP_JWT_SECRET` suffices for both.
+    pub fn jwt_encoding_key(&self) -> &EncodingKey {
+        &self.jwt_encoding_key
+    }
+
+    /// Accessor for the HS256 decoding key. Used by the extension key-escrow
+    /// module (T15) to verify `aud=extension` JWTs against the same secret.
+    pub fn jwt_decoding_key(&self) -> &DecodingKey {
+        &self.jwt_decoding_key
+    }
+
     /// Validate redirect_uri against DCR first, then the static fallback list.
     pub fn allows_redirect(&self, uri: &str, client_id: &str) -> bool {
         if self.registered_redirect_allowed(uri, client_id) {
@@ -1295,6 +1308,15 @@ pub async fn bearer_auth_middleware(
         // on this allowlist; it uses standard Bearer-JWT auth so only an
         // already-authenticated webapp can mint tickets for its own user.
         || path.starts_with("/api/cli-bootstrap/redeem/")
+        // Extension bootstrap-ticket redeem endpoint (chrome-extension T15,
+        // Decision 9). Same UUID-as-capability model as cli-bootstrap; the
+        // extension exchanges the ticket for a fresh `aud=extension` JWT
+        // without sending the webapp's `aud=mcp` JWT (which would not be
+        // present in the extension service worker's request context).
+        || path.starts_with("/api/extension-bootstrap/redeem/")
+        // Key-escrow endpoints verify their own `aud=extension` JWTs inline
+        // (the production bearer-auth middleware only accepts `aud=mcp`).
+        || path == "/api/key-escrow"
     {
         return next.run(request).await;
     }

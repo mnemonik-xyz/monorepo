@@ -131,6 +131,12 @@ name = "oauth_google"
 path = "tests/oauth_google.rs"
 required-features = ["test-support"]
 
+# Same feature-gating pattern for the chrome-extension key-escrow tests (T15).
+[[test]]
+name = "key_escrow"
+path = "tests/key_escrow.rs"
+required-features = ["test-support"]
+
 [dev-dependencies]
 tempfile = "3"
 httpmock = "0.8"
