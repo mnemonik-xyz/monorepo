@@ -62,6 +62,13 @@ jobs:
         working-directory: packages/extension
         run: bunx playwright install --with-deps chromium
 
+      # Xvfb + xdpyinfo are not always pulled in by playwright's
+      # --with-deps; install explicitly so the display-server probe
+      # below has xdpyinfo on PATH (round-3 fix for "Xvfb did not come
+      # up" failure).
+      - name: Install Xvfb + x11-utils
+        run: sudo apt-get update && sudo apt-get install -y xvfb x11-utils
+
       # MV3 extensions require a display server — xvfb provides one for
       # the loaded-extension flag (`--load-extension=$dist`). The
       # `--no-sandbox` flag in setup.ts is what lets Chromium start
@@ -72,12 +79,12 @@ jobs:
           DISPLAY: ':99'
         run: |
           Xvfb :99 -screen 0 1280x720x24 &
-          # Round-2 nit #5: replace the fragile `sleep 1` with a wait-
-          # for-display loop. `xdpyinfo` is installed alongside xvfb
-          # via `playwright install --with-deps chromium`; the loop
-          # exits as soon as the display answers (typically <100ms).
+          XVFB_PID=$!
+          # Wait-for-display loop with a death check so we fail fast
+          # if Xvfb itself dies before the display answers.
           for i in $(seq 1 50); do
             if xdpyinfo -display :99 >/dev/null 2>&1; then break; fi
+            kill -0 "$XVFB_PID" 2>/dev/null || { echo "Xvfb process died before display came up"; exit 1; }
             sleep 0.1
           done
           xdpyinfo -display :99 >/dev/null 2>&1 || { echo "Xvfb did not come up"; exit 1; }
