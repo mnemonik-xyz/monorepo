@@ -22,7 +22,8 @@
     "e2e": "playwright test",
     "lint": "tsc -b --noEmit",
     "lint:webext": "web-ext lint --source-dir=dist",
-    "size": "size-limit"
+    "size": "size-limit",
+    "size:check": "node scripts/check-size-limit.mjs"
   },
   "dependencies": {
     "@xenova/transformers": "^2.17.2",

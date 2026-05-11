@@ -1232,6 +1232,8 @@ Three round-1 reviewers (code-reviewer, security-auditor, test-reviewer) returne
 - `vitest run tests/unit/auth/key-escrow.test.ts` → 50 pass (was 33 before round-1; +17 from this fix wave).
 - `bun test` (full extension) → 196 pass / 1 pre-existing `cose.test.ts` WASM failure (unchanged from the pre-fix baseline).
 
+---
+
 ## 2026-05-11 · T19 — Round-3 fixer (PR #131 — size-limit budget refresh + chunk-import re-verification)
 
 Two CI gates introduced by T19 itself failed on PR #131 (run `25665708659`). Round-3 patch addresses the size-limit job inside the extension's bounded scope and re-verifies the spec-level chunk-import concern flagged in round-2 was not regression-inducing.
@@ -1259,3 +1261,166 @@ The Playwright job's actual failure on run `25665708659` was `Xvfb did not come 
 - `packages/extension/.size-limit.json` — three named per-chunk budgets.
 - `work/chrome-extension/decisions.md` — this entry.
 
+---
+
+## 2026-05-11 · T23 — Bridge contract tests + hygiene
+
+Audit round 2 found two cross-component drifts that survived per-side
+unit tests because each side mocked the boundary: `tab:fab-*` variants
+absent from the `Msg` union (audit B5 / AUD-C-05) and the `ui:recall`
+SW handler returning `{ deferred: "recall" }` instead of running a
+real embed+search (audit B4 / AUD-C-04). T23 lands the bridge-level
+test contracts that would have failed both PRs at CI:
+
+**New tests:**
+
+- `tests/unit/messages.contract.test.ts` — every variant in the `Msg`
+  union has well-formed + malformed samples via a TS-exhaustive
+  switch over `Msg["type"]`. Adding a new variant without extending
+  the sample table is a compile error; dropping a variant from
+  `parseMsg`'s switch flips the variant's well-formed sample to
+  `null` and fails the test. 25 tests / 110 assertions; covers
+  generic defensive rejection (null / undefined / primitives /
+  arrays / arrays-of-msgs / nested-discriminant smuggling / whitespace
+  drift on the `type` string).
+- `tests/unit/background/service-worker.contract.test.ts` — drives
+  `installServiceWorker` + real `parseMsg` against synthetic
+  MessageSender shapes for each inbound variant. Locks the
+  `{ ok, result }` envelope shape for every accepted variant
+  (B4 anchor binds `ui:recall` → real embedder + IndexedDbStore.search,
+  B5 anchor binds `tab:fab-*` → pending_fab_action.v1 + openPopup),
+  and the sender-authorisation perimeter: `ui:*` from a tab-bearing
+  sender, `tab:*` from a non-allowed origin, `tab:*` from a host
+  spoofing the allowed origin's prefix (`chatgpt.com.evil.example`),
+  `sw:*` inbound at all, and `ui:*` with no positive sender id all
+  return `{ ok: false, error: "unauthorized-sender" }`. 18 tests /
+  38 assertions. Drives the AUD-S T2 hostile-extension / hostile-
+  content-script threat from the security audit.
+
+**AUD-T-R2-02 fix:** in `tests/unit/auth/extension-bootstrap.test.ts`,
+the redeem-leg "no Authorization header" assertion was vacuous — the
+prior code `(init.headers ?? {}) as Record<string, string>` fell back
+to an empty object when `init.headers === undefined` (the
+overwhelmingly likely shape, since the source omits `headers`
+entirely in `fetchImpl(redeemUrl, { method: "GET" })`). The empty
+object always reports `authorization` as undefined, so the assertion
+never failed. Replaced with a strong form: `expect(init.headers)
+.toBeUndefined()`, plus a documented defence-in-depth branch that
+constructs a real `Headers` from any future `init.headers` value and
+asserts `get("authorization") === null` (so when the source ever
+switches to passing a Headers/Record object, the next maintainer
+sees the spec inline rather than a silent regression).
+
+**TA-MIN5 mitigation (size-limit silent-skip):** size-limit 12.x has
+no `--fail-if-not-found` flag, so when the configured globs in
+`.size-limit.json` don't match the dist/ layout (e.g. crxjs renamed
+the popup chunk after a build-toolchain bump), size-limit reports
+`size: 0, passed: true` and the budget gate silently degrades to a
+no-op (round-2 deferral logged earlier in this file under "size-limit
+`--fail-if-not-found` style enforcement"). Mitigation:
+`packages/extension/scripts/check-size-limit.mjs` shells out to
+`size-limit --json`, parses the report, and exits non-zero when any
+entry has `size === 0` (silent-skip) or `passed === false` (budget
+overrun). Wired into package.json as `bun run size:check`. Five unit
+tests in `tests/unit/scripts/check-size-limit.test.ts` cover the four
+failure modes + happy path via a fake-`npx` PATH shim that prints
+canned JSON.
+
+**TA-MIN1 (size-limit not gated by CI) — still deferred.** The
+extension `bun run build` fails today on a missing icon asset
+(`src/assets/icon-{16,32,48,128}.png`) — pre-existing T01/T10/T20 gap
+documented earlier in this file. Wiring `size:check` into
+`.github/workflows/node-test.yml` requires the build to succeed
+first; tracked as a follow-up alongside the icon-asset commit. Local
+operators running `bun run build && bun run size:check` get the full
+gate today; CI gets it the day the build is fixed. A minimal hook —
+one shell line — into the existing `bundle-size` job will be
+sufficient at that point.
+
+**Test coverage delta:**
+
+- New: 25 (`messages.contract.test.ts`) + 18 (`service-worker.contract.test.ts`)
+  + 5 (`check-size-limit.test.ts`) = 48 new tests.
+- Modified: `extension-bootstrap.test.ts` (1 test now non-vacuous).
+- Full `bun test` → 294 pass / 1 pre-existing `cose.test.ts` WASM
+  artefact load failure (unchanged baseline).
+
+**Files:**
+
+- New: `packages/extension/tests/unit/messages.contract.test.ts`,
+  `packages/extension/tests/unit/background/service-worker.contract.test.ts`,
+  `packages/extension/tests/unit/scripts/check-size-limit.test.ts`,
+  `packages/extension/scripts/check-size-limit.mjs`.
+- Modified: `packages/extension/tests/unit/auth/extension-bootstrap.test.ts`
+  (AUD-T-R2-02), `packages/extension/package.json` (`size:check`
+  script).
+- Production code untouched. Test-only `__setEmbedderForTesting` seam
+  in `src/background/recall-embedder.ts` already exists from T13.
+
+**Verification:** `bun test tests/unit/messages.contract.test.ts
+tests/unit/background/service-worker.contract.test.ts
+tests/unit/auth/extension-bootstrap.test.ts
+tests/unit/scripts/check-size-limit.test.ts
+tests/unit/messages.test.ts
+tests/unit/background/service-worker.test.ts` → 76 pass / 220
+assertions (post round-1 review fixes).
+
+**Round-1 review (test-reviewer + code-reviewer):** seven findings,
+all minor / nit / low. Applied: T23-T-N1 (multi-prefix unknown-
+discriminant rejection), T23-T-N2 (Symbol/IPC scope comment),
+T23-T-N3 (malformed ui:recall does not touch embedder/store — pins
+defence-in-depth against the ~25MB cold-start as a resource-
+exhaustion vector), T23-T-N4 (size-limit exit-1 + valid-JSON
+always-parse contract pinned via parameterised shim exit code),
+T23-C-N1 (trust-model comment on the spawnSync `npx` call), T23-C-N3
+(temp-dir cleanup via afterAll), T23-C-N5 (toEqual over toMatchObject
+for the recall envelope). Skipped: T23-C-N2 (diagnostic style — pre-
+existing nit), T23-C-N4 (whitespace-discriminant comment — already
+present). Round-2 reports: approve / approve. Full reports at
+`work/chrome-extension/logs/working/task-23/{test,code}-reviewer-round{1,2}.json`.
+
+---
+
+## 2026-05-11 · T24 — Options edges + fuzz tests
+
+Round-2 test audit flagged TA-MIN2 (no `About` section test) and TA-MIN4 (no Identity-import test). Plus the user requested maximum coverage on the parser/crypto seams — both are stable contracts that benefit from property-based fuzzing more than they benefit from another deterministic unit. T24 closes all three gaps in tests-only changes.
+
+**Files added (tests-only — no production code touched):**
+
+- `packages/extension/tests/component/options/About.test.tsx` — 7 tests. Renders the section heading, asserts the version row reads from `getOptionsRuntime().about`, asserts the optional build-hash row appears iff `buildHash` is set, asserts the privacy and source-repo links have `target="_blank"` + `rel="noreferrer noopener"`, and that swapping the runtime between mounts re-hydrates the row values.
+- `packages/extension/tests/component/options/Identity.import.test.tsx` — 8 tests. Mocks `identity.importEncrypted` directly (the file-picker is jsdom-stubbed). Covers happy path (file bytes + passphrase reach the runtime; badge updates; passphrase clears), empty-passphrase short-circuit before any runtime call (preserves rate-limit budget at the UI seam), three malformed-blob error variants (wrong passphrase, bad-JSON `SyntaxError`, missing-field `Error`, wrong-byte-length `Error`), the export-blob download path (asserts `URL.createObjectURL` is called with a JSON Blob and `URL.revokeObjectURL` is called after), and a defensive no-file-selected event (`a.click()` cancel on macOS) that must not crash.
+- `packages/extension/tests/unit/messages.fuzz.test.ts` — 8 tests, 1000 random inputs in the headline property. Hand-rolled mulberry32 PRNG + 50-line generator (no `fast-check` dep added; see "coverage gaps" below). Asserts `parseMsg` never throws, never returns `undefined`, and always returns either `null` or a typed `Msg` whose `type` is in the documented discriminant set. Adversarial samples: valid type + wrong payload shape → null, valid type + valid payload + extra fields → parsed (extras ignored), deeply-nested junk → null, prototype-pollution-looking inputs → safe, array-at-top → null, numeric/boolean discriminants → null.
+- `packages/extension/tests/unit/auth/key-escrow.fuzz.test.ts` — 4 properties × budgeted iteration counts (50 for the headline round-trip, 25 each for ciphertext + nonce tampering, 10 for KDF determinism). Uses the established `fastWrap` pattern (`memoryCostKib=8, timeCost=1, parallelism=1`) so the full suite lands in ~100ms; the production-parameter coverage is owned by `tests/unit/auth/key-escrow.test.ts`'s `wrapSecret — production parameters` test, not duplicated here.
+
+**Coverage gaps closed:**
+
+- TA-MIN2: About section. **Closed** — 7 tests bind the actual surface (version + build-hash + Privacy/Source links). The task brief mentioned MCP-endpoint + Discord links + "Reset all data" button — that UX has not landed in `About.tsx`; binding to the *current* component is the right call rather than testing a future surface that doesn't exist yet. The richer surface remains tracked as a forward-looking item but does not block T24.
+- TA-MIN4: Identity-import. **Closed** — 8 tests bind import (happy + 4 error variants + defensive no-file + empty-passphrase short-circuit) and export download surface.
+- TDD anchor `parseMsg_never_throws`. **Closed** — 1000 random inputs, all return null or typed Msg, never throw, never return undefined. Locks the type-narrowing invariant against future refactors.
+- TDD anchor `wrap_unwrap_is_identity`. **Closed** — 50 random (secret length ∈ [1, 256], passphrase length ∈ [8, 200]) pairs round-trip byte-for-byte. Tampering properties (ciphertext + nonce, 25 each) prove AES-GCM fails closed on single-byte perturbations.
+
+**Decision: hand-rolled property generator rather than `fast-check`.** `fast-check` is not in the extension's devDependencies and would be the first new dep added in this wave. The hand-rolled generator at the top of each fuzz file is ≤ 50 lines (mulberry32 + a recursive `randomValue` walker) and gives us deterministic seeds for CI-reproducible failures — `fast-check`'s `seed` knob is the only feature we'd actually use. Trade-off: we don't get its shrinking minimiser; if the property tests start failing flakily on hostile inputs, swap in `fast-check` then.
+
+**Decision: budgeted iteration counts for Argon2id fuzz.** Each Argon2id derive costs ~10ms even at `memoryCostKib=8, timeCost=1, parallelism=1`. The total wall-clock budget at 50 iterations + 25 + 25 + 10 lands at ~1.1s on a 2024-class laptop; the file timeout is set to 60s per `it()` block as a paranoid ceiling. The PRODUCTION-parameter round-trip is covered exactly once, in `tests/unit/auth/key-escrow.test.ts::wrapSecret — production parameters` — fuzzing with `m=64MiB` would burn ~5s per iteration and crater the CI budget.
+
+**Test results (worktree, run via `npx vitest run`):**
+
+- `tests/component/options/About.test.tsx` — 7 / 7 pass, 62ms.
+- `tests/component/options/Identity.import.test.tsx` — 8 / 8 pass, 232ms.
+- `tests/unit/messages.fuzz.test.ts` — 8 / 8 pass, 9ms (1000 iterations on the headline property).
+- `tests/unit/auth/key-escrow.fuzz.test.ts` — 4 / 4 pass, 104ms (50 + 25 + 25 + 10 = 110 Argon2id derives total).
+- Combined: 27 / 27 pass in 963ms.
+- Full extension `npx vitest run` (no test-name filter): 337 pass, 7 unchanged pre-existing failures (`cose.test.ts` missing WASM build; `cloud-sync.test.ts` re-auth event listener — both predate this PR; confirmed via `git stash` baseline diff).
+- `bun test tests/unit/messages.fuzz.test.ts tests/unit/auth/key-escrow.fuzz.test.ts` — 12 / 12 pass, 367ms (1929 `expect()` calls — bun discovers each PRNG iteration as a separate assertion).
+
+## 2026-05-11 · T24 — Round-1 review fixes
+
+`test-reviewer-round1.json` returned `needs_improvement` with three minor findings; all addressed. Reviewer reports at `work/chrome-extension/logs/working/task-24/test-reviewer-{round1,round2}.json`.
+
+| Finding | Severity | File | Resolution |
+| --- | --- | --- | --- |
+| T24-T-01 | minor | `tests/component/options/Identity.import.test.tsx` | **fixed** — leading comment block before the four error-variant tests calls them out as the regression-lock matrix for the documented failure classes (wrong passphrase, malformed JSON, missing field, wrong byte length). Tests kept as four distinct cases. |
+| T24-T-02 | minor | `tests/unit/messages.fuzz.test.ts` | **fixed** — `acceptedCount` counter inside the 1000-iteration loop + `expect(acceptedCount).toBeGreaterThan(0)` after. Catches a regression that early-returns null for every input. |
+| T24-T-03 | minor | `tests/unit/auth/key-escrow.fuzz.test.ts` | **fixed** — property reframed from "KDF determinism (which lives in the canonical `key-escrow.test.ts`)" to "round-trip identity over a fixed salt — the rotate invariant"; comments updated to describe what is actually verified. Determinism is implicit in the unwrap-succeeds assertion; the canonical determinism test is in `key-escrow.test.ts::deriveKey > is deterministic for (passphrase, salt)`. |
+
+Round-2 review: `status: passed`, 0 findings, 27/27 tests pass in 1.03s.
