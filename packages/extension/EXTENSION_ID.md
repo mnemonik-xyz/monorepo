@@ -53,13 +53,36 @@ passes it to Google on the authorize URL.
 1. **Web Store install (production / user-facing).** Google assigns
    and enforces the ID once the extension is published. End-users
    install via `https://chrome.google.com/webstore/detail/<id>` and
-   the ID is automatically `iegoicpcogbnnnajgfdbljfickgfnfoj`.
+   the production ID is `iegoicpcogbnnnajgfdbljfickgfnfoj`.
 2. **Unpacked dev load.** Chrome derives the ID from the SHA-256 of
-   the manifest's `key` field. To get the same ID under
-   `chrome://extensions → Load unpacked`, the developer must add a
-   `key` field to `manifest.json` whose public-key bytes hash to the
-   same ID. The `key` value is intentionally NOT checked into this
-   repo — see `RELEASE.md` for how it is stored.
+   the manifest's `key` field. To stabilise the dev-build ID across
+   developer machines (so the chromiumapp.org redirect URI line is
+   the same for every contributor), the `key` field IS committed to
+   `manifest.json`. The committed key is an RSA-2048 PUBLIC key only
+   (SubjectPublicKeyInfo, 294 bytes) — no private key material is
+   ever in the repo. Exposing the public key is safe: it cannot be
+   used to sign anything, and Chrome only uses it to derive the
+   extension ID.
+
+   **Important:** the committed dev-build key maps to a DIFFERENT
+   extension ID than the Web Store production ID. Developers who do
+   `Load unpacked` against this repo will get the dev-build ID, which
+   is intentional — it lets us OAuth-test against
+   `https://mcp.mnemonik.xyz` from the dev-build without going through
+   a CWS release. The corresponding `redirect_uris` are registered
+   server-side under the `google_oauth_client_id` configuration; see
+   `mcp/src/config.rs` and the `MNEMONIK_OAUTH_REDIRECT_URIS` env var.
+
+   PR134-C-07 / PR134-S-01 / BUG2-10: this is a deliberate policy
+   change vs. the previous "key is NOT checked in" stance. The prior
+   policy required every developer to manually paste a shared key
+   into a gitignored manifest.local.json, which contradicted the
+   "anyone can clone + run" goal of the dev workflow.
+
+   The private key used to sign CRX bundles for the Web Store remains
+   server-side (Google manages it inside the Web Store dashboard once
+   the extension is enrolled); only the public key needed for the
+   stable-ID derivation lives here.
 
 ## Google Cloud OAuth client
 

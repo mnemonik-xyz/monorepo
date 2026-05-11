@@ -269,7 +269,28 @@ export function Onboarding({ onComplete }: OnboardingProps): JSX.Element {
         </p>
         <button
           type="button"
-          onClick={() => onComplete()}
+          onClick={() => {
+            // PR134-BUG2-04: flip the storage tier to `local` BEFORE
+            // signalling `onComplete`. Without this, the App would
+            // re-bootstrap with `storage_tier === "cloud"` and the
+            // user would land in the broken "no identity, no session"
+            // state. Writing `local` first means the App's
+            // post-bootstrap branch sees `tier === "local"` and skips
+            // the Cloud-tier identity gate.
+            const cr = (globalThis as { chrome?: typeof chrome }).chrome;
+            void Promise.resolve()
+              .then(async () => {
+                try {
+                  await cr?.storage?.local?.set({ storage_tier: "local" });
+                } catch {
+                  // Best-effort — the App's local-tier path is
+                  // already the default, so a write failure simply
+                  // leaves the user in the previous broken state
+                  // (same as before this fix).
+                }
+              })
+              .finally(() => onComplete());
+          }}
           className="bg-white/5 hover:bg-white/10 text-text-primary border border-white/10 text-xs font-mono uppercase tracking-wide py-2 rounded transition-colors"
         >
           Continue in local mode

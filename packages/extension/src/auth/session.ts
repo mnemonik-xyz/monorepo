@@ -35,6 +35,7 @@
 // is to limit JWT lifetime (server-issued, default 1h per T14).
 
 import { SESSION_STORAGE_KEY, type Session } from "./types.js";
+import { EXTENSION_SESSION_STORAGE_KEY } from "./extension-bootstrap.js";
 
 // ── chrome.storage shim ────────────────────────────────────────────────
 
@@ -124,11 +125,19 @@ export async function setSession(
 /**
  * Clear the persisted session. No-op when no session is present (the
  * underlying `storage.remove` is idempotent).
+ *
+ * PR134-BLK-4 / BUG-04 / BUG2-05: also clear the cached `aud=extension`
+ * JWT (`extension_session.v1`). Without this, a sign-out leaves a
+ * fresh aud=extension token in storage; a subsequent sign-in as a
+ * different Google account would reuse it on the next escrow PUT/GET
+ * call and bind the new account's pubkey under the previous user's
+ * server-side identity. `chrome.storage.local.remove` accepts an
+ * array so we clear both keys in a single round-trip.
  */
 export async function clearSession(
   storage: StorageArea = defaultStorage(),
 ): Promise<void> {
-  await storage.remove(SESSION_STORAGE_KEY);
+  await storage.remove([SESSION_STORAGE_KEY, EXTENSION_SESSION_STORAGE_KEY]);
 }
 
 // ── JWT exp helper ─────────────────────────────────────────────────────

@@ -462,6 +462,48 @@ describe("service-worker contract · sender authorisation", () => {
     expect(flushSpy).not.toHaveBeenCalled();
   });
 
+  it("ui:recall is accepted from a content-script sender on an allowed origin (PR134-BLK-2 / BUG-01)", async () => {
+    // The recall overlay (Ctrl+Shift+R) runs in the content-script
+    // realm and fires `ui:recall` with `sender.tab` set to the host
+    // chat tab. Previously this was rejected with "unauthorized-
+    // sender" because the `ui:*` branch required `sender.tab ===
+    // undefined`. The fix splits `ui:recall` into its own branch
+    // that accepts EITHER popup origin (no tab) OR content-script
+    // origin on an allowed AI-chat host.
+    const { deps, cr, store } = makeDeps();
+    const embedderStub: Embedder = {
+      embed: vi.fn().mockResolvedValue(new Float32Array(384)),
+    } as unknown as Embedder;
+    __setEmbedderForTesting(embedderStub);
+    vi.spyOn(store, "search").mockResolvedValue([]);
+    installServiceWorker(deps);
+
+    const out = await fireAndCapture(
+      cr,
+      {
+        type: "ui:recall",
+        payload: { query: "hello", ownerPubkey: "z6Mk", limit: 3 },
+      },
+      tabSender("https://chatgpt.com/c/xyz"),
+    );
+    expect(out).toMatchObject({ ok: true });
+    expect(embedderStub.embed).toHaveBeenCalledWith("hello");
+  });
+
+  it("ui:recall from a non-allowed tab origin is rejected", async () => {
+    const { deps, cr } = makeDeps();
+    installServiceWorker(deps);
+    const out = await fireAndCapture(
+      cr,
+      {
+        type: "ui:recall",
+        payload: { query: "hello", ownerPubkey: "z6Mk", limit: 3 },
+      },
+      tabSender("https://evil.example.com/"),
+    );
+    expect(out).toEqual({ ok: false, error: "unauthorized-sender" });
+  });
+
   it("tab:fab-save-chat from a non-allowed origin is rejected (tab_fab_messages_from_non_allowed_origin_rejected)", async () => {
     // TDD anchor from task 23: drives the T2 hostile-extension /
     // hostile-content-script threat. A content script on

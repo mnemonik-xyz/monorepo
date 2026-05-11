@@ -93,6 +93,24 @@ describe("session — round-trip", () => {
     expect(result).toBeNull();
   });
 
+  it("clearSession also clears extension_session.v1 (PR134-BLK-4 / BUG-04 / BUG2-05)", async () => {
+    // The aud=extension cached JWT is keyed off `extension_session.v1`.
+    // Without this clear, signing out and signing in as a different
+    // Google account reuses the previous user's aud=extension token on
+    // the next escrow call.
+    await setSession(VALID_SESSION, storage);
+    await storage.set({
+      "extension_session.v1": {
+        jwt: "another.jwt.value",
+        expiresAt: Date.now() + 3600_000,
+      },
+    });
+    await clearSession(storage);
+    const stored = storage.inspect();
+    expect(stored[SESSION_STORAGE_KEY]).toBeUndefined();
+    expect(stored["extension_session.v1"]).toBeUndefined();
+  });
+
   it("clearSession is idempotent on an empty store", async () => {
     // Should not throw — chrome.storage.local.remove is itself idempotent.
     await clearSession(storage);

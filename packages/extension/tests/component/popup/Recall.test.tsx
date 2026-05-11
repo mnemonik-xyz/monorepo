@@ -500,4 +500,36 @@ describe("mergeRecallHits (pure)", () => {
     expect(out).toHaveLength(1);
     expect(out[0]?.attestation_id).toBe("a");
   });
+
+  it("dedupes by content when local and cloud ids differ (BUG2-03)", () => {
+    // Local row has `att_<blake3-prefix>` id; cloud-issued UUID is
+    // different. Both carry the same content. Merge MUST collapse
+    // them to a single result rather than rendering two cards.
+    const local = [
+      localHit({
+        attestation_id: "att_deadbeef00112233",
+        relevance_score: 0.4,
+        content: "shared content",
+        solana_tx: "local:deadbeef",
+        arweave_tx: "local:deadbeef",
+      }),
+    ];
+    const cloud = [
+      cloudHit({
+        attestation_id: "att_server-uuid-xyz",
+        similarity: 0.8,
+        content: "shared content",
+        solana_tx: "SolReal",
+        arweave_tx: "ArReal",
+      }),
+    ];
+    const out = mergeRecallHits(local, cloud, 5);
+    expect(out).toHaveLength(1);
+    // The local id stays canonical (cloud-sync drain has not reflowed
+    // the server id yet) but cloud-side tx ids fold in over `local:`.
+    expect(out[0]?.attestation_id).toBe("att_deadbeef00112233");
+    expect(out[0]?.relevance_score).toBe(0.8);
+    expect(out[0]?.solana_tx).toBe("SolReal");
+    expect(out[0]?.arweave_tx).toBe("ArReal");
+  });
 });
