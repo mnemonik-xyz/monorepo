@@ -30,21 +30,19 @@ import {
   Suspense,
   lazy,
   useCallback,
+  useRef,
   useState,
   type FormEvent,
   type JSX,
 } from "react";
-import {
-  uploadEscrow,
-  wrapSecret,
-  type EscrowBlob,
-} from "../../auth/key-escrow.js";
+import { bytesToBase64, type EscrowBlob } from "../../auth/key-escrow.js";
 import {
   MIN_PASSPHRASE_LENGTH,
   isPassphraseAcceptable,
 } from "../../options/components/PassphraseStrength.js";
 import { DEFAULT_SERVER_ORIGIN } from "../../auth/google-oauth.js";
 import { AuthError } from "../../auth/types.js";
+import { getRuntime } from "../runtime.js";
 
 // Lazy: the zxcvbn dictionaries are ~50KB gzip. Defer the cost until
 // the user actually opens the SetPassphrase step.
@@ -73,6 +71,20 @@ export type LinkChallenge = string;
  *  bridge so this surface stays decoupled from the loader. */
 export type SignChallenge = (nonce: Uint8Array) => Promise<Uint8Array>;
 
+/** Narrow seam SetPassphrase consumes — a subset of
+ *  `PopupRuntime.keyEscrow`. Round-2 fix (facade): production reaches
+ *  `auth/key-escrow.ts` ONLY through `popup/runtime.ts`; tests inject a
+ *  stub via this prop so the wrap / upload halves can be observed
+ *  without WebCrypto. */
+export interface SetPassphraseKeyEscrow {
+  wrap(
+    secret: Uint8Array,
+    passphrase: string,
+    pubkeyBase58: string,
+  ): Promise<EscrowBlob>;
+  upload(jwt: string, blob: EscrowBlob): Promise<void>;
+}
+
 export interface SetPassphraseProps {
   /** Server-issued Bearer JWT (`aud=extension`, carrying `google_sub`). */
   jwt: string;
@@ -84,8 +96,13 @@ export interface SetPassphraseProps {
   signChallenge: SignChallenge;
   /** Optional override of the MCP server origin (tests inject a stub). */
   serverOrigin?: string;
-  /** Optional fetch implementation (tests inject a stub). */
+  /** Optional fetch implementation (tests inject a stub). Used for the
+   *  `/oauth/google/link` POST only; key-escrow wrap+upload go through
+   *  `keyEscrow`. */
   fetchImpl?: typeof fetch;
+  /** Optional key-escrow facade override (tests inject a stub). Defaults
+   *  to the popup runtime's `keyEscrow.{wrap,upload}` pair. */
+  keyEscrow?: SetPassphraseKeyEscrow;
   /** Called once the whole wrap → upload → link sequence succeeds. */
   onComplete: () => void;
 }
@@ -106,11 +123,24 @@ export function SetPassphrase(props: SetPassphraseProps): JSX.Element {
     signChallenge,
     serverOrigin = DEFAULT_SERVER_ORIGIN,
     fetchImpl,
+    keyEscrow,
     onComplete,
   } = props;
   const [pp1, setPp1] = useState("");
   const [pp2, setPp2] = useState("");
   const [step, setStep] = useState<Step>({ kind: "form" });
+
+  // Resolve the key-escrow facade. Tests pass an explicit stub; the
+  // popup wires the real runtime here lazily so we do not import
+  // `auth/key-escrow.ts` from this module's static graph (the popup's
+  // first-paint bundle stays under the 50KB size-limit budget). The
+  // ref pin makes the reference stable across renders so `useCallback`
+  // deps don't churn (cousin of T17-C-03 for Restore.tsx).
+  const keRef = useRef<SetPassphraseKeyEscrow | null>(null);
+  if (keRef.current === null) {
+    keRef.current = keyEscrow ?? defaultSetPassphraseKeyEscrow();
+  }
+  const ke: SetPassphraseKeyEscrow = keRef.current;
 
   const acceptable = isPassphraseAcceptable(pp1) && pp1 === pp2;
   const submitting = step.kind === "wrapping" || step.kind === "linking";
@@ -131,7 +161,7 @@ export function SetPassphrase(props: SetPassphraseProps): JSX.Element {
 
       let blob: EscrowBlob;
       try {
-        blob = await wrapSecret(keypair.secret, pp, keypair.pubkey_base58);
+        blob = await ke.wrap(keypair.secret, pp, keypair.pubkey_base58);
       } catch (err) {
         setStep({
           kind: "error",
@@ -143,11 +173,7 @@ export function SetPassphrase(props: SetPassphraseProps): JSX.Element {
         return;
       }
       try {
-        const opts: { serverOrigin: string; fetchImpl?: typeof fetch } = {
-          serverOrigin,
-        };
-        if (fetchImpl !== undefined) opts.fetchImpl = fetchImpl;
-        await uploadEscrow(jwt, blob, opts);
+        await ke.upload(jwt, blob);
       } catch (err) {
         setStep({
           kind: "error",
@@ -218,6 +244,7 @@ export function SetPassphrase(props: SetPassphraseProps): JSX.Element {
       pp1,
       keypair,
       jwt,
+      ke,
       linkChallenge,
       signChallenge,
       serverOrigin,
@@ -344,8 +371,17 @@ async function linkGoogle(
     throw new AuthError(`linkGoogle: server returned ${String(resp.status)}`);
 }
 
-function bytesToBase64(b: Uint8Array): string {
-  let s = "";
-  for (let i = 0; i < b.length; i++) s += String.fromCharCode(b[i]!);
-  return globalThis.btoa(s);
+/** Default key-escrow facade — production passes nothing and we route
+ *  through the popup runtime's `keyEscrow.{wrap,upload}` pair. Tests
+ *  inject a stub via the `keyEscrow` prop so the wrap / upload halves
+ *  are observable without WebCrypto. */
+function defaultSetPassphraseKeyEscrow(): SetPassphraseKeyEscrow {
+  return {
+    async wrap(secret, passphrase, pubkeyBase58) {
+      return getRuntime().keyEscrow.wrap(secret, passphrase, pubkeyBase58);
+    },
+    async upload(jwt, blob) {
+      return getRuntime().keyEscrow.upload(jwt, blob);
+    },
+  };
 }

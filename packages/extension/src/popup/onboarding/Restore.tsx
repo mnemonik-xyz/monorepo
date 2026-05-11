@@ -2,20 +2,29 @@
 //
 // Triggered when `lookupExisting` returns
 // `{existingPubkey, escrowPresent: true}`. The user types their recovery
-// passphrase; the component fetches the encrypted blob from the server,
-// AES-GCM-decrypts it locally, and persists the recovered keypair to
-// `chrome.storage.local`.
+// passphrase; the component fetches the encrypted blob from the server
+// ONCE per popup-open, AES-GCM-decrypts it locally, and persists the
+// recovered keypair to `chrome.storage.local`.
+//
+// Round-1 review fixes (T17-C-02 / T17-S-01):
+//   The blob is cached in component state after the first successful
+//   GET. Subsequent submits (e.g. wrong-passphrase retries) consume the
+//   cached blob and never re-hit the server — this preserves the spec's
+//   "two independent gates" guarantee (5 server fetches / 24h on top of
+//   the 5 wrong-decrypt local block, instead of one combined budget).
 //
 // Failure handling:
 //   - Wrong passphrase → `WrongPassphraseError` (local AES-GCM tag check;
-//     no network call). We bump a local attempt counter; after 5 failures
-//     we disable the input for 24h and persist `restore_blocked_until` to
-//     `chrome.storage.local` so a popup re-open does not reset the
-//     budget. The server enforces fetch-rate independently.
-//   - 429 from server → `EscrowRateLimitError` carries `retry_after_seconds`;
-//     we surface a countdown ("retry after N min").
-//   - 404 → `EscrowNotFoundError`. We surface a static message — the user
-//     can reset onboarding from the App shell.
+//     no network call). We bump a persisted attempt counter; after 5
+//     failures we disable the input for 24h and persist
+//     `restore_blocked_until` to `chrome.storage.local` so a popup
+//     re-open does not reset the budget (T17-C-04: attempt count also
+//     persists, so 4 wrong + reopen + 4 more is not possible).
+//   - 429 from server → `EscrowRateLimitError` carries
+//     `retry_after_seconds` (server-bounded by `MAX_RETRY_AFTER_SECONDS`
+//     in `key-escrow.ts` per T17-S-02); we surface a countdown.
+//   - 404 → `EscrowNotFoundError`. We surface a static message — the
+//     user can reset onboarding from the App shell.
 //
 // "Forgot passphrase?" opens a modal explaining the two recovery paths
 // (start fresh OR import a keypair from another device); both are
@@ -35,6 +44,7 @@ import {
   WrongPassphraseError,
   fetchEscrow,
   unwrapSecret,
+  type EscrowBlob,
 } from "../../auth/key-escrow.js";
 
 /** Persistent block budget (T17 task spec § Restore UX). After 5 wrong
@@ -45,6 +55,11 @@ export const BLOCK_WINDOW_MS = 24 * 60 * 60 * 1000;
 
 /** chrome.storage.local key for the wall-clock-ms unblock timestamp. */
 export const RESTORE_BLOCKED_KEY = "restore_blocked_until";
+/** chrome.storage.local key for the persisted wrong-attempt counter
+ *  (T17-C-04). Read on mount alongside `restore_blocked_until` so a
+ *  popup-close-then-reopen does NOT reset the counter to 0. Cleared on
+ *  successful restore. */
+export const RESTORE_ATTEMPT_KEY = "restore_attempt_count";
 
 /** chrome.storage.local keys for the persisted keypair after restore.
  *  Mirror the layout `popup/runtime-impl.ts::loadIdentity` reads —
@@ -61,6 +76,17 @@ export function truncatePubkey(pub: string, head = 6, tail = 4): string {
   return `${pub.slice(0, head)}...${pub.slice(-tail)}`;
 }
 
+/** Narrow seam Restore consumes — a subset of `PopupRuntime.keyEscrow`.
+ *  Round-2 fix (facade): production reaches `auth/key-escrow.ts` ONLY
+ *  through `popup/runtime.ts` OR via the legacy
+ *  {`fetchImpl`, `serverOrigin`} props; tests inject a stub via this
+ *  prop so the fetch + decrypt halves can be observed independently of
+ *  the chrome.* polyfill. */
+export interface RestoreKeyEscrow {
+  fetch(jwt: string): Promise<EscrowBlob>;
+  unwrap(blob: EscrowBlob, passphrase: string): Promise<Uint8Array>;
+}
+
 export interface RestoreProps {
   /** Server-issued Bearer JWT. */
   jwt: string;
@@ -70,10 +96,16 @@ export interface RestoreProps {
   existingPubkey: string;
   /** Fired once the keypair is persisted. The host re-bootstraps. */
   onComplete: () => void;
-  /** Optional MCP server origin (tests inject a stub). */
+  /** Optional MCP server origin (legacy prop — used to build a default
+   *  `fetchEscrow`-backed facade when no `keyEscrow` is supplied).
+   *  Existing tests pass this; new callers should use `keyEscrow`. */
   serverOrigin?: string;
-  /** Optional fetch implementation (tests inject a stub). */
+  /** Optional fetch implementation (legacy prop — same role as
+   *  `serverOrigin`). */
   fetchImpl?: typeof fetch;
+  /** Optional key-escrow facade override (tests inject a stub). When
+   *  set, takes precedence over `fetchImpl` / `serverOrigin`. */
+  keyEscrow?: RestoreKeyEscrow;
   /** Optional clock injection (tests advance time without timers). */
   now?: () => number;
   /**
@@ -91,6 +123,18 @@ export interface RestoreStorage {
   set(items: Record<string, unknown>): Promise<void>;
 }
 
+/** Module-scope stable defaults — T17-C-03 fix. Using inline default-
+ *  prop expressions (`now = () => Date.now()`) creates a NEW reference
+ *  on every render, which churns the `useEffect` dep arrays and re-
+ *  fires the storage-read once per second during a live countdown.
+ *  Hoisting the defaults makes the references stable across renders. */
+const DEFAULT_NOW = (): number => Date.now();
+let DEFAULT_STORAGE: RestoreStorage | null = null;
+function getDefaultStorage(): RestoreStorage {
+  DEFAULT_STORAGE ??= chromeStorageAdapter();
+  return DEFAULT_STORAGE;
+}
+
 type Step =
   | { kind: "form" }
   | { kind: "fetching" }
@@ -106,36 +150,89 @@ export function Restore(props: RestoreProps): JSX.Element {
     onComplete,
     serverOrigin,
     fetchImpl,
-    now = () => Date.now(),
-    storage = chromeStorageAdapter(),
+    keyEscrow,
+    now = DEFAULT_NOW,
+    storage = getDefaultStorage(),
   } = props;
 
+  // Build a default key-escrow facade once per mount (NOT on every
+  // render) so the `ke` reference is stable across renders — keeps it
+  // safe to put in `useCallback` deps. The facade prefers the explicit
+  // `keyEscrow` prop, then the legacy `{fetchImpl, serverOrigin}` pair,
+  // and finally the bare `fetchEscrow`/`unwrapSecret` module imports.
+  const keRef = useRef<RestoreKeyEscrow | null>(null);
+  if (keRef.current === null) {
+    if (keyEscrow !== undefined) {
+      keRef.current = keyEscrow;
+    } else {
+      const httpOpts: { serverOrigin?: string; fetchImpl?: typeof fetch } = {};
+      if (serverOrigin !== undefined) httpOpts.serverOrigin = serverOrigin;
+      if (fetchImpl !== undefined) httpOpts.fetchImpl = fetchImpl;
+      keRef.current = {
+        async fetch(jwtArg: string): Promise<EscrowBlob> {
+          return fetchEscrow(jwtArg, httpOpts);
+        },
+        async unwrap(
+          blob: EscrowBlob,
+          passphrase: string,
+        ): Promise<Uint8Array> {
+          return unwrapSecret(blob, passphrase);
+        },
+      };
+    }
+  }
+  const ke: RestoreKeyEscrow = keRef.current;
+
   const [pp, setPp] = useState("");
+  // Wrong-attempt counter. Persisted (T17-C-04) so a popup-close-then-
+  // reopen during the budget window doesn't reset it.
   const [attempts, setAttempts] = useState(0);
   const [blockedUntil, setBlockedUntil] = useState<number | null>(null);
   const [rateLimitedUntil, setRateLimitedUntil] = useState<number | null>(null);
   const [step, setStep] = useState<Step>({ kind: "form" });
   const [forgotOpen, setForgotOpen] = useState(false);
+  // Cached encrypted blob (T17-C-02 / T17-S-01). Populated on the first
+  // successful fetch; reused for all subsequent decrypt attempts in the
+  // current popup session. Cleared on successful restore so a fresh
+  // popup-open re-fetches.
+  const [cachedBlob, setCachedBlob] = useState<EscrowBlob | null>(null);
   // `nowTick` triggers re-renders so the countdown is live. We rebind on
   // a 1s interval while a block / rate-limit window is active, then
   // tear down to keep the popup idle when nothing is counting down.
   const [, setNowTick] = useState(0);
   const tickRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  // Restore the persisted block on mount so a popup re-open during the
-  // 24h window does NOT reset the counter.
+  // Restore the persisted block AND attempt counter on mount so a popup
+  // re-open during the 24h window does NOT reset the counter
+  // (T17-C-04). Both keys are read in the same `storage.get` call.
   useEffect(() => {
     let cancelled = false;
     void (async () => {
       try {
-        const stored = await storage.get([RESTORE_BLOCKED_KEY]);
-        const raw = stored[RESTORE_BLOCKED_KEY];
-        if (typeof raw === "number" && raw > now()) {
-          if (!cancelled) setBlockedUntil(raw);
+        const stored = await storage.get([
+          RESTORE_BLOCKED_KEY,
+          RESTORE_ATTEMPT_KEY,
+        ]);
+        if (cancelled) return;
+        const rawBlocked = stored[RESTORE_BLOCKED_KEY];
+        const rawAttempts = stored[RESTORE_ATTEMPT_KEY];
+        if (typeof rawBlocked === "number" && rawBlocked > now()) {
+          setBlockedUntil(rawBlocked);
+        }
+        if (
+          typeof rawAttempts === "number" &&
+          rawAttempts > 0 &&
+          rawAttempts < MAX_WRONG_ATTEMPTS
+        ) {
+          // If the persisted counter has already crossed the threshold
+          // the block timestamp is the source of truth — we don't
+          // hydrate `attempts` past MAX so the threshold logic stays
+          // simple.
+          setAttempts(rawAttempts);
         }
       } catch {
-        // Best-effort — a missing storage permission shouldn't crash the
-        // popup. The user can still attempt restore; the in-memory
+        // Best-effort — a missing storage permission shouldn't crash
+        // the popup. The user can still attempt restore; the in-memory
         // counter still applies for the lifetime of the popup.
       }
     })();
@@ -184,42 +281,48 @@ export function Restore(props: RestoreProps): JSX.Element {
       // goes out of scope once this callback returns.
       const passphrase = pp;
       setPp("");
-      setStep({ kind: "fetching" });
 
-      let blob;
-      try {
-        const opts: { serverOrigin?: string; fetchImpl?: typeof fetch } = {};
-        if (serverOrigin !== undefined) opts.serverOrigin = serverOrigin;
-        if (fetchImpl !== undefined) opts.fetchImpl = fetchImpl;
-        blob = await fetchEscrow(jwt, opts);
-      } catch (err) {
-        if (err instanceof EscrowRateLimitError) {
-          const until = now() + err.retry_after_seconds * 1000;
-          setRateLimitedUntil(until);
-          setStep({
-            kind: "error",
-            message: `Server limited fetches. Retry after ${formatCountdown(
-              err.retry_after_seconds * 1000,
-            )}.`,
-          });
-          return;
-        }
-        if (err instanceof EscrowNotFoundError) {
+      // Step 1: ensure we have an encrypted blob. T17-C-02 / T17-S-01:
+      // fetch ONCE per popup session and cache; subsequent wrong-
+      // passphrase retries consume the cached blob without touching
+      // the server, preserving the independent 5/24h server budget.
+      let blob: EscrowBlob;
+      if (cachedBlob !== null) {
+        blob = cachedBlob;
+      } else {
+        setStep({ kind: "fetching" });
+        try {
+          blob = await ke.fetch(jwt);
+          setCachedBlob(blob);
+        } catch (err) {
+          if (err instanceof EscrowRateLimitError) {
+            const until = now() + err.retry_after_seconds * 1000;
+            setRateLimitedUntil(until);
+            setStep({
+              kind: "error",
+              message: `Server limited fetches. Retry after ${formatCountdown(
+                err.retry_after_seconds * 1000,
+              )}.`,
+            });
+            return;
+          }
+          if (err instanceof EscrowNotFoundError) {
+            setStep({
+              kind: "error",
+              message:
+                "No encrypted blob is stored on the server for this account. Re-enrol or import your keypair from another device.",
+            });
+            return;
+          }
           setStep({
             kind: "error",
             message:
-              "No encrypted blob is stored on the server for this account. Re-enrol or import your keypair from another device.",
+              err instanceof Error
+                ? `Could not fetch encrypted blob: ${err.message}`
+                : "Could not fetch encrypted blob.",
           });
           return;
         }
-        setStep({
-          kind: "error",
-          message:
-            err instanceof Error
-              ? `Could not fetch encrypted blob: ${err.message}`
-              : "Could not fetch encrypted blob.",
-        });
-        return;
       }
 
       // Local AES-GCM unwrap. Wrong passphrase surfaces here WITHOUT a
@@ -228,11 +331,19 @@ export function Restore(props: RestoreProps): JSX.Element {
       setStep({ kind: "decrypting" });
       let secret: Uint8Array;
       try {
-        secret = await unwrapSecret(blob, passphrase);
+        secret = await ke.unwrap(blob, passphrase);
       } catch (err) {
         if (err instanceof WrongPassphraseError) {
           const next = attempts + 1;
           setAttempts(next);
+          // Persist immediately so a popup-close doesn't reset the
+          // counter (T17-C-04).
+          try {
+            await storage.set({ [RESTORE_ATTEMPT_KEY]: next });
+          } catch {
+            // Best-effort — in-memory state still tracks the count for
+            // this popup lifetime.
+          }
           if (next >= MAX_WRONG_ATTEMPTS) {
             const until = now() + BLOCK_WINDOW_MS;
             setBlockedUntil(until);
@@ -275,6 +386,14 @@ export function Restore(props: RestoreProps): JSX.Element {
       try {
         // Convert to plain number[] for chrome.storage's structured
         // clone — `Uint8Array` round-trips lossily in some MV3 builds.
+        //
+        // Security note (T17-S-06, accepted): a plain `number[]` cannot
+        // be zeroed once handed to chrome.storage — the slice lives on
+        // the GC heap until collected. The original `Uint8Array` is
+        // zeroed below, which limits the exposure window to the brief
+        // interval between `Array.from(secret)` and the next GC pass.
+        // The platform constraint (structured-clone API) makes this
+        // unavoidable; see the THREAT MODEL block in `key-escrow.ts`.
         const secretArray = Array.from(secret);
         await storage.set({
           [IDENTITY_STORAGE_KEY]: { pubkey_base58: existingPubkey },
@@ -295,19 +414,32 @@ export function Restore(props: RestoreProps): JSX.Element {
         return;
       }
 
+      // Success — clear both persisted counters AND drop the cached
+      // blob so a future re-restore can't reuse it.
+      setCachedBlob(null);
+      setAttempts(0);
+      try {
+        await storage.set({
+          [RESTORE_ATTEMPT_KEY]: 0,
+          [RESTORE_BLOCKED_KEY]: 0,
+        });
+      } catch {
+        // Best-effort.
+      }
+
       setStep({ kind: "done" });
       onComplete();
     },
     [
       attempts,
+      cachedBlob,
       existingPubkey,
-      fetchImpl,
       inputDisabled,
       jwt,
+      ke,
       now,
       onComplete,
       pp,
-      serverOrigin,
       storage,
     ],
   );

@@ -29,6 +29,7 @@ import {
   rotatePassphrase,
   EscrowNotFoundError,
 } from "../auth/key-escrow.js";
+import { SESSION_STORAGE_KEY } from "../auth/types.js";
 import type {
   AuthFacade,
   AuthSession,
@@ -41,7 +42,11 @@ import type {
   SettingsFacade,
 } from "./runtime.js";
 
-const SESSION_KEY = "auth_session.v1";
+// Canonical chrome.storage.local key for the cached Google session.
+// Must match auth/session.ts and the popup's session writer — otherwise
+// every keyEscrow.rotate / delete / hasBlob call from Security silently
+// gets null JWT and fails.
+const SESSION_KEY = SESSION_STORAGE_KEY;
 
 /** Build the production OptionsRuntime. Called once from `main.tsx`. */
 export function createDefaultOptionsRuntime(): OptionsRuntime {
@@ -165,7 +170,7 @@ function createKeyEscrowFacade(): KeyEscrowFacade {
   };
 }
 
-/** Lift the current `auth_session.v1.jwt` out of chrome.storage. Returns
+/** Lift the current `session.v1.jwt` out of chrome.storage. Returns
  *  `null` when no session is cached or the blob is malformed. The
  *  keyEscrow facade calls this on every method so a stale JWT cached
  *  in module scope cannot leak into a fresh sign-in. */

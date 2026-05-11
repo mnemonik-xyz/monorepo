@@ -98,6 +98,15 @@ export const AES_GCM_NONCE_LENGTH = 12;
  *  proof against alternative KDFs (scrypt, etc.) without ambiguity. */
 export const KDF_IDENTIFIER = "argon2id" as const;
 
+/** Upper bound on parsed `Retry-After` values (T17-S-02). A hostile
+ *  MITM or compromised server returning `Retry-After: 999999999`
+ *  (~31 years) would otherwise disable the restore UI for the lifetime
+ *  of the extension install. 24h covers every legitimate rate-limit
+ *  window the server emits (the GET budget is 5/24h). Any value beyond
+ *  this is clamped silently. Applies to BOTH the header path and the
+ *  JSON-body `retry_after_secs` fallback. */
+export const MAX_RETRY_AFTER_SECONDS = 24 * 60 * 60;
+
 // ── Types ───────────────────────────────────────────────────────────────────
 
 /** Parsed `kdf_params` JSON. All fields REQUIRED — we never produce a
@@ -168,8 +177,12 @@ export class EscrowNotFoundError extends Error {
 
 /** Encode `bytes` as standard base64 (RFC 4648 §4, `+/` alphabet, `=`
  *  padding). Wire-format symmetric to the Rust server's
- *  `base64::engine::general_purpose::STANDARD`. */
-function bytesToBase64(bytes: Uint8Array): string {
+ *  `base64::engine::general_purpose::STANDARD`.
+ *
+ *  Exported (T17-C-06) so dependent components like
+ *  `popup/onboarding/SetPassphrase.tsx` reuse the single canonical
+ *  encoder rather than duplicating the logic. */
+export function bytesToBase64(bytes: Uint8Array): string {
   // btoa over a binary-string is fastest for the small payload sizes we
   // wrap (<= ~100 bytes ciphertext); we don't need a streaming encoder.
   let bin = "";
@@ -450,7 +463,7 @@ export async function uploadEscrow(
     // PUT is not currently rate-limited on the server, but we surface
     // 429 as a typed error anyway so future server-side throttling
     // does not require a client change.
-    throw new EscrowRateLimitError(parseRetryAfter(response, 60));
+    throw new EscrowRateLimitError(await parseRetryAfter(response, 60));
   }
   if (!response.ok) {
     throw new AuthError(
@@ -488,7 +501,7 @@ export async function fetchEscrow(
     throw new EscrowNotFoundError();
   }
   if (response.status === 429) {
-    throw new EscrowRateLimitError(parseRetryAfter(response, 3600));
+    throw new EscrowRateLimitError(await parseRetryAfter(response, 3600));
   }
   if (!response.ok) {
     throw new AuthError(
@@ -607,23 +620,44 @@ export async function rotatePassphrase(
  * Parse `Retry-After` (header — preferred) then fall back to JSON
  * `retry_after_secs`, then to `fallback`. Defensive against either
  * channel being absent or non-integer.
+ *
+ * The function is async because the JSON body fallback requires reading
+ * the response stream; we clone the response first so the caller can
+ * still read the original body afterward without "Body already
+ * consumed" errors.
  */
-function parseRetryAfter(response: Response, fallback: number): number {
+async function parseRetryAfter(
+  response: Response,
+  fallback: number,
+): Promise<number> {
+  const clamp = (n: number): number =>
+    Math.min(Math.max(1, Math.floor(n)), MAX_RETRY_AFTER_SECONDS);
+
   const headerVal = response.headers.get("retry-after");
   if (headerVal !== null) {
     const n = Number.parseInt(headerVal, 10);
-    if (Number.isFinite(n) && n > 0) return n;
+    if (Number.isFinite(n) && n > 0) return clamp(n);
   }
-  // Body fallback is best-effort: we MUST clone before consuming the
-  // body because the caller may also try to read it. Reading via
-  // `.clone().json()` keeps the original response intact.
+  // Body fallback: the server (T15 `escrow.rs::rate_limited`) emits
+  // BOTH a `Retry-After` header AND a JSON body of shape
+  // `{retry_after_secs: <int>}`. The server has a degenerate path
+  // (`HeaderValue` construction failure → header omitted, body still
+  // sent) — covering it here keeps the typed error informative even
+  // when the header channel drops. Per T17-S-02, the parsed body value
+  // is bounded too, so a server JSON of `{retry_after_secs: 999999999}`
+  // cannot disable the restore UI longer than `MAX_RETRY_AFTER_SECONDS`.
   try {
-    // Synchronous best-effort: we don't await; the body fallback only
-    // kicks in if the header was absent. Async parse is left for a
-    // future enhancement once we have a real-world server emitting
-    // both channels.
+    const clone = response.clone();
+    const body = (await clone.json()) as unknown;
+    if (body && typeof body === "object") {
+      const n = (body as Record<string, unknown>).retry_after_secs;
+      if (typeof n === "number" && Number.isFinite(n) && n > 0) {
+        return clamp(n);
+      }
+    }
   } catch {
-    // ignore — caller will see `fallback`.
+    // Body is not JSON, already consumed, or server returned an empty
+    // body. Fall through to the hardcoded floor.
   }
-  return fallback;
+  return clamp(fallback);
 }

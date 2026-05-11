@@ -10,13 +10,14 @@
 // no real network is touched. Storage is a Map-backed stub injected via
 // the `storage` prop so we can observe the persisted block timestamp.
 
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import {
   Restore,
   MAX_WRONG_ATTEMPTS,
   BLOCK_WINDOW_MS,
   RESTORE_BLOCKED_KEY,
+  RESTORE_ATTEMPT_KEY,
   IDENTITY_STORAGE_KEY,
   IDENTITY_SECRET_STORAGE_KEY,
   formatCountdown,
@@ -99,11 +100,17 @@ function fetchReturning(blob: EscrowBlob): typeof fetch {
 // ── 5_wrong_attempts_blocks_input — TDD anchor #3 ───────────────────────────
 
 describe("Restore — 5_wrong_attempts_blocks_input (TDD anchor)", () => {
-  it("five wrong passphrases disable the input and persist the block", async () => {
+  it("five wrong passphrases disable the input, persist the block, AND only fetch once (T17-C-09)", async () => {
     const secret = crypto.getRandomValues(new Uint8Array(32));
     const blob = await fastWrap(secret, "correct-passphrase-A", "PubABC123");
     const { store, adapter } = makeStorage();
     let nowMs = 1_700_000_000_000;
+
+    // T17-C-09: wrap fetchImpl in vi.fn() so we can assert how many
+    // times the server was hit across 5 wrong attempts. The expected
+    // count is EXACTLY ONE — the blob is cached in component state
+    // after the first GET and reused for subsequent decrypt attempts.
+    const fetchSpy = vi.fn(fetchReturning(blob));
 
     render(
       <Restore
@@ -111,7 +118,7 @@ describe("Restore — 5_wrong_attempts_blocks_input (TDD anchor)", () => {
         existingPubkey="PubABC123"
         onComplete={() => undefined}
         serverOrigin="https://mc.test"
-        fetchImpl={fetchReturning(blob)}
+        fetchImpl={fetchSpy as unknown as typeof fetch}
         now={() => nowMs}
         storage={adapter}
       />,
@@ -157,6 +164,76 @@ describe("Restore — 5_wrong_attempts_blocks_input (TDD anchor)", () => {
     expect((persisted as number) - nowMs).toBeLessThanOrEqual(
       BLOCK_WINDOW_MS + 1000,
     );
+
+    // T17-C-09 binding: the rate-limit budget protection invariant.
+    // 5 wrong-passphrase attempts MUST burn exactly 1 server fetch,
+    // not 5. The remaining 4 server tokens are reserved for genuine
+    // device-restore sessions, per the spec's "two independent gates".
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+
+    // The persisted attempt counter must also reflect the threshold,
+    // proving T17-C-04 — popup-close-reopen cannot reset the counter.
+    expect(store.get(RESTORE_ATTEMPT_KEY)).toBe(MAX_WRONG_ATTEMPTS);
+  });
+});
+
+// ── T17-C-04 — persisted attempt counter ────────────────────────────────────
+
+describe("Restore — persisted attempt counter survives mount (T17-C-04)", () => {
+  it("4 prior wrong attempts hydrate; one more wrong → block", async () => {
+    const secret = crypto.getRandomValues(new Uint8Array(32));
+    const blob = await fastWrap(secret, "correct-pp-PERSIST", "PubAttempts");
+    const { store, adapter } = makeStorage();
+    const nowMs = 1_700_000_000_000;
+    // Pre-seed: user previously got 4 wrong attempts then closed popup.
+    store.set(RESTORE_ATTEMPT_KEY, 4);
+
+    const fetchSpy = vi.fn(fetchReturning(blob));
+
+    render(
+      <Restore
+        jwt="JWT.PLACEHOLDER"
+        existingPubkey="PubAttempts"
+        onComplete={() => undefined}
+        serverOrigin="https://mc.test"
+        fetchImpl={fetchSpy as unknown as typeof fetch}
+        now={() => nowMs}
+        storage={adapter}
+      />,
+    );
+
+    const input = (await screen.findByTestId(
+      "restore-pp-input",
+    )) as HTMLInputElement;
+    const submit = screen.getByRole("button", { name: /^Restore/ });
+
+    // Wait for the hydration effect to read the storage and write the
+    // counter into state. The storage.get is async (microtask-deferred)
+    // so we flush the queue before submitting; otherwise the click
+    // would land before hydration and start counting from 0.
+    await Promise.resolve();
+    await Promise.resolve();
+    await waitFor(() => {
+      expect(input.disabled).toBe(false);
+    });
+
+    // One wrong attempt → block (NOT another four). The counter was
+    // hydrated from storage at 4.
+    fireEvent.change(input, { target: { value: "one-more-bogus-attempt" } });
+    fireEvent.click(submit);
+
+    // Wait for the actual block countdown to render — guarantees the
+    // attempts counter crossed MAX_WRONG_ATTEMPTS on the FIRST wrong
+    // submit (proving hydration set it to 4 ahead of time).
+    await waitFor(() => {
+      expect(
+        screen.queryByTestId("restore-block-countdown"),
+      ).toBeInTheDocument();
+    });
+    // Sanity: still only one fetch (blob caching invariant).
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    // Persisted counter is at the threshold.
+    expect(store.get(RESTORE_ATTEMPT_KEY)).toBe(MAX_WRONG_ATTEMPTS);
   });
 });
 

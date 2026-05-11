@@ -16,6 +16,7 @@ import type {
   LookupResult,
   Session,
 } from "../auth/types.js";
+import type { EscrowBlob } from "../auth/key-escrow.js";
 
 /** Identity loaded out of `chrome.storage.local`. `null` when the user
  *  has not completed T16 onboarding yet (popup renders a "not signed
@@ -137,6 +138,39 @@ export interface PopupRuntime {
     set(session: Session): Promise<void>;
     clear(): Promise<void>;
   };
+
+  /**
+   * T17 key-escrow seam. Popup onboarding components route through this
+   * facade rather than importing `src/auth/key-escrow.ts` directly, so
+   * tests have a single mock seam. The concrete impl dynamic-imports
+   * `auth/key-escrow.ts` lazily to keep the popup's first-paint bundle
+   * free of WebCrypto + hash-wasm.
+   */
+  keyEscrow: {
+    /** Argon2id-derive a key and AES-GCM-256 encrypt `secret`. */
+    wrap(
+      secret: Uint8Array,
+      passphrase: string,
+      pubkeyBase58: string,
+    ): Promise<EscrowBlob>;
+    /** Argon2id-derive a key and AES-GCM-256 decrypt `blob`. Throws
+     *  `WrongPassphraseError` on tag mismatch. Local-only — no network. */
+    unwrap(blob: EscrowBlob, passphrase: string): Promise<Uint8Array>;
+    /** PUT the blob to `/api/key-escrow`. */
+    upload(jwt: string, blob: EscrowBlob): Promise<void>;
+    /** GET the blob from `/api/key-escrow`. */
+    fetch(jwt: string): Promise<EscrowBlob>;
+    /** DELETE the blob. */
+    delete(jwt: string): Promise<void>;
+    /** Fetch → unwrap with `oldPassphrase` → re-wrap → upload. */
+    rotate(
+      jwt: string,
+      oldPassphrase: string,
+      newPassphrase: string,
+    ): Promise<void>;
+    /** Probe via GET; treats 404 as `false`. */
+    hasBlob(jwt: string): Promise<boolean>;
+  };
 }
 
 let current: PopupRuntime | null = null;
@@ -252,6 +286,45 @@ export function createDefaultRuntime(): PopupRuntime {
       async clear() {
         const { clearSession } = await import("../auth/session.js");
         return clearSession();
+      },
+    },
+    keyEscrow: {
+      async wrap(secret, passphrase, pubkeyBase58) {
+        const ke = await import("../auth/key-escrow.js");
+        return ke.wrapSecret(secret, passphrase, pubkeyBase58);
+      },
+      async unwrap(blob, passphrase) {
+        const ke = await import("../auth/key-escrow.js");
+        return ke.unwrapSecret(blob, passphrase);
+      },
+      async upload(jwt, blob) {
+        const ke = await import("../auth/key-escrow.js");
+        return ke.uploadEscrow(jwt, blob);
+      },
+      async fetch(jwt) {
+        const ke = await import("../auth/key-escrow.js");
+        return ke.fetchEscrow(jwt);
+      },
+      async delete(jwt) {
+        const ke = await import("../auth/key-escrow.js");
+        return ke.deleteEscrow(jwt);
+      },
+      async rotate(jwt, oldPassphrase, newPassphrase) {
+        const ke = await import("../auth/key-escrow.js");
+        return ke.rotatePassphrase(jwt, oldPassphrase, newPassphrase);
+      },
+      async hasBlob(jwt) {
+        const ke = await import("../auth/key-escrow.js");
+        try {
+          await ke.fetchEscrow(jwt);
+          return true;
+        } catch (err) {
+          if (err instanceof ke.EscrowNotFoundError) return false;
+          // Network / auth hiccups bubble to the caller — onboarding has
+          // already exercised auth via `signIn`, so a 401 / 5xx here is
+          // an actionable error rather than an "absent blob".
+          throw err;
+        }
       },
     },
   };

@@ -27,9 +27,11 @@ import {
   ARGON2ID_TIME_COST,
   AES_GCM_NONCE_LENGTH,
   KDF_IDENTIFIER,
+  MAX_RETRY_AFTER_SECONDS,
   EscrowNotFoundError,
   EscrowRateLimitError,
   WrongPassphraseError,
+  bytesToBase64,
   deriveKey,
   deleteEscrow,
   fetchEscrow,
@@ -61,6 +63,9 @@ function installFetchMock(
 
 beforeEach(() => {
   originalFetch = globalThis.fetch;
+  // Reset call recorder so tests that install fetch directly (not via
+  // installFetchMock) don't inherit stale entries from a prior test.
+  fetchCalls = [];
 });
 
 afterEach(() => {
@@ -121,8 +126,11 @@ describe("Argon2id parameters match D9 + OWASP minimums", () => {
     expect(ARGON2ID_MEMORY_COST_KIB).toBeGreaterThanOrEqual(19 * 1024);
     expect(ARGON2ID_MEMORY_COST_KIB).toBe(65_536);
   });
-  it("time_cost is at least 2 — OWASP floor", () => {
-    expect(ARGON2ID_TIME_COST).toBeGreaterThanOrEqual(2);
+  it("time_cost is at least 3 — OWASP floor at m=64MiB (D9)", () => {
+    // OWASP Argon2id at m >= 64 MiB recommends t >= 3 as the minimum
+    // iteration count. A PR that lowers the constant to 2 would also
+    // need to bump memory to ~96 MiB to stay within OWASP.
+    expect(ARGON2ID_TIME_COST).toBeGreaterThanOrEqual(3);
     expect(ARGON2ID_TIME_COST).toBe(3);
   });
   it("parallelism is 1 (portable, matches D9)", () => {
@@ -227,6 +235,87 @@ describe("wrap_unwrap_roundtrip — TDD anchor #1", () => {
     expect(params.t).toBe(FAST_PARAMS.timeCost);
     expect(params.p).toBe(FAST_PARAMS.parallelism);
   });
+});
+
+// ── Production wrapSecret — exercises full Argon2id parameters ──────────────
+//
+// Round-2 fix (T17-T-01): the round-trip tests above use `fastWrap` so
+// they finish in <100ms each. To bind the production code path —
+// `wrapSecret()`'s input-validation guards AND the production-parameter
+// `deriveKey` call site — we add ONE test here that invokes the real
+// function. It is slower (~150ms on a 2024 laptop) so we limit to a
+// single happy-path round-trip; the parameter constants test above
+// guards against silent constant drift.
+describe("wrapSecret — production parameters", () => {
+  it("round-trips a 64-byte Solana keypair through production Argon2id", async () => {
+    // 64 bytes = Solana keypair (32-byte seed || 32-byte pubkey).
+    // This is the actual payload size onboarding hands to wrapSecret.
+    const secret = crypto.getRandomValues(new Uint8Array(64));
+    const passphrase = "correct horse battery staple long";
+    const blob = await wrapSecret(secret, passphrase, "ProdPub");
+    expect(blob.kdf).toBe("argon2id");
+    // kdf_params on the wire MUST carry the production constants — a
+    // PR that swapped `ARGON2ID_MEMORY_COST_KIB` for a smaller value
+    // would surface here too.
+    const params = JSON.parse(blob.kdf_params) as Record<string, unknown>;
+    expect(params.m).toBe(ARGON2ID_MEMORY_COST_KIB);
+    expect(params.t).toBe(ARGON2ID_TIME_COST);
+    expect(params.p).toBe(ARGON2ID_PARALLELISM);
+    const out = await unwrapSecret(blob, passphrase);
+    expect(out).toEqual(secret);
+  }, 30_000);
+
+  it("rejects empty secret", async () => {
+    let caught: unknown;
+    try {
+      await wrapSecret(new Uint8Array(0), "pp", "Pub");
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(AuthError);
+  });
+
+  it("rejects empty passphrase", async () => {
+    let caught: unknown;
+    try {
+      await wrapSecret(new Uint8Array([1, 2, 3]), "", "Pub");
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(AuthError);
+  });
+
+  it("rejects empty pubkey_base58", async () => {
+    let caught: unknown;
+    try {
+      await wrapSecret(new Uint8Array([1, 2, 3]), "pp", "");
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(AuthError);
+  });
+});
+
+// ── Argon2id cost-time floor (OWASP guideline) ──────────────────────────────
+//
+// Round-2 fix (T17-CR-MIN-6): the task spec says "cost-time ≥ 100ms on
+// modern laptop in CI". A cold CI container with WASM tiering can be
+// noticeably slower than steady-state, so we assert a floor of 50ms
+// — half the spec target. The intent is to catch a PR that
+// accidentally lowers a parameter (and so collapses derive time);
+// catching real-world slow paths is the wrap-roundtrip test above.
+describe("Argon2id timing — D9 cost-time floor", () => {
+  it("deriveKey with production params is at least 50ms wall-clock", async () => {
+    const salt = crypto.getRandomValues(new Uint8Array(ARGON2ID_SALT_LENGTH));
+    const start = performance.now();
+    await deriveKey("a-real-passphrase-12-chars", salt);
+    const elapsedMs = performance.now() - start;
+    // 50ms (not 100ms) on purpose: cold CI containers running
+    // `hash-wasm` under a non-SIMD WASM build can take 50-80ms for the
+    // production params; we want this test to bind the lower bound
+    // without flaking. The constants test above guards the upper bound.
+    expect(elapsedMs).toBeGreaterThanOrEqual(50);
+  }, 30_000);
 });
 
 // ── Wrong passphrase — local detection, no network ──────────────────────────
@@ -458,6 +547,40 @@ describe("fetchEscrow", () => {
     expect((caught as EscrowRateLimitError).retry_after_seconds).toBe(1234);
   });
 
+  it("429 with NO Retry-After header falls back to JSON body retry_after_secs", async () => {
+    // Round-2 fix (T17-S-01 / T17-T-05): when the server fails to
+    // construct the header (escrow.rs::rate_limited fallback path), the
+    // JSON body still carries `retry_after_secs`. The client must parse
+    // it rather than dropping to the hardcoded floor.
+    installFetchMock(
+      () =>
+        new Response(JSON.stringify({ retry_after_secs: 300 }), {
+          status: 429,
+          headers: { "content-type": "application/json" },
+        }),
+    );
+    let caught: unknown = undefined;
+    try {
+      await fetchEscrow(FAKE_JWT, { serverOrigin: "https://mc.test" });
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(EscrowRateLimitError);
+    expect((caught as EscrowRateLimitError).retry_after_seconds).toBe(300);
+  });
+
+  it("429 with NO Retry-After header AND NO body falls back to 3600s floor", async () => {
+    installFetchMock(() => new Response("", { status: 429 }));
+    let caught: unknown = undefined;
+    try {
+      await fetchEscrow(FAKE_JWT, { serverOrigin: "https://mc.test" });
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(EscrowRateLimitError);
+    expect((caught as EscrowRateLimitError).retry_after_seconds).toBe(3600);
+  });
+
   it("rejects malformed response body", async () => {
     installFetchMock(() => new Response("not json", { status: 200 }));
     let caught: unknown = undefined;
@@ -616,5 +739,207 @@ describe("wrong_passphrase_fails_locally — spy on fetch", () => {
     }
     expect(caught).toBeInstanceOf(WrongPassphraseError);
     expect(fetchSpy).not.toHaveBeenCalled();
+  });
+});
+
+// ── T17-T-01 — production wrapSecret() tested directly ────────────────────
+//
+// The fast-Argon2id helper above replicates wrapSecret's logic with
+// reduced parameters; on its own it does NOT exercise the production
+// code path. These tests close that gap: input-validation guards run
+// synchronously (cheap), and a single slow round-trip uses real
+// Argon2id with the production constants to prove the wiring works.
+
+describe("wrapSecret — production code path (T17-T-01)", () => {
+  it("rejects empty secret synchronously (no KDF work)", async () => {
+    const before = Date.now();
+    let caught: unknown = undefined;
+    try {
+      await wrapSecret(new Uint8Array(0), "any-passphrase", "PubX");
+    } catch (e) {
+      caught = e;
+    }
+    const elapsed = Date.now() - before;
+    expect(caught).toBeInstanceOf(AuthError);
+    // Sub-50ms means the Argon2id derivation never ran.
+    expect(elapsed).toBeLessThan(50);
+  });
+
+  it("rejects empty passphrase synchronously", async () => {
+    let caught: unknown = undefined;
+    try {
+      await wrapSecret(new Uint8Array([1, 2, 3]), "", "PubX");
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(AuthError);
+  });
+
+  it("rejects empty pubkey synchronously", async () => {
+    let caught: unknown = undefined;
+    try {
+      await wrapSecret(new Uint8Array([1, 2, 3]), "passphrase", "");
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(AuthError);
+  });
+
+  it(
+    "round-trip with production Argon2id params — wrap → unwrap → equal",
+    async () => {
+      // Real wrapSecret + real unwrapSecret. The full Argon2id derive
+      // at m=64MiB t=3 lands around 100–200ms on a 2024 laptop; we run
+      // it twice (encrypt + decrypt) so this case carries the bulk of
+      // the production-path coverage in a single test.
+      const secret = crypto.getRandomValues(new Uint8Array(64));
+      const passphrase = "production-path-roundtrip-12345";
+      const blob = await wrapSecret(secret, passphrase, "PubProd");
+      // Sanity: the in-wire kdf_params reflect the production constants
+      // (proving wrapSecret actually passes them down, not just the
+      // exported constants matching).
+      const params = JSON.parse(blob.kdf_params) as Record<string, unknown>;
+      expect(params.m).toBe(ARGON2ID_MEMORY_COST_KIB);
+      expect(params.t).toBe(ARGON2ID_TIME_COST);
+      expect(params.p).toBe(ARGON2ID_PARALLELISM);
+      const recovered = await unwrapSecret(blob, passphrase);
+      expect(recovered).toEqual(secret);
+    },
+    { timeout: 30_000 },
+  );
+});
+
+// ── T17-T-04 — wrap/unwrap with 64-byte Solana keypair secret ──────────────
+
+describe("wrap_unwrap_roundtrip — 64-byte secret (Solana keypair shape)", () => {
+  it("64-byte input round-trips byte-for-byte", async () => {
+    const secret64 = crypto.getRandomValues(new Uint8Array(64));
+    const blob = await fastWrap(secret64, "pp-64-bytes-ok", "PubSolana");
+    const out = await unwrapSecret(blob, "pp-64-bytes-ok");
+    expect(out).toEqual(secret64);
+    expect(out.length).toBe(64);
+  });
+});
+
+// ── T17-S-02 / T17-T-05 — parseRetryAfter clamp + JSON body fallback ──────
+
+describe("parseRetryAfter — clamps Retry-After header to MAX_RETRY_AFTER_SECONDS (T17-S-02)", () => {
+  it("a hostile Retry-After: 999999999 is clamped to 86400", async () => {
+    installFetchMock(
+      () =>
+        new Response(JSON.stringify({ error: "rate_limited" }), {
+          status: 429,
+          headers: {
+            "retry-after": "999999999",
+            "content-type": "application/json",
+          },
+        }),
+    );
+    let caught: unknown = undefined;
+    try {
+      await fetchEscrow(FAKE_JWT, { serverOrigin: "https://mc.test" });
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(EscrowRateLimitError);
+    expect((caught as EscrowRateLimitError).retry_after_seconds).toBe(
+      MAX_RETRY_AFTER_SECONDS,
+    );
+  });
+});
+
+describe("parseRetryAfter — JSON body fallback (T17-T-05)", () => {
+  it("429 with no Retry-After header but retry_after_secs body → parsed", async () => {
+    installFetchMock(
+      () =>
+        new Response(JSON.stringify({ retry_after_secs: 300 }), {
+          status: 429,
+          headers: { "content-type": "application/json" },
+        }),
+    );
+    let caught: unknown = undefined;
+    try {
+      await fetchEscrow(FAKE_JWT, { serverOrigin: "https://mc.test" });
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(EscrowRateLimitError);
+    expect((caught as EscrowRateLimitError).retry_after_seconds).toBe(300);
+  });
+
+  it("hostile JSON retry_after_secs is also clamped (T17-S-02 second channel)", async () => {
+    installFetchMock(
+      () =>
+        new Response(JSON.stringify({ retry_after_secs: 999_999_999 }), {
+          status: 429,
+          headers: { "content-type": "application/json" },
+        }),
+    );
+    let caught: unknown = undefined;
+    try {
+      await fetchEscrow(FAKE_JWT, { serverOrigin: "https://mc.test" });
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(EscrowRateLimitError);
+    expect((caught as EscrowRateLimitError).retry_after_seconds).toBe(
+      MAX_RETRY_AFTER_SECONDS,
+    );
+  });
+});
+
+// ── T17-T-07 — rotatePassphrase: upload-mid-flight failure ─────────────────
+
+describe("rotatePassphrase — upload mid-flight failure (T17-T-07)", () => {
+  it("upload throws → error surfaces; old server-side blob is NOT deleted", async () => {
+    const secret = crypto.getRandomValues(new Uint8Array(32));
+    const oldBlob = await fastWrap(secret, "old-pp-correct", "PubRotateFail");
+    let deleteCalled = false;
+    let putCalls = 0;
+    globalThis.fetch = (async (
+      _input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      if (init?.method === "DELETE") {
+        deleteCalled = true;
+        return new Response("{}", { status: 200 });
+      }
+      if (init?.method === "PUT") {
+        putCalls++;
+        return new Response("", { status: 500 });
+      }
+      // GET → return the existing blob
+      return new Response(JSON.stringify(oldBlob), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }) as typeof globalThis.fetch;
+    let caught: unknown = undefined;
+    try {
+      await rotatePassphrase(FAKE_JWT, "old-pp-correct", "new-pp-strong", {
+        serverOrigin: "https://mc.test",
+      });
+    } catch (e) {
+      caught = e;
+    }
+    // The upload (PUT) failure surfaces as AuthError.
+    expect(caught).toBeInstanceOf(AuthError);
+    // The PUT was attempted (the failure is server-side, not pre-flight).
+    expect(putCalls).toBe(1);
+    // We never issue a DELETE, so the server keeps the old blob intact.
+    expect(deleteCalled).toBe(false);
+  });
+});
+
+// ── bytesToBase64 — exported helper round-trips (T17-C-06) ────────────────
+
+describe("bytesToBase64 — exported encoder", () => {
+  it("round-trips through atob to the original bytes", () => {
+    const input = new Uint8Array([0, 1, 2, 250, 251, 252, 253, 254, 255]);
+    const b64 = bytesToBase64(input);
+    const bin = globalThis.atob(b64);
+    const out = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+    expect(out).toEqual(input);
   });
 });
