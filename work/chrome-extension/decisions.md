@@ -1232,3 +1232,37 @@ Three round-1 reviewers (code-reviewer, security-auditor, test-reviewer) returne
 - `vitest run tests/unit/auth/key-escrow.test.ts` → 50 pass (was 33 before round-1; +17 from this fix wave).
 - `bun test` (full extension) → 196 pass / 1 pre-existing `cose.test.ts` WASM failure (unchanged from the pre-fix baseline).
 
+
+---
+
+## 2026-05-11 · T24 — Options edges + fuzz tests
+
+Round-2 test audit flagged TA-MIN2 (no `About` section test) and TA-MIN4 (no Identity-import test). Plus the user requested maximum coverage on the parser/crypto seams — both are stable contracts that benefit from property-based fuzzing more than they benefit from another deterministic unit. T24 closes all three gaps in tests-only changes.
+
+**Files added (tests-only — no production code touched):**
+
+- `packages/extension/tests/component/options/About.test.tsx` — 7 tests. Renders the section heading, asserts the version row reads from `getOptionsRuntime().about`, asserts the optional build-hash row appears iff `buildHash` is set, asserts the privacy and source-repo links have `target="_blank"` + `rel="noreferrer noopener"`, and that swapping the runtime between mounts re-hydrates the row values.
+- `packages/extension/tests/component/options/Identity.import.test.tsx` — 8 tests. Mocks `identity.importEncrypted` directly (the file-picker is jsdom-stubbed). Covers happy path (file bytes + passphrase reach the runtime; badge updates; passphrase clears), empty-passphrase short-circuit before any runtime call (preserves rate-limit budget at the UI seam), three malformed-blob error variants (wrong passphrase, bad-JSON `SyntaxError`, missing-field `Error`, wrong-byte-length `Error`), the export-blob download path (asserts `URL.createObjectURL` is called with a JSON Blob and `URL.revokeObjectURL` is called after), and a defensive no-file-selected event (`a.click()` cancel on macOS) that must not crash.
+- `packages/extension/tests/unit/messages.fuzz.test.ts` — 8 tests, 1000 random inputs in the headline property. Hand-rolled mulberry32 PRNG + 50-line generator (no `fast-check` dep added; see "coverage gaps" below). Asserts `parseMsg` never throws, never returns `undefined`, and always returns either `null` or a typed `Msg` whose `type` is in the documented discriminant set. Adversarial samples: valid type + wrong payload shape → null, valid type + valid payload + extra fields → parsed (extras ignored), deeply-nested junk → null, prototype-pollution-looking inputs → safe, array-at-top → null, numeric/boolean discriminants → null.
+- `packages/extension/tests/unit/auth/key-escrow.fuzz.test.ts` — 4 properties × budgeted iteration counts (50 for the headline round-trip, 25 each for ciphertext + nonce tampering, 10 for KDF determinism). Uses the established `fastWrap` pattern (`memoryCostKib=8, timeCost=1, parallelism=1`) so the full suite lands in ~100ms; the production-parameter coverage is owned by `tests/unit/auth/key-escrow.test.ts`'s `wrapSecret — production parameters` test, not duplicated here.
+
+**Coverage gaps closed:**
+
+- TA-MIN2: About section. **Closed** — 7 tests bind the actual surface (version + build-hash + Privacy/Source links). The task brief mentioned MCP-endpoint + Discord links + "Reset all data" button — that UX has not landed in `About.tsx`; binding to the *current* component is the right call rather than testing a future surface that doesn't exist yet. The richer surface remains tracked as a forward-looking item but does not block T24.
+- TA-MIN4: Identity-import. **Closed** — 8 tests bind import (happy + 4 error variants + defensive no-file + empty-passphrase short-circuit) and export download surface.
+- TDD anchor `parseMsg_never_throws`. **Closed** — 1000 random inputs, all return null or typed Msg, never throw, never return undefined. Locks the type-narrowing invariant against future refactors.
+- TDD anchor `wrap_unwrap_is_identity`. **Closed** — 50 random (secret length ∈ [1, 256], passphrase length ∈ [8, 200]) pairs round-trip byte-for-byte. Tampering properties (ciphertext + nonce, 25 each) prove AES-GCM fails closed on single-byte perturbations.
+
+**Decision: hand-rolled property generator rather than `fast-check`.** `fast-check` is not in the extension's devDependencies and would be the first new dep added in this wave. The hand-rolled generator at the top of each fuzz file is ≤ 50 lines (mulberry32 + a recursive `randomValue` walker) and gives us deterministic seeds for CI-reproducible failures — `fast-check`'s `seed` knob is the only feature we'd actually use. Trade-off: we don't get its shrinking minimiser; if the property tests start failing flakily on hostile inputs, swap in `fast-check` then.
+
+**Decision: budgeted iteration counts for Argon2id fuzz.** Each Argon2id derive costs ~10ms even at `memoryCostKib=8, timeCost=1, parallelism=1`. The total wall-clock budget at 50 iterations + 25 + 25 + 10 lands at ~1.1s on a 2024-class laptop; the file timeout is set to 60s per `it()` block as a paranoid ceiling. The PRODUCTION-parameter round-trip is covered exactly once, in `tests/unit/auth/key-escrow.test.ts::wrapSecret — production parameters` — fuzzing with `m=64MiB` would burn ~5s per iteration and crater the CI budget.
+
+**Test results (worktree, run via `npx vitest run`):**
+
+- `tests/component/options/About.test.tsx` — 7 / 7 pass, 62ms.
+- `tests/component/options/Identity.import.test.tsx` — 8 / 8 pass, 232ms.
+- `tests/unit/messages.fuzz.test.ts` — 8 / 8 pass, 9ms (1000 iterations on the headline property).
+- `tests/unit/auth/key-escrow.fuzz.test.ts` — 4 / 4 pass, 104ms (50 + 25 + 25 + 10 = 110 Argon2id derives total).
+- Combined: 27 / 27 pass in 963ms.
+- Full extension `npx vitest run` (no test-name filter): 337 pass, 7 unchanged pre-existing failures (`cose.test.ts` missing WASM build; `cloud-sync.test.ts` re-auth event listener — both predate this PR; confirmed via `git stash` baseline diff).
+- `bun test tests/unit/messages.fuzz.test.ts tests/unit/auth/key-escrow.fuzz.test.ts` — 12 / 12 pass, 367ms (1929 `expect()` calls — bun discovers each PRNG iteration as a separate assertion).
