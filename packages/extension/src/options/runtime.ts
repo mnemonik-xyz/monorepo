@@ -13,11 +13,21 @@ import type { SettingsV1 } from "../settings.js";
 
 // ── Identity / auth (T16 will fulfil) ───────────────────────────────────────
 
+/**
+ * UI-side session DTO. Mirrors the popup's persisted `Session` shape
+ * (see `src/auth/types.ts::Session`) — the options page never
+ * duplicates the on-disk schema, so `getSession` here is a thin
+ * mapper, not an alternative writer. Audit B3 / AUD-C-03 unifies the
+ * snake_case/camelCase drift that previously made the options page
+ * blind to a freshly-signed-in popup session.
+ */
 export interface AuthSession {
   /** Stable Google subject id — the same value the server uses to key
-   *  `google_identity_links` and `key_escrow_blobs`. */
-  google_sub: string;
-  /** Display label (e.g. `name@gmail.com`). Used by the UI only. */
+   *  `google_identity_links` and `key_escrow_blobs`. Mirrors
+   *  `Session.googleSub` on disk. */
+  googleSub: string;
+  /** Display label (derived from `Session.profile.email`). Used by the
+   *  UI only. */
   email: string;
   /** Server-issued JWT (`aud=mcp`) bound to this Google sub. The
    *  options page never inspects the JWT contents — it just hands the

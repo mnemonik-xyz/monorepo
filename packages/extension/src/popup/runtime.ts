@@ -21,6 +21,9 @@ import type {
   RecallRemoteHit,
   VerifyRemoteResult,
 } from "../runtime/sync/cloud-client.js";
+// Sync JWT-parsing helper — exposed on the runtime facade so popup
+// components don't import `auth/session.ts` directly (M3 / AUD-C-08).
+import { jwtExpiresAtMs as syncJwtExpiresAtMs } from "../auth/session.js";
 
 /** Re-export of `RecallRemoteHit` so popup callers depend on the
  *  facade rather than reaching into `runtime/sync/cloud-client.ts`. */
@@ -146,6 +149,22 @@ export interface PopupRuntime {
      * `aud=mcp` JWT against an escrow / sign-callback endpoint.
      */
     ensureExtensionJwt(mcpJwt: string): Promise<string>;
+    /**
+     * POST `/oauth/google/link` — bind the user's Ed25519 pubkey to
+     * their Google `sub` via a possession-proof signature. Stays on
+     * `aud=mcp` (the server's google-link handler runs the standard
+     * `verify_jwt` validator). Audit M3 / AUD-C-08: SetPassphrase
+     * routes through this seam instead of importing
+     * `DEFAULT_SERVER_ORIGIN` / `AuthError` directly.
+     */
+    linkGoogle(
+      mcpJwt: string,
+      body: {
+        pubkey_base58: string;
+        possession_proof_base64: string;
+        challenge: string;
+      },
+    ): Promise<void>;
   };
 
   /**
@@ -157,6 +176,11 @@ export interface PopupRuntime {
     get(): Promise<Session | null>;
     set(session: Session): Promise<void>;
     clear(): Promise<void>;
+    /** Pure JWT-parsing helper — extracts the `exp` claim (in seconds)
+     *  and returns it as milliseconds. Returns `null` for malformed
+     *  tokens. Exposed through the facade (audit M3 / AUD-C-08) so
+     *  popup components stay decoupled from `auth/session.ts`. */
+    jwtExpiresAtMs(jwt: string): number | null;
   };
 
   /**
@@ -399,6 +423,10 @@ export function createDefaultRuntime(): PopupRuntime {
           await import("../auth/extension-bootstrap.js");
         return ensureExtensionJwt(mcpJwt);
       },
+      async linkGoogle(mcpJwt, body) {
+        const { linkGoogleAccount } = await import("../auth/link.js");
+        return linkGoogleAccount(mcpJwt, body);
+      },
     },
     session: {
       async get() {
@@ -412,6 +440,14 @@ export function createDefaultRuntime(): PopupRuntime {
       async clear() {
         const { clearSession } = await import("../auth/session.js");
         return clearSession();
+      },
+      jwtExpiresAtMs(jwt: string) {
+        // Synchronous helper; not async-imported because callers
+        // (Onboarding.tsx) call it inside the sign-in handler where a
+        // dynamic import would force two await ticks. We accept the
+        // tiny cost of bundling the JWT parser; it is <500 bytes
+        // gzipped and parser-only (no chrome.* / WebCrypto deps).
+        return syncJwtExpiresAtMs(jwt);
       },
     },
     cloudSync: {
