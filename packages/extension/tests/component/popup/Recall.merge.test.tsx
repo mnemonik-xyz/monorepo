@@ -77,9 +77,12 @@ function makeCloudMergeRuntime(opts: CloudMergeOverrides): PopupRuntime {
       }
       return opts.cloudResults;
     });
+  const loadStorageTier = vi
+    .fn<[], Promise<"local" | "cloud">>()
+    .mockResolvedValue("cloud" as const);
   const runtime: PopupRuntime = {
     loadIdentity: async () => null,
-    loadStorageTier: async () => "cloud" as const,
+    loadStorageTier,
     getActiveTabAdapter: async () => null,
     getActiveTabSelection: async () => "",
     getActiveTabConversation: async () => null,
@@ -146,11 +149,16 @@ function makeCloudMergeRuntime(opts: CloudMergeOverrides): PopupRuntime {
   // callers — only tests pull off these handles.
   (
     runtime as unknown as {
-      __spies: { recall: typeof recall; recallRemote: typeof recallRemote };
+      __spies: {
+        recall: typeof recall;
+        recallRemote: typeof recallRemote;
+        loadStorageTier: typeof loadStorageTier;
+      };
     }
   ).__spies = {
     recall,
     recallRemote,
+    loadStorageTier,
   };
   return runtime;
 }
@@ -158,12 +166,14 @@ function makeCloudMergeRuntime(opts: CloudMergeOverrides): PopupRuntime {
 function spies(runtime: PopupRuntime): {
   recall: ReturnType<typeof vi.fn>;
   recallRemote: ReturnType<typeof vi.fn>;
+  loadStorageTier: ReturnType<typeof vi.fn>;
 } {
   return (
     runtime as unknown as {
       __spies: {
         recall: ReturnType<typeof vi.fn>;
         recallRemote: ReturnType<typeof vi.fn>;
+        loadStorageTier: ReturnType<typeof vi.fn>;
       };
     }
   ).__spies;
@@ -229,18 +239,17 @@ describe("Recall tab — Cloud-tier merge contract", () => {
 
     render(<Recall adapter={chatgptAdapter} />);
     // Wait for `loadStorageTier` to settle so the click runs in cloud
-    // mode rather than the default local fallback.
-    await waitFor(() => {
-      expect(runtime.loadStorageTier).toBeDefined();
-    });
+    // mode rather than the default local fallback. The Recall tab
+    // reads the tier exactly once on mount; we await that call AND
+    // a microtask so the React state commit propagates.
+    const { recall, recallRemote, loadStorageTier } = spies(runtime);
+    await waitFor(() => expect(loadStorageTier).toHaveBeenCalled());
     await new Promise((r) => setTimeout(r, 0));
 
     fireEvent.change(screen.getByLabelText("Recall query"), {
       target: { value: "test query" },
     });
     fireEvent.click(screen.getByRole("button", { name: /find/i }));
-
-    const { recall, recallRemote } = spies(runtime);
     await waitFor(() => expect(recall).toHaveBeenCalledTimes(1));
     await waitFor(() =>
       expect(recallRemote).toHaveBeenCalledWith("test query", 5),
@@ -300,14 +309,15 @@ describe("Recall tab — Cloud-tier merge contract", () => {
         arweave_tx: "ArRealCloudOnly",
       }),
     ];
-    setRuntime(
-      makeCloudMergeRuntime({
-        localResults,
-        cloudResults,
-      }),
-    );
+    const runtime = makeCloudMergeRuntime({
+      localResults,
+      cloudResults,
+    });
+    setRuntime(runtime);
 
     render(<Recall adapter={chatgptAdapter} />);
+    const { loadStorageTier } = spies(runtime);
+    await waitFor(() => expect(loadStorageTier).toHaveBeenCalled());
     await new Promise((r) => setTimeout(r, 0));
     fireEvent.change(screen.getByLabelText("Recall query"), {
       target: { value: "q" },
@@ -362,6 +372,8 @@ describe("Recall tab — Cloud-tier merge contract", () => {
       setRuntime(runtime);
 
       render(<Recall adapter={chatgptAdapter} />);
+      const { loadStorageTier } = spies(runtime);
+      await waitFor(() => expect(loadStorageTier).toHaveBeenCalled());
       await new Promise((r) => setTimeout(r, 0));
       fireEvent.change(screen.getByLabelText("Recall query"), {
         target: { value: "anything" },
