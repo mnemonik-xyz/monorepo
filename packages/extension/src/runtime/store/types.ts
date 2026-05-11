@@ -31,6 +31,17 @@ export interface AttestationRow {
   arweave_tx: string;
   /** Optional capture-context metadata for the popup recall view. */
   source_meta?: SourceMeta;
+  /**
+   * Set by the T18 cloud-sync drain when the server rejects this row
+   * with a non-recoverable 4xx (e.g. 410 expired correlation_id, 400
+   * malformed payload). The row stays in `attestations` so the user
+   * sees a "sync failed — recreate this memory" hint in the popup;
+   * `pending_uploads` is dequeued so the alarm-drain stops retrying.
+   *
+   * Optional + nullable; absence means "never attempted or transiently
+   * failing". 401 does NOT set this — re-auth is recoverable.
+   */
+  sync_failed_permanent?: boolean;
 }
 
 /** Attached when the row was captured from a supported AI-chat platform. */

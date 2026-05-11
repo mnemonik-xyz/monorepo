@@ -1,0 +1,281 @@
+// T18 — cloud-sync drain unit tests.
+//
+// D13 anchor: `alarm_drains_queue_on_reconnect`. Seeds 3 rows into
+// the `pending_uploads` queue + the backing `attestations` store,
+// drives `drainPendingUploads` with a fake `CloudSignClient` that
+// returns success for every row, and asserts:
+//   - the queue is empty after the drain,
+//   - every row was updated with the returned `solana_tx` +
+//     `arweave_tx`,
+//   - the drain reports `attempted = 3, flushed = 3`.
+//
+// Extra coverage:
+//   - `null` cloud client short-circuits (queue stays).
+//   - `ReauthRequiredError` halts the drain mid-batch + emits
+//     `re-auth-required` for the row that hit 401.
+//   - `PermanentSyncError` stamps `sync_failed_permanent` + dequeues.
+//   - `TransientSyncError` leaves the row queued and continues.
+
+import "fake-indexeddb/auto";
+import { describe, it, expect, vi } from "vitest";
+
+import {
+  drainPendingUploads,
+  type CloudSignClient,
+  type SyncEvent,
+} from "../../../src/background/cloud-sync.js";
+import {
+  PermanentSyncError,
+  ReauthRequiredError,
+  TransientSyncError,
+} from "../../../src/runtime/sync/cloud-client.js";
+import { IndexedDbStore } from "../../../src/runtime/store/indexeddb.js";
+import type { AttestationRow } from "../../../src/runtime/store/types.js";
+
+let dbCounter = 0;
+function freshDbName(label: string): string {
+  dbCounter += 1;
+  return `mnemonik-cs-${label}-${dbCounter}-${Math.random().toString(36).slice(2)}`;
+}
+
+function makeRow(
+  id: string,
+  overrides: Partial<AttestationRow> = {},
+): AttestationRow {
+  return {
+    attestation_id: id,
+    content: `content-${id}`,
+    content_hash: "0".repeat(64),
+    tags: ["source:chatgpt"],
+    embedding: new Float32Array([1, 0, 0, 0]),
+    cose_bytes: new Uint8Array([0x84, 0x01]),
+    created_at: "2026-05-11T00:00:00Z",
+    signer_pubkey: "SignerA",
+    owner_pubkey: "OwnerA",
+    solana_tx: `local:${id}`,
+    arweave_tx: `local:${id}`,
+    ...overrides,
+  };
+}
+
+/** Build a fake CloudSignClient that records calls and dispenses a
+ *  scripted result (or thrown error) per call. */
+function makeClient(
+  results: Array<
+    | { ok: true; solana_tx: string; arweave_tx: string }
+    | { ok: false; err: Error }
+  >,
+): CloudSignClient & {
+  calls: Array<{ content: string; signer_pubkey: string }>;
+} {
+  const calls: Array<{ content: string; signer_pubkey: string }> = [];
+  const client: CloudSignClient = {
+    async signRemote(args, signer) {
+      calls.push({
+        content: args.content,
+        signer_pubkey: signer.signer_pubkey,
+      });
+      const next = results.shift();
+      if (!next)
+        throw new Error("test: no scripted result for signRemote call");
+      if (!next.ok) throw next.err;
+      return {
+        attestation_id: `srv-${calls.length}`,
+        solana_tx: next.solana_tx,
+        arweave_tx: next.arweave_tx,
+      };
+    },
+  };
+  return Object.assign(client, { calls });
+}
+
+async function seedQueue(store: IndexedDbStore, ids: string[]): Promise<void> {
+  for (const id of ids) {
+    await store.saveAttestation(makeRow(id));
+    await store.enqueue(id);
+  }
+}
+
+describe("drainPendingUploads · empty queue", () => {
+  it("returns zeros without touching the cloud client", async () => {
+    const store = new IndexedDbStore({ dbName: freshDbName("empty") });
+    const client = makeClient([]);
+    const result = await drainPendingUploads({ store, cloudClient: client });
+    expect(result).toEqual({ attempted: 0, flushed: 0, errors: [] });
+    expect(client.calls).toHaveLength(0);
+  });
+});
+
+describe("drainPendingUploads · null client (no session)", () => {
+  it("reports queue depth and leaves the queue intact", async () => {
+    const store = new IndexedDbStore({ dbName: freshDbName("null") });
+    await seedQueue(store, ["a", "b"]);
+    const result = await drainPendingUploads({ store, cloudClient: null });
+    expect(result).toEqual({ attempted: 2, flushed: 0, errors: [] });
+    const pending = await store.listPending();
+    expect(pending.map((p) => p.attestation_id).sort()).toEqual(["a", "b"]);
+  });
+});
+
+describe("drainPendingUploads · alarm_drains_queue_on_reconnect (D13 anchor)", () => {
+  it("drains 3 queued rows and writes solana_tx + arweave_tx onto each row", async () => {
+    const store = new IndexedDbStore({ dbName: freshDbName("drain3") });
+    await seedQueue(store, ["att-1", "att-2", "att-3"]);
+
+    const client = makeClient([
+      { ok: true, solana_tx: "Sol-1", arweave_tx: "Ar-1" },
+      { ok: true, solana_tx: "Sol-2", arweave_tx: "Ar-2" },
+      { ok: true, solana_tx: "Sol-3", arweave_tx: "Ar-3" },
+    ]);
+
+    const result = await drainPendingUploads({ store, cloudClient: client });
+
+    expect(result).toMatchObject({ attempted: 3, flushed: 3 });
+    expect(result.errors).toEqual([]);
+
+    // Queue empty.
+    const pending = await store.listPending();
+    expect(pending).toEqual([]);
+
+    // Every row updated.
+    const a1 = await store.findById("att-1");
+    const a2 = await store.findById("att-2");
+    const a3 = await store.findById("att-3");
+    expect(a1?.solana_tx).toBe("Sol-1");
+    expect(a1?.arweave_tx).toBe("Ar-1");
+    expect(a2?.solana_tx).toBe("Sol-2");
+    expect(a2?.arweave_tx).toBe("Ar-2");
+    expect(a3?.solana_tx).toBe("Sol-3");
+    expect(a3?.arweave_tx).toBe("Ar-3");
+
+    // Drain visited each row exactly once in FIFO order.
+    expect(client.calls.map((c) => c.content)).toEqual([
+      "content-att-1",
+      "content-att-2",
+      "content-att-3",
+    ]);
+  });
+});
+
+describe("drainPendingUploads · 401 halts the drain and emits re-auth-required", () => {
+  it("stops mid-batch and emits the event for the failing row only", async () => {
+    const store = new IndexedDbStore({ dbName: freshDbName("reauth") });
+    await seedQueue(store, ["att-1", "att-2", "att-3"]);
+    const events: SyncEvent[] = [];
+
+    const client = makeClient([
+      { ok: true, solana_tx: "Sol-1", arweave_tx: "Ar-1" },
+      { ok: false, err: new ReauthRequiredError("expired") },
+      // The 3rd row is never reached because the drain halts.
+    ]);
+
+    const result = await drainPendingUploads({
+      store,
+      cloudClient: client,
+      emit: (event) => events.push(event),
+    });
+
+    expect(result.attempted).toBe(2);
+    expect(result.flushed).toBe(1);
+    expect(result.errors).toHaveLength(1);
+    expect(result.errors[0]).toMatchObject({
+      attestation_id: "att-2",
+      kind: "reauth",
+    });
+
+    // The 2nd + 3rd rows stay queued.
+    const pending = await store.listPending();
+    expect(pending.map((p) => p.attestation_id).sort()).toEqual([
+      "att-2",
+      "att-3",
+    ]);
+
+    // Only one event emitted, for the row that observed 401.
+    expect(events).toEqual([
+      { type: "re-auth-required", attestation_id: "att-2" },
+    ]);
+  });
+});
+
+describe("drainPendingUploads · permanent failure", () => {
+  it("stamps sync_failed_permanent on the row + dequeues it", async () => {
+    const store = new IndexedDbStore({ dbName: freshDbName("perm") });
+    await seedQueue(store, ["att-1"]);
+    const events: SyncEvent[] = [];
+
+    const client = makeClient([
+      { ok: false, err: new PermanentSyncError("expired correlation_id", 410) },
+    ]);
+
+    const result = await drainPendingUploads({
+      store,
+      cloudClient: client,
+      emit: (event) => events.push(event),
+    });
+
+    expect(result.attempted).toBe(1);
+    expect(result.flushed).toBe(0);
+    expect(result.errors[0]?.kind).toBe("permanent");
+
+    // Queue empty (permanent failure dequeues so we don't churn).
+    const pending = await store.listPending();
+    expect(pending).toEqual([]);
+
+    // Row stamped.
+    const row = await store.findById("att-1");
+    expect(row?.sync_failed_permanent).toBe(true);
+
+    // Emit fired with HTTP status forwarded.
+    expect(events).toEqual([
+      {
+        type: "permanent-failure",
+        attestation_id: "att-1",
+        status: 410,
+        message: "expired correlation_id",
+      },
+    ]);
+  });
+});
+
+describe("drainPendingUploads · transient failure", () => {
+  it("leaves the row queued and continues with the next one", async () => {
+    const store = new IndexedDbStore({ dbName: freshDbName("transient") });
+    await seedQueue(store, ["att-1", "att-2"]);
+
+    const client = makeClient([
+      { ok: false, err: new TransientSyncError("503 upstream", 503) },
+      { ok: true, solana_tx: "Sol-2", arweave_tx: "Ar-2" },
+    ]);
+
+    const result = await drainPendingUploads({ store, cloudClient: client });
+
+    expect(result.attempted).toBe(2);
+    expect(result.flushed).toBe(1);
+    expect(result.errors[0]?.kind).toBe("transient");
+
+    // att-1 stays queued; att-2 was flushed.
+    const pending = await store.listPending();
+    expect(pending.map((p) => p.attestation_id)).toEqual(["att-1"]);
+    expect((await store.findById("att-2"))?.solana_tx).toBe("Sol-2");
+  });
+});
+
+describe("drainPendingUploads · missing row", () => {
+  it("dequeues queue entries whose attestation_id was deleted from the store", async () => {
+    const store = new IndexedDbStore({ dbName: freshDbName("missing") });
+    // Enqueue without ever saving the row.
+    await store.enqueue("ghost-id");
+    const client = makeClient([]);
+
+    const result = await drainPendingUploads({ store, cloudClient: client });
+
+    expect(result.attempted).toBe(1);
+    expect(result.flushed).toBe(0);
+    expect(result.errors[0]).toMatchObject({
+      attestation_id: "ghost-id",
+      kind: "missing-row",
+    });
+    expect(await store.listPending()).toEqual([]);
+    expect(client.calls).toHaveLength(0);
+  });
+});

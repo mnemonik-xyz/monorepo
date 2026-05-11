@@ -47,6 +47,14 @@ function makeRuntime(overrides: Partial<PopupRuntime> = {}): PopupRuntime {
       set: async () => undefined,
       clear: async () => undefined,
     },
+    cloudSync: {
+      // T18 stub: tests default to Local tier so these never fire.
+      // Specific tests override `cloudSync` to assert the Cloud-tier
+      // merge in Recall.
+      signRemote: async () => null,
+      recallRemote: async () => null,
+      verifyRemote: async () => null,
+    },
     keyEscrow: {
       wrap: async () => {
         throw new Error("keyEscrow.wrap stub: not configured in test");

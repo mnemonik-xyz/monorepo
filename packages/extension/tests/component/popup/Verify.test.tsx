@@ -46,6 +46,12 @@ function makeRuntime(
       set: async () => undefined,
       clear: async () => undefined,
     },
+    cloudSync: {
+      // T18 stub: Verify tab tests default to Local tier.
+      signRemote: async () => null,
+      recallRemote: async () => null,
+      verifyRemote: async () => null,
+    },
     keyEscrow: {
       wrap: async () => {
         throw new Error("keyEscrow.wrap stub: not configured in test");

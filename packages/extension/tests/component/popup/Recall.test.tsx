@@ -42,6 +42,13 @@ function makeRuntime(overrides: Partial<PopupRuntime> = {}): PopupRuntime {
       set: async () => undefined,
       clear: async () => undefined,
     },
+    cloudSync: {
+      // T18 stub: tests default to Local tier so these never fire.
+      // Cloud-tier specific tests override `cloudSync.recallRemote`.
+      signRemote: async () => null,
+      recallRemote: async () => null,
+      verifyRemote: async () => null,
+    },
     keyEscrow: {
       wrap: async () => {
         throw new Error("keyEscrow.wrap stub: not configured in test");
@@ -179,5 +186,133 @@ describe("Recall tab", () => {
     for (const b of insertButtons) {
       expect(b).not.toBeDisabled();
     }
+  });
+
+  it("Cloud-tier: merges local IndexedDB hits with mnemonic_recall hits, dedupes by attestation_id", async () => {
+    // T18 Cloud-tier Recall merge: storage tier is "cloud", local
+    // returns one of two hits, cloud returns the same id (higher
+    // score) plus a brand-new id. The rendered list MUST contain
+    // both ids in score order, with the duplicate counted once.
+    const recall = vi.fn().mockResolvedValue([results[0]]); // local: 0.92
+    const recallRemote = vi.fn().mockResolvedValue([
+      // Same id as local[0] but with a higher cloud-side score — the
+      // merge keeps the higher of the two.
+      {
+        attestation_id: "att_aaa111",
+        content: "First match — keep going",
+        similarity: 0.97,
+        tags: ["source:chatgpt", "alpha"],
+        signed_at: "2026-05-10T00:00:00Z",
+        solana_tx: "RealSolTx1",
+        arweave_tx: "RealArTx1",
+      },
+      // Brand-new id that only exists on the cloud side.
+      {
+        attestation_id: "att_ccc333",
+        content: "Cloud-only memory",
+        similarity: 0.55,
+        tags: ["source:gemini"],
+        signed_at: "2026-05-11T00:00:00Z",
+      },
+    ]);
+    const loadStorageTier = vi.fn().mockResolvedValue("cloud" as const);
+    setRuntime(
+      makeRuntime({
+        recall,
+        loadStorageTier,
+        cloudSync: {
+          signRemote: async () => null,
+          recallRemote,
+          verifyRemote: async () => null,
+        },
+      }),
+    );
+
+    render(<Recall adapter={chatgptLikeAdapter} />);
+    // Wait for the tier-resolving useEffect to settle before issuing
+    // the search — otherwise the click can race the async state
+    // commit and the component stays in "local" tier for this click.
+    await waitFor(() => expect(loadStorageTier).toHaveBeenCalled());
+    // One more microtask for the React state commit to propagate.
+    await new Promise((r) => setTimeout(r, 0));
+
+    fireEvent.change(screen.getByLabelText("Recall query"), {
+      target: { value: "match" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /find/i }));
+
+    // Both calls fire — local first, cloud in parallel.
+    await waitFor(() => expect(recall).toHaveBeenCalled());
+    await waitFor(() => expect(recallRemote).toHaveBeenCalledWith("match", 5));
+
+    // The merged list contains exactly 2 distinct rows (att_aaa111
+    // and att_ccc333 — the duplicate id was deduped).
+    // Higher cloud score wins for the duplicate row.
+    await screen.findByText(/0.970/);
+    // Cloud-only entry rendered.
+    await screen.findByText(/Cloud-only memory/);
+    const list = await screen.findByLabelText("Recall results");
+    const items = list.querySelectorAll("li");
+    expect(items.length).toBe(2);
+  });
+
+  it("Cloud-tier: cloud failure does not block local results (offline-first)", async () => {
+    // The tech-spec's offline-first guarantee: a cloud-side failure
+    // (5xx, network drop, malformed JSON) must NEVER block the local
+    // results path. The component swallows the cloud error and
+    // renders local hits as if Cloud tier were Local.
+    const recall = vi.fn().mockResolvedValue(results);
+    const recallRemote = vi.fn().mockRejectedValue(new Error("503 upstream"));
+    setRuntime(
+      makeRuntime({
+        recall,
+        loadStorageTier: async () => "cloud" as const,
+        cloudSync: {
+          signRemote: async () => null,
+          recallRemote,
+          verifyRemote: async () => null,
+        },
+      }),
+    );
+
+    render(<Recall adapter={chatgptLikeAdapter} />);
+    fireEvent.change(screen.getByLabelText("Recall query"), {
+      target: { value: "match" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /find/i }));
+
+    // Local results still render unaffected.
+    await screen.findByText(/0.920/);
+    await screen.findByText(/0.710/);
+    // The component swallowed the cloud error — no error banner.
+    expect(screen.queryByText(/503/)).toBeNull();
+  });
+
+  it("Local-tier: skips cloudSync.recallRemote entirely (offline-first default)", async () => {
+    const recall = vi.fn().mockResolvedValue(results);
+    const recallRemote = vi.fn();
+    setRuntime(
+      makeRuntime({
+        recall,
+        // Default tier is "local" but be explicit so a regression
+        // that flips the default to "cloud" trips this.
+        loadStorageTier: async () => "local" as const,
+        cloudSync: {
+          signRemote: async () => null,
+          recallRemote,
+          verifyRemote: async () => null,
+        },
+      }),
+    );
+
+    render(<Recall adapter={chatgptLikeAdapter} />);
+    fireEvent.change(screen.getByLabelText("Recall query"), {
+      target: { value: "x" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /find/i }));
+
+    await waitFor(() => expect(recall).toHaveBeenCalled());
+    // Cloud recall must NOT have been called.
+    expect(recallRemote).not.toHaveBeenCalled();
   });
 });

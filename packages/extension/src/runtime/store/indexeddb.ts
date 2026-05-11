@@ -78,6 +78,18 @@ export class IndexedDbStore {
   }
 
   /**
+   * Direct primary-key lookup for `attestation_id`. Used by the
+   * T18 cloud-sync drain to fetch the full row that a `pending_uploads`
+   * entry references. Returns `undefined` when the row was deleted
+   * out from under the queue — caller dequeues to break the loop.
+   */
+  async findById(attestationId: string): Promise<AttestationRow | undefined> {
+    if (!attestationId) return undefined;
+    const db = await this.db();
+    return db.get("attestations", attestationId);
+  }
+
+  /**
    * Look up by either solana_tx or arweave_tx. Scans because neither
    * field has a unique index (cloud-mode rows can carry distinct values
    * yet share `local:<hash>` shapes for offline-first writes).
@@ -165,11 +177,7 @@ export class IndexedDbStore {
   /** Returns `[parent_id, depth]` pairs ordered by insertion. */
   async getEdges(childId: string): Promise<Array<[string, number]>> {
     const db = await this.db();
-    const rows = await db.getAllFromIndex(
-      "lineage_edges",
-      "by_child",
-      childId,
-    );
+    const rows = await db.getAllFromIndex("lineage_edges", "by_child", childId);
     return rows.map((r) => [r.parent_id, r.depth]);
   }
 
