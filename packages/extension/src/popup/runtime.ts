@@ -136,6 +136,16 @@ export interface PopupRuntime {
   auth: {
     signIn(): Promise<GoogleSignInResult>;
     lookupExisting(jwt: string): Promise<LookupResult>;
+    /**
+     * Two-step bootstrap handshake (T15). Exchanges an `aud=mcp` JWT
+     * for the short-lived `aud=extension` JWT that
+     * `/api/key-escrow*` + `/api/sign-callback` require. Caches the
+     * result in `chrome.storage.local.extension_session.v1` so a
+     * popup-close / SW-restart does not re-burn a ticket. Callers
+     * pass the result wherever they would have passed the
+     * `aud=mcp` JWT against an escrow / sign-callback endpoint.
+     */
+    ensureExtensionJwt(mcpJwt: string): Promise<string>;
   };
 
   /**
@@ -186,20 +196,28 @@ export interface PopupRuntime {
     /** Argon2id-derive a key and AES-GCM-256 decrypt `blob`. Throws
      *  `WrongPassphraseError` on tag mismatch. Local-only — no network. */
     unwrap(blob: EscrowBlob, passphrase: string): Promise<Uint8Array>;
-    /** PUT the blob to `/api/key-escrow`. */
-    upload(jwt: string, blob: EscrowBlob): Promise<void>;
-    /** GET the blob from `/api/key-escrow`. */
-    fetch(jwt: string): Promise<EscrowBlob>;
-    /** DELETE the blob. */
-    delete(jwt: string): Promise<void>;
-    /** Fetch → unwrap with `oldPassphrase` → re-wrap → upload. */
+    /**
+     * PUT the blob to `/api/key-escrow`.
+     *
+     * Callers pass their cached `aud=mcp` Google-session JWT; the
+     * facade internally runs the T15 extension-bootstrap handshake and
+     * substitutes the resulting `aud=extension` JWT before hitting the
+     * server (audit B1 / AUD-S-01).
+     */
+    upload(mcpJwt: string, blob: EscrowBlob): Promise<void>;
+    /** GET the blob from `/api/key-escrow`. See {@link upload} for the JWT contract. */
+    fetch(mcpJwt: string): Promise<EscrowBlob>;
+    /** DELETE the blob. See {@link upload} for the JWT contract. */
+    delete(mcpJwt: string): Promise<void>;
+    /** Fetch → unwrap with `oldPassphrase` → re-wrap → upload. See
+     *  {@link upload} for the JWT contract. */
     rotate(
-      jwt: string,
+      mcpJwt: string,
       oldPassphrase: string,
       newPassphrase: string,
     ): Promise<void>;
-    /** Probe via GET; treats 404 as `false`. */
-    hasBlob(jwt: string): Promise<boolean>;
+    /** Probe via GET; treats 404 as `false`. See {@link upload} for the JWT contract. */
+    hasBlob(mcpJwt: string): Promise<boolean>;
   };
 }
 
@@ -376,6 +394,11 @@ export function createDefaultRuntime(): PopupRuntime {
         const { lookupExisting } = await import("../auth/lookup.js");
         return lookupExisting(jwt);
       },
+      async ensureExtensionJwt(mcpJwt: string) {
+        const { ensureExtensionJwt } =
+          await import("../auth/extension-bootstrap.js");
+        return ensureExtensionJwt(mcpJwt);
+      },
     },
     session: {
       async get() {
@@ -446,26 +469,44 @@ export function createDefaultRuntime(): PopupRuntime {
         const ke = await import("../auth/key-escrow.js");
         return ke.unwrapSecret(blob, passphrase);
       },
-      async upload(jwt, blob) {
+      async upload(mcpJwt, blob) {
+        // Audit B1 / AUD-S-01: server's escrow handlers require
+        // aud=extension. Run the bootstrap handshake first; the
+        // returned JWT is cached so subsequent calls are cheap.
+        const { ensureExtensionJwt } =
+          await import("../auth/extension-bootstrap.js");
+        const extJwt = await ensureExtensionJwt(mcpJwt);
         const ke = await import("../auth/key-escrow.js");
-        return ke.uploadEscrow(jwt, blob);
+        return ke.uploadEscrow(extJwt, blob);
       },
-      async fetch(jwt) {
+      async fetch(mcpJwt) {
+        const { ensureExtensionJwt } =
+          await import("../auth/extension-bootstrap.js");
+        const extJwt = await ensureExtensionJwt(mcpJwt);
         const ke = await import("../auth/key-escrow.js");
-        return ke.fetchEscrow(jwt);
+        return ke.fetchEscrow(extJwt);
       },
-      async delete(jwt) {
+      async delete(mcpJwt) {
+        const { ensureExtensionJwt } =
+          await import("../auth/extension-bootstrap.js");
+        const extJwt = await ensureExtensionJwt(mcpJwt);
         const ke = await import("../auth/key-escrow.js");
-        return ke.deleteEscrow(jwt);
+        return ke.deleteEscrow(extJwt);
       },
-      async rotate(jwt, oldPassphrase, newPassphrase) {
+      async rotate(mcpJwt, oldPassphrase, newPassphrase) {
+        const { ensureExtensionJwt } =
+          await import("../auth/extension-bootstrap.js");
+        const extJwt = await ensureExtensionJwt(mcpJwt);
         const ke = await import("../auth/key-escrow.js");
-        return ke.rotatePassphrase(jwt, oldPassphrase, newPassphrase);
+        return ke.rotatePassphrase(extJwt, oldPassphrase, newPassphrase);
       },
-      async hasBlob(jwt) {
+      async hasBlob(mcpJwt) {
+        const { ensureExtensionJwt } =
+          await import("../auth/extension-bootstrap.js");
+        const extJwt = await ensureExtensionJwt(mcpJwt);
         const ke = await import("../auth/key-escrow.js");
         try {
-          await ke.fetchEscrow(jwt);
+          await ke.fetchEscrow(extJwt);
           return true;
         } catch (err) {
           if (err instanceof ke.EscrowNotFoundError) return false;
