@@ -112,15 +112,38 @@ describe("redeemExtensionJwt — happy path", () => {
     const headers = calls[0]!.init?.headers as Record<string, string>;
     expect(headers.authorization).toBe(`Bearer ${MCP_JWT}`);
     // Second call: GET redeem with no Authorization header (capability).
+    // The capability model is "the ticket UUID IS the credential" —
+    // bearer auth on this leg would silently re-introduce the
+    // "doubly-authorised consumption" issue that audit B1 / AUD-S-01
+    // closed. AUD-T-R2-02 fix: the previous `?? {}` fallback made the
+    // assertion vacuous when `init.headers` was undefined (the
+    // overwhelmingly likely shape, since the source omits the field
+    // entirely in `fetchImpl(redeemUrl, { method: "GET" })`). We now
+    // distinguish "no headers at all" from "headers present but no
+    // Authorization key" by asserting on the raw `init.headers`
+    // reference: if the source ever starts passing a Headers / record
+    // object, this assertion will FAIL — forcing a deliberate review
+    // rather than silently allowing the bearer to leak.
     expect(calls[1]!.url).toBe(
       `https://srv.example/api/extension-bootstrap/redeem/${TICKET_ID}`,
     );
     expect(calls[1]!.init?.method).toBe("GET");
-    const redeemHeaders = (calls[1]!.init?.headers ?? {}) as Record<
-      string,
-      string
-    >;
-    expect(redeemHeaders.authorization).toBeUndefined();
+    const redeemInit = calls[1]!.init;
+    expect(redeemInit).toBeDefined();
+    // Strong form: headers object MUST be absent on the redeem leg.
+    expect(redeemInit?.headers).toBeUndefined();
+    // Defence-in-depth: if a future refactor switches to passing a
+    // (possibly empty) Headers / Record object, the assertion above
+    // would fail — and this branch documents how to keep the audit
+    // intent intact in that case. We construct a fresh `Headers` from
+    // whatever the source supplied and confirm no `authorization`
+    // key is set. Today this branch is dead (headers is undefined);
+    // it stays here as the spec for the next refactor.
+    if (redeemInit?.headers !== undefined) {
+      const h = new Headers(redeemInit.headers as HeadersInit);
+      expect(h.get("authorization")).toBeNull();
+      expect(h.get("Authorization")).toBeNull();
+    }
   });
 });
 
