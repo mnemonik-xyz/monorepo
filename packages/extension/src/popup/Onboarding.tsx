@@ -371,6 +371,24 @@ async function loadLocalKeypair(): Promise<{
   return { pubkey_base58: pub, secret: Uint8Array.from(sec) };
 }
 
+/** PR136-C-07: typed error raised by `mintAndPersistKeypair` when
+ *  chrome.storage.local is in a partial-identity state (one of
+ *  `identity` / `identity_secret` present, the other missing).
+ *  `loadLocalKeypair` returns null in that case, which would normally
+ *  drive the fresh-user mint branch — but minting would silently
+ *  overwrite the existing public-half row and invalidate any
+ *  attestations the user already signed under that pubkey. We surface
+ *  this as a typed error so the orchestrator routes to the error step
+ *  and the user can recover the missing half (e.g. via Restore on a
+ *  paired device, or by clearing the partial state on the Options
+ *  page). */
+export class PartialIdentityError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "PartialIdentityError";
+  }
+}
+
 /** T25 — mint a fresh Ed25519 keypair via the WASM `generate_keypair`
  *  export and persist it to `chrome.storage.local` under the canonical
  *  `identity` / `identity_secret` keys. Mirrors
@@ -384,11 +402,32 @@ async function loadLocalKeypair(): Promise<{
  *
  *  The returned `secret` is a `Uint8Array` (matching `loadLocalKeypair`'s
  *  contract) so the caller can keep the wipe-on-unmount discipline
- *  Onboarding already enforces for the `set_passphrase` step. */
+ *  Onboarding already enforces for the `set_passphrase` step.
+ *
+ *  PR136-C-07 (round-2): mirrors the partial-state guard in
+ *  `options/runtime-impl.ts::generate`. Refuses to write when either
+ *  key is already present in chrome.storage.local so the autogen path
+ *  can never silently clobber a half-populated identity row. */
 async function mintAndPersistKeypair(): Promise<{
   pubkey_base58: string;
   secret: Uint8Array;
 }> {
+  // Read both canonical keys first. We refuse the write if EITHER is
+  // present so a future code path that ends up here with a populated
+  // (but unreadable) public-half row cannot overwrite the linked
+  // pubkey. The caller surfaces the typed error in the error step.
+  const existing = (await chrome.storage.local.get([
+    IDENTITY_KEY,
+    IDENTITY_SECRET_KEY,
+  ])) as Record<string, unknown>;
+  if (
+    existing[IDENTITY_KEY] !== undefined ||
+    existing[IDENTITY_SECRET_KEY] !== undefined
+  ) {
+    throw new PartialIdentityError(
+      "Refusing to autogen a keypair — chrome.storage.local already has a partial identity row. Clear it via Options → Identity before re-signing in.",
+    );
+  }
   const { generateKeypair } = await import("../runtime/sign/cose.js");
   const kp = await generateKeypair();
   const created_at = Date.now();

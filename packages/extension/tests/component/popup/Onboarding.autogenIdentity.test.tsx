@@ -311,6 +311,70 @@ describe("Onboarding — T25 auto-generate identity on fresh sign-in", () => {
     expect(store.get(IDENTITY_SECRET_KEY)).toEqual(preSeededSecret);
   });
 
+  // PR136-C-07: partial-state guard. `loadLocalKeypair` returns null
+  // when either canonical key is missing (the other may be present
+  // from a previous half-completed flow). The pre-T25-round-2
+  // mintAndPersistKeypair would silently overwrite the surviving
+  // public-half row, invalidating any attestations signed under it.
+  // The guard now throws a PartialIdentityError; the orchestrator
+  // surfaces it as a typed error step.
+  it("refuses to autogen when only the public-half row is present in storage", async () => {
+    const { store } = installChromeStub();
+    // Pre-seed ONLY the public-half row. The secret is missing, so
+    // loadLocalKeypair returns null and the fresh-user mint branch
+    // runs — but the guard MUST trip before the WASM call.
+    store.set(IDENTITY_KEY, {
+      pubkey_base58: "OrphanedPubkey0xDEAD",
+      created_at: 1700000000000,
+    });
+
+    const generateKeypairSpy = vi.fn(() => ({
+      pubkey_base58: "SHOULD_NOT_BE_USED",
+      secret: Array.from({ length: 64 }, () => 0),
+    }));
+    __setWasmForTesting({
+      default: () => Promise.resolve(undefined),
+      generate_keypair: generateKeypairSpy,
+      sign_challenge: () => new Uint8Array(64),
+      sign_cose_payload: () => new Uint8Array([0x84]),
+      import_keypair_json: () => ({}),
+      export_keypair_json: () => "{}",
+      compress_embedding: () => new Uint8Array(0),
+      decompress_embedding: () => new Float32Array(0),
+      to_canonical_cbor_bytes: () => new Uint8Array(0),
+      blake3_hash: () => new Uint8Array(32),
+      blake3_hash_hex: () => "00".repeat(32),
+    } as unknown as Parameters<typeof __setWasmForTesting>[0]);
+
+    const signIn = vi
+      .fn<[], Promise<GoogleSignInResult>>()
+      .mockResolvedValue(makeSignInResult());
+    const lookupExisting = vi
+      .fn<[string], Promise<LookupResult>>()
+      .mockResolvedValue({
+        existingPubkey: null,
+        escrowPresent: false,
+        linkChallenge: btoa("link-challenge-XYZ"),
+      });
+    setRuntime(makeRuntime({ signIn, lookupExisting }));
+
+    render(<Onboarding onComplete={() => undefined} />);
+    fireEvent.click(
+      screen.getByRole("button", { name: /Sign in with Google/i }),
+    );
+
+    expect(
+      await screen.findByText(/keypair generation failed:.*partial identity/i),
+    ).toBeInTheDocument();
+    // WASM was never asked to mint.
+    expect(generateKeypairSpy).not.toHaveBeenCalled();
+    // The orphaned public-half row is untouched.
+    expect(
+      (store.get(IDENTITY_KEY) as { pubkey_base58: string }).pubkey_base58,
+    ).toBe("OrphanedPubkey0xDEAD");
+    expect(store.has(IDENTITY_SECRET_KEY)).toBe(false);
+  });
+
   it("surfaces a typed error when generate_keypair throws", async () => {
     installChromeStub();
     // Wasm stub whose generate_keypair throws synchronously — the
