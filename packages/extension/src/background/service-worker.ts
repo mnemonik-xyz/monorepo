@@ -18,7 +18,12 @@
 //     `parseMsg` from `src/messages.ts`.
 
 import { IndexedDbStore } from "../runtime/store/indexeddb.js";
-import { flushPending } from "../runtime/sync/cloud-client.js";
+import { CloudClient } from "../runtime/sync/cloud-client.js";
+import {
+  flushPending,
+  type FlushPendingDeps,
+  type SyncEvent,
+} from "./cloud-sync.js";
 import { parseMsg, type Msg, type SaveSelectionPayload } from "../messages.js";
 
 /** Context-menu item id — keep stable; `chrome.contextMenus.create`
@@ -59,6 +64,16 @@ export interface ServiceWorkerDeps {
   /** Indirection so the alarm-drain test can spy without polluting the
    *  module-level binding. */
   flushPending: typeof flushPending;
+  /** Build a cloud client for one alarm tick — returns `null` when
+   *  there is no current session (the drain short-circuits in that
+   *  case and leaves the queue untouched). Defaults to reading
+   *  `session.v1` out of `chrome.storage.local`. */
+  cloudClientProvider?: () => Promise<CloudClient | null>;
+  /** Sink the alarm-drain calls when it observes a sync event (401 /
+   *  permanent failure). The default production wiring forwards to
+   *  `chrome.runtime.sendMessage` so the popup can react. T18
+   *  routes `re-auth-required` here. */
+  emitSyncEvent?: (event: SyncEvent) => void;
   /** ISO-8601 clock — defaults to `() => new Date().toISOString()`;
    *  swappable for deterministic tests. */
   now: () => string;
@@ -70,8 +85,56 @@ function defaultDeps(): ServiceWorkerDeps {
     chrome,
     storeFactory: () => new IndexedDbStore(),
     flushPending,
+    cloudClientProvider: defaultCloudClientProvider,
+    emitSyncEvent: defaultEmitSyncEvent,
     now: () => new Date().toISOString(),
   };
+}
+
+/**
+ * Default `cloudClientProvider`. Reads the persisted T16 session
+ * out of `chrome.storage.local`; returns `null` when no session is
+ * present (or when the JWT has expired — `getSession` already
+ * gates on `jwtExpiresAt`). Lazy-imports `auth/session.js` so the
+ * SW boot path stays free of the JWT helpers when no alarm has
+ * fired yet.
+ */
+async function defaultCloudClientProvider(): Promise<CloudClient | null> {
+  try {
+    const { getSession } = await import("../auth/session.js");
+    const session = await getSession();
+    if (!session) return null;
+    return new CloudClient({ jwt: session.jwt });
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.warn(
+      "[mnemonik] cloud-client provider failed; skipping drain:",
+      message,
+    );
+    return null;
+  }
+}
+
+/**
+ * Default `emitSyncEvent`. Forwards to the popup via
+ * `chrome.runtime.sendMessage`. The popup listens for
+ * `ui:re-auth-required` and routes back to the T16 sign-in flow.
+ * Wrapped in try/catch because `sendMessage` rejects when no popup
+ * is open — that's expected and not an error.
+ */
+function defaultEmitSyncEvent(event: SyncEvent): void {
+  try {
+    void chrome.runtime
+      .sendMessage({
+        type: "ui:sync-event",
+        payload: event,
+      })
+      .catch(() => {
+        // No popup open / no listener registered — silently ignore.
+      });
+  } catch {
+    // chrome.runtime unavailable (tests / cold-boot path).
+  }
 }
 
 /**
@@ -141,7 +204,7 @@ export function installServiceWorker(deps: ServiceWorkerDeps): void {
     (
       raw: unknown,
       sender: chrome.runtime.MessageSender,
-      sendResponse: (response: unknown) => void
+      sendResponse: (response: unknown) => void,
     ) => {
       const msg = parseMsg(raw);
       if (msg === null) {
@@ -163,7 +226,7 @@ export function installServiceWorker(deps: ServiceWorkerDeps): void {
           "[mnemonik] rejected message from unauthorised sender",
           msg.type,
           sender.id,
-          sender.url ?? sender.tab?.url ?? "<no url>"
+          sender.url ?? sender.tab?.url ?? "<no url>",
         );
         sendResponse({ ok: false, error: "unauthorized-sender" });
         return false;
@@ -177,7 +240,7 @@ export function installServiceWorker(deps: ServiceWorkerDeps): void {
           sendResponse({ ok: false, error: message });
         });
       return true;
-    }
+    },
   );
 
   // ── alarms: drain cloud-sync queue ───────────────────────────────────
@@ -188,22 +251,47 @@ export function installServiceWorker(deps: ServiceWorkerDeps): void {
     // IndexedDB queue. T18 will inherit this contract.
     if (cloudSyncInFlight) {
       console.warn(
-        "[mnemonik] cloud-sync-retry skipped: previous flush still in flight"
+        "[mnemonik] cloud-sync-retry skipped: previous flush still in flight",
       );
       return;
     }
     cloudSyncInFlight = true;
     const store = deps.storeFactory();
-    void deps
-      .flushPending({ store })
+    void runFlush(deps, store)
       .catch((err: unknown) => {
         const message = err instanceof Error ? err.message : String(err);
         console.warn("[mnemonik] flushPending failed:", message);
       })
       .finally(() => {
+        // CRITICAL: reset the guard in `finally` so a thrown error in
+        // any leg of the drain doesn't permanently wedge the alarm
+        // (next tick would skip with "previous flush still in
+        // flight"). Inherited from the T10 round-2 hardening.
         cloudSyncInFlight = false;
       });
   });
+}
+
+/**
+ * Compose the per-tick `FlushPendingDeps` and call `deps.flushPending`.
+ * Resolves the cloud client lazily so we don't burn a JWT decode on
+ * empty queues. Shared by the alarm handler and the explicit
+ * `ui:flush-pending` UI gesture so both paths emit `re-auth-required`
+ * the same way.
+ */
+async function runFlush(
+  deps: ServiceWorkerDeps,
+  store: IndexedDbStore,
+): Promise<unknown> {
+  const cloudClient = deps.cloudClientProvider
+    ? await deps.cloudClientProvider()
+    : null;
+  const args: FlushPendingDeps = {
+    store,
+    cloudClient,
+    ...(deps.emitSyncEvent ? { emit: deps.emitSyncEvent } : {}),
+  };
+  return deps.flushPending(args);
 }
 
 /**
@@ -222,7 +310,7 @@ export function installServiceWorker(deps: ServiceWorkerDeps): void {
 function isAuthorisedSender(
   cr: typeof chrome,
   sender: chrome.runtime.MessageSender,
-  msg: Msg
+  msg: Msg,
 ): boolean {
   // Our own extension id must match. `chrome.runtime.id` is the
   // canonical source of truth at runtime. If sender.id is set, it
@@ -252,7 +340,7 @@ function isAuthorisedSender(
     const tabUrl = sender.tab?.url ?? sender.url;
     if (typeof tabUrl !== "string") return false;
     return ALLOWED_TAB_ORIGINS.some((origin) =>
-      tabUrl.startsWith(origin + "/")
+      tabUrl.startsWith(origin + "/"),
     );
   }
 
@@ -292,7 +380,7 @@ async function handleMsg(deps: ServiceWorkerDeps, msg: Msg): Promise<unknown> {
   switch (msg.type) {
     case "ui:flush-pending": {
       const store = deps.storeFactory();
-      return deps.flushPending({ store });
+      return runFlush(deps, store);
     }
     case "ui:sign-memory":
       // T11 / T18: delegate to runtime/sign + runtime/store. The SW

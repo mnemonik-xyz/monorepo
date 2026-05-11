@@ -17,6 +17,16 @@ import type {
   Session,
 } from "../auth/types.js";
 import type { EscrowBlob } from "../auth/key-escrow.js";
+import type {
+  RecallRemoteHit,
+  VerifyRemoteResult,
+} from "../runtime/sync/cloud-client.js";
+
+/** Re-export of `RecallRemoteHit` so popup callers depend on the
+ *  facade rather than reaching into `runtime/sync/cloud-client.ts`. */
+export type CloudRecallHit = RecallRemoteHit;
+/** Same re-export pattern for the verify-result discriminated union. */
+export type CloudVerifyOutcome = VerifyRemoteResult;
 
 /** Identity loaded out of `chrome.storage.local`. `null` when the user
  *  has not completed T16 onboarding yet (popup renders a "not signed
@@ -140,6 +150,26 @@ export interface PopupRuntime {
   };
 
   /**
+   * T18 cloud-sync seam. Popup tabs (Recall in Cloud mode, future
+   * Verify-in-Cloud) route through this facade rather than importing
+   * `runtime/sync/cloud-client.ts` directly. The concrete impl
+   * dynamic-imports the client lazily so the popup's first-paint
+   * bundle stays under the size-limit budget — only Recall in Cloud
+   * mode pays the network-client cost.
+   *
+   * All three methods return `null` when there is no JWT-bearing
+   * session yet; callers branch on that to render "sign in to see
+   * cloud results" without throwing.
+   */
+  cloudSync: {
+    signRemote(
+      args: SignMemoryArgs & SignMemoryResult,
+    ): Promise<{ solana_tx: string; arweave_tx: string } | null>;
+    recallRemote(query: string, k: number): Promise<CloudRecallHit[] | null>;
+    verifyRemote(attestationId: string): Promise<CloudVerifyOutcome | null>;
+  };
+
+  /**
    * T17 key-escrow seam. Popup onboarding components route through this
    * facade rather than importing `src/auth/key-escrow.ts` directly, so
    * tests have a single mock seam. The concrete impl dynamic-imports
@@ -249,10 +279,83 @@ export function createDefaultRuntime(): PopupRuntime {
       const { getRuntimePipeline } = await import("./runtime-impl.js");
       return getRuntimePipeline().signMemory(args);
     },
-    async signRemote() {
-      // T18 wires the cloud client. Local-tier and pre-T18 builds are
-      // both fine to no-op here.
-      return;
+    async signRemote(args) {
+      // T18: Cloud-tier push. Task spec: attempt the live POST /mcp +
+      // POST /api/sign-callback immediately, falling back to the
+      // pending_uploads queue only on transient failure (network /
+      // 5xx) or absent session. The alarm drain handles the queue.
+      // Closes code-review round-1 finding T18-C-MAJOR-02.
+      try {
+        const { IndexedDbStore } =
+          await import("../runtime/store/indexeddb.js");
+        const store = new IndexedDbStore();
+        // Always enqueue first so a crash between the live attempt
+        // and its dequeue (browser tab close, popup dismiss) doesn't
+        // strand the row outside the queue. The CloudClient's
+        // happy path will `dequeue` immediately after the server
+        // returns a 200; on failure the row stays for the alarm.
+        await store.enqueue(args.attestation_id);
+      } catch {
+        // Best-effort enqueue. If IDB itself is unavailable, the
+        // live push below will still try; failing both is fine.
+      }
+      try {
+        const result = await this.cloudSync.signRemote(args);
+        // null = no session bound — leave the row enqueued, the
+        // user's next sign-in will pick it up on the alarm tick.
+        // Non-null = success; cloudSync.signRemote already wrote
+        // the tx ids back and dequeued. Nothing more to do.
+        void result;
+      } catch (err) {
+        const cc = await import("../runtime/sync/cloud-client.js");
+        if (err instanceof cc.ReauthRequiredError) {
+          // Surface re-auth as a global event so the popup's App.tsx
+          // can flip into onboarding mode. Leave the row queued so
+          // the next alarm tick (after re-auth) retries it.
+          const g = globalThis as {
+            dispatchEvent?: (e: Event) => boolean;
+            CustomEvent?: typeof CustomEvent;
+          };
+          if (
+            typeof g.dispatchEvent === "function" &&
+            typeof g.CustomEvent === "function"
+          ) {
+            try {
+              g.dispatchEvent(new g.CustomEvent("mnemonik:re-auth-required"));
+            } catch {
+              // Read-only globals — non-fatal.
+            }
+          }
+          return;
+        }
+        if (err instanceof cc.PermanentSyncError) {
+          // Mark permanently failed locally so the popup can render
+          // the "sync failed" hint. Dequeue so the alarm doesn't
+          // churn. Mirror what `drainPendingUploads` does on the
+          // background side.
+          try {
+            const { IndexedDbStore } =
+              await import("../runtime/store/indexeddb.js");
+            const store = new IndexedDbStore();
+            const row = await store.findById(args.attestation_id);
+            if (row) {
+              await store.saveAttestation({
+                ...row,
+                sync_failed_permanent: true,
+              });
+            }
+            await store.dequeue(args.attestation_id);
+          } catch {
+            // Best-effort cleanup.
+          }
+          // Re-throw so the caller (Capture.tsx) can surface a toast.
+          throw err;
+        }
+        // TransientSyncError or unknown: leave the row queued. The
+        // alarm drain will retry on the next tick. We don't re-throw
+        // so the Capture happy-path UX isn't blocked by a transient
+        // upstream hiccup — the user sees the local sign succeed.
+      }
     },
     async recall(query, limit) {
       const { getRuntimePipeline } = await import("./runtime-impl.js");
@@ -286,6 +389,52 @@ export function createDefaultRuntime(): PopupRuntime {
       async clear() {
         const { clearSession } = await import("../auth/session.js");
         return clearSession();
+      },
+    },
+    cloudSync: {
+      async signRemote(args) {
+        // Synchronous push path. Tabs that want immediate cloud
+        // confirmation (rather than waiting for the alarm-drain
+        // tick) call this. Returns `null` when there is no session;
+        // throws typed errors otherwise so the caller can branch.
+        const client = await buildCloudClient();
+        if (!client) return null;
+        const { signer_pubkey } = args;
+        // Re-load the COSE bytes off the local row — the popup
+        // already persisted them in `signMemory`, so we don't have
+        // to ship them across the messaging boundary again.
+        const { IndexedDbStore } =
+          await import("../runtime/store/indexeddb.js");
+        const store = new IndexedDbStore();
+        const row = await store.findById(args.attestation_id);
+        if (!row) return null;
+        const out = await client.signRemote(
+          {
+            content: row.content,
+            tags: [...row.tags],
+            ...(row.source_meta ? { source_meta: row.source_meta } : {}),
+          },
+          { cose_bytes: row.cose_bytes, signer_pubkey },
+        );
+        // Persist the tx ids back onto the row so subsequent Recall
+        // calls render them. Mirrors what the alarm-drain does.
+        await store.saveAttestation({
+          ...row,
+          solana_tx: out.solana_tx,
+          arweave_tx: out.arweave_tx,
+        });
+        await store.dequeue(args.attestation_id);
+        return { solana_tx: out.solana_tx, arweave_tx: out.arweave_tx };
+      },
+      async recallRemote(query, k) {
+        const client = await buildCloudClient();
+        if (!client) return null;
+        return client.recallRemote(query, k);
+      },
+      async verifyRemote(attestationId) {
+        const client = await buildCloudClient();
+        if (!client) return null;
+        return client.verifyRemote(attestationId);
       },
     },
     keyEscrow: {
@@ -328,6 +477,24 @@ export function createDefaultRuntime(): PopupRuntime {
       },
     },
   };
+}
+
+// ── cloud-sync helper ───────────────────────────────────────────────────────
+
+/**
+ * Build a `CloudClient` from the persisted session. Returns `null`
+ * when no session is bound — callers branch on that to render
+ * "sign in to see cloud results" without throwing. Dynamic-imports
+ * to keep the popup's first-paint bundle free of `fetch` setup.
+ */
+async function buildCloudClient(): Promise<
+  import("../runtime/sync/cloud-client.js").CloudClient | null
+> {
+  const { getSession } = await import("../auth/session.js");
+  const session = await getSession();
+  if (!session) return null;
+  const { CloudClient } = await import("../runtime/sync/cloud-client.js");
+  return new CloudClient({ jwt: session.jwt });
 }
 
 // ── chrome.* helpers (test-friendly) ────────────────────────────────────────
