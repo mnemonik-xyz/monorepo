@@ -1,0 +1,111 @@
+name: Extension E2E
+
+# T19 — Playwright E2E + bundle-size gates for the Chrome extension.
+#
+# Two jobs:
+#   - e2e — builds the extension, installs Chromium, runs the Playwright
+#     suite headed under xvfb (MV3 service workers don't boot in classic
+#     --headless). Failures upload `test-results/` (Playwright traces +
+#     screenshots) as a CI artifact for triage.
+#   - bundle-size — enforces the popup cold-open budget declared in
+#     packages/extension/.size-limit.json. Runs in parallel with e2e.
+
+on:
+  push:
+    branches: [dev]
+    paths:
+      - 'packages/extension/**'
+      - 'packages/sdk/**'
+      - '.github/workflows/ext-e2e.yml'
+  pull_request:
+    paths:
+      - 'packages/extension/**'
+      - 'packages/sdk/**'
+      - '.github/workflows/ext-e2e.yml'
+
+concurrency:
+  group: ext-e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  e2e:
+    name: Playwright suite (chromium + loaded extension)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies (workspaces)
+        run: bun install
+
+      # The popup imports the SDK via workspace resolution; we don't
+      # build the SDK's WASM here because the extension's tests don't
+      # exercise the signing pipeline at the WASM layer (those are
+      # covered by node-test.yml).
+      - name: Build extension
+        working-directory: packages/extension
+        run: bun run build
+
+      - name: Install Playwright Chromium
+        working-directory: packages/extension
+        run: bunx playwright install --with-deps chromium
+
+      # MV3 extensions require a display server — xvfb provides one for
+      # the loaded-extension flag (`--load-extension=$dist`). The
+      # `--no-sandbox` flag in setup.ts is what lets Chromium start
+      # under the GitHub runner's container.
+      - name: Run Playwright E2E suite
+        working-directory: packages/extension
+        env:
+          DISPLAY: ':99'
+        run: |
+          Xvfb :99 -screen 0 1280x720x24 &
+          sleep 1
+          bun run e2e
+
+      - name: Upload Playwright traces on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-traces
+          path: |
+            packages/extension/test-results/
+            packages/extension/playwright-report/
+          retention-days: 7
+
+  bundle-size:
+    name: popup bundle budget (size-limit)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies (workspaces)
+        run: bun install
+
+      - name: Build extension
+        working-directory: packages/extension
+        run: bun run build
+
+      # size-limit budgets are declared in
+      # packages/extension/.size-limit.json (added by T11). A breach
+      # fails the workflow.
+      - name: Enforce bundle budgets
+        working-directory: packages/extension
+        run: bun run size
