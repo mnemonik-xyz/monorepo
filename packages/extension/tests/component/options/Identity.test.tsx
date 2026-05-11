@@ -48,6 +48,7 @@ function makeRuntime(
     },
     cloudSync: {
       countLocalAttestations: async () => 0,
+      countCloudAttestations: async () => 0,
       enqueueAll: async () => undefined,
       subscribeProgress: () => () => undefined,
       exportAll: async () => new Uint8Array(),
@@ -64,7 +65,7 @@ describe("Identity section", () => {
     setOptionsRuntime(makeRuntime({ pubkey: null }));
     render(<Identity />);
     expect(
-      await screen.findByText(/No identity configured/i),
+      await screen.findByText(/No agent identity found/i),
     ).toBeInTheDocument();
   });
 
@@ -90,10 +91,11 @@ describe("Identity section", () => {
     );
     render(<Identity />);
     const passInput = await screen.findByLabelText(/Export passphrase/i);
-    fireEvent.change(passInput, { target: { value: "wrap-pp-1234" } });
+    // Long, non-dictionary passphrase clears the zxcvbn gate (>=12 chars
+    // AND score >= 3) — required to enable the Export button.
+    const strongPp = "Tr0ub4dor&3-Mnemonik-lazy-bear";
+    fireEvent.change(passInput, { target: { value: strongPp } });
     fireEvent.click(screen.getByRole("button", { name: /^export keypair$/i }));
-    await waitFor(() =>
-      expect(exportEncrypted).toHaveBeenCalledWith("wrap-pp-1234"),
-    );
+    await waitFor(() => expect(exportEncrypted).toHaveBeenCalledWith(strongPp));
   });
 });

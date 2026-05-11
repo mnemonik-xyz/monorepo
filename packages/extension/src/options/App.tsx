@@ -119,7 +119,16 @@ export function App(): JSX.Element {
                       : "border-transparent text-text-muted hover:text-text-primary"
                   }`}
                 >
+                  <span
+                    aria-hidden="true"
+                    className={`inline-block w-2 mr-2 ${
+                      selected ? "text-accent-primary" : "text-transparent"
+                    }`}
+                  >
+                    {selected ? "●" : " "}
+                  </span>
                   {SECTION_LABELS[s]}
+                  {selected ? <span className="sr-only"> (active)</span> : null}
                 </button>
               );
             })}

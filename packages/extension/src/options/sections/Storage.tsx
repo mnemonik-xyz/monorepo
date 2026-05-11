@@ -6,7 +6,10 @@
 // attestation as a COSE bundle.
 //
 // The migration confirmation lists the row count so the user knows
-// exactly what will move.
+// exactly what will move. Local→Cloud uses `countLocalAttestations()`
+// (rows about to be uploaded); Cloud→Local uses `countCloudAttestations()`
+// (rows currently held server-side). Cross-using the wrong counter
+// would mislead the user — the facade exposes both methods explicitly.
 
 import { useCallback, useEffect, useRef, useState, type JSX } from "react";
 import { getOptionsRuntime } from "../runtime.js";
@@ -14,6 +17,9 @@ import type { AuthSession, MigrationProgressEvent } from "../runtime.js";
 import { Toast } from "../../popup/components/Toast.js";
 import { MigrationProgress } from "../components/MigrationProgress.js";
 import type { SettingsV1 } from "../../settings.js";
+import type { ToastState } from "../types.js";
+import { triggerDownload } from "../utils/download.js";
+import { useDialogA11y } from "../utils/useDialogA11y.js";
 
 type Mode =
   | { kind: "closed" }
@@ -24,12 +30,6 @@ type Mode =
       kind: "migrating-to-cloud";
       progress: MigrationProgressEvent | null;
     };
-
-interface ToastState {
-  message: string;
-  kind: "success" | "error" | "info";
-  nonce: number;
-}
 
 export function Storage(): JSX.Element {
   const [tier, setTier] = useState<SettingsV1["storage_tier"]>("local");
@@ -73,8 +73,11 @@ export function Storage(): JSX.Element {
       setMode({ kind: "confirm-to-cloud", rows });
       return;
     }
-    // Cloud → Local: confirm the export-then-disconnect path.
-    const rows = await r.cloudSync.countLocalAttestations();
+    // Cloud → Local: ask the cloud-side counter, not the local one.
+    // T18 will replace the stub return-0 with the real query; until
+    // then the dialog says "0 cloud attestations" rather than echoing
+    // the local-IDB count and confusing the user.
+    const rows = await r.cloudSync.countCloudAttestations();
     setMode({ kind: "confirm-to-local", rows });
   }, [tier, session]);
 
@@ -124,7 +127,7 @@ export function Storage(): JSX.Element {
     const r = getOptionsRuntime();
     try {
       const blob = await r.cloudSync.exportAll();
-      triggerDownload(blob, "mnemonik-export.zip");
+      triggerDownload(blob, "mnemonik-export.zip", "application/zip");
       const next = await r.settings.update({ storage_tier: "local" });
       setTier(next.storage_tier);
       await r.auth.clearSession();
@@ -139,6 +142,8 @@ export function Storage(): JSX.Element {
       setMode({ kind: "closed" });
     }
   }, [showToast]);
+
+  const closeDialog = useCallback(() => setMode({ kind: "closed" }), []);
 
   return (
     <div className="flex flex-col gap-4">
@@ -178,17 +183,14 @@ export function Storage(): JSX.Element {
       </div>
 
       {mode.kind === "signin" ? (
-        <SignInDialog
-          onSignIn={onSignIn}
-          onCancel={() => setMode({ kind: "closed" })}
-        />
+        <SignInDialog onSignIn={onSignIn} onCancel={closeDialog} />
       ) : null}
 
       {mode.kind === "confirm-to-cloud" ? (
         <ConfirmToCloudDialog
           rows={mode.rows}
           onConfirm={onConfirmToCloud}
-          onCancel={() => setMode({ kind: "closed" })}
+          onCancel={closeDialog}
         />
       ) : null}
 
@@ -196,7 +198,7 @@ export function Storage(): JSX.Element {
         <ConfirmToLocalDialog
           rows={mode.rows}
           onConfirm={onConfirmToLocal}
-          onCancel={() => setMode({ kind: "closed" })}
+          onCancel={closeDialog}
         />
       ) : null}
 
@@ -223,6 +225,8 @@ function SignInDialog({
   onSignIn: () => void;
   onCancel: () => void;
 }): JSX.Element {
+  const primaryRef = useRef<HTMLButtonElement>(null);
+  useDialogA11y(primaryRef, onCancel);
   return (
     <div
       role="dialog"
@@ -244,6 +248,7 @@ function SignInDialog({
         </p>
         <div className="flex items-center gap-2 mt-1">
           <button
+            ref={primaryRef}
             type="button"
             onClick={onSignIn}
             className="flex-1 bg-accent-primary/20 hover:bg-accent-primary/30 text-accent-primary border border-accent-primary/50 text-xs font-mono uppercase tracking-wide py-1.5 rounded"
@@ -272,6 +277,8 @@ function ConfirmToCloudDialog({
   onConfirm: () => void;
   onCancel: () => void;
 }): JSX.Element {
+  const primaryRef = useRef<HTMLButtonElement>(null);
+  useDialogA11y(primaryRef, onCancel);
   return (
     <div
       role="dialog"
@@ -294,6 +301,7 @@ function ConfirmToCloudDialog({
         </p>
         <div className="flex items-center gap-2 mt-1">
           <button
+            ref={primaryRef}
             type="button"
             onClick={onConfirm}
             className="flex-1 bg-accent-primary/20 hover:bg-accent-primary/30 text-accent-primary border border-accent-primary/50 text-xs font-mono uppercase tracking-wide py-1.5 rounded"
@@ -322,6 +330,8 @@ function ConfirmToLocalDialog({
   onConfirm: () => void;
   onCancel: () => void;
 }): JSX.Element {
+  const primaryRef = useRef<HTMLButtonElement>(null);
+  useDialogA11y(primaryRef, onCancel);
   return (
     <div
       role="dialog"
@@ -343,6 +353,7 @@ function ConfirmToLocalDialog({
         </p>
         <div className="flex items-center gap-2 mt-1">
           <button
+            ref={primaryRef}
             type="button"
             onClick={onConfirm}
             className="flex-1 bg-accent-primary/20 hover:bg-accent-primary/30 text-accent-primary border border-accent-primary/50 text-xs font-mono uppercase tracking-wide py-1.5 rounded"
@@ -360,16 +371,4 @@ function ConfirmToLocalDialog({
       </div>
     </div>
   );
-}
-
-function triggerDownload(bytes: Uint8Array, filename: string): void {
-  const blob = new Blob([bytes], { type: "application/zip" });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = filename;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  URL.revokeObjectURL(url);
 }

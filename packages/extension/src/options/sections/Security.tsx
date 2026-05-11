@@ -2,6 +2,8 @@
 //   1. Rotate recovery passphrase (re-derives Argon2id wrap-key,
 //      re-encrypts the Ed25519 secret, PUTs to /api/key-escrow). Calls
 //      `keyEscrow.rotate(old, new)` — TDD anchor binds this contract.
+//      The new passphrase must clear a zxcvbn strength bar (length >= 12
+//      AND score >= 3) before the submit button enables.
 //   2. Delete cloud escrow (advanced; warns + double-confirm).
 //   3. Sign out of Google (clears session via `auth.clearSession()`).
 //
@@ -9,6 +11,8 @@
 // exists — none of these flows are meaningful without escrow access.
 
 import {
+  Suspense,
+  lazy,
   useCallback,
   useEffect,
   useState,
@@ -17,12 +21,17 @@ import {
 } from "react";
 import { getOptionsRuntime, type AuthSession } from "../runtime.js";
 import { Toast } from "../../popup/components/Toast.js";
+import type { ToastState } from "../types.js";
+import {
+  MIN_PASSPHRASE_LENGTH,
+  isPassphraseAcceptable,
+} from "../components/PassphraseStrength.js";
 
-interface ToastState {
-  message: string;
-  kind: "success" | "error" | "info";
-  nonce: number;
-}
+// Lazy: the meter pulls in zxcvbn-ts dictionaries (~50KB gzip). Defer
+// the cost until the user actually opens the Security tab.
+const PassphraseStrength = lazy(
+  () => import("../components/PassphraseStrength.js"),
+);
 
 export function Security(): JSX.Element {
   const [session, setSession] = useState<AuthSession | null>(null);
@@ -63,8 +72,18 @@ export function Security(): JSX.Element {
         showToast("Both current and new passphrase are required.", "error");
         return;
       }
-      if (trimmedNew.length < 10) {
-        showToast("New passphrase must be at least 10 characters.", "error");
+      if (trimmedNew.length < MIN_PASSPHRASE_LENGTH) {
+        showToast(
+          `New passphrase must be at least ${MIN_PASSPHRASE_LENGTH} characters.`,
+          "error",
+        );
+        return;
+      }
+      if (!isPassphraseAcceptable(trimmedNew)) {
+        showToast(
+          "New passphrase is too weak — aim for a Strong rating.",
+          "error",
+        );
         return;
       }
       setRotating(true);
@@ -128,6 +147,10 @@ export function Security(): JSX.Element {
     );
   }
 
+  const newAcceptable = isPassphraseAcceptable(newPp);
+  const submitDisabled =
+    rotating || !oldPp.trim() || !newPp.trim() || !newAcceptable;
+
   return (
     <div className="flex flex-col gap-4">
       <header>
@@ -147,6 +170,14 @@ export function Security(): JSX.Element {
         <h3 className="text-xs font-mono uppercase tracking-wide text-text-primary">
           Rotate recovery passphrase
         </h3>
+        <p
+          className="text-[11px] text-text-muted"
+          data-testid="rotate-recovery-warning"
+        >
+          The server stores only the encrypted blob — Mnemonik cannot recover
+          this passphrase for you. Save it in your password manager before you
+          submit.
+        </p>
         <label className="flex flex-col gap-1 text-[11px] text-text-muted font-mono">
           Current passphrase
           <input
@@ -167,9 +198,18 @@ export function Security(): JSX.Element {
             className="bg-black/30 border border-white/10 rounded px-2 py-1 text-text-primary text-xs font-mono"
           />
         </label>
+        <Suspense
+          fallback={
+            <div className="text-[10px] text-text-muted font-mono">
+              Loading strength meter…
+            </div>
+          }
+        >
+          <PassphraseStrength value={newPp} />
+        </Suspense>
         <button
           type="submit"
-          disabled={rotating}
+          disabled={submitDisabled}
           className="self-start bg-accent-primary/20 hover:bg-accent-primary/30 text-accent-primary border border-accent-primary/50 text-xs font-mono uppercase tracking-wide px-3 py-1.5 rounded disabled:opacity-50"
         >
           {rotating ? "Rotating…" : "Rotate passphrase"}

@@ -49,13 +49,14 @@ export function Telemetry(): JSX.Element {
           <span className="text-xs text-text-primary font-mono">
             Enable telemetry
           </span>
-          <span className="text-[10px] text-text-muted">
-            Help improve adapter coverage. You can turn this off anytime.
+          <span id="telemetry-hint" className="text-[10px] text-text-muted">
+            Sends adapter-failure and cold-start metrics. No content data.
           </span>
         </div>
         <input
           type="checkbox"
           aria-label="Enable telemetry"
+          aria-describedby="telemetry-hint"
           checked={enabled}
           onChange={onToggle}
           className="mt-1 accent-accent-primary"

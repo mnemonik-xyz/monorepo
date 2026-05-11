@@ -46,6 +46,7 @@ function makeRuntime(
     },
     cloudSync: {
       countLocalAttestations: async () => 0,
+      countCloudAttestations: async () => 0,
       enqueueAll: async () => undefined,
       subscribeProgress: () => () => undefined,
       exportAll: async () => new Uint8Array(),
@@ -80,11 +81,14 @@ describe("Security section", () => {
     const oldInput = await screen.findByLabelText(/Current passphrase/i);
     const newInput = await screen.findByLabelText(/New passphrase/i);
     fireEvent.change(oldInput, { target: { value: "old-pp" } });
-    fireEvent.change(newInput, { target: { value: "new-pp-1234" } });
+    // The new passphrase must clear the zxcvbn gate (>=12 chars AND
+    // score >= 3) — pick a long, non-dictionary value.
+    const strongPp = "Tr0ub4dor&3-Mnemonik-lazy-bear";
+    fireEvent.change(newInput, { target: { value: strongPp } });
 
     fireEvent.click(screen.getByRole("button", { name: /rotate passphrase/i }));
     await waitFor(() => expect(rotate).toHaveBeenCalledTimes(1));
-    expect(rotate).toHaveBeenCalledWith("old-pp", "new-pp-1234");
+    expect(rotate).toHaveBeenCalledWith("old-pp", strongPp);
   });
 
   it("blocks rotation when fields are empty", async () => {
@@ -97,12 +101,50 @@ describe("Security section", () => {
       }),
     );
     render(<Security />);
-    fireEvent.click(
-      await screen.findByRole("button", { name: /rotate passphrase/i }),
-    );
-    // Error toast renders; rotate is NOT called.
-    expect(await screen.findByRole("status")).toBeInTheDocument();
+    const submit = await screen.findByRole("button", {
+      name: /rotate passphrase/i,
+    });
+    // The submit button stays disabled until BOTH fields are filled and
+    // the new passphrase clears the zxcvbn gate. Clicking a disabled
+    // button does not fire onSubmit.
+    expect(submit).toBeDisabled();
+    fireEvent.click(submit);
     expect(rotate).not.toHaveBeenCalled();
+  });
+
+  it("blocks rotation when new passphrase is too weak", async () => {
+    const rotate = vi.fn<[string, string], Promise<void>>();
+    setOptionsRuntime(
+      makeRuntime({
+        session: { google_sub: "g", email: "u@x", jwt: "j" },
+        hasBlob: true,
+        rotate,
+      }),
+    );
+    render(<Security />);
+    const oldInput = await screen.findByLabelText(/Current passphrase/i);
+    const newInput = await screen.findByLabelText(/New passphrase/i);
+    fireEvent.change(oldInput, { target: { value: "old-pp" } });
+    // 12 chars but trivial sequence — zxcvbn rates this < 3.
+    fireEvent.change(newInput, { target: { value: "password1234" } });
+    const submit = await screen.findByRole("button", {
+      name: /rotate passphrase/i,
+    });
+    expect(submit).toBeDisabled();
+    expect(rotate).not.toHaveBeenCalled();
+  });
+
+  it("rotate form shows the 'cannot recover' explainer", async () => {
+    setOptionsRuntime(
+      makeRuntime({
+        session: { google_sub: "g", email: "u@x", jwt: "j" },
+        hasBlob: true,
+      }),
+    );
+    render(<Security />);
+    expect(
+      await screen.findByText(/Mnemonik cannot recover this passphrase/i),
+    ).toBeInTheDocument();
   });
 
   it("Sign out of Google clears the session", async () => {

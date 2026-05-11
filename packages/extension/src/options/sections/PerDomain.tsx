@@ -124,20 +124,27 @@ function Toggle({
   hint?: string;
 }): JSX.Element {
   // The accessible name embeds the host so tests + screen-reader users
-  // can disambiguate the same toggle across rows.
+  // can disambiguate the same toggle across rows. The hint text is
+  // surfaced via aria-describedby so it joins the accessible name in
+  // the SR announcement instead of being hidden behind the aria-label
+  // override.
   const ariaLabel = `${host} ${label}`;
+  const hintId = hint ? `pd-${host}-${field}-hint` : undefined;
   return (
     <label className="flex items-start justify-between gap-3 text-xs">
       <span className="flex flex-col">
         <span className="text-text-primary font-mono">{label}</span>
         {hint ? (
-          <span className="text-[10px] text-text-muted">{hint}</span>
+          <span id={hintId} className="text-[10px] text-text-muted">
+            {hint}
+          </span>
         ) : null}
       </span>
       <input
         type="checkbox"
         checked={value}
         aria-label={ariaLabel}
+        aria-describedby={hintId}
         onChange={() => onToggle(host, field)}
         className="mt-1 accent-accent-primary"
       />

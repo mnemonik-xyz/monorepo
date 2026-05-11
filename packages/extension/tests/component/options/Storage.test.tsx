@@ -23,6 +23,7 @@ function makeRuntime(
     signIn?: OptionsRuntime["auth"]["signIn"];
     enqueueAll?: OptionsRuntime["cloudSync"]["enqueueAll"];
     countLocal?: OptionsRuntime["cloudSync"]["countLocalAttestations"];
+    countCloud?: OptionsRuntime["cloudSync"]["countCloudAttestations"];
   } = {},
 ): OptionsRuntime {
   let settings: SettingsV1 = {
@@ -68,6 +69,7 @@ function makeRuntime(
     },
     cloudSync: {
       countLocalAttestations: overrides.countLocal ?? (async () => 0),
+      countCloudAttestations: overrides.countCloud ?? (async () => 0),
       enqueueAll: overrides.enqueueAll ?? (async () => undefined),
       subscribeProgress: (cb) => {
         const t = setTimeout(
@@ -122,6 +124,36 @@ describe("Storage section", () => {
     // Confirm copy must NOT appear yet.
     expect(screen.queryByText(/will upload/i)).not.toBeInTheDocument();
     expect(enqueueAll).not.toHaveBeenCalled();
+  });
+
+  it("Cloud→Local dialog cites countCloudAttestations, not the local count", async () => {
+    // Regression: previously the Cloud→Local confirmation dialog used
+    // `countLocalAttestations()` and labelled the result as "cloud
+    // attestations" — semantically wrong. The facade now exposes a
+    // dedicated `countCloudAttestations()` method that the dialog
+    // consumes for this direction.
+    const countLocal = vi.fn<[], Promise<number>>().mockResolvedValue(99);
+    const countCloud = vi.fn<[], Promise<number>>().mockResolvedValue(3);
+    setOptionsRuntime(
+      makeRuntime({
+        settings: { storage_tier: "cloud" },
+        session: { google_sub: "g", email: "u@x", jwt: "j" },
+        countLocal,
+        countCloud,
+      }),
+    );
+
+    render(<Storage />);
+    fireEvent.click(
+      await screen.findByRole("button", { name: /switch to local/i }),
+    );
+    await waitFor(() =>
+      expect(
+        screen.getByText(/export all 3 cloud attestations?/i),
+      ).toBeInTheDocument(),
+    );
+    expect(countCloud).toHaveBeenCalledTimes(1);
+    expect(countLocal).not.toHaveBeenCalled();
   });
 
   it("with a live session, opens the migration confirmation dialog", async () => {

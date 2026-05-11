@@ -162,6 +162,13 @@ function createCloudSyncFacade(): CloudSyncFacade {
         return 0;
       }
     },
+    async countCloudAttestations(): Promise<number> {
+      // T18 will GET /api/attestations?count=true (or equivalent) and
+      // surface the real cloud-side row count for the active session.
+      // Until then, return 0 so the Cloud→Local dialog renders a stable
+      // placeholder rather than the misleading local count.
+      return 0;
+    },
     async enqueueAll(): Promise<void> {
       // T18 will iterate every row and push to `pending_uploads`. Today
       // this is a no-op — the SW alarm already has the cloud-sync drain

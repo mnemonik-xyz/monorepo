@@ -85,8 +85,14 @@ export interface MigrationProgressEvent {
 
 export interface CloudSyncFacade {
   /** Count rows that would be enqueued by a Local→Cloud migration. The
-   *  Storage section displays this in the confirmation dialog. */
+   *  Storage section displays this in the Local→Cloud confirmation
+   *  dialog. */
   countLocalAttestations(): Promise<number>;
+  /** Count rows currently held server-side for the active Google
+   *  session. Used by the Cloud→Local confirmation dialog so the row
+   *  count reflects the *cloud* inventory, not the local copy. T18 will
+   *  replace the stub (which returns 0) with the real query. */
+  countCloudAttestations(): Promise<number>;
   /** Enqueue every local row into `pending_uploads`. Returns
    *  immediately; progress is observed via `subscribeProgress`. */
   enqueueAll(): Promise<void>;

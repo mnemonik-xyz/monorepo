@@ -2,17 +2,30 @@
 // copy on each, and surfaces "Export keypair" / "Import keypair"
 // (passphrase-encrypted JSON blob). The QR code is a placeholder until
 // a small QR module lands; the pubkey copy + DID copy cover the
-// Phase-1 sharing UX.
+// Phase-1 sharing UX. Export passphrase must clear the same zxcvbn
+// strength gate as Security/rotate (length >= 12 AND score >= 3).
 
-import { useCallback, useEffect, useRef, useState, type JSX } from "react";
+import {
+  Suspense,
+  lazy,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type JSX,
+} from "react";
 import { getOptionsRuntime, type IdentitySnapshot } from "../runtime.js";
 import { Toast } from "../../popup/components/Toast.js";
+import type { ToastState } from "../types.js";
+import { triggerDownload } from "../utils/download.js";
+import {
+  MIN_PASSPHRASE_LENGTH,
+  isPassphraseAcceptable,
+} from "../components/PassphraseStrength.js";
 
-interface ToastState {
-  message: string;
-  kind: "success" | "error" | "info";
-  nonce: number;
-}
+const PassphraseStrength = lazy(
+  () => import("../components/PassphraseStrength.js"),
+);
 
 export function Identity(): JSX.Element {
   const [identity, setIdentity] = useState<IdentitySnapshot | null>(null);
@@ -51,13 +64,23 @@ export function Identity(): JSX.Element {
 
   const onExport = useCallback(async () => {
     const pp = exportPassphrase.trim();
-    if (!pp || pp.length < 10) {
-      showToast("Export passphrase must be at least 10 characters.", "error");
+    if (!pp || pp.length < MIN_PASSPHRASE_LENGTH) {
+      showToast(
+        `Export passphrase must be at least ${MIN_PASSPHRASE_LENGTH} characters.`,
+        "error",
+      );
+      return;
+    }
+    if (!isPassphraseAcceptable(pp)) {
+      showToast(
+        "Export passphrase is too weak — aim for a Strong rating.",
+        "error",
+      );
       return;
     }
     try {
       const blob = await getOptionsRuntime().identity.exportEncrypted(pp);
-      triggerDownload(blob, "mnemonik-keypair.enc.json");
+      triggerDownload(blob, "mnemonik-keypair.enc.json", "application/json");
       setExportPassphrase("");
       showToast("Encrypted keypair downloaded.", "success");
     } catch (err) {
@@ -94,6 +117,9 @@ export function Identity(): JSX.Element {
     [importPassphrase, showToast],
   );
 
+  const exportAcceptable = isPassphraseAcceptable(exportPassphrase);
+  const exportDisabled = !identity || !exportAcceptable;
+
   return (
     <div className="flex flex-col gap-4">
       <header>
@@ -122,8 +148,7 @@ export function Identity(): JSX.Element {
       ) : (
         <div className="border border-white/10 rounded p-3">
           <p className="text-xs text-text-muted">
-            No identity configured. Open the popup to sign in or import a
-            keypair.
+            No agent identity found. Generate or import a keypair via the popup.
           </p>
         </div>
       )}
@@ -147,10 +172,19 @@ export function Identity(): JSX.Element {
             className="bg-black/30 border border-white/10 rounded px-2 py-1 text-text-primary text-xs font-mono"
           />
         </label>
+        <Suspense
+          fallback={
+            <div className="text-[10px] text-text-muted font-mono">
+              Loading strength meter…
+            </div>
+          }
+        >
+          <PassphraseStrength value={exportPassphrase} />
+        </Suspense>
         <button
           type="button"
           onClick={onExport}
-          disabled={!identity}
+          disabled={exportDisabled}
           className="self-start bg-accent-primary/20 hover:bg-accent-primary/30 text-accent-primary border border-accent-primary/50 text-xs font-mono uppercase tracking-wide px-3 py-1.5 rounded disabled:opacity-50"
         >
           Export keypair
@@ -230,16 +264,4 @@ function Row({
       </button>
     </div>
   );
-}
-
-function triggerDownload(bytes: Uint8Array, filename: string): void {
-  const blob = new Blob([bytes], { type: "application/json" });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = filename;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  URL.revokeObjectURL(url);
 }
