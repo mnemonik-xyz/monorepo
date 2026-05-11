@@ -58,6 +58,7 @@ function makeRuntime(
     },
     cloudSync: {
       countLocalAttestations: async () => 0,
+      countCloudAttestations: async () => 0,
       enqueueAll: async () => undefined,
       subscribeProgress: () => () => undefined,
       exportAll: async () => new Uint8Array(),

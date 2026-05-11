@@ -7,9 +7,10 @@
 //     (`src/auth/google-oauth.ts`). Today the stub throws on `signIn`
 //     so the Storage section's "Switch to Cloud" branch surfaces a
 //     clear "sign-in not yet wired" error instead of silently failing.
-//   - `keyEscrow` → STUB. T17 will replace with the real key-escrow
-//     client. Today calls reject so the Security section can render the
-//     "coming soon" banner without breaking the form.
+//   - `keyEscrow` → T17 real implementation. `rotate` re-derives the
+//     Argon2id wrap-key and PUTs a fresh blob; `delete` issues
+//     `DELETE /api/key-escrow`; `hasBlob` probes via GET and treats
+//     `EscrowNotFoundError` (or any transport hiccup) as "no blob".
 //   - `cloudSync` → STUB. T18 will replace with deferred-signing client.
 //     Today `enqueueAll` is a no-op and `subscribeProgress` emits a
 //     single `done: true` event so the migration UI doesn't hang.
@@ -22,6 +23,12 @@
 // initial bundle stays small.
 
 import { loadSettings, updateSettings } from "../settings.js";
+import {
+  deleteEscrow,
+  fetchEscrow,
+  rotatePassphrase,
+  EscrowNotFoundError,
+} from "../auth/key-escrow.js";
 import type {
   AuthFacade,
   AuthSession,
@@ -127,16 +134,64 @@ function createIdentityFacade(): IdentityFacade {
 
 function createKeyEscrowFacade(): KeyEscrowFacade {
   return {
-    async rotate(): Promise<void> {
-      throw new Error("Key escrow is not yet wired (T17 pending)");
+    async rotate(oldPassphrase: string, nextPassphrase: string): Promise<void> {
+      // Production wiring (T17): forward to the real key-escrow client.
+      // The Security section's TDD anchor `rotate_passphrase_re_encrypts_blob`
+      // already mocks this seam directly; in production we forward the
+      // typed errors as-is so the Security toast surfaces the right copy
+      // (wrong-passphrase, 429 rate-limit, etc.).
+      const jwt = await readJwtOrThrow("rotate");
+      await rotatePassphrase(jwt, oldPassphrase, nextPassphrase);
     },
     async delete(): Promise<void> {
-      throw new Error("Key escrow is not yet wired (T17 pending)");
+      const jwt = await readJwtOrThrow("delete");
+      await deleteEscrow(jwt);
     },
     async hasBlob(): Promise<boolean> {
-      return false;
+      try {
+        const jwt = await readJwt();
+        if (!jwt) return false;
+        await fetchEscrow(jwt);
+        return true;
+      } catch (err) {
+        if (err instanceof EscrowNotFoundError) return false;
+        // Any other error (network / auth / server) leaves the question
+        // open — surface as "no blob known" so the Security UI does not
+        // wedge into the false-positive state where Delete is enabled
+        // against a server that just had a hiccup.
+        return false;
+      }
     },
   };
+}
+
+/** Lift the current `auth_session.v1.jwt` out of chrome.storage. Returns
+ *  `null` when no session is cached or the blob is malformed. The
+ *  keyEscrow facade calls this on every method so a stale JWT cached
+ *  in module scope cannot leak into a fresh sign-in. */
+async function readJwt(): Promise<string | null> {
+  try {
+    const stored = (await chrome.storage.local.get([SESSION_KEY])) as Record<
+      string,
+      unknown
+    >;
+    const raw = stored[SESSION_KEY];
+    if (!raw || typeof raw !== "object") return null;
+    const jwt = (raw as Record<string, unknown>).jwt;
+    return typeof jwt === "string" && jwt.length > 0 ? jwt : null;
+  } catch {
+    return null;
+  }
+}
+
+async function readJwtOrThrow(where: string): Promise<string> {
+  const jwt = await readJwt();
+  if (!jwt) {
+    throw new Error(
+      `${where}: no Google session cached — sign in before managing escrow`,
+    );
+  }
+  return jwt;
 }
 
 function createCloudSyncFacade(): CloudSyncFacade {
