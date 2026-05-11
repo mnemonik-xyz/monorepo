@@ -161,6 +161,16 @@ function createAuthFacade(): AuthFacade {
   };
 }
 
+/** SA-T25-002 TOCTOU serialiser. `generate()` runs
+ *  read → check → WASM → write across multiple awaits; two concurrent
+ *  invocations (e.g. a double-clicked button or two open Options tabs)
+ *  could both pass the existence check before either completes the
+ *  write. We funnel every call through this module-level lock so the
+ *  second caller awaits the first and then re-reads storage — its
+ *  existence check will trip and throw, surfacing the duplicate-click
+ *  as a typed error in the UI rather than a silently overwritten key. */
+let generateInFlight: Promise<IdentitySnapshot> | null = null;
+
 function createIdentityFacade(): IdentityFacade {
   return {
     async load(): Promise<IdentitySnapshot | null> {
@@ -188,37 +198,71 @@ function createIdentityFacade(): IdentityFacade {
       }
     },
     async generate(): Promise<IdentitySnapshot> {
-      // Refuse to clobber an existing identity. The UI confirms the
-      // destructive regenerate path via a dialog and calls `clear()`
-      // FIRST — by the time we land here the storage should be empty.
-      const existing = (await chrome.storage.local.get([
-        IDENTITY_KEY,
-        IDENTITY_SECRET_KEY,
-      ])) as Record<string, unknown>;
-      if (
-        existing[IDENTITY_KEY] !== undefined ||
-        existing[IDENTITY_SECRET_KEY] !== undefined
-      ) {
-        throw new Error(
-          "Refusing to overwrite existing identity — clear it first",
-        );
+      // SA-T25-002: serialise concurrent generate() calls so the
+      // read → check → write sequence is observed atomically. A second
+      // caller awaits the first; after the first resolves, the second
+      // re-runs the existence check and throws because the now-stored
+      // keypair trips the clobber-guard. The lock is released in a
+      // finally{} so a thrown WASM init failure does not wedge future
+      // calls.
+      if (generateInFlight) {
+        await generateInFlight.catch(() => undefined);
       }
-      // WASM `generate_keypair` uses `getrandom`'s `js` feature →
-      // `crypto.getRandomValues`. CSPRNG-quality entropy. The base58
-      // pubkey is encoded inside the WASM boundary so we don't have to
-      // roll one here.
-      const { generateKeypair } = await import("../runtime/sign/cose.js");
-      const kp = await generateKeypair();
-      const created_at = Date.now();
-      await chrome.storage.local.set({
-        [IDENTITY_KEY]: { pubkey_base58: kp.pubkey_base58, created_at },
-        [IDENTITY_SECRET_KEY]: kp.secret,
-      });
-      return {
-        pubkey_base58: kp.pubkey_base58,
-        did: `did:sol:${kp.pubkey_base58}`,
-        created_at,
+      const run = async (): Promise<IdentitySnapshot> => {
+        // Refuse to clobber an existing identity. The UI confirms the
+        // destructive regenerate path via a dialog and calls `clear()`
+        // FIRST — by the time we land here the storage should be empty.
+        const existing = (await chrome.storage.local.get([
+          IDENTITY_KEY,
+          IDENTITY_SECRET_KEY,
+        ])) as Record<string, unknown>;
+        if (
+          existing[IDENTITY_KEY] !== undefined ||
+          existing[IDENTITY_SECRET_KEY] !== undefined
+        ) {
+          throw new Error(
+            "Refusing to overwrite existing identity — clear it first",
+          );
+        }
+        // WASM `generate_keypair` uses `getrandom`'s `js` feature →
+        // `crypto.getRandomValues`. CSPRNG-quality entropy. The base58
+        // pubkey is encoded inside the WASM boundary so we don't have to
+        // roll one here.
+        const { generateKeypair } = await import("../runtime/sign/cose.js");
+        const kp = await generateKeypair();
+        // SA-T25-004: mirror the byte-range normalisation that
+        // importPlain / exportPlain perform so all three storage-write
+        // paths share the same invariant. `generateKeypair` already
+        // validates internally — this is defence-in-depth against a
+        // future binding swap that bypasses the cose.ts normalisation.
+        if (!Array.isArray(kp.secret) || kp.secret.length !== 64) {
+          throw new Error("generate: WASM returned a malformed secret");
+        }
+        const normalisedSecret: number[] = [];
+        for (const n of kp.secret) {
+          const num = typeof n === "number" ? n : Number(n);
+          if (!Number.isInteger(num) || num < 0 || num > 255) {
+            throw new Error("generate: WASM returned a non-byte value");
+          }
+          normalisedSecret.push(num);
+        }
+        const created_at = Date.now();
+        await chrome.storage.local.set({
+          [IDENTITY_KEY]: { pubkey_base58: kp.pubkey_base58, created_at },
+          [IDENTITY_SECRET_KEY]: normalisedSecret,
+        });
+        return {
+          pubkey_base58: kp.pubkey_base58,
+          did: `did:sol:${kp.pubkey_base58}`,
+          created_at,
+        };
       };
+      generateInFlight = run();
+      try {
+        return await generateInFlight;
+      } finally {
+        generateInFlight = null;
+      }
     },
     async clear(): Promise<void> {
       // Best-effort: chrome.storage.local.remove is idempotent for

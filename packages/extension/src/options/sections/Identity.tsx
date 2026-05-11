@@ -124,6 +124,13 @@ export function Identity(props: IdentityProps = {}): JSX.Element {
       showToast("No identity to export.", "error");
       return;
     }
+    // SA-T25-001: gate the unencrypted-private-key download behind the
+    // same ConfirmFn seam regenerate + import-overwrite use, so an
+    // accidental click does not write the cleartext keypair to disk.
+    const ok = confirm(
+      "Download unencrypted private key file? Anyone with this file controls your identity. Keep it in your password manager.",
+    );
+    if (!ok) return;
     try {
       const payload = await getOptionsRuntime().identity.exportPlain();
       const json = JSON.stringify(payload, null, 2);
@@ -140,7 +147,7 @@ export function Identity(props: IdentityProps = {}): JSX.Element {
         "error",
       );
     }
-  }, [identity, showToast]);
+  }, [identity, confirm, showToast]);
 
   // ── T25: Plain import ─────────────────────────────────────────────────
   const onImportPlainFile = useCallback(
