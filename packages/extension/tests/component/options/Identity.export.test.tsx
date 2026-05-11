@@ -114,7 +114,11 @@ describe("Identity section — T25 plain export", () => {
       // 12-char base58 pubkey so the truncation rule fires (head=6,
       // tail=4 → "PubKey…0xAB").
       setOptionsRuntime(makeRuntime({ pubkey: "PubKeyAA0xAB" }));
-      render(<Identity />);
+      // SA-T25-001: Export now goes through the confirm seam. Accept
+      // the dialog so the download path runs; the separate cancel test
+      // below locks the false-return path.
+      const confirm = vi.fn<[string], boolean>().mockReturnValue(true);
+      render(<Identity confirm={confirm} />);
       await screen.findByText("did:sol:PubKeyAA0xAB");
 
       fireEvent.click(screen.getByRole("button", { name: /^Export$/ }));
@@ -146,6 +150,53 @@ describe("Identity section — T25 plain export", () => {
       expect(
         await screen.findByText(/Keypair downloaded\./i),
       ).toBeInTheDocument();
+    } finally {
+      triggerSpy.mockRestore();
+    }
+  });
+
+  it("export_confirm_dialog_fires_before_download_and_cancel_keeps_keypair_on_disk", async () => {
+    // SA-T25-001: an accidental click on Export must NOT silently write
+    // the cleartext keypair to disk. The component gates the download
+    // behind the same ConfirmFn seam regenerate + import-overwrite use.
+    const triggerSpy = vi
+      .spyOn(downloadModule, "triggerDownload")
+      .mockImplementation(() => undefined);
+    try {
+      setOptionsRuntime(makeRuntime({ pubkey: "PubKeyAA0xAB" }));
+      const confirm = vi.fn<[string], boolean>().mockReturnValue(false);
+      render(<Identity confirm={confirm} />);
+      await screen.findByText("did:sol:PubKeyAA0xAB");
+
+      fireEvent.click(screen.getByRole("button", { name: /^Export$/ }));
+
+      // Drain microtasks so any pending onClick fully resolves.
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(confirm).toHaveBeenCalledTimes(1);
+      // The confirm copy explicitly names "unencrypted private key" so
+      // a future copy-edit that softens the language trips the test.
+      expect(confirm.mock.calls[0]![0]).toMatch(/unencrypted private key/i);
+      expect(triggerSpy).not.toHaveBeenCalled();
+    } finally {
+      triggerSpy.mockRestore();
+    }
+  });
+
+  it("export_confirm_dialog_accept_proceeds_to_download", async () => {
+    const triggerSpy = vi
+      .spyOn(downloadModule, "triggerDownload")
+      .mockImplementation(() => undefined);
+    try {
+      setOptionsRuntime(makeRuntime({ pubkey: "PubKeyAA0xAB" }));
+      const confirm = vi.fn<[string], boolean>().mockReturnValue(true);
+      render(<Identity confirm={confirm} />);
+      await screen.findByText("did:sol:PubKeyAA0xAB");
+
+      fireEvent.click(screen.getByRole("button", { name: /^Export$/ }));
+
+      await waitFor(() => expect(triggerSpy).toHaveBeenCalledTimes(1));
+      expect(confirm).toHaveBeenCalledTimes(1);
     } finally {
       triggerSpy.mockRestore();
     }

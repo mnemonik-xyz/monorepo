@@ -43,6 +43,7 @@ import {
   jwtExpiresAtMs,
 } from "../auth/session.js";
 import { ensureExtensionJwt } from "../auth/extension-bootstrap.js";
+import { IDENTITY_KEY, IDENTITY_SECRET_KEY } from "../auth/storage-keys.js";
 import type { Session } from "../auth/types.js";
 import type {
   AuthFacade,
@@ -65,13 +66,12 @@ import type {
 export const PLAIN_EXPORT_WARNING =
   "Never share this file — anyone with it controls your identity. Store it in a password manager.";
 
-/** chrome.storage.local key the popup + options runtimes share for the
- *  `{pubkey_base58, created_at?}` blob. Mirrors `runtime-impl.ts`'s
- *  `loadIdentity` reader in the popup realm (T25 single source of
- *  truth). Re-exported via the IdentityFacade — components do NOT
- *  reach into chrome.storage directly. */
-export const IDENTITY_KEY = "identity";
-export const IDENTITY_SECRET_KEY = "identity_secret";
+/** chrome.storage.local keys the popup + options runtimes share for
+ *  the `{pubkey_base58, created_at?}` + 64-byte secret pair. The
+ *  canonical definitions now live in `src/auth/storage-keys.ts` —
+ *  re-export here for callers that still depend on the old import
+ *  path (PR136-C-01 / SA-T25-003). */
+export { IDENTITY_KEY, IDENTITY_SECRET_KEY } from "../auth/storage-keys.js";
 
 /** Lightweight base58 (Bitcoin alphabet) validator. The full base58
  *  decode is not needed here — we just sanity-check that every
@@ -82,6 +82,12 @@ export const IDENTITY_SECRET_KEY = "identity_secret";
 const BASE58_ALPHABET =
   "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
 
+/** Pre-computed Set for O(1) character membership lookups (PR136-C-06).
+ *  Pulled out of `isLikelyBase58` so the 58-entry Set is constructed
+ *  once at module-load instead of `String.indexOf`-scanning the
+ *  alphabet on every character. */
+const BASE58_SET: Set<string> = new Set(BASE58_ALPHABET);
+
 function isLikelyBase58(s: string): boolean {
   if (typeof s !== "string" || s.length === 0) return false;
   // Solana Ed25519 pubkeys are 32 bytes → ~43-44 base58 chars. We use a
@@ -89,7 +95,7 @@ function isLikelyBase58(s: string): boolean {
   // reach the WASM validator for the authoritative check.
   if (s.length < 32 || s.length > 64) return false;
   for (let i = 0; i < s.length; i++) {
-    if (BASE58_ALPHABET.indexOf(s[i]!) < 0) return false;
+    if (!BASE58_SET.has(s[i]!)) return false;
   }
   return true;
 }
@@ -161,6 +167,16 @@ function createAuthFacade(): AuthFacade {
   };
 }
 
+/** SA-T25-002 TOCTOU serialiser. `generate()` runs
+ *  read → check → WASM → write across multiple awaits; two concurrent
+ *  invocations (e.g. a double-clicked button or two open Options tabs)
+ *  could both pass the existence check before either completes the
+ *  write. We funnel every call through this module-level lock so the
+ *  second caller awaits the first and then re-reads storage — its
+ *  existence check will trip and throw, surfacing the duplicate-click
+ *  as a typed error in the UI rather than a silently overwritten key. */
+let generateInFlight: Promise<IdentitySnapshot> | null = null;
+
 function createIdentityFacade(): IdentityFacade {
   return {
     async load(): Promise<IdentitySnapshot | null> {
@@ -188,37 +204,71 @@ function createIdentityFacade(): IdentityFacade {
       }
     },
     async generate(): Promise<IdentitySnapshot> {
-      // Refuse to clobber an existing identity. The UI confirms the
-      // destructive regenerate path via a dialog and calls `clear()`
-      // FIRST — by the time we land here the storage should be empty.
-      const existing = (await chrome.storage.local.get([
-        IDENTITY_KEY,
-        IDENTITY_SECRET_KEY,
-      ])) as Record<string, unknown>;
-      if (
-        existing[IDENTITY_KEY] !== undefined ||
-        existing[IDENTITY_SECRET_KEY] !== undefined
-      ) {
-        throw new Error(
-          "Refusing to overwrite existing identity — clear it first",
-        );
+      // SA-T25-002: serialise concurrent generate() calls so the
+      // read → check → write sequence is observed atomically. A second
+      // caller awaits the first; after the first resolves, the second
+      // re-runs the existence check and throws because the now-stored
+      // keypair trips the clobber-guard. The lock is released in a
+      // finally{} so a thrown WASM init failure does not wedge future
+      // calls.
+      if (generateInFlight) {
+        await generateInFlight.catch(() => undefined);
       }
-      // WASM `generate_keypair` uses `getrandom`'s `js` feature →
-      // `crypto.getRandomValues`. CSPRNG-quality entropy. The base58
-      // pubkey is encoded inside the WASM boundary so we don't have to
-      // roll one here.
-      const { generateKeypair } = await import("../runtime/sign/cose.js");
-      const kp = await generateKeypair();
-      const created_at = Date.now();
-      await chrome.storage.local.set({
-        [IDENTITY_KEY]: { pubkey_base58: kp.pubkey_base58, created_at },
-        [IDENTITY_SECRET_KEY]: kp.secret,
-      });
-      return {
-        pubkey_base58: kp.pubkey_base58,
-        did: `did:sol:${kp.pubkey_base58}`,
-        created_at,
+      const run = async (): Promise<IdentitySnapshot> => {
+        // Refuse to clobber an existing identity. The UI confirms the
+        // destructive regenerate path via a dialog and calls `clear()`
+        // FIRST — by the time we land here the storage should be empty.
+        const existing = (await chrome.storage.local.get([
+          IDENTITY_KEY,
+          IDENTITY_SECRET_KEY,
+        ])) as Record<string, unknown>;
+        if (
+          existing[IDENTITY_KEY] !== undefined ||
+          existing[IDENTITY_SECRET_KEY] !== undefined
+        ) {
+          throw new Error(
+            "Refusing to overwrite existing identity — clear it first",
+          );
+        }
+        // WASM `generate_keypair` uses `getrandom`'s `js` feature →
+        // `crypto.getRandomValues`. CSPRNG-quality entropy. The base58
+        // pubkey is encoded inside the WASM boundary so we don't have to
+        // roll one here.
+        const { generateKeypair } = await import("../runtime/sign/cose.js");
+        const kp = await generateKeypair();
+        // SA-T25-004: mirror the byte-range normalisation that
+        // importPlain / exportPlain perform so all three storage-write
+        // paths share the same invariant. `generateKeypair` already
+        // validates internally — this is defence-in-depth against a
+        // future binding swap that bypasses the cose.ts normalisation.
+        if (!Array.isArray(kp.secret) || kp.secret.length !== 64) {
+          throw new Error("generate: WASM returned a malformed secret");
+        }
+        const normalisedSecret: number[] = [];
+        for (const n of kp.secret) {
+          const num = typeof n === "number" ? n : Number(n);
+          if (!Number.isInteger(num) || num < 0 || num > 255) {
+            throw new Error("generate: WASM returned a non-byte value");
+          }
+          normalisedSecret.push(num);
+        }
+        const created_at = Date.now();
+        await chrome.storage.local.set({
+          [IDENTITY_KEY]: { pubkey_base58: kp.pubkey_base58, created_at },
+          [IDENTITY_SECRET_KEY]: normalisedSecret,
+        });
+        return {
+          pubkey_base58: kp.pubkey_base58,
+          did: `did:sol:${kp.pubkey_base58}`,
+          created_at,
+        };
       };
+      generateInFlight = run();
+      try {
+        return await generateInFlight;
+      } finally {
+        generateInFlight = null;
+      }
     },
     async clear(): Promise<void> {
       // Best-effort: chrome.storage.local.remove is idempotent for
@@ -303,20 +353,46 @@ function createIdentityFacade(): IdentityFacade {
         );
       }
       // Byte-range validation — keeps a hand-edited JSON with > 255
-      // entries from poisoning chrome.storage.
+      // entries from poisoning chrome.storage. PR136-C-04: the message
+      // says "byte value" (the actual failure mode), not "secret length"
+      // — by this point the 64-element length is already confirmed.
       const normalised: number[] = [];
-      for (const n of secret) {
+      for (let i = 0; i < secret.length; i++) {
+        const n = secret[i];
         const num = typeof n === "number" ? n : Number(n);
         if (!Number.isInteger(num) || num < 0 || num > 255) {
-          throw new Error("Wrong secret length: contains non-byte value");
+          throw new Error(
+            `Invalid secret byte at index ${i}: expected an integer in [0, 255]`,
+          );
         }
         normalised.push(num);
       }
-      // Persist atomically. Carry `created_at` forward when the import
-      // envelope has an `exported_at`; we treat the export timestamp as
-      // a lower-bound on the identity's age, which keeps the Options
-      // "Created …" row useful after a round-trip.
-      const created_at = Date.now();
+      // PR136-C-02: forward `exported_at` from the import envelope as
+      // `created_at` when it parses to a sensible wall-clock time, so a
+      // round-trip (export → import) preserves the original age. The
+      // exporter writes ISO-8601 strings; we accept either ISO strings
+      // or epoch-ms numbers for backward compatibility. Guard against:
+      //   - missing / wrong-type values (fall back to Date.now()),
+      //   - unparseable strings (NaN getTime()),
+      //   - non-positive timestamps,
+      //   - absurdly-future timestamps (clock skew tolerance: 24h).
+      const now = Date.now();
+      const FUTURE_TOLERANCE_MS = 24 * 60 * 60 * 1000;
+      let created_at = now;
+      const exportedAt = obj.exported_at;
+      if (typeof exportedAt === "string" || typeof exportedAt === "number") {
+        const parsed =
+          typeof exportedAt === "number"
+            ? exportedAt
+            : new Date(exportedAt).getTime();
+        if (
+          Number.isFinite(parsed) &&
+          parsed > 0 &&
+          parsed <= now + FUTURE_TOLERANCE_MS
+        ) {
+          created_at = parsed;
+        }
+      }
       await chrome.storage.local.set({
         [IDENTITY_KEY]: { pubkey_base58: pub, created_at },
         [IDENTITY_SECRET_KEY]: normalised,
@@ -397,11 +473,10 @@ function createCloudSyncFacade(): CloudSyncFacade {
       // bundle stays small — only the Storage section migration flow
       // pays the cost.
       try {
-        const stored = (await chrome.storage.local.get(["identity"])) as Record<
-          string,
-          unknown
-        >;
-        const identity = stored.identity as
+        const stored = (await chrome.storage.local.get([
+          IDENTITY_KEY,
+        ])) as Record<string, unknown>;
+        const identity = stored[IDENTITY_KEY] as
           | { pubkey_base58?: string }
           | undefined;
         if (!identity?.pubkey_base58) return 0;
@@ -426,11 +501,10 @@ function createCloudSyncFacade(): CloudSyncFacade {
       // the SW alarm-driven `drainPendingUploads` (`background/
       // cloud-sync.ts`) flushes them on the next tick.
       try {
-        const stored = (await chrome.storage.local.get(["identity"])) as Record<
-          string,
-          unknown
-        >;
-        const identity = stored.identity as
+        const stored = (await chrome.storage.local.get([
+          IDENTITY_KEY,
+        ])) as Record<string, unknown>;
+        const identity = stored[IDENTITY_KEY] as
           | { pubkey_base58?: string }
           | undefined;
         if (!identity?.pubkey_base58) return;
@@ -503,11 +577,11 @@ function createCloudSyncFacade(): CloudSyncFacade {
       // Cloud → Local archive: bundle every local row as JSON. The COSE
       // bytes are emitted as base64 so the archive is JSON-clean. The
       // Storage section triggers a download of the returned bytes.
-      const stored = (await chrome.storage.local.get(["identity"])) as Record<
+      const stored = (await chrome.storage.local.get([IDENTITY_KEY])) as Record<
         string,
         unknown
       >;
-      const identity = stored.identity as
+      const identity = stored[IDENTITY_KEY] as
         | { pubkey_base58?: string }
         | undefined;
       if (!identity?.pubkey_base58) {

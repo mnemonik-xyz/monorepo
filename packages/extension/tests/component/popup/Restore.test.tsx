@@ -18,11 +18,13 @@ import {
   BLOCK_WINDOW_MS,
   RESTORE_BLOCKED_KEY,
   RESTORE_ATTEMPT_KEY,
-  IDENTITY_STORAGE_KEY,
-  IDENTITY_SECRET_STORAGE_KEY,
   formatCountdown,
   truncatePubkey,
 } from "../../../src/popup/onboarding/Restore.js";
+import {
+  IDENTITY_KEY,
+  IDENTITY_SECRET_KEY,
+} from "../../../src/auth/storage-keys.js";
 import {
   ARGON2ID_SALT_LENGTH,
   AES_GCM_NONCE_LENGTH,
@@ -268,12 +270,10 @@ describe("Restore — happy path", () => {
     await waitFor(() => {
       expect(completed).toBe(true);
     });
-    const identity = store.get(IDENTITY_STORAGE_KEY) as
+    const identity = store.get(IDENTITY_KEY) as
       | { pubkey_base58: string }
       | undefined;
-    const secretArr = store.get(IDENTITY_SECRET_STORAGE_KEY) as
-      | number[]
-      | undefined;
+    const secretArr = store.get(IDENTITY_SECRET_KEY) as number[] | undefined;
     expect(identity).toBeDefined();
     expect(identity?.pubkey_base58).toBe("PubHappy");
     expect(secretArr).toBeDefined();
@@ -330,8 +330,8 @@ describe("Restore — pubkey mismatch (audit S2 / FW-S-02)", () => {
     // onComplete fired.
     expect(unwrapSpy).not.toHaveBeenCalled();
     expect(completed).toBe(false);
-    expect(store.get(IDENTITY_STORAGE_KEY)).toBeUndefined();
-    expect(store.get(IDENTITY_SECRET_STORAGE_KEY)).toBeUndefined();
+    expect(store.get(IDENTITY_KEY)).toBeUndefined();
+    expect(store.get(IDENTITY_SECRET_KEY)).toBeUndefined();
   });
 });
 

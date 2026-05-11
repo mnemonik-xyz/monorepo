@@ -34,9 +34,9 @@ import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { Onboarding } from "../../../src/popup/Onboarding.js";
 import { setRuntime, type PopupRuntime } from "../../../src/popup/runtime.js";
 import {
-  IDENTITY_STORAGE_KEY,
-  IDENTITY_SECRET_STORAGE_KEY,
-} from "../../../src/popup/onboarding/Restore.js";
+  IDENTITY_KEY,
+  IDENTITY_SECRET_KEY,
+} from "../../../src/auth/storage-keys.js";
 import { __setWasmForTesting } from "../../../src/runtime/sign/cose.js";
 import type {
   GoogleSignInResult,
@@ -231,8 +231,8 @@ describe("Onboarding — fresh user (no existingPubkey)", () => {
     // requires a local keypair before mounting <SetPassphrase>.
     const secretBytes = makeSecret();
     installChromeStub({
-      [IDENTITY_STORAGE_KEY]: { pubkey_base58: PRESEEDED_PUBKEY },
-      [IDENTITY_SECRET_STORAGE_KEY]: Array.from(secretBytes),
+      [IDENTITY_KEY]: { pubkey_base58: PRESEEDED_PUBKEY },
+      [IDENTITY_SECRET_KEY]: Array.from(secretBytes),
     });
 
     const signIn = vi
@@ -370,8 +370,8 @@ describe("Onboarding — fresh user (no existingPubkey)", () => {
 
   it("surfaces a typed error and stays signed-out when no linkChallenge is issued", async () => {
     installChromeStub({
-      [IDENTITY_STORAGE_KEY]: { pubkey_base58: PRESEEDED_PUBKEY },
-      [IDENTITY_SECRET_STORAGE_KEY]: Array.from(makeSecret()),
+      [IDENTITY_KEY]: { pubkey_base58: PRESEEDED_PUBKEY },
+      [IDENTITY_SECRET_KEY]: Array.from(makeSecret()),
     });
     setRuntime(
       makeRuntime({
@@ -475,10 +475,10 @@ describe("Onboarding — welcome back (existingPubkey + escrowPresent)", () => {
     // chrome.storage.local.set received both the `identity` metadata
     // and the `identity_secret` array (mirrors the layout
     // `runtime-impl.ts::loadIdentity` reads).
-    const persistedIdentity = store.get(IDENTITY_STORAGE_KEY) as
+    const persistedIdentity = store.get(IDENTITY_KEY) as
       | { pubkey_base58: string }
       | undefined;
-    const persistedSecret = store.get(IDENTITY_SECRET_STORAGE_KEY) as
+    const persistedSecret = store.get(IDENTITY_SECRET_KEY) as
       | number[]
       | undefined;
     expect(persistedIdentity).toBeDefined();

@@ -24,6 +24,7 @@ import type {
 // Sync JWT-parsing helper — exposed on the runtime facade so popup
 // components don't import `auth/session.ts` directly (M3 / AUD-C-08).
 import { jwtExpiresAtMs as syncJwtExpiresAtMs } from "../auth/session.js";
+import { IDENTITY_KEY } from "../auth/storage-keys.js";
 
 /** Re-export of `RecallRemoteHit` so popup callers depend on the
  *  facade rather than reaching into `runtime/sync/cloud-client.ts`. */
@@ -274,10 +275,11 @@ export function getRuntime(): PopupRuntime {
 export function createDefaultRuntime(): PopupRuntime {
   return {
     async loadIdentity() {
-      const stored = await readChromeStorage<{
-        identity?: PopupIdentity | null;
-      }>("local", ["identity"]);
-      return stored.identity ?? null;
+      const stored = await readChromeStorage<Record<string, unknown>>("local", [
+        IDENTITY_KEY,
+      ]);
+      const identity = stored[IDENTITY_KEY] as PopupIdentity | null | undefined;
+      return identity ?? null;
     },
     async loadStorageTier() {
       const stored = await readChromeStorage<{

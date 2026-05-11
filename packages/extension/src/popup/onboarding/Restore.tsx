@@ -51,6 +51,7 @@ import {
   WrongPassphraseError,
   type EscrowBlob,
 } from "../../auth/key-escrow.js";
+import { IDENTITY_KEY, IDENTITY_SECRET_KEY } from "../../auth/storage-keys.js";
 import { getRuntime } from "../runtime.js";
 
 /** Persistent block budget (T17 task spec § Restore UX). After 5 wrong
@@ -67,14 +68,12 @@ export const RESTORE_BLOCKED_KEY = "restore_blocked_until";
  *  successful restore. */
 export const RESTORE_ATTEMPT_KEY = "restore_attempt_count";
 
-/** chrome.storage.local keys for the persisted keypair after restore.
- *  Mirror the layout `popup/runtime-impl.ts::loadIdentity` reads —
- *  `identity = {pubkey_base58}` (public metadata) and `identity_secret`
- *  (64-byte Solana keypair as a number[]; structured-clone-safe). Using
- *  a separate key for the secret matches the rest of the popup runtime
- *  and avoids breaking `signMemory`. */
-export const IDENTITY_STORAGE_KEY = "identity";
-export const IDENTITY_SECRET_STORAGE_KEY = "identity_secret";
+// chrome.storage.local keys for the persisted keypair after restore.
+// Mirror the layout `popup/runtime-impl.ts::loadIdentity` reads:
+//   `identity = {pubkey_base58}` (public metadata) and `identity_secret`
+//   (64-byte Solana keypair as a number[]; structured-clone-safe).
+// The canonical definitions live in `src/auth/storage-keys.ts` (PR136-C-01
+// / SA-T25-003) — Restore consumes them directly from there.
 
 /** Truncate a base58 pubkey for the welcome-back headline ("H8x...c4v"). */
 export function truncatePubkey(pub: string, head = 6, tail = 4): string {
@@ -447,8 +446,8 @@ export function Restore(props: RestoreProps): JSX.Element {
         // unavoidable; see the THREAT MODEL block in `key-escrow.ts`.
         const secretArray = Array.from(secret);
         await storage.set({
-          [IDENTITY_STORAGE_KEY]: { pubkey_base58: existingPubkey },
-          [IDENTITY_SECRET_STORAGE_KEY]: secretArray,
+          [IDENTITY_KEY]: { pubkey_base58: existingPubkey },
+          [IDENTITY_SECRET_KEY]: secretArray,
         });
         // Best-effort wipe of the recovered bytes. JS gives no
         // guarantee — see the THREAT MODEL note in `key-escrow.ts`.
