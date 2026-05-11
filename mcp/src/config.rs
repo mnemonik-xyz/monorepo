@@ -84,6 +84,15 @@ pub struct Config {
     /// Google OAuth redirect URI configured in Google Cloud Console. Must be
     /// HTTPS in production; defaults to `https://mc.mnemonik.xyz/oauth/google/callback`.
     pub google_oauth_redirect_uri: String,
+
+    // ── Extension key escrow (chrome-extension T15, Decision 9) ─────────────
+    /// Max GET fetches against `/api/key-escrow` per rolling 24h per
+    /// `google_sub`. Bounds online brute-force on the encrypted blob; the
+    /// Argon2id KDF bounds the offline brute-force on stolen ciphertext.
+    /// `main.rs::run_http` reads this value when constructing the escrow
+    /// router state — there is no `std::env::var` re-read downstream
+    /// (round-1 code-reviewer finding #2). Default 5.
+    pub key_escrow_rate_limit: u32,
 }
 
 impl Config {
@@ -136,6 +145,7 @@ impl Config {
                 "GOOGLE_OAUTH_REDIRECT_URI",
                 "https://mc.mnemonik.xyz/oauth/google/callback",
             ),
+            key_escrow_rate_limit: env_or("KEY_ESCROW_RATE_LIMIT", "5").parse().unwrap_or(5),
         }
     }
 
