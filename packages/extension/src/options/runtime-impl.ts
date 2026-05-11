@@ -82,6 +82,12 @@ export { IDENTITY_KEY, IDENTITY_SECRET_KEY } from "../auth/storage-keys.js";
 const BASE58_ALPHABET =
   "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
 
+/** Pre-computed Set for O(1) character membership lookups (PR136-C-06).
+ *  Pulled out of `isLikelyBase58` so the 58-entry Set is constructed
+ *  once at module-load instead of `String.indexOf`-scanning the
+ *  alphabet on every character. */
+const BASE58_SET: Set<string> = new Set(BASE58_ALPHABET);
+
 function isLikelyBase58(s: string): boolean {
   if (typeof s !== "string" || s.length === 0) return false;
   // Solana Ed25519 pubkeys are 32 bytes → ~43-44 base58 chars. We use a
@@ -89,7 +95,7 @@ function isLikelyBase58(s: string): boolean {
   // reach the WASM validator for the authoritative check.
   if (s.length < 32 || s.length > 64) return false;
   for (let i = 0; i < s.length; i++) {
-    if (BASE58_ALPHABET.indexOf(s[i]!) < 0) return false;
+    if (!BASE58_SET.has(s[i]!)) return false;
   }
   return true;
 }
@@ -347,20 +353,46 @@ function createIdentityFacade(): IdentityFacade {
         );
       }
       // Byte-range validation — keeps a hand-edited JSON with > 255
-      // entries from poisoning chrome.storage.
+      // entries from poisoning chrome.storage. PR136-C-04: the message
+      // says "byte value" (the actual failure mode), not "secret length"
+      // — by this point the 64-element length is already confirmed.
       const normalised: number[] = [];
-      for (const n of secret) {
+      for (let i = 0; i < secret.length; i++) {
+        const n = secret[i];
         const num = typeof n === "number" ? n : Number(n);
         if (!Number.isInteger(num) || num < 0 || num > 255) {
-          throw new Error("Wrong secret length: contains non-byte value");
+          throw new Error(
+            `Invalid secret byte at index ${i}: expected an integer in [0, 255]`,
+          );
         }
         normalised.push(num);
       }
-      // Persist atomically. Carry `created_at` forward when the import
-      // envelope has an `exported_at`; we treat the export timestamp as
-      // a lower-bound on the identity's age, which keeps the Options
-      // "Created …" row useful after a round-trip.
-      const created_at = Date.now();
+      // PR136-C-02: forward `exported_at` from the import envelope as
+      // `created_at` when it parses to a sensible wall-clock time, so a
+      // round-trip (export → import) preserves the original age. The
+      // exporter writes ISO-8601 strings; we accept either ISO strings
+      // or epoch-ms numbers for backward compatibility. Guard against:
+      //   - missing / wrong-type values (fall back to Date.now()),
+      //   - unparseable strings (NaN getTime()),
+      //   - non-positive timestamps,
+      //   - absurdly-future timestamps (clock skew tolerance: 24h).
+      const now = Date.now();
+      const FUTURE_TOLERANCE_MS = 24 * 60 * 60 * 1000;
+      let created_at = now;
+      const exportedAt = obj.exported_at;
+      if (typeof exportedAt === "string" || typeof exportedAt === "number") {
+        const parsed =
+          typeof exportedAt === "number"
+            ? exportedAt
+            : new Date(exportedAt).getTime();
+        if (
+          Number.isFinite(parsed) &&
+          parsed > 0 &&
+          parsed <= now + FUTURE_TOLERANCE_MS
+        ) {
+          created_at = parsed;
+        }
+      }
       await chrome.storage.local.set({
         [IDENTITY_KEY]: { pubkey_base58: pub, created_at },
         [IDENTITY_SECRET_KEY]: normalised,
