@@ -43,6 +43,7 @@ import {
   jwtExpiresAtMs,
 } from "../auth/session.js";
 import { ensureExtensionJwt } from "../auth/extension-bootstrap.js";
+import { IDENTITY_KEY, IDENTITY_SECRET_KEY } from "../auth/storage-keys.js";
 import type { Session } from "../auth/types.js";
 import type {
   AuthFacade,
@@ -65,13 +66,12 @@ import type {
 export const PLAIN_EXPORT_WARNING =
   "Never share this file — anyone with it controls your identity. Store it in a password manager.";
 
-/** chrome.storage.local key the popup + options runtimes share for the
- *  `{pubkey_base58, created_at?}` blob. Mirrors `runtime-impl.ts`'s
- *  `loadIdentity` reader in the popup realm (T25 single source of
- *  truth). Re-exported via the IdentityFacade — components do NOT
- *  reach into chrome.storage directly. */
-export const IDENTITY_KEY = "identity";
-export const IDENTITY_SECRET_KEY = "identity_secret";
+/** chrome.storage.local keys the popup + options runtimes share for
+ *  the `{pubkey_base58, created_at?}` + 64-byte secret pair. The
+ *  canonical definitions now live in `src/auth/storage-keys.ts` —
+ *  re-export here for callers that still depend on the old import
+ *  path (PR136-C-01 / SA-T25-003). */
+export { IDENTITY_KEY, IDENTITY_SECRET_KEY } from "../auth/storage-keys.js";
 
 /** Lightweight base58 (Bitcoin alphabet) validator. The full base58
  *  decode is not needed here — we just sanity-check that every
@@ -397,11 +397,10 @@ function createCloudSyncFacade(): CloudSyncFacade {
       // bundle stays small — only the Storage section migration flow
       // pays the cost.
       try {
-        const stored = (await chrome.storage.local.get(["identity"])) as Record<
-          string,
-          unknown
-        >;
-        const identity = stored.identity as
+        const stored = (await chrome.storage.local.get([
+          IDENTITY_KEY,
+        ])) as Record<string, unknown>;
+        const identity = stored[IDENTITY_KEY] as
           | { pubkey_base58?: string }
           | undefined;
         if (!identity?.pubkey_base58) return 0;
@@ -426,11 +425,10 @@ function createCloudSyncFacade(): CloudSyncFacade {
       // the SW alarm-driven `drainPendingUploads` (`background/
       // cloud-sync.ts`) flushes them on the next tick.
       try {
-        const stored = (await chrome.storage.local.get(["identity"])) as Record<
-          string,
-          unknown
-        >;
-        const identity = stored.identity as
+        const stored = (await chrome.storage.local.get([
+          IDENTITY_KEY,
+        ])) as Record<string, unknown>;
+        const identity = stored[IDENTITY_KEY] as
           | { pubkey_base58?: string }
           | undefined;
         if (!identity?.pubkey_base58) return;
@@ -503,11 +501,11 @@ function createCloudSyncFacade(): CloudSyncFacade {
       // Cloud → Local archive: bundle every local row as JSON. The COSE
       // bytes are emitted as base64 so the archive is JSON-clean. The
       // Storage section triggers a download of the returned bytes.
-      const stored = (await chrome.storage.local.get(["identity"])) as Record<
+      const stored = (await chrome.storage.local.get([IDENTITY_KEY])) as Record<
         string,
         unknown
       >;
-      const identity = stored.identity as
+      const identity = stored[IDENTITY_KEY] as
         | { pubkey_base58?: string }
         | undefined;
       if (!identity?.pubkey_base58) {

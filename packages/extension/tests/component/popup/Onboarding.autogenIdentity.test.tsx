@@ -28,9 +28,9 @@ import { render, screen, waitFor, fireEvent } from "@testing-library/react";
 import { Onboarding } from "../../../src/popup/Onboarding.js";
 import { setRuntime, type PopupRuntime } from "../../../src/popup/runtime.js";
 import {
-  IDENTITY_STORAGE_KEY,
-  IDENTITY_SECRET_STORAGE_KEY,
-} from "../../../src/popup/onboarding/Restore.js";
+  IDENTITY_KEY,
+  IDENTITY_SECRET_KEY,
+} from "../../../src/auth/storage-keys.js";
 import { __setWasmForTesting } from "../../../src/runtime/sign/cose.js";
 import type {
   GoogleSignInResult,
@@ -176,8 +176,8 @@ describe("Onboarding — T25 auto-generate identity on fresh sign-in", () => {
     installWasmStubWithGenerate(FRESH_PUBKEY);
 
     // Sanity: storage starts empty.
-    expect(store.has(IDENTITY_STORAGE_KEY)).toBe(false);
-    expect(store.has(IDENTITY_SECRET_STORAGE_KEY)).toBe(false);
+    expect(store.has(IDENTITY_KEY)).toBe(false);
+    expect(store.has(IDENTITY_SECRET_KEY)).toBe(false);
 
     const signIn = vi
       .fn<[], Promise<GoogleSignInResult>>()
@@ -210,12 +210,12 @@ describe("Onboarding — T25 auto-generate identity on fresh sign-in", () => {
     );
 
     // chrome.storage.local now holds the canonical identity layout.
-    const identity = store.get(IDENTITY_STORAGE_KEY) as
+    const identity = store.get(IDENTITY_KEY) as
       | { pubkey_base58?: string; created_at?: number }
       | undefined;
     expect(identity?.pubkey_base58).toBe(FRESH_PUBKEY);
     expect(typeof identity?.created_at).toBe("number");
-    const secret = store.get(IDENTITY_SECRET_STORAGE_KEY);
+    const secret = store.get(IDENTITY_SECRET_KEY);
     expect(Array.isArray(secret)).toBe(true);
     expect((secret as number[]).length).toBe(64);
     // Sanity check on the byte range — keep a structured-clone bug

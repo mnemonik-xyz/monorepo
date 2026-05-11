@@ -25,6 +25,7 @@ import type {
   LookupResult,
   Session,
 } from "../auth/types.js";
+import { IDENTITY_KEY, IDENTITY_SECRET_KEY } from "../auth/storage-keys.js";
 import { Restore } from "./onboarding/Restore.js";
 import { SetPassphrase } from "./onboarding/SetPassphrase.js";
 
@@ -351,20 +352,21 @@ async function loadLocalKeypair(): Promise<{
   pubkey_base58: string;
   secret: Uint8Array;
 } | null> {
-  let stored: {
-    identity?: { pubkey_base58?: string } | null;
-    identity_secret?: number[] | null;
-  } = {};
+  let stored: Record<string, unknown> = {};
   try {
     stored = (await chrome.storage.local.get([
-      "identity",
-      "identity_secret",
-    ])) as typeof stored;
+      IDENTITY_KEY,
+      IDENTITY_SECRET_KEY,
+    ])) as Record<string, unknown>;
   } catch {
     return null;
   }
-  const pub = stored.identity?.pubkey_base58;
-  const sec = stored.identity_secret;
+  const identity = stored[IDENTITY_KEY] as
+    | { pubkey_base58?: string }
+    | null
+    | undefined;
+  const pub = identity?.pubkey_base58;
+  const sec = stored[IDENTITY_SECRET_KEY] as number[] | null | undefined;
   if (!pub || !Array.isArray(sec) || sec.length === 0) return null;
   return { pubkey_base58: pub, secret: Uint8Array.from(sec) };
 }
@@ -396,8 +398,8 @@ async function mintAndPersistKeypair(): Promise<{
   // by re-opening the popup — the new keypair is on disk and the
   // welcome-back branch will pick it up.
   await chrome.storage.local.set({
-    identity: { pubkey_base58: kp.pubkey_base58, created_at },
-    identity_secret: kp.secret,
+    [IDENTITY_KEY]: { pubkey_base58: kp.pubkey_base58, created_at },
+    [IDENTITY_SECRET_KEY]: kp.secret,
   });
   return {
     pubkey_base58: kp.pubkey_base58,

@@ -4,6 +4,7 @@
 // for the action it triggers (sign / recall / verify) and nothing more.
 
 import { IndexedDbStore } from "../runtime/store/indexeddb.js";
+import { IDENTITY_KEY, IDENTITY_SECRET_KEY } from "../auth/storage-keys.js";
 import type { AttestationRow, SearchResult } from "../runtime/store/types.js";
 import type {
   SignMemoryArgs,
@@ -198,20 +199,21 @@ async function loadIdentity(): Promise<FullIdentity | null> {
   // against a truncated `identity_secret` write — Solana keypairs are
   // 64 bytes (32-byte seed || 32-byte pubkey); anything else is bogus
   // and would produce malformed signatures if we let it through.
-  let stored: {
-    identity?: { pubkey_base58?: string } | null;
-    identity_secret?: number[] | null;
-  } = {};
+  let stored: Record<string, unknown> = {};
   try {
     stored = (await chrome.storage.local.get([
-      "identity",
-      "identity_secret",
-    ])) as typeof stored;
+      IDENTITY_KEY,
+      IDENTITY_SECRET_KEY,
+    ])) as Record<string, unknown>;
   } catch {
     return null;
   }
-  const pub = stored.identity?.pubkey_base58;
-  const sec = stored.identity_secret;
+  const identity = stored[IDENTITY_KEY] as
+    | { pubkey_base58?: string }
+    | null
+    | undefined;
+  const pub = identity?.pubkey_base58;
+  const sec = stored[IDENTITY_SECRET_KEY] as number[] | null | undefined;
   if (!pub || !Array.isArray(sec) || sec.length !== 64) return null;
   return { pubkey_base58: pub, secret: sec };
 }
