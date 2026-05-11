@@ -76,21 +76,21 @@ function createPipeline(): RuntimePipeline {
       // canonicaliser which knows the field ordering).
       const compressed = await cose.compressEmbedding(embedding, 4);
       const created_at = new Date().toISOString();
-      const artifact = {
-        v: 1,
+      // content_hash is blake3 of the UTF-8 content bytes. The WASM
+      // `sign_attestation_bundle` derives `artifact_id` from this and
+      // builds the MEMORY_V1-shaped artifact internally before
+      // canonicalising + signing in one call. Bypasses the broken
+      // `to_canonical_cbor_bytes` path (serde_json::Value can't hold
+      // Uint8Array, so embedding_compressed fails to deserialise).
+      const contentBytes = new TextEncoder().encode(content);
+      const content_hash = await cose.blake3HashHex(contentBytes);
+      const cose_bytes = await cose.signAttestationBundle(
         content,
-        tags,
-        embedding_compressed: compressed,
-        signer_pubkey: identity.pubkey_base58,
-        owner_pubkey: identity.pubkey_base58,
-        created_at,
-      };
-      const cbor = await cose.toCanonicalCbor(artifact);
-      const content_hash = await cose.blake3HashHex(cbor);
-      const cose_bytes = await cose.signCosePayload(cbor, {
-        secret: identity.secret,
-        pubkey_base58: identity.pubkey_base58,
-      });
+        compressed,
+        content_hash,
+        identity.pubkey_base58,
+        { secret: identity.secret, pubkey_base58: identity.pubkey_base58 },
+      );
       const truncated = content_hash.slice(0, 16);
       const tx = `local:${truncated}`;
       const attestation_id = `att_${truncated}`;

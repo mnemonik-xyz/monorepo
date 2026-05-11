@@ -17,18 +17,36 @@ https://<extension-id>.chromiumapp.org/<path>
 
 T16 passes `path = "google"` (see
 `packages/extension/src/auth/google-oauth.ts::REDIRECT_PATH`), so the
-full redirect URI is:
+extension's redirect URI is:
 
 ```
 https://iegoicpcogbnnnajgfdbljfickgfnfoj.chromiumapp.org/google
 ```
 
-This exact URI must be whitelisted under "Authorized redirect URIs"
-in the Google Cloud OAuth client (project `mnemonik-xyz`, OAuth
-client type "Web application"). The MCP server's
-`GOOGLE_OAUTH_REDIRECT_URI` env var must match the same string —
-Google's `oauth2.googleapis.com/token` endpoint compares the value
-on the token-exchange leg.
+The extension sends this URI on the `/oauth/google/start` request.
+The server stores it in `PendingGoogleFlow.redirect_uri` and, after
+exchanging Google's auth code for an `id_token`, redirects the
+`chrome.identity.launchWebAuthFlow` flow back to this URI with the
+server-minted JWT.
+
+**This URI is NEVER whitelisted in Google Cloud Console.** Google
+never redirects to it directly — only the server does, via the
+final `redirect_to(&to)` in `mcp/src/oauth/google.rs::google_call-
+back_handler`. Whitelisting the chromiumapp URI in Google would
+cause Google to redirect there directly, bypassing the server's
+callback handler, and the extension's `state` would be Google's
+server-side state instead of the client-side CSRF state → state
+mismatch.
+
+The URI Google MUST be whitelisted for is the server's callback
+endpoint:
+
+```
+https://mcp.mnemonik.xyz/oauth/google/callback
+```
+
+This is what `GOOGLE_OAUTH_REDIRECT_URI` env var holds; the server
+passes it to Google on the authorize URL.
 
 ## Stable ID — two installation modes
 
