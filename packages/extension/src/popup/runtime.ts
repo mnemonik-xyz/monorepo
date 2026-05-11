@@ -11,6 +11,11 @@
 
 import type { ChatTurn, ChatAdapter } from "../runtime/chat/types.js";
 import type { SearchResult, SourceMeta } from "../runtime/store/types.js";
+import type {
+  GoogleSignInResult,
+  LookupResult,
+  Session,
+} from "../auth/types.js";
 
 /** Identity loaded out of `chrome.storage.local`. `null` when the user
  *  has not completed T16 onboarding yet (popup renders a "not signed
@@ -104,6 +109,34 @@ export interface PopupRuntime {
   signRemote(args: SignMemoryArgs & SignMemoryResult): Promise<void>;
   recall(query: string, limit: number): Promise<SearchResult[]>;
   verify(args: VerifyArgs): Promise<VerifyOutcome>;
+
+  /**
+   * T16 auth surface. The popup never imports `src/auth/*` directly so
+   * the runtime stays the single seam for tests + service-worker
+   * integration. Heavy paths (`signInWithGoogle` opens
+   * `chrome.identity.launchWebAuthFlow`, `lookupExisting` POSTs to the
+   * server) sit behind dynamic imports in the default impl.
+   *
+   * Phase 1 hard-codes `DEFAULT_SERVER_ORIGIN` inside `signInWithGoogle`.
+   * Multi-environment config (e.g. options.serverUrl read from
+   * `chrome.storage.sync`) is a backlog item — when it lands, thread the
+   * URL through this seam rather than re-exporting the auth helpers.
+   */
+  auth: {
+    signIn(): Promise<GoogleSignInResult>;
+    lookupExisting(jwt: string): Promise<LookupResult>;
+  };
+
+  /**
+   * T16 session-store seam. Same dynamic-import pattern as `auth`.
+   * Production code reads/writes `chrome.storage.local.session.v1` via
+   * the helpers in `src/auth/session.ts`.
+   */
+  session: {
+    get(): Promise<Session | null>;
+    set(session: Session): Promise<void>;
+    clear(): Promise<void>;
+  };
 }
 
 let current: PopupRuntime | null = null;
@@ -195,6 +228,32 @@ export function createDefaultRuntime(): PopupRuntime {
       const { getRuntimePipeline } = await import("./runtime-impl.js");
       return getRuntimePipeline().verify(args);
     },
+    auth: {
+      async signIn() {
+        // Lazy: keeps `chrome.identity.launchWebAuthFlow` and the PKCE
+        // helpers out of the popup's first-paint bundle.
+        const { signInWithGoogle } = await import("../auth/google-oauth.js");
+        return signInWithGoogle();
+      },
+      async lookupExisting(jwt: string) {
+        const { lookupExisting } = await import("../auth/lookup.js");
+        return lookupExisting(jwt);
+      },
+    },
+    session: {
+      async get() {
+        const { getSession } = await import("../auth/session.js");
+        return getSession();
+      },
+      async set(session) {
+        const { setSession } = await import("../auth/session.js");
+        return setSession(session);
+      },
+      async clear() {
+        const { clearSession } = await import("../auth/session.js");
+        return clearSession();
+      },
+    },
   };
 }
 
@@ -218,11 +277,11 @@ async function activeTabId(): Promise<number | null> {
 
 async function readChromeStorage<T>(
   area: "local" | "sync",
-  keys: string[]
+  keys: string[],
 ): Promise<Partial<T>> {
   try {
     const result = (await chrome.storage[area].get(
-      keys as unknown as string
+      keys as unknown as string,
     )) as unknown as Partial<T>;
     return result;
   } catch {

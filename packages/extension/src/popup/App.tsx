@@ -2,6 +2,11 @@
 //   - header (IdentityBadge + StorageTierPill + Settings cog)
 //   - tab switcher (Capture / Recall / Verify)
 //   - one-time bootstrap of identity + active-tab adapter + selection
+//   - T16 first-run onboarding gate: when no persisted Google session
+//     exists, the popup mounts <Onboarding> which drives the Google
+//     sign-in PKCE flow + `lookupExisting` and branches per the user-
+//     spec scenarios. The passphrase / key-escrow effects are stubbed
+//     in `Onboarding.tsx` pending T17.
 //
 // Identity + storage tier read from `chrome.storage.local`. Heavy
 // dependencies (WASM, embedder worker, IndexedDB cosine search) sit
@@ -18,6 +23,7 @@ import {
 } from "react";
 import type { ChatAdapter } from "../runtime/chat/types.js";
 import { getRuntime, type PopupIdentity, type StorageTier } from "./runtime.js";
+import { Onboarding } from "./Onboarding.js";
 import { Capture } from "./tabs/Capture.js";
 import { Recall } from "./tabs/Recall.js";
 import { Verify } from "./tabs/Verify.js";
@@ -34,6 +40,19 @@ const TAB_LABELS: Record<Tab, string> = {
 
 const TAB_ORDER: Tab[] = ["capture", "recall", "verify"];
 
+/**
+ * High-level popup mode:
+ *   - `loading`  — first-paint bootstrap is in flight.
+ *   - `onboarding` — no persisted session; mount the T16 sign-in flow.
+ *   - `app`      — session present (or skipped via local-tier); show tabs.
+ *
+ * Session is read from `chrome.storage.local.session.v1` via the runtime
+ * facade. T16 only writes the session blob after a successful Google
+ * sign-in — local-mode never populates it, so local-only users never
+ * see the onboarding flow (they continue using the popup as before).
+ */
+type PopupMode = "loading" | "onboarding" | "app";
+
 export function App(): JSX.Element {
   const [tab, setTab] = useState<Tab>("capture");
   const [identity, setIdentity] = useState<PopupIdentity | null>(null);
@@ -41,28 +60,64 @@ export function App(): JSX.Element {
   const [adapter, setAdapter] = useState<ChatAdapter | null>(null);
   const [selection, setSelection] = useState("");
   const [tierDialogOpen, setTierDialogOpen] = useState(false);
+  const [mode, setMode] = useState<PopupMode>("loading");
   const tabRefs = useRef<Partial<Record<Tab, HTMLButtonElement | null>>>({});
 
-  useEffect(() => {
+  const bootstrap = useCallback(async (): Promise<void> => {
     const r = getRuntime();
+    const [id, t, ad, sel, sess] = await Promise.all([
+      r.loadIdentity(),
+      r.loadStorageTier(),
+      r.getActiveTabAdapter(),
+      r.getActiveTabSelection(),
+      r.session.get(),
+    ]);
+    setIdentity(id);
+    setTier(t);
+    setAdapter(ad);
+    setSelection(sel);
+    // Two paths into onboarding:
+    //   1. First run on the Cloud tier (no session has ever been minted).
+    //   2. Cloud tier with an expired or cleared session — the user must
+    //      re-auth before continuing. `getSession` already returns null
+    //      for an expired JWT (Phase 1 has no refresh-token flow), so
+    //      both cases fall through the same `sess === null` branch.
+    //   On the Local tier onboarding stays optional, popup is fully usable
+    //   without a session. We never force the flow.
+    if (t === "cloud" && sess === null) {
+      setMode("onboarding");
+    } else {
+      setMode("app");
+    }
+  }, []);
+
+  useEffect(() => {
     let cancelled = false;
     void (async () => {
-      const [id, t, ad, sel] = await Promise.all([
-        r.loadIdentity(),
-        r.loadStorageTier(),
-        r.getActiveTabAdapter(),
-        r.getActiveTabSelection(),
-      ]);
-      if (cancelled) return;
-      setIdentity(id);
-      setTier(t);
-      setAdapter(ad);
-      setSelection(sel);
+      await bootstrap();
+      if (cancelled) {
+        // Render guard — `bootstrap` already mutated state by here,
+        // but the effect cleanup runs synchronously so the StrictMode
+        // double-render won't see a stale `setMode`. Keeping the guard
+        // for parity with the previous useEffect shape.
+      }
     })();
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [bootstrap]);
+
+  /**
+   * Once onboarding finishes (Onboarding's `onComplete` callback fires),
+   * re-bootstrap so the App sees the freshly-persisted session and any
+   * keypair the escrow flow restored. T17's onComplete arrives after
+   * the passphrase step completes (or the user opts into the
+   * "Continue in local mode" edge case).
+   */
+  const handleOnboardingComplete = useCallback((): void => {
+    setMode("loading");
+    void bootstrap();
+  }, [bootstrap]);
 
   const openOptions = (): void => {
     try {
@@ -77,7 +132,7 @@ export function App(): JSX.Element {
   // focus to the newly-selected tab. Home/End jump to first/last.
   const handleTabKeyDown = (
     e: KeyboardEvent<HTMLButtonElement>,
-    current: Tab
+    current: Tab,
   ): void => {
     const idx = TAB_ORDER.indexOf(current);
     let next: Tab | null = null;
@@ -96,6 +151,14 @@ export function App(): JSX.Element {
       tabRefs.current[next]?.focus();
     }
   };
+
+  // T16 onboarding takes the whole popup when present — the tab UI
+  // would distract from the sign-in / passphrase flow. Returning early
+  // keeps the conditional rendering simple and means the Onboarding
+  // component owns its own <main> + aria-labels.
+  if (mode === "onboarding") {
+    return <Onboarding onComplete={handleOnboardingComplete} />;
+  }
 
   return (
     <main className="bg-background text-text-primary p-3 flex flex-col gap-3 min-h-full">
@@ -211,7 +274,7 @@ function TierDialog({ onClose }: { onClose: () => void }): JSX.Element {
         onClose();
       }
     },
-    [onClose]
+    [onClose],
   );
 
   useEffect(() => {

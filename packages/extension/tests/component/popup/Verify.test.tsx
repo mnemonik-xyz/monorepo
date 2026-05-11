@@ -14,7 +14,7 @@ import {
 } from "../../../src/popup/runtime.js";
 
 function makeRuntime(
-  verifyFn: (args: VerifyArgs) => Promise<VerifyOutcome>
+  verifyFn: (args: VerifyArgs) => Promise<VerifyOutcome>,
 ): PopupRuntime {
   return {
     loadIdentity: async () => null,
@@ -33,6 +33,19 @@ function makeRuntime(
     signRemote: async () => undefined,
     recall: async () => [],
     verify: verifyFn,
+    auth: {
+      signIn: async () => {
+        throw new Error("auth.signIn stub: not configured in test");
+      },
+      lookupExisting: async () => {
+        throw new Error("auth.lookupExisting stub: not configured in test");
+      },
+    },
+    session: {
+      get: async () => null,
+      set: async () => undefined,
+      clear: async () => undefined,
+    },
   };
 }
 
