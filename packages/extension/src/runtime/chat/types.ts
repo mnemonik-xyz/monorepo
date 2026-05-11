@@ -56,6 +56,15 @@ export interface ChatAdapter {
   extractConversation(doc: Document): ChatTurn[];
   /** Locate the prompt input element — used by the recall-overlay paste UI. */
   findInputBox(doc: Document): HTMLElement | null;
+  /**
+   * Declared capability: does this adapter implement insert-into-chat?
+   * The popup uses this flag (not a `findInputBox.toString()` heuristic
+   * — minifiers collapse function bodies and break source inspection)
+   * to gate the "Insert into chat" button. Adapters that ship a real
+   * `findInputBox` set it to `true`; adapters that return `null`
+   * unconditionally (Phase 1 Claude / Gemini) set it to `false`.
+   */
+  readonly supportsInsert: boolean;
   /** Per-platform stable chat id. Returns `null` for unscoped pages. */
   getChatId(doc: Document, location: Location): string | null;
   /**
@@ -63,8 +72,5 @@ export interface ChatAdapter {
    * "assistant turn finished streaming" events and call `cb` once per
    * settled turn; the returned function detaches the subscription.
    */
-  onNewAssistantTurn?(
-    doc: Document,
-    cb: (turn: ChatTurn) => void,
-  ): () => void;
+  onNewAssistantTurn?(doc: Document, cb: (turn: ChatTurn) => void): () => void;
 }

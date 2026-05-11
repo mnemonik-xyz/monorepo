@@ -6,9 +6,7 @@
 // the selectors on capture day — the live ChatGPT DOM is not stable.
 
 import { registerAdapter } from "../registry.js";
-import {
-  domNodeToMarkdown,
-} from "../serializer.js";
+import { domNodeToMarkdown } from "../serializer.js";
 import type { ChatAdapter, ChatTurn } from "../types.js";
 
 /** Path segment after `/c/` is the stable chat id (typically a UUID). */
@@ -31,10 +29,11 @@ function inferRole(value: string | null): ChatTurn["role"] | null {
 export const chatgptAdapter: ChatAdapter = {
   hostPattern: /^chatgpt\.com\//,
   platform: "chatgpt",
+  supportsInsert: true,
 
   extractConversation(doc: Document): ChatTurn[] {
     const nodes = doc.querySelectorAll<HTMLElement>(
-      "[data-message-author-role]",
+      "[data-message-author-role]"
     );
     const turns: ChatTurn[] = [];
     for (const node of Array.from(nodes)) {
@@ -50,12 +49,12 @@ export const chatgptAdapter: ChatAdapter = {
   findInputBox(doc: Document): HTMLElement | null {
     // Primary selector — current 2026 ChatGPT prompt textarea.
     const textarea = doc.querySelector<HTMLTextAreaElement>(
-      'textarea[data-id="root"]',
+      'textarea[data-id="root"]'
     );
     if (textarea) return textarea;
     // Fallback: contenteditable composer used during A/B rollouts.
     return doc.querySelector<HTMLElement>(
-      '[contenteditable="true"][data-id="root"]',
+      '[contenteditable="true"][data-id="root"]'
     );
   },
 
@@ -64,10 +63,7 @@ export const chatgptAdapter: ChatAdapter = {
     return match?.[1] ?? null;
   },
 
-  onNewAssistantTurn(
-    doc: Document,
-    cb: (turn: ChatTurn) => void,
-  ): () => void {
+  onNewAssistantTurn(doc: Document, cb: (turn: ChatTurn) => void): () => void {
     // Track which assistant turns we've already announced + which were
     // observed mid-stream. An emit fires when a `[data-stream]` turn
     // loses that attribute (streaming finished) OR a fresh assistant
@@ -101,8 +97,8 @@ export const chatgptAdapter: ChatAdapter = {
     // Seed with any assistant turns already in the DOM at subscription time.
     for (const turn of Array.from(
       doc.querySelectorAll<HTMLElement>(
-        '[data-message-author-role="assistant"]',
-      ),
+        '[data-message-author-role="assistant"]'
+      )
     )) {
       visit(turn);
     }
@@ -110,11 +106,12 @@ export const chatgptAdapter: ChatAdapter = {
     // Pull `MutationObserver` from the document's own window so the
     // adapter works under both real browser globals and a JSDOM-backed
     // unit test environment (where Node's globalThis lacks the API).
-    const view = doc.defaultView ??
+    const view =
+      doc.defaultView ??
       (typeof globalThis !== "undefined" ? globalThis : undefined);
     const Observer =
-      view && (view as { MutationObserver?: typeof MutationObserver })
-        .MutationObserver;
+      view &&
+      (view as { MutationObserver?: typeof MutationObserver }).MutationObserver;
     if (!Observer) return () => {};
 
     const observer = new Observer((records) => {
@@ -127,9 +124,8 @@ export const chatgptAdapter: ChatAdapter = {
               visit(el);
             }
             for (const inner of Array.from(
-              el.querySelectorAll?.(
-                '[data-message-author-role="assistant"]',
-              ) ?? [],
+              el.querySelectorAll?.('[data-message-author-role="assistant"]') ??
+                []
             )) {
               visit(inner);
             }

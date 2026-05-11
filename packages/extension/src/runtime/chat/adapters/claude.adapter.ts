@@ -60,6 +60,9 @@ function extractContent(el: Element): string {
 export const claudeAdapter: ChatAdapter = {
   hostPattern: /^claude\.ai\//,
   platform: "claude",
+  // Phase 1 is read-only — `findInputBox` returns null unconditionally.
+  // Recall-overlay paste UI lands later; flip when it does.
+  supportsInsert: false,
 
   extractConversation(doc: Document): ChatTurn[] {
     const nodes = Array.from(doc.querySelectorAll(MESSAGE_SELECTOR));
@@ -85,10 +88,7 @@ export const claudeAdapter: ChatAdapter = {
     return match?.[1] ?? null;
   },
 
-  onNewAssistantTurn(
-    doc: Document,
-    cb: (turn: ChatTurn) => void,
-  ): () => void {
+  onNewAssistantTurn(doc: Document, cb: (turn: ChatTurn) => void): () => void {
     const fired = new WeakSet<Element>();
 
     const fireIfReady = (msg: Element): void => {
