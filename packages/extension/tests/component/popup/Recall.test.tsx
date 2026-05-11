@@ -6,8 +6,12 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
-import { Recall } from "../../../src/popup/tabs/Recall.js";
-import { setRuntime, type PopupRuntime } from "../../../src/popup/runtime.js";
+import { Recall, mergeRecallHits } from "../../../src/popup/tabs/Recall.js";
+import {
+  setRuntime,
+  type CloudRecallHit,
+  type PopupRuntime,
+} from "../../../src/popup/runtime.js";
 import type { ChatAdapter } from "../../../src/runtime/chat/types.js";
 import type { SearchResult } from "../../../src/runtime/store/types.js";
 
@@ -314,5 +318,186 @@ describe("Recall tab", () => {
     await waitFor(() => expect(recall).toHaveBeenCalled());
     // Cloud recall must NOT have been called.
     expect(recallRemote).not.toHaveBeenCalled();
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────────
+// mergeRecallHits — pure-function unit tests (code-reviewer C-5)
+// ────────────────────────────────────────────────────────────────────────
+
+function localHit(over: Partial<SearchResult>): SearchResult {
+  return {
+    attestation_id: over.attestation_id ?? "att",
+    content: over.content ?? "local content",
+    content_hash: over.content_hash ?? "0".repeat(64),
+    tags: over.tags ?? [],
+    solana_tx: over.solana_tx ?? "local:x",
+    arweave_tx: over.arweave_tx ?? "local:x",
+    created_at: over.created_at ?? "2026-05-10T00:00:00Z",
+    relevance_score: over.relevance_score ?? 0.5,
+  };
+}
+
+function cloudHit(over: Partial<CloudRecallHit>): CloudRecallHit {
+  return {
+    attestation_id: over.attestation_id ?? "att",
+    content: over.content ?? "cloud content",
+    similarity: over.similarity ?? 0.5,
+    ...(over.tags !== undefined ? { tags: over.tags } : {}),
+    ...(over.signed_at !== undefined ? { signed_at: over.signed_at } : {}),
+    ...(over.solana_tx !== undefined ? { solana_tx: over.solana_tx } : {}),
+    ...(over.arweave_tx !== undefined ? { arweave_tx: over.arweave_tx } : {}),
+  };
+}
+
+describe("mergeRecallHits (pure)", () => {
+  it("returns local slice unchanged when cloud is null", () => {
+    const local = [
+      localHit({ attestation_id: "a", relevance_score: 0.9 }),
+      localHit({ attestation_id: "b", relevance_score: 0.7 }),
+    ];
+    expect(mergeRecallHits(local, null, 5)).toEqual(local);
+  });
+
+  it("returns local slice unchanged when cloud is empty", () => {
+    const local = [localHit({ attestation_id: "a", relevance_score: 0.9 })];
+    expect(mergeRecallHits(local, [], 5)).toEqual(local);
+  });
+
+  it("truncates the result list to limit", () => {
+    const local = [
+      localHit({ attestation_id: "a", relevance_score: 0.9 }),
+      localHit({ attestation_id: "b", relevance_score: 0.8 }),
+      localHit({ attestation_id: "c", relevance_score: 0.7 }),
+    ];
+    const out = mergeRecallHits(local, null, 2);
+    expect(out).toHaveLength(2);
+    expect(out.map((r) => r.attestation_id)).toEqual(["a", "b"]);
+  });
+
+  it("dedupes same-id rows, keeping the higher score when cloud wins", () => {
+    const local = [localHit({ attestation_id: "a", relevance_score: 0.5 })];
+    const cloud = [cloudHit({ attestation_id: "a", similarity: 0.9 })];
+    const out = mergeRecallHits(local, cloud, 5);
+    expect(out).toHaveLength(1);
+    expect(out[0]?.relevance_score).toBe(0.9);
+  });
+
+  it("dedupes same-id rows, keeping the higher score when local wins", () => {
+    const local = [localHit({ attestation_id: "a", relevance_score: 0.9 })];
+    const cloud = [cloudHit({ attestation_id: "a", similarity: 0.4 })];
+    const out = mergeRecallHits(local, cloud, 5);
+    expect(out).toHaveLength(1);
+    expect(out[0]?.relevance_score).toBe(0.9);
+  });
+
+  it("folds cloud tx ids over synthetic local: ids for same-id rows", () => {
+    const local = [
+      localHit({
+        attestation_id: "a",
+        relevance_score: 0.5,
+        solana_tx: "local:a",
+        arweave_tx: "local:a",
+      }),
+    ];
+    const cloud = [
+      cloudHit({
+        attestation_id: "a",
+        similarity: 0.6,
+        solana_tx: "RealSol",
+        arweave_tx: "RealAr",
+      }),
+    ];
+    const out = mergeRecallHits(local, cloud, 5);
+    expect(out[0]?.solana_tx).toBe("RealSol");
+    expect(out[0]?.arweave_tx).toBe("RealAr");
+  });
+
+  it("keeps real local tx ids when cloud has different real ones (Phase 1 — see decisions.md backlog)", () => {
+    // Local row has been drained at least once already (real tx ids).
+    // A future cloud-side rotation would return different ids; the
+    // current merge rule keeps the local value. This documents the
+    // Phase 1 behaviour; T18-C-05 / decisions.md tracks Phase 2.
+    const local = [
+      localHit({
+        attestation_id: "a",
+        relevance_score: 0.5,
+        solana_tx: "OldRealSol",
+        arweave_tx: "OldRealAr",
+      }),
+    ];
+    const cloud = [
+      cloudHit({
+        attestation_id: "a",
+        similarity: 0.6,
+        solana_tx: "NewRealSol",
+        arweave_tx: "NewRealAr",
+      }),
+    ];
+    const out = mergeRecallHits(local, cloud, 5);
+    expect(out[0]?.solana_tx).toBe("OldRealSol");
+    expect(out[0]?.arweave_tx).toBe("OldRealAr");
+  });
+
+  it("does not fold cloud tx ids when cloud omits them", () => {
+    // Local row has synthetic ids; cloud hit has no tx fields. Merge
+    // must keep the local placeholders rather than write an empty
+    // string (which would break the popup's `local:` heuristic).
+    const local = [
+      localHit({
+        attestation_id: "a",
+        relevance_score: 0.5,
+        solana_tx: "local:a",
+        arweave_tx: "local:a",
+      }),
+    ];
+    const cloud = [cloudHit({ attestation_id: "a", similarity: 0.6 })];
+    const out = mergeRecallHits(local, cloud, 5);
+    expect(out[0]?.solana_tx).toBe("local:a");
+    expect(out[0]?.arweave_tx).toBe("local:a");
+  });
+
+  it("includes cloud-only entries projected into SearchResult shape", () => {
+    const cloud = [
+      cloudHit({
+        attestation_id: "cloud-only",
+        content: "only on server",
+        similarity: 0.7,
+        tags: ["t1"],
+        signed_at: "2026-05-11T00:00:00Z",
+        solana_tx: "Sol",
+        arweave_tx: "Ar",
+      }),
+    ];
+    const out = mergeRecallHits([], cloud, 5);
+    expect(out).toHaveLength(1);
+    expect(out[0]).toEqual({
+      attestation_id: "cloud-only",
+      content: "only on server",
+      content_hash: "",
+      tags: ["t1"],
+      solana_tx: "Sol",
+      arweave_tx: "Ar",
+      created_at: "2026-05-11T00:00:00Z",
+      relevance_score: 0.7,
+    });
+  });
+
+  it("re-sorts merged rows by score descending", () => {
+    const local = [
+      localHit({ attestation_id: "low", relevance_score: 0.2 }),
+      localHit({ attestation_id: "high", relevance_score: 0.9 }),
+    ];
+    const cloud = [cloudHit({ attestation_id: "mid", similarity: 0.5 })];
+    const out = mergeRecallHits(local, cloud, 5);
+    expect(out.map((r) => r.attestation_id)).toEqual(["high", "mid", "low"]);
+  });
+
+  it("drops cloud hits with empty attestation_id (defensive against malformed server response)", () => {
+    const local = [localHit({ attestation_id: "a", relevance_score: 0.9 })];
+    const cloud = [cloudHit({ attestation_id: "", similarity: 0.5 })];
+    const out = mergeRecallHits(local, cloud, 5);
+    expect(out).toHaveLength(1);
+    expect(out[0]?.attestation_id).toBe("a");
   });
 });

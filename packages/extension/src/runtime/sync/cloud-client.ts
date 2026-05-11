@@ -141,8 +141,14 @@ export class CloudClient {
       correlation_id?: unknown;
       expires_in?: unknown;
     }>("mnemonic_sign_memory", openBody);
+    // Reject empty strings explicitly — a malformed server response
+    // that returns `correlation_id: ""` would otherwise sail past the
+    // `typeof === 'string'` guard and burn a sign-callback round-trip
+    // only to come back as a confusing 410. Code-review round-1 T18-C-02.
     const correlationId =
-      typeof open.correlation_id === "string" ? open.correlation_id : null;
+      typeof open.correlation_id === "string" && open.correlation_id.length > 0
+        ? open.correlation_id
+        : null;
     if (!correlationId) {
       throw new PermanentSyncError(
         "mnemonic_sign_memory did not return correlation_id",
@@ -328,7 +334,14 @@ export class CloudClient {
       if (code !== null && code >= 500) {
         throw new TransientSyncError(msg, code);
       }
-      throw new PermanentSyncError(msg, code ?? 400);
+      if (code !== null) {
+        throw new PermanentSyncError(msg, code);
+      }
+      // No JSON-RPC error code at all — the wire is malformed. Treat
+      // as TransientSyncError so the alarm retries rather than
+      // stamping `sync_failed_permanent` on a row that may succeed
+      // on the next tick. Closes code-review round-1 nit T18-C-07.
+      throw new TransientSyncError(`${msg} (no rpc error code)`, res.status);
     }
     return extractToolResult<T>(parsed.result);
   }

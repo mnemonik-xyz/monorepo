@@ -119,6 +119,59 @@ export function App(): JSX.Element {
     void bootstrap();
   }, [bootstrap]);
 
+  /**
+   * T18 re-auth gate. The cloud-sync drain dispatches
+   * `mnemonik:re-auth-required` on `globalThis` and emits a
+   * `ui:sync-event` over `chrome.runtime.sendMessage` when it sees a
+   * 401 on `/mcp` or `/api/sign-callback`. Both surfaces converge
+   * here: clear the cached session and force-mount onboarding so the
+   * user is routed back through the T16 sign-in flow. Without this
+   * the drain silently halts and the user cannot recover from the
+   * popup. Closes code-review round-1 finding T18-C-MAJOR-01.
+   */
+  useEffect(() => {
+    const forceReauth = (): void => {
+      void getRuntime()
+        .session.clear()
+        .catch(() => {
+          // Best-effort — even if the clear fails, flipping to
+          // onboarding will re-read the session and (since the JWT
+          // is likely expired anyway) `getSession` will return null.
+        })
+        .finally(() => {
+          setMode("onboarding");
+        });
+    };
+    const onCustom = (): void => forceReauth();
+    const onRuntimeMessage = (raw: unknown): void => {
+      if (typeof raw !== "object" || raw === null) return;
+      const msg = raw as { type?: unknown; payload?: unknown };
+      if (msg.type !== "ui:sync-event") return;
+      const payload = msg.payload;
+      if (typeof payload !== "object" || payload === null) return;
+      if ((payload as { type?: unknown }).type === "re-auth-required") {
+        forceReauth();
+      }
+    };
+    const g = globalThis as {
+      addEventListener?: (n: string, h: EventListener) => void;
+      removeEventListener?: (n: string, h: EventListener) => void;
+    };
+    g.addEventListener?.(
+      "mnemonik:re-auth-required",
+      onCustom as EventListener,
+    );
+    const cr = (globalThis as { chrome?: typeof chrome }).chrome;
+    cr?.runtime?.onMessage?.addListener(onRuntimeMessage);
+    return () => {
+      g.removeEventListener?.(
+        "mnemonik:re-auth-required",
+        onCustom as EventListener,
+      );
+      cr?.runtime?.onMessage?.removeListener?.(onRuntimeMessage);
+    };
+  }, []);
+
   const openOptions = (): void => {
     try {
       chrome.runtime.openOptionsPage();

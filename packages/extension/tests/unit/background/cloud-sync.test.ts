@@ -21,6 +21,8 @@ import { describe, it, expect, vi } from "vitest";
 
 import {
   drainPendingUploads,
+  flushPending,
+  REAUTH_EVENT_NAME,
   type CloudSignClient,
   type SyncEvent,
 } from "../../../src/background/cloud-sync.js";
@@ -277,5 +279,130 @@ describe("drainPendingUploads · missing row", () => {
     });
     expect(await store.listPending()).toEqual([]);
     expect(client.calls).toHaveLength(0);
+  });
+});
+
+// Regression for test-reviewer F3: source_meta MUST round-trip
+// through the drain into signRemote args. The drain spreads
+// row.source_meta conditionally; a regression that drops the spread
+// would silently keep the cloud row's source attribution empty.
+describe("drainPendingUploads · forwards source_meta", () => {
+  it("passes through source_meta when the local row carries one", async () => {
+    const store = new IndexedDbStore({ dbName: freshDbName("source-meta") });
+    const rowWithMeta: AttestationRow = makeRow("att-meta", {
+      source_meta: {
+        platform: "chatgpt",
+        model: "gpt-4o",
+        chat_id: "ch-abc",
+        url: "https://chatgpt.com/c/ch-abc",
+      },
+    });
+    await store.saveAttestation(rowWithMeta);
+    await store.enqueue(rowWithMeta.attestation_id);
+
+    // Capture the full args object on the client side so we can
+    // assert source_meta arrived intact.
+    const captured: Array<Record<string, unknown>> = [];
+    const client: CloudSignClient = {
+      async signRemote(args) {
+        // Spread the whole `args` so we don't drop optional fields:
+        // the assertion below reads `source_meta` off the record.
+        captured.push({ ...(args as unknown as Record<string, unknown>) });
+        return {
+          attestation_id: "srv-1",
+          solana_tx: "Sol-meta",
+          arweave_tx: "Ar-meta",
+        };
+      },
+    };
+
+    const result = await drainPendingUploads({ store, cloudClient: client });
+    expect(result.flushed).toBe(1);
+    expect(captured).toHaveLength(1);
+    expect(captured[0]?.["source_meta"]).toEqual({
+      platform: "chatgpt",
+      model: "gpt-4o",
+      chat_id: "ch-abc",
+      url: "https://chatgpt.com/c/ch-abc",
+    });
+  });
+
+  it("omits source_meta when the row has none (does not ship undefined)", async () => {
+    const store = new IndexedDbStore({ dbName: freshDbName("no-meta") });
+    // Default makeRow has no source_meta.
+    await seedQueue(store, ["att-x"]);
+    const captured: Array<Record<string, unknown>> = [];
+    const client: CloudSignClient = {
+      async signRemote(args) {
+        captured.push({ ...args });
+        return { attestation_id: "srv", solana_tx: "S", arweave_tx: "A" };
+      },
+    };
+    await drainPendingUploads({ store, cloudClient: client });
+    expect(captured).toHaveLength(1);
+    // Must not include the key at all (D9 hygiene: no implicit
+    // `undefined` fields traveling over JSON).
+    expect(
+      Object.prototype.hasOwnProperty.call(captured[0], "source_meta"),
+    ).toBe(false);
+  });
+});
+
+// Regression for test-reviewer F1: `flushPending` (the SW-facing
+// wrapper) dispatches a `mnemonik:re-auth-required` CustomEvent on
+// `globalThis` when the drain observes a 401. Previously only the
+// `emit` callback was covered; the CustomEvent dispatch path had
+// zero direct coverage.
+describe("flushPending · re-auth CustomEvent dispatch", () => {
+  it("fires mnemonik:re-auth-required on globalThis when the drain sees 401", async () => {
+    const store = new IndexedDbStore({ dbName: freshDbName("flush-reauth") });
+    await seedQueue(store, ["att-1"]);
+
+    const client: CloudSignClient = {
+      async signRemote() {
+        throw new ReauthRequiredError("expired");
+      },
+    };
+
+    // Capture the CustomEvent — jsdom provides `addEventListener` on
+    // globalThis, so we can subscribe in-process.
+    const events: string[] = [];
+    const listener = (e: Event): void => {
+      events.push(e.type);
+    };
+    const g = globalThis as {
+      addEventListener: (n: string, h: EventListener) => void;
+      removeEventListener: (n: string, h: EventListener) => void;
+    };
+    g.addEventListener(REAUTH_EVENT_NAME, listener as EventListener);
+    try {
+      const result = await flushPending({ store, cloudClient: client });
+      expect(result.attempted).toBe(1);
+      expect(result.flushed).toBe(0);
+    } finally {
+      g.removeEventListener(REAUTH_EVENT_NAME, listener as EventListener);
+    }
+    expect(events).toEqual([REAUTH_EVENT_NAME]);
+  });
+
+  it("also forwards re-auth via the deps.emit callback (both signals fire)", async () => {
+    const store = new IndexedDbStore({ dbName: freshDbName("flush-both") });
+    await seedQueue(store, ["att-1"]);
+
+    const client: CloudSignClient = {
+      async signRemote() {
+        throw new ReauthRequiredError("expired");
+      },
+    };
+    const emitted: SyncEvent[] = [];
+    const result = await flushPending({
+      store,
+      cloudClient: client,
+      emit: (e) => emitted.push(e),
+    });
+    expect(result.attempted).toBe(1);
+    expect(emitted).toEqual([
+      { type: "re-auth-required", attestation_id: "att-1" },
+    ]);
   });
 });

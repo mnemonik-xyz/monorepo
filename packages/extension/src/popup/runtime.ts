@@ -280,23 +280,81 @@ export function createDefaultRuntime(): PopupRuntime {
       return getRuntimePipeline().signMemory(args);
     },
     async signRemote(args) {
-      // T18: Cloud-tier push. We re-use the cloudSync facade so the
-      // dynamic-import / session lookup lives in one place. On Local
-      // tier the popup never calls this; on Cloud tier this enqueues
-      // a `pending_uploads` row if no session is bound and is a no-op
-      // otherwise (the alarm drain handles the actual upload).
-      // Currently we just enqueue — the COSE bytes were signed in
-      // `signMemory`, so the alarm-drain has everything it needs.
-      // Explicit network attempt happens on the next alarm tick or on
-      // the user's manual flush gesture from the popup.
+      // T18: Cloud-tier push. Task spec: attempt the live POST /mcp +
+      // POST /api/sign-callback immediately, falling back to the
+      // pending_uploads queue only on transient failure (network /
+      // 5xx) or absent session. The alarm drain handles the queue.
+      // Closes code-review round-1 finding T18-C-MAJOR-02.
       try {
         const { IndexedDbStore } =
           await import("../runtime/store/indexeddb.js");
         const store = new IndexedDbStore();
+        // Always enqueue first so a crash between the live attempt
+        // and its dequeue (browser tab close, popup dismiss) doesn't
+        // strand the row outside the queue. The CloudClient's
+        // happy path will `dequeue` immediately after the server
+        // returns a 200; on failure the row stays for the alarm.
         await store.enqueue(args.attestation_id);
       } catch {
-        // Best-effort — if IDB is unavailable the alarm drain will
-        // simply have nothing to do.
+        // Best-effort enqueue. If IDB itself is unavailable, the
+        // live push below will still try; failing both is fine.
+      }
+      try {
+        const result = await this.cloudSync.signRemote(args);
+        // null = no session bound — leave the row enqueued, the
+        // user's next sign-in will pick it up on the alarm tick.
+        // Non-null = success; cloudSync.signRemote already wrote
+        // the tx ids back and dequeued. Nothing more to do.
+        void result;
+      } catch (err) {
+        const cc = await import("../runtime/sync/cloud-client.js");
+        if (err instanceof cc.ReauthRequiredError) {
+          // Surface re-auth as a global event so the popup's App.tsx
+          // can flip into onboarding mode. Leave the row queued so
+          // the next alarm tick (after re-auth) retries it.
+          const g = globalThis as {
+            dispatchEvent?: (e: Event) => boolean;
+            CustomEvent?: typeof CustomEvent;
+          };
+          if (
+            typeof g.dispatchEvent === "function" &&
+            typeof g.CustomEvent === "function"
+          ) {
+            try {
+              g.dispatchEvent(new g.CustomEvent("mnemonik:re-auth-required"));
+            } catch {
+              // Read-only globals — non-fatal.
+            }
+          }
+          return;
+        }
+        if (err instanceof cc.PermanentSyncError) {
+          // Mark permanently failed locally so the popup can render
+          // the "sync failed" hint. Dequeue so the alarm doesn't
+          // churn. Mirror what `drainPendingUploads` does on the
+          // background side.
+          try {
+            const { IndexedDbStore } =
+              await import("../runtime/store/indexeddb.js");
+            const store = new IndexedDbStore();
+            const row = await store.findById(args.attestation_id);
+            if (row) {
+              await store.saveAttestation({
+                ...row,
+                sync_failed_permanent: true,
+              });
+            }
+            await store.dequeue(args.attestation_id);
+          } catch {
+            // Best-effort cleanup.
+          }
+          // Re-throw so the caller (Capture.tsx) can surface a toast.
+          throw err;
+        }
+        // TransientSyncError or unknown: leave the row queued. The
+        // alarm drain will retry on the next tick. We don't re-throw
+        // so the Capture happy-path UX isn't blocked by a transient
+        // upstream hiccup — the user sees the local sign succeed.
       }
     },
     async recall(query, limit) {

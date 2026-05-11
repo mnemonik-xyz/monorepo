@@ -23,13 +23,23 @@
 //   - `recallRemote` returns parsed hits.
 //   - `verifyRemote` discriminated union.
 
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
   CloudClient,
   PermanentSyncError,
   ReauthRequiredError,
   TransientSyncError,
 } from "../../../../src/runtime/sync/cloud-client.js";
+
+// Defensive: reset spy state between tests so a future contributor
+// adding `vi.spyOn(globalThis, 'fetch')` at top-scope can't leak into
+// adjacent tests. Test-reviewer round-1 finding T18-T-01.
+beforeEach(() => {
+  vi.restoreAllMocks();
+});
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 const BASE = "https://mc.example.test";
 const JWT = "header.payload.sig";
@@ -209,6 +219,54 @@ describe("CloudClient · offline_enqueues_for_later (D13 anchor)", () => {
   });
 });
 
+describe("CloudClient · server-contract violations", () => {
+  // Regression for T18-C-02: a server response with an empty-string
+  // `correlation_id` is treated as a permanent failure rather than
+  // silently shipped to /api/sign-callback (which would come back
+  // as 410 and obscure the actual server bug).
+  it("throws PermanentSyncError when /mcp returns correlation_id: ''", async () => {
+    const fetchImpl = queuedFetch([
+      jsonResponse(200, {
+        jsonrpc: "2.0",
+        id: 1,
+        result: { correlation_id: "", expires_in: 300 },
+      }),
+    ]);
+    const client = new CloudClient({
+      jwt: JWT,
+      baseUrl: BASE,
+      fetch: fetchImpl,
+    });
+    await expect(
+      client.signRemote(
+        { content: "x", tags: [] },
+        { cose_bytes: COSE_BYTES, signer_pubkey: SIGNER_PUBKEY },
+      ),
+    ).rejects.toBeInstanceOf(PermanentSyncError);
+  });
+
+  it("throws PermanentSyncError when /mcp omits correlation_id entirely", async () => {
+    const fetchImpl = queuedFetch([
+      jsonResponse(200, {
+        jsonrpc: "2.0",
+        id: 1,
+        result: { expires_in: 300 },
+      }),
+    ]);
+    const client = new CloudClient({
+      jwt: JWT,
+      baseUrl: BASE,
+      fetch: fetchImpl,
+    });
+    await expect(
+      client.signRemote(
+        { content: "x", tags: [] },
+        { cose_bytes: COSE_BYTES, signer_pubkey: SIGNER_PUBKEY },
+      ),
+    ).rejects.toBeInstanceOf(PermanentSyncError);
+  });
+});
+
 describe("CloudClient · typed errors", () => {
   it("throws ReauthRequiredError on 401 from /mcp", async () => {
     const fetchImpl = queuedFetch([
@@ -375,6 +433,20 @@ describe("CloudClient · recallRemote", () => {
     });
     expect(await client.recallRemote("", 5)).toEqual([]);
     expect(await client.recallRemote("  ", 5)).toEqual([]);
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  // Regression for test-reviewer F4: k<=0 must short-circuit
+  // symmetrically with the empty-query branch (no fetch, [] result).
+  it("returns [] for k <= 0 without hitting the network", async () => {
+    const fetchImpl = vi.fn();
+    const client = new CloudClient({
+      jwt: JWT,
+      baseUrl: BASE,
+      fetch: fetchImpl as unknown as typeof fetch,
+    });
+    expect(await client.recallRemote("query", 0)).toEqual([]);
+    expect(await client.recallRemote("query", -1)).toEqual([]);
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 });
