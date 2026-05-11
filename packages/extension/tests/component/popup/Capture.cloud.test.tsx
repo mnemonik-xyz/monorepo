@@ -6,12 +6,17 @@
 // onboarding).
 //
 // The runtime facade exposes two seams here: the high-level
-// `signRemote(args)` wrapper (which mirrors what `runtime.ts` does in
-// production — best-effort enqueue, attempt cloud push, branch on
-// error class) and the low-level `cloudSync.signRemote` (the actual
-// HTTP call). To preserve the contract that "popup invokes
-// cloudSync.signRemote with the right payload" we install a test
-// `signRemote` that mirrors production semantics and delegates to the
+// `signRemote(args)` wrapper (whose error-handling semantics mirror
+// what `runtime.ts` does in production — try cloud push, branch on
+// error class, dispatch the re-auth event, swallow Transient, re-throw
+// Permanent) and the low-level `cloudSync.signRemote` (the actual
+// HTTP call). The IDB enqueue/dequeue side-effects production performs
+// are deliberately NOT modelled — these tests assert the popup ↔
+// runtime contract, not the queue's persistence. The cloud-sync drain
+// (tests/unit/background/cloud-sync.test.ts) already covers that.
+//
+// To preserve the contract that "popup invokes cloudSync.signRemote
+// with the right payload" the test `signRemote` delegates to the
 // mocked `cloudSync.signRemote` — that way both seams are observable.
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
@@ -41,7 +46,9 @@ const chatgptAdapter: ChatAdapter = {
 
 const SIGN_RESULT: SignMemoryResult = {
   attestation_id: "att_cloudbeef",
-  content_hash: "cloudbeef".repeat(7) + "00000",
+  // 64 hex chars — matches the canonical blake3 hex length used
+  // everywhere else in the suite.
+  content_hash: "cb".repeat(32),
   signer_pubkey: "PubCloud",
   // The local-pipeline always writes synthetic `local:` ids first; the
   // cloud-side `signRemote` overwrites them with real tx ids.
