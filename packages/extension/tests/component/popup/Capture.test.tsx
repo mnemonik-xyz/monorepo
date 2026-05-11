@@ -34,6 +34,19 @@ function makeRuntime(overrides: Partial<PopupRuntime> = {}): PopupRuntime {
     signRemote: async () => undefined,
     recall: async () => [],
     verify: async () => ({ status: "not_found" }),
+    auth: {
+      signIn: async () => {
+        throw new Error("auth.signIn stub: not configured in test");
+      },
+      lookupExisting: async () => {
+        throw new Error("auth.lookupExisting stub: not configured in test");
+      },
+    },
+    session: {
+      get: async () => null,
+      set: async () => undefined,
+      clear: async () => undefined,
+    },
     ...overrides,
   };
 }
@@ -74,7 +87,7 @@ describe("Capture tab", () => {
       <Capture
         adapter={chatgptAdapter}
         prefilledSelection="captured paragraph"
-      />
+      />,
     );
 
     const tagInput = screen.getByLabelText("Tags");
