@@ -21,7 +21,8 @@ use axum::{
 };
 use http_body_util::BodyExt;
 use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation};
-use mnemonic_core::codec::{canonical::to_canonical_cbor, sign::sign_cose};
+use mnemonic_core::codec::canonical::to_canonical_cbor;
+use mnemonic_core::identity::sign_bytes;
 use mnemonic_mcp::oauth::{
     self, authorize_handler, build_challenge_hash, token_handler, Claims, OAuthState, JWT_AUDIENCE,
     JWT_ISSUER, SERVER_ORIGIN,
@@ -137,17 +138,19 @@ async fn full_authorize_token_jwt_roundtrip() {
         ],
     };
     let cbor = to_canonical_cbor(&challenge, &schema).unwrap();
-    let cose = sign_cose(&cbor, &kp).expect("sign_cose");
-    let cose_b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, cose);
+    // Raw Ed25519 over the canonical CBOR — the post-refactor wire contract
+    // (the handler validates `signature` is exactly 64 bytes and calls
+    // `identity::verify_signature` against `pending.challenge_bytes`).
+    let sig = sign_bytes(&kp, &cbor);
+    let sig_b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &sig);
 
-    // Insert the pending record on the server side. The 8-arg signature
-    // includes `challenge_bytes` (the canonical-CBOR bytes the user signs),
-    // which this test does not exercise — the legacy COSE_Sign1 path bound
-    // to `challenge_hash` is what the assertion below validates.
+    // Insert the pending record on the server side. `challenge_bytes` must
+    // be the canonical-CBOR bytes the user signed — the handler verifies
+    // the signature against those exact bytes.
     st.insert_pending(
         client_state.to_string(),
         challenge_hash,
-        Vec::new(),
+        cbor,
         pubkey.clone(),
         redirect_uri.to_string(),
         code_challenge.clone(),
@@ -160,7 +163,11 @@ async fn full_authorize_token_jwt_roundtrip() {
     let (s1, body1) = post_json(
         app,
         "/oauth/authorize",
-        serde_json::json!({"state": client_state, "cose_signed": cose_b64}),
+        serde_json::json!({
+            "state": client_state,
+            "signature": sig_b64,
+            "signer_pubkey": pubkey,
+        }),
     )
     .await;
     assert_eq!(s1, StatusCode::OK, "authorize body: {body1}");

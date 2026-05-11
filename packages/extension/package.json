@@ -1,0 +1,63 @@
+{
+  "name": "@mnemonik-xyz/extension",
+  "version": "0.1.0",
+  "description": "Mnemonik Chrome extension — capture AI-chat context (ChatGPT, Claude.ai, Gemini), sign locally as verifiable memory, store in IndexedDB (free Local mode) or sync to managed Mnemonik infra (paid Cloud mode). MV3.",
+  "license": "Apache-2.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mnemonik-xyz/monorepo.git",
+    "directory": "packages/extension"
+  },
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b --noEmit && vite build",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "e2e": "playwright test",
+    "lint": "tsc -b --noEmit",
+    "lint:webext": "web-ext lint --source-dir=dist",
+    "size": "size-limit",
+    "size:check": "node scripts/check-size-limit.mjs"
+  },
+  "dependencies": {
+    "@xenova/transformers": "^2.17.2",
+    "@zxcvbn-ts/core": "^3.0.4",
+    "@zxcvbn-ts/language-common": "^3.0.4",
+    "@zxcvbn-ts/language-en": "^3.0.2",
+    "hash-wasm": "^4.12.0",
+    "idb": "^8.0.3",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0"
+  },
+  "devDependencies": {
+    "@crxjs/vite-plugin": "^2.0.0",
+    "@playwright/test": "^1.48.0",
+    "@size-limit/preset-app": "^12.1.0",
+    "@testing-library/dom": "^10.4.1",
+    "@testing-library/jest-dom": "^6.9.1",
+    "@testing-library/react": "^16.3.2",
+    "@testing-library/user-event": "^14.6.1",
+    "@types/chrome": "^0.0.287",
+    "@types/jsdom": "^28.0.1",
+    "@types/react": "^19.1.0",
+    "@types/react-dom": "^19.1.0",
+    "@vitejs/plugin-react": "^4.3.4",
+    "autoprefixer": "^10.5.0",
+    "fake-indexeddb": "^6.2.5",
+    "jsdom": "^24.1.3",
+    "postcss": "^8.5.14",
+    "rollup": "^4",
+    "size-limit": "^12.1.0",
+    "tailwindcss": "^3.4.19",
+    "typescript": "~5.7.2",
+    "vite": "^6.3.3",
+    "vitest": "^1.6.0",
+    "web-ext": "^8.3.0"
+  }
+}

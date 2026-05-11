@@ -28,7 +28,13 @@ use crate::codec::canonical::to_canonical_cbor;
 use crate::codec::hash::hash_bytes;
 use crate::codec::schema::MEMORY_V1;
 use crate::codec::sign::sign_cose;
+use crate::compress::{CompressedEmbedding, EmbeddingCompressor};
 use crate::identity::{pubkey_base58, sign_bytes};
+
+/// Deterministic seed used by every `EmbeddingCompressor` instance —
+/// must match `mcp/src/main.rs:309` and every test compressor in the
+/// codebase. Drift here breaks T05 byte parity and recall.
+const COMPRESS_SEED: u64 = 42;
 
 /// On-the-wire keypair representation that travels across the WASM boundary.
 ///
@@ -235,6 +241,92 @@ pub fn import_keypair_json(json_str: &str) -> Result<JsValue, JsValue> {
 /// module can inspect or override it later if needed.
 fn chrono_now_rfc3339() -> String {
     chrono::Utc::now().to_rfc3339()
+}
+
+// ── T05: extension crypto-pipeline bindings ─────────────────────────────────
+//
+// Exports added so a Chrome MV3 service worker can run the *exact same*
+// embedding-compress / canonical-CBOR / blake3 / COSE pipeline the server
+// runs natively. Byte parity is enforced by the golden fixtures emitted
+// from `core/tests/golden_fixtures.rs::emit_extension_fixtures` and
+// consumed from `packages/extension/tests/unit/sign/cose.test.ts`.
+
+/// Compress an f32 embedding via TurboQuant and return the serialized bytes.
+///
+/// Uses the codebase-wide deterministic seed (42) and the bit-width supplied
+/// by the caller. Bit-width MUST match `mcp/src/config.rs::turbo_bits` (4 by
+/// default) — drift makes server-stored embeddings incomparable to
+/// browser-rebuilt ones at recall time.
+#[wasm_bindgen]
+pub fn compress_embedding(embedding: &[f32], bit_width: u8) -> Result<Vec<u8>, JsValue> {
+    if embedding.is_empty() {
+        return Err(JsValue::from_str(
+            "compress_embedding: embedding must not be empty",
+        ));
+    }
+    let bits = bit_width as usize;
+    if !(2..=8).contains(&bits) {
+        return Err(JsValue::from_str(&format!(
+            "compress_embedding: bit_width must be 2..=8, got {bits}"
+        )));
+    }
+    let compressor = EmbeddingCompressor::new(embedding.len(), bits, COMPRESS_SEED);
+    let compressed = compressor.compress(embedding);
+    Ok(compressed.to_bytes())
+}
+
+/// Decompress TurboQuant bytes back to an approximate f32 embedding.
+///
+/// `dim` is required because `EmbeddingCompressor::new(...)` is dimension-
+/// specific — the same bytes decompress to different vectors under
+/// different `dim` configurations. The browser must know the dimension
+/// from the artifact's `metadata.embed_dim` field (server-set; 384 for
+/// the default `Xenova/all-MiniLM-L6-v2` per Decision 3).
+#[wasm_bindgen]
+pub fn decompress_embedding(bytes: &[u8], dim: usize) -> Result<Vec<f32>, JsValue> {
+    let compressed = CompressedEmbedding::from_bytes(bytes)
+        .ok_or_else(|| JsValue::from_str("decompress_embedding: malformed compressed bytes"))?;
+    if compressed.dim != dim {
+        return Err(JsValue::from_str(&format!(
+            "decompress_embedding: dim mismatch — bytes report {}, caller passed {}",
+            compressed.dim, dim
+        )));
+    }
+    let compressor = EmbeddingCompressor::new(dim, compressed.bit_width, COMPRESS_SEED);
+    Ok(compressor.decompress(&compressed))
+}
+
+/// Canonicalize a JS object to CBOR bytes per `MEMORY_V1` schema.
+///
+/// Same byte sequence the server emits via `codec::canonical::to_canonical_cbor`.
+/// The caller passes a plain JS object whose fields match `MEMORY_V1`'s
+/// `cbor_field_order`; missing optional fields are dropped (consistent with
+/// the native path's null-omission rule).
+#[wasm_bindgen]
+pub fn to_canonical_cbor_bytes(value: JsValue) -> Result<Vec<u8>, JsValue> {
+    let json: serde_json::Value = serde_wasm_bindgen::from_value(value).map_err(|e| {
+        JsValue::from_str(&format!("to_canonical_cbor_bytes: invalid JS value: {e}"))
+    })?;
+    to_canonical_cbor(&json, &MEMORY_V1)
+        .map_err(|e| JsValue::from_str(&format!("to_canonical_cbor_bytes: {e}")))
+}
+
+/// Compute the raw 32-byte blake3 digest of `bytes`.
+///
+/// Returns the binary digest, not hex — the extension renders hex only at
+/// display boundaries (web-app parity). For a hex string call
+/// `core::codec::hash::hash_bytes` natively.
+#[wasm_bindgen]
+pub fn blake3_hash(bytes: &[u8]) -> Vec<u8> {
+    blake3::hash(bytes).as_bytes().to_vec()
+}
+
+/// Hex string of the blake3 digest. Convenience export so the browser can
+/// echo the exact `content_hash` string the server stored without
+/// re-implementing hex encoding in TS.
+#[wasm_bindgen]
+pub fn blake3_hash_hex(bytes: &[u8]) -> String {
+    hash_bytes(bytes)
 }
 
 #[cfg(test)]

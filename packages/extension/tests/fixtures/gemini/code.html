@@ -1,0 +1,37 @@
+<!doctype html>
+<!--
+  Hand-crafted Gemini fixture: one user prompt + one assistant reply
+  containing a fenced Python code block. Both turn elements use
+  declarative shadow DOM (`<template shadowrootmode="open">`) to
+  exercise the shadow-pierce path.
+
+  Note (decisions.md, T09): refresh from a live HAR capture before
+  merge — element names + class structure are reverse-engineered from
+  prior captures, not authoritatively scraped here (sandbox cannot
+  reach gemini.google.com).
+-->
+<html lang="en">
+  <head><title>Gemini · code</title></head>
+  <body>
+    <chat-window>
+      <conversations-container>
+        <user-query>
+          <template shadowrootmode="open">
+            <div class="query-content">How do I sort a list in Python?</div>
+          </template>
+        </user-query>
+        <message-content>
+          <template shadowrootmode="open">
+            <div class="markdown">
+              <p>Use the built-in <code>sorted</code>:</p>
+              <pre><code class="language-python">def sort(xs):
+    return sorted(xs)
+</code></pre>
+              <p>That returns a new list.</p>
+            </div>
+          </template>
+        </message-content>
+      </conversations-container>
+    </chat-window>
+  </body>
+</html>

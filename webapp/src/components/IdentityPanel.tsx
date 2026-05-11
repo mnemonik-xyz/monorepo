@@ -36,6 +36,28 @@ type CliBootstrapState =
   | { kind: "error"; message: string };
 
 /**
+ * "Send to Extension" UI state machine — mirrors `CliBootstrapState` but
+ * tracks a separate ticket so a user can issue both a CLI and an extension
+ * ticket without one clobbering the other.
+ *
+ * The extension polls `GET /api/extension-bootstrap/redeem/:ticket` after
+ * the user pastes the ticket UUID into its onboarding screen (T20 popup
+ * onboarding); on success the extension receives the same flat 64-byte
+ * keypair the CLI flow returns and writes it into `chrome.storage.local`.
+ *
+ * For MVP the webapp surface is the same one-line paste-command pattern
+ * as Send to CLI — simplest viable approach. A future deep-link
+ * (`chrome-extension://<id>/popup/index.html#bootstrap=<ticket>`) is
+ * backlog and would require the Chrome Web Store extension id, which
+ * isn't known until first publication.
+ */
+type ExtBootstrapState =
+  | { kind: "idle" }
+  | { kind: "issuing" }
+  | { kind: "issued"; ticketId: string; expiresAtMs: number }
+  | { kind: "error"; message: string };
+
+/**
  * Identity panel — renders the active DID/pubkey and exposes Generate / Import
  * / Export actions. Backed entirely by the WASM module from `webapp/src/wasm/`.
  *
@@ -48,7 +70,7 @@ type CliBootstrapState =
  */
 export default function IdentityPanel() {
   const [identity, setIdentity] = useState<KeypairJson | null>(() =>
-    readIdentity()
+    readIdentity(),
   );
   const [error, setError] = useState<string | null>(null);
   const [isWorking, setIsWorking] = useState(false);
@@ -58,7 +80,13 @@ export default function IdentityPanel() {
   // a failed bootstrap-ticket issue doesn't clobber a previously-shown
   // generate/import/export error and vice-versa.
   const [cliState, setCliState] = useState<CliBootstrapState>({ kind: "idle" });
+  // "Send to Extension" — distinct ticket lifecycle so the user can issue
+  // CLI and extension tickets without conflict. The extension ticket TTL,
+  // rate-limit window, and one-shot semantics mirror the CLI flow on the
+  // server (see T15 extension-bootstrap endpoint).
+  const [extState, setExtState] = useState<ExtBootstrapState>({ kind: "idle" });
   const [copied, setCopied] = useState(false);
+  const [extCopied, setExtCopied] = useState(false);
   const [now, setNow] = useState<number>(() => Date.now());
 
   useEffect(() => {
@@ -88,7 +116,7 @@ export default function IdentityPanel() {
   };
 
   const handleImportFile = async (
-    e: React.ChangeEvent<HTMLInputElement>
+    e: React.ChangeEvent<HTMLInputElement>,
   ): Promise<void> => {
     const file = e.target.files?.[0];
     e.target.value = ""; // allow re-picking same file
@@ -136,7 +164,7 @@ export default function IdentityPanel() {
   const handleClear = () => {
     if (
       !window.confirm(
-        "Clear local keypair? You will lose access to memories signed by this identity unless you have a backup."
+        "Clear local keypair? You will lose access to memories signed by this identity unless you have a backup.",
       )
     ) {
       return;
@@ -191,7 +219,7 @@ export default function IdentityPanel() {
       const secret = (parsed as { secret: unknown[] }).secret;
       if (secret.length !== 64 || !secret.every((n) => typeof n === "number")) {
         throw new Error(
-          `stored secret must be exactly 64 numbers, got ${secret.length}`
+          `stored secret must be exactly 64 numbers, got ${secret.length}`,
         );
       }
       secretWire = JSON.stringify(secret);
@@ -199,7 +227,7 @@ export default function IdentityPanel() {
       setCliState({
         kind: "error",
         message: `Local identity is malformed: ${formatError(
-          e
+          e,
         )}. Re-generate or re-import a keypair.`,
       });
       return;
@@ -303,13 +331,150 @@ export default function IdentityPanel() {
     }
   };
 
+  /**
+   * "Send to Extension" — same wire shape as Send to CLI, different
+   * server route (`/api/extension-bootstrap/issue`) and different paste
+   * target (Mnemonik popup → Onboarding → "Restore from webapp").
+   *
+   * We issue a one-shot ticket; the user pastes the UUID into the popup;
+   * the popup polls `GET /api/extension-bootstrap/redeem/<ticket>` and
+   * writes the resulting 64-byte secret into `chrome.storage.local`.
+   * Simplest viable approach (per decisions.md T20 entry); a future
+   * `chrome-extension://<id>/...` deep link requires the published
+   * extension id and is backlog.
+   */
+  const handleSendToExtension = async () => {
+    setExtCopied(false);
+    const stored = localStorage.getItem("mnemonic.identity");
+    if (!stored) {
+      setExtState({
+        kind: "error",
+        message: "No identity to send. Generate or import one first.",
+      });
+      return;
+    }
+    // Re-use the same flat 64-byte secret extraction logic as Send to CLI
+    // so the server-side redeem handler can stay payload-agnostic.
+    let secretWire: string;
+    try {
+      const parsed = JSON.parse(stored) as unknown;
+      if (
+        !parsed ||
+        typeof parsed !== "object" ||
+        !("secret" in parsed) ||
+        !Array.isArray((parsed as { secret: unknown }).secret)
+      ) {
+        throw new Error("stored identity has no `secret` array");
+      }
+      const secret = (parsed as { secret: unknown[] }).secret;
+      if (secret.length !== 64 || !secret.every((n) => typeof n === "number")) {
+        throw new Error(
+          `stored secret must be exactly 64 numbers, got ${secret.length}`,
+        );
+      }
+      secretWire = JSON.stringify(secret);
+    } catch (e) {
+      setExtState({
+        kind: "error",
+        message: `Local identity is malformed: ${formatError(
+          e,
+        )}. Re-generate or re-import a keypair.`,
+      });
+      return;
+    }
+    const jwt = readJwt();
+    if (!jwt) {
+      window.location.assign("/oauth/consent");
+      return;
+    }
+
+    setExtState({ kind: "issuing" });
+    try {
+      const res = await fetch(`${MCP_BASE}/api/extension-bootstrap/issue`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${jwt}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ keypair_json: secretWire }),
+      });
+
+      if (res.status === 401) {
+        window.location.assign("/oauth/consent");
+        return;
+      }
+      if (res.status === 429) {
+        setExtState({
+          kind: "error",
+          message:
+            "You have 3 active extension tickets. Wait for one to expire (10 min).",
+        });
+        return;
+      }
+      if (!res.ok) {
+        let detail = `HTTP ${res.status}`;
+        try {
+          const body = await res.json();
+          if (body && typeof body.error === "string") detail = body.error;
+        } catch {
+          // ignore parse error — keep generic detail
+        }
+        setExtState({
+          kind: "error",
+          message: `Could not issue ticket: ${detail}`,
+        });
+        return;
+      }
+
+      const body = (await res.json()) as {
+        ticket_id?: unknown;
+        expires_at?: unknown;
+      };
+      if (typeof body.ticket_id !== "string" || body.ticket_id.length === 0) {
+        setExtState({
+          kind: "error",
+          message: "Could not issue ticket: server returned no ticket_id.",
+        });
+        return;
+      }
+      const expiresAtMs =
+        typeof body.expires_at === "number"
+          ? body.expires_at * 1000
+          : Date.now() + BOOTSTRAP_TTL_MS;
+      setExtState({
+        kind: "issued",
+        ticketId: body.ticket_id,
+        expiresAtMs,
+      });
+    } catch (e) {
+      setExtState({
+        kind: "error",
+        message: `Could not issue ticket: ${formatError(e)}`,
+      });
+    }
+  };
+
+  const handleCopyExtTicket = async () => {
+    if (extState.kind !== "issued") return;
+    try {
+      await navigator.clipboard.writeText(extState.ticketId);
+      setExtCopied(true);
+      window.setTimeout(() => setExtCopied(false), 2000);
+    } catch (e) {
+      setExtState({
+        kind: "error",
+        message: `Copy failed: ${formatError(e)}`,
+      });
+    }
+  };
+
   // Tick the countdown every second only while a ticket is outstanding.
   // Outside the `issued` state the interval is a waste of cycles.
   useEffect(() => {
-    if (cliState.kind !== "issued") return;
+    if (cliState.kind !== "issued" && extState.kind !== "issued") return;
     const id = window.setInterval(() => setNow(Date.now()), 1000);
     return () => window.clearInterval(id);
-  }, [cliState.kind]);
+  }, [cliState.kind, extState.kind]);
 
   const ticketRemainingMs = useMemo(() => {
     if (cliState.kind !== "issued") return 0;
@@ -326,6 +491,22 @@ export default function IdentityPanel() {
       });
     }
   }, [cliState, ticketRemainingMs]);
+
+  // Same machinery for the extension ticket — separate so the two timers
+  // don't share an "expired" message channel.
+  const extTicketRemainingMs = useMemo(() => {
+    if (extState.kind !== "issued") return 0;
+    return Math.max(0, extState.expiresAtMs - now);
+  }, [extState, now]);
+  const extTicketRemainingLabel = formatMmSs(extTicketRemainingMs);
+  useEffect(() => {
+    if (extState.kind === "issued" && extTicketRemainingMs === 0) {
+      setExtState({
+        kind: "error",
+        message: "Ticket expired. Click Send to Extension to issue a new one.",
+      });
+    }
+  }, [extState, extTicketRemainingMs]);
 
   return (
     <section className="space-y-4" aria-label="Agent identity">
@@ -415,9 +596,66 @@ export default function IdentityPanel() {
           className="rounded-md border border-text-muted/30 px-4 py-2 text-sm text-text-primary transition-colors hover:border-accent-primary hover:text-accent-primary disabled:cursor-not-allowed disabled:opacity-40"
           data-testid="identity-send-to-cli"
         >
-          {cliState.kind === "issuing" ? "Issuing..." : "Send to CLI"}
+          {cliState.kind === "issuing" ? "Issuing ticket..." : "Send to CLI"}
+        </button>
+        <button
+          type="button"
+          onClick={handleSendToExtension}
+          disabled={isWorking || !identity || extState.kind === "issuing"}
+          className="rounded-md border border-text-muted/30 px-4 py-2 text-sm text-text-primary transition-colors hover:border-accent-primary hover:text-accent-primary disabled:cursor-not-allowed disabled:opacity-40"
+          data-testid="identity-send-to-extension"
+        >
+          {extState.kind === "issuing"
+            ? "Issuing ticket..."
+            : "Send to Extension"}
         </button>
       </div>
+
+      {extState.kind === "issued" && (
+        <div
+          className="space-y-2 rounded-md border border-accent-primary/30 bg-accent-primary/5 p-4"
+          data-testid="identity-ext-ticket"
+        >
+          <p className="text-xs uppercase tracking-wide text-text-muted">
+            Paste this ticket into the Mnemonik extension popup within{" "}
+            {extTicketRemainingLabel}
+          </p>
+          <div className="flex items-center gap-2">
+            <code
+              className="flex-1 overflow-x-auto rounded bg-black/30 px-3 py-2 font-mono text-xs text-accent-primary"
+              data-testid="identity-ext-ticket-id"
+              aria-label="Extension bootstrap ticket ID"
+            >
+              {extState.ticketId}
+            </code>
+            <button
+              type="button"
+              onClick={handleCopyExtTicket}
+              className="rounded-md border border-text-muted/30 px-3 py-2 text-xs text-text-primary transition-colors hover:border-accent-primary hover:text-accent-primary"
+              data-testid="identity-ext-copy"
+            >
+              {extCopied ? "Copied" : "Copy"}
+            </button>
+          </div>
+          <p
+            className="font-mono text-xs text-text-muted"
+            data-testid="identity-ext-countdown"
+            aria-live="polite"
+          >
+            Expires in {extTicketRemainingLabel}
+          </p>
+        </div>
+      )}
+
+      {extState.kind === "error" && (
+        <p
+          className="rounded-md border border-error/30 bg-error/10 p-3 text-sm text-error"
+          role="alert"
+          data-testid="identity-ext-error"
+        >
+          {extState.message}
+        </p>
+      )}
 
       {cliState.kind === "issued" && (
         <div
@@ -431,6 +669,7 @@ export default function IdentityPanel() {
             <code
               className="flex-1 overflow-x-auto rounded bg-black/30 px-3 py-2 font-mono text-xs text-accent-primary"
               data-testid="identity-cli-command"
+              aria-label="CLI bootstrap command"
             >
               mnemonic identity import --ticket {cliState.ticketId}
             </code>

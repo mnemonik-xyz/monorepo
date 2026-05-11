@@ -24,6 +24,12 @@
 //! and `mnemonic_core::codec::sign::verify_artifact` for the challenge
 //! signature check (Decision 10) — the same primitives as COSE attestations.
 
+// ── Google OAuth submodules (chrome-extension T14, Decision 5) ───────────────
+// Sibling files under `mcp/src/oauth/`. Disabled at runtime when
+// `GOOGLE_OAUTH_CLIENT_ID` is unset (handlers return 404).
+pub mod google;
+pub mod google_jwks;
+
 use std::num::NonZeroUsize;
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -81,6 +87,13 @@ pub struct Claims {
     pub exp: u64,
     /// JWT ID — UUIDv4, unique per token.
     pub jti: String,
+    /// Google account `sub` claim — populated when the JWT was issued via the
+    /// Google OAuth provider (`/oauth/google/callback` → `/oauth/token`).
+    /// Absent for the original Solana-wallet OAuth path (Decision 10/11).
+    /// `serde(skip_serializing_if = "Option::is_none")` keeps existing tokens
+    /// byte-identical on the wire — the field appears only when populated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub google_sub: Option<String>,
 }
 
 /// Pending authorize record (state → expected pubkey + challenge metadata).
@@ -124,6 +137,11 @@ struct IssuedCode {
     /// closes a swap-redirect attack where an attacker who guessed `code` would
     /// otherwise drive the JWT to an attacker-controlled callback.
     redirect_uri: String,
+    /// Google account `sub` claim — populated only for codes minted by the
+    /// Google OAuth callback path (T14). The `/oauth/token` exchange copies
+    /// this onto the issued JWT's `google_sub` claim so downstream
+    /// `/oauth/google/lookup` + `/oauth/google/link` handlers can read it.
+    google_sub: Option<String>,
     /// Unix-seconds expiry.
     exp: u64,
 }
@@ -197,6 +215,47 @@ impl OAuthState {
     pub fn register_client(&self, client_id: String, redirect_uris: Vec<String>) {
         let mut guard = self.clients.lock().expect("clients mutex poisoned");
         guard.put(client_id, RegisteredClient { redirect_uris });
+    }
+
+    /// Mint a one-time authorization code bound to `sub` + `redirect_uri` +
+    /// `code_challenge` (PKCE S256) with an optional `google_sub` claim. The
+    /// caller (Google OAuth callback) returns the code string to the user-
+    /// agent in a redirect; the extension then exchanges it at `/oauth/token`
+    /// with the original `code_verifier`. Single-use — `/oauth/token` pops the
+    /// entry atomically.
+    ///
+    /// Returns the generated code (UUIDv4).
+    pub fn mint_issued_code(
+        &self,
+        sub: String,
+        code_challenge: String,
+        redirect_uri: String,
+        google_sub: Option<String>,
+    ) -> String {
+        let code = uuid::Uuid::new_v4().to_string();
+        let entry = IssuedCode {
+            sub,
+            code_challenge,
+            redirect_uri,
+            google_sub,
+            exp: now_secs() + CODE_TTL_SECS,
+        };
+        let mut guard = self.codes.lock().expect("codes mutex poisoned");
+        guard.put(code.clone(), entry);
+        code
+    }
+
+    /// Accessor for the HS256 encoding key. Used by the extension key-escrow
+    /// module (T15) to mint `aud=extension` JWTs signed by the same secret as
+    /// the main `aud=mcp` flow — a single `MCP_JWT_SECRET` suffices for both.
+    pub fn jwt_encoding_key(&self) -> &EncodingKey {
+        &self.jwt_encoding_key
+    }
+
+    /// Accessor for the HS256 decoding key. Used by the extension key-escrow
+    /// module (T15) to verify `aud=extension` JWTs against the same secret.
+    pub fn jwt_decoding_key(&self) -> &DecodingKey {
+        &self.jwt_decoding_key
     }
 
     /// Validate redirect_uri against DCR first, then the static fallback list.
@@ -302,8 +361,27 @@ fn now_secs() -> u64 {
 
 // ── JWT issuance + verification (Decision 11) ────────────────────────────────
 
-/// Issue an HS256 JWT bound to `sub` (base58 user pubkey).
+/// Issue an HS256 JWT bound to `sub` (base58 user pubkey). Convenience wrapper
+/// around `issue_jwt_with_google_sub(state, sub, None)` for the legacy
+/// Solana-wallet OAuth path (Decision 10/11).
+///
+/// Marked `allow(dead_code)` because the binary build path uses
+/// `issue_jwt_with_google_sub` directly; this thin wrapper is reachable from
+/// integration tests under `mcp/tests/*.rs` via the library facade in
+/// `lib.rs`. Removing it would cascade through ~12 test files.
+#[allow(dead_code)]
 pub fn issue_jwt(state: &OAuthState, sub: &str) -> Result<String, String> {
+    issue_jwt_with_google_sub(state, sub, None)
+}
+
+/// Issue an HS256 JWT bound to `sub` with an optional `google_sub` claim
+/// populated. Used by the Google OAuth path (T14) to carry the Google
+/// account identifier alongside the user's Ed25519 pubkey.
+pub fn issue_jwt_with_google_sub(
+    state: &OAuthState,
+    sub: &str,
+    google_sub: Option<String>,
+) -> Result<String, String> {
     let now = now_secs();
     let claims = Claims {
         iss: JWT_ISSUER.to_string(),
@@ -312,6 +390,7 @@ pub fn issue_jwt(state: &OAuthState, sub: &str) -> Result<String, String> {
         iat: now,
         exp: now + JWT_TTL_SECS,
         jti: uuid::Uuid::new_v4().to_string(),
+        google_sub,
     };
     let header = Header::new(Algorithm::HS256);
     encode(&header, &claims, &state.jwt_encoding_key).map_err(|e| format!("JWT encode failed: {e}"))
@@ -848,6 +927,7 @@ pub async fn authorize_handler(
                 sub: req.signer_pubkey.clone(),
                 code_challenge: pending.code_challenge.clone(),
                 redirect_uri: pending.redirect_uri.clone(),
+                google_sub: None,
                 exp: now_secs() + CODE_TTL_SECS,
             },
         );
@@ -973,7 +1053,7 @@ pub async fn token_handler(
         return oauth_error(StatusCode::UNAUTHORIZED, "code_verifier does not match");
     }
 
-    let token = match issue_jwt(&state, &issued.sub) {
+    let token = match issue_jwt_with_google_sub(&state, &issued.sub, issued.google_sub.clone()) {
         Ok(t) => t,
         Err(e) => {
             return oauth_error(
@@ -1228,6 +1308,15 @@ pub async fn bearer_auth_middleware(
         // on this allowlist; it uses standard Bearer-JWT auth so only an
         // already-authenticated webapp can mint tickets for its own user.
         || path.starts_with("/api/cli-bootstrap/redeem/")
+        // Extension bootstrap-ticket redeem endpoint (chrome-extension T15,
+        // Decision 9). Same UUID-as-capability model as cli-bootstrap; the
+        // extension exchanges the ticket for a fresh `aud=extension` JWT
+        // without sending the webapp's `aud=mcp` JWT (which would not be
+        // present in the extension service worker's request context).
+        || path.starts_with("/api/extension-bootstrap/redeem/")
+        // Key-escrow endpoints verify their own `aud=extension` JWTs inline
+        // (the production bearer-auth middleware only accepts `aud=mcp`).
+        || path == "/api/key-escrow"
     {
         return next.run(request).await;
     }
@@ -1411,6 +1500,39 @@ mod tests {
         (hash, cose_b64)
     }
 
+    /// Build a raw-Ed25519 signed challenge for a given keypair + state.
+    /// Mirrors `make_signed_challenge` but signs the canonical-CBOR bytes
+    /// directly with Ed25519 (no COSE_Sign1 wrap), returning the base64 of
+    /// the raw 64-byte signature plus the canonical-CBOR bytes the caller
+    /// must store as `pending.challenge_bytes` (the handler verifies the
+    /// signature against those exact bytes). This matches the post-refactor
+    /// wire contract enforced at `authorize_handler` (signature MUST be 64
+    /// bytes).
+    fn make_raw_signed_challenge(
+        kp: &Keypair,
+        client_state: &str,
+        redirect_uri: &str,
+        code_challenge: &str,
+        nonce: &str,
+        exp: u64,
+    ) -> (String, String, Vec<u8>) {
+        let challenge = serde_json::json!({
+            "server_origin": SERVER_ORIGIN,
+            "state": client_state,
+            "client_id": "test-client",
+            "redirect_uri": redirect_uri,
+            "code_challenge": code_challenge,
+            "code_challenge_method": "S256",
+            "nonce": nonce,
+            "exp": exp,
+        });
+        let cbor = to_canonical_cbor(&challenge, &CHALLENGE_SCHEMA).unwrap();
+        let hash = blake3_hex(&cbor);
+        let sig = mnemonic_core::identity::sign_bytes(kp, &cbor);
+        let sig_b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, sig);
+        (hash, sig_b64, cbor)
+    }
+
     fn build_authorize_router(state: Arc<OAuthState>) -> Router {
         Router::new()
             .route("/oauth/authorize", post(authorize_handler))
@@ -1447,7 +1569,7 @@ mod tests {
         let pubkey = kp.pubkey().to_string();
         let verifier = "test-verifier-min-43-chars-long-aaaaaaaaaaa";
         let challenge = pkce_challenge(verifier);
-        let (hash, cose_b64) = make_signed_challenge(
+        let (hash, sig_b64, cbor) = make_raw_signed_challenge(
             &kp,
             "csrf-state-1",
             "https://app/callback",
@@ -1458,7 +1580,7 @@ mod tests {
         st.insert_pending(
             "csrf-state-1".to_string(),
             hash,
-            Vec::new(),
+            cbor,
             pubkey.clone(),
             "https://app/callback".to_string(),
             challenge.clone(),
@@ -1469,7 +1591,11 @@ mod tests {
         let (status, body) = post_json(
             app,
             "/oauth/authorize",
-            serde_json::json!({"state": "csrf-state-1", "cose_signed": cose_b64}),
+            serde_json::json!({
+                "state": "csrf-state-1",
+                "signature": sig_b64,
+                "signer_pubkey": pubkey,
+            }),
         )
         .await;
         assert_eq!(status, StatusCode::OK, "body={body}");
@@ -1485,7 +1611,7 @@ mod tests {
         let attacker = Keypair::new();
         let pubkey = kp.pubkey().to_string();
         let challenge = pkce_challenge("v-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
-        let (hash, _good_cose) = make_signed_challenge(
+        let (hash, _good_sig, cbor) = make_raw_signed_challenge(
             &kp,
             "csrf-2",
             "https://app/cb",
@@ -1493,26 +1619,18 @@ mod tests {
             "n2",
             now_secs() + 30,
         );
-        // Tamper: re-sign the SAME canonical CBOR with the attacker's key.
-        // Hash matches but sig won't verify against the expected_pubkey.
-        let challenge_obj = serde_json::json!({
-            "server_origin": SERVER_ORIGIN,
-            "state": "csrf-2",
-            "client_id": "test-client",
-            "redirect_uri": "https://app/cb",
-            "code_challenge": challenge,
-            "code_challenge_method": "S256",
-            "nonce": "n2",
-            "exp": now_secs() + 30,
-        });
-        let cbor = to_canonical_cbor(&challenge_obj, &CHALLENGE_SCHEMA).unwrap();
-        let bad_cose = sign_cose(&cbor, &attacker).unwrap();
-        let bad_cose_b64 =
-            base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bad_cose);
+        // Tamper: re-sign the SAME canonical CBOR with the attacker's key
+        // (raw Ed25519, no COSE wrap — matches the post-refactor wire
+        // contract). Hash matches the pending entry, but the signature
+        // will not verify under the bound `expected_pubkey`.
+        let bad_sig = mnemonic_core::identity::sign_bytes(&attacker, &cbor);
+        let bad_sig_b64 =
+            base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bad_sig);
+        let attacker_pubkey = attacker.pubkey().to_string();
         st.insert_pending(
             "csrf-2".to_string(),
             hash,
-            Vec::new(),
+            cbor,
             pubkey,
             "https://app/cb".to_string(),
             challenge,
@@ -1523,7 +1641,11 @@ mod tests {
         let (status, _) = post_json(
             app,
             "/oauth/authorize",
-            serde_json::json!({"state": "csrf-2", "cose_signed": bad_cose_b64}),
+            serde_json::json!({
+                "state": "csrf-2",
+                "signature": bad_sig_b64,
+                "signer_pubkey": attacker_pubkey,
+            }),
         )
         .await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
@@ -1535,9 +1657,10 @@ mod tests {
         // pubkey B (different keypair). signer != expected_pubkey → 401.
         let st = fresh_state();
         let kp_b = Keypair::new();
+        let kp_b_pubkey = kp_b.pubkey().to_string();
         let pubkey_a = Keypair::new().pubkey().to_string(); // unrelated
         let challenge = pkce_challenge("v-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
-        let (hash, cose_b64) = make_signed_challenge(
+        let (hash, sig_b64, cbor) = make_raw_signed_challenge(
             &kp_b,
             "csrf-tamper",
             "https://app/cb",
@@ -1548,7 +1671,7 @@ mod tests {
         st.insert_pending(
             "csrf-tamper".to_string(),
             hash,
-            Vec::new(),
+            cbor,
             pubkey_a, // attacker's keypair signed but we expect somebody else
             "https://app/cb".to_string(),
             challenge,
@@ -1559,7 +1682,11 @@ mod tests {
         let (status, _) = post_json(
             app,
             "/oauth/authorize",
-            serde_json::json!({"state": "csrf-tamper", "cose_signed": cose_b64}),
+            serde_json::json!({
+                "state": "csrf-tamper",
+                "signature": sig_b64,
+                "signer_pubkey": kp_b_pubkey,
+            }),
         )
         .await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
@@ -1642,13 +1769,16 @@ mod tests {
             "csrf-plain".to_string(),
             s256_hash,
             Vec::new(),
-            pubkey,
+            pubkey.clone(),
             "https://app/cb".to_string(),
             plain_challenge.to_string(),
             "csrf-plain".to_string(),
             now_secs() + 30,
         );
-        // But the user signs a "plain" envelope.
+        // But the user signs a "plain" envelope (raw Ed25519 over the
+        // mismatched CBOR — handler verifies against the pending entry's
+        // S256 challenge_bytes which was never written, so verification
+        // fails on the empty-bytes path).
         let bad_obj = serde_json::json!({
             "server_origin": SERVER_ORIGIN,
             "state": "csrf-plain",
@@ -1660,13 +1790,17 @@ mod tests {
             "exp": now_secs() + 30,
         });
         let cbor = to_canonical_cbor(&bad_obj, &CHALLENGE_SCHEMA).unwrap();
-        let cose = sign_cose(&cbor, &kp).unwrap();
-        let cose_b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &cose);
+        let sig = mnemonic_core::identity::sign_bytes(&kp, &cbor);
+        let sig_b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &sig);
         let app = build_authorize_router(st);
         let (status, _) = post_json(
             app,
             "/oauth/authorize",
-            serde_json::json!({"state": "csrf-plain", "cose_signed": cose_b64}),
+            serde_json::json!({
+                "state": "csrf-plain",
+                "signature": sig_b64,
+                "signer_pubkey": pubkey,
+            }),
         )
         .await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
@@ -1678,7 +1812,7 @@ mod tests {
         let kp = Keypair::new();
         let pubkey = kp.pubkey().to_string();
         let challenge = pkce_challenge("v-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
-        let (hash, cose_b64) = make_signed_challenge(
+        let (hash, sig_b64, cbor) = make_raw_signed_challenge(
             &kp,
             "csrf-replay",
             "https://app/cb",
@@ -1689,8 +1823,8 @@ mod tests {
         st.insert_pending(
             "csrf-replay".to_string(),
             hash,
-            Vec::new(),
-            pubkey,
+            cbor,
+            pubkey.clone(),
             "https://app/cb".to_string(),
             challenge,
             "csrf-replay".to_string(),
@@ -1700,7 +1834,11 @@ mod tests {
         let (status1, _) = post_json(
             app,
             "/oauth/authorize",
-            serde_json::json!({"state": "csrf-replay", "cose_signed": cose_b64.clone()}),
+            serde_json::json!({
+                "state": "csrf-replay",
+                "signature": sig_b64.clone(),
+                "signer_pubkey": pubkey.clone(),
+            }),
         )
         .await;
         assert_eq!(status1, StatusCode::OK);
@@ -1709,7 +1847,11 @@ mod tests {
         let (status2, _) = post_json(
             app2,
             "/oauth/authorize",
-            serde_json::json!({"state": "csrf-replay", "cose_signed": cose_b64}),
+            serde_json::json!({
+                "state": "csrf-replay",
+                "signature": sig_b64,
+                "signer_pubkey": pubkey,
+            }),
         )
         .await;
         assert_eq!(status2, StatusCode::UNAUTHORIZED);
@@ -1722,7 +1864,7 @@ mod tests {
         let pubkey = kp.pubkey().to_string();
         let verifier = "v-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
         let challenge = pkce_challenge(verifier);
-        let (hash, cose_b64) = make_signed_challenge(
+        let (hash, sig_b64, cbor) = make_raw_signed_challenge(
             &kp,
             "tok-state",
             "https://app/cb",
@@ -1733,7 +1875,7 @@ mod tests {
         st.insert_pending(
             "tok-state".to_string(),
             hash,
-            Vec::new(),
+            cbor,
             pubkey.clone(),
             "https://app/cb".to_string(),
             challenge,
@@ -1744,7 +1886,11 @@ mod tests {
         let (s1, body) = post_json(
             app,
             "/oauth/authorize",
-            serde_json::json!({"state": "tok-state", "cose_signed": cose_b64}),
+            serde_json::json!({
+                "state": "tok-state",
+                "signature": sig_b64,
+                "signer_pubkey": pubkey.clone(),
+            }),
         )
         .await;
         assert_eq!(s1, StatusCode::OK);
@@ -1769,7 +1915,7 @@ mod tests {
         let pubkey = kp.pubkey().to_string();
         let verifier = "v-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
         let challenge = pkce_challenge(verifier);
-        let (hash, cose_b64) = make_signed_challenge(
+        let (hash, sig_b64, cbor) = make_raw_signed_challenge(
             &kp,
             "tok-bad",
             "https://app/cb",
@@ -1780,8 +1926,8 @@ mod tests {
         st.insert_pending(
             "tok-bad".to_string(),
             hash,
-            Vec::new(),
-            pubkey,
+            cbor,
+            pubkey.clone(),
             "https://app/cb".to_string(),
             challenge,
             "tok-bad".to_string(),
@@ -1791,7 +1937,11 @@ mod tests {
         let (_, body) = post_json(
             app,
             "/oauth/authorize",
-            serde_json::json!({"state": "tok-bad", "cose_signed": cose_b64}),
+            serde_json::json!({
+                "state": "tok-bad",
+                "signature": sig_b64,
+                "signer_pubkey": pubkey,
+            }),
         )
         .await;
         let code = body["code"].as_str().unwrap().to_string();
@@ -1817,6 +1967,7 @@ mod tests {
                     sub: "test-pubkey".to_string(),
                     code_challenge: pkce_challenge("v"),
                     redirect_uri: "https://app/cb".to_string(),
+                    google_sub: None,
                     exp: now_secs().saturating_sub(120),
                 },
             );
@@ -1858,6 +2009,7 @@ mod tests {
             iat: now_secs(),
             exp: now_secs() + 3600,
             jti: uuid::Uuid::new_v4().to_string(),
+            google_sub: None,
         };
         let h_b64 = base64::Engine::encode(
             &base64::engine::general_purpose::URL_SAFE_NO_PAD,
@@ -1884,6 +2036,7 @@ mod tests {
             iat: now_secs(),
             exp: now_secs() + 3600,
             jti: uuid::Uuid::new_v4().to_string(),
+            google_sub: None,
         };
         let token = encode(&header, &evil, &EncodingKey::from_secret(TEST_SECRET)).unwrap();
         assert!(
@@ -1898,6 +2051,7 @@ mod tests {
             iat: now_secs(),
             exp: now_secs() + 3600,
             jti: uuid::Uuid::new_v4().to_string(),
+            google_sub: None,
         };
         let token2 = encode(&header, &bad_aud, &EncodingKey::from_secret(TEST_SECRET)).unwrap();
         assert!(
@@ -2062,9 +2216,10 @@ mod tests {
         let cbor_bytes =
             base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &cbor_b64).unwrap();
 
-        // Sign the canonical-CBOR with the user's keypair.
-        let cose = sign_cose(&cbor_bytes, &kp).expect("sign_cose");
-        let cose_b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &cose);
+        // Sign the canonical-CBOR with the user's keypair (raw Ed25519 — no
+        // COSE wrap, matching the post-refactor wire contract).
+        let sig = mnemonic_core::identity::sign_bytes(&kp, &cbor_bytes);
+        let sig_b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &sig);
 
         // POST /oauth/authorize → success (200 with `code`).
         let app2 = build_init_router(st);
@@ -2073,9 +2228,11 @@ mod tests {
             .uri("/oauth/authorize")
             .header("content-type", "application/json")
             .body(Body::from(
-                serde_json::to_vec(
-                    &serde_json::json!({"state": "rt-state", "cose_signed": cose_b64}),
-                )
+                serde_json::to_vec(&serde_json::json!({
+                    "state": "rt-state",
+                    "signature": sig_b64,
+                    "signer_pubkey": pubkey,
+                }))
                 .unwrap(),
             ))
             .unwrap();

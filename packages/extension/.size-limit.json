@@ -1,0 +1,27 @@
+[
+  {
+    "name": "popup cold-open (entry + shared shells)",
+    "path": [
+      "dist/assets/index.html-*.js",
+      "dist/assets/session-*.js",
+      "dist/assets/preload-helper-*.js"
+    ],
+    "limit": "75 KB",
+    "gzip": true,
+    "running": false
+  },
+  {
+    "name": "key-escrow lazy chunk (argon2id + COSE bundled)",
+    "path": "dist/assets/auth-test-helpers-*.js",
+    "limit": "950 KB",
+    "gzip": true,
+    "running": false
+  },
+  {
+    "name": "cloud-client lazy chunk",
+    "path": "dist/assets/cloud-client-*.js",
+    "limit": "5 KB",
+    "gzip": true,
+    "running": false
+  }
+]

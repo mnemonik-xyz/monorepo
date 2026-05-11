@@ -1,6 +1,6 @@
 # Economics — STORAGE_MODE=full Switch Analysis
 
-Status: **draft notes for future deliberation**. Not a decision document. Captures the cost picture of flipping `STORAGE_MODE=local` → `STORAGE_MODE=full` on hosted `mc.mnemonik.xyz`, plus the inseparable billing question (`PAYMENT_MODE`).
+Status: **draft notes for future deliberation**. Not a decision document. Captures the cost picture of flipping `STORAGE_MODE=local` → `STORAGE_MODE=full` on hosted `mcp.mnemonik.xyz`, plus the inseparable billing question (`PAYMENT_MODE`).
 
 ---
 

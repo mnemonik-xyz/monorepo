@@ -263,8 +263,16 @@ impl SqliteStore {
         // that loses the lock race queues for up to 5s rather than
         // returning SQLITE_BUSY immediately (rusqlite default is 0ms),
         // which also stabilizes the payment race tests.
-        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;")
-            .context("setting WAL + busy_timeout pragmas")?;
+        // `PRAGMA foreign_keys=ON` is per-connection and must be set
+        // explicitly; SQLite defaults to OFF, which would silently demote
+        // `FOREIGN KEY ... ON DELETE CASCADE` clauses (such as the one on
+        // `key_escrow_blobs(google_sub) REFERENCES google_identity_links`)
+        // to no-ops. We enable it here so cascade-delete and FK-violation
+        // rejection actually fire.
+        conn.execute_batch(
+            "PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000; PRAGMA foreign_keys=ON;",
+        )
+        .context("setting WAL + busy_timeout + foreign_keys pragmas")?;
         conn.execute_batch(SCHEMA).context("initializing schema")?;
         migrate_payment_events_unique_index(&conn)?;
         migrate_owner_pubkey_columns(&conn)?;
@@ -276,8 +284,10 @@ impl SqliteStore {
         let conn = Connection::open_in_memory()?;
         // busy_timeout is harmless on in-memory DBs and keeps behavior
         // consistent with file-backed stores. WAL mode is meaningless in
-        // memory and not requested.
-        conn.execute_batch("PRAGMA busy_timeout=5000;")?;
+        // memory and not requested. `foreign_keys=ON` mirrors `open()` so
+        // FK CASCADE clauses (e.g. `key_escrow_blobs` → `google_identity_links`)
+        // are enforced in tests using `in_memory()` too.
+        conn.execute_batch("PRAGMA busy_timeout=5000; PRAGMA foreign_keys=ON;")?;
         conn.execute_batch(SCHEMA)?;
         migrate_payment_events_unique_index(&conn)?;
         migrate_owner_pubkey_columns(&conn)?;

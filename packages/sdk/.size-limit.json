@@ -1,0 +1,9 @@
+[
+  {
+    "name": "browser bundle (excl. WASM)",
+    "path": "dist/browser.js",
+    "limit": "120 KB",
+    "gzip": false,
+    "brotli": false
+  }
+]

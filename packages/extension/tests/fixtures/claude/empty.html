@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Claude — new chat</title>
+  </head>
+  <body>
+    <!--
+      Empty Claude conversation: the input is rendered but no
+      [data-testid^="message-"] elements exist yet. Adapter must
+      return [] and getChatId must return null on /new.
+    -->
+    <main>
+      <div data-testid="conversation-container"></div>
+      <form data-testid="composer">
+        <textarea aria-label="Message Claude…"></textarea>
+      </form>
+    </main>
+  </body>
+</html>

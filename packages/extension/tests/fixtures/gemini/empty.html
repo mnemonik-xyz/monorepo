@@ -1,0 +1,18 @@
+<!doctype html>
+<!--
+  Hand-crafted Gemini fixture: empty conversation landing page.
+  No <user-query> / <message-content> elements present — adapter must
+  return []. Mirrors gemini.google.com/app immediately after a fresh
+  "New chat" click.
+
+  See work/chrome-extension/decisions.md (T09 note) — refresh from a
+  live HAR capture before the adapter PR merges.
+-->
+<html lang="en">
+  <head><title>Gemini</title></head>
+  <body>
+    <chat-window>
+      <conversations-container></conversations-container>
+    </chat-window>
+  </body>
+</html>

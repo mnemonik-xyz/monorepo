@@ -1,0 +1,22 @@
+# `bun test` is the uniform JS-runner test driver per
+# .github/workflows/node-test.yml (decision 11 of the repo CI policy).
+#
+# The popup component tests under `tests/component/**` use
+# `@testing-library/react` (DOM rendering) and depend on vitest's
+# `environmentMatchGlobs: jsdom` opt-in, neither of which bun's
+# built-in test runner hosts today. Skip them here; they run under
+# vitest in CI via the dedicated `Extension popup component tests
+# (vitest)` step in `.github/workflows/node-test.yml` (added in T11
+# round 2 after review finding MAJ-3), so the D13 TDD anchors gate
+# merges.
+#
+# Same gating applies to the T13 content-script tests under
+# `tests/unit/content/**`: they exercise the FAB + Recall overlay via
+# `attachShadow`, `pointerdown`, etc., all of which need a jsdom DOM.
+# vitest hosts them; bun skips them.
+[test]
+pathIgnorePatterns = [
+  "**/tests/component/**",
+  "**/tests/unit/content/**",
+  "**/tests/e2e/**"
+]

@@ -91,78 +91,12 @@ jobs:
         run: gitleaks detect --source . --config .gitleaks.toml --redact --no-banner --log-opts='--all'
 
   # ── Task 8 additions ──────────────────────────────────────────────────────
-  # Three new gates: MCP Inspector validation, cargo audit (CVE pickup), and
-  # smithery.yaml schema validation.
-
-  mcp-inspector:
-    name: mcp-inspector
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: workspace
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-      - name: Install build deps (g++ for fastembed local-embed)
-        run: sudo apt-get update && sudo apt-get install -y g++
-      - name: Build mnemonic-mcp + mint-test-jwt
-        run: |
-          cargo build -p mnemonic-mcp --features local-embed --bin mnemonic-mcp
-          cargo build -p mnemonic-mcp --features test-support --bin mint-test-jwt
-      - name: Generate JWT secret + test token
-        id: jwt
-        run: |
-          # 32-byte random base64 secret.
-          SECRET="$(openssl rand -base64 32)"
-          echo "secret=$SECRET" >> "$GITHUB_OUTPUT"
-          # Mint a JWT for the canonical CI subject.
-          TOKEN="$(MCP_JWT_SECRET="$SECRET" \
-            ./target/debug/mint-test-jwt --sub ci-test)"
-          echo "token=$TOKEN" >> "$GITHUB_OUTPUT"
-      - name: Start mcp server
-        env:
-          STORAGE_MODE: local
-          PAYMENT_MODE: none
-          # local-embed is compiled in; fastembed downloads the ONNX model
-          # on first run (~22MB). ONNX model is cached by rust-cache via the
-          # ~/.cache/fastembed dir on subsequent runs.
-          EMBED_PROVIDER: fastembed
-          MCP_JWT_SECRET: ${{ steps.jwt.outputs.secret }}
-          MNEMONIC_KEYPAIR_PATH: /tmp/ci-mcp-id.json
-          DATABASE_PATH: /tmp/ci-mcp.db
-          RAG_CHUNK_DIR: /tmp/ci-rag
-        run: |
-          mkdir -p /tmp/ci-rag
-          ./target/debug/mnemonic-mcp --transport http --port 3000 &
-          echo $! > /tmp/mcp.pid
-      - name: Wait for /health (30s timeout)
-        run: |
-          for i in $(seq 1 30); do
-            if curl -fsS http://localhost:3000/health >/dev/null 2>&1; then
-              echo "/health up after ${i}s"
-              exit 0
-            fi
-            sleep 1
-          done
-          echo "/health never came up"
-          # Surface mcp logs for debugging.
-          if [ -f /tmp/mcp.pid ]; then kill "$(cat /tmp/mcp.pid)" 2>/dev/null || true; fi
-          exit 1
-      - name: Validate MCP server with @modelcontextprotocol/inspector
-        run: |
-          # Pinned to 0.6.x — bump in tandem with MCP spec releases.
-          # Inspector returns non-zero on validation errors.
-          npx --yes @modelcontextprotocol/inspector@0.6.x \
-            --validate http://localhost:3000/mcp \
-            -H "Authorization: Bearer ${{ steps.jwt.outputs.token }}" \
-            || (echo "MCP Inspector validation failed"; exit 1)
-      - name: Stop mcp server
-        if: always()
-        run: |
-          if [ -f /tmp/mcp.pid ]; then kill "$(cat /tmp/mcp.pid)" 2>/dev/null || true; fi
+  # Two PR-gating additions remain here: cargo audit (CVE pickup) and
+  # smithery.yaml schema validation. The third — `mcp-inspector` — has
+  # moved to `.github/workflows/nightly.yml` because (a) it tracks MCP
+  # spec drift on a release cadence PR authors can't influence and
+  # (b) it's the slowest gate (~3min Rust build + fastembed ONNX
+  # download). See that workflow for the pin rationale.
 
   cargo-audit:
     name: cargo-audit
@@ -177,8 +111,9 @@ jobs:
         run: cargo install cargo-audit --locked
       - name: Run cargo audit
         # `--deny warnings` upgrades unmaintained-crate warnings into errors.
-        # Documented exceptions live in `audit.toml` at the repo root
-        # (`[advisories] ignore = ["RUSTSEC-XXXX-YYYY"]`).
+        # Documented exceptions live in `.cargo/audit.toml` — the path
+        # cargo-audit loads by default. Schema:
+        # `[advisories] ignore = ["RUSTSEC-XXXX-YYYY"]`.
         run: cargo audit --deny warnings
 
   smithery-schema:
