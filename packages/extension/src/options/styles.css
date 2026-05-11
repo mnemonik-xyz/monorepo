@@ -1,0 +1,7 @@
+/* Tailwind entrypoint for the options page. Same dark palette as the
+ * popup (`src/popup/styles.css`); content globs in
+ * `tailwind.config.js` cover both surfaces. */
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
