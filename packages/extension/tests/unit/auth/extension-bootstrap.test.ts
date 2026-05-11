@@ -226,35 +226,30 @@ describe("ensureExtensionJwt — caching", () => {
   });
 
   it("re-handshakes when cached JWT is within the refresh buffer", async () => {
-    const { calls } = installFetch(() => {
-      // Distinct call sites; the URL fork below decides which to return.
-      return new Response(JSON.stringify({ ticket_id: TICKET_ID }), {
-        status: 200,
-      });
-    });
-    // Override with a per-URL handler.
-    globalThis.fetch = (async (
-      input: RequestInfo | URL,
-      init?: RequestInit,
-    ) => {
-      const url = typeof input === "string" ? input : input.toString();
-      const entry: { url: string; init?: RequestInit } = { url };
-      if (init !== undefined) entry.init = init;
-      calls.push(entry);
+    // AUD-T-R2-01: route through `installFetch` so the test shares the
+    // same fetch-stub lifecycle as the rest of the suite (beforeEach /
+    // afterEach restore the original `globalThis.fetch`). The handler
+    // forks on URL to return the same issue→redeem pair we use in the
+    // happy-path test.
+    const { calls } = installFetch((url) => {
       if (url.endsWith("/api/extension-bootstrap/issue")) {
         return new Response(JSON.stringify({ ticket_id: TICKET_ID }), {
           status: 200,
         });
       }
+      // Suffix the JWT with the current call count so the assertion
+      // below can confirm a re-handshake happened (the stale blob in
+      // storage carried "stale-jwt", and the new redeem returns
+      // `${EXT_JWT}-2`).
       return new Response(
         JSON.stringify({
-          access_token: `${EXT_JWT}-${String(calls.length)}`,
+          access_token: `${EXT_JWT}-${String(calls.length + 1)}`,
           aud: "extension",
           expires_in: 3600,
         }),
         { status: 200 },
       );
-    }) as typeof globalThis.fetch;
+    });
 
     const { area, map } = makeStorage();
     // Seed an almost-expired blob.
