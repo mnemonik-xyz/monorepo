@@ -1140,3 +1140,47 @@ Deferred: T10-N2-02 nit (`scripting` permission pre-declared for T13).
 Same pattern as `clipboardWrite` was — keep for now since T13 is the
 next wave (Wave C) and lands within the same release. Will revisit if
 T13 slips.
+
+---
+
+## 2026-05-11 · T13 — FAB + Recall overlay (Shadow DOM, hotkey + content-script)
+
+Replaces the T10 thin stubs at `src/content/fab.ts` and `src/content/recall-overlay.ts` with the full UI. Manifest unchanged from T10 (content_scripts entries + `web_accessible_resources` for `recall-overlay.css` were pre-declared in T10 round 2).
+
+**Files shipped**
+
+- `packages/extension/src/content/shadow-styles.ts` — single CSSStyleSheet-string export (`SHADOW_STYLES`). Tokens mirror webapp (`#0A0F1E` bg, `#00D4B4` accent, `ui-monospace` font). All selectors live under the implicit `:host` boundary of the shadow root.
+- `packages/extension/src/content/fab.ts` — `mountFab(): Promise<HTMLElement | null>`. 56px circular button → menu (Save chat / Save selection / Open Mnemonik). Drag-to-reposition with persistence in `chrome.storage.local.fabPosition.<domain>`. Visibility gated on `settings.v1.perDomain.<domain>.fabVisible !== false`.
+- `packages/extension/src/content/recall-overlay.ts` — `mountOverlay(): HTMLElement | null`. Modal with backdrop, 200ms-debounced search input → `chrome.runtime.sendMessage({type:'ui:recall'})`. Top-5 results: snippet + score + source pill + Copy / Insert / Open. Insert is gated on `selectAdapter(location.href)?.supportsInsert && findInputBox(document) !== null`; falls back to copy otherwise. ESC closes; click on backdrop closes; arrow-key navigation; focus-trap.
+- `packages/extension/src/content/recall-overlay.css` — empty placeholder (styles ride in `shadow-styles.ts`); kept so the manifest's `web_accessible_resources` reference doesn't fault on `web-ext lint`.
+- `packages/extension/tests/unit/content/{fab,recall-overlay}.test.ts` — JSDOM unit tests (8 tests). Run under vitest (jsdom env). bun-test is configured to skip them via `pathIgnorePatterns` since bun's runner doesn't host jsdom (same pattern as the popup component tests).
+- `packages/extension/tests/e2e/fab-overlay.spec.ts` — both D13-binding TDD anchors (`fab_does_not_leak_styles_to_host`, `overlay_inserts_into_chat_input_when_adapter_supports_it`). Run locally via `bun run e2e`; both pass against installed Chromium.
+- `packages/extension/playwright.config.ts` — minimal Playwright config (chromium project, 30s timeout, headless).
+
+**Decisions**
+
+- **Closed shadow root + `all: initial` host.** Maximum isolation per the task spec. The host element is a custom-element-tag (`<mnemonik-fab-host>`, `<mnemonik-overlay-host>`) with `style="all: initial; position: fixed; …"`. The shadow is `attachShadow({mode: "closed"})` so the host page has no `host.shadowRoot` handle. The Playwright TDD anchor `fab_does_not_leak_styles_to_host` verifies a host page's `body { background: red }` survives FAB injection unchanged.
+- **`supportsInsert` flag (T11 dependency).** The overlay's "Insert into chat" button reads `selectAdapter(location.href)?.supportsInsert` directly (no `Function.prototype.toString` introspection — same minifier-safe pattern as `Recall.tsx`). When false, the button is disabled with a helpful tooltip. ChatGPT adapter supports it; Claude + Gemini do not (Phase 1 read-only adapters).
+- **Per-domain settings shape (T12 dependency).** The FAB reads `chrome.storage.local["settings.v1"].perDomain[hostname]` and respects `fabVisible: false` to hide. Defined the local TypeScript shape (`PerDomainSettings { enabled?, fabVisible?, autoCapture? }`) inline; T12 (Options page) is in flight in a parallel worktree and ships the canonical version. Pragmatic: the contract here is just "if `fabVisible === false` skip mount", which the canned shape satisfies. If T12 changes the shape before merge, only the inline interface needs to align.
+- **Auto-mount gating.** The module's bottom-of-file auto-mount IIFE checks `typeof chrome.runtime.getURL === "function"` (only defined in real extension contexts). Tests that mock just `{ runtime: { id, onMessage } }` don't trigger auto-mount and can call `mountFab()` directly. This avoids a race where the test-time module load would auto-mount before the test asserts on its own `mountFab()` call.
+- **CSP-safe.** Zero inline event handlers. Every listener is `addEventListener`. Every DOM node is constructed via `createElement` + `textContent` (no `innerHTML`). The shadow `<style>` is the only element with raw text and the content is a static, non-interpolated module export.
+- **Drag-vs-click discrimination.** `attachDragAndClick` tracks pointermove deltas; only a 3px+ movement promotes the gesture to a drag (via `drag.moved = true`). On `pointerup`, if `!drag.moved` the click handler runs, otherwise the new position is persisted.
+- **No new permissions.** Manifest unchanged. The three enumerated host_permissions and `scripting` (already pre-declared in T10) are sufficient.
+- **D12 honoured.** Auto-capture is OFF — no FAB or overlay code observes assistant turns or page mutations for capture intent. The only entry points are FAB click, hotkey (via the SW-dispatched `sw:open-recall-overlay`), and the popup.
+
+**Test coverage**
+
+- bun test: 104 pass / 1 pre-existing fail (cose.test.ts WASM-bindings load — documented in T10 §"Sandbox observations").
+- vitest run: 122 pass / 1 pre-existing fail (same cose.test.ts).
+- Playwright e2e: 2 pass (both TDD anchors).
+
+**Known gap — E2E in CI**
+
+`.github/workflows/node-test.yml` does not yet run Playwright. Both TDD anchors have been verified locally; CI integration is a follow-up (would need `bunx playwright install chromium` + a dedicated job step). Until then, the bun-test + vitest unit suites act as the gating contract for the FAB + overlay wiring (mount idempotency, `all: initial` reset, ESC-closes, message-listener subscription); the Shadow-DOM isolation property and the chat-insert end-to-end are E2E-only and run pre-merge by hand.
+
+**Pre-existing build noise (not in T13 scope)**
+
+- `bun run build` fails on missing `src/assets/icon-*.png` (manifest references icons that aren't in the repo). Pre-existing on `dev`.
+- `tsc -b` reports a duplicate-vite-install typing conflict in `vite.config.ts` / `vitest.config.ts`. Pre-existing on `dev`, documented in T10 §"Sandbox observations".
+
+Task `13.md` flips to `status: in_review` / `blocked_on: ci-verify` per D13 — settles to `done` only after the PR's CI run reports green on the bun-test + vitest suites.
