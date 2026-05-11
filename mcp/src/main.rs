@@ -2,6 +2,7 @@ mod api;
 mod chat;
 mod config;
 mod cors_policy;
+mod escrow;
 mod llm;
 mod mcp;
 mod oauth;
@@ -381,6 +382,12 @@ async fn main() -> anyhow::Result<()> {
             tracing::error!("FATAL: google_identity_links migration failed: {e}");
             std::process::exit(1);
         }
+        // T15: key escrow blob table — FK to google_identity_links, so only
+        // migrated when Google OAuth is enabled. Idempotent; safe to re-run.
+        if let Err(e) = escrow::migrate_key_escrow_blobs(store.conn()) {
+            tracing::error!("FATAL: key_escrow_blobs migration failed: {e}");
+            std::process::exit(1);
+        }
     }
     // Chat rate limiter: 10 requests per 60 seconds per IP
     let chat_limiter = {
@@ -467,10 +474,13 @@ async fn main() -> anyhow::Result<()> {
         client_secret: cfg.google_oauth_client_secret.clone(),
         redirect_uri: cfg.google_oauth_redirect_uri.clone(),
     };
+    let extension_settings = ExtensionSettings {
+        key_escrow_rate_limit: cfg.key_escrow_rate_limit,
+    };
 
     match transport.as_str() {
         "stdio" => run_stdio(state).await,
-        "http" => run_http(state, &cli.host, cli.port, google_oauth).await,
+        "http" => run_http(state, &cli.host, cli.port, google_oauth, extension_settings).await,
         other => anyhow::bail!("unknown transport: {other} (use 'stdio' or 'http')"),
     }
 }
@@ -483,6 +493,14 @@ struct GoogleOAuthSettings {
     client_id: String,
     client_secret: String,
     redirect_uri: String,
+}
+
+/// Bundle of chrome-extension settings resolved from `Config`. Same single-
+/// source-of-truth pattern as `GoogleOAuthSettings` — no `std::env::var`
+/// re-reads inside `run_http`. Extends naturally as more extension knobs
+/// are added (e.g. T18's cloud-sync caps).
+struct ExtensionSettings {
+    key_escrow_rate_limit: u32,
 }
 
 // ── stdio transport ───────────────────────────────────────────────────────────
@@ -562,6 +580,7 @@ async fn run_http(
     host: &str,
     port: u16,
     google_oauth: GoogleOAuthSettings,
+    extension_settings: ExtensionSettings,
 ) -> anyhow::Result<()> {
     use axum::http::{header, Method};
     use tower_governor::{governor::GovernorConfigBuilder, GovernorLayer};
@@ -811,6 +830,60 @@ async fn run_http(
         Router::new()
     };
 
+    // ── T15: Extension key-escrow + extension-bootstrap (Decision 9) ─────────
+    // Only mounted when Google OAuth is enabled — escrow rows have an FK to
+    // `google_identity_links`. `KEY_ESCROW_RATE_LIMIT` is read once here from
+    // `Config` (single source of truth, no downstream `std::env::var`).
+    //
+    // Three sub-mounts:
+    //   1. `/api/extension-bootstrap/issue` — sits behind the standard
+    //      bearer-auth middleware (`aud=mcp` JWT required to mint a ticket).
+    //   2. `/api/extension-bootstrap/redeem/{ticket}` — UUID-as-capability,
+    //      bearer-auth URI-allowlisted (same model as `/api/cli-bootstrap/`).
+    //   3. `/api/key-escrow` PUT/GET/DELETE — verifies `aud=extension` JWT
+    //      inline, sits OUTSIDE bearer-auth (which only accepts `aud=mcp`).
+    let escrow_state = Arc::new(escrow::EscrowState::new(
+        extension_settings.key_escrow_rate_limit,
+        state.clone(),
+        oauth_state.clone(),
+    ));
+    let extension_bootstrap_issue_router = if google_enabled {
+        Router::new()
+            .route(
+                "/api/extension-bootstrap/issue",
+                post(escrow::extension_bootstrap_issue_handler),
+            )
+            .layer(middleware::from_fn_with_state(
+                oauth_state.clone(),
+                oauth::bearer_auth_middleware,
+            ))
+            .with_state(escrow_state.clone())
+    } else {
+        Router::new()
+    };
+    let extension_bootstrap_redeem_router = if google_enabled {
+        Router::new()
+            .route(
+                "/api/extension-bootstrap/redeem/{ticket}",
+                get(escrow::extension_bootstrap_redeem_handler),
+            )
+            .with_state(escrow_state.clone())
+    } else {
+        Router::new()
+    };
+    let key_escrow_router = if google_enabled {
+        Router::new()
+            .route(
+                "/api/key-escrow",
+                axum::routing::put(escrow::key_escrow_put_handler)
+                    .get(escrow::key_escrow_get_handler)
+                    .delete(escrow::key_escrow_delete_handler),
+            )
+            .with_state(escrow_state.clone())
+    } else {
+        Router::new()
+    };
+
     let app = Router::new()
         .route("/chat", post(chat::chat_handler))
         .route("/api-keys", post(create_api_key))
@@ -829,6 +902,9 @@ async fn run_http(
         .merge(google_public_routes)
         .merge(google_authed_lookup)
         .merge(google_authed_link)
+        .merge(extension_bootstrap_issue_router)
+        .merge(extension_bootstrap_redeem_router)
+        .merge(key_escrow_router)
         .merge(well_known_routes)
         .layer(cors);
 

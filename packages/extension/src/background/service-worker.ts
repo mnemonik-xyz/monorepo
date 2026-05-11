@@ -225,9 +225,16 @@ function isAuthorisedSender(
   msg: Msg
 ): boolean {
   // Our own extension id must match. `chrome.runtime.id` is the
-  // canonical source of truth at runtime.
+  // canonical source of truth at runtime. If sender.id is set, it
+  // MUST equal ownId — the previous `&& sender.id` short-circuit
+  // silently allowed undefined/empty sender.id through, which is
+  // the audit finding T10-N2-01.
   const ownId = cr.runtime?.id;
-  if (typeof ownId === "string" && sender.id && sender.id !== ownId) {
+  if (
+    typeof ownId === "string" &&
+    sender.id !== undefined &&
+    sender.id !== ownId
+  ) {
     return false;
   }
 
@@ -249,21 +256,23 @@ function isAuthorisedSender(
     );
   }
 
-  // UI-origin (`ui:*`) — popup / options page. No `sender.tab`; URL
-  // begins with `chrome-extension://<id>/`. Some browsers omit the
-  // sender URL for trusted internal pages; accept those when
-  // `sender.id` already matched our id and there's no tab.
+  // UI-origin (`ui:*`) — popup / options page. No `sender.tab`. We
+  // require POSITIVE identification: either `sender.id` matches our
+  // own extension id, or `sender.url` starts with our extension's
+  // chrome-extension:// origin. Both being absent is rejected (was
+  // the silent pass-through documented in audit T10-N2-01).
   if (
     msg.type === "ui:sign-memory" ||
     msg.type === "ui:recall" ||
     msg.type === "ui:flush-pending"
   ) {
     if (sender.tab !== undefined) return false;
-    if (sender.url === undefined) return true;
-    return (
-      typeof ownId === "string" &&
-      sender.url.startsWith(`chrome-extension://${ownId}/`)
-    );
+    if (typeof ownId !== "string") return false;
+    const idMatches = sender.id === ownId;
+    const urlMatches =
+      typeof sender.url === "string" &&
+      sender.url.startsWith(`chrome-extension://${ownId}/`);
+    return idMatches || urlMatches;
   }
 
   // Unknown msg.type would have been rejected by parseMsg; this branch

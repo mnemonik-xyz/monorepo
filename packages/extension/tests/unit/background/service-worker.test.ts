@@ -254,10 +254,15 @@ describe("service-worker · alarm_drains_pending_queue", () => {
     } as chrome.alarms.Alarm);
 
     // Poll until the async flush handler chain has settled. Replaces a
-    // pair of `await Promise.resolve()` ticks (review nit) — `waitFor`
+    // pair of `await Promise.resolve()` ticks (review nit) — polling
     // doesn't depend on a specific number of microtasks and stays green
-    // when T18 swaps in a real async drain step.
-    await vi.waitFor(() => expect(flushSpy).toHaveBeenCalledTimes(1));
+    // when T18 swaps in a real async drain step. Plain Promise-based loop
+    // works under both vitest and bun:test (vi.waitFor is vitest-only).
+    const deadline = Date.now() + 1000;
+    while (flushSpy.mock.calls.length === 0 && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    expect(flushSpy).toHaveBeenCalledTimes(1);
     const callArg = flushSpy.mock.calls[0]?.[0] as { store: IndexedDbStore };
     expect(callArg.store).toBe(store);
     const pending = await callArg.store.listPending();
@@ -301,7 +306,7 @@ describe("service-worker · runtime.onMessage router", () => {
     const captured = await new Promise<unknown>((resolve) => {
       cr.runtime.onMessage.fire(
         { type: "ui:flush-pending" },
-        {} as chrome.runtime.MessageSender,
+        popupSender(),
         (response: unknown) => resolve(response)
       );
     });
@@ -311,5 +316,21 @@ describe("service-worker · runtime.onMessage router", () => {
       ok: true,
       result: { attempted: 0, flushed: 0 },
     });
+  });
+
+  it("rejects ui:* messages with no positive sender identification (T10-N2-01)", async () => {
+    const { deps, cr, flushSpy } = makeDeps();
+    installServiceWorker(deps);
+
+    const captured = await new Promise<unknown>((resolve) => {
+      cr.runtime.onMessage.fire(
+        { type: "ui:flush-pending" },
+        {} as chrome.runtime.MessageSender,
+        (response: unknown) => resolve(response)
+      );
+    });
+
+    expect(flushSpy).not.toHaveBeenCalled();
+    expect(captured).toEqual({ ok: false, error: "unauthorized-sender" });
   });
 });
