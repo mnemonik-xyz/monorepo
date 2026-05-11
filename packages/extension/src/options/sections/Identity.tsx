@@ -1,9 +1,19 @@
 // Identity section. Shows the active pubkey + DID, offers a click-to-
-// copy on each, and surfaces "Export keypair" / "Import keypair"
-// (passphrase-encrypted JSON blob). The QR code is a placeholder until
-// a small QR module lands; the pubkey copy + DID copy cover the
-// Phase-1 sharing UX. Export passphrase must clear the same zxcvbn
-// strength gate as Security/rotate (length >= 12 AND score >= 3).
+// copy on each, and surfaces the T25 identity-management surface:
+//
+//   - Generate identity (only when no identity is configured) /
+//     Re-generate (with a destructive-confirm dialog) when one exists.
+//   - Export keypair (UNENCRYPTED JSON, with a non-removable warning).
+//   - Import keypair (UNENCRYPTED JSON; replace-confirm when an
+//     identity already lives in chrome.storage.local).
+//
+// The pre-T25 "Export encrypted" / "Import encrypted" controls are kept
+// below for the passphrase-protected backup flow (T17/T18 follow-up):
+// they round-trip the same on-disk shape via the WASM `export_keypair_
+// json` export and the existing key-escrow Argon2id wrap. Surfacing
+// both side-by-side lets the user pick the right tool — the plain
+// export prints a loud warning, the encrypted export prints the
+// passphrase requirement.
 
 import {
   Suspense,
@@ -27,12 +37,35 @@ const PassphraseStrength = lazy(
   () => import("../components/PassphraseStrength.js"),
 );
 
-export function Identity(): JSX.Element {
+/** Confirmation hook surface. Defaults to `window.confirm`; tests
+ *  inject a deterministic stub so the destructive paths (regenerate,
+ *  overwrite-on-import) are observable without driving a real dialog. */
+type ConfirmFn = (message: string) => boolean;
+
+const DEFAULT_CONFIRM: ConfirmFn = (msg) => {
+  try {
+    return window.confirm(msg);
+  } catch {
+    // jsdom (or a non-DOM environment) → behave as if the user cancelled.
+    return false;
+  }
+};
+
+export interface IdentityProps {
+  /** Test-only seam. Production omits this and we fall back to
+   *  `window.confirm`. The Onboarding-orchestrator tests pass a stub
+   *  to drive both the accept and the cancel paths. */
+  confirm?: ConfirmFn;
+}
+
+export function Identity(props: IdentityProps = {}): JSX.Element {
+  const confirm = props.confirm ?? DEFAULT_CONFIRM;
   const [identity, setIdentity] = useState<IdentitySnapshot | null>(null);
   const [exportPassphrase, setExportPassphrase] = useState("");
   const [importPassphrase, setImportPassphrase] = useState("");
   const [toast, setToast] = useState<ToastState | null>(null);
-  const fileInputRef = useRef<HTMLInputElement>(null);
+  const encryptedFileInputRef = useRef<HTMLInputElement>(null);
+  const plainFileInputRef = useRef<HTMLInputElement>(null);
 
   const showToast = useCallback((message: string, kind: ToastState["kind"]) => {
     setToast({ message, kind, nonce: Date.now() });
@@ -62,6 +95,95 @@ export function Identity(): JSX.Element {
     [showToast],
   );
 
+  // ── T25: Generate (and re-generate) ────────────────────────────────────
+  const onGenerate = useCallback(async () => {
+    const r = getOptionsRuntime();
+    try {
+      if (identity) {
+        const ok = confirm(
+          `Replacing existing identity ${shortPubkey(identity.pubkey_base58)}. The old keypair will be lost forever — your existing memories will become unverifiable on this device. Continue?`,
+        );
+        if (!ok) return;
+        await r.identity.clear();
+      }
+      const id = await r.identity.generate();
+      setIdentity(id);
+      showToast("New identity generated.", "success");
+    } catch (err) {
+      // Never include the secret in the error path.
+      showToast(
+        `Generate failed: ${err instanceof Error ? err.message : "unknown error"}`,
+        "error",
+      );
+    }
+  }, [identity, confirm, showToast]);
+
+  // ── T25: Plain export ─────────────────────────────────────────────────
+  const onExportPlain = useCallback(async () => {
+    if (!identity) {
+      showToast("No identity to export.", "error");
+      return;
+    }
+    // SA-T25-001: gate the unencrypted-private-key download behind the
+    // same ConfirmFn seam regenerate + import-overwrite use, so an
+    // accidental click does not write the cleartext keypair to disk.
+    const ok = confirm(
+      "Download unencrypted private key file? Anyone with this file controls your identity. Keep it in your password manager.",
+    );
+    if (!ok) return;
+    try {
+      const payload = await getOptionsRuntime().identity.exportPlain();
+      const json = JSON.stringify(payload, null, 2);
+      const bytes = new TextEncoder().encode(json);
+      const filename = `mnemonik-keypair-${shortPubkey(payload.pubkey_base58)}.json`;
+      triggerDownload(bytes, filename, "application/json");
+      showToast(
+        "Keypair downloaded. Store in your password manager.",
+        "success",
+      );
+    } catch (err) {
+      showToast(
+        `Export failed: ${err instanceof Error ? err.message : "unknown error"}`,
+        "error",
+      );
+    }
+  }, [identity, confirm, showToast]);
+
+  // ── T25: Plain import ─────────────────────────────────────────────────
+  const onImportPlainFile = useCallback(
+    async (file: File) => {
+      try {
+        const text = await file.text();
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(text);
+        } catch {
+          showToast("Wrong file format: not valid JSON.", "error");
+          return;
+        }
+        // Replace-confirm when an identity is already live in this
+        // browser. Done BEFORE the runtime call so we don't shred the
+        // existing secret on user-cancel.
+        if (identity) {
+          const ok = confirm(
+            `Replacing existing identity ${shortPubkey(identity.pubkey_base58)}. New memories will be signed with the imported key. Continue?`,
+          );
+          if (!ok) return;
+        }
+        const id = await getOptionsRuntime().identity.importPlain(parsed);
+        setIdentity(id);
+        showToast("Keypair imported.", "success");
+      } catch (err) {
+        showToast(
+          `Import failed: ${err instanceof Error ? err.message : "unknown error"}`,
+          "error",
+        );
+      }
+    },
+    [identity, confirm, showToast],
+  );
+
+  // ── Existing: encrypted export ────────────────────────────────────────
   const onExport = useCallback(async () => {
     const pp = exportPassphrase.trim();
     if (!pp || pp.length < MIN_PASSPHRASE_LENGTH) {
@@ -91,6 +213,7 @@ export function Identity(): JSX.Element {
     }
   }, [exportPassphrase, showToast]);
 
+  // ── Existing: encrypted import ────────────────────────────────────────
   const onImportFile = useCallback(
     async (file: File) => {
       const pp = importPassphrase.trim();
@@ -127,13 +250,64 @@ export function Identity(): JSX.Element {
           Identity
         </h2>
         <p className="text-xs text-text-muted mt-1">
-          Your Ed25519 keypair signs every attestation. Export the keypair as an
-          encrypted file to back it up or move to another browser.
+          Your Ed25519 keypair signs every attestation. Generate one if you have
+          none, export it for backup, or import a previous export.
         </p>
       </header>
 
+      <div className="flex flex-wrap gap-2">
+        <button
+          type="button"
+          onClick={() => void onGenerate()}
+          className="bg-accent-primary/20 hover:bg-accent-primary/30 text-accent-primary border border-accent-primary/50 text-xs font-mono uppercase tracking-wide px-3 py-1.5 rounded transition-colors"
+        >
+          {identity ? "Re-generate identity" : "Generate identity"}
+        </button>
+        <button
+          type="button"
+          onClick={() => void onExportPlain()}
+          disabled={!identity}
+          title={identity ? undefined : "No identity to export."}
+          className="bg-white/5 hover:bg-white/10 text-text-primary border border-white/10 text-xs font-mono uppercase tracking-wide px-3 py-1.5 rounded disabled:opacity-50"
+        >
+          Export
+        </button>
+        <button
+          type="button"
+          onClick={() => plainFileInputRef.current?.click()}
+          className="bg-white/5 hover:bg-white/10 text-text-primary border border-white/10 text-xs font-mono uppercase tracking-wide px-3 py-1.5 rounded"
+        >
+          Import
+        </button>
+        <input
+          ref={plainFileInputRef}
+          type="file"
+          accept="application/json,.json"
+          aria-label="Plain keypair file"
+          className="hidden"
+          onChange={(e) => {
+            const f = e.target.files?.[0];
+            if (f) void onImportPlainFile(f);
+            if (plainFileInputRef.current) plainFileInputRef.current.value = "";
+          }}
+        />
+      </div>
+
       {identity ? (
         <div className="border border-white/10 rounded p-3 flex flex-col gap-2">
+          <p className="text-[11px] text-text-muted font-mono">
+            Active identity:{" "}
+            <span className="text-accent-primary">
+              {shortPubkey(identity.pubkey_base58)}
+            </span>{" "}
+            ·{" "}
+            <span>
+              Created{" "}
+              {identity.created_at !== undefined
+                ? new Date(identity.created_at).toLocaleString()
+                : "—"}
+            </span>
+          </p>
           <Row
             label="Public key"
             value={identity.pubkey_base58}
@@ -148,14 +322,27 @@ export function Identity(): JSX.Element {
       ) : (
         <div className="border border-white/10 rounded p-3">
           <p className="text-xs text-text-muted">
-            No agent identity found. Generate or import a keypair via the popup.
+            No agent identity found. Click <em>Generate identity</em> above to
+            mint a fresh Ed25519 keypair, or sign in via the popup to let
+            onboarding generate one for you.
           </p>
         </div>
       )}
 
+      <div className="border border-yellow-500/30 bg-yellow-500/5 rounded p-3 flex flex-col gap-1">
+        <h3 className="text-xs font-mono uppercase tracking-wide text-yellow-300">
+          Plain export warning
+        </h3>
+        <p className="text-[11px] text-text-muted">
+          The <em>Export</em> button downloads your keypair in CLEARTEXT. Never
+          share the file — anyone with it controls your identity. Store it in a
+          password manager.
+        </p>
+      </div>
+
       <div className="border border-white/10 rounded p-3 flex flex-col gap-2">
         <h3 className="text-xs font-mono uppercase tracking-wide text-text-primary">
-          Export keypair
+          Export keypair (encrypted)
         </h3>
         <p className="text-[11px] text-text-muted">
           Encrypts the keypair with your passphrase (AES-GCM-256 + Argon2id) and
@@ -193,11 +380,11 @@ export function Identity(): JSX.Element {
 
       <div className="border border-white/10 rounded p-3 flex flex-col gap-2">
         <h3 className="text-xs font-mono uppercase tracking-wide text-text-primary">
-          Import keypair
+          Import keypair (encrypted)
         </h3>
         <p className="text-[11px] text-text-muted">
-          Restore a previously-exported keypair. Replaces the current identity
-          in this browser.
+          Restore a previously-exported encrypted keypair. Replaces the current
+          identity in this browser.
         </p>
         <label className="flex flex-col gap-1 text-[11px] text-text-muted font-mono">
           Import passphrase
@@ -210,14 +397,15 @@ export function Identity(): JSX.Element {
           />
         </label>
         <input
-          ref={fileInputRef}
+          ref={encryptedFileInputRef}
           type="file"
           accept="application/json"
           aria-label="Encrypted keypair file"
           onChange={(e) => {
             const f = e.target.files?.[0];
             if (f) void onImportFile(f);
-            if (fileInputRef.current) fileInputRef.current.value = "";
+            if (encryptedFileInputRef.current)
+              encryptedFileInputRef.current.value = "";
           }}
           className="text-xs text-text-muted file:mr-2 file:bg-white/5 file:hover:bg-white/10 file:text-text-primary file:border file:border-white/10 file:text-xs file:font-mono file:uppercase file:tracking-wide file:px-2 file:py-1 file:rounded"
         />
@@ -264,4 +452,11 @@ function Row({
       </button>
     </div>
   );
+}
+
+/** Truncate a base58 pubkey for headlines and filenames. Mirrors the
+ *  popup's `IdentityBadge.truncateMiddle`. */
+function shortPubkey(pub: string, head = 6, tail = 4): string {
+  if (pub.length <= head + tail + 1) return pub;
+  return `${pub.slice(0, head)}…${pub.slice(-tail)}`;
 }

@@ -1932,6 +1932,37 @@ Round-2 test audit flagged TA-MIN2 (no `About` section test) and TA-MIN4 (no Ide
 
 Round-2 review: `status: passed`, 0 findings, 27/27 tests pass in 1.03s.
 
+## 2026-05-11 · T25 — Round-2 review fixes
+
+`code-reviewer-round1.json` (2 major + 6 minor) and `security-auditor-round1.json` (1 medium BLOCK + 3 low) returned `request-changes` / `BLOCK`. Reviewer reports at `work/chrome-extension/logs/working/pr-136/{code-reviewer,security-auditor}-round1.json`.
+
+| Finding | Severity | File | Resolution |
+| --- | --- | --- | --- |
+| SA-T25-001 | medium (BLOCK) | `src/options/sections/Identity.tsx` | **fixed** — `onExportPlain()` now calls `confirm("Download unencrypted private key file? …")` via the same ConfirmFn seam regenerate + import-overwrite use, before `triggerDownload`. Two new tests in `Identity.export.test.tsx` lock both branches (accept proceeds, cancel keeps the file off disk). |
+| PR136-C-01 / SA-T25-003 | major / low | three sites (popup, options, Restore) | **fixed** — created `src/auth/storage-keys.ts` exporting `IDENTITY_KEY = "identity"` + `IDENTITY_SECRET_KEY = "identity_secret"`. Every read/write site (popup/options runtime, content recall-overlay, Onboarding orchestrator, Restore, plus three test files) now imports from there. Removed the duplicate definitions and the legacy `IDENTITY_STORAGE_KEY` / `IDENTITY_SECRET_STORAGE_KEY` aliases. |
+| PR136-C-02 | major | `src/options/runtime-impl.ts::importPlain` | **fixed** — comment promised `exported_at` forwarding but code hardcoded `Date.now()`. Now parses `exported_at` (ISO string OR epoch-ms number), validates `Number.isFinite && > 0 && <= now + 24h tolerance`, and uses it as `created_at`. Falls back to `Date.now()` on any guard-trip. Six new unit tests cover the matrix (valid ISO, missing, unparseable, far-future, epoch-ms number, round-trip preserved). |
+| PR136-C-03 | major | `tests/component/popup/Onboarding.autogenIdentity.test.tsx` | **fixed** — added a new test that pre-seeds canonical `identity` + `identity_secret`, drives the fresh-user lookup branch, and asserts (a) `generate_keypair` mock NEVER called, (b) stored values byte-identical to pre-seed. Inverts cleanly to catch a future `if (keypair)` regression. |
+| PR136-C-04 | minor | `src/options/runtime-impl.ts::importPlain` | **fixed** — byte-range error message was "Wrong secret length: contains non-byte value" — but length is already confirmed 64 by that branch. Now reads "Invalid secret byte at index N: expected an integer in [0, 255]", identifying both failure mode AND offending index. |
+| PR136-C-05 | minor | `tests/unit/options/runtime-impl.identity.test.ts` (new) | **fixed** — added direct unit tests for the validator: non-number string at index 5, non-number object at index 7, value > 255 at index 12, each asserting the index-locked error AND that chrome.storage is never written. |
+| PR136-C-06 | minor | `src/options/runtime-impl.ts::isLikelyBase58` | **fixed** — replaced `BASE58_ALPHABET.indexOf(c) < 0` with `BASE58_SET.has(c)` on a module-scope `Set<string>`. O(1) per character vs prior O(58). |
+| PR136-C-07 | minor | `src/popup/Onboarding.tsx::mintAndPersistKeypair` | **fixed** — mirrored the partial-state guard from `IdentityFacade.generate`. Reads both canonical keys; throws `PartialIdentityError` if either is present rather than silently overwriting the orphaned half. New test in `Onboarding.autogenIdentity.test.tsx` pre-seeds only the public-half row and asserts WASM never fires + error step surfaces + stored values untouched. |
+| SA-T25-002 | low | `src/options/runtime-impl.ts::generate` | **fixed** — added module-level `generateInFlight: Promise<IdentitySnapshot> \| null` lock. A second concurrent call awaits the first; after release it re-runs the existence check and trips the clobber guard. Lock released in `finally{}` so a WASM init failure does not wedge future calls. |
+| SA-T25-004 | low | `src/options/runtime-impl.ts::generate` | **fixed** — mirrored the byte-range normalisation loop (`Number.isInteger && [0, 255]`) from `importPlain` / `exportPlain` so all three storage-write paths share the same invariant. Two new unit tests pin the defence-in-depth behaviour via stubbed WASM. |
+
+**Test results (worktree):**
+
+- `tests/component/options tests/component/popup tests/unit/options` — **124 / 124 pass** in 2.52s.
+- `tests/unit/options/runtime-impl.identity.test.ts` (new) — 10 / 10 pass in 4ms.
+- `tests/component/popup/Onboarding.autogenIdentity.test.tsx` — 4 / 4 pass (1 pre-existing happy + 1 pre-existing WASM-error + 1 new no-overwrite + 1 new partial-state guard).
+- `tests/component/options/Identity.export.test.tsx` — 5 / 5 pass (3 pre-existing + 2 new confirm-dialog branches).
+- `bun x vite build` — successful (`✓ built in 1.73s`).
+
+**Decision: drop the `IDENTITY_STORAGE_KEY` re-exports rather than keep them as backward-compat aliases.** The duplicate names were not imported by anything but the (now-migrated) tests, so carrying them forward would only invite a future drift. Any new consumer imports `IDENTITY_KEY` / `IDENTITY_SECRET_KEY` from `src/auth/storage-keys.ts` directly.
+
+**Decision: 24-hour clock-skew tolerance for `exported_at` forward.** A user who exports on a system with a slow clock could legitimately end up with an `exported_at` slightly in the future relative to the import-time clock. 24h is generous enough to cover NTP-stragglers without admitting a hand-edited "imported from the year 3000" envelope as the canonical `created_at`.
+
+**Decision: defence-in-depth on `generate` write-path even though `cose.ts::generateKeypair` already validates.** SA-T25-004 explicitly called out the inconsistency between `generate` and `importPlain` / `exportPlain`. The audit asks for the storage-layer invariant to be enforced regardless of upstream behaviour so a future binding swap that drops the cose.ts guard does not silently propagate bad bytes into chrome.storage. The two unit tests in `runtime-impl.identity.test.ts::generate` regex-match either error string (cose.ts upstream OR runtime-impl downstream) so neither layer can be removed without a test failure.
+
 ## 2026-05-11 · PR #134 — Round-2 review fixes
 
 Four reviewers (code-reviewer, security-auditor, bug-hunter round-1,

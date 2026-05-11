@@ -193,3 +193,45 @@ export async function signChallenge(
   const wasm = await loadWasm();
   return wasm.sign_challenge(keypair, nonce);
 }
+
+/** Generate a fresh Ed25519 keypair via the WASM `generate_keypair`
+ *  export. The underlying RNG is `getrandom`'s `js` feature, which
+ *  delegates to `crypto.getRandomValues` — CSPRNG-quality entropy. The
+ *  return shape mirrors the on-disk identity layout used by both the
+ *  popup (`identity` / `identity_secret`) and the SDK (`KeypairJson`):
+ *  64-byte Solana secret (seed||pubkey) plus its base58-encoded pubkey.
+ *
+ *  This helper is the canonical, single-source seam for new-identity
+ *  minting in the extension realm — components must not call WASM
+ *  directly or roll their own base58 encoder. */
+export async function generateKeypair(): Promise<KeypairJson> {
+  const wasm = await loadWasm();
+  const raw = wasm.generate_keypair() as unknown;
+  if (!raw || typeof raw !== "object") {
+    throw new Error("generateKeypair: WASM returned a non-object value");
+  }
+  const o = raw as Record<string, unknown>;
+  const pub = o.pubkey_base58;
+  const secret = o.secret;
+  if (typeof pub !== "string" || pub.length === 0) {
+    throw new Error("generateKeypair: WASM returned an empty pubkey");
+  }
+  if (!Array.isArray(secret) || secret.length !== 64) {
+    throw new Error(
+      `generateKeypair: WASM returned a secret of length ${
+        Array.isArray(secret) ? secret.length : "non-array"
+      }, expected 64`,
+    );
+  }
+  // Defensive byte-range check — corrupted WASM output would otherwise
+  // slip through into the persisted identity blob.
+  const normalised: number[] = [];
+  for (const n of secret) {
+    const num = typeof n === "number" ? n : Number(n);
+    if (!Number.isInteger(num) || num < 0 || num > 255) {
+      throw new Error("generateKeypair: WASM secret contains non-byte value");
+    }
+    normalised.push(num);
+  }
+  return { pubkey_base58: pub, secret: normalised };
+}

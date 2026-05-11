@@ -43,8 +43,18 @@ function makeRuntime(
     },
     identity: {
       load: async () => null,
+      generate: async () => ({ pubkey_base58: "x", did: "did:sol:x" }),
+      clear: async () => undefined,
       exportEncrypted: async () => new Uint8Array(),
       importEncrypted: async () => ({ pubkey_base58: "x", did: "did:sol:x" }),
+      exportPlain: async () => ({
+        version: 1,
+        pubkey_base58: "x",
+        secret: Array.from({ length: 64 }, () => 0),
+        exported_at: "2026-05-11T00:00:00.000Z",
+        warning: "",
+      }),
+      importPlain: async () => ({ pubkey_base58: "x", did: "did:sol:x" }),
     },
     keyEscrow: {
       rotate: async () => undefined,

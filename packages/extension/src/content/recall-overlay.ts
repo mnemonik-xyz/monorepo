@@ -19,6 +19,7 @@
 import { parseMsg } from "../messages.js";
 import { selectAdapter } from "../runtime/chat/registry.js";
 import type { SearchResult } from "../runtime/store/types.js";
+import { IDENTITY_KEY } from "../auth/storage-keys.js";
 import { SHADOW_STYLES } from "./shadow-styles.js";
 
 const HOST_TAG = "mnemonik-overlay-host";
@@ -224,11 +225,11 @@ async function runSearch(state: OverlayState, raw: string): Promise<void> {
     // identity row so the SW recall scopes correctly.
     let ownerPubkey: string | undefined;
     try {
-      const stored = (await chrome.storage.local.get("identity")) as Record<
+      const stored = (await chrome.storage.local.get(IDENTITY_KEY)) as Record<
         string,
         unknown
       >;
-      const id = stored.identity as { pubkey_base58?: string } | undefined;
+      const id = stored[IDENTITY_KEY] as { pubkey_base58?: string } | undefined;
       if (id?.pubkey_base58) ownerPubkey = id.pubkey_base58;
     } catch {
       // chrome.storage might be unavailable in some test harnesses;
