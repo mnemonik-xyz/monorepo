@@ -116,6 +116,11 @@ export interface PopupRuntime {
    * integration. Heavy paths (`signInWithGoogle` opens
    * `chrome.identity.launchWebAuthFlow`, `lookupExisting` POSTs to the
    * server) sit behind dynamic imports in the default impl.
+   *
+   * Phase 1 hard-codes `DEFAULT_SERVER_ORIGIN` inside `signInWithGoogle`.
+   * Multi-environment config (e.g. options.serverUrl read from
+   * `chrome.storage.sync`) is a backlog item — when it lands, thread the
+   * URL through this seam rather than re-exporting the auth helpers.
    */
   auth: {
     signIn(): Promise<GoogleSignInResult>;

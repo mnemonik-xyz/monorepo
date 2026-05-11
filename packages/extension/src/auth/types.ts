@@ -52,6 +52,12 @@ export interface GoogleSignInResult {
    *  authentication — server already validated the id_token against
    *  Google's JWKS in T14). */
   profile: GoogleProfile;
+  /** Wall-clock ms at which the access token expires. Derived from the
+   *  server's `expires_in` (defaulting to 1h when absent). Callers
+   *  populate `Session.jwtExpiresAt` from this so the source of truth
+   *  for token lifetime is the server response, not a client-parsed
+   *  JWT `exp` claim. */
+  jwtExpiresAt: number;
 }
 
 /**

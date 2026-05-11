@@ -168,6 +168,7 @@ export async function signInWithGoogle(
     jwt: token.accessToken,
     googleSub: profile.sub,
     profile,
+    jwtExpiresAt: token.jwtExpiresAt,
   };
 }
 
@@ -310,7 +311,9 @@ interface ExchangeInput {
 interface ExchangeOutput {
   accessToken: string;
   idToken: string | null;
-  expiresAt: string;
+  /** Wall-clock ms at which the access token expires. Derived from the
+   *  server's `expires_in` (defaulting to 1h when absent). */
+  jwtExpiresAt: number;
 }
 
 async function exchangeCodeForToken(
@@ -334,8 +337,25 @@ async function exchangeCodeForToken(
     throw new AuthError("oauth: token endpoint unreachable", { cause });
   }
   if (!response.ok) {
+    // Best-effort: surface the server's `error` / `error_description`
+    // (RFC 6749 §5.2) so devs hitting `chrome://extensions` see
+    // "invalid_grant: PKCE verifier mismatch" instead of just "401".
+    // Bounded to 200 chars to keep the AuthError message reasonable.
+    let detail = "";
+    try {
+      const errBody = (await response.json()) as Record<string, unknown>;
+      const errCode = typeof errBody?.error === "string" ? errBody.error : "";
+      const errDesc =
+        typeof errBody?.error_description === "string"
+          ? errBody.error_description
+          : "";
+      const combined = [errCode, errDesc].filter(Boolean).join(": ");
+      if (combined) detail = ` — ${combined.slice(0, 200)}`;
+    } catch {
+      // Non-JSON or oversized body — ignore, fall back to bare status.
+    }
     throw new AuthError(
-      `oauth: token endpoint returned ${String(response.status)}`,
+      `oauth: token endpoint returned ${String(response.status)}${detail}`,
     );
   }
   let body: unknown;
@@ -360,8 +380,8 @@ async function exchangeCodeForToken(
     typeof obj.expires_in === "number" && Number.isFinite(obj.expires_in)
       ? obj.expires_in
       : 3600;
-  const expiresAt = new Date(Date.now() + expiresIn * 1000).toISOString();
-  return { accessToken, idToken, expiresAt };
+  const jwtExpiresAt = Date.now() + expiresIn * 1000;
+  return { accessToken, idToken, jwtExpiresAt };
 }
 
 // ── Profile extraction ──────────────────────────────────────────────────────

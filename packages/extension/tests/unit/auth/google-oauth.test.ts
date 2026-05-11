@@ -332,4 +332,79 @@ describe("signInWithGoogle — token endpoint failure", () => {
     expect(caught).toBeInstanceOf(AuthError);
     expect((caught as AuthError).message).toContain("401");
   });
+
+  it("surfaces RFC 6749 §5.2 error + error_description in the AuthError message", async () => {
+    installChromeMock((authorizeUrl) => {
+      const original = new URL(authorizeUrl);
+      const state = original.searchParams.get("state") ?? "";
+      const cb = new URL(REDIRECT_SENTINEL);
+      cb.searchParams.set("code", "ok-code");
+      cb.searchParams.set("state", state);
+      return cb.toString();
+    });
+    installFetchMock(
+      () =>
+        new Response(
+          JSON.stringify({
+            error: "invalid_grant",
+            error_description: "PKCE verifier mismatch",
+          }),
+          {
+            status: 400,
+            headers: { "content-type": "application/json" },
+          },
+        ),
+    );
+
+    let caught: unknown = undefined;
+    try {
+      await signInWithGoogle({ serverBaseUrl: "https://mc.test" });
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(AuthError);
+    const msg = (caught as AuthError).message;
+    expect(msg).toContain("400");
+    expect(msg).toContain("invalid_grant");
+    expect(msg).toContain("PKCE verifier mismatch");
+  });
+});
+
+describe("signInWithGoogle — jwtExpiresAt", () => {
+  it("returns wall-clock expiry derived from server's expires_in", async () => {
+    installChromeMock((authorizeUrl) => {
+      const original = new URL(authorizeUrl);
+      const state = original.searchParams.get("state") ?? "";
+      const cb = new URL(REDIRECT_SENTINEL);
+      cb.searchParams.set("code", "ok-code");
+      cb.searchParams.set("state", state);
+      return cb.toString();
+    });
+    installFetchMock(
+      () =>
+        new Response(
+          JSON.stringify({
+            access_token: fakeAccessToken(),
+            id_token: fakeIdToken({ sub: "google-sub-12345" }),
+            token_type: "Bearer",
+            // Pick a distinctive value so we can assert it travelled
+            // through `signInWithGoogle` rather than the 1h default.
+            expires_in: 1234,
+            scope: "mcp",
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+    );
+
+    const before = Date.now();
+    const result = await signInWithGoogle({
+      serverBaseUrl: "https://mc.test",
+    });
+    const after = Date.now();
+    // Expiry must be roughly `now + 1234s`. Allow a wide window for
+    // CI clock jitter — the point is to prove the value is NOT the 1h
+    // (3600s) default.
+    expect(result.jwtExpiresAt).toBeGreaterThanOrEqual(before + 1234 * 1000);
+    expect(result.jwtExpiresAt).toBeLessThanOrEqual(after + 1234 * 1000 + 100);
+  });
 });

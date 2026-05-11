@@ -77,10 +77,13 @@ export function App(): JSX.Element {
     setAdapter(ad);
     setSelection(sel);
     // Two paths into onboarding:
-    //   1. The user is on the Cloud tier but has no session yet (first run
-    //      or restored from a different machine).
-    //   2. The user is on Local tier — onboarding stays optional, popup
-    //      is fully usable without a session. We never force the flow.
+    //   1. First run on the Cloud tier (no session has ever been minted).
+    //   2. Cloud tier with an expired or cleared session — the user must
+    //      re-auth before continuing. `getSession` already returns null
+    //      for an expired JWT (Phase 1 has no refresh-token flow), so
+    //      both cases fall through the same `sess === null` branch.
+    //   On the Local tier onboarding stays optional, popup is fully usable
+    //   without a session. We never force the flow.
     if (t === "cloud" && sess === null) {
       setMode("onboarding");
     } else {

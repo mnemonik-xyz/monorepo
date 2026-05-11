@@ -18,11 +18,14 @@ import { SESSION_STORAGE_KEY, type Session } from "./types.js";
  * tests inject an in-memory shim without monkey-patching the global
  * `chrome` object. Production callers leave the parameter undefined
  * and the runtime resolves to `chrome.storage.local`.
+ *
+ * The chrome typings allow a default-values record on `get`
+ * (`{key: defaultValue}` overload), but no caller in this codebase
+ * uses it. The narrowed signature here keeps call-sites unambiguous;
+ * widen later if a caller actually needs the defaults overload.
  */
 export interface StorageArea {
-  get: (
-    keys: string | string[] | object | null,
-  ) => Promise<Record<string, unknown>>;
+  get: (keys: string | string[]) => Promise<Record<string, unknown>>;
   set: (items: Record<string, unknown>) => Promise<void>;
   remove: (keys: string | string[]) => Promise<void>;
 }

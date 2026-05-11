@@ -23,6 +23,10 @@ import type {
 } from "../auth/types.js";
 import { jwtExpiresAtMs } from "../auth/session.js";
 
+/** Fallback session lifetime when neither the server response nor the JWT
+ *  carries a usable expiry. Mirrors the server's default `expires_in`. */
+const FALLBACK_SESSION_MS = 60 * 60 * 1000;
+
 /**
  * Top-level onboarding state machine. The popup mounts this when
  * `runtime.session.get()` returned `null` on first paint.
@@ -47,6 +51,11 @@ export interface OnboardingProps {
   onComplete: () => void;
 }
 
+/** Minimum passphrase length per user-spec § Scenario 1. zxcvbn strength
+ *  scoring lands in T17 alongside the real key-escrow client; T16 keeps
+ *  the simpler length-only rule so both branches agree. */
+const MIN_PASSPHRASE_LEN = 12;
+
 export function Onboarding({ onComplete }: OnboardingProps): JSX.Element {
   const [step, setStep] = useState<OnboardingStep>({ kind: "intro" });
   const [passphrase, setPassphrase] = useState("");
@@ -59,16 +68,19 @@ export function Onboarding({ onComplete }: OnboardingProps): JSX.Element {
       const signIn = await r.auth.signIn();
       const lookup = await r.auth.lookupExisting(signIn.jwt);
       // Persist a minimal session — the popup re-reads it on next open.
+      // Source of truth for token lifetime is the server's `expires_in`
+      // (already wall-clock-converted into `signIn.jwtExpiresAt`); the
+      // JWT `exp` claim is the next fallback so a hand-crafted test JWT
+      // without `expires_in` still parses; finally a 1h default keeps
+      // the session usable when both are missing (defence-in-depth).
       const session: Session = {
         jwt: signIn.jwt,
         googleSub: signIn.googleSub,
         profile: signIn.profile,
         jwtExpiresAt:
-          jwtExpiresAtMs(signIn.jwt) ??
-          // 1h fallback when the JWT lacks an `exp` claim — the server
-          // contract guarantees it, but defence-in-depth keeps the
-          // session usable.
-          Date.now() + 60 * 60 * 1000,
+          signIn.jwtExpiresAt > 0
+            ? signIn.jwtExpiresAt
+            : (jwtExpiresAtMs(signIn.jwt) ?? Date.now() + FALLBACK_SESSION_MS),
         signedInAt: Date.now(),
       };
       await r.session.set(session);
@@ -90,10 +102,10 @@ export function Onboarding({ onComplete }: OnboardingProps): JSX.Element {
   const handleSetPassphrase = async (
     signIn: GoogleSignInResult,
   ): Promise<void> => {
-    if (passphrase.length < 12) {
+    if (passphrase.length < MIN_PASSPHRASE_LEN) {
       setStep({
         kind: "error",
-        message: "passphrase must be at least 12 characters",
+        message: `passphrase must be at least ${String(MIN_PASSPHRASE_LEN)} characters`,
       });
       return;
     }
@@ -117,6 +129,17 @@ export function Onboarding({ onComplete }: OnboardingProps): JSX.Element {
   const handleWelcomeBack = async (
     signIn: GoogleSignInResult,
   ): Promise<void> => {
+    // Symmetric guard with `handleSetPassphrase` — the restore flow MUST
+    // never call the T17 stub without a passphrase the user actually
+    // typed. A bare click would otherwise surface the stub's misleading
+    // "not implemented" message instead of the right validation error.
+    if (passphrase.length < MIN_PASSPHRASE_LEN) {
+      setStep({
+        kind: "error",
+        message: `passphrase must be at least ${String(MIN_PASSPHRASE_LEN)} characters`,
+      });
+      return;
+    }
     setStep({ kind: "restoring", signIn });
     try {
       await keyEscrow.fetchAndRestoreStub({ passphrase, jwt: signIn.jwt });
