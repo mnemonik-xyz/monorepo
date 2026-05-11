@@ -41,6 +41,7 @@ function makeRuntime(overrides: Partial<PopupRuntime> = {}): PopupRuntime {
 const chatgptAdapter: ChatAdapter = {
   hostPattern: /^chatgpt\.com\//,
   platform: "chatgpt",
+  supportsInsert: true,
   extractConversation: () => [],
   findInputBox: () => null,
   getChatId: () => null,

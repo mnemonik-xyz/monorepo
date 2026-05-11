@@ -116,13 +116,13 @@ export function Capture(props: CaptureProps): JSX.Element {
         </div>
       )}
 
-      <label className="flex flex-col gap-1 text-xs">
+      <label className="flex flex-col gap-1 text-xs" htmlFor="capture-content">
         <span className="text-text-muted">Selection / content</span>
         <textarea
+          id="capture-content"
           value={selection}
           onChange={(e) => setSelection(e.target.value)}
           rows={6}
-          aria-label="Capture content"
           className="bg-black/40 border border-white/10 rounded p-2 text-xs font-mono focus:outline-none focus:border-accent-primary resize-none"
           placeholder="Paste or capture the snippet to sign…"
         />
@@ -169,9 +169,12 @@ export function Capture(props: CaptureProps): JSX.Element {
           kind="success"
           message={`Signed → ${truncate(result.attestation_id, 18)}`}
           copyValue={result.attestation_id}
+          onDismiss={() => setResult(null)}
         />
       ) : null}
-      {error ? <Toast kind="error" message={error} /> : null}
+      {error ? (
+        <Toast kind="error" message={error} onDismiss={() => setError(null)} />
+      ) : null}
     </div>
   );
 }

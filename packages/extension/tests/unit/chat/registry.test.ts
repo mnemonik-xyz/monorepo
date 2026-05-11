@@ -10,13 +10,11 @@ import type { ChatAdapter } from "../../../src/runtime/chat/types.js";
 // Stub adapter helper — registry is meant to be opaque to the framework,
 // so tests construct minimal adapters and inject them via the test-only
 // setter that the production array stays empty in T06.
-function stub(
-  platform: string,
-  hostPattern: RegExp,
-): ChatAdapter {
+function stub(platform: string, hostPattern: RegExp): ChatAdapter {
   return {
     hostPattern,
     platform,
+    supportsInsert: false,
     extractConversation: () => [],
     findInputBox: () => null,
     getChatId: () => null,
@@ -65,9 +63,9 @@ describe("registry · selectAdapter", () => {
     const adapter = stub("chatgpt", /^chatgpt\.com\/c\//);
     __setAdaptersForTesting([adapter]);
     // Query string + hash must not affect matching.
-    expect(
-      selectAdapter("https://chatgpt.com/c/abc?ref=foo#section"),
-    ).toBe(adapter);
+    expect(selectAdapter("https://chatgpt.com/c/abc?ref=foo#section")).toBe(
+      adapter
+    );
     // Wrong path: no match, even though the host is right.
     expect(selectAdapter("https://chatgpt.com/about")).toBeNull();
   });

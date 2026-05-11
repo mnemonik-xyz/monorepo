@@ -37,15 +37,17 @@ function makeRuntime(overrides: Partial<PopupRuntime> = {}): PopupRuntime {
 const claudeLikeAdapter: ChatAdapter = {
   hostPattern: /^claude\.ai\//,
   platform: "claude",
+  supportsInsert: false,
   extractConversation: () => [],
   findInputBox: () => null,
   getChatId: () => null,
 };
 
-// Adapter that opts IN — the body has more than a bare `return null`.
+// Adapter that opts IN — declares insert support via the explicit flag.
 const chatgptLikeAdapter: ChatAdapter = {
   hostPattern: /^chatgpt\.com\//,
   platform: "chatgpt",
+  supportsInsert: true,
   extractConversation: () => [],
   findInputBox: (doc: Document) => {
     const ta = doc.querySelector('textarea[data-id="root"]');

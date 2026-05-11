@@ -47,9 +47,31 @@ export type VerifyOutcome =
       source?: SourceMeta;
       solana_tx?: string;
       arweave_tx?: string;
+      /**
+       * `true` when the popup only confirmed that the local row exists
+       * + has a non-empty COSE envelope (presence check), without
+       * running the cryptographic signature verification. The WASM
+       * `verify_artifact` export is pending (T05 follow-up); until it
+       * lands, the UI renders a "STORED LOCALLY — cryptographic
+       * verification coming soon" caveat instead of a plain green
+       * "VERIFIED" banner. Cloud-path verification (T18) will return
+       * this field `false` once full cryptographic verify is wired.
+       */
+      presence_only?: boolean;
     }
   | { status: "tampered"; reason: string }
-  | { status: "not_found"; attestation_id?: string };
+  | {
+      status: "not_found";
+      attestation_id?: string;
+      /**
+       * Set when the popup received `fileBytes` instead of an
+       * attestation id. File-drop verification is not yet implemented
+       * (T05 follow-up). The UI renders a clear placeholder message
+       * rather than the generic "not found" state to avoid misleading
+       * the user.
+       */
+      reason?: "file_drop_unsupported";
+    };
 
 export interface VerifyArgs {
   /** Either an `attestation_id` string OR raw COSE_Sign1 bytes from a

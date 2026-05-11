@@ -5,7 +5,9 @@
 # `@testing-library/react` (DOM rendering) and depend on vitest's
 # `environmentMatchGlobs: jsdom` opt-in, neither of which bun's
 # built-in test runner hosts today. Skip them here; they run under
-# vitest locally + can be picked up by a dedicated component-test
-# step if one is added to CI later.
+# vitest in CI via the dedicated `Extension popup component tests
+# (vitest)` step in `.github/workflows/node-test.yml` (added in T11
+# round 2 after review finding MAJ-3), so the D13 TDD anchors gate
+# merges.
 [test]
 pathIgnorePatterns = ["**/tests/component/**"]

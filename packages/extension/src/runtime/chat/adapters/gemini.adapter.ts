@@ -50,7 +50,7 @@ function* walkAll(root: Document | Element | ShadowRoot): Generator<Element> {
   const stack: (Element | ShadowRoot)[] = [start];
   while (stack.length) {
     const node = stack.pop()!;
-    const isElement = node.nodeType === 1 /* ELEMENT_NODE */;
+    const isElement = node.nodeType === 1; /* ELEMENT_NODE */
     if (isElement) yield node as Element;
     const children = Array.from(node.children);
     for (let i = children.length - 1; i >= 0; i--) {
@@ -122,8 +122,7 @@ function isNestedTurn(el: Element): boolean {
   const root = el.getRootNode() as Node & { host?: Element };
   if (root.nodeType === 11 /* DOCUMENT_FRAGMENT_NODE */ && root.host) {
     return (
-      isNestedTurn(root.host) ||
-      TURN_TAGS.has(root.host.tagName.toLowerCase())
+      isNestedTurn(root.host) || TURN_TAGS.has(root.host.tagName.toLowerCase())
     );
   }
   return false;
@@ -132,6 +131,9 @@ function isNestedTurn(el: Element): boolean {
 export const geminiAdapter: ChatAdapter = {
   hostPattern: /^gemini\.google\.com\//,
   platform: "gemini",
+  // Phase 1 is read-only — `findInputBox` returns null unconditionally.
+  // Recall-overlay paste UI lands later; flip when it does.
+  supportsInsert: false,
 
   extractConversation(doc: Document): ChatTurn[] {
     const turns: ChatTurn[] = [];
@@ -161,10 +163,7 @@ export const geminiAdapter: ChatAdapter = {
     return match?.[1] ?? null;
   },
 
-  onNewAssistantTurn(
-    doc: Document,
-    cb: (turn: ChatTurn) => void,
-  ): () => void {
+  onNewAssistantTurn(doc: Document, cb: (turn: ChatTurn) => void): () => void {
     // Resolve `MutationObserver` off the document's own window so unit
     // tests in a node Vitest environment (where the global is missing)
     // pick up the JSDOM-provided constructor instead.
@@ -196,10 +195,10 @@ export const geminiAdapter: ChatAdapter = {
     const shadowsObserved = new WeakSet<ShadowRoot>();
 
     const attachObserver = (root: Document | ShadowRoot): void => {
-      const isDocument = root.nodeType === 9 /* DOCUMENT_NODE */;
+      const isDocument = root.nodeType === 9; /* DOCUMENT_NODE */
       if (!isDocument) shadowsObserved.add(root as ShadowRoot);
       const target: Element | ShadowRoot | Document = isDocument
-        ? ((root as Document).body ?? root)
+        ? (root as Document).body ?? root
         : (root as ShadowRoot);
       const observer = new MO((records) => {
         for (const rec of records) {

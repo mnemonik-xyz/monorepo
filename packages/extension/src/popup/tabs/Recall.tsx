@@ -1,8 +1,8 @@
 // Recall tab — query input + result list. Hits `runtime.recall` which
 // runs cosine search over the IndexedDB store under the current
 // identity. "Insert into chat" is disabled when the active-tab adapter
-// has no `findInputBox` (T11 TDD anchor #2). "Copy markdown" + "Open"
-// are always available.
+// reports `supportsInsert: false` (T11 TDD anchor #2). "Copy markdown"
+// + "Open" are always available.
 
 import { useState, type JSX } from "react";
 import type { ChatAdapter } from "../../runtime/chat/types.js";
@@ -18,28 +18,27 @@ export function Recall(props: RecallProps): JSX.Element {
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<SearchResult[]>([]);
   const [busy, setBusy] = useState(false);
+  const [hasSearched, setHasSearched] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Probe the adapter once per render. We cannot dereference
-  // `findInputBox(document)` here because the popup runs in its own
-  // document; instead we ask the adapter to *report* support purely by
-  // method identity. The convention adopted by all three Phase 1
-  // adapters (T07/T08/T09) is that adapters lacking insert support
-  // return `null` unconditionally — we surface that as a disabled
-  // button + tooltip per the TDD anchor.
-  const insertSupported = isInsertSupported(adapter);
+  // Adapters declare insert support via a `supportsInsert: boolean`
+  // flag (BLK-1 fix). Minifier-safe — no `Function.prototype.toString`
+  // introspection.
+  const insertSupported = Boolean(adapter?.supportsInsert);
 
   const handleSearch = async (): Promise<void> => {
     setError(null);
     const trimmed = query.trim();
     if (trimmed === "") {
       setResults([]);
+      setHasSearched(false);
       return;
     }
     setBusy(true);
     try {
       const hits = await getRuntime().recall(trimmed, 5);
       setResults(hits);
+      setHasSearched(true);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -54,8 +53,15 @@ export function Recall(props: RecallProps): JSX.Element {
         type: "ui:insert-into-chat",
         payload: { text },
       });
-    } catch {
-      // Surface to user later — non-blocking for popup state.
+    } catch (e) {
+      // Surface the failure — the button is enabled, so a silent
+      // no-op would be misleading. The toast lives in <Recall> via
+      // the inline error block above the results list.
+      setError(
+        e instanceof Error
+          ? `Insert failed — ${e.message}. Reload the chat tab and try again.`
+          : "Insert failed — reload the chat tab and try again."
+      );
     }
   };
 
@@ -83,9 +89,10 @@ export function Recall(props: RecallProps): JSX.Element {
         <button
           type="submit"
           disabled={busy}
+          aria-busy={busy}
           className="bg-accent-primary/20 hover:bg-accent-primary/30 disabled:opacity-50 text-accent-primary border border-accent-primary/50 text-xs font-mono uppercase tracking-wide px-3 py-1.5 rounded transition-colors"
         >
-          {busy ? "…" : "Find"}
+          {busy ? "Recalling" : "Find"}
         </button>
       </form>
 
@@ -94,9 +101,9 @@ export function Recall(props: RecallProps): JSX.Element {
       ) : null}
 
       <ul className="flex flex-col gap-2" aria-label="Recall results">
-        {results.length === 0 && !busy ? (
+        {hasSearched && results.length === 0 && !busy ? (
           <li className="text-[11px] text-text-muted italic">
-            No results yet — type a query and press Enter.
+            Recall returned no results for this query.
           </li>
         ) : null}
         {results.map((r) => (
@@ -109,7 +116,11 @@ export function Recall(props: RecallProps): JSX.Element {
                 {r.relevance_score.toFixed(3)}
               </span>
               <PlatformPill tags={r.tags} />
-              <span className="text-text-muted font-mono ml-auto">
+              <span
+                className="text-text-muted font-mono ml-auto"
+                title={r.attestation_id}
+                aria-label={`Attestation ID: ${r.attestation_id}`}
+              >
                 {truncateMiddle(r.attestation_id, 6, 4)}
               </span>
             </div>
@@ -181,49 +192,4 @@ function toMarkdown(r: SearchResult): string {
 function truncateMiddle(value: string, head: number, tail: number): string {
   if (value.length <= head + tail + 1) return value;
   return `${value.slice(0, head)}…${value.slice(-tail)}`;
-}
-
-/**
- * The popup runs in its own document, so we can't probe `findInputBox`
- * against the active tab's DOM here. We treat adapters that ship a
- * `findInputBox` implementation in the registry as "claiming support";
- * Phase 1 ChatGPT does, Claude / Gemini do not.
- *
- * Convention: adapters that don't support insert pin their `findInputBox`
- * to a constant `() => null` (T08 + T09 do this explicitly). We detect
- * the no-op by calling it against an empty in-popup `Document` — a
- * `null` return without an actual chat DOM is the only signal we have
- * from inside the popup process. The result is a faithful proxy for
- * "the adapter has implemented insert support" — a true-positive
- * adapter returns null here too, but the *button click* path runs in
- * the content-script context where the real DOM lookup succeeds, so
- * the disabled-state is purely an informational gating step.
- *
- * To avoid the false-negative an explicit metadata channel would be
- * better; adapters expose `findInputBox` as a method, and adapters that
- * have no plans to support insert (T08 Claude, T09 Gemini) make the
- * function reference equal to a shared sentinel. We compare against the
- * sentinel by name — adapters that DO support insert define
- * `findInputBox` with a non-empty function body whose `toString()`
- * length exceeds the sentinel's. This is a heuristic; the TDD anchor
- * (Recall.test.tsx::insert_into_chat_disabled_when_no_input_box) drives
- * the false-negative case for an adapter returning null.
- */
-function isInsertSupported(adapter: ChatAdapter | null): boolean {
-  if (!adapter) return false;
-  // Heuristic detection: adapters that explicitly disable insert ship a
-  // single-statement body that returns `null`. Adapters that implement
-  // it have a multi-statement body that performs DOM lookups. The
-  // popup probe is conservative — when in doubt, allow the action and
-  // let the content script no-op on its side.
-  try {
-    const src = adapter.findInputBox.toString();
-    if (/return\s+null\s*;?\s*\}\s*$/.test(src.trim())) {
-      return false;
-    }
-    if (src.length < 60) return false;
-    return true;
-  } catch {
-    return false;
-  }
 }

@@ -1,7 +1,11 @@
 [
   {
     "name": "popup-initial-js",
-    "path": "dist/src/popup/main.tsx-*.js",
+    "path": [
+      "dist/src/popup/main.tsx-*.js",
+      "dist/assets/main-*.js",
+      "dist/assets/popup-*.js"
+    ],
     "limit": "50 KB",
     "gzip": true,
     "running": false
