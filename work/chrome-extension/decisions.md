@@ -556,3 +556,240 @@ on the test suite that does run (the unit + component layers; the
 build gate inherits the dev-branch breakage).
 
 ---
+
+## 2026-05-11 · T15 — Round-2 verification status (PR #114)
+
+Round-2 verifier confirmed that commit `d9deda6 fix(mcp): address T15
+review round 1` (on branch `claude/extension-t15-server-escrow-wt`)
+addresses all material findings from the three round-1 reviews under
+`work/chrome-extension/logs/working/task-15/`. No additional commits
+were required; the original round-2 commit was already complete.
+
+**Findings × resolution map** (all addressed by `d9deda6` unless
+noted):
+
+Code-reviewer (`code-reviewer-round1.json`):
+- major / JWT error detail leaked in `extract_extension_claims` →
+  client now receives fixed `jwt_invalid`, detail logged at warn.
+- major / `PRAGMA foreign_keys=ON` not set → added to both
+  `SqliteStore::open()` and `SqliteStore::in_memory()` (the only
+  `core/` touch this task needs; pure DB-connection setting).
+- minor / `internal_error` formats JWT-encode error → reviewer
+  marked as "acceptable, not blocking"; left as-is.
+- minor / per-user cap constant leak in 429 body → fixed opaque
+  `too_many_pending_tickets`.
+- minor / `now_rfc3339` / `now_unix` skew → single
+  `let now = chrono::Utc::now();`.
+- minor / nonce upper bound 64 → tightened to 16 bytes.
+- minor / `seed_link` linked_at type comment → doc comment added.
+- minor / `Retry-After` header silent failure → `match` + warn log.
+
+Security-auditor (`security-auditor-round1.json`):
+- T15-M-01 / JWT error leak → same fix as code-major above.
+- T15-M-02 / expired-ticket counter pinning (self-DoS) →
+  `ExtensionBootstrapTickets::insert` sweeps TTL-expired entries
+  for the inserting `jwt_sub` BEFORE counting toward the cap; new
+  test `expired_tickets_do_not_pin_per_user_counter`.
+- T15-L-01 / cap constant leak → same fix as code-minor above.
+- T15-L-02 / cross-user GET test → new `get_cross_user_isolation`.
+- T15-L-03 / pubkey_base58 length cap → 64-char upper bound.
+- T15-N-01 / two `Utc::now()` calls → same fix as code-minor.
+
+Test-reviewer (`test-reviewer-round1.json`):
+- F1 blocker / DELETE cross-user isolation → new
+  `delete_cross_user_isolation`; defensive direct-SQL check that
+  user B's row survives user A's DELETE attempt.
+- F2 blocker / expired ticket → 404 → new
+  `expired_bootstrap_ticket_returns_404` (harness with
+  `ttl_seconds=0`).
+- F3 major / 429 body assertion → 429 body now carries fixed
+  `rate_limited` token; `rate_limit_blocks_brute_force` asserts on
+  it.
+- F4 major / replay-nonce test absent → **deferred with rationale**:
+  escrow PUT/GET have no per-request server-side nonce. The body
+  `nonce` is a data-layer AES-GCM cipher nonce; bootstrap tickets
+  are already single-use (covered); escrow PUTs are idempotent
+  under replay (rewrap of same value). The tech-spec line is a
+  draft carryover. No test added; rationale recorded in worktree
+  `decisions.md` (T15 round-2 entry).
+- F5 minor / PUT/DELETE missing google_sub → new
+  `key_escrow_put_and_delete_require_google_sub_claim`.
+- F6 minor / `linked_at` INTEGER vs spec TEXT → doc comment on
+  `seed_link`; T14 schema is the source of truth.
+- F7 minor / per-user cap test → new
+  `bootstrap_per_user_cap_blocks_fourth_ticket`.
+
+**Verification on the worktree** (`/private/tmp/t15-worktree`,
+branch `claude/extension-t15-server-escrow-wt`):
+
+- `cargo build --workspace` → green.
+- `cargo test -p mnemonic-mcp --test key_escrow --features
+  mnemonic-mcp/test-support` → 16/16 pass in 0.29 s.
+- `cargo test --workspace --features mnemonic-mcp/test-support
+  --no-fail-fast` → all suites green, no failures.
+- `cargo clippy --workspace --lib --bins -- -D warnings` → clean.
+- `cargo clippy --workspace --all-targets --features
+  mnemonic-mcp/test-support -- -D warnings` → clean.
+- `cargo fmt --all -- --check` → clean.
+
+**Push**: `d9deda6` force-with-leased to
+`origin/claude/extension-t15-server-escrow` (PR #114). Noise file
+`docs/QUICKSTART.md` (case-insensitive FS collision in this
+worktree) was deliberately not staged.
+
+**Architectural rules preserved**:
+- Migration stays in `mcp/src/escrow.rs`, not `core/`.
+- The `PRAGMA` change in `core/src/storage/sqlite.rs` is a
+  per-connection SQLite setting, not domain logic — no `mcp/`
+  references introduced into `core/`.
+- `rusqlite::Connection` Mutex is never held across `.await` in any
+  handler; verified by re-reading `key_escrow_get_handler` and
+  `key_escrow_put_handler`.
+- No `.unwrap()` in production code; tests are unaffected.
+
+Task `15.md` remains `status: in_review` / `blocked_on: ci-verify`
+per D13 — flips to `done` only when PR #114 CI reports green.
+
+---
+
+## 2026-05-11 · T11 — Popup UI round-2 review fixes
+
+PR #113 received one round-1 blocker, three majors and four minors
+from `code-reviewer`, plus three majors / six minors / four nits
+from `ux-reviewer`. Worktree
+`/private/tmp/t11-worktree` (branch
+`claude/extension-t11-popup-wt`) reapplied the WIP patch from the
+interrupted resume, dropped the unrelated noise hunks
+(`docs/quickstart.md` and the embedder seed-vector fixture), then
+walked the findings list. Findings addressed:
+
+**Code-reviewer:**
+
+- BLK-1 — added `supportsInsert: boolean` to the `ChatAdapter`
+  interface in `runtime/chat/types.ts`. ChatGPT sets it `true`;
+  Claude / Gemini set it `false` (Phase 1 read-only). `Recall.tsx`
+  reads `Boolean(adapter?.supportsInsert)` directly — no more
+  `Function.prototype.toString` heuristic that minifiers would have
+  silenced. Test fixtures + `registry.test.ts` stub mirror the new
+  field; both D13 anchors stay binding.
+- MAJ-1 — file-drop verify path returns
+  `{ status: 'not_found', reason: 'file_drop_unsupported' }` and
+  the UI renders a clear "file verification coming soon — paste an
+  attestation id" placeholder instead of the misleading generic
+  not-found state. The runtime doc-comment + `decisions.md` entry
+  here flag it as a known MVP limitation pending the WASM
+  `verify_artifact` export (T05 follow-up).
+- MAJ-2 — `verifyRow` now sets `presence_only: true` and the UI
+  renders "STORED LOCALLY · VERIFIED" with an explicit caveat
+  ("Cryptographic verification coming soon — this confirms the
+  local record exists with a non-empty COSE envelope."). Missing
+  COSE bytes still trip the tampered path. **Known MVP limitation:
+  the popup does NOT yet perform cryptographic signature
+  verification — it only confirms presence + non-empty COSE
+  envelope.** Full verify is queued behind T05's `verify_artifact`
+  WASM export.
+- MAJ-3 — added a dedicated `Extension popup component tests
+  (vitest)` step to `.github/workflows/node-test.yml` running
+  `bunx vitest run tests/component` from `packages/extension`. The
+  D13 TDD anchors (`sign_button_calls_signMemory`,
+  `insert_into_chat_disabled_when_no_input_box`) now gate merges
+  per the round-1 review.
+- MIN-1 — `runtime-impl.ts::loadIdentity` now applies the same
+  defensive try/catch pattern as `runtime.ts::readChromeStorage`,
+  and validates `identity_secret` is exactly a 64-byte array
+  before returning (Solana keypairs are 64 bytes — anything else
+  would silently produce malformed signatures).
+- MIN-2 — JSDoc on the module-level `IndexedDbStore` singleton
+  documenting it is popup-realm scoped; the service worker must
+  build its own instance via `runtime/store/indexeddb.ts` if
+  background recall is ever wired.
+- MIN-3 — `Recall.handleInsert` surfaces failures via the inline
+  error block ("Insert failed — reload the chat tab and try
+  again.") instead of swallowing them silently.
+- MIN-4 — `.size-limit.json` accepts the three plausible Vite
+  chunk patterns crxjs may emit so the budget enforces against
+  whichever path the build resolves.
+
+**UX-reviewer:**
+
+- Major a11y (App tabs) — switched to APG tabs pattern:
+  `role="tablist"`, `role="tab"` + `aria-selected` +
+  `aria-controls`, `role="tabpanel"` + `aria-labelledby`,
+  `tabIndex` reflects selection. Added arrow / Home / End keyboard
+  handler that moves focus onto the new tab.
+- Major a11y (Verify state icons) — each outcome carries a
+  non-color glyph: `✓` verified, `✗` tampered, `?` not-found /
+  presence-only. Color is supplemental, not the only signal.
+- Major a11y (Toast Escape) — Toast accepts `onDismiss` +
+  `autoClearMs`. Escape key + close button (`aria-label="Dismiss"`)
+  both call `onDismiss`. Auto-clear after 4 s by default.
+- Minor a11y (Settings cog) — `title` removed; the gear glyph is
+  wrapped in `aria-hidden="true"` so the `aria-label` is the
+  single accessible name.
+- Minor a11y (Capture textarea) — explicit `id`/`htmlFor` pairing,
+  duplicate `aria-label` removed.
+- Minor a11y (Recall empty state) — tracks `hasSearched`. Pre-search
+  the list is empty; post-search-no-results renders "Recall
+  returned no results for this query."
+- Minor feedback (Recall busy) — Find button shows "Recalling"
+  with `aria-busy="true"` while the request is in flight.
+- Minor tone (Verify tampered reason) — prefixed with
+  "Verification failed: " per ux-guidelines.
+- Minor a11y (Verify drop zone) — added a hidden `<input
+  type="file">` triggered by a visible "Choose file" button so
+  keyboard / non-pointer users can pick a file without
+  drag-and-drop.
+- Nit (TierDialog Escape) — added a document-level Escape handler
+  that closes the dialog and an initial focus on the primary
+  action. Full focus-trap deferred to T12 dialog primitive.
+- Nit (Recall attestation id) — added `title` + `aria-label`
+  exposing the full `attestation_id` on the truncated span.
+
+**Verification:**
+
+- `bunx vitest run tests/component` → 10/10 component tests pass
+  including both D13 TDD anchors.
+- `bunx vitest run` → 101/107 pass; the six failures are
+  pre-existing (`tests/unit/sign/cose.test.ts` fails to load the
+  WASM artefact `core/pkg-web/mnemonic_core.js` because the
+  worktree has not built it — out of T11's scope).
+- `bun test` (excludes `tests/component/**` per bunfig.toml) →
+  91/92 pass with the same WASM-load failure as the only miss.
+- `bun run build` fails on a missing icon asset
+  (`src/assets/icon-16.png`) — pre-existing T01 / T10 / T20 gap,
+  not introduced or aggravated here.
+
+**Push:** `af711e7` force-with-leased to
+`origin/claude/extension-t11-popup` (PR #113). Noise file
+`docs/QUICKSTART.md` (case-insensitive FS collision in this
+worktree — HEAD already carries both casings as a separate pre-
+existing inconsistency) was deliberately not staged.
+
+**Architectural rules preserved:**
+
+- `core/` ↔ `mcp/` separation untouched (this PR is extension-only).
+- D13 TDD anchors (`sign_button_calls_signMemory`,
+  `insert_into_chat_disabled_when_no_input_box`) remain binding;
+  the second one now asserts the `disabled` attribute against the
+  explicit `supportsInsert: false` field rather than the
+  toString heuristic. Both anchors execute under the new vitest CI
+  step.
+- `worker.format: 'es'` in `vite.config.ts` (T04 dependency)
+  untouched.
+- `tests/component/**` stays excluded from `bun test` per the T11
+  round-1 commit; the new vitest CI step covers them.
+
+**Deferrals (out of scope for round-2):**
+
+- Full WASM `verify_artifact` export (T05 follow-up) so the popup
+  can drop the `presence_only` caveat and verify dropped files.
+- size-limit `--fail-if-not-found` style enforcement (no such flag
+  in size-limit 12.x; mitigated by listing three plausible globs).
+- Pre-existing `bun run lint` / `bun run build` failures
+  (vite/vitest version mismatch, missing icon asset) — not
+  introduced here.
+
+Task `11.md` remains `status: in_review` / `blocked_on: ci-verify`
+per D13 — flips to `done` only when PR #113 CI reports green.
+
+---
