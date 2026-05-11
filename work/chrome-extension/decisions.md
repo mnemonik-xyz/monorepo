@@ -1931,3 +1931,22 @@ Round-2 test audit flagged TA-MIN2 (no `About` section test) and TA-MIN4 (no Ide
 | T24-T-03 | minor | `tests/unit/auth/key-escrow.fuzz.test.ts` | **fixed** — property reframed from "KDF determinism (which lives in the canonical `key-escrow.test.ts`)" to "round-trip identity over a fixed salt — the rotate invariant"; comments updated to describe what is actually verified. Determinism is implicit in the unwrap-succeeds assertion; the canonical determinism test is in `key-escrow.test.ts::deriveKey > is deterministic for (passphrase, salt)`. |
 
 Round-2 review: `status: passed`, 0 findings, 27/27 tests pass in 1.03s.
+
+## 2026-05-11 · T25b — Auto-keygen + embedder prewarm
+
+T25b complements the T25 identity-UX work (generate / export / import on the Options page) with two UX shortcuts that make the freshly-installed extension usable without a console snippet:
+
+1. **Auto-create a local Ed25519 identity on popup mount.** `src/auth/local-identity.ts::ensureLocalIdentity` reads `chrome.storage.local.{identity, identity_secret}`. If either is missing or the secret is not 64 bytes, it generates a fresh keypair via `crypto.subtle.generateKey('Ed25519', true, ['sign','verify'])`, packs it as the Solana 64-byte format (`seed (PKCS8 offset 16..48) || pubkey (SPKI offset 12..44)`), base58-encodes the pubkey (~30 lines inline — no `bs58` dep), and persists under the canonical keys. The popup's bootstrap calls this when `loadIdentity()` returns null AND we are on the Local tier OR on Cloud tier with no session bound. Identity is never auto-overwritten when a session exists on the Cloud tier — the existing Onboarding / key-escrow restore flow owns that surface.
+
+2. **Pre-warm the ORT WASM + ONNX embedder model on install / update.** `chrome.runtime.onInstalled` (reason `install` or `update` only — `browser_update` / `chrome_update` skipped) now triggers a void async `prewarmEmbedder()` injected via `ServiceWorkerDeps`. The production default lazy-imports `runtime/embed/embedder-bridge.ts::__ensureEmbedderInitialised`, which spawns the SW-side `TransformersEmbedder` singleton and runs one throwaway `embed("init")` call to force the ~35MB model download through the worker's `ensureReady` gate. Failures are absorbed at the install listener boundary — slow networks just fall back to the existing cold-init cost on first capture.
+
+**Constraint compliance:** no new npm deps; no logging of raw secret bytes (`secret` is packed into a fresh `Uint8Array` then converted to `number[]` so it round-trips through `chrome.storage` without exposing a live view of key material); cloud-tier + escrow-present users are never auto-keygen'd.
+
+**Test results:**
+
+- `tests/unit/auth/ensure-local-identity.test.ts` — 8 / 8 pass under bun (213 expect() calls), covers: null storage → fresh keypair (shape, persistence, byte-range), idempotence on second call, existing valid identity returned verbatim, regenerate on bad-length secret, regenerate when identity is missing but identity_secret present, base58 fixtures (empty input, leading-zero handling, known fixture `1Ldp`).
+- `tests/unit/background/install-prewarm.test.ts` — 6 / 6 pass under bun, covers: prewarm called once on `install`, prewarm called once on `update`, NOT called on `browser_update` or `chrome_update`, install handler does not throw when prewarm rejects (and sibling install side-effects still happen), skips prewarm gracefully when no `prewarmEmbedder` dep is provided.
+- Full extension `bun test` — 321 pass, 1 pre-existing failure (`cose.test.ts` missing WASM build), unrelated to T25b. Confirmed via `git stash` baseline.
+- `bunx vitest run` — 416 pass, 2 pre-existing failures (`cose.test.ts` WASM missing + `cloud-sync.test.ts` globalThis.addEventListener under node env). Both predate this PR; confirmed via `git stash` baseline.
+- `bun x vite build` — clean.
+- `bun x tsc -b --noEmit` — clean.
