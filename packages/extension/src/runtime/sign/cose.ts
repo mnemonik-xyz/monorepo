@@ -30,7 +30,10 @@ interface MnemonicCoreModule {
   sign_cose_payload: (payload: Uint8Array, kp: unknown) => Uint8Array;
   import_keypair_json: (s: string) => unknown;
   export_keypair_json: (kp: unknown) => string;
-  compress_embedding: (embedding: Float32Array, bit_width: number) => Uint8Array;
+  compress_embedding: (
+    embedding: Float32Array,
+    bit_width: number,
+  ) => Uint8Array;
   decompress_embedding: (bytes: Uint8Array, dim: number) => Float32Array;
   to_canonical_cbor_bytes: (value: unknown) => Uint8Array;
   blake3_hash: (bytes: Uint8Array) => Uint8Array;
@@ -53,7 +56,9 @@ async function loadWasm(): Promise<MnemonicCoreModule> {
   if (modulePromise) return modulePromise;
   modulePromise = (async () => {
     const url = new URL("./wasm/mnemonic_core.js", import.meta.url);
-    const mod = (await import(/* @vite-ignore */ url.href)) as MnemonicCoreModule;
+    const mod = (await import(
+      /* @vite-ignore */ url.href
+    )) as MnemonicCoreModule;
     if (typeof mod.default === "function") {
       await mod.default();
     }
@@ -136,4 +141,19 @@ export async function signCosePayload(
     );
   }
   return cose;
+}
+
+/** Ed25519-sign raw `nonce` bytes with `keypair`. Returns the 64-byte
+ *  detached signature. Used by the `/oauth/google/link` possession-
+ *  proof flow (T16 + T17): the server issues a random nonce that the
+ *  client must sign to prove ownership of the pubkey being bound. */
+export async function signChallenge(
+  keypair: KeypairJson,
+  nonce: Uint8Array,
+): Promise<Uint8Array> {
+  if (nonce.length === 0) {
+    throw new Error("signChallenge: refusing to sign empty nonce");
+  }
+  const wasm = await loadWasm();
+  return wasm.sign_challenge(keypair, nonce);
 }

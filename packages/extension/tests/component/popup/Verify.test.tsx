@@ -46,6 +46,27 @@ function makeRuntime(
       set: async () => undefined,
       clear: async () => undefined,
     },
+    keyEscrow: {
+      wrap: async () => {
+        throw new Error("keyEscrow.wrap stub: not configured in test");
+      },
+      unwrap: async () => {
+        throw new Error("keyEscrow.unwrap stub: not configured in test");
+      },
+      upload: async () => {
+        throw new Error("keyEscrow.upload stub: not configured in test");
+      },
+      fetch: async () => {
+        throw new Error("keyEscrow.fetch stub: not configured in test");
+      },
+      delete: async () => {
+        throw new Error("keyEscrow.delete stub: not configured in test");
+      },
+      rotate: async () => {
+        throw new Error("keyEscrow.rotate stub: not configured in test");
+      },
+      hasBlob: async () => false,
+    },
   };
 }
 

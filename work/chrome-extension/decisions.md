@@ -1184,3 +1184,51 @@ Replaces the T10 thin stubs at `src/content/fab.ts` and `src/content/recall-over
 - `tsc -b` reports a duplicate-vite-install typing conflict in `vite.config.ts` / `vitest.config.ts`. Pre-existing on `dev`, documented in T10 §"Sandbox observations".
 
 Task `13.md` flips to `status: in_review` / `blocked_on: ci-verify` per D13 — settles to `done` only after the PR's CI run reports green on the bun-test + vitest suites.
+
+---
+
+## T17 — Key-escrow client + restore UX (D9 Argon2id+AES-GCM-256)
+
+T17 ships the client-side passphrase-wrap pipeline that fulfils D9 end-to-end: Argon2id (m=65536, t=3, p=1, hash_length=32) derives a 256-bit key from the user's recovery passphrase; AES-GCM-256 with a fresh 16-byte salt + 12-byte nonce wraps the Ed25519 secret; the server (T15) stores the opaque blob keyed by Google `sub`. The Restore UX handles the second-device path with a 5-attempt local block (24h, persisted) and surfaces server 429s as a typed `EscrowRateLimitError` countdown. Both the popup onboarding (`Onboarding.tsx`) and the options Security section now call the real `auth/key-escrow.ts` client. See PR #120 for the full diff.
+
+## 2026-05-11 · T17 — Round-1 review fixes (PR #120)
+
+Three round-1 reviewers (code-reviewer, security-auditor, test-reviewer) returned `request_changes`. Findings table + resolution status below. Reviewer reports archived at `work/chrome-extension/logs/working/task-17/{code-reviewer,security-auditor,test-reviewer}-round1.json`.
+
+| Finding | Severity | File | Resolution |
+| --- | --- | --- | --- |
+| T17-C-01 | blocker | `options/runtime-impl.ts` | **fixed** — `SESSION_KEY` now imports `SESSION_STORAGE_KEY` from `auth/types.js` so options + popup share the same chrome.storage slot. |
+| T17-C-02 / T17-S-01 | major / high | `popup/onboarding/Restore.tsx` | **fixed** — encrypted blob cached in `useState<EscrowBlob \| null>` after the first GET; subsequent wrong-passphrase submits decrypt against the cache without hitting the server. 5 wrong-passphrase attempts now cost exactly 1 server fetch, preserving the independent 5/24h GET budget. Asserted by `Restore.test.tsx` 5-attempts test (`fetchSpy.toHaveBeenCalledTimes(1)`). |
+| T17-C-03 | major | `popup/onboarding/Restore.tsx` | **fixed** — `now` / `storage` default expressions hoisted to module-scope (`DEFAULT_NOW`, `getDefaultStorage()`), eliminating useEffect dep churn on every render. The key-escrow facade is also pinned in a `useRef` so it's stable across renders. |
+| T17-C-04 | major | `popup/onboarding/Restore.tsx` | **fixed** — wrong-attempt counter persisted to `chrome.storage.local.restore_attempt_count`. Hydrated on mount alongside the block timestamp. New `Restore.test.tsx::T17-C-04` test seeds 4 prior attempts, asserts one more wrong click triggers the block. |
+| T17-C-05 / T17-T-05 | minor / minor | `auth/key-escrow.ts` | **fixed** — `parseRetryAfter` is now async, clones the response, parses `retry_after_secs` from the JSON body when the header is absent. Two new tests bind the channel: JSON-body-only fallback and hostile-large-value clamp. |
+| T17-C-06 | minor | `popup/onboarding/SetPassphrase.tsx` | **fixed** — `bytesToBase64` exported from `auth/key-escrow.ts`; SetPassphrase imports the canonical helper instead of duplicating. |
+| T17-C-07 | minor | `popup/onboarding/SetPassphrase.tsx` | **fixed** — component is now mounted from `Onboarding.tsx` on the `set_passphrase` branch with a host-supplied `signChallenge` callback that lazy-loads the WASM Ed25519 signer (`runtime/sign/cose.ts::signChallenge`). New `SetPassphrase.test.tsx` covers the zxcvbn gate, confirm-match, happy path (asserts wrap+upload+sign+link order), wrap error, upload error, and 409-already-linked. |
+| T17-C-08 | minor | `popup/onboarding/Restore.tsx` | **deferred to T18** — post-restore IndexedDB sync trigger lives with the background sync wave. Comment retained, no `chrome.runtime.sendMessage` added in this round. |
+| T17-C-09 | nit | `tests/component/popup/Restore.test.tsx` | **fixed** — 5-wrong-attempts test now wraps the fetch in `vi.fn()` and asserts `toHaveBeenCalledTimes(1)`. |
+| T17-S-02 | medium | `auth/key-escrow.ts` | **fixed** — `MAX_RETRY_AFTER_SECONDS = 24 * 3600` constant exported; both the header path and JSON-body fallback clamp to it. Test: `Retry-After: 999999999` → 86400 (header), `{retry_after_secs: 999999999}` → 86400 (body). |
+| T17-S-03 | medium | `popup/Onboarding.tsx` | **fixed** — secret-wipe now happens in a `useEffect` on `step` change so it fires on success path, error step transition, AND component unmount. Tracked via `heldKeypairRef`; on success the inline `onComplete` wipe still runs (defence-in-depth). |
+| T17-S-04 | low | `popup/Onboarding.tsx` | **deferred** — `loadLocalKeypair` length-validation alignment with `loadIdentity` (64-byte enforcement) is a hardening item; the immediate bug (mismatched chrome-storage key) is the higher-priority fix and is closed by T17-C-01. Logged for the T18 wave. |
+| T17-S-05 | low | `auth/key-escrow.ts` | **fixed** alongside T17-C-05 / T17-T-05 — the JSON body fallback is now real, not documentation-only. |
+| T17-S-06 | nit | `popup/onboarding/Restore.tsx` | **fixed** — explicit comment at the `Array.from(secret)` site documenting the structured-clone constraint (number[] cannot be zeroed). No code change required; the comment is now in place. |
+| T17-S-07 | nit | `popup/onboarding/Restore.tsx` | **deferred** — stale-closure risk on the attempts counter is bounded by the `inputDisabled` submitting-guard; the cosmetic window has no security consequence and the functional-updater rewrite would force the `set_passphrase` test fixture into a different shape. |
+| T17-T-01 | major | `tests/unit/auth/key-escrow.test.ts` | **fixed** — three new direct tests on production `wrapSecret`: empty-secret synchronous reject, empty-passphrase reject, empty-pubkey reject, plus a full slow round-trip at production Argon2id parameters with `testTimeout: 30_000` (asserts the in-blob `kdf_params.{m,t,p}` match the exported constants — proves the wiring, not just the constants). |
+| T17-T-02 | major | `tests/component/popup/SetPassphrase.test.tsx` | **fixed** — new 6-test file: zxcvbn gate, confirm-mismatch, happy path (full wrap+upload+sign+link sequence assertion), wrap error copy, upload error copy, 409 (already-linked) copy. |
+| T17-T-03 | minor | `tests/unit/auth/key-escrow.test.ts` | **fixed** — `time_cost ≥ 2` floor bumped to `≥ 3` to match OWASP 2023 + D9. |
+| T17-T-04 | minor | `tests/unit/auth/key-escrow.test.ts` | **fixed** — new test wraps + unwraps a 64-byte secret (Solana keypair shape) and asserts byte-for-byte equality. |
+| T17-T-06 | nit | `tests/unit/auth/key-escrow.test.ts` | **fixed** — `fetchCalls = []` reset added to `beforeEach` so cross-describe isolation holds even when later tests assign `globalThis.fetch` directly. |
+| T17-T-07 | nit | `tests/unit/auth/key-escrow.test.ts` | **fixed** — new test for `rotatePassphrase` upload-mid-flight failure: GET ok → unwrap ok → PUT 500 → `AuthError` surfaces, server-side blob is NOT deleted (no DELETE issued). |
+
+**Architecture follow-ups landed in this round (not strictly review findings, but pre-requisites):**
+
+- `popup/runtime.ts` gains a `keyEscrow` facade (`wrap/unwrap/upload/fetch/delete/rotate/hasBlob`) that lazy-imports `auth/key-escrow.ts`. Restore + SetPassphrase consume it via narrow prop seams (`RestoreKeyEscrow`, `SetPassphraseKeyEscrow`) so tests inject stubs without touching WebCrypto.
+- `runtime/sign/cose.ts` adds `signChallenge(keypair, nonce)` — Ed25519 detached signature over raw bytes, used by the `/oauth/google/link` possession proof. Onboarding.tsx supplies a closure that lazy-loads the WASM signer before signing.
+- Test fixtures in `tests/component/popup/{Capture,Recall,Verify}.test.tsx` gained the new `keyEscrow` stub block to keep `PopupRuntime` typecheck-complete.
+
+**Test coverage after fixes**
+
+- `bun test tests/unit/auth tests/component/popup tests/component/options` → 80 pass.
+- `vitest run tests/component/popup` → 25 pass (Capture 3, Recall 3, Verify 4, Restore 9, SetPassphrase 6).
+- `vitest run tests/unit/auth/key-escrow.test.ts` → 50 pass (was 33 before round-1; +17 from this fix wave).
+- `bun test` (full extension) → 196 pass / 1 pre-existing `cose.test.ts` WASM failure (unchanged from the pre-fix baseline).
+
