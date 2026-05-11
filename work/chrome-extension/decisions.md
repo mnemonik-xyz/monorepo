@@ -1266,3 +1266,15 @@ Round-2 test audit flagged TA-MIN2 (no `About` section test) and TA-MIN4 (no Ide
 - Combined: 27 / 27 pass in 963ms.
 - Full extension `npx vitest run` (no test-name filter): 337 pass, 7 unchanged pre-existing failures (`cose.test.ts` missing WASM build; `cloud-sync.test.ts` re-auth event listener — both predate this PR; confirmed via `git stash` baseline diff).
 - `bun test tests/unit/messages.fuzz.test.ts tests/unit/auth/key-escrow.fuzz.test.ts` — 12 / 12 pass, 367ms (1929 `expect()` calls — bun discovers each PRNG iteration as a separate assertion).
+
+## 2026-05-11 · T24 — Round-1 review fixes
+
+`test-reviewer-round1.json` returned `needs_improvement` with three minor findings; all addressed. Reviewer reports at `work/chrome-extension/logs/working/task-24/test-reviewer-{round1,round2}.json`.
+
+| Finding | Severity | File | Resolution |
+| --- | --- | --- | --- |
+| T24-T-01 | minor | `tests/component/options/Identity.import.test.tsx` | **fixed** — leading comment block before the four error-variant tests calls them out as the regression-lock matrix for the documented failure classes (wrong passphrase, malformed JSON, missing field, wrong byte length). Tests kept as four distinct cases. |
+| T24-T-02 | minor | `tests/unit/messages.fuzz.test.ts` | **fixed** — `acceptedCount` counter inside the 1000-iteration loop + `expect(acceptedCount).toBeGreaterThan(0)` after. Catches a regression that early-returns null for every input. |
+| T24-T-03 | minor | `tests/unit/auth/key-escrow.fuzz.test.ts` | **fixed** — property reframed from "KDF determinism (which lives in the canonical `key-escrow.test.ts`)" to "round-trip identity over a fixed salt — the rotate invariant"; comments updated to describe what is actually verified. Determinism is implicit in the unwrap-succeeds assertion; the canonical determinism test is in `key-escrow.test.ts::deriveKey > is deterministic for (passphrase, salt)`. |
+
+Round-2 review: `status: passed`, 0 findings, 27/27 tests pass in 1.03s.

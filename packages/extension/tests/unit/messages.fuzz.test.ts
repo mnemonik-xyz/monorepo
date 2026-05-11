@@ -151,9 +151,9 @@ function assertResultShape(out: unknown): void {
 describe("parseMsg — fuzz / property tests", () => {
   it("parseMsg_never_throws — 1000 random inputs", () => {
     const r = mulberry32(0xc0ffee);
+    let acceptedCount = 0;
     for (let i = 0; i < 1000; i++) {
       const input = randomValue(r, 4);
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
       let out: ReturnType<typeof parseMsg>;
       // The assertion under test: parseMsg must never throw on any
       // hostile shape. We wrap the call so a failure surfaces with the
@@ -170,8 +170,18 @@ describe("parseMsg — fuzz / property tests", () => {
       // Must be either null or a typed Msg — never undefined, never
       // partially-typed.
       expect(out === null || typeof out === "object").toBe(true);
-      if (out !== null) assertResultShape(out);
+      if (out !== null) {
+        assertResultShape(out);
+        acceptedCount++;
+      }
     }
+    // Round-1 review (test-reviewer-round1.json finding 2): a buggy
+    // refactor that early-returned null for every input would slip
+    // past the above per-iteration assertions silently. The generator
+    // is seeded so this lower bound is stable run-to-run; tightening
+    // the floor would invite flakes if the generator distribution
+    // shifts under a future tweak.
+    expect(acceptedCount).toBeGreaterThan(0);
   });
 
   it("never returns undefined — even for hostile primitives", () => {

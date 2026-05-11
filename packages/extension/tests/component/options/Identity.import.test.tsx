@@ -180,6 +180,14 @@ describe("Identity section — import flow (TA-MIN4)", () => {
     expect(screen.getByText("did:sol:OriginalPub")).toBeInTheDocument();
   });
 
+  // The four tests below are the regression-lock matrix for the
+  // documented failure classes the runtime can throw (wrong passphrase,
+  // malformed JSON, missing field, wrong byte length). They look
+  // similar because the component handles every rejection the same
+  // way — `Import failed: <err.message>` toast + badge unchanged — but
+  // we keep them as four distinct cases so a future change that
+  // accidentally swallows one class still surfaces here.
+  // (Round-1 review finding 1.)
   it("surfaces a wrong-passphrase error from the runtime in a toast", async () => {
     const importEncrypted = vi
       .fn<[Uint8Array, string], Promise<IdentitySnapshot>>()

@@ -192,18 +192,19 @@ describe("key-escrow fuzz — nonce tampering fails closed", () => {
   }, /* timeout */ 60_000);
 });
 
-// ── Property 4: KDF determinism over fixed (passphrase, salt) ────────────
+// ── Property 4: round-trip identity over a fixed salt ──────────────────
 //
-// `deriveKey(passphrase, salt)` produces the same AES-GCM key for the
-// same inputs. We can't observe the raw key bytes (non-extractable
-// CryptoKey by design) so we verify determinism by wrapping under one
-// derived key and unwrapping under another — same plaintext recovered.
-// This binds the property that `kdf_params` carry stable values when
-// the salt is fixed, which the production schema relies on for the
-// "same passphrase + same blob" invariant after a rotate.
+// Round-1 review (test-reviewer-round1.json finding 3): the canonical
+// KDF-determinism unit test lives at `key-escrow.test.ts::deriveKey >
+// is deterministic for (passphrase, salt)`. THIS property's value is
+// the "rotate" invariant — when the same (passphrase, salt) is reused
+// across two wraps, both round-trip to the original secret. AES-GCM tag
+// verification implicitly proves the KDF returned the same key both
+// times; a non-deterministic KDF would surface here as a
+// `WrongPassphraseError` on the second unwrap.
 
-describe("key-escrow fuzz — KDF determinism (fixed salt)", () => {
-  it("10 random (secret, passphrase) pairs produce wrap-with-k1, unwrap-with-k2 success", async () => {
+describe("key-escrow fuzz — round-trip over fixed salt (rotate invariant)", () => {
+  it("10 random (secret, passphrase) pairs wrap twice under fixed salt → both unwrap byte-for-byte", async () => {
     const r = mulberry32(0xabad_d00d);
     for (let i = 0; i < 10; i++) {
       const secret = randomSecret(r);
@@ -214,18 +215,16 @@ describe("key-escrow fuzz — KDF determinism (fixed salt)", () => {
       const blobA = await fastWrap(secret, pp, "DetPub", fixedSalt);
       const blobB = await fastWrap(secret, pp, "DetPub", fixedSalt);
       // The kdf_params salt_b64 MUST match — fixed salt in, same out.
+      // This is the visible-on-the-wire half of the determinism story;
+      // the unwrap below is the cryptographic half.
       const sa = (JSON.parse(blobA.kdf_params) as { salt_b64: string })
         .salt_b64;
       const sb = (JSON.parse(blobB.kdf_params) as { salt_b64: string })
         .salt_b64;
       expect(sa).toBe(sb);
-      // The KDF is deterministic, so a key derived from
-      // (passphrase, fixedSalt) decrypts ciphertext produced by ANY
-      // wrap that used the same key — including blobA, even when we
-      // hand it the (fresh-nonce) ciphertext from blobB. We prove
-      // this by unwrapping blobA with the same passphrase: if the
-      // KDF were non-deterministic, the derived key would differ and
-      // AES-GCM tag verification would fail.
+      // Both blobs unwrap to the original secret. A non-deterministic
+      // KDF would derive a different key on the second wrap and the
+      // unwrap below would throw `WrongPassphraseError`.
       const outA = await unwrapSecret(blobA, pp);
       const outB = await unwrapSecret(blobB, pp);
       expect(Array.from(outA)).toEqual(Array.from(secret));
