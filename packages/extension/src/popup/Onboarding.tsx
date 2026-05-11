@@ -135,14 +135,29 @@ export function Onboarding({ onComplete }: OnboardingProps): JSX.Element {
           });
           return;
         }
-        const keypair = await loadLocalKeypair();
+        // T25 fix: the previous flow short-circuited with a typed
+        // error when no local keypair existed yet, which blocked
+        // every fresh-user Google sign-in (the popup has no
+        // mint-keypair UI of its own). We now mint one in-place via
+        // the WASM `generate_keypair` export and persist it to
+        // chrome.storage.local under the canonical keys BEFORE
+        // proceeding to the SetPassphrase wrap step. The secret
+        // bytes are also retained in component state so the wipe-
+        // on-unmount discipline in Onboarding still applies.
+        let keypair = await loadLocalKeypair();
         if (!keypair) {
-          setStep({
-            kind: "error",
-            message:
-              "no local keypair available to encrypt — generate one before enabling Cloud sync",
-          });
-          return;
+          try {
+            keypair = await mintAndPersistKeypair();
+          } catch (err) {
+            setStep({
+              kind: "error",
+              message:
+                err instanceof Error
+                  ? `keypair generation failed: ${err.message}`
+                  : "keypair generation failed",
+            });
+            return;
+          }
         }
         setStep({
           kind: "set_passphrase",
@@ -352,6 +367,42 @@ async function loadLocalKeypair(): Promise<{
   const sec = stored.identity_secret;
   if (!pub || !Array.isArray(sec) || sec.length === 0) return null;
   return { pubkey_base58: pub, secret: Uint8Array.from(sec) };
+}
+
+/** T25 — mint a fresh Ed25519 keypair via the WASM `generate_keypair`
+ *  export and persist it to `chrome.storage.local` under the canonical
+ *  `identity` / `identity_secret` keys. Mirrors
+ *  `options/runtime-impl.ts::createIdentityFacade.generate` so a
+ *  fresh-user Google sign-in flow can produce a usable keypair without
+ *  the user having to open the Options page first.
+ *
+ *  The entropy source is `getrandom`'s `js` feature, which delegates
+ *  to `crypto.getRandomValues` — CSPRNG-quality. We never log the
+ *  secret bytes anywhere along the way (audit / security review).
+ *
+ *  The returned `secret` is a `Uint8Array` (matching `loadLocalKeypair`'s
+ *  contract) so the caller can keep the wipe-on-unmount discipline
+ *  Onboarding already enforces for the `set_passphrase` step. */
+async function mintAndPersistKeypair(): Promise<{
+  pubkey_base58: string;
+  secret: Uint8Array;
+}> {
+  const { generateKeypair } = await import("../runtime/sign/cose.js");
+  const kp = await generateKeypair();
+  const created_at = Date.now();
+  // Persist the public half + the 64-byte secret BEFORE we hand
+  // anything to <SetPassphrase>. If the popup is closed between
+  // mint and the wrap+upload sequence the user can still recover
+  // by re-opening the popup — the new keypair is on disk and the
+  // welcome-back branch will pick it up.
+  await chrome.storage.local.set({
+    identity: { pubkey_base58: kp.pubkey_base58, created_at },
+    identity_secret: kp.secret,
+  });
+  return {
+    pubkey_base58: kp.pubkey_base58,
+    secret: Uint8Array.from(kp.secret),
+  };
 }
 
 /** Bind the WASM Ed25519 signer to the freshly-loaded keypair so the

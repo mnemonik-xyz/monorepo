@@ -37,9 +37,22 @@ function makeRuntime(
               did: `did:sol:${overrides.pubkey}`,
             }
           : null,
+      generate: async () => ({
+        pubkey_base58: "GeneratedPubKey",
+        did: "did:sol:GeneratedPubKey",
+      }),
+      clear: async () => undefined,
       exportEncrypted:
         overrides.exportEncrypted ?? (async () => new Uint8Array([1, 2, 3, 4])),
       importEncrypted: async () => ({ pubkey_base58: "x", did: "did:sol:x" }),
+      exportPlain: async () => ({
+        version: 1,
+        pubkey_base58: overrides.pubkey ?? "x",
+        secret: Array.from({ length: 64 }, () => 0),
+        exported_at: "2026-05-11T00:00:00.000Z",
+        warning: "",
+      }),
+      importPlain: async () => ({ pubkey_base58: "x", did: "did:sol:x" }),
     },
     keyEscrow: {
       rotate: async () => undefined,

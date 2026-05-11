@@ -52,10 +52,45 @@ export interface IdentitySnapshot {
   pubkey_base58: string;
   /** `did:sol:<pubkey>` — derived from `pubkey_base58`. */
   did: string;
+  /** Wall-clock ms of the first time this identity was persisted to
+   *  `chrome.storage.local` (set by `generate()` / `importPlain()`).
+   *  Optional because identities that pre-date the T25 schema have no
+   *  recorded creation timestamp — the UI renders "Created —" in that
+   *  case. */
+  created_at?: number;
+}
+
+/** Plain-text (UNENCRYPTED) keypair export envelope. T25 — kept narrow
+ *  and explicit so importers can validate every field. The on-the-wire
+ *  shape is JSON; consumers handle the byte ↔ JSON conversion at the
+ *  edge. */
+export interface PlainKeypairExport {
+  /** Schema version — `1` today. Future revisions bump this. */
+  version: 1;
+  /** Base58-encoded Ed25519 pubkey. */
+  pubkey_base58: string;
+  /** 64-byte Solana keypair (seed||pubkey) as a JSON-clean number[]. */
+  secret: number[];
+  /** ISO-8601 timestamp of when the export was generated. */
+  exported_at: string;
+  /** Audit-mandated non-removable warning string. T25 import validators
+   *  do NOT require the warning to be present (otherwise a hand-written
+   *  backup would be rejected), but the exporter always writes it. */
+  warning: string;
 }
 
 export interface IdentityFacade {
   load(): Promise<IdentitySnapshot | null>;
+  /** Generate a fresh Ed25519 keypair via WASM `generate_keypair` and
+   *  persist it to `chrome.storage.local` under the canonical
+   *  `identity` / `identity_secret` keys. Returns the snapshot that
+   *  the UI displays. Refuses to overwrite an existing identity — the
+   *  caller must `clear()` (or the UI confirms a destructive
+   *  regenerate) first. */
+  generate(): Promise<IdentitySnapshot>;
+  /** Discard the in-storage identity (deletes both `identity` and
+   *  `identity_secret`). Used by the regenerate-confirm dialog. */
+  clear(): Promise<void>;
   /** Export the in-storage keypair as a passphrase-encrypted JSON blob.
    *  Returns the blob bytes; the UI offers it as a download. */
   exportEncrypted(passphrase: string): Promise<Uint8Array>;
@@ -65,6 +100,16 @@ export interface IdentityFacade {
     blob: Uint8Array,
     passphrase: string,
   ): Promise<IdentitySnapshot>;
+  /** T25 — UNENCRYPTED keypair export. The returned JSON includes a
+   *  non-removable warning string and an `exported_at` ISO timestamp.
+   *  Throws when no identity is configured. The caller is responsible
+   *  for triggering the download. */
+  exportPlain(): Promise<PlainKeypairExport>;
+  /** T25 — UNENCRYPTED keypair import. Validates `version`, the base58
+   *  pubkey shape, and the 64-byte secret length BEFORE writing to
+   *  storage. Throws a descriptive `Error` on validation failure; the
+   *  options page surfaces the `Error.message` verbatim in a toast. */
+  importPlain(payload: unknown): Promise<IdentitySnapshot>;
 }
 
 // ── Key escrow (T17 will fulfil) ────────────────────────────────────────────

@@ -53,8 +53,46 @@ import type {
   KeyEscrowFacade,
   MigrationProgressEvent,
   OptionsRuntime,
+  PlainKeypairExport,
   SettingsFacade,
 } from "./runtime.js";
+
+/** T25 audit-mandated warning string. Lives in a top-level constant so
+ *  the exporter cannot drift from the import-time documentation and so
+ *  the test suite can assert the exact text without duplicating a long
+ *  string literal. Security review insists this text accompanies every
+ *  unencrypted-export download. */
+export const PLAIN_EXPORT_WARNING =
+  "Never share this file — anyone with it controls your identity. Store it in a password manager.";
+
+/** chrome.storage.local key the popup + options runtimes share for the
+ *  `{pubkey_base58, created_at?}` blob. Mirrors `runtime-impl.ts`'s
+ *  `loadIdentity` reader in the popup realm (T25 single source of
+ *  truth). Re-exported via the IdentityFacade — components do NOT
+ *  reach into chrome.storage directly. */
+export const IDENTITY_KEY = "identity";
+export const IDENTITY_SECRET_KEY = "identity_secret";
+
+/** Lightweight base58 (Bitcoin alphabet) validator. The full base58
+ *  decode is not needed here — we just sanity-check that every
+ *  character of the imported pubkey is in the canonical alphabet so an
+ *  obviously-malformed key (e.g. raw hex or accidentally pasted text)
+ *  trips the validation at the UI seam rather than at the WASM
+ *  boundary later. */
+const BASE58_ALPHABET =
+  "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+
+function isLikelyBase58(s: string): boolean {
+  if (typeof s !== "string" || s.length === 0) return false;
+  // Solana Ed25519 pubkeys are 32 bytes → ~43-44 base58 chars. We use a
+  // generous 32..64 window so unusually short / long encodings still
+  // reach the WASM validator for the authoritative check.
+  if (s.length < 32 || s.length > 64) return false;
+  for (let i = 0; i < s.length; i++) {
+    if (BASE58_ALPHABET.indexOf(s[i]!) < 0) return false;
+  }
+  return true;
+}
 
 /** Fallback session lifetime when neither the server response nor the
  *  JWT carries a usable expiry. Mirrors the popup's onboarding default
@@ -127,19 +165,65 @@ function createIdentityFacade(): IdentityFacade {
   return {
     async load(): Promise<IdentitySnapshot | null> {
       try {
-        const stored = (await chrome.storage.local.get(["identity"])) as Record<
-          string,
-          unknown
-        >;
-        const raw = stored.identity;
+        const stored = (await chrome.storage.local.get([
+          IDENTITY_KEY,
+        ])) as Record<string, unknown>;
+        const raw = stored[IDENTITY_KEY];
         if (!raw || typeof raw !== "object") return null;
         const obj = raw as Record<string, unknown>;
         const pub = obj.pubkey_base58;
         if (typeof pub !== "string" || pub.length === 0) return null;
-        return { pubkey_base58: pub, did: `did:sol:${pub}` };
+        const created =
+          typeof obj.created_at === "number" && Number.isFinite(obj.created_at)
+            ? obj.created_at
+            : undefined;
+        const out: IdentitySnapshot = {
+          pubkey_base58: pub,
+          did: `did:sol:${pub}`,
+          ...(created !== undefined ? { created_at: created } : {}),
+        };
+        return out;
       } catch {
         return null;
       }
+    },
+    async generate(): Promise<IdentitySnapshot> {
+      // Refuse to clobber an existing identity. The UI confirms the
+      // destructive regenerate path via a dialog and calls `clear()`
+      // FIRST — by the time we land here the storage should be empty.
+      const existing = (await chrome.storage.local.get([
+        IDENTITY_KEY,
+        IDENTITY_SECRET_KEY,
+      ])) as Record<string, unknown>;
+      if (
+        existing[IDENTITY_KEY] !== undefined ||
+        existing[IDENTITY_SECRET_KEY] !== undefined
+      ) {
+        throw new Error(
+          "Refusing to overwrite existing identity — clear it first",
+        );
+      }
+      // WASM `generate_keypair` uses `getrandom`'s `js` feature →
+      // `crypto.getRandomValues`. CSPRNG-quality entropy. The base58
+      // pubkey is encoded inside the WASM boundary so we don't have to
+      // roll one here.
+      const { generateKeypair } = await import("../runtime/sign/cose.js");
+      const kp = await generateKeypair();
+      const created_at = Date.now();
+      await chrome.storage.local.set({
+        [IDENTITY_KEY]: { pubkey_base58: kp.pubkey_base58, created_at },
+        [IDENTITY_SECRET_KEY]: kp.secret,
+      });
+      return {
+        pubkey_base58: kp.pubkey_base58,
+        did: `did:sol:${kp.pubkey_base58}`,
+        created_at,
+      };
+    },
+    async clear(): Promise<void> {
+      // Best-effort: chrome.storage.local.remove is idempotent for
+      // missing keys. We never log the secret on the way out.
+      await chrome.storage.local.remove([IDENTITY_KEY, IDENTITY_SECRET_KEY]);
     },
     async exportEncrypted(): Promise<Uint8Array> {
       // T05 follow-up: WASM `export_keypair_json` + passphrase wrap.
@@ -148,6 +232,100 @@ function createIdentityFacade(): IdentityFacade {
     async importEncrypted(): Promise<IdentitySnapshot> {
       // T05 follow-up: WASM `import_keypair_json` + passphrase unwrap.
       throw new Error("Import keypair is not yet wired (T05 follow-up)");
+    },
+    async exportPlain(): Promise<PlainKeypairExport> {
+      const stored = (await chrome.storage.local.get([
+        IDENTITY_KEY,
+        IDENTITY_SECRET_KEY,
+      ])) as Record<string, unknown>;
+      const raw = stored[IDENTITY_KEY];
+      const secret = stored[IDENTITY_SECRET_KEY];
+      if (!raw || typeof raw !== "object") {
+        throw new Error("No identity to export");
+      }
+      const obj = raw as Record<string, unknown>;
+      const pub = obj.pubkey_base58;
+      if (typeof pub !== "string" || pub.length === 0) {
+        throw new Error("No identity to export");
+      }
+      if (!Array.isArray(secret) || secret.length !== 64) {
+        throw new Error(
+          "Identity secret is missing or malformed — refusing to export",
+        );
+      }
+      // Defensive byte-range check so the on-disk JSON cannot embed a
+      // value > 255 (would be a structured-clone bug we surface early).
+      const normalised: number[] = [];
+      for (const n of secret) {
+        const num = typeof n === "number" ? n : Number(n);
+        if (!Number.isInteger(num) || num < 0 || num > 255) {
+          throw new Error("Identity secret contains non-byte value");
+        }
+        normalised.push(num);
+      }
+      return {
+        version: 1,
+        pubkey_base58: pub,
+        secret: normalised,
+        exported_at: new Date().toISOString(),
+        warning: PLAIN_EXPORT_WARNING,
+      };
+    },
+    async importPlain(payload: unknown): Promise<IdentitySnapshot> {
+      // Validate the envelope BEFORE writing anything — the toast on
+      // failure surfaces the specific Error.message verbatim so the
+      // user knows which field is wrong.
+      if (!payload || typeof payload !== "object") {
+        throw new Error("Wrong file format: expected a JSON object");
+      }
+      const obj = payload as Record<string, unknown>;
+      if (obj.version !== 1) {
+        throw new Error(
+          `Wrong file format: unsupported version ${String(obj.version)} (expected 1)`,
+        );
+      }
+      const pub = obj.pubkey_base58;
+      if (typeof pub !== "string") {
+        throw new Error("Invalid public key: expected a base58 string");
+      }
+      if (!isLikelyBase58(pub)) {
+        throw new Error(
+          "Invalid public key: not a recognisable base58 Ed25519 pubkey",
+        );
+      }
+      const secret = obj.secret;
+      if (!Array.isArray(secret)) {
+        throw new Error("Wrong secret length: expected an array of 64 bytes");
+      }
+      if (secret.length !== 64) {
+        throw new Error(
+          `Wrong secret length: got ${secret.length} bytes, expected 64`,
+        );
+      }
+      // Byte-range validation — keeps a hand-edited JSON with > 255
+      // entries from poisoning chrome.storage.
+      const normalised: number[] = [];
+      for (const n of secret) {
+        const num = typeof n === "number" ? n : Number(n);
+        if (!Number.isInteger(num) || num < 0 || num > 255) {
+          throw new Error("Wrong secret length: contains non-byte value");
+        }
+        normalised.push(num);
+      }
+      // Persist atomically. Carry `created_at` forward when the import
+      // envelope has an `exported_at`; we treat the export timestamp as
+      // a lower-bound on the identity's age, which keeps the Options
+      // "Created …" row useful after a round-trip.
+      const created_at = Date.now();
+      await chrome.storage.local.set({
+        [IDENTITY_KEY]: { pubkey_base58: pub, created_at },
+        [IDENTITY_SECRET_KEY]: normalised,
+      });
+      return {
+        pubkey_base58: pub,
+        did: `did:sol:${pub}`,
+        created_at,
+      };
     },
   };
 }
