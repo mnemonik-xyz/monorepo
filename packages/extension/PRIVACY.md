@@ -31,6 +31,9 @@ policy disagree, the code is the bug.
   call (`DELETE /api/key-escrow`) removes your server-side escrow; on
   written request to `privacy@mnemonik.xyz` we delete all
   server-stored attestations linked to your account within 30 days.
+  A self-service `DELETE /api/memories` endpoint is on the roadmap;
+  until it ships, attestation deletion is handled via the email
+  request above (GDPR Art. 17 — same 30-day SLA either way).
 
 ## 2. Two storage modes — pick one per device
 
@@ -44,11 +47,14 @@ The extension supports two mutually exclusive storage modes
 - The Ed25519 identity used to sign attestations is generated locally
   and stored in `chrome.storage.local`. The private key never leaves
   the device unless *you* explicitly export it (file download) or
-  enable key escrow (§4 below).
+  enable key escrow (§4 below). Per our design (Decision D6) the
+  same Ed25519 keypair represents your identity across the CLI,
+  webapp, and extension — there is one identity per person, not one
+  per client — so keep it safe.
 - No analytics SDK, no error-reporting beacon, no remote telemetry.
 - The only outbound network requests in Local mode are the
   first-run model fetches from `huggingface.co` /
-  `cdn-lfs.huggingface.co` (~22 MB ONNX embedding model — required to
+  `cdn-lfs.huggingface.co` (~25 MB ONNX embedding model — required to
   compute the semantic vectors stored alongside each memory). These
   are static asset downloads; the request body contains no personal
   data. The CSP allow-lists exactly these origins (`connect-src` in
@@ -117,11 +123,11 @@ domain and disabled by default (Decision D12).
 
 ### 3.3 Embeddings
 
-Embeddings are computed locally using the `intfloat/multilingual-e5-small`
-ONNX model. The model file itself is downloaded once from
-`huggingface.co` on first use; thereafter it is served from the
-in-extension cache. The text you embed never reaches Hugging Face's
-servers.
+Embeddings are computed locally using the `Xenova/all-MiniLM-L6-v2`
+ONNX model (384-dimensional sentence embeddings; see Decision D3).
+The model file itself is downloaded once from `huggingface.co` on
+first use; thereafter it is served from the in-extension cache. The
+text you embed never reaches Hugging Face's servers.
 
 ### 3.4 Diagnostic / crash data
 
@@ -233,6 +239,12 @@ There is no `<all_urls>` host_permission anywhere in `manifest.json`
 than `<all_urls>` so that the extension only ever sees pages where
 it has been explicitly authorised to run.
 
+The extension's Content Security Policy allows `wasm-unsafe-eval`
+(and only `wasm-unsafe-eval` — never `unsafe-eval`) so it can load
+the on-device embedder and signing WASM module. This is the standard
+Manifest V3 directive for WebAssembly and does not permit JavaScript
+`eval()`, dynamic `new Function(...)`, or any remote-code execution.
+
 ## 8. Your rights — access, correction, deletion, portability
 
 You can do all of the following without contacting us:
@@ -243,9 +255,14 @@ You can do all of the following without contacting us:
   immutable by design (that is what "verifiable" means).
 - **Deletion (local):** Options → Storage → "Clear local store"
   wipes IndexedDB + `chrome.storage.local`.
-- **Deletion (cloud):** Options → Cloud → "Delete cloud data"
-  triggers `DELETE /api/key-escrow` and `DELETE /api/memories` for
-  your account. Server-side hard delete completes within seconds.
+- **Deletion (cloud — escrow):** Options → Cloud → "Forget escrow
+  on server" triggers `DELETE /api/key-escrow`. Server-side hard
+  delete completes within seconds.
+- **Deletion (cloud — attestations):** email `privacy@mnemonik.xyz`
+  from the address bound to your Google account; we delete all
+  server-stored attestations linked to your `sub` within 30 days
+  (GDPR Art. 17). A self-service `DELETE /api/memories` endpoint is
+  on the roadmap and will replace the email step when it ships.
 - **Portability:** the export JSON above is the same format the CLI
   consumes — `mnemonic identity import --file ./export.json`.
 

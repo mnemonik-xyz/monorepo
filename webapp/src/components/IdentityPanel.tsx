@@ -596,7 +596,7 @@ export default function IdentityPanel() {
           className="rounded-md border border-text-muted/30 px-4 py-2 text-sm text-text-primary transition-colors hover:border-accent-primary hover:text-accent-primary disabled:cursor-not-allowed disabled:opacity-40"
           data-testid="identity-send-to-cli"
         >
-          {cliState.kind === "issuing" ? "Issuing..." : "Send to CLI"}
+          {cliState.kind === "issuing" ? "Issuing ticket..." : "Send to CLI"}
         </button>
         <button
           type="button"
@@ -605,7 +605,9 @@ export default function IdentityPanel() {
           className="rounded-md border border-text-muted/30 px-4 py-2 text-sm text-text-primary transition-colors hover:border-accent-primary hover:text-accent-primary disabled:cursor-not-allowed disabled:opacity-40"
           data-testid="identity-send-to-extension"
         >
-          {extState.kind === "issuing" ? "Issuing..." : "Send to Extension"}
+          {extState.kind === "issuing"
+            ? "Issuing ticket..."
+            : "Send to Extension"}
         </button>
       </div>
 
@@ -622,6 +624,7 @@ export default function IdentityPanel() {
             <code
               className="flex-1 overflow-x-auto rounded bg-black/30 px-3 py-2 font-mono text-xs text-accent-primary"
               data-testid="identity-ext-ticket-id"
+              aria-label="Extension bootstrap ticket ID"
             >
               {extState.ticketId}
             </code>
@@ -666,6 +669,7 @@ export default function IdentityPanel() {
             <code
               className="flex-1 overflow-x-auto rounded bg-black/30 px-3 py-2 font-mono text-xs text-accent-primary"
               data-testid="identity-cli-command"
+              aria-label="CLI bootstrap command"
             >
               mnemonic identity import --ticket {cliState.ticketId}
             </code>

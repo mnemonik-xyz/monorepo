@@ -42,11 +42,11 @@ LOCAL MODE (DEFAULT, FREE)
 • Everything stays on this device. No sign-in. No network calls for the purpose of storing or syncing your memories.
 • IndexedDB holds your memory index and the compressed embeddings.
 • chrome.storage.local holds your Ed25519 keypair.
-• No analytics, no telemetry, no SDK. The only outbound network request in Local mode is a one-time ~22 MB ONNX model download from Hugging Face on first capture.
+• No analytics, no telemetry, no SDK. The only outbound network request in Local mode is a one-time ~25 MB ONNX model download from Hugging Face on first capture.
 
 CLOUD MODE (OPTIONAL, PAID)
 
-• Sign in with Google in the popup. The extension uses chrome.identity.launchWebAuthFlow against our verified OAuth client, receives a signed id_token, and binds your account to that Google subject identifier (sub).
+• Sign in with Google in the popup. The extension uses chrome.identity.launchWebAuthFlow via our verified OAuth client, receives a signed id_token, and binds your account to that Google subject identifier (sub).
 • Every signed attestation is sent over TLS 1.3 to mc.mnemonik.xyz and stored encrypted at rest on AWS (KMS-wrapped AES-256). You can list, recall, and delete from any logged-in device.
 • Mnemonik can read the plaintext content of cloud attestations (no end-to-end encryption in this release — explicitly documented in our privacy policy). If that's not acceptable for your use case, stay in Local mode.
 • Billed per-attestation outside the Chrome Web Store. Local mode never asks for payment.
@@ -60,7 +60,7 @@ KEY ESCROW (OPTIONAL, OFF BY DEFAULT)
 
 PRIVACY
 
-• Capture is always triggered by a user gesture — clicking the popup, the FAB, the context menu, or a keyboard shortcut. No background scraper, no silent observer.
+• Capture is always triggered by a user gesture — clicking the popup, the in-page button (floating action button / FAB), the context menu, or a keyboard shortcut. No background scraper, no silent observer.
 • Auto-capture (where assistant turns are recorded as they arrive) is opt-in per domain and off by default.
 • Telemetry is opt-in and anonymous. Off by default.
 • host_permissions is enumerated (chatgpt.com, claude.ai, gemini.google.com). No "<all_urls>" anywhere.
@@ -69,7 +69,7 @@ PRIVACY
 PRICING
 
 • Local mode: free, forever. Everything on this device.
-• Cloud mode: pay-as-you-go per attestation, settled outside the Chrome Web Store via x402 / Stripe. See mnemonik.xyz for current rates.
+• Cloud mode: pay-per-call usage, settled outside the Chrome Web Store via Stripe or crypto (the x402 micropayments protocol). See mnemonik.xyz for current rates.
 
 PERMISSIONS
 
