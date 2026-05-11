@@ -86,7 +86,7 @@ export async function mountFab(): Promise<HTMLElement | null> {
 
   buildMenuItem(menu, "Save this chat", () => {
     void chrome.runtime.sendMessage({ type: "tab:fab-save-chat" });
-    closeMenu();
+    closeMenu({ returnFocus: true });
   });
   buildMenuItem(menu, "Save selection", () => {
     const selectionText = window.getSelection()?.toString() ?? "";
@@ -94,30 +94,35 @@ export async function mountFab(): Promise<HTMLElement | null> {
       type: "tab:fab-save-selection",
       payload: { selectionText, pageUrl: location.href },
     });
-    closeMenu();
+    closeMenu({ returnFocus: true });
   });
   buildMenuItem(menu, "Open Mnemonik", () => {
     void chrome.runtime.sendMessage({ type: "tab:fab-open-popup" });
-    closeMenu();
+    closeMenu({ returnFocus: true });
   });
 
   const button = document.createElement("button");
   button.type = "button";
   button.className = "fab-button";
-  button.setAttribute("aria-label", "Mnemonik");
+  // Action-verb label per ux-guidelines; aria-expanded conveys state.
+  button.setAttribute("aria-label", "Open Mnemonik actions");
   button.setAttribute("aria-haspopup", "menu");
   button.setAttribute("aria-expanded", "false");
   button.textContent = "M";
   root.appendChild(button);
 
-  const closeMenu = (): void => {
+  const closeMenu = (opts?: { returnFocus?: boolean }): void => {
     menu.hidden = true;
     button.setAttribute("aria-expanded", "false");
+    if (opts?.returnFocus) button.focus();
   };
-  const openMenu = (): void => {
+  const openMenu = (opts?: { focusFirst?: boolean }): void => {
     menu.hidden = false;
     button.setAttribute("aria-expanded", "true");
+    if (opts?.focusFirst) focusMenuItem(menu, 0);
   };
+
+  attachMenuKeyboard(menu, button, closeMenu);
 
   // Position from storage, fallback to default.
   const position = await readPosition(domain);
@@ -127,7 +132,7 @@ export async function mountFab(): Promise<HTMLElement | null> {
     host,
     button,
     () => {
-      if (menu.hidden) openMenu();
+      if (menu.hidden) openMenu({ focusFirst: true });
       else closeMenu();
     },
     (next) => {
@@ -138,18 +143,20 @@ export async function mountFab(): Promise<HTMLElement | null> {
 
   // Close on outside click. Listener is on the document; the host
   // element is opaque so events that bubble out don't reach
-  // `composedPath` items inside the closed shadow root.
-  document.addEventListener(
-    "click",
-    (event) => {
-      if (event.target === host || (event.target as Node | null) === host) {
-        return;
-      }
-      // Anything outside the host closes the menu.
-      if (!menu.hidden) closeMenu();
-    },
-    true,
-  );
+  // `composedPath` items inside the closed shadow root. The handler
+  // is stored so the destroy path (visibility flip → host.remove())
+  // can detach it instead of leaking a closure.
+  const onDocumentClick = (event: MouseEvent): void => {
+    if (event.target === host) return;
+    // Anything outside the host closes the menu.
+    if (!menu.hidden) closeMenu();
+  };
+  document.addEventListener("click", onDocumentClick, true);
+
+  const destroy = (): void => {
+    document.removeEventListener("click", onDocumentClick, true);
+    host.remove();
+  };
 
   // Listen for visibility changes from the options page.
   if (chrome.storage?.onChanged) {
@@ -158,7 +165,7 @@ export async function mountFab(): Promise<HTMLElement | null> {
       const next = changes["settings.v1"]?.newValue as SettingsV1 | undefined;
       if (!next) return;
       const v = next.perDomain?.[domain]?.fabVisible;
-      if (v === false) host.remove();
+      if (v === false) destroy();
     });
   }
 
@@ -175,9 +182,107 @@ function buildMenuItem(
   item.type = "button";
   item.className = "fab-menu-item";
   item.setAttribute("role", "menuitem");
+  // APG menu pattern: roving tabindex. The currently-active item gets
+  // tabindex=0 (set by focusMenuItem); siblings stay at -1 so Tab
+  // moves out of the menu to the next page focusable.
+  item.tabIndex = -1;
   item.textContent = label;
   item.addEventListener("click", onClick);
   menu.appendChild(item);
+}
+
+function menuItems(menu: HTMLElement): HTMLButtonElement[] {
+  return Array.from(menu.querySelectorAll<HTMLButtonElement>(".fab-menu-item"));
+}
+
+function focusMenuItem(menu: HTMLElement, index: number): void {
+  const items = menuItems(menu);
+  if (items.length === 0) return;
+  const wrapped = ((index % items.length) + items.length) % items.length;
+  for (let i = 0; i < items.length; i++) {
+    items[i]!.tabIndex = i === wrapped ? 0 : -1;
+  }
+  items[wrapped]!.focus();
+}
+
+/**
+ * Attach WAI-ARIA APG menu keyboard semantics:
+ *   - Escape: close menu, return focus to button
+ *   - ArrowDown / ArrowUp: move between items (wrap)
+ *   - Home / End: jump to first / last item
+ *   - Enter / Space: activate the focused item (native button click)
+ *   - Tab: close menu and let focus propagate to the next page-level
+ *     focusable (APG menu, not menubar, behaviour)
+ */
+function attachMenuKeyboard(
+  menu: HTMLElement,
+  button: HTMLButtonElement,
+  closeMenu: (opts?: { returnFocus?: boolean }) => void,
+): void {
+  menu.addEventListener("keydown", (event) => {
+    if (menu.hidden) return;
+    const items = menuItems(menu);
+    if (items.length === 0) return;
+    const current = items.findIndex((el) => el === document.activeElement);
+
+    switch (event.key) {
+      case "Escape":
+        event.preventDefault();
+        closeMenu({ returnFocus: true });
+        return;
+      case "ArrowDown":
+        event.preventDefault();
+        focusMenuItem(menu, current < 0 ? 0 : current + 1);
+        return;
+      case "ArrowUp":
+        event.preventDefault();
+        focusMenuItem(menu, current < 0 ? items.length - 1 : current - 1);
+        return;
+      case "Home":
+        event.preventDefault();
+        focusMenuItem(menu, 0);
+        return;
+      case "End":
+        event.preventDefault();
+        focusMenuItem(menu, items.length - 1);
+        return;
+      case " ":
+      case "Enter": {
+        // Let buttons' native click fire on Enter, but Space needs
+        // explicit handling (preventDefault stops page scroll).
+        if (event.key === " ") {
+          event.preventDefault();
+          const focused = items[current];
+          focused?.click();
+        }
+        return;
+      }
+      case "Tab":
+        // Tab leaves the menu — close it and let the browser advance
+        // focus naturally to the next document-level tab stop.
+        closeMenu();
+        return;
+      default:
+        return;
+    }
+  });
+
+  // Escape pressed while the FAB button itself is focused (menu open
+  // but no menuitem focused) should still close.
+  button.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && !menu.hidden) {
+      event.preventDefault();
+      closeMenu({ returnFocus: true });
+    } else if (
+      (event.key === "ArrowDown" ||
+        event.key === "Enter" ||
+        event.key === " ") &&
+      !menu.hidden
+    ) {
+      event.preventDefault();
+      focusMenuItem(menu, 0);
+    }
+  });
 }
 
 function applyPosition(host: HTMLElement, position: FabPosition): void {

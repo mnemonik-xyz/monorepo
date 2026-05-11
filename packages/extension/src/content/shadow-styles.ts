@@ -149,12 +149,26 @@ export const SHADOW_STYLES: string = `
 .overlay-status {
   font-size: 11px;
   color: #94A3B8;
-  font-style: italic;
+  font-style: normal;
 }
 
 .overlay-status.error {
   color: #F87171;
-  font-style: normal;
+  font-weight: 600;
+}
+
+/* Visually-hidden helper for aria-describedby targets. Keeps text in
+   the AT tree while removing it from sighted layout. */
+.overlay-sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
 }
 
 .overlay-results {

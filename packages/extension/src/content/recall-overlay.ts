@@ -33,6 +33,7 @@ interface RecallResponse {
 
 interface OverlayHandles {
   host: HTMLElement;
+  input: HTMLInputElement;
   destroy: () => void;
 }
 
@@ -49,6 +50,13 @@ export function mountOverlay(): HTMLElement | null {
     focusInput(active);
     return active.host;
   }
+
+  // Capture the element that had focus before mounting so we can
+  // restore it on destroy (WCAG 2.1 SC 2.4.3, ARIA dialog pattern).
+  const previousFocus =
+    document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null;
 
   const host = document.createElement(HOST_TAG);
   host.setAttribute("style", "all: initial; position: fixed; inset: 0;");
@@ -72,7 +80,7 @@ export function mountOverlay(): HTMLElement | null {
   const input = document.createElement("input");
   input.className = "overlay-input";
   input.type = "search";
-  input.placeholder = "Recall — what do you remember…";
+  input.placeholder = "Recall by keyword";
   input.setAttribute("aria-label", "Recall query");
   modal.appendChild(input);
 
@@ -83,8 +91,13 @@ export function mountOverlay(): HTMLElement | null {
 
   const list = document.createElement("ul");
   list.className = "overlay-results";
+  list.setAttribute("role", "listbox");
   list.setAttribute("aria-label", "Recall results");
   modal.appendChild(list);
+  // Wire arrow-key navigation announcement: the input keeps DOM focus
+  // while aria-activedescendant points at the focused result <li>.
+  input.setAttribute("aria-controls", "mnemonik-overlay-results");
+  list.id = "mnemonik-overlay-results";
 
   const adapter = selectAdapter(location.href);
   const insertSupported = Boolean(adapter?.supportsInsert);
@@ -144,8 +157,7 @@ export function mountOverlay(): HTMLElement | null {
       const first = focusables[0];
       const last = focusables[focusables.length - 1];
       if (!first || !last) return;
-      const activeEl = (shadow as unknown as { activeElement?: Element })
-        .activeElement;
+      const activeEl = shadow.activeElement;
       if (event.shiftKey && activeEl === first) {
         event.preventDefault();
         last.focus();
@@ -162,10 +174,20 @@ export function mountOverlay(): HTMLElement | null {
     if (debounceTimer !== null) clearTimeout(debounceTimer);
     host.remove();
     active = null;
+    // Restore focus to the element that triggered the overlay
+    // (WCAG 2.1 SC 2.4.3, ARIA dialog pattern). Skip if the previous
+    // element was removed from the DOM in the interim.
+    if (previousFocus && document.contains(previousFocus)) {
+      try {
+        previousFocus.focus();
+      } catch {
+        // Element may have become unfocusable mid-flight; swallow.
+      }
+    }
   };
 
   document.body.appendChild(host);
-  active = { host, destroy };
+  active = { host, input, destroy };
   // Focus after mount so screen readers announce the dialog.
   setTimeout(() => input.focus(), 0);
   return host;
@@ -225,8 +247,17 @@ function renderResults(state: OverlayState): void {
   state.results.forEach((r, idx) => {
     const li = document.createElement("li");
     li.className = "overlay-result";
+    li.id = `mnemonik-result-${idx}`;
+    li.setAttribute("role", "option");
+    li.setAttribute(
+      "aria-selected",
+      idx === state.focusedIndex ? "true" : "false",
+    );
     if (idx === state.focusedIndex) li.classList.add("focused");
     li.setAttribute("data-index", String(idx));
+
+    const shortId = r.attestation_id.slice(0, 8);
+    const rowNumber = idx + 1;
 
     const meta = document.createElement("div");
     meta.className = "overlay-result-meta";
@@ -257,6 +288,10 @@ function renderResults(state: OverlayState): void {
     copyBtn.type = "button";
     copyBtn.className = "overlay-action";
     copyBtn.textContent = "Copy";
+    copyBtn.setAttribute(
+      "aria-label",
+      `Copy result ${rowNumber} (attestation ${shortId})`,
+    );
     copyBtn.addEventListener(
       "click",
       () => void copyText(state, toMarkdown(r)),
@@ -269,9 +304,27 @@ function renderResults(state: OverlayState): void {
     insertBtn.textContent = "Insert";
     if (!state.insertSupported) {
       insertBtn.setAttribute("disabled", "true");
+      // aria-describedby surfaces the explanation on keyboard focus,
+      // not just on mouse hover (which is what `title` provides).
+      const hintId = `mnemonik-insert-hint-${idx}`;
+      const hint = document.createElement("span");
+      hint.id = hintId;
+      hint.className = "overlay-sr-only";
+      hint.textContent =
+        "No compatible chat input on this page. Use Copy instead.";
+      actions.appendChild(hint);
+      insertBtn.setAttribute("aria-describedby", hintId);
+      insertBtn.setAttribute(
+        "aria-label",
+        `Insert result ${rowNumber} (unavailable on this page)`,
+      );
       insertBtn.title =
         "This page has no compatible chat input — Copy instead.";
     } else {
+      insertBtn.setAttribute(
+        "aria-label",
+        `Insert result ${rowNumber} into chat (attestation ${shortId})`,
+      );
       insertBtn.addEventListener(
         "click",
         () => void insertIntoChat(state, r.content),
@@ -282,6 +335,10 @@ function renderResults(state: OverlayState): void {
     const openLink = document.createElement("a");
     openLink.className = "overlay-action";
     openLink.textContent = "Open";
+    openLink.setAttribute(
+      "aria-label",
+      `Open result ${rowNumber} on mnemonik.xyz (attestation ${shortId})`,
+    );
     openLink.href = `https://mnemonik.xyz/m/${encodeURIComponent(r.attestation_id)}`;
     openLink.target = "_blank";
     openLink.rel = "noreferrer noopener";
@@ -290,6 +347,18 @@ function renderResults(state: OverlayState): void {
     li.appendChild(actions);
     state.list.appendChild(li);
   });
+  syncActiveDescendant(state);
+}
+
+function syncActiveDescendant(state: OverlayState): void {
+  if (state.results.length === 0) {
+    state.input.removeAttribute("aria-activedescendant");
+    return;
+  }
+  state.input.setAttribute(
+    "aria-activedescendant",
+    `mnemonik-result-${state.focusedIndex}`,
+  );
 }
 
 function moveFocus(state: OverlayState, delta: number): void {
@@ -297,13 +366,17 @@ function moveFocus(state: OverlayState, delta: number): void {
   const next =
     (state.focusedIndex + delta + state.results.length) % state.results.length;
   state.focusedIndex = next;
-  // Update class without full re-render to keep ARIA focus stable.
+  // Update class + aria-selected without full re-render to keep DOM
+  // focus on the input (composite-widget pattern via aria-activedescendant).
   for (const li of Array.from(
     state.list.querySelectorAll<HTMLLIElement>(".overlay-result"),
   )) {
     const idx = Number(li.getAttribute("data-index"));
-    li.classList.toggle("focused", idx === next);
+    const isActive = idx === next;
+    li.classList.toggle("focused", isActive);
+    li.setAttribute("aria-selected", isActive ? "true" : "false");
   }
+  syncActiveDescendant(state);
 }
 
 async function copyText(state: OverlayState, text: string): Promise<void> {
@@ -331,11 +404,37 @@ async function insertIntoChat(
     box.value = before ? `${before}\n${text}` : text;
     box.dispatchEvent(new Event("input", { bubbles: true }));
   } else {
-    // contenteditable composer.
+    // contenteditable composer. Use document.execCommand('insertText')
+    // so the host editor (ProseMirror, Tiptap, Lexical, etc.) sees an
+    // InputEvent and merges the change into its own model instead of
+    // having the existing rich-text DOM clobbered by a plain string.
     box.focus();
-    const existing = box.textContent ?? "";
-    box.textContent = existing ? `${existing}\n${text}` : text;
-    box.dispatchEvent(new Event("input", { bubbles: true }));
+    const prefix = (box.textContent ?? "").length > 0 ? "\n" : "";
+    let inserted = false;
+    try {
+      inserted = document.execCommand("insertText", false, prefix + text);
+    } catch {
+      inserted = false;
+    }
+    if (!inserted) {
+      // Older WebViews / non-execCommand environments: fall back to
+      // an InputEvent dispatch with the data payload, which most
+      // modern editors honour.
+      const evt = new InputEvent("beforeinput", {
+        data: prefix + text,
+        inputType: "insertText",
+        bubbles: true,
+        cancelable: true,
+      });
+      box.dispatchEvent(evt);
+      // If still not handled, append as a text node — last-resort and
+      // preserves any existing HTML rather than wiping it via
+      // textContent reassignment.
+      if (!evt.defaultPrevented) {
+        box.appendChild(document.createTextNode(prefix + text));
+        box.dispatchEvent(new Event("input", { bubbles: true }));
+      }
+    }
   }
   state.status.textContent = "Inserted into chat.";
   state.status.classList.remove("error");
@@ -347,11 +446,15 @@ function toMarkdown(r: SearchResult): string {
 }
 
 function focusInput(handles: OverlayHandles): void {
-  // The input lives inside a closed shadow root; we re-resolve via
-  // the host element's own shadowRoot getter (closed roots don't
-  // expose `shadowRoot`, so we tag the input on the host instead —
-  // for a focus-on-reopen we just call focus on the active element).
-  void handles;
+  // The input ref is captured on the OverlayHandles at mount time so
+  // re-opening (idempotent path) can refocus without reaching through
+  // the closed shadow root.
+  try {
+    handles.input.focus();
+    handles.input.select?.();
+  } catch {
+    // Element may have been detached; harmless on reopen.
+  }
 }
 
 function focusableElements(root: ParentNode): HTMLElement[] {
