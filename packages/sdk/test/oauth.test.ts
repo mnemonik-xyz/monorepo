@@ -101,13 +101,13 @@ describe("generatePkceVerifier / randomState", () => {
 describe("buildAuthorizeUrl", () => {
   it("emits all required PKCE+OAuth2.1 query params", async () => {
     const result = await buildAuthorizeUrl({
-      baseUrl: "https://mc.mnemonik.xyz",
+      baseUrl: "https://mcp.mnemonik.xyz",
       clientId: "mnemonic-cli",
       redirectUri: "http://127.0.0.1:33418/callback",
     });
 
     const url = new URL(result.url);
-    expect(url.origin).toBe("https://mc.mnemonik.xyz");
+    expect(url.origin).toBe("https://mcp.mnemonik.xyz");
     expect(url.pathname).toBe("/oauth/authorize");
     expect(url.searchParams.get("response_type")).toBe("code");
     expect(url.searchParams.get("client_id")).toBe("mnemonic-cli");
@@ -122,7 +122,7 @@ describe("buildAuthorizeUrl", () => {
 
   it("respects a caller-supplied scope", async () => {
     const r = await buildAuthorizeUrl({
-      baseUrl: "https://mc.mnemonik.xyz",
+      baseUrl: "https://mcp.mnemonik.xyz",
       clientId: "mnemonic-cli",
       redirectUri: "http://127.0.0.1:33418/callback",
       scope: "mcp openid",
@@ -133,7 +133,7 @@ describe("buildAuthorizeUrl", () => {
 
   it("stores {verifier, state, redirectUri, sessionId} keyed by sessionId", async () => {
     const r = await buildAuthorizeUrl({
-      baseUrl: "https://mc.mnemonik.xyz",
+      baseUrl: "https://mcp.mnemonik.xyz",
       clientId: "mnemonic-cli",
       redirectUri: "http://127.0.0.1:7777/callback",
     });
@@ -147,7 +147,7 @@ describe("buildAuthorizeUrl", () => {
 
   it("challenge in URL matches SHA-256(verifier) of the same session", async () => {
     const r = await buildAuthorizeUrl({
-      baseUrl: "https://mc.mnemonik.xyz",
+      baseUrl: "https://mcp.mnemonik.xyz",
       clientId: "mnemonic-cli",
       redirectUri: "http://127.0.0.1:1234/callback",
     });
@@ -176,7 +176,7 @@ describe("buildAuthorizeUrl", () => {
 
 describe("exchangeCodeForToken", () => {
   const REDIRECT = "http://127.0.0.1:33418/callback";
-  const BASE = "https://mc.mnemonik.xyz";
+  const BASE = "https://mcp.mnemonik.xyz";
 
   let fetchMock: ReturnType<typeof vi.fn>;
 
@@ -695,7 +695,7 @@ describe("pendingAuthSessions TTL + size cap", () => {
   it("buildAuthorizeUrl-stored session expires after TTL (integration)", async () => {
     await withMockedNow(async (advance) => {
       const seeded = await buildAuthorizeUrl({
-        baseUrl: "https://mc.mnemonik.xyz",
+        baseUrl: "https://mcp.mnemonik.xyz",
         clientId: "mnemonic-cli",
         redirectUri: "http://127.0.0.1:1/cb",
       });

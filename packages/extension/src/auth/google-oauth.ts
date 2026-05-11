@@ -34,7 +34,7 @@ import {
 export const EXTENSION_CLIENT_ID = "mnemonic-extension";
 
 /** Default MCP server origin. Tests inject their own via `serverBaseUrl`. */
-export const DEFAULT_SERVER_ORIGIN = "https://mc.mnemonik.xyz";
+export const DEFAULT_SERVER_ORIGIN = "https://mcp.mnemonik.xyz";
 
 /** PKCE method — S256 only (server enforces, RFC 7636 §4.2). */
 const PKCE_METHOD = "S256";
@@ -62,7 +62,7 @@ export interface ChromeIdentityShim {
 }
 
 export interface SignInWithGoogleInput {
-  /** Origin of the MCP server, e.g. `https://mc.mnemonik.xyz`. No
+  /** Origin of the MCP server, e.g. `https://mcp.mnemonik.xyz`. No
    *  trailing slash required — the URL constructor handles both. */
   serverBaseUrl?: string;
   /** Test-only: override `chrome.identity.*`. Production callers leave

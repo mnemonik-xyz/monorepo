@@ -82,7 +82,7 @@ pub struct Config {
     /// extension. Used for the `https://oauth2.googleapis.com/token` exchange.
     pub google_oauth_client_secret: String,
     /// Google OAuth redirect URI configured in Google Cloud Console. Must be
-    /// HTTPS in production; defaults to `https://mc.mnemonik.xyz/oauth/google/callback`.
+    /// HTTPS in production; defaults to `https://mcp.mnemonik.xyz/oauth/google/callback`.
     pub google_oauth_redirect_uri: String,
 
     // ── Extension key escrow (chrome-extension T15, Decision 9) ─────────────
@@ -143,7 +143,7 @@ impl Config {
             google_oauth_client_secret: env_or("GOOGLE_OAUTH_CLIENT_SECRET", ""),
             google_oauth_redirect_uri: env_or(
                 "GOOGLE_OAUTH_REDIRECT_URI",
-                "https://mc.mnemonik.xyz/oauth/google/callback",
+                "https://mcp.mnemonik.xyz/oauth/google/callback",
             ),
             key_escrow_rate_limit: env_or("KEY_ESCROW_RATE_LIMIT", "5").parse().unwrap_or(5),
         }

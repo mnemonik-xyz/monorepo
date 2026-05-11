@@ -1,4 +1,4 @@
-// T19 — `mc.mnemonik.xyz` server-side mock for Playwright extension
+// T19 — `mcp.mnemonik.xyz` server-side mock for Playwright extension
 // tests. Routes are installed at the context level so every page (popup,
 // options, content scripts, service worker fetch) picks them up.
 //
@@ -92,7 +92,7 @@ export async function mockServer(
       body: JSON.stringify(body),
     });
 
-  await context.route(/https:\/\/mc\.mnemonik\.xyz\/.*/, async (route) => {
+  await context.route(/https:\/\/mcp\.mnemonik\.xyz\/.*/, async (route) => {
     const req = route.request();
     const url = new URL(req.url());
     const path = url.pathname;
@@ -233,7 +233,7 @@ export async function mockServer(
   });
 
   const dispose = async () => {
-    await context.unroute(/https:\/\/mc\.mnemonik\.xyz\/.*/);
+    await context.unroute(/https:\/\/mcp\.mnemonik\.xyz\/.*/);
   };
   return { state, counts, dispose };
 }
