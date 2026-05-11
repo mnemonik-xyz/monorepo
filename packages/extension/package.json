@@ -19,6 +19,7 @@
     "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest",
+    "e2e": "playwright test",
     "lint": "tsc -b --noEmit",
     "lint:webext": "web-ext lint --source-dir=dist",
     "size": "size-limit"
@@ -34,6 +35,7 @@
   },
   "devDependencies": {
     "@crxjs/vite-plugin": "^2.0.0",
+    "@playwright/test": "^1.48.0",
     "@size-limit/preset-app": "^12.1.0",
     "@testing-library/dom": "^10.4.1",
     "@testing-library/jest-dom": "^6.9.1",

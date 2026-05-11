@@ -1,0 +1,10 @@
+/* Intentionally empty.
+ *
+ * The Recall overlay's styles live in src/content/shadow-styles.ts so
+ * they can be injected directly into the closed shadow root via
+ * <style>. The host page never receives a <link> to this file at
+ * runtime — but the file is referenced from manifest.json's
+ * web_accessible_resources to keep the @crxjs/vite-plugin build
+ * warning-free if a future change wants to load it via <link rel="stylesheet"
+ * href={chrome.runtime.getURL(...)}>.
+ */
