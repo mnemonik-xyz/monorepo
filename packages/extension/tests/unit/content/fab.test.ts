@@ -41,10 +41,13 @@ beforeEach(() => {
 });
 
 describe("mountFab", () => {
-  it("returns null when settings.v1.perDomain.<domain>.fabVisible === false", async () => {
+  it("returns null when settings.v1.per_domain.<domain>.fab_visible === false", async () => {
+    // Audit M2 / AUD-C-07: settings.ts uses snake_case (`per_domain`,
+    // `fab_visible`); the FAB previously read camelCase and never
+    // honoured the toggle. Asserts the on-disk shape directly.
     installChromeMock({
       "settings.v1": {
-        perDomain: { localhost: { fabVisible: false } },
+        per_domain: { localhost: { fab_visible: false } },
       },
     });
     const { mountFab } = await import("../../../src/content/fab.js");

@@ -18,22 +18,19 @@
 // addEventListener. No inline event handlers.
 
 import { SHADOW_STYLES } from "./shadow-styles.js";
+// Audit M2 / AUD-C-07: previously the FAB redeclared a camelCase
+// `SettingsV1` / `PerDomainSettings` shape inline, but `src/settings.ts`
+// persists snake_case (`per_domain[host].fab_visible`). The mismatched
+// reads silently returned undefined → `visible = true` always, so the
+// per-domain hide-FAB toggle in Options did nothing. Importing the
+// canonical types from `settings.ts` makes the schema single-sourced.
+import { type SettingsV1 } from "../settings.js";
 
 interface FabPosition {
   /** Distance from the right edge in px. */
   right: number;
   /** Distance from the bottom edge in px. */
   bottom: number;
-}
-
-interface PerDomainSettings {
-  enabled?: boolean;
-  fabVisible?: boolean;
-  autoCapture?: boolean;
-}
-
-interface SettingsV1 {
-  perDomain?: Record<string, PerDomainSettings>;
 }
 
 interface StorageShape {
@@ -164,7 +161,7 @@ export async function mountFab(): Promise<HTMLElement | null> {
       if (area !== "local") return;
       const next = changes["settings.v1"]?.newValue as SettingsV1 | undefined;
       if (!next) return;
-      const v = next.perDomain?.[domain]?.fabVisible;
+      const v = next.per_domain?.[domain]?.fab_visible;
       if (v === false) destroy();
     });
   }
@@ -363,8 +360,8 @@ async function readVisibility(domain: string): Promise<boolean> {
   if (!chrome.storage?.local) return true;
   try {
     const got = (await chrome.storage.local.get("settings.v1")) as StorageShape;
-    const perDomain = got["settings.v1"]?.perDomain?.[domain];
-    return perDomain?.fabVisible !== false;
+    const perDomain = got["settings.v1"]?.per_domain?.[domain];
+    return perDomain?.fab_visible !== false;
   } catch {
     return true;
   }
