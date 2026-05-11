@@ -91,32 +91,61 @@ function isValidStoredIdentity(s: StoredIdentityShape): s is {
 }
 
 /**
+ * Module-level in-flight promise cache. Guards against concurrent popup
+ * mounts (React 18 StrictMode double-render, two simultaneous bootstrap
+ * effects) racing two keygen rounds where the second `set` would
+ * overwrite the first. Mirrors the same singleton pattern used by
+ * `runtime/embed/embedder-bridge.ts` and `popup/embedder-bridge.ts`.
+ * Closes review round-1 finding PR135-C-01.
+ */
+let inflight: Promise<LocalIdentity> | null = null;
+
+/**
  * Read the persisted identity if present, else generate + persist a
  * fresh Ed25519 keypair. Idempotent on subsequent popup mounts —
  * existing-and-valid identities are returned as-is so we never re-mint
- * a key behind the user's back.
+ * a key behind the user's back. Concurrent callers share one in-flight
+ * promise so a StrictMode double-render mints exactly one keypair.
  *
  * Storage failures (denied permissions, quota) bubble up — callers
  * (popup boot) wrap in try/catch and fall back to the legacy "no
  * identity" header so the popup still renders.
  */
 export async function ensureLocalIdentity(): Promise<LocalIdentity> {
-  const stored = (await chrome.storage.local.get([
-    IDENTITY_KEY,
-    IDENTITY_SECRET_KEY,
-  ])) as StoredIdentityShape;
-  if (isValidStoredIdentity(stored)) {
-    return {
-      pubkey_base58: stored.identity.pubkey_base58,
-      secret: stored.identity_secret,
-    };
+  if (inflight) return inflight;
+  inflight = (async () => {
+    const stored = (await chrome.storage.local.get([
+      IDENTITY_KEY,
+      IDENTITY_SECRET_KEY,
+    ])) as StoredIdentityShape;
+    if (isValidStoredIdentity(stored)) {
+      return {
+        pubkey_base58: stored.identity.pubkey_base58,
+        secret: stored.identity_secret,
+      };
+    }
+    const fresh = await generateEd25519Keypair();
+    await chrome.storage.local.set({
+      [IDENTITY_KEY]: { pubkey_base58: fresh.pubkey_base58 },
+      [IDENTITY_SECRET_KEY]: fresh.secret,
+    });
+    return fresh;
+  })();
+  try {
+    return await inflight;
+  } catch (err) {
+    // Drop the failed promise so a subsequent call can retry. Without
+    // this the singleton would stick in a rejected state forever and
+    // the popup could never recover from a transient storage error.
+    inflight = null;
+    throw err;
   }
-  const fresh = await generateEd25519Keypair();
-  await chrome.storage.local.set({
-    [IDENTITY_KEY]: { pubkey_base58: fresh.pubkey_base58 },
-    [IDENTITY_SECRET_KEY]: fresh.secret,
-  });
-  return fresh;
+}
+
+/** @internal — test seam. Tests reset the singleton between cases so
+ *  the in-flight cache doesn't bleed across test isolation. */
+export function __resetEnsureLocalIdentityCache(): void {
+  inflight = null;
 }
 
 /**

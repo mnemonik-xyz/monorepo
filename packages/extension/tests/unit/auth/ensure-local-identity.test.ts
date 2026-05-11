@@ -15,6 +15,7 @@ import { describe, it, expect, beforeEach } from "vitest";
 import {
   base58Encode,
   ensureLocalIdentity,
+  __resetEnsureLocalIdentityCache,
 } from "../../../src/auth/local-identity.js";
 
 // ── Fake chrome.storage.local shim ──────────────────────────────────────────
@@ -69,6 +70,9 @@ let storage: FakeStorage;
 beforeEach(() => {
   storage = makeFakeStorage();
   installChromeStub(storage);
+  // Clear the module-level in-flight cache so each test gets a fresh
+  // mint round (otherwise the singleton would leak between tests).
+  __resetEnsureLocalIdentityCache();
 });
 
 // ── base58Encode sanity ─────────────────────────────────────────────────────
@@ -171,5 +175,27 @@ describe("ensureLocalIdentity — existing valid identity", () => {
       id.pubkey_base58,
     );
     expect(stored.identity_secret).toEqual(id.secret);
+  });
+});
+
+// ── concurrent-call dedupe (PR135-C-01) ─────────────────────────────────────
+
+describe("ensureLocalIdentity — concurrent callers", () => {
+  it("mints exactly one keypair when called twice in parallel from a null storage", async () => {
+    // StrictMode double-render + parallel bootstrap effects would
+    // call this concurrently. The in-flight cache must coalesce both
+    // into one mint round so the second `set` doesn't overwrite the
+    // first with a different keypair.
+    const [a, b] = await Promise.all([
+      ensureLocalIdentity(),
+      ensureLocalIdentity(),
+    ]);
+    expect(a.pubkey_base58).toBe(b.pubkey_base58);
+    expect(a.secret).toEqual(b.secret);
+    // Storage holds exactly the resolved identity, not a clobbered
+    // second-mint value.
+    const stored = storage.inspect();
+    expect(stored.identity).toEqual({ pubkey_base58: a.pubkey_base58 });
+    expect(stored.identity_secret).toEqual(a.secret);
   });
 });
