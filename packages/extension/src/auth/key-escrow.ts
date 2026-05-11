@@ -173,6 +173,29 @@ export class EscrowNotFoundError extends Error {
   }
 }
 
+/** Audit S2 / FW-S-02: thrown by `Restore` (and any future caller) when
+ *  the encrypted blob fetched from `/api/key-escrow` carries a
+ *  `pubkey_base58` that does NOT match the Google-account-linked
+ *  `existingPubkey` returned by `/oauth/google/lookup`. The server is
+ *  supposed to bind those at PUT time; a mismatch indicates a buggy or
+ *  compromised server (or a swapped blob in some pathological proxy
+ *  scenario). Either way the unwrap MUST be refused — proceeding would
+ *  silently persist an identity whose persisted `pubkey_base58` does
+ *  not match the secret decoded from the blob. */
+export class EscrowPubkeyMismatchError extends Error {
+  public override readonly name = "EscrowPubkeyMismatchError";
+  public readonly expectedPubkey: string;
+  public readonly blobPubkey: string;
+  public constructor(expectedPubkey: string, blobPubkey: string) {
+    super(
+      `escrow blob pubkey does not match the account-linked pubkey ` +
+        `(expected ${expectedPubkey}, blob ${blobPubkey})`,
+    );
+    this.expectedPubkey = expectedPubkey;
+    this.blobPubkey = blobPubkey;
+  }
+}
+
 // ── Base64 helpers ──────────────────────────────────────────────────────────
 
 /** Encode `bytes` as standard base64 (RFC 4648 §4, `+/` alphabet, `=`

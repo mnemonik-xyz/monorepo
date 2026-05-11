@@ -31,7 +31,6 @@
     "identity",
     "contextMenus",
     "activeTab",
-    "scripting",
     "alarms"
   ],
   "host_permissions": [
@@ -104,6 +103,6 @@
     }
   ],
   "content_security_policy": {
-    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; object-src 'self'; base-uri 'self'; connect-src 'self' https://mc.mnemonik.xyz https://huggingface.co https://*.huggingface.co"
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; object-src 'self'; base-uri 'self'; connect-src 'self' https://mc.mnemonik.xyz https://huggingface.co https://cdn-lfs.huggingface.co https://cdn-lfs-us-1.huggingface.co"
   }
 }

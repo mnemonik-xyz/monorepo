@@ -98,6 +98,34 @@ export type TabCaptureCandidate = {
   };
 };
 
+/** Tab → SW: user clicked the FAB's "Save this chat" menu item. The SW
+ *  forwards this to the active tab's content script so the adapter can
+ *  extract the conversation; the popup picks the result up via its
+ *  Capture tab when the user opens it. Audit B5 / AUD-C-05 closes the
+ *  silent-drop where parseMsg rejected this type. */
+export type TabFabSaveChat = {
+  type: "tab:fab-save-chat";
+  payload?: { pageUrl?: string };
+};
+
+/** Tab → SW: user clicked the FAB's "Save selection" menu item. The
+ *  payload carries the highlighted text + the page URL so the SW can
+ *  forward to the content script's save-selection handler without
+ *  re-reading `window.getSelection()` on a different turn. */
+export type TabFabSaveSelection = {
+  type: "tab:fab-save-selection";
+  payload: {
+    selectionText: string;
+    pageUrl: string;
+  };
+};
+
+/** Tab → SW: user clicked the FAB's "Open Mnemonik" menu item. Opens
+ *  the popup via `chrome.action.openPopup()` (where supported). */
+export type TabFabOpenPopup = {
+  type: "tab:fab-open-popup";
+};
+
 /** Discriminated union over every message the router knows about. */
 export type Msg =
   | SwOpenRecallOverlay
@@ -105,7 +133,10 @@ export type Msg =
   | UiSignMemory
   | UiRecall
   | UiFlushPending
-  | TabCaptureCandidate;
+  | TabCaptureCandidate
+  | TabFabSaveChat
+  | TabFabSaveSelection
+  | TabFabOpenPopup;
 
 /** Narrow `unknown` to `Msg`. Returns null when the shape doesn't match;
  *  callers decide whether to log / drop. Never throws on hostile input.
@@ -134,6 +165,13 @@ export function parseMsg(input: unknown): Msg | null {
       return { type: "ui:flush-pending" };
     case "tab:capture-candidate":
       return isTabCaptureCandidateMsg(input) ? input : null;
+    case "tab:fab-save-chat":
+      return isTabFabSaveChatMsg(input) ? input : null;
+    case "tab:fab-save-selection":
+      return isTabFabSaveSelectionMsg(input) ? input : null;
+    case "tab:fab-open-popup":
+      // No payload — type discriminant is the whole contract.
+      return { type: "tab:fab-open-popup" };
     default:
       return null;
   }
@@ -150,7 +188,7 @@ function isStringArray(v: unknown): v is string[] {
 }
 
 function isOpenRecallOverlayMsg(
-  input: Record<string, unknown>
+  input: Record<string, unknown>,
 ): input is SwOpenRecallOverlay {
   const p = input["payload"];
   if (!isPlainObject(p)) return false;
@@ -161,7 +199,7 @@ function isOpenRecallOverlayMsg(
 }
 
 function isSaveSelectionMsg(
-  input: Record<string, unknown>
+  input: Record<string, unknown>,
 ): input is SwSaveSelection {
   const p = input["payload"];
   if (!isPlainObject(p)) return false;
@@ -175,7 +213,7 @@ function isSaveSelectionMsg(
 }
 
 function isUiSignMemoryMsg(
-  input: Record<string, unknown>
+  input: Record<string, unknown>,
 ): input is UiSignMemory {
   const p = input["payload"];
   if (!isPlainObject(p)) return false;
@@ -215,7 +253,7 @@ function isUiRecallMsg(input: Record<string, unknown>): input is UiRecall {
 }
 
 function isTabCaptureCandidateMsg(
-  input: Record<string, unknown>
+  input: Record<string, unknown>,
 ): input is TabCaptureCandidate {
   const p = input["payload"];
   if (!isPlainObject(p)) return false;
@@ -224,5 +262,27 @@ function isTabCaptureCandidateMsg(
   if (typeof p["content"] !== "string") return false;
   if (p["chatId"] !== undefined && typeof p["chatId"] !== "string")
     return false;
+  return true;
+}
+
+function isTabFabSaveChatMsg(
+  input: Record<string, unknown>,
+): input is TabFabSaveChat {
+  const p = input["payload"];
+  if (p === undefined) return true;
+  if (!isPlainObject(p)) return false;
+  if (p["pageUrl"] !== undefined && typeof p["pageUrl"] !== "string") {
+    return false;
+  }
+  return true;
+}
+
+function isTabFabSaveSelectionMsg(
+  input: Record<string, unknown>,
+): input is TabFabSaveSelection {
+  const p = input["payload"];
+  if (!isPlainObject(p)) return false;
+  if (typeof p["selectionText"] !== "string") return false;
+  if (typeof p["pageUrl"] !== "string") return false;
   return true;
 }

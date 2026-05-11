@@ -336,7 +336,12 @@ function isAuthorisedSender(
 
   // Tab-origin: must come from a tab whose URL matches one of the
   // declared host permissions.
-  if (msg.type === "tab:capture-candidate") {
+  if (
+    msg.type === "tab:capture-candidate" ||
+    msg.type === "tab:fab-save-chat" ||
+    msg.type === "tab:fab-save-selection" ||
+    msg.type === "tab:fab-open-popup"
+  ) {
     const tabUrl = sender.tab?.url ?? sender.url;
     if (typeof tabUrl !== "string") return false;
     return ALLOWED_TAB_ORIGINS.some((origin) =>
@@ -386,8 +391,38 @@ async function handleMsg(deps: ServiceWorkerDeps, msg: Msg): Promise<unknown> {
       // T11 / T18: delegate to runtime/sign + runtime/store. The SW
       // does not embed business logic — it routes.
       return { deferred: "sign-memory" };
-    case "ui:recall":
-      return { deferred: "recall" };
+    case "ui:recall": {
+      // Audit B4 / AUD-C-04: the SW had `return { deferred: "recall" }`
+      // here so the recall-overlay (T13) saw zero results on every
+      // query. The overlay sends `ui:recall` via `chrome.runtime.send-
+      // Message` from the content-script realm — the popup is not
+      // open at hotkey time, so we must do the work in the SW.
+      //
+      // We construct a per-call IndexedDbStore (already inexpensive —
+      // `idb` reuses the underlying connection on repeat opens within
+      // the same SW boot) and lazy-import the embedder so a SW boot
+      // without recall traffic doesn't pay the ~25MB model load.
+      // The overlay expects a `{ ok, results }` reply; we shape it
+      // here to match.
+      try {
+        const { query, limit, ownerPubkey, tags } = msg.payload;
+        const { embedTextForSw } = await import("./recall-embedder.js");
+        const vector = await embedTextForSw(query);
+        const store = deps.storeFactory();
+        const searchOpts: { tags?: string[] } = {};
+        if (tags !== undefined) searchOpts.tags = tags;
+        const results = await store.search(
+          vector,
+          ownerPubkey,
+          limit,
+          searchOpts,
+        );
+        return { ok: true, results };
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        return { ok: false, error: message, results: [] };
+      }
+    }
     case "sw:open-recall-overlay":
     case "sw:save-selection":
     case "tab:capture-candidate":
@@ -395,6 +430,64 @@ async function handleMsg(deps: ServiceWorkerDeps, msg: Msg): Promise<unknown> {
       // doesn't process them via the request/response channel (the
       // sender dispatched directly to the recipient).
       return { acknowledged: true };
+    case "tab:fab-open-popup": {
+      // Audit B5 / AUD-C-05: programmatic popup open. Browsers may
+      // gate this on a user-gesture context — the FAB click satisfies
+      // that. Wrap in try/catch because some Chromium derivatives /
+      // older builds reject the call (and `chrome.action.openPopup`
+      // is missing entirely on some Edge versions). Failure is non-
+      // fatal; the user can still click the toolbar button.
+      try {
+        const action = (deps.chrome as { action?: { openPopup?: () => void } })
+          .action;
+        action?.openPopup?.();
+      } catch {
+        // Best-effort.
+      }
+      return { acknowledged: true };
+    }
+    case "tab:fab-save-chat":
+    case "tab:fab-save-selection": {
+      // Audit B5 / AUD-C-05: stash the FAB intent in chrome.storage.local
+      // under `pending_fab_action.v1` and request the popup open. The
+      // popup's Capture tab reads + clears the key on mount and pre-
+      // populates the form accordingly (page URL / selection text /
+      // "extract conversation" intent). When `chrome.action.openPopup`
+      // is unavailable the intent persists until the user opens the
+      // popup manually.
+      try {
+        const intent: Record<string, unknown> =
+          msg.type === "tab:fab-save-selection"
+            ? {
+                kind: "save-selection",
+                selectionText: msg.payload.selectionText,
+                pageUrl: msg.payload.pageUrl,
+                capturedAt: deps.now(),
+              }
+            : {
+                kind: "save-chat",
+                ...(msg.payload?.pageUrl !== undefined
+                  ? { pageUrl: msg.payload.pageUrl }
+                  : {}),
+                capturedAt: deps.now(),
+              };
+        await deps.chrome.storage.local.set({
+          "pending_fab_action.v1": intent,
+        });
+      } catch {
+        // Best-effort — popup will simply fall back to its empty state.
+      }
+      try {
+        const action = (deps.chrome as { action?: { openPopup?: () => void } })
+          .action;
+        action?.openPopup?.();
+      } catch {
+        // Best-effort — `chrome.action.openPopup` is gated by browser
+        // build / gesture context; the intent above survives until
+        // the user opens the popup manually.
+      }
+      return { acknowledged: true };
+    }
   }
 }
 

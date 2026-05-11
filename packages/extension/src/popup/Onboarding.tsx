@@ -25,7 +25,6 @@ import type {
   LookupResult,
   Session,
 } from "../auth/types.js";
-import { jwtExpiresAtMs } from "../auth/session.js";
 import { Restore } from "./onboarding/Restore.js";
 import { SetPassphrase } from "./onboarding/SetPassphrase.js";
 
@@ -117,7 +116,8 @@ export function Onboarding({ onComplete }: OnboardingProps): JSX.Element {
         jwtExpiresAt:
           signIn.jwtExpiresAt > 0
             ? signIn.jwtExpiresAt
-            : (jwtExpiresAtMs(signIn.jwt) ?? Date.now() + FALLBACK_SESSION_MS),
+            : (r.session.jwtExpiresAtMs(signIn.jwt) ??
+              Date.now() + FALLBACK_SESSION_MS),
         signedInAt: Date.now(),
       };
       await r.session.set(session);

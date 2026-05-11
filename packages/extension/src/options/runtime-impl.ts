@@ -3,17 +3,22 @@
 //
 //   - `settings` → `src/settings.ts` (chrome.storage.local under
 //     `settings.v1`).
-//   - `auth` → STUB. T16 will replace with the real Google OAuth client
-//     (`src/auth/google-oauth.ts`). Today the stub throws on `signIn`
-//     so the Storage section's "Switch to Cloud" branch surfaces a
-//     clear "sign-in not yet wired" error instead of silently failing.
+//   - `auth` → T16 real implementation. `signIn` runs Google OAuth via
+//     `src/auth/google-oauth.ts::signInWithGoogle` and persists the
+//     result through `src/auth/session.ts::setSession`. `getSession`
+//     reads through the SAME `getSession` helper the popup uses so
+//     the persisted shape is unified (audit B3 / AUD-C-03).
 //   - `keyEscrow` → T17 real implementation. `rotate` re-derives the
 //     Argon2id wrap-key and PUTs a fresh blob; `delete` issues
 //     `DELETE /api/key-escrow`; `hasBlob` probes via GET and treats
 //     `EscrowNotFoundError` (or any transport hiccup) as "no blob".
-//   - `cloudSync` → STUB. T18 will replace with deferred-signing client.
-//     Today `enqueueAll` is a no-op and `subscribeProgress` emits a
-//     single `done: true` event so the migration UI doesn't hang.
+//     All three run the T15 extension-bootstrap handshake first so
+//     the wire-level Bearer is `aud=extension` (audit B1).
+//   - `cloudSync` → T18 wiring. `enqueueAll` iterates every local row
+//     and calls `IndexedDbStore.enqueue` so the SW alarm can drain
+//     them; `subscribeProgress` polls the local queue size while the
+//     drain runs. `countCloudAttestations` stays at 0 until a server
+//     endpoint exists.
 //   - `identity` → reads `chrome.storage.local.identity` (populated by
 //     T16 onboarding). Export / import keypair are STUB — T05 owns the
 //     WASM `export_keypair_json` / `import_keypair_json` exports the
@@ -28,8 +33,17 @@ import {
   fetchEscrow,
   rotatePassphrase,
   EscrowNotFoundError,
+  bytesToBase64,
 } from "../auth/key-escrow.js";
-import { SESSION_STORAGE_KEY } from "../auth/types.js";
+import { signInWithGoogle } from "../auth/google-oauth.js";
+import {
+  getSession,
+  setSession,
+  clearSession,
+  jwtExpiresAtMs,
+} from "../auth/session.js";
+import { ensureExtensionJwt } from "../auth/extension-bootstrap.js";
+import type { Session } from "../auth/types.js";
 import type {
   AuthFacade,
   AuthSession,
@@ -42,11 +56,21 @@ import type {
   SettingsFacade,
 } from "./runtime.js";
 
-// Canonical chrome.storage.local key for the cached Google session.
-// Must match auth/session.ts and the popup's session writer — otherwise
-// every keyEscrow.rotate / delete / hasBlob call from Security silently
-// gets null JWT and fails.
-const SESSION_KEY = SESSION_STORAGE_KEY;
+/** Fallback session lifetime when neither the server response nor the
+ *  JWT carries a usable expiry. Mirrors the popup's onboarding default
+ *  so both writers stay in lock-step. */
+const FALLBACK_SESSION_MS = 60 * 60 * 1000;
+
+/** Project the popup's persisted `Session` shape onto the options-side
+ *  `AuthSession` DTO. The session.ts module owns the on-disk schema;
+ *  this function is a one-line shape mapper, not an alternative writer. */
+function projectSession(s: Session): AuthSession {
+  return {
+    googleSub: s.googleSub,
+    email: s.profile.email,
+    jwt: s.jwt,
+  };
+}
 
 /** Build the production OptionsRuntime. Called once from `main.tsx`. */
 export function createDefaultOptionsRuntime(): OptionsRuntime {
@@ -70,40 +94,31 @@ function createSettingsFacade(): SettingsFacade {
 function createAuthFacade(): AuthFacade {
   return {
     async signIn(): Promise<AuthSession> {
-      // T16 stub — see file header. The Storage section's confirmation
-      // dialog surfaces this error in a toast.
-      throw new Error("Google sign-in is not yet wired (T16 pending)");
+      // Audit B2 / AUD-C-02: T16 has shipped — wire signInWithGoogle
+      // here, mirror what `popup/runtime.ts::auth.signIn` does, and
+      // persist through the SAME `setSession` writer so the on-disk
+      // shape is unified across realms (B3 / AUD-C-03).
+      const result = await signInWithGoogle();
+      const next: Session = {
+        jwt: result.jwt,
+        googleSub: result.googleSub,
+        profile: result.profile,
+        jwtExpiresAt:
+          result.jwtExpiresAt > 0
+            ? result.jwtExpiresAt
+            : (jwtExpiresAtMs(result.jwt) ?? Date.now() + FALLBACK_SESSION_MS),
+        signedInAt: Date.now(),
+      };
+      await setSession(next);
+      return projectSession(next);
     },
     async getSession(): Promise<AuthSession | null> {
-      try {
-        const stored = (await chrome.storage.local.get([
-          SESSION_KEY,
-        ])) as Record<string, unknown>;
-        const raw = stored[SESSION_KEY];
-        if (!raw || typeof raw !== "object") return null;
-        const obj = raw as Record<string, unknown>;
-        if (
-          typeof obj.google_sub !== "string" ||
-          typeof obj.email !== "string" ||
-          typeof obj.jwt !== "string"
-        ) {
-          return null;
-        }
-        return {
-          google_sub: obj.google_sub,
-          email: obj.email,
-          jwt: obj.jwt,
-        };
-      } catch {
-        return null;
-      }
+      const s = await getSession();
+      if (!s) return null;
+      return projectSession(s);
     },
     async clearSession(): Promise<void> {
-      try {
-        await chrome.storage.local.remove(SESSION_KEY);
-      } catch {
-        // Best-effort.
-      }
+      await clearSession();
     },
   };
 }
@@ -145,18 +160,18 @@ function createKeyEscrowFacade(): KeyEscrowFacade {
       // already mocks this seam directly; in production we forward the
       // typed errors as-is so the Security toast surfaces the right copy
       // (wrong-passphrase, 429 rate-limit, etc.).
-      const jwt = await readJwtOrThrow("rotate");
-      await rotatePassphrase(jwt, oldPassphrase, nextPassphrase);
+      const extJwt = await readExtensionJwtOrThrow("rotate");
+      await rotatePassphrase(extJwt, oldPassphrase, nextPassphrase);
     },
     async delete(): Promise<void> {
-      const jwt = await readJwtOrThrow("delete");
-      await deleteEscrow(jwt);
+      const extJwt = await readExtensionJwtOrThrow("delete");
+      await deleteEscrow(extJwt);
     },
     async hasBlob(): Promise<boolean> {
       try {
-        const jwt = await readJwt();
-        if (!jwt) return false;
-        await fetchEscrow(jwt);
+        const extJwt = await readExtensionJwt();
+        if (!extJwt) return false;
+        await fetchEscrow(extJwt);
         return true;
       } catch (err) {
         if (err instanceof EscrowNotFoundError) return false;
@@ -170,33 +185,31 @@ function createKeyEscrowFacade(): KeyEscrowFacade {
   };
 }
 
-/** Lift the current `session.v1.jwt` out of chrome.storage. Returns
- *  `null` when no session is cached or the blob is malformed. The
- *  keyEscrow facade calls this on every method so a stale JWT cached
- *  in module scope cannot leak into a fresh sign-in. */
-async function readJwt(): Promise<string | null> {
+/** Lift the cached Google session via `getSession()` (single source of
+ *  truth — B3 / AUD-C-03), then run the T15 extension-bootstrap
+ *  handshake to redeem an `aud=extension` JWT for /api/key-escrow*
+ *  (audit B1 / AUD-S-01). Returns `null` when no session is cached so
+ *  callers can branch defensively (e.g. `hasBlob` returns false). */
+async function readExtensionJwt(): Promise<string | null> {
+  const session = await getSession();
+  if (!session) return null;
   try {
-    const stored = (await chrome.storage.local.get([SESSION_KEY])) as Record<
-      string,
-      unknown
-    >;
-    const raw = stored[SESSION_KEY];
-    if (!raw || typeof raw !== "object") return null;
-    const jwt = (raw as Record<string, unknown>).jwt;
-    return typeof jwt === "string" && jwt.length > 0 ? jwt : null;
+    return await ensureExtensionJwt(session.jwt);
   } catch {
+    // Bootstrap failures bubble up at the call site as "no blob known"
+    // for `hasBlob`; the throw variant surfaces them as toast errors.
     return null;
   }
 }
 
-async function readJwtOrThrow(where: string): Promise<string> {
-  const jwt = await readJwt();
-  if (!jwt) {
+async function readExtensionJwtOrThrow(where: string): Promise<string> {
+  const session = await getSession();
+  if (!session) {
     throw new Error(
       `${where}: no Google session cached — sign in before managing escrow`,
     );
   }
-  return jwt;
+  return await ensureExtensionJwt(session.jwt);
 }
 
 function createCloudSyncFacade(): CloudSyncFacade {
@@ -223,28 +236,118 @@ function createCloudSyncFacade(): CloudSyncFacade {
       }
     },
     async countCloudAttestations(): Promise<number> {
-      // T18 will GET /api/attestations?count=true (or equivalent) and
-      // surface the real cloud-side row count for the active session.
-      // Until then, return 0 so the Cloud→Local dialog renders a stable
-      // placeholder rather than the misleading local count.
+      // No `/api/attestations?count=true` endpoint exists today; we keep
+      // the stub returning 0 so the Cloud→Local dialog renders a stable
+      // placeholder rather than the misleading local count. A follow-up
+      // backlog item will add the server endpoint.
       return 0;
     },
     async enqueueAll(): Promise<void> {
-      // T18 will iterate every row and push to `pending_uploads`. Today
-      // this is a no-op — the SW alarm already has the cloud-sync drain
-      // stub (`runtime/sync/cloud-client.ts`) that T18 will fill in.
-      return;
+      // Audit B2 / AUD-C-02: T18 has shipped — iterate every local row
+      // for the active identity and call `IndexedDbStore.enqueue` so
+      // the SW alarm-driven `drainPendingUploads` (`background/
+      // cloud-sync.ts`) flushes them on the next tick.
+      try {
+        const stored = (await chrome.storage.local.get(["identity"])) as Record<
+          string,
+          unknown
+        >;
+        const identity = stored.identity as
+          | { pubkey_base58?: string }
+          | undefined;
+        if (!identity?.pubkey_base58) return;
+        const { IndexedDbStore } =
+          await import("../runtime/store/indexeddb.js");
+        const store = new IndexedDbStore();
+        const rows = await store.allByOwner(identity.pubkey_base58);
+        for (const row of rows) {
+          await store.enqueue(row.attestation_id);
+        }
+      } catch (err) {
+        // Bubble up so the Storage section can render the migration-
+        // failed toast. The dialog stays open via the error path in
+        // Storage.tsx's onConfirmToCloud catch.
+        throw err instanceof Error
+          ? err
+          : new Error(`enqueueAll failed: ${String(err)}`);
+      }
     },
     subscribeProgress(cb: (e: MigrationProgressEvent) => void): () => void {
-      // Single synthetic done event so the migration UI doesn't hang
-      // waiting for progress that won't arrive until T18.
-      const handle = setTimeout(() => {
-        cb({ attempted: 0, flushed: 0, total: 0, done: true });
-      }, 0);
-      return () => clearTimeout(handle);
+      // Audit B2: surface live queue drain progress. We poll
+      // `pending_uploads` size every 2s; the SW alarm-tick drains the
+      // queue server-side. Done when the queue is empty.
+      let cancelled = false;
+      let pollHandle: ReturnType<typeof setTimeout> | null = null;
+      let total = 0;
+      let started = false;
+      const poll = async (): Promise<void> => {
+        if (cancelled) return;
+        try {
+          const { IndexedDbStore } =
+            await import("../runtime/store/indexeddb.js");
+          const store = new IndexedDbStore();
+          const pending = await store.pendingCount();
+          if (!started) {
+            total = pending;
+            started = true;
+          }
+          const flushed = Math.max(0, total - pending);
+          const event: MigrationProgressEvent = {
+            attempted: total,
+            flushed,
+            total,
+            ...(pending === 0 ? { done: true } : {}),
+          };
+          cb(event);
+          if (pending > 0 && !cancelled) {
+            pollHandle = setTimeout(() => void poll(), 2000);
+          }
+        } catch (err) {
+          if (!cancelled) {
+            cb({
+              attempted: 0,
+              flushed: 0,
+              total: 0,
+              done: true,
+              error: err instanceof Error ? err.message : String(err),
+            });
+          }
+        }
+      };
+      // First tick immediately so callers see at least one event.
+      pollHandle = setTimeout(() => void poll(), 0);
+      return () => {
+        cancelled = true;
+        if (pollHandle !== null) clearTimeout(pollHandle);
+      };
     },
     async exportAll(): Promise<Uint8Array> {
-      throw new Error("Cloud → Local export is not yet wired (T18 pending)");
+      // Cloud → Local archive: bundle every local row as JSON. The COSE
+      // bytes are emitted as base64 so the archive is JSON-clean. The
+      // Storage section triggers a download of the returned bytes.
+      const stored = (await chrome.storage.local.get(["identity"])) as Record<
+        string,
+        unknown
+      >;
+      const identity = stored.identity as
+        | { pubkey_base58?: string }
+        | undefined;
+      if (!identity?.pubkey_base58) {
+        // Nothing to export; emit an empty-but-valid bundle so the
+        // download still goes through and the UI doesn't error out.
+        return new TextEncoder().encode(JSON.stringify({ rows: [] }, null, 2));
+      }
+      const { IndexedDbStore } = await import("../runtime/store/indexeddb.js");
+      const store = new IndexedDbStore();
+      const rows = await store.allByOwner(identity.pubkey_base58);
+      const serialised = rows.map((r) => ({
+        ...r,
+        cose_bytes: bytesToBase64(r.cose_bytes),
+        embedding: Array.from(r.embedding),
+      }));
+      return new TextEncoder().encode(
+        JSON.stringify({ rows: serialised }, null, 2),
+      );
     },
   };
 }

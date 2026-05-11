@@ -27,6 +27,9 @@ const RESULT_LIMIT = 5;
 
 interface RecallResponse {
   ok: boolean;
+  /** Result envelope from the SW's typed onMessage handler. */
+  result?: { ok?: boolean; results?: SearchResult[]; error?: string };
+  /** Legacy / fallback shape for tests that mock the SW directly. */
   results?: SearchResult[];
   error?: string;
 }
@@ -216,18 +219,44 @@ async function runSearch(state: OverlayState, raw: string): Promise<void> {
   state.status.textContent = "Recalling…";
   state.status.classList.remove("error");
   try {
-    const reply = (await chrome.runtime.sendMessage({
-      type: "ui:recall",
-      payload: { query, limit: RESULT_LIMIT },
-    })) as RecallResponse | undefined;
-    if (!reply || reply.ok === false) {
-      state.status.textContent = reply?.error ?? "Recall failed.";
+    // Audit B4 / AUD-C-04: the recall message requires `ownerPubkey`
+    // (per `parseMsg` in messages.ts). Pull it out of the persisted
+    // identity row so the SW recall scopes correctly.
+    let ownerPubkey: string | undefined;
+    try {
+      const stored = (await chrome.storage.local.get("identity")) as Record<
+        string,
+        unknown
+      >;
+      const id = stored.identity as { pubkey_base58?: string } | undefined;
+      if (id?.pubkey_base58) ownerPubkey = id.pubkey_base58;
+    } catch {
+      // chrome.storage might be unavailable in some test harnesses;
+      // the SW will surface a typed error if ownerPubkey is missing.
+    }
+    if (!ownerPubkey) {
+      state.status.textContent = "Sign in to enable recall.";
       state.status.classList.add("error");
       state.results = [];
       state.list.replaceChildren();
       return;
     }
-    state.results = reply.results ?? [];
+    const reply = (await chrome.runtime.sendMessage({
+      type: "ui:recall",
+      payload: { query, ownerPubkey, limit: RESULT_LIMIT },
+    })) as RecallResponse | undefined;
+    // The SW's typed `onMessage` listener wraps the handler return in
+    // `{ ok, result }`; un-nest before reading results.
+    const inner = reply?.result ?? reply;
+    if (!reply || reply.ok === false || inner?.ok === false) {
+      state.status.textContent =
+        inner?.error ?? reply?.error ?? "Recall failed.";
+      state.status.classList.add("error");
+      state.results = [];
+      state.list.replaceChildren();
+      return;
+    }
+    state.results = inner?.results ?? reply.results ?? [];
     state.focusedIndex = 0;
     if (state.results.length === 0) {
       state.status.textContent = "No memories matched this query.";

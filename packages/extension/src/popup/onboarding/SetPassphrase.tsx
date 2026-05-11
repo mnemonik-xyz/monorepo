@@ -35,14 +35,21 @@ import {
   type FormEvent,
   type JSX,
 } from "react";
-import { bytesToBase64, type EscrowBlob } from "../../auth/key-escrow.js";
+import { type EscrowBlob } from "../../auth/key-escrow.js";
 import {
   MIN_PASSPHRASE_LENGTH,
   isPassphraseAcceptable,
 } from "../../options/components/PassphraseStrength.js";
-import { DEFAULT_SERVER_ORIGIN } from "../../auth/google-oauth.js";
-import { AuthError } from "../../auth/types.js";
 import { getRuntime } from "../runtime.js";
+
+/** Inline base64 encoder. Mirrors `auth/key-escrow.ts::bytesToBase64`
+ *  but kept local so this component doesn't reach into the key-escrow
+ *  module's static graph (audit M3 / AUD-C-08). */
+function setPpBytesToBase64(bytes: Uint8Array): string {
+  let bin = "";
+  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]!);
+  return globalThis.btoa(bin);
+}
 
 // Lazy: the zxcvbn dictionaries are ~50KB gzip. Defer the cost until
 // the user actually opens the SetPassphrase step.
@@ -86,7 +93,11 @@ export interface SetPassphraseKeyEscrow {
 }
 
 export interface SetPassphraseProps {
-  /** Server-issued Bearer JWT (`aud=extension`, carrying `google_sub`). */
+  /** User's cached `aud=mcp` Google-session JWT. The popup runtime
+   *  internally runs the T15 extension-bootstrap handshake before
+   *  any `/api/key-escrow` call (audit B1 / AUD-S-01), and forwards
+   *  this same JWT verbatim to `/oauth/google/link`, which uses the
+   *  standard `verify_jwt` validator (aud=mcp). */
   jwt: string;
   /** Freshly-minted (or pre-existing local) Ed25519 keypair. */
   keypair: OnboardingKeypair;
@@ -121,7 +132,7 @@ export function SetPassphrase(props: SetPassphraseProps): JSX.Element {
     keypair,
     linkChallenge,
     signChallenge,
-    serverOrigin = DEFAULT_SERVER_ORIGIN,
+    serverOrigin,
     fetchImpl,
     keyEscrow,
     onComplete,
@@ -213,19 +224,25 @@ export function SetPassphrase(props: SetPassphraseProps): JSX.Element {
         return;
       }
       try {
-        const linkOpts: { serverOrigin: string; fetchImpl?: typeof fetch } = {
-          serverOrigin,
+        const linkBody = {
+          pubkey_base58: keypair.pubkey_base58,
+          possession_proof_base64: setPpBytesToBase64(signature),
+          challenge: linkChallenge,
         };
-        if (fetchImpl !== undefined) linkOpts.fetchImpl = fetchImpl;
-        await linkGoogle(
-          jwt,
-          {
-            pubkey_base58: keypair.pubkey_base58,
-            possession_proof_base64: bytesToBase64(signature),
-            challenge: linkChallenge,
-          },
-          linkOpts,
-        );
+        if (fetchImpl !== undefined || serverOrigin !== undefined) {
+          // Legacy test seam (kept for back-compat: existing component
+          // tests inject `{ fetchImpl, serverOrigin }` and observe the
+          // raw `/oauth/google/link` POST). Production callers omit
+          // both and we route through the runtime facade (M3).
+          const { linkGoogleAccount } = await import("../../auth/link.js");
+          const linkOpts: { serverOrigin?: string; fetchImpl?: typeof fetch } =
+            {};
+          if (serverOrigin !== undefined) linkOpts.serverOrigin = serverOrigin;
+          if (fetchImpl !== undefined) linkOpts.fetchImpl = fetchImpl;
+          await linkGoogleAccount(jwt, linkBody, linkOpts);
+        } else {
+          await getRuntime().auth.linkGoogle(jwt, linkBody);
+        }
       } catch (err) {
         setStep({
           kind: "error",
@@ -330,46 +347,10 @@ export function SetPassphrase(props: SetPassphraseProps): JSX.Element {
   );
 }
 
-// ── /oauth/google/link client ──────────────────────────────────────────────
-
-/** Body shape POSTed to `/oauth/google/link`. Mirrors
- *  `mcp/src/oauth/google.rs::LinkRequest`. */
-interface LinkRequest {
-  pubkey_base58: string;
-  possession_proof_base64: string;
-  challenge: string;
-}
-
-async function linkGoogle(
-  jwt: string,
-  body: LinkRequest,
-  opts: { serverOrigin: string; fetchImpl?: typeof fetch },
-): Promise<void> {
-  const fetchImpl = opts.fetchImpl ?? globalThis.fetch.bind(globalThis);
-  const url = new URL(
-    "/oauth/google/link",
-    opts.serverOrigin.replace(/\/+$/u, ""),
-  ).toString();
-  let resp: Response;
-  try {
-    resp = await fetchImpl(url, {
-      method: "POST",
-      headers: {
-        authorization: `Bearer ${jwt}`,
-        "content-type": "application/json",
-      },
-      body: JSON.stringify(body),
-    });
-  } catch (cause) {
-    throw new AuthError("linkGoogle: server unreachable", { cause });
-  }
-  if (resp.status === 401) throw new AuthError("linkGoogle: 401");
-  if (resp.status === 403) throw new AuthError("linkGoogle: 403");
-  if (resp.status === 409) throw new AuthError("linkGoogle: already linked");
-  if (resp.status === 429) throw new AuthError("linkGoogle: 429 rate-limited");
-  if (!resp.ok)
-    throw new AuthError(`linkGoogle: server returned ${String(resp.status)}`);
-}
+// The legacy inline `linkGoogle` implementation moved to
+// `src/auth/link.ts::linkGoogleAccount` (audit M3 / AUD-C-08). Tests
+// that still pass `{ fetchImpl, serverOrigin }` go through the same
+// module via a dynamic import in `onSubmit` above.
 
 /** Default key-escrow facade — production passes nothing and we route
  *  through the popup runtime's `keyEscrow.{wrap,upload}` pair. Tests

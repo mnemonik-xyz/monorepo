@@ -38,14 +38,20 @@ import {
   type FormEvent,
   type JSX,
 } from "react";
+// Restore consumes typed errors + the wire-shape type directly; the
+// concrete `fetchEscrow` / `unwrapSecret` calls go through the popup
+// runtime facade (audit M3 / AUD-C-08 layering fix). The runtime's
+// `keyEscrow.fetch` runs the T15 bootstrap handshake (audit B1) before
+// hitting /api/key-escrow, so callers pass their cached `aud=mcp`
+// session JWT and the wire-level Authorization carries `aud=extension`.
 import {
   EscrowNotFoundError,
+  EscrowPubkeyMismatchError,
   EscrowRateLimitError,
   WrongPassphraseError,
-  fetchEscrow,
-  unwrapSecret,
   type EscrowBlob,
 } from "../../auth/key-escrow.js";
+import { getRuntime } from "../runtime.js";
 
 /** Persistent block budget (T17 task spec § Restore UX). After 5 wrong
  *  passphrase attempts the input is disabled for 24h. The countdown
@@ -158,25 +164,48 @@ export function Restore(props: RestoreProps): JSX.Element {
   // Build a default key-escrow facade once per mount (NOT on every
   // render) so the `ke` reference is stable across renders — keeps it
   // safe to put in `useCallback` deps. The facade prefers the explicit
-  // `keyEscrow` prop, then the legacy `{fetchImpl, serverOrigin}` pair,
-  // and finally the bare `fetchEscrow`/`unwrapSecret` module imports.
+  // `keyEscrow` prop, then the legacy `{fetchImpl, serverOrigin}` pair
+  // (back-compat for tests that mock the wire layer), and finally the
+  // popup runtime facade — which routes through
+  // `getRuntime().keyEscrow.{fetch,unwrap}` and runs the T15 extension-
+  // bootstrap handshake before hitting /api/key-escrow.
   const keRef = useRef<RestoreKeyEscrow | null>(null);
   if (keRef.current === null) {
     if (keyEscrow !== undefined) {
       keRef.current = keyEscrow;
-    } else {
+    } else if (fetchImpl !== undefined || serverOrigin !== undefined) {
+      // Legacy back-compat path for tests that pass {fetchImpl, serverOrigin}
+      // — those tests assume the direct module entry-point. We dynamic-import
+      // it here so production callers don't pay the cost.
       const httpOpts: { serverOrigin?: string; fetchImpl?: typeof fetch } = {};
       if (serverOrigin !== undefined) httpOpts.serverOrigin = serverOrigin;
       if (fetchImpl !== undefined) httpOpts.fetchImpl = fetchImpl;
       keRef.current = {
         async fetch(jwtArg: string): Promise<EscrowBlob> {
+          const { fetchEscrow } = await import("../../auth/key-escrow.js");
           return fetchEscrow(jwtArg, httpOpts);
         },
         async unwrap(
           blob: EscrowBlob,
           passphrase: string,
         ): Promise<Uint8Array> {
+          const { unwrapSecret } = await import("../../auth/key-escrow.js");
           return unwrapSecret(blob, passphrase);
+        },
+      };
+    } else {
+      // Production path: route through the popup runtime facade so
+      // `auth/key-escrow.ts` stays out of this component's static
+      // import graph (M3 / AUD-C-08).
+      keRef.current = {
+        async fetch(jwtArg: string): Promise<EscrowBlob> {
+          return getRuntime().keyEscrow.fetch(jwtArg);
+        },
+        async unwrap(
+          blob: EscrowBlob,
+          passphrase: string,
+        ): Promise<Uint8Array> {
+          return getRuntime().keyEscrow.unwrap(blob, passphrase);
         },
       };
     }
@@ -323,6 +352,28 @@ export function Restore(props: RestoreProps): JSX.Element {
           });
           return;
         }
+      }
+
+      // Audit S2 / FW-S-02: defence-in-depth pubkey-binding check.
+      // The server is supposed to bind `pubkey_base58` to the Google
+      // account at PUT time; a mismatched blob here indicates a buggy
+      // or compromised server (or a swapped row in some pathological
+      // proxy scenario). Refuse the unwrap and surface a typed error.
+      if (blob.pubkey_base58 !== existingPubkey) {
+        const mismatch = new EscrowPubkeyMismatchError(
+          existingPubkey,
+          blob.pubkey_base58,
+        );
+        setStep({
+          kind: "error",
+          message:
+            "The encrypted blob does not match this account. Refusing " +
+            "to restore — contact support if this persists.",
+        });
+        // Keep `mismatch` referenced for log surfaces (no console.log of
+        // pubkeys to avoid leaking identity bytes into shared toolbars).
+        void mismatch;
+        return;
       }
 
       // Local AES-GCM unwrap. Wrong passphrase surfaces here WITHOUT a

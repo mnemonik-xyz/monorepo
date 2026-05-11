@@ -112,6 +112,22 @@ export class IndexedDbStore {
     return db.countFromIndex("attestations", "by_signer", signerPubkey);
   }
 
+  /** Every attestation row owned by `ownerPubkey`. Used by the options
+   *  Local→Cloud migration (audit B2 / AUD-C-02) to enumerate rows for
+   *  re-enqueue and by exportAll to assemble the JSON bundle. */
+  async allByOwner(ownerPubkey: string): Promise<AttestationRow[]> {
+    if (!ownerPubkey) return [];
+    const db = await this.db();
+    return db.getAllFromIndex("attestations", "by_owner", ownerPubkey);
+  }
+
+  /** Number of rows in the pending-uploads queue. Used by the options
+   *  page migration progress UI. */
+  async pendingCount(): Promise<number> {
+    const db = await this.db();
+    return db.count("pending_uploads");
+  }
+
   /**
    * Cosine-similarity top-K search scoped to `owner_pubkey`. Optional
    * `tags` filter is AND-applied (every supplied tag must be present).

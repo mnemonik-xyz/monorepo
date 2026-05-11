@@ -282,6 +282,59 @@ describe("Restore — happy path", () => {
   });
 });
 
+// ── S2 pubkey-mismatch defence-in-depth ─────────────────────────────────────
+
+describe("Restore — pubkey mismatch (audit S2 / FW-S-02)", () => {
+  it("refuses to unwrap when blob.pubkey_base58 != existingPubkey", async () => {
+    // Blob is wrapped for "PubBlob", but the account-linked pubkey
+    // surfaced by /oauth/google/lookup is "PubAccount". The server is
+    // supposed to bind them at PUT time; a mismatch indicates a buggy
+    // / compromised server. Client must refuse and surface a clear
+    // error before ever calling unwrap.
+    const secret = crypto.getRandomValues(new Uint8Array(32));
+    const blob = await fastWrap(secret, "correct-passphrase-A", "PubBlob");
+    const { store, adapter } = makeStorage();
+    let completed = false;
+
+    // unwrap spy: if we ever call it, the defence has failed.
+    const unwrapSpy = vi.fn();
+
+    render(
+      <Restore
+        jwt="JWT.PLACEHOLDER"
+        existingPubkey="PubAccount"
+        onComplete={() => {
+          completed = true;
+        }}
+        keyEscrow={{
+          fetch: async () => blob,
+          unwrap: unwrapSpy as unknown as (
+            b: EscrowBlob,
+            p: string,
+          ) => Promise<Uint8Array>,
+        }}
+        storage={adapter}
+      />,
+    );
+
+    const input = (await screen.findByTestId(
+      "restore-pp-input",
+    )) as HTMLInputElement;
+    fireEvent.change(input, { target: { value: "correct-passphrase-A" } });
+    fireEvent.click(screen.getByRole("button", { name: /^Restore/ }));
+
+    await waitFor(() => {
+      expect(screen.getByText(/does not match this account/i)).toBeTruthy();
+    });
+    // Critical assertions: unwrap NEVER called; nothing persisted; no
+    // onComplete fired.
+    expect(unwrapSpy).not.toHaveBeenCalled();
+    expect(completed).toBe(false);
+    expect(store.get(IDENTITY_STORAGE_KEY)).toBeUndefined();
+    expect(store.get(IDENTITY_SECRET_STORAGE_KEY)).toBeUndefined();
+  });
+});
+
 // ── 429 rate-limit surfacing ────────────────────────────────────────────────
 
 describe("Restore — 429 surfaces typed countdown", () => {
