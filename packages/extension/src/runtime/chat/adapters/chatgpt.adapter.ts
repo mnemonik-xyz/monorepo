@@ -66,7 +66,8 @@ export const chatgptAdapter: ChatAdapter = {
         // canonical alternation. The inner [data-message-author-role]
         // (if present) wins.
         const inner = node.querySelector("[data-message-author-role]");
-        const explicit = inner?.getAttribute("data-message-author-role");
+        const explicit =
+          inner?.getAttribute("data-message-author-role") ?? null;
         const role =
           inferRole(explicit) ?? (i % 2 === 0 ? "user" : "assistant");
         const content = domNodeToMarkdown(node).trim();
@@ -83,7 +84,8 @@ export const chatgptAdapter: ChatAdapter = {
         const node = list[i];
         if (!node) continue;
         const inner = node.querySelector("[data-message-author-role]");
-        const explicit = inner?.getAttribute("data-message-author-role");
+        const explicit =
+          inner?.getAttribute("data-message-author-role") ?? null;
         const role =
           inferRole(explicit) ?? (i % 2 === 0 ? "user" : "assistant");
         const content = domNodeToMarkdown(node).trim();

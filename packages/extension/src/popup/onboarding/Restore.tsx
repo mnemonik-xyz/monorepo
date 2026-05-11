@@ -133,6 +133,7 @@ export interface RestoreProps {
 export interface RestoreStorage {
   get(keys: string[]): Promise<Record<string, unknown>>;
   set(items: Record<string, unknown>): Promise<void>;
+  remove(keys: string | string[]): Promise<void>;
 }
 
 /** Module-scope stable defaults — T17-C-03 fix. Using inline default-
@@ -727,6 +728,13 @@ function chromeStorageAdapter(): RestoreStorage {
     async set(items: Record<string, unknown>): Promise<void> {
       try {
         await chrome.storage.local.set(items);
+      } catch {
+        // Best-effort — surface through the form rather than crashing.
+      }
+    },
+    async remove(keys: string | string[]): Promise<void> {
+      try {
+        await chrome.storage.local.remove(keys);
       } catch {
         // Best-effort — surface through the form rather than crashing.
       }
