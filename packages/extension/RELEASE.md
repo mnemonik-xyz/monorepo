@@ -172,7 +172,7 @@ Upload from `store-listing/`. Required dimensions:
 
 - [ ] Watch the developer dashboard for the daily install/uninstall
       counter.
-- [ ] Subscribe the team channel to `support@mnemonik.xyz` for first
+- [ ] Subscribe the team channel to `dev@mnemonik.xyz` for first
       week of bug reports.
 - [ ] If a critical bug surfaces, hotfix on `dev`, bump
       `manifest.json` to `1.0.1`, repeat §0–§7. Chrome Web Store will

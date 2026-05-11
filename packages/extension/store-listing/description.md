@@ -89,8 +89,8 @@ OPEN SOURCE
 SUPPORT
 
 • Bugs: https://github.com/mnemonik-xyz/monorepo/issues
-• Mail: hello@mnemonik.xyz
-• Privacy: privacy@mnemonik.xyz
+• Mail: dev@mnemonik.xyz
+• Privacy: dev@mnemonik.xyz
 ```
 
 (Character count: ~3 980 — well inside the 16 000 cap.)

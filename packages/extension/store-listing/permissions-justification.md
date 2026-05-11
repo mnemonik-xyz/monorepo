@@ -50,15 +50,6 @@ that user gesture and is revoked on tab change. This is the
 mechanism that lets us support generic page capture without a
 `<all_urls>` host_permission.
 
-## `clipboardWrite`
-
-Used by the "Copy markdown" action on the popup Recall tab and the
-context-menu "Copy memory" item on the page-overlay recall surface.
-We call `navigator.clipboard.writeText` from a user gesture; the
-write payload is exactly the user-visible markdown the popup
-displays. Without `clipboardWrite` users would have to manually
-select-and-copy from the recall list every time.
-
 ## `alarms`
 
 The service worker uses `chrome.alarms` to retry the cloud-sync

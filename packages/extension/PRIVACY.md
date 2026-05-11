@@ -2,7 +2,7 @@
 
 **Effective date:** 2026-05-11
 **Version:** 1.0.0
-**Contact:** privacy@mnemonik.xyz
+**Contact:** dev@mnemonik.xyz
 **Hosted copy:** https://mnemonik.xyz/extension/privacy
 
 This document explains exactly what data the Mnemonik Chrome extension
@@ -29,7 +29,7 @@ policy disagree, the code is the bug.
 - **Telemetry:** opt-in only, anonymous, disabled by default.
 - **Right to deletion:** one click removes your local data; one HTTP
   call (`DELETE /api/key-escrow`) removes your server-side escrow; on
-  written request to `privacy@mnemonik.xyz` we delete all
+  written request to `dev@mnemonik.xyz` we delete all
   server-stored attestations linked to your account within 30 days.
   A self-service `DELETE /api/memories` endpoint is on the roadmap;
   until it ships, attestation deletion is handled via the email
@@ -258,7 +258,7 @@ You can do all of the following without contacting us:
 - **Deletion (cloud — escrow):** Options → Cloud → "Forget escrow
   on server" triggers `DELETE /api/key-escrow`. Server-side hard
   delete completes within seconds.
-- **Deletion (cloud — attestations):** email `privacy@mnemonik.xyz`
+- **Deletion (cloud — attestations):** email `dev@mnemonik.xyz`
   from the address bound to your Google account; we delete all
   server-stored attestations linked to your `sub` within 30 days
   (GDPR Art. 17). A self-service `DELETE /api/memories` endpoint is
@@ -266,7 +266,7 @@ You can do all of the following without contacting us:
 - **Portability:** the export JSON above is the same format the CLI
   consumes — `mnemonic identity import --file ./export.json`.
 
-If anything above fails, email `privacy@mnemonik.xyz` and we will
+If anything above fails, email `dev@mnemonik.xyz` and we will
 complete the deletion within 30 days. EEA / UK residents may also
 contact the data-protection officer at the same address.
 
@@ -285,11 +285,11 @@ above.
 
 ## 11. Contact
 
-- Privacy & DPA: `privacy@mnemonik.xyz`
-- General support: `hello@mnemonik.xyz`
+- Privacy & DPA: `dev@mnemonik.xyz`
+- General support: `dev@mnemonik.xyz`
 - Source code: https://github.com/mnemonik-xyz/monorepo
 
 Data controller: Mnemonik, the project organisation behind the
 above repository. A written DPA is available on request from
-`privacy@mnemonik.xyz`.
+`dev@mnemonik.xyz`.
 
