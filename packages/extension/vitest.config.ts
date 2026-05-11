@@ -12,7 +12,11 @@ export default defineConfig({
       "tests/component/**/*.test.tsx",
       "src/**/*.test.ts",
     ],
-    environmentMatchGlobs: [["tests/component/**/*.test.tsx", "jsdom"]],
+    environmentMatchGlobs: [
+      ["tests/component/**/*.test.tsx", "jsdom"],
+      ["tests/unit/content/**/*.test.ts", "jsdom"],
+    ],
+    exclude: ["tests/e2e/**", "node_modules/**", "dist/**"],
     setupFiles: ["./tests/setup.popup.ts"],
     coverage: {
       provider: "v8",

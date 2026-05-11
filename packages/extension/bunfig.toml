@@ -9,5 +9,14 @@
 # (vitest)` step in `.github/workflows/node-test.yml` (added in T11
 # round 2 after review finding MAJ-3), so the D13 TDD anchors gate
 # merges.
+#
+# Same gating applies to the T13 content-script tests under
+# `tests/unit/content/**`: they exercise the FAB + Recall overlay via
+# `attachShadow`, `pointerdown`, etc., all of which need a jsdom DOM.
+# vitest hosts them; bun skips them.
 [test]
-pathIgnorePatterns = ["**/tests/component/**"]
+pathIgnorePatterns = [
+  "**/tests/component/**",
+  "**/tests/unit/content/**",
+  "**/tests/e2e/**"
+]

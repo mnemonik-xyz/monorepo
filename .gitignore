@@ -75,6 +75,11 @@ coverage/
 .coverage
 htmlcov/
 
+# Playwright artefacts (extension E2E)
+test-results/
+playwright-report/
+playwright/.cache/
+
 # Temporary files
 tmp/
 temp/
