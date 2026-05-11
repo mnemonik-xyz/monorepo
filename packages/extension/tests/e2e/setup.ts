@@ -90,8 +90,12 @@ export async function launchExtension(
     worker = await context.waitForEvent("serviceworker", { timeout: 5_000 });
   }
   const url = worker.url();
-  // url shape: chrome-extension://<id>/<path>
-  const match = /^chrome-extension:\/\/([a-z]{32})\//.exec(url);
+  // url shape: chrome-extension://<id>/<path>. Chrome's extension id
+  // alphabet is `[a-p]{32}` (mfehiopkijgjbjcnbpefilochdcjffaa-style),
+  // NOT generic lowercase. Tightening the regex matches `harness.spec.ts`
+  // and rejects any URL whose path segment accidentally looks like
+  // `[a-z]{32}` (round-2 review nit #4).
+  const match = /^chrome-extension:\/\/([a-p]{32})\//.exec(url);
   if (!match) throw new Error(`Could not parse extension id from ${url}`);
   const extensionId = match[1]!;
 

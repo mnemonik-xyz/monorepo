@@ -9,6 +9,16 @@
 
 import type { BrowserContext, Route } from "@playwright/test";
 import { Buffer } from "node:buffer";
+// Round-2 nit #3: import the real `EscrowBlob` from production code so
+// typed mocks catch shape drift at compile time. The previous local
+// `EscrowBlobLike` used wrong field names (`ciphertext_base64` etc.)
+// that don't appear in the actual schema.
+import type { EscrowBlob } from "../../../src/auth/key-escrow.js";
+
+// Re-export under the legacy alias so existing call sites
+// (`restore-on-second-profile.spec.ts`) keep compiling. New code should
+// import `EscrowBlob` directly from the production module.
+export type EscrowBlobLike = EscrowBlob;
 
 export interface ServerMockState {
   /** Google sub → look-up response (existing pubkey + escrow flag). */
@@ -17,7 +27,7 @@ export interface ServerMockState {
     { pubkey_base58: string | null; escrow_present: boolean }
   >;
   /** Escrow blob keyed by Google sub. */
-  escrowByGoogleSub: Record<string, EscrowBlobLike | undefined>;
+  escrowByGoogleSub: Record<string, EscrowBlob | undefined>;
   /** Force GET /api/key-escrow to 429 after this many calls. */
   escrowGetRateLimitAfter?: number;
   /** Retry-After (seconds) returned alongside the 429. */
@@ -26,18 +36,16 @@ export interface ServerMockState {
   extensionJwt: string;
   /** Outgoing mcp JWT (returned by /oauth/token, google_sub embedded). */
   mcpJwtFor(googleSub: string): string;
+  /** Seeded attestation surfaced by `/mcp mnemonic_recall` for the
+   *  restore-anchor's cloud-recall half (round-2 major #2). When the
+   *  Profile-2 popup queries recall after restore, the mock returns
+   *  this attestation id so the spec can assert the spec contract:
+   *  "identity restored → recall returns the attestation". */
+  seededRecallAttestationId?: string;
   /** sign-callback returns these tx ids. */
   attestationId: string;
   solanaTx: string;
   arweaveTx: string;
-}
-
-export interface EscrowBlobLike {
-  ciphertext_base64: string;
-  nonce_base64: string;
-  salt_base64: string;
-  pubkey_base58: string;
-  argon2_params: { m_cost: number; t_cost: number; p_cost: number };
 }
 
 export function defaultMockState(): ServerMockState {
@@ -170,11 +178,40 @@ export async function mockServer(
       }
     }
 
-    // /mcp — mnemonic_sign_memory returns a correlation id (deferred-sign).
+    // /mcp — JSON-RPC dispatch. The popup posts two methods we mock
+    // here: `mnemonic_sign_memory` (deferred-sign correlation id) and
+    // `mnemonic_recall` (cloud-side recall, used to verify D13 anchor
+    // "identity restored → recall returns the attestation").
     if (path === "/mcp" && req.method() === "POST") {
+      const rpc = (safeJson(req.postData()) ?? {}) as {
+        method?: string;
+        id?: number | string;
+      };
+      const rpcId = rpc.id ?? 1;
+      if (rpc.method === "mnemonic_recall") {
+        const seeded = state.seededRecallAttestationId;
+        const hits = seeded
+          ? [
+              {
+                attestation_id: seeded,
+                content: "seeded restore attestation",
+                similarity: 0.99,
+                signed_at: new Date().toISOString(),
+                solana_tx: state.solanaTx,
+                arweave_tx: state.arweaveTx,
+              },
+            ]
+          : [];
+        return json(route, 200, {
+          jsonrpc: "2.0",
+          id: rpcId,
+          result: { hits },
+        });
+      }
+      // Default → mnemonic_sign_memory shape (correlation id).
       return json(route, 200, {
         jsonrpc: "2.0",
-        id: 1,
+        id: rpcId,
         result: {
           correlation_id: "corr-" + (counts[`POST /mcp`] ?? 0),
           status: "pending",

@@ -18,6 +18,10 @@ on:
       - 'packages/sdk/**'
       - '.github/workflows/ext-e2e.yml'
   pull_request:
+    # Round-2 nit #6: restrict PR trigger to integration branches so
+    # feature-branch-to-feature-branch PRs don't fire it. Pushes still
+    # cover the `dev` branch independently.
+    branches: [dev, main]
     paths:
       - 'packages/extension/**'
       - 'packages/sdk/**'
@@ -68,7 +72,15 @@ jobs:
           DISPLAY: ':99'
         run: |
           Xvfb :99 -screen 0 1280x720x24 &
-          sleep 1
+          # Round-2 nit #5: replace the fragile `sleep 1` with a wait-
+          # for-display loop. `xdpyinfo` is installed alongside xvfb
+          # via `playwright install --with-deps chromium`; the loop
+          # exits as soon as the display answers (typically <100ms).
+          for i in $(seq 1 50); do
+            if xdpyinfo -display :99 >/dev/null 2>&1; then break; fi
+            sleep 0.1
+          done
+          xdpyinfo -display :99 >/dev/null 2>&1 || { echo "Xvfb did not come up"; exit 1; }
           bun run e2e
 
       - name: Upload Playwright traces on failure
