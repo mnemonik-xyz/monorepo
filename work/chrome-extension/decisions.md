@@ -1232,3 +1232,107 @@ Three round-1 reviewers (code-reviewer, security-auditor, test-reviewer) returne
 - `vitest run tests/unit/auth/key-escrow.test.ts` → 50 pass (was 33 before round-1; +17 from this fix wave).
 - `bun test` (full extension) → 196 pass / 1 pre-existing `cose.test.ts` WASM failure (unchanged from the pre-fix baseline).
 
+---
+
+## 2026-05-11 · T23 — Bridge contract tests + hygiene
+
+Audit round 2 found two cross-component drifts that survived per-side
+unit tests because each side mocked the boundary: `tab:fab-*` variants
+absent from the `Msg` union (audit B5 / AUD-C-05) and the `ui:recall`
+SW handler returning `{ deferred: "recall" }` instead of running a
+real embed+search (audit B4 / AUD-C-04). T23 lands the bridge-level
+test contracts that would have failed both PRs at CI:
+
+**New tests:**
+
+- `tests/unit/messages.contract.test.ts` — every variant in the `Msg`
+  union has well-formed + malformed samples via a TS-exhaustive
+  switch over `Msg["type"]`. Adding a new variant without extending
+  the sample table is a compile error; dropping a variant from
+  `parseMsg`'s switch flips the variant's well-formed sample to
+  `null` and fails the test. 25 tests / 110 assertions; covers
+  generic defensive rejection (null / undefined / primitives /
+  arrays / arrays-of-msgs / nested-discriminant smuggling / whitespace
+  drift on the `type` string).
+- `tests/unit/background/service-worker.contract.test.ts` — drives
+  `installServiceWorker` + real `parseMsg` against synthetic
+  MessageSender shapes for each inbound variant. Locks the
+  `{ ok, result }` envelope shape for every accepted variant
+  (B4 anchor binds `ui:recall` → real embedder + IndexedDbStore.search,
+  B5 anchor binds `tab:fab-*` → pending_fab_action.v1 + openPopup),
+  and the sender-authorisation perimeter: `ui:*` from a tab-bearing
+  sender, `tab:*` from a non-allowed origin, `tab:*` from a host
+  spoofing the allowed origin's prefix (`chatgpt.com.evil.example`),
+  `sw:*` inbound at all, and `ui:*` with no positive sender id all
+  return `{ ok: false, error: "unauthorized-sender" }`. 18 tests /
+  38 assertions. Drives the AUD-S T2 hostile-extension / hostile-
+  content-script threat from the security audit.
+
+**AUD-T-R2-02 fix:** in `tests/unit/auth/extension-bootstrap.test.ts`,
+the redeem-leg "no Authorization header" assertion was vacuous — the
+prior code `(init.headers ?? {}) as Record<string, string>` fell back
+to an empty object when `init.headers === undefined` (the
+overwhelmingly likely shape, since the source omits `headers`
+entirely in `fetchImpl(redeemUrl, { method: "GET" })`). The empty
+object always reports `authorization` as undefined, so the assertion
+never failed. Replaced with a strong form: `expect(init.headers)
+.toBeUndefined()`, plus a documented defence-in-depth branch that
+constructs a real `Headers` from any future `init.headers` value and
+asserts `get("authorization") === null` (so when the source ever
+switches to passing a Headers/Record object, the next maintainer
+sees the spec inline rather than a silent regression).
+
+**TA-MIN5 mitigation (size-limit silent-skip):** size-limit 12.x has
+no `--fail-if-not-found` flag, so when the configured globs in
+`.size-limit.json` don't match the dist/ layout (e.g. crxjs renamed
+the popup chunk after a build-toolchain bump), size-limit reports
+`size: 0, passed: true` and the budget gate silently degrades to a
+no-op (round-2 deferral logged earlier in this file under "size-limit
+`--fail-if-not-found` style enforcement"). Mitigation:
+`packages/extension/scripts/check-size-limit.mjs` shells out to
+`size-limit --json`, parses the report, and exits non-zero when any
+entry has `size === 0` (silent-skip) or `passed === false` (budget
+overrun). Wired into package.json as `bun run size:check`. Five unit
+tests in `tests/unit/scripts/check-size-limit.test.ts` cover the four
+failure modes + happy path via a fake-`npx` PATH shim that prints
+canned JSON.
+
+**TA-MIN1 (size-limit not gated by CI) — still deferred.** The
+extension `bun run build` fails today on a missing icon asset
+(`src/assets/icon-{16,32,48,128}.png`) — pre-existing T01/T10/T20 gap
+documented earlier in this file. Wiring `size:check` into
+`.github/workflows/node-test.yml` requires the build to succeed
+first; tracked as a follow-up alongside the icon-asset commit. Local
+operators running `bun run build && bun run size:check` get the full
+gate today; CI gets it the day the build is fixed. A minimal hook —
+one shell line — into the existing `bundle-size` job will be
+sufficient at that point.
+
+**Test coverage delta:**
+
+- New: 25 (`messages.contract.test.ts`) + 18 (`service-worker.contract.test.ts`)
+  + 5 (`check-size-limit.test.ts`) = 48 new tests.
+- Modified: `extension-bootstrap.test.ts` (1 test now non-vacuous).
+- Full `bun test` → 294 pass / 1 pre-existing `cose.test.ts` WASM
+  artefact load failure (unchanged baseline).
+
+**Files:**
+
+- New: `packages/extension/tests/unit/messages.contract.test.ts`,
+  `packages/extension/tests/unit/background/service-worker.contract.test.ts`,
+  `packages/extension/tests/unit/scripts/check-size-limit.test.ts`,
+  `packages/extension/scripts/check-size-limit.mjs`.
+- Modified: `packages/extension/tests/unit/auth/extension-bootstrap.test.ts`
+  (AUD-T-R2-02), `packages/extension/package.json` (`size:check`
+  script).
+- Production code untouched. Test-only `__setEmbedderForTesting` seam
+  in `src/background/recall-embedder.ts` already exists from T13.
+
+**Verification:** `bun test tests/unit/messages.contract.test.ts
+tests/unit/background/service-worker.contract.test.ts
+tests/unit/auth/extension-bootstrap.test.ts
+tests/unit/scripts/check-size-limit.test.ts
+tests/unit/messages.test.ts
+tests/unit/background/service-worker.test.ts` → 75 pass / 214
+assertions.
+
