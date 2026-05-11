@@ -151,16 +151,21 @@ jobs:
         working-directory: packages/extension
         run: bun test
 
-      # Popup component tests (T11). @testing-library/react + jsdom are
-      # not supported under bun's built-in test runner today, so the
-      # `tests/component/**` glob is excluded from `bun test` (see
+      # Popup component tests (T11) + content-script unit tests (T13).
+      # @testing-library/react + jsdom are not supported under bun's
+      # built-in test runner today, so the `tests/component/**` and
+      # `tests/unit/content/**` globs are excluded from `bun test` (see
       # `packages/extension/bunfig.toml`). They run under vitest here
       # so the D13 TDD anchors gate merges per the round-1 review
-      # finding MAJ-3.
-      - name: Extension popup component tests (vitest)
+      # finding MAJ-3. Audit M5 / test-auditor finding (2026-05-11):
+      # the content-script tests were previously double-excluded from
+      # CI because this step only matched `tests/component`; widened
+      # to include `tests/unit/content` so the FAB + recall-overlay
+      # JSDOM tests gate too.
+      - name: Extension popup + content-script tests (vitest)
         if: matrix.runtime == 'bun-latest'
         working-directory: packages/extension
-        run: bunx vitest run tests/component
+        run: bunx vitest run tests/component tests/unit/content
 
   bundle-size:
     name: bundle size budgets

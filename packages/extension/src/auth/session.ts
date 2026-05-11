@@ -73,10 +73,12 @@ function defaultStorage(): StorageArea {
  *     forward-incompatible schema),
  *   - the JWT has expired (`jwtExpiresAt <= Date.now()`).
  *
- * Expired sessions are NOT auto-deleted from storage — that's a Phase 2
- * concern. Returning `null` already pushes the popup onto the
- * re-login path; leaving the row in place lets the options page render
- * "session expired, sign in again" instead of "no identity".
+ * Audit S7 / FW-S-09: when a session IS found but is expired, the row
+ * is removed from storage before returning null. Previously the
+ * expired row lingered forever (Phase 2 concern), but a stale JWT
+ * sitting in chrome.storage.local widens the exfil window with no
+ * upside — `clearSession` is cheap and the next sign-in overwrites
+ * the row in either case.
  */
 export async function getSession(
   storage: StorageArea = defaultStorage(),
@@ -90,7 +92,17 @@ export async function getSession(
   }
   const raw = result[SESSION_STORAGE_KEY];
   if (!isPersistedSession(raw)) return null;
-  if (raw.jwtExpiresAt <= now()) return null;
+  if (raw.jwtExpiresAt <= now()) {
+    // Best-effort cleanup: never let a remove() failure surface as a
+    // null return — the in-memory check above already guarantees the
+    // caller sees null.
+    try {
+      await clearSession(storage);
+    } catch {
+      // swallow — caller still gets null.
+    }
+    return null;
+  }
   return raw;
 }
 

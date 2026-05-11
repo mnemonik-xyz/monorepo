@@ -119,6 +119,25 @@ describe("session — auto-expiry on read", () => {
     const result = await getSession(storage, () => future + 1);
     expect(result).toBeNull();
   });
+
+  // Audit S7 / FW-S-09: a `getSession` call that finds an expired row
+  // must REMOVE it from chrome.storage.local before returning null —
+  // narrows the window in which a stale JWT can leak via a profile
+  // exfiltration.
+  it("getSession clears the expired row from storage on read", async () => {
+    const expired: Session = {
+      ...VALID_SESSION,
+      jwtExpiresAt: Date.now() - 1,
+    };
+    await setSession(expired, storage);
+    expect(storage.inspect()[SESSION_STORAGE_KEY]).toBeDefined();
+
+    const result = await getSession(storage);
+
+    expect(result).toBeNull();
+    // The expired row MUST be gone after the read.
+    expect(storage.inspect()[SESSION_STORAGE_KEY]).toBeUndefined();
+  });
 });
 
 describe("session — shape validation", () => {

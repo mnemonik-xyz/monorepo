@@ -46,6 +46,7 @@ import {
 // session JWT and the wire-level Authorization carries `aud=extension`.
 import {
   EscrowNotFoundError,
+  EscrowPubkeyMismatchError,
   EscrowRateLimitError,
   WrongPassphraseError,
   type EscrowBlob,
@@ -351,6 +352,28 @@ export function Restore(props: RestoreProps): JSX.Element {
           });
           return;
         }
+      }
+
+      // Audit S2 / FW-S-02: defence-in-depth pubkey-binding check.
+      // The server is supposed to bind `pubkey_base58` to the Google
+      // account at PUT time; a mismatched blob here indicates a buggy
+      // or compromised server (or a swapped row in some pathological
+      // proxy scenario). Refuse the unwrap and surface a typed error.
+      if (blob.pubkey_base58 !== existingPubkey) {
+        const mismatch = new EscrowPubkeyMismatchError(
+          existingPubkey,
+          blob.pubkey_base58,
+        );
+        setStep({
+          kind: "error",
+          message:
+            "The encrypted blob does not match this account. Refusing " +
+            "to restore — contact support if this persists.",
+        });
+        // Keep `mismatch` referenced for log surfaces (no console.log of
+        // pubkeys to avoid leaking identity bytes into shared toolbars).
+        void mismatch;
+        return;
       }
 
       // Local AES-GCM unwrap. Wrong passphrase surfaces here WITHOUT a

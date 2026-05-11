@@ -25,19 +25,22 @@ describe("scaffold · manifest.json", () => {
   it("has the expected permission set", () => {
     // T10 round-2: `clipboardWrite` dropped (least-privilege; T13 adds
     // it back when the recall overlay's "copy hash" gesture lands).
-    // `scripting` added so T13 can use `chrome.scripting.executeScript`
-    // on the generic-page recall-overlay path (activeTab-gated).
+    // Audit S3 / FW-S-07: `scripting` removed — T13 landed without
+    // any `chrome.scripting.executeScript` call site (manifest
+    // content_scripts cover all overlay injection paths). Re-add
+    // ONLY if a future task needs programmatic injection and
+    // re-justify in the Chrome Web Store reviewer notes.
     expect(manifest.permissions).toEqual(
       expect.arrayContaining([
         "storage",
         "identity",
         "contextMenus",
         "activeTab",
-        "scripting",
         "alarms",
-      ])
+      ]),
     );
     expect(manifest.permissions).not.toContain("clipboardWrite");
+    expect(manifest.permissions).not.toContain("scripting");
   });
 
   it("declares only enumerated AI-chat host_permissions per D11", () => {
@@ -52,7 +55,7 @@ describe("scaffold · manifest.json", () => {
         "https://chatgpt.com/*",
         "https://claude.ai/*",
         "https://gemini.google.com/*",
-      ])
+      ]),
     );
     expect(manifest.host_permissions).not.toContain("<all_urls>");
     for (const entry of manifest.host_permissions) {
@@ -77,14 +80,14 @@ describe("scaffold · manifest.json", () => {
     expect(Array.isArray(manifest.content_scripts)).toBe(true);
     expect(manifest.content_scripts.length).toBeGreaterThanOrEqual(3);
     const matches = manifest.content_scripts.flatMap(
-      (c: { matches: string[] }) => c.matches
+      (c: { matches: string[] }) => c.matches,
     );
     expect(matches).toEqual(
       expect.arrayContaining([
         "https://chatgpt.com/*",
         "https://claude.ai/*",
         "https://gemini.google.com/*",
-      ])
+      ]),
     );
     expect(matches).not.toContain("<all_urls>");
     for (const cs of manifest.content_scripts as Array<{
@@ -93,7 +96,7 @@ describe("scaffold · manifest.json", () => {
     }>) {
       expect(Array.isArray(cs.js) && (cs.js?.length ?? 0) > 0).toBe(true);
       expect(
-        cs.run_at === "document_idle" || cs.run_at === "document_end"
+        cs.run_at === "document_idle" || cs.run_at === "document_end",
       ).toBe(true);
     }
   });
@@ -129,8 +132,15 @@ describe("scaffold · manifest.json", () => {
     expect(csp).toContain("script-src 'self'");
     // T10-S-04: worker-src 'self' future-proofs the embedder Web Worker.
     expect(csp).toContain("worker-src 'self'");
-    // T10-S-03: regional HF CDN coverage so cdn-lfs-us-1.huggingface.co
-    // (and friends) aren't blocked at model-download time.
-    expect(csp).toContain("https://*.huggingface.co");
+    // Audit S4 / FW-S-08: replaced the `https://*.huggingface.co`
+    // wildcard with an enumerated list of the specific CDN hosts
+    // transformers.js actually fetches from (config / tokenizer JSON
+    // at huggingface.co, LFS-backed weights at cdn-lfs.huggingface.co
+    // and the US-1 regional mirror). Wildcard subdomains are no
+    // longer accepted by this gate.
+    expect(csp).not.toContain("https://*.huggingface.co");
+    expect(csp).toContain("https://huggingface.co");
+    expect(csp).toContain("https://cdn-lfs.huggingface.co");
+    expect(csp).toContain("https://cdn-lfs-us-1.huggingface.co");
   });
 });
