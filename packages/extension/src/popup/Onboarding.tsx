@@ -107,8 +107,17 @@ export function Onboarding({ onComplete }: OnboardingProps): JSX.Element {
         kind: "error",
         message: `passphrase must be at least ${String(MIN_PASSPHRASE_LEN)} characters`,
       });
+      // Clear before the user retries — see security-auditor SEC-MIN-3.
+      setPassphrase("");
       return;
     }
+    // Snapshot the passphrase locally so we can hand it to the T17 stub
+    // and immediately wipe the React state slot. The local `pp` is the
+    // only remaining reference; it goes out of scope as soon as the
+    // function returns. This minimises the window in which the
+    // passphrase is reachable from React DevTools / heap snapshots.
+    const pp = passphrase;
+    setPassphrase("");
     setStep({ kind: "wrapping", signIn });
     try {
       // T17 stub: real implementation will Argon2id-derive a key,
@@ -116,7 +125,7 @@ export function Onboarding({ onComplete }: OnboardingProps): JSX.Element {
       // `PUT /api/key-escrow` followed by `POST /oauth/google/link` with
       // the possession proof. Here we only call the documented stub —
       // T17 replaces it.
-      await keyEscrow.wrapAndUploadStub({ passphrase, jwt: signIn.jwt });
+      await keyEscrow.wrapAndUploadStub({ passphrase: pp, jwt: signIn.jwt });
       setStep({ kind: "done" });
       onComplete();
     } catch (e) {
@@ -138,11 +147,17 @@ export function Onboarding({ onComplete }: OnboardingProps): JSX.Element {
         kind: "error",
         message: `passphrase must be at least ${String(MIN_PASSPHRASE_LEN)} characters`,
       });
+      setPassphrase("");
       return;
     }
+    // Same snapshot-then-clear pattern as handleSetPassphrase. The
+    // passphrase MUST not linger in React state across the async T17
+    // call — see security-auditor SEC-MIN-3.
+    const pp = passphrase;
+    setPassphrase("");
     setStep({ kind: "restoring", signIn });
     try {
-      await keyEscrow.fetchAndRestoreStub({ passphrase, jwt: signIn.jwt });
+      await keyEscrow.fetchAndRestoreStub({ passphrase: pp, jwt: signIn.jwt });
       setStep({ kind: "done" });
       onComplete();
     } catch (e) {

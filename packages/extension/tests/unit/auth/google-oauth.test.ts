@@ -370,6 +370,63 @@ describe("signInWithGoogle — token endpoint failure", () => {
   });
 });
 
+describe("extractProfile — security hardening (SEC-MIN-1, SEC-MIN-2)", () => {
+  // Hand-rolled b64url for hermetic tests.
+  function b64u(obj: unknown): string {
+    return btoa(JSON.stringify(obj))
+      .replace(/\+/g, "-")
+      .replace(/\//g, "_")
+      .replace(/=+$/, "");
+  }
+  function mkIdToken(claims: Record<string, unknown>): string {
+    return [b64u({ alg: "RS256", typ: "JWT" }), b64u(claims), "sig"].join(".");
+  }
+
+  it("clamps overlong name / email / sub fields", async () => {
+    const { extractProfile } =
+      await import("../../../src/auth/google-oauth.js");
+    const oversized = "a".repeat(10_000);
+    const token = mkIdToken({
+      sub: "g-sub",
+      email: oversized,
+      name: oversized,
+      picture: "https://lh3.googleusercontent.com/p.png",
+    });
+    const profile = extractProfile(token, "header.payload.sig");
+    expect(profile.email.length).toBeLessThanOrEqual(256);
+    expect(profile.name.length).toBeLessThanOrEqual(256);
+    expect(profile.sub).toBe("g-sub");
+  });
+
+  it("rejects non-https picture URLs (defence-in-depth XSS hardening)", async () => {
+    const { extractProfile } =
+      await import("../../../src/auth/google-oauth.js");
+    const cases = [
+      "javascript:alert(1)", // classic XSS payload
+      "data:text/html,<script>alert(1)</script>", // data: URL
+      "http://example.com/p.png", // plain http
+      "not-a-url-at-all",
+      "", // empty
+    ];
+    for (const picture of cases) {
+      const token = mkIdToken({ sub: "g-sub", picture });
+      const profile = extractProfile(token, "header.payload.sig");
+      expect(profile.picture).toBe("");
+    }
+  });
+
+  it("accepts and normalises a valid https picture URL", async () => {
+    const { extractProfile } =
+      await import("../../../src/auth/google-oauth.js");
+    const token = mkIdToken({
+      sub: "g-sub",
+      picture: "https://lh3.googleusercontent.com/a/p.png",
+    });
+    const profile = extractProfile(token, "header.payload.sig");
+    expect(profile.picture).toBe("https://lh3.googleusercontent.com/a/p.png");
+  });
+});
+
 describe("signInWithGoogle — jwtExpiresAt", () => {
   it("returns wall-clock expiry derived from server's expires_in", async () => {
     installChromeMock((authorizeUrl) => {

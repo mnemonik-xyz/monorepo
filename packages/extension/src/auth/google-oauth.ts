@@ -386,13 +386,45 @@ async function exchangeCodeForToken(
 
 // ── Profile extraction ──────────────────────────────────────────────────────
 
+/** Defence-in-depth caps on profile fields. The server already validates
+ *  the id_token's Google JWKS signature in T14, so legitimate values stay
+ *  well below these limits — the caps just stop a future server-side bug
+ *  from blowing up `chrome.storage.local` (10MB quota). */
+const MAX_SUB_LEN = 128;
+const MAX_EMAIL_LEN = 256;
+const MAX_NAME_LEN = 256;
+const MAX_PICTURE_URL_LEN = 1024;
+
+/** Strict-https URL validator. Rejects empty / non-https / unparseable
+ *  URLs to keep the value safe for direct use in `<img src=...>`. */
+function safePictureUrl(raw: unknown): string {
+  if (typeof raw !== "string" || raw.length === 0) return "";
+  if (raw.length > MAX_PICTURE_URL_LEN) return "";
+  try {
+    const u = new URL(raw);
+    if (u.protocol !== "https:") return "";
+    return u.toString();
+  } catch {
+    return "";
+  }
+}
+
+/** Cap a string field to `max` chars. Empty / non-string returns "". */
+function clampString(raw: unknown, max: number): string {
+  if (typeof raw !== "string") return "";
+  return raw.length > max ? raw.slice(0, max) : raw;
+}
+
 /**
  * Pull display fields out of the id_token payload (preferred) or fall
  * back to the access-token payload's `google_sub` claim.
  *
  * NEITHER token is signature-verified here — the server already validated
  * the id_token against Google's JWKS, and the access_token is HS256-signed
- * by us so any tampering would surface at the next API call.
+ * by us so any tampering would surface at the next API call. Length caps
+ * + URL-scheme validation are defence-in-depth so a future server-side
+ * bug cannot blow up `chrome.storage.local` or land an unsafe `<img
+ * src>` value in a downstream component (security-auditor round 1).
  *
  * Exported for direct testing.
  */
@@ -403,11 +435,11 @@ export function extractProfile(
   if (idToken) {
     const claims = parseJwtPayload(idToken);
     if (claims) {
-      const sub = typeof claims.sub === "string" ? claims.sub : "";
-      const email = typeof claims.email === "string" ? claims.email : "";
+      const sub = clampString(claims.sub, MAX_SUB_LEN);
+      const email = clampString(claims.email, MAX_EMAIL_LEN);
       const emailVerified = claims.email_verified === true;
-      const name = typeof claims.name === "string" ? claims.name : "";
-      const picture = typeof claims.picture === "string" ? claims.picture : "";
+      const name = clampString(claims.name, MAX_NAME_LEN);
+      const picture = safePictureUrl(claims.picture);
       if (sub) {
         return {
           sub,
@@ -421,8 +453,7 @@ export function extractProfile(
   }
   // Fallback: server JWT carries `google_sub`. No display fields here.
   const claims = parseJwtPayload(accessToken);
-  const fallbackSub =
-    typeof claims?.google_sub === "string" ? claims.google_sub : "";
+  const fallbackSub = clampString(claims?.google_sub, MAX_SUB_LEN);
   return {
     sub: fallbackSub,
     email: "",

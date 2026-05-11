@@ -8,6 +8,31 @@
 // in the backlog (Decision 5 mentions Phase 2 refresh flow). The
 // `getSession` reader returns `null` for an expired token so callers
 // can branch on freshness without re-parsing the JWT.
+//
+// THREAT MODEL — chrome.storage.local is NOT encrypted at rest.
+//
+// On Chrome desktop the backing store is a per-extension sqlite file under
+// `~/.../Local Extension Settings/<id>/`. Any process with filesystem
+// access to that path can read the persisted JWT in plaintext. This is
+// the chrome-extension standard: extensions do not have access to
+// CryptoKey-backed secret storage or OS keychain APIs.
+//
+// The accepted threat model for Phase 1 (per user-spec § Cloud-tier
+// privacy and § Restore-flow):
+//   - in-scope:  protecting the user-recovery passphrase (handled by T17
+//                Argon2id+AES-GCM, NOT stored in chrome.storage.local;
+//                the wrapped blob lives server-side in `key_escrow_blobs`),
+//                rate-limiting blob fetches server-side (5/24h/google_sub),
+//                MV3 CSP (no eval / no remote scripts).
+//   - out of scope: filesystem-level compromise of the user's Chrome
+//                   profile (an attacker with that level of access can
+//                   already exfiltrate the entire profile, including
+//                   cookies for every site).
+//
+// If the JWT is leaked, the attacker gains read access to the user's
+// memories (existing or future) until the JWT expires AND until the user
+// rotates their Ed25519 keypair via the recovery passphrase. Mitigation
+// is to limit JWT lifetime (server-issued, default 1h per T14).
 
 import { SESSION_STORAGE_KEY, type Session } from "./types.js";
 
