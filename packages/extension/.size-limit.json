@@ -1,12 +1,26 @@
 [
   {
-    "name": "popup-initial-js",
+    "name": "popup cold-open (entry + shared shells)",
     "path": [
-      "dist/src/popup/main.tsx-*.js",
-      "dist/assets/main-*.js",
-      "dist/assets/popup-*.js"
+      "dist/assets/index.html-*.js",
+      "dist/assets/session-*.js",
+      "dist/assets/preload-helper-*.js"
     ],
-    "limit": "50 KB",
+    "limit": "75 KB",
+    "gzip": true,
+    "running": false
+  },
+  {
+    "name": "key-escrow lazy chunk (argon2id + COSE bundled)",
+    "path": "dist/assets/auth-test-helpers-*.js",
+    "limit": "950 KB",
+    "gzip": true,
+    "running": false
+  },
+  {
+    "name": "cloud-client lazy chunk",
+    "path": "dist/assets/cloud-client-*.js",
+    "limit": "5 KB",
     "gzip": true,
     "running": false
   }

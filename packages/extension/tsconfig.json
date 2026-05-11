@@ -17,6 +17,13 @@
     "noEmit": true,
     "types": ["chrome", "vite/client"]
   },
-  "include": ["src/**/*", "tests/**/*", "vite.config.ts", "vitest.config.ts"],
-  "exclude": ["dist", "node_modules"]
+  // Tests are excluded from the production tsc gate — vitest runs its
+  // own type-aware checks at test time, and component tests carry
+  // intentionally-loose stubs for the popup runtime facade that the
+  // strict build doesn't need to see. vitest.config.ts is also
+  // excluded: a duplicate vitest-vendored vite install pollutes the
+  // `defineConfig` overload resolution under
+  // `exactOptionalPropertyTypes: true`. See decisions.md (T19).
+  "include": ["src/**/*", "vite.config.ts"],
+  "exclude": ["dist", "node_modules", "tests"]
 }

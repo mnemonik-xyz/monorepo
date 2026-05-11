@@ -112,15 +112,38 @@ describe("redeemExtensionJwt — happy path", () => {
     const headers = calls[0]!.init?.headers as Record<string, string>;
     expect(headers.authorization).toBe(`Bearer ${MCP_JWT}`);
     // Second call: GET redeem with no Authorization header (capability).
+    // The capability model is "the ticket UUID IS the credential" —
+    // bearer auth on this leg would silently re-introduce the
+    // "doubly-authorised consumption" issue that audit B1 / AUD-S-01
+    // closed. AUD-T-R2-02 fix: the previous `?? {}` fallback made the
+    // assertion vacuous when `init.headers` was undefined (the
+    // overwhelmingly likely shape, since the source omits the field
+    // entirely in `fetchImpl(redeemUrl, { method: "GET" })`). We now
+    // distinguish "no headers at all" from "headers present but no
+    // Authorization key" by asserting on the raw `init.headers`
+    // reference: if the source ever starts passing a Headers / record
+    // object, this assertion will FAIL — forcing a deliberate review
+    // rather than silently allowing the bearer to leak.
     expect(calls[1]!.url).toBe(
       `https://srv.example/api/extension-bootstrap/redeem/${TICKET_ID}`,
     );
     expect(calls[1]!.init?.method).toBe("GET");
-    const redeemHeaders = (calls[1]!.init?.headers ?? {}) as Record<
-      string,
-      string
-    >;
-    expect(redeemHeaders.authorization).toBeUndefined();
+    const redeemInit = calls[1]!.init;
+    expect(redeemInit).toBeDefined();
+    // Strong form: headers object MUST be absent on the redeem leg.
+    expect(redeemInit?.headers).toBeUndefined();
+    // Defence-in-depth: if a future refactor switches to passing a
+    // (possibly empty) Headers / Record object, the assertion above
+    // would fail — and this branch documents how to keep the audit
+    // intent intact in that case. We construct a fresh `Headers` from
+    // whatever the source supplied and confirm no `authorization`
+    // key is set. Today this branch is dead (headers is undefined);
+    // it stays here as the spec for the next refactor.
+    if (redeemInit?.headers !== undefined) {
+      const h = new Headers(redeemInit.headers as HeadersInit);
+      expect(h.get("authorization")).toBeNull();
+      expect(h.get("Authorization")).toBeNull();
+    }
   });
 });
 
@@ -226,35 +249,30 @@ describe("ensureExtensionJwt — caching", () => {
   });
 
   it("re-handshakes when cached JWT is within the refresh buffer", async () => {
-    const { calls } = installFetch(() => {
-      // Distinct call sites; the URL fork below decides which to return.
-      return new Response(JSON.stringify({ ticket_id: TICKET_ID }), {
-        status: 200,
-      });
-    });
-    // Override with a per-URL handler.
-    globalThis.fetch = (async (
-      input: RequestInfo | URL,
-      init?: RequestInit,
-    ) => {
-      const url = typeof input === "string" ? input : input.toString();
-      const entry: { url: string; init?: RequestInit } = { url };
-      if (init !== undefined) entry.init = init;
-      calls.push(entry);
+    // AUD-T-R2-01: route through `installFetch` so the test shares the
+    // same fetch-stub lifecycle as the rest of the suite (beforeEach /
+    // afterEach restore the original `globalThis.fetch`). The handler
+    // forks on URL to return the same issue→redeem pair we use in the
+    // happy-path test.
+    const { calls } = installFetch((url) => {
       if (url.endsWith("/api/extension-bootstrap/issue")) {
         return new Response(JSON.stringify({ ticket_id: TICKET_ID }), {
           status: 200,
         });
       }
+      // Suffix the JWT with the current call count so the assertion
+      // below can confirm a re-handshake happened (the stale blob in
+      // storage carried "stale-jwt", and the new redeem returns
+      // `${EXT_JWT}-2`).
       return new Response(
         JSON.stringify({
-          access_token: `${EXT_JWT}-${String(calls.length)}`,
+          access_token: `${EXT_JWT}-${String(calls.length + 1)}`,
           aud: "extension",
           expires_in: 3600,
         }),
         { status: 200 },
       );
-    }) as typeof globalThis.fetch;
+    });
 
     const { area, map } = makeStorage();
     // Seed an almost-expired blob.
