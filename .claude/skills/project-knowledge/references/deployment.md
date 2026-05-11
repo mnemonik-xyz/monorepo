@@ -279,6 +279,29 @@ longer required for the OAuth flow** — signing happens client-side in the
 webapp's WASM identity. The keypair is still required for legacy `full`
 storage mode (Arweave + Solana writes) but irrelevant to OAuth bootstrap.
 
+#### Chrome extension OAuth — Google sign-in (T14 + T16, 2026-05-11)
+
+The Chrome extension uses `chrome.identity.launchWebAuthFlow` (RFC 7636
+PKCE S256) against the server's `/oauth/google/start` + `/oauth/token`
+endpoints. Server-side Google config in `/home/claude/mcp.env`:
+
+```bash
+GOOGLE_OAUTH_CLIENT_ID=468578209539-nenf5avaagdv8b66rf4djojud4ighe03.apps.googleusercontent.com
+GOOGLE_OAUTH_CLIENT_SECRET=<held server-side; from Google Cloud Console>
+GOOGLE_OAUTH_REDIRECT_URI=https://iegoicpcogbnnnajgfdbljfickgfnfoj.chromiumapp.org/google
+```
+
+- Google Cloud project: `mnemonik-xyz`.
+- OAuth client type: **Web application** (the "Chrome extension" type
+  requires a Web Store Item ID at creation and produces a client
+  incompatible with `launchWebAuthFlow`).
+- Authorized redirect URI in Google Cloud Console must match
+  `GOOGLE_OAUTH_REDIRECT_URI` byte for byte.
+- Chrome Web Store Item ID: `iegoicpcogbnnnajgfdbljfickgfnfoj`.
+  Documented in `packages/extension/EXTENSION_ID.md`.
+- Server env var `GOOGLE_OAUTH_CLIENT_ID=""` (empty) disables the
+  Google OAuth router branch entirely (`mcp/src/oauth/google.rs::new`).
+
 ### Key Paths
 
 | Path | Purpose |
