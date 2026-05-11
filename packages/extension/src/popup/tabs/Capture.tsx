@@ -8,18 +8,33 @@
 // content script delivers the selection text via `chrome.runtime.send-
 // Message`, this tab just reads what arrived.
 
-import { useEffect, useState, type JSX } from "react";
+import { useCallback, useEffect, useRef, useState, type JSX } from "react";
 import type { ChatAdapter } from "../../runtime/chat/types.js";
 import { getRuntime, type SignMemoryResult } from "../runtime.js";
 import { Toast } from "../components/Toast.js";
 
+export interface FabIntent {
+  kind: "save-selection" | "save-chat";
+  selectionText?: string;
+  pageUrl?: string;
+  capturedAt?: string;
+}
+
 export interface CaptureProps {
   adapter: ChatAdapter | null;
   prefilledSelection: string;
+  /** FAB-driven intent the popup picked up out of
+   *  `chrome.storage.local.pending_fab_action.v1` (PR134-BLK-3 /
+   *  BUG-03 / BUG2-02). When `kind === "save-chat"` the Capture tab
+   *  auto-triggers the conversation extraction + sign flow. Selection
+   *  text is already merged into `prefilledSelection` by the parent. */
+  fabIntent?: FabIntent | null;
+  /** Acknowledge the FAB intent so the parent clears it from state. */
+  onFabIntentConsumed?: () => void;
 }
 
 export function Capture(props: CaptureProps): JSX.Element {
-  const { adapter, prefilledSelection } = props;
+  const { adapter, prefilledSelection, fabIntent, onFabIntentConsumed } = props;
   const [selection, setSelection] = useState(prefilledSelection);
   const [tagsRaw, setTagsRaw] = useState("");
   const [busy, setBusy] = useState(false);
@@ -70,7 +85,7 @@ export function Capture(props: CaptureProps): JSX.Element {
     }
   };
 
-  const handleSaveChat = async (): Promise<void> => {
+  const handleSaveChat = useCallback(async (): Promise<void> => {
     if (!adapter) return;
     setError(null);
     setResult(null);
@@ -99,7 +114,25 @@ export function Capture(props: CaptureProps): JSX.Element {
     } finally {
       setBusy(false);
     }
-  };
+  }, [adapter, tagsRaw]);
+
+  // PR134-BLK-3 / BUG-03: react to a FAB-driven "save-chat" intent by
+  // auto-triggering the conversation extraction + sign flow. Selection
+  // text is already merged into `prefilledSelection` by the parent.
+  // Guarded by `consumedRef` so a re-render after `setBusy` does not
+  // re-fire the same intent. `onFabIntentConsumed` is called as soon as
+  // we observe the intent so the parent can clear it from state and
+  // future renders see `fabIntent === null`.
+  const consumedRef = useRef<FabIntent | null>(null);
+  useEffect(() => {
+    if (!fabIntent) return;
+    if (consumedRef.current === fabIntent) return;
+    consumedRef.current = fabIntent;
+    if (fabIntent.kind === "save-chat" && adapter) {
+      void handleSaveChat();
+    }
+    onFabIntentConsumed?.();
+  }, [fabIntent, adapter, handleSaveChat, onFabIntentConsumed]);
 
   return (
     <div className="flex flex-col gap-3">

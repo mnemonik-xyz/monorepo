@@ -99,11 +99,31 @@ export function Recall(props: RecallProps): JSX.Element {
 
   const handleInsert = async (text: string): Promise<void> => {
     if (!insertSupported) return;
+    // PR134-BLK-1: route through `chrome.tabs.sendMessage` so the message
+    // reaches the content-script realm where `message-bridge.ts` owns
+    // `insertIntoChat`. `chrome.runtime.sendMessage` from the popup is
+    // delivered only to extension pages (SW, options, other popups), not
+    // to content scripts — so the previous wiring silently no-op'd.
     try {
-      await chrome.runtime.sendMessage({
+      const tabs = await chrome.tabs.query({
+        active: true,
+        currentWindow: true,
+      });
+      const tabId = tabs[0]?.id;
+      if (typeof tabId !== "number") {
+        setError("Could not find the active tab. Reload the chat tab.");
+        return;
+      }
+      const reply = (await chrome.tabs.sendMessage(tabId, {
         type: "ui:insert-into-chat",
         payload: { text },
-      });
+      })) as { ok?: boolean } | undefined;
+      if (!reply || reply.ok !== true) {
+        setError(
+          "Insert failed — the chat composer rejected the text. " +
+            "Copy markdown and paste manually.",
+        );
+      }
     } catch (e) {
       // Surface the failure — the button is enabled, so a silent
       // no-op would be misleading. The toast lives in <Recall> via

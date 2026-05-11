@@ -23,6 +23,20 @@ import "../runtime/chat/adapters/gemini.adapter.js";
 import { selectAdapter } from "../runtime/chat/registry.js";
 import type { ChatTurn } from "../runtime/chat/types.js";
 
+/** Debug-only logger. PR134-S-04 / PR134-C-08 / BUG-05: every diagnostic
+ *  console.log from the live-debug session is gated behind
+ *  `import.meta.env.DEV` so Vite tree-shakes them in production builds.
+ *  Error-level logs (`console.error`) stay enabled — those are the
+ *  operator signals the security audit explicitly approved. */
+function debugLog(...args: unknown[]): void {
+  // `import.meta.env.DEV` is statically true in dev and false in
+  // production; Vite/Rollup constant-folds the entire branch away.
+  if (import.meta.env.DEV) {
+    // eslint-disable-next-line no-console
+    console.log("[mnemonik]", ...args);
+  }
+}
+
 type Msg =
   | { type: "ui:extract-conversation" }
   | { type: "ui:get-selection" }
@@ -38,28 +52,37 @@ function isMsg(raw: unknown): raw is Msg {
   );
 }
 
-function extractConversation(): { turns: ChatTurn[] } | null {
+export function extractConversation(): { turns: ChatTurn[] } | null {
   const adapter = selectAdapter(window.location.href);
   if (!adapter) return null;
   try {
     return { turns: adapter.extractConversation(document) };
   } catch (err) {
+    // eslint-disable-next-line no-console
     console.error("[mnemonik] extractConversation failed", err);
     return null;
   }
 }
 
-function getSelectionText(): { selectionText: string } {
+export function getSelectionText(): { selectionText: string } {
   return { selectionText: window.getSelection()?.toString() ?? "" };
 }
 
-function insertIntoChat(text: string): { ok: boolean } {
+/**
+ * Insert `text` at the active chat composer. Returns `{ok: true}`
+ * ONLY when the resulting DOM actually contains the text — otherwise
+ * the popup can fall back to a clipboard copy. PR134-C-02: the previous
+ * `textContent =` last-resort fired and returned ok=true even on
+ * ProseMirror, which silently reconciles the mutation away on the
+ * next render; verifying via `innerText.includes(text)` closes that.
+ */
+export function insertIntoChat(text: string): { ok: boolean } {
   const adapter = selectAdapter(window.location.href);
-  console.log("[mnemonik] insertIntoChat: adapter =", adapter?.platform);
+  debugLog("insertIntoChat: adapter =", adapter?.platform);
   if (!adapter || !adapter.supportsInsert) return { ok: false };
   const input = adapter.findInputBox(document);
-  console.log(
-    "[mnemonik] insertIntoChat: input found =",
+  debugLog(
+    "insertIntoChat: input found =",
     !!input,
     input?.tagName,
     input?.id,
@@ -72,7 +95,7 @@ function insertIntoChat(text: string): { ok: boolean } {
     input.focus();
     input.value = text;
     input.dispatchEvent(new Event("input", { bubbles: true }));
-    return { ok: true };
+    return { ok: input.value.includes(text) };
   }
 
   if (!input.isContentEditable) return { ok: false };
@@ -85,7 +108,8 @@ function insertIntoChat(text: string): { ok: boolean } {
   //      fires `beforeinput`, which lightweight editors accept.
   //   2. Dispatch a synthetic `paste` ClipboardEvent — ProseMirror /
   //      Lexical / Slate all intercept this.
-  //   3. Fall back to `textContent =` + manual `input` event.
+  //   3. Fall back to `textContent =` + manual `input` event, with
+  //      an innerText verification to catch ProseMirror reconciliation.
   input.focus();
   try {
     const sel = window.getSelection();
@@ -107,8 +131,8 @@ function insertIntoChat(text: string): { ok: boolean } {
       return false;
     }
   })();
-  console.log(
-    "[mnemonik] insertIntoChat: execCommand ok =",
+  debugLog(
+    "insertIntoChat: execCommand ok =",
     ok1,
     "innerText match =",
     input.innerText.includes(text),
@@ -125,16 +149,22 @@ function insertIntoChat(text: string): { ok: boolean } {
       cancelable: true,
     });
     input.dispatchEvent(paste);
-    console.log(
-      "[mnemonik] insertIntoChat: paste dispatched, innerText match =",
+    debugLog(
+      "insertIntoChat: paste dispatched, innerText match =",
       input.innerText.includes(text),
     );
     if (input.innerText.includes(text)) return { ok: true };
   } catch (err) {
-    console.log("[mnemonik] insertIntoChat: paste failed", err);
+    debugLog("insertIntoChat: paste failed", err);
   }
 
   // Last resort: replace textContent directly + fire input event.
+  // PR134-C-02: verify that the editor actually retained the text
+  // before returning `{ok: true}`. ProseMirror's reconciler runs
+  // synchronously inside the same microtask on the input dispatch,
+  // so reading `innerText` immediately after the dispatch reflects
+  // the post-reconcile state. If the framework discarded the mutation,
+  // return `{ok: false}` so the caller can offer a clipboard copy.
   try {
     input.textContent = text;
     input.dispatchEvent(
@@ -144,22 +174,38 @@ function insertIntoChat(text: string): { ok: boolean } {
         inputType: "insertText",
       }),
     );
-    console.log(
-      "[mnemonik] insertIntoChat: textContent set, innerText match =",
-      input.innerText.includes(text),
-    );
-    return { ok: true };
+    const retained = input.innerText.includes(text);
+    debugLog("insertIntoChat: textContent set, innerText match =", retained);
+    return { ok: retained };
   } catch {
     return { ok: false };
   }
 }
 
-chrome.runtime.onMessage.addListener(
-  (
-    raw: unknown,
-    _sender: chrome.runtime.MessageSender,
-    sendResponse: (response?: unknown) => void,
-  ) => {
+/**
+ * Build the `chrome.runtime.onMessage` listener. Exposed for tests so
+ * they can drive it directly with a synthetic sender + capture the
+ * sendResponse value without monkey-patching the global.
+ */
+export function buildMessageListener(): (
+  raw: unknown,
+  sender: chrome.runtime.MessageSender,
+  sendResponse: (response?: unknown) => void,
+) => boolean {
+  return (raw, sender, sendResponse) => {
+    // PR134-S-03: defence-in-depth sender validation. Only messages
+    // that originate from our own extension (popup / SW / other content
+    // scripts) are processed. `externally_connectable` is absent from
+    // manifest.json so this is belt-and-braces, but the audit flagged
+    // the missing check explicitly.
+    const ownId = chrome.runtime?.id;
+    if (
+      typeof ownId === "string" &&
+      sender.id !== undefined &&
+      sender.id !== ownId
+    ) {
+      return false;
+    }
     if (!isMsg(raw)) return false;
     if (raw.type === "ui:extract-conversation") {
       sendResponse(extractConversation());
@@ -179,5 +225,7 @@ chrome.runtime.onMessage.addListener(
       return false;
     }
     return false;
-  },
-);
+  };
+}
+
+chrome.runtime.onMessage.addListener(buildMessageListener());

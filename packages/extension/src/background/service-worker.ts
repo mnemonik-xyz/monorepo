@@ -349,16 +349,37 @@ function isAuthorisedSender(
     );
   }
 
+  // `ui:recall` is a special case (PR134-BLK-2 / BUG-01). The recall
+  // overlay (T13) runs in the CONTENT-SCRIPT realm of the active chat
+  // tab and triggers a hotkey-driven recall by sending `ui:recall` via
+  // `chrome.runtime.sendMessage`. That message carries `sender.tab`
+  // set to the host tab. Accept it provided the tab origin is one of
+  // the declared host-permission origins AND the sender extension id
+  // matches our own (already enforced by the ownId guard above).
+  // Popup-driven `ui:recall` continues to work through the same path
+  // because `sender.tab` is undefined for extension-page senders.
+  if (msg.type === "ui:recall") {
+    if (typeof ownId !== "string") return false;
+    if (sender.tab !== undefined) {
+      const tabUrl = sender.tab.url ?? sender.url;
+      if (typeof tabUrl !== "string") return false;
+      return ALLOWED_TAB_ORIGINS.some((origin) =>
+        tabUrl.startsWith(origin + "/"),
+      );
+    }
+    const idMatches = sender.id === ownId;
+    const urlMatches =
+      typeof sender.url === "string" &&
+      sender.url.startsWith(`chrome-extension://${ownId}/`);
+    return idMatches || urlMatches;
+  }
+
   // UI-origin (`ui:*`) — popup / options page. No `sender.tab`. We
   // require POSITIVE identification: either `sender.id` matches our
   // own extension id, or `sender.url` starts with our extension's
   // chrome-extension:// origin. Both being absent is rejected (was
   // the silent pass-through documented in audit T10-N2-01).
-  if (
-    msg.type === "ui:sign-memory" ||
-    msg.type === "ui:recall" ||
-    msg.type === "ui:flush-pending"
-  ) {
+  if (msg.type === "ui:sign-memory" || msg.type === "ui:flush-pending") {
     if (sender.tab !== undefined) return false;
     if (typeof ownId !== "string") return false;
     const idMatches = sender.id === ownId;
