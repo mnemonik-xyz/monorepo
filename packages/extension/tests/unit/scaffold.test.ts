@@ -25,19 +25,20 @@ describe("scaffold · manifest.json", () => {
   it("has the expected permission set", () => {
     // T10 round-2: `clipboardWrite` dropped (least-privilege; T13 adds
     // it back when the recall overlay's "copy hash" gesture lands).
-    // `scripting` added so T13 can use `chrome.scripting.executeScript`
-    // on the generic-page recall-overlay path (activeTab-gated).
+    // Final-Wave audit FW-S-07: `scripting` removed (T13 never wired a
+    // `chrome.scripting.executeScript` caller; the content scripts are
+    // declared via manifest content_scripts entries).
     expect(manifest.permissions).toEqual(
       expect.arrayContaining([
         "storage",
         "identity",
         "contextMenus",
         "activeTab",
-        "scripting",
         "alarms",
-      ])
+      ]),
     );
     expect(manifest.permissions).not.toContain("clipboardWrite");
+    expect(manifest.permissions).not.toContain("scripting");
   });
 
   it("declares only enumerated AI-chat host_permissions per D11", () => {
@@ -52,7 +53,7 @@ describe("scaffold · manifest.json", () => {
         "https://chatgpt.com/*",
         "https://claude.ai/*",
         "https://gemini.google.com/*",
-      ])
+      ]),
     );
     expect(manifest.host_permissions).not.toContain("<all_urls>");
     for (const entry of manifest.host_permissions) {
@@ -77,14 +78,14 @@ describe("scaffold · manifest.json", () => {
     expect(Array.isArray(manifest.content_scripts)).toBe(true);
     expect(manifest.content_scripts.length).toBeGreaterThanOrEqual(3);
     const matches = manifest.content_scripts.flatMap(
-      (c: { matches: string[] }) => c.matches
+      (c: { matches: string[] }) => c.matches,
     );
     expect(matches).toEqual(
       expect.arrayContaining([
         "https://chatgpt.com/*",
         "https://claude.ai/*",
         "https://gemini.google.com/*",
-      ])
+      ]),
     );
     expect(matches).not.toContain("<all_urls>");
     for (const cs of manifest.content_scripts as Array<{
@@ -93,7 +94,7 @@ describe("scaffold · manifest.json", () => {
     }>) {
       expect(Array.isArray(cs.js) && (cs.js?.length ?? 0) > 0).toBe(true);
       expect(
-        cs.run_at === "document_idle" || cs.run_at === "document_end"
+        cs.run_at === "document_idle" || cs.run_at === "document_end",
       ).toBe(true);
     }
   });
