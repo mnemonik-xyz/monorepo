@@ -70,7 +70,10 @@ export default function SiteFooter() {
             Discord
           </FooterLink>
           <FooterLink external href={EXTERNAL_LINKS.telegram}>
-            Telegram
+            Telegram · community
+          </FooterLink>
+          <FooterLink external href={EXTERNAL_LINKS.telegramAnnouncements}>
+            Telegram · announcements
           </FooterLink>
         </FooterColumn>
       </div>

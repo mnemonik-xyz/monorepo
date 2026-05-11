@@ -18,6 +18,7 @@ export const EXTERNAL_LINKS = {
     "https://www.researchgate.net/publication/404381758_Sublinear_Verifiable_Recall_An_Inverted-File_Cascade_for_Compressed_Embedding_Retrieval_in_the_Mnemonic_Protocol",
   discord: "https://discord.gg/ws6wruJj",
   telegram: "https://t.me/mnemonikprotocol",
+  telegramAnnouncements: "https://t.me/mnemonik_xyz_announcements",
   issues: "https://github.com/mnemonik-xyz/monorepo/issues",
 } as const;
 

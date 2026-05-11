@@ -85,6 +85,14 @@ pub struct SqliteStore {
     conn: Connection,
 }
 
+/// Aggregate counters returned by `SqliteStore::public_stats`.
+#[derive(Debug, Clone, Copy, serde::Serialize)]
+pub struct PublicStats {
+    pub unique_users: i64,
+    pub saved_on_node: i64,
+    pub saved_onchain: i64,
+}
+
 /// Shared initialization step run after `SCHEMA` for every backing store
 /// (file-backed via `open` and in-memory via `in_memory`).
 ///
@@ -306,6 +314,43 @@ impl SqliteStore {
             params![correlation_id, attestation_id],
         )?;
         Ok(())
+    }
+
+    /// Aggregate counters intended for a public traction widget.
+    ///
+    /// - `unique_users`: distinct non-empty `owner_pubkey` (OAuth-resolved
+    ///   tenant scope). One human-or-agent identity counts once regardless of
+    ///   how many memories it saved.
+    /// - `saved_on_node`: total rows in `attestations` (everything the node
+    ///   has persisted, including local-mode synthetic txs).
+    /// - `saved_onchain`: rows whose `solana_tx` is a real Solana signature
+    ///   (i.e. not the `local:<...>` synthetic prefix used in
+    ///   `STORAGE_MODE=local` and not empty).
+    ///
+    /// All three are single indexed/scanned aggregates over `attestations`;
+    /// safe to call on the request path but the caller may still cache to
+    /// avoid hammering SQLite.
+    pub fn public_stats(&self) -> anyhow::Result<PublicStats> {
+        let unique_users: i64 = self.conn.query_row(
+            "SELECT COUNT(DISTINCT owner_pubkey) FROM attestations
+             WHERE owner_pubkey IS NOT NULL AND owner_pubkey <> ''",
+            [],
+            |row| row.get(0),
+        )?;
+        let saved_on_node: i64 =
+            self.conn
+                .query_row("SELECT COUNT(*) FROM attestations", [], |row| row.get(0))?;
+        let saved_onchain: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM attestations
+             WHERE solana_tx <> '' AND solana_tx NOT LIKE 'local:%'",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(PublicStats {
+            unique_users,
+            saved_on_node,
+            saved_onchain,
+        })
     }
 
     /// Resolve a persisted attestation by the deferred-sign correlation_id.

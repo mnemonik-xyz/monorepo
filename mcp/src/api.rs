@@ -685,6 +685,72 @@ pub async fn bootstrap_redeem_handler(
         .into_response()
 }
 
+// ── Public traction stats (GET /stats) ──────────────────────────────────────
+//
+// Public, unauthenticated counters surfaced on the webapp landing page.
+// Three numbers, no PII: distinct OAuth-resolved owners, total memories
+// persisted by this node, and the subset that landed on Solana (i.e. has a
+// non-`local:` solana_tx). Cached for 60s to keep the landing page from
+// hammering SQLite under concurrent loads.
+
+#[derive(Clone, Copy, Serialize)]
+struct PublicStatsBody {
+    unique_users: i64,
+    saved_on_node: i64,
+    saved_onchain: i64,
+}
+
+static STATS_CACHE: std::sync::OnceLock<
+    std::sync::Mutex<Option<(std::time::Instant, PublicStatsBody)>>,
+> = std::sync::OnceLock::new();
+
+const STATS_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// `GET /stats` — public traction counters for the webapp landing page.
+///
+/// No auth, no per-IP rate limit (the 60s in-process cache makes the SQL
+/// load O(1) per minute regardless of request volume). Always returns a
+/// 200 JSON body — on a transient SQLite error we serve zeroes rather
+/// than 5xx the public homepage.
+pub async fn public_stats_handler(State(state): State<Arc<McpState>>) -> Response {
+    let cache = STATS_CACHE.get_or_init(|| std::sync::Mutex::new(None));
+
+    {
+        let guard = cache.lock().unwrap();
+        if let Some((stamped_at, body)) = *guard {
+            if stamped_at.elapsed() < STATS_TTL {
+                return Json(body).into_response();
+            }
+        }
+    }
+
+    let body = {
+        let store = state.store.lock().unwrap();
+        match store.public_stats() {
+            Ok(stats) => PublicStatsBody {
+                unique_users: stats.unique_users,
+                saved_on_node: stats.saved_on_node,
+                saved_onchain: stats.saved_onchain,
+            },
+            Err(e) => {
+                tracing::warn!("public_stats query failed: {e}");
+                PublicStatsBody {
+                    unique_users: 0,
+                    saved_on_node: 0,
+                    saved_onchain: 0,
+                }
+            }
+        }
+    };
+
+    {
+        let mut guard = cache.lock().unwrap();
+        *guard = Some((std::time::Instant::now(), body));
+    }
+
+    Json(body).into_response()
+}
+
 /// Uniform 404 body for every "ticket missing / expired / consumed" path so a
 /// probing attacker cannot distinguish the three states.
 fn bootstrap_not_found() -> Response {

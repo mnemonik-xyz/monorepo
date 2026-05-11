@@ -890,6 +890,7 @@ async fn run_http(
         .route("/balance", get(get_balance))
         .route("/deposit", post(deposit))
         .route("/admin/stats", get(admin_stats))
+        .route("/stats", get(api::public_stats_handler))
         .route("/download-knowledge", get(chat::download_knowledge_handler))
         .route(
             "/health",

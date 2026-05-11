@@ -15,9 +15,11 @@
   },
   "dependencies": {
     "cbor-x": "^1.6.4",
-    "react": "^19.1.0",
-    "react-dom": "^19.1.0",
-    "react-router-dom": "^6.27.0"
+    "react": "^19.2.6",
+    "react-dom": "^19.2.6",
+    "react-markdown": "^10.1.0",
+    "react-router-dom": "^6.27.0",
+    "remark-gfm": "^4.0.1"
   },
   "devDependencies": {
     "@playwright/test": "^1.52.0",
@@ -37,13 +39,13 @@
   "optionalDependencies": {
     "@tailwindcss/oxide-darwin-arm64": "4.2.4",
     "@tailwindcss/oxide-darwin-x64": "4.2.4",
-    "@tailwindcss/oxide-linux-x64-gnu": "4.2.4",
     "@tailwindcss/oxide-linux-arm64-gnu": "4.2.4",
+    "@tailwindcss/oxide-linux-x64-gnu": "4.2.4",
     "@tailwindcss/oxide-win32-x64-msvc": "4.2.4",
     "lightningcss-darwin-arm64": "1.32.0",
     "lightningcss-darwin-x64": "1.32.0",
-    "lightningcss-linux-x64-gnu": "1.32.0",
     "lightningcss-linux-arm64-gnu": "1.32.0",
+    "lightningcss-linux-x64-gnu": "1.32.0",
     "lightningcss-win32-x64-msvc": "1.32.0"
   }
 }

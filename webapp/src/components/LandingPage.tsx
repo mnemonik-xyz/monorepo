@@ -1,5 +1,10 @@
 import { useState, useCallback, useRef, useEffect } from "react";
-import { sendChatMessage, ChatApiError } from "../lib/api";
+import {
+  sendChatMessage,
+  ChatApiError,
+  fetchPublicStats,
+  type PublicStats,
+} from "../lib/api";
 import type { Message } from "../types";
 
 const SESSION_MESSAGE_LIMIT = 50;
@@ -29,6 +34,7 @@ function LandingPage({
 }: LandingPageProps) {
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
+  const [stats, setStats] = useState<PublicStats | null>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
   const isLimitReached = messageCount >= SESSION_MESSAGE_LIMIT;
@@ -36,6 +42,16 @@ function LandingPage({
 
   useEffect(() => {
     inputRef.current?.focus();
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetchPublicStats().then((s) => {
+      if (!cancelled) setStats(s);
+    });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   const handleSend = useCallback(async () => {
@@ -122,6 +138,26 @@ function LandingPage({
           </p>
         </header>
 
+        {stats && (
+          <section
+            aria-label="Network traction"
+            className="grid grid-cols-3 gap-4 rounded-lg border border-text-muted/20 bg-white/5 px-4 py-5"
+          >
+            <StatCell
+              value={stats.unique_users}
+              label="unique users"
+            />
+            <StatCell
+              value={stats.saved_on_node}
+              label="memories on node"
+            />
+            <StatCell
+              value={stats.saved_onchain}
+              label="memories on-chain"
+            />
+          </section>
+        )}
+
         <section
           className="space-y-6 text-left"
           aria-label="Protocol description"
@@ -192,6 +228,19 @@ function LandingPage({
         </nav>
       </div>
     </main>
+  );
+}
+
+function StatCell({ value, label }: { value: number; label: string }) {
+  return (
+    <div className="flex flex-col items-center">
+      <span className="font-mono text-2xl font-semibold tabular-nums text-accent-primary sm:text-3xl">
+        {value.toLocaleString()}
+      </span>
+      <span className="mt-1 text-xs uppercase tracking-wider text-text-muted">
+        {label}
+      </span>
+    </div>
   );
 }
 
