@@ -1232,3 +1232,30 @@ Three round-1 reviewers (code-reviewer, security-auditor, test-reviewer) returne
 - `vitest run tests/unit/auth/key-escrow.test.ts` → 50 pass (was 33 before round-1; +17 from this fix wave).
 - `bun test` (full extension) → 196 pass / 1 pre-existing `cose.test.ts` WASM failure (unchanged from the pre-fix baseline).
 
+## 2026-05-11 · T19 — Round-3 fixer (PR #131 — size-limit budget refresh + chunk-import re-verification)
+
+Two CI gates introduced by T19 itself failed on PR #131 (run `25665708659`). Round-3 patch addresses the size-limit job inside the extension's bounded scope and re-verifies the spec-level chunk-import concern flagged in round-2 was not regression-inducing.
+
+**Findings & fixes:**
+
+| Finding | Cause | Fix |
+| --- | --- | --- |
+| `bundle-size` job failing — `Size Limit can't find files at dist/src/popup/main.tsx-*.js,dist/assets/main-*.js,dist/assets/popup-*.js` | T11's globs predate the crxjs / Vite 6 chunk-naming change: HTML-entry chunks are emitted as `dist/assets/index.html-<hash>.js`, not `main-*.js` or `popup-*.js`. The three plausible globs from T11 round-2 MIN-4 never matched on this build. | `.size-limit.json` rewritten with three named budgets keyed off the actual chunk names: (1) popup cold-open (entry + shared `session-*.js` + `preload-helper-*.js`) at 75 KB gzipped; (2) `key-escrow-*.js` lazy chunk at 950 KB gzipped (~878 KB measured — argon2-browser+COSE+hash-wasm bundled); (3) `cloud-client-*.js` lazy chunk at 5 KB gzipped (~1.7 KB measured). The 50 KB original popup budget (T11) is superseded — the actual cold-open path is ~21 KB gzipped, headroom intentionally retained for T16/T17/T18 growth. |
+| Round-2 chunk-import caveat (`mintEscrowBlob` / `runRestoreSubmit` calling `wrapSecret` / `unwrapSecret` / `fetchEscrow` on a minified chunk) | Round-2 fixer flagged that Vite minification could rename these symbols, breaking the dynamic-import call in `tests/e2e/restore-on-second-profile.spec.ts`. | **Verified non-issue at current Vite 6 / esbuild defaults.** `grep -oE 'wrapSecret\|unwrapSecret\|fetchEscrow' dist/assets/key-escrow-*.js` returns all three names intact — esbuild preserves module-level `export` names by default, only inner identifiers get mangled. No `terserOptions.keep_fnames` change needed, no spec rewrite to route through the runtime facade required. The chunk-import approach in the spec is stable as-is. If a future bundler swap (terser instead of esbuild) regresses this, the same `grep` step in CI would catch it before merge. |
+
+**Out of round-3 scope (workflow-file fix deferred):**
+
+The Playwright job's actual failure on run `25665708659` was `Xvfb did not come up` — the round-2 `xdpyinfo` readiness probe exited non-zero because `xdpyinfo` was not present on the ubuntu-latest runner image used for this build. The fix (apt-install `xvfb` + `x11-utils`, kill-0-on-Xvfb-PID probe) lives in `.github/workflows/ext-e2e.yml`, which is outside the `packages/extension/` boundary this fixer is scoped to. **Deferred to a follow-up workflow patch (round-4 / separate PR).** Once Xvfb is reliably up, the Playwright suite runs the now-verified chunk-import path; size-limit gate is fixed independently and should pass on the next CI run regardless of the Xvfb state.
+
+**Verification (local):**
+
+- `bun run build` → success, 1.79s. Chunk inventory unchanged from cc63ccd.
+- `bunx size-limit` → all three budgets pass (popup cold-open 20.96 KB gzip vs 75 KB cap; key-escrow 877.99 KB vs 950 KB; cloud-client 1.73 KB vs 5 KB).
+- `bunx playwright test --list` → 13 tests across 10 files enumerate cleanly (TypeScript still happy).
+- `grep -oE 'wrapSecret\|unwrapSecret\|fetchEscrow' dist/assets/key-escrow-*.js` → all three export names present.
+
+**Files touched (round-3):**
+
+- `packages/extension/.size-limit.json` — three named per-chunk budgets.
+- `work/chrome-extension/decisions.md` — this entry.
+
