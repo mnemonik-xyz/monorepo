@@ -1,5 +1,6 @@
 {
   "manifest_version": 3,
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAu+SiRGV6pRjBlWgn+ov6q4oVmAmTPcswutMbwGoMAE6LAmC51Xhjly/oEM4/9WAppgd0XRmi7PpyityLVwAMmNYTgwWHmLLcYl0MjbZLDbKLdC+k/tvJVrHQWMLTDD1yEaWtfutkRPTwi1EDaW861sFPgvo0TX2CYyTGiLLhHemvuDLcFktsm+cwFvcNOYh2atmtx4Icc2w23O9cu8S9lTAoFcDLnAsXXUEk2ak9wbpxwiJY8P/2vMXWXPY1oA5OAVA2OWxMnzvKAJpfaYY8EfL3Df0fti6lcZb4dN0xoIG3/Mac0bAfxYhSWj7RgUI9O1xBwLodWz/zpYIm2i+v+wIDAQAB",
   "name": "Mnemonik",
   "version": "1.0.0",
   "description": "Capture AI-chat context (ChatGPT, Claude, Gemini) and any web selection as verifiable memory. Local IndexedDB or managed Cloud sync. Cross-device under one Ed25519 identity.",
@@ -37,13 +38,15 @@
   "host_permissions": [
     "https://chatgpt.com/*",
     "https://claude.ai/*",
-    "https://gemini.google.com/*"
+    "https://gemini.google.com/*",
+    "https://mcp.mnemonik.xyz/*"
   ],
   "content_scripts": [
     {
       "matches": ["https://chatgpt.com/*"],
       "js": [
         "src/runtime/chat/adapters/chatgpt.adapter.ts",
+        "src/content/message-bridge.ts",
         "src/content/fab.ts",
         "src/content/recall-overlay.ts"
       ],
@@ -53,6 +56,7 @@
       "matches": ["https://claude.ai/*"],
       "js": [
         "src/runtime/chat/adapters/claude.adapter.ts",
+        "src/content/message-bridge.ts",
         "src/content/fab.ts",
         "src/content/recall-overlay.ts"
       ],
@@ -62,6 +66,7 @@
       "matches": ["https://gemini.google.com/*"],
       "js": [
         "src/runtime/chat/adapters/gemini.adapter.ts",
+        "src/content/message-bridge.ts",
         "src/content/fab.ts",
         "src/content/recall-overlay.ts"
       ],
@@ -104,6 +109,6 @@
     }
   ],
   "content_security_policy": {
-    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; object-src 'self'; base-uri 'self'; connect-src 'self' https://mcp.mnemonik.xyz https://huggingface.co https://cdn-lfs.huggingface.co https://cdn-lfs-us-1.huggingface.co"
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; object-src 'self'; base-uri 'self'; connect-src 'self' https://mcp.mnemonik.xyz https://huggingface.co https://cdn-lfs.huggingface.co https://cdn-lfs-us-1.huggingface.co https://*.xethub.hf.co https://cdn.jsdelivr.net"
   }
 }

@@ -66,6 +66,12 @@ export const RESTORE_BLOCKED_KEY = "restore_blocked_until";
  *  popup-close-then-reopen does NOT reset the counter to 0. Cleared on
  *  successful restore. */
 export const RESTORE_ATTEMPT_KEY = "restore_attempt_count";
+/** chrome.storage.local key for the server-issued 429 retry-after
+ *  window (BUG2-06). Persisting this means closing the popup mid-wait
+ *  does not burn a fresh fetch attempt on reopen — without it, the
+ *  user could blow through the 5/24h server budget by reopening
+ *  during the cooldown. */
+export const RESTORE_RATE_LIMITED_KEY = "restore_rate_limited_until";
 
 /** chrome.storage.local keys for the persisted keypair after restore.
  *  Mirror the layout `popup/runtime-impl.ts::loadIdentity` reads —
@@ -127,6 +133,7 @@ export interface RestoreProps {
 export interface RestoreStorage {
   get(keys: string[]): Promise<Record<string, unknown>>;
   set(items: Record<string, unknown>): Promise<void>;
+  remove(keys: string | string[]): Promise<void>;
 }
 
 /** Module-scope stable defaults — T17-C-03 fix. Using inline default-
@@ -234,6 +241,7 @@ export function Restore(props: RestoreProps): JSX.Element {
   // Restore the persisted block AND attempt counter on mount so a popup
   // re-open during the 24h window does NOT reset the counter
   // (T17-C-04). Both keys are read in the same `storage.get` call.
+  // BUG2-06: also hydrate the persisted 429 rate-limit window.
   useEffect(() => {
     let cancelled = false;
     void (async () => {
@@ -241,10 +249,12 @@ export function Restore(props: RestoreProps): JSX.Element {
         const stored = await storage.get([
           RESTORE_BLOCKED_KEY,
           RESTORE_ATTEMPT_KEY,
+          RESTORE_RATE_LIMITED_KEY,
         ]);
         if (cancelled) return;
         const rawBlocked = stored[RESTORE_BLOCKED_KEY];
         const rawAttempts = stored[RESTORE_ATTEMPT_KEY];
+        const rawRateLimited = stored[RESTORE_RATE_LIMITED_KEY];
         if (typeof rawBlocked === "number" && rawBlocked > now()) {
           setBlockedUntil(rawBlocked);
         }
@@ -258,6 +268,20 @@ export function Restore(props: RestoreProps): JSX.Element {
           // hydrate `attempts` past MAX so the threshold logic stays
           // simple.
           setAttempts(rawAttempts);
+        }
+        if (typeof rawRateLimited === "number" && rawRateLimited > now()) {
+          setRateLimitedUntil(rawRateLimited);
+        } else if (
+          typeof rawRateLimited === "number" &&
+          rawRateLimited <= now()
+        ) {
+          // Stale window — best-effort cleanup so the key doesn't
+          // accrete in chrome.storage.local forever.
+          try {
+            await storage.remove(RESTORE_RATE_LIMITED_KEY);
+          } catch {
+            // Non-fatal.
+          }
         }
       } catch {
         // Best-effort — a missing storage permission shouldn't crash
@@ -327,6 +351,15 @@ export function Restore(props: RestoreProps): JSX.Element {
           if (err instanceof EscrowRateLimitError) {
             const until = now() + err.retry_after_seconds * 1000;
             setRateLimitedUntil(until);
+            // BUG2-06: persist so a popup-close does not lose the
+            // window. On reopen the mount effect rehydrates this key
+            // and the input stays disabled for the remaining time.
+            try {
+              await storage.set({ [RESTORE_RATE_LIMITED_KEY]: until });
+            } catch {
+              // Best-effort — in-memory state still applies for this
+              // popup session.
+            }
             setStep({
               kind: "error",
               message: `Server limited fetches. Retry after ${formatCountdown(
@@ -466,14 +499,18 @@ export function Restore(props: RestoreProps): JSX.Element {
       }
 
       // Success — clear both persisted counters AND drop the cached
-      // blob so a future re-restore can't reuse it.
+      // blob so a future re-restore can't reuse it. BUG2-06: also
+      // clear the persisted rate-limit window so a future enrolment
+      // does not start gated.
       setCachedBlob(null);
       setAttempts(0);
+      setRateLimitedUntil(null);
       try {
         await storage.set({
           [RESTORE_ATTEMPT_KEY]: 0,
           [RESTORE_BLOCKED_KEY]: 0,
         });
+        await storage.remove(RESTORE_RATE_LIMITED_KEY);
       } catch {
         // Best-effort.
       }
@@ -691,6 +728,13 @@ function chromeStorageAdapter(): RestoreStorage {
     async set(items: Record<string, unknown>): Promise<void> {
       try {
         await chrome.storage.local.set(items);
+      } catch {
+        // Best-effort — surface through the form rather than crashing.
+      }
+    },
+    async remove(keys: string | string[]): Promise<void> {
+      try {
+        await chrome.storage.local.remove(keys);
       } catch {
         // Best-effort — surface through the form rather than crashing.
       }

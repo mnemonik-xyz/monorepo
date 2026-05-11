@@ -392,17 +392,15 @@ describe("Recall tab — Cloud-tier merge contract", () => {
       // <div> would render the string verbatim if it had bubbled up).
       expect(screen.queryByText(/503 upstream/)).toBeNull();
 
-      // The non-blocking warning surfaces via console.warn — the
-      // popup deliberately stays quiet in the UI (offline-first) but
-      // logs so developers can correlate with the SW drain.
-      const warned = warnSpy.mock.calls.some((args) =>
-        args.some(
-          (a) =>
-            typeof a === "string" &&
-            (a.includes("cloud recall failed") || a.includes("503 upstream")),
-        ),
-      );
-      expect(warned).toBe(true);
+      // BUG2-07: the popup surfaces cloud failure as a non-fatal
+      // banner above the results list ("Cloud search unavailable —
+      // showing local results only"). Previously a console.warn was
+      // the only signal; users had no UI indication anything failed.
+      await waitFor(() => {
+        expect(
+          screen.getByText(/Cloud search unavailable/i),
+        ).toBeInTheDocument();
+      });
     } finally {
       warnSpy.mockRestore();
     }

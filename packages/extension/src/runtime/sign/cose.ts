@@ -38,6 +38,42 @@ interface MnemonicCoreModule {
   to_canonical_cbor_bytes: (value: unknown) => Uint8Array;
   blake3_hash: (bytes: Uint8Array) => Uint8Array;
   blake3_hash_hex: (bytes: Uint8Array) => string;
+  sign_attestation_bundle: (
+    content: string,
+    embedding_bytes: Uint8Array,
+    content_hash: string,
+    owner_pubkey: string,
+    keypair_json: unknown,
+  ) => Uint8Array;
+}
+
+/** End-to-end sign: builds the MEMORY_V1 artifact internally (schema-correct
+ *  field names, types) + canonical CBOR + COSE_Sign1 in one WASM call.
+ *  Avoids the JS-side `to_canonical_cbor_bytes` round-trip which can't
+ *  represent Uint8Array fields via serde_json::Value. */
+export async function signAttestationBundle(
+  content: string,
+  embeddingCompressed: Uint8Array,
+  contentHash: string,
+  ownerPubkey: string,
+  keypair: KeypairJson,
+): Promise<Uint8Array> {
+  const wasm = await loadWasm();
+  const cose = wasm.sign_attestation_bundle(
+    content,
+    embeddingCompressed,
+    contentHash,
+    ownerPubkey,
+    keypair,
+  );
+  if (cose.length === 0 || cose[0] !== 0x84) {
+    throw new Error(
+      `signAttestationBundle: COSE_Sign1 envelope must start with 0x84, got 0x${(
+        cose[0] ?? 0
+      ).toString(16)}`,
+    );
+  }
+  return cose;
 }
 
 let modulePromise: Promise<MnemonicCoreModule> | null = null;

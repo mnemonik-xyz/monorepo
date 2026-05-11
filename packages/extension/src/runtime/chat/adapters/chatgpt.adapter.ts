@@ -32,13 +32,76 @@ export const chatgptAdapter: ChatAdapter = {
   supportsInsert: true,
 
   extractConversation(doc: Document): ChatTurn[] {
-    const nodes = doc.querySelectorAll<HTMLElement>(
-      "[data-message-author-role]"
-    );
+    // ChatGPT's DOM rotates often. Try in priority order:
+    //  1. Legacy `[data-message-author-role]` — explicit role.
+    //  2. Newer `[data-testid^="conversation-turn-"]` — index-based role.
+    //  3. `article` siblings — current 2026 layout, role from any inner
+    //     `[data-message-author-role]` or `data-testid` or position.
+    //  4. `.text-base` containers — heuristic last resort.
     const turns: ChatTurn[] = [];
-    for (const node of Array.from(nodes)) {
-      const role = inferRole(node.getAttribute("data-message-author-role"));
-      if (!role) continue;
+
+    const legacy = doc.querySelectorAll<HTMLElement>(
+      "[data-message-author-role]",
+    );
+    if (legacy.length > 0) {
+      for (const node of Array.from(legacy)) {
+        const role = inferRole(node.getAttribute("data-message-author-role"));
+        if (!role) continue;
+        const content = domNodeToMarkdown(node).trim();
+        if (!content) continue;
+        turns.push({ role, content });
+      }
+      if (turns.length > 0) return turns;
+    }
+
+    const testidTurns = doc.querySelectorAll<HTMLElement>(
+      '[data-testid^="conversation-turn-"]',
+    );
+    if (testidTurns.length > 0) {
+      const list = Array.from(testidTurns);
+      for (let i = 0; i < list.length; i++) {
+        const node = list[i];
+        if (!node) continue;
+        // Even-indexed turns are user, odd are assistant — ChatGPT's
+        // canonical alternation. The inner [data-message-author-role]
+        // (if present) wins.
+        const inner = node.querySelector("[data-message-author-role]");
+        const explicit =
+          inner?.getAttribute("data-message-author-role") ?? null;
+        const role =
+          inferRole(explicit) ?? (i % 2 === 0 ? "user" : "assistant");
+        const content = domNodeToMarkdown(node).trim();
+        if (!content) continue;
+        turns.push({ role, content });
+      }
+      if (turns.length > 0) return turns;
+    }
+
+    const articles = doc.querySelectorAll<HTMLElement>("main article");
+    if (articles.length > 0) {
+      const list = Array.from(articles);
+      for (let i = 0; i < list.length; i++) {
+        const node = list[i];
+        if (!node) continue;
+        const inner = node.querySelector("[data-message-author-role]");
+        const explicit =
+          inner?.getAttribute("data-message-author-role") ?? null;
+        const role =
+          inferRole(explicit) ?? (i % 2 === 0 ? "user" : "assistant");
+        const content = domNodeToMarkdown(node).trim();
+        if (!content) continue;
+        turns.push({ role, content });
+      }
+      if (turns.length > 0) return turns;
+    }
+
+    // Heuristic fallback — mirrors the PDF-exporter extension's strategy.
+    const base = doc.querySelectorAll<HTMLElement>("main .text-base");
+    const list = Array.from(base);
+    for (let i = 0; i < list.length; i++) {
+      const node = list[i];
+      if (!node) continue;
+      const role: ChatTurn["role"] = i % 2 === 0 ? "user" : "assistant";
       const content = domNodeToMarkdown(node).trim();
       if (!content) continue;
       turns.push({ role, content });
@@ -47,15 +110,27 @@ export const chatgptAdapter: ChatAdapter = {
   },
 
   findInputBox(doc: Document): HTMLElement | null {
-    // Primary selector — current 2026 ChatGPT prompt textarea.
-    const textarea = doc.querySelector<HTMLTextAreaElement>(
-      'textarea[data-id="root"]'
-    );
-    if (textarea) return textarea;
-    // Fallback: contenteditable composer used during A/B rollouts.
-    return doc.querySelector<HTMLElement>(
-      '[contenteditable="true"][data-id="root"]'
-    );
+    // ChatGPT's composer changes form often (textarea, ProseMirror,
+    // Lexical). Try selectors in priority order.
+    const candidates: Array<() => HTMLElement | null> = [
+      () => doc.querySelector<HTMLTextAreaElement>('textarea[data-id="root"]'),
+      () =>
+        doc.querySelector<HTMLElement>(
+          '[contenteditable="true"][data-id="root"]',
+        ),
+      () => doc.querySelector<HTMLElement>("#prompt-textarea"),
+      () =>
+        doc.querySelector<HTMLElement>(
+          'div[contenteditable="true"].ProseMirror',
+        ),
+      () => doc.querySelector<HTMLElement>('form [contenteditable="true"]'),
+      () => doc.querySelector<HTMLElement>("form textarea"),
+    ];
+    for (const c of candidates) {
+      const el = c();
+      if (el) return el;
+    }
+    return null;
   },
 
   getChatId(_doc: Document, location: Location): string | null {
@@ -97,8 +172,8 @@ export const chatgptAdapter: ChatAdapter = {
     // Seed with any assistant turns already in the DOM at subscription time.
     for (const turn of Array.from(
       doc.querySelectorAll<HTMLElement>(
-        '[data-message-author-role="assistant"]'
-      )
+        '[data-message-author-role="assistant"]',
+      ),
     )) {
       visit(turn);
     }
@@ -125,7 +200,7 @@ export const chatgptAdapter: ChatAdapter = {
             }
             for (const inner of Array.from(
               el.querySelectorAll?.('[data-message-author-role="assistant"]') ??
-                []
+                [],
             )) {
               visit(inner);
             }

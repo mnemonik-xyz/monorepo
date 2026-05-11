@@ -53,12 +53,44 @@ const TAB_ORDER: Tab[] = ["capture", "recall", "verify"];
  */
 type PopupMode = "loading" | "onboarding" | "app";
 
+/** Key the SW writes when the FAB asks the popup to pre-fill a capture.
+ *  Read + cleared on popup mount (PR134-BLK-3 / BUG-03 / BUG2-02). */
+const PENDING_FAB_KEY = "pending_fab_action.v1";
+
+/** Max age of a pending FAB intent we will pick up. Older intents are
+ *  cleared without affecting popup state — the user likely opened the
+ *  popup for an unrelated reason and the stale intent would surprise
+ *  them. 5 minutes mirrors the cloud-sync alarm period. */
+const PENDING_FAB_MAX_AGE_MS = 5 * 60 * 1000;
+
+interface PendingFabAction {
+  kind: "save-selection" | "save-chat";
+  selectionText?: string;
+  pageUrl?: string;
+  capturedAt?: string;
+}
+
+function isPendingFabAction(v: unknown): v is PendingFabAction {
+  if (typeof v !== "object" || v === null) return false;
+  const r = v as Record<string, unknown>;
+  if (r.kind !== "save-selection" && r.kind !== "save-chat") return false;
+  if (r.selectionText !== undefined && typeof r.selectionText !== "string") {
+    return false;
+  }
+  if (r.pageUrl !== undefined && typeof r.pageUrl !== "string") return false;
+  if (r.capturedAt !== undefined && typeof r.capturedAt !== "string") {
+    return false;
+  }
+  return true;
+}
+
 export function App(): JSX.Element {
   const [tab, setTab] = useState<Tab>("capture");
   const [identity, setIdentity] = useState<PopupIdentity | null>(null);
   const [tier, setTier] = useState<StorageTier>("local");
   const [adapter, setAdapter] = useState<ChatAdapter | null>(null);
   const [selection, setSelection] = useState("");
+  const [fabIntent, setFabIntent] = useState<PendingFabAction | null>(null);
   const [tierDialogOpen, setTierDialogOpen] = useState(false);
   const [mode, setMode] = useState<PopupMode>("loading");
   const tabRefs = useRef<Partial<Record<Tab, HTMLButtonElement | null>>>({});
@@ -102,6 +134,44 @@ export function App(): JSX.Element {
     setTier(t);
     setAdapter(ad);
     setSelection(sel);
+    // PR134-BLK-3 / BUG-03 / BUG2-02: pick up any FAB-stashed intent so
+    // "Save selection" / "Save this chat" from the floating action
+    // button actually pre-fills the Capture tab. Stale or malformed
+    // intents are silently discarded. The key is always cleared so the
+    // next popup-open is clean.
+    try {
+      const cr = (globalThis as { chrome?: typeof chrome }).chrome;
+      if (cr?.storage?.local) {
+        const stored = (await cr.storage.local.get(PENDING_FAB_KEY)) as Record<
+          string,
+          unknown
+        >;
+        const raw = stored[PENDING_FAB_KEY];
+        if (isPendingFabAction(raw)) {
+          const capturedAtMs =
+            typeof raw.capturedAt === "string"
+              ? Date.parse(raw.capturedAt)
+              : NaN;
+          const fresh =
+            !Number.isFinite(capturedAtMs) ||
+            Date.now() - capturedAtMs < PENDING_FAB_MAX_AGE_MS;
+          if (fresh) {
+            setFabIntent(raw);
+            if (raw.kind === "save-selection" && raw.selectionText) {
+              // Selection wins over any prior textarea content — the
+              // FAB intent is the user's explicit pre-fill request.
+              setSelection(raw.selectionText);
+            }
+            // `save-chat` is handled by Capture.tsx via the
+            // `fabIntent` prop (it kicks off `handleSaveChat`).
+          }
+        }
+        await cr.storage.local.remove(PENDING_FAB_KEY);
+      }
+    } catch {
+      // Best-effort — chrome.storage may be unavailable in test
+      // harnesses, popup still renders with no intent.
+    }
     // Two paths into onboarding:
     //   1. First run on the Cloud tier (no session has ever been minted).
     //   2. Cloud tier with an expired or cleared session — the user must
@@ -132,6 +202,14 @@ export function App(): JSX.Element {
       cancelled = true;
     };
   }, [bootstrap]);
+
+  // PR134-BLK-3: any FAB intent lands on the Capture tab — switch
+  // the active tab so the user sees the prefilled / auto-saving state.
+  useEffect(() => {
+    if (fabIntent !== null) {
+      setTab("capture");
+    }
+  }, [fabIntent]);
 
   /**
    * Once onboarding finishes (Onboarding's `onComplete` callback fires),
@@ -308,7 +386,12 @@ export function App(): JSX.Element {
           hidden={tab !== "capture"}
         >
           {tab === "capture" ? (
-            <Capture adapter={adapter} prefilledSelection={selection} />
+            <Capture
+              adapter={adapter}
+              prefilledSelection={selection}
+              fabIntent={fabIntent}
+              onFabIntentConsumed={() => setFabIntent(null)}
+            />
           ) : null}
         </div>
         <div
