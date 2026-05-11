@@ -38,6 +38,8 @@ export function Capture(props: CaptureProps): JSX.Element {
   const [selection, setSelection] = useState(prefilledSelection);
   const [tagsRaw, setTagsRaw] = useState("");
   const [busy, setBusy] = useState(false);
+  /** BUG2-08: surface embedder cold-start. Same pattern as Recall.tsx. */
+  const [busyElapsedMs, setBusyElapsedMs] = useState(0);
   const [result, setResult] = useState<SignMemoryResult | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -52,6 +54,20 @@ export function Capture(props: CaptureProps): JSX.Element {
     // prefilled-change, not echo back into ourselves.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [prefilledSelection]);
+
+  // BUG2-08: tick `busyElapsedMs` every 500 ms while busy so the
+  // cold-start hint appears after 5s. Same shape as Recall.tsx.
+  useEffect(() => {
+    if (!busy) {
+      setBusyElapsedMs(0);
+      return;
+    }
+    const start = Date.now();
+    const id = setInterval(() => {
+      setBusyElapsedMs(Date.now() - start);
+    }, 500);
+    return () => clearInterval(id);
+  }, [busy]);
 
   const handleSaveSelection = async (): Promise<void> => {
     setError(null);
@@ -172,6 +188,18 @@ export function Capture(props: CaptureProps): JSX.Element {
           placeholder="research, q4-2026"
         />
       </label>
+
+      {busy && busyElapsedMs > 5000 ? (
+        <div
+          role="status"
+          aria-live="polite"
+          className="text-[11px] text-text-muted font-mono italic"
+        >
+          {busyElapsedMs > 30000
+            ? "First-time setup: downloading embedding model (~25 MB). This can take up to 3 minutes on a slow connection."
+            : "Loading embedding model — first sign / recall after install takes a moment."}
+        </div>
+      ) : null}
 
       <div className="flex items-center gap-2">
         <button

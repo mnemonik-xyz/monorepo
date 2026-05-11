@@ -76,12 +76,23 @@ function createPipeline(): RuntimePipeline {
       // canonicaliser which knows the field ordering).
       const compressed = await cose.compressEmbedding(embedding, 4);
       const created_at = new Date().toISOString();
-      // content_hash is blake3 of the UTF-8 content bytes. The WASM
-      // `sign_attestation_bundle` derives `artifact_id` from this and
-      // builds the MEMORY_V1-shaped artifact internally before
-      // canonicalising + signing in one call. Bypasses the broken
-      // `to_canonical_cbor_bytes` path (serde_json::Value can't hold
-      // Uint8Array, so embedding_compressed fails to deserialise).
+      // content_hash is blake3 of the UTF-8 content bytes (only the
+      // first 16 hex chars are consumed by WASM to derive the
+      // `art:<prefix>` artifact id — PR134-C-10). The WASM
+      // `sign_attestation_bundle` builds the MEMORY_V1 artifact
+      // internally before canonicalising + signing in one call.
+      // Bypasses the broken `to_canonical_cbor_bytes` path
+      // (serde_json::Value can't hold Uint8Array, so
+      // embedding_compressed fails to deserialise).
+      //
+      // TODO(T18-content-hash) / PR134-C-01: this value is NOT the
+      // server-side `content_hash` (which is blake3 of the canonical
+      // CBOR). The COSE envelope itself binds to the canonical CBOR
+      // hash, so the COSE upload still verifies server-side; only the
+      // local `AttestationRow.content_hash` field carries the
+      // utf8-derived value. Once WASM exposes a parallel
+      // `attest_full(content, embedding, owner) -> {content_hash,
+      // cose_bytes}` entry point, restore parity with the server.
       const contentBytes = new TextEncoder().encode(content);
       const content_hash = await cose.blake3HashHex(contentBytes);
       const cose_bytes = await cose.signAttestationBundle(
