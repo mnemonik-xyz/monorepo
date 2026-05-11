@@ -1263,6 +1263,57 @@ The Playwright job's actual failure on run `25665708659` was `Xvfb did not come 
 
 ---
 
+## 2026-05-11 · T19 — Round-4 fixer (PR #131 — restore-on-second-profile tree-shake fix)
+
+After round-3 the Xvfb workflow patch (`round-3b`) landed and Playwright runs to completion, but the two `restore-on-second-profile.spec.ts` tests still fail with `TypeError: m.wrapSecret is not a function` at `mintEscrowBlob` (spec line 99). The round-3 entry above asserted that this was a "verified non-issue" because `grep` returned all three names from the chunk — that finding was **incorrect**. Documenting the false positive here so future fixers do not repeat the analysis.
+
+**Correction to round-3's claim (`grep -oE 'wrapSecret\|unwrapSecret\|fetchEscrow' dist/assets/key-escrow-*.js` returns all three names intact):**
+
+The `grep` matched, but the matches were *inside error-message string literals* (e.g. `throw new C("wrapSecret: secret must be a non-empty Uint8Array")`) and inside the popup runtime's destructured property accesses (`ke.wrapSecret(...)`) — **not** in the `export{...}` statement at the end of the chunk. The actual export statement only carried `fetchEscrow`, `deleteEscrow`, `rotatePassphrase`, and a handful of error classes. `wrapSecret`, `unwrapSecret`, and `uploadEscrow` were tree-shaken because production code only ever accesses them via `ke.wrapSecret(...)` after a dynamic-import from a *different* chunk — and rollup's per-export reachability analysis treats namespace member access across chunk boundaries conservatively, especially when those accesses happen behind an `await import(...)`. esbuild preserving function names is unrelated; rollup's chunk-graph tree-shake runs after esbuild's name-preservation pass.
+
+**Verification of the actual problem (before fix):**
+
+```
+$ grep -oE "export\{[^}]+\}" dist/assets/key-escrow-*.js | tr ',' '\n'
+export{C as AuthError
+q as DEFAULT_SERVER_ORIGIN
+pA as EscrowNotFoundError
+...
+nI as deleteEscrow
+dA as fetchEscrow
+QI as googleOauth
+hI as keyEscrow
+CI as rotatePassphrase
+zA as signInWithGoogle}
+```
+
+`wrapSecret`, `unwrapSecret`, `uploadEscrow` are conspicuously absent — confirming the dynamic-import `m.wrapSecret` resolves to `undefined`.
+
+**Fix (Option C from the round-4 brief):**
+
+1. **`packages/extension/src/auth/test-helpers.ts`** (new) — thin re-export module that pulls `wrapSecret`, `unwrapSecret`, `uploadEscrow`, `fetchEscrow`, `deleteEscrow`, `rotatePassphrase` + the three error classes + `EscrowBlob` / `EscrowHttpOptions` types from `./key-escrow.js`. Production code does NOT import this module; it exists solely so rollup has a graph edge that pins the named exports.
+2. **`packages/extension/vite.config.ts`** — added `rollupOptions.input["auth-test-helpers"]` pointing at the new file, plus a `manualChunks` rule that keeps it in its own named chunk (`auth-test-helpers-<hash>.js`), plus `output.minifyInternalExports: false` so the export names remain readable for the dynamic-import. Manual-chunks for `key-escrow` was dropped — the test-helpers entry now owns the dependency.
+3. **`packages/extension/tests/e2e/restore-on-second-profile.spec.ts`** — `findKeyEscrowChunkUrl` now matches `^auth-test-helpers-.*\.js$`. The two chunks Vite emits (a thin shim + a bundled chunk) both export the full surface; `.sort()[0]` picks the stable alphabetic-first chunk across rebuilds. Docstring updated to point future readers at `src/auth/test-helpers.ts`.
+4. **`packages/extension/.size-limit.json`** — `key-escrow lazy chunk` budget path updated from `dist/assets/key-escrow-*.js` to `dist/assets/auth-test-helpers-*.js`. Budget itself unchanged at 950 KB gzipped; measured size dropped to ~15.94 KB gzipped (the heavy `argon2-browser` / `hash-wasm` payload now lives inside the popup's `PassphraseStrength-*.js` chunk via a separate dynamic-import path — orthogonal to this fix; pre-existing Vite 6 chunking behaviour).
+
+**Verification (post-fix):**
+
+- `bun run build` → success.
+- `grep -oE "export\{[^}]+\}" dist/assets/auth-test-helpers-*.js` → exports include `wrapSecret`, `unwrapSecret`, `uploadEscrow`, `fetchEscrow`, `deleteEscrow`, `rotatePassphrase`, all error classes. Shim chunk additionally re-exports them under unchanged names from the larger bundled chunk.
+- `bunx size-limit` → 3 / 3 budgets pass (popup cold-open 21.05 KB, key-escrow chunk 15.94 KB gzipped vs 950 KB cap, cloud-client 1.73 KB).
+- `bunx playwright test --list` → 13 tests across 10 files enumerate cleanly.
+- `bunx tsc -b --noEmit` → clean.
+
+**Files touched (round-4):**
+
+- `packages/extension/src/auth/test-helpers.ts` (new).
+- `packages/extension/vite.config.ts`.
+- `packages/extension/tests/e2e/restore-on-second-profile.spec.ts`.
+- `packages/extension/.size-limit.json`.
+- `work/chrome-extension/decisions.md` (this entry).
+
+---
+
 ## 2026-05-11 · T23 — Bridge contract tests + hygiene
 
 Audit round 2 found two cross-component drifts that survived per-side

@@ -68,10 +68,15 @@ const GOOGLE_SUB = "restore-google-sub-001";
 const PROFILE1_SECRET_BYTES = Array.from({ length: 64 }, (_, i) => i + 1);
 const SEEDED_ATTESTATION_ID = "att-restore-cloud-seed-1";
 
-/** Locate the hashed `key-escrow-*.js` chunk Vite emits in
+/** Locate the hashed `auth-test-helpers-*.js` chunk Vite emits in
  *  `dist/assets/`. The hash changes between builds; globbing keeps the
- *  spec insensitive to rebuilds. The chunk export surface is the same
- *  as `src/auth/key-escrow.ts` (`wrapSecret`, `unwrapSecret`, …). */
+ *  spec insensitive to rebuilds. The chunk is a thin re-export of
+ *  `src/auth/key-escrow.ts` (see `src/auth/test-helpers.ts`) wired as
+ *  an explicit Vite input so rollup retains the full named-export
+ *  surface (`wrapSecret`, `unwrapSecret`, `uploadEscrow`, `fetchEscrow`,
+ *  …). Production code paths only access `keyEscrow.<method>` via the
+ *  popup runtime facade, which would otherwise let rollup tree-shake
+ *  the bare exports out of the main chunk. */
 async function findKeyEscrowChunkUrl(extensionId: string): Promise<string> {
   const { readdir } = await import("node:fs/promises");
   const { fileURLToPath } = await import("node:url");
@@ -79,10 +84,17 @@ async function findKeyEscrowChunkUrl(extensionId: string): Promise<string> {
   const here = dirname(fileURLToPath(import.meta.url));
   const assetsDir = resolve(here, "../../dist/assets");
   const entries = await readdir(assetsDir);
-  const hit = entries.find(
-    (e) => /^key-escrow-.*\.js$/.test(e) && !e.endsWith(".map"),
-  );
-  if (!hit) throw new Error("key-escrow chunk not found in dist/assets/");
+  // Vite emits two `auth-test-helpers-*.js` chunks: a thin re-export
+  // shim (the entry input) and a fully bundled chunk (shared with the
+  // popup graph). Both export the same named symbols — the shim just
+  // forwards them. Sort the candidates so chunk selection is stable
+  // across rebuilds.
+  const candidates = entries
+    .filter((e) => /^auth-test-helpers-.*\.js$/.test(e) && !e.endsWith(".map"))
+    .sort();
+  if (candidates.length === 0)
+    throw new Error("auth-test-helpers chunk not found in dist/assets/");
+  const hit = candidates[0];
   return `chrome-extension://${extensionId}/assets/${hit}`;
 }
 

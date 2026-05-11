@@ -12,7 +12,7 @@
   },
   {
     "name": "key-escrow lazy chunk (argon2id + COSE bundled)",
-    "path": "dist/assets/key-escrow-*.js",
+    "path": "dist/assets/auth-test-helpers-*.js",
     "limit": "950 KB",
     "gzip": true,
     "running": false
