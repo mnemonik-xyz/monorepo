@@ -31,7 +31,7 @@
     "identity",
     "contextMenus",
     "activeTab",
-    "clipboardWrite",
+    "scripting",
     "alarms"
   ],
   "host_permissions": [
@@ -87,7 +87,10 @@
   "web_accessible_resources": [
     {
       "resources": [
-        "src/assets/*",
+        "src/assets/icon-16.png",
+        "src/assets/icon-32.png",
+        "src/assets/icon-48.png",
+        "src/assets/icon-128.png",
         "src/content/recall-overlay.css",
         "src/runtime/embed/worker.ts",
         "wasm/*.wasm",
@@ -101,6 +104,6 @@
     }
   ],
   "content_security_policy": {
-    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'; base-uri 'self'; connect-src 'self' https://mc.mnemonik.xyz https://huggingface.co https://cdn-lfs.huggingface.co"
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; object-src 'self'; base-uri 'self'; connect-src 'self' https://mc.mnemonik.xyz https://huggingface.co https://*.huggingface.co"
   }
 }

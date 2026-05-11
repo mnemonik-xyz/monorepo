@@ -108,20 +108,121 @@ export type Msg =
   | TabCaptureCandidate;
 
 /** Narrow `unknown` to `Msg`. Returns null when the shape doesn't match;
- *  callers decide whether to log / drop. Never throws on hostile input. */
+ *  callers decide whether to log / drop. Never throws on hostile input.
+ *
+ *  Per-variant payload shape is validated here so handlers can destructure
+ *  fields without separate guards. Closes review round-1 finding T10-S-01
+ *  / code-review minor: previously the function returned `input as Msg`
+ *  after the type discriminant check alone, which would become a crash
+ *  vector once T11/T18 populate the `ui:sign-memory` / `ui:recall`
+ *  branches with real payload destructuring. */
 export function parseMsg(input: unknown): Msg | null {
-  if (typeof input !== "object" || input === null) return null;
-  const candidate = input as { type?: unknown };
-  if (typeof candidate.type !== "string") return null;
-  switch (candidate.type) {
+  if (!isPlainObject(input)) return null;
+  const t = input["type"];
+  if (typeof t !== "string") return null;
+  switch (t) {
     case "sw:open-recall-overlay":
+      return isOpenRecallOverlayMsg(input) ? input : null;
     case "sw:save-selection":
+      return isSaveSelectionMsg(input) ? input : null;
     case "ui:sign-memory":
+      return isUiSignMemoryMsg(input) ? input : null;
     case "ui:recall":
+      return isUiRecallMsg(input) ? input : null;
     case "ui:flush-pending":
+      // No payload — type discriminant is the whole contract.
+      return { type: "ui:flush-pending" };
     case "tab:capture-candidate":
-      return input as Msg;
+      return isTabCaptureCandidateMsg(input) ? input : null;
     default:
       return null;
   }
+}
+
+// ── per-variant payload guards ─────────────────────────────────────────
+
+function isPlainObject(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
+function isStringArray(v: unknown): v is string[] {
+  return Array.isArray(v) && v.every((x) => typeof x === "string");
+}
+
+function isOpenRecallOverlayMsg(
+  input: Record<string, unknown>
+): input is SwOpenRecallOverlay {
+  const p = input["payload"];
+  if (!isPlainObject(p)) return false;
+  const trigger = p["trigger"];
+  return (
+    trigger === "hotkey" || trigger === "popup" || trigger === "context-menu"
+  );
+}
+
+function isSaveSelectionMsg(
+  input: Record<string, unknown>
+): input is SwSaveSelection {
+  const p = input["payload"];
+  if (!isPlainObject(p)) return false;
+  if (typeof p["selectionText"] !== "string") return false;
+  if (typeof p["pageUrl"] !== "string") return false;
+  if (typeof p["capturedAt"] !== "string") return false;
+  if (p["pageTitle"] !== undefined && typeof p["pageTitle"] !== "string") {
+    return false;
+  }
+  return true;
+}
+
+function isUiSignMemoryMsg(
+  input: Record<string, unknown>
+): input is UiSignMemory {
+  const p = input["payload"];
+  if (!isPlainObject(p)) return false;
+  if (typeof p["content"] !== "string" || p["content"].length === 0) {
+    return false;
+  }
+  if (!isStringArray(p["tags"])) return false;
+  const src = p["source"];
+  if (src !== undefined) {
+    if (!isPlainObject(src)) return false;
+    if (typeof src["platform"] !== "string") return false;
+    for (const k of ["url", "chatId", "model"] as const) {
+      if (src[k] !== undefined && typeof src[k] !== "string") return false;
+    }
+  }
+  return true;
+}
+
+function isUiRecallMsg(input: Record<string, unknown>): input is UiRecall {
+  const p = input["payload"];
+  if (!isPlainObject(p)) return false;
+  if (typeof p["query"] !== "string" || p["query"].length === 0) return false;
+  if (typeof p["ownerPubkey"] !== "string" || p["ownerPubkey"].length === 0) {
+    return false;
+  }
+  const lim = p["limit"];
+  if (
+    typeof lim !== "number" ||
+    !Number.isInteger(lim) ||
+    lim <= 0 ||
+    lim > 100
+  ) {
+    return false;
+  }
+  if (p["tags"] !== undefined && !isStringArray(p["tags"])) return false;
+  return true;
+}
+
+function isTabCaptureCandidateMsg(
+  input: Record<string, unknown>
+): input is TabCaptureCandidate {
+  const p = input["payload"];
+  if (!isPlainObject(p)) return false;
+  if (typeof p["platform"] !== "string") return false;
+  if (typeof p["url"] !== "string") return false;
+  if (typeof p["content"] !== "string") return false;
+  if (p["chatId"] !== undefined && typeof p["chatId"] !== "string")
+    return false;
+  return true;
 }

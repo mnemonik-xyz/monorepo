@@ -41,8 +41,14 @@ function makeEvent<Args extends unknown[]>() {
   };
 }
 
+/** Constant test extension id — `chrome.runtime.id` analogue. The
+ *  service-worker validates `sender.id` against this; tests pass it as
+ *  the synthetic id of their MessageSender. */
+const TEST_EXT_ID = "mnemonik-test-extension-id";
+
 interface ChromeMock {
   runtime: {
+    id: string;
     onInstalled: ReturnType<typeof makeEvent<[{ reason: string }]>>;
     onStartup: ReturnType<typeof makeEvent<[]>>;
     onMessage: ReturnType<
@@ -53,6 +59,7 @@ interface ChromeMock {
   };
   contextMenus: {
     create: ReturnType<typeof vi.fn>;
+    removeAll: ReturnType<typeof vi.fn>;
     onClicked: ReturnType<
       typeof makeEvent<[chrome.contextMenus.OnClickData, chrome.tabs.Tab?]>
     >;
@@ -72,12 +79,19 @@ interface ChromeMock {
 function makeChromeMock(): ChromeMock {
   return {
     runtime: {
+      id: TEST_EXT_ID,
       onInstalled: makeEvent<[{ reason: string }]>(),
       onStartup: makeEvent<[]>(),
       onMessage: makeEvent(),
     },
     contextMenus: {
+      // `removeAll` invokes its callback synchronously so the SW's
+      // subsequent `create` runs inside the same install handler.
       create: vi.fn(),
+      removeAll: vi.fn((cb?: unknown): unknown => {
+        if (typeof cb === "function") (cb as () => void)();
+        return undefined;
+      }),
       onClicked: makeEvent(),
     },
     commands: {
@@ -91,6 +105,15 @@ function makeChromeMock(): ChromeMock {
       sendMessage: vi.fn().mockResolvedValue(undefined),
     },
   };
+}
+
+/** Construct a MessageSender that passes the service-worker's
+ *  `isAuthorisedSender` gate for `ui:*` messages (popup origin). */
+function popupSender(): chrome.runtime.MessageSender {
+  return {
+    id: TEST_EXT_ID,
+    url: `chrome-extension://${TEST_EXT_ID}/popup/index.html`,
+  } as chrome.runtime.MessageSender;
 }
 
 function uniqueDbName(suffix: string): string {
@@ -230,11 +253,11 @@ describe("service-worker · alarm_drains_pending_queue", () => {
       scheduledTime: Date.now(),
     } as chrome.alarms.Alarm);
 
-    // Wait a microtask so the async flushPending handler resolves.
-    await Promise.resolve();
-    await Promise.resolve();
-
-    expect(flushSpy).toHaveBeenCalledTimes(1);
+    // Poll until the async flush handler chain has settled. Replaces a
+    // pair of `await Promise.resolve()` ticks (review nit) — `waitFor`
+    // doesn't depend on a specific number of microtasks and stays green
+    // when T18 swaps in a real async drain step.
+    await vi.waitFor(() => expect(flushSpy).toHaveBeenCalledTimes(1));
     const callArg = flushSpy.mock.calls[0]?.[0] as { store: IndexedDbStore };
     expect(callArg.store).toBe(store);
     const pending = await callArg.store.listPending();
