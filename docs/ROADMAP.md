@@ -6,18 +6,18 @@ started. Each entry maps to one folder under
 
 ## Shipped
 
-- docs-actualization
-- mnemonic-integrations — Phase 1
-- mnemonic-webapp — MVP
+- mnemonic-core
+- webapp
+- MCP
 
 ## In progress
 
-- chrome-extension
-- mnemonic-cli — Phase 1
-- mnemonic-core
+- chrome extension
+- cli
 
 ## Planned
 
-- a2a-bridge
-- cursor-vscode-e2e-tests
-- keypair-sync
+- A2A bridge and x402
+- Hermes integration
+- Claude Code plugin
+- ERC-8004 — extend to enrich agent identity
