@@ -20,4 +20,4 @@ started. Each entry maps to one folder under
 - A2A bridge and x402
 - Hermes integration
 - Claude Code plugin
-- ERC-8004 — extend to enrich agent identity
+- ERC-8004 validator
