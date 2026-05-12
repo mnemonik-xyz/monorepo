@@ -9,11 +9,14 @@ started. Each entry maps to one folder under
 - mnemonic-core
 - webapp
 - MCP
+- Arweave storage for AI memories
 
 ## In progress
 
 - chrome extension
 - cli
+- cloud storage
+- paid plans
 
 ## Planned
 
