@@ -726,7 +726,6 @@ describe("loginWithIdentity", () => {
   });
   afterEach(() => {
     __setWasmForTesting(null);
-    vi.unstubAllGlobals();
   });
 
   function makeJwt(sub: string): string {
