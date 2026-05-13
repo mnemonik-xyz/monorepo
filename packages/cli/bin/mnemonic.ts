@@ -26,6 +26,7 @@ interface RootFlags {
   json?: boolean;
   quiet?: boolean;
   color?: boolean; // commander negates --no-color into `color: false`
+  verbose?: boolean;
 }
 
 function rootOpts(program: Command): OutputOptions {
@@ -34,6 +35,7 @@ function rootOpts(program: Command): OutputOptions {
     json: Boolean(flags.json),
     quiet: Boolean(flags.quiet),
     noColor: flags.color === false,
+    verbose: Boolean(flags.verbose),
   };
 }
 
@@ -48,7 +50,11 @@ export function buildProgram(): Command {
     .version("0.1.6")
     .option("--json", "machine-readable JSON output")
     .option("--quiet", "suppress non-essential output")
-    .option("--no-color", "disable ANSI color");
+    .option("--no-color", "disable ANSI color")
+    .option(
+      "--verbose",
+      "log auth identifiers + HTTP request/response context to stderr"
+    );
 
   program
     .command("init")
@@ -91,16 +97,33 @@ export function buildProgram(): Command {
 
   program
     .command("login")
-    .description("OAuth login (interactive PKCE loopback) or --token <jwt>")
+    .description(
+      "OAuth login — default signs the server challenge with the local CLI keypair (browserless). Use --browser for the legacy webapp-localStorage flow, or --token <jwt> for a pre-issued JWT."
+    )
     .option("--token <jwt>", "headless: persist a pre-issued JWT")
+    .option(
+      "--browser",
+      "use the legacy browser-mediated OAuth flow (webapp localStorage signs the challenge)"
+    )
     .option("--base-url <url>", "override the server base URL")
-    .action(async (cmdOpts: { token?: string; baseUrl?: string }) => {
-      await runLogin({
-        ...rootOpts(program),
-        ...(cmdOpts.token !== undefined ? { token: cmdOpts.token } : {}),
-        ...(cmdOpts.baseUrl !== undefined ? { baseUrl: cmdOpts.baseUrl } : {}),
-      });
-    });
+    .action(
+      async (cmdOpts: {
+        token?: string;
+        browser?: boolean;
+        baseUrl?: string;
+      }) => {
+        await runLogin({
+          ...rootOpts(program),
+          ...(cmdOpts.token !== undefined ? { token: cmdOpts.token } : {}),
+          ...(cmdOpts.browser !== undefined
+            ? { browser: cmdOpts.browser }
+            : {}),
+          ...(cmdOpts.baseUrl !== undefined
+            ? { baseUrl: cmdOpts.baseUrl }
+            : {}),
+        });
+      }
+    );
 
   program
     .command("sign [content]")

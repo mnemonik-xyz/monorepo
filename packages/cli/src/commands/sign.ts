@@ -8,12 +8,25 @@
 //
 // Tags from `--tags=a,b,c` (comma-separated, trimmed, empty entries dropped).
 
-import { LocalSigner, MnemonicClient } from "@mnemonik-xyz/sdk";
+import {
+  AuthError,
+  LocalSigner,
+  MnemonicClient,
+  parseJwtPayload,
+} from "@mnemonik-xyz/sdk";
 
-import { loadIdentity, loadToken } from "../config.js";
+import {
+  identityPath,
+  loadIdentity,
+  loadToken,
+  tokenPath,
+} from "../config.js";
 import { fromSdkError, UserError } from "../errors.js";
-import { format, hint, type OutputOptions } from "../output.js";
-import { assertIdentityMatchesToken } from "../preflight.js";
+import { format, hint, type OutputOptions, verbose } from "../output.js";
+import {
+  assertIdentityMatchesToken,
+  formatMismatchError,
+} from "../preflight.js";
 
 export interface SignOptions extends OutputOptions {
   tags?: string;
@@ -45,6 +58,10 @@ export async function runSign(
   const kp = await loadIdentity();
   const tok = loadToken();
 
+  verbose(`base_url=${baseUrl}`, opts);
+  verbose(`local pubkey=${kp.pubkey}`, opts);
+  verbose(`token.sub=${tok.sub}`, opts);
+
   const client = new MnemonicClient({
     baseUrl,
     signer: new LocalSigner(kp),
@@ -57,6 +74,16 @@ export async function runSign(
   try {
     result = await client.signMemory(content, tags.length > 0 ? { tags } : {});
   } catch (e) {
+    // Post-mortem on 403 from /api/sign-callback: the only way that can
+    // happen is `pending.jwt_sub !== body.signer_pubkey`. Preflight already
+    // checks the saved fields, but a stale file-read, a token-rotation race,
+    // or a server quirk can still bypass it. Re-derive the JWT's actual
+    // payload from the wire-side token and surface the discrepancy with the
+    // same remediation hints preflight uses, so the user sees a directly
+    // actionable error instead of `HTTP 403`.
+    if (e instanceof AuthError && /HTTP 403/.test(e.message)) {
+      throw new UserError(buildPostMortem(kp.pubkey, tok.jwt), e);
+    }
     throw fromSdkError(e);
   }
 
@@ -102,4 +129,41 @@ function parseTags(raw: string | undefined): string[] {
     .split(",")
     .map((t) => t.trim())
     .filter((t) => t.length > 0);
+}
+
+/**
+ * Build the post-mortem message shown when `/api/sign-callback` returned
+ * 403. Re-decodes the JWT payload to learn the real `sub` (in case
+ * `token.json.sub` had drifted from `jwt.sub`), then either surfaces the
+ * mismatch using the standard preflight message OR falls back to a
+ * server-side hint when the local view is internally consistent.
+ */
+function buildPostMortem(localPubkey: string, jwt: string): string {
+  let jwtSub: string;
+  try {
+    jwtSub = parseJwtPayload(jwt).sub;
+  } catch {
+    jwtSub = "(unparseable JWT)";
+  }
+  if (localPubkey !== jwtSub) {
+    return formatMismatchError({
+      identityPubkey: localPubkey,
+      tokenSub: jwtSub,
+      identityPath: identityPath(),
+      tokenPath: tokenPath(),
+    });
+  }
+  return [
+    "sign-callback rejected (HTTP 403) although local identity matches JWT.sub.",
+    `  local pubkey:  ${localPubkey}`,
+    `  JWT.sub:       ${jwtSub}`,
+    "",
+    "Most likely the server stored a different `jwt_sub` for the pending bundle",
+    "than the JWT actually carries. Possible causes:",
+    "  • the JWT was minted before a server-side identity rotation",
+    "  • the token at token.json is from a different deployment",
+    "",
+    "Try: rerun `mnemonic login` to mint a fresh JWT, then `mnemonic sign` again.",
+    "If the problem persists, run with `--verbose` and report the output.",
+  ].join("\n");
 }

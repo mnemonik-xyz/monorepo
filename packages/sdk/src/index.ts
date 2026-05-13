@@ -42,11 +42,13 @@ export type {
 export {
   buildAuthorizeUrl,
   exchangeCodeForToken,
+  loginWithIdentity,
   parseJwtPayload,
   generatePkceVerifier,
   pkceChallenge,
   randomState,
   pendingAuthSessions,
+  BROWSERLESS_REDIRECT_URI,
 } from "./oauth.js";
 export type {
   BuildAuthorizeUrlInput,
@@ -54,5 +56,7 @@ export type {
   ExchangeCodeForTokenInput,
   ExchangeCodeForTokenResult,
   JwtPayload,
+  LoginWithIdentityInput,
+  LoginWithIdentityResult,
   PendingAuthSession,
 } from "./oauth.js";

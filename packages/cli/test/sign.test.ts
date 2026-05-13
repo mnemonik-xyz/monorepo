@@ -119,6 +119,70 @@ describe("runSign", () => {
     expect(calls.some((u) => u.includes("/api/sign-callback"))).toBe(true);
   });
 
+  it("AuthError 403 on sign-callback → UserError post-mortem with mismatch hint", async () => {
+    // Preflight checks the saved file fields (id.pubkey vs token.sub). If
+    // token.sub matches identity.pubkey at preflight-time but the JWT inside
+    // token.jwt actually carries a DIFFERENT sub (e.g. token.json was
+    // tampered with, OR — the real bug — the file was rotated between
+    // preflight and the SDK call), the SDK call lands a 403 from
+    // /api/sign-callback. The post-mortem re-decodes the JWT and produces
+    // the same actionable mismatch message the preflight uses.
+    const kp = mock.generate_keypair();
+    saveIdentityJson(kp);
+    const localSub = kp.pubkey_base58;
+    // token.json.sub matches local identity (preflight passes), but the JWT
+    // itself was minted for a different identity.
+    const jwtRealSub = "DIFFERENT_JWT_SUB_xyz";
+    saveToken({
+      jwt: makeJwt(jwtRealSub),
+      expires_at: new Date(Date.now() + 3600_000).toISOString(),
+      sub: localSub, // <- preflight sees a match against id.pubkey_base58
+    });
+
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url.endsWith("/mcp")) {
+        return new Response(
+          JSON.stringify({
+            jsonrpc: "2.0",
+            id: 1,
+            result: {
+              content: [
+                {
+                  type: "text",
+                  text: JSON.stringify({ correlation_id: "c-403" }),
+                },
+              ],
+            },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } }
+        );
+      }
+      if (url.includes("/api/pending/")) {
+        return new Response(new Uint8Array([0x82, 0x01, 0x02]), {
+          status: 200,
+          headers: { "content-type": "application/cbor" },
+        });
+      }
+      if (url.includes("/api/sign-callback")) {
+        return new Response("forbidden", { status: 403 });
+      }
+      return new Response("not found", { status: 404 });
+    });
+    globalThis.fetch = fetchMock as never;
+
+    const err = await runSign("hello", {
+      content: "hello",
+      baseUrl: "http://test",
+    }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(UserError);
+    const msg = (err as UserError).message;
+    expect(msg).toMatch(/identity mismatch/);
+    // Both subjects surface so the user sees the actual discrepancy.
+    expect(msg).toContain(localSub);
+    expect(msg).toContain(jwtRealSub);
+  });
+
   it("ServerError (exit 2) when /mcp returns 500", async () => {
     const kp = mock.generate_keypair();
     saveIdentityJson(kp);
