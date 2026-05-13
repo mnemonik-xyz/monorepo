@@ -45,9 +45,10 @@ export function buildProgram(): Command {
     .name("mnemonic")
     .description("Mnemonic Protocol CLI — verifiable persistent memory")
     // TODO: read from package.json at build/runtime so we don't have
-    // to hand-bump on every release. Hardcoded for 0.1.6 to ship the
-    // mode-flag fix today.
-    .version("0.1.6")
+    // to hand-bump on every release. Hardcoded for 0.1.7 — the
+    // browserless-OAuth fix (#27); 0.1.6 was tagged but never published
+    // to npm, so we skip to 0.1.7 to keep tag history monotonic.
+    .version("0.1.7")
     .option("--json", "machine-readable JSON output")
     .option("--quiet", "suppress non-essential output")
     .option("--no-color", "disable ANSI color")
