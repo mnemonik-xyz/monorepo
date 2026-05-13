@@ -6,10 +6,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
+  BROWSERLESS_REDIRECT_URI,
   buildAuthorizeUrl,
   exchangeCodeForToken,
   generatePkceVerifier,
   getSession,
+  loginWithIdentity,
   parseJwtPayload,
   PENDING_SESSION_MAX,
   PENDING_SESSION_TTL_MS,
@@ -19,6 +21,9 @@ import {
   setSession,
 } from "../src/oauth.js";
 import { AuthError } from "../src/errors.js";
+import { Keypair } from "../src/keypair.js";
+import { __setWasmForTesting } from "../src/wasm.js";
+import { buildWasmMock } from "./helpers/wasm-mock.js";
 
 // ── helpers ────────────────────────────────────────────────────────────────
 
@@ -702,6 +707,216 @@ describe("pendingAuthSessions TTL + size cap", () => {
       expect(getSession(seeded.sessionId)).toBeDefined();
       advance(PENDING_SESSION_TTL_MS + 1);
       expect(getSession(seeded.sessionId)).toBeUndefined();
+    });
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────────────
+// loginWithIdentity — browserless OAuth (issue #27 fix)
+// ────────────────────────────────────────────────────────────────────────────
+
+describe("loginWithIdentity", () => {
+  const mockChallenge = new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8]);
+  const mockChallengeB64 = btoa(
+    String.fromCharCode(...mockChallenge)
+  );
+
+  beforeEach(() => {
+    __setWasmForTesting(buildWasmMock() as never);
+  });
+  afterEach(() => {
+    __setWasmForTesting(null);
+  });
+
+  function makeJwt(sub: string): string {
+    const header = { alg: "HS256", typ: "JWT" };
+    const payload = {
+      sub,
+      iat: Math.floor(Date.now() / 1000),
+      exp: Math.floor(Date.now() / 1000) + 3600,
+    };
+    return `${base64UrlEncode(JSON.stringify(header))}.${base64UrlEncode(
+      JSON.stringify(payload)
+    )}.sig`;
+  }
+
+  /**
+   * Build a three-endpoint mock server that mirrors the real server's
+   * contract for the programmatic OAuth flow. Captures every call so tests
+   * can assert URL shape, query params, and request bodies.
+   */
+  function buildMockOAuthServer(pubkey: string): {
+    fetchImpl: typeof fetch;
+    calls: Array<{ url: string; method: string; body?: unknown }>;
+  } {
+    const calls: Array<{ url: string; method: string; body?: unknown }> = [];
+    const fetchImpl = async (
+      input: RequestInfo | URL,
+      init?: RequestInit
+    ): Promise<Response> => {
+      const url = typeof input === "string" ? input : input.toString();
+      const method = init?.method ?? "GET";
+      let body: unknown;
+      if (typeof init?.body === "string") {
+        try {
+          body = JSON.parse(init.body);
+        } catch {
+          body = init.body;
+        }
+      }
+      calls.push({ url, method, body });
+
+      if (method === "GET" && url.startsWith("https://srv/oauth/authorize")) {
+        return new Response(
+          JSON.stringify({
+            challenge_cbor: mockChallengeB64,
+            state: new URL(url).searchParams.get("state"),
+            exp: Math.floor(Date.now() / 1000) + 60,
+          }),
+          { status: 200, headers: { "content-type": "application/json" } }
+        );
+      }
+      if (
+        method === "POST" &&
+        url === "https://srv/oauth/authorize"
+      ) {
+        const reqBody = body as {
+          state: string;
+          signature: string;
+          signer_pubkey: string;
+        };
+        if (reqBody.signer_pubkey !== pubkey) {
+          return new Response(
+            JSON.stringify({ error: "signer pubkey mismatch" }),
+            { status: 401, headers: { "content-type": "application/json" } }
+          );
+        }
+        return new Response(
+          JSON.stringify({
+            code: "code-fixture-1",
+            state: reqBody.state,
+            redirect_uri: BROWSERLESS_REDIRECT_URI,
+          }),
+          { status: 200, headers: { "content-type": "application/json" } }
+        );
+      }
+      if (method === "POST" && url === "https://srv/oauth/token") {
+        return new Response(
+          JSON.stringify({
+            access_token: makeJwt(pubkey),
+            token_type: "Bearer",
+            expires_in: 3600,
+            scope: "mcp",
+          }),
+          { status: 200, headers: { "content-type": "application/json" } }
+        );
+      }
+      return new Response("not found", { status: 404 });
+    };
+    return { fetchImpl, calls };
+  }
+
+  it("end-to-end: signs challenge, exchanges code, returns JWT.sub === keypair.pubkey", async () => {
+    const kp = await Keypair.generate();
+    const { fetchImpl, calls } = buildMockOAuthServer(kp.pubkey);
+
+    const result = await loginWithIdentity({
+      baseUrl: "https://srv",
+      clientId: "mnemonic-cli",
+      keypair: kp,
+      fetch: fetchImpl,
+    });
+
+    expect(result.jwt).toMatch(/^[\w-]+\.[\w-]+\.[\w-]+$/);
+    expect(result.sub).toBe(kp.pubkey);
+    expect(typeof result.expiresAt).toBe("string");
+
+    // Three calls in canonical order.
+    expect(calls).toHaveLength(3);
+    expect(calls[0]!.method).toBe("GET");
+    expect(calls[0]!.url).toContain("/oauth/authorize");
+    expect(calls[0]!.url).toContain(`pubkey=${encodeURIComponent(kp.pubkey)}`);
+    // Sentinel redirect_uri propagates and is loopback-shaped.
+    expect(calls[0]!.url).toContain(
+      `redirect_uri=${encodeURIComponent(BROWSERLESS_REDIRECT_URI)}`
+    );
+
+    expect(calls[1]!.method).toBe("POST");
+    expect(calls[1]!.url).toBe("https://srv/oauth/authorize");
+    const authBody = calls[1]!.body as {
+      state: string;
+      signature: string;
+      signer_pubkey: string;
+    };
+    expect(authBody.signer_pubkey).toBe(kp.pubkey);
+    // Raw 64-byte Ed25519 → base64 (no padding rstrip) = 88 chars.
+    expect(authBody.signature).toHaveLength(88);
+
+    expect(calls[2]!.method).toBe("POST");
+    expect(calls[2]!.url).toBe("https://srv/oauth/token");
+    const tokenBody = calls[2]!.body as {
+      code: string;
+      code_verifier: string;
+      redirect_uri: string;
+    };
+    expect(tokenBody.code).toBe("code-fixture-1");
+    expect(tokenBody.redirect_uri).toBe(BROWSERLESS_REDIRECT_URI);
+    expect(tokenBody.code_verifier).toMatch(/^[A-Za-z0-9_-]{43,}$/);
+  });
+
+  it("rejects when authorize-init returns non-2xx", async () => {
+    const kp = await Keypair.generate();
+    const fetchImpl: typeof fetch = async () =>
+      new Response("denied", { status: 400 });
+
+    await expect(
+      loginWithIdentity({
+        baseUrl: "https://srv",
+        clientId: "mnemonic-cli",
+        keypair: kp,
+        fetch: fetchImpl,
+      })
+    ).rejects.toBeInstanceOf(AuthError);
+  });
+
+  it("rejects when authorize-init returns mismatched state", async () => {
+    const kp = await Keypair.generate();
+    const fetchImpl: typeof fetch = async () =>
+      new Response(
+        JSON.stringify({
+          challenge_cbor: mockChallengeB64,
+          state: "EVIL-INJECTED-STATE",
+          exp: 0,
+        }),
+        { status: 200, headers: { "content-type": "application/json" } }
+      );
+
+    await expect(
+      loginWithIdentity({
+        baseUrl: "https://srv",
+        clientId: "mnemonic-cli",
+        keypair: kp,
+        fetch: fetchImpl,
+      })
+    ).rejects.toMatchObject({
+      message: expect.stringMatching(/state mismatch/),
+    });
+  });
+
+  it("rejects when POST /oauth/authorize returns 401 (server pubkey mismatch)", async () => {
+    const kp = await Keypair.generate();
+    // Server expects a DIFFERENT pubkey, so the POST will 401.
+    const { fetchImpl } = buildMockOAuthServer("DIFFERENT_PUBKEY_xyz");
+
+    await expect(
+      loginWithIdentity({
+        baseUrl: "https://srv",
+        clientId: "mnemonic-cli",
+        keypair: kp,
+        fetch: fetchImpl,
+      })
+    ).rejects.toMatchObject({
+      message: expect.stringMatching(/authorize returned 401/),
     });
   });
 });

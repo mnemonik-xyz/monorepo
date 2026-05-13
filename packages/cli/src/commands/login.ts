@@ -1,9 +1,18 @@
-// `mnemonic login` — two paths:
+// `mnemonic login` — three paths:
 //
-//   default (interactive):  PKCE + loopback HTTP server bound to 127.0.0.1:0
-//                           (random port). Opens the system browser, awaits
-//                           a single callback, validates `state`, exchanges
-//                           the code for a JWT, persists.
+//   default (browserless):  loads `~/.mnemonic/identity.json`, signs the
+//                           server's PKCE challenge with the local Ed25519
+//                           keypair, exchanges for a JWT. No browser, no
+//                           loopback server, fully agent-friendly. `JWT.sub`
+//                           is `identity.pubkey_base58` by construction —
+//                           closes the identity-mismatch class of bugs that
+//                           the browser flow can introduce (issue #27).
+//   --browser:              legacy PKCE + loopback HTTP server bound to
+//                           127.0.0.1:0 (random port). Opens the system
+//                           browser, OAuth challenge is signed by the
+//                           webapp's localStorage keypair. Retained for
+//                           users who have already paired the CLI identity
+//                           against the webapp's localStorage key.
 //   --token <jwt>:          headless. Decodes header b64 to assert
 //                           `alg=HS256`, parses payload, asserts `exp` in
 //                           future, persists. No browser, no server.
@@ -23,16 +32,24 @@ import type { AddressInfo } from "node:net";
 import {
   buildAuthorizeUrl,
   exchangeCodeForToken,
+  loginWithIdentity,
   parseJwtPayload,
 } from "@mnemonik-xyz/sdk";
 
-import { identityExists, loadIdentityJson, saveToken } from "../config.js";
-import { AuthError, CliError, fromSdkError } from "../errors.js";
-import { format, hint, type OutputOptions } from "../output.js";
+import {
+  identityExists,
+  loadIdentity,
+  loadIdentityJson,
+  saveToken,
+} from "../config.js";
+import { AuthError, CliError, fromSdkError, UserError } from "../errors.js";
+import { format, hint, type OutputOptions, verbose } from "../output.js";
 
 export interface LoginOptions extends OutputOptions {
   token?: string;
   baseUrl?: string;
+  /** Opt-in to the legacy browser-mediated OAuth flow. */
+  browser?: boolean;
   /** Internal — disable the `open` browser launch (for tests). */
   noOpen?: boolean;
   /** Internal — override loopback timeout for tests (ms). */
@@ -51,7 +68,63 @@ export async function runLogin(opts: LoginOptions): Promise<void> {
     await runHeadless(opts.token, opts);
     return;
   }
-  await runInteractive(baseUrl, opts);
+  if (opts.browser) {
+    await runInteractive(baseUrl, opts);
+    return;
+  }
+  await runBrowserless(baseUrl, opts);
+}
+
+// ── browserless (default) ──────────────────────────────────────────────────
+
+/**
+ * Programmatic OAuth: sign the server's PKCE challenge with the local
+ * keypair, exchange for a JWT. No browser, no loopback server.
+ *
+ * Requires `~/.mnemonic/identity.json` to already exist — if it doesn't,
+ * direct the user at the three pairing paths (`init`, `identity import
+ * --ticket`, `identity import --file`).
+ */
+async function runBrowserless(
+  baseUrl: string,
+  opts: LoginOptions
+): Promise<void> {
+  if (!identityExists()) {
+    throw new UserError(
+      "no local identity — run one of:\n" +
+        "  • mnemonic init                              — generate a fresh CLI keypair\n" +
+        "  • mnemonic identity import --ticket <uuid>   — pair from the webapp ('Send to CLI')\n" +
+        "  • mnemonic identity import --file <path>     — import an existing keypair JSON\n" +
+        "  • mnemonic login --browser                   — fall back to the legacy browser flow"
+    );
+  }
+  const kp = await loadIdentity();
+  verbose(`base_url=${baseUrl}`, opts);
+  verbose(`signing OAuth challenge with local pubkey=${kp.pubkey}`, opts);
+
+  let result: { jwt: string; expiresAt: string; sub: string };
+  try {
+    result = await loginWithIdentity({
+      baseUrl,
+      clientId: CLIENT_ID,
+      keypair: kp,
+    });
+  } catch (e) {
+    throw fromSdkError(e);
+  }
+  verbose(`server returned JWT.sub=${result.sub}`, opts);
+
+  saveToken({
+    jwt: result.jwt,
+    expires_at: result.expiresAt,
+    sub: result.sub,
+  });
+
+  format(
+    { sub: result.sub, expires_at: result.expiresAt, mode: "browserless" },
+    opts,
+    () => `login OK\nsub: ${result.sub}\nexpires: ${result.expiresAt}`
+  );
 }
 
 // ── headless ────────────────────────────────────────────────────────────────

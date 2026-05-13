@@ -44,7 +44,7 @@
     "prepublishOnly": "npm run build && npm test"
   },
   "dependencies": {
-    "@mnemonik-xyz/sdk": "^0.1.4",
+    "@mnemonik-xyz/sdk": "^0.1.5",
     "commander": "^14.0.3",
     "kleur": "^4.1.5",
     "open": "^11.0.0"

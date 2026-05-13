@@ -13,6 +13,8 @@
 // issuing the HTTP request. A mismatch terminates the flow.
 
 import { AuthError } from "./errors.js";
+import type { Keypair } from "./keypair.js";
+import { loadWasm } from "./wasm.js";
 
 /** Module-level pending-auth-session store, keyed by `sessionId` (UUIDv4). */
 export interface PendingAuthSession {
@@ -394,6 +396,259 @@ export async function exchangeCodeForToken(
 
   deleteSession(sessionId);
   return { jwt, expiresAt };
+}
+
+// ── browserless (programmatic) OAuth ────────────────────────────────────────
+
+/**
+ * Sentinel loopback `redirect_uri` for the browserless flow. Never actually
+ * visited — the flow completes entirely over HTTP from the SDK process — but
+ * the server requires a value that passes the loopback allowlist
+ * (`mcp/src/oauth/mod.rs::is_loopback_redirect`). `127.0.0.1:1/cli` is on the
+ * allowlist (loopback host, all-digits port) and the path makes it clear in
+ * any server logs that the bind came from the CLI, not a real browser.
+ */
+export const BROWSERLESS_REDIRECT_URI = "http://127.0.0.1:1/cli";
+
+export interface LoginWithIdentityInput {
+  baseUrl: string;
+  clientId: string;
+  keypair: Keypair;
+  scope?: string;
+  /** Override the global fetch (testing). */
+  fetch?: typeof fetch;
+}
+
+export interface LoginWithIdentityResult {
+  jwt: string;
+  expiresAt: string;
+  sub: string;
+}
+
+/**
+ * Browserless OAuth login: sign the server's PKCE challenge with `keypair`
+ * directly, no browser, no localStorage. Headless agents, CI, and the CLI's
+ * default `mnemonic login` all use this path.
+ *
+ * Flow (issue #27 / bug 3 root-cause fix):
+ *   1. `GET  /oauth/authorize?...&pubkey=<base58>` with `Accept: application/json`
+ *      → server returns `{challenge_cbor, state, exp}` and binds the pending
+ *      entry to this pubkey (`expected_pubkey`), so the POST below cannot
+ *      slip in a different key.
+ *   2. Sign the raw challenge bytes with `keypair` via WASM `sign_challenge`
+ *      (64-byte Ed25519; **not** COSE — server expects raw since the
+ *      raw-signature refactor in PR #100).
+ *   3. `POST /oauth/authorize` with `{state, signature, signer_pubkey}`
+ *      → `{code, state, redirect_uri}`.
+ *   4. `POST /oauth/token` with `{code, code_verifier, redirect_uri}`
+ *      → JWT. By construction `JWT.sub === keypair.pubkey`.
+ *
+ * Compared to {@link buildAuthorizeUrl} + {@link exchangeCodeForToken}, this
+ * never delegates the signature to a browser's localStorage keypair, so
+ * `JWT.sub` is guaranteed to equal `keypair.pubkey`. That eliminates the
+ * identity-mismatch class of bugs (sign-callback 403 from `/api/sign-callback`
+ * when `pending.jwt_sub !== signer_pubkey`).
+ *
+ * @throws `AuthError` on network failure, non-2xx, malformed body, or a
+ *         server-side `signer_pubkey` mismatch.
+ */
+export async function loginWithIdentity(
+  input: LoginWithIdentityInput
+): Promise<LoginWithIdentityResult> {
+  const { baseUrl, clientId, keypair } = input;
+  const scope = input.scope ?? "mcp";
+  const doFetch = input.fetch ?? fetch;
+
+  const verifier = generatePkceVerifier();
+  const challenge = await pkceChallenge(verifier);
+  const state = randomState();
+  const pubkey = keypair.pubkey;
+
+  // 1. GET /oauth/authorize — programmatic mode (Accept: application/json
+  //    + pubkey query). Server returns the canonical-CBOR challenge bytes,
+  //    binds `expected_pubkey` to ours, parks a pending entry under `state`.
+  const initUrl = new URL("/oauth/authorize", baseUrl);
+  initUrl.searchParams.set("response_type", "code");
+  initUrl.searchParams.set("client_id", clientId);
+  initUrl.searchParams.set("redirect_uri", BROWSERLESS_REDIRECT_URI);
+  initUrl.searchParams.set("code_challenge", challenge);
+  initUrl.searchParams.set("code_challenge_method", "S256");
+  initUrl.searchParams.set("state", state);
+  initUrl.searchParams.set("scope", scope);
+  initUrl.searchParams.set("pubkey", pubkey);
+
+  let initRes: Response;
+  try {
+    initRes = await doFetch(initUrl.toString(), {
+      method: "GET",
+      headers: { Accept: "application/json" },
+    });
+  } catch (cause) {
+    throw new AuthError("oauth: authorize-init unreachable", cause);
+  }
+  if (!initRes.ok) {
+    throw new AuthError(
+      `oauth: authorize-init returned ${initRes.status}`,
+      undefined
+    );
+  }
+  let initBody: unknown;
+  try {
+    initBody = await initRes.json();
+  } catch (cause) {
+    throw new AuthError("oauth: authorize-init returned non-JSON body", cause);
+  }
+  if (!initBody || typeof initBody !== "object") {
+    throw new AuthError("oauth: authorize-init returned malformed body");
+  }
+  const initObj = initBody as {
+    challenge_cbor?: unknown;
+    state?: unknown;
+    exp?: unknown;
+  };
+  if (typeof initObj.challenge_cbor !== "string") {
+    throw new AuthError("oauth: authorize-init missing `challenge_cbor`");
+  }
+  if (initObj.state !== state) {
+    throw new AuthError("oauth: authorize-init state mismatch");
+  }
+  const challengeBytes = base64StdToBytes(initObj.challenge_cbor);
+
+  // 2. Sign the raw bytes with the local keypair via WASM.
+  const wasm = await loadWasm();
+  let sig: Uint8Array;
+  try {
+    sig = wasm.sign_challenge(keypair.toJSON(), challengeBytes);
+  } catch (cause) {
+    throw new AuthError("oauth: sign_challenge failed", cause);
+  }
+  if (!(sig instanceof Uint8Array) || sig.length !== 64) {
+    throw new AuthError(
+      `oauth: sign_challenge returned ${sig?.length ?? "?"} bytes (expected 64)`
+    );
+  }
+  const sigB64 = bytesToBase64Std(sig);
+
+  // 3. POST /oauth/authorize — server verifies sig, pops pending, issues code.
+  const authorizeUrl = new URL("/oauth/authorize", baseUrl).toString();
+  let postRes: Response;
+  try {
+    postRes = await doFetch(authorizeUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        state,
+        signature: sigB64,
+        signer_pubkey: pubkey,
+      }),
+    });
+  } catch (cause) {
+    throw new AuthError("oauth: authorize unreachable", cause);
+  }
+  if (!postRes.ok) {
+    throw new AuthError(`oauth: authorize returned ${postRes.status}`);
+  }
+  let postBody: unknown;
+  try {
+    postBody = await postRes.json();
+  } catch (cause) {
+    throw new AuthError("oauth: authorize returned non-JSON body", cause);
+  }
+  if (!postBody || typeof postBody !== "object") {
+    throw new AuthError("oauth: authorize returned malformed body");
+  }
+  const postObj = postBody as {
+    code?: unknown;
+    state?: unknown;
+    redirect_uri?: unknown;
+  };
+  if (typeof postObj.code !== "string" || postObj.code.length === 0) {
+    throw new AuthError("oauth: authorize did not return `code`");
+  }
+  if (postObj.state !== state) {
+    throw new AuthError("oauth: authorize echoed wrong state");
+  }
+  const code = postObj.code;
+  // Use the server-echoed redirect_uri on /token (it is the value the server
+  // bound at bootstrap; passing it explicitly closes RFC 6749 §4.1.3).
+  const redirectUri =
+    typeof postObj.redirect_uri === "string"
+      ? postObj.redirect_uri
+      : BROWSERLESS_REDIRECT_URI;
+
+  // 4. POST /oauth/token — exchange code for JWT.
+  const tokenUrl = new URL("/oauth/token", baseUrl).toString();
+  let tokenRes: Response;
+  try {
+    tokenRes = await doFetch(tokenUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        grant_type: "authorization_code",
+        code,
+        code_verifier: verifier,
+        redirect_uri: redirectUri,
+        client_id: clientId,
+      }),
+    });
+  } catch (cause) {
+    throw new AuthError("oauth: token endpoint unreachable", cause);
+  }
+  if (!tokenRes.ok) {
+    throw new AuthError(`oauth: token endpoint returned ${tokenRes.status}`);
+  }
+  let tokenBody: unknown;
+  try {
+    tokenBody = await tokenRes.json();
+  } catch (cause) {
+    throw new AuthError("oauth: token endpoint returned non-JSON body", cause);
+  }
+  if (!tokenBody || typeof tokenBody !== "object") {
+    throw new AuthError("oauth: token endpoint returned malformed body");
+  }
+  const tokObj = tokenBody as {
+    access_token?: unknown;
+    jwt?: unknown;
+    expires_in?: unknown;
+    expires_at?: unknown;
+  };
+  const jwt =
+    typeof tokObj.access_token === "string"
+      ? tokObj.access_token
+      : typeof tokObj.jwt === "string"
+      ? tokObj.jwt
+      : "";
+  if (!jwt) {
+    throw new AuthError("oauth: token endpoint returned malformed body");
+  }
+  let expiresAt: string;
+  if (typeof tokObj.expires_in === "number" && Number.isFinite(tokObj.expires_in)) {
+    expiresAt = new Date(Date.now() + tokObj.expires_in * 1000).toISOString();
+  } else if (typeof tokObj.expires_at === "string") {
+    expiresAt = tokObj.expires_at;
+  } else {
+    expiresAt = new Date(Date.now() + 3600 * 1000).toISOString();
+  }
+
+  // `sub` is guaranteed to equal `keypair.pubkey` by construction
+  // (the server bound `expected_pubkey = pubkey` at GET-time and asserted
+  // `signer_pubkey == expected_pubkey` at POST-time before issuing the code).
+  return { jwt, expiresAt, sub: pubkey };
+}
+
+/** Standard base64 (with padding) → bytes. Distinct from `base64url`. */
+function base64StdToBytes(b64: string): Uint8Array {
+  const bin = atob(b64);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
+/** bytes → standard base64 (with padding). Matches what the server expects. */
+function bytesToBase64Std(bytes: Uint8Array): string {
+  let bin = "";
+  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]!);
+  return btoa(bin);
 }
 
 // ── JWT payload parsing (no signature verification) ─────────────────────────
