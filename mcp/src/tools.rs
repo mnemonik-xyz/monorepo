@@ -202,9 +202,17 @@ async fn sign_memory_deferred(
 /// unauthenticated agent where to send the user to authorize.
 ///
 /// When `jwt_sub` is present (caller did include a Bearer JWT), the tool
-/// reports the authenticated identity. When absent, it returns the install
-/// URL the agent should surface in chat as a clickable link, plus a fallback
-/// for agents that prefer the CLI path.
+/// reports the authenticated identity. When absent, it returns per-client
+/// paths the agent can render so the user can complete authorization.
+///
+/// The response is intentionally structured with `client_paths`: every
+/// supported chat / IDE has its own reconnect ritual (Claude.ai needs the
+/// Settings → Connectors → Disconnect/Reconnect dance because its OAuth
+/// only auto-fires on first install; Cursor / VS Code can use a deeplink;
+/// ChatGPT custom-GPTs need a manual JWT). A one-size-fits-all `install_url`
+/// is misleading for Claude.ai users — the install page assumes a fresh
+/// connector add, but in this flow the connector ALREADY exists and just
+/// needs to be re-authorized.
 pub fn mcp_auth(jwt_sub: Option<&str>) -> serde_json::Value {
     if let Some(sub) = jwt_sub {
         return serde_json::json!({
@@ -221,22 +229,77 @@ pub fn mcp_auth(jwt_sub: Option<&str>) -> serde_json::Value {
     }
     serde_json::json!({
         "status": "unauthorized",
+        // `install_url` is preserved for back-compat (existing E2E + tool
+        // description reference it). Agents SHOULD prefer rendering the
+        // `client_paths` entry that matches the chat/IDE they are running
+        // in — see below.
         "install_url": "https://mnemonik.xyz/install",
         "instructions": "This Mnemonic MCP connection is not yet authorized. \
-                         To authorize, click the install_url above — it routes \
-                         through your IDE's MCP install handler, which will \
-                         (re)trigger the OAuth login flow. A browser tab pops \
-                         up to mnemonik.xyz to approve, then all Mnemonic \
-                         tools become available in this chat. The OAuth flow \
-                         signs a one-time challenge with your local Ed25519 \
-                         keypair (kept in your browser's localStorage); the \
-                         server never sees the secret.",
-        "alternative_cli": "If the install URL does not trigger the IDE's auth \
-                            flow, run `npx @mnemonik-xyz/cli init && npx \
+                         Pick the path below that matches the chat/IDE you're \
+                         running in — they are NOT interchangeable. Claude.ai \
+                         in particular does NOT re-trigger OAuth from a 401: \
+                         the user must manually Disconnect & Reconnect the \
+                         Mnemonic connector in Settings → Connectors. The \
+                         install_url only helps if Mnemonic is not yet added \
+                         as a connector at all.",
+        "client_paths": {
+            "claude_ai": {
+                "title": "Claude.ai chat (claude.ai / Claude desktop / Claude mobile)",
+                "reconnect_url": "https://claude.ai/settings/connectors",
+                "steps": [
+                    "Open https://claude.ai/settings/connectors in your browser.",
+                    "Find 'Mnemonic' in the list. If it is not there yet, click 'Add custom connector' and paste https://mcp.mnemonik.xyz/mcp as the URL, then continue.",
+                    "Click 'Disconnect' on the Mnemonic row, then click 'Connect' again. (Claude.ai only triggers OAuth on Connect — it does NOT auto-retry on 401.)",
+                    "A browser tab opens to mnemonik.xyz to approve. Your local Ed25519 keypair (kept in mnemonik.xyz localStorage) signs a one-time challenge; the server never sees the secret.",
+                    "Return to this chat and ask again — Mnemonic tools will now work."
+                ],
+                "note": "Do NOT just click the install_url and 'Add to Claude.ai' — that flow assumes Mnemonic is not yet installed and shows a copy-the-URL modal. If you are already in a Claude.ai chat where the agent called mcp_auth, the connector IS installed; the issue is that it is not currently connected. Disconnect/Reconnect is the only fix."
+            },
+            "cursor": {
+                "title": "Cursor (3.2+)",
+                "reconnect_url": "https://mnemonik.xyz/install",
+                "steps": [
+                    "Click https://mnemonik.xyz/install (or render it as a clickable link in chat).",
+                    "Click 'Install in Cursor' — Cursor's deeplink handler opens the MCP install dialog with the OAuth flow pre-wired.",
+                    "Approve the install, then complete OAuth in the popup browser window.",
+                    "Return to chat and retry — tools are now authorized."
+                ]
+            },
+            "vscode": {
+                "title": "VS Code (1.93+) with GitHub Copilot",
+                "reconnect_url": "https://mnemonik.xyz/install",
+                "steps": [
+                    "Click https://mnemonik.xyz/install.",
+                    "Click 'Install in VS Code' — the vscode:mcp/install deeplink opens the MCP install dialog.",
+                    "Accept the Mnemonic MCP server. OAuth fires on the first tool call after install.",
+                    "Return to chat and retry."
+                ]
+            },
+            "chatgpt": {
+                "title": "ChatGPT custom GPT / Actions",
+                "reconnect_url": "https://mnemonik.xyz/install",
+                "steps": [
+                    "ChatGPT's custom-GPT MCP support does not auto-trigger OAuth. Run `npx @mnemonik-xyz/cli init && npx @mnemonik-xyz/cli login` in a terminal to mint a JWT.",
+                    "Paste the JWT into your custom-GPT's Action authentication as `Authorization: Bearer <jwt>`.",
+                    "Save the GPT config and retry."
+                ]
+            },
+            "other": {
+                "title": "Other / unknown MCP client",
+                "reconnect_url": "https://mnemonik.xyz/install",
+                "steps": [
+                    "If your client supports the MCP OAuth flow, removing and re-adding the https://mcp.mnemonik.xyz/mcp server will trigger it.",
+                    "Otherwise, fall back to the CLI: `npx @mnemonik-xyz/cli init && npx @mnemonik-xyz/cli login`, then add `Authorization: Bearer <jwt>` to the server config."
+                ]
+            }
+        },
+        "alternative_cli": "Last-resort fallback for clients without an OAuth \
+                            UI: run `npx @mnemonik-xyz/cli init && npx \
                             @mnemonik-xyz/cli login` in a terminal, then paste \
-                            the resulting JWT into your IDE's MCP server \
-                            configuration as `Authorization: Bearer <jwt>` \
-                            headers.",
+                            the resulting JWT into your MCP client's server \
+                            config as `Authorization: Bearer <jwt>`. Note: \
+                            Claude.ai's connector UI does NOT accept a custom \
+                            Bearer header — this path is for IDE configs only.",
         "discord": "https://discord.gg/ws6wruJj",
     })
 }
@@ -818,5 +881,91 @@ mod sign_memory_tests {
         assert!(result["content_hash"].is_string());
         let s = store.lock().unwrap();
         assert_eq!(s.count(&owner).unwrap(), 1);
+    }
+}
+
+#[cfg(test)]
+mod mcp_auth_tests {
+    //! Coverage for `mcp_auth` — the bridge tool that tells unauthenticated
+    //! MCP callers where to authorize. The structure of the unauthorized
+    //! response is part of the contract: the agent renders these fields
+    //! verbatim, so changes here are user-visible.
+
+    use super::*;
+
+    #[test]
+    fn authenticated_branch_returns_sub_and_did() {
+        let v = mcp_auth(Some("user-pubkey-123"));
+        assert_eq!(v["status"], "authenticated");
+        assert_eq!(v["sub"], "user-pubkey-123");
+        assert_eq!(v["did"], "did:sol:user-pubkey-123");
+        assert!(v["hint"].as_str().unwrap().contains("user-pubkey-123"));
+    }
+
+    #[test]
+    fn unauthorized_branch_has_legacy_back_compat_fields() {
+        let v = mcp_auth(None);
+        assert_eq!(v["status"], "unauthorized");
+        // E2E mcp-auth-tool.spec.ts asserts these exact fields — guard
+        // against accidental rename / removal.
+        assert_eq!(v["install_url"], "https://mnemonik.xyz/install");
+        assert!(v["instructions"].as_str().unwrap().len() > 50);
+        assert!(v["alternative_cli"].is_string());
+    }
+
+    #[test]
+    fn unauthorized_branch_includes_all_client_paths() {
+        let v = mcp_auth(None);
+        let paths = &v["client_paths"];
+        assert!(paths.is_object(), "client_paths must be a map");
+        for key in ["claude_ai", "cursor", "vscode", "chatgpt", "other"] {
+            let entry = &paths[key];
+            assert!(entry.is_object(), "client_paths.{key} missing");
+            assert!(
+                entry["title"]
+                    .as_str()
+                    .map(|s| !s.is_empty())
+                    .unwrap_or(false),
+                "client_paths.{key}.title must be non-empty string"
+            );
+            let steps = entry["steps"]
+                .as_array()
+                .unwrap_or_else(|| panic!("client_paths.{key}.steps must be an array"));
+            assert!(
+                !steps.is_empty(),
+                "client_paths.{key}.steps must not be empty"
+            );
+        }
+    }
+
+    #[test]
+    fn claude_ai_path_points_to_connectors_ui_and_says_reconnect() {
+        // This is the regression-guard for the original bug: a Claude.ai
+        // user whose connector exists-but-is-unauthorized was being told to
+        // visit mnemonik.xyz/install, which does not help them. The
+        // claude_ai path MUST send them to the connectors UI and explain
+        // the Disconnect/Reconnect dance.
+        let v = mcp_auth(None);
+        let c = &v["client_paths"]["claude_ai"];
+        assert_eq!(
+            c["reconnect_url"], "https://claude.ai/settings/connectors",
+            "claude_ai.reconnect_url must point at the connectors UI"
+        );
+        let steps_joined = c["steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|s| s.as_str())
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_lowercase();
+        assert!(
+            steps_joined.contains("disconnect"),
+            "claude_ai steps must mention Disconnect: {steps_joined}"
+        );
+        assert!(
+            steps_joined.contains("connect"),
+            "claude_ai steps must mention Connect: {steps_joined}"
+        );
     }
 }

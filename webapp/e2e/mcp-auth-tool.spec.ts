@@ -121,6 +121,45 @@ test("mcp_auth callable WITHOUT JWT — returns unauthorized + install_url", asy
   expect(payload.instructions.length).toBeGreaterThan(50);
 });
 
+test("mcp_auth unauthorized response includes per-client reconnect paths", async ({
+  request,
+}) => {
+  // Regression guard: the single `install_url` is misleading for Claude.ai
+  // users, whose connector OAuth only re-fires on Settings → Connectors →
+  // Disconnect/Reconnect (not on the install page). The response must carry
+  // a structured `client_paths` map so the agent can render the right path
+  // for the chat / IDE it is running in.
+  const r = await request.post(`${mcpBase()}/mcp`, {
+    headers: { "content-type": "application/json" },
+    data: {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "tools/call",
+      params: { name: "mcp_auth", arguments: {} },
+    },
+  });
+  expect(r.status()).toBe(200);
+  const payload = JSON.parse((await r.json()).result.content[0].text);
+
+  expect(payload.client_paths).toBeTruthy();
+  for (const key of ["claude_ai", "cursor", "vscode", "chatgpt", "other"]) {
+    expect(payload.client_paths[key], `missing client_paths.${key}`).toBeTruthy();
+    expect(typeof payload.client_paths[key].title).toBe("string");
+    expect(Array.isArray(payload.client_paths[key].steps)).toBe(true);
+    expect(payload.client_paths[key].steps.length).toBeGreaterThan(0);
+  }
+
+  // Claude.ai branch must point at the connectors UI, NOT the install page —
+  // that's the whole bug this regression test exists to prevent.
+  expect(payload.client_paths.claude_ai.reconnect_url).toBe(
+    "https://claude.ai/settings/connectors"
+  );
+  const claudeJoined =
+    payload.client_paths.claude_ai.steps.join(" ").toLowerCase();
+  expect(claudeJoined).toContain("disconnect");
+  expect(claudeJoined).toContain("connect");
+});
+
 test("non-allowlisted tools/call still 401s without JWT", async ({
   request,
 }) => {

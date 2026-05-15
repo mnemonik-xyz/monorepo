@@ -33,6 +33,53 @@ export default function Install() {
         </div>
 
         <section
+          aria-labelledby="claude-reconnect"
+          className="space-y-3 rounded-md border border-accent-primary/40 bg-accent-primary/5 p-4"
+          data-testid="claude-reconnect"
+        >
+          <h2
+            id="claude-reconnect"
+            className="text-base font-semibold text-text-primary"
+          >
+            Already in Claude.ai chat and seeing &ldquo;not authorized&rdquo;?
+          </h2>
+          <p className="text-sm text-text-muted">
+            The buttons above only help <em>add</em> Mnemonic as a connector
+            for the first time. Claude.ai does <strong>not</strong> re-trigger
+            OAuth automatically on a 401 — if the Mnemonic connector is
+            already in your list but the chat says it can&rsquo;t sign, you
+            need to <strong>Disconnect</strong> it and{" "}
+            <strong>Connect</strong> again. That&rsquo;s what makes the
+            browser tab pop up with the challenge.
+          </p>
+          <ol className="space-y-1 text-sm text-text-muted">
+            <li>
+              1. Open{" "}
+              <a
+                href="https://claude.ai/settings/connectors"
+                target="_blank"
+                rel="noreferrer"
+                className="font-mono text-accent-primary underline"
+              >
+                claude.ai/settings/connectors
+              </a>
+              .
+            </li>
+            <li>2. Find &ldquo;Mnemonic&rdquo; in the list.</li>
+            <li>
+              3. Click <span className="text-text-primary">Disconnect</span>,
+              then click <span className="text-text-primary">Connect</span>{" "}
+              again.
+            </li>
+            <li>
+              4. A browser tab opens to mnemonik.xyz — approve there with the
+              keypair shown above.
+            </li>
+            <li>5. Return to your Claude.ai chat and retry.</li>
+          </ol>
+        </section>
+
+        <section
           aria-labelledby="install-instructions"
           className="space-y-4"
           data-testid="install-instructions"
