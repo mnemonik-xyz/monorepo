@@ -114,7 +114,7 @@ signed artifact + capability token
 
 The two pipelines compose: an artifact signed in one runtime is the input to a share/rehydrate flow that hands it to another, and both flows verify the same canonical bytes against the same producer identity. This composition is what gives the protocol portable memory as a property rather than as an aspiration.
 
-Compression of embeddings serves portability and durable-storage anchoring, not the local recall path: shrinking embeddings keeps artifact metadata cheap to carry across systems and to anchor. The specific compression scheme, bit width, and recall implementation are documented separately as implementation choices.
+Compression of embeddings serves portability and durable-storage anchoring, not the local recall path: shrinking embeddings keeps artifact metadata cheap to carry across systems and to anchor. The reference implementation uses TurboQuant scalar quantization [[1]](#ref-1); the specific scheme, bit width, and recall implementation are documented separately as implementation choices.
 
 ## 5. Architecture Overview
 
@@ -309,7 +309,7 @@ This model lets Mnemonic evolve beyond single memory items into a general attest
 
 ## 7. Memory Composition and Sharing
 
-The artifact model in §6 gives a single signed memory its shape. §7 specifies how those artifacts compose into multi-runtime workflows: how cognitive role drives per-kind semantics, how access is scoped via capability tokens, how memory crosses trust boundaries through a defined handshake, and how it enters a target runtime through a rehydration pipeline that includes safe-injection framing. The whitepaper states the protocol-level claims; structures, exchange details, stage interfaces, and marker grammars are specified in [docs/spec/memory-composition.md](./spec/memory-composition.md).
+The artifact model in §6 gives a single signed memory its shape. §7 specifies how those artifacts compose into multi-runtime workflows: how cognitive role drives per-kind semantics, how access is scoped via capability tokens, how memory crosses trust boundaries through a defined handshake, and how it enters a target runtime through a rehydration pipeline that includes safe-injection framing [[3]](#ref-3). The whitepaper states the protocol-level claims; structures, exchange details, stage interfaces, and marker grammars are specified in [docs/spec/memory-composition.md](./spec/memory-composition.md).
 
 ### 7.1 Cognitive Typing
 
@@ -438,7 +438,7 @@ Mnemonic sits at the intersection of:
 - verifiable computation
 - machine-native payments
 
-The closest research and product directions include decentralized RAG, trustless agentic memory, ZK embedding proofs, verifiable ANN retrieval, and source reliability oracles. Mnemonic's current bet is pragmatic: hash commitments and signed artifacts are cheaper and deployable today, while ZK embedding or retrieval proofs remain credible future extensions.
+The closest research and product directions include decentralized RAG, trustless agentic memory and cryptographically-verified memory transfer [[3]](#ref-3), ZK embedding proofs, verifiable ANN retrieval (including the inverted-file cascade approach in [[2]](#ref-2)), embedding quantization with bounded distortion [[1]](#ref-1), and source reliability oracles. Mnemonic's current bet is pragmatic: hash commitments and signed artifacts are cheaper and deployable today, while ZK embedding or retrieval proofs remain credible future extensions.
 
 ## 12. Current Implementation Status
 
@@ -562,9 +562,14 @@ The long-term goal is broader: memory that agents can own, share, pay for, audit
 
 ## References
 
+<a id="ref-1"></a>
 1. Zandieh, A. and Mirrokni, V. *TurboQuant: Online Vector Quantization with Near-Optimal Distortion Rate.*
-2. *Sublinear Verifiable Recall: An Inverted-File Cascade for Compressed Embedding Retrieval in the Mnemonic Protocol.* https://www.researchgate.net/publication/404381758_Sublinear_Verifiable_Recall_An_Inverted-File_Cascade_for_Compressed_Embedding_Retrieval_in_the_Mnemonic_Protocol
-3. *Portable Agent Memory: A Protocol for Cryptographically-Verified Memory Transfer Across Heterogeneous AI Agents.* arXiv:2605.11032. https://arxiv.org/abs/2605.11032
+
+<a id="ref-2"></a>
+2. *[Sublinear Verifiable Recall: An Inverted-File Cascade for Compressed Embedding Retrieval in the Mnemonic Protocol](https://www.researchgate.net/publication/404381758_Sublinear_Verifiable_Recall_An_Inverted-File_Cascade_for_Compressed_Embedding_Retrieval_in_the_Mnemonic_Protocol).*
+
+<a id="ref-3"></a>
+3. *[Portable Agent Memory: A Protocol for Cryptographically-Verified Memory Transfer Across Heterogeneous AI Agents](https://arxiv.org/abs/2605.11032).* arXiv:2605.11032.
 
 ---
 
