@@ -62,27 +62,36 @@ A verifiable agent memory system needs the following properties:
 
 ## 3. Design Goals
 
-Mnemonic is designed around the following goals:
+Mnemonic is designed around protocol-level goals that hold across every deployment, and forward goals that extend the protocol over time. The split between the two is deliberate: the current section describes properties any compliant Mnemonic deployment must provide; the forward section names everything else explicitly, so the gap between specification and current implementation stays honest. Concrete implementation status lives in §11; specific backend choices, parameters, and costs live in companion documents.
 
-### 3.1 Current Implementation Goals
+### 3.1 Protocol Goals
 
-- Provide a working MCP server that existing agent clients can use today.
-- Support local development with no blockchain dependency.
-- Produce deterministic, typed, signed artifacts using canonical CBOR and COSE_Sign1.
-- Use blake3 hashes over canonical artifact bytes for current artifacts.
-- Store searchable local state in SQLite.
-- Support optional full-mode persistence through Arweave and Solana.
-- Keep verification available as a first-class operation.
+These goals are protocol commitments, not implementation choices. They hold whether the backend is local, hosted, on-chain, or hybrid, and whether any specific operator is running or not.
 
-### 3.2 Protocol Roadmap Goals
+- **Typed, signed, content-addressed artifacts.** Memory is encoded deterministically, hashed by content, and signed by the operator's cryptographic identity (see §5.1).
+- **Cognitive typing.** Memory artifacts declare a kind — episodic, semantic, procedural, working, or identity — and per-kind semantics apply downstream (see §7.1).
+- **Lineage as a first-class structure.** Parent–child relationships across artifacts are content-addressed, verifiable, and traversable, supporting provenance audits and Merkle-batched anchoring (see §5.5.1).
+- **Storage-agnostic protocol layer.** Authorship, integrity, lineage, and authorization hold regardless of which backend stores the bytes (see §5.2).
+- **Anchoring as a separable property.** Third-party timestamp is an opt-in addition over signature-based authorship and integrity, not a baseline requirement (see §5.5).
+- **Capability-scoped sharing.** Cross-runtime access to memory is authorized by signed, scoped, revocable capability tokens (see §7.2).
+- **Safe rehydration across runtimes.** Memory entering a target runtime traverses a defined verify → filter → rank → compress → format → frame → inject pipeline that prevents memory-mediated prompt injection (see §7.4, §7.5).
+- **Free verification.** Any party may verify any artifact they hold, with no operator gate (see §5.6.1).
+- **Free self-hosting.** Any operator may run a complete node and participate in the protocol without paying any other operator (see §5.6.1).
+- **Operator pluralism.** No operator is structurally privileged; verification is independent of which operator produced or stored the artifact (see §5.6.3).
 
-- Make memory portable across models, providers, agents, and hosts.
-- Support shared project memory namespaces for multi-agent workflows.
-- Extend memory records into provenance attestations for artifacts and decisions.
-- Provide settlement-aware memory infrastructure that agents can pay for directly.
-- Add stronger privacy, lifecycle, and multi-writer semantics before broad multi-party deployment.
-- Ship core protocol primitives as both a native Rust crate and a WebAssembly module, so identical verification logic runs in servers, browsers, and embedded agents.
-- Provide a browser-based demo client that recalls and verifies signed memory artifacts without a server dependency.
+### 3.2 Forward Goals
+
+These goals extend the protocol beyond its v1 scope.
+
+- Multi-operator shared memory across organizational boundaries, including discovery, cross-identity registries, and shared-namespace authorization semantics.
+- Stronger privacy primitives, including end-to-end encrypted snapshots and key recovery.
+- Lifecycle policy: pruning, compaction, retention classes, deletion, and export.
+- Provenance attestations extended beyond memory items into broader agent-workflow artifacts.
+- Settlement-aware memory infrastructure with mature agent-payable flows.
+- Reliability scoring backed by contribution history.
+- ZK proofs of embedding and retrieval correctness.
+- Portable core primitives shipped as both a native Rust crate and a WebAssembly module, so identical verification logic runs in servers, browsers, and embedded agents.
+- A browser-based demo client that recalls and verifies signed memory artifacts without a server dependency.
 
 ## 4. Core Insight
 
