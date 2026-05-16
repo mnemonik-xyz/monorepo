@@ -337,24 +337,31 @@ The portability claim composes the prior subsections. A signed artifact whose au
 
 ## 8. Trust Model
 
-Mnemonic currently guarantees:
+Mnemonic's trust model separates what the protocol guarantees from what it does not. The guarantees rest on signatures and canonical encoding alone; backend choices, anchoring, and capability tokens are layered above to add third-party timestamp, scoped sharing, and auditable transfer. Everything outside the guarantee list is explicitly out of scope for v1.
 
-- **Integrity:** current artifacts are hashed over canonical CBOR bytes.
-- **Authorship:** artifacts are signed by an Ed25519 identity.
-- **Local verifiability:** local-mode records can be checked against SQLite state.
-- **External verifiability:** full-mode records can be checked against persisted artifacts and chain anchors when available.
-- **Version awareness:** current CBOR+COSE artifacts and legacy JSON/SHA-256 artifacts are handled separately.
+The protocol guarantees:
 
-Mnemonic does not yet guarantee:
+- **Integrity** — artifacts are content-addressed over canonical encoded bytes; tampering after signing is detectable by anyone holding the artifact.
+- **Authorship** — artifacts are signed by an Ed25519 operator identity; the producer is independently verifiable.
+- **Lineage verifiability** — parent–child relationships across artifacts are content-addressed; tampering with any artifact in a lineage chain breaks the chain up to the root.
+- **Backend-independent verification** — verification holds regardless of which backend served the bytes. The same artifact retrieved from a local index, from a content-addressed network, or after on-chain anchoring returns the same authorship and integrity result.
+- **Optional third-party timestamp** — when an anchor is requested, existence at or before the anchor time is verifiable by any party that does not trust the operator (§5.6).
+- **Capability-scoped sharing** — cross-runtime access is authorized by signed, scoped, revocable capability tokens; receivers can independently verify the authorization chain (§7.2).
+- **Auditable transfer** — the sharing handshake produces a co-signed share receipt anchored in the lineage DAG; the share event itself is an attestable artifact (§7.3).
+- **Safe-injection contract** — retrieved memory is wrapped in markers that declare provenance and posture; the contract is honored when target runtimes publish framing-compliance attestations (§7.5).
+- **Free verification** — verification requires no operator service, no account, and no permission (§5.7.1).
 
-- End-to-end encryption in the active MCP sign/verify path.
-- Correctness of the memory content itself.
-- Completeness of an agent's memory history.
-- ZK proof that an embedding was computed faithfully.
-- ZK proof that a retrieval result is the true top-k from a committed corpus.
-- Safe multi-party shared memory semantics.
+The protocol does not guarantee:
 
-These limitations are intentional to state clearly: Mnemonic V1 prioritizes practical memory integrity and provenance before more expensive proof systems.
+- **Correctness of memory content** — the protocol verifies who wrote what and when, not whether the content is true.
+- **Completeness of memory history** — operators may sign a subset of their state; the protocol does not detect selective omission.
+- **At-rest encryption of memory content** — the canonical artifact format is plaintext under the operator's signature; transport encryption is provided by the sharing handshake (§7.3), but at-rest encryption is an operator-level concern.
+- **Receiving-runtime safety beyond the framing contract** — if a target runtime does not honor framing markers, the protocol cannot prevent memory-mediated prompt injection unilaterally. Compliance is observable via the target runtime's framing-compliance attestation.
+- **Concurrent multi-writer shared namespaces** — the protocol authorizes pairwise transfers via capability tokens, but does not yet specify conflict resolution, ordering, or convergence semantics for namespaces with multiple concurrent writers.
+- **ZK proofs of embedding correctness** — there is no protocol-level proof that an embedding was computed faithfully from the claimed content under the claimed model.
+- **ZK proofs of retrieval correctness** — there is no protocol-level proof that a returned top-k is the true top-k against a committed corpus.
+
+These boundaries are intentional. The v1 protocol commits only to what signatures and canonical encoding can enforce, plus what capability tokens and the sharing handshake can authorize and attest. ZK proofs of computation, multi-writer convergence, and at-rest encryption are credible extensions, but they add cost and complexity that the v1 scope deliberately defers (§15 Roadmap).
 
 ## 9. Positioning In The Agent Stack
 
