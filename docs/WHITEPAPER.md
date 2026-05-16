@@ -563,7 +563,7 @@ The long-term goal is broader: memory that agents can own, share, pay for, audit
 ## References
 
 <a id="ref-1"></a>
-1. Zandieh, A. and Mirrokni, V. *TurboQuant: Online Vector Quantization with Near-Optimal Distortion Rate.*
+1. Zandieh, A. and Mirrokni, V. *[TurboQuant: Online Vector Quantization with Near-Optimal Distortion Rate](https://arxiv.org/abs/2504.19874).* arXiv:2504.19874.
 
 <a id="ref-2"></a>
 2. *[Sublinear Verifiable Recall: An Inverted-File Cascade for Compressed Embedding Retrieval in the Mnemonic Protocol](https://www.researchgate.net/publication/404381758_Sublinear_Verifiable_Recall_An_Inverted-File_Cascade_for_Compressed_Embedding_Retrieval_in_the_Mnemonic_Protocol).*
