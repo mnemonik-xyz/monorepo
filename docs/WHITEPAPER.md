@@ -60,13 +60,9 @@ A verifiable agent memory system needs the following properties:
 - **Safe injection across runtimes:** transferred memory enters target runtimes through a defined pipeline that prevents memory-mediated prompt injection.
 - **Economic viability:** storage and verification costs remain low enough for real agent workflows, and verification in particular remains free by design.
 
-## 3. Design Goals
+## 3. Protocol Contract
 
-Mnemonic is designed around protocol-level goals that hold across every deployment, and forward goals that extend the protocol over time. The split between the two is deliberate: the current section describes properties any compliant Mnemonic deployment must provide; the forward section names everything else explicitly, so the gap between specification and current implementation stays honest. Concrete implementation status lives in §11; specific backend choices, parameters, and costs live in companion documents.
-
-### 3.1 Protocol Goals
-
-These goals are protocol commitments, not implementation choices. They hold whether the backend is local, hosted, on-chain, or hybrid, and whether any specific operator is running or not.
+This section enumerates the protocol-level invariants that any compliant Mnemonic deployment must provide. They are protocol commitments, not implementation choices: they hold whether the backend is local, hosted, on-chain, or hybrid, and whether any specific operator is running or not. Concrete implementation status is in §11; specific backend choices, parameters, and costs are in companion documents.
 
 - **Typed, signed, content-addressed artifacts.** Memory is encoded deterministically, hashed by content, and signed by the operator's cryptographic identity (see §5.1).
 - **Cognitive typing.** Memory artifacts declare a kind — episodic, semantic, procedural, working, or identity — and per-kind semantics apply downstream (see §7.1).
@@ -79,19 +75,7 @@ These goals are protocol commitments, not implementation choices. They hold whet
 - **Free self-hosting.** Any operator may run a complete node and participate in the protocol without paying any other operator (see §5.6.1).
 - **Operator pluralism.** No operator is structurally privileged; verification is independent of which operator produced or stored the artifact (see §5.6.3).
 
-### 3.2 Forward Goals
-
-These goals extend the protocol beyond its v1 scope.
-
-- Multi-operator shared memory across organizational boundaries, including discovery, cross-identity registries, and shared-namespace authorization semantics.
-- Stronger privacy primitives, including end-to-end encrypted snapshots and key recovery.
-- Lifecycle policy: pruning, compaction, retention classes, deletion, and export.
-- Provenance attestations extended beyond memory items into broader agent-workflow artifacts.
-- Settlement-aware memory infrastructure with mature agent-payable flows.
-- Reliability scoring backed by contribution history.
-- ZK proofs of embedding and retrieval correctness.
-- Portable core primitives shipped as both a native Rust crate and a WebAssembly module, so identical verification logic runs in servers, browsers, and embedded agents.
-- A browser-based demo client that recalls and verifies signed memory artifacts without a server dependency.
+Forward-looking work — what extends this contract beyond v1 — is consolidated in §14 Roadmap.
 
 ## 4. Core Insight
 
@@ -332,6 +316,8 @@ The roadmap below is organized around a single positioning, locked in 2026-05-01
 - Document the artifact format and verification model.
 - Improve local developer experience.
 - Keep local mode fast, free, and offline.
+- Ship core protocol primitives as both a native Rust crate and a WebAssembly module, so identical verification logic runs in servers, browsers, and embedded agents.
+- Provide a browser-based demo client that recalls and verifies signed memory artifacts without a server dependency.
 
 ### Phase 2: Product-Grade Memory Semantics
 
