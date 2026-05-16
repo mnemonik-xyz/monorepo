@@ -1,20 +1,18 @@
 # Mnemonic Protocol: Verifiable Memory Infrastructure for AI Agents
 
-**Draft:** v0.1  
-**Date:** April 2026  
+**Draft:** v0.2  
+**Date:** May 2026  
 **Status:** Working draft  
 
 ---
 
 ## Abstract
 
-AI agents increasingly operate across long-running tasks, tools, sessions, and providers, but their memory remains fragile. Context windows are temporary, vendor-native memory is hard to audit, and conventional vector stores provide persistence without cryptographic provenance. As a result, an agent can claim that it remembered a fact, produced an artifact, or acted on prior context, but external parties have no standard way to verify what was stored, who stored it, when it existed, or whether it was later changed.
+AI agents accumulate operational context across sessions, tools, and providers — preferences learned over time, factual knowledge extracted from interactions, procedures refined through use, working state maintained across turns, and persistent self-descriptions that shape their behavior. This memory is valuable, but it remains fragile: bound to single providers, locked in proprietary formats, unverifiable by outside parties, and unable to follow the operator that produced it from one runtime to another. As agents become more autonomous and operate across longer time horizons, the absence of a memory layer with cryptographic provenance becomes a coordination problem rather than a convenience problem.
 
-Mnemonic Protocol introduces a verifiable memory layer for AI agents. It treats memory as a portable, signed artifact rather than an opaque database row: something an agent can recall, carry across systems, and prove has not been silently changed. Memories can run fully locally for speed and development, or be persisted to decentralized infrastructure so third parties can independently verify integrity, authorship, and timestamped existence.
+Mnemonic Protocol is a verifiable memory layer for AI agents. It treats memory as a portable, signed artifact — content-addressed, typed, lineage-linked, signed by the operator's cryptographic identity, and independently verifiable by any party that holds it. The protocol distinguishes five kinds of memory artifact — episodic, semantic, procedural, working, and identity — each with its own schema and semantics. Memory belongs to the operator who signed it; it can be shared between runtimes through an explicit handshake mediated by capability tokens and brought into a target runtime through a defined rehydration pipeline that includes safe-injection framing to prevent memory-mediated prompt injection across trust boundaries. Because memory is bound to operator identity rather than to any specific runtime, an agent built up under one model provider can switch providers and continue from the accumulated state.
 
-Mnemonic is exposed through the Model Context Protocol (MCP), making it usable by current agent clients over HTTP or stdio. The current implementation is a Rust MCP server with five tools for identity, memory signing, verification, challenge signing, and recall. The broader protocol roadmap extends this foundation toward shared project memory, provenance attestations, portable memory wallets, settlement-aware memory services, and multi-agent trust infrastructure.
-
-The core thesis is simple: trustless agents cannot work without trustless agentic memory. A2A protocols make agents interoperable in motion; Mnemonic makes them coherent over time.
+Mnemonic is independent of where artifacts are stored and how they are anchored. Storage may be local, hosted, or on-chain; anchoring may use any backend that produces a verifiable inclusion proof linking a content-addressed hash to a publicly observable timestamp. Two protocol-level commitments hold across every deployment: verification is free for any party by design, and self-hosting is always available for any operator. These commitments are what make the protocol's trustlessness claim credible — neither the protocol's authors nor any specific operator can gate verification or prevent independent operation. Mnemonic fits underneath agent coordination protocols: A2A makes agents interoperable in motion, the Model Context Protocol makes agents interoperable in capability, and Mnemonic makes them coherent over time. The core thesis is that trustless agents cannot work without trustless agentic memory.
 
 ---
 
