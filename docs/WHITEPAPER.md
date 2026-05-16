@@ -129,17 +129,22 @@ For a deeper walkthrough including module boundaries and lock discipline, see [d
 
 Mnemonic artifacts are typed, versioned, and canonical.
 
-The current schema registry includes:
+The schema registry distinguishes five kinds of memory artifact, each with its own schema and semantics (see §7.1), alongside the artifact types produced by surrounding agent workflows and the capability artifacts that authorize sharing:
 
-- `memory`
-- `rag.context`
-- `rag.result`
-- `agent.state`
-- `receipt`
+- `memory.episodic` — time-ordered events, observations, and interactions
+- `memory.semantic` — factual assertions about the world, typically as structured claims
+- `memory.procedural` — learned skills, routines, and workflows
+- `memory.working` — transient goals, subgoals, scratch state, and pending actions
+- `memory.identity` — persistent persona attributes, preferences, communication style, and operational policies
+- `rag.context` — retrieved context bundles
+- `rag.result` — generated results derived from retrieved context
+- `agent.state` — state snapshots
+- `receipt` — operational receipts
+- `capability.token` — signed, scoped authorizations over lineage subtrees (see §7.2)
 
-Each schema defines required fields, optional fields, and stable canonical CBOR field ordering. Published schemas are immutable within a version. Changes require version bumps.
+Each schema defines required fields, optional fields, and stable canonical CBOR field ordering. Published schemas are immutable within a version. Changes require version bumps. The earlier flat `memory` schema is retained as a deprecated alias and resolves to `memory.episodic` for backward compatibility; new artifacts should use one of the five typed kinds directly.
 
-This model lets Mnemonic evolve beyond single memory items into a general attestation layer for agent workflows: retrieved context, generated results, state snapshots, receipts, and lineage-linked artifacts.
+This model lets Mnemonic evolve beyond single memory items into a general attestation layer for agent workflows: typed memory by cognitive role, retrieved context, generated results, state snapshots, receipts, capability authorizations, and lineage-linked artifacts.
 
 ## 7. Trust Model
 
