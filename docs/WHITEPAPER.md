@@ -24,7 +24,11 @@ For simple assistants, this is inconvenient. For agents that produce research, c
 
 The common instinct is to make context windows longer or to snapshot more internal model state. That helps with continuity inside one runtime, but it does not solve portability or auditability. Raw attention state is model-specific, opaque, expensive to move, and hard for independent systems to interpret. A proprietary chat history is more readable, but still belongs to the platform that stores it.
 
-Mnemonic starts from a different unit: the semantic memory item. A memory item is human-readable content linked to embeddings, metadata, cryptographic identity, and a verifiable commitment trail. It can be recalled by meaning, inspected by people, signed by agents, and independently checked by other systems.
+Mnemonic starts from a different unit: the typed memory artifact. A memory artifact is human-readable content with a declared cognitive role — episodic, semantic, procedural, working, or identity (see §7.1) — linked to embeddings, metadata, cryptographic identity, and a verifiable commitment trail. It can be recalled by meaning, inspected by people, signed by agents, and independently checked by other systems.
+
+Memory belongs to the operator who signed it, not to the runtime that produced it. The same artifacts are valid across model providers, agent frameworks, and physical machines: an operator that built up memory under one runtime can switch runtimes and continue from the accumulated state without re-signing prior records.
+
+Where those artifacts physically live is a separate concern from the protocol's guarantees. Storage may be local, hosted, on-chain, or any combination — backends are pluggable, not a binary "fast local vs. trustworthy decentralized" choice. Authorship and integrity hold regardless of backend; the backend layer adds availability, latency, and the strength of third-party timestamp claims (see §5).
 
 This shift matters for multi-agent systems. A2A protocols can move messages and tasks between agents, but they do not by themselves provide durable, portable, attestable memory. Mnemonic fits underneath coordination protocols as memory infrastructure: the substrate that lets agents remain coherent over time.
 
