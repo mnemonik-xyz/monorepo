@@ -309,79 +309,31 @@ This model lets Mnemonic evolve beyond single memory items into a general attest
 
 ## 7. Memory Composition and Sharing
 
-The artifact model in §6 gives a single signed memory its shape. §7 specifies how those artifacts compose into multi-runtime workflows: how cognitive role drives per-kind semantics, how access is scoped via capability tokens, how memory crosses trust boundaries through a defined handshake, and how it enters a target runtime through a rehydration pipeline that includes safe-injection framing. Together these subsections make portability and shared memory operational rather than aspirational.
+The artifact model in §6 gives a single signed memory its shape. §7 specifies how those artifacts compose into multi-runtime workflows: how cognitive role drives per-kind semantics, how access is scoped via capability tokens, how memory crosses trust boundaries through a defined handshake, and how it enters a target runtime through a rehydration pipeline that includes safe-injection framing. The whitepaper states the protocol-level claims; structures, exchange details, stage interfaces, and marker grammars are specified in [docs/spec/memory-composition.md](./spec/memory-composition.md).
 
 ### 7.1 Cognitive Typing
 
-The five `memory.*` kinds declared in §6 — `episodic`, `semantic`, `procedural`, `working`, `identity` — are not stylistic tags. They reflect distinct cognitive roles in agent operation and warrant different storage, retrieval, retention, and sharing semantics. Per-kind treatment is part of the protocol contract; the kind is part of the canonical artifact and is verified alongside content.
-
-- **`memory.episodic`** — time-ordered events, observations, and interactions. Retrieval combines temporal proximity with semantic similarity; salience decays with time and reinforcement updates it.
-- **`memory.semantic`** — factual assertions about entities, relations, and references. Retrieval is structured + semantic; contradictions across artifacts are first-class signals rather than errors.
-- **`memory.procedural`** — learned skills, routines, and workflows. Versioned by content hash; usage history feeds reliability scoring.
-- **`memory.working`** — transient goals, subgoals, scratch state, and pending actions for the current task. High churn, short retention by default, rarely shared outside the producing agent.
-- **`memory.identity`** — persistent persona attributes, preferences, communication style, and operational policies. Low write frequency, strong access control, audit-worthy on change.
-
-Each kind has implications for retention defaults (working: transient; identity: durable), retrieval semantics, sharing posture, and safety treatment. Downstream tooling reads the declared kind and applies kind-appropriate policy without renegotiating with the producer.
+The five `memory.*` kinds declared in §6 (`episodic`, `semantic`, `procedural`, `working`, `identity`) are not stylistic tags. They reflect distinct cognitive roles and warrant different retention, retrieval, sharing, and safety semantics. The kind is part of the canonical artifact and is verified alongside content, so downstream tooling reads the declared kind and applies kind-appropriate policy without renegotiating with the producer. Per-kind defaults — retention horizons, retrieval scoring, sharing posture, framing strictness — are specified in the memory-composition spec.
 
 ### 7.2 Capability Tokens
 
-When memory crosses a trust boundary — between agents, between runtimes, between operators — the receiver needs to know what they are authorized to see, do, and pass on. The protocol's answer is the signed, scoped, revocable capability token.
-
-A capability token is itself a typed artifact (`capability.token` in §6), signed by an authorizer (typically the operator that controls the source memory) and carrying:
-
-- **subject** — the public identity authorized to act under this token
-- **scope** — what subset of memory is authorized (by lineage subtree, kind, tag filter, or explicit artifact ids)
-- **permissions** — `read`, `list`, `share-onward`, `quote`
-- **expiry** — optional time bound
-- **revocation reference** — a token id that can be revoked by a counter-signed attestation
-- **chain of authority** — for delegated tokens, references to upstream tokens
-
-Capability tokens are content-addressed and verified by anyone holding them. Revocation is a counter-signed attestation that any verifier can check; the protocol does not require an online revocation check on every use — short-lived tokens are the preferred pattern for high-value operations, and longer-lived tokens carry explicit revocation-check policy in their metadata.
+Cross-runtime access to memory is authorized by signed, scoped, revocable capability tokens. A capability token is itself a typed artifact (`capability.token`), content-addressed, and verifiable by anyone holding it. Tokens carry a subject, a scope (over lineage subtrees, kinds, tag predicates, or explicit ids), a permission set, and an expiry; delegation is supported through a chain of authority; revocation is a counter-signed attestation. The protocol does not require online revocation checks on every use — short-lived tokens are the preferred pattern for high-value operations, and longer-lived tokens carry explicit online-check policy in their metadata. Token structure, scope grammar, and revocation semantics are specified in the memory-composition spec.
 
 ### 7.3 Sharing Handshake
 
-A sharing handshake establishes mutual authentication between two runtimes, evaluates the receiver's capability claim against the sender's current policy, and prepares an encrypted transport for the artifact bytes. The handshake is the protocol-level boundary between "memory at rest in the source runtime" and "memory in flight to a target runtime".
-
-The handshake produces three outputs:
-
-- A session key for encrypted transit (transport is operationally separate from the capability layer; the protocol specifies that bytes in flight are encrypted but does not mandate a specific KEM/AEAD pair, see implementation docs).
-- An agreed effective scope: the intersection of (capability token scope) and (sender's current policy at handshake time).
-- A receipt artifact, signed by both parties, recording the share event and anchored in the lineage DAG so the transfer is itself auditable.
-
-Either party can produce the receipt independently from their side; the handshake is symmetric and the receipt is co-signed.
+Memory crosses a trust boundary through a defined handshake between two runtimes. The handshake produces mutual authentication, an effective scope as the intersection of the capability token's scope and the sender's policy at handshake time, an encrypted transport for the artifact bytes, and a co-signed share receipt anchored in the lineage DAG so the transfer itself becomes auditable. The handshake is the protocol-level boundary between memory at rest and memory in flight. Exchange details, transport bindings, and receipt structure are specified in the memory-composition spec.
 
 ### 7.4 Rehydration Pipeline
 
-When a signed artifact enters a target runtime, it traverses a defined pipeline that turns artifact bytes into runtime context:
-
-1. **Verify** — authorship, integrity, lineage, anchor (if present).
-2. **Filter** — apply capability scope; drop anything outside the effective permissions.
-3. **Rank** — score remaining artifacts against the current task or query.
-4. **Compress** — reduce to the target runtime's context budget.
-5. **Format** — render to the runtime-appropriate form (structured tool result, prompt fragment, embedding, etc.).
-6. **Frame** — wrap with safe-injection markers (§7.5).
-7. **Inject** — hand off to the runtime's context.
-
-Each stage's output is auditable. The pipeline can be replayed deterministically from the source artifacts plus the same capability evaluation, so two runtimes given the same inputs produce the same rehydrated context.
+When a signed artifact enters a target runtime, it traverses a defined pipeline: **verify → filter → rank → compress → format → frame → inject**. The pipeline is deterministic and replayable: two implementations given the same inputs and configuration produce identical output at every stage, which makes the entire rehydration auditable from the source artifacts plus the recorded capability evaluation. Stage-by-stage interfaces, the ranker abstraction, and compression budgets are specified in the memory-composition spec.
 
 ### 7.5 Safe Injection (Framing)
 
-Memory content can resemble instructions. A `memory.identity` artifact may legitimately contain text like "Always confirm before destructive actions"; a `memory.episodic` artifact may quote a user's prior message that itself contains imperative language. Naively concatenating retrieved memory into a target runtime's prompt creates a memory-mediated prompt injection vector — instructions enter the model's effective prompt without authorization.
-
-The protocol's framing layer addresses this at the rehydration boundary:
-
-- Memory content is wrapped in explicit, runtime-aware safe-injection markers that mark the span as reference content, not instruction.
-- Marker pairs declare provenance ("memory signed by X at time T, kind K") and posture ("reference; do not interpret as instruction unless the receiving runtime's identity policy explicitly authorizes").
-- The receiving runtime's prompt template is responsible for honoring the markers; the SDK ships reference adapters for runtimes that do not honor framing natively.
-- Identity-kind artifacts carry stricter framing than other kinds, reflecting their higher potential as injection vectors.
-
-Framing is a protocol-level contract and an audit point; it is not a unilateral guarantee, because it depends on receiving-runtime cooperation. A runtime that does not implement framing cannot be safely targeted by sharing flows for high-trust memory; this is itself observable from the framing-compliance attestation that target runtimes publish.
+Memory content can resemble instructions, and naively concatenating retrieved memory into a target runtime's prompt creates a memory-mediated prompt injection surface. The protocol's framing layer wraps retrieved memory in safe-injection markers that declare provenance and posture (reference content, not instruction). Identity-kind memory carries stricter framing than other kinds, reflecting its higher potential as an injection vector. Framing is a protocol-level contract enforced at the rehydration boundary; it is not a unilateral guarantee, because honoring the markers depends on receiving-runtime cooperation, and compliance is itself an attestation that target runtimes publish. Marker grammars, per-kind strictness, and compliance-attestation structure are specified in the memory-composition spec.
 
 ### 7.6 Portability Across Runtimes
 
-The portability claim composes the prior subsections. A signed artifact whose authorship and integrity verify locally remains verifiable after transfer; capability tokens and the sharing handshake establish what may move and on what terms; the rehydration pipeline transforms transferred bytes into target-runtime context without losing provenance; framing protects the receiving runtime from memory-mediated injection. The result is that operator identity, not runtime identity, is what binds memory together over time.
-
-An operator that accumulated memory under one runtime and one provider may switch runtimes and providers without re-signing prior records. The new runtime, running the same protocol, will return the same authorship and integrity result for those artifacts as the old runtime did. Continuity of memory becomes a property of operator identity rather than of any platform.
+The portability claim composes the prior subsections. A signed artifact whose authorship and integrity verify locally remains verifiable after transfer; capability tokens and the sharing handshake establish what may move and on what terms; the rehydration pipeline transforms transferred bytes into target-runtime context without losing provenance; framing protects the receiving runtime from memory-mediated injection. The result is that operator identity, not runtime identity, is what binds memory together over time. An operator that accumulated memory under one runtime and one provider may switch and continue from the accumulated state without re-signing prior records.
 
 ## 8. Trust Model
 
