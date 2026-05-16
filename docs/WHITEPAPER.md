@@ -42,14 +42,23 @@ Current agent memory systems typically fall into three categories:
 
 These systems are useful, but they do not provide a portable trust layer. If an agent moves from one runtime to another, its accumulated state may not move with it. If a memory record changes, consumers may not notice. If an agent produces an answer based on prior context, downstream systems may not be able to audit which context existed at the time.
 
-A verifiable agent memory system needs six properties:
+Two further problems compound the trust gap and are not addressed by any of the three categories above.
+
+**Memory has cognitive structure that flat stores erase.** An agent's working state, its accumulated facts about the world, the procedures it has learned, the events it has witnessed, and its persistent self-description play different cognitive roles and warrant different retention, retrieval, and sharing semantics. Systems that treat memory as a homogeneous bag of strings cannot apply per-kind lifecycle, cannot scope access by kind, and cannot make different safety decisions about, for example, transient working state versus durable identity. The cognitive distinctions exist whether or not the storage layer recognizes them; surfacing them in the protocol is what allows correct downstream handling.
+
+**Memory crosses trust boundaries, and the transfer itself is unsolved.** When one agent or runtime hands memory to another, three problems appear at once. Authorization: the receiver should only see what they are entitled to see, and the entitlement should be expressible, transferable, and revocable without trusting a central authority. Verifiable transit: the receiver needs to confirm that what arrived is exactly what the owner signed, that lineage holds, and that any timestamp claims survive the hop. Injection safety: memory content can resemble instructions, and a naive paste of received memory into a target runtime's context creates a memory-mediated prompt injection surface. None of the three current categories provide primitives for any of these.
+
+A verifiable agent memory system needs the following properties:
 
 - **Persistence:** memory survives sessions, providers, and runtime changes.
 - **Semantic recall:** memory can be retrieved by meaning, not only by keyword.
 - **Provenance:** each memory is linked to a cryptographic identity.
 - **Integrity:** tampering can be detected independently.
 - **Portability:** memory is not trapped inside one vendor or framework.
-- **Economic viability:** storage and verification costs remain low enough for real agent workflows.
+- **Cognitive typing:** memory is distinguishable by role (episodic, semantic, procedural, working, identity) so per-kind semantics can apply.
+- **Capability-scoped sharing:** access is authorized by signed, scoped, revocable grants — not by ambient trust in a central operator.
+- **Safe injection across runtimes:** transferred memory enters target runtimes through a defined pipeline that prevents memory-mediated prompt injection.
+- **Economic viability:** storage and verification costs remain low enough for real agent workflows, and verification in particular remains free by design.
 
 ## 3. Design Goals
 
