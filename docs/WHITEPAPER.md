@@ -562,14 +562,9 @@ The long-term goal is broader: memory that agents can own, share, pay for, audit
 
 ## References
 
-1. Model Context Protocol. https://modelcontextprotocol.io/
-2. Arweave Protocol. https://arweave.org/
-3. Solana Documentation. https://solana.com/docs
-4. COSE: CBOR Object Signing and Encryption. RFC 9052.
-5. BLAKE3 Cryptographic Hash Function. https://github.com/BLAKE3-team/BLAKE3
-6. Zandieh, A. and Mirrokni, V. *TurboQuant: Online Vector Quantization with Near-Optimal Distortion Rate.*
-7. Coinbase. *x402: HTTP 402 Payment Required for Machine-to-Machine Payments.* https://x402.org/
-8. [Mnemonic Protocol Foundational Paper](./research/paper.pdf)
+1. Zandieh, A. and Mirrokni, V. *TurboQuant: Online Vector Quantization with Near-Optimal Distortion Rate.*
+2. *Sublinear Verifiable Recall: An Inverted-File Cascade for Compressed Embedding Retrieval in the Mnemonic Protocol.* https://www.researchgate.net/publication/404381758_Sublinear_Verifiable_Recall_An_Inverted-File_Cascade_for_Compressed_Embedding_Retrieval_in_the_Mnemonic_Protocol
+3. *Portable Agent Memory: A Protocol for Cryptographically-Verified Memory Transfer Across Heterogeneous AI Agents.* arXiv:2605.11032. https://arxiv.org/abs/2605.11032
 
 ---
 
