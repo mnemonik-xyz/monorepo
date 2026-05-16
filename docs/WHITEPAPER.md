@@ -62,7 +62,7 @@ A verifiable agent memory system needs the following properties:
 
 ## 3. Protocol Contract
 
-This section enumerates the protocol-level invariants that any compliant Mnemonic deployment must provide. They are protocol commitments, not implementation choices: they hold whether the backend is local, hosted, on-chain, or hybrid, and whether any specific operator is running or not. Concrete implementation status is in §11; specific backend choices, parameters, and costs are in companion documents.
+This section enumerates the protocol-level invariants that any compliant Mnemonic deployment must provide. They are protocol commitments, not implementation choices: they hold whether the backend is local, hosted, on-chain, or hybrid, and whether any specific operator is running or not. Concrete implementation status is in §12; specific backend choices, parameters, and costs are in companion documents.
 
 - **Typed, signed, content-addressed artifacts.** Memory is encoded deterministically, hashed by content, and signed by the operator's cryptographic identity (see §5.1).
 - **Cognitive typing.** Memory artifacts declare a kind — episodic, semantic, procedural, working, or identity — and per-kind semantics apply downstream (see §7.1).
@@ -75,7 +75,7 @@ This section enumerates the protocol-level invariants that any compliant Mnemoni
 - **Free self-hosting.** Any operator may run a complete node and participate in the protocol without paying any other operator (see §5.7.1).
 - **Operator pluralism.** No operator is structurally privileged; verification is independent of which operator produced or stored the artifact (see §5.7.3).
 
-Forward-looking work — what extends this contract beyond v1 — is consolidated in §14 Roadmap.
+Forward-looking work — what extends this contract beyond v1 — is consolidated in §15 Roadmap.
 
 ## 4. Core Insight
 
@@ -307,7 +307,83 @@ Each schema defines required fields, optional fields, and stable canonical CBOR 
 
 This model lets Mnemonic evolve beyond single memory items into a general attestation layer for agent workflows: typed memory by cognitive role, retrieved context, generated results, state snapshots, receipts, capability authorizations, and lineage-linked artifacts.
 
-## 7. Trust Model
+## 7. Memory Composition and Sharing
+
+The artifact model in §6 gives a single signed memory its shape. §7 specifies how those artifacts compose into multi-runtime workflows: how cognitive role drives per-kind semantics, how access is scoped via capability tokens, how memory crosses trust boundaries through a defined handshake, and how it enters a target runtime through a rehydration pipeline that includes safe-injection framing. Together these subsections make portability and shared memory operational rather than aspirational.
+
+### 7.1 Cognitive Typing
+
+The five `memory.*` kinds declared in §6 — `episodic`, `semantic`, `procedural`, `working`, `identity` — are not stylistic tags. They reflect distinct cognitive roles in agent operation and warrant different storage, retrieval, retention, and sharing semantics. Per-kind treatment is part of the protocol contract; the kind is part of the canonical artifact and is verified alongside content.
+
+- **`memory.episodic`** — time-ordered events, observations, and interactions. Retrieval combines temporal proximity with semantic similarity; salience decays with time and reinforcement updates it.
+- **`memory.semantic`** — factual assertions about entities, relations, and references. Retrieval is structured + semantic; contradictions across artifacts are first-class signals rather than errors.
+- **`memory.procedural`** — learned skills, routines, and workflows. Versioned by content hash; usage history feeds reliability scoring.
+- **`memory.working`** — transient goals, subgoals, scratch state, and pending actions for the current task. High churn, short retention by default, rarely shared outside the producing agent.
+- **`memory.identity`** — persistent persona attributes, preferences, communication style, and operational policies. Low write frequency, strong access control, audit-worthy on change.
+
+Each kind has implications for retention defaults (working: transient; identity: durable), retrieval semantics, sharing posture, and safety treatment. Downstream tooling reads the declared kind and applies kind-appropriate policy without renegotiating with the producer.
+
+### 7.2 Capability Tokens
+
+When memory crosses a trust boundary — between agents, between runtimes, between operators — the receiver needs to know what they are authorized to see, do, and pass on. The protocol's answer is the signed, scoped, revocable capability token.
+
+A capability token is itself a typed artifact (`capability.token` in §6), signed by an authorizer (typically the operator that controls the source memory) and carrying:
+
+- **subject** — the public identity authorized to act under this token
+- **scope** — what subset of memory is authorized (by lineage subtree, kind, tag filter, or explicit artifact ids)
+- **permissions** — `read`, `list`, `share-onward`, `quote`
+- **expiry** — optional time bound
+- **revocation reference** — a token id that can be revoked by a counter-signed attestation
+- **chain of authority** — for delegated tokens, references to upstream tokens
+
+Capability tokens are content-addressed and verified by anyone holding them. Revocation is a counter-signed attestation that any verifier can check; the protocol does not require an online revocation check on every use — short-lived tokens are the preferred pattern for high-value operations, and longer-lived tokens carry explicit revocation-check policy in their metadata.
+
+### 7.3 Sharing Handshake
+
+A sharing handshake establishes mutual authentication between two runtimes, evaluates the receiver's capability claim against the sender's current policy, and prepares an encrypted transport for the artifact bytes. The handshake is the protocol-level boundary between "memory at rest in the source runtime" and "memory in flight to a target runtime".
+
+The handshake produces three outputs:
+
+- A session key for encrypted transit (transport is operationally separate from the capability layer; the protocol specifies that bytes in flight are encrypted but does not mandate a specific KEM/AEAD pair, see implementation docs).
+- An agreed effective scope: the intersection of (capability token scope) and (sender's current policy at handshake time).
+- A receipt artifact, signed by both parties, recording the share event and anchored in the lineage DAG so the transfer is itself auditable.
+
+Either party can produce the receipt independently from their side; the handshake is symmetric and the receipt is co-signed.
+
+### 7.4 Rehydration Pipeline
+
+When a signed artifact enters a target runtime, it traverses a defined pipeline that turns artifact bytes into runtime context:
+
+1. **Verify** — authorship, integrity, lineage, anchor (if present).
+2. **Filter** — apply capability scope; drop anything outside the effective permissions.
+3. **Rank** — score remaining artifacts against the current task or query.
+4. **Compress** — reduce to the target runtime's context budget.
+5. **Format** — render to the runtime-appropriate form (structured tool result, prompt fragment, embedding, etc.).
+6. **Frame** — wrap with safe-injection markers (§7.5).
+7. **Inject** — hand off to the runtime's context.
+
+Each stage's output is auditable. The pipeline can be replayed deterministically from the source artifacts plus the same capability evaluation, so two runtimes given the same inputs produce the same rehydrated context.
+
+### 7.5 Safe Injection (Framing)
+
+Memory content can resemble instructions. A `memory.identity` artifact may legitimately contain text like "Always confirm before destructive actions"; a `memory.episodic` artifact may quote a user's prior message that itself contains imperative language. Naively concatenating retrieved memory into a target runtime's prompt creates a memory-mediated prompt injection vector — instructions enter the model's effective prompt without authorization.
+
+The protocol's framing layer addresses this at the rehydration boundary:
+
+- Memory content is wrapped in explicit, runtime-aware safe-injection markers that mark the span as reference content, not instruction.
+- Marker pairs declare provenance ("memory signed by X at time T, kind K") and posture ("reference; do not interpret as instruction unless the receiving runtime's identity policy explicitly authorizes").
+- The receiving runtime's prompt template is responsible for honoring the markers; the SDK ships reference adapters for runtimes that do not honor framing natively.
+- Identity-kind artifacts carry stricter framing than other kinds, reflecting their higher potential as injection vectors.
+
+Framing is a protocol-level contract and an audit point; it is not a unilateral guarantee, because it depends on receiving-runtime cooperation. A runtime that does not implement framing cannot be safely targeted by sharing flows for high-trust memory; this is itself observable from the framing-compliance attestation that target runtimes publish.
+
+### 7.6 Portability Across Runtimes
+
+The portability claim composes the prior subsections. A signed artifact whose authorship and integrity verify locally remains verifiable after transfer; capability tokens and the sharing handshake establish what may move and on what terms; the rehydration pipeline transforms transferred bytes into target-runtime context without losing provenance; framing protects the receiving runtime from memory-mediated injection. The result is that operator identity, not runtime identity, is what binds memory together over time.
+
+An operator that accumulated memory under one runtime and one provider may switch runtimes and providers without re-signing prior records. The new runtime, running the same protocol, will return the same authorship and integrity result for those artifacts as the old runtime did. Continuity of memory becomes a property of operator identity rather than of any platform.
+
+## 8. Trust Model
 
 Mnemonic currently guarantees:
 
@@ -328,7 +404,7 @@ Mnemonic does not yet guarantee:
 
 These limitations are intentional to state clearly: Mnemonic V1 prioritizes practical memory integrity and provenance before more expensive proof systems.
 
-## 8. Positioning In The Agent Stack
+## 9. Positioning In The Agent Stack
 
 Mnemonic is not a replacement for A2A protocols, orchestration systems, or vector databases.
 
@@ -338,61 +414,61 @@ In one sentence:
 
 > A2A makes agents interoperable in motion; Mnemonic makes them coherent over time.
 
-## 9. Use Cases
+## 10. Use Cases
 
 Mnemonic supports a family of agent-memory patterns. The 10 subsections below are short summaries; each links to a deep-dive document under `docs/usecases/`.
 
-### 9.1 Shared Project Memory Namespace
+### 10.1 Shared Project Memory Namespace
 
 Multiple A2A agents read from and write to a shared project-level memory namespace, so findings, decisions, contradictions, and source references accumulate on the project rather than inside any single agent. New agents joining the workflow retrieve accumulated context instead of starting from zero.
 [See deep-dive in docs/usecases/shared-project-memory-namespace.md.]
 
-### 9.2 Shared Memory Layer
+### 10.2 Shared Memory Layer
 
 Mnemonic acts as a persistent shared memory substrate underneath A2A coordination, surviving sessions, providers, and runtime changes while offering semantic retrieval and verifiable provenance. This replaces fragile context windows, ad-hoc databases, and vendor-locked memory with a portable common surface.
 [See deep-dive in docs/usecases/shared-memory-layer.md.]
 
-### 9.3 Provenance And Attestation Layer
+### 10.3 Provenance And Attestation Layer
 
 Mnemonic records what an agent produced, what inputs it used, when it produced the output, and how the output connects to earlier artifacts, turning opaque message passing between agents into auditable knowledge production. Downstream consumers can independently check authorship, integrity, and timestamped existence of each claim.
 [See deep-dive in docs/usecases/provenance-attestation-layer.md.]
 
-### 9.4 Trust And Reputation Layer
+### 10.4 Trust And Reputation Layer
 
 Historical memory and contribution records can power trust signals — which agents are reliable in a domain, whose outputs are reused, which contributors are noisy or adversarial — that orchestrators use beyond declared capabilities. Mnemonic links agent identity, memory entries, downstream usage, and validation outcomes into a durable reputation surface.
 [See deep-dive in docs/usecases/trust-reputation-layer.md.]
 
-### 9.5 Portable Memory Wallet
+### 10.5 Portable Memory Wallet
 
 Memory belongs to the agent or its operator rather than a provider: an operator can write memory while running on Claude, switch the runtime to GPT or a local model, and continue working from the same attested store without re-signing or re-attesting prior records. Memory snapshots are portable, verifiable, rehydratable, and independent from a single inference provider.
 [See deep-dive in docs/usecases/portable-memory-wallet.md.]
 
-### 9.6 Settlement-Aware Memory Infrastructure
+### 10.6 Settlement-Aware Memory Infrastructure
 
 Networked memory services need metering and payment; Mnemonic already supports balance and x402-style HTTP payment flows so agents can autonomously pay for memory writes, recall, and verification. This evolves into agent-payable memory infrastructure where verification remains open and paid operations sustain node operators.
 [See deep-dive in docs/usecases/settlement-aware-memory-infrastructure.md.]
 
-### 9.7 Task Memory Ledger
+### 10.7 Task Memory Ledger
 
 Each task exchanged in an A2A workflow leaves a durable record — request hash, assigned agent, summary, intermediate notes, output, artifact references, completion status, ordering anchors — that subsequent agents can retrieve. This prevents repeated context loss across the many short-lived tasks typical in multi-agent execution.
 [See deep-dive in docs/usecases/task-memory-ledger.md.]
 
-### 9.8 Artifact Attestation Service
+### 10.8 Artifact Attestation Service
 
 Mnemonic attests, indexes, and retrieves artifacts produced by A2A workflows — reports, code patches, evidence bundles, recommendations, structured outputs — by storing artifact hash, producing identity, upstream references, and semantic summary. Consumers can later prove who produced an artifact, when, and from which inputs.
 [See deep-dive in docs/usecases/artifact-attestation-service.md.]
 
-### 9.9 Agent Continuity Layer
+### 10.9 Agent Continuity Layer
 
 When an agent moves across runtimes, providers, or infrastructure because of cost, model upgrades, framework migration, or compliance, Mnemonic preserves prior memory items, project context, artifact history, and decisions so the agent retains accumulated context. Continuity is decoupled from the specific platform the agent runs on today.
 [See deep-dive in docs/usecases/agent-continuity-layer.md.]
 
-### 9.10 Reliability Oracle For Orchestration
+### 10.10 Reliability Oracle For Orchestration
 
 Orchestrators query Mnemonic for memory-backed trust signals — accepted vs rejected outputs, downstream reuse, citation quality, contradiction rate, reviewer corrections — to route work beyond stated capabilities. Mnemonic holds the historical evidence needed to answer reliability questions about agents and contributions.
 [See deep-dive in docs/usecases/reliability-oracle-for-orchestration.md.]
 
-## 10. Related Work
+## 11. Related Work
 
 Mnemonic sits at the intersection of:
 
@@ -405,7 +481,7 @@ Mnemonic sits at the intersection of:
 
 The closest research and product directions include decentralized RAG, trustless agentic memory, ZK embedding proofs, verifiable ANN retrieval, and source reliability oracles. Mnemonic's current bet is pragmatic: hash commitments and signed artifacts are cheaper and deployable today, while ZK embedding or retrieval proofs remain credible future extensions.
 
-## 11. Current Implementation Status
+## 12. Current Implementation Status
 
 The current canonical implementation is the Rust MCP server in this repository.
 
@@ -434,7 +510,7 @@ Not current implementation behavior:
 - Agent SDK abstraction.
 - ZK proof of embedding or retrieval correctness.
 
-## 12. Evaluation Plan
+## 13. Evaluation Plan
 
 A production-grade whitepaper should include empirical results for:
 
@@ -448,7 +524,7 @@ A production-grade whitepaper should include empirical results for:
 
 Historical prototype documents include retrieval and compression benchmarks, but this paper should only publish results that match the current Rust implementation or are clearly labeled as prior research.
 
-## 13. Limitations And Open Questions
+## 14. Limitations And Open Questions
 
 Open areas before broad production deployment:
 
@@ -461,7 +537,7 @@ Open areas before broad production deployment:
 - Product packaging: local tool, SDK, node network, hosted service, or hybrid.
 - Compliance and governance for sensitive memory data.
 
-## 14. Roadmap
+## 15. Roadmap
 
 The roadmap below is organized around a single positioning, locked in 2026-05-01: **Mnemonic is verifiable memory for trustless agents.** Phases 1–3 deliver the core memory primitive; Phases 4–5 compose it into the trustless-agent stack (A2A + ERC-8004) so signed memory becomes a first-class layer underneath multi-agent coordination and on-chain identity.
 
@@ -510,7 +586,7 @@ After Phase 5: Mnemonic is the only primitive in the trustless-agent stack that 
 
 Detailed plan, task breakdown, and decision rationale: `work/a2a-bridge/` (`user-spec.md`, `tech-spec.md`, `tasks/`, `backlog.md`, `decisions.md`, `research/positioning-trustless-agents.md`).
 
-## 15. Conclusion
+## 16. Conclusion
 
 Agents need more than longer context windows. They need memory that persists, travels, and can be verified.
 
