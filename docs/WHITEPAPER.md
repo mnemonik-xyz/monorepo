@@ -365,13 +365,13 @@ These boundaries are intentional. The v1 protocol commits only to what signature
 
 ## 9. Positioning In The Agent Stack
 
-Mnemonic is not a replacement for A2A protocols, orchestration systems, or vector databases.
+Mnemonic is not a replacement for A2A protocols, the Model Context Protocol (MCP), orchestration systems, or vector databases. It sits underneath these layers as memory infrastructure.
 
-A2A protocols handle discovery, coordination, task exchange, and message passing. Mnemonic fits underneath that layer as durable memory, provenance, portability, and trust infrastructure.
+A2A protocols handle discovery, coordination, task exchange, and message passing between agents. MCP standardizes how agents access tools, resources, and external capabilities within a runtime. Mnemonic fits underneath both as durable memory, provenance, lineage, and trust infrastructure: where A2A and MCP make agents interoperable in motion and in capability, Mnemonic keeps them coherent over time.
 
 In one sentence:
 
-> A2A makes agents interoperable in motion; Mnemonic makes them coherent over time.
+> A2A makes agents interoperable in motion; MCP makes them interoperable in capability; Mnemonic makes them coherent over time.
 
 ## 10. Use Cases
 
@@ -442,32 +442,37 @@ The closest research and product directions include decentralized RAG, trustless
 
 ## 12. Current Implementation Status
 
-The current canonical implementation is the Rust MCP server in this repository.
+The current canonical implementation is the Rust MCP server in this repository. It exercises one path through the v0.2 architecture (§5) and does not yet expose the full protocol surface; this section names the gap.
 
 Implemented today:
 
 - HTTP and stdio MCP transports.
-- Five Mnemonic tools.
-- Ed25519 server identity, with DID-sol and DID-key derivation exposed through `mnemonic_whoami`.
+- Five MCP tools: sign memory, recall, verify, whoami, prove identity.
+- Ed25519 operator identity with DID-sol and DID-key derivation.
 - Canonical CBOR artifact encoding.
 - COSE_Sign1 artifact signing.
-- blake3 hashing for current artifacts.
+- blake3 content hashing.
 - TurboQuant compression of embeddings (2–4 bits per dimension) carried in artifact metadata.
-- SQLite local recall over full embeddings.
+- Local recall over full embeddings via SQLite.
 - Local lineage index: parent–child artifact DAG with cycle detection and directional BFS traversal (`Ancestors`, `Descendants`, `Both`).
-- `local` and `full` storage modes.
-- Optional Solana and Arweave persistence in full mode.
+- Binary `local` / `full` storage modes (predecessor of the per-artifact backend selection in §5.3).
+- Optional Arweave persistence and Solana anchoring in `full` mode.
 - Payment modes: `none`, `balance`, `x402`, and `both`.
 
-Not current implementation behavior:
+Not yet implemented:
 
-- End-to-end encrypted snapshots.
-- Compressed shadow-index retrieval as the local recall path.
-- Multi-party shared namespaces.
-- Reliability oracle.
-- On-chain node registry.
-- Agent SDK abstraction.
-- ZK proof of embedding or retrieval correctness.
+- Per-artifact `StorageBackend` selection (§5.3); the current impl uses the binary `local`/`full` mode framing.
+- Cognitive typing on artifacts: the five `memory.*` kinds (§7.1); the current impl uses the deprecated flat `memory` schema.
+- Capability tokens (§7.2) and the revocation feed.
+- Sharing handshake with co-signed receipts anchored in lineage (§7.3).
+- Rehydration pipeline stages — filter, rank, compress, format, frame, inject (§7.4); only the verify stage is implemented.
+- Safe-injection framing markers and the framing-compliance attestation (§7.5).
+- WASM build of `core` and the browser-extension surface (§5.2).
+- Standalone `sdk` and `cli` surfaces as separate distribution targets (§5.2); their functionality currently lives inside the MCP binary.
+- At-rest encryption of memory content.
+- Multi-writer shared namespaces.
+- Reliability oracle and on-chain node registry.
+- ZK proofs of embedding or retrieval correctness.
 
 ## 13. Evaluation Plan
 
@@ -487,14 +492,14 @@ Historical prototype documents include retrieval and compression benchmarks, but
 
 Open areas before broad production deployment:
 
-- Security and privacy boundaries.
-- Encryption architecture and key recovery.
-- Memory write semantics: append, merge, overwrite, contradiction handling.
-- Lifecycle policy: pruning, compaction, export, deletion, retention classes.
-- Multi-writer consistency and shared namespace authorization.
-- Robustness to noisy, duplicate, contradictory, or adversarial memories.
-- Product packaging: local tool, SDK, node network, hosted service, or hybrid.
-- Compliance and governance for sensitive memory data.
+- **Security and privacy boundaries** — including at-rest encryption architecture and key recovery; the protocol provides transport encryption via the sharing handshake (§7.3) but takes no position on at-rest encryption.
+- **Memory write semantics** — append, merge, overwrite, and contradiction handling, especially for `memory.semantic` artifacts that may carry conflicting factual claims.
+- **Lifecycle policy** — pruning, compaction, export, deletion, and retention classes. Per-kind defaults from §7.1 set the direction, but specific policies and operator overrides are open.
+- **Multi-writer consistency and shared-namespace authorization** — pairwise sharing via capability tokens is specified (§7.2–§7.3), but namespaces with multiple concurrent writers need conflict resolution, ordering, and convergence semantics.
+- **Robustness to noisy, duplicate, contradictory, or adversarial memories** — including recall-time disambiguation and reliability scoring inputs.
+- **Framing-compliance ecosystem** — the registry of which target runtimes publish compliance attestations (§7.5), the format of those attestations across runtime families, and the inclusion criteria.
+- **Cross-implementation interop testing** — conformance tests across the `core`, `cli`, `sdk`, `mcp`, and `browser-extension` surfaces (§5.2), and across native and WASM builds of `core`.
+- **Compliance and governance** for sensitive memory data — regulatory boundaries, jurisdiction handling, and audit primitives.
 
 ## 15. Roadmap
 
