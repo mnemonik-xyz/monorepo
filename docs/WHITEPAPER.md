@@ -66,14 +66,14 @@ This section enumerates the protocol-level invariants that any compliant Mnemoni
 
 - **Typed, signed, content-addressed artifacts.** Memory is encoded deterministically, hashed by content, and signed by the operator's cryptographic identity (see §5.1).
 - **Cognitive typing.** Memory artifacts declare a kind — episodic, semantic, procedural, working, or identity — and per-kind semantics apply downstream (see §7.1).
-- **Lineage as a first-class structure.** Parent–child relationships across artifacts are content-addressed, verifiable, and traversable, supporting provenance audits and Merkle-batched anchoring (see §5.5.1).
-- **Storage-agnostic protocol layer.** Authorship, integrity, lineage, and authorization hold regardless of which backend stores the bytes (see §5.2).
-- **Anchoring as a separable property.** Third-party timestamp is an opt-in addition over signature-based authorship and integrity, not a baseline requirement (see §5.5).
+- **Lineage as a first-class structure.** Parent–child relationships across artifacts are content-addressed, verifiable, and traversable, supporting provenance audits and Merkle-batched anchoring (see §5.6.1).
+- **Storage-agnostic protocol layer.** Authorship, integrity, lineage, and authorization hold regardless of which backend stores the bytes (see §5.3).
+- **Anchoring as a separable property.** Third-party timestamp is an opt-in addition over signature-based authorship and integrity, not a baseline requirement (see §5.6).
 - **Capability-scoped sharing.** Cross-runtime access to memory is authorized by signed, scoped, revocable capability tokens (see §7.2).
 - **Safe rehydration across runtimes.** Memory entering a target runtime traverses a defined verify → filter → rank → compress → format → frame → inject pipeline that prevents memory-mediated prompt injection (see §7.4, §7.5).
-- **Free verification.** Any party may verify any artifact they hold, with no operator gate (see §5.6.1).
-- **Free self-hosting.** Any operator may run a complete node and participate in the protocol without paying any other operator (see §5.6.1).
-- **Operator pluralism.** No operator is structurally privileged; verification is independent of which operator produced or stored the artifact (see §5.6.3).
+- **Free verification.** Any party may verify any artifact they hold, with no operator gate (see §5.7.1).
+- **Free self-hosting.** Any operator may run a complete node and participate in the protocol without paying any other operator (see §5.7.1).
+- **Operator pluralism.** No operator is structurally privileged; verification is independent of which operator produced or stored the artifact (see §5.7.3).
 
 Forward-looking work — what extends this contract beyond v1 — is consolidated in §14 Roadmap.
 
@@ -118,29 +118,167 @@ Compression of embeddings serves portability and durable-storage anchoring, not 
 
 ## 5. Architecture Overview
 
-Mnemonic has two layers:
+Mnemonic is structured in two horizontal layers and a vertical taxonomy of surfaces over them. The two layers are a **protocol layer** that defines artifact format, identity, and verification semantics, and a **backend layer** that determines where artifacts physically live. The protocol layer is storage-agnostic: every guarantee about authorship, integrity, lineage, and authorization holds regardless of which backend is chosen. Backends differ in availability, latency, cost, and the strength of third-party timestamp claims. Surfaces (§5.2) are the consumer-facing entry points into the protocol layer; any surface can drive any backend, so storage is a user choice per artifact, not a property of the surface or the protocol.
 
-- **`mnemonic-core`** provides protocol primitives: canonical CBOR encoding, blake3 hashing, COSE_Sign1 signing, identity (Ed25519 keypairs with DID-sol and DID-key derivation), embedding, TurboQuant compression, storage traits, Solana integration, Arweave integration, and lineage helpers (a parent–child artifact DAG with directional traversal).
-- **`mnemonic-mcp`** exposes those primitives through MCP over HTTP and stdio, plus payment and pricing logic for networked operation.
+### 5.1 Protocol Layer (storage-independent)
 
-The MCP server exposes five tools:
+The protocol layer comprises six primitives, none of which assume anything about where bytes are persisted:
 
-- `mnemonic_whoami`
-- `mnemonic_sign_memory`
-- `mnemonic_verify`
-- `mnemonic_prove_identity`
-- `mnemonic_recall`
+- **Canonical encoding** — deterministic CBOR per RFC 8949 §4.2.
+- **Content addressing** — blake3 over canonical bytes.
+- **Signing envelope** — COSE_Sign1 with Ed25519, producer identity bound via DID (`did:key`, `did:sol`, or other supported methods).
+- **Schema registry** — typed, versioned artifact schemas including `memory.episodic`, `memory.semantic`, `memory.procedural`, `memory.working`, `memory.identity`, `rag.context`, `rag.result`, `agent.state`, `receipt`, and `capability.token`.
+- **Lineage DAG** — content-addressed parent→child references with cycle detection and directional traversal.
+- **Capability tokens** — signed, scoped authorizations over lineage subtrees.
 
-Storage is selected by mode:
+A verifier needs the artifact bytes, the producer's public key, and (optionally) a capability token. It does not need to know which backend served those bytes. This is the core property that makes Mnemonic portable: an artifact verified locally and the same artifact verified after retrieval from on-chain storage return identical integrity and authorship results.
 
-- **Local mode:** SQLite only, synthetic local transaction IDs, no payment gate.
-- **Full mode:** signed artifact bytes can be persisted to Arweave, anchored on Solana, and indexed locally in SQLite.
+### 5.2 Consumer Surfaces
 
-### 5.3 Pipeline Walkthrough (sign / recall / verify)
+The protocol layer is exposed through several surfaces, each suited to a different runtime context. All surfaces consume the same protocol primitives (§5.1) and target the same `StorageBackend` abstraction (§5.3), so any surface can drive any backend the user configures.
+
+- **`core`** — the protocol library, shipped as both a native Rust crate and a WebAssembly module. Higher surfaces are built on `core`; it has no opinion on storage or transport.
+- **`cli`** — command-line client for terminals and scripts. Local-first by default; the user may configure cloud or on-chain backends per artifact.
+- **`sdk`** — embeddable library for applications. Self-host capable: an SDK consumer may produce its own on-chain anchor proofs directly, without routing through any hosted service.
+- **`mcp`** — networked MCP server with HTTP and stdio transports. The default surface for agent runtimes that speak MCP; also exposes the operator payment surface for hosted services (§5.7).
+- **`browser-extension`** — in-browser client built on the WASM build of `core`. Fully functional in the browser: local, cloud, and on-chain backends are all reachable.
+
+Which surface to use is an ergonomic choice driven by the embedding context. Which backend to target is an independent choice made by the user per artifact, driven by durability, trust, and cost requirements. The protocol layer constrains neither, and no surface restricts which backends are reachable.
+
+### 5.3 The `StorageBackend` Abstraction
+
+Backends implement a small trait:
+
+```rust
+trait StorageBackend {
+    async fn put(&self, artifact: &SignedArtifact) -> Result<BackendRef>;
+    async fn get(&self, reference: &BackendRef) -> Result<SignedArtifact>;
+    async fn list(&self, filter: &Filter) -> Result<Vec<BackendRef>>;
+    fn capabilities(&self) -> BackendCapabilities;
+}
+```
+
+`BackendCapabilities` declares what guarantees a backend provides: `durability`, `third_party_timestamp`, `censorship_resistance`, `random_access_latency`, `cost_per_write_micro_usdc`. Higher surfaces consult these to surface trade-offs to the user. Search is abstracted separately (`RecallIndex` trait) so semantic recall does not bind to any specific storage backend.
+
+### 5.4 Backend Implementations
+
+| Backend | Durability | 3rd-party timestamp | Latency | Cost/write | Primary use |
+|---|---|---|---|---|---|
+| **Local** (e.g. SQLite) | Operator only | None | <10 ms | 0 | Development, single-agent, working memory |
+| **Cloud** (e.g. object store / managed DB) | Provider SLA | Provider-trusted | 10–100 ms | Low | Production teams, single-org trust boundary |
+| **Content-addressed P2P** (e.g. IPFS/Filecoin) | Network-dependent | Weak (DHT) | 100 ms–s | Very low | Public content, opportunistic availability |
+| **Permanent storage network** (e.g. Arweave) | Permanent (pay-once) | Implicit (block order) | 1–10 s to settle | Low | Long-lived attestations, audit records |
+| **On-chain anchor** | Anchors only (paired with durable storage) | Strong | seconds | Low per anchor (batched) | Trustless timestamp for high-value artifacts |
+| **Hybrid** | Composite | Composite | Composite | Composite | Common configuration in practice |
+
+The table gives the protocol-relevant categories; specific backend identifiers and operational parameters are tracked in implementation documentation. Storage selection happens per artifact: the user (or the application configured by the user) picks one or more backends from the available categories based on the artifact's durability, trust, and cost requirements. Many deployments combine a local index for hot access with one or more durable backends for long-lived or third-party-verifiable artifacts.
+
+### 5.5 Why On-Chain Is Optional
+
+On-chain anchoring is the only backend category that provides independent third-party timestamp without trusting any single operator. It is therefore valuable, but it is also the most expensive: every on-chain transaction costs something. Mnemonic treats on-chain anchoring as one tool among several:
+
+- **Anchor when** an artifact's existence at a specific time must be verifiable by a party that does not trust the operator.
+- **Do not anchor when** local or cloud durability is sufficient — the vast majority of working memory, draft state, and intra-session artifacts fall here.
+- **Batch anchor when** many low-value artifacts can share a single timestamp (see §5.6).
+
+The protocol's guarantees about authorship and integrity require no chain at all — only signatures and canonical encoding. Chain anchoring adds **third-party timestamp** and **non-repudiation against operator collusion**, which are valuable but separable properties.
+
+### 5.6 Anchoring
+
+Anchoring produces a verifiable claim that an artifact existed at or before a given time, checkable by any party without trusting the artifact's producer or the operator that stored it. Signatures alone give authorship and integrity; anchoring adds independent timestamp and non-repudiation against operator backdating. These are separable properties, and the protocol exposes them separately rather than collapsing them into a single boolean.
+
+Anchoring is the only protocol operation whose marginal cost is bounded below by an external system. The protocol minimizes that cost through batching and remains agnostic to the choice of anchor backend.
+
+#### 5.6.1 Merkle batching via the lineage DAG
+
+The lineage DAG (§5.1) provides what batched anchoring requires. A batch root is a derived artifact whose parents are the artifacts in the batch:
+
+```
+BatchRoot = derive(
+    schema     = "batch.root",
+    parent_ids = [H_1, H_2, ..., H_N]
+)
+```
+
+Because the batch root's canonical bytes contain its parents' content-addressed ids, and its own id is the hash of those bytes, modifying any leaf breaks the chain up to the root. The lineage DAG functions as a Merkle commitment without additional structure. Only the batch root is anchored; inclusion of any single artifact is proved via the lineage path. Batches compose into trees for logarithmic inclusion proofs at large N. Flat versus tree batching is a deployment parameter, not a protocol commitment.
+
+The amortized per-artifact anchoring cost decreases proportionally with batch size. The user chooses batch parameters per their latency tolerance for anchor finality.
+
+#### 5.6.2 Backend-agnostic anchor proofs
+
+The protocol accepts any anchor backend that produces a verifiable inclusion proof linking a content-addressed hash to a publicly observable timestamp. The contribution of a backend is captured in an `anchor_proof` record: a backend identifier, a backend-specific reference, the anchored hash, and the timestamp.
+
+Backends differ in finality latency, cost per anchor, trust assumption, and timestamp granularity. The protocol takes no position on the right trade-off across these axes. The reference implementation supports specific backends; their identification and operational parameters are specified in implementation documentation rather than in this protocol document.
+
+#### 5.6.3 Self-anchoring
+
+The protocol distinguishes between *producing* an anchor and *accepting* an anchor proof. Any user can submit an anchor transaction independently of any hosted service and present the resulting proof to the protocol; verification uses the same logic regardless of who produced the anchor. This is the structural property that keeps the protocol open — hosted anchoring is convenience, not a gate. The `sdk` and `browser-extension` surfaces both support direct self-anchoring; `mcp` additionally supports anchoring on behalf of users that prefer a hosted path.
+
+#### 5.6.4 Verification states
+
+Anchoring is asynchronous. The protocol defines explicit states reflecting whether an artifact has settled, is in flight, or remains unanchored: **signed but not anchored**, **anchor pending**, **anchored**, **anchor failed**. A verifier always knows which state an artifact is in. The protocol never claims an anchor exists when it does not, and never claims an absence of anchor when one is in flight.
+
+#### 5.6.5 What anchoring does and does not guarantee
+
+Anchoring adds existence at or before a known time, tamper-evidence for all artifacts under the anchored root, and non-repudiation against operator backdating. Anchoring does not provide content availability, authorization to read, correctness of the artifact's claims, or sub-settlement-time finality. Signed-but-unanchored artifacts remain fully valid for authorship and integrity. Anchoring upgrades verifiability against operator collusion and adds a public timestamp.
+
+### 5.7 Protocol Economics
+
+The protocol takes positions on what must remain free and what may be paid, but takes no position on how any particular operator prices the services they offer. The result is an economic model in which the protocol itself is unmonetizable while the services built on top of it are freely monetizable. This separation is intentional: it is what allows the protocol to remain a public good even when individual operators are commercial.
+
+#### 5.7.1 Operations the protocol guarantees are free
+
+Two operations are free by protocol design and cannot be gated by any operator:
+
+- **Verification.** Any party may verify the authorship, integrity, lineage, and anchoring of any artifact they hold. Verification requires no operator service, no account, and no permission. This is the foundation of the protocol's trustlessness claim — if verification can be gated, the protocol's guarantees become contingent on whoever holds the gate.
+- **Self-hosting.** Any user may run a complete node, sign and verify locally, and participate in the protocol without paying any other operator. The full set of protocol operations is available to any user running their own implementation across the `cli`, `sdk`, and `browser-extension` surfaces.
+
+These two guarantees are structural protections against capture. They mean that no party — including the protocol's original authors — can hold the protocol's core functionality hostage.
+
+#### 5.7.2 Operations operators may charge for
+
+Operations whose cost is bounded below by real compute, storage, bandwidth, or external-system fees may be charged for by the operator providing them. These are service-layer choices and the protocol takes no position on whether they are priced, subsidized, or free at any particular operator:
+
+- Producing anchors against backends that have non-zero cost.
+- Hosting durable storage on behalf of users.
+- Running embedding, recall, or query workloads at scale.
+- Operating high-availability or dedicated infrastructure.
+- Providing managed identity, capability, or audit services.
+
+Charging is a feature of operator deployment, not of the protocol. An operator may choose to offer any of these for free, at cost, or at a margin. Users uncomfortable with one operator's pricing are free to use another, run their own, or operate without that service entirely.
+
+#### 5.7.3 Operator pluralism
+
+The protocol does not privilege any operator. There is no canonical hosted service, no preferred node, no central registry of authorized operators. Any party may run a Mnemonic node, accept artifacts from other operators, anchor on behalf of users, and charge for any of these services. Verification of an artifact is independent of which operator produced it.
+
+This pluralism is what makes the free-tier guarantees credible. An operator that abuses its position — by raising prices, degrading service, or restricting access — does not control the protocol; users can migrate to other operators or to self-hosting without losing accumulated state, because all artifacts are portable by signature and verifiable independently.
+
+#### 5.7.4 Payment as a protocol primitive
+
+The protocol provides primitives for operators that wish to charge for services: payment-gated tool calls, balance-tracking accounts, and standard micropayment patterns over established settlement rails. These primitives are tools, not mandates. An operator that wishes to provide free service simply does not enable payment gating; an operator that wishes to charge enables it. The same protocol code supports both modes.
+
+Operators that charge are responsible for the economics of their own services: pricing, free quotas, subsidies, revenue allocation, and treasury management. These are commercial decisions of individual operators and are not specified by the protocol.
+
+#### 5.7.5 What this economic model rules out
+
+The combination of free verification, free self-hosting, operator pluralism, and optional payment rules out several common failure modes of protocol economics:
+
+- **Verification capture.** No operator can charge for the act of checking whether an artifact is genuine.
+- **Publishing capture.** No operator can prevent a user from signing and storing artifacts; the user can always run their own node.
+- **Lock-in.** Artifacts produced under one operator are verifiable by any other operator and by self-hosted nodes. There is no operator-specific format or operator-specific verification path.
+- **Single-operator dependency for protocol liveness.** Even if a particular hosted operator becomes unavailable, the protocol continues to function across all other operators and self-hosters.
+
+The protocol does not rule out commercial activity. It rules out commercial activity that depends on holding the protocol itself hostage.
+
+#### 5.7.6 Implementation-level economics
+
+Specific pricing, free-tier quotas, subsidy models, treasury accounting, and revenue strategy are operator-level concerns documented separately from the protocol specification. Different implementations and different hosted operators will make different choices. The protocol document specifies only what those choices must respect: verification stays free, self-hosting stays available, and no operator becomes structurally privileged over others.
+
+### 5.8 Pipeline Walkthrough (sign / recall / verify)
 
 The protocol exposes three primary operational flows: signing a new memory, recalling stored memories by meaning, and verifying that a held artifact is genuine.
 
-**Sign.** A request carrying content and metadata traverses a fixed pipeline. The configured embedder produces a full-precision embedding vector; the vector is compressed so a small form can be carried inside artifact metadata for portability and durable-storage anchoring. The artifact — content, declared cognitive kind, producer identity, timestamp, tags, embedding metadata — is encoded to canonical CBOR with stable field ordering, hashed by content, and signed under a COSE_Sign1 envelope with the operator's Ed25519 identity. The signed artifact is then persisted to whichever backends the deployment's policy selects for that artifact: a local index for fast access, and any subset of cloud, content-addressed network, or on-chain backends for durability and third-party verifiability. When an anchor is requested, the content hash and a backend reference are submitted to the chosen anchor backend; the resulting proof is committed alongside the artifact.
+**Sign.** A request carrying content and metadata traverses a fixed pipeline. The configured embedder produces a full-precision embedding vector; the vector is compressed so a small form can be carried inside artifact metadata for portability and durable-storage anchoring. The artifact — content, declared cognitive kind, producer identity, timestamp, tags, embedding metadata — is encoded to canonical CBOR with stable field ordering, hashed by content, and signed under a COSE_Sign1 envelope with the operator's Ed25519 identity. The signed artifact is then persisted to whichever backends the user has selected for that artifact: a local index for fast access, and any subset of cloud, content-addressed network, or on-chain backends for durability and third-party verifiability. When the user requests an anchor, the content hash and a backend reference are submitted to the chosen anchor backend; the resulting proof is committed alongside the artifact.
 
 **Recall.** A query is embedded with the same provider used at sign time, scored against the stored full-precision embeddings by cosine similarity, and the top-k matches are returned ordered by score. Recall reads from the local index regardless of where else the artifacts are stored: the local index is the hot path for retrieval, while remote backends serve durability and third-party verification. Compressed embeddings in artifact metadata serve portability and cross-node proof-of-existence, not retrieval.
 
