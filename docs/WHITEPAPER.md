@@ -79,25 +79,42 @@ Forward-looking work — what extends this contract beyond v1 — is consolidate
 
 ## 4. Core Insight
 
-Agent memory should be semantically meaningful, cryptographically attributable, and operationally cheap.
+Agent memory should be semantically meaningful, cryptographically attributable, portable across runtimes, and operationally cheap.
 
-Raw transformer state is the wrong abstraction for portable memory. Attention caches are model-specific, opaque, large, and difficult for humans or independent systems to interpret. Semantic memory items are smaller, inspectable, portable, and compatible with retrieval systems.
+Raw transformer state is the wrong abstraction for portable memory. Attention caches are model-specific, opaque, large, and difficult for humans or independent systems to interpret. Typed memory artifacts are smaller, inspectable, portable, and compatible with retrieval systems.
 
-Mnemonic applies this principle through a layered pipeline:
+Mnemonic applies this principle through two pipelines that share the same protocol primitives: one for producing memory, one for transferring it across a trust boundary into another runtime.
+
+The **sign pipeline** turns content into a verifiable artifact:
 
 ```text
 content
   -> embed
   -> compress
-  -> build typed artifact
+  -> build typed artifact (declared cognitive kind)
   -> canonicalize to CBOR
   -> hash canonical bytes with blake3
   -> sign with Ed25519 as COSE_Sign1
-  -> persist locally or externally
-  -> recall and verify through MCP
+  -> persist to one or more backends
+  -> recall by meaning
+  -> verify against producer, lineage, and (optionally) anchor
 ```
 
-The current implementation uses full embeddings in SQLite for recall. Compressed embeddings are produced and embedded in artifact metadata, supporting portability and future cross-node verification work. Compression uses TurboQuant scalar quantization to 2–4 bits per dimension, yielding up to roughly 32× size reduction so embeddings remain cheap to carry across systems and to anchor on durable storage. Historical research explored compressed candidate generation plus exact reranking; that remains a protocol design direction rather than the current local recall path.
+The **share / rehydrate pipeline** moves a signed artifact from one runtime to another:
+
+```text
+signed artifact + capability token
+  -> sharing handshake (authenticate, scope-check, encrypted transit)
+  -> verify (authorship, integrity, lineage, anchor)
+  -> filter (per capability scope)
+  -> rank, compress, format
+  -> frame (safe-injection markers)
+  -> inject into target runtime context
+```
+
+The two pipelines compose: an artifact signed in one runtime is the input to a share/rehydrate flow that hands it to another, and both flows verify the same canonical bytes against the same producer identity. This composition is what gives the protocol portable memory as a property rather than as an aspiration.
+
+Compression of embeddings serves portability and durable-storage anchoring, not the local recall path: shrinking embeddings keeps artifact metadata cheap to carry across systems and to anchor. The specific compression scheme, bit width, and recall implementation are documented separately as implementation choices.
 
 ## 5. Architecture Overview
 
