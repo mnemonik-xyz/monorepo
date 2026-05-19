@@ -75,6 +75,10 @@ name = "decompress"
 harness = false
 
 [[bench]]
+name = "decompress_fidelity"
+harness = false
+
+[[bench]]
 name = "cbor_codec"
 harness = false
 
