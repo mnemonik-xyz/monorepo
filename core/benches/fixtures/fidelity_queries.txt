@@ -1,0 +1,22 @@
+# Queries for decompress_fidelity_real bench. 10 sentences, 2 per cluster.
+# Same comment / blank-line conventions as fidelity_corpus.txt.
+
+# programming
+How does Rust enforce memory safety without a garbage collector?
+What does a procedural macro do at compile time?
+
+# cooking
+What is the right way to caramelize onions slowly?
+Why do you let a steak rest after cooking it?
+
+# travel
+Where can I find rice terraces in Indonesia?
+Which long-distance rail line crosses Russia from west to east?
+
+# music
+What does counterpoint mean in classical composition?
+How is the twelve-bar blues structured?
+
+# sports
+Why is cadence important for road cyclists?
+What are the two lifts in Olympic weightlifting?
