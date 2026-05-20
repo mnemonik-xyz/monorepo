@@ -1,0 +1,74 @@
+# Real-text fidelity corpus for decompress_fidelity_real bench.
+# 60 sentences across 5 topical clusters (12 each). Sections separated by
+# a blank line; lines starting with # are comments and skipped. The bench
+# loads this via include_str! at compile time -- no runtime IO.
+
+# --- Cluster 1: programming ---
+Rust's ownership model eliminates entire classes of memory safety bugs at compile time.
+The borrow checker enforces aliasing rules without runtime overhead.
+Async functions in Rust desugar into state machines that implement the Future trait.
+Cargo workspaces let you share dependency resolution across multiple member crates.
+The trait system enables zero-cost generic abstractions through monomorphization.
+Lifetime annotations describe how references relate to one another in scope.
+Macros come in two flavors: declarative (macro_rules) and procedural (proc-macro).
+Pattern matching with the match keyword is exhaustively checked by the compiler.
+The Result and Option types replace exceptions for fallible computations.
+Send and Sync are auto-traits that gate which values can cross thread boundaries.
+Smart pointers like Box, Rc, and Arc manage heap allocation and shared ownership.
+Iterators are lazy chains that compile down to tight loops with bounds checks elided.
+
+# --- Cluster 2: cooking ---
+A good risotto needs constant stirring to release the starch from arborio rice.
+Searing meat at high heat develops the Maillard reaction and deep flavor.
+Sourdough fermentation relies on wild yeast and lactobacillus cultures.
+A sharp knife is the most important tool in any home kitchen.
+Resting a steak after cooking lets the juices redistribute evenly.
+Reducing a sauce concentrates flavors by evaporating excess water.
+Bloom whole spices in hot oil before adding aromatics like onion or garlic.
+Tempering chocolate produces a glossy snap and stable crystal structure.
+Caramelizing onions slowly over low heat takes at least forty minutes.
+Salt enhances flavor by suppressing bitterness and amplifying sweetness.
+Knead bread dough until it passes the windowpane test for gluten development.
+Frying in clarified butter avoids the burnt milk solids of whole butter.
+
+# --- Cluster 3: travel ---
+Tokyo's subway system is famously punctual but daunting at rush hour.
+The Camino de Santiago draws pilgrims along several historic routes through Spain.
+Visiting the Inca trail to Machu Picchu requires a permit booked months ahead.
+Iceland's ring road circles the entire country in about ten driving days.
+A capsule hotel offers a small sleeping pod for budget travelers in Japan.
+The Trans-Siberian railway crosses eight time zones from Moscow to Vladivostok.
+Patagonia's Torres del Paine has notoriously fickle weather year round.
+Marrakech's medina is a maze of souks selling spices, textiles, and copperware.
+A Schengen visa allows tourist travel across most of continental Europe.
+Bali's terraced rice paddies are a UNESCO cultural landscape.
+The Faroe Islands have more sheep than people across eighteen rocky islands.
+New Zealand's South Island has fjords, glaciers, and rainforests within short drives.
+
+# --- Cluster 4: music ---
+Bach's Well-Tempered Clavier contains a prelude and fugue in every major and minor key.
+Jazz improvisation builds melodies over a fixed chord progression.
+A drum kit's hi-hat sits between the snare and the ride cymbal.
+Sonata form moves through exposition, development, and recapitulation sections.
+The pentatonic scale appears in folk traditions around the world.
+Counterpoint is the art of combining independent melodic lines.
+A fugue subject is introduced in one voice and answered in others.
+Equal temperament tunes every semitone to the same frequency ratio.
+The blues uses dominant seventh chords on the I, IV, and V degrees.
+Synthesizers shape sound with oscillators, filters, and envelope generators.
+Polyrhythm overlays two rhythmic patterns with different beat counts.
+Bel canto opera prizes a smooth, agile vocal line above orchestral textures.
+
+# --- Cluster 5: sports ---
+A marathon covers 42.195 kilometers and requires months of base training.
+Climbers grade routes on the Yosemite Decimal System or French scale.
+Tennis serves can exceed 220 kilometers per hour at the professional level.
+Soccer's offside rule prevents attackers from camping behind the defense.
+Basketball's three-point line was added to the NBA in 1979.
+A cyclist's pedaling efficiency improves with a higher cadence on climbs.
+Surfing waves break consistently when the seabed pushes swell upward.
+Olympic weightlifting consists of the snatch and the clean and jerk.
+Skiing's super-G combines elements of downhill and giant slalom.
+Boxing footwork keeps a fighter balanced and ready to throw or evade.
+A triathlon strings together swim, bike, and run legs in sequence.
+Skateboarding's ollie is the foundation move for most aerial tricks.

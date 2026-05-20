@@ -75,6 +75,15 @@ name = "decompress"
 harness = false
 
 [[bench]]
+name = "decompress_fidelity"
+harness = false
+
+[[bench]]
+name = "decompress_fidelity_real"
+harness = false
+required-features = ["local-embed"]
+
+[[bench]]
 name = "cbor_codec"
 harness = false
 
