@@ -193,54 +193,6 @@ async fn sign_memory_deferred(
     }))
 }
 
-/// `mcp_auth` — bridge tool for IDE clients (Cursor 3.2+, Claude.ai) whose
-/// MCP UI does not surface a native Connect/Authorize button for
-/// non-directory servers.
-///
-/// Allowlisted in `bearer_auth_middleware::ALLOWLIST_UNAUTH_TOOLS` so it is
-/// callable WITHOUT a JWT — the explicit purpose of the tool is to tell an
-/// unauthenticated agent where to send the user to authorize.
-///
-/// When `jwt_sub` is present (caller did include a Bearer JWT), the tool
-/// reports the authenticated identity. When absent, it returns the install
-/// URL the agent should surface in chat as a clickable link, plus a fallback
-/// for agents that prefer the CLI path.
-pub fn mcp_auth(jwt_sub: Option<&str>) -> serde_json::Value {
-    if let Some(sub) = jwt_sub {
-        return serde_json::json!({
-            "status": "authenticated",
-            "sub": sub,
-            "did": format!("did:sol:{sub}"),
-            "hint": format!(
-                "Already authenticated as {sub}. All Mnemonic MCP tools \
-                 (mnemonic_whoami / mnemonic_sign_memory / mnemonic_recall / \
-                 mnemonic_verify / mnemonic_prove_identity / \
-                 mnemonic_check_pending) should work."
-            ),
-        });
-    }
-    serde_json::json!({
-        "status": "unauthorized",
-        "install_url": "https://mnemonik.xyz/install",
-        "instructions": "This Mnemonic MCP connection is not yet authorized. \
-                         To authorize, click the install_url above — it routes \
-                         through your IDE's MCP install handler, which will \
-                         (re)trigger the OAuth login flow. A browser tab pops \
-                         up to mnemonik.xyz to approve, then all Mnemonic \
-                         tools become available in this chat. The OAuth flow \
-                         signs a one-time challenge with your local Ed25519 \
-                         keypair (kept in your browser's localStorage); the \
-                         server never sees the secret.",
-        "alternative_cli": "If the install URL does not trigger the IDE's auth \
-                            flow, run `npx @mnemonik-xyz/cli init && npx \
-                            @mnemonik-xyz/cli login` in a terminal, then paste \
-                            the resulting JWT into your IDE's MCP server \
-                            configuration as `Authorization: Bearer <jwt>` \
-                            headers.",
-        "discord": "https://discord.gg/ws6wruJj",
-    })
-}
-
 /// `mnemonic_check_pending` — resolve a deferred-sign correlation_id to its
 /// final on-chain state once the user has approved the COSE envelope in the
 /// browser. Returns one of:

@@ -11,7 +11,7 @@ size: M
 
 Build a layered test suite that covers the full Mnemonic MCP authorization + tool-call flow from each major client perspective: **Cursor**, **VS Code (with Copilot Chat MCP)**, **Claude Desktop**. Per m13v's guidance on issue #59, the suite is split into three tiers by determinism:
 
-1. **Tier 1 — CI-runnable, deterministic.** Network-free Rust unit tests + Playwright tests against the live (or local) MCP server that exercise the protocol-level flows: tools/list shape, allowlist semantics, OAuth handshake, deferred-sign flow, mcp_auth tool, WWW-Authenticate header presence, path-specific `/.well-known/oauth-protected-resource/mcp` shape, install-deeplink URL formats. PTY-driven CLI tests (via `child_process.spawn` already in use) cover `mnemonic init / login / sign / recall / verify`. Run on every PR.
+1. **Tier 1 — CI-runnable, deterministic.** Network-free Rust unit tests + Playwright tests against the live (or local) MCP server that exercise the protocol-level flows: tools/list shape, allowlist semantics, OAuth handshake, deferred-sign flow, WWW-Authenticate header presence, path-specific `/.well-known/oauth-protected-resource/mcp` shape, install-deeplink URL formats. PTY-driven CLI tests (via `child_process.spawn` already in use) cover `mnemonic init / login / sign / recall / verify`. Run on every PR.
 
 2. **Tier 2 — Local macOS smoke.** `cliclick` + AppleScript scripts that exercise the GUI install deeplinks: opening the install URL on `mnemonik.xyz/install`, clicking the "Install in Cursor" / "Install in VS Code" button, observing the deeplink hand-off to the right app, asserting the MCP server appears in the app's MCP config. Run manually or via `make smoke`. Documented as the canonical pre-release verification.
 
@@ -22,7 +22,7 @@ Build a layered test suite that covers the full Mnemonic MCP authorization + too
 Today's session surfaced multiple regressions that were missed because no automated test covers them:
 
 - The `tools/list` count assertion in `mcp.rs` was the ONLY guard against tool-list shape changes.
-- No test asserted the **WWW-Authenticate header** on 401 responses (MCP-spec mandate). Adding `mcp_auth` and the path-specific protected-resource endpoint required manual verification.
+- No test asserted the **WWW-Authenticate header** on 401 responses (MCP-spec mandate). Adding the path-specific protected-resource endpoint required manual verification.
 - The **VS Code deeplink format** (`vscode://` vs `vscode:`) regressed to a Safari-incompatible form; only spotted when a user reported it.
 - The **Cursor MCP OAuth flow** stalled silently for non-directory servers without a Connect button — no test could catch this UX gap from inside our codebase, but a smoke script that runs `cliclick` on the actual app would catch it the moment Cursor's UI changes.
 
@@ -32,9 +32,9 @@ Without tests, every server-side change that touches OAuth, tools/list, install-
 
 **Tier 1 acceptance:**
 
-- `cargo test --workspace` covers: WWW-Authenticate header on every 401 from /mcp; mcp_auth callable without JWT returning `status: "unauthorized"` + install_url; mcp_auth WITH a valid JWT returns `status: "authenticated"` + sub; tools/list returns exactly 7 tools by name; `/.well-known/oauth-protected-resource/mcp` returns `resource: "<origin>/mcp"`; root variant still returns `resource: "<origin>"`.
+- `cargo test --workspace` covers: WWW-Authenticate header on every 401 from /mcp; Claims attached on allowlisted discovery methods when a valid JWT is present; tools/list returns exactly 6 tools by name; `/.well-known/oauth-protected-resource/mcp` returns `resource: "<origin>/mcp"`; root variant still returns `resource: "<origin>"`.
 - `npx playwright test webapp/e2e/` covers: install deeplinks emit the documented URL formats (Cursor `cursor://anysphere.cursor-deeplink/...`, VS Code `vscode://mcp/install?...`, Claude.ai pasted-URL); OAuth handshake against live server completes end-to-end; deferred-sign flow returns real `solana_tx` when STORAGE_MODE=full; existing tests stay green.
-- `npm test --workspace=packages/cli --workspace=packages/sdk` covers: existing CLI / SDK unit + integration suite, plus a new test for `mcp_auth` tool semantics in the SDK if applicable.
+- `npm test --workspace=packages/cli --workspace=packages/sdk` covers: existing CLI / SDK unit + integration suite.
 
 **Tier 2 acceptance:**
 

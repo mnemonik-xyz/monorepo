@@ -15,12 +15,11 @@ Three tiers, by determinism + cost:
 ```
 Tier 1 — CI-runnable (every PR)
 ├── Rust: mcp/src/oauth.rs    → mod tests   (oauth handlers + middleware)
-├── Rust: mcp/src/tools.rs     → mod tests   (mcp_auth, check_pending, recall semantics)
+├── Rust: mcp/src/tools.rs     → mod tests   (check_pending, recall semantics)
 ├── Rust: mcp/src/api.rs       → mod tests   (sign-callback storage_mode branching)
 ├── TS:   webapp/src/components/InstallButtons.test.tsx (deeplink format)
 ├── TS:   webapp/e2e/oauth-flow.spec.ts                  (browser OAuth dance)
 ├── TS:   webapp/e2e/deferred-sign-flow.spec.ts          (sign approval → callback)
-├── TS:   webapp/e2e/mcp-auth-tool.spec.ts        ← NEW (mcp_auth + WWW-Auth + protected-resource shape, against live server)
 └── TS:   packages/cli/test/integration/cli-flows.test.ts (PTY init/login/sign/recall/verify)
 
 Tier 2 — Local macOS smoke (manual, pre-release)
@@ -46,10 +45,9 @@ Tier 3 — Manual verification runbook (pre-launch sign-off)
 | # | Description | Files | Est |
 |---|---|---|---|
 | 1 | Rust unit tests for WWW-Authenticate header presence on every 401 path through `bearer_auth_middleware` | `mcp/src/oauth.rs` | 30m |
-| 2 | Rust unit tests for `mcp_auth` allowlist + Claims-extraction-when-present semantics | `mcp/src/oauth.rs`, `mcp/src/tools.rs` | 30m |
+| 2 | Rust unit tests for Claims-extraction-on-allowlisted-request semantics | `mcp/src/oauth.rs` | 30m |
 | 3 | Rust unit tests for `/.well-known/oauth-protected-resource/mcp` shape + root variant continues to work | `mcp/src/oauth.rs` | 15m |
 | 4 | Rust unit tests for tools/list count + names (replaces fragile `tools.len() == N` assertion) | `mcp/src/mcp.rs` | 15m |
-| 5 | New Playwright spec `webapp/e2e/mcp-auth-tool.spec.ts` — exercises mcp_auth + WWW-Auth + protected-resource against live server | `webapp/e2e/mcp-auth-tool.spec.ts` | 45m |
 | 6 | Cursor install smoke script (cliclick + AppleScript + file-system assertion on `~/.cursor/mcp.json`) | `work/cursor-vscode-e2e-tests/smoke/cursor.sh` | 45m |
 | 7 | VS Code install smoke script (analogous, asserts `~/.vscode/extensions/.../mcp_servers.json` or platform-equivalent) | `work/cursor-vscode-e2e-tests/smoke/vscode.sh` | 45m |
 | 8 | Claude Desktop install smoke script (no deeplink — config file edit + restart; asserts via `claude_desktop_config.json`) | `work/cursor-vscode-e2e-tests/smoke/claude-desktop.sh` | 30m |
