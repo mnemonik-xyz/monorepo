@@ -33,9 +33,15 @@ describe("Keypair", () => {
   it("toJSON returns a defensive copy", async () => {
     const kp = await Keypair.generate();
     const a = kp.toJSON();
-    a.secret[0] = 0xff;
+    const original = a.secret[0];
+    // Pick a sentinel guaranteed-different from the original byte so the
+    // assertion doesn't false-fail ~1/256 runs when RNG happens to produce
+    // secret[0] === sentinel.
+    const sentinel = (original ^ 0xff) & 0xff;
+    a.secret[0] = sentinel;
     const b = kp.toJSON();
-    expect(b.secret[0]).not.toBe(0xff);
+    expect(b.secret[0]).toBe(original);
+    expect(b.secret[0]).not.toBe(sentinel);
   });
 
   it("fromJSON round-trips a generated keypair", async () => {
@@ -47,13 +53,13 @@ describe("Keypair", () => {
   it("fromJSON rejects garbage shapes", async () => {
     await expect(
       // @ts-expect-error — intentional bad input
-      Keypair.fromJSON({ wrong: "shape" })
+      Keypair.fromJSON({ wrong: "shape" }),
     ).rejects.toBeInstanceOf(UserError);
   });
 
   it("fromJSON rejects wrong-length secret", async () => {
     await expect(
-      Keypair.fromJSON({ secret: [1, 2, 3], pubkey_base58: "abc" })
+      Keypair.fromJSON({ secret: [1, 2, 3], pubkey_base58: "abc" }),
     ).rejects.toBeInstanceOf(UserError);
   });
 
@@ -67,7 +73,7 @@ describe("Keypair", () => {
 
   it("fromBackupString rejects malformed input", async () => {
     await expect(Keypair.fromBackupString("{not json")).rejects.toBeInstanceOf(
-      UserError
+      UserError,
     );
   });
 });
