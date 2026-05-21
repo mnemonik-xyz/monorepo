@@ -32,7 +32,7 @@ solana-sdk = "2.2"
 spl-memo = "6"
 futures = "0.3"
 tracing = "0.1"
-keyring = "4"
+keyring = { version = "3", default-features = false, features = ["apple-native", "windows-native", "sync-secret-service"] }
 crypto_box = "0.9"
 fastembed = { version = "5", optional = true }
 tokio = { version = "1", features = ["time", "rt"] }
