@@ -1,3 +1,13 @@
+pub mod keystore;
+pub mod keystore_file;
+#[cfg(test)]
+pub mod keystore_memory;
+pub mod keystore_os;
+
+pub use keystore::{KeyStore, KeystoreEntry, KeystoreError};
+pub use keystore_file::FileKeyStore;
+pub use keystore_os::OsKeyStore;
+
 use solana_sdk::pubkey::Pubkey;
 use solana_sdk::signature::{Keypair, Signer};
 
