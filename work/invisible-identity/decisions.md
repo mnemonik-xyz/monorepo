@@ -68,6 +68,31 @@ All five deviations resolved in chat on 2026-05-21:
 
 ---
 
+## Task 1: Add keyring + crypto_box deps
+
+**Status:** Done
+**Commit:** b01a2ab (initial), c05b62a (security-fix round 2)
+**Agent:** task-1-rust-deps (impl) + code-reviewer + security-auditor (reviews)
+**Summary:** Added `keyring = { version = "3", default-features = false, features = ["apple-native", "windows-native", "sync-secret-service"] }` and `crypto_box = "0.9"` to `core/Cargo.toml`. Compile gate only — no functional code. Build, clippy, fmt all green for lib/bin targets (pre-existing `--all-targets` clippy errors in `mcp/tests/` confirmed unchanged by this task).
+**Deviations:** Tech-spec §Dependencies pinned `keyring = "2"`. Per `decisions.md` follow-up 1 ("bump version pins if newer majors exist"), evaluated v2/v3/v4. Chose **v3.6.3** (latest of traditional-API line). Rejected v4.0.1: it is a meta CLI/sample crate with no `[features]` section, unconditionally depends on `db-keystore` → `turso` (libSQL) + `tantivy` + `mimalloc` (~150 unrelated transitive crates on desktop targets). Round 1 security-auditor flagged this as HIGH; round 2 fix (commit c05b62a) downgraded to v3 and explicitly selected native-backend features, eliminating the libSQL/tantivy tree (net Cargo.lock delta vs round 1: -185 packages, +12). Tech-spec §Dependencies should be updated to say `keyring = "3"` next time the spec is touched.
+
+**Reviews:**
+
+*Round 1:*
+- code-reviewer: not run (initial spawn used wrong subagent name)
+- security-auditor: 1 HIGH (keyring v4 db-keystore unconditional dep) + 1 medium + 1 low + 3 info → [logs/working/task-1/security-auditor-round1.json]
+
+*Round 2 (after c05b62a):*
+- code-reviewer: OK (1 minor doc nit re: decisions.md entry, addressed by this entry; 4 info) → [logs/working/task-1/code-reviewer-round1.json]
+- security-auditor: OK (round 1 HIGH resolved; 1 low documentation nit) → [logs/working/task-1/security-auditor-round2.json]
+
+**Verification:**
+- `cargo build --workspace` → clean (4s incremental)
+- `cargo clippy` lib/bin targets → clean (`--all-targets` flagged pre-existing `mcp/tests/` integration-test errors, unrelated to this task)
+- `cargo fmt --all -- --check` → clean
+
+---
+
 <!-- Task entries are appended below by agents as work completes.
 
 Format is strict — use only these sections, do not add others.
