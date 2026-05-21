@@ -93,6 +93,37 @@ All five deviations resolved in chat on 2026-05-21:
 
 ---
 
+## Task 2: KeyStore trait + Os/File/Memory impls
+
+**Status:** Done
+**Commits:** 9decc93 (impl), 8ba3b93 (round 2 fixes), 3882f06 (round 3 + tests)
+**Agent:** task-2-keystore (impl) + code-reviewer / security-auditor / test-reviewer
+**Summary:** Added `KeyStore` trait with three impls in `core/src/identity/keystore{,_os,_file,_memory}.rs`. Trait is `Send + Sync` with `get`/`set`/`remove`/`available`/`name`. `KeystoreEntry` uses hand-rolled `Serialize` for byte-equal JSON output `{"secret":[...64...],"pubkey_base58":"..."}` per Decision 13 (verified by golden-bytes unit test). `FileKeyStore` uses `tempfile::NamedTempFile::new_in(parent)` + `sync_all()` + `persist()` for atomic write; mode 0600 on Unix via explicit `set_permissions(0o600)` before write. `OsKeyStore::available()` is lazy and does NOT call `get_password()` (Decision 3: no keychain prompts at bootstrap). `MemoryKeyStore` is `#[cfg(test)]`-only. 21 unit tests pass; 1 ignored OS-keychain roundtrip (Wave 3 Task 9 will opt-in).
+
+**Deviations:**
+- Promoted `tempfile` from `[dev-dependencies]` to `[dependencies]` — required by production `FileKeyStore::set`. Removed the stale dev-dep entry.
+- Added `KeystoreError::PlatformUnavailable { reason }` instead of treating it as a unit variant — needed to carry headless-Linux's reason string per Decision 4 (file-fallback's stderr line includes the cause).
+- `keyring` 3.x API renamed `PlatformFailure` → `NoStorageAccess` from the v2 API the spec was drafted against. `OsKeyStore` maps `NoStorageAccess` → `PlatformUnavailable` consistently across `get`/`set`/`remove`/`available`.
+
+**Reviews:**
+
+*Round 1:*
+- code-reviewer: needs_fixes — 2 medium (`available()` not lazy; inconsistent `NoStorageAccess` mapping in `set`/`remove`), 4 minor (module-doc `///` vs `//!`, `tempfile` dup, missing `sync_all`, empty-parent edge case) → [logs/working/task-2/code-reviewer-round1.json]
+- security-auditor: OK — 2 low (Zeroize on intermediate String/Value; sync_all before persist), 9 info (Debug redaction verified; `KeystoreError` carries no secret; `keyring 3.6.3` Display impls audited; `NamedTempFile` default 0o600 on Unix confirmed). Deferred items: Zeroize hardening → Wave 5. → [logs/working/task-2/security-auditor-round1.json]
+- test-reviewer: OK — 13/13 required tests present, 6 useful extras, 0 noise. 3 low (missing overwrite + garbage-JSON tests) → [logs/working/task-2/test-reviewer-round1.json]
+
+*Round 2 (8ba3b93):* Lazy `OsKeyStore::available()` (Decision 3), consistent `NoStorageAccess` mapping, `//!` module docs, dedup `tempfile`. Skipped agent re-review on the targeted fixes; verified by re-running gates.
+
+*Round 3 (3882f06):* `sync_all()` before `persist()`; 3 new tests (`set_overwrites_existing_entry` × 2 + `get_on_garbage_json_returns_err`). Test count 18 → 21.
+
+**Verification:**
+- `cargo test -p mnemonic-core --lib identity::keystore` → 21 passed, 1 ignored
+- `cargo clippy -p mnemonic-core --lib --tests -- -D warnings` → clean
+- `cargo fmt --all -- --check` → clean
+- Golden JSON test asserts byte-exact `{"secret":[0,0,...,0],"pubkey_base58":"test"}`
+
+---
+
 <!-- Task entries are appended below by agents as work completes.
 
 Format is strict — use only these sections, do not add others.
