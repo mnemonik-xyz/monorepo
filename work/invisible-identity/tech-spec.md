@@ -47,7 +47,7 @@ Architecturally there is no new service. Everything lands as:
 - `core/src/identity/keystore_os.rs` (new) — `OsKeyStore` wrapping the `keyring` crate. macOS Keychain, Linux Secret Service, Windows Credential Manager.
 - `core/src/identity/keystore_file.rs` (new) — `FileKeyStore` operating on `~/.mnemonic/identity.json` in legacy format `{secret, pubkey_base58}`.
 - `core/src/identity/keystore_memory.rs` (new, `#[cfg(test)]` only) — `MemoryKeyStore` for unit tests.
-- `core/src/identity/mod.rs` (modified) — re-export new modules; the existing `load_or_create_keypair(path)` becomes a deprecated thin wrapper around `ensure()`.
+- `core/src/identity/mod.rs` (modified) — re-export new modules; the existing `load_or_create_keypair(path)` is **removed** in the same PR that introduces `ensure()` (we are pre-1.0, no external Rust consumers documented).
 
 **`mnemonic-mcp` (Rust binary) — modified:**
 
@@ -353,7 +353,7 @@ mnemonic identity push-to-webapp [--qr-only|--code-only]
 
 ### Removed packages
 
-None. The old `load_or_create_keypair(path)` codepath remains as a thin deprecated wrapper for one release cycle, then removed in a follow-up.
+`load_or_create_keypair(path)` is removed in the same PR that introduces `ensure()`. No deprecation cycle — pre-1.0, no documented external consumers of `mnemonic-core`. Callsites in `mcp/` are updated to `ensure()` directly.
 
 ### Using existing (from project)
 
@@ -465,37 +465,52 @@ Webapp `/install` → click "Install in Cursor" → deeplink opens → Cursor MC
 
 ## User-Spec Deviations
 
-Each entry is `[PENDING USER APPROVAL]` until accepted.
+All entries below were `[PENDING USER APPROVAL]` in the initial draft; they were resolved in chat on 2026-05-21 and are now `[ACCEPTED]`. See `decisions.md` for the audit log.
 
-### Deviation 1: Lazy keychain access at bootstrap
+### Deviation 1: Lazy keychain access at bootstrap — `[ACCEPTED]`
 
 **User-spec implies:** `identity.ensure()` makes identity available after bootstrap.
 **Tech-spec does:** Only pubkey is loaded from disk at bootstrap. The secret is fetched from keychain on-demand at first signing operation. `Identity` returned by `ensure()` carries a `SecretAccessor` closure, not the raw bytes.
-**Why:** Avoids OS keychain prompt on benign commands like `mnemonic whoami` / `--version`. Marketplace gate (no prompts on install) requires this. `[PENDING USER APPROVAL]`
+**Why:** Avoids OS keychain prompt on benign commands like `mnemonic whoami` / `--version`. Marketplace gate (no prompts on install) requires this. macOS will still prompt at *first* signing — users hit "Always Allow" once. README ships this nuance.
 
-### Deviation 2: x25519 wrapping for ticket secrets — server still sees plaintext momentarily
+### Deviation 2: x25519 wrapping for ticket secrets — broker trust model with momentary server plaintext — `[ACCEPTED]`
 
 **User-spec implies:** secrets are never plaintext on the network.
 **Tech-spec does:** Wrapping is on the network, but the server unwraps to its own ephemeral key on `/redeem` and re-wraps to the redeemer's submitted ephemeral. There is a sub-millisecond window where the server process memory holds the plaintext secret.
-**Why:** Issuing and redeeming devices don't know each other's pubkeys at issue time, so the server has to be a broker. Alternatives (pre-shared symmetric keys, multi-step exchanges) break the "open URL on another device" UX. This is the standard trust model for end-to-end encrypted onboarding flows. `[PENDING USER APPROVAL]`
 
-### Deviation 3: New `crypto_box` direct dep on Rust side + `@noble/curves` direct dep on Node
+**Trust model (pinned):**
+
+The Mnemonic webapp/MCP server is a **trusted broker** for the ticket-redemption step. A compromised server can already mint forged JWTs and serve malicious responses to any client; it can therefore already break the user's identity guarantees independently of this code path. Adding a momentary plaintext window during ticket re-wrap **does not expand the existing trust surface**: an attacker who can dump server process memory at the exact ms of a `/redeem` call can also impersonate the user via JWT signing.
+
+Mitigations within this trust model:
+- **Plaintext window is sub-millisecond** — secret bytes are in scope only for the duration of `crypto_box::open()` → `crypto_box::seal()`. No logging, no persistence, no async boundary that could extend the lifetime.
+- **Single-use tickets** — `redeemed=true` flag flipped before the re-wrap completes; second attempt returns 410 Gone.
+- **5-minute TTL** — windows where a memory dump even matters are bounded.
+- **Server's static x25519 keypair is in-process only**, generated at server start. Not persisted. Server restart invalidates all in-flight tickets (acceptable per TTL).
+
+What this trust model does *not* cover:
+- Compromised CLI or browser endpoint — out of scope; same as any client-side key compromise today.
+- Malicious server operator — out of scope; same as today's JWT issuance.
+- Memory-dump attack on the running server during the precise re-wrap moment — explicitly accepted within the trust model.
+
+If a deployment ever needs zero server-side plaintext, the fallback is the manual-paste flow (issuer prints encrypted blob, user copies to redeemer device, redeemer decrypts with a pre-shared symmetric key derived from a short passphrase). Not in scope for this feature.
+
+### Deviation 3: New `crypto_box` direct dep on Rust side + `@noble/curves` direct dep on Node — `[ACCEPTED]`
 
 **User-spec implies:** dependencies are unchanged except where strictly necessary.
 **Tech-spec adds:** Two new direct dependencies for x25519 sealed-box. Both already exist as transitive deps but are now promoted to direct so version-pinning is explicit.
-**Why:** Implicit transitive deps for cryptographic primitives are a maintenance footgun (auto-upgrades have caused breakage in this stack before). `[PENDING USER APPROVAL]`
+**Why:** Implicit transitive deps for cryptographic primitives are a maintenance footgun (auto-upgrades have caused breakage in this stack before — `solana-sdk` major bumps in 2025 silently changed x25519 backends).
 
-### Deviation 4: Existing `load_or_create_keypair(path)` deprecated for one release cycle, not removed immediately
+### Deviation 4: Remove `load_or_create_keypair(path)` immediately, no deprecation cycle — `[ACCEPTED]`
 
-**User-spec implies:** new path replaces old.
-**Tech-spec does:** Wraps old function as a thin deprecated shim calling `ensure()`. Removed in a follow-up release. Reason: any external consumer of `mnemonic-core` (third-party Rust users — currently none documented, but possible) gets a clean deprecation window.
-**Why:** Standard Rust library hygiene. Zero functional impact, minimal code surface. `[PENDING USER APPROVAL]`
+**Original draft:** keep old function as a deprecated thin shim for one release cycle.
+**Tech-spec does:** Remove `load_or_create_keypair(path)` in the same PR that introduces `ensure()`. All callsites in `mcp/` are updated. Pre-1.0 project, no documented external Rust consumers of `mnemonic-core`. Deprecation windows are for ecosystems with stranger consumers; we don't have those.
 
-### Deviation 5: Webapp install-page detection of platform
+### Deviation 5: Webapp install-page sorts by detected platform, does not hide other buttons — `[ACCEPTED]`
 
 **User-spec describes:** install deeplinks for Cursor / VS Code / Claude Desktop.
-**Tech-spec adds:** `webapp/src/pages/install.tsx` does User-Agent sniff to highlight the relevant button for the current OS; all three are always available as fallbacks. Adds ~30 LOC.
-**Why:** UX polish that closes the user-spec scenario 6 end-to-end. Not in user-spec but obviously expected for a "one click install" pitch. `[PENDING USER APPROVAL]`
+**Tech-spec adds:** `webapp/src/pages/install.tsx` detects platform via `navigator.userAgentData` (with `navigator.platform` fallback) and sorts the three install buttons with the detected-platform one first. All three buttons are always visible. ~5 LOC, not 30. No button is ever hidden — UA detection failing safely leaves the original order intact.
+**Why:** Softer than UA-sniffing-to-hide. Sorting ages better — "Cursor on Linux while browsing on iPad" is a real edge case.
 
 ## Tasks (wave decomposition)
 
@@ -505,7 +520,7 @@ Tasks live as `tasks/<n>.md` files; this section lists their headlines and wave 
 
 1. **`tasks/1.md` — Add `keyring` and `crypto_box` to `core/Cargo.toml`, re-export from `lib.rs`.** Smallest possible diff that compiles. Sequential dependency for the rest of Wave 1.
 2. **`tasks/2.md` — `KeyStore` trait + `OsKeyStore` + `FileKeyStore` + `MemoryKeyStore` in `core/src/identity/keystore*.rs`.** Three impls + trait. Plus unit tests on `MemoryKeyStore`.
-3. **`tasks/3.md` — `identity::ensure()` in `core/src/identity/ensure.rs` covering: create / read-stub / migrate-legacy / file-fallback paths.** Five unit tests. Deprecates `load_or_create_keypair`.
+3. **`tasks/3.md` — `identity::ensure()` in `core/src/identity/ensure.rs` covering: create / read-stub / migrate-legacy / file-fallback paths.** Five unit tests. Removes `load_or_create_keypair`.
 4. **`tasks/4.md` — Wire `ensure()` into `mcp/src/main.rs`.** Replace existing `load_or_create_keypair` call. Add stdio integration test that boots server on fresh `~/.mnemonic/` and serves `mnemonic_whoami`.
 
 ### Wave 2 — Node keystore + ensure() (mostly parallel; only shared file is package.json)
