@@ -1,15 +1,15 @@
-/// Filesystem-backed `KeyStore` implementation.
-///
-/// Reads and writes `~/.mnemonic/identity.json` (or any path provided at
-/// construction time) using the legacy JSON shape:
-///
-/// ```json
-/// {"secret":[...64 bytes...],"pubkey_base58":"..."}
-/// ```
-///
-/// `set` uses an atomic `NamedTempFile::new_in(parent) → persist()` write so
-/// a crash mid-write never leaves a partially-written file.  Mode 0600 is
-/// enforced on Unix.
+//! Filesystem-backed `KeyStore` implementation.
+//!
+//! Reads and writes `~/.mnemonic/identity.json` (or any path provided at
+//! construction time) using the legacy JSON shape:
+//!
+//! ```json
+//! {"secret":[...64 bytes...],"pubkey_base58":"..."}
+//! ```
+//!
+//! `set` uses an atomic `NamedTempFile::new_in(parent) → persist()` write so
+//! a crash mid-write never leaves a partially-written file.  Mode 0600 is
+//! enforced on Unix.
 use std::path::PathBuf;
 
 use crate::identity::keystore::{KeyStore, KeystoreEntry, KeystoreError};

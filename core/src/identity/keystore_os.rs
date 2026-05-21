@@ -1,12 +1,12 @@
-/// OS keychain-backed `KeyStore` implementation.
-///
-/// Wraps `keyring::Entry::new("xyz.mnemonik.identity", "default")` per
-/// Decision 1.  Maps to macOS Keychain, Linux Secret Service (via D-Bus), and
-/// Windows Credential Manager.
-///
-/// The value stored in the keychain is the compact JSON string:
-///   `{"secret":[...64 bytes...],"pubkey_base58":"..."}`
-/// — byte-identical to the legacy file-fallback format per Decision 13.
+//! OS keychain-backed `KeyStore` implementation.
+//!
+//! Wraps `keyring::Entry::new("xyz.mnemonik.identity", "default")` per
+//! Decision 1.  Maps to macOS Keychain, Linux Secret Service (via D-Bus), and
+//! Windows Credential Manager.
+//!
+//! The value stored in the keychain is the compact JSON string:
+//!   `{"secret":[...64 bytes...],"pubkey_base58":"..."}`
+//! — byte-identical to the legacy file-fallback format per Decision 13.
 use keyring::Entry;
 
 use crate::identity::keystore::{KeyStore, KeystoreEntry, KeystoreError};
@@ -60,9 +60,13 @@ impl KeyStore for OsKeyStore {
     fn set(&self, entry: &KeystoreEntry) -> Result<(), KeystoreError> {
         let json = serde_json::to_string(entry)?;
         let ke = self.entry()?;
-        ke.set_password(&json)
-            .map_err(|e| KeystoreError::Backend(anyhow::anyhow!("{e}")))?;
-        Ok(())
+        match ke.set_password(&json) {
+            Ok(()) => Ok(()),
+            Err(keyring::Error::NoStorageAccess(e)) => Err(KeystoreError::PlatformUnavailable {
+                reason: e.to_string(),
+            }),
+            Err(e) => Err(KeystoreError::Backend(anyhow::anyhow!("{e}"))),
+        }
     }
 
     /// Delete the keychain entry.  Idempotent — `NoEntry` is treated as success.
@@ -71,26 +75,28 @@ impl KeyStore for OsKeyStore {
         match entry.delete_credential() {
             Ok(()) => Ok(()),
             Err(keyring::Error::NoEntry) => Ok(()),
+            Err(keyring::Error::NoStorageAccess(e)) => Err(KeystoreError::PlatformUnavailable {
+                reason: e.to_string(),
+            }),
             Err(e) => Err(KeystoreError::Backend(anyhow::anyhow!("{e}"))),
         }
     }
 
-    /// Probe the keychain to determine if this backend is usable.
+    /// Lazy probe — does NOT trigger OS keychain unlock prompts (Decision 3).
     ///
-    /// Returns `false` on `PlatformFailure` / `NoStorageAccess` — those
-    /// indicate the keychain subsystem is not available (headless Docker, SSH
-    /// without keyring forwarding, etc.).  Returns `true` on `NoEntry`
-    /// (backend works, just no entry yet) and on success.
+    /// Only checks whether the platform backend can construct an `Entry`
+    /// descriptor.  Returns `Ok(false)` on `NoStorageAccess` (keychain
+    /// subsystem absent — headless Docker, SSH without keyring forwarding,
+    /// etc.).  Any other construction error propagates as
+    /// `KeystoreError::PlatformUnavailable`.  Does NOT call `get_password()`,
+    /// `set_password()`, or `delete_password()`.
     fn available(&self) -> Result<bool, KeystoreError> {
         match Entry::new(SERVICE, ACCOUNT) {
-            Err(_) => Ok(false),
-            Ok(e) => match e.get_password() {
-                Ok(_) | Err(keyring::Error::NoEntry) => Ok(true),
-                Err(keyring::Error::NoStorageAccess(_)) => Ok(false),
-                // Any other error (e.g. PlatformFailure on D-Bus timeout) →
-                // treat as unavailable so callers fall back to file.
-                Err(_) => Ok(false),
-            },
+            Ok(_) => Ok(true),
+            Err(keyring::Error::NoStorageAccess(_)) => Ok(false),
+            Err(e) => Err(KeystoreError::PlatformUnavailable {
+                reason: e.to_string(),
+            }),
         }
     }
 

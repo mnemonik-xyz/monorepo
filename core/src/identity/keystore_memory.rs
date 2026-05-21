@@ -1,7 +1,7 @@
-/// In-memory `KeyStore` implementation for use in tests only.
-///
-/// Backed by a `Mutex<Option<KeystoreEntry>>`. Thread-safe, zero I/O.
-/// Not compiled into production builds.
+//! In-memory `KeyStore` implementation for use in tests only.
+//!
+//! Backed by a `Mutex<Option<KeystoreEntry>>`. Thread-safe, zero I/O.
+//! Not compiled into production builds.
 use std::sync::Mutex;
 
 use crate::identity::keystore::{KeyStore, KeystoreEntry, KeystoreError};
