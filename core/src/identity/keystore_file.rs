@@ -86,6 +86,10 @@ impl KeyStore for FileKeyStore {
         // Write the JSON.  `serde_json::to_writer` is compact (no whitespace).
         serde_json::to_writer(&mut tmp, entry)?;
 
+        // Flush kernel buffers to disk before the rename so a power-loss
+        // mid-write cannot leave a zero-byte file at the target path.
+        tmp.as_file().sync_all()?;
+
         // Atomically rename to the final path.
         tmp.persist(&self.path).map_err(|e| e.error)?;
 
@@ -206,5 +210,30 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let store = store_in(&dir);
         assert!(store.available().unwrap());
+    }
+
+    #[test]
+    fn set_overwrites_existing_entry() {
+        let dir = TempDir::new().unwrap();
+        let store = store_in(&dir);
+        let a = make_entry(1);
+        let b = make_entry(2);
+        store.set(&a).unwrap();
+        store.set(&b).unwrap();
+        let got = store.get().unwrap().expect("entry must be present");
+        assert_eq!(got.secret, b.secret);
+        assert_eq!(got.pubkey_base58, b.pubkey_base58);
+    }
+
+    #[test]
+    fn get_on_garbage_json_returns_err() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("identity.json");
+        std::fs::write(&path, b"not json at all").unwrap();
+        let store = FileKeyStore::new(path);
+        match store.get() {
+            Err(KeystoreError::Serde(_)) => {}
+            other => panic!("expected KeystoreError::Serde, got {other:?}"),
+        }
     }
 }

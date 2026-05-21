@@ -142,4 +142,16 @@ mod tests {
         assert!(got.is_some());
         assert_eq!(boxed.name(), "memory");
     }
+
+    #[test]
+    fn set_overwrites_existing_entry() {
+        let store = MemoryKeyStore::new();
+        let a = make_entry(1);
+        let b = make_entry(2);
+        store.set(&a).unwrap();
+        store.set(&b).unwrap();
+        let got = store.get().unwrap().expect("entry must be present");
+        assert_eq!(got.secret, b.secret);
+        assert_eq!(got.pubkey_base58, b.pubkey_base58);
+    }
 }
