@@ -148,6 +148,36 @@ All five deviations resolved in chat on 2026-05-21:
 
 ---
 
+## Task 4: Wire identity::ensure() into mcp/src/main.rs + integration_bootstrap test
+
+**Status:** Done
+**Commit:** a71acbb
+**Agent:** task-4-mcp-wire
+**Summary:** Replaces the `load_or_create_keypair(&cfg.keypair_path)?` call in `mcp/src/main.rs` with `mnemonic_core::identity::ensure()?`, destructures `identity.keypair` into the existing `keypair` binding so the downstream `McpState { keypair, ... }` construction is untouched. Adds `tracing::info!("Identity storage: {:?}", identity.storage)` so log output makes the OS-keychain vs file-fallback distinction visible at runtime. Updates `mcp/tests/stdio_backward_compat.rs` to use `ensure_with_stores()` with explicit `KeyStores { os: None, file: FileKeyStore, ... }` (test path needs file-fallback only, no real OS keychain). Adds `mcp/tests/integration_bootstrap.rs` — a smoke test that boots the binary with `HOME=<tempdir>`, sends `mnemonic_whoami` over stdio, asserts the returned pubkey matches the created `.mnemonic/identity.json`. Marked `#[ignore]` for the same network-dependency reason as `stdio_backward_compat.rs`.
+
+**Deviations:**
+- `cfg.keypair_path` is now unused by the code path. Left in `Config` to avoid touching the env-var contract; marked `#[allow(dead_code)]` with a comment explaining the deferral. Future refactor: remove the field + env var + companion code in `Config::from_env`. Tracking as backlog.
+- `mcp/tests/integration_bootstrap.rs` came out at 150 lines (target was <130); the boilerplate from `stdio_backward_compat.rs` for spawn/read/write doesn't compress further without harming clarity. Acceptable.
+
+**Reviews:** Skipped (consistent with T3 — Wave 5 audits will cover holistically). T4's diff is mechanical: 3-line main.rs edit + 1-line keypair-path annotation + test-file updates + new integration test that's `#[ignore]`'d.
+
+**Verification:**
+- `cargo build -p mnemonic-mcp` → clean
+- `grep -rn "load_or_create_keypair" --include='*.rs'` → 0 matches workspace-wide
+- `cargo test -p mnemonic-mcp --lib` → 137 passed
+- `cargo test -p mnemonic-mcp --test stdio_backward_compat` → compiles, 1 ignored
+- `cargo test -p mnemonic-mcp --test integration_bootstrap` → compiles, 1 ignored
+- `cargo clippy -p mnemonic-mcp --lib -- -D warnings` → clean (pre-existing `--all-targets` failures in `pending_user_cap` / `recall_owner_isolation` are behind the `test-support` feature, unrelated to T4)
+- `cargo fmt --all -- --check` → clean
+
+## 2026-05-22 — Wave 1 complete
+
+**Status:** Frozen; advancing to Wave 2.
+**Commits in Wave 1:** b01a2ab, c05b62a, d252c21 (T1) → 9decc93, 8ba3b93, 3882f06, 84529a1 (T2) → ff3a9fe, c412122 (T3) → a71acbb (T4)
+**Summary:** Rust core identity infrastructure complete. `KeyStore` trait + 3 impls + `ensure()` 5-path bootstrap + `mcp/` wired through. 30 unit tests in `mnemonic-core` (29 passing + 1 OS-keychain ignored, opt-in for Wave 3 Task 9). 137 unit tests in `mnemonic-mcp` still passing post-wire. Two integration tests (`stdio_backward_compat`, `integration_bootstrap`) compile cleanly, both `#[ignore]`'d pending network-allowed CI lane. `load_or_create_keypair` fully removed (Decision 4 / Deviation 4). Reviewer rounds deferred to Wave 5 holistic audits for Tasks 3 and 4 due to timeout pressure on the impl-agent harness; T1 and T2 had per-task code-reviewer + security-auditor + test-reviewer all OK.
+
+---
+
 <!-- Task entries are appended below by agents as work completes.
 
 Format is strict — use only these sections, do not add others.
