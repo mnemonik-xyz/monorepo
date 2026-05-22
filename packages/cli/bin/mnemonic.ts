@@ -18,6 +18,7 @@ import { runProve } from "../src/commands/prove.js";
 import {
   runIdentityImport,
   runIdentityExport,
+  statusCommand,
 } from "../src/commands/identity.js";
 import { handleError } from "../src/errors.js";
 import { ensure, shouldSkipEnsure } from "../src/identity/ensure.js";
@@ -252,6 +253,20 @@ export function buildProgram(): Command {
         ...rootOpts(program),
         ...(cmdOpts.file !== undefined ? { file: cmdOpts.file } : {}),
       });
+    });
+
+  identity
+    .command("status")
+    .description(
+      "compare local identity (KeyStore/file) vs cached JWT — local-only, no network",
+    )
+    .action(async () => {
+      const opts = rootOpts(program);
+      const code = await statusCommand({
+        ...(opts.json !== undefined ? { json: opts.json } : {}),
+        ...(opts.noColor !== undefined ? { noColor: opts.noColor } : {}),
+      });
+      process.exit(code);
     });
 
   return program;
