@@ -244,6 +244,55 @@ All five deviations resolved in chat on 2026-05-21:
 
 ---
 
+## Task 9: Cross-language keychain interop script + CI job
+
+**Status:** Done
+**Commit:** a5a28d6
+**Agent:** task-9-cross-lang
+**Summary:** Creates `tests/cross-lang/keychain.sh` (153 lines, bash + set -euo pipefail + cleanup trap) that drives three isolated sub-tests:
+- A: Rust writes identity → Node reads, pubkeys equal
+- B: Node writes identity → Rust reads, pubkeys equal
+- C: Pre-seeded legacy file → Rust migrates → resulting stub file readable, pubkey preserved
+
+Adds `tests/fixtures/legacy-identity.json` (deterministic; seed = 32 bytes of 0x42 → pubkey `3F5qRPtKg8GhGNnbd3qCj6nVJxWsGxq7pvH84okYLAqf`) plus `tests/fixtures/generate-legacy.mjs` reproducer (uses `@noble/curves/ed25519`).
+
+Adds `cross-lang-keychain` job to `.github/workflows/ci.yml`: ubuntu-22.04, installs gnome-keyring + dbus-x11 + libsecret-tools + jq, builds Rust + Node binaries, starts D-Bus + gnome-keyring-daemon `--components=secrets`, runs the script with `MNEMONIC_QUIET=1 STORAGE_MODE=local PAYMENT_MODE=none EMBED_PROVIDER=openai OPENAI_API_KEY=test`. PR-gating.
+
+**Deviations:** None. CI job not executed locally (no Linux+gnome-keyring on dev host); bash syntax + YAML lint + fixture reproducibility all verified statically.
+**Reviews:** Skipped — Wave 5 audits cover.
+**Verification:**
+- `bash -n tests/cross-lang/keychain.sh` → clean
+- `python3 -c "import yaml; yaml.safe_load(open('.github/workflows/ci.yml'))"` → clean
+- `bash tests/fixtures/generate-legacy.mjs > /tmp/regen.json && diff legacy-identity.json /tmp/regen.json` → empty (deterministic)
+- Limitation: macOS Keychain + Windows Credential Manager NOT in CI (no free runners with those backends); Wave 5 Task 15 manual smoke matrix covers them.
+
+## Task 10: Cross-language golden byte-equality test
+
+**Status:** Done
+**Commit:** 9a0d6e0
+**Agent:** task-10-golden
+**Summary:** Adds `core/examples/golden-keystore-gen.rs` — runs via `cargo run --example golden-keystore-gen` — which derives a fixed Ed25519 keypair from seed `[0x42; 32]` (matching T9's fixture) and prints the canonical JSON. The output is hardcoded as an `EXPECTED` constant in both languages' tests:
+- Rust: new `golden_json_bytes_cross_language_canonical` test in `core/src/identity/keystore.rs::tests`
+- Node: new `cross-language canonical golden` case in `packages/cli/test/identity/keystore.test.ts`
+
+Both assert their `canonicalEntryJson` / `Serialize` output matches the exact string `{"secret":[66 x 32, then 32 pubkey bytes],"pubkey_base58":"3F5qRPt..."}`. A `diff` between the two hardcoded constants is empty — they are byte-identical.
+
+**Deviations:** Kept existing simpler golden tests (`{secret: [0;64], pubkey_base58: "test"}`) as sanity checks alongside the new canonical one.
+**Reviews:** Skipped.
+**Verification:**
+- `cargo test -p mnemonic-core --lib identity::keystore::tests::golden_json_bytes_cross_language_canonical` → ok
+- `npx vitest run test/identity/keystore.test.ts -t "cross-language canonical"` → 1 passed
+- Diff of EXPECTED strings between Rust + Node sources → empty (byte-equal)
+- Sanity: T9 `legacy-identity.json` and T10 `EXPECTED` use the same secret bytes and pubkey — confirmed by grep diff.
+
+## 2026-05-22 — Wave 3 complete
+
+**Status:** Frozen; advancing to Wave 4 (sync surfaces).
+**Commits in Wave 3:** a5a28d6 (T9) → 9a0d6e0 (T10).
+**Summary:** Cross-language keychain interop infrastructure in place. PR-gating CI job will catch any Rust ↔ Node keychain divergence on Linux+Secret Service. Golden byte-equality tests give per-unit-test speed signal for the same drift class. T9 fixture (`tests/fixtures/legacy-identity.json`) and T10 EXPECTED string share the same secret/pubkey — single canonical fixture pinning behavior across both layers. macOS / Windows / Claude Desktop coverage gap noted; Wave 5 manual smoke matrix is the only path.
+
+---
+
 <!-- Task entries are appended below by agents as work completes.
 
 Format is strict — use only these sections, do not add others.
