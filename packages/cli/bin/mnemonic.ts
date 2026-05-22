@@ -19,6 +19,8 @@ import {
   runIdentityImport,
   runIdentityExport,
   statusCommand,
+  pullFromWebappCommand,
+  pushToWebappCommand,
 } from "../src/commands/identity.js";
 import { handleError } from "../src/errors.js";
 import { ensure, shouldSkipEnsure } from "../src/identity/ensure.js";
@@ -268,6 +270,55 @@ export function buildProgram(): Command {
       });
       process.exit(code);
     });
+
+  identity
+    .command("pull-from-webapp [short-code]")
+    .description(
+      "adopt a CLI identity issued by the webapp — redeem the short code from `push-to-webapp`",
+    )
+    .option(
+      "--stdin",
+      "read short code from stdin instead of argv (avoids shell history leak)",
+    )
+    .option("--server-url <url>", "override the server base URL")
+    .action(
+      async (
+        shortCodeArg: string | undefined,
+        cmdOpts: { stdin?: boolean; serverUrl?: string },
+      ) => {
+        const code = await pullFromWebappCommand(shortCodeArg ?? "-", {
+          stdin: cmdOpts.stdin ?? !shortCodeArg,
+        });
+        process.exit(code);
+      },
+    );
+
+  identity
+    .command("push-to-webapp")
+    .description(
+      "issue a ticket from the local CLI identity — prints a short code and QR for the webapp",
+    )
+    .option("--code-only", "print short code and URL only, skip the QR")
+    .option("--qr-only", "print only the QR (no text output)")
+    .option("--server-url <url>", "override the server base URL")
+    .action(
+      async (cmdOpts: {
+        codeOnly?: boolean;
+        qrOnly?: boolean;
+        serverUrl?: string;
+      }) => {
+        const code = await pushToWebappCommand({
+          ...(cmdOpts.codeOnly !== undefined
+            ? { codeOnly: cmdOpts.codeOnly }
+            : {}),
+          ...(cmdOpts.qrOnly !== undefined ? { qrOnly: cmdOpts.qrOnly } : {}),
+          ...(cmdOpts.serverUrl !== undefined
+            ? { serverUrl: cmdOpts.serverUrl }
+            : {}),
+        });
+        process.exit(code);
+      },
+    );
 
   return program;
 }
