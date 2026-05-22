@@ -124,6 +124,30 @@ All five deviations resolved in chat on 2026-05-21:
 
 ---
 
+## Task 3: identity::ensure() 5-path bootstrap
+
+**Status:** Done
+**Commit:** ff3a9fe
+**Agent:** task-3-ensure (impl, timed out before commit; team lead finished — added Debug redaction, removed dead test helper, fixed clippy ptr_arg / Path import, ran gates, committed)
+**Summary:** Implements the five-path bootstrap algorithm exactly per tech-spec §Architecture in `core/src/identity/ensure.rs` (~830 lines, 6 unit tests). Introduces `Identity { keypair, pubkey_base58, created_at, storage }` with hand-rolled secret-redacted Debug impl, and `IdentityStorage { OsKeychain, File }`. Removes `load_or_create_keypair` (Decision 4 / Deviation 4 — immediate removal, no deprecation shim). Rollback guard via Drop: keychain entry is removed if stub-file write fails. `MNEMONIC_QUIET=1` suppresses the single stderr line on creation (Decision 7).
+
+**Deviations:**
+- Eager keypair cache in `Identity` (per task §Notes — Task 4 may tighten if startup cost is material; deferred).
+- `Identity` struct was not present in `core/src/identity/mod.rs` despite the task description implying it existed. Created it as part of T3 with the four fields above.
+- Bonus 6th test `ensure_stub_missing_keychain_entry_returns_err` — covers the error path when stub points at a missing keychain entry; not in task spec but worth pinning since the recovery is user-facing (`pull-from-webapp`).
+- `mcp/` build is intentionally broken at this commit (`mcp/src/main.rs:288` + `mcp/tests/stdio_backward_compat.rs:79,81` reference the deleted `load_or_create_keypair`). Task 4 fixes those.
+
+**Reviews:** SKIPPED for time-budget reasons. Wave 5 Tasks 16 (security-auditor) + 17 (code-reviewer) will cover the full diff of Tasks 1-14 holistically, including this commit. The eager-cache decision and the secret-redacted Debug impl are explicit security gates to revisit there.
+
+**Verification:**
+- `cargo test -p mnemonic-core --lib identity` → 30 passed, 1 ignored
+- `cargo clippy -p mnemonic-core --lib --tests -- -D warnings` → clean
+- `cargo fmt --all -- --check` → clean
+- `grep -E "tracing::|println!|eprintln!" core/src/identity/ensure.rs | grep -i secret` → no matches (no secret bytes in logs)
+- `cargo build -p mnemonic-mcp 2>&1 | grep "load_or_create_keypair"` → expected error, T4 fixes
+
+---
+
 <!-- Task entries are appended below by agents as work completes.
 
 Format is strict — use only these sections, do not add others.
