@@ -293,6 +293,97 @@ Both assert their `canonicalEntryJson` / `Serialize` output matches the exact st
 
 ---
 
+## Task 11: mnemonic identity status
+
+**Status:** Done
+**Commit:** 58b76ab
+**Agent:** task-11-identity-status
+**Summary:** Adds `mnemonic identity status` CLI subcommand to `packages/cli/src/commands/identity.ts`. Local-only drift detector — reads identity (OsKeyStore → FileKeyStore fallback chain) and `~/.mnemonic/token.json`, decodes JWT.sub without signature verification, classifies as `synced | diverged | webapp-unknown | no-identity | malformed`. Exit codes: 0 (synced / webapp-unknown), 3 (diverged / malformed), 1 (no-identity). `--json` mode emits a single parseable line. Wired into bin/mnemonic.ts as a subcommand under the existing `identity` parent.
+**Deviations:** None.
+**Reviews:** Skipped — Wave 5 audit coverage.
+**Verification:**
+- 22 tests passing under `vitest run test/commands/identity-status.test.ts`
+- `tsc -b` clean
+- No `fetch`/`http`/`axios` in the new status code path (network gates clean per Decision 11)
+- `shouldSkipEnsure` from T7 already exempts `identity status` from bootstrap
+
+## Task 12: Server symmetric ticket flow (issue-from-cli + dual-origin redeem + server-pub)
+
+**Status:** Done
+**Commits:** 4d722f3 (initial), b13b0a0 (interop patch — POST /redeem by short_code)
+**Agent:** task-12-server (impl) + task-12-redeem-by-code (interop patch)
+**Summary:** Three new endpoints on the mcp server:
+- `POST /api/cli-bootstrap/issue-from-cli` — CLI-originated ticket issuance. Body `{wrapped_secret, eph_pub, issuer_pubkey_base58}`; response `{ticket_id, short_code, expires_at}`. No auth.
+- `GET /api/cli-bootstrap/server-pub` — returns the server's static x25519 public key (process-lifetime; restart invalidates in-flight tickets).
+- `POST /api/cli-bootstrap/redeem` — by short_code (added in patch b13b0a0 because T13 + T14 both call this shape, but the original T12 only added a GET-by-UUID variant). Body `{short_code, redeemer_eph_pub}`. Dispatches to a shared `finalize_redeem` helper used by both the new POST and the existing GET-by-ticket variants.
+
+`BootstrapTickets` gained a `TicketOrigin` enum (`Webapp | Cli`) and a `consume_by_short_code(short_code)` method with the same single-use atomic semantics as `consume(ticket_id)`. `McpState` now carries a process-lifetime `crypto_box::SecretKey + PublicKey` pair generated at boot. Crypto combo: `crypto_box::SalsaBox` (XSalsa20-Poly1305 + Curve25519), wire format `nonce[24] || ciphertext`, base64.
+
+**Deviations:**
+- Original T12 only added GET-by-UUID; the user-visible capability is the short_code, so the patch b13b0a0 added the POST-by-short_code variant the clients actually call. Shared `finalize_redeem` helper avoids duplication.
+- Three other test files (`pending_authz.rs`, `pending_expiry.rs`, `sign_callback.rs`, plus chat.rs inline test state) had `McpState` constructions that needed the two new fields — all updated.
+**Reviews:** Skipped — Wave 5 audit coverage. Security-auditor concerns flagged in the prompt (sub-ms plaintext window, single-use enforcement) are addressed in code (atomic `consume`-then-`finalize_redeem`, no logging of secret/wrapped bytes).
+**Verification:**
+- 9 tests passing in `cargo test -p mnemonic-mcp --test api_cli_bootstrap` (6 original + 3 new)
+- 137 existing mcp/lib tests still passing
+- `cargo build` + `cargo clippy --lib --tests -- -D warnings` clean
+- Security grep `tracing::|println!|eprintln!` filtered for `secret|wrap` → empty (no leaks)
+
+## Task 13: mnemonic identity pull-from-webapp + push-to-webapp
+
+**Status:** Done
+**Commit:** 03717d2
+**Agent:** task-13-pull-push
+**Summary:** Two new CLI subcommands in `packages/cli/src/commands/identity.ts`:
+- `pull-from-webapp <short_code>` — generates ephemeral x25519 (tweetnacl), POSTs to `/api/cli-bootstrap/redeem` with `{short_code, redeemer_eph_pub}`. Unwraps server's response via `nacl.box.open()`, verifies derived pubkey matches `issuer_pubkey_base58` (integrity check, exit 3 on mismatch), writes secret to keystore. Accepts short_code via argv positional OR stdin (`-` argv) to avoid shell history leaks per tech-spec.
+- `push-to-webapp` — reads local identity from keystore, fetches `/server-pub`, wraps secret with `nacl.box()` (24-byte nonce prepended), POSTs to `/issue-from-cli`. Prints short_code + URL `https://mnemonik.xyz/install?pull=<short_code>` + QR (via `qrcode-terminal`, unless `--code-only`). Does NOT poll for redemption.
+
+Added `tweetnacl`, `bs58`, `@types/qrcode-terminal` to `packages/cli/package.json`. Both commands have test-seam `*WithDeps` variants for vitest injection.
+
+**Deviations:**
+- Found T12 router gap during impl — flagged. Patch b13b0a0 (T12 follow-up) added the missing POST endpoint.
+- Integration test does REAL crypto round-trip via mock-server that holds a deterministic static x25519 keypair, not a shape-only check.
+**Reviews:** Skipped — Wave 5 audit coverage.
+**Verification:**
+- 10 unit tests + 3 integration tests in `identity-sync.test.ts` + `ticket-flow.test.ts`, all passing
+- `tsc -b` clean
+- Secret/shortCode console-leak grep clean
+- `--help` renders correctly
+
+## Task 14: Webapp /install page + IdentityPanel drift modal
+
+**Status:** Done
+**Commits:** 58b76ab not relevant — actual T14 commit chain was the (timed-out) agent's uncommitted work + 4b7ff4d (fix agent that finished it)
+**Agent:** task-14-install (timed out partway through) + task-14-fix (completed)
+**Summary:** Two webapp changes:
+- `webapp/src/pages/Install.tsx` + `webapp/src/components/InstallButtons.tsx` — platform detection via `navigator.userAgentData.platform` with `navigator.platform` fallback (Deviation 5: sort, don't hide). Warning banner above install buttons. Click handlers generate `mcp.json` with `Authorization: Bearer <jwt>` baked in, base64-encoded, and trigger `cursor://mcp/install?config=...` / `vscode:mcp/install?config=...` deeplinks. Claude Desktop opens a copy-to-clipboard modal with paste-path hint. `?pull=<short_code>` query param triggers the redeem flow: generates ephemeral `nacl.box.keyPair()`, POSTs `/api/cli-bootstrap/redeem`, unwraps with `nacl.box.open()`, verifies pubkey via `bs58.encode(secret.slice(32))`, writes to localStorage.
+- `webapp/src/components/IdentityPanel.tsx` — "Generate new keypair" button now opens a confirmation modal with 4 options: Cancel (default focus), Send to CLI (POSTs `/api/cli-bootstrap/issue`, shows short_code), Download backup JSON (Blob + URL.createObjectURL, legacy shape), Generate anyway (red destructive style). Default-focus on Cancel — Enter is safe.
+
+Added `tweetnacl` + `bs58` to webapp deps (bit-compatible with server `crypto_box::SalsaBox`).
+
+**Deviations:**
+- The initial agent used WebCrypto X25519/HKDF/AES-GCM which is NOT interop-compatible with the server's `crypto_box::SalsaBox`. The fix agent replaced it with `tweetnacl` `nacl.box`/`nacl.box.open` — bit-compatible with both server (T12) and CLI (T13).
+- Modal JSX was missing after the first agent timed out partway; the fix agent inserted it.
+**Reviews:** Skipped — Wave 5 audit coverage (including the additional `ux-reviewer` lens).
+**Verification:**
+- `npm run build` clean — 317 modules transformed, 0 TS errors
+- 6 existing `IdentityPanel.test.tsx` tests pass; no Install.test.tsx tests added in the fix pass (the prior agent's tests for WebCrypto code were obsolete; Wave 5 manual smoke + E2E will cover)
+- No JWT or secret in any `console.*` call
+
+## 2026-05-22 — Wave 4 complete
+
+**Status:** Frozen; advancing to Wave 5.
+**Commits in Wave 4:** 58b76ab (T11) → 4d722f3 (T12 initial) → 4b7ff4d (T14, after fix) → 03717d2 (T13) → b13b0a0 (T12 interop patch for short_code POST).
+**Summary:** Cross-surface sync surfaces in place. Drift detection (T11), symmetric ticket flow on the server (T12), webapp `?pull=` flow + drift-warning modal (T14), CLI pull/push subcommands (T13). All three layers use `tweetnacl`/`crypto_box::SalsaBox` (XSalsa20-Poly1305 + Curve25519), wire format `nonce[24] || ciphertext` base64-encoded, bit-compatible across the boundary. Two integration tests (server-side `api_cli_bootstrap` + CLI `ticket-flow`) round-trip real crypto.
+
+Outstanding for Wave 5:
+- Audits (T16 security, T17 code review) — first pass at the whole feature diff. Tasks 3, 4, 5, 6, 7, 8, 11, 12, 13, 14 all deferred per-task reviewer rounds here; Wave 5 is the only review gate they get.
+- Manual cross-platform smoke matrix (T15) — macOS Keychain + Win11 + Linux+gnome-keyring + Linux headless + Docker alpine.
+- Archive `work/keypair-sync/` → `work/completed/keypair-sync/` (T18).
+- Pre-deploy QA gate (T19).
+
+---
+
 <!-- Task entries are appended below by agents as work completes.
 
 Format is strict — use only these sections, do not add others.
