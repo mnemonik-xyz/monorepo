@@ -463,6 +463,45 @@ PR is ready to open. URL: `https://github.com/mnemonik-xyz/monorepo/pull/new/fea
 
 ---
 
+## 2026-05-22 — User-spec resume-interview + dual validation, tech-spec backfill
+
+**Status:** user-spec.md `status: approved`; tech-spec.md backfilled (Decisions 16/17/18 added, Decision 7 rewritten, endpoint table added, drift pin-points enumerated, frontmatter updated).
+**Commits:**
+- user-spec round 0 (interview): 8c49f2c
+- user-spec round 1 (validators): aad3054
+- user-spec round 2 (validators): cc00bee
+- user-spec approval: 5d8f541
+- tech-spec backfill: (this commit)
+
+**Summary:** `/new-user-spec invisible-identity` invoked against an existing draft that had never been through formal interview. User chose "Resume — add interview". 4 substantive answers locked in: ship def = Wave 5 green + merge на main (NOT tag/npm/marketplace, those are follow-ups); endpoint naming drift fixed (`/api/cli-sync/` → `/api/cli-bootstrap/`); server-restart ticket invalidation → tech-spec only, not user-spec; `MNEMONIC_QUIET=1` promoted to stable user-facing contract on both surfaces.
+
+Two userspec validators (quality + adequacy) ran 2 rounds each, both approved post-round-2. New ACs landed in user-spec: concurrent bootstrap race, partial-state recovery (3 cases incl. loud mismatch), cross-lang byte-equality as AC, atomic single-PR ship across 4 surfaces, 4 named drift pin-points, CLI vs MCP stderr split.
+
+Then `tech-spec-validator` ran coverage check — 3 covered / 3 partial / 2 missing. User chose full backfill. Tech-spec additions/changes:
+- Frontmatter: `status: draft` → `frozen-implementation`; `branch` → `feat/invisible-identity`; `size: M` → `L`; added `backfilled: 2026-05-22` annotation.
+- Decision 7 rewritten as CLI-vs-MCP stderr split + `MNEMONIC_QUIET=1` contract + MCP stdio convention (subscriber → stdout for stdio transport).
+- Decision 15 augmented with chicken-and-egg rationale for baked-JWT vs OAuth-in-IDE.
+- New Decision 16: concurrent bootstrap race (atomic-rename + idempotent keychain set + post-write integrity check).
+- New Decision 17: partial-state recovery — 3 cases (stub-without-keychain → typed err; keychain-without-stub → silent rebuild; mismatch → loud exit 3, NO silent picking).
+- New Decision 18: server-side wrap-broker key process-lifetime by design; restart-invalidation is accepted UX cost (avoids permanent offline-compromise target).
+- Server endpoint table added to §Data Models (5 rows: issue, issue-from-cli, POST redeem by short_code, GET redeem by ticket_id, server-pub).
+- §E2E enumerates 4 named drift pin-points with where-verified mapping.
+- Dependencies L364 contradictory "stderr-bound subscriber" line corrected.
+
+**Deviations:** None — backfill is documentation-only, implementation was already at this state.
+
+**Verification:**
+- `wc -l user-spec.md` → 335 (was 327)
+- `wc -l tech-spec.md` → 629 (was 566)
+- `grep -c "^### Decision" tech-spec.md` → 18 (was 15)
+- `grep -n "cli-sync" user-spec.md tech-spec.md` → empty (was 2 stale refs)
+- Both userspec validators report `approved` post-round-2.
+- Resume-interview log at `logs/userspec/interview.yml` (gitignored), `metadata.status: completed`.
+
+**Concerns / follow-ups:** Wave 5 T15 still blocked_on_user (5-row hardware smoke). PR ready to open per Wave-5-complete note above.
+
+---
+
 <!-- Task entries are appended below by agents as work completes.
 
 Format is strict — use only these sections, do not add others.

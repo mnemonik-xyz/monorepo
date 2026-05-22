@@ -1,8 +1,9 @@
 ---
 created: 2026-05-21
-status: draft
-branch: claude/analyze-portable-agent-memory-nYOJm
-size: M
+backfilled: 2026-05-22  # post-implementation backfill to match Waves 1-4 reality + audit fixes (43a6696)
+status: frozen-implementation  # Waves 1-4 done; Wave 5 T15 blocked_on_user, T19 pre-deploy QA in_progress
+branch: feat/invisible-identity
+size: L  # re-sized in user-spec round 1; absorbs work/keypair-sync/, 4 surfaces, 19 tasks, marketplace-critical
 absorbs: work/keypair-sync/
 ---
 
@@ -183,15 +184,24 @@ Detection: parse as JSON, branch on presence of `"secret"` key. Both Node and Ru
 **Rationale:** A `.bak` file would leak the secret to a second location on disk indefinitely (until the user manually deletes it) — security regression vs. today. In-place atomic rewrite via tempfile + rename eliminates the partial-write window. Rollback via "delete keychain entry on file-write failure" guarantees the user can re-run after fixing whatever blocked the rewrite. `[SECURITY]`
 **Alternatives considered:** Leave `.bak` for user safety — rejected (security). Two-phase commit with explicit user confirmation — rejected (defeats invisible-bootstrap goal).
 
-### Decision 7: Single stderr line on creation, none on subsequent runs
-**Decision:** First-time identity creation emits exactly one line to stderr:
+### Decision 7: Stderr behavior — CLI emits one line, MCP-server stays silent
+**Decision:** Per-surface split (ratified by audit fix `43a6696` after wave 5 review):
+
+**Node CLI (`@mnemonik-xyz/cli`)** — first-time identity creation emits exactly one line to stderr:
 - `mnemonic: identity created did:sol:H8x4...c4v stored in OS keychain` (success)
 - `mnemonic: identity created did:sol:H8x4...c4v stored in ~/.mnemonic/identity.json (OS keychain unavailable: <reason>)` (file-fallback)
 - `mnemonic: legacy identity migrated to OS keychain` (migration path)
 
-Subsequent runs print nothing. The `--quiet` flag suppresses even the first-creation line. The `--json` flag formats the creation event as one stderr JSON object. `[USER]`
-**Rationale:** Marketplace gate prohibits noisy startup. One line at first boot is the minimum the user needs to know an identity was created on their behalf (and where it lives, for backup purposes). Stderr keeps stdout pipe-clean for json/recall/etc.
-**Alternatives considered:** Silent — rejected, user has no clue an identity was created. Multi-line summary — rejected, too noisy. Stdout — rejected, breaks `mnemonic sign "x" | jq ...` pipes.
+Subsequent runs print nothing. The `--quiet` CLI flag suppresses even the first-creation line. The `--json` flag formats the creation event as one stderr JSON object.
+
+**Rust mcp-server (`mnemonic-mcp`)** — completely silent on stderr at any point of bootstrap. Identity creation, migration, fallback are all observable only via structured `tracing::info!` / `tracing::warn!` records routed to whatever subscriber the operator wired up (default: stdout-bound for stdio transport — see "MCP stdio convention" below).
+
+**`MNEMONIC_QUIET=1` env var — stable user-facing contract on BOTH surfaces.** Suppresses any startup-creation announcement (the CLI stderr line above; on the Rust mcp-server it additionally drops `tracing::info!("identity created ...")` records below the `warn` level). Needed because IDEs spawn stdio MCP without argv-flag plumbing and any unsolicited stderr breaks Cursor/Claude Desktop JSON-RPC framing. Stable across minor versions. `[USER]`
+
+**MCP stdio convention.** When `--transport stdio`, the Rust mcp-server's `tracing` subscriber is wired to stdout (NOT stderr) because Cursor/Claude Desktop treat stderr as fatal error stream. Operators bringing up the HTTP transport may rebind to stderr via their own subscriber config — out of scope for this feature.
+
+**Rationale:** Marketplace gate prohibits noisy startup, and unsolicited stderr from a stdio MCP server is interpreted as a crash signal by Cursor. One stderr line on the CLI is the minimum a human user needs to know an identity was created on their behalf (and where it lives, for backup purposes). The MCP server has no human user — its operator reads logs, not stderr.
+**Alternatives considered:** Silent on CLI too — rejected, user has no clue an identity was created. Multi-line summary — rejected, too noisy. Stdout — rejected, breaks `mnemonic sign "x" | jq ...` pipes. Letting the MCP server keep the same stderr contract as CLI — rejected after `43a6696` when Cursor/Claude Desktop framing failures showed up in T15 smoke.
 
 ### Decision 8: No new Rust user CLI; extend Node `@mnemonik-xyz/cli` only
 **Decision:** The user-facing CLI surface stays at `@mnemonik-xyz/cli` (Node). The Rust `mnemonic-mcp` binary gets `identity::ensure()` for its own startup but exposes no new user-facing subcommands. The `mnemonic identity status / pull-from-webapp / push-to-webapp` commands live in the Node CLI.
@@ -253,8 +263,38 @@ Actually — refined: the wrap happens **client-to-client** with the server hold
 
 ### Decision 15: JWT-baked deeplinks for Cursor / VS Code / Claude Desktop
 **Decision:** `webapp/src/pages/install.tsx` generates a `mcp.json` config snippet with `headers: {Authorization: "Bearer <jwt>"}` baked in. Cursor uses `cursor://mcp/install?config=<base64-json>` deeplink scheme; VS Code uses `vscode:mcp/install?config=...`; Claude Desktop has no install deeplink — show a "Copy config to ~/Library/Application Support/Claude/claude_desktop_config.json" instruction with the baked JWT included. The JWT used is the current webapp session's JWT (read from localStorage). Webapp warns "this config contains a secret token, don't share it" above the button.
-**Rationale:** Decision 5/7 of the absorbed keypair-sync user-spec — closes the IDE-side drift case structurally. JWT.sub equals webapp localStorage pubkey, IDE-side `/mcp` calls authenticate as the webapp user, no `mnemonic login` step needed. `[USER]`
-**Alternatives considered:** Force OAuth-in-IDE — depends on Cursor/VS Code adding OAuth UI to their MCP UX, which they haven't. Long-lived bootstrap tickets — rejected, JWT TTL of 1h is shorter and safer than a separate ticket type.
+**Rationale:** Decision 5/7 of the absorbed keypair-sync user-spec — closes the IDE-side drift case structurally. JWT.sub equals webapp localStorage pubkey, IDE-side `/mcp` calls authenticate as the webapp user, no `mnemonic login` step needed. The chicken-and-egg constraint: Cursor/VS Code/Claude.ai DO support OAuth 2.1+PKCE against `mcp.mnemonik.xyz/oauth/*` for ongoing auth — but that handshake happens AFTER the MCP client is already instantiated in the IDE. At the "1-click install from webapp" moment the IDE has no JWT to start the OAuth dance, so pre-baked JWT bridges the install moment. After install, the OAuth-refresh path takes over without further user action. `[USER]`
+**Alternatives considered:** Force OAuth-in-IDE at install time — requires Cursor/VS Code to launch a browser handshake before applying the MCP config, which neither does. One-shot bootstrap-nonce → OAuth-in-IDE — adds a user-visible interactive step that breaks marketplace "no required setup" guideline. Long-lived bootstrap tickets — rejected, JWT TTL of 1h is shorter and safer than a separate ticket type.
+
+### Decision 16: Concurrent bootstrap is race-safe via atomic-rename + idempotent set
+**Decision:** Two concurrent `ensure()` calls on the same machine (e.g. IDE simultaneously spawning stdio-MCP and a CLI hook on a fresh `~/.mnemonic/`) must not produce split-brain identity. Mechanism:
+
+1. **Disk stub** written via `tempfile::NamedTempFile::new_in(parent) + sync_all() + persist(target)` — atomic-rename at the POSIX layer. The OS guarantees that `~/.mnemonic/identity.json` either points at the old inode or the new one, never a half-written file.
+2. **Keychain set** is idempotent — `OsKeyStore::set(service, account, value)` overwrites any existing entry. Two writers racing produce the entry one of them wrote last (whichever wins the OS-level mutex inside `keyring`/`@napi-rs/keyring`).
+3. **Reader path** verifies after open: stub's `pubkey_base58` must equal `derive_pubkey(keychain.get(keychain_ref).secret)`. Mismatch → loud error (see Decision 17 case c).
+
+The winning writer's identity becomes the canonical one; the losing writer retries the read path on its next call (or on the same call if `set` raised "already-exists" + we treat that as success). Both surfaces end up with the same pubkey because the keychain entry — single OS-level resource — is the tiebreaker.
+
+**Rationale:** First-run + concurrent-spawn is the high-risk callsite (IDE starts stdio-MCP and CLI-bound hook simultaneously on a fresh machine). Without atomic-rename, the disk stub could be left as a half-written file; without the keychain tiebreaker, the two writers could generate two different keys and stamp them on different surfaces. The race window is real — measured at sub-second on macOS during T15 smoke. `[TECHNICAL]`
+**Alternatives considered:** Flock on `~/.mnemonic/.lock` — adds a file we have to clean up on crash, and `flock` semantics differ across platforms (Windows has no flock; would force a polyfill). Application-level mutex via a sidecar process — way over-engineered.
+
+### Decision 17: Partial-state recovery is explicit, mismatch is loud
+**Decision:** Three reachable partial states, each with a defined behavior. NO silent picking of one of the two sides.
+
+| State | Cause | Behavior |
+|-------|-------|----------|
+| (a) stub file exists, keychain entry missing | User wiped keychain via Keychain Access; Linux Secret Service per-session loss; Docker volume mount lost in restart | Throw typed `IdentityRequiresKeystore { pubkey_base58, keychain_ref }`. CLI catches and prints actionable hint: `run 'mnemonic identity pull-from-webapp <code>' to restore`. Exit 1. |
+| (b) keychain entry exists, stub file missing | User wiped `~/.mnemonic/` but not OS keychain | Silent rebuild: derive pubkey from keychain secret, write a fresh stub pointing at the existing keychain entry. No stderr line — this is the "recover gracefully" path. |
+| (c) both exist BUT stub.pubkey ≠ derive_pubkey(keychain.secret) | Race in Decision 16's reader window; legacy migration bug; manual file-edit by user | Loud error: print `mnemonic: identity integrity mismatch — stub pubkey <X> does not match keychain-derived pubkey <Y>` to stderr, exit 3. Do NOT pick either side. User must run `mnemonic identity reset` (out of scope for this feature; backlog) or manually edit + retry. |
+
+**Rationale:** The mismatch case (c) is a safety property — silently picking one side hides the corruption and could re-introduce a drift bug class identical to the one this feature was meant to eliminate. Cases (a) and (b) are common enough on real desktops that they need first-class handling, not "undefined behavior". `[TECHNICAL] [SECURITY]`
+**Alternatives considered:** Always recover by regenerating from keychain — rejected, masks corruption. Prompt user interactively — rejected, breaks invisible-bootstrap. Self-heal by deleting both and re-creating — rejected, destroys data.
+
+### Decision 18: Server-side ticket keypair lifetime = process
+**Decision:** The `mcp/src/main.rs` startup generates a fresh `crypto_box::SecretKey` for the server's wrap-broker role and serves the matching `PublicKey` from `GET /api/cli-bootstrap/server-pub`. The keypair lives for the process lifetime — restart drops it. All in-flight tickets (TTL 5min window) become unredeemable on restart because the issuer-side `wrapped_secret` was sealed to the now-dropped server pubkey.
+
+**Rationale:** Persisting the server's wrap-broker key to disk would create a permanent target for offline compromise (an attacker who gets the file can decrypt every historical ticket ciphertext they captured). Process-lifetime keys mean compromise requires live process access. The user-visible cost is a worst-case 5-minute window after restart where in-flight tickets fail with `ticket expired (or server restarted)` and the user retries — acceptable. `[SECURITY]`
+**Alternatives considered:** Persist server key in OS keychain on the mcp host — rejected, mcp host doesn't have a per-deploy keychain abstraction. Rotate server key every 5min on a timer — rejected, adds complexity for no security gain over process-lifetime. Skip wrap-broker entirely (client-to-client crypto) — rejected, requires issuer and redeemer to know each other's pubkeys at issue time, which contradicts the "issue, then redeem from another device" UX.
 
 ## Data Models
 
@@ -318,6 +358,20 @@ Existing types in `core/src/identity/mod.rs` and `packages/sdk/src/identity/keyp
 
 See Decision 12. Stored in `BootstrapTickets` LRU. Not persisted across server restarts (acceptable: tickets are 5-min TTL anyway).
 
+### Server endpoints (mcp.mnemonik.xyz, `/api/cli-bootstrap/*`)
+
+Implemented in `mcp/src/api.rs` (Wave 4 Task 12 + interop patch b13b0a0). All endpoints are unauthenticated — the capability is the ticket short_code itself; auth is enforced by ticket-bound origin + redeemer pubkey wrapping (see Decision 12).
+
+| Method | Path | Body / params | Response | Caller |
+|--------|------|----------------|----------|--------|
+| POST | `/api/cli-bootstrap/issue` | `{wrapped_secret, eph_pub}` (wrap target = server x25519 pubkey from `/server-pub`) | `{ticket_id, short_code, expires_at}` | Webapp `IdentityPanel` "Send to CLI" button |
+| POST | `/api/cli-bootstrap/issue-from-cli` | `{wrapped_secret, eph_pub, issuer_pubkey_base58}` | `{ticket_id, short_code, expires_at}` | CLI `mnemonic identity push-to-webapp` |
+| POST | `/api/cli-bootstrap/redeem` | `{short_code, redeemer_eph_pub}` | `{wrapped_secret, eph_pub}` (re-wrapped to redeemer) | Both: CLI `pull-from-webapp` and Webapp `/install?pull=<short_code>` |
+| GET | `/api/cli-bootstrap/redeem/{ticket_id}` | — | same shape as POST redeem | Legacy by-UUID variant; new clients use POST by short_code |
+| GET | `/api/cli-bootstrap/server-pub` | — | `{server_pub_x25519_base64}` | CLI `push-to-webapp` (to wrap secret before issue) |
+
+Single-use enforced atomically inside `BootstrapTickets::consume_by_short_code` / `consume(ticket_id)`. Second redemption attempt returns HTTP 410 + body `{"error":"ticket already redeemed (or expired)"}`. Server restart invalidates all in-flight tickets per Decision 18.
+
 ### CLI argv: `mnemonic identity <subcommand>`
 
 ```
@@ -361,7 +415,7 @@ mnemonic identity push-to-webapp [--qr-only|--code-only]
 - `ed25519-dalek` (Rust) / `@noble/ed25519` (Node) — keypair gen + signing, unchanged
 - `serde` / `serde_json` (Rust) — identity.json (de)serialization
 - `uuid` (Rust) — ticket IDs
-- `tracing` (Rust) — single stderr line on creation via `tracing::info!` at appropriate level (stderr-bound subscriber already configured in mcp)
+- `tracing` (Rust) — identity creation announces via `tracing::info!`; see Decision 7 for the per-transport subscriber routing (stdio → stdout, HTTP → operator's choice). The mcp-server does NOT route identity-creation records to stderr — that would break Cursor/Claude Desktop JSON-RPC framing.
 
 ### Devdependencies
 
@@ -424,6 +478,15 @@ Cross-platform matrix gated by Wave 5 sign-off:
 ### E2E tests (release pipeline, not PR-gating)
 
 Webapp `/install` → click "Install in Cursor" → deeplink opens → Cursor MCP config applied → first MCP call from Cursor chat authenticates and returns expected pubkey. Verified by Playwright MCP against staging.
+
+**Named drift pin-point coverage (user-spec AC §Layer 2 last bullet — 4 sub-criteria):**
+
+| Drift case (from user-spec §Зачем) | Where verified |
+|------------------------------------|-----------------|
+| **Cursor 0.1.5 sign mismatch** (CLI keypair A, JWT minted under B, sign fails) | Wave 3 cross-language interop tests (T9 keychain.sh) + integration test that mints a JWT under the keychain pubkey and signs a memory; pubkeys equal end-to-end. |
+| **IDE OAuth manual paste** ("pending bundle owner mismatch") | Playwright E2E `webapp/e2e/install.spec.ts` — click install → assert subsequent MCP call uses the same `JWT.sub` as webapp localStorage pubkey, no manual paste. |
+| **Webapp test fixtures generated fresh keypair on `/install`** | `webapp/e2e/install.spec.ts` runs with pre-seeded `localStorage["mnemonic.identity"]` — assertion that the page does NOT overwrite it on load. Fixture-handling lives in `webapp/e2e/_helpers.ts`. |
+| **In-memory rollback invalidated JWT** | Pinned by Decision 18 as accepted behavior. Test: restart `mnemonic-mcp` mid-pull → CLI receives `ticket expired (or server restarted)` (exit 3), retries with fresh ticket and succeeds. Drift detector (`mnemonic identity status`) correctly reports `diverged` if JWT.sub stopped matching local identity. |
 
 ### Security review (Wave 5, read-only)
 
