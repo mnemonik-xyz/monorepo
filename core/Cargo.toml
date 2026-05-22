@@ -100,6 +100,11 @@ harness = false
 name = "emit_golden"
 required-features = ["golden-fixtures"]
 
+# `cargo run --example golden-keystore-gen` prints the canonical JSON for the
+# cross-language golden byte-equality fixture (Task 10). No feature gate.
+[[example]]
+name = "golden-keystore-gen"
+
 # WASM target dependencies — only pulled in when building for wasm32-unknown-unknown.
 # Native (`cargo build --workspace`) builds do not see any of these.
 #

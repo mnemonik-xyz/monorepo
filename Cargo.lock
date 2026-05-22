@@ -3154,6 +3154,7 @@ dependencies = [
  "coset",
  "criterion",
  "crypto_box",
+ "dirs",
  "fastembed",
  "futures",
  "getrandom 0.2.17",

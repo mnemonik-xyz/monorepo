@@ -231,6 +231,33 @@ mod tests {
         );
     }
 
+    /// Cross-language golden byte-equality test (Task 10).
+    ///
+    /// The fixture is a deterministic `KeystoreEntry` built from a 32-byte
+    /// seed `[0x42; 32]` using `Keypair::new_from_array`. The 64-byte `secret`
+    /// field is `kp.to_bytes()` = seed_bytes || pubkey_bytes (Solana/ed25519_dalek
+    /// layout); only the first 32 bytes are the seed, the rest is the derived
+    /// public key. The `EXPECTED` string was generated once by
+    /// `cargo run --example golden-keystore-gen` and must be identical to the
+    /// constant in `packages/cli/test/identity/keystore.test.ts`.
+    #[test]
+    fn golden_json_bytes_cross_language_canonical() {
+        use solana_sdk::signature::{Keypair, Signer};
+
+        let kp = Keypair::new_from_array([0x42u8; 32]);
+        let secret64 = kp.to_bytes();
+        let pubkey = kp.pubkey().to_string();
+
+        let entry = KeystoreEntry {
+            secret: secret64,
+            pubkey_base58: pubkey,
+        };
+        let actual = serde_json::to_string(&entry).unwrap();
+
+        const EXPECTED: &str = r#"{"secret":[66,66,66,66,66,66,66,66,66,66,66,66,66,66,66,66,66,66,66,66,66,66,66,66,66,66,66,66,66,66,66,66,33,82,248,209,155,121,29,36,69,50,66,225,95,46,171,108,183,207,250,123,106,94,211,0,151,150,14,6,152,129,219,18],"pubkey_base58":"3F5qRPtKg8GhGNnbd3qCj6nVJxWsGxq7pvH84okYLAqf"}"#;
+        assert_eq!(actual, EXPECTED, "cross-language byte-equality must hold");
+    }
+
     /// Verify `Debug` impl redacts the secret.
     #[test]
     fn debug_redacts_secret() {
