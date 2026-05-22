@@ -14,6 +14,9 @@ pub struct Config {
     pub http_port: u16,
     pub solana_rpc_url: String,
     pub arweave_url: String,
+    /// Retained for env-var contract compatibility; no longer read at startup
+    /// (identity::ensure() derives the path from $HOME internally).
+    #[allow(dead_code)]
     pub keypair_path: PathBuf,
     pub database_path: PathBuf,
     /// "hash" (default, offline) or "openai" (requires OPENAI_API_KEY)

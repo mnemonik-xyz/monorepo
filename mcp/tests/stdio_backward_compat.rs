@@ -76,9 +76,16 @@ async fn test_stdio_tools_list_sign_memory_recall_without_oauth() {
     // pubkey so the binary's `seed::run` finds `count > 0` and skips the
     // (slow + network-touching) RAG bootstrap loop.
     {
-        use mnemonic_core::identity::{load_or_create_keypair, pubkey_base58};
+        use mnemonic_core::identity::{ensure_with_stores, pubkey_base58, FileKeyStore, KeyStores};
         use mnemonic_core::storage::{AttestationStore, SqliteStore};
-        let kp = load_or_create_keypair(&keypair_path).expect("keypair");
+        let stores = KeyStores {
+            os: None,
+            file: Box::new(FileKeyStore::new(keypair_path.clone())),
+            identity_path: keypair_path.clone(),
+            readme_path: tmp.path().join("README.txt"),
+        };
+        let id = ensure_with_stores(stores).expect("ensure");
+        let kp = id.keypair;
         let pubkey = pubkey_base58(&kp);
         let store = SqliteStore::open(&db_path).expect("sqlite open");
         store

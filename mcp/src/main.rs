@@ -21,7 +21,7 @@ use axum::{
     Json, Router,
 };
 use clap::Parser;
-use mnemonic_core::{arweave, compress, embed, identity, solana, storage::SqliteStore};
+use mnemonic_core::{arweave, compress, embed, solana, storage::SqliteStore};
 use serde::Deserialize;
 use solana_sdk::signer::Signer;
 use std::sync::Arc;
@@ -285,9 +285,12 @@ async fn main() -> anyhow::Result<()> {
         cli.transport.clone()
     };
 
-    let keypair = identity::load_or_create_keypair(&cfg.keypair_path)?;
+    let identity_struct = mnemonic_core::identity::ensure()
+        .map_err(|e| anyhow::anyhow!("identity::ensure failed at startup: {e}"))?;
+    let keypair = identity_struct.keypair;
     tracing::info!("Identity: {}", keypair.pubkey());
-    tracing::info!("did:sol: {}", identity::did_sol(&keypair));
+    tracing::info!("did:sol: {}", mnemonic_core::identity::did_sol(&keypair));
+    tracing::info!("Identity storage: {:?}", identity_struct.storage);
 
     let embedder = embed::build_embedder(
         &cfg.embed_provider,
