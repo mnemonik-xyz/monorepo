@@ -158,13 +158,9 @@ fn handle_create(
         guard.disarm();
 
         write_readme_once(readme_path)?;
-        maybe_log(|| {
-            tracing::info!(
-                target: "mnemonic::identity",
-                "identity created did:sol:{} stored in OS keychain",
-                pubkey_base58
-            )
-        });
+        maybe_log_line(&format!(
+            "mnemonic: identity created did:sol:{pubkey_base58} stored in OS keychain"
+        ));
 
         Ok(Identity {
             keypair,
@@ -179,15 +175,15 @@ fn handle_create(
             .context("writing new identity to file store")?;
 
         write_readme_once(readme_path)?;
-        maybe_log(|| {
-            tracing::info!(
-                target: "mnemonic::identity",
-                "identity created did:sol:{} stored in {} (OS keychain unavailable: {})",
-                pubkey_base58,
-                identity_path.display(),
-                reason
-            )
-        });
+        // Path is rendered as the literal "~/.mnemonic/identity.json" string
+        // to match the Node CLI byte-for-byte (Decision 7). The real path is
+        // derived from $HOME via `dirs::home_dir()` in `default_stores()`, so
+        // 99% of the time this is the actual on-disk location; tests use
+        // tempdir paths but don't assert on the message.
+        let _ = identity_path; // suppress unused-binding lint without changing the signature
+        maybe_log_line(&format!(
+            "mnemonic: identity created did:sol:{pubkey_base58} stored in ~/.mnemonic/identity.json (OS keychain unavailable: {reason})"
+        ));
 
         Ok(Identity {
             keypair,
@@ -290,12 +286,7 @@ fn handle_legacy(
 
         // README: idempotent — won't overwrite if exists.
         write_readme_once(readme_path)?;
-        maybe_log(|| {
-            tracing::info!(
-                target: "mnemonic::identity",
-                "legacy identity migrated to OS keychain"
-            )
-        });
+        maybe_log_line("mnemonic: legacy identity migrated to OS keychain");
 
         Ok(Identity {
             keypair,
@@ -400,12 +391,17 @@ fn describe_unavailability(os: Option<&dyn KeyStore>) -> String {
     }
 }
 
-/// Emit a `tracing::info!` line unless `MNEMONIC_QUIET=1` is set.
-fn maybe_log(f: impl FnOnce()) {
+/// Emit a single `mnemonic:`-prefixed line to stderr unless `MNEMONIC_QUIET=1`
+/// is set. Bypasses the `tracing` subscriber for these three Decision-7
+/// creation/migration messages so wording matches `packages/cli/src/identity/
+/// ensure.ts` byte-for-byte — operators / QA / docs see one canonical line per
+/// event regardless of which surface (Rust mcp-server vs Node CLI) bootstrapped
+/// the identity.
+fn maybe_log_line(line: &str) {
     if std::env::var("MNEMONIC_QUIET").is_ok() {
         return;
     }
-    f();
+    eprintln!("{line}");
 }
 
 // ---------------------------------------------------------------------------

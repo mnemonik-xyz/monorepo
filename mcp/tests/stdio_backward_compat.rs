@@ -113,7 +113,6 @@ async fn test_stdio_tools_list_sign_memory_recall_without_oauth() {
         // call embed() in this test (tools/list + initialize don't embed).
         .env("EMBED_PROVIDER", "openai")
         .env("OPENAI_API_KEY", "stdio-test-key-not-real")
-        .env("MNEMONIC_KEYPAIR_PATH", &keypair_path)
         .env("DATABASE_PATH", &db_path)
         .env("RAG_CHUNK_DIR", &rag_dir)
         .env("OLLAMA_URL", "http://localhost:11434")

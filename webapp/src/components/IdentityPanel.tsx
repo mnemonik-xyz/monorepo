@@ -18,8 +18,9 @@ const MCP_BASE =
   (import.meta.env?.VITE_MCP_BASE as string | undefined) ??
   "https://mcp.mnemonik.xyz";
 
-/** Bootstrap-ticket TTL fallback when the server omits `expires_at`. */
-const BOOTSTRAP_TTL_MS = 10 * 60 * 1000;
+/** Bootstrap-ticket TTL fallback when the server omits `expires_at`.
+ *  Matches `BOOTSTRAP_TTL_SECS = 300` in `mcp/src/api.rs` (Decision 12). */
+const BOOTSTRAP_TTL_MS = 5 * 60 * 1000;
 
 /**
  * "Send to CLI" UI state machine.
@@ -294,7 +295,7 @@ export default function IdentityPanel() {
         setCliState({
           kind: "error",
           message:
-            "You have 3 active CLI tickets. Wait for one to expire (10 min) or revoke later.",
+            "You have 3 active CLI tickets. Wait for one to expire (5 min) or revoke later.",
         });
         return;
       }
@@ -325,7 +326,7 @@ export default function IdentityPanel() {
         return;
       }
       // Server may include an absolute `expires_at` (unix seconds). If
-      // absent, fall back to "now + 10 minutes" per Decision 7.
+      // absent, fall back to "now + 5 minutes" per Decision 12.
       const expiresAtMs =
         typeof body.expires_at === "number"
           ? body.expires_at * 1000
@@ -441,7 +442,7 @@ export default function IdentityPanel() {
         setExtState({
           kind: "error",
           message:
-            "You have 3 active extension tickets. Wait for one to expire (10 min).",
+            "You have 3 active extension tickets. Wait for one to expire (5 min).",
         });
         return;
       }
