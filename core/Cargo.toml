@@ -33,6 +33,7 @@ spl-memo = "6"
 futures = "0.3"
 tracing = "0.1"
 keyring = { version = "3", default-features = false, features = ["apple-native", "windows-native", "sync-secret-service"] }
+dirs = "6"
 crypto_box = "0.9"
 tempfile = "3"
 fastembed = { version = "5", optional = true }
