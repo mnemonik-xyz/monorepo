@@ -226,23 +226,27 @@ else
 fi
 
 # -----------------------------------------------------------------------------
-# STEP 3 — Sign (exercises actual keychain unlock)
+# STEP 3 — Prove (exercises actual keychain unlock; pure local, no login needed)
 # -----------------------------------------------------------------------------
 
-log "STEP 3 — sign a test memory (verifies keychain secret is readable)"
-NOISY=1 timeout 30 node "$MNEMONIC_CLI" sign "t15-macos-sign-1" > "$TMP_DIR/step3.stdout" 2> "$TMP_DIR/step3.stderr" || true
+# `mnemonic prove` signs a 32-byte challenge with the local Ed25519 key. It
+# touches the keychain via OsKeyStore::get() — exactly the path that triggers
+# Apple's "Always Allow" prompt on first read. If Step 2b widened the
+# partition list, this must succeed silently. We use `prove` instead of
+# `sign` because `sign` requires a logged-in JWT (token.json), which the
+# smoke setup intentionally does not provision.
 
-# The signature output shape varies; accept any of these signals:
-#   - a 'signature' or 'signature_hex' field in JSON
-#   - a hex string of length >= 128
-#   - a base64 string of length >= 80
-#   - any non-empty stdout that doesn't contain "error"
+log "STEP 3 — prove a challenge (verifies keychain secret is readable)"
+NOISY=1 timeout 30 node "$MNEMONIC_CLI" prove --challenge "$(printf 'deadbeef%.0s' {1..8})" > "$TMP_DIR/step3.stdout" 2> "$TMP_DIR/step3.stderr" || true
+
+# The prove output is human-formatted by default; --json gives JSON. Accept
+# either: any non-empty stdout that contains a base58/hex signature shape.
 assert_pass "step3.stdout_nonempty"   "[ -s \"$TMP_DIR/step3.stdout\" ]"
 assert_pass "step3.no_obvious_error"  "! grep -qiE 'error|panic|trace' \"$TMP_DIR/step3.stderr\""
 
-# Re-sign — must succeed silently (no prompt second time around)
-log "  re-signing to confirm no repeat prompt"
-NOISY=1 timeout 15 node "$MNEMONIC_CLI" sign "t15-macos-sign-2" > "$TMP_DIR/step3b.stdout" 2> "$TMP_DIR/step3b.stderr" || true
+# Re-prove — must succeed silently (no prompt second time around)
+log "  re-proving to confirm no repeat prompt"
+NOISY=1 timeout 15 node "$MNEMONIC_CLI" prove --challenge "$(printf 'beefcafe%.0s' {1..8})" > "$TMP_DIR/step3b.stdout" 2> "$TMP_DIR/step3b.stderr" || true
 assert_pass "step3.second_sign_nonempty" "[ -s \"$TMP_DIR/step3b.stdout\" ]"
 
 # -----------------------------------------------------------------------------

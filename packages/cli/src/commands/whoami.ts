@@ -56,9 +56,22 @@ export async function runWhoami(opts: WhoamiOptions): Promise<void> {
   };
 
   if (identityExists()) {
-    const id = loadIdentityJson();
-    result.pubkey = id.pubkey_base58;
-    result.did = `did:sol:${id.pubkey_base58}`;
+    // identity.json may be the new stub shape (keychain-backed). For the
+    // default whoami output we only need `pubkey_base58`, which the typed
+    // `IdentityRequiresKeystore` throw carries directly — no need to
+    // resolve the secret via the OS keychain at all.
+    try {
+      const id = loadIdentityJson();
+      result.pubkey = id.pubkey_base58;
+      result.did = `did:sol:${id.pubkey_base58}`;
+    } catch (e) {
+      if (e instanceof IdentityRequiresKeystore) {
+        result.pubkey = e.pubkey_base58;
+        result.did = `did:sol:${e.pubkey_base58}`;
+      } else {
+        throw e;
+      }
+    }
   }
 
   if (tokenExists()) {
