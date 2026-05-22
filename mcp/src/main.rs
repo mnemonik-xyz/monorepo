@@ -700,6 +700,13 @@ async fn run_http(
             "/api/cli-bootstrap/redeem/{ticket}",
             axum::routing::get(api::bootstrap_redeem_handler),
         )
+        // POST /api/cli-bootstrap/redeem — lookup by short_code (T13/T14 interop).
+        // No auth required: the short_code is the capability, exempt via the
+        // bearer-auth allowlist (same treatment as the GET UUID-based variant).
+        .route(
+            "/api/cli-bootstrap/redeem",
+            post(api::bootstrap_redeem_by_code_handler),
+        )
         .route(
             "/api/cli-bootstrap/server-pub",
             axum::routing::get(api::bootstrap_server_pub_handler),

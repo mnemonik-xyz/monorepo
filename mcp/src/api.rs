@@ -805,22 +805,14 @@ pub struct CliRedeemResponse {
     pub issuer_pubkey_base58: String,
 }
 
-pub async fn bootstrap_redeem_handler(
-    State(state): State<Arc<McpState>>,
-    Path(ticket_str): Path<String>,
-    body: Option<Json<BootstrapRedeemBody>>,
-) -> Response {
-    // Parse the ticket UUID. Invalid UUIDs collapse to 404.
-    let ticket_id = match Uuid::parse_str(&ticket_str) {
-        Ok(id) => id,
-        Err(_) => return bootstrap_not_found(),
-    };
-
-    let entry = match state.bootstrap_tickets.consume(ticket_id).await {
-        Some(t) => t,
-        None => return bootstrap_not_found(),
-    };
-
+/// Shared post-`consume` logic for both redeem handlers. Performs origin
+/// dispatch: Webapp-origin tickets return the keypair bytes directly;
+/// Cli-origin tickets unwrap the server-encrypted secret and re-wrap it
+/// to the redeemer's ephemeral x25519 public key.
+///
+/// `redeemer_eph_pub` is a base64-encoded 32-byte x25519 public key —
+/// required only for `Cli`-origin tickets.
+fn finalize_redeem(entry: BootstrapTicket, redeemer_eph_pub: Option<String>, state: &McpState) -> Response {
     match entry.origin {
         TicketOrigin::Webapp => {
             // Original Decision-7 flow: return keypair bytes directly.
@@ -853,7 +845,7 @@ pub async fn bootstrap_redeem_handler(
         }
         TicketOrigin::Cli => {
             // Task-12 symmetric flow: unwrap with server SK, re-wrap to redeemer.
-            let redeemer_pub_b64 = match body.and_then(|b| b.redeemer_eph_pub.clone()) {
+            let redeemer_pub_b64 = match redeemer_eph_pub {
                 Some(s) => s,
                 None => {
                     return error_resp(
@@ -948,6 +940,61 @@ pub async fn bootstrap_redeem_handler(
                 .into_response()
         }
     }
+}
+
+pub async fn bootstrap_redeem_handler(
+    State(state): State<Arc<McpState>>,
+    Path(ticket_str): Path<String>,
+    body: Option<Json<BootstrapRedeemBody>>,
+) -> Response {
+    // Parse the ticket UUID. Invalid UUIDs collapse to 404.
+    let ticket_id = match Uuid::parse_str(&ticket_str) {
+        Ok(id) => id,
+        Err(_) => return bootstrap_not_found(),
+    };
+
+    let entry = match state.bootstrap_tickets.consume(ticket_id).await {
+        Some(t) => t,
+        None => return bootstrap_not_found(),
+    };
+
+    let redeemer_eph_pub = body.and_then(|b| b.redeemer_eph_pub.clone());
+    finalize_redeem(entry, redeemer_eph_pub, &state)
+}
+
+/// Request body for `POST /api/cli-bootstrap/redeem`.
+#[derive(Debug, Deserialize)]
+pub struct BootstrapRedeemByCodeRequest {
+    pub short_code: String,
+    /// Required for Cli-origin tickets; absent for Webapp-origin.
+    #[serde(default)]
+    pub redeemer_eph_pub: Option<String>,
+}
+
+/// `POST /api/cli-bootstrap/redeem` — lookup by short_code (user-visible
+/// capability; vs the UUID-based GET variant). Body:
+///   { short_code: "ABCD-1234", redeemer_eph_pub: <base64 32B> }
+/// Returns same shapes as bootstrap_redeem_handler:
+/// - Webapp origin: {secret: number[64], pubkey_base58}
+/// - Cli origin: {wrapped_secret, eph_pub, origin, issuer_pubkey_base58}
+///
+/// 404 on missing / expired / already-consumed codes. Body is identical for
+/// all three states so a probing attacker cannot distinguish (same as the
+/// UUID-based GET variant).
+pub async fn bootstrap_redeem_by_code_handler(
+    State(state): State<Arc<McpState>>,
+    Json(body): Json<BootstrapRedeemByCodeRequest>,
+) -> Response {
+    let entry = match state
+        .bootstrap_tickets
+        .consume_by_short_code(&body.short_code)
+        .await
+    {
+        Some(t) => t,
+        None => return bootstrap_not_found(),
+    };
+
+    finalize_redeem(entry, body.redeemer_eph_pub, &state)
 }
 
 /// Request body for `POST /api/cli-bootstrap/issue-from-cli`.
