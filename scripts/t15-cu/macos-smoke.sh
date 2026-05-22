@@ -237,17 +237,33 @@ fi
 # smoke setup intentionally does not provision.
 
 log "STEP 3 — prove a challenge (verifies keychain secret is readable)"
-NOISY=1 timeout 30 node "$MNEMONIC_CLI" prove --challenge "$(printf 'deadbeef%.0s' {1..8})" > "$TMP_DIR/step3.stdout" 2> "$TMP_DIR/step3.stderr" || true
+# Use --json for deterministic structured output. Capture exit code too so
+# we know if the process was killed by timeout, errored, or exited cleanly
+# with no stdout. Empty stdout+stderr+exit-0 is a bug we want to detect.
+CHALLENGE_1="deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+CHALLENGE_2="beefcafebeefcafebeefcafebeefcafebeefcafebeefcafebeefcafebeefcafe"
 
-# The prove output is human-formatted by default; --json gives JSON. Accept
-# either: any non-empty stdout that contains a base58/hex signature shape.
+set +e
+timeout 30 node "$MNEMONIC_CLI" --json prove --challenge "$CHALLENGE_1" > "$TMP_DIR/step3.stdout" 2> "$TMP_DIR/step3.stderr"
+STEP3_EXIT=$?
+set -e
+echo "$STEP3_EXIT" > "$TMP_DIR/step3.exit_code"
+log "  step3 exit code: $STEP3_EXIT (0=clean, 124=timeout-killed, other=error)"
+
 assert_pass "step3.stdout_nonempty"   "[ -s \"$TMP_DIR/step3.stdout\" ]"
 assert_pass "step3.no_obvious_error"  "! grep -qiE 'error|panic|trace' \"$TMP_DIR/step3.stderr\""
+assert_pass "step3.exit_clean"        "[ \"$STEP3_EXIT\" = '0' ]"
+assert_pass "step3.json_has_signature" "jq -e .signature \"$TMP_DIR/step3.stdout\" >/dev/null 2>&1"
 
 # Re-prove — must succeed silently (no prompt second time around)
 log "  re-proving to confirm no repeat prompt"
-NOISY=1 timeout 15 node "$MNEMONIC_CLI" prove --challenge "$(printf 'beefcafe%.0s' {1..8})" > "$TMP_DIR/step3b.stdout" 2> "$TMP_DIR/step3b.stderr" || true
+set +e
+timeout 15 node "$MNEMONIC_CLI" --json prove --challenge "$CHALLENGE_2" > "$TMP_DIR/step3b.stdout" 2> "$TMP_DIR/step3b.stderr"
+STEP3B_EXIT=$?
+set -e
+echo "$STEP3B_EXIT" > "$TMP_DIR/step3b.exit_code"
 assert_pass "step3.second_sign_nonempty" "[ -s \"$TMP_DIR/step3b.stdout\" ]"
+assert_pass "step3.second_exit_clean"    "[ \"$STEP3B_EXIT\" = '0' ]"
 
 # -----------------------------------------------------------------------------
 # STEP 4 — Legacy migration (pre-seed legacy fixture → expect stub conversion + pubkey preserved)
