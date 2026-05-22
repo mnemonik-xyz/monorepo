@@ -16,6 +16,7 @@ export { MnemonicClient } from "./client.js";
 export { coseSignPayload } from "./cose.js";
 export {
   AuthError,
+  IdentityRequiresKeystore,
   IntegrityError,
   MnemonicError,
   ServerError,

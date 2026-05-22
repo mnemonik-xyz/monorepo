@@ -6,7 +6,7 @@
 // Sharing the shape is what lets the bootstrap-ticket flow round-trip a
 // keypair from browser to CLI without re-serialization.
 
-import { UserError } from "./errors.js";
+import { IdentityRequiresKeystore, UserError } from "./errors.js";
 import { loadWasm } from "./wasm.js";
 
 /** On-the-wire keypair representation, identical to webapp localStorage. */
@@ -75,41 +75,67 @@ export class Keypair {
   }
 
   /**
-   * Construct from an existing `KeypairJson` shape. Validation is
-   * performed via WASM `import_keypair_json` (round-trip through canonical
-   * JSON) so we get the same secret-length + pubkey-derivation checks the
-   * WASM boundary enforces server-side.
+   * Construct from a parsed identity.json object. Accepts two shapes:
    *
-   * @param json - A `KeypairJson` (or candidate) — typically read from
+   * **Legacy shape** — `{secret: number[64], pubkey_base58: string}`:
+   * Validated via WASM `import_keypair_json` (checks secret length and
+   * pubkey derivation) and returned as a fully-loaded `Keypair`.
+   *
+   * **Stub shape** — `{pubkey_base58: string, keychain_ref: string}`:
+   * The identity.json was written by the CLI in invisible-bootstrap mode;
+   * the secret bytes live in the OS keychain. This method cannot load them
+   * — it throws {@link IdentityRequiresKeystore} so the caller can resolve
+   * the secret via the appropriate keychain API.
+   *
+   * @param json - A parsed identity.json value — typically read from
    *               `localStorage["mnemonic.identity"]` or
    *               `~/.mnemonic/identity.json`.
-   * @returns The validated `Keypair`.
-   * @throws `UserError` if `json` does not match the expected shape, the
-   *         secret is the wrong length, or the pubkey does not derive
-   *         from the secret.
+   * @returns The validated `Keypair` (legacy shape only).
+   * @throws `TypeError` if `json` is not an object.
+   * @throws `IdentityRequiresKeystore` if `json` is a stub shape
+   *         referencing an OS keychain entry.
+   * @throws `UserError` if the secret length is wrong, the pubkey does not
+   *         derive from the secret, or WASM validation fails.
    */
   static async fromJSON(json: KeypairJson | unknown): Promise<Keypair> {
-    if (!isKeypairJsonShape(json)) {
-      throw new UserError(
-        "Keypair.fromJSON: expected {secret: number[64], pubkey_base58: string}"
+    if (!json || typeof json !== "object") {
+      throw new TypeError(
+        "Keypair.fromJSON: expected {secret: number[64], pubkey_base58: string}",
       );
     }
-    if (json.secret.length !== 64) {
-      throw new UserError(
-        `Keypair.fromJSON: secret must be 64 bytes, got ${json.secret.length}`
-      );
+    const obj = json as Record<string, unknown>;
+
+    // Legacy shape: secret bytes present — validate and construct.
+    if (Array.isArray(obj.secret) && typeof obj.pubkey_base58 === "string") {
+      if (obj.secret.length !== 64) {
+        throw new UserError(
+          `Keypair.fromJSON: secret must be 64 bytes, got ${obj.secret.length}`,
+        );
+      }
+      const wasm = await loadWasm();
+      const jsonStr = JSON.stringify(obj);
+      let validated: unknown;
+      try {
+        validated = wasm.import_keypair_json(jsonStr);
+      } catch (e) {
+        // WASM-bindgen errors arrive as `Error` instances; re-throw under our
+        // typed hierarchy so callers can `instanceof UserError`.
+        throw new UserError(`invalid keypair: ${describeError(e)}`, e);
+      }
+      return new Keypair(coerceKeypairJson(validated));
     }
-    const wasm = await loadWasm();
-    const jsonStr = JSON.stringify(json);
-    let validated: unknown;
-    try {
-      validated = wasm.import_keypair_json(jsonStr);
-    } catch (e) {
-      // WASM-bindgen errors arrive as `Error` instances; re-throw under our
-      // typed hierarchy so callers can `instanceof UserError`.
-      throw new UserError(`invalid keypair: ${describeError(e)}`, e);
+
+    // Stub shape: keychain reference — caller must resolve via OS keychain.
+    if (
+      typeof obj.pubkey_base58 === "string" &&
+      typeof obj.keychain_ref === "string"
+    ) {
+      throw new IdentityRequiresKeystore(obj.pubkey_base58, obj.keychain_ref);
     }
-    return new Keypair(coerceKeypairJson(validated));
+
+    throw new TypeError(
+      "Keypair.fromJSON: expected {secret: number[64], pubkey_base58: string}",
+    );
   }
 
   /**
