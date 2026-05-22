@@ -90,7 +90,7 @@ Each step has the same shape: an action, an assertion, and an "on failure" recov
 
 | Platform | GUI prompt expected? | Computer Use action |
 |---|---|---|
-| `macos14` | YES — Apple Keychain Access modal asking to allow `node` (or `mnemonic`) to read `xyz.mnemonik.identity`. Title typically "Keychain wants to use 'xyz.mnemonik.identity'". | (a) Screenshot the screen. (b) If a modal contains the text "Keychain wants to use" or "Allow access", click the **"Always Allow"** button. (c) Wait 2s, screenshot again to confirm the modal is gone. (d) Re-screenshot to verify the prior terminal window is foreground and the command has returned. Record the screenshot file paths in the step's diagnostics. |
+| `macos14` | NO — provided `scripts/macos-prep-keychain.sh` was run once between Step 2 and Step 3 of this row. Run it now: `"$T15_REPO_PATH/scripts/macos-prep-keychain.sh"` — prompts for the login password ONCE, widens the entry's partition list to `apple-tool:,unsigned:`, then subsequent reads are silent. **If the script can't run** (no TTY for password, `T15_KEYCHAIN_PASSWORD` not provided), fall back to the legacy GUI path: (a) screenshot the screen, (b) if a modal contains "Keychain wants to use" or "Allow access", click the **"Always Allow"** button, (c) wait 2s, re-screenshot, (d) mark step diagnostic `acl_widened: false` so the operator knows future runs will keep prompting. |
 | `ubuntu22_keyring` | Sometimes — only if the keyring is locked. If a modal appears with the text "Unlock keyring", type the user's login password (or skip with status `deferred` if no password is available). If no modal appears within 3s, proceed. | Wait 3s after invocation; screenshot; if no modal, continue. If modal, mark `deferred: requires_user_password`. |
 | `windows11` | NO modal expected (Credential Manager doesn't prompt for current-user credentials). | None |
 | `ubuntu22_headless` | NO modal (no GUI). | None |
@@ -273,7 +273,7 @@ This file is the "agent-runnable" version. The original checklist remains for hu
 
 1. **Webapp test login**: provide a stable `T15_WEBAPP_AUTH_COOKIE` for a long-lived test user (or set up an `?test_user=...` query-param dev-mode shortcut on the webapp's OAuth flow) so Step 6 can run unattended on platforms with browsers.
 
-2. **macOS keychain pre-authorization**: investigate `security set-key-partition-list -S apple-tool:,unsigned:` so Step 3's "Always Allow" GUI click can be replaced with a no-prompt command line. Until that lands, the GUI click in Step 3 is the only one the agent absolutely must perform.
+2. ✅ **macOS keychain pre-authorization** — RESOLVED in commit b46ec20. `scripts/macos-prep-keychain.sh` widens the `xyz.mnemonik.identity/default` partition list to `apple-tool:,unsigned:` via `security set-generic-password-partition-list`. Operator (or the agent itself) runs the script once after first bootstrap; subsequent reads are silent. Residual: the script prompts for the login password once (keychain admin gate). For fully unattended runs, stage `T15_KEYCHAIN_PASSWORD` and have the agent pipe it via `expect`. The legacy "Always Allow" GUI fallback in Step 3 remains for environments where the script can't run.
 
 3. **Windows 11 runner**: confirm GitHub Actions' `windows-2022` runner can drive Credential Manager unattended. If yes, this scenario could be re-classified from "manual smoke" to "CI smoke on a Windows runner" — closing the gap left by Wave 3 CI (which only covers Linux + gnome-keyring).
 
