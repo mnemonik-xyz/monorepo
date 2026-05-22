@@ -20,7 +20,12 @@ import {
   runIdentityExport,
 } from "../src/commands/identity.js";
 import { handleError } from "../src/errors.js";
+import { ensure, shouldSkipEnsure } from "../src/identity/ensure.js";
 import type { OutputOptions } from "../src/output.js";
+
+// Re-export so callers that previously imported shouldSkipEnsure from this
+// module don't break.
+export { shouldSkipEnsure };
 
 interface RootFlags {
   json?: boolean;
@@ -54,26 +59,26 @@ export function buildProgram(): Command {
     .option("--no-color", "disable ANSI color")
     .option(
       "--verbose",
-      "log auth identifiers + HTTP request/response context to stderr"
+      "log auth identifiers + HTTP request/response context to stderr",
     );
 
   program
     .command("init")
     .description(
-      "set up CLI identity — pair with webapp via --ticket (recommended) or --standalone"
+      "set up CLI identity — pair with webapp via --ticket (recommended) or --standalone",
     )
     .option(
       "--ticket <uuid>",
-      "redeem a webapp 'Send to CLI' ticket (recommended — keeps CLI + webapp keypairs aligned)"
+      "redeem a webapp 'Send to CLI' ticket (recommended — keeps CLI + webapp keypairs aligned)",
     )
     .option(
       "--standalone",
-      "generate a fresh CLI-only keypair (advanced; will not match webapp localStorage)"
+      "generate a fresh CLI-only keypair (advanced; will not match webapp localStorage)",
     )
     .option("--force", "overwrite existing identity")
     .option(
       "--base-url <url>",
-      "override the server base URL (used with --ticket)"
+      "override the server base URL (used with --ticket)",
     )
     .action(
       async (cmdOpts: {
@@ -93,18 +98,18 @@ export function buildProgram(): Command {
             ? { baseUrl: cmdOpts.baseUrl }
             : {}),
         });
-      }
+      },
     );
 
   program
     .command("login")
     .description(
-      "OAuth login — default signs the server challenge with the local CLI keypair (browserless). Use --browser for the legacy webapp-localStorage flow, or --token <jwt> for a pre-issued JWT."
+      "OAuth login — default signs the server challenge with the local CLI keypair (browserless). Use --browser for the legacy webapp-localStorage flow, or --token <jwt> for a pre-issued JWT.",
     )
     .option("--token <jwt>", "headless: persist a pre-issued JWT")
     .option(
       "--browser",
-      "use the legacy browser-mediated OAuth flow (webapp localStorage signs the challenge)"
+      "use the legacy browser-mediated OAuth flow (webapp localStorage signs the challenge)",
     )
     .option("--base-url <url>", "override the server base URL")
     .action(
@@ -123,7 +128,7 @@ export function buildProgram(): Command {
             ? { baseUrl: cmdOpts.baseUrl }
             : {}),
         });
-      }
+      },
     );
 
   program
@@ -134,7 +139,7 @@ export function buildProgram(): Command {
     .action(
       async (
         content: string | undefined,
-        cmdOpts: { tags?: string; baseUrl?: string }
+        cmdOpts: { tags?: string; baseUrl?: string },
       ) => {
         await runSign(content, {
           ...rootOpts(program),
@@ -143,7 +148,7 @@ export function buildProgram(): Command {
             ? { baseUrl: cmdOpts.baseUrl }
             : {}),
         });
-      }
+      },
     );
 
   program
@@ -155,7 +160,7 @@ export function buildProgram(): Command {
     .action(
       async (
         query: string,
-        cmdOpts: { topK?: number; tag?: string; baseUrl?: string }
+        cmdOpts: { topK?: number; tag?: string; baseUrl?: string },
       ) => {
         await runRecall(query, {
           ...rootOpts(program),
@@ -165,7 +170,7 @@ export function buildProgram(): Command {
             ? { baseUrl: cmdOpts.baseUrl }
             : {}),
         });
-      }
+      },
     );
 
   program
@@ -235,7 +240,7 @@ export function buildProgram(): Command {
             ? { baseUrl: cmdOpts.baseUrl }
             : {}),
         });
-      }
+      },
     );
 
   identity
@@ -253,6 +258,19 @@ export function buildProgram(): Command {
 }
 
 export async function main(argv: string[]): Promise<void> {
+  // Bootstrap identity before any command runs.  Skipped for help/version
+  // flags and specific subcommands that manage identity themselves.
+  if (!shouldSkipEnsure(argv)) {
+    try {
+      await ensure();
+    } catch (e) {
+      // Print a clean error without leaking secret bytes, then exit.
+      const msg = e instanceof Error ? e.message : String(e);
+      process.stderr.write(`mnemonic: identity bootstrap failed: ${msg}\n`);
+      process.exit(1);
+    }
+  }
+
   const program = buildProgram();
   try {
     await program.parseAsync(argv);

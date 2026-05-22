@@ -27,9 +27,14 @@ import {
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-import { Keypair, type KeypairJson } from "@mnemonik-xyz/sdk";
+import {
+  IdentityRequiresKeystore,
+  Keypair,
+  type KeypairJson,
+} from "@mnemonik-xyz/sdk";
 
 import { UserError } from "./errors.js";
+import { OsKeyStore } from "./identity/keystore-os.js";
 
 export interface TokenJson {
   jwt: string;
@@ -88,7 +93,7 @@ export function restrictFileMode(path: string): void {
       execFileSync(
         "icacls",
         [path, "/inheritance:r", "/grant:r", `${user}:F`],
-        { stdio: "ignore" }
+        { stdio: "ignore" },
       );
     } catch {
       // Non-fatal — the file is written; ACL hardening is best-effort on
@@ -177,7 +182,7 @@ function noIdentityError(): UserError {
     `no identity in ${configDir()}. Options:\n` +
       `  • mnemonic init                              — generate fresh keypair\n` +
       `  • mnemonic identity import --ticket <uuid>   — round-trip from webapp\n` +
-      `  • mnemonic identity import --file <path>     — import existing keypair JSON`
+      `  • mnemonic identity import --file <path>     — import existing keypair JSON`,
   );
 }
 
@@ -202,7 +207,7 @@ export function loadIdentityJson(): KeypairJson {
     }
     if (!isKeypairJson(parsed)) {
       throw new UserError(
-        `identity has wrong shape; expected {secret: number[64], pubkey_base58: string}`
+        `identity has wrong shape; expected {secret: number[64], pubkey_base58: string}`,
       );
     }
     return parsed;
@@ -227,7 +232,7 @@ export function loadIdentityJson(): KeypairJson {
     }
     if (!isSolanaKeypairArray(parsed)) {
       throw new UserError(
-        `${legacy} is not a Solana keypair file (expected JSON array of 64 numbers in 0..255)`
+        `${legacy} is not a Solana keypair file (expected JSON array of 64 numbers in 0..255)`,
       );
     }
     process.stderr.write("using legacy id.json (Solana keypair file format)\n");
@@ -237,10 +242,45 @@ export function loadIdentityJson(): KeypairJson {
   throw noIdentityError();
 }
 
+/**
+ * Resolve a stub identity.json via the OS keychain and return a full Keypair.
+ *
+ * Called from `loadIdentity()` and `whoami` when `Keypair.fromJSON` throws
+ * `IdentityRequiresKeystore` — i.e. the file is a stub that carries only a
+ * pubkey + keychain_ref, not the raw secret bytes.
+ *
+ * Exported so `commands/whoami.ts` can reuse it without duplicating the
+ * keychain-lookup logic.
+ */
+export async function resolveKeypairFromKeystore(
+  pubkey_base58: string,
+): Promise<Keypair> {
+  const ks = new OsKeyStore();
+  const entry = await ks.get();
+  if (!entry) {
+    throw new UserError(
+      `identity.json points at the OS keychain (stub file) but the keychain entry is missing. ` +
+        `Run \`mnemonic identity pull-from-webapp\` to re-import your key.`,
+    );
+  }
+  const fullJson: KeypairJson = {
+    secret: entry.secret,
+    pubkey_base58: entry.pubkey_base58 || pubkey_base58,
+  };
+  return Keypair.fromJSON(fullJson);
+}
+
 /** Convenience: load + return as a `Keypair` instance. */
 export async function loadIdentity(): Promise<Keypair> {
   const json = loadIdentityJson();
-  return Keypair.fromJSON(json);
+  try {
+    return await Keypair.fromJSON(json);
+  } catch (e) {
+    if (e instanceof IdentityRequiresKeystore) {
+      return resolveKeypairFromKeystore(e.pubkey_base58);
+    }
+    throw e;
+  }
 }
 
 /** Atomic mode-0600 write of an identity. */
@@ -301,13 +341,13 @@ export function loadToken(): TokenJson {
   }
   if (!isTokenJson(parsed)) {
     throw new UserError(
-      `token has wrong shape; expected {jwt, expires_at, sub}`
+      `token has wrong shape; expected {jwt, expires_at, sub}`,
     );
   }
   const exp = Date.parse(parsed.expires_at);
   if (Number.isFinite(exp) && exp <= Date.now()) {
     throw new UserError(
-      `token expired at ${parsed.expires_at}; run \`mnemonic login\` again`
+      `token expired at ${parsed.expires_at}; run \`mnemonic login\` again`,
     );
   }
   return parsed;

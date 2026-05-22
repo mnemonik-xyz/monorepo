@@ -10,6 +10,7 @@
 // asserts `whoami` makes ≤ 1 fetch by default.
 
 import {
+  IdentityRequiresKeystore,
   Keypair,
   LocalSigner,
   MnemonicClient,
@@ -20,6 +21,7 @@ import {
   identityExists,
   loadIdentityJson,
   loadToken,
+  resolveKeypairFromKeystore,
   tokenExists,
 } from "../config.js";
 import { fromSdkError } from "../errors.js";
@@ -87,7 +89,16 @@ export async function runWhoami(opts: WhoamiOptions): Promise<void> {
     const baseUrl =
       opts.baseUrl ?? process.env.MNEMONIC_BASE_URL ?? DEFAULT_BASE_URL;
     const id = loadIdentityJson();
-    const kp = await Keypair.fromJSON(id);
+    let kp: Keypair;
+    try {
+      kp = await Keypair.fromJSON(id);
+    } catch (e) {
+      if (e instanceof IdentityRequiresKeystore) {
+        kp = await resolveKeypairFromKeystore(e.pubkey_base58);
+      } else {
+        throw e;
+      }
+    }
     const tok = loadToken();
     const client = new MnemonicClient({
       baseUrl,
@@ -105,7 +116,7 @@ export async function runWhoami(opts: WhoamiOptions): Promise<void> {
   format(result, opts, (_d, _color) => {
     const lines: string[] = [];
     lines.push(
-      `pubkey:       ${result.pubkey ?? "(none — run `mnemonic init`)"}`
+      `pubkey:       ${result.pubkey ?? "(none — run `mnemonic init`)"}`,
     );
     lines.push(`did:          ${result.did ?? "(none)"}`);
     if (result.jwt) {
@@ -117,9 +128,9 @@ export async function runWhoami(opts: WhoamiOptions): Promise<void> {
           result.signer_match === null
             ? "(unknown)"
             : result.signer_match
-            ? "yes"
-            : "NO — identity and JWT disagree"
-        }`
+              ? "yes"
+              : "NO — identity and JWT disagree"
+        }`,
       );
     } else {
       lines.push(`jwt:          (none — run \`mnemonic login\`)`);
