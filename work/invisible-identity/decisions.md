@@ -384,12 +384,18 @@ Outstanding for Wave 5:
 
 ---
 
-## Task 15: Cross-platform smoke matrix — DEFERRED to human-driven execution
+## Task 15: Cross-platform smoke matrix — Computer Use agent scenario
 
-**Status:** blocked_on_user
-**Checklist:** `logs/working/T15-smoke-matrix-checklist.md` (5 rows × 6 steps)
-**Reason:** macOS Keychain + Win11 Credential Manager cannot be driven by free CI runners. Linux+gnome-keyring is covered by Wave 3 CI (`cross-lang-keychain` job). Docker alpine + headless Linux are nominally CI-able but the spec asks for an independent confirmation pass.
-**Hand-off:** Operator runs the checklist on the 5 platforms, records pass/fail per row, copies the sign-off table back into a new `## Task 15:` entry in this file.
+**Status:** ready_for_computer_use_agent
+**Scenario:** `scenarios/T15-smoke-matrix.md` (Codex / Claude Computer Use)
+**Human checklist (alt):** `logs/working/T15-smoke-matrix-checklist.md`
+**Summary:** Rewrote the original human-driven Markdown checklist into a Computer Use agent scenario. Same 5-row × 6-step matrix, but adapted for agent execution: precise commands + regex/exit-code assertions per step, explicit GUI affordances (modal text + button labels) for the macOS / Win11 cases, structured per-platform JSON output + aggregated summary contract, 60s-per-step timeout, mandatory cleanup, sensitive-data rules (never log secret bytes), no-modification guarantee. Orchestrator invokes the agent once per platform with `T15_PLATFORM` env var; five invocations cover the full matrix.
+**Open follow-ups for the orchestrator** (listed in §8 of the scenario):
+- Provide a stable `T15_WEBAPP_AUTH_COOKIE` so Step 6 (browser redemption) can run unattended
+- Investigate `security set-key-partition-list -S apple-tool:,unsigned:` to bypass the Step 3 "Always Allow" GUI click on macOS
+- Verify GitHub Actions' `windows-2022` runner can drive Credential Manager — would re-classify the row from "manual smoke" to "CI smoke"
+- Verify `@napi-rs/keyring linux-x64-musl` prebuilt works for the Docker alpine row
+**Hand-off:** Orchestrator invokes 5 Computer Use agent runs; aggregates per-platform JSON results; a `decisions_md_block` JSON field in the summary file is the canonical text to append here as the actual Task 15 sign-off entry once executed.
 
 ## Task 16: Security audit (full feature diff)
 
