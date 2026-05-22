@@ -194,3 +194,42 @@ jobs:
       - run: |
           cargo test -p mnemonic-mcp --features test-support \
             --test stdio_backward_compat -- --ignored
+
+  # Cross-language keychain interop test (Task 9).
+  # Drives both Rust mnemonic-mcp and Node CLI against the same gnome-keyring
+  # entry and asserts byte-equality of secrets. Linux+gnome-keyring only;
+  # macOS Keychain and Windows Credential Manager are covered by Wave 5
+  # manual smoke tests (no free CI runners with those backends).
+  cross-lang-keychain:
+    name: cross-lang-keychain
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: workspace
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install gnome-keyring + tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gnome-keyring dbus-x11 libsecret-tools jq
+      - name: Build Rust mcp-server
+        run: cargo build -p mnemonic-mcp
+      - name: Build Node CLI
+        run: npm install --workspaces --include-workspace-root && npm run build --workspace=@mnemonik-xyz/cli
+      - name: Run cross-lang test under dbus + keyring
+        env:
+          MNEMONIC_QUIET: '1'
+          STORAGE_MODE: local
+          PAYMENT_MODE: none
+          EMBED_PROVIDER: openai
+          OPENAI_API_KEY: test
+        run: |
+          eval "$(dbus-launch --sh-syntax)"
+          echo -n "" | gnome-keyring-daemon --unlock
+          gnome-keyring-daemon --start --components=secrets &
+          sleep 1
+          bash tests/cross-lang/keychain.sh
