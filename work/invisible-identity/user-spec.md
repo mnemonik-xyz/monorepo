@@ -30,7 +30,7 @@ related:
 
 **Слой 2 — Кросс-поверхностная синхронизация (поглощено из keypair-sync).**
 
-5. **`mnemonic identity status`** — команда обнаружения drift'а. Сравнивает локальную identity с JWT.sub из кэшированного `~/.mnemonic/token.json` и сообщает: `synced` / `diverged` / `webapp-unknown`.
+5. **`mnemonic identity status`** — команда обнаружения drift'а (локально, без сети). Сравнивает локальную identity с JWT.sub из кэшированного `~/.mnemonic/token.json` и сообщает: `synced` / `diverged` / `webapp-unknown` / `no-identity` / `malformed`. Exit code `0` если synced/webapp-unknown, `3` если diverged/malformed, `1` если identity отсутствует.
 6. **JWT-baked install deeplinks.** Кнопки "Install in Cursor / VS Code" на webapp вшивают `Authorization: Bearer <jwt>` в сгенерированный `mcp.json` — IDE сразу аутентифицирован тем же keypair'ом что и webapp. Никакого ручного `mnemonic login` или копирования JWT.
 7. **Drift-warning prompts.** Webapp "Generate new" показывает модалку с опциями "Send to CLI / Download backup / Cancel" **до** того как новый ключ заменит старый. CLI `mnemonic init --force` напоминает про webapp localStorage drift.
 8. **Send-to-CLI / Pull-from-webapp.** Двусторонние flow на one-shot тикетах с TTL 5 минут: либо QR-код / short-code от webapp к CLI, либо `mnemonic identity push-to-webapp` от CLI к webapp. Сырые секреты по сети не идут — передаётся обёрнутый секрет или новый pubkey для linkage (см. tech-spec).
@@ -142,14 +142,14 @@ Exit code `0` если synced, `3` если diverged. `--json` для пайпа
 
 **Send-to-CLI (webapp → CLI):**
 
-1. На webapp: меню `Settings → Keys → Send to CLI`. Webapp вызывает `POST /api/cli-sync/issue` (uses существующий oauth-ticket pattern). Получает короткий код `ABCD-1234` и QR.
-2. На CLI: `mnemonic identity pull-from-webapp ABCD-1234`. CLI обращается к `POST /api/cli-sync/redeem`, получает обёрнутый секрет (wrap-key — короткоживущий x25519 эфемерный ключ, см. tech-spec), разворачивает локально, записывает в keychain + обновляет stub-файл.
+1. На webapp: меню `Settings → Keys → Send to CLI`. Webapp вызывает `POST /api/cli-bootstrap/issue`. Получает короткий код `ABCD-1234` и QR.
+2. На CLI: `mnemonic identity pull-from-webapp ABCD-1234`. CLI обращается к `POST /api/cli-bootstrap/redeem`, получает обёрнутый секрет (wrap-key — короткоживущий x25519 эфемерный ключ, см. tech-spec), разворачивает локально, записывает в keychain + обновляет stub-файл.
 3. На обеих поверхностях теперь одинаковый pubkey. JWT тоже валиден без `mnemonic login`.
 
 **Push-to-webapp (CLI → webapp):**
 
-1. На CLI: `mnemonic identity push-to-webapp`. CLI печатает короткий URL `https://mnemonik.xyz/install?pull=<ticket>` и QR-код.
-2. Пользователь открывает URL/сканирует QR в браузере где залогинен в webapp. Webapp редимит ticket, обёрнутый секрет приходит, разворачивается в браузере и кладётся в localStorage.
+1. На CLI: `mnemonic identity push-to-webapp` сначала тянет статический серверный x25519-pubkey через `GET /api/cli-bootstrap/server-pub`, оборачивает секрет под него, затем POST'ит `/api/cli-bootstrap/issue-from-cli` чтобы получить ticket + short_code. CLI печатает короткий URL `https://mnemonik.xyz/install?pull=<short_code>` и QR-код.
+2. Пользователь открывает URL/сканирует QR в браузере где залогинен в webapp. Webapp редимит ticket через `POST /api/cli-bootstrap/redeem`, обёрнутый секрет приходит, разворачивается в браузере и кладётся в localStorage.
 
 Тикеты one-shot, TTL 5 минут, привязаны к user-id (на webapp) и к pubkey (на CLI). Сырые секреты не путешествуют по сети — только обёрнутые x25519.
 
@@ -216,6 +216,12 @@ Cursor открывается через deeplink `cursor://mcp/install?config=<
 - [ ] `work/keypair-sync/user-spec.md` перемещён в `work/completed/keypair-sync/user-spec.md`.
 - [ ] `work/completed/keypair-sync/MOVED.md` создан с однострочной ссылкой на `work/invisible-identity/`.
 
+**Определение "Shipped":**
+
+- [ ] Wave 5 целиком зелёный — T15 (manual smoke matrix, 5 платформ) подписан, T16/T17 (security + code audits) без unresolved CRITICAL/HIGH, T18 (архивирование) done, T19 (pre-deploy QA gate) зелёный.
+- [ ] Feature-ветка `feat/invisible-identity` смерджена в `main` через PR.
+- [ ] **Out of scope для этой feature:** tag release (`v*`), `npm publish` для `@mnemonik-xyz/cli`, фактическая подача в VS Code Marketplace / Cursor Extensions Gallery. Эти шаги становятся возможными после shipа этой feature, но являются отдельными follow-up'ами.
+
 ## Ограничения
 
 - **Один identity на машину.** Multi-profile (`--profile work` / `--profile personal`) — backlog. Файл/keychain entry один на `~/.mnemonic/`.
@@ -254,6 +260,7 @@ Cursor открывается через deeplink `cursor://mcp/install?config=<
 - **Bootstrap callsite (Node):** `identity.ensure()` вызывается из `@mnemonik-xyz/cli` entrypoint **до** любой argv-обработки конкретной команды, кроме `--help` / `--version`.
 - **Bootstrap callsite (Rust):** `identity::ensure()` вызывается из `mcp/src/main.rs` после парсинга CLI args и до старта transport'а.
 - **Single stderr line on creation:** `mnemonic: identity created did:sol:H8x...c4v stored in OS keychain` (или `... stored in legacy file (keychain unavailable: <reason>)`). Никаких других prompt'ов.
+- **`MNEMONIC_QUIET=1` env var — публичный user-facing override.** Подавляет ту самую stderr-строку на первом создании identity. Назначение — headless / CI / Docker / IDE-spawn сценарии, где любой нежданный stderr ломает парсеры или пугает reviewer'ов. Контракт стабильный: следующие минорные версии не сломают переменную и её эффект.
 - **`~/.mnemonic/README.txt`:** один абзац, описывает что находится в папке и где искать docs.
 - **Ticket protocol для Send/Pull:** ticket = `{id: uuid, wrapped_secret: x25519(secret, ephemeral_pub), eph_pub: 32bytes, ttl: 300s, single_use: true}`. Сырых секретов в сети нет.
 - **Webapp deeplink format:** `cursor://mcp/install?config=<base64-json>`, для VS Code — `vscode:mcp/install?config=...`, для Claude Desktop — manual `mcp.json` (но JWT уже подставлен).
