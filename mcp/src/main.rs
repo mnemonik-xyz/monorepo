@@ -274,7 +274,12 @@ struct StatsQuery {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let _ = dotenvy::dotenv();
-    tracing_subscriber::fmt::init();
+    // Route tracing output to stderr so the stdio MCP transport (where
+    // stdout carries JSON-RPC frames) is not corrupted by `tracing::info!`
+    // / `warn!` / `error!` lines. See Wave 5 security audit finding 1.
+    tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .init();
 
     let cli = Cli::parse();
     let cfg = config::Config::from_env();

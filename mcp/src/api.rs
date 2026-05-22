@@ -356,8 +356,8 @@ fn error_resp(status: StatusCode, msg: &str) -> Response {
 // Caps:
 //   - LRU 100 entries total. The 101st insert evicts the oldest entry.
 //   - Per-`jwt_sub` cap 3. The 4th insert by the same user → 429.
-//   - TTL 600 seconds. Redeems past TTL → 404 (treated identically to "not
-//     found / already consumed" so a probing attacker cannot distinguish).
+//   - TTL 300 seconds (5 minutes). Redeems past TTL → 404 (treated identically
+//     to "not found / already consumed" so a probing attacker cannot distinguish).
 //
 // Atomicity: `consume` removes-and-returns under a single tokio mutex guard.
 // Two concurrent redeems of the same ticket race deterministically: exactly
@@ -367,8 +367,12 @@ fn error_resp(status: StatusCode, msg: &str) -> Response {
 pub const BOOTSTRAP_LRU_CAPACITY: usize = 100;
 /// Maximum tickets per `jwt_sub` (4th insert returns 429).
 pub const BOOTSTRAP_PER_USER_CAP: usize = 3;
-/// Ticket TTL in seconds (10 minutes).
-pub const BOOTSTRAP_TTL_SECS: i64 = 600;
+/// Ticket TTL in seconds (5 minutes).
+///
+/// Matches tech-spec Decision 12 and the Deviation 2 trust model — the
+/// plaintext-reachability window on the server is bounded to 5 minutes
+/// so that a transient memory dump after compromise has a small target.
+pub const BOOTSTRAP_TTL_SECS: i64 = 300;
 
 /// Generate a short code in `XXXX-XXXX` format using an alphabet that
 /// excludes visually confusable characters (0, 1, O, I). 40 bits of entropy,
@@ -510,7 +514,7 @@ impl BootstrapTickets {
         }
     }
 
-    /// Build with production defaults: 100 LRU, 3 per-user, 600s TTL.
+    /// Build with production defaults: 100 LRU, 3 per-user, 300s (5min) TTL.
     pub fn with_defaults() -> Self {
         Self::new(
             BOOTSTRAP_LRU_CAPACITY,
@@ -1231,7 +1235,7 @@ mod tests {
         // reduced to `peek` would flip `some_count` to 2 with very high
         // probability somewhere in the iteration count.
         for _iter in 0..64 {
-            let store = Arc::new(BootstrapTickets::new(10, 5, 600));
+            let store = Arc::new(BootstrapTickets::new(10, 5, 300));
             let id = store
                 .insert("user-a".into(), "[1,2,3]".into())
                 .await
@@ -1265,7 +1269,7 @@ mod tests {
     #[tokio::test]
     async fn test_bootstrap_ticket_single_use() {
         // Issue, consume, second consume returns None. TDD anchor (tasks/6.md).
-        let store = BootstrapTickets::new(10, 5, 600);
+        let store = BootstrapTickets::new(10, 5, 300);
         let id = store.insert("u".into(), "[]".into()).await.unwrap();
         assert!(store.consume(id).await.is_some());
         assert!(store.consume(id).await.is_none());
@@ -1274,7 +1278,7 @@ mod tests {
     #[tokio::test]
     async fn test_bootstrap_ticket_per_user_cap() {
         // 4th insert by the same user returns 429.
-        let store = BootstrapTickets::new(100, 3, 600);
+        let store = BootstrapTickets::new(100, 3, 300);
         for _ in 0..3 {
             store.insert("alice".into(), "[]".into()).await.unwrap();
         }
@@ -1289,7 +1293,7 @@ mod tests {
         // Issue, force-expire, consume returns None. Wall-clock advance
         // would couple the test to real time; force_expire mirrors the
         // pattern used by `PendingBundles::force_expire`.
-        let store = BootstrapTickets::new(10, 5, 600);
+        let store = BootstrapTickets::new(10, 5, 300);
         let id = store.insert("u".into(), "[]".into()).await.unwrap();
         store.force_expire(&id).await;
         let result = store.consume(id).await;
@@ -1303,7 +1307,7 @@ mod tests {
     async fn test_bootstrap_ticket_lru_evicts_oldest() {
         // Insert capacity+1 by distinct users so per-user cap is not hit;
         // oldest entry is evicted, newest is retrievable.
-        let store = BootstrapTickets::new(3, 5, 600);
+        let store = BootstrapTickets::new(3, 5, 300);
         let mut ids = Vec::new();
         for i in 0..4 {
             let id = store
@@ -1333,7 +1337,7 @@ mod tests {
         // 64-byte fake keypair (zeros). pubkey will be 11111...1 base58.
         let bytes: Vec<u8> = vec![0u8; 64];
         let kp_json = serde_json::to_string(&bytes).unwrap();
-        let store = Arc::new(BootstrapTickets::new(10, 5, 600));
+        let store = Arc::new(BootstrapTickets::new(10, 5, 300));
         let id = store.insert("u".into(), kp_json).await.unwrap();
 
         // Tiny handler closure — same signature as production but takes the
@@ -1392,7 +1396,7 @@ mod tests {
         use axum::Router;
         use tower::ServiceExt;
 
-        let store = Arc::new(BootstrapTickets::new(10, 5, 600));
+        let store = Arc::new(BootstrapTickets::new(10, 5, 300));
 
         async fn redeem(
             State(store): State<Arc<BootstrapTickets>>,

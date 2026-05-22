@@ -65,7 +65,7 @@ function b64ToBytes(b64: string): Uint8Array {
  * Wire contract (Task 12):
  *   POST /api/cli-bootstrap/redeem
  *   Body: { short_code: string, redeemer_eph_pub: string (base64) }
- *   Response: { wrapped_secret: string (base64), eph_pub: string (base64), pubkey_base58: string }
+ *   Response: { wrapped_secret: string (base64), eph_pub: string (base64), issuer_pubkey_base58: string }
  *
  * Encryption scheme: NaCl box (XSalsa20-Poly1305 via crypto_box::SalsaBox on
  * the Rust server side). Wire format of wrapped_secret: nonce[24] || ciphertext.
@@ -106,13 +106,13 @@ async function redeemShortCode(
   const body = (await res.json()) as {
     wrapped_secret?: unknown;
     eph_pub?: unknown;
-    pubkey_base58?: unknown;
+    issuer_pubkey_base58?: unknown;
   };
 
   if (
     typeof body.wrapped_secret !== "string" ||
     typeof body.eph_pub !== "string" ||
-    typeof body.pubkey_base58 !== "string"
+    typeof body.issuer_pubkey_base58 !== "string"
   ) {
     throw new Error("Server returned unexpected shape from redeem endpoint");
   }
@@ -143,15 +143,18 @@ async function redeemShortCode(
   }
 
   // 5. Verify pubkey: derive Ed25519 public key from the last 32 bytes of the
-  // secret and compare against the server-supplied pubkey_base58.
+  // secret and compare against the server-supplied issuer_pubkey_base58.
   const derivedPubkey = bs58.encode(plaintext.slice(32));
-  if (derivedPubkey !== body.pubkey_base58) {
+  if (derivedPubkey !== body.issuer_pubkey_base58) {
     throw new Error(
       "Pubkey mismatch: decrypted secret does not match server-reported pubkey",
     );
   }
 
-  return { secret64: Array.from(plaintext), pubkeyBase58: body.pubkey_base58 };
+  return {
+    secret64: Array.from(plaintext),
+    pubkeyBase58: body.issuer_pubkey_base58,
+  };
 }
 
 export default function Install() {
