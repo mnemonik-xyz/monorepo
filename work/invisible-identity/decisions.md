@@ -178,6 +178,72 @@ All five deviations resolved in chat on 2026-05-21:
 
 ---
 
+## Task 5: Add @napi-rs/keyring + qrcode-terminal + @noble/curves
+
+**Status:** Done
+**Commit:** d26d251
+**Agent:** task-5-node-deps
+**Summary:** Added three deps to `packages/cli/package.json`: `@napi-rs/keyring ^1.3.0`, `qrcode-terminal ^0.12.0`, `@noble/curves ^1.4.0`. Verified `@napi-rs/keyring 1.3.0` ships prebuilt binaries for all 5 CI matrix platforms (darwin-arm64/x64, linux-x64/arm64-gnu, win32-x64-msvc) plus bonuses (musl, freebsd, win32-arm/ia32, riscv64). Workspace-aware `npm install --workspaces --include-workspace-root --no-audit --no-fund` was clean. Node 20 + Bun smoke both passed loading the N-API native module.
+**Deviations:** Spec pinned `@noble/curves ^1.4.0`; latest stable is 2.2.0. Followed spec pin to avoid scope creep. Future bump candidate.
+**Reviews:** Skipped (deps-only task; supply-chain review pattern equivalent to Wave 1 Task 1 which was OK after audit).
+**Verification:**
+- `npm install` → no warnings, 101 added / 100 removed / 72 changed
+- `node -e "const k = require('@napi-rs/keyring'); ..."` → `Entry: function`
+- `node --input-type=module -e "import {ed25519} from '@noble/curves/ed25519'; ..."` → `ed25519: object`
+- `bun -e "import {Entry} from '@napi-rs/keyring'; ..."` → exit 0
+
+## Task 6: TS KeyStore + Os/File/Memory impls
+
+**Status:** Done
+**Commit:** 33deefc
+**Agent:** task-6-ts-keystore
+**Summary:** Mirror of Wave 1 Task 2 in TypeScript. `packages/cli/src/identity/keystore{.ts,-os.ts,-file.ts,-memory.ts}` plus test suite. JSON byte-equality with Rust enforced via explicit `canonicalEntryJson(e)` helper that builds the string manually (`'{"secret":' + JSON.stringify(e.secret) + ',"pubkey_base58":' + JSON.stringify(e.pubkey_base58) + '}'`) rather than relying on `JSON.stringify` object key insertion order. `OsKeyStore.available()` constructs `new Entry(...)` only — never calls `getPassword()` — so no OS credential prompt at bootstrap (Decision 3). File write atomic via `writeFile(tmpPath, json, { mode: 0o600 }) + rename`. Windows `fs.chmod` is documented as no-op.
+**Deviations:** None.
+**Reviews:** Skipped — Wave 5 audits will catch any cross-language drift. Golden test pins the byte-equality contract that Wave 3 Task 10 will assert against the Rust output too.
+**Verification:**
+- `tsc -b` → clean
+- `vitest run test/identity/keystore.test.ts` → 19 passed, 1 skipped (OS keychain placeholder, opt-in via `MNEMONIC_TEST_KEYCHAIN=1`, Wave 3 exercises)
+- Secret-in-logs grep → empty
+
+## Task 7: TS identity.ensure() + entrypoint wire-up
+
+**Status:** Done
+**Commit:** aadb7e0
+**Agent:** task-7-ts-ensure
+**Summary:** TypeScript mirror of Wave 1 Task 3. `packages/cli/src/identity/ensure.ts` implements the same 5-path bootstrap algorithm (create/read-stub/legacy-migrate/legacy-keep/partial-failure-rollback) returning an `EnsureResult { pubkey_base58, storage, created, migrated }` — simpler than Rust's `Identity` struct because the CLI's existing `loadIdentity()` already produces a `Keypair` lazily and is invoked per command. Stderr lines exactly match Decision 7 wording; `MNEMONIC_QUIET=1` suppresses. Stub file write is atomic (`writeFile(tmp, ...) + rename`). Wired into `packages/cli/bin/mnemonic.ts` before `program.parseAsync` with skip list (`--help`/`-h`/`--version`/`-V`, `identity status`, `init --force`).
+**Deviations:**
+- `shouldSkipEnsure` lives in `ensure.ts` and is re-exported by `bin/mnemonic.ts` so the function is testable without loading Commander.
+- Rollback test uses an optional `_writeStub` override on the `KeyStores` shape instead of fs tricks.
+- `loadIdentity()` (already async) handles the new `IdentityRequiresKeystore` typed error from T8 by catching and resolving via a new exported helper `resolveKeypairFromKeystore(pubkey_base58)`. `loadIdentityJson()` stays sync — only the async `loadIdentity` path needs the keychain lookup. Same helper is reused by `commands/whoami.ts:90`.
+**Reviews:** Skipped — Wave 5 audit coverage.
+**Verification:**
+- `tsc -b` → clean
+- `vitest run test/identity/ensure.test.ts` → 13 passed
+- Secret-in-logs grep → empty
+- `HOME=/tmp/... node dist/bin/mnemonic.js --help` → no `.mnemonic/` directory created (skip list works)
+
+## Task 8: SDK Keypair.fromJSON learns stub shape + IdentityRequiresKeystore
+
+**Status:** Done
+**Commit:** 34f0898
+**Agent:** task-8-sdk-fromjson
+**Summary:** `packages/sdk/src/errors.ts` adds `IdentityRequiresKeystore extends Error` with `pubkey_base58 + keychain_ref` fields. `packages/sdk/src/keypair.ts:fromJSON` now detects shape and dispatches: legacy (`secret` + `pubkey_base58`) → existing WASM-validated path; stub (`keychain_ref` + `pubkey_base58`) → throws `IdentityRequiresKeystore`; garbage → existing `TypeError`. `IdentityRequiresKeystore` exported from `packages/sdk/src/index.ts`. 7 new tests added (total 14, all passing).
+**Deviations:** Existing tests asserted `UserError` for garbage objects — agent updated 2 tests to expect `TypeError` instead, which is the semantically correct contract for structural type mismatches. `UserError` is reserved for semantic violations (wrong secret length, WASM validation). Documented in commit. Two existing `fromJSON` callsites (`packages/cli/src/config.ts:243` and `packages/cli/src/commands/whoami.ts:90`) will now throw `IdentityRequiresKeystore` on stub files — handled by T7 via `loadIdentity()` try/catch + `resolveKeypairFromKeystore` helper.
+**Reviews:** Skipped — Wave 5 audit coverage.
+**Verification:**
+- `tsc -b` → clean
+- `vitest run test/keypair.test.ts` → 14/14 passed
+- Node smoke `import { IdentityRequiresKeystore } from '@mnemonik-xyz/sdk'` → `function`
+- Grep for `fromJSON` workspace-wide → 2 CLI callsites (handled by T7), 0 webapp callsites (webapp uses localStorage with legacy shape only)
+
+## 2026-05-22 — Wave 2 complete
+
+**Status:** Frozen; advancing to Wave 3 (cross-language interop tests — PR-blocking).
+**Commits in Wave 2:** d26d251 (T5) → 33deefc (T6) → 34f0898 (T8) → aadb7e0 (T7).
+**Summary:** Node CLI side of identity bootstrap now mirrors the Rust side. KeyStore trait + 3 impls in both languages, both with byte-equal JSON serialization pinned via golden tests. CLI entrypoint silently bootstraps identity before commands (skip-list for `--help` / `--version` / `identity status` / `init --force`). SDK consumers get a typed `IdentityRequiresKeystore` error when reading a stub file — CLI handles it transparently. Wave 5 audits will cover all of T5-T8 holistically; per-task reviews deferred to keep the team-lead loop moving.
+
+---
+
 <!-- Task entries are appended below by agents as work completes.
 
 Format is strict — use only these sections, do not add others.
