@@ -30,6 +30,7 @@ import {
 import type { AddressInfo } from "node:net";
 
 import {
+  IdentityRequiresKeystore,
   buildAuthorizeUrl,
   exchangeCodeForToken,
   loginWithIdentity,
@@ -87,7 +88,7 @@ export async function runLogin(opts: LoginOptions): Promise<void> {
  */
 async function runBrowserless(
   baseUrl: string,
-  opts: LoginOptions
+  opts: LoginOptions,
 ): Promise<void> {
   if (!identityExists()) {
     throw new UserError(
@@ -95,7 +96,7 @@ async function runBrowserless(
         "  • mnemonic init                              — generate a fresh CLI keypair\n" +
         "  • mnemonic identity import --ticket <uuid>   — pair from the webapp ('Send to CLI')\n" +
         "  • mnemonic identity import --file <path>     — import an existing keypair JSON\n" +
-        "  • mnemonic login --browser                   — fall back to the legacy browser flow"
+        "  • mnemonic login --browser                   — fall back to the legacy browser flow",
     );
   }
   const kp = await loadIdentity();
@@ -123,7 +124,7 @@ async function runBrowserless(
   format(
     { sub: result.sub, expires_at: result.expiresAt, mode: "browserless" },
     opts,
-    () => `login OK\nsub: ${result.sub}\nexpires: ${result.expiresAt}`
+    () => `login OK\nsub: ${result.sub}\nexpires: ${result.expiresAt}`,
   );
 }
 
@@ -145,7 +146,7 @@ async function runHeadless(jwt: string, opts: LoginOptions): Promise<void> {
     { sub: payload.sub, expires_at: expiresAt, mode: "headless" },
     opts,
     (_d, _color) =>
-      `login OK (headless)\nsub: ${payload.sub}\nexpires: ${expiresAt}`
+      `login OK (headless)\nsub: ${payload.sub}\nexpires: ${expiresAt}`,
   );
 }
 
@@ -153,7 +154,7 @@ async function runHeadless(jwt: string, opts: LoginOptions): Promise<void> {
 
 async function runInteractive(
   baseUrl: string,
-  opts: LoginOptions
+  opts: LoginOptions,
 ): Promise<void> {
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 
@@ -179,7 +180,7 @@ async function runInteractive(
   hint(`opening browser: ${authz.url}`, opts);
   hint(
     `if no browser opens, paste the URL into one. callback URL: ${redirectUri}`,
-    opts
+    opts,
   );
 
   // 3. Open the browser (best-effort — failure is non-fatal because users
@@ -201,7 +202,7 @@ async function runInteractive(
     if (e instanceof AuthError) throw e;
     throw new AuthError(
       `loopback server error: ${e instanceof Error ? e.message : String(e)}`,
-      e
+      e,
     );
   } finally {
     server.close();
@@ -212,7 +213,7 @@ async function runInteractive(
   //    the token endpoint if state was wrong).
   if (cb.state !== authz.state) {
     throw new AuthError(
-      "oauth: state mismatch (possible CSRF) — login aborted"
+      "oauth: state mismatch (possible CSRF) — login aborted",
     );
   }
 
@@ -243,7 +244,7 @@ async function runInteractive(
   format(
     { sub: payload.sub, expires_at: token.expiresAt, mode: "interactive" },
     opts,
-    () => `login OK\nsub: ${payload.sub}\nexpires: ${token.expiresAt}`
+    () => `login OK\nsub: ${payload.sub}\nexpires: ${token.expiresAt}`,
   );
 }
 
@@ -263,17 +264,24 @@ function warnIfMismatch(jwtSub: string): void {
   try {
     identityPub = loadIdentityJson().pubkey_base58;
   } catch (e) {
-    // Identity file present but unreadable — surface nothing here; the user
-    // already has bigger problems and the next command will report them.
-    if (!(e instanceof CliError)) throw e;
-    return;
+    // Stub-shaped identity.json: the pubkey is still on the `IdentityRequires
+    // Keystore` payload. Use that directly — we don't need the secret here.
+    if (e instanceof IdentityRequiresKeystore) {
+      identityPub = e.pubkey_base58;
+    } else if (e instanceof CliError) {
+      // Identity file present but unreadable — surface nothing here; the user
+      // already has bigger problems and the next command will report them.
+      return;
+    } else {
+      throw e;
+    }
   }
   if (identityPub === jwtSub) return;
   process.stderr.write(
     `\nWARNING: logged-in identity sub <${jwtSub}> doesn't match local keypair <${identityPub}>.\n` +
       `         All sign/recall/verify will fail until aligned.\n` +
       `         Fix: mnemonic identity import --ticket <uuid>   (from webapp)\n` +
-      `              OR mnemonic init --force   (replaces keypair, then re-login)\n`
+      `              OR mnemonic init --force   (replaces keypair, then re-login)\n`,
   );
 }
 
@@ -308,7 +316,7 @@ function listenLoopback(): Promise<{ server: Server; port: number }> {
  */
 function awaitCallback(
   server: Server,
-  timeoutMs: number
+  timeoutMs: number,
 ): Promise<CallbackResult> {
   return new Promise((resolve, reject) => {
     let settled = false;
@@ -327,9 +335,9 @@ function awaitCallback(
       settle(() =>
         reject(
           new AuthError(
-            `loopback callback timed out after ${Math.round(timeoutMs / 1000)}s`
-          )
-        )
+            `loopback callback timed out after ${Math.round(timeoutMs / 1000)}s`,
+          ),
+        ),
       );
     }, timeoutMs);
 
@@ -356,10 +364,10 @@ function awaitCallback(
         respondHtml(
           res,
           400,
-          `<h1>Login failed</h1><p>${escapeHtml(err)}: ${escapeHtml(desc)}</p>`
+          `<h1>Login failed</h1><p>${escapeHtml(err)}: ${escapeHtml(desc)}</p>`,
         );
         settle(() =>
-          reject(new AuthError(`oauth callback error: ${err} ${desc}`))
+          reject(new AuthError(`oauth callback error: ${err} ${desc}`)),
         );
         return;
       }
@@ -370,10 +378,10 @@ function awaitCallback(
         respondHtml(
           res,
           400,
-          "<h1>Login failed</h1><p>Missing code or state.</p>"
+          "<h1>Login failed</h1><p>Missing code or state.</p>",
         );
         settle(() =>
-          reject(new AuthError("oauth callback missing code/state"))
+          reject(new AuthError("oauth callback missing code/state")),
         );
         return;
       }
@@ -381,7 +389,7 @@ function awaitCallback(
       respondHtml(
         res,
         200,
-        "<h1>Login complete</h1><p>You can close this tab and return to your terminal.</p>"
+        "<h1>Login complete</h1><p>You can close this tab and return to your terminal.</p>",
       );
       settle(() => resolve({ code, state }));
     };
@@ -390,7 +398,7 @@ function awaitCallback(
     server.once("close", () => {
       // If the server is closed before a callback (e.g. parent error), fail.
       settle(() =>
-        reject(new AuthError("loopback server closed before callback"))
+        reject(new AuthError("loopback server closed before callback")),
       );
     });
   });

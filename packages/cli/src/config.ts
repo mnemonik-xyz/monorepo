@@ -119,6 +119,19 @@ function isKeypairJson(v: unknown): v is KeypairJson {
   );
 }
 
+/**
+ * Validate a parsed object is shaped like the keychain-backed stub:
+ * `{pubkey_base58, did_sol?, keychain_ref?, created_at?}` per Decision 5.
+ * The defining negative is "no `secret` field"; we additionally require a
+ * non-empty `pubkey_base58` so a garbage `{}` is not mistaken for a stub.
+ */
+function isStubIdentity(v: unknown): boolean {
+  if (!v || typeof v !== "object") return false;
+  const o = v as Record<string, unknown>;
+  if ("secret" in o) return false;
+  return typeof o.pubkey_base58 === "string" && o.pubkey_base58.length > 0;
+}
+
 /** True iff `v` is a JSON array of exactly 64 numbers in 0..=255. */
 function isSolanaKeypairArray(v: unknown): v is number[] {
   if (!Array.isArray(v) || v.length !== 64) return false;
@@ -206,8 +219,22 @@ export function loadIdentityJson(): KeypairJson {
       throw new UserError(`identity is not valid JSON: ${path}`, e);
     }
     if (!isKeypairJson(parsed)) {
+      // Detect the new stub shape (Decision 5: keychain-backed identity.json).
+      // If found, signal callers via `IdentityRequiresKeystore` so they can
+      // either resolve via `resolveKeypairFromKeystore` (when they need the
+      // secret) or read the pubkey directly from the error (when they don't).
+      if (isStubIdentity(parsed)) {
+        const stub = parsed as {
+          pubkey_base58: string;
+          keychain_ref?: string;
+        };
+        throw new IdentityRequiresKeystore(
+          stub.pubkey_base58,
+          stub.keychain_ref ?? "xyz.mnemonik.identity/default",
+        );
+      }
       throw new UserError(
-        `identity has wrong shape; expected {secret: number[64], pubkey_base58: string}`,
+        `identity has wrong shape; expected {secret: number[64], pubkey_base58: string} or stub {pubkey_base58, keychain_ref}`,
       );
     }
     return parsed;
@@ -270,9 +297,24 @@ export async function resolveKeypairFromKeystore(
   return Keypair.fromJSON(fullJson);
 }
 
-/** Convenience: load + return as a `Keypair` instance. */
+/** Convenience: load + return as a `Keypair` instance.
+ *
+ *  Two paths can throw `IdentityRequiresKeystore`:
+ *  - `loadIdentityJson()` synchronously, when the on-disk file is a stub
+ *  - `Keypair.fromJSON()` asynchronously, when given a stub-shaped object
+ *
+ *  Both are caught here and resolved via the OS keychain.
+ */
 export async function loadIdentity(): Promise<Keypair> {
-  const json = loadIdentityJson();
+  let json: KeypairJson;
+  try {
+    json = loadIdentityJson();
+  } catch (e) {
+    if (e instanceof IdentityRequiresKeystore) {
+      return resolveKeypairFromKeystore(e.pubkey_base58);
+    }
+    throw e;
+  }
   try {
     return await Keypair.fromJSON(json);
   } catch (e) {

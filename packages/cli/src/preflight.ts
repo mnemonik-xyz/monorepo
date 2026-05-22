@@ -16,6 +16,8 @@
 // command (sign / recall / verify, and whoami's --with-count) BEFORE any
 // HTTP request is constructed.
 
+import { IdentityRequiresKeystore } from "@mnemonik-xyz/sdk";
+
 import {
   identityPath,
   loadIdentityJson,
@@ -70,16 +72,28 @@ export function formatMismatchError(ctx: MismatchContext): string {
  * "no identity" / "no token" hint instead of crashing.
  */
 export function assertIdentityMatchesToken(): void {
-  const id = loadIdentityJson();
+  // identity.json may be a stub (keychain-backed) — extract the pubkey from
+  // the typed throw rather than the full keypair JSON; we only need the
+  // pubkey here, so resolving from the keychain is unnecessary.
+  let identityPubkey: string;
+  try {
+    identityPubkey = loadIdentityJson().pubkey_base58;
+  } catch (e) {
+    if (e instanceof IdentityRequiresKeystore) {
+      identityPubkey = e.pubkey_base58;
+    } else {
+      throw e;
+    }
+  }
   const tok = loadToken();
-  if (id.pubkey_base58 !== tok.sub) {
+  if (identityPubkey !== tok.sub) {
     throw new UserError(
       formatMismatchError({
-        identityPubkey: id.pubkey_base58,
+        identityPubkey,
         tokenSub: tok.sub,
         identityPath: identityPath(),
         tokenPath: tokenPath(),
-      })
+      }),
     );
   }
 }

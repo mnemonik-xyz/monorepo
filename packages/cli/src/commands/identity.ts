@@ -37,12 +37,14 @@ import path from "node:path";
 import nacl from "tweetnacl";
 import bs58 from "bs58";
 
+import { IdentityRequiresKeystore } from "@mnemonik-xyz/sdk";
 import type { KeypairJson } from "@mnemonik-xyz/sdk";
 
 import {
   identityExists,
   identityPath,
   loadIdentityJson,
+  resolveKeypairFromKeystore,
   restrictFileMode,
   saveIdentityJson,
   tokenPath,
@@ -230,7 +232,20 @@ export async function runIdentityExport(
   if (!opts.file) {
     throw new UserError("identity export: --file <path> is required");
   }
-  const json = loadIdentityJson(); // throws UserError if missing
+  // identity.json may be a stub (keychain-backed). Export must produce the
+  // full legacy shape `{secret, pubkey_base58}` so the backup is portable —
+  // resolve via the keychain when the file is a stub.
+  let json: KeypairJson;
+  try {
+    json = loadIdentityJson();
+  } catch (e) {
+    if (e instanceof IdentityRequiresKeystore) {
+      const kp = await resolveKeypairFromKeystore(e.pubkey_base58);
+      json = kp.toJSON();
+    } else {
+      throw e;
+    }
+  }
   const path = opts.file;
   try {
     writeFileSync(path, JSON.stringify(json, null, 2), { mode: 0o600 });
