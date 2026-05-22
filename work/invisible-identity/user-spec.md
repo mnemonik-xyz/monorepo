@@ -1,6 +1,7 @@
 ---
 created: 2026-05-21
-status: draft
+approved: 2026-05-22
+status: approved
 type: feature
 size: L  # absorbs work/keypair-sync/, 5 surfaces, 19 tasks/5 waves, marketplace-critical path
 priority: P0 (блокирует marketplace shipping; поглощает work/keypair-sync/)
