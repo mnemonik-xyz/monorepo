@@ -42,10 +42,7 @@ const TEST_SECRET: &[u8; 32] = b"api-cli-bootstrap-test-secret-!!";
 fn build_router(state: Arc<McpState>, oauth_state: Arc<OAuthState>) -> Router {
     Router::new()
         // Webapp-origin issue (JWT required)
-        .route(
-            "/api/cli-bootstrap/issue",
-            post(bootstrap_issue_handler),
-        )
+        .route("/api/cli-bootstrap/issue", post(bootstrap_issue_handler))
         // CLI-origin issue (no auth required; x25519 wrap is the capability)
         .route(
             "/api/cli-bootstrap/issue-from-cli",
@@ -86,8 +83,7 @@ fn wrap_to_pub(recipient_pub: &X25519PublicKey, plaintext: &[u8]) -> (String, St
     let mut blob = nonce.to_vec();
     blob.extend_from_slice(&ct);
     let wrapped_b64 = base64::engine::general_purpose::STANDARD.encode(&blob);
-    let eph_pub_b64 =
-        base64::engine::general_purpose::STANDARD.encode(eph_pub.as_bytes());
+    let eph_pub_b64 = base64::engine::general_purpose::STANDARD.encode(eph_pub.as_bytes());
     (wrapped_b64, eph_pub_b64)
 }
 
@@ -101,9 +97,8 @@ fn unwrap_from_server(
     let server_pub_bytes = base64::engine::general_purpose::STANDARD
         .decode(server_eph_pub_b64)
         .expect("decode server_eph_pub");
-    let server_pub = X25519PublicKey::from(
-        <[u8; 32]>::try_from(server_pub_bytes.as_slice()).expect("32 bytes"),
-    );
+    let server_pub =
+        X25519PublicKey::from(<[u8; 32]>::try_from(server_pub_bytes.as_slice()).expect("32 bytes"));
     let salsa = SalsaBox::new(&server_pub, redeemer_sk);
     let blob = base64::engine::general_purpose::STANDARD
         .decode(wrapped_b64)
@@ -244,11 +239,7 @@ async fn issue_from_cli_returns_ticket_with_cli_origin() {
         None, // no Bearer token
     )
     .await;
-    assert_eq!(
-        status,
-        StatusCode::OK,
-        "issue-from-cli must be 200: {body}"
-    );
+    assert_eq!(status, StatusCode::OK, "issue-from-cli must be 200: {body}");
 
     // Verify response shape.
     let ticket_id = body["ticket_id"].as_str().expect("ticket_id missing");
@@ -260,10 +251,7 @@ async fn issue_from_cli_returns_ticket_with_cli_origin() {
         9,
         "short_code must be 9 chars (XXXX-XXXX): {short_code}"
     );
-    assert!(
-        body["expires_at"].is_string(),
-        "expires_at missing: {body}"
-    );
+    assert!(body["expires_at"].is_string(), "expires_at missing: {body}");
 }
 
 // ── Test: roundtrip redeem with real crypto ───────────────────────────────────
@@ -298,7 +286,11 @@ async fn redeem_unwraps_and_rewraps_correctly_roundtrip() {
         None,
     )
     .await;
-    assert_eq!(s_issue, StatusCode::OK, "issue-from-cli failed: {issue_body}");
+    assert_eq!(
+        s_issue,
+        StatusCode::OK,
+        "issue-from-cli failed: {issue_body}"
+    );
     let ticket_id = issue_body["ticket_id"].as_str().unwrap().to_string();
 
     // 4. Webapp generates redeemer ephemeral keypair.
@@ -383,8 +375,8 @@ async fn redeem_rejects_expired_ticket() {
 
     // Attempt redeem — must be 404.
     let redeemer_sk = X25519SecretKey::generate(&mut OsRng);
-    let redeemer_pub_b64 = base64::engine::general_purpose::STANDARD
-        .encode(redeemer_sk.public_key().as_bytes());
+    let redeemer_pub_b64 =
+        base64::engine::general_purpose::STANDARD.encode(redeemer_sk.public_key().as_bytes());
     let (s_redeem, body_redeem) = get_with_body(
         &app,
         &format!("/api/cli-bootstrap/redeem/{ticket_id}"),
@@ -431,8 +423,8 @@ async fn redeem_rejects_already_redeemed_ticket() {
     let ticket_id = issue_body["ticket_id"].as_str().unwrap().to_string();
 
     let redeemer_sk = X25519SecretKey::generate(&mut OsRng);
-    let redeemer_pub_b64 = base64::engine::general_purpose::STANDARD
-        .encode(redeemer_sk.public_key().as_bytes());
+    let redeemer_pub_b64 =
+        base64::engine::general_purpose::STANDARD.encode(redeemer_sk.public_key().as_bytes());
 
     // First redeem — must succeed.
     let (s1, b1) = get_with_body(
@@ -532,8 +524,8 @@ async fn redeem_handles_both_origins() {
     let cli_ticket_id = issue_cli["ticket_id"].as_str().unwrap();
 
     let redeemer_sk = X25519SecretKey::generate(&mut OsRng);
-    let redeemer_pub_b64 = base64::engine::general_purpose::STANDARD
-        .encode(redeemer_sk.public_key().as_bytes());
+    let redeemer_pub_b64 =
+        base64::engine::general_purpose::STANDARD.encode(redeemer_sk.public_key().as_bytes());
     let (s_redeem_cli, body_cli) = get_with_body(
         &app,
         &format!("/api/cli-bootstrap/redeem/{cli_ticket_id}"),
@@ -583,7 +575,11 @@ async fn redeem_by_short_code_returns_secret_for_webapp_origin() {
         Some(&token),
     )
     .await;
-    assert_eq!(s_issue, StatusCode::OK, "webapp issue must succeed: {issue_body}");
+    assert_eq!(
+        s_issue,
+        StatusCode::OK,
+        "webapp issue must succeed: {issue_body}"
+    );
 
     // Inject a short_code directly via the test helper (Webapp-origin tickets
     // don't surface a short_code in the issue response — override via the
@@ -613,7 +609,11 @@ async fn redeem_by_short_code_returns_secret_for_webapp_origin() {
         None,
     )
     .await;
-    assert_eq!(s_redeem, StatusCode::OK, "webapp redeem must succeed: {body_wa}");
+    assert_eq!(
+        s_redeem,
+        StatusCode::OK,
+        "webapp redeem must succeed: {body_wa}"
+    );
     assert!(
         body_wa["secret"].is_array(),
         "webapp redeem must return secret array: {body_wa}"
@@ -661,7 +661,11 @@ async fn redeem_by_short_code_unwraps_rewraps_for_cli_origin() {
         None,
     )
     .await;
-    assert_eq!(s_issue, StatusCode::OK, "issue-from-cli must succeed: {issue_body}");
+    assert_eq!(
+        s_issue,
+        StatusCode::OK,
+        "issue-from-cli must succeed: {issue_body}"
+    );
     let short_code = issue_body["short_code"].as_str().unwrap().to_string();
 
     // 4. Webapp generates an ephemeral redeemer keypair.

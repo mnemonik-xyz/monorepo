@@ -816,7 +816,11 @@ pub struct CliRedeemResponse {
 ///
 /// `redeemer_eph_pub` is a base64-encoded 32-byte x25519 public key —
 /// required only for `Cli`-origin tickets.
-fn finalize_redeem(entry: BootstrapTicket, redeemer_eph_pub: Option<String>, state: &McpState) -> Response {
+fn finalize_redeem(
+    entry: BootstrapTicket,
+    redeemer_eph_pub: Option<String>,
+    state: &McpState,
+) -> Response {
     match entry.origin {
         TicketOrigin::Webapp => {
             // Original Decision-7 flow: return keypair bytes directly.
@@ -891,8 +895,7 @@ fn finalize_redeem(entry: BootstrapTicket, redeemer_eph_pub: Option<String>, sta
                     "stored wrapped_secret is too short to contain a nonce",
                 );
             }
-            let nonce_bytes: [u8; 24] =
-                entry.wrapped_secret[..24].try_into().unwrap();
+            let nonce_bytes: [u8; 24] = entry.wrapped_secret[..24].try_into().unwrap();
             let nonce = crypto_box::aead::generic_array::GenericArray::from(nonce_bytes);
             // SAFETY: Plaintext window is deliberately minimal — unwrap and
             // immediately re-wrap without binding to a named variable.
@@ -1129,7 +1132,13 @@ pub async fn bootstrap_server_pub_handler(State(state): State<Arc<McpState>>) ->
     use base64::Engine;
     let pub_b64 = base64::engine::general_purpose::STANDARD
         .encode(state.bootstrap_server_x25519_public.as_bytes());
-    (StatusCode::OK, Json(ServerPubResponse { server_x25519_pub: pub_b64 })).into_response()
+    (
+        StatusCode::OK,
+        Json(ServerPubResponse {
+            server_x25519_pub: pub_b64,
+        }),
+    )
+        .into_response()
 }
 
 // ── Public traction stats (GET /stats) ──────────────────────────────────────

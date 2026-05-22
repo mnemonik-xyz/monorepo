@@ -444,8 +444,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Static x25519 keypair for the CLI bootstrap symmetric flow (Task 12).
     // Generated once at process boot; process-lifetime only.
-    let bootstrap_server_x25519_secret =
-        crypto_box::SecretKey::generate(&mut rand::rngs::OsRng);
+    let bootstrap_server_x25519_secret = crypto_box::SecretKey::generate(&mut rand::rngs::OsRng);
     let bootstrap_server_x25519_public = bootstrap_server_x25519_secret.public_key();
 
     let state = Arc::new(mcp::McpState {
