@@ -437,6 +437,12 @@ async fn main() -> anyhow::Result<()> {
     // the capability — no Authorization header required).
     let bootstrap_tickets = Arc::new(api::BootstrapTickets::with_defaults());
 
+    // Static x25519 keypair for the CLI bootstrap symmetric flow (Task 12).
+    // Generated once at process boot; process-lifetime only.
+    let bootstrap_server_x25519_secret =
+        crypto_box::SecretKey::generate(&mut rand::rngs::OsRng);
+    let bootstrap_server_x25519_public = bootstrap_server_x25519_secret.public_key();
+
     let state = Arc::new(mcp::McpState {
         keypair,
         solana: solana::SolanaClient::new(&cfg.solana_rpc_url),
@@ -460,6 +466,8 @@ async fn main() -> anyhow::Result<()> {
         chat_limiter,
         pending,
         bootstrap_tickets,
+        bootstrap_server_x25519_secret,
+        bootstrap_server_x25519_public,
     });
 
     // ── RAG seeding (whitepaper chunking + artifact generation) ──────────
@@ -685,8 +693,16 @@ async fn run_http(
             post(api::bootstrap_issue_handler),
         )
         .route(
+            "/api/cli-bootstrap/issue-from-cli",
+            post(api::bootstrap_issue_from_cli_handler),
+        )
+        .route(
             "/api/cli-bootstrap/redeem/{ticket}",
             axum::routing::get(api::bootstrap_redeem_handler),
+        )
+        .route(
+            "/api/cli-bootstrap/server-pub",
+            axum::routing::get(api::bootstrap_server_pub_handler),
         )
         .layer(middleware::from_fn_with_state(
             oauth_state.clone(),

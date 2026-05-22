@@ -505,6 +505,10 @@ mod handler_tests {
         let llm_client =
             crate::llm::LlmClient::new("ollama", "", "test-model", llm_base_url, 512).unwrap();
 
+        let bootstrap_server_x25519_secret =
+            crypto_box::SecretKey::generate(&mut crypto_box::aead::OsRng);
+        let bootstrap_server_x25519_public = bootstrap_server_x25519_secret.public_key();
+
         Arc::new(McpState {
             keypair: solana_sdk::signature::Keypair::new(),
             solana: SolanaClient::new("http://localhost:0"),
@@ -528,6 +532,8 @@ mod handler_tests {
             chat_limiter,
             pending: Arc::new(crate::pending::PendingBundles::with_defaults()),
             bootstrap_tickets: Arc::new(crate::api::BootstrapTickets::with_defaults()),
+            bootstrap_server_x25519_secret,
+            bootstrap_server_x25519_public,
         })
     }
 

@@ -143,6 +143,14 @@ pub struct McpState {
     /// in-memory only; server restart drops every pending ticket.
     /// LRU 100, TTL 600s, per-user cap 3. See `api.rs` for the design.
     pub bootstrap_tickets: Arc<BootstrapTickets>,
+
+    /// Static x25519 keypair for the CLI bootstrap symmetric flow (Task 12).
+    /// Generated once at process boot via `SecretKey::generate(&mut OsRng)`.
+    /// Process-lifetime only — restarting the server invalidates all in-flight
+    /// CLI-origin tickets (acceptable given the 5-min TTL). Exposed via
+    /// `GET /api/cli-bootstrap/server-pub` so CLIs can wrap their secrets.
+    pub bootstrap_server_x25519_secret: crypto_box::SecretKey,
+    pub bootstrap_server_x25519_public: crypto_box::PublicKey,
 }
 
 // Safety: We only access store through std::sync::Mutex (short critical sections, no await)
@@ -643,6 +651,10 @@ mod transport_tests {
             crate::llm::LlmClient::new("ollama", "", "test-model", "http://localhost:0", 512)
                 .expect("build llm client");
 
+        let bootstrap_server_x25519_secret =
+            crypto_box::SecretKey::generate(&mut crypto_box::aead::OsRng);
+        let bootstrap_server_x25519_public = bootstrap_server_x25519_secret.public_key();
+
         Arc::new(McpState {
             keypair: solana_sdk::signature::Keypair::new(),
             solana: SolanaClient::new("http://localhost:0"),
@@ -666,6 +678,8 @@ mod transport_tests {
             chat_limiter,
             pending: Arc::new(crate::pending::PendingBundles::with_defaults()),
             bootstrap_tickets: Arc::new(crate::api::BootstrapTickets::with_defaults()),
+            bootstrap_server_x25519_secret,
+            bootstrap_server_x25519_public,
         })
     }
 

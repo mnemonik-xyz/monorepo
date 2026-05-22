@@ -92,6 +92,10 @@ uuid = { version = "1", features = ["v4"] }
 # solana-sdk; bumping to 0.9 introduces a duplicate major.
 rand = "0.8"
 
+# x25519 key agreement for the CLI bootstrap symmetric flow (Task 12).
+# `SalsaBox` (XSalsa20-Poly1305 + Curve25519) — same major as core's dep.
+crypto_box = "0.9"
+
 # ZIP archive (artifact generation in seed.rs)
 zip = { version = "2", default-features = false, features = ["deflate"] }
 
@@ -137,12 +141,20 @@ name = "key_escrow"
 path = "tests/key_escrow.rs"
 required-features = ["test-support"]
 
+# Task-12 symmetric CLI bootstrap ticket flow tests.
+[[test]]
+name = "api_cli_bootstrap"
+path = "tests/api_cli_bootstrap.rs"
+required-features = ["test-support"]
+
 [dev-dependencies]
 tempfile = "3"
 httpmock = "0.8"
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 hyper = "1"
+# Task-12: used in api_cli_bootstrap tests for client-side crypto operations.
+crypto_box = "0.9"
 # Adversarial JSON re-encoder used by tests/roundtrip_cose_via_http_proxy.rs to
 # mutate envelope bytes (key reorder, whitespace normalize) and prove the
 # base64 cose_bundle field survives byte-identical (Decision 7 + Risks R1).

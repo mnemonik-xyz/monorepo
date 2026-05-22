@@ -75,6 +75,8 @@ fn build_state() -> Arc<McpState> {
     let llm_client =
         mnemonic_mcp::llm::LlmClient::new("ollama", "", "test-model", "http://localhost:0", 512)
             .unwrap();
+    let bootstrap_x25519_sk = crypto_box::SecretKey::generate(&mut crypto_box::aead::OsRng);
+    let bootstrap_x25519_pk = bootstrap_x25519_sk.public_key();
     Arc::new(McpState {
         keypair: Keypair::new(),
         solana: SolanaClient::new("http://localhost:0"),
@@ -98,6 +100,8 @@ fn build_state() -> Arc<McpState> {
         chat_limiter,
         pending: Arc::new(PendingBundles::with_defaults()),
         bootstrap_tickets: Arc::new(mnemonic_mcp::api::BootstrapTickets::with_defaults()),
+        bootstrap_server_x25519_secret: bootstrap_x25519_sk,
+        bootstrap_server_x25519_public: bootstrap_x25519_pk,
     })
 }
 
