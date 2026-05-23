@@ -57,15 +57,43 @@ impl KeyStore for OsKeyStore {
     ///
     /// Serializes to compact JSON with key order `secret` → `pubkey_base58`
     /// (Decision 13) and stores the UTF-8 string.
+    ///
+    /// **macOS:** uses `security add-generic-password -U -A` (shell-out)
+    /// instead of `keyring::Entry::set_password` so the resulting item has
+    /// a permissive ACL (`-A` = "allow any application to access this item
+    /// without warning"). This is required to honor Decision 3 — without it,
+    /// every subsequent process that reads the entry (a fresh `mnemonic`
+    /// invocation, the Rust mcp-server, third-party SDK consumers) triggers
+    /// an "Allow access" GUI prompt because Apple Keychain's default ACL
+    /// only trusts the binary that originally created the entry. The
+    /// `keyring` crate has no API for setting `kSecACLAuthorizationAny`,
+    /// so we drop down to `/usr/bin/security`.
+    ///
+    /// Argv exposure: the JSON (including the 64-byte secret) appears in
+    /// `argv` for the duration of the `security` subprocess (~50ms). On a
+    /// single-user developer machine the risk is minimal; on a shared host
+    /// it's a documented trade-off. A future hardening pass could use a
+    /// memfd or named pipe to pass the secret out-of-band.
     fn set(&self, entry: &KeystoreEntry) -> Result<(), KeystoreError> {
         let json = serde_json::to_string(entry)?;
-        let ke = self.entry()?;
-        match ke.set_password(&json) {
-            Ok(()) => Ok(()),
-            Err(keyring::Error::NoStorageAccess(e)) => Err(KeystoreError::PlatformUnavailable {
-                reason: e.to_string(),
-            }),
-            Err(e) => Err(KeystoreError::Backend(anyhow::anyhow!("{e}"))),
+
+        #[cfg(target_os = "macos")]
+        {
+            return set_permissive_macos(&json);
+        }
+
+        #[allow(unreachable_code)]
+        {
+            let ke = self.entry()?;
+            match ke.set_password(&json) {
+                Ok(()) => Ok(()),
+                Err(keyring::Error::NoStorageAccess(e)) => {
+                    Err(KeystoreError::PlatformUnavailable {
+                        reason: e.to_string(),
+                    })
+                }
+                Err(e) => Err(KeystoreError::Backend(anyhow::anyhow!("{e}"))),
+            }
         }
     }
 
@@ -103,6 +131,46 @@ impl KeyStore for OsKeyStore {
     fn name(&self) -> &'static str {
         "os"
     }
+}
+
+/// macOS-only: write the keychain entry via `security add-generic-password
+/// -U -A` so the resulting item's ACL is `kSecACLAuthorizationAny` (allow
+/// any app). See the `set()` doc for why this matters.
+///
+/// Args:
+///   -U  Update an existing item if present (idempotent)
+///   -A  Allow any application to access this item without warning
+///   -s  Service name (Decision 1)
+///   -a  Account name (Decision 1)
+///   -w  Password / value (the JSON-encoded `KeystoreEntry`)
+#[cfg(target_os = "macos")]
+fn set_permissive_macos(json: &str) -> Result<(), KeystoreError> {
+    use std::process::Command;
+
+    let output = Command::new("/usr/bin/security")
+        .args([
+            "add-generic-password",
+            "-U",
+            "-A",
+            "-s",
+            SERVICE,
+            "-a",
+            ACCOUNT,
+            "-w",
+            json,
+        ])
+        .output()
+        .map_err(|e| KeystoreError::Backend(anyhow::anyhow!("spawn security: {e}")))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(KeystoreError::Backend(anyhow::anyhow!(
+            "security add-generic-password failed (exit {:?}): {}",
+            output.status.code(),
+            stderr.trim()
+        )));
+    }
+    Ok(())
 }
 
 #[cfg(test)]

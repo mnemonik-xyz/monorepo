@@ -11,6 +11,8 @@
  * placed in Error.cause in any retrievable form.
  */
 
+import { execFileSync } from "node:child_process";
+
 import { Entry } from "@napi-rs/keyring";
 import {
   type KeyStore,
@@ -21,6 +23,46 @@ import {
 
 const SERVICE = "xyz.mnemonik.identity";
 const ACCOUNT = "default";
+
+/**
+ * macOS-only: write the keychain entry via `security add-generic-password
+ * -U -A` so the resulting item's ACL is `kSecACLAuthorizationAny` (allow any
+ * application to access without warning). See `set()` doc for why.
+ *
+ * Args:
+ *   -U  Update an existing item if present (idempotent)
+ *   -A  Allow any application to access this item without warning
+ *   -s  Service name (Decision 1)
+ *   -a  Account name (Decision 1)
+ *   -w  Password / value (the JSON-encoded `KeystoreEntry`)
+ *
+ * Argv exposure: the JSON (including the 64-byte secret) appears in `argv`
+ * for the duration of the subprocess (~50ms). Documented trade-off; see
+ * the Rust mirror in `core/src/identity/keystore_os.rs`.
+ */
+function setPermissiveMacos(json: string): void {
+  try {
+    execFileSync(
+      "/usr/bin/security",
+      [
+        "add-generic-password",
+        "-U",
+        "-A",
+        "-s",
+        SERVICE,
+        "-a",
+        ACCOUNT,
+        "-w",
+        json,
+      ],
+      { stdio: ["ignore", "ignore", "pipe"] },
+    );
+  } catch (err) {
+    // Do NOT propagate the raw error message — it may contain the json on
+    // some shell-error paths. Surface a generic kind only.
+    throw new KeystoreError("other", `OsKeyStore.set (macOS shell-out) failed`);
+  }
+}
 
 /** Classify a thrown error from @napi-rs/keyring into a KeystoreErrorKind. */
 function classifyKeychainError(
@@ -129,9 +171,27 @@ export class OsKeyStore implements KeyStore {
     };
   }
 
-  /** Persist the entry in the OS keychain. */
+  /** Persist the entry in the OS keychain.
+   *
+   *  **macOS**: shells out to `security add-generic-password -U -A` so the
+   *  resulting item's ACL allows any application to read without prompt
+   *  (Decision 3 — "no prompts at bootstrap"). `@napi-rs/keyring`'s
+   *  `setPassword` creates entries with a restrictive default ACL that
+   *  triggers an "Always Allow" GUI prompt for every new caller (e.g. the
+   *  Rust mcp-server vs the Node CLI vs a third-party SDK consumer).
+   *
+   *  **Other platforms**: use `@napi-rs/keyring` directly — Linux Secret
+   *  Service and Windows Credential Manager don't have per-item ACLs that
+   *  prompt on cross-binary access.
+   */
   async set(entry: KeystoreEntry): Promise<void> {
     const json = canonicalEntryJson(entry);
+
+    if (process.platform === "darwin") {
+      setPermissiveMacos(json);
+      return;
+    }
+
     try {
       const e = new Entry(SERVICE, ACCOUNT);
       e.setPassword(json);
