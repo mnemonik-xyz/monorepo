@@ -502,6 +502,43 @@ Then `tech-spec-validator` ran coverage check — 3 covered / 3 partial / 2 miss
 
 ---
 
+## 2026-05-24 — T15 local-host attempt aborted; Phase 1/2 plan recorded
+
+**Status:** T15 still `blocked_on_user`. Local-host automated attempt was scoped, started, and aborted before executing destructive steps.
+
+**Context:** Mid-session attempt to close T15's `macos14` row automatically by running the scenario `§2` steps directly on the developer's macOS (15.5 Sequoia) machine. Pre-flight passed: HEAD = `2b15266` (≥ T19 close commit `c05c9fc`), `target/release/mnemonic-mcp` built, `packages/cli/dist/bin/mnemonic.js` built.
+
+**Reason for abort:** Discovered the host has a production Mnemonic identity at `~/.mnemonic/` — stub-shape, pubkey `FkwN...LYAk`, created 2026-05-23. Scenario `Step 1 (clean state)` executes `rm -rf ~/.mnemonic` plus `security delete-generic-password -s xyz.mnemonik.identity` — this would have **destroyed the developer's actual keypair** because:
+- The stub file is trivially backupable
+- The keychain entry holds the only copy of the long-lived secret; deleting it is irreversible without prior `security export` (which requires the user's login password and explicit consent)
+- Scenario hardcodes `service=xyz.mnemonik.identity / account=default` per Decision 1 — no env-var override exists to redirect to a per-run namespace
+
+**Decision:** Treat local-host execution as **unsafe by default on developer machines**. T15 should run on:
+- A dedicated test user account on macOS (separate `~/`, separate login.keychain), or
+- A throwaway VM, or
+- A CI runner provisioned with `security export` / `security import` wrapping the destructive cleanup
+
+This finding becomes a constraint for both Phase 1 and Phase 2 of the T15 orchestrator backlog (next entry).
+
+**Backlog — T15 orchestrator (two-phase plan recorded for future sessions):**
+
+| Phase | Scope | Belongs in | When |
+|---|---|---|---|
+| **Phase 1** | Local headless runner (slices A+B from prior session analysis): `scripts/t15-cu/run-row.sh <platform>` directly executes `§2` Steps 1–5 on the current machine; `scripts/t15-cu/aggregate.sh` produces summary + `decisions_md_block`. **Must include identity backup/restore wrapper** (`security export -k login.keychain -t classes -f pkcs12 -P <password> -o /tmp/t15-backup.p12` → run → `security import`) so the developer's production identity is preserved. Step 6 webapp redemption deferred unless local webapp is up. | `work/invisible-identity/tasks/20.md` (within current feature, since Phase 1 closes the merge gate) | After this session — needs ~30–60 min dev time on a host where running the safe-wrapped destructive flow is acceptable |
+| **Phase 2** | Generic CU harness as a **separate feature**: `work/cu-smoke-harness/` with own `user-spec.md` + `tech-spec.md`. First scenario = T15; future scenarios = whatever cross-platform smoke matrices the project needs. Lifts the Phase 1 scripts into a stable abstraction (scenario contract, CU launcher contract, aggregator, retry policy, identity-preservation wrapper as first-class concern). | New feature folder `work/cu-smoke-harness/` | After Phase 1 ships and after a 2nd potential consumer surfaces. If no 2nd consumer appears within ~2 months, Phase 1 scripts stay as one-shot tools; nothing lost. |
+
+**Naming:** Phase 2 feature = `cu-smoke-harness` (chosen during this session over `cross-platform-test-orchestrator` and `scenario-runner` — narrowest accurate scope).
+
+**Verification (what this session DID change):**
+- `git rev-parse HEAD` → `2b15266` (no T15 result commits added — that's the point)
+- `ls scripts/t15-cu/` → empty (unchanged — Phase 1 scripts NOT created here)
+- `work/cu-smoke-harness/` → does not exist (Phase 2 NOT started — by design)
+- Only diff: this `decisions.md` entry documenting the abort + plan
+
+**For the next session driving Phase 1:** read this entry first, do NOT execute `Step 1` on a host with a production identity without the backup/restore wrapper. The wrapper is a hard prereq, not a nice-to-have.
+
+---
+
 <!-- Task entries are appended below by agents as work completes.
 
 Format is strict — use only these sections, do not add others.
