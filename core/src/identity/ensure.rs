@@ -145,12 +145,28 @@ fn handle_create(
     // write a fresh stub file pointing at it, return. NEVER overwrite the
     // keychain — that's the data-loss path the spec explicitly forbids.
     // -----------------------------------------------------------------
+    // `os.available()` returns true if the keyring backend can construct an
+    // Entry descriptor; on Linux that's essentially always true once the
+    // crate is linked, but the actual D-Bus Secret Service daemon may still
+    // be unreachable. Probe with a real `get()` call; if it returns
+    // `PlatformUnavailable` we treat the OS as unavailable for the rest of
+    // this function and fall through to file-fallback creation. That keeps
+    // the orphan-detection silent on hosts where the keychain is configured
+    // but the running daemon is dead (CI runners with mis-configured
+    // gnome-keyring, headless Linux variants, etc.).
+    let mut os_usable = false;
     if os_available {
         let os_store = os.expect("os_available true implies Some");
-        if let Some(existing) = os_store
-            .get()
-            .context("probing OS keychain for orphan entry")?
-        {
+        let probe = os_store.get();
+        let existing = match probe {
+            Ok(slot) => {
+                os_usable = true;
+                slot
+            }
+            Err(KeystoreError::PlatformUnavailable { .. }) => None,
+            Err(other) => return Err(other).context("probing OS keychain for orphan entry"),
+        };
+        if let Some(existing) = existing {
             let keypair = Keypair::try_from(&existing.secret[..]).map_err(|e| {
                 anyhow::anyhow!(
                     "OS keychain entry secret is not a valid Solana keypair (cannot rebuild stub): {e}"
@@ -196,8 +212,11 @@ fn handle_create(
         pubkey_base58: pubkey_base58.clone(),
     };
 
-    if os_available {
-        let os_store = os.expect("os_available true implies Some");
+    // `os_usable` reflects the actual `get()` probe; honour it over the
+    // optimistic `os_available` so a CI runner with a dead Secret Service
+    // daemon doesn't get stuck trying to `set()` and failing.
+    if os_usable {
+        let os_store = os.expect("os_usable true implies Some");
 
         // Arm rollback guard before touching keychain.
         let mut guard = KeychainRollback::new(os_store);

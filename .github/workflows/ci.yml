@@ -254,9 +254,31 @@ jobs:
           PAYMENT_MODE: none
           EMBED_PROVIDER: openai
           OPENAI_API_KEY: test
+        # gnome-keyring init pattern used by Travis/CircleCI for years:
+        #   - `dbus-launch --sh-syntax` exports DBUS_SESSION_BUS_ADDRESS
+        #     into the current shell (eval).
+        #   - `gnome-keyring-daemon --start --foreground --components=secrets
+        #     --unlock` reads the keychain password from STDIN (we pass empty
+        #     here; the daemon treats empty as "create an unlocked default
+        #     collection"), and prints control + ssh socket env vars to
+        #     stdout, which we capture and export.
+        #
+        # The previous pattern (`gnome-keyring-daemon --start &` in the
+        # background WITHOUT capturing its env output) sometimes left the
+        # secrets component unreachable over D-Bus — `os.available()`
+        # returned true but `os.get()` failed with NoStorageAccess. The
+        # in-process tests added in commit 7b60a3c+ also catch this
+        # gracefully but we want the daemon actually running for the test.
         run: |
+          set -e
           eval "$(dbus-launch --sh-syntax)"
-          echo -n "" | gnome-keyring-daemon --unlock
-          gnome-keyring-daemon --start --components=secrets &
-          sleep 1
+          export $(echo "" | gnome-keyring-daemon --start --components=secrets --unlock 2>/dev/null | xargs -I{} echo {})
+          # Verify the secrets service is actually reachable via D-Bus
+          # before running the test — surfaces config issues with a clear
+          # error rather than a downstream NoStorageAccess.
+          dbus-send --session --dest=org.freedesktop.DBus \
+            --type=method_call --print-reply \
+            /org/freedesktop/DBus org.freedesktop.DBus.ListNames \
+            | grep -q org.freedesktop.secrets \
+            || { echo 'gnome-keyring secrets service not on D-Bus session bus' >&2; exit 1; }
           bash tests/cross-lang/keychain.sh
