@@ -62,4 +62,21 @@ paths = [
     # paste of a real install URL) is now scanned normally.
     '''work/.*\.md$''',
     '''work/.*/tests/fixtures/.*\.json$''',
+    # Agent-generated audit JSON reports under `work/<feature>/logs/working/
+    # audit/`. These quote synthetic test pubkeys/JWTs verbatim while
+    # diagnosing them; they are local-only by .gitignore today
+    # (`work/*/logs/` is gitignored), but legacy commits before that rule
+    # was tightened still appear in `git log --all`. Limited to the
+    # specific audit subdirectory so a stray report elsewhere in `work/`
+    # is still scanned.
+    '''work/.*/logs/working/audit/.*\.json$''',
+    # invisible-identity cross-language byte-equality fixtures (T9 + T10).
+    # The "secret" tripping the heuristic is a base58-encoded *public* key
+    # (`3F5qRPtKg8GhGNnbd3qCj6nVJxWsGxq7pvH84okYLAqf`) derived
+    # deterministically from seed `[0x42; 32]`. Documented in
+    # `core/examples/golden-keystore-gen.rs`.
+    '''core/src/identity/keystore\.rs''',
+    '''core/examples/golden-keystore-gen\.rs''',
+    '''tests/fixtures/legacy-identity\.json''',
+    '''tests/fixtures/generate-legacy\.mjs''',
 ]

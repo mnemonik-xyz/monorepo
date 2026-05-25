@@ -47,6 +47,13 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: workspace
+      # `keyring` v3's `sync-secret-service` feature (selected in
+      # core/Cargo.toml so the Rust mcp-server can talk to Linux Secret
+      # Service) transitively pulls in `libdbus-sys`, whose build script
+      # needs the `libdbus-1` system library + pkg-config. Ubuntu runners
+      # don't ship these by default.
+      - name: Install Linux Rust system deps (libdbus-1 for keyring crate)
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
       # Lint the production surface (lib + bins, no integration tests).
       - run: cargo clippy --workspace --lib --bins -- -D warnings
       # Then lint everything (incl. mcp/tests/*.rs) with test-support so the
@@ -62,6 +69,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: workspace
+      # See clippy job for context on libdbus-1-dev.
+      - name: Install Linux Rust system deps (libdbus-1 for keyring crate)
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
       # Workspace tests including the 12 mcp/tests/*.rs integration files
       # (Task 8 — see work/mnemonic-integrations/tasks/8.md). The
       # `mnemonic-mcp/test-support` feature flag activates the
@@ -213,9 +223,13 @@ jobs:
         with:
           node-version: '22'
       - name: Install gnome-keyring + tools
+        # `libdbus-1-dev pkg-config` here too — the cross-lang job builds
+        # the same Rust workspace as `clippy`/`test`, hence triggers the
+        # `libdbus-sys` build script via `keyring`'s
+        # `sync-secret-service` feature.
         run: |
           sudo apt-get update
-          sudo apt-get install -y gnome-keyring dbus-x11 libsecret-tools jq
+          sudo apt-get install -y gnome-keyring dbus-x11 libsecret-tools jq libdbus-1-dev pkg-config
       - name: Build Rust mcp-server
         run: cargo build -p mnemonic-mcp
       - name: Build Node CLI
