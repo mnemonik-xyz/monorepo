@@ -147,7 +147,10 @@ fn handle_create(
     // -----------------------------------------------------------------
     if os_available {
         let os_store = os.expect("os_available true implies Some");
-        if let Some(existing) = os_store.get().context("probing OS keychain for orphan entry")? {
+        if let Some(existing) = os_store
+            .get()
+            .context("probing OS keychain for orphan entry")?
+        {
             let keypair = Keypair::try_from(&existing.secret[..]).map_err(|e| {
                 anyhow::anyhow!(
                     "OS keychain entry secret is not a valid Solana keypair (cannot rebuild stub): {e}"
@@ -159,9 +162,7 @@ fn handle_create(
             // must equal what we just derived. Mismatch = Decision 17 case
             // (c) territory; surface loudly rather than silently picking a
             // side.
-            if !existing.pubkey_base58.is_empty()
-                && existing.pubkey_base58 != pubkey_base58
-            {
+            if !existing.pubkey_base58.is_empty() && existing.pubkey_base58 != pubkey_base58 {
                 anyhow::bail!(
                     "OS keychain entry integrity mismatch — stored pubkey {} does not match secret-derived pubkey {} (Decision 17 case c)",
                     existing.pubkey_base58,
@@ -634,7 +635,10 @@ mod tests {
         // NO stub file on disk — directory exists but identity.json doesn't.
         let identity_path = dir.path().join("identity.json");
         let readme_path = dir.path().join("README.txt");
-        assert!(!identity_path.exists(), "test precondition: identity.json must NOT exist");
+        assert!(
+            !identity_path.exists(),
+            "test precondition: identity.json must NOT exist"
+        );
 
         let stores = KeyStores {
             os: Some(Box::new(ArcMemoryKeyStore(os_arc.clone()))),
@@ -655,13 +659,22 @@ mod tests {
         assert!(identity_path.exists(), "stub file must be written");
         let stub: Value = serde_json::from_slice(&std::fs::read(&identity_path).unwrap()).unwrap();
         assert_eq!(stub["pubkey_base58"].as_str().unwrap(), original_pubkey);
-        assert!(stub.get("secret").is_none(), "rebuilt stub must NOT contain secret");
-        assert!(stub.get("keychain_ref").is_some(), "rebuilt stub must reference the keychain");
+        assert!(
+            stub.get("secret").is_none(),
+            "rebuilt stub must NOT contain secret"
+        );
+        assert!(
+            stub.get("keychain_ref").is_some(),
+            "rebuilt stub must reference the keychain"
+        );
 
         // Keychain entry preserved byte-for-byte — the critical anti-data-loss
         // assertion. If ensure() ever silently regenerates here, the original
         // private key is lost and the user's identity is reassigned.
-        let after = os_arc.get().unwrap().expect("keychain entry must still exist");
+        let after = os_arc
+            .get()
+            .unwrap()
+            .expect("keychain entry must still exist");
         assert_eq!(
             after.secret, original_secret,
             "keychain entry secret must NOT be overwritten — Decision 17 (b) is silent rebuild, not regenerate"
