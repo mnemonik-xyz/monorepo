@@ -22,7 +22,19 @@ import { Keypair } from "@mnemonik-xyz/sdk";
 
 import { OsKeyStore } from "./keystore-os.js";
 import { FileKeyStore } from "./keystore-file.js";
-import type { KeyStore } from "./keystore.js";
+import { KeystoreError, type KeyStore } from "./keystore.js";
+
+/**
+ * Common helper: return `true` iff a thrown KeystoreError represents the
+ * "the OS keychain backend constructed fine but the actual D-Bus / Secret
+ * Service daemon is unreachable" case. This is the false-positive
+ * `available()` situation that surfaces on Linux CI runners with
+ * mis-configured gnome-keyring; we treat it as "OS keychain not usable"
+ * and gracefully fall through to the file-fallback path.
+ */
+function isPlatformUnavailable(err: unknown): boolean {
+  return err instanceof KeystoreError && err.kind === "platform-unavailable";
+}
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -235,19 +247,35 @@ async function createIdentity(stores: KeyStores): Promise<EnsureResult> {
   // stub file pointing at it. NEVER generate a new keypair here —
   // overwriting the keychain in this case = data loss (the user's
   // original identity becomes unreachable).
+  //
+  // `available()` returns true if the keystore backend constructed an
+  // Entry descriptor; on Linux that's essentially always true once the
+  // module is loaded, but the actual D-Bus Secret Service daemon may
+  // still be unreachable. Probe with a real `get()` call; if it throws
+  // PlatformUnavailable we treat the OS as unusable for the rest of
+  // this function and fall through to file-fallback creation. Matches
+  // the Rust `handle_create` behaviour in core/src/identity/ensure.rs.
   // ---------------------------------------------------------------------
+  let osUsable = false;
   if (osAvail && stores.os !== null) {
-    const existing = await stores.os.get();
-    if (existing !== null) {
-      const recovered_pubkey = existing.pubkey_base58;
-      await doWriteStub(stores.identityPath, recovered_pubkey);
-      // Silent rebuild per Decision 17 (b) — no `log(...)` call.
-      return {
-        pubkey_base58: recovered_pubkey,
-        storage: "os-keychain",
-        created: false, // we did not create — we recovered
-        migrated: false,
-      };
+    try {
+      const existing = await stores.os.get();
+      osUsable = true;
+      if (existing !== null) {
+        const recovered_pubkey = existing.pubkey_base58;
+        await doWriteStub(stores.identityPath, recovered_pubkey);
+        // Silent rebuild per Decision 17 (b) — no `log(...)` call.
+        return {
+          pubkey_base58: recovered_pubkey,
+          storage: "os-keychain",
+          created: false, // we did not create — we recovered
+          migrated: false,
+        };
+      }
+    } catch (err) {
+      if (!isPlatformUnavailable(err)) throw err;
+      // PlatformUnavailable: stay in `osUsable = false` mode and fall
+      // through to file-fallback creation below.
     }
   }
 
@@ -259,7 +287,7 @@ async function createIdentity(stores: KeyStores): Promise<EnsureResult> {
   const pubkey_base58 = json.pubkey_base58;
   const entry = { secret: json.secret, pubkey_base58 };
 
-  if (osAvail && stores.os !== null) {
+  if (osUsable && stores.os !== null) {
     // Write to OS keychain.
     await stores.os.set(entry);
 
@@ -321,8 +349,29 @@ async function handleLegacy(
   const doWriteStub = stores._writeStub ?? writeStubAtomic;
 
   if (osAvail && stores.os !== null) {
-    // Migrate: write to OS keychain, then rewrite file as stub.
-    await stores.os.set(entry);
+    // Migrate: write to OS keychain, then rewrite file as stub. Catch
+    // PlatformUnavailable specifically so a dead Secret Service daemon
+    // doesn't force the user into an unrecoverable state — we keep the
+    // legacy file in place and proceed as if `osAvail` had been false.
+    try {
+      await stores.os.set(entry);
+    } catch (err) {
+      if (isPlatformUnavailable(err)) {
+        // OS keychain claimed to be available but `set` failed at the
+        // D-Bus boundary. Skip migration; preserve the legacy file as-is
+        // and return a file-storage result identical to the no-OS path.
+        log(
+          `mnemonic: identity stays in ~/.mnemonic/identity.json (OS keychain unavailable on set)`,
+        );
+        return {
+          pubkey_base58,
+          storage: "file",
+          created: false,
+          migrated: false,
+        };
+      }
+      throw err;
+    }
 
     try {
       await doWriteStub(stores.identityPath, pubkey_base58);
