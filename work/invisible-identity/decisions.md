@@ -539,6 +539,46 @@ This finding becomes a constraint for both Phase 1 and Phase 2 of the T15 orches
 
 ---
 
+## 2026-05-25 — T15 macos14 partial run + 2 hard merge-blockers surfaced
+
+**Status:** T15 row `macos14` partially executed on developer's host. 4 of 6 steps pass; Step 3 deferred; Step 6 blocked by production deploy gap.
+**Result:** logs/working/task-15/T15-smoke-result-macos14.json
+**Summary:** logs/working/task-15/T15-smoke-summary.json
+**Backup wrapper used:** `security find-generic-password -w` to /tmp/mnemonic-keychain-backup.json (developer ran manually); restore via `security add-generic-password -w "$(cat backup)"` + manual stub rewrite (NOT via `mnemonic whoami` — see finding #1 below).
+
+**Step results:** Step 1 (clean state) pass, Step 2 (bootstrap) pass, Step 3 (sign keychain-unlock proof) deferred-requires-GUI-click, Step 4 (legacy migration file assertions) pass, Step 5 (drift status all 4 sub-checks) pass.
+
+**HARD MERGE-BLOCKER #1 — production deploy gap on mcp.mnemonik.xyz.** Step 6 round-trip with webapp failed: CLI's `push-to-webapp` calls `GET https://mcp.mnemonik.xyz/api/cli-bootstrap/server-pub` → HTTP 404. Probed full Task-12 endpoint set:
+- `GET /api/cli-bootstrap/server-pub` → 404
+- `POST /api/cli-bootstrap/issue-from-cli` → 404
+- `POST /api/cli-bootstrap/redeem` → 404
+- (existing pre-Task-12 endpoints alive: `/health` 200, `/.well-known/oauth-authorization-server` 200, `POST /api/cli-bootstrap/issue` 401)
+
+Production server is at least one Task-12 (commit `4d722f3`) deploy behind. Merging `invisible-identity` to main without also redeploying `mcp.mnemonik.xyz` ships a broken end-to-end UX (push-to-webapp + webapp `/install?pull=` flow). Remediation: deploy GHCR image from main HEAD post-merge BEFORE announcing/relying on push-to-webapp; verify with `curl https://mcp.mnemonik.xyz/api/cli-bootstrap/server-pub` returning 200 + JSON `{server_pub_x25519_base64: "..."}`.
+
+**HARD MERGE-BLOCKER #2 — Decision 17 case (b) is fiction.** Tech-spec backfill commit `1c2ecf1` introduced Decision 17 with case (b): "keychain entry exists, stub file missing → silent rebuild from keychain". The implementation does NOT do this — `ensure()` with missing stub generates a fresh keypair and CALLS `keychain.set()` which OVERWRITES the existing keychain entry's secret. Discovered during T15 restore phase: after re-adding the developer's production secret to keychain via `security add-generic-password`, running `mnemonic whoami` to "let case (b) rebuild the stub" instead destroyed the production secret with a freshly-generated `71cT...EmWb` keypair. The developer's `FkwN...LYAk` keypair was recovered only because the backup `.json` file at /tmp was still intact and we did a SECOND restore + manually wrote the stub without invoking `mnemonic`.
+
+This is a data-loss bug class: any user who manually wipes `~/.mnemonic/` (because they think the stub is corrupt, or for any other reason) but leaves the keychain entry intact will silently lose their secret on next `mnemonic` invocation. Two resolutions:
+1. Implement case (b) as the spec says (probe keychain on missing-stub branch, derive pubkey, write fresh stub, no keychain.set). Add integration test. **(Preferred — spec was right, code was wrong.)**
+2. Revise Decision 17 to reflect actual behavior, document the data-loss-by-design under "Constraints" in user-spec, and warn users explicitly in the stderr line when stub is missing.
+
+This MUST be resolved before merge — the data-loss path is reachable by ordinary user behavior, not just T15 restore.
+
+**Other findings (non-blocking, file for tech-spec / scenario revision):**
+- `scenarios/T15-smoke-matrix.md` §2 Step 5c expected storage-label string `OS keychain (macOS Keychain)` is outdated. Implementation prints `OS keychain (stub-referenced; not yet pulled)` — more honest because at status-time the secret hasn't been fetched. Update scenario or make regex-loose.
+- Scenario §2 Step 5d should specify the token.json file shape (`{jwt, sub, expires_at}`) — operator/agent writing a fake token easily gets the shape wrong (we did, with `{token, ...}`). Shape is enforced by `packages/cli/src/commands/identity.ts:344` `readTokenJwt`.
+- Decision 3 vs Decision 17 interaction unclear in practice: `whoami` + `identity status` both hang on a freshly-restored keychain entry (creator-process = `security` CLI, reader-process = `node` from nvm). Suggests there IS startup keychain access despite Decision 3's "lazy" claim. Possibly an early-validation code path that should be made truly lazy, OR the lazy claim should be qualified ("lazy unless the entry's ACL doesn't permit current process, in which case the OS-level probe itself prompts").
+- `macos-prep-keychain.sh` ordering is critical and easy to mis-execute. Must run AFTER entry creation; a re-created entry needs re-prep. Recommend ensure() on macOS to call `security set-generic-password-partition-list` itself post-write — would eliminate the prep step. This is a meaningful UX improvement, file as backlog.
+
+**Verification artifacts:**
+- `git status --short` → `M decisions.md`, `?? work/invisible-identity/logs/working/task-15/*.json` (logs gitignored, only decisions.md commits)
+- Result + summary JSON files present at logs/working/task-15/
+- Developer's identity restored — manual verification still pending (developer to confirm via `mnemonic whoami` after `! scripts/macos-prep-keychain.sh` one more time, or via "Always Allow" GUI click on next signing)
+
+**For the next session:** fix Merge-Blocker #2 (Decision 17 case b implementation) first because it's a real user-facing data-loss bug. Merge-Blocker #1 (production deploy) is a release-engineering task, not code work — it can run in parallel and is unblocked by the existence of the GHCR image from this feature branch.
+
+---
+
 <!-- Task entries are appended below by agents as work completes.
 
 Format is strict — use only these sections, do not add others.
