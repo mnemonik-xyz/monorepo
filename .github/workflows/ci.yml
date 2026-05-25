@@ -214,20 +214,9 @@ jobs:
     name: cross-lang-keychain
     # Upgraded from ubuntu-22.04 → ubuntu-latest (24.04) because `wasm-pack`
     # caches in Swatinem rust-cache@v2 are now built against GLIBC 2.39
-    # (Ubuntu 24.04). The 22.04 runner ships GLIBC 2.35 → wasm-pack from
-    # the cache exits with "GLIBC_2.39 not found". gnome-keyring's
-    # behavior is identical on 24.04, so no functional change to the
-    # cross-language interop assertions.
+    # (Ubuntu 24.04). gnome-keyring's behavior is identical on 24.04, so
+    # no functional change to the cross-language interop assertions.
     runs-on: ubuntu-latest
-    # The cross-lang script itself has unrelated startup issues under
-    # CI (stdio binary EOF handling + dbus session inheritance) that
-    # need separate debugging — tracked as a follow-up. Cross-language
-    # JSON byte-equality is independently verified by the
-    # `golden COSE fixture lockstep` and the per-language golden tests
-    # (`identity::keystore::tests::golden_json_bytes_cross_language_canonical`
-    # in Rust + `cross-language canonical golden` in the CLI vitest
-    # suite), so we don't block PRs on this incremental check.
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -245,8 +234,14 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y gnome-keyring dbus-x11 libsecret-tools jq libdbus-1-dev pkg-config
-      - name: Build Rust mcp-server
-        run: cargo build -p mnemonic-mcp
+      - name: Build Rust mcp-server + keychain-roundtrip example
+        # `keychain-roundtrip` is the tiny Rust binary the cross-lang
+        # script invokes — it calls `identity::ensure()` and prints
+        # `{"pubkey":..., "storage":...}`. Much simpler than the full
+        # mcp stdio server and avoids the EOF / embedder-init pitfalls.
+        run: |
+          cargo build -p mnemonic-mcp
+          cargo build -p mnemonic-core --example keychain-roundtrip
       - name: Build Node CLI (sdk first — cli imports from it)
         run: |
           npm install --workspaces --include-workspace-root --no-audit --no-fund
