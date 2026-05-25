@@ -124,13 +124,69 @@ fn default_stores() -> anyhow::Result<KeyStores> {
 // Path handlers
 // ---------------------------------------------------------------------------
 
-/// Path 1: identity.json absent — generate a new keypair.
+/// Path 1: identity.json absent — generate a new keypair, OR (Decision 17
+/// case b) silently rebuild the stub file from an existing keychain entry
+/// the user happens to still have (e.g. `rm -rf ~/.mnemonic` without
+/// clearing OS keychain). Recovery is silent — no stderr line, no new
+/// keypair, no overwrite of the keychain secret. Tests:
+/// `ensure_recovers_orphan_keychain_silently`.
 fn handle_create(
     os: Option<&dyn KeyStore>,
     file: &dyn KeyStore,
     identity_path: &Path,
     readme_path: &Path,
 ) -> anyhow::Result<Identity> {
+    let created_at = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let os_available = os.map(|s| s.available().unwrap_or(false)).unwrap_or(false);
+
+    // -----------------------------------------------------------------
+    // Decision 17 (b): keychain entry exists, stub file missing → silent
+    // rebuild. Reconstruct the Identity from the existing keychain secret,
+    // write a fresh stub file pointing at it, return. NEVER overwrite the
+    // keychain — that's the data-loss path the spec explicitly forbids.
+    // -----------------------------------------------------------------
+    if os_available {
+        let os_store = os.expect("os_available true implies Some");
+        if let Some(existing) = os_store.get().context("probing OS keychain for orphan entry")? {
+            let keypair = Keypair::try_from(&existing.secret[..]).map_err(|e| {
+                anyhow::anyhow!(
+                    "OS keychain entry secret is not a valid Solana keypair (cannot rebuild stub): {e}"
+                )
+            })?;
+            let pubkey_base58 = keypair.pubkey().to_string();
+
+            // Sanity: keychain-stored pubkey_base58 (if present + non-empty)
+            // must equal what we just derived. Mismatch = Decision 17 case
+            // (c) territory; surface loudly rather than silently picking a
+            // side.
+            if !existing.pubkey_base58.is_empty()
+                && existing.pubkey_base58 != pubkey_base58
+            {
+                anyhow::bail!(
+                    "OS keychain entry integrity mismatch — stored pubkey {} does not match secret-derived pubkey {} (Decision 17 case c)",
+                    existing.pubkey_base58,
+                    pubkey_base58
+                );
+            }
+
+            let stub = build_stub_json(&pubkey_base58, &created_at);
+            write_stub_file(identity_path, &stub)?;
+            write_readme_once(readme_path)?;
+            // Silent rebuild per Decision 17 (b) — no stderr line.
+
+            return Ok(Identity {
+                keypair,
+                pubkey_base58,
+                created_at,
+                storage: IdentityStorage::OsKeychain,
+            });
+        }
+        // No orphan entry — fall through to fresh-keypair creation below.
+    }
+
+    // -----------------------------------------------------------------
+    // Truly fresh creation: generate a new Ed25519 keypair.
+    // -----------------------------------------------------------------
     let keypair = Keypair::new();
     let pubkey_base58 = keypair.pubkey().to_string();
     let secret = keypair.to_bytes();
@@ -138,9 +194,6 @@ fn handle_create(
         secret,
         pubkey_base58: pubkey_base58.clone(),
     };
-    let created_at = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-
-    let os_available = os.map(|s| s.available().unwrap_or(false)).unwrap_or(false);
 
     if os_available {
         let os_store = os.expect("os_available true implies Some");
@@ -552,6 +605,70 @@ mod tests {
         );
 
         // Identity storage is OsKeychain.
+        assert!(matches!(id.storage, IdentityStorage::OsKeychain));
+    }
+
+    // ---------------------------------------------------------------------------
+    // Test: Decision 17 case (b) — keychain entry exists, stub file missing.
+    // Spec contract: silent rebuild from keychain secret. No new keypair
+    // generated, no overwrite of the keychain entry, no stderr line.
+    // Regression guard for the data-loss bug T15 macos14 surfaced.
+    // ---------------------------------------------------------------------------
+    #[test]
+    fn ensure_recovers_orphan_keychain_silently() {
+        let dir = TempDir::new().unwrap();
+
+        // Pre-seed an OS keychain entry that points at a known keypair.
+        let original = Keypair::new();
+        let original_pubkey = original.pubkey().to_string();
+        let original_secret = original.to_bytes();
+
+        let os_arc = std::sync::Arc::new(MemoryKeyStore::new());
+        os_arc
+            .set(&KeystoreEntry {
+                secret: original_secret,
+                pubkey_base58: original_pubkey.clone(),
+            })
+            .expect("seeding orphan keychain entry");
+
+        // NO stub file on disk — directory exists but identity.json doesn't.
+        let identity_path = dir.path().join("identity.json");
+        let readme_path = dir.path().join("README.txt");
+        assert!(!identity_path.exists(), "test precondition: identity.json must NOT exist");
+
+        let stores = KeyStores {
+            os: Some(Box::new(ArcMemoryKeyStore(os_arc.clone()))),
+            file: Box::new(MemoryKeyStore::new()),
+            identity_path: identity_path.clone(),
+            readme_path,
+        };
+
+        let id = ensure_with_stores(stores).expect("Decision 17 case (b) must succeed");
+
+        // The recovered identity MUST match the pre-seeded keychain entry.
+        assert_eq!(
+            id.pubkey_base58, original_pubkey,
+            "recovered pubkey must match pre-seeded keychain entry — spec forbids regeneration"
+        );
+
+        // Stub file written, points at the orphan entry, no `secret` field.
+        assert!(identity_path.exists(), "stub file must be written");
+        let stub: Value = serde_json::from_slice(&std::fs::read(&identity_path).unwrap()).unwrap();
+        assert_eq!(stub["pubkey_base58"].as_str().unwrap(), original_pubkey);
+        assert!(stub.get("secret").is_none(), "rebuilt stub must NOT contain secret");
+        assert!(stub.get("keychain_ref").is_some(), "rebuilt stub must reference the keychain");
+
+        // Keychain entry preserved byte-for-byte — the critical anti-data-loss
+        // assertion. If ensure() ever silently regenerates here, the original
+        // private key is lost and the user's identity is reassigned.
+        let after = os_arc.get().unwrap().expect("keychain entry must still exist");
+        assert_eq!(
+            after.secret, original_secret,
+            "keychain entry secret must NOT be overwritten — Decision 17 (b) is silent rebuild, not regenerate"
+        );
+        assert_eq!(after.pubkey_base58, original_pubkey);
+
+        // Storage classification is correct.
         assert!(matches!(id.storage, IdentityStorage::OsKeychain));
     }
 

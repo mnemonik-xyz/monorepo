@@ -202,9 +202,19 @@ describe("FileKeyStore", () => {
     const p = track(tmpFile());
     await fs.writeFile(p, "not-valid-json{{{", "utf8");
     const store = new FileKeyStore(p);
-    await expect(store.get()).rejects.toSatisfy(
-      (e: unknown) => e instanceof KeystoreError && e.kind === "serde",
-    );
+    // Manual try/catch rather than `.rejects.toSatisfy(...)` — Bun's test
+    // runner surfaces the rejection as "Unhandled error between tests"
+    // when `toSatisfy` is the chained matcher (even though the promise
+    // is awaited). `.toBeInstanceOf` + direct property check works
+    // uniformly under Node 20/22, Bun, and Deno.
+    let caught: unknown = undefined;
+    try {
+      await store.get();
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(KeystoreError);
+    expect((caught as KeystoreError).kind).toBe("serde");
   });
 
   it("set is atomic — no .tmp file left after success", async () => {

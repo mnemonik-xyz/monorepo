@@ -232,8 +232,11 @@ jobs:
           sudo apt-get install -y gnome-keyring dbus-x11 libsecret-tools jq libdbus-1-dev pkg-config
       - name: Build Rust mcp-server
         run: cargo build -p mnemonic-mcp
-      - name: Build Node CLI
-        run: npm install --workspaces --include-workspace-root && npm run build --workspace=@mnemonik-xyz/cli
+      - name: Build Node CLI (sdk first — cli imports from it)
+        run: |
+          npm install --workspaces --include-workspace-root --no-audit --no-fund
+          npm run build --workspace=@mnemonik-xyz/sdk
+          npm run build --workspace=@mnemonik-xyz/cli
       - name: Run cross-lang test under dbus + keyring
         env:
           MNEMONIC_QUIET: '1'

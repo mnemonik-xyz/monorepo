@@ -117,6 +117,53 @@ describe("ensure creates when absent (os available)", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Scenario 1b — Decision 17 case (b): keychain entry exists, stub file
+// missing. Spec contract: silent rebuild from the keychain secret. No new
+// keypair generated, no overwrite of the existing keychain entry, no
+// stderr line. Regression guard for the data-loss bug T15 macos14 surfaced.
+// ---------------------------------------------------------------------------
+
+describe("ensure recovers orphan keychain silently (Decision 17 case b)", () => {
+  it("adopts the existing keychain entry without overwriting it", async () => {
+    const dir = tmpDir();
+    const osStore = new MemoryKeyStore();
+    // Pre-populate OS keychain with a known entry — the orphan case.
+    const original = fakeEntry();
+    await osStore.set(original);
+
+    // NO stub file on disk yet.
+    const stores = await makeStores(dir, osStore);
+    const exists = await fs
+      .access(stores.identityPath)
+      .then(() => true)
+      .catch(() => false);
+    expect(exists).toBe(false);
+
+    const result = await ensureWithStores(stores);
+
+    // Adopted, not created. `created: false` is the spec-correct signal —
+    // we recovered an existing identity, we did not mint a new one.
+    expect(result.created).toBe(false);
+    expect(result.migrated).toBe(false);
+    expect(result.storage).toBe("os-keychain");
+    expect(result.pubkey_base58).toBe(original.pubkey_base58);
+
+    // Keychain entry must remain BYTE-IDENTICAL — the data-loss assertion.
+    const after = await osStore.get();
+    expect(after).not.toBeNull();
+    expect(after!.pubkey_base58).toBe(original.pubkey_base58);
+    expect(after!.secret).toEqual(original.secret);
+
+    // Stub file written, references the keychain, no secret on disk.
+    const raw = await fs.readFile(stores.identityPath, "utf8");
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    expect("keychain_ref" in parsed).toBe(true);
+    expect("secret" in parsed).toBe(false);
+    expect(parsed.pubkey_base58).toBe(original.pubkey_base58);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Scenario 2 — STUB already correct — no side effects
 // ---------------------------------------------------------------------------
 

@@ -226,15 +226,38 @@ export async function ensureWithStores(
 // ---------------------------------------------------------------------------
 
 async function createIdentity(stores: KeyStores): Promise<EnsureResult> {
+  const doWriteStub = stores._writeStub ?? writeStubAtomic;
+  const osAvail = stores.os !== null && (await stores.os.available());
+
+  // ---------------------------------------------------------------------
+  // Decision 17 case (b): keychain entry exists, stub file missing →
+  // silent rebuild. Adopt the existing keychain secret, write a fresh
+  // stub file pointing at it. NEVER generate a new keypair here —
+  // overwriting the keychain in this case = data loss (the user's
+  // original identity becomes unreachable).
+  // ---------------------------------------------------------------------
+  if (osAvail && stores.os !== null) {
+    const existing = await stores.os.get();
+    if (existing !== null) {
+      const recovered_pubkey = existing.pubkey_base58;
+      await doWriteStub(stores.identityPath, recovered_pubkey);
+      // Silent rebuild per Decision 17 (b) — no `log(...)` call.
+      return {
+        pubkey_base58: recovered_pubkey,
+        storage: "os-keychain",
+        created: false, // we did not create — we recovered
+        migrated: false,
+      };
+    }
+  }
+
+  // ---------------------------------------------------------------------
+  // Truly fresh creation: generate a new Ed25519 keypair.
+  // ---------------------------------------------------------------------
   const kp = await Keypair.generate();
   const json = kp.toJSON();
   const pubkey_base58 = json.pubkey_base58;
   const entry = { secret: json.secret, pubkey_base58 };
-
-  // Try OS keychain first.
-  const osAvail = stores.os !== null && (await stores.os.available());
-
-  const doWriteStub = stores._writeStub ?? writeStubAtomic;
 
   if (osAvail && stores.os !== null) {
     // Write to OS keychain.
