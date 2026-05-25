@@ -212,7 +212,13 @@ jobs:
   # manual smoke tests (no free CI runners with those backends).
   cross-lang-keychain:
     name: cross-lang-keychain
-    runs-on: ubuntu-22.04
+    # Upgraded from ubuntu-22.04 → ubuntu-latest (24.04) because `wasm-pack`
+    # caches in Swatinem rust-cache@v2 are now built against GLIBC 2.39
+    # (Ubuntu 24.04). The 22.04 runner ships GLIBC 2.35 → wasm-pack from
+    # the cache exits with "GLIBC_2.39 not found". gnome-keyring's
+    # behavior is identical on 24.04, so no functional change to the
+    # cross-language interop assertions.
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
