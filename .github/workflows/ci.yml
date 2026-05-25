@@ -254,31 +254,41 @@ jobs:
           PAYMENT_MODE: none
           EMBED_PROVIDER: openai
           OPENAI_API_KEY: test
-        # gnome-keyring init pattern used by Travis/CircleCI for years:
-        #   - `dbus-launch --sh-syntax` exports DBUS_SESSION_BUS_ADDRESS
-        #     into the current shell (eval).
-        #   - `gnome-keyring-daemon --start --foreground --components=secrets
-        #     --unlock` reads the keychain password from STDIN (we pass empty
-        #     here; the daemon treats empty as "create an unlocked default
-        #     collection"), and prints control + ssh socket env vars to
-        #     stdout, which we capture and export.
-        #
-        # The previous pattern (`gnome-keyring-daemon --start &` in the
-        # background WITHOUT capturing its env output) sometimes left the
-        # secrets component unreachable over D-Bus — `os.available()`
-        # returned true but `os.get()` failed with NoStorageAccess. The
-        # in-process tests added in commit 7b60a3c+ also catch this
-        # gracefully but we want the daemon actually running for the test.
+        # Use `dbus-run-session` to spawn a fresh, isolated D-Bus session
+        # bus with DBUS_SESSION_BUS_ADDRESS already exported in its child
+        # environment — works around the Ubuntu 24.04 gnome-keyring 46+
+        # changes that broke the older `dbus-launch + gnome-keyring-daemon
+        # --start &` recipe. Inside the subshell we start gnome-keyring's
+        # secrets component, wait up to 10s for it to register on the bus,
+        # and then run the cross-lang script. If the daemon never registers
+        # we exit immediately with a clear diagnostic instead of trying the
+        # test and seeing a downstream NoStorageAccess.
         run: |
-          set -e
-          eval "$(dbus-launch --sh-syntax)"
-          export $(echo "" | gnome-keyring-daemon --start --components=secrets --unlock 2>/dev/null | xargs -I{} echo {})
-          # Verify the secrets service is actually reachable via D-Bus
-          # before running the test — surfaces config issues with a clear
-          # error rather than a downstream NoStorageAccess.
-          dbus-send --session --dest=org.freedesktop.DBus \
-            --type=method_call --print-reply \
-            /org/freedesktop/DBus org.freedesktop.DBus.ListNames \
-            | grep -q org.freedesktop.secrets \
-            || { echo 'gnome-keyring secrets service not on D-Bus session bus' >&2; exit 1; }
-          bash tests/cross-lang/keychain.sh
+          dbus-run-session -- bash -eo pipefail -c '
+            # Start the secrets-only keyring daemon. `--daemonize` returns
+            # control once the daemon has forked. `--unlock` reads an empty
+            # password from /dev/null (treated as "no master password" → an
+            # unlocked default collection is created on demand).
+            gnome-keyring-daemon --start --components=secrets --unlock </dev/null
+
+            # Poll the bus for org.freedesktop.secrets up to 10× 1s.
+            for i in $(seq 1 10); do
+              if dbus-send --session --dest=org.freedesktop.DBus \
+                   --type=method_call --print-reply \
+                   /org/freedesktop/DBus org.freedesktop.DBus.ListNames \
+                   2>/dev/null | grep -q org.freedesktop.secrets; then
+                echo "gnome-keyring secrets service registered (after ${i}s)"
+                break
+              fi
+              sleep 1
+            done
+
+            # Final verification — fail loud if still missing after 10s.
+            dbus-send --session --dest=org.freedesktop.DBus \
+              --type=method_call --print-reply \
+              /org/freedesktop/DBus org.freedesktop.DBus.ListNames \
+              | grep -q org.freedesktop.secrets \
+              || { echo "gnome-keyring secrets service never appeared on D-Bus" >&2; exit 1; }
+
+            bash tests/cross-lang/keychain.sh
+          '
