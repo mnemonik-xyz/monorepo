@@ -220,28 +220,41 @@ fn handle_create(
 
         // Arm rollback guard before touching keychain.
         let mut guard = KeychainRollback::new(os_store);
-        os_store
-            .set(&entry)
-            .context("writing new identity to OS keychain")?;
-        guard.arm();
+        match os_store.set(&entry) {
+            Ok(()) => {
+                guard.arm();
 
-        // Write stub file — on failure the guard's Drop rolls back the keychain.
-        let stub = build_stub_json(&pubkey_base58, &created_at);
-        write_stub_file(identity_path, &stub)?;
-        guard.disarm();
+                // Write stub file — on failure the guard's Drop rolls back the keychain.
+                let stub = build_stub_json(&pubkey_base58, &created_at);
+                write_stub_file(identity_path, &stub)?;
+                guard.disarm();
 
-        write_readme_once(readme_path)?;
-        maybe_log_line(&format!(
-            "mnemonic: identity created did:sol:{pubkey_base58} stored in OS keychain"
-        ));
+                write_readme_once(readme_path)?;
+                maybe_log_line(&format!(
+                    "mnemonic: identity created did:sol:{pubkey_base58} stored in OS keychain"
+                ));
 
-        Ok(Identity {
-            keypair,
-            pubkey_base58,
-            created_at,
-            storage: IdentityStorage::OsKeychain,
-        })
-    } else {
+                return Ok(Identity {
+                    keypair,
+                    pubkey_base58,
+                    created_at,
+                    storage: IdentityStorage::OsKeychain,
+                });
+            }
+            Err(KeystoreError::PlatformUnavailable { .. }) => {
+                // OS keychain claimed usable for `get` but set failed at
+                // the backend boundary (some CI Secret Service setups
+                // allow read but not write). Fall through to file-fallback
+                // using the SAME keypair we already generated.
+            }
+            Err(other) => {
+                return Err(other).context("writing new identity to OS keychain");
+            }
+        }
+        // Fall through to file-fallback below.
+    }
+
+    {
         // File-fallback path.
         let reason = describe_unavailability(os);
         file.set(&entry)

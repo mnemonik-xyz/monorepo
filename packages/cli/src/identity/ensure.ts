@@ -288,8 +288,29 @@ async function createIdentity(stores: KeyStores): Promise<EnsureResult> {
   const entry = { secret: json.secret, pubkey_base58 };
 
   if (osUsable && stores.os !== null) {
-    // Write to OS keychain.
-    await stores.os.set(entry);
+    // Write to OS keychain. If `set` fails with PlatformUnavailable
+    // (some CI runners allow `get` but not `set` on the Secret Service
+    // socket — bug in the daemon's ACL setup, not ours), fall through
+    // to the file-fallback path with the same keypair so the user gets
+    // a working identity instead of a hard error.
+    try {
+      await stores.os.set(entry);
+    } catch (err) {
+      if (isPlatformUnavailable(err)) {
+        // Skip OS path; jump to file-fallback creation below.
+        await stores.file.set(entry);
+        log(
+          `mnemonic: identity created did:sol:${pubkey_base58} stored in ~/.mnemonic/identity.json (OS keychain set failed)`,
+        );
+        return {
+          pubkey_base58,
+          storage: "file",
+          created: true,
+          migrated: false,
+        };
+      }
+      throw err;
+    }
 
     // Write stub file atomically.
     try {
