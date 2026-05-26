@@ -1,8 +1,9 @@
 ---
 created: 2026-05-21
-status: draft
+approved: 2026-05-22
+status: approved
 type: feature
-size: M
+size: L  # absorbs work/keypair-sync/, 5 surfaces, 19 tasks/5 waves, marketplace-critical path
 priority: P0 (блокирует marketplace shipping; поглощает work/keypair-sync/)
 related:
   - work/keypair-sync/user-spec.md (поглощён; закрывается при ship'е этой feature)
@@ -30,7 +31,7 @@ related:
 
 **Слой 2 — Кросс-поверхностная синхронизация (поглощено из keypair-sync).**
 
-5. **`mnemonic identity status`** — команда обнаружения drift'а. Сравнивает локальную identity с JWT.sub из кэшированного `~/.mnemonic/token.json` и сообщает: `synced` / `diverged` / `webapp-unknown`.
+5. **`mnemonic identity status`** — команда обнаружения drift'а (локально, без сети). Сравнивает локальную identity с JWT.sub из кэшированного `~/.mnemonic/token.json` и сообщает: `synced` / `diverged` / `webapp-unknown` / `no-identity` / `malformed`. Exit code `0` если synced/webapp-unknown, `3` если diverged/malformed, `1` если identity отсутствует.
 6. **JWT-baked install deeplinks.** Кнопки "Install in Cursor / VS Code" на webapp вшивают `Authorization: Bearer <jwt>` в сгенерированный `mcp.json` — IDE сразу аутентифицирован тем же keypair'ом что и webapp. Никакого ручного `mnemonic login` или копирования JWT.
 7. **Drift-warning prompts.** Webapp "Generate new" показывает модалку с опциями "Send to CLI / Download backup / Cancel" **до** того как новый ключ заменит старый. CLI `mnemonic init --force` напоминает про webapp localStorage drift.
 8. **Send-to-CLI / Pull-from-webapp.** Двусторонние flow на one-shot тикетах с TTL 5 минут: либо QR-код / short-code от webapp к CLI, либо `mnemonic identity push-to-webapp` от CLI к webapp. Сырые секреты по сети не идут — передаётся обёрнутый секрет или новый pubkey для linkage (см. tech-spec).
@@ -142,14 +143,14 @@ Exit code `0` если synced, `3` если diverged. `--json` для пайпа
 
 **Send-to-CLI (webapp → CLI):**
 
-1. На webapp: меню `Settings → Keys → Send to CLI`. Webapp вызывает `POST /api/cli-sync/issue` (uses существующий oauth-ticket pattern). Получает короткий код `ABCD-1234` и QR.
-2. На CLI: `mnemonic identity pull-from-webapp ABCD-1234`. CLI обращается к `POST /api/cli-sync/redeem`, получает обёрнутый секрет (wrap-key — короткоживущий x25519 эфемерный ключ, см. tech-spec), разворачивает локально, записывает в keychain + обновляет stub-файл.
+1. На webapp: меню `Settings → Keys → Send to CLI`. Webapp вызывает `POST /api/cli-bootstrap/issue`. Получает короткий код `ABCD-1234` и QR.
+2. На CLI: `mnemonic identity pull-from-webapp ABCD-1234`. CLI обращается к `POST /api/cli-bootstrap/redeem`, получает обёрнутый секрет (wrap-key — короткоживущий x25519 эфемерный ключ, см. tech-spec), разворачивает локально, записывает в keychain + обновляет stub-файл.
 3. На обеих поверхностях теперь одинаковый pubkey. JWT тоже валиден без `mnemonic login`.
 
 **Push-to-webapp (CLI → webapp):**
 
-1. На CLI: `mnemonic identity push-to-webapp`. CLI печатает короткий URL `https://mnemonik.xyz/install?pull=<ticket>` и QR-код.
-2. Пользователь открывает URL/сканирует QR в браузере где залогинен в webapp. Webapp редимит ticket, обёрнутый секрет приходит, разворачивается в браузере и кладётся в localStorage.
+1. На CLI: `mnemonic identity push-to-webapp` сначала тянет статический серверный x25519-pubkey через `GET /api/cli-bootstrap/server-pub`, оборачивает секрет под него, затем POST'ит `/api/cli-bootstrap/issue-from-cli` чтобы получить ticket + short_code. CLI печатает короткий URL `https://mnemonik.xyz/install?pull=<short_code>` и QR-код.
+2. Пользователь открывает URL/сканирует QR в браузере где залогинен в webapp. Webapp редимит ticket через `POST /api/cli-bootstrap/redeem`, обёрнутый секрет приходит, разворачивается в браузере и кладётся в localStorage.
 
 Тикеты one-shot, TTL 5 минут, привязаны к user-id (на webapp) и к pubkey (на CLI). Сырые секреты не путешествуют по сети — только обёрнутые x25519.
 
@@ -195,26 +196,38 @@ Cursor открывается через deeplink `cursor://mcp/install?config=<
 
 - [ ] `mnemonic sign "x"` на свежей машине (без `~/.mnemonic/`) работает без ошибок, identity создаётся автоматически, секрет уходит в keychain.
 - [ ] `mnemonic-mcp --transport stdio` (Rust) на свежей машине стартует без ошибок, использует ту же identity что и Node CLI.
-- [ ] На macOS / Linux (gnome-keyring или kwallet) / Windows — keychain entry создаётся и читается обеими языковыми сторонами.
+- [ ] На macOS / Linux (gnome-keyring или kwallet) / Windows — keychain entry создаётся и читается обеими языковыми сторонами; содержимое keychain entry **байт-в-байт совпадает** между Rust и Node (golden-byte тест в CI).
 - [ ] На headless Linux без D-Bus и в Docker-контейнере без keychain — file-fallback работает, identity сохраняется в legacy-формате `{secret, pubkey_base58}` mode 0600.
 - [ ] Существующий `identity.json` legacy-формата мигрируется в stub + keychain entry при первом запуске после апгрейда, без потери ключа.
-- [ ] Никаких prompt'ов или интерактивных запросов при первом запуске любой команды. Единственная stderr-строка `mnemonic: identity created did:sol:...` на первом создании.
+- [ ] Никаких prompt'ов или интерактивных запросов при первом запуске любой команды. **CLI** на первом создании печатает ровно одну stderr-строку `mnemonic: identity created did:sol:...`; **MCP-сервер (Rust stdio)** при создании identity полностью молчит на stderr (видимость только через структурированный `tracing::info!` в логах). На втором и последующих запусках обе поверхности молчат.
 - [ ] `did:sol:` остаётся форматом по умолчанию (без breaking change).
 - [ ] `~/.mnemonic/README.txt` пишется на первом запуске с однострочным описанием папки.
+- [ ] **Конкурентный bootstrap безопасен:** два процесса (например, CLI и stdio-MCP стартуют одновременно при первом запуске IDE), которые оба видят отсутствующий `identity.json`, не создают два разных ключа. Реализация — atomic-rename через `tempfile + persist` для дискового стуба, идемпотентный keychain `set`, проверка совпадения pubkey после записи. Race выигрывает один, второй читает результат.
+- [ ] **Partial-state recovery:** stub-файл без keychain entry → `IdentityRequiresKeystore` с подсказкой `pull-from-webapp`. Keychain entry без stub-файла → пересоздание стуба из keychain (silent recovery). Stub.pubkey ≠ derived(keychain.secret) → громкая ошибка `identity integrity mismatch` (exit 3), запись повреждена, требуется ручное вмешательство — никакого silent picking одной из сторон.
 
 **Слой 2 — Кросс-поверхностная синхронизация:**
 
 - [ ] `mnemonic identity status` возвращает `synced` когда CLI identity и JWT.sub совпадают, `diverged` иначе, exit code 0/3 соответственно.
 - [ ] Webapp "Generate new keypair" показывает модалку с опциями Send-to-CLI / Download backup / Cancel перед заменой.
-- [ ] CLI `mnemonic init --force` выводит расширенное предупреждение про webapp drift.
-- [ ] `mnemonic identity pull-from-webapp <code>` и `push-to-webapp` работают end-to-end через ticket flow, TTL 5 минут, single redemption.
+- [ ] CLI `mnemonic init --force` печатает предупреждение, упоминающее как минимум: (a) что webapp localStorage останется на старом ключе, (b) что cached JWT в `token.json` после смены станет невалидным до следующего `mnemonic login`, (c) явный prompt подтверждения с дефолтом "No".
+- [ ] `mnemonic identity pull-from-webapp <code>` и `push-to-webapp` работают end-to-end через ticket flow, TTL 5 минут, single redemption. Повторная попытка redemption уже использованного `short_code` возвращает чёткую user-visible ошибку `ticket already redeemed (or expired)` с exit code 3 — никакого silent fail.
 - [ ] Webapp install deeplinks (Cursor / VS Code / Claude Desktop) вшивают актуальный JWT пользователя в `mcp.json` config. После клика "Install" в IDE можно вызывать MCP без ручного `mnemonic login`.
-- [ ] Все pin-точки drift'а из секции "Зачем" не воспроизводятся в integration-тестах E2E.
+- [ ] Четыре pin-точки drift'а из секции "Зачем" покрыты сценарными тестами:
+  - **Cursor 0.1.5 sign mismatch** — interop тест Rust mcp-server + Node CLI на shared keychain entry: подпись из IDE проходит против webapp-минтнутого JWT.
+  - **IDE OAuth manual paste** — webapp install deeplink flow: после клика "Install" в IDE первый MCP call авторизован без manual JWT-paste; никакого "pending bundle owner mismatch".
+  - **Webapp test fixtures игнорировали local CLI identity** — Playwright E2E запускает webapp `/install` с pre-seeded localStorage identity, проверяет что fixture не перетирает её при загрузке страницы.
+  - **In-memory rollback инвалидировал JWT** — explicit contract зафиксирован в tech-spec: server restart инвалидирует все in-flight ticket'ы (TTL 5 мин окно). Тест: рестартануть mcp-сервер во время активного pull-from-webapp → CLI получает чёткий `ticket expired` (exit 3) и пользователь делает retry. Drift detector корректно ловит post-restart состояние как `diverged` если JWT.sub перестал совпадать с локальной identity.
 
 **Архивирование `work/keypair-sync/`:**
 
 - [ ] `work/keypair-sync/user-spec.md` перемещён в `work/completed/keypair-sync/user-spec.md`.
 - [ ] `work/completed/keypair-sync/MOVED.md` создан с однострочной ссылкой на `work/invisible-identity/`.
+
+**Определение "Shipped":**
+
+- [ ] Wave 5 целиком зелёный — T15 (manual smoke matrix, 5 платформ) подписан, T16/T17 (security + code audits) без unresolved CRITICAL/HIGH, T18 (архивирование) done, T19 (pre-deploy QA gate) зелёный.
+- [ ] Feature-ветка `feat/invisible-identity` смерджена в `main` через **один** PR, охватывающий все четыре поверхности (Rust core, mcp-server, Node CLI/SDK, webapp). Атомарный merge — поверхности не релизятся постепенно, чтобы избежать промежуточных состояний где, например, webapp шлёт CLI на endpoint которого ещё нет в опубликованном mcp-server. После merge на main все surface-артефакты (Docker image, npm tarball, webapp build) собираются из одного коммита.
+- [ ] **Out of scope для этой feature:** tag release (`v*`), `npm publish` для `@mnemonik-xyz/cli`, фактическая подача в VS Code Marketplace / Cursor Extensions Gallery. Эти шаги становятся возможными после shipа этой feature, но являются отдельными follow-up'ами.
 
 ## Ограничения
 
@@ -239,24 +252,19 @@ Cursor открывается через deeplink `cursor://mcp/install?config=<
 | Cross-platform тестирование keychain не покрывается CI matrix'ом | Высокая | Wave 5 имеет manual smoke matrix на macOS / Ubuntu+gnome-keyring / Windows. Headless Linux в CI покрывает file-fallback. |
 | `identity.json` stub-формат vs legacy-формат — рассинхрон между Node и Rust в детекции | Средняя | Tech-spec фиксирует точную shape обоих форматов и алгоритм детекции (`if "secret" in keys then legacy else stub`). Round-trip golden tests. |
 | Архивирование `work/keypair-sync/` теряет контекст для будущих читателей | Низкая | `work/completed/keypair-sync/MOVED.md` сохраняется в git'е навсегда; ссылка ведёт сюда. Содержимое user-spec.md keypair-sync целиком интегрировано в эту feature. |
+| Конкурентный bootstrap на свежей машине: IDE одновременно стартует stdio MCP и CLI hook'и, оба видят ENOENT и оба генерируют ключи → silent split-brain | Средняя | Atomic-rename pattern для disk-стуба (`tempfile` + `persist`), идемпотентная запись в keychain. Race выигрывает один писатель; второй на retry читает результат. AC закрывает этот случай. |
+| Pre-baked JWT в install deeplink выбран вместо ре-OAuth-в-IDE flow | Принятый риск | Cursor/VS Code/Claude.ai уже умеют OAuth 2.1+PKCE против `mcp.mnemonik.xyz/oauth/*` (см. architecture.md), но это handshake **после** того как MCP-клиент уже инстанцирован в IDE. Для "1-click install с webapp" нужна аутентификация **в момент** install — IDE при apply config'а не знает где взять JWT кроме как из самого config'а. Pre-baked JWT решает chicken-and-egg. Альтернатива (одноразовый bootstrap-nonce → OAuth-в-IDE) добавляет ещё один user-visible шаг, что подрывает "no required setup" guideline marketplace. Митигации: JWT TTL короткий (1h, см. tech-spec), warning в UI "this config contains a secret token, don't commit", при OAuth-refresh-rotation в будущем JWT regenerируется в IDE без перепрохождения install. |
 
-## Технические решения
+## Технические решения (user-facing)
 
-(полный набор — в `tech-spec.md`; здесь только user-facing решения, локированные после рескоупа A/B/C)
+Полный набор архитектурных решений, библиотек, форматов, путей и протокольных деталей — в `tech-spec.md §Decisions` (15 решений) и `tech-spec.md §Data Models`. Здесь зафиксированы только те решения, которые видны или ощутимы конечному пользователю.
 
-- **Node keychain library: `@napi-rs/keyring`.** Активно maintained, N-API нативный, cross-platform. `keytar` в maintenance-mode — отвергнут.
-- **Rust keychain library: `keyring` crate.** Стандарт для cross-platform native keychain в Rust.
-- **Keychain coordinates: `service = xyz.mnemonik.identity`, `account = default`.** Одни и те же для Node и Rust.
-- **Keychain content format: legacy JSON `{secret: number[64], pubkey_base58: string}`.** Та же shape что сейчас в файле, чтобы Node и Rust могли читать без межязыковой координации над форматом.
-- **Disk file format (stub):** `{pubkey_base58, did_sol, keychain_ref: "xyz.mnemonik.identity/default", created_at}`. Mode 0600. Поле `created_at` чисто информативное.
-- **Disk file format (legacy fallback):** `{secret: number[64], pubkey_base58: string}` — сохраняется как сейчас.
-- **DID-формат по умолчанию: `did:sol:`** (не меняется). `did:key` — опциональный флаг, в этой feature не реализуется.
-- **Bootstrap callsite (Node):** `identity.ensure()` вызывается из `@mnemonik-xyz/cli` entrypoint **до** любой argv-обработки конкретной команды, кроме `--help` / `--version`.
-- **Bootstrap callsite (Rust):** `identity::ensure()` вызывается из `mcp/src/main.rs` после парсинга CLI args и до старта transport'а.
-- **Single stderr line on creation:** `mnemonic: identity created did:sol:H8x...c4v stored in OS keychain` (или `... stored in legacy file (keychain unavailable: <reason>)`). Никаких других prompt'ов.
+- **DID-формат по умолчанию: `did:sol:`** (не меняется, no breaking change). `did:key` — опциональный флаг для будущих фич, в этой feature не реализуется.
+- **Single stderr line on creation (CLI only):** `mnemonic: identity created did:sol:H8x...c4v stored in OS keychain` (или `... stored in legacy file (keychain unavailable: <reason>)`). MCP-сервер при создании identity молчит на stderr. Никаких других prompt'ов на любой поверхности.
+- **`MNEMONIC_QUIET=1` env var — публичный user-facing override.** Подавляет stderr-строку на первом создании identity. Назначение — headless / CI / Docker / IDE-spawn сценарии, где любой нежданный stderr ломает парсеры или пугает reviewer'ов. Контракт стабильный: следующие минорные версии не сломают переменную и её эффект.
 - **`~/.mnemonic/README.txt`:** один абзац, описывает что находится в папке и где искать docs.
-- **Ticket protocol для Send/Pull:** ticket = `{id: uuid, wrapped_secret: x25519(secret, ephemeral_pub), eph_pub: 32bytes, ttl: 300s, single_use: true}`. Сырых секретов в сети нет.
-- **Webapp deeplink format:** `cursor://mcp/install?config=<base64-json>`, для VS Code — `vscode:mcp/install?config=...`, для Claude Desktop — manual `mcp.json` (но JWT уже подставлен).
+- **Сырых секретов в сети нет — никогда.** Send-to-CLI и Push-to-webapp передают только x25519-обёрнутый секрет с TTL 5 минут и single-redemption; протокольные детали обёртки и точные endpoint'ы — в tech-spec.
+- **Install deeplink — native URL scheme:** `cursor://mcp/install?config=...` и `vscode:mcp/install?config=...` (платформа-зависимое); Claude Desktop — copy-to-clipboard `mcp.json` (deeplink не поддерживается клиентом). JWT уже вшит в config — никакого ручного `mnemonic login` после клика.
 
 ## Тестирование
 

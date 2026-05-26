@@ -27,9 +27,14 @@ import {
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-import { Keypair, type KeypairJson } from "@mnemonik-xyz/sdk";
+import {
+  IdentityRequiresKeystore,
+  Keypair,
+  type KeypairJson,
+} from "@mnemonik-xyz/sdk";
 
 import { UserError } from "./errors.js";
+import { OsKeyStore } from "./identity/keystore-os.js";
 
 export interface TokenJson {
   jwt: string;
@@ -88,7 +93,7 @@ export function restrictFileMode(path: string): void {
       execFileSync(
         "icacls",
         [path, "/inheritance:r", "/grant:r", `${user}:F`],
-        { stdio: "ignore" }
+        { stdio: "ignore" },
       );
     } catch {
       // Non-fatal — the file is written; ACL hardening is best-effort on
@@ -112,6 +117,19 @@ function isKeypairJson(v: unknown): v is KeypairJson {
     typeof o.pubkey_base58 === "string" &&
     o.pubkey_base58.length > 0
   );
+}
+
+/**
+ * Validate a parsed object is shaped like the keychain-backed stub:
+ * `{pubkey_base58, did_sol?, keychain_ref?, created_at?}` per Decision 5.
+ * The defining negative is "no `secret` field"; we additionally require a
+ * non-empty `pubkey_base58` so a garbage `{}` is not mistaken for a stub.
+ */
+function isStubIdentity(v: unknown): boolean {
+  if (!v || typeof v !== "object") return false;
+  const o = v as Record<string, unknown>;
+  if ("secret" in o) return false;
+  return typeof o.pubkey_base58 === "string" && o.pubkey_base58.length > 0;
 }
 
 /** True iff `v` is a JSON array of exactly 64 numbers in 0..=255. */
@@ -177,7 +195,7 @@ function noIdentityError(): UserError {
     `no identity in ${configDir()}. Options:\n` +
       `  • mnemonic init                              — generate fresh keypair\n` +
       `  • mnemonic identity import --ticket <uuid>   — round-trip from webapp\n` +
-      `  • mnemonic identity import --file <path>     — import existing keypair JSON`
+      `  • mnemonic identity import --file <path>     — import existing keypair JSON`,
   );
 }
 
@@ -201,8 +219,22 @@ export function loadIdentityJson(): KeypairJson {
       throw new UserError(`identity is not valid JSON: ${path}`, e);
     }
     if (!isKeypairJson(parsed)) {
+      // Detect the new stub shape (Decision 5: keychain-backed identity.json).
+      // If found, signal callers via `IdentityRequiresKeystore` so they can
+      // either resolve via `resolveKeypairFromKeystore` (when they need the
+      // secret) or read the pubkey directly from the error (when they don't).
+      if (isStubIdentity(parsed)) {
+        const stub = parsed as {
+          pubkey_base58: string;
+          keychain_ref?: string;
+        };
+        throw new IdentityRequiresKeystore(
+          stub.pubkey_base58,
+          stub.keychain_ref ?? "xyz.mnemonik.identity/default",
+        );
+      }
       throw new UserError(
-        `identity has wrong shape; expected {secret: number[64], pubkey_base58: string}`
+        `identity has wrong shape; expected {secret: number[64], pubkey_base58: string} or stub {pubkey_base58, keychain_ref}`,
       );
     }
     return parsed;
@@ -227,7 +259,7 @@ export function loadIdentityJson(): KeypairJson {
     }
     if (!isSolanaKeypairArray(parsed)) {
       throw new UserError(
-        `${legacy} is not a Solana keypair file (expected JSON array of 64 numbers in 0..255)`
+        `${legacy} is not a Solana keypair file (expected JSON array of 64 numbers in 0..255)`,
       );
     }
     process.stderr.write("using legacy id.json (Solana keypair file format)\n");
@@ -237,10 +269,60 @@ export function loadIdentityJson(): KeypairJson {
   throw noIdentityError();
 }
 
-/** Convenience: load + return as a `Keypair` instance. */
+/**
+ * Resolve a stub identity.json via the OS keychain and return a full Keypair.
+ *
+ * Called from `loadIdentity()` and `whoami` when `Keypair.fromJSON` throws
+ * `IdentityRequiresKeystore` — i.e. the file is a stub that carries only a
+ * pubkey + keychain_ref, not the raw secret bytes.
+ *
+ * Exported so `commands/whoami.ts` can reuse it without duplicating the
+ * keychain-lookup logic.
+ */
+export async function resolveKeypairFromKeystore(
+  pubkey_base58: string,
+): Promise<Keypair> {
+  const ks = new OsKeyStore();
+  const entry = await ks.get();
+  if (!entry) {
+    throw new UserError(
+      `identity.json points at the OS keychain (stub file) but the keychain entry is missing. ` +
+        `Run \`mnemonic identity pull-from-webapp\` to re-import your key.`,
+    );
+  }
+  const fullJson: KeypairJson = {
+    secret: entry.secret,
+    pubkey_base58: entry.pubkey_base58 || pubkey_base58,
+  };
+  return Keypair.fromJSON(fullJson);
+}
+
+/** Convenience: load + return as a `Keypair` instance.
+ *
+ *  Two paths can throw `IdentityRequiresKeystore`:
+ *  - `loadIdentityJson()` synchronously, when the on-disk file is a stub
+ *  - `Keypair.fromJSON()` asynchronously, when given a stub-shaped object
+ *
+ *  Both are caught here and resolved via the OS keychain.
+ */
 export async function loadIdentity(): Promise<Keypair> {
-  const json = loadIdentityJson();
-  return Keypair.fromJSON(json);
+  let json: KeypairJson;
+  try {
+    json = loadIdentityJson();
+  } catch (e) {
+    if (e instanceof IdentityRequiresKeystore) {
+      return resolveKeypairFromKeystore(e.pubkey_base58);
+    }
+    throw e;
+  }
+  try {
+    return await Keypair.fromJSON(json);
+  } catch (e) {
+    if (e instanceof IdentityRequiresKeystore) {
+      return resolveKeypairFromKeystore(e.pubkey_base58);
+    }
+    throw e;
+  }
 }
 
 /** Atomic mode-0600 write of an identity. */
@@ -301,13 +383,13 @@ export function loadToken(): TokenJson {
   }
   if (!isTokenJson(parsed)) {
     throw new UserError(
-      `token has wrong shape; expected {jwt, expires_at, sub}`
+      `token has wrong shape; expected {jwt, expires_at, sub}`,
     );
   }
   const exp = Date.parse(parsed.expires_at);
   if (Number.isFinite(exp) && exp <= Date.now()) {
     throw new UserError(
-      `token expired at ${parsed.expires_at}; run \`mnemonic login\` again`
+      `token expired at ${parsed.expires_at}; run \`mnemonic login\` again`,
     );
   }
   return parsed;

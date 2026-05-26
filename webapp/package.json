@@ -14,12 +14,14 @@
     "test:e2e:integrations": "playwright test e2e/install.spec.ts e2e/oauth-flow.spec.ts e2e/deferred-sign-flow.spec.ts"
   },
   "dependencies": {
+    "bs58": "^6.0.0",
     "cbor-x": "^1.6.4",
     "react": "^19.2.6",
     "react-dom": "^19.2.6",
     "react-markdown": "^10.1.0",
     "react-router-dom": "^6.27.0",
-    "remark-gfm": "^4.0.1"
+    "remark-gfm": "^4.0.1",
+    "tweetnacl": "^1.0.3"
   },
   "devDependencies": {
     "@playwright/test": "^1.52.0",

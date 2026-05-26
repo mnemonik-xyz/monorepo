@@ -1285,6 +1285,16 @@ pub async fn bearer_auth_middleware(
         // on this allowlist; it uses standard Bearer-JWT auth so only an
         // already-authenticated webapp can mint tickets for its own user.
         || path.starts_with("/api/cli-bootstrap/redeem/")
+        // POST /api/cli-bootstrap/redeem — short_code lookup (T13/T14 interop).
+        // Same no-auth semantics as the UUID-based GET variant: the short_code
+        // is the capability. Exact-path match so it doesn't shadow sub-paths.
+        || path == "/api/cli-bootstrap/redeem"
+        // CLI-origin ticket issue: the CLI has not yet redeemed a JWT — the
+        // x25519 wrap to the server's static key is the capability. No Bearer
+        // JWT required.
+        || path == "/api/cli-bootstrap/issue-from-cli"
+        // Server's static x25519 public key — needed before issuing a ticket.
+        || path == "/api/cli-bootstrap/server-pub"
         // Extension bootstrap-ticket redeem endpoint (chrome-extension T15,
         // Decision 9). Same UUID-as-capability model as cli-bootstrap; the
         // extension exchanges the ticket for a fresh `aud=extension` JWT

@@ -21,7 +21,7 @@ use axum::{
     Json, Router,
 };
 use clap::Parser;
-use mnemonic_core::{arweave, compress, embed, identity, solana, storage::SqliteStore};
+use mnemonic_core::{arweave, compress, embed, solana, storage::SqliteStore};
 use serde::Deserialize;
 use solana_sdk::signer::Signer;
 use std::sync::Arc;
@@ -274,7 +274,12 @@ struct StatsQuery {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let _ = dotenvy::dotenv();
-    tracing_subscriber::fmt::init();
+    // Route tracing output to stderr so the stdio MCP transport (where
+    // stdout carries JSON-RPC frames) is not corrupted by `tracing::info!`
+    // / `warn!` / `error!` lines. See Wave 5 security audit finding 1.
+    tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .init();
 
     let cli = Cli::parse();
     let cfg = config::Config::from_env();
@@ -285,9 +290,12 @@ async fn main() -> anyhow::Result<()> {
         cli.transport.clone()
     };
 
-    let keypair = identity::load_or_create_keypair(&cfg.keypair_path)?;
+    let identity_struct = mnemonic_core::identity::ensure()
+        .map_err(|e| anyhow::anyhow!("identity::ensure failed at startup: {e}"))?;
+    let keypair = identity_struct.keypair;
     tracing::info!("Identity: {}", keypair.pubkey());
-    tracing::info!("did:sol: {}", identity::did_sol(&keypair));
+    tracing::info!("did:sol: {}", mnemonic_core::identity::did_sol(&keypair));
+    tracing::info!("Identity storage: {:?}", identity_struct.storage);
 
     let embedder = embed::build_embedder(
         &cfg.embed_provider,
@@ -434,6 +442,11 @@ async fn main() -> anyhow::Result<()> {
     // the capability — no Authorization header required).
     let bootstrap_tickets = Arc::new(api::BootstrapTickets::with_defaults());
 
+    // Static x25519 keypair for the CLI bootstrap symmetric flow (Task 12).
+    // Generated once at process boot; process-lifetime only.
+    let bootstrap_server_x25519_secret = crypto_box::SecretKey::generate(&mut rand::rngs::OsRng);
+    let bootstrap_server_x25519_public = bootstrap_server_x25519_secret.public_key();
+
     let state = Arc::new(mcp::McpState {
         keypair,
         solana: solana::SolanaClient::new(&cfg.solana_rpc_url),
@@ -457,6 +470,8 @@ async fn main() -> anyhow::Result<()> {
         chat_limiter,
         pending,
         bootstrap_tickets,
+        bootstrap_server_x25519_secret,
+        bootstrap_server_x25519_public,
     });
 
     // ── RAG seeding (whitepaper chunking + artifact generation) ──────────
@@ -682,8 +697,23 @@ async fn run_http(
             post(api::bootstrap_issue_handler),
         )
         .route(
+            "/api/cli-bootstrap/issue-from-cli",
+            post(api::bootstrap_issue_from_cli_handler),
+        )
+        .route(
             "/api/cli-bootstrap/redeem/{ticket}",
             axum::routing::get(api::bootstrap_redeem_handler),
+        )
+        // POST /api/cli-bootstrap/redeem — lookup by short_code (T13/T14 interop).
+        // No auth required: the short_code is the capability, exempt via the
+        // bearer-auth allowlist (same treatment as the GET UUID-based variant).
+        .route(
+            "/api/cli-bootstrap/redeem",
+            post(api::bootstrap_redeem_by_code_handler),
+        )
+        .route(
+            "/api/cli-bootstrap/server-pub",
+            axum::routing::get(api::bootstrap_server_pub_handler),
         )
         .layer(middleware::from_fn_with_state(
             oauth_state.clone(),

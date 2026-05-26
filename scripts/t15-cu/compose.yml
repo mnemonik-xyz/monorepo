@@ -1,0 +1,82 @@
+# T15 — Claude Computer Use launcher
+#
+# Spins up Anthropic's reference Computer Use demo container with:
+#   - the monorepo bind-mounted at /work/monorepo
+#   - named volumes for /target and /node_modules so Linux-built artifacts
+#     don't pollute the host (especially on macOS, where the host's `target/`
+#     and `node_modules/` are populated with darwin binaries)
+#   - the T15 init script + prompt template available to the container
+#
+# Usage (from repo root):
+#   export ANTHROPIC_API_KEY=sk-ant-...
+#   T15_PLATFORM=ubuntu22_headless docker compose -f scripts/t15-cu/compose.yml up
+#
+# Then open http://localhost:8080 (combined view) or http://localhost:6080
+# (just the desktop) in a browser. Paste the contents of
+# /home/computeruse/Desktop/T15-PROMPT.md into the chat.
+
+services:
+  cu:
+    image: ghcr.io/anthropics/anthropic-quickstarts:computer-use-demo-latest
+    container_name: t15-cu
+    pull_policy: missing
+    init: true
+    environment:
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:?ANTHROPIC_API_KEY required}
+
+      # T15 scenario inputs — agent reads these from the prompt or directly via $env
+      T15_PLATFORM: ${T15_PLATFORM:-ubuntu22_headless}
+      T15_REPO_PATH: /work/monorepo
+      T15_WEBAPP_URL: ${T15_WEBAPP_URL:-}
+      T15_WEBAPP_AUTH_COOKIE: ${T15_WEBAPP_AUTH_COOKIE:-}
+      T15_OUTPUT_DIR: /work/monorepo/work/invisible-identity/logs/working
+
+      # mnemonic-mcp runtime env required by the binary at startup
+      MNEMONIC_QUIET: "1"
+      STORAGE_MODE: local
+      PAYMENT_MODE: none
+      EMBED_PROVIDER: openai
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-test-not-real}
+
+    volumes:
+      # The repo, read-write. Init script needs to write build artifacts and
+      # the agent needs to write per-platform JSON results back to
+      # work/invisible-identity/logs/working/.
+      - ../..:/work/monorepo:rw
+
+      # Overlay named volumes on top of the bind mount so Linux-built
+      # artifacts stay inside the container and never touch the host's
+      # darwin/win toolchain caches.
+      - t15-cargo-target:/work/monorepo/target
+      - t15-cargo-registry:/home/computeruse/.cargo/registry
+      - t15-cargo-git:/home/computeruse/.cargo/git
+      - t15-node-modules:/work/monorepo/node_modules
+      - t15-webapp-node-modules:/work/monorepo/webapp/node_modules
+      - t15-cli-node-modules:/work/monorepo/packages/cli/node_modules
+      - t15-sdk-node-modules:/work/monorepo/packages/sdk/node_modules
+      - t15-extension-node-modules:/work/monorepo/packages/extension/node_modules
+
+      # Anthropic chat session cache (so a `docker compose down && up` retains
+      # auth setup and any in-progress conversation state).
+      - t15-claude-cache:/home/computeruse/.anthropic
+
+    ports:
+      # Combined view — recommended entrypoint. Chat on left, live desktop on right.
+      - "8080:8080"
+      # noVNC web client — just the desktop, no chat panel.
+      - "6080:6080"
+      # Streamlit chat UI on its own port.
+      - "8501:8501"
+      # Raw VNC (for native VNC clients like Screen Sharing.app or RealVNC).
+      - "5900:5900"
+
+volumes:
+  t15-cargo-target:
+  t15-cargo-registry:
+  t15-cargo-git:
+  t15-node-modules:
+  t15-webapp-node-modules:
+  t15-cli-node-modules:
+  t15-sdk-node-modules:
+  t15-extension-node-modules:
+  t15-claude-cache:

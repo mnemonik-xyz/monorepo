@@ -1,31 +1,64 @@
+pub mod ensure;
+pub mod keystore;
+pub mod keystore_file;
+#[cfg(test)]
+pub mod keystore_memory;
+pub mod keystore_os;
+
+pub use ensure::{ensure, ensure_with_stores, KeyStores};
+pub use keystore::{KeyStore, KeystoreEntry, KeystoreError};
+pub use keystore_file::FileKeyStore;
+pub use keystore_os::OsKeyStore;
+
 use solana_sdk::pubkey::Pubkey;
 use solana_sdk::signature::{Keypair, Signer};
 
-#[cfg(not(target_arch = "wasm32"))]
-use anyhow::Context;
-#[cfg(not(target_arch = "wasm32"))]
-use std::path::Path;
+// ---------------------------------------------------------------------------
+// Identity
+// ---------------------------------------------------------------------------
 
-/// Load keypair from JSON file, or generate and save a new one.
+/// A resolved Mnemonic Ed25519 identity.
 ///
-/// Filesystem-backed; native-only. The browser (`core::wasm`) uses
-/// `localStorage` instead and never touches this function.
-#[cfg(not(target_arch = "wasm32"))]
-pub fn load_or_create_keypair(path: &Path) -> anyhow::Result<Keypair> {
-    if path.exists() {
-        let data = std::fs::read_to_string(path).context("reading keypair file")?;
-        let bytes: Vec<u8> = serde_json::from_str(&data).context("parsing keypair JSON")?;
-        Keypair::try_from(bytes.as_slice()).map_err(|e| anyhow::anyhow!("invalid keypair: {e}"))
-    } else {
-        let kp = Keypair::new();
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).context("creating keypair directory")?;
-        }
-        let bytes: Vec<u8> = kp.to_bytes().to_vec();
-        std::fs::write(path, serde_json::to_string(&bytes)?).context("writing keypair")?;
-        Ok(kp)
+/// The `keypair` is eagerly loaded at bootstrap time. Task 4 may convert this
+/// to lazy access via a `SecretAccessor` if the startup cost proves material;
+/// for now eager caching is sufficient and simpler.
+pub struct Identity {
+    pub keypair: Keypair,
+    /// Base58-encoded public key, cached for cheap reads.
+    pub pubkey_base58: String,
+    /// RFC3339 timestamp from the stub file, or "now" on first creation.
+    pub created_at: String,
+    /// Where the secret is persisted.
+    pub storage: IdentityStorage,
+}
+
+impl std::fmt::Debug for Identity {
+    /// Secret-redacted Debug — never prints `keypair` bytes.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Identity")
+            .field("keypair", &"[redacted; 64]")
+            .field("pubkey_base58", &self.pubkey_base58)
+            .field("created_at", &self.created_at)
+            .field("storage", &self.storage)
+            .finish()
     }
 }
+
+/// Where the identity secret is persisted.
+#[derive(Debug)]
+pub enum IdentityStorage {
+    /// Secret lives in the OS keychain (macOS Keychain, Linux Secret Service,
+    /// Windows Credential Manager). The `identity.json` file holds only the
+    /// public key (stub shape).
+    OsKeychain,
+    /// Secret lives in `~/.mnemonic/identity.json` (legacy / file-fallback
+    /// shape). Used when no OS keychain is available.
+    File,
+}
+
+// ---------------------------------------------------------------------------
+// Crypto helpers — unchanged; existing mcp/ call-sites kept working.
+// ---------------------------------------------------------------------------
 
 /// Base58-encoded public key.
 pub fn pubkey_base58(kp: &Keypair) -> String {
@@ -90,16 +123,5 @@ mod tests {
         assert_eq!(sig.len(), 64);
         assert!(verify_signature(&kp.pubkey(), msg, &sig));
         assert!(!verify_signature(&kp.pubkey(), b"wrong", &sig));
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    #[test]
-    fn test_keypair_roundtrip() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("test_id.json");
-
-        let kp1 = load_or_create_keypair(&path).unwrap();
-        let kp2 = load_or_create_keypair(&path).unwrap();
-        assert_eq!(kp1.pubkey(), kp2.pubkey());
     }
 }

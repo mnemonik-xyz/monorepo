@@ -45,12 +45,18 @@
   },
   "dependencies": {
     "@mnemonik-xyz/sdk": "^0.1.5",
+    "@napi-rs/keyring": "^1.3.0",
+    "@noble/curves": "^1.4.0",
+    "bs58": "^6.0.0",
     "commander": "^14.0.3",
     "kleur": "^4.1.5",
-    "open": "^11.0.0"
+    "open": "^11.0.0",
+    "qrcode-terminal": "^0.12.0",
+    "tweetnacl": "^1.0.3"
   },
   "devDependencies": {
     "@types/node": "^20.12.0",
+    "@types/qrcode-terminal": "^0.12.2",
     "execa": "^9.6.1",
     "typescript": "^5.4.0",
     "vitest": "^1.6.0"

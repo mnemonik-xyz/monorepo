@@ -112,6 +112,10 @@ pub fn mock_state() -> Arc<McpState> {
     let llm_client =
         LlmClient::new("ollama", "", "test-model", "http://localhost:0", 512).expect("llm_client");
 
+    let bootstrap_server_x25519_secret =
+        crypto_box::SecretKey::generate(&mut crypto_box::aead::OsRng);
+    let bootstrap_server_x25519_public = bootstrap_server_x25519_secret.public_key();
+
     Arc::new(McpState {
         keypair: Keypair::new(),
         solana: SolanaClient::new("http://localhost:0"),
@@ -135,6 +139,8 @@ pub fn mock_state() -> Arc<McpState> {
         chat_limiter,
         pending: Arc::new(PendingBundles::with_defaults()),
         bootstrap_tickets: Arc::new(crate::api::BootstrapTickets::with_defaults()),
+        bootstrap_server_x25519_secret,
+        bootstrap_server_x25519_public,
     })
 }
 

@@ -14,7 +14,6 @@ pub struct Config {
     pub http_port: u16,
     pub solana_rpc_url: String,
     pub arweave_url: String,
-    pub keypair_path: PathBuf,
     pub database_path: PathBuf,
     /// "hash" (default, offline) or "openai" (requires OPENAI_API_KEY)
     pub embed_provider: String,
@@ -104,10 +103,6 @@ impl Config {
             http_port: env_or("MCP_HTTP_PORT", "3000").parse().unwrap_or(3000),
             solana_rpc_url: env_or("SOLANA_RPC_URL", "http://localhost:8899"),
             arweave_url: env_or("ARWEAVE_URL", "http://localhost:1984"),
-            keypair_path: expand_path(&env_or(
-                "MNEMONIC_KEYPAIR_PATH",
-                &format!("{}/.mnemonic/id.json", home),
-            )),
             database_path: expand_path(&env_or(
                 "DATABASE_PATH",
                 &format!("{}/.mnemonic/attestations.db", home),
