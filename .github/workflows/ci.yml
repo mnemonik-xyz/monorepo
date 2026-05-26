@@ -215,24 +215,6 @@ jobs:
     # Upgraded from ubuntu-22.04 → ubuntu-latest (24.04) because `wasm-pack`
     # caches in Swatinem rust-cache@v2 are now built against GLIBC 2.39.
     runs-on: ubuntu-latest
-    # Informational — not PR-gating. The cross-language byte-equality
-    # guarantee this job is meant to catch is already covered by two
-    # always-green mechanisms:
-    #   1. Golden byte-equality test (Rust + TS):
-    #      core/src/identity/keystore.rs::tests::
-    #         golden_json_bytes_cross_language_canonical
-    #      packages/cli/test/identity/keystore.test.ts:
-    #         'cross-language canonical golden'
-    #      Plus the 'golden COSE fixture lockstep' CI job.
-    #   2. T15 macOS smoke matrix step 6 — real-world Rust ↔ Node
-    #      roundtrip on Apple Keychain, signed off manually.
-    # This job's marginal coverage is Linux Secret Service interop,
-    # which is high-value but Ubuntu 24.04 gnome-keyring init is
-    # famously brittle in CI. Sub-test A passes (basic interop works);
-    # sub-test B has a state-coupling issue with the running daemon
-    # that needs deeper debugging. Tracked as backlog; not blocking
-    # merge.
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

@@ -356,31 +356,43 @@ fn handle_legacy(
     let os_available = os.map(|s| s.available().unwrap_or(false)).unwrap_or(false);
 
     if os_available {
-        // Path 3: migrate legacy file → OS keychain + stub.
+        // Path 3: migrate legacy file → OS keychain + stub. If the actual
+        // `set()` fails at the D-Bus / Secret Service boundary (the
+        // `os.available()` probe is lazy on Linux and can falsely succeed
+        // when the daemon allows query but not write), fall through to
+        // Path 4 instead of dying — preserves the existing legacy file
+        // and gives the user a working identity. Matches Decision 4
+        // ("file-fallback triggers on ANY keychain error").
         let os_store = os.expect("os_available true implies Some");
 
         let mut guard = KeychainRollback::new(os_store);
-        os_store
-            .set(&entry)
-            .context("migrating identity to OS keychain")?;
-        guard.arm();
+        match os_store.set(&entry) {
+            Ok(()) => {
+                guard.arm();
+                let stub = build_stub_json(&pubkey_base58, &created_at);
+                write_stub_file(identity_path, &stub)?;
+                guard.disarm();
 
-        // Rewrite file as stub.
-        let stub = build_stub_json(&pubkey_base58, &created_at);
-        write_stub_file(identity_path, &stub)?;
-        guard.disarm();
+                write_readme_once(readme_path)?;
+                maybe_log_line("mnemonic: legacy identity migrated to OS keychain");
 
-        // README: idempotent — won't overwrite if exists.
-        write_readme_once(readme_path)?;
-        maybe_log_line("mnemonic: legacy identity migrated to OS keychain");
+                return Ok(Identity {
+                    keypair,
+                    pubkey_base58,
+                    created_at,
+                    storage: IdentityStorage::OsKeychain,
+                });
+            }
+            Err(KeystoreError::PlatformUnavailable { .. }) => {
+                // Fall through to Path 4 (keep legacy file as-is).
+            }
+            Err(other) => {
+                return Err(other).context("migrating identity to OS keychain");
+            }
+        }
+    }
 
-        Ok(Identity {
-            keypair,
-            pubkey_base58,
-            created_at,
-            storage: IdentityStorage::OsKeychain,
-        })
-    } else {
+    {
         // Path 4: OS unavailable — keep legacy on file, return as-is.
         // Ensure the README exists (may be absent on very old installations).
         write_readme_once(readme_path)?;
