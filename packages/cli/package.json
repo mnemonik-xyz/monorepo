@@ -1,6 +1,6 @@
 {
   "name": "@mnemonik-xyz/cli",
-  "version": "0.1.7",
+  "version": "0.2.0",
   "description": "Command-line interface for the Mnemonic Protocol. Thin wrapper around @mnemonik-xyz/sdk that adds Node-only persistence (~/.mnemonic/), interactive OAuth loopback, and TTY-aware output formatting.",
   "license": "Apache-2.0",
   "//": "private: false — npm publish-ready (T14). Scoped package, public access set explicitly.",
@@ -44,7 +44,7 @@
     "prepublishOnly": "npm run build && npm test"
   },
   "dependencies": {
-    "@mnemonik-xyz/sdk": "^0.1.5",
+    "@mnemonik-xyz/sdk": "^0.2.0",
     "@napi-rs/keyring": "^1.3.0",
     "@noble/curves": "^1.4.0",
     "bs58": "^6.0.0",
