@@ -579,6 +579,25 @@ This MUST be resolved before merge — the data-loss path is reachable by ordina
 
 ---
 
+## 2026-05-27 — Merge-Blocker #2 closed (was already partly-fixed); case (c) integrity check landed; CI policy locked
+
+**Status:** T15 frontmatter merge-blockers list shrinks from 2 → 1. Only Merge-Blocker #1 (prod deploy lag) remains.
+
+**Correction to the 2026-05-25 entry framing:** Merge-Blocker #2 was originally written as "Decision 17 case (b) reachable data-loss path — code overwrites secret." Re-investigation in this session found that case (b) silent-rebuild was ALREADY implemented in HEAD by background commits `c1e68d5` (Rust, `core/src/identity/ensure.rs:127-202`) and `b0f99da` (Node, `packages/cli/src/identity/ensure.ts:240-280`) — the orphan-keychain → adopt-and-write-stub path returns `created: false` and does NOT call `keychain.set()`. The 2026-05-25 T15 restore disaster was caused by running `mnemonic whoami` against a stub that already existed (the stale `71cT...EmWb` from the earlier accidental write), not by case (b) being unimplemented. The original 2026-05-25 framing was a misread.
+
+**What was actually missing** was Decision 17 case (c) on the Node side: the integrity check that compares the keychain entry's stored `pubkey_base58` against the pubkey derived from the stored secret bytes, and throws loud on mismatch. Rust's `handle_create` did this; Node's `createIdentity` silently adopted the stored pubkey. Spec-violating asymmetry, but lower severity than the original "case (b) data-loss" framing — it requires a corrupted keychain entry (stored pubkey ≠ derived from secret) to trigger.
+
+**Resolution shipped today:**
+- **PR #152 (squashed as `6f36e47` on main):** `fix(cli): ensure() — implement Decision 17 case (c) integrity check`. Derives pubkey from secret seed (first 32 bytes) via `@noble/curves/ed25519` + `bs58`, throws with the exact Rust message `OS keychain entry integrity mismatch — stored pubkey X does not match secret-derived pubkey Y (Decision 17 case c)` on mismatch. Uses the derived pubkey as the source of truth when writing the stub. `fakeEntry()` in tests was rewritten to produce a deterministic real Ed25519 keypair so the existing case-(b) regression test still passes under the stricter check. New "Scenario 1c" test asserts throw + keychain-unchanged + no-stub-written.
+- **Same PR also contained:** `fix(ci): install wasm-pack in cross-lang-keychain job`. The `cross-lang-keychain` job had been silently failing on every PR/main run since the #151 merge (`735b8f1`) because `npm run build --workspace=@mnemonik-xyz/sdk` shells out to `build-wasm.sh` which requires `wasm-pack` on PATH — and the job's rust toolchain setup never installed it.
+- **PR #153 (open):** `chore(ci): split cross-lang-keychain into build (gate) + keychain (informational)`. Splits the conflated single job to stop the 4-commit yo-yo of `continue-on-error: true` toggles (`e5e9a83` → `7b60a3c` → `fde7f72` → `12a7ec9`, 2026-05-25 → 2026-05-26) that masked the wasm-pack regression. `cross-lang-build` is the hard required gate; `cross-lang-keychain (informational)` is permanently `continue-on-error: true` until the gnome-keyring sub-test-B daemon-coupling issue is fixed upstream. CLAUDE.md `## CI gate policy` section codifies the procedure for ever flipping the toggle (10 consecutive green runs + named root-cause commit + reviewer sign-off in a single PR).
+
+**Remaining merge blockers:** 1 — `mcp.mnemonik.xyz` production deploy lag (Task 12 endpoints still 404 in prod). Deploy script exists at `scripts/deploy/deploy-main-to-prod.sh` and is ready to run; SSH to `claude@150.251.147.215` required.
+
+**Cross-platform matrix progress:** Still 1 of 5 rows attempted. T15 acceptance criterion ("All 8 platform rows attempted") remains the dominant blocker for T15 sign-off independent of merge-blockers.
+
+---
+
 <!-- Task entries are appended below by agents as work completes.
 
 Format is strict — use only these sections, do not add others.
