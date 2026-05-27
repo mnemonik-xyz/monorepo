@@ -18,11 +18,46 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
+import { ed25519 } from "@noble/curves/ed25519";
+import bs58 from "bs58";
+
 import { Keypair } from "@mnemonik-xyz/sdk";
 
 import { OsKeyStore } from "./keystore-os.js";
 import { FileKeyStore } from "./keystore-file.js";
-import { KeystoreError, type KeyStore } from "./keystore.js";
+import {
+  KeystoreError,
+  type KeyStore,
+  type KeystoreEntry,
+} from "./keystore.js";
+
+/**
+ * Derive the base58-encoded Ed25519 pubkey from a 64-byte secret (seed +
+ * pubkey, matching `solana_sdk::signature::Keypair::to_bytes()`). Only the
+ * first 32 bytes (seed) are used for derivation — the trailing 32 bytes are
+ * the keypair's claimed pubkey and are NOT trusted by this function.
+ */
+function derivePubkeyBase58(secret: number[]): string {
+  const seed = Uint8Array.from(secret.slice(0, 32));
+  return bs58.encode(ed25519.getPublicKey(seed));
+}
+
+/**
+ * Decision 17 case (c): keychain entry integrity check. If the stored
+ * `pubkey_base58` is non-empty and does not derive from the stored secret
+ * bytes, the keychain entry is corrupted — fail loud rather than silently
+ * adopting the wrong pubkey. Mirrors the Rust `handle_create` integrity
+ * check in core/src/identity/ensure.rs. NEVER log secret bytes.
+ */
+function assertKeystoreEntryIntegrity(existing: KeystoreEntry): string {
+  const derived = derivePubkeyBase58(existing.secret);
+  if (existing.pubkey_base58 !== "" && existing.pubkey_base58 !== derived) {
+    throw new Error(
+      `OS keychain entry integrity mismatch — stored pubkey ${existing.pubkey_base58} does not match secret-derived pubkey ${derived} (Decision 17 case c)`,
+    );
+  }
+  return derived;
+}
 
 /**
  * Common helper: return `true` iff a thrown KeystoreError represents the
@@ -262,7 +297,11 @@ async function createIdentity(stores: KeyStores): Promise<EnsureResult> {
       const existing = await stores.os.get();
       osUsable = true;
       if (existing !== null) {
-        const recovered_pubkey = existing.pubkey_base58;
+        // Decision 17 case (c): integrity-check the entry before adopting.
+        // Throws loud Error on mismatch — caller surfaces to user, no silent
+        // pubkey divergence. Derived pubkey is the source of truth (matches
+        // Rust's `handle_create`).
+        const recovered_pubkey = assertKeystoreEntryIntegrity(existing);
         await doWriteStub(stores.identityPath, recovered_pubkey);
         // Silent rebuild per Decision 17 (b) — no `log(...)` call.
         return {

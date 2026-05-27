@@ -13,6 +13,9 @@ import fs from "node:fs/promises";
 import { randomBytes } from "node:crypto";
 import { describe, it, expect } from "vitest";
 
+import { ed25519 } from "@noble/curves/ed25519";
+import bs58 from "bs58";
+
 import {
   ensureWithStores,
   shouldSkipEnsure,
@@ -72,11 +75,21 @@ async function writeStubFile(
   await fs.writeFile(identityPath, content, { mode: 0o600 });
 }
 
-// A fake KeystoreEntry for tests that don't need a real WASM-generated key.
+// A deterministic-but-real Ed25519 KeystoreEntry for tests that don't need
+// the full WASM Keypair.generate() machinery. The 32-byte seed is a fixed
+// `i % 256` pattern so the derived pubkey is stable across runs; the
+// trailing 32 bytes hold the actual derived public key, matching the
+// `solana_sdk::signature::Keypair::to_bytes()` convention. Required by the
+// Decision 17 case (c) integrity check.
 function fakeEntry(): KeystoreEntry {
+  const seed = Uint8Array.from(Array.from({ length: 32 }, (_, i) => i % 256));
+  const pubkey = ed25519.getPublicKey(seed);
+  const secret = new Uint8Array(64);
+  secret.set(seed, 0);
+  secret.set(pubkey, 32);
   return {
-    secret: Array.from({ length: 64 }, (_, i) => i % 256),
-    pubkey_base58: "FakeBase58PubkeyForTestingPurposesOnly1234567890",
+    secret: Array.from(secret),
+    pubkey_base58: bs58.encode(pubkey),
   };
 }
 
@@ -160,6 +173,48 @@ describe("ensure recovers orphan keychain silently (Decision 17 case b)", () => 
     expect("keychain_ref" in parsed).toBe(true);
     expect("secret" in parsed).toBe(false);
     expect(parsed.pubkey_base58).toBe(original.pubkey_base58);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Scenario 1c — Decision 17 case (c): keychain entry exists but the stored
+// pubkey does not match the pubkey derived from the stored secret. Spec
+// contract: fail loud, do not silently adopt the wrong pubkey, do not
+// overwrite the keychain. Mirrors Rust's `handle_create` integrity check.
+// ---------------------------------------------------------------------------
+
+describe("ensure rejects corrupted keychain entry (Decision 17 case c)", () => {
+  it("throws integrity-mismatch error when stored pubkey diverges from secret", async () => {
+    const dir = tmpDir();
+    const osStore = new MemoryKeyStore();
+    // Build an entry whose stored pubkey deliberately disagrees with the
+    // pubkey derivable from the secret. The secret remains a valid Ed25519
+    // 64-byte blob — only the `pubkey_base58` field is wrong.
+    const good = fakeEntry();
+    const corrupted: KeystoreEntry = {
+      secret: good.secret,
+      pubkey_base58: "WrongStoredPubkey1111111111111111111111111111",
+    };
+    await osStore.set(corrupted);
+
+    const stores = await makeStores(dir, osStore);
+
+    await expect(ensureWithStores(stores)).rejects.toThrow(
+      /OS keychain entry integrity mismatch/,
+    );
+
+    // Keychain must NOT have been mutated by the failed adoption attempt.
+    const after = await osStore.get();
+    expect(after).not.toBeNull();
+    expect(after!.pubkey_base58).toBe(corrupted.pubkey_base58);
+    expect(after!.secret).toEqual(corrupted.secret);
+
+    // No stub file should have been written.
+    const stubExists = await fs
+      .access(stores.identityPath)
+      .then(() => true)
+      .catch(() => false);
+    expect(stubExists).toBe(false);
   });
 });
 

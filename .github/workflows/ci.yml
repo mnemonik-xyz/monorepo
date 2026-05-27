@@ -240,6 +240,11 @@ jobs:
         run: |
           cargo build -p mnemonic-mcp
           cargo build -p mnemonic-core --example keychain-roundtrip
+      - name: Install wasm-pack
+        # SDK `npm run build` shells out to packages/sdk/scripts/build-wasm.sh
+        # which requires wasm-pack on PATH. Version pinned to match
+        # release.yml and node-test.yml — keep all three in sync.
+        run: cargo install wasm-pack --locked --version 0.14.0 || true
       - name: Build Node CLI (sdk first — cli imports from it)
         run: |
           npm install --workspaces --include-workspace-root --no-audit --no-fund
