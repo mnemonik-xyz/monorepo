@@ -222,10 +222,11 @@ jobs:
   #      daemon-coupling issue on Ubuntu 24.04 (see fde7f72 commit
   #      message) that survived 5 rounds of debugging.
   #
-  # Mixing them led to a 3-month yo-yo of `continue-on-error: true` being
-  # toggled on/off, masking real build regressions (e.g. wasm-pack going
-  # missing in the runner — undetected for the entire #151 merge because
-  # the gate was off). Now split:
+  # Mixing them led to a two-day yo-yo of `continue-on-error: true` being
+  # toggled on/off (4 commits across 2026-05-25 → 2026-05-26: e5e9a83 →
+  # 7b60a3c → fde7f72 → 12a7ec9), masking real build regressions (e.g.
+  # wasm-pack going missing in the runner — undetected for the entire
+  # #151 merge because the gate was off). Now split:
   #   - `cross-lang-build`     → hard required gate. Never continue-on-error.
   #   - `cross-lang-keychain`  → informational. PERMANENTLY continue-on-error
   #                              until the daemon-coupling issue is fixed
