@@ -6,6 +6,10 @@
 // through `handleError` which maps typed CLI errors to documented exit codes
 // (Decision 10): 0=ok, 1=user, 2=server, 3=integrity, 4=auth.
 
+import { readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+
 import { Command } from "commander";
 
 import { runInit } from "../src/commands/init.js";
@@ -30,6 +34,38 @@ import type { OutputOptions } from "../src/output.js";
 // module don't break.
 export { shouldSkipEnsure };
 
+/**
+ * Read the CLI version from this package's package.json at runtime.
+ *
+ * Walks up from `import.meta.url` looking for a package.json whose `name`
+ * field matches `@mnemonik-xyz/cli`. Has to walk because the relative
+ * distance differs between the compiled binary (`dist/bin/mnemonic.js`,
+ * two levels up) and the source under test (`bin/mnemonic.ts`, one level
+ * up). Hardcoding a fixed depth was the original sin — replaced with a
+ * resolution strategy that works in both layouts.
+ */
+function readPkgVersion(): string {
+  let dir = dirname(fileURLToPath(import.meta.url));
+  for (let i = 0; i < 5; i++) {
+    const candidate = resolve(dir, "package.json");
+    try {
+      const pkg = JSON.parse(readFileSync(candidate, "utf8")) as {
+        name?: string;
+        version?: string;
+      };
+      if (pkg.name === "@mnemonik-xyz/cli" && typeof pkg.version === "string") {
+        return pkg.version;
+      }
+    } catch {
+      // package.json absent at this level — keep walking up.
+    }
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return "unknown";
+}
+
 interface RootFlags {
   json?: boolean;
   quiet?: boolean;
@@ -52,11 +88,7 @@ export function buildProgram(): Command {
   program
     .name("mnemonic")
     .description("Mnemonic Protocol CLI — verifiable persistent memory")
-    // TODO: read from package.json at build/runtime so we don't have
-    // to hand-bump on every release. Hardcoded for 0.1.7 — the
-    // browserless-OAuth fix (#27); 0.1.6 was tagged but never published
-    // to npm, so we skip to 0.1.7 to keep tag history monotonic.
-    .version("0.1.7")
+    .version(readPkgVersion())
     .option("--json", "machine-readable JSON output")
     .option("--quiet", "suppress non-essential output")
     .option("--no-color", "disable ANSI color")

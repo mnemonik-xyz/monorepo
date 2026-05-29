@@ -29,7 +29,7 @@ describe("buildProgram", () => {
         "whoami",
         "prove",
         "identity",
-      ])
+      ]),
     );
   });
 
@@ -43,7 +43,7 @@ describe("buildProgram", () => {
     expect(sub).toEqual(expect.arrayContaining(["import", "export"]));
   });
 
-  it("--version prints the package version", () => {
+  it("--version prints the package version", async () => {
     let captured = "";
     vi.spyOn(process.stdout, "write").mockImplementation((c: unknown) => {
       captured += String(c);
@@ -52,7 +52,19 @@ describe("buildProgram", () => {
     const p = buildProgram();
     p.exitOverride(); // throw instead of process.exit on --version
     expect(() => p.parse(["node", "mnemonic", "--version"])).toThrow();
-    expect(captured).toContain("0.1.7");
+
+    // The CLI reads its version from package.json at runtime now (was
+    // hardcoded; see the readPkgVersion docstring in bin/mnemonic.ts).
+    // Compare against package.json directly so this test never drifts on
+    // future bumps.
+    const fs = await import("node:fs");
+    const path = await import("node:path");
+    const { fileURLToPath } = await import("node:url");
+    const here = path.dirname(fileURLToPath(import.meta.url));
+    const pkgJson = JSON.parse(
+      fs.readFileSync(path.resolve(here, "..", "package.json"), "utf8"),
+    ) as { version: string };
+    expect(captured.trim()).toBe(pkgJson.version);
   });
 
   it("recognises top-level flags --json / --quiet / --no-color", () => {
