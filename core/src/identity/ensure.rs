@@ -19,6 +19,7 @@ use chrono::Utc;
 use serde_json::Value;
 use solana_sdk::signature::{Keypair, Signer};
 use tempfile::NamedTempFile;
+use tracing::warn;
 
 use crate::identity::keystore::{KeyStore, KeystoreEntry, KeystoreError};
 use crate::identity::{Identity, IdentityStorage};
@@ -164,7 +165,26 @@ fn handle_create(
                 slot
             }
             Err(KeystoreError::PlatformUnavailable { .. }) => None,
-            Err(other) => return Err(other).context("probing OS keychain for orphan entry"),
+            Err(other) => {
+                // The orphan-probe is exploratory, not authoritative — we are
+                // asking "does an entry happen to exist?" before deciding what
+                // to do. If the backend errors for any reason (D-Bus session
+                // missing on headless Linux, gnome-keyring daemon dead,
+                // permissions blip, etc.) the safe answer is "no orphan
+                // found, fall through to file-fallback creation." A hard
+                // error here would crash startup on every headless host that
+                // links the `keyring` crate but lacks a working Secret
+                // Service daemon. The keystore_os::get path only translates
+                // keyring::Error::NoStorageAccess to PlatformUnavailable;
+                // every other variant (notably PlatformFailure for missing
+                // D-Bus session bus) becomes Backend, which is what trips
+                // this branch in production. Treat as unavailable and log.
+                warn!(
+                    target: "mnemonic_core::identity::ensure",
+                    "OS keychain orphan-probe errored: {other} — falling through to file fallback"
+                );
+                None
+            }
         };
         if let Some(existing) = existing {
             let keypair = Keypair::try_from(&existing.secret[..]).map_err(|e| {
@@ -888,6 +908,76 @@ mod tests {
                 & 0o777;
             assert_eq!(mode, 0o600, "file mode must be 0600");
         }
+    }
+
+    // ---------------------------------------------------------------------------
+    // Test: orphan-probe error during create path falls through to file
+    // fallback instead of crashing startup. Regression for the headless-Linux
+    // production crash where keyring::Entry::get_password returns
+    // PlatformFailure (D-Bus session bus absent) which keystore_os maps to
+    // KeystoreError::Backend, not PlatformUnavailable. Before the fix, the
+    // handle_create probe arm panicked the binary; now it logs a warning and
+    // proceeds with file-fallback creation.
+    // ---------------------------------------------------------------------------
+    #[test]
+    fn ensure_tolerates_backend_error_during_orphan_probe() {
+        use crate::identity::keystore_file::FileKeyStore;
+
+        // KeyStore that reports `available() == Ok(true)` (the keychain
+        // backend constructs fine) but `get()` returns a Backend error
+        // (simulating headless-Linux where the daemon is unreachable but the
+        // crate didn't translate that to NoStorageAccess).
+        struct FailingProbeKeyStore;
+        impl KeyStore for FailingProbeKeyStore {
+            fn get(&self) -> Result<Option<KeystoreEntry>, KeystoreError> {
+                Err(KeystoreError::Backend(anyhow::anyhow!(
+                    "simulated headless-Linux D-Bus session absent"
+                )))
+            }
+            fn set(&self, _entry: &KeystoreEntry) -> Result<(), KeystoreError> {
+                Err(KeystoreError::PlatformUnavailable {
+                    reason: "set unreachable in this test path".to_string(),
+                })
+            }
+            fn remove(&self) -> Result<(), KeystoreError> {
+                Ok(())
+            }
+            fn available(&self) -> Result<bool, KeystoreError> {
+                Ok(true)
+            }
+            fn name(&self) -> &'static str {
+                "failing-probe-mock"
+            }
+        }
+
+        let dir = TempDir::new().unwrap();
+        let identity_path = dir.path().join("identity.json");
+        let readme_path = dir.path().join("README.txt");
+
+        let stores = KeyStores {
+            os: Some(Box::new(FailingProbeKeyStore)),
+            file: Box::new(FileKeyStore::new(identity_path.clone())),
+            identity_path: identity_path.clone(),
+            readme_path,
+        };
+
+        let id = ensure_with_stores(stores)
+            .expect("ensure must NOT crash on a Backend error during the orphan probe");
+
+        // Must have fallen through to file-fallback creation.
+        assert!(
+            matches!(id.storage, IdentityStorage::File),
+            "expected file fallback when OS probe errors, got {:?}",
+            id.storage
+        );
+
+        // Legacy-format file (with secret) should be on disk.
+        let written: Value =
+            serde_json::from_slice(&std::fs::read(&identity_path).unwrap()).unwrap();
+        assert!(
+            written.get("secret").is_some(),
+            "file-fallback path must write legacy format with secret"
+        );
     }
 
     // ---------------------------------------------------------------------------
