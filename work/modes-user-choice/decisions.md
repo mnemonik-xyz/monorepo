@@ -10,13 +10,22 @@ Append-only log of decisions and audit findings.
 - **Retraction** — *permanent / immutable*. Once participated, the anchor is
   immutable; no un-share / tombstone in V1. Matches append-only design.
 
-**PENDING RESEARCH (blocks finalizing participate semantics):**
-- **What "participate" means** — broadcast-to-pool vs directed point-to-point
-  exchange. User: "no answer yet, need deeper research on what is really on
-  demand by multi-agent trustless development." → deep-research launched.
-- **Delivery-guarantee definition** — which failure to protect against
-  (durability / retrievability / proof-of-delivery). User: "need proper
-  decision on this." → fold into same research, then re-present for sign-off.
+**RESEARCH-BACKED RECOMMENDATIONS (deep-research 2026-06-01, see research.md —
+awaiting final user sign-off):**
+- **What "participate" means → broadcast-publish a verifiable public record**, not
+  recipient-ACK handoff. Evidence: cross-operator exchange is dominated by
+  *directed* message-passing that explicitly shares no memory (A2A "Opaque
+  Execution"); the only *broadcast* pattern shipping is ERC-8004's public
+  attestation/reputation registry — which is Mnemonic-shaped. Verifiable
+  cross-operator *shared memory* is still aspirational, so V1 doesn't bet on it.
+  Directed exchange deferred to the A2A bridge.
+- **Delivery-guarantee → D1: durable write + read-back + re-verify.** Cheapest
+  guarantee meaningfully stronger than a receipt; needs no online counterparty;
+  fills the exact gap ERC-8004/IPFS leave open (hash committed, availability NOT
+  guaranteed). Recipient-ACK (D2) is the gold standard but needs an online
+  counterparty → deferred. Receipt schema forward-shaped for D2.
+- **Mnemonic wedge identified:** "ERC-8004 proves a hash; Mnemonic proves the
+  bytes are actually retrievable."
 
 ## Open decisions (awaiting user sign-off before Wave 1)
 

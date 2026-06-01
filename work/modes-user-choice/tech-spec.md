@@ -149,12 +149,31 @@ migration, while S2 reintroduces the split the user is trying to remove. Retirin
 `work/.../decisions.md`), not an accident. If the user prefers the conservative
 path, S2 is the fallback.
 
+## Research outcome (deep-research 2026-06-01 — see research.md)
+
+The two semantic questions the user flagged for research now have evidence-backed
+recommendations, both pulling the same way:
+
+- **"Participate" = broadcast-publish a verifiable public record** (ERC-8004
+  reputation/validation analog — the one broadcast pattern actually shipping in
+  trustless agent infra), **not** recipient-ACK handoff. Cross-operator *exchange*
+  is dominated by directed message-passing that shares no memory (A2A "Opaque
+  Execution"); verifiable cross-operator *shared memory* is still aspirational.
+  ⇒ V1 `participate` = "anchor durably + make discoverable/verifiable by anyone."
+  Directed exchange (recipient ACK) deferred to the A2A bridge.
+- **Delivery guarantee = D1** confirmed. ERC-8004 commits hash+URI but explicitly
+  does **not** guarantee the off-chain content is retrievable — that gap is
+  Mnemonic's wedge, and D1's read-back is the cheap proof that fills it:
+  *"ERC-8004 proves a hash; Mnemonic proves the bytes are actually retrievable."*
+
 ## Open decisions (need user sign-off before Wave 1)
 
 1. **Storage invariant:** S1 (tag rows, recommended) vs S2 (separate DBs).
-2. **Delivery definition for V1:** D1 (durable-anchor + read-back, recommended)
-   vs starting straight at D2 (recipient ack).
-3. **Mode granularity:** per-request field on `sign_memory` (recommended) vs
+2. **Delivery definition for V1:** **D1** (durable-anchor + read-back) —
+   research-confirmed; recipient-ACK (D2) deferred (needs online counterparty).
+3. **Participate semantics:** **broadcast-publish** (research-recommended) vs
+   directed handoff. V1 = broadcast; directed via A2A bridge later.
+4. **Mode granularity:** per-request field on `sign_memory` (recommended) vs
    per-identity default persisted server-side vs both.
 
 ## Tasks / waves (provisional — finalized after open decisions)
