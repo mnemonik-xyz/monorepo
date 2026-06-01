@@ -349,12 +349,20 @@ Feature size **L** → unit + integration + targeted E2E.
   `solana-test-validator` harness:
   - happy path: anchor → recall+verify succeeds → row `participate`,
     `delivery_receipt` returned, `attestation_costs` row written.
-  - induced failure: single-server `httpmock` returning *corrupted* GET
-    bytes on the Arweave re-fetch (pattern in
+  - induced failure (`PAYMENT_MODE=balance`): single-server `httpmock`
+    returning *corrupted* GET bytes on the Arweave re-fetch (pattern in
     `core/src/arweave/mod.rs::new_for_test`); row demoted to `local`, no
     `attestation_costs` row, JSON-RPC `-32011 DeliveryNotConfirmed`, **and**
     the caller's balance returns to pre-call value (refund-release assertion,
     not just absence of cost row).
+  - induced failure (`PAYMENT_MODE=x402`): same demotion path, plus assert
+    the x402 nonce is **not** marked consumed in `x402_nonces` — the caller
+    can retry with the same payment. Closes the x402 corner the
+    balance-only assertion leaves open.
+  - DoS guard: simulate N repeated demotions for one owner → the
+    (N+1)-th `participate` call returns `-32011 DeliveryQuotaExceeded`
+    before any Arweave or Solana call (asserted by *absence* of mocked
+    Arweave/Solana invocations in that call).
 - `mcp/tests/verify_by_stored_mode.rs` (new) — explicit scenarios for T4:
   - row stored with `write_mode='local'` → `verify` routes through
     `verify_local` regardless of `STORAGE_MODE` env-var.
@@ -430,23 +438,49 @@ the mode-absent response envelope against future drift.
 
 ### Wave 3 — Delivery guarantee (mcp/)
 
-**T3: Recall+verify round-trip on participate; demote-to-local on failure; no charge on failure**
+**T3: Recall+verify round-trip on participate; demote-to-local on failure; no charge on failure; DoS guard**
 - Description: Wrap the participate branch of `sign_memory_inline` in a
   delivery-confirmation step: after `solana.write_memo` returns, re-fetch
-  the COSE bytes from Arweave and run `verify_cose` plus an in-process
-  `recall` against the fresh `content_hash`. On both-succeed: persist with
+  the COSE bytes from Arweave (with exponential backoff up to the
+  `MNEMONIC_DELIVERY_REFETCH_TIMEOUT_SECS` wall-clock budget, default
+  `15`) and run `verify_cose` plus an in-process `recall` against the
+  fresh `content_hash`. On both-succeed: persist with
   `write_mode='participate'`, call `record_attestation_cost`, return
   `delivery_receipt`. On any failure: persist with `write_mode='local'`,
   skip `record_attestation_cost`, call `payment::refund_balance` with a
   reason that includes the demoted `attestation_id`, return JSON-RPC
-  `-32011 DeliveryNotConfirmed`. Refund-itself failure writes a structured
-  audit row (new table `payment_refund_failures` or reuse
-  `payment_events` with a typed event kind — pick at impl time, document
-  in PR). Critical-section discipline: no `.await` while the SQLite mutex
-  is held — two short scoped locks (one for the post-anchor persist, one
-  for the demote+refund path). Add a small exponential-backoff retry
-  (max 2 attempts, 200ms / 800ms) on the Arweave re-fetch to absorb the
-  documented eventual-consistency window before declaring failure.
+  `-32011 DeliveryNotConfirmed`. Critical-section discipline: no `.await`
+  while the SQLite mutex is held — two short scoped locks (one for the
+  post-anchor persist, one for the demote+refund path).
+  **Outcome-based DoS guard:** a small in-memory `RefundsBySubject`
+  (e.g. `DashMap<owner_pubkey, SlidingWindowCounter>`, 60-second window)
+  is incremented in the refund branch and consulted at the *entry* of the
+  participate path (BEFORE Arweave/Solana writes). If the caller exceeds
+  the configurable threshold (default 5/60s) the request short-circuits
+  to `-32011` with `data.kind: "DeliveryQuotaExceeded"`, spending zero
+  chain fees. Refund-itself failure extends the existing `payment_events`
+  table with a new typed `event_kind = 'refund_failed'` row carrying ONLY
+  `{api_key, attestation_id, reason, occurred_at}` — no payload bytes,
+  no `content_preview`, no embedding (PII allow-list pinned in the
+  spec to avoid impl-time drift).
+- Skill: `code-writing`
+- Reviewers: `code-reviewer`, `test-reviewer`, `security-auditor`
+- Verify-smoke: `cargo test -p mnemonic-mcp delivery_guarantee::happy_path`
+  passes; `cargo test -p mnemonic-mcp delivery_guarantee::demotion_on_fetch_failure`
+  passes with corrupted `httpmock` GET on the Arweave re-fetch;
+  `cargo test -p mnemonic-mcp delivery_guarantee::quota_exceeded` passes
+  (induced repeated demotions for one owner → 6th call short-circuits).
+- Files to modify: `mcp/src/tools.rs` (sign_memory_inline participate branch,
+  refetch helper), `mcp/src/payment.rs` (refund-reason wiring;
+  `RefundsBySubject` counter; `payment_events` `event_kind` extension),
+  `mcp/src/mcp.rs` (entry-point consultation of the quota counter),
+  `mcp/src/config.rs` (new env var).
+- Files to read: `mcp/src/tools.rs` (`sign_memory_inline` participate branch
+  at the Arweave+Solana write block, plus `verify_cose` helper for
+  reference), `mcp/src/payment.rs` (`refund_balance`, `payment_events`
+  schema), `mcp/src/mcp.rs` (refund call site on tool-execution error,
+  paywall entry), `core/src/arweave/mod.rs` (`new_for_test` httpmock
+  pattern), T2 output.
 - Skill: `code-writing`
 - Reviewers: `code-reviewer`, `test-reviewer`, `security-auditor`
 - Verify-smoke: `cargo test -p mnemonic-mcp delivery_guarantee::happy_path`
@@ -616,15 +650,29 @@ this feature — it travels with the next general MCP-server release.
 - **DoS amplification via induced delivery failure.** Without mitigation a
   caller could trigger participate writes that always fail at re-fetch,
   bleeding operator margin (the operator already paid Arweave + Solana
-  fees) while being fully refunded. Mitigation: (i) exponential-backoff
-  retry on the Arweave re-fetch in T3 (max 2 attempts, 200ms/800ms — most
-  failures resolve within Arweave's eventual-consistency window); (ii) a
-  rate-limit on `DeliveryNotConfirmed` outcomes per `owner_pubkey` via
-  `tower_governor` (rolling window, e.g. 5/min) — if exceeded the next
-  `participate` call returns `-32011` *without* spending operator
-  fees; (iii) a Prometheus metric
-  `mnemonic_delivery_not_confirmed_total{owner_pubkey, stage}` so operators
-  detect attack patterns. Decision call-out in T3.
+  fees) while being fully refunded. Mitigation:
+  (i) **Wall-clock retry budget** on the Arweave re-fetch in T3 — default
+  `MNEMONIC_DELIVERY_REFETCH_TIMEOUT_SECS=15` (configurable per operator),
+  retried with exponential backoff up to the budget. Sized against
+  Arweave's documented eventual-consistency window (seconds to low tens of
+  seconds), not a fixed two-attempt cap. Inside the budget the request
+  blocks; on budget exhaustion the row is demoted and the refund fires.
+  (ii) **Outcome-based per-owner counter consulted at participate entry**
+  — a small in-memory `RefundsBySubject` (e.g. `dashmap` with a sliding
+  window; reset by TTL) is incremented in the refund branch of T3 and
+  *read* at the top of the participate path in `mcp_handler` **before**
+  any chain write. If a caller exceeds the threshold (e.g. 5 demotions in
+  60 s) the next `participate` request short-circuits to `-32011` with a
+  `DeliveryQuotaExceeded` data kind, **without** spending Arweave/Solana
+  fees. `tower_governor` is *not* used for this because it rate-limits
+  requests, not outcomes. The new counter lives in `mcp/src/payment.rs`
+  next to the existing payment state.
+  (iii) **Metrics** — Prometheus counters
+  `mnemonic_delivery_not_confirmed_total{stage}` (label set:
+  `stage ∈ {refetch, verify, recall}`; **no `owner_pubkey` label** —
+  high-cardinality anti-pattern). Per-tenant detail goes to structured
+  log lines (`tracing::warn!(owner_pubkey=…, stage=…)`) for ops
+  investigation without TSDB blow-up. Decision call-out in T3.
 - **`.await` discipline.** T3 inserts new awaits (Arweave re-fetch,
   `verify_cose`, `recall`) into the existing scoped-lock block. Mitigation:
   per Decision 8, two short critical sections — neither holds the SQLite
