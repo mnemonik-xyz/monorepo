@@ -1,6 +1,6 @@
 ---
 created: 2026-06-01
-status: draft
+status: approved  # all decisions finalized 2026-06-01; tasks ready (Wave 1)
 branch: claude/modes-user-choice-Qkk6X
 size: L
 related:
@@ -82,12 +82,12 @@ memory is free" a structural property of the code path, not an operator setting.
 **delivery receipt**. Detailed options below; the receipt is persisted on the
 attestation row and surfaced in `verify`.
 
-### 4. Storage invariant — DECISION DEFERRED to §Open decisions
+### 4. Storage invariant — DECIDED: S1 (one DB, rows tagged by `write_mode`)
 
-Whether `local` and `participate` artifacts share one SQLite (tagged by a
-`write_mode` column) or live in separate stores is the load-bearing open
-decision. Both are sketched below with a recommendation; final call is the
-user's per user-spec.
+`local` and `participate` artifacts share **one** SQLite, tagged by a `write_mode`
+column; recall spans both. This consciously retires CLAUDE.md's "Never mix in one
+DB" (update in the same PR). The S1-vs-S2 analysis that led here is kept below as
+rationale; the decision is final (see §FINALIZED + decisions.md).
 
 ## Delivery guarantee — options (the heart of "participate")
 
@@ -142,7 +142,7 @@ Note: V1 anchors **plaintext** signed bytes (public publish) — `verify` works 
 anyone with the tx id, no decryption key. Encrypted-share is explicitly out of
 scope (see decisions.md #3).
 
-## Storage invariant — options for "Never mix in one DB"
+## Storage invariant — options for "Never mix in one DB" (DECIDED: S1; kept as rationale)
 
 - **Option S1 — Tag rows in one DB (recommended).** Add `write_mode TEXT NOT
   NULL DEFAULT 'local'` (and the `delivery_receipt` columns) to the attestations
@@ -162,8 +162,8 @@ scope (see decisions.md #3).
 coexist for one user and recall to see both; S1 delivers that with a single
 migration, while S2 reintroduces the split the user is trying to remove. Retiring
 "Never mix in one DB" is then a *conscious* spec change (update CLAUDE.md ## and
-`work/.../decisions.md`), not an accident. If the user prefers the conservative
-path, S2 is the fallback.
+`work/.../decisions.md`), not an accident. **S1 is the finalized decision** (user
+sign-off 2026-06-01); S2 is recorded only as the rejected conservative alternative.
 
 ## Research outcome (deep-research 2026-06-01 — see research.md)
 
@@ -195,7 +195,39 @@ recommendations, both pulling the same way:
 4. **Mode granularity → per-request `mode` field** on `sign_memory` (default `local`).
 5. **Payment → per shared artifact**; local always free. **Retraction → immutable.**
 
-## Tasks / waves (provisional — finalized after open decisions)
+## Local storage substrate & surfaces (DECIDED — scoped reference, separate build)
+
+The `local` mode must fit **all four surfaces** — CLI, Node-SDK, IDE-hosted agents,
+browser extension. These decisions are **finalized** (see decisions.md §"Local
+storage substrate", §"Browser store — revised after PAM", §"Bridge mechanism") but
+their *implementation* is a **separate build effort, not one of this feature's 8
+server-side tasks** — recorded here so the topology is part of the spec.
+
+- **Native surfaces = SQLite, shared canonical DB.** CLI, IDE agents (via the local
+  `mnemonic-mcp`), and the Node-SDK all share the server-owned
+  `~/.mnemonic/attestations.db` (`rusqlite`, concrete `SqliteStore`, no
+  `AttestationStore` trait). Storage analogue of one-keypair-everywhere.
+- **Browser = "bridge, else local".** When a local `mnemonic-mcp` is reachable the
+  extension uses the **same canonical DB** (real-time, unified). When not, it falls
+  back to a **`chrome.storage.local` signed-artifact buffer** — **not** SQLite-WASM,
+  **not** an in-browser embedder (offline recall needs an offline embedder, which we
+  don't ship; PAM-informed). Offline = list/read buffered artifacts; no semantic
+  recall until a bridge returns and the server ingests the buffer.
+- **Browser integrity is first-class.** The extension runs **blake3-wasm +
+  Ed25519-wasm**, so buffered artifacts are content-addressed and COSE-signed
+  identically to native/SDK artifacts (we deliberately do *not* copy PAM's degraded
+  SHA-256/unsigned browser tier).
+- **Bridge mechanism = Chrome native messaging.** One-time, **per-user, no-admin**
+  install (a `mnemonic install-bridge` drops a host manifest in the per-user dir /
+  `HKCU`); thereafter Chrome auto-spawns the binary on demand — the user never runs
+  a daemon by hand. `localhost` HTTP is a power-user alternative; policy-locked
+  machines degrade gracefully to the offline buffer.
+- **Convergence = the protocol's job.** The offline split-brain window heals via
+  shared Ed25519 identity + `participate`/anchor + the server ingesting the buffer
+  on bridge-return — i.e. the same `local → participate` path this feature builds,
+  no bespoke local file merge.
+
+## Tasks / waves (FINALIZED — server-side scope only)
 
 - **Wave 1 — types + config envelope.** `WriteMode` enum in `core`; reinterpret
   config (`allow_participate`, keep `payment_mode` as participate-payment policy);

@@ -11,7 +11,7 @@ Append-only log of decisions and audit findings.
   immutable; no un-share / tombstone in V1. Matches append-only design.
 
 **RESEARCH-BACKED RECOMMENDATIONS (deep-research 2026-06-01, see research.md —
-awaiting final user sign-off):**
+✅ SIGNED OFF, now items #2/#3 in FINALIZED below):**
 - **What "participate" means → broadcast-publish a verifiable public record**, not
   recipient-ACK handoff. Evidence: cross-operator exchange is dominated by
   *directed* message-passing that explicitly shares no memory (A2A "Opaque
@@ -27,7 +27,7 @@ awaiting final user sign-off):**
 - **Mnemonic wedge identified:** "ERC-8004 proves a hash; Mnemonic proves the
   bytes are actually retrievable."
 
-## Open decisions (awaiting user sign-off before Wave 1)
+## Open decisions — ✅ ALL RESOLVED (see FINALIZED below)
 
 — all resolved, see FINALIZED below.
 
@@ -65,27 +65,27 @@ and IDE-hosted agents. Decided:
   `~/.mnemonic/attestations.db` and CLI + IDE agents + Node-SDK **share it** —
   the storage analogue of invisible-identity's one-keypair-everywhere.
 - **Browser reach = "bridge, else local"** (user pick). The extension connects to
-  a running local `mnemonic-mcp` (native-messaging host / `localhost`) when
-  reachable and shares the **same canonical `~/.mnemonic/attestations.db`** — fully
-  unified, real-time, no copies. When the bridge is unreachable (no host
-  installed / locked-down browser), it falls back to its **own OPFS-backed
-  SQLite-WASM node** (`@sqlite.org/sqlite-wasm` / `wa-sqlite`), **not `sql.js`**.
-  Rationale for OPFS over `sql.js`: `sql.js` holds the whole DB in memory and only
-  persists on a manual `Uint8Array` export — a crash before export loses writes,
-  the exact local-loss risk this protocol exists to prevent; OPFS-backed SQLite is
-  durable per-transaction. (`sql.js` only as a fallback where OPFS is absent.)
+  a running local `mnemonic-mcp` when reachable and shares the **same canonical
+  `~/.mnemonic/attestations.db`** — fully unified, real-time, no copies. When the
+  bridge is unreachable (no host installed / locked-down browser), it falls back to
+  its own browser-local store. ⚠️ *The offline-store specifics first written here
+  (OPFS-backed SQLite-WASM) were **SUPERSEDED** — see §"Browser store — revised
+  after PAM reference" below: the offline store is a `chrome.storage.local`
+  signed-artifact buffer, no SQLite-WASM.*
 - **Accepted cost = a transient split-brain window.** A browser write made while
-  the bridge is down lives only in the OPFS node until it converges — and
+  the bridge is down lives only in the browser-local store until it converges — and
   convergence is the **protocol's** job (shared Ed25519 identity +
   `participate`/anchor + `recall`, i.e. the `local → participate` path this
   feature builds), **not** an automatic local file merge. No new machinery — just
   the divergence window. Chosen over "bridge-only" (which avoids split-brain by
   refusing to work offline) to never strand the user.
-- **Backend shape = SQLite everywhere, no abstraction** (user pick "SQLite
-  everywhere"). Keep the concrete `SqliteStore` — no `AttestationStore` trait.
-  `rusqlite` natively, OPFS-WASM SQLite in the browser, one schema. The browser
-  store is net-new TS outside `core/` (native-only by rule) and is a **separate
-  build effort**, not a task in this server-side feature. Recorded so it isn't lost.
+- **Backend shape = SQLite everywhere on native, no abstraction** (user pick
+  "SQLite everywhere"). Keep the concrete `SqliteStore` — no `AttestationStore`
+  trait. `rusqlite` on every native/server surface, one schema. ⚠️ *The browser
+  half ("OPFS-WASM SQLite in the browser") was **SUPERSEDED** by the PAM revision
+  below — the browser is **not** SQLite, it is a `chrome.storage.local` artifact
+  buffer.* The browser store is net-new TS outside `core/` (native-only by rule)
+  and is a **separate build effort**, not a task in this server-side feature.
 
 **Clarification that reframed the guarantee (user, 2026-06-01):** anchored-on-
 Arweave = "mission done" — the risk surface is *local-only* artifacts. `participate`'s
