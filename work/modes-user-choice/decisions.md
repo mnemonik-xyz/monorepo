@@ -104,3 +104,44 @@ encryption would have been net-new.
   **guarantee delivery**; purely-local artifacts are risky to share because they
   may be unreachable when a peer asks. This is the paid service-layer path.
 - Mode must be the **user's** choice driven by intent, not an operator env var.
+
+## Browser store — revised after PAM reference (2026-06-01, user)
+
+**Supersedes the OPFS-SQLite browser node** in §"Local storage substrate" above
+(commit `9fc81d2`). Trigger: the user shared how Portable Agent Memory (PAM)
+stores data — no DB at all; a memory is a single signed JSON `.pam` artifact
+(five components: episodic/semantic/procedural/working/identity + integrity), and
+the MV3 extension persists the whole artifact under one `chrome.storage.local`
+key (`pam_artifact`), service-worker single-owner. Two things PAM forced:
+
+- **Browser offline = write-only buffer, NOT a local query node** (user pick,
+  reasoned: *"is it ok to go with write-only buffer?"* — yes). Decisive reason:
+  recall must **embed the query**, which needs an embedder running offline. Without
+  bundling the ~22 MB fastembed ONNX model into the extension (OpenAI is
+  unreachable offline), **there is no semantic recall offline regardless of the
+  store** — so OPFS-SQLite-WASM only ever paid off if we *also* shipped an
+  in-browser embedder. We drop both. Browser store becomes a durable
+  `chrome.storage.local` **artifact buffer** (PAM proves it's persisted
+  per-write, atomic, zero-WASM) holding signed artifacts; on bridge-return the
+  local server ingests them and serves recall. Offline you can list/read buffered
+  artifacts but not semantically search them. **No OPFS-SQLite-WASM, no
+  in-browser embedder, no `sql.js`.** This shrinks the "separate browser build
+  effort" considerably.
+- **Browser artifacts stay first-class verifiable — diverge from PAM here** (user
+  pick: "Match the protocol"). PAM's browser edition degrades to **SHA-256 +
+  empty `signature`**, so its browser artifacts are unsigned and their hashes
+  don't match the SDK's `blake3:` — a non-verifiable tier. For Mnemonic that
+  breaks the whole "verifiable memory" thesis, so the extension runs
+  **blake3-wasm + Ed25519-wasm**: every buffered artifact is content-addressed
+  and COSE-signed **identically to native/SDK artifacts** (interoperable hashes,
+  real signatures). Both primitives run in-browser via WASM — PAM simply chose
+  not to.
+
+**Net effect on the earlier topology:** "bridge, else local" stands; "SQLite
+everywhere" now means **SQLite on all native/server surfaces** (CLI / IDE agents /
+Node-SDK share the canonical `~/.mnemonic/attestations.db`). The browser is **not**
+SQLite — it is a `chrome.storage.local` signed-artifact buffer. Convergence is
+still the protocol's job (shared Ed25519 identity + `participate`/anchor + the
+server ingesting the buffer on bridge-return); the transient split-brain window is
+unchanged. All of this remains a **separate build effort**, not a task in this
+server-side feature.
