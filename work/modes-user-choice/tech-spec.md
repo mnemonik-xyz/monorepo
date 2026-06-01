@@ -114,17 +114,33 @@ candidate definitions of "delivered", in increasing strength:
   periodic proof-of-availability challenges. Out of scope; named only so the
   receipt schema reserves room.
 
-**Recommendation:** ship **D1** as the delivery guarantee for V1. It is fully
-local-verifiable, needs no counterparty, and directly addresses the stated risk
-("artifact unreachable when a peer asks") by guaranteeing a durable, re-read,
-anchored copy exists independent of the user's machine. Schema is forward-shaped
-for D2/D3.
+**FINALIZED definition (user, 2026-06-01): "anchored AND verified by recall =
+delivered."** This is D1's intent, but expressed through the protocol's *own*
+read path rather than a bespoke read-back:
 
-The concrete code delta vs today's `full` path: today `sign_memory_inline`
-writes Arweave+Solana and trusts them. D1 adds the **read-back + re-verify** step
-and packages the result as an explicit `delivery_receipt` rather than two loose
-tx-id strings. That read-back is the line between "we wrote it somewhere" and
-"the protocol guarantees it's retrievable".
+1. `participate` write → anchor signed COSE plaintext on Arweave + Solana memo
+   timestamp (today's `full` path).
+2. **Confirmation = a recall + verify round-trip against the anchored artifact:**
+   recall must be able to retrieve it, and `verify` must re-fetch the anchored
+   COSE bytes and re-check blake3 hash + Ed25519 signature against the Solana
+   anchor (this is exactly what `tools::verify` already does in `full` mode).
+3. Only when that round-trip passes is the write reported `participated` and
+   charged. If it fails (anchor didn't land / bytes don't verify), the artifact
+   stays `local`, no charge — the user is never left believing a still-local
+   artifact was delivered.
+
+**Why this framing (user's reframe):** anchored-on-Arweave is "mission done" — the
+risk surface is *local-only* artifacts. The single silent failure is claiming
+"participated" while the anchor didn't actually land, leaving the artifact local.
+"Verified by recall" closes exactly that gap by reusing recall/verify, so there is
+**no new bespoke primitive** — just gating the `participated` state + the charge on
+a recall/verify round-trip. `delivery_receipt` persists `{arweave_tx, solana_tx,
+recall_verified_at}` and is forward-shaped with optional `acks[]` for the deferred
+D2 (recipient-ACK via the A2A bridge).
+
+Note: V1 anchors **plaintext** signed bytes (public publish) — `verify` works for
+anyone with the tx id, no decryption key. Encrypted-share is explicitly out of
+scope (see decisions.md #3).
 
 ## Storage invariant — options for "Never mix in one DB"
 
@@ -166,15 +182,18 @@ recommendations, both pulling the same way:
   Mnemonic's wedge, and D1's read-back is the cheap proof that fills it:
   *"ERC-8004 proves a hash; Mnemonic proves the bytes are actually retrievable."*
 
-## Open decisions (need user sign-off before Wave 1)
+## FINALIZED (2026-06-01, user sign-off) — see decisions.md
 
-1. **Storage invariant:** S1 (tag rows, recommended) vs S2 (separate DBs).
-2. **Delivery definition for V1:** **D1** (durable-anchor + read-back) —
-   research-confirmed; recipient-ACK (D2) deferred (needs online counterparty).
-3. **Participate semantics:** **broadcast-publish** (research-recommended) vs
-   directed handoff. V1 = broadcast; directed via A2A bridge later.
-4. **Mode granularity:** per-request field on `sign_memory` (recommended) vs
-   per-identity default persisted server-side vs both.
+1. **Storage invariant → S1** (tag rows in one DB). Retires "Never mix in one DB".
+2. **Delivery definition → "anchored AND verified by recall = delivered"** (user's
+   words). The proof is a **recall + verify round-trip against the anchored
+   artifact**, not a bespoke read-back — see §Delivery below (rewritten). Until it
+   passes, the write stays `local` and is not charged.
+3. **Participate semantics → broadcast / public publish.** Anchor signed COSE
+   **plaintext** (current behavior). No encryption / key-based access in V1.
+   Directed/recipient-ACK deferred to the A2A bridge.
+4. **Mode granularity → per-request `mode` field** on `sign_memory` (default `local`).
+5. **Payment → per shared artifact**; local always free. **Retraction → immutable.**
 
 ## Tasks / waves (provisional — finalized after open decisions)
 
@@ -186,12 +205,15 @@ recommendations, both pulling the same way:
 - **Wave 2 — per-call mode + free/paid fork.** `sign_memory` accepts `mode`;
   paywall gate keys off resolved `WriteMode::Participate`; unsupported-mode error.
   Files: `mcp/src/mcp.rs`, `mcp/src/tools.rs`, `mcp/src/payment.rs`.
-- **Wave 3 — delivery receipt (D1).** Read-back + re-verify; `delivery_receipt`
-  on the row; `verify` surfaces it. Storage migration per chosen S-option.
-  Files: `mcp/src/tools.rs`, `core/src/storage/sqlite.rs`.
-- **Wave 4 — docs + invariant retirement.** Update CLAUDE.md (retire/rephrase
-  "Never mix in one DB" + "Mode is set at startup"), `.env.example`, whitepaper
-  §5.7 cross-ref. Append `decisions.md`.
+- **Wave 3 — delivery = anchored + verified-by-recall.** After anchor, gate the
+  `participated` state + the charge on a **recall + verify round-trip** against the
+  anchored artifact (reuse `tools::verify` full-mode path); persist
+  `delivery_receipt = {arweave_tx, solana_tx, recall_verified_at}` on the row
+  (S1 migration adds `write_mode` + receipt columns). Files: `mcp/src/tools.rs`,
+  `core/src/storage/sqlite.rs`.
+- **Wave 4 — docs + invariant retirement.** Update CLAUDE.md (retire "Never mix in
+  one DB" + "Mode is set at startup" with the conscious-change rationale),
+  `.env.example`, whitepaper §5.7 cross-ref. Append `decisions.md`.
 - **Audit waves** (code/security/test) read-only per repo workflow.
 
 `mcp/src/tools.rs`, `mcp/src/mcp.rs`, `mcp/src/config.rs` are the known
@@ -202,7 +224,8 @@ parallel-conflict files — waves are sequenced so only one wave touches each.
 - Unit: `WriteMode` parse/default; paywall fires on `Participate` only, never on
   `Local`; unsupported-mode error on local-only server.
 - Integration: `local` write produces synthetic `local:` ids + zero cost; a
-  `participate` write produces a `delivery_receipt` whose read-back hash matches;
-  forced Arweave read-back failure ⇒ reported `local` + no charge (refund path).
+  `participate` write is reported `participated` only after recall+verify passes
+  against the anchored artifact, with a `delivery_receipt`; forced anchor/verify
+  failure ⇒ reported `local` + no charge (the "not falsely delivered" guarantee).
 - Recall spans both modes (S1) or merges two stores (S2) — same top-K result set.
 - `MockEmbedder` in `#[cfg(test)]` (no `HashEmbedder`, per CLAUDE.md rule 4).

@@ -29,12 +29,39 @@ awaiting final user sign-off):**
 
 ## Open decisions (awaiting user sign-off before Wave 1)
 
-1. **Storage invariant** — S1 (tag rows in one DB, recommended) vs S2 (separate
-   DB per mode). User answered "decide in the spec"; tech-spec recommends S1.
-2. **Delivery definition for V1** — pending research (see above).
-3. **Participate semantics** — pending research (see above).
-4. **Mode granularity** — per-request `mode` field on `sign_memory`
-   (recommended) vs per-identity default vs both.
+— all resolved, see FINALIZED below.
+
+## FINALIZED (2026-06-01, user sign-off)
+
+1. **Storage invariant → S1** (tag rows with `write_mode` in one DB; local +
+   shared coexist for one user; recall spans both). Retires CLAUDE.md's "Never
+   mix in one DB" as a *conscious* change (update in same PR).
+2. **Delivery definition → "anchored AND verified by recall = delivered"** (user's
+   words). Supersedes the abstract "D1 read-back": the delivery proof is a
+   **recall + verify round-trip against the anchored artifact** — anchor on
+   Arweave/Solana, then confirm recall can retrieve it and `verify` re-checks the
+   anchored bytes (hash + COSE signature). Reuses existing recall/verify
+   machinery; no bespoke read-back primitive. Until that round-trip passes, the
+   write is NOT "participated" (still local; no charge on failure).
+3. **Participate semantics → broadcast / public publish.** Anchor signed COSE
+   **plaintext** (today's shape). Anyone with the tx id can read+verify — the
+   ERC-8004-style public attestation model. **No encryption / no key-based access
+   in V1** (user: "Public publish"). Encrypted-share + capability-token sharing
+   is a future arc, not this iteration. Directed/recipient-ACK exchange deferred
+   to the A2A bridge.
+4. **Mode granularity → per-request `mode` field on `sign_memory`** (default
+   `local`).
+5. **Payment → per shared artifact**; local always free (from interview).
+6. **Retraction → permanent / immutable** (from interview).
+
+**Clarification that reframed the guarantee (user, 2026-06-01):** anchored-on-
+Arweave = "mission done" — the risk surface is *local-only* artifacts. `participate`'s
+job is to move an artifact out of the local-only risk surface into the anchored
+state; the only silent failure is reporting "participated" when the anchor didn't
+actually land. That is exactly what "verified by recall" closes. Correction logged:
+today's Arweave write is **signed, not encrypted** (`core/src/arweave/mod.rs:56`,
+`core/src/wasm/mod.rs:208`) — so "public publish" is consistent with current code;
+encryption would have been net-new.
 
 ## Locked context (from user, 2026-06-01)
 
