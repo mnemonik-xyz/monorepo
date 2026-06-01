@@ -143,5 +143,32 @@ Node-SDK share the canonical `~/.mnemonic/attestations.db`). The browser is **no
 SQLite — it is a `chrome.storage.local` signed-artifact buffer. Convergence is
 still the protocol's job (shared Ed25519 identity + `participate`/anchor + the
 server ingesting the buffer on bridge-return); the transient split-brain window is
-unchanged. All of this remains a **separate build effort**, not a task in this
-server-side feature.
+unchanged. ## Bridge mechanism — native messaging (2026-06-01, user)
+
+Locks *how* the "bridge, else local" extension reaches the local server. Chrome/Edge
+allow only two extension→local-process channels; user picked **native messaging**.
+
+- **Channel = native messaging** (`chrome.runtime.connectNative`). A one-time
+  install drops a *native-messaging host manifest* (JSON naming the `mnemonic`
+  binary + allowed extension IDs); thereafter **Chrome auto-spawns the binary on
+  demand** and kills it when the port/tab closes. The user never launches a daemon
+  by hand. The spawned host opens the canonical `~/.mnemonic/attestations.db`
+  directly (SQLite multi-process file locking / WAL arbitrates concurrent access —
+  no "single long-lived owner" assumption needed).
+- **No admin / root required.** Manifest + binary install entirely in **user
+  space** — per-user manifest dirs (`~/.config/google-chrome/NativeMessagingHosts/`
+  on Linux, `~/Library/Application Support/Google/Chrome/NativeMessagingHosts/` on
+  macOS, **`HKCU`** registry on Windows, never `HKLM`), binary in `~/.local/bin` /
+  `~/.cargo/bin`. A `mnemonic install-bridge` command does it with no `sudo`/UAC.
+- **`localhost` HTTP = power-user alternative, not default.** `fetch` against a
+  running `mnemonic-mcp --transport http`. Chrome will NOT start it; the user must
+  keep the daemon alive (manually or via a login/systemd/launchd service). Offered
+  for users who already run the daemon; not the recommended path.
+- **Policy-locked machines degrade gracefully.** MDM-managed/corporate browsers can
+  disable native messaging or block writes to the manifest dir. In that case the
+  bridge never comes up and the extension falls back to the offline
+  `chrome.storage.local` signed-artifact buffer — the exact reason "bridge, else
+  local" never assumes the user *can* install anything.
+
+All of this remains part of the **separate browser build effort**, not a task in
+this server-side feature.
