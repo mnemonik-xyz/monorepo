@@ -143,7 +143,9 @@ Node-SDK share the canonical `~/.mnemonic/attestations.db`). The browser is **no
 SQLite — it is a `chrome.storage.local` signed-artifact buffer. Convergence is
 still the protocol's job (shared Ed25519 identity + `participate`/anchor + the
 server ingesting the buffer on bridge-return); the transient split-brain window is
-unchanged. ## Bridge mechanism — native messaging (2026-06-01, user)
+unchanged.
+
+## Bridge mechanism — native messaging (2026-06-01, user)
 
 Locks *how* the "bridge, else local" extension reaches the local server. Chrome/Edge
 allow only two extension→local-process channels; user picked **native messaging**.
