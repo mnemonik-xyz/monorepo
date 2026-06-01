@@ -54,6 +54,32 @@ awaiting final user sign-off):**
 5. **Payment → per shared artifact**; local always free (from interview).
 6. **Retraction → permanent / immutable** (from interview).
 
+## Local storage substrate & cross-surface topology (2026-06-01, user)
+
+The `local` mode must fit **all four surfaces** — browser extension, CLI, SDK,
+and IDE-hosted agents. Decided:
+
+- **Substrate = SQLite everywhere, one schema, one `.db` semantics.** Native
+  `rusqlite` for the surfaces that have a filesystem (CLI, IDE agents via the
+  local `mnemonic-mcp` server, Node-SDK); the server owns the canonical
+  `~/.mnemonic/attestations.db` and CLI + IDE agents + Node-SDK **share it** —
+  the storage analogue of invisible-identity's one-keypair-everywhere.
+- **Browser = its own OPFS-backed SQLite-WASM node** (`@sqlite.org/sqlite-wasm`
+  / `wa-sqlite`), **not `sql.js`** (user pick). Rationale: `sql.js` holds the
+  whole DB in memory and only persists on a manual `Uint8Array` export — a crash
+  before export loses writes, the exact local-loss risk this protocol exists to
+  prevent. OPFS-backed SQLite is durable per-transaction. (`sql.js` allowed only
+  as a fallback where OPFS is unavailable.)
+- **Cross-surface reconciliation is the protocol's job, not the filesystem's.**
+  The browser node is a separate local store; it converges with the native store
+  through shared Ed25519 identity + `participate`/anchor + `recall`, i.e. the
+  `local → participate` path this feature defines. No forced shared local file
+  across the browser/native boundary.
+- **Implication for code:** browser-side storage is net-new and lives outside
+  `core/` (native-only by rule). Track via an `AttestationStore` trait + OPFS
+  backend as a **separate build effort** — not a task in this feature, which is
+  server-side. Recorded here so the topology decision isn't lost.
+
 **Clarification that reframed the guarantee (user, 2026-06-01):** anchored-on-
 Arweave = "mission done" — the risk surface is *local-only* artifacts. `participate`'s
 job is to move an artifact out of the local-only risk surface into the anchored
