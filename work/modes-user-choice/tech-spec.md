@@ -158,12 +158,17 @@ property: the gate only fires when resolved mode is `Participate`).
    reason must include the demoted `attestation_id` for 1:1 correlation
    with the downgrade. A refund-itself failure writes a structured audit
    row (new in T3) instead of only `tracing::warn!` (current behavior).
-8. **No `.await` across SQLite lock in the participate flow.** [supports
-   project pattern "storage lock discipline" — see patterns.md "Storage lock
-   discipline"]. T3 inserts new awaits (Arweave re-fetch, `verify_cose`,
-   recall) between the Solana memo and the final DB persist. The implementation
-   uses two short critical sections (post-anchor success persist OR post-failure
-   demote+refund); neither holds `store.lock()` across an `.await`.
+8. **No `.await` across in-process lock guards (SQLite mutex AND DashMap
+   shard) in the participate flow.** [supports project pattern "storage
+   lock discipline" — see patterns.md "Storage lock discipline"; extended
+   to DashMap by this spec because the new `RefundsBySubject` introduces a
+   second same-class lock]. T3 inserts new awaits (Arweave re-fetch,
+   `verify_cose`, recall) between the Solana memo and the final DB persist.
+   The implementation uses two short critical sections for the SQLite
+   mutex (post-anchor success persist OR post-failure demote+refund) and
+   read-only/write-and-drop access patterns for DashMap shard guards;
+   neither lock class is held across an `.await`. Code-audit (A1) checks
+   both lock classes.
 9. **`find_by_tx` must filter by `owner_pubkey` to preserve tenant isolation.**
    [supports patterns.md "Tenant isolation via `owner_pubkey`"]. With `local`
    and `participate` rows now coexisting for many tenants in one DB,
@@ -453,16 +458,26 @@ the mode-absent response envelope against future drift.
   while the SQLite mutex is held — two short scoped locks (one for the
   post-anchor persist, one for the demote+refund path).
   **Outcome-based DoS guard:** a small in-memory `RefundsBySubject`
-  (e.g. `DashMap<owner_pubkey, SlidingWindowCounter>`, 60-second window)
-  is incremented in the refund branch and consulted at the *entry* of the
-  participate path (BEFORE Arweave/Solana writes). If the caller exceeds
-  the configurable threshold (default 5/60s) the request short-circuits
-  to `-32011` with `data.kind: "DeliveryQuotaExceeded"`, spending zero
-  chain fees. Refund-itself failure extends the existing `payment_events`
-  table with a new typed `event_kind = 'refund_failed'` row carrying ONLY
-  `{api_key, attestation_id, reason, occurred_at}` — no payload bytes,
-  no `content_preview`, no embedding (PII allow-list pinned in the
-  spec to avoid impl-time drift).
+  (`DashMap<api_key_hash, SlidingWindowCounter>`, 60-second window;
+  **keyed by `api_key_hash`, NOT `owner_pubkey`** — Ed25519 keys are free
+  to rotate but billable subjects aren't, so the latter is the right
+  blast-radius). Bounded eviction: a background task running every
+  `quota_evict_interval_secs` (default 30) drops entries whose window has
+  been empty for the last 2× the window, keeping the map size proportional
+  to *active* spenders, not lifetime cardinality. The counter is
+  incremented in the refund branch and consulted at the *entry* of the
+  participate path (BEFORE Arweave/Solana writes); on exceed
+  (default 5/60s, both configurable) the request short-circuits to
+  `-32011` with `data.kind: "DeliveryQuotaExceeded"`, spending zero chain
+  fees. **DashMap shard discipline:** DashMap's per-shard lock is held
+  briefly for the increment/read and never across an `.await` — same rule
+  as the SQLite mutex (see Decision 8).
+  Refund-itself failure extends the existing `payment_events` table with a
+  new typed `event_kind = 'refund_failed'` row carrying ONLY
+  `{api_key_hash, attestation_id, reason, occurred_at}` —
+  **`api_key_hash` not the raw key** (credential-at-rest hygiene, CWE-312),
+  no payload bytes, no `content_preview`, no embedding (PII allow-list
+  pinned in the spec to avoid impl-time drift).
 - Skill: `code-writing`
 - Reviewers: `code-reviewer`, `test-reviewer`, `security-auditor`
 - Verify-smoke: `cargo test -p mnemonic-mcp delivery_guarantee::happy_path`
@@ -481,18 +496,6 @@ the mode-absent response envelope against future drift.
   schema), `mcp/src/mcp.rs` (refund call site on tool-execution error,
   paywall entry), `core/src/arweave/mod.rs` (`new_for_test` httpmock
   pattern), T2 output.
-- Skill: `code-writing`
-- Reviewers: `code-reviewer`, `test-reviewer`, `security-auditor`
-- Verify-smoke: `cargo test -p mnemonic-mcp delivery_guarantee::happy_path`
-  passes; `cargo test -p mnemonic-mcp delivery_guarantee::demotion_on_fetch_failure`
-  passes with corrupted `httpmock` GET on the Arweave re-fetch.
-- Files to modify: `mcp/src/tools.rs` (sign_memory_inline participate branch),
-  `mcp/src/payment.rs` (refund-reason wiring; structured audit row).
-- Files to read: `mcp/src/tools.rs` (`sign_memory_inline` participate branch
-  at the Arweave+Solana write block, plus `verify_cose` helper for
-  reference), `mcp/src/payment.rs` (`refund_balance` and existing call site
-  in `mcp/src/mcp.rs`), `mcp/src/mcp.rs` (refund call site on
-  tool-execution error), T2 output.
 
 ### Wave 4 — Read paths (mcp/)
 
@@ -657,22 +660,34 @@ this feature — it travels with the next general MCP-server release.
   Arweave's documented eventual-consistency window (seconds to low tens of
   seconds), not a fixed two-attempt cap. Inside the budget the request
   blocks; on budget exhaustion the row is demoted and the refund fires.
-  (ii) **Outcome-based per-owner counter consulted at participate entry**
-  — a small in-memory `RefundsBySubject` (e.g. `dashmap` with a sliding
-  window; reset by TTL) is incremented in the refund branch of T3 and
-  *read* at the top of the participate path in `mcp_handler` **before**
-  any chain write. If a caller exceeds the threshold (e.g. 5 demotions in
-  60 s) the next `participate` request short-circuits to `-32011` with a
-  `DeliveryQuotaExceeded` data kind, **without** spending Arweave/Solana
-  fees. `tower_governor` is *not* used for this because it rate-limits
-  requests, not outcomes. The new counter lives in `mcp/src/payment.rs`
-  next to the existing payment state.
-  (iii) **Metrics** — Prometheus counters
+  (ii) **Outcome-based per-billable-subject counter consulted at
+  participate entry** — a small in-memory `RefundsBySubject`
+  (`DashMap<api_key_hash, SlidingWindowCounter>` with a 60-second sliding
+  window) is incremented in the refund branch of T3 and *read* at the top
+  of the participate path in `mcp_handler` **before** any chain write.
+  **Keyed by `api_key_hash`, not `owner_pubkey`** — Ed25519 keys rotate
+  freely, billable subjects don't; keying on the wrong identifier would
+  let a caller bypass the quota by minting a new identity per request.
+  Bounded eviction: idle entries (empty window for 2×window) are dropped
+  on a configurable interval (`quota_evict_interval_secs`, default 30) so
+  map size tracks *active* spenders, not lifetime cardinality. If a
+  caller exceeds the threshold (default 5 demotions in 60 s, both env-
+  configurable for empirical tuning) the next `participate` request
+  short-circuits to `-32011` with `data.kind: "DeliveryQuotaExceeded"`,
+  **without** spending Arweave/Solana fees. `tower_governor` is *not*
+  used because it rate-limits requests, not outcomes. The new counter
+  lives in `mcp/src/payment.rs` next to the existing payment state.
+  (iii) **Metrics** — Prometheus counter
   `mnemonic_delivery_not_confirmed_total{stage}` (label set:
-  `stage ∈ {refetch, verify, recall}`; **no `owner_pubkey` label** —
-  high-cardinality anti-pattern). Per-tenant detail goes to structured
-  log lines (`tracing::warn!(owner_pubkey=…, stage=…)`) for ops
-  investigation without TSDB blow-up. Decision call-out in T3.
+  `stage ∈ {refetch, verify, recall}`; **no `owner_pubkey` or
+  `api_key_hash` label** — high-cardinality anti-pattern). Per-tenant
+  detail goes to structured log lines (`tracing::warn!(api_key_hash=…,
+  owner_pubkey=…, stage=…)`) for ops investigation without TSDB blow-up.
+  Decision call-out in T3.
+  (iv) **SLO note for operators.** The 15s refetch budget and 5/60s quota
+  are *starting* defaults; operators should set them empirically from
+  observed legitimate-traffic demotion rate. Both are env vars so they
+  can be tuned without a redeploy of behavior.
 - **`.await` discipline.** T3 inserts new awaits (Arweave re-fetch,
   `verify_cose`, `recall`) into the existing scoped-lock block. Mitigation:
   per Decision 8, two short critical sections — neither holds the SQLite
