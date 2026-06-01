@@ -1,5 +1,15 @@
 # Decisions — modes-user-choice
 
+> ⚠️ **NEEDS REVIEW (flagged 2026-06-01).** Append-only, so nothing here is deleted —
+> but entries are **mixed validity now**. Still good: the *server-side* spine
+> (per-request `write_mode`, free-local default, "delivered = anchored AND confirmed
+> via recall", retire "never mix in one DB"). **Stale / contradicted:** every
+> **browser** decision (bridge, `chrome.storage.local`, no-embedder, direct-to-chain)
+> — the shipped `work/chrome-extension/` does the opposite. Also predates the user's
+> reframing into a *transparent self-host ↔ remote cost spectrum*. Treat
+> **`user-spec.md` as canonical**; re-confirm each decision against it before relying
+> on it.
+
 Append-only log of decisions and audit findings.
 
 ## Interview outcomes (2026-06-01, user)

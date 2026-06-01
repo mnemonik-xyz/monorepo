@@ -1,6 +1,6 @@
 ---
 created: 2026-06-01
-status: draft
+status: needs-review  # flagged 2026-06-01 — browser journey contradicted by shipped work/chrome-extension; predates user reframing. user-spec.md is canonical.
 type: user-journeys
 related:
   - work/modes-user-choice/user-spec.md
@@ -9,6 +9,15 @@ related:
 ---
 
 # User Journeys — Mode-as-a-user-choice, per client surface
+
+> ⚠️ **NEEDS REVIEW — not current (flagged 2026-06-01).** The browser surface here
+> (native-messaging bridge, `chrome.storage.local` buffer, "no in-browser embedder",
+> direct-to-chain publish) is **fiction relative to the shipped `work/chrome-extension/`**
+> (transformers.js ONNX embedder, IndexedDB, **Local vs Cloud** tiers, Cloud = hosted
+> `STORAGE_MODE=full` via deferred signing). This doc also predates the user's
+> reframing into a *transparent self-host ↔ remote cost spectrum*. The CLI / SDK / IDE
+> journeys may still be broadly right, but **verify against `user-spec.md` (canonical)
+> and `work/chrome-extension/` before trusting any of it.**
 
 How the **local vs participate** intent is expressed, and the full write → recall →
 (optionally) participate → verify loop is lived, on each of the four surfaces:

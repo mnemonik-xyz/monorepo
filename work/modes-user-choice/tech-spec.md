@@ -1,6 +1,6 @@
 ---
 created: 2026-06-01
-status: approved  # all decisions finalized 2026-06-01; tasks ready (Wave 1)
+status: needs-review  # flagged 2026-06-01 — predates user reframing + chrome-extension discovery; see banner. user-spec.md is canonical.
 branch: claude/modes-user-choice-Qkk6X
 size: L
 related:
@@ -8,6 +8,20 @@ related:
 ---
 
 # Tech Spec: Mode as a user choice (intent-driven), not a server parameter
+
+> ⚠️ **NEEDS REVIEW — not current (flagged 2026-06-01).** Two things postdate this
+> doc. **(1) The user reframed the feature** as a *transparent cost/deployment
+> spectrum* — the user must not have to think about plumbing: use any tool **locally
+> & free**; run **your own MCP server/node** to persist + share for **less** (you pay
+> only the raw on-chain/**cloud** cost); or use **Mnemonik / other remote infra** via
+> **x402**. Self-host ↔ remote is a first-class axis, and durable **cloud** (private,
+> cross-device reuse) sits beside public on-chain broadcast. **(2)** It predates the
+> already-built **`work/chrome-extension/`** (22/24 tasks done: in-browser
+> `transformers.js` ONNX embedder, IndexedDB, explicit **Local vs Cloud** tiers,
+> Cloud = thin client to hosted `STORAGE_MODE=full`), which **contradicts** any
+> browser design here (native-messaging bridge, `chrome.storage.local`,
+> direct-to-chain, "no in-browser embedder"). **Canonical = `user-spec.md`;
+> re-derive from it after reconciling with `work/chrome-extension/`.**
 
 ## Problem recap
 

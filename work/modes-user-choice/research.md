@@ -1,5 +1,12 @@
 # Research: what multi-agent trustless systems demand from shared/exchanged memory
 
+> ⚠️ **NEEDS REVIEW (flagged 2026-06-01).** Background research, still largely useful,
+> but it fed conclusions that predate (a) the user's reframing into a *transparent
+> self-host ↔ remote cost spectrum* (incl. durable **cloud** for private cross-device
+> reuse, not only public on-chain broadcast) and (b) the discovery of the shipped
+> `work/chrome-extension/`. Re-read against **`user-spec.md` (canonical)** before
+> using any conclusion.
+
 **Date:** 2026-06-01 · **Method:** deep-research (5 parallel angles → claims →
 cross-verification). Feeds the two open questions in `decisions.md`:
 *what "participate" means* and *what "delivery guarantee" means*.

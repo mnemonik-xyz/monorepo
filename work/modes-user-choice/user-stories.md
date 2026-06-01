@@ -1,6 +1,6 @@
 ---
 created: 2026-06-01
-status: approved  # browser "how" forks resolved 2026-06-01 (A1 + B2)
+status: needs-review  # flagged 2026-06-01 — browser forks (A1/B2) contradicted by shipped work/chrome-extension; predates user reframing. user-spec.md is canonical.
 type: user-stories
 related:
   - work/modes-user-choice/user-journeys.md
@@ -8,6 +8,15 @@ related:
 ---
 
 # User stories — per client surface
+
+> ⚠️ **NEEDS REVIEW — not current (flagged 2026-06-01).** The browser "how" forks
+> resolved here (**A1** context-injection / no-embedder, **B2** direct-to-chain) are
+> **contradicted by the already-built `work/chrome-extension/`** (in-browser
+> `transformers.js` ONNX embedder *exists*; storage is IndexedDB; the real model is
+> **Local vs Cloud**, Cloud = hosted `STORAGE_MODE=full`). This doc also predates the
+> user's reframing of the feature as a *transparent self-host ↔ remote cost spectrum*
+> (local-free → own-node-cheaper → remote-infra-x402; durable cloud *and* on-chain).
+> **Canonical = `user-spec.md`.** Re-derive these stories from it and the extension.
 
 The "I want / so that" wants that the journeys (`user-journeys.md`) realize.
 Surfaces: CLI, Node-SDK, IDE-hosted agent, browser extension.
