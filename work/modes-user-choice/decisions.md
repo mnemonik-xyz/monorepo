@@ -64,21 +64,28 @@ and IDE-hosted agents. Decided:
   local `mnemonic-mcp` server, Node-SDK); the server owns the canonical
   `~/.mnemonic/attestations.db` and CLI + IDE agents + Node-SDK **share it** —
   the storage analogue of invisible-identity's one-keypair-everywhere.
-- **Browser = its own OPFS-backed SQLite-WASM node** (`@sqlite.org/sqlite-wasm`
-  / `wa-sqlite`), **not `sql.js`** (user pick). Rationale: `sql.js` holds the
-  whole DB in memory and only persists on a manual `Uint8Array` export — a crash
-  before export loses writes, the exact local-loss risk this protocol exists to
-  prevent. OPFS-backed SQLite is durable per-transaction. (`sql.js` allowed only
-  as a fallback where OPFS is unavailable.)
-- **Cross-surface reconciliation is the protocol's job, not the filesystem's.**
-  The browser node is a separate local store; it converges with the native store
-  through shared Ed25519 identity + `participate`/anchor + `recall`, i.e. the
-  `local → participate` path this feature defines. No forced shared local file
-  across the browser/native boundary.
-- **Implication for code:** browser-side storage is net-new and lives outside
-  `core/` (native-only by rule). Track via an `AttestationStore` trait + OPFS
-  backend as a **separate build effort** — not a task in this feature, which is
-  server-side. Recorded here so the topology decision isn't lost.
+- **Browser reach = "bridge, else local"** (user pick). The extension connects to
+  a running local `mnemonic-mcp` (native-messaging host / `localhost`) when
+  reachable and shares the **same canonical `~/.mnemonic/attestations.db`** — fully
+  unified, real-time, no copies. When the bridge is unreachable (no host
+  installed / locked-down browser), it falls back to its **own OPFS-backed
+  SQLite-WASM node** (`@sqlite.org/sqlite-wasm` / `wa-sqlite`), **not `sql.js`**.
+  Rationale for OPFS over `sql.js`: `sql.js` holds the whole DB in memory and only
+  persists on a manual `Uint8Array` export — a crash before export loses writes,
+  the exact local-loss risk this protocol exists to prevent; OPFS-backed SQLite is
+  durable per-transaction. (`sql.js` only as a fallback where OPFS is absent.)
+- **Accepted cost = a transient split-brain window.** A browser write made while
+  the bridge is down lives only in the OPFS node until it converges — and
+  convergence is the **protocol's** job (shared Ed25519 identity +
+  `participate`/anchor + `recall`, i.e. the `local → participate` path this
+  feature builds), **not** an automatic local file merge. No new machinery — just
+  the divergence window. Chosen over "bridge-only" (which avoids split-brain by
+  refusing to work offline) to never strand the user.
+- **Backend shape = SQLite everywhere, no abstraction** (user pick "SQLite
+  everywhere"). Keep the concrete `SqliteStore` — no `AttestationStore` trait.
+  `rusqlite` natively, OPFS-WASM SQLite in the browser, one schema. The browser
+  store is net-new TS outside `core/` (native-only by rule) and is a **separate
+  build effort**, not a task in this server-side feature. Recorded so it isn't lost.
 
 **Clarification that reframed the guarantee (user, 2026-06-01):** anchored-on-
 Arweave = "mission done" — the risk surface is *local-only* artifacts. `participate`'s
