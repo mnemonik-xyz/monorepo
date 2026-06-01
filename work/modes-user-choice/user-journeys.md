@@ -161,46 +161,46 @@ cannot be retracted.
 
 ## Surface 4 — Browser extension (ChatGPT / Claude / Gemini / Copilot, MV3)
 
-**Actor:** a human clicking in the extension UI over a web chat. The richest surface
-for branching, because reachability varies — this is where **"bridge, else local"**
-is felt directly.
+**Actor:** a human clicking in the extension UI over a web chat. **Standalone-first
+persona** (see user-stories.md): the core value depends on **no infrastructure** —
+no server, no daemon, no install. The bridge is an *optional* enhancement, not a
+precondition.
 
-**J0 · Onboarding — two outcomes by reachability.**
-- *Bridged:* if the user ran `mnemonic install-bridge` (one-time, **per-user, no
-  admin**), the extension reaches the local `mnemonic-mcp` over **native messaging**
-  (Chrome auto-spawns the binary). It now reads/writes the **same canonical DB** as
-  the CLI/IDE — full power, including recall.
-- *Offline (no host / policy-locked browser):* the extension silently falls back to
-  its own **`chrome.storage.local` signed-artifact buffer**. It still has the user's
-  identity (blake3-wasm + Ed25519-wasm) and writes **first-class signed artifacts** —
-  it just can't *semantically recall* until a bridge appears.
+**J0 · Onboarding — zero-install, works immediately.** Add the extension; it
+generates/loads the Ed25519 identity (blake3-wasm + Ed25519-wasm) and creates a local
+`chrome.storage.local` store of **structured, signed memory blocks** (episodic /
+semantic / procedural / working / identity). No account, no server. *Optional:* a
+power user who also runs the CLI/IDE can `mnemonic install-bridge` to share the
+canonical DB — pure bonus, never required.
 
-**J1 · Remember (local).**
-- *Bridged:* "Save to memory" on a chat selection → `local` write into the canonical
-  DB; instantly recallable here, in the CLI, and in the IDE.
-- *Offline:* the same click appends a signed artifact to the buffer. The user can
-  list/read buffered items, but search over them is unavailable offline (no
-  embedder in the browser). When the bridge later comes up, the local server
-  **ingests the buffer** and those memories become fully recallable everywhere —
-  convergence via the protocol, not a file merge. (This is the accepted transient
-  split-brain window.)
+**J1 · Remember + reuse across chats/providers (local, free) — the core loop.**
+"Save to memory" on a chat selection writes a signed block into the local store.
+Reuse works by **context injection (Fork A1)**: when the user starts a new chat on
+ChatGPT / Claude / Gemini / Copilot, the extension injects the relevant/pinned blocks
+into the prompt — so the assistant carries prior context across vendors. Selection is
+heuristic (recency / pinned / keyword), **not** semantic search — there is no
+in-browser embedder by design. Everything stays on-device unless explicitly published.
 
-**J2 · Participate (paid).** Requires a bridge (anchoring needs the funded operator
-keypair the host process holds). The extension shows an explicit **"Publish &
-verify"** action with the cost and the public/immutable warning; on confirm it goes
-through the bridge to anchor + run the recall+verify round-trip, then shows the
-`delivery_receipt`. **Offline**, the "Publish" action is disabled with a hint
-("connect the local bridge to publish") — the buffered artifact stays `local` until
-then. Never a silent paid action.
+**J2 · Participate (publish a public, verifiable record) — direct-to-chain (Fork
+B2).** The user clicks **"Publish & verify"**; the extension signs locally and anchors
+**directly to Arweave + Solana from the user's own connected wallet** (e.g. Phantom /
+a bundler) via public gateways — **no hosted operator, no bridge required.** Cost =
+the chain/storage fee paid from the user's wallet (not a server-side `payment_mode`
+charge). After anchoring, the extension does the read-back + verify round-trip (fetch
+the COSE bytes, re-check blake3 + Ed25519 against the Solana anchor) and shows the
+`delivery_receipt`. If the user has no funded wallet connected, the action prompts
+them to connect/fund one — never a silent spend, never falsely "published".
 
-**J3 · Verify.** Paste/scan a tx id or hash → verify the signed bytes are retrievable
-and delivered. Works bridged (full path) and, for buffered local artifacts, as a
-self-signature check.
+**J3 · Verify.** Paste/scan a tx id or hash → fetch the anchored bytes and re-check
+signature + hash against the Solana anchor. Works fully standalone (it is just public
+network reads), and for local-only blocks acts as a self-signature check.
 
-**J4 · Continuity.** *Bridged* = the same memory across the web chat, the terminal,
-and the IDE — one identity, one DB. *Offline* = a temporary local node that
-re-joins on bridge-return. This is the cross-surface payoff the whole topology
-exists to deliver.
+**J4 · Continuity + portability.** *On one device:* memory is reused across every
+provider's chat via injection. *Across devices:* the user **exports/imports the
+signed artifact** to carry memory to another browser/machine — "no infrastructure"
+never means "trapped on one device." *Optional bridge:* if installed, the browser
+shares the canonical DB with the CLI/IDE (one identity, one DB) — the power-user
+upgrade, not the baseline.
 
 ---
 
@@ -208,14 +208,16 @@ exists to deliver.
 
 1. In **Cursor**, the agent saves `local` "user prefers async Python" — free, private.
 2. At the **terminal**, `mnemonic recall "python"` returns it — same DB, no sync.
-3. In the **browser** (bridged), the user sees it while chatting with ChatGPT and
-   clicks **Publish & verify** on an audit result → `participate`: anchored, recall-
-   verified, `delivery_receipt` shown, charged once.
+3. In the **browser** (zero install), the user carries context across ChatGPT,
+   Claude, and Gemini via injection, and clicks **Publish & verify** on an audit
+   result → `participate`: anchored **directly from their own wallet** to
+   Arweave/Solana, read-back-verified, `delivery_receipt` shown. No server in the
+   path.
 4. A **third party** runs `mnemonic verify <tx>` on another machine and confirms the
    bytes are real *and retrievable* — the ERC-8004 gap Mnemonic closes.
-5. On a **locked-down browser** with no bridge, the same user still captures notes
-   into the offline buffer; they converge into the canonical DB the next time the
-   bridge is reachable. Nobody is ever stranded.
+5. The user **exports** their signed memory artifact and **imports** it into a
+   browser on a second machine — full portability, still no infrastructure. (A power
+   user who *also* runs the CLI/IDE can instead bridge to share the canonical DB.)
 
 ## Open / deferred (not designed here)
 

@@ -1,6 +1,6 @@
 ---
 created: 2026-06-01
-status: draft  # browser "how" has 2 open forks — see end of file
+status: approved  # browser "how" forks resolved 2026-06-01 (A1 + B2)
 type: user-stories
 related:
   - work/modes-user-choice/user-journeys.md
@@ -33,8 +33,8 @@ As a **browser-extension user**, I want:
   the CLI/IDE, my browser memories are recognizably mine (one keypair everywhere).
 - **…(optionally) to publish a memory as a public, verifiable record** — *so that*
   other agents/people can verify it — **without that requiring me to run any
-  infrastructure** (see Fork B: a remote operator does the anchoring, I just sign +
-  pay per artifact).
+  infrastructure**: I sign locally and the extension anchors **directly to
+  Arweave/Solana from my own wallet** (Fork B2), with no hosted operator in the path.
 - **…to carry my memory between machines/browsers** via export/import of the signed
   artifact — *so that* "no infrastructure" never means "trapped on one device."
 
@@ -73,34 +73,35 @@ As a **user of an AI coding agent**, I want:
 
 ---
 
-## Open forks the browser "no-infrastructure" want creates
+## Resolved forks (browser "no-infrastructure", 2026-06-01, user)
 
-The wants above are firm. Two *mechanism* questions remain — both materially shape
-the browser build and one of them touches a prior decision:
+### Fork A — cross-chat/provider reuse → **A1 · Context injection (PAM-style)** ✅
 
-### Fork A — How does "reusable across chats/providers" work?
+Store structured memory blocks locally; inject the relevant/pinned ones into each
+new chat across providers. **No embedder, no server, no semantic recall in-browser
+— fully infra-free.** Selection is heuristic (recency / pinned / keyword). **Keeps
+the "no in-browser embedder" decision** (which the standalone-first reframing had
+reopened). *Rejected:* A2 local-embedder (reverses that decision, +~22 MB), A3
+remote recall (network dependency, data leaves device — breaks "no infra").
 
-- **A1 · Context injection (PAM-style).** Store structured memory blocks locally;
-  inject the relevant/pinned ones into each new chat across providers. **No embedder,
-  no server — fully infra-free.** Selection is heuristic (recency / pinned / keyword),
-  not semantic. Fits the existing "no in-browser embedder" decision.
-- **A2 · Local semantic recall.** Bundle a small ONNX embedder in the extension →
-  embed + cosine-search locally. True semantic recall, still infra-free, but ~22 MB
-  model + WASM compute, and it **reverses the "no in-browser embedder" decision**.
-- **A3 · Remote semantic recall.** Send the query to a hosted embed/recall service.
-  Light client, but a **network dependency** (and query/memory leaves the device) —
-  in tension with "no infrastructure."
+### Fork B — zero-infra publish → **B2 · Direct-to-chain from the browser** ✅
 
-### Fork B — How does a zero-infra browser user `participate` (publish)?
+The extension anchors **directly** to Arweave + Solana via public gateways/RPC using
+the **user's own funded wallet** — no hosted operator, no daemon, maximally
+decentralized. "No infrastructure" taken to its strongest reading: not even a
+third-party operator in the path. *Rejected:* B1 remote-operator-x402 (introduces a
+hosted-operator dependency), B3 bridge-only (denies pure-browser users publishing).
 
-Anchoring inherently needs network (Arweave + Solana + payment), so it can't be
-*purely* local. "No infrastructure" = no server *I run*, not "no network ever."
-
-- **B1 · Remote operator over HTTPS + x402.** I sign locally; a hosted operator
-  anchors for a per-artifact fee (reuses our `payment_mode = x402`). **No install,
-  no daemon** — just network + pay-per-publish. Most consistent with the persona.
-- **B2 · Direct-to-chain from the browser.** Extension submits to Arweave/Solana via
-  public gateways using my own funded wallet. Maximally decentralized, but I must
-  fund/manage a wallet — arguably its own infrastructure + friction.
-- **B3 · Bridge-only participate.** Pure-browser users can't publish; participate
-  needs the optional local bridge. Keeps the browser standalone for local-only use.
+**Implications for the (separate) browser build:**
+- **Payment ≠ the server-side x402/balance model.** The browser user pays **chain +
+  storage fees directly** from their wallet; there is no per-artifact fee to a
+  Mnemonic operator. `payment_mode` does not govern browser participate.
+- **Wallet management is net-new browser scope:** the Ed25519 *identity* key (signs
+  the COSE artifact) is distinct from the **funding wallet(s)** — an Arweave wallet
+  (or a bundler like Irys/Turbo that accepts SOL) + a SOL-funded Solana fee-payer.
+  Likely "connect your wallet" (e.g. Phantom) rather than a hot key in the extension.
+- **Delivery guarantee still holds** via read-back + verify (fetch the anchored COSE
+  bytes, re-check blake3 + Ed25519 against the Solana anchor) — this does **not**
+  need semantic recall, so it is compatible with A1.
+- **Bridge stays optional.** A power user who also runs the CLI/IDE may still bridge
+  to the canonical DB; it is never required for local use or for publishing.

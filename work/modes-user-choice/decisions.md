@@ -174,3 +174,30 @@ allow only two extension→local-process channels; user picked **native messagin
 
 All of this remains part of the **separate browser build effort**, not a task in
 this server-side feature.
+
+## Browser persona = standalone-first + infra-free (2026-06-01, user)
+
+User-story input reframed the browser surface: *"as a browser-extension user I want
+not to depend on any infrastructure; I want memories/context reusable across chats
+and providers."* Consequences (see user-stories.md, user-journeys.md):
+
+- **Standalone-first; the bridge is demoted to an optional power-user enhancement.**
+  The earlier "bridge, else local" wording made the local server primary — for the
+  browser persona that is inverted: zero-install standalone is the *primary* path,
+  the bridge is a bonus for users who also run the CLI/IDE. Local use and publishing
+  must both work with **no server the user runs**.
+- **Fork A → A1 context injection (PAM-style).** Cross-chat/provider reuse = inject
+  locally-stored memory blocks into each new chat; **no in-browser embedder, no
+  semantic recall** browser-side. Confirms (does not reverse) the no-embedder
+  decision, which standalone-first had reopened. (Rejected: bundled local embedder;
+  remote recall.)
+- **Fork B → B2 direct-to-chain.** Pure-browser `participate` anchors **directly to
+  Arweave + Solana from the user's own funded wallet** via public gateways/RPC — no
+  hosted operator, maximally decentralized. (Rejected: remote-operator-x402;
+  bridge-only.) ⇒ browser participate is **not** governed by server-side
+  `payment_mode`; the user pays chain/storage fees directly. Wallet management
+  (funding wallet distinct from the Ed25519 identity key; likely "connect Phantom")
+  is net-new browser scope. Delivery guarantee still holds via read-back + verify
+  (no semantic recall needed → compatible with A1).
+
+Still a **separate browser build effort**, not a task in this server-side feature.
