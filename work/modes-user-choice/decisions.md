@@ -211,3 +211,66 @@ and providers."* Consequences (see user-stories.md, user-journeys.md):
   (no semantic recall needed → compatible with A1).
 
 Still a **separate browser build effort**, not a task in this server-side feature.
+
+## Finalization (2026-06-01, user) — interview round 2
+
+Closes the user-spec.md "Открытый рефайнмент" and reconciles with shipped
+`work/chrome-extension/`. **`user-spec.md` (rewritten 2026-06-01) is canonical.**
+
+**FINALIZED:**
+
+1. **Scope of this feature = server-side only.** No code changes in
+   `packages/extension/` in this iteration. Extension keeps working as-is.
+2. **Compatibility invariant (load-bearing):** server-side changes must keep the
+   existing HTTP contract that the shipped extension's **Cloud-tier** uses
+   (deferred signing → hosted `STORAGE_MODE=full`). Concretely: the new `mode`
+   field on `sign_memory` is **optional, default `local`**; requests without
+   `mode` keep current env-var-driven behavior — no silent semantic change for
+   un-updated clients.
+3. **V1 API surface = binary `mode: local | participate`.** No `target` /
+   `visibility` / `cloud` field. The third "cloud" point that the open
+   refinement discussed is **deferred to V2+** with this framing: private
+   durable cloud-mirror, when it lands, sits **on top of** the chain anchor
+   (anchor remains the source of verifiability), not as a replacement for it.
+4. **Tier-2 ("self-operator")** is **not new code** — it is the existing
+   `STORAGE_MODE=full + PAYMENT_MODE=none` deployment, just made an explicit
+   positioning point. This feature does not add a "your own MCP" code path; it
+   only acknowledges that the path already exists and ensures `whoami` envelope
+   exposes it correctly (`participate_cost.amount_cents: 0`,
+   `payment_methods: []`).
+5. **`whoami` envelope contract** (new in V1, called out in user-spec):
+   `supported_modes`, `default_mode`, `participate_cost
+   {currency, amount_cents, payment_methods}`. **Typed error**
+   `UnsupportedMode { requested, supported }` (JSON-RPC `-32010`) on requesting
+   a mode the server cannot serve — **never a silent downgrade to `local`**.
+   This is the discoverability contract clients (CLI, SDK, extension, agents)
+   target.
+6. **"Спектр" stays as user-spec positioning, not code structure.** Tier-1/2/3
+   are deploy variants ("which MCP am I pointed at"), not three values in the
+   API. The interview confirmed: *"the main idea here is that user should not
+   care. Locally — use free. Want to save onchain/cloud? Pay for it."* The
+   per-call axis stays binary; the per-deployment axis is operator-side env-vars
+   and is invisible at the API surface.
+
+**RETIRED — stale relative to canonical user-spec.md (kept here only for
+audit-trail; do NOT use as design input):**
+
+- **Browser native-messaging bridge** (section "Bridge mechanism — native
+  messaging") — out of scope of this feature; covered by `work/chrome-extension/`
+  if/when it ever revisits browser↔server bridging.
+- **Browser OPFS-SQLite-WASM store** + later **`chrome.storage.local`
+  signed-artifact buffer** revision (sections "Local storage substrate" and
+  "Browser store — revised after PAM reference") — superseded by the shipped
+  extension's actual choice (IndexedDB + transformers.js embedder in
+  `packages/extension/`).
+- **Browser standalone-first + Forks A1 (no embedder) / B2 (direct-to-chain)**
+  (section "Browser persona") — directly contradicted by the shipped extension
+  (in-browser ONNX embedder *exists*; Cloud-tier is hosted-operator, not
+  direct-to-chain). The shipped extension is the canonical browser model.
+
+**Sibling docs status:**
+- `tech-spec.md`, `user-stories.md`, `user-journeys.md` are **superseded** by
+  this finalization. They predate (a) the reframing into a transparent
+  positioning spectrum and (b) the chrome-extension discovery. To be
+  regenerated via `/new-tech-spec` (tech-spec) and removed/rewritten on demand
+  (stories/journeys — they were exploratory artifacts, not template-required).
