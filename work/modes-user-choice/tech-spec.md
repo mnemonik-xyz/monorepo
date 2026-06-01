@@ -15,8 +15,8 @@ related:
 and threaded as `&str` into every tool (`whoami`, `sign_memory`, `recall`,
 `verify`) and into the dispatch + paywall in `mcp/src/mcp.rs`. The operator
 picks one value for the whole process; the caller cannot choose. CLAUDE.md
-encodes the consequence as a hard rule: *"Mode is set at startup, not per-call.
-Never mix in one DB."* This spec deliberately revisits that rule.
+encodes the consequence as two rules: *"Mode is set at startup, not per-call"*
+and *"Never mix in one DB"*. This spec deliberately revisits both.
 
 The user-spec (canonical) reduces the surface to a single per-write intent:
 
@@ -74,17 +74,19 @@ visible.
   change (additional `WriteMode` parameter).
 - `mcp/src/tools.rs`:
   - `sign_memory_inline` — parse `mode` from input, resolve against
-    `WriteMode`, branch on resolved mode (today branches on `storage_mode`
-    string at lines `332` and `367`); on `Participate`, run the
+    `WriteMode`, branch on resolved mode (today branches on the
+    `storage_mode: &str` argument in two places — local-vs-Arweave write
+    block and the cost-recording block); on `Participate`, run the
     recall+verify round-trip before persisting "delivered" state.
-  - `whoami` (line `27`) — return envelope.
-  - `verify` (line `419`) — route by stored `write_mode` column.
-- `mcp/src/mcp.rs:424` — paywall gate. Today: `payment_mode != "none" &&
-  storage_mode != "local"`. New: gate on resolved `WriteMode::Participate`.
-  Requests without `mode` field continue to fall back to env-var-driven
-  legacy behavior (compat).
-- `mcp/src/payment.rs` — no API change; only callsite moves. `Local` writes
-  never reach `check_payment` / `record_attestation_cost`.
+  - `whoami` — return envelope.
+  - `verify` — route by stored `write_mode` column.
+- `mcp/src/mcp.rs` — paywall gate inside `mcp_handler`. Today:
+  `payment_mode != "none" && storage_mode != "local"`. New: gate on
+  resolved `WriteMode::Participate`. Requests without `mode` field continue
+  to fall back to env-var-driven legacy behavior (compat).
+- `mcp/src/payment.rs` — no API change; only callsite reshuffles. `Local`
+  writes never reach `check_payment` / `record_attestation_cost`.
+  T3 wires `refund_balance` for the delivery-failure path.
 - `CLAUDE.md` (root) — retire the "Never mix modes in one DB" rule
   explicitly in the same PR.
 
@@ -145,19 +147,34 @@ property: the gate only fires when resolved mode is `Participate`).
    the same PR.
 6. **Delivery proof = recall+verify round-trip over anchored bytes.**
    [supports user-spec invariant "Доставлено = заякорено И подтверждено через
-   recall"]. Uses existing `verify_cose` (`tools.rs:479`) and the SQLite
-   cosine recall path — no new primitive.
+   recall"]. Uses existing `verify_cose` helper in `mcp/src/tools.rs` and
+   the SQLite cosine recall path — no new primitive.
 7. **On delivery failure: row demoted to `local`, no charge.** [supports
    user-spec "плата не берётся" + "запись остаётся local"]. Implementation:
-   wrap the participate path in a transaction-like rollback that flips
-   `write_mode` and skips `record_attestation_cost`; the reserved
-   balance/x402 payment is released via the existing `payment::refund` path
-   (currently used by error returns in `mcp.rs`).
-8. **[TECHNICAL] Trait signature change is breaking inside the workspace.**
-   `AttestationStore::save_attestation` gains a `WriteMode` parameter. All
-   11 internal callsites in `core/src/storage/sqlite.rs` (test helpers) plus
-   `mcp/src/tools.rs` and `mcp/src/api.rs::sign_callback` must be updated in
-   the same task. No external crates depend on this trait.
+   the participate path persists the row with `write_mode='local'` and skips
+   `record_attestation_cost`; the reserved balance/x402 payment is released
+   via `payment::refund_balance` (in `mcp/src/payment.rs`, currently invoked
+   from `mcp/src/mcp.rs::mcp_handler` on tool-execution errors). Refund
+   reason must include the demoted `attestation_id` for 1:1 correlation
+   with the downgrade. A refund-itself failure writes a structured audit
+   row (new in T3) instead of only `tracing::warn!` (current behavior).
+8. **No `.await` across SQLite lock in the participate flow.** [supports
+   project pattern "storage lock discipline" — see patterns.md "Storage lock
+   discipline"]. T3 inserts new awaits (Arweave re-fetch, `verify_cose`,
+   recall) between the Solana memo and the final DB persist. The implementation
+   uses two short critical sections (post-anchor success persist OR post-failure
+   demote+refund); neither holds `store.lock()` across an `.await`.
+9. **`find_by_tx` must filter by `owner_pubkey` to preserve tenant isolation.**
+   [supports patterns.md "Tenant isolation via `owner_pubkey`"]. With `local`
+   and `participate` rows now coexisting for many tenants in one DB,
+   `verify`'s routing lookup (T4) cannot fall through `find_by_tx` unscoped.
+   T4 closes this pre-existing gap as part of the routing change.
+10. **[TECHNICAL] Trait signature change is breaking inside the workspace.**
+    `AttestationStore::save_attestation` gains a `WriteMode` parameter. All
+    internal callsites in `core/src/storage/sqlite.rs` (test helpers) plus
+    `mcp/src/tools.rs::sign_memory_inline` and
+    `mcp/src/api.rs::sign_callback_handler` must be updated in the same
+    task. No external crates depend on this trait.
 
 ## User-Spec Deviations
 
@@ -169,7 +186,7 @@ each Decision above).
 ### Schema migration
 
 Idempotent helper `migrate_write_mode_column` (mirrors
-`migrate_owner_pubkey_columns` in `core/src/storage/sqlite.rs:148`):
+`migrate_owner_pubkey_columns` in `core/src/storage/sqlite.rs`):
 
 ```sql
 -- 1. Add column with safe default for fresh schemas.
@@ -177,9 +194,12 @@ ALTER TABLE attestations
   ADD COLUMN write_mode TEXT NOT NULL DEFAULT 'participate';
 
 -- 2. Backfill legacy rows based on tx-id shape.
+--    `local:_%` requires at least one character after the colon; this is
+--    strict-collision-safe with real Solana signatures because base58
+--    excludes lowercase `l` and ':' is not in base58 at all.
 UPDATE attestations
    SET write_mode = 'local'
- WHERE solana_tx LIKE 'local:%';
+ WHERE solana_tx LIKE 'local:_%';
 
 -- 3. Index for filtered recall + audit queries.
 CREATE INDEX IF NOT EXISTS idx_attestations_write_mode
@@ -188,8 +208,10 @@ CREATE INDEX IF NOT EXISTS idx_attestations_write_mode
 
 `DEFAULT 'participate'` is the conservative choice: a row that existed under
 the legacy global `STORAGE_MODE=full` operator was, by definition, a paid
-participate write. The `LIKE 'local:%'` backfill catches the
-`storage_mode=local` rows independently.
+participate write. The `LIKE 'local:_%'` backfill catches the
+`storage_mode=local` rows independently. The `local:` prefix is reserved as
+the synthetic-id namespace owned exclusively by `tools.rs::sign_memory_inline`
+(local branch) — documented in the same PR as a hard invariant.
 
 ### `WriteMode` enum
 
@@ -214,6 +236,21 @@ via `String` adapter.
   "mode": "local" | "participate"   // NEW, optional, default = legacy env-var
 }
 ```
+
+**Resolution rule (single source of truth, used by *both* the paywall gate and
+the persisted `write_mode` column):**
+
+| Input `mode` value | Resolves to | Notes |
+|---|---|---|
+| field absent (key missing) | env-var fallback (`local` if `STORAGE_MODE=local`, else `participate`) | Backward-compat for the shipped extension. |
+| `"local"` (exact lowercase string) | `WriteMode::Local` | |
+| `"participate"` (exact lowercase string) | `WriteMode::Participate` | |
+| `null` / non-string / empty string / whitespace / different case / unknown string | JSON-RPC `-32602 InvalidParams` (`data.field: "mode"`, `data.received: <verbatim>`) | Reject early in the dispatcher — never reaches the gate or the storage column. |
+
+The resolution function is pure and lives in `mcp/src/tools.rs` (T2);
+`mcp.rs::mcp_handler` calls it once and threads the resulting `WriteMode`
+into both the paywall check and `sign_memory`. Two-path drift is impossible
+by construction.
 
 ### `mnemonic_whoami` (output addition)
 
@@ -243,10 +280,22 @@ via `String` adapter.
   "delivery_receipt": {
     "arweave_tx": "...",
     "solana_tx": "...",
-    "recall_verified_at": "2026-06-01T12:34:56Z"
+    "recall_verified_at": "2026-06-01T12:34:56Z"  // operator-attested, see note
   }
 }
 ```
+
+**Trust model for `recall_verified_at`.** This timestamp is **server-set** at
+the moment the recall+verify round-trip passes. It is *not* part of the
+COSE-signed payload and *not* chain-anchored. The cryptographically
+verifiable timestamp is the Solana memo's `block_time`, which any third
+party can fetch from `solana_tx`. `recall_verified_at` is an operator-level
+receipt asserting "I successfully read these bytes back at time T"; it is
+useful for SLA/SLO purposes but third-party verifiers should treat
+`solana_tx.block_time` as the canonical anchor time. The user-spec
+invariant ("anchored AND verified by recall") is satisfied because the
+*successful return* of `sign_memory` is itself the operator's claim of
+verified retrievability — the timestamp is metadata.
 
 ### Typed errors
 
@@ -269,43 +318,64 @@ Feature size **L** → unit + integration + targeted E2E.
 
 ### Unit
 - `core/src/storage/mode.rs` — serde round-trip, rusqlite round-trip.
-- `migrate_write_mode_column` — fresh-schema path, legacy-rows backfill path,
-  idempotency (run twice, same result).
-- `whoami` envelope shape per config: `STORAGE_MODE=local` →
-  `supported_modes=["local"]`; `STORAGE_MODE=full + PAYMENT_MODE=none` →
-  `participate_cost.amount_cents=0`; `full + PAYMENT_MODE=x402` →
-  `participate_cost.payment_methods=["x402"]`.
-- `parse_mode` request parsing — accepts `"local"`, `"participate"`, missing
-  (→ env-var fallback), unknown (→ JSON-RPC `InvalidParams`).
+- `migrate_write_mode_column` — fresh-schema path, legacy-rows backfill path
+  (mix of `local:abc`, `local:` exact, and real signatures), idempotency
+  (run twice, same result).
+- `parse_mode` request resolver — accepts `"local"`, `"participate"`; missing
+  (→ env-var fallback); rejects `null`, non-string, `""`, `" "`, `"Local"`,
+  `"PARTICIPATE"`, unknown — each producing `-32602 InvalidParams`. The
+  resolver is the single source feeding the paywall gate and the persisted
+  `write_mode` column (drift-impossible by construction).
 - `paywall_gate(WriteMode)` — pure function returning whether to charge;
-  `WriteMode::Local` always false.
+  `WriteMode::Local` always false. (Whoami envelope shape is covered at
+  integration level; no unit duplicate.)
 
-### Integration (Rust, `tests/`)
-- `tests/modes_per_request.rs` (new) — drive the MCP HTTP/stdio dispatcher
+### Integration (Rust, `mcp/tests/`)
+- `mcp/tests/modes_per_request.rs` (new) — drives the MCP HTTP dispatcher
   end-to-end:
   - `sign_memory { mode: "local" }` against a `STORAGE_MODE=full` server →
     free, no Arweave write, row tagged `local`.
   - `sign_memory { mode: "participate" }` against `STORAGE_MODE=local` server
-    → `UnsupportedMode` (-32010), no row written.
-  - `sign_memory { /* no mode */ }` legacy path → identical bytes/behavior to
-    today's tests (regression guard for shipped extension).
-  - `whoami` envelope shape per `Config`.
-- `tests/delivery_guarantee.rs` (new) — uses the existing `arlocal` +
+    → `UnsupportedMode` (`-32010`), no row written.
+  - `sign_memory { /* no mode */ }` legacy path — golden-fixture assertion
+    against the response shape the shipped extension consumes; any field
+    drift fails the test (regression guard).
+  - `whoami` envelope shape across the three deploy variants: local-only,
+    self-operator (`full + PAYMENT_MODE=none`), hosted-x402.
+  - **Mixed-mode coexistence:** seed one DB with a `local` row and a
+    `participate` row for the same `owner_pubkey`, call `recall`, assert
+    both surface in the result and each carries its stored `write_mode`.
+- `mcp/tests/delivery_guarantee.rs` (new) — uses the existing `arlocal` +
   `solana-test-validator` harness:
   - happy path: anchor → recall+verify succeeds → row `participate`,
-    `delivery_receipt` returned, charge recorded.
-  - induced failure: stub the Arweave fetch to return wrong bytes → row
-    demoted to `local`, no `attestation_costs` row, JSON-RPC error
-    `DeliveryNotConfirmed`.
+    `delivery_receipt` returned, `attestation_costs` row written.
+  - induced failure: single-server `httpmock` returning *corrupted* GET
+    bytes on the Arweave re-fetch (pattern in
+    `core/src/arweave/mod.rs::new_for_test`); row demoted to `local`, no
+    `attestation_costs` row, JSON-RPC `-32011 DeliveryNotConfirmed`, **and**
+    the caller's balance returns to pre-call value (refund-release assertion,
+    not just absence of cost row).
+- `mcp/tests/verify_by_stored_mode.rs` (new) — explicit scenarios for T4:
+  - row stored with `write_mode='local'` → `verify` routes through
+    `verify_local` regardless of `STORAGE_MODE` env-var.
+  - row stored with `write_mode='participate'` → `verify` routes through
+    `verify_cose`.
+  - **tenant isolation:** caller A's `verify` against caller B's
+    `solana_tx` returns "not found", never leaks `content_hash`,
+    `signer_pubkey`, or content preview (regression guard for the
+    `find_by_tx` gap closed in T4).
 
 ### Compatibility regression
 The shipped extension's Cloud-tier exercises the deferred-signing path
-(`sign_memory_deferred`, `/api/sign-callback`). All existing tests in
-`tests/sign_memory_deferred_*` and `tests/sign_callback_*` must pass
-unchanged — the new `mode` field is parsed once at the top of `sign_memory`
-and the deferred branch (`jwt_sub.is_some()`) is entered before any
-mode-specific code path, so its behavior is byte-identical when `mode` is
-absent.
+(`sign_memory_deferred`, `/api/sign-callback`). The existing tests
+`mcp/tests/deferred_sign_flow.rs` and `mcp/tests/sign_callback.rs` must pass
+unchanged at the *assertion* level — the new `mode` field is parsed once at
+the top of `sign_memory` and the deferred branch (`jwt_sub.is_some()`) is
+entered before any mode-specific code path, so its behavior is byte-identical
+when `mode` is absent. T1's trait signature change will require updating
+internal test-helper callsites inside those files, but no test assertion or
+HTTP contract changes. A golden response-shape fixture (added in T2) pins
+the mode-absent response envelope against future drift.
 
 ### Not covered by this feature
 - Browser-side behavior — out of scope (kept compatible, not modified).
@@ -317,14 +387,12 @@ absent.
 ### Wave 1 — Foundation (core/)
 
 **T1: WriteMode type + DB schema migration + save_attestation signature**
-- Description: Add `WriteMode { Local, Participate }` enum in
-  `core/src/storage/mode.rs`. Extend `AttestationStore::save_attestation`
-  and `SqliteStore::save_attestation` with a `WriteMode` parameter; persist
-  it as a new `write_mode TEXT NOT NULL` column. Add idempotent
-  `migrate_write_mode_column` helper that adds the column with default
-  `'participate'` then backfills `'local'` for legacy rows whose `solana_tx`
-  starts with `local:`. Update all internal callsites in
-  `core/src/storage/sqlite.rs` tests.
+- Description: Introduce `WriteMode { Local, Participate }` as a pure type
+  in `core/`. Extend the `AttestationStore` trait and `SqliteStore` so every
+  row persists its mode. Add an idempotent migration helper that adds the
+  column and backfills legacy rows by the synthetic-id prefix rule defined
+  in Data model §"Schema migration". Update all internal callsites
+  (sqlite.rs tests, fixtures).
 - Skill: `code-writing`
 - Reviewers: `code-reviewer`, `test-reviewer`
 - Verify-smoke: `cargo test -p mnemonic-core storage::` passes; run
@@ -332,69 +400,90 @@ absent.
   fresh-schema and legacy-DB paths.
 - Files to modify: `core/src/storage/mode.rs` (new), `core/src/storage/mod.rs`,
   `core/src/storage/sqlite.rs`, `core/src/storage/traits.rs`, `core/src/lib.rs`.
-- Files to read: `core/src/storage/sqlite.rs:148-280` (migration helpers),
-  `core/src/storage/sqlite.rs:388-430` (save_attestation), user-spec.md.
+- Files to read: `core/src/storage/sqlite.rs` (migration helpers at
+  `migrate_owner_pubkey_columns`, `migrate_correlation_id_column`;
+  `save_attestation` impl), `core/src/storage/traits.rs` (`AttestationStore`
+  trait), user-spec.md.
 
 ### Wave 2 — API surface (mcp/)
 
-**T2: Per-request `mode` field + UnsupportedMode error + paywall reframing + whoami envelope**
-- Description: Add optional `mode` field to `mnemonic_sign_memory` input.
-  Resolve to `WriteMode` (default = legacy env-var when absent; `local` when
-  explicit). Move the paywall gate at `mcp/src/mcp.rs:424` to fire only when
-  resolved mode is `Participate`. Extend `whoami` output with envelope
-  fields. Emit JSON-RPC error `-32010 UnsupportedMode` when a caller
-  requests a mode outside `supported_modes`. Thread resolved `WriteMode`
-  into `sign_memory_inline` and `save_attestation`. Update all callsites in
-  `tools.rs` that today branch on `storage_mode: &str`.
+**T2: Per-request `mode` field + UnsupportedMode error + paywall reframing + whoami envelope + golden fixture**
+- Description: Add an optional `mode` field to `mnemonic_sign_memory` and a
+  single resolver function (rules in API contract §"Resolution rule").
+  Reroute the paywall gate in `mcp/src/mcp.rs` to fire on resolved
+  `WriteMode::Participate`. Extend `whoami` output with the envelope
+  contract. Emit `-32010 UnsupportedMode` when the caller requests a mode
+  outside `supported_modes`; reject malformed `mode` values with
+  `-32602 InvalidParams`. Thread `WriteMode` into `sign_memory_inline` and
+  `save_attestation`. Add a golden-fixture test asserting the mode-absent
+  response shape (compat guard for shipped extension).
 - Skill: `code-writing`
 - Reviewers: `code-reviewer`, `test-reviewer`
 - Verify-smoke: `cargo test -p mnemonic-mcp` passes; quick HTTP probe —
   `curl -X POST localhost:3000/mcp -d '{"method":"tools/call","params":{"name":"mnemonic_whoami"}}'`
   returns envelope with `supported_modes` field.
 - Files to modify: `mcp/src/mcp.rs` (paywall + dispatch), `mcp/src/tools.rs`
-  (whoami envelope, sign_memory input parsing).
-- Files to read: `mcp/src/mcp.rs:410-440`, `mcp/src/tools.rs:25-100`,
-  `mcp/src/tools.rs:280-400`, `mcp/src/config.rs:30-95`, T1 output.
+  (whoami envelope, sign_memory input parsing, mode resolver).
+- Files to read: `mcp/src/mcp.rs` (paywall gate inside `mcp_handler`),
+  `mcp/src/tools.rs` (`whoami`, `sign_memory`, `sign_memory_inline`),
+  `mcp/src/config.rs` (envelope fields), T1 output.
 
 ### Wave 3 — Delivery guarantee (mcp/)
 
 **T3: Recall+verify round-trip on participate; demote-to-local on failure; no charge on failure**
-- Description: Wrap the participate branch of `sign_memory_inline` (today's
-  Arweave/Solana write block at `tools.rs:332-367`) in a delivery confirmation
-  step: after `solana.write_memo` returns, re-fetch the COSE bytes from
-  Arweave and run `verify_cose` plus an in-process `recall` against the
-  fresh `content_hash`. On both-succeed: persist `write_mode='participate'`
-  and `record_attestation_cost`; return `delivery_receipt`. On any failure:
-  persist `write_mode='local'`, skip `record_attestation_cost`, release the
-  reserved payment via the existing refund path, return JSON-RPC
-  `-32011 DeliveryNotConfirmed`. Add `delivery_receipt` to the success
-  envelope.
+- Description: Wrap the participate branch of `sign_memory_inline` in a
+  delivery-confirmation step: after `solana.write_memo` returns, re-fetch
+  the COSE bytes from Arweave and run `verify_cose` plus an in-process
+  `recall` against the fresh `content_hash`. On both-succeed: persist with
+  `write_mode='participate'`, call `record_attestation_cost`, return
+  `delivery_receipt`. On any failure: persist with `write_mode='local'`,
+  skip `record_attestation_cost`, call `payment::refund_balance` with a
+  reason that includes the demoted `attestation_id`, return JSON-RPC
+  `-32011 DeliveryNotConfirmed`. Refund-itself failure writes a structured
+  audit row (new table `payment_refund_failures` or reuse
+  `payment_events` with a typed event kind — pick at impl time, document
+  in PR). Critical-section discipline: no `.await` while the SQLite mutex
+  is held — two short scoped locks (one for the post-anchor persist, one
+  for the demote+refund path). Add a small exponential-backoff retry
+  (max 2 attempts, 200ms / 800ms) on the Arweave re-fetch to absorb the
+  documented eventual-consistency window before declaring failure.
 - Skill: `code-writing`
 - Reviewers: `code-reviewer`, `test-reviewer`, `security-auditor`
-- Verify-smoke: integration test `tests/delivery_guarantee.rs::happy_path`
-  passes; `tests/delivery_guarantee.rs::demotion_on_fetch_failure` passes
-  with stubbed Arweave returning wrong bytes.
+- Verify-smoke: `cargo test -p mnemonic-mcp delivery_guarantee::happy_path`
+  passes; `cargo test -p mnemonic-mcp delivery_guarantee::demotion_on_fetch_failure`
+  passes with corrupted `httpmock` GET on the Arweave re-fetch.
 - Files to modify: `mcp/src/tools.rs` (sign_memory_inline participate branch),
-  `mcp/src/payment.rs` (refund callsite, no API change).
-- Files to read: `mcp/src/tools.rs:280-405`, `mcp/src/payment.rs`,
-  `mcp/src/tools.rs:479` (verify_cose), T2 output.
+  `mcp/src/payment.rs` (refund-reason wiring; structured audit row).
+- Files to read: `mcp/src/tools.rs` (`sign_memory_inline` participate branch
+  at the Arweave+Solana write block, plus `verify_cose` helper for
+  reference), `mcp/src/payment.rs` (`refund_balance` and existing call site
+  in `mcp/src/mcp.rs`), `mcp/src/mcp.rs` (refund call site on
+  tool-execution error), T2 output.
 
 ### Wave 4 — Read paths (mcp/)
 
-**T4: `verify` routes by stored `write_mode` column**
-- Description: Replace the env-var branch in `mcp/src/tools.rs::verify`
-  (line `419`: `if storage_mode == "local"`) with a SQLite lookup of the
-  row's `write_mode`. `local`-tagged rows route to `verify_local`;
-  `participate`-tagged rows route to the existing
-  `verify_cose`/`verify_legacy_json` path. Keep the env-var signature for
-  backward compatibility but ignore it for routing. `recall` already returns
-  the row's stored fields; surface `write_mode` in the recall result envelope.
+**T4: `verify` routes by stored `write_mode` column + tenant isolation on `find_by_tx`**
+- Description: Replace the env-var branch in `verify` with a SQLite lookup
+  of the row's `write_mode`. `local`-tagged rows route to `verify_local`;
+  `participate`-tagged rows route to `verify_cose`/`verify_legacy_json`.
+  Keep the env-var argument in the function signature for compatibility but
+  ignore it for routing. Surface `write_mode` in the `recall` result
+  envelope. **Tenant-isolation fix:** the `find_by_tx` lookup (and the
+  routing query) must filter by the caller's `owner_pubkey` so cohabiting
+  tenants in one DB cannot probe each other's rows via `verify` (closes the
+  pre-existing gap identified in Decision 9).
 - Skill: `code-writing`
-- Reviewers: `code-reviewer`, `test-reviewer`
+- Reviewers: `code-reviewer`, `test-reviewer`, `security-auditor`
 - Verify-smoke: `cargo test -p mnemonic-mcp verify_` and
-  `cargo test -p mnemonic-mcp recall_` pass.
-- Files to modify: `mcp/src/tools.rs` (verify routing, recall result shape).
-- Files to read: `mcp/src/tools.rs:407-630`, T1 output.
+  `cargo test -p mnemonic-mcp recall_` pass;
+  `cargo test -p mnemonic-mcp verify_by_stored_mode::tenant_isolation` passes.
+- Files to modify: `mcp/src/tools.rs` (verify routing, recall result shape),
+  `core/src/storage/sqlite.rs` (`find_by_tx` + any sibling lookup gains an
+  `owner_pubkey` filter).
+- Files to read: `mcp/src/tools.rs` (`verify`, `verify_local`, `verify_cose`,
+  `verify_legacy_json`, `recall`), `core/src/storage/sqlite.rs`
+  (`find_by_tx`), patterns.md §"Tenant isolation via `owner_pubkey`",
+  T1 output.
 
 ### Wave 5 — Docs
 
@@ -450,44 +539,109 @@ absent.
 - Skill: `pre-deploy-qa`
 - Reviewers: none
 
+## Acceptance Criteria
+
+All AC are testable in CI without a live environment. Each maps to one or
+more user-spec invariants (anchor in brackets).
+
+1. **Free local against `full` server.** `sign_memory { mode: "local" }`
+   against a `STORAGE_MODE=full + PAYMENT_MODE=x402` server returns a
+   `local:`-prefixed pair of synthetic tx ids, no Arweave/Solana writes,
+   row tagged `write_mode='local'`, no `attestation_costs` row, no payment
+   header required. [user-spec invariant: "Личная память бесплатна всегда"]
+2. **Legacy backward compatibility.** `sign_memory` with no `mode` field
+   produces a response with identical field shape to today's pre-change
+   path (golden-fixture asserted in T2). [user-spec invariant: "Совместимость
+   с shipped `work/chrome-extension/`"]
+3. **Unsupported-mode typed error.**
+   `sign_memory { mode: "participate" }` against a `STORAGE_MODE=local`
+   server returns JSON-RPC `-32010 UnsupportedMode` with
+   `data.supported = ["local"]`, no row written, no charge. Malformed
+   `mode` values (`null`, non-string, empty, case-variant, unknown) return
+   `-32602 InvalidParams`. [user-spec invariant: "типизированная ошибка,
+   не тихий downgrade"]
+4. **`whoami` envelope per deploy variant.** Returns
+   `supported_modes`, `default_mode`, `participate_cost` correctly shaped
+   for: local-only (`participate_cost: null`), self-operator
+   (`participate_cost.amount_cents: 0, payment_methods: []`), hosted-x402
+   (`amount_cents > 0, payment_methods: ["x402", …]`). [user-spec
+   invariant: "Discoverability через `whoami`"]
+5. **Delivery happy path.** Successful `participate` write returns a
+   success envelope including `delivery_receipt { arweave_tx, solana_tx,
+   recall_verified_at }`; row tagged `write_mode='participate'`;
+   `attestation_costs` row written. [user-spec invariant: "«Доставлено»
+   = заякорено И подтверждено через recall"]
+6. **Delivery failure path.** Induced Arweave re-fetch corruption demotes
+   the row to `write_mode='local'`, skips `attestation_costs`, refunds
+   the reserved balance (post-call balance equals pre-call balance), and
+   returns `-32011 DeliveryNotConfirmed`. [user-spec invariant: "Пока
+   артефакт не перечитан … запись остаётся local и плата не берётся"]
+7. **Mixed-mode coexistence.** A single owner can hold `local` and
+   `participate` rows in the same DB; `recall` returns both and tags each
+   with its stored `write_mode`. [user-spec invariant: "сосуществуют у
+   одного пользователя в одной БД, тегируясь `write_mode`"]
+8. **Tenant isolation on verify.** Caller A's `verify` against caller B's
+   `solana_tx` returns "not found" with no leaked content/hash/signer.
+   [project pattern: "Tenant isolation via `owner_pubkey`"]
+9. **Docs alignment.** Root `CLAUDE.md` no longer carries the literal
+   string "Never mix in one DB"; `patterns.md` storage-modes paragraph
+   matches the new per-request semantics. [user-spec invariant:
+   "ретайрится"]
+
 ## Agent Verification Plan
 
-This feature is purely server-side and ships its acceptance behind
-`cargo test`. No MCP tools required beyond standard CI invocations.
-Post-deploy verification not in scope — it travels with the next general
-release of the MCP server.
+### Tools required
+None. CI invocations only: `cargo test --workspace --no-fail-fast`,
+`cargo clippy --workspace --all-targets -- -D warnings`,
+`cargo fmt --all -- --check`.
 
-- **Tools required:** none (only `cargo test`, `cargo clippy`, `cargo fmt`).
-- **Acceptance criteria** (all from user-spec invariants):
-  1. `sign_memory { mode: "local" }` against a `full` server returns free,
-     no Arweave/Solana tx, row `write_mode='local'`.
-  2. `sign_memory` with no `mode` field against any server returns the same
-     bytes as today's legacy path (regression).
-  3. `sign_memory { mode: "participate" }` against a `local`-only server
-     returns JSON-RPC `-32010 UnsupportedMode`.
-  4. `whoami` returns the envelope; envelope reflects `Config` correctly
-     for all three deploy variants (local-only, self-operator, hosted-x402).
-  5. Successful participate write returns `delivery_receipt`; failed one
-     returns `-32011 DeliveryNotConfirmed` with the row demoted and no
-     `attestation_costs` row.
-  6. CLAUDE.md no longer states "Never mix modes in one DB".
+### Verification approach
+All 9 acceptance criteria map to specific tests (unit or `mcp/tests/*`
+integration) listed in §"Testing strategy". The pre-deploy QA task (F1)
+runs the suite and explicitly cross-checks each AC against its
+corresponding test name. Post-deploy verification is out of scope for
+this feature — it travels with the next general MCP-server release.
 
 ## Risk & mitigations
 
-- **Trait signature change ripples through ~15 callsites.** Mitigation:
-  T1 bundles the signature change with all internal callsite updates in
-  one task; CI catches anything missed.
-- **Backfill heuristic for legacy rows.** `solana_tx LIKE 'local:%'` is
-  reliable for rows written via the `STORAGE_MODE=local` code path
-  (`tools.rs:332-334` produces this exact prefix). Risk: a deployment
-  that hand-modified rows. Mitigation: idempotent migration helper can be
-  re-run after manual fix-ups; the new column defaults to `'participate'`
-  which is the safer assumption (paid → trustworthy until shown otherwise).
-- **Refund correctness on delivery failure.** Mitigation: T3 reuses the
-  existing payment refund path that is exercised by current error-return
-  tests; security audit (A2) reviews specifically this case.
+- **Trait signature change ripples through internal callsites.** T1 starts
+  by grepping `\.save_attestation(` across the workspace to enumerate
+  callsites, then updates them all in one PR. CI catches anything missed.
+- **Backfill heuristic for legacy rows.** `solana_tx LIKE 'local:_%'`
+  (strict — at least one char after the colon) is collision-safe against
+  real Solana signatures (base58 excludes lowercase `l`, and `:` is not in
+  the base58 alphabet at all). Risk: a deployment with hand-modified rows.
+  Mitigation: idempotent migration can be re-run; column defaults to
+  `'participate'` (safer when in doubt — paid implies trustworthy).
+- **DoS amplification via induced delivery failure.** Without mitigation a
+  caller could trigger participate writes that always fail at re-fetch,
+  bleeding operator margin (the operator already paid Arweave + Solana
+  fees) while being fully refunded. Mitigation: (i) exponential-backoff
+  retry on the Arweave re-fetch in T3 (max 2 attempts, 200ms/800ms — most
+  failures resolve within Arweave's eventual-consistency window); (ii) a
+  rate-limit on `DeliveryNotConfirmed` outcomes per `owner_pubkey` via
+  `tower_governor` (rolling window, e.g. 5/min) — if exceeded the next
+  `participate` call returns `-32011` *without* spending operator
+  fees; (iii) a Prometheus metric
+  `mnemonic_delivery_not_confirmed_total{owner_pubkey, stage}` so operators
+  detect attack patterns. Decision call-out in T3.
+- **`.await` discipline.** T3 inserts new awaits (Arweave re-fetch,
+  `verify_cose`, `recall`) into the existing scoped-lock block. Mitigation:
+  per Decision 8, two short critical sections — neither holds the SQLite
+  lock across an `.await`. Code-audit (A1) checks this explicitly.
+- **Refund audit-trail correctness.** Mitigation: T3 includes the demoted
+  `attestation_id` in the refund reason and writes a structured audit row
+  on refund-itself failure (Decision 7). Security audit (A2) reviews.
+- **Tenant isolation on cohabiting modes.** Now that one DB carries many
+  tenants × two modes, `find_by_tx` and the new routing lookup MUST scope
+  by `owner_pubkey`. Mitigation: T4 closes the pre-existing gap as part of
+  the routing change (Decision 9); regression test in
+  `mcp/tests/verify_by_stored_mode.rs`.
 - **Backward compatibility with shipped extension.** Mitigation: T2 keeps
-  the `mode`-absent path on the legacy env-var fallback verbatim; T1
-  defaults the migration column so DBs without the new column work after
-  one schema migration; existing deferred-signing tests must pass
-  unchanged (compat regression block in test strategy).
+  the `mode`-absent path on the legacy env-var fallback verbatim and
+  pins the response shape behind a golden-fixture test; T1's migration
+  helper is idempotent so DBs that haven't seen the new column work after
+  one boot; existing `deferred_sign_flow.rs` and `sign_callback.rs` test
+  *assertions* must pass unchanged (internal helper callsites are updated
+  for the new `WriteMode` parameter, as called out in the compat-regression
+  paragraph of the testing strategy).
