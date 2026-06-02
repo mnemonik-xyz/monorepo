@@ -72,6 +72,18 @@ impl ToSql for WriteMode {
     }
 }
 
+// SAFETY note (security-auditor round 1, deferred to T2):
+// The error path below echoes the raw column value back through
+// `FromSqlError::Other`. That is acceptable here because the only inputs
+// that ever reach this column are (a) the literal `'participate'` DEFAULT
+// added by `migrate_write_mode_column`, (b) the lowercase strings written
+// by `WriteMode::to_sql` via `save_attestation`, and (c) the legacy
+// backfill UPDATE which writes only `'local'`. Once T2 lands the JSON-input
+// resolver in `mcp/`, every user-supplied `mode` value is rejected at the
+// dispatcher boundary (`-32602 InvalidParams`) before it could be persisted —
+// so this error variant only fires on a tampered DB or a future migration
+// bug, where echoing the value is a useful diagnostic, not a leak vector.
+// T2 owns the input boundary; revisit this comment if the assumption shifts.
 impl FromSql for WriteMode {
     fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
         let s = value.as_str()?;

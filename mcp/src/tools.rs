@@ -18,7 +18,7 @@ use mnemonic_core::compress::EmbeddingCompressor;
 use mnemonic_core::embed::Embedder;
 use mnemonic_core::identity;
 use mnemonic_core::solana::SolanaClient;
-use mnemonic_core::storage::{AttestationStore, SqliteStore};
+use mnemonic_core::storage::{AttestationStore, SqliteStore, WriteMode};
 
 use crate::pending::PendingBundles;
 use crate::{payment, pricing::CostHint};
@@ -352,6 +352,10 @@ async fn sign_memory_inline(
     // 6. Save locally
     {
         let store = store.lock().unwrap();
+        // T1 placeholder: thread `WriteMode::Participate` so the now-11-arg
+        // trait method compiles. T2 will replace this with the resolved
+        // per-request `WriteMode` from the dispatcher (drives the paywall
+        // gate AND the persisted column from one source — Decision 1).
         store.save_attestation(
             &attestation_id,
             content,
@@ -362,6 +366,7 @@ async fn sign_memory_inline(
             &pubkey,
             owner_pubkey,
             &now,
+            WriteMode::Participate,
             &embedding,
         )?;
         if storage_mode != "local" {

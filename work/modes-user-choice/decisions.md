@@ -274,3 +274,32 @@ audit-trail; do NOT use as design input):**
   positioning spectrum and (b) the chrome-extension discovery. To be
   regenerated via `/new-tech-spec` (tech-spec) and removed/rewritten on demand
   (stories/journeys — they were exploratory artifacts, not template-required).
+
+## Task 1: WriteMode enum + write_mode column + save_attestation signature
+
+**Status:** Done
+**Commit:** b62038c
+**Agent:** task1-impl
+**Summary:** Added `core::storage::WriteMode { Local, Participate }` (pure
+type, strict serde + rusqlite round-trip, `from_str_strict` rejects every
+non-canonical input) and threaded it through `AttestationStore::save_attestation`
++ `SqliteStore::save_attestation`. New idempotent `migrate_write_mode_column`
+adds `write_mode TEXT NOT NULL DEFAULT 'participate'` plus the composite
+`(owner_pubkey, write_mode)` index, and is wired into both `SqliteStore::open`
+and `::in_memory`. Backfill rule: `UPDATE … SET write_mode='local' WHERE
+solana_tx LIKE 'local:_%'` — the `_` requires ≥1 char after the colon, so bare
+`'local:'` stays `'participate'` (default) and real base58 sigs stay
+`'participate'` (base58 excludes lowercase `l`, so collision is impossible).
+DEFAULT is `'participate'` on purpose: legacy global-`STORAGE_MODE=full` rows
+were paid writes. This is the foundation that T2 consumes when it wires the
+per-request `mode` field through `sign_memory_inline`.
+**Deviations:** None.
+
+**Reviews:**
+
+*Round 1:* pending (will be dispatched by the team lead).
+
+**Verification:**
+- `cargo test -p mnemonic-core --no-fail-fast` → 121 passed, 0 failed, 1 ignored.
+- `cargo clippy -p mnemonic-core --all-targets -- -D warnings` → clean.
+- `cargo fmt --all -- --check` → clean.

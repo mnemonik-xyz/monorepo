@@ -280,10 +280,17 @@ fn migrate_correlation_id_column(conn: &Connection) -> anyhow::Result<()> {
 /// idempotent (`CREATE INDEX IF NOT EXISTS`, UPDATE matches zero rows on a
 /// clean DB) so this is safe to invoke on every open.
 fn migrate_write_mode_column(conn: &Connection) -> anyhow::Result<()> {
-    fn has_column(conn: &Connection, table: &str, column: &str) -> anyhow::Result<bool> {
+    // SAFETY: the PRAGMA query string is a hard-coded literal — no
+    // user-controlled input can reach SQLite here. The older migration
+    // helpers (`migrate_owner_pubkey_columns`, `migrate_correlation_id_column`)
+    // accept a `table: &str` and `format!()` it in; that pattern is safe
+    // today (only internal literals call them) but fragile if extended. This
+    // helper deliberately avoids the parameter so the query is a const, not
+    // a runtime-formatted string (security-auditor round 1 finding).
+    fn attestations_has_column(conn: &Connection, column: &str) -> anyhow::Result<bool> {
         let mut stmt = conn
-            .prepare(&format!("PRAGMA table_info({table})"))
-            .with_context(|| format!("preparing PRAGMA table_info({table})"))?;
+            .prepare("PRAGMA table_info(attestations)")
+            .context("preparing PRAGMA table_info(attestations)")?;
         let mut rows = stmt.query([])?;
         while let Some(row) = rows.next()? {
             let name: String = row.get(1)?;
@@ -294,7 +301,7 @@ fn migrate_write_mode_column(conn: &Connection) -> anyhow::Result<()> {
         Ok(false)
     }
 
-    let need_column = !has_column(conn, "attestations", "write_mode")?;
+    let need_column = !attestations_has_column(conn, "write_mode")?;
 
     conn.execute_batch("BEGIN IMMEDIATE;")
         .context("opening write_mode migration transaction")?;

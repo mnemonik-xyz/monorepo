@@ -38,7 +38,7 @@ use crypto_box::{
 };
 use lru::LruCache;
 use mnemonic_core::codec::{hash::hash_bytes, sign::verify_artifact};
-use mnemonic_core::storage::AttestationStore;
+use mnemonic_core::storage::{AttestationStore, WriteMode};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 use uuid::Uuid;
@@ -284,6 +284,11 @@ pub async fn sign_callback_handler(
                 );
             }
         };
+        // T1 placeholder: thread `WriteMode::Participate` so the now-11-arg
+        // trait method compiles. T2 will replace this with the resolved
+        // per-request `WriteMode` once the deferred-sign flow carries the
+        // mode through the callback (the original request that produced this
+        // correlation_id resolved a mode at dispatch time).
         let save_res = store.save_attestation(
             &attestation_id,
             &entry.content,
@@ -294,6 +299,7 @@ pub async fn sign_callback_handler(
             &req.signer_pubkey, // signer = pubkey we just verified via COSE
             &req.signer_pubkey, // owner = same pubkey (Decision 9 — webapp flow uses keypair as identity)
             &now,
+            WriteMode::Participate,
             &entry.embedding,
         );
         // Stamp the correlation_id onto the row so `mnemonic_check_pending`
