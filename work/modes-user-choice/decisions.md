@@ -755,3 +755,26 @@ exercise the same code in their non-failure direction).
 **Documented residuals (not re-litigated):** T3.5 (`demotion_on_x402`),
 `delivery_guarantee::happy_path` ignored, `stdio_backward_compat` +
 `api_cli_bootstrap` ignored (pre-existing).
+
+## Wave 7 — Pre-deploy QA (T9)
+
+**Status:** Done
+**Auditor:** qa-pre-deploy (no reviewers — QA report IS the verdict)
+**Date:** 2026-06-02
+**HEAD:** b0561a4f5421efb0129bd3f6ad97e0c3437631df
+**Verdict:** **pass**
+**Report:** `work/modes-user-choice/logs/qa/pre-deploy-qa.md`
+
+**Gates summary:**
+- Lint + format → clean (`cargo fmt --check` ✓, `cargo clippy -- -D warnings` ✓).
+- Test suite → **533 passed, 0 failed, 4 ignored** (`cargo test --workspace --features mnemonic-mcp/test-support --no-fail-fast`). All 4 ignored documented (pre-existing OS-keychain / spawn-binary, plus the `happy_path` sentinel for the future arlocal harness).
+- CI cross-lang-build (gate) → **success** on HEAD `b0561a4` (run 26820125143).
+- AC traceability → 11/11 user-spec invariants + 9/9 tech-spec AC mapped to passing named tests (per `logs/audit/test-audit.md`).
+- Audit-wave residuals → 0 critical, 0 major across T6 code-audit + T7 security-audit + T8 test-audit. Only known residuals carried forward (T3.5 `demotion_on_x402` follow-up; R2-F4 response-timing symmetry).
+- Smoke probe (best-effort) → release build with `--features local-embed` succeeded; server startup blocked on local OS-keychain identity prereq (host environment issue, not a feature regression). Smoke path is also exercised by CI post-merge; per `tasks/9.md` smoke failure does NOT cap verdict to fail.
+
+**Outstanding pre-merge:**
+- Land T3.5 (`demotion_on_x402` integration test) before merging to main.
+- User sign-off.
+
+**Deviations:** None. Read-only/run-only QA per `tasks/9.md` "Critical do not"; no source/test/docs files modified.
