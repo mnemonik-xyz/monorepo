@@ -504,7 +504,8 @@ for retry; race window between two concurrent same-nonce requests resolved by
 the `x402_nonces.tx_sig` UNIQUE constraint — loser sees a clean error).
 Round-1 major "DoS quota guard skipped for x402-only callers" closed via new
 `derive_quota_subject(headers, payment_mode)` returning either
-`blake3(api_key).to_hex()` (Bearer) or `blake3(payer_pubkey).to_hex()` (x402).
+`blake3(api_key).to_hex()` (Bearer) or `blake3(tx_sig).to_hex()` (x402 —
+the on-chain payment proof; stable across retries with the same payment).
 
 **Deviations:**
 
