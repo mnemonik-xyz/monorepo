@@ -643,3 +643,115 @@ one-paragraph cross-reference only.
 - `cargo fmt --all -- --check` → clean (docs-only).
 - `cargo test --workspace --features mnemonic-mcp/test-support --no-fail-fast`
   → green (docs-only; code tests unaffected).
+
+## Wave 6 — Code audit (A1)
+
+**Status:** Approved
+**Auditor:** audit-code
+**Date:** 2026-06-02
+**Report:** `work/modes-user-choice/logs/audit/code-audit.md`
+**Verdict:** approved — no critical, no major findings. Five minor / info-level
+observations recorded in the report (visibility of `perform_delivery_check`,
+graceful-shutdown signal for the eviction loop, cosmetic match-return typing,
+duplicate predicate doc cross-reference, `&'static str` architectural note).
+All are non-blocking; none warrant a fixer-agent dispatch.
+
+**Highlights cross-checked end-to-end:**
+- Lock discipline: no SQLite mutex held across `.await` in any of the 5
+  touched files; DashMap shard guards in `RefundsBySubject` honoured the
+  same rule. Background eviction loop awaits `tokio::time::sleep` only
+  BETWEEN passes.
+- PII allow-list at `payment_events.refund_failed` rows: `{api_key_hash,
+  attestation_id, reason, occurred_at}` only — hash NOT raw key,
+  description format `"{attestation_id} | {reason}"`, asserted by both a
+  unit test and the `delivery_guarantee::refund_failure_writes_audit_row`
+  integration test (with negative assertion that no `content_preview` /
+  `cose_bytes` column exists on `payment_events`).
+- Trait signature ripple closed: `save_attestation` (gained `WriteMode`),
+  `find_by_tx` (gained `owner_pubkey`), new `find_write_mode_by_tx`. No
+  orphaned callsites.
+- Backward-compatibility golden fixture
+  (`mcp/tests/fixtures/modes/legacy_sign_response.json`) present and pinned
+  by the `mode_absent_response_shape_is_unchanged_from_legacy` test.
+- Migration idempotency exercised, runs from BOTH `SqliteStore::open` AND
+  `::in_memory`; backfill heuristic `LIKE 'local:_%'` collision-safe.
+
+**Known residuals carried forward** (already documented in this log):
+- T3.5 — `demotion_on_x402` integration test deferred to a small
+  follow-up task.
+- R2-F4 — `verify` response-timing symmetry on tenant miss accepted as
+  residual (shape-level isolation fully closed).
+
+## Wave 6 — Security Audit (A2)
+
+**Status:** Done
+**Agent:** audit-security
+**Verdict:** approved
+**Report:** `work/modes-user-choice/logs/audit/security-audit.md`
+
+**Summary:** Holistic OWASP Top 10 + tenant-isolation + payment-refund +
+write_mode injection review across the cumulative feature diff (core/storage,
+mcp/{tools,mcp,payment,api,main,config}, integration tests). All seven
+critical invariants verified end-to-end: lock discipline (SQLite mutex +
+DashMap shard guards never held across `.await`), tenant isolation (identical
+`not_found` shape across `verify` routing miss AND `verify_local` leaf,
+T4 round-1 `storage_mode: "local"` oracle confirmed closed), drift-impossible
+WriteMode (single resolver call at `mcp_handler` entry threaded through to
+`save_attestation`), DoS guard fires at participate entry BEFORE chain spend
+(quota_exceeded test asserts zero Arweave hits on the threshold-breaching
+call), `derive_quota_subject` keyed on `blake3(api_key)` / `blake3(tx_sig)`
+(never `owner_pubkey`), refund-failed audit row honours the pinned PII
+allow-list (api_key column carries blake3 hash; no content_preview /
+cose_bytes / embedding columns exist), and `payment_events.api_key` column
+carries the HASH on refund_failed rows by both code path and integration-test
+assertion.
+
+**Findings:** Zero new. Every major / minor flagged by per-task rounds
+(T1–T4) has been resolved in a subsequent commit; the resolutions are
+catalogued in the audit report under "Severity-tagged findings".
+
+**Known deferrals carried forward** (already documented above):
+- T3.5 — `demotion_on_x402` integration test deferred.
+- R2-F4 — `verify` response-timing symmetry on tenant miss accepted.
+
+## Wave 6 — Test Audit (A3)
+
+**Status:** Done
+**Auditor:** audit-test (no reviewers — audit IS the review)
+**Date:** 2026-06-02
+**Verdict:** **approved**
+**Report:** `work/modes-user-choice/logs/audit/test-audit.md`
+
+**Numbers:** 528 tests passing, 0 failed, 4 ignored (all documented:
+`happy_path` requires arlocal, `stdio_backward_compat` + `api_cli_bootstrap`
+spawn the binary, `roundtrip_real_keychain` is OS-keychain pre-existing).
+
+**Coverage matrices:** Both the user-spec invariant matrix and the
+9-AC tech-spec matrix are filled in inside the report. Every invariant
+and every AC has at least one strongly-asserted test except `AC5 happy
+path` (sentinel `#[ignore]`d per project convention; failure paths
+exercise the same code in their non-failure direction).
+
+**Findings:** Six tracked, all severity ≤ minor; no blockers.
+1. **F1 (info)** — `paywall_gate(WriteMode)` spec'd as a pure-function
+   unit test but realised at integration level (gate inlined in
+   `mcp_handler`); acceptable documented divergence.
+2. **F2 (minor)** — `quota_exceeded_short_circuits_before_chain_write`
+   asserts Arweave absence but not Solana symmetrically. One-line
+   tightening.
+3. **F3 (minor)** — `refund_failure_writes_audit_row` asserts hash
+   length (64) but not hex-digit-only chars. Carried over from T3
+   r1+r2 unaddressed.
+4. **F4 (minor)** — `LEAKY_FIELDS` in `verify_by_stored_mode.rs`
+   should include `storage_mode` for belt-and-suspenders regression
+   coverage.
+5. **F5 (info)** — `derive_quota_subject` has no direct unit test
+   (only `balance` branch covered via integration). x402 branch ties
+   into deferred T3.5.
+6. **F6 (info)** — participate-routing assertion in
+   `verify_routes_participate_for_participate_row` is more indirect
+   than its local counterpart; resolvable when arlocal harness lands.
+
+**Documented residuals (not re-litigated):** T3.5 (`demotion_on_x402`),
+`delivery_guarantee::happy_path` ignored, `stdio_backward_compat` +
+`api_cli_bootstrap` ignored (pre-existing).
