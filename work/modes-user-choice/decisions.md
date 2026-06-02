@@ -314,27 +314,58 @@ new integration suite `mcp/tests/modes_per_request.rs` covers all six
 ACs end-to-end. A golden fixture at
 `mcp/tests/fixtures/modes/legacy_sign_response.json` pins the mode-absent
 deferred-signing envelope shape (regression guard for shipped extension).
-**Deviations:** Routing rule for `sign_memory` is more nuanced than the
-brief described: it skips deferred when `write_mode == Local AND
-envelope.supports_participate()` (explicit-local-on-full). The brief
-suggested skipping deferred whenever `write_mode == Local`; that would
-break `mock_state` (local) + JWT + mode-absent path which the existing
-`deferred_sign_flow.rs` / `oauth_tool_call.rs` / `pending_user_cap.rs` /
-`recall_owner_isolation.rs` tests assume routes through deferred. The
-narrower condition preserves those assertions verbatim (per the
-"Do NOT change deferred_sign_flow.rs / sign_callback.rs ASSERTIONS"
-constraint) while still honouring the user-spec invariant for the
-chrome-extension's actual deploy target (full + JWT, never local + JWT
-in production).
+**Deviations:** Round-1 had a routing rule "skip deferred when
+`write_mode == Local AND envelope.supports_participate()`" — round-2
+review flagged this as the wrong predicate (conflated "explicit
+local" with "running on a full server"). Replaced with the simpler
+`ResolvedMode::is_explicit_local()` (i.e. caller sent `mode: "local"`
+explicitly) regardless of deploy variant. The mode-absent + JWT +
+local-only path (chrome-extension Cloud-tier production target)
+keeps routing through deferred because `ResolvedMode::fallback(Local)`
+is `explicit == false`. No assertions in `deferred_sign_flow.rs` /
+`sign_callback.rs` change.
 
 **Reviews:**
 
-*Round 1:* pending (will be dispatched by the team lead).
+*Round 1:*
+- code-reviewer: 5 minors → applied in round 2.
+- test-reviewer: 3 minors → applied in round 2.
+- security-auditor: 1 major (explicit-local routing on local-only
+  deploy) + 3 minors → all applied in round 2.
 
-**Verification:**
+*Round 2 changes (single commit):*
+- Resolver now returns `ResolvedMode { write_mode, explicit }`. Routing
+  in `sign_memory` uses `is_explicit_local()` (drops the round-1
+  `envelope.supports_participate()` workaround). Fixes the
+  security-auditor major. New integration test
+  `modes_per_request::explicit_local_against_local_only_server_is_inline_not_deferred`
+  pins the regression.
+- Resolver called ONCE per request in `mcp_handler`; threaded through
+  new `handle_request_with_resolved_mode` →  `handle_tool_call` →
+  `sign_memory`. Stdio path resolves on demand inside
+  `handle_tool_call` when `pre_resolved_mode = None`.
+- `tool_error_to_json_rpc` now matches on the typed
+  `tools::ToolError { TypedRpc(JsonRpcError), Other(anyhow::Error) }`
+  carrier instead of parsing `anyhow::Error.to_string()` as JSON.
+  Closes the security-auditor "forged error code" minor.
+- `mnemonic_sign_memory` `inputSchema` now declares the `mode` field
+  with `enum: ["local", "participate"]` + description.
+- `tracing::warn!` emitted on resolver `Err` in both dispatch paths.
+- Stale paywall doc-comment on `mcp_handler` rewritten.
+- `whoami_envelope_per_deploy_variant` sub-case 4c: added
+  `default_mode == "local"` + `currency == "USD"` assertions.
+- `local_against_full_server_returns_free`: explicit assertion that
+  the response is 200 OK (paywall bypassed — would be 402 if not).
+- Misleading "inline" comment on the golden-fixture test corrected
+  (test actually pins the deferred awaiting_signature shape).
+- Stale resolver-test comment ("rejection happens in
+  sign_memory_inline") corrected to `sign_memory`.
+
+**Verification (round 2):**
 - `cargo test --workspace --features mnemonic-mcp/test-support --no-fail-fast`
-  → all suites green (mcp lib: 153 passed; modes_per_request: 6 passed;
-  every existing integration test unchanged in assertions).
+  → **TOTAL: 507 passed, 0 failed** (mcp lib: 154 passed including
+  new `test_explicit_local_with_jwt_takes_inline_path`;
+  modes_per_request: 7 passed; every other test unchanged).
 - `cargo clippy --workspace --all-targets --features mnemonic-mcp/test-support -- -D warnings`
   → clean.
 - `cargo fmt --all -- --check` → clean.

@@ -333,6 +333,11 @@ fn tool_definitions() -> Value {
                 "properties": {
                     "content": {"type": "string", "description": "Content to attest"},
                     "tags": {"type": "array", "items": {"type": "string"}, "description": "Optional tags"},
+                    "mode": {
+                        "type": "string",
+                        "enum": ["local", "participate"],
+                        "description": "Per-request write intent (T2 — modes-user-choice). 'local' keeps the artifact on the server's own SQLite (free, no chain writes). 'participate' anchors on Arweave + Solana (paid on hosted operators; cost surfaced via mnemonic_whoami). Optional — omit to use the server's default; call mnemonic_whoami to see supported_modes / default_mode / participate_cost first.",
+                    },
                 },
                 "required": ["content"],
             },
@@ -391,6 +396,27 @@ pub async fn handle_request(
     owner_pubkey: &str,
     jwt_sub: Option<&str>,
 ) -> JsonRpcResponse {
+    // T2 round-2: callers without a pre-resolved mode (stdio dispatch via
+    // `run_stdio` → `handle_request`) get `None` here. The dispatcher
+    // resolves on demand inside `handle_tool_call`. `mcp_handler` (HTTP)
+    // resolves up front for the paywall gate and passes the result in via
+    // `handle_request_with_resolved_mode` below.
+    handle_request_with_resolved_mode(req, state, owner_pubkey, jwt_sub, None).await
+}
+
+/// Variant of [`handle_request`] that accepts a pre-resolved `mode`. The
+/// HTTP `mcp_handler` resolves `mode` once before the paywall gate (so
+/// the gate decision and the storage column come from the same value);
+/// it threads the resolved value here so `handle_tool_call` doesn't
+/// re-parse the same input. The single call site eliminates the latent
+/// drift risk the round-1 implementation carried.
+pub async fn handle_request_with_resolved_mode(
+    req: &JsonRpcRequest,
+    state: &McpState,
+    owner_pubkey: &str,
+    jwt_sub: Option<&str>,
+    pre_resolved_mode: Option<crate::tools::ResolvedMode>,
+) -> JsonRpcResponse {
     let result: Result<Value, JsonRpcError> = match req.method.as_str() {
         "initialize" => Ok(serde_json::json!({
             "protocolVersion": "2025-06-18",
@@ -405,7 +431,7 @@ pub async fn handle_request(
                 .and_then(|n| n.as_str())
                 .unwrap_or("");
             let args = req.params.get("arguments").cloned().unwrap_or_default();
-            handle_tool_call(name, &args, state, owner_pubkey, jwt_sub).await
+            handle_tool_call(name, &args, state, owner_pubkey, jwt_sub, pre_resolved_mode).await
         }
         "notifications/initialized" | "ping" => Ok(serde_json::json!({})),
         _ => Err(JsonRpcError::simple(
@@ -506,11 +532,18 @@ fn ndjson_error(status: StatusCode, code: i32, message: &str) -> Response {
 /// extensible to many (progress notifications, deferred sign-callback frames
 /// from Task 4b).
 ///
-/// Payment-gating semantics from the previous request-response handler are
-/// preserved: when `mnemonic_sign_memory` is invoked under
-/// `payment_mode != "none" && storage_mode != "local"`, we run the full
-/// `payment::check_payment` -> `deduct_balance` -> dispatch -> refund flow.
-/// Each terminal state emits exactly one NDJSON frame.
+/// Payment-gating semantics (T2 round-2 — modes-user-choice): the gate
+/// fires only when `mnemonic_sign_memory` is invoked AND the resolved
+/// per-request `mode` is `Participate` AND `payment_mode != "none"`.
+/// A `Local` request (explicit or env-fallback) bypasses the gate
+/// entirely regardless of `STORAGE_MODE` — the whitepaper §5.7.1
+/// free-local invariant is now structural, not configurational. The
+/// resolved `WriteMode` is computed once here and threaded into
+/// `handle_request_with_resolved_mode` so the dispatch column and the
+/// gate decision come from the same value (drift impossible by
+/// construction). On a gate-pass we run the full
+/// `payment::check_payment` -> `deduct_balance` -> dispatch -> refund
+/// flow. Each terminal state emits exactly one NDJSON frame.
 pub async fn mcp_handler(
     State(state): State<Arc<McpState>>,
     headers: HeaderMap,
@@ -581,23 +614,33 @@ pub async fn mcp_handler(
     let is_sign_memory = req.method == "tools/call"
         && req.params.get("name").and_then(|n| n.as_str()) == Some("mnemonic_sign_memory");
 
-    // T2: resolve the per-request `mode` field BEFORE the paywall gate so
-    // that (a) malformed `mode` values short-circuit with `-32602
-    // InvalidParams` instead of charging, (b) `WriteMode::Local` requests
-    // ALWAYS skip the paywall regardless of `STORAGE_MODE`, (c) the
-    // resolved `WriteMode` is the single value driving both the paywall
-    // decision and the column persisted by `sign_memory_inline` (drift
-    // impossible by construction — Decision 1).
+    // T2 round-2: resolve the per-request `mode` field ONCE here, before
+    // the paywall gate. The resolved value drives THREE things:
     //
-    // For non-sign_memory requests, this resolution is a no-op (we never
-    // touch the value); we still tunnel it through `handle_tool_call`
-    // when needed so the same parsing happens exactly once.
-    let resolved_mode_for_gate: Option<WriteMode> = if is_sign_memory {
+    //   1. The paywall gate predicate below.
+    //   2. The persisted `write_mode` column (threaded into
+    //      `handle_request_with_resolved_mode` →  `handle_tool_call` →
+    //      `tools::sign_memory` → `save_attestation`).
+    //   3. The deferred-vs-inline routing in `sign_memory` (uses
+    //      `ResolvedMode::is_explicit_local` to honour the user-spec
+    //      invariant uniformly across deploys).
+    //
+    // Single source of truth → drift impossible by construction. On a
+    // malformed value (case-variant, whitespace, null, etc.) we
+    // short-circuit with `-32602 InvalidParams` BEFORE charging, BEFORE
+    // touching storage, and after emitting a structured warn log for
+    // operator visibility.
+    let resolved_mode_for_gate: Option<crate::tools::ResolvedMode> = if is_sign_memory {
         let args = req.params.get("arguments").cloned().unwrap_or_default();
         match crate::tools::resolve_write_mode(args.get("mode"), &state.storage_mode) {
-            Ok(m) => Some(m),
+            Ok(r) => Some(r),
             Err(err) => {
-                // Bad `mode` field — short-circuit with the typed error.
+                let received = args.get("mode").cloned().unwrap_or(Value::Null);
+                tracing::warn!(
+                    field = "mode",
+                    received = %received,
+                    "rejected non-canonical mode value"
+                );
                 let resp = JsonRpcResponse {
                     jsonrpc: "2.0".into(),
                     id: req.id.clone().unwrap_or(Value::Null),
@@ -615,7 +658,10 @@ pub async fn mcp_handler(
     // `Local` write on a `STORAGE_MODE=full + PAYMENT_MODE=x402` server
     // bypasses the gate entirely — the whitepaper §5.7.1 free-local
     // invariant is now structural, not configurational.
-    let participate_gate = matches!(resolved_mode_for_gate, Some(WriteMode::Participate));
+    let participate_gate = matches!(
+        resolved_mode_for_gate.map(|r| r.write_mode),
+        Some(WriteMode::Participate)
+    );
     if is_sign_memory && participate_gate && state.payment_mode != "none" {
         // Use live price from pricing engine (refreshed in background).
         let current_cost = state.pricing.current_price();
@@ -649,7 +695,14 @@ pub async fn mcp_handler(
                     }
                 }
 
-                let resp = handle_request(&req, &state, &owner_pubkey, jwt_sub.as_deref()).await;
+                let resp = handle_request_with_resolved_mode(
+                    &req,
+                    &state,
+                    &owner_pubkey,
+                    jwt_sub.as_deref(),
+                    resolved_mode_for_gate,
+                )
+                .await;
 
                 // Refund on tool failure. Uses `refund_balance` (not
                 // `credit_deposit`) so the per-tx_sig idempotency guard does
@@ -683,7 +736,14 @@ pub async fn mcp_handler(
             }
         }
     } else {
-        let resp = handle_request(&req, &state, &owner_pubkey, jwt_sub.as_deref()).await;
+        let resp = handle_request_with_resolved_mode(
+            &req,
+            &state,
+            &owner_pubkey,
+            jwt_sub.as_deref(),
+            resolved_mode_for_gate,
+        )
+        .await;
         ndjson_response(StatusCode::OK, &resp)
     }
 }
@@ -699,6 +759,7 @@ async fn handle_tool_call(
     state: &McpState,
     owner_pubkey: &str,
     jwt_sub: Option<&str>,
+    pre_resolved_mode: Option<crate::tools::ResolvedMode>,
 ) -> Result<Value, JsonRpcError> {
     let result = match name {
         "mnemonic_whoami" => {
@@ -720,13 +781,27 @@ async fn handle_tool_call(
                         .collect()
                 })
                 .unwrap_or_default();
-            // T2: resolve the per-request `mode` field into a typed
-            // `WriteMode`. Errors here (`-32602 InvalidParams`) propagate
-            // out as typed JSON-RPC errors with `data.field == "mode"`
-            // and `data.received` echoing the raw input. The paywall
-            // gate in `mcp_handler` resolves the same value (single
-            // source of truth — drift impossible by construction).
-            let write_mode = tools::resolve_write_mode(args.get("mode"), &state.storage_mode)?;
+            // T2 round-2: use the pre-resolved mode if `mcp_handler` already
+            // parsed it for the paywall gate (HTTP transport — single call
+            // site, drift impossible). The stdio dispatch path passes `None`
+            // here and we resolve on demand below.
+            let resolved = match pre_resolved_mode {
+                Some(r) => r,
+                None => match tools::resolve_write_mode(args.get("mode"), &state.storage_mode) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        // Log the rejection so probe traffic is visible to
+                        // operators (security-auditor round-1 minor).
+                        let received = args.get("mode").cloned().unwrap_or(Value::Null);
+                        tracing::warn!(
+                            field = "mode",
+                            received = %received,
+                            "rejected non-canonical mode value on stdio path"
+                        );
+                        return Err(e);
+                    }
+                },
+            };
             let cost_hint = state.pricing.cost_hint(state.sol_tx_fee_lamports);
             tools::sign_memory(
                 &state.keypair,
@@ -742,7 +817,7 @@ async fn handle_tool_call(
                 &state.storage_mode,
                 owner_pubkey,
                 jwt_sub,
-                write_mode,
+                resolved,
                 &state.envelope,
             )
             .await
@@ -807,33 +882,20 @@ async fn handle_tool_call(
     }))
 }
 
-/// Translate an `anyhow::Error` coming out of `tools::sign_memory` into a
-/// `JsonRpcError`. `sign_memory_inline` smuggles typed JSON-RPC errors (e.g.
-/// `-32010 UnsupportedMode`) through `anyhow` as JSON-stringified bodies;
-/// every other error stays a generic `-32603 InternalError` with the
-/// stringified `Display`.
+/// Translate a [`tools::ToolError`] into a `JsonRpcError`.
 ///
-/// The smuggle format is exactly the inner-data shape of `JsonRpcError`:
-/// `{"code": i32, "message": String, "data": Option<Value>}`. If parsing
-/// succeeds, the original typed error is reconstituted; otherwise we fall
-/// back to the generic envelope. This keeps the tool-impl side honest
-/// (it doesn't need to know about JSON-RPC) while still letting typed
-/// errors reach the wire.
-fn tool_error_to_json_rpc(e: anyhow::Error) -> JsonRpcError {
-    let msg = e.to_string();
-    if let Ok(parsed) = serde_json::from_str::<Value>(&msg) {
-        if let (Some(code), Some(message)) = (
-            parsed.get("code").and_then(|c| c.as_i64()),
-            parsed.get("message").and_then(|m| m.as_str()),
-        ) {
-            return JsonRpcError {
-                code: code as i32,
-                message: message.to_string(),
-                data: parsed.get("data").cloned().filter(|v| !v.is_null()),
-            };
-        }
+/// Round-2 (security-auditor minor): replaces the round-1 parser that
+/// round-tripped JsonRpcError through `anyhow::Error.to_string()` as
+/// JSON. That approach let any downstream error whose `Display` happened
+/// to be valid JSON with a numeric `code` forge a typed error code. The
+/// typed [`tools::ToolError`] carrier makes the dispatch decision
+/// type-safe at the language level — the JsonRpcError is never a string
+/// until it reaches the wire.
+fn tool_error_to_json_rpc(e: crate::tools::ToolError) -> JsonRpcError {
+    match e {
+        crate::tools::ToolError::TypedRpc(rpc) => rpc,
+        crate::tools::ToolError::Other(any) => JsonRpcError::simple(-32603, any.to_string()),
     }
-    JsonRpcError::simple(-32603, msg)
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

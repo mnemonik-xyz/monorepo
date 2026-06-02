@@ -24,50 +24,101 @@ use crate::mcp::{invalid_params, unsupported_mode, Envelope, JsonRpcError};
 use crate::pending::PendingBundles;
 use crate::{payment, pricing::CostHint};
 
+/// Outcome of resolving the per-request `mode` field. Carries the resolved
+/// [`WriteMode`] **plus** whether it came from the caller's explicit input
+/// or from the env-var fallback path.
+///
+/// Round-2 review (security-auditor major): keeping these two dimensions
+/// distinct lets the routing rule in `sign_memory` say "**explicit local
+/// always goes inline**" without bringing the envelope into the predicate
+/// — the envelope's `supports_participate` check was a workaround for the
+/// missing explicit-vs-fallback distinction and silently broke scenario
+/// (c) (explicit `mode: "local"` on a local-only deploy went to the
+/// deferred branch instead of the free inline path the user-spec
+/// invariant promises).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResolvedMode {
+    pub write_mode: WriteMode,
+    /// True when the caller sent an explicit `"mode": "local"` /
+    /// `"mode": "participate"` field. False when the caller omitted the
+    /// field and the resolver applied env-var fallback.
+    pub explicit: bool,
+}
+
+impl ResolvedMode {
+    fn explicit(write_mode: WriteMode) -> Self {
+        Self {
+            write_mode,
+            explicit: true,
+        }
+    }
+
+    fn fallback(write_mode: WriteMode) -> Self {
+        Self {
+            write_mode,
+            explicit: false,
+        }
+    }
+
+    /// True when the caller explicitly asked for `Local`. Used by
+    /// `sign_memory` to bypass the deferred-signing (Cloud-tier) branch in
+    /// favour of the inline free-local path — the user-spec invariant
+    /// "Личная память бесплатна всегда" applies regardless of deploy
+    /// variant (full or local-only).
+    pub fn is_explicit_local(&self) -> bool {
+        self.explicit && self.write_mode == WriteMode::Local
+    }
+}
+
 /// Resolve the per-request `mode` field on `mnemonic_sign_memory` to a
-/// concrete [`WriteMode`]. This is the **single source of truth** that drives
-/// BOTH the paywall gate in `mcp_handler` AND the persisted `write_mode`
-/// column on the attestation row — by construction they cannot drift
-/// (Decision 1 in work/modes-user-choice/tech-spec.md).
+/// concrete [`ResolvedMode`]. This is the **single source of truth** that
+/// drives BOTH the paywall gate in `mcp_handler` AND the persisted
+/// `write_mode` column on the attestation row — by construction they
+/// cannot drift (Decision 1 in work/modes-user-choice/tech-spec.md).
 ///
 /// Resolution rules (tech-spec §"API contract changes / Resolution rule"):
 ///
-/// | Input             | Output                                            |
-/// |-------------------|---------------------------------------------------|
-/// | `None` (absent)   | env-var fallback: `local` iff `env_storage_mode  |
-/// |                   | == "local"`, else `Participate`                  |
-/// | `"local"`         | `WriteMode::Local`                                |
-/// | `"participate"`   | `WriteMode::Participate`                          |
-/// | anything else     | `Err(invalid_params("mode", received_verbatim))`  |
+/// | Input             | Output                                                        |
+/// |-------------------|---------------------------------------------------------------|
+/// | `None` (absent)   | env-var fallback: `local` iff `env_storage_mode == "local"`,  |
+/// |                   | else `Participate` (marked `explicit = false`)                |
+/// | `"local"`         | `WriteMode::Local` (`explicit = true`)                        |
+/// | `"participate"`   | `WriteMode::Participate` (`explicit = true`)                  |
+/// | anything else     | `Err(invalid_params("mode", received_verbatim))`              |
 ///
 /// "Anything else" covers: JSON `null`, non-string types (integer, array,
 /// object), empty `""`, whitespace `" "`, capitalised `"Local"` /
-/// `"PARTICIPATE"`, unknown strings. The verbatim received `Value` is echoed
-/// in the error's `data.received` so a misbehaving client can diff.
+/// `"PARTICIPATE"`, unknown strings. The verbatim received `Value` is
+/// echoed in the error's `data.received` so a misbehaving client can diff.
 ///
 /// Pure function — no I/O, no globals. The full resolution table is
 /// table-driven-tested in `mcp::tests::resolve_write_mode_*`.
-pub(crate) fn resolve_write_mode(
+pub fn resolve_write_mode(
     input_mode: Option<&serde_json::Value>,
     env_storage_mode: &str,
-) -> Result<WriteMode, JsonRpcError> {
+) -> Result<ResolvedMode, JsonRpcError> {
     match input_mode {
         None => {
             // Backward-compat: the shipped chrome-extension and pre-T2 stdio
             // clients never send `mode`. Resolve from env-var so their
-            // behaviour is byte-for-byte unchanged.
+            // behaviour is byte-for-byte unchanged. Marked `explicit = false`
+            // so the routing rule in `sign_memory` knows this is the legacy
+            // fallback path (deferred branch still applies when JWT is set).
             if env_storage_mode == "local" {
-                Ok(WriteMode::Local)
+                Ok(ResolvedMode::fallback(WriteMode::Local))
             } else {
-                Ok(WriteMode::Participate)
+                Ok(ResolvedMode::fallback(WriteMode::Participate))
             }
         }
         Some(serde_json::Value::String(s)) => match WriteMode::from_str_strict(s) {
-            Some(m) => Ok(m),
+            Some(m) => Ok(ResolvedMode::explicit(m)),
             // `from_str_strict` rejects `"Local"`, `"PARTICIPATE"`, `""`,
             // `" "`, trailing whitespace, and any unknown string. Echo the
             // raw string back through `data.received` (not `s` directly —
-            // we want the JSON Value variant preserved).
+            // we want the JSON Value variant preserved). Caller is
+            // expected to also emit a `tracing::warn!` line — done at the
+            // dispatcher boundary (`mcp_handler`) so logging discipline
+            // stays in one place, not scattered across resolver callers.
             None => Err(invalid_params(
                 "mode",
                 input_mode.expect("Some matched above"),
@@ -78,22 +129,48 @@ pub(crate) fn resolve_write_mode(
     }
 }
 
-/// Smuggle a `unsupported_mode` JSON-RPC error through `anyhow::Error` so it
-/// surfaces from `tools::sign_memory` (which has an `anyhow::Result` return
-/// type) and is reconstituted by `mcp::tool_error_to_json_rpc` at the
-/// dispatcher boundary. The encoded body is the inner-data shape of
-/// `JsonRpcError`: `{code, message, data}` JSON — matching the parsing
-/// rule in `tool_error_to_json_rpc`. Drift would silently fall back to
-/// `-32603 InternalError`; the round-trip is tested via the integration
-/// test `participate_against_local_only_server_returns_unsupported`.
-fn unsupported_mode_anyhow(envelope: &Envelope) -> anyhow::Error {
-    let err = unsupported_mode("participate", &envelope.supported_modes);
-    let body = serde_json::json!({
-        "code": err.code,
-        "message": err.message,
-        "data": err.data,
-    });
-    anyhow::anyhow!(body.to_string())
+/// Typed error returned from `sign_memory` so the dispatcher can
+/// distinguish a typed JSON-RPC error (e.g. `-32010 UnsupportedMode`)
+/// from a generic `anyhow::Error` (e.g. an Arweave write failure).
+///
+/// Round-2 review (security-auditor minor): the round-1 implementation
+/// smuggled JsonRpcError through `anyhow::Error.to_string()` and
+/// reconstituted it by parsing the Display output as JSON. That parser
+/// would happily reconstitute any error whose `Display` happened to be
+/// a valid JSON object with a numeric `code` — an attacker-controlled
+/// content path (e.g. a downstream service error containing JSON in
+/// its message) could forge a typed error code. The typed carrier
+/// here makes the dispatch decision type-safe; the JsonRpcError is
+/// never a string until it reaches the wire.
+#[derive(Debug)]
+pub enum ToolError {
+    /// Already-typed JSON-RPC error — propagate verbatim through the
+    /// dispatcher.
+    TypedRpc(JsonRpcError),
+    /// Opaque error (Arweave/Solana/SQLite failure, etc.). The
+    /// dispatcher wraps it in `-32603 InternalError`.
+    Other(anyhow::Error),
+}
+
+impl From<anyhow::Error> for ToolError {
+    fn from(e: anyhow::Error) -> Self {
+        ToolError::Other(e)
+    }
+}
+
+impl From<JsonRpcError> for ToolError {
+    fn from(e: JsonRpcError) -> Self {
+        ToolError::TypedRpc(e)
+    }
+}
+
+impl std::fmt::Display for ToolError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ToolError::TypedRpc(e) => write!(f, "{} (code {})", e.message, e.code),
+            ToolError::Other(e) => write!(f, "{e}"),
+        }
+    }
 }
 
 /// Tool 1: whoami (sync — DB only)
@@ -170,33 +247,38 @@ pub async fn sign_memory(
     storage_mode: &str,
     owner_pubkey: &str,
     jwt_sub: Option<&str>,
-    write_mode: WriteMode,
+    resolved: ResolvedMode,
     envelope: &Envelope,
-) -> anyhow::Result<serde_json::Value> {
+) -> Result<serde_json::Value, ToolError> {
     // T2 — UnsupportedMode check fires BEFORE the JWT-deferred branch so a
     // browser client asking for `participate` against a local-only deploy
     // gets the typed error even when it would otherwise enter the
     // deferred-signing path. The user explicitly asked to anchor on-chain;
     // the server cannot fulfil that intent regardless of whether the
     // signing path is server-side or browser-side.
-    if write_mode == WriteMode::Participate && !envelope.supports_participate() {
-        return Err(unsupported_mode_anyhow(envelope));
+    if resolved.write_mode == WriteMode::Participate && !envelope.supports_participate() {
+        return Err(ToolError::TypedRpc(unsupported_mode(
+            "participate",
+            &envelope.supported_modes,
+        )));
     }
-    // The deferred-signing branch is the Cloud-tier path (browser signs
-    // COSE, server only anchors). It fires on any JWT-authenticated
-    // request EXCEPT when the caller explicitly opted into the inline
-    // free-local path (`mode: "local"` against a server that ALSO
-    // supports participate — i.e. a `full` deploy). For mode-absent
-    // requests we preserve the legacy behaviour (deferred whenever JWT
-    // is present) so the shipped chrome-extension Cloud-tier keeps
-    // working byte-for-byte. The "explicit local on a full deploy
-    // returns free" case is signalled by `write_mode == Local` AND the
-    // envelope supporting participate (a paid/anchoring deploy that the
-    // user is on but chose to bypass).
-    let explicit_local_on_full = write_mode == WriteMode::Local && envelope.supports_participate();
+    // Routing rule (round-2 simplification — security-auditor major):
+    // - `explicit local` (caller sent `mode: "local"`) → ALWAYS inline,
+    //   regardless of deploy. The user-spec invariant "Личная память
+    //   бесплатна всегда" is honoured uniformly: scenario (b) full + JWT
+    //   + explicit local AND scenario (c) local + JWT + explicit local
+    //   both produce a synthetic-id free local write. Closes the
+    //   round-1 gap where (c) silently went to the deferred path.
+    // - Everything else with a JWT → deferred (Cloud-tier flow). This
+    //   includes mode-absent + JWT on a local-only deploy (the
+    //   chrome-extension's actual production target — preserved byte-
+    //   for-byte) AND explicit `mode: "participate"` + JWT.
+    // - No JWT → inline (stdio / Claude Code path), unchanged.
     if let Some(sub) = jwt_sub {
-        if !explicit_local_on_full {
-            return sign_memory_deferred(embedder, compressor, pending, content, tags, sub).await;
+        if !resolved.is_explicit_local() {
+            return sign_memory_deferred(embedder, compressor, pending, content, tags, sub)
+                .await
+                .map_err(ToolError::Other);
         }
     }
     sign_memory_inline(
@@ -211,10 +293,10 @@ pub async fn sign_memory(
         cost_hint,
         storage_mode,
         owner_pubkey,
-        write_mode,
-        envelope,
+        resolved.write_mode,
     )
     .await
+    .map_err(ToolError::Other)
 }
 
 /// HTTP/JWT branch — Decision 12 deferred-signing path.
@@ -416,8 +498,11 @@ pub async fn check_pending(
 ///   from the response keep working byte-for-byte because the resolver
 ///   maps `None` (no `mode` field) to env-var fallback, producing the same
 ///   `WriteMode` value the env-var would have selected.
-/// - `envelope` is consulted to short-circuit a `participate` request
-///   against a local-only deploy with a typed `UnsupportedMode` error.
+///
+/// The participate-on-local-only short-circuit lives in `sign_memory` (the
+/// public entry point) — fires before deferred-vs-inline branching so the
+/// user gets the typed error regardless of path. `sign_memory_inline` does
+/// NOT take the envelope.
 #[allow(clippy::too_many_arguments)]
 async fn sign_memory_inline(
     keypair: &Keypair,
@@ -432,13 +517,7 @@ async fn sign_memory_inline(
     storage_mode: &str,
     owner_pubkey: &str,
     write_mode: WriteMode,
-    envelope: &Envelope,
 ) -> anyhow::Result<serde_json::Value> {
-    // The participate-on-local-only short-circuit lives in
-    // `sign_memory` (the public entry point) — fires before deferred-vs-
-    // inline branching so the user gets the typed error regardless of
-    // path.
-    let _ = envelope; // retained in the signature for future hooks
     let pubkey = identity::pubkey_base58(keypair);
     let attestation_id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
@@ -881,15 +960,16 @@ mod sign_memory_tests {
 
     #[tokio::test]
     async fn test_sign_memory_returns_awaiting_signature_for_jwt_path() {
-        // T2: the legacy mode-absent JWT path still resolves to the
-        // deferred branch because the resolver maps a local-only deploy
-        // with no explicit mode to `WriteMode::Local`, and on a deploy
-        // that does NOT support participate that takes the deferred
-        // branch (legacy chrome-extension shape preserved). See
-        // `sign_memory` for the routing rule.
+        // T2 round-2: mode-absent JWT path against a local-only deploy
+        // resolves to `Local` via env-var fallback (`explicit = false`)
+        // and STILL takes the deferred branch — the routing rule
+        // bypasses deferred only for *explicit* local requests. This
+        // pins the legacy chrome-extension Cloud-tier shape byte-for-
+        // byte (no `mode` field, deferred envelope).
         let (kp, sol, ar, store, emb, comp, pending, hint) = fixtures();
         let owner = kp.pubkey().to_string();
         let env = local_envelope();
+        let resolved = resolve_write_mode(None, "local").unwrap();
         let result = sign_memory(
             &kp,
             &sol,
@@ -904,7 +984,7 @@ mod sign_memory_tests {
             "local",
             &owner,
             Some("user-jwt-sub"),
-            WriteMode::Local,
+            resolved,
             &env,
         )
         .await
@@ -925,6 +1005,7 @@ mod sign_memory_tests {
         let (kp, sol, ar, store, emb, comp, pending, hint) = fixtures();
         let owner = kp.pubkey().to_string();
         let env = local_envelope();
+        let resolved = resolve_write_mode(None, "local").unwrap();
         let result = sign_memory(
             &kp,
             &sol,
@@ -939,7 +1020,7 @@ mod sign_memory_tests {
             "local",
             &owner,
             None,
-            WriteMode::Local,
+            resolved,
             &env,
         )
         .await
@@ -949,6 +1030,77 @@ mod sign_memory_tests {
         assert!(result["content_hash"].is_string());
         let s = store.lock().unwrap();
         assert_eq!(s.count(&owner).unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_explicit_local_with_jwt_takes_inline_path() {
+        // T2 round-2 (security-auditor major): explicit `mode: "local"`
+        // with a JWT MUST short-circuit to the inline path regardless
+        // of deploy variant — both local-only AND full deploys honour
+        // the "Личная память бесплатна всегда" invariant uniformly.
+        // Round-1's `envelope.supports_participate()` workaround broke
+        // this for local-only deploys.
+        let (kp, sol, ar, store, emb, comp, pending, hint) = fixtures();
+        let owner = kp.pubkey().to_string();
+
+        // Sub-case A: explicit local on a local-only deploy.
+        let env_local = local_envelope();
+        let resolved_explicit_local =
+            resolve_write_mode(Some(&serde_json::json!("local")), "local").unwrap();
+        assert!(resolved_explicit_local.is_explicit_local());
+        let result = sign_memory(
+            &kp,
+            &sol,
+            &ar,
+            &store,
+            &emb,
+            &comp,
+            &pending,
+            "explicit-local-on-local",
+            &[],
+            &hint,
+            "local",
+            &owner,
+            Some("user-jwt-sub"),
+            resolved_explicit_local,
+            &env_local,
+        )
+        .await
+        .unwrap();
+        assert!(
+            result["attestation_id"].is_string(),
+            "expected inline shape, got {result:?}"
+        );
+        assert_eq!(result["write_mode"], "local");
+        // Sub-case B: explicit local on a full deploy.
+        let env_full = Envelope::from_config("full", "none", 0);
+        let resolved_explicit_local_full =
+            resolve_write_mode(Some(&serde_json::json!("local")), "full").unwrap();
+        assert!(resolved_explicit_local_full.is_explicit_local());
+        let result = sign_memory(
+            &kp,
+            &sol,
+            &ar,
+            &store,
+            &emb,
+            &comp,
+            &pending,
+            "explicit-local-on-full",
+            &[],
+            &hint,
+            "full",
+            &owner,
+            Some("user-jwt-sub"),
+            resolved_explicit_local_full,
+            &env_full,
+        )
+        .await
+        .unwrap();
+        assert!(
+            result["attestation_id"].is_string(),
+            "expected inline shape on full deploy too"
+        );
+        assert_eq!(result["write_mode"], "local");
     }
 }
 
@@ -977,34 +1129,40 @@ mod resolve_write_mode_tests {
     }
 
     #[test]
-    fn none_with_env_local_resolves_to_local() {
-        let m = resolve_write_mode(None, "local").expect("None+local resolves");
-        assert_eq!(m, WriteMode::Local);
+    fn none_with_env_local_resolves_to_local_fallback() {
+        let r = resolve_write_mode(None, "local").expect("None+local resolves");
+        assert_eq!(r.write_mode, WriteMode::Local);
+        assert!(!r.explicit, "env-var fallback must not be marked explicit");
+        assert!(!r.is_explicit_local());
     }
 
     #[test]
-    fn none_with_env_full_resolves_to_participate() {
+    fn none_with_env_full_resolves_to_participate_fallback() {
         // Legacy compat: pre-T2 clients (chrome-extension Cloud) on a full
         // deploy fall back to env-var behaviour — Participate.
-        let m = resolve_write_mode(None, "full").expect("None+full resolves");
-        assert_eq!(m, WriteMode::Participate);
+        let r = resolve_write_mode(None, "full").expect("None+full resolves");
+        assert_eq!(r.write_mode, WriteMode::Participate);
+        assert!(!r.explicit);
     }
 
     #[test]
-    fn explicit_local_string_resolves_to_local() {
+    fn explicit_local_string_resolves_to_local_explicit() {
         let v = serde_json::json!("local");
-        let m = resolve_write_mode(Some(&v), "full").expect("explicit local");
-        assert_eq!(m, WriteMode::Local);
+        let r = resolve_write_mode(Some(&v), "full").expect("explicit local");
+        assert_eq!(r.write_mode, WriteMode::Local);
+        assert!(r.explicit, "string-literal input must be marked explicit");
+        assert!(r.is_explicit_local());
     }
 
     #[test]
-    fn explicit_participate_string_resolves_to_participate() {
+    fn explicit_participate_string_resolves_to_participate_explicit() {
         let v = serde_json::json!("participate");
-        let m = resolve_write_mode(Some(&v), "local").expect("explicit participate");
+        let r = resolve_write_mode(Some(&v), "local").expect("explicit participate");
         // Note: even on a `STORAGE_MODE=local` env, the resolver returns
-        // Participate; rejection happens later in `sign_memory_inline` via
-        // the envelope check. The resolver's job is parse-only.
-        assert_eq!(m, WriteMode::Participate);
+        // Participate; rejection happens later in `sign_memory` via the
+        // envelope check. The resolver's job is parse-only.
+        assert_eq!(r.write_mode, WriteMode::Participate);
+        assert!(r.explicit);
     }
 
     #[test]
