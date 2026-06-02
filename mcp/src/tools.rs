@@ -1264,9 +1264,13 @@ fn verify_local(
                 }))
             }
         }
+        // Tenant-isolation parity (T4 round-1 security finding, CWE-203):
+        // the `not_found` shape must match the top-level routing-miss
+        // shape exactly. Including `storage_mode: "local"` here would
+        // distinguish "row belongs to another local tenant" from "row
+        // doesn't exist anywhere", giving an attacker an existence oracle.
         None => Ok(serde_json::json!({
             "status": "not_found",
-            "storage_mode": "local",
             "lookup_id": lookup_id,
         })),
     }
