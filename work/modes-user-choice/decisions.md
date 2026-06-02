@@ -477,3 +477,63 @@ idle entries on a configurable interval. Four new env vars in
 - `cargo clippy --workspace --all-targets --features mnemonic-mcp/test-support -- -D warnings`
   → clean.
 - `cargo fmt --all -- --check` → clean.
+
+## Task 3 — round 2 (lead-applied finish + partial deferral)
+
+**Status:** Ready for review (round 2)
+**Commit:** (pending — this entry written before commit)
+**Agent:** main agent (lead) — applied the round-2 finish after two consecutive
+teammate runtime failures (first teammate stalled mid-iteration; recovery
+teammate's socket closed unexpectedly after ~65 min). Code-substantive work
+in the working tree was authored by the prior teammates and verified by the
+lead; the lead added only the small mechanical pieces noted below.
+
+**Summary:** Round-1 critical (recall stage used `content_hash` instead of
+primary-key lookup, broken for real embedders) closed — replaced with a
+direct `SELECT 1 FROM attestations WHERE attestation_id = ? AND
+owner_pubkey = ?` existence check in `perform_delivery_check`. Round-1 major
+"Cloud-tier deferred path lacks delivery guarantee" closed — extracted a
+shared helper `tools::confirm_delivery_or_demote(DeliveryContext)` called by
+BOTH `sign_memory_inline` (inline path) AND `sign_callback_handler` (deferred
+path) so the user-spec invariant "delivered = anchored AND verified by recall"
+now holds for the chrome-extension Cloud-tier flow. Round-1 major
+"x402 nonce consumed before delivery" closed — `check_payment` now only
+VERIFIES the nonce; consumption deferred to `consume_x402_nonce_after_success`
+which fires after delivery success (failure path leaves the nonce reusable
+for retry; race window between two concurrent same-nonce requests resolved by
+the `x402_nonces.tx_sig` UNIQUE constraint — loser sees a clean error).
+Round-1 major "DoS quota guard skipped for x402-only callers" closed via new
+`derive_quota_subject(headers, payment_mode)` returning either
+`blake3(api_key).to_hex()` (Bearer) or `blake3(payer_pubkey).to_hex()` (x402).
+
+**Deviations:**
+
+- **Test gap deferred:** `demotion_on_x402` integration test is NOT
+  implemented in this round. The x402-nonce-deferral CODE is in place and
+  exercised by the production paths, but the dedicated test requires new
+  x402 mock infrastructure (signed USDC transfer mock, `X-Payment` header
+  helpers, `x402_nonces`-state read helpers) that the existing test harness
+  doesn't provide. Adding this infra is moderate scope and would re-expose
+  the agent-stall failure mode the round-2 fix already hit twice. Deferred
+  to a small follow-up task (T3.5 — "x402 delivery-failure integration
+  test"), to land before merge to main. Audit-wave will flag this gap as
+  visible-but-known.
+- **Lead authored a partial commit.** Per the lead's role boundary
+  ("dispatcher, not doer"), the lead does not normally write code. After
+  two teammate runtime failures left the round-2 work uncommitted in the
+  working tree but visibly complete, the user explicitly approved the
+  lead-deviation path. Lead-authored changes are limited to: (a) one
+  `#[allow(clippy::too_many_arguments)]` annotation on
+  `perform_delivery_check` (matching the project's existing pattern on
+  `AttestationStore::save_attestation`); (b) two test-strengthening
+  additions in `delivery_guarantee.rs` per the test-reviewer's round-1
+  asks (DB-row assertion on `demotion_on_verify_failure`; description-
+  format-prefix assertion on `refund_failure_writes_audit_row`). All other
+  changes in this commit are unmodified from the teammates' uncommitted
+  working-tree work.
+
+**Verification:**
+- `cargo fmt --all -- --check` → clean.
+- `cargo clippy --workspace --all-targets --features mnemonic-mcp/test-support -- -D warnings` → clean.
+- `cargo test --workspace --features mnemonic-mcp/test-support --no-fail-fast` →
+  **527 passed, 0 failed** (4 ignored, all intentional per project convention).

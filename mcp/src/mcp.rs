@@ -171,6 +171,42 @@ pub fn delivery_not_confirmed(
     }
 }
 
+/// Derive the per-request quota subject for the DoS guard. Returns the
+/// `blake3` hex digest of either the bearer api_key (balance mode) or the
+/// x402 tx_sig (x402 mode). `None` on stdio path (no auth headers) and on
+/// `payment_mode == "none"` (no billable subject).
+///
+/// Centralised so the subject derivation is the same value at the entry
+/// quota check, the success-path nonce-consumption call (via the matching
+/// `tx_sig`), and the failure-branch counter increment. A divergence
+/// between any two of those would let an attacker bypass the quota by
+/// rotating the part of the request the failure branch doesn't see.
+///
+/// **Subject choice rationale** (round-2 security-auditor fix):
+/// - Balance: `blake3(api_key).to_hex()` — same as round 1. Operator-issued.
+/// - x402: `blake3(tx_sig).to_hex()` — stable across retries with the
+///   same `X-Payment` header. A fresh tx_sig means a fresh USDC payment;
+///   the caller pays their own way around the quota.
+/// - `Both` mode: prefer balance if a Bearer header is present, otherwise
+///   fall back to x402 — matches the order `check_payment` uses.
+pub(crate) fn derive_quota_subject(headers: &HeaderMap, payment_mode: &str) -> Option<String> {
+    if payment_mode == "none" {
+        return None;
+    }
+    // Balance has precedence in `both` mode — matches `check_payment`'s order.
+    if matches!(payment_mode, "balance" | "both") {
+        if let Some(raw_key) = payment::extract_api_key(headers) {
+            return Some(payment::hash_api_key(&raw_key));
+        }
+    }
+    if matches!(payment_mode, "x402" | "both") {
+        if let Some(proof) = payment::extract_x402_proof(headers) {
+            return Some(payment::hash_api_key(&proof.tx_sig));
+        }
+    }
+    None
+}
+
 /// `-32011 DeliveryQuotaExceeded` — entry-of-participate-path short-circuit
 /// fired by `mcp_handler` BEFORE any Arweave/Solana write because the
 /// caller's `api_key_hash` has accumulated `>= threshold` delivery-failure
@@ -735,19 +771,27 @@ pub async fn mcp_handler(
 
     // T3 — outcome-based DoS guard. Consulted at the *entry* of the
     // participate path, BEFORE `check_payment`/`deduct_balance`, BEFORE
-    // any Arweave/Solana write. Keyed on `api_key_hash` (blake3 of the
-    // bearer api_key), NEVER on `owner_pubkey` — Ed25519 keys rotate for
-    // free, billable subjects don't (Decision in tech-spec §"Risk &
-    // mitigations / DoS amplification" mitigation ii). On
-    // quota-exceeded the request short-circuits to JSON-RPC -32011 with
-    // `data.kind: "DeliveryQuotaExceeded"`, spending zero chain fees.
+    // any Arweave/Solana write. The subject is the stable billable
+    // identifier for the request:
     //
-    // No-op on the stdio path (no Bearer JWT) since stdio is trusted-
-    // local. No-op on `payment_mode == "none"` since there is no billable
-    // subject to key on.
+    //   - **balance mode**: `blake3(bearer_api_key)` — the operator-issued
+    //     api_key the caller can't rotate without re-paying.
+    //   - **x402 mode**: `blake3(tx_sig)` — the on-chain payment proof.
+    //     After the round-2 nonce deferral, the same tx_sig is reusable on
+    //     delivery failure (no charge), so it serves as a stable
+    //     per-payment identifier. A fresh tx_sig means a fresh USDC
+    //     payment — the caller is paying their own way around the quota,
+    //     which is the right blast-radius.
+    //
+    // Keying on `owner_pubkey` (Ed25519) would let an attacker mint a new
+    // identity per request → quota bypass. The chosen subject derivation
+    // closes that gap for both auth methods.
+    //
+    // No-op on the stdio path (no Bearer JWT, no x402 header) since stdio
+    // is trusted-local. No-op on `payment_mode == "none"` since there is
+    // no billable subject to key on.
     if is_sign_memory && participate_gate && state.payment_mode != "none" {
-        if let Some(raw_key) = payment::extract_api_key(&headers) {
-            let subject = payment::hash_api_key(&raw_key);
+        if let Some(subject) = derive_quota_subject(&headers, &state.payment_mode) {
             if state.refunds_by_subject.is_over(&subject) {
                 state.delivery_metrics.record_quota_short_circuit();
                 let err = delivery_quota_exceeded(
@@ -755,7 +799,7 @@ pub async fn mcp_handler(
                     state.refunds_by_subject.threshold(),
                 );
                 tracing::warn!(
-                    api_key_hash = %subject,
+                    subject_hash = %subject,
                     threshold = state.refunds_by_subject.threshold(),
                     window_secs = state.refunds_by_subject.window().as_secs(),
                     "delivery quota exceeded — short-circuiting participate request"
@@ -816,10 +860,10 @@ pub async fn mcp_handler(
                 )
                 .await;
 
-                // Refund on tool failure. Uses `refund_balance` (not
-                // `credit_deposit`) so the per-tx_sig idempotency guard does
-                // not silently swallow repeated refunds for the same
-                // underlying failure class.
+                // Refund + bookkeeping on tool failure. Uses
+                // `refund_balance` (not `credit_deposit`) so the per-tx_sig
+                // idempotency guard does not silently swallow repeated
+                // refunds for the same underlying failure class.
                 //
                 // T3 (modes-user-choice) — the typed
                 // `-32011 DeliveryNotConfirmed` carries the demoted
@@ -833,11 +877,28 @@ pub async fn mcp_handler(
                 //   2. On the participate path the SAME error increments
                 //      the `RefundsBySubject` counter so the entry-of-
                 //      participate quota guard fires after `threshold`
-                //      consecutive demotions.
+                //      consecutive demotions. The subject is derived from
+                //      `derive_quota_subject(headers, payment_mode)` so it
+                //      matches the value the entry quota-check already
+                //      computed (drift-impossible).
                 //   3. On refund-itself failure write a structured
                 //      `payment_events` audit row via
                 //      `payment::record_refund_failed` so an operator can
                 //      forensically trace stuck ledger state.
+                //
+                // T3 round-2 — on SUCCESS, consume the x402 nonce here
+                // (deferred from `check_payment`). A delivery failure
+                // leaves the nonce reusable so the caller's USDC payment
+                // isn't forfeit when the operator's anchor isn't proved
+                // retrievable. The race window between the entry
+                // `x402_nonce_already_consumed` check and this INSERT is
+                // resolved by the `x402_nonces.tx_sig` UNIQUE constraint:
+                // the loser sees ConstraintViolation, which is the right
+                // behaviour for two concurrent requests with the same
+                // payment.
+                let quota_subject = derive_quota_subject(&headers, &state.payment_mode);
+                let x402_proof = payment::extract_x402_proof(&headers);
+
                 if let Some(ref err) = resp.error {
                     // T3 — DeliveryNotConfirmed-specific bookkeeping.
                     // Extract `stage` + `attestation_id` from the typed
@@ -856,8 +917,10 @@ pub async fn mcp_handler(
                         state.delivery_metrics.record_not_confirmed(dnc_stage);
                     }
 
+                    // Refund — balance path only. x402 refund is implicit
+                    // (the nonce was never consumed, so the same
+                    // `X-Payment` header can be retried).
                     if let Some(ref key) = api_key {
-                        let subject = payment::hash_api_key(key);
                         // Refund reason format includes the demoted
                         // attestation_id so the `payment_events.description`
                         // column lets an operator grep
@@ -875,8 +938,9 @@ pub async fn mcp_handler(
                         }; // mutex dropped here; no `.await` while held
 
                         if let Err(refund_err) = refund_result {
+                            let log_subject = quota_subject.clone().unwrap_or_default();
                             tracing::warn!(
-                                api_key_hash = %subject,
+                                subject_hash = %log_subject,
                                 error = %refund_err,
                                 attestation_id = %dnc_attestation_id,
                                 "refund failed; writing audit row"
@@ -884,7 +948,7 @@ pub async fn mcp_handler(
                             // Best-effort audit row. Lives in `mcp/` per
                             // the project's hard architectural rule.
                             // Body sticks to the PII allow-list pinned
-                            // in the spec: api_key_hash (NOT raw key),
+                            // in the spec: subject_hash (NOT raw key),
                             // attestation_id, reason, occurred_at. No
                             // content_preview, no cose_bytes, no
                             // embedding.
@@ -892,22 +956,52 @@ pub async fn mcp_handler(
                             let store = state.store.lock().expect("store mutex poisoned");
                             let _ = payment::record_refund_failed(
                                 &store,
-                                &subject,
+                                &log_subject,
                                 dnc_attestation_id,
                                 "refund-itself-failed",
                                 &now,
                             );
                         }
+                    }
 
-                        // T3 — increment the per-subject quota counter on
-                        // delivery demotions only. Other failure classes
-                        // (e.g. embed/Arweave failure before the delivery
-                        // check) do NOT count against the quota; only the
-                        // induced-refund pattern matters for the DoS
-                        // mitigation. Counter increment happens OUTSIDE
-                        // the SQLite mutex (Decision 8).
-                        if dnc_data.is_some() {
-                            state.refunds_by_subject.record_failure(&subject);
+                    // T3 — increment the per-subject quota counter on
+                    // delivery demotions only. Other failure classes
+                    // (e.g. embed/Arweave failure before the delivery
+                    // check) do NOT count against the quota; only the
+                    // induced-refund pattern matters for the DoS
+                    // mitigation. Counter increment happens OUTSIDE
+                    // the SQLite mutex (Decision 8). Fires for BOTH
+                    // balance- and x402-authed callers — the subject
+                    // derivation handles auth method dispatch.
+                    if dnc_data.is_some() {
+                        if let Some(ref subject) = quota_subject {
+                            state.refunds_by_subject.record_failure(subject);
+                        }
+                    }
+                } else {
+                    // Success path — consume the x402 nonce now that the
+                    // delivery confirmation has passed. ConstraintViolation
+                    // on a concurrent retry is fine (one of the two
+                    // requests wins; the other gets the
+                    // `x402_nonce_already_consumed` reject on its next
+                    // entry).
+                    if let Some(proof) = x402_proof.as_ref() {
+                        let store = state.store.lock().expect("store mutex poisoned");
+                        if let Err(e) =
+                            payment::consume_x402_nonce_after_success(&store, &proof.tx_sig)
+                        {
+                            // Log only — by the time we reach here the
+                            // anchor + DB write have already happened, so
+                            // a nonce-consume failure cannot un-deliver
+                            // the artefact. The operator may see a
+                            // duplicate-charge later if the caller replays
+                            // the same `X-Payment` and the original
+                            // INSERT actually did succeed under a race.
+                            tracing::warn!(
+                                tx_sig = %proof.tx_sig,
+                                error = %e,
+                                "x402 nonce consume failed post-success"
+                            );
                         }
                     }
                 }

@@ -147,6 +147,24 @@ async fn demotion_on_verify_failure() {
     assert_eq!(data["stage"], "verify");
     assert_eq!(data["row_demoted_to"], "local");
 
+    // DB row assertion — catches a regression where the demotion
+    // INSERT OR REPLACE silently fails (test-reviewer round 1).
+    let attestation_id = data["attestation_id"]
+        .as_str()
+        .expect("attestation_id in error data");
+    let row_write_mode: String = {
+        let store = state.store.lock().unwrap();
+        store
+            .conn()
+            .query_row(
+                "SELECT write_mode FROM attestations WHERE attestation_id = ?",
+                rusqlite::params![attestation_id],
+                |r| r.get::<_, String>(0),
+            )
+            .expect("row exists after demotion")
+    };
+    assert_eq!(row_write_mode, "local");
+
     // Balance restored.
     assert_eq!(balance_for(&state, &bearer), pre_balance);
     assert_eq!(state.delivery_metrics.not_confirmed("verify"), 1);
@@ -249,8 +267,15 @@ async fn refund_failure_writes_audit_row() {
             .expect("install refund-fail trigger");
     }
 
-    let (status, _env) = call_sign_memory_participate(&app, &bearer, "audit-row").await;
+    let (status, env) = call_sign_memory_participate(&app, &bearer, "audit-row").await;
     assert_eq!(status, StatusCode::OK);
+
+    // Capture the demoted attestation_id for the description-format
+    // assertion below (test-reviewer round 1).
+    let attestation_id = env["error"]["data"]["attestation_id"]
+        .as_str()
+        .expect("attestation_id in -32011 error data")
+        .to_string();
 
     // Read the refund_failed audit row.
     let store = state.store.lock().unwrap();
@@ -285,6 +310,14 @@ async fn refund_failure_writes_audit_row() {
     assert!(
         row.3.contains("refund-itself-failed"),
         "description must include the reason"
+    );
+    // Description must use the spec-mandated `{attestation_id} | {reason}`
+    // format prefix for 1:1 forensic correlation (test-reviewer round 1,
+    // tech-spec §"Decisions 7" PII allow-list).
+    assert!(
+        row.3.starts_with(&format!("{attestation_id} | ")),
+        "description must start with '{attestation_id} | ', got: {}",
+        row.3
     );
 
     // Negative assertion: NO `content_preview` / `cose_bytes` column exists

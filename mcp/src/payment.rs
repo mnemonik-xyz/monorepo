@@ -196,6 +196,23 @@ async fn check_x402(
         }
     };
 
+    // T3 round-2 — replay-detect WITHOUT consuming. If this nonce has
+    // already been consumed (by a successful delivery on an earlier
+    // request), reject. The actual `INSERT INTO x402_nonces` happens
+    // AFTER `confirm_delivery_or_demote` succeeds (see
+    // `consume_x402_nonce_after_success` below) so a delivery failure
+    // leaves the nonce reusable — the caller's USDC payment is not
+    // forfeit when the operator's anchor isn't proved retrievable.
+    {
+        let store = store.lock().unwrap();
+        if x402_nonce_already_consumed(&store, &proof.tx_sig).unwrap_or(false) {
+            return PaymentGate::Unauthorized(format!(
+                "x402 payment already used: {}",
+                proof.tx_sig
+            ));
+        }
+    }
+
     // Verify the Solana USDC transfer
     match verify_usdc_transfer(solana, &proof.tx_sig, treasury, usdc_mint, cost as u64).await {
         Ok(Some(_)) => {}
@@ -208,15 +225,47 @@ async fn check_x402(
         Err(e) => return PaymentGate::Unauthorized(format!("x402 verification error: {e}")),
     }
 
-    // Mark nonce to prevent replay
-    {
-        let store = store.lock().unwrap();
-        if let Err(e) = mark_x402_nonce(&store, &proof.tx_sig) {
-            return PaymentGate::Unauthorized(e.to_string());
-        }
-    }
-
+    // Do NOT mark the nonce here. The nonce is consumed only after a
+    // successful delivery confirmation (or, in the
+    // legacy `payment_mode == "none"` path, never). See
+    // `consume_x402_nonce_after_success`.
     PaymentGate::Proceed(None)
+}
+
+/// Read-only replay check for an x402 nonce. Returns `Ok(true)` if a row
+/// already exists in `x402_nonces`, `Ok(false)` otherwise.
+///
+/// Used by `check_x402` to fail-fast on replay BEFORE the more expensive
+/// `verify_usdc_transfer` Solana RPC. Note: a race window exists between
+/// this read and the eventual `consume_x402_nonce_after_success` INSERT
+/// — the loser gets `mark_x402_nonce` ConstraintViolation, which is the
+/// correct outcome (one of the two concurrent requests wins).
+pub fn x402_nonce_already_consumed(store: &SqliteStore, tx_sig: &str) -> anyhow::Result<bool> {
+    let exists: bool = store
+        .conn()
+        .query_row(
+            "SELECT 1 FROM x402_nonces WHERE tx_sig = ? LIMIT 1",
+            params![tx_sig],
+            |_| Ok(true),
+        )
+        .unwrap_or(false);
+    Ok(exists)
+}
+
+/// Consume an x402 nonce by inserting it into `x402_nonces`. Called by
+/// the caller AFTER the delivery confirmation passes (T3 round-2
+/// deferral). Returns `Err` on ConstraintViolation if the same nonce was
+/// concurrently consumed by another request.
+///
+/// Round-2 split: the original `check_x402` consumed the nonce at gate
+/// time, which made delivery failures permanently spend the caller's
+/// USDC. With the nonce deferred to here, a delivery failure leaves the
+/// nonce reusable and the caller can retry with the same `X-Payment`
+/// header — they pay Arweave/Solana fees again on the retry (operator
+/// bleed), but the DoS quota guard caps how many such retries cost the
+/// operator.
+pub fn consume_x402_nonce_after_success(store: &SqliteStore, tx_sig: &str) -> anyhow::Result<()> {
+    mark_x402_nonce(store, tx_sig)
 }
 
 // ── Builder ──────────────────────────────────────────────────────────────────

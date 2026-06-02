@@ -654,55 +654,30 @@ async fn sign_memory_inline(
     // round-trip passes; surfaced in the success envelope under
     // `delivery_receipt.recall_verified_at`. Operator-attested per the
     // tech-spec trust-model note.
+    //
+    // Round-2: the delivery + demote logic lives in
+    // `confirm_delivery_or_demote` and is shared with the deferred-path
+    // (`api::sign_callback_handler`). Same primitives, same behaviour,
+    // one code path.
     let recall_verified_at: Option<String> = if write_mode == WriteMode::Participate {
-        match perform_delivery_check(
+        let ctx = DeliveryContext {
             arweave,
             store,
-            embedder,
-            &arweave_tx,
-            &solana_tx,
-            &content_hash,
-            &attestation_id,
+            timeout: delivery_refetch_timeout,
+            attestation_id: &attestation_id,
+            content,
+            content_hash: &content_hash,
+            tags,
+            solana_tx: &solana_tx,
+            arweave_tx: &arweave_tx,
+            signer_pubkey: &pubkey,
             owner_pubkey,
-            delivery_refetch_timeout,
-        )
-        .await
-        {
-            Ok(()) => Some(chrono::Utc::now().to_rfc3339()),
-            Err(stage) => {
-                // Delivery failed — short critical section to DEMOTE the
-                // row to `WriteMode::Local`. INSERT OR REPLACE so the
-                // existing row's columns are overwritten in place. NO cost
-                // recording; the mcp_handler refund-on-error branch will
-                // fire because we return the typed error below.
-                {
-                    let store = store.lock().unwrap();
-                    store.save_attestation(
-                        &attestation_id,
-                        content,
-                        &content_hash,
-                        tags,
-                        // Keep the REAL Arweave + Solana tx ids — they
-                        // are still chain-anchored, just not provably
-                        // retrievable. Audit-trail integrity > pretending
-                        // the writes didn't happen.
-                        &solana_tx,
-                        &arweave_tx,
-                        &pubkey,
-                        owner_pubkey,
-                        &now,
-                        WriteMode::Local,
-                        &embedding,
-                    )?;
-                }
-                tracing::warn!(
-                    attestation_id = %attestation_id,
-                    arweave_tx = %arweave_tx,
-                    solana_tx = %solana_tx,
-                    stage = %stage,
-                    owner_pubkey = %owner_pubkey,
-                    "delivery not confirmed — row demoted to local, awaiting refund"
-                );
+            created_at: &now,
+            embedding: &embedding,
+        };
+        match confirm_delivery_or_demote(ctx).await? {
+            DeliveryOutcome::Confirmed { recall_verified_at } => Some(recall_verified_at),
+            DeliveryOutcome::Demoted { stage } => {
                 return Err(ToolError::TypedRpc(delivery_not_confirmed(
                     stage,
                     &arweave_tx,
@@ -793,20 +768,29 @@ async fn sign_memory_inline(
 ///    expected hash + tx ids. Catches tampering between write and read
 ///    (incl. operator-side adversary in shared-tenant deployments) and
 ///    catches the case where some other key signed the bytes.
-/// 3. **Recall.** Run an in-process (NOT over HTTP) recall against the
-///    just-written `content_hash` scoped to this owner; confirm our own
-///    `attestation_id` appears in the hit list. Catches the case where
-///    the row never made it into the recall search index (compressor
-///    mismatch, schema drift, etc.).
+/// 3. **Recall.** Confirm "we can read back the row we just wrote" via a
+///    primary-key existence check scoped to the owner pubkey. Catches DB
+///    write loss between `save_attestation` and the delivery check
+///    completing (rare but possible if a concurrent tx in another mcp
+///    process rolls back our write, or in the deferred-signing path if
+///    `set_correlation_id` somehow drops the row).
+///
+///    NB (round-2 fix): the round-1 implementation here ran a cosine
+///    similarity search using `embedder.embed(content_hash)` as the query
+///    vector. That worked under `StubEmbedder` (constant vector → all
+///    rows are neighbours) but produces no semantic match for real
+///    embedders like `FastEmbedder`/`OpenAIEmbedder` — recall would miss
+///    the target row in any non-trivial corpus. The check's *purpose* is
+///    "can we read it back", which is a database existence question, not
+///    a semantic-search question.
 ///
 /// Pure async — no SQLite lock held across `.await`. The caller's lock
 /// scopes (save_attestation in the success/failure branches) sit OUTSIDE
 /// this function entirely.
 #[allow(clippy::too_many_arguments)]
-async fn perform_delivery_check(
+pub async fn perform_delivery_check(
     arweave: &ArweaveClient,
     store: &std::sync::Mutex<SqliteStore>,
-    embedder: &dyn Embedder,
     arweave_tx: &str,
     solana_tx: &str,
     content_hash: &str,
@@ -833,28 +817,23 @@ async fn perform_delivery_check(
         return Err("verify");
     }
 
-    // Stage 3: in-process recall — re-derive the search vector and confirm
-    // our row is present. Brief SQLite lock; no `.await` while held.
-    // `tools::recall` returns a JSON Value with `results: [...]` — we walk
-    // the array looking for our `attestation_id`.
-    //
-    // We use the content_hash as the recall query so the search vector
-    // matches the row we just inserted; using `content` would pull in
-    // semantically-similar rows but might not surface the exact one if
-    // the corpus is large.
-    let hits_contain_us: bool = {
+    // Stage 3: primary-key existence check scoped to owner_pubkey. Brief
+    // SQLite lock; no `.await` while held. Owner scoping preserves the
+    // tenant-isolation invariant (Decision 9 / T4) — even though we are
+    // looking up by the row's own attestation_id, a future change that
+    // dropped owner from the predicate would let any caller probe rows
+    // by attestation_id; the explicit AND defends in depth.
+    let exists: bool = {
         let store_g = store.lock().unwrap();
-        // Embed the content_hash itself as the query — deterministic per
-        // row and lexically unique to this attestation.
-        let query_emb = embedder.embed(content_hash);
-        let results = store_g
-            .search(&query_emb, owner_pubkey, 50)
-            .unwrap_or_default();
-        results
-            .iter()
-            .any(|hit| hit.attestation_id == attestation_id)
+        let conn = store_g.conn();
+        conn.query_row(
+            "SELECT 1 FROM attestations WHERE attestation_id = ? AND owner_pubkey = ?",
+            rusqlite::params![attestation_id, owner_pubkey],
+            |_| Ok(true),
+        )
+        .unwrap_or(false)
     };
-    if !hits_contain_us {
+    if !exists {
         return Err("recall");
     }
     Ok(())
@@ -932,6 +911,106 @@ async fn arweave_refetch_with_budget(
     Err(last_err.unwrap_or_else(|| {
         anyhow::anyhow!("arweave_refetch_with_budget: budget exhausted with no error captured")
     }))
+}
+
+/// Inputs to [`confirm_delivery_or_demote`]. The struct keeps the call-sites
+/// (inline `sign_memory_inline` AND deferred `api::sign_callback_handler`)
+/// reading like declarations rather than 11-argument soup.
+pub struct DeliveryContext<'a> {
+    pub arweave: &'a ArweaveClient,
+    pub store: &'a std::sync::Mutex<SqliteStore>,
+    pub timeout: Duration,
+    pub attestation_id: &'a str,
+    pub content: &'a str,
+    pub content_hash: &'a str,
+    pub tags: &'a [String],
+    pub solana_tx: &'a str,
+    pub arweave_tx: &'a str,
+    pub signer_pubkey: &'a str,
+    pub owner_pubkey: &'a str,
+    pub created_at: &'a str,
+    pub embedding: &'a [f32],
+}
+
+/// Outcome of [`confirm_delivery_or_demote`].
+pub enum DeliveryOutcome {
+    /// All three stages passed. Caller persists cost (Participate) and
+    /// emits the success envelope including `delivery_receipt`.
+    Confirmed { recall_verified_at: String },
+    /// One of the stages failed. Caller emits the typed `-32011
+    /// DeliveryNotConfirmed` (or HTTP equivalent for the deferred path).
+    /// The row has already been demoted to `WriteMode::Local` via
+    /// `INSERT OR REPLACE` so the embed + signature aren't wasted.
+    Demoted { stage: &'static str },
+}
+
+/// Single shared delivery-confirmation helper used by BOTH the inline
+/// `sign_memory_inline` path AND the deferred `sign_callback_handler`
+/// path. Performs the three-stage check (refetch → verify_cose →
+/// primary-key recall) and, on failure, demotes the row in place to
+/// `WriteMode::Local` so caller logic (refund / counter / typed-error
+/// emission) is identical across both code paths.
+///
+/// Critical-section discipline (Decision 8): the SQLite mutex is taken
+/// only inside `perform_delivery_check`'s primary-key existence check
+/// AND inside this function's failure-branch `save_attestation(Local)`
+/// call. Both are short, sync, and drop the lock before any `.await`.
+/// No mutex is held across the network calls.
+///
+/// **Pre-condition:** the caller MUST have already persisted the row with
+/// `WriteMode::Participate` BEFORE calling this. The recall stage performs
+/// a primary-key existence check; if the row isn't there yet, the helper
+/// will report stage = "recall" and demote (which on a fresh-row scenario
+/// has no row to overwrite, leading to a confusing demotion-of-nothing).
+pub async fn confirm_delivery_or_demote(
+    ctx: DeliveryContext<'_>,
+) -> anyhow::Result<DeliveryOutcome> {
+    match perform_delivery_check(
+        ctx.arweave,
+        ctx.store,
+        ctx.arweave_tx,
+        ctx.solana_tx,
+        ctx.content_hash,
+        ctx.attestation_id,
+        ctx.owner_pubkey,
+        ctx.timeout,
+    )
+    .await
+    {
+        Ok(()) => Ok(DeliveryOutcome::Confirmed {
+            recall_verified_at: chrono::Utc::now().to_rfc3339(),
+        }),
+        Err(stage) => {
+            // Demote in place via INSERT OR REPLACE under the same
+            // attestation_id. Short critical section, no `.await` while
+            // held.
+            {
+                let store = ctx.store.lock().unwrap();
+                store.save_attestation(
+                    ctx.attestation_id,
+                    ctx.content,
+                    ctx.content_hash,
+                    ctx.tags,
+                    ctx.solana_tx,
+                    ctx.arweave_tx,
+                    ctx.signer_pubkey,
+                    ctx.owner_pubkey,
+                    ctx.created_at,
+                    WriteMode::Local,
+                    ctx.embedding,
+                )?;
+            }
+            tracing::warn!(
+                attestation_id = %ctx.attestation_id,
+                arweave_tx = %ctx.arweave_tx,
+                solana_tx = %ctx.solana_tx,
+                stage = %stage,
+                owner_pubkey = %ctx.owner_pubkey,
+                "delivery not confirmed — row demoted to local"
+            );
+            Ok(DeliveryOutcome::Demoted { stage })
+        }
+    }
 }
 
 /// Tool 3: verify

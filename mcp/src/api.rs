@@ -297,6 +297,13 @@ pub async fn sign_callback_handler(
         // path having been reached. See work/modes-user-choice/
         // tech-spec.md §"Data flow (participate write)" + decisions.md
         // entry for T2.
+        //
+        // Round-2 (T3 extension): row is persisted as `Participate` here
+        // BEFORE the delivery check. The delivery check's primary-key
+        // recall stage needs the row to exist (see
+        // `tools::perform_delivery_check`). On delivery failure the row
+        // is demoted in place via `INSERT OR REPLACE` inside
+        // `confirm_delivery_or_demote`.
         let save_res = store.save_attestation(
             &attestation_id,
             &entry.content,
@@ -327,6 +334,72 @@ pub async fn sign_callback_handler(
             StatusCode::INTERNAL_SERVER_ERROR,
             &format!("persist failed: {e}"),
         );
+    }
+
+    // T3 (round-2): extend the delivery guarantee to the deferred-signing
+    // path. After the chain anchor + DB persist, run the same three-stage
+    // check (refetch → verify_cose → primary-key recall) that
+    // `sign_memory_inline` runs. On failure: row is demoted in place to
+    // `WriteMode::Local` by the shared helper, and we surface a typed
+    // error response so the webapp can show the user a "delivery not
+    // confirmed" notice rather than a green checkmark.
+    //
+    // Skip the check for `local`-mode deploys (no real anchor to re-fetch).
+    // Refund-on-failure for the deferred path is out of scope: the webapp
+    // owns its own credit accounting and the inline-path `mcp_handler`
+    // doesn't see this code path. The demoted row + structured error
+    // signal the webapp to NOT charge the user.
+    if state.storage_mode != "local" {
+        let ctx = crate::tools::DeliveryContext {
+            arweave: &state.arweave,
+            store: &state.store,
+            timeout: state.delivery_refetch_timeout,
+            attestation_id: &attestation_id,
+            content: &entry.content,
+            content_hash: &entry.content_hash,
+            tags: &entry.tags,
+            solana_tx: &solana_tx,
+            arweave_tx: &arweave_tx,
+            signer_pubkey: &req.signer_pubkey,
+            owner_pubkey: &req.signer_pubkey,
+            created_at: &now,
+            embedding: &entry.embedding,
+        };
+        match crate::tools::confirm_delivery_or_demote(ctx).await {
+            Ok(crate::tools::DeliveryOutcome::Confirmed { .. }) => {
+                // Happy path — fall through to the success envelope.
+            }
+            Ok(crate::tools::DeliveryOutcome::Demoted { stage }) => {
+                state.delivery_metrics.record_not_confirmed(stage);
+                tracing::warn!(
+                    attestation_id = %attestation_id,
+                    arweave_tx = %arweave_tx,
+                    solana_tx = %solana_tx,
+                    stage = %stage,
+                    "deferred-path delivery not confirmed — row demoted to local"
+                );
+                // 200 OK with a typed-error body so the webapp's existing
+                // JSON-handling does not break, but the body carries the
+                // demotion signal. (HTTP 4xx would be wrong: the anchor
+                // DID succeed and the row IS persisted — just demoted.)
+                let body = serde_json::json!({
+                    "status": "delivery_not_confirmed",
+                    "kind": "DeliveryNotConfirmed",
+                    "stage": stage,
+                    "row_demoted_to": "local",
+                    "attestation_id": attestation_id,
+                    "arweave_tx": arweave_tx,
+                    "solana_tx": solana_tx,
+                });
+                return (StatusCode::OK, Json(body)).into_response();
+            }
+            Err(e) => {
+                return error_resp(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("delivery check internal error: {e}"),
+                );
+            }
+        }
     }
 
     let solana_explorer_url = if solana_tx.starts_with("local:") {
