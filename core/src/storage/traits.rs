@@ -1,5 +1,7 @@
 //! Storage trait definitions for attestation persistence.
 
+use super::mode::WriteMode;
+
 /// Raw attestation row for local-mode verification.
 #[derive(Debug)]
 pub struct AttestationRow {
@@ -38,6 +40,12 @@ pub trait AttestationStore {
     /// scope used by `search`. In the single-tenant browser-mediated flow they
     /// are equal (Decision 4); in stdio/CLI mode the caller passes the local
     /// keypair pubkey for both.
+    /// `write_mode` is the per-request user intent (`Local` / `Participate`)
+    /// resolved at the MCP entry point. It is persisted on the row so `verify`
+    /// can route by stored intent (T4) and `recall` can surface it back to the
+    /// caller. Internal/legacy callsites that pre-date this parameter pass
+    /// `WriteMode::Participate` to preserve their previous "real anchor"
+    /// semantics.
     #[allow(clippy::too_many_arguments)]
     fn save_attestation(
         &self,
@@ -50,6 +58,7 @@ pub trait AttestationStore {
         signer_pubkey: &str,
         owner_pubkey: &str,
         created_at: &str,
+        write_mode: WriteMode,
         embedding: &[f32],
     ) -> anyhow::Result<()>;
 
