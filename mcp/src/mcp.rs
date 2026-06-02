@@ -141,6 +141,56 @@ pub fn invalid_params(field: &str, received: &Value) -> JsonRpcError {
     }
 }
 
+/// `-32011 DeliveryNotConfirmed` — the participate write hit Arweave + Solana
+/// but the post-anchor recall+verify round-trip failed at `stage`. The
+/// attestation row was persisted as `local` (so the embed/signature aren't
+/// wasted), the reserved payment was refunded, no `attestation_costs` row
+/// was written. The client may either accept the local-only persistence or
+/// retry; on x402 retries the same payment header is still good (the nonce
+/// stays unconsumed). T3 — modes-user-choice.
+///
+/// `data` shape: `{kind, arweave_tx, solana_tx, stage, row_demoted_to,
+/// attestation_id}`.
+pub fn delivery_not_confirmed(
+    stage: &str,
+    arweave_tx: &str,
+    solana_tx: &str,
+    attestation_id: &str,
+) -> JsonRpcError {
+    JsonRpcError {
+        code: -32011,
+        message: "Delivery not confirmed".to_string(),
+        data: Some(serde_json::json!({
+            "kind": "DeliveryNotConfirmed",
+            "arweave_tx": arweave_tx,
+            "solana_tx": solana_tx,
+            "stage": stage,
+            "row_demoted_to": "local",
+            "attestation_id": attestation_id,
+        })),
+    }
+}
+
+/// `-32011 DeliveryQuotaExceeded` — entry-of-participate-path short-circuit
+/// fired by `mcp_handler` BEFORE any Arweave/Solana write because the
+/// caller's `api_key_hash` has accumulated `>= threshold` delivery-failure
+/// demotions inside the sliding window. Spends zero chain fees. The error
+/// shares the `-32011` code with `DeliveryNotConfirmed`; clients
+/// discriminate via `data.kind`. T3 — modes-user-choice.
+///
+/// `data` shape: `{kind, window_secs, threshold}`.
+pub fn delivery_quota_exceeded(window_secs: u64, threshold: u32) -> JsonRpcError {
+    JsonRpcError {
+        code: -32011,
+        message: "Delivery quota exceeded".to_string(),
+        data: Some(serde_json::json!({
+            "kind": "DeliveryQuotaExceeded",
+            "window_secs": window_secs,
+            "threshold": threshold,
+        })),
+    }
+}
+
 /// `whoami` discoverability envelope — derived once at process start from
 /// `Config` (storage_mode + payment_mode + pricing engine snapshot) and
 /// returned through `mnemonic_whoami` so clients learn what the server can
@@ -311,6 +361,26 @@ pub struct McpState {
     /// without re-deriving the list. Decision 3 in
     /// work/modes-user-choice/tech-spec.md.
     pub envelope: Envelope,
+
+    /// Wall-clock budget for the post-anchor Arweave re-fetch in the
+    /// participate delivery-guarantee flow (T3). Used by
+    /// `tools::sign_memory_inline` to bound the exponential-backoff retry
+    /// loop. Operator-tunable via `MNEMONIC_DELIVERY_REFETCH_TIMEOUT_SECS`.
+    pub delivery_refetch_timeout: std::time::Duration,
+
+    /// Outcome-based per-`api_key_hash` quota counter (T3 — DoS guard).
+    /// Consulted at the *entry* of the participate path in `mcp_handler`
+    /// BEFORE any Arweave/Solana write; incremented in the failure branch
+    /// of `sign_memory_inline` after a delivery demotion. Bounded by the
+    /// background eviction task spawned in `main.rs::run_http`. Keyed on
+    /// `api_key_hash` (blake3(api_key).to_hex()), NEVER `owner_pubkey`.
+    pub refunds_by_subject: Arc<payment::RefundsBySubject>,
+
+    /// Process-lifetime counters incremented by the delivery-guarantee
+    /// flow. Stub for the eventual Prometheus surface — see
+    /// `payment::DeliveryMetrics` for the four counters and the
+    /// no-per-tenant-label rationale.
+    pub delivery_metrics: Arc<payment::DeliveryMetrics>,
 }
 
 // Safety: We only access store through std::sync::Mutex (short critical sections, no await)
@@ -662,6 +732,48 @@ pub async fn mcp_handler(
         resolved_mode_for_gate.map(|r| r.write_mode),
         Some(WriteMode::Participate)
     );
+
+    // T3 — outcome-based DoS guard. Consulted at the *entry* of the
+    // participate path, BEFORE `check_payment`/`deduct_balance`, BEFORE
+    // any Arweave/Solana write. Keyed on `api_key_hash` (blake3 of the
+    // bearer api_key), NEVER on `owner_pubkey` — Ed25519 keys rotate for
+    // free, billable subjects don't (Decision in tech-spec §"Risk &
+    // mitigations / DoS amplification" mitigation ii). On
+    // quota-exceeded the request short-circuits to JSON-RPC -32011 with
+    // `data.kind: "DeliveryQuotaExceeded"`, spending zero chain fees.
+    //
+    // No-op on the stdio path (no Bearer JWT) since stdio is trusted-
+    // local. No-op on `payment_mode == "none"` since there is no billable
+    // subject to key on.
+    if is_sign_memory && participate_gate && state.payment_mode != "none" {
+        if let Some(raw_key) = payment::extract_api_key(&headers) {
+            let subject = payment::hash_api_key(&raw_key);
+            if state.refunds_by_subject.is_over(&subject) {
+                state.delivery_metrics.record_quota_short_circuit();
+                let err = delivery_quota_exceeded(
+                    state.refunds_by_subject.window().as_secs(),
+                    state.refunds_by_subject.threshold(),
+                );
+                tracing::warn!(
+                    api_key_hash = %subject,
+                    threshold = state.refunds_by_subject.threshold(),
+                    window_secs = state.refunds_by_subject.window().as_secs(),
+                    "delivery quota exceeded — short-circuiting participate request"
+                );
+                let resp = JsonRpcResponse {
+                    jsonrpc: "2.0".into(),
+                    id: req.id.clone().unwrap_or(Value::Null),
+                    result: None,
+                    error: Some(err),
+                };
+                // 429 Too Many Requests — semantically correct for an
+                // outcome-based quota; matches existing
+                // tower_governor 429 returns elsewhere in the stack.
+                return ndjson_response(StatusCode::TOO_MANY_REQUESTS, &resp);
+            }
+        }
+    }
+
     if is_sign_memory && participate_gate && state.payment_mode != "none" {
         // Use live price from pricing engine (refreshed in background).
         let current_cost = state.pricing.current_price();
@@ -708,16 +820,94 @@ pub async fn mcp_handler(
                 // `credit_deposit`) so the per-tx_sig idempotency guard does
                 // not silently swallow repeated refunds for the same
                 // underlying failure class.
-                if resp.error.is_some() {
+                //
+                // T3 (modes-user-choice) — the typed
+                // `-32011 DeliveryNotConfirmed` carries the demoted
+                // `attestation_id` in `data.attestation_id` so the refund
+                // reason can correlate 1:1 with the downgrade. We also:
+                //   1. Increment the per-stage `delivery_not_confirmed_total`
+                //      counter (no per-tenant label — high-cardinality
+                //      anti-pattern; per-tenant detail goes to the
+                //      `tracing::warn!` line emitted from
+                //      `sign_memory_inline`).
+                //   2. On the participate path the SAME error increments
+                //      the `RefundsBySubject` counter so the entry-of-
+                //      participate quota guard fires after `threshold`
+                //      consecutive demotions.
+                //   3. On refund-itself failure write a structured
+                //      `payment_events` audit row via
+                //      `payment::record_refund_failed` so an operator can
+                //      forensically trace stuck ledger state.
+                if let Some(ref err) = resp.error {
+                    // T3 — DeliveryNotConfirmed-specific bookkeeping.
+                    // Extract `stage` + `attestation_id` from the typed
+                    // error's `data` payload (set by
+                    // `delivery_not_confirmed`).
+                    let dnc_data = err
+                        .data
+                        .as_ref()
+                        .filter(|d| d["kind"] == "DeliveryNotConfirmed");
+                    let dnc_stage = dnc_data.and_then(|d| d["stage"].as_str()).unwrap_or("");
+                    let dnc_attestation_id = dnc_data
+                        .and_then(|d| d["attestation_id"].as_str())
+                        .unwrap_or("");
+
+                    if dnc_data.is_some() {
+                        state.delivery_metrics.record_not_confirmed(dnc_stage);
+                    }
+
                     if let Some(ref key) = api_key {
-                        let reason = resp
-                            .error
-                            .as_ref()
-                            .map(|e| e.message.as_str())
-                            .unwrap_or("error");
-                        let store = state.store.lock().expect("store mutex poisoned");
-                        if let Err(e) = payment::refund_balance(&store, key, current_cost, reason) {
-                            tracing::warn!(api_key = %key, error = %e, "refund failed");
+                        let subject = payment::hash_api_key(key);
+                        // Refund reason format includes the demoted
+                        // attestation_id so the `payment_events.description`
+                        // column lets an operator grep
+                        // `description LIKE '<id>%'` for the audit trail
+                        // (tech-spec Decision 7).
+                        let reason = if dnc_data.is_some() && !dnc_attestation_id.is_empty() {
+                            format!("delivery_not_confirmed: {dnc_attestation_id}")
+                        } else {
+                            err.message.clone()
+                        };
+
+                        let refund_result = {
+                            let store = state.store.lock().expect("store mutex poisoned");
+                            payment::refund_balance(&store, key, current_cost, &reason)
+                        }; // mutex dropped here; no `.await` while held
+
+                        if let Err(refund_err) = refund_result {
+                            tracing::warn!(
+                                api_key_hash = %subject,
+                                error = %refund_err,
+                                attestation_id = %dnc_attestation_id,
+                                "refund failed; writing audit row"
+                            );
+                            // Best-effort audit row. Lives in `mcp/` per
+                            // the project's hard architectural rule.
+                            // Body sticks to the PII allow-list pinned
+                            // in the spec: api_key_hash (NOT raw key),
+                            // attestation_id, reason, occurred_at. No
+                            // content_preview, no cose_bytes, no
+                            // embedding.
+                            let now = chrono::Utc::now().to_rfc3339();
+                            let store = state.store.lock().expect("store mutex poisoned");
+                            let _ = payment::record_refund_failed(
+                                &store,
+                                &subject,
+                                dnc_attestation_id,
+                                "refund-itself-failed",
+                                &now,
+                            );
+                        }
+
+                        // T3 — increment the per-subject quota counter on
+                        // delivery demotions only. Other failure classes
+                        // (e.g. embed/Arweave failure before the delivery
+                        // check) do NOT count against the quota; only the
+                        // induced-refund pattern matters for the DoS
+                        // mitigation. Counter increment happens OUTSIDE
+                        // the SQLite mutex (Decision 8).
+                        if dnc_data.is_some() {
+                            state.refunds_by_subject.record_failure(&subject);
                         }
                     }
                 }
@@ -819,6 +1009,7 @@ async fn handle_tool_call(
                 jwt_sub,
                 resolved,
                 &state.envelope,
+                state.delivery_refetch_timeout,
             )
             .await
             .map_err(tool_error_to_json_rpc)?
@@ -986,6 +1177,12 @@ mod transport_tests {
             bootstrap_server_x25519_secret,
             bootstrap_server_x25519_public,
             envelope: Envelope::from_config("local", "none", 0),
+            delivery_refetch_timeout: std::time::Duration::from_secs(15),
+            refunds_by_subject: Arc::new(crate::payment::RefundsBySubject::new(
+                std::time::Duration::from_secs(60),
+                5,
+            )),
+            delivery_metrics: Arc::new(crate::payment::DeliveryMetrics::default()),
         })
     }
 

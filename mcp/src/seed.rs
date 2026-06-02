@@ -353,6 +353,7 @@ pub async fn run(state: &McpState) -> Result<()> {
                 None,
                 seed_resolved,
                 &state.envelope,
+                state.delivery_refetch_timeout,
             )
             .await
             // `sign_memory` returns `ToolError` (typed RPC error or generic

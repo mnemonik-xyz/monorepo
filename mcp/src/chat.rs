@@ -535,6 +535,12 @@ mod handler_tests {
             bootstrap_server_x25519_secret,
             bootstrap_server_x25519_public,
             envelope: crate::mcp::Envelope::from_config("local", "none", 0),
+            delivery_refetch_timeout: std::time::Duration::from_secs(15),
+            refunds_by_subject: Arc::new(crate::payment::RefundsBySubject::new(
+                std::time::Duration::from_secs(60),
+                5,
+            )),
+            delivery_metrics: Arc::new(crate::payment::DeliveryMetrics::default()),
         })
     }
 

@@ -92,6 +92,40 @@ pub struct Config {
     /// router state — there is no `std::env::var` re-read downstream
     /// (round-1 code-reviewer finding #2). Default 5.
     pub key_escrow_rate_limit: u32,
+
+    // ── Delivery guarantee (modes-user-choice T3) ───────────────────────────
+    //
+    // Wall-clock budget + outcome-based DoS guard for the participate
+    // delivery confirmation (Arweave re-fetch → verify_cose → in-process
+    // recall). All four knobs are operator-tunable env vars so the
+    // production sweet-spot can be found empirically without a redeploy of
+    // behaviour. See `work/modes-user-choice/tech-spec.md` §"Risk &
+    // mitigations / DoS amplification" for the rationale on each default.
+    /// Wall-clock budget (seconds) for the post-anchor Arweave re-fetch.
+    /// Retries with exponential backoff (200ms start, 2.0 factor, 2s cap)
+    /// until either the bytes return OR this budget elapses. Sized against
+    /// Arweave's documented eventual-consistency window. Default 15s.
+    /// Env: `MNEMONIC_DELIVERY_REFETCH_TIMEOUT_SECS`.
+    pub delivery_refetch_timeout_secs: u64,
+    /// Quota threshold for the outcome-based DoS guard: when an
+    /// `api_key_hash` accumulates this many delivery-failure demotions
+    /// within `delivery_quota_window_secs`, subsequent `participate`
+    /// requests from the same subject short-circuit with `-32011
+    /// DeliveryQuotaExceeded` BEFORE any Arweave/Solana write. Keyed on
+    /// `api_key_hash`, not `owner_pubkey` — Ed25519 keys rotate for free
+    /// but billable subjects don't. Default 5.
+    /// Env: `MNEMONIC_DELIVERY_QUOTA_THRESHOLD`.
+    pub delivery_quota_threshold: u32,
+    /// Sliding-window length (seconds) for the demotion counter above.
+    /// Default 60s.
+    /// Env: `MNEMONIC_DELIVERY_QUOTA_WINDOW_SECS`.
+    pub delivery_quota_window_secs: u64,
+    /// Eviction-loop interval (seconds) for the bounded-size guard.
+    /// Entries with no timestamps in the last `2 * window_secs` are dropped
+    /// so the map size tracks *active* spenders, not lifetime cardinality.
+    /// Default 30s.
+    /// Env: `MNEMONIC_DELIVERY_QUOTA_EVICT_SECS`.
+    pub delivery_quota_evict_interval_secs: u64,
 }
 
 impl Config {
@@ -141,6 +175,18 @@ impl Config {
                 "https://mcp.mnemonik.xyz/oauth/google/callback",
             ),
             key_escrow_rate_limit: env_or("KEY_ESCROW_RATE_LIMIT", "5").parse().unwrap_or(5),
+            delivery_refetch_timeout_secs: env_or("MNEMONIC_DELIVERY_REFETCH_TIMEOUT_SECS", "15")
+                .parse()
+                .unwrap_or(15),
+            delivery_quota_threshold: env_or("MNEMONIC_DELIVERY_QUOTA_THRESHOLD", "5")
+                .parse()
+                .unwrap_or(5),
+            delivery_quota_window_secs: env_or("MNEMONIC_DELIVERY_QUOTA_WINDOW_SECS", "60")
+                .parse()
+                .unwrap_or(60),
+            delivery_quota_evict_interval_secs: env_or("MNEMONIC_DELIVERY_QUOTA_EVICT_SECS", "30")
+                .parse()
+                .unwrap_or(30),
         }
     }
 

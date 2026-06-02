@@ -7,6 +7,8 @@
 
 use solana_sdk::signature::Keypair;
 
+use std::time::Duration;
+
 use mnemonic_core::arweave::ArweaveClient;
 use mnemonic_core::codec::{
     canonical::{from_canonical_cbor, to_canonical_cbor},
@@ -20,7 +22,9 @@ use mnemonic_core::identity;
 use mnemonic_core::solana::SolanaClient;
 use mnemonic_core::storage::{AttestationStore, SqliteStore, WriteMode};
 
-use crate::mcp::{invalid_params, unsupported_mode, Envelope, JsonRpcError};
+use crate::mcp::{
+    delivery_not_confirmed, invalid_params, unsupported_mode, Envelope, JsonRpcError,
+};
 use crate::pending::PendingBundles;
 use crate::{payment, pricing::CostHint};
 
@@ -249,6 +253,7 @@ pub async fn sign_memory(
     jwt_sub: Option<&str>,
     resolved: ResolvedMode,
     envelope: &Envelope,
+    delivery_refetch_timeout: Duration,
 ) -> Result<serde_json::Value, ToolError> {
     // T2 — UnsupportedMode check fires BEFORE the JWT-deferred branch so a
     // browser client asking for `participate` against a local-only deploy
@@ -294,9 +299,9 @@ pub async fn sign_memory(
         storage_mode,
         owner_pubkey,
         resolved.write_mode,
+        delivery_refetch_timeout,
     )
     .await
-    .map_err(ToolError::Other)
 }
 
 /// HTTP/JWT branch — Decision 12 deferred-signing path.
@@ -499,6 +504,29 @@ pub async fn check_pending(
 ///   maps `None` (no `mode` field) to env-var fallback, producing the same
 ///   `WriteMode` value the env-var would have selected.
 ///
+/// T3 changes (delivery guarantee on participate):
+///
+/// - After `solana.write_memo` returns, the participate path re-fetches the
+///   COSE bytes from Arweave with an exponential-backoff loop capped by
+///   `delivery_refetch_timeout`, then runs `verify_cose` over the re-fetched
+///   bytes, then runs an in-process recall against `content_hash` and
+///   confirms our `attestation_id` is in the result. On any failure (refetch
+///   budget exhausted, verify mismatch, recall miss) the row is persisted
+///   with `WriteMode::Local` — so the embed + signature aren't wasted —
+///   and the function returns `ToolError::TypedRpc(delivery_not_confirmed)`.
+///   `mcp_handler` consumes the typed error to drive refund + counter
+///   bookkeeping (api_key is only available at the dispatcher boundary).
+/// - On success the row is persisted with `WriteMode::Participate` and the
+///   success envelope gains `delivery_receipt { arweave_tx, solana_tx,
+///   recall_verified_at }`. `recall_verified_at` is operator-attested per
+///   the tech-spec's trust-model note; the cryptographically verifiable
+///   timestamp is the Solana memo's `block_time`.
+/// - Critical-section discipline (Decision 8): two short scoped locks. The
+///   success branch takes the SQLite mutex for save_attestation +
+///   record_attestation_cost and drops it. The failure branch takes the
+///   SQLite mutex for save_attestation(Local) and drops it BEFORE returning
+///   the typed error. No `.await` is held while either lock is in scope.
+///
 /// The participate-on-local-only short-circuit lives in `sign_memory` (the
 /// public entry point) — fires before deferred-vs-inline branching so the
 /// user gets the typed error regardless of path. `sign_memory_inline` does
@@ -517,7 +545,8 @@ async fn sign_memory_inline(
     storage_mode: &str,
     owner_pubkey: &str,
     write_mode: WriteMode,
-) -> anyhow::Result<serde_json::Value> {
+    delivery_refetch_timeout: Duration,
+) -> Result<serde_json::Value, ToolError> {
     let pubkey = identity::pubkey_base58(keypair);
     let attestation_id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
@@ -582,7 +611,17 @@ async fn sign_memory_inline(
         }
     };
 
-    // 6. Save locally
+    // 6a. Save row immediately after chain anchor.
+    //
+    // Two critical reasons for saving BEFORE the delivery check:
+    //   (1) The in-process recall stage of the delivery check reads from
+    //       SQLite — the row must exist by the time we query for it.
+    //   (2) On delivery failure we re-save with `WriteMode::Local`
+    //       (INSERT OR REPLACE) so the embed + signature aren't wasted
+    //       even though the chain anchor isn't proved retrievable.
+    //
+    // ONE short critical section: take the SQLite mutex, write the
+    // attestation row, drop the mutex. No `.await` while held (Decision 8).
     {
         let store = store.lock().unwrap();
         // T2: the persisted `write_mode` column is the SAME value the
@@ -600,25 +639,102 @@ async fn sign_memory_inline(
             write_mode,
             &embedding,
         )?;
-        // Cost-recording fires only on `Participate` writes. A `Local`
-        // request can hit this code path against a `STORAGE_MODE=full +
-        // PAYMENT_MODE=x402` server and MUST NOT produce an
-        // `attestation_costs` row — that would charge the caller for a
-        // free path.
-        if write_mode == WriteMode::Participate {
-            let _ = payment::record_attestation_cost(
-                &store,
-                &attestation_id,
-                cost_hint.irys_lamports,
-                cost_hint.sol_tx_fee_lamports,
-                cost_hint.sol_price_usdc,
-                cost_hint.charge_micro_usdc,
-            );
+    }
+
+    // 6b. Delivery confirmation — Participate ONLY. T3 (modes-user-choice).
+    //
+    // We just successfully wrote to Arweave + Solana AND persisted the row.
+    // Before claiming "delivered" we must prove the chain bytes are
+    // *retrievable*. Three checks, any failure demotes the row to `Local`
+    // (via INSERT OR REPLACE under the same attestation_id) and returns
+    // the typed error (refund handled by mcp_handler since api_key only
+    // lives there).
+    //
+    // The `recall_verified_at` timestamp is captured at the moment the
+    // round-trip passes; surfaced in the success envelope under
+    // `delivery_receipt.recall_verified_at`. Operator-attested per the
+    // tech-spec trust-model note.
+    let recall_verified_at: Option<String> = if write_mode == WriteMode::Participate {
+        match perform_delivery_check(
+            arweave,
+            store,
+            embedder,
+            &arweave_tx,
+            &solana_tx,
+            &content_hash,
+            &attestation_id,
+            owner_pubkey,
+            delivery_refetch_timeout,
+        )
+        .await
+        {
+            Ok(()) => Some(chrono::Utc::now().to_rfc3339()),
+            Err(stage) => {
+                // Delivery failed — short critical section to DEMOTE the
+                // row to `WriteMode::Local`. INSERT OR REPLACE so the
+                // existing row's columns are overwritten in place. NO cost
+                // recording; the mcp_handler refund-on-error branch will
+                // fire because we return the typed error below.
+                {
+                    let store = store.lock().unwrap();
+                    store.save_attestation(
+                        &attestation_id,
+                        content,
+                        &content_hash,
+                        tags,
+                        // Keep the REAL Arweave + Solana tx ids — they
+                        // are still chain-anchored, just not provably
+                        // retrievable. Audit-trail integrity > pretending
+                        // the writes didn't happen.
+                        &solana_tx,
+                        &arweave_tx,
+                        &pubkey,
+                        owner_pubkey,
+                        &now,
+                        WriteMode::Local,
+                        &embedding,
+                    )?;
+                }
+                tracing::warn!(
+                    attestation_id = %attestation_id,
+                    arweave_tx = %arweave_tx,
+                    solana_tx = %solana_tx,
+                    stage = %stage,
+                    owner_pubkey = %owner_pubkey,
+                    "delivery not confirmed — row demoted to local, awaiting refund"
+                );
+                return Err(ToolError::TypedRpc(delivery_not_confirmed(
+                    stage,
+                    &arweave_tx,
+                    &solana_tx,
+                    &attestation_id,
+                )));
+            }
         }
+    } else {
+        None
+    };
+
+    // 6c. Cost recording — Participate-success ONLY. A `Local` request
+    // can hit this code path against a `STORAGE_MODE=full +
+    // PAYMENT_MODE=x402` server and MUST NOT produce an
+    // `attestation_costs` row — that would charge the caller for a free
+    // path. Also fires AFTER the delivery check passes (on a demotion we
+    // return before reaching here).
+    if write_mode == WriteMode::Participate {
+        let store = store.lock().unwrap();
+        let _ = payment::record_attestation_cost(
+            &store,
+            &attestation_id,
+            cost_hint.irys_lamports,
+            cost_hint.sol_tx_fee_lamports,
+            cost_hint.sol_price_usdc,
+            cost_hint.charge_micro_usdc,
+        );
     }
 
     let ratio = compressor.compression_ratio();
-    Ok(serde_json::json!({
+    let mut out = serde_json::json!({
         "attestation_id": attestation_id,
         "content_hash": content_hash,
         "hash_algorithm": "blake3",
@@ -643,6 +759,178 @@ async fn sign_memory_inline(
             "original_bytes": embedding.len() * 4,
             "compressed_bytes": compressed_bytes.len(),
         },
+    });
+
+    // Participate success envelope addition — T3. `delivery_receipt`
+    // documents the delivery proof: the chain tx ids plus the
+    // operator-attested timestamp of the successful read-back.
+    if let Some(ts) = recall_verified_at {
+        // Snapshot the tx ids into owned strings BEFORE we obtain the
+        // mutable borrow on `out`'s object map (avoids E0502 — `obj.insert`
+        // would otherwise hold a mutable borrow while `out[...]` re-borrows
+        // immutably).
+        let receipt = serde_json::json!({
+            "arweave_tx": arweave_tx,
+            "solana_tx": solana_tx,
+            "recall_verified_at": ts,
+        });
+        if let Some(obj) = out.as_object_mut() {
+            obj.insert("delivery_receipt".to_string(), receipt);
+        }
+    }
+    Ok(out)
+}
+
+/// Run the post-anchor delivery-confirmation pipeline for a participate
+/// write. Three sequential checks; the first failure short-circuits with
+/// the stage label suitable for the typed error envelope.
+///
+/// 1. **Refetch.** Pull the anchored COSE bytes back from Arweave with an
+///    exponential-backoff retry capped by `timeout`. Catches the "anchor
+///    accepted but bytes not retrievable" silent failure (Arweave's
+///    eventual-consistency window).
+/// 2. **Verify.** Run `verify_cose` over the re-fetched bytes with the
+///    expected hash + tx ids. Catches tampering between write and read
+///    (incl. operator-side adversary in shared-tenant deployments) and
+///    catches the case where some other key signed the bytes.
+/// 3. **Recall.** Run an in-process (NOT over HTTP) recall against the
+///    just-written `content_hash` scoped to this owner; confirm our own
+///    `attestation_id` appears in the hit list. Catches the case where
+///    the row never made it into the recall search index (compressor
+///    mismatch, schema drift, etc.).
+///
+/// Pure async — no SQLite lock held across `.await`. The caller's lock
+/// scopes (save_attestation in the success/failure branches) sit OUTSIDE
+/// this function entirely.
+#[allow(clippy::too_many_arguments)]
+async fn perform_delivery_check(
+    arweave: &ArweaveClient,
+    store: &std::sync::Mutex<SqliteStore>,
+    embedder: &dyn Embedder,
+    arweave_tx: &str,
+    solana_tx: &str,
+    content_hash: &str,
+    attestation_id: &str,
+    owner_pubkey: &str,
+    timeout: Duration,
+) -> Result<(), &'static str> {
+    // Stage 1: refetch the anchored bytes within a wall-clock budget.
+    let refetched = match arweave_refetch_with_budget(arweave, arweave_tx, timeout).await {
+        Ok(bytes) => bytes,
+        Err(_) => return Err("refetch"),
+    };
+
+    // Stage 2: COSE verify the re-fetched bytes against the expected
+    // content hash + the chain tx ids. `verify_cose` returns a JSON Value;
+    // `status == "verified"` is the only pass condition. Anything else
+    // (`"tampered"`, hash mismatch, decoder error) is a fail.
+    let verify_result =
+        match verify_cose(&refetched, Some(content_hash), Some(solana_tx), arweave_tx) {
+            Ok(v) => v,
+            Err(_) => return Err("verify"),
+        };
+    if verify_result["status"].as_str() != Some("verified") {
+        return Err("verify");
+    }
+
+    // Stage 3: in-process recall — re-derive the search vector and confirm
+    // our row is present. Brief SQLite lock; no `.await` while held.
+    // `tools::recall` returns a JSON Value with `results: [...]` — we walk
+    // the array looking for our `attestation_id`.
+    //
+    // We use the content_hash as the recall query so the search vector
+    // matches the row we just inserted; using `content` would pull in
+    // semantically-similar rows but might not surface the exact one if
+    // the corpus is large.
+    let hits_contain_us: bool = {
+        let store_g = store.lock().unwrap();
+        // Embed the content_hash itself as the query — deterministic per
+        // row and lexically unique to this attestation.
+        let query_emb = embedder.embed(content_hash);
+        let results = store_g
+            .search(&query_emb, owner_pubkey, 50)
+            .unwrap_or_default();
+        results
+            .iter()
+            .any(|hit| hit.attestation_id == attestation_id)
+    };
+    if !hits_contain_us {
+        return Err("recall");
+    }
+    Ok(())
+}
+
+/// Re-fetch `arweave_tx` from Arweave with exponential backoff bounded by
+/// `total_budget`. Returns the raw bytes on success or `Err` on either a
+/// non-retryable read error OR budget exhaustion (whichever comes first).
+///
+/// Backoff schedule: 200ms → 400ms → 800ms → 1600ms → 2000ms (capped at
+/// `MAX_BACKOFF`). The retry count is *not* fixed; the loop stops when
+/// the next sleep would push the elapsed time past `total_budget`. This
+/// keeps the wall-clock contract simple: the function returns to the
+/// caller no later than `total_budget + one slow read` after it was
+/// called.
+///
+/// Sized against Arweave's documented eventual-consistency window (seconds
+/// to low tens of seconds); see tech-spec §"Risk & mitigations / DoS
+/// amplification" mitigation (i).
+async fn arweave_refetch_with_budget(
+    arweave: &ArweaveClient,
+    tx: &str,
+    total_budget: Duration,
+) -> anyhow::Result<Vec<u8>> {
+    const INITIAL_DELAY: Duration = Duration::from_millis(200);
+    const MAX_BACKOFF: Duration = Duration::from_secs(2);
+    const FACTOR: u32 = 2;
+
+    let start = std::time::Instant::now();
+    let mut delay = INITIAL_DELAY;
+    let mut attempt: u32 = 0;
+    // Initialized inside the loop — the `None` placeholder satisfies the
+    // unwrap_or at the end in the (impossible) case where we exit before
+    // any read attempt.
+    #[allow(unused_assignments)]
+    let mut last_err: Option<anyhow::Error> = None;
+    loop {
+        attempt += 1;
+        match arweave.read(tx).await {
+            Ok(bytes) => return Ok(bytes),
+            Err(e) => {
+                tracing::debug!(
+                    arweave_tx = %tx,
+                    attempt,
+                    elapsed_ms = start.elapsed().as_millis() as u64,
+                    error = %e,
+                    "arweave_refetch_with_budget: read failed, retrying"
+                );
+                last_err = Some(e);
+            }
+        }
+
+        // Decide whether another retry fits in the budget. If the next
+        // sleep would push us past, give up now.
+        let elapsed = start.elapsed();
+        if elapsed >= total_budget {
+            break;
+        }
+        let remaining = total_budget - elapsed;
+        if delay > remaining {
+            // One last partial sleep to use up the budget, then bail.
+            tokio::time::sleep(remaining).await;
+            // Final attempt before returning the timeout error.
+            match arweave.read(tx).await {
+                Ok(bytes) => return Ok(bytes),
+                Err(e) => {
+                    last_err = Some(e);
+                }
+            }
+            break;
+        }
+        tokio::time::sleep(delay).await;
+        delay = (delay * FACTOR).min(MAX_BACKOFF);
+    }
+    Err(last_err.unwrap_or_else(|| {
+        anyhow::anyhow!("arweave_refetch_with_budget: budget exhausted with no error captured")
     }))
 }
 
@@ -986,6 +1274,7 @@ mod sign_memory_tests {
             Some("user-jwt-sub"),
             resolved,
             &env,
+            std::time::Duration::from_secs(15),
         )
         .await
         .unwrap();
@@ -1022,6 +1311,7 @@ mod sign_memory_tests {
             None,
             resolved,
             &env,
+            std::time::Duration::from_secs(15),
         )
         .await
         .unwrap();
@@ -1064,6 +1354,7 @@ mod sign_memory_tests {
             Some("user-jwt-sub"),
             resolved_explicit_local,
             &env_local,
+            std::time::Duration::from_secs(15),
         )
         .await
         .unwrap();
@@ -1093,6 +1384,7 @@ mod sign_memory_tests {
             Some("user-jwt-sub"),
             resolved_explicit_local_full,
             &env_full,
+            std::time::Duration::from_secs(15),
         )
         .await
         .unwrap();

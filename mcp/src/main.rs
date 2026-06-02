@@ -461,6 +461,15 @@ async fn main() -> anyhow::Result<()> {
         initial_price_micro_usdc,
     );
 
+    // T3: outcome-based DoS guard for participate writes. Threshold +
+    // window come from `Config`; the background eviction task is spawned
+    // immediately after the `Arc<McpState>` is built (see below).
+    let refunds_by_subject = Arc::new(payment::RefundsBySubject::new(
+        std::time::Duration::from_secs(cfg.delivery_quota_window_secs),
+        cfg.delivery_quota_threshold,
+    ));
+    let delivery_metrics = Arc::new(payment::DeliveryMetrics::default());
+
     let state = Arc::new(mcp::McpState {
         keypair,
         solana: solana::SolanaClient::new(&cfg.solana_rpc_url),
@@ -487,7 +496,35 @@ async fn main() -> anyhow::Result<()> {
         bootstrap_server_x25519_secret,
         bootstrap_server_x25519_public,
         envelope,
+        delivery_refetch_timeout: std::time::Duration::from_secs(cfg.delivery_refetch_timeout_secs),
+        refunds_by_subject: refunds_by_subject.clone(),
+        delivery_metrics: delivery_metrics.clone(),
     });
+
+    // T3: spawn the bounded-eviction background loop for the delivery-quota
+    // counter so the DashMap size tracks *active* spenders, not lifetime
+    // cardinality. Holds shard guards briefly per shard; never across an
+    // `.await` (Decision 8 extended to DashMap). The task lives for the
+    // process lifetime; on shutdown the runtime drops it.
+    {
+        let guard = refunds_by_subject.clone();
+        let evict_interval = std::time::Duration::from_secs(cfg.delivery_quota_evict_interval_secs);
+        // Subjects with no failures for 2*window are dropped.
+        let evict_since = std::time::Duration::from_secs(cfg.delivery_quota_window_secs * 2);
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(evict_interval).await;
+                let dropped = guard.evict_idle(evict_since);
+                if dropped > 0 {
+                    tracing::debug!(
+                        dropped,
+                        remaining = guard.len(),
+                        "RefundsBySubject eviction pass"
+                    );
+                }
+            }
+        });
+    }
 
     // ── RAG seeding (whitepaper chunking + artifact generation) ──────────
     if let Err(e) = seed::run(&state).await {

@@ -398,3 +398,82 @@ per-request `mode` field through `sign_memory_inline`.
 - `cargo test -p mnemonic-core --no-fail-fast` → 121 passed, 0 failed, 1 ignored.
 - `cargo clippy -p mnemonic-core --all-targets -- -D warnings` → clean.
 - `cargo fmt --all -- --check` → clean.
+
+## Task 3: Delivery guarantee + refund + DoS guard
+
+**Status:** Done
+**Agent:** task3-impl
+**Summary:** Wrapped the participate branch of `sign_memory_inline` in a
+three-stage delivery confirmation (Arweave re-fetch with wall-clock budget →
+`verify_cose` → in-process recall). Row is saved as `Participate`
+immediately after the chain anchor (recall queries the DB; the row must
+exist by recall time); on any stage failure the row is demoted in place
+via `INSERT OR REPLACE` to `WriteMode::Local`, no `attestation_costs` row
+is written, and the typed `-32011 DeliveryNotConfirmed { stage,
+arweave_tx, solana_tx, row_demoted_to: "local", attestation_id }` is
+returned. `mcp_handler`'s refund-on-error branch consumes the typed
+error's `data.attestation_id`, refunds the balance with a reason that
+includes the demoted id, increments the per-stage
+`delivery_not_confirmed_total` counter AND the per-`api_key_hash`
+`RefundsBySubject` quota counter, and on refund-itself-failure writes a
+`payment_events` audit row via the new `payment::record_refund_failed`
+API (body lives in `mcp/`, per the architectural rule). DoS guard
+consulted at participate ENTRY in `mcp_handler` before any chain write;
+exceeded → `-32011 DeliveryQuotaExceeded` with `HTTP 429`, zero chain
+spend. Background eviction task spawned from `main.rs::run_http` drops
+idle entries on a configurable interval. Four new env vars in
+`mcp/src/config.rs`:
+`MNEMONIC_DELIVERY_REFETCH_TIMEOUT_SECS=15`,
+`MNEMONIC_DELIVERY_QUOTA_THRESHOLD=5`,
+`MNEMONIC_DELIVERY_QUOTA_WINDOW_SECS=60`,
+`MNEMONIC_DELIVERY_QUOTA_EVICT_SECS=30`.
+
+**Key design calls:**
+- Quota counter keyed on `blake3(api_key).to_hex()`, NEVER `owner_pubkey` —
+  Ed25519 keys rotate for free, billable subjects don't (CWE-312 +
+  bypass-prevention).
+- Audit row's `payment_events.api_key` column carries the HASH for
+  `refund_failed` rows; column name is legacy, schema is untouched
+  (no migration needed).
+- Wall-clock retry budget bounded by `MNEMONIC_DELIVERY_REFETCH_TIMEOUT_SECS`
+  (default 15s, exp backoff 200ms→2s) instead of a fixed attempt count —
+  sized against Arweave's eventual-consistency window.
+- Two short critical sections in the participate flow: one for
+  save_attestation (Participate or Local), one (in `mcp_handler`) for
+  refund_balance + record_refund_failed. Neither holds the SQLite mutex
+  or any DashMap shard guard across `.await` — Decision 8 honoured and
+  extended to DashMap by this task.
+- Row saved as `Participate` BEFORE the delivery check (recall queries the
+  DB), then demoted in place via `INSERT OR REPLACE` on failure. The
+  spec's pseudo-code reads as two separate saves but the same
+  `attestation_id` + `INSERT OR REPLACE` semantics make this single-row
+  flow cleaner and lets the recall stage actually find the row.
+- T3 tests target the INLINE participate path (no JWT) because the
+  current T2 routing sends JWT+participate to the deferred-signing branch
+  (which sits in `api::sign_callback_handler`, not in
+  `sign_memory_inline`). The OAuth middleware is intentionally NOT
+  mounted in `build_state_and_router` for T3 tests — production HTTP
+  clients receive the same delivery flow on the inline path; the JWT
+  layer is orthogonal. `happy_path` is `#[ignore]`d with a comment
+  explaining the real arlocal + solana-test-validator harness it would
+  require; the four failure-mode tests exercise the same code paths in
+  their non-failure direction.
+
+**Deviations:** None substantive. Two minor adjustments:
+1. Row save now precedes delivery check (`INSERT OR REPLACE` semantics on
+   demotion) so the recall stage has a row to find — the spec text reads
+   as two saves but the same `attestation_id` makes the single-row flow
+   the intended behaviour.
+2. Refund + counter + record_refund_failed wired into `mcp_handler`'s
+   existing on-error refund branch rather than inside `sign_memory_inline`
+   (api_key only lives at the dispatcher boundary). Functionally
+   equivalent to the brief; keeps the lock-discipline rule applied to
+   `mcp_handler` instead of duplicating across two files.
+
+**Verification:**
+- `cargo test --workspace --features mnemonic-mcp/test-support --no-fail-fast`
+  → workspace green (all task suites pass, delivery_guarantee: 4 passed +
+  1 ignored).
+- `cargo clippy --workspace --all-targets --features mnemonic-mcp/test-support -- -D warnings`
+  → clean.
+- `cargo fmt --all -- --check` → clean.

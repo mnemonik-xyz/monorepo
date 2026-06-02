@@ -113,6 +113,12 @@ fn build_state() -> Arc<McpState> {
         // these legacy compatibility tests the deploy is local-only, so the
         // envelope renders `["local"]` / `null` cost — see Envelope::from_config.
         envelope: mnemonic_mcp::mcp::Envelope::from_config("local", "none", 0),
+        delivery_refetch_timeout: std::time::Duration::from_secs(15),
+        refunds_by_subject: std::sync::Arc::new(mnemonic_mcp::payment::RefundsBySubject::new(
+            std::time::Duration::from_secs(60),
+            5,
+        )),
+        delivery_metrics: std::sync::Arc::new(mnemonic_mcp::payment::DeliveryMetrics::default()),
     })
 }
 
