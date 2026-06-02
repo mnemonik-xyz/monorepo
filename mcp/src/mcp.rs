@@ -1111,12 +1111,17 @@ async fn handle_tool_call(
         "mnemonic_verify" => {
             let sol = args.get("solana_tx").and_then(|v| v.as_str());
             let ar = args.get("arweave_tx").and_then(|v| v.as_str());
+            // T4: pass `owner_pubkey` so the storage routing lookup
+            // (`find_write_mode_by_tx`) is tenant-scoped. The
+            // `storage_mode` argument is retained for ABI compatibility
+            // but ignored — routing is by stored `write_mode` now.
             tools::verify(
                 &state.solana,
                 &state.arweave,
                 &state.store,
                 sol,
                 ar,
+                owner_pubkey,
                 &state.storage_mode,
             )
             .await

@@ -14,6 +14,11 @@ pub struct AttestationRow {
 }
 
 /// Search result with relevance scoring.
+///
+/// `write_mode` is surfaced so callers (notably `recall`) can render mixed-
+/// mode lists with provenance visible: each row carries the per-request
+/// intent that produced it (`Local` — free, offline; `Participate` —
+/// anchored on Arweave + Solana).
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct SearchResult {
     pub attestation_id: String,
@@ -23,15 +28,17 @@ pub struct SearchResult {
     pub solana_tx: String,
     pub arweave_tx: String,
     pub created_at: String,
+    pub write_mode: WriteMode,
     pub relevance_score: f32,
 }
 
 /// Attestation CRUD and cosine search.
 ///
-/// Authorization is the caller's responsibility for `find_by_tx` / `count`.
-/// `save_attestation` and `search` enforce a mandatory `owner_pubkey` filter:
-/// each row stores `owner_pubkey` and `search` returns only rows matching the
-/// supplied owner. Per Decision 9 there is no anonymous / unfiltered path.
+/// Authorization is enforced by both `search` and `find_by_tx` /
+/// `find_write_mode_by_tx`: every lookup is scoped by a mandatory
+/// `owner_pubkey`. A wrong-tenant probe returns `Ok(None)` indistinguishable
+/// from a genuine miss. Per Decision 9 there is no anonymous / unfiltered
+/// path.
 pub trait AttestationStore {
     /// Persist an attestation row scoped to `owner_pubkey`.
     ///
@@ -62,7 +69,25 @@ pub trait AttestationStore {
         embedding: &[f32],
     ) -> anyhow::Result<()>;
 
-    fn find_by_tx(&self, tx_id: &str) -> anyhow::Result<Option<AttestationRow>>;
+    /// Look up a row by `solana_tx` OR `arweave_tx`, scoped to the caller's
+    /// `owner_pubkey`. A row belonging to a different tenant returns
+    /// `Ok(None)` — same shape as a genuine miss, no side-channel leak of
+    /// existence, hash, signer, or content. Closes the pre-existing tenant-
+    /// isolation gap surfaced by per-request mode coexistence (Decision 9 /
+    /// T4).
+    fn find_by_tx(&self, tx_id: &str, owner_pubkey: &str)
+        -> anyhow::Result<Option<AttestationRow>>;
+
+    /// Look up the stored `write_mode` for a row by `solana_tx` OR
+    /// `arweave_tx`, scoped to the caller's `owner_pubkey`. Used by
+    /// `verify` routing in `mcp/` to dispatch by stored intent without
+    /// re-loading the full row. Wrong-tenant lookups return `Ok(None)`
+    /// identical to a genuine miss.
+    fn find_write_mode_by_tx(
+        &self,
+        tx_id: &str,
+        owner_pubkey: &str,
+    ) -> anyhow::Result<Option<WriteMode>>;
 
     fn count(&self, signer: &str) -> anyhow::Result<i64>;
 

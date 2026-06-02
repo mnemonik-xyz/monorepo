@@ -147,6 +147,26 @@ impl TestServer {
         mint_jwt(sub, TEST_JWT_SECRET)
     }
 
+    /// Mint a HS256 JWT bound to an explicit pubkey identity. T4 needs
+    /// this primitive so a single `TestServer` (one SQLite DB) can be
+    /// driven by two distinct authenticated callers for the tenant-
+    /// isolation scenario. Semantically equivalent to `mint_jwt`, but
+    /// named after the caller's intent (the `sub` value is treated as
+    /// the tenant's `owner_pubkey`).
+    pub fn mint_test_jwt(&self, pubkey: &str) -> String {
+        mint_jwt(pubkey, TEST_JWT_SECRET)
+    }
+
+    /// Return a small client wrapper whose `call_tool` injects
+    /// `Authorization: Bearer <jwt>`. Lets a test pin a single identity
+    /// across a sequence of calls without repeating `mint_jwt` and
+    /// remembering to thread `Some(&sub)` through `call_tool`. The
+    /// returned wrapper borrows the parent `TestServer` (zero-copy of
+    /// the underlying `Router`).
+    pub fn with_token<'a>(&'a self, jwt: &'a str) -> AuthedClient<'a> {
+        AuthedClient { server: self, jwt }
+    }
+
     /// The server keypair's base58 pubkey — convenient default "owner" for
     /// tests that don't care about multi-tenancy. Equal to `claims.sub`
     /// when the test mints a JWT via `self.mint_jwt(&self.server_pubkey())`.
@@ -213,14 +233,20 @@ impl TestServer {
     }
 
     /// Fetch a row by Solana tx id (`local:` synthetic id or real
-    /// signature). Wraps `find_by_tx`. Returns `None` for a miss; panics
-    /// on a SQLite error (test scaffolding doesn't need a result type).
+    /// signature) scoped to `owner_pubkey`. Wraps `find_by_tx`. Returns
+    /// `None` for a miss OR a wrong-tenant probe (the storage layer
+    /// returns `Ok(None)` for both — tenant isolation is enforced at the
+    /// SQL predicate per T4). Panics on a SQLite error (test scaffolding
+    /// doesn't need a result type).
     pub fn fetch_attestation_by_tx(
         &self,
         tx_id: &str,
+        owner_pubkey: &str,
     ) -> Option<mnemonic_core::storage::AttestationRow> {
         let store = self.state.store.lock().expect("store mutex");
-        store.find_by_tx(tx_id).expect("find_by_tx must not error")
+        store
+            .find_by_tx(tx_id, owner_pubkey)
+            .expect("find_by_tx must not error")
     }
 
     /// Read the persisted `write_mode` column for an attestation by its
@@ -303,5 +329,42 @@ impl CallResult {
             .as_str()
             .unwrap_or("");
         serde_json::from_str(text).unwrap_or(Value::Null)
+    }
+}
+
+/// Authenticated client bound to a specific bearer token (and therefore a
+/// specific `owner_pubkey` resolved by the OAuth middleware from the JWT
+/// `sub` claim). Constructed via [`TestServer::with_token`]; intended for
+/// multi-tenant test scenarios such as T4's tenant-isolation regression.
+pub struct AuthedClient<'a> {
+    server: &'a TestServer,
+    jwt: &'a str,
+}
+
+impl AuthedClient<'_> {
+    /// Issue an authenticated `tools/call` to `/mcp` with the bound JWT
+    /// in the `Authorization: Bearer <jwt>` header. Returns the parsed
+    /// JSON envelope; the underlying transport behaviour matches
+    /// [`TestServer::call_tool`] byte-for-byte.
+    pub async fn call_tool(&self, name: &str, arguments: Value) -> CallResult {
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {"name": name, "arguments": arguments},
+        });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/mcp")
+            .header("content-type", "application/json")
+            .header("authorization", format!("Bearer {}", self.jwt))
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        let resp = self.server.app.clone().oneshot(req).await.unwrap();
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let envelope: Value = serde_json::from_slice(&bytes)
+            .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(&bytes).into()));
+        CallResult { status, envelope }
     }
 }

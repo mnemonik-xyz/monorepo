@@ -1015,27 +1015,74 @@ pub async fn confirm_delivery_or_demote(
 
 /// Tool 3: verify
 ///
-/// Full mode: fetch COSE bytes from Arweave → COSE verify → compare hash with anchor
-/// Local mode: SQLite lookup + blake3 recompute
+/// Routes by the row's stored `write_mode` (Decision 9 / T4), not by env-var:
+/// - `WriteMode::Local`  → `verify_local` (SQLite lookup + blake3 recompute).
+/// - `WriteMode::Participate` → fetch COSE bytes from Arweave → COSE verify →
+///   compare hash with the Solana anchor (`verify_cose` / `verify_legacy_json`
+///   fallback for v1 rows).
+///
+/// Tenant isolation: the routing lookup is scoped by the caller's
+/// `owner_pubkey`. A row owned by a different tenant returns the
+/// `not_found` shape identical to a genuine miss — no `content_hash`,
+/// `signer_pubkey`, or content preview leaks across tenants.
+///
+/// `storage_mode` is _unused — routing is by stored `write_mode`_. It is
+/// kept in the signature for ABI compatibility with internal callers that
+/// pre-date the routing change.
 pub async fn verify(
     solana: &SolanaClient,
     arweave: &ArweaveClient,
     store: &std::sync::Mutex<SqliteStore>,
     solana_tx: Option<&str>,
     arweave_tx: Option<&str>,
-    storage_mode: &str,
+    owner_pubkey: &str,
+    _storage_mode: &str,
 ) -> anyhow::Result<serde_json::Value> {
-    if storage_mode == "local" {
-        return verify_local(store, solana_tx, arweave_tx);
-    }
+    let lookup_id = match solana_tx.or(arweave_tx) {
+        Some(id) => id,
+        None => {
+            return Ok(serde_json::json!({
+                "status": "error",
+                "message": "Provide solana_tx or arweave_tx",
+            }));
+        }
+    };
 
-    // Full mode
-    if solana_tx.is_none() && arweave_tx.is_none() {
-        return Ok(
-            serde_json::json!({"status": "error", "message": "Provide solana_tx or arweave_tx"}),
-        );
-    }
+    // Storage lock discipline: SqliteStore is !Send. Hold the mutex
+    // briefly for the routing lookup and DROP before any `.await` on
+    // Arweave / Solana clients.
+    let routed_mode = {
+        let store = store.lock().expect("store mutex poisoned");
+        store.find_write_mode_by_tx(lookup_id, owner_pubkey)?
+    };
 
+    match routed_mode {
+        Some(WriteMode::Local) => verify_local(store, solana_tx, arweave_tx, owner_pubkey),
+        Some(WriteMode::Participate) => {
+            verify_participate(solana, arweave, solana_tx, arweave_tx).await
+        }
+        // Tenant isolation: a row owned by a different tenant returns
+        // `Ok(None)` from `find_write_mode_by_tx` — same shape as a
+        // genuine miss. NO `content_hash`, `signer_pubkey`, `content`,
+        // or `preview` is included; the response is indistinguishable
+        // from "tx doesn't exist anywhere in the DB".
+        None => Ok(serde_json::json!({
+            "status": "not_found",
+            "lookup_id": lookup_id,
+        })),
+    }
+}
+
+/// Participate-mode verification: fetch COSE bytes from Arweave, verify the
+/// COSE signature, compare blake3 hash against the Solana anchor. Extracted
+/// from the pre-T4 env-var branch so the routing decision in `verify`
+/// remains a flat `match`.
+async fn verify_participate(
+    solana: &SolanaClient,
+    arweave: &ArweaveClient,
+    solana_tx: Option<&str>,
+    arweave_tx: Option<&str>,
+) -> anyhow::Result<serde_json::Value> {
     let mut expected_hash: Option<String> = None;
     let mut ar_tx = arweave_tx.map(|s| s.to_string());
     let mut anchor_version: u64 = 1;
@@ -1159,17 +1206,24 @@ fn verify_legacy_json(
 }
 
 /// Local-mode verification: SQLite lookup + blake3 recompute.
+///
+/// `owner_pubkey` scopes the lookup so a tenant cannot probe another
+/// tenant's row via `verify`. The wrapping `verify()` already routed here
+/// because `find_write_mode_by_tx` returned `Some(Local)` under this
+/// scope; we re-apply the predicate defensively so direct callsites
+/// inherit the same isolation guarantee.
 fn verify_local(
     store: &std::sync::Mutex<SqliteStore>,
     solana_tx: Option<&str>,
     arweave_tx: Option<&str>,
+    owner_pubkey: &str,
 ) -> anyhow::Result<serde_json::Value> {
     let lookup_id = solana_tx
         .or(arweave_tx)
         .ok_or_else(|| anyhow::anyhow!("provide solana_tx or arweave_tx"))?;
 
-    let store = store.lock().unwrap();
-    let att = store.find_by_tx(lookup_id)?;
+    let store = store.lock().expect("store mutex poisoned");
+    let att = store.find_by_tx(lookup_id, owner_pubkey)?;
 
     match att {
         Some(a) => {

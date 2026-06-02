@@ -531,12 +531,24 @@ impl AttestationStore for SqliteStore {
         Ok(())
     }
 
-    fn find_by_tx(&self, tx_id: &str) -> anyhow::Result<Option<AttestationRow>> {
+    fn find_by_tx(
+        &self,
+        tx_id: &str,
+        owner_pubkey: &str,
+    ) -> anyhow::Result<Option<AttestationRow>> {
+        // Tenant-isolation predicate (Decision 9 / T4): the lookup MUST
+        // include `AND owner_pubkey = ?` so a row owned by a different
+        // tenant is indistinguishable from a genuine miss. No carve-out;
+        // legacy rows with NULL `owner_pubkey` will not match any caller.
+        // Response-timing symmetry is documented as accepted residual
+        // (R2-F4) — no constant-time wrapper is layered here.
         let mut stmt = self.conn.prepare(
             "SELECT attestation_id, content, content_hash, solana_tx, arweave_tx, signer_pubkey
-             FROM attestations WHERE solana_tx = ?1 OR arweave_tx = ?1 LIMIT 1",
+             FROM attestations
+             WHERE (solana_tx = ?1 OR arweave_tx = ?1) AND owner_pubkey = ?2
+             LIMIT 1",
         )?;
-        let mut rows = stmt.query(params![tx_id])?;
+        let mut rows = stmt.query(params![tx_id, owner_pubkey])?;
         match rows.next()? {
             Some(row) => Ok(Some(AttestationRow {
                 attestation_id: row.get(0)?,
@@ -546,6 +558,28 @@ impl AttestationStore for SqliteStore {
                 arweave_tx: row.get(4)?,
                 signer_pubkey: row.get(5)?,
             })),
+            None => Ok(None),
+        }
+    }
+
+    fn find_write_mode_by_tx(
+        &self,
+        tx_id: &str,
+        owner_pubkey: &str,
+    ) -> anyhow::Result<Option<WriteMode>> {
+        // Same tenant-isolation predicate as `find_by_tx`: a row owned by
+        // a different tenant returns `Ok(None)` — `verify` routing must
+        // not branch differently for "exists for someone else" vs.
+        // "doesn't exist at all". Separate from `find_by_tx` so the
+        // routing path does not pay the cost of decoding `content` etc.
+        let mut stmt = self.conn.prepare(
+            "SELECT write_mode FROM attestations
+             WHERE (solana_tx = ?1 OR arweave_tx = ?1) AND owner_pubkey = ?2
+             LIMIT 1",
+        )?;
+        let mut rows = stmt.query(params![tx_id, owner_pubkey])?;
+        match rows.next()? {
+            Some(row) => Ok(Some(row.get::<_, WriteMode>(0)?)),
             None => Ok(None),
         }
     }
@@ -569,7 +603,8 @@ impl AttestationStore for SqliteStore {
         // with NULL `owner_pubkey` will not match any caller.
         let mut stmt = self.conn.prepare(
             "SELECT a.attestation_id, a.content, a.content_hash, a.tags,
-                    a.solana_tx, a.arweave_tx, a.created_at, ae.embedding
+                    a.solana_tx, a.arweave_tx, a.created_at, a.write_mode,
+                    ae.embedding
              FROM attestations a
              JOIN attestation_embeddings ae ON a.attestation_id = ae.attestation_id
              WHERE a.owner_pubkey = ?",
@@ -584,7 +619,7 @@ impl AttestationStore for SqliteStore {
 
         let mut results: Vec<SearchResult> = stmt
             .query_map(params![owner_pubkey], |row| {
-                let emb_blob: Vec<u8> = row.get(7)?;
+                let emb_blob: Vec<u8> = row.get(8)?;
                 let emb = bytes_to_floats(&emb_blob);
                 let e_norm = l2_norm(&emb);
                 let score = if e_norm > 0.0 {
@@ -605,6 +640,7 @@ impl AttestationStore for SqliteStore {
                     solana_tx: row.get(4)?,
                     arweave_tx: row.get(5)?,
                     created_at: row.get(6)?,
+                    write_mode: row.get::<_, WriteMode>(7)?,
                     relevance_score: score,
                 })
             })?
@@ -688,12 +724,86 @@ mod tests {
             )
             .unwrap();
 
-        let found = store.find_by_tx("sol_tx_1").unwrap();
+        let found = store.find_by_tx("sol_tx_1", TEST_OWNER).unwrap();
         assert!(found.is_some());
         let row = found.unwrap();
         assert_eq!(row.attestation_id, "att-1");
         assert_eq!(row.content, "content");
         assert_eq!(row.content_hash, "hash1");
+
+        // Tenant-isolation predicate: a wrong-tenant lookup returns
+        // `Ok(None)` indistinguishable from a genuine miss.
+        let other_tenant = store.find_by_tx("sol_tx_1", "different-owner").unwrap();
+        assert!(
+            other_tenant.is_none(),
+            "wrong-tenant lookup must return None"
+        );
+    }
+
+    #[test]
+    fn test_find_write_mode_by_tx_routes_by_stored_mode() {
+        // Seed two rows under different tenants but identical-shape txids
+        // so the predicate has to discriminate by both tx AND owner.
+        let store = SqliteStore::in_memory().unwrap();
+        store
+            .save_attestation(
+                "att-local",
+                "local content",
+                "h-local",
+                &[],
+                "sol-shared",
+                "ar-local",
+                "signer-a",
+                "owner-a",
+                "2026-04-13T00:00:00Z",
+                WriteMode::Local,
+                &[1.0, 0.0],
+            )
+            .unwrap();
+        store
+            .save_attestation(
+                "att-participate",
+                "participate content",
+                "h-participate",
+                &[],
+                "sol-different",
+                "ar-participate",
+                "signer-b",
+                "owner-b",
+                "2026-04-13T00:00:00Z",
+                WriteMode::Participate,
+                &[0.0, 1.0],
+            )
+            .unwrap();
+
+        // owner-a's row is local
+        assert_eq!(
+            store
+                .find_write_mode_by_tx("sol-shared", "owner-a")
+                .unwrap(),
+            Some(WriteMode::Local)
+        );
+        // owner-b's row is participate
+        assert_eq!(
+            store
+                .find_write_mode_by_tx("sol-different", "owner-b")
+                .unwrap(),
+            Some(WriteMode::Participate)
+        );
+        // Wrong tenant for an existing tx → None (no leak).
+        assert_eq!(
+            store
+                .find_write_mode_by_tx("sol-shared", "owner-b")
+                .unwrap(),
+            None
+        );
+        // Unknown tx → None.
+        assert_eq!(
+            store
+                .find_write_mode_by_tx("nonexistent", "owner-a")
+                .unwrap(),
+            None
+        );
     }
 
     #[test]
@@ -911,7 +1021,7 @@ mod tests {
     #[test]
     fn test_find_by_tx_not_found() {
         let store = SqliteStore::in_memory().unwrap();
-        let found = store.find_by_tx("nonexistent").unwrap();
+        let found = store.find_by_tx("nonexistent", TEST_OWNER).unwrap();
         assert!(found.is_none());
     }
 
@@ -949,7 +1059,7 @@ mod tests {
         );
         assert!(result.is_ok());
         // Content should be updated
-        let row = store.find_by_tx("sol2").unwrap().unwrap();
+        let row = store.find_by_tx("sol2", TEST_OWNER).unwrap().unwrap();
         assert_eq!(row.content, "c2");
     }
 

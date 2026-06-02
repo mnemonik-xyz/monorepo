@@ -538,3 +538,57 @@ the on-chain payment proof; stable across retries with the same payment).
 - `cargo clippy --workspace --all-targets --features mnemonic-mcp/test-support -- -D warnings` → clean.
 - `cargo test --workspace --features mnemonic-mcp/test-support --no-fail-fast` →
   **527 passed, 0 failed** (4 ignored, all intentional per project convention).
+
+## Task 4: verify routes by stored write_mode + tenant isolation on find_by_tx
+
+**Status:** Ready for review
+**Agent:** task4-impl
+**Summary:** Replaced the env-var routing branch in `mcp/src/tools.rs::verify`
+with a SQLite lookup of the row's stored `write_mode`. New
+`AttestationStore::find_write_mode_by_tx(tx, owner_pubkey)` plus a
+re-shaped `find_by_tx(tx, owner_pubkey)` close a pre-existing tenant-
+isolation gap surfaced by per-request mode coexistence: both lookups
+filter by `AND owner_pubkey = ?` in the SQL predicate, so a wrong-tenant
+probe returns `Ok(None)` indistinguishable from a genuine miss. `verify`
+routes `WriteMode::Local` → `verify_local`, `WriteMode::Participate` →
+new `verify_participate` helper (extracted from the old env-var branch),
+`None` → flat `{status: "not_found", lookup_id}` envelope with NO
+`content_hash` / `signer` / `content` / `preview` leakage. The
+`storage_mode` parameter is kept on `verify` for ABI compatibility but
+marked unused via `_storage_mode` and a doc comment. `recall` now
+surfaces `write_mode` on each row via `SearchResult.write_mode`
+(serialized as `"local"` / `"participate"`). The `_helpers/` harness
+gained `mint_test_jwt(pubkey)` + `with_token(jwt) -> AuthedClient`
+primitives so the tenant-isolation tests can drive two distinct
+authenticated callers against one shared DB. New `mcp/tests/
+verify_by_stored_mode.rs` covers the four scenarios: routing by stored
+local-mode, routing by stored participate-mode, tenant isolation
+(critical, both local + participate row shapes), and recall surfacing
+`write_mode`.
+
+**Tenant-isolation residual:** R2-F4 (response-timing symmetry) is
+documented as accepted in the user-spec — no constant-time SQL wrapper
+was added. The shape-level isolation (no leakage of identifying fields
+through error data) is fully closed.
+
+**Deviations:** Added `mcp/src/mcp.rs` to Files-to-Modify (the
+dispatcher's `tools::verify(...)` call site now passes `owner_pubkey`,
+in scope from the JWT `sub` claim). The task file listed only `core/`
+and `mcp/src/tools.rs` originally.
+
+**Verification:**
+- `cargo test -p mnemonic-mcp --features test-support --test verify_by_stored_mode`
+  → **5 passed, 0 failed** (`verify_routes_local_for_local_row`,
+  `verify_routes_participate_for_participate_row`,
+  `tenant_isolation_local`, `tenant_isolation_participate`,
+  `recall_surfaces_write_mode`).
+- `cargo test -p mnemonic-mcp --features test-support verify_` → green
+  (includes the new file plus `demotion_on_verify_failure` from T3).
+- `cargo test -p mnemonic-mcp --features test-support recall_` → green
+  (includes the new file plus `recall_owner_isolation` and
+  `mixed_mode_coexistence_recall_returns_both`).
+- `cargo test --workspace --features mnemonic-mcp/test-support --no-fail-fast`
+  → green across all integration suites.
+- `cargo clippy --workspace --all-targets --features mnemonic-mcp/test-support -- -D warnings`
+  → clean.
+- `cargo fmt --all -- --check` → clean.
