@@ -284,11 +284,19 @@ pub async fn sign_callback_handler(
                 );
             }
         };
-        // T1 placeholder: thread `WriteMode::Participate` so the now-11-arg
-        // trait method compiles. T2 will replace this with the resolved
-        // per-request `WriteMode` once the deferred-sign flow carries the
-        // mode through the callback (the original request that produced this
-        // correlation_id resolved a mode at dispatch time).
+        // T2 (resolved from T1 placeholder): the deferred-signing /
+        // sign-callback flow ALWAYS persists with `WriteMode::Participate`
+        // — by construction. A `local`-mode request never enters this
+        // pipeline (the deferred branch fires only for the HTTP/JWT path
+        // which exists specifically to anchor on Arweave + Solana
+        // through user-side signing). The mode was resolved at the
+        // original `mnemonic_sign_memory` dispatch time and would have
+        // been `Participate`; we don't re-derive it here because the
+        // pending bundle doesn't carry the mode field — recording
+        // `Participate` is the only value consistent with this code
+        // path having been reached. See work/modes-user-choice/
+        // tech-spec.md §"Data flow (participate write)" + decisions.md
+        // entry for T2.
         let save_res = store.save_attestation(
             &attestation_id,
             &entry.content,

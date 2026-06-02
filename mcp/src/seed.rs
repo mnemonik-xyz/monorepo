@@ -329,6 +329,16 @@ pub async fn run(state: &McpState) -> Result<()> {
 
             // Seeding always takes the inline (server-signing) path —
             // `jwt_sub = None` per Decision 12.
+            //
+            // T2: seeding never carries an explicit `mode` field — it
+            // resolves to env-var fallback (the same `WriteMode` value the
+            // server has always used for its own RAG corpus). On a `full`
+            // deploy that's `Participate`; on `local` it's `Local`. We
+            // pre-resolve here (instead of plumbing the args object) so the
+            // call site reads as "intentional inline seeding", not "stamped
+            // a mode at runtime".
+            let seed_mode = tools::resolve_write_mode(None, &state.storage_mode)
+                .expect("None always resolves to Ok per resolver contract");
             let result = tools::sign_memory(
                 &state.keypair,
                 &state.solana,
@@ -343,6 +353,8 @@ pub async fn run(state: &McpState) -> Result<()> {
                 &state.storage_mode,
                 &server_owner_pubkey,
                 None,
+                seed_mode,
+                &state.envelope,
             )
             .await
             .with_context(|| format!("sign_memory failed for {rel_str} chunk {i}"))?;

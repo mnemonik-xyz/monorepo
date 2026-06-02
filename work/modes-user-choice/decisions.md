@@ -275,6 +275,70 @@ audit-trail; do NOT use as design input):**
   regenerated via `/new-tech-spec` (tech-spec) and removed/rewritten on demand
   (stories/journeys — they were exploratory artifacts, not template-required).
 
+## Task 2: Per-request mode + whoami envelope + typed errors + paywall reframing
+
+**Status:** Ready for review
+**Commit:** (assigned by team lead)
+**Agent:** task2-impl
+**Summary:** Added `tools::resolve_write_mode` — a pure function that maps the
+optional `mode` field on `mnemonic_sign_memory` to a typed `WriteMode`, with
+strict rejection (-32602 InvalidParams, `data.field`/`data.received`) for every
+non-canonical input (case-variant, whitespace, null, non-string, unknown).
+That resolver is the SINGLE source of truth: `mcp_handler` calls it once
+before the paywall gate (`is_sign_memory && resolved == Participate &&
+payment_mode != "none"`), and the same resolved value is threaded into
+`sign_memory(... write_mode ...)` and then into `save_attestation`. The three
+T1 `WriteMode::Participate` placeholders in `mcp/` are replaced: two in
+`tools.rs` and one in `api.rs::sign_callback_handler` (the deferred-sign
+flow always anchors → `Participate` by construction; documented in-line).
+Added a `mcp::Envelope` struct on `McpState` populated at process start in
+`main.rs::run_http` AND in every test-state constructor (`test_support`,
+`mcp::transport_tests::build_test_state`, `tests/sign_callback.rs`,
+`tests/pending_authz.rs`, `tests/pending_expiry.rs`, `chat.rs` test scope),
+plus the new typed-error helpers `unsupported_mode` (-32010) and
+`invalid_params` (-32602) sitting next to `JsonRpcError` in `mcp.rs`.
+`whoami` returns the envelope (`supported_modes`, `default_mode`,
+`participate_cost { currency, amount_cents, payment_methods }`) merged onto
+the legacy fields so the chrome-extension Cloud-tier `storage_mode` echo
+keeps working. Routing change in `sign_memory`: an EXPLICIT `mode: "local"`
+request against a deploy that ALSO supports `participate` (i.e. `full`)
+short-circuits to the inline path even with a JWT — the user explicitly
+opted out of the deferred Cloud-tier flow to get the free local write
+(user-spec invariant "Личная память бесплатна всегда"). Mode-absent + JWT
+on a local-only deploy continues to take the deferred branch (legacy
+chrome-extension Cloud-tier preserved). Test harness lives in
+`mcp/tests/_helpers/mod.rs` (`TestServer::builder().storage_mode(…).
+payment_mode(…).build()`, `.call_tool()`, `.attestation_count()`,
+`.write_mode_for_tx()`, `.attestation_cost_rows()`, `.balance_for()`) and
+new integration suite `mcp/tests/modes_per_request.rs` covers all six
+ACs end-to-end. A golden fixture at
+`mcp/tests/fixtures/modes/legacy_sign_response.json` pins the mode-absent
+deferred-signing envelope shape (regression guard for shipped extension).
+**Deviations:** Routing rule for `sign_memory` is more nuanced than the
+brief described: it skips deferred when `write_mode == Local AND
+envelope.supports_participate()` (explicit-local-on-full). The brief
+suggested skipping deferred whenever `write_mode == Local`; that would
+break `mock_state` (local) + JWT + mode-absent path which the existing
+`deferred_sign_flow.rs` / `oauth_tool_call.rs` / `pending_user_cap.rs` /
+`recall_owner_isolation.rs` tests assume routes through deferred. The
+narrower condition preserves those assertions verbatim (per the
+"Do NOT change deferred_sign_flow.rs / sign_callback.rs ASSERTIONS"
+constraint) while still honouring the user-spec invariant for the
+chrome-extension's actual deploy target (full + JWT, never local + JWT
+in production).
+
+**Reviews:**
+
+*Round 1:* pending (will be dispatched by the team lead).
+
+**Verification:**
+- `cargo test --workspace --features mnemonic-mcp/test-support --no-fail-fast`
+  → all suites green (mcp lib: 153 passed; modes_per_request: 6 passed;
+  every existing integration test unchanged in assertions).
+- `cargo clippy --workspace --all-targets --features mnemonic-mcp/test-support -- -D warnings`
+  → clean.
+- `cargo fmt --all -- --check` → clean.
+
 ## Task 1: WriteMode enum + write_mode column + save_attestation signature
 
 **Status:** Done

@@ -534,6 +534,7 @@ mod handler_tests {
             bootstrap_tickets: Arc::new(crate::api::BootstrapTickets::with_defaults()),
             bootstrap_server_x25519_secret,
             bootstrap_server_x25519_public,
+            envelope: crate::mcp::Envelope::from_config("local", "none", 0),
         })
     }
 

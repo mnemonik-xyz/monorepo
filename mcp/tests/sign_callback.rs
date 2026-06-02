@@ -109,6 +109,10 @@ fn build_state() -> Arc<McpState> {
         bootstrap_tickets: Arc::new(mnemonic_mcp::api::BootstrapTickets::with_defaults()),
         bootstrap_server_x25519_secret: bootstrap_x25519_sk,
         bootstrap_server_x25519_public: bootstrap_x25519_pk,
+        // T2: every McpState now carries a discoverability envelope. For
+        // these legacy compatibility tests the deploy is local-only, so the
+        // envelope renders `["local"]` / `null` cost — see Envelope::from_config.
+        envelope: mnemonic_mcp::mcp::Envelope::from_config("local", "none", 0),
     })
 }
 

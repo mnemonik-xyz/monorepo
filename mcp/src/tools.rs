@@ -20,20 +20,120 @@ use mnemonic_core::identity;
 use mnemonic_core::solana::SolanaClient;
 use mnemonic_core::storage::{AttestationStore, SqliteStore, WriteMode};
 
+use crate::mcp::{invalid_params, unsupported_mode, Envelope, JsonRpcError};
 use crate::pending::PendingBundles;
 use crate::{payment, pricing::CostHint};
 
+/// Resolve the per-request `mode` field on `mnemonic_sign_memory` to a
+/// concrete [`WriteMode`]. This is the **single source of truth** that drives
+/// BOTH the paywall gate in `mcp_handler` AND the persisted `write_mode`
+/// column on the attestation row — by construction they cannot drift
+/// (Decision 1 in work/modes-user-choice/tech-spec.md).
+///
+/// Resolution rules (tech-spec §"API contract changes / Resolution rule"):
+///
+/// | Input             | Output                                            |
+/// |-------------------|---------------------------------------------------|
+/// | `None` (absent)   | env-var fallback: `local` iff `env_storage_mode  |
+/// |                   | == "local"`, else `Participate`                  |
+/// | `"local"`         | `WriteMode::Local`                                |
+/// | `"participate"`   | `WriteMode::Participate`                          |
+/// | anything else     | `Err(invalid_params("mode", received_verbatim))`  |
+///
+/// "Anything else" covers: JSON `null`, non-string types (integer, array,
+/// object), empty `""`, whitespace `" "`, capitalised `"Local"` /
+/// `"PARTICIPATE"`, unknown strings. The verbatim received `Value` is echoed
+/// in the error's `data.received` so a misbehaving client can diff.
+///
+/// Pure function — no I/O, no globals. The full resolution table is
+/// table-driven-tested in `mcp::tests::resolve_write_mode_*`.
+pub(crate) fn resolve_write_mode(
+    input_mode: Option<&serde_json::Value>,
+    env_storage_mode: &str,
+) -> Result<WriteMode, JsonRpcError> {
+    match input_mode {
+        None => {
+            // Backward-compat: the shipped chrome-extension and pre-T2 stdio
+            // clients never send `mode`. Resolve from env-var so their
+            // behaviour is byte-for-byte unchanged.
+            if env_storage_mode == "local" {
+                Ok(WriteMode::Local)
+            } else {
+                Ok(WriteMode::Participate)
+            }
+        }
+        Some(serde_json::Value::String(s)) => match WriteMode::from_str_strict(s) {
+            Some(m) => Ok(m),
+            // `from_str_strict` rejects `"Local"`, `"PARTICIPATE"`, `""`,
+            // `" "`, trailing whitespace, and any unknown string. Echo the
+            // raw string back through `data.received` (not `s` directly —
+            // we want the JSON Value variant preserved).
+            None => Err(invalid_params(
+                "mode",
+                input_mode.expect("Some matched above"),
+            )),
+        },
+        // Non-string (null, integer, array, object) — strict rejection.
+        Some(v) => Err(invalid_params("mode", v)),
+    }
+}
+
+/// Smuggle a `unsupported_mode` JSON-RPC error through `anyhow::Error` so it
+/// surfaces from `tools::sign_memory` (which has an `anyhow::Result` return
+/// type) and is reconstituted by `mcp::tool_error_to_json_rpc` at the
+/// dispatcher boundary. The encoded body is the inner-data shape of
+/// `JsonRpcError`: `{code, message, data}` JSON — matching the parsing
+/// rule in `tool_error_to_json_rpc`. Drift would silently fall back to
+/// `-32603 InternalError`; the round-trip is tested via the integration
+/// test `participate_against_local_only_server_returns_unsupported`.
+fn unsupported_mode_anyhow(envelope: &Envelope) -> anyhow::Error {
+    let err = unsupported_mode("participate", &envelope.supported_modes);
+    let body = serde_json::json!({
+        "code": err.code,
+        "message": err.message,
+        "data": err.data,
+    });
+    anyhow::anyhow!(body.to_string())
+}
+
 /// Tool 1: whoami (sync — DB only)
-pub fn whoami(keypair: &Keypair, store: &SqliteStore, storage_mode: &str) -> serde_json::Value {
+///
+/// T2 extension: returns the discoverability envelope (`supported_modes`,
+/// `default_mode`, `participate_cost`) alongside the existing fields so
+/// clients can choose `local` vs `participate` BEFORE attempting to write.
+/// The legacy `storage_mode` field is kept verbatim for pre-envelope clients
+/// (chrome-extension Cloud tier still reads it).
+pub fn whoami(
+    keypair: &Keypair,
+    store: &SqliteStore,
+    storage_mode: &str,
+    envelope: &Envelope,
+) -> serde_json::Value {
     let pubkey = identity::pubkey_base58(keypair);
     let count = store.count(&pubkey).unwrap_or(0);
-    serde_json::json!({
+    // Serialize the envelope through serde_json so the `null` rendering of
+    // `participate_cost: Option<ParticipateCost>` and the static `&'static
+    // str` arrays in `supported_modes` come out byte-identical to the
+    // spec'd wire shape (no manual JSON construction drift).
+    let envelope_value = serde_json::to_value(envelope).unwrap_or(serde_json::Value::Null);
+    let envelope_obj = envelope_value.as_object().cloned().unwrap_or_default();
+    let mut out = serde_json::json!({
         "public_key": pubkey,
         "did_sol": identity::did_sol(keypair),
         "did_key": identity::did_key(keypair),
         "attestation_count": count,
         "storage_mode": storage_mode,
-    })
+    });
+    // Merge envelope keys (`supported_modes`, `default_mode`,
+    // `participate_cost`) into the response. Done as a post-merge rather
+    // than inline so the field order in the json! macro stays stable for
+    // the golden fixture.
+    if let Some(map) = out.as_object_mut() {
+        for (k, v) in envelope_obj {
+            map.insert(k, v);
+        }
+    }
+    out
 }
 
 /// Tool 2: sign_memory — branches on `jwt_sub`.
@@ -70,9 +170,34 @@ pub async fn sign_memory(
     storage_mode: &str,
     owner_pubkey: &str,
     jwt_sub: Option<&str>,
+    write_mode: WriteMode,
+    envelope: &Envelope,
 ) -> anyhow::Result<serde_json::Value> {
+    // T2 — UnsupportedMode check fires BEFORE the JWT-deferred branch so a
+    // browser client asking for `participate` against a local-only deploy
+    // gets the typed error even when it would otherwise enter the
+    // deferred-signing path. The user explicitly asked to anchor on-chain;
+    // the server cannot fulfil that intent regardless of whether the
+    // signing path is server-side or browser-side.
+    if write_mode == WriteMode::Participate && !envelope.supports_participate() {
+        return Err(unsupported_mode_anyhow(envelope));
+    }
+    // The deferred-signing branch is the Cloud-tier path (browser signs
+    // COSE, server only anchors). It fires on any JWT-authenticated
+    // request EXCEPT when the caller explicitly opted into the inline
+    // free-local path (`mode: "local"` against a server that ALSO
+    // supports participate — i.e. a `full` deploy). For mode-absent
+    // requests we preserve the legacy behaviour (deferred whenever JWT
+    // is present) so the shipped chrome-extension Cloud-tier keeps
+    // working byte-for-byte. The "explicit local on a full deploy
+    // returns free" case is signalled by `write_mode == Local` AND the
+    // envelope supporting participate (a paid/anchoring deploy that the
+    // user is on but chose to bypass).
+    let explicit_local_on_full = write_mode == WriteMode::Local && envelope.supports_participate();
     if let Some(sub) = jwt_sub {
-        return sign_memory_deferred(embedder, compressor, pending, content, tags, sub).await;
+        if !explicit_local_on_full {
+            return sign_memory_deferred(embedder, compressor, pending, content, tags, sub).await;
+        }
     }
     sign_memory_inline(
         keypair,
@@ -86,6 +211,8 @@ pub async fn sign_memory(
         cost_hint,
         storage_mode,
         owner_pubkey,
+        write_mode,
+        envelope,
     )
     .await
 }
@@ -274,8 +401,23 @@ pub async fn check_pending(
 }
 
 /// Stdio branch — inline server-side signing (Decision 4 single-tenant flow).
-/// Byte-for-byte preserves the pre-Task-5 behavior so existing integration
-/// tests + Claude Code clients keep working.
+///
+/// T2 changes (routing now driven by per-request `write_mode`, not the
+/// operator's `STORAGE_MODE` env-var):
+///
+/// - The `write_mode` parameter replaces `storage_mode` as the routing
+///   decision. `WriteMode::Local` → synthetic-id no-anchor path
+///   regardless of env-var. `WriteMode::Participate` → real Arweave +
+///   Solana writes regardless of env-var (the paywall gate in
+///   `mcp_handler` has already ensured the deploy supports it).
+/// - `storage_mode` is retained ONLY for the legacy whoami-echo field in
+///   the success envelope. It does NOT influence behaviour anymore — the
+///   chrome-extension and other legacy clients that read `storage_mode`
+///   from the response keep working byte-for-byte because the resolver
+///   maps `None` (no `mode` field) to env-var fallback, producing the same
+///   `WriteMode` value the env-var would have selected.
+/// - `envelope` is consulted to short-circuit a `participate` request
+///   against a local-only deploy with a typed `UnsupportedMode` error.
 #[allow(clippy::too_many_arguments)]
 async fn sign_memory_inline(
     keypair: &Keypair,
@@ -289,7 +431,14 @@ async fn sign_memory_inline(
     cost_hint: &CostHint,
     storage_mode: &str,
     owner_pubkey: &str,
+    write_mode: WriteMode,
+    envelope: &Envelope,
 ) -> anyhow::Result<serde_json::Value> {
+    // The participate-on-local-only short-circuit lives in
+    // `sign_memory` (the public entry point) — fires before deferred-vs-
+    // inline branching so the user gets the typed error regardless of
+    // path.
+    let _ = envelope; // retained in the signature for future hooks
     let pubkey = identity::pubkey_base58(keypair);
     let attestation_id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
@@ -328,34 +477,37 @@ async fn sign_memory_inline(
     let content_hash = signed.content_hash.clone();
     let embed_model = embedder.model_id().to_string();
 
-    // 5. Store on-chain (or locally)
-    let (solana_tx, arweave_tx) = if storage_mode == "local" {
-        let local_ar = format!("local:{}", &attestation_id[..8]);
-        let local_sol = format!("local:{}", &content_hash[..16]);
-        (local_sol, local_ar)
-    } else {
-        // Arweave: store COSE_Sign1 bytes (not raw JSON)
-        let ar_tx = arweave.write_bytes(&signed.cose_bytes, keypair).await?;
-        arweave.mine().await?;
+    // 5. Store on-chain (or locally) — routed by per-request `write_mode`,
+    //    not the operator's `STORAGE_MODE`. A `local` request against a
+    //    `STORAGE_MODE=full` deploy stays free (no Arweave/Solana writes).
+    let (solana_tx, arweave_tx) = match write_mode {
+        WriteMode::Local => {
+            let local_ar = format!("local:{}", &attestation_id[..8]);
+            let local_sol = format!("local:{}", &content_hash[..16]);
+            (local_sol, local_ar)
+        }
+        WriteMode::Participate => {
+            // Arweave: store COSE_Sign1 bytes (not raw JSON)
+            let ar_tx = arweave.write_bytes(&signed.cose_bytes, keypair).await?;
+            arweave.mine().await?;
 
-        // Solana: anchor blake3 hash + embedding model (v3 format)
-        let memo = serde_json::json!({
-            "h": content_hash,
-            "a": ar_tx,
-            "m": embed_model,
-            "v": 3,
-        });
-        let sol_tx = solana.write_memo(keypair, &memo.to_string()).await?;
-        (sol_tx, ar_tx)
+            // Solana: anchor blake3 hash + embedding model (v3 format)
+            let memo = serde_json::json!({
+                "h": content_hash,
+                "a": ar_tx,
+                "m": embed_model,
+                "v": 3,
+            });
+            let sol_tx = solana.write_memo(keypair, &memo.to_string()).await?;
+            (sol_tx, ar_tx)
+        }
     };
 
     // 6. Save locally
     {
         let store = store.lock().unwrap();
-        // T1 placeholder: thread `WriteMode::Participate` so the now-11-arg
-        // trait method compiles. T2 will replace this with the resolved
-        // per-request `WriteMode` from the dispatcher (drives the paywall
-        // gate AND the persisted column from one source — Decision 1).
+        // T2: the persisted `write_mode` column is the SAME value the
+        // paywall gate consulted (single source of truth — Decision 1).
         store.save_attestation(
             &attestation_id,
             content,
@@ -366,10 +518,15 @@ async fn sign_memory_inline(
             &pubkey,
             owner_pubkey,
             &now,
-            WriteMode::Participate,
+            write_mode,
             &embedding,
         )?;
-        if storage_mode != "local" {
+        // Cost-recording fires only on `Participate` writes. A `Local`
+        // request can hit this code path against a `STORAGE_MODE=full +
+        // PAYMENT_MODE=x402` server and MUST NOT produce an
+        // `attestation_costs` row — that would charge the caller for a
+        // free path.
+        if write_mode == WriteMode::Participate {
             let _ = payment::record_attestation_cost(
                 &store,
                 &attestation_id,
@@ -393,6 +550,7 @@ async fn sign_memory_inline(
         "did_sol": identity::did_sol(keypair),
         "timestamp": now,
         "storage_mode": storage_mode,
+        "write_mode": write_mode.as_str(),
         "embedding": {
             "model": embed_model,
             "provider": embedder.provider_name(),
@@ -717,10 +875,21 @@ mod sign_memory_tests {
         (kp, sol, ar, store, StubEmbedder, comp, pending, hint)
     }
 
+    fn local_envelope() -> Envelope {
+        Envelope::from_config("local", "none", 0)
+    }
+
     #[tokio::test]
     async fn test_sign_memory_returns_awaiting_signature_for_jwt_path() {
+        // T2: the legacy mode-absent JWT path still resolves to the
+        // deferred branch because the resolver maps a local-only deploy
+        // with no explicit mode to `WriteMode::Local`, and on a deploy
+        // that does NOT support participate that takes the deferred
+        // branch (legacy chrome-extension shape preserved). See
+        // `sign_memory` for the routing rule.
         let (kp, sol, ar, store, emb, comp, pending, hint) = fixtures();
         let owner = kp.pubkey().to_string();
+        let env = local_envelope();
         let result = sign_memory(
             &kp,
             &sol,
@@ -735,6 +904,8 @@ mod sign_memory_tests {
             "local",
             &owner,
             Some("user-jwt-sub"),
+            WriteMode::Local,
+            &env,
         )
         .await
         .unwrap();
@@ -753,6 +924,7 @@ mod sign_memory_tests {
     async fn test_sign_memory_stdio_path_unchanged() {
         let (kp, sol, ar, store, emb, comp, pending, hint) = fixtures();
         let owner = kp.pubkey().to_string();
+        let env = local_envelope();
         let result = sign_memory(
             &kp,
             &sol,
@@ -767,6 +939,8 @@ mod sign_memory_tests {
             "local",
             &owner,
             None,
+            WriteMode::Local,
+            &env,
         )
         .await
         .unwrap();
@@ -775,5 +949,131 @@ mod sign_memory_tests {
         assert!(result["content_hash"].is_string());
         let s = store.lock().unwrap();
         assert_eq!(s.count(&owner).unwrap(), 1);
+    }
+}
+
+#[cfg(test)]
+mod resolve_write_mode_tests {
+    //! T2 resolver unit tests. Pure function — no fixtures needed.
+    //!
+    //! Drives the SINGLE source of truth that feeds both the paywall gate
+    //! in `mcp_handler` and the persisted `write_mode` column. Drift is
+    //! impossible by construction because both call sites consume the
+    //! return value of `resolve_write_mode`.
+
+    use super::*;
+
+    /// Helper: assert the error is `-32602 InvalidParams` with the expected
+    /// `data.field` and `data.received` payload.
+    fn assert_invalid_params(err: JsonRpcError, expected_received: &serde_json::Value) {
+        assert_eq!(err.code, -32602, "expected -32602 InvalidParams");
+        assert_eq!(err.message, "Invalid params");
+        let data = err.data.expect("InvalidParams must carry `data`");
+        assert_eq!(data["field"], "mode", "data.field must be \"mode\"");
+        assert_eq!(
+            &data["received"], expected_received,
+            "data.received must echo input verbatim"
+        );
+    }
+
+    #[test]
+    fn none_with_env_local_resolves_to_local() {
+        let m = resolve_write_mode(None, "local").expect("None+local resolves");
+        assert_eq!(m, WriteMode::Local);
+    }
+
+    #[test]
+    fn none_with_env_full_resolves_to_participate() {
+        // Legacy compat: pre-T2 clients (chrome-extension Cloud) on a full
+        // deploy fall back to env-var behaviour — Participate.
+        let m = resolve_write_mode(None, "full").expect("None+full resolves");
+        assert_eq!(m, WriteMode::Participate);
+    }
+
+    #[test]
+    fn explicit_local_string_resolves_to_local() {
+        let v = serde_json::json!("local");
+        let m = resolve_write_mode(Some(&v), "full").expect("explicit local");
+        assert_eq!(m, WriteMode::Local);
+    }
+
+    #[test]
+    fn explicit_participate_string_resolves_to_participate() {
+        let v = serde_json::json!("participate");
+        let m = resolve_write_mode(Some(&v), "local").expect("explicit participate");
+        // Note: even on a `STORAGE_MODE=local` env, the resolver returns
+        // Participate; rejection happens later in `sign_memory_inline` via
+        // the envelope check. The resolver's job is parse-only.
+        assert_eq!(m, WriteMode::Participate);
+    }
+
+    #[test]
+    fn null_rejects_with_invalid_params() {
+        let v = serde_json::Value::Null;
+        let err = resolve_write_mode(Some(&v), "local").expect_err("null rejects");
+        assert_invalid_params(err, &v);
+    }
+
+    #[test]
+    fn non_string_integer_rejects() {
+        let v = serde_json::json!(42);
+        let err = resolve_write_mode(Some(&v), "local").expect_err("integer rejects");
+        assert_invalid_params(err, &v);
+    }
+
+    #[test]
+    fn non_string_array_rejects() {
+        let v = serde_json::json!(["local"]);
+        let err = resolve_write_mode(Some(&v), "local").expect_err("array rejects");
+        assert_invalid_params(err, &v);
+    }
+
+    #[test]
+    fn non_string_object_rejects() {
+        let v = serde_json::json!({"mode": "local"});
+        let err = resolve_write_mode(Some(&v), "local").expect_err("object rejects");
+        assert_invalid_params(err, &v);
+    }
+
+    #[test]
+    fn empty_string_rejects() {
+        let v = serde_json::json!("");
+        let err = resolve_write_mode(Some(&v), "local").expect_err("empty rejects");
+        assert_invalid_params(err, &v);
+    }
+
+    #[test]
+    fn whitespace_string_rejects() {
+        let v = serde_json::json!(" ");
+        let err = resolve_write_mode(Some(&v), "local").expect_err("whitespace rejects");
+        assert_invalid_params(err, &v);
+    }
+
+    #[test]
+    fn capitalised_local_rejects() {
+        let v = serde_json::json!("Local");
+        let err = resolve_write_mode(Some(&v), "local").expect_err("Local rejects");
+        assert_invalid_params(err, &v);
+    }
+
+    #[test]
+    fn uppercase_participate_rejects() {
+        let v = serde_json::json!("PARTICIPATE");
+        let err = resolve_write_mode(Some(&v), "local").expect_err("PARTICIPATE rejects");
+        assert_invalid_params(err, &v);
+    }
+
+    #[test]
+    fn unknown_string_rejects() {
+        let v = serde_json::json!("cloud");
+        let err = resolve_write_mode(Some(&v), "local").expect_err("unknown rejects");
+        assert_invalid_params(err, &v);
+    }
+
+    #[test]
+    fn trailing_whitespace_rejects() {
+        let v = serde_json::json!("local ");
+        let err = resolve_write_mode(Some(&v), "local").expect_err("trailing space rejects");
+        assert_invalid_params(err, &v);
     }
 }

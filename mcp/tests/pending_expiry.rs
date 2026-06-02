@@ -82,6 +82,8 @@ fn state_with_short_ttl(ttl_secs: i64) -> Arc<McpState> {
         bootstrap_tickets: Arc::new(mnemonic_mcp::api::BootstrapTickets::with_defaults()),
         bootstrap_server_x25519_secret: bootstrap_x25519_sk,
         bootstrap_server_x25519_public: bootstrap_x25519_pk,
+        // T2: discoverability envelope (local-only deploy in this test).
+        envelope: mnemonic_mcp::mcp::Envelope::from_config("local", "none", 0),
     })
 }
 

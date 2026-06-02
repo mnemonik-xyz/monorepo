@@ -25,7 +25,7 @@ use mnemonic_core::arweave::ArweaveClient;
 use mnemonic_core::compress::EmbeddingCompressor;
 use mnemonic_core::embed::Embedder;
 use mnemonic_core::solana::SolanaClient;
-use mnemonic_core::storage::SqliteStore;
+use mnemonic_core::storage::{SqliteStore, WriteMode};
 use std::convert::Infallible;
 use std::sync::Arc;
 
@@ -73,6 +73,156 @@ pub struct JsonRpcResponse {
 pub struct JsonRpcError {
     pub code: i32,
     pub message: String,
+    /// Optional structured error data (JSON-RPC 2.0 §5.1 "Error object" allows
+    /// an arbitrary `data` field). Used by the typed errors introduced in T2:
+    /// - `-32010 UnsupportedMode` carries `{kind, requested, supported}`.
+    /// - `-32602 InvalidParams` carries `{field, received}`.
+    ///
+    /// Older `-32603 InternalError` / `-32600 InvalidRequest` envelopes
+    /// continue to omit this field — `skip_serializing_if` keeps the
+    /// pre-T2 wire shape byte-identical for legacy error paths
+    /// (golden-fixture compat for the shipped chrome-extension).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub data: Option<Value>,
+}
+
+impl JsonRpcError {
+    /// Construct a JSON-RPC error with no `data` field. Used for legacy code
+    /// paths that pre-date the typed-error helpers (T2). Keeps the on-the-wire
+    /// shape `{code, message}` byte-identical to the pre-T2 envelope.
+    pub fn simple(code: i32, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+            data: None,
+        }
+    }
+}
+
+// ── Typed JSON-RPC errors (T2 — modes-user-choice) ──────────────────────────
+//
+// Two new error codes covering the per-request `mode` field on
+// `mnemonic_sign_memory`. See work/modes-user-choice/tech-spec.md
+// §"Typed errors" for the wire-format contract.
+
+/// `-32010 UnsupportedMode` — the caller requested a mode the server cannot
+/// serve (e.g. `participate` on a `STORAGE_MODE=local` deploy). Never used as
+/// a silent downgrade; the user explicitly asked for chain-anchoring and the
+/// server must say "I can't" so the client picks `local` or another operator.
+///
+/// `data` shape: `{kind: "UnsupportedMode", requested, supported}`.
+pub fn unsupported_mode(requested: &str, supported: &[&str]) -> JsonRpcError {
+    JsonRpcError {
+        code: -32010,
+        message: "Unsupported mode".to_string(),
+        data: Some(serde_json::json!({
+            "kind": "UnsupportedMode",
+            "requested": requested,
+            "supported": supported,
+        })),
+    }
+}
+
+/// `-32602 InvalidParams` — a request parameter is malformed. The T2 resolver
+/// emits this for `mode` values that are not exactly `"local"` or
+/// `"participate"` (case-variant, whitespace, null, non-string, unknown).
+/// The verbatim received value is echoed back in `data.received` so the
+/// caller can diff against its own outgoing payload.
+///
+/// `data` shape: `{field, received}`.
+pub fn invalid_params(field: &str, received: &Value) -> JsonRpcError {
+    JsonRpcError {
+        code: -32602,
+        message: "Invalid params".to_string(),
+        data: Some(serde_json::json!({
+            "field": field,
+            "received": received,
+        })),
+    }
+}
+
+/// `whoami` discoverability envelope — derived once at process start from
+/// `Config` (storage_mode + payment_mode + pricing engine snapshot) and
+/// returned through `mnemonic_whoami` so clients learn what the server can
+/// serve **before** they try to write. See user-spec §"Discoverability через
+/// whoami" and tech-spec Decision 3.
+#[derive(Debug, Clone, Serialize)]
+pub struct Envelope {
+    /// Modes the server is willing to accept for `sign_memory.mode`. A pure
+    /// `STORAGE_MODE=local` deploy returns `["local"]`; a `full` deploy
+    /// returns `["local", "participate"]`.
+    pub supported_modes: Vec<&'static str>,
+    /// Mode applied when the caller omits the `mode` field. Always `"local"`
+    /// for V1 (user-spec invariant — "default `local`").
+    pub default_mode: &'static str,
+    /// Price metadata for the `participate` mode. `None` on a local-only
+    /// server (the field renders as JSON `null`); `Some` with `amount_cents`
+    /// and `payment_methods` on any `full`-mode server.
+    pub participate_cost: Option<ParticipateCost>,
+}
+
+impl Envelope {
+    /// True if `supported_modes` contains `"participate"`. Used by the
+    /// `sign_memory` entrypoint to reject `participate` requests with a typed
+    /// `UnsupportedMode` instead of a silent downgrade.
+    pub fn supports_participate(&self) -> bool {
+        self.supported_modes.contains(&"participate")
+    }
+
+    /// Derive the envelope from operator-side env-vars and the current
+    /// pricing snapshot. Pure — no I/O, no clock; safe to call at process
+    /// start AND inside tests.
+    ///
+    /// `storage_mode` resolves `supported_modes`. `payment_mode` resolves
+    /// `participate_cost.payment_methods`. `price_micro_usdc` is divided by
+    /// `10_000` to produce USD cents — the pricing engine quotes in
+    /// micro-USDC (1e-6 USD).
+    pub fn from_config(storage_mode: &str, payment_mode: &str, price_micro_usdc: i64) -> Self {
+        if storage_mode == "local" {
+            // Local-only deploy. The server CANNOT anchor and must say so
+            // up front — `participate_cost` is null (the field is present
+            // in the JSON, not omitted, so clients can distinguish
+            // "no participate support" from "old server without envelope").
+            return Self {
+                supported_modes: vec!["local"],
+                default_mode: "local",
+                participate_cost: None,
+            };
+        }
+        // Full deploy: micro-USDC → cents (round half-to-zero — the integer
+        // truncation matches the existing `record_attestation_cost` math).
+        let amount_cents = (price_micro_usdc / 10_000).max(0);
+        let payment_methods: Vec<&'static str> = match payment_mode {
+            "none" => Vec::new(),
+            "balance" => vec!["balance"],
+            "x402" => vec!["x402"],
+            "both" => vec!["x402", "balance"],
+            // Defensive: an unknown mode collapses to empty methods. Operator
+            // misconfiguration shouldn't leak as a misleading payment menu.
+            _ => Vec::new(),
+        };
+        Self {
+            supported_modes: vec!["local", "participate"],
+            default_mode: "local",
+            participate_cost: Some(ParticipateCost {
+                currency: "USD",
+                amount_cents,
+                payment_methods,
+            }),
+        }
+    }
+}
+
+/// Price + payment-method tuple for `participate` writes. Serialised as part
+/// of `Envelope`. `currency` is currently always `"USD"`; `amount_cents` is
+/// the per-write cost in USD cents; `payment_methods` enumerates how the
+/// caller can pay (`["x402"]`, `["balance"]`, `["x402","balance"]`, or empty
+/// for `PAYMENT_MODE=none` self-operator deploys).
+#[derive(Debug, Clone, Serialize)]
+pub struct ParticipateCost {
+    pub currency: &'static str,
+    pub amount_cents: i64,
+    pub payment_methods: Vec<&'static str>,
 }
 
 /// Shared state for the MCP server.
@@ -151,6 +301,16 @@ pub struct McpState {
     /// `GET /api/cli-bootstrap/server-pub` so CLIs can wrap their secrets.
     pub bootstrap_server_x25519_secret: crypto_box::SecretKey,
     pub bootstrap_server_x25519_public: crypto_box::PublicKey,
+
+    /// `whoami` discoverability envelope — populated once at process start
+    /// from `Config` (storage_mode + payment_mode + initial pricing
+    /// snapshot). See `Envelope::from_config`. Threaded into
+    /// `tools::whoami` for the new envelope-output contract AND into
+    /// `tools::sign_memory` so the `participate`-on-local-only rejection
+    /// path can return `unsupported_mode("participate", &supported)`
+    /// without re-deriving the list. Decision 3 in
+    /// work/modes-user-choice/tech-spec.md.
+    pub envelope: Envelope,
 }
 
 // Safety: We only access store through std::sync::Mutex (short critical sections, no await)
@@ -231,7 +391,7 @@ pub async fn handle_request(
     owner_pubkey: &str,
     jwt_sub: Option<&str>,
 ) -> JsonRpcResponse {
-    let result = match req.method.as_str() {
+    let result: Result<Value, JsonRpcError> = match req.method.as_str() {
         "initialize" => Ok(serde_json::json!({
             "protocolVersion": "2025-06-18",
             "capabilities": {"tools": {}},
@@ -248,7 +408,10 @@ pub async fn handle_request(
             handle_tool_call(name, &args, state, owner_pubkey, jwt_sub).await
         }
         "notifications/initialized" | "ping" => Ok(serde_json::json!({})),
-        _ => Err(format!("unknown method: {}", req.method)),
+        _ => Err(JsonRpcError::simple(
+            -32603,
+            format!("unknown method: {}", req.method),
+        )),
     };
 
     // For notifications (no `id`), JSON-RPC 2.0 forbids a response. Callers
@@ -266,14 +429,11 @@ pub async fn handle_request(
             result: Some(val),
             error: None,
         },
-        Err(msg) => JsonRpcResponse {
+        Err(err) => JsonRpcResponse {
             jsonrpc: "2.0".into(),
             id: response_id,
             result: None,
-            error: Some(JsonRpcError {
-                code: -32603,
-                message: msg,
-            }),
+            error: Some(err),
         },
     }
 }
@@ -421,7 +581,42 @@ pub async fn mcp_handler(
     let is_sign_memory = req.method == "tools/call"
         && req.params.get("name").and_then(|n| n.as_str()) == Some("mnemonic_sign_memory");
 
-    if is_sign_memory && state.payment_mode != "none" && state.storage_mode != "local" {
+    // T2: resolve the per-request `mode` field BEFORE the paywall gate so
+    // that (a) malformed `mode` values short-circuit with `-32602
+    // InvalidParams` instead of charging, (b) `WriteMode::Local` requests
+    // ALWAYS skip the paywall regardless of `STORAGE_MODE`, (c) the
+    // resolved `WriteMode` is the single value driving both the paywall
+    // decision and the column persisted by `sign_memory_inline` (drift
+    // impossible by construction — Decision 1).
+    //
+    // For non-sign_memory requests, this resolution is a no-op (we never
+    // touch the value); we still tunnel it through `handle_tool_call`
+    // when needed so the same parsing happens exactly once.
+    let resolved_mode_for_gate: Option<WriteMode> = if is_sign_memory {
+        let args = req.params.get("arguments").cloned().unwrap_or_default();
+        match crate::tools::resolve_write_mode(args.get("mode"), &state.storage_mode) {
+            Ok(m) => Some(m),
+            Err(err) => {
+                // Bad `mode` field — short-circuit with the typed error.
+                let resp = JsonRpcResponse {
+                    jsonrpc: "2.0".into(),
+                    id: req.id.clone().unwrap_or(Value::Null),
+                    result: None,
+                    error: Some(err),
+                };
+                return ndjson_response(StatusCode::BAD_REQUEST, &resp);
+            }
+        }
+    } else {
+        None
+    };
+
+    // Paywall fires only on resolved `Participate` + a paid deploy. A
+    // `Local` write on a `STORAGE_MODE=full + PAYMENT_MODE=x402` server
+    // bypasses the gate entirely — the whitepaper §5.7.1 free-local
+    // invariant is now structural, not configurational.
+    let participate_gate = matches!(resolved_mode_for_gate, Some(WriteMode::Participate));
+    if is_sign_memory && participate_gate && state.payment_mode != "none" {
         // Use live price from pricing engine (refreshed in background).
         let current_cost = state.pricing.current_price();
         let gate = payment::check_payment(
@@ -504,17 +699,17 @@ async fn handle_tool_call(
     state: &McpState,
     owner_pubkey: &str,
     jwt_sub: Option<&str>,
-) -> Result<Value, String> {
+) -> Result<Value, JsonRpcError> {
     let result = match name {
         "mnemonic_whoami" => {
             // DB-only: lock, query, release before returning
             let store = state.store.lock().unwrap();
-            tools::whoami(&state.keypair, &store, &state.storage_mode)
+            tools::whoami(&state.keypair, &store, &state.storage_mode, &state.envelope)
         }
         "mnemonic_sign_memory" => {
             let content = args["content"]
                 .as_str()
-                .ok_or("content required")?
+                .ok_or_else(|| JsonRpcError::simple(-32603, "content required"))?
                 .to_string();
             let tags: Vec<String> = args
                 .get("tags")
@@ -525,6 +720,13 @@ async fn handle_tool_call(
                         .collect()
                 })
                 .unwrap_or_default();
+            // T2: resolve the per-request `mode` field into a typed
+            // `WriteMode`. Errors here (`-32602 InvalidParams`) propagate
+            // out as typed JSON-RPC errors with `data.field == "mode"`
+            // and `data.received` echoing the raw input. The paywall
+            // gate in `mcp_handler` resolves the same value (single
+            // source of truth — drift impossible by construction).
+            let write_mode = tools::resolve_write_mode(args.get("mode"), &state.storage_mode)?;
             let cost_hint = state.pricing.cost_hint(state.sol_tx_fee_lamports);
             tools::sign_memory(
                 &state.keypair,
@@ -540,9 +742,11 @@ async fn handle_tool_call(
                 &state.storage_mode,
                 owner_pubkey,
                 jwt_sub,
+                write_mode,
+                &state.envelope,
             )
             .await
-            .map_err(|e| e.to_string())?
+            .map_err(tool_error_to_json_rpc)?
         }
         "mnemonic_verify" => {
             let sol = args.get("solana_tx").and_then(|v| v.as_str());
@@ -556,17 +760,21 @@ async fn handle_tool_call(
                 &state.storage_mode,
             )
             .await
-            .map_err(|e| e.to_string())?
+            .map_err(|e| JsonRpcError::simple(-32603, e.to_string()))?
         }
         "mnemonic_prove_identity" => {
             // Pure crypto, no DB or network
             tools::prove_identity(
                 &state.keypair,
-                args["challenge"].as_str().ok_or("challenge required")?,
+                args["challenge"]
+                    .as_str()
+                    .ok_or_else(|| JsonRpcError::simple(-32603, "challenge required"))?,
             )
         }
         "mnemonic_recall" => {
-            let query = args["query"].as_str().ok_or("query required")?;
+            let query = args["query"]
+                .as_str()
+                .ok_or_else(|| JsonRpcError::simple(-32603, "query required"))?;
             let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(5) as usize;
             // DB-only: lock, query, release
             let store = state.store.lock().unwrap();
@@ -582,16 +790,50 @@ async fn handle_tool_call(
         "mnemonic_check_pending" => {
             let cid = args["correlation_id"]
                 .as_str()
-                .ok_or("correlation_id required")?
+                .ok_or_else(|| JsonRpcError::simple(-32603, "correlation_id required"))?
                 .to_string();
             tools::check_pending(&state.pending, &state.store, &cid).await
         }
-        _ => return Err(format!("unknown tool: {name}")),
+        _ => {
+            return Err(JsonRpcError::simple(
+                -32603,
+                format!("unknown tool: {name}"),
+            ))
+        }
     };
 
     Ok(serde_json::json!({
         "content": [{"type": "text", "text": serde_json::to_string_pretty(&result).unwrap_or_default()}]
     }))
+}
+
+/// Translate an `anyhow::Error` coming out of `tools::sign_memory` into a
+/// `JsonRpcError`. `sign_memory_inline` smuggles typed JSON-RPC errors (e.g.
+/// `-32010 UnsupportedMode`) through `anyhow` as JSON-stringified bodies;
+/// every other error stays a generic `-32603 InternalError` with the
+/// stringified `Display`.
+///
+/// The smuggle format is exactly the inner-data shape of `JsonRpcError`:
+/// `{"code": i32, "message": String, "data": Option<Value>}`. If parsing
+/// succeeds, the original typed error is reconstituted; otherwise we fall
+/// back to the generic envelope. This keeps the tool-impl side honest
+/// (it doesn't need to know about JSON-RPC) while still letting typed
+/// errors reach the wire.
+fn tool_error_to_json_rpc(e: anyhow::Error) -> JsonRpcError {
+    let msg = e.to_string();
+    if let Ok(parsed) = serde_json::from_str::<Value>(&msg) {
+        if let (Some(code), Some(message)) = (
+            parsed.get("code").and_then(|c| c.as_i64()),
+            parsed.get("message").and_then(|m| m.as_str()),
+        ) {
+            return JsonRpcError {
+                code: code as i32,
+                message: message.to_string(),
+                data: parsed.get("data").cloned().filter(|v| !v.is_null()),
+            };
+        }
+    }
+    JsonRpcError::simple(-32603, msg)
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -609,6 +851,7 @@ mod transport_tests {
     use axum::{http::Request, middleware as axum_middleware, routing::post, Router};
     use http_body_util::BodyExt;
     use mnemonic_core::embed::Embedder;
+    use mnemonic_core::storage::AttestationStore;
     use std::path::PathBuf;
     use tower::ServiceExt;
 
@@ -680,6 +923,7 @@ mod transport_tests {
             bootstrap_tickets: Arc::new(crate::api::BootstrapTickets::with_defaults()),
             bootstrap_server_x25519_secret,
             bootstrap_server_x25519_public,
+            envelope: Envelope::from_config("local", "none", 0),
         })
     }
 
@@ -839,6 +1083,116 @@ mod transport_tests {
             .trim_end_matches('\n');
         let env: Value = serde_json::from_str(line).expect("frame valid JSON");
         assert_eq!(env["id"], 8);
+    }
+
+    /// Mint a HS256 JWT for tests using the module's `TEST_JWT_SECRET`.
+    /// Wrap around `crate::oauth::issue_jwt` to keep the call shape in
+    /// the TDD anchor (and any future test) short and explicit.
+    fn mint_jwt_for_tests(sub: &str) -> String {
+        let oauth_state = crate::oauth::OAuthState::new(TEST_JWT_SECRET);
+        crate::oauth::issue_jwt(&oauth_state, sub).expect("issue_jwt")
+    }
+
+    /// TDD anchor for T2 (modes-user-choice). Drives end-to-end:
+    /// `sign_memory { mode: "participate" }` against a local-only
+    /// server (default `STORAGE_MODE=local` from `build_test_state`)
+    /// returns the typed `-32010 UnsupportedMode` envelope with
+    /// `data.supported == ["local"]` and writes ZERO rows. Same
+    /// expectations as the integration test in
+    /// `mcp/tests/modes_per_request.rs`, but inlined here against the
+    /// existing in-module test plumbing so we have a fast unit-level
+    /// regression guard inside the dispatcher's own test module.
+    #[tokio::test]
+    async fn participate_against_local_only_server_returns_unsupported_mode() {
+        let state = build_test_state(); // STORAGE_MODE defaults to "local"
+        let app = build_test_router(state.clone());
+
+        // The owner pubkey must match jwt.sub for the OAuth middleware to
+        // bind the request to a real Claims extension.
+        let owner = mnemonic_core::identity::pubkey_base58(&state.keypair);
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "mnemonic_sign_memory",
+                "arguments": {"content": "hi", "mode": "participate"},
+            },
+        });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/mcp")
+            .header("content-type", "application/json")
+            .header(
+                "authorization",
+                format!("Bearer {}", mint_jwt_for_tests(&owner)),
+            )
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        let (_status, _hdrs, bytes) = collect_body(resp).await;
+        let envelope: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+
+        let err = envelope["error"]
+            .as_object()
+            .expect("expected JSON-RPC error envelope");
+        assert_eq!(err["code"], -32010, "code must be -32010 UnsupportedMode");
+        assert_eq!(err["message"], "Unsupported mode");
+        let data = err["data"]
+            .as_object()
+            .expect("typed error must carry `data`");
+        assert_eq!(data["kind"], "UnsupportedMode");
+        assert_eq!(data["requested"], "participate");
+        assert_eq!(data["supported"], serde_json::json!(["local"]));
+
+        // DB must be unchanged — no row written, no synthetic id minted.
+        let store = state.store.lock().unwrap();
+        // `count` is signer-scoped; pass empty string for "all signers".
+        assert_eq!(store.count("").unwrap_or_default(), 0);
+        // Also count under the test owner key directly to be extra-safe.
+        assert_eq!(store.count(&owner).unwrap_or_default(), 0);
+    }
+
+    /// Companion to the TDD anchor: `invalid mode` value (uppercase
+    /// `"Local"`) returns `-32602 InvalidParams` with `data.field == "mode"`
+    /// and `data.received` echoing the raw input. Strict — no normalisation.
+    #[tokio::test]
+    async fn invalid_mode_string_returns_invalid_params() {
+        let state = build_test_state();
+        let app = build_test_router(state.clone());
+        let owner = mnemonic_core::identity::pubkey_base58(&state.keypair);
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {
+                "name": "mnemonic_sign_memory",
+                "arguments": {"content": "hi", "mode": "Local"},
+            },
+        });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/mcp")
+            .header("content-type", "application/json")
+            .header(
+                "authorization",
+                format!("Bearer {}", mint_jwt_for_tests(&owner)),
+            )
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        let (_status, _hdrs, bytes) = collect_body(resp).await;
+        let envelope: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let err = envelope["error"]
+            .as_object()
+            .expect("expected JSON-RPC error");
+        assert_eq!(err["code"], -32602);
+        let data = err["data"].as_object().expect("data");
+        assert_eq!(data["field"], "mode");
+        assert_eq!(data["received"], "Local");
+
+        let store = state.store.lock().unwrap();
+        assert_eq!(store.count(&owner).unwrap_or_default(), 0);
     }
 
     /// Active under Task 4 — `oauth::bearer_auth_middleware` rejects
