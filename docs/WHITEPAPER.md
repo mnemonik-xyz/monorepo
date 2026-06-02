@@ -417,6 +417,8 @@ Operators providing real-world computing, storage allocation, and network bandwi
 
 The validation layer maintains absolute neutrality. There are no canonical data coordinators, structurally privileged master nodes, or restricted identity registries. Because artifacts are portable by signature and self-describing via cCBOR, users can migrate across commercial operators or drop back to raw self-hosting without fracturing their agent's historical context graph.
 
+The two protocol-level paths exposed to the user surface this split directly. A `local` write (default on `mnemonic_sign_memory`) realizes §5.7.1: the artifact stays on the user's own filesystem or self-hosted node, signature/hash/lineage verification runs locally and free, and no operator can gate it. A `participate` write realizes §5.7.2: durable anchoring on Arweave + Solana with operator-priced service work (storage allocation, consensus anchoring, optional embedding compute), where "delivered" is defined as anchored AND verified by a recall round-trip — never a silent receipt. The `mode` field is a per-request user choice; the same keypair and the same API serve both, so users move freely between the two as §5.7.3 requires. See `work/modes-user-choice/user-spec.md` for the canonical model.
+
 ---
 
 ### 5.8 Core Execution Lifecycles

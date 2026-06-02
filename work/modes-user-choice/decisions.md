@@ -592,3 +592,54 @@ and `mcp/src/tools.rs` originally.
 - `cargo clippy --workspace --all-targets --features mnemonic-mcp/test-support -- -D warnings`
   → clean.
 - `cargo fmt --all -- --check` → clean.
+
+## Task 5: Retire "Never mix in one DB" + sync project-knowledge + .env.example + whitepaper §5.7 cross-ref
+
+**Status:** Ready for review
+**Agent:** task5-impl
+**Summary:** Docs-only task that lands the user-spec → docs alignment for the
+modes-user-choice feature. Root `CLAUDE.md` "Storage modes" paragraph is
+rewritten: the two superseded sentences ("Mode is set at startup, not
+per-call" and "Never mix in one DB") are deliberately retired and replaced
+with a per-request-mode paragraph that names the `mode: "local" | "participate"`
+field (default `local`, env-var fallback for legacy clients), the `write_mode`
+column, the recall-spans-both-modes invariant, and the delivery definition
+("anchored AND passes a recall+verify round-trip"); cross-references
+`work/modes-user-choice/user-spec.md` and `decisions.md`. Project Knowledge:
+`patterns.md` "Storage modes" paragraph rewritten to mirror the new per-request
+model + envelope contract + delivery + retirement of the old invariant, and
+"Storage lock discipline" extended to mention DashMap shard guards alongside
+the SQLite mutex (T3 extended Decision 8). `architecture.md` gains a new
+"Mode dispatch" subsection under Data Flow covering the four T1–T4 pieces:
+`whoami` envelope contract, single-source-of-truth `resolve_write_mode`
+resolver, the shared `confirm_delivery_or_demote` helper (inline + deferred
+paths), and the `RefundsBySubject` DoS guard keyed via `derive_quota_subject`.
+Root `.env.example` documents that STORAGE_MODE/PAYMENT_MODE now set the
+operator capability/default (local writes always free regardless of
+PAYMENT_MODE), and adds the four new env vars from T3:
+`MNEMONIC_DELIVERY_REFETCH_TIMEOUT_SECS=15`,
+`MNEMONIC_DELIVERY_QUOTA_THRESHOLD=5`,
+`MNEMONIC_DELIVERY_QUOTA_WINDOW_SECS=60`,
+`MNEMONIC_DELIVERY_QUOTA_EVICT_SECS=30` (defaults confirmed against
+`mcp/src/config.rs`). `docs/WHITEPAPER.md` §5.7 gains a one-paragraph
+cross-reference linking §5.7.1 (free verification + self-hosting invariants)
+to the `local` path and §5.7.2 (service-layer monetization) to the
+`participate` path, anchored on the user-spec's binary `mode` API. This
+docs PR completes the user-spec → docs alignment for code waves T1–T4. Post-
+audit and post-QA sign-off entries are NOT included here — they land later
+via the audit wave (A1–A3) and pre-deploy QA (F1).
+**Deviations:** None. All edits land exactly the scope listed in
+`work/modes-user-choice/tasks/5.md` — no code touched, no other
+project-knowledge files modified, whitepaper change is the requested
+one-paragraph cross-reference only.
+
+**Reviews:**
+
+*Round 1:* pending (will be dispatched by the team lead).
+
+**Verification:**
+- `grep -F "Never mix in one DB" CLAUDE.md` → no matches.
+- `grep -F "Mode is set at startup" CLAUDE.md` → no matches.
+- `cargo fmt --all -- --check` → clean (docs-only).
+- `cargo test --workspace --features mnemonic-mcp/test-support --no-fail-fast`
+  → green (docs-only; code tests unaffected).
