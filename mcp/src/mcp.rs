@@ -32,18 +32,212 @@ use std::sync::Arc;
 /// Build-time-generated skill manifest constants, projected from
 /// `mcp/assets/skills/*.md` by `mcp/build.rs`. Three slots per skill —
 /// `*_FULL_MARKDOWN`, `*_PURPOSE_PLUS_TRIGGER`, `*_PURPOSE_ONE_LINER` —
-/// plus an `ALL_SKILLS: &[SkillManifest]` table. Task 2 consumes these
-/// from the new `prompts/*`, `resources/*`, and enriched `tools/list`
-/// dispatch arms. See [`work/agent-native-distribution/tech-spec.md`]
-/// Decision 1 for the single-source-of-truth rationale.
-//
-// TODO(task-2): remove `#[allow(dead_code)]` once `prompts/*`,
-// `resources/*`, and `tools/list` consume these constants. Until then
-// the integration test is the only consumer and clippy would otherwise
-// fail the `-D warnings` gate.
-#[allow(dead_code)]
+/// plus an `ALL_SKILLS: &[SkillManifest]` table. Consumed by the
+/// `prompts/*`, `resources/*`, and enriched `tools/list` dispatch arms
+/// below. See [`work/agent-native-distribution/tech-spec.md`] Decision 1
+/// for the single-source-of-truth rationale.
 pub mod skills {
     include!(concat!(env!("OUT_DIR"), "/skills_generated.rs"));
+}
+
+/// URI scheme for skill resources. `resources/list` advertises one URI
+/// per skill manifest in the shape `mnemonik://skills/<name>.md`;
+/// `resources/read` accepts the same shape and returns the verbatim
+/// `FULL_MARKDOWN` slot. Namespaced to our protocol so a client that
+/// mixes mnemonic resources with other servers' resources can route by
+/// scheme.
+const RESOURCE_URI_PREFIX: &str = "mnemonik://skills/";
+
+/// Process-level embedder build identity surfaced through the MCP
+/// `initialize` response (`result.embedder.model_version`). Format:
+/// `<mcp-version>-<embedder-family>-<library-version>`. Today we ship
+/// fastembed; a future swap to OpenAI would mint a new value such as
+/// `"0.2.0-openai-text-embedding-3-small"`.
+///
+/// **Not** wired into `Embedder::model_id()` — the trait identifies the
+/// MODEL (e.g. `"all-MiniLM-L6-v2"`); this constant identifies the
+/// process build that drove the embedding pipeline. Both are useful to
+/// callers who want to re-embed and compare.
+///
+/// **Process risk — manual sync required.** This is a plain string
+/// literal (the `concat!` macro accepts only literal tokens, not const
+/// expressions, so we cannot derive it from `CARGO_PKG_VERSION` plus
+/// `fastembed::VERSION`). The Task 13 release checklist MUST include:
+/// "verify `EMBEDDER_MODEL_VERSION` matches `mcp/Cargo.toml` `version`
+/// and `cargo tree -p fastembed | head -1` output before tagging" so a
+/// fastembed bump or mcp version bump never silently ships a stale
+/// identifier. Defined here (not in `lib.rs`) because the binary's
+/// `mod mcp;` and the library's `pub mod mcp;` both compile this file,
+/// so a single canonical definition under `mcp` satisfies both
+/// compilation units; `lib.rs` re-exports it for integration tests.
+pub const EMBEDDER_MODEL_VERSION: &str = "0.1.0-fastembed-5.13.2";
+
+/// Build the `prompts/list` response payload. One entry per skill
+/// manifest: `name`, `description` (the `PURPOSE_ONE_LINER` slot). The
+/// MCP spec leaves prompt arguments optional — we don't take any, so
+/// the field is omitted (clients render the prompt as "ready-to-send"
+/// markdown).
+fn prompts_list_payload() -> Value {
+    let prompts: Vec<Value> = skills::ALL_SKILLS
+        .iter()
+        .map(|s| {
+            serde_json::json!({
+                "name": s.name,
+                "description": s.purpose_one_liner,
+            })
+        })
+        .collect();
+    serde_json::json!({ "prompts": prompts })
+}
+
+/// Build the `prompts/get` response for a named skill. Returns
+/// `Err(invalid_params("name", received))` if `name` is missing or does
+/// not match any built-in skill — MCP clients render `-32602` as a
+/// distinct "unknown prompt" UX, so the error code is meaningful.
+fn prompts_get_payload(params: &Value) -> Result<Value, JsonRpcError> {
+    let raw_name = params.get("name");
+    let name = match raw_name.and_then(Value::as_str) {
+        Some(n) => n,
+        None => {
+            return Err(invalid_params(
+                "name",
+                &raw_name.cloned().unwrap_or(Value::Null),
+            ));
+        }
+    };
+    let skill = skills::ALL_SKILLS.iter().find(|s| s.name == name);
+    let skill = match skill {
+        Some(s) => s,
+        None => {
+            return Err(invalid_params("name", &Value::String(name.to_string())));
+        }
+    };
+    Ok(serde_json::json!({
+        "description": skill.purpose_one_liner,
+        "messages": [
+            {
+                "role": "user",
+                "content": {
+                    "type": "text",
+                    "text": skill.full_markdown,
+                },
+            }
+        ],
+    }))
+}
+
+/// Build the `resources/list` response payload. One resource per skill
+/// manifest: `uri` (`mnemonik://skills/<name>.md`), `name`,
+/// `description` (one-liner), `mimeType: "text/markdown"`.
+fn resources_list_payload() -> Value {
+    let resources: Vec<Value> = skills::ALL_SKILLS
+        .iter()
+        .map(|s| {
+            serde_json::json!({
+                "uri": format!("{RESOURCE_URI_PREFIX}{name}.md", name = s.name),
+                "name": s.name,
+                "description": s.purpose_one_liner,
+                "mimeType": "text/markdown",
+            })
+        })
+        .collect();
+    serde_json::json!({ "resources": resources })
+}
+
+/// Build the `resources/read` response. Validates the `uri` shape —
+/// must start with `RESOURCE_URI_PREFIX` and end with `.md`, with a
+/// skill stem that matches a registered manifest. Returns the verbatim
+/// `FULL_MARKDOWN` slot (byte-identical to the source file under
+/// `mcp/assets/skills/<name>.md`).
+fn resources_read_payload(params: &Value) -> Result<Value, JsonRpcError> {
+    let raw_uri = params.get("uri");
+    let uri = match raw_uri.and_then(Value::as_str) {
+        Some(u) => u,
+        None => {
+            return Err(invalid_params(
+                "uri",
+                &raw_uri.cloned().unwrap_or(Value::Null),
+            ));
+        }
+    };
+    let stem = uri
+        .strip_prefix(RESOURCE_URI_PREFIX)
+        .and_then(|rest| rest.strip_suffix(".md"));
+    let skill = match stem {
+        Some(s) => skills::ALL_SKILLS.iter().find(|m| m.name == s),
+        None => None,
+    };
+    let skill = match skill {
+        Some(s) => s,
+        None => {
+            return Err(invalid_params("uri", &Value::String(uri.to_string())));
+        }
+    };
+    Ok(serde_json::json!({
+        "contents": [
+            {
+                "uri": uri,
+                "mimeType": "text/markdown",
+                "text": skill.full_markdown,
+            }
+        ],
+    }))
+}
+
+/// Find the skill manifest that matches a given MCP tool name. The six
+/// public tools map 1:1 to the six user-facing skills (the seventh
+/// skill — `mnemonik-help` — is a meta-skill with no underlying tool);
+/// `mnemonic_check_pending` is also mapped to `mnemonik-attest` because
+/// it is the deferred-result polling half of the attest flow.
+fn skill_for_tool(tool: &str) -> Option<&'static skills::SkillManifest> {
+    let target = match tool {
+        "mnemonic_whoami" => "mnemonik-status",
+        "mnemonic_sign_memory" => "mnemonik-attest",
+        "mnemonic_check_pending" => "mnemonik-attest",
+        "mnemonic_verify" => "mnemonik-verify",
+        "mnemonic_recall" => "mnemonik-recall",
+        "mnemonic_prove_identity" => "mnemonik-init",
+        _ => return None,
+    };
+    skills::ALL_SKILLS.iter().find(|s| s.name == target)
+}
+
+/// Append the matching skill manifest's `Purpose+Trigger` section to a
+/// tool's base description. Keeps `tool_definitions()` declarative;
+/// the enrichment is impossible to forget because `enriched_tools()`
+/// runs the lookup for every entry.
+fn enrich_tool_description(tool: &Value) -> Value {
+    let mut out = tool.clone();
+    let Some(name) = tool.get("name").and_then(Value::as_str) else {
+        return out;
+    };
+    let Some(skill) = skill_for_tool(name) else {
+        return out;
+    };
+    let base = tool
+        .get("description")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let enriched = format!("{base}\n\n{}", skill.purpose_plus_trigger);
+    if let Some(obj) = out.as_object_mut() {
+        obj.insert("description".to_string(), Value::String(enriched));
+    }
+    out
+}
+
+/// Enriched `tools/list` payload — each base entry from
+/// `tool_definitions()` has the matching skill manifest's Purpose +
+/// Trigger appended to its `description`. Drift between manifest and
+/// tools/list is now physically impossible because the manifest body is
+/// the single source of truth for that copy.
+fn enriched_tools() -> Vec<Value> {
+    tool_definitions()
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|t| enrich_tool_description(&t))
+        .collect()
 }
 
 /// JSON-RPC 2.0 request or notification.
@@ -510,6 +704,17 @@ fn tool_definitions() -> Value {
                 "required": ["correlation_id"],
             },
         },
+        {
+            "name": "request_public_write_confirmation",
+            "description": "Public-write ceremony gate: presents the content_hash about to be anchored on Arweave + Solana so the user can confirm or refuse in-turn before any chain write fires. Consumed by Task 4's handler; not user-facing — agent skills invoke it inline whenever they intend to issue a `mode='participate'` write with `visibility='public'`.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "content_hash": {"type": "string", "description": "blake3 hex of the canonical-CBOR bundle the caller is about to anchor"},
+                },
+                "required": ["content_hash"],
+            },
+        },
     ])
 }
 
@@ -543,10 +748,23 @@ pub async fn handle_request_with_resolved_mode(
     let result: Result<Value, JsonRpcError> = match req.method.as_str() {
         "initialize" => Ok(serde_json::json!({
             "protocolVersion": "2025-06-18",
-            "capabilities": {"tools": {}},
+            "capabilities": {
+                "tools": {},
+                "prompts": {},
+                "resources": {},
+            },
             "serverInfo": {"name": "mnemonic", "version": "0.1.0"},
+            "embedder": {
+                "model_id": state.embedder.model_id(),
+                "model_version": EMBEDDER_MODEL_VERSION,
+                "dim": state.embedder.dim(),
+            },
         })),
-        "tools/list" => Ok(serde_json::json!({"tools": tool_definitions()})),
+        "tools/list" => Ok(serde_json::json!({"tools": enriched_tools()})),
+        "prompts/list" => Ok(prompts_list_payload()),
+        "prompts/get" => prompts_get_payload(&req.params),
+        "resources/list" => Ok(resources_list_payload()),
+        "resources/read" => resources_read_payload(&req.params),
         "tools/call" => {
             let name = req
                 .params
@@ -1390,8 +1608,8 @@ mod transport_tests {
             .expect("tools array present");
         assert_eq!(
             tools.len(),
-            6,
-            "expected 6 MCP tools in tools/list response (whoami, sign_memory, verify, prove_identity, recall, check_pending)",
+            7,
+            "expected 7 MCP tools in tools/list response (whoami, sign_memory, verify, prove_identity, recall, check_pending, request_public_write_confirmation)",
         );
     }
 

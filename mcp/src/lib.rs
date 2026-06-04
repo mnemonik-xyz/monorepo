@@ -47,3 +47,12 @@ pub mod tools;
 /// only the feature flag works as a gate.
 #[cfg(feature = "test-support")]
 pub mod test_support;
+
+/// Re-export of the build-identity constant defined inside `mcp.rs` so
+/// integration tests under `mcp/tests/` can refer to it via
+/// `mnemonic_mcp::EMBEDDER_MODEL_VERSION`. The canonical definition
+/// lives in `mcp.rs` because both compilation units (`main.rs` binary
+/// and this `lib.rs` library) include the same `mcp.rs` source file,
+/// and the `initialize` dispatcher must read the constant from a path
+/// that both compilation units agree on.
+pub use mcp::EMBEDDER_MODEL_VERSION;

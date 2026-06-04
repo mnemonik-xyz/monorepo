@@ -1232,7 +1232,23 @@ const MAX_PEEK_BODY: usize = 1024 * 1024;
 /// the connection lifecycle and rejecting them with 401 breaks
 /// streamable-HTTP transport (observed during T15 — Cursor sends
 /// `notifications/initialized` immediately after `initialize` response).
-const ALLOWLIST_METHODS: &[&str] = &["initialize", "tools/list", "ping"];
+///
+/// The four `prompts/*` and `resources/*` methods join the allowlist as
+/// part of the agent-native-distribution feature: skill manifests and
+/// their rendered markdown are public read-only discovery surfaces and
+/// must work without OAuth so MCP clients can preview them before the
+/// user signs in. The dispatcher only reads from compile-time embedded
+/// constants on these paths — no per-tenant data ever leaves the server,
+/// no storage is touched, so the anonymous read is safe.
+const ALLOWLIST_METHODS: &[&str] = &[
+    "initialize",
+    "tools/list",
+    "ping",
+    "prompts/list",
+    "prompts/get",
+    "resources/list",
+    "resources/read",
+];
 
 /// Extract the JSON-RPC `method` field from a request body without consuming
 /// the parser state. Returns `None` if the body is not valid JSON or the

@@ -165,6 +165,15 @@ name = "delivery_guarantee"
 path = "tests/delivery_guarantee.rs"
 required-features = ["test-support"]
 
+# T2 agent-native-distribution discovery surfaces (prompts/list,
+# prompts/get, resources/list, resources/read, enriched tools/list).
+# Uses `mock_state` from `mnemonic_mcp::test_support` and exercises the
+# anonymous-allowlist path through `oauth::bearer_auth_middleware`.
+[[test]]
+name = "discovery_anonymous"
+path = "tests/discovery_anonymous.rs"
+required-features = ["test-support"]
+
 [dev-dependencies]
 tempfile = "3"
 httpmock = "0.8"
