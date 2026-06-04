@@ -110,6 +110,7 @@ fn build_state() -> Arc<McpState> {
             5,
         )),
         delivery_metrics: Arc::new(mnemonic_mcp::payment::DeliveryMetrics::default()),
+        confirmation_ledger: Arc::new(mnemonic_mcp::confirmation_token::ConfirmationLedger::new()),
     })
 }
 

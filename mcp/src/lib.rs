@@ -19,6 +19,7 @@
 pub mod api;
 pub mod chat;
 pub mod config;
+pub mod confirmation_token;
 pub mod cors_policy;
 pub mod escrow;
 pub mod llm;

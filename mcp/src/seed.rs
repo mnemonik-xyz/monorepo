@@ -352,6 +352,10 @@ pub async fn run(state: &McpState) -> Result<()> {
                 &server_owner_pubkey,
                 None,
                 seed_resolved,
+                // Seeded knowledge rows are always private — the RAG corpus
+                // is owner-scoped (server keypair) and never enters the
+                // anonymous-recall public pool.
+                mnemonic_core::storage::Visibility::Private,
                 &state.envelope,
                 state.delivery_refetch_timeout,
             )

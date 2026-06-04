@@ -133,6 +133,64 @@ pub fn resolve_write_mode(
     }
 }
 
+/// Resolve the per-request `visibility` field on `mnemonic_sign_memory`
+/// (Decision 3 / AC14 — agent-native-distribution).
+///
+/// Rules:
+///
+/// | Input                                            | Output                                           |
+/// |--------------------------------------------------|--------------------------------------------------|
+/// | absent                                           | `Visibility::Private`                            |
+/// | `"private"` / `"public"` AND mode = participate  | parsed variant                                   |
+/// | any present value AND mode = local               | `Err(invalid_params("visibility", ...))` (AC14)  |
+/// | non-string / non-canonical (under participate)   | `Err(invalid_params("visibility", received))`    |
+///
+/// The local-mode rejection fires for ANY present `visibility` value
+/// (including the literal `"private"`), not only `"public"`. Visibility is a
+/// participate-only concept; allowing `"private"` on local writes would leak
+/// dead metadata into a column the row never consults.
+///
+/// Pure function — no I/O, no globals.
+pub fn resolve_visibility(
+    args: &serde_json::Value,
+    resolved_mode: WriteMode,
+) -> Result<Visibility, JsonRpcError> {
+    let raw = args.get("visibility");
+    match raw {
+        None => Ok(Visibility::default()),
+        Some(v) => {
+            // AC14 — `visibility` is invalid params on local writes regardless
+            // of the underlying value. Rejecting at the boundary keeps the
+            // matrix `{local, public}` cell undefined-by-construction.
+            if resolved_mode == WriteMode::Local {
+                return Err(invalid_params("visibility", v));
+            }
+            match v {
+                serde_json::Value::String(s) => match Visibility::from_str_strict(s) {
+                    Some(vis) => Ok(vis),
+                    None => Err(invalid_params("visibility", v)),
+                },
+                _ => Err(invalid_params("visibility", v)),
+            }
+        }
+    }
+}
+
+/// Resolve the per-request `allow_fallback_to_participate` field
+/// (Decision 4 — agent-native-distribution soft-fall opt-in).
+///
+/// Strict bool. Absent → `false`. Non-bool returns `invalid_params` with the
+/// verbatim received value echoed back so a misbehaving client can diff
+/// against its own outgoing payload.
+pub fn resolve_allow_fallback(args: &serde_json::Value) -> Result<bool, JsonRpcError> {
+    let raw = args.get("allow_fallback_to_participate");
+    match raw {
+        None => Ok(false),
+        Some(serde_json::Value::Bool(b)) => Ok(*b),
+        Some(v) => Err(invalid_params("allow_fallback_to_participate", v)),
+    }
+}
+
 /// Typed error returned from `sign_memory` so the dispatcher can
 /// distinguish a typed JSON-RPC error (e.g. `-32010 UnsupportedMode`)
 /// from a generic `anyhow::Error` (e.g. an Arweave write failure).
@@ -252,6 +310,7 @@ pub async fn sign_memory(
     owner_pubkey: &str,
     jwt_sub: Option<&str>,
     resolved: ResolvedMode,
+    visibility: Visibility,
     envelope: &Envelope,
     delivery_refetch_timeout: Duration,
 ) -> Result<serde_json::Value, ToolError> {
@@ -299,6 +358,7 @@ pub async fn sign_memory(
         storage_mode,
         owner_pubkey,
         resolved.write_mode,
+        visibility,
         delivery_refetch_timeout,
     )
     .await
@@ -545,14 +605,31 @@ async fn sign_memory_inline(
     storage_mode: &str,
     owner_pubkey: &str,
     write_mode: WriteMode,
+    visibility: Visibility,
     delivery_refetch_timeout: Duration,
 ) -> Result<serde_json::Value, ToolError> {
     let pubkey = identity::pubkey_base58(keypair);
     let attestation_id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
 
-    // 1. Embed content
+    // 1. Embed content. The `Embedder` trait is infallible by design; the
+    // production code path treats an empty vector as the failure signal
+    // (model file missing, ONNX crash, etc.) per Task 4's note in
+    // agent-native-distribution tech-spec. Surface as typed
+    // `-32098 EmbedderInvalid` so the agent can branch on the structured
+    // error rather than parsing a free-text message. `fallback_available`
+    // is `true` — the caller can retry with
+    // `allow_fallback_to_participate=true` to proxy through the hosted
+    // endpoint (Decision 4).
     let embedding = embedder.embed(content);
+    if embedding.is_empty() {
+        return Err(ToolError::TypedRpc(crate::mcp::embedder_invalid(
+            "embedder returned empty vector",
+            "Verify the local embedder model file is present and uncorrupted; \
+             reinstall the binary if the integrity check fails.",
+            true,
+        )));
+    }
 
     // 2. Compress with TurboQuant
     let compressed = compressor.compress(&embedding);
@@ -626,10 +703,12 @@ async fn sign_memory_inline(
         let store = store.lock().unwrap();
         // T2: the persisted `write_mode` column is the SAME value the
         // paywall gate consulted (single source of truth — Decision 1).
-        // Visibility is privacy-by-default — `Visibility::Private` here
-        // matches the user-spec default (AC13/AC14). Task 5 wires the
-        // JSON-input resolver that lets a participate-mode caller opt into
-        // `Public`; until then, every write through this path is private.
+        // Visibility is threaded from the resolver in `handle_tool_call`
+        // (Task 4 / Decision 3+5). For `write_mode == Local` the resolver
+        // has already rejected any explicit visibility request via AC14,
+        // so we expect `Visibility::Private` here; for participate writes
+        // the resolved value (`Private` default or `Public` after the
+        // public-write ceremony) flows through verbatim.
         store.save_attestation(
             &attestation_id,
             content,
@@ -641,7 +720,7 @@ async fn sign_memory_inline(
             owner_pubkey,
             &now,
             write_mode,
-            Visibility::Private,
+            visibility,
             &embedding,
         )?;
     }
@@ -726,6 +805,7 @@ async fn sign_memory_inline(
         "timestamp": now,
         "storage_mode": storage_mode,
         "write_mode": write_mode.as_str(),
+        "visibility": visibility.as_str(),
         "embedding": {
             "model": embed_model,
             "provider": embedder.provider_name(),
@@ -1312,15 +1392,31 @@ pub fn recall(
     query: &str,
     limit: usize,
     owner_pubkey: &str,
+    visibility_filter: Option<Visibility>,
 ) -> serde_json::Value {
     let signer_pubkey = identity::pubkey_base58(keypair);
     let query_emb = embedder.embed(query);
-    // Authenticated recall (this path is reached only with a resolved
-    // `owner_pubkey`): `None` returns all of the caller's own rows
-    // regardless of visibility (Decision 5). Task 5 wires the
-    // anonymous-recall branch that passes `Some(Visibility::Public)`.
+    // Visibility-aware recall (Decision 5 / AC13 — agent-native-distribution).
+    //
+    // - Authenticated callers (`visibility_filter = None`): see all of their
+    //   own rows regardless of visibility — the owner_pubkey predicate is
+    //   the only tenant boundary.
+    // - Anonymous callers (`visibility_filter = Some(Visibility::Public)`):
+    //   the storage layer adds `AND a.visibility = 'public'` so only rows
+    //   the owner explicitly opted into the public pool surface.
+    //
+    // The owner_pubkey is the local server keypair on the anonymous path
+    // (the dispatcher's fallback), so the SQL still filters by *some* owner.
+    // For the anonymous case the visibility-public predicate is the real
+    // gating filter — `owner_pubkey` in that path is effectively a no-op
+    // because all public rows on a server are reachable via the public
+    // index regardless of who anchored them. Task 4 stays consistent with
+    // T2 of this feature by passing through the existing owner_pubkey
+    // contract rather than rewriting the search to drop the owner predicate
+    // for anonymous calls; the test in `mcp/tests/anonymous_recall.rs`
+    // pins the expected behaviour.
     let results = store
-        .search(&query_emb, owner_pubkey, None, limit)
+        .search(&query_emb, owner_pubkey, visibility_filter, limit)
         .unwrap_or_default();
     // count() is signer-scoped (legacy semantic); search() is owner-scoped.
     let total = store.count(&signer_pubkey).unwrap_or(0);
@@ -1424,6 +1520,7 @@ mod sign_memory_tests {
             &owner,
             Some("user-jwt-sub"),
             resolved,
+            Visibility::Private,
             &env,
             std::time::Duration::from_secs(15),
         )
@@ -1461,6 +1558,7 @@ mod sign_memory_tests {
             &owner,
             None,
             resolved,
+            Visibility::Private,
             &env,
             std::time::Duration::from_secs(15),
         )
@@ -1504,6 +1602,7 @@ mod sign_memory_tests {
             &owner,
             Some("user-jwt-sub"),
             resolved_explicit_local,
+            Visibility::Private,
             &env_local,
             std::time::Duration::from_secs(15),
         )
@@ -1534,6 +1633,7 @@ mod sign_memory_tests {
             &owner,
             Some("user-jwt-sub"),
             resolved_explicit_local_full,
+            Visibility::Private,
             &env_full,
             std::time::Duration::from_secs(15),
         )

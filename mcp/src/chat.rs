@@ -103,6 +103,7 @@ pub async fn chat_handler(
             message,
             RECALL_LIMIT,
             &chat_owner_pubkey,
+            None,
         )
     }; // lock dropped here -- safe to .await below
 
@@ -541,6 +542,7 @@ mod handler_tests {
                 5,
             )),
             delivery_metrics: Arc::new(crate::payment::DeliveryMetrics::default()),
+            confirmation_ledger: Arc::new(crate::confirmation_token::ConfirmationLedger::new()),
         })
     }
 

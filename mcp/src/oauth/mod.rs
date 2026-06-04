@@ -1290,6 +1290,35 @@ pub fn extract_json_rpc_method(bytes: &[u8]) -> Option<String> {
     val.get("method")?.as_str().map(|s| s.to_string())
 }
 
+/// Extract `params.name` (MCP tool name) from a `tools/call` body. Returns
+/// `None` for any other method, invalid JSON, or missing `name`. Used by the
+/// bearer-auth middleware to allow anonymous `mnemonic_recall` calls per
+/// Decision 5 / AC13 (agent-native-distribution). The recall handler enforces
+/// visibility filtering downstream; the middleware just gates which tool
+/// names are reachable without a JWT.
+pub fn extract_tools_call_name(bytes: &[u8]) -> Option<String> {
+    let val: Value = serde_json::from_slice(bytes).ok()?;
+    if val.get("method")?.as_str()? != "tools/call" {
+        return None;
+    }
+    val.get("params")?
+        .get("name")?
+        .as_str()
+        .map(|s| s.to_string())
+}
+
+/// Tool names that pass `bearer_auth_middleware` without a JWT (the
+/// `tools/call` analogue of `ALLOWLIST_METHODS`). The downstream handler in
+/// `mcp::handle_tool_call` enforces tool-specific access rules
+/// (e.g. `mnemonic_recall` filters by `visibility='public'` when
+/// `jwt_sub` is absent — AC13).
+///
+/// Only `mnemonic_recall` belongs here in v1 of agent-native-distribution.
+/// Adding a new entry expands the anonymous attack surface — review
+/// carefully and pair with explicit visibility / tenancy guards in the
+/// downstream handler.
+const ALLOWLIST_TOOLS_CALL_NAMES: &[&str] = &["mnemonic_recall"];
+
 /// Bearer-auth middleware. Inserts the resolved `Claims` into the request
 /// extension on success so downstream handlers can read `jwt.sub` via
 /// `Request::extensions()` / `axum::Extension(Claims)`.
@@ -1370,6 +1399,10 @@ pub async fn bearer_auth_middleware(
     };
 
     let method = extract_json_rpc_method(&body_bytes);
+    // Tool name extracted iff method == "tools/call". `None` for every other
+    // method. Used to pick out the per-tool allowlist (AC13 anonymous
+    // recall) without expanding the method allowlist.
+    let tools_call_name = extract_tools_call_name(&body_bytes);
     let allowlisted = method
         .as_deref()
         .map(|m| {
@@ -1378,7 +1411,19 @@ pub async fn bearer_auth_middleware(
             // `notifications/*` methods are also pass-through. Without this
             // Cursor's post-initialize `notifications/initialized` is rejected
             // with 401, breaking the handshake.
-            ALLOWLIST_METHODS.contains(&m) || m.starts_with("notifications/")
+            //
+            // Decision 5 / AC13 — agent-native-distribution: `tools/call`
+            // with a tool name listed in `ALLOWLIST_TOOLS_CALL_NAMES` is
+            // also allowlisted. Only `mnemonic_recall` is on that list in
+            // v1; the downstream handler enforces visibility filtering so
+            // anonymous callers see only `visibility='public'` rows.
+            ALLOWLIST_METHODS.contains(&m)
+                || m.starts_with("notifications/")
+                || (m == "tools/call"
+                    && tools_call_name
+                        .as_deref()
+                        .map(|t| ALLOWLIST_TOOLS_CALL_NAMES.contains(&t))
+                        .unwrap_or(false))
         })
         .unwrap_or(false);
 

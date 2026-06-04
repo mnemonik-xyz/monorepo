@@ -69,6 +69,12 @@ solana-sdk = "2.2"
 sha2 = "0.10"
 hex = "0.4"
 
+# HMAC-SHA256 — used by `confirmation_token.rs` to bind the
+# `request_public_write_confirmation` mint to (content_hash || owner_pubkey ||
+# visibility || expires_at || jti). Decision 5b — agent-native-distribution.
+# RustCrypto, small, audited; matches the sha2 major already pinned.
+hmac = "0.12"
+
 # Encoding
 base64 = "0.22"
 
@@ -172,6 +178,29 @@ required-features = ["test-support"]
 [[test]]
 name = "discovery_anonymous"
 path = "tests/discovery_anonymous.rs"
+required-features = ["test-support"]
+
+# Task 4 agent-native-distribution — sign_memory visibility resolver +
+# Decision 5b public-write confirmation gate + anonymous recall filter +
+# parametrized Error Catalogue coverage.
+[[test]]
+name = "sign_memory_visibility"
+path = "tests/sign_memory_visibility.rs"
+required-features = ["test-support"]
+
+[[test]]
+name = "anonymous_recall"
+path = "tests/anonymous_recall.rs"
+required-features = ["test-support"]
+
+[[test]]
+name = "confirmation_gate"
+path = "tests/confirmation_gate.rs"
+required-features = ["test-support"]
+
+[[test]]
+name = "error_catalogue"
+path = "tests/error_catalogue.rs"
 required-features = ["test-support"]
 
 [dev-dependencies]

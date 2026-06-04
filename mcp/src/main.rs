@@ -1,6 +1,7 @@
 mod api;
 mod chat;
 mod config;
+mod confirmation_token;
 mod cors_policy;
 mod escrow;
 mod llm;
@@ -470,6 +471,11 @@ async fn main() -> anyhow::Result<()> {
     ));
     let delivery_metrics = Arc::new(payment::DeliveryMetrics::default());
 
+    // Task 4 / Decision 5b — public-write confirmation ledger. Random
+    // HMAC secret seeded at process start; never persisted. Background
+    // eviction starts immediately after the `Arc<McpState>` is built.
+    let confirmation_ledger = Arc::new(confirmation_token::ConfirmationLedger::new());
+
     let state = Arc::new(mcp::McpState {
         keypair,
         solana: solana::SolanaClient::new(&cfg.solana_rpc_url),
@@ -499,7 +505,14 @@ async fn main() -> anyhow::Result<()> {
         delivery_refetch_timeout: std::time::Duration::from_secs(cfg.delivery_refetch_timeout_secs),
         refunds_by_subject: refunds_by_subject.clone(),
         delivery_metrics: delivery_metrics.clone(),
+        confirmation_ledger: confirmation_ledger.clone(),
     });
+
+    // Spawn the confirmation-ledger eviction loop. Held strong reference
+    // means the loop lives for the process lifetime; on shutdown the
+    // runtime drops it. Tokio JoinHandle is intentionally discarded —
+    // the loop never returns under normal operation.
+    let _confirmation_evictor = confirmation_token::start_evictor(confirmation_ledger);
 
     // T3: spawn the bounded-eviction background loop for the delivery-quota
     // counter so the DashMap size tracks *active* spenders, not lifetime

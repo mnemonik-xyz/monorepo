@@ -3215,6 +3215,7 @@ dependencies = [
  "futures",
  "governor",
  "hex",
+ "hmac 0.12.1",
  "http-body-util",
  "httpmock",
  "hyper 1.9.0",

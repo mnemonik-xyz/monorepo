@@ -476,6 +476,143 @@ pub fn delivery_quota_exceeded(window_secs: u64, threshold: u32) -> JsonRpcError
     }
 }
 
+// ── Typed JSON-RPC errors (Task 4 — agent-native-distribution) ──────────────
+//
+// New entries from the Error Catalogue table in
+// `work/agent-native-distribution/tech-spec.md` (Decision 4 + Decision 5b +
+// soft-fall routing). Each helper documents the trigger condition, the
+// `data.kind` discriminator, and every documented `data` field. A
+// parametrized integration test in `mcp/tests/error_catalogue.rs` covers
+// every row by triggering the condition via the production code path
+// rather than hand-crafting a response.
+
+/// `-32095 PublicWriteRequiresConfirmation` — `sign_memory` arrived with
+/// `mode=participate + visibility=public` but the `public_write_confirmation`
+/// field was missing, malformed, replayed, expired, cross-owner, or
+/// content_hash-mismatched. The caller must rerun
+/// `request_public_write_confirmation` to mint a fresh token and retry.
+/// Decision 5b.
+///
+/// `data` shape: `{kind, content_hash, suggested_action}`.
+pub fn public_write_requires_confirmation(content_hash: &str) -> JsonRpcError {
+    JsonRpcError {
+        code: -32095,
+        message: "Public-write confirmation required".to_string(),
+        data: Some(serde_json::json!({
+            "kind": "PublicWriteRequiresConfirmation",
+            "content_hash": content_hash,
+            "suggested_action":
+                "Call request_public_write_confirmation, surface the content_hash to the user \
+                 for in-turn approval, then retry sign_memory with the returned \
+                 confirmation_token + jti within the 5-minute TTL.",
+        })),
+    }
+}
+
+/// `-32096 OAuthTimeout` — the OAuth-loopback browser flow exceeded the
+/// per-call deadline (`MNEMONIC_OAUTH_TIMEOUT_SECS`, default 120s) without
+/// the user finishing consent. Decision 4 + AC11. Production trigger lives
+/// in Task 5 (`mcp-stdio` participate-mode); helper is defined here so the
+/// Error Catalogue table has one canonical home.
+///
+/// `data` shape: `{kind, sign_url, expires_at, attempted_at}`.
+#[allow(dead_code)]
+pub fn oauth_timeout(sign_url: &str, expires_at: u64, attempted_at: u64) -> JsonRpcError {
+    JsonRpcError {
+        code: -32096,
+        message: "OAuth loopback timed out".to_string(),
+        data: Some(serde_json::json!({
+            "kind": "OAuthTimeout",
+            "sign_url": sign_url,
+            "expires_at": expires_at,
+            "attempted_at": attempted_at,
+        })),
+    }
+}
+
+/// `-32098 EmbedderInvalid` — the local embedder produced an unusable vector
+/// (model file missing, corrupted, or ONNX runtime crashed). The `Embedder`
+/// trait at `core/src/embed/mod.rs` is infallible by design; the production
+/// code path in `sign_memory_inline` surfaces this typed error by treating
+/// an empty `Vec::new()` return from `embed()` as the failure signal.
+/// `fallback_available` advertises whether the request could be retried with
+/// `allow_fallback_to_participate=true`.
+///
+/// `data` shape: `{kind, reason, repair_hint, fallback_available}`.
+pub fn embedder_invalid(reason: &str, repair_hint: &str, fallback_available: bool) -> JsonRpcError {
+    JsonRpcError {
+        code: -32098,
+        message: "Embedder invalid".to_string(),
+        data: Some(serde_json::json!({
+            "kind": "EmbedderInvalid",
+            "reason": reason,
+            "repair_hint": repair_hint,
+            "fallback_available": fallback_available,
+        })),
+    }
+}
+
+/// `-32099 LocalStorageBusy` — SQLite returned `SQLITE_BUSY` after the
+/// configured 5000ms internal busy-timeout (Decision 13). The agent should
+/// retry after `retry_after_ms`. Shares the `-32099` code with
+/// `TokenExpired`; clients discriminate via `data.kind`. Production trigger
+/// lives in `core::storage::sqlite` busy-error mapping (T6 wire-up).
+///
+/// `data` shape: `{kind, retry_after_ms}`.
+#[allow(dead_code)]
+pub fn local_storage_busy(retry_after_ms: u64) -> JsonRpcError {
+    JsonRpcError {
+        code: -32099,
+        message: "Local storage busy".to_string(),
+        data: Some(serde_json::json!({
+            "kind": "LocalStorageBusy",
+            "retry_after_ms": retry_after_ms,
+        })),
+    }
+}
+
+/// `-32094 IdentityBootstrapFailed` — `core::identity::ensure()` returned an
+/// error (no keychain access, no file fallback, all attempted paths failed).
+/// Distinct from `-32099 TokenExpired`: the token is a JWT, the identity is
+/// the Ed25519 signing key. Identity failure blocks every signed operation.
+/// Production trigger lives in Task 5/6 keychain wire-up.
+///
+/// `data` shape: `{kind, reason, repair_hint}`.
+#[allow(dead_code)]
+pub fn identity_bootstrap_failed(reason: &str, repair_hint: &str) -> JsonRpcError {
+    JsonRpcError {
+        code: -32094,
+        message: "Identity bootstrap failed".to_string(),
+        data: Some(serde_json::json!({
+            "kind": "IdentityBootstrapFailed",
+            "reason": reason,
+            "repair_hint": repair_hint,
+        })),
+    }
+}
+
+/// `-32011 HostedUnavailable` — `mcp-stdio`'s participate-mode proxy could
+/// not reach `MNEMONIC_HOSTED_ENDPOINT` (DNS, TCP, TLS, or 5xx-after-retry).
+/// Shares `-32011` with `DeliveryNotConfirmed` and `DeliveryQuotaExceeded`;
+/// clients discriminate via `data.kind`. Decision 4 (soft-fall) maps
+/// post-escalation hosted unreachability to this code so the caller learns
+/// the escalation failure, not the original local failure. Production
+/// trigger lives in Task 5 (mcp-stdio soft-fall proxy).
+///
+/// `data` shape: `{kind, last_error, retry_after_ms}`.
+#[allow(dead_code)]
+pub fn hosted_unavailable(last_error: &str, retry_after_ms: u64) -> JsonRpcError {
+    JsonRpcError {
+        code: -32011,
+        message: "Hosted endpoint unavailable".to_string(),
+        data: Some(serde_json::json!({
+            "kind": "HostedUnavailable",
+            "last_error": last_error,
+            "retry_after_ms": retry_after_ms,
+        })),
+    }
+}
+
 /// `whoami` discoverability envelope — derived once at process start from
 /// `Config` (storage_mode + payment_mode + pricing engine snapshot) and
 /// returned through `mnemonic_whoami` so clients learn what the server can
@@ -666,6 +803,15 @@ pub struct McpState {
     /// `payment::DeliveryMetrics` for the four counters and the
     /// no-per-tenant-label rationale.
     pub delivery_metrics: Arc<payment::DeliveryMetrics>,
+
+    /// In-process ledger for the public-write confirmation ceremony
+    /// (Decision 5b — agent-native-distribution). `request_public_write_confirmation`
+    /// mints an HMAC-bound token; `sign_memory` with
+    /// `mode=participate + visibility=public` consumes it. The HMAC secret
+    /// is regenerated at construction time and never persisted; a process
+    /// restart invalidates every in-flight token (intentional graceful-
+    /// degradation — the agent reruns the 3s ceremony).
+    pub confirmation_ledger: Arc<crate::confirmation_token::ConfirmationLedger>,
 }
 
 // Safety: We only access store through std::sync::Mutex (short critical sections, no await)
@@ -1359,6 +1505,56 @@ async fn handle_tool_call(
                     }
                 },
             };
+            // Task 4 — visibility (Decision 3 + AC14) and the
+            // allow_fallback_to_participate opt-in (Decision 4). Both
+            // resolved here so the public-write gate can fire BEFORE the
+            // tool body and so soft-fall routing in Task 5 has the resolved
+            // value. Visibility may NOT be present alongside `mode=local`
+            // — `resolve_visibility` returns `-32602 InvalidParams` in that
+            // case.
+            let visibility = tools::resolve_visibility(args, resolved.write_mode)?;
+            // `_allow_fallback` is wired through to the soft-fall router in
+            // Task 5. Parsed here so any malformed value is rejected at the
+            // dispatcher boundary before storage / payment side effects.
+            let _allow_fallback = tools::resolve_allow_fallback(args)?;
+
+            // Decision 5b — public-write confirmation gate. Fires only when
+            // the caller has explicitly opted into `participate + public`;
+            // the default `private` path is unaffected. Owner_pubkey is
+            // server-derived (the dispatcher's `owner_pubkey` is sourced
+            // from `claims.sub` on the HTTP path), never client-supplied —
+            // a cross-owner replay would present mismatched owner here and
+            // the consume returns `Invalid`.
+            if resolved.write_mode == mnemonic_core::storage::WriteMode::Participate
+                && visibility == mnemonic_core::storage::Visibility::Public
+            {
+                let token_b64 = args
+                    .get("public_write_confirmation")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let jti_raw = args.get("jti").and_then(|v| v.as_str()).unwrap_or("");
+                let content_hash_arg = blake3::hash(content.as_bytes()).to_hex().to_string();
+                let parsed_jti = uuid::Uuid::parse_str(jti_raw).ok();
+                let consume_result = match parsed_jti {
+                    Some(jti) if !token_b64.is_empty() => state.confirmation_ledger.consume(
+                        token_b64,
+                        &jti,
+                        &content_hash_arg,
+                        owner_pubkey,
+                        mnemonic_core::storage::Visibility::Public,
+                    ),
+                    _ => Err(crate::confirmation_token::ConfirmError::Invalid),
+                };
+                if consume_result.is_err() {
+                    tracing::warn!(
+                        owner_pubkey = %owner_pubkey,
+                        content_hash = %content_hash_arg,
+                        "public-write confirmation rejected — missing, expired, replayed, or HMAC-mismatched token"
+                    );
+                    return Err(public_write_requires_confirmation(&content_hash_arg));
+                }
+            }
+
             let cost_hint = state.pricing.cost_hint(state.sol_tx_fee_lamports);
             tools::sign_memory(
                 &state.keypair,
@@ -1375,6 +1571,7 @@ async fn handle_tool_call(
                 owner_pubkey,
                 jwt_sub,
                 resolved,
+                visibility,
                 &state.envelope,
                 state.delivery_refetch_timeout,
             )
@@ -1414,6 +1611,15 @@ async fn handle_tool_call(
                 .as_str()
                 .ok_or_else(|| JsonRpcError::simple(-32603, "query required"))?;
             let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(5) as usize;
+            // Decision 5 / AC13 — anonymous callers (no JWT) see only
+            // `visibility='public'` rows; authenticated callers see all of
+            // their own. `jwt_sub.is_none()` is the anonymous-recall
+            // discriminator surfaced from the dispatcher.
+            let visibility_filter = if jwt_sub.is_none() {
+                Some(mnemonic_core::storage::Visibility::Public)
+            } else {
+                None
+            };
             // DB-only: lock, query, release
             let store = state.store.lock().unwrap();
             tools::recall(
@@ -1423,6 +1629,7 @@ async fn handle_tool_call(
                 query,
                 limit,
                 owner_pubkey,
+                visibility_filter,
             )
         }
         "mnemonic_check_pending" => {
@@ -1432,21 +1639,46 @@ async fn handle_tool_call(
                 .to_string();
             tools::check_pending(&state.pending, &state.store, &cid).await
         }
-        // request_public_write_confirmation is advertised in tool_definitions()
-        // but the handler lands in Task 4 (Decision 2 — public-write ceremony).
-        // Until then, callers that follow the inputSchema and invoke this tool
-        // get a typed -32601 MethodNotFound rather than the generic catch-all
-        // -32603, which would otherwise look like a server-side bug. Includes
-        // the recommended fallback path in the message so MCP clients can
-        // surface useful guidance to the user.
+        // request_public_write_confirmation — Decision 5b. Mints an
+        // HMAC-bound, single-use confirmation token for a specific
+        // (content_hash, owner_pubkey, visibility=Public) tuple. JWT is
+        // REQUIRED at mint time: the tool is NOT in `ALLOWLIST_METHODS`,
+        // so the bearer-auth middleware already rejected callers without
+        // valid `Claims` with `-32001`. `owner_pubkey` here is server-
+        // derived from `claims.sub` (the dispatcher's resolution), so the
+        // HMAC binds the token to the authenticated owner — a cross-owner
+        // replay attempts at consume time will fail HMAC reconstruction.
         "request_public_write_confirmation" => {
-            return Err(JsonRpcError::simple(
-                -32601,
-                "request_public_write_confirmation handler not yet implemented \
-                 (lands in agent-native-distribution Task 4); \
-                 use mnemonic_sign_memory with mode='participate' \
-                 + visibility='public' once the ceremony ships",
-            ));
+            // Belt-and-braces: even though the middleware allowlist guards
+            // this method, double-check we have an authenticated `jwt_sub`.
+            // The dispatcher's `owner_pubkey` fallback (server keypair)
+            // would let an anonymous mint slip through if this guard were
+            // missing — defending in depth.
+            if jwt_sub.is_none() {
+                return Err(JsonRpcError::simple(
+                    -32001,
+                    "request_public_write_confirmation requires authentication",
+                ));
+            }
+            let content_hash = args
+                .get("content_hash")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| {
+                    invalid_params(
+                        "content_hash",
+                        &args.get("content_hash").cloned().unwrap_or(Value::Null),
+                    )
+                })?;
+            let (token, jti, expires_at) = state.confirmation_ledger.mint(
+                content_hash,
+                owner_pubkey,
+                mnemonic_core::storage::Visibility::Public,
+            );
+            serde_json::json!({
+                "confirmation_token": token,
+                "jti": jti.to_string(),
+                "expires_at": expires_at,
+            })
         }
         _ => {
             return Err(JsonRpcError::simple(
@@ -1571,6 +1803,7 @@ mod transport_tests {
                 5,
             )),
             delivery_metrics: Arc::new(crate::payment::DeliveryMetrics::default()),
+            confirmation_ledger: Arc::new(crate::confirmation_token::ConfirmationLedger::new()),
         })
     }
 
@@ -1845,7 +2078,10 @@ mod transport_tests {
     /// Active under Task 4 — `oauth::bearer_auth_middleware` rejects
     /// unauthenticated `tools/call` with HTTP 401 and a JSON-RPC error
     /// envelope (`code: -32001`). `initialize` and `tools/list` remain
-    /// allowlisted (Decision 9).
+    /// allowlisted (Decision 9). `mnemonic_recall` is allowlisted by
+    /// Task 4 / AC13 (agent-native-distribution) for anonymous-public
+    /// discovery, so this test uses `mnemonic_sign_memory` — which is
+    /// NOT allowlisted and must still 401 without a Bearer JWT.
     #[tokio::test]
     async fn test_missing_authorization_header_returns_401() {
         let state = build_test_state();
@@ -1854,7 +2090,7 @@ mod transport_tests {
         let req_body = serde_json::json!({
             "jsonrpc": "2.0",
             "method": "tools/call",
-            "params": {"name": "mnemonic_recall", "arguments": {"query": "x"}},
+            "params": {"name": "mnemonic_sign_memory", "arguments": {"content": "x"}},
             "id": 99,
         });
         let req = Request::builder()

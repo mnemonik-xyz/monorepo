@@ -148,6 +148,7 @@ pub fn mock_state() -> Arc<McpState> {
             5,
         )),
         delivery_metrics: Arc::new(crate::payment::DeliveryMetrics::default()),
+        confirmation_ledger: Arc::new(crate::confirmation_token::ConfirmationLedger::new()),
     })
 }
 
@@ -221,6 +222,7 @@ pub fn mock_state_with(
             5,
         )),
         delivery_metrics: Arc::new(crate::payment::DeliveryMetrics::default()),
+        confirmation_ledger: Arc::new(crate::confirmation_token::ConfirmationLedger::new()),
     })
 }
 
@@ -303,6 +305,7 @@ pub fn mock_state_for_delivery(
             quota_threshold,
         )),
         delivery_metrics: Arc::new(crate::payment::DeliveryMetrics::default()),
+        confirmation_ledger: Arc::new(crate::confirmation_token::ConfirmationLedger::new()),
     })
 }
 

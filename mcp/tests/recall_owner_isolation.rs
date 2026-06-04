@@ -209,17 +209,15 @@ async fn test_recall_filters_by_owner_pubkey_and_anonymous_returns_401() {
         .to_string();
     assert_eq!(row_content, "bob memory 1", "bob got alice's row!");
 
-    // 2. Anonymous recall (no Authorization header) → 401, NEVER 200 with rows.
-    //
-    // NOTE (agent-native-distribution Task 4): this 401 assertion will change
-    // when Task 4 lands the visibility-filter recall path per AC13 — anonymous
-    // recall will return HTTP 200 with only `visibility='public'` rows
-    // included. When that lands, update this assertion to:
-    //   assert_eq!(sa, StatusCode::OK);
-    //   let rows = body_a["result"]["content"]...;
-    //   assert!(rows.iter().all(|r| r["visibility"] == "public"));
-    // Surfaced now (by test-reviewer round 1 finding F2) so the next coder
-    // doesn't hit a surprise CI failure.
+    // 2. Anonymous recall (no Authorization header) — Task 4 lands the
+    // visibility-filter recall path per AC13. Anonymous recall now returns
+    // HTTP 200 with only `visibility='public'` rows included. Alice and
+    // Bob's writes above went through the deferred-sign flow → resulting
+    // attestations are `visibility = 'private'` by default (the WASM
+    // sign-callback doesn't set visibility), so anonymous recall sees zero
+    // rows here. The critical safety property — "anonymous callers do NOT
+    // observe private rows across tenants" — is enforced by the
+    // visibility-filter clause, not by 401.
     let (sa, body_a) = post_jsonrpc(
         &app,
         serde_json::json!({
@@ -236,7 +234,20 @@ async fn test_recall_filters_by_owner_pubkey_and_anonymous_returns_401() {
     .await;
     assert_eq!(
         sa,
-        StatusCode::UNAUTHORIZED,
-        "anonymous recall MUST be 401, got {sa}: {body_a}"
+        StatusCode::OK,
+        "anonymous recall is allowlisted per AC13, got {sa}: {body_a}"
+    );
+    // Anonymous recall body structure mirrors authenticated recall: the
+    // wrapping `tools/call` result has a `content[0].text` JSON-string.
+    let text = body_a["result"]["content"][0]["text"]
+        .as_str()
+        .expect("anon recall content text");
+    let inner: Value = serde_json::from_str(text).expect("anon recall inner json");
+    let rows = inner["results"].as_array().cloned().unwrap_or_default();
+    // None of alice's or bob's private rows surface. The list is empty
+    // because none of the deferred-sign writes opted into `visibility=public`.
+    assert!(
+        rows.is_empty(),
+        "anonymous recall must NOT surface private rows: {inner}"
     );
 }

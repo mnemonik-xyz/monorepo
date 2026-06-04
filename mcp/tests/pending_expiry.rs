@@ -90,6 +90,7 @@ fn state_with_short_ttl(ttl_secs: i64) -> Arc<McpState> {
             5,
         )),
         delivery_metrics: Arc::new(mnemonic_mcp::payment::DeliveryMetrics::default()),
+        confirmation_ledger: Arc::new(mnemonic_mcp::confirmation_token::ConfirmationLedger::new()),
     })
 }
 

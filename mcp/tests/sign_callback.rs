@@ -119,6 +119,9 @@ fn build_state() -> Arc<McpState> {
             5,
         )),
         delivery_metrics: std::sync::Arc::new(mnemonic_mcp::payment::DeliveryMetrics::default()),
+        confirmation_ledger: std::sync::Arc::new(
+            mnemonic_mcp::confirmation_token::ConfirmationLedger::new(),
+        ),
     })
 }
 
