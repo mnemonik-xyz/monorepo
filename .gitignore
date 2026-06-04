@@ -95,3 +95,13 @@ temp/
 .claude/shared/
 .claude/skills/*
 !.claude/skills/project-knowledge/
+
+# Ruflo runtime + per-developer .claude/ artifacts (per-developer, NOT shared).
+# Mirrors the rules previously added on claude/modes-user-choice-Qkk6X but that
+# were superseded by the broader .claude/skills/* allowlist in cbe8a7e. These
+# directories are runtime/config noise and shouldn't ship.
+.claude-flow/
+.claude/helpers/
+.claude/settings.json
+.mcp.json
+PROJECT_MEMORY.md

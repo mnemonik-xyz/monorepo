@@ -12,8 +12,12 @@
 //!    `attestation_costs` row, balance restored, counter incremented.
 //! 3. `demotion_on_verify_failure` — different valid COSE bytes (signed by
 //!    another key) → `stage: "verify"`.
-//! 4. `demotion_on_x402` — TODO: requires a different bearer path; covered
-//!    structurally by the refetch test under PAYMENT_MODE=balance.
+//! 4. `demotion_on_x402_leaves_nonce_reusable` — same refetch failure as
+//!    (2) but under PAYMENT_MODE=x402. Asserts the T3-round-2 nonce
+//!    deferral (`mark_x402_nonce` fires only after delivery success):
+//!    after a failed delivery the `x402_nonces` table is empty, so the
+//!    caller can retry with the same `X-Payment` header without being
+//!    told "already consumed".
 //! 5. `quota_exceeded` — 5 consecutive demotions; the 6th `participate` call
 //!    short-circuits with `DeliveryQuotaExceeded` BEFORE any chain call.
 //! 6. `refund_failure_writes_audit_row` — stubbed refund failure → an
@@ -23,8 +27,8 @@
 mod delivery_harness;
 
 use delivery_harness::{
-    balance_for, build_state_and_router, call_sign_memory_participate, seed_api_key_jwt,
-    MockArweave, MockSolana,
+    balance_for, build_state_and_router, build_state_and_router_x402, call_sign_memory_participate,
+    call_sign_memory_participate_x402, seed_api_key_jwt, MockArweave, MockSolana,
 };
 
 use std::time::Duration;
@@ -332,4 +336,120 @@ async fn refund_failure_writes_audit_row() {
         .collect();
     assert!(!cols.iter().any(|c| c == "content_preview"));
     assert!(!cols.iter().any(|c| c == "cose_bytes"));
+}
+
+// ── 7. T3.5 — x402 nonce reusable after demotion ────────────────────────────
+
+/// `demotion_on_x402_leaves_nonce_reusable` — under PAYMENT_MODE=x402, an
+/// induced delivery failure must NOT consume the x402 nonce. This pins the
+/// T3-round-2 deferral (`consume_x402_nonce_after_success` runs only on a
+/// confirmed delivery) end-to-end: an attacker / unlucky caller can retry
+/// with the same `X-Payment` header without seeing a misleading "already
+/// consumed" rejection, and the operator hasn't double-billed.
+///
+/// Mocks `getTransaction` on Solana so `verify_usdc_transfer` passes
+/// without us minting an actual on-chain transaction. The delivery still
+/// fails for the regular T3 reason (corrupted Arweave GET), so the
+/// post-anchor demotion + refund path is what's actually exercised here.
+#[tokio::test]
+async fn demotion_on_x402_leaves_nonce_reusable() {
+    // A real-looking Solana tx signature (base58, ~88 chars). Doesn't have to
+    // verify on-chain — the mock dispatcher just substring-matches on it.
+    const TX_SIG: &str =
+        "5VfYdM3GjRZqkBdYNz2hVnQYsBfP1k8fL3jHkMb7vYqXrJzGw2XaRpUyMcNvDsW4eLkR1tFqGxKyPmAhU6Dv8nQT";
+    // Synthetic operator treasury + mainnet USDC mint. The mock proof says
+    // this exact owner+mint received `CHEAP_COST` micro-USDC.
+    const TREASURY: &str = "TreaSurYMockPayToMnemonik11111111111111111";
+    const USDC_MINT: &str = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+
+    // Anchor PUT succeeds; GET returns 404 → refetch budget exhausts, the
+    // delivery check exits at the `refetch` stage — same shape as
+    // `demotion_on_refetch_failure` but under PAYMENT_MODE=x402 instead of
+    // `balance`. (Using `read_fails` rather than `corrupted_get` because
+    // the latter routes through `verify_cose` and ends at stage=`verify`,
+    // which is a separate test in this file.)
+    let arweave = MockArweave::read_fails("AR_TX_X402");
+    arweave.install();
+    let solana =
+        MockSolana::happy_with_x402_payment(TX_SIG, TREASURY, USDC_MINT, CHEAP_COST as u64);
+
+    let (state, app) = build_state_and_router_x402(
+        &arweave.base_url(),
+        &solana.base_url(),
+        CHEAP_COST,
+        5,
+        Duration::from_secs(60),
+        Duration::from_secs(2),
+        TREASURY,
+        USDC_MINT,
+    );
+
+    // Submit the request with X-Payment pointing at TX_SIG.
+    let (status, envelope) = call_sign_memory_participate_x402(&app, TX_SIG, "hello-x402").await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Same -32011 shape as the other demotion tests.
+    let err = envelope["error"]
+        .as_object()
+        .expect("expected JSON-RPC error envelope");
+    assert_eq!(err["code"], -32011);
+    let data = err["data"].as_object().expect("data");
+    assert_eq!(data["stage"], "refetch");
+    assert_eq!(data["row_demoted_to"], "local");
+    let attestation_id = data["attestation_id"]
+        .as_str()
+        .expect("attestation_id in -32011 error data")
+        .to_string();
+
+    let store = state.store.lock().unwrap();
+
+    // Demotion landed in storage.
+    let row_write_mode: String = store
+        .conn()
+        .query_row(
+            "SELECT write_mode FROM attestations WHERE attestation_id = ?",
+            rusqlite::params![attestation_id],
+            |r| r.get::<_, String>(0),
+        )
+        .expect("row exists after demotion");
+    assert_eq!(row_write_mode, "local");
+
+    // ── THE T3.5 LOAD-BEARING ASSERTION ─────────────────────────────────
+    // x402 nonce was NOT consumed: `mark_x402_nonce` fires only via
+    // `consume_x402_nonce_after_success` on a confirmed delivery. A failed
+    // delivery must leave the row absent so retry with the same payment
+    // succeeds without a misleading "already consumed" rejection.
+    let nonce_consumed: bool = store
+        .conn()
+        .query_row(
+            "SELECT EXISTS (SELECT 1 FROM x402_nonces WHERE tx_sig = ?)",
+            rusqlite::params![TX_SIG],
+            |r| r.get::<_, bool>(0),
+        )
+        .expect("x402_nonces query");
+    assert!(
+        !nonce_consumed,
+        "T3 R2 nonce-deferral: failed delivery must leave x402 nonce \
+         reusable. tx_sig=`{TX_SIG}` should NOT appear in x402_nonces, \
+         but it does."
+    );
+
+    // No cost row written: Participate cost-record fires only on success.
+    let costs_count: i64 = store
+        .conn()
+        .query_row(
+            "SELECT COUNT(*) FROM attestation_costs WHERE attestation_id = ?",
+            rusqlite::params![attestation_id],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    assert_eq!(
+        costs_count, 0,
+        "demoted writes must not record an attestation_costs row"
+    );
+
+    drop(store);
+
+    // Counter increments under the per-stage label for operator observability.
+    assert_eq!(state.delivery_metrics.not_confirmed("refetch"), 1);
 }
