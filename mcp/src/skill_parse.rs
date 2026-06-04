@@ -49,9 +49,8 @@ pub fn extract_h2_section(body: &str, title: &str) -> Option<String> {
 /// so the build failure message contains the section name; the test surface
 /// uses it to assert the same error surface.
 pub fn expect_h2_section(body: &str, title: &str) -> Result<String, String> {
-    extract_h2_section(body, title).ok_or_else(|| {
-        format!("manifest missing required `## {title}` H2 section")
-    })
+    extract_h2_section(body, title)
+        .ok_or_else(|| format!("manifest missing required `## {title}` H2 section"))
 }
 
 /// Format the exact panic message that build.rs emits when a manifest is

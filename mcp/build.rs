@@ -30,6 +30,15 @@ include!("src/skill_parse.rs");
 /// The seven manifests user-spec AC1 requires. Missing files OR extra files
 /// fail the build with the offending name surfaced. Order is alphabetical for
 /// determinism of the generated module.
+///
+/// Any `*.md` file under `mcp/assets/skills/` MUST be listed here — the
+/// build script's "unexpected file" guard fails the build otherwise. If
+/// you add a new skill manifest: (1) drop the markdown under
+/// `mcp/assets/skills/<name>.md`, (2) add `"<name>"` to this list, and
+/// (3) update the integration test's expected set in
+/// `mcp/tests/skill_manifests.rs`. The three lists are deliberately
+/// duplicated so they can be cross-checked; the `unexpected_manifest_file_is_a_build_error`
+/// test catches desync between this constant and the assets directory.
 const EXPECTED_MANIFESTS: &[&str] = &[
     "attest",
     "checkpoint",
@@ -46,7 +55,12 @@ fn main() {
     let out_dir = env::var("OUT_DIR").expect("OUT_DIR set by cargo");
     let out_file = Path::new(&out_dir).join("skills_generated.rs");
 
-    // Rerun if any manifest changes (path is relative to CARGO_MANIFEST_DIR).
+    // Rerun on directory-level changes (new file added, file removed, file
+    // renamed — these all bump the dir mtime). Per-file `rerun-if-changed`
+    // for each individual *.md is emitted inside the read loop below so that
+    // an *edit* to an existing manifest also triggers a re-run on filesystems
+    // like macOS APFS where editing a file's content does NOT update the
+    // parent directory mtime. Code-reviewer round 1 finding CR-1.
     println!("cargo:rerun-if-changed=assets/skills");
     println!("cargo:rerun-if-changed=build.rs");
     // Shared parser code — if it changes, both build and tests need to re-run.
@@ -84,6 +98,10 @@ fn main() {
         if path.extension().and_then(|s| s.to_str()) != Some("md") {
             continue;
         }
+        // Code-reviewer round 1 CR-1: emit a per-file rerun directive for
+        // each accepted manifest so an in-place edit (which does not bump
+        // the parent dir mtime on APFS) still triggers a re-run.
+        println!("cargo:rerun-if-changed={}", path.display());
         let stem = path
             .file_stem()
             .and_then(|s| s.to_str())
@@ -191,7 +209,15 @@ fn parse_manifest(name: &str, body: &str) -> Parsed {
         trigger = trigger_trim
     );
 
-    // One-liner = first non-empty line of Purpose section.
+    // One-liner = first non-empty line of the Purpose section.
+    //
+    // Authoring convention (code-reviewer round 1 CR-5): the first line of
+    // each `## Purpose` block MUST be a self-contained sentence — it is
+    // extracted verbatim as `purpose_one_liner` and surfaced in short
+    // contexts (e.g., resource listings, help summaries). Subsequent
+    // sentences are fine; they just don't appear in the one-liner slot.
+    // If you write a multi-line Purpose, keep the leading line readable in
+    // isolation.
     let purpose_one_liner = purpose_trim
         .lines()
         .find(|line| !line.trim().is_empty())

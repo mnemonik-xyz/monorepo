@@ -36,6 +36,11 @@ use std::sync::Arc;
 /// from the new `prompts/*`, `resources/*`, and enriched `tools/list`
 /// dispatch arms. See [`work/agent-native-distribution/tech-spec.md`]
 /// Decision 1 for the single-source-of-truth rationale.
+//
+// TODO(task-2): remove `#[allow(dead_code)]` once `prompts/*`,
+// `resources/*`, and `tools/list` consume these constants. Until then
+// the integration test is the only consumer and clippy would otherwise
+// fail the `-D warnings` gate.
 #[allow(dead_code)]
 pub mod skills {
     include!(concat!(env!("OUT_DIR"), "/skills_generated.rs"));
