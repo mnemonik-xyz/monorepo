@@ -46,7 +46,7 @@ Variables for `mcp/` (set by user):
 |---|---|---|
 | `MNEMONIC_KEYPAIR_PATH` | `~/.mnemonic/id.json` | Ed25519 keypair |
 | `DATABASE_PATH` | `~/.mnemonic/attestations.db` | SQLite |
-| `STORAGE_MODE` | `local` | `local` or `full` |
+| `STORAGE_MODE` | `local` | Operator capability/default — `local` or `full`. Per-request `mode` field on `mnemonic_sign_memory` overrides; legacy callers without the field fall back to this. See `work/completed/modes-user-choice/user-spec.md`. |
 | `EMBED_PROVIDER` | `fastembed` | `fastembed`, `openai`, `hash` |
 | `OPENAI_API_KEY` | — | If `EMBED_PROVIDER=openai` |
 | `TURBO_BITS` | `4` | 2, 3, or 4 |
@@ -54,7 +54,11 @@ Variables for `mcp/` (set by user):
 | `SOLANA_RPC_URL` | `https://api.mainnet-beta.solana.com` | Solana RPC |
 | `MCP_TRANSPORT` | `http` | `stdio` or `http` |
 | `MCP_HTTP_PORT` | `3000` | HTTP transport port |
-| `PAYMENT_MODE` | `none` | `none`, `balance`, `x402`, `both` |
+| `PAYMENT_MODE` | `none` | `none`, `balance`, `x402`, `both`. Gates only resolved `WriteMode::Participate` writes; `local` writes never reach the paywall regardless of this value. |
+| `MNEMONIC_DELIVERY_REFETCH_TIMEOUT_SECS` | `15` | Wall-clock budget for the Arweave re-fetch step of the delivery guarantee. Sized against Arweave's eventual-consistency window. |
+| `MNEMONIC_DELIVERY_QUOTA_THRESHOLD` | `5` | Per-subject demotion count above which the next `participate` request short-circuits to `-32011 DeliveryQuotaExceeded` before any chain spend (DoS guard). |
+| `MNEMONIC_DELIVERY_QUOTA_WINDOW_SECS` | `60` | Sliding window for the demotion counter above. |
+| `MNEMONIC_DELIVERY_QUOTA_EVICT_SECS` | `30` | Interval at which the background task drops idle entries from the per-subject quota map (bounded growth). |
 | `MCP_JWT_SECRET` | — | HS256 secret for OAuth Bearer JWTs (required in hosted mode; ≥32 random bytes — `openssl rand -base64 32`) |
 | `MCP_PUBLIC_BASE_URL` | — | Public origin advertised in OAuth metadata + `/sign/{id}` redirect (e.g. `https://mcp.mnemonik.xyz`) |
 | `OAUTH_RATELIMIT_DISABLE` | `0` | Set to `1` only in CI / Playwright runs to bypass the `tower_governor` per-IP limiter on `/oauth/*` |
