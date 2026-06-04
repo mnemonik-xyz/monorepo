@@ -32,7 +32,9 @@
 use std::collections::HashSet;
 
 use mnemonic_mcp::mcp::skills;
-use mnemonic_mcp::skill_parse::{expect_h2_section, extract_h2_section};
+use mnemonic_mcp::skill_parse::{
+    expect_h2_section, extract_h2_section, format_missing_section_panic,
+};
 
 #[test]
 fn all_seven_manifests_parse() {
@@ -159,13 +161,19 @@ fn build_fails_on_missing_purpose_section() {
         err.contains("Purpose"),
         "error must name the missing section, got: {err}"
     );
-    // The build script wraps this error as `manifest {name}.md {err}` — assert
-    // the build-side wrapping format surfaces the filename too, by reproducing
-    // the exact format-string build.rs uses on the panic path.
-    let build_panic = format!("manifest attest.md {err}");
+    // Security-auditor round 1 SA-T1-02: assert on the exact panic message
+    // build.rs emits, via the shared `format_missing_section_panic` helper
+    // both sides use. Threading the manifest name through is part of the
+    // contract — a regression that drops the filename from the build panic
+    // would now break this assertion.
+    let build_panic = format_missing_section_panic("attest", &err);
     assert!(
-        build_panic.contains("attest.md") && build_panic.contains("Purpose"),
-        "build-side wrapping must name file AND section, got: {build_panic}"
+        build_panic.contains("attest.md"),
+        "build-side panic must name the offending file, got: {build_panic}"
+    );
+    assert!(
+        build_panic.contains("Purpose"),
+        "build-side panic must name the offending section, got: {build_panic}"
     );
 }
 

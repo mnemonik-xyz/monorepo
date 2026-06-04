@@ -53,3 +53,17 @@ pub fn expect_h2_section(body: &str, title: &str) -> Result<String, String> {
         format!("manifest missing required `## {title}` H2 section")
     })
 }
+
+/// Format the exact panic message that build.rs emits when a manifest is
+/// missing a required H2 section. Single source of truth so the integration
+/// test asserts on the same string the build script produces — adding a new
+/// piece of context to the error (e.g., a repair hint) requires updating
+/// this function, and the test then immediately reflects the new shape.
+///
+/// Security-auditor round 1 SA-T1-02: the missing-section test asserts on
+/// the output of this function, threading both the manifest name AND the
+/// section title through, so a regression that drops either from the build
+/// panic surfaces in the test.
+pub fn format_missing_section_panic(manifest_name: &str, parse_err: &str) -> String {
+    format!("manifest {manifest_name}.md {parse_err}")
+}

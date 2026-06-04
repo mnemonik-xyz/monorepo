@@ -66,7 +66,19 @@ fn main() {
     for entry in fs::read_dir(&skills_dir).expect("read_dir on assets/skills") {
         let entry = entry.expect("dir entry");
         let path = entry.path();
-        if !path.is_file() {
+        // Security-auditor round 1 SA-T1-01: use symlink_metadata() so a
+        // symlink named `<name>.md` pointing at an arbitrary file outside
+        // the assets dir is rejected, not silently followed and baked into
+        // the binary. `Path::is_file()` follows symlinks; the symlink
+        // shape doesn't satisfy `file_type().is_file()`. Mirrors Decision 9's
+        // lstat discipline on the install side.
+        let meta = match fs::symlink_metadata(&path) {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        if !meta.file_type().is_file() {
+            // Skips directories, symlinks (even if their target is a regular
+            // file), pipes, sockets, etc.
             continue;
         }
         if path.extension().and_then(|s| s.to_str()) != Some("md") {
@@ -165,9 +177,9 @@ struct Parsed {
 /// `Err` message + the file name) if either is missing.
 fn parse_manifest(name: &str, body: &str) -> Parsed {
     let purpose = expect_h2_section(body, "Purpose")
-        .unwrap_or_else(|err| panic!("manifest {}.md {}", name, err));
+        .unwrap_or_else(|err| panic!("{}", format_missing_section_panic(name, &err)));
     let trigger = expect_h2_section(body, "Trigger")
-        .unwrap_or_else(|err| panic!("manifest {}.md {}", name, err));
+        .unwrap_or_else(|err| panic!("{}", format_missing_section_panic(name, &err)));
 
     let purpose_trim = purpose.trim().to_string();
     let trigger_trim = trigger.trim().to_string();
