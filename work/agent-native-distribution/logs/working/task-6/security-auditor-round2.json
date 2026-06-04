@@ -1,0 +1,79 @@
+{
+  "round": 2,
+  "reviewer": "t6-security-auditor",
+  "commit": "f2faef6",
+  "diff_base": "604fbf5",
+  "date": "2026-06-04",
+  "overall_verdict": "PASS",
+  "summary": "All three round-1 findings addressed. SA6-001 is fixed correctly: token_path() now returns Result and propagates Err on unresolvable HOME. SA6-002 is fixed: directory hardcoded to 0o700 (best-effort). SA6-003 is adequately documented with explicit security contract. Three new surfaces from round 2 audited: MNEMONIC_CONFIG_DIR override, extract_exp_unix_no_verify, and ALLOWLIST_TOOLS_CALL_NAMES — all pass. No new security issues found. Task 6 is clear to merge.",
+  "round1_findings_resolution": [
+    {
+      "id": "SA6-001",
+      "original_severity": "Medium",
+      "status": "FIXED",
+      "fix_location": "core/src/identity/token_store.rs:103-117",
+      "assessment": "Correctly fixed. token_path() now returns Result<PathBuf, TokenStoreError>. When neither MNEMONIC_CONFIG_DIR is set nor dirs::home_dir() resolves, returns Err(TokenStoreError::Io(InvalidInput, 'cannot determine home directory; set $HOME or $MNEMONIC_CONFIG_DIR')). All three public wrappers (read_token, save_token, delete_token) propagate via token_path()?. Matches the ensure.rs pattern. The MNEMONIC_CONFIG_DIR override is a valid design (parity with Node CLI) — an attacker who can set env vars in the process already controls the process, and the override is documented not to escape the HOME-must-contain constraint by design (test seam). Empty string override correctly falls through to the HOME path."
+    },
+    {
+      "id": "SA6-002",
+      "original_severity": "Low",
+      "status": "FIXED",
+      "fix_location": "core/src/identity/token_store.rs:195-207",
+      "assessment": "Correctly implemented. After create_dir_all(parent), explicitly set directory permissions to 0o700 on Unix via fs::set_permissions. Best-effort (let _ = ...) with documented rationale: an existing directory with different ownership may return EPERM; swallowing that error is safe because the file itself remains 0o600. Comment explains the tradeoff clearly. Matches Node CLI's mkdirSync(dir, {recursive: true, mode: 0o700}). The TOCTOU window between create_dir_all and set_permissions is not exploitable for the token itself (file is 0o600 regardless of dir mode)."
+    },
+    {
+      "id": "SA6-003",
+      "original_severity": "Low",
+      "status": "DOCUMENTED — ACCEPTABLE",
+      "fix_location": "mcp/src/oauth/mod.rs:1082-1102 (doc comment)",
+      "assessment": "The function must remain pub because mcp/tests/oauth_loopback.rs is a separate compile unit that only sees pub items. The doc comment now carries an explicit security contract: 'sub MUST be a PKCE-validated subject. Callers that mint JWTs without a PKCE handshake must NOT call this helper.' Today's only production callsite is token_handler with issued.sub from the PKCE ceremony. The constraint is documented and the function name + module placement make unintended callers visible in code review. Acceptable for v1."
+    }
+  ],
+  "new_surfaces_audited": [
+    {
+      "item": "MNEMONIC_CONFIG_DIR env override in token_path()",
+      "location": "core/src/identity/token_store.rs:104-109",
+      "verdict": "PASS",
+      "notes": "The override resolves to PathBuf::from(override_dir).join('token.json') without validating the path is inside HOME. This is intentional — it is a test seam, not a user-facing configuration surface. Anyone who can set env vars in the server process already controls the process. Empty-string override correctly falls through to the HOME path. The design is consistent with Node CLI's configDir() pattern. No path traversal concern beyond what an env-var-controlling attacker already has."
+    },
+    {
+      "item": "extract_exp_unix_no_verify() — unverified JWT payload decode",
+      "location": "mcp/src/oauth/mod.rs:1146-1157",
+      "verdict": "PASS",
+      "notes": "Private function (fn, not pub). Only called from cache_minted_token, which receives the JWT that was just minted in-process by issue_jwt_with_google_sub. The result only sets the on-disk expires_at field for cache TTL — NOT used for any authorization decision. If the decode fails or returns None, the fallback is 'now + JWT_TTL_SECS' (conservative, not permissive). Function name explicitly documents the no-verify contract. No auth bypass possible: the cached expires_at is only checked to decide whether to re-initiate OAuth, not to grant access."
+    },
+    {
+      "item": "ALLOWLIST_TOOLS_CALL_NAMES and extract_tools_call_name() — anonymous tools/call",
+      "location": "mcp/src/oauth/mod.rs:1342-1480",
+      "verdict": "PASS",
+      "notes": "The allowlist contains only ['mnemonic_recall']. The check is: m == 'tools/call' AND tool_name in ALLOWLIST_TOOLS_CALL_NAMES. Verified: 'tools/call' is NOT in ALLOWLIST_METHODS, so the only way a tools/call request reaches a handler without JWT is via the explicit tool-name check. A request with method='tools/call' and no name, or name='mnemonic_sign_memory', is correctly rejected. Body is read once and re-inserted for both the auth and allowlist paths (verified at lines 1512 and 1522). The transport test at line 2094 was correctly updated to use mnemonic_sign_memory (not mnemonic_recall) to verify the 401 gate still holds."
+    },
+    {
+      "item": "Anonymous recall owner scoping — server keypair fallback",
+      "location": "mcp/src/mcp.rs:1137-1143 + mcp/src/tools.rs:1408-1417",
+      "verdict": "PASS (security-positive deviation from spec)",
+      "notes": "For anonymous callers (jwt_sub = None), owner_pubkey is the server keypair's pubkey. The recall handler uses jwt_sub.is_none() to set visibility_filter = Some(Public). The SQL query filters by BOTH owner_pubkey AND visibility='public'. This means anonymous recall only surfaces public rows anchored under the server keypair — it does NOT cross tenant boundaries. This is more restrictive than AC13's 'returns only visibility=public rows' language (which implies cross-tenant public pool). The restriction is explicitly documented in tools.rs:1408-1417 comment. From a security perspective, this is a safe under-implementation: anonymous callers cannot enumerate other users' public attestations, only the server operator's. Acceptable per the code-reviewer's note (CR-3)."
+    },
+    {
+      "item": "ENV_GUARD mutex isolation in integration_token.rs and oauth_loopback.rs",
+      "location": "core/tests/integration_token.rs:259 + mcp/tests/oauth_loopback.rs (local static)",
+      "verdict": "PASS",
+      "notes": "Each test binary has its own static Mutex guarding MNEMONIC_CONFIG_DIR mutations. Both test files properly acquire the guard before mutation and restore the original value on exit (including the poisoned-mutex-reclaim pattern). Tests in integration_token.rs that use path injection directly (save_token_to/read_token_from) do not touch env vars and don't need the guard. No race conditions between the two test binaries: each binary runs as a separate process in cargo test. HOME is no longer mutated anywhere in the test suite — only MNEMONIC_CONFIG_DIR."
+    },
+    {
+      "item": "Defense-in-depth double check on request_public_write_confirmation handler",
+      "location": "mcp/src/mcp.rs:1655-1665",
+      "verdict": "PASS",
+      "notes": "The handler explicitly checks jwt_sub.is_none() and returns -32001 if no JWT is present, even though the bearer_auth_middleware already enforces this (request_public_write_confirmation is NOT in ALLOWLIST_METHODS). This defense-in-depth guard catches any future misconfiguration where the allowlist is accidentally extended. The comment documents the rationale: 'defending in depth'. Correct and good security practice."
+    }
+  ],
+  "no_regression_items": [
+    "File mode 0600 set before persist — timing unchanged from round 1, still correct",
+    "Atomic write via NamedTempFile + persist — unchanged, still correct",
+    "Malformed JSON degrades to Ok(None), no panics in production paths — unchanged",
+    "JWT bearer token string never in TokenExpired error response — unchanged",
+    "warn log does not expose sensitive data — unchanged; the new debug logs in extract_exp_unix_no_verify use only the numeric exp value (unix timestamp), not the JWT string"
+  ],
+  "required_actions": [],
+  "merge_recommendation": "APPROVE — all round-1 required findings resolved, all new surfaces in round 2 pass security review. No outstanding required actions."
+}

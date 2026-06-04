@@ -1,0 +1,100 @@
+{
+  "reviewer": "t6-test-reviewer",
+  "round": 1,
+  "commit": "604fbf5",
+  "verdict": "approve_with_required_fixes",
+  "summary": "Tests are well-structured and cover the critical behavioral contracts. Two required fixes: save_is_atomic does not actually test mid-write tearing (the sleep is post-rename, not mid-write), and the missing HOME-unset edge case has no test coverage. Four advisory notes on spec deviations and test strength.",
+  "findings": [
+    {
+      "id": "F1",
+      "severity": "required",
+      "category": "test_correctness",
+      "location": "core/tests/integration_token.rs::save_is_atomic",
+      "title": "save_is_atomic does not detect mid-write tearing — it tests fast sequential writes, not atomicity",
+      "detail": "The task TDD anchor says 'start a write in one thread via std::thread::sleep mid-rename'. The implementation sleeps for 100µs AFTER save_token_to returns (i.e., after the rename completes). Because NamedTempFile::persist() calls rename(2), which is atomic on POSIX, there is never a window for a reader to observe a partial file. The test therefore cannot detect a regression where the atomic tempfile+rename is replaced by a direct overwrite-in-place. The test passes vacuously — even if save_token_to wrote directly to the final path (non-atomic), the file would rarely be observed torn because the write is fast. To actually test the atomicity guarantee, the write must be interrupted mid-stream: either use a test-seam that inserts a sleep between the fs::write and the rename, or verify the property by swapping in a broken non-atomic writer and asserting the test fails. As written, the test catches zero regressions relative to a non-atomic implementation.",
+      "recommendation": "Option A (preferred): Replace the test body. Seed the path with v1. Spawn a writer that calls save_token_to in a tight loop with no sleep. Main thread reads in a tight loop for 100ms. At the end, assert no read returned Ok(None) or a panic. This catches the 'reader sees missing file during non-atomic rename' case. The 'never partial JSON' property is guaranteed by rename(2) semantics on POSIX — document that explicitly. Option B: Rename the test to save_token_to_fast_sequential_writes_are_consistent and update the assertion comment to reflect what it actually tests (concurrent fast writes don't corrupt), treating it as a smoke test rather than an atomicity proof."
+    },
+    {
+      "id": "F2",
+      "severity": "required",
+      "category": "missing_coverage",
+      "location": "core/tests/integration_token.rs",
+      "title": "HOME unset edge case has no test",
+      "detail": "Task 6 Details section explicitly calls out: 'HOME env var unset — dirs::home_dir() returns None → Err(TokenStoreError::Io(...)) with clear message.' The implementation returns PathBuf::from('/') when home_dir() is None, then tries to create_dir_all('/') and write to '/.mnemonic/token.json'. On a standard macOS/Linux machine that will fail with a permission error surfaced as Err(TokenStoreError::Io(...)). This is the correct behavior per spec, but there is no test verifying it. The edge case is explicitly enumerated in the spec as something to verify.",
+      "recommendation": "Add a test that temporarily unsets $HOME (guard with a Mutex like with_home_override does in the mcp tests, since env mutation is process-wide), calls save_token()/read_token(), and asserts the result is Err(TokenStoreError::Io(_)) rather than a panic. Alternatively, expose a token_path_from_home(Option<PathBuf>) seam internally and unit test the None branch directly without mutating the process environment."
+    },
+    {
+      "id": "F3",
+      "severity": "advisory",
+      "category": "spec_deviation",
+      "location": "mcp/tests/oauth_loopback.rs::fresh_install_path",
+      "title": "TDD anchor 'mock OAuth server + mock call count == 1' is not implemented — second-sign reuse is not tested",
+      "detail": "The task's TDD anchor for fresh_install_path says: 'second sign_memory within TTL succeeds without invoking the OAuth mock (mock call count == 1)'. The test exercises the actual token_handler mint and asserts the file is created, but does not verify that a second call reuses the cached token without triggering another OAuth round-trip. The 'mock call count == 1' invariant is the primary behavioral guarantee of the caching logic — without it, the test does not prove caching works. The coder's deviation note (Rust binary is not an OAuth client in V1) is correct, but the caching behavior being tested is the server-side cache_minted_token, not client-side loopback. The second-read assertion is missing.",
+      "recommendation": "After asserting token_path.exists() and cached.sub == pubkey, add a second read_token_from call and assert it returns the same token (jwt field matches). Also assert cache_minted_token is idempotent by calling it twice with different jwt values and verifying the second write wins. This is already partially covered by cache_minted_token_overwrites_existing — consider whether fresh_install_path and that test can share assertions rather than duplicate setup."
+    },
+    {
+      "id": "F4",
+      "severity": "advisory",
+      "category": "spec_deviation",
+      "location": "mcp/tests/oauth_loopback.rs",
+      "title": "corrupted_token_path tests library function directly, not the OAuth path behavioral consequence",
+      "detail": "The task's TDD anchor says 'assert OAuth-loopback re-fires (not panic, not error response to user) and read_token returned None'. The test only checks that read_token_from returns Ok(None) for binary-garbage input — it does not verify that the mcp server layer actually re-initiates OAuth loopback (or any equivalent behavior) when read_token returns None at the callsite in oauth/mod.rs. The behavioral contract ('the caller re-OAuths') is the meaningful assertion; testing only the library function leaves the integration untested. This is partially a consequence of the coder's correct observation that the Rust binary is not an OAuth client in V1, but the server-side consequence of a None read (falling through to the Authorization header path) is testable.",
+      "recommendation": "Document explicitly in the test file that the 'OAuth re-fires' behavioral contract is intentionally deferred because the mcp-stdio OAuth-client path is out of V1 scope. The existing test covers the library contract. Add a brief comment pointing to the integration test that would cover the full behavioral path in a future task."
+    },
+    {
+      "id": "F5",
+      "severity": "advisory",
+      "category": "correctness",
+      "location": "core/src/identity/token_store.rs::read_token_from (line 128-133)",
+      "title": "Unparseable RFC3339 returns Err(Expired) — tech-spec testing strategy says 'returns None', task spec says 'Err(Expired)'; implementation matches task spec but the discrepancy should be documented",
+      "detail": "tech-spec.md line 332 says 'expired-token returns None' but Task 6 TDD anchor explicitly says 'expired_token_returns_expired_error → Err(TokenStoreError::Expired)'. The implementation follows the task spec. The coder's rationale ('I don't know when this expires' is safer than 'assume it's fine') is sound. However, unparseable_timestamp_returns_expired in the inline unit tests (token_store.rs) tests this correctly, and the integration test suite mirrors it. The behavioral choice is correct — force re-OAuth rather than silently accept an undated token. No code change needed; the finding is to ensure this is documented in decisions.md so a future reader understands why the tech-spec's 'returns None' language was superseded.",
+      "recommendation": "Add a one-line comment to the Err branch at token_store.rs:128: '// Unparseable timestamp treated as expired — re-OAuth is safer than silently accepting'. Record the tech-spec vs task-spec discrepancy in decisions.md under a 'Task 6 implementation notes' entry."
+    },
+    {
+      "id": "F6",
+      "severity": "advisory",
+      "category": "test_isolation",
+      "location": "mcp/tests/oauth_loopback.rs::fresh_install_path, cache_minted_token_overwrites_existing",
+      "title": "HOME mutation via with_home_override in a non-async test that creates a tokio runtime internally — potential for env leakage on panic",
+      "detail": "with_home_override mutates $HOME under a static Mutex and restores it on exit. The closure in fresh_install_path creates a tokio runtime via Builder::new_current_thread(). If a panic occurs inside the rt.block_on() closure, the stack unwinds through block_on, through the f() closure in with_home_override, to the match expression that restores HOME. The Mutex guard is still held during unwinding, HOME is restored, and the test correctly panics with the error. This is safe. However: if a panic causes the static Mutex to become poisoned (the lock() call unwraps via unwrap_or_else(|e| e.into_inner())), a subsequent test that tries to acquire the lock will succeed but log a poisoning. This is correctly handled by the into_inner() call. No code change needed — but the test file should document why HOME_GUARD uses into_inner() rather than panicking on poisoning."
+    }
+  ],
+  "tdd_anchor_coverage": {
+    "core_integration_token": {
+      "roundtrip_write_read_delete": "PASS — all fields checked, delete→None verified",
+      "expired_token_returns_expired_error": "PASS — fields on Expired variant checked (expires_at, sub)",
+      "malformed_json_returns_none": "PASS — correct JSON that fails serde deserialization, returns Ok(None)",
+      "missing_field_returns_none": "PASS — missing expires_at field, returns Ok(None)",
+      "save_is_atomic": "FAIL — see F1 — test does not detect mid-write tearing, sleep is post-rename",
+      "save_sets_mode_0600_unix": "PASS — unix gate correct, mode bits verified",
+      "delete_is_idempotent": "PASS — tests missing file + after-save, both twice"
+    },
+    "mcp_oauth_loopback": {
+      "fresh_install_path": "PARTIAL — file created + sub matches, but second-call cache reuse not asserted (see F3)",
+      "expired_token_path": "PASS — Err(Expired) surfaced, -32099 JSON-RPC shape verified (expires_at + pubkey fields)",
+      "corrupted_token_path": "PARTIAL — library Ok(None) verified, behavioral 're-OAuth fires' not tested (see F4)",
+      "cache_minted_token_overwrites_existing": "PASS (bonus) — overwrite semantics + JWT_TTL_SECS delta verified"
+    }
+  },
+  "spec_deviation_assessment": {
+    "mcp_test_scope_reduction": "Acceptable for V1. Coder's reasoning is correct: the Rust binary is not an OAuth loopback client in V1 (code-research §5). The three mcp tests exercise the actual server-side callsites introduced by this task (cache_minted_token, token_expired helper, read_token_from in corrupted path). The gap in behavioral coverage (agent-side re-OAuth trigger) is a V1 scope boundary, not a test quality issue. This deviation should be recorded in decisions.md.",
+    "unparseable_timestamp_as_expired": "Acceptable and correct. See F5."
+  },
+  "pyramid_assessment": {
+    "unit": "5 inline unit tests in token_store.rs — appropriate coverage of the basic contracts",
+    "integration_core": "7 tests covering all TDD anchors — good test isolation via TempDir",
+    "integration_mcp": "4 tests, 3 from spec + 1 bonus — appropriate scope given V1 constraints",
+    "e2e": "Not required for this task per spec",
+    "balance": "Appropriate. No over-mocking — core tests use real file I/O against tempdir."
+  },
+  "required_fixes": [
+    "F1: save_is_atomic — test does not detect atomicity regression; fix or rename",
+    "F2: HOME unset edge case — explicitly required by task spec Details section, not covered"
+  ],
+  "advisory_fixes": [
+    "F3: fresh_install_path — add second-read assertion to verify cache reuse",
+    "F4: corrupted_token_path — add comment documenting intentional scope boundary",
+    "F5: unparseable-as-expired — document in decisions.md, add inline comment",
+    "F6: with_home_override mutex poisoning — document into_inner() rationale"
+  ]
+}

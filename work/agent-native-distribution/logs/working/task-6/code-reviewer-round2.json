@@ -1,0 +1,72 @@
+{
+  "round": 2,
+  "reviewer": "t6-code-reviewer",
+  "task": "Task 6 — Token-file access for Rust binary + TokenExpired typed error",
+  "commit": "f2faef6",
+  "verdict": "APPROVE_WITH_NOTES",
+  "summary": "All six round-1 findings are addressed. The two blocking issues are resolved cleanly: R1-MAJOR-1 is properly deferred to Task 5 with documentation in both source and decisions.md; R1-MAJOR-2 is resolved via MNEMONIC_CONFIG_DIR override that matches the Node CLI's existing seam. The implementation is correct, well-tested, and ready to merge. Three minor residual notes below — none blocking.",
+  "issues": [
+    {
+      "id": "R2-NOTE-1",
+      "severity": "minor",
+      "dimension": "Testing Coverage (6)",
+      "title": "integration_token.rs still uses unsafe set_var for env-mutation tests",
+      "description": "home_unset_or_unwritable_yields_io_error (line 202) and config_dir_override_isolates_path (line 229) both use unsafe { std::env::set_var(...) } with the shared ENV_GUARD static. This is the same pattern that was removed from oauth_loopback.rs (and correctly so). The ENV_GUARD guards within the integration_token test binary, but the same cross-binary-boundary concern from R1-MAJOR-2 applies: if another test binary in mcp-core reads MNEMONIC_CONFIG_DIR concurrently, the static Mutex provides no protection. The risk is low (MNEMONIC_CONFIG_DIR is unlikely to be read by other tests), but the unsafe is still present. The oauth_loopback.rs tests removed HOME mutation and replaced it with MNEMONIC_CONFIG_DIR, but now integration_token.rs mutates MNEMONIC_CONFIG_DIR the same way. This is not blocking for merge given the low collision probability, but should be tracked.",
+      "location": "core/tests/integration_token.rs:196-216 (home_unset_or_unwritable_yields_io_error), :226-245 (config_dir_override_isolates_path)",
+      "recommendation": "For home_unset_or_unwritable_yields_io_error, avoid env mutation entirely: call save_token_to() directly with a PathBuf that is already known to be unwritable (e.g., /dev/null/token.json) — this tests the Io error path without touching any env var. For config_dir_override_isolates_path, call token_path() with a mock (or inline test against the _from/_to path-injected variants) rather than mutating the process env. Both tests verify properties that can be tested without env mutation."
+    },
+    {
+      "id": "R2-NOTE-2",
+      "severity": "minor",
+      "dimension": "Testing Coverage (6)",
+      "title": "cache_minted_token_overwrites_existing asserts expires_at using now+TTL bound, not actual exp claim",
+      "description": "The test at oauth_loopback.rs:342-351 asserts that expires_at is within JWT_TTL_SECS of now. This bound is now slightly wrong since cache_minted_token extracts the actual exp from the JWT payload via extract_exp_unix_no_verify. Because cache_minted_token('first-jwt', ...) is called with a hardcoded string 'first-jwt' that has no exp claim (it is not a real JWT), extract_exp_unix_no_verify returns None, and the fallback now+TTL is used. So the test is actually exercising the fallback path, not the happy path. The assertion passes but it is not testing what it says it is testing (R1-MINOR-2 fix). This is a latent coverage gap: the happy path (exp extracted from a real JWT) is untested.",
+      "location": "mcp/tests/oauth_loopback.rs:334-358 (cache_minted_token_overwrites_existing)",
+      "recommendation": "Replace the hardcoded 'first-jwt' / 'second-jwt' strings with real JWTs minted via issue_jwt() from the same OAuthState. Then verify that the cached expires_at matches (within 1s) the JWT's own exp claim. This tests the extract_exp_unix_no_verify path rather than the fallback. Keep a separate test for the fallback path (non-JWT string) if desired."
+    },
+    {
+      "id": "R2-NOTE-3",
+      "severity": "minor",
+      "dimension": "Code Readability (3)",
+      "title": "token_path() returning Result changes public API — callers must be audited",
+      "description": "token_path() changed from an infallible -> PathBuf to fallible -> Result<PathBuf, TokenStoreError>. This is correct (SA6-001) but the change to a public API means any downstream crate (packages/cli, future mcp-stdio) that calls token_path() directly must handle the new Result. The doc comment notes this, but the public re-export in core/src/identity/mod.rs (line 14) exposes the new signature to all consumers without a deprecation notice. For v1 the only callers are internal (read_token, save_token, delete_token) so this is safe, but worth confirming no external caller has been missed.",
+      "location": "core/src/identity/token_store.rs:103, core/src/identity/mod.rs:14",
+      "recommendation": "Run cargo check --workspace to confirm no external callers break. If clippy is clean across the full workspace, this note can be closed without code changes."
+    }
+  ],
+  "round1_findings_resolution": {
+    "R1-MAJOR-1": {
+      "status": "RESOLVED_BY_DEFERRAL",
+      "assessment": "Correctly deferred to Task 5 with explicit documentation in mcp.rs:440-451, oauth_loopback.rs header, and decisions.md. The deferred scope is clearly bounded: Task 5's MNEMONIC_HOSTED_ENDPOINT proxy path. The deferred_code indicator (#[allow(dead_code)] with a named tracking pointer) is an appropriate and auditable pattern for this codebase."
+    },
+    "R1-MAJOR-2": {
+      "status": "RESOLVED",
+      "assessment": "with_home_override replaced with with_config_dir_override using MNEMONIC_CONFIG_DIR. The env var is Mnemonic-namespaced and unlikely to be read by other code; the static Mutex guards within the test binary. Unsafe is still technically present (set_var) but the blast radius is scoped to a Mnemonic-specific env var rather than the process-global HOME. Residual note R2-NOTE-1 tracks the remaining unsafe in integration_token.rs but is not blocking."
+    },
+    "R1-MINOR-1": {
+      "status": "RESOLVED",
+      "assessment": "token_path() now checks MNEMONIC_CONFIG_DIR first, exactly matching Node CLI configDir() at config.ts:48-52. The fallback to dirs::home_dir() is preserved; HOME-unset now returns a typed Io error rather than silently using /."
+    },
+    "R1-MINOR-2": {
+      "status": "RESOLVED",
+      "assessment": "extract_exp_unix_no_verify() correctly parses the JWT payload segment without signature verification. The fallback (debug log + now+TTL) is appropriate for the two failure modes (non-JWT string, exp outside chrono range). The function is private, the security contract is documented."
+    },
+    "R1-MINOR-3": {
+      "status": "RESOLVED",
+      "assessment": "Writer now uses a tight loop (AtomicBool stop flag, no sleep); reader gets 1ms head start and runs for 100ms; >100 iterations asserted. The Ok(None) assertion message now explains the partial-write interpretation. Substantially more adversarial than the previous version."
+    },
+    "R1-MINOR-4": {
+      "status": "RESOLVED_BY_DOCUMENTATION",
+      "assessment": "The #[allow(dead_code)] annotation is retained with an explicit tracking pointer to the deferred callsite (Task 5, decisions.md, R1-MAJOR-1 ticket). This is a clear, auditable deferred-work indicator rather than an opaque clippy suppression."
+    }
+  },
+  "positive_observations": [
+    "token_path() returning Result instead of silently falling back to /.mnemonic is the correct security-audit fix (SA6-001). The error message 'set $HOME or $MNEMONIC_CONFIG_DIR' is actionable.",
+    "save_token_to() now tightens the parent directory to 0o700 (SA6-002). The best-effort pattern with a silent discard on EPERM is appropriate — the file's 0o600 mode still protects contents on shared machines.",
+    "extract_exp_unix_no_verify() is correctly scoped as private, correctly documented as a tautology-avoidance optimization, and the two fallback paths are both covered with debug logs.",
+    "The fresh_install_path test now includes a second read assertion (lines 260-268) proving the cache-reuse property. This is the correct surrogate for the 'mock call count == 1' assertion that requires Task 5's proxy path.",
+    "The save_is_atomic test is substantially improved: tight writer loop, time-bounded reader, >100 read count assertion, and an actionable failure message explaining what Ok(None) would mean.",
+    "MNEMONIC_CONFIG_DIR parity with Node CLI is exact: both check the env var first, both fall back to home directory, and the Rust implementation documents the exact line in config.ts it mirrors."
+  ],
+  "blocking_items_for_merge": []
+}

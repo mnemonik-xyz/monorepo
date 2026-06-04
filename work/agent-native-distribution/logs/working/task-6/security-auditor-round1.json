@@ -1,0 +1,137 @@
+{
+  "round": 1,
+  "reviewer": "t6-security-auditor",
+  "commit": "604fbf5",
+  "date": "2026-06-04",
+  "overall_verdict": "CONDITIONAL_PASS",
+  "summary": "One medium finding (HOME=unset fallback to '/'), two low findings (directory permissions, overly-public cache function). No critical or high severity issues. Token contents (JWT string) are never leaked in error responses. File mode 0600, atomic write, and malformed-JSON degradation are all correctly implemented. One required fix before merge.",
+  "findings": [
+    {
+      "id": "SA6-001",
+      "severity": "Medium",
+      "title": "token_path() falls back to '/' when HOME is unset — violates spec 'inside HOME, never elsewhere'",
+      "location": "core/src/identity/token_store.rs:90-92",
+      "description": "When `dirs::home_dir()` returns `None` (HOME env var unset), `token_path()` silently returns `/.mnemonic/token.json` via `unwrap_or_else(|| PathBuf::from(\"/\"))`. This violates the task spec requirement that the token file location must be inside HOME, never elsewhere. On systems where the root filesystem is writable by the process (e.g., Docker containers running as root), this silently writes credentials to the root directory. Additionally, if an attacker can arrange HOME to be unset in the server process environment, the token write goes to a predictable path in the root directory.",
+      "contrast_with_precedent": "ensure.rs at line 104 uses `ok_or_else(|| anyhow::anyhow(\"cannot determine home directory; set $HOME\"))` — it errors loudly on missing HOME. token_store.rs should follow the same pattern.",
+      "attack_scenario": "An attacker who can unset HOME in the server process environment (e.g., via environment variable injection in a container entrypoint, or a misconfigured systemd unit) causes all token reads and writes to occur at /.mnemonic/token.json. In environments running as root this file is writable. A second process with read access to / (or a Docker volume mount) could exfiltrate the cached JWT.",
+      "required_fix": "Replace the `unwrap_or_else(|| PathBuf::from(\"/\"))` with the same pattern as ensure.rs: return a Result or panic with a clear message. Specifically, `token_path()` should become `fn token_path() -> Result<PathBuf, TokenStoreError>` that returns `Err(TokenStoreError::Io(io::Error::new(io::ErrorKind::NotFound, \"HOME directory not set\")))` when `dirs::home_dir()` returns None. Alternatively, use `ok_or_else(...)` and propagate. This unifies behavior with ensure.rs and closes the spec violation.",
+      "code_snippet": "// CURRENT (unsafe fallback):\ndirs::home_dir()\n    .unwrap_or_else(|| PathBuf::from(\"/\"))  // <-- violates spec\n    .join(\".mnemonic\")\n    .join(\"token.json\")\n\n// RECOMMENDED:\nfn token_path() -> Result<PathBuf, TokenStoreError> {\n    dirs::home_dir()\n        .map(|h| h.join(\".mnemonic\").join(\"token.json\"))\n        .ok_or_else(|| TokenStoreError::Io(io::Error::new(\n            io::ErrorKind::NotFound,\n            \"cannot determine home directory; set $HOME\",\n        )))\n}",
+      "references": ["OWASP A05:2021 Security Misconfiguration", "Task spec: 'Token file location (~/.mnemonic/token.json) — must be inside HOME, never elsewhere'"]
+    },
+    {
+      "id": "SA6-002",
+      "severity": "Low",
+      "title": "~/.mnemonic/ directory created with umask-dependent permissions, not hardcoded 0o700",
+      "location": "core/src/identity/token_store.rs:159",
+      "description": "fs::create_dir_all(parent) creates ~/.mnemonic/ using the process's umask. With a permissive umask (e.g., 0o000 or 0o002), the directory may be created world-readable (0o777 or 0o775), meaning other local users can list its contents and discover that token.json exists. The token file itself is protected by 0o600 and is unreadable by others. However, directory listing leaks metadata (filename, mtime).",
+      "impact": "Low: the token file contents are protected by 0o600. Only directory listing is exposed. On multi-user systems, this reveals that the user has a cached Mnemonic token. No credential content is exposed.",
+      "note": "ensure.rs has the same pattern (create_dir_all without explicit mode at line 107), making this a pre-existing codebase-wide pattern rather than a regression introduced by this task. The finding is recorded for completeness but is not blocking.",
+      "recommended_fix": "After create_dir_all, set the directory permissions explicitly:\n#[cfg(unix)]\n{\n    use std::os::unix::fs::PermissionsExt;\n    fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;\n}\nIf this is done in token_store.rs, it should be mirrored in ensure.rs for consistency (separate PR/task).",
+      "blocking": false
+    },
+    {
+      "id": "SA6-003",
+      "severity": "Low",
+      "title": "cache_minted_token is pub — widens the attack surface for arbitrary token writes",
+      "location": "mcp/src/oauth/mod.rs:1089",
+      "description": "The `pub fn cache_minted_token(jwt: &str, sub: &str)` function is exported from the mcp crate. The doc comment says it is public 'so future binary-side outbound flows can persist tokens minted through alternate paths'. In practice, today's only caller is `token_handler` (line 1071, sub comes from PKCE-validated `issued.sub`). Exposing this as pub allows any code linking against mnemonic_mcp to write arbitrary (jwt, sub) pairs to ~/.mnemonic/token.json without going through the OAuth PKCE ceremony.",
+      "impact": "Low in practice: exploitation requires code execution in the same process as the MCP server, which is already beyond the threat model. However, the pub visibility is broader than needed for the stated purpose (testing), and test-only visibility should use #[cfg(test)] or pub(crate).",
+      "recommended_fix": "Change `pub fn cache_minted_token` to `pub(crate) fn cache_minted_token`. The only production caller is within the same crate (mcp). The test imports it via `mnemonic_mcp::oauth::cache_minted_token` — this works with pub(crate) in integration tests because integration tests in mcp/tests/ are treated as external crates by rustc... actually they ARE external so they need pub. Alternative: expose a test-only re-export behind #[cfg(test)] in mcp/src/lib.rs. Or accept the current pub and document the invariant that callers must only pass validated jwt/sub pairs.",
+      "note": "The simplest fix preserving test coverage is to keep pub but add a doc comment stating callers MUST ensure sub is PKCE-validated. The finding is informational and non-blocking.",
+      "blocking": false
+    }
+  ],
+  "compliant_items": [
+    {
+      "item": "File mode 0600 set BEFORE persist (not after) — no race window between rename and chmod",
+      "location": "core/src/identity/token_store.rs:167-173",
+      "verdict": "PASS — correctly implemented. Set mode on tempfile, then rename. The resulting file at target path inherits the tempfile's 0o600 permissions atomically."
+    },
+    {
+      "item": "Atomic write via NamedTempFile + persist in same directory",
+      "location": "core/src/identity/token_store.rs:161-175",
+      "verdict": "PASS — NamedTempFile::new_in(parent) creates the tempfile in the same directory, ensuring rename() is a same-filesystem atomic operation (no cross-device rename). sync_all() before persist flushes to disk."
+    },
+    {
+      "item": "Malformed JSON degrades to Ok(None) — no panic, no hard error",
+      "location": "core/src/identity/token_store.rs:124-127",
+      "verdict": "PASS — serde_json::from_slice Err arm returns Ok(None). Verified by corrupted_token_path test with binary garbage input b\"\\x00\\xffnot-json-at-all{\"."
+    },
+    {
+      "item": "File parse failure does not panic in production code",
+      "location": "core/src/identity/token_store.rs (all production functions)",
+      "verdict": "PASS — zero unwrap() calls in production code paths. All unwrap() calls are inside #[cfg(test)] blocks."
+    },
+    {
+      "item": "TokenExpired error does NOT leak JWT bearer token string",
+      "location": "mcp/src/mcp.rs:447-457",
+      "verdict": "PASS — token_expired(expires_at, pubkey) only includes expires_at and pubkey in data. The JWT string is never included in the error response. The data fields {expires_at, pubkey} are the spec-documented fields per tech-spec error catalogue line 280."
+    },
+    {
+      "item": "Error catalogue compliance: code -32099, kind 'TokenExpired', data fields expires_at+pubkey",
+      "location": "mcp/src/mcp.rs:447-457 + mcp/tests/oauth_loopback.rs:265-272",
+      "verdict": "PASS — code=-32099, data.kind='TokenExpired', data.expires_at, data.pubkey all present and asserted in expired_token_path test."
+    },
+    {
+      "item": "TokenStoreError::Expired Display does not expose JWT contents",
+      "location": "core/src/identity/token_store.rs:54-57",
+      "verdict": "PASS — Display shows 'token expired at {expires_at}' only. No JWT string in Display output."
+    },
+    {
+      "item": "warn log in cache_minted_token does not expose sensitive data",
+      "location": "mcp/src/oauth/mod.rs:1098-1102",
+      "verdict": "PASS — warn log only includes the TokenStoreError Display string ('token I/O error: ...' or 'token parse error: ...'). Neither variant exposes the JWT string or token file contents."
+    },
+    {
+      "item": "HOME_GUARD mutex prevents concurrent HOME mutations in test file",
+      "location": "mcp/tests/oauth_loopback.rs:75-88",
+      "verdict": "PASS — static Mutex guards all with_home_override calls within the same binary. Tests in integration_token.rs use TempDir paths directly, not $HOME, so they don't need the guard."
+    },
+    {
+      "item": "NodeCLI loadToken/saveToken unchanged — no cross-runtime regression",
+      "location": "packages/cli/src/config.ts (not modified in this commit)",
+      "verdict": "PASS — git diff confirms packages/cli/ has zero changes in commit 604fbf5."
+    },
+    {
+      "item": "delete_token_at is idempotent on NotFound",
+      "location": "core/src/identity/token_store.rs:188-193",
+      "verdict": "PASS — NotFound arm returns Ok(()); tested by delete_is_idempotent."
+    },
+    {
+      "item": "Unparseable expires_at timestamp treated as expired (safer than accepting undated token)",
+      "location": "core/src/identity/token_store.rs:131-138",
+      "verdict": "PASS — Correct fail-safe design. An unparseable timestamp returns Expired rather than Ok(Some(token)), preventing use of a token with unknown expiry."
+    }
+  ],
+  "required_actions": [
+    {
+      "id": "SA6-001-FIX",
+      "priority": "REQUIRED before merge",
+      "action": "Change token_path() to return Result<PathBuf, TokenStoreError> and propagate Err when dirs::home_dir() returns None, matching ensure.rs behavior. Update all callers (read_token, save_token, delete_token, and their _from/_to variants) to propagate the Result. Update the 7 integration tests in integration_token.rs that call token_path() indirectly via read_token/save_token to ensure they don't accidentally test against the real HOME."
+    }
+  ],
+  "optional_improvements": [
+    {
+      "id": "SA6-002-OPT",
+      "priority": "Non-blocking — recommend as follow-up",
+      "action": "Explicitly set ~/.mnemonic/ directory permissions to 0o700 after create_dir_all. Mirror in ensure.rs for consistency."
+    },
+    {
+      "id": "SA6-003-OPT",
+      "priority": "Non-blocking — informational",
+      "action": "Consider pub(crate) for cache_minted_token or add doc comment clarifying that callers must pass PKCE-validated sub values only."
+    }
+  ],
+  "risk_surface_assessed": [
+    "Token file path validation and HOME directory handling",
+    "Atomic write safety (no partial-file exposure window)",
+    "File permission enforcement (chmod 0600 timing relative to persist)",
+    "JSON deserialization error handling (no panic on malformed input)",
+    "Error response data fields (no JWT bearer token leakage)",
+    "Log output (no sensitive data in warn messages)",
+    "Test isolation (HOME env var mutation guarded by mutex)",
+    "Public API surface of cache_minted_token",
+    "Directory creation permissions",
+    "Idempotency of delete_token"
+  ]
+}

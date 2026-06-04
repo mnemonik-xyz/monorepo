@@ -1,0 +1,79 @@
+{
+  "round": 1,
+  "reviewer": "t6-code-reviewer",
+  "task": "Task 6 — Token-file access for Rust binary + TokenExpired typed error",
+  "commit": "604fbf5",
+  "verdict": "REVISE",
+  "summary": "The core token_store module is well-implemented and covers all spec requirements. Three issues require fixes: (1) a major gap where read_token is never called at any outbound-authenticated callsite, leaving the task's stated goal of letting the binary reuse cached tokens unfulfilled; (2) unsafe env mutation in test isolation that will race on Rust 1.77+ Cargo test runners; (3) a missing MNEMONIC_CONFIG_DIR env override parity gap vs the Node CLI that will cause test isolation to rely on global HOME mutation rather than a stable env knob.",
+  "issues": [
+    {
+      "id": "R1-MAJOR-1",
+      "severity": "major",
+      "dimension": "Cross-File Consistency (10)",
+      "title": "read_token never called at production callsites — core feature objective unmet",
+      "description": "The task description says 'Look for the JWT validation path that today reads from Authorization header — add a fallback to token_store::read_token when no header is present and we need to authenticate the binary's own subsequent calls.' No such callsite was added. The only token_store use in mcp/src/ is the single save path in cache_minted_token (oauth/mod.rs:1097). The Rust binary now writes a token file but never reads it back to authenticate outbound participate-mode proxy calls. The task's TDD anchor test fresh_install_path shows 'second sign_memory within TTL reuses cached token without invoking the OAuth mock (mock call count == 1)' — that assertion is not actually exercised because the binary has no callsite that reads the token before making an authenticated request. The test only asserts the file exists after the OAuth round-trip, not that a second call skips re-auth.",
+      "location": "mcp/src/oauth/mod.rs — missing read_token callsite for outbound authenticated proxy calls; mcp/src/tools.rs — no participate-mode token attachment path",
+      "recommendation": "Identify where the binary would attach a Bearer header for participate-mode HTTPS proxy calls (Task 5's MNEMONIC_HOSTED_ENDPOINT proxy path, even if that path is not yet fully wired). Add a read_token() call there and map TokenStoreError::Expired to the -32099 JSON-RPC error. If Task 5 is strictly a later task, document this explicitly in decisions.md and mark the AC11 ('subsequent writes within TTL do not re-trigger loopback') test as blocked-until-Task-5 rather than implying it is covered."
+    },
+    {
+      "id": "R1-MAJOR-2",
+      "severity": "major",
+      "dimension": "Testing Coverage (6)",
+      "title": "unsafe env::set_var in tests races with concurrent test threads",
+      "description": "mcp/tests/oauth_loopback.rs:82 uses `unsafe { std::env::set_var(\"HOME\", ...) }` guarded by a static Mutex. Rust 1.77 (Cargo edition 2024) treats std::env::set_var inside a multi-threaded process as UB and emits a deprecation that will become a hard error. The Mutex guard in with_home_override prevents two tests in oauth_loopback.rs from running concurrently, but Cargo's default test runner can interleave tests from DIFFERENT test binaries (mcp/tests/integration_token.rs runs in parallel with oauth_loopback.rs) and the static Mutex is per-binary — it does not protect across binary boundaries. The integration_token.rs tests do not touch HOME, but if any other test in the mcp crate reads HOME during the window, the race is real.",
+      "location": "mcp/tests/oauth_loopback.rs:71-92 (with_home_override), lines 82, 87",
+      "recommendation": "Replace HOME mutation with MNEMONIC_CONFIG_DIR env var override, which (a) is a stable, safe, test-only surface already used by the Node CLI and (b) requires no unsafe. This is also the right fix for R1-MINOR-1 below. If dirs::home_dir() must be tested specifically, use std::env::set_var via a serial test attribute (#[serial] from the serial_test crate already in the workspace, if present) or use a proc-macro fixture that restores on drop — not an unsafe raw set_var."
+    },
+    {
+      "id": "R1-MINOR-1",
+      "severity": "minor",
+      "dimension": "Cross-File Consistency (10)",
+      "title": "Rust token_path() has no MNEMONIC_CONFIG_DIR env override — parity gap with Node CLI",
+      "description": "The Node CLI's configDir() checks MNEMONIC_CONFIG_DIR first (packages/cli/src/config.ts:49). Rust's token_path() uses dirs::home_dir() only (token_store.rs:90-94). Both runtimes share the same file path family; tests in the Node CLI override the directory via MNEMONIC_CONFIG_DIR without HOME mutation. The Rust side cannot do the same, forcing the oauth_loopback.rs tests to fall back to the global HOME mutation pattern (R1-MAJOR-2). The parity gap will also surface when integration tests for mcp-stdio are written and need an isolated token directory without touching $HOME.",
+      "location": "core/src/identity/token_store.rs:89-94 (token_path function)",
+      "recommendation": "Add MNEMONIC_CONFIG_DIR env override to token_path(): if std::env::var(\"MNEMONIC_CONFIG_DIR\") is set, use that as the base directory instead of dirs::home_dir(). This matches Node CLI behaviour, enables safe test isolation without HOME mutation, and costs two lines. Update the doc comment to document the override."
+    },
+    {
+      "id": "R1-MINOR-2",
+      "severity": "minor",
+      "dimension": "Error Handling (4)",
+      "title": "cache_minted_token derives expires_at from clock-at-call-time, not from JWT exp claim",
+      "description": "cache_minted_token (oauth/mod.rs:1090-1091) computes expires_at as Utc::now() + JWT_TTL_SECS. The actual JWT exp claim is set earlier in the mint path (oauth/mod.rs:391: exp: now + JWT_TTL_SECS). Because the two now() calls are not atomic, the cached expires_at can be up to a few milliseconds after the JWT's actual exp. For a 1-hour TTL this is negligible, but the read_token check (token_store.rs:135: if exp <= Utc::now()) means a token read within that microsecond window could be valid per the file but rejected by the server. The correct approach is to pass the minted token's exp through to cache_minted_token.",
+      "location": "mcp/src/oauth/mod.rs:1089-1103 (cache_minted_token), mcp/src/oauth/mod.rs:391 (JWT exp)",
+      "recommendation": "Change the signature to cache_minted_token(jwt: &str, sub: &str, exp_unix: u64) and compute expires_at as DateTime::from_timestamp(exp_unix as i64, 0).to_rfc3339(). Pass the same exp value used in the JWT claims object (oauth/mod.rs:391). This makes the on-disk expires_at exactly match the JWT's expiry, eliminating the tiny clock-skew window."
+    },
+    {
+      "id": "R1-MINOR-3",
+      "severity": "minor",
+      "dimension": "Testing Coverage (6)",
+      "title": "save_is_atomic test does not assert the absence of partial-write observation",
+      "description": "The test (integration_token.rs:106-148) reads 500 times concurrently with a writer and asserts the result is never Ok(None). The Ok(None) condition in read_token_from is triggered by malformed JSON (token_store.rs:122). A partial-write file would typically produce malformed JSON, so this assertion does indirectly catch partial writes. However, the test comment says 'never a half-written file' and the assertion should explicitly state that Ok(None) = partial write. The test currently has a subtle flaw: the loop reads 500 times after barrier.wait() but the writer starts concurrently, meaning many reads happen before the writer does anything — reducing the actual race window. A small thread::sleep before the reader loop would make the race more adversarial.",
+      "location": "core/tests/integration_token.rs:106-148 (save_is_atomic)",
+      "recommendation": "Add a brief thread::sleep(Duration::from_millis(1)) after barrier.wait() in the reader to give the writer a head start. Also document in the assertion message that Ok(None) indicates a partial write was observed."
+    },
+    {
+      "id": "R1-MINOR-4",
+      "severity": "minor",
+      "dimension": "Code Readability (3)",
+      "title": "#[allow(dead_code)] on token_expired is premature — should be cfg(test) gated instead",
+      "description": "token_expired (mcp/src/mcp.rs:446) carries #[allow(dead_code)] because its only in-binary caller is the test suite. The comment says 'the error catalogue test exercises this helper'. A function that is production-spec'd (Error Catalogue table, AC16) and used only by tests should either be marked #[cfg(test)] (if it is truly test-only) or left ungated and wired into the production path (mcp-stdio's participate proxy error handling). The current state means it will silently be dropped from the production binary while appearing in the error catalogue spec.",
+      "location": "mcp/src/mcp.rs:446-457 (token_expired function)",
+      "recommendation": "Wire token_expired into the production path (the participate-mode proxy error handler that maps a TokenStoreError::Expired from read_token to a JSON-RPC error). This fixes R1-MAJOR-1 as a side effect. If the production wiring is deferred to Task 5, mark it #[cfg(any(test, feature = \"testutils\"))] explicitly — not #[allow(dead_code)] — so the dead-code state is auditable."
+    }
+  ],
+  "positive_observations": [
+    "TokenJson struct matches Node CLI config.ts:39-65 field-for-field (jwt, expires_at as ISO-8601 string, sub). Serde derive is correct.",
+    "Atomic write via NamedTempFile + persist is correctly implemented. Mode 0600 is set BEFORE persist (token_store.rs:169-172), which is the correct order to avoid the TOCTOU window on the tempfile path.",
+    "Malformed JSON and missing-field cases both degrade to Ok(None) as required. The implementation correctly uses serde_json::from_slice and returns None on Err rather than propagating.",
+    "Unparseable timestamp is treated as Expired rather than None — a safer conservative choice documented in the code.",
+    "TokenStoreError properly implements Display, std::error::Error, From<io::Error>, From<serde_json::Error> — consistent with project error conventions.",
+    "delete_token_at correctly ignores NotFound for idempotency.",
+    "Integration tests use TempDir for isolation; no real ~/.mnemonic/ is touched by the core tests.",
+    "The fresh_install_path test is a genuine round-trip through the production OAuth token_handler path, not a stub — this is the right level for integration coverage.",
+    "The deviation from the TDD anchor spec (binary is not an OAuth client in V1) is documented in the test file header and committed to decisions.md."
+  ],
+  "blocking_items_for_merge": [
+    "R1-MAJOR-1: read_token not wired at any production outbound callsite — core task objective unmet",
+    "R1-MAJOR-2: unsafe env::set_var without cross-binary isolation — unsafe UB in multi-threaded test runner"
+  ]
+}

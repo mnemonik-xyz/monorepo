@@ -1,0 +1,90 @@
+{
+  "reviewer": "t6-test-reviewer",
+  "round": 2,
+  "commit": "f2faef6",
+  "verdict": "approved",
+  "summary": "Both required fixes from round 1 are correctly addressed. save_is_atomic now runs a tight-loop writer controlled by a stop flag and a deadline-bounded reader — this genuinely detects a regression where tempfile+rename is replaced by direct truncate-then-write. The HOME-unset contract is enforced structurally by changing token_path() to return Result<PathBuf, TokenStoreError> and tested via MNEMONIC_CONFIG_DIR→unwritable-path. All advisory items are addressed or documented. Approve.",
+  "findings": [
+    {
+      "id": "F1",
+      "round_1_severity": "required",
+      "status": "resolved",
+      "location": "core/tests/integration_token.rs::save_is_atomic",
+      "assessment": "Fix is correct. Writer now runs a tight loop with no sleep, stopped by AtomicBool set after the reader's 100ms deadline. Reader runs for 100ms and asserts >100 iterations as a sanity check. The critical assertion — .expect('file must never appear missing or malformed mid-rename') on the inner Option — now correctly fails if a non-atomic implementation allows Ok(None) (partial write deserialization failure) or a missing-file moment. The 1ms head start before the reader loop is reasonable: it ensures the writer has at least one rename in-flight before the reader starts, making the test non-vacuous. One note: on very slow CI machines, the writer might complete fewer iterations than the reader — but the stop flag ensures the writer always runs at least through the reader's first iteration, and the regression detection property holds regardless of iteration count."
+    },
+    {
+      "id": "F2",
+      "round_1_severity": "required",
+      "status": "resolved",
+      "location": "core/tests/integration_token.rs::home_unset_or_unwritable_yields_io_error + core/src/identity/token_store.rs::token_path()",
+      "assessment": "Fix is structurally correct and stronger than the literal spec requirement. The spec said 'HOME unset → Err(Io)'; the implementation now returns Err(Io) when HOME is unset (no more silent fallback to PathBuf::from('/')). The test exercises the Io path via MNEMONIC_CONFIG_DIR pointing at /dev/null/mnemonic-token-test — create_dir_all on that path returns ENOTDIR, surfaces as TokenStoreError::Io. This is equivalent to the HOME-unset path (same Io variant) while avoiding unsafe HOME mutation. The companion config_dir_override_isolates_path test proves the override seam itself works (token_path() returns cfg_dir/token.json, save+read round-trip succeeds). The ENV_GUARD Mutex with into_inner() and the explanatory comment are correct. The MNEMONIC_CONFIG_DIR seam also supersedes HOME mutation in the mcp tests (with_config_dir_override replaces with_home_override) — a positive side-effect that reduces unsafe env mutations in the test suite."
+    },
+    {
+      "id": "F3",
+      "round_1_severity": "advisory",
+      "status": "resolved",
+      "location": "mcp/tests/oauth_loopback.rs::fresh_install_path",
+      "assessment": "Second-read assertion added. The test now reads the cached token twice and asserts jwt, sub, and expires_at are byte-identical between reads. The comment documents the V1 scope boundary ('mock call count == 1' deferred to Task 5) clearly and points to decisions.md. Sufficient for the V1 scope."
+    },
+    {
+      "id": "F4",
+      "round_1_severity": "advisory",
+      "status": "resolved",
+      "location": "mcp/tests/oauth_loopback.rs file header",
+      "assessment": "V1 scope boundary documented in the module doc comment with explicit reference to Task 5. Adequate."
+    },
+    {
+      "id": "F5",
+      "round_1_severity": "advisory",
+      "status": "resolved",
+      "location": "core/src/identity/token_store.rs:149-155",
+      "assessment": "Inline comment at the Err branch explains the tech-spec vs task-spec discrepancy and the reasoning. decisions.md entry noted as pending — acceptable since the implementation rationale is now inline."
+    },
+    {
+      "id": "F6",
+      "round_1_severity": "advisory",
+      "status": "resolved",
+      "location": "mcp/tests/oauth_loopback.rs::with_config_dir_override doc comment",
+      "assessment": "into_inner() poisoning pattern is now documented with rationale. Correct."
+    }
+  ],
+  "new_observations": [
+    {
+      "id": "N1",
+      "severity": "informational",
+      "location": "core/src/identity/token_store.rs::save_token_to (directory mode)",
+      "assessment": "The round-2 diff adds a best-effort directory chmod to 0o700. The 'let _ =' silently swallows EPERM — this is intentional and correct (the file's own 0o600 mode still protects the contents). The comment documenting the Node CLI parity is accurate. No action needed."
+    },
+    {
+      "id": "N2",
+      "severity": "informational",
+      "location": "mcp/tests/oauth_loopback.rs::cache_minted_token_overwrites_existing",
+      "assessment": "Test correctly migrated from with_home_override to with_config_dir_override. The path assertion (cfg_dir/token.json instead of home/.mnemonic/token.json) is consistent with MNEMONIC_CONFIG_DIR semantics: the override replaces the full base dir, not just the parent dir. Production path is unaffected (~/.mnemonic/token.json when env var is unset). No action needed."
+    }
+  ],
+  "tdd_anchor_coverage": {
+    "core_integration_token": {
+      "roundtrip_write_read_delete": "PASS",
+      "expired_token_returns_expired_error": "PASS",
+      "malformed_json_returns_none": "PASS",
+      "missing_field_returns_none": "PASS",
+      "save_is_atomic": "PASS — tight-loop writer + deadline-bounded reader, genuine regression detector",
+      "save_sets_mode_0600_unix": "PASS",
+      "delete_is_idempotent": "PASS",
+      "home_unset_or_unwritable_yields_io_error": "PASS (F2 fix)",
+      "config_dir_override_isolates_path": "PASS (F2 fix, seam verification)"
+    },
+    "mcp_oauth_loopback": {
+      "fresh_install_path": "PASS — full mint round-trip + cache reuse second-read assertion",
+      "expired_token_path": "PASS",
+      "corrupted_token_path": "PASS — V1 scope boundary documented",
+      "cache_minted_token_overwrites_existing": "PASS"
+    }
+  },
+  "pyramid_assessment": {
+    "unit": "5 inline unit tests unchanged — appropriate",
+    "integration_core": "9 tests (7 original + 2 new for F2) — good isolation via TempDir and ENV_GUARD",
+    "integration_mcp": "4 tests — appropriate scope, with_config_dir_override replaces unsafe HOME mutation",
+    "balance": "Appropriate. No over-mocking."
+  }
+}
