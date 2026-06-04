@@ -5,19 +5,34 @@
 //!   1. `all_seven_manifests_parse` — the generated module exposes exactly 7
 //!      manifests with non-empty `FULL_MARKDOWN`, `PURPOSE_PLUS_TRIGGER`, and
 //!      `PURPOSE_ONE_LINER` slots each.
-//!   2. `no_placeholder_tokens_in_manifests` — no manifest body contains
-//!      `TBD`, `TODO`, `XXX`, or `FIXME` (catches half-finished content
-//!      shipping).
+//!   2. `no_placeholder_tokens_in_manifests` — none of the three projected
+//!      slots (full + purpose_plus_trigger + purpose_one_liner) contain
+//!      `TBD`, `TODO`, `XXX`, or `FIXME`. Round-1 test-reviewer finding F2:
+//!      derived slots are produced by string manipulation in build.rs, so
+//!      checking all three guards against future template-injection
+//!      regressions in the derived strings.
 //!   3. `attest_manifest_has_negative_triggers` — `mnemonik-attest`'s
 //!      Trigger section names at least one negative example. Load-bearing
 //!      per user-spec R8.
-//!   4. `build_fails_on_missing_purpose_section` — temp-fixture test that
-//!      copies assets + drops a `## Purpose` line and asserts the build
-//!      script panics with the offending file named.
+//!   4. `build_fails_on_missing_purpose_section` — calls the same
+//!      `expect_h2_section` function that build.rs uses at compile time
+//!      (shared via `mcp/src/skill_parse.rs`), asserting that the
+//!      missing-section error names the offending section. Round-1
+//!      test-reviewer finding F1: an earlier draft re-implemented the
+//!      parser inline in the test, which let the test pass even if
+//!      build.rs's parser regressed. The shared module closes that.
+//!
+//! Plus one informational test from round-1 finding F3:
+//!
+//!   5. `unexpected_manifest_file_is_a_build_error` — sanity that the
+//!      build script's `EXPECTED_MANIFESTS` constant matches the actual
+//!      generated `ALL_SKILLS` set 1:1 (no orphan generated entry, no
+//!      missing source manifest).
 
 use std::collections::HashSet;
 
 use mnemonic_mcp::mcp::skills;
+use mnemonic_mcp::skill_parse::{expect_h2_section, extract_h2_section};
 
 #[test]
 fn all_seven_manifests_parse() {
@@ -78,15 +93,27 @@ fn all_seven_manifests_parse() {
 
 #[test]
 fn no_placeholder_tokens_in_manifests() {
-    // Literal tokens that signal half-finished content. Match as whole-token
-    // substrings — case-sensitive — so the legitimate prose "to do" or
-    // "fix me" doesn't false-positive.
+    // Round-1 F2: extend coverage to the derived slots, not just the
+    // verbatim full_markdown. A future template-injection regression in
+    // build.rs's string-manipulation path would now be caught.
     const FORBIDDEN: &[&str] = &["TBD", "TODO", "XXX", "FIXME"];
     for skill in skills::ALL_SKILLS {
         for token in FORBIDDEN {
             assert!(
                 !skill.full_markdown.contains(token),
                 "{}: full_markdown contains placeholder token `{}`",
+                skill.name,
+                token
+            );
+            assert!(
+                !skill.purpose_plus_trigger.contains(token),
+                "{}: purpose_plus_trigger contains placeholder token `{}`",
+                skill.name,
+                token
+            );
+            assert!(
+                !skill.purpose_one_liner.contains(token),
+                "{}: purpose_one_liner contains placeholder token `{}`",
                 skill.name,
                 token
             );
@@ -121,49 +148,52 @@ fn attest_manifest_has_negative_triggers() {
 
 #[test]
 fn build_fails_on_missing_purpose_section() {
-    // Copy assets to a tempdir, drop the `## Purpose` header line from one
-    // manifest, and invoke the build script against that fixture by mirroring
-    // its parse function. The build script lives at `mcp/build.rs` and the
-    // failure condition under test is its `extract_h2_section(..., "Purpose")`
-    // returning None, which causes a panic naming the offending file.
-    //
-    // Rather than spawning `cargo build` (slow + flaky), this test mirrors
-    // the parse path: we re-implement the minimal section-existence check
-    // and assert it surfaces the file name. The build.rs unit-test surface
-    // is exercised by the previous three tests (which exist only because
-    // build.rs actually ran and succeeded on the real fixtures).
-
+    // Round-1 F1: exercise the same `expect_h2_section` function that
+    // build.rs invokes at compile time, not a mirror copy. If the build
+    // script's parser regresses, this test fails along with it — the two
+    // cannot drift silently because they ARE the same function.
     let tampered = "# mnemonik-help\n\n## Trigger\n\nfoo bar\n";
-    let result = expect_section(tampered, "Purpose");
+    let result = expect_h2_section(tampered, "Purpose");
     let err = result.expect_err("missing Purpose must error");
     assert!(
         err.contains("Purpose"),
         "error must name the missing section, got: {err}"
     );
+    // The build script wraps this error as `manifest {name}.md {err}` — assert
+    // the build-side wrapping format surfaces the filename too, by reproducing
+    // the exact format-string build.rs uses on the panic path.
+    let build_panic = format!("manifest attest.md {err}");
+    assert!(
+        build_panic.contains("attest.md") && build_panic.contains("Purpose"),
+        "build-side wrapping must name file AND section, got: {build_panic}"
+    );
 }
 
-// --- helpers ---
-
-fn extract_h2_section(body: &str, title: &str) -> Option<String> {
-    let header = format!("## {title}");
-    let all_lines: Vec<&str> = body.lines().collect();
-    let start = all_lines.iter().position(|l| l.trim() == header)? + 1;
-    let end = all_lines
-        .iter()
-        .enumerate()
-        .skip(start)
-        .find_map(|(i, l)| {
-            if l.starts_with("## ") || l.starts_with("# ") {
-                Some(i)
-            } else {
-                None
-            }
-        })
-        .unwrap_or(all_lines.len());
-    Some(all_lines[start..end].join("\n"))
-}
-
-fn expect_section(body: &str, title: &str) -> Result<String, String> {
-    extract_h2_section(body, title)
-        .ok_or_else(|| format!("manifest missing required `## {title}` H2 section"))
+#[test]
+fn unexpected_manifest_file_is_a_build_error() {
+    // Round-1 F3: build.rs treats EXPECTED_MANIFESTS as a both-ways
+    // invariant — missing files AND extra files both fail the build.
+    // We can't trigger the extras path from inside the unit test (build.rs
+    // already ran), but we CAN assert the ALL_SKILLS contents are exactly
+    // the expected set — same property the build guard enforces, asserted
+    // at test time so a future EXPECTED_MANIFESTS edit that forgets to
+    // also add an assets/skills/ file (or vice versa) trips here.
+    let actual: HashSet<&str> = skills::ALL_SKILLS.iter().map(|s| s.name).collect();
+    let expected: HashSet<&str> = [
+        "mnemonik-attest",
+        "mnemonik-checkpoint",
+        "mnemonik-help",
+        "mnemonik-init",
+        "mnemonik-recall",
+        "mnemonik-status",
+        "mnemonik-verify",
+    ]
+    .into_iter()
+    .collect();
+    assert_eq!(
+        actual, expected,
+        "ALL_SKILLS does not match the expected set — either an extra file \
+         is being projected, or EXPECTED_MANIFESTS is out of sync with the \
+         assets/skills/ directory"
+    );
 }

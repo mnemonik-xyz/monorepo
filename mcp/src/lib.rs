@@ -28,6 +28,13 @@ pub mod payment;
 pub mod pending;
 pub mod pricing;
 pub mod seed;
+/// Markdown parser shared between `build.rs` (which projects skill
+/// manifests into compile-time string constants) and the
+/// `skill_manifests.rs` integration test (which exercises the same
+/// "missing `## Purpose` fails" guard against the exact same code).
+/// `build.rs` `include!()`s this file directly; the test imports it via
+/// `mnemonic_mcp::skill_parse::...`.
+pub mod skill_parse;
 pub mod tools;
 
 /// Shared test helpers for `mcp/tests/*.rs` — `mock_state()` and `mint_jwt()`.

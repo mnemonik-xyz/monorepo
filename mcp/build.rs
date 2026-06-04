@@ -20,6 +20,13 @@ use std::env;
 use std::fs;
 use std::path::Path;
 
+// Shared parser helpers (`extract_h2_section`, `expect_h2_section`) live
+// in `mcp/src/skill_parse.rs` and are include!()-ed here so this build
+// script and `mcp/tests/skill_manifests.rs` exercise the same code path.
+// Test-reviewer round 1 finding F1: re-implementing the parser in the
+// test allowed drift; the shared file closes that.
+include!("src/skill_parse.rs");
+
 /// The seven manifests user-spec AC1 requires. Missing files OR extra files
 /// fail the build with the offending name surfaced. Order is alphabetical for
 /// determinism of the generated module.
@@ -42,6 +49,8 @@ fn main() {
     // Rerun if any manifest changes (path is relative to CARGO_MANIFEST_DIR).
     println!("cargo:rerun-if-changed=assets/skills");
     println!("cargo:rerun-if-changed=build.rs");
+    // Shared parser code — if it changes, both build and tests need to re-run.
+    println!("cargo:rerun-if-changed=src/skill_parse.rs");
 
     if !skills_dir.is_dir() {
         panic!(
@@ -152,20 +161,13 @@ struct Parsed {
 }
 
 /// Parse a manifest's body. Surfaces both required H2 sections as separate
-/// strings; panics with a named-file error if either is missing.
+/// strings; panics with a named-file error (built from `expect_h2_section`'s
+/// `Err` message + the file name) if either is missing.
 fn parse_manifest(name: &str, body: &str) -> Parsed {
-    let purpose = extract_h2_section(body, "Purpose").unwrap_or_else(|| {
-        panic!(
-            "manifest {}.md missing required `## Purpose` H2 section",
-            name
-        )
-    });
-    let trigger = extract_h2_section(body, "Trigger").unwrap_or_else(|| {
-        panic!(
-            "manifest {}.md missing required `## Trigger` H2 section",
-            name
-        )
-    });
+    let purpose = expect_h2_section(body, "Purpose")
+        .unwrap_or_else(|err| panic!("manifest {}.md {}", name, err));
+    let trigger = expect_h2_section(body, "Trigger")
+        .unwrap_or_else(|err| panic!("manifest {}.md {}", name, err));
 
     let purpose_trim = purpose.trim().to_string();
     let trigger_trim = trigger.trim().to_string();
@@ -190,40 +192,6 @@ fn parse_manifest(name: &str, body: &str) -> Parsed {
         purpose_plus_trigger,
         purpose_one_liner,
     }
-}
-
-/// Extract the body of an H2 section with the given title. Returns the text
-/// between the `## <title>` line (exclusive) and the next `## ` line (exclusive),
-/// or None if the section header is not present. Whitespace-only sections
-/// count as present (the caller's `.trim()` handles emptiness).
-fn extract_h2_section(body: &str, title: &str) -> Option<String> {
-    let header = format!("## {title}");
-    let mut lines = body.lines().enumerate();
-    let start = lines.find_map(|(i, l)| {
-        // Match exact "## Title" with no trailing tokens — avoids matching
-        // e.g. "## Purpose-driven" if someone writes such a heading.
-        if l.trim() == header {
-            Some(i + 1)
-        } else {
-            None
-        }
-    })?;
-
-    let all_lines: Vec<&str> = body.lines().collect();
-    let end = all_lines
-        .iter()
-        .enumerate()
-        .skip(start)
-        .find_map(|(i, l)| {
-            if l.starts_with("## ") || l.starts_with("# ") {
-                Some(i)
-            } else {
-                None
-            }
-        })
-        .unwrap_or(all_lines.len());
-
-    Some(all_lines[start..end].join("\n"))
 }
 
 /// Emit a Rust string literal that round-trips arbitrary UTF-8. Uses a raw
