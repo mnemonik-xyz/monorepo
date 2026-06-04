@@ -1062,6 +1062,13 @@ pub async fn token_handler(
             );
         }
     };
+    // Best-effort cache the minted JWT to `~/.mnemonic/token.json` so the
+    // Rust binary's own subsequent outbound calls can reuse it without
+    // re-running the OAuth loopback (Task 6 of agent-native-distribution).
+    // Failure is non-fatal — the response to the calling agent still ships
+    // the token, and a corrupted/missing cache only forces a re-OAuth next
+    // time. Decision 7: no OS keychain wrapper in V1.
+    cache_minted_token(&token, &issued.sub);
     let body = TokenResponse {
         access_token: token,
         token_type: "Bearer".to_string(),
@@ -1069,6 +1076,30 @@ pub async fn token_handler(
         scope: "mcp".to_string(),
     };
     (StatusCode::OK, Json(body)).into_response()
+}
+
+/// Persist `token` to `~/.mnemonic/token.json` as a best-effort cache. The
+/// `expires_at` field is derived from [`JWT_TTL_SECS`] so the on-disk
+/// timestamp matches the JWT's own `exp` claim within ~1s. Errors are
+/// logged at `warn` and swallowed — a cache failure must never break the
+/// OAuth response (the calling agent has already received its token).
+///
+/// Public so future binary-side outbound flows can persist tokens
+/// minted through alternate paths (Google OAuth, extension key-escrow).
+pub fn cache_minted_token(jwt: &str, sub: &str) {
+    let expires_at =
+        (chrono::Utc::now() + chrono::Duration::seconds(JWT_TTL_SECS as i64)).to_rfc3339();
+    let token = mnemonic_core::identity::TokenJson {
+        jwt: jwt.to_string(),
+        expires_at,
+        sub: sub.to_string(),
+    };
+    if let Err(e) = mnemonic_core::identity::save_token(&token) {
+        tracing::warn!(
+            target: "mnemonic_mcp::oauth",
+            "best-effort cache of minted JWT to ~/.mnemonic/token.json failed: {e}"
+        );
+    }
 }
 
 /// Build a uniform OAuth-style error envelope.

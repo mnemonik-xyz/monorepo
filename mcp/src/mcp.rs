@@ -428,6 +428,34 @@ pub(crate) fn derive_quota_subject(headers: &HeaderMap, payment_mode: &str) -> O
     None
 }
 
+/// `-32099 TokenExpired` — the cached OAuth JWT at `~/.mnemonic/token.json`
+/// has an `expires_at` in the past. The Rust binary surfaces this when it
+/// reads the file via [`mnemonic_core::identity::token_store::read_token`]
+/// for an outbound authenticated call. The agent client re-initiates the
+/// OAuth loopback to refresh the token; the failure is recoverable without
+/// user intervention beyond clicking through the consent page again.
+///
+/// `data` shape: `{kind: "TokenExpired", expires_at, pubkey}`.
+///
+/// `allow(dead_code)` because the only in-binary caller today is the
+/// integration test `mcp/tests/oauth_loopback.rs`; the lib/bin compile
+/// units don't see test usage so clippy flags it as unused. The error
+/// catalogue test (`mcp/tests/error_catalogue.rs`) exercises this helper
+/// alongside the rest of the typed-error set. Matches the same pattern
+/// `oauth::issue_jwt` uses at `mcp/src/oauth/mod.rs`.
+#[allow(dead_code)]
+pub fn token_expired(expires_at: &str, pubkey: &str) -> JsonRpcError {
+    JsonRpcError {
+        code: -32099,
+        message: "Token expired".to_string(),
+        data: Some(serde_json::json!({
+            "kind": "TokenExpired",
+            "expires_at": expires_at,
+            "pubkey": pubkey,
+        })),
+    }
+}
+
 /// `-32011 DeliveryQuotaExceeded` — entry-of-participate-path short-circuit
 /// fired by `mcp_handler` BEFORE any Arweave/Solana write because the
 /// caller's `api_key_hash` has accumulated `>= threshold` delivery-failure

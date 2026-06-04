@@ -4,11 +4,16 @@ pub mod keystore_file;
 #[cfg(test)]
 pub mod keystore_memory;
 pub mod keystore_os;
+pub mod token_store;
 
 pub use ensure::{ensure, ensure_with_stores, KeyStores};
 pub use keystore::{KeyStore, KeystoreEntry, KeystoreError};
 pub use keystore_file::FileKeyStore;
 pub use keystore_os::OsKeyStore;
+pub use token_store::{
+    delete_token, delete_token_at, read_token, read_token_from, save_token, save_token_to,
+    token_path, TokenJson, TokenStoreError,
+};
 
 use solana_sdk::pubkey::Pubkey;
 use solana_sdk::signature::{Keypair, Signer};
