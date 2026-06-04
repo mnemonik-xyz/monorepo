@@ -1,5 +1,5 @@
 //! Integration tests for the agent-native-distribution `visibility` column
-//! (feature T3 / Decision 2 + 5 + 11).
+//! (feature T3 / Decision 2 + 5 + 9 + 11).
 //!
 //! Covers:
 //! - `migrate_visibility_column` idempotency on a clean DB (column + index
@@ -9,6 +9,8 @@
 //! - `search` with `visibility_filter = Some(Public)` excludes private rows.
 //! - `search` with `visibility_filter = None` returns both (authenticated
 //!   callers see all their own rows — Decision 5).
+//! - `search` with a visibility filter still respects the mandatory owner
+//!   predicate (Decision 9 + Decision 5 interaction).
 //!
 //! These tests use `SqliteStore::open` against a tempfile so the migration
 //! path under `open()` is exercised end-to-end (the in-memory variant runs
@@ -108,64 +110,16 @@ fn migrate_visibility_column_idempotent_on_clean_db() {
 }
 
 // AC: legacy rows (column-absent DB) get backfilled to 'private' on first
-// migration. We simulate a pre-v1 DB by raw-SQL building the schema without
-// the visibility column, inserting rows, then running the migration.
+// migration. Simulates a pre-v1 DB by raw-SQL building the legacy schema
+// (without the visibility column) directly on a tempfile, seeding three
+// rows, then opening that file through `SqliteStore::open` — which runs the
+// same migration sequence operators see on upgrade.
 #[test]
 fn migrate_visibility_column_backfills_legacy_rows() {
-    // Standalone connection — we want to control schema construction.
-    let conn = Connection::open_in_memory().unwrap();
-    conn.execute_batch(
-        "CREATE TABLE attestations (
-            attestation_id TEXT PRIMARY KEY,
-            content TEXT NOT NULL,
-            content_hash TEXT NOT NULL,
-            tags TEXT NOT NULL DEFAULT '[]',
-            solana_tx TEXT NOT NULL,
-            arweave_tx TEXT NOT NULL,
-            signer_pubkey TEXT NOT NULL,
-            created_at TEXT NOT NULL,
-            owner_pubkey TEXT,
-            write_mode TEXT NOT NULL DEFAULT 'participate'
-        );",
-    )
-    .unwrap();
-
-    for id in ["att-legacy-a", "att-legacy-b", "att-legacy-c"] {
-        conn.execute(
-            "INSERT INTO attestations
-                (attestation_id, content, content_hash, tags,
-                 solana_tx, arweave_tx, signer_pubkey, created_at,
-                 owner_pubkey, write_mode)
-             VALUES (?,?,?,?,?,?,?,?,?,?)",
-            params![
-                id,
-                "legacy content",
-                "h",
-                "[]",
-                "sol",
-                "ar",
-                SIGNER,
-                "2026-01-01",
-                OWNER,
-                "participate",
-            ],
-        )
-        .unwrap();
-    }
-
-    // SqliteStore's migration helpers are crate-private — but the migration
-    // is wired into `SqliteStore::open` / `in_memory`. Open a fresh in-memory
-    // store first to confirm the wiring works, then reproduce the legacy
-    // shape via the standalone connection above and assert backfill by
-    // running the public API: open a tempfile-backed store from a path that
-    // points at the same on-disk DB we just built.
-    //
-    // The simplest portable path: snapshot the legacy DB to a tempfile,
-    // then open it via SqliteStore::open and assert visibility was
-    // backfilled to 'private' on every row.
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("legacy.db");
-    // Build the same legacy schema directly on the file.
+
+    // Build the legacy schema on the tempfile (no visibility column).
     {
         let file_conn = Connection::open(&path).unwrap();
         file_conn
@@ -397,4 +351,89 @@ fn search_no_filter_returns_both() {
     let ids: Vec<&str> = both.iter().map(|r| r.attestation_id.as_str()).collect();
     assert!(ids.contains(&"att-public"));
     assert!(ids.contains(&"att-private"));
+
+    // Explicitly pin the `visibility` field on each SearchResult — guards
+    // the row_mapper column-index binding (column 8) for the new field
+    // (test-reviewer round 1 F3).
+    let public_row = both
+        .iter()
+        .find(|r| r.attestation_id == "att-public")
+        .expect("public row present");
+    assert_eq!(public_row.visibility, Visibility::Public);
+    let private_row = both
+        .iter()
+        .find(|r| r.attestation_id == "att-private")
+        .expect("private row present");
+    assert_eq!(private_row.visibility, Visibility::Private);
+}
+
+// Decision 9 (owner isolation) + Decision 5 (visibility filter) interaction:
+// the visibility filter is additive on top of the mandatory owner predicate.
+// A public row owned by tenant B must never appear in tenant A's search,
+// even when tenant A is asking for `Some(Visibility::Public)`. Closes the
+// test-reviewer round 1 F1 gap.
+#[test]
+fn search_visibility_filter_respects_owner_isolation() {
+    let (store, _dir) = open_temp_store();
+    let query = [1.0_f32, 0.0_f32];
+
+    let owner_a = "owner-a-pubkey";
+    let owner_b = "owner-b-pubkey";
+
+    // Both rows are visibility=Public — the discriminator is owner_pubkey.
+    // If `search` accidentally dropped the owner filter for the visibility-
+    // filtered branch, owner_b's row would leak into owner_a's results.
+    store
+        .save_attestation(
+            "att-a-public",
+            "owner a's public memory",
+            "h-a",
+            &[],
+            "sol-a",
+            "ar-a",
+            SIGNER,
+            owner_a,
+            "2026-01-01",
+            WriteMode::Participate,
+            Visibility::Public,
+            &query,
+        )
+        .unwrap();
+    store
+        .save_attestation(
+            "att-b-public",
+            "owner b's public memory",
+            "h-b",
+            &[],
+            "sol-b",
+            "ar-b",
+            SIGNER,
+            owner_b,
+            "2026-01-01",
+            WriteMode::Participate,
+            Visibility::Public,
+            &query,
+        )
+        .unwrap();
+
+    let a_view = store
+        .search(&query, owner_a, Some(Visibility::Public), 10)
+        .expect("search succeeds");
+    assert_eq!(
+        a_view.len(),
+        1,
+        "owner_a must see exactly one public row (their own), not owner_b's"
+    );
+    assert_eq!(a_view[0].attestation_id, "att-a-public");
+    assert!(
+        !a_view.iter().any(|r| r.attestation_id == "att-b-public"),
+        "owner_b's public row must NOT leak into owner_a's filtered search"
+    );
+
+    // Symmetric: owner_b sees only their own row.
+    let b_view = store
+        .search(&query, owner_b, Some(Visibility::Public), 10)
+        .expect("search succeeds");
+    assert_eq!(b_view.len(), 1);
+    assert_eq!(b_view[0].attestation_id, "att-b-public");
 }

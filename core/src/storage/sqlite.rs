@@ -82,6 +82,29 @@ CREATE TABLE IF NOT EXISTS lineage_edges (
 CREATE INDEX IF NOT EXISTS idx_lineage_edges_child ON lineage_edges(child_id);
 "#;
 
+/// SQL backing `AttestationStore::search` when the caller passes
+/// `visibility_filter = None` (authenticated path — sees all of the owner's
+/// own rows regardless of visibility, per Decision 5). Owner scope is the
+/// mandatory tenant predicate from Decision 9.
+const SEARCH_SQL_ALL: &str = "SELECT a.attestation_id, a.content, a.content_hash, a.tags,
+            a.solana_tx, a.arweave_tx, a.created_at, a.write_mode,
+            a.visibility, ae.embedding
+     FROM attestations a
+     JOIN attestation_embeddings ae ON a.attestation_id = ae.attestation_id
+     WHERE a.owner_pubkey = ?";
+
+/// SQL backing `AttestationStore::search` when the caller passes
+/// `visibility_filter = Some(v)` (anonymous-recall path — `Some(Public)` —
+/// or an explicit owner-filtered enumeration — `Some(Private)`). Owner
+/// scope is preserved; visibility is bound via `ToSql`, never interpolated
+/// as text.
+const SEARCH_SQL_FILTERED: &str = "SELECT a.attestation_id, a.content, a.content_hash, a.tags,
+            a.solana_tx, a.arweave_tx, a.created_at, a.write_mode,
+            a.visibility, ae.embedding
+     FROM attestations a
+     JOIN attestation_embeddings ae ON a.attestation_id = ae.attestation_id
+     WHERE a.owner_pubkey = ? AND a.visibility = ?";
+
 pub struct SqliteStore {
     conn: Connection,
 }
@@ -252,6 +275,34 @@ fn migrate_correlation_id_column(conn: &Connection) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Probes whether `attestations` has the given column via `PRAGMA
+/// table_info`. Shared by `migrate_write_mode_column` and
+/// `migrate_visibility_column` — both ADD-COLUMN migrations need this gate
+/// because SQLite lacks `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`.
+///
+/// SAFETY: the PRAGMA query string is a hard-coded literal — only the
+/// column-name comparison (a `String` read out of `row.get(1)?`) is
+/// dynamic. The older `migrate_owner_pubkey_columns` /
+/// `migrate_correlation_id_column` helpers `format!()` the table name into
+/// the query string; that pattern is safe today (only internal literals
+/// call them) but fragile if extended. This helper deliberately fixes the
+/// table to `attestations` so the query is a const, not a runtime-formatted
+/// string (security-auditor round 1 finding on `migrate_write_mode_column`,
+/// preserved verbatim in the shared lift — code-reviewer round 1, CR-T3-1).
+fn attestations_has_column(conn: &Connection, column: &str) -> anyhow::Result<bool> {
+    let mut stmt = conn
+        .prepare("PRAGMA table_info(attestations)")
+        .context("preparing PRAGMA table_info(attestations)")?;
+    let mut rows = stmt.query([])?;
+    while let Some(row) = rows.next()? {
+        let name: String = row.get(1)?;
+        if name == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 /// Idempotent ADD-COLUMN migration for the per-request `write_mode` field
 /// (feature `modes-user-choice`, T1).
 ///
@@ -280,27 +331,6 @@ fn migrate_correlation_id_column(conn: &Connection) -> anyhow::Result<()> {
 /// idempotent (`CREATE INDEX IF NOT EXISTS`, UPDATE matches zero rows on a
 /// clean DB) so this is safe to invoke on every open.
 fn migrate_write_mode_column(conn: &Connection) -> anyhow::Result<()> {
-    // SAFETY: the PRAGMA query string is a hard-coded literal — no
-    // user-controlled input can reach SQLite here. The older migration
-    // helpers (`migrate_owner_pubkey_columns`, `migrate_correlation_id_column`)
-    // accept a `table: &str` and `format!()` it in; that pattern is safe
-    // today (only internal literals call them) but fragile if extended. This
-    // helper deliberately avoids the parameter so the query is a const, not
-    // a runtime-formatted string (security-auditor round 1 finding).
-    fn attestations_has_column(conn: &Connection, column: &str) -> anyhow::Result<bool> {
-        let mut stmt = conn
-            .prepare("PRAGMA table_info(attestations)")
-            .context("preparing PRAGMA table_info(attestations)")?;
-        let mut rows = stmt.query([])?;
-        while let Some(row) = rows.next()? {
-            let name: String = row.get(1)?;
-            if name == column {
-                return Ok(true);
-            }
-        }
-        Ok(false)
-    }
-
     let need_column = !attestations_has_column(conn, "write_mode")?;
 
     conn.execute_batch("BEGIN IMMEDIATE;")
@@ -370,23 +400,6 @@ fn migrate_write_mode_column(conn: &Connection) -> anyhow::Result<()> {
 /// serialize against any concurrent opener (Decision 13: reuses the
 /// existing WAL + busy_timeout config at `open()`; no new tuning here).
 fn migrate_visibility_column(conn: &Connection) -> anyhow::Result<()> {
-    // SAFETY: hard-coded literal PRAGMA — no user-controlled input reaches
-    // SQLite here. Same constant-query pattern as `migrate_write_mode_column`
-    // (security-auditor round 1 finding on that helper).
-    fn attestations_has_column(conn: &Connection, column: &str) -> anyhow::Result<bool> {
-        let mut stmt = conn
-            .prepare("PRAGMA table_info(attestations)")
-            .context("preparing PRAGMA table_info(attestations)")?;
-        let mut rows = stmt.query([])?;
-        while let Some(row) = rows.next()? {
-            let name: String = row.get(1)?;
-            if name == column {
-                return Ok(true);
-            }
-        }
-        Ok(false)
-    }
-
     let need_column = !attestations_has_column(conn, "visibility")?;
 
     conn.execute_batch("BEGIN IMMEDIATE;")
@@ -695,15 +708,14 @@ impl AttestationStore for SqliteStore {
         //
         // Optional visibility filter (Decision 5): the anonymous-recall path
         // passes `Some(Visibility::Public)`; authenticated callers pass
-        // `None`. The two SQL statements are constants — only typed
-        // `Visibility` (round-tripped through `ToSql`) ever reaches the
-        // `AND a.visibility = ?` placeholder, never user text.
-        let base_select = "SELECT a.attestation_id, a.content, a.content_hash, a.tags,
-                    a.solana_tx, a.arweave_tx, a.created_at, a.write_mode,
-                    a.visibility, ae.embedding
-             FROM attestations a
-             JOIN attestation_embeddings ae ON a.attestation_id = ae.attestation_id
-             WHERE a.owner_pubkey = ?";
+        // `None`. SQL for both branches is a module-level `&'static str`
+        // constant (`SEARCH_SQL_*` below) — only typed `Visibility`
+        // (round-tripped through `ToSql`) ever reaches the
+        // `AND a.visibility = ?` placeholder, never user text. The two
+        // statements are kept as separate constants rather than concatenated
+        // at runtime so a future reader sees both queries verbatim without
+        // having to mentally fold a `format!` call (security-auditor round 1
+        // SEC-T3-01, code-reviewer round 1 CR-T3-2).
 
         let q_norm = l2_norm(query_embedding);
         let q_normalized: Vec<f32> = if q_norm > 0.0 {
@@ -742,13 +754,12 @@ impl AttestationStore for SqliteStore {
 
         let mut results: Vec<SearchResult> = match visibility_filter {
             Some(v) => {
-                let sql = format!("{base_select} AND a.visibility = ?");
-                let mut stmt = self.conn.prepare(&sql)?;
+                let mut stmt = self.conn.prepare(SEARCH_SQL_FILTERED)?;
                 let rows = stmt.query_map(params![owner_pubkey, v], row_mapper)?;
                 rows.filter_map(|r| r.ok()).collect()
             }
             None => {
-                let mut stmt = self.conn.prepare(base_select)?;
+                let mut stmt = self.conn.prepare(SEARCH_SQL_ALL)?;
                 let rows = stmt.query_map(params![owner_pubkey], row_mapper)?;
                 rows.filter_map(|r| r.ok()).collect()
             }
