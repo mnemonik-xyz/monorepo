@@ -33,6 +33,36 @@ Review details — in JSON files via links. QA report — in logs/working/.
 
 -->
 
+## Task 1: Skill manifests + build-time projection
+
+**Status:** Done
+**Commits:** fec5d97 (impl) + ddf7255 (test-reviewer R1 fixes) + ab7380d (security-auditor R1 fixes) + 5255976 (code-reviewer R1 fixes)
+**Agent:** t1-coder
+**Summary:** Created seven markdown skill manifests under `mcp/assets/skills/` (`help`, `init`, `recall`, `attest`, `checkpoint`, `verify`, `status`) as the single source of truth and wired a `build.rs` that parses each manifest's `## Purpose` + `## Trigger` H2 sections at build time, emitting compile-time constants (`FULL_MARKDOWN`, `PURPOSE_PLUS_TRIGGER`, `PURPOSE_ONE_LINER`) plus an `ALL_SKILLS` table for Task 2 to project into `prompts/*`, `resources/*`, and `tools/list`. Key implementation decision: the markdown parser is shared between `build.rs` and the integration test via `mcp/src/skill_parse.rs` (include!()-d by build.rs, imported by the test as `mnemonic_mcp::skill_parse::...`) so the "missing-section fails build" guard is exercised by the exact same code at test time — drift between test and build is structurally impossible. Security hardening: `fs::symlink_metadata()` rejects symlinks in the assets dir (mirrors Decision 9's lstat discipline on the install side). Per-file `cargo:rerun-if-changed` directives emitted inside the manifest read loop so in-place edits trigger a rebuild on APFS.
+**Deviations:** None.
+
+**Reviews:**
+
+*Round 1 (fec5d97):*
+- code-reviewer: changes_requested, 2 blocking + 3 non-blocking → [logs/working/task-1/code-reviewer-round1.json](logs/working/task-1/code-reviewer-round1.json)
+- security-auditor: PASS_WITH_NOTES, 2 LOW + 1 INFO → [logs/working/task-1/security-auditor-round1.json](logs/working/task-1/security-auditor-round1.json)
+- test-reviewer: NEEDS_FIXES, 1 medium-blocking + 1 low + 1 info → [logs/working/task-1/test-reviewer-round1.json](logs/working/task-1/test-reviewer-round1.json)
+
+*Round 2 (after fixes — ddf7255, ab7380d, 5255976):*
+- code-reviewer: approved → [logs/working/task-1/code-reviewer-round2.json](logs/working/task-1/code-reviewer-round2.json)
+- security-auditor: PASS → [logs/working/task-1/security-auditor-round2.json](logs/working/task-1/security-auditor-round2.json)
+- test-reviewer: APPROVED → [logs/working/task-1/test-reviewer-round2.json](logs/working/task-1/test-reviewer-round2.json)
+
+**Verification:**
+- `cargo test -p mnemonic-mcp --test skill_manifests` → 5/5 pass (4 TDD anchors + 1 extra-file regression test)
+- `cargo clippy -p mnemonic-mcp --all-targets --features test-support -- -D warnings` → clean
+- Smoke (manifest missing): renaming `attest.md` → `attest.bak` yields `error: missing required skill manifest: attest.md / expected at: ...`
+- Smoke (section missing): tampered `## Purpose` → `## Purposes` in help.md yields `manifest help.md manifest missing required \`## Purpose\` H2 section`
+- Smoke (symlink rejection): `attest.md` as symlink → `/tmp/evil-fake-attest.md` is treated as missing (target never opened)
+- Smoke (rerun-if-changed): editing `help.md` content triggers a recompile and regenerates `skills_generated.rs`
+
+---
+
 ## Task 3: visibility column migration + Visibility enum + storage signatures
 
 **Status:** Done
