@@ -29,6 +29,18 @@ use mnemonic_core::storage::{SqliteStore, WriteMode};
 use std::convert::Infallible;
 use std::sync::Arc;
 
+/// Build-time-generated skill manifest constants, projected from
+/// `mcp/assets/skills/*.md` by `mcp/build.rs`. Three slots per skill —
+/// `*_FULL_MARKDOWN`, `*_PURPOSE_PLUS_TRIGGER`, `*_PURPOSE_ONE_LINER` —
+/// plus an `ALL_SKILLS: &[SkillManifest]` table. Task 2 consumes these
+/// from the new `prompts/*`, `resources/*`, and enriched `tools/list`
+/// dispatch arms. See [`work/agent-native-distribution/tech-spec.md`]
+/// Decision 1 for the single-source-of-truth rationale.
+#[allow(dead_code)]
+pub mod skills {
+    include!(concat!(env!("OUT_DIR"), "/skills_generated.rs"));
+}
+
 /// JSON-RPC 2.0 request or notification.
 ///
 /// Per JSON-RPC 2.0 spec, notifications (e.g. MCP `notifications/initialized`,
