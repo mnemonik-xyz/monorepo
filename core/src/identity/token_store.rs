@@ -302,4 +302,39 @@ mod tests {
             other => panic!("expected Expired, got {other:?}"),
         }
     }
+
+    /// Verify `$MNEMONIC_CONFIG_DIR` overrides the base directory. This is
+    /// the only test that mutates the env var — the integration tests use
+    /// the path-injected `save_token_to`/`read_token_from` variants
+    /// (round-2 code review R2-NOTE-1). Guarded by [`ENV_GUARD`] so it
+    /// does not race with itself across test re-runs in the same process.
+    #[test]
+    fn config_dir_override_routes_through_token_path() {
+        let _g = ENV_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = TempDir::new().unwrap();
+        let previous = std::env::var_os("MNEMONIC_CONFIG_DIR");
+        // SAFETY: this test owns ENV_GUARD for the duration of the
+        // mutation and restores the prior value on exit. The only other
+        // code reading `MNEMONIC_CONFIG_DIR` in this binary is
+        // `token_path()` itself, which we call inside the lock.
+        unsafe {
+            std::env::set_var("MNEMONIC_CONFIG_DIR", dir.path());
+        }
+        let resolved = token_path();
+        unsafe {
+            match previous {
+                Some(v) => std::env::set_var("MNEMONIC_CONFIG_DIR", v),
+                None => std::env::remove_var("MNEMONIC_CONFIG_DIR"),
+            }
+        }
+        let resolved = resolved.expect("token_path must succeed under override");
+        assert_eq!(resolved, dir.path().join("token.json"));
+    }
+
+    /// Shared guard for tests that mutate `MNEMONIC_CONFIG_DIR`. The
+    /// `into_inner()` pattern is intentional: a panic inside a prior test
+    /// leaves the env var possibly stale, but every guarded test sets the
+    /// env var explicitly before reading, so a poisoned lock does not
+    /// corrupt the next test's observed environment.
+    static ENV_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
 }

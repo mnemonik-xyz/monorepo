@@ -330,17 +330,28 @@ fn corrupted_token_path() {
 
 /// Additional explicit check: `cache_minted_token` is idempotent under
 /// repeated calls (subsequent OAuth mints overwrite the cache safely).
+/// Uses real JWTs minted via [`issue_jwt`] so the exp-extraction path in
+/// [`cache_minted_token`] is exercised — round-2 code review R2-NOTE-2.
+/// A hardcoded string would silently bypass `extract_exp_unix_no_verify`
+/// and fall back to the conservative `now + TTL` estimate, leaving the
+/// production exp-from-JWT path untested.
 #[test]
 fn cache_minted_token_overwrites_existing() {
+    use mnemonic_mcp::oauth::issue_jwt;
     with_config_dir_override(|cfg_dir| {
         let path = cfg_dir.join("token.json");
+        let st = Arc::new(OAuthState::new(TEST_SECRET));
+        let owner_a = "OwnerA111111111111111111111111111111111111";
+        let owner_b = "OwnerB111111111111111111111111111111111111";
 
-        cache_minted_token("first-jwt", "OwnerA111111111111111111111111111111111111");
+        let jwt_a = issue_jwt(&st, owner_a).expect("issue first JWT");
+        cache_minted_token(&jwt_a, owner_a);
         let first = read_token_from(&path).unwrap().unwrap();
-        assert_eq!(first.jwt, "first-jwt");
-        assert_eq!(first.sub, "OwnerA111111111111111111111111111111111111");
-        // expires_at is `now + JWT_TTL_SECS`; assert it parses and is
-        // within ~JWT_TTL_SECS of "now".
+        assert_eq!(first.jwt, jwt_a);
+        assert_eq!(first.sub, owner_a);
+        // expires_at is derived from the JWT's own `exp` claim — assert it
+        // parses and is within ~JWT_TTL_SECS of now (the exp claim is
+        // `iat + JWT_TTL_SECS`, where iat is the JWT mint timestamp).
         let parsed = chrono::DateTime::parse_from_rfc3339(&first.expires_at)
             .expect("cached expires_at must be RFC3339");
         let delta = parsed.with_timezone(&chrono::Utc) - chrono::Utc::now();
@@ -350,9 +361,16 @@ fn cache_minted_token_overwrites_existing() {
             delta.num_seconds()
         );
 
-        cache_minted_token("second-jwt", "OwnerB111111111111111111111111111111111111");
+        let jwt_b = issue_jwt(&st, owner_b).expect("issue second JWT");
+        cache_minted_token(&jwt_b, owner_b);
         let second = read_token_from(&path).unwrap().unwrap();
-        assert_eq!(second.jwt, "second-jwt");
-        assert_eq!(second.sub, "OwnerB111111111111111111111111111111111111");
+        assert_eq!(second.jwt, jwt_b);
+        assert_eq!(second.sub, owner_b);
+        // Each freshly-minted JWT must overwrite the previous cache and
+        // the second exp must reflect the second mint, not the first.
+        assert_ne!(
+            first.jwt, second.jwt,
+            "second JWT must differ from first (jti claim is fresh per mint)"
+        );
     });
 }

@@ -185,78 +185,22 @@ fn save_sets_mode_0600_unix() {
 }
 
 /// F2 — task spec Details: "HOME env var unset → dirs::home_dir() returns
-/// None → Err(TokenStoreError::Io(...))". Exercised here via the
-/// `MNEMONIC_CONFIG_DIR` override pointing at a path whose parent does
-/// not exist (and cannot be created), which surfaces the same I/O error
-/// without mutating the process-global `$HOME`. The `set_var` call is
-/// scoped under a static Mutex shared with [`config_dir_override_isolates_path`]
-/// so the two tests do not race on the env var.
+/// None → Err(TokenStoreError::Io(...))". Round-2 code review R2-NOTE-1
+/// follow-up: instead of mutating `MNEMONIC_CONFIG_DIR`, drive the same
+/// failure mode by calling [`save_token_to`] directly with a path whose
+/// parent is `/dev/null/...` (not a directory and cannot be created).
+/// Same Io failure surface, zero env mutation, no need for a static
+/// Mutex / `unsafe` block.
 #[test]
-fn home_unset_or_unwritable_yields_io_error() {
-    let _g = ENV_GUARD.lock().unwrap_or_else(|e| e.into_inner());
-    let previous = std::env::var_os("MNEMONIC_CONFIG_DIR");
-    // SAFETY: this test owns the ENV_GUARD lock for the duration of the
-    // mutation; restore on exit. No async runtime is touched.
-    // Point the override at a path whose parent does not exist AND cannot
-    // be created (file at /dev/null is not a directory).
-    unsafe {
-        std::env::set_var("MNEMONIC_CONFIG_DIR", "/dev/null/mnemonic-token-test");
-    }
-    let result = mnemonic_core::identity::save_token(&sample_token(&future_iso(1)));
-    unsafe {
-        match previous {
-            Some(v) => std::env::set_var("MNEMONIC_CONFIG_DIR", v),
-            None => std::env::remove_var("MNEMONIC_CONFIG_DIR"),
-        }
-    }
-    let err = result.expect_err("save into unwritable path must Err");
+fn save_into_unwritable_path_yields_io_error() {
+    let unwritable = std::path::Path::new("/dev/null/mnemonic-token-test/token.json");
+    let err = save_token_to(unwritable, &sample_token(&future_iso(1)))
+        .expect_err("save into unwritable path must Err");
     assert!(
         matches!(err, TokenStoreError::Io(_)),
         "expected Io error, got {err:?}"
     );
 }
-
-/// `MNEMONIC_CONFIG_DIR` parity test. Setting it makes `token_path()`
-/// resolve to `<override>/token.json` — the same behaviour Node CLI's
-/// `configDir()` provides at `packages/cli/src/config.ts:48-52`. This
-/// is the test seam that replaces HOME mutation in the mcp integration
-/// tests (Round-1 code-reviewer R1-MAJOR-2).
-#[test]
-fn config_dir_override_isolates_path() {
-    let _g = ENV_GUARD.lock().unwrap_or_else(|e| e.into_inner());
-    let dir = TempDir::new().unwrap();
-    let previous = std::env::var_os("MNEMONIC_CONFIG_DIR");
-    unsafe {
-        std::env::set_var("MNEMONIC_CONFIG_DIR", dir.path());
-    }
-    let expected = dir.path().join("token.json");
-    let actual = mnemonic_core::identity::token_path();
-    let save_result = mnemonic_core::identity::save_token(&sample_token(&future_iso(1)));
-    let read_result = mnemonic_core::identity::read_token();
-    unsafe {
-        match previous {
-            Some(v) => std::env::set_var("MNEMONIC_CONFIG_DIR", v),
-            None => std::env::remove_var("MNEMONIC_CONFIG_DIR"),
-        }
-    }
-    assert_eq!(
-        actual.expect("token_path must succeed under override"),
-        expected,
-        "MNEMONIC_CONFIG_DIR must override token_path"
-    );
-    save_result.expect("save under override must succeed");
-    let token = read_result
-        .expect("read under override must not error")
-        .expect("token must be present after save");
-    assert_eq!(token.jwt, "header.payload.signature");
-}
-
-/// Shared lock for the two tests that mutate `MNEMONIC_CONFIG_DIR`. The
-/// `into_inner()` pattern on poisoning is intentional: a panic inside the
-/// previous test left the env var possibly stale, but the next test sets
-/// it explicitly before reading, so a poisoned lock does not corrupt the
-/// test's observed environment.
-static ENV_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[test]
 fn delete_is_idempotent() {
