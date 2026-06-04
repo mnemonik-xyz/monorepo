@@ -230,14 +230,24 @@ fn enrich_tool_description(tool: &Value) -> Value {
 /// Trigger appended to its `description`. Drift between manifest and
 /// tools/list is now physically impossible because the manifest body is
 /// the single source of truth for that copy.
-fn enriched_tools() -> Vec<Value> {
-    tool_definitions()
-        .as_array()
-        .cloned()
-        .unwrap_or_default()
-        .into_iter()
-        .map(|t| enrich_tool_description(&t))
-        .collect()
+///
+/// Cached: both `tool_definitions()` and the skill manifests are
+/// `'static` / deterministic, so the enriched vector is computed once
+/// per process and shared by reference (tech-spec implementation hint;
+/// code-reviewer round 1 CR2-03). `tools/list` no longer allocates a
+/// fresh `Vec<Value>` per request — the payload-construction site in
+/// `handle_request_with_resolved_mode` clones from the cached slice.
+fn enriched_tools() -> &'static [Value] {
+    static CACHE: std::sync::OnceLock<Vec<Value>> = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| {
+        tool_definitions()
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|t| enrich_tool_description(&t))
+            .collect()
+    })
 }
 
 /// JSON-RPC 2.0 request or notification.
@@ -1393,6 +1403,22 @@ async fn handle_tool_call(
                 .ok_or_else(|| JsonRpcError::simple(-32603, "correlation_id required"))?
                 .to_string();
             tools::check_pending(&state.pending, &state.store, &cid).await
+        }
+        // request_public_write_confirmation is advertised in tool_definitions()
+        // but the handler lands in Task 4 (Decision 2 — public-write ceremony).
+        // Until then, callers that follow the inputSchema and invoke this tool
+        // get a typed -32601 MethodNotFound rather than the generic catch-all
+        // -32603, which would otherwise look like a server-side bug. Includes
+        // the recommended fallback path in the message so MCP clients can
+        // surface useful guidance to the user.
+        "request_public_write_confirmation" => {
+            return Err(JsonRpcError::simple(
+                -32601,
+                "request_public_write_confirmation handler not yet implemented \
+                 (lands in agent-native-distribution Task 4); \
+                 use mnemonic_sign_memory with mode='participate' \
+                 + visibility='public' once the ceremony ships",
+            ));
         }
         _ => {
             return Err(JsonRpcError::simple(

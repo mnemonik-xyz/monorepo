@@ -337,3 +337,79 @@ async fn prompts_list_with_invalid_bearer_passes_through() {
         "response must still carry prompts array: {body}"
     );
 }
+
+/// Round-1 code-review CR2-02: cover the unknown-name branch of
+/// `prompts_get_payload` so the typed `-32602 InvalidParams` envelope
+/// — `data.field == "name"`, `data.received` echoing the raw input —
+/// is locked down against a refactor that swaps the error code.
+#[tokio::test]
+async fn prompts_get_unknown_name_returns_invalid_params() {
+    let state = mock_state();
+    let oauth_state = Arc::new(OAuthState::new(TEST_SECRET));
+    let app = build_router(state, oauth_state);
+
+    let (status, body) = post_json(
+        &app,
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "prompts/get",
+            "id": 7,
+            "params": {"name": "mnemonik-does-not-exist"},
+        }),
+        None,
+    )
+    .await;
+
+    // JSON-RPC errors travel inside a 200 envelope on streamable-HTTP;
+    // only transport-level failures bump the HTTP status.
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "JSON-RPC error must travel inside a 200 envelope: {body}"
+    );
+    let err = body["error"]
+        .as_object()
+        .unwrap_or_else(|| panic!("expected error envelope: {body}"));
+    assert_eq!(err["code"], -32602, "must be -32602 InvalidParams: {body}");
+    let data = err["data"]
+        .as_object()
+        .unwrap_or_else(|| panic!("typed error must carry data: {body}"));
+    assert_eq!(data["field"], "name");
+    assert_eq!(data["received"], "mnemonik-does-not-exist");
+}
+
+/// Round-1 code-review CR2-02: cover the bad-URI branch of
+/// `resources_read_payload`. Wrong scheme — `https://` instead of
+/// `mnemonik://skills/` — must surface `-32602 InvalidParams` with
+/// `data.field == "uri"` so clients distinguish "I sent a bad URI"
+/// from "the server doesn't know that resource".
+#[tokio::test]
+async fn resources_read_bad_uri_scheme_returns_invalid_params() {
+    let state = mock_state();
+    let oauth_state = Arc::new(OAuthState::new(TEST_SECRET));
+    let app = build_router(state, oauth_state);
+
+    let bad_uri = "https://invalid-scheme/foo.md";
+    let (status, body) = post_json(
+        &app,
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "resources/read",
+            "id": 8,
+            "params": {"uri": bad_uri},
+        }),
+        None,
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    let err = body["error"]
+        .as_object()
+        .unwrap_or_else(|| panic!("expected error envelope: {body}"));
+    assert_eq!(err["code"], -32602);
+    let data = err["data"]
+        .as_object()
+        .unwrap_or_else(|| panic!("typed error must carry data: {body}"));
+    assert_eq!(data["field"], "uri");
+    assert_eq!(data["received"], bad_uri);
+}
