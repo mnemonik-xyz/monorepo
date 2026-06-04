@@ -4,6 +4,15 @@ on:
   push:
     tags: ["v*"]
 
+# DR8-M1 (R1 deploy review): duplicate or force-pushed tag refs can
+# trigger concurrent release runs that race on GitHub Release asset
+# uploads and on Trusted-Publishing OIDC token reuse. Group by ref so
+# a re-pushed tag cancels its in-flight predecessor instead of double-
+# publishing.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: write
 
@@ -132,20 +141,41 @@ jobs:
       # signed by the GitHub-Actions-signed attestation below. Format
       # matches `sha256sum -b` so a downstream `sha256sum -c SHA256SUMS`
       # works for users who pull all tarballs into one directory.
+      #
+      # Layout assumption: `actions/upload-artifact@v4` (build-linux,
+      # build-macos) names each artifact after its target triple, and
+      # `download-artifact@v4` with `path: artifacts` materializes one
+      # subdirectory per artifact — `artifacts/<target>/<tarball>.tar.gz`,
+      # exactly one level deep. The `sed` below strips that single
+      # `./<target>/` prefix so each line reads `<hash> *<filename>` and
+      # the shim's parser sees the bare tarball name. If a future build
+      # matrix change adds nesting depth (e.g. per-OS subdirs), the
+      # post-normalization guard fails the job so the regression is
+      # caught at release time, not at first install (SAR8-M1, CR8-001).
       - name: Generate SHA256SUMS
         run: |
           cd artifacts
           find . -name 'mnemonic-mcp-*.tar.gz' -exec sha256sum -b {} \; > SHA256SUMS
-          # Normalize the leading `./<target>/` prefix produced by `find`
-          # so each line reads `<hash> *<filename>` — the shim's parser
-          # expects the bare tarball name, not the artifact subdirectory.
           sed -i 's| \*\./[^/]*/| \*|' SHA256SUMS
+          # SAR8-M1: refuse to publish a SHA256SUMS file whose lines
+          # still embed a path separator — the shim's parser keys on
+          # bare filenames, so a leftover `subdir/` prefix silently
+          # breaks every install. `grep -q '/'` exits 0 if any `/`
+          # remains; we invert that into a failure.
+          if grep -q '/' SHA256SUMS; then
+            echo 'ERROR: SHA256SUMS normalization failed — line still contains /' >&2
+            cat SHA256SUMS >&2
+            exit 1
+          fi
           cat SHA256SUMS
 
-      # GitHub artifact attestation (sigstore-backed). The shim verifies
-      # via `gh attestation verify --owner mnemonik-xyz
-      # --signer-workflow .github/workflows/release.yml`, so the subject
-      # path must cover every tarball the shim might download.
+      # GitHub artifact attestation (sigstore-backed). The shim's
+      # verification model (Decision 8, install-binary.ts) runs
+      # `gh attestation verify <tarball>` BEFORE extraction, so the
+      # tarball is the correct subject. Attesting the extracted binary
+      # would add no security (the tarball digest already commits to
+      # its contents) and would require an extra extract+re-pack step
+      # here. SAR8-M2 (R1): tarball-only is intentional, not a gap.
       - name: Attest build provenance
         uses: actions/attest-build-provenance@v1
         with:
@@ -254,8 +284,13 @@ jobs:
   # Gated on `release` so the SHA256SUMS asset + sigstore attestation
   # are visible on the GitHub Release *before* the npm shim is pullable
   # — first-run `ensureBinaryCached` in install-binary.ts would 404 on
-  # SHA256SUMS otherwise. Decoupled from publish-npm because the shim
-  # has no Rust/WASM build step (pure Node + tar dependency).
+  # SHA256SUMS otherwise.
+  #
+  # NOT gated on `publish-npm` by design (SAR8-INFO1): packages/mcp has
+  # zero dependency on @mnemonik-xyz/sdk or @mnemonik-xyz/cli (pure Node
+  # + tar). If a future change adds a workspace dep on either, ALSO add
+  # the matching `needs:` here, otherwise the shim could ship pointing
+  # at an SDK/CLI version that does not yet exist on the registry.
   publish-mcp-shim:
     name: Publish @mnemonik-xyz/mcp with provenance
     needs: [release]
