@@ -335,19 +335,32 @@ async fn main() -> anyhow::Result<()> {
 
     let cfg = config::Config::from_env();
 
-    // ── Hosted endpoint resolution (Decision 12) ─────────────────────────────
+    // ── Hosted endpoint resolution (Decision 12 + SAR5-M1 round 3) ───────────
     // The compile-time `DEFAULT_HOSTED_ENDPOINT` wins unless the operator
-    // explicitly passed `--allow-custom-endpoint` AND set the env var. When
-    // the env var is set without the flag we emit exactly one stderr line so
-    // the operator notices their override was rejected; we never silently
-    // honour the env var.
+    // explicitly passed `--allow-custom-endpoint` AND set the env var AND
+    // the env value passes URL safety validation (https:// or loopback
+    // http://). The resolver returns a typed warning enum so we can
+    // distinguish the two operator-facing failure modes:
+    //   - FlagAbsent → env was set but flag was not; never silently honour.
+    //   - RejectedUnsafe → flag WAS set but value is unsafe (SSRF surface);
+    //     closes the attack vector where an attacker who can flip BOTH the
+    //     flag and the env var could redirect outbound writes to e.g.
+    //     cloud-metadata IPs or file:// URLs.
     let env_hosted = std::env::var("MNEMONIC_HOSTED_ENDPOINT").ok();
-    let (hosted_endpoint, should_warn) =
+    let (hosted_endpoint, hosted_warning) =
         mnemonic_mcp::resolved_hosted_endpoint(cli.allow_custom_endpoint, env_hosted.as_deref());
-    if should_warn {
-        eprintln!(
-            "[mnemonik-mcp] ignoring MNEMONIC_HOSTED_ENDPOINT — use --allow-custom-endpoint to enable"
-        );
+    match hosted_warning {
+        mnemonic_mcp::HostedEndpointWarning::None => {}
+        mnemonic_mcp::HostedEndpointWarning::FlagAbsent => {
+            eprintln!(
+                "[mnemonik-mcp] ignoring MNEMONIC_HOSTED_ENDPOINT — use --allow-custom-endpoint to enable"
+            );
+        }
+        mnemonic_mcp::HostedEndpointWarning::RejectedUnsafe => {
+            eprintln!(
+                "[mnemonik-mcp] rejecting unsafe MNEMONIC_HOSTED_ENDPOINT — only https:// or http://127.0.0.1|localhost|[::1] are accepted (falling back to default)"
+            );
+        }
     }
 
     // Subcommand-driven transport: `mcp-stdio` forces stdio regardless of

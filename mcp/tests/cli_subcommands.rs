@@ -34,26 +34,33 @@ use tokio::time::timeout;
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(15);
 const REQ_TIMEOUT: Duration = Duration::from_secs(5);
 
-// ── In-process matrix for `resolved_hosted_endpoint` (Decision 12) ────────
+// ── In-process matrix for `resolved_hosted_endpoint` (Decision 12 + SAR5-M1) ──
+
+use mnemonic_mcp::HostedEndpointWarning;
 
 #[test]
 fn resolved_hosted_endpoint_default_wins_when_flag_unset() {
-    // env var present + flag false → fall back to default, signal warn=true
-    let (endpoint, should_warn) =
-        mnemonic_mcp::resolved_hosted_endpoint(false, Some("http://attacker.example"));
+    // env var present + flag false → fall back to default, signal FlagAbsent
+    let (endpoint, warning) =
+        mnemonic_mcp::resolved_hosted_endpoint(false, Some("https://test.local/mcp"));
     assert_eq!(endpoint, mnemonic_mcp::DEFAULT_HOSTED_ENDPOINT);
-    assert!(
-        should_warn,
-        "warning required when env var present + flag absent"
+    assert_eq!(
+        warning,
+        HostedEndpointWarning::FlagAbsent,
+        "FlagAbsent warning required when env var present + flag absent"
     );
 }
 
 #[test]
-fn resolved_hosted_endpoint_env_wins_when_flag_set() {
-    let (endpoint, should_warn) =
+fn resolved_hosted_endpoint_env_wins_when_flag_set_and_safe() {
+    let (endpoint, warning) =
         mnemonic_mcp::resolved_hosted_endpoint(true, Some("https://test.local/mcp"));
     assert_eq!(endpoint, "https://test.local/mcp");
-    assert!(!should_warn, "flag-allowed env value emits no warning");
+    assert_eq!(
+        warning,
+        HostedEndpointWarning::None,
+        "flag-allowed safe env value emits no warning"
+    );
 }
 
 #[test]
@@ -63,7 +70,8 @@ fn resolved_hosted_endpoint_default_when_env_unset() {
     let (e2, w2) = mnemonic_mcp::resolved_hosted_endpoint(true, None);
     assert_eq!(e1, mnemonic_mcp::DEFAULT_HOSTED_ENDPOINT);
     assert_eq!(e2, mnemonic_mcp::DEFAULT_HOSTED_ENDPOINT);
-    assert!(!w1 && !w2, "no env var means no warning");
+    assert_eq!(w1, HostedEndpointWarning::None);
+    assert_eq!(w2, HostedEndpointWarning::None);
 }
 
 #[test]
@@ -72,9 +80,61 @@ fn resolved_hosted_endpoint_empty_env_treated_as_unset() {
     // shell snippet like `MNEMONIC_HOSTED_ENDPOINT= mnemonic-mcp ...` does
     // not silently surrender to the default with a warning that confuses
     // the operator. Falls through to the default with no warn.
-    let (endpoint, should_warn) = mnemonic_mcp::resolved_hosted_endpoint(false, Some(""));
+    let (endpoint, warning) = mnemonic_mcp::resolved_hosted_endpoint(false, Some(""));
     assert_eq!(endpoint, mnemonic_mcp::DEFAULT_HOSTED_ENDPOINT);
-    assert!(!should_warn);
+    assert_eq!(warning, HostedEndpointWarning::None);
+}
+
+#[test]
+fn resolved_hosted_endpoint_rejects_unsafe_url_with_flag_set() {
+    // SAR5-M1 (round-1 security audit): even when `--allow-custom-endpoint`
+    // is set, the env value must pass URL validation. Non-loopback `http://`,
+    // `file://`, cloud-metadata IPs, and URLs with credentials are all
+    // rejected — the resolver returns the default plus a RejectedUnsafe
+    // warning so the operator's stderr line points at the validation gate
+    // (different remedy than the FlagAbsent case).
+    for unsafe_url in [
+        "http://attacker.example/mcp",
+        "http://169.254.169.254/latest/user-data",
+        "file:///etc/passwd",
+        "ftp://example.com/mcp",
+        "https://user:secret@host/mcp",
+    ] {
+        let (endpoint, warning) = mnemonic_mcp::resolved_hosted_endpoint(true, Some(unsafe_url));
+        assert_eq!(
+            endpoint,
+            mnemonic_mcp::DEFAULT_HOSTED_ENDPOINT,
+            "unsafe URL `{unsafe_url}` must fall back to default"
+        );
+        assert_eq!(
+            warning,
+            HostedEndpointWarning::RejectedUnsafe,
+            "unsafe URL `{unsafe_url}` must emit RejectedUnsafe warning"
+        );
+    }
+}
+
+#[test]
+fn resolved_hosted_endpoint_accepts_loopback_http_with_flag_set() {
+    // Test/dev path: localhost-targeted URLs survive the validation gate.
+    for safe_url in [
+        "http://127.0.0.1/mcp",
+        "http://127.0.0.1:3000/mcp",
+        "http://localhost/mcp",
+        "http://localhost:8080",
+        "http://[::1]:9000",
+    ] {
+        let (endpoint, warning) = mnemonic_mcp::resolved_hosted_endpoint(true, Some(safe_url));
+        assert_eq!(
+            endpoint, safe_url,
+            "loopback URL `{safe_url}` must be honoured verbatim"
+        );
+        assert_eq!(
+            warning,
+            HostedEndpointWarning::None,
+            "loopback URL `{safe_url}` must emit no warning"
+        );
+    }
 }
 
 // ── logout: file-removal + idempotency (sandboxed via MNEMONIC_CONFIG_DIR) ──
@@ -284,15 +344,16 @@ async fn mcp_stdio_accepts_jsonrpc_on_stdin() {
     let tools = resp["result"]["tools"]
         .as_array()
         .expect("tools array missing");
-    // F-2 (test-reviewer round 1): the task spec's TDD anchor calls for the
-    // full post-Task-2 inventory (5 pre-existing + the new public-write
-    // confirmation tool from Task 4). Asserting `>= 5` keeps the test
-    // robust to a 6th or 7th tool being added without coupling Task 5 to
-    // an exact count owned by Tasks 1/2/4. The earlier `!is_empty()` form
-    // would have accepted a regression that returned a single dummy tool.
+    // R1-003 (code-reviewer round 1, tightens F-2 round-2): the TDD anchor
+    // calls for 7 entries — 6 pre-existing tools (whoami, sign_memory,
+    // verify, prove_identity, recall, check_pending) + the new
+    // request_public_write_confirmation gate from Task 4 = 7 minimum.
+    // Asserting `>= 7` rather than `== 7` keeps the test forward-compatible
+    // with future task additions while still catching any regression that
+    // drops a tool from the inventory.
     assert!(
-        tools.len() >= 5,
-        "tools/list should return >= 5 tool entries; got {} (full response: {resp})",
+        tools.len() >= 7,
+        "tools/list should return >= 7 tool entries (TDD anchor); got {} (full response: {resp})",
         tools.len()
     );
 
@@ -450,19 +511,46 @@ async fn env_var_ignored_without_flag() {
 
 #[tokio::test]
 async fn env_var_honored_with_flag() {
+    // SAR5-M1 (round-3 update): the env value must now pass URL validation,
+    // so this test uses a loopback URL to exercise the happy path. The
+    // `RejectedUnsafe` branch is covered by `env_var_rejected_when_unsafe`.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let db_path = tmp.path().join("attestations.db");
+    let stderr_text =
+        run_stdio_with_env(tmp.path(), &db_path, "http://127.0.0.1:65535/mcp", true).await;
+    // Neither warning line must fire on the happy path.
+    assert!(
+        !stderr_text
+            .contains("ignoring MNEMONIC_HOSTED_ENDPOINT — use --allow-custom-endpoint to enable"),
+        "FlagAbsent warning MUST NOT fire when --allow-custom-endpoint is passed; \
+         got stderr: {stderr_text:?}"
+    );
+    assert!(
+        !stderr_text.contains("rejecting unsafe MNEMONIC_HOSTED_ENDPOINT"),
+        "RejectedUnsafe warning MUST NOT fire for loopback http://; \
+         got stderr: {stderr_text:?}"
+    );
+}
+
+#[tokio::test]
+async fn env_var_rejected_when_unsafe() {
+    // SAR5-M1 (round-3 security fix): even with `--allow-custom-endpoint`,
+    // a non-loopback `http://` URL must be rejected with the spec'd warning
+    // and the default endpoint substituted. This is the defence against an
+    // attacker who can flip BOTH the flag and the env var (e.g., a
+    // compromised npm postinstall script) but still cannot redirect
+    // participate-mode writes to arbitrary SSRF targets.
     let tmp = tempfile::tempdir().expect("tempdir");
     let db_path = tmp.path().join("attestations.db");
     let stderr_text = run_stdio_with_env(
         tmp.path(),
         &db_path,
-        "http://attacker.example.invalid",
+        "http://attacker.example.invalid/mcp",
         true,
     )
     .await;
     assert!(
-        !stderr_text
-            .contains("ignoring MNEMONIC_HOSTED_ENDPOINT — use --allow-custom-endpoint to enable"),
-        "warning line MUST NOT fire when --allow-custom-endpoint is passed; \
-         got stderr: {stderr_text:?}"
+        stderr_text.contains("rejecting unsafe MNEMONIC_HOSTED_ENDPOINT"),
+        "expected RejectedUnsafe stderr line, got: {stderr_text:?}"
     );
 }

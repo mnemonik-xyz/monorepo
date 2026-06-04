@@ -24,7 +24,7 @@ use mnemonic_core::storage::{AttestationStore, SqliteStore, Visibility, WriteMod
 
 use crate::mcp::{
     delivery_not_confirmed, hosted_unavailable, invalid_params, public_write_requires_confirmation,
-    unsupported_mode, Envelope, JsonRpcError,
+    token_expired, unsupported_mode, Envelope, JsonRpcError,
 };
 use crate::pending::PendingBundles;
 use crate::{payment, pricing::CostHint};
@@ -455,6 +455,42 @@ impl EscalationReason {
     }
 }
 
+/// Scrub a `reqwest::Error` for inclusion in a JSON-RPC `data.last_error`
+/// field returned to the agent. SAR5-L1 (round-1 security audit): reqwest's
+/// `Display` impl includes the full URL, which may contain credentials in
+/// the userinfo component or sensitive path segments that should not leak
+/// into agent context or downstream log aggregation. We render only:
+///
+/// - The error kind (`request`, `connect`, `timeout`, etc. via the canned
+///   `is_*` accessors), and
+/// - The host name (NOT the full URL — no userinfo, no path, no query).
+///
+/// `SAR5-M1`'s URL validation already rejects userinfo at the input
+/// boundary; this is defence-in-depth in case future code paths build a
+/// reqwest::Request without going through the validation gate.
+fn scrub_reqwest_error(e: &reqwest::Error) -> String {
+    let host = e
+        .url()
+        .and_then(|u| u.host_str().map(|h| h.to_string()))
+        .unwrap_or_else(|| "unknown".to_string());
+    let kind = if e.is_timeout() {
+        "timeout"
+    } else if e.is_connect() {
+        "connect"
+    } else if e.is_request() {
+        "request"
+    } else if e.is_body() {
+        "body"
+    } else if e.is_decode() {
+        "decode"
+    } else if e.is_status() {
+        "status"
+    } else {
+        "transport"
+    };
+    format!("{kind} error to host {host}")
+}
+
 /// Proxy the caller's `sign_memory` arguments to the resolved hosted MCP
 /// endpoint as a JSON-RPC `tools/call` for `mnemonic_sign_memory` with
 /// `mode` rewritten to `"participate"`. Reuses the caller's `jwt_sub` for
@@ -561,27 +597,59 @@ async fn proxy_participate(
         },
     });
 
-    // Cached token lookup. If `read_token` returns Expired the caller's
-    // -32099 surface lives at the dispatcher boundary (Task 6 forward flag);
-    // for soft-fall escalation we treat Expired the same as "no token" —
-    // the hosted side will respond with `-32001 unauthorized` which we
-    // surface to the agent as the actual blocker (re-OAuth required).
+    // Cached token lookup. Three branches — SAR5-INFO3 (round-1 security
+    // audit) closure of the Task 6 forward flag:
+    //   - `Ok(Some(token))` → cached JWT sent as Bearer; hosted side
+    //     validates the signature/exp.
+    //   - `Ok(None)` (file absent OR malformed JSON) → no Bearer header;
+    //     hosted side returns `-32001 unauthorized` and the agent must
+    //     re-OAuth.
+    //   - `Err(Expired)` → SHORT-CIRCUIT with `-32099 TokenExpired`
+    //     verbatim from the local catalogue. This is the canonical error
+    //     code AC16 specifies for expired-token conditions; falling
+    //     through to "no Bearer" would surface `-32001 unauthorized`
+    //     instead and an agent programmed against the catalogue would
+    //     not recognise it as the same condition.
+    //   - `Err(Io/Parse)` (path resolution failed, etc.) → treat as
+    //     "no token" for forward compatibility; the hosted side rejects
+    //     and the agent re-OAuths. Logged at debug so a misconfigured
+    //     `MNEMONIC_CONFIG_DIR` is visible to the operator.
+    // `jwt_sub` is plumbed through the signature for symmetry with the
+    // HTTP-path Cloud-tier branch but isn't used in the no-token fall-
+    // through — the hosted side reads the JWT from the Bearer header, not
+    // from our process state. Suppress the unused-binding lint at the
+    // boundary rather than carrying a dead `let _ = jwt_sub;` inside the
+    // match arm (R1-002, code-reviewer round 1).
+    let _ = jwt_sub;
     let mut req = client.post(endpoint).json(&body);
-    if let Ok(Some(token)) = mnemonic_core::identity::read_token() {
-        req = req.bearer_auth(token.jwt);
-    } else if let Some(sub) = jwt_sub {
-        // No cached token but the caller had a JWT in-process (HTTP path
-        // with the Cloud-tier deferred branch sometimes lands here in
-        // theory — kept defensive for symmetry). Pass nothing; the hosted
-        // side will reject with the typed unauthorized error.
-        let _ = sub;
+    match mnemonic_core::identity::read_token() {
+        Ok(Some(token)) => {
+            req = req.bearer_auth(token.jwt);
+        }
+        Ok(None) => {
+            // No cached token — hosted side will return -32001
+            // unauthorized and the agent re-OAuths.
+        }
+        Err(mnemonic_core::identity::TokenStoreError::Expired { expires_at, sub }) => {
+            return Err(ToolError::TypedRpc(token_expired(&expires_at, &sub)));
+        }
+        Err(e) => {
+            tracing::debug!(
+                target: "mnemonic_mcp::tools",
+                error = %e,
+                "soft-fall: read_token returned non-Expired error; proceeding without Bearer (hosted will return -32001)"
+            );
+        }
     }
 
     let resp = match req.send().await {
         Ok(r) => r,
         Err(e) => {
             let _ = reason;
-            return Err(ToolError::TypedRpc(hosted_unavailable(&e.to_string(), 500)));
+            return Err(ToolError::TypedRpc(hosted_unavailable(
+                &scrub_reqwest_error(&e),
+                500,
+            )));
         }
     };
     let status = resp.status();
@@ -589,14 +657,14 @@ async fn proxy_participate(
         Ok(t) => t,
         Err(e) => {
             return Err(ToolError::TypedRpc(hosted_unavailable(
-                &format!("body read failed: {e}"),
+                &format!("body read failed: {}", scrub_reqwest_error(&e)),
                 500,
             )));
         }
     };
     if !status.is_success() {
         return Err(ToolError::TypedRpc(hosted_unavailable(
-            &format!("hosted endpoint returned HTTP {status}: {body_text}"),
+            &format!("hosted endpoint returned HTTP {status}"),
             500,
         )));
     }
@@ -670,16 +738,27 @@ async fn proxy_participate(
         Some(s) => serde_json::from_str(s).unwrap_or(serde_json::Value::Null),
         None => result.clone(),
     };
-    if let Some(obj) = inner_value.as_object_mut() {
-        obj.insert(
-            "escalated".to_string(),
-            serde_json::json!({
-                "from": "local",
-                "to": "participate",
-                "reason": reason.as_str(),
-            }),
-        );
-    }
+    // R1-004 (code-reviewer round 1): if the hosted response is malformed
+    // (no `content[0].text`, or the text isn't valid JSON object) the
+    // unwrap above produced a `Null` or a non-object. `as_object_mut()`
+    // would then silently drop the `escalated` injection and we'd return
+    // `Ok(Null)` — the agent could not distinguish success from a parse
+    // failure. Map that case to `HostedUnavailable` so the caller sees a
+    // typed error and can retry / re-OAuth.
+    let Some(obj) = inner_value.as_object_mut() else {
+        return Err(ToolError::TypedRpc(hosted_unavailable(
+            "malformed hosted response: missing or non-object content[0].text",
+            500,
+        )));
+    };
+    obj.insert(
+        "escalated".to_string(),
+        serde_json::json!({
+            "from": "local",
+            "to": "participate",
+            "reason": reason.as_str(),
+        }),
+    );
     Ok(inner_value)
 }
 

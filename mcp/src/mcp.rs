@@ -437,19 +437,12 @@ pub(crate) fn derive_quota_subject(headers: &HeaderMap, payment_mode: &str) -> O
 ///
 /// `data` shape: `{kind: "TokenExpired", expires_at, pubkey}`.
 ///
-/// `allow(dead_code)`: the production callsite that maps
-/// `TokenStoreError::Expired` from `mnemonic_core::identity::read_token` to
-/// this JSON-RPC error lives at the outbound participate-mode proxy
-/// (mcp-stdio's `MNEMONIC_HOSTED_ENDPOINT` path). That proxy path is
-/// scheduled for Task 5 of agent-native-distribution per Decision 7 and
-/// is intentionally deferred — code-reviewer R1-MAJOR-1 in
-/// `logs/working/task-6/code-reviewer-round1.json` and decisions.md.
-/// The helper is exercised by the round-1 integration tests
-/// (`mcp/tests/oauth_loopback.rs::expired_token_path`) and by Task 4's
-/// `mcp/tests/error_catalogue.rs::catalogue_round_trip`; in both cases
-/// the test crate is a separate compile unit from the bin/lib so the
-/// usage is invisible to bin clippy and we must annotate.
-#[allow(dead_code)]
+/// Wired into the soft-fall proxy path by Task 5 round-3 (SAR5-INFO3 —
+/// security-audit round 1): `tools::proxy_participate` maps
+/// `TokenStoreError::Expired` from `mnemonic_core::identity::read_token`
+/// to this typed JSON-RPC error so the agent sees the canonical `-32099
+/// TokenExpired` code from the AC16 error catalogue instead of the
+/// hosted side's `-32001 unauthorized` rebuke.
 pub fn token_expired(expires_at: &str, pubkey: &str) -> JsonRpcError {
     JsonRpcError {
         code: -32099,

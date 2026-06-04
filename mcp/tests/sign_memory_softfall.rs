@@ -19,6 +19,20 @@
 //! proves the escalation is actually proxied (not stubbed inside
 //! `sign_memory`).
 
+// `softfall_env_guard` returns a `std::sync::MutexGuard` that intentionally
+// outlives the entire async test body — including the `.await` calls on the
+// soft-fall router — so the `MNEMONIC_CONFIG_DIR` env-var mutation in
+// `expired_cached_token_surfaces_token_expired_typed_error` cannot leak into
+// parallel tests reading the same env var via `read_token()`. Clippy flags
+// std-Mutex-across-await as a potential deadlock risk, but here:
+//   1. there is only ONE Mutex (the static GUARD inside the helper), and
+//   2. each test acquires it exactly once at the top, so no two tests can
+//      contend simultaneously to deadlock.
+// An async-aware mutex (`tokio::sync::Mutex`) would force every helper
+// caller to make the test async-yield-able just for the lock; the value of
+// keeping the simple synchronous fixture outweighs the cosmetic warning.
+#![allow(clippy::await_holding_lock)]
+
 use std::time::Duration;
 
 use mnemonic_core::storage::Visibility;
@@ -53,6 +67,10 @@ fn hosted_client() -> reqwest::Client {
 
 #[tokio::test]
 async fn default_no_silent_escalation() {
+    // SAR5-INFO3: every soft-fall test acquires `softfall_env_guard()`
+    // before touching `read_token()` so the expired-token fixture's
+    // MNEMONIC_CONFIG_DIR override does not leak across tests.
+    let _env_guard = softfall_env_guard();
     // `allow_fallback_to_participate=false` (the default). Local path
     // fails with `-32098 EmbedderInvalid`; the response MUST be the
     // typed local error, never a silent escalation. The hosted_endpoint
@@ -108,6 +126,7 @@ async fn default_no_silent_escalation() {
 
 #[tokio::test]
 async fn opt_in_escalation_returns_escalated_field() {
+    let _env_guard = softfall_env_guard();
     // The httpmock server simulates `mcp.mnemonik.xyz/mcp` returning a
     // successful sign_memory result. Decision 4: the local-side response
     // unwraps the hosted `result.content[0].text` JSON and injects
@@ -204,6 +223,7 @@ async fn opt_in_escalation_returns_escalated_field() {
 
 #[tokio::test]
 async fn opt_in_escalation_no_confirmation_token() {
+    let _env_guard = softfall_env_guard();
     // Decision 4 + 5b — post-escalation visibility re-resolution fires
     // LOCALLY before the hosted proxy call, so a buggy/compromised hosted
     // operator cannot bypass the user-approval ceremony by returning
@@ -302,6 +322,7 @@ async fn opt_in_escalation_no_confirmation_token() {
 
 #[tokio::test]
 async fn opt_in_escalation_with_valid_confirmation_token_reaches_hosted() {
+    let _env_guard = softfall_env_guard();
     let mock = httpmock::MockServer::start();
     let hosted_success = serde_json::json!({
         "attestation_id": "hosted-pub-uuid",
@@ -381,6 +402,7 @@ async fn opt_in_escalation_with_valid_confirmation_token_reaches_hosted() {
 
 #[tokio::test]
 async fn opt_in_escalation_no_network() {
+    let _env_guard = softfall_env_guard();
     // Decision 4: when the hosted endpoint is unreachable during
     // escalation, the typed error is `-32011 HostedUnavailable`, NOT the
     // original `-32098 EmbedderInvalid`. The agent sees the actual
@@ -442,8 +464,219 @@ async fn opt_in_escalation_no_network() {
     );
     let data = err.data.expect("data carrier");
     assert_eq!(data["kind"], "HostedUnavailable");
-    assert!(data["last_error"].as_str().is_some_and(|s| !s.is_empty()));
+    let last_error = data["last_error"].as_str().expect("last_error string");
+    assert!(!last_error.is_empty(), "last_error must be non-empty");
+    // SAR5-L1 (round-1 security audit): the last_error message MUST NOT
+    // include the full URL. The scrubbed form is "<kind> error to host
+    // <hostname>"; verify the path segment is absent and the loopback
+    // host is the only address present.
+    assert!(
+        !last_error.contains("/mcp"),
+        "scrubbed last_error must not contain the URL path: {last_error:?}"
+    );
+    assert!(
+        !last_error.contains("http://"),
+        "scrubbed last_error must not contain the URL scheme: {last_error:?}"
+    );
     assert_eq!(data["retry_after_ms"], 500);
+}
+
+// ── Test 4a: hosted returns malformed response → HostedUnavailable ────────
+//
+// R1-004 (code-reviewer round 1): if the hosted side returns success-shaped
+// JSON-RPC but the inner `result.content[0].text` is missing or not a JSON
+// object, the local proxy can no longer inject `escalated{}` cleanly. The
+// guard maps this to `-32011 HostedUnavailable` so the agent sees a typed
+// error rather than `Ok(Null)`.
+#[tokio::test]
+async fn opt_in_escalation_hosted_malformed_response_surfaces_hosted_unavailable() {
+    let _env_guard = softfall_env_guard();
+    let mock = httpmock::MockServer::start();
+    let m = mock.mock(|when, then| {
+        when.method(httpmock::Method::POST).path("/mcp");
+        // No `content` array, no `text` field — just a bare `result` value.
+        then.status(200)
+            .header("content-type", "application/json")
+            .json_body(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": "totally-not-an-object",
+            }));
+    });
+
+    let endpoint = format!("{}/mcp", mock.base_url());
+    let state = mock_state_with_embedder_and_endpoint(
+        Box::new(FailingEmbedder::always_fail()),
+        endpoint.clone(),
+    );
+    let kp = solana_sdk::signature::Keypair::new();
+    let owner = mnemonic_core::identity::pubkey_base58(&kp);
+    let resolved = resolve_write_mode(None, "local").unwrap();
+    let args = serde_json::json!({"content": "hosted-malformed"});
+
+    let result = sign_memory(
+        &kp,
+        &state.solana,
+        &state.arweave,
+        &state.store,
+        state.embedder.as_ref(),
+        &state.compressor,
+        &state.pending,
+        "hosted-malformed",
+        &[],
+        &cost_hint(),
+        "local",
+        &owner,
+        None,
+        resolved,
+        Visibility::Private,
+        &state.envelope,
+        Duration::from_secs(2),
+        true,
+        &state.hosted_endpoint,
+        &hosted_client(),
+        &args,
+    )
+    .await;
+
+    let err = match result {
+        Err(ToolError::TypedRpc(e)) => e,
+        other => {
+            panic!("expected -32011 HostedUnavailable on malformed hosted response, got {other:?}")
+        }
+    };
+    assert_eq!(err.code, -32011);
+    let data = err.data.expect("data carrier");
+    assert_eq!(data["kind"], "HostedUnavailable");
+    let last_error = data["last_error"].as_str().expect("last_error string");
+    assert!(
+        last_error.contains("malformed hosted response"),
+        "last_error must name the malformed-response failure mode: {last_error:?}"
+    );
+    assert_eq!(m.calls(), 1);
+}
+
+// ── Test 4b: expired cached token surfaces -32099 TokenExpired ────────────
+//
+// SAR5-INFO3 (round-1 security audit, closure of Task 6 forward flag):
+// the soft-fall proxy reads the cached JWT via `read_token()` BEFORE
+// sending the HTTP request. If the cached token is expired, the agent
+// must see the canonical `-32099 TokenExpired` typed error from the
+// catalogue rather than the hosted side's `-32001 unauthorized` —
+// otherwise an agent programmed against AC16 mistakes the condition for
+// a generic auth failure. Mirrors the existing
+// `oauth_loopback.rs::with_config_dir_override` ENV-mutation pattern.
+
+/// Process-wide mutex that EVERY test in this file acquires before
+/// touching the soft-fall proxy. The proxy reads `MNEMONIC_CONFIG_DIR`
+/// via global `std::env`, so even tests that don't mutate the env var
+/// must serialise with the one that does — otherwise the expired-token
+/// test pollutes the env state for parallel tests running at the same
+/// time. Cargo runs integration tests in parallel by default; this
+/// mutex is the workaround that lets us keep that default without
+/// flaky cross-test interference.
+fn softfall_env_guard() -> std::sync::MutexGuard<'static, ()> {
+    static GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    GUARD.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+fn with_config_dir_override<F: FnOnce(&std::path::Path) -> R, R>(f: F) -> R {
+    let _g = softfall_env_guard();
+    let dir = tempfile::TempDir::new().unwrap();
+    let previous = std::env::var_os("MNEMONIC_CONFIG_DIR");
+    // SAFETY: ENV_GUARD serialises mutations; previous value is restored
+    // below regardless of whether `f` returns or panics. The lock guard
+    // outlives the inner call, so no other test can race on the env var.
+    unsafe {
+        std::env::set_var("MNEMONIC_CONFIG_DIR", dir.path());
+    }
+    let result = f(dir.path());
+    unsafe {
+        match previous {
+            Some(v) => std::env::set_var("MNEMONIC_CONFIG_DIR", v),
+            None => std::env::remove_var("MNEMONIC_CONFIG_DIR"),
+        }
+    }
+    result
+}
+
+#[test]
+fn expired_cached_token_surfaces_token_expired_typed_error() {
+    with_config_dir_override(|cfg_dir| {
+        // Seed an expired token (expires_at in the past) at the path the
+        // production `token_path()` resolves to under the env override.
+        let token_path = cfg_dir.join("token.json");
+        let expired = serde_json::json!({
+            "jwt": "expired.jwt.value",
+            "expires_at": "2000-01-01T00:00:00Z",
+            "sub": "expired-test-sub",
+        });
+        std::fs::write(&token_path, expired.to_string()).expect("seed expired token");
+
+        // Build a fresh tokio runtime inside the env-guard scope — see the
+        // `oauth_loopback.rs::fresh_install_path` rationale: a `#[tokio::test]`
+        // attribute would build the runtime BEFORE the guard takes effect,
+        // racing the env mutation.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let state = mock_state_with_embedder_and_endpoint(
+                Box::new(FailingEmbedder::always_fail()),
+                // Endpoint set to a syntactically-safe loopback so the URL
+                // validation gate (SAR5-M1) accepts it — the test SHOULD
+                // short-circuit at the expired-token branch BEFORE any
+                // HTTP call is attempted, so the endpoint's reachability
+                // is irrelevant.
+                "http://127.0.0.1:1/mcp".to_string(),
+            );
+            let kp = solana_sdk::signature::Keypair::new();
+            let owner = mnemonic_core::identity::pubkey_base58(&kp);
+            let resolved = resolve_write_mode(None, "local").unwrap();
+            let args = serde_json::json!({"content": "expired-token-test"});
+
+            let result = sign_memory(
+                &kp,
+                &state.solana,
+                &state.arweave,
+                &state.store,
+                state.embedder.as_ref(),
+                &state.compressor,
+                &state.pending,
+                "expired-token-test",
+                &[],
+                &cost_hint(),
+                "local",
+                &owner,
+                None,
+                resolved,
+                Visibility::Private,
+                &state.envelope,
+                Duration::from_secs(2),
+                true,
+                &state.hosted_endpoint,
+                &hosted_client(),
+                &args,
+            )
+            .await;
+
+            let err = match result {
+                Err(ToolError::TypedRpc(e)) => e,
+                other => panic!(
+                    "expected -32099 TokenExpired (typed) from soft-fall proxy, got {other:?}"
+                ),
+            };
+            assert_eq!(
+                err.code, -32099,
+                "expired cached token must surface canonical -32099 TokenExpired, NOT hosted -32001"
+            );
+            let data = err.data.expect("data carrier");
+            assert_eq!(data["kind"], "TokenExpired");
+            assert_eq!(data["expires_at"], "2000-01-01T00:00:00Z");
+            assert_eq!(data["pubkey"], "expired-test-sub");
+        });
+    });
 }
 
 // ── Test 5: empty hosted_endpoint sentinel — no soft-fall available ───────
@@ -457,6 +690,7 @@ async fn opt_in_escalation_no_network() {
 // default" would silently change which typed error the agent receives.
 #[tokio::test]
 async fn empty_endpoint_sentinel_propagates_local_error() {
+    let _env_guard = softfall_env_guard();
     let state = mock_state_with_embedder_and_endpoint(
         Box::new(FailingEmbedder::always_fail()),
         String::new(),

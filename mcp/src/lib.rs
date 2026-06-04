@@ -63,54 +63,231 @@ pub use mcp::EMBEDDER_MODEL_VERSION;
 /// agent-native-distribution: this constant is the *only* hosted peer the
 /// binary will speak to unless the operator explicitly passes
 /// `--allow-custom-endpoint`, in which case `MNEMONIC_HOSTED_ENDPOINT` is
-/// honoured. A local attacker that injects the env var into a shell
-/// therefore cannot silently redirect outbound writes without also
-/// modifying the binary's flag set.
+/// honoured **and validated**. A local attacker that injects the env var
+/// into a shell therefore cannot silently redirect outbound writes without
+/// also modifying the binary's flag set; and an attacker who can flip the
+/// flag (via a compromised npm postinstall script, etc.) still cannot
+/// redirect to arbitrary SSRF targets — only `https://` and loopback
+/// `http://` URLs survive the validation gate.
 pub const DEFAULT_HOSTED_ENDPOINT: &str = "https://mcp.mnemonik.xyz/mcp";
+
+/// Reason the caller's `MNEMONIC_HOSTED_ENDPOINT` value was not honoured.
+/// Returned by [`resolved_hosted_endpoint`] so the production caller can
+/// emit a distinguishable stderr line per case. Decision 12 +
+/// security-audit round 1 finding SAR5-M1 (agent-native-distribution Task
+/// 5 round 2): the env var being rejected at the validation step is
+/// different from the env var being silently ignored because the flag is
+/// absent — both must be loud, but the operator-facing message text needs
+/// to point at the different remedy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostedEndpointWarning {
+    /// Env var was honoured and the default was returned. No warning.
+    None,
+    /// `--allow-custom-endpoint` was absent but the env var was set, so
+    /// the value was ignored. Caller should emit:
+    /// `[mnemonik-mcp] ignoring MNEMONIC_HOSTED_ENDPOINT — use --allow-custom-endpoint to enable`
+    FlagAbsent,
+    /// `--allow-custom-endpoint` WAS set but the env value failed URL
+    /// validation (non-https + non-loopback, or unparseable). Caller
+    /// should emit:
+    /// `[mnemonik-mcp] rejecting unsafe MNEMONIC_HOSTED_ENDPOINT — only https:// or http://127.0.0.1|localhost|[::1] are accepted`
+    RejectedUnsafe,
+}
+
+/// Validate that a candidate hosted-endpoint URL is safe to use as a
+/// participate-mode proxy destination. Decision 12 + SAR5-M1: only
+/// production-shape (`https://`) and dev-loopback (`http://127.0.0.1`,
+/// `http://localhost`, `http://[::1]`) URLs survive — `file://`,
+/// cloud-metadata IPs (`http://169.254.169.254`), and arbitrary
+/// attacker-controlled HTTPS URLs with credentials in the userinfo
+/// component are all rejected.
+///
+/// Returns `true` when the URL passes. Rejection is silent — the caller
+/// (production `main.rs`) emits the operator-facing stderr line via the
+/// [`HostedEndpointWarning::RejectedUnsafe`] signal.
+fn is_safe_hosted_endpoint(url: &str) -> bool {
+    // Reject any URL containing userinfo (`user:pass@host`) regardless of
+    // scheme — credentials in the URL would leak into reqwest error
+    // messages and the JSON-RPC `data.last_error` field (SAR5-L1). The
+    // detection works because the userinfo component, if present, sits
+    // between `://` and the first `/` (path) or end-of-string and contains
+    // an `@` that the host alone cannot contain.
+    if let Some((_, after_scheme)) = url.split_once("://") {
+        let host_and_rest = after_scheme.split('/').next().unwrap_or("");
+        if host_and_rest.contains('@') {
+            return false;
+        }
+    }
+    if url.starts_with("https://") {
+        return true;
+    }
+    // Loopback HTTP variants — exact prefix match against the canonical
+    // forms a developer's localhost test infra produces. The trailing
+    // character must be `/`, `:`, or end-of-string so that
+    // `http://localhost.attacker.example` does NOT match.
+    const LOOPBACK_PREFIXES: &[&str] = &["http://127.0.0.1", "http://localhost", "http://[::1]"];
+    for prefix in LOOPBACK_PREFIXES {
+        if let Some(rest) = url.strip_prefix(prefix) {
+            // After the prefix the URL must either end, start a port
+            // (`:`), or start a path (`/`). Anything else is a different
+            // host that just happens to share the prefix.
+            if rest.is_empty() || rest.starts_with(':') || rest.starts_with('/') {
+                return true;
+            }
+        }
+    }
+    false
+}
 
 /// Resolve the hosted MCP endpoint for participate-mode soft-fall.
 ///
-/// Rules (Decision 12 — agent-native-distribution):
-/// - `allow_custom == true` AND `MNEMONIC_HOSTED_ENDPOINT` set → env value.
-/// - `allow_custom == true` AND env var unset → [`DEFAULT_HOSTED_ENDPOINT`].
-/// - `allow_custom == false` AND env var set → [`DEFAULT_HOSTED_ENDPOINT`]
-///   PLUS a single-line stderr warning is emitted by the caller (see
-///   `main::resolve_hosted_endpoint_with_warning`). This helper itself is
-///   pure — no I/O, no stderr — so tests can exercise the resolution
-///   matrix without capturing process output.
-/// - `allow_custom == false` AND env var unset → [`DEFAULT_HOSTED_ENDPOINT`].
-pub fn resolve_hosted_endpoint(allow_custom: bool, env_value: Option<&str>) -> &'static str {
-    // We deliberately return `&'static str` even when the env var is set:
-    // the production wrapper at `main::resolve_hosted_endpoint_with_warning`
-    // owns the `String` when it needs to be runtime-derived; this helper
-    // covers the gating logic ("did the env var get to win?") only, so
-    // tests can assert the answer without allocating.
-    match (allow_custom, env_value) {
-        (true, Some(s)) if !s.is_empty() => {
-            // The caller (main) owns the resolved `String`; we cannot return
-            // a borrowed slice here without leaking, so signal "use env" by
-            // returning the default and let main handle the actual string.
-            // Tests should use `resolved_hosted_endpoint` below for the
-            // string variant.
-            let _ = s;
-            DEFAULT_HOSTED_ENDPOINT
-        }
-        _ => DEFAULT_HOSTED_ENDPOINT,
-    }
-}
-
-/// String-returning variant of [`resolve_hosted_endpoint`]: returns an owned
-/// `String` so the caller does not need to materialise a `&'static str` for
-/// a runtime-derived endpoint. Same rules; emits NO stderr — the
-/// `should_warn` boolean in the return signals to the caller that a warning
-/// is owed (Decision 12 — agent-native-distribution).
+/// Decision 12 (Task 5) — gating logic in three layers:
+/// 1. **No flag** → env var is fully ignored; default returned. When env
+///    var was set, signal [`HostedEndpointWarning::FlagAbsent`] so the
+///    operator notices their override was rejected.
+/// 2. **Flag set, env var unset** → default returned.
+/// 3. **Flag set, env var set** → URL passes through
+///    [`is_safe_hosted_endpoint`]. On success, env value is returned with
+///    no warning. On failure, default returned with
+///    [`HostedEndpointWarning::RejectedUnsafe`] — SAR5-M1 closes the SSRF
+///    attack surface for the case where an attacker can flip BOTH the
+///    flag and the env var (e.g., a compromised npm postinstall script).
+///
+/// Empty env values are treated as "no override" so a shell snippet like
+/// `MNEMONIC_HOSTED_ENDPOINT= mnemonic-mcp ...` does not surrender to the
+/// default with a confusing warning.
+///
+/// Pure function: no I/O, no stderr — the production wrapper at
+/// `main.rs` owns the operator-facing message text.
 pub fn resolved_hosted_endpoint(
     allow_custom: bool,
     env_value: Option<&str>,
-) -> (String, bool /* should_warn */) {
+) -> (String, HostedEndpointWarning) {
     match (allow_custom, env_value) {
-        (true, Some(s)) if !s.is_empty() => (s.to_string(), false),
-        (false, Some(s)) if !s.is_empty() => (DEFAULT_HOSTED_ENDPOINT.to_string(), true),
-        _ => (DEFAULT_HOSTED_ENDPOINT.to_string(), false),
+        (true, Some(s)) if !s.is_empty() => {
+            if is_safe_hosted_endpoint(s) {
+                (s.to_string(), HostedEndpointWarning::None)
+            } else {
+                (
+                    DEFAULT_HOSTED_ENDPOINT.to_string(),
+                    HostedEndpointWarning::RejectedUnsafe,
+                )
+            }
+        }
+        (false, Some(s)) if !s.is_empty() => (
+            DEFAULT_HOSTED_ENDPOINT.to_string(),
+            HostedEndpointWarning::FlagAbsent,
+        ),
+        _ => (
+            DEFAULT_HOSTED_ENDPOINT.to_string(),
+            HostedEndpointWarning::None,
+        ),
+    }
+}
+
+#[cfg(test)]
+mod hosted_endpoint_validation_tests {
+    use super::*;
+
+    #[test]
+    fn https_is_safe() {
+        assert!(is_safe_hosted_endpoint("https://mcp.mnemonik.xyz/mcp"));
+        assert!(is_safe_hosted_endpoint("https://example.com:8443/mcp"));
+    }
+
+    #[test]
+    fn loopback_http_is_safe() {
+        assert!(is_safe_hosted_endpoint("http://127.0.0.1/mcp"));
+        assert!(is_safe_hosted_endpoint("http://127.0.0.1:3000/mcp"));
+        assert!(is_safe_hosted_endpoint("http://localhost/mcp"));
+        assert!(is_safe_hosted_endpoint("http://localhost:3000"));
+        assert!(is_safe_hosted_endpoint("http://[::1]/mcp"));
+        assert!(is_safe_hosted_endpoint("http://[::1]:3000"));
+    }
+
+    #[test]
+    fn non_loopback_http_is_rejected() {
+        // Plain HTTP without loopback is the SSRF attack surface.
+        assert!(!is_safe_hosted_endpoint("http://attacker.example/mcp"));
+        assert!(!is_safe_hosted_endpoint("http://example.com:80/mcp"));
+        // Cloud-metadata IPs MUST NOT slip through.
+        assert!(!is_safe_hosted_endpoint(
+            "http://169.254.169.254/latest/user-data"
+        ));
+        assert!(!is_safe_hosted_endpoint("http://10.0.0.1/mcp"));
+    }
+
+    #[test]
+    fn file_scheme_is_rejected() {
+        assert!(!is_safe_hosted_endpoint("file:///etc/passwd"));
+    }
+
+    #[test]
+    fn unparseable_or_empty_is_rejected() {
+        assert!(!is_safe_hosted_endpoint("not-a-url"));
+        assert!(!is_safe_hosted_endpoint(""));
+        assert!(!is_safe_hosted_endpoint("ftp://example.com/mcp"));
+    }
+
+    #[test]
+    fn lookalike_loopback_is_rejected() {
+        // `http://localhost.attacker.example` shares the `http://localhost`
+        // prefix but is a different host — the suffix check rejects it.
+        assert!(!is_safe_hosted_endpoint(
+            "http://localhost.attacker.example/mcp"
+        ));
+        assert!(!is_safe_hosted_endpoint(
+            "http://127.0.0.1.attacker.example/mcp"
+        ));
+    }
+
+    #[test]
+    fn userinfo_credentials_are_rejected() {
+        // SAR5-L1 (round-1 security audit): URLs with userinfo
+        // (user:pass@host) leak credentials into reqwest error messages.
+        // Reject at the validation layer regardless of scheme.
+        assert!(!is_safe_hosted_endpoint(
+            "https://user:secret@example.com/mcp"
+        ));
+        assert!(!is_safe_hosted_endpoint("http://user@127.0.0.1/mcp"));
+        assert!(!is_safe_hosted_endpoint("http://admin:pwd@localhost/mcp"));
+    }
+
+    #[test]
+    fn resolved_hosted_endpoint_matrix() {
+        // Flag absent, env set → FlagAbsent warning, default returned.
+        let (ep, w) = resolved_hosted_endpoint(false, Some("https://attacker.example/mcp"));
+        assert_eq!(ep, DEFAULT_HOSTED_ENDPOINT);
+        assert_eq!(w, HostedEndpointWarning::FlagAbsent);
+
+        // Flag set, valid env → env returned, no warning.
+        let (ep, w) = resolved_hosted_endpoint(true, Some("http://127.0.0.1:3000/mcp"));
+        assert_eq!(ep, "http://127.0.0.1:3000/mcp");
+        assert_eq!(w, HostedEndpointWarning::None);
+
+        // Flag set, https env → env returned, no warning.
+        let (ep, w) = resolved_hosted_endpoint(true, Some("https://test.local/mcp"));
+        assert_eq!(ep, "https://test.local/mcp");
+        assert_eq!(w, HostedEndpointWarning::None);
+
+        // Flag set, unsafe env → RejectedUnsafe warning, default returned.
+        let (ep, w) = resolved_hosted_endpoint(true, Some("http://attacker.example/mcp"));
+        assert_eq!(ep, DEFAULT_HOSTED_ENDPOINT);
+        assert_eq!(w, HostedEndpointWarning::RejectedUnsafe);
+
+        // Flag set, file:// env → RejectedUnsafe warning.
+        let (ep, w) = resolved_hosted_endpoint(true, Some("file:///etc/passwd"));
+        assert_eq!(ep, DEFAULT_HOSTED_ENDPOINT);
+        assert_eq!(w, HostedEndpointWarning::RejectedUnsafe);
+
+        // Flag set, env unset → default, no warning.
+        let (ep, w) = resolved_hosted_endpoint(true, None);
+        assert_eq!(ep, DEFAULT_HOSTED_ENDPOINT);
+        assert_eq!(w, HostedEndpointWarning::None);
+
+        // Flag absent, env unset → default, no warning.
+        let (ep, w) = resolved_hosted_endpoint(false, None);
+        assert_eq!(ep, DEFAULT_HOSTED_ENDPOINT);
+        assert_eq!(w, HostedEndpointWarning::None);
     }
 }
