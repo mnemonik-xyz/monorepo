@@ -407,7 +407,22 @@ fn handle_legacy(
                 // Fall through to Path 4 (keep legacy file as-is).
             }
             Err(other) => {
-                return Err(other).context("migrating identity to OS keychain");
+                // Same defensive pattern as handle_create's orphan-probe
+                // (PR #154). On headless Linux without a D-Bus session bus,
+                // keyring::Entry::set_password returns PlatformFailure, which
+                // keystore_os maps to KeystoreError::Backend rather than
+                // PlatformUnavailable. A hard error here crash-loops the
+                // server on every restart (production saw restart counter
+                // 14k+ over 5 days). Treat any backend error as "OS
+                // keychain unwritable, keep legacy on file" — preserves the
+                // existing identity exactly as-is and lets the server come
+                // up. A warn! makes the underlying error visible without
+                // crashing.
+                warn!(
+                    target: "mnemonic_core::identity::ensure",
+                    "OS keychain set during legacy migration errored: {other} — keeping legacy file as-is"
+                );
+                // Fall through to Path 4.
             }
         }
     }
@@ -978,6 +993,87 @@ mod tests {
             written.get("secret").is_some(),
             "file-fallback path must write legacy format with secret"
         );
+    }
+
+    // ---------------------------------------------------------------------------
+    // Test: legacy-migration backend error falls through to file-fallback
+    // instead of crashing startup. Regression for the 2026-06-04 production
+    // crash on a headless VPS where handle_legacy's `os.set()` returned
+    // KeystoreError::Backend (D-Bus session absent) — only PlatformUnavailable
+    // was treated as "fall through", any other backend error crash-looped
+    // the server (restart counter hit 14k+). Same defensive pattern as
+    // ensure_tolerates_backend_error_during_orphan_probe but for the legacy
+    // migration path.
+    // ---------------------------------------------------------------------------
+    #[test]
+    fn ensure_tolerates_backend_error_during_legacy_migration() {
+        // KeyStore that reports `available() == Ok(true)` and an empty
+        // `get()` (no orphan), but `set()` fails with Backend — simulates
+        // headless-Linux at the migration step.
+        struct FailingSetKeyStore;
+        impl KeyStore for FailingSetKeyStore {
+            fn get(&self) -> Result<Option<KeystoreEntry>, KeystoreError> {
+                Ok(None)
+            }
+            fn set(&self, _entry: &KeystoreEntry) -> Result<(), KeystoreError> {
+                Err(KeystoreError::Backend(anyhow::anyhow!(
+                    "simulated headless-Linux D-Bus set failure"
+                )))
+            }
+            fn remove(&self) -> Result<(), KeystoreError> {
+                Ok(())
+            }
+            fn available(&self) -> Result<bool, KeystoreError> {
+                Ok(true)
+            }
+            fn name(&self) -> &'static str {
+                "failing-set-mock"
+            }
+        }
+
+        let dir = TempDir::new().unwrap();
+        let identity_path = dir.path().join("identity.json");
+
+        // Seed a legacy identity.json with a real keypair.
+        let keypair = Keypair::new();
+        let pubkey = keypair.pubkey().to_string();
+        let secret = keypair.to_bytes();
+        let legacy_entry = KeystoreEntry {
+            secret,
+            pubkey_base58: pubkey.clone(),
+        };
+        std::fs::write(
+            &identity_path,
+            serde_json::to_string(&legacy_entry).unwrap(),
+        )
+        .unwrap();
+
+        let stores = KeyStores {
+            os: Some(Box::new(FailingSetKeyStore)),
+            file: Box::new(MemoryKeyStore::new()),
+            identity_path: identity_path.clone(),
+            readme_path: dir.path().join("README.txt"),
+        };
+
+        let id = ensure_with_stores(stores)
+            .expect("ensure must NOT crash on a Backend error during legacy migration");
+
+        // Identity preserved exactly — same pubkey, kept on file (Path 4).
+        assert_eq!(id.pubkey_base58, pubkey);
+        assert!(
+            matches!(id.storage, IdentityStorage::File),
+            "expected file fallback on backend error, got {:?}",
+            id.storage
+        );
+
+        // Legacy file untouched on disk.
+        let on_disk: Value =
+            serde_json::from_slice(&std::fs::read(&identity_path).unwrap()).unwrap();
+        assert!(
+            on_disk.get("secret").is_some(),
+            "legacy file must stay legacy"
+        );
+        assert_eq!(on_disk["pubkey_base58"].as_str().unwrap(), pubkey);
     }
 
     // ---------------------------------------------------------------------------
