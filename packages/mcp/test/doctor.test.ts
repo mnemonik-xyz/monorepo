@@ -278,10 +278,13 @@ describe("doctor", () => {
         failed!.detail.length,
         `${c.name}: repair hint nonempty`,
       ).toBeGreaterThan(0);
-      // For non-health failures, repair-hint should mention "repair" or "delete"/"run".
-      if (c.name !== "health-503") {
-        expect(failed!.detail).toMatch(/repair|delete|run/i);
-      }
+      // Per test-reviewer round 1 FINDING-3: every failure case must carry a
+      // repair hint per task spec — checkMcpHealth's 503 branch already
+      // includes "repair: ..." so the assertion applies uniformly.
+      expect(
+        failed!.detail,
+        `${c.name}: detail must mention repair / delete / run`,
+      ).toMatch(/repair|delete|run/i);
     }
   });
 });

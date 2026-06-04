@@ -56,40 +56,63 @@ export async function makeBinaryTarball(
 }
 
 /**
- * Build a malicious tarball whose entry literally encodes `../escape.txt`.
+ * Build a malicious tarball that contains BOTH a legitimate `mnemonic-mcp`
+ * entry AND a path-traversal entry named `../escape.txt`. If the zip-slip
+ * guard were bypassed:
+ *   - `mnemonic-mcp` would extract normally (so ensureBinaryCached would
+ *     succeed past the "did not produce binary" check), AND
+ *   - `../escape.txt` would land at `cacheDir/escape.txt` (binDir is
+ *     `cacheDir/bin`, and `../` resolves one level up).
  *
- * The extraction CWD in production is `cacheDir/bin` (binDir), so an entry
- * named `../escape.txt` — if the extract filter were bypassed — would resolve
- * to `cacheDir/bin/../escape.txt` = `cacheDir/escape.txt`. The test probes
- * exactly that path to detect a bypass.
+ * Per test-reviewer round 1 FINDING-2, packing only the traversal entry
+ * made the test's rejection incidental: ensureBinaryCached threw on missing
+ * binary regardless of whether the filter caught the traversal. Including
+ * a legitimate binary entry forces the rejection to come from the filter
+ * (or tar's built-in path-traversal protection), not from a layout error.
  *
- * `tar.create` resolves entries against `cwd`, so to make `tar.list` see
- * `../escape.txt` as the header name we use `prefix: ".."` (which prepends
- * to each entry's archive name without affecting where bytes are read).
+ * Construction strategy: tar v7's `prefix` option applies uniformly to all
+ * entries, so we cannot pack two entries with different name shapes in a
+ * single call. Instead we build two .tar.gz streams and concatenate the
+ * bytes — gzip and ustar both treat concatenated members as a valid stream.
  */
 export async function makeMaliciousTarball(
   destTar: string,
 ): Promise<{ tarPath: string; sha256: string }> {
   const stagingDir = await freshTempDir("mnemonik-mcp-evil-");
   try {
+    await writeFile(join(stagingDir, "mnemonic-mcp"), "#!/bin/sh\nexit 0\n", {
+      mode: 0o755,
+    });
     await writeFile(join(stagingDir, "escape.txt"), "pwned\n");
-    await mkdir(dirname(destTar), { recursive: true });
+
+    const benignTar = join(stagingDir, "_benign.tar.gz");
+    const evilTar = join(stagingDir, "_evil.tar.gz");
+    // Legitimate root-level entry: `mnemonic-mcp`.
+    await tar.create(
+      { gzip: true, file: benignTar, cwd: stagingDir, portable: true },
+      ["mnemonic-mcp"],
+    );
+    // Traversal entry: header name becomes `../escape.txt`.
     await tar.create(
       {
         gzip: true,
-        file: destTar,
+        file: evilTar,
         cwd: stagingDir,
         portable: true,
-        // Header name becomes `../escape.txt` — a path-traversal entry.
-        // tar normalises `prefix + entry` into the on-archive name.
         prefix: "..",
       },
       ["escape.txt"],
     );
+
     const { readFile } = await import("node:fs/promises");
-    const buf = await readFile(destTar);
+    await mkdir(dirname(destTar), { recursive: true });
+    const benignBytes = await readFile(benignTar);
+    const evilBytes = await readFile(evilTar);
+    const concatenated = Buffer.concat([benignBytes, evilBytes]);
+    await writeFile(destTar, concatenated);
+
     const h = createHash("sha256");
-    h.update(buf);
+    h.update(concatenated);
     return { tarPath: destTar, sha256: h.digest("hex") };
   } finally {
     await rm(stagingDir, { recursive: true, force: true });

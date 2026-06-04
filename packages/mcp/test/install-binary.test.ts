@@ -169,13 +169,25 @@ describe("ensureBinaryCached", () => {
     process.env.PATH = `${ghDir}:${ctx.origPath ?? ""}`;
 
     await ensureBinaryCached();
-    const recorded = await readFile(ctx.ghRecord, "utf8");
-    expect(recorded).toContain("--owner");
-    expect(recorded).toContain("mnemonik-xyz");
-    expect(recorded).toContain("--repo");
-    expect(recorded).toContain("mnemonik-xyz/monorepo");
-    expect(recorded).toContain("--signer-workflow");
-    expect(recorded).toContain(".github/workflows/release.yml");
+    // Per test-reviewer round 1 FINDING-1: substring `toContain` checks would
+    // pass even if the flag and its value were swapped or reordered, letting
+    // `gh attestation verify` receive malformed argv. Assert each flag's
+    // exact follower in the argv list.
+    const args = (await readFile(ctx.ghRecord, "utf8"))
+      .split("\n")
+      .filter((line) => line.length > 0);
+    const ownerIdx = args.indexOf("--owner");
+    const repoIdx = args.indexOf("--repo");
+    const wfIdx = args.indexOf("--signer-workflow");
+    expect(ownerIdx).toBeGreaterThan(-1);
+    expect(repoIdx).toBeGreaterThan(-1);
+    expect(wfIdx).toBeGreaterThan(-1);
+    expect(args[ownerIdx + 1]).toBe("mnemonik-xyz");
+    expect(args[repoIdx + 1]).toBe("mnemonik-xyz/monorepo");
+    expect(args[wfIdx + 1]).toBe(".github/workflows/release.yml");
+    // Also assert the leading subcommand sequence.
+    expect(args[0]).toBe("attestation");
+    expect(args[1]).toBe("verify");
   });
 
   it("gh_attestation_verify_rejection: throws when gh exits non-zero", async () => {
@@ -214,21 +226,24 @@ describe("ensureBinaryCached", () => {
     const ghDir = await makeMockGh({ exit: 0, recordPath: ctx.ghRecord });
     process.env.PATH = `${ghDir}:${ctx.origPath ?? ""}`;
 
-    // The fixture tarball's only entry is `../escape.txt`. With extract CWD
-    // = binDir (cacheDir/bin), an unfiltered tar.extract would otherwise
-    // land the entry at `cacheDir/bin/../escape.txt` = `cacheDir/escape.txt`.
+    // Per test-reviewer round 1 FINDING-2: the fixture now packs BOTH a
+    // legitimate `mnemonic-mcp` entry AND a traversal entry named
+    // `../escape.txt`. The install succeeds because the legitimate binary
+    // entry extracts normally; the traversal entry must be skipped by the
+    // filter (or by tar v7's built-in path-traversal protection) without
+    // landing at `cacheDir/escape.txt`. If the guard were absent, install
+    // would still succeed AND the escape probe would find the planted file.
     //
-    // tar v7 itself rejects path-traversal entries by default, AND our
-    // makeExtractFilter rejects them as defense-in-depth (proven directly
-    // by the `makeExtractFilter rejects SymbolicLink + Link entries` unit
-    // test on the next case). The probe asserts the integration outcome:
-    // no file is written outside binDir regardless of which layer caught it.
-    //
-    // Per code-reviewer round 1 ISSUE-002: the previous probe joined `..`
-    // onto cacheDir directly and would never see the bypass landing site.
-    await expect(ensureBinaryCached()).rejects.toBeTruthy();
+    // Per code-reviewer round 1 ISSUE-002: the probe path joins to the
+    // binDir parent (`cacheDir/escape.txt`) which is the exact landing
+    // site for an unfiltered `../escape.txt` entry when CWD=cacheDir/bin.
+    await ensureBinaryCached();
     const escapeProbe = join(cacheDir(), "escape.txt");
     await expect(stat(escapeProbe)).rejects.toThrow();
+    // Also assert the binary was actually extracted — proves the legitimate
+    // entry got through and the filter only rejected the malicious one.
+    const binarySt = await stat(join(cacheDir(), "bin", "mnemonik-mcp"));
+    expect(binarySt.isFile()).toBe(true);
   });
 
   it("makeExtractFilter rejects SymbolicLink + Link entries (zip-slip hardening unit)", () => {
