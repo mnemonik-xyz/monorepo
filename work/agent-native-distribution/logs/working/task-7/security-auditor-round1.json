@@ -1,0 +1,109 @@
+{
+  "round": 1,
+  "reviewer": "t7-security-auditor",
+  "commit": "4e2e111",
+  "task": "7",
+  "timestamp": "2026-06-05",
+  "verdict": "CONDITIONAL_PASS",
+  "summary": "Two medium findings and two low findings. No criticals. The supply-chain-critical path (SHA256 verification before extraction, gh attestation verify with hardcoded publisher pins, zip-slip hardening, atomic write, symlink refusal) is implemented correctly and tested. Criticals from the task spec brief are all satisfied. Required fixes before merge: M1 (RESTART_LINE in --check mode) and M2 (MNEMONIK_MCP_RELEASE_BASE_URL scheme validation). Low findings L1 and L2 are advisory.",
+  "findings": [
+    {
+      "id": "SAR7-M1",
+      "severity": "Medium",
+      "title": "RESTART_LINE printed in --check (dry-run) mode — contradicts dry-run contract",
+      "file": "packages/mcp/src/install-hosts.ts",
+      "line": 196,
+      "description": "In installHosts(), the RESTART_LINE ('If any of these agents is already running, please restart them.') is written to stdout after the candidate loop unconditionally whenever present.length > 0 (line 196). The --check guard inside the loop skips writes correctly (line 159-166) but the RESTART_LINE emission is not gated on !opts.check. AC10 specifies 'mnemonik-mcp install --check prints a plan ... nothing is written to disk' — the restart instruction is semantically a post-write directive. Printing it after a dry-run is misleading and could cause users to unnecessarily restart running agents.",
+      "attack_vector": "Not a direct security bypass, but violates the dry-run contract: an operator scripting around --check output would receive a false 'restart needed' signal. Also causes the TDD anchor test (restart_instruction_in_output) to pass in the wrong mode if the test called --check instead of apply.",
+      "evidence": "install-hosts.ts:196 — process.stdout.write(RESTART_LINE + '\\n') is outside any opts.check guard. The check_mode_no_writes test (install-hosts.test.ts:132-154) verifies mtime and no .tmp files but does NOT capture stdout, so it would not catch this regression.",
+      "fix": "Gate the RESTART_LINE behind !opts.check: change line 196 to: if (!opts.check) { process.stdout.write(RESTART_LINE + '\\n'); }. Also add a stdout assertion to the check_mode_no_writes test: expect(ctx.capturedStdout).not.toMatch(/please restart/)."
+    },
+    {
+      "id": "SAR7-M2",
+      "severity": "Medium",
+      "title": "MNEMONIK_MCP_RELEASE_BASE_URL accepts http:// with no scheme validation — weakens defense-in-depth",
+      "file": "packages/mcp/src/paths.ts",
+      "line": 56,
+      "description": "releaseBaseUrl() returns the MNEMONIK_MCP_RELEASE_BASE_URL env var value verbatim with no scheme or hostname validation. An attacker who can inject environment variables (e.g., local malware, compromised shell profile, or a wrapper script) can redirect downloads to an HTTP endpoint. A network-level MITM could then serve a tampered binary + a matching SHA256SUMS file, bypassing SHA256 verification entirely. The gh attestation verify step is the final defense, but defense-in-depth principle requires not relying on a single gate.",
+      "attack_vector": "Attacker sets MNEMONIK_MCP_RELEASE_BASE_URL=http://attacker.example in the user's environment. All subsequent ensureBinaryCached() invocations download the tarball and SHA256SUMS over HTTP. A network MITM substitutes a malicious binary and a SHA256SUMS file with matching digest. SHA256 check passes. gh attestation verify is invoked on the tampered binary — this is the sole surviving gate. If the gh binary itself is compromised or intercepted (less likely but possible), the entire chain fails.",
+      "evidence": "paths.ts:56 — process.env.MNEMONIK_MCP_RELEASE_BASE_URL ?? RELEASE_BASE_URL returns unvalidated string. Confirmed experimentally: setting MNEMONIK_MCP_RELEASE_BASE_URL=http://attacker.example produces http:// URLs passed to fetch().",
+      "fix": "In releaseBaseUrl(), validate the override: const override = process.env.MNEMONIK_MCP_RELEASE_BASE_URL; if (override) { try { const u = new URL(override); if (u.protocol !== 'https:') throw new Error('must be https'); } catch(e) { throw new Error('MNEMONIK_MCP_RELEASE_BASE_URL must be a valid https:// URL: ' + String(e)); } return override; } Note: this breaks current test setup (tests use a non-HTTPS BASE_URL). Tests must switch to a local HTTPS mock server or use http: and additionally set a MNEMONIK_MCP_ALLOW_HTTP=1 test-only env var that disables the scheme check. The latter is precedented by the Rust binary's --allow-custom-endpoint pattern (Decision 12)."
+    },
+    {
+      "id": "SAR7-L1",
+      "severity": "Low",
+      "title": "Test helper makeMockGh interpolates recordPath into a shell script body without sanitization",
+      "file": "packages/mcp/test/helpers.ts",
+      "line": 146,
+      "description": "The makeMockGh() helper embeds opts.recordPath directly into a sh script string via template interpolation. If opts.recordPath contained shell metacharacters (semicolons, backticks, dollar signs, etc.), the written script would be vulnerable to command injection when executed as the mock 'gh' binary. In practice, recordPath is always join(fixtures, 'gh-argv.log') where fixtures is a mkdtemp-generated path with only alphanumeric and hyphen characters, so no actual injection occurs. However, the pattern is latently unsafe if the helper is ever reused with a crafted path.",
+      "attack_vector": "Test-only code; exploitable only by a developer who calls makeMockGh with a crafted recordPath. Not a production security risk.",
+      "evidence": "helpers.ts:146-153 — const sh = `...printf \"%s\\\\n\" \"$arg\" >> \"${opts.recordPath}\"...`. Shell quoting around the path is present but only single-layer; a path containing \" (double quote) would break the quoting.",
+      "fix": "Replace shell interpolation with printf %q or use a Node-native solution: instead of a shell script, write a small Node script (#!/usr/bin/env node) that writes process.argv.slice(2).join('\\n') to a path hardcoded inside the script. This eliminates the shell entirely. Advisory — not a blocker for merge."
+    },
+    {
+      "id": "SAR7-L2",
+      "severity": "Low",
+      "title": "mcp-stdio.ts forwards all extra argv to the Rust binary, including --allow-custom-endpoint",
+      "file": "packages/mcp/src/mcp-stdio.ts",
+      "line": 7,
+      "description": "mcpStdio() calls spawn(bin, ['mcp-stdio', ...extraArgs]) where extraArgs = args.slice(1) from the entrypoint dispatcher (bin/mnemonik-mcp.ts:39). A user invoking 'mnemonik-mcp mcp-stdio --allow-custom-endpoint' would forward --allow-custom-endpoint to the underlying Rust binary, enabling MNEMONIC_HOSTED_ENDPOINT redirection (Decision 12 of the Rust binary). This is technically allowed by the spec but creates an undocumented path for a user to activate the endpoint-override flag without knowing about the Rust binary's CLI directly. No injection is possible (spawn args array, not shell string).",
+      "attack_vector": "A user or an automation script that invokes mnemonik-mcp mcp-stdio --allow-custom-endpoint with MNEMONIC_HOSTED_ENDPOINT set to an attacker URL would route participate-mode writes to the attacker server. However, this requires the user to both set the env var AND pass the flag, which is already the documented (if restricted) path in Decision 12.",
+      "evidence": "mcp-stdio.ts:7 — spawn(bin, ['mcp-stdio', ...extraArgs]). bin/mnemonik-mcp.ts:39 — return mcpStdio(args.slice(1)).",
+      "fix": "Document this passthrough behavior in USAGE and the mnemonik-mcp install help text. Optionally, add a denylist of forwarded flags (e.g., refuse --allow-custom-endpoint at the shim layer, requiring direct binary invocation). Advisory — not a blocker."
+    }
+  ],
+  "supply_chain_critical_checklist": {
+    "sha256_before_extraction": {
+      "status": "PASS",
+      "detail": "install-binary.ts:253-265 — SHA256 of tarball bytes verified against SHA256SUMS entry BEFORE writeFile to disk and BEFORE tar.extract. Ordering is correct: download → verify SHA → stage to disk → gh attest → extract."
+    },
+    "gh_attestation_publisher_pins": {
+      "status": "PASS",
+      "detail": "install-binary.ts:120-130 — spawn('gh', ['attestation','verify',artifactPath,'--owner','mnemonik-xyz','--repo','mnemonik-xyz/monorepo','--signer-workflow','.github/workflows/release.yml']). All three pins are hardcoded constants from paths.ts. No shell:true. ENOENT fails closed with explicit error. Non-zero exit fails closed."
+    },
+    "zip_slip_protection": {
+      "status": "PASS",
+      "detail": "makeExtractFilter (install-binary.ts:174-193) resolves every entry path against extractRoot via path.resolve + path.relative, rejects: (1) empty/dot relative path, (2) relative path starting with '..', (3) absolute relative path. Additionally rejects SymbolicLink and Link (hard-link) entry types. Verified experimentally: '../etc/passwd', './../../etc/passwd', 'bin/../../../etc/passwd', absolute paths, empty string all return false."
+    },
+    "install_dir_under_home": {
+      "status": "PASS",
+      "detail": "cacheDir() defaults to ~/.local/share/@mnemonik-xyz/mcp (XDG-compliant, within HOME). Override via MNEMONIK_MCP_CACHE_DIR for tests. Never /tmp or system paths by default."
+    },
+    "binary_mode_0755": {
+      "status": "PASS",
+      "detail": "install-binary.ts:294 — await chmod(target, 0o755). Cache dir created with 0o700 (line 239-244). Manifest sidecar written with mode 0o600 (writeManifestSidecar:197). Staged tarball written with 0o600 (line 269)."
+    },
+    "no_postinstall_script": {
+      "status": "PASS",
+      "detail": "package.json has no 'postinstall' key. Only 'prepublishOnly' (build + test). Lazy install on first invocation via ensureBinaryCached() called from bin/mnemonik-mcp.ts before each subcommand."
+    },
+    "doctor_uses_manifest_not_redownload": {
+      "status": "PASS",
+      "detail": "doctor.ts:checkBinaryIntegrity() reads manifest.json sidecar (line 115), extracts m.sha256, hashes the on-disk binary, compares. Does NOT fetch SHA256SUMS. This correctly closes the 'circular re-fetch' audit finding from round 1."
+    },
+    "symlink_out_of_home_refusal": {
+      "status": "PASS",
+      "detail": "assertNotSymlinkOutOfHome (install-hosts.ts:50-69) uses lstat (non-following) to detect symlink, then realpath to get resolved target, then checks target.startsWith(home+sep). Correctly handles both /home/user/file and /home/user (bare home) as valid. The macOS /var vs /private/var concern does not apply in practice (confirmed: os.homedir() returns /Users/syi which realpath does not transform on this system). Per-candidate error catch ensures one bad candidate does not block others."
+    },
+    "atomic_write_host_configs": {
+      "status": "PASS",
+      "detail": "atomicWriteJson (install-hosts.ts:98-113) stages at <path>.mnemonik.tmp (same directory for POSIX rename atomicity), fsyncs via fh.sync(), then renames over the original. Staged file written with mode 0o600. Temp file is same-dir, ensuring rename crosses no filesystem boundary."
+    }
+  },
+  "positive_findings": [
+    "SHA256 verification is fail-closed: missing SHA256SUMS entry throws, mismatch throws, no fallback path.",
+    "gh attestation verify is fail-closed: ENOENT (gh not installed) throws with explicit install guidance, non-zero exit throws, partial flag match is impossible because args are a JS array.",
+    "Malicious tarball test (makeMaliciousTarball) correctly uses tar.create prefix to create a genuine traversal entry, not a mock. The guard rejects it in practice.",
+    "cachedBinaryValid() is called before any network I/O — the fast path never downloads.",
+    "The staged tarball is deleted in a finally{} block regardless of success or failure.",
+    "Manifest sidecar separates binary SHA (for re-verify) from tarball SHA (audit record) — correct architecture.",
+    "No shell:true in any child_process.spawn call.",
+    "No user-controlled content flows into fetch() URLs at runtime (only committed binary-version.json and RELEASE_BASE_URL which is env-controlled but attestation-gated).",
+    "Token file check in doctor never logs JWT bytes; only expiry timestamp and file path appear in detail fields.",
+    "Identity check never logs pubkey value; only path.",
+    "Per-candidate atomicity in installHosts: one malformed candidate does not prevent other candidates from being updated.",
+    "parseSha256Sums uses a strict regex (exactly 64 hex chars) — no partial-match acceptance."
+  ],
+  "required_fixes": ["SAR7-M1", "SAR7-M2"],
+  "advisory_fixes": ["SAR7-L1", "SAR7-L2"]
+}

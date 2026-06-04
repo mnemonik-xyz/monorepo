@@ -1,0 +1,98 @@
+{
+  "round": 1,
+  "reviewer": "t7-test-reviewer",
+  "verdict": "conditional_pass",
+  "summary": "All 21 tests pass. TDD anchor coverage is complete and test quality is solid throughout. Three issues require fixes before this is a clean pass: one gap in the gh_attestation_verify_invocation test (argv ordering not asserted — wrong-order invocation would pass), one missing negative anchor for the malicious tarball case (the test accepts any truthy rejection, which means a guard failure that throws the wrong reason still passes), and one under-specified doctor parametrized failure (health-503 repair-hint check is explicitly skipped via the `if (c.name !== 'health-503')` guard, which contradicts the task spec requirement that every failure case has a non-empty repair hint).",
+  "test_run": {
+    "executed": true,
+    "pass_count": 21,
+    "fail_count": 0,
+    "total_anchors_required": 15,
+    "total_anchors_found": 15,
+    "supplemental_tests": 6
+  },
+  "anchor_coverage": [
+    { "anchor": "sha256_match_succeeds", "test": "install-binary.test.ts::sha256_match_succeeds", "covered": true, "quality": "good — asserts manifest.sha256 = on-disk binary SHA, manifest.tarball_sha256 = tarball SHA (split correctly), publisher fields, file mode 0o755, and both fetch URLs called." },
+    { "anchor": "sha256_mismatch_rejected", "test": "install-binary.test.ts::sha256_mismatch_rejected", "covered": true, "quality": "good — uses wrong 32-byte hex (not full 64 hex), which is also caught by parseSha256Sums's regex — worth noting but not a gap since the mismatch path is still exercised correctly." },
+    { "anchor": "gh_attestation_verify_invocation", "test": "install-binary.test.ts::gh_attestation_verify_invocation", "covered": true, "quality": "weak — see FINDING-1" },
+    { "anchor": "gh_attestation_verify_rejection", "test": "install-binary.test.ts::gh_attestation_verify_rejection", "covered": true, "quality": "good — mock gh exits 1, assert throws with exact message pattern, assert no manifest written." },
+    { "anchor": "zip_slip_hardened_extraction", "test": "install-binary.test.ts::zip_slip_hardened_extraction + makeExtractFilter unit", "covered": true, "quality": "partial — see FINDING-2" },
+    { "anchor": "symlink_entries_skipped", "test": "install-binary.test.ts::symlink_entries_skipped", "covered": true, "quality": "good — verifies that 'real-binary' IS extracted while the symlink entry is skipped, and the symlink target was not created on disk. Proves selectivity." },
+    { "anchor": "cached_binary_skips_re-download", "test": "install-binary.test.ts::cached_binary_skips_re-download", "covered": true, "quality": "good — real install primes cache, throwing fetch stub on second pass asserts zero network, gh recording absence proves gh not re-invoked." },
+    { "anchor": "non_destructive_merge", "test": "install-hosts.test.ts::non_destructive_merge", "covered": true, "quality": "good — checks 'other', 'mcpServers.foo', 'nested.keep' all survive; verifies original file had the pre-install content as substring." },
+    { "anchor": "idempotent", "test": "install-hosts.test.ts::idempotent", "covered": true, "quality": "good — byte-identical string equality between first and second pass." },
+    { "anchor": "all_candidates_absent_exits_0", "test": "install-hosts.test.ts::all_candidates_absent_exits_0", "covered": true, "quality": "good — asserts 'no host configs found' in stdout AND that restart line is absent (correct per spec)." },
+    { "anchor": "check_mode_no_writes", "test": "install-hosts.test.ts::check_mode_no_writes", "covered": true, "quality": "good — mtimeMs comparison before/after, explicit .mnemonik.tmp scan in both directories." },
+    { "anchor": "symlink_out_of_home_refuses", "test": "install-hosts.test.ts::symlink_out_of_home_refuses", "covered": true, "quality": "good — target content unchanged after refused write, uses off-home tempdir with explicit cleanup." },
+    { "anchor": "restart_instruction_in_output", "test": "install-hosts.test.ts::restart_instruction_in_output", "covered": true, "quality": "good — splits on \\n, checks lines.at(-1) for exact string." },
+    { "anchor": "happy_path (doctor)", "test": "doctor.test.ts::happy_path", "covered": true, "quality": "good — seedHappyFixture is thorough; asserts all 6 checks individually by name in stdout." },
+    { "anchor": "parametrized_failures (doctor)", "test": "doctor.test.ts::parametrized_failures", "covered": true, "quality": "partial — see FINDING-3" }
+  ],
+  "supplemental_coverage": [
+    { "test": "parseSha256Sums unit", "value": "catches cases where `*` prefix was stripped or comment lines were included; genuine gap would allow wrong artifact hash to pass." },
+    { "test": "cached_binary_with_mismatched_sha redownloads", "value": "exercise cache invalidation path — distinct from the 'valid cache returns fast' anchor." },
+    { "test": "empty_zero_byte_json_parses_as_empty_object", "value": "edge case from task spec; source confirmed via install-hosts.ts line 142-144." },
+    { "test": "malformed_json_aborts_per_candidate_but_does_not_touch_others", "value": "per-candidate atomicity contract from task spec edge cases section." },
+    { "test": "atomicWriteJson stages then renames", "value": "internal-only test; confirms no .mnemonik.tmp leaks after success." }
+  ],
+  "findings": [
+    {
+      "id": "FINDING-1",
+      "severity": "medium",
+      "category": "test_weakness",
+      "anchor": "gh_attestation_verify_invocation",
+      "title": "argv ordering not asserted — flags in wrong order would pass",
+      "detail": "The test reads the gh mock's recorded argv file and checks that `--owner`, `mnemonik-xyz`, `--repo`, `mnemonik-xyz/monorepo`, `--signer-workflow`, `.github/workflows/release.yml` all appear as substrings. However it does NOT assert that `--owner` precedes `mnemonik-xyz`, that `--repo` precedes `mnemonik-xyz/monorepo`, or that `--signer-workflow` precedes its value. A broken implementation that emitted `mnemonik-xyz --owner mnemonik-xyz/monorepo --repo` (flag-value swapped or reordered) would record all the right tokens and the test would pass, yet `gh` would receive malformed arguments and silently produce a false-positive attestation pass. The test structure (newline-separated argv dump, substring contains) cannot distinguish flag-from-value pairing.",
+      "fix": "After splitting the recorded file on newlines, assert the argument list as an ordered sequence. The simplest fix: `const args = recorded.split('\\n').filter(Boolean); const ownerIdx = args.indexOf('--owner'); const repoIdx = args.indexOf('--repo'); const wfIdx = args.indexOf('--signer-workflow'); expect(ownerIdx).toBeGreaterThan(-1); expect(args[ownerIdx + 1]).toBe('mnemonik-xyz'); expect(args[repoIdx + 1]).toBe('mnemonik-xyz/monorepo'); expect(args[wfIdx + 1]).toBe('.github/workflows/release.yml');`"
+    },
+    {
+      "id": "FINDING-2",
+      "severity": "low",
+      "category": "test_weakness",
+      "anchor": "zip_slip_hardened_extraction",
+      "title": "zip_slip test accepts any truthy rejection — escape path not separately verified",
+      "detail": "The zip_slip test calls `await expect(ensureBinaryCached()).rejects.toBeTruthy()`. This passes if the function throws for ANY reason, including the 'did not produce a binary at ...' message that fires when the filter silently drops the traversal entry and the binary is absent. The critical property — that no file escaped to the parent directory — IS checked via `stat(escapeProbe)`. The issue is subtle: makeMaliciousTarball includes `mnemonic-mcp` in the tarball root but its `prefix: '../escape'` applies to BOTH entries packed in `['inner/escape.txt']` (only the escape entry, not mnemonic-mcp which is also in staging dir but NOT packed because tar.create only packs `['inner/escape.txt']`). Result: there is no `mnemonic-mcp` in the tarball at all, so the 'did not produce binary' error fires regardless of whether the traversal entry was filtered or not. The escape stat check is the real guard but the rejection reason is incidental. The makeExtractFilter unit test does correctly drive the filter in isolation, which partially compensates.",
+      "fix": "Update makeMaliciousTarball to pack BOTH the legitimate `mnemonic-mcp` entry AND the traversal entry so that if the traversal guard is absent the install would succeed (and the stat check would actually find escape.txt). Or: after the rejection, also check `stat(join(cacheDir(), 'bin', 'mnemonic-mcp'))` to confirm partial extraction state, and add an assertion on the rejection message using `.rejects.toThrow(/archive layout|did not produce/)` to narrow which failure mode triggered."
+    },
+    {
+      "id": "FINDING-3",
+      "severity": "medium",
+      "category": "coverage_gap",
+      "anchor": "parametrized_failures (doctor)",
+      "title": "health-503 repair-hint assertion explicitly skipped — contradicts task spec",
+      "detail": "The parametrized_failures loop asserts that `failed.detail` matches `/repair|delete|run/i` for all failure cases EXCEPT health-503, which is exempted via `if (c.name !== 'health-503')`. The task spec (Task 7 TDD anchor: 'parametrized_failures') states 'assert non-empty repair_hint for that check' without any health-503 exception. Inspection of doctor.ts checkMcpHealth shows it DOES include a repair hint in the detail string ('repair: check https://status.mnemonik.xyz or your network' on 503). The skip is therefore unnecessarily conservative — the check would pass if the assertion were applied. The test as written would not catch a future refactor that accidentally drops the repair hint from the health check.",
+      "fix": "Remove the `if (c.name !== 'health-503')` guard from the repair-hint assertion. The health-503 detail string already satisfies `/repair/i`. If the intent was to allow doctor to report a network failure without a prescriptive 'repair' verb, use a weaker assertion like `expect(failed.detail.length).toBeGreaterThan(0)` (which is already asserted above it) and document the exemption explicitly."
+    },
+    {
+      "id": "FINDING-4",
+      "severity": "info",
+      "category": "test_quality",
+      "title": "captureStream restore is called manually mid-test rather than in afterEach — ordering fragile",
+      "detail": "In install-hosts.test.ts and doctor.test.ts, stdout capture is set up in beforeEach but `ctx.restoreStdout()` is called manually inside the test body before the assertion (`ctx.capturedStdout`). The afterEach also calls restoreStdout() unconditionally. If a test throws before the manual restore call, afterEach still restores stdout (correct), but `ctx.capturedStdout` will be empty because the sink was never flushed to the ctx field. Tests that fail mid-run could produce confusing assertion messages ('expected \"\" to contain ...' rather than the real captured content). Not a correctness issue for passing tests but makes debugging harder.",
+      "fix": "Move the `ctx.restoreStdout()` call into afterEach only (after the test body runs), and store the sink directly on ctx so it's always accessible. Alternatively, flush the sink value to ctx at the end of each test via `afterEach(() => { ctx.capturedStdout = outSink.value; })`."
+    },
+    {
+      "id": "FINDING-5",
+      "severity": "info",
+      "category": "test_quality",
+      "title": "mcp-stdio.ts has zero test coverage — acknowledged in diff but should be noted",
+      "detail": "mcp-stdio.ts is not covered by any vitest test. The coder's diff notes this and proposes smoke coverage only. Per the test-master methodology, this is acceptable for a subprocess passthrough that requires a real binary fixture. However the module IS exercised via the binary's bin dispatcher path which is also untested (the bin dispatcher is noted as smoke-only via --help). Between mcp-stdio.ts and bin/mnemonik-mcp.ts, the dispatch and subprocess-forwarding logic that links the npm shim to the underlying Rust binary is entirely without automated coverage. If a future change breaks the subprocess spawn args or the exit-code forwarding, no test will catch it until smoke.",
+      "fix": "Consider adding a minimal vitest test for mcp-stdio.ts using vi.mock('node:child_process') to assert: (a) spawn is called with the result of ensureBinaryCached() as the binary path, (b) 'mcp-stdio' is the first element of the args array, (c) stdio is ['inherit','inherit','inherit']. This is lower-maintenance than a real subprocess test and catches the most likely regressions."
+    }
+  ],
+  "test_pyramid_assessment": {
+    "smoke": "not applicable (no project-level smoke layer)",
+    "unit": "good — parseSha256Sums, makeExtractFilter, atomicWriteJson, and Visibility-like validation all tested in isolation; helpers.ts produces minimal real tarballs without extra deps",
+    "integration": "strong — install-binary tests drive the full download-verify-extract pipeline with real tar fixtures and a real mock-gh shim; install-hosts tests use real tempdir fs; doctor tests probe real file I/O",
+    "e2e": "intentionally deferred per tech-spec (netns offline test classified as E2E in tech-spec; not in this PR)"
+  },
+  "anti_pattern_checks": {
+    "tests_nothing": "none found",
+    "mocks_only_not_result": "none found — all key tests assert on actual file state, exit codes, or captured stdout content",
+    "no_assertions": "none found",
+    "excessive_mocking": "mcp-stdio.ts would benefit from targeted child_process mocking (FINDING-5) but existing tests do not over-mock"
+  },
+  "required_fixes": ["FINDING-1", "FINDING-3"],
+  "recommended_fixes": ["FINDING-2"],
+  "advisory": ["FINDING-4", "FINDING-5"]
+}

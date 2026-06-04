@@ -1,0 +1,33 @@
+{
+  "reviewer": "t7-code-reviewer",
+  "round": 2,
+  "commit": "c0fc702",
+  "verdict": "approved",
+  "summary": "All three round-1 findings correctly addressed. ISSUE-002 fix is sound: the malicious tarball now emits a genuine `../escape.txt` header (via prefix:'..') and the escape probe correctly targets cacheDir/escape.txt — the exact landing site if the filter were bypassed. ISSUE-001 fix guards RESTART_LINE behind !opts.check and the test assertion is added. ISSUE-003 fix removes both dynamic imports and adds rename to the static import. No new issues introduced. Approved.",
+  "issue_resolutions": [
+    {
+      "id": "ISSUE-002",
+      "round1_severity": "major",
+      "status": "resolved",
+      "verification": "makeMaliciousTarball now uses `prefix: '..'` + entry `escape.txt`. The on-archive header name is `../escape.txt`. With extract CWD=binDir (cacheDir/bin), a bypassed extract would write to cacheDir/bin/../escape.txt = cacheDir/escape.txt. The test probes join(cacheDir(), 'escape.txt') — the correct landing site. The comment in the test accurately describes both layers (tar v7 native rejection + makeExtractFilter defense-in-depth). The assertion `await expect(stat(escapeProbe)).rejects.toThrow()` will now genuinely catch a broken filter. Fix is correct."
+    },
+    {
+      "id": "ISSUE-001",
+      "round1_severity": "minor",
+      "status": "resolved",
+      "verification": "install-hosts.ts lines 196-200: RESTART_LINE is now wrapped in `if (!opts.check)`. The guard is in the correct position (after the per-candidate loop, before the firstError re-throw). install-hosts.test.ts lines 154-158: the new assertion `expect(ctx.capturedStdout).not.toMatch(/please restart/)` is correctly placed after `ctx.restoreStdout()` in the check_mode_no_writes test. Fix is correct."
+    },
+    {
+      "id": "ISSUE-003",
+      "round1_severity": "minor",
+      "status": "resolved",
+      "verification": "install-binary.ts lines 3-11: `rename` is now in the static import alongside the other fs/promises members. Both former dynamic import sites (writeManifestSidecar and ensureBinaryCached) now call rename directly. No remaining dynamic imports of node:fs/promises in install-binary.ts. Fix is correct."
+    }
+  ],
+  "new_issues": [],
+  "positive_observations": [
+    "The comment in makeMaliciousTarball is accurate and explains both the tar prefix mechanic and the rationale for the probe path — a future maintainer can verify the test's correctness without re-deriving it.",
+    "The test comment in zip_slip_hardened_extraction correctly notes that tar v7 itself rejects `..` entries natively, and frames makeExtractFilter as defense-in-depth, which is the right framing. The unit test for makeExtractFilter directly covers the filter's `../escape` rejection, so the integration test's probe is not the sole coverage path.",
+    "The RESTART_LINE guard placement is clean — it is inside the returned-early path (if present.length === 0 returns early before reaching the guard), so the absent-candidates path continues to not print the restart line, which remains correct."
+  ]
+}

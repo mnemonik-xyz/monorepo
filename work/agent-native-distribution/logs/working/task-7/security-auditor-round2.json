@@ -1,0 +1,44 @@
+{
+  "round": 2,
+  "reviewer": "t7-security-auditor",
+  "commits": ["c0fc702", "427ab4c"],
+  "task": "7",
+  "timestamp": "2026-06-05",
+  "verdict": "PASS",
+  "summary": "Both required fixes from round 1 are correctly implemented and verified. SAR7-M1 (RESTART_LINE in check mode) is gated behind !opts.check with a covering test assertion. SAR7-M2 (URL scheme validation) validates the override via new URL(), accepts https:// unconditionally, accepts http:// only with MNEMONIK_MCP_ALLOW_HTTP=1 escape hatch, and rejects file:// and other schemes even with the escape hatch. Six new unit tests cover all branches. All 5 scenarios verified experimentally against the compiled dist. Advisory findings L1 and L2 acknowledged as non-blockers and stand as recorded in round 1.",
+  "finding_resolutions": [
+    {
+      "id": "SAR7-M1",
+      "status": "RESOLVED",
+      "fix_location": "packages/mcp/src/install-hosts.ts:196-200",
+      "verification": "Guard `if (!opts.check)` wraps the RESTART_LINE write at line 198-200. Confirmed in source. Test check_mode_no_writes (install-hosts.test.ts:154-158) adds `ctx.restoreStdout(); expect(ctx.capturedStdout).not.toMatch(/please restart/)` — correctly asserts dry-run produces no restart directive."
+    },
+    {
+      "id": "SAR7-M2",
+      "status": "RESOLVED",
+      "fix_location": "packages/mcp/src/paths.ts:68-89",
+      "verification": "releaseBaseUrl() now parses override via `new URL()` (throws on malformed). Returns override immediately for https:. Allows http: only when MNEMONIK_MCP_ALLOW_HTTP === '1'. All other protocols (file:, ftp:, etc.) throw even with escape hatch. Experimentally verified: T1 http:// rejected, T2 http:// + escape hatch accepted, T3 https:// accepted, T4 file:// + escape hatch rejected, T5 default is https://github.com/. Six new unit tests in describe('releaseBaseUrl validation (SAR7-M2)') cover all branches including cross-test env var isolation via beforeEach/afterEach."
+    },
+    {
+      "id": "SAR7-L1",
+      "status": "ACKNOWLEDGED_ADVISORY",
+      "note": "Shell interpolation in makeMockGh test helper not addressed this round. Acceptable — mkdtemp paths are safe in practice. Non-blocking."
+    },
+    {
+      "id": "SAR7-L2",
+      "status": "ACKNOWLEDGED_ADVISORY",
+      "note": "mcp-stdio extra-args passthrough not addressed this round. No injection risk (spawn array). Non-blocking."
+    }
+  ],
+  "supply_chain_critical_checklist": {
+    "sha256_before_extraction": "PASS — unchanged from round 1",
+    "gh_attestation_publisher_pins": "PASS — unchanged from round 1",
+    "zip_slip_protection": "PASS — unchanged from round 1",
+    "install_dir_under_home": "PASS — unchanged from round 1",
+    "binary_mode_0755": "PASS — unchanged from round 1",
+    "no_postinstall_script": "PASS — unchanged from round 1",
+    "doctor_uses_manifest_not_redownload": "PASS — unchanged from round 1",
+    "symlink_out_of_home_refusal": "PASS — unchanged from round 1",
+    "url_scheme_enforcement": "PASS — new in round 2, SAR7-M2 fix verified"
+  }
+}

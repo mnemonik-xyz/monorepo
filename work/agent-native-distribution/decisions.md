@@ -226,3 +226,32 @@ Review details — in JSON files via links. QA report — in logs/working/.
 - `cargo clippy --workspace --all-targets --features mnemonic-mcp/test-support -- -D warnings` → clean
 - `cargo fmt --all -- --check` → clean
 - Release-binary smoke: `mcp-stdio` subcommand and `logout` subcommand verified via spawned-binary tests in `mcp/tests/cli_subcommands.rs`
+
+## Task 7: @mnemonik-xyz/mcp npm shim — lazy install, host-config wiring, doctor
+
+**Status:** Done
+**Commits:** 4e2e111 (impl) + c0fc702 (code-reviewer R1 fixes) + fbc7f38 (test-reviewer R1 fixes) + 427ab4c (security-auditor R1 SAR7-M2 fix)
+**Agent:** t7-coder
+**Summary:** New `packages/mcp/` npm workspace shipping the `mnemonik-mcp` Node bin. No `postinstall` (Decision 8) — first invocation lazy-installs the matching Rust binary from GitHub Releases via `ensureBinaryCached`: SHA256 verified against `SHA256SUMS`, `gh attestation verify` pinned to `--owner mnemonik-xyz --repo mnemonik-xyz/monorepo --signer-workflow .github/workflows/release.yml` (fails closed on missing `gh`), zip-slip-hardened `tar.extract` (rejects `..`/absolute paths and SymbolicLink + Link entry types), tar dep pinned to `^7.4.0` (CVE-2021-32803/04 line). Manifest sidecar records the cached binary's on-disk SHA256 (used by doctor's `binary-integrity` check — no re-download, closes the Round-1 audit's circular-trust finding) AND the original SHA256SUMS entry for audit. `install` subcommand (Decision 9) merges `mcpServers.mnemonik` into any present `~/.claude.json`, Claude Desktop, or `~/.cursor/mcp.json` with `lstat`-based symlink-out-of-home refusal, atomic temp+rename, per-candidate atomicity, idempotent, output ends with the exact AC9 restart-instruction line. `install --check` is mtime-stable dry-run (restart line suppressed). `doctor` runs 6 diagnostics (host config presence, /health, binary integrity, local config dir r/w, identity, token) with repair hints. `MNEMONIK_MCP_RELEASE_BASE_URL` validated as `https://` only; `MNEMONIK_MCP_ALLOW_HTTP=1` is the test-only escape hatch (analogous to Rust Decision 12).
+
+**Deviations:** None.
+
+**Reviews:**
+
+*Round 1 (4e2e111):*
+- code-reviewer: request_changes, 1 major + 2 minor → [logs/working/task-7/code-reviewer-round1.json](logs/working/task-7/code-reviewer-round1.json)
+- security-auditor: CONDITIONAL_PASS, 2 medium + 2 low → [logs/working/task-7/security-auditor-round1.json](logs/working/task-7/security-auditor-round1.json)
+- test-reviewer: conditional_pass, 2 required + 1 recommended + 2 advisory → [logs/working/task-7/test-reviewer-round1.json](logs/working/task-7/test-reviewer-round1.json)
+
+*Round 2 (c0fc702 + fbc7f38 + 427ab4c):*
+- code-reviewer: approved → [logs/working/task-7/code-reviewer-round2.json](logs/working/task-7/code-reviewer-round2.json)
+- security-auditor: PASS → [logs/working/task-7/security-auditor-round2.json](logs/working/task-7/security-auditor-round2.json)
+- test-reviewer: pass → [logs/working/task-7/test-reviewer-round2.json](logs/working/task-7/test-reviewer-round2.json)
+
+**Verification:**
+- `cd packages/mcp && npx vitest run` → 27/27 pass (15 TDD anchors + 12 supplemental incl. 6 new SAR7-M2 URL-validation tests)
+- `cd packages/mcp && npx tsc --noEmit` → clean
+- `cd packages/mcp && npm run build` → emits `dist/bin/mnemonik-mcp.js`
+- Smoke (task §Verification Steps): tempdir-HOME `install --check` mtime-stable; `install` adds `mcpServers.mnemonik` while preserving unrelated keys; restart line printed only in apply mode.
+- Tar version pinned: `^7.4.0` (CVE-2021-32803/04 mitigation).
+- `gh` CLI required at runtime — README documents the install link.

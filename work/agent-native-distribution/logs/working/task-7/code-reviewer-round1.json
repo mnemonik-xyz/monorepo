@@ -1,0 +1,101 @@
+{
+  "reviewer": "t7-code-reviewer",
+  "round": 1,
+  "commit": "4e2e111",
+  "verdict": "request_changes",
+  "summary": "Solid implementation of all 7 TDD anchors; architecture, security fundamentals, and test coverage are strong. Four issues require changes before approval: one major logic bug (malicious tarball test allows extraction to succeed before probing outside cache dir), two minor readability/correctness gaps (check_mode silent restart line, install-hosts exits without surfacing firstError as exit code), and one informational note on symlink-out-of-home edge case for canonical-path-equal-home targets.",
+  "dimensions": {
+    "1_architectural_patterns": {
+      "score": "pass",
+      "notes": "Clean separation: paths.ts holds all location logic (good single source); install-binary owns download+verify; install-hosts owns config mutation; doctor is read-only diagnostics. No circular imports detected. mcp-stdio is a thin passthrough as intended. bin/mnemonik-mcp.ts dispatches without owning logic."
+    },
+    "2_separation_of_concerns": {
+      "score": "pass",
+      "notes": "Each module has one responsibility. install-binary's ensureBinaryCached is slightly long (90 lines) but the sequential steps (download → verify → stage → gh-attest → extract → rename → chmod → manifest) are inherently coupled by spec. No SRP violations."
+    },
+    "3_readability_and_maintainability": {
+      "score": "minor",
+      "notes": "One issue: install-hosts.ts check mode prints the RESTART_LINE only in the non-check branch (the final `process.stdout.write(RESTART_LINE + '\\n')` is outside the per-candidate loop but inside installHosts — it runs unconditionally, including in check mode). In check mode no files are written so the restart instruction is misleading. See ISSUE-001.",
+      "issues": ["ISSUE-001"]
+    },
+    "4_error_handling_and_logging": {
+      "score": "minor",
+      "notes": "install-hosts catches per-candidate errors, records firstError, continues to the next candidate, then throws firstError at the end. The throw propagates to main() where it is caught and process.exit(1) is called. This is correct. However, the exit code from main() when installHosts throws is 1 — which is fine — but the outer catch swallows the error message without re-printing to stderr (the catch in bin/mnemonik-mcp.ts does `process.stderr.write(msg)` then `process.exit(1)`, which is correct). No silent swallowing detected. Logging is absent (by design for a CLI tool writing to stdout/stderr directly). No secrets in logs. The one concern: if firstError is undefined but a candidate processing error occurs (impossible given the catch always sets firstError), code would pass. Not a live bug."
+    },
+    "5_type_safety": {
+      "score": "pass",
+      "notes": "Strict TypeScript throughout (strict, noUncheckedIndexedAccess, exactOptionalPropertyTypes). Use of `as` casts is limited and guarded: `JSON.parse(...) as Record<string, unknown>` is the idiomatic safe pattern here since the parsed value is validated before use. `m[1]!` and `m[2]!` non-null assertions after a regex match with named groups are safe. PlatformKey type is well-defined. Manifest interface is strongly typed."
+    },
+    "6_testing_coverage": {
+      "score": "major",
+      "notes": "All 15 task TDD anchors are present plus 6 supplemental tests. However, the zip_slip_hardened_extraction test has a logic flaw: the malicious tarball produced by makeMaliciousTarball does NOT include a `mnemonic-mcp` file at the root (the `prefix: '../escape'` applies to the `inner/escape.txt` entry), so extraction will fail to find the binary and the test correctly expects a throw. BUT the test then probes `join(cacheDir(), '..', 'escape.txt')` which is the PARENT of cacheDir — not necessarily `${cacheDir}/../escape.txt` relative to the extraction CWD (which is binDir = cacheDir/bin). The traversal entry path inside the tarball is `../escape/inner/escape.txt` relative to the extract CWD (binDir), which would resolve to `${cacheDir}/inner/escape.txt` — still inside cacheDir, not escaping home. The test checks the wrong escape target path; it does not actually verify that the traversal entry was rejected vs simply landed somewhere non-harmful. See ISSUE-002.",
+      "issues": ["ISSUE-002"]
+    },
+    "7_dependencies_management": {
+      "score": "pass",
+      "notes": "tar pinned to ^7.4.0 per CVE-2021-32803/04 mitigation. Only one runtime dependency (tar) — all others are devDeps. Built-in Node fetch used (no undici). gh CLI is a runtime requirement documented in README, not a Node dep. No @types/tar in dependencies (correctly in devDependencies). vitest v1.6.0 — current stable. No version conflicts detected."
+    },
+    "8_security_considerations": {
+      "score": "pass",
+      "notes": "gh attestation verify is invoked with all three pins (--owner, --repo, --signer-workflow) hardcoded from paths.ts constants. Fails closed on ENOENT (gh not installed). SHA256 is verified before attestation — correct order (attestation verifies provenance, SHA verifies bytes; doing SHA first is a cheap fast fail). Zip-slip filter correctly checks rel.startsWith('..') AND isAbsolute(rel) AND rel==='' edge case. Symlink skip covers both SymbolicLink and Link (hard link). atomicWriteJson uses fsync + rename — correct POSIX atomic pattern. Manifest sidecar written with mode 0o600. Binary written with 0o755, cache dir 0o700. No secrets hardcoded. MNEMONIK_MCP_RELEASE_BASE_URL env override exists for tests — acceptable since the shim has no --allow-custom-endpoint equivalent (unlike the Rust binary), but the override is not security-sensitive (it only affects where to download FROM, not where to send user data). homedir() correctly prefers $HOME over os.homedir() for test isolation."
+    },
+    "9_performance": {
+      "score": "pass",
+      "notes": "cachedBinaryValid() is called on every invocation and does two fs.stat + one readFile + one SHA256 computation. SHA256 of the binary on every cold invocation is acceptable for a CLI tool (binary is ~10MB). Hot path (cache valid) returns immediately after SHA check. No N+1 issues."
+    },
+    "10_cross_file_consistency": {
+      "score": "pass",
+      "notes": "All imports verified: install-binary imports from paths.js — all named exports exist. doctor imports from install-hosts.js (hostCandidates) and paths.js (binaryPath, homedir, manifestPath) — all present. bin/mnemonik-mcp.ts imports doctor, installHosts, mcpStdio — all match exported function names and signatures. install-hosts imports binaryPath, homedir from paths.js — correct. Tests import _internal objects — all three modules export _internal with the expected shapes."
+    },
+    "11_resource_management": {
+      "score": "minor",
+      "notes": "atomicWriteJson opens a file handle via `open()` and closes it in a finally block — correct. The dynamic import of `node:fs/promises` inside writeManifestSidecar and ensureBinaryCached (for rename) is unnecessary since rename is imported at the top of install-binary.ts. The dynamic import works but creates a minor readability issue. See ISSUE-003."
+    }
+  },
+  "issues": [
+    {
+      "id": "ISSUE-001",
+      "severity": "minor",
+      "dimension": "3_readability_and_maintainability",
+      "file": "packages/mcp/src/install-hosts.ts",
+      "location": "installHosts() — the final `process.stdout.write(RESTART_LINE + '\\n')` statement",
+      "description": "The RESTART_LINE is printed unconditionally at the end of installHosts(), including when `opts.check === true`. In check mode no files are written, so the restart instruction is confusing and misleading to the user. The all_candidates_absent test correctly asserts `expect(ctx.capturedStdout).not.toMatch(/please restart/)` for the absent-candidates case, but there is no test asserting that check mode also suppresses the restart line.",
+      "reproduction": "Run `mnemonik-mcp install --check` with any host config present — the output will include the restart instruction even though nothing was modified.",
+      "fix": "Guard the RESTART_LINE behind `if (!opts.check)`. Also add an assertion to the check_mode_no_writes test: `expect(capturedStdout).not.toMatch(/please restart/)` after running install with check:true.",
+      "code_suggestion": "// At the end of installHosts:\nif (!opts.check) {\n  process.stdout.write(RESTART_LINE + '\\n');\n}\nif (firstError !== undefined) throw firstError;"
+    },
+    {
+      "id": "ISSUE-002",
+      "severity": "major",
+      "dimension": "6_testing_coverage",
+      "file": "packages/mcp/test/helpers.ts + packages/mcp/test/install-binary.test.ts",
+      "location": "makeMaliciousTarball() + zip_slip_hardened_extraction test",
+      "description": "The malicious tarball is created with `tar.create({ prefix: '../escape', cwd: stagingDir }, ['inner/escape.txt'])`. The `prefix` option prepends to each entry name, so the archive contains an entry named `../escape/inner/escape.txt`. When extracted into binDir (cacheDir/bin), the filter receives entryPath='../escape/inner/escape.txt'. resolve(binDir, '../escape/inner/escape.txt') resolves to cacheDir/escape/inner/escape.txt — which is INSIDE cacheDir (not outside home). The filter's `rel.startsWith('..')` check against binDir would actually produce `rel = '../escape/inner/escape.txt'` (relative from binDir), which WOULD be caught. So the filter does reject it correctly. However, the test's escape probe `join(cacheDir(), '..', 'escape.txt')` checks for a file at `{parent-of-cacheDir}/escape.txt` — which is never what the tarball would create even on bypass (it would create `../escape/inner/escape.txt` relative to binDir = cacheDir/../escape/inner/escape.txt = one level up from cacheDir in the escape subdir). The probe path is wrong and would always pass even if the filter were broken. The test asserts the right outcome (no escape) via the wrong mechanism (incorrect probe path).",
+      "fix": "Fix the probe path to check where the entry would actually land if the filter were bypassed: `const escapeProbe = join(cacheDir(), 'bin', '..', 'escape', 'inner', 'escape.txt')` — i.e., resolve the tarball's intended traversal path relative to binDir. Alternatively, restructure makeMaliciousTarball to pack a simpler entry `../escape.txt` (one level up from extraction CWD) so the probe is straightforward: `join(cacheDir(), 'escape.txt')`.",
+      "code_suggestion": "// In makeMaliciousTarball — simpler traversal entry:\nawait writeFile(join(stagingDir, 'escape.txt'), 'pwned\\n');\n// Pack with prefix that places it one level above extraction CWD:\n// Use a custom approach: pack 'escape.txt', then rename entry to '../escape.txt'\n// Simplest: just write the file as '../escape.txt' by using a staging layout:\nconst escapeDir = join(stagingDir, '..');\n// ... or restructure to use a known relative path that resolves outside binDir.\n\n// In the test:\nconst escapeProbe = join(cacheDir(), 'escape.txt'); // one level up from binDir=cacheDir/bin, inside cacheDir root\nawait expect(stat(escapeProbe)).rejects.toThrow();"
+    },
+    {
+      "id": "ISSUE-003",
+      "severity": "minor",
+      "dimension": "11_resource_management",
+      "file": "packages/mcp/src/install-binary.ts",
+      "location": "writeManifestSidecar() line ~198, ensureBinaryCached() line ~285",
+      "description": "Both functions use `const { rename } = await import('node:fs/promises')` as a dynamic import inside the function body, despite `rename` being trivially available as a static import at the top of the file (alongside chmod, mkdir, readFile, rm, stat, writeFile). This is dead complexity with no benefit — `node:fs/promises` is not conditionally available, and the dynamic import does not improve tree-shaking in a Node.js CLI context.",
+      "fix": "Add `rename` to the static import at line 3: `import { chmod, mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';` and remove both dynamic import expressions.",
+      "code_suggestion": "// Line 3 of install-binary.ts:\nimport { chmod, mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';\n\n// In writeManifestSidecar — remove the dynamic import, just call rename directly:\nawait rename(tmp, manifestPath());\n\n// In ensureBinaryCached — same:\nawait rename(extractedSource, target);"
+    }
+  ],
+  "positive_observations": [
+    "Security fundamentals are correct and complete: gh attestation verify has all three pins hardcoded; fails closed on missing gh CLI; SHA256 verified before attestation; zip-slip filter handles the three escape vectors (../, /abs, SymbolicLink, Link); symlink-out-of-home check uses realpath correctly; atomic write uses fsync + rename.",
+    "All 15 TDD anchor tests are present and mechanically correct. The supplemental tests (malformed JSON, zero-byte JSON, atomicWriteJson unit test, cached_binary_with_mismatched_sha) add meaningful edge-case coverage beyond the anchors.",
+    "Type safety is excellent — strict mode with noUncheckedIndexedAccess and exactOptionalPropertyTypes enabled. No inappropriate `any` usage.",
+    "The paths.ts module cleanly centralises all location logic with proper env-var overrides for test isolation (MNEMONIK_MCP_CACHE_DIR, HOME, XDG_DATA_HOME). This makes the test infrastructure clean.",
+    "Doctor's token-file-integrity check correctly treats expired token as a soft pass (not hard fail) per the spec, while malformed JSON is a hard fail — exactly as specified.",
+    "installHosts correctly implements per-candidate atomicity: errors on one candidate don't abort others; firstError is surfaced at the end.",
+    "check mode correctly skips writes and the mtime assertion in the test is a strong mechanical guarantee (not just content comparison).",
+    "No postinstall script (Decision 8 compliance verified in package.json).",
+    "tar dependency pinned to ^7.4.0 per CVE mitigation requirement."
+  ],
+  "blocking_for_approval": ["ISSUE-002"],
+  "non_blocking_requested": ["ISSUE-001", "ISSUE-003"]
+}
