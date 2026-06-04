@@ -20,16 +20,23 @@ use _helpers::TestServer;
 use mnemonic_core::storage::Visibility;
 use serde_json::{json, Value};
 
+/// Round 2 / SAR1-L2: mint() now requires `content_hash` to be exactly
+/// 64 ASCII-hex characters. Helper picks a deterministic fixture hash.
+fn fixture_hash() -> String {
+    blake3::hash(b"fixture-content").to_hex().to_string()
+}
+
 #[tokio::test]
 async fn mint_without_jwt_returns_unauthorized() {
     // request_public_write_confirmation is NOT in ALLOWLIST_METHODS — the
-    // bearer-auth middleware rejects an anonymous call with -32001.
+    // bearer-auth middleware rejects an anonymous call with -32001 BEFORE
+    // any content_hash validation runs.
     let server = TestServer::builder().build();
     let result = server
         .call_tool(
             None,
             "request_public_write_confirmation",
-            json!({ "content_hash": "abcd" }),
+            json!({ "content_hash": fixture_hash() }),
         )
         .await;
     assert_eq!(
@@ -49,7 +56,7 @@ async fn mint_with_jwt_returns_token() {
         .call_tool(
             Some(&owner),
             "request_public_write_confirmation",
-            json!({ "content_hash": "abcd" }),
+            json!({ "content_hash": fixture_hash() }),
         )
         .await;
     assert_eq!(result.status, axum::http::StatusCode::OK);
@@ -57,6 +64,40 @@ async fn mint_with_jwt_returns_token() {
     assert!(inner["confirmation_token"].is_string());
     assert!(inner["jti"].is_string());
     assert!(inner["expires_at"].is_number());
+}
+
+#[tokio::test]
+async fn mint_with_malformed_content_hash_rejected() {
+    // SAR1-L2 (round 1 security audit): content_hash must be 64
+    // ASCII-hex characters. A short or non-hex value returns
+    // -32602 InvalidParams BEFORE the ledger is touched, so a malicious
+    // authenticated caller cannot inflate the in-process DashMap with
+    // garbage entries.
+    let server = TestServer::builder().build();
+    let owner = server.server_pubkey();
+    for bad in [
+        "abcd",
+        "not-hex-input-here-just-letters-and-such",
+        "",
+        &"f".repeat(63),
+        &"g".repeat(64),
+    ] {
+        let result = server
+            .call_tool(
+                Some(&owner),
+                "request_public_write_confirmation",
+                json!({ "content_hash": bad }),
+            )
+            .await;
+        let err = result.expect_error();
+        assert_eq!(err["code"], -32602, "{bad:?} must return -32602");
+        assert_eq!(err["data"]["field"], "content_hash");
+    }
+    assert_eq!(
+        server.state.confirmation_ledger.len(),
+        0,
+        "malformed mint must NOT add an entry to the ledger"
+    );
 }
 
 #[tokio::test]

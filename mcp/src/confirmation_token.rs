@@ -174,9 +174,23 @@ impl ConfirmationLedger {
         // same jti at the same time, at most one observes `Some(_)` here;
         // the other sees `None` and returns `Invalid`.
         let removed = self.entries.remove_if(jti, |_, entry| {
+            // SAR1-I2 (round 1 security audit, agent-native-distribution
+            // Task 4): check expiry FIRST so expired entries skip the
+            // HMAC computation. The HMAC step is not free; avoiding it
+            // for clearly-expired replay attempts is cheaper and makes
+            // the expiry semantics explicit. The entry is left in the
+            // map (predicate returns false → no removal); the background
+            // eviction loop sweeps it on the next 60s tick.
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            if now >= entry.expires_at {
+                return false;
+            }
             // Reconstruct the expected HMAC from request fields + stored
-            // expires_at (we never trust client-supplied expiry — only the
-            // expiry we minted is in scope for HMAC reconstruction).
+            // expires_at (we never trust client-supplied expiry — only
+            // the expiry we minted is in scope for HMAC reconstruction).
             let expected = compute_hmac(
                 &self.hmac_secret,
                 content_hash,
@@ -190,11 +204,7 @@ impl ConfirmationLedger {
             // Both predicates must hold for the entry to be removed.
             let ct_stored = ct_eq(&entry.hmac, &expected);
             let ct_client = ct_eq(&entry.hmac, &presented);
-            let now = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs();
-            ct_stored && ct_client && now < entry.expires_at
+            ct_stored && ct_client
         });
         if removed.is_some() {
             Ok(())
@@ -373,6 +383,36 @@ mod tests {
         assert_eq!(removed, 100, "TTL=0 ledger evicts all rows");
         assert_eq!(ledger.len(), 0);
         assert_eq!(live.len(), 1, "non-expired ledger keeps rows");
+    }
+
+    #[test]
+    fn consume_expired_rejected() {
+        // F3 (test-reviewer round 1, agent-native-distribution Task 4):
+        // an expired-but-not-yet-evicted entry must be rejected by
+        // consume() with `ConfirmError::Invalid`. TTL=0 makes the entry
+        // born-expired (expires_at == now at mint, then `now >=
+        // expires_at` on the next consume call). The entry stays in the
+        // map until the background eviction sweep, but consume rejects
+        // it on sight.
+        let ledger = ConfirmationLedger::with_config(Duration::ZERO, Duration::from_secs(60));
+        let (token, jti, _exp) = ledger.mint("hash-1", "owner", Visibility::Public);
+        // The entry is in the map but already expired.
+        assert_eq!(ledger.len(), 1, "born-expired entry still occupies a slot");
+        let err = ledger
+            .consume(&token, &jti, "hash-1", "owner", Visibility::Public)
+            .unwrap_err();
+        assert_eq!(err, ConfirmError::Invalid);
+        // The predicate returned false → remove_if did NOT remove the
+        // entry; it stays until the background eviction sweeps it.
+        assert_eq!(
+            ledger.len(),
+            1,
+            "expired consume must not remove the entry — eviction owns that path"
+        );
+        // Subsequent eviction clears it.
+        let removed = ledger.evict_expired();
+        assert_eq!(removed, 1);
+        assert_eq!(ledger.len(), 0);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

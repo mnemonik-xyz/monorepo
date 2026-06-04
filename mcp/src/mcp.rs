@@ -1624,14 +1624,26 @@ async fn handle_tool_call(
                 .as_str()
                 .ok_or_else(|| JsonRpcError::simple(-32603, "query required"))?;
             let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(5) as usize;
-            // Decision 5 / AC13 — anonymous callers (no JWT) see only
-            // `visibility='public'` rows; authenticated callers see all of
-            // their own. `jwt_sub.is_none()` is the anonymous-recall
-            // discriminator surfaced from the dispatcher.
-            let visibility_filter = if jwt_sub.is_none() {
-                Some(mnemonic_core::storage::Visibility::Public)
+            // Decision 5 / AC13 — agent-native-distribution (round 2 / SAR1-M1):
+            //
+            //   - Anonymous caller (`jwt_sub.is_none()`): scope is the
+            //     CROSS-OWNER public pool. Pass `owner_pubkey = None` AND
+            //     `visibility_filter = Some(Public)`. The storage layer
+            //     drops the owner predicate; only `visibility = 'public'`
+            //     rows surface (private rows stay invisible regardless of
+            //     owner — privacy contract preserved).
+            //   - Authenticated caller: scope is the caller's own corpus
+            //     across both visibilities. Pass `owner_pubkey = Some(sub)`
+            //     AND `visibility_filter = None`.
+            //
+            // SAR1-M1 round-1 had `owner_pubkey = owner_pubkey` (server
+            // keypair fallback) for anonymous — that scoped anonymous recall
+            // to server-keypair rows only, contradicting the user-spec
+            // "public part of the pool". Fixed here.
+            let (recall_owner, visibility_filter): (Option<&str>, _) = if jwt_sub.is_none() {
+                (None, Some(mnemonic_core::storage::Visibility::Public))
             } else {
-                None
+                (Some(owner_pubkey), None)
             };
             // DB-only: lock, query, release
             let store = state.store.lock().unwrap();
@@ -1641,7 +1653,7 @@ async fn handle_tool_call(
                 state.embedder.as_ref(),
                 query,
                 limit,
-                owner_pubkey,
+                recall_owner,
                 visibility_filter,
             )
         }
@@ -1682,6 +1694,23 @@ async fn handle_tool_call(
                         &args.get("content_hash").cloned().unwrap_or(Value::Null),
                     )
                 })?;
+            // SAR1-L2 (round 1 security audit, agent-native-distribution Task 4):
+            // require the `content_hash` to be exactly 64 lowercase-or-uppercase
+            // hex characters — the canonical blake3 hex shape. Without this,
+            // an authenticated caller can spam `mint()` with arbitrary garbage
+            // hashes to inflate the in-process DashMap until the 60s eviction
+            // sweep catches up; the validation moves the boundary up to the
+            // dispatcher so only well-formed blake3 hex tokens land in the
+            // ledger. A consume against a garbage-bound token would still
+            // fail (content_hash recomputed from actual content at consume
+            // time), but accepting bad inputs at mint is a DoS amplifier we
+            // can close cheaply.
+            if content_hash.len() != 64 || !content_hash.chars().all(|c| c.is_ascii_hexdigit()) {
+                return Err(invalid_params(
+                    "content_hash",
+                    &Value::String(content_hash.to_string()),
+                ));
+            }
             let (token, jti, expires_at) = state.confirmation_ledger.mint(
                 content_hash,
                 owner_pubkey,

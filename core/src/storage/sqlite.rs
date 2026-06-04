@@ -82,10 +82,11 @@ CREATE TABLE IF NOT EXISTS lineage_edges (
 CREATE INDEX IF NOT EXISTS idx_lineage_edges_child ON lineage_edges(child_id);
 "#;
 
-/// SQL backing `AttestationStore::search` when the caller passes
-/// `visibility_filter = None` (authenticated path — sees all of the owner's
-/// own rows regardless of visibility, per Decision 5). Owner scope is the
-/// mandatory tenant predicate from Decision 9.
+/// SQL backing `AttestationStore::search` when the caller passes a
+/// `Some(owner)` AND `visibility_filter = None` (authenticated path —
+/// sees all of the owner's own rows regardless of visibility per
+/// Decision 5). Owner scope is the mandatory tenant predicate from
+/// Decision 9.
 const SEARCH_SQL_ALL: &str = "SELECT a.attestation_id, a.content, a.content_hash, a.tags,
             a.solana_tx, a.arweave_tx, a.created_at, a.write_mode,
             a.visibility, ae.embedding
@@ -93,17 +94,32 @@ const SEARCH_SQL_ALL: &str = "SELECT a.attestation_id, a.content, a.content_hash
      JOIN attestation_embeddings ae ON a.attestation_id = ae.attestation_id
      WHERE a.owner_pubkey = ?";
 
-/// SQL backing `AttestationStore::search` when the caller passes
-/// `visibility_filter = Some(v)` (anonymous-recall path — `Some(Public)` —
-/// or an explicit owner-filtered enumeration — `Some(Private)`). Owner
-/// scope is preserved; visibility is bound via `ToSql`, never interpolated
-/// as text.
+/// SQL backing `AttestationStore::search` when the caller passes a
+/// `Some(owner)` AND `Some(visibility)` (owner-scoped + visibility-filtered).
+/// Owner scope is preserved; visibility is bound via `ToSql`, never
+/// interpolated as text.
 const SEARCH_SQL_FILTERED: &str = "SELECT a.attestation_id, a.content, a.content_hash, a.tags,
             a.solana_tx, a.arweave_tx, a.created_at, a.write_mode,
             a.visibility, ae.embedding
      FROM attestations a
      JOIN attestation_embeddings ae ON a.attestation_id = ae.attestation_id
      WHERE a.owner_pubkey = ? AND a.visibility = ?";
+
+/// SQL backing `AttestationStore::search` when the caller passes
+/// `owner_pubkey = None` AND `visibility_filter = Some(v)` — the
+/// cross-owner anonymous-public path (agent-native-distribution Task 4 /
+/// SAR1-M1). Drops the owner predicate; the caller is responsible for
+/// pairing this with `Some(Visibility::Public)` so non-public rows do not
+/// leak. The `owner_pubkey is NULL` case from legacy unmigrated rows is
+/// excluded so anonymous callers don't accidentally surface unmigrated
+/// content; only rows with a non-NULL owner AND public visibility appear.
+const SEARCH_SQL_CROSS_OWNER_VIS: &str =
+    "SELECT a.attestation_id, a.content, a.content_hash, a.tags,
+            a.solana_tx, a.arweave_tx, a.created_at, a.write_mode,
+            a.visibility, ae.embedding
+     FROM attestations a
+     JOIN attestation_embeddings ae ON a.attestation_id = ae.attestation_id
+     WHERE a.owner_pubkey IS NOT NULL AND a.visibility = ?";
 
 pub struct SqliteStore {
     conn: Connection,
@@ -699,7 +715,7 @@ impl AttestationStore for SqliteStore {
     fn search(
         &self,
         query_embedding: &[f32],
-        owner_pubkey: &str,
+        owner_pubkey: Option<&str>,
         visibility_filter: Option<Visibility>,
         limit: usize,
     ) -> anyhow::Result<Vec<SearchResult>> {
@@ -752,16 +768,37 @@ impl AttestationStore for SqliteStore {
             })
         };
 
-        let mut results: Vec<SearchResult> = match visibility_filter {
-            Some(v) => {
+        // Three search shapes per Decision 5 + SAR1-M1 (agent-native-distribution):
+        //   (Some(owner), Some(v))  → owner-scoped + visibility-filtered
+        //   (Some(owner), None)     → owner-scoped (authenticated, full corpus)
+        //   (None,        Some(v))  → cross-owner + visibility-filtered (anonymous-public)
+        //   (None,        None)     → DISALLOWED — would expose all rows; the
+        //                             trait doc requires `None` owner to be
+        //                             paired with `Some(visibility)`. Defensive
+        //                             early-return keeps the storage layer from
+        //                             silently leaking on a future caller bug.
+        let mut results: Vec<SearchResult> = match (owner_pubkey, visibility_filter) {
+            (Some(owner), Some(v)) => {
                 let mut stmt = self.conn.prepare(SEARCH_SQL_FILTERED)?;
-                let rows = stmt.query_map(params![owner_pubkey, v], row_mapper)?;
+                let rows = stmt.query_map(params![owner, v], row_mapper)?;
                 rows.filter_map(|r| r.ok()).collect()
             }
-            None => {
+            (Some(owner), None) => {
                 let mut stmt = self.conn.prepare(SEARCH_SQL_ALL)?;
-                let rows = stmt.query_map(params![owner_pubkey], row_mapper)?;
+                let rows = stmt.query_map(params![owner], row_mapper)?;
                 rows.filter_map(|r| r.ok()).collect()
+            }
+            (None, Some(v)) => {
+                let mut stmt = self.conn.prepare(SEARCH_SQL_CROSS_OWNER_VIS)?;
+                let rows = stmt.query_map(params![v], row_mapper)?;
+                rows.filter_map(|r| r.ok()).collect()
+            }
+            (None, None) => {
+                // Defensive: callers must not pass `None`/`None` (would
+                // expose every row anonymously). Trait doc forbids this;
+                // returning an empty result here keeps the leak closed
+                // even if a future caller violates the contract.
+                Vec::new()
             }
         };
 
@@ -1010,7 +1047,9 @@ mod tests {
 
         // Query closer to att-0's embedding; search is now scoped by
         // `owner_pubkey`, not by `signer_pubkey`.
-        let results = store.search(&[1.0, 0.0], "owner_agent", None, 2).unwrap();
+        let results = store
+            .search(&[1.0, 0.0], Some("owner_agent"), None, 2)
+            .unwrap();
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].attestation_id, "att-0");
     }
@@ -1052,17 +1091,23 @@ mod tests {
             )
             .unwrap();
 
-        let alice_results = store.search(&[1.0, 0.0], "owner_alice", None, 10).unwrap();
+        let alice_results = store
+            .search(&[1.0, 0.0], Some("owner_alice"), None, 10)
+            .unwrap();
         assert_eq!(alice_results.len(), 1);
         assert_eq!(alice_results[0].attestation_id, "att-alice");
 
-        let bob_results = store.search(&[1.0, 0.0], "owner_bob", None, 10).unwrap();
+        let bob_results = store
+            .search(&[1.0, 0.0], Some("owner_bob"), None, 10)
+            .unwrap();
         assert_eq!(bob_results.len(), 1);
         assert_eq!(bob_results[0].attestation_id, "att-bob");
 
         // Owner with no rows must return empty, even though same signer
         // produced rows under other owners.
-        let unknown = store.search(&[1.0, 0.0], "owner_carol", None, 10).unwrap();
+        let unknown = store
+            .search(&[1.0, 0.0], Some("owner_carol"), None, 10)
+            .unwrap();
         assert!(unknown.is_empty());
     }
 
@@ -1134,14 +1179,14 @@ mod tests {
             .unwrap();
 
         // Pre-migration: search by owner returns nothing.
-        let before = store.search(&[1.0, 0.0], server, None, 10).unwrap();
+        let before = store.search(&[1.0, 0.0], Some(server), None, 10).unwrap();
         assert!(before.is_empty(), "NULL owner_pubkey must hide the row");
 
         // Re-run the migration on the live connection.
         super::migrate_owner_pubkey_columns(store.conn()).unwrap();
 
         // Post-migration: row is visible to its signer-as-owner.
-        let after = store.search(&[1.0, 0.0], server, None, 10).unwrap();
+        let after = store.search(&[1.0, 0.0], Some(server), None, 10).unwrap();
         assert_eq!(after.len(), 1, "backfill must restore visibility");
         assert_eq!(after[0].attestation_id, "att-legacy");
     }

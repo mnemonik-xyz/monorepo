@@ -1391,40 +1391,40 @@ pub fn recall(
     embedder: &dyn Embedder,
     query: &str,
     limit: usize,
-    owner_pubkey: &str,
+    owner_pubkey: Option<&str>,
     visibility_filter: Option<Visibility>,
 ) -> serde_json::Value {
     let signer_pubkey = identity::pubkey_base58(keypair);
     let query_emb = embedder.embed(query);
     // Visibility-aware recall (Decision 5 / AC13 — agent-native-distribution).
     //
-    // - Authenticated callers (`visibility_filter = None`): see all of their
-    //   own rows regardless of visibility — the owner_pubkey predicate is
-    //   the only tenant boundary.
-    // - Anonymous callers (`visibility_filter = Some(Visibility::Public)`):
-    //   the storage layer adds `AND a.visibility = 'public'` so only rows
-    //   the owner explicitly opted into the public pool surface.
+    // - Authenticated callers (`owner_pubkey = Some(sub)`,
+    //   `visibility_filter = None`): see all of their own rows regardless
+    //   of visibility — owner predicate is the only tenant boundary.
+    // - Anonymous callers (`owner_pubkey = None`,
+    //   `visibility_filter = Some(Visibility::Public)`): the storage layer
+    //   drops the owner predicate and matches every row with
+    //   `visibility = 'public'`. This is the cross-owner public pool the
+    //   user-spec describes (AC13 / Flow 4) — agent-native-distribution
+    //   Task 4 round 2 / SAR1-M1.
     //
-    // For anonymous callers, `owner_pubkey` is the server keypair (the
-    // dispatcher's fallback when claims are absent). This means anonymous
-    // recall returns only public rows anchored under the server keypair —
-    // it does NOT cross tenant boundaries. Cross-tenant anonymous recall
-    // (returning all public rows from all owners across the DB) is NOT
-    // implemented in v1: the owner predicate stays in place by design,
-    // matching the test fixture in `mcp/tests/anonymous_recall.rs` which
-    // seeds rows under the server keypair specifically so the search finds
-    // them at all (code-reviewer round 1 CR-3 — correcting the round-1
-    // comment that mis-described the owner predicate as "effectively a
-    // no-op").
+    // The trait doc on `AttestationStore::search` requires `None` owner to
+    // be paired with `Some(visibility)` so the storage layer never exposes
+    // every row to an anonymous caller. The dispatcher constructs the
+    // pair correctly at the `handle_tool_call` boundary.
     let results = store
         .search(&query_emb, owner_pubkey, visibility_filter, limit)
         .unwrap_or_default();
-    // count() is signer-scoped (legacy semantic); search() is owner-scoped.
+    // count() is signer-scoped (legacy semantic); search() is owner-scoped
+    // OR cross-owner depending on the dispatcher's input.
     let total = store.count(&signer_pubkey).unwrap_or(0);
     serde_json::json!({
         "query": query,
         "results": results,
         "total_attestations": total,
+        // `owner_pubkey` echoes the resolved scope:
+        // - authenticated → the JWT sub (server-side derived)
+        // - anonymous → `null` to signal cross-owner public-pool search
         "owner_pubkey": owner_pubkey,
         "embed_provider": embedder.provider_name(),
         "embed_model": embedder.model_id(),

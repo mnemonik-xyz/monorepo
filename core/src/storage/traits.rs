@@ -103,20 +103,26 @@ pub trait AttestationStore {
 
     fn count(&self, signer: &str) -> anyhow::Result<i64>;
 
-    /// Cosine-similarity search scoped to `owner_pubkey`.
+    /// Cosine-similarity search.
     ///
-    /// SQL filter is `WHERE owner_pubkey = ?` — there is no carve-out. Pass
-    /// the JWT-resolved pubkey (HTTP transport) or the local keypair pubkey
-    /// (stdio transport).
+    /// `owner_pubkey` — `Some(pk)` scopes results to a single owner (the
+    /// authenticated-recall path, Decision 9 tenant boundary). `None` drops
+    /// the owner predicate entirely so results span every owner; this is the
+    /// cross-owner anonymous-public path (agent-native-distribution Task 4 /
+    /// SAR1-M1). Callers MUST pair `None` with
+    /// `visibility_filter = Some(Visibility::Public)` — passing `None`
+    /// without the visibility filter would expose every row in the database
+    /// to an anonymous caller.
     ///
     /// `visibility_filter` — when `Some(v)`, restricts results to rows whose
-    /// stored `visibility` equals `v`. The anonymous-recall path
-    /// (Decision 5) passes `Some(Visibility::Public)`; authenticated callers
-    /// pass `None` to see all their own rows regardless of visibility.
+    /// stored `visibility` equals `v`. Authenticated callers (with
+    /// `owner_pubkey = Some(pk)`) pass `None` to see all their own rows;
+    /// anonymous callers (with `owner_pubkey = None`) pass
+    /// `Some(Visibility::Public)` to discover the cross-owner public pool.
     fn search(
         &self,
         query_embedding: &[f32],
-        owner_pubkey: &str,
+        owner_pubkey: Option<&str>,
         visibility_filter: Option<Visibility>,
         limit: usize,
     ) -> anyhow::Result<Vec<SearchResult>>;

@@ -175,7 +175,7 @@ async fn test_full_lifecycle_sign_callback_410_on_replay() {
     {
         let store = state.store.lock().expect("store mutex");
         let results = store
-            .search(&[0.1; 8], &user_pubkey, None, 5)
+            .search(&[0.1; 8], Some(user_pubkey.as_str()), None, 5)
             .expect("search ok");
         assert_eq!(
             results.len(),

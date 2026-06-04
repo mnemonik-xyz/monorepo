@@ -179,16 +179,63 @@ async fn visibility_threads_through_to_storage() {
     // The response envelope surfaces the visibility verbatim.
     assert_eq!(result["visibility"], "private");
     let attestation_id = result["attestation_id"].as_str().expect("attestation_id");
-    let store = server.state.store.lock().unwrap();
-    let conn = store.conn();
-    let vis: String = conn
-        .query_row(
-            "SELECT visibility FROM attestations WHERE attestation_id = ?",
-            rusqlite::params![attestation_id],
-            |row| row.get(0),
-        )
-        .expect("visibility column");
-    assert_eq!(vis, "private", "visibility column reflects threaded value");
+    {
+        let store = server.state.store.lock().unwrap();
+        let conn = store.conn();
+        let vis: String = conn
+            .query_row(
+                "SELECT visibility FROM attestations WHERE attestation_id = ?",
+                rusqlite::params![attestation_id],
+                |row| row.get(0),
+            )
+            .expect("visibility column");
+        assert_eq!(vis, "private", "visibility column reflects threaded value");
+    }
+
+    // F1 (test-reviewer round 1, agent-native-distribution Task 4):
+    // also prove `Visibility::Public` threads through to the persisted
+    // row. Direct `sign_memory` call bypasses the dispatcher's
+    // public-write confirmation gate (which only fires through
+    // `handle_tool_call`), so no ceremony token is needed — the test
+    // exercises the threading itself, not the gate.
+    let result_public = sign_memory(
+        &kp,
+        &server.state.solana,
+        &server.state.arweave,
+        &server.state.store,
+        server.state.embedder.as_ref(),
+        &server.state.compressor,
+        &server.state.pending,
+        "visibility-threading-content-public",
+        &[],
+        &cost_hint,
+        "local",
+        &owner_kp,
+        None,
+        resolved,
+        Visibility::Public,
+        &server.state.envelope,
+        Duration::from_secs(15),
+    )
+    .await
+    .expect("sign_memory inline succeeds for Public visibility too");
+
+    assert_eq!(result_public["visibility"], "public");
+    let attestation_id_public = result_public["attestation_id"]
+        .as_str()
+        .expect("attestation_id");
+    {
+        let store = server.state.store.lock().unwrap();
+        let conn = store.conn();
+        let vis: String = conn
+            .query_row(
+                "SELECT visibility FROM attestations WHERE attestation_id = ?",
+                rusqlite::params![attestation_id_public],
+                |row| row.get(0),
+            )
+            .expect("visibility column");
+        assert_eq!(vis, "public", "visibility=public also persists verbatim");
+    }
 
     // Silence unused-warning for `owner` in the harness setup.
     let _ = owner;

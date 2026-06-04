@@ -286,7 +286,7 @@ fn search_visibility_filter_excludes_private() {
         .unwrap();
 
     let public_only = store
-        .search(&query, OWNER, Some(Visibility::Public), 10)
+        .search(&query, Some(OWNER), Some(Visibility::Public), 10)
         .expect("search succeeds");
     assert_eq!(public_only.len(), 1, "expected exactly one row");
     assert_eq!(public_only[0].attestation_id, "att-public");
@@ -295,7 +295,7 @@ fn search_visibility_filter_excludes_private() {
     // Symmetrically, Some(Private) returns only the private row — supports
     // authenticated callers who want to enumerate their own private set.
     let private_only = store
-        .search(&query, OWNER, Some(Visibility::Private), 10)
+        .search(&query, Some(OWNER), Some(Visibility::Private), 10)
         .expect("search succeeds");
     assert_eq!(private_only.len(), 1);
     assert_eq!(private_only[0].attestation_id, "att-private");
@@ -342,7 +342,9 @@ fn search_no_filter_returns_both() {
         )
         .unwrap();
 
-    let both = store.search(&query, OWNER, None, 10).expect("search ok");
+    let both = store
+        .search(&query, Some(OWNER), None, 10)
+        .expect("search ok");
     assert_eq!(
         both.len(),
         2,
@@ -417,7 +419,7 @@ fn search_visibility_filter_respects_owner_isolation() {
         .unwrap();
 
     let a_view = store
-        .search(&query, owner_a, Some(Visibility::Public), 10)
+        .search(&query, Some(owner_a), Some(Visibility::Public), 10)
         .expect("search succeeds");
     assert_eq!(
         a_view.len(),
@@ -432,7 +434,7 @@ fn search_visibility_filter_respects_owner_isolation() {
 
     // Symmetric: owner_b sees only their own row.
     let b_view = store
-        .search(&query, owner_b, Some(Visibility::Public), 10)
+        .search(&query, Some(owner_b), Some(Visibility::Public), 10)
         .expect("search succeeds");
     assert_eq!(b_view.len(), 1);
     assert_eq!(b_view[0].attestation_id, "att-b-public");

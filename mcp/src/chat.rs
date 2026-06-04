@@ -102,7 +102,7 @@ pub async fn chat_handler(
             state.embedder.as_ref(),
             message,
             RECALL_LIMIT,
-            &chat_owner_pubkey,
+            Some(chat_owner_pubkey.as_str()),
             None,
         )
     }; // lock dropped here -- safe to .await below

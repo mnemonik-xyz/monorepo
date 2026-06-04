@@ -274,7 +274,7 @@ async fn test_sign_callback_persists_attestation_then_evicts() {
     {
         let store = state.store.lock().unwrap();
         let results = store
-            .search(&[0.1; 8], &pubkey, None, 5)
+            .search(&[0.1; 8], Some(pubkey.as_str()), None, 5)
             .expect("search ok");
         assert_eq!(results.len(), 1, "attestation row missing");
         assert_eq!(results[0].content, "persisted memory");
