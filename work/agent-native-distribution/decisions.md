@@ -155,3 +155,41 @@ Review details — in JSON files via links. QA report — in logs/working/.
 - `cargo clippy -p mnemonic-core --all-targets -- -D warnings` → clean
 - `cargo fmt -p mnemonic-core -- --check` → clean
 - AC11 keychain move deferred to v1.1 per task spec post-completion checklist.
+
+## Task 4: sign_memory visibility + HMAC public-write gate + anonymous recall filter
+
+**Status:** Done
+**Commits:** 06e63d8 (impl) + 163706f (review round 1 fixes) + 54ad816 (review round 2 fixes)
+**Agent:** t4-coder
+**Summary:** Wired `Visibility` through `sign_memory` → `save_attestation`; new `resolve_visibility` + `resolve_allow_fallback` resolvers reject `mode=local + visibility=...` at the dispatcher (AC14). Built `ConfirmationLedger` (DashMap-backed HMAC-SHA256 over `content_hash || owner_pubkey || visibility || expires_at || jti`, single-use via `remove_if`, 5-min TTL + 60s background eviction). Anonymous `tools/call mnemonic_recall` allowlisted in `bearer_auth_middleware` via new `ALLOWLIST_TOOLS_CALL_NAMES`; dispatcher passes `(None, Some(Public))` to `search` so the cross-owner public pool surfaces (AC13) without leaking private rows. Extended `core::storage::AttestationStore::search` signature to `Option<&str>` owner with a defensive `(None, None) → Vec::new()` guard. Error catalogue helpers added for `-32095 PublicWriteRequiresConfirmation`, `-32098 EmbedderInvalid`, plus dead-code-allowed placeholders for the Task 5/6 typed errors (`-32096`, `-32099 LocalStorageBusy`, `-32094`, `-32011 HostedUnavailable`).
+**Deviations:**
+- Deviated from spec (round-2 / SAR1-M1 security-blocker fix): the round-1 implementation scoped anonymous recall to the dispatcher's owner-fallback (server keypair), hiding cross-user public rows. Round 3 changed `AttestationStore::search`'s `owner_pubkey` from `&str` to `Option<&str>` and added `SEARCH_SQL_CROSS_OWNER_VIS` (`WHERE owner_pubkey IS NOT NULL AND visibility = ?`) so anonymous recall surfaces every owner's public rows per user-spec AC13/Flow 4. Cross-owner test `cross_owner_public_pool_visible` pins the behaviour.
+- Added `subtle = "2"` as a direct dep (already transitively present via hmac/sha2) so the consume-path constant-time compare uses `subtle::ConstantTimeEq::ct_eq` instead of a hand-rolled XOR loop (code-reviewer CR-2 / security-auditor SAR1-L1, round 1).
+- Added 64-char ASCII-hex format validation on `request_public_write_confirmation::content_hash` at the dispatcher boundary (security-auditor SAR1-L2, round 1) — closes a DashMap-spam DoS vector for authenticated callers.
+- `_allow_fallback` parsed at the dispatcher but unused in Task 4 scope; Task 5 wires the soft-fall router in `tools::sign_memory_inline`.
+- Some error catalogue helpers (`oauth_timeout`, `local_storage_busy`, `identity_bootstrap_failed`, `hosted_unavailable`) carry `#[allow(dead_code)]` because the production triggers live in Tasks 5/6 (`mcp-stdio` outbound proxy + token-store integration). `error_catalogue.rs::catalogue_typed_helpers_pin_data_shapes` pins the wire shapes for those rows; Task 4 owns the 5 in-scope rows triggered via production code paths.
+
+**Reviews:**
+
+*Round 1 (06e63d8):*
+- code-reviewer: REVISE, 1 major + 2 minor + 2 info → [logs/working/task-4/code-reviewer-round1.json](logs/working/task-4/code-reviewer-round1.json)
+- security-auditor: CONDITIONAL_PASS, 1 medium-blocking + 2 low + 2 info → [logs/working/task-4/security-auditor-round1.json](logs/working/task-4/security-auditor-round1.json)
+- test-reviewer: APPROVE_WITH_NOTES, 3 minor + 2 notes (no blocking) → [logs/working/task-4/test-reviewer-round1.json](logs/working/task-4/test-reviewer-round1.json)
+
+*Round 2 (163706f + 54ad816):*
+- code-reviewer: APPROVED → [logs/working/task-4/code-reviewer-round2.json](logs/working/task-4/code-reviewer-round2.json)
+- security-auditor: PASS (SAR1-M1 resolved) → [logs/working/task-4/security-auditor-round2.json](logs/working/task-4/security-auditor-round2.json)
+- test-reviewer: APPROVE → [logs/working/task-4/test-reviewer-round2.json](logs/working/task-4/test-reviewer-round2.json)
+
+**Forward flag for Task 5:** the soft-fall router must consume the already-parsed `allow_fallback_to_participate` value. Task 5 wires `tools::sign_memory_inline`'s post-failure branch so that when `allow_fallback_to_participate=true` and local execution fails (`-32098 EmbedderInvalid` etc.), `sign_memory` re-dispatches through `MNEMONIC_HOSTED_ENDPOINT` and the response carries `escalated: { from, to, reason }` per Decision 4. Visibility resolution runs AGAIN post-escalation so the public-write confirmation gate from Task 4 still fires; the `-32011 HostedUnavailable` helper (currently `#[allow(dead_code)]`) is the canonical typed error for hosted-unreachable on the escalation path. AC11 / AC15 / R1 become structurally testable once the wiring lands.
+
+**Verification:**
+- `cargo test -p mnemonic-mcp --features test-support --lib confirmation_token` → 7/7 pass
+- `cargo test -p mnemonic-mcp --features test-support --test sign_memory_visibility` → 5/5 pass
+- `cargo test -p mnemonic-mcp --features test-support --test anonymous_recall` → 3/3 pass
+- `cargo test -p mnemonic-mcp --features test-support --test confirmation_gate` → 10/10 pass
+- `cargo test -p mnemonic-mcp --features test-support --test error_catalogue` → 6/6 pass
+- `cargo test --workspace --features mnemonic-mcp/test-support --no-fail-fast` → 0 failures
+- `cargo clippy --workspace --all-targets --features mnemonic-mcp/test-support -- -D warnings` → clean
+- `cargo fmt --all -- --check` → clean
+- Smoke (live curl loop) skipped — the integration tests drive the production dispatcher + middleware + storage stack through the same `axum::Router` + `oauth::bearer_auth_middleware` wiring as the binary. No new external endpoints were added.

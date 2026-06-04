@@ -1,0 +1,92 @@
+{
+  "round": 2,
+  "reviewer": "t4-security-auditor",
+  "commit": "HEAD (round-3.diff applied)",
+  "date": "2026-06-04",
+  "verdict": "pass",
+  "summary": "All round-1 findings addressed correctly. SAR1-M1 (blocker): anonymous recall now passes (owner=None, visibility=Some(Public)) to storage::search, which maps to SEARCH_SQL_CROSS_OWNER_VIS — drops the owner predicate, exposes all users' public rows while private rows stay hidden. SAR1-L1 (low): hand-rolled constant_time_eq replaced with subtle::ConstantTimeEq::ct_eq. SAR1-L2 (low): 64-char hex validation on content_hash before mint(). SAR1-I1 (info): cross_owner_public_pool_visible test added, catches SAR1-M1 regression. SAR1-I2 (info): expiry check now first in consume() predicate. No new security issues introduced.",
+
+  "findings_resolution": [
+    {
+      "id": "SAR1-M1",
+      "original_severity": "Medium / BLOCKING",
+      "status": "RESOLVED",
+      "verification": "mcp/src/mcp.rs:1643-1646: anonymous path now produces `(recall_owner=None, visibility_filter=Some(Public))`. tools::recall forwards both to store.search(). core/src/storage/sqlite.rs:784-795: the `(None, Some(v))` arm selects SEARCH_SQL_CROSS_OWNER_VIS which is `WHERE a.owner_pubkey IS NOT NULL AND a.visibility = ?` — owner predicate dropped, visibility filter binding preserved. core/src/storage/traits.rs: trait doc explicitly forbids `(None, None)` and requires None owner to be paired with Some(visibility). The defensive `(None, None)` arm returns Vec::new() to prevent any accidental full-table exposure from a future caller bug. Anonymous-recall test `cross_owner_public_pool_visible` seeds public rows under two distinct non-server keypairs (owner-a-base58-pubkey-distinct, owner-b-base58-pubkey-distinct) plus a private row under owner A; asserts both public rows surface and the private row does not. This directly pins the previously broken cross-owner behavior."
+    },
+    {
+      "id": "SAR1-L1",
+      "original_severity": "Low",
+      "status": "RESOLVED",
+      "verification": "mcp/src/confirmation_token.rs:32: `use subtle::ConstantTimeEq;`. mcp/Cargo.toml:83: `subtle = \"2\"` as a direct dependency. New `ct_eq(a, b)` function at line 295: `bool::from(a.ct_eq(b))` — delegates to subtle's implementation which uses `black_box` and volatile reads to defeat LLVM loop-collapse optimizations. The old `constant_time_eq` function is fully removed; all call sites use `ct_eq`. The length short-circuit concern is moot: `subtle::ConstantTimeEq::ct_eq` handles unequal-length slices correctly (returns false in constant time for mismatched lengths). HMAC output is always 32 bytes, so this path is fixed-length in practice."
+    },
+    {
+      "id": "SAR1-L2",
+      "original_severity": "Low",
+      "status": "RESOLVED",
+      "verification": "mcp/src/mcp.rs:1708: `if content_hash.len() != 64 || !content_hash.chars().all(|c| c.is_ascii_hexdigit())` fires BEFORE `state.confirmation_ledger.mint()` is called. On rejection, returns `invalid_params(\"content_hash\", ...)` — no ledger entry created. Test `mint_with_malformed_content_hash_rejected` covers five bad inputs: short string, non-hex letters, empty string, 63 f-chars, 64 g-chars. After all five rejections, asserts `confirmation_ledger.len() == 0` — ledger pollution vector closed. Note: `is_ascii_hexdigit()` accepts both upper and lowercase hex (0-9, a-f, A-F), which is correct since blake3.to_hex() produces lowercase."
+    },
+    {
+      "id": "SAR1-I1",
+      "original_severity": "Informational",
+      "status": "RESOLVED",
+      "verification": "mcp/tests/anonymous_recall.rs: `cross_owner_public_pool_visible` test added (lines 562-665). Seeds rows under owner-a and owner-b (distinct from server keypair), asserts both public rows surface in anonymous recall. Also asserts `!ids.contains(&\"private-by-a\")` — the private row from owner A does not surface. Additionally asserts `rows.iter().all(|r| r[\"visibility\"] == \"public\")` to catch any future visibility-filter regression. This test would have caught SAR1-M1 immediately in round 1 if it had existed."
+    },
+    {
+      "id": "SAR1-I2",
+      "original_severity": "Informational",
+      "status": "RESOLVED",
+      "verification": "mcp/src/confirmation_token.rs:178-292: consume() predicate now opens with the expiry check (`if now >= entry.expires_at { return false; }`) before computing compute_hmac(). HMAC computation is skipped for expired entries. The entry is left in the map (predicate returns false → no removal); eviction sweeps it. New unit test `consume_expired_rejected` (lines 385-346): mints with TTL=0 (born-expired), asserts consume returns Invalid, asserts ledger.len() == 1 (entry not removed by consume), then asserts evict_expired removes it. This correctly pins that consume and eviction have separate ownership of expired entry lifecycle."
+    }
+  ],
+
+  "new_findings": [],
+
+  "verified_correct": [
+    {
+      "check": "SAR1-M1 fix — (None, None) defensive guard",
+      "status": "PASS",
+      "notes": "sqlite.rs:796-809: the (None, None) arm returns Vec::new() with a comment explaining the invariant. This is the correct defense-in-depth: the trait doc documents the contract, the sqlite impl enforces it defensively. No panic, no data leak."
+    },
+    {
+      "check": "SAR1-M1 fix — authenticated path unchanged",
+      "status": "PASS",
+      "notes": "mcp.rs:1645-1646: authenticated callers produce `(Some(owner_pubkey), None)`. sqlite.rs:779-784: the `(Some(owner), None)` arm uses SEARCH_SQL_ALL (`WHERE owner_pubkey = ?`) — tenant isolation unchanged. No cross-tenant leakage introduced by the fix."
+    },
+    {
+      "check": "SAR1-M1 fix — chat.rs updated",
+      "status": "PASS",
+      "notes": "mcp/src/chat.rs:267: `Some(chat_owner_pubkey.as_str())` — chat recall is still owner-scoped (authenticated path). The signature change to Option<&str> was propagated correctly to all call sites."
+    },
+    {
+      "check": "SAR1-M1 fix — all existing tests updated",
+      "status": "PASS",
+      "notes": "core/src/storage/sqlite.rs, core/tests/integration_storage.rs, mcp/tests/deferred_sign_flow.rs, mcp/tests/sign_callback.rs: all existing search() call sites updated from `&str` to `Some(&str)`. No call sites left with the old signature."
+    },
+    {
+      "check": "SAR1-L2 fix — validation fires before ledger touch",
+      "status": "PASS",
+      "notes": "mcp.rs:1708 validation is positioned after content_hash extraction (line 1686) and BEFORE `state.confirmation_ledger.mint()` (line 1720). Order verified in the diff. Ledger len assertion in the test confirms no entry was created."
+    },
+    {
+      "check": "ct_eq length handling",
+      "status": "PASS",
+      "notes": "subtle::ConstantTimeEq::ct_eq returns subtle::Choice(0) for unequal-length slices in constant time. bool::from(a.ct_eq(b)) handles this correctly. Since HMAC output is always 32 bytes and presented is base64-decoded (variable length checked by the `Err(_)` arm), mismatched lengths correctly return false without timing leak."
+    },
+    {
+      "check": "No new ALLOWLIST entries",
+      "status": "PASS",
+      "notes": "oauth/mod.rs ALLOWLIST_METHODS and ALLOWLIST_TOOLS_CALL_NAMES unchanged in this diff. No new methods or tool names added to the anonymous-OK surface."
+    },
+    {
+      "check": "Privacy contract preserved after SAR1-M1 fix",
+      "status": "PASS",
+      "notes": "SEARCH_SQL_CROSS_OWNER_VIS: `WHERE a.owner_pubkey IS NOT NULL AND a.visibility = ?`. The visibility parameter is bound to `Visibility::Public` by the dispatcher. Private rows have `visibility = 'private'`, which does not match `?` = `'public'`. Legacy unmigrated rows with `owner_pubkey IS NULL` are excluded (IS NOT NULL predicate). Both protections are independent — either alone would suffice for privacy, both together are defense-in-depth."
+    }
+  ],
+
+  "blocking_for_merge": [],
+  "recommended_before_merge": [],
+  "informational_only": [],
+
+  "notes": "All five round-1 findings fully addressed. No new security issues introduced by the fixes. The implementation now correctly serves the user-spec's cross-owner public pool requirement (AC13 / Flow 4) while preserving the privacy contract (private rows invisible to anonymous callers across all owners). The defensive (None, None) guard in sqlite.rs is a good forward-compatibility measure. Cleared for merge from security perspective."
+}

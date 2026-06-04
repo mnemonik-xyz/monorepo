@@ -1,0 +1,145 @@
+{
+  "round": 1,
+  "reviewer": "t4-security-auditor",
+  "commit": "06e63d8eabb69b8eb72a8fe0dc3ba4baf838482e",
+  "date": "2026-06-04",
+  "verdict": "conditional_pass",
+  "summary": "The HMAC binding tuple, single-use enforcement, and mint/consume auth gating are correctly implemented. Five findings below. One is Medium severity (anonymous recall scope mismatch vs user-spec), two are Low, two are Informational. No Critical or High severity issues found. The medium finding does not break the privacy guarantee but limits the functional utility of the public pool. Recommend fixing before merge.",
+
+  "findings": [
+    {
+      "id": "SAR1-M1",
+      "severity": "Medium",
+      "title": "Anonymous recall filters by server_keypair owner_pubkey — cross-owner public rows are unreachable",
+      "file": "mcp/src/tools.rs",
+      "lines": "1404-1421",
+      "category": "Insecure Design / Functional Gap",
+      "description": "When `jwt_sub.is_none()` the dispatcher sets `owner_pubkey = pubkey_base58(&state.keypair)` (server keypair) and passes `visibility_filter = Some(Visibility::Public)`. The SQL executed is `WHERE a.owner_pubkey = <server_keypair> AND a.visibility = 'public'`. This means anonymous recall can only surface public rows anchored by the server keypair itself — not all users' public rows across the whole pool. The code comment at tools.rs:1412 ('owner_pubkey in that path is effectively a no-op') is incorrect; the predicate is fully active and excludes all non-server-keypair public rows. The test in anonymous_recall.rs validates only that seeding under server_pubkey works — it does not test that a different user's public rows are visible to anonymous callers. User-spec intent ('публичную часть пула', AC13 'only public rows') implies cross-user public pool access.",
+      "impact": "Privacy contract is NOT broken — private rows remain invisible to anonymous callers. However, the public pool is siloed to the server keypair. Users who perform participate-mode writes with visibility=public to mcp.mnemonik.xyz cannot have their public attestations discovered via anonymous recall — the feature's stated distribution channel ('inbound distribution channel') does not work for user-owned public rows.",
+      "reproduce": "Mint a public attestation as owner B (different keypair from server keypair), then issue an anonymous recall matching that content. Expected: row visible. Actual: 0 rows returned (SQL filters by server_keypair, not B).",
+      "recommendation": "For anonymous recall, drop the owner_pubkey predicate entirely (or scope to a global public index). The SQL should be `WHERE a.visibility = 'public'` without the owner_pubkey restriction. The storage layer's `SEARCH_SQL_FILTERED` would need a variant without the owner predicate, or `search()` would need an `Option<&str>` owner_pubkey arg with `None` meaning 'all owners'. Alternatively, if the intent is only the server's public rows, the user-spec and test must be updated to clarify that scope — but that would contradict AC13's 'public pool' language.",
+      "references": ["user-spec.md:29 (публичную часть пула)", "user-spec.md:110 (Поток 4 step 3)", "user-spec.md:129 (AC13)", "tech-spec.md Decision 5"]
+    },
+    {
+      "id": "SAR1-L1",
+      "severity": "Low",
+      "title": "Hand-rolled constant_time_eq may be compiler-optimized away under optimization flags",
+      "file": "mcp/src/confirmation_token.rs",
+      "lines": "276-289",
+      "category": "Cryptographic Implementation",
+      "description": "The `constant_time_eq` function accumulates XOR differences into `acc` and checks `acc == 0`. Without a volatile write or a fence preventing the optimizer from determining at compile time that the loop result is equivalent to a simple byte comparison, an optimizing compiler could theoretically convert this to a short-circuit comparison. In practice, rustc with LTO enabled and a correctly typed accumulator (`u8`) is unlikely to collapse this loop, but it is not guaranteed by the language. The RustCrypto `subtle` crate uses `#[inline(never)]` + pointer tricks specifically to prevent this.",
+      "impact": "If the optimizer eliminates the constant-time property, an attacker who can measure consume() timing via a side channel (e.g., via TLS timing at the HTTP layer, or direct access to the process) could potentially determine whether the presented HMAC bytes partially match a valid token. However, this requires local measurement ability and a high number of oracle queries — practically difficult given the DashMap's jti lookup already short-circuits on missing jti before any HMAC comparison. The primary security layer (DashMap remove_if) limits exploitation.",
+      "recommendation": "Replace `constant_time_eq` with `subtle::ConstantTimeEq` from the `subtle` crate (a RustCrypto primitive), or use `hmac::Mac::verify_slice` which already handles constant-time verification via the `digest` crate's `CtOutput`. The `subtle` crate is already an indirect transitive dependency via the `hmac` crate. Adding it explicitly to mcp/Cargo.toml (`subtle = \"2\"`) costs zero additional compile time.",
+      "references": ["confirmation_token.rs:276-289", "https://doc.rust-lang.org/reference/behavior-considered-undefined.html"]
+    },
+    {
+      "id": "SAR1-L2",
+      "severity": "Low",
+      "title": "mint() performs only client-supplied content_hash validation — no format enforcement",
+      "file": "mcp/src/mcp.rs",
+      "lines": "1668-1688",
+      "category": "Input Validation",
+      "description": "The `request_public_write_confirmation` handler accepts any non-empty string as `content_hash` and HMAC-binds it without validating that it is a 64-character blake3 hex string. An agent or operator could call mint() with a content_hash of `\"anything\"` or with an empty string (length-limited by the required check, but not format-checked). At consume time, `content_hash_arg` is recomputed from the actual content (`blake3::hash(content.as_bytes()).to_hex()`), so a token minted with a garbage hash will always fail to consume — the security invariant holds. However, no-op mints consume DashMap entries and contribute to the memory usage that the background eviction loop must clean up.",
+      "impact": "A malicious authenticated caller could spam `request_public_write_confirmation` with garbage content_hash values to generate unconsumed DashMap entries. The 5-minute TTL and 60s eviction loop bound the maximum in-memory ledger size: at most ~5min/60s = 5 eviction epochs * (mint rate * 60s) entries live at once. The DashMap eviction at 60s tick prevents unbounded growth but does not rate-limit mint calls. This is an amplification vector for memory exhaustion by authenticated attackers.",
+      "recommendation": "Add format validation to the content_hash input: `if content_hash.len() != 64 || !content_hash.chars().all(|c| c.is_ascii_hexdigit()) { return Err(invalid_params(\"content_hash\", &args[\"content_hash\"])); }`. This limits mint() calls to only legitimate blake3 hex hashes, and also serves as a secondary defense against malicious inputs. Rate limiting on mint() per JWT sub would also help but is out of scope for Task 4.",
+      "references": ["mcp.rs:1668-1688", "tech-spec.md Decision 5b"]
+    },
+    {
+      "id": "SAR1-I1",
+      "severity": "Informational",
+      "title": "Anonymous recall test seeds rows under server_pubkey — masks the cross-owner scope bug",
+      "file": "mcp/tests/anonymous_recall.rs",
+      "lines": "74-80",
+      "category": "Test Coverage",
+      "description": "The anonymous_recall integration test seeds both rows under `server.server_pubkey()` — the same keypair that becomes `owner_pubkey` in the anonymous path. This means the test validates the filter mechanism correctly (public row visible, private row hidden) but does not surface the cross-owner scope limitation identified in SAR1-M1. The test passes even with the broken cross-owner behavior.",
+      "impact": "No security gap from this test alone, but it provides false confidence that the anonymous public pool works across all user-owned rows. The test must be augmented to seed rows under a different keypair and assert those are visible (or explicitly document that they are out of scope).",
+      "recommendation": "Add a test case: seed a public row under a different owner keypair (not the server keypair), call anonymous recall, assert the row appears in results. If the behavior is intentionally limited to server-keypair rows, update the test comment to say so explicitly and file a follow-up for cross-owner public pool support.",
+      "references": ["anonymous_recall.rs:74-80", "SAR1-M1"]
+    },
+    {
+      "id": "SAR1-I2",
+      "severity": "Informational",
+      "title": "consume() predicate does not short-circuit on non-expired jti-present case before computing HMAC",
+      "file": "mcp/src/confirmation_token.rs",
+      "lines": "260-282",
+      "category": "Performance / Defense in Depth",
+      "description": "Inside the `remove_if` predicate, the code computes a full HMAC, then does a constant-time comparison with the stored HMAC, then does a constant-time comparison with the presented bytes. The expiry check (`now < entry.expires_at`) is evaluated after both HMAC computations. For an already-expired entry, the expiry check makes the remove_if predicate return false, so the entry is NOT removed — correct behavior. However, an expired entry leaks into the code path that computes the HMAC unnecessarily. The ordering does not cause any security issue (an expired entry will not pass), but re-ordering the expiry check first avoids wasted computation.",
+      "impact": "None from a security standpoint. Minor computational overhead for expired entries presented as replay attempts.",
+      "recommendation": "Reorder the predicate: check `now < entry.expires_at` first, then compute the HMAC only if the entry is still valid. This makes the code clearer about the expiry semantics and avoids HMAC computation for clearly expired entries.",
+      "references": ["confirmation_token.rs:260-282"]
+    }
+  ],
+
+  "verified_correct": [
+    {
+      "check": "HMAC binding tuple completeness",
+      "status": "PASS",
+      "notes": "compute_hmac() at confirmation_token.rs:343-358 feeds all five required fields in order: content_hash (as_bytes), owner_pubkey (as_bytes), visibility (as_str then as_bytes), expires_at (to_be_bytes — big-endian u64, prevents length extension), jti (as_bytes — UUID 16 raw bytes). All five fields are present; none can be dropped without HMAC mismatch."
+    },
+    {
+      "check": "Single-use enforcement atomicity",
+      "status": "PASS",
+      "notes": "DashMap::remove_if at confirmation_token.rs:260 is the atomic CAS. The predicate computes expected HMAC, checks constant-time equality against stored AND presented bytes, and checks expiry — all inside the predicate closure that remove_if evaluates while holding a per-shard write lock. The concurrent test (atomic_remove_if_under_concurrent_access) with 16 tasks and a Barrier confirms exactly one winner. DashMap does not expose a double-remove race."
+    },
+    {
+      "check": "60s eviction TTL correctness",
+      "status": "PASS",
+      "notes": "evict_expired() uses retain with `expires_at <= now` as the removal predicate (equal-to-now is removed, consistent with the consume predicate `now < expires_at`). The background loop in start_evictor() spawns once at McpState build in main.rs:537. The TTL=0 test exercises full eviction. The eviction and consume predicates are symmetric."
+    },
+    {
+      "check": "request_public_write_confirmation NOT in ALLOWLIST_METHODS",
+      "status": "PASS",
+      "notes": "ALLOWLIST_METHODS at oauth/mod.rs:1274-1282 contains exactly 7 entries (initialize, tools/list, ping, prompts/list, prompts/get, resources/list, resources/read). 'request_public_write_confirmation' is absent. The per-tool allowlist ALLOWLIST_TOOLS_CALL_NAMES at oauth/mod.rs:1320 contains only 'mnemonic_recall'. Additionally, the handler has a belt-and-braces jwt_sub.is_none() check at mcp.rs:1657-1666 returning -32001. The test mint_without_jwt_returns_unauthorized confirms 401 on anonymous call."
+    },
+    {
+      "check": "Anonymous recall passes Some(Visibility::Public) to search",
+      "status": "PASS",
+      "notes": "At mcp.rs:1618-1623: when jwt_sub.is_none(), visibility_filter = Some(mnemonic_core::storage::Visibility::Public), else None. Passed directly to tools::recall which forwards to store.search. The SQL SEARCH_SQL_FILTERED adds AND a.visibility = 'public' when the filter is Some. The discriminator jwt_sub.is_none() is correct — it's None only when no JWT was presented (anonymous callers). Note: the scope is limited to server_keypair rows (see SAR1-M1)."
+    },
+    {
+      "check": "SQL injection in visibility filter",
+      "status": "PASS",
+      "notes": "SEARCH_SQL_FILTERED is a static string constant; visibility is passed as the second positional parameter via ToSql on the Visibility enum (which implements ToSql producing the canonical string 'public' or 'private'). No user-supplied text is interpolated into the SQL. The rusqlite params![] macro binds all values as prepared statement parameters. No injection vector."
+    },
+    {
+      "check": "Cross-owner replay rejection",
+      "status": "PASS",
+      "notes": "consume() reconstructs HMAC using the owner_pubkey derived from claims.sub (server-authoritative). At mcp.rs:1543, owner_pubkey passed to consume() is the dispatcher's owner_pubkey (not from args). If owner B presents a token minted for owner A, the reconstructed HMAC uses B's pubkey while the stored HMAC bound A's pubkey — mismatch. Test consume_with_different_owner_rejected confirms -32095. The confirmation_token unit test cross_owner_consume_rejected also confirms the ledger entry survives a failed cross-owner attempt (predicate returned false → not removed → owner A can still retry)."
+    },
+    {
+      "check": "No logging of HMAC secrets or token bytes",
+      "status": "PASS",
+      "notes": "The tracing::warn! at mcp.rs:1751-1755 logs only owner_pubkey and content_hash — neither is a secret. hmac_secret is never logged anywhere in confirmation_token.rs. The HMAC bytes themselves are not logged. The ConfirmationLedger struct does not derive Debug in a way that would print the secret."
+    },
+    {
+      "check": "HMAC secret process-scoped lifecycle",
+      "status": "PASS",
+      "notes": "confirmation_token.rs:181-183: secret is generated via rand::thread_rng().fill_bytes() using rand 0.8 API (not rand 0.9 rng() — matches workspace pin). Secret is stored in [u8; 32] on the stack during new(), moved into the struct, never persisted. The unit test hmac_secret_is_process_scoped confirms two ledger instances have independent secrets."
+    },
+    {
+      "check": "Empty embedding surfaces -32098 EmbedderInvalid before storage side-effects",
+      "status": "PASS",
+      "notes": "sign_memory_inline at tools.rs:1107-1114: embedding.is_empty() check fires immediately after embed(), before compress(), before CBOR encoding, before save_attestation(). The ToolError::TypedRpc(-32098 EmbedderInvalid) is returned with no storage side-effects. Test catalogue_embedder_invalid confirms via the production code path with FailingEmbedder."
+    },
+    {
+      "check": "DashMap eviction does not hold lock across .await",
+      "status": "PASS",
+      "notes": "evict_expired() at confirmation_token.rs:293-310 uses DashMap::retain which holds per-shard write locks briefly (the closure is sync, no await). No async operations inside the retain closure. start_evictor() does not hold any DashMap lock while sleeping."
+    }
+  ],
+
+  "owasp_coverage": {
+    "A01_broken_access_control": "Covered — cross-owner replay tested, anonymous recall gate verified",
+    "A02_cryptographic_failures": "Covered — HMAC binding tuple verified, constant-time comparison analyzed (L1 finding)",
+    "A03_injection": "Covered — SQL injection in visibility filter ruled out",
+    "A04_insecure_design": "Covered — public pool scope mismatch (M1 finding), HMAC secret lifecycle verified",
+    "A07_identification_authentication": "Covered — mint gate verified, jwt_sub.is_none() check verified",
+    "A09_security_logging": "Covered — no secret logged, only public identifiers"
+  },
+
+  "blocking_for_merge": ["SAR1-M1"],
+  "recommended_before_merge": ["SAR1-L1", "SAR1-L2"],
+  "informational_only": ["SAR1-I1", "SAR1-I2"],
+
+  "notes": "SAR1-M1 is blocking because the user-spec explicitly states anonymous recall returns the public part of the pool (all-user public rows), and Flow 4 in the spec describes an anonymous user discovering public attestations from anyone. The privacy guarantee (no private rows leaking) holds correctly — this is a correctness/scope finding, not a confidentiality breach. SAR1-L1 and SAR1-L2 should be fixed before merge but are not showstoppers if the team accepts the residual risk. SAR1-I1 is the test-coverage follow-on to SAR1-M1."
+}

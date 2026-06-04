@@ -1,0 +1,86 @@
+{
+  "reviewer": "t4-code-reviewer",
+  "round": 1,
+  "commit": "06e63d8eabb69b8eb72a8fe0dc3ba4baf838482e",
+  "task": "4",
+  "verdict": "changes_requested",
+  "summary": "Solid implementation overall. The HMAC binding tuple, single-use DashMap semantics, resolver logic, anonymous recall filter, and error catalogue helpers are all correct and well-aligned with the tech-spec. Five findings: one major (tautological test helper is always true, so the 'received' field shape is not actually validated in the error catalogue), two minor (hand-rolled constant-time eq instead of the `subtle` crate, comments in recall handler overstate cross-tenant public-row semantics), and two informational (allow_fallback resolved but not used in Task 4 scope, confirm_consumed_then_entry_missing assertion has an inverted edge case).",
+  "findings": [
+    {
+      "id": "CR-1",
+      "severity": "major",
+      "dimension": "Testing Coverage",
+      "file": "mcp/tests/error_catalogue.rs",
+      "lines": "64-67",
+      "title": "is_string_or_value is a tautology — 'received' field shape is never actually validated",
+      "description": "The function reads `!v.is_null() || v.is_null()`, which is always `true` regardless of the JSON value. The intent (as indicated by the comment 'received echoes the verbatim input which can be any JSON value') was presumably to accept any non-null value, but the implementation accepts null too — and more importantly, it accepts nothing at all because the predicate is a tautology. The `assert_data_fields` call on line 90 that checks `received` will pass even if `data.received` contains a structurally wrong shape or is the wrong type entirely. This means the AC16 catalogue test does not validate the `data.received` field contract.",
+      "recommendation": "Replace the helper with a matcher that accepts any JSON value except missing-key (the missing-key case is already caught by `assert_data_fields`'s `unwrap_or_else` panic). The simplest fix:\n```rust\nfn is_any_value(_v: &Value) -> bool {\n    true  // field presence is enforced by assert_data_fields; shape is 'any JSON'\n}\n```\nName it `is_any_value` to make the intent transparent, and update the comment to say 'any JSON value including null is accepted; field presence is the check'. The current name and body are contradictory.",
+      "spec_reference": "tech-spec.md Error Catalogue + AC16: 'each documented data field is present with documented type'"
+    },
+    {
+      "id": "CR-2",
+      "severity": "minor",
+      "dimension": "Security Considerations",
+      "file": "mcp/src/confirmation_token.rs",
+      "lines": "276-286",
+      "title": "Hand-rolled constant-time equality instead of the `subtle` crate",
+      "description": "The `constant_time_eq` function is a hand-rolled XOR-accumulate implementation intended to prevent timing side-channels during HMAC comparison. The comment acknowledges this explicitly. However, Rust compilers can legally optimise the XOR loop in ways that reintroduce data-dependent branches (LLVM is not contractually barred from doing so on `u8` XOR accumulation). The industry standard for constant-time comparison in Rust is the `subtle` crate, which uses `black_box` and volatile reads to prevent elision. The `sha2` crate (already in the workspace as a transitive dep via the `hmac` crate itself) is a RustCrypto crate, so `subtle` is also a transitive dep and costs nothing to add. Given that the HMAC token is a security primitive protecting public-write writes, timing hardness is load-bearing.",
+      "recommendation": "Add `subtle = \"2\"` to `mcp/Cargo.toml` (it is already transitively present via hmac/sha2). Replace the hand-rolled function:\n```rust\nuse subtle::ConstantTimeEq;\nfn ct_eq(a: &[u8], b: &[u8]) -> bool {\n    a.ct_eq(b).into()\n}\n```\nDelete the `constant_time_eq` function. This is a one-line change per call site.",
+      "spec_reference": "tech-spec.md Decision 5b security audit scope; patterns.md security gate"
+    },
+    {
+      "id": "CR-3",
+      "severity": "minor",
+      "dimension": "Code Readability & Maintainability",
+      "file": "mcp/src/tools.rs",
+      "lines": "1164-1182",
+      "title": "Comment overstates cross-tenant semantics of anonymous recall — could mislead future maintainers",
+      "description": "The block comment on the `recall` function (lines ~1174-1182 in the diff) states: 'For the anonymous case the visibility-public predicate is the real gating filter — owner_pubkey in that path is effectively a no-op because all public rows on a server are reachable via the public index regardless of who anchored them.' This is misleading. The SQL search is owner-scoped (it passes `owner_pubkey` to `search`), so anonymous callers only see public rows belonging to the server keypair — not every public row in the DB from all tenants. If the server has tenant A and tenant B, anonymous recall does NOT return tenant B's public rows. The comment implies a broader semantics than the implementation delivers, which could cause a future coder to incorrectly relax or remove the owner filter thinking it is 'a no-op anyway'.",
+      "recommendation": "Replace the misleading sentence with the accurate semantics:\n```\n// For anonymous callers, `owner_pubkey` is the server keypair (the\n// fallback from the dispatcher when claims are absent). This means\n// anonymous recall returns only public rows anchored by the server keypair —\n// it does NOT cross tenant boundaries. Cross-tenant anonymous recall\n// (returning all public rows from all owners) is not implemented in v1.\n```",
+      "spec_reference": "tech-spec.md Decision 5, AC13"
+    },
+    {
+      "id": "CR-4",
+      "severity": "informational",
+      "dimension": "Code Readability & Maintainability",
+      "file": "mcp/src/mcp.rs",
+      "lines": "719-721 (diff context)",
+      "title": "_allow_fallback is resolved but silently unused — should document the Task 5 handoff clearly",
+      "description": "The `_allow_fallback` variable is resolved from args and the leading underscore suppresses the compiler warning, but the inline comment 'wired through to the soft-fall router in Task 5' is the only indication of why this resolver runs in Task 4 at all. This is acceptable given the wave-based task breakdown, but the comment does not name which file in Task 5 will consume this value, making it harder for the Task 5 coder to locate the right place to wire it. The pattern is consistent with the existing task structure, so this is informational only.",
+      "recommendation": "Optionally strengthen the comment to reference the concrete Task 5 code path: 'This arg is parsed here to reject malformed values at the dispatcher boundary. Task 5 wires it into `sign_memory_inline`'s soft-fall branch in `mcp/src/tools.rs` (the `allow_fallback_to_participate=true` path that re-dispatches to participate-mode on embedder failure).' This makes the Task 5 coder's job unambiguous.",
+      "spec_reference": "tech-spec.md Decision 4, Task 5 description"
+    },
+    {
+      "id": "CR-5",
+      "severity": "informational",
+      "dimension": "Testing Coverage",
+      "file": "mcp/tests/confirmation_gate.rs",
+      "lines": "1467-1478",
+      "title": "consume_succeeds_for_matching_args assertion on ledger.len() == 0 has an edge case with Arweave retry",
+      "description": "The test asserts `server.state.confirmation_ledger.len() == 0` after the sign_memory call returns any error other than -32095. This assertion is sound when the token is consumed before the Arweave/Solana downstream fails (which is the expected production path — the gate fires before network IO). However, if the code path were reordered in the future to attempt the Arweave write BEFORE consuming the confirmation token, the assertion would pass vacuously (token still in ledger = len 1, not 0). The current implementation is correct (consume happens first, before any IO), but the assertion does not pin that ordering — it only validates the post-state. Informational because the ordering is currently correct.",
+      "recommendation": "Consider adding a comment: '// Asserts the token was consumed BEFORE the downstream Arweave/Solana IO. // If this fails with len > 0, the public-write gate ordering has regressed.' This makes the intent of the assertion explicit rather than incidental."
+    }
+  ],
+  "positive_observations": [
+    "HMAC binding tuple (content_hash || owner_pubkey || visibility || expires_at || jti) matches Decision 5b exactly, including the visibility field for future-proofing against enum extension.",
+    "Cross-owner replay protection is correctly implemented: the `owner_pubkey` passed to `consume` comes from `claims.sub` (server-derived), so a cross-owner replay reconstructs a mismatching HMAC.",
+    "DashMap `remove_if` is the correct atomic primitive for single-use enforcement — exactly one concurrent winner guaranteed by the CAS semantics.",
+    "The `is_string_or_value` bug aside, the `assert_data_fields` helper pattern is well-designed for forward-compatible field presence checks.",
+    "Background eviction with `retain` inside a loop (no `.await` while shard write locks are held) correctly respects the storage lock discipline from patterns.md.",
+    "The `resolve_visibility` local-mode rejection fires on ANY present value (including 'private'), not only 'public', which matches the Decision 3 requirement that visibility is a participate-only concept and that dead metadata should not be written to local rows.",
+    "Anonymous recall test correctly seeds rows under the server keypair (the dispatcher fallback for anonymous callers) — this is the only owner_pubkey the search will find when called anonymously.",
+    "recall_owner_isolation.rs F2 flip is clean and the updated assertion (zero rows, not 401) correctly reflects the new behaviour with the explanation of why rows are empty (deferred-sign writes default to private).",
+    "The belt-and-braces `jwt_sub.is_none()` check inside `request_public_write_confirmation` correctly defends against a hypothetical middleware misconfiguration where an anonymous call could reach the handler despite not being in ALLOWLIST_METHODS.",
+    "Error helper constructors correctly follow the existing `data: { kind, ... }` discriminator convention, making `data.kind` the canonical client-side discriminator for codes that are shared across multiple error variants (e.g. -32099 is shared by TokenExpired and LocalStorageBusy)."
+  ],
+  "spec_deviations": [],
+  "required_changes": [
+    "CR-1 (major): Fix is_string_or_value tautology in error_catalogue.rs — rename to is_any_value and document intent.",
+    "CR-2 (minor): Replace hand-rolled constant_time_eq with subtle::ConstantTimeEq in confirmation_token.rs."
+  ],
+  "optional_changes": [
+    "CR-3: Correct the misleading cross-tenant comment in tools.rs recall block.",
+    "CR-4: Strengthen _allow_fallback comment to reference Task 5 wire-up location.",
+    "CR-5: Add ordering-intent comment to the ledger.len() assertion in confirmation_gate.rs."
+  ]
+}

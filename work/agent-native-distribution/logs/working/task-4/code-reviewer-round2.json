@@ -1,0 +1,44 @@
+{
+  "reviewer": "t4-code-reviewer",
+  "round": 2,
+  "commit": "163706f800f9c359a9b66d2eb6236585dbf75279",
+  "task": "4",
+  "verdict": "approved",
+  "summary": "All five round-1 findings correctly addressed. CR-1 (tautological helper) fixed with a clean rename and honest body. CR-2 (hand-rolled constant-time eq) replaced with subtle::ConstantTimeEq — the slice ct_eq correctly returns Choice(0) on length mismatch, so no separate length guard is needed. CR-3 comment now accurately describes the owner-scoped semantics. CR-4 comment names the Task 5 wire-up location precisely. CR-5 ordering-intent comment is clear and actionable. No new issues introduced. The out-of-scope Task 6 metadata files (decisions.md + tasks/6.md) are documentation-only and do not affect Task 4 correctness.",
+  "findings": [],
+  "round_1_finding_dispositions": [
+    {
+      "id": "CR-1",
+      "original_severity": "major",
+      "disposition": "resolved",
+      "verification": "is_string_or_value removed; is_any_value introduced with body `true` and a clear comment explaining that field presence is the real check. The tautological name and misleading body are gone. The assert_data_fields call in catalogue_invalid_params_visibility_on_local now uses is_any_value."
+    },
+    {
+      "id": "CR-2",
+      "original_severity": "minor",
+      "disposition": "resolved",
+      "verification": "subtle = '2' added as a direct dep in mcp/Cargo.toml (with a comment explaining the provenance of the round-1 finding). The constant_time_eq function is replaced by ct_eq wrapping bool::from(a.ct_eq(b)). subtle::ConstantTimeEq on [u8] returns Choice(0) for mismatched lengths without a non-constant-time branch — the wrapper is correct and complete. Both call sites in the remove_if predicate updated to ct_eq."
+    },
+    {
+      "id": "CR-3",
+      "original_severity": "minor",
+      "disposition": "resolved",
+      "verification": "The misleading 'effectively a no-op' sentence is gone. Replacement text accurately states: anonymous recall returns only public rows anchored under the server keypair; cross-tenant anonymous recall is NOT implemented in v1; the owner predicate stays in place by design. The note also correctly references the anonymous_recall.rs test fixture to explain why the test seeds under the server keypair."
+    },
+    {
+      "id": "CR-4",
+      "original_severity": "informational",
+      "disposition": "resolved",
+      "verification": "_allow_fallback comment now names the exact file (mcp/src/tools.rs), the exact function (sign_memory_inline's post-failure branch), the hosted endpoint env var (MNEMONIC_HOSTED_ENDPOINT), and the escalated marker shape — sufficient for the Task 5 coder to locate the wire-up point without any additional search."
+    },
+    {
+      "id": "CR-5",
+      "original_severity": "informational",
+      "disposition": "resolved",
+      "verification": "The ledger.len() == 0 assertion now carries an explicit comment: 'ORDERING INTENT: the gate consumes the token BEFORE the Arweave/Solana downstream IO. If this assertion ever flips to > 0, the public-write gate has regressed.' Clear and actionable."
+    }
+  ],
+  "out_of_scope_observations": [
+    "Task 6 metadata (decisions.md + tasks/6.md) included in the round-2 commit is documentation-only. No code changes. Task 6 status update (in_progress → done) and the Task 6 decisions log do not affect Task 4 correctness."
+  ]
+}

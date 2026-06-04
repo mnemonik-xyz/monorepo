@@ -1,0 +1,95 @@
+{
+  "reviewer": "t4-test-reviewer",
+  "task": 4,
+  "round": 2,
+  "note": "This report covers the diff labelled round-3 by the coder (which addresses round-1 findings F1-F5). Per reviewer instructions this is reviewer round 2.",
+  "verdict": "APPROVE",
+  "summary": "All round-1 findings resolved. F1 (public visibility not persisted) fixed with a second sign_memory call asserting visibility='public' in the DB. F3 (consume_expired_rejected missing) fixed with a unit test that correctly exercises the expiry-first predicate path. F4 (tautological matcher) fixed via rename. F5 (owner comment) fixed with substantive explanation and a new cross_owner_public_pool_visible test. The SAR1-M1 bug fix (anonymous recall now correctly drops the owner predicate for cross-owner public pool) is well-tested. No new findings.",
+
+  "findings_resolved": [
+    {
+      "id": "F1",
+      "status": "RESOLVED",
+      "verification": "visibility_threads_through_to_storage now calls sign_memory twice — once with Visibility::Private (existing), once with Visibility::Public (new). Both SQL-verified via direct rusqlite query on the attestation_id. Distinct attestation IDs guaranteed by different content strings. The test correctly bypasses the dispatcher gate (as intended — it exercises the threading, not the gate). Assertion: result_public['visibility'] == 'public' AND DB column == 'public'."
+    },
+    {
+      "id": "F2",
+      "status": "RESOLVED_PRIOR_ROUND",
+      "verification": "Addressed in round 2 per coder. Not re-verified in this diff but accepted."
+    },
+    {
+      "id": "F3",
+      "status": "RESOLVED",
+      "verification": "consume_expired_rejected is now a unit test in confirmation_token::tests. Uses ConfirmationLedger::with_config(Duration::ZERO, ...) to create a born-expired entry. Asserts: (1) ledger.len()==1 before consume (entry present), (2) consume returns Invalid, (3) ledger.len()==1 after consume (entry NOT removed — predicate returned false, remove_if did not remove), (4) evict_expired removes it (removed==1, len==0). This correctly pins the expiry-first predicate path added in SAR1-I2."
+    },
+    {
+      "id": "F4",
+      "status": "RESOLVED_PRIOR_ROUND",
+      "verification": "Accepted per coder statement."
+    },
+    {
+      "id": "F5",
+      "status": "RESOLVED",
+      "verification": "anonymous_recall.rs updated with: (1) comment in filters_private_rows explaining owner is independent of any dispatcher fallback since SAR1-M1 dropped the owner predicate; (2) new cross_owner_public_pool_visible test seeding rows under two distinct non-server-keypair owners and asserting both public rows surface + private row from owner A does NOT surface + all returned rows have visibility=='public'."
+    }
+  ],
+
+  "new_content_review": {
+    "SAR1_M1_bug_fix": {
+      "assessment": "CORRECT",
+      "detail": "Anonymous recall now passes (owner_pubkey=None, visibility_filter=Some(Public)) to search(). The storage layer routes this to SEARCH_SQL_CROSS_OWNER_VIS which drops the owner predicate and adds WHERE visibility='public'. The defensive (None, None) → Vec::new() guard prevents accidental full-DB exposure. The trait doc on AttestationStore::search is updated to document the required pairing contract.",
+      "test_coverage": "cross_owner_public_pool_visible exercises the production code path through bearer_auth_middleware + handle_tool_call + tools::recall + storage::search. No mocks. Assertions cover both cross-owner public rows present AND private row absent AND all returned rows visibility==public."
+    },
+    "SAR1_I2_expiry_first": {
+      "assessment": "CORRECT",
+      "detail": "The consume() predicate now checks expiry first (now >= entry.expires_at → return false) before doing HMAC computation. This is a minor optimization with a semantic improvement: expired entries are rejected without touching HMAC. The entry stays in the map (predicate false → remove_if does not remove), which is correct — the eviction loop owns removal. F3's unit test covers this path precisely.",
+      "test_coverage": "consume_expired_rejected unit test."
+    },
+    "SAR1_L2_content_hash_validation": {
+      "assessment": "CORRECT",
+      "detail": "mint() now validates content_hash as exactly 64 ASCII-hex characters before touching the ledger. Returns -32602 InvalidParams on failure. The validation uses chars().all(|c| c.is_ascii_hexdigit()) which correctly handles lowercase and uppercase hex.",
+      "test_coverage": "mint_with_malformed_content_hash_rejected: table-driven over 5 bad inputs (too short, non-hex letters, empty, 63 chars, 64 non-hex chars). Asserts -32602 + data.field=='content_hash' for each. Asserts ledger.len()==0 after all calls (no entries leaked). fixture_hash() helper uses blake3::hash(b'fixture-content').to_hex() which produces a valid 64-hex string — replaces the previous 'abcd' fixture in mint_without_jwt_returns_unauthorized and mint_with_jwt_returns_token."
+    },
+    "search_signature_change": {
+      "assessment": "CORRECT",
+      "detail": "AttestationStore::search signature changed owner_pubkey: &str → Option<&str>. All call sites updated (sqlite.rs unit tests, integration_storage.rs, deferred_sign_flow.rs, sign_callback.rs, chat.rs). The (None, None) defensive guard returns Vec::new() which is the safe choice. Trait doc explicitly forbids the (None, None) combination and explains why.",
+      "test_coverage": "Existing sqlite.rs unit tests updated to pass Some(owner). cross_owner_public_pool_visible exercises the (None, Some(Public)) path. No test for (None, None) defensive guard — acceptable since the guard's purpose is future-proofing against caller bugs and there is no production caller that would pass (None, None)."
+    }
+  },
+
+  "tdd_anchors_final_status": {
+    "all_16_anchors_present": true,
+    "consume_expired_rejected": "NOW PRESENT — unit test in confirmation_token::tests",
+    "visibility_persisted_on_participate_public": "NOW PRESENT — second sub-case in visibility_threads_through_to_storage asserts DB column visibility='public'",
+    "cross_owner_public_pool_visible": "NEW (beyond original spec) — pins SAR1-M1 regression boundary",
+    "mint_with_malformed_content_hash_rejected": "NEW (beyond original spec) — pins SAR1-L2 dispatcher validation"
+  },
+
+  "test_counts_verified": {
+    "confirmation_token_unit": 7,
+    "sign_memory_visibility": 5,
+    "anonymous_recall": 3,
+    "confirmation_gate": 10,
+    "error_catalogue": 6,
+    "total_new_tests": 31
+  },
+
+  "trigger_fidelity": {
+    "assessment": "GOOD",
+    "notes": "All in-scope catalogue rows triggered via production code paths. consume_expired_rejected uses real ConfirmationLedger with TTL=0 + real SystemTime comparison. cross_owner_public_pool_visible uses real axum middleware + real storage layer. mint_with_malformed_content_hash_rejected triggers the dispatcher boundary check before ledger is touched."
+  },
+
+  "test_independence": {
+    "assessment": "GOOD",
+    "notes": "Each test builds its own TestServer (in-memory SQLite). Unit tests are fully self-contained. No shared global state."
+  },
+
+  "minor_observations": [
+    "The resolve_write_mode(None, 'local') call in visibility_threads_through_to_storage is reused for both the Private and Public sign_memory calls. This is correct since mode=local doesn't change between sub-cases.",
+    "cross_owner_public_pool_visible uses owner_a = 'owner-a-base58-pubkey-distinct' as a string literal rather than a real keypair. This is fine — save_attestation accepts any string for owner_pubkey and the test is exercising the storage/dispatcher layer, not identity.",
+    "The (None, None) defensive guard in sqlite.rs returns Vec::new() silently. A tracing::warn!() here would be useful for diagnosing future caller bugs but is not required for correctness."
+  ],
+
+  "approve": true,
+  "block_merge": false
+}
