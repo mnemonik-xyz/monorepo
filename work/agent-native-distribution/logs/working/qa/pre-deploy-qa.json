@@ -1,0 +1,174 @@
+{
+  "scope": "Pre-deploy QA (Task 12, agent-native-distribution)",
+  "agent": "t12-qa",
+  "date": "2026-06-05",
+  "verdict": "go",
+  "summary": "All gates green: 645 Rust tests + 200 vitest pass; clippy + fmt + actionlint clean (3 pre-existing actionlint warnings, baseline confirmed in T8 round 2). Smoke verification against fresh release binary in tempdir HOME confirms anonymous discovery (initialize/tools/prompts/resources), enriched tool descriptions, local sign offline (zero non-loopback TCP via lsof inspection on live process), AC14 visibility rejection on local, install idempotence (byte-identical re-run), non-destructive merge (unrelated entries preserved), --check dry-run mtime stability, doctor 6-check structured output with proper exit 1 on fail. AC11 (OAuth-loopback browser flow) and AC15 stderr mismatch warning explicitly deferred to T14 post-deploy (per T11 TR11-6 + audit consensus that binary-embedded discovery makes mismatch unobservable for v1). AC3 macOS netns-equivalent airplane test done via lsof connection inspection (T11 TR11-1 compensation). No blockers; cleared for Task 13 deploy.",
+  "gates": [
+    {
+      "name": "cargo test --workspace --no-fail-fast --features mnemonic-mcp/test-support",
+      "status": "pass",
+      "details": "645 passed, 0 failed, 4 ignored across 41 test binaries. Identical totals to T11 audit (645/0/4)."
+    },
+    {
+      "name": "cargo clippy --workspace --all-targets --features mnemonic-mcp/test-support -- -D warnings",
+      "status": "pass",
+      "details": "Clean — zero warnings."
+    },
+    {
+      "name": "cargo fmt --all -- --check",
+      "status": "pass",
+      "details": "Clean."
+    },
+    {
+      "name": "cd packages/mcp && npx vitest run",
+      "status": "pass",
+      "details": "27/27 pass (3 files: install-binary.test.ts, install-hosts.test.ts, doctor.test.ts)."
+    },
+    {
+      "name": "cd packages/cli && npx vitest run",
+      "status": "pass",
+      "details": "143/145 pass + 2 skipped, 18 files. No regression from T6."
+    },
+    {
+      "name": "cd packages/sdk && npm test",
+      "status": "pass",
+      "details": "146/146 pass across 14 files."
+    },
+    {
+      "name": "cd packages/mcp && npm run build && npm pack --dry-run",
+      "status": "pass",
+      "details": "Build emits dist/* deterministically (27 files; 19.9 kB tarball; 72.2 kB unpacked). No secrets / .env in published tarball; only README + dist/* + package.json. dist/binary-version.json present."
+    },
+    {
+      "name": "actionlint .github/workflows/release.yml",
+      "status": "pass",
+      "details": "3 warnings — all pre-existing on lines 68, 91, 105 in build-linux/build-macos jobs (confirmed in T8 round 2). Zero new findings from this feature."
+    },
+    {
+      "name": "release binary smoke — initialize/tools/list/prompts/list/resources/list (STORAGE_MODE=local, PAYMENT_MODE=none, tempdir HOME)",
+      "status": "pass",
+      "details": "initialize returned protocolVersion 2025-06-18, capabilities {tools,prompts,resources}, embedder {model_id=all-MiniLM-L6-v2, model_version=0.1.0-fastembed-5.13.2, dim=384}. tools/list returned 7 tools, each tool description contains Purpose:+Trigger: sections projected from skill manifests at build time. prompts/list returned 7 prompts. resources/list returned 7 resources (mnemonik://skills/*.md URIs)."
+    },
+    {
+      "name": "release binary smoke — sign_memory mode=local + recall + visibility=public rejection",
+      "status": "pass",
+      "details": "mode=local sign succeeded with write_mode=local, visibility=private, synthetic local:* tx IDs, content_hash recorded, COSE_Sign1 signed. Anonymous recall (no JWT) returned total_attestations=1, results=[] — privacy filter correctly excluded the private row (AC13 working). sign_memory {mode=local, visibility=public} rejected with -32602 InvalidParams field=visibility received=public (AC14 working)."
+    },
+    {
+      "name": "release binary smoke — airplane-mode local sign (AC3 lsof inspection)",
+      "status": "pass",
+      "details": "Spawned mcp-stdio with mode=local sign in background, watched `lsof -p <pid> -i -n` during sign: zero TCP/UDP connections on the binary process (only PIPE/unix sockets for its own stdin/stdout). Compensates T11 TR11-1 (Linux netns missing on macOS). Sign returned successfully with write_mode=local."
+    },
+    {
+      "name": "shim smoke — install --check (dry-run mtime stability)",
+      "status": "pass",
+      "details": "Created tempdir HOME with pre-existing ~/.claude.json (foo mcpServer) + ~/.cursor/mcp.json (empty). Captured mtime before+after install --check: both unchanged. Output planned: 'would set mcpServers.mnemonik' for both detected files."
+    },
+    {
+      "name": "shim smoke — install (apply, non-destructive, idempotent)",
+      "status": "pass",
+      "details": "install added mcpServers.mnemonik with absolute binary path + args=['mcp-stdio'] (no npx) to ~/.claude.json and ~/.cursor/mcp.json. The pre-existing foo entry preserved byte-identical. Claude Desktop config (~/Library/Application Support/...) silently skipped (file absent). Re-run produced byte-identical SHA256 on both files (idempotence). Output's final line == 'If any of these agents is already running, please restart them.' (exact AC9 string)."
+    },
+    {
+      "name": "shim smoke — doctor 6-check structured output + exit 1 on fail",
+      "status": "pass",
+      "details": "Six checks emitted: host-config-entry-presence (pass; 2/3 hosts configured), mcp-mnemonik-xyz-health (pass; 200 OK live), binary-integrity (fail; cached binary absent + repair hint), local-sqlite-rw (pass), identity-accessible (fail; no identity file + repair hint), token-file-integrity (pass; no cached token). Exit code: 1 (correctly non-zero when any check fails). AC17 verified."
+    }
+  ],
+  "ac_coverage": {
+    "AC1 — Anonymous discovery (≥7 prompts, ≥7 resources, enriched tools/list)": "covered_by: discovery_anonymous.rs (8/8 tests, T2 verification) + smoke initialize/tools-list/prompts-list/resources-list against release binary — confirmed 7 prompts, 7 resources, 7 tools with Purpose:+Trigger: enrichment",
+    "AC2 — Manifest integrity (build-time projection, drift impossible)": "covered_by: skill_manifests.rs (5/5, T1 build.rs guard rejects missing manifest/section, symlink rejection, rerun-if-changed)",
+    "AC3 — Local sign offline (no outbound TCP, < 1s)": "covered_by: sign_memory_softfall.rs (default no-fallback typed error + outbound==0 mock assertion) + smoke lsof inspection of live mcp-stdio process showed zero non-loopback connections on the binary's PID during a local sign. macOS netns unavailable — lsof inspection is the compensating control (T11 TR11-1 closure).",
+    "AC4 — Local recall finds local-written (top-1)": "covered_by: sign_memory_visibility.rs + sign_memory_softfall.rs integration round-trip + smoke sign-then-recall (returned total_attestations=1 — embed/compress/store/search round-trip functional; smoke top-1 not asserted because anonymous recall correctly filtered private row per AC13 — see Rust integration test for authenticated top-1)",
+    "AC5 — Default no silent escalation": "covered_by: sign_memory_softfall.rs (allow_fallback_to_participate=false + embedder fails → typed -32098 EmbedderInvalid, zero outbound mock hits)",
+    "AC6 — Explicit opt-in fallback + escalated response field": "covered_by: sign_memory_softfall.rs opt_in_escalation_* + sign_memory_softfall.rs escalation-with-public-write-confirmation path + dispatcher test in confirmation_gate.rs",
+    "AC7 — Install idempotent (byte-identical re-run)": "covered_by: install-hosts.test.ts vitest idempotency assertion + smoke SHA256 comparison before/after re-run (claude+cursor both identical)",
+    "AC8 — Install non-destructive (unrelated entries preserved)": "covered_by: install-hosts.test.ts JSON merge preserve-unrelated test + smoke foo entry preserved byte-identical post-install",
+    "AC9 — Install resilient (1 of 3 hosts present, exit 0)": "covered_by: install-hosts.test.ts all-absent + present-only-some test + smoke Claude Desktop absent path silently skipped, exit 0, restart line printed",
+    "AC10 — Install --check dry-run (mtime stable)": "covered_by: install-hosts.test.ts --check mtime + no-temp-files assertion + smoke mtime comparison before/after = unchanged on both files",
+    "AC11 — OAuth-loopback flow + token cached + 1h TTL": "partial — covered_by: oauth_loopback.rs token-caching invariants (file written after mint, expires_at honored, re-read returns byte-identical JWT, malformed→Ok(None)). Live browser-popup loopback against mcp.mnemonik.xyz deferred to post-deploy T14 (requires production OAuth provider)",
+    "AC12 — (REFRAMED per Decision 7) — token persisted at ~/.mnemonic/token.json (NOT keychain in v1)": "covered_by: integration_token.rs (token_store roundtrip, file mode 0o600, dir mode 0o700, expired-on-read returns Expired, malformed→Ok(None)) + cli_subcommands.rs logout removes file. Keychain move is explicit user-spec Follow-ups v1.1 deferral per Decision 7.",
+    "AC13 — Visibility-respecting anonymous recall (public-only)": "covered_by: anonymous_recall.rs (3/3 — cross-owner public surfaces, private excluded, owner-isolation preserved for authenticated) + recall_owner_isolation.rs (T2 forward flag honored) + smoke confirmed empty results when anonymous queries our private row",
+    "AC14 — Visibility only on participate writes (-32602 on local+visibility)": "covered_by: sign_memory_visibility.rs (5/5 — local+visibility=public/private both reject; participate+visibility accepted) + smoke -32602 InvalidParams field=visibility received=public",
+    "AC15 — Embedder config surface (initialize.embedder.{model_id,model_version,dim})": "covered_by: discovery_anonymous.rs (initialize_returns_embedder_metadata) + smoke initialize returned embedder {model_id, model_version='0.1.0-fastembed-5.13.2', dim=384}. T11 TR11-6 stderr mismatch warning disposition: v1 deferred — binary-embedded discovery (Decision 1) makes server/binary divergence unobservable in normal operation; ship as-is, defer warning emission to v1.1 (informational, not a v1 gate).",
+    "AC16 — Error catalogue propagation (all rows as typed JSON-RPC errors)": "covered_by: error_catalogue.rs (6/6 production-path triggers + catalogue_typed_helpers_pin_data_shapes for cross-task helpers) + confirmation_gate.rs (10/10 PublicWriteRequiresConfirmation triggers) + oauth_loopback.rs (TokenExpired) + sign_memory_softfall.rs (HostedUnavailable). T11 TR11-3 noted 3 helpers pinned only at helper level — wire contracts protected, audit consensus is no production-trigger gap for v1 (live trigger covered in post-deploy T14 smoke)",
+    "AC17 — Doctor command (6 checks, exit 0/1, repair hints)": "covered_by: doctor.test.ts (2 happy/fail path tests) + smoke executed 6 checks against tempdir HOME with cached binary absent + identity absent → exit 1, two failing checks each with repair hint, four passing checks, exit code 1"
+  },
+  "tech_spec_acceptance_coverage": {
+    "cargo test --workspace passes": "verified — 645/0/4",
+    "cargo clippy --workspace -- -D warnings clean": "verified — clean",
+    "npx vitest run in packages/mcp/ passes": "verified — 27/27",
+    "no regression in existing integration tests": "verified — packages/cli 143/145+2 skipped (no regression vs T6), packages/sdk 146/146",
+    "migrate_visibility_column idempotent": "verified by integration_storage.rs migrate_visibility_column_idempotent_on_clean_db + clean-DB-no-op test (T3)",
+    "mcp-stdio reuses Arc<McpState> (no duplicate embedder/store)": "verified by cli_subcommands.rs single-state assertion + T5 code-review round-3 PASS confirming reuse of run_stdio path",
+    "five new JSON-RPC method arms return MCP-spec-conformant on anonymous calls": "verified — discovery_anonymous.rs + live binary smoke",
+    "ALLOWLIST_METHODS extension is sole code change for anonymous-OK": "verified by T2 code-review + auth_allowlist.rs",
+    "release.yml emits SHA256SUMS as release asset": "verified — T8 deploy-reviewer PASS + actionlint clean of new steps",
+    "packages/mcp ships as @mnemonik-xyz/mcp with Trusted Publishing": "verified — T8 publish-mcp-shim job analogous to publish-npm with --provenance + npm pack tarball name=@mnemonik-xyz/mcp@0.2.0"
+  },
+  "agent_check_table_smoke_results": [
+    {"row": 1, "step": "Anonymous discovery 7 prompts", "status": "pass", "evidence": "smoke prompts/list returned 7 entries with non-empty descriptions"},
+    {"row": 2, "step": "Anonymous discovery 7 resources", "status": "pass", "evidence": "smoke resources/list returned 7 entries with mnemonik://skills/*.md URIs"},
+    {"row": 3, "step": "tools/list enriched descriptions ≥ documented length", "status": "pass", "evidence": "smoke each of 7 tools carries Purpose: + Trigger: sections; mnemonic_sign_memory description includes ~2.5kB of Purpose+Trigger text"},
+    {"row": 4, "step": "Anonymous recall returns only public", "status": "pass", "evidence": "anonymous_recall.rs (3/3) — production code path. Live smoke against tempdir confirmed private row not surfaced to anonymous recall."},
+    {"row": 5, "step": "Install idempotent (byte-identical)", "status": "pass", "evidence": "smoke SHA256 of claude.json+cursor mcp.json before and after re-run identical"},
+    {"row": 6, "step": "Install --check is dry-run", "status": "pass", "evidence": "smoke mtime stable on both files; output declarative plan"},
+    {"row": 7, "step": "Local sign offline", "status": "pass", "evidence": "smoke mcp-stdio + lsof inspection of binary PID — zero non-loopback TCP/UDP; sign returned write_mode=local with synthetic local:* tx IDs"},
+    {"row": 8, "step": "Default no silent escalation", "status": "pass", "evidence": "sign_memory_softfall.rs default_typed_error_no_outbound + manual: visibility=public on local rejected (related path)"},
+    {"row": 9, "step": "Explicit opt-in fallback works", "status": "pass", "evidence": "sign_memory_softfall.rs opt_in_escalation_response_includes_escalated_field + dispatcher integration"},
+    {"row": 10, "step": "Visibility rejected on local (-32602)", "status": "pass", "evidence": "smoke -32602 InvalidParams field=visibility received=public + sign_memory_visibility.rs 5/5"},
+    {"row": 11, "step": "Token cached at ~/.mnemonic/token.json (NOT keychain per Decision 7)", "status": "pass", "evidence": "integration_token.rs file roundtrip + 0o600 mode + Node CLI shares same file path"},
+    {"row": 12, "step": "Embedder config surface in initialize", "status": "pass", "evidence": "smoke initialize.embedder = {model_id=all-MiniLM-L6-v2, model_version=0.1.0-fastembed-5.13.2, dim=384}"},
+    {"row": 13, "step": "Doctor diagnoses corruption + repair hint", "status": "pass", "evidence": "smoke doctor exit 1 with binary-integrity fail + identity-accessible fail, each carrying repair hint; doctor.test.ts vitest happy/fail paths"},
+    {"row": 14, "step": "Token migration from existing CLI", "status": "deferred", "evidence": "Decision 7 — token migration to keychain deferred to v1.1; current shared-file model means no migration needed for v1. Documented in user-spec Follow-ups."}
+  ],
+  "deferredToPostDeploy": [
+    {
+      "criterion": "AC11 live browser-popup OAuth-loopback against mcp.mnemonik.xyz",
+      "reason": "Requires production OAuth provider; cannot pre-deploy verify with mocked OAuth alone",
+      "verificationCondition": "After deploy, agent runs sign_memory with mode=participate against mcp.mnemonik.xyz with no cached token",
+      "verificationSteps": "On a fresh-install macOS host: npm install -g @mnemonik-xyz/mcp; mnemonik-mcp install; via MCP Inspector or Claude Code, trigger a participate-mode sign_memory; observe browser popup opens with OAuth flow; complete login; assert ~/.mnemonic/token.json appears with mode 0o600; second sign within TTL succeeds without re-popup"
+    },
+    {
+      "criterion": "AC15 stderr mismatch warning between binary and server embedder versions",
+      "reason": "Binary-embedded discovery (Decision 1) means server/binary divergence is structurally unobservable in normal operation; warning emission deferred to v1.1 per T11 TR11-6 + audit consensus",
+      "verificationCondition": "Not a v1 release gate — documented disposition is acceptance of current behavior",
+      "verificationSteps": "(No T14 action required) — defer concrete warning emission to v1.1 follow-up issue tracking"
+    },
+    {
+      "criterion": "Live anonymous discovery against production mcp.mnemonik.xyz via MCP Inspector",
+      "reason": "Requires production server build with new prompts/resources handlers deployed",
+      "verificationCondition": "After deploy, run npx @modelcontextprotocol/inspector https://mcp.mnemonik.xyz/mcp",
+      "verificationSteps": "Verify Inspector shows 7 prompts, 7 resources, 5+ tools with enriched descriptions; screenshot for release-checklist"
+    },
+    {
+      "criterion": "Live anonymous recall against production DB with visibility filter",
+      "reason": "Requires production DB seeded with public + private test rows",
+      "verificationCondition": "After deploy, seed test rows via authenticated CLI then query anonymously",
+      "verificationSteps": "curl --no-buffer POST https://mcp.mnemonik.xyz/mcp with tools/call mnemonic_recall, query for the seeded test string; assert only public rows in result"
+    },
+    {
+      "criterion": "Fresh-install end-to-end macOS UX: npm install + mnemonik-mcp install + Claude Code spawns binary + airplane mode local sign",
+      "reason": "Requires shim published to npm registry; pre-deploy build is local-only",
+      "verificationCondition": "Run on a fresh macOS host after @mnemonik-xyz/mcp@<tag> publish",
+      "verificationSteps": "On fresh macOS: npm install -g @mnemonik-xyz/mcp; mnemonik-mcp install; open Claude Code; verify mnemonik tools appear in /mcp menu; enable airplane mode; perform a local-mode attestation; assert success"
+    }
+  ],
+  "manual_steps_for_T14": [
+    "Run `npx @modelcontextprotocol/inspector https://mcp.mnemonik.xyz/mcp` and visually verify 7 prompts / 7 resources / 5+ tools with enriched descriptions surface in the Inspector UI (per user-spec 'Пользователь проверяет' MCP Inspector smoke)",
+    "On a fresh macOS host (no prior ~/.mnemonic/): `npm install -g @mnemonik-xyz/mcp && mnemonik-mcp install`. Open Claude Code, verify mnemonik tools visible in /mcp menu, attempt a local-mode attestation in airplane mode and confirm success (per user-spec 'Пользователь проверяет' Fresh-machine install smoke)",
+    "Trigger first participate-mode write through Claude Code; confirm browser popup OAuth flow; after login, confirm `~/.mnemonic/token.json` exists with mode 0o600 and contains valid JWT; second participate-mode write within 1h must NOT re-trigger browser",
+    "On fresh install, run `mnemonik-mcp doctor` and confirm all 6 checks pass (host-config-entry-presence, mcp-mnemonik-xyz-health, binary-integrity, local-sqlite-rw, identity-accessible, token-file-integrity)",
+    "Seed mcp.mnemonik.xyz with one private + one public test row matching a distinctive query string; run anonymous recall via curl; assert only the public row returns (AC13 live verification)",
+    "(Optional informational) If the binary's embedder model_version diverges from server's at any point, verify whether the AC15 stderr warning emits (currently structurally unreachable per Decision 1; tracks v1.1 backlog only)"
+  ],
+  "open_audit_followups": {
+    "T11 TR11-1": "AC3 macOS netns missing — compensated pre-deploy by lsof process-level connection inspection; production verification via airplane-mode T14 manual smoke. Status: addressed.",
+    "T11 TR11-3": "3 error catalogue rows (OAuthTimeout, LocalStorageBusy, IdentityBootstrapFailed) only pinned at helper level — wire contracts protected. Status: deferred — production-trigger paths verified live in T14 if needed; no v1 gate impact.",
+    "T11 TR11-6": "AC15 stderr mismatch line unasserted — binary-embedded discovery makes divergence unobservable. Status: explicitly deferred to v1.1, documented in this report's deferredToPostDeploy section. NOT a v1 release gate per audit consensus.",
+    "T9 minor 1": "Dynamic await import('node:fs/promises') in install-hosts.ts:104 + doctor.ts:158. Status: informational, no runtime impact, post-launch cleanup.",
+    "T9 minor 2": "mnemonic_check_pending mapped to mnemonik-attest skill in mcp/src/mcp.rs:196 — semantically off-target. Status: informational, copy-edit, post-launch.",
+    "T10 SA10-L1+L2+INFO1": "Low + info-level defense-in-depth observations on install-hosts realpath, hosted-endpoint flag-gate boundary, and DashMap horizontal-scaling. Status: all explicitly accepted per threat model; no v1 action."
+  }
+}

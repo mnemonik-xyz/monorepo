@@ -365,3 +365,41 @@ Review details — in JSON files via links. QA report — in logs/working/.
 - security-auditor: PASS, 0 blockers + 0 majors + 2 LOW + 1 INFO → [logs/working/audit/security-auditor.json](logs/working/audit/security-auditor.json)
 
 **Ready for deploy:** Yes — no security blockers across T1-T8. Pre-deploy QA (T12) may proceed.
+
+## Task 12: Pre-deploy QA
+
+**Status:** Done
+**Commit:** (this commit)
+**Agent:** t12-qa
+**Summary:** Pre-deploy QA passed. Verdict: **go** — cleared for Task 13 deploy. Full gate green across cargo test (645 passed, 0 failed, 4 ignored), cargo clippy -D warnings, cargo fmt, packages/mcp vitest (27/27), packages/cli vitest (143 + 2 skipped, no regression vs T6), packages/sdk vitest (146/146), npm pack dry-run (27 files, no secrets), actionlint (3 pre-existing warnings only). Smoke against fresh release binary in tempdir HOME confirmed every user-spec AC + every "Как проверить" row 1-13 (row 14 deferred per Decision 7). AC11 (live OAuth-loopback popup) + Inspector smoke + fresh-machine npm install pipelined to T14 post-deploy. AC15 stderr mismatch warning explicitly deferred to v1.1 per T11 TR11-6 + audit consensus (binary-embedded discovery makes server/binary divergence structurally unobservable in v1). AC3 macOS netns gap compensated by lsof process-level connection inspection during a live mcp-stdio sign — zero non-loopback TCP/UDP observed on the binary's PID. AC14 visibility-on-local rejection verified live (-32602). Install smoke confirmed idempotence (byte-identical SHA256 on re-run), non-destructive merge (unrelated foo entry preserved), --check mtime stability, restart-instruction line. Doctor smoke confirmed 6-check structured output with proper exit 1 on failure + repair hints.
+
+**Deviations:** None.
+
+**Reviews:**
+
+*Round 1 (this commit):*
+- pre-deploy-qa: go, 0 blockers + 0 majors + 0 minors + 5 deferred-to-post-deploy → [logs/working/qa/pre-deploy-qa.json](logs/working/qa/pre-deploy-qa.json) (mirror: [logs/working/task-12/qa-report.json](logs/working/task-12/qa-report.json))
+
+**Deferred to post-deploy (T14):**
+- AC11 live OAuth-loopback popup against mcp.mnemonik.xyz
+- AC15 stderr mismatch warning — v1.1 backlog only, not a v1 gate per Decision 1 (binary-embedded discovery)
+- Live anonymous discovery via MCP Inspector against production server
+- Live anonymous recall + visibility filter against production DB
+- Fresh-install end-to-end UX (npm install -g + Claude Code spawn + airplane sign)
+
+**Verification:**
+- `cargo test --workspace --no-fail-fast --features mnemonic-mcp/test-support` → 645 passed, 0 failed, 4 ignored
+- `cargo clippy --workspace --all-targets --features mnemonic-mcp/test-support -- -D warnings` → clean
+- `cargo fmt --all -- --check` → clean
+- `cd packages/mcp && npx vitest run` → 27/27
+- `cd packages/cli && npx vitest run` → 143 + 2 skipped (no regression vs T6)
+- `cd packages/sdk && npm test` → 146/146
+- `cd packages/mcp && npm run build && npm pack --dry-run` → 27 files, 19.9 kB tarball, no secrets
+- `actionlint .github/workflows/release.yml` → 3 pre-existing warnings (T8 baseline confirmed)
+- Smoke (release binary mcp-stdio): initialize/tools/list/prompts/list/resources/list — 7+7+7 returned, embedder metadata present
+- Smoke (release binary mcp-stdio): mode=local sign succeeded; mode=local+visibility=public rejected with -32602
+- Smoke (AC3 airplane): lsof on live binary PID during local sign — zero non-loopback connections
+- Smoke (shim install): apply non-destructive + idempotent SHA256 + restart line + Claude Desktop skipped silently
+- Smoke (shim install --check): mtime stable on both files
+- Smoke (shim doctor): 6 checks, exit 1 with repair hints when binary/identity absent
+- Full report: [logs/working/qa/pre-deploy-qa.json](logs/working/qa/pre-deploy-qa.json)
