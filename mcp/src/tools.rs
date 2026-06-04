@@ -491,6 +491,66 @@ async fn proxy_participate(
         obj.remove("allow_fallback_to_participate");
     }
 
+    // Decision 4 + 5b — post-escalation visibility re-resolution.
+    //
+    // The local request resolved with `mode=local + visibility=public +
+    // allow_fallback_to_participate=true`; the dispatcher boundary at
+    // `resolve_visibility` rejects local+public via AC14 before any of
+    // this code runs, so reaching this branch implies an internal caller
+    // that already pre-resolved a `Visibility::Public` value (or a future
+    // refactor that admits public on the local path). EITHER way, the
+    // soft-fall would now effectively land as a participate write —
+    // exactly the path Decision 5b's HMAC-bound `public_write_confirmation`
+    // gate exists to authorise. The hosted side will fire the gate AGAIN
+    // (defence-in-depth, see test `opt_in_escalation_no_confirmation_token`),
+    // but we also gate it LOCALLY so a buggy or compromised hosted operator
+    // that returns success on a missing token cannot bypass the user-
+    // approval ceremony.
+    //
+    // The local gate fires when the request's `visibility` field is
+    // `"public"` AND either `public_write_confirmation` OR `jti` is
+    // missing. We don't try to validate the token cryptographically here
+    // (that is the hosted side's ledger's job); we only ensure the agent
+    // surfaced the content to the user via the ceremony.
+    let visibility_public = proxied_args
+        .get("visibility")
+        .and_then(|v| v.as_str())
+        .map(|s| s.eq_ignore_ascii_case("public"))
+        .unwrap_or(false);
+    if visibility_public {
+        let has_token = proxied_args
+            .get("public_write_confirmation")
+            .and_then(|v| v.as_str())
+            .map(|s| !s.is_empty())
+            .unwrap_or(false);
+        let has_jti = proxied_args
+            .get("jti")
+            .and_then(|v| v.as_str())
+            .map(|s| !s.is_empty())
+            .unwrap_or(false);
+        if !has_token || !has_jti {
+            // Compute the content_hash from the request's content field so
+            // the caller's typed-error envelope matches what the local
+            // dispatcher would have returned without escalation. The
+            // hosted side would otherwise compute the same hash; emitting
+            // it locally avoids a tautological network round-trip.
+            let content_hash = proxied_args
+                .get("content")
+                .and_then(|v| v.as_str())
+                .map(|s| blake3::hash(s.as_bytes()).to_hex().to_string())
+                .unwrap_or_default();
+            tracing::warn!(
+                target: "mnemonic_mcp::tools",
+                reason = reason.as_str(),
+                content_hash = %content_hash,
+                "soft-fall escalation aborted before proxy: visibility=public without public_write_confirmation"
+            );
+            return Err(ToolError::TypedRpc(public_write_requires_confirmation(
+                &content_hash,
+            )));
+        }
+    }
+
     let body = serde_json::json!({
         "jsonrpc": "2.0",
         "id": 1,

@@ -19,55 +19,14 @@
 //! proves the escalation is actually proxied (not stubbed inside
 //! `sign_memory`).
 
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use mnemonic_core::embed::Embedder;
 use mnemonic_core::storage::Visibility;
 use mnemonic_mcp::test_support::mock_state_with_embedder_and_endpoint;
 use mnemonic_mcp::tools::{resolve_write_mode, sign_memory, ToolError};
 
-// ── FailingEmbedder ────────────────────────────────────────────────────────
-
-/// Same shape as the `error_catalogue.rs::FailingEmbedder` fixture — `embed()`
-/// returns `Vec::new()` on the configured call, which `sign_memory_inline`
-/// detects and surfaces as `-32098 EmbedderInvalid`. Kept inline in this
-/// file (instead of imported) to avoid a cross-test private import; the
-/// shape is small and the duplication keeps each integration test
-/// self-contained.
-struct FailingEmbedder {
-    fail_on_call: AtomicUsize,
-    counter: AtomicUsize,
-}
-
-impl FailingEmbedder {
-    fn always_fail() -> Self {
-        Self {
-            fail_on_call: AtomicUsize::new(1),
-            counter: AtomicUsize::new(0),
-        }
-    }
-}
-
-impl Embedder for FailingEmbedder {
-    fn embed(&self, _text: &str) -> Vec<f32> {
-        let n = self.counter.fetch_add(1, Ordering::SeqCst);
-        if n + 1 >= self.fail_on_call.load(Ordering::SeqCst) {
-            Vec::new()
-        } else {
-            vec![0.0; 8]
-        }
-    }
-    fn dim(&self) -> usize {
-        8
-    }
-    fn provider_name(&self) -> &str {
-        "failing"
-    }
-    fn model_id(&self) -> &str {
-        "test/failing-embedder"
-    }
-}
+mod support;
+use support::FailingEmbedder;
 
 // ── Shared fixture builders ────────────────────────────────────────────────
 
@@ -245,12 +204,19 @@ async fn opt_in_escalation_returns_escalated_field() {
 
 #[tokio::test]
 async fn opt_in_escalation_no_confirmation_token() {
-    // Decision 4 + 5b: when escalating to participate with
-    // `visibility=public`, the hosted side's public-write gate fires. We
-    // simulate the hosted's `-32095 PublicWriteRequiresConfirmation`
-    // response and assert the local-side dispatcher propagates it
-    // verbatim (the escalation is undone — no chain write).
+    // Decision 4 + 5b — post-escalation visibility re-resolution fires
+    // LOCALLY before the hosted proxy call, so a buggy/compromised hosted
+    // operator cannot bypass the user-approval ceremony by returning
+    // success on a missing-token request. Test-reviewer F-3 (round 1):
+    // the mock is configured to return SUCCESS; if the local gate is the
+    // source of truth, the agent still sees `-32095` AND the hosted mock
+    // observes ZERO calls.
     let mock = httpmock::MockServer::start();
+    let hosted_success = serde_json::json!({
+        "attestation_id": "hosted-success-that-should-not-be-trusted",
+        "write_mode": "participate",
+        "visibility": "public",
+    });
     let m = mock.mock(|when, then| {
         when.method(httpmock::Method::POST).path("/mcp");
         then.status(200)
@@ -258,14 +224,8 @@ async fn opt_in_escalation_no_confirmation_token() {
             .json_body(serde_json::json!({
                 "jsonrpc": "2.0",
                 "id": 1,
-                "error": {
-                    "code": -32095,
-                    "message": "Public-write confirmation required",
-                    "data": {
-                        "kind": "PublicWriteRequiresConfirmation",
-                        "content_hash": "deadbeef",
-                        "suggested_action": "call request_public_write_confirmation",
-                    },
+                "result": {
+                    "content": [{"type": "text", "text": hosted_success.to_string()}],
                 },
             }));
     });
@@ -277,18 +237,12 @@ async fn opt_in_escalation_no_confirmation_token() {
     );
     let kp = solana_sdk::signature::Keypair::new();
     let owner = mnemonic_core::identity::pubkey_base58(&kp);
-    // Resolve as a participate request from a participate-supporting
-    // envelope so visibility=public is permitted on the local request
-    // boundary. The dispatcher rejects local + public via
-    // `resolve_visibility` at the boundary; for the soft-fall test we
-    // bypass the dispatcher and call `sign_memory` directly with a
-    // pre-resolved local mode AND a `Visibility::Public` value the
-    // dispatcher would have rejected. That intentionally mirrors what
-    // a malicious / buggy client could attempt — the gate STILL fires
-    // at the hosted side post-escalation. Decision 4 + 5b.
-    //
-    // In production the dispatcher would have routed this differently;
-    // the contract under test is specifically the hosted-side re-resolve.
+    // Direct sign_memory call with Visibility::Public bypasses the
+    // dispatcher's local-mode rejection — the test deliberately mirrors
+    // an internal caller that has pre-resolved visibility (or a future
+    // refactor that admits public on the local path). The contract under
+    // test is the LOCAL post-escalation gate: it fires before the proxy
+    // network call, so the hosted mock must observe zero hits.
     let resolved = resolve_write_mode(None, "local").unwrap();
     let args = serde_json::json!({"content": "pub-without-token", "visibility": "public"});
 
@@ -323,11 +277,104 @@ async fn opt_in_escalation_no_confirmation_token() {
     };
     assert_eq!(
         err.code, -32095,
-        "post-escalation visibility re-resolution must fire"
+        "post-escalation visibility re-resolution must fire LOCALLY before any proxy call"
     );
     let data = err.data.expect("data carrier");
     assert_eq!(data["kind"], "PublicWriteRequiresConfirmation");
-    assert_eq!(m.calls(), 1, "hosted-side gate is the source of truth");
+    // F-3 contract: the LOCAL gate is the source of truth. Even though the
+    // mock is configured to return SUCCESS, the agent sees -32095 because
+    // the local code aborts the proxy before reaching the network — a
+    // buggy / compromised hosted operator MUST NOT be able to bypass the
+    // user-approval ceremony.
+    assert_eq!(
+        m.calls(),
+        0,
+        "LOCAL gate must short-circuit before the proxy fires"
+    );
+}
+
+// ── Test 3b: opt-in escalation with valid token reaches the proxy ─────────
+//
+// Negative-of-the-negative: when the caller DOES supply a non-empty
+// `public_write_confirmation` + `jti` pair, the local pre-flight gate
+// passes and the proxy fires. Pins the other side of the F-3 contract:
+// the local gate does NOT over-fire on well-formed public-write requests.
+
+#[tokio::test]
+async fn opt_in_escalation_with_valid_confirmation_token_reaches_hosted() {
+    let mock = httpmock::MockServer::start();
+    let hosted_success = serde_json::json!({
+        "attestation_id": "hosted-pub-uuid",
+        "write_mode": "participate",
+        "visibility": "public",
+    });
+    let m = mock.mock(|when, then| {
+        when.method(httpmock::Method::POST).path("/mcp");
+        then.status(200)
+            .header("content-type", "application/json")
+            .json_body(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": {
+                    "content": [{"type": "text", "text": hosted_success.to_string()}],
+                },
+            }));
+    });
+
+    let endpoint = format!("{}/mcp", mock.base_url());
+    let state = mock_state_with_embedder_and_endpoint(
+        Box::new(FailingEmbedder::always_fail()),
+        endpoint.clone(),
+    );
+    let kp = solana_sdk::signature::Keypair::new();
+    let owner = mnemonic_core::identity::pubkey_base58(&kp);
+    let resolved = resolve_write_mode(None, "local").unwrap();
+    let args = serde_json::json!({
+        "content": "pub-with-token",
+        "visibility": "public",
+        // The LOCAL pre-flight gate only checks presence of the token
+        // and jti; cryptographic validation is the hosted side's ledger's
+        // job (separate test surface). A non-empty pair is sufficient.
+        "public_write_confirmation": "fake-but-nonempty-token",
+        "jti": "00000000-0000-0000-0000-000000000001",
+    });
+
+    let result = sign_memory(
+        &kp,
+        &state.solana,
+        &state.arweave,
+        &state.store,
+        state.embedder.as_ref(),
+        &state.compressor,
+        &state.pending,
+        "pub-with-token",
+        &[],
+        &cost_hint(),
+        "local",
+        &owner,
+        None,
+        resolved,
+        Visibility::Public,
+        &state.envelope,
+        Duration::from_secs(2),
+        true,
+        &state.hosted_endpoint,
+        &hosted_client(),
+        &args,
+    )
+    .await
+    .expect("local gate passes when token+jti are present; proxy returns hosted success");
+
+    let escalated = result
+        .get("escalated")
+        .expect("escalated field present on success");
+    assert_eq!(escalated["reason"], "embedder_unavailable");
+    assert_eq!(result["attestation_id"], "hosted-pub-uuid");
+    assert_eq!(
+        m.calls(),
+        1,
+        "well-formed public-write request must reach the hosted proxy"
+    );
 }
 
 // ── Test 4: opt-in escalation with no network → HostedUnavailable ─────────
@@ -397,4 +444,63 @@ async fn opt_in_escalation_no_network() {
     assert_eq!(data["kind"], "HostedUnavailable");
     assert!(data["last_error"].as_str().is_some_and(|s| !s.is_empty()));
     assert_eq!(data["retry_after_ms"], 500);
+}
+
+// ── Test 5: empty hosted_endpoint sentinel — no soft-fall available ───────
+//
+// Test-reviewer round-2 F-5: lock the documented contract that
+// `hosted_endpoint == ""` disables soft-fall entirely, so `allow_fallback
+// == true` with no configured endpoint propagates the original local error
+// (`-32098 EmbedderInvalid`) instead of `-32011 HostedUnavailable`. The
+// `mock_state` family uses this sentinel — without explicit coverage, a
+// future refactor that started treating empty-endpoint as "try the
+// default" would silently change which typed error the agent receives.
+#[tokio::test]
+async fn empty_endpoint_sentinel_propagates_local_error() {
+    let state = mock_state_with_embedder_and_endpoint(
+        Box::new(FailingEmbedder::always_fail()),
+        String::new(),
+    );
+    let kp = solana_sdk::signature::Keypair::new();
+    let owner = mnemonic_core::identity::pubkey_base58(&kp);
+    let resolved = resolve_write_mode(None, "local").unwrap();
+    let args = serde_json::json!({"content": "empty-endpoint-sentinel"});
+
+    let result = sign_memory(
+        &kp,
+        &state.solana,
+        &state.arweave,
+        &state.store,
+        state.embedder.as_ref(),
+        &state.compressor,
+        &state.pending,
+        "empty-endpoint-sentinel",
+        &[],
+        &cost_hint(),
+        "local",
+        &owner,
+        None,
+        resolved,
+        Visibility::Private,
+        &state.envelope,
+        Duration::from_secs(2),
+        // allow_fallback=true would normally trigger soft-fall, BUT the
+        // empty hosted_endpoint sentinel disables the router entirely.
+        true,
+        &state.hosted_endpoint,
+        &hosted_client(),
+        &args,
+    )
+    .await;
+
+    let err = match result {
+        Err(ToolError::TypedRpc(e)) => e,
+        other => panic!("expected -32098 EmbedderInvalid (original local error), got {other:?}"),
+    };
+    assert_eq!(
+        err.code, -32098,
+        "empty hosted_endpoint sentinel must propagate the original local error, NOT HostedUnavailable"
+    );
+    let data = err.data.expect("data carrier");
+    assert_eq!(data["kind"], "EmbedderInvalid");
 }

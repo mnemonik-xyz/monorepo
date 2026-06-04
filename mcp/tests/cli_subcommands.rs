@@ -27,11 +27,11 @@ use tokio::process::Command;
 use tokio::time::timeout;
 
 /// Test budget. Each spawned-binary test waits at most this long for the
-/// first JSON-RPC response. The startup cost of `mnemonic-mcp` is
-/// dominated by the pricing.refresh() network call; on a sandboxed runner
-/// that times out internally to ~10s, so 45s is the same headroom
-/// `stdio_backward_compat` uses.
-const STARTUP_TIMEOUT: Duration = Duration::from_secs(45);
+/// first JSON-RPC response. With `PRICING_REFRESH_DISABLED=1` (no network
+/// fetches) AND `EMBED_PROVIDER=stub-test` (no slow rotation-matrix build)
+/// the binary boots in well under 1s; the 15s ceiling tolerates a heavily
+/// contended CI box without inviting hangs.
+const STARTUP_TIMEOUT: Duration = Duration::from_secs(15);
 const REQ_TIMEOUT: Duration = Duration::from_secs(5);
 
 // ── In-process matrix for `resolved_hosted_endpoint` (Decision 12) ────────
@@ -139,24 +139,33 @@ async fn logout_is_idempotent_when_file_absent() {
 
 /// `mnemonic-mcp mcp-stdio` should expose the same JSON-RPC handler as
 /// `mnemonic-mcp --transport stdio`. We drive a `tools/list` round-trip
-/// and assert the response carries a tools array. The TDD anchor in the
-/// task spec asks for 7 tools (5 pre-existing + new
-/// `request_public_write_confirmation` + one more from the Wave 1
-/// enrichment), so we assert `>= 5` to stay robust against the actual
-/// inventory which is owned by Tasks 1/2/4 — Task 5 only proves the
-/// subcommand routes to the existing dispatcher, NOT the tool inventory.
+/// and assert the response carries the post-Task-2 tool inventory (>= 5
+/// tools — 5 pre-existing + new `request_public_write_confirmation`, see
+/// Task 4). Test-reviewer F-2: assertion is `>= 5`, not `> 0`, so a
+/// dispatcher regression returning a single dummy tool would fail.
+///
+/// Round-2 (test-reviewer F-1): the binary now honours
+/// `PRICING_REFRESH_DISABLED=1` so startup stays offline; the test no
+/// longer needs `#[ignore]`.
 #[tokio::test]
-#[ignore = "spawns mnemonic-mcp binary; pricing.refresh() needs internet (run with --ignored in CI)"]
 async fn mcp_stdio_accepts_jsonrpc_on_stdin() {
     let bin = env!("CARGO_BIN_EXE_mnemonic-mcp");
 
     let tmp = tempfile::tempdir().expect("tempdir");
-    let keypair_path = tmp.path().join("id.json");
+    // Build a fake HOME so the binary's `dirs::home_dir()` lookup resolves
+    // into the tempdir; otherwise `core::identity::ensure()` would write
+    // a fresh keypair to the developer's real `~/.mnemonic/identity.json`.
+    let fake_home = tmp.path().to_path_buf();
+    std::fs::create_dir_all(fake_home.join(".mnemonic")).expect("mnemonic dir");
+    let keypair_path = fake_home.join(".mnemonic").join("identity.json");
     let db_path = tmp.path().join("attestations.db");
     let rag_dir = tmp.path().join("rag");
     std::fs::create_dir_all(&rag_dir).expect("rag dir");
 
-    // Pre-seed identity + attestations so RAG bootstrap is skipped.
+    // Pre-seed identity + an attestation row so the binary boots into
+    // `run_stdio` without invoking `ensure()` for a new identity AND
+    // without the RAG bootstrap loop (which fires on first boot when the
+    // owner has zero rows).
     {
         use mnemonic_core::identity::{ensure_with_stores, pubkey_base58, FileKeyStore, KeyStores};
         use mnemonic_core::storage::{AttestationStore, SqliteStore, Visibility, WriteMode};
@@ -164,7 +173,7 @@ async fn mcp_stdio_accepts_jsonrpc_on_stdin() {
             os: None,
             file: Box::new(FileKeyStore::new(keypair_path.clone())),
             identity_path: keypair_path.clone(),
-            readme_path: tmp.path().join("README.txt"),
+            readme_path: fake_home.join(".mnemonic").join("README.txt"),
         };
         let id = ensure_with_stores(stores).expect("ensure");
         let kp = id.keypair;
@@ -190,10 +199,23 @@ async fn mcp_stdio_accepts_jsonrpc_on_stdin() {
 
     let mut cmd = Command::new(bin);
     cmd.arg("mcp-stdio")
+        // Force `dirs::home_dir()` and the identity stub-path resolution to
+        // land inside our tempdir instead of the developer's real $HOME.
+        .env("HOME", &fake_home)
+        .env("MNEMONIC_CONFIG_DIR", fake_home.join(".mnemonic"))
         .env("STORAGE_MODE", "local")
         .env("PAYMENT_MODE", "none")
-        .env("EMBED_PROVIDER", "openai")
-        .env("OPENAI_API_KEY", "cli-test-key-not-real")
+        // F-1 round-2 fix: skip the initial+background pricing.refresh()
+        // calls so the binary never reaches out to uploader.irys.xyz or
+        // api.coingecko.com on startup (the ~20s blocker that previously
+        // forced #[ignore]). Test-only env contract; main.rs documents the
+        // semantics.
+        .env("PRICING_REFRESH_DISABLED", "1")
+        // EMBED_PROVIDER=stub-test bypasses the 60s+ 1536-dim TurboQuant
+        // rotation-matrix build cost OpenAIEmbedder would trigger; the
+        // test only calls `tools/list`, which never invokes embed().
+        .env("EMBED_PROVIDER", "stub-test")
+        .env("OPENAI_API_KEY", "")
         .env("DATABASE_PATH", &db_path)
         .env("RAG_CHUNK_DIR", &rag_dir)
         .env("OLLAMA_URL", "http://localhost:11434")
@@ -262,9 +284,16 @@ async fn mcp_stdio_accepts_jsonrpc_on_stdin() {
     let tools = resp["result"]["tools"]
         .as_array()
         .expect("tools array missing");
+    // F-2 (test-reviewer round 1): the task spec's TDD anchor calls for the
+    // full post-Task-2 inventory (5 pre-existing + the new public-write
+    // confirmation tool from Task 4). Asserting `>= 5` keeps the test
+    // robust to a 6th or 7th tool being added without coupling Task 5 to
+    // an exact count owned by Tasks 1/2/4. The earlier `!is_empty()` form
+    // would have accepted a regression that returned a single dummy tool.
     assert!(
-        !tools.is_empty(),
-        "tools/list should return at least one tool entry: {resp}"
+        tools.len() >= 5,
+        "tools/list should return >= 5 tool entries; got {} (full response: {resp})",
+        tools.len()
     );
 
     drop(stdin);
@@ -288,10 +317,14 @@ async fn run_stdio_with_env(
     let rag_dir = config_dir.join("rag");
     std::fs::create_dir_all(&rag_dir).expect("rag dir");
 
-    // Pre-seed an identity and an attestation row so RAG bootstrap is
-    // skipped on startup. This is the same fast-path the
-    // `stdio_backward_compat` test uses.
-    let keypair_path = config_dir.join("id.json");
+    // Pre-seed identity in the binary's `dirs::home_dir()/.mnemonic`
+    // location (we set HOME=config_dir below) so `core::identity::ensure()`
+    // finds a pre-existing keypair and does NOT print the "mnemonic:
+    // identity created" line. Same fast-path used by
+    // `mcp_stdio_accepts_jsonrpc_on_stdin`.
+    let dotmnemonic = config_dir.join(".mnemonic");
+    std::fs::create_dir_all(&dotmnemonic).expect("dotmnemonic");
+    let keypair_path = dotmnemonic.join("identity.json");
     {
         use mnemonic_core::identity::{ensure_with_stores, pubkey_base58, FileKeyStore, KeyStores};
         use mnemonic_core::storage::{AttestationStore, SqliteStore, Visibility, WriteMode};
@@ -299,7 +332,7 @@ async fn run_stdio_with_env(
             os: None,
             file: Box::new(FileKeyStore::new(keypair_path.clone())),
             identity_path: keypair_path.clone(),
-            readme_path: config_dir.join("README.txt"),
+            readme_path: dotmnemonic.join("README.txt"),
         };
         let id = ensure_with_stores(stores).expect("ensure");
         let kp = id.keypair;
@@ -328,12 +361,18 @@ async fn run_stdio_with_env(
         cmd.arg("--allow-custom-endpoint");
     }
     cmd.arg("mcp-stdio")
+        // HOME redirects dirs::home_dir() into the tempdir, so
+        // identity::ensure() resolves to the pre-seeded keypair instead of
+        // touching the developer's real ~/.mnemonic.
+        .env("HOME", config_dir)
         .env("MNEMONIC_HOSTED_ENDPOINT", hosted_env)
-        .env("MNEMONIC_CONFIG_DIR", config_dir)
+        .env("MNEMONIC_CONFIG_DIR", &dotmnemonic)
         .env("STORAGE_MODE", "local")
         .env("PAYMENT_MODE", "none")
-        .env("EMBED_PROVIDER", "openai")
-        .env("OPENAI_API_KEY", "test-key-not-real")
+        // F-1 round-2 fix: see comment in mcp_stdio_accepts_jsonrpc_on_stdin.
+        .env("PRICING_REFRESH_DISABLED", "1")
+        .env("EMBED_PROVIDER", "stub-test")
+        .env("OPENAI_API_KEY", "")
         .env("DATABASE_PATH", db_path)
         .env("RAG_CHUNK_DIR", &rag_dir)
         .env("OLLAMA_URL", "http://localhost:11434")
@@ -358,10 +397,9 @@ async fn run_stdio_with_env(
         });
     }
     // Give the binary up to ~10s for the stderr line to land. The warning
-    // is printed BEFORE the embedder builds (which is the slow step), so
-    // it should land within the first second on any reasonable runner.
-    // We poll for up to 10s with a 100ms granularity so the test stays
-    // tight on local machines and tolerant on CI.
+    // is printed BEFORE the embedder builds (which is fast under
+    // EMBED_PROVIDER=stub-test), so it should land within the first
+    // hundred ms on any reasonable runner.
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     loop {
         {
@@ -390,7 +428,6 @@ async fn run_stdio_with_env(
 }
 
 #[tokio::test]
-#[ignore = "spawns mnemonic-mcp binary; covers stderr-line emission (run with --ignored in CI)"]
 async fn env_var_ignored_without_flag() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let db_path = tmp.path().join("attestations.db");
@@ -412,7 +449,6 @@ async fn env_var_ignored_without_flag() {
 }
 
 #[tokio::test]
-#[ignore = "spawns mnemonic-mcp binary; covers stderr-silence with the flag (run with --ignored in CI)"]
 async fn env_var_honored_with_flag() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let db_path = tmp.path().join("attestations.db");

@@ -26,13 +26,12 @@
 #![cfg(feature = "test-support")]
 
 mod _helpers;
-
-use std::sync::atomic::{AtomicUsize, Ordering};
+mod support;
 
 use _helpers::TestServer;
-use mnemonic_core::embed::Embedder;
 use mnemonic_core::storage::Visibility;
 use serde_json::{json, Value};
+use support::FailingEmbedder;
 
 type FieldMatcher = fn(&Value) -> bool;
 
@@ -173,46 +172,12 @@ async fn catalogue_public_write_requires_confirmation() {
 }
 
 // ── EmbedderInvalid via FailingEmbedder ────────────────────────────────────
-
-/// Test fixture from the Task 4 spec — surfaces the `-32098 EmbedderInvalid`
-/// error catalogue row by returning an empty vector from `embed()`. The
-/// production code path in `sign_memory_inline` checks `if embedding
-/// .is_empty() { return embedder_invalid(...) }`. We instantiate this
-/// embedder on a hand-built `McpState` because the `TestServer` harness
-/// uses the deterministic 8-dim StubEmbedder.
-pub struct FailingEmbedder {
-    pub fail_on_call: AtomicUsize,
-    pub counter: AtomicUsize,
-}
-
-impl Default for FailingEmbedder {
-    fn default() -> Self {
-        Self {
-            fail_on_call: AtomicUsize::new(1),
-            counter: AtomicUsize::new(0),
-        }
-    }
-}
-
-impl Embedder for FailingEmbedder {
-    fn embed(&self, _text: &str) -> Vec<f32> {
-        let n = self.counter.fetch_add(1, Ordering::SeqCst);
-        if n + 1 >= self.fail_on_call.load(Ordering::SeqCst) {
-            Vec::new()
-        } else {
-            vec![0.0; 384]
-        }
-    }
-    fn model_id(&self) -> &str {
-        "test/failing-embedder"
-    }
-    fn dim(&self) -> usize {
-        384
-    }
-    fn provider_name(&self) -> &str {
-        "failing"
-    }
-}
+//
+// Task 5 round-2 F-4 (test-reviewer): the FailingEmbedder fixture moved
+// out of this file into `mcp/tests/support/mod.rs` so soft-fall tests can
+// share the same definition without an inline copy. The original
+// `dim = 384` semantics are preserved via `FailingEmbedder::with_dim(384)`
+// at the construction site below.
 
 #[tokio::test]
 async fn catalogue_embedder_invalid() {

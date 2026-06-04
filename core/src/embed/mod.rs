@@ -196,6 +196,21 @@ pub fn build_embedder(
     model: &str,
 ) -> Result<Box<dyn Embedder>, String> {
     match provider {
+        // Test-only deterministic stub. 8-dim, returns a constant vector.
+        // Triggered by `EMBED_PROVIDER=stub-test`. Used by integration tests
+        // that spawn the binary — the production OpenAI / fastembed paths
+        // build a 1536-dim or 384-dim TurboQuant rotation matrix whose
+        // unoptimised-debug-build cost is >>60s, exceeding any reasonable
+        // CI per-test budget. The stub keeps semantic search disabled (every
+        // vector is identical) but `tools/list`, `whoami`, `prove_identity`,
+        // and the dispatcher routing under test never call `embed()`.
+        "stub-test" => {
+            tracing::warn!(
+                "EMBED_PROVIDER=stub-test — semantic search disabled (constant 8-dim vectors); \
+                 production deploys MUST NOT use this provider"
+            );
+            Ok(Box::new(TestStubEmbedder { dim: 8 }))
+        }
         "fastembed" => {
             #[cfg(feature = "local-embed")]
             {
@@ -244,6 +259,31 @@ pub fn build_embedder(
         other => Err(format!(
             "Unknown EMBED_PROVIDER={other}. Valid: fastembed, openai"
         )),
+    }
+}
+
+/// Test-only embedder selected via `EMBED_PROVIDER=stub-test`. Returns a
+/// constant 8-dim zero vector for every input so the spawned-binary
+/// integration tests can boot without paying the 1536-dim TurboQuant
+/// rotation-matrix build cost (10s in release, 60s+ in unoptimised debug).
+/// Semantic search is non-functional in this mode — callers that need real
+/// embeddings should use `fastembed` (open weights) or `openai`.
+struct TestStubEmbedder {
+    dim: usize,
+}
+
+impl Embedder for TestStubEmbedder {
+    fn embed(&self, _text: &str) -> Vec<f32> {
+        vec![0.0; self.dim]
+    }
+    fn dim(&self) -> usize {
+        self.dim
+    }
+    fn provider_name(&self) -> &str {
+        "stub-test"
+    }
+    fn model_id(&self) -> &str {
+        "stub-test/zeros-8"
     }
 }
 

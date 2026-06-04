@@ -430,9 +430,30 @@ async fn main() -> anyhow::Result<()> {
     };
     let pricing = pricing::PricingEngine::new(cfg.sign_memory_cost_micro_usdc);
 
-    // Attempt an initial price fetch (non-fatal — falls back to floor price)
-    if let Err(e) = pricing.refresh(&pricing_cfg).await {
-        tracing::warn!("initial pricing refresh failed (using floor price): {e}");
+    // Test-mode env guard — review round 2 finding F-1
+    // (agent-native-distribution test-reviewer). The initial + background
+    // pricing.refresh() calls reach out to uploader.irys.xyz and
+    // api.coingecko.com on startup; each has a 10s reqwest timeout, so on
+    // a sandboxed CI runner the binary takes ~20s+ to settle into
+    // `run_stdio` and the spawned-binary integration tests time out.
+    // Setting `PRICING_REFRESH_DISABLED=1` skips both the initial fetch
+    // and the background loop entirely; the pricing engine returns its
+    // floor value (`sign_memory_cost_micro_usdc`) for the duration of the
+    // test. Operator-set in production deployments would degrade the
+    // dynamic pricing surface, which is intentional: this is a test-only
+    // knob and a typo defaults to the production path.
+    let pricing_refresh_disabled =
+        std::env::var("PRICING_REFRESH_DISABLED").ok().as_deref() == Some("1");
+    if pricing_refresh_disabled {
+        tracing::info!(
+            "PRICING_REFRESH_DISABLED=1 — skipping initial + background pricing refresh; \
+             prices stay pinned at the floor value for the process lifetime (test mode)"
+        );
+    } else {
+        // Attempt an initial price fetch (non-fatal — falls back to floor price)
+        if let Err(e) = pricing.refresh(&pricing_cfg).await {
+            tracing::warn!("initial pricing refresh failed (using floor price): {e}");
+        }
     }
     tracing::info!(
         price_micro_usdc = pricing.current_price(),
@@ -441,7 +462,7 @@ async fn main() -> anyhow::Result<()> {
     );
 
     // Spawn background refresh loop
-    {
+    if !pricing_refresh_disabled {
         let pricing = pricing.clone();
         let refresh_secs = cfg.price_refresh_secs;
         tokio::spawn(async move {

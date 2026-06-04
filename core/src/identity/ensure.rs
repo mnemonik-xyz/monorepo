@@ -100,9 +100,23 @@ pub struct KeyStores {
 // ---------------------------------------------------------------------------
 
 fn default_stores() -> anyhow::Result<KeyStores> {
-    let home = dirs::home_dir()
-        .ok_or_else(|| anyhow::anyhow!("cannot determine home directory; set $HOME"))?;
-    let mnemonic_dir = home.join(".mnemonic");
+    // Honour `MNEMONIC_CONFIG_DIR` as a test-mode override mirroring the
+    // same env contract `token_store::token_path` uses (Task 6 —
+    // agent-native-distribution). Lets integration tests sandbox the
+    // identity path without mutating the process-global `$HOME` (which
+    // requires `unsafe` on Rust 2024 AND is unreliable on macOS where
+    // `dirs::home_dir()` returns the NSHomeDirectory regardless of `$HOME`).
+    // When the override is in effect we ALSO drop the OsKeyStore so the
+    // sandboxed identity does not silently pick up a real keychain entry
+    // left over from a prior production binary run.
+    let override_dir = std::env::var_os("MNEMONIC_CONFIG_DIR").filter(|s| !s.is_empty());
+    let mnemonic_dir = if let Some(ref od) = override_dir {
+        std::path::PathBuf::from(od)
+    } else {
+        let home = dirs::home_dir()
+            .ok_or_else(|| anyhow::anyhow!("cannot determine home directory; set $HOME"))?;
+        home.join(".mnemonic")
+    };
 
     std::fs::create_dir_all(&mnemonic_dir)
         .with_context(|| format!("creating {}", mnemonic_dir.display()))?;
@@ -113,8 +127,15 @@ fn default_stores() -> anyhow::Result<KeyStores> {
     use crate::identity::keystore_file::FileKeyStore;
     use crate::identity::keystore_os::OsKeyStore;
 
+    let os: Option<Box<dyn KeyStore>> = if override_dir.is_some() {
+        // Sandbox mode — file-only; the real OS keychain stays untouched.
+        None
+    } else {
+        Some(Box::new(OsKeyStore::new()))
+    };
+
     Ok(KeyStores {
-        os: Some(Box::new(OsKeyStore::new())),
+        os,
         file: Box::new(FileKeyStore::new(identity_path.clone())),
         identity_path,
         readme_path,
