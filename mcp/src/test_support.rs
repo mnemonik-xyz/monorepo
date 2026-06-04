@@ -37,7 +37,7 @@ use mnemonic_core::solana::SolanaClient;
 use mnemonic_core::storage::SqliteStore;
 
 use crate::llm::LlmClient;
-use crate::mcp::McpState;
+use crate::mcp::{Envelope, McpState};
 use crate::pending::PendingBundles;
 use crate::pricing::PricingEngine;
 
@@ -141,6 +141,166 @@ pub fn mock_state() -> Arc<McpState> {
         bootstrap_tickets: Arc::new(crate::api::BootstrapTickets::with_defaults()),
         bootstrap_server_x25519_secret,
         bootstrap_server_x25519_public,
+        envelope: Envelope::from_config("local", "none", 0),
+        delivery_refetch_timeout: std::time::Duration::from_secs(15),
+        refunds_by_subject: Arc::new(crate::payment::RefundsBySubject::new(
+            std::time::Duration::from_secs(60),
+            5,
+        )),
+        delivery_metrics: Arc::new(crate::payment::DeliveryMetrics::default()),
+    })
+}
+
+/// Builder-shaped variant of [`mock_state`] used by `mcp/tests/_helpers/` to
+/// vary `storage_mode` + `payment_mode` per test without copying the full
+/// `McpState` literal. Defaults match `mock_state()`; the price quoted in the
+/// envelope mirrors the production wiring (PricingEngine current_price()).
+///
+/// Returns the freshly-built `Arc<McpState>` plus an `Arc<oauth::OAuthState>`
+/// with the standard test secret — the harness combines both into a single
+/// `TestServer` value.
+pub fn mock_state_with(
+    storage_mode: &str,
+    payment_mode: &str,
+    sign_memory_cost_micro_usdc: i64,
+) -> Arc<McpState> {
+    let tmp = tempfile::NamedTempFile::new().expect("tempfile");
+    let path = tmp.into_temp_path();
+    let path_buf = path.keep().expect("keep tempfile");
+
+    let store = SqliteStore::open(&path_buf).expect("sqlite open");
+    let compressor = EmbeddingCompressor::new(8, 4, 42);
+    let quota = Quota::per_minute(NonZeroU32::new(10).expect("nz"));
+    let chat_limiter = governor::RateLimiter::keyed(quota);
+    let ollama_client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .expect("reqwest");
+    let llm_client =
+        LlmClient::new("ollama", "", "test-model", "http://localhost:0", 512).expect("llm_client");
+
+    let bootstrap_server_x25519_secret =
+        crypto_box::SecretKey::generate(&mut crypto_box::aead::OsRng);
+    let bootstrap_server_x25519_public = bootstrap_server_x25519_secret.public_key();
+
+    // Pricing engine seeded with the cost the caller wants quoted. `Envelope`
+    // reads this same value via `current_price()` so the wire-format
+    // `participate_cost.amount_cents` matches what the paywall actually
+    // charges (single source of truth — drift impossible by construction).
+    let pricing = PricingEngine::new(sign_memory_cost_micro_usdc);
+
+    Arc::new(McpState {
+        keypair: Keypair::new(),
+        solana: SolanaClient::new("http://localhost:0"),
+        arweave: ArweaveClient::new("http://localhost:0"),
+        store: std::sync::Mutex::new(store),
+        embedder: Box::new(StubEmbedder::default()),
+        compressor,
+        payment_mode: payment_mode.to_string(),
+        treasury_pubkey: String::new(),
+        usdc_mint: String::new(),
+        sign_memory_cost_micro_usdc,
+        pricing,
+        sol_tx_fee_lamports: 0,
+        storage_mode: storage_mode.to_string(),
+        ollama_url: "http://localhost:0".into(),
+        ollama_model: "test-model".into(),
+        rag_chunk_dir: std::path::PathBuf::from("/tmp"),
+        llm_client,
+        artifact_zip_path: std::sync::Mutex::new(None),
+        ollama_client,
+        chat_limiter,
+        pending: Arc::new(PendingBundles::with_defaults()),
+        bootstrap_tickets: Arc::new(crate::api::BootstrapTickets::with_defaults()),
+        bootstrap_server_x25519_secret,
+        bootstrap_server_x25519_public,
+        envelope: Envelope::from_config(storage_mode, payment_mode, sign_memory_cost_micro_usdc),
+        delivery_refetch_timeout: std::time::Duration::from_secs(15),
+        refunds_by_subject: Arc::new(crate::payment::RefundsBySubject::new(
+            std::time::Duration::from_secs(60),
+            5,
+        )),
+        delivery_metrics: Arc::new(crate::payment::DeliveryMetrics::default()),
+    })
+}
+
+/// T3-specific variant of [`mock_state_with`] for the
+/// `mcp/tests/delivery_guarantee.rs` integration suite. Adds two knobs that
+/// the other paths don't need to vary:
+///
+/// - `arweave_url` — points the underlying `ArweaveClient` at a caller-
+///   supplied `httpmock` base URL (the production code paths always use
+///   `localhost:0` which won't accept POSTs).
+/// - `quota_threshold` / `quota_window` — tunes the DoS guard so a 6-call
+///   test scenario can induce the short-circuit without waiting 60s of
+///   wall-clock time.
+/// - `refetch_timeout` — lets tests use a sub-second budget so the
+///   refetch-failure path returns within an acceptable test duration
+///   instead of the production 15s default.
+#[allow(clippy::too_many_arguments)]
+pub fn mock_state_for_delivery(
+    storage_mode: &str,
+    payment_mode: &str,
+    sign_memory_cost_micro_usdc: i64,
+    arweave_url: &str,
+    solana_rpc_url: &str,
+    quota_threshold: u32,
+    quota_window: std::time::Duration,
+    refetch_timeout: std::time::Duration,
+) -> Arc<McpState> {
+    let tmp = tempfile::NamedTempFile::new().expect("tempfile");
+    let path = tmp.into_temp_path();
+    let path_buf = path.keep().expect("keep tempfile");
+
+    let store = SqliteStore::open(&path_buf).expect("sqlite open");
+    let compressor = EmbeddingCompressor::new(8, 4, 42);
+    let quota = Quota::per_minute(NonZeroU32::new(10).expect("nz"));
+    let chat_limiter = governor::RateLimiter::keyed(quota);
+    let ollama_client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .expect("reqwest");
+    let llm_client =
+        LlmClient::new("ollama", "", "test-model", "http://localhost:0", 512).expect("llm_client");
+
+    let bootstrap_server_x25519_secret =
+        crypto_box::SecretKey::generate(&mut crypto_box::aead::OsRng);
+    let bootstrap_server_x25519_public = bootstrap_server_x25519_secret.public_key();
+
+    let pricing = PricingEngine::new(sign_memory_cost_micro_usdc);
+
+    Arc::new(McpState {
+        keypair: Keypair::new(),
+        solana: SolanaClient::new(solana_rpc_url),
+        arweave: ArweaveClient::new(arweave_url),
+        store: std::sync::Mutex::new(store),
+        embedder: Box::new(StubEmbedder::default()),
+        compressor,
+        payment_mode: payment_mode.to_string(),
+        treasury_pubkey: String::new(),
+        usdc_mint: String::new(),
+        sign_memory_cost_micro_usdc,
+        pricing,
+        sol_tx_fee_lamports: 0,
+        storage_mode: storage_mode.to_string(),
+        ollama_url: "http://localhost:0".into(),
+        ollama_model: "test-model".into(),
+        rag_chunk_dir: std::path::PathBuf::from("/tmp"),
+        llm_client,
+        artifact_zip_path: std::sync::Mutex::new(None),
+        ollama_client,
+        chat_limiter,
+        pending: Arc::new(PendingBundles::with_defaults()),
+        bootstrap_tickets: Arc::new(crate::api::BootstrapTickets::with_defaults()),
+        bootstrap_server_x25519_secret,
+        bootstrap_server_x25519_public,
+        envelope: Envelope::from_config(storage_mode, payment_mode, sign_memory_cost_micro_usdc),
+        delivery_refetch_timeout: refetch_timeout,
+        refunds_by_subject: Arc::new(crate::payment::RefundsBySubject::new(
+            quota_window,
+            quota_threshold,
+        )),
+        delivery_metrics: Arc::new(crate::payment::DeliveryMetrics::default()),
     })
 }
 

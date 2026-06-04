@@ -109,6 +109,16 @@ fn build_state() -> Arc<McpState> {
         bootstrap_tickets: Arc::new(mnemonic_mcp::api::BootstrapTickets::with_defaults()),
         bootstrap_server_x25519_secret: bootstrap_x25519_sk,
         bootstrap_server_x25519_public: bootstrap_x25519_pk,
+        // T2: every McpState now carries a discoverability envelope. For
+        // these legacy compatibility tests the deploy is local-only, so the
+        // envelope renders `["local"]` / `null` cost — see Envelope::from_config.
+        envelope: mnemonic_mcp::mcp::Envelope::from_config("local", "none", 0),
+        delivery_refetch_timeout: std::time::Duration::from_secs(15),
+        refunds_by_subject: std::sync::Arc::new(mnemonic_mcp::payment::RefundsBySubject::new(
+            std::time::Duration::from_secs(60),
+            5,
+        )),
+        delivery_metrics: std::sync::Arc::new(mnemonic_mcp::payment::DeliveryMetrics::default()),
     })
 }
 

@@ -7,6 +7,7 @@ use anyhow::Context;
 use rusqlite::{params, Connection};
 use std::path::Path;
 
+use super::mode::WriteMode;
 use super::traits::{AttestationRow, AttestationStore, LineageStore, SearchResult};
 
 const SCHEMA: &str = r#"
@@ -251,6 +252,103 @@ fn migrate_correlation_id_column(conn: &Connection) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Idempotent ADD-COLUMN migration for the per-request `write_mode` field
+/// (feature `modes-user-choice`, T1).
+///
+/// Adds `attestations.write_mode TEXT NOT NULL DEFAULT 'participate'` plus a
+/// composite `(owner_pubkey, write_mode)` index for the filtered recall and
+/// audit queries that follow in later tasks.
+///
+/// `DEFAULT 'participate'` is the conservative choice for legacy rows: a row
+/// that existed under the previous global `STORAGE_MODE=full` operator was,
+/// by definition, a paid participate write. Silently re-tagging those rows
+/// as `'local'` would destroy billing history and downgrade the integrity
+/// claim attached to the row.
+///
+/// Backfill rule: `solana_tx LIKE 'local:_%'` (strict — at least one
+/// character after the colon). This is collision-safe with real Solana
+/// signatures because base58 excludes lowercase `l` and `:` is not in the
+/// base58 alphabet at all; the only rows that match are the synthetic ids
+/// produced by `mcp/src/tools.rs::sign_memory_inline`'s local branch. The
+/// bare `local:` prefix (no suffix) is reserved as the synthetic-id
+/// namespace and is *not* a valid synthetic id — it stays `'participate'`
+/// on purpose.
+///
+/// SQLite `ALTER TABLE ... ADD COLUMN` lacks `IF NOT EXISTS`, so presence is
+/// gated via `PRAGMA table_info`. Wrapped in `BEGIN IMMEDIATE` to serialize
+/// against any concurrent opener; the inner steps are individually
+/// idempotent (`CREATE INDEX IF NOT EXISTS`, UPDATE matches zero rows on a
+/// clean DB) so this is safe to invoke on every open.
+fn migrate_write_mode_column(conn: &Connection) -> anyhow::Result<()> {
+    // SAFETY: the PRAGMA query string is a hard-coded literal — no
+    // user-controlled input can reach SQLite here. The older migration
+    // helpers (`migrate_owner_pubkey_columns`, `migrate_correlation_id_column`)
+    // accept a `table: &str` and `format!()` it in; that pattern is safe
+    // today (only internal literals call them) but fragile if extended. This
+    // helper deliberately avoids the parameter so the query is a const, not
+    // a runtime-formatted string (security-auditor round 1 finding).
+    fn attestations_has_column(conn: &Connection, column: &str) -> anyhow::Result<bool> {
+        let mut stmt = conn
+            .prepare("PRAGMA table_info(attestations)")
+            .context("preparing PRAGMA table_info(attestations)")?;
+        let mut rows = stmt.query([])?;
+        while let Some(row) = rows.next()? {
+            let name: String = row.get(1)?;
+            if name == column {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    let need_column = !attestations_has_column(conn, "write_mode")?;
+
+    conn.execute_batch("BEGIN IMMEDIATE;")
+        .context("opening write_mode migration transaction")?;
+
+    let do_migration = || -> anyhow::Result<()> {
+        if need_column {
+            conn.execute(
+                "ALTER TABLE attestations
+                    ADD COLUMN write_mode TEXT NOT NULL DEFAULT 'participate'",
+                [],
+            )
+            .context("adding attestations.write_mode")?;
+        }
+        // Backfill legacy `local:*` synthetic-id rows. Runs every open: cheap
+        // on clean DBs (zero matches once converged), correct on DBs that had
+        // the column added without a backfill in an earlier release.
+        // `LIKE 'local:_%'` requires at least one char after the colon —
+        // bare `local:` is reserved and stays `'participate'` (default).
+        conn.execute(
+            "UPDATE attestations
+                SET write_mode = 'local'
+              WHERE solana_tx LIKE 'local:_%'",
+            [],
+        )
+        .context("backfilling attestations.write_mode for local: synthetic ids")?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_attestations_write_mode
+                 ON attestations(owner_pubkey, write_mode)",
+            [],
+        )
+        .context("creating idx_attestations_write_mode")?;
+        Ok(())
+    };
+
+    match do_migration() {
+        Ok(()) => {
+            conn.execute_batch("COMMIT;")
+                .context("committing write_mode migration")?;
+            Ok(())
+        }
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK;");
+            Err(e)
+        }
+    }
+}
+
 impl SqliteStore {
     pub fn open(path: &Path) -> anyhow::Result<Self> {
         if let Some(parent) = path.parent() {
@@ -277,6 +375,7 @@ impl SqliteStore {
         migrate_payment_events_unique_index(&conn)?;
         migrate_owner_pubkey_columns(&conn)?;
         migrate_correlation_id_column(&conn)?;
+        migrate_write_mode_column(&conn)?;
         Ok(Self { conn })
     }
 
@@ -292,6 +391,7 @@ impl SqliteStore {
         migrate_payment_events_unique_index(&conn)?;
         migrate_owner_pubkey_columns(&conn)?;
         migrate_correlation_id_column(&conn)?;
+        migrate_write_mode_column(&conn)?;
         Ok(Self { conn })
     }
 
@@ -396,18 +496,20 @@ impl AttestationStore for SqliteStore {
         signer_pubkey: &str,
         owner_pubkey: &str,
         created_at: &str,
+        write_mode: WriteMode,
         embedding: &[f32],
     ) -> anyhow::Result<()> {
         let tags_json = serde_json::to_string(tags)?;
-        // Explicit column list — `owner_pubkey` was added by
-        // `migrate_owner_pubkey_columns` after the original table CREATE,
-        // so the column count and order in `INSERT OR REPLACE INTO ...
-        // VALUES (...)` would otherwise drift between fresh and migrated DBs.
+        // Explicit column list — `owner_pubkey` and `write_mode` were added by
+        // migration helpers after the original table CREATE, so the column
+        // count and order in `INSERT OR REPLACE INTO ... VALUES (...)` would
+        // otherwise drift between fresh and migrated DBs.
         self.conn.execute(
             "INSERT OR REPLACE INTO attestations
                  (attestation_id, content, content_hash, tags,
-                  solana_tx, arweave_tx, signer_pubkey, created_at, owner_pubkey)
-             VALUES (?,?,?,?,?,?,?,?,?)",
+                  solana_tx, arweave_tx, signer_pubkey, created_at, owner_pubkey,
+                  write_mode)
+             VALUES (?,?,?,?,?,?,?,?,?,?)",
             params![
                 attestation_id,
                 content,
@@ -418,6 +520,7 @@ impl AttestationStore for SqliteStore {
                 signer_pubkey,
                 created_at,
                 owner_pubkey,
+                write_mode.as_str(),
             ],
         )?;
         let emb_bytes = floats_to_bytes(embedding);
@@ -428,12 +531,24 @@ impl AttestationStore for SqliteStore {
         Ok(())
     }
 
-    fn find_by_tx(&self, tx_id: &str) -> anyhow::Result<Option<AttestationRow>> {
+    fn find_by_tx(
+        &self,
+        tx_id: &str,
+        owner_pubkey: &str,
+    ) -> anyhow::Result<Option<AttestationRow>> {
+        // Tenant-isolation predicate (Decision 9 / T4): the lookup MUST
+        // include `AND owner_pubkey = ?` so a row owned by a different
+        // tenant is indistinguishable from a genuine miss. No carve-out;
+        // legacy rows with NULL `owner_pubkey` will not match any caller.
+        // Response-timing symmetry is documented as accepted residual
+        // (R2-F4) — no constant-time wrapper is layered here.
         let mut stmt = self.conn.prepare(
             "SELECT attestation_id, content, content_hash, solana_tx, arweave_tx, signer_pubkey
-             FROM attestations WHERE solana_tx = ?1 OR arweave_tx = ?1 LIMIT 1",
+             FROM attestations
+             WHERE (solana_tx = ?1 OR arweave_tx = ?1) AND owner_pubkey = ?2
+             LIMIT 1",
         )?;
-        let mut rows = stmt.query(params![tx_id])?;
+        let mut rows = stmt.query(params![tx_id, owner_pubkey])?;
         match rows.next()? {
             Some(row) => Ok(Some(AttestationRow {
                 attestation_id: row.get(0)?,
@@ -443,6 +558,28 @@ impl AttestationStore for SqliteStore {
                 arweave_tx: row.get(4)?,
                 signer_pubkey: row.get(5)?,
             })),
+            None => Ok(None),
+        }
+    }
+
+    fn find_write_mode_by_tx(
+        &self,
+        tx_id: &str,
+        owner_pubkey: &str,
+    ) -> anyhow::Result<Option<WriteMode>> {
+        // Same tenant-isolation predicate as `find_by_tx`: a row owned by
+        // a different tenant returns `Ok(None)` — `verify` routing must
+        // not branch differently for "exists for someone else" vs.
+        // "doesn't exist at all". Separate from `find_by_tx` so the
+        // routing path does not pay the cost of decoding `content` etc.
+        let mut stmt = self.conn.prepare(
+            "SELECT write_mode FROM attestations
+             WHERE (solana_tx = ?1 OR arweave_tx = ?1) AND owner_pubkey = ?2
+             LIMIT 1",
+        )?;
+        let mut rows = stmt.query(params![tx_id, owner_pubkey])?;
+        match rows.next()? {
+            Some(row) => Ok(Some(row.get::<_, WriteMode>(0)?)),
             None => Ok(None),
         }
     }
@@ -466,7 +603,8 @@ impl AttestationStore for SqliteStore {
         // with NULL `owner_pubkey` will not match any caller.
         let mut stmt = self.conn.prepare(
             "SELECT a.attestation_id, a.content, a.content_hash, a.tags,
-                    a.solana_tx, a.arweave_tx, a.created_at, ae.embedding
+                    a.solana_tx, a.arweave_tx, a.created_at, a.write_mode,
+                    ae.embedding
              FROM attestations a
              JOIN attestation_embeddings ae ON a.attestation_id = ae.attestation_id
              WHERE a.owner_pubkey = ?",
@@ -481,7 +619,7 @@ impl AttestationStore for SqliteStore {
 
         let mut results: Vec<SearchResult> = stmt
             .query_map(params![owner_pubkey], |row| {
-                let emb_blob: Vec<u8> = row.get(7)?;
+                let emb_blob: Vec<u8> = row.get(8)?;
                 let emb = bytes_to_floats(&emb_blob);
                 let e_norm = l2_norm(&emb);
                 let score = if e_norm > 0.0 {
@@ -502,6 +640,7 @@ impl AttestationStore for SqliteStore {
                     solana_tx: row.get(4)?,
                     arweave_tx: row.get(5)?,
                     created_at: row.get(6)?,
+                    write_mode: row.get::<_, WriteMode>(7)?,
                     relevance_score: score,
                 })
             })?
@@ -580,16 +719,91 @@ mod tests {
                 "signer1",
                 TEST_OWNER,
                 "2026-04-13T00:00:00Z",
+                WriteMode::Participate,
                 &[1.0, 0.0],
             )
             .unwrap();
 
-        let found = store.find_by_tx("sol_tx_1").unwrap();
+        let found = store.find_by_tx("sol_tx_1", TEST_OWNER).unwrap();
         assert!(found.is_some());
         let row = found.unwrap();
         assert_eq!(row.attestation_id, "att-1");
         assert_eq!(row.content, "content");
         assert_eq!(row.content_hash, "hash1");
+
+        // Tenant-isolation predicate: a wrong-tenant lookup returns
+        // `Ok(None)` indistinguishable from a genuine miss.
+        let other_tenant = store.find_by_tx("sol_tx_1", "different-owner").unwrap();
+        assert!(
+            other_tenant.is_none(),
+            "wrong-tenant lookup must return None"
+        );
+    }
+
+    #[test]
+    fn test_find_write_mode_by_tx_routes_by_stored_mode() {
+        // Seed two rows under different tenants but identical-shape txids
+        // so the predicate has to discriminate by both tx AND owner.
+        let store = SqliteStore::in_memory().unwrap();
+        store
+            .save_attestation(
+                "att-local",
+                "local content",
+                "h-local",
+                &[],
+                "sol-shared",
+                "ar-local",
+                "signer-a",
+                "owner-a",
+                "2026-04-13T00:00:00Z",
+                WriteMode::Local,
+                &[1.0, 0.0],
+            )
+            .unwrap();
+        store
+            .save_attestation(
+                "att-participate",
+                "participate content",
+                "h-participate",
+                &[],
+                "sol-different",
+                "ar-participate",
+                "signer-b",
+                "owner-b",
+                "2026-04-13T00:00:00Z",
+                WriteMode::Participate,
+                &[0.0, 1.0],
+            )
+            .unwrap();
+
+        // owner-a's row is local
+        assert_eq!(
+            store
+                .find_write_mode_by_tx("sol-shared", "owner-a")
+                .unwrap(),
+            Some(WriteMode::Local)
+        );
+        // owner-b's row is participate
+        assert_eq!(
+            store
+                .find_write_mode_by_tx("sol-different", "owner-b")
+                .unwrap(),
+            Some(WriteMode::Participate)
+        );
+        // Wrong tenant for an existing tx → None (no leak).
+        assert_eq!(
+            store
+                .find_write_mode_by_tx("sol-shared", "owner-b")
+                .unwrap(),
+            None
+        );
+        // Unknown tx → None.
+        assert_eq!(
+            store
+                .find_write_mode_by_tx("nonexistent", "owner-a")
+                .unwrap(),
+            None
+        );
     }
 
     #[test]
@@ -607,6 +821,7 @@ mod tests {
                     "signer_a",
                     TEST_OWNER,
                     "2026-01-01",
+                    WriteMode::Participate,
                     &[1.0, 0.0],
                 )
                 .unwrap();
@@ -622,6 +837,7 @@ mod tests {
                 "signer_b",
                 TEST_OWNER,
                 "2026-01-01",
+                WriteMode::Participate,
                 &[1.0, 0.0],
             )
             .unwrap();
@@ -647,6 +863,7 @@ mod tests {
                 "agent",
                 "owner_agent",
                 "2026-01-01",
+                WriteMode::Participate,
                 &[1.0, 0.0],
             )
             .unwrap();
@@ -661,6 +878,7 @@ mod tests {
                 "agent",
                 "owner_agent",
                 "2026-01-01",
+                WriteMode::Participate,
                 &[0.0, 1.0],
             )
             .unwrap();
@@ -687,6 +905,7 @@ mod tests {
                 "signer_x",
                 "owner_alice",
                 "2026-01-01",
+                WriteMode::Participate,
                 &[1.0, 0.0],
             )
             .unwrap();
@@ -701,6 +920,7 @@ mod tests {
                 "signer_x",
                 "owner_bob",
                 "2026-01-01",
+                WriteMode::Participate,
                 &[1.0, 0.0],
             )
             .unwrap();
@@ -773,6 +993,7 @@ mod tests {
                 server,
                 server,
                 "2026-01-01",
+                WriteMode::Participate,
                 &[1.0, 0.0],
             )
             .unwrap();
@@ -800,7 +1021,7 @@ mod tests {
     #[test]
     fn test_find_by_tx_not_found() {
         let store = SqliteStore::in_memory().unwrap();
-        let found = store.find_by_tx("nonexistent").unwrap();
+        let found = store.find_by_tx("nonexistent", TEST_OWNER).unwrap();
         assert!(found.is_none());
     }
 
@@ -818,6 +1039,7 @@ mod tests {
                 "s1",
                 TEST_OWNER,
                 "2026-01-01",
+                WriteMode::Participate,
                 &[1.0],
             )
             .unwrap();
@@ -832,11 +1054,12 @@ mod tests {
             "s1",
             TEST_OWNER,
             "2026-01-01",
+            WriteMode::Participate,
             &[1.0],
         );
         assert!(result.is_ok());
         // Content should be updated
-        let row = store.find_by_tx("sol2").unwrap().unwrap();
+        let row = store.find_by_tx("sol2", TEST_OWNER).unwrap().unwrap();
         assert_eq!(row.content, "c2");
     }
 
@@ -861,5 +1084,244 @@ mod tests {
         assert!(edges_c1.is_empty());
         let edges_c2 = store.get_edges("c2").unwrap();
         assert!(edges_c2.is_empty());
+    }
+
+    // -- modes-user-choice T1 ------------------------------------------------
+
+    /// Returns the list of (cid, name, type, notnull, dflt_value) tuples for
+    /// `attestations` so tests can assert on column presence + DEFAULT.
+    fn attestations_table_info(conn: &Connection) -> Vec<(String, String, i64, Option<String>)> {
+        let mut stmt = conn.prepare("PRAGMA table_info(attestations)").unwrap();
+        stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(1)?,         // name
+                row.get::<_, String>(2)?,         // type
+                row.get::<_, i64>(3)?,            // notnull
+                row.get::<_, Option<String>>(4)?, // dflt_value
+            ))
+        })
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect()
+    }
+
+    fn index_exists(conn: &Connection, name: &str) -> bool {
+        let mut stmt = conn
+            .prepare("SELECT name FROM sqlite_master WHERE type='index' AND name=?")
+            .unwrap();
+        let mut rows = stmt.query(params![name]).unwrap();
+        rows.next().unwrap().is_some()
+    }
+
+    #[test]
+    fn migrate_write_mode_column_on_fresh_db() {
+        // Fresh in-memory store runs the migration in `in_memory()`.
+        let store = SqliteStore::in_memory().unwrap();
+
+        let cols = attestations_table_info(store.conn());
+        let wm = cols
+            .iter()
+            .find(|(name, _, _, _)| name == "write_mode")
+            .expect("write_mode column must exist on a fresh DB");
+        assert_eq!(wm.1, "TEXT", "write_mode must be TEXT");
+        assert_eq!(wm.2, 1, "write_mode must be NOT NULL");
+        // SQLite stores the DEFAULT clause verbatim including the quotes.
+        assert_eq!(
+            wm.3.as_deref(),
+            Some("'participate'"),
+            "DEFAULT must be 'participate' (legacy paid writes), not 'local'"
+        );
+
+        // Composite index must be created.
+        assert!(
+            index_exists(store.conn(), "idx_attestations_write_mode"),
+            "idx_attestations_write_mode must be created"
+        );
+
+        // A row inserted via save_attestation gets the bound value.
+        store
+            .save_attestation(
+                "att-local",
+                "c",
+                "h",
+                &[],
+                "local:abc",
+                "ar",
+                "s",
+                TEST_OWNER,
+                "2026-01-01",
+                WriteMode::Local,
+                &[1.0, 0.0],
+            )
+            .unwrap();
+        let mode: WriteMode = store
+            .conn()
+            .query_row(
+                "SELECT write_mode FROM attestations WHERE attestation_id=?",
+                params!["att-local"],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(mode, WriteMode::Local);
+    }
+
+    /// Seed a fresh in-memory DB whose `attestations` table predates the
+    /// `write_mode` column. We do that by recreating only the legacy column
+    /// set, then running the migration on it. This exercises the same code
+    /// path operators see when upgrading.
+    fn open_legacy_attestations_db() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE attestations (
+                attestation_id TEXT PRIMARY KEY,
+                content TEXT NOT NULL,
+                content_hash TEXT NOT NULL,
+                tags TEXT NOT NULL DEFAULT '[]',
+                solana_tx TEXT NOT NULL,
+                arweave_tx TEXT NOT NULL,
+                signer_pubkey TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                owner_pubkey TEXT
+            );",
+        )
+        .unwrap();
+        conn
+    }
+
+    #[test]
+    fn migrate_write_mode_column_backfills_legacy_rows() {
+        let conn = open_legacy_attestations_db();
+        // Seed three rows BEFORE the column exists, using raw INSERTs.
+        // - 'local:abc'         → backfill must tag as 'local'
+        // - 'local:' (no suffix) → must stay 'participate' (the `_` requires ≥1 char)
+        // - real-shaped base58  → must stay 'participate'
+        let real_sig = "5VfYdkv9LR3p4n2H8eYZUxq7w1bWmZ7v3jR6Vh8L9NkXrF4tY7B6cJ2sP5gN8eMqXk";
+        for (id, sol_tx) in [
+            ("att-localish", "local:abc"),
+            ("att-bareprefix", "local:"),
+            ("att-realsig", real_sig),
+        ] {
+            conn.execute(
+                "INSERT INTO attestations
+                    (attestation_id, content, content_hash, tags,
+                     solana_tx, arweave_tx, signer_pubkey, created_at, owner_pubkey)
+                 VALUES (?,?,?,?,?,?,?,?,?)",
+                params![id, "c", "h", "[]", sol_tx, "ar", "s", "2026-01-01", "owner"],
+            )
+            .unwrap();
+        }
+
+        super::migrate_write_mode_column(&conn).unwrap();
+
+        let read_mode = |id: &str| -> String {
+            conn.query_row(
+                "SELECT write_mode FROM attestations WHERE attestation_id=?",
+                params![id],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap()
+        };
+
+        assert_eq!(
+            read_mode("att-localish"),
+            "local",
+            "'local:abc' must be backfilled to 'local'"
+        );
+        assert_eq!(
+            read_mode("att-bareprefix"),
+            "participate",
+            "bare 'local:' (no suffix) must stay 'participate' (default)"
+        );
+        assert_eq!(
+            read_mode("att-realsig"),
+            "participate",
+            "real base58 signature must stay 'participate' (default)"
+        );
+
+        // Index must be created by the migration even on a legacy DB.
+        assert!(index_exists(&conn, "idx_attestations_write_mode"));
+    }
+
+    #[test]
+    fn migrate_write_mode_column_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("idempotent.db");
+        let store = SqliteStore::open(&path).unwrap();
+
+        // Insert one row and one synthetic-id row.
+        store
+            .save_attestation(
+                "att-p",
+                "c",
+                "h",
+                &[],
+                "real-sig",
+                "ar",
+                "s",
+                TEST_OWNER,
+                "2026-01-01",
+                WriteMode::Participate,
+                &[1.0, 0.0],
+            )
+            .unwrap();
+        // A legacy 'local:foo' row inserted via a raw UPDATE to simulate the
+        // pre-migration state, then re-run the migration.
+        store
+            .conn()
+            .execute(
+                "UPDATE attestations SET solana_tx='local:foo', write_mode='participate'
+                    WHERE attestation_id='att-p'",
+                [],
+            )
+            .unwrap();
+
+        // First re-run: must flip to 'local' (the row now matches the LIKE).
+        super::migrate_write_mode_column(store.conn()).unwrap();
+        let mode_1: String = store
+            .conn()
+            .query_row(
+                "SELECT write_mode FROM attestations WHERE attestation_id='att-p'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(mode_1, "local");
+
+        // Snapshot row count, then re-run twice more. Nothing must change.
+        let count_before: i64 = store
+            .conn()
+            .query_row("SELECT COUNT(*) FROM attestations", [], |row| row.get(0))
+            .unwrap();
+        super::migrate_write_mode_column(store.conn()).unwrap();
+        super::migrate_write_mode_column(store.conn()).unwrap();
+
+        let count_after: i64 = store
+            .conn()
+            .query_row("SELECT COUNT(*) FROM attestations", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count_after, count_before, "row count must not change");
+
+        // Exactly one index of that name — no duplicates from multiple runs.
+        let idx_count: i64 = store
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                   WHERE type='index' AND name='idx_attestations_write_mode'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(idx_count, 1);
+
+        // Final value is still 'local'.
+        let mode_final: String = store
+            .conn()
+            .query_row(
+                "SELECT write_mode FROM attestations WHERE attestation_id='att-p'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(mode_final, "local");
     }
 }

@@ -21,7 +21,7 @@ All providers implement the `Embedder` trait in `core/src/embed/mod.rs`. Never c
 
 ### Storage lock discipline
 
-`AttestationStore` wraps `rusqlite::Connection` which is `!Send`. In async contexts, wrap in `std::sync::Mutex` and never hold the lock across an `.await` point.
+`AttestationStore` wraps `rusqlite::Connection` which is `!Send`. In async contexts, wrap in `std::sync::Mutex` and never hold the lock across an `.await` point. The same rule extends to `DashMap` shard guards used by the in-memory `RefundsBySubject` quota counter in `mcp/src/payment.rs` (added in `modes-user-choice` T3): the per-shard lock is held briefly for the increment/read and never across an `.await`. Both lock classes (SQLite mutex + DashMap shard guard) are checked by the code-audit wave. See `work/modes-user-choice/tech-spec.md` Decision 8.
 
 ### Error handling
 
@@ -29,7 +29,7 @@ Use `anyhow::Result` for all fallible functions in `core/` and `mcp/`. Convert t
 
 ### Storage modes
 
-`local` (default) uses SQLite only with synthetic IDs prefixed `local:` — free, instant, offline. `full` uses Arweave + Solana + SQLite and requires a funded keypair. The mode is set at server startup, not per-call. Never mix modes in one database.
+Two write modes: `local` (SQLite only, synthetic `local:`-prefixed tx IDs — free, instant, offline) and `participate` (Arweave + Solana + SQLite — paid, durable, anchored; requires a funded keypair on the operator). **Mode is a per-request user choice**, not a server-startup setting: `mnemonic_sign_memory` takes an optional `mode: "local" | "participate"` field (default `local`; absent field falls back to the env-var `STORAGE_MODE` for shipped legacy clients). `STORAGE_MODE` and `PAYMENT_MODE` now set the operator's *capability/default* — what the deploy can offer and how it charges — not a global switch on every call. Local writes are always free regardless of `PAYMENT_MODE`; the paywall fires only when the resolved write mode is `participate` (single resolver in `mcp/src/tools.rs::resolve_write_mode`, drift-impossible by construction). Rows are tagged via the `write_mode` column and `recall` spans both modes for one owner, so a single owner's `local` and `participate` writes coexist in one DB (the old "never mix in one DB" invariant was deliberately retired by `work/modes-user-choice`). A `participate` write succeeds only after a recall+verify round-trip over the anchored bytes (`tools::confirm_delivery_or_demote`, shared by inline + deferred paths); on failure the row is demoted to `local` and the reserved payment is refunded. Discoverability: `mnemonic_whoami` advertises an envelope (`supported_modes`, `default_mode`, `participate_cost`) derived from operator config; requesting a mode the server cannot serve returns `-32010 UnsupportedMode` — never a silent downgrade. See `work/modes-user-choice/user-spec.md` (canonical) and `work/modes-user-choice/tech-spec.md`.
 
 ### Tenant isolation via `owner_pubkey`
 
