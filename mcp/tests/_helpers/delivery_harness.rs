@@ -258,6 +258,41 @@ impl MockSolana {
         Self { server }
     }
 
+    /// Like [`happy`], plus a `getTransaction` mock that returns a
+    /// synthetic USDC transfer for the supplied `tx_sig`. The transfer
+    /// shows a `cost`-micro-USDC delta on `treasury`'s SPL account for
+    /// `usdc_mint`, which is exactly what `verify_usdc_transfer` walks.
+    ///
+    /// Used by the T3.5 `demotion_on_x402_*` tests so `check_payment`
+    /// passes its USDC-transfer verification without us having to mint a
+    /// real on-chain transaction.
+    pub fn happy_with_x402_payment(
+        tx_sig: &str,
+        treasury: &str,
+        usdc_mint: &str,
+        cost: u64,
+    ) -> Self {
+        let me = Self::happy();
+        let body = format!(
+            r#"{{"jsonrpc":"2.0","id":1,"result":{{"meta":{{"err":null,"preTokenBalances":[{{"accountIndex":0,"owner":"{treasury}","mint":"{usdc_mint}","uiTokenAmount":{{"amount":"0","decimals":6,"uiAmount":0.0,"uiAmountString":"0"}}}}],"postTokenBalances":[{{"accountIndex":0,"owner":"{treasury}","mint":"{usdc_mint}","uiTokenAmount":{{"amount":"{cost}","decimals":6,"uiAmount":0.0,"uiAmountString":"0"}}}}]}}}}}}"#
+        );
+        // The Solana client posts every RPC to `/`; httpmock dispatches by
+        // body content. We match on the tx_sig substring so this mock only
+        // answers `getTransaction` calls for THIS specific signature; any
+        // other signature falls through to httpmock's 404 default, which
+        // makes a misconfigured test fail loudly instead of silently
+        // mocking a different proof.
+        me.server.mock(|when, then| {
+            when.method(POST)
+                .body_includes(r#""method":"getTransaction""#)
+                .body_includes(tx_sig);
+            then.status(200)
+                .header("content-type", "application/json")
+                .body(body);
+        });
+        me
+    }
+
     pub fn base_url(&self) -> String {
         self.server.base_url()
     }
@@ -292,6 +327,43 @@ pub fn build_state_and_router(
         quota_threshold,
         quota_window,
         refetch_timeout,
+        "",
+        "",
+    );
+    let app = Router::new()
+        .route("/mcp", post(mcp_handler))
+        .with_state(state.clone());
+    (state, app)
+}
+
+/// Variant of [`build_state_and_router`] that wires `treasury_pubkey` and
+/// `usdc_mint` into the `McpState` so the x402 payment-gate (`check_payment`
+/// → `verify_usdc_transfer`) has destination addresses to match against.
+///
+/// Used exclusively by the T3.5 `demotion_on_x402_*` tests; for `balance`
+/// or `none` payment modes the regular `build_state_and_router` is enough.
+#[allow(clippy::too_many_arguments)]
+pub fn build_state_and_router_x402(
+    arweave_url: &str,
+    solana_url: &str,
+    cost_micro_usdc: i64,
+    quota_threshold: u32,
+    quota_window: Duration,
+    refetch_timeout: Duration,
+    treasury_pubkey: &str,
+    usdc_mint: &str,
+) -> (Arc<McpState>, Router) {
+    let state = mock_state_for_delivery(
+        "full",
+        "x402",
+        cost_micro_usdc,
+        arweave_url,
+        solana_url,
+        quota_threshold,
+        quota_window,
+        refetch_timeout,
+        treasury_pubkey,
+        usdc_mint,
     );
     let app = Router::new()
         .route("/mcp", post(mcp_handler))
@@ -356,6 +428,50 @@ pub async fn call_sign_memory_participate(
         .uri("/mcp")
         .header("content-type", "application/json")
         .header("authorization", format!("Bearer {bearer}"))
+        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    let status = resp.status();
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let envelope: Value = serde_json::from_slice(&bytes)
+        .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(&bytes).into()));
+    (status, envelope)
+}
+
+/// Issue a `sign_memory { mode: "participate", content }` with an
+/// `X-Payment` header pointing at the supplied `tx_sig`. The payload is
+/// the raw JSON shape that `payment::extract_x402_proof` accepts (it
+/// tries raw JSON before falling back to base64).
+///
+/// The on-chain payment proof itself is mocked elsewhere (see
+/// [`MockSolana::happy_with_x402_payment`]); this helper only constructs
+/// the HTTP request.
+pub async fn call_sign_memory_participate_x402(
+    app: &Router,
+    tx_sig: &str,
+    content: &str,
+) -> (StatusCode, Value) {
+    let body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {
+            "name": "mnemonic_sign_memory",
+            "arguments": {"content": content, "mode": "participate"},
+        },
+    });
+    // Raw JSON shape per X402PaymentProof; extract_x402_proof tries this
+    // first before the base64 fallback so no encoding round-trip is needed.
+    let x_payment = serde_json::json!({
+        "tx_sig": tx_sig,
+        "network": "solana-mainnet",
+    })
+    .to_string();
+    let req = Request::builder()
+        .method("POST")
+        .uri("/mcp")
+        .header("content-type", "application/json")
+        .header("x-payment", x_payment)
         .body(Body::from(serde_json::to_vec(&body).unwrap()))
         .unwrap();
     let resp = app.clone().oneshot(req).await.unwrap();

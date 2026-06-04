@@ -247,6 +247,8 @@ pub fn mock_state_for_delivery(
     quota_threshold: u32,
     quota_window: std::time::Duration,
     refetch_timeout: std::time::Duration,
+    treasury_pubkey: &str,
+    usdc_mint: &str,
 ) -> Arc<McpState> {
     let tmp = tempfile::NamedTempFile::new().expect("tempfile");
     let path = tmp.into_temp_path();
@@ -277,8 +279,8 @@ pub fn mock_state_for_delivery(
         embedder: Box::new(StubEmbedder::default()),
         compressor,
         payment_mode: payment_mode.to_string(),
-        treasury_pubkey: String::new(),
-        usdc_mint: String::new(),
+        treasury_pubkey: treasury_pubkey.to_string(),
+        usdc_mint: usdc_mint.to_string(),
         sign_memory_cost_micro_usdc,
         pricing,
         sol_tx_fee_lamports: 0,
