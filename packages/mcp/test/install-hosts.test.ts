@@ -151,6 +151,11 @@ describe("installHosts", () => {
     for (const e of [...claudeDir, ...cursorDir]) {
       expect(e.endsWith(".mnemonik.tmp")).toBe(false);
     }
+    // Per code-reviewer round 1 ISSUE-001: check mode must NOT print the
+    // restart instruction — nothing was modified, so there's nothing to
+    // restart.
+    ctx.restoreStdout();
+    expect(ctx.capturedStdout).not.toMatch(/please restart/);
   });
 
   it("symlink_out_of_home_refuses: refuses and does NOT modify the off-home target", async () => {

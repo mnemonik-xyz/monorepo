@@ -1,6 +1,14 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmod, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  mkdir,
+  readFile,
+  rename,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -197,7 +205,6 @@ async function writeManifestSidecar(manifest: Manifest): Promise<void> {
   await writeFile(tmp, JSON.stringify(manifest, null, 2), {
     mode: 0o600,
   });
-  const { rename } = await import("node:fs/promises");
   await rename(tmp, manifestPath());
 }
 
@@ -283,7 +290,6 @@ export async function ensureBinaryCached(): Promise<string> {
     const extractedSource = join(binDir, "mnemonic-mcp");
     const target = binaryPath();
     if ((await fileExists(extractedSource)) && extractedSource !== target) {
-      const { rename } = await import("node:fs/promises");
       await rename(extractedSource, target);
     }
     if (!(await fileExists(target))) {

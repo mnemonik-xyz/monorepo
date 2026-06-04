@@ -193,7 +193,11 @@ export async function installHosts(
     }
   }
 
-  process.stdout.write(RESTART_LINE + "\n");
+  // Suppress the restart hint in check mode — no files were modified, so the
+  // user has nothing to restart. Per code-reviewer round 1 ISSUE-001.
+  if (!opts.check) {
+    process.stdout.write(RESTART_LINE + "\n");
+  }
 
   if (firstError !== undefined) throw firstError;
 }

@@ -214,12 +214,20 @@ describe("ensureBinaryCached", () => {
     const ghDir = await makeMockGh({ exit: 0, recordPath: ctx.ghRecord });
     process.env.PATH = `${ghDir}:${ctx.origPath ?? ""}`;
 
-    // Extraction won't yield the expected `mnemonic-mcp` so we expect the
-    // installer to throw with "archive layout may have changed" — either
-    // way, no file should escape the cache dir.
+    // The fixture tarball's only entry is `../escape.txt`. With extract CWD
+    // = binDir (cacheDir/bin), an unfiltered tar.extract would otherwise
+    // land the entry at `cacheDir/bin/../escape.txt` = `cacheDir/escape.txt`.
+    //
+    // tar v7 itself rejects path-traversal entries by default, AND our
+    // makeExtractFilter rejects them as defense-in-depth (proven directly
+    // by the `makeExtractFilter rejects SymbolicLink + Link entries` unit
+    // test on the next case). The probe asserts the integration outcome:
+    // no file is written outside binDir regardless of which layer caught it.
+    //
+    // Per code-reviewer round 1 ISSUE-002: the previous probe joined `..`
+    // onto cacheDir directly and would never see the bypass landing site.
     await expect(ensureBinaryCached()).rejects.toBeTruthy();
-    // The parent of cacheDir should NOT have an `escape.txt` planted there.
-    const escapeProbe = join(cacheDir(), "..", "escape.txt");
+    const escapeProbe = join(cacheDir(), "escape.txt");
     await expect(stat(escapeProbe)).rejects.toThrow();
   });
 

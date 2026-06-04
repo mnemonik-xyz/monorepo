@@ -56,37 +56,35 @@ export async function makeBinaryTarball(
 }
 
 /**
- * Build a malicious tarball with a path-traversal entry. The actual file
- * `mnemonic-mcp` is included so a normal extraction would also produce the
- * binary, but the additional `../escape.txt` entry tests the zip-slip guard.
+ * Build a malicious tarball whose entry literally encodes `../escape.txt`.
+ *
+ * The extraction CWD in production is `cacheDir/bin` (binDir), so an entry
+ * named `../escape.txt` — if the extract filter were bypassed — would resolve
+ * to `cacheDir/bin/../escape.txt` = `cacheDir/escape.txt`. The test probes
+ * exactly that path to detect a bypass.
+ *
+ * `tar.create` resolves entries against `cwd`, so to make `tar.list` see
+ * `../escape.txt` as the header name we use `prefix: ".."` (which prepends
+ * to each entry's archive name without affecting where bytes are read).
  */
 export async function makeMaliciousTarball(
   destTar: string,
 ): Promise<{ tarPath: string; sha256: string }> {
   const stagingDir = await freshTempDir("mnemonik-mcp-evil-");
   try {
-    const inner = join(stagingDir, "inner");
-    await mkdir(inner, { recursive: true });
-    // The benign root entry — a normal extraction would succeed without it.
-    await writeFile(join(stagingDir, "mnemonic-mcp"), "#!/bin/sh\nexit 0\n", {
-      mode: 0o755,
-    });
-    // The traversal entry: pack with portable=true so `..` survives.
-    await writeFile(join(inner, "escape.txt"), "pwned\n");
+    await writeFile(join(stagingDir, "escape.txt"), "pwned\n");
     await mkdir(dirname(destTar), { recursive: true });
-    // tar accepts `..` entries when we pass them explicitly via `prefix` or
-    // by listing a path starting with `..`. We construct the tar by hand
-    // via tar.create + a transform that prepends `../` to the inner entry
-    // name during pack.
     await tar.create(
       {
         gzip: true,
         file: destTar,
         cwd: stagingDir,
         portable: true,
-        prefix: "../escape",
+        // Header name becomes `../escape.txt` — a path-traversal entry.
+        // tar normalises `prefix + entry` into the on-archive name.
+        prefix: "..",
       },
-      ["inner/escape.txt"],
+      ["escape.txt"],
     );
     const { readFile } = await import("node:fs/promises");
     const buf = await readFile(destTar);
