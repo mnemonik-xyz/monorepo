@@ -8,7 +8,12 @@ import {
   ensureBinaryCached,
   parseSha256Sums,
 } from "../src/install-binary.js";
-import { binaryPath, cacheDir, manifestPath } from "../src/paths.js";
+import {
+  binaryPath,
+  cacheDir,
+  manifestPath,
+  releaseBaseUrl,
+} from "../src/paths.js";
 
 import {
   cleanupTemp,
@@ -85,6 +90,65 @@ describe("parseSha256Sums", () => {
     expect(map.size).toBe(2);
     expect(map.get("artifact-one.tar.gz")).toBe("deadbeef".repeat(8));
     expect(map.get("artifact-two.tar.gz")).toBe("00".repeat(32));
+  });
+});
+
+describe("releaseBaseUrl validation (SAR7-M2)", () => {
+  // Each case reads and writes the same env vars releaseBaseUrl() consults;
+  // beforeEach/afterEach (outer setupCtx/teardownCtx) reset them between
+  // tests. We snapshot and restore the M2-specific vars here too because
+  // some cases mutate MNEMONIK_MCP_ALLOW_HTTP which the outer harness does
+  // not track.
+  let origAllowHttp: string | undefined;
+  let origBaseUrl: string | undefined;
+
+  beforeEach(() => {
+    origAllowHttp = process.env.MNEMONIK_MCP_ALLOW_HTTP;
+    origBaseUrl = process.env.MNEMONIK_MCP_RELEASE_BASE_URL;
+  });
+
+  afterEach(() => {
+    if (origAllowHttp === undefined) delete process.env.MNEMONIK_MCP_ALLOW_HTTP;
+    else process.env.MNEMONIK_MCP_ALLOW_HTTP = origAllowHttp;
+    if (origBaseUrl === undefined)
+      delete process.env.MNEMONIK_MCP_RELEASE_BASE_URL;
+    else process.env.MNEMONIK_MCP_RELEASE_BASE_URL = origBaseUrl;
+  });
+
+  it("returns compiled-in default when no override set", () => {
+    delete process.env.MNEMONIK_MCP_RELEASE_BASE_URL;
+    delete process.env.MNEMONIK_MCP_ALLOW_HTTP;
+    expect(releaseBaseUrl()).toMatch(/^https:\/\/github\.com\//);
+  });
+
+  it("accepts https override unconditionally", () => {
+    process.env.MNEMONIK_MCP_RELEASE_BASE_URL = "https://mirror.example/dl";
+    delete process.env.MNEMONIK_MCP_ALLOW_HTTP;
+    expect(releaseBaseUrl()).toBe("https://mirror.example/dl");
+  });
+
+  it("rejects http override without MNEMONIK_MCP_ALLOW_HTTP — closes MITM redirect vector", () => {
+    process.env.MNEMONIK_MCP_RELEASE_BASE_URL = "http://attacker.example";
+    delete process.env.MNEMONIK_MCP_ALLOW_HTTP;
+    expect(() => releaseBaseUrl()).toThrow(/must use https:\/\//);
+  });
+
+  it("accepts http override only when MNEMONIK_MCP_ALLOW_HTTP=1 escape hatch is set", () => {
+    process.env.MNEMONIK_MCP_RELEASE_BASE_URL = "http://localhost:9999/dl";
+    process.env.MNEMONIK_MCP_ALLOW_HTTP = "1";
+    expect(releaseBaseUrl()).toBe("http://localhost:9999/dl");
+  });
+
+  it("rejects malformed URLs", () => {
+    process.env.MNEMONIK_MCP_RELEASE_BASE_URL = "not a url";
+    delete process.env.MNEMONIK_MCP_ALLOW_HTTP;
+    expect(() => releaseBaseUrl()).toThrow(/is not a valid URL/);
+  });
+
+  it("rejects file:// and other non-http(s) schemes even with escape hatch", () => {
+    process.env.MNEMONIK_MCP_RELEASE_BASE_URL = "file:///etc/passwd";
+    process.env.MNEMONIK_MCP_ALLOW_HTTP = "1";
+    expect(() => releaseBaseUrl()).toThrow(/must use https:\/\//);
   });
 });
 

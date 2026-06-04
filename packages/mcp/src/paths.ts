@@ -52,6 +52,38 @@ export function detectPlatform(): PlatformKey {
   );
 }
 
+/**
+ * Returns the GitHub Releases base URL used by `ensureBinaryCached`.
+ *
+ * `MNEMONIK_MCP_RELEASE_BASE_URL` overrides the compiled-in default for tests
+ * and self-hosted mirrors. The override MUST be `https://` so a local-malware
+ * or compromised-shell-profile-injected env var cannot silently redirect the
+ * download to an HTTP endpoint where a network MITM could substitute a
+ * tampered tarball + matching SHA256SUMS (gh attestation verify is the last
+ * gate, but defense-in-depth requires we don't lean on a single gate). The
+ * `MNEMONIK_MCP_ALLOW_HTTP=1` escape hatch unblocks tests that point at a
+ * local HTTP fixture — analogous to the Rust binary's `--allow-custom-endpoint`
+ * pattern (tech-spec Decision 12). Per security-auditor round 1 SAR7-M2.
+ */
 export function releaseBaseUrl(): string {
-  return process.env.MNEMONIK_MCP_RELEASE_BASE_URL ?? RELEASE_BASE_URL;
+  const override = process.env.MNEMONIK_MCP_RELEASE_BASE_URL;
+  if (!override) return RELEASE_BASE_URL;
+  let parsed: URL;
+  try {
+    parsed = new URL(override);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    throw new Error(`MNEMONIK_MCP_RELEASE_BASE_URL is not a valid URL: ${msg}`);
+  }
+  if (parsed.protocol === "https:") return override;
+  if (
+    parsed.protocol === "http:" &&
+    process.env.MNEMONIK_MCP_ALLOW_HTTP === "1"
+  ) {
+    return override;
+  }
+  throw new Error(
+    `MNEMONIK_MCP_RELEASE_BASE_URL must use https:// (got '${parsed.protocol}'); ` +
+      `set MNEMONIK_MCP_ALLOW_HTTP=1 to permit http:// for local-only test fixtures`,
+  );
 }
