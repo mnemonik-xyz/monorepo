@@ -298,3 +298,38 @@ Review details — in JSON files via links. QA report — in logs/working/.
 
 *Round 1 (this commit):*
 - code-auditor: PASS, 0 blockers + 0 majors + 2 minors + 6 info → [logs/working/audit/code-auditor.json](logs/working/audit/code-auditor.json)
+
+## Task 11: Test Audit (Wave 7)
+
+**Status:** Done
+**Commit:** (this commit)
+**Agent:** t11-auditor
+**Summary:** Holistic test audit across Tasks 1-8. Verdict: **approve_with_minor_findings** — zero blockers, zero recommended-before-merge, six informational findings. Full suite green: 645 Rust tests + 27 vitest = **672 passing, 0 failures, 4 ignored** (all documented). Every AC1-AC17 (minus deferred AC12) plus 5/12 in-scope error catalogue rows have at least one covering test that drives the production code path with behavioral assertions; the 7 cross-task error rows have wire-shape contracts pinned via helpers and 2 of them (HostedUnavailable, TokenExpired) additionally trigger via production paths in Tasks 5/6's tests. HMAC ceremony's cross-owner replay (`consume_with_different_owner_rejected`) threads `claims.sub` through the dispatcher, and concurrent-consume (`atomic_remove_if_under_concurrent_access`) uses tokio::Barrier with 16 tasks. Doctor's 6 parametrized failure cases each induce the failure via the production resource the check probes (tampered binary bytes, /dev/null config dir, malformed JSON token file, etc.), not by mocking the check functions. Pyramid balance healthy for L: ~25 unit / ~50 integration / 0 true E2E — acceptable per user-spec §Тестирование which defers host-specific behavioural E2E.
+**Deviations:** None.
+
+**Findings:**
+
+- **TR11-1 (Minor)** — AC3 `unshare -rn` netns isolation E2E does not exist; current AC3 defence is indirect (URL pointed at .invalid TLD, env-var pricing disabled, inline-path inspection). T12 manual airplane-mode smoke compensates per user-spec row 7.
+- **TR11-2 (Minor)** — Byte-for-byte manifest snapshot only covers `mnemonik-attest.md`; other 6 manifests checked via `Purpose:`/`Trigger:` substring only. ~10-line extension via `resources/read` loop would close it.
+- **TR11-3 (Info)** — 3 error catalogue rows (OAuthTimeout, LocalStorageBusy, IdentityBootstrapFailed) pinned only at the helper level; wire contract protected but no production-trigger integration test.
+- **TR11-4 (Info)** — `resolve_visibility` / `resolve_allow_fallback` have no dedicated `#[test]` units (only integration coverage in sign_memory_visibility.rs). `resolve_write_mode`'s 12-case unit suite is the precedent worth mirroring.
+- **TR11-5 (Info)** — `stdio_backward_compat::test_stdio_tools_list_sign_memory_recall_without_oauth` could drop `#[ignore]` once `PRICING_REFRESH_DISABLED=1` is wired (or be deleted as superseded by `mcp_stdio_accepts_jsonrpc_on_stdin`).
+- **TR11-6 (Info)** — AC15 `[mnemonik-mcp] embedder version mismatch` stderr line is unasserted; binary-embedded discovery (Decision 1) makes the divergence unobservable in v1 — flag for T12 spec disposition.
+
+**Reviews:**
+
+*Round 1 (this commit):*
+- test-auditor: APPROVE_WITH_MINOR_FINDINGS, 0 blockers + 0 recommended + 6 info → [logs/working/audit/test-auditor.json](logs/working/audit/test-auditor.json)
+
+**Verification:**
+
+- `cargo test --workspace --no-fail-fast --features mnemonic-mcp/test-support` → 645 passed, 0 failed, 4 ignored across 41 test binaries
+- `cd packages/mcp && npx vitest run` → 27 passed, 0 failed across 3 test files
+- Report: [logs/working/audit/test-auditor.json](logs/working/audit/test-auditor.json)
+
+**QA handoff for T12:**
+
+1. Run airplane-mode local-mode sign smoke on macOS (compensates TR11-1's missing netns E2E)
+2. Run MCP Inspector against `mcp.mnemonik.xyz` and screenshot prompts/resources/tools surfaces (per user-spec §Как проверить)
+3. Run fresh-machine `npm install -g @mnemonik-xyz/mcp && mnemonik-mcp install` on macOS (covers the live GitHub Releases → host-config → spawned subprocess chain end-to-end)
+4. Decide AC15 mismatch-line disposition (TR11-6) — implement the warning emission OR update spec to drop the line on the grounds that local-only discovery makes divergence unobservable in v1

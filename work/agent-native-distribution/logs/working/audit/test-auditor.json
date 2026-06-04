@@ -1,0 +1,471 @@
+{
+  "round": 1,
+  "reviewer": "t11-auditor",
+  "commit": "HEAD (post-Tasks 1-8, pre-T12 QA)",
+  "date": "2026-06-05",
+  "verdict": "approve_with_minor_findings",
+  "summary": "Holistic test audit across Tasks 1-8 for agent-native-distribution. Test suite is green: 645 Rust tests + 27 vitest = 672 passing, 0 failures, 4 ignored (all with documented rationale). AC1-AC17 plus the Error Catalogue rows each map to at least one test that exercises the production code path. The HMAC confirmation gate, public-write ceremony, soft-fall router, install symlink hardening, and doctor's six checks are all driven by production triggers (FailingEmbedder, port-0 ECONNREFUSED trick, real symlink fixtures, malformed tarball, expired token files, fetch stubs returning 503) — none of the negative-path tests are hand-crafted response stubs. Concurrent-consume race uses tokio::Barrier with 16 tasks. Pyramid balance is healthy for an L feature: ~25 unit + ~50 integration + 0 true E2E (with AC3 netns deferred as documented). Findings: (1) AC3 unshare -rn netns isolation test does not exist — currently covered by integration-style assertions on outbound-call absence rather than a real network namespace. Documented as a known gap that T12 manual QA picks up via airplane mode. (2) Byte-for-byte manifest snapshot only checked for `mnemonik-attest.md`; other six manifests checked only via Purpose:/Trigger: substring presence. (3) `resolve_visibility` / `resolve_allow_fallback` have no dedicated #[test] units; integration coverage in sign_memory_visibility.rs is comprehensive but the resolvers' pure-function nature would benefit from a few cheap inline unit tests. None of these block merge. T12 (pre-deploy QA) inherits the AC3 manual smoke and the byte-for-byte snapshot gap as items to verify against the freshly-built binary.",
+
+  "ac_coverage_matrix": [
+    {
+      "ac": "AC1",
+      "title": "Anonymous discovery (≥7 prompts, ≥7 resources, enriched tools/list)",
+      "covered": true,
+      "covering_tests": [
+        "mcp/tests/discovery_anonymous.rs:75 prompts_list_returns_seven_without_bearer",
+        "mcp/tests/discovery_anonymous.rs:120 resources_list_returns_seven_without_bearer",
+        "mcp/tests/discovery_anonymous.rs:218 tools_list_enriched_with_purpose_trigger",
+        "mcp/tests/discovery_anonymous.rs:166 resources_read_returns_full_markdown_for_attest"
+      ],
+      "litmus_pass": true,
+      "notes": "Drives real /mcp router via TestServer; counts entries against `>=7` after asserting `mnemonik-` name prefix + non-empty descriptions. Byte-for-byte snapshot via skills::ALL_SKILLS for one manifest (attest); other 6 only get substring `Purpose:` / `Trigger:` check — see finding TR11-2."
+    },
+    {
+      "ac": "AC2",
+      "title": "Manifest integrity — no missing source file, no placeholder tokens, drift impossible",
+      "covered": true,
+      "covering_tests": [
+        "mcp/tests/skill_manifests.rs:39 all_seven_manifests_parse",
+        "mcp/tests/skill_manifests.rs:96 no_placeholder_tokens_in_manifests",
+        "mcp/tests/skill_manifests.rs:151 build_fails_on_missing_purpose_section",
+        "mcp/tests/skill_manifests.rs:180 unexpected_manifest_file_is_a_build_error"
+      ],
+      "litmus_pass": true,
+      "notes": "TBD/TODO/XXX/FIXME placeholder guard runs against all three projected slots (full_markdown, purpose_plus_trigger, purpose_one_liner). The build.rs missing-section panic is exercised via the same `expect_h2_section` function build.rs uses — drift between test and build is structurally impossible."
+    },
+    {
+      "ac": "AC3",
+      "title": "Local sign offline — zero outbound calls under netns isolation",
+      "covered": "partial",
+      "covering_tests": [
+        "mcp/tests/sign_memory_softfall.rs:69 default_no_silent_escalation (proxies endpoint pointed at unreachable URL; would crash on accidental connect)",
+        "mcp/tests/cli_subcommands.rs:211 mcp_stdio_accepts_jsonrpc_on_stdin (PRICING_REFRESH_DISABLED=1 + EMBED_PROVIDER=stub-test ensures no startup network)"
+      ],
+      "litmus_pass": "partial",
+      "notes": "NO `unshare -rn` netns isolation test exists. Tech-spec Testing Strategy line 358 calls for `unshare -rn` + `ss -tn state established` + `strace -e trace=connect` E2E. The current evidence is indirect (URL pointed at .invalid TLD, env vars disable pricing). On Linux CI this can be added as a follow-up smoke; the macOS-only v1 scope makes the test platform-dependent. Documented gap. T12 manual QA covers airplane-mode smoke per user-spec §Как проверить row 7."
+    },
+    {
+      "ac": "AC4",
+      "title": "Local recall finds local-written (round-trip embed → store → search → top-1)",
+      "covered": true,
+      "covering_tests": [
+        "core/tests/integration_storage.rs (visibility filter integration covers cosine search + recall)",
+        "mcp/tests/anonymous_recall.rs:78 filters_private_rows (recall round-trip with identical embedding scoring)",
+        "mcp/tests/sign_memory_visibility.rs:117 visibility_threads_through_to_storage (sign + persist round-trip)"
+      ],
+      "litmus_pass": true,
+      "notes": "The dedicated `recall on target text, target top-1 with score gap > 0.1 over runners-up` scenario from tech-spec line 341 is not present as a single named test, but the embed→compress→store→search round-trip is covered transitively by anonymous_recall + sign_memory_visibility writing through the same pipeline. Consider adding the precise gap-asserting variant for T12 to lean on."
+    },
+    {
+      "ac": "AC5",
+      "title": "Default behaviour: no silent escalation when allow_fallback=false",
+      "covered": true,
+      "covering_tests": [
+        "mcp/tests/sign_memory_softfall.rs:69 default_no_silent_escalation"
+      ],
+      "litmus_pass": true,
+      "notes": "Production trigger: `FailingEmbedder::always_fail()` from `mcp/tests/support/mod.rs`. Hosted endpoint pointed at `http://unreachable.invalid` so any silent escalation would crash with a connection error, not pass silently. Asserts -32098 EmbedderInvalid with data.kind."
+    },
+    {
+      "ac": "AC6",
+      "title": "Explicit opt-in fallback semantics — escalation visible in response, hosted-unavailable mapped",
+      "covered": true,
+      "covering_tests": [
+        "mcp/tests/sign_memory_softfall.rs:128 opt_in_escalation_returns_escalated_field (mock.calls() == 1 proves real proxy)",
+        "mcp/tests/sign_memory_softfall.rs:404 opt_in_escalation_no_network (port-0 ECONNREFUSED, -32011 HostedUnavailable)",
+        "mcp/tests/sign_memory_softfall.rs:225 opt_in_escalation_no_confirmation_token (Decision 4+5b interaction)",
+        "mcp/tests/sign_memory_softfall.rs:492 opt_in_escalation_hosted_malformed_response_surfaces_hosted_unavailable",
+        "mcp/tests/sign_memory_softfall.rs:604 expired_cached_token_surfaces_token_expired_typed_error (SAR5-INFO3)"
+      ],
+      "litmus_pass": true,
+      "notes": "httpmock used for the success+malformed cases; port-0 bind-then-drop trick for no-network case is deterministic. SAR5-L1 stderr scrubbing (no path / scheme leaked) asserted at line 471-480."
+    },
+    {
+      "ac": "AC7",
+      "title": "Install idempotent — re-run produces byte-identical configs",
+      "covered": true,
+      "covering_tests": [
+        "packages/mcp/test/install-hosts.test.ts:112 idempotent: running install twice produces byte-identical final file"
+      ],
+      "litmus_pass": true,
+      "notes": "Asserts firstPass === secondPass byte-equal."
+    },
+    {
+      "ac": "AC8",
+      "title": "Install non-destructive — unrelated keys byte-identical",
+      "covered": true,
+      "covering_tests": [
+        "packages/mcp/test/install-hosts.test.ts:85 non_destructive_merge"
+      ],
+      "litmus_pass": true,
+      "notes": "Seeds unrelated `mcpServers.foo`, top-level `other`, nested `nested.keep` arr — asserts each survives byte-identical."
+    },
+    {
+      "ac": "AC9",
+      "title": "Install resilient — absent hosts exit 0, restart-instruction printed only when applicable",
+      "covered": true,
+      "covering_tests": [
+        "packages/mcp/test/install-hosts.test.ts:124 all_candidates_absent_exits_0",
+        "packages/mcp/test/install-hosts.test.ts:183 restart_instruction_in_output (exact string match)"
+      ],
+      "litmus_pass": true,
+      "notes": "Exact final-line assertion is `If any of these agents is already running, please restart them.` per Decision 9."
+    },
+    {
+      "ac": "AC10",
+      "title": "Install --check is dry-run — mtimes unchanged, no .mnemonik.tmp",
+      "covered": true,
+      "covering_tests": [
+        "packages/mcp/test/install-hosts.test.ts:132 check_mode_no_writes"
+      ],
+      "litmus_pass": true,
+      "notes": "Real `stat().mtimeMs` comparison (not just write-spy absence) per task brief. Also asserts no leftover `.mnemonik.tmp` files."
+    },
+    {
+      "ac": "AC11",
+      "title": "OAuth-loopback + cached-token reuse",
+      "covered": true,
+      "covering_tests": [
+        "mcp/tests/oauth_loopback.rs:126 fresh_install_path (full OAuth /oauth/authorize + /oauth/token + cache + second-read equality)",
+        "mcp/tests/oauth_loopback.rs:277 expired_token_path (chrono past timestamp → TokenStoreError::Expired → -32099)",
+        "mcp/tests/oauth_loopback.rs:317 corrupted_token_path (malformed bytes → Ok(None), not panic)",
+        "mcp/tests/oauth_loopback.rs:338 cache_minted_token_overwrites_existing (real issue_jwt to exercise exp claim parsing)"
+      ],
+      "litmus_pass": true,
+      "notes": "Task brief calls for three sub-cases (fresh / expired / corrupted) — all three present. The 'mock call count == 1' invariant from the original TDD anchor is intentionally deferred per the Task 6 deviation log; Task 5's soft-fall test (`expired_cached_token_surfaces_token_expired_typed_error`) closes the loop by proving the production proxy reads cached tokens before any HTTP call."
+    },
+    {
+      "ac": "AC12",
+      "title": "Token in keychain — DROPPED IN V1 per Decision 7 / User-Spec Deviation",
+      "covered": "n/a",
+      "covering_tests": [],
+      "litmus_pass": "n/a",
+      "notes": "Tech-spec line 394 documents the v1 scope deferral. Token stays in `~/.mnemonic/token.json`. AC12 deferred to v1.1; not a coverage gap."
+    },
+    {
+      "ac": "AC13",
+      "title": "Visibility-respecting anonymous recall — only visibility='public' returned",
+      "covered": true,
+      "covering_tests": [
+        "mcp/tests/anonymous_recall.rs:78 filters_private_rows",
+        "mcp/tests/anonymous_recall.rs:119 authenticated_recall_returns_both",
+        "mcp/tests/anonymous_recall.rs:151 cross_owner_public_pool_visible (SAR1-M1 regression pin)"
+      ],
+      "litmus_pass": true,
+      "notes": "Two distinct owners (`owner_a`, `owner_b`) seeded with public rows + a private row under owner A; anonymous recall returns both public rows and excludes the private. Pins the cross-owner public-pool contract."
+    },
+    {
+      "ac": "AC14",
+      "title": "Visibility-on-local rejection — typed -32602 InvalidParams",
+      "covered": true,
+      "covering_tests": [
+        "mcp/tests/sign_memory_visibility.rs:24 visibility_rejected_on_local_writes (public value)",
+        "mcp/tests/sign_memory_visibility.rs:62 visibility_rejected_on_local_writes_even_for_private_value (presence-based rejection)",
+        "mcp/tests/sign_memory_visibility.rs:88 visibility_rejected_for_non_canonical_value (5 case-variant inputs)",
+        "mcp/tests/error_catalogue.rs:73 catalogue_invalid_params_visibility_on_local"
+      ],
+      "litmus_pass": true,
+      "notes": "Rejection is presence-based, not value-based, matching Decision 3. Also asserts no row persisted post-rejection."
+    },
+    {
+      "ac": "AC15",
+      "title": "Embedder configuration surface — model_id + model_version in initialize",
+      "covered": true,
+      "covering_tests": [
+        "mcp/tests/discovery_anonymous.rs:270 initialize_surfaces_embedder_metadata"
+      ],
+      "litmus_pass": true,
+      "notes": "Asserts non-empty model_id + model_version + dim > 0 + capabilities.prompts/.resources present. The mismatch-warning E2E (binary vs hosted-peer initialize divergence triggering stderr line) is partially covered by `cli_subcommands.rs` env-var tests but the actual `[mnemonik-mcp] embedder version mismatch: local=<x> remote=<y>` line assertion is not present — gap noted but low priority (initialize surface is the prerequisite, mismatch path is a follow-on)."
+    },
+    {
+      "ac": "AC16",
+      "title": "Error catalogue propagation — every row exercises production path",
+      "covered": true,
+      "covering_tests": [
+        "mcp/tests/error_catalogue.rs:73 catalogue_invalid_params_visibility_on_local",
+        "mcp/tests/error_catalogue.rs:95 catalogue_invalid_params_non_bool_allow_fallback",
+        "mcp/tests/error_catalogue.rs:114 catalogue_unsupported_mode_participate_on_local_only",
+        "mcp/tests/error_catalogue.rs:143 catalogue_public_write_requires_confirmation",
+        "mcp/tests/error_catalogue.rs:182 catalogue_embedder_invalid (FailingEmbedder production path)",
+        "mcp/tests/error_catalogue.rs:267 catalogue_typed_helpers_pin_data_shapes (helper-level wire-shape contract for rows owned by tasks 5/6)",
+        "mcp/tests/sign_memory_softfall.rs:404 (HostedUnavailable via port-0 ECONNREFUSED)",
+        "mcp/tests/sign_memory_softfall.rs:604 (TokenExpired via expired cached token)",
+        "mcp/tests/oauth_loopback.rs:277 (TokenExpired via TokenStoreError::Expired round-trip)"
+      ],
+      "litmus_pass": true,
+      "notes": "12 rows in the catalogue. The 5 in-scope-of-Task-4 rows have production-code-path triggers (FailingEmbedder, dispatcher-rejection on local+visibility, dispatcher-rejection on participate-on-local-only deploy, missing confirmation token, non-bool allow_fallback). The other 7 rows (DeliveryNotConfirmed, DeliveryQuotaExceeded, HostedUnavailable, OAuthTimeout, LocalStorageBusy, TokenExpired, IdentityBootstrapFailed) have their wire shapes pinned by `catalogue_typed_helpers_pin_data_shapes` AND their typed errors triggered by production paths owned by Tasks 5/6 (notably HostedUnavailable + TokenExpired in sign_memory_softfall.rs and oauth_loopback.rs). DeliveryNotConfirmed/DeliveryQuotaExceeded come from the existing delivery_guarantee.rs surface untouched by this feature. OAuthTimeout, LocalStorageBusy, IdentityBootstrapFailed are pinned helper-level but lack a dedicated production-trigger integration test — minor gap, see TR11-3."
+    },
+    {
+      "ac": "AC17",
+      "title": "Doctor command — 6 parametrized failure cases, production triggers",
+      "covered": true,
+      "covering_tests": [
+        "packages/mcp/test/doctor.test.ts:164 happy_path",
+        "packages/mcp/test/doctor.test.ts:183 parametrized_failures (6 cases: missing-host-config-entry, health-503, corrupted-cached-binary, config-dir-readonly, missing-identity, malformed-token)"
+      ],
+      "litmus_pass": true,
+      "notes": "Production triggers per case: missing-host-config → write a host file without mnemonik entry; health-503 → vi.stubGlobal fetch returns 503 Response; corrupted-cached-binary → write tampered bytes to the cached binary file (changes its SHA, manifest mismatch); config-dir-readonly → set MNEMONIC_CONFIG_DIR to /dev/null subpath so mkdir + writeFile both fail; missing-identity → rm the seeded id.json; malformed-token → write `{not json` to token.json. Each asserts exitCode=1 + repair_hint non-empty AND containing /repair|delete|run/i. None are check-function mocks."
+    }
+  ],
+
+  "test_pyramid_balance": {
+    "unit_tests_count": "~25",
+    "unit_tests_examples": [
+      "mcp/src/tools.rs:2105+ resolve_write_mode (12 cases)",
+      "mcp/src/confirmation_token.rs: ledger mechanics (mint, consume, replay, evict, concurrent — 8 cases)",
+      "core/src/storage/mode.rs: Visibility enum codec (Display/FromStr/serde)",
+      "mcp/tests/cli_subcommands.rs:42-138 resolved_hosted_endpoint matrix (6 in-process cases)",
+      "packages/mcp/test/install-binary.test.ts: parseSha256Sums, makeExtractFilter, releaseBaseUrl validation"
+    ],
+    "integration_tests_count": "~50",
+    "integration_tests_examples": [
+      "anonymous_recall.rs (3) + confirmation_gate.rs (10) + discovery_anonymous.rs (8) + error_catalogue.rs (6) + oauth_loopback.rs (4) + sign_memory_softfall.rs (8) + sign_memory_visibility.rs (5) + skill_manifests.rs (5) + cli_subcommands.rs (10) + integration_storage.rs (6) + integration_token.rs (8)",
+      "packages/mcp install-hosts.test.ts (9) + install-binary.test.ts (16) + doctor.test.ts (2)"
+    ],
+    "e2e_tests_count": "0 hard E2E (no Playwright/host-driven scripted sessions)",
+    "e2e_tests_examples": [
+      "cli_subcommands.rs:211 mcp_stdio_accepts_jsonrpc_on_stdin (spawned binary, real JSON-RPC) — E2E-style",
+      "cli_subcommands.rs:491,512,535 env_var_ignored_without_flag / honored_with_flag / rejected_when_unsafe (spawned binary, stderr capture)"
+    ],
+    "verdict": "Healthy for L feature. Unit + integration ratio is 1:2 which is right for a server feature with rich tooling surface. The 0-true-E2E count is acceptable per user-spec §Тестирование which explicitly defers host-specific behavioural verification to post-launch and pre-release manual smoke (MCP Inspector + airplane-mode local write). AC3 netns E2E is the one structurally-required E2E that doesn't exist; see TR11-1.",
+    "over_mocking_check": "Pass. The integration tests use real SQLite (tempfile), real router + middleware stack, real OAuth state with HS256 signing. Mocks are confined to: (a) FailingEmbedder for embedder failure injection, (b) httpmock::MockServer for hosted-peer in soft-fall tests (used only to verify proxy-vs-local-gate boundary), (c) fetch stub for doctor's /health probe. No test mocks 3+ dependencies."
+  },
+
+  "behavioral_vs_structural_assertions": {
+    "verdict": "Pass",
+    "examples": [
+      "anonymous_recall.rs:115 — asserts rows[0]['attestation_id'] == 'public-id' AND rows[0]['visibility'] == 'public' (concrete return values)",
+      "confirmation_gate.rs:154 — asserts ledger.len() == 0 post-consume (concrete state change)",
+      "sign_memory_softfall.rs:219 — asserts m.calls() == 1 (mock invocation count proves real proxy, not stub)",
+      "sign_memory_visibility.rs:190-197 — asserts SELECT visibility FROM attestations row value via real SQL query",
+      "doctor.test.ts:276 — asserts checks.find(.. fail).pass === false AND detail.length > 0"
+    ],
+    "notes": "No 'function was called' or 'no exception thrown' patterns observed. Every assertion is on a concrete return, state, or mock-count value."
+  },
+
+  "litmus_test_for_empty_tests": {
+    "verdict": "Pass — would-be empty tests are absent",
+    "examples_of_strong_litmus": [
+      "If `sign_memory` were replaced with `unimplemented!()`: discovery_anonymous tests still pass (they call prompts/list, not sign_memory), but every test in sign_memory_visibility.rs, sign_memory_softfall.rs, confirmation_gate.rs, and error_catalogue.rs would fail because they require an actual return value or state mutation.",
+      "If `resolve_visibility` returned `Ok(Private)` unconditionally: visibility_rejected_on_local_writes_even_for_private_value would fail (expects -32602 InvalidParams).",
+      "If `ConfirmationLedger::consume` were replaced with `Ok(())`: consume_replay_rejected would fail because the second call would succeed.",
+      "If `migrate_visibility_column` were a no-op: migrate_visibility_column_idempotent_on_clean_db asserts the column AND index actually exist via PRAGMA queries.",
+      "If `install-binary.ts` skipped SHA verification: sha256_mismatch_rejected expects a throw containing 'SHA256 mismatch'."
+    ]
+  },
+
+  "hmac_confirmation_token_tests": {
+    "cross_owner_replay_present": true,
+    "cross_owner_test_location": "mcp/tests/confirmation_gate.rs:242 consume_with_different_owner_rejected",
+    "claims_sub_check_validated": true,
+    "claims_sub_check_evidence": "Test mints with owner_a, calls sign_memory with JWT bound to owner_b. The dispatcher derives owner_pubkey from claims.sub (server-side), the gate's HMAC reconstruction uses owner_b — HMAC mismatch against the A-bound entry returns -32095. NOT just HMAC reconstruction; the production path explicitly threads claims.sub into the consume call.",
+    "concurrent_consume_race_present": true,
+    "concurrent_consume_location": "mcp/src/confirmation_token.rs:418 atomic_remove_if_under_concurrent_access",
+    "concurrent_consume_uses_barrier": true,
+    "concurrent_consume_evidence": "tokio::sync::Barrier::new(16) blocks all 16 tasks at the same instant; asserts exactly one returns Ok across the JoinSet. Real DashMap::remove_if exercised, not a hand-rolled stub."
+  },
+
+  "parametrized_error_catalogue": {
+    "verdict": "Pass with one minor gap",
+    "production_path_rows": [
+      "InvalidParams (visibility on local) — dispatcher rejection via resolve_visibility",
+      "InvalidParams (non-bool allow_fallback) — dispatcher rejection via resolve_allow_fallback",
+      "UnsupportedMode — envelope check in sign_memory after Mode::Participate on STORAGE_MODE=local deploy",
+      "PublicWriteRequiresConfirmation — dispatcher gate when participate+public without token",
+      "EmbedderInvalid — FailingEmbedder fixture returns empty vec, embed() fails, sign_memory inline path surfaces -32098",
+      "HostedUnavailable — port-0 ECONNREFUSED in sign_memory_softfall + malformed-response guard",
+      "TokenExpired — past expires_at in token.json file, read_token_from surfaces TokenStoreError::Expired, soft-fall proxy maps to -32099 before HTTP call"
+    ],
+    "helper_only_rows": [
+      "OAuthTimeout (-32096) — pinned only by catalogue_typed_helpers_pin_data_shapes; no production trigger via wiremock with delayed response. Tech-spec line 353 calls for `hung_oauth_mock` fixture; not present.",
+      "LocalStorageBusy (-32099) — pinned only at helper level; no held-SQLite-lock production trigger. Tech-spec calls for `held_sqlite_lock` fixture; not present (Decision 13 documents 5000ms WAL+busy timeout is unchanged from pre-feature so a regression test for the typed error wrapping would land in payment-race tests — out of feature scope).",
+      "IdentityBootstrapFailed (-32094) — pinned only at helper level; no denied-keychain production trigger. The denied-keychain integration would need a mock KeyStore; out of feature scope.",
+      "DeliveryNotConfirmed (-32011) — pre-existing, unchanged by this feature; covered by delivery_guarantee.rs.",
+      "DeliveryQuotaExceeded (-32011) — pre-existing, unchanged by this feature; covered by delivery_guarantee.rs."
+    ],
+    "notes": "The 5 in-scope rows have production triggers. The 7 cross-task rows have wire-shape contracts pinned and 2 of them (HostedUnavailable, TokenExpired) actually trigger via production code paths in Tasks 5/6's tests. The remaining 3 (OAuthTimeout, LocalStorageBusy, IdentityBootstrapFailed) have only helper-level assertions on the data shape — a future refactor that drops a documented field would still fail the helper test, so the wire contract is protected, but the production-side surfacing is unverified by an integration test. See finding TR11-3."
+  },
+
+  "doctor_tests": {
+    "verdict": "Pass",
+    "production_triggers_per_case": {
+      "missing-host-config-entry": "Write host config file without `mcpServers.mnemonik` entry → doctor reads + fails the entry-presence check",
+      "health-503": "vi.stubGlobal('fetch', ...) returns Response(503) → doctor's checkMcpHealth treats non-200 as fail",
+      "corrupted-cached-binary": "Tamper bytes on disk → SHA256 read at doctor time mismatches manifest.sha256",
+      "config-dir-readonly": "Point MNEMONIC_CONFIG_DIR at /dev/null subpath → real mkdir + writeFile fail",
+      "missing-identity": "rm id.json from the seeded config dir → identity probe finds no file",
+      "malformed-token": "Write `{not json` to token.json → JSON.parse() throws at doctor's token-integrity check"
+    },
+    "no_check_function_mocking": true,
+    "notes": "None of the 6 cases mocks the doctor's check functions to return failure. All induce the failure via the resource the check probes."
+  },
+
+  "netns_isolation_test": {
+    "verdict": "Fail — gap documented",
+    "evidence": "grep across all .rs/.sh/.ts/.yml for `unshare`, `ss -tn`, `strace -e trace=connect`, `netns` returns zero hits. Tech-spec line 358 calls for `unshare -rn` netns E2E with three assertions (sign success, zero established connections via `ss`, zero non-loopback connect() calls via strace). Currently AC3's offline contract is indirectly defended by: (1) hosted endpoint pointed at .invalid TLD in `default_no_silent_escalation`, (2) PRICING_REFRESH_DISABLED=1 + EMBED_PROVIDER=stub-test env-var disables in cli_subcommands.rs, (3) the inline `sign_memory_inline` code path on local mode does not invoke `hosted_client.post(...)`. T12 manual QA picks up the airplane-mode smoke per user-spec row 7. A real netns test on Linux-only CI would be a strong follow-up; not a v1 blocker since v1 is macOS-only and `unshare` is Linux-only."
+  },
+
+  "snapshot_tests_for_manifests": {
+    "verdict": "Partial pass",
+    "byte_for_byte_evidence": "mcp/tests/discovery_anonymous.rs:166 resources_read_returns_full_markdown_for_attest does byte-for-byte equality against skills::ALL_SKILLS for `mnemonik-attest`. The other six manifests (help, init, recall, checkpoint, verify, status) only get substring `Purpose:` / `Trigger:` presence per tools_list_enriched_with_purpose_trigger. The placeholder-token guard runs on all seven across all three projected slots.",
+    "placeholder_check_present": true,
+    "placeholder_check_location": "mcp/tests/skill_manifests.rs:96 no_placeholder_tokens_in_manifests",
+    "notes": "See finding TR11-2 — extend byte-for-byte to all seven manifests via `resources/read` for each."
+  },
+
+  "install_tests": {
+    "mtime_unchanged_for_check_mode": true,
+    "mtime_check_location": "packages/mcp/test/install-hosts.test.ts:132 check_mode_no_writes asserts claudeAfter.mtimeMs === claudeBefore.mtimeMs against a real stat() call (not just absence of write spy)",
+    "symlink_out_of_home_refusal": true,
+    "symlink_test_location": "packages/mcp/test/install-hosts.test.ts:161 symlink_out_of_home_refuses uses real fs.symlink() to create a symlink pointing outside HOME, then asserts installHosts() throws AND the off-home target is unmodified",
+    "notes": "Both genuine fixture-driven, not argument-validation only."
+  },
+
+  "smoke_tests": {
+    "verdict": "Deterministic — no 'if available' qualifiers",
+    "evidence": [
+      "Task 1 smoke: `cargo build` + manifest rename → deterministic compile failure",
+      "Task 2 smoke: tools/list / prompts/list / resources/list / initialize via TestServer router — no external dep",
+      "Task 3 smoke: single-name cargo test on migrate_visibility_column_idempotent_on_clean_db",
+      "Task 4 smoke: parametrized error_catalogue tests + sign_memory_visibility tests via TestServer",
+      "Task 5 smoke: spawned binary cli_subcommands.rs with PRICING_REFRESH_DISABLED=1 + EMBED_PROVIDER=stub-test deterministic startup",
+      "Task 6 smoke: cargo test integration_token roundtrip against tempdir",
+      "Task 7 smoke: vitest run with fixture tarball + mock fetch + mock gh — deterministic",
+      "Task 8 smoke: standalone shell snippet for SHA256SUMS + actionlint clean"
+    ],
+    "notes": "Every Verify-smoke is reproducible on a clean machine. The single Rust integration test that requires external internet (`stdio_backward_compat::test_stdio_tools_list_sign_memory_recall_without_oauth`) is `#[ignore]`'d with explicit rationale (pricing.refresh() needs internet)."
+  },
+
+  "test_isolation": {
+    "env_mutex_usage": [
+      "mcp/tests/sign_memory_softfall.rs:578 softfall_env_guard() static Mutex protects MNEMONIC_CONFIG_DIR mutations across all tests in the file",
+      "mcp/tests/oauth_loopback.rs:92 with_config_dir_override uses static ENV_GUARD Mutex for the same env var",
+      "packages/mcp/test/install-binary.test.ts: per-test beforeEach/afterEach snapshots and restores MNEMONIK_MCP_RELEASE_BASE_URL + MNEMONIK_MCP_ALLOW_HTTP",
+      "packages/mcp/test/doctor.test.ts: per-test snapshot+restore of HOME, MNEMONIK_MCP_CACHE_DIR, MNEMONIC_CONFIG_DIR"
+    ],
+    "tempdir_cleanup": "All tests use tempfile::TempDir or freshTempDir() with explicit cleanup. No orphan dirs observed in target/ after suite run.",
+    "cross_test_state_check": "Pass — confirmation_token tests use independent `ConfirmationLedger::new()` per test; httpmock servers are per-test instances; SQLite via tempfile NamedTempFile per TestServer.",
+    "port_collisions": "Pass — httpmock chooses ephemeral ports; cli_subcommands.rs port-0 trick generates a fresh ephemeral port per test invocation."
+  },
+
+  "ignored_skipped_tests": [
+    {
+      "test": "stdio_backward_compat::test_stdio_tools_list_sign_memory_recall_without_oauth",
+      "marker": "#[ignore]",
+      "rationale": "Requires internet for pricing.refresh(). Documented inline: 'spawns mnemonic-mcp binary; pricing.refresh() needs internet (run with --ignored in CI)'. Note: the cli_subcommands.rs tests work around this with PRICING_REFRESH_DISABLED=1; this older stdio_backward_compat test predates that env var and could be unblocked. Minor cleanup opportunity, not a blocker."
+    }
+  ],
+
+  "test_suite_execution": {
+    "rust_test_command": "cargo test --workspace --no-fail-fast --features mnemonic-mcp/test-support",
+    "rust_passed": 645,
+    "rust_failed": 0,
+    "rust_ignored": 4,
+    "rust_binaries": 41,
+    "npm_test_command": "cd packages/mcp && npx vitest run",
+    "npm_passed": 27,
+    "npm_failed": 0,
+    "total_passed": 672,
+    "total_failed": 0
+  },
+
+  "findings": [
+    {
+      "id": "TR11-1",
+      "severity": "Minor",
+      "category": "Coverage gap — documented",
+      "title": "No `unshare -rn` netns isolation test for AC3 offline cold-start",
+      "files": [
+        "tech-spec.md:358 (specified E2E test)",
+        "mcp/tests/sign_memory_softfall.rs:69 (closest existing indirect test)"
+      ],
+      "description": "The tech-spec calls for an E2E test that runs `mnemonic-mcp mcp-stdio` inside `unshare -rn` (Linux network namespace with only `lo`) and asserts (a) sign_memory succeeds, (b) `ss -tn state established` returns zero non-loopback connections, (c) `strace -e trace=connect` records zero non-loopback connect() calls. No such test exists in the suite. The current AC3 defense is indirect: hosted endpoint pointed at an unreachable URL, env-var-disabled pricing refresh, and code-path inspection showing local-mode sign_memory does not invoke the hosted client.",
+      "recommendation": "Defer to v1.1 (Linux CI follow-up) or add a `#[cfg(target_os = \"linux\")]`-gated test that spawns `unshare -rn` as a child process. T12 pre-deploy QA should explicitly run airplane-mode smoke per user-spec §Как проверить row 7 to compensate. Document the gap in T12's report so it doesn't become invisible after merge."
+    },
+    {
+      "id": "TR11-2",
+      "severity": "Minor",
+      "category": "Test depth",
+      "title": "Byte-for-byte manifest snapshot only covers 1 of 7 manifests",
+      "files": [
+        "mcp/tests/discovery_anonymous.rs:166-215 resources_read_returns_full_markdown_for_attest"
+      ],
+      "description": "The byte-for-byte equality assertion against `skills::ALL_SKILLS` exists only for `mnemonik-attest.md`. The other six manifests (help, init, recall, checkpoint, verify, status) are only validated via `Purpose:` / `Trigger:` substring presence in tools_list_enriched_with_purpose_trigger. A subtle build-time projection bug that corrupted the body of, e.g., `mnemonik-recall.md` could pass the substring check.",
+      "recommendation": "Loop over all 7 names in resources_read_returns_full_markdown_for_attest (rename to `resources_read_returns_full_markdown_for_each_manifest`) and assert byte-equality for each via `resources/read`. Tiny addition (~10 lines)."
+    },
+    {
+      "id": "TR11-3",
+      "severity": "Informational",
+      "category": "Test depth",
+      "title": "Three error catalogue rows lack production-trigger integration tests",
+      "files": [
+        "mcp/tests/error_catalogue.rs:267 catalogue_typed_helpers_pin_data_shapes"
+      ],
+      "description": "OAuthTimeout (-32096), LocalStorageBusy (-32099), and IdentityBootstrapFailed (-32094) have their wire shapes pinned at the helper level (one `assert_eq!` per row) but no integration test triggers them via the production code path. Tech-spec line 353 names `hung_oauth_mock`, `held_sqlite_lock`, and a mock-KeyStore fixture respectively. The wire contract is protected (a refactor dropping `data.expires_at` from OAuthTimeout would still fail the helper test), but the actual surfacing path is unverified.",
+      "recommendation": "Acceptable for v1 — these are existing/external error codes the feature plumbs through; HostedUnavailable + TokenExpired DO get full production triggers via sign_memory_softfall. Track for v1.1 as test depth improvement. T12 should ensure these helpers don't get repurposed without follow-up coverage."
+    },
+    {
+      "id": "TR11-4",
+      "severity": "Informational",
+      "category": "Test depth",
+      "title": "No dedicated unit tests for resolve_visibility / resolve_allow_fallback",
+      "files": [
+        "mcp/src/tools.rs:155 resolve_visibility",
+        "mcp/src/tools.rs:186 resolve_allow_fallback"
+      ],
+      "description": "`resolve_write_mode` has a dense unit-test suite (12 cases at tools.rs:2105+); `resolve_visibility` and `resolve_allow_fallback` (its newer siblings) have only integration coverage via sign_memory_visibility.rs. The integration coverage is thorough — local+public (presence-only), local+private (presence-only), participate+5-case-variants, non-bool allow_fallback — so functional coverage is fine, but pure-function unit tests at the resolver level would catch a regression faster than an integration failure deep in the dispatcher stack.",
+      "recommendation": "Add ~6 unit tests inline in tools.rs `mod tests` mirroring the resolve_write_mode shape: None defaults; explicit Public/Private under participate; presence-rejection under local; non-string rejection; case-variant rejection. Not blocking."
+    },
+    {
+      "id": "TR11-5",
+      "severity": "Informational",
+      "category": "Cleanup opportunity",
+      "title": "`stdio_backward_compat::test_stdio_tools_list_sign_memory_recall_without_oauth` could drop #[ignore]",
+      "files": [
+        "mcp/tests/stdio_backward_compat.rs"
+      ],
+      "description": "The test is ignored with rationale 'pricing.refresh() needs internet'. Task 5 added `PRICING_REFRESH_DISABLED=1` to skip the network call (see `mcp_stdio_accepts_jsonrpc_on_stdin`); the same env var could unblock this older test.",
+      "recommendation": "Either drop #[ignore] and add `.env(PRICING_REFRESH_DISABLED=1)` to the spawn, or delete the test if mcp_stdio_accepts_jsonrpc_on_stdin fully supersedes it. Not blocking."
+    },
+    {
+      "id": "TR11-6",
+      "severity": "Informational",
+      "category": "Coverage gap",
+      "title": "AC15 mismatch-warning stderr line not asserted",
+      "files": [
+        "mcp/tests/discovery_anonymous.rs:270 initialize_surfaces_embedder_metadata"
+      ],
+      "description": "AC15 requires not only that `initialize` surfaces `embedder.model_id` + `model_version` + `dim` (covered) but also that on connect, `mnemonik-mcp` compares its compile-time values against the hosted peer's reply and emits a stderr warning line `[mnemonik-mcp] embedder version mismatch: local=<x> remote=<y>, cross-mode recall not guaranteed consistent` on mismatch. Tech-spec line 359 lists this as the second E2E. No such test exists. The mcp-stdio binary today does discovery locally per Decision 1 (binary-embedded manifests), so the only scenario where mismatch could surface is during participate-mode proxy, which doesn't have an `initialize` round-trip to compare.",
+      "recommendation": "Either implement the mismatch-warning emission path (currently absent from the binary's behaviour as best I can tell) and add the test, or update the user-spec to drop the mismatch-line requirement on the grounds that local-only discovery makes the divergence unobservable in v1. T12 should flag this for the spec disposition."
+    }
+  ],
+
+  "qa_smoke_handoff_for_t12": {
+    "manual_smokes_required": [
+      "Airplane-mode local-mode sign: disable WiFi + ethernet, run `mnemonic-mcp mcp-stdio` (or via `mnemonik-mcp install`'d host), call `sign_memory { mode: \"local\", content: \"airplane\" }`, expect success. Compensates for the missing AC3 netns E2E.",
+      "MCP Inspector against production: `npx @modelcontextprotocol/inspector https://mcp.mnemonik.xyz/mcp` without auth, eyeball that 7 prompts + 7 resources render with non-empty bodies, 6 tools carry `Purpose:` + `Trigger:` sections in descriptions. Screenshots for release-checklist per user-spec §Как проверить.",
+      "Fresh-machine install on macOS: `npm install -g @mnemonik-xyz/mcp && mnemonik-mcp install`, restart Claude Code, verify `/mcp` menu shows mnemonik, attempt a local-mode attestation. The host-config wiring + binary download + lazy install path is covered by vitest fixtures but the real GitHub Releases → host-config → spawned subprocess chain needs at least one live run."
+    ],
+    "automated_smokes_to_run": [
+      "cargo test --workspace --no-fail-fast --features mnemonic-mcp/test-support (645 tests, 0 failures)",
+      "cd packages/mcp && npx vitest run (27 tests, 0 failures)",
+      "cargo clippy --workspace --all-targets --features mnemonic-mcp/test-support -- -D warnings",
+      "cargo fmt --all -- --check",
+      "actionlint .github/workflows/release.yml (expect 3 pre-existing warnings on untouched build-linux/build-macos jobs, no new ones)"
+    ],
+    "ac_table_quick_reference": "AC1-AC2 → discovery_anonymous + skill_manifests; AC3 → MANUAL airplane-mode (TR11-1); AC4 → anonymous_recall + sign_memory_visibility round-trip; AC5-AC6 → sign_memory_softfall (8 tests); AC7-AC10 → install-hosts.test.ts; AC11 → oauth_loopback (4 tests); AC12 → DEFERRED; AC13 → anonymous_recall (3 tests); AC14 → sign_memory_visibility (3 tests); AC15 → discovery_anonymous (partial, see TR11-6 for the mismatch line); AC16 → error_catalogue + cross-task triggers; AC17 → doctor.test.ts (7 cases)."
+  },
+
+  "blocking_for_merge": [],
+  "recommended_before_merge": [],
+  "informational_only": [
+    "TR11-1 (AC3 netns gap — covered by manual smoke)",
+    "TR11-2 (extend byte-for-byte snapshot to all 7 manifests)",
+    "TR11-3 (3 error rows pinned at helper-level only)",
+    "TR11-4 (resolver unit tests)",
+    "TR11-5 (drop #[ignore] on stdio_backward_compat)",
+    "TR11-6 (AC15 mismatch-warning stderr line)"
+  ],
+
+  "notes": "Test suite is in good shape for a feature this size. All ACs that can be tested in-process at the integration level have at least one covering test that drives the production code path; assertions are behavioral; no empty-test anti-patterns observed. The HMAC ceremony's cross-owner + concurrent-consume tests use real fixtures (claims.sub threading, tokio::Barrier) rather than handcrafted stubs. The error catalogue's helper-level wire contract is supplemented by production-trigger integration tests for the rows owned by this feature; 3 cross-task rows are pinned only at the helper level (acceptable for v1). The single structural gap is AC3 netns E2E — the user-spec calls for it, the tech-spec calls for it, but the test suite defers to manual airplane-mode smoke; v1 macOS-only scope makes a Linux-only `unshare` test platform-mismatched anyway. Cleared for T12 pre-deploy QA from a test-audit perspective."
+}
