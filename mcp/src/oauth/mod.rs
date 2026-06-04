@@ -1079,16 +1079,51 @@ pub async fn token_handler(
 }
 
 /// Persist `token` to `~/.mnemonic/token.json` as a best-effort cache. The
-/// `expires_at` field is derived from [`JWT_TTL_SECS`] so the on-disk
-/// timestamp matches the JWT's own `exp` claim within ~1s. Errors are
-/// logged at `warn` and swallowed — a cache failure must never break the
-/// OAuth response (the calling agent has already received its token).
+/// on-disk `expires_at` is derived from the JWT's own `exp` claim so it
+/// matches the issuer's notion of expiry byte-for-byte — no clock-skew
+/// window between the JWT mint and the cache write (round-1 code review
+/// R1-MINOR-2). Errors are logged at `warn` and swallowed — a cache
+/// failure must never break the OAuth response (the calling agent has
+/// already received its token).
 ///
-/// Public so future binary-side outbound flows can persist tokens
-/// minted through alternate paths (Google OAuth, extension key-escrow).
+/// **Security contract** (round-1 security audit SA6-003): `sub` MUST be
+/// a PKCE-validated subject (already proven against the COSE_Sign1
+/// signature at `authorize_handler`). Callers that mint JWTs without a
+/// PKCE handshake must NOT call this helper — the cached file would
+/// associate the caller's identity with someone else's keypair on disk.
+/// Currently the only production callsite is `token_handler` immediately
+/// after `issue_jwt_with_google_sub`, where `issued.sub` is the
+/// PKCE-bound subject.
+///
+/// Public (rather than `pub(crate)`) so integration tests at
+/// `mcp/tests/oauth_loopback.rs` can exercise the cache path directly;
+/// no production callsite outside this module exists today.
 pub fn cache_minted_token(jwt: &str, sub: &str) {
-    let expires_at =
-        (chrono::Utc::now() + chrono::Duration::seconds(JWT_TTL_SECS as i64)).to_rfc3339();
+    let expires_at = match extract_exp_unix_no_verify(jwt) {
+        Some(exp) => match chrono::DateTime::<chrono::Utc>::from_timestamp(exp as i64, 0) {
+            Some(dt) => dt.to_rfc3339(),
+            // exp claim outside chrono's representable range — fall back to
+            // the conservative "now + TTL" estimate; logs a debug line so
+            // an operator can investigate.
+            None => {
+                tracing::debug!(
+                    target: "mnemonic_mcp::oauth",
+                    "JWT exp {exp} out of chrono range; falling back to now+TTL"
+                );
+                (chrono::Utc::now() + chrono::Duration::seconds(JWT_TTL_SECS as i64)).to_rfc3339()
+            }
+        },
+        None => {
+            // No parseable exp claim — the cache becomes useless after the
+            // first read (Expired returned), but at least no panic, and a
+            // re-OAuth fixes the cache on the next call. Same fallback.
+            tracing::debug!(
+                target: "mnemonic_mcp::oauth",
+                "could not extract exp from minted JWT; falling back to now+TTL"
+            );
+            (chrono::Utc::now() + chrono::Duration::seconds(JWT_TTL_SECS as i64)).to_rfc3339()
+        }
+    };
     let token = mnemonic_core::identity::TokenJson {
         jwt: jwt.to_string(),
         expires_at,
@@ -1100,6 +1135,23 @@ pub fn cache_minted_token(jwt: &str, sub: &str) {
             "best-effort cache of minted JWT to ~/.mnemonic/token.json failed: {e}"
         );
     }
+}
+
+/// Extract the `exp` claim (unix seconds) from a JWT WITHOUT verifying the
+/// signature. Used by [`cache_minted_token`] — the JWT was just minted in
+/// this same process by [`issue_jwt_with_google_sub`], so signature
+/// re-verification would be a tautology. Returns `None` if the JWT is not
+/// in standard three-part form or the payload does not carry a numeric
+/// `exp` claim.
+fn extract_exp_unix_no_verify(jwt: &str) -> Option<u64> {
+    let payload_b64 = jwt.split('.').nth(1)?;
+    let payload_bytes = base64::Engine::decode(
+        &base64::engine::general_purpose::URL_SAFE_NO_PAD,
+        payload_b64,
+    )
+    .ok()?;
+    let payload: serde_json::Value = serde_json::from_slice(&payload_bytes).ok()?;
+    payload.get("exp")?.as_u64()
 }
 
 /// Build a uniform OAuth-style error envelope.

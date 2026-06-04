@@ -83,20 +83,45 @@ impl From<serde_json::Error> for TokenStoreError {
     }
 }
 
-/// `~/.mnemonic/token.json`. Falls back to a synthetic absolute path on the
-/// `dirs::home_dir() == None` edge case (HOME unset on a non-standard host);
-/// callers see the failure surface through [`read_token`]/[`save_token`].
-pub fn token_path() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("/"))
-        .join(".mnemonic")
-        .join("token.json")
+/// `~/.mnemonic/token.json`.
+///
+/// `$MNEMONIC_CONFIG_DIR`, when set and non-empty, overrides the base
+/// directory — parity with the Node CLI's `configDir()` at
+/// `packages/cli/src/config.ts:48-52`. This lets integration tests sandbox
+/// the token path without mutating `$HOME` (which is process-global and
+/// requires `unsafe` on Rust 2024). When the override is absent the
+/// production path is `~/.mnemonic/token.json` via [`dirs::home_dir`].
+///
+/// Returns [`TokenStoreError::Io`] (with `InvalidInput` kind and the
+/// message "cannot determine home directory; set $HOME or
+/// $MNEMONIC_CONFIG_DIR") when neither the env override is set nor
+/// `dirs::home_dir()` resolves a HOME. Round-1 security audit SA6-001:
+/// the spec contract is "token file must live inside HOME, never
+/// elsewhere"; the previous infallible signature silently fell back to
+/// `/.mnemonic/token.json` which would attempt to write at the
+/// filesystem root.
+pub fn token_path() -> Result<PathBuf, TokenStoreError> {
+    if let Some(override_dir) = std::env::var_os("MNEMONIC_CONFIG_DIR") {
+        let s = override_dir.to_string_lossy();
+        if !s.is_empty() {
+            return Ok(PathBuf::from(override_dir).join("token.json"));
+        }
+    }
+    let home = dirs::home_dir().ok_or_else(|| {
+        TokenStoreError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "cannot determine home directory; set $HOME or $MNEMONIC_CONFIG_DIR",
+        ))
+    })?;
+    Ok(home.join(".mnemonic").join("token.json"))
 }
 
 /// Read the token at the production path. See [`read_token_from`] for the
-/// path-injection variant used by tests.
+/// path-injection variant used by tests. Propagates the
+/// [`TokenStoreError::Io`] from [`token_path`] when neither
+/// `MNEMONIC_CONFIG_DIR` nor `HOME` is resolvable.
 pub fn read_token() -> Result<Option<TokenJson>, TokenStoreError> {
-    read_token_from(&token_path())
+    read_token_from(&token_path()?)
 }
 
 /// Read a token from `path`.
@@ -124,7 +149,11 @@ pub fn read_token_from(path: &Path) -> Result<Option<TokenJson>, TokenStoreError
     let exp = match DateTime::parse_from_rfc3339(&token.expires_at) {
         Ok(dt) => dt.with_timezone(&Utc),
         // Unparseable timestamp — treat as expired so the caller re-OAuths
-        // rather than silently accepting an undated token.
+        // rather than silently accepting an undated token. The tech-spec's
+        // "returns None" language at line 332 was superseded by the Task 6
+        // TDD anchor `expired_token_returns_expired_error` and refined here:
+        // "I don't know when this expires" is safer than "assume valid".
+        // Decisions.md (Task 6) records the spec discrepancy.
         Err(_) => {
             return Err(TokenStoreError::Expired {
                 expires_at: token.expires_at,
@@ -142,8 +171,10 @@ pub fn read_token_from(path: &Path) -> Result<Option<TokenJson>, TokenStoreError
 }
 
 /// Save `token` to the production path (creating `~/.mnemonic/` if needed).
+/// Propagates the [`TokenStoreError::Io`] from [`token_path`] when neither
+/// `MNEMONIC_CONFIG_DIR` nor `HOME` is resolvable.
 pub fn save_token(token: &TokenJson) -> Result<(), TokenStoreError> {
-    save_token_to(&token_path(), token)
+    save_token_to(&token_path()?, token)
 }
 
 /// Atomic write of `token` to `path`. Tempfile-in-same-dir + rename so a
@@ -157,6 +188,22 @@ pub fn save_token_to(path: &Path, token: &TokenJson) -> Result<(), TokenStoreErr
         ))
     })?;
     fs::create_dir_all(parent)?;
+    // Tighten the parent directory to 0o700 on Unix — round-1 security
+    // audit SA6-002. `fs::create_dir_all` honours umask, which on many
+    // Linux distros leaves world-readable mode 0o755; the directory
+    // listing exposes "this user has a Mnemonic token" even though the
+    // token file itself is 0o600. `set_permissions` here is idempotent
+    // and matches the Node CLI's `mkdirSync(dir, { recursive: true,
+    // mode: 0o700 })` at `packages/cli/src/config.ts:71`.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        // Best-effort tightening — if the directory already exists with
+        // different ownership (shared dev machine), this may fail with
+        // EPERM. Don't bubble that as a save failure since the file mode
+        // 0o600 still protects the contents.
+        let _ = fs::set_permissions(parent, fs::Permissions::from_mode(0o700));
+    }
 
     let mut tmp = NamedTempFile::new_in(parent)?;
     let json = serde_json::to_string_pretty(token)?;
@@ -178,9 +225,11 @@ pub fn save_token_to(path: &Path, token: &TokenJson) -> Result<(), TokenStoreErr
 }
 
 /// Delete the production-path token. Idempotent — removing a missing file
-/// is `Ok(())`. Backing the Task 5 logout subcommand.
+/// is `Ok(())`. Backing the Task 5 logout subcommand. Propagates the
+/// [`TokenStoreError::Io`] from [`token_path`] when neither
+/// `MNEMONIC_CONFIG_DIR` nor `HOME` is resolvable.
 pub fn delete_token() -> Result<(), TokenStoreError> {
-    delete_token_at(&token_path())
+    delete_token_at(&token_path()?)
 }
 
 /// Delete the token at `path`. Idempotent on `NotFound`.
