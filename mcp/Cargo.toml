@@ -210,6 +210,24 @@ name = "error_catalogue"
 path = "tests/error_catalogue.rs"
 required-features = ["test-support"]
 
+# Task 5 agent-native-distribution — clap subcommands (mcp-stdio + logout)
+# and MNEMONIC_HOSTED_ENDPOINT gating. Spawns the built binary as a child
+# process and drives JSON-RPC on stdin so the integration covers the actual
+# `main()` dispatch, not just the library entrypoint.
+[[test]]
+name = "cli_subcommands"
+path = "tests/cli_subcommands.rs"
+required-features = ["test-support"]
+
+# Task 5 agent-native-distribution — soft-fall routing in `sign_memory`.
+# Exercises the local-failure → participate-proxy re-dispatch (Decision 4)
+# AND the visibility re-resolution gate post-escalation (Decision 4 + 5b
+# interaction).
+[[test]]
+name = "sign_memory_softfall"
+path = "tests/sign_memory_softfall.rs"
+required-features = ["test-support"]
+
 [dev-dependencies]
 tempfile = "3"
 httpmock = "0.8"

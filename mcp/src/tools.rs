@@ -23,7 +23,8 @@ use mnemonic_core::solana::SolanaClient;
 use mnemonic_core::storage::{AttestationStore, SqliteStore, Visibility, WriteMode};
 
 use crate::mcp::{
-    delivery_not_confirmed, invalid_params, unsupported_mode, Envelope, JsonRpcError,
+    delivery_not_confirmed, hosted_unavailable, invalid_params, public_write_requires_confirmation,
+    unsupported_mode, Envelope, JsonRpcError,
 };
 use crate::pending::PendingBundles;
 use crate::{payment, pricing::CostHint};
@@ -313,6 +314,16 @@ pub async fn sign_memory(
     visibility: Visibility,
     envelope: &Envelope,
     delivery_refetch_timeout: Duration,
+    // Task 5 — agent-native-distribution Decision 4. The soft-fall router
+    // sits BETWEEN this entrypoint and the failing inline path. Set to
+    // `true` only when the caller has explicitly opted in via
+    // `allow_fallback_to_participate`. The hosted_endpoint + hosted_client
+    // come from `McpState`; an empty `hosted_endpoint` disables soft-fall
+    // (test fixture sentinel).
+    allow_fallback: bool,
+    hosted_endpoint: &str,
+    hosted_client: &reqwest::Client,
+    args: &serde_json::Value,
 ) -> Result<serde_json::Value, ToolError> {
     // T2 — UnsupportedMode check fires BEFORE the JWT-deferred branch so a
     // browser client asking for `participate` against a local-only deploy
@@ -345,7 +356,7 @@ pub async fn sign_memory(
                 .map_err(ToolError::Other);
         }
     }
-    sign_memory_inline(
+    let inline_result = sign_memory_inline(
         keypair,
         solana,
         arweave,
@@ -361,7 +372,255 @@ pub async fn sign_memory(
         visibility,
         delivery_refetch_timeout,
     )
-    .await
+    .await;
+
+    match inline_result {
+        Ok(v) => Ok(v),
+        Err(e) => {
+            // Decision 4 — soft-fall opt-in. The router runs ONLY if all of:
+            //   (1) caller passed `allow_fallback_to_participate=true`
+            //   (2) the local error is in the soft-fallable catalogue
+            //       (EmbedderInvalid / LocalStorageBusy / IdentityBootstrapFailed)
+            //   (3) a non-empty hosted endpoint is configured
+            // Any other failure (UnsupportedMode, DeliveryNotConfirmed,
+            // PublicWriteRequiresConfirmation, opaque Other) flows through
+            // verbatim — soft-fall is for *local capability* failures only.
+            if !allow_fallback || hosted_endpoint.is_empty() {
+                return Err(e);
+            }
+            let reason = match &e {
+                ToolError::TypedRpc(rpc) => softfall_reason_from_error(rpc),
+                ToolError::Other(_) => None,
+            };
+            let Some(reason) = reason else {
+                return Err(e);
+            };
+            // Proxy the same arguments through the hosted endpoint with
+            // `mode` swapped to `participate`. Visibility resolution runs
+            // AGAIN on the hosted side (Decision 4 — the public-write
+            // confirmation gate from Task 4 still fires). On hosted
+            // unavailability we return `-32011 HostedUnavailable` so the
+            // agent sees the actual failure point, NOT the original local
+            // failure code.
+            tracing::warn!(
+                target: "mnemonic_mcp::tools",
+                reason = reason.as_str(),
+                "sign_memory: soft-fall escalating to participate via hosted endpoint"
+            );
+            proxy_participate(hosted_client, hosted_endpoint, args, jwt_sub, reason).await
+        }
+    }
+}
+
+/// Map a typed JSON-RPC error returned from the local `sign_memory_inline`
+/// path to its `escalated.reason` enum value (Decision 4 —
+/// agent-native-distribution). Errors that are NOT in the soft-fallable set
+/// (delivery failures, unsupported mode, public-write gate violations)
+/// return `None` so the caller propagates the error verbatim instead of
+/// escalating.
+fn softfall_reason_from_error(rpc: &JsonRpcError) -> Option<EscalationReason> {
+    let kind = rpc
+        .data
+        .as_ref()
+        .and_then(|d| d.get("kind"))
+        .and_then(|v| v.as_str())?;
+    match (rpc.code, kind) {
+        (-32098, "EmbedderInvalid") => Some(EscalationReason::EmbedderUnavailable),
+        (-32099, "LocalStorageBusy") => Some(EscalationReason::LocalStorageBusy),
+        (-32094, "IdentityBootstrapFailed") => Some(EscalationReason::IdentityBootstrapFailed),
+        _ => None,
+    }
+}
+
+/// Machine-readable reason for `escalated.reason` in the soft-fall response.
+/// Each variant maps 1:1 to a typed JSON-RPC error in the local catalogue
+/// (Error Catalogue table — agent-native-distribution tech-spec).
+#[derive(Debug, Clone, Copy)]
+pub enum EscalationReason {
+    /// `-32098 EmbedderInvalid` — local embedder unusable.
+    EmbedderUnavailable,
+    /// `-32099 LocalStorageBusy` — SQLite busy after the 5s busy_timeout.
+    LocalStorageBusy,
+    /// `-32094 IdentityBootstrapFailed` — `identity::ensure()` returned err.
+    IdentityBootstrapFailed,
+}
+
+impl EscalationReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::EmbedderUnavailable => "embedder_unavailable",
+            Self::LocalStorageBusy => "local_storage_busy",
+            Self::IdentityBootstrapFailed => "identity_bootstrap_failed",
+        }
+    }
+}
+
+/// Proxy the caller's `sign_memory` arguments to the resolved hosted MCP
+/// endpoint as a JSON-RPC `tools/call` for `mnemonic_sign_memory` with
+/// `mode` rewritten to `"participate"`. Reuses the caller's `jwt_sub` for
+/// Bearer auth when present; if no token is cached the hosted side will
+/// return `-32001 unauthorized` and the agent must re-OAuth (Decision 7).
+///
+/// On any transport failure (DNS, TCP, TLS, non-2xx) returns
+/// `-32011 HostedUnavailable` per Decision 4 — the agent sees the actual
+/// failure point, not the original local-failure code. On a successful
+/// hosted call the inner `result` is unwrapped, an `escalated` field is
+/// injected, and the augmented JSON is returned. If the hosted side
+/// returned a JSON-RPC error (e.g. `-32095 PublicWriteRequiresConfirmation`
+/// because the caller didn't supply `public_write_confirmation`), that
+/// error is propagated verbatim — Decision 4 + 5b interaction.
+async fn proxy_participate(
+    client: &reqwest::Client,
+    endpoint: &str,
+    args: &serde_json::Value,
+    jwt_sub: Option<&str>,
+    reason: EscalationReason,
+) -> Result<serde_json::Value, ToolError> {
+    // Build the re-dispatch arguments: clone the caller's args, override
+    // `mode` to participate. `allow_fallback_to_participate` is dropped to
+    // prevent recursive escalation if the hosted side itself reports a
+    // local failure (mock-server bug, partial deploy). Visibility flows
+    // through verbatim so the hosted public-write gate sees the same
+    // intent the caller declared.
+    let mut proxied_args = args.clone();
+    if let Some(obj) = proxied_args.as_object_mut() {
+        obj.insert(
+            "mode".to_string(),
+            serde_json::Value::String("participate".to_string()),
+        );
+        obj.remove("allow_fallback_to_participate");
+    }
+
+    let body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {
+            "name": "mnemonic_sign_memory",
+            "arguments": proxied_args,
+        },
+    });
+
+    // Cached token lookup. If `read_token` returns Expired the caller's
+    // -32099 surface lives at the dispatcher boundary (Task 6 forward flag);
+    // for soft-fall escalation we treat Expired the same as "no token" —
+    // the hosted side will respond with `-32001 unauthorized` which we
+    // surface to the agent as the actual blocker (re-OAuth required).
+    let mut req = client.post(endpoint).json(&body);
+    if let Ok(Some(token)) = mnemonic_core::identity::read_token() {
+        req = req.bearer_auth(token.jwt);
+    } else if let Some(sub) = jwt_sub {
+        // No cached token but the caller had a JWT in-process (HTTP path
+        // with the Cloud-tier deferred branch sometimes lands here in
+        // theory — kept defensive for symmetry). Pass nothing; the hosted
+        // side will reject with the typed unauthorized error.
+        let _ = sub;
+    }
+
+    let resp = match req.send().await {
+        Ok(r) => r,
+        Err(e) => {
+            let _ = reason;
+            return Err(ToolError::TypedRpc(hosted_unavailable(&e.to_string(), 500)));
+        }
+    };
+    let status = resp.status();
+    let body_text = match resp.text().await {
+        Ok(t) => t,
+        Err(e) => {
+            return Err(ToolError::TypedRpc(hosted_unavailable(
+                &format!("body read failed: {e}"),
+                500,
+            )));
+        }
+    };
+    if !status.is_success() {
+        return Err(ToolError::TypedRpc(hosted_unavailable(
+            &format!("hosted endpoint returned HTTP {status}: {body_text}"),
+            500,
+        )));
+    }
+
+    let parsed: serde_json::Value = match serde_json::from_str(&body_text) {
+        Ok(v) => v,
+        Err(e) => {
+            return Err(ToolError::TypedRpc(hosted_unavailable(
+                &format!("malformed hosted response: {e}"),
+                500,
+            )));
+        }
+    };
+
+    // JSON-RPC error from the hosted side propagates verbatim — Decision 4
+    // + 5b interaction: a `-32095 PublicWriteRequiresConfirmation` returned
+    // by the hosted public-write gate must reach the agent unchanged so
+    // the public-write ceremony from Task 4 still applies post-escalation.
+    if let Some(err) = parsed.get("error") {
+        let code = err.get("code").and_then(|c| c.as_i64()).unwrap_or(-32603) as i32;
+        let message = err
+            .get("message")
+            .and_then(|m| m.as_str())
+            .unwrap_or("hosted error")
+            .to_string();
+        // If the hosted side echoed `kind == PublicWriteRequiresConfirmation`,
+        // re-derive the canonical helper to keep `data.suggested_action`
+        // exactly aligned with the local catalogue (defence-in-depth
+        // against a hosted operator returning a slightly-different shape).
+        let kind = err
+            .get("data")
+            .and_then(|d| d.get("kind"))
+            .and_then(|v| v.as_str());
+        if kind == Some("PublicWriteRequiresConfirmation") {
+            // The hosted side computed the hash; honour whatever it returned
+            // (the content text is identical so blake3 collisions are nil).
+            let content_hash = err
+                .get("data")
+                .and_then(|d| d.get("content_hash"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            return Err(ToolError::TypedRpc(public_write_requires_confirmation(
+                content_hash,
+            )));
+        }
+        return Err(ToolError::TypedRpc(JsonRpcError {
+            code,
+            message,
+            data: err.get("data").cloned(),
+        }));
+    }
+
+    // Successful escalation. The hosted side wraps its tool result in the
+    // MCP `content: [{type:"text", text:"<pretty-JSON>"}]` envelope; we
+    // mirror that here so the dispatcher's downstream wrapping is a no-op
+    // and the agent sees a uniform shape.
+    let result = parsed
+        .get("result")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    // The result is the wrapper `{content:[{text:"<inner JSON>"}]}`; pull
+    // the inner JSON out so we can inject `escalated` onto the same
+    // object the caller would have seen on a successful local write.
+    let inner_text = result
+        .get("content")
+        .and_then(|c| c.as_array())
+        .and_then(|arr| arr.first())
+        .and_then(|item| item.get("text"))
+        .and_then(|t| t.as_str());
+    let mut inner_value: serde_json::Value = match inner_text {
+        Some(s) => serde_json::from_str(s).unwrap_or(serde_json::Value::Null),
+        None => result.clone(),
+    };
+    if let Some(obj) = inner_value.as_object_mut() {
+        obj.insert(
+            "escalated".to_string(),
+            serde_json::json!({
+                "from": "local",
+                "to": "participate",
+                "reason": reason.as_str(),
+            }),
+        );
+    }
+    Ok(inner_value)
 }
 
 /// HTTP/JWT branch — Decision 12 deferred-signing path.
@@ -1494,6 +1753,18 @@ mod sign_memory_tests {
         Envelope::from_config("local", "none", 0)
     }
 
+    /// Soft-fall disabled — Task 5 unit tests in this module don't exercise
+    /// the escalation router. Returns an empty endpoint sentinel + a dummy
+    /// client; `sign_memory` treats either as "no soft-fall available" and
+    /// propagates the local error verbatim.
+    fn no_softfall() -> (reqwest::Client, serde_json::Value) {
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(1))
+            .build()
+            .unwrap();
+        (client, serde_json::json!({}))
+    }
+
     #[tokio::test]
     async fn test_sign_memory_returns_awaiting_signature_for_jwt_path() {
         // T2 round-2: mode-absent JWT path against a local-only deploy
@@ -1506,6 +1777,7 @@ mod sign_memory_tests {
         let owner = kp.pubkey().to_string();
         let env = local_envelope();
         let resolved = resolve_write_mode(None, "local").unwrap();
+        let (hosted_client, args) = no_softfall();
         let result = sign_memory(
             &kp,
             &sol,
@@ -1524,6 +1796,10 @@ mod sign_memory_tests {
             Visibility::Private,
             &env,
             std::time::Duration::from_secs(15),
+            false,
+            "",
+            &hosted_client,
+            &args,
         )
         .await
         .unwrap();
@@ -1544,6 +1820,7 @@ mod sign_memory_tests {
         let owner = kp.pubkey().to_string();
         let env = local_envelope();
         let resolved = resolve_write_mode(None, "local").unwrap();
+        let (hosted_client, args) = no_softfall();
         let result = sign_memory(
             &kp,
             &sol,
@@ -1562,6 +1839,10 @@ mod sign_memory_tests {
             Visibility::Private,
             &env,
             std::time::Duration::from_secs(15),
+            false,
+            "",
+            &hosted_client,
+            &args,
         )
         .await
         .unwrap();
@@ -1588,6 +1869,7 @@ mod sign_memory_tests {
         let resolved_explicit_local =
             resolve_write_mode(Some(&serde_json::json!("local")), "local").unwrap();
         assert!(resolved_explicit_local.is_explicit_local());
+        let (hosted_client, args) = no_softfall();
         let result = sign_memory(
             &kp,
             &sol,
@@ -1606,6 +1888,10 @@ mod sign_memory_tests {
             Visibility::Private,
             &env_local,
             std::time::Duration::from_secs(15),
+            false,
+            "",
+            &hosted_client,
+            &args,
         )
         .await
         .unwrap();
@@ -1619,6 +1905,7 @@ mod sign_memory_tests {
         let resolved_explicit_local_full =
             resolve_write_mode(Some(&serde_json::json!("local")), "full").unwrap();
         assert!(resolved_explicit_local_full.is_explicit_local());
+        let (hosted_client, args) = no_softfall();
         let result = sign_memory(
             &kp,
             &sol,
@@ -1637,6 +1924,10 @@ mod sign_memory_tests {
             Visibility::Private,
             &env_full,
             std::time::Duration::from_secs(15),
+            false,
+            "",
+            &hosted_client,
+            &args,
         )
         .await
         .unwrap();

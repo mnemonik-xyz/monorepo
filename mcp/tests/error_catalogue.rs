@@ -244,6 +244,11 @@ async fn catalogue_embedder_invalid() {
         charge_micro_usdc: 0,
     };
 
+    let hosted_client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(1))
+        .build()
+        .unwrap();
+    let args = serde_json::json!({});
     let result = sign_memory(
         &kp,
         &SolanaClient::new("http://localhost:0"),
@@ -262,6 +267,10 @@ async fn catalogue_embedder_invalid() {
         Visibility::Private,
         &envelope,
         Duration::from_secs(15),
+        false,
+        "",
+        &hosted_client,
+        &args,
     )
     .await;
 

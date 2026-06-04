@@ -543,6 +543,12 @@ mod handler_tests {
             )),
             delivery_metrics: Arc::new(crate::payment::DeliveryMetrics::default()),
             confirmation_ledger: Arc::new(crate::confirmation_token::ConfirmationLedger::new()),
+            hosted_endpoint: String::new(),
+            hosted_client: reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .timeout(std::time::Duration::from_secs(2))
+                .build()
+                .expect("reqwest hosted client"),
         })
     }
 

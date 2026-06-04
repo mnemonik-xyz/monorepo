@@ -149,6 +149,15 @@ pub fn mock_state() -> Arc<McpState> {
         )),
         delivery_metrics: Arc::new(crate::payment::DeliveryMetrics::default()),
         confirmation_ledger: Arc::new(crate::confirmation_token::ConfirmationLedger::new()),
+        // Empty endpoint sentinel — `tools::sign_memory` treats an empty
+        // string as "no soft-fall available" so tests that don't wire an
+        // httpmock get the default no-network behaviour.
+        hosted_endpoint: String::new(),
+        hosted_client: reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(std::time::Duration::from_secs(2))
+            .build()
+            .expect("reqwest hosted client"),
     })
 }
 
@@ -223,6 +232,12 @@ pub fn mock_state_with(
         )),
         delivery_metrics: Arc::new(crate::payment::DeliveryMetrics::default()),
         confirmation_ledger: Arc::new(crate::confirmation_token::ConfirmationLedger::new()),
+        hosted_endpoint: String::new(),
+        hosted_client: reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(std::time::Duration::from_secs(2))
+            .build()
+            .expect("reqwest hosted client"),
     })
 }
 
@@ -306,6 +321,98 @@ pub fn mock_state_for_delivery(
         )),
         delivery_metrics: Arc::new(crate::payment::DeliveryMetrics::default()),
         confirmation_ledger: Arc::new(crate::confirmation_token::ConfirmationLedger::new()),
+        hosted_endpoint: String::new(),
+        hosted_client: reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(std::time::Duration::from_secs(2))
+            .build()
+            .expect("reqwest hosted client"),
+    })
+}
+
+/// Build an `McpState` for the agent-native-distribution Task 5 soft-fall
+/// tests. Two extra knobs over [`mock_state`]:
+///
+/// - `embedder: Box<dyn Embedder>` — lets the test inject `FailingEmbedder`
+///   so `sign_memory_inline` returns `-32098 EmbedderInvalid` deterministically
+///   without needing a real ONNX model on disk. The production `mock_state`
+///   uses [`StubEmbedder`]; this variant is the constructor the task spec
+///   describes as "test-only McpState constructor variant taking
+///   `Box<dyn Embedder>` directly".
+/// - `hosted_endpoint: String` — points the soft-fall proxy at an
+///   `httpmock` instance OR at an unreachable URL (to exercise the
+///   `-32011 HostedUnavailable` branch).
+///
+/// `dim` must match `embedder.dim()`; the compressor is rebuilt against it
+/// so the canonical CBOR pipeline doesn't reject a length-mismatched
+/// vector. All other defaults mirror [`mock_state`] verbatim.
+pub fn mock_state_with_embedder_and_endpoint(
+    embedder: Box<dyn Embedder>,
+    hosted_endpoint: String,
+) -> Arc<McpState> {
+    let tmp = tempfile::NamedTempFile::new().expect("tempfile");
+    let path = tmp.into_temp_path();
+    let path_buf = path.keep().expect("keep tempfile");
+
+    let dim = embedder.dim();
+    let store = SqliteStore::open(&path_buf).expect("sqlite open");
+    let compressor = EmbeddingCompressor::new(dim, 4, 42);
+    let quota = Quota::per_minute(NonZeroU32::new(10).expect("nz"));
+    let chat_limiter = governor::RateLimiter::keyed(quota);
+    let ollama_client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .expect("reqwest");
+    let llm_client =
+        LlmClient::new("ollama", "", "test-model", "http://localhost:0", 512).expect("llm_client");
+
+    let bootstrap_server_x25519_secret =
+        crypto_box::SecretKey::generate(&mut crypto_box::aead::OsRng);
+    let bootstrap_server_x25519_public = bootstrap_server_x25519_secret.public_key();
+
+    let hosted_client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        // Short timeout — the no-network test asserts on `HostedUnavailable`
+        // within a single test step rather than a 30s default.
+        .timeout(std::time::Duration::from_secs(2))
+        .build()
+        .expect("reqwest hosted client");
+
+    Arc::new(McpState {
+        keypair: Keypair::new(),
+        solana: SolanaClient::new("http://localhost:0"),
+        arweave: ArweaveClient::new("http://localhost:0"),
+        store: std::sync::Mutex::new(store),
+        embedder,
+        compressor,
+        payment_mode: "none".into(),
+        treasury_pubkey: String::new(),
+        usdc_mint: String::new(),
+        sign_memory_cost_micro_usdc: 0,
+        pricing: PricingEngine::new(0),
+        sol_tx_fee_lamports: 0,
+        storage_mode: "local".into(),
+        ollama_url: "http://localhost:0".into(),
+        ollama_model: "test-model".into(),
+        rag_chunk_dir: std::path::PathBuf::from("/tmp"),
+        llm_client,
+        artifact_zip_path: std::sync::Mutex::new(None),
+        ollama_client,
+        chat_limiter,
+        pending: Arc::new(PendingBundles::with_defaults()),
+        bootstrap_tickets: Arc::new(crate::api::BootstrapTickets::with_defaults()),
+        bootstrap_server_x25519_secret,
+        bootstrap_server_x25519_public,
+        envelope: Envelope::from_config("local", "none", 0),
+        delivery_refetch_timeout: std::time::Duration::from_secs(2),
+        refunds_by_subject: Arc::new(crate::payment::RefundsBySubject::new(
+            std::time::Duration::from_secs(60),
+            5,
+        )),
+        delivery_metrics: Arc::new(crate::payment::DeliveryMetrics::default()),
+        confirmation_ledger: Arc::new(crate::confirmation_token::ConfirmationLedger::new()),
+        hosted_endpoint,
+        hosted_client,
     })
 }
 

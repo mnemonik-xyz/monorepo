@@ -111,6 +111,12 @@ fn build_state() -> Arc<McpState> {
         )),
         delivery_metrics: Arc::new(mnemonic_mcp::payment::DeliveryMetrics::default()),
         confirmation_ledger: Arc::new(mnemonic_mcp::confirmation_token::ConfirmationLedger::new()),
+        hosted_endpoint: String::new(),
+        hosted_client: reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(std::time::Duration::from_secs(2))
+            .build()
+            .expect("reqwest hosted client"),
     })
 }
 

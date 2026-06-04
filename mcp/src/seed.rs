@@ -337,6 +337,11 @@ pub async fn run(state: &McpState) -> Result<()> {
             // `Participate`; on `local` it's `Local`.
             let seed_resolved = tools::resolve_write_mode(None, &state.storage_mode)
                 .expect("None always resolves to Ok per resolver contract");
+            // Seeding never opts into soft-fall — RAG corpus seeding runs at
+            // server boot under a server-keypair owner; an escalation to the
+            // hosted endpoint would be self-loop and the corpus is always
+            // private. Pass `allow_fallback=false` and empty endpoint.
+            let seed_args = serde_json::json!({});
             let result = tools::sign_memory(
                 &state.keypair,
                 &state.solana,
@@ -358,6 +363,10 @@ pub async fn run(state: &McpState) -> Result<()> {
                 mnemonic_core::storage::Visibility::Private,
                 &state.envelope,
                 state.delivery_refetch_timeout,
+                false,
+                "",
+                &state.hosted_client,
+                &seed_args,
             )
             .await
             // `sign_memory` returns `ToolError` (typed RPC error or generic

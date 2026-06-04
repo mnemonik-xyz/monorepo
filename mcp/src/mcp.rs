@@ -818,6 +818,22 @@ pub struct McpState {
     /// restart invalidates every in-flight token (intentional graceful-
     /// degradation — the agent reruns the 3s ceremony).
     pub confirmation_ledger: Arc<crate::confirmation_token::ConfirmationLedger>,
+
+    /// Resolved hosted MCP endpoint for the participate-mode soft-fall
+    /// proxy on `mcp-stdio` (Decision 4 + Decision 12 —
+    /// agent-native-distribution). Default
+    /// [`crate::DEFAULT_HOSTED_ENDPOINT`] unless the operator passed
+    /// `--allow-custom-endpoint` AND set `MNEMONIC_HOSTED_ENDPOINT`. Empty
+    /// string is a sentinel for "no soft-fall available" (test fixtures
+    /// that exercise the local code path without wiring an HTTPS client).
+    pub hosted_endpoint: String,
+
+    /// Shared HTTP client used by the soft-fall proxy to POST JSON-RPC to
+    /// [`Self::hosted_endpoint`]. Pinned `Policy::none()` on redirects so
+    /// a compromised hosted operator cannot 302 us to an unrelated host
+    /// (the env-var redirection vector Decision 12 closes for the
+    /// pre-connect side; this closes the mid-connection side).
+    pub hosted_client: reqwest::Client,
 }
 
 // Safety: We only access store through std::sync::Mutex (short critical sections, no await)
@@ -1519,17 +1535,22 @@ async fn handle_tool_call(
             // — `resolve_visibility` returns `-32602 InvalidParams` in that
             // case.
             let visibility = tools::resolve_visibility(args, resolved.write_mode)?;
-            // `_allow_fallback` is parsed here so any malformed value is
+            // `allow_fallback` is parsed here so any malformed value is
             // rejected at the dispatcher boundary before storage / payment
-            // side effects. Task 5 (mcp-stdio subcommand + soft-fall) wires
-            // it into `tools::sign_memory_inline`'s post-failure branch in
-            // `mcp/src/tools.rs`: when `allow_fallback_to_participate=true`
-            // and local execution fails (e.g. `-32098 EmbedderInvalid`),
-            // sign_memory re-dispatches the same arguments through the
-            // hosted participate-mode proxy (`MNEMONIC_HOSTED_ENDPOINT`)
-            // and the response gains an `escalated: { from, to, reason }`
-            // marker (Decision 4 — agent-native-distribution).
-            let _allow_fallback = tools::resolve_allow_fallback(args)?;
+            // side effects. Task 5 wires this into `tools::sign_memory`'s
+            // post-failure branch in `mcp/src/tools.rs`: when
+            // `allow_fallback_to_participate=true` AND local execution fails
+            // with one of the soft-fallable typed errors (`-32098
+            // EmbedderInvalid`, `-32099 LocalStorageBusy`, `-32094
+            // IdentityBootstrapFailed`), `sign_memory` re-dispatches the
+            // same arguments through the hosted participate-mode proxy
+            // (`state.hosted_endpoint`, resolved at process start and gated
+            // behind `--allow-custom-endpoint` per Decision 12). The
+            // response gains an `escalated: { from, to, reason }` marker
+            // per Decision 4; on hosted unavailability the typed error is
+            // `-32011 HostedUnavailable`, NOT the original local-failure
+            // code.
+            let allow_fallback = tools::resolve_allow_fallback(args)?;
 
             // Decision 5b — public-write confirmation gate. Fires only when
             // the caller has explicitly opted into `participate + public`;
@@ -1587,6 +1608,10 @@ async fn handle_tool_call(
                 visibility,
                 &state.envelope,
                 state.delivery_refetch_timeout,
+                allow_fallback,
+                &state.hosted_endpoint,
+                &state.hosted_client,
+                args,
             )
             .await
             .map_err(tool_error_to_json_rpc)?
@@ -1846,6 +1871,12 @@ mod transport_tests {
             )),
             delivery_metrics: Arc::new(crate::payment::DeliveryMetrics::default()),
             confirmation_ledger: Arc::new(crate::confirmation_token::ConfirmationLedger::new()),
+            hosted_endpoint: String::new(),
+            hosted_client: reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .timeout(std::time::Duration::from_secs(2))
+                .build()
+                .expect("reqwest hosted client"),
         })
     }
 

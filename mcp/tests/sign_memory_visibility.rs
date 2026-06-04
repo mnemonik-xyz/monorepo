@@ -154,6 +154,7 @@ async fn visibility_threads_through_to_storage() {
         charge_micro_usdc: 0,
     };
 
+    let softfall_args = serde_json::json!({});
     let result = sign_memory(
         &kp,
         &server.state.solana,
@@ -172,6 +173,10 @@ async fn visibility_threads_through_to_storage() {
         Visibility::Private,
         &server.state.envelope,
         Duration::from_secs(15),
+        false,
+        &server.state.hosted_endpoint,
+        &server.state.hosted_client,
+        &softfall_args,
     )
     .await
     .expect("sign_memory inline succeeds with stub embedder");
@@ -216,6 +221,10 @@ async fn visibility_threads_through_to_storage() {
         Visibility::Public,
         &server.state.envelope,
         Duration::from_secs(15),
+        false,
+        &server.state.hosted_endpoint,
+        &server.state.hosted_client,
+        &softfall_args,
     )
     .await
     .expect("sign_memory inline succeeds for Public visibility too");

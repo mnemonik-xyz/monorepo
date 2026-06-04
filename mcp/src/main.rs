@@ -21,7 +21,7 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use mnemonic_core::{arweave, compress, embed, solana, storage::SqliteStore};
 use serde::Deserialize;
 use solana_sdk::signer::Signer;
@@ -35,7 +35,8 @@ use std::sync::Arc;
     about = "Mnemonic MCP server — verifiable memory attestation"
 )]
 struct Cli {
-    /// Transport: "stdio" or "http"
+    /// Transport: "stdio" or "http". Ignored when a subcommand is supplied
+    /// (e.g. `mcp-stdio` always selects the stdio transport).
     #[arg(long, default_value = "http")]
     transport: String,
 
@@ -46,6 +47,32 @@ struct Cli {
     /// HTTP host (when transport=http)
     #[arg(long, default_value = "0.0.0.0")]
     host: String,
+
+    /// Allow `MNEMONIC_HOSTED_ENDPOINT` to override the compiled-in default
+    /// hosted peer used by participate-mode soft-fall (Decision 12 —
+    /// agent-native-distribution). Without this flag, the env var is ignored
+    /// and a single-line stderr warning is emitted if it is set, so a local
+    /// attacker that injects the env var cannot silently redirect outbound
+    /// participate writes to an attacker-controlled host.
+    #[arg(long, global = true, default_value_t = false)]
+    allow_custom_endpoint: bool,
+
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Start the MCP server on stdio. Equivalent to running `mnemonic-mcp
+    /// --transport stdio` without a subcommand. Hosts (Claude Code, Cursor)
+    /// invoke this form so the host-config entry can declare the subcommand
+    /// verbatim without parsing flags.
+    McpStdio,
+    /// Remove the cached OAuth-loopback JWT at `~/.mnemonic/token.json`
+    /// (the default location resolved via `mnemonic_core::identity::token_path`).
+    /// Idempotent — absent file exits 0 silently. Always prints
+    /// "mnemonic: logged out" to stderr on success.
+    Logout,
 }
 
 // ── HTTP request/response types ───────────────────────────────────────────────
@@ -283,12 +310,60 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let cli = Cli::parse();
+
+    // ── Subcommand short-circuits ────────────────────────────────────────────
+    // `logout` MUST run before any McpState build — no embedder download, no
+    // identity bootstrap, no SQLite open. It's a single fs::remove_file call.
+    if matches!(cli.command, Some(Command::Logout)) {
+        match mnemonic_core::identity::delete_token() {
+            Ok(()) => {
+                // Spec-mandated stderr line (task 5 — agent-native-distribution).
+                // Idempotent: absent file is also Ok(()) per token_store
+                // implementation, so this message fires uniformly.
+                eprintln!("mnemonic: logged out");
+                return Ok(());
+            }
+            Err(e) => {
+                // Path-resolution failure (no HOME, no MNEMONIC_CONFIG_DIR)
+                // is the only case that surfaces here — file-not-found is
+                // already mapped to Ok by delete_token_at.
+                eprintln!("mnemonic: logout failed: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
+
     let cfg = config::Config::from_env();
 
-    let transport = if std::env::var("MCP_TRANSPORT").is_ok() {
-        cfg.transport.clone()
-    } else {
-        cli.transport.clone()
+    // ── Hosted endpoint resolution (Decision 12) ─────────────────────────────
+    // The compile-time `DEFAULT_HOSTED_ENDPOINT` wins unless the operator
+    // explicitly passed `--allow-custom-endpoint` AND set the env var. When
+    // the env var is set without the flag we emit exactly one stderr line so
+    // the operator notices their override was rejected; we never silently
+    // honour the env var.
+    let env_hosted = std::env::var("MNEMONIC_HOSTED_ENDPOINT").ok();
+    let (hosted_endpoint, should_warn) =
+        mnemonic_mcp::resolved_hosted_endpoint(cli.allow_custom_endpoint, env_hosted.as_deref());
+    if should_warn {
+        eprintln!(
+            "[mnemonik-mcp] ignoring MNEMONIC_HOSTED_ENDPOINT — use --allow-custom-endpoint to enable"
+        );
+    }
+
+    // Subcommand-driven transport: `mcp-stdio` forces stdio regardless of
+    // env or flag, mirroring how MCP hosts spawn the binary. The pre-existing
+    // `--transport` flag continues to work for the no-subcommand path so any
+    // existing `mnemonic-mcp --transport stdio` invocation is unchanged.
+    let transport = match cli.command {
+        Some(Command::McpStdio) => "stdio".to_string(),
+        Some(Command::Logout) => unreachable!("logout short-circuits above"),
+        None => {
+            if std::env::var("MCP_TRANSPORT").is_ok() {
+                cfg.transport.clone()
+            } else {
+                cli.transport.clone()
+            }
+        }
     };
 
     let identity_struct = mnemonic_core::identity::ensure()
@@ -476,6 +551,15 @@ async fn main() -> anyhow::Result<()> {
     // eviction starts immediately after the `Arc<McpState>` is built.
     let confirmation_ledger = Arc::new(confirmation_token::ConfirmationLedger::new());
 
+    // Soft-fall proxy HTTP client. `Policy::none()` mirrors the existing
+    // Ollama client treatment — a compromised hosted operator returning a
+    // 302 to an attacker-controlled URL must NOT be auto-followed.
+    let hosted_client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .expect("failed to build reqwest client for hosted soft-fall proxy");
+
     let state = Arc::new(mcp::McpState {
         keypair,
         solana: solana::SolanaClient::new(&cfg.solana_rpc_url),
@@ -506,6 +590,8 @@ async fn main() -> anyhow::Result<()> {
         refunds_by_subject: refunds_by_subject.clone(),
         delivery_metrics: delivery_metrics.clone(),
         confirmation_ledger: confirmation_ledger.clone(),
+        hosted_endpoint,
+        hosted_client,
     });
 
     // Spawn the confirmation-ledger eviction loop. Held strong reference
