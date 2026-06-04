@@ -285,3 +285,16 @@ Review details — in JSON files via links. QA report — in logs/working/.
 - Existing `publish-npm` job sed-extracted and diffed against `HEAD~2:.github/workflows/release.yml` — byte-for-byte identical.
 
 **Forward flag:** Before the first tagged release (Task 13 fires), `@mnemonik-xyz/mcp` must be pre-registered on npm.com with the same Trusted-Publisher OIDC configuration as the existing `@mnemonik-xyz/sdk` and `@mnemonik-xyz/cli` packages (publisher: `mnemonik-xyz/monorepo`, workflow: `.github/workflows/release.yml`, environment: none). Without this, the first `npm publish --provenance` will 403. DR8-INFO1 and the task post-completion checklist both call this out — log it explicitly in Task 13's deployment runbook.
+
+## Task 9: Code Audit (holistic, wave 7)
+
+**Status:** Done
+**Commit:** (this commit)
+**Agent:** t9-auditor
+**Summary:** Holistic code audit across the merged state of Tasks 1-8 on `main`. Verdict: **pass** — zero blockers or majors. Two minor follow-up items recorded (dynamic `await import('node:fs/promises')` for `open`/`writeFile` left in `packages/mcp/src/install-hosts.ts:104` + `doctor.ts:158` despite task #61 cleanup; `mnemonic_check_pending` mapped to `mnemonik-attest` skill in `mcp/src/mcp.rs:196` is semantically off-target). Six info-level confirmations recorded for the focus areas (HMAC binding length-stability, SQL injection safety on `visibility` filter, mutex `unwrap()` patterns are pre-existing and not introduced by this feature, release.yml job-scoped permissions correct, rust-toolchain.toml + Cargo.lock churn explainable, version coherence between Cargo binary and npm shim flagged as a Task 13 pre-tag gate).
+**Deviations:** None.
+
+**Reviews:**
+
+*Round 1 (this commit):*
+- code-auditor: PASS, 0 blockers + 0 majors + 2 minors + 6 info → [logs/working/audit/code-auditor.json](logs/working/audit/code-auditor.json)

@@ -1,0 +1,72 @@
+{
+  "auditor": "t9-auditor",
+  "scope": "Code Audit (holistic, across T1-T8 merged state on main)",
+  "verdict": "pass",
+  "findings": [
+    {
+      "severity": "minor",
+      "id": "CA-001",
+      "file": "packages/mcp/src/install-hosts.ts",
+      "line": 104,
+      "description": "Dynamic `await import('node:fs/promises')` for `open` remains despite task #61 (CR-ISSUE-003) being marked completed. Static imports at the top of the file pull `lstat, readFile, realpath, rename, stat, writeFile` but not `open`. The fix ticket title (`Replace dynamic node:fs/promises imports with static rename import`) suggests only `rename` was targeted; the broader dynamic-import pattern still exists here and at `packages/mcp/src/doctor.ts:158` (`const { writeFile } = await import('node:fs/promises')`). Functionally harmless under Node 20+, but inconsistent with the cleanup pass and creates a minor code-smell for future readers.",
+      "remediation": "Hoist `open` to the top-level `import { … } from 'node:fs/promises'` block in install-hosts.ts and `writeFile` likewise in doctor.ts. Two-line change, no behavioural impact."
+    },
+    {
+      "severity": "minor",
+      "id": "CA-002",
+      "file": "mcp/src/mcp.rs",
+      "line": 196,
+      "description": "`skill_for_tool()` maps `mnemonic_check_pending` to `mnemonik-attest` so its `tools/list` description carries attest's Purpose+Trigger. `mnemonic_check_pending` is the post-async correlation_id poll, NOT an attestation event — the agent reads attest guidance when calling the poll, which is semantically off-target. There is no dedicated `checkpoint`-or-equivalent skill for the polling pattern; the `checkpoint` manifest is about project-state snapshots, not pending-resolution. Result: `mnemonic_check_pending` either gets attest-flavoured guidance (current) or none (if mapping removed).",
+      "remediation": "Either (a) remove the mapping so the tool description falls back to its base text only, or (b) add a short paragraph to the `mnemonik-attest` manifest acknowledging that `check_pending` is a follow-up step. Option (a) is the cheaper fix and preserves the drift-impossible single-source-of-truth invariant for the remaining 5 tools that DO have a clear skill counterpart."
+    },
+    {
+      "severity": "info",
+      "id": "CA-003",
+      "file": "mcp/Cargo.toml",
+      "line": 3,
+      "description": "Binary `version = \"0.1.0\"` while `packages/mcp/dist/binary-version.json` targets `v0.2.0` and the npm shim `@mnemonik-xyz/mcp` ships as `0.2.0`. The Task 13 deployment runbook is expected to bump `mcp/Cargo.toml` to `0.2.0` before tagging `v0.2.0`; until then, a `cargo build` produces a `mnemonic-mcp 0.1.0` binary that the shim attempts to download as a `v0.2.0` tarball. Not a code defect — just a deployment-time gate the team-lead must enforce.",
+      "remediation": "Add to Task 13 pre-tag checklist: bump `mcp/Cargo.toml`, `packages/sdk/package.json`, `packages/cli/package.json`, and verify `packages/mcp/dist/binary-version.json` matches the new tag before pushing the `v*` tag."
+    },
+    {
+      "severity": "info",
+      "id": "CA-004",
+      "file": "mcp/src/confirmation_token.rs",
+      "line": 269,
+      "description": "HMAC binding tuple `content_hash || owner_pubkey || visibility.as_str() || expires_at.to_be_bytes() || jti.as_bytes()` is well-designed against the length-confusion concern raised in task 9 focus area: `content_hash` is validated as 64-char ASCII hex at the dispatcher boundary (mcp.rs:1726), `owner_pubkey` is server-derived from JWT claims (deterministic length per OAuth flow), `expires_at` is a fixed-8-byte big-endian encoding, and `jti` is a fixed-16-byte UUID. The only variable-length cross-field boundary is content_hash↔owner_pubkey, but the content_hash length pre-check at the mint dispatcher closes the attack window. Documented here for the record; no remediation needed.",
+      "remediation": "None — recording as info so reviewers in v2 (when multi-instance scaling moves the ledger to Redis or signed-cookie equivalent, per Decision 5b horizontal-scaling note) preserve the validation discipline."
+    },
+    {
+      "severity": "info",
+      "id": "CA-005",
+      "file": "mcp/src/tools.rs",
+      "line": 1543,
+      "description": "Two production-path `Mutex::lock().unwrap()` and one `.expect(\"store mutex poisoned\")` calls at tools.rs:1101/1182/1310/1471/1543/1713 and mcp.rs:1137/1273/1370/1390/1423/1485/1667 are all pre-existing (predate this feature; git-blamed to 1f26fba6 / 2026-04-21 and earlier). Patterns.md says \"no unwrap() outside tests\"; the convention in this codebase has been to treat mutex poisoning as a panic-as-bug, which is idiomatic Rust. This feature did NOT introduce any new mutex unwrap callsites — every new lock acquisition in confirmation_token.rs (DashMap, no Mutex) and the soft-fall router (no SQLite lock around `.await`) followed the patterns.md discipline. Recording as info to acknowledge the existing convention and confirm no regression.",
+      "remediation": "None — pre-existing convention. If the team wants to migrate to typed `PoisonError` handling, do it project-wide in a separate change."
+    },
+    {
+      "severity": "info",
+      "id": "CA-006",
+      "file": "core/src/storage/sqlite.rs",
+      "line": 109,
+      "description": "Three named SQL constants (`SEARCH_SQL_ALL`, `SEARCH_SQL_FILTERED`, `SEARCH_SQL_CROSS_OWNER_VIS`) cleanly factor the three valid `(owner, visibility_filter)` combinations of `search()`. The `(None, None)` cell is explicitly handled as `Vec::new()` per the round-2 security-blocker fix — a defensive guard that rejects the no-owner+no-filter combination so a future bug cannot accidentally surface the entire DB anonymously. Visibility filter is bound via `ToSql`, never inlined — SQL-injection-safe. Recording as info: this is exemplary defence-in-depth.",
+      "remediation": "None — preserve the pattern as-is."
+    },
+    {
+      "severity": "info",
+      "id": "CA-007",
+      "file": ".github/workflows/release.yml",
+      "line": 128,
+      "description": "`id-token: write` + `attestations: write` are scoped to the `release` job only (lines 128-131). The `publish-mcp-shim` job (line 294) carries only `id-token: write` + `contents: read`, and `publish-npm` (line 197) matches. Workflow-level `permissions: contents: write` (line 16) is the default; no job inherits the broader sigstore-mint scopes accidentally. AC for release-permissions discipline is met.",
+      "remediation": "None — preserve the per-job permissions block."
+    },
+    {
+      "severity": "info",
+      "id": "CA-008",
+      "file": "rust-toolchain.toml",
+      "line": 1,
+      "description": "`rust-toolchain.toml` is unchanged from pre-feature state (channel=\"stable\", components=[rustfmt, clippy], profile=\"minimal\"). Cargo.lock churn for this feature is +2 lines from Task 4 (surfacing `subtle` as a direct dep that was already transitively present via hmac/sha2). Workspace hygiene clean.",
+      "remediation": "None."
+    }
+  ],
+  "summary": "Holistic code audit across T1-T8 finds zero blocking or major findings. The feature is internally consistent: T1's skill manifests are projected into both T2's tools/list enrichment AND prompts/resources via a single ALL_SKILLS table, drift physically impossible; T4's error catalogue (`-32094/95/96/98/99` and `-32011 HostedUnavailable`) follows the existing `data.kind` discriminator convention with no (code, kind) overlap; T5's soft-fall routing in tools.rs:proxy_participate releases the SQLite mutex before any `.await` and gates the public-write confirmation token locally as well as on the hosted side (defence in depth per Decision 4+5b); T6's token_store is reused verbatim by T5's soft-fall proxy with TokenStoreError::Expired correctly mapped to -32099; T7's npm shim pins `gh attestation verify --owner --repo --signer-workflow` argv exactly, zip-slip filter rejects SymbolicLink+Link entry types AND non-descendant paths, atomic temp+rename for both manifest sidecar and host configs; T8's release.yml scopes sigstore-mint permissions to the `release` job only. Eight findings recorded — six are info-level confirmation of focus-area checks, two are minor cleanup items (dynamic-import leftover in install-hosts.ts:104 + doctor.ts:158; stale `mnemonic_check_pending`→`mnemonik-attest` skill mapping in mcp.rs:196). No findings block the wave 7 audit gate. Recommend the two minors be addressed in a single small follow-up commit either before or shortly after Task 13 deploy."
+}
