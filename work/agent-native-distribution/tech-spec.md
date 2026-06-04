@@ -1,6 +1,7 @@
 ---
 created: 2026-06-04
-status: draft
+approved: 2026-06-04
+status: approved
 branch: dev
 size: L
 ---
