@@ -2,7 +2,7 @@
 created: 2026-06-04
 status: draft
 type: feature
-size: L  # 3 coordinated pieces — server-side propagation + CLI install + CLI mcp-stdio + new visibility column
+size: L  # 3 coordinated pieces — server-side propagation + npm shim ship-Rust-binary + install subcommand + new visibility column on participate
 priority: P0 (без него adoption story не работает: установленный, но не использующийся протокол не distributes)
 related:
   - work/invisible-identity/user-spec.md (опирается — local identity bootstrap reused для local-mode signing)
@@ -22,49 +22,51 @@ source_of_patterns: github.com/aitankfish/pnl (@pnlmarket/mcp-server v0.5.1, MIT
 **Кусок 1 — Server-side skill propagation на `mcp.mnemonik.xyz`.**
 
 1. На сервере появляются **7 markdown skill-манифестов** (`help`, `init`, `recall`, `attest`, `checkpoint`, `verify`, `status`) — единый источник правды per skill. Каждый манифест объясняет когда инструмент применять, какой контекст из диалога собрать, что не делать.
-2. Манифесты доставляются через **три MCP-поверхности** одновременно: `prompts/list + prompts/get` (для агентов, использующих именованные prompts как slash-команды), `resources/list + resources/read` (для агентов, загружающих manifests как читаемые ресурсы), и **enriched `tools/list` descriptions** для всех 5 существующих инструментов (Purpose + Trigger sections вшиваются на build-time).
-3. **Discovery работает pre-auth.** `initialize`, `prompts/*`, `resources/*`, `tools/list` отвечают без Bearer-токена. Любой агент, подключившийся к `mcp.mnemonik.xyz`, мгновенно видит все skills, не пройдя OAuth. Существующий OAuth-gate остаётся на write-tier tool calls в participate mode.
+2. Манифесты доставляются через **три MCP-поверхности** одновременно: `prompts/list + prompts/get`, `resources/list + resources/read`, и **enriched `tools/list` descriptions** для всех 5 существующих инструментов (Purpose + Trigger секции манифеста встраиваются на build-time).
+3. **Discovery работает pre-auth.** `initialize`, `prompts/*`, `resources/*`, `tools/list` отвечают без Bearer-токена. Существующий OAuth-gate остаётся на write-tier tool calls в participate mode.
 4. **Anonymous recall** работает без auth над публичной частью пула (см. `visibility` ниже).
-5. Схема расширяется одной колонкой: `attestations.visibility TEXT NOT NULL DEFAULT 'private'` (values: `'private'` | `'public'`). Anonymous recall возвращает **только** `visibility='public'` строки. Default `'private'` — privacy-by-default.
+5. Схема расширяется одной колонкой: `attestations.visibility TEXT NOT NULL DEFAULT 'private'` (values: `'private'` | `'public'`). Колонка применима **только** к строкам, записанным через participate mode. Anonymous recall возвращает **только** `visibility='public'` строки. Default `'private'` — privacy-by-default даже для participate.
 
-**Кусок 2 — CLI `mnemonic install` subcommand (PNL pattern, lifted, not copied).**
+**Кусок 2 — npm shim `@mnemonik-xyz/mcp` (новый package) + `mnemonik-mcp install` subcommand.**
 
-6. Существующий `@mnemonik-xyz/cli` обогащается `install` subcommand'ом. Хардкоднутый список из 3 хост-конфигов: `~/.claude.json`, `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS), `~/.cursor/mcp.json`. Только-если-файл-существует, non-destructive JSON merge, идемпотентно. Linux/Windows пути и хосты Cline/Codex/Windsurf — out of scope для v1 (повторяем реальное покрытие PNL, не overstatement из их README).
-7. В каждый существующий config пишется одна запись:
+6. Новый npm package `@mnemonik-xyz/mcp` — тонкий launcher по pattern'у esbuild / prisma / swc. На install (`npm install -g @mnemonik-xyz/mcp` или `npx -y @mnemonik-xyz/mcp install`) определяет платформу и скачивает соответствующий prebuilt **Rust binary `mnemonic-mcp`** из GitHub Releases (тот же артефакт, что и для cargo-install). Hashes verified. Binary кеширует в платформо-стандартный location.
+7. **`mnemonik-mcp install`** — pattern PNL'я. Хардкоднутый список из 3 хост-конфигов: `~/.claude.json`, `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS), `~/.cursor/mcp.json`. Только-если-файл-существует, non-destructive JSON merge, идемпотентно.
+8. В каждый существующий config пишется одна запись, указывающая на **локально-распакованный путь к binary** (не `npx`, чтобы не пинговать registry при каждом старте хоста):
    ```json
-   "mnemonik": { "command": "npx", "args": ["-y", "@mnemonik-xyz/cli", "mcp-stdio"] }
+   "mnemonik": { "command": "/path/to/cached/mnemonic-mcp", "args": ["mcp-stdio"] }
    ```
    Все остальные ключи и MCP-серверы остаются byte-identical. Re-run заменяет в-месте, дубликатов нет.
-8. Output говорит пользователю **перезапустить уже запущенные агенты** (хост hot-reload вне scope, как у PNL). Если хост не запущен — открыть его как обычно.
+9. **`mnemonik-mcp install --check`** — dry-run. Показывает: какие хост-конфиги обнаружены, в какие нужно записать `mnemonik`-entry, какие уже содержат `mnemonik`-entry (replacement-target). Никаких изменений на диске.
+10. Output после `install` (apply) говорит пользователю **перезапустить уже запущенные агенты**, если они работали в момент установки. Если хост не запущен — открыть его как обычно.
+11. **`mnemonik-mcp doctor`** — диагностическая команда. Проверяет: presence `mnemonik` записи в каждом хост-конфиге, ping `mcp.mnemonik.xyz/health`, проверка binary integrity (hash), доступность local SQLite read/write, keychain accessibility for identity + token. Pass/fail per check + repair hints.
 
-**Кусок 3 — CLI `mnemonic mcp-stdio` subcommand.**
+**Кусок 3 — `mnemonic-mcp mcp-stdio` (новая команда в существующем Rust binary).**
 
-9. Локальный stdio MCP-сервер, который хост (Claude Code/Desktop/Cursor) спавнит как subprocess. JSON-RPC поверх stdin/stdout.
-10. **Dual-route по `write_mode`:**
-    - **Local mode (default)**: полное локальное исполнение. Embedder через transformers.js (`Xenova/all-MiniLM-L6-v2`, 384-dim, скачивается on-demand при первом write), TurboQuant compress через WASM-core, canonical CBOR + COSE_Sign1 через SDK, INSERT в `~/.mnemonic/attestations.db` (better-sqlite3, схема портирована из `core/src/storage/sqlite.rs`). **Никаких сетевых вызовов.** Подпись локальным Ed25519 identity (из invisible-bootstrap, PR #154/#157 шипнуты ранее сегодня).
+12. Existing Rust `mnemonic-mcp` binary получает новую subcommand'у `mcp-stdio`. JSON-RPC поверх stdin/stdout, спавнится хостом. Подразумевается использование существующего MCP server core'а (axum/JSON-RPC dispatch, tools registry).
+13. **Dual-route по `mode`-аргументу tool call'а** (см. modes-user-choice #156):
+    - **Local mode (default)**: полное локальное исполнение **через тот же Rust код**, который сейчас работает на `mcp.mnemonik.xyz`. Embedder = fastembed (MiniLM-L6, 384-dim, ONNX). TurboQuant compress, canonical CBOR, COSE_Sign1 — всё existing core code, никакого переписывания. INSERT в локальный SQLite (`~/.mnemonic/attestations.db`). **Никаких сетевых вызовов** в local mode. Подпись локальным Ed25519 identity (из invisible-bootstrap, PR #154/#157 шипнуты ранее сегодня).
     - **Participate mode**: проксирует JSON-RPC в `mcp.mnemonik.xyz/mcp` через HTTPS. На первый auth-required вызов запускает OAuth-loopback (browser popup, как в существующем `mnemonic login --browser`).
     - **Discovery (`prompts/*`, `resources/*`, `tools/list`)**: всегда проксируется на сервер — один источник правды для манифестов.
-11. **Token storage переезжает в OS keychain.** Сегодня `~/.mnemonic/token.json` — plaintext. После v1 — keychain entry `xyz.mnemonik.token / default` (macOS Keychain / Secret Service / DPAPI). Это закрывает аномалию: identity у нас уже в keychain через invisible-bootstrap, токен — нет. `mnemonic logout` удаляет keychain entry.
-12. **Soft-fall semantics на сбое embedder'а** (model download fail, ONNX runtime crash):
-    - `mode=local + visibility=private` → **fail loud**, никаких publishments. Privacy contract is non-negotiable.
-    - `mode=local + visibility=public + network available` → **soft-fall к participate**, OAuth-loopback если нужен, stderr line `[mnemonik] local model unavailable, falling through to participate (this attestation will be PUBLIC and chain-anchored)`.
-13. **`mnemonic doctor`** — диагностическая команда (user-facing verification). Проверяет presence манифестов в host configs, ping `mcp.mnemonik.xyz/health`, доступность local embedder + model, sqlite read/write, keychain accessibility. Pass/fail per check + repair hints.
+14. **Token storage переезжает в OS keychain.** Сегодня `~/.mnemonic/token.json` — plaintext. После v1 — keychain entry `xyz.mnemonik.token / default` (macOS Keychain / Linux Secret Service / Windows Credential Manager — через тот же Rust `keyring` crate, что уже используется для identity). Это закрывает аномалию: identity у нас в keychain через invisible-bootstrap, токен сейчас — нет. `mnemonik-mcp logout` удаляет keychain entry.
+15. **Soft-fall = explicit opt-in (не silent).** На сбой local embedder'а / fs / sqlite:
+    - **Default behaviour**: возвращается JSON-RPC `-32098 EmbedderInvalid` / `-32099 LocalStorageBusy`. Никакого silent escalation. Агент видит ошибку и может либо retry, либо surface user'у, либо отдельным вызовом запросить participate-mode (что вызовет OAuth-loopback).
+    - **Explicit opt-in**: tool args принимают `allow_fallback_to_participate: true`. Default `false`. Если `true` и local fails — mcp-stdio автоматически роутит на participate; в response добавляется поле `escalated: { from: "local", to: "participate", reason: "local_embedder_unavailable" }` — агент **видит** escalation в самом response, не только в stderr.
 
 ## Зачем
 
 **Сегодня протокол установлен, но не используется.**
 
-Даже после успешной ручной настройки (отредактировал `~/.claude.json`, прошёл OAuth) агент **не дотягивается до инструментов в правильные моменты**: пять tool'ов отдаются с минимальными descriptions, никаких behavioural-инструкций. Агент не знает когда attest'ить (после каких решений, не каких нажатий клавиш), что **не** attest'ить (transient state, scratch work, PII), как собрать payload context из диалога, какие guardrails применять. В результате — протокол установлен, но не работает по cadence'у, который превращает его в habit. Без habit'а memory-provenance standard не распространяется, потому что spread зависит от того, что **агенты аттестуют рефлекторно**, а не от того, что пользователь даёт явные команды.
+Даже после успешной ручной настройки (отредактировал `~/.claude.json`, прошёл OAuth) агент не дотягивается до инструментов в правильные моменты: пять tool'ов отдаются с минимальными descriptions, никаких behavioural-инструкций. Агент не знает когда attest'ить (после каких решений, не каких нажатий клавиш), что не attest'ить (transient state, scratch work, PII), как собрать payload context из диалога, какие guardrails применять. В результате — протокол установлен, но не работает по cadence'у, который превращает его в habit.
 
 **Сегодня даже установка непропорционально болезненна.**
 
-Чтобы попробовать Mnemonic нужно: найти docs, вручную добавить config-entry в свой агент, перезапустить агента, пройти OAuth-флоу, **и только потом** агент видит инструменты — без behavioural-инструкций. Каждый из шагов — точка отвала. Пользователь, который сегодня хочет local-mode attestations (не платный, не публичный), всё равно обязан пройти полный OAuth-цикл для **любого** sign'а.
+Чтобы попробовать Mnemonic нужно: найти docs, вручную добавить config-entry в свой агент, перезапустить агента, пройти OAuth-флоу, **и только потом** агент видит инструменты — без behavioural-инструкций. Пользователь, который сегодня хочет local-mode attestations (не платный, не публичный), всё равно обязан пройти полный OAuth-цикл для **любого** sign'а.
 
 **Цель этой фичи:**
 
-- **Установка в две команды**: `npm install -g @mnemonik-xyz/cli && mnemonic install`. После рестарта (или первого старта) агент видит mnemonik. Никаких ручных правок конфигов.
-- **Local-mode usage без OAuth и без сети**: подписать память локально, никаких prompts, никаких сетевых хапов.
-- **Anonymous discovery до OAuth**: подключённый агент видит skills + recall публичной части пула без идентичности вообще. Это превращает MCP-endpoint в inbound distribution channel: спред идёт через сеть MCP-подключений сама по себе, не через docs-link.
+- **Установка в две команды**: `npm install -g @mnemonik-xyz/mcp && mnemonik-mcp install`. После рестарта (или первого старта) агент видит mnemonik. Никаких ручных правок конфигов.
+- **Local-mode usage без OAuth и без сети**: подписать память локально, никаких prompts, никаких сетевых хапов. Никакого WASM-cold-start: используется тот же compiled Rust core, что и hosted server, через нативный binary.
+- **Anonymous discovery до OAuth**: подключённый агент видит skills + recall публичной части пула без идентичности вообще. Это превращает MCP-endpoint в inbound distribution channel.
 - **OAuth срабатывает только когда явно нужен** — на первый participate-mode write.
 
 ## Целевая аудитория
@@ -72,7 +74,7 @@ source_of_patterns: github.com/aitankfish/pnl (@pnlmarket/mcp-server v0.5.1, MIT
 Любой MCP-capable агент или его оператор. Две когорты:
 
 1. **Anonymous / curious**: подключается к `mcp.mnemonik.xyz` без auth, изучает что протокол даёт через prompts и resources, может попробовать anonymous recall публичной части пула. Решает OAuth-init для записи или просто узнаёт.
-2. **Authenticated operator**: установил CLI через `mnemonic install`, ожидает что local-mode писалки работают без вопросов, participate-mode требует OAuth и платёж.
+2. **Authenticated operator**: установил CLI через `mnemonik-mcp install`, ожидает что local-mode писалки работают без вопросов, participate-mode требует OAuth и платёж.
 
 Поддерживаемые хосты в v1: **Claude Code, Claude Desktop (macOS), Cursor**. Linux / Windows пути, Cline / Codex / Windsurf — v1.1+.
 
@@ -80,26 +82,26 @@ source_of_patterns: github.com/aitankfish/pnl (@pnlmarket/mcp-server v0.5.1, MIT
 
 **Поток 1 — Newcomer install.**
 
-1. Пользователь делает `npm install -g @mnemonik-xyz/cli`.
-2. Пользователь делает `mnemonic install`. CLI находит существующие хост-конфиги, пишет в каждый ровно одну `mcpServers.mnemonik` запись, не трогает другие ключи, не создаёт конфиги для незаустановленных хостов. Output: «Mnemonik wired into Claude Code, Cursor. If any of them is already running, please restart it.»
-3. Пользователь открывает Claude Code. Хост спавнит `npx -y @mnemonik-xyz/cli mcp-stdio` как subprocess. Subprocess подключается к `mcp.mnemonik.xyz` для discovery, advertise'ит 5 tools + 7 prompts + 7 resources хосту.
+1. Пользователь делает `npm install -g @mnemonik-xyz/mcp` (или `npx -y @mnemonik-xyz/mcp install`). npm shim определяет платформу, качает prebuilt `mnemonic-mcp` Rust binary из GitHub Releases, верифицирует hash, кеширует.
+2. Пользователь делает `mnemonik-mcp install`. CLI находит существующие хост-конфиги, пишет в каждый одну `mcpServers.mnemonik` запись с **прямым путём к binary** (не `npx`), не трогает другие ключи, не создаёт конфиги для незаустановленных хостов. Output: «Mnemonik wired into Claude Code, Cursor. If any of them is already running, please restart it.»
+3. Пользователь открывает Claude Code. Хост спавнит `/path/to/mnemonic-mcp mcp-stdio` как subprocess. Subprocess подключается к `mcp.mnemonik.xyz` для discovery (proxy), advertise'ит 5 tools + 7 prompts + 7 resources хосту.
 4. Хост exposуит `/mnemonik-*` slash-commands и инструменты агенту с полными descriptions.
 5. Агент видит инструменты + skill-manifests и реагирует ими в правильные моменты — никаких дополнительных действий от пользователя.
 
-**Поток 2 — First local-mode write.**
+**Поток 2 — First local-mode write (offline-capable).**
 
 1. Агент решает аттестовать (скажем, после committed code change — что описано в `mnemonik-attest` манифесте).
-2. Агент вызывает `sign_memory { mode: "local", visibility: "private", content: ... }` через mcp-stdio.
-3. mcp-stdio: invisibly обеспечивает identity (через invisible-bootstrap из PR #154/#157, no-op если уже есть), embed через transformers.js (первый вызов качает ~30MB MiniLM model в фоне), TurboQuant compress, canonical CBOR, COSE_Sign1 sign, INSERT в `~/.mnemonic/attestations.db`. Никаких сетевых вызовов.
-4. Агент получает подтверждение `{attestation_id, content_hash, write_mode: "local", visibility: "private"}`.
-5. Пользователь не видит ничего — silent. Никаких browser popup'ов, никаких prompts.
+2. Агент вызывает `sign_memory { mode: "local", content: ... }` через mcp-stdio. (visibility не указывается — local подразумевает private.)
+3. mcp-stdio (= Rust binary с `mcp-stdio` subcommand): invisibly обеспечивает identity (через invisible-bootstrap из PR #154/#157, no-op если уже есть). Дальше тот же исполнительный path, что и hosted server в local mode: embed через fastembed, TurboQuant compress, canonical CBOR, COSE_Sign1 sign, INSERT в `~/.mnemonic/attestations.db`. **Никаких сетевых вызовов.**
+4. Агент получает подтверждение `{attestation_id, content_hash, write_mode: "local"}`.
+5. Пользователь не видит ничего — silent.
 
 **Поток 3 — First participate-mode write (public chain-anchored).**
 
-1. Агент решает зааттестовать что-то значимое и предлагает пользователю опубликовать (manifest `mnemonik-attest` требует confirmation от пользователя для public).
-2. Пользователь подтверждает. Агент вызывает `sign_memory { mode: "participate", visibility: "public", confirmed: true, content: ... }`.
-3. mcp-stdio проксирует на `mcp.mnemonik.xyz`. Сервер видит no Bearer → запускает OAuth-loopback: возвращает sign_url, mcp-stdio открывает браузер, пользователь логинится через webapp.
-4. Token cached в OS keychain (`xyz.mnemonik.token`). Запись anchor'ится на Solana + Arweave. Stderr line: `[mnemonik] participate-mode write: <pubkey> <content_hash>`.
+1. Агент решает зааттестовать что-то значимое и предлагает пользователю опубликовать. Skill manifest `mnemonik-attest` требует confirmation от пользователя для `visibility: "public"`.
+2. Пользователь подтверждает. Агент вызывает `sign_memory { mode: "participate", visibility: "public", content: ... }`.
+3. mcp-stdio проксирует на `mcp.mnemonik.xyz`. Сервер видит no Bearer → возвращает auth challenge. mcp-stdio запускает OAuth-loopback: открывает браузер, пользователь логинится через webapp.
+4. Token cached в OS keychain (`xyz.mnemonik.token`). Запись anchor'ится на Solana + Arweave. Stderr line: `[mnemonik] participate-mode write: <pubkey> <content_hash> visibility=public`.
 5. На follow-up participate-mode write'ы token уже в keychain → OAuth не запускается, до 1h TTL.
 
 **Поток 4 — Anonymous discovery (без CLI).**
@@ -107,32 +109,32 @@ source_of_patterns: github.com/aitankfish/pnl (@pnlmarket/mcp-server v0.5.1, MIT
 1. Разработчик добавляет `https://mcp.mnemonik.xyz/mcp` напрямую в `~/.cursor/mcp.json` (без установки CLI).
 2. Cursor подключается без Bearer. Сервер пропускает discovery surface; `prompts/list`, `resources/list`, `tools/list` все возвращаются.
 3. Разработчик или его агент пробуют `recall` запрос — сервер фильтрует по `visibility='public'` и возвращает публичную часть пула.
-4. Если решает participate, следует skill-manifest `mnemonik-init`, который проводит через `npm install -g @mnemonik-xyz/cli && mnemonic install`.
+4. Если решает participate, следует skill-manifest `mnemonik-init`, который проводит через `npm install -g @mnemonik-xyz/mcp && mnemonik-mcp install`.
 
 ## Критерии приёмки
 
 **Release gate (должно держаться для shippa — protocol-level, без host-specific behavioural verification):**
 
 - [ ] **AC1 — Anonymous discovery.** Ванильный MCP-клиент (`@modelcontextprotocol/inspector`) подключается к `mcp.mnemonik.xyz` без Bearer-токена и получает: ≥7 entries в `prompts/list` с непустыми descriptions, ≥7 entries в `resources/list` с читаемыми bodies, и `tools/list` где каждый из 5 tool'ов несёт enriched description, ссылающуюся на соответствующий skill manifest.
-- [ ] **AC2 — Manifest integrity.** Каждый prompt/resource происходит из одного markdown-файла. CI валит build если manifest упоминается без существующего исходного файла.
-- [ ] **AC3 — Local sign offline.** С установленным CLI и bootstrapped identity, `sign_memory { mode: "local", visibility: "private", content: ... }` через mcp-stdio даёт валидный COSE_Sign1, INSERT в `~/.mnemonic/attestations.db` с `write_mode=local, visibility=private`, и **ноль сетевых вызовов** во время операции (netns assertion). Завершается < 5s при уже-загруженной модели.
+- [ ] **AC2 — Manifest integrity.** Каждый prompt/resource происходит из одного markdown-файла. CI валит build если manifest упоминается без существующего исходного файла. `Purpose` + `Trigger` секции автоматически инжектируются в `tools/list` descriptions на build-time, drift между поверхностями физически невозможен.
+- [ ] **AC3 — Local sign offline.** С распакованным binary и bootstrapped identity, `sign_memory { mode: "local", content: ... }` через mcp-stdio даёт валидный COSE_Sign1, INSERT в `~/.mnemonic/attestations.db` с `write_mode=local`, и **ноль outbound сетевых вызовов** во время операции. Тестируется в network-namespace без какой-либо internet connectivity (как airplane mode). Завершается < 1s на нормальной машине.
 - [ ] **AC4 — Local recall finds local-written.** Cosine search в local SQLite возвращает только что записанный attestation как top-1.
-- [ ] **AC5 — Soft-fall semantics (public).** С `mode=local + visibility=public` и недоступным локальным embedder'ом + network available: транспарентно роутится на participate, OAuth-loopback если нужно, stderr-warning о public chain anchor'е, sign успешен с `write_mode=participate`.
-- [ ] **AC6 — Privacy preservation.** С `mode=local + visibility=private` и недоступным embedder'ом: fail loud (`-32098 EmbedderInvalid`). Никаких publishments. Privacy contract не negotiable.
+- [ ] **AC5 — Default behaviour: no silent escalation.** С `mode=local` + недоступным local embedder'ом + **БЕЗ** `allow_fallback_to_participate: true` arg: возвращается JSON-RPC `-32098 EmbedderInvalid` независимо от состояния сети. Никаких publishments, никакого OAuth popup'а, никаких сетевых вызовов. Privacy contract non-negotiable.
+- [ ] **AC6 — Explicit opt-in fallback semantics.** С `mode=local` + `allow_fallback_to_participate: true` + недоступным local embedder + network available: транспарентно роутится на participate, OAuth-loopback если нужен, **в JSON-RPC response** содержится `escalated: { from: "local", to: "participate", reason: ... }`. Stderr line warns о chain anchor'е. С `allow_fallback_to_participate: true` + no network: возвращается `-32097 HostedUnavailable` (escalation провалилась), а не `-32098`.
 - [ ] **AC7 — Install idempotent.** Re-run производит byte-identical configs.
 - [ ] **AC8 — Install non-destructive.** На машине с 3 хостами + pre-populated unrelated MCP entries: install добавляет `mnemonik` entry в каждый, оставляет все остальные entries byte-identical (diff-verification).
 - [ ] **AC9 — Install resilient.** На машине с 1 из 3 хостов: только этот хост модифицируется, отсутствующие пропускаются silently. Exit 0 даже если ни один не найден.
-- [ ] **AC10 — OAuth-loopback flow.** Первый participate-mode write триггерит browser popup; token cached в OS keychain; subsequent writes до 1h TTL не запускают browser.
-- [ ] **AC11 — Token in keychain.** К концу v1 работы `~/.mnemonic/token.json` удалён; token живёт в OS keychain (`xyz.mnemonik.token/default` на macOS, etc.). `mnemonic logout` удаляет keychain entry.
-- [ ] **AC12 — Visibility-respecting anonymous recall.** Unauthenticated recall возвращает **только** `visibility="public"` строки. CI test seed'ит DB с private + public matching query, asserts что anonymous response содержит public и исключает private.
-- [ ] **AC13 — Embedder parity (cross-language golden).** Для канонической fixture-строки CLI's transformers.js и server's fastembed производят byte-identical 384-dim vectors. CI golden test, mismatch валит release.
-- [ ] **AC14 — Embedder version surface.** Сервер возвращает `embedder.model_id` + `embedder.model_version` в `initialize` response; CLI логирует warning при mismatch.
-- [ ] **AC15 — Tool descriptions inline manifests.** `tools/list` descriptions содержат `Purpose` + `Trigger` sections манифеста, вшитые на build-time. Drift между tools/list description и prompt/resource body **физически невозможен** (один markdown-источник).
-- [ ] **AC16 — Error catalogue.** Все определённые ошибки (`-32095..-32099`) пропагируются через mcp-stdio как JSON-RPC error objects с documented data fields. Skills документируют их так, чтобы агент закладывал retry/surface logic на generation time, не на runtime surprise.
+- [ ] **AC10 — Install --check (dry-run).** `mnemonik-mcp install --check` печатает план (какие хост-конфиги обнаружены, какие будут модифицированы, какие уже содержат mnemonik-entry как replacement target). Exit 0. На диск ничего не пишется (verified via mtime comparison before/after).
+- [ ] **AC11 — OAuth-loopback flow.** Первый participate-mode write триггерит browser popup; token cached в OS keychain (entry `xyz.mnemonik.token/default`); subsequent writes до 1h TTL не запускают browser.
+- [ ] **AC12 — Token in keychain.** К концу v1 работы `~/.mnemonic/token.json` удалён; token живёт **только** в OS keychain (`keyring` crate). `mnemonik-mcp logout` удаляет keychain entry. Тест: после login, файл `~/.mnemonic/token.json` не существует, но `mnemonic whoami` возвращает валидный pubkey.
+- [ ] **AC13 — Visibility-respecting anonymous recall.** Unauthenticated recall возвращает **только** `visibility="public"` строки. CI test seed'ит DB одной private + одной public записью matching query string, asserts что anonymous response содержит public и исключает private.
+- [ ] **AC14 — Visibility only on participate writes.** `sign_memory { mode: "local", visibility: "public" }` отвергается с JSON-RPC `-32602 InvalidParams { reason: "visibility is only valid with mode=participate" }`. Local writes неявно приватны (нет колонки на disk, нет concept'а sharing).
+- [ ] **AC15 — Embedder configuration surface.** Сервер возвращает `embedder.model_id` + `embedder.model_version` в `initialize` response. Local binary использует ту же модель в той же версии — версия pinned compile-time в binary, документировано что cross-mode recall semantics undefined при mismatch.
+- [ ] **AC16 — Error catalogue propagation.** Все определённые ошибки (`-32095..-32099`) пропагируются через mcp-stdio как JSON-RPC error objects с documented data fields. Конкретно testable: для каждого error code есть integration test, который триггерит условие и asserts что возвращён код + data shape соответствуют спеке.
 
 **Post-launch metrics (не gates):**
 
-- В течение 14 дней после релиза ≥N уникальных pubkey'ев исполняют `mnemonic install` и ≥M из них делают как минимум один local-mode write. Anonymous discovery hits на hosted сервере трекаются отдельно. N/M фиксируются после первой недели данных.
+- В течение 14 дней после релиза ≥N уникальных pubkey'ев исполняют `mnemonik-mcp install` и ≥M из них делают как минимум один local-mode write. Anonymous discovery hits на hosted сервере трекаются отдельно. N/M фиксируются после первой недели данных.
 
 ## Ограничения
 
@@ -140,67 +142,70 @@ source_of_patterns: github.com/aitankfish/pnl (@pnlmarket/mcp-server v0.5.1, MIT
 
 **Архитектурный контракт (locked-in):**
 
-- Local-mode операции полностью локальны. Никаких сетевых вызовов. Памяти не покидают машину пользователя в local mode. (Путь B выбран над Путём A "hosted accepts anonymous COSE" — privacy + чтобы не нагружать shared сервер.)
-- Embedder model parity: CLI использует `Xenova/all-MiniLM-L6-v2` через transformers.js, версия pinned. **Должно** совпадать с moделью server'а (fastembed MiniLM-L6, 384-dim) — иначе cross-mode recall не consistent. Проверяется CI golden test'ом.
+- Local-mode операции полностью локальны. Никаких сетевых вызовов. Памяти не покидают машину пользователя в local mode. (Путь B "переписать в Node" отвергнут — Path C "ship existing Rust binary через npm shim" выбран. Преимущество: переиспользуем уже-протестированный Rust core, тот же fastembed embedder, тот же canonical-CBOR/COSE, тот же SQLite schema. Нет cross-runtime parity вопросов. Нет WASM cold-start. Нет реимплементации.)
 - Identity для local-mode signing — переиспользуем invisible-bootstrap Ed25519 keypair (`~/.mnemonic/identity.json` + OS keychain, шипнуто сегодня в PR #154/#157).
 - Discovery methods (`prompts/*`, `resources/*`, `tools/list`) **обязаны** succeed без Bearer'а. Write-tier tool calls сохраняют OAuth **только** в participate mode; local mode не требует OAuth вообще.
-- Anonymous recall фильтруется `visibility='public'` — writer **явно** соглашается на публикацию через флаг. Это сильнее, чем "writer responsibility" из ранних версий идеи.
+- Soft-fall = explicit opt-in. По умолчанию `mode=local` отказывается с loud error при сбое. `allow_fallback_to_participate: true` — единственный путь к escalation, и agent видит escalation в response.
+- Visibility flag применим **только** к participate-mode writes. Local writes неявно приватны. Anonymous recall фильтруется `visibility='public'`. Default `visibility='private'` даже для participate — privacy-by-default.
 - **NO admin override / god-key anywhere.** Отличительная фича vs PNL — **отсутствие** `emergency_drain_vault`-эквивалента для attestation state. Hard rule.
 
 **Scope OUT для v1 (явные non-goals):**
 
 - NO autosign / encrypted-wallet / bound-challenge (T3 Part B из source brief). Write tools сохраняют OAuth + browser-mediated signing в participate mode.
-- NO Cline, Codex, Windsurf поддержка в `install` (PNL's installer handle'ит только 3 хоста несмотря на overstatement в README; мы не повторяем).
+- NO Cline, Codex, Windsurf поддержка в `install` (PNL's installer handle'ит только 3 хоста, despite README overstatement; мы не повторяем).
 - NO Linux/Windows host-config paths в install candidates() — macOS-only для v1.
 - NO host-specific behavioural verification в release gate. Тест "agent attests by reflex" — post-launch.
 - NO cross-mode recall в v1 — local recall и participate recall изолированы. Документируется в манифестах.
+- NO Node-side реимплементация core логики. Используем существующий Rust binary через npm shim.
 
 **Совместимость:**
 
-- `mcp.mnemonik.xyz` сохраняет OAuth 2.1 + PKCE, modes-user-choice (#156, шипнут сегодня), browser-mediated signing, DoS guard, delivery confirmation. **Добавляем** prompts/resources handlers + middleware adjustment для anonymous discovery.
-- CLI расширяется; существующие 0.2.2 subcommand'ы (init, login, sign, recall, verify, whoami, prove, identity push-to-webapp) остаются backwards-compatible.
+- `mcp.mnemonik.xyz` сохраняет OAuth 2.1 + PKCE, modes-user-choice (#156, шипнут сегодня), browser-mediated signing, DoS guard, delivery confirmation. **Добавляем** prompts/resources handlers + middleware adjustment для anonymous discovery + visibility column.
+- CLI (Node `@mnemonik-xyz/cli`) остаётся как есть для interactive use. Новый npm shim `@mnemonik-xyz/mcp` отдельный package, на нём держится install/mcp-stdio механизм.
 
 ## Риски
 
-- **R1 — Privacy regression через mode-mistake (severe).** Агент ставит `visibility=public` на приватный контент. **Митигация:** default `visibility=private`; server-side `-32095 PublicWriteRequiresConfirmation` gate; skill manifest требует user-confirmation для public; stderr-audit line на каждом participate-mode write.
-- **R2 — Local identity / token compromise (medium).** **Митигация:** identity в OS keychain (через invisible-bootstrap); token теперь тоже в keychain (AC11); 1h token TTL; `mnemonic logout` для explicit cleanup. OS-level security contract документирован; physical-access compromise **не** защищаем.
-- **R3 — Embedder model parity drift (medium).** **Митигация:** CI golden test (AC13); версия embedder'а сурфейсится в `initialize` (AC14); та же модель pinned через CLI + server для всех v1.x; документировано что cross-mode recall не consistent.
-- **R4 — CLI install size (low).** transformers.js + ONNX runtime + model добавляет ~50-100MB total (модель качается on-demand). Acceptable для developer CLI; аналог `pip install` сопоставимого размера.
-- **R5 — Native dependency install fail (low-medium).** better-sqlite3 нужна native compilation на первой установке. **Митигация:** ship platform-specific prebuilt binaries через npm optionalDependencies; документировать fallback на pure-JS sqlite если нужно.
-- **R6 — Host config drift (medium, future).** Хосты могут поменять config paths или схему. **Митигация:** хардкодный candidates() с file-existence guard'ом; install idempotent чтобы re-run ловил изменения; новые пути добавляются в CLI patch releases.
-- **R7 — npm CLI version mismatch с hosted server (low-medium).** Старый CLI может не понять новых server responses. **Митигация:** server-side embedder version surface (AC14); CLI announce'ит свою версию в `initialize`; backwards-compat от server для одного minor cycle.
-- **R8 — Skill manifest content quality drives adoption (high).** Плохо написанные манифесты вызывают over-attest или under-attest. **Митигация:** trigger boundary явные в `mnemonik-attest`; positive AND negative examples; dogfooding с internal review перед release.
+- **R1 — Privacy regression через mode-mistake (severe).** Агент ставит `visibility=public` на приватный контент. **Митигация:** default `visibility=private` даже в participate; visibility отсутствует в local mode полностью (AC14); server-side `-32095 PublicWriteRequiresConfirmation` gate; skill manifest требует user-confirmation для public writes; stderr-audit line на каждом participate-mode write.
+- **R2 — Soft-fall escalation surprise (medium).** Agent или operator думает что local-mode не делает чего-то — но `allow_fallback_to_participate: true` всё равно эскалирует. **Митигация:** opt-in default `false`; escalation возвращается в JSON-RPC response (не только stderr) — agent видит изменение и может решить как surface'ить юзеру.
+- **R3 — Local identity / token compromise (medium).** **Митигация:** identity в OS keychain (через invisible-bootstrap); token теперь тоже в keychain (AC12); 1h token TTL; `mnemonik-mcp logout` для explicit cleanup. OS-level security contract документирован; physical-access compromise **не** защищаем.
+- **R4 — Binary distribution complexity (low-medium).** Прибавляется новый npm package `@mnemonik-xyz/mcp` который скачивает Rust binary на install. release.yml сейчас имеет проблемы с Linux builds (libdbus) — необходимо чтобы macOS builds работали стабильно для v1 (already в порядке). Linux/Windows v1.1. **Митигация:** install проверяет hash скачанного binary; на failure — clear error message; fallback не предусматриваем (no Rust binary = no install).
+- **R5 — Host config drift (medium, future).** Хосты могут поменять config paths или схему. **Митигация:** хардкодный candidates() с file-existence guard'ом; install idempotent чтобы re-run ловил изменения; новые пути добавляются в patch releases.
+- **R6 — npm shim version mismatch с binary в кэше (low).** Пользователь обновляет `@mnemonik-xyz/mcp` package, но в кэше старый binary. **Митигация:** на каждый запуск shim проверяет binary version против expected (стейтлесс check). Mismatch → re-download.
+- **R7 — Skill manifest content quality drives adoption (high).** Плохо написанные манифесты вызывают over-attest или under-attest. **Митигация:** trigger boundary явные в `mnemonik-attest`; positive AND negative examples; dogfooding с internal review перед release. Error-handling guidance (что делать при `-32098`, `-32099` и т.д.) встроена в `mnemonik-attest` manifest, чтобы агент знал retry/surface patterns на generation time.
 
 ## Технические решения
 
-- **Решили: единый markdown — три MCP-проекции.** Manifests живут как `assets/skills/*.md` (или эквивалент). На build-time секции `Purpose` + `Trigger` extract'ятся в Rust string constants для `tools/list` descriptions. `prompts/list` отдаёт первый абзац как description, full body в `messages[0].content`. `resources/list` отдаёт entire markdown as `text/markdown`. Drift между поверхностями физически невозможен.
-- **Решили: local-mode = local-everything.** Никаких сетевых вызовов в local mode. WASM core + transformers.js embedder + better-sqlite3. Памяти не покидают машину. (Отвергли альтернативу "hosted accepts anonymous COSE" — privacy + не нагружаем shared сервер.)
-- **Решили: visibility flag separate от write_mode.** `write_mode` (local/participate) — куда писать. `visibility` (private/public) — можно ли публиковать. Soft-fall разрешён только когда `visibility=public`. Default `visibility=private` — privacy-by-default.
-- **Решили: на model download fail с `visibility=private` — fail loud, без soft-fall.** Privacy contract не negotiable. С `visibility=public` — soft-fall разрешён.
-- **Решили: token storage в OS keychain.** Сегодня `~/.mnemonic/token.json` — plaintext, тогда как identity уже в keychain. Закрываем аномалию. macOS Keychain / Linux Secret Service / Windows DPAPI через `keyring` crate (Rust) / `@napi-rs/keyring` (Node).
-- **Решили: 3 хоста macOS-only для v1.** Повторяем реальное покрытие PNL, не overstatement из их README. Linux/Windows + Cline/Codex/Windsurf — v1.1+.
-- **Решили: host restart accepted, не делаем hot-reload.** macOS notifications / SIGUSR1 / AppleScript — brittle, требуют permissions, цена > выгода. Install output говорит "please restart your agent if it's running."
-- **Не делаем: pre-download embedder при install.** Пользователь может использовать только локально или только participate. Не тратим bandwidth до первой нужды. Opt-in `mnemonic install --eager-embedder` — потенциальный v1.1 follow-up.
+- **Решили: единый markdown — три MCP-проекции.** Manifests = единый источник правды per skill. На build-time секции `Purpose` + `Trigger` extract'ятся в string constants для `tools/list` descriptions. Prompts и resources surfaces отдают весь markdown без сокращений. Drift физически невозможен.
+- **Решили: Path C — ship existing Rust binary через npm shim.** Не переписываем local-mode pipeline в Node. Используем тот же compiled Rust core, что и hosted server. Pattern as esbuild/prisma/swc. Преимущество vs Path B (Node реимплементация): нет cross-runtime embedder parity вопросов; нет WASM cold-start; нет реимплементации canonical-CBOR/COSE/TurboQuant; меньше maintenance surface.
+- **Решили: visibility flag только в participate mode.** Local writes неявно приватны (никогда не покидают машину). Visibility имеет смысл только для writes которые видны кому-либо кроме owner'а. Default `private` даже для participate.
+- **Решили: soft-fall = explicit opt-in.** Local mode не эскалирует molча. `allow_fallback_to_participate: true` явный opt-in, escalation видна в JSON-RPC response. Без opt-in — loud error.
+- **Решили: token storage в OS keychain.** Сегодня `~/.mnemonic/token.json` — plaintext, тогда как identity уже в keychain. Закрываем аномалию. Один и тот же `keyring` crate.
+- **Решили: 3 хоста macOS-only для v1.** Повторяем реальное покрытие PNL. Linux/Windows + Cline/Codex/Windsurf — v1.1+.
+- **Решили: host restart accepted, не делаем hot-reload.** Цена > выгода. Install output говорит "please restart your agent if it's running."
+- **Решили: install пишет прямой путь к binary, не `npx -y`.** PNL использует `npx -y` потому что у них нет prebuilt binary. У нас есть. `npx -y` пингует registry на каждом старте хоста — нарушает offline contract (AC3).
+- **Не делаем: pre-download embedder при install.** Эта проблема не существует с Path C — embedder уже встроен в binary (fastembed). Bandwidth на install = только sam binary.
 
 ## Тестирование
 
 **Unit-тесты:** делаются всегда, не обсуждаются. В частности:
 
-- Manifest files валидно парсятся через include_dir!/rust-embed
+- Manifest files валидно парсятся через `include_dir!`/`rust-embed`
 - prompts/list и resources/list handlers возвращают MCP-spec-conformant JSON
 - Install JSON read/merge/write preserves unrelated keys (table-driven с synthetic configs)
-- Install idempotent (re-run produces byte-identical output)
-- mcp-stdio router: local mode dispatches local sign/recall, participate mode dispatches hosted proxy
-- Embedder parity: canonical fixture string → byte-identical embeddings в CLI и server (cross-language golden)
+- Install идемпотентен (re-run produces byte-identical output)
+- mcp-stdio router: local mode dispatches local execution через core, participate mode dispatches hosted proxy, discovery всегда proxy
+- Soft-fall semantics: `allow_fallback_to_participate=false` → loud error; `true` + network available → escalation + response field; `true` + no network → -32097
+- Visibility validation: `mode=local + visibility set` → -32602
 
-**Интеграционные тесты:** делаем — критичные для release gate (AC1, AC3, AC10, AC12, AC15).
+**Интеграционные тесты:** делаем — критичные для release gate (AC1, AC3, AC11, AC13).
 
 - Spin up mcp-server локально, hit от reqwest клиента без Bearer'а, verify discovery surface (AC1)
 - Mode-routing: local sign_memory не делает сетевых вызовов вне proxy boundary (netns assertion — AC3)
-- OAuth-loopback фирится только когда participate mode + no cached token (AC10)
-- Anonymous recall filter (AC12)
+- OAuth-loopback фирится только когда participate mode + no cached token (AC11)
+- Anonymous recall filter (AC13)
+- Install идемпотентность + non-destructive merge (AC7, AC8)
 
-**E2E тесты:** **не делаем** для release gate — host-specific behavioural verification (Claude Code / Cursor / Claude Desktop scripted sessions) отложено на post-launch. Causa: дорого по hardware + brittle к host updates. Smoke test (manual MCP Inspector smoke + fresh-machine install + airplane-mode local write) выполняется перед release вручную.
+**E2E тесты:** **не делаем** для release gate — host-specific behavioural verification (Claude Code / Cursor / Claude Desktop scripted sessions) отложено на post-launch. Smoke test (manual MCP Inspector + fresh-machine install + airplane-mode local write) выполняется перед release вручную.
 
 ## Как проверить
 
@@ -211,23 +216,25 @@ source_of_patterns: github.com/aitankfish/pnl (@pnlmarket/mcp-server v0.5.1, MIT
 | 1. Anonymous discovery возвращает 7 prompts | `curl https://mcp.mnemonik.xyz/mcp` с JSON-RPC `prompts/list` без Authorization | HTTP 200; JSON-RPC result содержит ≥7 prompts с непустыми descriptions |
 | 2. Anonymous discovery возвращает 7 resources | то же с `resources/list` | ≥7 resources, каждый имеет валидный URI и readable body |
 | 3. tools/list содержит enriched descriptions | то же с `tools/list` | Каждый из 5 tool'ов имеет description ≥500 байт включая `Purpose:` и `Trigger:` секции |
-| 4. Anonymous recall returns only public | seed DB с private + public matching test query, query через mcp.mnemonik.xyz `tools/call recall` без Bearer | Только public row в response |
-| 5. Install idempotent | bash: pre-populate ~/.claude.json с unrelated entry, run `mnemonic install`, dump file, run снова, diff | Byte-identical между двумя dumps; unrelated entry неизменён |
-| 6. Local sign offline | bash в netns без интернета: `mnemonic sign --local --visibility private "test content"` | Exit 0; row в ~/.mnemonic/attestations.db с write_mode=local, visibility=private; никаких outbound TCP |
-| 7. Local recall finds local-written | bash: запись через шаг 6, потом `mnemonic recall --local "test content"` | Returns top-1 = только что записанный attestation |
-| 8. Privacy-private fails loud on model fail | bash: rm -rf ~/.mnemonic/models/; `mnemonic sign --local --visibility private "x"` | Exit 1 (или другой error); error -32098 EmbedderInvalid; никаких outbound calls |
-| 9. Embedder parity golden | CI: run server fastembed + CLI transformers.js на канонической fixture-строке, compare bytes | Match exact |
-| 10. Token в keychain после login | bash: `mnemonic login`, then `security find-generic-password -s xyz.mnemonik.token -a default` (macOS) | Returns entry; `~/.mnemonic/token.json` не существует |
+| 4. Anonymous recall returns only public | seed DB private + public matching test query, query через mcp.mnemonik.xyz `tools/call recall` без Bearer | Только public row в response |
+| 5. Install idempotent | bash: pre-populate ~/.claude.json unrelated entry, run `mnemonik-mcp install --write`, dump file, run снова, diff | Byte-identical между dumps; unrelated entry неизменён |
+| 6. Install --check is dry-run | bash: записать mtime до и после `mnemonik-mcp install --check` на каждый хост-конфиг | mtimes неизменны; stdout содержит план; exit 0 |
+| 7. Local sign offline | bash в netns без интернета: `mnemonic-mcp mcp-stdio` спавнится, послать JSON-RPC `tools/call sign_memory { mode: "local", content: "test" }` | Result: успех; row в ~/.mnemonic/attestations.db с write_mode=local; никаких outbound TCP |
+| 8. Default behaviour: no silent escalation | bash: rm -rf ~/.mnemonic/cache/embedder/; послать sign_memory без `allow_fallback_to_participate` | JSON-RPC error -32098 EmbedderInvalid; никаких outbound calls; никакого browser popup |
+| 9. Explicit opt-in fallback works | то же что #8, но с `allow_fallback_to_participate: true` и интернетом | Success; response содержит `escalated: { from: "local", to: "participate" }`; stderr содержит warning line |
+| 10. Visibility rejected on local | послать `sign_memory { mode: "local", visibility: "public" }` | JSON-RPC error -32602 InvalidParams |
+| 11. Token в keychain после login | bash: `mnemonic login` через mcp-stdio (participate write), потом проверить `security find-generic-password -s xyz.mnemonik.token -a default` (macOS) | Returns entry; `~/.mnemonic/token.json` не существует |
+| 12. AC15: embedder config surface | JSON-RPC `initialize` request к mcp.mnemonik.xyz без Bearer | Result содержит `embedder.model_id` и `embedder.model_version` non-empty |
 
 ### Пользователь проверяет
 
-- **Fresh-machine install smoke (manual, перед release):** На чистой macOS машине: `npm install -g @mnemonik-xyz/cli && mnemonic install`. Открыть Claude Code, проверить что mnemonik tools видны в `/mcp` menu, попробовать local-mode attestation, проверить что работает в airplane mode (после первого скачивания модели). Зачем руками: behavioral observation (agent sees tools, agent invokes correctly) не покрывается CI.
+- **Fresh-machine install smoke (manual, перед release):** На чистой macOS машине: `npm install -g @mnemonik-xyz/mcp && mnemonik-mcp install`. Открыть Claude Code, проверить что mnemonik tools видны в `/mcp` menu, попробовать local-mode attestation, проверить что работает в airplane mode (binary не требует internet, embedder встроен). Зачем руками: behavioral observation (agent видит tools, агент invok'ает корректно) не покрывается CI.
 - **MCP Inspector smoke (manual, перед release):** `npx @modelcontextprotocol/inspector https://mcp.mnemonik.xyz/mcp` без auth. Глазами проверить что 7 prompts / 7 resources visible. Screenshot в release-checklist. Зачем руками: визуальная проверка UX-полирования (descriptions не обрезаются, не выглядят странно).
 
 ## Follow-ups (v1.1+)
 
-- Linux + Windows host-config paths в install candidates().
+- Linux + Windows host-config paths в install candidates() (заблокировано release.yml libdbus fix).
 - Cline / Codex / Windsurf поддержка в install.
 - Behavioural smoke matrix через 3 хоста (scripted-session "agent attests by reflex" тесты).
-- Pre-download embedder опционально через `mnemonic install --eager-embedder` чтобы снизить first-write latency.
-- Multi-version embedder support на server'е (один из путей закрытия R3, если model upgrade станет нужен).
+- Pre-anchored "soft-publish": запись изначально в local, потом отдельной командой promote до participate (без re-signing).
+- Multi-version embedder support на server'е (если model upgrade станет нужен — закрывает R6 alt-path).
