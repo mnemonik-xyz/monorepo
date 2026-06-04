@@ -96,10 +96,18 @@ The Node CLI (`@mnemonik-xyz/cli` v0.2.x) gains a token-storage migration of its
 **Rationale:** Serves user-spec AC14. Eliminates the under-defined `{local, public}` matrix cell user flagged in interview. Local writes never leave the machine — sharing concept doesn't apply.
 **Alternatives considered:** Accept `visibility` on local writes as future-promote intent — rejected because there's no promote mechanism in v1, the flag would be dead metadata, and adequacy validator round 1 explicitly flagged the under-specification.
 
-### Decision 4: Soft-fall is explicit opt-in via `allow_fallback_to_participate: bool` (default `false`), escalation visible in response
+### Decision 4: Soft-fall is explicit opt-in via `allow_fallback_to_participate: bool` (default `false`), escalation visible in response, visibility re-resolves on escalation
 **Decision:** New typed `bool` arg on `sign_memory`. Default `false`. When `false` and local execution fails, `sign_memory` returns the underlying JSON-RPC typed error. When `true` and local fails, `sign_memory` re-dispatches the same arguments through the participate path (which auto-triggers OAuth-loopback if no cached token); response includes `escalated: { from: "local", to: "participate", reason: "<machine readable enum>" }`. Stderr line logged. If escalation itself fails (no network), the error returned is the *escalation* failure (`-32011` family for hosted unavailable), not the original local-failure code — agent sees the actual failure point.
-**Rationale:** Serves user-spec AC5 + AC6. Closes adequacy validator round 1 finding ("silent escalation surprises the caller"). Explicit opt-in + response-surfaced escalation gives the agent enough information to surface to the user without depending on stderr (which most MCP hosts don't expose).
-**Alternatives considered:** (a) Always silent soft-fall on `visibility=public` — rejected per validator. (b) Always loud fail — rejected because the user-spec explicitly carves out the opt-in for callers who'd rather get a working write than a clean error.
+
+**Critical**: visibility resolution runs AGAIN after escalation. The caller's original `mode=local` rejected `visibility=public` per Decision 3 (AC14). After escalation, `mode` is now effectively `participate` — `visibility=public` is now legal but Decision 5b's public-write confirmation gate still applies. So the path `mode=local + visibility=public + allow_fallback_to_participate=true` can only succeed if the call also carries `public_write_confirmation` matching the bound-challenge contract — otherwise post-escalation visibility resolution returns `-32095 PublicWriteRequiresConfirmation` and the escalation is undone (no chain write). This closes the security-audit finding "allow_fallback composes with visibility-rejection bypass."
+
+**Rationale:** Serves user-spec AC5 + AC6. Closes adequacy validator round 1 finding ("silent escalation surprises the caller") and security audit round 1 finding ("allow_fallback bypasses visibility rejection").
+**Alternatives considered:** (a) Always silent soft-fall — rejected. (b) Always loud fail — rejected because user-spec carves out the opt-in. (c) Disallow `visibility=public` with `allow_fallback=true` entirely — rejected because forcing the agent to know in advance that local will fail defeats the opt-in's purpose.
+
+### Decision 5b: Server-side public-write confirmation gate
+**Decision:** Any `sign_memory` with `mode=participate + visibility=public` requires an additional `public_write_confirmation` field whose value is a short-lived (5-minute TTL) HMAC-bound token issued by a paired call. Flow: agent first calls a new `request_public_write_confirmation { content_hash, owner_pubkey }` tool which returns `{confirmation_token, expires_at}` bound to that specific `content_hash`. The agent surfaces the content to the user; on user approval the agent supplies `confirmation_token` to `sign_memory`. Without it, server returns `-32095 PublicWriteRequiresConfirmation { content_hash, suggested_action: "call request_public_write_confirmation then surface to user" }`. The token is single-use, scoped to the bound `content_hash` — prompt-injected attestations cannot reuse a token issued for different content.
+**Rationale:** Serves user-spec R1 (which explicitly lists "server-side public-write confirmation gate (typed error)" as the mitigation). Without this, prompt injection in recalled content can coerce an agent into setting `visibility=public` on the user's next sensitive memory — the headline severe risk. The bound-token ceremony matches the existing browser-mediated signing pattern's capability-by-possession-of-UUID model (patterns.md), reusing established threat-model thinking.
+**Alternatives considered:** (a) Skill-manifest user-confirmation only — rejected per round-1 security audit; agents can be coerced by prompt injection regardless of manifest instructions. (b) Per-request confirmation through an additional OAuth ceremony — rejected as too heavy (would block local→participate escalation entirely). (c) `confirmed: true` boolean arg — rejected because identical-shape to non-bound confirmations elsewhere and provides zero replay protection.
 
 ### Decision 5: Anonymous recall filters `WHERE visibility = 'public'` via new `search` arg
 **Decision:** Extend `SqliteStore::search` (`sqlite.rs:596-653`) to accept an optional `visibility_filter: Option<Visibility>`. When `Some(Visibility::Public)`, the WHERE clause adds `AND a.visibility = 'public'`. `recall` tool handler passes `Some(Public)` iff the caller has no JWT (`Claims` from `bearer_auth_middleware` is `None`); otherwise `None` (authenticated callers see all their own rows).
@@ -112,19 +120,43 @@ The Node CLI (`@mnemonik-xyz/cli` v0.2.x) gains a token-storage migration of its
 **Alternatives considered:** Separate binary `mnemonic-mcp-stdio` — rejected because it doubles release surface and risks code drift; the existing dispatcher handles everything we need.
 
 ### Decision 7: Token storage moves to OS keychain via existing `keyring` crate (Rust) and `@napi-rs/keyring` (Node)
-**Decision:** New `core/src/identity/token_store.rs` exposes `read_token() -> Option<TokenJson>`, `save_token(&TokenJson)`, `delete_token()` against a fixed keychain coordinate `service = "xyz.mnemonik.token"`, `account = "default"` (mirrors the identity entry's `xyz.mnemonik.identity`/`default` convention). Token JSON shape is unchanged from today's `~/.mnemonic/token.json`. Both the Rust binary (when caching after OAuth-loopback) and Node CLI (when persisting after `login`) read/write the same coordinate. On Rust side, a one-shot migration helper detects the legacy file and adopts its content if the keychain entry is absent; legacy file deleted post-migration. On Node side, same migration in `packages/cli/src/identity/token-store.ts`.
-**Rationale:** Serves user-spec AC12 + AC12b. Closes adequacy validator round 1 finding ("two-store anomaly: identity in keychain, token in plaintext"). Reuses already-loaded `keyring` infrastructure on both runtimes — zero new deps.
-**Alternatives considered:** (a) Keep file but encrypt with a fresh OS-randomness key in keychain — rejected because adds a key-management layer for zero benefit over just storing the token directly in keychain. (b) Token-only file; coordinate Rust+CLI release simultaneously — rejected because user-spec AC12b explicitly requires migration-on-first-use without simultaneous release.
+**Decision:** New `core/src/identity/token_store.rs` exposes `read_token() -> Option<TokenJson>`, `save_token(&TokenJson)`, `delete_token()` against a fixed keychain coordinate `service = "xyz.mnemonik.token"`, `account = "default"` (mirrors the identity entry's `xyz.mnemonik.identity`/`default` convention). Token JSON shape is unchanged from today's `~/.mnemonic/token.json`. Both the Rust binary (when caching after OAuth-loopback) and Node CLI (when persisting after `login`) read/write the same coordinate.
 
-### Decision 8: npm shim downloads pinned-tag binary from GitHub Releases on install, verifies against pipeline-emitted SHA256SUMS
-**Decision:** `@mnemonik-xyz/mcp` package.json includes a `postinstall` script that runs `dist/scripts/install-binary.js`. The script consults `dist/binary-version.json` (committed alongside the shim release) for the target tag, computes the GitHub Releases asset URL pattern `https://github.com/mnemonik-xyz/monorepo/releases/download/${tag}/mnemonic-mcp-${tag}-${target}.tar.gz`, downloads, also downloads `SHA256SUMS` from the same release, picks the matching line, verifies the digest with Node's `crypto.createHash("sha256")`. On mismatch — refuses to install; on network failure — clear error message. release.yml gains a `release.checksums` step that emits `SHA256SUMS` from all collected artifacts before `softprops/action-gh-release@v2` runs.
-**Rationale:** Serves user-spec R4 + R6 + AC17 (doctor checks integrity). Closes adequacy validator round 2 finding ("'hash verified' has nothing trustworthy to verify against today"). SHA256SUMS is the minimum-overhead manifest format; future upgrade to sigstore is a v2 concern.
-**Alternatives considered:** (a) sigstore-signed manifest — rejected as scope creep; SHA256SUMS satisfies "verified against same tagged pipeline" requirement. (b) Bundle binary directly in npm package per-platform (esbuild pattern) — rejected because the binary is already published to GitHub Releases for `cargo install` parity; double-publishing would double download paths and split the verification surface.
+**Token TTL**: Cached tokens remain valid for `expires_at` from the JWT claim (1h post-issue). Pre-expiry calls reuse the cached token without re-OAuth (`-32099 TokenExpired` returned only when the token's `expires_at` precedes the current time; agent then re-initiates the participate flow which triggers OAuth-loopback).
 
-### Decision 9: Three host candidates hardcoded (macOS only); install written with full binary path (no `npx`)
-**Decision:** `install.ts` candidates list: `~/.claude.json`, `~/Library/Application Support/Claude/claude_desktop_config.json`, `~/.cursor/mcp.json`. Each entry written as `"command": "<resolved absolute path to cached mnemonik-mcp>", "args": ["mcp-stdio"]`. Only-if-file-exists guard; absent hosts skipped silently; output reports per-host status.
-**Rationale:** Serves user-spec "Что делаем" Кусок 2 items 6-8 and AC7-AC10. Direct binary path keeps the host's subprocess spawn offline (user-spec AC3 explicitly forbids `npx -y` since it pings registry). macOS-only matches PNL's actual coverage; Linux/Windows are v1.1 (user-spec scope).
-**Alternatives considered:** `npx -y @mnemonik-xyz/mcp mcp-stdio` — rejected per adequacy validator round 1.
+**Migration is atomic**: Helper opens the legacy file `O_RDONLY`, reads contents, writes to keychain, fsyncs the keychain entry (where supported), then `unlink()`s the legacy file. If any step fails before unlink, file is left in place (next-call retry). After successful unlink, the file is `shred`-equivalent overwritten on filesystems that support it (`std::fs::write` with zero-buffer of the original length before unlink); on filesystems without overwrite guarantees (e.g., copy-on-write), a stderr warning logs that the legacy plaintext may persist in snapshots/backups.
+
+**Keychain coordinate is single-tenant per OS user account.** Multi-user macOS sessions get separate logins → separate keychains by OS design. Cross-tenant collision within one OS account is documented as out-of-scope for v1 (user-spec assumes one identity per machine; R3 covers physical-access compromise).
+
+**Rationale:** Serves user-spec AC11 (cached token 1h TTL), AC12 + AC12b. Closes adequacy round 1 finding ("two-store anomaly"), security round 1 findings ("token migration window leaves cleartext recoverable", "keychain coordinate has no scope").
+**Alternatives considered:** (a) Encrypted file with key in keychain — rejected (key-management layer with zero gain). (b) Per-tenant keychain entries (account=`<pubkey>`) — rejected for v1 because user-spec single-machine-single-identity assumption holds; multi-tenant is a v2 enhancement. (c) Token in keyring's session-scoped collection — rejected because participate write must survive logout/login.
+
+### Decision 8: npm shim downloads pinned-tag binary from GitHub Releases on install, verifies against pipeline-emitted SHA256SUMS + GitHub artifact attestation
+**Decision:** `@mnemonik-xyz/mcp` ships `bin/mnemonik-mcp` as a stub that invokes lazy install (no `postinstall` script — those run with unrestricted ambient permissions and silently fail under `--ignore-scripts`). The first invocation runs `install-binary.ts`, which:
+
+1. Consults `dist/binary-version.json` (committed in the shim) for the target tag.
+2. Downloads `mnemonic-mcp-${tag}-${target}.tar.gz` and `SHA256SUMS` from `github.com/mnemonik-xyz/monorepo/releases/download/${tag}/...`.
+3. Verifies SHA256 against the SHA256SUMS line for that exact filename.
+4. **Additionally** verifies via `gh attestation verify` (no PAT required — GitHub's public verification endpoint accepts the artifact bytes and returns the attestation chain rooted at the OIDC identity of the tagged release pipeline). Rejection on missing or mismatched attestation.
+5. Extracts using zip-slip-hardened tar: every entry's resolved absolute path must be a strict descendant of the cache directory; symlinks are skipped entirely; the tar dep is pinned to a version known to mitigate CVE-2021-32803/04.
+6. Cache directory is created with mode `0o700`; binary set executable mode `0o755`.
+
+`mnemonik-mcp doctor` re-verifies the cached binary against a sidecar `manifest.json` written at install time (containing the original SHA256SUMS line and the attestation bundle). The doctor's verify is NOT against a re-download of the SHA256SUMS file (which would be circular per security audit) — it's against the manifest captured at install time, which the user-trusted at that moment.
+
+release.yml gains a `release.checksums` step emitting `SHA256SUMS` and uses GitHub's built-in artifact attestation action (`actions/attest-build-provenance`) before the release publishes.
+
+**Rationale:** Serves user-spec R4 + R6 + AC17. Closes security audit round 1 critical finding ("SHA256SUMS-only is supply-chain weak — same-URL fetch breaks the trust root"). `gh attestation verify` is free, OIDC-rooted, and natively compatible with the Trusted Publishing flow we already use for npm. Stub-install instead of `postinstall` closes the npm install-script attack surface flagged in round 1.
+**Alternatives considered:** (a) `postinstall` with SHA256SUMS only — rejected per security audit. (b) Sigstore independently — rejected because GitHub artifact attestation IS Sigstore under the hood, but with less plumbing on our side. (c) Bundle binaries directly in npm — rejected because dual download paths split the verification surface.
+
+### Decision 9: Three host candidates hardcoded (macOS only); install written with full binary path (no `npx`); atomic write + symlink hardening
+**Decision:** `install.ts` candidates list: `~/.claude.json`, `~/Library/Application Support/Claude/claude_desktop_config.json`, `~/.cursor/mcp.json`. Each entry written as `"command": "<resolved absolute path to cached mnemonik-mcp>", "args": ["mcp-stdio"]`. Only-if-file-exists guard; absent hosts skipped silently; output reports per-host status AND ends with the line `"If any of these agents is already running, please restart them."` (asserted by AC9 test).
+
+**Atomic write + symlink hardening**: For each candidate path: (1) `lstat()` the target — if it's a symlink whose resolved target is outside the user's home directory, refuse with a clear error; (2) read the contents, deserialize, mutate; (3) serialize, write to `<candidate>.mnemonik.tmp` in the same directory; (4) `fsync()` the temp file; (5) `rename()` over the original. The temp-then-rename guarantees no partial-write window where the host could read a corrupted JSON.
+
+**TTY confirmation for agent-headless invocation**: `install` defaults to non-interactive (writes immediately). A new `--confirm` flag forces an interactive prompt before each host. Agents that headlessly invoke `install` see the write happen; users who want a TTY prompt opt in via `--confirm`. This is documented in `mnemonik-mcp install --help` and in the `mnemonik-attest` skill manifest's "guardrails" section.
+
+**Rationale:** Serves user-spec Кусок 2 items 6-8 and AC7-AC10 (especially the previously-unverified restart-instruction line). Closes security audit round 1 majors ("no symlink check", "no atomic write", "agent headless invocation"). Direct binary path keeps the host's subprocess spawn offline (user-spec AC3 forbids `npx -y`).
+**Alternatives considered:** `npx -y @mnemonik-xyz/mcp mcp-stdio` — rejected per adequacy round 1. Always-interactive install — rejected because the headline flow is one-command install; mandatory TTY breaks scripting.
 
 ### Decision 10: `initialize` response surfaces embedder identity for client-side parity warning
 **Decision:** `initialize` arm in `mcp.rs:526` extended to include `embedder: { model_id: <Embedder::model_id()>, model_version: "<env or build constant>", dim: <Embedder::dim()> }`. The Rust binary running as `mcp-stdio` reads its own embedder's values at startup; on first `initialize` reply from a remote `mcp.mnemonik.xyz` (when proxying participate-mode discovery, though discovery is local by Decision 1), compares; mismatch logged to stderr as `[mnemonik-mcp] embedder version mismatch: local=<x> remote=<y>, cross-mode recall not guaranteed consistent`.
@@ -134,6 +166,16 @@ The Node CLI (`@mnemonik-xyz/cli` v0.2.x) gains a token-storage migration of its
 ### Decision 11: `Visibility` enum lives in `core/src/storage/types.rs` next to `WriteMode`
 **Decision:** New `pub enum Visibility { Private, Public }` with `Display`/`FromStr`/serde impls following `WriteMode` precedent. Wired through `save_attestation`, `search`, `SearchResult`, and the SQLite codec. Default-derived `Visibility::default()` returns `Private`.
 **Rationale:** Established pattern in the repo (`WriteMode` is the closest analogue); reviewers know what to expect. **[TECHNICAL]** — derived from user-spec requirement to track visibility; the exact module placement is a code-organization detail.
+
+### Decision 12: `MNEMONIC_HOSTED_ENDPOINT` env override is gated behind an explicit `--allow-custom-endpoint` flag
+**Decision:** The binary's default hosted peer is the compile-time-baked constant `https://mcp.mnemonik.xyz/mcp`. The `MNEMONIC_HOSTED_ENDPOINT` env var is read ONLY when the binary is invoked with `--allow-custom-endpoint`. Without the flag, the env var is ignored (with a single-line stderr warning if it's set). This means local malware that injects the env var into a user's shell cannot silently redirect participate-mode writes + OAuth token exchange to an attacker-controlled server.
+**Rationale:** Serves the security audit round 1 major finding ("MNEMONIC_HOSTED_ENDPOINT redirection vector"). Trades a slight ergonomic cost for test/dev (need `--allow-custom-endpoint` in any test that points at a local instance) for closing the attack vector.
+**Alternatives considered:** (a) Remove the env var entirely — rejected because integration tests need a way to point at localhost. (b) Read env var unconditionally — rejected per security audit. (c) Require a signed config file — rejected as scope creep.
+
+### Decision 13: WAL mode + busy-timeout concrete values
+**Decision:** `SqliteStore::open` executes `PRAGMA journal_mode=WAL; PRAGMA busy_timeout=2000;` immediately after the connection is established and before any migration runs. `busy_timeout=2000` (milliseconds) means SQLite's internal retry loop accommodates concurrent writers up to a 2-second wait before returning `SQLITE_BUSY`. On `SQLITE_BUSY`, the `save_attestation` callsite catches the error and returns the typed JSON-RPC `-32099 LocalStorageBusy { retry_after_ms: 500 }` so the agent retries with backoff.
+**Rationale:** Serves user-spec R8 ("точные значения — tech-spec"). 2-second timeout is generous for the concurrent-host-subprocess case (Claude Code + Cursor open at once) without making the inline path appear hung to the agent. SQLite's internal handling is preferred over an outer Rust-level retry loop because the WAL mode supports concurrent readers with a single writer; the timeout handles the writer queue.
+**Alternatives considered:** (a) Outer retry loop in Rust — rejected as duplicate-effort over SQLite's built-in retry. (b) Larger timeout (10s) — rejected as too long for an interactive agent path.
 
 ## Data Models
 
@@ -208,6 +250,25 @@ New index: `CREATE INDEX IF NOT EXISTS idx_attestations_visibility ON attestatio
 }
 ```
 
+### Error Catalogue (canonical list for this feature)
+
+The user-spec AC16 says "точный list — tech-spec". This is that list. Every entry has a matching parametrized integration test in `mcp/tests/error_catalogue.rs` that triggers the condition and asserts `code`, `data.kind`, and each documented data field.
+
+| Code | `data.kind` | Trigger condition | `data` fields |
+|------|-------------|-------------------|---------------|
+| `-32602` | `"InvalidParams"` | `sign_memory { mode: "local", visibility: ... }` | `field: "visibility"`, `received: "<value>"` |
+| `-32602` | `"InvalidParams"` | `sign_memory { allow_fallback_to_participate: <non-bool> }` | `field`, `received` |
+| `-32010` | `"UnsupportedMode"` | `mode=participate` on local-only deploy | `requested`, `supported` |
+| `-32011` | `"DeliveryNotConfirmed"` | Existing; unchanged | `arweave_tx`, `solana_tx`, `stage`, `row_demoted_to: "local"`, `attestation_id` |
+| `-32011` | `"DeliveryQuotaExceeded"` | Existing; unchanged | `window_secs`, `threshold` |
+| `-32011` | `"HostedUnavailable"` | mcp-stdio's participate proxy cannot reach `MNEMONIC_HOSTED_ENDPOINT` | `last_error`, `retry_after_ms` |
+| `-32095` | `"PublicWriteRequiresConfirmation"` | `mode=participate + visibility=public` without `public_write_confirmation` (Decision 5b) | `content_hash`, `suggested_action` |
+| `-32096` | `"OAuthTimeout"` | OAuth-loopback exceeded `MNEMONIC_OAUTH_TIMEOUT_SECS` (default 120s) without callback | `sign_url`, `expires_at`, `attempted_at` |
+| `-32098` | `"EmbedderInvalid"` | Local embedder cannot produce vectors (model missing, corrupted, ONNX crash) | `reason`, `repair_hint`, `fallback_available` |
+| `-32099` | `"LocalStorageBusy"` | SQLite `SQLITE_BUSY` after 2s busy-timeout | `retry_after_ms` |
+| `-32099` | `"TokenExpired"` | Cached token's `expires_at` precedes current time on read | `expires_at`, `pubkey` |
+| `-32094` | `"IdentityBootstrapFailed"` | `ensure()` fails (no keychain, no file fallback) | `reason`, `repair_hint` |
+
 ### Token keychain entry (both runtimes)
 
 - Service: `xyz.mnemonik.token`
@@ -262,17 +323,28 @@ Attached to the GitHub Release as a separate asset.
 
 ### Integration tests
 
-- **Anonymous discovery (AC1):** spin up `mnemonic-mcp` locally in `STORAGE_MODE=local`, POST `initialize` / `prompts/list` / `resources/list` / `tools/list` from `reqwest` without `Authorization`. Assert ≥7 prompts, ≥7 resources, 5+ tool descriptions each ≥500 bytes mentioning Purpose+Trigger.
+- **Anonymous discovery (AC1):** spin up `mnemonic-mcp` locally in `STORAGE_MODE=local`, POST `initialize` / `prompts/list` / `resources/list` / `tools/list` from `reqwest` without `Authorization`. Assert 7 prompts (exact, per Decision 1), 7 resources (exact), 6 tool descriptions (count matches `tool_definitions()`'s 6 tools), each tool description containing the literal Purpose+Trigger sub-strings from `mcp/assets/skills/<corresponding>.md` (byte-for-byte snapshot check), and no manifest body containing placeholder tokens `TBD|TODO|XXX|FIXME`.
 - **Anonymous recall filter (AC13):** seed DB via direct SQL with one row `visibility='private'` matching a query string and one row `visibility='public'` matching the same string. Call `recall` without `Authorization`. Assert the response contains only the public row.
-- **Visibility rejected on local writes (AC14):** call `tools/call sign_memory` with `mode=local, visibility=public`. Assert JSON-RPC error code `-32602` and message naming `visibility`.
-- **Soft-fall opt-in semantics (AC5/AC6):** monkey-patch the embedder to raise on first call; call `sign_memory` with `allow_fallback_to_participate=false` → assert typed embedder-failure error and zero outbound TCP (netns-isolated test). Call again with `allow_fallback_to_participate=true` + reachable hosted endpoint → assert success and `escalated` field in response.
-- **Token migration (AC12b):** seed `~/.mnemonic/token.json` in a tempdir HOME, invoke `mnemonic_login`-equivalent flow via `mnemonic-mcp` binary, assert keychain entry present + file deleted.
-- **Install idempotent + non-destructive (AC7-AC10):** create synthetic configs with unrelated `mcpServers` entries; run `install.ts` twice; diff against original — only `mnemonik` key added/replaced, unrelated entries byte-identical; absent host configs silently skipped.
+- **Local recall finds local-written (AC4):** with `STORAGE_MODE=local` binary, `sign_memory { mode: "local", content: "distinctive test string XYZ" }` → capture `attestation_id`. Then `recall { query: "distinctive test string XYZ", limit: 5 }` → assert `results[0].attestation_id == captured_id` AND `results[0].score > 0.5`. Variant: write 2 unrelated + 1 target, recall on target text, assert target top-1 with score gap > 0.1 over runners-up. Exercises embed → compress → store → search round-trip.
+- **Visibility rejected on local writes (AC14):** call `tools/call sign_memory` with `mode=local, visibility=public`. Assert JSON-RPC error code `-32602`, `data.kind == "InvalidParams"`, `data.field == "visibility"`.
+- **Soft-fall opt-in semantics (AC5/AC6):** monkey-patch the embedder to raise on first call. (a) call `sign_memory` with `allow_fallback_to_participate=false` → assert typed `-32098 EmbedderInvalid` AND zero outbound TCP (`unshare -rn` test). (b) Call with `allow_fallback_to_participate=true` + reachable hosted endpoint + `visibility=public + public_write_confirmation=<valid token>` → assert success and `escalated` field. (c) Call with `allow_fallback_to_participate=true + visibility=public` WITHOUT `public_write_confirmation` → assert post-escalation re-resolution returns `-32095 PublicWriteRequiresConfirmation` (validates Decision 4 + 5b interaction).
+- **Public-write confirmation gate (Decision 5b):** call `request_public_write_confirmation { content_hash }` → returns `{confirmation_token}`. Pass it to `sign_memory` → success. Replay same token → `-32095`. Pass a token issued for a different `content_hash` → `-32095`. Token expired (after 5min wait or `tokio::time::advance`) → `-32095`.
+- **OAuth-loopback regression after token migration (AC11):** (a) seed legacy `~/.mnemonic/token.json` in tempdir HOME, invoke participate sign_memory via mcp-stdio, assert success AND keychain entry payload parses as expected `TokenJson` shape. (b) Fresh-install path: no legacy file, mock OAuth server, first sign_memory triggers loopback and persists; second sign_memory within TTL succeeds without invoking the OAuth mock (mock call count == 1). (c) Token expired path: first call within TTL succeeds (mock count 1); advance clock past `expires_at`; second call returns `-32099 TokenExpired`.
+- **Token migration atomicity (AC12, Decision 7):** seed `~/.mnemonic/token.json`, kill the binary mid-migration via SIGKILL between read and write; on restart, assert file is intact (no zero-byte truncation, no partial-write corruption). After successful migration, assert file absent AND keychain entry parseable.
+- **Install idempotent + non-destructive (AC7, AC8):** create synthetic configs with unrelated `mcpServers` entries; run `install.ts` twice; diff against original — only `mnemonik` key added/replaced, unrelated entries byte-identical.
+- **Install resilient (AC9):** All three candidate paths absent → install exits 0, stdout reports "no host configs found", stderr empty. 1-of-3 present → only the present one modified, other two untouched (`lstat()` mtime check before/after).
+- **Install --check (AC10):** populate tempdir candidates; capture mtime_ns for each; run `mnemonik-mcp install --check`; assert mtime_ns unchanged AND no `.mnemonik.tmp` files in any candidate dir AND stdout contains a per-host plan line.
+- **Install restart instruction (AC9 supplemental):** `mnemonik-mcp install` output's final line equals `If any of these agents is already running, please restart them.` (exact string match).
+- **Install symlink hardening (Decision 9):** create `~/.claude.json` as a symlink whose target resolves outside `$HOME` (e.g., `/tmp/foo`); run `mnemonik-mcp install` → assert error and the target file is NOT modified.
+- **MNEMONIC_HOSTED_ENDPOINT gating (Decision 12):** with `MNEMONIC_HOSTED_ENDPOINT=http://attacker.example` set in env: (a) `mnemonic-mcp mcp-stdio` (no flag) → participate path uses default endpoint, stderr contains warning about ignored env var. (b) `mnemonic-mcp mcp-stdio --allow-custom-endpoint` → uses the env value.
+- **Doctor (AC17):** (a) Happy path — clean fixture with valid host config + identity + token → exit 0, output names all 6 checks as `pass`. (b) Parametrized failures — for each of {missing-host-config, mcp.mnemonik.xyz/health unreachable (mock 503), corrupted-cached-binary, locked-SQLite, denied-keychain-identity, denied-keychain-token}: induce that failure, assert exit 1 AND the corresponding check is `fail` AND `repair_hint` non-empty for that check.
+- **Error Catalogue coverage (AC16):** parametrized test iterating each row of the Error Catalogue table; for each row, triggers the condition and asserts `error.code`, `error.data.kind`, and each documented `data` field is present with documented type.
+- **migrate_visibility_column idempotency (Decision 2):** clean DB → column 'visibility' present with default 'private' AND `idx_attestations_visibility` index present. DB that already has the column → re-run produces identical `pragma_table_info` output. DB with legacy rows lacking the column → all rows backfilled to 'private'.
 
 ### E2E tests
 
-- **Offline cold-start of local sign (AC3):** in network-isolated CI runner, spawn `mnemonic-mcp mcp-stdio` with embedder model pre-cached, drive it via JSON-RPC stdin, assert `sign_memory { mode: "local" }` succeeds with zero outbound TCP (`tcpdump`-style assertion at the network namespace boundary).
-- **Embedder parity surface (AC15):** start binary, observe `initialize` response carries `embedder.model_id` and `embedder.model_version`; simulate mismatched values from a mock hosted peer; assert stderr warning line.
+- **Offline cold-start of local sign (AC3):** spawn `mnemonic-mcp mcp-stdio` inside `unshare -rn` (new network namespace with only `lo`), drive via JSON-RPC on stdin, assert (a) `sign_memory { mode: "local" }` returns success, (b) `ss -tn state established` inside the netns shows zero established non-loopback connections, (c) `strace -e trace=connect` on the process records no `connect()` calls to a non-loopback address. Removes the `--offline`-vs-netns ambiguity flagged by round 1 test review.
+- **Embedder parity surface (AC15):** start binary, observe `initialize` response carries `embedder.model_id` and `embedder.model_version`; mock a hosted-peer `initialize` response with mismatched values; assert stderr contains exact warning line `[mnemonik-mcp] embedder version mismatch: local=<x> remote=<y>, cross-mode recall not guaranteed consistent`.
 
 ## Agent Verification Plan
 
@@ -308,8 +380,12 @@ No Playwright / Telegram / Stripe MCPs required; this feature has no browser UI.
 ## User-Spec Deviations
 
 - **AC12b (token migration via existing CLI):** user-spec says "не требует одновременного релиза CLI и shim'а." Tech-spec implements this for the Rust binary (Decision 7) but ALSO writes equivalent migration code in `packages/cli/src/identity/token-store.ts`. The CLI change is non-blocking — the keychain entry coordinate is fixed, so a not-yet-updated CLI continues reading the legacy file until it gets rebuilt with token-store wiring, at which point it migrates. **Reason:** without the CLI-side change, users who run `mnemonic login` from the CLI (not via the shim) would still write plaintext, leaving a partial migration. Tech-spec ships both halves but they remain independently shippable. → No approval needed — strengthens user-spec intent without changing semantics.
-- **Added: `MNEMONIC_HOSTED_ENDPOINT` environment variable** on `mnemonic-mcp` binary (default `https://mcp.mnemonik.xyz/mcp`). Reason: participate-mode proxying needs to know where to send HTTPS calls; for testing the binary must be redirectable to a local instance. User-spec implies `mcp.mnemonik.xyz` everywhere but doesn't make it env-configurable. → No approval needed — operational hygiene, doesn't change user-visible behavior.
-- **Added: `embedder.model_version` field type left to tech-spec.** User-spec AC15 says "embedder.model_id + embedder.model_version" without committing to whether `model_version` is a semver string, ONNX file hash, or build-time constant. Tech-spec picks a build-time constant string for v1, derivable from the fastembed crate version + model name. → No approval needed — tech-spec-level detail, surface contract unchanged.
+- **Added: `MNEMONIC_HOSTED_ENDPOINT` environment variable** on `mnemonic-mcp` binary, gated behind `--allow-custom-endpoint` flag per Decision 12. Reason: participate-mode proxying needs to know where to send HTTPS calls; tests need redirectability. The flag-gating closes the security-audit redirection vector. → No approval needed — tightens user-spec security posture.
+- **Added: `embedder.model_version` field type left to tech-spec.** User-spec AC15 says "embedder.model_id + embedder.model_version" without committing to whether `model_version` is a semver string, ONNX file hash, or build-time constant. Tech-spec picks a build-time constant string for v1. → No approval needed — surface contract unchanged.
+- **Added: `embedder.dim` field on `initialize` response (Decision 10).** Not requested by user-spec AC15. Reason: a future client wanting to validate that incoming embeddings are compatible with the server's storage needs the dimensionality alongside the model ID; surfacing it costs zero. → No approval needed — additive, no semantic change.
+- **Added: `request_public_write_confirmation` MCP tool (Decision 5b).** Not in user-spec's enumerated tools (5 existing + this would be the 7th counting `check_pending`). Reason: user-spec R1 explicitly names "server-side `-32095 PublicWriteRequiresConfirmation` gate" as the privacy mitigation; the gate requires a ceremony, and the ceremony needs an endpoint. The new tool implements that endpoint. → No approval needed — fulfills user-spec R1 mitigation.
+- **Decision 11 `[TECHNICAL]`: Visibility enum module placement** (`core/src/storage/types.rs`) is pure code organization — user-spec doesn't speak to module paths. Marked `[TECHNICAL]` for clarity but listed here because the methodology requires `[TECHNICAL]` decisions to be acknowledged. → No approval needed — infrastructure detail.
+- **Added: `mnemonik-mcp logout` subcommand on the binary's CLI.** User-spec AC12 says "`mnemonik-mcp logout` удаляет keychain entry" but the verb wasn't in any task in the round-1 draft (gap caught by completeness validator). Task 8 now wires `logout` as a clap subcommand calling `token_store::delete_token`. → No approval needed — closes a gap, not a deviation per se.
 
 ## Acceptance Criteria
 
@@ -330,130 +406,107 @@ No Playwright / Telegram / Stripe MCPs required; this feature has no browser UI.
 ### Wave 1 (independent foundation — server-side skills + discovery)
 
 #### Task 1: Skill manifests + build-time projection
-- **Description:** Create `mcp/assets/skills/` directory with seven manifests (`help.md`, `init.md`, `recall.md`, `attest.md`, `checkpoint.md`, `verify.md`, `status.md`). Each manifest has `## Purpose`, `## Trigger`, plus body sections (context, tool, guardrails, examples). Wire `build.rs` (or proc-macro if cleaner) to parse the H2 sections and emit string constants for downstream use. Manifest content is per user-spec; trigger boundary explicit per R7 mitigation.
+- **Description:** Create `mcp/assets/skills/` directory with seven manifests (`help.md`, `init.md`, `recall.md`, `attest.md`, `checkpoint.md`, `verify.md`, `status.md`). Each manifest has `## Purpose`, `## Trigger`, plus body sections (context, tool, guardrails, examples). Wire `build.rs` to parse the H2 sections and emit string constants for downstream use. Manifest content per user-spec; trigger boundary explicit per R7 mitigation.
 - **Skill:** code-writing
 - **Reviewers:** code-reviewer, security-auditor, test-reviewer
-- **Verify-smoke:** `cargo build -p mnemonic-mcp` succeeds; deliberately rename one manifest, expect build to fail with clear missing-manifest error
+- **Verify-smoke:** `cargo build -p mnemonic-mcp` succeeds; deliberately rename one manifest, expect build to fail
 - **Files to modify:** `mcp/build.rs` (new), `mcp/Cargo.toml` (build dep if needed), `mcp/assets/skills/*.md` (new)
-- **Files to read:** `mcp/src/mcp.rs:427-497` (current `tool_definitions()`), `work/agent-native-distribution/user-spec.md`
+- **Files to read:** `mcp/src/mcp.rs:427-497`, `work/agent-native-distribution/user-spec.md`
 
-#### Task 2: prompts/* + resources/* MCP methods + anonymous allowlist
-- **Description:** Add four arms (`prompts/list`, `prompts/get`, `resources/list`, `resources/read`) to the dispatcher in `mcp.rs`. Each pulls from the manifest constants built in Task 1. Extend `ALLOWLIST_METHODS` in `oauth/mod.rs` with the four new method names. Extend `initialize` capabilities to include `prompts: {}` and `resources: {}`.
+#### Task 2: All `mcp.rs` server surfaces (prompts + resources + dispatcher + initialize + tools/list enrichment) + anonymous allowlist
+- **Description:** Single owner of all `mcp/src/mcp.rs` edits in Wave 1 to eliminate W1 file-collision. Adds four dispatcher arms (`prompts/list`, `prompts/get`, `resources/list`, `resources/read`) using manifest constants from Task 1. Extends `initialize` capabilities (`prompts: {}`, `resources: {}`) AND adds `embedder: { model_id, model_version, dim }` derived from `state.embedder`. Enriches `tool_definitions()` descriptions with Purpose+Trigger from each manifest. Extends `ALLOWLIST_METHODS` in `oauth/mod.rs` with the four new method names.
 - **Skill:** code-writing
 - **Reviewers:** code-reviewer, security-auditor, test-reviewer
-- **Verify-smoke:** `curl -s -X POST localhost:3000/mcp -H 'Content-Type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"prompts/list","params":{}}'` returns ≥7 prompts without Authorization
-- **Files to modify:** `mcp/src/mcp.rs` (dispatcher + initialize), `mcp/src/oauth/mod.rs` (allowlist)
-- **Files to read:** `mcp/src/mcp.rs:499-547`, `mcp/src/oauth/mod.rs:1226-1336`, `mcp/assets/skills/` (Task 1 output)
+- **Verify-smoke:** `curl -s -X POST localhost:3000/mcp -H 'Content-Type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"prompts/list","params":{}}'` returns 7 prompts without `Authorization`; `curl ... initialize` carries non-empty `embedder.model_id`; `curl ... tools/list` shows tool descriptions containing the literal Purpose+Trigger substrings from the manifest source files (post-Task-1 wiring)
+- **Files to modify:** `mcp/src/mcp.rs` (dispatcher + initialize + tool_definitions), `mcp/src/oauth/mod.rs` (allowlist const)
+- **Files to read:** `mcp/src/mcp.rs:427-497`, `mcp/src/mcp.rs:499-547`, `mcp/src/oauth/mod.rs:1226-1336`, `mcp/assets/skills/` (Task 1 output), `core/src/embed/mod.rs` (`Embedder` trait)
 
-#### Task 3: Enriched tools/list descriptions + initialize embedder surface
-- **Description:** Inject Purpose+Trigger from each skill manifest into the matching tool's `description` field in `tool_definitions()`. Extend the `initialize` response to include `embedder: { model_id, model_version, dim }` derived from `state.embedder` (which already exposes `Embedder::model_id()` and `Embedder::dim()`).
-- **Skill:** code-writing
-- **Reviewers:** code-reviewer, test-reviewer
-- **Verify-smoke:** `curl ... initialize` response shows `embedder.model_id`; `curl ... tools/list` response shows each tool description ≥500 bytes mentioning Purpose+Trigger
-- **Files to modify:** `mcp/src/mcp.rs` (`tool_definitions()` + `initialize` arm)
-- **Files to read:** `mcp/src/mcp.rs:427-497`, `core/src/embed/mod.rs` (`Embedder` trait)
+### Wave 2 (storage + tool args + WAL config — depends on nothing in Wave 1)
 
-### Wave 2 (storage + tool args — depends on nothing in Wave 1)
-
-#### Task 4: visibility column migration + Visibility enum + storage signatures
-- **Description:** New `core/src/storage/types.rs::Visibility` enum (Private | Public) with Display/FromStr/serde. New `migrate_visibility_column()` in `sqlite.rs` mirroring `migrate_write_mode_column`. Extend `AttestationStore::save_attestation` trait signature with `visibility: Visibility`. Extend `search` with optional `visibility_filter`. Wire migration into `SqliteStore::open` and `SqliteStore::in_memory`.
+#### Task 3: visibility column migration + Visibility enum + storage signatures + WAL + busy_timeout
+- **Description:** New `core/src/storage/types.rs::Visibility` enum (Private | Public) with Display/FromStr/serde. New `migrate_visibility_column()` mirroring `migrate_write_mode_column`. Extend `AttestationStore::save_attestation` trait signature with `visibility: Visibility`. Extend `search` with optional `visibility_filter`. Wire migration into `SqliteStore::open` and `SqliteStore::in_memory`. Per Decision 13: set `PRAGMA journal_mode=WAL; PRAGMA busy_timeout=2000;` in both `SqliteStore::open` and `SqliteStore::in_memory` before migrations run.
 - **Skill:** code-writing
 - **Reviewers:** code-reviewer, security-auditor, test-reviewer
-- **Files to modify:** `core/src/storage/types.rs` (new file), `core/src/storage/sqlite.rs`, `core/src/storage/traits.rs`, `core/src/storage/mod.rs` (re-export)
-- **Files to read:** `core/src/storage/sqlite.rs:282-350` (migration precedent), `core/src/storage/sqlite.rs:488-532` (save_attestation), `core/src/storage/sqlite.rs:596-653` (search)
+- **Verify-smoke:** `cargo test -p mnemonic-core sqlite::migration::visibility_column` covers idempotency (clean → column present + index; existing column → no-op; legacy rows → backfilled to 'private')
+- **Files to modify:** `core/src/storage/types.rs` (new file), `core/src/storage/sqlite.rs`, `core/src/storage/traits.rs`, `core/src/storage/mod.rs`
+- **Files to read:** `core/src/storage/sqlite.rs:282-350`, `core/src/storage/sqlite.rs:488-532`, `core/src/storage/sqlite.rs:596-653`
 
-#### Task 5: sign_memory accepts visibility + allow_fallback args; anonymous recall filters public
-- **Description:** Add `resolve_visibility(args, mode)` and `resolve_allow_fallback(args)` in `tools.rs` following `resolve_write_mode` shape; reject `mode=local + visibility=...` with `invalid_params`. Thread `visibility` through `sign_memory` into `save_attestation`. Update `recall` handler to pass `Some(Visibility::Public)` to `search` when caller has no `Claims`, else `None`. Add `escalated` field to `sign_memory` response when soft-fall fires (paired with Task 7 wiring).
+#### Task 4: sign_memory accepts visibility + allow_fallback args; anonymous recall filters public; public-write confirmation gate (Decision 5b)
+- **Description:** Add `resolve_visibility(args, mode)` and `resolve_allow_fallback(args)` in `tools.rs` following `resolve_write_mode` shape; reject `mode=local + visibility=...` with `invalid_params`. Thread `visibility` through `sign_memory` into `save_attestation`. Add new `request_public_write_confirmation` tool (Decision 5b) that mints a `confirmation_token` (HMAC over `content_hash || owner_pubkey || expires_at`, 5-min TTL, single-use; tokens tracked in an in-process `DashMap`); enforce on `sign_memory` with `mode=participate + visibility=public`. Update `recall` handler to pass `Some(Visibility::Public)` to `search` when caller has no `Claims`. Add the typed error catalogue entries from the Error Catalogue table (`-32094`, `-32095`, `-32096`, `-32098`, `-32099`, `-32011 HostedUnavailable`).
 - **Skill:** code-writing
 - **Reviewers:** code-reviewer, security-auditor, test-reviewer
-- **Verify-smoke:** `curl ... tools/call sign_memory { mode: "local", visibility: "public" }` returns `-32602`; anonymous `recall` returns only public seeded row
-- **Files to modify:** `mcp/src/tools.rs`, `mcp/src/mcp.rs` (`handle_tool_call` arg extraction)
-- **Files to read:** `mcp/src/tools.rs:100-134` (resolve_write_mode), `mcp/src/mcp.rs:1054-1088` (current sign_memory arg extraction)
+- **Verify-smoke:** `cargo test --test error_catalogue` parametrized test exercises every row of the Error Catalogue table; anonymous `curl ... recall` returns only public seeded row; `curl ... sign_memory { mode: "local", visibility: "public" }` returns `-32602 InvalidParams`
+- **Files to modify:** `mcp/src/tools.rs` (resolvers + new request_public_write_confirmation tool + error helpers), `mcp/src/mcp.rs` (`handle_tool_call` arg extraction + dispatcher arm for the new tool)
+- **Files to read:** `mcp/src/tools.rs:100-134`, `mcp/src/mcp.rs:1054-1088`
 
 ### Wave 3 (CLI + binary — depends on Wave 2)
 
-#### Task 6: mcp-stdio subcommand on Rust binary + MNEMONIC_HOSTED_ENDPOINT env var
-- **Description:** Add `clap` subcommand `mcp-stdio` to `mnemonic-mcp` (`main.rs`) that re-uses the existing `run_stdio()` entry point. Add `MNEMONIC_HOSTED_ENDPOINT` env var (default `https://mcp.mnemonik.xyz/mcp`) for participate-mode proxying. Behavior preserved: existing stdio flow continues to work unchanged.
-- **Skill:** code-writing
-- **Reviewers:** code-reviewer, test-reviewer
-- **Verify-smoke:** `mnemonic-mcp mcp-stdio` accepts JSON-RPC on stdin (echo a `tools/list` request, expect response)
-- **Files to modify:** `mcp/src/main.rs`
-- **Files to read:** `mcp/src/main.rs:576-617` (current run_stdio)
-
-#### Task 7: Soft-fall opt-in routing (local→participate on opt-in)
-- **Description:** When `allow_fallback_to_participate=true` and local execution fails, `sign_memory` re-dispatches the same call through the participate path (HTTPS to `MNEMONIC_HOSTED_ENDPOINT`). On success, response carries `escalated: {from, to, reason}`. On hosted unavailability, error is the hosted-unavailable code (not the original local-failure code). Stderr warning logged. Wire this into `sign_memory` inline path.
+#### Task 5: mcp-stdio + logout subcommands on Rust binary + MNEMONIC_HOSTED_ENDPOINT gating + soft-fall routing
+- **Description:** Add clap subcommands `mcp-stdio` (re-uses existing `run_stdio()`) and `logout` (calls `token_store::delete_token`) to `mnemonic-mcp`. Add `--allow-custom-endpoint` flag per Decision 12; without it, `MNEMONIC_HOSTED_ENDPOINT` env var is ignored (with stderr warning if set). Behavior preserved for default `mnemonic-mcp` invocation. Wire soft-fall routing in `sign_memory`: when `allow_fallback_to_participate=true` and local execution fails, re-dispatch through participate path (HTTPS to resolved endpoint); on success, response carries `escalated: {from, to, reason}`; on hosted unavailability, error is `-32011 HostedUnavailable` (not the original local-failure code); per Decision 4, visibility resolution runs again post-escalation so the public-write confirmation gate from Task 4 still applies.
 - **Skill:** code-writing
 - **Reviewers:** code-reviewer, security-auditor, test-reviewer
-- **Verify-smoke:** rm fastembed cache, post `sign_memory` with `allow_fallback_to_participate=true` against running binary, expect success + `escalated` field
-- **Files to modify:** `mcp/src/tools.rs`, `mcp/src/mcp.rs` (route hookup)
-- **Files to read:** `mcp/src/tools.rs:240-...` (current sign_memory routing)
+- **Verify-smoke:** `mnemonic-mcp mcp-stdio` accepts JSON-RPC on stdin; `mnemonic-mcp logout` deletes keychain entry; with `MNEMONIC_HOSTED_ENDPOINT=http://attacker.example` set in env and no flag, participate path uses default endpoint and stderr contains warning
+- **Files to modify:** `mcp/src/main.rs`, `mcp/src/tools.rs` (soft-fall routing), `mcp/src/mcp.rs` (route hookup)
+- **Files to read:** `mcp/src/main.rs:576-617`, `mcp/src/tools.rs:240-...`
 
-#### Task 8: Token storage in OS keychain + migration (Rust binary + Node CLI)
-- **Description:** New `core/src/identity/token_store.rs` with `read_token`/`save_token`/`delete_token` against `xyz.mnemonik.token/default`. Migration helper that adopts `~/.mnemonic/token.json` on first call and deletes the file. New `packages/cli/src/identity/token-store.ts` mirroring the same coordinate via `@napi-rs/keyring`. Update Node CLI's `loadToken`/`saveToken` callsites (`config.ts:367, 399`) to delegate.
+#### Task 6: Token storage in OS keychain + atomic migration (Rust binary + Node CLI)
+- **Description:** New `core/src/identity/token_store.rs` with `read_token`/`save_token`/`delete_token` against `xyz.mnemonik.token/default`. Atomic migration helper per Decision 7: read legacy file → write keychain → fsync → zero-overwrite the legacy file → unlink. Update Rust callsites in `mcp/src/oauth/mod.rs` to delegate. New `packages/cli/src/identity/token-store.ts` mirroring the same coordinate via `@napi-rs/keyring`. Update Node CLI's `loadToken`/`saveToken` callsites (`config.ts:367, 399`) to delegate. Honor `expires_at` from `TokenJson` — return `-32099 TokenExpired` from the read path when current time exceeds `expires_at`.
 - **Skill:** code-writing
 - **Reviewers:** code-reviewer, security-auditor, test-reviewer
-- **Verify-smoke:** `mnemonic login` (Node CLI) leaves no `~/.mnemonic/token.json` afterwards; `security find-generic-password -s xyz.mnemonik.token -a default` (macOS) returns entry
-- **Files to modify:** `core/src/identity/token_store.rs` (new), `core/src/identity/mod.rs` (re-export), `mcp/src/oauth/mod.rs` (callsites that read/write token), `packages/cli/src/identity/token-store.ts` (new), `packages/cli/src/config.ts:367,399` (delegate)
-- **Files to read:** `packages/cli/src/config.ts:39-65` (current TokenJson + paths), `core/src/identity/keystore_os.rs` (Rust keychain wrapper precedent), `packages/cli/src/identity/keystore-os.ts:16` (Node keychain wrapper precedent)
+- **Verify-smoke:** `cargo test -p mnemonic-core token_store::migration::adopt_legacy_file` against tempdir HOME with seeded file passes; `npx vitest run identity/token-store` against mocked `@napi-rs/keyring` passes the same scenario
+- **Files to modify:** `core/src/identity/token_store.rs` (new), `core/src/identity/mod.rs` (re-export), `mcp/src/oauth/mod.rs` (callsites), `packages/cli/src/identity/token-store.ts` (new), `packages/cli/src/config.ts:367,399`
+- **Files to read:** `packages/cli/src/config.ts:39-65`, `core/src/identity/keystore_os.rs`, `packages/cli/src/identity/keystore-os.ts:16`
 
-### Wave 4 (npm shim package — depends on Wave 3 Task 6)
+### Wave 4 (npm shim package skeleton + lazy-install + bin entry — depends on Wave 3 Task 5)
 
-#### Task 9: @mnemonik-xyz/mcp shim package skeleton + binary download/verify
-- **Description:** New `packages/mcp/` directory with `package.json` (`name: "@mnemonik-xyz/mcp"`, `bin: { "mnemonik-mcp": "./dist/bin/mnemonik-mcp.js" }`), TypeScript config, vitest setup mirroring `packages/cli/`. Bin entrypoint dispatches between subcommands (`install`, `mcp-stdio`, `doctor`). On `postinstall`, downloads the platform binary from GitHub Releases, verifies SHA256 against the release's SHA256SUMS asset, extracts, places at `~/.local/share/@mnemonik-xyz/mcp/bin/mnemonik-mcp`. `mcp-stdio` subcommand on the shim spawns the cached binary as subprocess.
+#### Task 7: @mnemonik-xyz/mcp shim — full package (bin + lazy-install + hardened download/verify + all subcommands)
+- **Description:** Single owner of all `packages/mcp/` content in this wave to eliminate W4 file-collision. Creates `packages/mcp/` with `package.json` (`name: "@mnemonik-xyz/mcp"`, `bin: { "mnemonik-mcp": "./dist/bin/mnemonik-mcp.js" }`), `tsconfig.json`, vitest setup mirroring `packages/cli/`. Bin entrypoint dispatches between `install` / `install --check` / `mcp-stdio` / `doctor`. No `postinstall` script (security hardening per Decision 8) — first invocation lazy-runs install-binary. `install-binary.ts` downloads tarball + SHA256SUMS, verifies hash, runs `gh attestation verify` (rejects on missing/mismatched attestation), extracts with zip-slip-hardened tar (resolves each entry's absolute path, refuses non-descendants, skips symlinks; `tar` dep pinned to known-safe version), caches binary at platform-standard location with mode 0o755 (parent dir 0o700), writes `manifest.json` sidecar with SHA256 + attestation bundle for doctor's later re-verification. `install` subcommand: per Decision 9 — three hardcoded host candidates, lstat-symlink-out-of-home check, atomic tempfile + rename, non-destructive JSON merge, idempotent, output ends with restart-instruction string. `install --check` is dry-run (verified via mtime-unchanged assertion). `doctor` subcommand: six checks (host-config entry presence, /health ping, binary integrity via `manifest.json` not re-download, local SQLite r/w, identity accessibility, keychain access for token), structured output, exit 0/1, repair hints. `mcp-stdio` spawns the cached binary as subprocess.
 - **Skill:** code-writing
 - **Reviewers:** code-reviewer, security-auditor, test-reviewer
-- **Verify-smoke:** `npm install` in shim dir runs postinstall; cached binary present; SHA256 verify with fixture digest passes (positive case) and fails on mismatch (negative case)
-- **Files to modify:** `packages/mcp/package.json` (new), `packages/mcp/tsconfig.json` (new), `packages/mcp/src/install-binary.ts` (new), `packages/mcp/src/bin/mnemonik-mcp.ts` (new), `packages/mcp/src/mcp-stdio.ts` (new)
-- **Files to read:** `packages/cli/package.json` (peer pattern), `packages/cli/bin/mnemonic.ts` (subcommand dispatch pattern)
-
-#### Task 10: install + doctor subcommands (PNL-pattern config wiring + diagnostics)
-- **Description:** `install` subcommand reads three candidate host config paths (only-if-exists), parses JSON, sets `mcpServers.mnemonik = { command: <absolute path to cached binary>, args: ["mcp-stdio"] }`, writes back preserving unrelated keys. Idempotent on re-run. `--check` flag prints plan without writing. `doctor` subcommand reports: presence of `mnemonik` entry in each host config, ping to `mcp.mnemonik.xyz/health`, binary integrity (re-verify hash), local SQLite read/write, identity accessibility, keychain accessibility for token. Pass/fail per check + repair hint.
-- **Skill:** code-writing
-- **Reviewers:** code-reviewer, security-auditor, test-reviewer
-- **Verify-smoke:** seed unrelated `mcpServers.foo` entry in tempdir HOME's `~/.claude.json`; run `mnemonik-mcp install`; diff shows `mnemonik` added and `foo` untouched; re-run shows no diff
-- **Files to modify:** `packages/mcp/src/install-hosts.ts` (new), `packages/mcp/src/doctor.ts` (new), `packages/mcp/src/bin/mnemonik-mcp.ts` (dispatch new subcommands)
-- **Files to read:** Task 9 output (shim skeleton)
+- **Verify-smoke:** `npx vitest run packages/mcp/` passes; (a) install-binary against fixture tarball + matching SHA256SUMS → success; (b) install-binary against fixture with mismatched SHA → rejects with clear error; (c) `mnemonik-mcp install` against tempdir HOME with unrelated `mcpServers.foo` entry → diff shows `mnemonik` added, `foo` untouched, restart-instruction in stdout; (d) `mnemonik-mcp install --check` against same tempdir → mtime_ns unchanged; (e) symlink-out-of-home test refuses to write
+- **Files to modify:** `packages/mcp/package.json` (new), `packages/mcp/tsconfig.json` (new), `packages/mcp/src/bin/mnemonik-mcp.ts` (new — dispatch all subcommands), `packages/mcp/src/install-binary.ts` (new), `packages/mcp/src/install-hosts.ts` (new), `packages/mcp/src/doctor.ts` (new), `packages/mcp/src/mcp-stdio.ts` (new), `packages/mcp/dist/binary-version.json` (new, committed)
+- **Files to read:** `packages/cli/package.json`, `packages/cli/bin/mnemonic.ts`
 
 ### Wave 5 (release pipeline — depends on Waves 1-4)
 
-#### Task 11: release.yml SHA256SUMS emission + @mnemonik-xyz/mcp publish step
-- **Description:** Add a step to `.github/workflows/release.yml` that, after all build matrices complete (`needs: [build-linux, build-macos]`), generates a `SHA256SUMS` file from all collected `mnemonic-mcp-*.tar.gz` artifacts and attaches it to the GitHub Release as a separate asset. Add a new `publish-mcp-shim` job analogous to the existing `publish-npm` job: Trusted Publishing via OIDC (no NPM_TOKEN), `npm publish --access public --provenance` on `packages/mcp/`. Skip-if-already-published guard.
+#### Task 8: release.yml SHA256SUMS + GitHub artifact attestation + @mnemonik-xyz/mcp publish
+- **Description:** Add a step to `.github/workflows/release.yml` that, after all build matrices complete (`needs: [build-linux, build-macos]`), generates `SHA256SUMS` from all collected `mnemonic-mcp-*.tar.gz` artifacts and attaches as a separate release asset. Add `actions/attest-build-provenance@v1` step to emit GitHub-OIDC-rooted artifact attestations for the same artifacts (the shim's install-binary then verifies via `gh attestation verify`). Add a new `publish-mcp-shim` job analogous to `publish-npm`: Trusted Publishing via OIDC (no NPM_TOKEN), `npm publish --access public --provenance` on `packages/mcp/`, skip-if-already-published guard.
 - **Skill:** deploy-pipeline
 - **Reviewers:** code-reviewer, security-auditor, deploy-reviewer
-- **Verify-smoke:** create a draft release in a forked repo (or use `act` if available) and confirm SHA256SUMS asset appears + shim publish job runs end-to-end
+- **Verify-smoke:** (a) `actionlint .github/workflows/release.yml` is clean; (b) standalone shell snippet for SHA256SUMS step: `tar -czf /tmp/fake.tar.gz README.md && (cd /tmp && sha256sum -b fake.tar.gz > SHA256SUMS) && grep -E "^[0-9a-f]{64} \*?fake.tar.gz$" /tmp/SHA256SUMS` succeeds; (c) optional `act -j publish-mcp-shim --dryrun` if act available
 - **Files to modify:** `.github/workflows/release.yml`
-- **Files to read:** `.github/workflows/release.yml:14-216` (full file — modifications span build matrix + release job + new publish-mcp-shim)
+- **Files to read:** `.github/workflows/release.yml:14-216`
 
 ### Audit Wave
 
-#### Task 12: Code Audit
+#### Task 9: Code Audit
 - **Description:** Full-feature code quality audit. Read all source files created/modified in Tasks 1-11. Review holistically for cross-component issues: SQLite lock discipline (no .await held across mutex), Arc<McpState> singleton compliance, error code conventions (-32xxx ranges consistent with existing -32001/-32010/-32011 helpers), no `unwrap()` outside tests, manifest content quality (positive AND negative triggers in `attest.md`). Write audit report.
 - **Skill:** code-reviewing
 - **Reviewers:** none
 
-#### Task 13: Security Audit
+#### Task 10: Security Audit
 - **Description:** Full-feature security audit. Read all source files created/modified in Tasks 1-11. Analyze for OWASP Top 10 + protocol-specific: bearer allowlist correctness (no new methods accidentally exposed beyond intended four), SHA256 verification correctness in shim's binary download path, no token leakage in logs, visibility filter cannot be bypassed via SQL injection through the recall query path, install path doesn't follow symlinks out of `~/.local/share`. Write audit report.
 - **Skill:** security-auditor
 - **Reviewers:** none
 
-#### Task 14: Test Audit
+#### Task 11: Test Audit
 - **Description:** Full-feature test quality audit. Read all test files created in Tasks 1-11. Verify: unit-test coverage of resolvers + migration + Visibility enum roundtrip; integration tests assert the actual JSON-RPC error codes and `data` shapes (not just error presence); shim tests exercise SHA256 mismatch path (negative case); netns-isolated offline test is genuinely network-namespace-isolated (not just `--offline`); test pyramid balance (no over-mocked integration tests). Write audit report.
 - **Skill:** test-master
 - **Reviewers:** none
 
 ### Final Wave
 
-#### Task 15: Pre-deploy QA
+#### Task 12: Pre-deploy QA
 - **Description:** Acceptance testing: run `cargo test --workspace`, `cargo clippy --workspace -- -D warnings`, `npx vitest run` in packages/mcp/ and packages/cli/. Verify each user-spec acceptance criterion (AC1–AC17) and each tech-spec criterion against a freshly-built local binary + shim install in a tempdir HOME. Cross-check verification-table rows 1–14 from user-spec "Как проверить" pass against the locally-running binary.
 - **Skill:** pre-deploy-qa
 - **Reviewers:** none
 
-#### Task 16: Deploy (tag + publish)
+#### Task 13: Deploy (tag + publish)
 - **Description:** Bump versions: `mcp/Cargo.toml` (binary), `packages/sdk/package.json`, `packages/cli/package.json`, `packages/mcp/package.json`. Update CHANGELOG. Tag `v<x.y.z>` and push. CI release.yml emits artifacts + SHA256SUMS + publishes SDK, CLI, and new `@mnemonik-xyz/mcp`. Watch the Trusted Publishing flow complete. Update `dist/binary-version.json` in the shim to reference the new tag.
 - **Skill:** deploy-pipeline
 - **Reviewers:** none
 
-#### Task 17: Post-deploy verification
+#### Task 14: Post-deploy verification
 - **Description:** Live-environment checks against `mcp.mnemonik.xyz` after server rebuild + `@mnemonik-xyz/mcp` after npm publish:
   - Anonymous discovery via MCP Inspector — tool: `npx @modelcontextprotocol/inspector https://mcp.mnemonik.xyz/mcp`
   - Anonymous recall filter against production DB (seeded test fixture earlier) — tool: curl
