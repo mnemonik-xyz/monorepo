@@ -1405,16 +1405,17 @@ pub fn recall(
     //   the storage layer adds `AND a.visibility = 'public'` so only rows
     //   the owner explicitly opted into the public pool surface.
     //
-    // The owner_pubkey is the local server keypair on the anonymous path
-    // (the dispatcher's fallback), so the SQL still filters by *some* owner.
-    // For the anonymous case the visibility-public predicate is the real
-    // gating filter — `owner_pubkey` in that path is effectively a no-op
-    // because all public rows on a server are reachable via the public
-    // index regardless of who anchored them. Task 4 stays consistent with
-    // T2 of this feature by passing through the existing owner_pubkey
-    // contract rather than rewriting the search to drop the owner predicate
-    // for anonymous calls; the test in `mcp/tests/anonymous_recall.rs`
-    // pins the expected behaviour.
+    // For anonymous callers, `owner_pubkey` is the server keypair (the
+    // dispatcher's fallback when claims are absent). This means anonymous
+    // recall returns only public rows anchored under the server keypair —
+    // it does NOT cross tenant boundaries. Cross-tenant anonymous recall
+    // (returning all public rows from all owners across the DB) is NOT
+    // implemented in v1: the owner predicate stays in place by design,
+    // matching the test fixture in `mcp/tests/anonymous_recall.rs` which
+    // seeds rows under the server keypair specifically so the search finds
+    // them at all (code-reviewer round 1 CR-3 — correcting the round-1
+    // comment that mis-described the owner predicate as "effectively a
+    // no-op").
     let results = store
         .search(&query_emb, owner_pubkey, visibility_filter, limit)
         .unwrap_or_default();

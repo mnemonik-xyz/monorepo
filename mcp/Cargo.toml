@@ -75,6 +75,13 @@ hex = "0.4"
 # RustCrypto, small, audited; matches the sha2 major already pinned.
 hmac = "0.12"
 
+# Constant-time byte comparison for the HMAC consume path in
+# `confirmation_token.rs`. RustCrypto crate, already transitively present via
+# hmac/sha2 — surfaced as a direct dep so the typed `ct_eq` is reachable
+# without leaning on a hand-rolled loop the compiler can elide (code-reviewer
+# round 1 CR-2, agent-native-distribution Task 4).
+subtle = "2"
+
 # Encoding
 base64 = "0.22"
 

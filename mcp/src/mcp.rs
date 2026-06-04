@@ -1519,9 +1519,16 @@ async fn handle_tool_call(
             // — `resolve_visibility` returns `-32602 InvalidParams` in that
             // case.
             let visibility = tools::resolve_visibility(args, resolved.write_mode)?;
-            // `_allow_fallback` is wired through to the soft-fall router in
-            // Task 5. Parsed here so any malformed value is rejected at the
-            // dispatcher boundary before storage / payment side effects.
+            // `_allow_fallback` is parsed here so any malformed value is
+            // rejected at the dispatcher boundary before storage / payment
+            // side effects. Task 5 (mcp-stdio subcommand + soft-fall) wires
+            // it into `tools::sign_memory_inline`'s post-failure branch in
+            // `mcp/src/tools.rs`: when `allow_fallback_to_participate=true`
+            // and local execution fails (e.g. `-32098 EmbedderInvalid`),
+            // sign_memory re-dispatches the same arguments through the
+            // hosted participate-mode proxy (`MNEMONIC_HOSTED_ENDPOINT`)
+            // and the response gains an `escalated: { from, to, reason }`
+            // marker (Decision 4 — agent-native-distribution).
             let _allow_fallback = tools::resolve_allow_fallback(args)?;
 
             // Decision 5b — public-write confirmation gate. Fires only when

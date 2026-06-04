@@ -3236,6 +3236,7 @@ dependencies = [
  "sha2 0.10.9",
  "simd-json",
  "solana-sdk",
+ "subtle",
  "tempfile",
  "tokio",
  "tokio-stream",

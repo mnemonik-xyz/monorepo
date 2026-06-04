@@ -102,6 +102,14 @@ async fn consume_succeeds_for_matching_args() {
         );
     }
     // Ledger must have removed the entry post-consume (single-use).
+    //
+    // ORDERING INTENT (code-reviewer round 1 CR-5): the gate consumes the
+    // token BEFORE the Arweave/Solana downstream IO. So even when the
+    // downstream write fails (as it does here against http://localhost:0),
+    // the ledger row is gone. If this assertion ever flips to `> 0`, the
+    // public-write gate has regressed — somebody reordered the consume
+    // after the IO, opening a window where a failed write leaves an
+    // unconsumed token in the ledger.
     assert_eq!(server.state.confirmation_ledger.len(), 0);
 }
 

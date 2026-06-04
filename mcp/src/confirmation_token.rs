@@ -29,6 +29,7 @@ use dashmap::DashMap;
 use hmac::{Hmac, Mac};
 use rand::RngCore;
 use sha2::Sha256;
+use subtle::ConstantTimeEq;
 use uuid::Uuid;
 
 use mnemonic_core::storage::Visibility;
@@ -187,8 +188,8 @@ impl ConfirmationLedger {
             // Constant-time compare on the stored HMAC. The presented bytes
             // are also compared so a forged client-supplied token can't pass.
             // Both predicates must hold for the entry to be removed.
-            let ct_stored = constant_time_eq(&entry.hmac, &expected);
-            let ct_client = constant_time_eq(&entry.hmac, &presented);
+            let ct_stored = ct_eq(&entry.hmac, &expected);
+            let ct_client = ct_eq(&entry.hmac, &presented);
             let now = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
@@ -273,17 +274,16 @@ fn compute_hmac(
     mac.finalize().into_bytes().to_vec()
 }
 
-/// Constant-time equality. Hand-rolled to avoid an extra `subtle` crate dep.
-/// `a.len() != b.len()` short-circuits non-secretly (length is not the secret).
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut acc = 0u8;
-    for (x, y) in a.iter().zip(b.iter()) {
-        acc |= x ^ y;
-    }
-    acc == 0
+/// Constant-time byte-slice equality via `subtle::ConstantTimeEq`. The
+/// `subtle` crate is the RustCrypto-standard primitive that uses `black_box`
+/// plus volatile reads to defeat LLVM loop optimisations that could otherwise
+/// reintroduce data-dependent branches on a hand-rolled XOR-accumulate
+/// (code-reviewer round 1 CR-2, agent-native-distribution Task 4).
+/// Note: an `a.len() != b.len()` short-circuit is non-secret here because an
+/// HMAC output is a fixed 32 bytes — the slice never carries the secret in
+/// its length.
+fn ct_eq(a: &[u8], b: &[u8]) -> bool {
+    bool::from(a.ct_eq(b))
 }
 
 #[cfg(test)]

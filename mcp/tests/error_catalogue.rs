@@ -61,9 +61,14 @@ fn is_bool(v: &Value) -> bool {
 fn is_array(v: &Value) -> bool {
     v.is_array()
 }
-fn is_string_or_value(v: &Value) -> bool {
-    // `received` echoes the verbatim input which can be any JSON value.
-    !v.is_null() || v.is_null()
+fn is_any_value(_v: &Value) -> bool {
+    // `received` echoes the verbatim input — any JSON value (including null)
+    // is acceptable; field presence is the real check, enforced by
+    // `assert_data_fields`'s `unwrap_or_else` panic-on-missing-key. The
+    // round-1 helper `is_string_or_value` collapsed to a tautology and
+    // silently bypassed even this presence check; the rename makes the
+    // intent transparent (code-reviewer CR-1, agent-native-distribution Task 4).
+    true
 }
 
 #[tokio::test]
@@ -85,10 +90,7 @@ async fn catalogue_invalid_params_visibility_on_local() {
     assert_eq!(err["code"], -32602);
     let data = &err["data"];
     assert_eq!(data["field"], "visibility");
-    assert_data_fields(
-        data,
-        &[("field", is_string), ("received", is_string_or_value)],
-    );
+    assert_data_fields(data, &[("field", is_string), ("received", is_any_value)]);
 }
 
 #[tokio::test]
