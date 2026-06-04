@@ -91,3 +91,34 @@ Review details — in JSON files via links. QA report — in logs/working/.
 - `cargo clippy --workspace --all-targets --features mnemonic-mcp/test-support -- -D warnings` → clean
 - `cargo fmt --all -- --check` → clean
 - Smoke (task §Verification Steps): `cargo test -p mnemonic-core integration_storage::migrate_visibility_column_idempotent_on_clean_db` → 1 passed
+
+---
+
+## Task 2: mcp.rs server surfaces + anonymous allowlist + tools/list enrichment
+
+**Status:** Done
+**Commits:** 88f8db6 (impl) + db57911 (round 1 code-reviewer fixes: CR2-01 placeholder arm, CR2-02 negative-path tests, CR2-03 OnceLock cache) + d52f2f5 (round 1 test-reviewer F2/F3 fixes)
+**Agent:** t2-coder
+**Summary:** Wired the four `prompts/*` and `resources/*` dispatch arms plus the embedder metadata block in `initialize`, enriched `tools/list` descriptions with the matching skill manifest's `Purpose+Trigger` via `skill_for_tool()`/`enrich_tool_description()` (drift-impossible: manifest body is the single source of truth), added the 7th tool entry `request_public_write_confirmation` (definition + -32601 placeholder arm pointing to Task 4's handler), and extended `ALLOWLIST_METHODS` in `oauth/mod.rs` so the four new discovery methods are anonymous-OK. Key implementation decisions: `EMBEDDER_MODEL_VERSION` is a `pub const` literal in `mcp.rs` (re-exported from `lib.rs`) because both compilation units (binary `mod mcp;` and library `pub mod mcp;`) compile the same `mcp.rs` source file; sync risk for fastembed bumps documented inline + flagged for Task 13 release checklist. `enriched_tools()` is memoized via `std::sync::OnceLock<Vec<Value>>` after code-reviewer round 1, single allocation per process.
+**Deviations:** None.
+
+**Forward flag for Task 4 (from test-reviewer F2):** `recall_owner_isolation.rs:212` carries a NOTE about the AC13/Task 4 contract change — the 401-on-anonymous-recall assertion must flip to `200 + visibility='public'` rows when Task 4 lands the visibility-filter recall path. Task 4's coder should update that assertion alongside the handler change.
+
+**Reviews:**
+
+*Round 1 (88f8db6):*
+- code-reviewer: approve_with_minor_findings, 3 minor + 1 informational → [logs/working/task-2/code-reviewer-round1.json](logs/working/task-2/code-reviewer-round1.json)
+- security-auditor: PASS → [logs/working/task-2/security-auditor-round1.json](logs/working/task-2/security-auditor-round1.json)
+- test-reviewer: CONDITIONAL_PASS, 2 required + 1 optional → [logs/working/task-2/test-reviewer-round1.json](logs/working/task-2/test-reviewer-round1.json)
+
+*Round 2 (db57911 + d52f2f5):*
+- code-reviewer: APPROVED → [logs/working/task-2/code-reviewer-round2.json](logs/working/task-2/code-reviewer-round2.json)
+- security-auditor: PASS → [logs/working/task-2/security-auditor-round2.json](logs/working/task-2/security-auditor-round2.json)
+- test-reviewer: PASS → [logs/working/task-2/test-reviewer-round2.json](logs/working/task-2/test-reviewer-round2.json)
+
+**Verification:**
+- `cargo test -p mnemonic-mcp --features test-support --test discovery_anonymous` → 8/8 pass (6 TDD anchors + 2 negative-path tests added in round 2)
+- `cargo test --workspace --features mnemonic-mcp/test-support --no-fail-fast` → green
+- `cargo clippy --workspace --all-targets --features mnemonic-mcp/test-support -- -D warnings` → clean
+- `cargo fmt --all -- --check` → clean
+- Smoke (live curl loop) skipped — integration tests exercise the same dispatcher arms through the same axum Router + oauth middleware stack as the production handler; the only thing live smoke would add is a fastembed model_id roundtrip, and the integration test's `mock_state()` calls the same `Embedder::model_id()` trait method the dispatcher uses.

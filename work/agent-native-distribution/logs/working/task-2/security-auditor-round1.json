@@ -1,0 +1,101 @@
+{
+  "review_round": 1,
+  "reviewer": "t2-security-auditor",
+  "commit": "88f8db6",
+  "task": "Task 2: mcp.rs server surfaces + anonymous allowlist + tools/list enrichment",
+  "date": "2026-06-04",
+  "verdict": "PASS_WITH_MINOR_FINDINGS",
+  "summary": "The implementation is secure for its scope. The anonymous allowlist enforcement is correct, no per-tenant or sensitive data leaks through the new discovery surfaces, and the URI/name input validation is structurally sound (stem matched against a compile-time static set, not the filesystem). Two low-severity findings and one forward-looking advisory for Task 4.",
+
+  "findings": [
+    {
+      "id": "SA-T2-01",
+      "severity": "LOW",
+      "category": "Information Disclosure",
+      "title": "Tool description contains internal implementation artifact",
+      "location": "mcp/src/mcp.rs — tool_definitions(), request_public_write_confirmation entry",
+      "description": "The description for the `request_public_write_confirmation` tool reads: \"Consumed by Task 4's handler; not user-facing — agent skills invoke it inline whenever they intend to issue a `mode='participate'` write with `visibility='public'`.\" The phrase 'Consumed by Task 4's handler' is an internal development artifact referencing the project's task numbering system. This is exposed anonymously via `tools/list`.",
+      "impact": "An anonymous MCP client can infer that the tool has no handler yet and that the project is following a numbered task structure. Not a secret, but it signals an incomplete implementation surface that an adversary could probe.",
+      "recommendation": "Remove the 'Consumed by Task 4's handler; not user-facing' fragment from the public-facing description before the v1 release. Replace with functional description only: e.g., 'Request a signed confirmation token required for public participate-mode writes. Call before sign_memory with mode=participate and visibility=public.'",
+      "fix_required_before_ship": false
+    },
+    {
+      "id": "SA-T2-02",
+      "severity": "LOW",
+      "category": "Input Validation",
+      "title": "No explicit length cap on `name` / `uri` parameters in discovery handlers",
+      "location": "mcp/src/mcp.rs — prompts_get_payload(), resources_read_payload()",
+      "description": "The `name` field in `prompts/get` and the `uri` field in `resources/read` are accepted from the JSON-RPC params without an explicit length check. On a failure path (`invalid_params`), the full received value is echoed back in `data.received`. The body is globally bounded by `MAX_PEEK_BODY = 1 MiB` in the OAuth middleware, so the maximum echo size is bounded, but there is no per-field cap.",
+      "impact": "A client could send a name/uri of up to ~1 MiB, causing the server to allocate, parse, and echo a large string in the JSON-RPC error response. This is a mild amplification vector (1:1 echo, no multiplication) bounded by the existing 1 MiB body cap. Not a DoS risk given existing rate limiting, but the pattern is not defense-in-depth.",
+      "recommendation": "Add a short length check before the lookup: e.g., `if name.len() > 128 { return Err(invalid_params(\"name\", &Value::String(name.to_string()))); }`. Skill names are at most ~32 chars; URIs are at most ~64. A 256-byte cap per field eliminates the echo amplification while imposing zero ergonomic cost on legitimate clients.",
+      "fix_required_before_ship": false
+    },
+    {
+      "id": "SA-T2-03",
+      "severity": "INFO",
+      "category": "Defense in Depth — Forward Advisory for Task 4",
+      "title": "request_public_write_confirmation handler (Task 4) must re-verify JWT presence",
+      "location": "mcp/src/mcp.rs — future Task 4 handler dispatch arm",
+      "description": "The `request_public_write_confirmation` tool is listed in `tools/list` (anonymous-visible) and correctly NOT placed in `ALLOWLIST_METHODS`. The OAuth middleware gate enforces JWT requirement on `tools/call` today — any anonymous `tools/call` for this tool gets a 401 before reaching the dispatcher. However, per the threat model in tech-spec Decision 5b, the handler itself must independently verify that `Claims` is `Some` (i.e., a valid JWT is present) and derive `owner_pubkey` exclusively from `claims.sub`, never from client-supplied parameters. This is defense-in-depth against future middleware refactoring that might inadvertently allowlist `tools/call`.",
+      "impact": "If Task 4's handler is written without an explicit `Claims` check and a future change accidentally allowlists `tools/call`, an anonymous caller could invoke the ceremony gate without authentication, bypassing the ownership binding in the HMAC tuple (tech-spec Decision 5b: 'owner_pubkey is derived server-side from claims.sub — never client-supplied').",
+      "recommendation": "Task 4 must include: (1) An explicit `match claims { Some(c) => c, None => return Err(JsonRpcError::simple(-32001, \"unauthorized\")) }` guard at handler entry, before any HMAC computation. (2) A dedicated integration test case: call `request_public_write_confirmation` without Bearer token → assert HTTP 401 (middleware) AND separately assert the handler returns -32001 if somehow called with Claims=None (defense-in-depth unit test).",
+      "fix_required_before_ship": false
+    }
+  ],
+
+  "pass_checks": [
+    {
+      "check": "Anonymous allowlist enforcement — no non-allowlisted method reachable anonymously",
+      "result": "PASS",
+      "detail": "ALLOWLIST_METHODS now contains exactly: [initialize, tools/list, ping, prompts/list, prompts/get, resources/list, resources/read]. The `notifications/*` prefix passthrough is safe: arbitrary `notifications/X` methods hit the dispatcher's catch-all `_ => Err(unknown method)` arm and return -32603 with no data access. The literal `notifications/initialized` arm returns `{}`. No tool execution path is reachable without a valid JWT."
+    },
+    {
+      "check": "No path traversal in resource URI handling",
+      "result": "PASS",
+      "detail": "resources_read_payload() strips the RESOURCE_URI_PREFIX ('mnemonik://skills/') and '.md' suffix, then does a linear scan against ALL_SKILLS (a compile-time static slice). No filesystem call is made anywhere in the new handlers. An attacker cannot supply '../../../etc/passwd' or similar — the stem would not match any registered skill name and returns -32602."
+    },
+    {
+      "check": "No owner_pubkey / signer_pubkey / JWT sub leakage in anonymous responses",
+      "result": "PASS",
+      "detail": "The four new dispatcher arms (prompts/list, prompts/get, resources/list, resources/read) call functions that accept only (&Value) or no parameters. None reference owner_pubkey, jwt_sub, or state.keypair. The initialize response now includes embedder.{model_id, model_version, dim} — these are public model identity fields, not user credentials. For anonymous requests, owner_pubkey falls back to state.keypair (server's own Ed25519 pubkey) but this value is not surfaced in any new response field."
+    },
+    {
+      "check": "No embeddings or canonical CBOR bytes returned anonymously",
+      "result": "PASS",
+      "detail": "prompts/* and resources/* return only skill manifest markdown (mcp/assets/skills/*.md content) — public documentation. No search results, embedding vectors, attestation records, or CBOR bytes are reachable on these paths."
+    },
+    {
+      "check": "URI echo in success path is bounded to valid canonical URIs only",
+      "result": "PASS",
+      "detail": "In resources_read_payload(), the user-supplied `uri` is echoed in the success response contents[0].uri ONLY after passing both prefix/suffix validation AND stem lookup against ALL_SKILLS. Any URI that reaches the echo point is structurally 'mnemonik://skills/<valid_skill_name>.md' — the effective value space is at most 7 strings."
+    },
+    {
+      "check": "request_public_write_confirmation tools/call blocked for anonymous callers",
+      "result": "PASS",
+      "detail": "tools/call is not in ALLOWLIST_METHODS. Anonymous POST to /mcp with method=tools/call receives HTTP 401 from bearer_auth_middleware before the dispatcher is invoked. The tool definition in tools/list (anonymous-visible) exposes only name + inputSchema — no sensitive server data."
+    },
+    {
+      "check": "No log injection via user-supplied name/uri values",
+      "result": "PASS",
+      "detail": "Grepped new handler functions for tracing/log macro calls. None of the new prompts_get_payload(), resources_read_payload(), prompts_list_payload(), resources_list_payload(), enrich_tool_description(), or skill_for_tool() functions emit log lines containing user-supplied values."
+    },
+    {
+      "check": "Skill manifest content — no secrets baked into binary",
+      "result": "PASS",
+      "detail": "Spot-checked mcp/assets/skills/attest.md and init.md. Content is purely user-facing behavioral guidance. No API keys, private keys, internal service URLs, or credentials are present in the manifests."
+    }
+  ],
+
+  "owasp_coverage": {
+    "A01_broken_access_control": "CHECKED — anonymous discovery surfaces are read-only static data; write-tier tools remain JWT-gated",
+    "A02_cryptographic_failures": "NOT_IN_SCOPE — no crypto in Task 2; embedder identity is informational",
+    "A03_injection": "CHECKED — no SQL in new paths; URI/name matched against compile-time set, no exec",
+    "A04_insecure_design": "CHECKED — allowlist-by-name is the established pattern; no new architectural risk",
+    "A05_security_misconfiguration": "CHECKED — ALLOWLIST_METHODS change is minimal and justified; test coverage present",
+    "A06_vulnerable_components": "NOT_IN_SCOPE — no new dependencies in Task 2",
+    "A07_auth_failures": "CHECKED — tools/call remains gated; allowlisted methods are read-only",
+    "A08_integrity_failures": "NOT_IN_SCOPE — no binary download or deserialization in Task 2",
+    "A09_logging_monitoring": "CHECKED — no user-supplied value appears in log lines from new handlers",
+    "A10_ssrf": "NOT_IN_SCOPE — no outbound requests in Task 2 discovery paths"
+  }
+}

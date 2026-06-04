@@ -1,0 +1,85 @@
+{
+  "reviewer": "t2-code-reviewer",
+  "task": 2,
+  "round": 1,
+  "commit": "88f8db6",
+  "verdict": "approve_with_minor_findings",
+  "summary": "Implementation is correct and well-structured. All six TDD anchor tests are present and cover the wire contract through the real OAuth middleware. Four findings: one minor (request_public_write_confirmation handler stub missing from handle_tool_call), one minor (prompts/get and resources/read lack negative-path test coverage), one minor (enriched_tools() rebuilds tool_definitions() on every tools/list call), one informational (serverInfo version hardcoded, pre-existing issue not introduced by this task).",
+  "dimensions_reviewed": [
+    "architecture",
+    "separation_of_concerns",
+    "code_readability_and_maintainability",
+    "error_handling",
+    "type_safety",
+    "testing_coverage",
+    "cross_file_consistency",
+    "security_considerations",
+    "performance"
+  ],
+  "findings": [
+    {
+      "id": "CR2-01",
+      "severity": "minor",
+      "dimension": "cross_file_consistency",
+      "title": "request_public_write_confirmation advertised in tools/list but missing from handle_tool_call dispatcher",
+      "location": "mcp/src/mcp.rs:1397-1402 (handle_tool_call _ arm)",
+      "description": "The 7th tool entry 'request_public_write_confirmation' is exposed via tool_definitions() and therefore appears in the enriched tools/list response. However, handle_tool_call has no arm for this name — calls to it fall through to the catch-all _ branch which returns '-32603 unknown tool: request_public_write_confirmation'. This is intentional per task spec ('Consumed by Task 4’s handler'), but as-shipped, any MCP client that follows the advertised inputSchema and calls the tool receives an internal error rather than a graceful 'not yet implemented' response. The test suite does not exercise this call path, so the gap is invisible in CI.",
+      "recommendation": "Add a placeholder arm in handle_tool_call that returns a well-typed '-32603 NotImplemented' or '-32010 UnsupportedMode'-equivalent with a clear message: 'request_public_write_confirmation requires Task 4 handler — call mnemonic_sign_memory with mode=participate instead'. This closes the gap between the advertised surface and the actual dispatch, which is a wire-contract violation today. Alternatively, suppress the 7th tool entry from tool_definitions() until Task 4 ships and add it there. The task spec explicitly says Task 2 adds this entry; the handler stub should accompany it.",
+      "blocking": false
+    },
+    {
+      "id": "CR2-02",
+      "severity": "minor",
+      "dimension": "testing_coverage",
+      "title": "No negative-path tests for prompts/get (unknown name) and resources/read (bad URI)",
+      "location": "mcp/tests/discovery_anonymous.rs",
+      "description": "The task spec edge-case section documents: prompts/get { name: '<unknown>' } -> -32602 InvalidParams { field: 'name', received: '<unknown>' } and resources/read { uri: '<bad-scheme>' } -> same shape with field: 'uri'. These paths exercise real conditional branches in prompts_get_payload() and resources_read_payload() (the None arm in skill lookup), but no test covers them. The TDD anchor list in tasks/2.md does not require these tests, but the code_reviewing methodology flags missing error-path coverage for user-facing dispatchers.",
+      "recommendation": "Add two tests to discovery_anonymous.rs: (1) POST prompts/get with params.name = 'nonexistent-skill', assert HTTP 200 (JSON-RPC errors still return 200), body.error.code == -32602, body.error.data.field == 'name'. (2) POST resources/read with params.uri = 'https://invalid-scheme/foo.md', assert error.code == -32602, data.field == 'uri'. Both tests are small and test real branches in production code.",
+      "blocking": false
+    },
+    {
+      "id": "CR2-03",
+      "severity": "minor",
+      "dimension": "performance",
+      "title": "enriched_tools() and tool_definitions() rebuild serde_json::Value on every tools/list call",
+      "location": "mcp/src/mcp.rs:233-241 (enriched_tools), mcp/src/mcp.rs:638 (tool_definitions)",
+      "description": "tool_definitions() constructs a serde_json::json!([...]) array literal and enriched_tools() clones it, maps over it with string formatting, and returns a Vec<Value> on every tools/list request. The skills::ALL_SKILLS slice is 'static and the enriched descriptions are deterministic, so this work could be done once at startup. Under normal load (discovery is O(connections), not O(requests per second on hot paths)) this is unlikely to matter, but it is an unnecessary allocation on every call. The tech-spec recommends 'assemble at startup time and cache' in the implementation hints section.",
+      "recommendation": "Wrap the enriched result in a std::sync::OnceLock<Vec<Value>> or compute it inside McpState::build() and store as Arc<Vec<Value>>. Since the skill constants are 'static and the tool_definitions JSON is deterministic, a module-level OnceLock is appropriate: static ENRICHED_TOOLS: OnceLock<Vec<Value>> = OnceLock::new(); fn enriched_tools() -> &'static [Value] { ENRICHED_TOOLS.get_or_init(|| ...) }. This is a low-priority improvement; acceptable to defer to a follow-up.",
+      "blocking": false
+    },
+    {
+      "id": "CR2-04",
+      "severity": "informational",
+      "dimension": "code_readability_and_maintainability",
+      "title": "serverInfo version '0.1.0' is hardcoded — pre-existing issue not introduced by this task",
+      "location": "mcp/src/mcp.rs:756",
+      "description": "The initialize response carries serverInfo.version as the literal string '0.1.0'. This matches the current mcp/Cargo.toml version field but is not derived from it (no env!(\"CARGO_PKG_VERSION\") usage). The same issue exists for EMBEDDER_MODEL_VERSION (acknowledged in code comments). This is a pre-existing pattern unchanged by this task; surfaced here for completeness. The Task 13 release checklist already covers EMBEDDER_MODEL_VERSION; adding serverInfo.version to that same checklist is sufficient.",
+      "recommendation": "Either use env!(\"CARGO_PKG_VERSION\") in the initialize arm (which IS supported for concat!-free cases since it's a simple string substitution: the version!() approach via a build.rs env propagation), or add 'verify serverInfo.version matches Cargo.toml' to the Task 13 release checklist alongside the existing EMBEDDER_MODEL_VERSION check. Not a blocker; informational only.",
+      "blocking": false
+    }
+  ],
+  "positive_observations": [
+    "skill_for_tool() mapping is correct: mnemonik-help and mnemonik-checkpoint have no direct tool analog and are correctly absent from the mapping. The _ => return None arm handles them transparently — enrich_tool_description() passes them through unchanged (correct: help/checkpoint appear in prompts/resources but not in tools/list enrichment).",
+    "ALLOWLIST_METHODS extension is minimal and correct — exactly the four new discovery methods are added, no over-extension. The comment block at oauth/mod.rs:1236-1242 accurately explains the security rationale (compile-time constants only, no storage access).",
+    "prompts_get_payload() and resources_read_payload() both validate inputs before looking up skills, returning -32602 with field + received in data — consistent with the existing invalid_params() helper shape from modes-user-choice.",
+    "RESOURCE_URI_PREFIX constant eliminates magic string duplication between resources_list_payload() and resources_read_payload(). strip_suffix('.md') on the URI stem is correct — prevents a skill named 'foo.md' (impossible given EXPECTED_MANIFESTS, but defensive is good).",
+    "EMBEDDER_MODEL_VERSION is placed in mcp.rs (not lib.rs) with a pub use re-export in lib.rs — correct reasoning documented in the doc comment: avoids the dual-compilation-unit duplication risk.",
+    "The test file mirrors auth_allowlist.rs test plumbing exactly (same mock_state() + OAuthState wiring, same post_json() helper pattern) — low maintenance surface, familiar to anyone who has read the existing test suite.",
+    "prompts_list_with_invalid_bearer_passes_through is a valuable regression guard — it locks down the 'allowlisted methods treat bad Bearer as absent' behavior that was observed to be fragile in T15.",
+    "resources_read test asserts byte-for-byte equality against skills::ALL_SKILLS[...].full_markdown — this is the correct assertion for the single-source-of-truth invariant and would catch any transformation bug in the payload builder.",
+    "The 7th tool (request_public_write_confirmation) is correctly absent from skill_for_tool(), so enrich_tool_description() passes it through unchanged — its description in tool_definitions() is the complete description (no manifest enrichment needed per task spec)."
+  ],
+  "spec_compliance": {
+    "AC1": "pass — prompts_list_returns_seven_without_bearer and resources_list_returns_seven_without_bearer cover the >=7 count; tools_list_enriched_with_purpose_trigger covers enriched descriptions",
+    "AC2": "pass — build.rs manifest integrity check from Task 1 already enforced; this task consumes those constants",
+    "AC15": "pass — initialize_surfaces_embedder_metadata asserts non-empty model_id, model_version, and positive dim; capabilities.prompts and capabilities.resources also asserted",
+    "task_2_ac_four_dispatcher_arms": "pass",
+    "task_2_ac_initialize_capabilities_and_embedder": "pass",
+    "task_2_ac_tools_list_enriched": "pass",
+    "task_2_ac_allowlist_extended": "pass",
+    "task_2_ac_six_anchor_tests_pass": "pass (reported by coder; test results consistent with implementation)",
+    "task_2_ac_no_regression": "pass (reported by coder)"
+  },
+  "required_changes_before_merge": [],
+  "optional_improvements": ["CR2-01 (stub handler)", "CR2-02 (negative-path tests)", "CR2-03 (OnceLock caching)"]
+}

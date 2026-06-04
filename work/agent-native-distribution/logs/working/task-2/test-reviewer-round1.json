@@ -1,0 +1,101 @@
+{
+  "reviewer": "t2-test-reviewer",
+  "task": "2",
+  "round": 1,
+  "verdict": "CONDITIONAL_PASS",
+  "summary": "All six TDD anchors are implemented and structurally sound. Three findings require attention: one required fix (F1 — missing negative-case tests for prompts/get and resources/read error paths that are explicitly listed in tasks/2.md edge-case section), one required fix (F2 — recall_owner_isolation.rs asserts anonymous recall returns 401 which will conflict with AC13's public-visibility recall being added in Task 4; needs a comment/note now), and one optional improvement (F3 — allowlist coverage gap in oauth/mod.rs internal unit tests for the four new methods).",
+
+  "findings": [
+    {
+      "id": "F1",
+      "severity": "required",
+      "category": "coverage_gap",
+      "title": "No tests for prompts/get and resources/read error paths (explicitly listed in tasks/2.md edge cases)",
+      "detail": "tasks/2.md §Edge cases specifies: `prompts/get { name: '<unknown>' }` must return `-32602 InvalidParams { field: 'name', received: '<unknown>' }`, and `resources/read { uri: '<bad-scheme>' }` must return `-32602 InvalidParams { field: 'uri' }`. The production code in mcp.rs:97-130 and mcp.rs:152-183 correctly implements these paths. However, discovery_anonymous.rs has zero tests exercising the error branches. Both functions have two error branches each (missing/null param and unknown name/uri) — none are exercised in the test file. These are not covered by any other test file. This is a direct spec gap: the TDD anchor list has 6 tests, tasks/2.md §Edge cases adds two more scenarios that were supposed to be covered.",
+      "evidence": {
+        "spec_reference": "tasks/2.md §Edge cases lines 85-87",
+        "code_location": "mcp/src/mcp.rs:97-130 (prompts_get_payload), mcp.rs:152-183 (resources_read_payload)",
+        "test_gap": "mcp/tests/discovery_anonymous.rs — no test for prompts/get at all; resources/read only has happy path"
+      },
+      "fix": "Add two tests to discovery_anonymous.rs: (1) `prompts_get_unknown_name_returns_invalid_params` — POST `prompts/get { name: 'nonexistent-skill' }` without auth, assert HTTP 200 + JSON-RPC error code -32602 + data.field == 'name'. (2) `resources_read_bad_uri_returns_invalid_params` — POST `resources/read { uri: 'https://wrong-scheme.example/foo.md' }` without auth, assert HTTP 200 + JSON-RPC error code -32602 + data.field == 'uri'."
+    },
+    {
+      "id": "F2",
+      "severity": "required",
+      "category": "test_contract_conflict",
+      "title": "recall_owner_isolation.rs asserts anonymous recall → 401; AC13 (Task 4) will change this to 200 with public rows",
+      "detail": "mcp/tests/recall_owner_isolation.rs:230 asserts `anonymous recall MUST be 401`. This was correct pre-Task-2. AC13 (user-spec) requires that after Task 4 lands, anonymous recall returns only `visibility='public'` rows (HTTP 200). When Task 4 modifies the recall handler to filter by `visibility='public'` for unauthenticated callers, the existing recall_owner_isolation assertion will fail. Task 2 is the correct place to annotate this incoming conflict so Task 4's coder knows to update the existing test rather than being surprised by a CI failure.",
+      "evidence": {
+        "conflict_location": "mcp/tests/recall_owner_isolation.rs:156-230, specifically line 230",
+        "incoming_change": "tech-spec Decision 5 + AC13 — Task 4 will route anonymous recall through visibility='public' filter",
+        "risk": "Task 4 will break this assertion silently unless the test is updated alongside the handler change"
+      },
+      "fix": "Add a comment in recall_owner_isolation.rs above the anonymous-recall assertion block: `// NOTE(agent-native-distribution Task 4): this 401 assertion will change when Task 4 // routes anonymous recall to visibility='public' filter per AC13. Update the assert // to: status == 200 + results contain only public-visibility rows.` This prevents Task 4 from encountering an unexpected failing test and documents the intentional contract change."
+    },
+    {
+      "id": "F3",
+      "severity": "optional",
+      "category": "coverage_gap",
+      "title": "oauth/mod.rs internal unit tests do not cover the four new allowlisted methods",
+      "detail": "oauth/mod.rs has internal #[cfg(test)] tests at line 2325 (`test_middleware_initialize_method_allowlisted`) and related tests that cover `initialize` and `tools/list` as allowlisted, and `tools/call` as gated. After extending ALLOWLIST_METHODS with `prompts/list`, `prompts/get`, `resources/list`, `resources/read` at lines 1247-1250, there are no corresponding unit tests in the oauth module that assert these four methods also pass without Bearer. The integration tests in discovery_anonymous.rs cover prompts/list and (via the invalid-bearer test) the allowlist semantics for prompts/list, but prompts/get, resources/list, and resources/read are only covered at the integration level through the discovery_anonymous.rs HTTP tests — not at the middleware unit-test level. The comment at oauth/mod.rs:2609-2610 still says 'initialize / tools/list are the only allowlisted JSON-RPC methods' — now stale.",
+      "evidence": {
+        "stale_comment": "mcp/src/oauth/mod.rs:2609-2610",
+        "missing_tests": "No test in oauth/mod.rs's #[cfg(test)] block for prompts/get, resources/list, resources/read allowlist behavior",
+        "existing_coverage": "discovery_anonymous.rs covers prompts/list anonymous access + invalid-bearer pass-through; integration coverage exists for prompts/list only"
+      },
+      "fix": "Either (a) add three small unit tests inside oauth/mod.rs's #[cfg(test)] block (mirroring test_middleware_initialize_method_allowlisted for each of the three uncovered methods), or (b) update the stale comment at line 2609-2610 to list all six allowlisted methods. Option (b) is the minimum — option (a) gives regression protection if someone trims ALLOWLIST_METHODS."
+    }
+  ],
+
+  "passing": [
+    {
+      "id": "P1",
+      "title": "All six TDD anchors implemented and structurally correct",
+      "detail": "prompts_list_returns_seven_without_bearer, resources_list_returns_seven_without_bearer, resources_read_returns_full_markdown_for_attest, tools_list_enriched_with_purpose_trigger, initialize_surfaces_embedder_metadata, prompts_list_with_invalid_bearer_passes_through — all present, all assert the exact contract from tasks/2.md."
+    },
+    {
+      "id": "P2",
+      "title": "Test isolation: each test gets a fresh mock_state() with tempfile SQLite",
+      "detail": "No shared state between tests. Pattern mirrors auth_allowlist.rs. Parallel cargo test runs cannot collide."
+    },
+    {
+      "id": "P3",
+      "title": "resources_read byte-for-byte assertion uses the compiled constant, not a re-read",
+      "detail": "The test compares against skills::ALL_SKILLS.iter().find(|s| s.name == 'mnemonik-attest').full_markdown — the same constant the production path returns. Drift between the file and the response is physically impossible. Correct approach."
+    },
+    {
+      "id": "P4",
+      "title": ">=7 cardinality tolerance is correct and the split with skill_manifests.rs is sound",
+      "detail": "discovery_anonymous.rs uses >= 7 for prompts/resources counts; skill_manifests.rs enforces == 7 exact-set invariant. The split is intentional and documented in the diff note. Each test catches a different failure class."
+    },
+    {
+      "id": "P5",
+      "title": "tools_list_enriched_with_purpose_trigger correctly exempts request_public_write_confirmation",
+      "detail": "The 7th tool (gate infrastructure) is explicitly excluded from the manifest-enrichment assertion with a comment explaining why. The test only certifies the 6-tool enrichment contract."
+    },
+    {
+      "id": "P6",
+      "title": "Invalid-bearer pass-through test correctly targets allowlist semantics, not JWT validity",
+      "detail": "The test sends 'not-a-real-jwt' and asserts 200 — correctly targeting the oauth/mod.rs:1378-1384 behavior where allowlisted methods treat bad Bearer as absent. Asserts prompts array is still returned."
+    },
+    {
+      "id": "P7",
+      "title": "oauth_tool_call.rs and mcp.rs transport tests correctly bumped to 7 tools",
+      "detail": "EXPECTED_TOOLS array and the chunked-response-encoding assertion both updated consistently. No count drift."
+    },
+    {
+      "id": "P8",
+      "title": "Cargo.toml test entry correctly gates on required-features = ['test-support']",
+      "detail": "Matches the pattern of existing test entries. Prevents accidental compilation without the test-support feature."
+    }
+  ],
+
+  "pyramid_assessment": {
+    "unit_tests": "Not applicable to this task — Task 2 is server-surface wiring; unit-level logic lives in the helper functions (prompts_list_payload etc.) which are thin. The tech-spec unit tests for this task are in skill_manifests.rs (Task 1 output), which is correct.",
+    "integration_tests": "Six integration tests via discovery_anonymous.rs. Coverage of happy paths is complete. Error path coverage is missing for prompts/get and resources/read (F1).",
+    "e2e_tests": "Not required for Task 2 per spec.",
+    "balance": "Appropriate for the task size. The two required fixes (F1, F2) are targeted and low-effort."
+  },
+
+  "overall_assessment": "The implementation is solid and the tests are well-structured. F1 and F2 are required before this task can be considered complete — F1 closes a spec-explicit gap, F2 prevents a CI regression surprise in Task 4. F3 is a quality improvement that would be nice to have but does not block merge."
+}

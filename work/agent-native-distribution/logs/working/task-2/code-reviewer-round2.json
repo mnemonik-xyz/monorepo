@@ -1,0 +1,37 @@
+{
+  "reviewer": "t2-code-reviewer",
+  "task": 2,
+  "round": 2,
+  "commit": "db57911",
+  "verdict": "approve",
+  "summary": "All three actionable round-1 findings addressed correctly. CR2-01 (placeholder handler): -32601 MethodNotFound arm added with clear fallback guidance. CR2-02 (negative-path tests): both prompts_get and resources_read bad-input branches now have pinned assertions on code + data.field + data.received. CR2-03 (OnceLock caching): enriched_tools() returns &'static [Value], single allocation per process. CR2-04 informational skipped as agreed. No new issues introduced.",
+  "findings": [
+    {
+      "id": "CR2-01-RESOLVED",
+      "severity": "resolved",
+      "title": "request_public_write_confirmation placeholder arm — LGTM",
+      "detail": "-32601 (MethodNotFound) is the correct JSON-RPC 2.0 code for a method that is known but not yet callable (distinguishes it from -32603 InternalError and -32602 InvalidParams). The message includes the task-4 context and the current recommended path, which is exactly what a well-behaved MCP client would surface to the user. The arm is positioned before the _ catch-all so it takes precedence. No issues."
+    },
+    {
+      "id": "CR2-02-RESOLVED",
+      "severity": "resolved",
+      "title": "Negative-path tests for prompts/get and resources/read — LGTM",
+      "detail": "Both tests assert (1) HTTP 200 (JSON-RPC error in envelope, not HTTP error), (2) error.code == -32602, (3) data.field matches the validated param name, (4) data.received echoes the raw input value. This locks down the exact error shape against future refactors. The test for resources_read captures the bad_uri string in a variable and asserts data.received == bad_uri — correct for the echo-back contract. Both tests use the same build_router + post_json helpers as the six existing tests — no new test infrastructure."
+    },
+    {
+      "id": "CR2-03-RESOLVED",
+      "severity": "resolved",
+      "title": "OnceLock caching in enriched_tools() — LGTM",
+      "detail": "static CACHE: OnceLock<Vec<Value>> is module-level and process-scoped — correct for deterministic static content. get_or_init() is thread-safe; concurrent callers on the first request will both attempt init but OnceLock guarantees exactly one wins and the rest wait. Return type changed from Vec<Value> to &'static [Value]; the call site at mcp.rs:773 passes enriched_tools() into serde_json::json!({'tools': ...}) which accepts &[Value] via serde's Serialize impl for slices — no clone needed at the call site. The doc comment accurately describes the rationale and references the round-1 finding."
+    }
+  ],
+  "new_findings": [],
+  "spec_compliance": {
+    "AC1": "pass",
+    "AC2": "pass",
+    "AC15": "pass",
+    "task_2_all_ac": "pass",
+    "no_regression": "pass (reported by coder, consistent with implementation)"
+  },
+  "ready_to_merge": true
+}

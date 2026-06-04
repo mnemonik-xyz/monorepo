@@ -1,0 +1,64 @@
+{
+  "review_round": 2,
+  "reviewer": "t2-security-auditor",
+  "commit": "db57911",
+  "task": "Task 2 round-1 fix: OnceLock cache + placeholder arm + negative-path tests",
+  "date": "2026-06-04",
+  "verdict": "PASS",
+  "summary": "All three round-2 changes are clean from a security perspective. The OnceLock cache contains only compile-time static data with no per-tenant contamination risk. The placeholder arm for request_public_write_confirmation is correctly gated behind the existing JWT requirement on tools/call. The two new negative-path tests correctly exercise the error paths anonymously and confirm the typed -32602 envelope shape. One informational note carried forward.",
+
+  "round1_findings_status": {
+    "SA-T2-01": "OPEN (not addressed in round 2 — dev artifact 'Consumed by Task 4's handler' in tools/list description still present in tool_definitions(); SA-T2-01 is a pre-ship cleanup item, not a blocker). New placeholder arm error string also references 'agent-native-distribution Task 4' but this is only reachable by authenticated callers so impact is lower.",
+    "SA-T2-02": "OPEN (no per-field length cap added — acknowledged as non-blocker, bounded by MAX_PEEK_BODY globally).",
+    "SA-T2-03": "CARRIED FORWARD as advisory for Task 4. Not actionable in Task 2."
+  },
+
+  "round2_changes_reviewed": [
+    {
+      "change": "enriched_tools() OnceLock<Vec<Value>> cache",
+      "security_verdict": "PASS",
+      "analysis": "The cached value is computed entirely from (1) tool_definitions() — a pure static JSON literal — and (2) skill manifest constants baked at compile time via include_str!. No request-time input, no per-tenant data, no network call touches the cache value. OnceLock::get_or_init guarantees exactly-once initialization under concurrent access per Rust's memory model — no data race, no TOCTOU. The cache is a process-level singleton shared by all requests, but because the content is exclusively public tool definitions, there is zero cross-tenant contamination risk. The previous per-request Vec<Value> allocation was not a security issue; the cache is purely a performance improvement."
+    },
+    {
+      "change": "request_public_write_confirmation placeholder arm (-32601)",
+      "security_verdict": "PASS",
+      "analysis": "The arm returns a static string error with no user input echoed and no storage access. It is only reachable after passing the bearer_auth_middleware JWT gate (tools/call is not in ALLOWLIST_METHODS). The error message references 'agent-native-distribution Task 4' — an internal artifact — but since this path requires a valid JWT, the information is exposed only to authenticated callers, which is a significantly lower risk than SA-T2-01 (anonymous-accessible tools/list description). Still worth cleaning up before v1 tag for the same reason as SA-T2-01, but classified INFO not LOW given the auth gate.",
+      "note": "Using -32601 (MethodNotFound) for 'handler not yet implemented' is a mild semantic stretch — the method is tools/call; the tool name is what lacks a handler. The existing catch-all uses -32603 ('unknown tool') which is more precise. This is a code-reviewer concern, not a security issue. No action needed from security perspective."
+    },
+    {
+      "change": "Two new negative-path integration tests",
+      "security_verdict": "PASS",
+      "analysis": "prompts_get_unknown_name_returns_invalid_params: sends 'mnemonik-does-not-exist' anonymously, asserts HTTP 200 + JSON-RPC error code -32602 + data.field='name' + data.received='mnemonik-does-not-exist'. This correctly verifies the echo behavior and confirms no secret or server-internal data is present in the error response. resources_read_bad_uri_scheme_returns_invalid_params: sends 'https://invalid-scheme/foo.md' anonymously, asserts same -32602 envelope shape. Both tests exercise the anonymous error path without a Bearer token, confirming these branches are accessible pre-auth (correct for discovery methods) and return only typed, non-sensitive error data."
+    }
+  ],
+
+  "open_findings": [
+    {
+      "id": "SA-T2-01",
+      "severity": "LOW",
+      "status": "OPEN — pre-ship cleanup",
+      "title": "Dev artifact strings in public-facing tool descriptions",
+      "locations": [
+        "mcp/src/mcp.rs tool_definitions() — 'Consumed by Task 4's handler; not user-facing' in tools/list description (anonymous-accessible)",
+        "mcp/src/mcp.rs handle_tool_call placeholder arm — 'lands in agent-native-distribution Task 4' in -32601 error message (auth-gated, lower risk)"
+      ],
+      "action": "Remove both before tagging v1. Replace tools/list description with functional text only. The placeholder arm message can simply read 'request_public_write_confirmation is not yet available; use mnemonic_sign_memory with mode=participate + visibility=public'."
+    },
+    {
+      "id": "SA-T2-02",
+      "severity": "LOW",
+      "status": "OPEN — non-blocker, defense-in-depth",
+      "title": "No per-field length cap on name/uri params",
+      "action": "Add 256-byte cap in prompts_get_payload and resources_read_payload before lookup. Bounded by MAX_PEEK_BODY globally but per-field cap is defense-in-depth."
+    },
+    {
+      "id": "SA-T2-03",
+      "severity": "INFO",
+      "status": "ADVISORY for Task 4",
+      "title": "Task 4 handler must independently verify Claims at entry",
+      "action": "No action in Task 2. Task 4 must add explicit Claims=Some guard before HMAC computation in request_public_write_confirmation handler."
+    }
+  ],
+
+  "overall_assessment": "Task 2 implementation is security-sound. The two open findings (SA-T2-01, SA-T2-02) are pre-ship cleanup items, not blockers. SA-T2-03 is carried forward as an advisory for Task 4. No new security issues introduced in round 2."
+}
