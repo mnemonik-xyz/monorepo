@@ -1,0 +1,56 @@
+{
+  "reviewer": "t8-code-reviewer",
+  "task": "8",
+  "round": 2,
+  "verdict": "approved",
+  "summary": "All round-1 findings addressed correctly. CR8-001 is resolved: the one-level nesting assumption is now documented in the step comment, and the post-normalization grep guard catches layout regressions at release time rather than at first install. CR8-002 was explicitly left as-is per guidance. One informational observation on empty-SHA256SUMS edge case — not actionable. No new issues introduced. The diff is clean.",
+  "findings": [
+    {
+      "id": "CR8-R2-INFO1",
+      "severity": "informational",
+      "dimension": "Error Handling",
+      "title": "No guard for empty SHA256SUMS (zero build artifacts case)",
+      "location": ".github/workflows/release.yml — Generate SHA256SUMS step",
+      "description": "The normalization guard (`if grep -q '/' SHA256SUMS; then exit 1; fi`) catches leftover path separators after sed. It does NOT catch the case where `find` matches zero tarballs and SHA256SUMS is empty. An empty SHA256SUMS would still be uploaded to the GitHub Release, and the shim's install-binary.ts would fail with 'SHA256SUMS does not include an entry for <filename>' — a user-visible error rather than a silent corruption.",
+      "impact": "This scenario requires the build-linux and build-macos jobs to have both produced no artifacts, which would mean both matrix legs failed. In that case, the `needs: [build-linux, build-macos]` would also fail and the release job would not run. So an empty SHA256SUMS from zero artifacts is structurally impossible given the current workflow DAG — both build jobs must succeed (and produce tarballs) for the release job to trigger.",
+      "recommendation": "Not actionable — the failure mode is structurally impossible given `needs: [build-linux, build-macos]`. Documenting for completeness.",
+      "actionable": false
+    }
+  ],
+  "round1_findings_resolution": {
+    "CR8-001": {
+      "status": "resolved",
+      "description": "The step comment now explicitly documents the one-level-deep artifact layout assumption (upload-artifact names by target triple, download-artifact materializes exactly one subdirectory per artifact). The post-normalization `grep -q '/'` guard correctly fires if any line still contains a slash after sed — this catches both deeper nesting and a completely failed normalization. Logic verified: valid tarball names (mnemonic-mcp-${tag}-${target}.tar.gz) contain no slashes, so the guard does not produce false positives. A simulated nested-path scenario would leave '/' in the filename portion and trigger exit 1."
+    },
+    "CR8-002": {
+      "status": "accepted_as_is",
+      "description": "Leave-as-is per round-1 guidance. The prepublishOnly double-build is intentional belt-and-suspenders."
+    }
+  },
+  "new_additions_review": {
+    "concurrency_block": {
+      "verdict": "correct",
+      "analysis": "Workflow-level concurrency keyed on `github.ref` with `cancel-in-progress: true` is the standard pattern for tag-triggered release workflows. Correctly prevents race conditions on GitHub Release asset uploads and Trusted-Publishing OIDC token reuse when a tag is force-pushed. The cancel applies to all jobs including publish-npm and publish-mcp-shim — acceptable tradeoff since tag re-pushes are typically corrective actions where abandoning the in-flight run is intentional. One nuance: if the release job is mid-execution (partially uploaded artifacts) and is cancelled, GitHub Release state may be partial. This is the standard accepted risk of cancel-in-progress on release workflows and is preferable to double-publishing."
+    },
+    "sha256sums_comment_expansion": {
+      "verdict": "correct",
+      "analysis": "The expanded comment accurately documents the layout contract (upload-artifact@v4 names by target triple, download-artifact@v4 materializes one subdir per artifact). The cross-reference to SAR8-M1 and CR8-001 makes the audit trail clear. No inaccuracies."
+    },
+    "post_normalization_guard": {
+      "verdict": "correct",
+      "analysis": "`grep -q '/'` on the post-sed SHA256SUMS exits 0 only if a slash is present, which triggers the explicit `exit 1` with a clear error message on stderr. Correct inversion logic. Edge case: empty SHA256SUMS passes the guard silently but is structurally impossible (see CR8-R2-INFO1 above). The error message includes `cat SHA256SUMS >&2` for immediate debugging visibility — good practice."
+    },
+    "attest_comment_update": {
+      "verdict": "correct",
+      "analysis": "The updated comment accurately explains why the subject-path covers only the tarball (not the extracted binary): `gh attestation verify` runs against the tarball before extraction in install-binary.ts, and the tarball digest already commits to its contents. The cross-reference to Decision 8 and SAR8-M2 is accurate."
+    },
+    "publish_mcp_shim_comment_update": {
+      "verdict": "correct",
+      "analysis": "The expanded header comment explains the deliberate absence of `needs: [publish-npm]` and provides a forward-looking maintenance note: if a future change adds a workspace dep on sdk/cli, the `needs:` must be extended to avoid shipping a shim referencing an unpublished SDK/CLI version. This is the right pattern for documenting intentional architectural constraints."
+    }
+  },
+  "ac_verification": {
+    "all_round1_acs_still_pass": true,
+    "note": "The round-2 changes are additive (concurrency block, comment expansions, post-normalization guard). None of the changes remove or alter existing functionality. All 9 task ACs verified in round 1 continue to pass."
+  }
+}

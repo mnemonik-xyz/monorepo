@@ -1,0 +1,96 @@
+{
+  "round": 1,
+  "reviewer": "t8-security-auditor",
+  "commit": "f865d51",
+  "task": "8",
+  "timestamp": "2026-06-05",
+  "verdict": "APPROVE_WITH_FINDINGS",
+  "summary": "The diff is structurally correct and addresses the key supply-chain concerns. Two medium findings and one informational finding require attention before ship; no blockers.",
+  "findings": [
+    {
+      "id": "SAR8-M1",
+      "severity": "Medium",
+      "title": "SHA256SUMS sed regex is fragile — will silently produce malformed lines if artifact subdirectory names contain a slash",
+      "location": ".github/workflows/release.yml — Generate SHA256SUMS step, line 142",
+      "description": "The sed substitution `s| \\*\\./[^/]*/| \\*|` assumes the artifact download layout is exactly one directory deep (`./<target>/filename.tar.gz`). `actions/download-artifact@v4` without an explicit `merge-multiple: true` flag creates per-artifact subdirectories that ARE one level deep, so today the regex works. However, if the path contains a nested structure or the download layout changes in a future `actions/download-artifact` version, the regex will not match and SHA256SUMS lines will retain the `./<target>/` prefix. The shim's `install-binary.ts` parser (Task 7) splits on `sha256sum -b` format and matches lines against the bare filename — a non-normalized line will fail to match, causing every install to error out. The failure is silent from the workflow side (cat SHA256SUMS will show malformed lines but the step exits 0).",
+      "attack_vector": "Not a direct attack vector. This is a correctness/resilience issue: a layout change in `download-artifact` silently breaks the shim's verification path, which could cause all binary downloads to fail. An attacker cannot exploit this to bypass verification — it would fail closed — but it could block legitimate installs during a dependency version bump.",
+      "recommendation": "Use a more robust normalization that strips any relative prefix rather than assuming depth-1. Replace the sed line with:\n  `sed -i 's| \\*\\./\\([^/]*/\\)*| \\*|' SHA256SUMS`\nOr more readably, use a Python/awk one-liner that extracts only the basename:\n  `awk '{ n=split($2,a,\"/\"); $2=\"*\"a[n]; print }' SHA256SUMS > SHA256SUMS.tmp && mv SHA256SUMS.tmp SHA256SUMS`\nAlternatively, document the expected depth assumption in a comment and add a validation step that fails the workflow if any SHA256SUMS line still contains a `/` after normalization:\n  `grep -q '/' SHA256SUMS && echo 'ERROR: SHA256SUMS normalization failed' && exit 1 || true`"
+    },
+    {
+      "id": "SAR8-M2",
+      "severity": "Medium",
+      "title": "actions/attest-build-provenance@v1 subject-path does NOT include the Rust binaries — only tarballs; diverges from tech-spec Decision 8 requirement",
+      "location": ".github/workflows/release.yml — Attest build provenance step, line 152",
+      "description": "The task brief (from the team lead message) explicitly states: '`actions/attest-build-provenance@v1` must use the `subject-path` field listing the actual binary artifacts (not just the tarballs)'. The diff uses `subject-path: 'artifacts/**/mnemonic-mcp-*.tar.gz'` which attests only the tarballs. Tech-spec Decision 8 says 'verifies via `gh attestation verify <tarball>`' — so attesting the tarballs is correct for the shim's verification path. However, the task brief from the team lead explicitly requires binaries to be included as subjects. If the intent is that the attestation covers the innermost binary (not just the outer tarball), then the tarballs need to be extracted first, or both the binaries AND tarballs need to be added as subjects. The current approach means `gh attestation verify <binary>` will fail — only `gh attestation verify <tarball>` succeeds.",
+      "attack_vector": "If users or downstream consumers want to verify the raw binary (extracted from the tarball) against the attestation, they cannot — only tarball verification is supported. An attacker who replaces the binary inside a tarball after it is attested would produce a tarball that still passes attestation (the outer tarball hash matches) but contains a malicious binary. However, the shim downloads and re-verifies the whole tarball hash via SHA256SUMS before extracting, so this path is already defended. The risk is primarily about incomplete attestation coverage per the stated requirement.",
+      "recommendation": "Option A (minimal — satisfies shim verification, consistent with tech-spec Decision 8): keep `subject-path: 'artifacts/**/mnemonic-mcp-*.tar.gz'` and update the team-lead task brief comment to clarify that tarballs are the correct attestation subjects for this workflow. Update the task's acceptance criteria comment accordingly.\n\nOption B (full coverage per task brief): extract binaries after building tarballs, and add both to subject-path:\n```yaml\n- name: Attest build provenance\n  uses: actions/attest-build-provenance@v1\n  with:\n    subject-path: |\n      artifacts/**/mnemonic-mcp-*.tar.gz\n      artifacts/**/mnemonic-mcp\n```\nThis requires a prior extraction step. Recommend Option A and a brief clarifying comment in the workflow, since the shim only verifies tarballs via `gh attestation verify <tarball>` anyway."
+    },
+    {
+      "id": "SAR8-INFO1",
+      "severity": "Informational",
+      "title": "publish-mcp-shim has no explicit `needs` on publish-npm — parallel publish races are acceptable but worth documenting",
+      "location": ".github/workflows/release.yml — publish-mcp-shim job, line 261",
+      "description": "`publish-mcp-shim` has `needs: [release]` which correctly sequences it after the SHA256SUMS + attestation step. It does NOT have `needs: [publish-npm]`, meaning both publish jobs run in parallel after `release`. This is fine and intentional (they publish independent packages). However, both jobs run `npm ci` over the full workspace, and if `packages/mcp/` has a dependency on `packages/sdk/` or `packages/cli/` via a workspace reference, the mcp-shim publish could fail if sdk/cli are mid-publish during the race. Currently the shim is pure Node with no sdk/cli workspace dep (per tech-spec), so there is no race. This is informational to document the assumption.",
+      "attack_vector": "None. Purely a documentation/fragility note for future contributors who might add workspace dependencies to packages/mcp/.",
+      "recommendation": "Add a comment to `publish-mcp-shim` noting that it intentionally does not depend on `publish-npm` because `packages/mcp/` has no workspace dependency on sdk or cli. This protects against a future contributor inadvertently adding the dep without adding `needs: [publish-npm]`:\n```yaml\n# Intentionally does NOT need publish-npm — packages/mcp has no workspace\n# dependency on sdk or cli. If that changes, add needs: [publish-npm] here.\n```"
+    }
+  ],
+  "checklist": {
+    "sha256sums_generated_in_build_job": {
+      "status": "PASS",
+      "note": "SHA256SUMS is generated in the `release` job immediately after `actions/download-artifact@v4` collects all tarballs — the same job, same runner, same ephemeral workspace as the artifact collection. It is not fetched from an external source."
+    },
+    "attest_subject_path_correct": {
+      "status": "PARTIAL",
+      "note": "Subject path covers tarballs (`artifacts/**/mnemonic-mcp-*.tar.gz`), which is what the shim's `gh attestation verify <tarball>` needs. Does not cover raw binaries per the team-lead task brief requirement — see SAR8-M2."
+    },
+    "no_workflow_dispatch_trigger": {
+      "status": "PASS",
+      "note": "The `on:` trigger is `push: tags: ['v*']` only. No `workflow_dispatch` present. All jobs have consistent `if: startsWith(github.ref, 'refs/tags/v')` guards on the publish jobs."
+    },
+    "no_npm_token_secret": {
+      "status": "PASS",
+      "note": "No `NPM_TOKEN`, `NODE_AUTH_TOKEN`, or any secret reference in the `publish-mcp-shim` job. OIDC Trusted Publishing via `id-token: write` only, mirroring the existing `publish-npm` pattern."
+    },
+    "no_secret_echo_in_run_steps": {
+      "status": "PASS",
+      "note": "No `echo $GITHUB_TOKEN`, no secret interpolation in run steps. The skip-if-already-published guard only reads package.json version and npm registry — no secrets in the shell commands."
+    },
+    "github_token_permissions_not_overprivileged": {
+      "status": "PASS",
+      "note": "release job: `contents: write` (needed by action-gh-release) + `id-token: write` + `attestations: write` (both required by attest-build-provenance@v1). publish-mcp-shim: `id-token: write` + `contents: read`. No `packages: write`, no `actions: write`, no `security-events: write`, no `pull-requests: write`. Scope is minimal."
+    },
+    "publish_mcp_shim_needs_release": {
+      "status": "PASS",
+      "note": "`needs: [release]` correctly sequences publish-mcp-shim after SHA256SUMS + attestation are attached to the GitHub Release. First-run `ensureBinaryCached` in the shim won't 404 on SHA256SUMS."
+    },
+    "if_guard_on_publish_job": {
+      "status": "PASS",
+      "note": "`if: startsWith(github.ref, 'refs/tags/v')` is present on `publish-mcp-shim`, matching the existing `publish-npm` guard. Non-tag runs (e.g. if a `workflow_dispatch` were added later) would skip the job."
+    },
+    "existing_publish_npm_job_unchanged": {
+      "status": "PASS",
+      "note": "The diff shows the existing `publish-npm` job (lines 167-251) is untouched byte-for-byte. The new job is appended after it."
+    },
+    "attestations_write_permission_added": {
+      "status": "PASS",
+      "note": "`attestations: write` added to the `release` job's permissions block alongside `id-token: write`. The workflow-level `permissions: contents: write` is overridden at the job level with the full minimal set needed."
+    }
+  },
+  "required_changes": [
+    {
+      "id": "SAR8-M1",
+      "action": "Harden SHA256SUMS sed normalization or add a post-normalization validation step that fails fast if any line still contains a path separator."
+    },
+    {
+      "id": "SAR8-M2",
+      "action": "Clarify attestation subject scope: either document that tarballs-only is correct per the shim's verification path (and update the task brief accordingly), or add the raw binary paths to subject-path if full binary attestation is required."
+    }
+  ],
+  "optional_changes": [
+    {
+      "id": "SAR8-INFO1",
+      "action": "Add a comment to publish-mcp-shim documenting the intentional absence of needs: [publish-npm]."
+    }
+  ]
+}

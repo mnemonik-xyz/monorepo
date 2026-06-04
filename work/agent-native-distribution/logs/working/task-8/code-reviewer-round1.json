@@ -1,0 +1,56 @@
+{
+  "reviewer": "t8-code-reviewer",
+  "task": "8",
+  "round": 1,
+  "verdict": "approved_with_minor",
+  "summary": "The diff is correct, complete, and well-structured. All task ACs are met. Two minor findings: (1) a latent risk in the sed normalization pattern for deeply-nested artifact layouts, and (2) the `prepublishOnly` hook in packages/mcp runs `npm test` during `npm publish` on CI, which is acceptable but worth confirming is intentional. Both are low-severity and do not block merge.",
+  "findings": [
+    {
+      "id": "CR8-001",
+      "severity": "minor",
+      "dimension": "Architecture / Cross-File Consistency",
+      "title": "sed path-normalization pattern assumes exactly one directory level of nesting",
+      "location": ".github/workflows/release.yml — Generate SHA256SUMS step",
+      "description": "The sed command `sed -i 's| \\*\\./[^/]*/| \\*|'` strips exactly one directory component (e.g. `./aarch64-apple-darwin/`) from sha256sum output. This correctly handles the current artifact layout where `download-artifact@v4` (with no `name` filter) places each artifact under `artifacts/<target-name>/<tarball>`, giving paths like `./aarch64-apple-darwin/mnemonic-mcp-v0.2.0-aarch64-apple-darwin.tar.gz`. The `[^/]*` stops at the first `/`, so paths with zero or two levels of nesting (e.g. if a future artifact upload changes its `path:` to a flat file or adds a subdirectory) would produce incorrectly normalized lines without any warning.",
+      "impact": "Currently safe — the artifact upload `path: ${{ env.ASSET }}` points to a flat file so download-artifact places it exactly one level deep. However, if a future build matrix change produces nested paths, the SHA256SUMS lines would be wrong and the shim's install-binary.ts would fail to find the expected filename, surfacing as a download-time hash lookup failure. The bug would be immediately visible rather than silent.",
+      "recommendation": "Low urgency given the current layout is stable and the bug would be immediately visible. If you want extra resilience, replace the sed with a basename extraction: `sha256sum -b {} | sed \"s| \\\\*.*[/\\\\\\\\]| \\\\*|\"` (replace any path up to the last separator). Alternatively, document the one-level assumption in the step comment so a future maintainer is warned.",
+      "actionable": false
+    },
+    {
+      "id": "CR8-002",
+      "severity": "minor",
+      "dimension": "Dependencies Management / Testing",
+      "title": "publish-mcp-shim runs vitest tests via prepublishOnly during npm publish on CI",
+      "location": ".github/workflows/release.yml — Build @mnemonik-xyz/mcp and Publish @mnemonik-xyz/mcp steps; packages/mcp/package.json prepublishOnly",
+      "description": "packages/mcp/package.json defines `\"prepublishOnly\": \"npm run build && npm test\"`. In the publish-mcp-shim job, `npm publish` will therefore trigger a full vitest run before publishing. The tests use mock fetch and a mock `gh` CLI binary injected via PATH, so they are not network-dependent — they will pass on ubuntu-latest. However: (a) the Build step (`npm run build --workspace packages/mcp`) already compiles the TypeScript, so the `npm run build` in prepublishOnly is redundant (doubles compile time); and (b) there is no explicit `node_modules/.bin` PATH setup for `vitest` and `tsx`, which are devDependencies. These should be available because `npm ci` ran earlier, but the ordering matters — if the runner's PATH does not expose workspace-level binaries, vitest may not be found.",
+      "impact": "In practice: the existing `publish-npm` job also relies on `npm ci` making devDependency binaries available for `wasm-pack` and `tsc`, so the same implicit assumption applies there and it has not been a problem. The double-compile is a ~5s CI cost with no correctness impact. The test run adds ~15s. Neither is a blocker.",
+      "recommendation": "Not blocking. If the prepublishOnly double-build becomes a pain point, it can be split into `\"prepublishOnly\": \"npm test\"` (letting the build step in CI do the compile). Leave as-is for now — it's a locally-reasonable pattern.",
+      "actionable": false
+    }
+  ],
+  "ac_verification": {
+    "AC1_actionlint_clean": "PASS — coder confirmed pre-existing warnings on untouched build-linux/build-macos lines; no new actionlint findings introduced by this diff.",
+    "AC2_sha256sums_covers_all_tarballs": "PASS — `find . -name 'mnemonic-mcp-*.tar.gz' -exec sha256sum -b {} \\;` covers all target tarballs collected under artifacts/; sed normalization confirmed correct for the current one-level nesting layout.",
+    "AC3_attest_build_provenance": "PASS — `actions/attest-build-provenance@v1` step is present with `subject-path: 'artifacts/**/mnemonic-mcp-*.tar.gz'`, covering all tarballs the shim might download.",
+    "AC4_permissions_id_token_attestations": "PASS — release job permissions block explicitly declares `id-token: write` and `attestations: write` alongside the inherited `contents: write`.",
+    "AC5_sha256sums_release_asset": "PASS — `artifacts/SHA256SUMS` is included in the `softprops/action-gh-release@v2` `files:` block as a separate entry.",
+    "AC6_publish_mcp_shim_trusted_publishing": "PASS — job uses `permissions: id-token: write`, no NPM_TOKEN, `npm publish --access public --provenance`, and the skip-if-already-published guard mirrors publish-npm.",
+    "AC7_needs_release": "PASS — `needs: [release]` ensures SHA256SUMS + attestation are on the GitHub Release before the shim package is pullable.",
+    "AC8_publish_npm_unchanged": "PASS — publish-npm body verified against original; byte-for-byte identical (publish-npm starts at line 132, ends at line 216; all content confirmed unchanged).",
+    "AC9_smoke_sha256sums_snippet": "PASS — coder reported the standalone snippet matched the `^[0-9a-f]{64} \\*?mnemonic-mcp-.+\\.tar\\.gz$` pattern; independently confirmed sed output format via simulation."
+  },
+  "cross_file_checks": {
+    "install_binary_sha256sums_format": "PASS — install-binary.ts parser at line 103-107 expects lines matching `/^([0-9a-fA-F]{64})\\s+\\*?(\\S+)$/` and looks up by bare filename key. The sed-normalized SHA256SUMS lines (`<hash> *mnemonic-mcp-<tag>-<target>.tar.gz`) match exactly.",
+    "install_binary_gh_attestation_flags": "PASS — install-binary.ts passes `--owner`, `--repo` (as `${REPO_OWNER}/${REPO_NAME}`), and `--signer-workflow` to `gh attestation verify`. The signer-workflow value must match `.github/workflows/release.yml` — confirmed the attest-build-provenance step runs inside `release.yml`.",
+    "packages_mcp_standalone_build": "PASS — packages/mcp has no dependency on packages/sdk or packages/cli; tsconfig.json has no project references. The publish-mcp-shim job does not need a prior SDK build step.",
+    "artifact_download_path_layout": "PASS — `download-artifact@v4` with `path: artifacts` and no `name:` filter creates `artifacts/<artifact-name>/<file>`. Artifact names are `${{ matrix.target }}` (e.g. `aarch64-apple-darwin`). SHA256SUMS sed normalization is correct for this one-level layout.",
+    "workflow_trigger_guard": "PASS — `if: startsWith(github.ref, 'refs/tags/v')` on publish-mcp-shim is consistent with the same guard on publish-npm. Since the workflow's `on:` is `push: tags: ['v*']`, the guard is defensive-redundant in the same way — acceptable consistency."
+  },
+  "positive_observations": [
+    "Ordering is correct: attestation step runs BEFORE the GitHub Release creation step, ensuring the attestation bundle is anchored to the release artifact before the release goes public.",
+    "The `needs: [release]` gate on publish-mcp-shim prevents a race where the shim is installable but SHA256SUMS is not yet attached to the release — install-binary.ts's 404 on SHA256SUMS would give a clear error rather than a confusing partial state.",
+    "The comment explaining why publish-mcp-shim is decoupled from publish-npm is accurate and helpful for future maintainers.",
+    "The skip-if-already-published guard pattern is copied faithfully from publish-npm, including the exact error message format difference (`@mnemonik-xyz/mcp $LOCAL` vs the sdk/cli pattern). Idiomatic.",
+    "The release job permissions block comment clearly documents the reason for each permission, which is non-obvious for `attestations: write`."
+  ]
+}

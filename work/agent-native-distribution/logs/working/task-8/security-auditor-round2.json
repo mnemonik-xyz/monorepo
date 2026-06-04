@@ -1,0 +1,80 @@
+{
+  "round": 2,
+  "reviewer": "t8-security-auditor",
+  "commit": "7c3eba5",
+  "task": "8",
+  "timestamp": "2026-06-05",
+  "verdict": "APPROVED",
+  "summary": "All three round 1 findings are addressed correctly. The concurrency block added by the deploy reviewer is a net security improvement. No new findings.",
+  "round1_findings_disposition": [
+    {
+      "id": "SAR8-M1",
+      "status": "CLOSED",
+      "disposition": "Fixed via post-normalization guard. The `if grep -q '/' SHA256SUMS; then ... exit 1; fi` block correctly fails the job (with diagnostic output to stderr) whenever any SHA256SUMS line still contains a path separator after the sed normalization. The guard fires on the second character field only (the filename column), not the hash column — the hash hex string contains no `/` so there are no false positives. The error output redirects to stderr and the step exits 1, which blocks the downstream `Create GitHub Release` and `Attest build provenance` steps from running with a corrupt SHA256SUMS. Correct."
+    },
+    {
+      "id": "SAR8-M2",
+      "status": "CLOSED",
+      "disposition": "Resolved via documentation. The attest step comment now explicitly states that tarball-only subject-path is intentional: 'SAR8-M2 (R1): tarball-only is intentional, not a gap.' The rationale is correct — the shim's verification model runs `gh attestation verify <tarball>` before extraction (Decision 8, install-binary.ts), so attesting the tarball is the right scope. The tarball's digest already cryptographically commits to the binary inside it; a second attestation on the extracted binary would add no security while adding pipeline complexity. Accepted."
+    },
+    {
+      "id": "SAR8-INFO1",
+      "status": "CLOSED",
+      "disposition": "Resolved via comment. The `publish-mcp-shim` header now contains: 'NOT gated on `publish-npm` by design (SAR8-INFO1): packages/mcp has zero dependency on @mnemonik-xyz/sdk or @mnemonik-xyz/cli (pure Node + tar). If a future change adds a workspace dep on either, ALSO add the matching `needs:` here...' This is the exact guidance needed to prevent future contributors from silently creating the race condition. Correct."
+    }
+  ],
+  "new_change_review": {
+    "concurrency_block": {
+      "status": "APPROVED",
+      "description": "The `concurrency: group: release-${{ github.ref }}, cancel-in-progress: true` block is placed at workflow level (not per-job), which correctly groups all jobs — build-linux, build-macos, release, publish-npm, publish-mcp-shim — under the same concurrency key. A re-pushed tag cancels the entire in-flight run, not just a subset of jobs. This is the correct placement.\n\nSecurity assessment: This block closes a race condition where a force-pushed tag could trigger two parallel runs: (a) run A's `release` job creates the GitHub Release and uploads SHA256SUMS; run B's `release` job then tries to create the same release and fails (or uploads a second SHA256SUMS that overwrites A's). With `cancel-in-progress: true`, run A is cancelled when run B is triggered, so only the latest run completes. This is net better than the previous behavior.\n\nOne nuance: `cancel-in-progress: true` means that if run A has already completed `release` (tarballs + SHA256SUMS uploaded) but `publish-mcp-shim` is still in progress, and a re-push of the same tag triggers run B, run A's publish-mcp-shim is cancelled mid-flight. This is acceptable — run B will re-publish if needed, and the skip-if-already-published guard handles the case where run A already succeeded. No security issue."
+    }
+  },
+  "checklist": {
+    "sha256sums_generated_in_build_job": {
+      "status": "PASS",
+      "note": "Generated in the release job from downloaded artifacts. Post-normalization guard added (SAR8-M1). Guard produces stderr diagnostics and exit 1 on failure — no silent corruption."
+    },
+    "attest_subject_path_correct": {
+      "status": "PASS",
+      "note": "Tarball-only subject-path is documented as intentional per Decision 8 (SAR8-M2). Rationale: tarball digest commits to binary contents; shim verifies tarballs not binaries."
+    },
+    "no_workflow_dispatch_trigger": {
+      "status": "PASS",
+      "note": "Trigger remains `push: tags: ['v*']` only. No workflow_dispatch added."
+    },
+    "no_npm_token_secret": {
+      "status": "PASS",
+      "note": "No NPM_TOKEN anywhere. OIDC Trusted Publishing via id-token: write."
+    },
+    "no_secret_echo_in_run_steps": {
+      "status": "PASS",
+      "note": "No secret interpolation. New grep/cat/exit block in SHA256SUMS step only reads the local file."
+    },
+    "github_token_permissions_not_overprivileged": {
+      "status": "PASS",
+      "note": "Permissions unchanged from round 1. release: contents/id-token/attestations write. publish-mcp-shim: id-token write + contents read."
+    },
+    "publish_mcp_shim_needs_release": {
+      "status": "PASS",
+      "note": "needs: [release] unchanged and correct."
+    },
+    "if_guard_on_publish_job": {
+      "status": "PASS",
+      "note": "if: startsWith(github.ref, 'refs/tags/v') unchanged and correct."
+    },
+    "existing_publish_npm_job_unchanged": {
+      "status": "PASS",
+      "note": "publish-npm job is byte-identical to round 1."
+    },
+    "attestations_write_permission_added": {
+      "status": "PASS",
+      "note": "Unchanged from round 1 — correctly present."
+    },
+    "concurrency_block": {
+      "status": "PASS",
+      "note": "Workflow-level concurrency group keyed on github.ref with cancel-in-progress: true. Prevents double-publish on force-pushed tags. Net security improvement."
+    }
+  },
+  "required_changes": [],
+  "optional_changes": []
+}

@@ -255,3 +255,33 @@ Review details — in JSON files via links. QA report — in logs/working/.
 - Smoke (task §Verification Steps): tempdir-HOME `install --check` mtime-stable; `install` adds `mcpServers.mnemonik` while preserving unrelated keys; restart line printed only in apply mode.
 - Tar version pinned: `^7.4.0` (CVE-2021-32803/04 mitigation).
 - `gh` CLI required at runtime — README documents the install link.
+
+## Task 8: release.yml SHA256SUMS + GitHub artifact attestation + @mnemonik-xyz/mcp publish
+
+**Status:** Done
+**Commits:** f865d51 (impl) + 7c3eba5 (round 1 review fixes: DR8-M1 concurrency, SAR8-M1 normalization guard, SAR8-M2 attestation scope docs, SAR8-INFO1 + DR8-L1 comment expansion)
+**Agent:** t8-coder
+**Summary:** Extended `.github/workflows/release.yml` with three additions for the npm shim distribution path. (1) New `Generate SHA256SUMS` step in the `release` job: `find` + `sha256sum -b` over every `mnemonic-mcp-*.tar.gz` artifact, sed-normalized to strip the `download-artifact@v4` subdirectory prefix, then a post-normalization guard (`grep -q '/' && exit 1`) that fails the release at CI time if a future build-matrix layout change produces nested artifact paths (instead of silently breaking every install). Published to the GitHub Release as a separate asset. (2) `actions/attest-build-provenance@v1` step over the same tarball glob; `release` job permissions block now includes `id-token: write` + `attestations: write` alongside the existing `contents: write` (minimal sigstore surface). Tarball-only `subject-path` is intentional per Decision 8 — the shim's `install-binary.ts` runs `gh attestation verify <tarball>` BEFORE extraction. (3) New `publish-mcp-shim` job mirroring `publish-npm` (Trusted Publishing via OIDC — no NPM_TOKEN, `--access public --provenance`, skip-if-already-published guard, `if: startsWith(github.ref, 'refs/tags/v')` gate). Gated `needs: [release]` so SHA256SUMS + attestation are visible on the GitHub Release BEFORE the npm shim is pullable (`ensureBinaryCached` would otherwise 404 on first install). Intentionally NOT gated on `publish-npm`: `packages/mcp` has zero workspace dependency on `@mnemonik-xyz/sdk` or `@mnemonik-xyz/cli`. Workflow-level `concurrency: release-${{ github.ref }}` block with `cancel-in-progress: true` prevents duplicate/force-pushed tag refs from racing on Release asset uploads or OIDC token reuse. Existing `publish-npm` job byte-for-byte unchanged.
+
+**Deviations:** None.
+
+**Reviews:**
+
+*Round 1 (f865d51):*
+- code-reviewer: approved_with_minor — CR8-001 (sed nesting-depth assumption, doc clarification) + CR8-002 (no-action) → [logs/working/task-8/code-reviewer-round1.json](logs/working/task-8/code-reviewer-round1.json)
+- security-auditor: APPROVE_WITH_FINDINGS — SAR8-M1 (medium, post-norm guard), SAR8-M2 (medium, attest scope docs), SAR8-INFO1 (info) → [logs/working/task-8/security-auditor-round1.json](logs/working/task-8/security-auditor-round1.json)
+- deploy-reviewer: CONDITIONAL_PASS — DR8-M1 (medium, blocking — concurrency group), DR8-L1 (low — sed comment), 2 INFO → [logs/working/task-8/deploy-reviewer-round1.json](logs/working/task-8/deploy-reviewer-round1.json)
+
+*Round 2 (7c3eba5):*
+- code-reviewer: approved — CR8-001 fully resolved; one CR8-R2-INFO1 (empty SHA256SUMS — structurally impossible per `needs: [build-linux, build-macos]`) accepted as non-actionable → [logs/working/task-8/code-reviewer-round2.json](logs/working/task-8/code-reviewer-round2.json)
+- security-auditor: APPROVED — all three R1 findings closed, concurrency block recognized as net security improvement → [logs/working/task-8/security-auditor-round2.json](logs/working/task-8/security-auditor-round2.json)
+- deploy-reviewer: PASS — DR8-M1 + DR8-L1 closed, only the same 3 pre-existing actionlint warnings remain in untouched build-linux/build-macos jobs → [logs/working/task-8/deploy-reviewer-round2.json](logs/working/task-8/deploy-reviewer-round2.json)
+
+**Verification:**
+- `actionlint .github/workflows/release.yml` → 3 warnings, all pre-existing (lines 68, 91, 105 in build-linux/build-macos; confirmed via `git stash` baseline diff). Zero new findings introduced by this diff.
+- SHA256SUMS smoke test (per task §Verification Steps): fixture tarball + sha256sum -b + sed normalization produces parseable line `^[0-9a-f]{64} \*mnemonic-mcp-.+\.tar\.gz$`.
+- SAR8-M1 guard regression smoke: simulated nested layout (`artifacts/macos/aarch64-apple-darwin/<tarball>`) correctly trips `exit 1` with the leftover `aarch64-apple-darwin/` prefix in the stderr error output.
+- Structural YAML parse confirms job DAG: `build-linux`, `build-macos` → `release` → `publish-mcp-shim`; `publish-npm` runs in parallel (decoupled from binary builds).
+- Existing `publish-npm` job sed-extracted and diffed against `HEAD~2:.github/workflows/release.yml` — byte-for-byte identical.
+
+**Forward flag:** Before the first tagged release (Task 13 fires), `@mnemonik-xyz/mcp` must be pre-registered on npm.com with the same Trusted-Publisher OIDC configuration as the existing `@mnemonik-xyz/sdk` and `@mnemonik-xyz/cli` packages (publisher: `mnemonik-xyz/monorepo`, workflow: `.github/workflows/release.yml`, environment: none). Without this, the first `npm publish --provenance` will 403. DR8-INFO1 and the task post-completion checklist both call this out — log it explicitly in Task 13's deployment runbook.

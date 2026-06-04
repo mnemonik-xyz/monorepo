@@ -1,0 +1,91 @@
+{
+  "reviewer": "t8-deploy-reviewer",
+  "round": 1,
+  "timestamp": "2026-06-05",
+  "verdict": "CONDITIONAL_PASS",
+  "summary": "The Task 8 diff is structurally sound and passes the primary ordering and permissions requirements. Two issues require attention before merge: (1) a missing concurrency group that would allow duplicate tag-push double-releases, and (2) the SHA256SUMS sed normalization uses a pattern designed for the `download-artifact` subdirectory layout that is correct but fragile if the artifact naming convention changes — worth a defensive comment. One pre-existing actionlint warning (SC2086 in Package steps, macos-13 runner label) is not introduced by this diff.",
+
+  "checklist": {
+    "actionlint_clean": {
+      "status": "WARN",
+      "detail": "actionlint reports two SC2086 warnings (lines 59, 96) and one runner-label warning (line 82). All three are in pre-existing code (build-linux Package step, build-macos Package step, build-macos runner spec) — NOT introduced by this diff. The new Task 8 additions (Generate SHA256SUMS, Attest build provenance, publish-mcp-shim steps) are clean. Verdict: no new issues introduced; pre-existing warnings are pre-existing debt."
+    },
+    "release_assets_before_npm_publish": {
+      "status": "PASS",
+      "detail": "publish-mcp-shim has `needs: [release]`. The `release` job generates SHA256SUMS and runs attest-build-provenance BEFORE softprops/action-gh-release uploads them. publish-npm has no `needs: [release]` dependency — it is decoupled and runs in parallel. That is intentional per the existing comment ('Decoupled from Rust binary builds — npm packages don't consume Rust binaries'). publish-mcp-shim however does correctly depend on release, so SHA256SUMS is available on the GitHub Release page before the shim is installable from npm."
+    },
+    "concurrency_group": {
+      "status": "FAIL",
+      "severity": "MEDIUM",
+      "detail": "No `concurrency:` block is defined on the workflow. If a maintainer pushes two tags in rapid succession (e.g., mis-tag then re-tag), both workflow runs fire concurrently. The `release` job could upload duplicate GitHub Release assets (softprops/action-gh-release is idempotent on the Release itself but can double-upload assets on concurrent runs). The `publish-mcp-shim` skip-if-already-published guard protects npm but not the Release asset upload. Recommended fix: add at workflow top-level: `concurrency: { group: release-${{ github.ref }}, cancel-in-progress: true }`. This is the standard pattern for release workflows.",
+      "fix": "Add at workflow level (after `on:` block): `concurrency:\\n  group: release-${{ github.ref }}\\n  cancel-in-progress: true`"
+    },
+    "macos_matrix": {
+      "status": "PASS",
+      "detail": "build-macos matrix correctly defines aarch64-apple-darwin on runner macos-latest and x86_64-apple-darwin on runner macos-13. Both targets produce artifacts that are collected by `actions/download-artifact@v4` into `artifacts/`. The SHA256SUMS `find` pattern `mnemonic-mcp-*.tar.gz` covers both darwin targets. No change to the matrix was introduced by this diff — it is pre-existing and correct for v1 macOS-only scope."
+    },
+    "rollback_strategy": {
+      "status": "PASS",
+      "detail": "The task description notes rollback = delete tag + manual npm unpublish. The workflow has no `on: workflow_dispatch:` trigger so re-running a deleted tag requires re-pushing the tag — this is the intended behavior and prevents accidental re-release. The skip-if-already-published guard on publish-mcp-shim means a partial release (binaries published, npm already published) is safe to retry without double-publishing. The `cancel-in-progress: true` concurrency fix (FAIL above) would further tighten this by preventing the duplicate-run scenario. No rollback documentation is added to the workflow itself, but the task spec delegates that to docs — acceptable."
+    },
+    "sha256sums_generation": {
+      "status": "PASS_WITH_NOTE",
+      "detail": "The SHA256SUMS step runs `cd artifacts` then `find . -name mnemonic-mcp-*.tar.gz -exec sha256sum -b {} \\;`. Because `actions/download-artifact@v4` with `path: artifacts` creates `artifacts/<artifact-name>/<file>`, find outputs paths like `./aarch64-apple-darwin/mnemonic-mcp-vX-aarch64-apple-darwin.tar.gz`. The sed `s| \\*\\./[^/]*/| \\*|` correctly strips the single subdirectory prefix, producing `<hash> *mnemonic-mcp-vX-aarch64-apple-darwin.tar.gz` — which is what install-binary.ts's parser expects. The SHA256SUMS file is written inside `artifacts/`, and the release step uploads `artifacts/SHA256SUMS` explicitly alongside `artifacts/**/*.tar.gz`. Correct. Note: the `find -exec sha256sum -b {} \\;` form runs sha256sum once per file, so each line is standalone — no aggregation issue. The `sed -i` uses GNU sed (ubuntu-latest) so the in-place flag needs no suffix — correct."
+    },
+    "attestation_step_ordering": {
+      "status": "PASS",
+      "detail": "Attest build provenance runs AFTER Generate SHA256SUMS and BEFORE Create GitHub Release. The attestation subject-path `artifacts/**/mnemonic-mcp-*.tar.gz` covers all built tarballs in the artifact subdirectory tree. The sigstore bundle is published under the repo via the `attestations: write` permission which is correctly added to the `release` job's permissions block alongside `id-token: write` and `contents: write`."
+    },
+    "permissions_block": {
+      "status": "PASS",
+      "detail": "The `release` job gains `permissions: { contents: write, id-token: write, attestations: write }`. The workflow-level `permissions: { contents: write }` remains. Job-level permissions override workflow-level, so the release job has exactly the three permissions it needs. `publish-mcp-shim` has `permissions: { id-token: write, contents: read }` — correct (Trusted Publishing needs id-token; contents: read is sufficient for checkout). No overprivileged scopes introduced."
+    },
+    "publish_npm_job_unchanged": {
+      "status": "PASS",
+      "detail": "Diff verified — the publish-npm job (lines 167-251 in the post-diff file) is byte-identical to the pre-diff version. No changes introduced."
+    },
+    "trusted_publishing_no_npm_token": {
+      "status": "PASS",
+      "detail": "publish-mcp-shim does not set NODE_AUTH_TOKEN or reference secrets.NPM_TOKEN. It uses the same Trusted Publishing pattern as publish-npm: setup-node with registry-url + id-token: write permission + npm publish --provenance. Correct."
+    }
+  },
+
+  "findings": [
+    {
+      "id": "DR8-M1",
+      "severity": "MEDIUM",
+      "title": "No concurrency group — duplicate tag pushes can double-release",
+      "detail": "Without a `concurrency:` block, two simultaneous runs triggered by the same tag (or by a deleted+re-pushed tag) will race. Both will attempt to upload SHA256SUMS and tarballs to the same GitHub Release. softprops/action-gh-release is not atomic on asset upload; concurrent uploads of the same asset name can produce corrupt or duplicate assets. The npm guard prevents double-npm-publish, but the GitHub Release asset side is unprotected.",
+      "fix": "Add at workflow top-level (after the `on:` block, before `permissions:`):\n\nconcurrency:\n  group: release-${{ github.ref }}\n  cancel-in-progress: true\n\nThis ensures only one release run proceeds per tag ref at a time.",
+      "blocking": true
+    },
+    {
+      "id": "DR8-L1",
+      "severity": "LOW",
+      "title": "sed normalization is correct but underdocumented for future maintainers",
+      "detail": "The sed `s| \\*\\./[^/]*/| \\*|` pattern is correct for the `download-artifact@v4` subdirectory layout but is non-obvious. A future maintainer who changes the artifact upload strategy (e.g., using artifact merge or flat path) could break the SHA256SUMS format without realizing it. The comment above the sed line explains the format goal but not the layout assumption being corrected.",
+      "fix": "Expand the inline comment to mention the download-artifact subdirectory layout explicitly:\n# actions/download-artifact@v4 places each artifact under its own named\n# subdirectory (e.g. artifacts/aarch64-apple-darwin/mnemonic-mcp-...).  \n# Strip the leading `./subdir/` so each line reads `<hash> *<filename>`.",
+      "blocking": false
+    },
+    {
+      "id": "DR8-INFO1",
+      "severity": "INFO",
+      "title": "Trusted Publishing for @mnemonik-xyz/mcp requires pre-registration on npm.com",
+      "detail": "The task spec notes: 'If not, the first publish will need manual setup on npm.com (provision a trusted-publisher entry for the new package).' The workflow itself is correct but the publish will silently 403 if the npm package is not pre-registered with the same OIDC publisher identity. This is a deployment-readiness concern, not a code defect.",
+      "fix": "Document in post-completion notes (already flagged in task spec). Verify before tagging Task 13.",
+      "blocking": false
+    },
+    {
+      "id": "DR8-INFO2",
+      "severity": "INFO",
+      "title": "publish-npm runs in parallel with release (not gated) — npm publish can succeed before GitHub Release assets are visible",
+      "detail": "publish-npm does NOT have `needs: [release]`. It can complete and make @mnemonik-xyz/sdk and @mnemonik-xyz/cli installable before the GitHub Release assets (tarballs, SHA256SUMS) are published. This is intentional (per the 'Decoupled from Rust binary builds' comment) and only affects the sdk/cli packages which don't need the release assets. publish-mcp-shim IS gated on release. No action needed — just noting the asymmetry for clarity.",
+      "fix": "No change needed. Document the intentional asymmetry in decisions.md if not already present.",
+      "blocking": false
+    }
+  ],
+
+  "required_changes": ["DR8-M1 (concurrency group)"],
+  "recommended_changes": ["DR8-L1 (sed comment)"],
+  "informational": ["DR8-INFO1", "DR8-INFO2"]
+}

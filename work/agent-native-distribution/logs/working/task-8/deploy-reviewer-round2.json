@@ -1,0 +1,80 @@
+{
+  "reviewer": "t8-deploy-reviewer",
+  "round": 2,
+  "timestamp": "2026-06-05",
+  "verdict": "PASS",
+  "summary": "All round 1 findings addressed. DR8-M1 (concurrency group) closed with correct placement and explanatory comment. DR8-L1 (sed comment) closed with expanded layout assumption documentation plus the SAR8-M1 post-normalization guard, which adds an active regression trap. actionlint shows only the three pre-existing warnings (lines 68, 91, 105) introduced before this diff; no new issues. SHA256SUMS generation + guard logic verified by local simulation. The workflow is correct, well-commented, and safe to merge.",
+
+  "findings_from_round1": {
+    "DR8-M1": {
+      "status": "CLOSED",
+      "detail": "Concurrency block added at workflow top-level (lines 12-14), after `on:` and before `permissions:`. Group key is `release-${{ github.ref }}` — unique per tag ref (e.g. `release-refs/tags/v1.0.0`), which means concurrent runs on the same tag are serialized with the in-flight run cancelled on re-trigger. Comment explains both the Release-asset upload race and the Trusted-Publishing OIDC token reuse race — both are valid motivations and the comment is accurate."
+    },
+    "DR8-L1": {
+      "status": "CLOSED",
+      "detail": "SHA256SUMS step comment expanded (lines 144-154) to name the exact `download-artifact@v4` layout assumption: artifact-named subdirectory, exactly one level deep, producing `artifacts/<target>/<tarball>`. The SAR8-M1 guard (`grep -q '/' SHA256SUMS && exit 1`) was added as an active regression trap — if a future matrix change adds nesting depth, the release job fails at checksum generation rather than silently publishing a broken SHA256SUMS. Tested: happy path (1-level layout) passes guard; 2-level nested path correctly trips it."
+    }
+  },
+
+  "checklist": {
+    "actionlint_clean": {
+      "status": "PASS",
+      "detail": "actionlint reports only the three pre-existing warnings (SC2086 at lines 68 and 105 in Package steps; macos-13 runner label at line 91). All three shifted by 9 lines due to the concurrency block insertion but are in build-linux/build-macos jobs untouched by this diff. Zero new findings introduced by round 2 changes."
+    },
+    "release_assets_before_npm_publish": {
+      "status": "PASS",
+      "detail": "Job DAG unchanged: build-linux + build-macos → release (SHA256SUMS + attestation + GitHub Release asset upload) → publish-mcp-shim. SHA256SUMS and attestation are guaranteed published before the npm shim is installable from the registry. publish-npm remains parallel to release (decoupled, intentional — sdk/cli don't consume release assets)."
+    },
+    "concurrency_group": {
+      "status": "PASS",
+      "detail": "Workflow-level `concurrency: { group: release-${{ github.ref }}, cancel-in-progress: true }` added at lines 12-14. Group key is `release-refs/tags/v1.0.0` for a v1.0.0 tag push — unique per tag, not shared across tags. `cancel-in-progress: true` cancels the in-flight predecessor if the same tag is re-pushed. This correctly prevents the double-release race identified in DR8-M1."
+    },
+    "macos_matrix": {
+      "status": "PASS",
+      "detail": "build-macos matrix unchanged: aarch64-apple-darwin on macos-latest, x86_64-apple-darwin on macos-13. Both darwin targets are covered by the SHA256SUMS find pattern and the attest subject-path glob. The matrix correctly produces both binaries required by the shim's macOS v1 scope."
+    },
+    "sha256sums_generation_and_guard": {
+      "status": "PASS",
+      "detail": "Locally verified with simulated download-artifact@v4 subdirectory layout. Happy path: find produces `./aarch64-apple-darwin/mnemonic-mcp-v1.0.0-aarch64-apple-darwin.tar.gz` style paths; sed strips to `*mnemonic-mcp-v1.0.0-aarch64-apple-darwin.tar.gz`; grep -q '/' finds no slash; guard passes; output matches ^[0-9a-f]{64} \\*mnemonic-mcp-.+\\.tar\\.gz$ format. Failure path: 2-level nested layout (`./os/aarch64-apple-darwin/...`) leaves `aarch64-apple-darwin/` after sed stripping one level; guard correctly fires with exit 1."
+    },
+    "attest_before_release": {
+      "status": "PASS",
+      "detail": "Step order in release job: (1) checkout, (2) download-artifact, (3) Generate SHA256SUMS, (4) Attest build provenance, (5) Create GitHub Release. SHA256SUMS and attestation both complete before release asset upload. Subject path `artifacts/**/mnemonic-mcp-*.tar.gz` covers all built tarballs."
+    },
+    "permissions_block": {
+      "status": "PASS",
+      "detail": "No change to permissions in round 2. release job: contents: write, id-token: write, attestations: write. publish-mcp-shim: id-token: write, contents: read. Workflow-level: contents: write. All correct and unchanged."
+    },
+    "publish_npm_unchanged": {
+      "status": "PASS",
+      "detail": "publish-npm job body is byte-identical to round 1. Round 2 diff only touches the publish-mcp-shim header comment (lines 283-293) — no functional changes to publish-npm."
+    },
+    "rollback_strategy": {
+      "status": "PASS",
+      "detail": "Concurrency group with cancel-in-progress means a bad release run can be stopped by deleting the tag (stops any running workflow) or re-tagging (cancels the in-flight run). npm skip-if-already-published guard prevents double-publish on retry. Rollback procedure (delete tag + npm unpublish) is unchanged."
+    }
+  },
+
+  "new_findings": [
+    {
+      "id": "DR8-R2-INFO1",
+      "severity": "INFO",
+      "title": "SHA256SUMS guard does not cover hash-column slashes",
+      "detail": "The guard `grep -q '/'` catches path-separator residue in the filename column. The hash column (64 hex chars) cannot contain `/` by construction (SHA-256 output is hex-only). So the guard is safe and cannot false-positive on the hash. Worth noting for completeness — the guard is correct as written.",
+      "fix": "No change needed.",
+      "blocking": false
+    },
+    {
+      "id": "DR8-R2-INFO2",
+      "severity": "INFO",
+      "title": "publish-mcp-shim does not declare `needs: [publish-npm]` — future workspace dep risk documented",
+      "detail": "The round 2 header comment (lines 289-293) now explicitly documents that `needs: [publish-npm]` is intentionally absent because packages/mcp has zero dependency on @mnemonik-xyz/sdk or @mnemonik-xyz/cli, and instructs future maintainers to add it if a workspace dep is introduced. This is the correct treatment of this informational risk — no code change required.",
+      "fix": "No change needed. Documentation in the workflow comment is sufficient.",
+      "blocking": false
+    }
+  ],
+
+  "required_changes": [],
+  "recommended_changes": [],
+  "informational": ["DR8-R2-INFO1", "DR8-R2-INFO2", "DR8-INFO1 (pre-registration on npm.com — tracked in decisions.md per task spec)"]
+}
