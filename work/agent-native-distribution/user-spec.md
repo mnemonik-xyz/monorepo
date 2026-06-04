@@ -1,6 +1,7 @@
 ---
 created: 2026-06-04
-status: draft
+approved: 2026-06-04
+status: approved
 type: feature
 size: L  # 3 coordinated pieces — server-side propagation + npm shim ship-Rust-binary + install subcommand + new visibility column on participate
 priority: P0 (без него adoption story не работает: установленный, но не использующийся протокол не distributes)
@@ -36,13 +37,13 @@ source_of_patterns: github.com/aitankfish/pnl (@pnlmarket/mcp-server v0.5.1, MIT
 10. Output после `install` (apply) говорит пользователю **перезапустить уже запущенные агенты**, если они работали в момент установки. Если хост не запущен — открыть его как обычно.
 11. **`mnemonik-mcp doctor`** — диагностическая команда. Проверяет: presence `mnemonik` записи в каждом хост-конфиге, ping `mcp.mnemonik.xyz/health`, проверка binary integrity (hash), доступность local SQLite read/write, keychain accessibility for identity + token. Pass/fail per check + repair hints.
 
-**Кусок 3 — `mnemonic-mcp mcp-stdio` (новая команда в существующем Rust binary).**
+**Кусок 3 — `mnemonik-mcp mcp-stdio` (новая subcommand'а binary'я).**
 
 12. Existing Rust `mnemonic-mcp` binary получает новую subcommand'у `mcp-stdio`. JSON-RPC поверх stdin/stdout, спавнится хостом. Подразумевается использование существующего MCP server core'а (axum/JSON-RPC dispatch, tools registry).
 13. **Dual-route по `mode`-аргументу tool call'а** (см. modes-user-choice #156):
-    - **Local mode (default)**: полное локальное исполнение **через тот же Rust код**, который сейчас работает на `mcp.mnemonik.xyz`. Embedder = fastembed (MiniLM-L6, 384-dim, ONNX). TurboQuant compress, canonical CBOR, COSE_Sign1 — всё existing core code, никакого переписывания. INSERT в локальный SQLite (`~/.mnemonic/attestations.db`). **Никаких сетевых вызовов** в local mode. Подпись локальным Ed25519 identity (из invisible-bootstrap, PR #154/#157 шипнуты ранее сегодня).
-    - **Participate mode**: проксирует JSON-RPC в `mcp.mnemonik.xyz/mcp` через HTTPS. На первый auth-required вызов запускает OAuth-loopback (browser popup, как в существующем `mnemonic login --browser`).
-    - **Discovery (`prompts/*`, `resources/*`, `tools/list`)**: всегда проксируется на сервер — один источник правды для манифестов.
+    - **Local mode (default)**: полное локальное исполнение **через тот же Rust код**, который сейчас работает на `mcp.mnemonik.xyz`. Existing core embedding + compression + canonical CBOR + COSE_Sign1 pipeline — никакого переписывания. INSERT в локальный SQLite. **Никаких сетевых вызовов** в local mode. Подпись локальным Ed25519 identity (из invisible-bootstrap, PR #154/#157).
+    - **Participate mode**: проксирует JSON-RPC в `mcp.mnemonik.xyz/mcp` через HTTPS. На первый auth-required вызов запускает OAuth-loopback (browser popup).
+    - **Discovery (`prompts/*`, `resources/*`, `tools/list`)**: отвечает **из binary напрямую**, не проксирует. Manifests baked в binary через `include_dir!` на build-time (та же source-of-truth, что и server использует). Это позволяет агенту видеть skills даже offline / при недоступности hosted server'а. Server-side manifests и binary-embedded snapshot обновляются вместе через release pipeline; mismatch (старый binary, новый server) сёрфейсится через `embedder.model_version`-style сравнение в `initialize` response.
 14. **Token storage переезжает в OS keychain.** Сегодня `~/.mnemonic/token.json` — plaintext. После v1 — token живёт в OS keychain (точные координаты — tech-spec, использует существующую keychain-инфраструктуру). Это закрывает аномалию: identity у нас в keychain через invisible-bootstrap, токен сейчас — нет. `mnemonik-mcp logout` удаляет keychain entry. **Migration**: при первом login через mcp-stdio, если существующий `~/.mnemonic/token.json` найден — token читается, записывается в keychain, файл удаляется. Один shot, no-op на subsequent login'ах. Existing `@mnemonik-xyz/cli` (Node) v0.2.x продолжает работать с keychain entry — его читает через тот же `@napi-rs/keyring` (уже используется для identity). Не требует одновременного релиза CLI и shim'а.
 15. **Soft-fall = explicit opt-in (не silent).** На сбой local embedder'а / fs / sqlite:
     - **Default behaviour**: возвращается типизированная JSON-RPC ошибка (точные коды — tech-spec). Никакого silent escalation. Агент видит ошибку и может либо retry, либо surface user'у, либо отдельным вызовом запросить participate-mode (что вызовет OAuth-loopback).
@@ -82,7 +83,7 @@ source_of_patterns: github.com/aitankfish/pnl (@pnlmarket/mcp-server v0.5.1, MIT
 
 1. Пользователь делает `npm install -g @mnemonik-xyz/mcp` (или `npx -y @mnemonik-xyz/mcp install`). npm shim определяет платформу, качает prebuilt `mnemonic-mcp` Rust binary из GitHub Releases, верифицирует hash, кеширует.
 2. Пользователь делает `mnemonik-mcp install`. CLI находит существующие хост-конфиги, пишет в каждый одну `mcpServers.mnemonik` запись с **прямым путём к binary** (не `npx`), не трогает другие ключи, не создаёт конфиги для незаустановленных хостов. Output: «Mnemonik wired into Claude Code, Cursor. If any of them is already running, please restart it.»
-3. Пользователь открывает Claude Code. Хост спавнит `/path/to/mnemonic-mcp mcp-stdio` как subprocess. Subprocess подключается к `mcp.mnemonik.xyz` для discovery (proxy), advertise'ит 5 tools + 7 prompts + 7 resources хосту.
+3. Пользователь открывает Claude Code. Хост спавнит `/path/to/mnemonik-mcp mcp-stdio` как subprocess. Subprocess advertise'ит 5 tools + 7 prompts + 7 resources хосту (manifests baked в binary, не требуют network).
 4. Хост exposуит `/mnemonik-*` slash-commands и инструменты агенту с полными descriptions.
 5. Агент видит инструменты + skill-manifests и реагирует ими в правильные моменты — никаких дополнительных действий от пользователя.
 
@@ -99,7 +100,7 @@ source_of_patterns: github.com/aitankfish/pnl (@pnlmarket/mcp-server v0.5.1, MIT
 1. Агент решает зааттестовать что-то значимое и предлагает пользователю опубликовать. Skill manifest `mnemonik-attest` требует confirmation от пользователя для `visibility: "public"`.
 2. Пользователь подтверждает. Агент вызывает `sign_memory { mode: "participate", visibility: "public", content: ... }`.
 3. mcp-stdio проксирует на `mcp.mnemonik.xyz`. Сервер видит no Bearer → возвращает auth challenge. mcp-stdio запускает OAuth-loopback: открывает браузер, пользователь логинится через webapp.
-4. Token cached в OS keychain (`xyz.mnemonik.token`). Запись anchor'ится на Solana + Arweave. Stderr line: `[mnemonik] participate-mode write: <pubkey> <content_hash> visibility=public`.
+4. Token cached в OS keychain. Запись anchor'ится на Solana + Arweave. Stderr line: `[mnemonik] participate-mode write: <pubkey> <content_hash> visibility=public`.
 5. На follow-up participate-mode write'ы token уже в keychain → OAuth не запускается, до 1h TTL.
 
 **Поток 4 — Anonymous discovery (без CLI).**
@@ -164,7 +165,7 @@ source_of_patterns: github.com/aitankfish/pnl (@pnlmarket/mcp-server v0.5.1, MIT
 
 ## Риски
 
-- **R1 — Privacy regression через mode-mistake (severe).** Агент ставит `visibility=public` на приватный контент. **Митигация:** default `visibility=private` даже в participate; visibility отсутствует в local mode полностью (AC14); server-side `-32095 PublicWriteRequiresConfirmation` gate; skill manifest требует user-confirmation для public writes; stderr-audit line на каждом participate-mode write.
+- **R1 — Privacy regression через mode-mistake (severe).** Агент ставит `visibility=public` на приватный контент. **Митигация:** default `visibility=private` даже в participate; visibility отсутствует в local mode полностью (AC14); server-side public-write confirmation gate (typed error); skill manifest требует user-confirmation для public writes; stderr-audit line на каждом participate-mode write.
 - **R2 — Soft-fall escalation surprise (medium).** Agent или operator думает что local-mode не делает чего-то — но `allow_fallback_to_participate: true` всё равно эскалирует. **Митигация:** opt-in default `false`; escalation возвращается в JSON-RPC response (не только stderr) — agent видит изменение и может решить как surface'ить юзеру.
 - **R3 — Local identity / token compromise (medium).** **Митигация:** identity в OS keychain (через invisible-bootstrap); token теперь тоже в keychain (AC12); 1h token TTL; `mnemonik-mcp logout` для explicit cleanup. OS-level security contract документирован; physical-access compromise **не** защищаем.
 - **R4 — Binary distribution complexity (low-medium).** Прибавляется новый npm package `@mnemonik-xyz/mcp` который скачивает Rust binary на install. release.yml сейчас имеет проблемы с Linux builds (libdbus, отдельная задача) — необходимо чтобы macOS builds работали стабильно для v1 (already в порядке). Linux/Windows v1.1. **Митигация:** release.yml должен emit'ить verified checksum manifest (SHA256SUMS или sigstore signature) от той же tagged pipeline, что и собирает binary. shim верифицирует hash на download. На failure — clear error message; fallback не предусматриваем (no Rust binary = no install).
@@ -197,10 +198,10 @@ source_of_patterns: github.com/aitankfish/pnl (@pnlmarket/mcp-server v0.5.1, MIT
 - Install JSON read/merge/write preserves unrelated keys (table-driven с synthetic configs)
 - Install идемпотентен (re-run produces byte-identical output)
 - mcp-stdio router: local mode dispatches local execution через core, participate mode dispatches hosted proxy, discovery всегда proxy
-- Soft-fall semantics: `allow_fallback_to_participate=false` → loud error; `true` + network available → escalation + response field; `true` + no network → -32097
-- Visibility validation: `mode=local + visibility set` → -32602
+- Soft-fall semantics: `allow_fallback_to_participate=false` → loud typed error; `true` + network available → escalation + response field; `true` + no network → typed hosted-unavailable error (not embedder-invalid)
+- Visibility validation: `mode=local + visibility set` → typed invalid-params error
 
-**Интеграционные тесты:** делаем — критичные для release gate (AC1, AC3, AC11, AC13).
+**Интеграционные тесты:** делаем — критичные для release gate (AC1, AC3, AC11, AC13, AC17).
 
 - Spin up mcp-server локально, hit от reqwest клиента без Bearer'а, verify discovery surface (AC1)
 - Mode-routing: local sign_memory не делает сетевых вызовов вне proxy boundary (netns assertion — AC3)
@@ -222,7 +223,7 @@ source_of_patterns: github.com/aitankfish/pnl (@pnlmarket/mcp-server v0.5.1, MIT
 | 4. Anonymous recall returns only public | seed DB private + public matching test query, query через mcp.mnemonik.xyz `tools/call recall` без Bearer | Только public row в response |
 | 5. Install idempotent | bash: pre-populate ~/.claude.json unrelated entry, run `mnemonik-mcp install`, dump file, run снова, diff | Byte-identical между dumps; unrelated entry неизменён |
 | 6. Install --check is dry-run | bash: записать mtime до и после `mnemonik-mcp install --check` на каждый хост-конфиг | mtimes неизменны; stdout содержит план; exit 0 |
-| 7. Local sign offline | bash в netns без интернета: `mnemonic-mcp mcp-stdio` спавнится, послать JSON-RPC `tools/call sign_memory { mode: "local", content: "test" }` | Result: успех; row в ~/.mnemonic/attestations.db с write_mode=local; никаких outbound TCP |
+| 7. Local sign offline | bash в netns без интернета: `mnemonik-mcp mcp-stdio` спавнится, послать JSON-RPC `tools/call sign_memory { mode: "local", content: "test" }` | Result: успех; row в локальной DB с write_mode=local; никаких outbound TCP |
 | 8. Default behaviour: no silent escalation | bash: повредить локальный embedder cache; послать sign_memory без `allow_fallback_to_participate` | Типизированная embedder-invalid ошибка; никаких outbound calls; никакого browser popup |
 | 9. Explicit opt-in fallback works | то же что #8, но с `allow_fallback_to_participate: true` и интернетом | Success; response содержит `escalated: { from: "local", to: "participate" }`; stderr содержит warning line |
 | 10. Visibility rejected on local | послать `sign_memory { mode: "local", visibility: "public" }` | Типизированная invalid-params ошибка |
