@@ -333,3 +333,35 @@ Review details — in JSON files via links. QA report — in logs/working/.
 2. Run MCP Inspector against `mcp.mnemonik.xyz` and screenshot prompts/resources/tools surfaces (per user-spec §Как проверить)
 3. Run fresh-machine `npm install -g @mnemonik-xyz/mcp && mnemonik-mcp install` on macOS (covers the live GitHub Releases → host-config → spawned subprocess chain end-to-end)
 4. Decide AC15 mismatch-line disposition (TR11-6) — implement the warning emission OR update spec to drop the line on the grounds that local-only discovery makes divergence unobservable in v1
+
+## Task 10: Security Audit (holistic, wave 7 — final security gate)
+
+**Status:** Done
+**Commit:** (this commit)
+**Agent:** t10-auditor
+**Summary:** Final security gate before deploy. Holistic audit across the merged state of Tasks 1-8. Verdict: **PASS** — 0 blockers, 0 majors, 2 LOW defense-in-depth observations, 1 INFO. Verified each focus area from the task:
+
+- **HMAC public-write gate (T4 / Decision 5b)** — 5-tuple binding `content_hash || owner_pubkey || visibility || expires_at(be) || jti(uuid)` with fixed-width prefix fields; HMAC secret 32 random bytes from `rand::thread_rng()` at `ConfirmationLedger::new()`, process-scoped, never persisted; `DashMap::remove_if` is the only consume path (atomic CAS); `subtle::ConstantTimeEq::ct_eq` for HMAC compare; `request_public_write_confirmation` NOT in `ALLOWLIST_METHODS` so JWT is required at mint; owner_pubkey at both mint AND consume comes from the dispatcher's `claims.sub` (lines 1146-1149, 1570, 1734); 60s background eviction sweep bounds the map.
+- **Anonymous recall (T4 / AC13)** — `mcp.rs:1661-1665` always passes `Some(Visibility::Public)` for anonymous (`jwt_sub.is_none()`); no fallback to `None` on error paths; `sqlite.rs:780-802` defensively returns `Vec::new()` if a caller ever passes `(None, None)`; visibility filter is parameterized via `params![v]` (no SQL injection).
+- **Token storage (T6)** — file mode 0o600 set on tempfile BEFORE persist; parent dir 0o700 (best-effort); atomic tempfile + rename; malformed JSON returns `Ok(None)` (never panics); expired token error carries `expires_at` + `sub` (public pubkey) but NOT the JWT itself.
+- **MNEMONIC_HOSTED_ENDPOINT gating (T5 / Decision 12)** — `--allow-custom-endpoint` flag gates env var; URL validation rejects userinfo (`user:pass@host`), `file://`, cloud-metadata `169.254.169.254`, and lookalike hosts (`localhost.attacker.example`); HTTPS + loopback HTTP only; stderr warning does not echo env value.
+- **Soft-fall routing (T5)** — opt-in only via `allow_fallback_to_participate: true` AND error in soft-fallable catalogue (EmbedderInvalid/LocalStorageBusy/IdentityBootstrapFailed) AND non-empty hosted endpoint; default behavior returns typed error verbatim; post-escalation the proxy LOCALLY enforces public-write gate (so `mode=local + visibility=public + allow_fallback=true + no confirmation` cannot chain-write); soft-fall warning logs only the reason enum string, no secrets; `scrub_reqwest_error` strips URL/userinfo before inclusion in error data.
+- **npm shim (T7)** — SHA256SUMS verified BEFORE extraction; `gh attestation verify` pinned to `--owner mnemonik-xyz --repo mnemonik-xyz/monorepo --signer-workflow .github/workflows/release.yml` with no retry-without-pins loop; gh CLI absence fails closed with clear message (not SHA-only fallback); zip-slip filter rejects `..`, absolute paths, `SymbolicLink`, AND `Link` entries; cache dir 0o700 + binary 0o755; cache dir under `XDG_DATA_HOME` or `~/.local/share`; `MNEMONIK_MCP_RELEASE_BASE_URL` requires https unless `MNEMONIK_MCP_ALLOW_HTTP=1`.
+- **release.yml (T8)** — Trusted Publishing OIDC for npm (no NPM_TOKEN); `attest-build-provenance@v1` over tarball glob (correct subject — shim verifies before extraction); `release` job has `contents: write + id-token: write + attestations: write`; `publish-npm` and `publish-mcp-shim` jobs have only `id-token: write + contents: read` (minimal); workflow-level `concurrency: release-${{ github.ref }} cancel-in-progress: true` prevents duplicate-tag races.
+- **Threat-model gaps** — discovery (`prompts/*`, `resources/*`) iterates only compile-time `ALL_SKILLS`; no tenant data leakage; `resources/read` URI is exact-match against registered skill names (no path traversal); `request_public_write_confirmation` cannot enumerate cross-owner because no client-supplied target_owner field; `FailingEmbedder` is feature-gated behind `test-support` and lives only in `mcp/tests/support/` — not compiled into release binaries.
+- **No admin override / god-key** — grep across `mcp/src`, `core/src`, `packages/mcp/src` for `ADMIN_*`, `emergency_drain`, `god_key`, `owner_override`, `skip_payment`, `bypass_auth` returns zero matches.
+
+**Findings:**
+
+- **SA10-L1 (LOW)** — `assertNotSymlinkOutOfHome` in `install-hosts.ts:50-69` only checks if the final candidate is a symlink; path components (e.g. `~/Library`) are not realpath-resolved. Acceptable per threat model (attacker who can write `$HOME` doesn't need this trick).
+- **SA10-L2 (LOW)** — `is_safe_hosted_endpoint` accepts any HTTPS host after userinfo rejection; an attacker who controls BOTH `--allow-custom-endpoint` AND the env var can redirect to `https://attacker.example`. Acceptable per Decision 12's threat model (flag-gate IS the security boundary).
+- **SA10-INFO1 (INFO)** — Horizontal scaling note: single-instance DashMap ledger is fail-closed if scaled out without sticky sessions. v1 single-instance; v2 should migrate to Redis or signed-cookie ledger.
+
+**Deviations:** None.
+
+**Reviews:**
+
+*Round 1 (this commit):*
+- security-auditor: PASS, 0 blockers + 0 majors + 2 LOW + 1 INFO → [logs/working/audit/security-auditor.json](logs/working/audit/security-auditor.json)
+
+**Ready for deploy:** Yes — no security blockers across T1-T8. Pre-deploy QA (T12) may proceed.

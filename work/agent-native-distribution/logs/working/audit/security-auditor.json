@@ -1,0 +1,239 @@
+{
+  "auditor": "t10-auditor",
+  "skill": "security-auditor",
+  "feature": "agent-native-distribution",
+  "scope": "holistic wave-7 security audit across merged state of T1-T8",
+  "verdict": "PASS",
+  "date": "2026-06-05",
+  "summary": "Final security gate before deploy. Holistic audit across HMAC public-write gate, anonymous recall, token storage, MNEMONIC_HOSTED_ENDPOINT gating, soft-fall routing, npm shim (SHA256SUMS + gh attestation + zip-slip), and release.yml. All critical security controls implemented correctly. Two LOW-severity defense-in-depth observations and one INFO note. No blockers.",
+  "files_reviewed": [
+    "mcp/src/confirmation_token.rs",
+    "mcp/src/mcp.rs (lines 75-241, 948-1750)",
+    "mcp/src/tools.rs (lines 290-700, 1485-1500)",
+    "mcp/src/oauth/mod.rs (lines 1320-1500)",
+    "mcp/src/main.rs (lines 49-365)",
+    "mcp/src/lib.rs (lines 80-186)",
+    "core/src/identity/token_store.rs",
+    "core/src/storage/sqlite.rs (lines 86-122, 715-805, 398-460)",
+    "packages/mcp/src/install-binary.ts",
+    "packages/mcp/src/install-hosts.ts",
+    "packages/mcp/src/paths.ts",
+    "packages/mcp/src/doctor.ts",
+    "packages/mcp/src/bin/mnemonik-mcp.ts",
+    ".github/workflows/release.yml"
+  ],
+  "focus_areas": [
+    {
+      "area": "HMAC public-write gate (T4 / Decision 5b)",
+      "verdict": "closed",
+      "evidence": [
+        "mcp/src/confirmation_token.rs:270-285 — HMAC binding tuple = secret || content_hash || owner_pubkey || visibility.as_str() || expires_at.to_be_bytes() || jti.as_bytes(). Fixed-width expires_at and jti; variable-length strings are content_hash (blake3 hex, 64 chars enforced at dispatcher line 1726), owner_pubkey (Solana base58), visibility (`private`/`public`). Concatenation is non-ambiguous because the prefix fields are fixed-length or are checked-format strings.",
+        "mcp/src/confirmation_token.rs:96-105 — HMAC secret seeded via `rand::thread_rng().fill_bytes(&mut secret)` on `ConfirmationLedger::new()`. The 32-byte secret is process-scoped (lives in the `ConfirmationLedger` struct, never persisted). Test `hmac_secret_is_process_scoped` (line 306) pins the invariant.",
+        "mcp/src/confirmation_token.rs:176-208 — Single-use enforcement uses `DashMap::remove_if` atomic CAS. The predicate checks expiry FIRST (cheap reject), then reconstructs the expected HMAC and compares against BOTH the stored entry AND the client-presented token via `subtle::ConstantTimeEq::ct_eq`. Test `atomic_remove_if_under_concurrent_access` (line 418) pins the exactly-one-winner semantic with 16 racing tasks.",
+        "mcp/src/oauth/mod.rs:1326-1334 — `ALLOWLIST_METHODS` does NOT include `request_public_write_confirmation` or `tools/call:request_public_write_confirmation`. The mint endpoint requires JWT.",
+        "mcp/src/mcp.rs:1694-1736 — Defense-in-depth: even though middleware enforces the JWT, the dispatcher checks `if jwt_sub.is_none()` and rejects with -32001. owner_pubkey passed to `mint()` is the dispatcher's `owner_pubkey` which at line 1146-1149 is `claims.sub.clone()` when claims are present, server keypair fallback only when claims are None — and the None branch is unreachable here because of the explicit `jwt_sub.is_none()` guard.",
+        "mcp/src/mcp.rs:1546-1582 — Consume path: `owner_pubkey` passed to `consume()` is again the dispatcher-resolved value (line 1570 uses the same variable as mint), so a cross-owner replay (Owner B presents Owner A's token) fails because consume's HMAC reconstruction uses B's owner_pubkey from B's claims.sub — does not match the HMAC the ledger stored with A's owner. Test `cross_owner_consume_rejected` (line 340) pins this.",
+        "mcp/src/confirmation_token.rs:259-267 — Background eviction loop (`start_evictor`) sweeps expired entries every 60s via `evict_tick`. Bounds the map under flood. Test `evict_expired_removes_only_expired_rows` (line 369) pins the sweep semantic.",
+        "mcp/src/mcp.rs:1726-1730 — content_hash format validation: exactly 64 ASCII hex chars enforced at mint, closing the SAR1-L2 DoS amplifier (DashMap-spam via garbage hashes)."
+      ]
+    },
+    {
+      "area": "Anonymous recall (T4 / Decision 5 / AC13)",
+      "verdict": "closed",
+      "evidence": [
+        "mcp/src/mcp.rs:1661-1665 — `if jwt_sub.is_none() { (None, Some(Visibility::Public)) } else { (Some(owner_pubkey), None) }`. Anonymous callers ALWAYS get `Some(Public)`; no fallback to `None` on any error path (the if/else is total).",
+        "core/src/storage/sqlite.rs:780-802 — `search()` match arm `(None, Some(v))` runs `SEARCH_SQL_CROSS_OWNER_VIS` which is `WHERE a.owner_pubkey IS NOT NULL AND a.visibility = ?`. Parameterized binding via `params![v]`. The `(None, None)` arm returns `Vec::new()` defensively, so even if a future caller violates the contract, no leak.",
+        "core/src/storage/sqlite.rs:86-122 — All three search SQL constants use `?` placeholders; no `format!()`-based string interpolation. SQL injection on visibility filter is structurally impossible.",
+        "mcp/src/oauth/mod.rs:1372 — `ALLOWLIST_TOOLS_CALL_NAMES = &[\"mnemonic_recall\"]` — only recall is anonymous-allowlisted. Cross-owner public access is intentional per AC13."
+      ]
+    },
+    {
+      "area": "Token storage (T6)",
+      "verdict": "closed",
+      "evidence": [
+        "core/src/identity/token_store.rs:198-220 — On Unix: parent dir set to 0o700 (line 205, best-effort), tempfile created in parent, tempfile permissions set to 0o600 BEFORE persist (line 219), then `tmp.persist(path)` rename. Atomic — no half-written window.",
+        "core/src/identity/token_store.rs:103-117 — `token_path()` resolves via `MNEMONIC_CONFIG_DIR` or `dirs::home_dir()`; refuses to fall back to a root-relative path. SA6-001 closed.",
+        "core/src/identity/token_store.rs:137-148 — Malformed JSON returns `Ok(None)` (line 147), never panics. Test `read_malformed_returns_none` (line 276) pins this.",
+        "core/src/identity/token_store.rs:149-170 — Expired-or-unparseable timestamp returns `TokenStoreError::Expired { expires_at, sub }` — the payload contains the (already-expired) timestamp and the public `sub` (Solana pubkey) but NOT the JWT itself. No leak of claim contents from an expired token."
+      ]
+    },
+    {
+      "area": "MNEMONIC_HOSTED_ENDPOINT gating (T5 / Decision 12)",
+      "verdict": "closed",
+      "evidence": [
+        "mcp/src/lib.rs:162-186 — `resolved_hosted_endpoint(allow_custom, env_value)` ignores env var when `allow_custom=false`, even if set. Returns `HostedEndpointWarning::FlagAbsent` so the operator sees the override was ignored.",
+        "mcp/src/lib.rs:108-140 — `is_safe_hosted_endpoint()` rejects: userinfo (`user:pass@host`), non-https non-loopback schemes, `file://`, cloud-metadata IPs (169.254.169.254 is rejected by the prefix check — only exact-match `http://127.0.0.1`/`http://localhost`/`http://[::1]` followed by `:`/`/`/EOL pass), and lookalike hosts (`http://localhost.attacker.example`). Tests at lines 188-294 cover all cases.",
+        "mcp/src/main.rs:354-362 — Stderr warning emits exactly once at startup. Neither warning includes the env value, so no token-byte leak even if a malicious operator stuffed a JWT into the env var."
+      ]
+    },
+    {
+      "area": "Soft-fall routing (T5 / Decision 4)",
+      "verdict": "closed",
+      "evidence": [
+        "mcp/src/tools.rs:388-410 — Soft-fall requires ALL of: `allow_fallback=true`, error code in soft-fallable catalogue (EmbedderInvalid/LocalStorageBusy/IdentityBootstrapFailed via `softfall_reason_from_error`), AND non-empty hosted endpoint. Default behavior (allow_fallback=false) returns the typed error verbatim with no escalation and no outbound calls.",
+        "mcp/src/tools.rs:551-588 — Post-escalation, the proxy LOCALLY enforces the public-write gate: if `visibility=public` is set without both `public_write_confirmation` and `jti`, the escalation is aborted before any HTTP call and `-32095 PublicWriteRequiresConfirmation` is returned. Closes the Decision 4 + 5b interaction: `mode=local + visibility=public + allow_fallback=true + no confirmation` cannot chain-write.",
+        "mcp/src/tools.rs:405-409 — Soft-fall warning logs only the reason enum string (`embedder_unavailable`/`local_storage_busy`/`identity_bootstrap_failed`) — no token, no content, no owner.",
+        "mcp/src/tools.rs:578-583 — Soft-fall abort warning logs reason + truncated content_hash; no token, no content body.",
+        "mcp/src/tools.rs:471-491 — `scrub_reqwest_error()` renders only the error kind + host (NO full URL, no userinfo, no path) before inclusion in `data.last_error`."
+      ]
+    },
+    {
+      "area": "npm shim (T7)",
+      "verdict": "closed",
+      "evidence": [
+        "packages/mcp/src/install-binary.ts:260-285 — Order of operations: SHA256 (`expected = sums.get(artifact)`, `actual = sha256Hex(tarball)`) is verified BEFORE staging; staged tarball is then passed to `gh attestation verify` (line 279) BEFORE `tar.extract` (line 281).",
+        "packages/mcp/src/install-binary.ts:126-169 — `gh attestation verify` argv = `['attestation', 'verify', artifactPath, '--owner', 'mnemonik-xyz', '--repo', 'mnemonik-xyz/monorepo', '--signer-workflow', '.github/workflows/release.yml']`. No fallback path: `child.on('error')` for ENOENT rejects with 'gh CLI is required' (fail closed, line 147-153); `child.on('close')` with non-zero exit rejects (line 162-166). No retry-without-pins loop.",
+        "packages/mcp/src/install-binary.ts:182-201 — `makeExtractFilter` rejects `SymbolicLink` and `Link` entries (line 194), and resolves each entry path against `extractRoot`; rejects when `rel.startsWith('..')` or `isAbsolute(rel)` (line 198). Zip-slip closed.",
+        "packages/mcp/src/install-binary.ts:245-251 — Cache dir created with mode `0o700`; re-chmod after creation in case it preexisted with looser bits. bin dir same treatment.",
+        "packages/mcp/src/install-binary.ts:300 — Extracted binary set to mode `0o755`.",
+        "packages/mcp/src/paths.ts:27-33 — Cache dir defaults to XDG_DATA_HOME or `~/.local/share/@mnemonik-xyz/mcp`. Always under HOME unless `MNEMONIK_MCP_CACHE_DIR` override (acceptable for tests).",
+        "packages/mcp/src/paths.ts:68-89 — `MNEMONIK_MCP_RELEASE_BASE_URL` requires https://; only `MNEMONIK_MCP_ALLOW_HTTP=1` permits http:// for local-only fixtures. Closes SAR7-M2 (URL-redirection-with-attestation defense in depth).",
+        "packages/mcp/src/install-hosts.ts:50-69 — `assertNotSymlinkOutOfHome` calls `lstat` + `realpath`; refuses when target is not a descendant of `$HOME` (uses `home + sep` boundary to prevent `home + 'attacker'` substring match).",
+        "packages/mcp/src/install-hosts.ts:97-113 — Atomic write: `.mnemonik.tmp` in same dir, fsync via `fh.sync()`, then `rename`. Mode 0o600 on the temp file via `open(tmp, 'w', 0o600)`.",
+        "packages/mcp/src/install-hosts.ts:21-33 — `hostCandidates()` is a hardcoded list — no user input flows into candidate paths."
+      ]
+    },
+    {
+      "area": "release.yml (T8)",
+      "verdict": "closed",
+      "evidence": [
+        ".github/workflows/release.yml:294-330 — `publish-mcp-shim` uses Trusted Publishing OIDC: `permissions: { id-token: write, contents: read }`, no NPM_TOKEN secret, `npm publish --access public --provenance`.",
+        ".github/workflows/release.yml:128-131 — `release` job permissions: `contents: write` (needed by softprops/action-gh-release), `id-token: write` + `attestations: write` (needed by attest-build-provenance). Minimal blast radius.",
+        ".github/workflows/release.yml:204-207, 299-301 — `publish-npm` and `publish-mcp-shim` jobs use `contents: read` (not write) and only `id-token: write` for OIDC. Correctly scoped.",
+        ".github/workflows/release.yml:179-182 — `attest-build-provenance@v1` over `artifacts/**/mnemonic-mcp-*.tar.gz`. Subject is the tarball (the shim verifies tarball BEFORE extraction, so this is the correct subject — explicitly documented at lines 172-178).",
+        ".github/workflows/release.yml:12-14 — Workflow-level `concurrency: release-${{ github.ref }}` with `cancel-in-progress: true` prevents duplicate-tag races on GitHub Release asset uploads and OIDC token reuse.",
+        ".github/workflows/release.yml:155-170 — SHA256SUMS generation step has a post-normalization guard (`grep -q '/' && exit 1`) that fails CI if a future build-matrix layout change embeds path separators."
+      ]
+    },
+    {
+      "area": "Threat model — anonymous discovery surface expansion (T2)",
+      "verdict": "closed",
+      "evidence": [
+        "mcp/src/mcp.rs:80-145 — `prompts_list_payload`, `prompts_get_payload`, `resources_list_payload`, `resources_read_payload` all iterate ONLY `skills::ALL_SKILLS` (compile-time embedded). No tenant data, no DB access, no `owner_pubkey`, no attestation counts, no recent-write summaries.",
+        "mcp/src/mcp.rs:152-185 — `resources_read_payload` uses exact-match against `RESOURCE_URI_PREFIX = 'mnemonik://skills/'` + `.md` suffix + skill stem found in `ALL_SKILLS`. Path traversal (e.g., `mnemonik://skills/../../etc/passwd`) cannot match because the stem must equal a registered name. The skill list is the allowlist.",
+        "mcp/src/mcp.rs:948-961 — `initialize` response surfaces `embedder.model_id`, `embedder.model_version`, `embedder.dim` — all compile-time / model-fingerprint values. No tenant identifiers."
+      ]
+    },
+    {
+      "area": "Threat model — request_public_write_confirmation owner enumeration",
+      "verdict": "closed",
+      "evidence": [
+        "mcp/src/mcp.rs:1694-1731 — The tool requires JWT; an authenticated caller can mint a token bound to their own owner_pubkey ONLY (the tool reads owner_pubkey from the dispatcher resolution which is claims.sub for authenticated callers, line 1146-1147). There is no caller-controlled `target_owner_pubkey` parameter, so cross-owner enumeration is impossible by construction.",
+        "mcp/src/mcp.rs:1737-1741 — Response returns only `confirmation_token`, `jti`, `expires_at`. No echo of `owner_pubkey` or other authenticated-caller-specific info that wasn't already known to them."
+      ]
+    },
+    {
+      "area": "Threat model — FailingEmbedder DoS in production",
+      "verdict": "closed",
+      "evidence": [
+        "mcp/src/lib.rs:49-50 — `pub mod test_support;` is `#[cfg(feature = \"test-support\")]`. The `test-support` feature is opt-in and not enabled in release builds.",
+        "mcp/tests/support/mod.rs:27 — `FailingEmbedder` lives under `mcp/tests/support/`, not compiled into the release binary at all (it's an integration-test-only support module)."
+      ]
+    },
+    {
+      "area": "No admin override / god-key path (user-spec hard rule)",
+      "verdict": "closed",
+      "evidence": [
+        "grep -rnE 'ADMIN_KEY|ADMIN_PUBKEY|admin_pubkey|emergency_drain|god_key|owner_override|skip_payment|bypass_auth' across mcp/src, core/src, packages/mcp/src returns ZERO matches. No conditional admin-pubkey checks anywhere in the new code."
+      ]
+    },
+    {
+      "area": "No unwrap() in production paths (patterns.md)",
+      "verdict": "closed-with-prior-baseline",
+      "evidence": [
+        "Modified files contain no NEW `.unwrap()` calls in production paths. The pre-existing `store.lock().unwrap()` pattern at tools.rs:1101/1182/1310/1471 predates this feature (commit ba4a63c, OAuth + bearer middleware) and is the accepted Mutex poisoning convention across the codebase — outside this audit's scope.",
+        "confirmation_token.rs uses `expect()` only at line 278 (HMAC key length — infallible for fixed 32-byte input)."
+      ]
+    },
+    {
+      "area": "No secrets in logs (patterns.md)",
+      "verdict": "closed",
+      "evidence": [
+        "tools.rs:405-409 — soft-fall escalating warning logs only reason enum string.",
+        "tools.rs:578-583 — soft-fall abort warning logs reason + truncated content_hash; no token, no content body.",
+        "tools.rs:637-641 — debug-level log of non-Expired TokenStoreError; error rendering uses TokenStoreError::Display which renders type-of-error + io::Error message (may include OS path, no JWT bytes).",
+        "tools.rs:1491-1497 — delivery-not-confirmed warning logs attestation_id, arweave_tx, solana_tx, stage, owner_pubkey — all public on-chain identifiers, no secrets.",
+        "main.rs:354-362 — hosted endpoint warnings do not echo the env value.",
+        "confirmation_token.rs — no tracing/log calls; rejection is silent (returns ConfirmError::Invalid which the dispatcher logs at line 1576-1580 with owner_pubkey + content_hash — both public/derivable).",
+        "main.rs:385-387 — startup info logs pubkey/did:sol — public identifiers, intentional."
+      ]
+    }
+  ],
+  "findings": [
+    {
+      "id": "SA10-L1",
+      "severity": "LOW",
+      "category": "Defense-in-depth",
+      "area": "install-hosts.ts symlink-out-of-home",
+      "file": "packages/mcp/src/install-hosts.ts:50-69",
+      "summary": "assertNotSymlinkOutOfHome only checks if the candidate file itself is a symlink, not whether path components leading to it (e.g., ~/Library) are attacker-controlled symlinks.",
+      "threat_model": "An attacker with prior write access to $HOME who can create a symlink at e.g. ~/Library pointing to /tmp/attacker/Library could redirect writes targeted at ~/Library/Application Support/Claude/claude_desktop_config.json. However, an attacker who can write to $HOME can already write the target file directly without this trick, and macOS SIP also protects ~/Library from being replaced by a symlink. Net new attack surface is essentially nil.",
+      "recommendation": "Optional defense-in-depth: realpath() each candidate fully and verify resolution stays within $HOME at every component. Acceptable to defer.",
+      "blocker": false
+    },
+    {
+      "id": "SA10-L2",
+      "severity": "LOW",
+      "category": "Defense-in-depth",
+      "area": "is_safe_hosted_endpoint HTTPS host check",
+      "file": "mcp/src/lib.rs:121-123",
+      "summary": "HTTPS URLs pass the safety check unconditionally (after userinfo rejection), so an attacker who can flip BOTH --allow-custom-endpoint AND MNEMONIC_HOSTED_ENDPOINT can redirect to e.g. https://attacker.example/mcp.",
+      "threat_model": "Requires simultaneous compromise of (a) the user's invocation flags AND (b) the user's env vars — local malware that controls both can already achieve the same effect by replacing the binary. The flag-gate (Decision 12) is the actual security boundary; HTTPS host validation would only protect against an attacker who controls env but NOT flags, which is the case covered by `HostedEndpointWarning::FlagAbsent`. Acceptable as-designed.",
+      "recommendation": "No action required for v1. If the threat model expands to include `--allow-custom-endpoint` being set by a trusted operator while env is attacker-influenced (e.g., shared CI), consider an HTTPS host allowlist.",
+      "blocker": false
+    },
+    {
+      "id": "SA10-INFO1",
+      "severity": "INFO",
+      "category": "Documentation",
+      "area": "Horizontal scaling note in Decision 5b",
+      "file": "work/agent-native-distribution/tech-spec.md:120",
+      "summary": "If mcp.mnemonik.xyz scales to >1 instance, the in-process DashMap ledger becomes incorrect (mint on A, consume on B → false reject). Tech-spec calls this out as a v2 concern.",
+      "threat_model": "Not a security regression — incorrect rejection is fail-closed. Worth tracking because a deployment misconfiguration (load-balancer with sticky-sessions disabled) would surface as confusing user-facing errors.",
+      "recommendation": "No action for v1. v2 should migrate to Redis or a signed-cookie ledger before scaling out.",
+      "blocker": false
+    }
+  ],
+  "verifications": {
+    "no_admin_override": true,
+    "no_unwrap_in_production_paths_new": true,
+    "no_secrets_in_logs": true,
+    "anonymous_recall_always_public": true,
+    "hmac_owner_server_derived_at_mint_and_consume": true,
+    "single_use_atomic_remove_if": true,
+    "jwt_required_at_mint": true,
+    "token_file_mode_0o600": true,
+    "token_parent_dir_0o700": true,
+    "atomic_token_write": true,
+    "malformed_json_returns_none": true,
+    "expired_token_no_claim_leak": true,
+    "env_var_ignored_without_flag": true,
+    "url_validation_rejects_userinfo_file_metadata": true,
+    "soft_fall_opt_in_only": true,
+    "soft_fall_no_silent_escalation_default": true,
+    "soft_fall_post_escalation_visibility_gate": true,
+    "soft_fall_warning_no_secret_leakage": true,
+    "sha256_verified_before_extraction": true,
+    "gh_attestation_pinned": true,
+    "gh_cli_absence_fails_closed": true,
+    "no_retry_without_pins": true,
+    "zip_slip_rejects_dotdot_absolute_symlink_hardlink": true,
+    "cache_dir_under_home": true,
+    "binary_mode_0o755": true,
+    "cache_dir_mode_0o700": true,
+    "release_yml_trusted_publishing_oidc": true,
+    "release_yml_no_npm_token": true,
+    "release_yml_attestation_over_tarball": true,
+    "release_yml_minimal_permissions": true,
+    "release_yml_concurrency_group": true,
+    "discovery_no_tenant_leakage": true,
+    "resources_read_no_path_traversal": true,
+    "request_confirmation_no_owner_enumeration": true,
+    "failing_embedder_not_in_production": true
+  },
+  "post_audit_actions": [
+    "Append summary to work/agent-native-distribution/decisions.md",
+    "Commit security-auditor.json under work/agent-native-distribution/logs/working/audit/",
+    "Message team-lead with verdict + finding count"
+  ]
+}
