@@ -2606,9 +2606,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_middleware_tool_call_requires_jwt() {
-        // Every `tools/call` requires a valid Bearer JWT — discovery methods
-        // (`initialize` / `tools/list`) are the only allowlisted JSON-RPC
-        // methods on /mcp.
+        // Every `tools/call` requires a valid Bearer JWT — the discovery
+        // surfaces (`initialize`, `tools/list`, `ping`, plus the four
+        // agent-native-distribution methods `prompts/list`, `prompts/get`,
+        // `resources/list`, `resources/read`) are the JSON-RPC methods
+        // allowlisted on /mcp. See `ALLOWLIST_METHODS` for the canonical
+        // list.
         let st = fresh_state();
         let app = build_authn_router(st);
         let body = serde_json::json!({

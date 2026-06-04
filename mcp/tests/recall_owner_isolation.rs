@@ -210,6 +210,16 @@ async fn test_recall_filters_by_owner_pubkey_and_anonymous_returns_401() {
     assert_eq!(row_content, "bob memory 1", "bob got alice's row!");
 
     // 2. Anonymous recall (no Authorization header) → 401, NEVER 200 with rows.
+    //
+    // NOTE (agent-native-distribution Task 4): this 401 assertion will change
+    // when Task 4 lands the visibility-filter recall path per AC13 — anonymous
+    // recall will return HTTP 200 with only `visibility='public'` rows
+    // included. When that lands, update this assertion to:
+    //   assert_eq!(sa, StatusCode::OK);
+    //   let rows = body_a["result"]["content"]...;
+    //   assert!(rows.iter().all(|r| r["visibility"] == "public"));
+    // Surfaced now (by test-reviewer round 1 finding F2) so the next coder
+    // doesn't hit a surprise CI failure.
     let (sa, body_a) = post_jsonrpc(
         &app,
         serde_json::json!({
