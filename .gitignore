@@ -84,3 +84,14 @@ playwright/.cache/
 tmp/
 temp/
 *.tmp
+
+# Local-only AI-dev methodology framework (from github.com/pavel-molyanov/molyanov-ai-dev).
+# Installed as tooling so /do-feature and the spec-driven commands/skills/agents work
+# in-repo; intentionally NOT committed. The project-specific project-knowledge skill is
+# tracked and explicitly kept below.
+.claude/agents/
+.claude/commands/
+.claude/hooks/
+.claude/shared/
+.claude/skills/*
+!.claude/skills/project-knowledge/

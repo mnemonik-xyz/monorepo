@@ -148,6 +148,12 @@ jobs:
           node-version: 22
           registry-url: https://registry.npmjs.org
 
+      # npm Trusted Publishing (OIDC) requires npm CLI >= 11.5.1. Node 22
+      # ships npm 10.x, so upgrade explicitly. Once the global install
+      # finishes, subsequent `npm` invocations resolve to the new binary.
+      - name: Upgrade npm to >=11.5.1 (Trusted Publishing requires it)
+        run: npm install -g npm@latest
+
       # Rust toolchain + wasm-pack are required because the SDK's
       # prepublishOnly hook runs `npm run build` which invokes
       # wasm-pack to produce core/pkg-web/* before tsc + dist/wasm/ copy.
@@ -183,6 +189,12 @@ jobs:
       # 403 with "cannot publish over previously published versions". Compare
       # local package.json version to npm registry; skip if equal.
 
+      # Trusted Publishing (OIDC): npm auto-detects the GitHub Actions
+       # OIDC token via the `id-token: write` permission above. No
+       # NODE_AUTH_TOKEN, no NPM_TOKEN secret — npm publish authenticates
+       # against the trusted-publisher config registered on each package's
+       # npm settings page (see CLAUDE.md "## npm publishing"). Provenance
+       # is signed automatically and verifiable end-to-end.
       - name: Publish @mnemonik-xyz/sdk
         run: |
           LOCAL=$(node -p "require('./packages/sdk/package.json').version")
@@ -192,8 +204,6 @@ jobs:
           else
             npm publish --access public --provenance --workspace packages/sdk
           fi
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Publish @mnemonik-xyz/cli
         run: |
@@ -204,5 +214,3 @@ jobs:
           else
             npm publish --access public --provenance --workspace packages/cli
           fi
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

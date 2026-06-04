@@ -76,9 +76,16 @@ async fn test_stdio_tools_list_sign_memory_recall_without_oauth() {
     // pubkey so the binary's `seed::run` finds `count > 0` and skips the
     // (slow + network-touching) RAG bootstrap loop.
     {
-        use mnemonic_core::identity::{load_or_create_keypair, pubkey_base58};
-        use mnemonic_core::storage::{AttestationStore, SqliteStore};
-        let kp = load_or_create_keypair(&keypair_path).expect("keypair");
+        use mnemonic_core::identity::{ensure_with_stores, pubkey_base58, FileKeyStore, KeyStores};
+        use mnemonic_core::storage::{AttestationStore, SqliteStore, WriteMode};
+        let stores = KeyStores {
+            os: None,
+            file: Box::new(FileKeyStore::new(keypair_path.clone())),
+            identity_path: keypair_path.clone(),
+            readme_path: tmp.path().join("README.txt"),
+        };
+        let id = ensure_with_stores(stores).expect("ensure");
+        let kp = id.keypair;
         let pubkey = pubkey_base58(&kp);
         let store = SqliteStore::open(&db_path).expect("sqlite open");
         store
@@ -92,6 +99,11 @@ async fn test_stdio_tools_list_sign_memory_recall_without_oauth() {
                 &pubkey,
                 &pubkey,
                 &chrono::Utc::now().to_rfc3339(),
+                // T1 placeholder: seed row is structurally a `local:` synthetic
+                // tx, but the migration's backfill rule already covers that on
+                // upgrade. T2 will pass the resolved mode here once the
+                // resolver is in place.
+                WriteMode::Participate,
                 &[0.0; 8],
             )
             .expect("save_attestation");
@@ -106,7 +118,6 @@ async fn test_stdio_tools_list_sign_memory_recall_without_oauth() {
         // call embed() in this test (tools/list + initialize don't embed).
         .env("EMBED_PROVIDER", "openai")
         .env("OPENAI_API_KEY", "stdio-test-key-not-real")
-        .env("MNEMONIC_KEYPAIR_PATH", &keypair_path)
         .env("DATABASE_PATH", &db_path)
         .env("RAG_CHUNK_DIR", &rag_dir)
         .env("OLLAMA_URL", "http://localhost:11434")

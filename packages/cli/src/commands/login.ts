@@ -1,9 +1,18 @@
-// `mnemonic login` — two paths:
+// `mnemonic login` — three paths:
 //
-//   default (interactive):  PKCE + loopback HTTP server bound to 127.0.0.1:0
-//                           (random port). Opens the system browser, awaits
-//                           a single callback, validates `state`, exchanges
-//                           the code for a JWT, persists.
+//   default (browserless):  loads `~/.mnemonic/identity.json`, signs the
+//                           server's PKCE challenge with the local Ed25519
+//                           keypair, exchanges for a JWT. No browser, no
+//                           loopback server, fully agent-friendly. `JWT.sub`
+//                           is `identity.pubkey_base58` by construction —
+//                           closes the identity-mismatch class of bugs that
+//                           the browser flow can introduce (issue #27).
+//   --browser:              legacy PKCE + loopback HTTP server bound to
+//                           127.0.0.1:0 (random port). Opens the system
+//                           browser, OAuth challenge is signed by the
+//                           webapp's localStorage keypair. Retained for
+//                           users who have already paired the CLI identity
+//                           against the webapp's localStorage key.
 //   --token <jwt>:          headless. Decodes header b64 to assert
 //                           `alg=HS256`, parses payload, asserts `exp` in
 //                           future, persists. No browser, no server.
@@ -21,18 +30,27 @@ import {
 import type { AddressInfo } from "node:net";
 
 import {
+  IdentityRequiresKeystore,
   buildAuthorizeUrl,
   exchangeCodeForToken,
+  loginWithIdentity,
   parseJwtPayload,
 } from "@mnemonik-xyz/sdk";
 
-import { identityExists, loadIdentityJson, saveToken } from "../config.js";
-import { AuthError, CliError, fromSdkError } from "../errors.js";
-import { format, hint, type OutputOptions } from "../output.js";
+import {
+  identityExists,
+  loadIdentity,
+  loadIdentityJson,
+  saveToken,
+} from "../config.js";
+import { AuthError, CliError, fromSdkError, UserError } from "../errors.js";
+import { format, hint, type OutputOptions, verbose } from "../output.js";
 
 export interface LoginOptions extends OutputOptions {
   token?: string;
   baseUrl?: string;
+  /** Opt-in to the legacy browser-mediated OAuth flow. */
+  browser?: boolean;
   /** Internal — disable the `open` browser launch (for tests). */
   noOpen?: boolean;
   /** Internal — override loopback timeout for tests (ms). */
@@ -51,7 +69,63 @@ export async function runLogin(opts: LoginOptions): Promise<void> {
     await runHeadless(opts.token, opts);
     return;
   }
-  await runInteractive(baseUrl, opts);
+  if (opts.browser) {
+    await runInteractive(baseUrl, opts);
+    return;
+  }
+  await runBrowserless(baseUrl, opts);
+}
+
+// ── browserless (default) ──────────────────────────────────────────────────
+
+/**
+ * Programmatic OAuth: sign the server's PKCE challenge with the local
+ * keypair, exchange for a JWT. No browser, no loopback server.
+ *
+ * Requires `~/.mnemonic/identity.json` to already exist — if it doesn't,
+ * direct the user at the three pairing paths (`init`, `identity import
+ * --ticket`, `identity import --file`).
+ */
+async function runBrowserless(
+  baseUrl: string,
+  opts: LoginOptions,
+): Promise<void> {
+  if (!identityExists()) {
+    throw new UserError(
+      "no local identity — run one of:\n" +
+        "  • mnemonic init                              — generate a fresh CLI keypair\n" +
+        "  • mnemonic identity import --ticket <uuid>   — pair from the webapp ('Send to CLI')\n" +
+        "  • mnemonic identity import --file <path>     — import an existing keypair JSON\n" +
+        "  • mnemonic login --browser                   — fall back to the legacy browser flow",
+    );
+  }
+  const kp = await loadIdentity();
+  verbose(`base_url=${baseUrl}`, opts);
+  verbose(`signing OAuth challenge with local pubkey=${kp.pubkey}`, opts);
+
+  let result: { jwt: string; expiresAt: string; sub: string };
+  try {
+    result = await loginWithIdentity({
+      baseUrl,
+      clientId: CLIENT_ID,
+      keypair: kp,
+    });
+  } catch (e) {
+    throw fromSdkError(e);
+  }
+  verbose(`server returned JWT.sub=${result.sub}`, opts);
+
+  saveToken({
+    jwt: result.jwt,
+    expires_at: result.expiresAt,
+    sub: result.sub,
+  });
+
+  format(
+    { sub: result.sub, expires_at: result.expiresAt, mode: "browserless" },
+    opts,
+    () => `login OK\nsub: ${result.sub}\nexpires: ${result.expiresAt}`,
+  );
 }
 
 // ── headless ────────────────────────────────────────────────────────────────
@@ -72,7 +146,7 @@ async function runHeadless(jwt: string, opts: LoginOptions): Promise<void> {
     { sub: payload.sub, expires_at: expiresAt, mode: "headless" },
     opts,
     (_d, _color) =>
-      `login OK (headless)\nsub: ${payload.sub}\nexpires: ${expiresAt}`
+      `login OK (headless)\nsub: ${payload.sub}\nexpires: ${expiresAt}`,
   );
 }
 
@@ -80,7 +154,7 @@ async function runHeadless(jwt: string, opts: LoginOptions): Promise<void> {
 
 async function runInteractive(
   baseUrl: string,
-  opts: LoginOptions
+  opts: LoginOptions,
 ): Promise<void> {
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 
@@ -106,7 +180,7 @@ async function runInteractive(
   hint(`opening browser: ${authz.url}`, opts);
   hint(
     `if no browser opens, paste the URL into one. callback URL: ${redirectUri}`,
-    opts
+    opts,
   );
 
   // 3. Open the browser (best-effort — failure is non-fatal because users
@@ -128,7 +202,7 @@ async function runInteractive(
     if (e instanceof AuthError) throw e;
     throw new AuthError(
       `loopback server error: ${e instanceof Error ? e.message : String(e)}`,
-      e
+      e,
     );
   } finally {
     server.close();
@@ -139,7 +213,7 @@ async function runInteractive(
   //    the token endpoint if state was wrong).
   if (cb.state !== authz.state) {
     throw new AuthError(
-      "oauth: state mismatch (possible CSRF) — login aborted"
+      "oauth: state mismatch (possible CSRF) — login aborted",
     );
   }
 
@@ -170,7 +244,7 @@ async function runInteractive(
   format(
     { sub: payload.sub, expires_at: token.expiresAt, mode: "interactive" },
     opts,
-    () => `login OK\nsub: ${payload.sub}\nexpires: ${token.expiresAt}`
+    () => `login OK\nsub: ${payload.sub}\nexpires: ${token.expiresAt}`,
   );
 }
 
@@ -190,17 +264,24 @@ function warnIfMismatch(jwtSub: string): void {
   try {
     identityPub = loadIdentityJson().pubkey_base58;
   } catch (e) {
-    // Identity file present but unreadable — surface nothing here; the user
-    // already has bigger problems and the next command will report them.
-    if (!(e instanceof CliError)) throw e;
-    return;
+    // Stub-shaped identity.json: the pubkey is still on the `IdentityRequires
+    // Keystore` payload. Use that directly — we don't need the secret here.
+    if (e instanceof IdentityRequiresKeystore) {
+      identityPub = e.pubkey_base58;
+    } else if (e instanceof CliError) {
+      // Identity file present but unreadable — surface nothing here; the user
+      // already has bigger problems and the next command will report them.
+      return;
+    } else {
+      throw e;
+    }
   }
   if (identityPub === jwtSub) return;
   process.stderr.write(
     `\nWARNING: logged-in identity sub <${jwtSub}> doesn't match local keypair <${identityPub}>.\n` +
       `         All sign/recall/verify will fail until aligned.\n` +
       `         Fix: mnemonic identity import --ticket <uuid>   (from webapp)\n` +
-      `              OR mnemonic init --force   (replaces keypair, then re-login)\n`
+      `              OR mnemonic init --force   (replaces keypair, then re-login)\n`,
   );
 }
 
@@ -235,7 +316,7 @@ function listenLoopback(): Promise<{ server: Server; port: number }> {
  */
 function awaitCallback(
   server: Server,
-  timeoutMs: number
+  timeoutMs: number,
 ): Promise<CallbackResult> {
   return new Promise((resolve, reject) => {
     let settled = false;
@@ -254,9 +335,9 @@ function awaitCallback(
       settle(() =>
         reject(
           new AuthError(
-            `loopback callback timed out after ${Math.round(timeoutMs / 1000)}s`
-          )
-        )
+            `loopback callback timed out after ${Math.round(timeoutMs / 1000)}s`,
+          ),
+        ),
       );
     }, timeoutMs);
 
@@ -283,10 +364,10 @@ function awaitCallback(
         respondHtml(
           res,
           400,
-          `<h1>Login failed</h1><p>${escapeHtml(err)}: ${escapeHtml(desc)}</p>`
+          `<h1>Login failed</h1><p>${escapeHtml(err)}: ${escapeHtml(desc)}</p>`,
         );
         settle(() =>
-          reject(new AuthError(`oauth callback error: ${err} ${desc}`))
+          reject(new AuthError(`oauth callback error: ${err} ${desc}`)),
         );
         return;
       }
@@ -297,10 +378,10 @@ function awaitCallback(
         respondHtml(
           res,
           400,
-          "<h1>Login failed</h1><p>Missing code or state.</p>"
+          "<h1>Login failed</h1><p>Missing code or state.</p>",
         );
         settle(() =>
-          reject(new AuthError("oauth callback missing code/state"))
+          reject(new AuthError("oauth callback missing code/state")),
         );
         return;
       }
@@ -308,7 +389,7 @@ function awaitCallback(
       respondHtml(
         res,
         200,
-        "<h1>Login complete</h1><p>You can close this tab and return to your terminal.</p>"
+        "<h1>Login complete</h1><p>You can close this tab and return to your terminal.</p>",
       );
       settle(() => resolve({ code, state }));
     };
@@ -317,7 +398,7 @@ function awaitCallback(
     server.once("close", () => {
       // If the server is closed before a callback (e.g. parent error), fail.
       settle(() =>
-        reject(new AuthError("loopback server closed before callback"))
+        reject(new AuthError("loopback server closed before callback")),
       );
     });
   });

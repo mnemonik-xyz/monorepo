@@ -6,8 +6,7 @@ End-to-end test coverage for Cursor / VS Code / Claude Desktop MCP integration. 
 
 Runs on every push via existing CI:
 
-- **Rust unit tests** — `cargo test -p mnemonic-mcp --lib --features test-support oauth::tests` covers the WWW-Authenticate header, `mcp_auth` allowlist, claims-on-allowlisted, path-specific `oauth-protected-resource/mcp`, and the unauth-tool helper.
-- **Playwright tests** — `cd webapp && npx playwright test e2e/mcp-auth-tool.spec.ts` runs 6 tests against the live `mcp.mnemonik.xyz` backend covering tools/list shape, mcp_auth response, 401 + WWW-Authenticate, and both protected-resource metadata variants.
+- **Rust unit tests** — `cargo test -p mnemonic-mcp --lib --features test-support oauth::tests` covers the WWW-Authenticate header, claims-on-allowlisted, and path-specific `oauth-protected-resource/mcp`.
 - **CLI integration** — `cd packages/cli && npm test` covers the `mnemonic init / login / sign / recall / verify` ladder against the SDK's in-process mock server.
 - **InstallButtons unit test** — `cd webapp && npx vitest run src/components/InstallButtons.test.tsx` validates the deeplink URL formats (`cursor://`, `vscode://`, Claude.ai pasted URL).
 
@@ -74,6 +73,6 @@ The combinatorial cost outweighs the ROI for a hackathon-stage project. Tier 2 s
 | Not tested | Why |
 |---|---|
 | Cursor's "Connect" button appearance | Cursor's UI is closed-source; behavior depends on whether the server is in their curated directory. We can't assert from outside. |
-| Browser auto-pop on 401 in Cursor 3.2.16 | Cursor-side UX gap (see manual-verify.md step D4). Documented workaround. |
+| Browser auto-pop on 401 in Cursor 3.2.16 | Cursor-side UX gap in old versions. Cursor ≥0.45 handles spec OAuth correctly; older builds require manual install via `mnemonik.xyz/install`. |
 | Terminal output of `mnemonic` CLI via AppleScript | Terminals are AX-opaque. Use the `child_process.spawn`-based integration tests instead (already in `packages/cli/test/integration/cli-flows.test.ts`). |
 | Cursor / VS Code / Claude Desktop versions outside the matrix | Pin tested versions in the script header. Bump on regression. |

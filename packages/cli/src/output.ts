@@ -21,6 +21,8 @@ export interface OutputOptions {
   json?: boolean;
   quiet?: boolean;
   noColor?: boolean;
+  /** Top-level `--verbose` flag — gates {@link verbose} output. */
+  verbose?: boolean;
 }
 
 /** Resolve effective color setting (TTY + flag + env). */
@@ -64,6 +66,22 @@ export function format(
 export function hint(message: string, opts: OutputOptions): void {
   if (opts.quiet) return;
   process.stderr.write(`${message}\n`);
+}
+
+/**
+ * Print a verbose diagnostic line to stderr when `--verbose` is set.
+ *
+ * Verbose output is for self-diagnostic of auth issues (issue #27): identity
+ * vs JWT.sub comparison, redacted HTTP request/response context, OAuth flow
+ * checkpoints. Distinct from {@link hint} (always-on progress) and
+ * {@link warn} (always-on warnings) — verbose stays silent in the default
+ * case. Honors `--quiet` too (`--verbose --quiet` is an explicit contradiction
+ * that resolves to quiet).
+ */
+export function verbose(message: string, opts: OutputOptions): void {
+  if (!opts.verbose) return;
+  if (opts.quiet) return;
+  process.stderr.write(`[verbose] ${message}\n`);
 }
 
 /** Print a warning to stderr (always — even under --quiet). */

@@ -1234,29 +1234,6 @@ const MAX_PEEK_BODY: usize = 1024 * 1024;
 /// `notifications/initialized` immediately after `initialize` response).
 const ALLOWLIST_METHODS: &[&str] = &["initialize", "tools/list", "ping"];
 
-/// Tool names within `tools/call` that bypass JWT validation. Used by
-/// `mcp_auth` so an MCP client (Cursor, Claude.ai) can ask the server "am I
-/// authenticated and where do I authorize" without first having a token.
-/// Cursor's MCP UI has no native Connect/Authorize button for non-directory
-/// servers; without an unauth-callable hint tool, the chat agent has no way
-/// to surface the install/authorize URL to the user.
-const ALLOWLIST_UNAUTH_TOOLS: &[&str] = &["mcp_auth"];
-
-/// Inspect a JSON-RPC body for `tools/call` invocations whose `params.name`
-/// is in `ALLOWLIST_UNAUTH_TOOLS`. Returns true iff the request is one of
-/// those tool calls (so the middleware can let it through without a JWT).
-fn is_unauth_tool_call(bytes: &[u8]) -> bool {
-    let val: Value = match serde_json::from_slice(bytes) {
-        Ok(v) => v,
-        Err(_) => return false,
-    };
-    let name = val
-        .pointer("/params/name")
-        .and_then(|n| n.as_str())
-        .unwrap_or("");
-    ALLOWLIST_UNAUTH_TOOLS.contains(&name)
-}
-
 /// Extract the JSON-RPC `method` field from a request body without consuming
 /// the parser state. Returns `None` if the body is not valid JSON or the
 /// `method` field is missing/non-string. Cheap — does not allocate the full
@@ -1308,6 +1285,16 @@ pub async fn bearer_auth_middleware(
         // on this allowlist; it uses standard Bearer-JWT auth so only an
         // already-authenticated webapp can mint tickets for its own user.
         || path.starts_with("/api/cli-bootstrap/redeem/")
+        // POST /api/cli-bootstrap/redeem — short_code lookup (T13/T14 interop).
+        // Same no-auth semantics as the UUID-based GET variant: the short_code
+        // is the capability. Exact-path match so it doesn't shadow sub-paths.
+        || path == "/api/cli-bootstrap/redeem"
+        // CLI-origin ticket issue: the CLI has not yet redeemed a JWT — the
+        // x25519 wrap to the server's static key is the capability. No Bearer
+        // JWT required.
+        || path == "/api/cli-bootstrap/issue-from-cli"
+        // Server's static x25519 public key — needed before issuing a ticket.
+        || path == "/api/cli-bootstrap/server-pub"
         // Extension bootstrap-ticket redeem endpoint (chrome-extension T15,
         // Decision 9). Same UUID-as-capability model as cli-bootstrap; the
         // extension exchanges the ticket for a fresh `aud=extension` JWT
@@ -1344,17 +1331,7 @@ pub async fn bearer_auth_middleware(
             // `notifications/*` methods are also pass-through. Without this
             // Cursor's post-initialize `notifications/initialized` is rejected
             // with 401, breaking the handshake.
-            if ALLOWLIST_METHODS.contains(&m) || m.starts_with("notifications/") {
-                return true;
-            }
-            // `tools/call` is normally gated, but specific tool names listed
-            // in ALLOWLIST_UNAUTH_TOOLS (e.g. `mcp_auth`) are callable
-            // without a JWT so the agent can fetch authorize hints before it
-            // has a token.
-            if m == "tools/call" {
-                return is_unauth_tool_call(&body_bytes);
-            }
-            false
+            ALLOWLIST_METHODS.contains(&m) || m.starts_with("notifications/")
         })
         .unwrap_or(false);
 
@@ -1362,9 +1339,9 @@ pub async fn bearer_auth_middleware(
     // for BOTH gated and allowlisted requests so the downstream handler can
     // see `Claims` when present — the allowlist only relaxes "JWT MUST be
     // present and valid", it does not mean "ignore the JWT if the client
-    // sent one". `mcp_auth` specifically depends on this: it is allowlisted
-    // (so unauthenticated callers get the install hint) AND it reports
-    // `status: "authenticated"` when a valid JWT IS attached.
+    // sent one". Allowlisted discovery methods (`initialize` / `tools/list`)
+    // may still arrive with a Bearer token mid-session; downstream code can
+    // branch on `Claims` if it cares.
     let bearer = parts
         .headers
         .get(axum::http::header::AUTHORIZATION)
@@ -1394,10 +1371,10 @@ pub async fn bearer_auth_middleware(
     }
 
     // Allowlisted path — JWT is OPTIONAL. If a Bearer header is present and
-    // verifies, attach Claims so `mcp_auth` (and any future allowlisted tool
-    // that wants to know the caller identity) can branch on it. If absent or
-    // invalid, proceed without Claims (allowlisted requests must not 401 on
-    // bad tokens — the whole point is the user might not yet have one).
+    // verifies, attach Claims so downstream handlers that want the caller
+    // identity can branch on it. If absent or invalid, proceed without
+    // Claims (allowlisted requests must not 401 on bad tokens — discovery
+    // methods are reached before the client has a token).
     let mut new_req = Request::from_parts(parts, Body::from(body_bytes));
     if let Some(token) = bearer.filter(|t| !t.is_empty()) {
         if let Ok(claims) = verify_jwt(&state, &token) {
@@ -2528,11 +2505,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_middleware_extracts_claims_on_allowlisted_request_with_valid_jwt() {
-        // The `mcp_auth` tool (and any future allowlisted-but-claims-aware
-        // tool) needs the bearer middleware to extract Claims when a valid
-        // JWT IS present, even though the request is allowlisted. Without
-        // this, allowlisted tools always see jwt_sub=None and cannot
-        // distinguish authenticated callers from unauthenticated ones.
+        // Allowlisted discovery methods (`initialize` / `tools/list`) may be
+        // invoked mid-session with a Bearer token. When that happens the
+        // middleware must still attach Claims so downstream handlers can
+        // branch on caller identity.
         use axum::{routing::post, Extension};
         async fn echo_claims(claims: Option<Extension<Claims>>) -> String {
             match claims {
@@ -2551,12 +2527,9 @@ mod tests {
             ))
             .with_state(st);
 
-        // Allowlisted call (mcp_auth) WITH a valid Bearer JWT — Claims must
-        // be attached to the request extensions.
         let body = serde_json::json!({
             "jsonrpc": "2.0",
-            "method": "tools/call",
-            "params": {"name": "mcp_auth", "arguments": {}},
+            "method": "tools/list",
             "id": 1
         });
         let req = Request::builder()
@@ -2578,8 +2551,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_middleware_allowlisted_request_without_jwt_passes_no_claims() {
-        // Mirror of the above: allowlisted call WITHOUT a Bearer header
-        // passes through, handler sees jwt_sub=None. The whole point of the
+        // Mirror of the above: allowlisted method WITHOUT a Bearer header
+        // passes through, handler sees Claims=None. The whole point of the
         // allowlist is to NOT 401 when the caller has no token yet.
         use axum::{routing::post, Extension};
         async fn echo_claims(claims: Option<Extension<Claims>>) -> String {
@@ -2600,8 +2573,7 @@ mod tests {
 
         let body = serde_json::json!({
             "jsonrpc": "2.0",
-            "method": "tools/call",
-            "params": {"name": "mcp_auth", "arguments": {}},
+            "method": "tools/list",
             "id": 1
         });
         let req = Request::builder()
@@ -2617,9 +2589,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_middleware_non_allowlisted_tool_call_still_requires_jwt() {
-        // The unauth-tool allowlist is NARROW: only `mcp_auth` (and future
-        // additions) bypass JWT. Other `tools/call` requests must still 401.
+    async fn test_middleware_tool_call_requires_jwt() {
+        // Every `tools/call` requires a valid Bearer JWT — discovery methods
+        // (`initialize` / `tools/list`) are the only allowlisted JSON-RPC
+        // methods on /mcp.
         let st = fresh_state();
         let app = build_authn_router(st);
         let body = serde_json::json!({
@@ -2638,35 +2611,7 @@ mod tests {
         assert_eq!(
             resp.status(),
             StatusCode::UNAUTHORIZED,
-            "Non-allowlisted tool calls MUST 401 without JWT"
-        );
-    }
-
-    #[test]
-    fn test_is_unauth_tool_call_helper() {
-        // Helper function: peeks params.name within tools/call body.
-        let yes = b"{\"jsonrpc\":\"2.0\",\"method\":\"tools/call\",\"params\":{\"name\":\"mcp_auth\"},\"id\":1}";
-        assert!(
-            is_unauth_tool_call(yes),
-            "mcp_auth must be in unauth tool allowlist"
-        );
-
-        let no = b"{\"jsonrpc\":\"2.0\",\"method\":\"tools/call\",\"params\":{\"name\":\"mnemonic_whoami\"},\"id\":1}";
-        assert!(
-            !is_unauth_tool_call(no),
-            "non-allowlisted tools must not bypass auth"
-        );
-
-        let malformed = b"not-json-at-all";
-        assert!(
-            !is_unauth_tool_call(malformed),
-            "malformed body falls back to gated"
-        );
-
-        let no_params = b"{\"jsonrpc\":\"2.0\",\"method\":\"tools/call\",\"id\":1}";
-        assert!(
-            !is_unauth_tool_call(no_params),
-            "missing params.name falls back to gated"
+            "tools/call MUST 401 without JWT"
         );
     }
 

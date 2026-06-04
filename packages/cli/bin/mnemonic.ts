@@ -6,6 +6,10 @@
 // through `handleError` which maps typed CLI errors to documented exit codes
 // (Decision 10): 0=ok, 1=user, 2=server, 3=integrity, 4=auth.
 
+import { readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+
 import { Command } from "commander";
 
 import { runInit } from "../src/commands/init.js";
@@ -18,14 +22,55 @@ import { runProve } from "../src/commands/prove.js";
 import {
   runIdentityImport,
   runIdentityExport,
+  statusCommand,
+  pullFromWebappCommand,
+  pushToWebappCommand,
 } from "../src/commands/identity.js";
 import { handleError } from "../src/errors.js";
+import { ensure, shouldSkipEnsure } from "../src/identity/ensure.js";
 import type { OutputOptions } from "../src/output.js";
+
+// Re-export so callers that previously imported shouldSkipEnsure from this
+// module don't break.
+export { shouldSkipEnsure };
+
+/**
+ * Read the CLI version from this package's package.json at runtime.
+ *
+ * Walks up from `import.meta.url` looking for a package.json whose `name`
+ * field matches `@mnemonik-xyz/cli`. Has to walk because the relative
+ * distance differs between the compiled binary (`dist/bin/mnemonic.js`,
+ * two levels up) and the source under test (`bin/mnemonic.ts`, one level
+ * up). Hardcoding a fixed depth was the original sin — replaced with a
+ * resolution strategy that works in both layouts.
+ */
+function readPkgVersion(): string {
+  let dir = dirname(fileURLToPath(import.meta.url));
+  for (let i = 0; i < 5; i++) {
+    const candidate = resolve(dir, "package.json");
+    try {
+      const pkg = JSON.parse(readFileSync(candidate, "utf8")) as {
+        name?: string;
+        version?: string;
+      };
+      if (pkg.name === "@mnemonik-xyz/cli" && typeof pkg.version === "string") {
+        return pkg.version;
+      }
+    } catch {
+      // package.json absent at this level — keep walking up.
+    }
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return "unknown";
+}
 
 interface RootFlags {
   json?: boolean;
   quiet?: boolean;
   color?: boolean; // commander negates --no-color into `color: false`
+  verbose?: boolean;
 }
 
 function rootOpts(program: Command): OutputOptions {
@@ -34,6 +79,7 @@ function rootOpts(program: Command): OutputOptions {
     json: Boolean(flags.json),
     quiet: Boolean(flags.quiet),
     noColor: flags.color === false,
+    verbose: Boolean(flags.verbose),
   };
 }
 
@@ -42,31 +88,32 @@ export function buildProgram(): Command {
   program
     .name("mnemonic")
     .description("Mnemonic Protocol CLI — verifiable persistent memory")
-    // TODO: read from package.json at build/runtime so we don't have
-    // to hand-bump on every release. Hardcoded for 0.1.6 to ship the
-    // mode-flag fix today.
-    .version("0.1.6")
+    .version(readPkgVersion())
     .option("--json", "machine-readable JSON output")
     .option("--quiet", "suppress non-essential output")
-    .option("--no-color", "disable ANSI color");
+    .option("--no-color", "disable ANSI color")
+    .option(
+      "--verbose",
+      "log auth identifiers + HTTP request/response context to stderr",
+    );
 
   program
     .command("init")
     .description(
-      "set up CLI identity — pair with webapp via --ticket (recommended) or --standalone"
+      "set up CLI identity — pair with webapp via --ticket (recommended) or --standalone",
     )
     .option(
       "--ticket <uuid>",
-      "redeem a webapp 'Send to CLI' ticket (recommended — keeps CLI + webapp keypairs aligned)"
+      "redeem a webapp 'Send to CLI' ticket (recommended — keeps CLI + webapp keypairs aligned)",
     )
     .option(
       "--standalone",
-      "generate a fresh CLI-only keypair (advanced; will not match webapp localStorage)"
+      "generate a fresh CLI-only keypair (advanced; will not match webapp localStorage)",
     )
     .option("--force", "overwrite existing identity")
     .option(
       "--base-url <url>",
-      "override the server base URL (used with --ticket)"
+      "override the server base URL (used with --ticket)",
     )
     .action(
       async (cmdOpts: {
@@ -86,21 +133,38 @@ export function buildProgram(): Command {
             ? { baseUrl: cmdOpts.baseUrl }
             : {}),
         });
-      }
+      },
     );
 
   program
     .command("login")
-    .description("OAuth login (interactive PKCE loopback) or --token <jwt>")
+    .description(
+      "OAuth login — default signs the server challenge with the local CLI keypair (browserless). Use --browser for the legacy webapp-localStorage flow, or --token <jwt> for a pre-issued JWT.",
+    )
     .option("--token <jwt>", "headless: persist a pre-issued JWT")
+    .option(
+      "--browser",
+      "use the legacy browser-mediated OAuth flow (webapp localStorage signs the challenge)",
+    )
     .option("--base-url <url>", "override the server base URL")
-    .action(async (cmdOpts: { token?: string; baseUrl?: string }) => {
-      await runLogin({
-        ...rootOpts(program),
-        ...(cmdOpts.token !== undefined ? { token: cmdOpts.token } : {}),
-        ...(cmdOpts.baseUrl !== undefined ? { baseUrl: cmdOpts.baseUrl } : {}),
-      });
-    });
+    .action(
+      async (cmdOpts: {
+        token?: string;
+        browser?: boolean;
+        baseUrl?: string;
+      }) => {
+        await runLogin({
+          ...rootOpts(program),
+          ...(cmdOpts.token !== undefined ? { token: cmdOpts.token } : {}),
+          ...(cmdOpts.browser !== undefined
+            ? { browser: cmdOpts.browser }
+            : {}),
+          ...(cmdOpts.baseUrl !== undefined
+            ? { baseUrl: cmdOpts.baseUrl }
+            : {}),
+        });
+      },
+    );
 
   program
     .command("sign [content]")
@@ -110,7 +174,7 @@ export function buildProgram(): Command {
     .action(
       async (
         content: string | undefined,
-        cmdOpts: { tags?: string; baseUrl?: string }
+        cmdOpts: { tags?: string; baseUrl?: string },
       ) => {
         await runSign(content, {
           ...rootOpts(program),
@@ -119,7 +183,7 @@ export function buildProgram(): Command {
             ? { baseUrl: cmdOpts.baseUrl }
             : {}),
         });
-      }
+      },
     );
 
   program
@@ -131,7 +195,7 @@ export function buildProgram(): Command {
     .action(
       async (
         query: string,
-        cmdOpts: { topK?: number; tag?: string; baseUrl?: string }
+        cmdOpts: { topK?: number; tag?: string; baseUrl?: string },
       ) => {
         await runRecall(query, {
           ...rootOpts(program),
@@ -141,7 +205,7 @@ export function buildProgram(): Command {
             ? { baseUrl: cmdOpts.baseUrl }
             : {}),
         });
-      }
+      },
     );
 
   program
@@ -211,7 +275,7 @@ export function buildProgram(): Command {
             ? { baseUrl: cmdOpts.baseUrl }
             : {}),
         });
-      }
+      },
     );
 
   identity
@@ -225,10 +289,86 @@ export function buildProgram(): Command {
       });
     });
 
+  identity
+    .command("status")
+    .description(
+      "compare local identity (KeyStore/file) vs cached JWT — local-only, no network",
+    )
+    .action(async () => {
+      const opts = rootOpts(program);
+      const code = await statusCommand({
+        ...(opts.json !== undefined ? { json: opts.json } : {}),
+        ...(opts.noColor !== undefined ? { noColor: opts.noColor } : {}),
+      });
+      process.exit(code);
+    });
+
+  identity
+    .command("pull-from-webapp [short-code]")
+    .description(
+      "adopt a CLI identity issued by the webapp — redeem the short code from `push-to-webapp`",
+    )
+    .option(
+      "--stdin",
+      "read short code from stdin instead of argv (avoids shell history leak)",
+    )
+    .option("--server-url <url>", "override the server base URL")
+    .action(
+      async (
+        shortCodeArg: string | undefined,
+        cmdOpts: { stdin?: boolean; serverUrl?: string },
+      ) => {
+        const code = await pullFromWebappCommand(shortCodeArg ?? "-", {
+          stdin: cmdOpts.stdin ?? !shortCodeArg,
+        });
+        process.exit(code);
+      },
+    );
+
+  identity
+    .command("push-to-webapp")
+    .description(
+      "issue a ticket from the local CLI identity — prints a short code and QR for the webapp",
+    )
+    .option("--code-only", "print short code and URL only, skip the QR")
+    .option("--qr-only", "print only the QR (no text output)")
+    .option("--server-url <url>", "override the server base URL")
+    .action(
+      async (cmdOpts: {
+        codeOnly?: boolean;
+        qrOnly?: boolean;
+        serverUrl?: string;
+      }) => {
+        const code = await pushToWebappCommand({
+          ...(cmdOpts.codeOnly !== undefined
+            ? { codeOnly: cmdOpts.codeOnly }
+            : {}),
+          ...(cmdOpts.qrOnly !== undefined ? { qrOnly: cmdOpts.qrOnly } : {}),
+          ...(cmdOpts.serverUrl !== undefined
+            ? { serverUrl: cmdOpts.serverUrl }
+            : {}),
+        });
+        process.exit(code);
+      },
+    );
+
   return program;
 }
 
 export async function main(argv: string[]): Promise<void> {
+  // Bootstrap identity before any command runs.  Skipped for help/version
+  // flags and specific subcommands that manage identity themselves.
+  if (!shouldSkipEnsure(argv)) {
+    try {
+      await ensure();
+    } catch (e) {
+      // Print a clean error without leaking secret bytes, then exit.
+      const msg = e instanceof Error ? e.message : String(e);
+      process.stderr.write(`mnemonic: identity bootstrap failed: ${msg}\n`);
+      process.exit(1);
+    }
+  }
+
   const program = buildProgram();
   try {
     await program.parseAsync(argv);

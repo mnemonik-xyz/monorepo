@@ -558,6 +558,16 @@ async function handleMsg(deps: ServiceWorkerDeps, msg: Msg): Promise<unknown> {
 // `installServiceWorker` and call it explicitly against a mocked
 // `chrome.*` — the boot below is guarded so test imports stay
 // side-effect free.
-if (typeof chrome !== "undefined" && typeof chrome.runtime !== "undefined") {
+// Probe the listener path we actually consume (`runtime.onInstalled`) rather
+// than just `runtime`, because under `bun test` all unit files share
+// globalThis and earlier tests (e.g. tests/unit/auth/google-oauth.test.ts)
+// install a partial chrome stub with `runtime: { lastError }` and no
+// `onInstalled`. Without this stricter guard the boot below crashes that
+// test file's module load.
+if (
+  typeof chrome !== "undefined" &&
+  typeof chrome.runtime !== "undefined" &&
+  typeof chrome.runtime.onInstalled !== "undefined"
+) {
   installServiceWorker(defaultDeps());
 }

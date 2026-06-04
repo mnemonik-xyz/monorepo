@@ -137,3 +137,23 @@ export class UserError extends MnemonicError {
     this.name = "UserError";
   }
 }
+
+/**
+ * Thrown by `Keypair.fromJSON` when given a stub-shaped identity.json
+ * (pubkey + keychain_ref, no secret bytes). Signals the caller to
+ * resolve the secret via an OS keychain instead of from disk.
+ *
+ * @param pubkey_base58 - The Ed25519 public key from the stub.
+ * @param keychain_ref  - The OS keychain entry name to look up.
+ */
+export class IdentityRequiresKeystore extends Error {
+  constructor(
+    public readonly pubkey_base58: string,
+    public readonly keychain_ref: string,
+  ) {
+    super(
+      `identity.json is a stub referencing keychain entry '${keychain_ref}'; load via OS keychain`,
+    );
+    this.name = "IdentityRequiresKeystore";
+  }
+}

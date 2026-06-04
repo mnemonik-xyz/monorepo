@@ -32,9 +32,13 @@ use axum::{
     response::{IntoResponse, Response},
     Extension, Json,
 };
+use crypto_box::{
+    aead::{Aead, AeadCore, OsRng},
+    PublicKey as X25519PublicKey, SalsaBox, SecretKey as X25519SecretKey,
+};
 use lru::LruCache;
 use mnemonic_core::codec::{hash::hash_bytes, sign::verify_artifact};
-use mnemonic_core::storage::AttestationStore;
+use mnemonic_core::storage::{AttestationStore, WriteMode};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 use uuid::Uuid;
@@ -280,6 +284,26 @@ pub async fn sign_callback_handler(
                 );
             }
         };
+        // T2 (resolved from T1 placeholder): the deferred-signing /
+        // sign-callback flow ALWAYS persists with `WriteMode::Participate`
+        // — by construction. A `local`-mode request never enters this
+        // pipeline (the deferred branch fires only for the HTTP/JWT path
+        // which exists specifically to anchor on Arweave + Solana
+        // through user-side signing). The mode was resolved at the
+        // original `mnemonic_sign_memory` dispatch time and would have
+        // been `Participate`; we don't re-derive it here because the
+        // pending bundle doesn't carry the mode field — recording
+        // `Participate` is the only value consistent with this code
+        // path having been reached. See work/modes-user-choice/
+        // tech-spec.md §"Data flow (participate write)" + decisions.md
+        // entry for T2.
+        //
+        // Round-2 (T3 extension): row is persisted as `Participate` here
+        // BEFORE the delivery check. The delivery check's primary-key
+        // recall stage needs the row to exist (see
+        // `tools::perform_delivery_check`). On delivery failure the row
+        // is demoted in place via `INSERT OR REPLACE` inside
+        // `confirm_delivery_or_demote`.
         let save_res = store.save_attestation(
             &attestation_id,
             &entry.content,
@@ -290,6 +314,7 @@ pub async fn sign_callback_handler(
             &req.signer_pubkey, // signer = pubkey we just verified via COSE
             &req.signer_pubkey, // owner = same pubkey (Decision 9 — webapp flow uses keypair as identity)
             &now,
+            WriteMode::Participate,
             &entry.embedding,
         );
         // Stamp the correlation_id onto the row so `mnemonic_check_pending`
@@ -309,6 +334,72 @@ pub async fn sign_callback_handler(
             StatusCode::INTERNAL_SERVER_ERROR,
             &format!("persist failed: {e}"),
         );
+    }
+
+    // T3 (round-2): extend the delivery guarantee to the deferred-signing
+    // path. After the chain anchor + DB persist, run the same three-stage
+    // check (refetch → verify_cose → primary-key recall) that
+    // `sign_memory_inline` runs. On failure: row is demoted in place to
+    // `WriteMode::Local` by the shared helper, and we surface a typed
+    // error response so the webapp can show the user a "delivery not
+    // confirmed" notice rather than a green checkmark.
+    //
+    // Skip the check for `local`-mode deploys (no real anchor to re-fetch).
+    // Refund-on-failure for the deferred path is out of scope: the webapp
+    // owns its own credit accounting and the inline-path `mcp_handler`
+    // doesn't see this code path. The demoted row + structured error
+    // signal the webapp to NOT charge the user.
+    if state.storage_mode != "local" {
+        let ctx = crate::tools::DeliveryContext {
+            arweave: &state.arweave,
+            store: &state.store,
+            timeout: state.delivery_refetch_timeout,
+            attestation_id: &attestation_id,
+            content: &entry.content,
+            content_hash: &entry.content_hash,
+            tags: &entry.tags,
+            solana_tx: &solana_tx,
+            arweave_tx: &arweave_tx,
+            signer_pubkey: &req.signer_pubkey,
+            owner_pubkey: &req.signer_pubkey,
+            created_at: &now,
+            embedding: &entry.embedding,
+        };
+        match crate::tools::confirm_delivery_or_demote(ctx).await {
+            Ok(crate::tools::DeliveryOutcome::Confirmed { .. }) => {
+                // Happy path — fall through to the success envelope.
+            }
+            Ok(crate::tools::DeliveryOutcome::Demoted { stage }) => {
+                state.delivery_metrics.record_not_confirmed(stage);
+                tracing::warn!(
+                    attestation_id = %attestation_id,
+                    arweave_tx = %arweave_tx,
+                    solana_tx = %solana_tx,
+                    stage = %stage,
+                    "deferred-path delivery not confirmed — row demoted to local"
+                );
+                // 200 OK with a typed-error body so the webapp's existing
+                // JSON-handling does not break, but the body carries the
+                // demotion signal. (HTTP 4xx would be wrong: the anchor
+                // DID succeed and the row IS persisted — just demoted.)
+                let body = serde_json::json!({
+                    "status": "delivery_not_confirmed",
+                    "kind": "DeliveryNotConfirmed",
+                    "stage": stage,
+                    "row_demoted_to": "local",
+                    "attestation_id": attestation_id,
+                    "arweave_tx": arweave_tx,
+                    "solana_tx": solana_tx,
+                });
+                return (StatusCode::OK, Json(body)).into_response();
+            }
+            Err(e) => {
+                return error_resp(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("delivery check internal error: {e}"),
+                );
+            }
+        }
     }
 
     let solana_explorer_url = if solana_tx.starts_with("local:") {
@@ -352,8 +443,8 @@ fn error_resp(status: StatusCode, msg: &str) -> Response {
 // Caps:
 //   - LRU 100 entries total. The 101st insert evicts the oldest entry.
 //   - Per-`jwt_sub` cap 3. The 4th insert by the same user → 429.
-//   - TTL 600 seconds. Redeems past TTL → 404 (treated identically to "not
-//     found / already consumed" so a probing attacker cannot distinguish).
+//   - TTL 300 seconds (5 minutes). Redeems past TTL → 404 (treated identically
+//     to "not found / already consumed" so a probing attacker cannot distinguish).
 //
 // Atomicity: `consume` removes-and-returns under a single tokio mutex guard.
 // Two concurrent redeems of the same ticket race deterministically: exactly
@@ -363,8 +454,42 @@ fn error_resp(status: StatusCode, msg: &str) -> Response {
 pub const BOOTSTRAP_LRU_CAPACITY: usize = 100;
 /// Maximum tickets per `jwt_sub` (4th insert returns 429).
 pub const BOOTSTRAP_PER_USER_CAP: usize = 3;
-/// Ticket TTL in seconds (10 minutes).
-pub const BOOTSTRAP_TTL_SECS: i64 = 600;
+/// Ticket TTL in seconds (5 minutes).
+///
+/// Matches tech-spec Decision 12 and the Deviation 2 trust model — the
+/// plaintext-reachability window on the server is bounded to 5 minutes
+/// so that a transient memory dump after compromise has a small target.
+pub const BOOTSTRAP_TTL_SECS: i64 = 300;
+
+/// Generate a short code in `XXXX-XXXX` format using an alphabet that
+/// excludes visually confusable characters (0, 1, O, I). 40 bits of entropy,
+/// well within the threat model for a 5-minute, single-use token.
+fn generate_short_code() -> String {
+    const ALPHABET: &[u8] = b"23456789ABCDEFGHJKLMNPQRSTUVWXYZ";
+    let mut bytes = [0u8; 8];
+    use rand::RngCore;
+    rand::thread_rng().fill_bytes(&mut bytes);
+    let chars: Vec<char> = bytes
+        .iter()
+        .map(|&b| ALPHABET[(b as usize) % ALPHABET.len()] as char)
+        .collect();
+    format!(
+        "{}{}{}{}-{}{}{}{}",
+        chars[0], chars[1], chars[2], chars[3], chars[4], chars[5], chars[6], chars[7]
+    )
+}
+
+/// Which side issued the ticket.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub enum TicketOrigin {
+    /// Webapp issued the ticket (original Decision-7 flow). The ticket
+    /// carries a `keypair_json` blob; no x25519 wrapping is involved.
+    Webapp,
+    /// CLI issued the ticket (Task-12 symmetric flow). The ticket carries
+    /// an x25519-wrapped secret blob (`wrapped_secret` + `eph_pub`).
+    Cli,
+}
 
 /// One pending bootstrap ticket. Held in memory under the mutex until
 /// `consume` removes it or the TTL expires.
@@ -376,14 +501,45 @@ pub struct BootstrapTicket {
     /// dead-code analyzer but is part of the public Decision-7 schema.
     #[allow(dead_code)]
     pub ticket_id: Uuid,
+
+    /// Which direction this ticket flows.
+    pub origin: TicketOrigin,
+
+    // ── Webapp-origin fields (origin == Webapp) ──────────────────────────
     /// Solana CLI keypair JSON: a JSON array of 64 bytes (Ed25519 secret +
     /// public concatenation, the same format the Solana CLI writes to disk).
     /// Stored as-is (string) so the server never deserializes secret material
     /// — the CLI receives the raw JSON and parses on its end.
+    /// Empty string for `Cli`-origin tickets.
     pub keypair_json: String,
+
+    // ── CLI-origin fields (origin == Cli) ────────────────────────────────
+    /// Issuer's x25519 public key bytes (32 bytes). Stored for the re-wrap
+    /// step; not logged or persisted outside the process.
+    /// Zero array for `Webapp`-origin tickets.
+    pub eph_pub: [u8; 32],
+    /// Encrypted secret blob (nonce[24] || ciphertext). Encrypted with the
+    /// server's static x25519 key; re-encrypted for the redeemer on consume.
+    /// Empty for `Webapp`-origin tickets.
+    pub wrapped_secret: Vec<u8>,
+    /// Ed25519 pubkey of the CLI issuer, base58-encoded. Relayed to the
+    /// redeemer in the redeem response so the webapp can verify identity.
+    /// Empty string for `Webapp`-origin tickets.
+    pub issuer_pubkey_base58: String,
+
+    /// Human-readable short code in `XXXX-XXXX` format. Used by CLI-origin
+    /// tickets so the user can type it into the webapp. For Webapp-origin
+    /// tickets this is the empty string (the UUID path is used instead).
+    /// Accessed by `consume_by_short_code`; suppress dead-code lint on the
+    /// field because that method is gated on `test-support` feature.
+    #[allow(dead_code)]
+    pub short_code: String,
+
     /// JWT subject (base58 user pubkey) of the webapp caller that issued the
     /// ticket. Recorded for the per-user cap accounting only — `consume` does
     /// not require an authenticated caller (the UUID is the capability).
+    /// For CLI-origin tickets this is set to the `issuer_pubkey_base58` to
+    /// reuse the same per-user accounting path.
     pub jwt_sub: String,
     /// Unix-seconds expiry. `consume` returns None when `now >= expires_at`.
     pub expires_at: i64,
@@ -445,7 +601,7 @@ impl BootstrapTickets {
         }
     }
 
-    /// Build with production defaults: 100 LRU, 3 per-user, 600s TTL.
+    /// Build with production defaults: 100 LRU, 3 per-user, 300s (5min) TTL.
     pub fn with_defaults() -> Self {
         Self::new(
             BOOTSTRAP_LRU_CAPACITY,
@@ -454,32 +610,75 @@ impl BootstrapTickets {
         )
     }
 
-    /// Issue a fresh ticket. Returns the UUID the webapp shows to the user
-    /// (and the CLI then submits to /redeem). Atomicity: per-user counter and
-    /// LRU mutate under a single guard. Generated UUIDv4 is collision-safe
-    /// for the LRU's lifetime.
+    /// Insert a webapp-origin ticket. Returns the UUID the webapp shows to
+    /// the user (and the CLI then submits to /redeem). Atomicity: per-user
+    /// counter and LRU mutate under a single guard. Generated UUIDv4 is
+    /// collision-safe for the LRU's lifetime.
     pub async fn insert(
         &self,
         jwt_sub: String,
         keypair_json: String,
     ) -> Result<Uuid, BootstrapInsertError> {
+        let entry = BootstrapTicket {
+            ticket_id: Uuid::new_v4(),
+            origin: TicketOrigin::Webapp,
+            keypair_json,
+            eph_pub: [0u8; 32],
+            wrapped_secret: Vec::new(),
+            issuer_pubkey_base58: String::new(),
+            short_code: String::new(),
+            jwt_sub: jwt_sub.clone(),
+            expires_at: 0, // filled in below
+        };
+        self.insert_inner(jwt_sub, entry).await
+    }
+
+    /// Insert a CLI-origin ticket. The CLI has already x25519-wrapped its
+    /// secret to the server's static public key; we store the ciphertext
+    /// and relay it (re-wrapped) to the webapp redeemer. Returns the ticket
+    /// UUID and a human-readable short code.
+    pub async fn insert_cli(
+        &self,
+        issuer_pubkey_base58: String,
+        wrapped_secret: Vec<u8>,
+        eph_pub: [u8; 32],
+    ) -> Result<(Uuid, String), BootstrapInsertError> {
+        let ticket_id = Uuid::new_v4();
+        let short_code = generate_short_code();
+        let entry = BootstrapTicket {
+            ticket_id,
+            origin: TicketOrigin::Cli,
+            keypair_json: String::new(),
+            eph_pub,
+            wrapped_secret,
+            issuer_pubkey_base58: issuer_pubkey_base58.clone(),
+            short_code: short_code.clone(),
+            jwt_sub: issuer_pubkey_base58.clone(),
+            expires_at: 0, // filled in below
+        };
+        self.insert_inner(issuer_pubkey_base58, entry)
+            .await
+            .map(|id| (id, short_code))
+    }
+
+    /// Common insertion logic shared by `insert` and `insert_cli`. Sets
+    /// `expires_at` and handles LRU eviction accounting.
+    async fn insert_inner(
+        &self,
+        user_key: String,
+        mut entry: BootstrapTicket,
+    ) -> Result<Uuid, BootstrapInsertError> {
         let mut guard = self.inner.lock().await;
 
         // Per-user cap.
-        let count = guard.per_user.get(&jwt_sub).copied().unwrap_or(0);
+        let count = guard.per_user.get(&user_key).copied().unwrap_or(0);
         if count >= guard.per_user_cap {
             return Err(BootstrapInsertError::PerUserCapExceeded);
         }
 
-        let ticket_id = Uuid::new_v4();
+        let ticket_id = entry.ticket_id;
         let now = chrono::Utc::now().timestamp();
-        let expires_at = now + guard.ttl_seconds;
-        let entry = BootstrapTicket {
-            ticket_id,
-            keypair_json,
-            jwt_sub: jwt_sub.clone(),
-            expires_at,
-        };
+        entry.expires_at = now + guard.ttl_seconds;
 
         // Insert; if the LRU evicts an unrelated entry, decrement THAT
         // user's counter so accounting stays consistent.
@@ -490,12 +689,12 @@ impl BootstrapTickets {
             // UUID so this is always an unrelated eviction — but defensively
             // skip the dec_user when somehow the evicted entry IS our just-
             // inserted one (impossible with a fresh UUID, but cheap to guard).
-            if guard.lru.peek(&ticket_id).is_some() || evicted.jwt_sub != jwt_sub {
+            if guard.lru.peek(&ticket_id).is_some() || evicted.jwt_sub != user_key {
                 guard.dec_user(&evicted.jwt_sub);
             }
         }
 
-        *guard.per_user.entry(jwt_sub).or_insert(0) += 1;
+        *guard.per_user.entry(user_key).or_insert(0) += 1;
         Ok(ticket_id)
     }
 
@@ -509,6 +708,31 @@ impl BootstrapTickets {
         let now = chrono::Utc::now().timestamp();
         if now >= entry.expires_at {
             // Expired — drop the per-user counter and pretend it never existed.
+            guard.dec_user(&entry.jwt_sub);
+            return None;
+        }
+        guard.dec_user(&entry.jwt_sub);
+        Some(entry)
+    }
+
+    /// Atomic find-by-short-code and remove. Walks the LRU (O(n)) to locate
+    /// a ticket by `short_code`, then delegates to the same expiry/counter
+    /// logic as `consume`. Returns `None` if not found, expired, or redeemed.
+    /// Single-use: the entry is removed before returning.
+    /// Currently used only in test/test-support contexts; allow dead-code lint.
+    #[allow(dead_code)]
+    pub async fn consume_by_short_code(&self, short_code: &str) -> Option<BootstrapTicket> {
+        let mut guard = self.inner.lock().await;
+        // Find the ticket_id for this short_code by scanning the LRU. The
+        // LRU is capped at 1000 entries so the O(n) walk is bounded.
+        let ticket_id = guard
+            .lru
+            .iter()
+            .find(|(_, t)| t.short_code == short_code)
+            .map(|(id, _)| *id)?;
+        let entry = guard.lru.pop(&ticket_id)?;
+        let now = chrono::Utc::now().timestamp();
+        if now >= entry.expires_at {
             guard.dec_user(&entry.jwt_sub);
             return None;
         }
@@ -542,6 +766,23 @@ impl BootstrapTickets {
         let mut guard = self.inner.lock().await;
         if let Some(entry) = guard.lru.get_mut(ticket_id) {
             entry.expires_at = chrono::Utc::now().timestamp() - 1;
+        }
+    }
+
+    /// Test helper: force-expire a CLI-origin ticket by short_code.
+    #[cfg(any(test, feature = "test-support"))]
+    #[allow(dead_code)]
+    pub async fn force_expire_by_short_code(&self, short_code: &str) {
+        let mut guard = self.inner.lock().await;
+        let ticket_id = guard
+            .lru
+            .iter()
+            .find(|(_, t)| t.short_code == short_code)
+            .map(|(id, _)| *id);
+        if let Some(id) = ticket_id {
+            if let Some(entry) = guard.lru.get_mut(&id) {
+                entry.expires_at = chrono::Utc::now().timestamp() - 1;
+            }
         }
     }
 }
@@ -610,30 +851,197 @@ pub async fn bootstrap_issue_handler(
     }
 }
 
-/// `GET /api/cli-bootstrap/redeem/:ticket` — CLI consumes a ticket. NO auth:
-/// the UUID is the capability (a high-entropy single-use bearer token, on
-/// the same model as `correlation_id` for the browser-mediated flow). The
-/// `bearer_auth_middleware` allowlist exempts this prefix.
+/// `GET /api/cli-bootstrap/redeem/:ticket` — CLI or webapp consumes a ticket.
+/// NO auth: the UUID is the capability (high-entropy single-use bearer token).
+/// The `bearer_auth_middleware` allowlist exempts this prefix.
 ///
-/// Returns `{secret: number[64], pubkey_base58}` on success. The 64-byte
-/// secret is parsed from the stored `keypair_json`; the pubkey is derived
-/// from the last 32 bytes (Solana convention: secret is bytes 0..32, public
-/// is bytes 32..64 in the on-disk format). 404 on missing / expired /
-/// already-consumed tickets — the response body is identical for all three
-/// states so a probing attacker cannot distinguish.
+/// Handles both origins:
+/// - `Webapp` origin: returns `{secret: number[64], pubkey_base58}` (original
+///   Decision-7 shape). No crypto involved.
+/// - `Cli` origin: expects query/body `{redeemer_eph_pub: <base64 32B>}`.
+///   Unwraps with server's static x25519 SK, re-wraps to redeemer's pub, and
+///   returns `{wrapped_secret, eph_pub, origin, issuer_pubkey_base58}`.
+///
+/// 404 on missing / expired / already-consumed tickets. Body is identical for
+/// all three states so a probing attacker cannot distinguish.
 #[derive(Debug, Serialize)]
 pub struct BootstrapRedeemResponse {
     pub secret: Vec<u8>,
     pub pubkey_base58: String,
 }
 
+/// Request body for `GET /api/cli-bootstrap/redeem/:ticket` when the ticket
+/// has a `Cli` origin. Redeemer supplies its ephemeral x25519 public key so
+/// the server can re-wrap the secret to them.
+#[derive(Debug, Deserialize, Default)]
+pub struct BootstrapRedeemBody {
+    /// Base64 (standard) encoded 32-byte x25519 ephemeral public key of the
+    /// webapp redeemer. Required only for `Cli`-origin tickets.
+    #[serde(default)]
+    pub redeemer_eph_pub: Option<String>,
+}
+
+/// Response for `Cli`-origin ticket redemption.
+#[derive(Debug, Serialize)]
+pub struct CliRedeemResponse {
+    /// Base64-encoded re-wrapped secret (nonce[24] || ciphertext). The
+    /// redeemer uses its ephemeral SK + `eph_pub` to unwrap.
+    pub wrapped_secret: String,
+    /// Base64-encoded server ephemeral public key (32 bytes). The redeemer
+    /// DH's this with its ephemeral SK to derive the shared key.
+    pub eph_pub: String,
+    /// Origin of the ticket: "Cli" or "Webapp".
+    pub origin: TicketOrigin,
+    /// Base58-encoded Ed25519 pubkey of the CLI that issued the ticket.
+    pub issuer_pubkey_base58: String,
+}
+
+/// Shared post-`consume` logic for both redeem handlers. Performs origin
+/// dispatch: Webapp-origin tickets return the keypair bytes directly;
+/// Cli-origin tickets unwrap the server-encrypted secret and re-wrap it
+/// to the redeemer's ephemeral x25519 public key.
+///
+/// `redeemer_eph_pub` is a base64-encoded 32-byte x25519 public key —
+/// required only for `Cli`-origin tickets.
+fn finalize_redeem(
+    entry: BootstrapTicket,
+    redeemer_eph_pub: Option<String>,
+    state: &McpState,
+) -> Response {
+    match entry.origin {
+        TicketOrigin::Webapp => {
+            // Original Decision-7 flow: return keypair bytes directly.
+            let bytes: Vec<u8> = match serde_json::from_str::<Vec<u8>>(&entry.keypair_json) {
+                Ok(v) => v,
+                Err(e) => {
+                    return error_resp(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        &format!("stored keypair_json is not a JSON byte array: {e}"),
+                    )
+                }
+            };
+            if bytes.len() != 64 {
+                return error_resp(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("stored keypair must be 64 bytes, got {}", bytes.len()),
+                );
+            }
+            let pubkey = solana_sdk::pubkey::Pubkey::try_from(&bytes[32..64])
+                .map(|pk| pk.to_string())
+                .unwrap_or_default();
+            (
+                StatusCode::OK,
+                Json(BootstrapRedeemResponse {
+                    secret: bytes,
+                    pubkey_base58: pubkey,
+                }),
+            )
+                .into_response()
+        }
+        TicketOrigin::Cli => {
+            // Task-12 symmetric flow: unwrap with server SK, re-wrap to redeemer.
+            let redeemer_pub_b64 = match redeemer_eph_pub {
+                Some(s) => s,
+                None => {
+                    return error_resp(
+                        StatusCode::BAD_REQUEST,
+                        "redeemer_eph_pub is required for Cli-origin tickets",
+                    )
+                }
+            };
+            let redeemer_pub_bytes = match base64::Engine::decode(
+                &base64::engine::general_purpose::STANDARD,
+                redeemer_pub_b64.as_bytes(),
+            ) {
+                Ok(b) => b,
+                Err(e) => {
+                    return error_resp(
+                        StatusCode::BAD_REQUEST,
+                        &format!("redeemer_eph_pub is not valid base64: {e}"),
+                    )
+                }
+            };
+            if redeemer_pub_bytes.len() != 32 {
+                return error_resp(
+                    StatusCode::BAD_REQUEST,
+                    &format!(
+                        "redeemer_eph_pub must be 32 bytes, got {}",
+                        redeemer_pub_bytes.len()
+                    ),
+                );
+            }
+            let redeemer_pub =
+                X25519PublicKey::from(<[u8; 32]>::try_from(redeemer_pub_bytes.as_slice()).unwrap());
+
+            // Unwrap with server static SK + issuer eph pub.
+            let issuer_pub = X25519PublicKey::from(entry.eph_pub);
+            let server_box = SalsaBox::new(&issuer_pub, &state.bootstrap_server_x25519_secret);
+            if entry.wrapped_secret.len() < 24 {
+                return error_resp(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "stored wrapped_secret is too short to contain a nonce",
+                );
+            }
+            let nonce_bytes: [u8; 24] = entry.wrapped_secret[..24].try_into().unwrap();
+            let nonce = crypto_box::aead::generic_array::GenericArray::from(nonce_bytes);
+            // SAFETY: Plaintext window is deliberately minimal — unwrap and
+            // immediately re-wrap without binding to a named variable.
+            let plaintext = match server_box.decrypt(&nonce, &entry.wrapped_secret[24..]) {
+                Ok(p) => p,
+                Err(_) => {
+                    return error_resp(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "failed to decrypt wrapped_secret",
+                    )
+                }
+            };
+
+            // Re-wrap to the redeemer's ephemeral pub using a fresh server ephemeral.
+            let server_eph_sk = X25519SecretKey::generate(&mut OsRng);
+            let server_eph_pub = server_eph_sk.public_key();
+            let redeemer_box = SalsaBox::new(&redeemer_pub, &server_eph_sk);
+            let out_nonce = SalsaBox::generate_nonce(&mut OsRng);
+            let rewrapped = match redeemer_box.encrypt(&out_nonce, plaintext.as_slice()) {
+                Ok(c) => c,
+                Err(_) => {
+                    return error_resp(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "failed to re-encrypt for redeemer",
+                    )
+                }
+            };
+            // Plaintext is dropped here — scope is intentionally tight.
+            drop(plaintext);
+
+            let mut transport = out_nonce.to_vec();
+            transport.extend_from_slice(&rewrapped);
+
+            use base64::Engine;
+            let wrapped_b64 = base64::engine::general_purpose::STANDARD.encode(&transport);
+            let eph_pub_b64 =
+                base64::engine::general_purpose::STANDARD.encode(server_eph_pub.as_bytes());
+            let issuer_pubkey_base58 = entry.issuer_pubkey_base58.clone();
+
+            (
+                StatusCode::OK,
+                Json(CliRedeemResponse {
+                    wrapped_secret: wrapped_b64,
+                    eph_pub: eph_pub_b64,
+                    origin: TicketOrigin::Cli,
+                    issuer_pubkey_base58,
+                }),
+            )
+                .into_response()
+        }
+    }
+}
+
 pub async fn bootstrap_redeem_handler(
     State(state): State<Arc<McpState>>,
     Path(ticket_str): Path<String>,
+    body: Option<Json<BootstrapRedeemBody>>,
 ) -> Response {
-    // Parse the ticket UUID. Invalid UUIDs collapse to 404 (same as
-    // not-found) so an attacker probing the endpoint cannot distinguish
-    // "garbage UUID" from "valid UUID but consumed".
+    // Parse the ticket UUID. Invalid UUIDs collapse to 404.
     let ticket_id = match Uuid::parse_str(&ticket_str) {
         Ok(id) => id,
         Err(_) => return bootstrap_not_found(),
@@ -644,42 +1052,177 @@ pub async fn bootstrap_redeem_handler(
         None => return bootstrap_not_found(),
     };
 
-    // Parse the keypair JSON (a JSON array of 64 numbers per Solana CLI
-    // convention). The server-side parse here is the FIRST time we
-    // interpret the bytes — issue stored them verbatim.
-    let bytes: Vec<u8> = match serde_json::from_str::<Vec<u8>>(&entry.keypair_json) {
-        Ok(v) => v,
+    let redeemer_eph_pub = body.and_then(|b| b.redeemer_eph_pub.clone());
+    finalize_redeem(entry, redeemer_eph_pub, &state)
+}
+
+/// Request body for `POST /api/cli-bootstrap/redeem`.
+#[derive(Debug, Deserialize)]
+pub struct BootstrapRedeemByCodeRequest {
+    pub short_code: String,
+    /// Required for Cli-origin tickets; absent for Webapp-origin.
+    #[serde(default)]
+    pub redeemer_eph_pub: Option<String>,
+}
+
+/// `POST /api/cli-bootstrap/redeem` — lookup by short_code (user-visible
+/// capability; vs the UUID-based GET variant). Body:
+///   { short_code: "ABCD-1234", redeemer_eph_pub: <base64 32B> }
+/// Returns same shapes as bootstrap_redeem_handler:
+/// - Webapp origin: {secret: number[64], pubkey_base58}
+/// - Cli origin: {wrapped_secret, eph_pub, origin, issuer_pubkey_base58}
+///
+/// 404 on missing / expired / already-consumed codes. Body is identical for
+/// all three states so a probing attacker cannot distinguish (same as the
+/// UUID-based GET variant).
+pub async fn bootstrap_redeem_by_code_handler(
+    State(state): State<Arc<McpState>>,
+    Json(body): Json<BootstrapRedeemByCodeRequest>,
+) -> Response {
+    let entry = match state
+        .bootstrap_tickets
+        .consume_by_short_code(&body.short_code)
+        .await
+    {
+        Some(t) => t,
+        None => return bootstrap_not_found(),
+    };
+
+    finalize_redeem(entry, body.redeemer_eph_pub, &state)
+}
+
+/// Request body for `POST /api/cli-bootstrap/issue-from-cli`.
+#[derive(Debug, Deserialize)]
+pub struct CliBootstrapIssueRequest {
+    /// Base64-encoded ciphertext (nonce[24] || ciphertext). The plaintext
+    /// has been encrypted to the server's static x25519 public key.
+    pub wrapped_secret: String,
+    /// Base64-encoded 32-byte ephemeral x25519 public key of the CLI issuer.
+    pub eph_pub: String,
+    /// Base58-encoded Ed25519 pubkey of the CLI. Relayed to the redeemer
+    /// in the redeem response.
+    pub issuer_pubkey_base58: String,
+}
+
+/// Response for `POST /api/cli-bootstrap/issue-from-cli`.
+#[derive(Debug, Serialize)]
+pub struct CliBootstrapIssueResponse {
+    pub ticket_id: String,
+    pub short_code: String,
+    pub expires_at: String,
+}
+
+/// `POST /api/cli-bootstrap/issue-from-cli` — CLI issues a ticket destined
+/// for webapp redemption. No auth header required: the x25519 wrap to the
+/// server's static key IS the capability proof.
+///
+/// Body: `{wrapped_secret, eph_pub, issuer_pubkey_base58}`
+/// Response: `{ticket_id, short_code, expires_at}`
+pub async fn bootstrap_issue_from_cli_handler(
+    State(state): State<Arc<McpState>>,
+    Json(req): Json<CliBootstrapIssueRequest>,
+) -> Response {
+    // Decode wrapped_secret.
+    let wrapped_bytes = match base64::Engine::decode(
+        &base64::engine::general_purpose::STANDARD,
+        req.wrapped_secret.as_bytes(),
+    ) {
+        Ok(b) => b,
         Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({
-                    "error": format!("stored keypair_json is not a JSON byte array: {e}"),
-                })),
+            return error_resp(
+                StatusCode::BAD_REQUEST,
+                &format!("wrapped_secret is not valid base64: {e}"),
+            )
+        }
+    };
+    if wrapped_bytes.len() < 24 {
+        return error_resp(
+            StatusCode::BAD_REQUEST,
+            "wrapped_secret is too short (must contain at least a 24-byte nonce)",
+        );
+    }
+
+    // Decode eph_pub.
+    let eph_pub_bytes = match base64::Engine::decode(
+        &base64::engine::general_purpose::STANDARD,
+        req.eph_pub.as_bytes(),
+    ) {
+        Ok(b) => b,
+        Err(e) => {
+            return error_resp(
+                StatusCode::BAD_REQUEST,
+                &format!("eph_pub is not valid base64: {e}"),
+            )
+        }
+    };
+    if eph_pub_bytes.len() != 32 {
+        return error_resp(
+            StatusCode::BAD_REQUEST,
+            &format!("eph_pub must be 32 bytes, got {}", eph_pub_bytes.len()),
+        );
+    }
+    let eph_pub: [u8; 32] = eph_pub_bytes.try_into().unwrap();
+
+    if req.issuer_pubkey_base58.trim().is_empty() {
+        return error_resp(StatusCode::BAD_REQUEST, "issuer_pubkey_base58 is required");
+    }
+
+    match state
+        .bootstrap_tickets
+        .insert_cli(req.issuer_pubkey_base58, wrapped_bytes, eph_pub)
+        .await
+    {
+        Ok((ticket_id, short_code)) => {
+            let expires_at = chrono::Utc::now() + chrono::Duration::seconds(BOOTSTRAP_TTL_SECS);
+            (
+                StatusCode::OK,
+                Json(CliBootstrapIssueResponse {
+                    ticket_id: ticket_id.to_string(),
+                    short_code,
+                    expires_at: expires_at.to_rfc3339(),
+                }),
             )
                 .into_response()
         }
-    };
-    if bytes.len() != 64 {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
+        Err(BootstrapInsertError::PerUserCapExceeded) => (
+            StatusCode::TOO_MANY_REQUESTS,
             Json(serde_json::json!({
-                "error": format!("stored keypair must be 64 bytes, got {}", bytes.len()),
+                "error": format!(
+                    "per-issuer bootstrap-ticket cap exceeded ({} active)",
+                    BOOTSTRAP_PER_USER_CAP
+                ),
             })),
         )
-            .into_response();
+            .into_response(),
+        Err(BootstrapInsertError::LruExhausted) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "error": "bootstrap-ticket store exhausted; retry shortly"
+            })),
+        )
+            .into_response(),
     }
-    // Solana keypair on-disk: bytes[0..32] = secret seed, bytes[32..64] =
-    // public key. Use solana_sdk to derive the base58 pubkey rather than
-    // re-implementing.
-    let pubkey = solana_sdk::pubkey::Pubkey::try_from(&bytes[32..64])
-        .map(|pk| pk.to_string())
-        .unwrap_or_default();
+}
 
+/// `GET /api/cli-bootstrap/server-pub` — return the server's static x25519
+/// public key. No auth required. The CLI uses this to wrap its secret before
+/// calling `/issue-from-cli`. The key is stable for the process lifetime;
+/// restarting the server invalidates all in-flight CLI tickets (acceptable
+/// given the 5-minute TTL).
+#[derive(Debug, Serialize)]
+pub struct ServerPubResponse {
+    /// Base64-encoded 32-byte x25519 public key.
+    pub server_x25519_pub: String,
+}
+
+pub async fn bootstrap_server_pub_handler(State(state): State<Arc<McpState>>) -> Response {
+    use base64::Engine;
+    let pub_b64 = base64::engine::general_purpose::STANDARD
+        .encode(state.bootstrap_server_x25519_public.as_bytes());
     (
         StatusCode::OK,
-        Json(BootstrapRedeemResponse {
-            secret: bytes,
-            pubkey_base58: pubkey,
+        Json(ServerPubResponse {
+            server_x25519_pub: pub_b64,
         }),
     )
         .into_response()
@@ -788,7 +1331,7 @@ mod tests {
         // reduced to `peek` would flip `some_count` to 2 with very high
         // probability somewhere in the iteration count.
         for _iter in 0..64 {
-            let store = Arc::new(BootstrapTickets::new(10, 5, 600));
+            let store = Arc::new(BootstrapTickets::new(10, 5, 300));
             let id = store
                 .insert("user-a".into(), "[1,2,3]".into())
                 .await
@@ -822,7 +1365,7 @@ mod tests {
     #[tokio::test]
     async fn test_bootstrap_ticket_single_use() {
         // Issue, consume, second consume returns None. TDD anchor (tasks/6.md).
-        let store = BootstrapTickets::new(10, 5, 600);
+        let store = BootstrapTickets::new(10, 5, 300);
         let id = store.insert("u".into(), "[]".into()).await.unwrap();
         assert!(store.consume(id).await.is_some());
         assert!(store.consume(id).await.is_none());
@@ -831,7 +1374,7 @@ mod tests {
     #[tokio::test]
     async fn test_bootstrap_ticket_per_user_cap() {
         // 4th insert by the same user returns 429.
-        let store = BootstrapTickets::new(100, 3, 600);
+        let store = BootstrapTickets::new(100, 3, 300);
         for _ in 0..3 {
             store.insert("alice".into(), "[]".into()).await.unwrap();
         }
@@ -846,7 +1389,7 @@ mod tests {
         // Issue, force-expire, consume returns None. Wall-clock advance
         // would couple the test to real time; force_expire mirrors the
         // pattern used by `PendingBundles::force_expire`.
-        let store = BootstrapTickets::new(10, 5, 600);
+        let store = BootstrapTickets::new(10, 5, 300);
         let id = store.insert("u".into(), "[]".into()).await.unwrap();
         store.force_expire(&id).await;
         let result = store.consume(id).await;
@@ -860,7 +1403,7 @@ mod tests {
     async fn test_bootstrap_ticket_lru_evicts_oldest() {
         // Insert capacity+1 by distinct users so per-user cap is not hit;
         // oldest entry is evicted, newest is retrievable.
-        let store = BootstrapTickets::new(3, 5, 600);
+        let store = BootstrapTickets::new(3, 5, 300);
         let mut ids = Vec::new();
         for i in 0..4 {
             let id = store
@@ -890,7 +1433,7 @@ mod tests {
         // 64-byte fake keypair (zeros). pubkey will be 11111...1 base58.
         let bytes: Vec<u8> = vec![0u8; 64];
         let kp_json = serde_json::to_string(&bytes).unwrap();
-        let store = Arc::new(BootstrapTickets::new(10, 5, 600));
+        let store = Arc::new(BootstrapTickets::new(10, 5, 300));
         let id = store.insert("u".into(), kp_json).await.unwrap();
 
         // Tiny handler closure — same signature as production but takes the
@@ -949,7 +1492,7 @@ mod tests {
         use axum::Router;
         use tower::ServiceExt;
 
-        let store = Arc::new(BootstrapTickets::new(10, 5, 600));
+        let store = Arc::new(BootstrapTickets::new(10, 5, 300));
 
         async fn redeem(
             State(store): State<Arc<BootstrapTickets>>,

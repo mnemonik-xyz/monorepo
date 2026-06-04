@@ -55,6 +55,11 @@ jobs:
         with:
           shared-key: workspace
 
+      # See ci.yml::clippy for context — Rust workspace builds need
+      # libdbus-1-dev for keyring's sync-secret-service feature.
+      - name: Install Linux Rust system deps
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+
       - name: Regenerate golden fixture from Rust core
         run: bash packages/sdk/scripts/regen-golden-fixtures.sh
 
@@ -88,6 +93,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: workspace
+
+      # See ci.yml::clippy for context.
+      - name: Install Linux Rust system deps
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
 
       - name: Install wasm-pack
         run: cargo install wasm-pack --locked --version 0.14.0 || true
@@ -186,6 +195,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: workspace
+
+      # See ci.yml::clippy for context.
+      - name: Install Linux Rust system deps
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
 
       - name: Install wasm-pack
         run: cargo install wasm-pack --locked --version 0.14.0 || true

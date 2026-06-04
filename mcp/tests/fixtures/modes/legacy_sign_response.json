@@ -1,0 +1,7 @@
+{
+  "approve_url": "<NORMALISED>",
+  "correlation_id": "<NORMALISED>",
+  "expires_in": 300,
+  "next_step": "<NORMALISED>",
+  "status": "awaiting_signature"
+}

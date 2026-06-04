@@ -6,8 +6,9 @@ Items deliberately out of scope for Phase 1 (≤5 dev-days, hackathon MVP). Arch
 
 ## Bugs (open)
 
-### BUG — `mnemonic sign` fails with `sign-callback rejected: HTTP 403` after fresh OAuth login (cli 0.1.5 / sdk 0.1.4)
+### BUG — `mnemonic sign` fails with `sign-callback rejected: HTTP 403` after fresh OAuth login (cli 0.1.5 / sdk 0.1.4) — RESOLVED in cli 0.1.6 / sdk 0.1.5
 
+- **Resolved:** 2026-05-13 — browserless OAuth flow (see `decisions.md` § "CLI 0.1.6 / SDK 0.1.5"). `mnemonic login` now signs the server's PKCE challenge with the local keypair directly, so `JWT.sub === identity.pubkey_base58` by construction. Legacy browser flow retained behind `--browser`. Sign-callback 403 also gets an actionable post-mortem in case anything else slips through.
 - **Reported:** 2026-05-02
 - **Severity:** P0 — primary demo path is broken end-to-end on a clean install. `init` + `login` succeed, `sign` fails immediately.
 - **Repro:** `yarn add @mnemonik-xyz/cli@0.1.5` → `mnemonic init` (existing `~/.mnemonic/identity.json`, no `--force`, OK) → `mnemonic login` (OAuth completes, `sub=B3hTWwBvx2RjEwcCrq9cmybpg6g6NRapD2R9n9caP4uX`, JWT stored) → `mnemonic sign "hello"` → `AuthError: sign-callback rejected: HTTP 403`.

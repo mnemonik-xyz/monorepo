@@ -21,7 +21,7 @@ use axum::{
     Json, Router,
 };
 use clap::Parser;
-use mnemonic_core::{arweave, compress, embed, identity, solana, storage::SqliteStore};
+use mnemonic_core::{arweave, compress, embed, solana, storage::SqliteStore};
 use serde::Deserialize;
 use solana_sdk::signer::Signer;
 use std::sync::Arc;
@@ -274,7 +274,12 @@ struct StatsQuery {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let _ = dotenvy::dotenv();
-    tracing_subscriber::fmt::init();
+    // Route tracing output to stderr so the stdio MCP transport (where
+    // stdout carries JSON-RPC frames) is not corrupted by `tracing::info!`
+    // / `warn!` / `error!` lines. See Wave 5 security audit finding 1.
+    tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .init();
 
     let cli = Cli::parse();
     let cfg = config::Config::from_env();
@@ -285,9 +290,12 @@ async fn main() -> anyhow::Result<()> {
         cli.transport.clone()
     };
 
-    let keypair = identity::load_or_create_keypair(&cfg.keypair_path)?;
+    let identity_struct = mnemonic_core::identity::ensure()
+        .map_err(|e| anyhow::anyhow!("identity::ensure failed at startup: {e}"))?;
+    let keypair = identity_struct.keypair;
     tracing::info!("Identity: {}", keypair.pubkey());
-    tracing::info!("did:sol: {}", identity::did_sol(&keypair));
+    tracing::info!("did:sol: {}", mnemonic_core::identity::did_sol(&keypair));
+    tracing::info!("Identity storage: {:?}", identity_struct.storage);
 
     let embedder = embed::build_embedder(
         &cfg.embed_provider,
@@ -434,6 +442,34 @@ async fn main() -> anyhow::Result<()> {
     // the capability — no Authorization header required).
     let bootstrap_tickets = Arc::new(api::BootstrapTickets::with_defaults());
 
+    // Static x25519 keypair for the CLI bootstrap symmetric flow (Task 12).
+    // Generated once at process boot; process-lifetime only.
+    let bootstrap_server_x25519_secret = crypto_box::SecretKey::generate(&mut rand::rngs::OsRng);
+    let bootstrap_server_x25519_public = bootstrap_server_x25519_secret.public_key();
+
+    // T2: derive the whoami discoverability envelope once at process start.
+    // The initial `current_price()` snapshot may be zero before the pricing
+    // engine's first refresh — that maps to `participate_cost.amount_cents:
+    // 0` on a `full + x402` deploy until the background refresher updates.
+    // Operators running with a non-zero `sign_memory_cost_micro_usdc` config
+    // value get a stable opening price; `PricingEngine::new(initial)` seeds
+    // exactly that. See tech-spec Decision 3.
+    let initial_price_micro_usdc = pricing.current_price();
+    let envelope = mcp::Envelope::from_config(
+        &cfg.storage_mode,
+        &cfg.payment_mode,
+        initial_price_micro_usdc,
+    );
+
+    // T3: outcome-based DoS guard for participate writes. Threshold +
+    // window come from `Config`; the background eviction task is spawned
+    // immediately after the `Arc<McpState>` is built (see below).
+    let refunds_by_subject = Arc::new(payment::RefundsBySubject::new(
+        std::time::Duration::from_secs(cfg.delivery_quota_window_secs),
+        cfg.delivery_quota_threshold,
+    ));
+    let delivery_metrics = Arc::new(payment::DeliveryMetrics::default());
+
     let state = Arc::new(mcp::McpState {
         keypair,
         solana: solana::SolanaClient::new(&cfg.solana_rpc_url),
@@ -457,7 +493,38 @@ async fn main() -> anyhow::Result<()> {
         chat_limiter,
         pending,
         bootstrap_tickets,
+        bootstrap_server_x25519_secret,
+        bootstrap_server_x25519_public,
+        envelope,
+        delivery_refetch_timeout: std::time::Duration::from_secs(cfg.delivery_refetch_timeout_secs),
+        refunds_by_subject: refunds_by_subject.clone(),
+        delivery_metrics: delivery_metrics.clone(),
     });
+
+    // T3: spawn the bounded-eviction background loop for the delivery-quota
+    // counter so the DashMap size tracks *active* spenders, not lifetime
+    // cardinality. Holds shard guards briefly per shard; never across an
+    // `.await` (Decision 8 extended to DashMap). The task lives for the
+    // process lifetime; on shutdown the runtime drops it.
+    {
+        let guard = refunds_by_subject.clone();
+        let evict_interval = std::time::Duration::from_secs(cfg.delivery_quota_evict_interval_secs);
+        // Subjects with no failures for 2*window are dropped.
+        let evict_since = std::time::Duration::from_secs(cfg.delivery_quota_window_secs * 2);
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(evict_interval).await;
+                let dropped = guard.evict_idle(evict_since);
+                if dropped > 0 {
+                    tracing::debug!(
+                        dropped,
+                        remaining = guard.len(),
+                        "RefundsBySubject eviction pass"
+                    );
+                }
+            }
+        });
+    }
 
     // ── RAG seeding (whitepaper chunking + artifact generation) ──────────
     if let Err(e) = seed::run(&state).await {
@@ -682,8 +749,23 @@ async fn run_http(
             post(api::bootstrap_issue_handler),
         )
         .route(
+            "/api/cli-bootstrap/issue-from-cli",
+            post(api::bootstrap_issue_from_cli_handler),
+        )
+        .route(
             "/api/cli-bootstrap/redeem/{ticket}",
             axum::routing::get(api::bootstrap_redeem_handler),
+        )
+        // POST /api/cli-bootstrap/redeem — lookup by short_code (T13/T14 interop).
+        // No auth required: the short_code is the capability, exempt via the
+        // bearer-auth allowlist (same treatment as the GET UUID-based variant).
+        .route(
+            "/api/cli-bootstrap/redeem",
+            post(api::bootstrap_redeem_by_code_handler),
+        )
+        .route(
+            "/api/cli-bootstrap/server-pub",
+            axum::routing::get(api::bootstrap_server_pub_handler),
         )
         .layer(middleware::from_fn_with_state(
             oauth_state.clone(),

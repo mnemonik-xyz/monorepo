@@ -15,8 +15,7 @@ Walk through every step. Tick the checkbox. If anything fails, file a GitHub iss
 - [ ] **A3.** `curl -sS https://mcp.mnemonik.xyz/.well-known/oauth-protected-resource` → JSON has `resource: "https://mcp.mnemonik.xyz"`.
 - [ ] **A4.** `curl -sS https://mcp.mnemonik.xyz/.well-known/oauth-protected-resource/mcp` → JSON has `resource: "https://mcp.mnemonik.xyz/mcp"` (path-specific, RFC 9728 §3.1).
 - [ ] **A5.** `curl -i -X POST https://mcp.mnemonik.xyz/mcp -H 'content-type: application/json' -d '{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"mnemonic_recall","arguments":{"query":"x"}}}'` → `HTTP/2 401` AND a `www-authenticate: Bearer realm="..."` header with `resource_metadata=...`.
-- [ ] **A6.** `curl -sS -X POST https://mcp.mnemonik.xyz/mcp -H 'content-type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | python3 -c 'import sys,json; d=json.load(sys.stdin); print(len(d["result"]["tools"]))'` → prints `7`.
-- [ ] **A7.** `curl -sS -X POST https://mcp.mnemonik.xyz/mcp -H 'content-type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"mcp_auth","arguments":{}}}' | python3 -m json.tool` → result text includes `"status": "unauthorized"` and `"install_url": "https://mnemonik.xyz/install"`.
+- [ ] **A6.** `curl -sS -X POST https://mcp.mnemonik.xyz/mcp -H 'content-type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | python3 -c 'import sys,json; d=json.load(sys.stdin); print(len(d["result"]["tools"]))'` → prints `6`.
 
 ## B. CLI install flow (3 min)
 
@@ -113,6 +112,5 @@ Walk through every step. Tick the checkbox. If anything fails, file a GitHub iss
 ## H. Stage A → Stage B sign-off (1 min)
 
 - [ ] **H1.** All A–G boxes ticked.
-- [ ] **H2.** Output of `npx playwright test webapp/e2e/mcp-auth-tool.spec.ts --reporter=line` → `6 passed`.
-- [ ] **H3.** Output of `cargo test -p mnemonic-mcp --lib oauth::tests --features test-support` → all `oauth::tests::test_*` from today's batch pass (the 8 pre-existing failing oauth tests are tracked separately in a backlog item — do NOT block release on them, do NOT ignore the new ones).
-- [ ] **H4.** Sign off in `decisions.md` with timestamp + your handle.
+- [ ] **H2.** Output of `cargo test -p mnemonic-mcp --lib oauth::tests --features test-support` → all `oauth::tests::test_*` from today's batch pass (the 8 pre-existing failing oauth tests are tracked separately in a backlog item — do NOT block release on them, do NOT ignore the new ones).
+- [ ] **H3.** Sign off in `decisions.md` with timestamp + your handle.

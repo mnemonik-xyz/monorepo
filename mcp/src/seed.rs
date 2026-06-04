@@ -329,6 +329,14 @@ pub async fn run(state: &McpState) -> Result<()> {
 
             // Seeding always takes the inline (server-signing) path —
             // `jwt_sub = None` per Decision 12.
+            //
+            // T2: seeding never carries an explicit `mode` field — it
+            // resolves to env-var fallback (`explicit = false`) so the
+            // routing rule in `sign_memory` reads it as the legacy path,
+            // not as a "user opted into local". On a `full` deploy that's
+            // `Participate`; on `local` it's `Local`.
+            let seed_resolved = tools::resolve_write_mode(None, &state.storage_mode)
+                .expect("None always resolves to Ok per resolver contract");
             let result = tools::sign_memory(
                 &state.keypair,
                 &state.solana,
@@ -343,8 +351,15 @@ pub async fn run(state: &McpState) -> Result<()> {
                 &state.storage_mode,
                 &server_owner_pubkey,
                 None,
+                seed_resolved,
+                &state.envelope,
+                state.delivery_refetch_timeout,
             )
             .await
+            // `sign_memory` returns `ToolError` (typed RPC error or generic
+            // anyhow). Seeding has no caller to surface a typed error to,
+            // so flatten to anyhow with a stringified display.
+            .map_err(|e| anyhow::anyhow!("{e}"))
             .with_context(|| format!("sign_memory failed for {rel_str} chunk {i}"))?;
 
             signed_chunks.push(SignedChunk {

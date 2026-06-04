@@ -16,6 +16,7 @@ export { MnemonicClient } from "./client.js";
 export { coseSignPayload } from "./cose.js";
 export {
   AuthError,
+  IdentityRequiresKeystore,
   IntegrityError,
   MnemonicError,
   ServerError,
@@ -42,11 +43,13 @@ export type {
 export {
   buildAuthorizeUrl,
   exchangeCodeForToken,
+  loginWithIdentity,
   parseJwtPayload,
   generatePkceVerifier,
   pkceChallenge,
   randomState,
   pendingAuthSessions,
+  BROWSERLESS_REDIRECT_URI,
 } from "./oauth.js";
 export type {
   BuildAuthorizeUrlInput,
@@ -54,5 +57,7 @@ export type {
   ExchangeCodeForTokenInput,
   ExchangeCodeForTokenResult,
   JwtPayload,
+  LoginWithIdentityInput,
+  LoginWithIdentityResult,
   PendingAuthSession,
 } from "./oauth.js";

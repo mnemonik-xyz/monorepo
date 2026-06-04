@@ -55,6 +55,8 @@ fn state_with_short_ttl(ttl_secs: i64) -> Arc<McpState> {
     let llm_client =
         mnemonic_mcp::llm::LlmClient::new("ollama", "", "test-model", "http://localhost:0", 512)
             .unwrap();
+    let bootstrap_x25519_sk = crypto_box::SecretKey::generate(&mut crypto_box::aead::OsRng);
+    let bootstrap_x25519_pk = bootstrap_x25519_sk.public_key();
     Arc::new(McpState {
         keypair: Keypair::new(),
         solana: SolanaClient::new("http://localhost:0"),
@@ -78,6 +80,16 @@ fn state_with_short_ttl(ttl_secs: i64) -> Arc<McpState> {
         chat_limiter,
         pending: Arc::new(PendingBundles::new(10, ttl_secs, 5)),
         bootstrap_tickets: Arc::new(mnemonic_mcp::api::BootstrapTickets::with_defaults()),
+        bootstrap_server_x25519_secret: bootstrap_x25519_sk,
+        bootstrap_server_x25519_public: bootstrap_x25519_pk,
+        // T2: discoverability envelope (local-only deploy in this test).
+        envelope: mnemonic_mcp::mcp::Envelope::from_config("local", "none", 0),
+        delivery_refetch_timeout: std::time::Duration::from_secs(15),
+        refunds_by_subject: Arc::new(mnemonic_mcp::payment::RefundsBySubject::new(
+            std::time::Duration::from_secs(60),
+            5,
+        )),
+        delivery_metrics: Arc::new(mnemonic_mcp::payment::DeliveryMetrics::default()),
     })
 }
 

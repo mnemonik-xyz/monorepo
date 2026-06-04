@@ -21,6 +21,11 @@ use axum::http::HeaderMap;
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
 
+use dashmap::DashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
 use mnemonic_core::solana::SolanaClient;
 use mnemonic_core::storage::SqliteStore;
 
@@ -191,6 +196,23 @@ async fn check_x402(
         }
     };
 
+    // T3 round-2 — replay-detect WITHOUT consuming. If this nonce has
+    // already been consumed (by a successful delivery on an earlier
+    // request), reject. The actual `INSERT INTO x402_nonces` happens
+    // AFTER `confirm_delivery_or_demote` succeeds (see
+    // `consume_x402_nonce_after_success` below) so a delivery failure
+    // leaves the nonce reusable — the caller's USDC payment is not
+    // forfeit when the operator's anchor isn't proved retrievable.
+    {
+        let store = store.lock().unwrap();
+        if x402_nonce_already_consumed(&store, &proof.tx_sig).unwrap_or(false) {
+            return PaymentGate::Unauthorized(format!(
+                "x402 payment already used: {}",
+                proof.tx_sig
+            ));
+        }
+    }
+
     // Verify the Solana USDC transfer
     match verify_usdc_transfer(solana, &proof.tx_sig, treasury, usdc_mint, cost as u64).await {
         Ok(Some(_)) => {}
@@ -203,15 +225,47 @@ async fn check_x402(
         Err(e) => return PaymentGate::Unauthorized(format!("x402 verification error: {e}")),
     }
 
-    // Mark nonce to prevent replay
-    {
-        let store = store.lock().unwrap();
-        if let Err(e) = mark_x402_nonce(&store, &proof.tx_sig) {
-            return PaymentGate::Unauthorized(e.to_string());
-        }
-    }
-
+    // Do NOT mark the nonce here. The nonce is consumed only after a
+    // successful delivery confirmation (or, in the
+    // legacy `payment_mode == "none"` path, never). See
+    // `consume_x402_nonce_after_success`.
     PaymentGate::Proceed(None)
+}
+
+/// Read-only replay check for an x402 nonce. Returns `Ok(true)` if a row
+/// already exists in `x402_nonces`, `Ok(false)` otherwise.
+///
+/// Used by `check_x402` to fail-fast on replay BEFORE the more expensive
+/// `verify_usdc_transfer` Solana RPC. Note: a race window exists between
+/// this read and the eventual `consume_x402_nonce_after_success` INSERT
+/// — the loser gets `mark_x402_nonce` ConstraintViolation, which is the
+/// correct outcome (one of the two concurrent requests wins).
+pub fn x402_nonce_already_consumed(store: &SqliteStore, tx_sig: &str) -> anyhow::Result<bool> {
+    let exists: bool = store
+        .conn()
+        .query_row(
+            "SELECT 1 FROM x402_nonces WHERE tx_sig = ? LIMIT 1",
+            params![tx_sig],
+            |_| Ok(true),
+        )
+        .unwrap_or(false);
+    Ok(exists)
+}
+
+/// Consume an x402 nonce by inserting it into `x402_nonces`. Called by
+/// the caller AFTER the delivery confirmation passes (T3 round-2
+/// deferral). Returns `Err` on ConstraintViolation if the same nonce was
+/// concurrently consumed by another request.
+///
+/// Round-2 split: the original `check_x402` consumed the nonce at gate
+/// time, which made delivery failures permanently spend the caller's
+/// USDC. With the nonce deferred to here, a delivery failure leaves the
+/// nonce reusable and the caller can retry with the same `X-Payment`
+/// header — they pay Arweave/Solana fees again on the retry (operator
+/// bleed), but the DoS quota guard caps how many such retries cost the
+/// operator.
+pub fn consume_x402_nonce_after_success(store: &SqliteStore, tx_sig: &str) -> anyhow::Result<()> {
+    mark_x402_nonce(store, tx_sig)
 }
 
 // ── Builder ──────────────────────────────────────────────────────────────────
@@ -658,6 +712,281 @@ fn random_bytes<const N: usize>() -> anyhow::Result<[u8; N]> {
     Ok(out)
 }
 
+// ── Delivery DoS guard (modes-user-choice T3) ───────────────────────────────
+//
+// Outcome-based per-`api_key_hash` sliding-window counter consulted at the
+// *entry* of the participate path in `mcp_handler` BEFORE any Arweave or
+// Solana write. Increments on every delivery-not-confirmed demotion. When a
+// caller crosses the threshold within the window the next `participate`
+// request short-circuits with `-32011 DeliveryQuotaExceeded` so a
+// systematically-failing client cannot bleed operator margin by triggering
+// chain spend that is always refunded.
+//
+// Keying is on the bearer api_key's blake3 digest (`api_key_hash`), NOT on
+// `owner_pubkey`. Ed25519 keys can be rotated for free; billable subjects
+// can't. Keying on the wrong identifier would let an attacker bypass the
+// quota by minting a fresh identity per request — same threat model as
+// e-mail-based rate-limits not keyed on e-mail-aliases.
+//
+// `DashMap` shard-level lock discipline (extends Decision 8 of the
+// tech-spec): every method below holds a shard guard for the duration of a
+// single `record` / `count` / `is_empty_for` call and drops it before
+// returning. No `.await` between guard acquisition and drop. The
+// background eviction task respects the same rule per shard.
+
+/// Compute the blake3 digest of an api_key, hex-encoded. Used both as the
+/// quota-counter subject AND as the credential-at-rest identifier for the
+/// `payment_events` audit row written by [`record_refund_failed`]. Centralised
+/// here so call-sites cannot accidentally substitute the raw key (CWE-312
+/// hygiene).
+pub fn hash_api_key(api_key: &str) -> String {
+    blake3::hash(api_key.as_bytes()).to_hex().to_string()
+}
+
+/// Sliding-window timestamp counter — push, prune-on-read, count. Not
+/// thread-safe by itself; protection comes from the `DashMap` shard the
+/// counter sits inside. Methods are `&mut self` so the type-system enforces
+/// the shard-guard exclusivity at the call-site.
+#[derive(Debug, Default, Clone)]
+pub struct SlidingWindowCounter {
+    timestamps: Vec<Instant>,
+}
+
+impl SlidingWindowCounter {
+    /// Push `now` and drop timestamps older than `window`. Bounded by
+    /// the threshold check that fronts every increment site so the vec
+    /// never grows past `O(threshold)` in practice.
+    pub fn record(&mut self, now: Instant, window: Duration) {
+        let cutoff = now.checked_sub(window);
+        if let Some(cutoff) = cutoff {
+            self.timestamps.retain(|t| *t >= cutoff);
+        }
+        self.timestamps.push(now);
+    }
+
+    /// Count timestamps that fall inside `window` looking back from `now`.
+    /// Does NOT mutate (callers might want to inspect without pruning).
+    pub fn count(&self, now: Instant, window: Duration) -> u32 {
+        let cutoff = match now.checked_sub(window) {
+            Some(c) => c,
+            None => return self.timestamps.len() as u32,
+        };
+        self.timestamps.iter().filter(|t| **t >= cutoff).count() as u32
+    }
+
+    /// `true` if the counter has had no timestamps in the last `since`
+    /// duration — used by the eviction loop to decide whether a subject
+    /// has gone dormant.
+    pub fn is_empty_for(&self, now: Instant, since: Duration) -> bool {
+        let Some(cutoff) = now.checked_sub(since) else {
+            return false;
+        };
+        !self.timestamps.iter().any(|t| *t >= cutoff)
+    }
+}
+
+/// Per-subject sliding-window demotion counter. See module-level comment.
+///
+/// Single `DashMap` instance shared across the whole process via
+/// `McpState.refunds_by_subject`. Bounded by the background eviction task
+/// spawned in `main.rs::run_http`.
+pub struct RefundsBySubject {
+    inner: Arc<DashMap<String, SlidingWindowCounter>>,
+    window: Duration,
+    threshold: u32,
+}
+
+impl RefundsBySubject {
+    /// Build a fresh guard with the given window and threshold.
+    pub fn new(window: Duration, threshold: u32) -> Self {
+        Self {
+            inner: Arc::new(DashMap::new()),
+            window,
+            threshold,
+        }
+    }
+
+    /// Configured window duration. Surfaced for the `DeliveryQuotaExceeded`
+    /// error envelope so the client knows the SLO knob.
+    pub fn window(&self) -> Duration {
+        self.window
+    }
+
+    /// Configured demotion threshold. Surfaced for the typed error envelope.
+    pub fn threshold(&self) -> u32 {
+        self.threshold
+    }
+
+    /// True iff the subject has hit or exceeded the threshold inside the
+    /// sliding window. Acquires the shard guard for `subject`, takes the
+    /// count, releases. No `.await` between acquire and drop (extends
+    /// Decision 8 to DashMap).
+    pub fn is_over(&self, subject: &str) -> bool {
+        let now = Instant::now();
+        match self.inner.get(subject) {
+            Some(entry) => entry.count(now, self.window) >= self.threshold,
+            None => false,
+        }
+    }
+
+    /// Increment the subject's counter by one. Acquires the shard guard
+    /// briefly and releases before returning. Safe to call from the
+    /// failure-branch of `sign_memory_inline` after the SQLite mutex has
+    /// already been released.
+    pub fn record_failure(&self, subject: &str) {
+        let now = Instant::now();
+        let window = self.window;
+        self.inner
+            .entry(subject.to_string())
+            .or_default()
+            .record(now, window);
+    }
+
+    /// Bounded eviction: drop any entry whose counter has been empty for the
+    /// last `since` duration. Holds each shard guard only for the duration
+    /// of its own retain pass; never across `.await`. Returns the number of
+    /// entries evicted (useful for instrumentation + tests).
+    pub fn evict_idle(&self, since: Duration) -> usize {
+        let before = self.inner.len();
+        let now = Instant::now();
+        // `retain` on DashMap iterates shard-by-shard, holding only one
+        // shard guard at a time. Closure runs synchronously; no `.await`
+        // crosses the guard boundary.
+        self.inner
+            .retain(|_, counter| !counter.is_empty_for(now, since));
+        before.saturating_sub(self.inner.len())
+    }
+
+    /// Number of subjects currently tracked. Useful for tests.
+    pub fn len(&self) -> usize {
+        self.inner.len()
+    }
+
+    /// True if the map is currently empty. Convenience for tests.
+    #[allow(dead_code)] // exercised by unit tests; future eviction-loop introspection.
+    pub fn is_empty(&self) -> bool {
+        self.inner.is_empty()
+    }
+}
+
+/// Process-lifetime counters incremented in the delivery-guarantee flow.
+/// Lightweight `AtomicU64` shims that stand in for the eventual Prometheus
+/// histogram/counter surface (the rest of the binary hasn't wired
+/// `metrics::` crates yet — see commit log; we can swap to `metrics::counter!`
+/// later without touching call-sites because they go through
+/// [`DeliveryMetrics`]).
+///
+/// The four counters are:
+/// - `delivery_quota_short_circuit` — `-32011 DeliveryQuotaExceeded` returns.
+/// - `delivery_not_confirmed_refetch` — demotions due to Arweave re-fetch.
+/// - `delivery_not_confirmed_verify` — demotions due to verify_cose mismatch.
+/// - `delivery_not_confirmed_recall` — demotions due to recall miss.
+///
+/// No per-tenant label (`api_key_hash` or `owner_pubkey`) is attached. That
+/// would be a high-cardinality anti-pattern for any future Prometheus
+/// adapter; per-tenant detail belongs in structured `tracing::warn!` lines
+/// (already emitted at every demotion call-site).
+pub struct DeliveryMetrics {
+    quota_short_circuit: AtomicU64,
+    not_confirmed_refetch: AtomicU64,
+    not_confirmed_verify: AtomicU64,
+    not_confirmed_recall: AtomicU64,
+}
+
+impl Default for DeliveryMetrics {
+    fn default() -> Self {
+        Self {
+            quota_short_circuit: AtomicU64::new(0),
+            not_confirmed_refetch: AtomicU64::new(0),
+            not_confirmed_verify: AtomicU64::new(0),
+            not_confirmed_recall: AtomicU64::new(0),
+        }
+    }
+}
+
+impl DeliveryMetrics {
+    /// Increment the quota-exceeded short-circuit counter.
+    pub fn record_quota_short_circuit(&self) {
+        self.quota_short_circuit.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Increment the per-stage `delivery_not_confirmed_total` counter.
+    /// `stage` must be one of `"refetch"`, `"verify"`, `"recall"`.
+    pub fn record_not_confirmed(&self, stage: &str) {
+        match stage {
+            "refetch" => self.not_confirmed_refetch.fetch_add(1, Ordering::Relaxed),
+            "verify" => self.not_confirmed_verify.fetch_add(1, Ordering::Relaxed),
+            "recall" => self.not_confirmed_recall.fetch_add(1, Ordering::Relaxed),
+            // Unknown stage — log but do not crash. Reaching here means a
+            // call-site sent a stage label the metric type doesn't know.
+            other => {
+                tracing::warn!(
+                    stage = other,
+                    "DeliveryMetrics::record_not_confirmed called with unknown stage"
+                );
+                0
+            }
+        };
+    }
+
+    /// Read the quota-short-circuit counter. For tests + future Prometheus
+    /// adapter only.
+    #[allow(dead_code)] // exercised by integration tests via test-support feature.
+    pub fn quota_short_circuit(&self) -> u64 {
+        self.quota_short_circuit.load(Ordering::Relaxed)
+    }
+
+    /// Read the per-stage `delivery_not_confirmed_total` counter.
+    #[allow(dead_code)] // exercised by integration tests via test-support feature.
+    pub fn not_confirmed(&self, stage: &str) -> u64 {
+        match stage {
+            "refetch" => self.not_confirmed_refetch.load(Ordering::Relaxed),
+            "verify" => self.not_confirmed_verify.load(Ordering::Relaxed),
+            "recall" => self.not_confirmed_recall.load(Ordering::Relaxed),
+            _ => 0,
+        }
+    }
+}
+
+/// Record a `refund_failed` audit row when the refund-itself path fails after
+/// a delivery demotion. Best-effort — callers should `.ok()` the result; the
+/// row is a forensic crumb, not a correctness barrier.
+///
+/// **PII allow-list** (tech-spec §"Risk & mitigations / Refund audit-trail
+/// correctness"): the row carries ONLY `{api_key_hash, attestation_id,
+/// reason, occurred_at}`. NO raw `api_key`, NO `content_preview`, NO
+/// embedding bytes, NO COSE payload. The `payment_events.api_key` column
+/// receives the `blake3` digest here (column name is legacy; the schema is
+/// untouched per the spec — no new migration needed).
+///
+/// Lives in `mcp/src/payment.rs` per the project's hard architectural rule:
+/// all payment methods live in `payment.rs`, never in `core/`. Body uses
+/// the existing schema columns; the new `event_type='refund_failed'` value
+/// is just a new enumerant.
+pub fn record_refund_failed(
+    store: &SqliteStore,
+    api_key_hash: &str,
+    attestation_id: &str,
+    reason: &str,
+    occurred_at: &str,
+) -> anyhow::Result<()> {
+    // Description carries the demoted attestation_id + the failure reason in
+    // a structured `{id} | {reason}` shape so an operator can grep
+    // `payment_events.description LIKE '<attestation_id>%'` for forensics.
+    let description = format!("{attestation_id} | {reason}");
+    store.conn().execute(
+        "INSERT INTO payment_events (event_id, api_key, amount_micro_usdc, event_type, tx_sig, description, created_at) VALUES (?,?,?,'refund_failed',NULL,?,?)",
+        params![
+            uuid::Uuid::new_v4().to_string(),
+            api_key_hash,
+            0i64,
+            description,
+            occurred_at,
+        ],
+    )?;
+    Ok(())
+}
+
 // ── Tests ────────────────────────────────────────────────────────────────────
 #[cfg(test)]
 mod tests {
@@ -942,5 +1271,141 @@ mod tests {
             "err = {err}"
         );
         assert_eq!(get_balance(&store, &key).unwrap(), Some(500));
+    }
+
+    // ── T3: RefundsBySubject sliding-window guard ────────────────────────────
+
+    #[test]
+    fn hash_api_key_is_deterministic_and_not_raw_key() {
+        let key = "mnm_abcdefghijklmnopqrstuvwx";
+        let h1 = hash_api_key(key);
+        let h2 = hash_api_key(key);
+        assert_eq!(h1, h2, "hash must be deterministic");
+        assert_ne!(h1, key, "hash must not equal raw key");
+        assert!(
+            !h1.contains("mnm_"),
+            "blake3 hex must not contain the key prefix: {h1}"
+        );
+        assert_eq!(h1.len(), 64, "blake3 hex is 32 bytes = 64 hex chars");
+    }
+
+    #[test]
+    fn refunds_by_subject_under_threshold_is_not_over() {
+        let g = RefundsBySubject::new(Duration::from_secs(60), 5);
+        assert!(!g.is_over("sub_x"));
+        g.record_failure("sub_x");
+        g.record_failure("sub_x");
+        assert!(!g.is_over("sub_x"));
+    }
+
+    #[test]
+    fn refunds_by_subject_at_threshold_is_over() {
+        let g = RefundsBySubject::new(Duration::from_secs(60), 3);
+        g.record_failure("sub_y");
+        g.record_failure("sub_y");
+        g.record_failure("sub_y");
+        assert!(g.is_over("sub_y"));
+        // Different subject is unaffected.
+        assert!(!g.is_over("sub_z"));
+    }
+
+    #[test]
+    fn refunds_by_subject_expired_entries_drop_out() {
+        // 50ms window — easy to wait out in a test.
+        let g = RefundsBySubject::new(Duration::from_millis(50), 2);
+        g.record_failure("sub_a");
+        g.record_failure("sub_a");
+        assert!(g.is_over("sub_a"));
+        std::thread::sleep(Duration::from_millis(80));
+        assert!(
+            !g.is_over("sub_a"),
+            "after window elapses count must drop below threshold"
+        );
+    }
+
+    #[test]
+    fn evict_idle_drops_silent_subjects() {
+        let g = RefundsBySubject::new(Duration::from_millis(20), 5);
+        g.record_failure("sub_p");
+        assert_eq!(g.len(), 1);
+        std::thread::sleep(Duration::from_millis(50));
+        let dropped = g.evict_idle(Duration::from_millis(20));
+        assert_eq!(dropped, 1);
+        assert!(g.is_empty());
+    }
+
+    #[test]
+    fn evict_idle_keeps_active_subjects() {
+        let g = RefundsBySubject::new(Duration::from_secs(60), 5);
+        g.record_failure("active");
+        // Eviction `since` longer than the time elapsed → keep.
+        let dropped = g.evict_idle(Duration::from_secs(60));
+        assert_eq!(dropped, 0);
+        assert_eq!(g.len(), 1);
+    }
+
+    #[test]
+    fn record_refund_failed_writes_audit_row_with_hash_not_raw_key() {
+        let store = fresh_store();
+        let raw_key = "mnm_secretkeyabcdefghijklmn";
+        let hash = hash_api_key(raw_key);
+        let occurred_at = chrono::Utc::now().to_rfc3339();
+        record_refund_failed(
+            &store,
+            &hash,
+            "att-id-uuid-0001",
+            "refund-itself-failed",
+            &occurred_at,
+        )
+        .unwrap();
+
+        // Row exists with the hash, not the raw key.
+        let row: (String, String, i64, String) = store
+            .conn()
+            .query_row(
+                "SELECT api_key, event_type, amount_micro_usdc, description
+                   FROM payment_events
+                  WHERE event_type = 'refund_failed'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(row.0, hash, "api_key column must carry hash, not raw key");
+        assert_eq!(row.1, "refund_failed");
+        assert_eq!(row.2, 0, "amount must be 0 (refund_failed is not money)");
+        assert!(
+            row.3.starts_with("att-id-uuid-0001 | "),
+            "description must lead with the demoted attestation id: {}",
+            row.3
+        );
+        assert!(
+            row.3.contains("refund-itself-failed"),
+            "description must include the reason: {}",
+            row.3
+        );
+
+        // Negative assertion: no raw-key substring anywhere in the row.
+        for col in [&row.0, &row.1, &row.3] {
+            assert!(
+                !col.contains(raw_key),
+                "raw api_key must not appear anywhere in the audit row: {col}"
+            );
+        }
+    }
+
+    #[test]
+    fn delivery_metrics_increment_and_read() {
+        let m = DeliveryMetrics::default();
+        assert_eq!(m.quota_short_circuit(), 0);
+        m.record_quota_short_circuit();
+        m.record_quota_short_circuit();
+        assert_eq!(m.quota_short_circuit(), 2);
+
+        m.record_not_confirmed("refetch");
+        m.record_not_confirmed("refetch");
+        m.record_not_confirmed("verify");
+        assert_eq!(m.not_confirmed("refetch"), 2);
+        assert_eq!(m.not_confirmed("verify"), 1);
+        assert_eq!(m.not_confirmed("recall"), 0);
     }
 }

@@ -32,6 +32,17 @@ serde_urlencoded = "0.7"
 # Rate limiting (POST /chat: 10 req/min per IP)
 governor = "0.8"
 
+# Sharded concurrent hash map for the per-`api_key_hash` delivery-quota
+# counter (modes-user-choice T3 — DoS guard). Per-shard locks held briefly
+# only; never across `.await` (Decision 8 of the tech-spec extended to
+# DashMap). `5` matches the same major used elsewhere in the workspace.
+dashmap = "5"
+
+# blake3 — used for the api_key → api_key_hash digest that keys the delivery
+# DoS guard. Hashing the bearer key before it lands in any audit row keeps
+# the raw credential out of the database (CWE-312).
+blake3 = "1"
+
 # OAuth 2.1 + PKCE server primitives (Decision 9-11, Task 4)
 # Pinned per tech-spec; cargo tree -p governor must show one major version after add.
 oauth2 = "=4.4.2"
@@ -92,6 +103,10 @@ uuid = { version = "1", features = ["v4"] }
 # solana-sdk; bumping to 0.9 introduces a duplicate major.
 rand = "0.8"
 
+# x25519 key agreement for the CLI bootstrap symmetric flow (Task 12).
+# `SalsaBox` (XSalsa20-Poly1305 + Curve25519) — same major as core's dep.
+crypto_box = "0.9"
+
 # ZIP archive (artifact generation in seed.rs)
 zip = { version = "2", default-features = false, features = ["deflate"] }
 
@@ -137,12 +152,31 @@ name = "key_escrow"
 path = "tests/key_escrow.rs"
 required-features = ["test-support"]
 
+# Task-12 symmetric CLI bootstrap ticket flow tests.
+[[test]]
+name = "api_cli_bootstrap"
+path = "tests/api_cli_bootstrap.rs"
+required-features = ["test-support"]
+
+# T3 modes-user-choice delivery-guarantee tests. Uses `mock_state_for_delivery`
+# from `mnemonic_mcp::test_support` (gated behind the same feature).
+[[test]]
+name = "delivery_guarantee"
+path = "tests/delivery_guarantee.rs"
+required-features = ["test-support"]
+
 [dev-dependencies]
 tempfile = "3"
 httpmock = "0.8"
+# regex — used by `_helpers/delivery_harness.rs` to match any Arweave GET
+# path (the arlocal write path self-mints the tx_id from a PRNG, so the
+# test can't pre-register a specific path).
+regex = "1"
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 hyper = "1"
+# Task-12: used in api_cli_bootstrap tests for client-side crypto operations.
+crypto_box = "0.9"
 # Adversarial JSON re-encoder used by tests/roundtrip_cose_via_http_proxy.rs to
 # mutate envelope bytes (key reorder, whitespace normalize) and prove the
 # base64 cose_bundle field survives byte-identical (Decision 7 + Risks R1).

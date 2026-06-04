@@ -52,7 +52,7 @@ Cargo workspace, `resolver = "2"`, two members:
 
 **Data flow (`sign_memory`):** text → `embed::Embedder` → `compress::EmbeddingCompressor` (TurboQuant 2/3/4 bits) → `codec::canonical::to_canonical_cbor` → `blake3` hash → `codec::sign` (COSE_Sign1 with Ed25519) → in `full` mode: Arweave bytes + Solana SPL Memo → `storage::AttestationStore` (SQLite). `recall` reads SQLite + cosine search over decompressed embeddings.
 
-**Storage modes** (`STORAGE_MODE`): `local` (default) — SQLite only, synthetic `local:` tx IDs, free, offline. `full` — Arweave + Solana writes, requires funded Ed25519 keypair. Mode is set at startup, not per-call. Never mix in one DB.
+**Storage modes** (`STORAGE_MODE`): `local` — SQLite only, synthetic `local:` tx IDs, free, offline. `full` — Arweave + Solana writes, requires funded Ed25519 keypair. `STORAGE_MODE` now sets the operator's *capability/default*, not a global switch: write mode is a **per-request user choice** via the optional `mode: "local" | "participate"` field on `mnemonic_sign_memory` (default `local`; requests without the field fall back to the env-var for shipped legacy clients). Rows are tagged via the `write_mode` column and `recall` spans both modes for one owner — so a single owner's `local` and `participate` writes coexist in one DB by design. A `participate` write only succeeds after the anchored bytes pass a recall+verify round-trip; on failure the row is demoted to `local` and no payment is charged. Rationale + decisions: `work/modes-user-choice/user-spec.md` and `work/modes-user-choice/decisions.md`.
 
 **Payment modes** (`PAYMENT_MODE`, HTTP + `full` only): `none` | `balance` (Bearer token, balance checked against live pricing engine) | `x402` (HTTP 402 + retry with `X-Payment` header) | `both`. Only `mnemonic_sign_memory` is paid.
 
@@ -95,6 +95,21 @@ Read these via the `project-knowledge` skill — they're the source of truth.
 ## CI
 
 `.github/workflows/ci.yml` runs on push to `main` and every PR: rustfmt check, clippy with `-D warnings`, `cargo test --workspace`, gitleaks (working tree + full history). `.github/workflows/release.yml` runs on `v*` tags: cross-compile mcp binary, build Docker image, publish to GHCR/crates.io. Toolchain pinned via `rust-toolchain.toml`.
+
+### CI gate policy
+
+The cross-language interop coverage is intentionally split into two jobs with different gate semantics — do not collapse them or flip the toggles without following the procedure below.
+
+- **`cross-lang-build (gate)`** — hard required gate. Builds the Rust binaries + SDK WASM + CLI dist that the keychain interop test would need. Deterministic. Never carries `continue-on-error`. If this is red, real build infra is broken (e.g. wasm-pack missing, libdbus header gone) and the PR must block.
+- **`cross-lang-keychain (informational)`** — `needs: cross-lang-build`, permanently `continue-on-error: true`. Drives the actual Rust ↔ Node keychain roundtrip under a CI-spawned `gnome-keyring` + D-Bus session. Sub-test B has an unresolved daemon-coupling issue on Ubuntu 24.04 (see commit `fde7f72` — survived 5 rounds of debugging). The job stays in the matrix as a visible signal but does not gate.
+
+**Yo-yo prevention rule:** the `continue-on-error: true` on `cross-lang-keychain` is permanent until the daemon-coupling sub-test B is fixed upstream. Do not flip it on/off — that pattern previously masked a `wasm-pack`-missing build regression that shipped to main untouched during PR #151. If you believe the test is now stable enough to gate, the procedure is:
+
+1. Reproduce 10 consecutive green runs of the script on Ubuntu 24.04.
+2. Land a single PR that simultaneously removes `continue-on-error: true` AND updates this section, naming the fix commit that closed the daemon-coupling root cause.
+3. Get a reviewer sign-off on that PR explicitly acknowledging the gate change.
+
+If you only want to gate the build path (the actual regression-catcher), the `cross-lang-build` job already does that — no toggling needed.
 
 ## Stream Timeout Prevention
 

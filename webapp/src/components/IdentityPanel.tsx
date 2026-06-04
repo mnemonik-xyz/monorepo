@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import {
   clearIdentity,
   readIdentity,
@@ -18,8 +18,9 @@ const MCP_BASE =
   (import.meta.env?.VITE_MCP_BASE as string | undefined) ??
   "https://mcp.mnemonik.xyz";
 
-/** Bootstrap-ticket TTL fallback when the server omits `expires_at`. */
-const BOOTSTRAP_TTL_MS = 10 * 60 * 1000;
+/** Bootstrap-ticket TTL fallback when the server omits `expires_at`.
+ *  Matches `BOOTSTRAP_TTL_SECS = 300` in `mcp/src/api.rs` (Decision 12). */
+const BOOTSTRAP_TTL_MS = 5 * 60 * 1000;
 
 /**
  * "Send to CLI" UI state machine.
@@ -79,6 +80,11 @@ export default function IdentityPanel() {
   // "Send to CLI" state — separate from the panel's main `error` channel so
   // a failed bootstrap-ticket issue doesn't clobber a previously-shown
   // generate/import/export error and vice-versa.
+  // Drift-warning modal state — shown when the user clicks "Generate new"
+  // while an identity already exists.
+  const [showGenerateModal, setShowGenerateModal] = useState(false);
+  const cancelButtonRef = useRef<HTMLButtonElement>(null);
+
   const [cliState, setCliState] = useState<CliBootstrapState>({ kind: "idle" });
   // "Send to Extension" — distinct ticket lifecycle so the user can issue
   // CLI and extension tickets without conflict. The extension ticket TTL,
@@ -96,7 +102,11 @@ export default function IdentityPanel() {
     });
   }, []);
 
-  const handleGenerate = async () => {
+  /**
+   * Actually execute keypair generation — shared by both the first-time
+   * path (no identity) and the "Generate anyway" destructive path (via modal).
+   */
+  const executeGenerate = useCallback(async () => {
     setError(null);
     setIsWorking(true);
     try {
@@ -109,7 +119,32 @@ export default function IdentityPanel() {
     } finally {
       setIsWorking(false);
     }
+  }, []);
+
+  /**
+   * "Generate" button handler. If an identity already exists, open the
+   * drift-warning modal so the user can back up / send to CLI before
+   * replacing. For first-time generation (no existing identity), proceed
+   * directly without confirmation.
+   */
+  const handleGenerate = () => {
+    if (identity) {
+      setShowGenerateModal(true);
+    } else {
+      void executeGenerate();
+    }
   };
+
+  /** Focus the Cancel button when the modal opens (accessibility). */
+  useEffect(() => {
+    if (showGenerateModal) {
+      // rAF gives the DOM time to mount the modal before we try to focus.
+      const id = window.requestAnimationFrame(() => {
+        cancelButtonRef.current?.focus();
+      });
+      return () => window.cancelAnimationFrame(id);
+    }
+  }, [showGenerateModal]);
 
   const handleImportClick = () => {
     importInputRef.current?.click();
@@ -260,7 +295,7 @@ export default function IdentityPanel() {
         setCliState({
           kind: "error",
           message:
-            "You have 3 active CLI tickets. Wait for one to expire (10 min) or revoke later.",
+            "You have 3 active CLI tickets. Wait for one to expire (5 min) or revoke later.",
         });
         return;
       }
@@ -291,7 +326,7 @@ export default function IdentityPanel() {
         return;
       }
       // Server may include an absolute `expires_at` (unix seconds). If
-      // absent, fall back to "now + 10 minutes" per Decision 7.
+      // absent, fall back to "now + 5 minutes" per Decision 12.
       const expiresAtMs =
         typeof body.expires_at === "number"
           ? body.expires_at * 1000
@@ -407,7 +442,7 @@ export default function IdentityPanel() {
         setExtState({
           kind: "error",
           message:
-            "You have 3 active extension tickets. Wait for one to expire (10 min).",
+            "You have 3 active extension tickets. Wait for one to expire (5 min).",
         });
         return;
       }
@@ -466,6 +501,41 @@ export default function IdentityPanel() {
         message: `Copy failed: ${formatError(e)}`,
       });
     }
+  };
+
+  /**
+   * "Send to CLI" from inside the drift-warning modal — issues a ticket
+   * for the CURRENT keypair so the CLI can adopt it before it disappears.
+   * Closes the modal and reuses the existing handleSendToCli logic.
+   */
+  const handleModalSendToCli = () => {
+    setShowGenerateModal(false);
+    void handleSendToCli();
+  };
+
+  /**
+   * "Download backup JSON" from inside the drift-warning modal.
+   * Exports the current keypair in legacy shape
+   * `{secret: number[64], pubkey_base58: string}` as a downloadable file.
+   */
+  const handleModalDownloadBackup = () => {
+    if (!identity) return;
+    const date = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+    const filename = `mnemonic-identity-backup-${date}.json`;
+    const payload = JSON.stringify(
+      { secret: identity.secret, pubkey_base58: identity.pubkey_base58 },
+      null,
+      2,
+    );
+    const blob = new Blob([payload], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
   };
 
   // Tick the countdown every second only while a ticket is outstanding.
@@ -718,6 +788,69 @@ export default function IdentityPanel() {
         >
           {error}
         </p>
+      )}
+
+      {showGenerateModal && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="replace-title"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+        >
+          <div className="w-full max-w-sm space-y-4 rounded-lg border border-text-muted/20 bg-background p-6 shadow-xl">
+            <h3
+              id="replace-title"
+              className="text-base font-semibold text-text-primary"
+            >
+              Replace keypair?
+            </h3>
+            <p className="text-sm text-red-400">
+              This will replace your current keypair. JWTs your IDEs and CLI
+              hold will stop working. Before continuing, you can back up or
+              transfer the existing identity:
+            </p>
+            <div className="flex flex-col gap-2">
+              <button
+                ref={cancelButtonRef}
+                type="button"
+                onClick={() => setShowGenerateModal(false)}
+                className="rounded-md border border-text-muted/30 px-4 py-2 text-sm text-text-primary transition-colors hover:border-accent-primary hover:text-accent-primary"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setShowGenerateModal(false);
+                  handleModalSendToCli();
+                }}
+                className="rounded-md border border-accent-primary/50 px-4 py-2 text-sm text-accent-primary transition-colors hover:border-accent-primary"
+              >
+                Send to CLI first
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setShowGenerateModal(false);
+                  handleModalDownloadBackup();
+                }}
+                className="rounded-md border border-text-muted/30 px-4 py-2 text-sm text-text-primary transition-colors hover:border-accent-primary hover:text-accent-primary"
+              >
+                Download backup JSON
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setShowGenerateModal(false);
+                  void executeGenerate();
+                }}
+                className="rounded-md border border-red-500/50 px-4 py-2 text-sm text-red-400 transition-colors hover:border-red-500"
+              >
+                Generate anyway
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </section>
   );

@@ -20,6 +20,20 @@
 [extend]
 useDefault = true
 
+# Detect JWTs baked into install configs / deeplinks pointing at the
+# production webapp domain (Decision 15 / tech-spec §Risks row 4). A user
+# pasting an install URL into a public GitHub issue, blog post, or commit
+# would not be caught by the default `jwt` rule alone because that rule is
+# allow-listed for our test fixtures; this scoped rule re-enables JWT
+# detection specifically when the JWT appears near a `mc.mnemonik.xyz` or
+# `mnemonik.xyz/install` reference.
+[[rules]]
+id = "mnemonic-jwt-baked-deeplink"
+description = "JWT baked into mcp.json install config or /install deeplink for mc.mnemonik.xyz"
+regex = '''ey[A-Za-z0-9_\-]{10,}\.ey[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}'''
+keywords = ["mc.mnemonik.xyz", "mnemonik.xyz/install"]
+tags = ["jwt", "token", "secret", "mnemonic-deeplink"]
+
 [allowlist]
 description = "test fixtures + synthetic test JWTs / pubkeys"
 paths = [
@@ -40,8 +54,29 @@ paths = [
     # as the existing golden-cose.json entry — fixtures are reproducible
     # output of Rust core test harnesses, not real secrets.
     '''packages/extension/tests/.*''',
-    # Spec-driven workflow artefacts (audit logs + decision records) that
-    # quote the synthetic fixtures verbatim. `work/` is documentation, not
-    # production code.
-    '''work/.*''',
+    # Spec-driven workflow artefacts. Narrowed from the previous blanket
+    # `work/.*` allowlist (Wave 5 security audit finding 3): only markdown
+    # docs and JSON test fixtures under `work/` are allowed to quote the
+    # synthetic JWT/pubkey fixtures verbatim. Any other file type under
+    # `work/` (e.g. a stray `.json` install-config snapshot or a `.txt`
+    # paste of a real install URL) is now scanned normally.
+    '''work/.*\.md$''',
+    '''work/.*/tests/fixtures/.*\.json$''',
+    # Agent-generated audit JSON reports under `work/<feature>/logs/working/
+    # audit/`. These quote synthetic test pubkeys/JWTs verbatim while
+    # diagnosing them; they are local-only by .gitignore today
+    # (`work/*/logs/` is gitignored), but legacy commits before that rule
+    # was tightened still appear in `git log --all`. Limited to the
+    # specific audit subdirectory so a stray report elsewhere in `work/`
+    # is still scanned.
+    '''work/.*/logs/working/audit/.*\.json$''',
+    # invisible-identity cross-language byte-equality fixtures (T9 + T10).
+    # The "secret" tripping the heuristic is a base58-encoded *public* key
+    # (`3F5qRPtKg8GhGNnbd3qCj6nVJxWsGxq7pvH84okYLAqf`) derived
+    # deterministically from seed `[0x42; 32]`. Documented in
+    # `core/examples/golden-keystore-gen.rs`.
+    '''core/src/identity/keystore\.rs''',
+    '''core/examples/golden-keystore-gen\.rs''',
+    '''tests/fixtures/legacy-identity\.json''',
+    '''tests/fixtures/generate-legacy\.mjs''',
 ]

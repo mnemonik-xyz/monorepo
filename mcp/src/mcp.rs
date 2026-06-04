@@ -25,7 +25,7 @@ use mnemonic_core::arweave::ArweaveClient;
 use mnemonic_core::compress::EmbeddingCompressor;
 use mnemonic_core::embed::Embedder;
 use mnemonic_core::solana::SolanaClient;
-use mnemonic_core::storage::SqliteStore;
+use mnemonic_core::storage::{SqliteStore, WriteMode};
 use std::convert::Infallible;
 use std::sync::Arc;
 
@@ -73,6 +73,242 @@ pub struct JsonRpcResponse {
 pub struct JsonRpcError {
     pub code: i32,
     pub message: String,
+    /// Optional structured error data (JSON-RPC 2.0 §5.1 "Error object" allows
+    /// an arbitrary `data` field). Used by the typed errors introduced in T2:
+    /// - `-32010 UnsupportedMode` carries `{kind, requested, supported}`.
+    /// - `-32602 InvalidParams` carries `{field, received}`.
+    ///
+    /// Older `-32603 InternalError` / `-32600 InvalidRequest` envelopes
+    /// continue to omit this field — `skip_serializing_if` keeps the
+    /// pre-T2 wire shape byte-identical for legacy error paths
+    /// (golden-fixture compat for the shipped chrome-extension).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub data: Option<Value>,
+}
+
+impl JsonRpcError {
+    /// Construct a JSON-RPC error with no `data` field. Used for legacy code
+    /// paths that pre-date the typed-error helpers (T2). Keeps the on-the-wire
+    /// shape `{code, message}` byte-identical to the pre-T2 envelope.
+    pub fn simple(code: i32, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+            data: None,
+        }
+    }
+}
+
+// ── Typed JSON-RPC errors (T2 — modes-user-choice) ──────────────────────────
+//
+// Two new error codes covering the per-request `mode` field on
+// `mnemonic_sign_memory`. See work/modes-user-choice/tech-spec.md
+// §"Typed errors" for the wire-format contract.
+
+/// `-32010 UnsupportedMode` — the caller requested a mode the server cannot
+/// serve (e.g. `participate` on a `STORAGE_MODE=local` deploy). Never used as
+/// a silent downgrade; the user explicitly asked for chain-anchoring and the
+/// server must say "I can't" so the client picks `local` or another operator.
+///
+/// `data` shape: `{kind: "UnsupportedMode", requested, supported}`.
+pub fn unsupported_mode(requested: &str, supported: &[&str]) -> JsonRpcError {
+    JsonRpcError {
+        code: -32010,
+        message: "Unsupported mode".to_string(),
+        data: Some(serde_json::json!({
+            "kind": "UnsupportedMode",
+            "requested": requested,
+            "supported": supported,
+        })),
+    }
+}
+
+/// `-32602 InvalidParams` — a request parameter is malformed. The T2 resolver
+/// emits this for `mode` values that are not exactly `"local"` or
+/// `"participate"` (case-variant, whitespace, null, non-string, unknown).
+/// The verbatim received value is echoed back in `data.received` so the
+/// caller can diff against its own outgoing payload.
+///
+/// `data` shape: `{field, received}`.
+pub fn invalid_params(field: &str, received: &Value) -> JsonRpcError {
+    JsonRpcError {
+        code: -32602,
+        message: "Invalid params".to_string(),
+        data: Some(serde_json::json!({
+            "field": field,
+            "received": received,
+        })),
+    }
+}
+
+/// `-32011 DeliveryNotConfirmed` — the participate write hit Arweave + Solana
+/// but the post-anchor recall+verify round-trip failed at `stage`. The
+/// attestation row was persisted as `local` (so the embed/signature aren't
+/// wasted), the reserved payment was refunded, no `attestation_costs` row
+/// was written. The client may either accept the local-only persistence or
+/// retry; on x402 retries the same payment header is still good (the nonce
+/// stays unconsumed). T3 — modes-user-choice.
+///
+/// `data` shape: `{kind, arweave_tx, solana_tx, stage, row_demoted_to,
+/// attestation_id}`.
+pub fn delivery_not_confirmed(
+    stage: &str,
+    arweave_tx: &str,
+    solana_tx: &str,
+    attestation_id: &str,
+) -> JsonRpcError {
+    JsonRpcError {
+        code: -32011,
+        message: "Delivery not confirmed".to_string(),
+        data: Some(serde_json::json!({
+            "kind": "DeliveryNotConfirmed",
+            "arweave_tx": arweave_tx,
+            "solana_tx": solana_tx,
+            "stage": stage,
+            "row_demoted_to": "local",
+            "attestation_id": attestation_id,
+        })),
+    }
+}
+
+/// Derive the per-request quota subject for the DoS guard. Returns the
+/// `blake3` hex digest of either the bearer api_key (balance mode) or the
+/// x402 tx_sig (x402 mode). `None` on stdio path (no auth headers) and on
+/// `payment_mode == "none"` (no billable subject).
+///
+/// Centralised so the subject derivation is the same value at the entry
+/// quota check, the success-path nonce-consumption call (via the matching
+/// `tx_sig`), and the failure-branch counter increment. A divergence
+/// between any two of those would let an attacker bypass the quota by
+/// rotating the part of the request the failure branch doesn't see.
+///
+/// **Subject choice rationale** (round-2 security-auditor fix):
+/// - Balance: `blake3(api_key).to_hex()` — same as round 1. Operator-issued.
+/// - x402: `blake3(tx_sig).to_hex()` — stable across retries with the
+///   same `X-Payment` header. A fresh tx_sig means a fresh USDC payment;
+///   the caller pays their own way around the quota.
+/// - `Both` mode: prefer balance if a Bearer header is present, otherwise
+///   fall back to x402 — matches the order `check_payment` uses.
+pub(crate) fn derive_quota_subject(headers: &HeaderMap, payment_mode: &str) -> Option<String> {
+    if payment_mode == "none" {
+        return None;
+    }
+    // Balance has precedence in `both` mode — matches `check_payment`'s order.
+    if matches!(payment_mode, "balance" | "both") {
+        if let Some(raw_key) = payment::extract_api_key(headers) {
+            return Some(payment::hash_api_key(&raw_key));
+        }
+    }
+    if matches!(payment_mode, "x402" | "both") {
+        if let Some(proof) = payment::extract_x402_proof(headers) {
+            return Some(payment::hash_api_key(&proof.tx_sig));
+        }
+    }
+    None
+}
+
+/// `-32011 DeliveryQuotaExceeded` — entry-of-participate-path short-circuit
+/// fired by `mcp_handler` BEFORE any Arweave/Solana write because the
+/// caller's `api_key_hash` has accumulated `>= threshold` delivery-failure
+/// demotions inside the sliding window. Spends zero chain fees. The error
+/// shares the `-32011` code with `DeliveryNotConfirmed`; clients
+/// discriminate via `data.kind`. T3 — modes-user-choice.
+///
+/// `data` shape: `{kind, window_secs, threshold}`.
+pub fn delivery_quota_exceeded(window_secs: u64, threshold: u32) -> JsonRpcError {
+    JsonRpcError {
+        code: -32011,
+        message: "Delivery quota exceeded".to_string(),
+        data: Some(serde_json::json!({
+            "kind": "DeliveryQuotaExceeded",
+            "window_secs": window_secs,
+            "threshold": threshold,
+        })),
+    }
+}
+
+/// `whoami` discoverability envelope — derived once at process start from
+/// `Config` (storage_mode + payment_mode + pricing engine snapshot) and
+/// returned through `mnemonic_whoami` so clients learn what the server can
+/// serve **before** they try to write. See user-spec §"Discoverability через
+/// whoami" and tech-spec Decision 3.
+#[derive(Debug, Clone, Serialize)]
+pub struct Envelope {
+    /// Modes the server is willing to accept for `sign_memory.mode`. A pure
+    /// `STORAGE_MODE=local` deploy returns `["local"]`; a `full` deploy
+    /// returns `["local", "participate"]`.
+    pub supported_modes: Vec<&'static str>,
+    /// Mode applied when the caller omits the `mode` field. Always `"local"`
+    /// for V1 (user-spec invariant — "default `local`").
+    pub default_mode: &'static str,
+    /// Price metadata for the `participate` mode. `None` on a local-only
+    /// server (the field renders as JSON `null`); `Some` with `amount_cents`
+    /// and `payment_methods` on any `full`-mode server.
+    pub participate_cost: Option<ParticipateCost>,
+}
+
+impl Envelope {
+    /// True if `supported_modes` contains `"participate"`. Used by the
+    /// `sign_memory` entrypoint to reject `participate` requests with a typed
+    /// `UnsupportedMode` instead of a silent downgrade.
+    pub fn supports_participate(&self) -> bool {
+        self.supported_modes.contains(&"participate")
+    }
+
+    /// Derive the envelope from operator-side env-vars and the current
+    /// pricing snapshot. Pure — no I/O, no clock; safe to call at process
+    /// start AND inside tests.
+    ///
+    /// `storage_mode` resolves `supported_modes`. `payment_mode` resolves
+    /// `participate_cost.payment_methods`. `price_micro_usdc` is divided by
+    /// `10_000` to produce USD cents — the pricing engine quotes in
+    /// micro-USDC (1e-6 USD).
+    pub fn from_config(storage_mode: &str, payment_mode: &str, price_micro_usdc: i64) -> Self {
+        if storage_mode == "local" {
+            // Local-only deploy. The server CANNOT anchor and must say so
+            // up front — `participate_cost` is null (the field is present
+            // in the JSON, not omitted, so clients can distinguish
+            // "no participate support" from "old server without envelope").
+            return Self {
+                supported_modes: vec!["local"],
+                default_mode: "local",
+                participate_cost: None,
+            };
+        }
+        // Full deploy: micro-USDC → cents (round half-to-zero — the integer
+        // truncation matches the existing `record_attestation_cost` math).
+        let amount_cents = (price_micro_usdc / 10_000).max(0);
+        let payment_methods: Vec<&'static str> = match payment_mode {
+            "none" => Vec::new(),
+            "balance" => vec!["balance"],
+            "x402" => vec!["x402"],
+            "both" => vec!["x402", "balance"],
+            // Defensive: an unknown mode collapses to empty methods. Operator
+            // misconfiguration shouldn't leak as a misleading payment menu.
+            _ => Vec::new(),
+        };
+        Self {
+            supported_modes: vec!["local", "participate"],
+            default_mode: "local",
+            participate_cost: Some(ParticipateCost {
+                currency: "USD",
+                amount_cents,
+                payment_methods,
+            }),
+        }
+    }
+}
+
+/// Price + payment-method tuple for `participate` writes. Serialised as part
+/// of `Envelope`. `currency` is currently always `"USD"`; `amount_cents` is
+/// the per-write cost in USD cents; `payment_methods` enumerates how the
+/// caller can pay (`["x402"]`, `["balance"]`, `["x402","balance"]`, or empty
+/// for `PAYMENT_MODE=none` self-operator deploys).
+#[derive(Debug, Clone, Serialize)]
+pub struct ParticipateCost {
+    pub currency: &'static str,
+    pub amount_cents: i64,
+    pub payment_methods: Vec<&'static str>,
 }
 
 /// Shared state for the MCP server.
@@ -143,6 +379,44 @@ pub struct McpState {
     /// in-memory only; server restart drops every pending ticket.
     /// LRU 100, TTL 600s, per-user cap 3. See `api.rs` for the design.
     pub bootstrap_tickets: Arc<BootstrapTickets>,
+
+    /// Static x25519 keypair for the CLI bootstrap symmetric flow (Task 12).
+    /// Generated once at process boot via `SecretKey::generate(&mut OsRng)`.
+    /// Process-lifetime only — restarting the server invalidates all in-flight
+    /// CLI-origin tickets (acceptable given the 5-min TTL). Exposed via
+    /// `GET /api/cli-bootstrap/server-pub` so CLIs can wrap their secrets.
+    pub bootstrap_server_x25519_secret: crypto_box::SecretKey,
+    pub bootstrap_server_x25519_public: crypto_box::PublicKey,
+
+    /// `whoami` discoverability envelope — populated once at process start
+    /// from `Config` (storage_mode + payment_mode + initial pricing
+    /// snapshot). See `Envelope::from_config`. Threaded into
+    /// `tools::whoami` for the new envelope-output contract AND into
+    /// `tools::sign_memory` so the `participate`-on-local-only rejection
+    /// path can return `unsupported_mode("participate", &supported)`
+    /// without re-deriving the list. Decision 3 in
+    /// work/modes-user-choice/tech-spec.md.
+    pub envelope: Envelope,
+
+    /// Wall-clock budget for the post-anchor Arweave re-fetch in the
+    /// participate delivery-guarantee flow (T3). Used by
+    /// `tools::sign_memory_inline` to bound the exponential-backoff retry
+    /// loop. Operator-tunable via `MNEMONIC_DELIVERY_REFETCH_TIMEOUT_SECS`.
+    pub delivery_refetch_timeout: std::time::Duration,
+
+    /// Outcome-based per-`api_key_hash` quota counter (T3 — DoS guard).
+    /// Consulted at the *entry* of the participate path in `mcp_handler`
+    /// BEFORE any Arweave/Solana write; incremented in the failure branch
+    /// of `sign_memory_inline` after a delivery demotion. Bounded by the
+    /// background eviction task spawned in `main.rs::run_http`. Keyed on
+    /// `api_key_hash` (blake3(api_key).to_hex()), NEVER `owner_pubkey`.
+    pub refunds_by_subject: Arc<payment::RefundsBySubject>,
+
+    /// Process-lifetime counters incremented by the delivery-guarantee
+    /// flow. Stub for the eventual Prometheus surface — see
+    /// `payment::DeliveryMetrics` for the four counters and the
+    /// no-per-tenant-label rationale.
+    pub delivery_metrics: Arc<payment::DeliveryMetrics>,
 }
 
 // Safety: We only access store through std::sync::Mutex (short critical sections, no await)
@@ -165,6 +439,11 @@ fn tool_definitions() -> Value {
                 "properties": {
                     "content": {"type": "string", "description": "Content to attest"},
                     "tags": {"type": "array", "items": {"type": "string"}, "description": "Optional tags"},
+                    "mode": {
+                        "type": "string",
+                        "enum": ["local", "participate"],
+                        "description": "Per-request write intent (T2 — modes-user-choice). 'local' keeps the artifact on the server's own SQLite (free, no chain writes). 'participate' anchors on Arweave + Solana (paid on hosted operators; cost surfaced via mnemonic_whoami). Optional — omit to use the server's default; call mnemonic_whoami to see supported_modes / default_mode / participate_cost first.",
+                    },
                 },
                 "required": ["content"],
             },
@@ -204,14 +483,6 @@ fn tool_definitions() -> Value {
             },
         },
         {
-            "name": "mcp_auth",
-            "description": "Check the OAuth authentication status of this MCP connection. Designed to be CALLED FIRST by an agent when the user reports unauthorized errors or when other Mnemonic tools fail with auth errors. Always callable WITHOUT a JWT (allowlisted in the bearer-auth middleware). Returns {status: 'authenticated', sub, hint} when a valid JWT was presented, or {status: 'unauthorized', install_url, instructions, alternative_cli} when not — in which case the agent should surface install_url as a clickable link in the chat reply so the user can complete authorization in their browser.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {},
-            },
-        },
-        {
             "name": "mnemonic_check_pending",
             "description": "Resolves a deferred-sign correlation_id to its on-chain state. Use this AFTER mnemonic_sign_memory returns awaiting_signature and the user has approved in the browser. Returns {status: 'signed', solana_tx, arweave_tx, solana_explorer_url, arweave_url, attestation_id, ...} on success, {status: 'awaiting_signature'} if user has not approved yet, or {status: 'not_found'} if expired.",
             "inputSchema": {
@@ -231,7 +502,28 @@ pub async fn handle_request(
     owner_pubkey: &str,
     jwt_sub: Option<&str>,
 ) -> JsonRpcResponse {
-    let result = match req.method.as_str() {
+    // T2 round-2: callers without a pre-resolved mode (stdio dispatch via
+    // `run_stdio` → `handle_request`) get `None` here. The dispatcher
+    // resolves on demand inside `handle_tool_call`. `mcp_handler` (HTTP)
+    // resolves up front for the paywall gate and passes the result in via
+    // `handle_request_with_resolved_mode` below.
+    handle_request_with_resolved_mode(req, state, owner_pubkey, jwt_sub, None).await
+}
+
+/// Variant of [`handle_request`] that accepts a pre-resolved `mode`. The
+/// HTTP `mcp_handler` resolves `mode` once before the paywall gate (so
+/// the gate decision and the storage column come from the same value);
+/// it threads the resolved value here so `handle_tool_call` doesn't
+/// re-parse the same input. The single call site eliminates the latent
+/// drift risk the round-1 implementation carried.
+pub async fn handle_request_with_resolved_mode(
+    req: &JsonRpcRequest,
+    state: &McpState,
+    owner_pubkey: &str,
+    jwt_sub: Option<&str>,
+    pre_resolved_mode: Option<crate::tools::ResolvedMode>,
+) -> JsonRpcResponse {
+    let result: Result<Value, JsonRpcError> = match req.method.as_str() {
         "initialize" => Ok(serde_json::json!({
             "protocolVersion": "2025-06-18",
             "capabilities": {"tools": {}},
@@ -245,10 +537,13 @@ pub async fn handle_request(
                 .and_then(|n| n.as_str())
                 .unwrap_or("");
             let args = req.params.get("arguments").cloned().unwrap_or_default();
-            handle_tool_call(name, &args, state, owner_pubkey, jwt_sub).await
+            handle_tool_call(name, &args, state, owner_pubkey, jwt_sub, pre_resolved_mode).await
         }
         "notifications/initialized" | "ping" => Ok(serde_json::json!({})),
-        _ => Err(format!("unknown method: {}", req.method)),
+        _ => Err(JsonRpcError::simple(
+            -32603,
+            format!("unknown method: {}", req.method),
+        )),
     };
 
     // For notifications (no `id`), JSON-RPC 2.0 forbids a response. Callers
@@ -266,14 +561,11 @@ pub async fn handle_request(
             result: Some(val),
             error: None,
         },
-        Err(msg) => JsonRpcResponse {
+        Err(err) => JsonRpcResponse {
             jsonrpc: "2.0".into(),
             id: response_id,
             result: None,
-            error: Some(JsonRpcError {
-                code: -32603,
-                message: msg,
-            }),
+            error: Some(err),
         },
     }
 }
@@ -346,11 +638,18 @@ fn ndjson_error(status: StatusCode, code: i32, message: &str) -> Response {
 /// extensible to many (progress notifications, deferred sign-callback frames
 /// from Task 4b).
 ///
-/// Payment-gating semantics from the previous request-response handler are
-/// preserved: when `mnemonic_sign_memory` is invoked under
-/// `payment_mode != "none" && storage_mode != "local"`, we run the full
-/// `payment::check_payment` -> `deduct_balance` -> dispatch -> refund flow.
-/// Each terminal state emits exactly one NDJSON frame.
+/// Payment-gating semantics (T2 round-2 — modes-user-choice): the gate
+/// fires only when `mnemonic_sign_memory` is invoked AND the resolved
+/// per-request `mode` is `Participate` AND `payment_mode != "none"`.
+/// A `Local` request (explicit or env-fallback) bypasses the gate
+/// entirely regardless of `STORAGE_MODE` — the whitepaper §5.7.1
+/// free-local invariant is now structural, not configurational. The
+/// resolved `WriteMode` is computed once here and threaded into
+/// `handle_request_with_resolved_mode` so the dispatch column and the
+/// gate decision come from the same value (drift impossible by
+/// construction). On a gate-pass we run the full
+/// `payment::check_payment` -> `deduct_balance` -> dispatch -> refund
+/// flow. Each terminal state emits exactly one NDJSON frame.
 pub async fn mcp_handler(
     State(state): State<Arc<McpState>>,
     headers: HeaderMap,
@@ -421,7 +720,105 @@ pub async fn mcp_handler(
     let is_sign_memory = req.method == "tools/call"
         && req.params.get("name").and_then(|n| n.as_str()) == Some("mnemonic_sign_memory");
 
-    if is_sign_memory && state.payment_mode != "none" && state.storage_mode != "local" {
+    // T2 round-2: resolve the per-request `mode` field ONCE here, before
+    // the paywall gate. The resolved value drives THREE things:
+    //
+    //   1. The paywall gate predicate below.
+    //   2. The persisted `write_mode` column (threaded into
+    //      `handle_request_with_resolved_mode` →  `handle_tool_call` →
+    //      `tools::sign_memory` → `save_attestation`).
+    //   3. The deferred-vs-inline routing in `sign_memory` (uses
+    //      `ResolvedMode::is_explicit_local` to honour the user-spec
+    //      invariant uniformly across deploys).
+    //
+    // Single source of truth → drift impossible by construction. On a
+    // malformed value (case-variant, whitespace, null, etc.) we
+    // short-circuit with `-32602 InvalidParams` BEFORE charging, BEFORE
+    // touching storage, and after emitting a structured warn log for
+    // operator visibility.
+    let resolved_mode_for_gate: Option<crate::tools::ResolvedMode> = if is_sign_memory {
+        let args = req.params.get("arguments").cloned().unwrap_or_default();
+        match crate::tools::resolve_write_mode(args.get("mode"), &state.storage_mode) {
+            Ok(r) => Some(r),
+            Err(err) => {
+                let received = args.get("mode").cloned().unwrap_or(Value::Null);
+                tracing::warn!(
+                    field = "mode",
+                    received = %received,
+                    "rejected non-canonical mode value"
+                );
+                let resp = JsonRpcResponse {
+                    jsonrpc: "2.0".into(),
+                    id: req.id.clone().unwrap_or(Value::Null),
+                    result: None,
+                    error: Some(err),
+                };
+                return ndjson_response(StatusCode::BAD_REQUEST, &resp);
+            }
+        }
+    } else {
+        None
+    };
+
+    // Paywall fires only on resolved `Participate` + a paid deploy. A
+    // `Local` write on a `STORAGE_MODE=full + PAYMENT_MODE=x402` server
+    // bypasses the gate entirely — the whitepaper §5.7.1 free-local
+    // invariant is now structural, not configurational.
+    let participate_gate = matches!(
+        resolved_mode_for_gate.map(|r| r.write_mode),
+        Some(WriteMode::Participate)
+    );
+
+    // T3 — outcome-based DoS guard. Consulted at the *entry* of the
+    // participate path, BEFORE `check_payment`/`deduct_balance`, BEFORE
+    // any Arweave/Solana write. The subject is the stable billable
+    // identifier for the request:
+    //
+    //   - **balance mode**: `blake3(bearer_api_key)` — the operator-issued
+    //     api_key the caller can't rotate without re-paying.
+    //   - **x402 mode**: `blake3(tx_sig)` — the on-chain payment proof.
+    //     After the round-2 nonce deferral, the same tx_sig is reusable on
+    //     delivery failure (no charge), so it serves as a stable
+    //     per-payment identifier. A fresh tx_sig means a fresh USDC
+    //     payment — the caller is paying their own way around the quota,
+    //     which is the right blast-radius.
+    //
+    // Keying on `owner_pubkey` (Ed25519) would let an attacker mint a new
+    // identity per request → quota bypass. The chosen subject derivation
+    // closes that gap for both auth methods.
+    //
+    // No-op on the stdio path (no Bearer JWT, no x402 header) since stdio
+    // is trusted-local. No-op on `payment_mode == "none"` since there is
+    // no billable subject to key on.
+    if is_sign_memory && participate_gate && state.payment_mode != "none" {
+        if let Some(subject) = derive_quota_subject(&headers, &state.payment_mode) {
+            if state.refunds_by_subject.is_over(&subject) {
+                state.delivery_metrics.record_quota_short_circuit();
+                let err = delivery_quota_exceeded(
+                    state.refunds_by_subject.window().as_secs(),
+                    state.refunds_by_subject.threshold(),
+                );
+                tracing::warn!(
+                    subject_hash = %subject,
+                    threshold = state.refunds_by_subject.threshold(),
+                    window_secs = state.refunds_by_subject.window().as_secs(),
+                    "delivery quota exceeded — short-circuiting participate request"
+                );
+                let resp = JsonRpcResponse {
+                    jsonrpc: "2.0".into(),
+                    id: req.id.clone().unwrap_or(Value::Null),
+                    result: None,
+                    error: Some(err),
+                };
+                // 429 Too Many Requests — semantically correct for an
+                // outcome-based quota; matches existing
+                // tower_governor 429 returns elsewhere in the stack.
+                return ndjson_response(StatusCode::TOO_MANY_REQUESTS, &resp);
+            }
+        }
+    }
+
+    if is_sign_memory && participate_gate && state.payment_mode != "none" {
         // Use live price from pricing engine (refreshed in background).
         let current_cost = state.pricing.current_price();
         let gate = payment::check_payment(
@@ -454,22 +851,157 @@ pub async fn mcp_handler(
                     }
                 }
 
-                let resp = handle_request(&req, &state, &owner_pubkey, jwt_sub.as_deref()).await;
+                let resp = handle_request_with_resolved_mode(
+                    &req,
+                    &state,
+                    &owner_pubkey,
+                    jwt_sub.as_deref(),
+                    resolved_mode_for_gate,
+                )
+                .await;
 
-                // Refund on tool failure. Uses `refund_balance` (not
-                // `credit_deposit`) so the per-tx_sig idempotency guard does
-                // not silently swallow repeated refunds for the same
-                // underlying failure class.
-                if resp.error.is_some() {
+                // Refund + bookkeeping on tool failure. Uses
+                // `refund_balance` (not `credit_deposit`) so the per-tx_sig
+                // idempotency guard does not silently swallow repeated
+                // refunds for the same underlying failure class.
+                //
+                // T3 (modes-user-choice) — the typed
+                // `-32011 DeliveryNotConfirmed` carries the demoted
+                // `attestation_id` in `data.attestation_id` so the refund
+                // reason can correlate 1:1 with the downgrade. We also:
+                //   1. Increment the per-stage `delivery_not_confirmed_total`
+                //      counter (no per-tenant label — high-cardinality
+                //      anti-pattern; per-tenant detail goes to the
+                //      `tracing::warn!` line emitted from
+                //      `sign_memory_inline`).
+                //   2. On the participate path the SAME error increments
+                //      the `RefundsBySubject` counter so the entry-of-
+                //      participate quota guard fires after `threshold`
+                //      consecutive demotions. The subject is derived from
+                //      `derive_quota_subject(headers, payment_mode)` so it
+                //      matches the value the entry quota-check already
+                //      computed (drift-impossible).
+                //   3. On refund-itself failure write a structured
+                //      `payment_events` audit row via
+                //      `payment::record_refund_failed` so an operator can
+                //      forensically trace stuck ledger state.
+                //
+                // T3 round-2 — on SUCCESS, consume the x402 nonce here
+                // (deferred from `check_payment`). A delivery failure
+                // leaves the nonce reusable so the caller's USDC payment
+                // isn't forfeit when the operator's anchor isn't proved
+                // retrievable. The race window between the entry
+                // `x402_nonce_already_consumed` check and this INSERT is
+                // resolved by the `x402_nonces.tx_sig` UNIQUE constraint:
+                // the loser sees ConstraintViolation, which is the right
+                // behaviour for two concurrent requests with the same
+                // payment.
+                let quota_subject = derive_quota_subject(&headers, &state.payment_mode);
+                let x402_proof = payment::extract_x402_proof(&headers);
+
+                if let Some(ref err) = resp.error {
+                    // T3 — DeliveryNotConfirmed-specific bookkeeping.
+                    // Extract `stage` + `attestation_id` from the typed
+                    // error's `data` payload (set by
+                    // `delivery_not_confirmed`).
+                    let dnc_data = err
+                        .data
+                        .as_ref()
+                        .filter(|d| d["kind"] == "DeliveryNotConfirmed");
+                    let dnc_stage = dnc_data.and_then(|d| d["stage"].as_str()).unwrap_or("");
+                    let dnc_attestation_id = dnc_data
+                        .and_then(|d| d["attestation_id"].as_str())
+                        .unwrap_or("");
+
+                    if dnc_data.is_some() {
+                        state.delivery_metrics.record_not_confirmed(dnc_stage);
+                    }
+
+                    // Refund — balance path only. x402 refund is implicit
+                    // (the nonce was never consumed, so the same
+                    // `X-Payment` header can be retried).
                     if let Some(ref key) = api_key {
-                        let reason = resp
-                            .error
-                            .as_ref()
-                            .map(|e| e.message.as_str())
-                            .unwrap_or("error");
+                        // Refund reason format includes the demoted
+                        // attestation_id so the `payment_events.description`
+                        // column lets an operator grep
+                        // `description LIKE '<id>%'` for the audit trail
+                        // (tech-spec Decision 7).
+                        let reason = if dnc_data.is_some() && !dnc_attestation_id.is_empty() {
+                            format!("delivery_not_confirmed: {dnc_attestation_id}")
+                        } else {
+                            err.message.clone()
+                        };
+
+                        let refund_result = {
+                            let store = state.store.lock().expect("store mutex poisoned");
+                            payment::refund_balance(&store, key, current_cost, &reason)
+                        }; // mutex dropped here; no `.await` while held
+
+                        if let Err(refund_err) = refund_result {
+                            let log_subject = quota_subject.clone().unwrap_or_default();
+                            tracing::warn!(
+                                subject_hash = %log_subject,
+                                error = %refund_err,
+                                attestation_id = %dnc_attestation_id,
+                                "refund failed; writing audit row"
+                            );
+                            // Best-effort audit row. Lives in `mcp/` per
+                            // the project's hard architectural rule.
+                            // Body sticks to the PII allow-list pinned
+                            // in the spec: subject_hash (NOT raw key),
+                            // attestation_id, reason, occurred_at. No
+                            // content_preview, no cose_bytes, no
+                            // embedding.
+                            let now = chrono::Utc::now().to_rfc3339();
+                            let store = state.store.lock().expect("store mutex poisoned");
+                            let _ = payment::record_refund_failed(
+                                &store,
+                                &log_subject,
+                                dnc_attestation_id,
+                                "refund-itself-failed",
+                                &now,
+                            );
+                        }
+                    }
+
+                    // T3 — increment the per-subject quota counter on
+                    // delivery demotions only. Other failure classes
+                    // (e.g. embed/Arweave failure before the delivery
+                    // check) do NOT count against the quota; only the
+                    // induced-refund pattern matters for the DoS
+                    // mitigation. Counter increment happens OUTSIDE
+                    // the SQLite mutex (Decision 8). Fires for BOTH
+                    // balance- and x402-authed callers — the subject
+                    // derivation handles auth method dispatch.
+                    if dnc_data.is_some() {
+                        if let Some(ref subject) = quota_subject {
+                            state.refunds_by_subject.record_failure(subject);
+                        }
+                    }
+                } else {
+                    // Success path — consume the x402 nonce now that the
+                    // delivery confirmation has passed. ConstraintViolation
+                    // on a concurrent retry is fine (one of the two
+                    // requests wins; the other gets the
+                    // `x402_nonce_already_consumed` reject on its next
+                    // entry).
+                    if let Some(proof) = x402_proof.as_ref() {
                         let store = state.store.lock().expect("store mutex poisoned");
-                        if let Err(e) = payment::refund_balance(&store, key, current_cost, reason) {
-                            tracing::warn!(api_key = %key, error = %e, "refund failed");
+                        if let Err(e) =
+                            payment::consume_x402_nonce_after_success(&store, &proof.tx_sig)
+                        {
+                            // Log only — by the time we reach here the
+                            // anchor + DB write have already happened, so
+                            // a nonce-consume failure cannot un-deliver
+                            // the artefact. The operator may see a
+                            // duplicate-charge later if the caller replays
+                            // the same `X-Payment` and the original
+                            // INSERT actually did succeed under a race.
+                            tracing::warn!(
+                                tx_sig = %proof.tx_sig,
+                                error = %e,
+                                "x402 nonce consume failed post-success"
+                            );
                         }
                     }
                 }
@@ -488,7 +1020,14 @@ pub async fn mcp_handler(
             }
         }
     } else {
-        let resp = handle_request(&req, &state, &owner_pubkey, jwt_sub.as_deref()).await;
+        let resp = handle_request_with_resolved_mode(
+            &req,
+            &state,
+            &owner_pubkey,
+            jwt_sub.as_deref(),
+            resolved_mode_for_gate,
+        )
+        .await;
         ndjson_response(StatusCode::OK, &resp)
     }
 }
@@ -504,17 +1043,18 @@ async fn handle_tool_call(
     state: &McpState,
     owner_pubkey: &str,
     jwt_sub: Option<&str>,
-) -> Result<Value, String> {
+    pre_resolved_mode: Option<crate::tools::ResolvedMode>,
+) -> Result<Value, JsonRpcError> {
     let result = match name {
         "mnemonic_whoami" => {
             // DB-only: lock, query, release before returning
             let store = state.store.lock().unwrap();
-            tools::whoami(&state.keypair, &store, &state.storage_mode)
+            tools::whoami(&state.keypair, &store, &state.storage_mode, &state.envelope)
         }
         "mnemonic_sign_memory" => {
             let content = args["content"]
                 .as_str()
-                .ok_or("content required")?
+                .ok_or_else(|| JsonRpcError::simple(-32603, "content required"))?
                 .to_string();
             let tags: Vec<String> = args
                 .get("tags")
@@ -525,6 +1065,27 @@ async fn handle_tool_call(
                         .collect()
                 })
                 .unwrap_or_default();
+            // T2 round-2: use the pre-resolved mode if `mcp_handler` already
+            // parsed it for the paywall gate (HTTP transport — single call
+            // site, drift impossible). The stdio dispatch path passes `None`
+            // here and we resolve on demand below.
+            let resolved = match pre_resolved_mode {
+                Some(r) => r,
+                None => match tools::resolve_write_mode(args.get("mode"), &state.storage_mode) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        // Log the rejection so probe traffic is visible to
+                        // operators (security-auditor round-1 minor).
+                        let received = args.get("mode").cloned().unwrap_or(Value::Null);
+                        tracing::warn!(
+                            field = "mode",
+                            received = %received,
+                            "rejected non-canonical mode value on stdio path"
+                        );
+                        return Err(e);
+                    }
+                },
+            };
             let cost_hint = state.pricing.cost_hint(state.sol_tx_fee_lamports);
             tools::sign_memory(
                 &state.keypair,
@@ -540,33 +1101,45 @@ async fn handle_tool_call(
                 &state.storage_mode,
                 owner_pubkey,
                 jwt_sub,
+                resolved,
+                &state.envelope,
+                state.delivery_refetch_timeout,
             )
             .await
-            .map_err(|e| e.to_string())?
+            .map_err(tool_error_to_json_rpc)?
         }
         "mnemonic_verify" => {
             let sol = args.get("solana_tx").and_then(|v| v.as_str());
             let ar = args.get("arweave_tx").and_then(|v| v.as_str());
+            // T4: pass `owner_pubkey` so the storage routing lookup
+            // (`find_write_mode_by_tx`) is tenant-scoped. The
+            // `storage_mode` argument is retained for ABI compatibility
+            // but ignored — routing is by stored `write_mode` now.
             tools::verify(
                 &state.solana,
                 &state.arweave,
                 &state.store,
                 sol,
                 ar,
+                owner_pubkey,
                 &state.storage_mode,
             )
             .await
-            .map_err(|e| e.to_string())?
+            .map_err(|e| JsonRpcError::simple(-32603, e.to_string()))?
         }
         "mnemonic_prove_identity" => {
             // Pure crypto, no DB or network
             tools::prove_identity(
                 &state.keypair,
-                args["challenge"].as_str().ok_or("challenge required")?,
+                args["challenge"]
+                    .as_str()
+                    .ok_or_else(|| JsonRpcError::simple(-32603, "challenge required"))?,
             )
         }
         "mnemonic_recall" => {
-            let query = args["query"].as_str().ok_or("query required")?;
+            let query = args["query"]
+                .as_str()
+                .ok_or_else(|| JsonRpcError::simple(-32603, "query required"))?;
             let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(5) as usize;
             // DB-only: lock, query, release
             let store = state.store.lock().unwrap();
@@ -579,41 +1152,40 @@ async fn handle_tool_call(
                 owner_pubkey,
             )
         }
-        "mcp_auth" => tools::mcp_auth(jwt_sub),
         "mnemonic_check_pending" => {
             let cid = args["correlation_id"]
                 .as_str()
-                .ok_or("correlation_id required")?
+                .ok_or_else(|| JsonRpcError::simple(-32603, "correlation_id required"))?
                 .to_string();
             tools::check_pending(&state.pending, &state.store, &cid).await
         }
-        _ => return Err(format!("unknown tool: {name}")),
+        _ => {
+            return Err(JsonRpcError::simple(
+                -32603,
+                format!("unknown tool: {name}"),
+            ))
+        }
     };
 
-    // MCP tool envelope. The `isError: true` flag is what makes a tool
-    // call surface as a "tool execution failed" in MCP clients (Cursor /
-    // Claude.ai / VS Code chat UIs) instead of as "successfully called".
-    //
-    // For `mcp_auth` specifically: the user reported that Cursor renders
-    // a successful tool-call envelope (HTTP 200, valid JSON) as
-    // "Successfully authenticated MCP server" regardless of the JSON
-    // payload's `status` field. The fix is to mark the response as an
-    // error WHEN our payload's `status` is "unauthorized" — that way
-    // Cursor displays the error text (which contains the install_url
-    // hint) rather than masking it under a misleading success message.
-    let is_unauth_response = name == "mcp_auth"
-        && result
-            .get("status")
-            .and_then(|s| s.as_str())
-            .map(|s| s == "unauthorized" || s == "not_found")
-            .unwrap_or(false);
-    let mut envelope = serde_json::json!({
+    Ok(serde_json::json!({
         "content": [{"type": "text", "text": serde_json::to_string_pretty(&result).unwrap_or_default()}]
-    });
-    if is_unauth_response {
-        envelope["isError"] = serde_json::Value::Bool(true);
+    }))
+}
+
+/// Translate a [`tools::ToolError`] into a `JsonRpcError`.
+///
+/// Round-2 (security-auditor minor): replaces the round-1 parser that
+/// round-tripped JsonRpcError through `anyhow::Error.to_string()` as
+/// JSON. That approach let any downstream error whose `Display` happened
+/// to be valid JSON with a numeric `code` forge a typed error code. The
+/// typed [`tools::ToolError`] carrier makes the dispatch decision
+/// type-safe at the language level — the JsonRpcError is never a string
+/// until it reaches the wire.
+fn tool_error_to_json_rpc(e: crate::tools::ToolError) -> JsonRpcError {
+    match e {
+        crate::tools::ToolError::TypedRpc(rpc) => rpc,
+        crate::tools::ToolError::Other(any) => JsonRpcError::simple(-32603, any.to_string()),
     }
-    Ok(envelope)
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -631,6 +1203,7 @@ mod transport_tests {
     use axum::{http::Request, middleware as axum_middleware, routing::post, Router};
     use http_body_util::BodyExt;
     use mnemonic_core::embed::Embedder;
+    use mnemonic_core::storage::AttestationStore;
     use std::path::PathBuf;
     use tower::ServiceExt;
 
@@ -673,6 +1246,10 @@ mod transport_tests {
             crate::llm::LlmClient::new("ollama", "", "test-model", "http://localhost:0", 512)
                 .expect("build llm client");
 
+        let bootstrap_server_x25519_secret =
+            crypto_box::SecretKey::generate(&mut crypto_box::aead::OsRng);
+        let bootstrap_server_x25519_public = bootstrap_server_x25519_secret.public_key();
+
         Arc::new(McpState {
             keypair: solana_sdk::signature::Keypair::new(),
             solana: SolanaClient::new("http://localhost:0"),
@@ -696,6 +1273,15 @@ mod transport_tests {
             chat_limiter,
             pending: Arc::new(crate::pending::PendingBundles::with_defaults()),
             bootstrap_tickets: Arc::new(crate::api::BootstrapTickets::with_defaults()),
+            bootstrap_server_x25519_secret,
+            bootstrap_server_x25519_public,
+            envelope: Envelope::from_config("local", "none", 0),
+            delivery_refetch_timeout: std::time::Duration::from_secs(15),
+            refunds_by_subject: Arc::new(crate::payment::RefundsBySubject::new(
+                std::time::Duration::from_secs(60),
+                5,
+            )),
+            delivery_metrics: Arc::new(crate::payment::DeliveryMetrics::default()),
         })
     }
 
@@ -787,8 +1373,8 @@ mod transport_tests {
             .expect("tools array present");
         assert_eq!(
             tools.len(),
-            7,
-            "expected 7 MCP tools in tools/list response (whoami, sign_memory, verify, prove_identity, recall, mcp_auth, check_pending)",
+            6,
+            "expected 6 MCP tools in tools/list response (whoami, sign_memory, verify, prove_identity, recall, check_pending)",
         );
     }
 
@@ -855,6 +1441,116 @@ mod transport_tests {
             .trim_end_matches('\n');
         let env: Value = serde_json::from_str(line).expect("frame valid JSON");
         assert_eq!(env["id"], 8);
+    }
+
+    /// Mint a HS256 JWT for tests using the module's `TEST_JWT_SECRET`.
+    /// Wrap around `crate::oauth::issue_jwt` to keep the call shape in
+    /// the TDD anchor (and any future test) short and explicit.
+    fn mint_jwt_for_tests(sub: &str) -> String {
+        let oauth_state = crate::oauth::OAuthState::new(TEST_JWT_SECRET);
+        crate::oauth::issue_jwt(&oauth_state, sub).expect("issue_jwt")
+    }
+
+    /// TDD anchor for T2 (modes-user-choice). Drives end-to-end:
+    /// `sign_memory { mode: "participate" }` against a local-only
+    /// server (default `STORAGE_MODE=local` from `build_test_state`)
+    /// returns the typed `-32010 UnsupportedMode` envelope with
+    /// `data.supported == ["local"]` and writes ZERO rows. Same
+    /// expectations as the integration test in
+    /// `mcp/tests/modes_per_request.rs`, but inlined here against the
+    /// existing in-module test plumbing so we have a fast unit-level
+    /// regression guard inside the dispatcher's own test module.
+    #[tokio::test]
+    async fn participate_against_local_only_server_returns_unsupported_mode() {
+        let state = build_test_state(); // STORAGE_MODE defaults to "local"
+        let app = build_test_router(state.clone());
+
+        // The owner pubkey must match jwt.sub for the OAuth middleware to
+        // bind the request to a real Claims extension.
+        let owner = mnemonic_core::identity::pubkey_base58(&state.keypair);
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "mnemonic_sign_memory",
+                "arguments": {"content": "hi", "mode": "participate"},
+            },
+        });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/mcp")
+            .header("content-type", "application/json")
+            .header(
+                "authorization",
+                format!("Bearer {}", mint_jwt_for_tests(&owner)),
+            )
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        let (_status, _hdrs, bytes) = collect_body(resp).await;
+        let envelope: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+
+        let err = envelope["error"]
+            .as_object()
+            .expect("expected JSON-RPC error envelope");
+        assert_eq!(err["code"], -32010, "code must be -32010 UnsupportedMode");
+        assert_eq!(err["message"], "Unsupported mode");
+        let data = err["data"]
+            .as_object()
+            .expect("typed error must carry `data`");
+        assert_eq!(data["kind"], "UnsupportedMode");
+        assert_eq!(data["requested"], "participate");
+        assert_eq!(data["supported"], serde_json::json!(["local"]));
+
+        // DB must be unchanged — no row written, no synthetic id minted.
+        let store = state.store.lock().unwrap();
+        // `count` is signer-scoped; pass empty string for "all signers".
+        assert_eq!(store.count("").unwrap_or_default(), 0);
+        // Also count under the test owner key directly to be extra-safe.
+        assert_eq!(store.count(&owner).unwrap_or_default(), 0);
+    }
+
+    /// Companion to the TDD anchor: `invalid mode` value (uppercase
+    /// `"Local"`) returns `-32602 InvalidParams` with `data.field == "mode"`
+    /// and `data.received` echoing the raw input. Strict — no normalisation.
+    #[tokio::test]
+    async fn invalid_mode_string_returns_invalid_params() {
+        let state = build_test_state();
+        let app = build_test_router(state.clone());
+        let owner = mnemonic_core::identity::pubkey_base58(&state.keypair);
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {
+                "name": "mnemonic_sign_memory",
+                "arguments": {"content": "hi", "mode": "Local"},
+            },
+        });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/mcp")
+            .header("content-type", "application/json")
+            .header(
+                "authorization",
+                format!("Bearer {}", mint_jwt_for_tests(&owner)),
+            )
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        let (_status, _hdrs, bytes) = collect_body(resp).await;
+        let envelope: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let err = envelope["error"]
+            .as_object()
+            .expect("expected JSON-RPC error");
+        assert_eq!(err["code"], -32602);
+        let data = err["data"].as_object().expect("data");
+        assert_eq!(data["field"], "mode");
+        assert_eq!(data["received"], "Local");
+
+        let store = state.store.lock().unwrap();
+        assert_eq!(store.count(&owner).unwrap_or_default(), 0);
     }
 
     /// Active under Task 4 — `oauth::bearer_auth_middleware` rejects

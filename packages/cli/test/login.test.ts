@@ -5,13 +5,14 @@
 // callback to it. Spying directly on the frozen ESM export does not work
 // (TypeError: Cannot redefine property), hence the factory-level mock.
 
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { runLogin } from "../src/commands/login.js";
-import { AuthError } from "../src/errors.js";
+import { saveIdentityJson } from "../src/config.js";
+import { AuthError, UserError } from "../src/errors.js";
 import {
   clearWasmMock,
   installWasmMock,
@@ -133,6 +134,7 @@ describe("runLogin interactive state-mismatch (TDD anchor)", () => {
     try {
       await expect(
         runLogin({
+          browser: true,
           baseUrl: "http://idp.test",
           noOpen: true,
           timeoutMs: 10_000,
@@ -209,6 +211,7 @@ describe("runLogin interactive state-mismatch (TDD anchor)", () => {
       // exitCode 4. The point of this test is that 5xx surfaces cleanly.
       await expect(
         runLogin({
+          browser: true,
           baseUrl: "http://idp.test",
           noOpen: true,
           timeoutMs: 10_000,
@@ -221,4 +224,144 @@ describe("runLogin interactive state-mismatch (TDD anchor)", () => {
 
     expect(existsSync(join(dir, "token.json"))).toBe(false);
   }, 15_000);
+});
+
+// ────────────────────────────────────────────────────────────────────────────
+// Browserless (default) login — issue #27 fix.
+// ────────────────────────────────────────────────────────────────────────────
+
+describe("runLogin browserless (default)", () => {
+  let cleanup = (): void => {};
+  let dir = "";
+  let mock: ReturnType<typeof installWasmMock>;
+  let realFetch: typeof globalThis.fetch | undefined;
+
+  beforeEach(() => {
+    const r = withTmpConfigDir();
+    dir = r.dir;
+    cleanup = r.cleanup;
+    mock = installWasmMock();
+    realFetch = globalThis.fetch;
+    vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    clearWasmMock();
+    if (realFetch) globalThis.fetch = realFetch;
+    cleanup();
+  });
+
+  it("aborts with UserError when no local identity is present", async () => {
+    // No saveIdentityJson — identity.json absent.
+    await expect(runLogin({ baseUrl: "http://idp.test" })).rejects.toBeInstanceOf(
+      UserError
+    );
+    expect(existsSync(join(dir, "token.json"))).toBe(false);
+  });
+
+  it("signs the OAuth challenge with the local keypair and persists JWT.sub === pubkey", async () => {
+    const kp = mock.generate_keypair();
+    saveIdentityJson(kp);
+
+    const challengeB64 = Buffer.from([1, 2, 3, 4]).toString("base64");
+
+    const fetchMock = vi.fn(
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        const method = init?.method ?? "GET";
+        if (method === "GET" && url.includes("/oauth/authorize")) {
+          // Server JSON mode — return the challenge under the caller's state.
+          const stateParam = new URL(url).searchParams.get("state");
+          return new Response(
+            JSON.stringify({
+              challenge_cbor: challengeB64,
+              state: stateParam,
+              exp: Math.floor(Date.now() / 1000) + 60,
+            }),
+            { status: 200, headers: { "content-type": "application/json" } }
+          );
+        }
+        if (
+          method === "POST" &&
+          /\/oauth\/authorize$/.test(url)
+        ) {
+          const body = JSON.parse(init!.body as string) as {
+            state: string;
+            signer_pubkey: string;
+            signature: string;
+          };
+          // Defensive: server would 401 here if pubkey didn't match.
+          expect(body.signer_pubkey).toBe(kp.pubkey_base58);
+          expect(typeof body.signature).toBe("string");
+          return new Response(
+            JSON.stringify({
+              code: "code-1",
+              state: body.state,
+              redirect_uri: "http://127.0.0.1:1/cli",
+            }),
+            { status: 200, headers: { "content-type": "application/json" } }
+          );
+        }
+        if (method === "POST" && url.endsWith("/oauth/token")) {
+          return new Response(
+            JSON.stringify({
+              access_token: makeJwt(kp.pubkey_base58),
+              token_type: "Bearer",
+              expires_in: 3600,
+              scope: "mcp",
+            }),
+            { status: 200, headers: { "content-type": "application/json" } }
+          );
+        }
+        return new Response("not found", { status: 404 });
+      }
+    );
+    globalThis.fetch = fetchMock as never;
+
+    await runLogin({ baseUrl: "http://idp.test" });
+
+    expect(existsSync(join(dir, "token.json"))).toBe(true);
+    const persisted = JSON.parse(
+      readFileSync(join(dir, "token.json"), "utf8")
+    ) as { sub: string; jwt: string };
+    expect(persisted.sub).toBe(kp.pubkey_base58);
+    expect(persisted.jwt).toMatch(/^[\w-]+\.[\w-]+\.[\w-]+$/);
+
+    // No browser was opened: only the three HTTP calls.
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it("surfaces AuthError when the server rejects the signature", async () => {
+    const kp = mock.generate_keypair();
+    saveIdentityJson(kp);
+
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url.includes("/oauth/authorize")) {
+        // GET succeeds, POST will get a 401 from our mock — match the
+        // server's actual behavior when signer_pubkey doesn't equal
+        // expected_pubkey.
+        if (url.includes("?")) {
+          return new Response(
+            JSON.stringify({
+              challenge_cbor: Buffer.from([1, 2, 3]).toString("base64"),
+              state: new URL(url).searchParams.get("state"),
+              exp: Math.floor(Date.now() / 1000) + 60,
+            }),
+            { status: 200, headers: { "content-type": "application/json" } }
+          );
+        }
+        return new Response("nope", { status: 401 });
+      }
+      return new Response("not found", { status: 404 });
+    });
+    globalThis.fetch = fetchMock as never;
+
+    await expect(
+      runLogin({ baseUrl: "http://idp.test" })
+    ).rejects.toBeInstanceOf(AuthError);
+    expect(existsSync(join(dir, "token.json"))).toBe(false);
+  });
 });
