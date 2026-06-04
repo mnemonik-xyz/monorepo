@@ -37,7 +37,7 @@
 mod _helpers;
 
 use _helpers::TestServer;
-use mnemonic_core::storage::{AttestationStore, WriteMode};
+use mnemonic_core::storage::{AttestationStore, Visibility, WriteMode};
 use serde_json::json;
 
 // ── 1. local-mode write against a full-mode + paid server is free ──────────
@@ -435,6 +435,7 @@ async fn mixed_mode_coexistence_recall_returns_both() {
                 &owner, // owner — same in single-tenant
                 &now,
                 WriteMode::Local,
+                Visibility::Private,
                 &[0.1; 8],
             )
             .expect("save local row");
@@ -452,6 +453,7 @@ async fn mixed_mode_coexistence_recall_returns_both() {
                 &owner,
                 &now,
                 WriteMode::Participate,
+                Visibility::Private,
                 &[0.1; 8],
             )
             .expect("save participate row");

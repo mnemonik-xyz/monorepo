@@ -1,6 +1,6 @@
 //! Storage trait definitions for attestation persistence.
 
-use super::mode::WriteMode;
+use super::mode::{Visibility, WriteMode};
 
 /// Raw attestation row for local-mode verification.
 #[derive(Debug)]
@@ -19,6 +19,11 @@ pub struct AttestationRow {
 /// mode lists with provenance visible: each row carries the per-request
 /// intent that produced it (`Local` — free, offline; `Participate` —
 /// anchored on Arweave + Solana).
+///
+/// `visibility` is surfaced so callers can render the per-row sharing
+/// intent next to provenance — and so the anonymous-recall path
+/// (Decision 5) has a guaranteed-stable shape when it filters server-side
+/// to `Visibility::Public` only.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct SearchResult {
     pub attestation_id: String,
@@ -29,6 +34,7 @@ pub struct SearchResult {
     pub arweave_tx: String,
     pub created_at: String,
     pub write_mode: WriteMode,
+    pub visibility: Visibility,
     pub relevance_score: f32,
 }
 
@@ -53,6 +59,11 @@ pub trait AttestationStore {
     /// caller. Internal/legacy callsites that pre-date this parameter pass
     /// `WriteMode::Participate` to preserve their previous "real anchor"
     /// semantics.
+    /// `visibility` is the per-request sharing intent (`Private` / `Public`)
+    /// resolved at the MCP entry point. Local-mode writes are always
+    /// `Private` (the resolver rejects explicit visibility on local mode —
+    /// AC14). Anonymous recall (Decision 5) filters server-side to
+    /// `Visibility::Public`; authenticated callers see all their own rows.
     #[allow(clippy::too_many_arguments)]
     fn save_attestation(
         &self,
@@ -66,6 +77,7 @@ pub trait AttestationStore {
         owner_pubkey: &str,
         created_at: &str,
         write_mode: WriteMode,
+        visibility: Visibility,
         embedding: &[f32],
     ) -> anyhow::Result<()>;
 
@@ -96,10 +108,16 @@ pub trait AttestationStore {
     /// SQL filter is `WHERE owner_pubkey = ?` — there is no carve-out. Pass
     /// the JWT-resolved pubkey (HTTP transport) or the local keypair pubkey
     /// (stdio transport).
+    ///
+    /// `visibility_filter` — when `Some(v)`, restricts results to rows whose
+    /// stored `visibility` equals `v`. The anonymous-recall path
+    /// (Decision 5) passes `Some(Visibility::Public)`; authenticated callers
+    /// pass `None` to see all their own rows regardless of visibility.
     fn search(
         &self,
         query_embedding: &[f32],
         owner_pubkey: &str,
+        visibility_filter: Option<Visibility>,
         limit: usize,
     ) -> anyhow::Result<Vec<SearchResult>>;
 }

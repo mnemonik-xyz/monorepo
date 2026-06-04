@@ -7,7 +7,7 @@ use anyhow::Context;
 use rusqlite::{params, Connection};
 use std::path::Path;
 
-use super::mode::WriteMode;
+use super::mode::{Visibility, WriteMode};
 use super::traits::{AttestationRow, AttestationStore, LineageStore, SearchResult};
 
 const SCHEMA: &str = r#"
@@ -349,6 +349,91 @@ fn migrate_write_mode_column(conn: &Connection) -> anyhow::Result<()> {
     }
 }
 
+/// Idempotent ADD-COLUMN migration for per-attestation `visibility`
+/// (feature `agent-native-distribution`, T3 / Decision 2).
+///
+/// Adds `attestations.visibility TEXT NOT NULL DEFAULT 'private'` plus a
+/// single-column `idx_attestations_visibility` index used by the anonymous
+/// `recall` filter (Decision 5 — authenticated callers see all their own
+/// rows; anonymous callers see only `visibility='public'`).
+///
+/// `DEFAULT 'private'` is privacy-by-default: every legacy row predates the
+/// concept of `visibility` and was, by definition, not opted into anonymous
+/// discovery. Backfill is therefore an unconditional UPDATE that promotes
+/// any NULL/empty row to `'private'`. The UPDATE is no-op once the DEFAULT
+/// has fired (NOT NULL means new rows are never NULL), but stays idempotent
+/// on every open so a manually-tampered DB or a re-import is normalized.
+///
+/// SQLite `ALTER TABLE ... ADD COLUMN` lacks `IF NOT EXISTS`, so presence is
+/// gated via `PRAGMA table_info` — see the parallel rationale in
+/// `migrate_write_mode_column` above. Wrapped in `BEGIN IMMEDIATE` to
+/// serialize against any concurrent opener (Decision 13: reuses the
+/// existing WAL + busy_timeout config at `open()`; no new tuning here).
+fn migrate_visibility_column(conn: &Connection) -> anyhow::Result<()> {
+    // SAFETY: hard-coded literal PRAGMA — no user-controlled input reaches
+    // SQLite here. Same constant-query pattern as `migrate_write_mode_column`
+    // (security-auditor round 1 finding on that helper).
+    fn attestations_has_column(conn: &Connection, column: &str) -> anyhow::Result<bool> {
+        let mut stmt = conn
+            .prepare("PRAGMA table_info(attestations)")
+            .context("preparing PRAGMA table_info(attestations)")?;
+        let mut rows = stmt.query([])?;
+        while let Some(row) = rows.next()? {
+            let name: String = row.get(1)?;
+            if name == column {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    let need_column = !attestations_has_column(conn, "visibility")?;
+
+    conn.execute_batch("BEGIN IMMEDIATE;")
+        .context("opening visibility migration transaction")?;
+
+    let do_migration = || -> anyhow::Result<()> {
+        if need_column {
+            conn.execute(
+                "ALTER TABLE attestations
+                    ADD COLUMN visibility TEXT NOT NULL DEFAULT 'private'",
+                [],
+            )
+            .context("adding attestations.visibility")?;
+        }
+        // Backfill any pre-migration row that might lack a value (manual
+        // ALTER on a legacy DB, or a re-imported row with NULL). Cheap on
+        // clean DBs — the NOT NULL DEFAULT makes UPDATE a zero-row no-op
+        // after first migration.
+        conn.execute(
+            "UPDATE attestations
+                SET visibility = 'private'
+              WHERE visibility IS NULL OR visibility = ''",
+            [],
+        )
+        .context("backfilling attestations.visibility to 'private'")?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_attestations_visibility
+                 ON attestations(visibility)",
+            [],
+        )
+        .context("creating idx_attestations_visibility")?;
+        Ok(())
+    };
+
+    match do_migration() {
+        Ok(()) => {
+            conn.execute_batch("COMMIT;")
+                .context("committing visibility migration")?;
+            Ok(())
+        }
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK;");
+            Err(e)
+        }
+    }
+}
+
 impl SqliteStore {
     pub fn open(path: &Path) -> anyhow::Result<Self> {
         if let Some(parent) = path.parent() {
@@ -376,6 +461,7 @@ impl SqliteStore {
         migrate_owner_pubkey_columns(&conn)?;
         migrate_correlation_id_column(&conn)?;
         migrate_write_mode_column(&conn)?;
+        migrate_visibility_column(&conn)?;
         Ok(Self { conn })
     }
 
@@ -392,6 +478,7 @@ impl SqliteStore {
         migrate_owner_pubkey_columns(&conn)?;
         migrate_correlation_id_column(&conn)?;
         migrate_write_mode_column(&conn)?;
+        migrate_visibility_column(&conn)?;
         Ok(Self { conn })
     }
 
@@ -497,19 +584,21 @@ impl AttestationStore for SqliteStore {
         owner_pubkey: &str,
         created_at: &str,
         write_mode: WriteMode,
+        visibility: Visibility,
         embedding: &[f32],
     ) -> anyhow::Result<()> {
         let tags_json = serde_json::to_string(tags)?;
-        // Explicit column list — `owner_pubkey` and `write_mode` were added by
-        // migration helpers after the original table CREATE, so the column
-        // count and order in `INSERT OR REPLACE INTO ... VALUES (...)` would
-        // otherwise drift between fresh and migrated DBs.
+        // Explicit column list — `owner_pubkey`, `write_mode`, and
+        // `visibility` were added by migration helpers after the original
+        // table CREATE, so the column count and order in
+        // `INSERT OR REPLACE INTO ... VALUES (...)` would otherwise drift
+        // between fresh and migrated DBs.
         self.conn.execute(
             "INSERT OR REPLACE INTO attestations
                  (attestation_id, content, content_hash, tags,
                   solana_tx, arweave_tx, signer_pubkey, created_at, owner_pubkey,
-                  write_mode)
-             VALUES (?,?,?,?,?,?,?,?,?,?)",
+                  write_mode, visibility)
+             VALUES (?,?,?,?,?,?,?,?,?,?,?)",
             params![
                 attestation_id,
                 content,
@@ -521,6 +610,7 @@ impl AttestationStore for SqliteStore {
                 created_at,
                 owner_pubkey,
                 write_mode.as_str(),
+                visibility.as_str(),
             ],
         )?;
         let emb_bytes = floats_to_bytes(embedding);
@@ -597,18 +687,23 @@ impl AttestationStore for SqliteStore {
         &self,
         query_embedding: &[f32],
         owner_pubkey: &str,
+        visibility_filter: Option<Visibility>,
         limit: usize,
     ) -> anyhow::Result<Vec<SearchResult>> {
         // Mandatory ownership filter (Decision 9). No carve-out; legacy rows
         // with NULL `owner_pubkey` will not match any caller.
-        let mut stmt = self.conn.prepare(
-            "SELECT a.attestation_id, a.content, a.content_hash, a.tags,
+        //
+        // Optional visibility filter (Decision 5): the anonymous-recall path
+        // passes `Some(Visibility::Public)`; authenticated callers pass
+        // `None`. The two SQL statements are constants — only typed
+        // `Visibility` (round-tripped through `ToSql`) ever reaches the
+        // `AND a.visibility = ?` placeholder, never user text.
+        let base_select = "SELECT a.attestation_id, a.content, a.content_hash, a.tags,
                     a.solana_tx, a.arweave_tx, a.created_at, a.write_mode,
-                    ae.embedding
+                    a.visibility, ae.embedding
              FROM attestations a
              JOIN attestation_embeddings ae ON a.attestation_id = ae.attestation_id
-             WHERE a.owner_pubkey = ?",
-        )?;
+             WHERE a.owner_pubkey = ?";
 
         let q_norm = l2_norm(query_embedding);
         let q_normalized: Vec<f32> = if q_norm > 0.0 {
@@ -617,35 +712,47 @@ impl AttestationStore for SqliteStore {
             query_embedding.to_vec()
         };
 
-        let mut results: Vec<SearchResult> = stmt
-            .query_map(params![owner_pubkey], |row| {
-                let emb_blob: Vec<u8> = row.get(8)?;
-                let emb = bytes_to_floats(&emb_blob);
-                let e_norm = l2_norm(&emb);
-                let score = if e_norm > 0.0 {
-                    q_normalized
-                        .iter()
-                        .zip(emb.iter())
-                        .map(|(a, b)| a * b / e_norm)
-                        .sum::<f32>()
-                } else {
-                    0.0
-                };
-                let tags_str: String = row.get(3)?;
-                Ok(SearchResult {
-                    attestation_id: row.get(0)?,
-                    content: row.get(1)?,
-                    content_hash: row.get(2)?,
-                    tags: serde_json::from_str(&tags_str).unwrap_or_default(),
-                    solana_tx: row.get(4)?,
-                    arweave_tx: row.get(5)?,
-                    created_at: row.get(6)?,
-                    write_mode: row.get::<_, WriteMode>(7)?,
-                    relevance_score: score,
-                })
-            })?
-            .filter_map(|r| r.ok())
-            .collect();
+        let row_mapper = |row: &rusqlite::Row<'_>| -> rusqlite::Result<SearchResult> {
+            let emb_blob: Vec<u8> = row.get(9)?;
+            let emb = bytes_to_floats(&emb_blob);
+            let e_norm = l2_norm(&emb);
+            let score = if e_norm > 0.0 {
+                q_normalized
+                    .iter()
+                    .zip(emb.iter())
+                    .map(|(a, b)| a * b / e_norm)
+                    .sum::<f32>()
+            } else {
+                0.0
+            };
+            let tags_str: String = row.get(3)?;
+            Ok(SearchResult {
+                attestation_id: row.get(0)?,
+                content: row.get(1)?,
+                content_hash: row.get(2)?,
+                tags: serde_json::from_str(&tags_str).unwrap_or_default(),
+                solana_tx: row.get(4)?,
+                arweave_tx: row.get(5)?,
+                created_at: row.get(6)?,
+                write_mode: row.get::<_, WriteMode>(7)?,
+                visibility: row.get::<_, Visibility>(8)?,
+                relevance_score: score,
+            })
+        };
+
+        let mut results: Vec<SearchResult> = match visibility_filter {
+            Some(v) => {
+                let sql = format!("{base_select} AND a.visibility = ?");
+                let mut stmt = self.conn.prepare(&sql)?;
+                let rows = stmt.query_map(params![owner_pubkey, v], row_mapper)?;
+                rows.filter_map(|r| r.ok()).collect()
+            }
+            None => {
+                let mut stmt = self.conn.prepare(base_select)?;
+                let rows = stmt.query_map(params![owner_pubkey], row_mapper)?;
+                rows.filter_map(|r| r.ok()).collect()
+            }
+        };
 
         results.sort_by(|a, b| b.relevance_score.partial_cmp(&a.relevance_score).unwrap());
         results.truncate(limit);
@@ -720,6 +827,7 @@ mod tests {
                 TEST_OWNER,
                 "2026-04-13T00:00:00Z",
                 WriteMode::Participate,
+                Visibility::Private,
                 &[1.0, 0.0],
             )
             .unwrap();
@@ -757,6 +865,7 @@ mod tests {
                 "owner-a",
                 "2026-04-13T00:00:00Z",
                 WriteMode::Local,
+                Visibility::Private,
                 &[1.0, 0.0],
             )
             .unwrap();
@@ -772,6 +881,7 @@ mod tests {
                 "owner-b",
                 "2026-04-13T00:00:00Z",
                 WriteMode::Participate,
+                Visibility::Private,
                 &[0.0, 1.0],
             )
             .unwrap();
@@ -822,6 +932,7 @@ mod tests {
                     TEST_OWNER,
                     "2026-01-01",
                     WriteMode::Participate,
+                    Visibility::Private,
                     &[1.0, 0.0],
                 )
                 .unwrap();
@@ -838,6 +949,7 @@ mod tests {
                 TEST_OWNER,
                 "2026-01-01",
                 WriteMode::Participate,
+                Visibility::Private,
                 &[1.0, 0.0],
             )
             .unwrap();
@@ -864,6 +976,7 @@ mod tests {
                 "owner_agent",
                 "2026-01-01",
                 WriteMode::Participate,
+                Visibility::Private,
                 &[1.0, 0.0],
             )
             .unwrap();
@@ -879,13 +992,14 @@ mod tests {
                 "owner_agent",
                 "2026-01-01",
                 WriteMode::Participate,
+                Visibility::Private,
                 &[0.0, 1.0],
             )
             .unwrap();
 
         // Query closer to att-0's embedding; search is now scoped by
         // `owner_pubkey`, not by `signer_pubkey`.
-        let results = store.search(&[1.0, 0.0], "owner_agent", 2).unwrap();
+        let results = store.search(&[1.0, 0.0], "owner_agent", None, 2).unwrap();
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].attestation_id, "att-0");
     }
@@ -906,6 +1020,7 @@ mod tests {
                 "owner_alice",
                 "2026-01-01",
                 WriteMode::Participate,
+                Visibility::Private,
                 &[1.0, 0.0],
             )
             .unwrap();
@@ -921,21 +1036,22 @@ mod tests {
                 "owner_bob",
                 "2026-01-01",
                 WriteMode::Participate,
+                Visibility::Private,
                 &[1.0, 0.0],
             )
             .unwrap();
 
-        let alice_results = store.search(&[1.0, 0.0], "owner_alice", 10).unwrap();
+        let alice_results = store.search(&[1.0, 0.0], "owner_alice", None, 10).unwrap();
         assert_eq!(alice_results.len(), 1);
         assert_eq!(alice_results[0].attestation_id, "att-alice");
 
-        let bob_results = store.search(&[1.0, 0.0], "owner_bob", 10).unwrap();
+        let bob_results = store.search(&[1.0, 0.0], "owner_bob", None, 10).unwrap();
         assert_eq!(bob_results.len(), 1);
         assert_eq!(bob_results[0].attestation_id, "att-bob");
 
         // Owner with no rows must return empty, even though same signer
         // produced rows under other owners.
-        let unknown = store.search(&[1.0, 0.0], "owner_carol", 10).unwrap();
+        let unknown = store.search(&[1.0, 0.0], "owner_carol", None, 10).unwrap();
         assert!(unknown.is_empty());
     }
 
@@ -994,6 +1110,7 @@ mod tests {
                 server,
                 "2026-01-01",
                 WriteMode::Participate,
+                Visibility::Private,
                 &[1.0, 0.0],
             )
             .unwrap();
@@ -1006,14 +1123,14 @@ mod tests {
             .unwrap();
 
         // Pre-migration: search by owner returns nothing.
-        let before = store.search(&[1.0, 0.0], server, 10).unwrap();
+        let before = store.search(&[1.0, 0.0], server, None, 10).unwrap();
         assert!(before.is_empty(), "NULL owner_pubkey must hide the row");
 
         // Re-run the migration on the live connection.
         super::migrate_owner_pubkey_columns(store.conn()).unwrap();
 
         // Post-migration: row is visible to its signer-as-owner.
-        let after = store.search(&[1.0, 0.0], server, 10).unwrap();
+        let after = store.search(&[1.0, 0.0], server, None, 10).unwrap();
         assert_eq!(after.len(), 1, "backfill must restore visibility");
         assert_eq!(after[0].attestation_id, "att-legacy");
     }
@@ -1040,6 +1157,7 @@ mod tests {
                 TEST_OWNER,
                 "2026-01-01",
                 WriteMode::Participate,
+                Visibility::Private,
                 &[1.0],
             )
             .unwrap();
@@ -1055,6 +1173,7 @@ mod tests {
             TEST_OWNER,
             "2026-01-01",
             WriteMode::Participate,
+            Visibility::Private,
             &[1.0],
         );
         assert!(result.is_ok());
@@ -1151,6 +1270,7 @@ mod tests {
                 TEST_OWNER,
                 "2026-01-01",
                 WriteMode::Local,
+                Visibility::Private,
                 &[1.0, 0.0],
             )
             .unwrap();
@@ -1261,6 +1381,7 @@ mod tests {
                 TEST_OWNER,
                 "2026-01-01",
                 WriteMode::Participate,
+                Visibility::Private,
                 &[1.0, 0.0],
             )
             .unwrap();

@@ -25,7 +25,7 @@
 mod _helpers;
 
 use _helpers::TestServer;
-use mnemonic_core::storage::{AttestationStore, WriteMode};
+use mnemonic_core::storage::{AttestationStore, Visibility, WriteMode};
 use serde_json::json;
 
 // Fixed pubkey-shaped strings for the multi-tenant tests. They don't need
@@ -92,6 +92,7 @@ fn seed_row(
             owner, // owner
             &now,
             write_mode,
+            Visibility::Private,
             &[0.1; 8],
         )
         .expect("save row");

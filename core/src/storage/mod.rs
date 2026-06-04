@@ -4,7 +4,7 @@ pub mod mode;
 pub mod sqlite;
 pub mod traits;
 
-pub use mode::WriteMode;
+pub use mode::{Visibility, WriteMode};
 pub use sqlite::{PublicStats, SqliteStore};
 pub use traits::{AttestationRow, SearchResult};
 pub use traits::{AttestationStore, LineageStore};

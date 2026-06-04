@@ -38,7 +38,7 @@ use crypto_box::{
 };
 use lru::LruCache;
 use mnemonic_core::codec::{hash::hash_bytes, sign::verify_artifact};
-use mnemonic_core::storage::{AttestationStore, WriteMode};
+use mnemonic_core::storage::{AttestationStore, Visibility, WriteMode};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 use uuid::Uuid;
@@ -304,6 +304,11 @@ pub async fn sign_callback_handler(
         // `tools::perform_delivery_check`). On delivery failure the row
         // is demoted in place via `INSERT OR REPLACE` inside
         // `confirm_delivery_or_demote`.
+        // Visibility defaults to `Private` here — the deferred-sign callback
+        // path is a Participate write (browser-mediated COSE_Sign1), and
+        // until the JSON-input resolver lands (Task 5) every such write is
+        // private-by-default (AC13). Public visibility will become an
+        // explicit opt-in propagated from the original `sign_memory` call.
         let save_res = store.save_attestation(
             &attestation_id,
             &entry.content,
@@ -315,6 +320,7 @@ pub async fn sign_callback_handler(
             &req.signer_pubkey, // owner = same pubkey (Decision 9 — webapp flow uses keypair as identity)
             &now,
             WriteMode::Participate,
+            Visibility::Private,
             &entry.embedding,
         );
         // Stamp the correlation_id onto the row so `mnemonic_check_pending`

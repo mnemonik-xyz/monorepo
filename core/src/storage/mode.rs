@@ -1,15 +1,26 @@
-//! Per-attestation write mode.
+//! Per-attestation write mode and visibility.
 //!
-//! `WriteMode` is a pure type — no I/O, no protocol coupling. It encodes the
-//! single per-request user intent that the modes-user-choice feature spec
-//! reduces the surface to: either keep the artifact local (free, offline) or
-//! anchor it on Arweave + Solana (paid, durable, verifiable).
+//! Two pure types — no I/O, no protocol coupling — that encode the per-request
+//! user intents the protocol surfaces in JSON.
 //!
-//! Lives in `core/` so both the storage layer (which persists it on every
-//! attestation row) and the MCP layer (which resolves it from JSON input)
-//! share one type. JSON wire format is lowercase (`"local"` / `"participate"`)
-//! to match the user-spec table; rusqlite round-trips via the same lowercase
-//! strings stored in the new `attestations.write_mode` column.
+//! `WriteMode` encodes the modes-user-choice intent: either keep the artifact
+//! local (free, offline) or anchor it on Arweave + Solana (paid, durable,
+//! verifiable).
+//!
+//! `Visibility` encodes the agent-native-distribution intent for
+//! participate-mode writes: `Private` (default) keeps the row hidden from
+//! anonymous discovery; `Public` opts the row into anonymous recall. Local
+//! writes never carry a meaningful visibility — they don't leave the user's
+//! machine — so the resolver in `mcp/` rejects `mode=local + visibility=...`
+//! at the boundary (Decision 3 / AC14). The column lives on every row so the
+//! storage layer can filter without a join.
+//!
+//! Both types live in `core/` so both the storage layer (which persists them
+//! on every attestation row) and the MCP layer (which resolves them from JSON
+//! input) share one type. JSON wire format is lowercase
+//! (`"local"`/`"participate"`, `"private"`/`"public"`) to match the user-spec
+//! tables; rusqlite round-trips via the same lowercase strings stored in the
+//! `attestations.write_mode` and `attestations.visibility` columns.
 
 use rusqlite::{
     types::{FromSql, FromSqlError, FromSqlResult, ToSqlOutput, ValueRef},
@@ -91,6 +102,78 @@ impl FromSql for WriteMode {
             FromSqlError::Other(Box::new(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 format!("unknown write_mode column value: {s:?}"),
+            )))
+        })
+    }
+}
+
+/// Per-attestation visibility (agent-native-distribution).
+///
+/// `Private` — default. Row is invisible to anonymous (unauthenticated)
+/// `recall`. Authenticated owners always see their own private rows.
+///
+/// `Public` — row is included in anonymous `recall` results. Only valid on
+/// `WriteMode::Participate` writes; the resolver in `mcp/` rejects
+/// `mode=local + visibility=...` at the JSON-RPC boundary (Decision 3 / AC14).
+///
+/// Default is `Private` — user-spec privacy-by-default for participate writes
+/// (the column exists on every row, so the `'private'` default also covers
+/// the legacy backfill case).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Visibility {
+    #[default]
+    Private,
+    Public,
+}
+
+impl Visibility {
+    /// Canonical lowercase string form — on-the-wire (JSON) and in-DB
+    /// representation. Round-trips with `from_str_strict`.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Visibility::Private => "private",
+            Visibility::Public => "public",
+        }
+    }
+
+    /// Strict parser: accepts ONLY the canonical lowercase tokens
+    /// `"private"` / `"public"`. Mirrors `WriteMode::from_str_strict` —
+    /// case variants, whitespace, unknown values all return `None` so the
+    /// MCP resolver can surface a typed `-32602 InvalidParams` error rather
+    /// than silently normalizing.
+    pub fn from_str_strict(s: &str) -> Option<Self> {
+        match s {
+            "private" => Some(Visibility::Private),
+            "public" => Some(Visibility::Public),
+            _ => None,
+        }
+    }
+}
+
+impl ToSql for Visibility {
+    fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
+        Ok(ToSqlOutput::Borrowed(ValueRef::Text(
+            self.as_str().as_bytes(),
+        )))
+    }
+}
+
+// SAFETY note: mirrors the WriteMode FromSql rationale above. The error path
+// echoes the raw column value through `FromSqlError::Other` because the only
+// values that ever reach this column are (a) the literal `'private'` DEFAULT
+// added by `migrate_visibility_column`, (b) the lowercase strings written by
+// `Visibility::to_sql` via `save_attestation`, and (c) the legacy backfill
+// UPDATE which writes only `'private'`. User-supplied visibility values are
+// rejected at the MCP dispatcher boundary before persistence, so this
+// variant only fires on a tampered DB or future migration bug.
+impl FromSql for Visibility {
+    fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
+        let s = value.as_str()?;
+        Visibility::from_str_strict(s).ok_or_else(|| {
+            FromSqlError::Other(Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("unknown visibility column value: {s:?}"),
             )))
         })
     }
@@ -205,6 +288,114 @@ mod tests {
         let msg = err.to_string();
         assert!(
             msg.contains("write_mode") || msg.contains("weird"),
+            "error should mention the bad column or value, got: {msg}"
+        );
+    }
+
+    // -- Visibility (agent-native-distribution) ----------------------------
+
+    #[test]
+    fn visibility_default_is_private() {
+        assert_eq!(Visibility::default(), Visibility::Private);
+    }
+
+    #[test]
+    fn visibility_as_str_round_trips_with_from_str_strict() {
+        for variant in [Visibility::Private, Visibility::Public] {
+            let s = variant.as_str();
+            assert_eq!(Visibility::from_str_strict(s), Some(variant));
+        }
+    }
+
+    #[test]
+    fn visibility_from_str_strict_accepts_only_canonical_lowercase() {
+        assert_eq!(
+            Visibility::from_str_strict("private"),
+            Some(Visibility::Private)
+        );
+        assert_eq!(
+            Visibility::from_str_strict("public"),
+            Some(Visibility::Public)
+        );
+        for bad in [
+            "Private",
+            "PUBLIC",
+            "Public",
+            "PRIVATE",
+            "",
+            " ",
+            "  ",
+            "unknown",
+            "public ",
+            " public",
+            "private\n",
+            "null",
+            "0",
+        ] {
+            assert_eq!(
+                Visibility::from_str_strict(bad),
+                None,
+                "input {bad:?} must not parse"
+            );
+        }
+    }
+
+    #[test]
+    fn visibility_serde_json_round_trip() {
+        let json = serde_json::to_string(&Visibility::Private).unwrap();
+        assert_eq!(json, "\"private\"");
+        let back: Visibility = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, Visibility::Private);
+
+        let json = serde_json::to_string(&Visibility::Public).unwrap();
+        assert_eq!(json, "\"public\"");
+        let back: Visibility = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, Visibility::Public);
+    }
+
+    #[test]
+    fn visibility_serde_rejects_non_canonical_case() {
+        assert!(serde_json::from_str::<Visibility>("\"Private\"").is_err());
+        assert!(serde_json::from_str::<Visibility>("\"PUBLIC\"").is_err());
+        assert!(serde_json::from_str::<Visibility>("\"unknown\"").is_err());
+        assert!(serde_json::from_str::<Visibility>("null").is_err());
+    }
+
+    #[test]
+    fn visibility_rusqlite_round_trip() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT NOT NULL)")
+            .unwrap();
+
+        for v in [Visibility::Private, Visibility::Public] {
+            conn.execute("INSERT INTO t (v) VALUES (?)", rusqlite::params![v])
+                .unwrap();
+        }
+
+        let mut stmt = conn.prepare("SELECT v FROM t ORDER BY id").unwrap();
+        let values: Vec<Visibility> = stmt
+            .query_map([], |row| row.get::<_, Visibility>(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+
+        assert_eq!(values, vec![Visibility::Private, Visibility::Public]);
+    }
+
+    #[test]
+    fn visibility_rusqlite_from_sql_rejects_unknown_value() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE t (v TEXT NOT NULL)")
+            .unwrap();
+        conn.execute("INSERT INTO t (v) VALUES ('weird')", [])
+            .unwrap();
+
+        let err = conn
+            .query_row("SELECT v FROM t", [], |row| row.get::<_, Visibility>(0))
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("visibility") || msg.contains("weird"),
             "error should mention the bad column or value, got: {msg}"
         );
     }

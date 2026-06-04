@@ -174,7 +174,9 @@ async fn test_full_lifecycle_sign_callback_410_on_replay() {
     //    just want to prove persistence happened.)
     {
         let store = state.store.lock().expect("store mutex");
-        let results = store.search(&[0.1; 8], &user_pubkey, 5).expect("search ok");
+        let results = store
+            .search(&[0.1; 8], &user_pubkey, None, 5)
+            .expect("search ok");
         assert_eq!(
             results.len(),
             1,

@@ -77,7 +77,7 @@ async fn test_stdio_tools_list_sign_memory_recall_without_oauth() {
     // (slow + network-touching) RAG bootstrap loop.
     {
         use mnemonic_core::identity::{ensure_with_stores, pubkey_base58, FileKeyStore, KeyStores};
-        use mnemonic_core::storage::{AttestationStore, SqliteStore, WriteMode};
+        use mnemonic_core::storage::{AttestationStore, SqliteStore, Visibility, WriteMode};
         let stores = KeyStores {
             os: None,
             file: Box::new(FileKeyStore::new(keypair_path.clone())),
@@ -104,6 +104,7 @@ async fn test_stdio_tools_list_sign_memory_recall_without_oauth() {
                 // upgrade. T2 will pass the resolved mode here once the
                 // resolver is in place.
                 WriteMode::Participate,
+                Visibility::Private,
                 &[0.0; 8],
             )
             .expect("save_attestation");

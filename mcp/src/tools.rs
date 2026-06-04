@@ -20,7 +20,7 @@ use mnemonic_core::compress::EmbeddingCompressor;
 use mnemonic_core::embed::Embedder;
 use mnemonic_core::identity;
 use mnemonic_core::solana::SolanaClient;
-use mnemonic_core::storage::{AttestationStore, SqliteStore, WriteMode};
+use mnemonic_core::storage::{AttestationStore, SqliteStore, Visibility, WriteMode};
 
 use crate::mcp::{
     delivery_not_confirmed, invalid_params, unsupported_mode, Envelope, JsonRpcError,
@@ -626,6 +626,10 @@ async fn sign_memory_inline(
         let store = store.lock().unwrap();
         // T2: the persisted `write_mode` column is the SAME value the
         // paywall gate consulted (single source of truth — Decision 1).
+        // Visibility is privacy-by-default — `Visibility::Private` here
+        // matches the user-spec default (AC13/AC14). Task 5 wires the
+        // JSON-input resolver that lets a participate-mode caller opt into
+        // `Public`; until then, every write through this path is private.
         store.save_attestation(
             &attestation_id,
             content,
@@ -637,6 +641,7 @@ async fn sign_memory_inline(
             owner_pubkey,
             &now,
             write_mode,
+            Visibility::Private,
             &embedding,
         )?;
     }
@@ -986,6 +991,10 @@ pub async fn confirm_delivery_or_demote(
             // held.
             {
                 let store = ctx.store.lock().unwrap();
+                // Demoted local rows are always private — `Visibility` is a
+                // participate-only concept (AC14). Even if the original
+                // participate write had `visibility=public`, demotion strips
+                // it: a local row can't be anonymously discoverable.
                 store.save_attestation(
                     ctx.attestation_id,
                     ctx.content,
@@ -997,6 +1006,7 @@ pub async fn confirm_delivery_or_demote(
                     ctx.owner_pubkey,
                     ctx.created_at,
                     WriteMode::Local,
+                    Visibility::Private,
                     ctx.embedding,
                 )?;
             }
@@ -1305,8 +1315,12 @@ pub fn recall(
 ) -> serde_json::Value {
     let signer_pubkey = identity::pubkey_base58(keypair);
     let query_emb = embedder.embed(query);
+    // Authenticated recall (this path is reached only with a resolved
+    // `owner_pubkey`): `None` returns all of the caller's own rows
+    // regardless of visibility (Decision 5). Task 5 wires the
+    // anonymous-recall branch that passes `Some(Visibility::Public)`.
     let results = store
-        .search(&query_emb, owner_pubkey, limit)
+        .search(&query_emb, owner_pubkey, None, limit)
         .unwrap_or_default();
     // count() is signer-scoped (legacy semantic); search() is owner-scoped.
     let total = store.count(&signer_pubkey).unwrap_or(0);
