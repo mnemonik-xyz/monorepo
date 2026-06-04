@@ -1,0 +1,134 @@
+{
+  "round": 1,
+  "reviewer": "t5-test-reviewer",
+  "commit": "997f503",
+  "task": "5",
+  "feature": "agent-native-distribution",
+  "status": "needs_improvement",
+  "summary": "Test coverage is solid for the soft-fall routing (Decision 4) and the pure-function endpoint-gating matrix (Decision 12). Nine TDD anchors are present. However, three spawned-binary anchors are permanently #[ignore]'d without a CI-opt-in path, one anchor has a weakened assertion that cannot catch its intended regression, the `opt_in_escalation_no_confirmation_token` test misrepresents the Decision 4+5b interaction it claims to cover, and the `FailingEmbedder` is duplicated inline rather than reused from the shared support fixture. No critical gaps; four medium findings and one low.",
+
+  "testPyramidBalance": {
+    "unit": 4,
+    "integration": 8,
+    "e2e": 0,
+    "assessment": "Balance is appropriate for a CLI + routing feature. Pure-function matrix (4 unit-style tests) + process-spawn + httpmock-backed integration tests is the right shape. E2E (netns/strace) is gated per task spec and correctly omitted on macOS. No pyramid violation."
+  },
+
+  "tddAnchorCoverage": [
+    { "anchor": "mcp_stdio_accepts_jsonrpc_on_stdin",          "file": "cli_subcommands.rs", "status": "present_but_weakened",  "note": "Test asserts `!tools.is_empty()` instead of the spec'd `>= 5` lower bound (comment says '>= 5' but the assertion is `is_empty()`). The discrepancy means a regressed dispatcher returning one dummy tool would still pass." },
+    { "anchor": "logout_removes_token_file",                   "file": "cli_subcommands.rs", "status": "covered_active" },
+    { "anchor": "logout_is_idempotent_when_file_absent",       "file": "cli_subcommands.rs", "status": "covered_active" },
+    { "anchor": "env_var_ignored_without_flag",                "file": "cli_subcommands.rs", "status": "covered_ignored",       "note": "Correct stderr-line assertion; permanently #[ignore]'d — see finding F-1." },
+    { "anchor": "env_var_honored_with_flag",                   "file": "cli_subcommands.rs", "status": "covered_ignored",       "note": "Correct negative assertion. Permanently #[ignore]'d — see finding F-1." },
+    { "anchor": "default_no_silent_escalation",                "file": "sign_memory_softfall.rs", "status": "covered_active",   "note": "macOS-reduced variant (no netns/strace); unreachable-URL sentinel is the correct substitute per task spec." },
+    { "anchor": "opt_in_escalation_returns_escalated_field",   "file": "sign_memory_softfall.rs", "status": "covered_active" },
+    { "anchor": "opt_in_escalation_no_confirmation_token",     "file": "sign_memory_softfall.rs", "status": "present_but_misrepresents", "note": "See finding F-3 — test bypasses the dispatcher boundary to inject Visibility::Public directly and asserts the hosted mock fires. This proves the proxy call happens, not that Decision 4+5b re-resolution prevents a local bypass." },
+    { "anchor": "opt_in_escalation_no_network",                "file": "sign_memory_softfall.rs", "status": "covered_active" }
+  ],
+
+  "findings": [
+    {
+      "id": "F-1",
+      "severity": "medium",
+      "category": "Missing Coverage — CI cannot run these tests automatically",
+      "location": "mcp/tests/cli_subcommands.rs:env_var_ignored_without_flag, env_var_honored_with_flag, mcp_stdio_accepts_jsonrpc_on_stdin",
+      "description": "Three spawned-binary tests are permanently `#[ignore]`'d because the binary's startup hits a network call (pricing.refresh). The comment says 'run with --ignored in CI' but no CI job currently passes `--include-ignored` for this test binary, meaning these tests never run in CI. The ignore reason cites 'network-dependent startup' but the test itself uses a fake `OPENAI_API_KEY` and `STORAGE_MODE=local` — the actual blocker is the pricing.refresh() background call, not a test fixture problem.",
+      "litmusTestFailed": false,
+      "replacement": {
+        "approach": "Add `PRICING_REFRESH_DISABLED=1` (or equivalent env flag) to disable the background pricing refresh in test mode, allowing the binary to start offline. Then remove `#[ignore]` from the three tests. Alternatively, the `mcp_stdio_accepts_jsonrpc_on_stdin` test's startup setup already pre-seeds identity + attestations — if the startup hang is pricing-only, a single env var would make the test runnable without a real internet connection.",
+        "assertions": [
+          "mcp_stdio_accepts_jsonrpc_on_stdin: assert tools.len() >= 5 (not just is_empty)",
+          "env_var_ignored_without_flag: assert stderr contains the spec'd warning string",
+          "env_var_honored_with_flag: assert warning string absent"
+        ],
+        "mockChange": "Wire PRICING_REFRESH_DISABLED env guard in McpState::build() (test-only feature flag acceptable) or add --no-pricing-refresh flag gated under #[cfg(feature=\"test-support\")]."
+      }
+    },
+    {
+      "id": "F-2",
+      "severity": "medium",
+      "category": "Weakened Assertion — anchor cannot catch its intended regression",
+      "location": "mcp/tests/cli_subcommands.rs:mcp_stdio_accepts_jsonrpc_on_stdin (line ~279-282)",
+      "description": "The test comment says 'we assert >= 5 to stay robust' but the actual assertion is `assert!(!tools.is_empty())`. A dispatcher bug that returns exactly 1 dummy tool (or any non-empty array) would pass this test. The TDD anchor in the task spec says '7 entries'; the test deliberately loosens to >= 5 (acceptable) but then further loosens to > 0 (not catching meaningful regressions). This is a litmus-test failure for the described claim.",
+      "litmusTestFailed": true,
+      "replacement": {
+        "approach": "Change the assertion to `assert!(tools.len() >= 5, ...)`.",
+        "assertions": [
+          "tools.len() >= 5 with a message showing the actual count and full response JSON"
+        ],
+        "mockChange": "None — the fix is one-line in the assertion."
+      }
+    },
+    {
+      "id": "F-3",
+      "severity": "medium",
+      "category": "Test Misrepresents the Contract it Claims to Cover",
+      "location": "mcp/tests/sign_memory_softfall.rs:opt_in_escalation_no_confirmation_token (lines ~699-783)",
+      "description": "The test's stated goal is to verify 'Decision 4 + 5b interaction: post-escalation visibility re-resolution fires for public writes without a confirmation token.' However, the test calls `sign_memory()` DIRECTLY with `Visibility::Public` already resolved, bypassing the `resolve_visibility` dispatcher layer. The comment acknowledges this ('In production the dispatcher would have routed this differently') but frames it as intentional. This means the test proves that the HOSTED MOCK returns -32095 when the test wires it to return -32095 — a mock-return anti-pattern. It does NOT prove that the production `sign_memory` flow re-invokes `resolve_visibility` on the escalated request. A future refactor that removes post-escalation re-resolution would not be caught by this test if the mock still returns -32095.",
+      "litmusTestFailed": true,
+      "replacement": {
+        "approach": "Test via the dispatcher: construct a valid MCP `tools/call` JSON-RPC request with `mode=local, allow_fallback_to_participate=true, visibility=public` (without public_write_confirmation), call `handle_tool_call` or `handle_request` (not `sign_memory` directly), configure the mock to return a success response. Assert the response is -32095 PublicWriteRequiresConfirmation even though the mock returns success — proving the LOCAL side's post-escalation re-resolution fires before forwarding the request.",
+        "assertions": [
+          "error.code == -32095",
+          "error.data.kind == 'PublicWriteRequiresConfirmation'",
+          "mock.calls() == 0 (if re-resolution fires before the proxy) OR == 1 (if re-resolution fires on the response, per current Decision 4 description; document which is intended)",
+          "Crucially: the mock must be configured to return SUCCESS — only then does the test prove the local code, not the mock."
+        ],
+        "mockChange": "Configure httpmock to return a success response. If the local re-resolution fires before the proxy call, the mock should see 0 calls. If it fires on the response path, the mock sees 1 call. Either is acceptable if documented, but the test must not rely on the mock returning the expected error."
+      }
+    },
+    {
+      "id": "F-4",
+      "severity": "low",
+      "category": "Test Anti-pattern — FailingEmbedder duplicated across test files",
+      "location": "mcp/tests/sign_memory_softfall.rs:FailingEmbedder (lines ~490-522) + mcp/tests/error_catalogue.rs:FailingEmbedder (implied by coder summary)",
+      "description": "The `FailingEmbedder` struct is re-declared inline in `sign_memory_softfall.rs` with a comment explaining it is 'kept inline to avoid a cross-test private import'. If it also exists in `error_catalogue.rs`, that is two copies of the same fixture to keep in sync. The `fail_on_call` semantics (`fail_on_call: AtomicUsize::new(1)` means fail on first call) are non-obvious and differ from a simpler 'always fail' name — a discrepancy that matters if one copy is updated.",
+      "litmusTestFailed": false,
+      "replacement": {
+        "approach": "Move `FailingEmbedder` to `mcp/tests/support/mod.rs` (or the existing test-support crate) and re-export it. The coder's comment says 'cross-test private import' is the blocker — Rust integration test support modules in `tests/support/mod.rs` are visible to sibling integration test files via `mod support;` at the top of each file.",
+        "assertions": [],
+        "mockChange": "Move struct, add `mod support;` + `use support::FailingEmbedder;` in both test files."
+      }
+    },
+    {
+      "id": "F-5",
+      "severity": "low",
+      "category": "Missing Negative Case — empty-hosted-endpoint sentinel not explicitly tested",
+      "location": "mcp/src/test_support.rs:mock_state, mock_state_with, mock_state_for_delivery",
+      "description": "The `mock_state` family now sets `hosted_endpoint: String::new()` as a sentinel to disable soft-fall. The `tools::sign_memory` doc says 'empty string = no soft-fall available'. This sentinel is a documented contract but has no unit test exercising that `allow_fallback=true + empty endpoint` returns the original local error (not HostedUnavailable). Worth a one-liner test to lock the contract.",
+      "litmusTestFailed": false,
+      "replacement": {
+        "approach": "Add a unit test in `sign_memory_softfall.rs`: `FailingEmbedder + allow_fallback=true + empty hosted_endpoint → -32098 EmbedderInvalid` (not -32011). One extra `#[tokio::test]`, 10 lines.",
+        "assertions": [
+          "err.code == -32098 (original local error propagated when no hosted endpoint configured)",
+          "err.data.kind == 'EmbedderInvalid'"
+        ],
+        "mockChange": "Use `mock_state_with_embedder_and_endpoint(FailingEmbedder::always_fail(), String::new())`."
+      }
+    }
+  ],
+
+  "severityCounts": {
+    "critical": 0,
+    "high": 0,
+    "medium": 3,
+    "low": 2
+  },
+
+  "statusDecision": "needs_improvement",
+  "taskRequired": {
+    "needed": false,
+    "reason": "No critical or high-severity issues. Three medium findings require fixes before the task can be considered closed: F-1 (three always-ignored anchors need a CI path), F-2 (weakened assertion), F-3 (mock-return anti-pattern misrepresents Decision 4+5b coverage). F-4 and F-5 are low-priority cleanup items that can be done alongside the medium fixes without a separate task."
+  },
+
+  "requiredChanges": [
+    "F-1: Provide a CI path for the three #[ignore]'d spawned-binary tests (env flag to disable pricing.refresh, then remove #[ignore]).",
+    "F-2: Change `assert!(!tools.is_empty())` to `assert!(tools.len() >= 5, ...)` in mcp_stdio_accepts_jsonrpc_on_stdin.",
+    "F-3: Rewrite opt_in_escalation_no_confirmation_token to go through the dispatcher (handle_tool_call / handle_request) and configure the mock to return success — proving local re-resolution fires, not mock wiring."
+  ],
+
+  "optionalImprovements": [
+    "F-4: Consolidate FailingEmbedder into mcp/tests/support/mod.rs.",
+    "F-5: Add one-liner test for empty-endpoint sentinel: allow_fallback=true + empty endpoint => EmbedderInvalid (not HostedUnavailable)."
+  ]
+}

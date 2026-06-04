@@ -1,0 +1,109 @@
+{
+  "task": 5,
+  "round": 1,
+  "commit": "997f503",
+  "reviewer": "t5-security-auditor",
+  "verdict": "CONDITIONAL_PASS",
+  "summary": "The critical security properties — Decision 12 env-var gating, soft-fall opt-in contract, redirect policy, and logout atomicity — are correctly implemented. One medium-blocking finding (SSRF risk from unrestricted env var value when flag IS set) and two low findings require fixes before merge.",
+  "findings": [
+    {
+      "id": "SAR5-M1",
+      "severity": "MEDIUM",
+      "category": "SSRF / Input Validation",
+      "blocking": true,
+      "title": "MNEMONIC_HOSTED_ENDPOINT accepted verbatim when --allow-custom-endpoint is set — no URL scheme or host validation",
+      "location": "mcp/src/lib.rs:resolved_hosted_endpoint (lines 51-58) + mcp/src/main.rs (env_hosted resolution block)",
+      "description": "When `allow_custom == true` and the env var is set, `resolved_hosted_endpoint` returns the env value verbatim with no validation of scheme, host, or path. An operator who sets `MNEMONIC_HOSTED_ENDPOINT=file:///etc/passwd` or `http://169.254.169.254/latest/user-data` will get that value fed directly to `reqwest::Client::post(endpoint)` in `proxy_participate`. The threat model for Decision 12 is 'local attacker that injects the env var without the flag'; but the flag itself could be passed by a compromised shell profile or a malicious npm postinstall script that sets both. For the LEGITIMATE use case (test infra pointing at localhost), the valid value set is `http://127.0.0.1:<port>/mcp` or `https://<hostname>/mcp`.",
+      "impact": "An attacker who can influence both the env var AND get the flag set (e.g., via a compromised dev-dependency's npm lifecycle script) can redirect participate-mode writes to an arbitrary URL — including cloud metadata endpoints (SSRF), file:// reads on Windows, or attacker-controlled HTTPS endpoints that phish OAuth tokens.",
+      "recommendation": "Add URL scheme validation in `resolved_hosted_endpoint`: only accept `https://` (production) or `http://127.0.0.1` / `http://[::1]` / `http://localhost` (test/dev). Reject anything else with `eprintln!` + fallback to `DEFAULT_HOSTED_ENDPOINT`. Example guard:\n```rust\nfn is_safe_custom_endpoint(url: &str) -> bool {\n    url.starts_with(\"https://\")\n        || url.starts_with(\"http://127.0.0.1\")\n        || url.starts_with(\"http://localhost\")\n        || url.starts_with(\"http://[::1]\")\n}\n```\nIf the URL fails validation, warn to stderr and fall through to the default, treating it the same as if the flag were absent.",
+      "references": ["OWASP A10:2021 Server-Side Request Forgery", "Decision 12 — agent-native-distribution"]
+    },
+    {
+      "id": "SAR5-L1",
+      "severity": "LOW",
+      "category": "Information Disclosure / Log Safety",
+      "blocking": false,
+      "title": "proxy_participate logs `e.to_string()` from reqwest errors which may contain the full URL (including any credentials in the userinfo component)",
+      "location": "mcp/src/tools.rs::proxy_participate — the `req.send().await` error branch",
+      "description": "If the `MNEMONIC_HOSTED_ENDPOINT` value contains URL credentials (e.g. `https://user:password@host/mcp`), `reqwest`'s error `Display` impl includes the URL verbatim. The string then goes into `hosted_unavailable(&e.to_string(), 500)` which embeds it in the `data.last_error` field of the JSON-RPC response returned to the agent. From there it can flow into agent logs, stderr captures, or MCP inspector output.",
+      "impact": "Credentials or sensitive path segments in `MNEMONIC_HOSTED_ENDPOINT` would be leaked to the agent's context and any log aggregation that captures MCP JSON-RPC responses.",
+      "recommendation": "Scrub the URL from error messages before embedding in the JSON-RPC response. Either (a) use `e.url().map(|u| u.host_str().unwrap_or(\"unknown\"))` to extract only the host for the error message, or (b) apply the URL validation from SAR5-M1 first — valid URLs won't have userinfo components.",
+      "references": ["OWASP A09:2021 Security Logging and Monitoring Failures"]
+    },
+    {
+      "id": "SAR5-L2",
+      "severity": "LOW",
+      "category": "Correctness / Security Contract",
+      "blocking": false,
+      "title": "resolve_hosted_endpoint (the &'static str variant) always returns DEFAULT_HOSTED_ENDPOINT, making it a no-op misleader",
+      "location": "mcp/src/lib.rs::resolve_hosted_endpoint (lines 31-46)",
+      "description": "The function `resolve_hosted_endpoint` (returning `&'static str`) was written to express the gating logic but cannot actually return the env var value because returning a `&'static str` for a runtime-derived string requires leaking. The implementation acknowledges this with `let _ = s;` and returns `DEFAULT_HOSTED_ENDPOINT` even in the `(true, Some(s))` arm. The function comment says 'the production wrapper at main::resolve_hosted_endpoint_with_warning owns the String' — but there is no function named `resolve_hosted_endpoint_with_warning` anywhere in the codebase. The production code calls `resolved_hosted_endpoint` (the owned-String variant) exclusively. The `&'static str` variant is therefore dead code that could mislead a future reader into thinking it implements the gating correctly.",
+      "impact": "Low impact today (the correct `resolved_hosted_endpoint` is used everywhere), but the dead function will confuse future maintainers and could be incorrectly reached if someone adds a callsite. The comment references a nonexistent function name.",
+      "recommendation": "Either (a) delete `resolve_hosted_endpoint` (the &'static str variant) entirely — it is unused and its doc comment references a nonexistent function — or (b) add `#[doc(hidden)] #[cfg(test)]` and a test that proves it's only used internally. Update the comment to reference `resolved_hosted_endpoint` (the actual production wrapper) correctly.",
+      "references": []
+    },
+    {
+      "id": "SAR5-INFO1",
+      "severity": "INFO",
+      "category": "Defense-in-Depth",
+      "blocking": false,
+      "title": "mcp_stdio_accepts_jsonrpc_on_stdin uses OPENAI_API_KEY='cli-test-key-not-real' — confirm no outbound call possible",
+      "location": "mcp/tests/cli_subcommands.rs::mcp_stdio_accepts_jsonrpc_on_stdin (env setup block)",
+      "description": "The test sets `EMBED_PROVIDER=openai` and `OPENAI_API_KEY=cli-test-key-not-real`. If the binary's embedder initialisation makes any network call during startup (e.g., to validate the key), a fake key would cause a failed auth rather than an offline start. This is the `#[ignore]` test so it only runs explicitly, but the note is: confirm that `EMBED_PROVIDER=openai` with a fake key doesn't trigger a live API call during `tools/list` (which requires no embedding). If startup validation is possible, the test should use `EMBED_PROVIDER=fastembed` with `--features local-embed` or mock the embedder via env.",
+      "impact": "Informational only — the test is `#[ignore]` and the fake key would cause a 401 not a secret leak. No action required if the embedder is lazy-initialised (only embeds on actual embed() calls).",
+      "recommendation": "Add a comment to the test noting that the fake OPENAI_API_KEY is safe because the OpenAI embedder is lazy — the key is never sent during `tools/list` which requires no vector generation. If that assumption changes, switch to `EMBED_PROVIDER=mock` (if available) or `EMBED_PROVIDER=fastembed`.",
+      "references": []
+    },
+    {
+      "id": "SAR5-INFO2",
+      "severity": "INFO",
+      "category": "Security Design / TOCTOU",
+      "blocking": false,
+      "title": "logout token deletion path — confirm token_path() resolution is fixed at call time, no TOCTOU on the path itself",
+      "location": "mcp/src/main.rs::logout short-circuit block + mnemonic_core::identity::delete_token",
+      "description": "The `logout` implementation calls `mnemonic_core::identity::delete_token()` which internally resolves `token_path()` and calls `fs::remove_file`. Based on Task 6's implementation (604fbf5), `token_path()` reads `MNEMONIC_CONFIG_DIR` or `$HOME/.mnemonic/token.json`. The security question is: is `token_path()` called once (path fixed) or called twice (check-existence, then delete) creating a TOCTOU window? Task 6's `delete_token_at()` implementation uses a single `fs::remove_file()` call (not check-then-delete), which is the correct atomic pattern — no TOCTOU exists. This is a confirmation finding, not a defect.",
+      "impact": "None — the implementation is correct. Noted because the task spec specifically called this out as a security concern.",
+      "recommendation": "No action needed. Confirmed: `delete_token` resolves the path once and calls `remove_file` atomically. The `ENOENT` case is mapped to `Ok(())` so the idempotency contract holds without a check-then-delete race.",
+      "references": ["Task 5 spec — logout subcommand: token file deletion must be atomic, no time-of-check-to-time-of-use race"]
+    },
+    {
+      "id": "SAR5-INFO3",
+      "severity": "INFO",
+      "category": "Security Design / Token Expiry",
+      "blocking": false,
+      "title": "proxy_participate: TokenStoreError::Expired treated same as Ok(None) — no -32099 propagated to agent",
+      "location": "mcp/src/tools.rs::proxy_participate — read_token() call",
+      "description": "In the soft-fall proxy, `mnemonic_core::identity::read_token()` is called; if it returns `Err(Expired)`, the code falls through to the else-if branch (which does `let _ = sub` and sends no Bearer header). This means an expired token causes the hosted side to return `-32001 unauthorized` rather than `-32099 TokenExpired`. The task spec says 'respect TokenExpired typed error (don't silently fall through)'. The current implementation does silently fall through — the agent gets `-32001 unauthorized` from the hosted side, not the canonical `-32099 TokenExpired` that Task 6 defines for this error condition.",
+      "impact": "Low — the agent will re-OAuth (correct behaviour) but the error code differs from the spec. An agent programmed to handle `-32099 TokenExpired` specifically (per AC16 error catalogue) will instead see `-32001 unauthorized` and may take a different code path. Privacy is not affected — the hosted side rejects correctly.",
+      "recommendation": "In `proxy_participate`, distinguish the `Expired` arm from the `Ok(None)` arm: if `read_token()` returns `Err(Expired)`, return `Err(ToolError::TypedRpc(token_expired(expires_at, sub)))` immediately so the agent sees the canonical error code and can handle it per the catalogue contract. Import `mcp::mcp::token_expired` (the same helper Task 6 declared with `#[allow(dead_code)]`). This also drops the dead_code annotation from that helper.",
+      "references": ["Task 5 spec — Token reading path: respect TokenExpired typed error (don't silently fall through)", "Task 6 forward flag — 'the outbound participate-mode proxy callsite must call read_token() and map TokenStoreError::Expired to the existing token_expired() JSON-RPC helper'", "Error Catalogue — -32099 TokenExpired"]
+    }
+  ],
+  "security_positives": [
+    "Decision 12 core is correctly implemented: without --allow-custom-endpoint, MNEMONIC_HOSTED_ENDPOINT is completely ignored at the binary level (read, discarded before McpState build) and the warning line is emitted exactly once to stderr.",
+    "resolved_hosted_endpoint is a pure function (no I/O, no stderr), enabling exhaustive matrix testing without process spawning. The 4-cell matrix (flag × env) is fully covered by the in-process unit tests.",
+    "reqwest::redirect::Policy::none() on the hosted_client closes the mid-connection redirect attack vector. This is set consistently across all production and test McpState constructions.",
+    "proxy_participate strips allow_fallback_to_participate from the proxied args, preventing recursive escalation if the hosted side returns a local failure code.",
+    "proxy_participate drops visibility=public through to the hosted side without modification, letting the hosted public-write gate (Task 4 Decision 5b) fire correctly. The -32095 re-derivation using the local canonical helper (rather than passing through the hosted data verbatim) is a correct defence-in-depth measure.",
+    "Empty-string hosted_endpoint sentinel ('') is used uniformly in all test fixtures so accidental production escalations never occur in tests. The guard `if !allow_fallback || hosted_endpoint.is_empty()` enforces this at the router level.",
+    "logout runs before McpState build — no identity bootstrap, embedder download, or SQLite open happens on logout. This minimises the attack surface of the logout path.",
+    "Soft-fall reason catalogue (EmbedderUnavailable, LocalStorageBusy, IdentityBootstrapFailed) is correctly limited to local capability errors. DeliveryNotConfirmed, PublicWriteRequiresConfirmation, UnsupportedMode, and opaque Other errors are NOT escalated — they propagate verbatim.",
+    "30s production timeout on hosted_client prevents the binary from blocking indefinitely on a slow hosted endpoint.",
+    "Port-0 ECONNREFUSED trick in opt_in_escalation_no_network is sound and deterministic — superior to a mock that requires the listener to stay alive."
+  ],
+  "ac_coverage": {
+    "AC5_no_silent_escalation": "PASS — allow_fallback defaults false, guard enforced in router, test default_no_silent_escalation confirms -32098 returned verbatim.",
+    "AC6_explicit_opt_in_fallback": "PASS WITH NOTE — success escalation path verified (test 2). The SAR5-INFO3 TokenExpired silent fallthrough is a minor deviation from the full spec contract.",
+    "AC11_token_caching": "PARTIAL — Token read is implemented in proxy_participate. The TokenExpired→-32099 mapping is missing (SAR5-INFO3).",
+    "AC12_gating": "PASS — Decision 12 env-var gating implemented and tested exhaustively.",
+    "AC16_error_catalogue": "PARTIAL — HostedUnavailable -32011 fires correctly. TokenExpired -32099 not surfaced on the soft-fall path (SAR5-INFO3)."
+  },
+  "required_fixes_before_merge": [
+    "SAR5-M1: Add URL scheme/host validation in resolved_hosted_endpoint for the allow_custom=true path. Restrict to https:// or loopback http://. Warn + fallback on invalid value."
+  ],
+  "recommended_fixes": [
+    "SAR5-INFO3: Map TokenStoreError::Expired to -32099 TokenExpired in proxy_participate (forward flag from Task 6 explicitly asked for this wiring).",
+    "SAR5-L1: Scrub URL credentials from reqwest error messages before embedding in last_error.",
+    "SAR5-L2: Delete or suppress the unused resolve_hosted_endpoint (&'static str variant); update its doc comment to reference the correct function name."
+  ]
+}

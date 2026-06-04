@@ -1,0 +1,78 @@
+{
+  "round": 3,
+  "reviewer": "t5-test-reviewer",
+  "commit": "e26c99d",
+  "task": "5",
+  "feature": "agent-native-distribution",
+  "status": "passed",
+  "summary": "All four new tests are correct and cover their stated contracts. The URL validation logic and unit tests are thorough. The expired-token short-circuit is properly wired before the proxy HTTP call. The env-mutex serialisation approach is sound for the scope. One low-severity observation about the loopback prefix matching, no action required.",
+
+  "newTestsReview": [
+    {
+      "test": "opt_in_escalation_hosted_malformed_response_surfaces_hosted_unavailable",
+      "file": "mcp/tests/sign_memory_softfall.rs",
+      "finding": "R1-004",
+      "verdict": "CORRECT",
+      "detail": "Mock configured to return bare result string (not an object). Test asserts -32011 HostedUnavailable, data.kind=HostedUnavailable, last_error contains 'malformed hosted response', m.calls()==1 (proxy was attempted). The assertions are tight: they prove (a) the production code path detects the malformed shape and maps it to the correct typed error, (b) the proxy was actually invoked (not short-circuited before the call), and (c) the last_error names the failure mode for the agent. Litmus test passes: removing the malformed-response guard in proxy_participate would cause the test to either panic on unwrap or return Ok(Null), both of which fail the assertion."
+    },
+    {
+      "test": "expired_cached_token_surfaces_token_expired_typed_error",
+      "file": "mcp/tests/sign_memory_softfall.rs",
+      "finding": "SAR5-INFO3",
+      "verdict": "CORRECT",
+      "detail": "Seeds expired token (expires_at=2000-01-01) at the MNEMONIC_CONFIG_DIR-resolved path. Uses manual tokio runtime inside with_config_dir_override to ensure the env-guard holds for the full async body — rationale matches the oauth_loopback.rs precedent for this pattern. Asserts -32099, data.kind=TokenExpired, data.expires_at and data.pubkey fields match the seeded token. The endpoint is set to http://127.0.0.1:1/mcp (valid loopback for SAR5-M1 gate; unreachable port) confirming the short-circuit fires before any HTTP call. Litmus test passes: removing the Expired arm in proxy_participate would allow the call to proceed to the unreachable port and return -32011 HostedUnavailable, failing the -32099 assertion."
+    },
+    {
+      "test": "resolved_hosted_endpoint_rejects_unsafe_url_with_flag_set",
+      "file": "mcp/tests/cli_subcommands.rs",
+      "finding": "SAR5-M1",
+      "verdict": "CORRECT",
+      "detail": "Parametrised over 5 unsafe URLs covering non-loopback http://, cloud-metadata IP, file://, ftp://, and credentials-in-URL. Each asserts endpoint==DEFAULT and warning==RejectedUnsafe. The 5-case coverage exercises all rejection branches in is_safe_hosted_endpoint (scheme not https, not loopback; explicit credentials path). Litmus test passes: removing is_safe_hosted_endpoint validation would return the unsafe URL with None warning, failing the RejectedUnsafe assertion."
+    },
+    {
+      "test": "resolved_hosted_endpoint_accepts_loopback_http_with_flag_set",
+      "file": "mcp/tests/cli_subcommands.rs",
+      "finding": "SAR5-M1 negative",
+      "verdict": "CORRECT",
+      "detail": "Parametrised over 5 loopback forms (127.0.0.1, localhost, [::1] with and without ports). Each asserts endpoint==safe_url and warning==None. Also updated env_var_honored_with_flag to use http://127.0.0.1:65535/mcp (passes SAR5-M1 validation) and assert both warning lines are absent — correctly separates FlagAbsent and RejectedUnsafe signal paths. Litmus test passes: over-aggressive rejection in is_safe_hosted_endpoint would return DEFAULT with a warning, failing the endpoint==safe_url assertion."
+    },
+    {
+      "test": "env_var_rejected_when_unsafe (spawned binary)",
+      "file": "mcp/tests/cli_subcommands.rs",
+      "finding": "SAR5-M1 end-to-end",
+      "verdict": "CORRECT",
+      "detail": "Spawned-binary test that asserts the 'rejecting unsafe MNEMONIC_HOSTED_ENDPOINT' stderr line fires when an unsafe URL is set with --allow-custom-endpoint. Complements the in-process unit tests by proving the binary's main.rs actually emits the RejectedUnsafe warning text (not just that the pure function returns the right enum variant). Active (not #[ignore]'d) — correct because the binary startup is now offline-capable via PRICING_REFRESH_DISABLED."
+    }
+  ],
+
+  "envMutexSerialisation": {
+    "verdict": "SOUND",
+    "detail": "The static GUARD mutex serialises all tests in sign_memory_softfall.rs that touch the soft-fall proxy, preventing MNEMONIC_CONFIG_DIR env-var leakage from with_config_dir_override. Two design choices warrant brief notes: (1) #![allow(clippy::await_holding_lock)] is module-scoped, not function-scoped. This is acceptable because the rationale comment documents the constraint clearly and all tests in the module participate in the same locking discipline. (2) The restore-on-panic path in with_config_dir_override uses unsafe env::set_var/remove_var inside a std Mutex guard — this is the same pattern as oauth_loopback.rs and is correct for single-threaded test workers that hold the mutex. No deadlock risk given the single static mutex and single-holder invariant."
+  },
+
+  "urlValidationLogicReview": {
+    "verdict": "CORRECT with one informational observation",
+    "detail": "is_safe_hosted_endpoint uses string prefix matching with a suffix guard (rest.is_empty() || rest.starts_with(':') || rest.starts_with('/')) to prevent localhost.attacker.example from matching. The lookalike_loopback_is_rejected unit test confirms this. Userinfo detection splits on '://' and checks the host-segment for '@' before the first path separator — correct for all standard URL forms. The 8 lib.rs unit tests cover: https safe, loopback http safe, non-loopback http rejected, file:// rejected, unparseable/empty rejected, lookalike-loopback rejected, userinfo credentials rejected, and the resolved_hosted_endpoint_matrix integration.",
+    "informationalObservation": "127.0.0.2 through 127.255.255.255 are also loopback addresses per RFC 5735 (entire 127.0.0.0/8 is loopback) but are not accepted by the current LOOPBACK_PREFIXES list (only 127.0.0.1 is listed). This is deliberate minimalism — no developer test setup legitimately uses 127.0.0.x other than 127.0.0.1, and adding the full /8 range would broaden the attack surface. The current scope is correct for v1. No action needed."
+  },
+
+  "toolsCountAssertion": {
+    "verdict": "IMPROVED",
+    "detail": "tools.len() >= 7 with explicit TDD-anchor comment referencing the 6 pre-existing tools + request_public_write_confirmation from Task 4. This is correct for the current post-Task-4 inventory. The >= (not ==) form keeps it forward-compatible with future task additions."
+  },
+
+  "findingsIntroduced": [],
+
+  "severityCounts": {
+    "critical": 0,
+    "high": 0,
+    "medium": 0,
+    "low": 0
+  },
+
+  "status": "passed",
+  "taskRequired": {
+    "needed": false,
+    "reason": "No findings. All four new tests are correct. URL validation logic and unit tests are thorough. Env-mutex serialisation is sound. Test reviewer final sign-off."
+  }
+}

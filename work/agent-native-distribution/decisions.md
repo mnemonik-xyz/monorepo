@@ -193,3 +193,36 @@ Review details — in JSON files via links. QA report — in logs/working/.
 - `cargo clippy --workspace --all-targets --features mnemonic-mcp/test-support -- -D warnings` → clean
 - `cargo fmt --all -- --check` → clean
 - Smoke (live curl loop) skipped — the integration tests drive the production dispatcher + middleware + storage stack through the same `axum::Router` + `oauth::bearer_auth_middleware` wiring as the binary. No new external endpoints were added.
+
+## Task 5: mcp-stdio + logout subcommands on Rust binary + MNEMONIC_HOSTED_ENDPOINT gating + soft-fall routing
+
+**Status:** Done
+**Commits:** 997f503 (impl) + 158ddc9 (round 2 fixes) + e26c99d (round 3 fixes)
+**Agent:** t5-coder
+**Summary:** Added `mcp-stdio` subcommand wired to the existing `run_stdio()` path (reusing the `Arc<McpState>` singleton) and `logout` subcommand that deletes the token file before any `McpState` build. Implemented Decision 12 `--allow-custom-endpoint` global clap flag gating `MNEMONIC_HOSTED_ENDPOINT` with `is_safe_hosted_endpoint()` URL validation (rejects non-HTTPS non-loopback, file://, cloud-metadata IPs, lookalike hosts, userinfo credentials) returning a typed `HostedEndpointWarning` enum. Wired soft-fall routing in `tools::sign_memory_inline` per Decision 4 (three conditions: `allow_fallback=true`, error code in soft-fallable catalogue, non-empty hosted endpoint) via `proxy_participate`, which strips `allow_fallback_to_participate` from proxied args, injects the `escalated` response field, maps `TokenStoreError::Expired` to `-32099 TokenExpired` before any HTTP call, scrubs URL/credentials from `reqwest` error messages, and guards against malformed hosted responses with `-32011 HostedUnavailable`.
+**Deviations:** None.
+
+**Reviews:**
+
+*Round 1 (997f503):*
+- code-reviewer: approve_with_minor_fixes, 4 minor → [logs/working/task-5/code-reviewer-round1.json](logs/working/task-5/code-reviewer-round1.json)
+- security-auditor: CONDITIONAL_PASS, 1 medium-blocking (SAR5-M1) + 2 low + 1 info + 2 others → [logs/working/task-5/security-auditor-round1.json](logs/working/task-5/security-auditor-round1.json)
+- test-reviewer: needs_improvement, 5 findings → [logs/working/task-5/test-reviewer-round1.json](logs/working/task-5/test-reviewer-round1.json)
+
+*Round 2 (158ddc9):*
+- code-reviewer: approve_with_minor_fixes, R1-001/R1-002/R1-004 deferred, R1-003 fixed, 1 new minor doc defect (R2-001) → [logs/working/task-5/code-reviewer-round2.json](logs/working/task-5/code-reviewer-round2.json)
+- security-auditor: PASS → [logs/working/task-5/security-auditor-round2.json](logs/working/task-5/security-auditor-round2.json)
+- test-reviewer: passed → [logs/working/task-5/test-reviewer-round2.json](logs/working/task-5/test-reviewer-round2.json)
+
+*Round 3 (e26c99d):*
+- code-reviewer: approved — all R1 findings resolved; R2-001 (error_catalogue.rs dim comment) accepted as known technical debt → [logs/working/task-5/code-reviewer-round3.json](logs/working/task-5/code-reviewer-round3.json)
+- security-auditor: PASS — SAR5-M1/L1/L2/INFO3 all closed, no new findings → [logs/working/task-5/security-auditor-round3.json](logs/working/task-5/security-auditor-round3.json)
+- test-reviewer: passed — all 4 new round-3 tests correct, env-mutex serialisation sound → [logs/working/task-5/test-reviewer-round3.json](logs/working/task-5/test-reviewer-round3.json)
+
+**Forward flag:** None. The `#[allow(dead_code)]` on `token_expired()` in `mcp/src/mcp.rs` was dropped in round 3 (helper is now live via `proxy_participate`). R2-001 (wrong dim in error_catalogue.rs comment) is open minor documentation debt with no runtime impact.
+
+**Verification:**
+- `cargo test --workspace --features mnemonic-mcp/test-support --no-fail-fast` → green (per coder round 3 report)
+- `cargo clippy --workspace --all-targets --features mnemonic-mcp/test-support -- -D warnings` → clean
+- `cargo fmt --all -- --check` → clean
+- Release-binary smoke: `mcp-stdio` subcommand and `logout` subcommand verified via spawned-binary tests in `mcp/tests/cli_subcommands.rs`

@@ -1,0 +1,58 @@
+{
+  "task": 5,
+  "round": 3,
+  "commits": ["997f503", "158ddc9", "e26c99d"],
+  "reviewer": "t5-security-auditor",
+  "verdict": "PASS",
+  "summary": "All four round-1 security findings (SAR5-M1, SAR5-L1, SAR5-L2, SAR5-INFO3) are closed in e26c99d. No new security findings. The implementation is correct, well-tested, and the URL validation logic handles all required attack surfaces. Clear to merge.",
+  "round1_findings_final_status": [
+    {
+      "id": "SAR5-M1",
+      "original_severity": "MEDIUM",
+      "status": "CLOSED",
+      "resolution": "is_safe_hosted_endpoint() helper correctly validates the allowed URL surface. Accepts: https://* and loopback http:// (127.0.0.1, localhost, [::1]) with exact prefix+suffix check to prevent lookalike attacks. Rejects: file://, ftp://, non-loopback http://, cloud-metadata IPs (169.254.169.254), userinfo credentials (user:pass@host), empty strings, and unparseable URLs. The 3-variant HostedEndpointWarning enum lets main.rs emit distinct stderr lines per failure mode (FlagAbsent vs. RejectedUnsafe), so operators see the correct remedy. 8 inline unit tests in hosted_endpoint_validation_tests and a new spawned-binary env_var_rejected_when_unsafe test cover the full matrix including the loopback-happy-path and the unsafe-rejection path."
+    },
+    {
+      "id": "SAR5-L1",
+      "original_severity": "LOW",
+      "status": "CLOSED",
+      "resolution": "scrub_reqwest_error() helper renders only '<kind> error to host <hostname>'. Kind comes from the is_*() accessor methods (timeout/connect/request/body/decode/status/transport). Host comes from e.url().and_then(|u| u.host_str()). Path, query, and userinfo are dropped. Used in all three reqwest error sites in proxy_participate (send, body read, non-2xx response body). The opt_in_escalation_no_network test now additionally asserts that last_error does not contain '/mcp' (path) or 'http://' (scheme)."
+    },
+    {
+      "id": "SAR5-L2",
+      "original_severity": "LOW",
+      "status": "CLOSED",
+      "resolution": "The unused resolve_hosted_endpoint (&'static str variant) has been deleted. The misleading doc comment referencing the nonexistent 'main::resolve_hosted_endpoint_with_warning' function is gone. Production callers use resolved_hosted_endpoint (String variant) exclusively."
+    },
+    {
+      "id": "SAR5-INFO3",
+      "original_severity": "INFO",
+      "status": "CLOSED",
+      "resolution": "proxy_participate now has an explicit Err(TokenStoreError::Expired { expires_at, sub }) match arm that returns Err(ToolError::TypedRpc(token_expired(&expires_at, &sub))) immediately. The Ok(Some) → Bearer, Ok(None) → no-header, Err(Expired) → -32099 short-circuit, and Err(other) → debug-log + no-header branches are all handled distinctly. The #[allow(dead_code)] annotation on token_expired() helper in mcp.rs is dropped — the helper is now live. New test expired_cached_token_surfaces_token_expired_typed_error seeds an expired token.json via MNEMONIC_CONFIG_DIR override and asserts -32099 with data.kind=TokenExpired, data.expires_at, and data.pubkey carried through. AC16 error catalogue coverage on the soft-fall path is now complete."
+    }
+  ],
+  "new_findings": [],
+  "implementation_quality_notes": [
+    {
+      "topic": "is_safe_hosted_endpoint prefix match for 127.0.0.1",
+      "assessment": "CORRECT. The loopback allowlist is ['http://127.0.0.1', 'http://localhost', 'http://[::1]'] with strip_prefix() followed by a rest.is_empty() || rest.starts_with(':') || rest.starts_with('/') suffix check. This correctly allows http://127.0.0.1:3000/mcp and http://localhost/mcp while rejecting http://127.0.0.1.attacker.example/mcp and http://localhost.attacker.example. It does NOT allow http://127.0.0.2 or other 127.x.x.x addresses — these are rejected because the prefix match is exact. Note: the full loopback range is 127.0.0.0/8 (RFC 5735); a developer using http://127.0.0.2:8080 for testing would receive a RejectedUnsafe rejection. This is an acceptable restriction for v1 — dev test infra typically uses 127.0.0.1 or localhost."
+    },
+    {
+      "topic": "TokenExpired short-circuit fires before the HTTP call",
+      "assessment": "CORRECT. The read_token() match block runs before client.post(endpoint).send().await. An expired token never reaches the network — the Expired arm returns immediately with -32099. This means no partial request is sent to the hosted endpoint for an expired-credential path, which is the correct behaviour."
+    },
+    {
+      "topic": "scrub_reqwest_error on non-2xx body text",
+      "assessment": "CORRECT AND IMPROVED. The previous code leaked the raw body_text from a non-2xx response into data.last_error via format!(\"hosted endpoint returned HTTP {status}: {body_text}\"). The round-3 fix drops body_text entirely, emitting only \"hosted endpoint returned HTTP {status}\". A hostile hosted operator who returns a 401 with a body of \"{'jwt':'...sensitive...'}\" can no longer leak that content through the agent's error response."
+    },
+    {
+      "topic": "malformed hosted response guard (R1-004)",
+      "assessment": "CORRECT. The let Some(obj) = inner_value.as_object_mut() else { return Err(HostedUnavailable(...)) } guard prevents the previous silent Ok(Null) on a malformed response. The test opt_in_escalation_hosted_malformed_response_surfaces_hosted_unavailable passes a bare string 'totally-not-an-object' as the hosted result and asserts -32011 with a last_error containing 'malformed hosted response'. This closes a subtle correctness hole where a protocol-level mismatch would surface as an empty success to the agent."
+    },
+    {
+      "topic": "softfall_env_guard mutex and #[allow(clippy::await_holding_lock)]",
+      "assessment": "ACCEPTABLE. The static std::sync::Mutex guard serialises the MNEMONIC_CONFIG_DIR env mutation across all 8 soft-fall tests. The #[allow(clippy::await_holding_lock)] at the file level is justified in the comment: there is only one mutex and each test acquires it once (no re-entrant path), so the deadlock risk Clippy warns about is structurally excluded. Using tokio::sync::Mutex would force every call site to become async just for the lock. The trade-off is correct for a test-only fixture."
+    }
+  ],
+  "security_posture_summary": "Task 5's security posture across all three rounds: (1) Decision 12 env-var gating is complete with URL-level SSRF validation — the threat model now covers both 'attacker injects env var without flag' AND 'attacker flips both flag and env var'. (2) Soft-fall privacy contract (no silent escalation, explicit opt-in) is correctly implemented and tested. (3) Redirect policy (none) on hosted_client closes mid-connection redirect attacks. (4) Local pre-flight public-write gate (round 2) ensures a compromised hosted operator cannot bypass the user-approval ceremony. (5) Credential/URL scrubbing in error messages prevents information disclosure through JSON-RPC error responses. (6) TokenExpired canonical error code closes the AC16 error catalogue gap on the soft-fall path. No remaining open security findings."
+}

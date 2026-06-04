@@ -1,0 +1,75 @@
+{
+  "round": 1,
+  "reviewer": "t5-code-reviewer",
+  "commit": "997f503",
+  "verdict": "approve_with_minor_fixes",
+  "summary": "Task 5 implementation is correct on all critical paths. Architecture is sound: McpState singleton reused, run_stdio() correctly reused by mcp-stdio subcommand, Decision 12 gating implemented correctly, soft-fall routing matches Decision 4 semantics. Two minor issues require fixes before merge; one dead public function should be removed or suppressed.",
+  "issues": [
+    {
+      "id": "R1-001",
+      "severity": "minor",
+      "dimension": "code_readability",
+      "file": "mcp/src/lib.rs",
+      "lines": "82-99",
+      "title": "resolve_hosted_endpoint (&'static str variant) is dead public API that always returns DEFAULT_HOSTED_ENDPOINT regardless of arguments",
+      "description": "resolve_hosted_endpoint() is a public function that, for the case (allow_custom=true, env_value=Some(_)), discards the env value and returns DEFAULT_HOSTED_ENDPOINT anyway (the let _ = s; branch). The actual main.rs caller uses resolved_hosted_endpoint() (the String/bool tuple variant). The &'static str variant cannot actually honour the env-override case — its comment admits 'signal use env by returning the default and let main handle the actual string'. This means the function is misleadingly documented: it claims to gate the override, but the gate result is always the same output. No caller uses this variant outside the doc comment. Clippy passes because the function is pub, but it is effectively dead.",
+      "recommendation": "Either delete resolve_hosted_endpoint entirely (resolved_hosted_endpoint covers all needs), or change it to an internal helper (non-pub) used only in a test, and annotate it #[cfg(test)]. Do not leave a pub function that silently ignores its input — future callers will assume it works."
+    },
+    {
+      "id": "R1-002",
+      "severity": "minor",
+      "dimension": "code_readability",
+      "file": "mcp/src/tools.rs",
+      "lines": "512-518",
+      "title": "Dead else-if branch in proxy_participate: let _ = sub is a no-op placeholder",
+      "description": "The else-if Some(sub) = jwt_sub block in proxy_participate exists to document a defensive case, but its body is let _ = sub; — it neither adds a header nor does anything. The preceding if branch (read_token success) adds a Bearer header; the else branch (no token, no jwt_sub) correctly sends no header; but the else-if adds no header either. The let _ = sub; suppresses the unused-variable warning without serving any purpose. The comment says 'Pass nothing; the hosted side will reject with the typed unauthorized error' — which is what happens with no else-if at all.",
+      "recommendation": "Remove the else-if branch entirely. The fall-through (no token set) is already the correct behaviour. If defensive documentation is desired, add a code comment on the closing brace of the if block instead."
+    },
+    {
+      "id": "R1-003",
+      "severity": "minor",
+      "dimension": "testing",
+      "file": "mcp/tests/cli_subcommands.rs",
+      "lines": "142-148, 266",
+      "title": "mcp_stdio_accepts_jsonrpc_on_stdin asserts !tools.is_empty() instead of TDD anchor's 7 entries",
+      "description": "The task's TDD anchor specifies: 'assert result.tools contains 7 entries'. The test asserts !tools.is_empty(). The test comment explains the reason: 'Task 5 only proves the subcommand routes to the existing dispatcher, NOT the tool inventory'. This is a reasonable narrowing for isolation, but it deviates from the anchor and means a regression where tool_definitions() drops from 7 to 1 would not be caught by this test.",
+      "recommendation": "Change the assertion to assert!(tools.len() >= 7, ...) and note in the comment why >= 7 rather than == 7 (Task 5 does not own the tool count — Wave 1 Tasks 1/2 do). This preserves isolation intent while honouring the TDD anchor bound."
+    },
+    {
+      "id": "R1-004",
+      "severity": "minor",
+      "dimension": "code_readability",
+      "file": "mcp/src/tools.rs",
+      "lines": "609-622",
+      "title": "Null inner_value silently drops the escalated field in a malformed hosted-response path",
+      "description": "In proxy_participate, when inner_text is None (the hosted response has no content[0].text envelope, e.g. a bug in the hosted server) the code falls back to result.clone(). If result itself is also Null, inner_value is Null, as_object_mut() returns None, and the escalated field is never injected. Ok(Null) is returned to the agent — which looks like a successful empty write with no escalation marker. This is a protocol correctness issue: the agent cannot distinguish 'escalation succeeded but returned null result' from 'bug in parsing'. The code comment says 'mirror that here so the dispatcher's downstream wrapping is a no-op', but the downstream dispatcher will wrap Null in the MCP content envelope, producing a confusing empty success response.",
+      "recommendation": "After the inner_value assignment: if inner_value is Null or not an object, return HostedUnavailable with last_error='malformed hosted response: missing content[0].text'. The test in opt_in_escalation_returns_escalated_field currently mocks a well-formed response so this path is not exercised; it should be exercised in a separate negative-case test or the guard added to make the success path reliable."
+    }
+  ],
+  "positive_observations": [
+    "Decision 12 is correctly implemented: --allow-custom-endpoint is a clap global flag with global=true, so it parses before AND after the subcommand position. The test helper correctly prepends it before 'mcp-stdio'. MNEMONIC_HOSTED_ENDPOINT env var is read after clap parse; the warning line text matches the spec verbatim.",
+    "Logout short-circuits before any McpState build — no embedder download, no SQLite open, no identity bootstrap. This is architecturally correct per the task spec ('MUST run before any McpState build').",
+    "mcp-stdio subcommand correctly reuses the existing run_stdio() path. The Arc<McpState> singleton is shared with run_http; no duplicate embedder/store construction. Code path confirmed at main.rs:648.",
+    "Soft-fall routing correctly implements Decision 4's three conditions: (1) allow_fallback=true, (2) error code in soft-fallable catalogue, (3) non-empty hosted endpoint. The sentinel-string trick (empty endpoint disables soft-fall) is clearly documented and properly tested in default_no_silent_escalation which points at 'http://unreachable.invalid' to catch accidental escalation.",
+    "softfall_reason_from_error matches on (code, kind) — both fields required — which prevents a fabricated error with code=-32098 but kind='Other' from triggering escalation. This closes a potential bypass.",
+    "proxy_participate correctly strips allow_fallback_to_participate from the proxied args, preventing recursive escalation. The comment explains why.",
+    "proxy_participate correctly propagates PublicWriteRequiresConfirmation from the hosted side verbatim, satisfying Decision 4+5b interaction.",
+    "resolved_hosted_endpoint is a pure function with no I/O; the in-process matrix tests (4 cases) cover all branches without spawning a binary, keeping the test suite fast.",
+    "All 9 TDD anchor tests are present and pass. The #[ignore] annotation for network-dependent tests is consistent with the existing stdio_backward_compat pattern.",
+    "Token file MNEMONIC_CONFIG_DIR sandboxing in logout tests correctly avoids touching the developer's real ~/.mnemonic. The pattern mirrors how the token_store tests work.",
+    "ToolError enum with TypedRpc/Other discriminator is the correct pattern — avoids the round-1 string-parsing hack mentioned in the inline comment.",
+    "chat.rs and seed.rs correctly pass allow_fallback=false and empty/sentinel endpoint, with the reasoning documented inline. No unintended escalation paths from seeding."
+  ],
+  "acceptance_criteria_check": {
+    "AC_mcp_stdio_subcommand_wired": "PASS — dispatches to run_stdio()",
+    "AC_logout_subcommand": "PASS — tested with idempotency",
+    "AC_allow_custom_endpoint_flag": "PASS — Decision 12 correctly implemented",
+    "AC_softfall_routing": "PASS — all 3 conditions checked",
+    "AC_escalated_field_in_response": "PASS — injected in proxy_participate success path (but see R1-004 for Null edge case)",
+    "AC_hosted_unavailable_on_no_network": "PASS — port-0-bind test confirms -32011",
+    "AC_visibility_re_resolves_after_escalation": "PASS — hosted side enforces gate; opt_in_escalation_no_confirmation_token confirms -32095 propagated",
+    "AC_all_9_tdd_anchor_tests_pass": "PASS per coder report; TDD anchor assertion weakened in one test (see R1-003)",
+    "AC_existing_tests_still_pass": "PASS — signature adapters correct across error_catalogue, pending_authz, pending_expiry, sign_callback, sign_memory_visibility",
+    "AC_clippy_clean": "PASS"
+  }
+}

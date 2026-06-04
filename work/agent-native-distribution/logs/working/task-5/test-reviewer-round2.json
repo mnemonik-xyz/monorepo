@@ -1,0 +1,88 @@
+{
+  "round": 2,
+  "reviewer": "t5-test-reviewer",
+  "commit": "158ddc9",
+  "task": "5",
+  "feature": "agent-native-distribution",
+  "status": "passed",
+  "summary": "All five round-1 findings addressed correctly. The three previously #[ignore]'d TDD anchors now run as active tests via PRICING_REFRESH_DISABLED + EMBED_PROVIDER=stub-test. The tools.len assertion tightened to >= 5. F-3 fully resolved: local pre-flight gate fires before the proxy, mock configured to return success, mock.calls()==0 proves the local code is the source of truth. F-4 consolidated into tests/support/mod.rs. F-5 empty-sentinel test locks the documented contract. No new issues introduced.",
+
+  "findingsResolution": [
+    {
+      "id": "F-1",
+      "severity": "medium",
+      "originalIssue": "Three spawned-binary anchors permanently #[ignore]'d with no CI path",
+      "resolution": "RESOLVED",
+      "detail": "PRICING_REFRESH_DISABLED=1 guard added in mcp/src/main.rs skips both initial and background pricing.refresh() calls. EMBED_PROVIDER=stub-test added in core/src/embed/mod.rs provides a constant 8-dim zero-vector embedder that avoids the 60s+ TurboQuant rotation-matrix build. MNEMONIC_CONFIG_DIR override extended to core/src/identity/ensure.rs with sandbox-disables-OsKeyStore semantics. All three #[ignore] annotations removed. STARTUP_TIMEOUT reduced from 45s to 15s, consistent with the improved boot time."
+    },
+    {
+      "id": "F-2",
+      "severity": "medium",
+      "originalIssue": "assert!(!tools.is_empty()) accepted a dispatcher returning one dummy tool",
+      "resolution": "RESOLVED",
+      "detail": "Changed to assert!(tools.len() >= 5, \"tools/list should return >= 5 tool entries; got {} (full response: {resp})\", tools.len()). Comment updated to explain the >= 5 vs exact count rationale. Litmus-test failure closed."
+    },
+    {
+      "id": "F-3",
+      "severity": "medium",
+      "originalIssue": "opt_in_escalation_no_confirmation_token was a mock-return anti-pattern — mock returned -32095, test proved mock wiring not local re-resolution",
+      "resolution": "RESOLVED",
+      "detail": "Local pre-flight public-write gate added in tools::proxy_participate: checks visibility==\"public\" && (public_write_confirmation empty || jti empty), returns -32095 before the network call. Test rewritten: mock now returns SUCCESS; test asserts -32095 AND m.calls()==0 — proving the LOCAL gate fires before the proxy. Additional test opt_in_escalation_with_valid_confirmation_token_reaches_hosted added as the negative-of-the-negative: well-formed token+jti passes the local gate and the mock sees 1 call. Both sides of the contract are now pinned."
+    },
+    {
+      "id": "F-4",
+      "severity": "low",
+      "originalIssue": "FailingEmbedder duplicated inline across error_catalogue.rs and sign_memory_softfall.rs",
+      "resolution": "RESOLVED",
+      "detail": "mcp/tests/support/mod.rs created (86 lines). FailingEmbedder moved there with always_fail() and with_dim(n) constructors. Both error_catalogue.rs and sign_memory_softfall.rs updated to mod support; use support::FailingEmbedder;. Single source of truth established."
+    },
+    {
+      "id": "F-5",
+      "severity": "low",
+      "originalIssue": "Empty-endpoint sentinel (hosted_endpoint==\"\") had no test; allow_fallback=true + empty endpoint contract undocumented",
+      "resolution": "RESOLVED",
+      "detail": "empty_endpoint_sentinel_propagates_local_error added in sign_memory_softfall.rs. Uses mock_state_with_embedder_and_endpoint(FailingEmbedder::always_fail(), String::new()). Asserts -32098 EmbedderInvalid (not -32011 HostedUnavailable). Contract locked."
+    }
+  ],
+
+  "newFindingsIntroduced": [],
+
+  "observationsNoAction": [
+    {
+      "id": "OBS-1",
+      "note": "EMBED_PROVIDER=stub-test produces constant 8-dim zero vectors. The stub warns on stderr: 'production deploys MUST NOT use this provider'. Because every embed() call returns identical zero vectors, all cosine-similarity scores will be equal (or undefined for zero vectors). This is acceptable here because cli_subcommands tests only call tools/list (which never invokes embed()) and the sign_memory_softfall tests inject FailingEmbedder that returns Vec::new() before the stub would ever be called. If a future test attempts semantic recall assertions through the spawned binary using EMBED_PROVIDER=stub-test, cosine scores will be misleading. Not an issue for the current test suite."
+    },
+    {
+      "id": "OBS-2",
+      "note": "The sandbox MNEMONIC_CONFIG_DIR env guard in ensure.rs correctly drops OsKeyStore in sandbox mode. One edge: if a developer runs tests with a stale MNEMONIC_CONFIG_DIR set in their shell session, the OsKeyStore suppression kicks in unexpectedly. The guard explicitly checks for empty string (filter(|s| !s.is_empty())), which is a reasonable safeguard. No action needed."
+    },
+    {
+      "id": "OBS-3",
+      "note": "opt_in_escalation_with_valid_confirmation_token_reaches_hosted passes a fake 'public_write_confirmation' token and jti. The comment correctly notes 'cryptographic validation is the hosted side's ledger's job'. This is the right scope boundary — the local pre-flight is a presence check, not a cryptographic one, and Decision 5b integration tests (Task 4 scope) cover the HMAC ledger path."
+    }
+  ],
+
+  "tddAnchorCoverage": [
+    { "anchor": "mcp_stdio_accepts_jsonrpc_on_stdin",          "status": "covered_active",   "note": "tools.len() >= 5 assertion. F-1 + F-2 both closed." },
+    { "anchor": "logout_removes_token_file",                   "status": "covered_active" },
+    { "anchor": "logout_is_idempotent_when_file_absent",       "status": "covered_active" },
+    { "anchor": "env_var_ignored_without_flag",                "status": "covered_active",   "note": "#[ignore] removed. F-1 closed." },
+    { "anchor": "env_var_honored_with_flag",                   "status": "covered_active",   "note": "#[ignore] removed. F-1 closed." },
+    { "anchor": "default_no_silent_escalation",                "status": "covered_active" },
+    { "anchor": "opt_in_escalation_returns_escalated_field",   "status": "covered_active" },
+    { "anchor": "opt_in_escalation_no_confirmation_token",     "status": "covered_active",   "note": "F-3 closed. Mock returns success; m.calls()==0 proves local gate." },
+    { "anchor": "opt_in_escalation_no_network",                "status": "covered_active" }
+  ],
+
+  "severityCounts": {
+    "critical": 0,
+    "high": 0,
+    "medium": 0,
+    "low": 0
+  },
+
+  "taskRequired": {
+    "needed": false,
+    "reason": "All findings resolved. Test suite is clean. No additional tasks required."
+  }
+}

@@ -1,0 +1,58 @@
+{
+  "round": 2,
+  "reviewer": "t5-code-reviewer",
+  "base_commit": "997f503",
+  "round2_commit": "158ddc9",
+  "verdict": "approve_with_minor_fixes",
+  "summary": "Round 2 fixes R1-003 (tools.len >= 5) and adds significant new correct functionality: PRICING_REFRESH_DISABLED guard, stub-test embedder, MNEMONIC_CONFIG_DIR identity sandboxing, local pre-flight public-write gate (defence-in-depth), FailingEmbedder consolidation, and two new positive tests (opt_in_escalation_with_valid_confirmation_token_reaches_hosted + empty_endpoint_sentinel_propagates_local_error). R1-001 and R1-002 were not addressed — both dead-code items remain. R1-004 was not addressed — the Null inner_value path still silently drops the escalated field. One new minor documentation defect introduced (error_catalogue.rs comment claims with_dim(384) but actual code uses default() dim=8).",
+  "round1_findings_resolution": {
+    "R1-001": {
+      "status": "not_fixed",
+      "note": "resolve_hosted_endpoint() at mcp/src/lib.rs:82-100 still exists as public API and still returns DEFAULT_HOSTED_ENDPOINT regardless of arguments. The doc comment was expanded to explain the design intent but the function body is unchanged. The (true, Some(s)) arm discards s and returns DEFAULT_HOSTED_ENDPOINT — same as all other arms. No caller uses this function."
+    },
+    "R1-002": {
+      "status": "not_fixed",
+      "note": "Dead else-if branch at mcp/src/tools.rs:572-578 still present. The body is still 'let _ = sub;' — a no-op. The comment was not changed. The branch was not removed."
+    },
+    "R1-003": {
+      "status": "fixed",
+      "note": "Changed from !tools.is_empty() to tools.len() >= 5 with an explanatory comment. The #[ignore] annotation was also removed from mcp_stdio_accepts_jsonrpc_on_stdin, env_var_ignored_without_flag, and env_var_honored_with_flag — all three spawned-binary tests now run in CI without --ignored."
+    },
+    "R1-004": {
+      "status": "not_fixed",
+      "note": "The Null inner_value path at mcp/src/tools.rs:669-683 is unchanged. When inner_text is None, inner_value falls back to result.clone(). If result is also Null (or not an object), as_object_mut() returns None and the escalated field is silently dropped. Ok(Null) is still returned. No guard was added."
+    }
+  },
+  "new_issues": [
+    {
+      "id": "R2-001",
+      "severity": "minor",
+      "dimension": "code_readability",
+      "file": "mcp/tests/error_catalogue.rs",
+      "lines": "179, 199",
+      "title": "Comment says FailingEmbedder::with_dim(384) but actual code uses FailingEmbedder::default() (dim=8)",
+      "description": "The comment at line 179 states 'The original dim = 384 semantics are preserved via FailingEmbedder::with_dim(384) at the construction site below.' The actual construction at line 199 is 'FailingEmbedder::default()' which calls always_fail() with dim=8 (not 384). The compressor at line 197 is also dim=8 so the test is internally consistent and passes, but the comment is factually incorrect. A reader tracing the dim contract would be misled.",
+      "recommendation": "Either change the construction to FailingEmbedder::with_dim(8) (making the dim explicit and consistent with the compressor) and update the comment to match, OR change the compressor to dim=384 and construction to with_dim(384) if 384 was the intended shape. The dim=8 path is simpler and already correct; just update the comment to remove the false with_dim(384) claim."
+    }
+  ],
+  "positive_observations": [
+    "PRICING_REFRESH_DISABLED=1 guard is correctly scoped: the flag is read once at startup, both the initial fetch and the background loop are gated on it, and the binary logs a clear tracing::info line documenting the test-mode semantics. The in-line comment explaining why the guard is needed (uploader.irys.xyz + coingecko 10s timeout on sandboxed CI) is correct and useful.",
+    "EMBED_PROVIDER=stub-test is properly gated to production-safe: the tracing::warn at startup means a production operator who accidentally sets this provider will see a warning in their traces. The provider correctly implements all four Embedder trait methods. It is NOT behind #[cfg(test)] — this is correct because it must be available in the compiled binary for spawned-binary tests.",
+    "MNEMONIC_CONFIG_DIR honour in default_stores() is architecturally correct. The OsKeyStore is dropped when the override is in effect, preventing real keychain entries from leaking into sandbox runs. The macOS-specific note about NSHomeDirectory being immune to $HOME mutation is accurate and is the correct reason for using the env var override pattern rather than setting HOME.",
+    "The local pre-flight public-write gate in proxy_participate is a correct defence-in-depth addition per Decision 4 + 5b. The gate fires before any network call, preventing a buggy/compromised hosted operator from bypassing the user-approval ceremony. The content_hash is computed locally (blake3 on the content field) rather than trusted from the request, which is the correct pattern.",
+    "opt_in_escalation_with_valid_confirmation_token_reaches_hosted is a correct positive test that pins the other side of the F-3 contract: a well-formed token+jti pair passes the local gate and the proxy fires (mock.calls() == 1). This prevents the local gate from over-firing on legitimate public writes.",
+    "empty_endpoint_sentinel_propagates_local_error correctly pins the empty-endpoint sentinel contract: allow_fallback=true with hosted_endpoint='' propagates the original -32098 EmbedderInvalid, NOT -32011 HostedUnavailable. This is the correct behaviour per the sentinel design and was the F-5 test-reviewer request.",
+    "FailingEmbedder consolidated into mcp/tests/support/mod.rs with added with_dim() constructor, Default impl, and public fields. The module follows the correct Cargo integration-test pattern (each test file declares 'mod support;'). The #[allow(dead_code)] on with_dim() is appropriate — keeping the composable surface without a lint warning.",
+    "All three previously #[ignore]'d spawned-binary tests (mcp_stdio_accepts_jsonrpc_on_stdin, env_var_ignored_without_flag, env_var_honored_with_flag) now run without --ignored. This is the correct outcome of the PRICING_REFRESH_DISABLED + stub-test combination removing the startup latency blockers.",
+    "The fake_home/$HOME/$MNEMONIC_CONFIG_DIR pattern in mcp_stdio_accepts_jsonrpc_on_stdin correctly sandboxes both dirs::home_dir() (via HOME env) and token_store::token_path() (via MNEMONIC_CONFIG_DIR). The pre-seeded keypair in fake_home/.mnemonic/identity.json avoids the 'identity created' first-boot path that would have triggered the RAG bootstrap loop."
+  ],
+  "acceptance_criteria_check": {
+    "R1-001_dead_resolve_hosted_endpoint": "NOT FIXED — still present as dead public API",
+    "R1-002_dead_jwt_sub_branch": "NOT FIXED — else-if still present with let _ = sub body",
+    "R1-003_tools_len_assertion": "FIXED — now tools.len() >= 5",
+    "R1-004_null_inner_value_drops_escalated": "NOT FIXED — Null fallback path unchanged",
+    "R2_001_errorcatalogue_dim_comment": "NEW MINOR — comment says with_dim(384) but code uses default() dim=8",
+    "new_functionality_correct": "PASS — all 5 new round-2 additions (stub-test, PRICING_REFRESH_DISABLED, MNEMONIC_CONFIG_DIR sandboxing, local pre-flight gate, test consolidation) are architecturally correct"
+  },
+  "merge_recommendation": "The three unfixed round-1 findings (R1-001, R1-002, R1-004) are minor and do not block correctness or security. R1-001 and R1-002 are dead-code quality issues. R1-004 is an edge case in a malformed-hosted-response path that is not currently tested. The author may choose to address them in a follow-on commit or accept them as known minor technical debt. The new round-2 code is high quality and all new tests are correct. Merge is acceptable once the author acknowledges the three open findings and the R2-001 comment defect."
+}

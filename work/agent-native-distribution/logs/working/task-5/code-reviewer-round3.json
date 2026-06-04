@@ -1,0 +1,59 @@
+{
+  "round": 3,
+  "reviewer": "t5-code-reviewer",
+  "base_commit": "158ddc9",
+  "round3_commit": "e26c99d",
+  "verdict": "approved",
+  "summary": "All four R1 findings are resolved. R1-001 (dead resolve_hosted_endpoint): deleted and superseded by a materially better resolved_hosted_endpoint that now returns a typed HostedEndpointWarning enum (None/FlagAbsent/RejectedUnsafe) and adds URL safety validation (SAR5-M1). R1-002 (dead else-if jwt_sub): removed; replaced with 'let _ = jwt_sub' at the boundary and a proper match on read_token() return variants including Err(Expired) -> -32099 TokenExpired (SAR5-INFO3). R1-003 (tools.len assertion): tightened further to >= 7, matching the TDD anchor. R1-004 (Null inner_value drops escalated): fixed with 'let Some(obj) = ... else { return HostedUnavailable }' and a dedicated test. R2-001 (error_catalogue.rs dim comment) remains unfixed — the only open minor item, acceptable as known technical debt. All new round-3 additions are architecturally correct.",
+  "round1_findings_resolution": {
+    "R1-001": {
+      "status": "fixed",
+      "note": "resolve_hosted_endpoint (&'static str variant) deleted from lib.rs. resolved_hosted_endpoint now returns (String, HostedEndpointWarning) with a new HostedEndpointWarning enum (None/FlagAbsent/RejectedUnsafe). URL safety validation added via is_safe_hosted_endpoint() — rejects non-https non-loopback, file://, cloud-metadata IPs, lookalike hosts, and userinfo credentials. Production main.rs updated to match on the typed enum, emitting a distinct RejectedUnsafe message for the new case."
+    },
+    "R1-002": {
+      "status": "fixed",
+      "note": "Dead 'else if let Some(sub) = jwt_sub { let _ = sub; }' branch removed from proxy_participate. Replaced by 'let _ = jwt_sub;' at the entry boundary to suppress the unused-binding lint. The token lookup path is now a proper match on read_token() with four meaningful arms: Ok(Some) -> Bearer, Ok(None) -> no header, Err(Expired) -> -32099 TokenExpired short-circuit, Err(other) -> debug log + proceed without Bearer."
+    },
+    "R1-003": {
+      "status": "fixed",
+      "note": "tools.len() >= 7 (up from >= 5 in round 2), matching the TDD anchor's full inventory of 6 pre-existing tools + request_public_write_confirmation from Task 4. Comment explains the >= vs == choice."
+    },
+    "R1-004": {
+      "status": "fixed",
+      "note": "Malformed-hosted-response guard added in proxy_participate: 'let Some(obj) = inner_value.as_object_mut() else { return Err(hosted_unavailable(...)) }'. Returns -32011 HostedUnavailable with last_error='malformed hosted response: missing or non-object content[0].text'. New test opt_in_escalation_hosted_malformed_response_surfaces_hosted_unavailable pins the contract."
+    }
+  },
+  "round2_findings_resolution": {
+    "R2-001": {
+      "status": "not_fixed",
+      "note": "error_catalogue.rs line 179 comment still says 'FailingEmbedder::with_dim(384)' but actual code at line 199 uses 'FailingEmbedder::default()' (dim=8). Test passes because compressor is also dim=8, but the comment is factually incorrect. Acceptable as known technical debt."
+    }
+  },
+  "new_additions_assessment": {
+    "HostedEndpointWarning_enum": "CORRECT — typed enum replaces bool 'should_warn', distinguishes FlagAbsent from RejectedUnsafe, pure function, no I/O. Tests in hosted_endpoint_validation_tests module cover all branches including edge cases: lookalike loopback, cloud-metadata, file://, userinfo credentials, empty string, unknown schemes.",
+    "is_safe_hosted_endpoint": "CORRECT — loopback prefix matching uses exact-suffix check (empty/colon/slash after prefix) so 'http://localhost.attacker.example' is correctly rejected. Userinfo detection via '@' in the host segment before the first '/' is sound. Defence-in-depth note in comment is accurate.",
+    "scrub_reqwest_error": "CORRECT — renders '<kind> error to host <hostname>' with no URL path, no query, no userinfo. Covers all reqwest error kinds via is_timeout/is_connect/is_request/is_body/is_decode/is_status with a catch-all 'transport'. SAR5-L1 now correctly closed: the no-network test asserts last_error does not contain '/mcp' or 'http://'.",
+    "HTTP_status_scrubbing": "CORRECT — 'hosted endpoint returned HTTP {status}' drops body_text from the error message, preventing raw response bodies (which may contain PII or server-internal error detail) from leaking into agent context.",
+    "TokenExpired_short_circuit": "CORRECT — Err(TokenStoreError::Expired { expires_at, sub }) short-circuits proxy_participate with -32099 TokenExpired BEFORE any HTTP call. The expired_cached_token_surfaces_token_expired_typed_error test pins the contract using a #[test] (not #[tokio::test]) with a fresh tokio runtime built inside the env-guard scope, matching the oauth_loopback.rs pattern for correct env-isolation.",
+    "softfall_env_guard_mutex": "CORRECT — process-wide static Mutex serialises all tests in the file that touch MNEMONIC_CONFIG_DIR. The #[allow(clippy::await_holding_lock)] at file level is appropriate: the guard is held across .await in the async tests by design. The expired-token test is #[test] (synchronous) so it does not hold the guard across awaits — it builds its own tokio runtime synchronously under the guard.",
+    "with_config_dir_override_unsafe": "CORRECT — unsafe std::env::set_var is properly guarded: the SAFETY comment accurately describes the invariant (single Mutex held by caller, restore-or-remove in all exit paths). The pattern mirrors oauth_loopback.rs. Integration test binaries are separate processes from each other so cross-crate env races cannot occur.",
+    "opt_in_escalation_hosted_malformed_response_surfaces_hosted_unavailable": "CORRECT — mock returns 'result: \"totally-not-an-object\"' (string, not content-array). Test asserts -32011, last_error contains 'malformed hosted response', mock.calls() == 1 confirming the HTTP request was made before the guard triggered.",
+    "resolved_hosted_endpoint_matrix_tests": "CORRECT — 7 cases in lib.rs #[cfg(test)] module cover: FlagAbsent, valid-https-env, valid-loopback-env, unsafe-env (RejectedUnsafe), file-scheme (RejectedUnsafe), no-env-with-flag, no-env-no-flag. All are in-process unit tests, fast, no I/O."
+  },
+  "acceptance_criteria_final": {
+    "R1_001_dead_resolve_hosted_endpoint": "FIXED",
+    "R1_002_dead_jwt_sub_branch": "FIXED",
+    "R1_003_tools_len_ge_7": "FIXED",
+    "R1_004_null_inner_value_guard": "FIXED",
+    "R2_001_errorcatalogue_dim_comment": "OPEN — minor documentation defect, acceptable as known technical debt",
+    "SAR5_M1_url_validation": "IMPLEMENTED and tested",
+    "SAR5_L1_scrub_reqwest_errors": "IMPLEMENTED and tested",
+    "SAR5_INFO3_token_expired_short_circuit": "IMPLEMENTED and tested",
+    "SAR5_L2_delete_dead_function": "IMPLEMENTED (overlaps R1-001)",
+    "all_tdd_anchor_tests_present": "PASS",
+    "cargo_test_clean": "PASS per coder report",
+    "cargo_clippy_clean": "PASS per coder report",
+    "cargo_fmt_clean": "PASS per coder report"
+  },
+  "merge_recommendation": "Approved for merge. All substantive findings from rounds 1, 2, and the security audit are resolved. The one open item (R2-001: wrong dim in error_catalogue.rs comment) is a documentation-only defect with no runtime impact and can be addressed in a follow-on. Task 5 is complete."
+}
