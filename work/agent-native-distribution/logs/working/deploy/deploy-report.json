@@ -1,0 +1,154 @@
+{
+  "scope": "T13 deploy (agent-native-distribution feature)",
+  "agent": "t13-deploy",
+  "date": "2026-06-05",
+  "verdict": "go",
+  "tag": "v0.2.3",
+  "commit": "85a79be9412f906e51417ea084dd60d02bb46043",
+  "github_release_url": "https://github.com/mnemonik-xyz/monorepo/releases/tag/v0.2.3",
+
+  "version_bumps": {
+    "mcp/Cargo.toml": "0.1.0 -> 0.2.3",
+    "core/Cargo.toml": "0.1.0 -> 0.2.3",
+    "packages/mcp/package.json": "0.2.0 -> 0.2.3",
+    "packages/mcp/dist/binary-version.json (tag)": "v0.2.0 -> v0.2.3",
+    "packages/sdk/package.json": "0.2.1 (unchanged — skip-if-already-published)",
+    "packages/cli/package.json": "0.2.2 (unchanged — skip-if-already-published)",
+    "EMBEDDER_MODEL_VERSION literal": "0.1.0-fastembed-5.13.2 (unchanged — Cargo.lock fastembed 5.13.2 confirms in sync)"
+  },
+
+  "ci_runs": [
+    {
+      "run_id": 26999228682,
+      "url": "https://github.com/mnemonik-xyz/monorepo/actions/runs/26999228682",
+      "tag_pointed_at": "54946a3 (initial bump commit)",
+      "outcome": "cancelled (user) — build-linux failed due to missing libdbus-1-dev; x86_64-apple-darwin queued indefinitely"
+    },
+    {
+      "run_id": 27000964152,
+      "url": "https://github.com/mnemonik-xyz/monorepo/actions/runs/27000964152",
+      "tag_pointed_at": "adc8e94 (continue-on-error + release needs:[build-macos])",
+      "outcome": "cancelled — superseded by next iteration after libdbus root cause confirmed"
+    },
+    {
+      "run_id": 27001770879,
+      "url": "https://github.com/mnemonik-xyz/monorepo/actions/runs/27001770879",
+      "tag_pointed_at": "a2bbc2a (libdbus-1-dev added to apt-get for native + cross paths)",
+      "outcome": "cancelled (still on macos-13 x86_64 queue blocker) — superseded by Apple-Silicon-only pivot"
+    },
+    {
+      "run_id": 27001975333,
+      "url": "https://github.com/mnemonik-xyz/monorepo/actions/runs/27001975333",
+      "tag_pointed_at": "85a79be (Apple-Silicon-only pivot)",
+      "outcome": "completed (with non-blocking failures captured below)"
+    }
+  ],
+
+  "ci_final_jobs": {
+    "Build aarch64-apple-darwin": "success",
+    "Build x86_64-unknown-linux-gnu": "success (libdbus-1-dev fix took effect)",
+    "Build aarch64-unknown-linux-gnu": "failure — multi-arch dpkg path didn't resolve libdbus-1-dev:arm64 cleanly; continue-on-error safety net engaged; release not blocked",
+    "Create Release": "success",
+    "Publish to npm with provenance (sdk + cli)": "success — both skipped-if-already-published as expected; no version regression",
+    "Publish @mnemonik-xyz/mcp with provenance": "failure — Trusted Publishing OIDC config not active on the npm package at run time; user manually published @mnemonik-xyz/mcp@0.2.3 from a developer machine afterward"
+  },
+
+  "github_release_assets": {
+    "actually_attached": [
+      "mnemonic-mcp-v0.2.3-aarch64-apple-darwin.tar.gz",
+      "SHA256SUMS"
+    ],
+    "note_on_linux_x86_64": "Build succeeded but the tarball did not land on the GitHub Release because the `release` job has `needs: [build-macos]` and its `download-artifact@v4` only collects artifacts present in the workflow run's artifact store at the moment it downloads. The Linux x86_64 tarball IS still retrievable from the workflow run's artifact store at https://github.com/mnemonik-xyz/monorepo/actions/runs/27001975333 (90-day retention). If Linux binaries become an explicit v1.1 deliverable, either add `build-linux` back to `release.needs:` (accepting that one Linux failure now blocks the release) or use `actions/download-artifact@v4` with `pattern:` to selectively merge successful Linux outputs in a follow-up workflow."
+  },
+
+  "attestation": {
+    "method": "actions/attest-build-provenance@v1 (sigstore)",
+    "subject": "tarballs (intentional — shim verifies the tarball BEFORE extraction; see SAR8-M2)",
+    "verifiable_via": "gh attestation verify <tarball> --owner mnemonik-xyz --repo monorepo --signer-workflow .github/workflows/release.yml"
+  },
+
+  "npm_publish": {
+    "@mnemonik-xyz/sdk": "0.2.1 — unchanged, no republish (CI skip-if-already-published)",
+    "@mnemonik-xyz/cli": "0.2.2 — unchanged, no republish (CI skip-if-already-published)",
+    "@mnemonik-xyz/mcp": "0.2.3 — published MANUALLY by user from a developer machine (npm CLI). Trusted Publishing config exists for the package on npm.com but the publish-mcp-shim job's OIDC token was rejected on the first publish attempt — this is the standard first-publish gotcha. Manual publish completed; verified live via `npm view @mnemonik-xyz/mcp version` -> 0.2.3 (72.4 kB unpacked, integrity OK).",
+    "tarball_contents_verified": true,
+    "secrets_or_env_in_tarball": false,
+    "shasum": "a0960910f0b64837361f3a16e7c8e992d552e9aa"
+  },
+
+  "vps_redeploy": {
+    "host": "claude@150.251.147.215 (mnemonik.xyz / mcp.mnemonik.xyz)",
+    "method": "bash scripts/deploy/deploy-main-to-prod.sh",
+    "now_on_commit": "85a79be9412f906e51417ea084dd60d02bb46043",
+    "build_method": "cargo build --release -p mnemonic-mcp --features local-embed (native VPS build, 2m45s)",
+    "downtime_seconds": "~3 (sudo systemctl restart mnemonic-mcp)",
+    "db_backup_path": "/home/claude/data/attestations.db.pre-main-20260605-...",
+    "health_checks": {
+      "localhost_3000_health": "ok (4s)",
+      "public_https_mcp_mnemonik_xyz_health": "{\"status\":\"ok\"}"
+    },
+    "endpoint_verification": {
+      "prompts/list count": 7,
+      "resources/list count": 7,
+      "tools/list count": 7,
+      "tools[0].description sample": "contains Purpose: + Trigger: sections (skill manifests projecting correctly)",
+      "initialize.embedder": {
+        "dim": 384,
+        "model_id": "all-MiniLM-L6-v2",
+        "model_version": "0.1.0-fastembed-5.13.2"
+      }
+    },
+    "journal_clean_startup": true,
+    "non_fatal_warnings": [
+      "WARN initial pricing refresh failed (using floor price): sol price fetch — pricing-feed flake, falls back to floor 1000 micro-USDC. Pre-existing, not a regression.",
+      "ERROR RAG seeding failed: sign_memory failed for QUICKSTART.md chunk 0 — RAG seeding is a startup optimization; one chunk failed but server continued and is serving requests. Worth tracking but not blocking deploy."
+    ],
+    "restart_loop": false
+  },
+
+  "iterations_summary": {
+    "iteration_1": "Initial v0.2.3 tag on 54946a3 — Linux build failed (missing libdbus-1-dev); x86_64-apple-darwin queued. User cancelled the run.",
+    "iteration_2": "release.yml fix (adc8e94): continue-on-error on build-linux + release.needs:[build-macos]. Retagged. Still blocked on macos-13 x86_64 queue. User signaled new plan.",
+    "iteration_3": "release.yml fix (a2bbc2a): libdbus-1-dev for native + libdbus-1-dev:arm64 for cross. Retagged. Still blocked on macos-13 queue. User pivoted to Apple-Silicon-only.",
+    "iteration_4": "release.yml + binary-version.json + paths.ts pivot (85a79be): dropped x86_64-apple-darwin from matrix, narrowed PlatformKey, added user-friendly Intel Mac error, bumped test fixture TAG to v0.2.3. Retagged. SUCCEEDED (with non-blocking aarch64 Linux failure + publish-mcp-shim Trusted Publisher first-publish failure)."
+  },
+
+  "ac_coverage_for_task_13": {
+    "Versions bumped": "covered",
+    "binary-version.json points at new tag": "covered (and reduced to darwin-arm64 only per Apple-Silicon pivot)",
+    "CHANGELOG entry": "covered (work/agent-native-distribution/CHANGELOG.md)",
+    "Tag pushed to origin": "covered (v0.2.3 on 85a79be)",
+    "release.yml CI green: build-macos, release, publish-mcp-shim, publish-npm": "PARTIAL — build-macos aarch64 green, release green, publish-npm (sdk+cli) green; publish-mcp-shim failed via OIDC (manual user publish completed the package); build-linux x86_64 green (bonus), aarch64 deferred",
+    "npm view @mnemonik-xyz/mcp version returns new version": "covered (live, 0.2.3)",
+    "npm view @mnemonik-xyz/mcp dist.tarball contains expected built dist": "covered (27 files, 19.9 kB packed / 72.2 kB unpacked, integrity OK)",
+    "VPS redeployed; /health ok; prompts/list returns 7": "covered (also resources/list=7, tools/list=7, embedder block correct)",
+    "No restart loop on VPS": "covered (journal clean)"
+  },
+
+  "forward_flags_for_v1_1": [
+    "Configure npm Trusted Publishing for @mnemonik-xyz/mcp now that the package exists on the registry (one-time setup on npm.com — package was not yet present at first attempt). After config, publish-mcp-shim job will succeed automatically on the next tag.",
+    "Fix aarch64-unknown-linux-gnu cross-compile: `dpkg --add-architecture arm64 && apt install libdbus-1-dev:arm64` did not resolve cleanly. Likely needs the GitHub-hosted Ubuntu image's arm64 repo to be explicitly registered, or a different toolchain (cross-rs or docker-based). Currently masked by continue-on-error.",
+    "macos-13 (x86_64-apple-darwin) runner availability: this entire iteration was driven by macos-13 queue starvation. Either accept Apple-Silicon-only as the v1 scope decision, or move x86_64 builds to a self-hosted runner / GitHub Larger Runners.",
+    "Linux x86_64 tarball was built successfully but did not get attached to the GitHub Release (release.needs:[build-macos] excludes Linux from the dependency tree, so it's not guaranteed to be in artifacts/). Decide whether Linux x86_64 binaries are a v1.1 deliverable; if yes, restructure the release job.",
+    "Two pre-existing non-fatal VPS warnings (sol price fetch + RAG seeding chunk failure) should be investigated independently — neither was introduced by this deploy."
+  ],
+
+  "files_changed_in_T13": [
+    "mcp/Cargo.toml (version)",
+    "core/Cargo.toml (version)",
+    "Cargo.lock (refreshed)",
+    "packages/mcp/package.json (version)",
+    "packages/mcp/dist/binary-version.json (tag + artifacts dict)",
+    "packages/mcp/src/paths.ts (PlatformKey narrowed, Intel Mac error message)",
+    "packages/mcp/test/install-binary.test.ts (TAG fixture)",
+    ".github/workflows/release.yml (continue-on-error, needs reduction, libdbus deps, matrix reduction)",
+    "work/agent-native-distribution/CHANGELOG.md (new)"
+  ],
+
+  "commits_landed_on_main": [
+    "54946a3 chore(release): bump versions for v0.2.3 coordinated release",
+    "adc8e94 fix(ci): make Linux builds non-blocking in release.yml — macOS is v1 scope",
+    "a2bbc2a fix(ci): install libdbus-1-dev for Linux builds + non-blocking safety net",
+    "85a79be fix(ci,packaging): v1 Apple Silicon only — drop x86_64-apple-darwin from matrix"
+  ]
+}

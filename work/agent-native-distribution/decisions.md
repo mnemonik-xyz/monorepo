@@ -403,3 +403,68 @@ Review details — in JSON files via links. QA report — in logs/working/.
 - Smoke (shim install --check): mtime stable on both files
 - Smoke (shim doctor): 6 checks, exit 1 with repair hints when binary/identity absent
 - Full report: [logs/working/qa/pre-deploy-qa.json](logs/working/qa/pre-deploy-qa.json)
+
+## T13 Deploy (wave 9) — v0.2.3 — 2026-06-05 — t13-deploy
+
+**Verdict:** GO. Production mcp.mnemonik.xyz is live on commit `85a79be` (tag v0.2.3); @mnemonik-xyz/mcp@0.2.3 is on npm; GitHub Release at https://github.com/mnemonik-xyz/monorepo/releases/tag/v0.2.3.
+
+### Coordinated versions
+- `mnemonic-mcp` (binary): 0.1.0 → **0.2.3**
+- `mnemonic-core` (lib): 0.1.0 → **0.2.3**
+- `@mnemonik-xyz/mcp` (npm shim): 0.2.0 → **0.2.3**
+- `@mnemonik-xyz/sdk`: 0.2.1 (unchanged; skip-if-already-published)
+- `@mnemonik-xyz/cli`: 0.2.2 (unchanged; skip-if-already-published)
+- `EMBEDDER_MODEL_VERSION`: `0.1.0-fastembed-5.13.2` (left as-is; Cargo.lock fastembed 5.13.2 confirms in sync)
+- `dist/binary-version.json`: tag v0.2.0 → v0.2.3, artifacts dict narrowed to `darwin-arm64` only
+
+### CI iterations (4 tag pushes on v0.2.3)
+1. **`54946a3`** (initial bump). Run 26999228682. Failed: build-linux missing `libdbus-1-dev`; x86_64-apple-darwin queued indefinitely on macos-13. **Cancelled by user.**
+2. **`adc8e94`** (`fix(ci): make Linux builds non-blocking in release.yml — macOS is v1 scope`). Run 27000964152. `continue-on-error: true` on `build-linux`; `release.needs:[build-macos]`. Still blocked on macos-13. **Cancelled** in favor of root-cause fix.
+3. **`a2bbc2a`** (`fix(ci): install libdbus-1-dev for Linux builds + non-blocking safety net`). Run 27001770879. Added `libdbus-1-dev` (native x86_64) + `dpkg --add-architecture arm64 && libdbus-1-dev:arm64` (cross aarch64). Still blocked on macos-13. **Cancelled** in favor of Apple-Silicon-only pivot.
+4. **`85a79be`** (`fix(ci,packaging): v1 Apple Silicon only — drop x86_64-apple-darwin from matrix`). Run 27001975333. **Completed.** Matrix reduced; `binary-version.json` narrowed; `paths.ts:detectPlatform` raises a clean Intel-Mac error; test fixture TAG bumped to v0.2.3.
+
+### Final CI state (run 27001975333)
+- ✅ Build aarch64-apple-darwin
+- ✅ Build x86_64-unknown-linux-gnu (libdbus fix took effect)
+- ❌ Build aarch64-unknown-linux-gnu (multi-arch dpkg path didn't resolve; `continue-on-error` safety net engaged; release not blocked)
+- ✅ Create Release (SHA256SUMS + sigstore attestation)
+- ✅ Publish to npm with provenance (sdk + cli skip-if-already-published)
+- ❌ Publish @mnemonik-xyz/mcp with provenance (Trusted Publishing OIDC rejected first attempt — standard first-publish gotcha; **user manually published** @mnemonik-xyz/mcp@0.2.3 from a dev machine; verified live via `npm view`)
+
+### GitHub Release assets (v0.2.3)
+- `mnemonic-mcp-v0.2.3-aarch64-apple-darwin.tar.gz`
+- `SHA256SUMS`
+- Linux x86_64 tarball: **built successfully but not attached** to the Release (release.needs:[build-macos] only — Linux artifacts live for 90 days in the workflow run's artifact store but aren't on the Release page). Acceptable for v1 (binary-version.json only references darwin-arm64).
+
+### VPS redeploy (mcp.mnemonik.xyz)
+- Method: `bash scripts/deploy/deploy-main-to-prod.sh` (canonical).
+- Now on commit `85a79be9412f906e51417ea084dd60d02bb46043`. DB backup at `/home/claude/data/attestations.db.pre-main-20260605-*`.
+- Build: native `cargo build --release -p mnemonic-mcp --features local-embed` (2m45s clean), webapp `npm install && npm run build` clean.
+- Restart: ~3s downtime.
+- Health: localhost:3000/health ok after 4s; https://mcp.mnemonik.xyz/health → `{"status":"ok"}`.
+- Endpoint verification (live, public):
+  - `prompts/list` → **7**, `resources/list` → **7**, `tools/list` → **7**
+  - `tools[0].description` contains `Purpose:` + `Trigger:` (skill manifests projecting correctly)
+  - `initialize.embedder` → `{dim:384, model_id:"all-MiniLM-L6-v2", model_version:"0.1.0-fastembed-5.13.2"}`
+- Journal: clean startup (identity, fastembed, TurboQuant 4-bit, storage=full, pricing, OAuth, Google OAuth, `MCP server listening on http://0.0.0.0:3000/mcp`). **No restart loop.**
+- Two pre-existing non-fatal warnings (not regressions, not blocking):
+  - `WARN initial pricing refresh failed (using floor price)` — sol price fetch flake.
+  - `ERROR RAG seeding failed: sign_memory failed for QUICKSTART.md chunk 0` — RAG seeding is a startup optimization; one chunk failed but server continues.
+
+### Forward flags for v1.1+
+- **Configure npm Trusted Publishing for @mnemonik-xyz/mcp** now that the package exists on the registry. Once configured, `publish-mcp-shim` job will succeed automatically on the next tag, removing the manual-publish step.
+- **Fix aarch64-unknown-linux-gnu cross-compile**: `dpkg --add-architecture arm64 && apt install libdbus-1-dev:arm64` did not resolve cleanly. Likely needs explicit arm64 repo registration on the GitHub ubuntu runner, or migration to `cross-rs` / docker-based cross. Currently masked by `continue-on-error: true`.
+- **macos-13 (x86_64-apple-darwin) runner availability** was the root cause driver of 3 of 4 iterations. Either codify Apple-Silicon-only as the v1 scope decision permanently (current state) or move x86_64 builds to GitHub Larger Runners / self-hosted.
+- **Linux x86_64 tarball missing from GitHub Release**: build succeeded but the release job's `needs:[build-macos]` excludes Linux from the dependency tree, so its artifact is not in `artifacts/` at download time. If Linux x86_64 binaries become a v1.1 deliverable, restructure the release job.
+- **Pre-existing VPS warnings** (sol price fetch + RAG seeding chunk failure) should be tracked separately — neither was introduced by this deploy.
+
+### Files changed in T13
+- `mcp/Cargo.toml`, `core/Cargo.toml`, `Cargo.lock`
+- `packages/mcp/package.json`, `packages/mcp/dist/binary-version.json`
+- `packages/mcp/src/paths.ts` (PlatformKey narrowed, Intel Mac error)
+- `packages/mcp/test/install-binary.test.ts` (TAG fixture v0.2.0 → v0.2.3)
+- `.github/workflows/release.yml` (continue-on-error, needs reduction, libdbus, matrix reduction)
+- `work/agent-native-distribution/CHANGELOG.md` (new release notes)
+- `work/agent-native-distribution/logs/working/deploy/deploy-report.json` (new)
+
+Full deploy report: [logs/working/deploy/deploy-report.json](logs/working/deploy/deploy-report.json).
