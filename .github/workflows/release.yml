@@ -23,11 +23,11 @@ jobs:
   build-linux:
     name: Build ${{ matrix.target }}
     runs-on: ubuntu-latest
-    # v0.2.3 (Option A): Linux artifacts are best-effort for v1.
-    # libdbus / cross-compile reliability is unresolved; macOS is
-    # the v1 release scope (binary-version.json lists only darwin*).
-    # `continue-on-error` prevents Linux flakes from cascading into
-    # the `release` job below (which now depends only on build-macos).
+    # v0.2.3: Linux build deps now include `libdbus-1-dev` + `pkg-config`
+    # (required by `libdbus-sys`, transitive of `keyring`). This should
+    # make Linux builds succeed. `continue-on-error: true` is kept as a
+    # safety net so any future apt/cross-compile drift still doesn't
+    # block release (which depends only on build-macos for v1).
     continue-on-error: true
     strategy:
       matrix:
@@ -49,13 +49,20 @@ jobs:
 
       - name: Install dependencies (native x86_64)
         if: matrix.cross == false
-        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev g++
+        # `libdbus-1-dev` is required by libdbus-sys (transitive of keyring).
+        # Confirmed root cause of v0.2.3 first-attempt Linux build failure.
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev g++ libdbus-1-dev
 
       - name: Install dependencies (cross aarch64)
         if: matrix.cross == true
+        # `libdbus-1-dev:arm64` via multi-arch — same libdbus-sys requirement
+        # as the native path. If multi-arch install drifts, the build will
+        # fail but `continue-on-error: true` at job level keeps the release
+        # pipeline moving (macOS is the v1 scope).
         run: |
+          sudo dpkg --add-architecture arm64
           sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu pkg-config perl make
+          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu pkg-config perl make libdbus-1-dev:arm64
 
       - name: Build
         env:
