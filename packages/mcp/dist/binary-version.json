@@ -1,6 +1,6 @@
 {
-  "tag": "v0.2.3",
+  "tag": "v0.2.4",
   "artifacts": {
-    "darwin-arm64": "mnemonic-mcp-v0.2.3-aarch64-apple-darwin.tar.gz"
+    "darwin-arm64": "mnemonic-mcp-v0.2.4-aarch64-apple-darwin.tar.gz"
   }
 }

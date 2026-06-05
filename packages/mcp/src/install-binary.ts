@@ -117,8 +117,10 @@ async function downloadToBuffer(url: string): Promise<Buffer> {
 
 /**
  * Run `gh attestation verify` against the downloaded artifact, pinning
- * --owner, --repo, and --signer-workflow so a generic GitHub-published
- * attestation over matching bytes cannot pass (security audit round 2).
+ * --repo and --signer-workflow so a generic GitHub-published attestation
+ * over matching bytes cannot pass (security audit round 2). `--owner` is
+ * NOT passed: current `gh` CLI treats `--owner` and `--repo` as mutually
+ * exclusive, and `--repo owner/name` already encodes the owner.
  *
  * Returns the bundle path on success; throws otherwise. The `gh` CLI is
  * required — fail closed, never silently skip.
@@ -129,8 +131,6 @@ async function runGhAttestationVerify(artifactPath: string): Promise<string> {
       "attestation",
       "verify",
       artifactPath,
-      "--owner",
-      REPO_OWNER,
       "--repo",
       `${REPO_OWNER}/${REPO_NAME}`,
       "--signer-workflow",

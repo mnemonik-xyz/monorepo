@@ -34,7 +34,7 @@ interface TestCtx {
 }
 
 let ctx: TestCtx;
-const TAG = "v0.2.3";
+const TAG = "v0.2.4";
 // Match the dist/binary-version.json darwin-arm64 mapping; tests force the
 // platform via stubbing process.platform.
 const ARTIFACT = `mnemonic-mcp-${TAG}-aarch64-apple-darwin.tar.gz`;
@@ -217,7 +217,7 @@ describe("ensureBinaryCached", () => {
     await expect(stat(manifestPath())).rejects.toThrow();
   });
 
-  it("gh_attestation_verify_invocation: argv contains --owner --repo --signer-workflow with pinned values", async () => {
+  it("gh_attestation_verify_invocation: argv contains --repo --signer-workflow with pinned values and no --owner", async () => {
     const tarFile = join(ctx.fixtures, ARTIFACT);
     const { sha256 } = await makeBinaryTarball(tarFile);
     const tarBytes = await readFile(tarFile);
@@ -240,15 +240,15 @@ describe("ensureBinaryCached", () => {
     const args = (await readFile(ctx.ghRecord, "utf8"))
       .split("\n")
       .filter((line) => line.length > 0);
-    const ownerIdx = args.indexOf("--owner");
     const repoIdx = args.indexOf("--repo");
     const wfIdx = args.indexOf("--signer-workflow");
-    expect(ownerIdx).toBeGreaterThan(-1);
     expect(repoIdx).toBeGreaterThan(-1);
     expect(wfIdx).toBeGreaterThan(-1);
-    expect(args[ownerIdx + 1]).toBe("mnemonik-xyz");
     expect(args[repoIdx + 1]).toBe("mnemonik-xyz/monorepo");
     expect(args[wfIdx + 1]).toBe(".github/workflows/release.yml");
+    // --owner is intentionally absent — current `gh` CLI treats --owner and
+    // --repo as mutually exclusive; --repo owner/name already pins the owner.
+    expect(args.indexOf("--owner")).toBe(-1);
     // Also assert the leading subcommand sequence.
     expect(args[0]).toBe("attestation");
     expect(args[1]).toBe("verify");
