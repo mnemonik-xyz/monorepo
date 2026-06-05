@@ -468,3 +468,51 @@ Review details — in JSON files via links. QA report — in logs/working/.
 - `work/agent-native-distribution/logs/working/deploy/deploy-report.json` (new)
 
 Full deploy report: [logs/working/deploy/deploy-report.json](logs/working/deploy/deploy-report.json).
+
+## Task 14: Post-deploy QA
+
+**Status:** Done
+**Commit:** 06094ce (QA report) + (this commit)
+**Agent:** t14-postqa
+**Summary:** Live-environment verification against production mcp.mnemonik.xyz v0.2.3 + @mnemonik-xyz/mcp@0.2.3 + GitHub Release v0.2.3. Verdict: **partial pass** — every automated check this agent can run is green; 6 deferred items require fresh-machine or human-eye verification by the user. Automated checks (all pass): npm view returns 0.2.3; /health returns 200 ok; anonymous prompts/list = 7, resources/list = 7, tools/list = 7 (6 enriched with Purpose+Trigger via skill manifests + 1 gate-infra tool per Decision 5b); initialize.embedder live = {model_id: all-MiniLM-L6-v2, model_version: 0.1.0-fastembed-5.13.2, dim: 384}; prompts/get and resources/read return identical 4882-byte body for mnemonik-attest (AC2 single-source projection verified live); GitHub Release v0.2.3 assets list = [aarch64-apple-darwin tarball, SHA256SUMS]; downloaded tarball's local sha256 matches SHA256SUMS byte-for-byte; sigstore attestation verifies with `gh attestation verify --repo mnemonik-xyz/monorepo` and the attestation JSON confirms signer workflow path = .github/workflows/release.yml + runner = github-hosted.
+
+**Deviations:** None.
+
+**Findings:**
+
+- **POST14-MINOR-1** — Shim's `gh attestation verify <tarball> --owner mnemonik-xyz --repo mnemonik-xyz/monorepo --signer-workflow ...` per Decision 8 now fails on current `gh` CLI versions: the CLI rejects `--owner` + `--repo` together as a mutually-exclusive flag group ("if any flags in the group [owner repo] are set none of the others can be"). The production attestation itself is valid and verifiable with `--repo` alone; `--owner` is redundant in that form since the repo path already encodes ownership. **Recommendation:** drop `--owner` from install-binary.ts in a v0.2.4 fast-follow patch — without it, first-install on machines with current `gh` CLI will fail attestation verification. Tracked as POST14 follow-up.
+
+**Reviews:**
+
+*Round 1 (this commit):*
+- post-deploy-qa: partial (9/9 automated pass, 6 deferred-to-user) → [logs/working/qa/post-deploy-qa.json](logs/working/qa/post-deploy-qa.json)
+
+**Manual steps remaining for user (6, per the JSON report's manual_steps_for_user array):**
+1. **M1** — Fresh-machine `npm install -g @mnemonik-xyz/mcp` + `mnemonik-mcp install` + Claude Code `/mcp` menu visibility
+2. **M2** — AC3 airplane-mode local sign smoke on Apple Silicon
+3. **M3** — AC11 live OAuth browser popup against mcp.mnemonik.xyz
+4. **M4** — AC13 anonymous recall production seed (one public + one private + filter check)
+5. **M5** — MCP Inspector visual smoke + screenshot for release checklist
+6. **M6** — AC17 doctor on fresh machine (all 6 pass) + corrupted-binary detection (exit 1 + repair hint)
+
+**Open follow-ups (v0.2.4 / v1.1):**
+- v0.2.4 fast-follow: patch install-binary.ts to drop `--owner` from `gh attestation verify` invocation (POST14-MINOR-1).
+- v1.1: TR11-6 AC15 stderr mismatch warning emission (explicitly deferred per T11 + T12 + T14 audit consensus; binary-embedded discovery makes divergence unobservable in v1).
+- v1.1: Move JWT token from `~/.mnemonic/token.json` to OS keychain (Decision 7 deferral; user-spec Follow-ups).
+- v1.1+: Linux + Windows host-config paths in install candidates; Cline/Codex/Windsurf support; behavioural smoke matrix across 3 hosts; soft-publish promote flow.
+
+**Post-launch metrics window (per user-spec):** 14-day collection starting 2026-06-05 of (a) unique pubkeys executing `mnemonik-mcp install`, (b) % making at least one local-mode write, (c) anonymous discovery hits on mcp.mnemonik.xyz. Baseline review at day-7; pivot decision at day-14.
+
+**Verification:**
+- `npm view @mnemonik-xyz/mcp version` → 0.2.3
+- `curl -fsS https://mcp.mnemonik.xyz/health` → 200 + {"status":"ok"}
+- prompts/list anonymous = 7; resources/list anonymous = 7; tools/list anonymous = 7
+- initialize.embedder live = present with model_id + model_version + dim
+- prompts/get mnemonik-attest + resources/read mnemonik://skills/mnemonik-attest.md → identical 4882-byte body
+- GitHub Release v0.2.3 assets = [mnemonic-mcp-v0.2.3-aarch64-apple-darwin.tar.gz, SHA256SUMS]
+- SHA256SUMS hash matches local shasum of downloaded tarball
+- `gh attestation verify <tarball> --repo mnemonik-xyz/monorepo` → exit 0; attestation signer workflow path = .github/workflows/release.yml
+- Full report: [logs/working/qa/post-deploy-qa.json](logs/working/qa/post-deploy-qa.json)
+
+**Feature shipped:** Yes — automated production checks green; 6 manual fresh-machine items handed off to user; no rollback indicated.
+
