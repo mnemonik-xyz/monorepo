@@ -23,6 +23,12 @@ jobs:
   build-linux:
     name: Build ${{ matrix.target }}
     runs-on: ubuntu-latest
+    # v0.2.3 (Option A): Linux artifacts are best-effort for v1.
+    # libdbus / cross-compile reliability is unresolved; macOS is
+    # the v1 release scope (binary-version.json lists only darwin*).
+    # `continue-on-error` prevents Linux flakes from cascading into
+    # the `release` job below (which now depends only on build-macos).
+    continue-on-error: true
     strategy:
       matrix:
         include:
@@ -118,7 +124,12 @@ jobs:
 
   release:
     name: Create Release
-    needs: [build-linux, build-macos]
+    # v0.2.3 (Option A): only macOS gates the release. Linux builds
+    # are non-blocking (see `continue-on-error` on build-linux above);
+    # if Linux artifacts happen to land they are still picked up by
+    # the `download-artifact@v4` step below and included in the
+    # SHA256SUMS + GitHub Release. macOS-only is the v1 contract.
+    needs: [build-macos]
     runs-on: ubuntu-latest
     # `id-token: write` + `attestations: write` are required by
     # actions/attest-build-provenance@v1 to mint the sigstore bundle
