@@ -95,13 +95,16 @@ jobs:
   build-macos:
     name: Build ${{ matrix.target }}
     runs-on: ${{ matrix.runner }}
+    # v0.2.3: x86_64-apple-darwin dropped from the matrix — macos-13
+    # runners have been unavailable / heavily queued; v1 scope is
+    # Apple Silicon only (binary-version.json artifacts dict now lists
+    # only darwin-arm64; packages/mcp/src/paths.ts raises a clean
+    # "Apple Silicon required" error for darwin-x64 callers).
     strategy:
       matrix:
         include:
           - target: aarch64-apple-darwin
             runner: macos-latest
-          - target: x86_64-apple-darwin
-            runner: macos-13
     steps:
       - uses: actions/checkout@v4
 

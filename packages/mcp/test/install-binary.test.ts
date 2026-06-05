@@ -34,7 +34,7 @@ interface TestCtx {
 }
 
 let ctx: TestCtx;
-const TAG = "v0.2.0";
+const TAG = "v0.2.3";
 // Match the dist/binary-version.json darwin-arm64 mapping; tests force the
 // platform via stubbing process.platform.
 const ARTIFACT = `mnemonic-mcp-${TAG}-aarch64-apple-darwin.tar.gz`;
