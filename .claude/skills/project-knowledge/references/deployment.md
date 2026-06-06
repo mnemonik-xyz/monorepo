@@ -57,6 +57,7 @@ Variables for `mcp/` (set by user):
 | `PAYMENT_MODE` | `none` | `none`, `balance`, `x402`, `both` |
 | `MCP_JWT_SECRET` | — | HS256 secret for OAuth Bearer JWTs (required in hosted mode; ≥32 random bytes — `openssl rand -base64 32`) |
 | `MCP_JWT_TTL_SECS` | `3600` | Optional access-token TTL override. Clamped to `[60, 604800]` (1 min – 7 days) at startup; out-of-range, empty, or unparseable values WARN-log and fall back to the clamp / default. Set to `60` on `mcp.dev.mnemonik.xyz` for the R1 empirical gate; leave unset in prod (`refresh-token-rotation` Decision 12). |
+| `MCP_REFRESH_SALT` | — | **Mandatory** in hosted mode. Per-deploy salt for `blake3(salt \|\| plaintext)` at-rest hashing of refresh tokens (`refresh-token-rotation` Decision 2). Generate via `openssl rand -base64 32` — standard padded base64 with `+/=` charset, NOT url-safe-no-pad. Boot ABORTS if the env var is absent OR if the decoded byte length is < 32 (closes the 32-ASCII-chars / ~5-bytes-of-entropy footgun). Rotating the salt invalidates EVERY live refresh token because the at-rest hash function changes; treat with the same operational discipline as `MCP_JWT_SECRET`. |
 | `MCP_PUBLIC_BASE_URL` | — | Public origin advertised in OAuth metadata + `/sign/{id}` redirect (e.g. `https://mcp.mnemonik.xyz`) |
 | `OAUTH_RATELIMIT_DISABLE` | `0` | Set to `1` only in CI / Playwright runs to bypass the `tower_governor` per-IP limiter on `/oauth/*` |
 
@@ -288,6 +289,26 @@ window can watch an expiry fire:
 # Dev (mcp.dev.mnemonik.xyz):
 echo "MCP_JWT_TTL_SECS=60" >> /home/claude/mcp.env
 ```
+
+The same env file also requires **`MCP_REFRESH_SALT`** (Decision 2 of the
+`refresh-token-rotation` tech-spec). It is the per-deploy salt for the
+`blake3(salt || plaintext)` at-rest hash on the `refresh_tokens` table. Boot
+ABORTS if it is missing OR if its standard-base64 decode is < 32 bytes —
+silent fallback would create a deploy that hashes refresh tokens against an
+empty / weak key. Generate once on the VPS, same operational discipline as
+`MCP_JWT_SECRET`:
+
+```bash
+echo "MCP_REFRESH_SALT=$(openssl rand -base64 32)" >> /home/claude/mcp.env
+```
+
+**Rotation note:** rotating `MCP_REFRESH_SALT` invalidates EVERY live
+refresh token because the at-rest hash function changes. Rotate only as a
+deliberate operational event (e.g. suspected DB exfiltration); routine
+deploys MUST keep the value stable. The salt is decoded via standard
+padded base64 (`+/=` charset) — the same encoding `openssl rand -base64
+32` emits — NOT url-safe-no-pad; do not paste in URL-safe payloads from
+other generators.
 
 Per Deviation 7 of the same tech-spec, `MNEMONIC_KEYPAIR_PATH` is **no
 longer required for the OAuth flow** — signing happens client-side in the

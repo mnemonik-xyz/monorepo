@@ -214,7 +214,7 @@ async fn post_callback(
 #[tokio::test]
 async fn test_sign_callback_validates_signer_pubkey_eq_jwt_sub() {
     let state = build_state();
-    let oauth_state = Arc::new(OAuthState::new(TEST_SECRET));
+    let oauth_state = Arc::new(OAuthState::with_defaults(TEST_SECRET));
     let app = build_router(state.clone(), oauth_state.clone());
 
     let kp = Keypair::new();
@@ -235,7 +235,7 @@ async fn test_sign_callback_validates_signer_pubkey_eq_jwt_sub() {
 #[tokio::test]
 async fn test_sign_callback_atomic_single_use_410_on_replay() {
     let state = build_state();
-    let oauth_state = Arc::new(OAuthState::new(TEST_SECRET));
+    let oauth_state = Arc::new(OAuthState::with_defaults(TEST_SECRET));
     let app = build_router(state.clone(), oauth_state.clone());
 
     let kp = Keypair::new();
@@ -259,7 +259,7 @@ async fn test_sign_callback_atomic_single_use_410_on_replay() {
 #[tokio::test]
 async fn test_sign_callback_persists_attestation_then_evicts() {
     let state = build_state();
-    let oauth_state = Arc::new(OAuthState::new(TEST_SECRET));
+    let oauth_state = Arc::new(OAuthState::with_defaults(TEST_SECRET));
     let app = build_router(state.clone(), oauth_state.clone());
 
     let kp = Keypair::new();
@@ -309,7 +309,7 @@ async fn test_sign_callback_persists_attestation_then_evicts() {
 #[tokio::test]
 async fn test_sign_callback_rejects_tampered_content_hash() {
     let state = build_state();
-    let oauth_state = Arc::new(OAuthState::new(TEST_SECRET));
+    let oauth_state = Arc::new(OAuthState::with_defaults(TEST_SECRET));
     let app = build_router(state.clone(), oauth_state.clone());
 
     let kp = Keypair::new();
@@ -349,7 +349,7 @@ async fn test_sign_callback_rejects_invalid_signature() {
     // This test instead: alice signs the bundle but the COSE bytes are
     // truncated → verify_artifact returns Err → 401.
     let state = build_state();
-    let oauth_state = Arc::new(OAuthState::new(TEST_SECRET));
+    let oauth_state = Arc::new(OAuthState::with_defaults(TEST_SECRET));
     let app = build_router(state.clone(), oauth_state.clone());
 
     let kp = Keypair::new();

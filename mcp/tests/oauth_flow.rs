@@ -72,7 +72,7 @@ async fn post_json(app: Router, uri: &str, body: Value) -> (StatusCode, Value) {
 
 #[tokio::test]
 async fn full_authorize_token_jwt_roundtrip() {
-    let st = Arc::new(OAuthState::new(TEST_SECRET));
+    let st = Arc::new(OAuthState::with_defaults(TEST_SECRET));
     let kp = Keypair::new();
     let pubkey = kp.pubkey().to_string();
 

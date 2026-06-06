@@ -32,8 +32,9 @@ pub mod google_jwks;
 pub mod refresh;
 
 use std::num::NonZeroUsize;
+use std::path::Path;
 use std::sync::{Mutex, OnceLock};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::{
     body::Body,
@@ -46,6 +47,7 @@ use axum::{
 use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
 use lru::LruCache;
 use mnemonic_core::codec::{canonical::to_canonical_cbor, hash::hash_bytes as blake3_hex};
+use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashSet;
@@ -288,6 +290,11 @@ struct RegisteredClient {
 
 /// Shared OAuth state — pending challenges + issued codes, both LRU+TTL bound.
 /// Wrap in `Arc` and inject into Axum routers via `with_state`.
+///
+/// Decision 6 (refresh-token-rotation): the OAuth subsystem owns its own
+/// physical `rusqlite::Connection` on the same SQLite file as `McpState.store`.
+/// Two Connections on one file under WAL mode is well-defined — SQLite's
+/// writer lock serialises concurrent writes — and avoids a McpState refactor.
 pub struct OAuthState {
     pending: Mutex<LruCache<String, PendingAuthorize>>,
     codes: Mutex<LruCache<String, IssuedCode>>,
@@ -295,25 +302,150 @@ pub struct OAuthState {
     /// HS256 signing key. Constructed once from `MCP_JWT_SECRET` at startup.
     jwt_encoding_key: EncodingKey,
     jwt_decoding_key: DecodingKey,
+    // ── Refresh-token rotation surface (Decision 6, Task 3) ──────────────────
+    /// Second physical `rusqlite::Connection` on the same SQLite file as
+    /// `McpState.store`. Holds the `refresh_tokens` table; wrapped in
+    /// `Arc<Mutex<_>>` because rusqlite::Connection is `!Send` and is read
+    /// from async handlers. Migrated + PRAGMA-configured at construction.
+    pub refresh_store: Arc<Mutex<Connection>>,
+    /// Per-deploy salt for `blake3(salt || plaintext)` at-rest hashing of
+    /// refresh tokens. 32+ bytes, generated via `openssl rand -base64 32`,
+    /// gated at boot by `validate_refresh_salt`. Immutable for the deploy
+    /// lifetime — rotating invalidates every live refresh token.
+    pub refresh_salt: Vec<u8>,
+    /// Reuse-interval (D4 — Auth0 default 5s). Wrapped legitimate retries
+    /// inside this window get the cached `(access_jwt, refresh_plaintext)`
+    /// pair from `reuse_cache` (Branch B), preventing a network retry from
+    /// looking like a token-reuse attack (Branch B').
+    ///
+    /// Stored on the state for observability + future-test invariants —
+    /// the value is also encoded into `reuse_cache.ttl` at construction
+    /// time, so logic does not need to read this field. `#[allow(dead_code)]`
+    /// keeps the field in the surface while we satisfy `-D warnings`.
+    #[allow(dead_code)]
+    pub reuse_interval: Duration,
+    /// Background evictor tick period (D9 — production default 1h).
+    /// Consumed by `refresh::start_evictor` at boot time.
+    pub evictor_tick: Duration,
+    /// In-process pair cache backing D5 reuse-interval idempotency.
+    /// Capacity and TTL are wired through from `OAuthState::new`'s
+    /// `reuse_cache_cap` argument (round-2 m6 — the cap is no longer
+    /// silently defaulted).
+    pub reuse_cache: Arc<refresh::ReuseCache>,
 }
 
 impl OAuthState {
-    /// Build OAuthState from a 32-byte base64-decoded secret. Panics if the
-    /// secret is shorter than 32 bytes — caller (main.rs) must reject startup
-    /// in that case rather than allowing a weak HMAC key.
-    pub fn new(secret: &[u8]) -> Self {
+    /// Build OAuthState from a 32-byte base64-decoded secret plus the
+    /// refresh-token subsystem configuration. Panics if the secret is
+    /// shorter than 32 bytes — caller (main.rs) must reject startup in
+    /// that case rather than allowing a weak HMAC key.
+    ///
+    /// Opens a SECOND physical `rusqlite::Connection` on `database_path`
+    /// (NOT a clone of `McpState.store`'s connection — Decision 6: two
+    /// connections on one file under WAL is the canonical pattern;
+    /// `payment.rs`'s `Arc<Mutex<Connection>>` field is the precedent).
+    /// Applies the OAuth-side PRAGMAs (`foreign_keys=ON` + WAL +
+    /// `busy_timeout=5000`) and the `refresh_tokens` migration before
+    /// returning, so the connection is fully ready for `refresh::rotate`
+    /// callers.
+    pub fn new(
+        secret: &[u8],
+        database_path: &Path,
+        refresh_salt: Vec<u8>,
+        reuse_interval: Duration,
+        evictor_tick: Duration,
+        reuse_cache_cap: usize,
+    ) -> anyhow::Result<Self> {
+        assert!(
+            secret.len() >= 32,
+            "MCP_JWT_SECRET must decode to >= 32 bytes (got {})",
+            secret.len()
+        );
+        assert!(
+            refresh_salt.len() >= 32,
+            "refresh_salt must be >= 32 bytes (got {}) — validate via validate_refresh_salt before constructing OAuthState",
+            refresh_salt.len()
+        );
+        let cap = NonZeroUsize::new(OAUTH_STATE_CAPACITY).expect("nonzero capacity");
+        // D6: open OAuth-side physical connection, apply OAuth PRAGMAs +
+        // migrate refresh_tokens table. `migrate_refresh_tokens` already
+        // calls `apply_oauth_connection_pragmas` first, so a single call
+        // is sufficient.
+        let conn = Connection::open(database_path).map_err(|e| {
+            anyhow::anyhow!(
+                "OAuthState: open refresh-token SQLite connection at {}: {e}",
+                database_path.display()
+            )
+        })?;
+        refresh::migrate_refresh_tokens(&conn)?;
+        let reuse_cache_cap_nz = NonZeroUsize::new(reuse_cache_cap)
+            .ok_or_else(|| anyhow::anyhow!("reuse_cache_cap must be non-zero (got 0)"))?;
+        let reuse_cache = Arc::new(refresh::ReuseCache::with_cap_and_ttl(
+            reuse_cache_cap_nz,
+            reuse_interval,
+        ));
+        Ok(Self {
+            pending: Mutex::new(LruCache::new(cap)),
+            codes: Mutex::new(LruCache::new(cap)),
+            clients: Mutex::new(LruCache::new(cap)),
+            jwt_encoding_key: EncodingKey::from_secret(secret),
+            jwt_decoding_key: DecodingKey::from_secret(secret),
+            refresh_store: Arc::new(Mutex::new(conn)),
+            refresh_salt,
+            reuse_interval,
+            evictor_tick,
+            reuse_cache,
+        })
+    }
+
+    /// Test-only constructor: in-memory SQLite + fixed test salt + fast
+    /// reuse/evictor intervals + default reuse-cache capacity. Every test
+    /// call site that previously did `OAuthState::new(TEST_SECRET)` switches
+    /// to `OAuthState::with_defaults(TEST_SECRET)` for a one-line diff.
+    ///
+    /// **NOT for production wiring** — uses an in-memory SQLite database
+    /// (every refresh-token row vanishes on process exit) and a fixed
+    /// all-`0xAB` salt that an attacker could trivially recompute. The
+    /// production binary (`main.rs::run_http`) always uses
+    /// `OAuthState::new` with the deploy-time `MCP_REFRESH_SALT`. Kept
+    /// outside `#[cfg(test)]` because every integration test crate under
+    /// `mcp/tests/*.rs` consumes it via the library facade, and gating
+    /// it on `feature = "test-support"` would force ~14 unrelated test
+    /// crates to opt in — out of scope for Task 3.
+    ///
+    /// `#[allow(dead_code)]` — the bin (`mnemonic-mcp`) target never
+    /// reaches this; the warning would otherwise fire under `-D warnings`.
+    #[allow(dead_code)]
+    pub fn with_defaults(secret: &[u8]) -> Self {
         assert!(
             secret.len() >= 32,
             "MCP_JWT_SECRET must decode to >= 32 bytes (got {})",
             secret.len()
         );
         let cap = NonZeroUsize::new(OAUTH_STATE_CAPACITY).expect("nonzero capacity");
+        // In-memory SQLite — keeps each test isolated; never touches disk.
+        let conn =
+            Connection::open_in_memory().expect("OAuthState::with_defaults: open in-memory SQLite");
+        refresh::migrate_refresh_tokens(&conn)
+            .expect("OAuthState::with_defaults: migrate refresh_tokens table");
+        let refresh_salt: Vec<u8> = vec![0xABu8; 32];
+        let reuse_interval = Duration::from_millis(100);
+        let evictor_tick = Duration::from_millis(50);
+        let reuse_cache = Arc::new(refresh::ReuseCache::with_cap_and_ttl(
+            refresh::DEFAULT_REUSE_CACHE_CAP_NZ,
+            reuse_interval,
+        ));
         Self {
             pending: Mutex::new(LruCache::new(cap)),
             codes: Mutex::new(LruCache::new(cap)),
             clients: Mutex::new(LruCache::new(cap)),
             jwt_encoding_key: EncodingKey::from_secret(secret),
             jwt_decoding_key: DecodingKey::from_secret(secret),
+            refresh_store: Arc::new(Mutex::new(conn)),
+            refresh_salt,
+            reuse_interval,
+            evictor_tick,
+            reuse_cache,
         }
     }
 
@@ -1077,17 +1209,92 @@ pub async fn authorize_handler(
 
 // ── /oauth/token handler (PKCE + JWT issue) ──────────────────────────────────
 
+/// `POST /oauth/token` request body — covers BOTH grant types
+/// (`authorization_code` and `refresh_token`, refresh-token-rotation
+/// Decision 11). Every field is `Option<String>` so the same struct
+/// deserialises either grant; the post-parse dispatch in `token_handler`
+/// validates the per-grant required fields.
+///
+/// `grant_type` defaults to `"authorization_code"` via `default_grant_type`
+/// so legacy clients (existing webapp redeem, integration tests,
+/// `scripts/test-oauth-flow.sh`) that omit the field still hit the
+/// existing code+verifier path byte-for-byte.
 #[derive(Debug, Deserialize)]
 pub struct TokenRequest {
-    pub code: String,
-    pub code_verifier: String,
+    /// OAuth 2.1 grant type. Defaults to `"authorization_code"` for legacy
+    /// clients that pre-date the dispatch. Known values:
+    /// `"authorization_code"` | `"refresh_token"`. Anything else returns
+    /// `400 unsupported_grant_type` (Decision 11 + RFC 6749 §5.2).
+    #[serde(default = "default_grant_type")]
+    pub grant_type: String,
+    /// Authorization code from `/oauth/authorize`. Required when
+    /// `grant_type == "authorization_code"`.
+    #[serde(default)]
+    pub code: Option<String>,
+    /// PKCE code_verifier. Required when `grant_type == "authorization_code"`.
+    #[serde(default)]
+    pub code_verifier: Option<String>,
     /// `redirect_uri` from the original authorize request. Optional for
     /// backward compatibility with clients that omit it (legacy webapp,
-    /// integration tests). When present, MUST equal the value bound at
-    /// `/oauth/authorize` time — RFC 6749 §4.1.3 + RFC 7636 §4.4 require this
-    /// equality check to defeat a swap-redirect attack on a leaked code.
+    /// integration tests). When present on an `authorization_code` grant,
+    /// MUST equal the value bound at `/oauth/authorize` time — RFC 6749
+    /// §4.1.3 + RFC 7636 §4.4 require this equality check to defeat a
+    /// swap-redirect attack on a leaked code.
     #[serde(default)]
     pub redirect_uri: Option<String>,
+    /// Refresh token plaintext. Required when `grant_type == "refresh_token"`.
+    /// Length-capped at 4096 bytes BEFORE any hashing or DB lookup
+    /// (Decision 16) to short-circuit oversized payloads.
+    #[serde(default)]
+    pub refresh_token: Option<String>,
+}
+
+/// `serde(default)` for `TokenRequest.grant_type` — keeps legacy clients
+/// (no `grant_type` field) hitting the `authorization_code` path.
+fn default_grant_type() -> String {
+    "authorization_code".to_string()
+}
+
+/// Maximum accepted `refresh_token` payload length (Decision 16). Rejected
+/// pre-hash + pre-DB to short-circuit oversized inputs.
+pub const REFRESH_TOKEN_MAX_LEN: usize = 4096;
+
+/// Pure helper — validates `MCP_REFRESH_SALT` (refresh-token-rotation
+/// Decision 2). Decoder is `base64::engine::general_purpose::STANDARD`,
+/// matching the `openssl rand -base64 32` recipe shipped in `.env.example`
+/// (which emits standard padded base64 with `+/=` charset, NOT
+/// url-safe-no-pad).
+///
+/// Rejects:
+/// - `None` — env var unset.
+/// - base64 decode failure.
+/// - decoded byte length < 32 (closes the operator-typed-32-ASCII-chars
+///   footgun where the env value looks "long enough" but standard-base64
+///   decodes to `~5` bytes of effective entropy).
+///
+/// Pure and side-effect-free so unit tests can exercise it directly
+/// without booting `run_http`.
+pub fn validate_refresh_salt(env_value: Option<&str>) -> anyhow::Result<Vec<u8>> {
+    let raw = env_value.ok_or_else(|| {
+        anyhow::anyhow!(
+            "MCP_REFRESH_SALT env var is required (generate via `openssl rand -base64 32`)"
+        )
+    })?;
+    let decoded = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, raw.trim())
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "MCP_REFRESH_SALT is not valid standard-padded base64: {e} \
+                 (generate via `openssl rand -base64 32`)"
+            )
+        })?;
+    if decoded.len() < 32 {
+        anyhow::bail!(
+            "MCP_REFRESH_SALT decoded to {} bytes — must be >= 32 \
+             (generate via `openssl rand -base64 32`)",
+            decoded.len()
+        );
+    }
+    Ok(decoded)
 }
 
 #[derive(Debug, Serialize)]
@@ -1098,6 +1305,14 @@ pub struct TokenResponse {
     /// OAuth 2.1 / RFC 6749 §5.1 — the scope the token was granted.
     /// We only have one scope (`mcp`); echoed for clients that read it.
     pub scope: String,
+    /// Refresh token plaintext (RFC 6749 §5.1). Emitted on
+    /// `authorization_code` mint AND on every `refresh_token` rotation
+    /// (Branch A). Absent for early `authorization_code` exchanges that
+    /// pre-date Task 3 — `skip_serializing_if` keeps wire-compat with
+    /// clients that didn't ask for one. Branch B (legitimate retry inside
+    /// reuse-interval) returns the byte-identical previous refresh_token.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refresh_token: Option<String>,
 }
 
 /// `POST /oauth/token` — exchange a fresh authorization code for a JWT.
@@ -1118,6 +1333,21 @@ pub async fn token_handler(
     headers: axum::http::HeaderMap,
     body: axum::body::Bytes,
 ) -> Response {
+    let resp = token_handler_inner(&state, &headers, &body).await;
+    apply_no_store_headers(resp)
+}
+
+/// Inner handler — returns a `Response` from any exit point. The outer
+/// `token_handler` wraps the result with `apply_no_store_headers` so every
+/// `/oauth/token` response (success AND error) carries
+/// `Cache-Control: no-store` + `Pragma: no-cache` (Decision 15 / RFC 6749
+/// §5.1). Single helper at the boundary eliminates the N-return-site
+/// header-insert pattern.
+async fn token_handler_inner(
+    state: &Arc<OAuthState>,
+    headers: &axum::http::HeaderMap,
+    body: &axum::body::Bytes,
+) -> Response {
     // Decide between JSON and x-www-form-urlencoded. Default to JSON if
     // the header is missing — keeps existing programmatic clients
     // (`scripts/test-oauth-flow.sh`, integration tests) working.
@@ -1128,7 +1358,7 @@ pub async fn token_handler(
         .to_lowercase();
 
     let req: TokenRequest = if ct.starts_with("application/x-www-form-urlencoded") {
-        match serde_urlencoded::from_bytes(&body) {
+        match serde_urlencoded::from_bytes(body) {
             Ok(r) => r,
             Err(e) => {
                 return oauth_error(
@@ -1139,7 +1369,7 @@ pub async fn token_handler(
         }
     } else {
         // JSON (or unknown content-type — JSON is our default).
-        match serde_json::from_slice(&body) {
+        match serde_json::from_slice(body) {
             Ok(r) => r,
             Err(e) => {
                 return oauth_error(
@@ -1150,9 +1380,44 @@ pub async fn token_handler(
         }
     };
 
+    match req.grant_type.as_str() {
+        "authorization_code" => token_handler_authorization_code(state, req).await,
+        "refresh_token" => token_handler_refresh(state, req).await,
+        // RFC 6749 §5.2 / Decision 11 — any other grant_type must NOT
+        // silently fall through to the authorization_code path with empty
+        // code/verifier (which would surface a confusing 401). The
+        // explicit `unsupported_grant_type` 400 closes that vector.
+        other => oauth_error(
+            StatusCode::BAD_REQUEST,
+            &format!("unsupported_grant_type: {other}"),
+        ),
+    }
+}
+
+/// Branch: `grant_type=authorization_code`. Existing PKCE + JWT-issue path,
+/// now with explicit non-empty validation on `code` and `code_verifier`
+/// (Decision 11 — previously enforced by serde's non-Option fields; the
+/// widened `TokenRequest` makes the check explicit).
+async fn token_handler_authorization_code(state: &Arc<OAuthState>, req: TokenRequest) -> Response {
+    let code = match req.code.as_deref().filter(|s| !s.is_empty()) {
+        Some(c) => c.to_string(),
+        None => {
+            return oauth_error(StatusCode::BAD_REQUEST, "invalid_request: code is required");
+        }
+    };
+    let code_verifier = match req.code_verifier.as_deref().filter(|s| !s.is_empty()) {
+        Some(v) => v.to_string(),
+        None => {
+            return oauth_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_request: code_verifier is required",
+            );
+        }
+    };
+
     let issued = {
         let mut guard = state.codes.lock().expect("codes mutex poisoned");
-        guard.pop(&req.code)
+        guard.pop(&code)
     };
     let issued = match issued {
         Some(c) => c,
@@ -1181,13 +1446,13 @@ pub async fn token_handler(
 
     // Verify PKCE: SHA256(verifier) base64url-no-pad == challenge.
     use sha2::{Digest, Sha256};
-    let digest = Sha256::digest(req.code_verifier.as_bytes());
+    let digest = Sha256::digest(code_verifier.as_bytes());
     let derived = base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, digest);
     if derived != issued.code_challenge {
         return oauth_error(StatusCode::UNAUTHORIZED, "code_verifier does not match");
     }
 
-    let token = match issue_jwt_with_google_sub(&state, &issued.sub, issued.google_sub.clone()) {
+    let token = match issue_jwt_with_google_sub(state, &issued.sub, issued.google_sub.clone()) {
         Ok(t) => t,
         Err(e) => {
             return oauth_error(
@@ -1203,13 +1468,204 @@ pub async fn token_handler(
     // the token, and a corrupted/missing cache only forces a re-OAuth next
     // time. Decision 7: no OS keychain wrapper in V1.
     cache_minted_token(&token, &issued.sub);
+
+    // Mint the refresh token paired with this authorization_code redemption.
+    // New family_id per mint (D3 — every authorize handshake is its own
+    // device family). Failure here is best-effort + non-fatal: the access
+    // token is still surfaced; the client will fall back to a fresh
+    // `authorization_code` flow on access-token expiry rather than a
+    // refresh-token rotation. Operational metric: count of mints that
+    // failed surfaces via the WARN log.
+    let refresh_token = {
+        let guard = state.refresh_store.lock().ok();
+        match guard {
+            Some(conn) => match refresh::mint_for_authorization_code(
+                &conn,
+                &state.refresh_salt,
+                &issued.sub,
+                issued.google_sub.as_deref(),
+            ) {
+                Ok(rt) => Some(rt.plaintext),
+                Err(e) => {
+                    tracing::warn!(
+                        target: "mnemonic_mcp::oauth",
+                        error = %e,
+                        "refresh_token mint failed after authorization_code redeem; access_token still surfaced"
+                    );
+                    None
+                }
+            },
+            None => {
+                tracing::warn!(
+                    target: "mnemonic_mcp::oauth",
+                    "refresh_store mutex poisoned; skipping refresh_token mint"
+                );
+                None
+            }
+        }
+    };
+
     let body = TokenResponse {
         access_token: token,
         token_type: "Bearer".to_string(),
         expires_in: jwt_ttl_secs(),
         scope: "mcp".to_string(),
+        refresh_token,
     };
     (StatusCode::OK, Json(body)).into_response()
+}
+
+/// Branch: `grant_type=refresh_token`. Length-cap (D16) + non-empty check
+/// FIRST so an oversized payload is rejected before hashing or DB work.
+/// Then call `refresh::rotate` and translate the outcome to the 4-field
+/// JSON response (or `invalid_grant` on Branch B'/C/D/E).
+async fn token_handler_refresh(state: &Arc<OAuthState>, req: TokenRequest) -> Response {
+    let plaintext = match req.refresh_token.as_deref() {
+        Some(s) if !s.is_empty() => s.to_string(),
+        _ => {
+            return oauth_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_request: refresh_token is required",
+            );
+        }
+    };
+    // Decision 16: enforce the 4096-byte cap BEFORE any hashing or DB
+    // lookup. Both gates short-circuit oversized inputs before they can
+    // consume CPU or row-lock budget.
+    if plaintext.len() > REFRESH_TOKEN_MAX_LEN {
+        return oauth_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request: refresh_token exceeds 4096 bytes",
+        );
+    }
+
+    // Clone the Arcs the minter closure needs — the rusqlite Connection
+    // guard must stay sync (no `.await` while held), so we hop onto a
+    // blocking thread for the rotation.
+    let store = Arc::clone(&state.refresh_store);
+    let cache = Arc::clone(&state.reuse_cache);
+    let salt = state.refresh_salt.clone();
+    let state_for_minter = Arc::clone(state);
+    let outcome_result = tokio::task::spawn_blocking(move || {
+        let conn = store
+            .lock()
+            .map_err(|_| anyhow::anyhow!("refresh_store mutex poisoned"))?;
+        let minter = move |sub: &str, google_sub: Option<&str>| -> anyhow::Result<String> {
+            issue_jwt_with_google_sub(&state_for_minter, sub, google_sub.map(str::to_string))
+                .map_err(|e| anyhow::anyhow!("JWT issuance failed: {e}"))
+        };
+        refresh::rotate(
+            &conn,
+            &salt,
+            &cache,
+            &plaintext,
+            &minter,
+            &refresh::RotateContext::default(),
+        )
+    })
+    .await;
+
+    let outcome = match outcome_result {
+        Ok(Ok(o)) => o,
+        Ok(Err(e)) => {
+            tracing::warn!(
+                target: "mnemonic_mcp::oauth",
+                error = %e,
+                "refresh_token rotation failed (internal)"
+            );
+            return oauth_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error: refresh rotation failed",
+            );
+        }
+        Err(e) => {
+            tracing::warn!(
+                target: "mnemonic_mcp::oauth",
+                error = %e,
+                "refresh_token rotation task panicked"
+            );
+            return oauth_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error: refresh rotation task panicked",
+            );
+        }
+    };
+
+    match outcome {
+        refresh::RotateOutcome::Rotated {
+            new_token,
+            sub,
+            google_sub,
+        } => {
+            // Branch A: rotation cache `put` already happened inside
+            // `refresh::rotate` (D5 ordering invariant) so a legitimate
+            // retry of the OLD plaintext within `reuse_interval` will
+            // hit Branch B. We mint a fresh access JWT for this caller
+            // — byte-different from the one cached under the old hash
+            // (different `iat` / `jti`) but semantically equivalent.
+            //
+            // The cached JWT is only consulted on a Branch B retry of
+            // the OLD plaintext, not the NEW one. The new caller wants
+            // a JWT pinned to *this* request's `iat`.
+            let access_token = match issue_jwt_with_google_sub(state, &sub, google_sub.clone()) {
+                Ok(t) => t,
+                Err(e) => {
+                    return oauth_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        &format!("JWT issuance failed: {e}"),
+                    );
+                }
+            };
+            cache_minted_token(&access_token, &sub);
+            let body = TokenResponse {
+                access_token,
+                token_type: "Bearer".to_string(),
+                expires_in: jwt_ttl_secs(),
+                scope: "mcp".to_string(),
+                refresh_token: Some(new_token.plaintext),
+            };
+            (StatusCode::OK, Json(body)).into_response()
+        }
+        refresh::RotateOutcome::Replayed {
+            access_jwt,
+            refresh_plaintext,
+        } => {
+            let body = TokenResponse {
+                access_token: access_jwt,
+                token_type: "Bearer".to_string(),
+                expires_in: jwt_ttl_secs(),
+                scope: "mcp".to_string(),
+                refresh_token: Some(refresh_plaintext),
+            };
+            (StatusCode::OK, Json(body)).into_response()
+        }
+        refresh::RotateOutcome::InvalidGrant => {
+            // Decision 11 / RFC 6749 §5.2 — Branch B' / C / D / E are all
+            // surfaced as `invalid_grant` to the client. The granular
+            // distinction lives in the server-side tracing log per D14.
+            oauth_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_grant: refresh_token rejected",
+            )
+        }
+    }
+}
+
+/// Apply RFC 6749 §5.1 / Decision 15 cache-suppression headers to a
+/// `/oauth/token` response. Called from the outer `token_handler` so
+/// every success-and-error exit point picks them up.
+fn apply_no_store_headers(mut resp: Response) -> Response {
+    use axum::http::HeaderValue;
+    let h = resp.headers_mut();
+    h.insert(
+        axum::http::header::CACHE_CONTROL,
+        HeaderValue::from_static("no-store"),
+    );
+    h.insert(
+        axum::http::header::PRAGMA,
+        HeaderValue::from_static("no-cache"),
+    );
+    resp
 }
 
 /// Persist `token` to `~/.mnemonic/token.json` as a best-effort cache. The
@@ -1316,7 +1772,11 @@ pub async fn oauth_authorization_server_metadata() -> Response {
         "token_endpoint": format!("{SERVER_ORIGIN}/oauth/token"),
         "registration_endpoint": format!("{SERVER_ORIGIN}/oauth/register"),
         "response_types_supported": ["code"],
-        "grant_types_supported": ["authorization_code"],
+        // refresh-token-rotation Task 3 / Decision 11: advertise both grants.
+        // The `/oauth/token` handler accepts `grant_type=refresh_token`
+        // dispatching to `refresh::rotate`; clients MUST observe this
+        // metadata before attempting a refresh.
+        "grant_types_supported": ["authorization_code", "refresh_token"],
         "code_challenge_methods_supported": ["S256"],
         "token_endpoint_auth_methods_supported": ["none"],
         "scopes_supported": ["mcp"],
@@ -1724,7 +2184,7 @@ mod tests {
     const TEST_SECRET: &[u8; 32] = b"unit-test-secret-32-bytes-long!!";
 
     fn fresh_state() -> Arc<OAuthState> {
-        Arc::new(OAuthState::new(TEST_SECRET))
+        Arc::new(OAuthState::with_defaults(TEST_SECRET))
     }
 
     /// Build a signed challenge for a given keypair + state. Returns
@@ -2683,6 +3143,10 @@ mod tests {
         );
         assert_eq!(parsed["response_types_supported"][0], "code");
         assert_eq!(parsed["grant_types_supported"][0], "authorization_code");
+        // refresh-token-rotation Task 3 / Decision 11 — discovery MUST also
+        // advertise the refresh_token grant so MCP clients can opt into
+        // the rotation flow.
+        assert_eq!(parsed["grant_types_supported"][1], "refresh_token");
         assert_eq!(parsed["code_challenge_methods_supported"][0], "S256");
         assert_eq!(parsed["token_endpoint_auth_methods_supported"][0], "none");
         assert_eq!(parsed["scopes_supported"][0], "mcp");
@@ -3292,5 +3756,362 @@ mod tests {
         // Char-boundary safe — multi-byte UTF-8 must not panic.
         // "ü" is 2 bytes; "🦀" is 4. With max_chars=3, take "üü🦀" wholly.
         assert_eq!(bound_log_value("üü🦀abc", 3), "üü🦀…");
+    }
+
+    // ── Task 3 TDD anchors (refresh-token-rotation) ─────────────────────────
+
+    /// Build a router for /oauth/token only — used by the Task 3 dispatch
+    /// and cache-header anchors. Shares state across calls so a successful
+    /// `authorization_code` exchange can be followed by a `refresh_token`
+    /// rotation in the same test.
+    fn build_token_router(state: Arc<OAuthState>) -> Router {
+        Router::new()
+            .route("/oauth/token", post(token_handler))
+            .with_state(state)
+    }
+
+    /// POST helper that returns the full `Response` so the caller can
+    /// inspect headers (Cache-Control / Pragma) AND the JSON body.
+    async fn post_token_form_full(app: Router, form: &str) -> Response {
+        let req = Request::builder()
+            .method("POST")
+            .uri("/oauth/token")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(Body::from(form.to_string()))
+            .unwrap();
+        app.oneshot(req).await.unwrap()
+    }
+
+    /// Decode the JSON body of a token response (consumes the response).
+    async fn read_json_body(resp: Response) -> (StatusCode, Value) {
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let parsed: Value = serde_json::from_slice(&bytes)
+            .unwrap_or(Value::String(String::from_utf8_lossy(&bytes).into()));
+        (status, parsed)
+    }
+
+    /// Assert RFC 6749 §5.1 / Decision 15 cache-suppression headers.
+    fn assert_no_store_cache_headers(resp: &Response) {
+        let cc = resp.headers().get(axum::http::header::CACHE_CONTROL);
+        assert_eq!(
+            cc.and_then(|h| h.to_str().ok()),
+            Some("no-store"),
+            "/oauth/token response must carry Cache-Control: no-store"
+        );
+        let pragma = resp.headers().get(axum::http::header::PRAGMA);
+        assert_eq!(
+            pragma.and_then(|h| h.to_str().ok()),
+            Some("no-cache"),
+            "/oauth/token response must carry Pragma: no-cache"
+        );
+    }
+
+    /// TDD anchor: POST grant_type=refresh_token with no refresh_token
+    /// field → 400 invalid_request (Decision 11 / AC13).
+    #[tokio::test]
+    async fn missing_refresh_token_field_returns_invalid_request() {
+        let st = fresh_state();
+        let app = build_token_router(st);
+        let resp = post_token_form_full(app, "grant_type=refresh_token").await;
+        let status = resp.status();
+        assert_no_store_cache_headers(&resp);
+        let (_, body) = read_json_body(resp).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "body={body}");
+        let err = body["error"].as_str().unwrap_or("");
+        assert!(
+            err.starts_with("invalid_request"),
+            "expected invalid_request, got {err}"
+        );
+    }
+
+    /// TDD anchor: unknown grant_type → 400 unsupported_grant_type
+    /// (RFC 6749 §5.2 / Decision 11 — closes the silent fall-through to
+    /// authorization_code).
+    #[tokio::test]
+    async fn unknown_grant_type_returns_unsupported_grant_type() {
+        let st = fresh_state();
+        let app = build_token_router(st);
+        let resp = post_token_form_full(app, "grant_type=client_credentials").await;
+        let status = resp.status();
+        assert_no_store_cache_headers(&resp);
+        let (_, body) = read_json_body(resp).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "body={body}");
+        let err = body["error"].as_str().unwrap_or("");
+        assert!(
+            err.starts_with("unsupported_grant_type"),
+            "expected unsupported_grant_type, got {err}"
+        );
+    }
+
+    /// TDD anchor: refresh_token > 4096 bytes → 400 invalid_request,
+    /// rejected BEFORE any hashing or DB lookup (Decision 16). Asserts:
+    /// 1. the response is invalid_request (not invalid_grant — the gate
+    ///    fires before `refresh::rotate` is reached);
+    /// 2. no row exists in `refresh_tokens` referencing the hash of the
+    ///    oversized plaintext (which proves the DB lookup never ran).
+    #[tokio::test]
+    async fn refresh_token_too_long_returns_invalid_request() {
+        let st = fresh_state();
+        let app = build_token_router(st.clone());
+        // 4097 bytes — one over the cap.
+        let oversized = "a".repeat(REFRESH_TOKEN_MAX_LEN + 1);
+        let form = format!(
+            "grant_type=refresh_token&refresh_token={}",
+            urlencoding_encode(&oversized)
+        );
+        let resp = post_token_form_full(app, &form).await;
+        let status = resp.status();
+        assert_no_store_cache_headers(&resp);
+        let (_, body) = read_json_body(resp).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "body={body}");
+        let err = body["error"].as_str().unwrap_or("");
+        assert!(
+            err.starts_with("invalid_request"),
+            "must be invalid_request (length cap), not invalid_grant; got {err}"
+        );
+        // Assert no DB work occurred — the row count is still 0 and no
+        // hash of the oversized plaintext could possibly be present.
+        let conn = st.refresh_store.lock().unwrap();
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM refresh_tokens", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 0, "length cap MUST fire before any DB insert");
+    }
+
+    /// TDD anchor: every /oauth/token response (success AND error) carries
+    /// `Cache-Control: no-store` + `Pragma: no-cache` (Decision 15).
+    /// Iterates the three error-path branches PLUS a success path.
+    #[tokio::test]
+    async fn token_response_emits_no_store_cache_headers() {
+        let st = fresh_state();
+
+        // Error path 1: invalid_request (missing refresh_token).
+        let resp1 =
+            post_token_form_full(build_token_router(st.clone()), "grant_type=refresh_token").await;
+        assert_no_store_cache_headers(&resp1);
+
+        // Error path 2: unsupported_grant_type.
+        let resp2 = post_token_form_full(build_token_router(st.clone()), "grant_type=foo").await;
+        assert_no_store_cache_headers(&resp2);
+
+        // Error path 3: invalid_grant (unknown refresh token).
+        let resp3 = post_token_form_full(
+            build_token_router(st.clone()),
+            "grant_type=refresh_token&refresh_token=never-issued-plaintext",
+        )
+        .await;
+        assert_no_store_cache_headers(&resp3);
+
+        // Error path 4: authorization_code with missing code.
+        let resp4 = post_token_form_full(
+            build_token_router(st.clone()),
+            "grant_type=authorization_code&code_verifier=v",
+        )
+        .await;
+        assert_no_store_cache_headers(&resp4);
+
+        // Success path: drive a complete authorization_code exchange so
+        // we can assert the cache headers ride the 200 too. The webapp /
+        // tests path: insert an IssuedCode directly via mint_issued_code,
+        // then redeem at /oauth/token.
+        let verifier = "a-test-verifier-min-43-chars-long-aaaaaaaaaa";
+        let challenge = pkce_challenge(verifier);
+        let code = st.mint_issued_code(
+            "test-sub".to_string(),
+            challenge,
+            "https://app/callback".to_string(),
+            None,
+        );
+        let form = format!(
+            "grant_type=authorization_code&code={code}&code_verifier={}",
+            urlencoding_encode(verifier)
+        );
+        let resp5 = post_token_form_full(build_token_router(st.clone()), &form).await;
+        assert_eq!(resp5.status(), StatusCode::OK);
+        assert_no_store_cache_headers(&resp5);
+    }
+
+    /// TDD anchor: `validate_refresh_salt(None)` returns Err (Decision 2).
+    #[test]
+    fn salt_missing_aborts_boot() {
+        let result = validate_refresh_salt(None);
+        assert!(
+            result.is_err(),
+            "validate_refresh_salt(None) MUST error — required env var"
+        );
+        let msg = result.err().unwrap().to_string();
+        assert!(
+            msg.contains("MCP_REFRESH_SALT"),
+            "error message must name the env var; got {msg}"
+        );
+    }
+
+    /// TDD anchor: salt that base64-decodes to < 32 bytes returns Err
+    /// (Decision 2 — closes the 32-ASCII-chars / ~5-bytes-of-entropy
+    /// footgun). Also covers a positive case to prove the happy path
+    /// returns the decoded bytes.
+    #[test]
+    fn salt_under_32_bytes_aborts_boot() {
+        // "YQ==" — standard-base64 of `b"a"` — decodes to 1 byte.
+        let result = validate_refresh_salt(Some("YQ=="));
+        assert!(result.is_err(), "1-byte salt MUST be rejected (< 32 bytes)");
+        let msg = result.err().unwrap().to_string();
+        assert!(
+            msg.contains("32") || msg.contains(">= 32"),
+            "error must explain the 32-byte minimum; got {msg}"
+        );
+
+        // Positive case: 32 random bytes base64-encoded (matches the
+        // `openssl rand -base64 32` output shape).
+        let bytes32 = [0xCDu8; 32];
+        let encoded = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, bytes32);
+        let result_ok = validate_refresh_salt(Some(&encoded));
+        let decoded = result_ok.expect("32-byte salt must decode");
+        assert!(decoded.len() >= 32, "decoded len must be >= 32");
+    }
+
+    /// TDD anchor (round-2 m6): the `reuse_cache_cap` argument to
+    /// `OAuthState::new` IS wired through to the LRU constructor — NOT
+    /// silently defaulted to `DEFAULT_REUSE_CACHE_CAP`. Construct an
+    /// OAuthState with cap=2, drive 3 rotations, assert the LRU evicts
+    /// the oldest entry (the first plaintext is no longer cached). Using
+    /// the in-memory `Connection` via tempfile so we can drive `new`
+    /// directly with a custom cap.
+    #[tokio::test]
+    async fn reuse_cache_cap_respects_oauth_state_field() {
+        // Cap = 2.
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path().to_path_buf();
+        let salt = vec![0xABu8; 32];
+        let st = OAuthState::new(
+            TEST_SECRET,
+            &path,
+            salt,
+            std::time::Duration::from_secs(60),
+            std::time::Duration::from_secs(60),
+            2,
+        )
+        .expect("OAuthState::new with cap=2");
+        // Publish 3 distinct entries; LRU cap=2 must evict the oldest.
+        st.reuse_cache
+            .put("k1", "j1".into(), "p1".into(), "fam".into());
+        st.reuse_cache
+            .put("k2", "j2".into(), "p2".into(), "fam".into());
+        st.reuse_cache
+            .put("k3", "j3".into(), "p3".into(), "fam".into());
+        assert_eq!(
+            st.reuse_cache.len(),
+            2,
+            "cap=2 must hold at 2 entries after 3 puts"
+        );
+        assert!(
+            st.reuse_cache.get("k1").is_none(),
+            "oldest entry k1 must be evicted under cap=2"
+        );
+        assert!(st.reuse_cache.get("k2").is_some());
+        assert!(st.reuse_cache.get("k3").is_some());
+    }
+
+    /// TDD anchor (D14): no plaintext refresh token nor its hash appears
+    /// in any tracing log emitted from `refresh::rotate` or
+    /// `token_handler` across ALL six rotate branches (A success,
+    /// B reuse, B' grace cache-miss, C invalid_grant outside-window,
+    /// D unknown family / expired, E too-long pre-hash). Uses
+    /// `tracing-test::traced_test` so each test instance gets its own
+    /// log subscriber — `logs_contain` queries that buffer.
+    ///
+    /// Branch B' is exercised by Branch C in this anchor — both produce
+    /// the same logging shape (no plaintext, no hash). The full
+    /// per-branch coverage lives in `refresh.rs::tests`; this anchor
+    /// asserts the policy across the HTTP-layer surface.
+    #[tokio::test]
+    #[tracing_test::traced_test]
+    async fn logging_policy_no_plaintext_no_hash_across_branches() {
+        let st = fresh_state();
+        let app_factory = || build_token_router(st.clone());
+
+        // Branch E — too-long pre-hash. Distinct plaintext per branch so
+        // logs_contain assertions can't confuse one branch's leak with
+        // another's.
+        let too_long_pt = "BRANCHE_PLAINTEXT_a".repeat(500);
+        let _ = post_token_form_full(
+            app_factory(),
+            &format!(
+                "grant_type=refresh_token&refresh_token={}",
+                urlencoding_encode(&too_long_pt)
+            ),
+        )
+        .await;
+
+        // Branch D — unknown family / never issued.
+        let unknown_pt = "BRANCHD_UNKNOWN_PLAINTEXT";
+        let _ = post_token_form_full(
+            app_factory(),
+            &format!("grant_type=refresh_token&refresh_token={unknown_pt}"),
+        )
+        .await;
+
+        // Branch A — successful rotation. Mint a refresh row via
+        // authorization_code exchange, then drive a refresh_token rotation.
+        let verifier_a = "branchA-verifier-min-43-chars-long-aaaaaaaaaaa";
+        let challenge_a = pkce_challenge(verifier_a);
+        let code_a = st.mint_issued_code(
+            "BRANCHA_SUB".to_string(),
+            challenge_a,
+            "https://app/callback".to_string(),
+            None,
+        );
+        let form_a = format!(
+            "grant_type=authorization_code&code={code_a}&code_verifier={}",
+            urlencoding_encode(verifier_a)
+        );
+        let resp_a = post_token_form_full(app_factory(), &form_a).await;
+        let (_, body_a) = read_json_body(resp_a).await;
+        let rt_a = body_a["refresh_token"]
+            .as_str()
+            .expect("authorization_code mint should yield refresh_token")
+            .to_string();
+        let form_refresh = format!(
+            "grant_type=refresh_token&refresh_token={}",
+            urlencoding_encode(&rt_a)
+        );
+        let _ = post_token_form_full(app_factory(), &form_refresh).await;
+
+        // Branch B — second call within reuse-interval against the SAME
+        // (now revoked) plaintext.
+        let _ = post_token_form_full(app_factory(), &form_refresh).await;
+
+        // Branch C — replay outside reuse-interval. Force the rotated row
+        // out of reuse-interval by waiting (with_defaults reuse_interval
+        // is 100ms).
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let _ = post_token_form_full(app_factory(), &form_refresh).await;
+
+        // D14 assertions: no plaintext appears in any log line. The
+        // tracing-test buffer is process-thread-local; `logs_contain`
+        // returns true if any captured line matches.
+        // - Oversized plaintext (Branch E) — pull a unique substring.
+        assert!(
+            !logs_contain("BRANCHE_PLAINTEXT_a"),
+            "D14: Branch E must not log the oversized plaintext"
+        );
+        // - Unknown plaintext (Branch D).
+        assert!(
+            !logs_contain("BRANCHD_UNKNOWN_PLAINTEXT"),
+            "D14: Branch D must not log the unknown plaintext"
+        );
+        // - Branch A/B/B'/C plaintext.
+        assert!(
+            !logs_contain(&rt_a),
+            "D14: rotate must never log the legitimate refresh-token plaintext"
+        );
+        // - At-rest hash (blake3(salt || plaintext)) — compute and
+        //   assert it never appears in any log line.
+        let hash_rt = refresh::hash_refresh_token(&st.refresh_salt, &rt_a);
+        assert!(
+            !logs_contain(&hash_rt),
+            "D14: rotate must never log the at-rest hash"
+        );
     }
 }

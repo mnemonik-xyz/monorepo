@@ -136,7 +136,7 @@ fn fresh_install_path() {
         // signed-challenge mirrors the existing oauth_flow.rs fixture; we
         // need a real `token_handler` execution because that's where the
         // `cache_minted_token` call lives.
-        let st = Arc::new(OAuthState::new(TEST_SECRET));
+        let st = Arc::new(OAuthState::with_defaults(TEST_SECRET));
         let kp = Keypair::new();
         let pubkey = kp.pubkey().to_string();
         let verifier = "loopback-fresh-verifier-43-chars-aaaaaaaaa";
@@ -340,7 +340,7 @@ fn cache_minted_token_overwrites_existing() {
     use mnemonic_mcp::oauth::issue_jwt;
     with_config_dir_override(|cfg_dir| {
         let path = cfg_dir.join("token.json");
-        let st = Arc::new(OAuthState::new(TEST_SECRET));
+        let st = Arc::new(OAuthState::with_defaults(TEST_SECRET));
         let owner_a = "OwnerA111111111111111111111111111111111111";
         let owner_b = "OwnerB111111111111111111111111111111111111";
 

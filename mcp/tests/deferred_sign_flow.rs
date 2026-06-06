@@ -125,7 +125,7 @@ fn extract_correlation_id(body: &Value) -> Option<String> {
 #[tokio::test]
 async fn test_full_lifecycle_sign_callback_410_on_replay() {
     let state = mock_state();
-    let oauth_state = Arc::new(OAuthState::new(TEST_SECRET));
+    let oauth_state = Arc::new(OAuthState::with_defaults(TEST_SECRET));
     let app = build_app(state.clone(), oauth_state.clone());
 
     // The user's local keypair (in production this is the WASM-generated

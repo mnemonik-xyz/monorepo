@@ -155,7 +155,7 @@ fn extract_recall_results(body: &Value) -> Value {
 #[tokio::test]
 async fn test_recall_filters_by_owner_pubkey_and_anonymous_returns_401() {
     let state = mock_state();
-    let oauth_state = Arc::new(OAuthState::new(TEST_SECRET));
+    let oauth_state = Arc::new(OAuthState::with_defaults(TEST_SECRET));
     let app = build_app(state, oauth_state.clone());
 
     let alice_kp = Keypair::new();

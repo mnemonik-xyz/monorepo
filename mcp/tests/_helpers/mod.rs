@@ -108,7 +108,7 @@ impl TestServerBuilder {
             &self.payment_mode,
             self.sign_memory_cost_micro_usdc,
         );
-        let oauth_state = Arc::new(OAuthState::new(TEST_JWT_SECRET));
+        let oauth_state = Arc::new(OAuthState::with_defaults(TEST_JWT_SECRET));
         let app = Router::new()
             .route("/mcp", post(mcp_handler))
             .route("/api/pending/{correlation_id}", get(get_pending_handler))

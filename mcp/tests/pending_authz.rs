@@ -170,7 +170,7 @@ async fn test_pending_get_capability_any_jwt_succeeds() {
     // forging the actual sign-callback still requires the user's
     // localStorage Ed25519 keypair, which the cid does not grant.
     let state = build_state();
-    let oauth_state = Arc::new(OAuthState::new(TEST_SECRET));
+    let oauth_state = Arc::new(OAuthState::with_defaults(TEST_SECRET));
     let app = build_router(state.clone(), oauth_state.clone());
 
     let alice = Keypair::new().pubkey().to_string();
@@ -204,7 +204,7 @@ async fn test_pending_get_capability_any_jwt_succeeds() {
 #[tokio::test]
 async fn test_pending_get_404_for_unknown_correlation_id() {
     let state = build_state();
-    let oauth_state = Arc::new(OAuthState::new(TEST_SECRET));
+    let oauth_state = Arc::new(OAuthState::with_defaults(TEST_SECRET));
     let app = build_router(state.clone(), oauth_state.clone());
 
     let user = Keypair::new().pubkey().to_string();
@@ -223,7 +223,7 @@ async fn test_pending_get_404_for_unknown_correlation_id() {
 #[tokio::test]
 async fn test_pending_get_returns_canonical_cbor_for_owner() {
     let state = build_state();
-    let oauth_state = Arc::new(OAuthState::new(TEST_SECRET));
+    let oauth_state = Arc::new(OAuthState::with_defaults(TEST_SECRET));
     let app = build_router(state.clone(), oauth_state.clone());
 
     let alice = Keypair::new().pubkey().to_string();
@@ -256,7 +256,7 @@ async fn test_pending_get_capability_no_jwt_succeeds() {
     // possession of the cid is the capability. A request without any
     // Authorization header against a known cid must succeed.
     let state = build_state();
-    let oauth_state = Arc::new(OAuthState::new(TEST_SECRET));
+    let oauth_state = Arc::new(OAuthState::with_defaults(TEST_SECRET));
     let app = build_router(state.clone(), oauth_state.clone());
     let alice = Keypair::new().pubkey().to_string();
     let (cid, _) = park_for(&state, &alice, "x").await;

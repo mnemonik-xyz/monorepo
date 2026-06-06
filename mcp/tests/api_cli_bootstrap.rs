@@ -175,7 +175,7 @@ async fn get_with_body(
 #[tokio::test]
 async fn server_pub_endpoint_returns_static_key() {
     let state = mock_state();
-    let oauth_state = Arc::new(OAuthState::new(TEST_SECRET));
+    let oauth_state = Arc::new(OAuthState::with_defaults(TEST_SECRET));
     let app = build_router(state.clone(), oauth_state);
 
     // No auth required — allowlisted.
@@ -212,7 +212,7 @@ async fn server_pub_endpoint_returns_static_key() {
 #[tokio::test]
 async fn issue_from_cli_returns_ticket_with_cli_origin() {
     let state = mock_state();
-    let oauth_state = Arc::new(OAuthState::new(TEST_SECRET));
+    let oauth_state = Arc::new(OAuthState::with_defaults(TEST_SECRET));
     let app = build_router(state.clone(), oauth_state);
 
     // Fetch server pub.
@@ -259,7 +259,7 @@ async fn issue_from_cli_returns_ticket_with_cli_origin() {
 #[tokio::test]
 async fn redeem_unwraps_and_rewraps_correctly_roundtrip() {
     let state = mock_state();
-    let oauth_state = Arc::new(OAuthState::new(TEST_SECRET));
+    let oauth_state = Arc::new(OAuthState::with_defaults(TEST_SECRET));
     let app = build_router(state.clone(), oauth_state);
 
     // 1. Fetch server pub.
@@ -340,7 +340,7 @@ async fn redeem_unwraps_and_rewraps_correctly_roundtrip() {
 #[tokio::test]
 async fn redeem_rejects_expired_ticket() {
     let state = mock_state();
-    let oauth_state = Arc::new(OAuthState::new(TEST_SECRET));
+    let oauth_state = Arc::new(OAuthState::with_defaults(TEST_SECRET));
     let app = build_router(state.clone(), oauth_state);
 
     // Fetch server pub and issue a CLI ticket.
@@ -396,7 +396,7 @@ async fn redeem_rejects_expired_ticket() {
 #[tokio::test]
 async fn redeem_rejects_already_redeemed_ticket() {
     let state = mock_state();
-    let oauth_state = Arc::new(OAuthState::new(TEST_SECRET));
+    let oauth_state = Arc::new(OAuthState::with_defaults(TEST_SECRET));
     let app = build_router(state.clone(), oauth_state);
 
     // Issue a CLI ticket.
@@ -456,7 +456,7 @@ async fn redeem_rejects_already_redeemed_ticket() {
 #[tokio::test]
 async fn redeem_handles_both_origins() {
     let state = mock_state();
-    let oauth_state = Arc::new(OAuthState::new(TEST_SECRET));
+    let oauth_state = Arc::new(OAuthState::with_defaults(TEST_SECRET));
     let app = build_router(state.clone(), oauth_state);
 
     // --- Webapp-origin ticket ---
@@ -558,7 +558,7 @@ async fn redeem_handles_both_origins() {
 #[tokio::test]
 async fn redeem_by_short_code_returns_secret_for_webapp_origin() {
     let state = mock_state();
-    let oauth_state = Arc::new(OAuthState::new(TEST_SECRET));
+    let oauth_state = Arc::new(OAuthState::with_defaults(TEST_SECRET));
     let app = build_router(state.clone(), oauth_state);
 
     // Issue a Webapp-origin ticket via /api/cli-bootstrap/issue (JWT required).
@@ -634,7 +634,7 @@ async fn redeem_by_short_code_returns_secret_for_webapp_origin() {
 #[tokio::test]
 async fn redeem_by_short_code_unwraps_rewraps_for_cli_origin() {
     let state = mock_state();
-    let oauth_state = Arc::new(OAuthState::new(TEST_SECRET));
+    let oauth_state = Arc::new(OAuthState::with_defaults(TEST_SECRET));
     let app = build_router(state.clone(), oauth_state);
 
     // 1. Fetch server pub.
@@ -734,7 +734,7 @@ async fn redeem_by_short_code_unwraps_rewraps_for_cli_origin() {
 #[tokio::test]
 async fn redeem_by_short_code_returns_404_for_unknown_code() {
     let state = mock_state();
-    let oauth_state = Arc::new(OAuthState::new(TEST_SECRET));
+    let oauth_state = Arc::new(OAuthState::with_defaults(TEST_SECRET));
     let app = build_router(state.clone(), oauth_state);
 
     let redeemer_sk = X25519SecretKey::generate(&mut OsRng);
