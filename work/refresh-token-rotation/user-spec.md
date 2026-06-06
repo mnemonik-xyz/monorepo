@@ -27,18 +27,19 @@ race. Клиенты OAuth 2.1 (Cursor, VS Code Copilot, Claude Desktop)
 
 ## Зачем
 
-Сегодня JWT-access-token живёт 1 час. Через час сессия в Claude Desktop
-умирает: каждый последующий `tools/call` к auth-гейтнутому тулу
-возвращает `-32001 unauthorized: invalid JWT: ExpiredSignature`. Внутри
-сессии восстановить токен нельзя — харнес прицепляет пару
+Сегодня JWT-access-token живёт 1 час. Через час активная сессия в
+HTTP-MCP-хосте умирает: каждый последующий `tools/call` к auth-гейтнутому
+тулу возвращает `-32001 unauthorized: invalid JWT: ExpiredSignature`.
+Внутри сессии восстановить токен нельзя — харнес прицепляет пару
 `authenticate`/`complete_authentication` только при коннекте, и наш
 сервер на момент коннекта рапортует валидный токен, так что пара не
 цепляется.
 
-Воспроизводилось в живой сессии 2026-06-06: пользователь хотел сохранить
-контекст разговора через `mnemonic_sign_memory`, получил unauthorized,
-не смог продолжить и пришлось писать workaround в `HANDOFF.md` в репо.
-Такая поломка отравляет любую сессию длиннее часа.
+Воспроизводилось в живой сессии 2026-06-06 на Claude.ai (web — потенциально
+через desktop wrapper, общий origin `https://claude.ai`): пользователь
+хотел сохранить контекст разговора через `mnemonic_sign_memory`, получил
+unauthorized, не смог продолжить и пришлось писать workaround в
+`HANDOFF.md` в репо. Такая поломка отравляет любую сессию длиннее часа.
 
 Stripe MCP — hosted OAuth MCP-сервер сопоставимого профиля — этой
 проблемы не имеет. Их recipe: 1ч access + 1г rolling refresh. Юзер
@@ -68,9 +69,10 @@ Stripe MCP — hosted OAuth MCP-сервер сопоставимого проф
      "refresh_token": "rt_..."
    }
    ```
-   Поддерживаются оба content-type'а (form-encoded для Cursor/VS Code,
-   JSON для Claude Desktop) симметрично существующему authorization_code
-   flow.
+   Поддерживаются оба content-type'а симметрично существующему
+   authorization_code flow (по факту в коде сегодня: `application/x-www-
+   form-urlencoded` от VS Code и Claude.ai, `application/json` от
+   Cursor — см. `oauth/mod.rs:975-977`).
 3. **MCP-хост работает как обычно** в течение часа. На каждый запрос —
    Bearer access-token, сервер валидирует, отдаёт результат.
 4. **Access-token протух (через час):** хост получает 401 с
@@ -86,12 +88,14 @@ Stripe MCP — hosted OAuth MCP-сервер сопоставимого проф
    - минтит новый access + новый refresh + расширяет `expires_at` на
      1г от now (rolling),
    - возвращает оба клиенту.
-6. **Reuse-interval защита от concurrent-race (NEW):** если в течение
-   30 секунд после ротации тот же `rt_X` приходит снова — сервер
-   возвращает **тот же descendant pair**, что был выдан первому
-   запросу (идемпотентный путь). Это покрывает кейс «два параллельных
-   401 → два параллельных refresh-grant» без kill-the-session.
-   **Только** предъявление revoked-refresh **после** окна → family-revoke.
+6. **Reuse-interval защита от retry-after-network-fail (NEW):** если в
+   течение **5 секунд** (Auth0 default) после ротации тот же `rt_X`
+   приходит снова — сервер возвращает **тот же descendant pair**, что
+   был выдан первому запросу (идемпотентный путь). Это **mechanism, который
+   различает** легитимный retry (клиент не получил ответ из-за сетевой
+   ошибки и переотправил) и replay-attack (атакующий получил
+   refresh-токен и предъявил его позже). **Только** предъявление
+   revoked-refresh **после** окна → потенциальный replay → family-revoke.
 7. **Хост подставляет** новый access в Authorization header и
    повторяет упавший запрос. Пользователь ничего не видит.
 8. **Юзер активен ≤ 1 год:** каждая ротация выдвигает срок refresh на
@@ -101,8 +105,15 @@ Stripe MCP — hosted OAuth MCP-сервер сопоставимого проф
    и редко.
 
 **Защита от replay:** старый refresh-токен, использованный **после**
-reuse-interval окна, вызывает revocation **всего семейства** (chain
-`rotated_to` + `family_id`). Это стандартный паттерн OAuth 2.1 §6.1.
+5-секундного reuse-interval окна, вызывает revocation **всего семейства**
+(chain `rotated_to` + `family_id`). Это стандартный паттерн OAuth 2.1 §6.1.
+
+**Семья** = все refresh-токены, выпущенные через одну цепочку ротаций,
+начиная с одного authorization_code обмена. Каждый
+`grant_type=authorization_code` exchange открывает новую семью с
+свежим `family_id` (UUID). Multi-device пользователь (логинился с двух
+устройств) имеет **две независимые семьи** — компрометация одной не
+revokе другую. Это standard Stripe/Auth0 паттерн.
 
 ## Критерии приёмки
 
@@ -113,14 +124,19 @@ reuse-interval окна, вызывает revocation **всего семейст
   `refresh_token` возвращает 200 с **новым** `access_token` (отличается
   от старого) и **новым** `refresh_token` (отличается от того, что
   прислали).
-- [ ] AC3 — После reuse-interval (30s) старый `refresh_token`
+- [ ] AC3 — После reuse-interval (5s) старый `refresh_token`
   использовать нельзя: `/oauth/token` с `grant_type=refresh_token`+
-  `старый_токен` возвращает `400 invalid_grant`.
+  `старый_токен` возвращает `400 invalid_grant`. **Семантика:** вне
+  reuse-окна предъявление revoked-токена трактуется как
+  потенциальный replay (а не legitimate retry — для retry окна
+  5 секунд более чем достаточно).
 - [ ] AC4 — Replay detection после reuse-interval: попытка использовать
-  revoked refresh-token вне окна инвалидирует **всю цепочку ротаций**
-  (родитель + все потомки по `family_id`). После этого даже самый свежий
-  refresh из цепочки возвращает `400 invalid_grant` — юзер должен пройти
-  полный OAuth.
+  revoked refresh-token **вне** окна инвалидирует **всю цепочку ротаций
+  по `family_id`** (родитель + все потомки + текущий валидный refresh).
+  После этого даже самый свежий refresh из той же семьи возвращает
+  `400 invalid_grant` — пользователь должен пройти полный OAuth.
+  **Семьи разных authorization_code exchange'ей независимы** (multi-device
+  изоляция).
 - [ ] AC5 — Истёкший refresh-token (`expires_at <= now`) возвращает
   `400 invalid_grant`. Новые токены не выпускаются, family-revoke
   не триггерится (истечение ≠ атака).
@@ -138,20 +154,26 @@ reuse-interval окна, вызывает revocation **всего семейст
 - [ ] AC9 — Анонимный `mnemonic_recall` (регрессионный якорь) продолжает
   работать без изменений — `mcp/tests/anonymous_recall.rs` не сломан.
 - [ ] AC10 — **Dual content-type parity**: refresh-grant работает
-  идентично в `application/x-www-form-urlencoded` (как у Cursor /
-  VS Code) и в `application/json` (как у Claude Desktop). Существующий
-  authorization_code flow тоже работает в обоих форматах сегодня — фича
-  сохраняет этот инвариант.
+  идентично в `application/x-www-form-urlencoded` **и** в
+  `application/json`. По коду на сегодня (`oauth/mod.rs:975-977`):
+  form шлют VS Code и Claude.ai; JSON шлёт Cursor — но AC не привязан
+  к конкретным клиентам, важна паритетность обоих форматов на
+  refresh-ветке. Существующий authorization_code flow уже это делает —
+  фича сохраняет инвариант для новой ветки.
 - [ ] AC11 — **Wire-format back-compat**: клиент, который игнорирует
   поле `refresh_token` в ответе и продолжает использовать только
   `access_token` (как наши легаси-клиенты до этой фичи), работает без
   изменений. Поле — additive, никаких breaking-change.
-- [ ] AC12 — **Concurrent rotation внутри reuse-interval**: два запроса
-  ротации с одним и тем же `rt_X` в течение 30s после первой ротации
-  оба получают одну и ту же descendant pair (идемпотентность через
-  reuse-interval lookup). Семья **не** revoked. Тест запускает 2
-  параллельных refresh-grant'а и проверяет, что обоим вернулся
-  один и тот же новый access+refresh.
+- [ ] AC12 — **Quasi-concurrent rotation внутри reuse-interval**:
+  два запроса ротации с одним и тем же `rt_X`, прибывшие почти
+  одновременно. SQLite `BEGIN IMMEDIATE` сериализует writer'ов, так что
+  «true parallel» внутри одной БД не достижим: второй запрос блокируется
+  на immediate-lock, потом видит `revoked=1 AND rotated_at + 5s > now`
+  и попадает в reuse-interval lookup-путь — возвращается **та же
+  descendant pair**, что была выдана первому. Тест: `tokio::join!` двух
+  refresh-grant'ов с одним токеном; обоим возвращён одинаковый
+  результат (NOT independent rotations), семья НЕ revoked. Семантика
+  гарантирует что network-retry не убьёт сессию.
 - [ ] AC13 — **Malformed refresh-grant**: `grant_type=refresh_token` без
   поля `refresh_token` (или с пустой строкой) возвращает
   `400 invalid_request` (не `invalid_grant` — это не неверный токен,
@@ -170,7 +192,8 @@ reuse-interval окна, вызывает revocation **всего семейст
 - Refresh-token — **opaque random string** (32 байта base64url), не JWT.
 - Refresh-grant поддерживает **оба** content-type'а (form-encoded и
   JSON) симметрично существующему authorization_code endpoint'у.
-  Серверный dispatch в `token_handler` уже это делает.
+  Серверный dispatch в `token_handler` уже это делает; ветка для
+  `grant_type=refresh_token` встаёт в тот же путь.
 - Архитектурное правило: OAuth/payment/pricing живут в `mcp/`, не в
   `core/`. Refresh-token storage идёт в `mcp/src/oauth/refresh.rs` по
   паттерну `migrate_key_escrow_blobs` (`escrow.rs:113-133`).
@@ -192,20 +215,24 @@ reuse-interval окна, вызывает revocation **всего семейст
 
 ## Риски
 
-- **R1 — Claude Desktop может не поддерживать refresh-токены.**
-  Эмпирически неизвестно. Cursor / VS Code Copilot ротируют (OAuth 2.1
-  standard); Claude Desktop — гипотеза до проверки.
-  **Mitigation (pre-ship, обязательно):** одна из двух дешёвых проверок
-  ДО ship:
-  - **Option A**: захватить HTTP-трейс Claude Desktop ↔ Stripe MCP
-    (https://mcp.stripe.com — у них refresh-tokens работают), посмотреть
-    делает ли Claude Desktop `grant_type=refresh_token` POST на их
-    `/oauth/token`. Если да — наш фикс сработает по тому же протоколу.
-  - **Option B**: задеплоить v0.2.5-dev с `JWT_TTL_SECS=60`, подключить
-    Claude Desktop, ждать 2 минуты, наблюдать поведение. Если ротирует —
-    подтверждено. Если нет — `refresh_token` для Claude Desktop ничего
-    не даёт, открываем эскалацию (Anthropic ticket / переключаемся на
-    stateless-auth-rearch путь).
+- **R1 — Claude.ai (и потенциально другие OAuth-клиенты) могут не
+  поддерживать refresh-токены.** Cursor / VS Code Copilot ротируют по
+  OAuth 2.1 standard; Claude.ai — гипотеза до эмпирической проверки.
+  **Mitigation (pre-ship, обязательно — одна из):**
+  - **Option B (PRIMARY)**: задеплоить `mcp.dev.mnemonik.xyz` с
+    `JWT_TTL_SECS=60`, подключить Claude.ai (или Claude Desktop wrapper),
+    ждать 2 минуты. Параллельно Cursor как control. Если оба продолжают
+    работать без OAuth-страницы — refresh-токены подхватываются;
+    если только Cursor — Claude.ai не ротирует, переходим к эскалации
+    (Anthropic ticket / stateless-auth-rearch путь). Чисто, не требует
+    TLS-interception инфраструктуры.
+  - **Option C (если Option B затруднён)**: прочитать MCP SDK
+    (`@modelcontextprotocol/sdk` для JS-хостов, типизированный OAuth
+    helper) и/или открытые куски Claude.ai OAuth client'а. Подтвердить
+    что код вызывает `grant_type=refresh_token`. Дешевле деплоя.
+  - **Option A (deprecated, не рекомендую)**: захватить HTTP-трейс
+    Claude.ai ↔ Stripe MCP. Требует custom CA в trust store и борьбы
+    с возможным cert pinning'ом в Electron-обёртке — высокая инфра-цена.
 
   Без одной из этих проверок ДО ship — это та же ставка на «потом
   узнаем», которая угробила два предыдущих пивота этого спека.
@@ -293,17 +320,27 @@ reuse-interval окна, вызывает revocation **всего семейст
   Pattern from `payment.rs:478-505`.
 - **D12 (Eviction):** Hourly background sweep
   (`Duration::from_secs(3600)`) по паттерну
-  `confirmation_token::start_evictor`. Plus opportunistic cleanup:
-  при каждой успешной ротации в той же транзакции —
-  `DELETE FROM refresh_tokens WHERE family_id=? AND expires_at < now`
-  чтобы держать таблицу маленькой.
-- **D13 (Reuse-interval — Auth0/Okta pattern):** 30-секундное окно
-  после ротации. Если тот же `rt_X` приходит ещё раз внутри окна —
-  сервер lookup'ит запись с `rotated_to != NULL AND revoked_at + 30s
-  > now`, и **возвращает уже-выданную descendant pair** (не выпускает
-  третий токен, не revokе семьи). Solves concurrent-401 race без
-  компрометации replay-detect: только вне окна reused `rt_X` →
-  family-revoke. Auth0 называет это «refresh token reuse interval».
+  `confirmation_token::start_evictor`. Один путь — без opportunistic
+  cleanup в транзакции ротации; для 1y TTL hourly sweep более чем
+  достаточно, второй путь добавляет сложность без observable выигрыша
+  (adequacy round 2 finding).
+- **D13 (Reuse-interval — Auth0pattern, 5 секунд):** 5-секундное окно
+  после ротации (Auth0 default; Okta пишет 30s — наш профиль ближе к
+  Auth0 потому что 5с покрывает любой реалистичный network retry, а
+  более длинное окно расширяет реальный window для replay-attack'а
+  если refresh утечёт). Если тот же `rt_X` приходит ещё раз внутри
+  окна — сервер lookup'ит запись с `rotated_to != NULL AND revoked_at +
+  5s > now`, и **возвращает уже-выданную descendant pair**. Solves
+  network-retry race без компрометации replay-detect: только вне
+  окна reused `rt_X` → family-revoke. Auth0 называет это «refresh
+  token reuse interval».
+- **D13.1 (`family_id` semantics):** **Per-grant UUID** — каждый
+  `grant_type=authorization_code` exchange выпускает новый
+  `family_id = uuid::Uuid::new_v4()`. Multi-device пользователь (логин
+  с двух браузеров) имеет две независимые семьи; компрометация одной
+  НЕ revokе другую. Альтернатива — sub-bound (`family_id = sub`) —
+  была бы paranoid: один украденный токен убивает все сессии. Stripe и
+  Auth0 идут по per-grant; копируем для консистентного UX.
 - **D14 (Dual content-type parity):** Новая refresh-ветка в
   `token_handler` парсит body после dispatch'а на `application/json`
   vs `application/x-www-form-urlencoded` (тот же путь что для
@@ -356,10 +393,11 @@ R1 mitigation — НЕ в CI (Claude Desktop не headless), но **резуль
 | 2. То же что 1, но `Content-Type: application/json` | cargo test integration | Тот же 200 с теми же полями — паритет (AC10) |
 | 3. С новым access-токеном вызвать `tools/call mnemonic_whoami` | cargo test integration | 200 с pubkey, `sub` от первого grant'а (AC8) |
 | 4. Подождать 1ч (или симулировать exp в прошлом) → access протух | cargo test integration | 401 `-32001` на whoami, как сегодня (AC8) |
-| 5. `POST /oauth/token grant_type=refresh_token refresh_token=<saved>` | cargo test integration | 200 с **новыми** access и refresh; новый `expires_at > старый_expires_at` (AC2, AC6) |
-| 6. **Сразу** (внутри 30s) повторить шаг 5 с тем же старым `rt_X` | cargo test integration | 200 с **той же** descendant pair что в шаге 5 (reuse-interval, AC12) |
-| 7. Параллельно (tokio::join!) выполнить 2 одновременных refresh-grant'а с одним `rt_X` | cargo test integration | Оба возвращают идентичные descendant tokens; семья НЕ revoked (AC12) |
-| 8. Подождать 31s → повторить шаг 5 со старым `rt_X` | cargo test integration | 400 `invalid_grant` + family revoked (AC3, AC4) |
+| 5. `POST /oauth/token grant_type=refresh_token refresh_token=<saved>` (form-encoded) | cargo test integration | 200 с **новыми** access и refresh; новый `expires_at > старый_expires_at` (AC2, AC6) |
+| 5b. Тот же refresh-grant но с `Content-Type: application/json` (свежая family) | cargo test integration | Тот же 200 с теми же полями — паритет content-type на refresh-ветке (AC10) |
+| 6. **Сразу** (внутри 5s) повторить шаг 5 с тем же старым `rt_X` | cargo test integration | 200 с **той же** descendant pair что в шаге 5 (reuse-interval, AC12) |
+| 7. tokio::join! двух refresh-grant'ов с одним `rt_X` (квази-параллельно — BEGIN IMMEDIATE сериализует) | cargo test integration | Оба возвращают **идентичные** descendant tokens (второй идёт через reuse-interval lookup, не делает independent rotation); семья НЕ revoked (AC12) |
+| 8. Подождать 6s → повторить шаг 5 со старым `rt_X` | cargo test integration | 400 `invalid_grant` + family revoked (AC3, AC4) |
 | 9. После шага 8 — попробовать использовать НОВЫЙ refresh из шага 5 | cargo test integration | 400 `invalid_grant` (вся семья revoked, AC4) |
 | 10. `GET /.well-known/oauth-authorization-server` | cargo test integration | JSON содержит `"grant_types_supported": [..., "refresh_token"]` (AC7) |
 | 11. Симулировать refresh с `expires_at < now` (1y+ протух) | cargo test integration | 400 `invalid_grant`; семья НЕ revoked (истечение ≠ атака, AC5) |

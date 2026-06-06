@@ -36,9 +36,9 @@ Chrome extension runs **fully client-side** for local writes:
 | Component | Where | What |
 |-----------|-------|------|
 | Identity | `localStorage["mnemonic.identity"]` | Ed25519 keypair (today's pattern, see webapp `Sign.tsx`) |
-| Embeddings | WASM-compiled `core/` in extension's service-worker / content-script | `fastembed` or similar — local model already in webapp build |
+| Embeddings | **Browser-native embedder via WASM** — `ort-web` (ONNX Runtime) or `transformers.js`, per `architecture.md:14` design. NOT `fastembed` — `core/src/lib.rs:10-13` gates `embed` behind `#[cfg(not(target_arch = "wasm32"))]`, so the native embedder doesn't compile to WASM. Adopting a browser-compatible embedder is a load-bearing sub-task of this migration. | local model runs in extension's service-worker / offscreen document |
 | Storage | IndexedDB via `wa-sqlite` or `sql.js` | full text + uncompressed f32 embedding + metadata |
-| COSE signing | WASM `sign_cose_payload` export | user's keypair, never leaves browser |
+| COSE signing | WASM `sign_cose_payload` export (already works in webapp) | user's keypair, never leaves browser |
 
 For `participate` writes (paid + anchored), extension continues to call
 external MCP (`mcp.mnemonik.xyz` or operator's choice) — same path as

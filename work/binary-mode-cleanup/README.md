@@ -22,12 +22,16 @@ User-facing mode model becomes **binary**:
 | Mode | Where it lives | Cost | Anchored? | Who signs |
 |------|----------------|------|-----------|-----------|
 | `local` | client-side: stdio→SQLite file, browser-extension→IndexedDB | free | no | user's keypair (locally) |
-| `participate` | server SQLite (full text for recall) + Arweave (compressed embedding) + Solana (timestamp anchor) | x402/balance via external MCP | yes | user's keypair (browser-mediated via webapp) |
+| `participate` | server SQLite (full text + uncompressed f32 embedding for recall) + Arweave (COSE_Sign1 envelope wrapping canonical CBOR — proof-of-existence, NOT used for recall) + Solana (SPL Memo with blake3 of canonical CBOR — timestamp anchor) | x402/balance via external MCP | yes | user's keypair (browser-mediated via webapp) |
 
 **No third "free hosted server SQLite without anchor" tier exists**. Today
 it does — via `STORAGE_MODE=local + PAYMENT_MODE=none` on operator
-deploys (chrome-extension's production target, see `patterns.md::Storage
-modes`). That config becomes a deploy-anti-pattern and is retired.
+deploys (chrome-extension's production target, see CLAUDE.md and
+`patterns.md` — section "Storage modes" describes the per-request
+`mode` resolution + envelope; the legacy "no-cost hosted SQLite via
+operator config" emerges from the `PAYMENT_MODE=none` choice on a
+deploy that exposes `mode:"local"`). That config becomes a
+deploy-anti-pattern and is retired.
 
 Whitepaper §5.7.1 invariant "Личная память бесплатна всегда" holds
 structurally:

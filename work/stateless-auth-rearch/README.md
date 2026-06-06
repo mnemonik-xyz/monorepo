@@ -61,29 +61,41 @@ Two reasons:
 
 ## Sketch of what F0 would look like
 
-### Option A — local stdio-proxy
+### Option A — local stdio-proxy (full replacement of hosted OAuth, not side-grade)
 
 User installs `mnemonik-mcp proxy --upstream mcp.mnemonik.xyz` via the
 existing `mnemonik install` flow (agent-native-distribution v0.2.4).
+This **replaces** the OAuth+Bearer auth path entirely on the hosted
+HTTP API — not a side-grade. The legacy `/oauth/*` surface either
+deprecates or stays only for backward-compat during migration.
+
 The proxy:
 - Runs as a stdio MCP server (MCP-host sees it as a normal stdio server).
-- Holds the user's Ed25519 keypair locally.
+- Holds the user's Ed25519 keypair locally (file in `~/.config/mnemonik/`).
 - For each `tools/call`, signs canonical request body with the keypair.
 - Forwards to upstream HTTPS endpoint with `X-Mnemonic-Signature` +
-  `X-Mnemonic-Pubkey` headers (or similar).
+  `X-Mnemonic-Pubkey` headers (or HTTP Message Signatures per RFC 9421).
 
-Upstream server:
-- Validates signature math, no DB lookup, fully stateless on auth.
-- Routes tenancy via the validated pubkey.
+Upstream server (refactored, breaking change):
+- Drops `bearer_auth_middleware` for tool-call routes.
+- Mounts new `signature_auth_middleware` that validates Ed25519 math
+  against the body, no DB lookup, fully stateless on auth.
+- Routes tenancy via the validated pubkey from the signature header.
 
 Pros: stateless auth, structural bug-elimination, aligned with protocol
-thesis. Pros for user: no OAuth-pages ever, even on first connect (keypair
-either generated locally or imported).
+thesis. No OAuth-pages ever, even on first connect (keypair either
+generated locally on first run or imported from existing identity).
 
-Cons: requires local proxy installation (one more thing for users to do —
-though `mnemonik install` is one command). Wire protocol on upstream must
-change. Browser-mediated signing flow needs reconciliation (still needed
-for webapp clients).
+Cons:
+- Requires local proxy installation — `mnemonik install` is one command,
+  but it's still one command users must run before connecting any host.
+- Wire protocol on upstream must change. Breaking-change for direct-HTTP
+  clients (Cursor, VS Code, Claude.ai) — they don't natively sign
+  per-request. Workaround: keep OAuth path as legacy fallback during
+  transition window, deprecate later.
+- Browser-mediated signing flow (Sign.tsx) needs reconciliation: webapp
+  could either also use HTTP Message Signatures, or continue using the
+  capability-based `correlation_id` path with the proxy as the bridge.
 
 ### Option B — MCP-spec change
 
