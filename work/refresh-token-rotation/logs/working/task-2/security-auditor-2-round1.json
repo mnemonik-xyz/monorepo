@@ -1,0 +1,81 @@
+{
+  "auditor": "security-auditor-2",
+  "round": 1,
+  "commit": "dcfdd45",
+  "task": "Task 2 — JWT_TTL_SECS env-plumbing via OnceLock + pub mod refresh",
+  "date": "2026-06-06",
+  "methodology": "OWASP Top 10 (2021+), crypto hygiene, Decision 12 tech-spec compliance, ENV input validation, log-safety audit",
+  "verdict": "CONDITIONAL_PASS",
+  "summary": "No critical or high-severity vulnerabilities found. One medium finding (INFO log records raw env var value including any operator-supplied string), two low findings (test does not assert whitespace-only WARN independently; `pub mod refresh` exposes Task 1 module prematurely). One informational note on arithmetic cast. All findings are minor and none block ship; the medium finding has a simple one-line fix.",
+  "findings": [
+    {
+      "id": "M1",
+      "severity": "Medium",
+      "title": "seed_jwt_ttl_from_env INFO log records the raw MCP_JWT_TTL_SECS string unconditionally",
+      "file": "mcp/src/oauth/mod.rs",
+      "lines": "93-97",
+      "description": "The INFO log in seed_jwt_ttl_from_env emits the raw env-var string: `MCP_JWT_TTL_SECS={raw.as_deref().unwrap_or('<unset>')}`. For MCP_JWT_TTL_SECS specifically, the value is expected to be a small integer (e.g. '60', '3600'), so this is low-risk in normal operation. However, if an operator accidentally copies a secret value (e.g. pastes their MCP_JWT_SECRET into MCP_JWT_TTL_SECS by mistake), the raw secret would appear in logs. Decision 14 of the tech-spec states 'NEVER log: token_hash, full plaintext, JWT access_token, salt bytes'. While MCP_JWT_TTL_SECS is not itself a secret, logging arbitrary operator-supplied env var strings in an INFO line that will appear in prod log aggregation creates a plausible secret-exposure vector through operator error. The WARN logs in compute_jwt_ttl_from_env_str correctly log `{trimmed:?}` (the parsed numeric-ish value) with the operator's raw input, which is also the same exposure.",
+      "attack_scenario": "Operator on-call sets MCP_JWT_TTL_SECS to a value accidentally copied from clipboard containing MCP_JWT_SECRET or MCP_REFRESH_SALT. The INFO line is ingested by the log aggregator (Loki, CloudWatch, Datadog) and indexed/retained. Log access is typically broader than secret-store access.",
+      "recommendation": "Change the INFO log to log the resolved (clamped) value only, not the raw env var string. Example: `\"JWT access-token TTL seeded to {value}s\"`. The WARN logs in compute_jwt_ttl_from_env_str that show the raw string are acceptable because those logs fire only for invalid input (non-numeric/empty/out-of-range), and logging the raw input there is necessary for operator debugging. However, consider replacing `{trimmed:?}` in the parse-failure WARN with a length-bounded prefix (e.g. first 16 chars) to limit exposure even further. The INFO line on the happy path does not need the raw value at all.",
+      "compliance": "Decision 14 (logging policy); OWASP A09:2021 Security Logging and Monitoring Failures"
+    },
+    {
+      "id": "L1",
+      "severity": "Low",
+      "title": "Unit test jwt_ttl_parse_failure_logs_warn_and_uses_default does not independently assert WARN for whitespace-only input",
+      "file": "mcp/src/oauth/mod.rs",
+      "lines": "3207-3211",
+      "description": "The test calls compute_jwt_ttl_from_env_str(Some('')) and then compute_jwt_ttl_from_env_str(Some('   ')) and checks assert!(logs_contain('MCP_JWT_TTL_SECS is empty / whitespace-only')) only once (after the empty-string call). Due to #[tracing_test::traced_test] accumulating logs across the entire test function, the single logs_contain assertion after the empty-string check satisfies both cases — but the whitespace-only path ('   ') is not independently verified to emit a WARN. If a future refactor accidentally skips the WARN for whitespace-only while keeping it for empty, the test would still pass.",
+      "recommendation": "Add a separate assert!(logs_contain(...)) immediately after the whitespace-only call, or restructure into separate sub-cases. This is a test-coverage gap, not a production code defect.",
+      "compliance": "Decision 12 (non-silent WARN contract for explicit misconfiguration)"
+    },
+    {
+      "id": "L2",
+      "severity": "Low",
+      "title": "pub mod refresh declaration exposes Task 1 module before its full security review",
+      "file": "mcp/src/oauth/mod.rs",
+      "lines": "32",
+      "description": "The task spec (task 2.md) states 'Note: the pub mod refresh; declaration is owned by Task 1 — this task does NOT touch the module-declaration block'. The diff shows Task 2 added `pub mod refresh;` at line 32 even though the Task 1 module (refresh.rs) has not yet been through its own security audit. The refresh.rs file exists in the repo and is now reachable from prod code via this declaration. If refresh.rs contains any unsafe or unreviewed security-sensitive code, it is now exposed. This is a workflow/sequencing issue, not an implementation bug, but it means the security surface of Task 1 is merged into the codebase without the Task 1 security audit having gated that merge.",
+      "recommendation": "Per the task spec's own note, Task 2 should not own this declaration. If it was intentionally moved here for compilation reasons, ensure Task 1's security audit is completed (or already complete) before this commit reaches the merge gate. This finding is informational if Task 1 has already been audited separately.",
+      "compliance": "OWASP A05:2021 Security Misconfiguration (premature exposure of unreviewed surface)"
+    },
+    {
+      "id": "I1",
+      "severity": "Info",
+      "title": "now + jwt_ttl_secs() arithmetic could theoretically overflow u64 at the far future epoch",
+      "file": "mcp/src/oauth/mod.rs, mcp/src/escrow.rs",
+      "lines": "482, 797 (escrow.rs)",
+      "description": "exp: now + jwt_ttl_secs() uses plain u64 addition. now_secs() returns u64 (SystemTime since UNIX_EPOCH). With JWT_TTL_MAX_SECS clamped to 604800 (7 days) and the current epoch well below u64::MAX, overflow is not realistically reachable. The existing codebase uses the same pattern for CODE_TTL_SECS and other TTLs without wrapping protection. This is purely informational — the clamp to 604800 makes the addition safe for any realistic timestamp.",
+      "recommendation": "No immediate action required. If the codebase ever allows larger TTLs, add .saturating_add() to match the pattern used at line 1914 (now_secs().saturating_sub(120)).",
+      "compliance": "CWE-190 Integer Overflow — not exploitable under current clamp"
+    }
+  ],
+  "checklist": {
+    "env_input_validation_no_panic": "PASS — compute_jwt_ttl_from_env_str handles None, empty, whitespace, and parse failures without panicking; returns safe default 3600",
+    "no_path_bypasses_ttl_via_huge_or_zero_value": "PASS — clamp [60, 604800] is enforced before OnceLock.set; zero is handled (parses to 0 < 60, clamped to 60); u64 parse prevents negative values",
+    "clamp_boundaries_60_604800_correctly_enforced": "PASS — conditions `parsed < JWT_TTL_MIN_SECS` (60) and `parsed > JWT_TTL_MAX_SECS` (604_800) are correct boundary checks; both boundaries are inclusive (60 and 604800 pass through without WARN)",
+    "no_leak_of_MCP_JWT_TTL_SECS_into_logs_with_secrets": "PARTIAL — the INFO log in seed_jwt_ttl_from_env records the raw env var string (see M1); MCP_JWT_TTL_SECS is not itself a secret, but the pattern risks operator-error secret exposure",
+    "parse_failure_logs_warn_falls_back_3600": "PASS — all parse failure paths (non-numeric, empty, whitespace) emit WARN and return JWT_TTL_DEFAULT_SECS (3600)",
+    "oncelock_race_free_seeding": "PASS — seed_jwt_ttl_from_env is called at the top of run_http before OAuthState::new and before any router is mounted; no reader can fire before the seed in production",
+    "stdio_transport_safe": "PASS — stdio transport never calls run_http; jwt_ttl_secs() falls back to JWT_TTL_DEFAULT_SECS via unwrap_or when OnceLock is unseeded",
+    "six_read_sites_updated": "PASS — oauth/mod.rs:391 (issue_jwt_with_google_sub exp), oauth/mod.rs:1163 (token_handler expires_in), oauth/mod.rs:1204 (cache fallback 1), oauth/mod.rs:1215 (cache fallback 2), escrow.rs:511 (extension bootstrap expires_in), escrow.rs:797 (mint_extension_jwt exp) — all confirmed",
+    "onceLock_set_idempotent": "PASS — JWT_TTL.set(value) result is discarded via let _ = ...; subsequent calls are silently no-ops; no panic",
+    "test_isolation_no_oncelock_pollution": "PASS — both unit tests exercise compute_jwt_ttl_from_env_str directly, never calling seed_jwt_ttl_from_env, so the process-global static is not mutated",
+    "no_jwt_secret_logging": "PASS — load_jwt_secret() error paths mention byte counts but never log the secret value; no secret value appears in any log line",
+    "cache_control_headers": "NOT IN SCOPE — Task 2 does not touch token response headers; this belongs to Task 3",
+    "dependency_tracing_test_dev_only": "PASS — tracing-test = '0.2' is in [dev-dependencies] only; not linked into the production binary (confirmed in Cargo.toml diff)",
+    "std_sync_onceLock_not_once_cell": "PASS — uses std::sync::OnceLock as mandated by Decision 12; no once_cell import"
+  },
+  "owasp_mapping": {
+    "A01_broken_access_control": "N/A — this task does not change authorization logic",
+    "A02_cryptographic_failures": "PASS — no cryptographic changes; HS256 algorithm, key validation, and JWT structure unchanged",
+    "A03_injection": "PASS — env var value is parsed as u64 (trimmed first); no shell injection, no SQL, no format string vulnerability",
+    "A04_insecure_design": "PASS — clamp boundaries match the tech-spec Decision 12; no zero TTL path exists",
+    "A05_security_misconfiguration": "LOW — see L2 (pub mod refresh premature exposure); otherwise server aborts on bad MCP_JWT_SECRET",
+    "A06_vulnerable_components": "PASS — tracing-test 0.2.6 is a dev-only dep; no known CVEs; Cargo.lock pinned",
+    "A07_auth_failures": "PASS — TTL logic is additive; existing Bearer JWT validation (HS256, fixed alg, iss/aud check) unchanged",
+    "A08_integrity_failures": "PASS — OnceLock cannot be overwritten post-seed; no deserialization of untrusted input in this change",
+    "A09_logging_monitoring_failures": "MEDIUM — see M1 (raw env var logged on INFO); otherwise startup misconfiguration is loud (WARN)",
+    "A10_ssrf": "N/A — no URL handling in this change"
+  }
+}

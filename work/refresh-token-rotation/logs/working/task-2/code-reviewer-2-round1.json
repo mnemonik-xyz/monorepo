@@ -1,0 +1,164 @@
+{
+  "reviewer": "code-reviewer-2",
+  "round": 1,
+  "commit": "dcfdd45",
+  "task": "work/refresh-token-rotation/tasks/2.md",
+  "timestamp": "2026-06-06",
+  "verdict": "APPROVE_WITH_MINOR_NOTES",
+  "summary": "Task 2 implementation is correct and production-ready. All 6 read sites switched, OnceLock semantics are sound, clamp [60, 604800] is enforced, WARN logging fires on every failure/out-of-range path, and test isolation is properly achieved by exercising the pure helper rather than the global OnceLock. Three minor findings noted — none are blocking.",
+
+  "acceptance_criteria_check": {
+    "AC_const_removed": {
+      "status": "PASS",
+      "note": "pub const JWT_TTL_SECS: u64 = 3600 is gone. Replaced by JWT_TTL_DEFAULT_SECS, JWT_TTL_MIN_SECS, JWT_TTL_MAX_SECS named constants and the OnceLock static. No residual references to the old const name found in any file under mcp/."
+    },
+    "AC_jwt_ttl_secs_fn": {
+      "status": "PASS",
+      "note": "pub fn jwt_ttl_secs() -> u64 exists at oauth/mod.rs:81; reads OnceLock via get().unwrap_or(&JWT_TTL_DEFAULT_SECS) — safe pre-seed fallback confirmed."
+    },
+    "AC_6_read_sites": {
+      "status": "PASS",
+      "note": "All 6 production read sites confirmed switched: oauth/mod.rs:482 (exp claim), oauth/mod.rs:1166 (expires_in), oauth/mod.rs:1204 (chrono fallback 1), oauth/mod.rs:1215 (chrono fallback 2), escrow.rs:511 (extension expires_in), escrow.rs:797 (extension exp claim). Zero stale JWT_TTL_SECS references remain in mcp/."
+    },
+    "AC_chrono_cast": {
+      "status": "PASS",
+      "note": "Both chrono arithmetic sites (mod.rs:1204, mod.rs:1215) use jwt_ttl_secs() as i64 — cast preserved identically to the prior const."
+    },
+    "AC_tracing_test_dev_dep": {
+      "status": "PASS",
+      "note": "tracing-test = \"0.2\" added under [dev-dependencies] in mcp/Cargo.toml. Cargo.lock resolves to 0.2.6. Placed correctly — not in runtime deps."
+    },
+    "AC_escrow_import": {
+      "status": "PASS",
+      "note": "escrow.rs:59 import updated: JWT_TTL_SECS removed, jwt_ttl_secs function added. Import list is: {jwt_ttl_secs, Claims, OAuthState, JWT_ISSUER}."
+    },
+    "AC_run_http_seed": {
+      "status": "PASS",
+      "note": "oauth::seed_jwt_ttl_from_env() called at main.rs:796, after load_jwt_secret() at main.rs:790 and before OAuthState::new at main.rs:797. Ordering matches the task spec requirement."
+    },
+    "AC_clamp_and_warn": {
+      "status": "PASS",
+      "note": "Values below 60 clamp to 60 with WARN. Values above 604800 clamp to 604800 with WARN. Parse failures (non-numeric, empty, whitespace-only) fall back to 3600 with WARN."
+    },
+    "AC_parse_failure_warn": {
+      "status": "PASS",
+      "note": "Separate WARN branches: empty/whitespace produces 'MCP_JWT_TTL_SECS is empty / whitespace-only' WARN; non-numeric produces 'failed to parse as u64' WARN. None is silent."
+    },
+    "AC_env_example_docs": {
+      "status": "PASS",
+      "note": ".env.example has the MCP_JWT_TTL_SECS commented block adjacent to MCP_JWT_SECRET, covering: default 3600, clamp [60, 604800], R1-gate use-case, and behavior on bad input."
+    },
+    "AC_deployment_md_docs": {
+      "status": "PASS",
+      "note": "deployment.md env-var table row added (line ~57) with default, clamp range, and R1 gate mention. Hosted-mode block (around line 275) adds a bash snippet for prod vs dev configuration."
+    },
+    "AC_unit_tests_pass": {
+      "status": "PASS",
+      "note": "Both jwt_ttl_seeded_from_env_and_clamped and jwt_ttl_parse_failure_logs_warn_and_uses_default are present with #[tracing_test::traced_test] + #[test] annotations. The helper is tested directly (no OnceLock pollution). Builder reported 183 tests passing with both new tests green."
+    }
+  },
+
+  "dimensions": {
+    "1_architectural_patterns": {
+      "rating": "good",
+      "notes": "Process-global OnceLock pattern matches the confirmation_token::DEFAULT_TTL single-source style called out in Decision 12. Pure helper (compute_jwt_ttl_from_env_str) correctly separates the parsing/clamping logic from the OnceLock lifecycle, enabling test isolation without a reset seam. No architectural anti-patterns introduced."
+    },
+    "2_separation_of_concerns": {
+      "rating": "good",
+      "notes": "Parsing/clamping/WARN logic is entirely in compute_jwt_ttl_from_env_str. Seeding lives in seed_jwt_ttl_from_env. Reading lives in jwt_ttl_secs. Each caller does exactly one thing. The escrow.rs and oauth/mod.rs read sites are thin — they call the function without duplicating any logic."
+    },
+    "3_readability_maintainability": {
+      "rating": "good",
+      "notes": "Named constants (JWT_TTL_DEFAULT_SECS, JWT_TTL_MIN_SECS, JWT_TTL_MAX_SECS) replace the magic numbers in the WARN messages and clamp conditions. Doc comments on the static, getter, seeder, and helper are concise and link correctly to Decision 12. One minor concern: the 3 new pub consts (JWT_TTL_DEFAULT_SECS, JWT_TTL_MIN_SECS, JWT_TTL_MAX_SECS) expand the public API surface of oauth/mod.rs unnecessarily — they are only needed by the helper and tests. pub(crate) or even private would be tighter. Not blocking."
+    },
+    "4_error_handling_logging": {
+      "rating": "good",
+      "notes": [
+        "WARN fires on every failure mode: below-min clamp, above-max clamp, empty string, whitespace-only, and parse error. None are silent.",
+        "None MINOR: env wholly unset (None) silently returns 3600 — intentional by spec ('only the explicit misconfiguration cases are loud'), test confirms this at line 3215.",
+        "INFO log in seed_jwt_ttl_from_env at line 93-97 always fires even when OnceLock::set silently loses the race (idempotent second call). The log says 'seeded to Xs' even when the value was NOT actually stored. This is misleading in a multi-call scenario (e.g., integration test harness that calls run_http twice). See finding M1 below.",
+        "No PII in logs. No token data. Correct structured tracing macro usage with target: 'mnemonic_mcp::oauth'."
+      ]
+    },
+    "5_type_safety": {
+      "rating": "good",
+      "notes": "OnceLock<u64> is the correct type. The chrono cast to i64 is preserved at both sites. compute_jwt_ttl_from_env_str accepts Option<&str> — correct type for the env::var().ok().as_deref() chain."
+    },
+    "6_testing_coverage": {
+      "rating": "good",
+      "notes": [
+        "jwt_ttl_seeded_from_env_and_clamped covers: below-min (10), above-max (9999999), in-range passthrough (3600). WARN assertions on the first two.",
+        "jwt_ttl_parse_failure_logs_warn_and_uses_default covers: non-numeric, empty string, None (silent). WARN assertions on first two.",
+        "Minor gap (m1): The test for whitespace-only (Some('   ')) at line 3208-3210 asserts the return value but does NOT assert a WARN was emitted for that specific call. The logs_contain check at line 3207 fires after the empty-string call — since tracing_test accumulates across the whole test function, the WARN from the empty string would satisfy logs_contain for 'whitespace-only'. This means the whitespace-specific WARN is not independently verified. Not a blocking gap — the production code path is shared (same trimmed.is_empty() branch for both) — but the test gives weaker isolation for the whitespace sub-case.",
+        "In-range passthrough (3600) at line 3189 has no assertion that NO WARN was emitted. Since tracing_test#logs_contain is positive-only (no logs_not_contain in 0.2), this is an accepted limitation — not actionable without adding a custom assertion."
+      ]
+    },
+    "7_dependencies": {
+      "rating": "good",
+      "notes": "std::sync::OnceLock used as mandated (not once_cell). tracing-test = '0.2' is dev-only, does not add runtime overhead. Cargo.lock resolves to 0.2.6 which is current stable. No new runtime dependencies introduced."
+    },
+    "8_security": {
+      "rating": "good",
+      "notes": "No secrets in logs. The WARN messages log only the env var name and the parsed/clamped numeric value — no path to leaking jwt secret or salt. The [60, 604800] clamp prevents the operator footgun of setting TTL=1 (documented in tech-spec Risks). Default of 3600 is conservative for a misconfig."
+    },
+    "9_performance": {
+      "rating": "good",
+      "notes": "OnceLock::get() is a single atomic load after first initialization — effectively free on every request. The seed runs once at startup. No performance concerns."
+    },
+    "10_cross_file_consistency": {
+      "rating": "good",
+      "notes": "All cross-file usages verified: escrow.rs imports jwt_ttl_secs (function, not const); both escrow.rs read sites confirmed at lines 511 and 797; oauth_loopback.rs import updated and the single read site updated. main.rs calls seed before OAuthState::new. No stale references."
+    },
+    "11_resource_management": {
+      "rating": "good",
+      "notes": "OnceLock<u64> is a lightweight process-global — no resource lifecycle concern. Seeded once, read many times. No heap-allocated heavy resource created."
+    }
+  },
+
+  "findings": [
+    {
+      "id": "M1",
+      "severity": "minor",
+      "dimension": "error_handling_logging",
+      "file": "mcp/src/oauth/mod.rs",
+      "lines": "89-98",
+      "title": "seed_jwt_ttl_from_env INFO log fires even when OnceLock::set loses the race (misleading on second call)",
+      "description": "seed_jwt_ttl_from_env always emits 'JWT access-token TTL seeded to Xs' at INFO regardless of whether JWT_TTL.set(value) actually stored the value. On a second call (e.g., an integration test harness that re-runs run_http, or a future rolling-reload path), the log would say 'seeded' when the actual stored value is the one from the first call. The currently committed value might differ from what the log reports, causing confusion during forensic log analysis.",
+      "recommendation": "Log conditionally based on whether OnceLock::set succeeded. Example:\n  match JWT_TTL.set(value) {\n    Ok(()) => tracing::info!(..., \"seeded to {value}s ...\"),\n    Err(_) => tracing::debug!(\"seed_jwt_ttl_from_env called again; OnceLock already set to {}s, ignoring\", jwt_ttl_secs()),\n  }\nAlternatively, use get_or_init with a closure so the INFO log is inside the init closure — it only fires once by construction.",
+      "blocking": false
+    },
+    {
+      "id": "m1",
+      "severity": "minor",
+      "dimension": "testing_coverage",
+      "file": "mcp/src/oauth/mod.rs",
+      "lines": "3205-3211",
+      "title": "Whitespace-only WARN assertion is not independently verified in test",
+      "description": "In jwt_ttl_parse_failure_logs_warn_and_uses_default, the logs_contain('MCP_JWT_TTL_SECS is empty / whitespace-only') assertion at line 3207 is placed after the empty-string call at line 3206, not after the whitespace-only call at line 3208. tracing_test accumulates logs across the entire test function, so this assertion proves the WARN fired at least once for empty or whitespace — but does not independently verify the whitespace-only call triggers the WARN. Both cases execute the same code path (trimmed.is_empty()), so the production behavior is correct; only the test coverage is coarser than it appears.",
+      "recommendation": "Add a second logs_contain assertion after the whitespace-only call:\n  assert!(logs_contain(\"MCP_JWT_TTL_SECS is empty / whitespace-only\"));\nafter line 3210, to independently confirm the whitespace sub-case. Not blocking.",
+      "blocking": false
+    },
+    {
+      "id": "m2",
+      "severity": "minor",
+      "dimension": "readability_maintainability",
+      "file": "mcp/src/oauth/mod.rs",
+      "lines": "58-68",
+      "title": "JWT_TTL_DEFAULT_SECS, JWT_TTL_MIN_SECS, JWT_TTL_MAX_SECS are pub but only needed internally",
+      "description": "The three new constants are declared pub, which adds them to the public API surface of mcp::oauth. They are consumed only by compute_jwt_ttl_from_env_str (pub(crate)) and the test module. No external consumer in the codebase currently references them. Making them pub(crate) or even pub(super) would keep the public API minimal.",
+      "recommendation": "Change pub const JWT_TTL_DEFAULT_SECS, JWT_TTL_MIN_SECS, JWT_TTL_MAX_SECS to pub(crate) const. This is a one-line-per-constant change with no functional impact. If future cross-crate consumers need these, the visibility can be widened explicitly.",
+      "blocking": false
+    }
+  ],
+
+  "positive_observations": [
+    "Test isolation strategy is excellent: the pure helper pattern avoids OnceLock pollution between parallel test runs without requiring a reset seam (as noted in the task spec). This is the idiomatic approach.",
+    "The clamp behavior is documented in WARN messages that include both the presented value and the applied clamp bound — this is directly useful for post-deploy log inspection on the Task 10 R1 gate.",
+    "The ordering invariant in run_http (seed before OAuthState::new) is correctly enforced and documented with a comment explaining the stdio-transport safe-default.",
+    "No old JWT_TTL_SECS const leakage anywhere — verified grep across all mcp/ files returns zero residual references to the old name.",
+    "tracing-test is correctly scoped to dev-dependencies; the comment in Cargo.toml explaining the Task 3 reuse intent is a helpful forward pointer.",
+    "Deployment docs are complete: both the env-var table row and the hosted-mode bash snippet cover prod vs dev configuration, and the R1 empirical gate use-case is explicitly called out."
+  ],
+
+  "overall_assessment": "Implementation is correct, well-tested, and spec-compliant. All 11 acceptance criteria from task 2.md are satisfied. The three minor findings (M1, m1, m2) are non-blocking: M1 is a mildly misleading INFO log on second-call, m1 is a test assertion gap on the whitespace sub-case, m2 is unnecessarily wide visibility on three constants. None affect production correctness or security. The work is approvable as-is; addressing M1 in a follow-on pass would improve observability robustness."
+}

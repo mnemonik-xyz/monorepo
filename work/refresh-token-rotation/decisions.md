@@ -274,3 +274,32 @@ Round-2 R1 cleanup (dead test flag) applied in `d324868`.
 - `cargo build --workspace` → OK
 - `cargo clippy -p mnemonic-mcp --all-targets --features test-support -- -D warnings` → clean
 - `cargo fmt --all -- --check` → clean
+
+## Task 2: JWT_TTL_SECS env-plumbing via OnceLock
+
+**Status:** Done
+**Commits:** `dcfdd45` (initial), `b84a031` (round-1 fix: TR2-R1-1 / CR2-R1-m1), `b092178` (round-1 fix: CR2-R1-M1 + CR2-R1-m2), `719b5c8` (round-1 fix: SA2-R1-M1 + bounded WARN echo)
+**Agent:** task-2-builder
+**Summary:** Replaced the hard-coded `pub const JWT_TTL_SECS: u64 = 3600` in `mcp/src/oauth/mod.rs` with a `static JWT_TTL: OnceLock<u64>` seeded by `seed_jwt_ttl_from_env()` (called once in `main::run_http` immediately after `load_jwt_secret()?`). A pure helper `compute_jwt_ttl_from_env_str(Option<&str>) -> u64` enforces the `[60, 604_800]` clamp (Decision 12) and emits WARN on parse-fail / out-of-range / empty / whitespace — never silent, so a deploy typo on the Task 10 R1 gate is loud. All 6 production read sites (4 in `oauth/mod.rs`, 2 in `escrow.rs`) call `jwt_ttl_secs()`. Two `#[tracing_test::traced_test]` unit tests exercise the pure helper directly so they never touch the process-global `OnceLock` (test-isolation seam from the spec). Docs land in `.env.example` (next to `MCP_JWT_SECRET`) and `references/deployment.md` (env-var table + hosted-mode deploy block).
+
+**Deviations:** HTTP-boot smoke (the `MCP_JWT_TTL_SECS=60 cargo run ...` AC line) could not be executed in this sandbox — the binary's `identity::ensure` requires OS keychain access the harness does not grant, and process stdio is suppressed when backgrounded. The behavior contract is fully exercised by the two `#[traced_test]` unit tests + the unchanged `oauth_loopback` and `auth_allowlist` integration tests. All three reviewers were notified and none flagged the deviation as blocking. After round-1 review fixes, the seed function moved from `JWT_TTL.set` to `get_or_init` with a captured `Option<u64>` so the INFO log only fires on actual init (CR2-R1-M1), and both the INFO and DEBUG logs were stripped of the raw `MCP_JWT_TTL_SECS=<raw>` echo (SA2-R1-M1, Decision-14 logging policy). The parse-failure WARN that still needs to surface raw input routes it through a new char-boundary-safe `bound_log_value(s, max_chars)` helper that truncates at 16 chars + ellipsis, with a dedicated UTF-8-aware test pinning the panic-safety invariant. Two extra unit tests landed in `719b5c8` to cover the SA2-driven bounding contract — total `--bin mnemonic-mcp` test count is 185 (up from the pre-task baseline of 181).
+
+**Reviews:**
+
+*Round 1:*
+- code-reviewer-2: APPROVE_WITH_MINOR_NOTES — M1 (re-seed log honesty) + m1 (whitespace WARN assertion gap) + m2 (visibility tightening on the three TTL constants) → `logs/working/task-2/code-reviewer-2-round1.json`
+- security-auditor-2: CONDITIONAL_PASS — M1 (raw env-var echo / secret-exposure vector) + L1 (whitespace WARN gap, dup of CR2 m1 / TR2-R1-1) + L2 (informational, `pub mod refresh;` ownership) + I1 (informational) → `logs/working/task-2/security-auditor-2-round1.json`
+- test-reviewer-2: CONDITIONAL_PASS — TR2-R1-1 (whitespace WARN not independently asserted) → `logs/working/task-2/test-reviewer-2-round1.json`
+
+*Round 2 (after fixes):*
+- code-reviewer-2: APPROVE — M1/m1/m2 all resolved; `get_or_init` idiom confirmed; visibility tightening accepted; no new issues → `logs/working/task-2/code-reviewer-2-round2.json`
+- security-auditor-2: PASS — M1 fully addressed (logs carry only resolved numeric TTL; parse-failure WARN bounded at 16 chars); L1 independently asserted; `bound_log_value` UTF-8-safe via `chars()` iterator → `logs/working/task-2/security-auditor-2-round2.json`
+- test-reviewer-2: PASS — TR2-R1-1 resolved with minimal and accurate fix → `logs/working/task-2/test-reviewer-2-round2.json`
+
+**Verification:**
+- `cargo test -p mnemonic-mcp --features test-support --bin mnemonic-mcp` → 185/185 pass
+- `cargo test -p mnemonic-mcp --features test-support --test oauth_loopback` → 4/4 pass
+- `cargo test -p mnemonic-mcp --features test-support --test auth_allowlist` → 1/1 pass (regression check per AC)
+- `cargo build -p mnemonic-mcp` → OK
+- `cargo clippy -p mnemonic-mcp --all-targets --features test-support -- -D warnings` → clean
+- `cargo fmt --all -- --check` → clean

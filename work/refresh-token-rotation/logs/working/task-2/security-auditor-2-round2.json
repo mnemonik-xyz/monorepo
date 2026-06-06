@@ -1,0 +1,51 @@
+{
+  "auditor": "security-auditor-2",
+  "round": 2,
+  "commits_reviewed": ["b84a031", "719b5c8"],
+  "task": "Task 2 — JWT_TTL_SECS env-plumbing via OnceLock + pub mod refresh",
+  "date": "2026-06-06",
+  "verdict": "PASS",
+  "summary": "All round-1 findings resolved. M1 fix is correct and complete: INFO/DEBUG logs no longer echo the raw env var string; the parse-failure WARN now routes through a char-boundary-safe bound_log_value helper capped at 16 chars. L1 fix adds the missing independent whitespace-only WARN assertion. L2 clarified (pub mod refresh is in Task 1 commit fd73cbe, not Task 2). I1 acknowledged. Two new tests lock down the truncation semantics. No new findings introduced by either fix commit.",
+  "round1_findings_resolution": [
+    {
+      "id": "M1",
+      "resolution": "FIXED",
+      "commit": "719b5c8",
+      "details": "seed_jwt_ttl_from_env INFO log now emits only the resolved numeric TTL ('JWT access-token TTL seeded to {value}s') with no raw env var string. The DEBUG re-seed log similarly emits only the stored numeric value. The parse-failure WARN in compute_jwt_ttl_from_env_str that requires the raw string for operator debugging now uses bound_log_value(trimmed, 16) — a char-boundary-safe truncator that caps output at 16 Unicode chars + ellipsis. A 1 MB attacker-supplied string produces at most 16 chars + '…' in log aggregation.",
+      "verification": "Code confirmed at lines 108-118 (INFO/DEBUG logs) and 184 (bounded WARN). Both log lines verified against the actual file."
+    },
+    {
+      "id": "L1",
+      "resolution": "FIXED",
+      "commit": "b84a031",
+      "details": "Independent assert!(logs_contain('MCP_JWT_TTL_SECS is empty / whitespace-only')) added immediately after the Some('   ') call in jwt_ttl_parse_failure_logs_warn_and_uses_default. The WARN contract for whitespace-only input is now independently verified.",
+      "verification": "Confirmed at line 3257 in the current file."
+    },
+    {
+      "id": "L2",
+      "resolution": "INFORMATIONAL — no fix required",
+      "details": "The pub mod refresh; declaration is in commit fd73cbe (Task 1 — 'feat(mcp): task 1 — refresh-token storage module + migration + evictor'), not Task 2. It appears in the Task 2 diff only as a context line in the hunk header. Task 1 security audit is handled by security-auditor-1."
+    },
+    {
+      "id": "I1",
+      "resolution": "ACKNOWLEDGED — no action",
+      "details": "now + jwt_ttl_secs() plain u64 addition not exploitable under [60, 604800] clamp. No change needed."
+    }
+  ],
+  "new_code_review": {
+    "bound_log_value_correctness": "PASS — implementation uses chars() iterator, not byte slices, so multi-byte UTF-8 sequences cannot cause a slice panic. Ellipsis appended iff iter.next().is_some() after take(max_chars), meaning exactly max_chars chars are kept on truncation. Test case 'üü🦀abc' with max=3 verifies the multi-byte case.",
+    "bound_log_value_test_coverage": "PASS — five cases: len < max (pass-through), len == max (pass-through), len > max (truncate + ellipsis), empty, multi-byte UTF-8. These are the correct boundary cases.",
+    "jwt_ttl_parse_failure_warn_bounds_raw_value_test": "PASS — uses 17-char alphanumeric string (not parseable as u64), asserts first 16 chars present, asserts ellipsis present, asserts 17th char NOT present. Correctly pins the truncation boundary.",
+    "no_new_log_leakage_in_fix": "PASS — no new log statements were introduced that echo secrets or raw env var values. The only new log surface is the removal of raw echoing from the INFO/DEBUG lines.",
+    "no_regression_in_clamping": "PASS — bound_log_value only applies to the parse-failure Err(e) branch; the clamp WARN branches (below-min, above-max) log the parsed u64 value directly (e.g. 'MCP_JWT_TTL_SECS={parsed}') which is safe (it's the numeric parse result, not raw string).",
+    "get_or_init_vs_set_pattern": "PASS — seed_jwt_ttl_from_env now uses get_or_init with a closure that captures newly_seeded_value via a local Option<u64>. This is the correct idiomatic pattern for OnceLock when you need to know if this call was the first writer. No race condition: get_or_init is atomic and the closure runs at most once."
+  },
+  "checklist_r2": {
+    "M1_info_log_no_raw_env_string": "PASS — confirmed at line 111",
+    "M1_debug_log_no_raw_env_string": "PASS — confirmed at line 116",
+    "M1_warn_log_bounded": "PASS — bound_log_value(trimmed, 16) at line 184",
+    "bound_log_value_utf8_safe": "PASS — chars() iterator approach, verified with multi-byte test case",
+    "L1_whitespace_warn_independently_asserted": "PASS — assert at line 3257",
+    "no_new_findings": "PASS — no new security issues introduced by either fix commit"
+  }
+}
