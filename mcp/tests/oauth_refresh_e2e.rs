@@ -832,7 +832,7 @@ async fn test_malformed_refresh_grant_invalid_request() {
         "grant_type": "refresh_token",
         "refresh_token": "",
     });
-    let (status2, _headers2, parsed2) = post_token_raw(
+    let (status2, headers2, parsed2) = post_token_raw(
         &server,
         "application/json",
         serde_json::to_vec(&body_empty).unwrap(),
@@ -847,6 +847,11 @@ async fn test_malformed_refresh_grant_invalid_request() {
         parsed2["error"], "invalid_request",
         "AC13: error code must be invalid_request for empty string; body={parsed2}"
     );
+    // R2-MINOR-1: the empty-string error path also fires through the
+    // outer `apply_no_store_headers` wrapper — anchor it alongside the
+    // missing-field variant so a regression that bypassed the wrapper
+    // on just one of the two `invalid_request` exits is caught.
+    assert_no_store_headers(&headers2, "AC13 empty-string error");
 }
 
 // ── SA5-H2 (round 2) — D16 oversized refresh_token rejected pre-hash ──────
@@ -866,7 +871,7 @@ async fn test_oversized_refresh_token_rejected_as_invalid_request() {
         "grant_type": "refresh_token",
         "refresh_token": oversized,
     });
-    let (status, _headers, parsed) = post_token_raw(
+    let (status, headers, parsed) = post_token_raw(
         &server,
         "application/json",
         serde_json::to_vec(&body).unwrap(),
@@ -881,6 +886,10 @@ async fn test_oversized_refresh_token_rejected_as_invalid_request() {
         parsed["error"], "invalid_request",
         "D16: error code must be invalid_request; body={parsed}"
     );
+    // R2-MINOR-1: D15 / RFC 6749 §5.1 cache-suppression headers must
+    // also apply to the length-cap error path — the production
+    // `apply_no_store_headers` wrapper is the unconditional seam.
+    assert_no_store_headers(&headers, "D16 oversized error");
 }
 
 // ── SA5-M1 (round 2) — unsupported_grant_type regression anchor ───────────
@@ -900,7 +909,7 @@ async fn test_unsupported_grant_type_rejected() {
         "client_id": "test-client",
         "client_secret": "irrelevant-but-shaped-like-the-real-attack-vector",
     });
-    let (status, _headers, parsed) = post_token_raw(
+    let (status, headers, parsed) = post_token_raw(
         &server,
         "application/json",
         serde_json::to_vec(&body).unwrap(),
@@ -915,6 +924,10 @@ async fn test_unsupported_grant_type_rejected() {
         parsed["error"], "unsupported_grant_type",
         "D11: error code must be unsupported_grant_type; body={parsed}"
     );
+    // R2-MINOR-1: the unsupported_grant_type exit path also flows
+    // through `apply_no_store_headers` — anchor it here so a refactor
+    // that bypassed the wrapper on this specific exit is caught.
+    assert_no_store_headers(&headers, "D11 unsupported_grant_type error");
 }
 
 // ── Cross-cutting — tokio Mutex non-starvation under interleaved load ─────
