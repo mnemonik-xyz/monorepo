@@ -988,26 +988,18 @@ mod tests {
         // sibling thread would already see the new state), but the cache
         // has NOT yet been populated. The observer asserts the missing
         // entry — pinning the CWE-362 race window D5 closes by demanding
-        // put-BEFORE-COMMIT in production. We also persist the observed
-        // state in a flag the test checks after `rotate` returns.
+        // put-BEFORE-COMMIT in production. `observer_fired` confirms the
+        // closure actually ran, `observed_cache_miss` confirms it saw the
+        // gap. Post-rotate SELECT confirms the DB row is committed-as-revoked.
         let seed2 = mint_seed(&conn, "bob");
-        let observed_revoked = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let observer_fired = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let observed_cache_miss = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
 
         DEBUG_HOOK_CACHE_PUT_AFTER_COMMIT.with(|c| c.set(true));
         {
-            let observed_revoked = std::sync::Arc::clone(&observed_revoked);
+            let observer_fired = std::sync::Arc::clone(&observer_fired);
             let observed_cache_miss = std::sync::Arc::clone(&observed_cache_miss);
             let seed2_hash = seed2.token_hash.clone();
-            // Capture a clone of `conn` is not possible (rusqlite Connection
-            // is !Send for FFI safety); the observer runs on the same
-            // thread as `rotate`, so we read DB state via a separate
-            // in-memory connection isn't viable either. We instead query
-            // through `cache` for the miss, and rely on the post-rotate
-            // SELECT to observe `revoked=1` (it is by construction at this
-            // point — the COMMIT already ran). The observer's role is to
-            // assert the cache miss at exactly the post-COMMIT / pre-put
-            // instant.
             BRANCH_A_RACE_OBSERVER.with(|cell| {
                 *cell.borrow_mut() = Some(Box::new(move |cache, _old_hash| {
                     // At this point: COMMIT has fired; put has not. So a
@@ -1015,15 +1007,12 @@ mod tests {
                     // cache miss → Branch B' fail-closed. That is the
                     // CWE-362 race window the D5 put-BEFORE-COMMIT
                     // ordering closes.
+                    observer_fired.store(true, std::sync::atomic::Ordering::SeqCst);
                     if cache.get(&seed2_hash).is_none() {
                         observed_cache_miss.store(true, std::sync::atomic::Ordering::SeqCst);
                     }
                 }));
             });
-            // Mark "observed_revoked" eagerly — we'll verify with a DB
-            // SELECT after rotate() returns; under the put-AFTER-COMMIT
-            // hook, the DB row is in fact revoked at the observer instant.
-            observed_revoked.store(true, std::sync::atomic::Ordering::SeqCst);
         }
 
         let minter2 = fixed_minter("jwt-A2");
@@ -1037,8 +1026,12 @@ mod tests {
         )
         .expect("Branch A rotate (race mode)");
 
-        // The observer fired between COMMIT and put — it must have seen the
-        // cache as empty for the old hash.
+        // The observer fired between COMMIT and put.
+        assert!(
+            observer_fired.load(std::sync::atomic::Ordering::SeqCst),
+            "race observer must fire between COMMIT and put when the hook is set"
+        );
+        // ...and at that instant the cache MISS-ed on old_hash.
         assert!(
             observed_cache_miss.load(std::sync::atomic::Ordering::SeqCst),
             "race observer must see cache MISS for old_hash between COMMIT and put"
@@ -1048,8 +1041,8 @@ mod tests {
             cache.get(&seed2.token_hash).is_some(),
             "after the put-after-COMMIT path runs, the cache is populated"
         );
-        // And the DB row IS revoked at the observer instant: post-rotate
-        // the row is still revoked.
+        // The DB row IS revoked at the observer instant (verified via SELECT
+        // post-rotate — the COMMIT already ran by then).
         let revoked: i64 = conn
             .query_row(
                 "SELECT revoked FROM refresh_tokens WHERE token_hash = ?1",
@@ -1059,11 +1052,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             revoked, 1,
-            "old row is revoked at and after the observer instant"
-        );
-        assert!(
-            observed_revoked.load(std::sync::atomic::Ordering::SeqCst),
-            "the DB row is committed-as-revoked at the observer instant (post-COMMIT)"
+            "old row is committed-as-revoked at and after the observer instant"
         );
 
         // Reset thread-local state so sibling tests see a clean slate.
