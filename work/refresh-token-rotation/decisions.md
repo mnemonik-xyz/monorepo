@@ -338,3 +338,44 @@ A handler-side proxy log line was also added — the rotate-internal log emissio
 - `cargo clippy --workspace --all-targets --features 'mnemonic-mcp/test-support' -- -D warnings` → clean
 - `cargo fmt --all -- --check` → clean
 - `cargo test -p mnemonic-mcp --features 'mnemonic-mcp/test-support' --no-fail-fast` → 535 tests, 0 fails (51 oauth unit tests including the 8 new TDD anchors)
+
+---
+
+## Task 4: TestServerBuilder with-oauth-token flag + integration test helpers
+
+**Status:** Done
+**Commit:** ae3c22a (round-1 implementation in e77cefa; round-2 fixes in ae3c22a)
+**Agent:** task-4-builder
+**Summary:** Wave-3 single-task — extends `TestServerBuilder` in `mcp/tests/_helpers/mod.rs` with `with_oauth_token(bool)`, `with_reuse_interval(Duration)`, `with_evictor_tick(Duration)` setters. Default `with_oauth_token == false` keeps the existing `OAuthState::with_defaults` constructor and does NOT mount `/oauth/token` or `/oauth/authorize` (preserves the AC9 regression guard — `test_anonymous_recall_unchanged` runs against a builder where those routes still 404). On `true`, opens its own tempfile-backed `rusqlite::Connection` per Decision 6, runs `migrate_refresh_tokens`, mounts BOTH `/oauth/token` (POST) and `/oauth/authorize` (GET + POST) on the same tower-stack as `/mcp` via `Router::merge`. Adds four public fixture helpers consumed by Task 5: `bootstrap_oauth -> (code, verifier, redirect_uri)` drives the real production challenge-sign-redeem path through `/oauth/authorize` GET (JSON mode with `pubkey` query param to bind `expected_pubkey`) + raw Ed25519-signed POST — no SQL shortcuts into `issued_codes` (Finding 4 / production parity); `rotate(server, refresh) -> (access, refresh)` returns BOTH freshly-emitted strings so Task 5 AC12 can assert byte-identity on both fields under the 10-parallel rotation; `insert_expired_refresh_for_test -> (plaintext, family_id)` inserts a row with `expires_at = now - 60` via `refresh::hash_refresh_token(salt, plaintext)` and returns both values Task 5 AC5 needs (plaintext to POST, family_id to assert non-revoke); `family_has_unrevoked_rows(server, family_id) -> bool` is a synchronous `SELECT COUNT(*) WHERE family_id = ? AND revoked = 0`. All SQL helpers acquire the `Mutex<Connection>` guard, run one statement, drop the guard before any control flow — no `.await` under the lock (CLAUDE.md hard rule). Adds `TEST_REFRESH_SALT: [u8; 32] = [0xABu8; 32]` and `TEST_REDIRECT_URI: &str = "http://127.0.0.1:9999/cb"` as `pub const`s so Task 5 tests can echo the same values when posting `/oauth/token` directly. New test target `mcp/tests/helpers_smoke.rs` (gated `required-features = ["test-support"]`) carries five smoke tests covering: positive + negative route mount, bootstrap triple drives 200 on authorization_code grant with non-empty access + refresh, rotate returns non-empty `(access, refresh)` pair with `refresh2 != refresh1`, insert_expired returns 43-char plaintext + UUID family_id with stored token_hash matching `hash_refresh_token` recompute, and family_has_unrevoked_rows flips correctly on direct SQL revoke/unrevoke. Pulls `_helpers` via `#[path = "_helpers/mod.rs"] mod _helpers;` so the smoke tests live in their own Cargo target rather than duplicating into every consumer of `_helpers`.
+
+**Deviations:**
+
+1. **`bootstrap_oauth` embeds `client_id = "test-client"` and does NOT return it as part of the triple (T4-M1).** Task 5 tests doing direct POSTs to `/oauth/token` must echo this value as `client_id` when constructing their bodies. Acceptable in V1 because the tech-spec's refresh-grant explicitly does NOT validate `client_id` against the `refresh_tokens` row, so silent coupling on the literal `"test-client"` does not break any AC. If a future hardening pass adds `client_id` validation, `bootstrap_oauth` should be widened to return a 4-tuple `(code, verifier, redirect_uri, client_id)`.
+
+2. **`rotate(server, refresh)` helper sends `content-type: application/json` only (T4-M3).** Task 5 AC10 (form-encoded / JSON parity for VS Code / Claude.ai vs Cursor wire) must inline the `application/x-www-form-urlencoded` POST construction in the test body rather than calling through `rotate`. AC12 (10 parallel rotations) is unaffected because that test is about reuse-interval serialisation, not content-type. The helper is the happy-path shape only.
+
+3. **No production code modified.** `mcp/src/oauth/refresh.rs`, `mcp/src/oauth/mod.rs`, `mcp/src/main.rs`, `mcp/src/test_support.rs` all unchanged. Scope-fenced to `mcp/tests/_helpers/mod.rs` (extended), `mcp/tests/helpers_smoke.rs` (new), and `mcp/Cargo.toml` (single `[[test]]` entry for the smoke target).
+
+4. **Smoke verification ran in-process via `tower::ServiceExt::oneshot`.** No live HTTP boot — the helper drives the same axum router shape used by Tasks 2/3 smoke. The release binary's `identity::ensure` OS-keychain dependency was not reached and not required for these helpers. Same deviation pattern Tasks 2/3 documented.
+
+5. **Security findings F1 (`OAuthState::with_defaults` not cfg-gated) and F2 (`refresh_salt` / `refresh_store` pub fields) explicitly out of Task 4 scope** — both are pre-existing Task 3 design decisions where `with_defaults` was intentionally kept outside `#[cfg(test)]` so every integration test crate consumes it via the library facade (gating it on `cfg(test)` would break all 14 test crates; gating it on `feature = "test-support"` is out of scope per Task 3's decisions.md entry). The `pub` fields are necessary surface for Task 4's helpers themselves (`insert_expired_refresh_for_test` reads `refresh_salt`, `family_has_unrevoked_rows` locks `refresh_store`). Deferred as a hardening item for a future pass.
+
+**Reviews:**
+
+*Round 1:*
+- code-reviewer-4: approve_with_minors — 3 optional minor (tempfile keep() intent, rand::thread_rng confirmation, task-history doc trim) + 3 verified-no-action cross-file consistency notes → `logs/working/task-4/code-reviewer-4-round1.json`
+- security-auditor-4: APPROVED — 0 blockers; 2 Low (F1 `with_defaults` cfg-gating, F2 `pub` fields on OAuthState) explicitly flagged as out-of-scope Task-3 design decisions; 1 Informational (TEST_REDIRECT_URI loopback citation, cosmetic) → `logs/working/task-4/security-auditor-4-round1.json`
+- test-reviewer-4: APPROVE_WITH_MINORS — 3 minor (T4-M1 client_id ergonomic, T4-M2 misleading evictor sweep comment, T4-M3 rotate JSON-only) → `logs/working/task-4/test-reviewer-4-round1.json`
+
+*Round 2 (after fixes in `ae3c22a`):*
+- code-reviewer-4: approved — all three round-1 minors resolved; 0 new findings; deferred items correctly scoped to decisions.md → `logs/working/task-4/code-reviewer-4-round2.json`
+- test-reviewer-4: APPROVED — T4-M2 closed (comment now correctly states no evictor runs and documents the EVICTOR_GRACE_SECS boundary math); T4-M1 + T4-M3 deferred to decisions.md per reviewer recommendation; 0 new findings; Task 5 marked READY → `logs/working/task-4/test-reviewer-4-round2.json`
+- security-auditor-4: no round-2 requested (round-1 findings were explicitly out-of-Task-4 scope; no security-relevant code changed in round-2 fixes).
+
+**Verification:**
+- `cargo build -p mnemonic-mcp` → OK (pre-condition gate: Tasks 1-3 in tree).
+- `cargo test -p mnemonic-mcp --features test-support --test helpers_smoke` → 5/5 pass in 1.6s wall-clock.
+- `cargo test -p mnemonic-mcp --features test-support --tests` → 0 failures across all 34 test binaries (no regressions on existing tests with `with_oauth_token == false` path).
+- `cargo test -p mnemonic-mcp --features test-support --lib` → 201 pass, 0 fail.
+- `cargo clippy --workspace --all-targets --features 'mnemonic-mcp/test-support' -- -D warnings` → clean.
+- `cargo fmt --all -- --check` → clean.
