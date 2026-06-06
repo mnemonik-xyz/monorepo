@@ -422,7 +422,6 @@ work. Legitimate refresh tokens are 43 bytes base64url-encoded; 4 KiB is
 is too coarse — by the time it fires we've already allocated and
 parsed. A field-level cap short-circuits at parse time. Per-IP rate
 limiting on `/oauth/*` is already in place via `tower_governor` (see
-`patterns.md::JSON-RPC notifications return 202` neighbours and
 `architecture.md:65`); the field cap closes the per-request size
 vector that the rate limiter doesn't address.
 **Alternatives considered:**
@@ -695,7 +694,7 @@ Three tiers:
 | `MCP_JWT_TTL_SECS` operator footgun (e.g., setting 1s) | D12 — value is clamped to `[60, 604800]` at seed time; out-of-range logs WARN and applies clamp. |
 | Rolling deploy with refresh-evictor double-spawn | `start_evictor` spawned once from `main.rs`; rolling deploy replaces the process. |
 | Cross-table mutex contention (refresh + attestations + escrow) | `Connection` is the project's existing shared mutex pattern — no new contention surface. `cross_table_mutex_no_starvation` integration test asserts no starvation under interleaved load. |
-| Unauthenticated DoS on `/oauth/token` | Existing `tower_governor` per-IP rate limiter applies to `/oauth/*` (per `architecture.md:65` + `patterns.md::OAuth Bearer-auth allowlist`); refresh-grant inherits the limiter, no new wiring. D16 caps the request body field size as a complementary per-request defence. |
+| Unauthenticated DoS on `/oauth/token` | Existing `tower_governor` per-IP rate limiter applies to `/oauth/*` (per `architecture.md:65`); refresh-grant inherits the limiter, no new wiring. D16 caps the request body field size as a complementary per-request defence. |
 | Salt entropy footgun (32-char ASCII passes 32-byte raw length check) | D2 requires base64url-decode of `MCP_REFRESH_SALT` to yield ≥32 bytes; `.env.example` ships `openssl rand -base64 32` as the recipe. Boot test `oauth::tests::salt_under_32_bytes_aborts_boot` enforces. |
 | Branch E INFO log volume under credential-stuffing | `tower_governor` throttles but does not block repeated attacker attempts; Branch E logs INFO once per attempt with `remote_addr` + `request_id`. Volume scales linearly with attempt rate. Mitigation: operational rule to set tracing-layer rate-limited dedup (e.g. `tracing-subscriber` + `rate-limiter`) at the operator level — not in V1 server code. Documented in `deployment.md` as a tracing-volume tuning note. |
 
