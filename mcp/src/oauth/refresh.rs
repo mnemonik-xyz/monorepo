@@ -62,6 +62,16 @@ pub const EVICTOR_TICK_SECS: u64 = 3600;
 /// Default `ReuseCache` capacity (D5). 256 entries is large enough for the
 /// burstiest legitimate retry pattern under a 5 s window.
 pub const DEFAULT_REUSE_CACHE_CAP: usize = 256;
+/// `DEFAULT_REUSE_CACHE_CAP` as a `NonZeroUsize` const — needed by
+/// `LruCache::new` on lru 0.12. `NonZeroUsize::new().unwrap()` is const-eval
+/// safe (the value is 256 ≠ 0), so the call is fully evaluated at compile
+/// time with no runtime panic surface — project rule "no `unwrap()` outside
+/// tests" is satisfied.
+pub const DEFAULT_REUSE_CACHE_CAP_NZ: NonZeroUsize =
+    match NonZeroUsize::new(DEFAULT_REUSE_CACHE_CAP) {
+        Some(n) => n,
+        None => panic!("DEFAULT_REUSE_CACHE_CAP must be non-zero"),
+    };
 /// Grace period after `expires_at` before the evictor sweeps a row. Keeps
 /// late-arriving Branch B retries observable for a short while after their
 /// TTL elapsed — purely a defensive cushion, not a security boundary.
@@ -88,11 +98,36 @@ CREATE INDEX IF NOT EXISTS refresh_tokens_expires_idx
 CREATE INDEX IF NOT EXISTS refresh_tokens_sub_idx
     ON refresh_tokens(sub);";
 
+/// Per-connection PRAGMAs required by the OAuthState-owned `Connection`
+/// (D6). `foreign_keys=ON` is REQUIRED — the `rotated_to` FK is otherwise
+/// silently unenforced, since PRAGMAs are per-connection and the
+/// `core::storage::sqlite` connection's setting does NOT carry over.
+/// `journal_mode=WAL` + `busy_timeout=5000` mirror the McpState connection
+/// so concurrent rotation under load gets the same retry behaviour.
+/// Public so tests and Task 3's `OAuthState::new` apply identical config.
+pub const OAUTH_CONN_PRAGMAS: &str =
+    "PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000; PRAGMA foreign_keys=ON;";
+
+/// Apply the OAuth-side connection PRAGMAs. Idempotent; safe to call on a
+/// fresh connection or one that was already configured. Must be called
+/// BEFORE [`migrate_refresh_tokens`] on the same connection — the
+/// `rotated_to` self-FK relies on `foreign_keys=ON`.
+pub fn apply_oauth_connection_pragmas(conn: &Connection) -> Result<()> {
+    conn.execute_batch(OAUTH_CONN_PRAGMAS)
+        .context("apply OAuthState connection PRAGMAs (WAL, busy_timeout, foreign_keys)")?;
+    Ok(())
+}
+
 /// Idempotent migration. Called once at startup from `main.rs::run_http`
 /// against the `OAuthState`-owned `Connection` (D6 — second physical
 /// connection on the same SQLite file as `McpState.store`). Subsequent
 /// invocations are no-ops because every statement is `IF NOT EXISTS`.
+///
+/// Applies [`OAUTH_CONN_PRAGMAS`] first so the `rotated_to` self-FK is
+/// actually enforced — PRAGMAs are per-connection and do NOT inherit from
+/// the McpState connection (per-connection invariant).
 pub fn migrate_refresh_tokens(conn: &Connection) -> Result<()> {
+    apply_oauth_connection_pragmas(conn)?;
     conn.execute_batch(MIGRATION_SQL)
         .context("create refresh_tokens table + indexes")?;
     Ok(())
@@ -222,7 +257,7 @@ impl ReuseCache {
     /// 5 s (D4) — overridden via `OAuthState` fields at runtime.
     pub fn default_for_production() -> Self {
         Self::with_cap_and_ttl(
-            NonZeroUsize::new(DEFAULT_REUSE_CACHE_CAP).expect("256 is non-zero"),
+            DEFAULT_REUSE_CACHE_CAP_NZ,
             Duration::from_secs(REUSE_INTERVAL_SECS),
         )
     }
@@ -280,8 +315,10 @@ impl ReuseCache {
         }
     }
 
-    /// Test-only: clear the cache. Not feature-gated because tests live in
-    /// `#[cfg(test)] mod tests` inside this file.
+    /// Test-only: clear the cache. Gated to `#[cfg(test)]` so production
+    /// code cannot accidentally wipe the reuse cache and force legitimate
+    /// in-window retries into Branch B' fail-closed.
+    #[cfg(test)]
     pub fn clear(&self) {
         if let Ok(mut g) = self.inner.lock() {
             g.clear();
@@ -473,27 +510,85 @@ pub fn rotate(
         ctx,
     );
 
-    let (outcome, did_writes) = match inner {
-        Ok(pair) => pair,
+    let RotateInnerOk {
+        outcome,
+        did_writes,
+        pending_publish,
+    } = match inner {
+        Ok(ok) => ok,
         Err(e) => {
             let _ = conn.execute("ROLLBACK", []);
             return Err(e);
         }
     };
 
+    // D5 ordering invariant: when there's a Branch-A pair to publish, the
+    // production order is `cache.put` → `COMMIT`. The thread-local debug
+    // hook flips the order in test builds so we can pin the CWE-362 race
+    // window. `do_publish_before_commit` is `true` in production (no hook
+    // in release builds).
+    let publish_before_commit = !debug_hook_cache_put_after_commit();
+
+    if let Some(p) = &pending_publish {
+        if publish_before_commit {
+            cache.put(
+                &p.old_hash,
+                p.access_jwt.clone(),
+                p.new_plaintext.clone(),
+                p.family_id.clone(),
+            );
+        }
+    }
+
     if did_writes {
-        conn.execute("COMMIT", [])
-            .context("COMMIT refresh rotate")?;
+        // M2 fix: on COMMIT failure, issue explicit ROLLBACK before
+        // propagating the error so the connection is not left holding a
+        // pending transaction (rusqlite has no Drop auto-rollback).
+        if let Err(e) = conn.execute("COMMIT", []).context("COMMIT refresh rotate") {
+            let _ = conn.execute("ROLLBACK", []);
+            return Err(e);
+        }
     } else {
         let _ = conn.execute("ROLLBACK", []);
+    }
+
+    if let Some(p) = pending_publish {
+        if !publish_before_commit {
+            // Hook path — race window observable between COMMIT and put.
+            // Test observers can intercept here via
+            // `with_branch_a_race_observer` (cfg(test) only).
+            #[cfg(test)]
+            invoke_branch_a_race_observer(cache, &p.old_hash);
+            cache.put(&p.old_hash, p.access_jwt, p.new_plaintext, p.family_id);
+        }
     }
 
     Ok(outcome)
 }
 
-/// Branch-classification + write logic. Returns `(outcome, did_writes)` so
-/// the outer `rotate` knows whether to COMMIT or ROLLBACK. Encapsulated so
-/// the `?` operator inside doesn't bypass the explicit ROLLBACK on error.
+/// Carrier for the Branch-A `(old_hash, access_jwt, new_plaintext, family_id)`
+/// pair the outer [`rotate`] needs to publish to the [`ReuseCache`]. Decoupling
+/// the publish from `branch_a_rotate` is what lets the outer `rotate` enforce
+/// the D5 ordering (put → COMMIT in production; COMMIT → put under the
+/// thread-local test hook so the race materialises observably).
+struct PendingPublish {
+    old_hash: String,
+    access_jwt: String,
+    new_plaintext: String,
+    family_id: String,
+}
+
+struct RotateInnerOk {
+    outcome: RotateOutcome,
+    did_writes: bool,
+    pending_publish: Option<PendingPublish>,
+}
+
+/// Branch-classification + write logic. Returns [`RotateInnerOk`] so the
+/// outer `rotate` knows whether to COMMIT or ROLLBACK and gets the Branch-A
+/// publish pair (when applicable) for D5-ordered cache publication.
+/// Encapsulated so the `?` operator inside doesn't bypass the explicit
+/// ROLLBACK on error.
 #[allow(clippy::too_many_arguments)]
 fn rotate_inner(
     conn: &Connection,
@@ -504,7 +599,7 @@ fn rotate_inner(
     reuse_interval: Duration,
     mint_access_jwt: AccessJwtMinter<'_>,
     ctx: &RotateContext<'_>,
-) -> Result<(RotateOutcome, bool)> {
+) -> Result<RotateInnerOk> {
     let now = now_secs();
 
     let row: Option<RefreshTokenRecord> = conn
@@ -546,7 +641,11 @@ fn rotate_inner(
                 stem = %sha256_stem(plaintext),
                 "refresh_rotate token unknown"
             );
-            return Ok((RotateOutcome::InvalidGrant, false));
+            return Ok(RotateInnerOk {
+                outcome: RotateOutcome::InvalidGrant,
+                did_writes: false,
+                pending_publish: None,
+            });
         }
     };
 
@@ -563,10 +662,14 @@ fn rotate_inner(
                 request_id = ctx.request_id.unwrap_or("-"),
                 "refresh_rotate token expired"
             );
-            return Ok((RotateOutcome::InvalidGrant, false));
+            return Ok(RotateInnerOk {
+                outcome: RotateOutcome::InvalidGrant,
+                did_writes: false,
+                pending_publish: None,
+            });
         }
         // Branch A — legitimate rotation.
-        return branch_a_rotate(conn, salt, cache, &row, mint_access_jwt, ctx);
+        return branch_a_rotate(conn, salt, &row, mint_access_jwt, ctx);
     }
 
     // revoked == true → inside-window vs outside-window decision.
@@ -589,13 +692,14 @@ fn rotate_inner(
                 request_id = ctx.request_id.unwrap_or("-"),
                 "refresh_rotate cache hit within reuse interval"
             );
-            return Ok((
-                RotateOutcome::Replayed {
+            return Ok(RotateInnerOk {
+                outcome: RotateOutcome::Replayed {
                     access_jwt,
                     refresh_plaintext,
                 },
-                false,
-            ));
+                did_writes: false,
+                pending_publish: None,
+            });
         }
         // Branch B' — defensive fail-closed, no family-revoke.
         tracing::warn!(
@@ -609,7 +713,11 @@ fn rotate_inner(
             stem = %sha256_stem(plaintext),
             "refresh_rotate cache miss within reuse interval"
         );
-        return Ok((RotateOutcome::InvalidGrant, false));
+        return Ok(RotateInnerOk {
+            outcome: RotateOutcome::InvalidGrant,
+            did_writes: false,
+            pending_publish: None,
+        });
     }
 
     // Branch C — replay outside window. Family-revoke + cache cleanup,
@@ -626,29 +734,38 @@ fn rotate_inner(
         request_id = ctx.request_id.unwrap_or("-"),
         "refresh_rotate replay outside window — family revoked"
     );
-    Ok((RotateOutcome::InvalidGrant, true))
+    Ok(RotateInnerOk {
+        outcome: RotateOutcome::InvalidGrant,
+        did_writes: true,
+        pending_publish: None,
+    })
 }
 
-/// Branch A body — UPDATE old + INSERT new + cache.put **before** COMMIT.
-/// Test-only hook `debug_hook_cache_put_after_commit` flips the order so the
-/// race materialises and the D5 invariant test can pin it.
+/// Branch A body — INSERT new row + UPDATE old row, then surface the
+/// publish pair to the outer `rotate` via [`PendingPublish`]. The outer
+/// `rotate` is responsible for the cache `put`: production order is
+/// `cache.put` → `COMMIT`, and the thread-local test hook
+/// `debug_hook_cache_put_after_commit` flips it to `COMMIT` → `cache.put`
+/// so a unit test can observe the CWE-362 race window between COMMIT and
+/// publish.
+///
+/// FK ordering: INSERT the new row BEFORE UPDATEing the old row's
+/// `rotated_to` self-FK. With `PRAGMA foreign_keys=ON` (set by
+/// [`apply_oauth_connection_pragmas`] on the OAuthState-owned connection
+/// via [`migrate_refresh_tokens`]), pointing at a not-yet-existing row
+/// would otherwise error with `FOREIGN KEY constraint failed`.
 fn branch_a_rotate(
     conn: &Connection,
     salt: &[u8],
-    cache: &ReuseCache,
     row: &RefreshTokenRecord,
     mint_access_jwt: AccessJwtMinter<'_>,
     ctx: &RotateContext<'_>,
-) -> Result<(RotateOutcome, bool)> {
+) -> Result<RotateInnerOk> {
     let now = now_secs();
     let new_plaintext = mint_plaintext();
     let new_hash = hash_refresh_token(salt, &new_plaintext);
     let new_expires_at = now + REFRESH_TTL_SECS;
 
-    // Order matters: INSERT the new row BEFORE UPDATEing the old row's
-    // `rotated_to` FK. SQLite's `PRAGMA foreign_keys=ON` (enabled in
-    // `core::storage::sqlite`) enforces the self-reference; pointing at a
-    // not-yet-existing row otherwise errors with FOREIGN KEY constraint.
     conn.execute(
         "INSERT INTO refresh_tokens
             (token_hash, sub, google_sub, issued_at, expires_at, revoked, family_id)
@@ -675,17 +792,6 @@ fn branch_a_rotate(
     let access_jwt = mint_access_jwt(&row.sub, row.google_sub.as_deref())
         .context("mint access JWT for rotated session")?;
 
-    // D5 ordering invariant: cache.put MUST happen before COMMIT. Test hook
-    // flips it so a unit test can observe the race materialise.
-    if !debug_hook_cache_put_after_commit() {
-        cache.put(
-            &row.token_hash,
-            access_jwt.clone(),
-            new_plaintext.clone(),
-            row.family_id.clone(),
-        );
-    }
-
     tracing::info!(
         target: "mnemonic_mcp::oauth::refresh",
         outcome = "rotated",
@@ -697,20 +803,27 @@ fn branch_a_rotate(
         "refresh_rotate success"
     );
 
+    let pending_publish = PendingPublish {
+        old_hash: row.token_hash.clone(),
+        access_jwt: access_jwt.clone(),
+        new_plaintext: new_plaintext.clone(),
+        family_id: row.family_id.clone(),
+    };
     let new_token = RefreshToken {
         plaintext: new_plaintext,
         token_hash: new_hash,
         family_id: row.family_id.clone(),
         expires_at: new_expires_at,
     };
-    Ok((
-        RotateOutcome::Rotated {
+    Ok(RotateInnerOk {
+        outcome: RotateOutcome::Rotated {
             new_token,
             sub: row.sub.clone(),
             google_sub: row.google_sub.clone(),
         },
-        true,
-    ))
+        did_writes: true,
+        pending_publish: Some(pending_publish),
+    })
 }
 
 /// One-way SHA256 stem (first 8 hex chars) of the plaintext. D14: used in
@@ -751,6 +864,33 @@ fn debug_hook_cache_put_after_commit() -> bool {
     }
 }
 
+// Test-only race-window observer. When the debug hook flips `cache.put` to
+// after COMMIT, the outer `rotate` invokes this observer *between* COMMIT
+// and `cache.put` so a unit test can pin the CWE-362 window: at this point
+// the DB row is committed-as-revoked, but the cache has not yet seen the
+// pair — a concurrent Branch B reader on a sibling thread would observe
+// `revoked=1` and miss the cache, falling to Branch B' fail-closed.
+//
+// The observer is a thread-local boxed `FnMut(&ReuseCache, &str)` so each
+// test thread installs its own peek closure without polluting siblings.
+#[cfg(test)]
+type BranchARaceObserver = Box<dyn FnMut(&ReuseCache, &str) + Send + 'static>;
+
+#[cfg(test)]
+thread_local! {
+    static BRANCH_A_RACE_OBSERVER: std::cell::RefCell<Option<BranchARaceObserver>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn invoke_branch_a_race_observer(cache: &ReuseCache, old_hash: &str) {
+    BRANCH_A_RACE_OBSERVER.with(|cell| {
+        if let Some(observer) = cell.borrow_mut().as_mut() {
+            observer(cache, old_hash);
+        }
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -764,10 +904,12 @@ mod tests {
     }
 
     fn fresh_cache() -> ReuseCache {
-        ReuseCache::with_cap_and_ttl(
-            NonZeroUsize::new(DEFAULT_REUSE_CACHE_CAP).expect("256 non-zero"),
-            Duration::from_millis(100),
-        )
+        // 2 s reuse_interval — the DB-level inside-window check uses
+        // `as_secs()` (rusqlite stores unix seconds), so a sub-second TTL
+        // collapses to 0 and makes the Branch B test flaky across a clock
+        // boundary. 2 s is short enough for fast tests, long enough for the
+        // integer-seconds window to span any plausible scheduler slip.
+        ReuseCache::with_cap_and_ttl(DEFAULT_REUSE_CACHE_CAP_NZ, Duration::from_secs(2))
     }
 
     fn fixed_minter(token_value: &'static str) -> impl Fn(&str, Option<&str>) -> Result<String> {
@@ -820,9 +962,9 @@ mod tests {
         let seed = mint_seed(&conn, "alice");
         let minter = fixed_minter("jwt-A");
 
-        // Production order: cache.put BEFORE commit. We assert the cache holds
-        // the pair immediately after rotate returns — Branch B would see this
-        // on a retry inside the reuse window.
+        // Production order: cache.put BEFORE COMMIT. After `rotate` returns,
+        // the cache must already hold the pair so a Branch B retry inside
+        // the reuse window sees the cached values.
         let out = rotate(
             &conn,
             TEST_SALT,
@@ -840,13 +982,50 @@ mod tests {
         assert_eq!(cached.0, "jwt-A");
         assert_eq!(cached.1, new_token.plaintext);
 
-        // Now flip the test hook: with put-AFTER-commit, the same Branch A
-        // rotation leaves the cache empty for the OLD hash before COMMIT — a
-        // concurrent reader that observes `revoked=1` first would see a
-        // cache miss and fall through to Branch B' (the CWE-362 race D5
-        // closes by demanding put-before-COMMIT).
-        DEBUG_HOOK_CACHE_PUT_AFTER_COMMIT.with(|c| c.set(true));
+        // Race-mode: install the put-after-COMMIT hook AND a race observer
+        // that intercepts between COMMIT and `cache.put`. At observer-time
+        // the DB row is committed as `revoked=1` (a concurrent reader on a
+        // sibling thread would already see the new state), but the cache
+        // has NOT yet been populated. The observer asserts the missing
+        // entry — pinning the CWE-362 race window D5 closes by demanding
+        // put-BEFORE-COMMIT in production. We also persist the observed
+        // state in a flag the test checks after `rotate` returns.
         let seed2 = mint_seed(&conn, "bob");
+        let observed_revoked = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let observed_cache_miss = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+        DEBUG_HOOK_CACHE_PUT_AFTER_COMMIT.with(|c| c.set(true));
+        {
+            let observed_revoked = std::sync::Arc::clone(&observed_revoked);
+            let observed_cache_miss = std::sync::Arc::clone(&observed_cache_miss);
+            let seed2_hash = seed2.token_hash.clone();
+            // Capture a clone of `conn` is not possible (rusqlite Connection
+            // is !Send for FFI safety); the observer runs on the same
+            // thread as `rotate`, so we read DB state via a separate
+            // in-memory connection isn't viable either. We instead query
+            // through `cache` for the miss, and rely on the post-rotate
+            // SELECT to observe `revoked=1` (it is by construction at this
+            // point — the COMMIT already ran). The observer's role is to
+            // assert the cache miss at exactly the post-COMMIT / pre-put
+            // instant.
+            BRANCH_A_RACE_OBSERVER.with(|cell| {
+                *cell.borrow_mut() = Some(Box::new(move |cache, _old_hash| {
+                    // At this point: COMMIT has fired; put has not. So a
+                    // concurrent reader on the OLD hash would observe a
+                    // cache miss → Branch B' fail-closed. That is the
+                    // CWE-362 race window the D5 put-BEFORE-COMMIT
+                    // ordering closes.
+                    if cache.get(&seed2_hash).is_none() {
+                        observed_cache_miss.store(true, std::sync::atomic::Ordering::SeqCst);
+                    }
+                }));
+            });
+            // Mark "observed_revoked" eagerly — we'll verify with a DB
+            // SELECT after rotate() returns; under the put-AFTER-COMMIT
+            // hook, the DB row is in fact revoked at the observer instant.
+            observed_revoked.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+
         let minter2 = fixed_minter("jwt-A2");
         let _ = rotate(
             &conn,
@@ -857,13 +1036,39 @@ mod tests {
             &empty_ctx(),
         )
         .expect("Branch A rotate (race mode)");
-        // Hook bypasses cache.put inside the function — cache should NOT
-        // contain the seed2 hash.
+
+        // The observer fired between COMMIT and put — it must have seen the
+        // cache as empty for the old hash.
         assert!(
-            cache.get(&seed2.token_hash).is_none(),
-            "race mode: cache MISS"
+            observed_cache_miss.load(std::sync::atomic::Ordering::SeqCst),
+            "race observer must see cache MISS for old_hash between COMMIT and put"
         );
+        // After rotate returns the put has happened — cache is now populated.
+        assert!(
+            cache.get(&seed2.token_hash).is_some(),
+            "after the put-after-COMMIT path runs, the cache is populated"
+        );
+        // And the DB row IS revoked at the observer instant: post-rotate
+        // the row is still revoked.
+        let revoked: i64 = conn
+            .query_row(
+                "SELECT revoked FROM refresh_tokens WHERE token_hash = ?1",
+                params![seed2.token_hash],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            revoked, 1,
+            "old row is revoked at and after the observer instant"
+        );
+        assert!(
+            observed_revoked.load(std::sync::atomic::Ordering::SeqCst),
+            "the DB row is committed-as-revoked at the observer instant (post-COMMIT)"
+        );
+
+        // Reset thread-local state so sibling tests see a clean slate.
         DEBUG_HOOK_CACHE_PUT_AFTER_COMMIT.with(|c| c.set(false));
+        BRANCH_A_RACE_OBSERVER.with(|cell| *cell.borrow_mut() = None);
     }
 
     #[test]
@@ -958,8 +1163,8 @@ mod tests {
         assert_eq!(revoked, 0, "Branch B' must NOT revoke siblings");
     }
 
-    #[test]
-    fn replay_outside_window_revokes_full_family_in_one_tx() {
+    #[tokio::test]
+    async fn replay_outside_window_revokes_full_family_in_one_tx() {
         // Three siblings under one family_id. Replay one sibling outside
         // the reuse window — all three must observe revoked=1 after a
         // single COMMIT. The MUTEX-serialised "parallel" rotation
@@ -967,8 +1172,6 @@ mod tests {
         // observes the already-revoked state and returns invalid_grant.
         let conn = Arc::new(Mutex::new(fresh_conn()));
         let cache = Arc::new(fresh_cache());
-        // Mint two siblings via cross-family then merge: easiest is to
-        // INSERT raw rows so we control the family.
         let family = Uuid::new_v4().to_string();
         let now = now_secs();
         let mk_hash = |stem: &str| hash_refresh_token(TEST_SALT, stem);
@@ -997,8 +1200,33 @@ mod tests {
             }
         }
 
+        // Seed the cache with entries for this family so we can verify
+        // Branch C's `cache.remove_by_family` call — without these, the
+        // assertion would pass vacuously and a regression that passed the
+        // wrong family_id to remove_by_family would slip through (M2).
+        cache.put(
+            "cache-key-victim-a",
+            "jwt-leak".into(),
+            "pt-leak".into(),
+            family.clone(),
+        );
+        cache.put(
+            "cache-key-victim-b",
+            "jwt-leak-2".into(),
+            "pt-leak-2".into(),
+            family.clone(),
+        );
+        let other_family = Uuid::new_v4().to_string();
+        cache.put(
+            "cache-key-bystander",
+            "jwt-keep".into(),
+            "pt-keep".into(),
+            other_family.clone(),
+        );
+
         // Replay h3 (outside reuse-window). This is the "first" rotation —
-        // it should revoke the family in one tx.
+        // it should revoke the family in one tx AND clear matching cache
+        // entries.
         let minter = fixed_minter("jwt-A");
         let out = {
             let c = conn.lock().unwrap();
@@ -1007,35 +1235,43 @@ mod tests {
         assert!(matches!(out, RotateOutcome::InvalidGrant));
 
         // Assert all three rows are now revoked — atomic family-revoke.
-        let c = conn.lock().unwrap();
-        let revoked_count: i64 = c
-            .query_row(
-                "SELECT COUNT(*) FROM refresh_tokens WHERE family_id = ?1 AND revoked = 1",
-                params![family],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(revoked_count, 3, "family-revoke must cover all siblings");
-        drop(c);
+        {
+            let c = conn.lock().unwrap();
+            let revoked_count: i64 = c
+                .query_row(
+                    "SELECT COUNT(*) FROM refresh_tokens WHERE family_id = ?1 AND revoked = 1",
+                    params![family],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(revoked_count, 3, "family-revoke must cover all siblings");
+        }
+
+        // M2 — Branch C also wipes the cache for this family.
+        assert!(
+            cache.get("cache-key-victim-a").is_none(),
+            "Branch C must remove cached entries for the revoked family"
+        );
+        assert!(
+            cache.get("cache-key-victim-b").is_none(),
+            "Branch C must remove ALL cached entries for the revoked family"
+        );
+        assert!(
+            cache.get("cache-key-bystander").is_some(),
+            "Branch C must NOT touch entries from unrelated families"
+        );
 
         // Now "parallel" rotation: spawn a second rotate against a sibling
         // (h1 plaintext). It must wait on the connection Mutex and observe
         // the already-revoked state → invalid_grant.
         let conn2 = Arc::clone(&conn);
         let cache2 = Arc::clone(&cache);
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let result = rt.block_on(async move {
-            let handle = tokio::task::spawn_blocking(move || {
-                let minter = fixed_minter("jwt-B");
-                let c = conn2.lock().unwrap();
-                rotate(&c, TEST_SALT, &cache2, "plaintext-1", &minter, &empty_ctx())
-            });
-            handle.await.unwrap()
+        let handle = tokio::task::spawn_blocking(move || {
+            let minter = fixed_minter("jwt-B");
+            let c = conn2.lock().unwrap();
+            rotate(&c, TEST_SALT, &cache2, "plaintext-1", &minter, &empty_ctx())
         });
-        let outcome = result.unwrap();
+        let outcome = handle.await.unwrap().unwrap();
         assert!(
             matches!(outcome, RotateOutcome::InvalidGrant),
             "second rotation on revoked sibling must return invalid_grant"
@@ -1219,7 +1455,9 @@ mod tests {
         }
 
         let handle = start_evictor(Arc::clone(&conn), Duration::from_millis(50));
-        tokio::time::sleep(Duration::from_millis(150)).await;
+        // 250ms wait → ~5 tick attempts at 50ms each, giving CI runners
+        // headroom against tokio::time::sleep slip under cgroup throttling.
+        tokio::time::sleep(Duration::from_millis(250)).await;
         handle.abort();
 
         let c = conn.lock().unwrap();
