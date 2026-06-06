@@ -19,7 +19,7 @@ related:
 Добавляем стандартный OAuth 2.1 refresh-token flow к `/oauth/token` сервера
 mnemonik-mcp. Access-token остаётся 1ч (без изменений). Новый refresh-token
 живёт 1 год, **rolling** — каждое использование выпускает новый refresh
-и инвалидирует старый. В пределах короткого «reuse-interval» (30 секунд)
+и инвалидирует старый. В пределах короткого «reuse-interval» (5 секунд, Auth0 default)
 повторное предъявление того же refresh-токена возвращает уже-выданную
 descendant-пару — это защищает параллельные клиенты от kill-the-session
 race. Клиенты OAuth 2.1 (Cursor, VS Code Copilot, Claude.ai — включая
