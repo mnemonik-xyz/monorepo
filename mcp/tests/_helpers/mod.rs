@@ -69,16 +69,13 @@ pub const TEST_JWT_SECRET: &[u8; 32] = b"modes-per-request-secret-32-byts";
 pub const TEST_REFRESH_SALT: [u8; 32] = [0xABu8; 32];
 
 /// Builder for `TestServer`. All fields are optional with sensible defaults
-/// (`storage_mode=local`, `payment_mode=none`, no per-write cost). Mirror
-/// the names in `Config::from_env` so tests read like deployment
-/// declarations.
+/// (`storage_mode=local`, `payment_mode=none`, no per-write cost,
+/// `oauth_token=false`). Mirror the names in `Config::from_env` so tests
+/// read like deployment declarations.
 ///
-/// `oauth_token`, `reuse_interval`, `evictor_tick` were added for the
-/// refresh-token-rotation Task 4 integration harness. Defaults preserve
-/// pre-Task-4 behaviour for every existing test — the OAuth `/token` and
-/// `/authorize` routes are NOT mounted unless `with_oauth_token(true)` is
-/// called, and `OAuthState::with_defaults` (the prior constructor) is
-/// retained on that path.
+/// The OAuth `/token` and `/authorize` routes are NOT mounted unless
+/// `with_oauth_token(true)` is called — existing callers that never
+/// touched the OAuth surface keep getting 404 on those paths.
 pub struct TestServerBuilder {
     storage_mode: String,
     payment_mode: String,
@@ -177,6 +174,9 @@ impl TestServerBuilder {
         let oauth_state = if self.oauth_token {
             let tmp = tempfile::NamedTempFile::new().expect("oauth tempfile");
             let path = tmp.into_temp_path();
+            // `keep()` prevents the `TempPath` Drop from deleting the file —
+            // the SQLite handle inside `OAuthState` must outlive this builder
+            // method. Same leak pattern `mock_state_with` uses for its store.
             let oauth_db = path.keep().expect("keep oauth tempfile");
             let salt = TEST_REFRESH_SALT.to_vec();
             // Default fast timers — matches `OAuthState::with_defaults`
@@ -710,9 +710,14 @@ pub async fn rotate(server: &TestServer, refresh: &str) -> (String, String) {
 ///
 /// Why 60 s in the past rather than 1 s: a sub-second cushion would race
 /// against the `SystemTime::now()` read inside `refresh::rotate_inner`
-/// under cgroup throttling. 60 s is far enough to be stable, short enough
-/// to keep the test row out of the evictor's natural sweep window (which
-/// uses `EVICTOR_GRACE_SECS = 60`).
+/// under cgroup throttling. 60 s is far enough to be stable.
+///
+/// No evictor task runs in the test harness — `TestServerBuilder::build()`
+/// does not call `refresh::start_evictor`; only `main.rs::run_http` does.
+/// This row is therefore safe from eviction regardless of timing (and
+/// even if the evictor were spawned, `expires_at = now - 60` exactly
+/// equals the `EVICTOR_GRACE_SECS = 60` cutoff, so the strict
+/// `expires_at < cutoff` predicate would still keep the row alive).
 ///
 /// Mutex discipline (CLAUDE.md): the connection guard is acquired, the SQL
 /// is run, the guard is dropped — all before the function returns. No
