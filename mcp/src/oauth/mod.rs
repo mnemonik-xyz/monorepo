@@ -3209,6 +3209,9 @@ mod tests {
             compute_jwt_ttl_from_env_str(Some("   ")),
             JWT_TTL_DEFAULT_SECS
         );
+        // Whitespace-only must emit the same loud WARN as the empty case —
+        // both trim to "" and hit the `is_empty()` branch (TR2-R1-1).
+        assert!(logs_contain("MCP_JWT_TTL_SECS is empty / whitespace-only"));
         // Sanity-check the silent path: env wholly unset (None) returns
         // the default without emitting a WARN — only the explicit
         // misconfiguration cases above are loud.
