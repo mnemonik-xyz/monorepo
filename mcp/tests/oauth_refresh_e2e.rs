@@ -1,9 +1,12 @@
 //! Integration test suite — OAuth 2.1 refresh-token rotation (Task 5).
 //!
-//! 14 `#[tokio::test]` functions: one per AC1–AC13 plus a single
-//! `cross_table_mutex_no_starvation` cross-cutting test that proves the
-//! per-table mutexes do not starve either side under interleaved
-//! contention.
+//! 16 `#[tokio::test]` functions total: 13 AC tests (AC1–AC13) + 1
+//! cross-cutting `cross_table_tokio_mutex_no_starvation` + 2 defense-
+//! in-depth security tests added in round 2 (`test_oversized_refresh_
+//! token_rejected_as_invalid_request` covers D16 4 KiB length-cap;
+//! `test_unsupported_grant_type_rejected` covers RFC 6749 §5.2 /
+//! Decision 11). The two extra security tests close round-1 findings
+//! SA5-H2 and SA5-M1 from `security-auditor-5-round1.json`.
 //!
 //! Every test builds the server via
 //! `TestServer::builder().with_oauth_token(true).with_reuse_interval(
@@ -131,14 +134,16 @@ async fn fresh_authcode_pair(server: &TestServer) -> Value {
 }
 
 /// Send a raw POST to `/oauth/token` with the given body bytes and
-/// content-type. Returns `(status, parsed_body)`. Used by tests that
-/// need to exercise an error path or a non-JSON content-type the
-/// `rotate` helper does not cover.
+/// content-type. Returns `(status, headers, parsed_body)` — `HeaderMap`
+/// is surfaced so callers can assert the RFC 6749 §5.1 / Decision 15
+/// cache-suppression headers (`Cache-Control: no-store` + `Pragma:
+/// no-cache`) which the production `apply_no_store_headers` wrapper
+/// applies to BOTH success and error responses.
 async fn post_token_raw(
     server: &TestServer,
     content_type: &str,
     body_bytes: Vec<u8>,
-) -> (StatusCode, Value) {
+) -> (StatusCode, axum::http::HeaderMap, Value) {
     let req = Request::builder()
         .method("POST")
         .uri("/oauth/token")
@@ -152,10 +157,35 @@ async fn post_token_raw(
         .await
         .expect("oneshot raw POST /oauth/token");
     let status = resp.status();
+    let headers = resp.headers().clone();
     let bytes = resp.into_body().collect().await.unwrap().to_bytes();
     let parsed: Value = serde_json::from_slice(&bytes)
         .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(&bytes).into()));
-    (status, parsed)
+    (status, headers, parsed)
+}
+
+/// Assert RFC 6749 §5.1 / Decision 15 cache-suppression headers are
+/// present on a `/oauth/token` response. Production
+/// `apply_no_store_headers` (`mcp/src/oauth/mod.rs::1743`) is the
+/// regression target — a refactor that drops the wrapper from the
+/// success or error path would otherwise slip past the suite.
+fn assert_no_store_headers(headers: &axum::http::HeaderMap, label: &str) {
+    let cache_control = headers
+        .get(axum::http::header::CACHE_CONTROL)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert_eq!(
+        cache_control, "no-store",
+        "{label}: Cache-Control must equal 'no-store' (RFC 6749 §5.1 / Decision 15); got {cache_control:?}"
+    );
+    let pragma = headers
+        .get(axum::http::header::PRAGMA)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert_eq!(
+        pragma, "no-cache",
+        "{label}: Pragma must equal 'no-cache' (RFC 6749 §5.1 / Decision 15); got {pragma:?}"
+    );
 }
 
 /// SELECT the `refresh_tokens.expires_at` for a given plaintext. Used by
@@ -299,7 +329,7 @@ async fn test_old_refresh_outside_reuse_interval_rejected() {
         "grant_type": "refresh_token",
         "refresh_token": refresh1,
     });
-    let (status, parsed) = post_token_raw(
+    let (status, _headers, parsed) = post_token_raw(
         &server,
         "application/json",
         serde_json::to_vec(&body).unwrap(),
@@ -338,7 +368,7 @@ async fn test_replay_outside_reuse_revokes_family() {
         "grant_type": "refresh_token",
         "refresh_token": r1,
     });
-    let (status, parsed) = post_token_raw(
+    let (status, _headers, parsed) = post_token_raw(
         &server,
         "application/json",
         serde_json::to_vec(&body).unwrap(),
@@ -356,7 +386,7 @@ async fn test_replay_outside_reuse_revokes_family() {
         "grant_type": "refresh_token",
         "refresh_token": r2,
     });
-    let (status2, parsed2) = post_token_raw(
+    let (status2, _headers2, parsed2) = post_token_raw(
         &server,
         "application/json",
         serde_json::to_vec(&body2).unwrap(),
@@ -381,7 +411,7 @@ async fn test_expired_refresh_rejected_no_family_revoke() {
         "grant_type": "refresh_token",
         "refresh_token": plaintext,
     });
-    let (status, parsed) = post_token_raw(
+    let (status, _headers, parsed) = post_token_raw(
         &server,
         "application/json",
         serde_json::to_vec(&body).unwrap(),
@@ -416,8 +446,10 @@ async fn test_rolling_expires_at_extended() {
     // The DB stores `expires_at` as unix-seconds. The mint-time
     // `expires_at = now + 1y` and the post-rotation `expires_at = new_now + 1y`
     // — both computed from `SystemTime::now()` at distinct instants. Sleep
-    // at least 1 s so the integer-second comparison sees the extension.
-    tokio::time::sleep(Duration::from_millis(1100)).await;
+    // at least 1 s so the integer-second comparison sees the extension —
+    // reuses the same `POST_FAMILY_REVOKE_SLEEP_MS` constant AC4 picks
+    // for the wall-clock-second tick (R1-MINOR-1, round 1).
+    tokio::time::sleep(Duration::from_millis(POST_FAMILY_REVOKE_SLEEP_MS)).await;
 
     let (_, r2) = rotate(&server, &r1).await;
     let expires_after = db_expires_at_for_plaintext(&server, &r2);
@@ -432,14 +464,37 @@ async fn test_rolling_expires_at_extended() {
 
 #[tokio::test]
 async fn test_discovery_advertises_refresh_grant() {
-    // The discovery handler is pure — does not need an HTTP route mounted
-    // on the test router. Call it directly through axum's response
-    // primitive and inspect the JSON body.
-    use axum::response::IntoResponse;
+    // Drive the discovery endpoint via a wire-level HTTP GET so a routing
+    // regression (e.g. path renamed from `/.well-known/...`) would be
+    // caught — not just a handler signature change. The
+    // `TestServerBuilder` does not mount `.well-known` (production wires
+    // it in `main.rs::run_http` lines 1011–1027); building a minimal
+    // local router with the production handler keeps this test
+    // self-contained inside the Task 5 scope-fence (no helper edits) and
+    // still exercises the axum route/extractor layer. The handler is
+    // pure and stateless — no `OAuthState` parameter — so a default
+    // `Router::new().route(...).oneshot(...)` call is a faithful proxy
+    // for the production GET path.
+    use axum::routing::get;
 
-    let response = mnemonic_mcp::oauth::oauth_authorization_server_metadata().await;
-    let resp = response.into_response();
-    assert_eq!(resp.status(), StatusCode::OK);
+    let app = axum::Router::<()>::new().route(
+        "/.well-known/oauth-authorization-server",
+        get(mnemonic_mcp::oauth::oauth_authorization_server_metadata),
+    );
+    let req = Request::builder()
+        .method("GET")
+        .uri("/.well-known/oauth-authorization-server")
+        .body(Body::empty())
+        .expect("build GET /.well-known/oauth-authorization-server");
+    let resp = app
+        .oneshot(req)
+        .await
+        .expect("oneshot GET /.well-known/oauth-authorization-server");
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "AC7: discovery GET must return 200"
+    );
     let bytes = resp.into_body().collect().await.unwrap().to_bytes();
     let v: Value = serde_json::from_slice(&bytes).expect("discovery JSON");
 
@@ -590,7 +645,7 @@ async fn test_refresh_grant_content_type_parity() {
         "grant_type=refresh_token&refresh_token={}",
         urlencode_value(&rt_form)
     );
-    let (form_status, form_resp) = post_token_raw(
+    let (form_status, form_headers, form_resp) = post_token_raw(
         &server,
         "application/x-www-form-urlencoded",
         form_body.into_bytes(),
@@ -607,7 +662,7 @@ async fn test_refresh_grant_content_type_parity() {
         "grant_type": "refresh_token",
         "refresh_token": rt_json,
     });
-    let (json_status, json_resp) = post_token_raw(
+    let (json_status, json_headers, json_resp) = post_token_raw(
         &server,
         "application/json",
         serde_json::to_vec(&json_body).unwrap(),
@@ -620,6 +675,13 @@ async fn test_refresh_grant_content_type_parity() {
     );
 
     assert_structural_eq(&form_resp, &json_resp);
+
+    // SA5-H1 (round 2): Decision 15 / RFC 6749 §5.1 — both responses
+    // (regardless of content-type) MUST carry `Cache-Control: no-store`
+    // + `Pragma: no-cache`. Production `apply_no_store_headers` is the
+    // single seam; this is the success-path regression anchor.
+    assert_no_store_headers(&form_headers, "AC10 form success");
+    assert_no_store_headers(&json_headers, "AC10 json success");
 }
 
 /// Minimal URL-encoder for application/x-www-form-urlencoded values.
@@ -660,9 +722,17 @@ async fn test_back_compat_ignores_refresh_field() {
         // absent field does NOT panic.
         let _ignored: Option<&str> = tok.get("refresh_token").and_then(|v| v.as_str());
 
-        // Mid-cycle Bearer-gated tool call — pin that the OAuth pipeline
-        // continues serving authenticated traffic even though we never
-        // touched the refresh-grant.
+        // Out-of-cycle Bearer-gated tool call (TR-2 round 1): proves the
+        // bearer-auth middleware AND a tool handler still respond 200
+        // for the server's own keypair while we churn through fresh
+        // `authorization_code` exchanges — `mnemonic_recall` here uses
+        // an unrelated JWT subject (the server keypair, not the
+        // ephemeral keypair `bootstrap_oauth` minted above), so this is
+        // a parallel-session liveness probe rather than a same-session
+        // continuity assertion. The point of AC11 is "legacy client
+        // that never sends grant_type=refresh_token keeps working",
+        // which this loop pins by completing 3 authorization_code
+        // rounds without ever touching the refresh-grant.
         let owner = server.server_pubkey();
         let result = server
             .call_tool(
@@ -728,14 +798,15 @@ async fn test_concurrent_rotation_idempotent_within_reuse() {
 #[tokio::test]
 async fn test_malformed_refresh_grant_invalid_request() {
     let server = build_server();
-    let body = serde_json::json!({
+
+    // Variant 1: refresh_token field intentionally omitted.
+    let body_missing = serde_json::json!({
         "grant_type": "refresh_token",
-        // refresh_token field intentionally omitted
     });
-    let (status, parsed) = post_token_raw(
+    let (status, headers, parsed) = post_token_raw(
         &server,
         "application/json",
-        serde_json::to_vec(&body).unwrap(),
+        serde_json::to_vec(&body_missing).unwrap(),
     )
     .await;
     assert_eq!(
@@ -747,12 +818,128 @@ async fn test_malformed_refresh_grant_invalid_request() {
         parsed["error"], "invalid_request",
         "AC13: error code must be invalid_request; body={parsed}"
     );
+    // SA5-H1 (round 2): error responses also carry the no-store headers
+    // (Decision 15 / RFC 6749 §5.1 — production wrapper applies to ALL
+    // exit points). This is the error-path regression anchor.
+    assert_no_store_headers(&headers, "AC13 missing field error");
+
+    // Variant 2: empty-string refresh_token (R1-MINOR-2 / TR-5 round 1).
+    // Production handler at `token_handler_refresh` treats `Some("")`
+    // identically to `None` — both surface as `invalid_request`. The
+    // explicit assertion guards against a regression where the
+    // empty-string branch silently 200s.
+    let body_empty = serde_json::json!({
+        "grant_type": "refresh_token",
+        "refresh_token": "",
+    });
+    let (status2, _headers2, parsed2) = post_token_raw(
+        &server,
+        "application/json",
+        serde_json::to_vec(&body_empty).unwrap(),
+    )
+    .await;
+    assert_eq!(
+        status2,
+        StatusCode::BAD_REQUEST,
+        "AC13: empty-string refresh_token must be 400; body={parsed2}"
+    );
+    assert_eq!(
+        parsed2["error"], "invalid_request",
+        "AC13: error code must be invalid_request for empty string; body={parsed2}"
+    );
 }
 
-// ── Cross-cutting — mutex non-starvation under interleaved load ───────────
+// ── SA5-H2 (round 2) — D16 oversized refresh_token rejected pre-hash ──────
 
 #[tokio::test]
-async fn cross_table_mutex_no_starvation() {
+async fn test_oversized_refresh_token_rejected_as_invalid_request() {
+    let server = build_server();
+
+    // D16 / `REFRESH_TOKEN_MAX_LEN = 4096`. A 4097-byte payload MUST be
+    // rejected with `400 invalid_request` BEFORE any hashing or DB work
+    // — this is a DoS mitigation (oversized POST would otherwise
+    // amplify blake3 + Mutex<Connection> contention). The handler at
+    // `mcp/src/oauth/mod.rs::token_handler_refresh` (line 1580) is the
+    // single seam.
+    let oversized = "a".repeat(4097);
+    let body = serde_json::json!({
+        "grant_type": "refresh_token",
+        "refresh_token": oversized,
+    });
+    let (status, _headers, parsed) = post_token_raw(
+        &server,
+        "application/json",
+        serde_json::to_vec(&body).unwrap(),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "D16: 4097-byte refresh_token must return 400; body={parsed}"
+    );
+    assert_eq!(
+        parsed["error"], "invalid_request",
+        "D16: error code must be invalid_request; body={parsed}"
+    );
+}
+
+// ── SA5-M1 (round 2) — unsupported_grant_type regression anchor ───────────
+
+#[tokio::test]
+async fn test_unsupported_grant_type_rejected() {
+    let server = build_server();
+
+    // Decision 11 / RFC 6749 §5.2 — any `grant_type` other than
+    // `authorization_code` or `refresh_token` MUST return
+    // `400 unsupported_grant_type`. Without this regression anchor a
+    // refactor that silently fell through to the `authorization_code`
+    // path (with empty code/verifier) would surface as 401
+    // `unknown_code` instead and slip past the typed-error contract.
+    let body = serde_json::json!({
+        "grant_type": "client_credentials",
+        "client_id": "test-client",
+        "client_secret": "irrelevant-but-shaped-like-the-real-attack-vector",
+    });
+    let (status, _headers, parsed) = post_token_raw(
+        &server,
+        "application/json",
+        serde_json::to_vec(&body).unwrap(),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "D11: unsupported grant_type must return 400; body={parsed}"
+    );
+    assert_eq!(
+        parsed["error"], "unsupported_grant_type",
+        "D11: error code must be unsupported_grant_type; body={parsed}"
+    );
+}
+
+// ── Cross-cutting — tokio Mutex non-starvation under interleaved load ─────
+//
+// **Scope clarification (R1-MAJOR-1 / SA5-L1 round 1):** This test
+// verifies that the TWO per-table `std::sync::Mutex<rusqlite::Connection>`
+// instances (one on `McpState.store`, one on `OAuthState.refresh_store`)
+// — each guarded around a synchronous block with no `.await` held —
+// allow both sides to make bounded progress when interleaved through the
+// tokio runtime. It does NOT exercise SQLite-level writer-lock fairness
+// on a shared database file: the `TestServerBuilder` opens each store
+// on its OWN tempfile (`_helpers/mod.rs:175-180` and
+// `test_support.rs::mock_state_with`), whereas production wires both
+// connections to the same `attestations.db` path (Decision 6) where
+// SQLite serialises writes via its single writer lock. Same-file SQLite
+// writer-lock fairness is intentionally out of Task 5 scope (the test
+// harness uses separate tempfiles to keep tests fully isolated and
+// neither helper edits nor a bespoke shared-file `TestServer`
+// constructor are in this task's scope-fence). The test name
+// `cross_table_tokio_mutex_no_starvation` makes the actual invariant
+// explicit; a follow-up task can add a shared-file variant if SQLite
+// writer-lock fairness needs a wire-level regression anchor.
+
+#[tokio::test]
+async fn cross_table_tokio_mutex_no_starvation() {
     let server = Arc::new(build_server());
 
     // Pre-seed an `authorization_code` so the rotation side has a starting
@@ -790,9 +977,11 @@ async fn cross_table_mutex_no_starvation() {
     };
 
     // Spawn the attestation-write side — 50 sequential saves through
-    // `McpState.store` (a separate `Arc<Mutex<Connection>>` from the
-    // OAuth refresh store, so this is a cross-table check on per-table
-    // mutex fairness rather than a single-mutex contention test).
+    // `McpState.store`. This Mutex<Connection> is DISTINCT from the
+    // `OAuthState.refresh_store` mutex above; the test verifies that
+    // neither tokio task starves the other when interleaved through
+    // the runtime (NOT same-file SQLite writer-lock fairness — see the
+    // module-level scope clarification above the test).
     let attestation_completions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let attestations = {
         let server = Arc::clone(&server);
