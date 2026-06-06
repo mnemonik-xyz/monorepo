@@ -167,10 +167,19 @@ pub enum RotateOutcome {
     /// publishes the `(access_jwt, new_plaintext)` pair into the cache the
     /// handler also owns. (Cache `put` happens **inside** `rotate` — see
     /// the implementation — so callers do not need to publish themselves.)
+    ///
+    /// `access_jwt` is the same JWT the cache published — surfacing it
+    /// to the handler so the Branch A caller and a subsequent Branch B
+    /// retry of the SAME old plaintext receive byte-identical access
+    /// tokens (AC12 — closes CR3-R1-C1 round-1 finding in Task 3).
+    /// Without this, the handler would mint a second JWT for the
+    /// Branch A response with a different `jti`/`iat`, breaking the
+    /// idempotency guarantee on a legitimate network retry.
     Rotated {
         new_token: RefreshToken,
         sub: String,
         google_sub: Option<String>,
+        access_jwt: String,
     },
     /// Branch B — legitimate retry within reuse-interval. Pair is the
     /// byte-identical `(access_jwt, new_plaintext)` previously emitted.
@@ -820,6 +829,7 @@ fn branch_a_rotate(
             new_token,
             sub: row.sub.clone(),
             google_sub: row.google_sub.clone(),
+            access_jwt,
         },
         did_writes: true,
         pending_publish: Some(pending_publish),

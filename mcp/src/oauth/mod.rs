@@ -1348,6 +1348,14 @@ async fn token_handler_inner(
     headers: &axum::http::HeaderMap,
     body: &axum::body::Bytes,
 ) -> Response {
+    // CR3-R1-M2 / D14 forensic context. `remote_addr` is the first hop in
+    // `X-Forwarded-For` (set by the front nginx) if present, else
+    // `X-Real-IP`, else the "-" sentinel. `request_id` is a per-call
+    // UUIDv4 — propagated into `RotateContext` so Branch C family-revoke
+    // and Branch E credential-stuffing log lines can be correlated to a
+    // specific caller for forensic review.
+    let remote_addr = extract_forensic_remote_addr(headers);
+    let request_id = uuid::Uuid::new_v4().to_string();
     // Decide between JSON and x-www-form-urlencoded. Default to JSON if
     // the header is missing — keeps existing programmatic clients
     // (`scripts/test-oauth-flow.sh`, integration tests) working.
@@ -1382,14 +1390,19 @@ async fn token_handler_inner(
 
     match req.grant_type.as_str() {
         "authorization_code" => token_handler_authorization_code(state, req).await,
-        "refresh_token" => token_handler_refresh(state, req).await,
+        "refresh_token" => token_handler_refresh(state, req, remote_addr, request_id).await,
         // RFC 6749 §5.2 / Decision 11 — any other grant_type must NOT
         // silently fall through to the authorization_code path with empty
         // code/verifier (which would surface a confusing 401). The
         // explicit `unsupported_grant_type` 400 closes that vector.
-        other => oauth_error(
+        //
+        // SA3-R1-M1: do NOT echo the user-supplied `req.grant_type` into
+        // the response body. The code-only envelope keeps attacker-
+        // controlled strings off the wire.
+        _ => oauth_error_typed(
             StatusCode::BAD_REQUEST,
-            &format!("unsupported_grant_type: {other}"),
+            "unsupported_grant_type",
+            "grant_type is not one of authorization_code, refresh_token",
         ),
     }
 }
@@ -1402,15 +1415,20 @@ async fn token_handler_authorization_code(state: &Arc<OAuthState>, req: TokenReq
     let code = match req.code.as_deref().filter(|s| !s.is_empty()) {
         Some(c) => c.to_string(),
         None => {
-            return oauth_error(StatusCode::BAD_REQUEST, "invalid_request: code is required");
+            return oauth_error_typed(
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+                "code is required",
+            );
         }
     };
     let code_verifier = match req.code_verifier.as_deref().filter(|s| !s.is_empty()) {
         Some(v) => v.to_string(),
         None => {
-            return oauth_error(
+            return oauth_error_typed(
                 StatusCode::BAD_REQUEST,
-                "invalid_request: code_verifier is required",
+                "invalid_request",
+                "code_verifier is required",
             );
         }
     };
@@ -1452,12 +1470,21 @@ async fn token_handler_authorization_code(state: &Arc<OAuthState>, req: TokenReq
         return oauth_error(StatusCode::UNAUTHORIZED, "code_verifier does not match");
     }
 
+    // SA3-R1-M2: keep the underlying `{e}` in the server-side warn log
+    // only; the response body carries a fixed prose so an internal
+    // error string is never echoed to the wire.
     let token = match issue_jwt_with_google_sub(state, &issued.sub, issued.google_sub.clone()) {
         Ok(t) => t,
         Err(e) => {
-            return oauth_error(
+            tracing::warn!(
+                target: "mnemonic_mcp::oauth",
+                error = %e,
+                "JWT issuance failed during authorization_code redeem"
+            );
+            return oauth_error_typed(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("JWT issuance failed: {e}"),
+                "internal_error",
+                "JWT issuance failed",
             );
         }
     };
@@ -1519,13 +1546,31 @@ async fn token_handler_authorization_code(state: &Arc<OAuthState>, req: TokenReq
 /// FIRST so an oversized payload is rejected before hashing or DB work.
 /// Then call `refresh::rotate` and translate the outcome to the 4-field
 /// JSON response (or `invalid_grant` on Branch B'/C/D/E).
-async fn token_handler_refresh(state: &Arc<OAuthState>, req: TokenRequest) -> Response {
+///
+/// `remote_addr` + `request_id` are threaded into `RotateContext` so
+/// D14 log lines from Branches C/D/E carry the forensic correlation
+/// fields the tech-spec mandates (round-1 code-reviewer M2).
+async fn token_handler_refresh(
+    state: &Arc<OAuthState>,
+    req: TokenRequest,
+    remote_addr: String,
+    request_id: String,
+) -> Response {
     let plaintext = match req.refresh_token.as_deref() {
         Some(s) if !s.is_empty() => s.to_string(),
         _ => {
-            return oauth_error(
+            tracing::info!(
+                target: "mnemonic_mcp::oauth",
+                outcome = "invalid_request",
+                reason = "refresh_token_missing",
+                remote_addr = %remote_addr,
+                request_id = %request_id,
+                "refresh_grant rejected (empty / missing refresh_token)"
+            );
+            return oauth_error_typed(
                 StatusCode::BAD_REQUEST,
-                "invalid_request: refresh_token is required",
+                "invalid_request",
+                "refresh_token is required",
             );
         }
     };
@@ -1533,9 +1578,19 @@ async fn token_handler_refresh(state: &Arc<OAuthState>, req: TokenRequest) -> Re
     // lookup. Both gates short-circuit oversized inputs before they can
     // consume CPU or row-lock budget.
     if plaintext.len() > REFRESH_TOKEN_MAX_LEN {
-        return oauth_error(
+        tracing::info!(
+            target: "mnemonic_mcp::oauth",
+            outcome = "invalid_request",
+            reason = "refresh_token_too_long",
+            length = plaintext.len(),
+            remote_addr = %remote_addr,
+            request_id = %request_id,
+            "refresh_grant rejected (length cap)"
+        );
+        return oauth_error_typed(
             StatusCode::BAD_REQUEST,
-            "invalid_request: refresh_token exceeds 4096 bytes",
+            "invalid_request",
+            "refresh_token exceeds 4096 bytes",
         );
     }
 
@@ -1546,6 +1601,8 @@ async fn token_handler_refresh(state: &Arc<OAuthState>, req: TokenRequest) -> Re
     let cache = Arc::clone(&state.reuse_cache);
     let salt = state.refresh_salt.clone();
     let state_for_minter = Arc::clone(state);
+    let remote_addr_for_ctx = remote_addr.clone();
+    let request_id_for_ctx = request_id.clone();
     let outcome_result = tokio::task::spawn_blocking(move || {
         let conn = store
             .lock()
@@ -1554,14 +1611,11 @@ async fn token_handler_refresh(state: &Arc<OAuthState>, req: TokenRequest) -> Re
             issue_jwt_with_google_sub(&state_for_minter, sub, google_sub.map(str::to_string))
                 .map_err(|e| anyhow::anyhow!("JWT issuance failed: {e}"))
         };
-        refresh::rotate(
-            &conn,
-            &salt,
-            &cache,
-            &plaintext,
-            &minter,
-            &refresh::RotateContext::default(),
-        )
+        let ctx = refresh::RotateContext {
+            remote_addr: Some(remote_addr_for_ctx.as_str()),
+            request_id: Some(request_id_for_ctx.as_str()),
+        };
+        refresh::rotate(&conn, &salt, &cache, &plaintext, &minter, &ctx)
     })
     .await;
 
@@ -1570,23 +1624,29 @@ async fn token_handler_refresh(state: &Arc<OAuthState>, req: TokenRequest) -> Re
         Ok(Err(e)) => {
             tracing::warn!(
                 target: "mnemonic_mcp::oauth",
+                remote_addr = %remote_addr,
+                request_id = %request_id,
                 error = %e,
                 "refresh_token rotation failed (internal)"
             );
-            return oauth_error(
+            return oauth_error_typed(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "internal_error: refresh rotation failed",
+                "internal_error",
+                "refresh rotation failed",
             );
         }
         Err(e) => {
             tracing::warn!(
                 target: "mnemonic_mcp::oauth",
+                remote_addr = %remote_addr,
+                request_id = %request_id,
                 error = %e,
                 "refresh_token rotation task panicked"
             );
-            return oauth_error(
+            return oauth_error_typed(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "internal_error: refresh rotation task panicked",
+                "internal_error",
+                "refresh rotation task panicked",
             );
         }
     };
@@ -1595,30 +1655,34 @@ async fn token_handler_refresh(state: &Arc<OAuthState>, req: TokenRequest) -> Re
         refresh::RotateOutcome::Rotated {
             new_token,
             sub,
-            google_sub,
+            access_jwt,
+            ..
         } => {
-            // Branch A: rotation cache `put` already happened inside
-            // `refresh::rotate` (D5 ordering invariant) so a legitimate
-            // retry of the OLD plaintext within `reuse_interval` will
-            // hit Branch B. We mint a fresh access JWT for this caller
-            // — byte-different from the one cached under the old hash
-            // (different `iat` / `jti`) but semantically equivalent.
-            //
-            // The cached JWT is only consulted on a Branch B retry of
-            // the OLD plaintext, not the NEW one. The new caller wants
-            // a JWT pinned to *this* request's `iat`.
-            let access_token = match issue_jwt_with_google_sub(state, &sub, google_sub.clone()) {
-                Ok(t) => t,
-                Err(e) => {
-                    return oauth_error(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        &format!("JWT issuance failed: {e}"),
-                    );
-                }
-            };
-            cache_minted_token(&access_token, &sub);
+            // CR3-R1-C1 fix: surface the SAME `access_jwt` minted inside
+            // `refresh::rotate` (and already published to the reuse
+            // cache before COMMIT, per D5 ordering). A subsequent
+            // Branch B retry of the OLD plaintext now receives a
+            // byte-identical `(access_jwt, refresh_plaintext)` pair to
+            // the one returned here — closing the AC12 idempotency
+            // gap that a re-mint in this scope previously broke.
+            cache_minted_token(&access_jwt, &sub);
+            // D14: handler-side INFO log with sub + family_id +
+            // remote_addr + request_id. Mirrors the rotate-internal
+            // log line but emitted on the async tokio task (NOT inside
+            // `spawn_blocking`) so test harnesses with thread-local
+            // tracing subscribers (`tracing-test`) can observe it.
+            tracing::info!(
+                target: "mnemonic_mcp::oauth",
+                outcome = "rotated",
+                branch = "A",
+                family_id = %new_token.family_id,
+                sub = %sub,
+                remote_addr = %remote_addr,
+                request_id = %request_id,
+                "refresh_grant rotated"
+            );
             let body = TokenResponse {
-                access_token,
+                access_token: access_jwt,
                 token_type: "Bearer".to_string(),
                 expires_in: jwt_ttl_secs(),
                 scope: "mcp".to_string(),
@@ -1630,6 +1694,19 @@ async fn token_handler_refresh(state: &Arc<OAuthState>, req: TokenRequest) -> Re
             access_jwt,
             refresh_plaintext,
         } => {
+            // D14: handler-side DEBUG with remote_addr + request_id.
+            // We don't have sub / family_id at this layer because the
+            // `Replayed` outcome doesn't surface them — the rotate
+            // internal log already carries the full forensic set, and
+            // this handler-side line exists for harness observability.
+            tracing::debug!(
+                target: "mnemonic_mcp::oauth",
+                outcome = "replayed",
+                branch = "B",
+                remote_addr = %remote_addr,
+                request_id = %request_id,
+                "refresh_grant replayed"
+            );
             let body = TokenResponse {
                 access_token: access_jwt,
                 token_type: "Bearer".to_string(),
@@ -1643,9 +1720,18 @@ async fn token_handler_refresh(state: &Arc<OAuthState>, req: TokenRequest) -> Re
             // Decision 11 / RFC 6749 §5.2 — Branch B' / C / D / E are all
             // surfaced as `invalid_grant` to the client. The granular
             // distinction lives in the server-side tracing log per D14.
-            oauth_error(
+            tracing::info!(
+                target: "mnemonic_mcp::oauth",
+                outcome = "invalid_grant",
+                branch = "B_prime_or_C_or_D_or_E",
+                remote_addr = %remote_addr,
+                request_id = %request_id,
+                "refresh_grant rejected"
+            );
+            oauth_error_typed(
                 StatusCode::BAD_REQUEST,
-                "invalid_grant: refresh_token rejected",
+                "invalid_grant",
+                "refresh_token rejected",
             )
         }
     }
@@ -1744,9 +1830,61 @@ fn extract_exp_unix_no_verify(jwt: &str) -> Option<u64> {
     payload.get("exp")?.as_u64()
 }
 
-/// Build a uniform OAuth-style error envelope.
+/// Build a uniform OAuth-style error envelope (legacy single-field shape).
+/// Pre-Task-3 callsites build `{"error": "<freeform prose>"}`. New
+/// /oauth/token error paths should use [`oauth_error_typed`] instead so
+/// the response shape matches RFC 6749 §5.2 exactly:
+/// `{"error": "<code>", "error_description": "<prose>"}`.
 fn oauth_error(status: StatusCode, msg: &str) -> Response {
     (status, Json(serde_json::json!({"error": msg}))).into_response()
+}
+
+/// RFC 6749 §5.2 — `/oauth/token` error envelope. `error` is the bare
+/// machine-readable code (`invalid_request`, `invalid_grant`,
+/// `unsupported_grant_type`, `internal_error`); `error_description` is
+/// the optional human-readable prose. Closes round-1 code-reviewer M1.
+///
+/// **D14 + SA3 R1 M1 + M2 compliance:** `error_description` carries
+/// fixed, operator-authored prose only. NEVER format user-supplied
+/// strings (`grant_type` echoes, `format!("...: {other}")`) or internal
+/// error values (`format!("...: {e}")`) into this field — both would
+/// leak attacker-controlled or implementation-detail strings to the
+/// wire. Internal `{e}` belongs in the tracing::warn server-side log.
+fn oauth_error_typed(status: StatusCode, error: &str, description: &str) -> Response {
+    (
+        status,
+        Json(serde_json::json!({
+            "error": error,
+            "error_description": description,
+        })),
+    )
+        .into_response()
+}
+
+/// Extract the forensic remote-address header for D14 logging. First
+/// hop in `X-Forwarded-For` (the canonical nginx-set header), else
+/// `X-Real-IP`, else `"-"`. Trims the value to the first comma so a
+/// proxy chain's full list does not bloat the log line; bounded to
+/// 64 chars char-boundary-safe so an attacker-supplied massive value
+/// cannot pollute log aggregation.
+///
+/// The connection-level peer address is NOT used here because in
+/// production the binary sits behind nginx; the peer is always
+/// 127.0.0.1. `X-Forwarded-For` from a trusted reverse proxy is the
+/// only meaningful client-IP signal.
+fn extract_forensic_remote_addr(headers: &axum::http::HeaderMap) -> String {
+    let raw = headers
+        .get("x-forwarded-for")
+        .or_else(|| headers.get("x-real-ip"))
+        .and_then(|v| v.to_str().ok());
+    let Some(s) = raw else {
+        return "-".to_string();
+    };
+    let first_hop = s.split(',').next().unwrap_or("").trim();
+    if first_hop.is_empty() {
+        return "-".to_string();
+    }
+    bound_log_value(first_hop, 64)
 }
 
 // ── /.well-known discovery endpoints (RFC 8414 + MCP spec) ───────────────────
@@ -3142,11 +3280,19 @@ mod tests {
             format!("{SERVER_ORIGIN}/oauth/token")
         );
         assert_eq!(parsed["response_types_supported"][0], "code");
-        assert_eq!(parsed["grant_types_supported"][0], "authorization_code");
-        // refresh-token-rotation Task 3 / Decision 11 — discovery MUST also
-        // advertise the refresh_token grant so MCP clients can opt into
-        // the rotation flow.
-        assert_eq!(parsed["grant_types_supported"][1], "refresh_token");
+        // refresh-token-rotation Task 3 / Decision 11 — discovery MUST
+        // advertise BOTH grants so MCP clients can opt into the
+        // rotation flow. Use set-membership (TR3-R1-L2) rather than
+        // positional indexing so re-ordering the array doesn't break
+        // the test.
+        let grants: Vec<&str> = parsed["grant_types_supported"]
+            .as_array()
+            .expect("grant_types_supported must be an array")
+            .iter()
+            .map(|v| v.as_str().unwrap_or(""))
+            .collect();
+        assert!(grants.contains(&"authorization_code"), "grants={grants:?}");
+        assert!(grants.contains(&"refresh_token"), "grants={grants:?}");
         assert_eq!(parsed["code_challenge_methods_supported"][0], "S256");
         assert_eq!(parsed["token_endpoint_auth_methods_supported"][0], "none");
         assert_eq!(parsed["scopes_supported"][0], "mcp");
@@ -4013,47 +4159,91 @@ mod tests {
         assert!(st.reuse_cache.get("k3").is_some());
     }
 
-    /// TDD anchor (D14): no plaintext refresh token nor its hash appears
-    /// in any tracing log emitted from `refresh::rotate` or
-    /// `token_handler` across ALL six rotate branches (A success,
-    /// B reuse, B' grace cache-miss, C invalid_grant outside-window,
-    /// D unknown family / expired, E too-long pre-hash). Uses
-    /// `tracing-test::traced_test` so each test instance gets its own
-    /// log subscriber — `logs_contain` queries that buffer.
-    ///
-    /// Branch B' is exercised by Branch C in this anchor — both produce
-    /// the same logging shape (no plaintext, no hash). The full
-    /// per-branch coverage lives in `refresh.rs::tests`; this anchor
-    /// asserts the policy across the HTTP-layer surface.
+    /// POST `/oauth/token` form helper that injects `X-Forwarded-For` so
+    /// the handler's D14 forensic-field extraction (`remote_addr`) has
+    /// non-`-` input to log. Used by the round-2 logging-policy anchor
+    /// which asserts both ABSENCE of secrets AND PRESENCE of forensic
+    /// fields per tech-spec line 628.
+    async fn post_token_form_with_xff(app: Router, form: &str, xff: &str) -> Response {
+        let req = Request::builder()
+            .method("POST")
+            .uri("/oauth/token")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .header("x-forwarded-for", xff)
+            .body(Body::from(form.to_string()))
+            .unwrap();
+        app.oneshot(req).await.unwrap()
+    }
+
+    /// TDD anchor (D14): per tech-spec line 628 the test asserts BOTH
+    /// (a) NO plaintext, at-rest hash, SALT BYTES, or full ACCESS_TOKEN
+    /// appears in any tracing log emitted from `refresh::rotate` or
+    /// `token_handler` AND (b) the forensic fields the policy mandates
+    /// (`family_id`, `sub`, `remote_addr`, `request_id`) ARE present
+    /// where applicable. Iterates each of the 6 rotate branches
+    /// individually (A, B, B', C, D, E) — Branch B' is an INSIDE-window
+    /// cache-MISS, distinct from Branch C's OUTSIDE-window replay, so
+    /// the test forces a cache flush after Branch A and re-submits the
+    /// OLD plaintext to exercise B' explicitly. Branch D (expired) is
+    /// pre-seeded with `expires_at < now`; Branch E (unknown) is a
+    /// never-issued plaintext.
     #[tokio::test]
     #[tracing_test::traced_test]
     async fn logging_policy_no_plaintext_no_hash_across_branches() {
         let st = fresh_state();
         let app_factory = || build_token_router(st.clone());
 
-        // Branch E — too-long pre-hash. Distinct plaintext per branch so
-        // logs_contain assertions can't confuse one branch's leak with
-        // another's.
+        // Per-branch X-Forwarded-For sentinels so we can prove
+        // `remote_addr` IS captured in the resulting log lines.
+        let xff_a = "203.0.113.10";
+        let xff_b = "203.0.113.11";
+        let xff_b_prime = "203.0.113.12";
+        let xff_c = "203.0.113.13";
+        let xff_d = "203.0.113.14";
+        let xff_e = "203.0.113.15";
+
+        // ── Branch E — too-long pre-hash ─────────────────────────────
         let too_long_pt = "BRANCHE_PLAINTEXT_a".repeat(500);
-        let _ = post_token_form_full(
+        let _ = post_token_form_with_xff(
             app_factory(),
             &format!(
                 "grant_type=refresh_token&refresh_token={}",
                 urlencoding_encode(&too_long_pt)
             ),
+            xff_e,
         )
         .await;
 
-        // Branch D — unknown family / never issued.
-        let unknown_pt = "BRANCHD_UNKNOWN_PLAINTEXT";
-        let _ = post_token_form_full(
+        // ── Branch D — expired refresh-token (pre-seeded row with
+        // `expires_at < now`, revoked=0 — that is refresh.rs's Branch D) ──
+        let expired_plaintext = "BRANCHD_EXPIRED_PLAINTEXT";
+        let expired_hash = refresh::hash_refresh_token(&st.refresh_salt, expired_plaintext);
+        let expired_family = uuid::Uuid::new_v4().to_string();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        {
+            let conn = st.refresh_store.lock().unwrap();
+            conn.execute(
+                "INSERT INTO refresh_tokens
+                    (token_hash, sub, google_sub, issued_at, expires_at,
+                     revoked, family_id)
+                 VALUES (?1, 'BRANCHD_SUB', NULL, ?2, ?3, 0, ?4)",
+                rusqlite::params![expired_hash, now - 10, now - 1, expired_family],
+            )
+            .unwrap();
+        }
+        let _ = post_token_form_with_xff(
             app_factory(),
-            &format!("grant_type=refresh_token&refresh_token={unknown_pt}"),
+            &format!("grant_type=refresh_token&refresh_token={expired_plaintext}"),
+            xff_d,
         )
         .await;
 
-        // Branch A — successful rotation. Mint a refresh row via
-        // authorization_code exchange, then drive a refresh_token rotation.
+        // ── Branches A / B / B' / C ──────────────────────────────────
+        // Mint a refresh row via authorization_code redeem, then drive
+        // the rotation flow.
         let verifier_a = "branchA-verifier-min-43-chars-long-aaaaaaaaaaa";
         let challenge_a = pkce_challenge(verifier_a);
         let code_a = st.mint_issued_code(
@@ -4066,52 +4256,118 @@ mod tests {
             "grant_type=authorization_code&code={code_a}&code_verifier={}",
             urlencoding_encode(verifier_a)
         );
-        let resp_a = post_token_form_full(app_factory(), &form_a).await;
-        let (_, body_a) = read_json_body(resp_a).await;
+        // The authorization_code redeem path doesn't carry remote_addr
+        // into the log; we only need its response body to extract the
+        // refresh-token plaintext and access-token to assert against.
+        let resp_a_init = post_token_form_with_xff(app_factory(), &form_a, xff_a).await;
+        let (_, body_a) = read_json_body(resp_a_init).await;
         let rt_a = body_a["refresh_token"]
             .as_str()
             .expect("authorization_code mint should yield refresh_token")
+            .to_string();
+        let access_token_a = body_a["access_token"]
+            .as_str()
+            .expect("authorization_code redeem should yield access_token")
             .to_string();
         let form_refresh = format!(
             "grant_type=refresh_token&refresh_token={}",
             urlencoding_encode(&rt_a)
         );
-        let _ = post_token_form_full(app_factory(), &form_refresh).await;
+
+        // Branch A — first rotate of the just-minted plaintext.
+        let resp_branch_a = post_token_form_with_xff(app_factory(), &form_refresh, xff_a).await;
+        let (_, body_branch_a) = read_json_body(resp_branch_a).await;
+        let access_token_branch_a = body_branch_a["access_token"]
+            .as_str()
+            .expect("Branch A should yield an access_token")
+            .to_string();
 
         // Branch B — second call within reuse-interval against the SAME
-        // (now revoked) plaintext.
-        let _ = post_token_form_full(app_factory(), &form_refresh).await;
+        // (now revoked) plaintext, cache HIT.
+        let _ = post_token_form_with_xff(app_factory(), &form_refresh, xff_b).await;
 
-        // Branch C — replay outside reuse-interval. Force the rotated row
-        // out of reuse-interval by waiting (with_defaults reuse_interval
-        // is 100ms).
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-        let _ = post_token_form_full(app_factory(), &form_refresh).await;
+        // Branch B' — INSIDE the reuse window but cache MISS. Wipe the
+        // reuse_cache directly so the next rotate of the SAME old
+        // plaintext sees revoked=1, rotated_at recent → cache.get None →
+        // fail-closed. This is the actual B' branch (distinct from C).
+        st.reuse_cache.clear();
+        let _ = post_token_form_with_xff(app_factory(), &form_refresh, xff_b_prime).await;
 
-        // D14 assertions: no plaintext appears in any log line. The
-        // tracing-test buffer is process-thread-local; `logs_contain`
-        // returns true if any captured line matches.
-        // - Oversized plaintext (Branch E) — pull a unique substring.
+        // Branch C — replay OUTSIDE reuse-interval. The with_defaults
+        // reuse_interval is 100 ms (sub-second flake-resistant: rusqlite
+        // stores integer seconds, so we wait long enough that
+        // `now > rotated_at + reuse_interval.as_secs()` reliably).
+        tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+        let _ = post_token_form_with_xff(app_factory(), &form_refresh, xff_c).await;
+
+        // ─────────────────────────────────────────────────────────────
+        // (a) ABSENCE assertions — no plaintext / no hash / no salt /
+        // no full access_token leaks into any log line.
+        // ─────────────────────────────────────────────────────────────
         assert!(
             !logs_contain("BRANCHE_PLAINTEXT_a"),
             "D14: Branch E must not log the oversized plaintext"
         );
-        // - Unknown plaintext (Branch D).
         assert!(
-            !logs_contain("BRANCHD_UNKNOWN_PLAINTEXT"),
-            "D14: Branch D must not log the unknown plaintext"
+            !logs_contain(expired_plaintext),
+            "D14: Branch D must not log the expired plaintext"
         );
-        // - Branch A/B/B'/C plaintext.
         assert!(
             !logs_contain(&rt_a),
             "D14: rotate must never log the legitimate refresh-token plaintext"
         );
-        // - At-rest hash (blake3(salt || plaintext)) — compute and
-        //   assert it never appears in any log line.
         let hash_rt = refresh::hash_refresh_token(&st.refresh_salt, &rt_a);
         assert!(
             !logs_contain(&hash_rt),
             "D14: rotate must never log the at-rest hash"
+        );
+        let salt_hex = hex::encode(&st.refresh_salt);
+        assert!(
+            !logs_contain(&salt_hex),
+            "D14: rotate must never log the per-deploy salt bytes"
+        );
+        assert!(
+            !logs_contain(&access_token_a),
+            "D14: rotate must never log the full authorization_code access_token"
+        );
+        assert!(
+            !logs_contain(&access_token_branch_a),
+            "D14: rotate must never log the full Branch-A access_token"
+        );
+
+        // ─────────────────────────────────────────────────────────────
+        // (b) PRESENCE assertions — forensic fields IS captured per
+        // tech-spec line 628.
+        // ─────────────────────────────────────────────────────────────
+        // Sub is logged on Branch A (success) — refresh.rs:795-803.
+        assert!(
+            logs_contain("BRANCHA_SUB"),
+            "D14: Branch A must log sub for forensic correlation"
+        );
+        // Family_id is logged on Branch A success — emitted as
+        // `family_id=<uuid>`; presence of the key is sufficient since
+        // the uuid is randomly generated per mint.
+        assert!(
+            logs_contain("family_id"),
+            "D14: Branch A/B/C/D log lines must carry family_id"
+        );
+        // Remote_addr is threaded into the rotate ctx from the handler,
+        // surfaces in log lines for B'/C/D/E (the branches that log
+        // remote_addr per refresh.rs). Each branch uses a distinct
+        // X-Forwarded-For so we can assert presence.
+        assert!(
+            logs_contain(xff_b_prime),
+            "D14: Branch B' must log remote_addr (X-Forwarded-For first hop)"
+        );
+        assert!(logs_contain(xff_c), "D14: Branch C must log remote_addr");
+        assert!(logs_contain(xff_d), "D14: Branch D must log remote_addr");
+        assert!(logs_contain(xff_e), "D14: Branch E must log remote_addr");
+        // request_id is a UUIDv4 minted per /oauth/token request — assert
+        // the key is present in the log buffer (the value itself rotates
+        // per branch / per request).
+        assert!(
+            logs_contain("request_id"),
+            "D14: log lines must carry request_id for cross-call correlation"
         );
     }
 }
