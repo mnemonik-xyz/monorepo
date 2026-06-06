@@ -1476,3 +1476,1078 @@ the precedent of wrapping balance UPDATE + payment_events INSERT in
     `OAUTH_RATELIMIT_DISABLE=1` env-var escape hatch
     (`mcp/src/main.rs:826-830`) is the documented bypass.
 
+---
+
+## §I — Implementation-level details
+
+## Updated: 2026-06-06
+
+Added at tech-spec stage. Scope: refresh-token rotation (D1-D17 + D13.1
+locked). Quotes every call site the implementer touches and recommends
+one specific approach per section. Does not re-cover §A-§H.
+
+### §I.1 — `JWT_TTL_SECS` env-plumbing surface
+
+**The const** (`mcp/src/oauth/mod.rs:58`):
+
+```rust
+pub const JWT_TTL_SECS: u64 = 3600;
+```
+
+**Every read site** across the workspace (`grep -rn JWT_TTL_SECS`):
+
+1. `mcp/src/oauth/mod.rs:391` — `exp: now + JWT_TTL_SECS` in
+   `issue_jwt_with_google_sub`. The canonical mint for `aud="mcp"`.
+2. `mcp/src/oauth/mod.rs:1075` — `expires_in: JWT_TTL_SECS` in
+   `token_handler`'s `TokenResponse` (advertised TTL on the auth-code
+   exchange). The refresh-grant branch needs the same value.
+3. `mcp/src/oauth/mod.rs:1113` — `cache_minted_token`'s fallback when
+   the JWT's `exp` claim is unparseable: `now + JWT_TTL_SECS`.
+4. `mcp/src/oauth/mod.rs:1124` — same fallback when `exp` claim is
+   missing entirely.
+5. `mcp/src/escrow.rs:59` — `use crate::oauth::{..., JWT_TTL_SECS};`.
+6. `mcp/src/escrow.rs:511` — `expires_in: JWT_TTL_SECS` for the
+   extension-bootstrap response.
+7. `mcp/src/escrow.rs:797` — `exp: now + JWT_TTL_SECS` in extension
+   JWT mint (`aud="extension"`).
+
+Test-only reads (not impl-critical):
+
+- `mcp/tests/oauth_loopback.rs:35,353-360` — uses the constant to
+  assert the cached token's `expires_at` is within `JWT_TTL_SECS` of
+  now. If we change the const at runtime, this test's window assertion
+  still holds because it reads the same import.
+- `core/src/identity/token_store.rs:11` — doc comment reference only.
+
+**Recommendation: Option (b) — process-global `OnceCell<u64>`** seeded
+at startup from env, defaulting to 3600. Rationale:
+
+- Read sites are scattered across `oauth/mod.rs`, `escrow.rs` (with the
+  field literal `JWT_TTL_SECS` baked into doc-comments). Replacing the
+  `pub const` with a `state.jwt_ttl_secs` field (Option a) ripples
+  through `escrow.rs:797` (no `OAuthState` in scope at that mint site —
+  `mint_extension_jwt` takes `&OAuthState` already, so this is
+  tractable but ugly), `cache_minted_token` (takes only `jwt` + `sub`),
+  and every test fixture that reads `JWT_TTL_SECS` as a constant. ~10
+  call-site rewrites.
+- Option (b) keeps the import shape (`use crate::oauth::JWT_TTL_SECS`)
+  — convert from `pub const` to `pub fn jwt_ttl_secs() -> u64` that
+  reads a `static JWT_TTL_OVERRIDE: OnceCell<u64>` and falls back to
+  `3600`. Initialise in `main.rs::run_http` (or `run_stdio`) from the
+  optional env var `MCP_JWT_TTL_SECS`. Zero behavioural change when
+  the env var is absent. Token cache and tests keep reading the
+  function and the value is consistent process-wide.
+- Option (c) — hard-coded dev patch — works for the immediate dev-deploy
+  R1 scenario but loses any "configurable for staging" property and
+  leaves a known-bad value in the binary if anyone reuses it.
+
+**Minimal change** (Option b skeleton):
+
+```rust
+// mcp/src/oauth/mod.rs:58
+use once_cell::sync::OnceCell;
+
+static JWT_TTL_OVERRIDE: OnceCell<u64> = OnceCell::new();
+
+/// Initialise the JWT-TTL override once at startup. Idempotent — second
+/// call is a no-op. Read by `jwt_ttl_secs()`.
+pub fn init_jwt_ttl_secs(seconds: u64) {
+    let _ = JWT_TTL_OVERRIDE.set(seconds);
+}
+
+pub fn jwt_ttl_secs() -> u64 {
+    *JWT_TTL_OVERRIDE.get().unwrap_or(&3600)
+}
+
+#[deprecated = "use jwt_ttl_secs() — preserves const for back-compat reads"]
+pub const JWT_TTL_SECS: u64 = 3600;
+```
+
+Then rewrite the 7 production read sites above to call `jwt_ttl_secs()`
+instead of `JWT_TTL_SECS`. `once_cell` is already in the workspace tree
+(`core/Cargo.toml`). The deprecation hint keeps the test file from
+silently picking up the wrong value until the test is updated; CI
+clippy gate (`-D warnings`) will fail unless the test is also migrated
+— which is the desired behaviour for a constant that no longer
+reflects runtime truth.
+
+### §I.2 — `TokenRequest` struct widening
+
+**Current shape** (`mcp/src/oauth/mod.rs:946-957`):
+
+```rust
+#[derive(Debug, Deserialize)]
+pub struct TokenRequest {
+    pub code: String,
+    pub code_verifier: String,
+    /// `redirect_uri` from the original authorize request. Optional for
+    /// backward compatibility with clients that omit it (legacy webapp,
+    /// integration tests). When present, MUST equal the value bound at
+    /// `/oauth/authorize` time — RFC 6749 §4.1.3 + RFC 7636 §4.4 require this
+    /// equality check to defeat a swap-redirect attack on a leaked code.
+    #[serde(default)]
+    pub redirect_uri: Option<String>,
+}
+```
+
+`code` + `code_verifier` are non-optional today — `serde_json::from_slice`
+or `serde_urlencoded::from_bytes` will fail with HTTP 400 if either is
+missing. Adding refresh requires those to become optional too (a refresh
+grant has neither).
+
+**Content-type dispatch** (`mcp/src/oauth/mod.rs:990-1017`) — verbatim:
+
+```rust
+let ct = headers
+    .get(axum::http::header::CONTENT_TYPE)
+    .and_then(|v| v.to_str().ok())
+    .unwrap_or("application/json")
+    .to_lowercase();
+
+let req: TokenRequest = if ct.starts_with("application/x-www-form-urlencoded") {
+    match serde_urlencoded::from_bytes(&body) {
+        Ok(r) => r,
+        Err(e) => {
+            return oauth_error(
+                StatusCode::BAD_REQUEST,
+                &format!("token request form parse failed: {e}"),
+            );
+        }
+    }
+} else {
+    // JSON (or unknown content-type — JSON is our default).
+    match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => {
+            return oauth_error(
+                StatusCode::BAD_REQUEST,
+                &format!("token request JSON parse failed: {e}"),
+            );
+        }
+    }
+};
+```
+
+**No grant_type branching today.** The handler implicitly assumes
+`authorization_code` and immediately calls `state.codes.lock().pop(&req.code)`
+at `mod.rs:1019-1022`.
+
+**Recommended new shape**:
+
+```rust
+#[derive(Debug, Deserialize)]
+pub struct TokenRequest {
+    /// OAuth 2.1 grant_type. Defaults to `"authorization_code"` for
+    /// legacy clients that omit it (existing `scripts/test-oauth-flow.sh`,
+    /// integration tests, the webapp's first redeem call).
+    #[serde(default = "default_grant_type")]
+    pub grant_type: String,
+    // ── authorization_code branch ────────────────────────────────────
+    #[serde(default)]
+    pub code: Option<String>,
+    #[serde(default)]
+    pub code_verifier: Option<String>,
+    #[serde(default)]
+    pub redirect_uri: Option<String>,
+    // ── refresh_token branch ─────────────────────────────────────────
+    #[serde(default)]
+    pub refresh_token: Option<String>,
+}
+
+fn default_grant_type() -> String { "authorization_code".to_string() }
+```
+
+Then in `token_handler` after parsing, dispatch on `req.grant_type`:
+
+```rust
+match req.grant_type.as_str() {
+    "authorization_code" => {
+        let code = req.code.as_deref().unwrap_or("");
+        let verifier = req.code_verifier.as_deref().unwrap_or("");
+        if code.is_empty() || verifier.is_empty() {
+            return oauth_error(StatusCode::BAD_REQUEST, "invalid_request: code and code_verifier required");
+        }
+        // existing path...
+    }
+    "refresh_token" => {
+        let rt = req.refresh_token.as_deref().unwrap_or("");
+        if rt.is_empty() {
+            // AC13: missing or empty refresh_token → 400 invalid_request.
+            return oauth_error(StatusCode::BAD_REQUEST, "invalid_request: refresh_token required");
+        }
+        return handle_refresh_grant(&state, rt).await;
+    }
+    other => {
+        return oauth_error(StatusCode::BAD_REQUEST,
+            &format!("unsupported_grant_type: {other}"));
+    }
+}
+```
+
+**Reusable 400 builder** — `oauth_error` at `mod.rs:1158`:
+
+```rust
+fn oauth_error(status: StatusCode, msg: &str) -> Response {
+    (status, Json(serde_json::json!({"error": msg}))).into_response()
+}
+```
+
+Existing 400 sites that demonstrate the convention: `mod.rs:496, 502,
+508, 516, 523, 552, 573, 861, 870, 878, 883, 897, 1000, 1011, 1041`.
+Mirror this — `oauth_error(StatusCode::BAD_REQUEST, "invalid_request: ...")`.
+
+**Format note** (RFC 6749 §5.2): a strict OAuth client expects the
+error JSON to use `{"error": "invalid_request", "error_description": "..."}`.
+Today's `oauth_error` flattens both into a single `error` string. The
+existing behaviour is not RFC-compliant but is consistent with the rest
+of the handler — keeping it consistent is the safer choice for V1; a
+follow-up can split the shape.
+
+### §I.3 — `mcp/src/oauth/refresh.rs` module skeleton
+
+**Module-level shape** (recommended public surface):
+
+```rust
+//! Refresh-token rotation. OAuth 2.1 + reuse-detection (D1-D17).
+//!
+//! - Opaque tokens (32 random bytes, URL-safe-base64 on the wire).
+//! - Blake3 hash with per-deploy salt at rest (D2; mirrors `payment::hash_api_key`).
+//! - 1-year rolling TTL, 5s reuse-interval grace, per-grant family_id (UUID).
+//! - BEGIN IMMEDIATE atomic rotation (mirrors `payment::deduct_balance`).
+
+use anyhow::{Context, Result};
+use rusqlite::{params, Connection, OptionalExtension};
+
+pub const REFRESH_TTL_SECS: u64 = 365 * 24 * 3600;     // 1 year (D3)
+pub const REUSE_INTERVAL_SECS: u64 = 5;                 // D5 (Auth0)
+pub const EVICTOR_TICK_SECS: u64 = 3600;                // D7 hourly sweep
+
+/// Newly-minted token, one-shot. `plaintext` is the URL-safe-base64
+/// raw refresh token; surface it on the HTTP response then drop the
+/// struct — there is no way to reconstruct it once `Drop` runs.
+pub struct RefreshToken {
+    pub plaintext: String,
+    pub token_hash: String,        // hex(blake3(salt || raw_bytes))
+    pub family_id: String,         // UUID
+    pub expires_at: u64,           // unix seconds
+}
+
+/// One row in `refresh_tokens`. Used by family-revoke + reuse-detection.
+#[derive(Debug, Clone)]
+pub struct RefreshTokenRecord {
+    pub token_hash: String,
+    pub sub: String,
+    pub google_sub: Option<String>,
+    pub issued_at: u64,
+    pub expires_at: u64,
+    pub revoked: bool,
+    pub rotated_to: Option<String>,
+    pub family_id: String,
+    pub rotated_at: Option<u64>,    // populated when revoked=1
+}
+
+/// Mint a fresh refresh token for the just-redeemed authorization_code.
+/// Generates a new `family_id` (every authorize handshake is its own
+/// device family — D6). Returns the plaintext via `RefreshToken`.
+pub fn mint_for_authorization_code(
+    conn: &Connection,
+    salt: &[u8; 32],
+    sub: &str,
+    google_sub: Option<&str>,
+) -> Result<RefreshToken>;
+
+/// Atomic rotation under BEGIN IMMEDIATE. Behaviours:
+/// - Unknown plaintext       → Err("invalid_grant").
+/// - Expired row             → Err("invalid_grant"), NO family revoke.
+/// - Revoked outside 5s grace → revoke entire family, Err("invalid_grant").
+/// - Revoked within 5s grace  → return the existing successor (idempotent retry).
+/// - Valid row                → mark old revoked + insert new, return new token.
+pub fn rotate(
+    conn: &Connection,
+    salt: &[u8; 32],
+    plaintext: &str,
+) -> Result<(RefreshToken, String /* sub */, Option<String> /* google_sub */)>;
+
+/// Mark every row in `family_id` as revoked. Called by `rotate` when a
+/// reuse-after-grace is detected (D5).
+pub fn family_revoke(conn: &Connection, family_id: &str) -> Result<()>;
+
+/// Idempotent migration. Called once at startup from `main.rs::run_http`
+/// (and any test harness that wants the table).
+pub fn migrate_refresh_tokens(conn: &Connection) -> Result<()>;
+
+/// Delete every row with `expires_at <= now`. Called from the hourly
+/// background evictor. Returns the number of rows removed.
+pub fn evict_expired(conn: &Connection) -> Result<usize>;
+```
+
+**Migration function — mirrors `escrow::migrate_key_escrow_blobs`
+verbatim** (`mcp/src/escrow.rs:113-133`):
+
+```rust
+pub fn migrate_refresh_tokens(conn: &rusqlite::Connection) -> Result<()> {
+    conn.execute_batch(MIGRATION_SQL)
+        .context("create refresh_tokens table")?;
+    Ok(())
+}
+
+pub const MIGRATION_SQL: &str = "CREATE TABLE IF NOT EXISTS refresh_tokens (
+    token_hash   TEXT PRIMARY KEY,
+    sub          TEXT NOT NULL,
+    google_sub   TEXT,
+    issued_at    INTEGER NOT NULL,
+    expires_at   INTEGER NOT NULL,
+    revoked      INTEGER NOT NULL DEFAULT 0,
+    rotated_at   INTEGER,
+    rotated_to   TEXT REFERENCES refresh_tokens(token_hash) ON DELETE SET NULL,
+    family_id    TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_refresh_tokens_family
+    ON refresh_tokens(family_id);
+CREATE INDEX IF NOT EXISTS idx_refresh_tokens_expires_at
+    ON refresh_tokens(expires_at);
+CREATE INDEX IF NOT EXISTS idx_refresh_tokens_sub
+    ON refresh_tokens(sub);";
+```
+
+Notes on the DDL:
+
+- 9 columns total (8 from D-decisions + `rotated_at INTEGER` so the
+  5s reuse-window comparison runs against a stored timestamp, not a
+  computed value). Documented as part of D5 in `decisions.md`; spec
+  author should keep that adjustment visible.
+- `rotated_to` is a self-FK with `ON DELETE SET NULL` so a family
+  cascade-delete (post-eviction) does not orphan a pointer. SQLite
+  enforces FKs only with `PRAGMA foreign_keys=ON`; the connection is
+  already configured for this in `core/src/storage/sqlite.rs:484-487`.
+- `idx_refresh_tokens_family` is the hot path for `family_revoke`
+  (`UPDATE ... WHERE family_id = ?`).
+- `idx_refresh_tokens_expires_at` is the hot path for the hourly
+  evictor (`DELETE WHERE expires_at <= ?`).
+- `idx_refresh_tokens_sub` lets the eventual revocation endpoint
+  (out-of-scope V1, but cheap to index now) list a user's grants.
+
+**Per-function SQL sketches**:
+
+- `mint_for_authorization_code`:
+  ```
+  INSERT INTO refresh_tokens
+    (token_hash, sub, google_sub, issued_at, expires_at, revoked, family_id)
+    VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6)
+  ```
+
+- `rotate` — see §I.5 for the full BEGIN IMMEDIATE walk-through.
+
+- `family_revoke`:
+  ```
+  UPDATE refresh_tokens
+     SET revoked = 1, rotated_at = ?2
+   WHERE family_id = ?1 AND revoked = 0
+  ```
+
+- `evict_expired`:
+  ```
+  DELETE FROM refresh_tokens WHERE expires_at <= ?1
+  ```
+
+### §I.4 — `OAuthState` extension
+
+**Current shape** (`mcp/src/oauth/mod.rs:157-164`):
+
+```rust
+pub struct OAuthState {
+    pending: Mutex<LruCache<String, PendingAuthorize>>,
+    codes: Mutex<LruCache<String, IssuedCode>>,
+    clients: Mutex<LruCache<String, RegisteredClient>>,
+    jwt_encoding_key: EncodingKey,
+    jwt_decoding_key: DecodingKey,
+}
+```
+
+**Recommended additions**:
+
+```rust
+pub struct OAuthState {
+    pending: Mutex<LruCache<String, PendingAuthorize>>,
+    codes: Mutex<LruCache<String, IssuedCode>>,
+    clients: Mutex<LruCache<String, RegisteredClient>>,
+    jwt_encoding_key: EncodingKey,
+    jwt_decoding_key: DecodingKey,
+    // ── NEW for refresh-token rotation ──────────────────────────────
+    /// Shared with `McpState::store` — same `Connection` behind the same
+    /// `Mutex`. Refresh-token rotation runs under BEGIN IMMEDIATE on
+    /// this connection so reads and writes serialise against the other
+    /// `mcp/`-owned tables (`google_identity_links`, `key_escrow_blobs`,
+    /// `payment_events`).
+    pub(crate) refresh_store: Arc<Mutex<rusqlite::Connection>>,
+    /// 32-byte per-deploy salt. Mixed into blake3 before the row lookup
+    /// (`token_hash = hex(blake3(salt || raw_bytes))`) so a snapshot of
+    /// `refresh_tokens` from one deploy cannot be replayed against
+    /// another deploy that knows the same plaintext (D2).
+    pub(crate) refresh_salt: [u8; 32],
+}
+```
+
+**Salt approach precedent** (`mcp/src/payment.rs:737-744`):
+
+```rust
+pub fn hash_api_key(api_key: &str) -> String {
+    blake3::hash(api_key.as_bytes()).to_hex().to_string()
+}
+```
+
+`payment.rs` uses unsalted blake3 because the API-key threat model is
+"server compromise → all keys stolen anyway" — the hash there is just a
+CWE-312 hygiene measure. Refresh tokens are different: they are
+client-presented credentials with a 1-year lifetime. A per-deploy salt
+costs nothing and prevents cross-deploy rainbow-table reuse if a snapshot
+leaks. Stored on `OAuthState`, seeded from env (`MCP_REFRESH_TOKEN_SALT`,
+base64-decoded to ≥32 bytes; if missing, generate fresh on every boot
+and warn — same pattern as `confirmation_token::ConfirmationLedger::new`
+at `confirmation_token.rs:90-105`).
+
+**`OAuthState::new` call sites** (4 in production + test code):
+
+1. `mcp/src/main.rs:791` — production HTTP path:
+   ```rust
+   let oauth_state = Arc::new(oauth::OAuthState::new(&secret));
+   ```
+   Threading: `OAuthState::new` signature widens to
+   `new(secret: &[u8], store: Arc<Mutex<Connection>>, refresh_salt: [u8; 32])`.
+   In `main.rs` `store` already lives inside `state` at the same scope
+   (`state.store` lock is moved by `Arc<McpState>`); the simplest wiring
+   keeps a separate `Arc<Mutex<Connection>>` that BOTH `OAuthState` and
+   `McpState` hold:
+   ```rust
+   let store_arc = Arc::new(std::sync::Mutex::new(SqliteStore::open(...)?));
+   let oauth_state = Arc::new(oauth::OAuthState::new(
+       &secret,
+       store_arc.clone(),
+       load_refresh_salt()?,
+   ));
+   // McpState then takes store_arc.clone() instead of the Mutex<SqliteStore> literal.
+   ```
+   Alternative: lift only the inner `Connection` (since `SqliteStore`
+   exposes `conn() -> &Connection` at `core/src/storage/sqlite.rs:514-517`)
+   — requires a small wrapper because `Connection` is `!Send` and lifetime
+   borrowed-out-of-Mutex is awkward. Prefer the wrapping approach.
+
+2. `mcp/tests/_helpers/mod.rs:111` — test harness:
+   ```rust
+   let oauth_state = Arc::new(OAuthState::new(TEST_JWT_SECRET));
+   ```
+   The `mock_state_with` factory (called one line above) builds the
+   SQLite store; lift its connection out into the same `Arc<Mutex>` so
+   both can share it. A fixed test salt (32 bytes of `0xAB`) keeps test
+   determinism.
+
+3. `mcp/src/oauth/mod.rs:1593` — unit-test `fresh_state()`:
+   ```rust
+   fn fresh_state() -> Arc<OAuthState> {
+       Arc::new(OAuthState::new(TEST_SECRET))
+   }
+   ```
+   Same shape — needs an in-memory SQLite connection. Reuse
+   `rusqlite::Connection::open_in_memory()?` then run
+   `migrate_refresh_tokens` before returning. Existing pattern lives
+   at `core/src/storage/sqlite.rs:504` (`in_memory`).
+
+4. `mcp/src/mcp.rs:1838` — internal test fixture; same treatment as (2).
+
+**Why `Arc<Mutex<Connection>>` not `Arc<Mutex<SqliteStore>>`**: keeps the
+new module from depending on `mnemonic_core::storage::SqliteStore`
+constructors. The `Connection` is the abstraction shared with the
+other `mcp/`-owned tables — `escrow.rs` and `oauth/google.rs` already
+take `&rusqlite::Connection` directly (`escrow.rs:113`,
+`google.rs:340`).
+
+### §I.5 — `BEGIN IMMEDIATE` rotation transaction
+
+**Canonical precedent** (`mcp/src/payment.rs:478-505`,
+`deduct_balance` / `credit_deposit`) — quoted in §H.10 already.
+
+**Adapted for `rotate`**:
+
+```rust
+pub fn rotate(
+    conn: &Connection,
+    salt: &[u8; 32],
+    plaintext: &str,
+) -> Result<(RefreshToken, String, Option<String>)> {
+    let now = now_secs();
+    let presented_hash = hash_refresh_token(salt, plaintext);
+
+    conn.execute("BEGIN IMMEDIATE", [])?;
+
+    // 1. Look up the presented row. BEGIN IMMEDIATE already holds the
+    //    write lock; no concurrent rotation can race past this read.
+    let row: Option<RefreshTokenRecord> = conn.query_row(
+        "SELECT token_hash, sub, google_sub, issued_at, expires_at,
+                revoked, rotated_at, rotated_to, family_id
+           FROM refresh_tokens WHERE token_hash = ?1",
+        params![presented_hash],
+        |r| Ok(RefreshTokenRecord {
+            token_hash: r.get(0)?, sub: r.get(1)?, google_sub: r.get(2)?,
+            issued_at: r.get(3)?, expires_at: r.get(4)?,
+            revoked: r.get::<_, i64>(5)? != 0,
+            rotated_at: r.get(6)?, rotated_to: r.get(7)?, family_id: r.get(8)?,
+        }),
+    ).optional()?;
+
+    let row = match row {
+        Some(r) => r,
+        None => {
+            let _ = conn.execute("ROLLBACK", []);
+            anyhow::bail!("invalid_grant: unknown refresh_token");
+        }
+    };
+
+    // 2. Expired (AC5) — reject, do NOT revoke family.
+    if now > row.expires_at {
+        let _ = conn.execute("ROLLBACK", []);
+        anyhow::bail!("invalid_grant: refresh_token expired");
+    }
+
+    // 3. Revoked branch (AC3 / AC4 / AC12).
+    if row.revoked {
+        let rotated_at = row.rotated_at.unwrap_or(0);
+        if now <= rotated_at + REUSE_INTERVAL_SECS {
+            // AC12: idempotent retry within 5s grace — return the existing
+            // successor pair. Look it up via rotated_to.
+            let successor_hash = row.rotated_to.clone()
+                .ok_or_else(|| anyhow::anyhow!("revoked row missing rotated_to"))?;
+            let successor: RefreshTokenRecord = conn.query_row(
+                "SELECT ... FROM refresh_tokens WHERE token_hash = ?1",
+                params![successor_hash], /* same row shape */)?;
+            conn.execute("COMMIT", [])?;
+            // CAVEAT: we cannot return the plaintext here — it was burned
+            // at the original rotation. The grace-window idempotent retry
+            // semantic is "the request that wins the race gets the new
+            // plaintext; subsequent retries within 5s get the SAME 200
+            // response (re-issued JWT, same `refresh_token` value re-emitted).
+            // Implementation choice: stash the successor plaintext in an
+            // in-memory LRU keyed by old_hash, TTL = REUSE_INTERVAL_SECS.
+            // Falls back to invalid_grant after the LRU drops.
+            // ALTERNATIVE: have rotate return `Err(ReuseRetry)` and let
+            // the handler decide — cleaner, recommended.
+            anyhow::bail!("retry_within_reuse_interval");
+        } else {
+            // AC4: replay outside grace → revoke entire family.
+            family_revoke(conn, &row.family_id)?;
+            conn.execute("COMMIT", [])?;
+            anyhow::bail!("invalid_grant: refresh_token reuse detected; family revoked");
+        }
+    }
+
+    // 4. Happy path — mint new, mark old revoked, INSERT new.
+    let new = mint_refresh_token(salt, &row.sub, row.google_sub.as_deref(),
+                                  &row.family_id, now)?;
+    conn.execute(
+        "UPDATE refresh_tokens
+            SET revoked = 1, rotated_at = ?2, rotated_to = ?3
+          WHERE token_hash = ?1",
+        params![row.token_hash, now, new.token_hash],
+    )?;
+    conn.execute(
+        "INSERT INTO refresh_tokens
+            (token_hash, sub, google_sub, issued_at, expires_at, revoked, family_id)
+            VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6)",
+        params![new.token_hash, row.sub, row.google_sub,
+                now, now + REFRESH_TTL_SECS, row.family_id],
+    )?;
+
+    conn.execute("COMMIT", [])?;
+    Ok((new, row.sub, row.google_sub))
+}
+```
+
+**`!Send` / `.await` discipline**: `Connection` is `!Send`. The handler
+holds the lock through the full BEGIN/COMMIT and DOES NOT `.await`
+during the transaction — exactly matching `payment::deduct_balance` at
+`payment.rs:419-473`. The handler signature stays sync inside the
+locked region:
+
+```rust
+async fn handle_refresh_grant(state: &Arc<OAuthState>, plaintext: &str) -> Response {
+    let result = {
+        // SCOPED guard — drops before the `.await` on response build.
+        let conn = state.refresh_store.lock().expect("refresh store mutex poisoned");
+        refresh::rotate(&conn, &state.refresh_salt, plaintext)
+    };
+    match result {
+        Ok((new_refresh, sub, google_sub)) => {
+            // issue_jwt_with_google_sub is sync; safe to call after drop.
+            let access = match issue_jwt_with_google_sub(state, &sub, google_sub) {
+                Ok(t) => t,
+                Err(e) => return oauth_error(StatusCode::INTERNAL_SERVER_ERROR,
+                                              &format!("JWT issuance failed: {e}")),
+            };
+            let body = serde_json::json!({
+                "access_token": access,
+                "token_type": "Bearer",
+                "expires_in": jwt_ttl_secs(),
+                "refresh_token": new_refresh.plaintext,
+                "scope": "mcp",
+            });
+            (StatusCode::OK, Json(body)).into_response()
+        }
+        Err(e) => oauth_error(StatusCode::UNAUTHORIZED, &format!("invalid_grant: {e}")),
+    }
+}
+```
+
+**No `spawn_blocking` needed.** `grep -rn 'spawn_blocking' mcp/src`
+returns zero hits — the codebase already runs SQLite work synchronously
+inside short-locked scopes. SQLite calls are sub-millisecond on this
+workload; the Tokio reactor stall is acceptable per the existing
+`payment.rs`, `confirmation_token.rs`, `escrow.rs` precedent.
+
+### §I.6 — Background evictor
+
+**Precedent** (`mcp/src/confirmation_token.rs:259-267`) — quoted verbatim:
+
+```rust
+pub fn start_evictor(ledger: Arc<ConfirmationLedger>) -> tokio::task::JoinHandle<()> {
+    let tick = ledger.evict_tick();
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(tick).await;
+            ledger.evict_expired();
+        }
+    })
+}
+```
+
+**Recommended new evictor** in `mcp/src/oauth/refresh.rs`:
+
+```rust
+pub fn start_refresh_evictor(
+    store: Arc<Mutex<rusqlite::Connection>>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let tick = std::time::Duration::from_secs(EVICTOR_TICK_SECS); // 3600s = 1h
+        loop {
+            tokio::time::sleep(tick).await;
+            let result = {
+                let conn = match store.lock() {
+                    Ok(g) => g,
+                    Err(_) => continue, // poisoned — skip this tick
+                };
+                evict_expired(&conn)
+            };
+            match result {
+                Ok(n) if n > 0 => tracing::info!(target: "mnemonic_mcp::oauth::refresh",
+                    "evicted {n} expired refresh-token rows"),
+                Ok(_) => {}
+                Err(e) => tracing::warn!(target: "mnemonic_mcp::oauth::refresh",
+                    "refresh-token evictor failed: {e}"),
+            }
+        }
+    })
+}
+```
+
+**Spawn site** (`mcp/src/main.rs:635` neighbourhood):
+
+```rust
+let _confirmation_evictor = confirmation_token::start_evictor(confirmation_ledger);
+let _refresh_evictor = oauth::refresh::start_refresh_evictor(store_arc.clone()); // NEW
+```
+
+`EVICTOR_TICK_SECS = 3600` matches D7 (hourly). The confirmation-token
+evictor uses 60s because confirmation TTL is 5 min; refresh-token TTL
+is 1 year, so a 1h sweep amortises perfectly.
+
+### §I.7 — Discovery metadata update
+
+**Current** (`mcp/src/oauth/mod.rs:1178-1191`):
+
+```rust
+pub async fn oauth_authorization_server_metadata() -> Response {
+    let body = serde_json::json!({
+        "issuer": SERVER_ORIGIN,
+        "authorization_endpoint": format!("{SERVER_ORIGIN}/oauth/authorize"),
+        "token_endpoint": format!("{SERVER_ORIGIN}/oauth/token"),
+        "registration_endpoint": format!("{SERVER_ORIGIN}/oauth/register"),
+        "response_types_supported": ["code"],
+        "grant_types_supported": ["authorization_code"],
+        "code_challenge_methods_supported": ["S256"],
+        "token_endpoint_auth_methods_supported": ["none"],
+        "scopes_supported": ["mcp"],
+    });
+    (StatusCode::OK, Json(body)).into_response()
+}
+```
+
+**One-line change**:
+
+```rust
+"grant_types_supported": ["authorization_code", "refresh_token"],
+```
+
+Test (`mcp/src/oauth/mod.rs` `mod tests`):
+
+```rust
+#[tokio::test]
+async fn test_discovery_advertises_refresh_token_grant() {
+    let resp = oauth_authorization_server_metadata().await;
+    let bytes = http_body_util::BodyExt::collect(resp.into_body())
+        .await.unwrap().to_bytes();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let grants = body["grant_types_supported"].as_array().unwrap();
+    assert!(grants.iter().any(|g| g == "refresh_token"));
+    assert!(grants.iter().any(|g| g == "authorization_code")); // back-compat
+}
+```
+
+### §I.8 — `TestServerBuilder` extension
+
+**Current builder build()** (`mcp/tests/_helpers/mod.rs:104-126`):
+
+```rust
+pub fn build(self) -> TestServer {
+    let state = mock_state_with(
+        &self.storage_mode,
+        &self.payment_mode,
+        self.sign_memory_cost_micro_usdc,
+    );
+    let oauth_state = Arc::new(OAuthState::new(TEST_JWT_SECRET));
+    let app = Router::new()
+        .route("/mcp", post(mcp_handler))
+        .route("/api/pending/{correlation_id}", get(get_pending_handler))
+        .route("/api/sign-callback", post(sign_callback_handler))
+        .layer(middleware::from_fn_with_state(
+            oauth_state.clone(),
+            oauth::bearer_auth_middleware,
+        ))
+        .with_state(state.clone());
+    TestServer { state, oauth_state, app }
+}
+```
+
+**New builder method + conditional mount**:
+
+```rust
+pub struct TestServerBuilder {
+    storage_mode: String,
+    payment_mode: String,
+    sign_memory_cost_micro_usdc: i64,
+    oauth_token: bool, // NEW
+}
+
+impl TestServerBuilder {
+    pub fn with_oauth_token(mut self, enabled: bool) -> Self {
+        self.oauth_token = enabled;
+        self
+    }
+
+    pub fn build(self) -> TestServer {
+        let state = mock_state_with(/* unchanged */);
+        let oauth_state = Arc::new(OAuthState::new(TEST_JWT_SECRET));
+        // ...
+
+        let mut app = Router::new()
+            .route("/mcp", post(mcp_handler))
+            .route("/api/pending/{correlation_id}", get(get_pending_handler))
+            .route("/api/sign-callback", post(sign_callback_handler))
+            .layer(middleware::from_fn_with_state(
+                oauth_state.clone(),
+                oauth::bearer_auth_middleware,
+            ))
+            .with_state(state.clone());
+
+        // NEW — mount /oauth/token on the SAME tower stack so a test can
+        // hit it via `app.clone().oneshot(...)`. /oauth/token does not need
+        // bearer_auth (URI-allowlisted in production), but adding the
+        // middleware layer is harmless for tests.
+        if self.oauth_token {
+            let oauth_routes = Router::new()
+                .route("/oauth/token", post(oauth::token_handler))
+                .with_state(oauth_state.clone());
+            app = app.merge(oauth_routes);
+        }
+
+        TestServer { state, oauth_state, app }
+    }
+}
+```
+
+`/mcp` is currently mounted at `_helpers/mod.rs:112-120` — copy that
+shape for `/oauth/token` (different `with_state` because the handler
+takes `State<Arc<OAuthState>>` not `State<Arc<McpState>>`).
+
+**One subtlety** — the test harness's `OAuthState::new(TEST_JWT_SECRET)`
+call lives at `_helpers/mod.rs:111`. After §I.4's change to widen the
+signature, this builder must also build an in-memory SQLite connection
+for `refresh_store` (use `rusqlite::Connection::open_in_memory()?` then
+`migrate_refresh_tokens` on it). Test salt = `[0xAB; 32]`.
+
+### §I.9 — Integration test layout
+
+**File**: `mcp/tests/oauth_refresh_e2e.rs` (NEW)
+
+Use the standard `mod _helpers;` pattern (already shared by
+`modes_per_request.rs`). Each test builds a `TestServer` via
+`TestServer::builder().with_oauth_token(true).build()`.
+
+```rust
+mod _helpers;
+use _helpers::TestServer;
+
+// AC1 — authorization_code grant returns refresh_token field.
+#[tokio::test]
+async fn test_authcode_grant_returns_refresh() {
+    let server = TestServer::builder().with_oauth_token(true).build();
+    let (code, verifier) = mint_authcode(&server).await;
+    let resp = post_token(&server, json!({"code": code, "code_verifier": verifier})).await;
+    assert!(resp["refresh_token"].is_string());
+    assert!(resp["access_token"].is_string());
+}
+
+// AC2 — refresh_token grant rotates: new pair, old becomes revoked.
+#[tokio::test]
+async fn test_refresh_grant_returns_new_pair() {
+    let server = TestServer::builder().with_oauth_token(true).build();
+    let (_access, refresh) = bootstrap_oauth(&server).await;
+    let resp = post_token(&server, json!({
+        "grant_type": "refresh_token", "refresh_token": refresh.clone()
+    })).await;
+    let new_refresh = resp["refresh_token"].as_str().unwrap();
+    assert_ne!(new_refresh, refresh);
+    assert!(resp["access_token"].is_string());
+}
+
+// AC3 — old refresh presented outside 5s grace → 401 (after the grace
+// has expired AND the family is not yet revoked, i.e. test sleeps 6s).
+#[tokio::test]
+async fn test_old_refresh_outside_reuse_interval_rejected() {
+    let server = TestServer::builder().with_oauth_token(true).build();
+    let (_a, refresh1) = bootstrap_oauth(&server).await;
+    let _ = rotate(&server, &refresh1).await;
+    tokio::time::sleep(std::time::Duration::from_secs(6)).await;
+    let resp_status = post_token_status(&server, json!({
+        "grant_type": "refresh_token", "refresh_token": refresh1
+    })).await;
+    assert_eq!(resp_status, StatusCode::UNAUTHORIZED);
+}
+
+// AC4 — replay outside grace revokes the entire family. After replay,
+// the NEW refresh token (from the legitimate rotation) is also rejected.
+#[tokio::test]
+async fn test_replay_outside_reuse_revokes_family() {
+    let server = TestServer::builder().with_oauth_token(true).build();
+    let (_a, r1) = bootstrap_oauth(&server).await;
+    let r2 = rotate(&server, &r1).await;
+    tokio::time::sleep(std::time::Duration::from_secs(6)).await;
+    let _ = post_token_status(&server, json!({
+        "grant_type": "refresh_token", "refresh_token": r1
+    })).await; // triggers family revoke
+    let status = post_token_status(&server, json!({
+        "grant_type": "refresh_token", "refresh_token": r2
+    })).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+// AC5 — expired refresh → 401 WITHOUT revoking the family. Use a test
+// helper that directly inserts a row with expires_at in the past.
+#[tokio::test]
+async fn test_expired_refresh_rejected_no_family_revoke() {
+    let server = TestServer::builder().with_oauth_token(true).build();
+    let (plaintext, family_id) = insert_expired_refresh_for_test(&server).await;
+    let status = post_token_status(&server, json!({
+        "grant_type": "refresh_token", "refresh_token": plaintext
+    })).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    // Sibling row in the same family must still be revoked=0.
+    assert!(family_has_unrevoked_rows(&server, &family_id));
+}
+
+// AC6 — rotation extends expires_at by another 1y from now.
+#[tokio::test]
+async fn test_rolling_expires_at_extended() {
+    let server = TestServer::builder().with_oauth_token(true).build();
+    let (_a, r1) = bootstrap_oauth(&server).await;
+    let pre_exp = read_expires_at_for(&server, &r1);
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    let r2 = rotate(&server, &r1).await;
+    let post_exp = read_expires_at_for(&server, &r2);
+    assert!(post_exp >= pre_exp + 1, "rotation must roll expires_at forward");
+}
+
+// AC7 — discovery JSON advertises refresh_token grant.
+#[tokio::test]
+async fn test_discovery_advertises_refresh_grant() {
+    let body = fetch_discovery(&TestServer::builder().build()).await;
+    let grants = body["grant_types_supported"].as_array().unwrap();
+    assert!(grants.iter().any(|g| g == "refresh_token"));
+}
+
+// AC8 — access token shape unchanged. Decode + assert claim set matches
+// the existing Claims struct byte-for-byte; presence of refresh_token
+// in the response must not perturb the JWT.
+#[tokio::test]
+async fn test_access_token_format_unchanged() {
+    let server = TestServer::builder().with_oauth_token(true).build();
+    let (access, _r) = bootstrap_oauth(&server).await;
+    let claims = oauth::verify_jwt(&server.oauth_state, &access).unwrap();
+    assert_eq!(claims.aud, "mcp");
+    assert_eq!(claims.iss, "mcp.mnemonik.xyz");
+}
+
+// AC9 — anonymous recall path still works (refresh-token feature must
+// not affect the allowlisted recall semantics).
+#[tokio::test]
+async fn test_anonymous_recall_unchanged() {
+    let server = TestServer::builder().build(); // no /oauth/token mount
+    let resp = server.call_tool(None, "mnemonic_recall", json!({"query":"x"})).await;
+    assert!(resp.status.is_success());
+}
+
+// AC10 — content-type parity: form-encoded refresh grant works the same
+// as JSON-encoded. Two sub-tests; assert identical wire output.
+#[tokio::test]
+async fn test_refresh_grant_content_type_parity() {
+    let server = TestServer::builder().with_oauth_token(true).build();
+    let (_a, r) = bootstrap_oauth(&server).await;
+    let body_form = format!("grant_type=refresh_token&refresh_token={r}");
+    let resp_form = post_token_raw(&server, "application/x-www-form-urlencoded",
+                                    body_form.into_bytes()).await;
+    assert_eq!(resp_form.status(), StatusCode::OK);
+    // Build a SEPARATE server (the form path consumed the token) and
+    // assert JSON path returns the same shape.
+}
+
+// AC11 — legacy client that omits grant_type AND refresh_token still
+// works (default grant_type = authorization_code).
+#[tokio::test]
+async fn test_back_compat_ignores_refresh_field() {
+    let server = TestServer::builder().with_oauth_token(true).build();
+    let (code, verifier) = mint_authcode(&server).await;
+    let resp = post_token(&server, json!({"code": code, "code_verifier": verifier})).await;
+    assert!(resp["access_token"].is_string());
+}
+
+// AC12 — concurrent rotation within 5s grace is idempotent: 10 parallel
+// requests with the SAME old refresh_token, all within reuse-interval,
+// resolve to the SAME successor access_token / refresh_token pair.
+#[tokio::test]
+async fn test_concurrent_rotation_idempotent_within_reuse() {
+    let server = TestServer::builder().with_oauth_token(true).build();
+    let (_a, r1) = bootstrap_oauth(&server).await;
+    let futs = (0..10).map(|_| rotate(&server, &r1));
+    let results = futures::future::join_all(futs).await;
+    // All 10 must succeed and return the same refresh_token plaintext.
+    let first = results[0].as_ref().unwrap().clone();
+    for r in &results[1..] {
+        assert_eq!(r.as_ref().unwrap(), &first);
+    }
+}
+
+// AC13 — malformed refresh grant (missing refresh_token) → 400
+// invalid_request, NOT 401.
+#[tokio::test]
+async fn test_malformed_refresh_grant_invalid_request() {
+    let server = TestServer::builder().with_oauth_token(true).build();
+    let status = post_token_status(&server, json!({
+        "grant_type": "refresh_token"
+        // refresh_token omitted
+    })).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+```
+
+Helpers (`mod _helpers` extensions) to author:
+
+- `bootstrap_oauth(&server) -> (access, refresh)` — runs the full
+  authorize → token flow once, returning both tokens. Reuses the
+  pattern from `oauth/mod.rs:1986-2030`.
+- `rotate(&server, &refresh) -> String` — POSTs `grant_type=refresh_token`,
+  returns the new refresh plaintext.
+- `post_token`, `post_token_status`, `post_token_raw` — thin wrappers
+  around `app.oneshot` mirroring `_helpers::TestServer::call_tool`.
+- `insert_expired_refresh_for_test(&server) -> (plaintext, family_id)` —
+  uses `server.state.store.lock()` to write a row with `expires_at = 0`
+  bypassing the public mint API.
+
+### §I.10 — Implementation risks
+
+1. **Salt rotation strategy.** Changing `MCP_REFRESH_TOKEN_SALT`
+   invalidates EVERY outstanding refresh token because
+   `hex(blake3(new_salt || raw_bytes))` no longer matches the stored
+   hash. This is the operational equivalent of "rotate the JWT secret":
+   every active client must re-OAuth. Tech-spec should either document
+   the salt as immutable-after-first-boot (recommended) or include a
+   dual-hash window during a known rotation. Generating fresh-on-boot
+   when env is absent (the `confirmation_token` precedent at
+   `confirmation_token.rs:90-105`) is fine for dev but every restart
+   invalidates refresh tokens — not acceptable for production.
+
+2. **`token.json` cache file is out-of-scope (D15) BUT the read path
+   may still need awareness.** `cache_minted_token`
+   (`mcp/src/oauth/mod.rs:1101-1138`) writes ONLY the access token
+   today:
+   ```rust
+   let token = mnemonic_core::identity::TokenJson {
+       jwt: jwt.to_string(),
+       expires_at,
+       sub: sub.to_string(),
+   };
+   ```
+   The cache will continue to be invalidated on every JWT expiry until a
+   future feature wires refresh-token retrieval through it. The tech-spec
+   author can leave this confidently alone — the V1 refresh flow lives
+   entirely server-side and clients (Cursor, VS Code, Claude.ai) manage
+   refresh tokens in their own credential stores via the OAuth response.
+
+3. **`WWW-Authenticate` header on `/mcp` 401s unchanged.**
+   `jsonrpc_unauthorized` at `mcp/src/oauth/mod.rs:1543-1570` always
+   emits `Bearer realm="..." error="invalid_token" ...
+   resource_metadata="..."`. The refresh-token feature does NOT touch
+   this — refresh failures happen at `/oauth/token`, which returns
+   `oauth_error(BAD_REQUEST | UNAUTHORIZED, "...")` (`mod.rs:1158`)
+   with no WWW-Authenticate header. RFC-compliant — WWW-Authenticate
+   is for the protected resource, not for the token endpoint.
+
+4. **`/oauth/*` tower-governor rate-limit applies unchanged.**
+   `mcp/src/main.rs:810-829`: 5 burst + 1 req/s refill per IP. The
+   refresh grant adds traffic at the rate of one POST per access-token
+   expiry per client ≈ 1/hour. Per-IP is fine for that volume; CI runs
+   with many concurrent clients should set `OAUTH_RATELIMIT_DISABLE=1`
+   (already documented at `main.rs:814-830`). No new rate-limit wiring
+   needed.
+
+5. **Existing oauth unit tests — extend, don't shadow.**
+   `mod tests` at `mcp/src/oauth/mod.rs:1572-end` contains
+   `test_token_valid_verifier_returns_jwt` (`:1982`),
+   `test_token_invalid_verifier_401` (`:2033`),
+   `test_token_expired_code_60s_401` (`:2080`) and ~15 more. The
+   refresh-grant tests should live in the SAME `mod tests` (one
+   `#[tokio::test]` per AC) and reuse the existing `fresh_state`,
+   `build_authorize_router`, `post_json` helpers. The
+   `_helpers::TestServer` integration suite covers the cross-handler
+   wiring (refresh-grant → JWT-protected `/mcp` call); unit tests
+   cover the rotation function and dispatch logic in isolation. Do
+   not shadow — extend.
+
+6. **`fresh_state()` upgrade hazard.** Every unit test in
+   `oauth/mod.rs::mod tests` calls `fresh_state()` (`:1592`). After
+   §I.4's signature change, this helper must build an in-memory
+   `Connection` + run `migrate_refresh_tokens` before returning the
+   `OAuthState`. Existing tests that DON'T touch the refresh table
+   still work because the migration is idempotent and the helper now
+   does the extra work transparently. Worth a single explanatory
+   comment so future authors don't strip it as "unused".
+
+7. **5-second reuse-interval test flake risk.** AC3, AC4, and AC5 use
+   `tokio::time::sleep` with real wall-clock — slow CI may push the
+   6-second waits up. Two mitigations:
+   (a) Pull `REUSE_INTERVAL_SECS` into a `&OAuthState` field instead
+   of a module-level const so tests can lower it to 100ms.
+   (b) Use `tokio::time::pause()` + `advance()` to drive deterministic
+   virtual time. Pattern unused in this codebase today; precedent worth
+   adding for this feature.
+   Recommendation: (a) — same shape as `ConfirmationLedger::with_config`
+   at `confirmation_token.rs:96-105` which already exposes `ttl` and
+   `evict_tick` as fields for the same reason.
+
+
