@@ -245,3 +245,32 @@ user's explicit ask). 13 findings (1 critical, 8 major, 4 minor).
   primary. Added Option C (read MCP SDK source).
 - 13 ACs > M threshold (size_check minor): kept as-is; all tightly
   scoped to one endpoint. Acknowledged in interview.yml.
+
+## Task 1: Refresh-token storage module + migration + evictor
+
+**Status:** Done
+**Commits:** `fd73cbe` (initial), `5d51c77` (round-1 fixes), `d324868` (round-2 cleanup)
+**Agent:** task-1-builder
+**Summary:** New `mcp/src/oauth/refresh.rs` with `refresh_tokens` schema + migration, `mint_for_authorization_code`, `family_revoke`, `evict_expired`/`start_evictor`, atomic 6-branch `rotate` under one `BEGIN IMMEDIATE` (D8), and an in-process `ReuseCache` (lru 0.12 + manual TTL). Key invariants: `cache.put` BEFORE `COMMIT` in Branch A (D5, closes CWE-362); `migrate_refresh_tokens` calls `apply_oauth_connection_pragmas` so `foreign_keys=ON` + WAL + `busy_timeout=5000` are enforced on the OAuthState-owned connection per D6; explicit `ROLLBACK` on COMMIT failure (matches `payment.rs:478-505`); `D14` logging surface has zero `token_hash`/plaintext/JWT/salt leakage. Test hook restructure: production cache-put ordering is owned by outer `rotate`; the D5 unit test installs a thread-local race observer that fires between COMMIT and put and asserts the CWE-362 window materializes.
+
+**Deviations:** Branch B' WARN log includes `family_id + sub` (the row IS resolved at B'), going beyond D14's `outcome+remote_addr+request_id+stem` literal field list — accepted by security-auditor-1 + code-reviewer-1 as forensically valuable, not a security regression. Tech-spec D14 wording should be updated to reflect this in a follow-up. Public `OAUTH_CONN_PRAGMAS` const + `apply_oauth_connection_pragmas` helper added so Task 3's `OAuthState::new` can call the helper independently — minor additive surface beyond what the task spec literally listed.
+
+**Reviews:**
+
+*Round 1:*
+- code-reviewer-1: REQUEST_CHANGES — 1 major (D5 debug hook skipped put rather than moving it post-COMMIT) + 3 minor → `logs/working/task-1/code-reviewer-1-round1.json`
+- security-auditor-1: CONDITIONAL PASS — 2 medium (PRAGMA setup; COMMIT-failure ROLLBACK) + 2 minor → `logs/working/task-1/security-auditor-1-round1.json`
+- test-reviewer-1: APPROVE_WITH_MINOR_NOTES — 3 minor (Branch B 1-second-boundary flakiness; Branch C cache-cleanup unverified; evictor timing buffer) → `logs/working/task-1/test-reviewer-1-round1.json`
+
+*Round 2 (after fixes):*
+- code-reviewer-1: APPROVED — F1/F2/F3/F4 all resolved; R1 minor (dead `observed_revoked` flag) and R2 informational (B' field deviation) noted → `logs/working/task-1/code-reviewer-1-round2.json`
+- security-auditor-1: PASS — M1/M2/m2 fixed; m1 accepted; D5 ordering re-verified under restructure → `logs/working/task-1/security-auditor-1-round2.json`
+- test-reviewer-1: APPROVED — M1/M2/M3 resolved; D5 race-observer test now meaningful → `logs/working/task-1/test-reviewer-1-round2.json`
+
+Round-2 R1 cleanup (dead test flag) applied in `d324868`.
+
+**Verification:**
+- `cargo test -p mnemonic-mcp --features test-support --lib refresh::tests` → 12/12 pass
+- `cargo build --workspace` → OK
+- `cargo clippy -p mnemonic-mcp --all-targets --features test-support -- -D warnings` → clean
+- `cargo fmt --all -- --check` → clean
