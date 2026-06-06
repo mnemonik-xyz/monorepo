@@ -94,14 +94,22 @@ revert-the-tag with no data migration to undo.
      (`revoked = 1, rotated_at = now, rotated_to = <new_hash>`); roll
      `expires_at = now + 1y` on the new row. **Insert
      `(access_jwt_string, new_plaintext)` into the LRU pair-cache keyed
-     by `old_token_hash` BEFORE `COMMIT`** while still holding the
-     SQLite writer lock acquired by `BEGIN IMMEDIATE`. `LruCache::put`
-     is infallible (lru crate API; only side effect is evicting the
-     oldest entry if cap reached). The publish ordering is safe by
-     construction: every other writer/reader on this row enters via
-     `BEGIN IMMEDIATE` and therefore blocks on Writer-1's writer lock
-     until COMMIT releases it; by that point the cache entry is already
-     visible. Concurrent rotators on **sibling rows of the same
+     by `old_token_hash` BEFORE `COMMIT`** while Writer-1 still holds
+     the SQLite writer lock acquired by `BEGIN IMMEDIATE`. Concretely:
+     (i) Writer-1 acquires the `Arc<Mutex<Connection>>` Mutex (project
+     existing pattern), (ii) BEGIN IMMEDIATE on the connection, (iii)
+     execute UPDATE/INSERT, (iv) `reuse_cache.put(old_hash, pair)` (own
+     internal mutex; releases immediately after the put), (v) COMMIT,
+     (vi) release the `Connection` Mutex. `LruCache::put` is infallible
+     (lru crate API; only side effect is evicting the oldest entry if
+     cap reached). The publish ordering is safe by construction: every
+     other writer/reader on this row enters via `BEGIN IMMEDIATE` and
+     therefore blocks on Writer-1's `Connection` Mutex — and by
+     extension on Writer-1's SQLite writer-lock release at step (vi);
+     by that point the cache entry was published at step (iv). A
+     `debug_hook_cache_put_after_commit` test (D5 unit tests) flips
+     the order in a debug build and asserts the race materializes,
+     pinning the invariant. Concurrent rotators on **sibling rows of the same
      `family_id`** are blocked by the same writer lock through the
      family-revoke walk in Branch C — see Decision 8. COMMIT.
    - **Branch B** — found, `revoked = 1`, `rotated_at + reuse_interval >
@@ -506,7 +514,13 @@ pub struct OAuthState {
 ## Dependencies
 
 ### New packages
-None. All required crates already live in `mcp/Cargo.toml`.
+- `tracing-test = "0.2"` as `[dev-dependencies]` only — required by the
+  `logging_policy_no_plaintext_no_hash_across_branches` unit test to
+  capture `tracing` output during D14 verification. Not linked into
+  the production binary. Alternative if `tracing-test` is undesirable
+  in the dev tree: use `tracing_subscriber::fmt::layer().with_writer(
+  buffer)` with an existing `tracing_subscriber` dep — chosen NOT to
+  in favor of the more ergonomic `traced_test` macro.
 
 ### Using existing (from project)
 - `rusqlite` — same `Connection` handle as `McpState.store`.
@@ -683,6 +697,7 @@ Three tiers:
 | Cross-table mutex contention (refresh + attestations + escrow) | `Connection` is the project's existing shared mutex pattern — no new contention surface. `cross_table_mutex_no_starvation` integration test asserts no starvation under interleaved load. |
 | Unauthenticated DoS on `/oauth/token` | Existing `tower_governor` per-IP rate limiter applies to `/oauth/*` (per `architecture.md:65` + `patterns.md::OAuth Bearer-auth allowlist`); refresh-grant inherits the limiter, no new wiring. D16 caps the request body field size as a complementary per-request defence. |
 | Salt entropy footgun (32-char ASCII passes 32-byte raw length check) | D2 requires base64url-decode of `MCP_REFRESH_SALT` to yield ≥32 bytes; `.env.example` ships `openssl rand -base64 32` as the recipe. Boot test `oauth::tests::salt_under_32_bytes_aborts_boot` enforces. |
+| Branch E INFO log volume under credential-stuffing | `tower_governor` throttles but does not block repeated attacker attempts; Branch E logs INFO once per attempt with `remote_addr` + `request_id`. Volume scales linearly with attempt rate. Mitigation: operational rule to set tracing-layer rate-limited dedup (e.g. `tracing-subscriber` + `rate-limiter`) at the operator level — not in V1 server code. Documented in `deployment.md` as a tracing-volume tuning note. |
 
 
 ## User-Spec Deviations
@@ -821,12 +836,12 @@ requires.
 
 #### Task 4: `TestServerBuilder::with_oauth_token` + integration test helpers
 - **Description:** Add the `with_oauth_token(bool)` flag and the
-  fixture helpers (`bootstrap_oauth`, `rotate`,
-  `insert_expired_refresh_for_test`, `with_reuse_interval`,
+  fixture helpers (`bootstrap_oauth`, `rotate` returning `(String,
+  String)`, `insert_expired_refresh_for_test`, `with_reuse_interval`,
   `with_evictor_tick`) entirely in this task. No other task touches
   `test_support.rs` afterward.
 - **Skill:** code-writing
-- **Reviewers:** code-reviewer, test-reviewer
+- **Reviewers:** code-reviewer, security-auditor, test-reviewer
 - **Verify-smoke:** `cargo test -p mnemonic-mcp --test _helpers_test_server_mounts_oauth_token` (smoke test added in the same task) confirms the new flag mounts the route.
 - **Files to modify:** `mcp/tests/_helpers/mod.rs`,
   `mcp/src/test_support.rs`.
@@ -842,6 +857,7 @@ requires.
   in <2s.
 - **Skill:** code-writing
 - **Reviewers:** code-reviewer, security-auditor, test-reviewer
+- **Verify-smoke:** `cargo test -p mnemonic-mcp --test oauth_refresh_e2e` — all 15 integration tests (AC1-AC13 + 2 cross-cutting) pass under 2 seconds.
 - **Files to modify:** `mcp/tests/oauth_refresh_e2e.rs` (new).
 - **Files to read:** `work/refresh-token-rotation/user-spec.md`
   AC1–AC13, `work/refresh-token-rotation/code-research.md` §I.9,
