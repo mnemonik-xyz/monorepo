@@ -22,7 +22,8 @@ mnemonik-mcp. Access-token остаётся 1ч (без изменений). Н�
 и инвалидирует старый. В пределах короткого «reuse-interval» (30 секунд)
 повторное предъявление того же refresh-токена возвращает уже-выданную
 descendant-пару — это защищает параллельные клиенты от kill-the-session
-race. Клиенты OAuth 2.1 (Cursor, VS Code Copilot, Claude Desktop)
+race. Клиенты OAuth 2.1 (Cursor, VS Code Copilot, Claude.ai — включая
+работу через Claude Desktop wrapper, общий origin `https://claude.ai`)
 подхватывают это автоматически и тихо ротируют без участия пользователя.
 
 ## Зачем
@@ -225,7 +226,11 @@ revokе другую. Это standard Stripe/Auth0 паттерн.
     работать без OAuth-страницы — refresh-токены подхватываются;
     если только Cursor — Claude.ai не ротирует, переходим к эскалации
     (Anthropic ticket / stateless-auth-rearch путь). Чисто, не требует
-    TLS-interception инфраструктуры.
+    TLS-interception инфраструктуры. **Подготовка**: `JWT_TTL_SECS` —
+    `pub const` в `oauth/mod.rs:58` (плюс `escrow.rs:59` для
+    `aud=extension`), env-override'а сегодня нет — нужен либо
+    одноразовый patch на dev-сборку, либо env-var plumbing как
+    пре-requisite. Tech-spec автор разрулит.
   - **Option C (если Option B затруднён)**: прочитать MCP SDK
     (`@modelcontextprotocol/sdk` для JS-хостов, типизированный OAuth
     helper) и/или открытые куски Claude.ai OAuth client'а. Подтвердить
@@ -394,7 +399,7 @@ R1 mitigation — НЕ в CI (Claude Desktop не headless), но **резуль
 | 3. С новым access-токеном вызвать `tools/call mnemonic_whoami` | cargo test integration | 200 с pubkey, `sub` от первого grant'а (AC8) |
 | 4. Подождать 1ч (или симулировать exp в прошлом) → access протух | cargo test integration | 401 `-32001` на whoami, как сегодня (AC8) |
 | 5. `POST /oauth/token grant_type=refresh_token refresh_token=<saved>` (form-encoded) | cargo test integration | 200 с **новыми** access и refresh; новый `expires_at > старый_expires_at` (AC2, AC6) |
-| 5b. Тот же refresh-grant но с `Content-Type: application/json` (свежая family) | cargo test integration | Тот же 200 с теми же полями — паритет content-type на refresh-ветке (AC10) |
+| 5b. Запустить НОВУЮ authorization_code exchange → получить второй `rt_Y` из независимой семьи → выполнить refresh-grant с `Content-Type: application/json` на `rt_Y` | cargo test integration | 200 с новой парой; паритет content-type на refresh-ветке (AC10). Используется свежий токен, не уже-ротированный `rt_X` из шага 5. |
 | 6. **Сразу** (внутри 5s) повторить шаг 5 с тем же старым `rt_X` | cargo test integration | 200 с **той же** descendant pair что в шаге 5 (reuse-interval, AC12) |
 | 7. tokio::join! двух refresh-grant'ов с одним `rt_X` (квази-параллельно — BEGIN IMMEDIATE сериализует) | cargo test integration | Оба возвращают **идентичные** descendant tokens (второй идёт через reuse-interval lookup, не делает independent rotation); семья НЕ revoked (AC12) |
 | 8. Подождать 6s → повторить шаг 5 со старым `rt_X` | cargo test integration | 400 `invalid_grant` + family revoked (AC3, AC4) |

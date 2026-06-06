@@ -63,7 +63,7 @@ Top-level repo files added during the AI-tools integration phase: `smithery.yaml
 - `uuid` — attestation IDs
 - `jsonwebtoken` — HS256 JWTs for OAuth Bearer tokens (Decision 11 of `mnemonic-integrations`)
 - `tower-http` (CORS) + `tower_governor` (per-IP rate limiter on `/oauth/*`)
-- `serde_urlencoded` — `/oauth/token` accepts both `application/json` and `application/x-www-form-urlencoded` (Cursor/VS Code use form, Claude.ai uses JSON)
+- `serde_urlencoded` — `/oauth/token` accepts both `application/json` and `application/x-www-form-urlencoded` (VS Code and Claude.ai use form-encoded; Cursor uses JSON — per `oauth/mod.rs:975-977`)
 
 ---
 
@@ -90,7 +90,7 @@ Top-level repo files added during the AI-tools integration phase: `smithery.yaml
 
 **Cursor / VS Code / Claude.ai (MCP clients)**
 - Purpose: install the hosted MCP server via deeplink
-- Auth: OAuth 2.1 + PKCE against `mcp.mnemonik.xyz/oauth/*`. Cursor and VS Code POST `/oauth/token` as `application/x-www-form-urlencoded`; Claude.ai POSTs the same endpoint as `application/json` and registers itself via `POST /oauth/register` (RFC 7591 dynamic client registration). Claude.ai POSTs JSON-RPC to apex `/`; Cursor and VS Code POST to `/mcp`. Both paths are wired to the same handler.
+- Auth: OAuth 2.1 + PKCE against `mcp.mnemonik.xyz/oauth/*`. Per `mcp/src/oauth/mod.rs:975-977`: VS Code and Claude.ai POST `/oauth/token` as `application/x-www-form-urlencoded`; Cursor POSTs as `application/json`. Claude.ai also registers itself via `POST /oauth/register` (RFC 7591 dynamic client registration). Claude.ai POSTs JSON-RPC to apex `/`; Cursor and VS Code POST to `/mcp`. Both paths are wired to the same handler.
 
 **OpenAI (optional)**
 - Purpose: higher-quality embeddings
@@ -120,7 +120,7 @@ Rows are tagged with `write_mode` (`local` | `participate`) and `recall` spans b
 
 **Browser-mediated `sign_memory` (Decision 12 of `mnemonic-integrations`):** when the MCP server runs in hosted mode, it does not hold the user's signing key. `tools.rs::sign_memory` builds the canonical-CBOR payload server-side, stores it in `pending::PendingBundles` keyed by a UUID `correlation_id` bound to the OAuth user's pubkey, and returns a JSON-RPC response containing `https://mnemonik.xyz/sign/{correlation_id}` plus an expiry. The webapp `Sign.tsx` page fetches the bundle via `GET /api/pending/{id}` (capability-based auth — possession of the unguessable `correlation_id` is the capability), runs `sign_cose_payload` in WASM against the locally-stored keypair, and POSTs the COSE_Sign1 envelope to `/api/sign-callback`. The server validates the envelope, persists the attestation tagged with `owner_pubkey`, and (in `full` mode) writes Arweave + Solana asynchronously. `PendingBundles` enforces a TTL, an LRU cap, and a per-user-pubkey limit so an authenticated client cannot flood the queue.
 
-**OAuth 2.1 + PKCE flow (Decision 11):** MCP clients hit `GET /.well-known/oauth-authorization-server` for RFC 8414 metadata, then either `POST /oauth/register` (Claude.ai DCR) or use a static client_id. They redirect the user to `GET /oauth/authorize?...` which serves a bootstrap HTML page that loads `/oauth/consent`; the React Consent page asks WASM `sign_challenge` to sign the PKCE-bound challenge bytes with the local Ed25519 key and POSTs the raw signature back to `/oauth/authorize` (raw Ed25519, not COSE_Sign1 — the challenge is a single binary blob, no canonical-CBOR wrapping required). The server verifies the signature against `challenge_bytes`, issues an HS256 JWT (1h TTL, claims bound to the user pubkey via `sub`), and redirects to the client's callback. The token endpoint accepts both `application/json` (Claude.ai) and `application/x-www-form-urlencoded` (Cursor / VS Code).
+**OAuth 2.1 + PKCE flow (Decision 11):** MCP clients hit `GET /.well-known/oauth-authorization-server` for RFC 8414 metadata, then either `POST /oauth/register` (Claude.ai DCR) or use a static client_id. They redirect the user to `GET /oauth/authorize?...` which serves a bootstrap HTML page that loads `/oauth/consent`; the React Consent page asks WASM `sign_challenge` to sign the PKCE-bound challenge bytes with the local Ed25519 key and POSTs the raw signature back to `/oauth/authorize` (raw Ed25519, not COSE_Sign1 — the challenge is a single binary blob, no canonical-CBOR wrapping required). The server verifies the signature against `challenge_bytes`, issues an HS256 JWT (1h TTL, claims bound to the user pubkey via `sub`), and redirects to the client's callback. The token endpoint accepts both `application/json` (Cursor) and `application/x-www-form-urlencoded` (VS Code / Claude.ai) — see `oauth/mod.rs:975-977`.
 
 ---
 

@@ -150,6 +150,13 @@ critical, 8 major, 9 minor) on first pass of the rewritten spec.
   `application/json` (today: Cursor) via existing token_handler dispatch
   at `oauth/mod.rs:982-1078`. Round 2 corrected the inverted client
   attribution that was present in the round-1 draft.
+  **Implementation hook (AC13)**: current `TokenRequest` struct
+  (`oauth/mod.rs:946-957`) has no `grant_type` or `refresh_token`
+  fields. Tech-spec needs to widen the struct AND add post-parse
+  validation: if `grant_type=refresh_token` but `refresh_token` field
+  is absent/empty → return `400 invalid_request`. The branch decision
+  inside `token_handler` keys off `grant_type` after parse, not before
+  (no new content-type dispatch).
 - **D15 (CLI cache out of scope)** — `~/.mnemonic/token.json` not extended
   in V1. Open `work/cli-refresh-token-support/` follow-up if requested.
 - **D16 (No global logout v1)** — accept JWT access trade-off; document.
