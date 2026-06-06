@@ -94,9 +94,16 @@ revert-the-tag with no data migration to undo.
      (`revoked = 1, rotated_at = now, rotated_to = <new_hash>`); roll
      `expires_at = now + 1y` on the new row. **Insert
      `(access_jwt_string, new_plaintext)` into the LRU pair-cache keyed
-     by `old_token_hash` BEFORE `COMMIT`** (ordering point: if `put`
-     fails the transaction rolls back; readers who see `revoked=1` after
-     `COMMIT` are guaranteed to find the cache entry). COMMIT.
+     by `old_token_hash` BEFORE `COMMIT`** while still holding the
+     SQLite writer lock acquired by `BEGIN IMMEDIATE`. `LruCache::put`
+     is infallible (lru crate API; only side effect is evicting the
+     oldest entry if cap reached). The publish ordering is safe by
+     construction: every other writer/reader on this row enters via
+     `BEGIN IMMEDIATE` and therefore blocks on Writer-1's writer lock
+     until COMMIT releases it; by that point the cache entry is already
+     visible. Concurrent rotators on **sibling rows of the same
+     `family_id`** are blocked by the same writer lock through the
+     family-revoke walk in Branch C — see Decision 8. COMMIT.
    - **Branch B** — found, `revoked = 1`, `rotated_at + reuse_interval >
      now`, cache HIT on `old_token_hash`: legitimate network retry
      within reuse window. Return the cached `(access_jwt_string,
@@ -144,8 +151,8 @@ revert-the-tag with no data migration to undo.
 | Resource | Owner (creates) | Consumers | Instance count |
 |----------|----------------|-----------|----------------|
 | `Arc<Mutex<rusqlite::Connection>>` (shared SQLite handle) | `main.rs::run_http` | `McpState.store`, `OAuthState.refresh_store`, refresh evictor task | 1 (singleton — same file as attestations) |
-| `OnceLock<u64>` JWT TTL | `main.rs::run_http` (seeds from `MCP_JWT_TTL_SECS` env, clamped to [60, 604800], default 3600) | `oauth/mod.rs::jwt_ttl_secs()` callers (7 prod sites in `oauth/mod.rs` + `escrow.rs`) | 1 (process-global) |
-| Pair-cache (`refresh::ReuseCache`) holding `(String, String) = (access_jwt, refresh_plaintext)` | `OAuthState::new` | `refresh::rotate` Branch A (put) + Branch B (get) | 1 per server, cap 256 entries, TTL = `reuse_interval` |
+| `OnceLock<u64>` JWT TTL | `main.rs::run_http` (seeds from `MCP_JWT_TTL_SECS` env, clamped to [60, 604800], default 3600) | `oauth/mod.rs::jwt_ttl_secs()` callers (6 read sites: 4 in `oauth/mod.rs:391, 1075, 1113, 1124` + 2 in `escrow.rs:511, 797`; the const declaration at `oauth/mod.rs:58` and the `use` import at `escrow.rs:59` are not read sites) | 1 (process-global) |
+| Pair-cache (`refresh::ReuseCache`) holding `(String, String) = (access_jwt, refresh_plaintext)` | `OAuthState::new` | `refresh::rotate` Branch A (put) + Branch B (get) | 1 per server, cap configurable via `OAuthState.reuse_cache_cap` (default 256 entries), TTL = `reuse_interval` |
 | Refresh-token salt (`Vec<u8>`, ≥32 bytes) | `OAuthState::new` (reads `MCP_REFRESH_SALT` env; **mandatory in hosted mode** — server aborts boot if absent or shorter than 32 bytes) | `refresh::hash_token` | 1 per deploy |
 
 ## Decisions
@@ -164,9 +171,13 @@ UX impact.
 ### Decision 2: Opaque refresh tokens, blake3(salt+plaintext) at rest, salt is a mandatory deploy secret
 **Decision:** Refresh tokens are 32 random bytes, base64url for the wire.
 Stored as `blake3(salt + plaintext)`. Plaintext leaves the server once.
-`MCP_REFRESH_SALT` is a **mandatory** env var on hosted deploys — server
-aborts boot with a clear error if absent or under 32 bytes. **No fallback
-derived from `MCP_JWT_SECRET`.**
+`MCP_REFRESH_SALT` is a **mandatory** env var on hosted deploys —
+server aborts boot with a clear error if absent or under 32 bytes
+**after base64url decoding** (this guards against operators setting
+a 32-character ASCII string with low entropy — `~5` bytes of effective
+entropy — which would pass a raw-byte length check). `.env.example`
+ships a one-liner that mandates `openssl rand -base64 32` as the
+generator. **No fallback derived from `MCP_JWT_SECRET`.**
 **Rationale:** Stripe/Auth0 standard for opaque tokens. Blake3 matches the
 `payment.rs:737-744` precedent — one hashing primitive across the auth
 surface. A deterministic salt fallback would couple two secrets: leak of
@@ -216,7 +227,12 @@ family-revoke.
 - Persist plaintext in DB — defeats hash-at-rest if DB leaks.
 - Cache only access_token, re-mint refresh — same idempotency hole.
 - Encrypt-at-rest plaintext with deploy key — extra surface.
-- Cache-after-COMMIT — re-introduces the CWE-362 race.
+- Cache-after-COMMIT — re-introduces the CWE-362 race because Writer 2
+  could observe `revoked=1` from SQL before Writer 1 publishes to cache.
+- Persist cache pair in SQLite (write the pair into the new row) —
+  defeats hash-at-rest if the DB leaks.
+- Per-token mutex outside SQLite — duplicates what `BEGIN IMMEDIATE`
+  already gives us via the writer lock.
 **User-spec anchor:** `[TECHNICAL]` — required for AC12 under D2 hash-at-rest.
 
 ### Decision 6: `OAuthState` holds `Arc<Mutex<rusqlite::Connection>>` (not `SqliteStore`)
@@ -296,18 +312,25 @@ client-side vs server-side rejection without parsing prose.
 `pub fn jwt_ttl_secs() -> u64` reading `std::sync::OnceLock<u64>` seeded
 once in `run_http` from env (fallback 3600). Seed clamps the value to
 `[60, 604800]` (1 minute to 7 days) — outside-range values clamp + log
-WARN. All 7 production read sites switch to the function.
+WARN. **Parse failures (e.g. `MCP_JWT_TTL_SECS=notanumber` or empty)
+log WARN and fall back to 3600** — explicit non-silent behaviour so
+a deploy-typo on Task 10 doesn't produce a 1h gate mistaken for a 60s
+one. All 6 production read sites switch to the function.
 **Rationale:** R1 verification (Option B) requires deploying to
 `mcp.dev.mnemonik.xyz` with `MCP_JWT_TTL_SECS=60` for 2-minute
 observation. OnceLock keeps the change surgical — every reader uses a
 function call instead of a constant, no `OAuthState` field-threading is
 needed at any reader site, and the single-source pattern matches the
 `confirmation_token::DEFAULT_TTL` style. `OAuthState` IS in scope at
-`escrow.rs:797` (mint_extension_jwt accepts `oauth: &OAuthState`), so
+`escrow.rs:797` (`mint_extension_jwt` accepts `oauth: &OAuthState`), so
 field-threading was technically feasible — the OnceLock was picked for
 the additional reason that it gives a single seed point at startup that
 the operator controls via env, matching how every other deploy knob is
-exposed.
+exposed. **Note on R1 jitter:** combining the 60s clamped TTL with the
+5s `reuse_interval` is intentional — Cursor and Claude.ai are expected
+to refresh many times during the 2-minute observation window. False
+positives (a sluggish client misses the 5s window after expiry) are
+acceptable as "client did not silently refresh" signals for the gate.
 **Alternatives considered:**
 - Field on `OAuthState` — works, but seven call-site signature changes
   and forced state-threading for what is conceptually a process-wide
@@ -330,23 +353,54 @@ flaky and slow. Matches `ConfirmationLedger::with_config`
   rest of the suite avoids.
 - `cfg(test)` constants — would diverge prod and test code paths.
 
-### Decision 14: Logging policy — never log plaintext, never log token_hash
+### Decision 14: Logging policy — never log plaintext, never log token_hash, log forensic fields per branch
 **Decision:** All `tracing` calls in `refresh.rs` and the refresh-branch
-of `token_handler` log `family_id`, `sub`, and outcome only. **No
-plaintext refresh tokens, no `token_hash` values.** Branches C, D, E
-log at WARN (C) / INFO (D, E) to support post-hoc credential-stuffing
-detection without leaking the credential-at-rest.
+of `token_handler` log `outcome` plus a branch-appropriate subset of
+forensic fields:
+- Branches A, B, C, D (token resolved to a row): `family_id` + `sub`
+  + `outcome` + `remote_addr` + `request_id`.
+- Branch B' (cache miss inside window) + Branch E (unknown token):
+  `outcome` + `remote_addr` + `request_id` + length-prefix of presented
+  refresh (first 8 chars of plaintext SHA256 stem — collision-resistant
+  but does NOT match the at-rest hash because the stored hash uses the
+  refresh-salt blake3 keyed-mode; useful only for correlating
+  log-vs-client-side debugging).
+- All branches NEVER log: `token_hash`, full plaintext, JWT
+  `access_token`, salt bytes.
+Branches C, D, E log at WARN (C) / INFO (D, E) so log-volume alarms
+can distinguish potential abuse (C) from operational expiry (D, E).
 **Rationale:** `token_hash` is the credential-at-rest under D2 — logging
-it is equivalent to logging the credential. Family-revoke and expired
-failures still need to be observable for operations, hence the
-sub+family_id tuple.
-**User-spec anchor:** D14 (operational), security audit finding M11.
+it is equivalent to logging the credential. Branch E with no
+`family_id`/`sub` (token unknown) is the credential-stuffing detection
+surface; without `remote_addr` + `request_id` it would be a blind
+spot (CWE-778). The optional SHA256-stem is a one-way digest distinct
+from the at-rest hash so it cannot be cross-correlated to confirm
+hash-at-rest values.
+**Alternatives considered:**
+- Log `token_hash` for forensics — equivalent to logging the
+  credential.
+- Log only `outcome` (no forensic fields) — Branch E becomes blind to
+  credential-stuffing.
+- Log full plaintext on Branch E only — round-trip leaking; rejected
+  even on internal logs.
+**User-spec anchor:** D14 (operational), security audit findings M11 +
+m4 (CWE-778).
 
 ### Decision 15: `Cache-Control: no-store` + `Pragma: no-cache` on every `/oauth/token` response
-**Decision:** Every response from `token_handler` — success and error
-alike — sets `Cache-Control: no-store` and `Pragma: no-cache` headers.
+**Decision:** Every response from `token_handler` — success **and**
+error alike — sets `Cache-Control: no-store` and `Pragma: no-cache`
+headers.
 **Rationale:** RFC 6749 §5.1 explicit requirement. Prevents intermediate
-caches (CDNs, browser caches, proxies) from retaining tokens.
+caches (CDNs, browser caches, proxies) from retaining tokens. Error
+responses included because RFC 6749 §5.2 error responses may still
+disclose grant state (e.g. `unsupported_grant_type` reveals what
+grants the server accepts) that an intermediate cache should not
+retain across users.
+**Alternatives considered:**
+- Headers only on success responses — round-1 security finding noted
+  errors can carry sensitive state too.
+- `Vary: Authorization` instead — does not prevent storage, only
+  varies the cache key; misses the intent.
 **User-spec anchor:** `[TECHNICAL]` security audit finding M14.
 
 ### Decision 16: Refresh-token field max length 4 KiB on the wire
@@ -355,10 +409,21 @@ longer than 4 KiB with `400 invalid_request` BEFORE any hashing or DB
 work. Legitimate refresh tokens are 43 bytes base64url-encoded; 4 KiB is
 ~100× the legitimate length and well below the 1 MiB body cap.
 **Rationale:** Without an early length cap an attacker can POST a giant
-refresh_token and amplify the shared `Mutex<Connection>` contention
+`refresh_token` and amplify the shared `Mutex<Connection>` contention
 (CWE-400). The 1 MiB body cap (`MAX_PEEK_BODY` at `oauth/mod.rs:1307`)
-is too coarse — by the time it fires we've allocated. A field-level cap
-short-circuits at parse time.
+is too coarse — by the time it fires we've already allocated and
+parsed. A field-level cap short-circuits at parse time. Per-IP rate
+limiting on `/oauth/*` is already in place via `tower_governor` (see
+`patterns.md::JSON-RPC notifications return 202` neighbours and
+`architecture.md:65`); the field cap closes the per-request size
+vector that the rate limiter doesn't address.
+**Alternatives considered:**
+- Use the 1 MiB body cap alone — allocations already happened.
+- Cap at 256 bytes (closer to legitimate size) — too aggressive; some
+  OAuth clients embed metadata in refresh tokens up to a few hundred
+  bytes; 4 KiB gives headroom without enabling abuse.
+- No cap, rely on `tower_governor` — rate limiter throttles per IP;
+  does not address per-request size amplification.
 **User-spec anchor:** `[TECHNICAL]` security audit finding M12.
 
 ## Data Models
@@ -508,8 +573,22 @@ Located alongside implementation files; run with `cargo test -p mnemonic-mcp`.
 - `oauth::tests::jwt_ttl_seeded_from_env_and_clamped`
   — Out-of-range values (10s, 9999999s) clamp to [60, 604800] with a
   WARN log.
+- `oauth::tests::jwt_ttl_parse_failure_logs_warn_and_uses_default`
+  — `MCP_JWT_TTL_SECS=notanumber` / empty / whitespace each fall back
+  to 3600 with a WARN log. Closes the silent-default vector for the R1
+  gate (Task 10).
 - `oauth::tests::token_response_emits_no_store_cache_headers`
-  — D15.
+  — D15 (both success and error paths).
+- `oauth::tests::logging_policy_no_plaintext_no_hash_across_branches`
+  — `tracing_test::traced_test` captures `refresh::rotate` output for
+  Branch A, B, B', C, D, E and asserts no log line contains the
+  plaintext, the at-rest `token_hash`, the salt, or the full
+  `access_token`. Forensic fields (`family_id`, `sub`, `remote_addr`,
+  `request_id`) are required to be present where D14 specifies.
+- `oauth::tests::reuse_cache_cap_respects_oauth_state_field`
+  — `ReuseCache::with_cap(10)` constructed via `OAuthState` field;
+  insert 12 entries; assert 10 cap enforced (closes round-2 security
+  m6: cap was hardcoded).
 
 (Dropped from earlier draft: `token_request_deserializes_both_grants`
 and `mint_and_hash_roundtrip` — they tested `serde_derive` / `blake3`
@@ -521,15 +600,21 @@ AC-bound integration tests and the security-relevant tests above.)
 two extras: AC11 "legacy client lifecycle" (a multi-call session where
 the client never reads the `refresh_token` field but still uses
 `/oauth/token` for fresh codes — must keep working); AC12 "10
-parallel rotations" (`tokio::join!` ten copies of the same
-`rt_X`, assert all ten return byte-identical responses — beefier than
-the 2-call sketch). Each test uses
+parallel rotations" (`tokio::join!` ten copies of the same `rt_X`).
+The test helper `rotate(server, refresh) -> (String, String)` returns
+**both** the new `access_token` and the new `refresh_token`; AC12
+asserts ALL ten responses are byte-identical on BOTH fields (closes
+round-2 test-reviewer minor — single-field assertion would silently
+pass a regression where the cache stores only refresh and Branch B
+re-mints the access JWT). Each test uses
 `TestServerBuilder::with_oauth_token(true)` with
 `reuse_interval = Duration::from_millis(100)` to keep wall-clock <2s.
-Tests for AC1–AC13 follow the sketches in `code-research.md §I.9`,
-revised so that AC10 form/JSON parity asserts **structural equality of
-the response body excluding the access_token JWT** (which is
-intentionally non-deterministic on independent rotations).
+AC10 form/JSON parity asserts **structural equality of the response
+body across the two formats** — same field set, same lengths,
+identical metadata — except for the access_token JWT itself which is
+intentionally non-deterministic on **independent** rotations (D5
+makes Branch B idempotent on the SAME rotation, not across distinct
+ones).
 
 Cross-cutting integration tests:
 - `cross_table_mutex_no_starvation` — interleave 50 refresh rotations
@@ -596,6 +681,9 @@ Three tiers:
 | `MCP_JWT_TTL_SECS` operator footgun (e.g., setting 1s) | D12 — value is clamped to `[60, 604800]` at seed time; out-of-range logs WARN and applies clamp. |
 | Rolling deploy with refresh-evictor double-spawn | `start_evictor` spawned once from `main.rs`; rolling deploy replaces the process. |
 | Cross-table mutex contention (refresh + attestations + escrow) | `Connection` is the project's existing shared mutex pattern — no new contention surface. `cross_table_mutex_no_starvation` integration test asserts no starvation under interleaved load. |
+| Unauthenticated DoS on `/oauth/token` | Existing `tower_governor` per-IP rate limiter applies to `/oauth/*` (per `architecture.md:65` + `patterns.md::OAuth Bearer-auth allowlist`); refresh-grant inherits the limiter, no new wiring. D16 caps the request body field size as a complementary per-request defence. |
+| Salt entropy footgun (32-char ASCII passes 32-byte raw length check) | D2 requires base64url-decode of `MCP_REFRESH_SALT` to yield ≥32 bytes; `.env.example` ships `openssl rand -base64 32` as the recipe. Boot test `oauth::tests::salt_under_32_bytes_aborts_boot` enforces. |
+
 
 ## User-Spec Deviations
 
@@ -614,12 +702,15 @@ requires.
   `.env.example` and `deployment.md`. **[PENDING USER APPROVAL]** —
   user-spec approval was granted on the assumption that no new env vars
   were added; flagging explicitly for visibility.
-- **Added: `MCP_JWT_TTL_SECS` optional env var with clamp.** Required
-  prerequisite for the user-spec R1 Option B empirical gate. No effect
-  in prod (default 3600). Clamp `[60, 604800]` prevents operator
-  footgun. Documented in `.env.example` and `deployment.md`.
-  **[PENDING USER APPROVAL]** — user-spec explicitly invited this
-  footnote to be resolved in tech-spec; surfacing for the record.
+- **Added: `MCP_JWT_TTL_SECS` optional env var with clamp + parse-failure
+  fallback.** Required prerequisite for the user-spec R1 Option B
+  empirical gate; the user-spec's R1 footnote (`user-spec.md`
+  line 224-232) explicitly invited this env-plumbing to be resolved
+  in tech-spec. No effect in prod (default 3600). Clamp `[60, 604800]`
+  prevents operator footgun; parse failures log WARN and fall back to
+  3600. Documented in `.env.example` and `deployment.md`.
+  **[PENDING USER APPROVAL]** — surfacing for the record so the user
+  is aware a new env var has been introduced.
 
 ## Acceptance Criteria
 
@@ -639,8 +730,22 @@ requires.
       (D14).
 - [ ] Каждый `/oauth/token` response (success И error) несёт
       `Cache-Control: no-store` + `Pragma: no-cache` (D15).
-- [ ] Боот сервера с пустым или коротким `MCP_REFRESH_SALT` падает с
-      понятной ошибкой (D2 + `oauth::tests::salt_*_aborts_boot`).
+- [ ] Боот сервера с пустым или коротким `MCP_REFRESH_SALT` (после
+      base64url decode) падает с понятной ошибкой (D2 +
+      `oauth::tests::salt_*_aborts_boot`).
+- [ ] `refresh_token` поле длиннее 4 KiB на refresh-grant возвращает
+      `400 invalid_request` ДО хеширования / DB запроса (D16 +
+      `oauth::tests::refresh_token_too_long_returns_invalid_request`).
+- [ ] `/oauth/*` rate-limit активен (`tower_governor` уже стоит на
+      этом scope per `architecture.md:65`); no new wiring required by
+      this feature. Существующий тест поведения rate-limiter'а не
+      затронут.
+- [ ] V1 limitation accepted: refresh-grant **не валидирует**
+      `client_id` поле против записи в `refresh_tokens`. Допустимо
+      потому что server использует public-clients model
+      (`token_endpoint_auth_methods_supported: ["none"]` в discovery,
+      см. `oauth/mod.rs:1187`). Tightening to per-client binding —
+      follow-up feature если confidential clients добавятся.
 - [ ] Нет регрессий в `oauth/mod.rs:2022-2099` area +
       `mcp/tests/auth_allowlist.rs` + `mcp/tests/anonymous_recall.rs`.
 - [ ] R1 pre-ship gate (Task 10) — Claude.ai продолжает работать с
@@ -654,23 +759,33 @@ requires.
 - **Description:** Implement `mcp/src/oauth/refresh.rs` per the
   Architecture and Decisions sections — storage CRUD, BEGIN IMMEDIATE
   rotation transaction with all branches (A, B, B', C, D, E), pair
-  LRU, migration, evictor. Wires nothing yet; just the module.
+  LRU, migration, evictor. Wires nothing yet; just the module. **Does
+  NOT modify `oauth/mod.rs`** — the `pub mod refresh;` declaration is
+  in Task 2 alongside the other `oauth/mod.rs` edits, so Wave 1 has
+  zero file collisions.
 - **Skill:** code-writing
 - **Reviewers:** code-reviewer, security-auditor, test-reviewer
 - **Verify-smoke:** `cargo test -p mnemonic-mcp refresh::tests` —
   all listed unit tests under Testing Strategy → Unit tests pass.
-- **Files to modify:** `mcp/src/oauth/refresh.rs` (new),
-  `mcp/src/oauth/mod.rs` (`pub mod refresh;` declaration line only).
+  (Module is reachable in tests via `mnemonic_mcp::oauth::refresh::*`
+  even before the `pub mod refresh;` line is added — Cargo
+  auto-discovers the file under `oauth/`, and the module is reachable
+  for tests via the test-binary; integration with prod code happens
+  in Task 2's `pub mod refresh;` add.)
+- **Files to modify:** `mcp/src/oauth/refresh.rs` (new).
 - **Files to read:** `mcp/src/escrow.rs`, `mcp/src/payment.rs`,
   `mcp/src/confirmation_token.rs`,
   `work/refresh-token-rotation/code-research.md` §I.3, §I.5, §I.6.
 
-#### Task 2: `JWT_TTL_SECS` env-plumbing via `OnceLock`
+#### Task 2: `JWT_TTL_SECS` env-plumbing via `OnceLock` + `pub mod refresh;`
 - **Description:** Replace the constant with a function reading
   `OnceLock<u64>` seeded in `run_http` from `MCP_JWT_TTL_SECS` env
-  (clamp + WARN on out-of-range). Switch all 7 production read sites
-  to the new function. Add the env var to `.env.example` and the
-  deployment doc.
+  (clamp + WARN on out-of-range or parse failure; fall back to 3600).
+  Switch all 6 production read sites to the new function. Add the env
+  var to `.env.example` and the deployment doc. **Also adds the
+  `pub mod refresh;` declaration in `oauth/mod.rs`** so Task 1's
+  module becomes reachable from prod code (collision-free with
+  Task 1 because Task 1 only creates the new file).
 - **Skill:** code-writing
 - **Reviewers:** code-reviewer, security-auditor, test-reviewer
 - **Verify-smoke:** `MCP_JWT_TTL_SECS=60 cargo run -p mnemonic-mcp -- --transport http --port 3000` boots cleanly and `cargo test -p mnemonic-mcp jwt_ttl_seeded_from_env_and_clamped` passes.
