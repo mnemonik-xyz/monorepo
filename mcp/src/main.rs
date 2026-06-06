@@ -788,6 +788,12 @@ async fn run_http(
 
     // ── OAuth state + JWT secret (Decisions 9 + 11) ──────────────────────────
     let secret = load_jwt_secret()?;
+    // Seed the process-global JWT TTL OnceLock from `MCP_JWT_TTL_SECS`
+    // (Decision 12, refresh-token-rotation). Runs BEFORE OAuthState::new
+    // so every reader observes the seeded value. Stdio transport never
+    // reaches this path; the OnceLock's safe default (3600s) keeps
+    // `jwt_ttl_secs()` correct there too.
+    oauth::seed_jwt_ttl_from_env();
     let oauth_state = Arc::new(oauth::OAuthState::new(&secret));
     tracing::info!(
         "OAuth state initialized (LRU cap {})",

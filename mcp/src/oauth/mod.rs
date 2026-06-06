@@ -32,7 +32,7 @@ pub mod google_jwks;
 pub mod refresh;
 
 use std::num::NonZeroUsize;
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::{
@@ -55,8 +55,98 @@ use std::sync::Arc;
 pub const JWT_ISSUER: &str = "mcp.mnemonik.xyz";
 /// JWT audience — fixed, validated on every verify.
 pub const JWT_AUDIENCE: &str = "mcp";
-/// JWT TTL: 1 hour per Decision 11.
-pub const JWT_TTL_SECS: u64 = 3600;
+/// JWT TTL default (1 hour, Decision 11) — applied when `MCP_JWT_TTL_SECS`
+/// is unset, unparseable, empty, or whitespace.
+pub const JWT_TTL_DEFAULT_SECS: u64 = 3600;
+/// Lower clamp on `MCP_JWT_TTL_SECS` (Decision 12 — refresh-token-rotation
+/// tech-spec). 60s is the minimum usable for the R1 pre-ship empirical gate
+/// (Task 10) and avoids the "MCP_JWT_TTL_SECS=1" operator footgun.
+pub const JWT_TTL_MIN_SECS: u64 = 60;
+/// Upper clamp on `MCP_JWT_TTL_SECS` (Decision 12). 7 days — a soft cap
+/// that keeps long-lived tokens off the wire without forbidding legitimate
+/// extended sessions.
+pub const JWT_TTL_MAX_SECS: u64 = 604_800;
+
+/// Process-global JWT TTL, seeded once at startup by [`seed_jwt_ttl_from_env`]
+/// (called inside `main::run_http`). Decision 12 mandates `std::sync::OnceLock`
+/// — do NOT swap in `once_cell::sync::OnceCell` (that crate is not in the
+/// project's dependency surface).
+static JWT_TTL: OnceLock<u64> = OnceLock::new();
+
+/// Returns the effective JWT access-token TTL in seconds. Reads the
+/// `OnceLock` seeded by [`seed_jwt_ttl_from_env`]; if the lock was never
+/// seeded (e.g. stdio transport, which skips `run_http`, or a test that
+/// imported this module without booting the HTTP stack) falls back to
+/// [`JWT_TTL_DEFAULT_SECS`] so every reader is safe pre-seed.
+pub fn jwt_ttl_secs() -> u64 {
+    *JWT_TTL.get().unwrap_or(&JWT_TTL_DEFAULT_SECS)
+}
+
+/// Seeds [`JWT_TTL`] from the `MCP_JWT_TTL_SECS` env var (clamp + parse
+/// failure behaviour documented on [`compute_jwt_ttl_from_env_str`]). Idempotent
+/// — calling more than once is a no-op (later calls silently lose the race so
+/// tests can re-run the seed without panicking).
+pub fn seed_jwt_ttl_from_env() {
+    let raw = std::env::var("MCP_JWT_TTL_SECS").ok();
+    let value = compute_jwt_ttl_from_env_str(raw.as_deref());
+    let _ = JWT_TTL.set(value);
+    tracing::info!(
+        target: "mnemonic_mcp::oauth",
+        "JWT access-token TTL seeded to {value}s (MCP_JWT_TTL_SECS={})",
+        raw.as_deref().unwrap_or("<unset>")
+    );
+}
+
+/// Pure helper — parses an optional `MCP_JWT_TTL_SECS` string, applies the
+/// clamp `[JWT_TTL_MIN_SECS, JWT_TTL_MAX_SECS]`, emits a WARN on
+/// clamp / parse failure, and returns the resolved value. Public to the
+/// module so `seed_jwt_ttl_from_env` and the unit tests share one
+/// codepath — the tests exercise this helper directly so they do NOT
+/// pollute the process-global `OnceLock` (test-isolation hint from the
+/// task spec).
+///
+/// Defaults to [`JWT_TTL_DEFAULT_SECS`] on `None`, empty, whitespace, or
+/// parse failure. The non-silent WARN closes the silent-default vector
+/// for the Task 10 R1 gate (a deploy-typo must be loud).
+pub(crate) fn compute_jwt_ttl_from_env_str(raw: Option<&str>) -> u64 {
+    let Some(s) = raw else {
+        return JWT_TTL_DEFAULT_SECS;
+    };
+    let trimmed = s.trim();
+    if trimmed.is_empty() {
+        tracing::warn!(
+            target: "mnemonic_mcp::oauth",
+            "MCP_JWT_TTL_SECS is empty / whitespace-only; falling back to default {JWT_TTL_DEFAULT_SECS}s"
+        );
+        return JWT_TTL_DEFAULT_SECS;
+    }
+    match trimmed.parse::<u64>() {
+        Ok(parsed) => {
+            if parsed < JWT_TTL_MIN_SECS {
+                tracing::warn!(
+                    target: "mnemonic_mcp::oauth",
+                    "MCP_JWT_TTL_SECS={parsed} below minimum {JWT_TTL_MIN_SECS}s; clamped to {JWT_TTL_MIN_SECS}"
+                );
+                JWT_TTL_MIN_SECS
+            } else if parsed > JWT_TTL_MAX_SECS {
+                tracing::warn!(
+                    target: "mnemonic_mcp::oauth",
+                    "MCP_JWT_TTL_SECS={parsed} above maximum {JWT_TTL_MAX_SECS}s; clamped to {JWT_TTL_MAX_SECS}"
+                );
+                JWT_TTL_MAX_SECS
+            } else {
+                parsed
+            }
+        }
+        Err(e) => {
+            tracing::warn!(
+                target: "mnemonic_mcp::oauth",
+                "MCP_JWT_TTL_SECS={trimmed:?} failed to parse as u64 ({e}); falling back to default {JWT_TTL_DEFAULT_SECS}s"
+            );
+            JWT_TTL_DEFAULT_SECS
+        }
+    }
+}
 /// Pending-state TTL: 60s per Decision 10. Consumed by the consent-page
 /// bootstrap endpoint (`GET /oauth/authorize`) when inserting a fresh challenge.
 pub const STATE_TTL_SECS: u64 = 60;
@@ -389,7 +479,7 @@ pub fn issue_jwt_with_google_sub(
         aud: JWT_AUDIENCE.to_string(),
         sub: sub.to_string(),
         iat: now,
-        exp: now + JWT_TTL_SECS,
+        exp: now + jwt_ttl_secs(),
         jti: uuid::Uuid::new_v4().to_string(),
         google_sub,
     };
@@ -1073,7 +1163,7 @@ pub async fn token_handler(
     let body = TokenResponse {
         access_token: token,
         token_type: "Bearer".to_string(),
-        expires_in: JWT_TTL_SECS,
+        expires_in: jwt_ttl_secs(),
         scope: "mcp".to_string(),
     };
     (StatusCode::OK, Json(body)).into_response()
@@ -1111,7 +1201,7 @@ pub fn cache_minted_token(jwt: &str, sub: &str) {
                     target: "mnemonic_mcp::oauth",
                     "JWT exp {exp} out of chrono range; falling back to now+TTL"
                 );
-                (chrono::Utc::now() + chrono::Duration::seconds(JWT_TTL_SECS as i64)).to_rfc3339()
+                (chrono::Utc::now() + chrono::Duration::seconds(jwt_ttl_secs() as i64)).to_rfc3339()
             }
         },
         None => {
@@ -1122,7 +1212,7 @@ pub fn cache_minted_token(jwt: &str, sub: &str) {
                 target: "mnemonic_mcp::oauth",
                 "could not extract exp from minted JWT; falling back to now+TTL"
             );
-            (chrono::Utc::now() + chrono::Duration::seconds(JWT_TTL_SECS as i64)).to_rfc3339()
+            (chrono::Utc::now() + chrono::Duration::seconds(jwt_ttl_secs() as i64)).to_rfc3339()
         }
     };
     let token = mnemonic_core::identity::TokenJson {
@@ -3069,5 +3159,59 @@ mod tests {
             StatusCode::UNAUTHORIZED,
             "code must be single-use even after a 400 mismatch, got body={body3}"
         );
+    }
+
+    // ── Decision 12 — MCP_JWT_TTL_SECS env-plumbing ──────────────────────────
+    // Both tests exercise the pure helper `compute_jwt_ttl_from_env_str` so
+    // they never seed the process-global `JWT_TTL` OnceLock — running them
+    // in parallel with other tests (or one another) cannot pollute the
+    // shared static.
+
+    #[tracing_test::traced_test]
+    #[test]
+    fn jwt_ttl_seeded_from_env_and_clamped() {
+        // Below-min clamp: `10` → `JWT_TTL_MIN_SECS` (60).
+        assert_eq!(compute_jwt_ttl_from_env_str(Some("10")), JWT_TTL_MIN_SECS);
+        assert!(logs_contain(
+            "MCP_JWT_TTL_SECS=10 below minimum 60s; clamped to 60"
+        ));
+        // Above-max clamp: `9999999` → `JWT_TTL_MAX_SECS` (604_800).
+        assert_eq!(
+            compute_jwt_ttl_from_env_str(Some("9999999")),
+            JWT_TTL_MAX_SECS
+        );
+        assert!(logs_contain(
+            "MCP_JWT_TTL_SECS=9999999 above maximum 604800s; clamped to 604800"
+        ));
+        // In-range passthrough: `3600` → `3600` (the legacy const value;
+        // guarantees the env-unset path stays byte-identical to the prior
+        // const so existing OAuth flows do not regress).
+        assert_eq!(compute_jwt_ttl_from_env_str(Some("3600")), 3600);
+    }
+
+    #[tracing_test::traced_test]
+    #[test]
+    fn jwt_ttl_parse_failure_logs_warn_and_uses_default() {
+        // Non-numeric: must NOT silently default — operator typo on the
+        // Task 10 R1 gate would otherwise turn a 60s observation window
+        // into a 1h one. WARN log is the loud-failure contract.
+        assert_eq!(
+            compute_jwt_ttl_from_env_str(Some("notanumber")),
+            JWT_TTL_DEFAULT_SECS
+        );
+        assert!(logs_contain(
+            "MCP_JWT_TTL_SECS=\"notanumber\" failed to parse as u64"
+        ));
+        // Empty string and whitespace-only get the same loud treatment.
+        assert_eq!(compute_jwt_ttl_from_env_str(Some("")), JWT_TTL_DEFAULT_SECS);
+        assert!(logs_contain("MCP_JWT_TTL_SECS is empty / whitespace-only"));
+        assert_eq!(
+            compute_jwt_ttl_from_env_str(Some("   ")),
+            JWT_TTL_DEFAULT_SECS
+        );
+        // Sanity-check the silent path: env wholly unset (None) returns
+        // the default without emitting a WARN — only the explicit
+        // misconfiguration cases above are loud.
+        assert_eq!(compute_jwt_ttl_from_env_str(None), JWT_TTL_DEFAULT_SECS);
     }
 }

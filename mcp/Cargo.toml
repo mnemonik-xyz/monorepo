@@ -231,6 +231,11 @@ required-features = ["test-support"]
 [dev-dependencies]
 tempfile = "3"
 httpmock = "0.8"
+# `#[traced_test]` macro + `logs_contain` helper used by the WARN-log
+# assertions in oauth::tests::jwt_ttl_* (Task 2, refresh-token-rotation).
+# Tech-spec Dependencies list it; landing here lets Task 3
+# (logging_policy WARN assertions) reuse the same dev-dep.
+tracing-test = "0.2"
 # regex — used by `_helpers/delivery_harness.rs` to match any Arweave GET
 # path (the arlocal write path self-mints the tx_id from a PRNG, so the
 # test can't pre-register a specific path).

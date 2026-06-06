@@ -56,6 +56,7 @@ Variables for `mcp/` (set by user):
 | `MCP_HTTP_PORT` | `3000` | HTTP transport port |
 | `PAYMENT_MODE` | `none` | `none`, `balance`, `x402`, `both` |
 | `MCP_JWT_SECRET` | — | HS256 secret for OAuth Bearer JWTs (required in hosted mode; ≥32 random bytes — `openssl rand -base64 32`) |
+| `MCP_JWT_TTL_SECS` | `3600` | Optional access-token TTL override. Clamped to `[60, 604800]` (1 min – 7 days) at startup; out-of-range, empty, or unparseable values WARN-log and fall back to the clamp / default. Set to `60` on `mcp.dev.mnemonik.xyz` for the R1 empirical gate; leave unset in prod (`refresh-token-rotation` Decision 12). |
 | `MCP_PUBLIC_BASE_URL` | — | Public origin advertised in OAuth metadata + `/sign/{id}` redirect (e.g. `https://mcp.mnemonik.xyz`) |
 | `OAUTH_RATELIMIT_DISABLE` | `0` | Set to `1` only in CI / Playwright runs to bypass the `tower_governor` per-IP limiter on `/oauth/*` |
 
@@ -272,6 +273,20 @@ TTL, claims bound to user pubkey). Generate once on the VPS:
 
 ```bash
 echo "MCP_JWT_SECRET=$(openssl rand -base64 32)" >> /home/claude/mcp.env
+```
+
+The same env file accepts an optional **`MCP_JWT_TTL_SECS`** override
+(Decision 12 of the `refresh-token-rotation` tech-spec). The server clamps
+the value to `[60, 604800]` at startup and WARN-logs on out-of-range,
+empty, or unparseable input. Production leaves it unset (3600s default);
+the dev subdomain `mcp.dev.mnemonik.xyz` sets it to `60` for the Task 10
+R1 empirical gate so the 2-minute parallel Cursor + Claude.ai observation
+window can watch an expiry fire:
+
+```bash
+# Prod (mcp.mnemonik.xyz): unset — the 3600s default applies.
+# Dev (mcp.dev.mnemonik.xyz):
+echo "MCP_JWT_TTL_SECS=60" >> /home/claude/mcp.env
 ```
 
 Per Deviation 7 of the same tech-spec, `MNEMONIC_KEYPAIR_PATH` is **no
