@@ -29,6 +29,7 @@
 // `GOOGLE_OAUTH_CLIENT_ID` is unset (handlers return 404).
 pub mod google;
 pub mod google_jwks;
+pub mod refresh;
 
 use std::num::NonZeroUsize;
 use std::sync::Mutex;
