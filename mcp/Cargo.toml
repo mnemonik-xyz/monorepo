@@ -228,6 +228,17 @@ name = "sign_memory_softfall"
 path = "tests/sign_memory_softfall.rs"
 required-features = ["test-support"]
 
+# Refresh-token-rotation Task 4 — smoke tests for the `_helpers/mod.rs`
+# `TestServerBuilder::with_oauth_token` flag and fixture helpers
+# (`bootstrap_oauth`, `rotate`, `insert_expired_refresh_for_test`,
+# `family_has_unrevoked_rows`). Pulls `_helpers` via `#[path]` so the smoke
+# binary is its own Cargo target — keeps the assertions from being
+# duplicated into every consumer of `_helpers`.
+[[test]]
+name = "helpers_smoke"
+path = "tests/helpers_smoke.rs"
+required-features = ["test-support"]
+
 [dev-dependencies]
 tempfile = "3"
 httpmock = "0.8"
