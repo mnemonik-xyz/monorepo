@@ -56,10 +56,12 @@ revert-the-tag with no data migration to undo.
   `jwt_ttl_secs()` reading `OnceLock<u64>` seeded from
   `MCP_JWT_TTL_SECS` env var.
 - **`mcp/src/main.rs` (EDIT)** — `run_http` validates `MCP_REFRESH_SALT`
-  presence + minimum length, seeds the `OnceLock<u64>`, opens the shared
-  `Connection`, threads `Arc<Mutex<Connection>>` to `OAuthState::new`,
-  calls `refresh::migrate_refresh_tokens`, spawns
-  `refresh::start_evictor`.
+  presence + minimum-decoded-length, seeds the `OnceLock<u64>`, opens a
+  **second** `rusqlite::Connection` on the same DB path as McpState.store
+  (project default `~/.mnemonic/attestations.db` per `DATABASE_PATH` env),
+  hands it to `OAuthState::new` as `Arc<Mutex<Connection>>`, calls
+  `refresh::migrate_refresh_tokens` on the new Connection, spawns
+  `refresh::start_evictor`. McpState.store layout is **not** changed.
 - **`mcp/tests/_helpers/mod.rs` + `mcp/src/test_support.rs` (EDIT)** —
   `TestServerBuilder::with_oauth_token(bool)` mounts `/oauth/token` in
   the same tower stack as `/mcp`. All fixture helpers
@@ -158,7 +160,7 @@ revert-the-tag with no data migration to undo.
 
 | Resource | Owner (creates) | Consumers | Instance count |
 |----------|----------------|-----------|----------------|
-| `Arc<Mutex<rusqlite::Connection>>` (shared SQLite handle) | `main.rs::run_http` | `McpState.store`, `OAuthState.refresh_store`, refresh evictor task | 1 (singleton — same file as attestations) |
+| `Arc<Mutex<rusqlite::Connection>>` (OAuthState-owned, second connection on the same DB file) | `OAuthState::new` (called from `main.rs::run_http`) | `OAuthState.refresh_store`, refresh evictor task | 1 per server (second physical Connection on the same SQLite file as `McpState.store`; WAL mode serializes concurrent writers via SQLite's own lock) |
 | `OnceLock<u64>` JWT TTL | `main.rs::run_http` (seeds from `MCP_JWT_TTL_SECS` env, clamped to [60, 604800], default 3600) | `oauth/mod.rs::jwt_ttl_secs()` callers (6 read sites: 4 in `oauth/mod.rs:391, 1075, 1113, 1124` + 2 in `escrow.rs:511, 797`; the const declaration at `oauth/mod.rs:58` and the `use` import at `escrow.rs:59` are not read sites) | 1 (process-global) |
 | Pair-cache (`refresh::ReuseCache`) holding `(String, String) = (access_jwt, refresh_plaintext)` | `OAuthState::new` | `refresh::rotate` Branch A (put) + Branch B (get) | 1 per server, cap configurable via `OAuthState.reuse_cache_cap` (default 256 entries), TTL = `reuse_interval` |
 | Refresh-token salt (`Vec<u8>`, ≥32 bytes) | `OAuthState::new` (reads `MCP_REFRESH_SALT` env; **mandatory in hosted mode** — server aborts boot if absent or shorter than 32 bytes) | `refresh::hash_token` | 1 per deploy |
@@ -243,11 +245,37 @@ family-revoke.
   already gives us via the writer lock.
 **User-spec anchor:** `[TECHNICAL]` — required for AC12 under D2 hash-at-rest.
 
-### Decision 6: `OAuthState` holds `Arc<Mutex<rusqlite::Connection>>` (not `SqliteStore`)
-**Decision:** `OAuthState::new` accepts `Arc<Mutex<Connection>>` directly;
-shared with `McpState.store`.
-**Rationale:** Matches `escrow.rs:113` and `oauth/google.rs:340` precedent.
-Avoids a new wrapper type.
+### Decision 6: `OAuthState` opens a SECOND `Arc<Mutex<rusqlite::Connection>>` on the same SQLite file
+**Decision:** `OAuthState::new` opens its **own** `rusqlite::Connection` on
+the same path as `McpState.store` (read from `DATABASE_PATH` env, project
+default `~/.mnemonic/attestations.db`) and stores it as `Arc<Mutex<
+Connection>>`. The two connections see the same data file; SQLite WAL
+mode supports multiple concurrent connections to one file with built-in
+serialization on writer locks. **No refactoring of `McpState.store`**
+(`std::sync::Mutex<SqliteStore>`) is required. The existing
+`Mutex<SqliteStore>` keeps owning attestation reads/writes; the new
+`Arc<Mutex<Connection>>` in `OAuthState` owns refresh-token
+reads/writes. Both go to the same physical file.
+**Rationale:** Round-1 reality-checker correctly flagged that the
+originally-claimed "share Connection from McpState.store" plan was
+fabricated — `escrow.rs:113` is `migrate_key_escrow_blobs(conn:
+&Connection)`, a per-call parameter, not a stored handle. Extracting
+Connection out of `Mutex<SqliteStore>` requires a McpState refactor
+that is out of scope for this feature. A second Connection on the same
+file is the smallest correct change: no new dependency on
+`core::storage::sqlite` from `mcp/src/oauth/`, no McpState surgery,
+and SQLite WAL mode is already enabled (`core/src/storage/sqlite.rs`
+sets `journal_mode=WAL` at boot). Cross-table writes serialize via
+SQLite's writer lock with well-established semantics.
+**Alternatives considered:**
+- Share Connection with `McpState.store` — requires McpState refactor;
+  not feasible in scope.
+- Expose a `SqliteStore::with_connection<F, R>` accessor for `mcp/`
+  use — works but couples `mcp/src/oauth/refresh.rs` to
+  `core::storage::SqliteStore`, violating the project rule that `mcp/`
+  doesn't import OAuth-specific surface from `core/`.
+- Separate `refresh_tokens.db` file — operationally worse (extra backup
+  job, extra schema config) for no observable win.
 **User-spec anchor:** D10.
 
 ### Decision 7: Access-token format unchanged (JWT HS256, 1h TTL) — accepts no-global-logout trade-off
@@ -919,10 +947,21 @@ requires.
   dev MCP; both stay functional across 2+ JWT expiries.
 
 #### Task 11: Prod deploy (gated by Task 10)
-- **Description:** Only execute on Task 10 GO. Tag `v0.2.5`, push,
-  release.yml builds + ships. Deploy to `mcp.mnemonik.xyz` per the
-  `deployment.md::VPS Deploy Process`. Confirm prod `MCP_JWT_TTL_SECS`
-  is unset or 3600 and `MCP_REFRESH_SALT` is set to a deploy secret.
+- **Description:** Only execute on Task 10 GO. Verify feature branch is
+  merged to `main` (release tags cut from `main` per `architecture.md`).
+  Tag `v0.2.5`, push tag. `release.yml` cross-compiles the Rust binary
+  for x86_64-linux + aarch64-darwin and attaches to GitHub Release —
+  **no Docker image** (`release.yml` has zero docker steps; the
+  `mcp/`-on-GHCR Docker image mentioned in `deployment.md` table is a
+  separate aspiration not wired into this `release.yml`). Deploy the
+  Rust binary to `mcp.mnemonik.xyz` VPS per `deployment.md::VPS Deploy
+  Process` (`pull tag → restart systemd service`). Confirm prod env:
+  `MCP_JWT_TTL_SECS` is unset or 3600; `MCP_REFRESH_SALT` set to a
+  **fresh** prod-only deploy secret (NEVER reuse Task 10's tunnel
+  salt); journalctl service name is `mnemonic-mcp`; prod DB path
+  `/home/claude/data/attestations.db` exists and the
+  `refresh_tokens` table appears after first boot (`sqlite3
+  /home/claude/data/attestations.db ".schema refresh_tokens"`).
 - **Skill:** deploy-pipeline
 - **Reviewers:** none
 
