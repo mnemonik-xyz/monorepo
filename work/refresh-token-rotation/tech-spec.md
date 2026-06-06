@@ -661,7 +661,7 @@ Cross-cutting integration tests:
 - `cross_table_mutex_no_starvation` — interleave 50 refresh rotations
   with 50 attestation writes against the shared `Connection`; assert
   both make progress without deadlock or unbounded blocking.
-- `db_write_failure_during_rotation_returns_500_and_is_retry_safe`
+- ~~`db_write_failure_during_rotation_returns_500_and_is_retry_safe`~~ — dropped in task-decomposition iter 1 because production code does not expose a fault-injection hook on the shared Connection. R6 DB-write-failure verification delegated to Task 6 code-audit (review the SQLite all-or-nothing transaction semantics in `refresh::rotate` for retry-safety).
   — fault inject a SQL error mid-Branch-A (test harness wraps the
   store with a write-failing decorator on first call); assert response
   is `500` AND a retry within reuse window succeeds with the same
@@ -884,7 +884,7 @@ requires.
   in <2s.
 - **Skill:** code-writing
 - **Reviewers:** code-reviewer, security-auditor, test-reviewer
-- **Verify-smoke:** `cargo test -p mnemonic-mcp --test oauth_refresh_e2e` — all 15 integration tests (AC1-AC13 + 2 cross-cutting) pass under 2 seconds.
+- **Verify-smoke:** `cargo test -p mnemonic-mcp --test oauth_refresh_e2e` — all 14 integration tests (AC1-AC13 + 1 cross-cutting cross_table_mutex_no_starvation) pass under 2 seconds. (DB-write-failure integration test was dropped in task-decomposition iter 1 — R6 verification delegated to Task 6 code-audit.)
 - **Files to modify:** `mcp/tests/oauth_refresh_e2e.rs` (new).
 - **Files to read:** `work/refresh-token-rotation/user-spec.md`
   AC1–AC13, `work/refresh-token-rotation/code-research.md` §I.9,
