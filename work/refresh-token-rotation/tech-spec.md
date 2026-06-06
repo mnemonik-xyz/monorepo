@@ -1,6 +1,6 @@
 ---
 created: 2026-06-06
-status: draft
+status: approved
 branch: dev
 size: M
 ---
@@ -713,7 +713,7 @@ requires.
   `blake3(MCP_JWT_SECRET + "refresh")` fallback was unsafe (single
   secret leak → rainbow-table feasibility). New deploys must set a
   random 32+ byte salt; server aborts boot if absent. Documented in
-  `.env.example` and `deployment.md`. **[PENDING USER APPROVAL]** —
+  `.env.example` and `deployment.md`. **[APPROVED 2026-06-06]** —
   user-spec approval was granted on the assumption that no new env vars
   were added; flagging explicitly for visibility.
 - **Added: `MCP_JWT_TTL_SECS` optional env var with clamp + parse-failure
@@ -723,7 +723,7 @@ requires.
   in tech-spec. No effect in prod (default 3600). Clamp `[60, 604800]`
   prevents operator footgun; parse failures log WARN and fall back to
   3600. Documented in `.env.example` and `deployment.md`.
-  **[PENDING USER APPROVAL]** — surfacing for the record so the user
+  **[APPROVED 2026-06-06]** — surfacing for the record so the user
   is aware a new env var has been introduced.
 
 ## Acceptance Criteria
