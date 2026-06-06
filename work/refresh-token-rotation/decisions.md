@@ -303,3 +303,38 @@ Round-2 R1 cleanup (dead test flag) applied in `d324868`.
 - `cargo build -p mnemonic-mcp` → OK
 - `cargo clippy -p mnemonic-mcp --all-targets --features test-support -- -D warnings` → clean
 - `cargo fmt --all -- --check` → clean
+
+## Task 3: OAuthState widening + refresh-grant + discovery + salt validation
+
+**Status:** Done
+**Commits:** `3e5c1fe4` (initial implementation), `b3541d2` (round-1 fixes: CR3-R1-C1 + CR3-R1-M1 + CR3-R1-M2 + SA3-R1-M1 + SA3-R1-M2 + TR3-R1 H1-H4 + M1-M2 + L2)
+**Agent:** task-3-builder
+**Summary:** Wave-2 wiring task. Widens `OAuthState` with 5 new fields (`refresh_store: Arc<Mutex<Connection>>`, `refresh_salt`, `reuse_interval`, `evictor_tick`, `reuse_cache`); `OAuthState::new` opens a second physical `rusqlite::Connection` on `DATABASE_PATH` per Decision 6. Adds `OAuthState::with_defaults(secret)` in-memory test constructor so ~40 test call sites take a one-line diff. Widens `TokenRequest` so every field is `Option<String>` with explicit `grant_type` (default `"authorization_code"` for legacy clients) + `refresh_token`. `token_handler` is now a thin wrapper around `token_handler_inner` that pipes the response through `apply_no_store_headers` (Decision 15 — `Cache-Control: no-store` + `Pragma: no-cache` on every exit). Post-parse dispatch routes `authorization_code` (existing path with explicit non-empty validation; now also mints a refresh-token via `refresh::mint_for_authorization_code`), `refresh_token` (length-cap pre-hash per Decision 16 → `spawn_blocking` → `refresh::rotate`), or `unsupported_grant_type` 400 per RFC 6749 §5.2 / Decision 11. Discovery advertises both grants. Pure `validate_refresh_salt` helper (Decision 2 — `base64::STANDARD` decode + ≥32 byte check) gates boot in `main::run_http`, which also threads `DATABASE_PATH` + intervals + `reuse_cache_cap` into the new constructor and spawns `refresh::start_evictor`. After round-1 reviews, a new `oauth_error_typed(status, error, description)` builder produces the RFC 6749 §5.2 `{"error": code, "error_description": prose}` envelope so user-supplied `grant_type` and internal `{e}` values are never echoed to the wire; `extract_forensic_remote_addr` reads `X-Forwarded-For` (first hop, 64-char bounded via existing UTF-8-safe `bound_log_value`) and a per-request UUIDv4 `request_id` threads into `RotateContext` so D14 production log lines carry the full forensic correlation set.
+
+**Deviations:** Two cross-task deviations, both approved by the team lead:
+
+1. **`refresh.rs` (Task 1 module) — 2-line surface addition to fix AC12.** The round-1 code review (CR3-R1-C1) caught a critical: `RotateOutcome::Rotated` only carried `(new_token, sub, google_sub)`, so the Task 3 handler was minting a SECOND access JWT for the response body. The JWT published to the LRU cache (for Branch B retry idempotency) was therefore byte-different from the one returned to the Branch A caller, breaking AC12. Fix: added `access_jwt: String` field to `RotateOutcome::Rotated` and populated it from the already-minted JWT inside `branch_a_rotate`. All existing `Rotated { .. }` destructures in `refresh.rs::tests` absorb the new field via `..` so no test-side churn. The Task 3 handler now consumes the field directly. Cross-task encroachment is minimal (2 lines: field declaration + populate); cleaner than the alternative of plumbing the cached JWT out via a second channel.
+
+2. **`OAuthState::with_defaults` lives outside `#[cfg(test)]`.** The cfg-gated form was the original intent, but every integration-test crate under `mcp/tests/*.rs` consumes the constructor via the library facade — gating it on `cfg(test)` made all 14 test crates fail to compile (the library is built without `cfg(test)` for the integration tests). Gating on `feature = "test-support"` would force ~14 test crates to opt in and is out of scope for Task 3. The constructor is annotated `#[allow(dead_code)]` for the bin target and the doc comment is explicit: "**NOT for production wiring** — uses an in-memory SQLite database … and a fixed all-`0xAB` salt." Production `main::run_http` always uses the multi-arg `OAuthState::new`.
+
+3. **Smoke verification could not run live in this sandbox.** The release binary aborts on `identity::ensure` (OS keychain) BEFORE reaching `run_http` where the new salt-gate and `OAuthState::new` live. Documented as the same deviation Task 2 used. All AC paths are covered by the 8 TDD anchor unit tests at the handler boundary via axum `oneshot` (`tower::ServiceExt`).
+
+A handler-side proxy log line was also added — the rotate-internal log emissions inside `tokio::task::spawn_blocking` are invisible to `tracing_test::traced_test`'s thread-local subscriber, so the handler emits a parallel D14-shape INFO line on the async task AFTER `spawn_blocking` returns. The production log infrastructure observes both; the test harness observes the handler-side one. This is documented in code comments on the four emission sites.
+
+**Reviews:**
+
+*Round 1:*
+- code-reviewer-3: changes-required — 1 critical (CR3-R1-C1 AC12 double-mint) + 2 major (CR3-R1-M1 envelope shape; CR3-R1-M2 forensic fields) + 3 minor → `logs/working/task-3/code-reviewer-3-round1.json`
+- security-auditor-3: CONDITIONAL_PASS — 2 minor (SA3-R1-M1 user-grant_type echo; SA3-R1-M2 internal `{e}` echo) → `logs/working/task-3/security-auditor-3-round1.json`
+- test-reviewer-3: FAILED — 4 HIGH (TR3-R1-H1 missing presence assertions; TR3-R1-H2 salt absent; TR3-R1-H3 access_token absent; TR3-R1-H4 Branch B' not exercised) + 1 MEDIUM (TR3-R1-M1 Branch D conflated with E) + 2 LOW → `logs/working/task-3/test-reviewer-1.json`
+
+*Round 2 (after fixes in `b3541d2`):*
+- code-reviewer-3: APPROVED — all three required findings correctly addressed; 3 minor follow-up notes (`assert!(starts_with(...))` vs exact equality; handler InvalidGrant log carries merged branch label; pre-existing sub-second `as_secs()` boundary in Branch B' — none merge-blocking) → `logs/working/task-3/code-reviewer-3-round2.json`
+- security-auditor-3: PASS — both M1/M2 resolved; new `oauth_error_typed` builder design accepted as a structural audit anchor for future callers → `logs/working/task-3/security-auditor-3-round2.json`
+- test-reviewer-3: PASSED — all 8 findings resolved; 2 new LOW observations (N1 Branch B `xff_b` not asserted; N2 handler InvalidGrant log merged label) flagged for code reviewer, non-blocking → `logs/working/task-3/test-reviewer-3-round2.json`
+
+**Verification:**
+- `cargo build --workspace` → OK
+- `cargo clippy --workspace --all-targets --features 'mnemonic-mcp/test-support' -- -D warnings` → clean
+- `cargo fmt --all -- --check` → clean
+- `cargo test -p mnemonic-mcp --features 'mnemonic-mcp/test-support' --no-fail-fast` → 535 tests, 0 fails (51 oauth unit tests including the 8 new TDD anchors)
