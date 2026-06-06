@@ -91,7 +91,12 @@ pub fn jwt_ttl_secs() -> u64 {
 /// The INFO log only fires when *this* call actually populated the lock
 /// (CR2-R1-M1). A re-seed that lost the race emits a DEBUG line stating the
 /// observed (already-stored) value so logs cannot lie about what
-/// `jwt_ttl_secs()` will return next.
+/// `jwt_ttl_secs()` will return next. Neither log echoes the raw env-var
+/// string (SA2-R1-M1) — only the resolved numeric TTL — so an operator
+/// who accidentally pastes `MCP_JWT_SECRET` into `MCP_JWT_TTL_SECS` does
+/// not leak it through log aggregation. The Decision-14-style WARN logs
+/// in [`compute_jwt_ttl_from_env_str`] that DO need to surface the raw
+/// value (parse failure) bound it to the first 16 chars.
 pub fn seed_jwt_ttl_from_env() {
     let raw = std::env::var("MCP_JWT_TTL_SECS").ok();
     let mut newly_seeded_value: Option<u64> = None;
@@ -103,16 +108,29 @@ pub fn seed_jwt_ttl_from_env() {
     if let Some(value) = newly_seeded_value {
         tracing::info!(
             target: "mnemonic_mcp::oauth",
-            "JWT access-token TTL seeded to {value}s (MCP_JWT_TTL_SECS={})",
-            raw.as_deref().unwrap_or("<unset>")
+            "JWT access-token TTL seeded to {value}s"
         );
     } else {
         tracing::debug!(
             target: "mnemonic_mcp::oauth",
-            "JWT access-token TTL already seeded to {stored}s; re-seed call ignored \
-             (MCP_JWT_TTL_SECS={})",
-            raw.as_deref().unwrap_or("<unset>")
+            "JWT access-token TTL already seeded to {stored}s; re-seed call ignored"
         );
+    }
+}
+
+/// Truncates `s` to at most `max_chars` Unicode characters, appending an
+/// ellipsis when truncation occurred (SA2-R1-M1). Char-boundary-safe — we
+/// take `max_chars` from the `chars()` iterator, NOT byte slices, so a
+/// multi-byte UTF-8 sequence in attacker input cannot trigger a slice
+/// panic. Use this whenever a WARN log needs to echo operator-supplied
+/// raw input from an env var.
+fn bound_log_value(s: &str, max_chars: usize) -> String {
+    let mut iter = s.chars();
+    let head: String = iter.by_ref().take(max_chars).collect();
+    if iter.next().is_some() {
+        format!("{head}…")
+    } else {
+        head
     }
 }
 
@@ -158,9 +176,15 @@ pub(crate) fn compute_jwt_ttl_from_env_str(raw: Option<&str>) -> u64 {
             }
         }
         Err(e) => {
+            // Bound the echoed raw value to 16 chars so an attacker- or
+            // operator-supplied massive string cannot bloat log aggregation
+            // (SA2-R1-M1). Char-boundary-safe slice. Truncation is
+            // marked with a trailing ellipsis so the original length is
+            // discoverable.
+            let bounded = bound_log_value(trimmed, 16);
             tracing::warn!(
                 target: "mnemonic_mcp::oauth",
-                "MCP_JWT_TTL_SECS={trimmed:?} failed to parse as u64 ({e}); falling back to default {JWT_TTL_DEFAULT_SECS}s"
+                "MCP_JWT_TTL_SECS={bounded:?} failed to parse as u64 ({e}); falling back to default {JWT_TTL_DEFAULT_SECS}s"
             );
             JWT_TTL_DEFAULT_SECS
         }
@@ -3235,5 +3259,38 @@ mod tests {
         // the default without emitting a WARN — only the explicit
         // misconfiguration cases above are loud.
         assert_eq!(compute_jwt_ttl_from_env_str(None), JWT_TTL_DEFAULT_SECS);
+    }
+
+    #[tracing_test::traced_test]
+    #[test]
+    fn jwt_ttl_parse_failure_warn_bounds_raw_value() {
+        // SA2-R1-M1: the parse-failure WARN must bound the echoed raw value
+        // so a 1 MB attacker-supplied string doesn't bloat log aggregation.
+        // 17 chars should truncate to 16 chars + ellipsis.
+        let raw = "abcdefghijklmnopq"; // 17 chars, none of which parse
+        assert_eq!(
+            compute_jwt_ttl_from_env_str(Some(raw)),
+            JWT_TTL_DEFAULT_SECS
+        );
+        assert!(logs_contain("abcdefghijklmnop")); // first 16 chars
+        assert!(logs_contain("…")); // truncation marker
+        assert!(
+            !logs_contain("abcdefghijklmnopq"),
+            "the 17th char must NOT appear in the WARN log"
+        );
+    }
+
+    #[test]
+    fn bound_log_value_truncates_to_max_chars() {
+        // No truncation when len ≤ max.
+        assert_eq!(bound_log_value("abc", 5), "abc");
+        assert_eq!(bound_log_value("abcde", 5), "abcde");
+        // Truncates with ellipsis when len > max.
+        assert_eq!(bound_log_value("abcdef", 5), "abcde…");
+        // Empty stays empty.
+        assert_eq!(bound_log_value("", 5), "");
+        // Char-boundary safe — multi-byte UTF-8 must not panic.
+        // "ü" is 2 bytes; "🦀" is 4. With max_chars=3, take "üü🦀" wholly.
+        assert_eq!(bound_log_value("üü🦀abc", 3), "üü🦀…");
     }
 }
