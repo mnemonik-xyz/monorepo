@@ -160,7 +160,7 @@ export function buildMcpConfig(jwt: string): string {
     {
       mcpServers: {
         mnemonic: {
-          url: "https://mc.mnemonik.xyz/mcp",
+          url: MCP_URL,
           headers: { Authorization: `Bearer ${jwt}` },
         },
       },

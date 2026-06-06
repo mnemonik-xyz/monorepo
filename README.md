@@ -20,7 +20,30 @@ npx @mnemonik-xyz/cli init --ticket <uuid> && npx @mnemonik-xyz/cli login && npx
 npx @mnemonik-xyz/cli init --standalone && npx @mnemonik-xyz/cli login && npx @mnemonik-xyz/cli sign "first memory"
 ```
 
-Mnemonic gives an AI agent a persistent and verifiable artifact/memory layer: signed memories that can be semantically recalled, independently verified, and optionally anchored on-chain.
+Mnemonic is a verifiable, persistent memory layer for AI agents, exposed over the Model Context Protocol (MCP). Every memory is semantically embedded, signed with your own Ed25519 identity, and optionally anchored on Solana and Arweave — so it stays portable across tools like Claude, Cursor, and VS Code and can be independently verified by anyone.
+
+## Add to your AI tool
+
+Mnemonic runs as a hosted MCP server — no install needed, just point your client at it:
+
+```
+https://mcp.mnemonik.xyz/mcp
+```
+
+- **One-click install:** open **[mnemonik.xyz/install](https://mnemonik.xyz/install)** and pick Cursor, VS Code, Claude Desktop, or Windsurf. Identity, IDE wiring, and OAuth happen in one flow.
+- **Cursor:** `cursor://anysphere.cursor-deeplink/mcp/install?name=Mnemonic&url=https%3A%2F%2Fmcp.mnemonik.xyz%2Fmcp`
+- **VS Code (1.93+):** `vscode:mcp/install?%7B%22name%22%3A%22Mnemonic%22%2C%22type%22%3A%22http%22%2C%22url%22%3A%22https%3A%2F%2Fmcp.mnemonik.xyz%2Fmcp%22%7D`
+- **Claude Desktop** — add to `claude_desktop_config.json`:
+
+  ```json
+  {
+    "mcpServers": {
+      "mnemonic": { "url": "https://mcp.mnemonik.xyz/mcp" }
+    }
+  }
+  ```
+
+Prefer the terminal? The `npx @mnemonik-xyz/cli` quickstart is below. Looking for the server in a registry? See [discovery & distribution](./docs/distribution.md).
 
 ---
 
@@ -196,7 +219,7 @@ Active work lives in `work/`. Completed features are archived under `work/comple
 
 Agent guidance and project knowledge for this repo live in `.claude/skills/project-knowledge/` and `CLAUDE.md`.
 
-Default branch: `dev`.
+Default branch: `main`.
 
 ---
 
