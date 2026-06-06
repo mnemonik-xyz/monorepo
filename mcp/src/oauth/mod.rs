@@ -56,16 +56,17 @@ pub const JWT_ISSUER: &str = "mcp.mnemonik.xyz";
 /// JWT audience — fixed, validated on every verify.
 pub const JWT_AUDIENCE: &str = "mcp";
 /// JWT TTL default (1 hour, Decision 11) — applied when `MCP_JWT_TTL_SECS`
-/// is unset, unparseable, empty, or whitespace.
-pub const JWT_TTL_DEFAULT_SECS: u64 = 3600;
+/// is unset, unparseable, empty, or whitespace. `pub(crate)`: only the unit
+/// tests in this module and [`jwt_ttl_secs`] read it; no external consumer.
+pub(crate) const JWT_TTL_DEFAULT_SECS: u64 = 3600;
 /// Lower clamp on `MCP_JWT_TTL_SECS` (Decision 12 — refresh-token-rotation
 /// tech-spec). 60s is the minimum usable for the R1 pre-ship empirical gate
 /// (Task 10) and avoids the "MCP_JWT_TTL_SECS=1" operator footgun.
-pub const JWT_TTL_MIN_SECS: u64 = 60;
+pub(crate) const JWT_TTL_MIN_SECS: u64 = 60;
 /// Upper clamp on `MCP_JWT_TTL_SECS` (Decision 12). 7 days — a soft cap
 /// that keeps long-lived tokens off the wire without forbidding legitimate
 /// extended sessions.
-pub const JWT_TTL_MAX_SECS: u64 = 604_800;
+pub(crate) const JWT_TTL_MAX_SECS: u64 = 604_800;
 
 /// Process-global JWT TTL, seeded once at startup by [`seed_jwt_ttl_from_env`]
 /// (called inside `main::run_http`). Decision 12 mandates `std::sync::OnceLock`
@@ -84,17 +85,35 @@ pub fn jwt_ttl_secs() -> u64 {
 
 /// Seeds [`JWT_TTL`] from the `MCP_JWT_TTL_SECS` env var (clamp + parse
 /// failure behaviour documented on [`compute_jwt_ttl_from_env_str`]). Idempotent
-/// — calling more than once is a no-op (later calls silently lose the race so
-/// tests can re-run the seed without panicking).
+/// — second calls silently lose the race against the first-write so test
+/// harnesses can re-invoke the seed without panicking.
+///
+/// The INFO log only fires when *this* call actually populated the lock
+/// (CR2-R1-M1). A re-seed that lost the race emits a DEBUG line stating the
+/// observed (already-stored) value so logs cannot lie about what
+/// `jwt_ttl_secs()` will return next.
 pub fn seed_jwt_ttl_from_env() {
     let raw = std::env::var("MCP_JWT_TTL_SECS").ok();
-    let value = compute_jwt_ttl_from_env_str(raw.as_deref());
-    let _ = JWT_TTL.set(value);
-    tracing::info!(
-        target: "mnemonic_mcp::oauth",
-        "JWT access-token TTL seeded to {value}s (MCP_JWT_TTL_SECS={})",
-        raw.as_deref().unwrap_or("<unset>")
-    );
+    let mut newly_seeded_value: Option<u64> = None;
+    let stored = *JWT_TTL.get_or_init(|| {
+        let v = compute_jwt_ttl_from_env_str(raw.as_deref());
+        newly_seeded_value = Some(v);
+        v
+    });
+    if let Some(value) = newly_seeded_value {
+        tracing::info!(
+            target: "mnemonic_mcp::oauth",
+            "JWT access-token TTL seeded to {value}s (MCP_JWT_TTL_SECS={})",
+            raw.as_deref().unwrap_or("<unset>")
+        );
+    } else {
+        tracing::debug!(
+            target: "mnemonic_mcp::oauth",
+            "JWT access-token TTL already seeded to {stored}s; re-seed call ignored \
+             (MCP_JWT_TTL_SECS={})",
+            raw.as_deref().unwrap_or("<unset>")
+        );
+    }
 }
 
 /// Pure helper — parses an optional `MCP_JWT_TTL_SECS` string, applies the
