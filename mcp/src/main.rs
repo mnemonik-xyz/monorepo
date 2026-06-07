@@ -799,6 +799,15 @@ async fn run_http(
 
     // ── OAuth state + JWT secret (Decisions 9 + 11) ──────────────────────────
     let secret = load_jwt_secret()?;
+    // Seed the process-global server origin OnceLock from `MCP_PUBLIC_BASE_URL`
+    // BEFORE any OAuth route is mounted — every `/.well-known/*` metadata
+    // document and every canonical-CBOR challenge envelope reads the resolved
+    // value via `oauth::server_origin()`. Stdio transport never reaches this
+    // path; the OnceLock's safe default (`SERVER_ORIGIN_DEFAULT`,
+    // `https://mcp.mnemonik.xyz`) keeps the legacy hardcoded behavior intact
+    // there. Malformed env values WARN-log and fall back to the default rather
+    // than aborting boot — same defensive pattern as `seed_jwt_ttl_from_env`.
+    oauth::seed_server_origin_from_env();
     // Seed the process-global JWT TTL OnceLock from `MCP_JWT_TTL_SECS`
     // (Decision 12, refresh-token-rotation). Runs BEFORE OAuthState::new
     // so every reader observes the seeded value. Stdio transport never

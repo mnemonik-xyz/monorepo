@@ -24,8 +24,8 @@ use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation};
 use mnemonic_core::codec::canonical::to_canonical_cbor;
 use mnemonic_core::identity::sign_bytes;
 use mnemonic_mcp::oauth::{
-    self, authorize_handler, build_challenge_hash, token_handler, Claims, OAuthState, JWT_AUDIENCE,
-    JWT_ISSUER, SERVER_ORIGIN,
+    self, authorize_handler, build_challenge_hash, server_origin, token_handler, Claims,
+    OAuthState, JWT_AUDIENCE, JWT_ISSUER,
 };
 use serde_json::Value;
 use solana_sdk::signature::{Keypair, Signer};
@@ -87,7 +87,7 @@ async fn full_authorize_token_jwt_roundtrip() {
     let exp = now_secs() + 30;
 
     let challenge_hash = build_challenge_hash(
-        SERVER_ORIGIN,
+        server_origin(),
         client_state,
         "test-client",
         redirect_uri,
@@ -101,7 +101,7 @@ async fn full_authorize_token_jwt_roundtrip() {
     // Sign the same canonical CBOR via the same primitive the WASM signer
     // would call in production.
     let challenge = serde_json::json!({
-        "server_origin": SERVER_ORIGIN,
+        "server_origin": server_origin(),
         "state": client_state,
         "client_id": "test-client",
         "redirect_uri": redirect_uri,

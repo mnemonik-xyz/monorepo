@@ -199,9 +199,137 @@ pub const STATE_TTL_SECS: u64 = 60;
 pub const CODE_TTL_SECS: u64 = 60;
 /// LRU bound on both pending-state and issued-code maps.
 pub const OAUTH_STATE_CAPACITY: usize = 10_000;
-/// Server origin used in the canonical-CBOR challenge (Decision 10).
-/// Public so the consent-page bootstrap and tests can reuse the same value.
-pub const SERVER_ORIGIN: &str = "https://mcp.mnemonik.xyz";
+/// Default server origin baked into the binary — used when
+/// `MCP_PUBLIC_BASE_URL` is unset. Matches the production hostname so the
+/// no-env-var deploy path is byte-identical to the legacy `pub const
+/// SERVER_ORIGIN` it replaced.
+pub const SERVER_ORIGIN_DEFAULT: &str = "https://mcp.mnemonik.xyz";
+
+/// Process-global server origin, seeded once at startup by
+/// [`seed_server_origin_from_env`] (called inside `main::run_http`). Reads
+/// `MCP_PUBLIC_BASE_URL`; falls back to [`SERVER_ORIGIN_DEFAULT`] when unset
+/// or malformed. `std::sync::OnceLock` mirrors the [`JWT_TTL`] pattern — no
+/// external `once_cell` dependency.
+static SERVER_ORIGIN: OnceLock<String> = OnceLock::new();
+
+/// Returns the effective server origin advertised in OAuth metadata, the
+/// canonical-CBOR challenge envelope, and the `/.well-known/*` documents.
+/// Falls back to [`SERVER_ORIGIN_DEFAULT`] when the `OnceLock` was never
+/// seeded (stdio transport, tests that import this module without booting
+/// the HTTP stack) so every reader is safe pre-seed.
+pub fn server_origin() -> &'static str {
+    SERVER_ORIGIN
+        .get()
+        .map(String::as_str)
+        .unwrap_or(SERVER_ORIGIN_DEFAULT)
+}
+
+/// Seeds [`SERVER_ORIGIN`] from the `MCP_PUBLIC_BASE_URL` env var. Idempotent
+/// — second calls silently lose the race against the first-write so test
+/// harnesses can re-invoke the seed without panicking.
+///
+/// The validation rules mirror [`compute_jwt_ttl_from_env_str`]'s
+/// loud-failure contract: malformed values emit a WARN log and fall back to
+/// [`SERVER_ORIGIN_DEFAULT`] rather than aborting boot, so an operator typo
+/// on the live deploy does not take the server down. A wholly-unset env var
+/// silently uses the default — only explicit misconfiguration is loud.
+pub fn seed_server_origin_from_env() {
+    let raw = std::env::var("MCP_PUBLIC_BASE_URL").ok();
+    let mut newly_seeded_value: Option<String> = None;
+    let stored = SERVER_ORIGIN.get_or_init(|| {
+        let v = compute_server_origin_from_env_str(raw.as_deref());
+        newly_seeded_value = Some(v.clone());
+        v
+    });
+    if let Some(value) = newly_seeded_value {
+        tracing::info!(
+            target: "mnemonic_mcp::oauth",
+            "server origin seeded to {value}"
+        );
+    } else {
+        tracing::debug!(
+            target: "mnemonic_mcp::oauth",
+            "server origin already seeded to {stored}; re-seed call ignored"
+        );
+    }
+}
+
+/// Pure helper — validates an optional `MCP_PUBLIC_BASE_URL` string and
+/// returns the resolved origin. Public to the module so
+/// [`seed_server_origin_from_env`] and the unit tests share one codepath;
+/// the tests exercise this helper directly so they do NOT pollute the
+/// process-global `OnceLock`.
+///
+/// Defaults to [`SERVER_ORIGIN_DEFAULT`] on `None`, empty, whitespace, or
+/// any of the validation failures listed below. The non-silent WARN on
+/// malformed values closes the silent-default vector for the Task 10 R1
+/// gate (a deploy-typo must be loud).
+///
+/// Rejects (WARN + default):
+///   - empty / whitespace-only
+///   - missing `http://` or `https://` scheme prefix
+///   - trailing `/` (would double-slash when concatenated with endpoint paths)
+///   - any `?` query or `#` fragment
+///   - a path beyond the host:port (e.g. `https://host/sub`) — OAuth
+///     metadata advertises endpoint URLs as `{origin}/oauth/authorize` etc.,
+///     a base with a path would garble the resulting URL
+pub(crate) fn compute_server_origin_from_env_str(raw: Option<&str>) -> String {
+    let Some(s) = raw else {
+        return SERVER_ORIGIN_DEFAULT.to_string();
+    };
+    let trimmed = s.trim();
+    if trimmed.is_empty() {
+        tracing::warn!(
+            target: "mnemonic_mcp::oauth",
+            "MCP_PUBLIC_BASE_URL is empty / whitespace-only; falling back to default {SERVER_ORIGIN_DEFAULT}"
+        );
+        return SERVER_ORIGIN_DEFAULT.to_string();
+    }
+    let bounded = bound_log_value(trimmed, 64);
+    let rest = if let Some(r) = trimmed.strip_prefix("https://") {
+        r
+    } else if let Some(r) = trimmed.strip_prefix("http://") {
+        r
+    } else {
+        tracing::warn!(
+            target: "mnemonic_mcp::oauth",
+            "MCP_PUBLIC_BASE_URL={bounded:?} missing http:// or https:// scheme; falling back to default {SERVER_ORIGIN_DEFAULT}"
+        );
+        return SERVER_ORIGIN_DEFAULT.to_string();
+    };
+    if rest.is_empty() {
+        tracing::warn!(
+            target: "mnemonic_mcp::oauth",
+            "MCP_PUBLIC_BASE_URL={bounded:?} has scheme but no host; falling back to default {SERVER_ORIGIN_DEFAULT}"
+        );
+        return SERVER_ORIGIN_DEFAULT.to_string();
+    }
+    if trimmed.ends_with('/') {
+        tracing::warn!(
+            target: "mnemonic_mcp::oauth",
+            "MCP_PUBLIC_BASE_URL={bounded:?} has trailing slash; falling back to default {SERVER_ORIGIN_DEFAULT}"
+        );
+        return SERVER_ORIGIN_DEFAULT.to_string();
+    }
+    if trimmed.contains('?') || trimmed.contains('#') {
+        tracing::warn!(
+            target: "mnemonic_mcp::oauth",
+            "MCP_PUBLIC_BASE_URL={bounded:?} contains query or fragment; falling back to default {SERVER_ORIGIN_DEFAULT}"
+        );
+        return SERVER_ORIGIN_DEFAULT.to_string();
+    }
+    // Reject a path component past the host:port. Splitting on the first
+    // `/` after the scheme isolates the authority; anything after it is a
+    // path, which would corrupt the metadata URL concatenations.
+    if rest.contains('/') {
+        tracing::warn!(
+            target: "mnemonic_mcp::oauth",
+            "MCP_PUBLIC_BASE_URL={bounded:?} has path component beyond host; falling back to default {SERVER_ORIGIN_DEFAULT}"
+        );
+        return SERVER_ORIGIN_DEFAULT.to_string();
+    }
+    trimmed.to_string()
+}
 /// Frontend webapp origin — the consent page lives here. The bootstrap
 /// endpoint `GET /oauth/authorize` redirects the user-agent (browser) to
 /// `WEBAPP_CONSENT_URL?challenge=<base64-cbor>&state=<state>` so the WASM
@@ -802,8 +930,9 @@ pub async fn authorize_init_handler(
     rand::thread_rng().fill_bytes(&mut nonce_bytes);
     let nonce = hex::encode(nonce_bytes);
 
+    let origin = server_origin();
     let challenge_obj = serde_json::json!({
-        "server_origin": SERVER_ORIGIN,
+        "server_origin": origin,
         "state": q.state,
         "client_id": q.client_id,
         "redirect_uri": q.redirect_uri,
@@ -825,7 +954,7 @@ pub async fn authorize_init_handler(
     // any external recomputation (tests, future caller-side validators) on
     // a single helper.
     let challenge_hash = match build_challenge_hash(
-        SERVER_ORIGIN,
+        origin,
         &q.state,
         &q.client_id,
         &q.redirect_uri,
@@ -1904,11 +2033,12 @@ fn extract_forensic_remote_addr(headers: &axum::http::HeaderMap) -> String {
 /// require. The `code_challenge_methods_supported` advertises only `S256`
 /// because Decision 10 enforces S256-only PKCE.
 pub async fn oauth_authorization_server_metadata() -> Response {
+    let origin = server_origin();
     let body = serde_json::json!({
-        "issuer": SERVER_ORIGIN,
-        "authorization_endpoint": format!("{SERVER_ORIGIN}/oauth/authorize"),
-        "token_endpoint": format!("{SERVER_ORIGIN}/oauth/token"),
-        "registration_endpoint": format!("{SERVER_ORIGIN}/oauth/register"),
+        "issuer": origin,
+        "authorization_endpoint": format!("{origin}/oauth/authorize"),
+        "token_endpoint": format!("{origin}/oauth/token"),
+        "registration_endpoint": format!("{origin}/oauth/register"),
         "response_types_supported": ["code"],
         // refresh-token-rotation Task 3 / Decision 11: advertise both grants.
         // The `/oauth/token` handler accepts `grant_type=refresh_token`
@@ -1925,9 +2055,10 @@ pub async fn oauth_authorization_server_metadata() -> Response {
 /// `GET /.well-known/oauth-protected-resource` — MCP spec metadata document
 /// for the server origin as a whole.
 pub async fn oauth_protected_resource_metadata() -> Response {
+    let origin = server_origin();
     let body = serde_json::json!({
-        "resource": SERVER_ORIGIN,
-        "authorization_servers": [SERVER_ORIGIN],
+        "resource": origin,
+        "authorization_servers": [origin],
         "scopes_supported": ["mcp"],
         "bearer_methods_supported": ["header"],
     });
@@ -1945,9 +2076,10 @@ pub async fn oauth_protected_resource_metadata() -> Response {
 /// returning the path-qualified resource value, Cursor never opens the
 /// browser to launch /oauth/authorize.
 pub async fn oauth_protected_resource_metadata_mcp() -> Response {
+    let origin = server_origin();
     let body = serde_json::json!({
-        "resource": format!("{SERVER_ORIGIN}/mcp"),
-        "authorization_servers": [SERVER_ORIGIN],
+        "resource": format!("{origin}/mcp"),
+        "authorization_servers": [origin],
         "scopes_supported": ["mcp"],
         "bearer_methods_supported": ["header"],
     });
@@ -2337,7 +2469,7 @@ mod tests {
         exp: u64,
     ) -> (String, String) {
         let challenge = serde_json::json!({
-            "server_origin": SERVER_ORIGIN,
+            "server_origin": server_origin(),
             "state": client_state,
             "client_id": "test-client",
             "redirect_uri": redirect_uri,
@@ -2370,7 +2502,7 @@ mod tests {
         exp: u64,
     ) -> (String, String, Vec<u8>) {
         let challenge = serde_json::json!({
-            "server_origin": SERVER_ORIGIN,
+            "server_origin": server_origin(),
             "state": client_state,
             "client_id": "test-client",
             "redirect_uri": redirect_uri,
@@ -2608,7 +2740,7 @@ mod tests {
         let plain_challenge = "plain-challenge-string";
         // Pending stores S256 expectations.
         let s256_hash = build_challenge_hash(
-            SERVER_ORIGIN,
+            server_origin(),
             "csrf-plain",
             "test-client",
             "https://app/cb",
@@ -2633,7 +2765,7 @@ mod tests {
         // S256 challenge_bytes which was never written, so verification
         // fails on the empty-bytes path).
         let bad_obj = serde_json::json!({
-            "server_origin": SERVER_ORIGIN,
+            "server_origin": server_origin(),
             "state": "csrf-plain",
             "client_id": "test-client",
             "redirect_uri": "https://app/cb",
@@ -3270,15 +3402,13 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let body_bytes = resp.into_body().collect().await.unwrap().to_bytes();
         let parsed: Value = serde_json::from_slice(&body_bytes).unwrap();
-        assert_eq!(parsed["issuer"], SERVER_ORIGIN);
+        let origin = server_origin();
+        assert_eq!(parsed["issuer"], origin);
         assert_eq!(
             parsed["authorization_endpoint"],
-            format!("{SERVER_ORIGIN}/oauth/authorize")
+            format!("{origin}/oauth/authorize")
         );
-        assert_eq!(
-            parsed["token_endpoint"],
-            format!("{SERVER_ORIGIN}/oauth/token")
-        );
+        assert_eq!(parsed["token_endpoint"], format!("{origin}/oauth/token"));
         assert_eq!(parsed["response_types_supported"][0], "code");
         // refresh-token-rotation Task 3 / Decision 11 — discovery MUST
         // advertise BOTH grants so MCP clients can opt into the
@@ -3314,8 +3444,9 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let body_bytes = resp.into_body().collect().await.unwrap().to_bytes();
         let parsed: Value = serde_json::from_slice(&body_bytes).unwrap();
-        assert_eq!(parsed["resource"], SERVER_ORIGIN);
-        assert_eq!(parsed["authorization_servers"][0], SERVER_ORIGIN);
+        let origin = server_origin();
+        assert_eq!(parsed["resource"], origin);
+        assert_eq!(parsed["authorization_servers"][0], origin);
         assert_eq!(parsed["scopes_supported"][0], "mcp");
         assert_eq!(parsed["bearer_methods_supported"][0], "header");
     }
@@ -3343,12 +3474,13 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let body_bytes = resp.into_body().collect().await.unwrap().to_bytes();
         let parsed: Value = serde_json::from_slice(&body_bytes).unwrap();
+        let origin = server_origin();
         assert_eq!(
             parsed["resource"],
-            format!("{SERVER_ORIGIN}/mcp"),
+            format!("{origin}/mcp"),
             "resource MUST equal the URL the MCP client connects to (path-specific)"
         );
-        assert_eq!(parsed["authorization_servers"][0], SERVER_ORIGIN);
+        assert_eq!(parsed["authorization_servers"][0], origin);
         assert_eq!(parsed["scopes_supported"][0], "mcp");
         assert_eq!(parsed["bearer_methods_supported"][0], "header");
     }
@@ -3733,7 +3865,7 @@ mod tests {
         // sign them with the user's keypair. Same fields the bootstrap
         // handler would store.
         let challenge_obj = serde_json::json!({
-            "server_origin": SERVER_ORIGIN,
+            "server_origin": server_origin(),
             "state": "rb-state",
             "client_id": "test-client",
             "redirect_uri": bound_uri,
@@ -3888,6 +4020,114 @@ mod tests {
             !logs_contain("abcdefghijklmnopq"),
             "the 17th char must NOT appear in the WARN log"
         );
+    }
+
+    // ── MCP_PUBLIC_BASE_URL env-plumbing ─────────────────────────────────────
+    // Mirrors the JWT-TTL pattern above: exercise the pure helper
+    // `compute_server_origin_from_env_str` so tests never seed the
+    // process-global `SERVER_ORIGIN` OnceLock.
+
+    #[tracing_test::traced_test]
+    #[test]
+    fn server_origin_defaults_when_env_unset() {
+        // Wholly-unset env → silent default; no WARN.
+        assert_eq!(
+            compute_server_origin_from_env_str(None),
+            SERVER_ORIGIN_DEFAULT
+        );
+    }
+
+    #[tracing_test::traced_test]
+    #[test]
+    fn server_origin_uses_env_when_set() {
+        // https override.
+        assert_eq!(
+            compute_server_origin_from_env_str(Some(
+                "https://car-damages-controlling-blocked.trycloudflare.com"
+            )),
+            "https://car-damages-controlling-blocked.trycloudflare.com"
+        );
+        // http override (loopback-style dev).
+        assert_eq!(
+            compute_server_origin_from_env_str(Some("http://127.0.0.1:3000")),
+            "http://127.0.0.1:3000"
+        );
+        // Surrounding whitespace is trimmed.
+        assert_eq!(
+            compute_server_origin_from_env_str(Some("  https://mcp.dev.mnemonik.xyz  ")),
+            "https://mcp.dev.mnemonik.xyz"
+        );
+    }
+
+    #[tracing_test::traced_test]
+    #[test]
+    fn server_origin_falls_back_on_malformed_env() {
+        // Empty / whitespace-only — WARN + default. Loud failure closes the
+        // silent-deploy-typo vector on the Task 10 R1 gate.
+        assert_eq!(
+            compute_server_origin_from_env_str(Some("")),
+            SERVER_ORIGIN_DEFAULT
+        );
+        assert!(logs_contain(
+            "MCP_PUBLIC_BASE_URL is empty / whitespace-only"
+        ));
+        assert_eq!(
+            compute_server_origin_from_env_str(Some("   ")),
+            SERVER_ORIGIN_DEFAULT
+        );
+        // Missing scheme.
+        assert_eq!(
+            compute_server_origin_from_env_str(Some("mcp.mnemonik.xyz")),
+            SERVER_ORIGIN_DEFAULT
+        );
+        assert!(logs_contain(
+            "missing http:// or https:// scheme; falling back to default"
+        ));
+        // Trailing slash — would double-slash on metadata URL concat.
+        assert_eq!(
+            compute_server_origin_from_env_str(Some("https://example.com/")),
+            SERVER_ORIGIN_DEFAULT
+        );
+        assert!(logs_contain("has trailing slash"));
+        // Path component beyond host — would garble the metadata URL.
+        assert_eq!(
+            compute_server_origin_from_env_str(Some("https://example.com/sub")),
+            SERVER_ORIGIN_DEFAULT
+        );
+        assert!(logs_contain("has path component beyond host"));
+        // Query string.
+        assert_eq!(
+            compute_server_origin_from_env_str(Some("https://example.com?x=1")),
+            SERVER_ORIGIN_DEFAULT
+        );
+        assert!(logs_contain("contains query or fragment"));
+        // Fragment.
+        assert_eq!(
+            compute_server_origin_from_env_str(Some("https://example.com#frag")),
+            SERVER_ORIGIN_DEFAULT
+        );
+        // Scheme without host.
+        assert_eq!(
+            compute_server_origin_from_env_str(Some("https://")),
+            SERVER_ORIGIN_DEFAULT
+        );
+        assert!(logs_contain("has scheme but no host"));
+    }
+
+    #[test]
+    fn server_origin_accessor_default_pre_seed() {
+        // Pre-seed reader contract: until `seed_server_origin_from_env`
+        // populates the OnceLock, `server_origin()` returns the default.
+        // The OnceLock is process-global and may have been seeded by a
+        // sibling test in this binary — so we only assert the function
+        // does not panic and returns a non-empty `https://` value (either
+        // the default or whatever a previous test seeded).
+        let origin = server_origin();
+        assert!(
+            origin.starts_with("https://") || origin.starts_with("http://"),
+            "server_origin() must always return a scheme-prefixed URL, got {origin}"
+        );
+        assert!(!origin.is_empty());
     }
 
     #[test]
