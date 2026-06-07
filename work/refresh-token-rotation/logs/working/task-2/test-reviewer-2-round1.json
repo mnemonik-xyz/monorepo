@@ -1,0 +1,88 @@
+{
+  "reviewer": "test-reviewer-2",
+  "task": "refresh-token-rotation/task-2",
+  "commit": "dcfdd45",
+  "round": 1,
+  "verdict": "CONDITIONAL_PASS",
+  "summary": "Two required unit tests are present and structurally sound. One minor gap: the whitespace-only input case ('   ') asserts the return value but omits the logs_contain WARN assertion, leaving the test unable to catch a regression where whitespace silently swallows the warning. Everything else passes cleanly.",
+
+  "findings": [
+    {
+      "id": "TR2-R1-1",
+      "severity": "minor",
+      "category": "missing_assertion",
+      "location": "mcp/src/oauth/mod.rs:3208-3211 (jwt_ttl_parse_failure_logs_warn_and_uses_default)",
+      "description": "Whitespace-only input ('   ') asserts the return value equals JWT_TTL_DEFAULT_SECS but has no following logs_contain assertion. The empty-string case at line 3207 does assert the WARN log; the whitespace case does not. A regression that silently drops the WARN for whitespace (e.g., calling return early before the tracing::warn!) would pass this test. The spec requires: 'whitespace-only ... fall back to 3600 AND emit a WARN log' — both halves must be asserted.",
+      "fix": "Add `assert!(logs_contain(\"MCP_JWT_TTL_SECS is empty / whitespace-only\"));` immediately after the assert_eq! for Some(\"   \") at line 3211."
+    }
+  ],
+
+  "coverage_checklist": {
+    "onceLock_seed_read_at_startup": {
+      "status": "PASS",
+      "note": "seed_jwt_ttl_from_env() called in run_http before OAuthState::new (main.rs:796). Pre-seed safe-default (3600) via unwrap_or confirmed in jwt_ttl_secs(). Tested indirectly: pure helper tests confirm all code paths; OnceLock idempotency (set returns Err on second call, silently dropped) is correct Rust std behavior."
+    },
+    "env_parse_low_clamped": {
+      "status": "PASS",
+      "note": "Some('10') -> JWT_TTL_MIN_SECS (60) asserted. WARN log ('MCP_JWT_TTL_SECS=10 below minimum 60s; clamped to 60') asserted via logs_contain."
+    },
+    "env_parse_in_range": {
+      "status": "PASS",
+      "note": "Some('3600') -> 3600 passthrough asserted. Regression anchor for existing OAuth flows."
+    },
+    "env_parse_high_clamped": {
+      "status": "PASS",
+      "note": "Some('9999999') -> JWT_TTL_MAX_SECS (604800) asserted. WARN log asserted."
+    },
+    "env_parse_malformed_notanumber": {
+      "status": "PASS",
+      "note": "Some('notanumber') -> 3600 asserted. WARN log ('MCP_JWT_TTL_SECS=\\\"notanumber\\\" failed to parse as u64') asserted."
+    },
+    "env_parse_empty_string": {
+      "status": "PASS",
+      "note": "Some('') -> 3600 asserted. WARN log ('MCP_JWT_TTL_SECS is empty / whitespace-only') asserted."
+    },
+    "env_parse_whitespace_only": {
+      "status": "PARTIAL",
+      "note": "Some('   ') -> 3600 return value asserted. WARN log NOT asserted. See TR2-R1-1."
+    },
+    "env_absent_none_silent": {
+      "status": "PASS",
+      "note": "None -> JWT_TTL_DEFAULT_SECS (3600) asserted. No WARN emitted (correct silent path). Test confirms this at line 3215."
+    },
+    "mcp_jwt_ttl_secs_silently_ignored_regression_catch": {
+      "status": "PASS",
+      "note": "Tests exercise compute_jwt_ttl_from_env_str directly, which is the single codepath used by both seed_jwt_ttl_from_env and all 6 production read sites. A regression where MCP_JWT_TTL_SECS is ignored (e.g., seed function no longer calls the helper) would still be caught because the helper tests operate on the actual parsing and clamping logic. The OnceLock seed function itself is not independently tested for the 'value gets into OnceLock' path — this is acceptable given the trivial OnceLock.set call and that the two unit tests cover all branching logic."
+    },
+    "no_flaky_timing_sleep": {
+      "status": "PASS",
+      "note": "No real time.sleep() or tokio::time::sleep() calls in either test. No timing dependencies. Both tests are deterministic and fast."
+    },
+    "six_read_sites_switched": {
+      "status": "PASS",
+      "note": "Diff confirms all 6 sites updated: oauth/mod.rs lines 479, 1163, 1201, 1211 (4 sites) and escrow.rs lines 508, 794 (2 sites). escrow.rs import at line 59 updated to jwt_ttl_secs function."
+    },
+    "tracing_test_dev_dep": {
+      "status": "PASS",
+      "note": "tracing-test = '0.2' added to [dev-dependencies] in mcp/Cargo.toml. Not in production dependencies."
+    },
+    "oauth_loopback_regression": {
+      "status": "PASS",
+      "note": "cache_minted_token_overwrites_existing updated to use jwt_ttl_secs() function call instead of JWT_TTL_SECS constant. Import updated. Assertion message updated. Behavioral semantics preserved."
+    }
+  },
+
+  "test_quality_assessment": {
+    "test_isolation": "GOOD — pure helper pattern correctly avoids OnceLock pollution between parallel test runs. Choice endorsed by task spec.",
+    "assertion_quality": "GOOD with one gap (TR2-R1-1). All other assertions test actual return values and actual log output, not mock call counts.",
+    "regression_anchor": "GOOD — Some('3600') passthrough test directly guards the 'existing OAuth flows keep 1h TTL when env is unset' invariant.",
+    "silent_default_vector_closed": "GOOD for notanumber, empty, and in-range cases. Gap on whitespace (TR2-R1-1) is minor since the production code path is shared with empty-string via trim().",
+    "redundancy": "None detected. Each case (low-clamp, high-clamp, in-range, parse-fail, empty, whitespace, absent) covers a distinct branch."
+  },
+
+  "blocking": false,
+  "required_changes": [
+    "Add logs_contain assertion for whitespace-only case in jwt_ttl_parse_failure_logs_warn_and_uses_default (TR2-R1-1)"
+  ],
+  "optional_improvements": []
+}

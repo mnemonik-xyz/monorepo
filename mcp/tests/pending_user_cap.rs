@@ -91,7 +91,7 @@ fn is_per_user_cap_error(body: &Value) -> bool {
 #[tokio::test]
 async fn test_51st_sign_memory_returns_429_with_retry_after() {
     let state = mock_state();
-    let oauth_state = Arc::new(OAuthState::new(TEST_SECRET));
+    let oauth_state = Arc::new(OAuthState::with_defaults(TEST_SECRET));
     let app = build_app(state.clone(), oauth_state.clone());
 
     let user_pubkey = "user-cap-test-pubkey";

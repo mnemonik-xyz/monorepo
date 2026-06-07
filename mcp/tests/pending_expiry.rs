@@ -143,7 +143,7 @@ async fn park_bundle(state: &Arc<McpState>, owner: &str) -> String {
 #[tokio::test]
 async fn test_after_301s_pending_returns_410_and_evicts() {
     let state = state_with_short_ttl(1);
-    let oauth_state = Arc::new(OAuthState::new(TEST_SECRET));
+    let oauth_state = Arc::new(OAuthState::with_defaults(TEST_SECRET));
     let app = build_app(state.clone(), oauth_state.clone());
 
     let kp = Keypair::new();

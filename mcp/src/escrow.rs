@@ -56,7 +56,7 @@ use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
 use crate::mcp::McpState;
-use crate::oauth::{Claims, OAuthState, JWT_ISSUER, JWT_TTL_SECS};
+use crate::oauth::{jwt_ttl_secs, Claims, OAuthState, JWT_ISSUER};
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -508,7 +508,7 @@ pub async fn extension_bootstrap_redeem_handler(
         Json(ExtensionBootstrapRedeemResponse {
             access_token: token,
             aud: EXTENSION_JWT_AUDIENCE,
-            expires_in: JWT_TTL_SECS,
+            expires_in: jwt_ttl_secs(),
         }),
     )
         .into_response()
@@ -794,7 +794,7 @@ pub fn mint_extension_jwt(
         aud: EXTENSION_JWT_AUDIENCE.to_string(),
         sub: sub.to_string(),
         iat: now,
-        exp: now + JWT_TTL_SECS,
+        exp: now + jwt_ttl_secs(),
         jti: uuid::Uuid::new_v4().to_string(),
         google_sub,
     };

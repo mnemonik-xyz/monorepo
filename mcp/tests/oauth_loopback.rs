@@ -32,7 +32,7 @@ use http_body_util::BodyExt;
 use mnemonic_core::identity::{read_token_from, save_token_to, TokenJson};
 use mnemonic_mcp::mcp::token_expired;
 use mnemonic_mcp::oauth::{
-    authorize_handler, cache_minted_token, token_handler, OAuthState, JWT_TTL_SECS,
+    authorize_handler, cache_minted_token, jwt_ttl_secs, token_handler, OAuthState,
 };
 use serde_json::Value;
 use solana_sdk::signature::{Keypair, Signer};
@@ -136,7 +136,7 @@ fn fresh_install_path() {
         // signed-challenge mirrors the existing oauth_flow.rs fixture; we
         // need a real `token_handler` execution because that's where the
         // `cache_minted_token` call lives.
-        let st = Arc::new(OAuthState::new(TEST_SECRET));
+        let st = Arc::new(OAuthState::with_defaults(TEST_SECRET));
         let kp = Keypair::new();
         let pubkey = kp.pubkey().to_string();
         let verifier = "loopback-fresh-verifier-43-chars-aaaaaaaaa";
@@ -340,7 +340,7 @@ fn cache_minted_token_overwrites_existing() {
     use mnemonic_mcp::oauth::issue_jwt;
     with_config_dir_override(|cfg_dir| {
         let path = cfg_dir.join("token.json");
-        let st = Arc::new(OAuthState::new(TEST_SECRET));
+        let st = Arc::new(OAuthState::with_defaults(TEST_SECRET));
         let owner_a = "OwnerA111111111111111111111111111111111111";
         let owner_b = "OwnerB111111111111111111111111111111111111";
 
@@ -350,14 +350,14 @@ fn cache_minted_token_overwrites_existing() {
         assert_eq!(first.jwt, jwt_a);
         assert_eq!(first.sub, owner_a);
         // expires_at is derived from the JWT's own `exp` claim — assert it
-        // parses and is within ~JWT_TTL_SECS of now (the exp claim is
-        // `iat + JWT_TTL_SECS`, where iat is the JWT mint timestamp).
+        // parses and is within ~`jwt_ttl_secs()` of now (the exp claim is
+        // `iat + jwt_ttl_secs()`, where iat is the JWT mint timestamp).
         let parsed = chrono::DateTime::parse_from_rfc3339(&first.expires_at)
             .expect("cached expires_at must be RFC3339");
         let delta = parsed.with_timezone(&chrono::Utc) - chrono::Utc::now();
         assert!(
-            delta.num_seconds() > 0 && delta.num_seconds() <= JWT_TTL_SECS as i64,
-            "expires_at must be in the future, within JWT_TTL_SECS: delta={}s",
+            delta.num_seconds() > 0 && delta.num_seconds() <= jwt_ttl_secs() as i64,
+            "expires_at must be in the future, within jwt_ttl_secs(): delta={}s",
             delta.num_seconds()
         );
 

@@ -680,7 +680,17 @@ async fn main() -> anyhow::Result<()> {
 
     match transport.as_str() {
         "stdio" => run_stdio(state).await,
-        "http" => run_http(state, &cli.host, cli.port, google_oauth, extension_settings).await,
+        "http" => {
+            run_http(
+                state,
+                &cli.host,
+                cli.port,
+                google_oauth,
+                extension_settings,
+                &cfg.database_path,
+            )
+            .await
+        }
         other => anyhow::bail!("unknown transport: {other} (use 'stdio' or 'http')"),
     }
 }
@@ -781,6 +791,7 @@ async fn run_http(
     port: u16,
     google_oauth: GoogleOAuthSettings,
     extension_settings: ExtensionSettings,
+    database_path: &std::path::Path,
 ) -> anyhow::Result<()> {
     use axum::http::{header, Method};
     use tower_governor::{governor::GovernorConfigBuilder, GovernorLayer};
@@ -788,10 +799,51 @@ async fn run_http(
 
     // ── OAuth state + JWT secret (Decisions 9 + 11) ──────────────────────────
     let secret = load_jwt_secret()?;
-    let oauth_state = Arc::new(oauth::OAuthState::new(&secret));
+    // Seed the process-global server origin OnceLock from `MCP_PUBLIC_BASE_URL`
+    // BEFORE any OAuth route is mounted — every `/.well-known/*` metadata
+    // document and every canonical-CBOR challenge envelope reads the resolved
+    // value via `oauth::server_origin()`. Stdio transport never reaches this
+    // path; the OnceLock's safe default (`SERVER_ORIGIN_DEFAULT`,
+    // `https://mcp.mnemonik.xyz`) keeps the legacy hardcoded behavior intact
+    // there. Malformed env values WARN-log and fall back to the default rather
+    // than aborting boot — same defensive pattern as `seed_jwt_ttl_from_env`.
+    oauth::seed_server_origin_from_env();
+    // Seed the process-global JWT TTL OnceLock from `MCP_JWT_TTL_SECS`
+    // (Decision 12, refresh-token-rotation). Runs BEFORE OAuthState::new
+    // so every reader observes the seeded value. Stdio transport never
+    // reaches this path; the OnceLock's safe default (3600s) keeps
+    // `jwt_ttl_secs()` correct there too.
+    oauth::seed_jwt_ttl_from_env();
+    // ── MCP_REFRESH_SALT gate (refresh-token-rotation Decision 2) ────────────
+    // Boot aborts on missing / invalid / under-32-byte salt. The decoder is
+    // `STANDARD` base64 — matches `openssl rand -base64 32` in `.env.example`.
+    let refresh_salt =
+        oauth::validate_refresh_salt(std::env::var("MCP_REFRESH_SALT").ok().as_deref())?;
+    // Production defaults from `oauth::refresh` consts (D4, D5, D9).
+    let reuse_interval = std::time::Duration::from_secs(oauth::refresh::REUSE_INTERVAL_SECS);
+    let evictor_tick = std::time::Duration::from_secs(oauth::refresh::EVICTOR_TICK_SECS);
+    let reuse_cache_cap = oauth::refresh::DEFAULT_REUSE_CACHE_CAP;
+    let oauth_state = Arc::new(oauth::OAuthState::new(
+        &secret,
+        database_path,
+        refresh_salt,
+        reuse_interval,
+        evictor_tick,
+        reuse_cache_cap,
+    )?);
     tracing::info!(
-        "OAuth state initialized (LRU cap {})",
-        oauth::OAUTH_STATE_CAPACITY
+        "OAuth state initialized (LRU cap {}, refresh-token rotation enabled, db={})",
+        oauth::OAUTH_STATE_CAPACITY,
+        database_path.display()
+    );
+    // ── Refresh-token evictor (Decision 9) ───────────────────────────────────
+    // Spawn alongside the existing `_confirmation_evictor`. Holds a strong
+    // `Arc<Mutex<Connection>>` reference for the lifetime of the process —
+    // the loop never returns under normal operation; the runtime drops the
+    // task on shutdown.
+    let _refresh_evictor = oauth::refresh::start_evictor(
+        std::sync::Arc::clone(&oauth_state.refresh_store),
+        oauth_state.evictor_tick,
     );
 
     // ── Per-IP rate limiters (Decision 9, tech-spec AC line 357) ─────────────

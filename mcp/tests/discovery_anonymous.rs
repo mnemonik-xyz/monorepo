@@ -75,7 +75,7 @@ async fn post_json(app: &Router, body: Value, auth: Option<&str>) -> (StatusCode
 #[tokio::test]
 async fn prompts_list_returns_seven_without_bearer() {
     let state = mock_state();
-    let oauth_state = Arc::new(OAuthState::new(TEST_SECRET));
+    let oauth_state = Arc::new(OAuthState::with_defaults(TEST_SECRET));
     let app = build_router(state, oauth_state);
 
     let (status, body) = post_json(
@@ -120,7 +120,7 @@ async fn prompts_list_returns_seven_without_bearer() {
 #[tokio::test]
 async fn resources_list_returns_seven_without_bearer() {
     let state = mock_state();
-    let oauth_state = Arc::new(OAuthState::new(TEST_SECRET));
+    let oauth_state = Arc::new(OAuthState::with_defaults(TEST_SECRET));
     let app = build_router(state, oauth_state);
 
     let (status, body) = post_json(
@@ -165,7 +165,7 @@ async fn resources_list_returns_seven_without_bearer() {
 #[tokio::test]
 async fn resources_read_returns_full_markdown_for_attest() {
     let state = mock_state();
-    let oauth_state = Arc::new(OAuthState::new(TEST_SECRET));
+    let oauth_state = Arc::new(OAuthState::with_defaults(TEST_SECRET));
     let app = build_router(state, oauth_state);
 
     let uri = "mnemonik://skills/mnemonik-attest.md";
@@ -217,7 +217,7 @@ async fn resources_read_returns_full_markdown_for_attest() {
 #[tokio::test]
 async fn tools_list_enriched_with_purpose_trigger() {
     let state = mock_state();
-    let oauth_state = Arc::new(OAuthState::new(TEST_SECRET));
+    let oauth_state = Arc::new(OAuthState::with_defaults(TEST_SECRET));
     let app = build_router(state, oauth_state);
 
     let (status, body) = post_json(
@@ -270,7 +270,7 @@ async fn tools_list_enriched_with_purpose_trigger() {
 #[tokio::test]
 async fn initialize_surfaces_embedder_metadata() {
     let state = mock_state();
-    let oauth_state = Arc::new(OAuthState::new(TEST_SECRET));
+    let oauth_state = Arc::new(OAuthState::with_defaults(TEST_SECRET));
     let app = build_router(state, oauth_state);
 
     let (status, body) = post_json(
@@ -314,7 +314,7 @@ async fn initialize_surfaces_embedder_metadata() {
 #[tokio::test]
 async fn prompts_list_with_invalid_bearer_passes_through() {
     let state = mock_state();
-    let oauth_state = Arc::new(OAuthState::new(TEST_SECRET));
+    let oauth_state = Arc::new(OAuthState::with_defaults(TEST_SECRET));
     let app = build_router(state, oauth_state);
 
     // Garbage JWT — must not turn an allowlisted call into a 401. Per
@@ -345,7 +345,7 @@ async fn prompts_list_with_invalid_bearer_passes_through() {
 #[tokio::test]
 async fn prompts_get_unknown_name_returns_invalid_params() {
     let state = mock_state();
-    let oauth_state = Arc::new(OAuthState::new(TEST_SECRET));
+    let oauth_state = Arc::new(OAuthState::with_defaults(TEST_SECRET));
     let app = build_router(state, oauth_state);
 
     let (status, body) = post_json(
@@ -386,7 +386,7 @@ async fn prompts_get_unknown_name_returns_invalid_params() {
 #[tokio::test]
 async fn resources_read_bad_uri_scheme_returns_invalid_params() {
     let state = mock_state();
-    let oauth_state = Arc::new(OAuthState::new(TEST_SECRET));
+    let oauth_state = Arc::new(OAuthState::with_defaults(TEST_SECRET));
     let app = build_router(state, oauth_state);
 
     let bad_uri = "https://invalid-scheme/foo.md";

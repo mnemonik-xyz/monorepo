@@ -64,7 +64,7 @@ async fn post_json(app: &Router, body: Value, auth: Option<&str>) -> (StatusCode
 #[tokio::test]
 async fn test_tools_list_initialize_no_auth_200_sign_memory_no_auth_401() {
     let state = mock_state();
-    let oauth_state = Arc::new(OAuthState::new(TEST_SECRET));
+    let oauth_state = Arc::new(OAuthState::with_defaults(TEST_SECRET));
     let app = build_router(state, oauth_state.clone());
 
     // 1. tools/list with NO Authorization header → 200 (allowlisted).

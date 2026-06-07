@@ -228,9 +228,35 @@ name = "sign_memory_softfall"
 path = "tests/sign_memory_softfall.rs"
 required-features = ["test-support"]
 
+# Refresh-token-rotation Task 4 — smoke tests for the `_helpers/mod.rs`
+# `TestServerBuilder::with_oauth_token` flag and fixture helpers
+# (`bootstrap_oauth`, `rotate`, `insert_expired_refresh_for_test`,
+# `family_has_unrevoked_rows`). Pulls `_helpers` via `#[path]` so the smoke
+# binary is its own Cargo target — keeps the assertions from being
+# duplicated into every consumer of `_helpers`.
+[[test]]
+name = "helpers_smoke"
+path = "tests/helpers_smoke.rs"
+required-features = ["test-support"]
+
+# Refresh-token-rotation Task 5 — full integration suite covering AC1–AC13
+# plus one cross-cutting `cross_table_mutex_no_starvation` test. Pulls
+# `_helpers` via `mod _helpers;` and exercises `TestServerBuilder::
+# with_oauth_token(true).with_reuse_interval(100ms)`. Gated on
+# `test-support` because `_helpers` imports `mnemonic_mcp::test_support`.
+[[test]]
+name = "oauth_refresh_e2e"
+path = "tests/oauth_refresh_e2e.rs"
+required-features = ["test-support"]
+
 [dev-dependencies]
 tempfile = "3"
 httpmock = "0.8"
+# `#[traced_test]` macro + `logs_contain` helper used by the WARN-log
+# assertions in oauth::tests::jwt_ttl_* (Task 2, refresh-token-rotation).
+# Tech-spec Dependencies list it; landing here lets Task 3
+# (logging_policy WARN assertions) reuse the same dev-dep.
+tracing-test = "0.2"
 # regex — used by `_helpers/delivery_harness.rs` to match any Arweave GET
 # path (the arlocal write path self-mints the tx_id from a PRNG, so the
 # test can't pre-register a specific path).

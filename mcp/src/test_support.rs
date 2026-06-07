@@ -436,7 +436,7 @@ struct LocalClaims {
 ///
 /// The `secret` must be `>= 32` bytes; shorter inputs panic at the
 /// `EncodingKey::from_secret` boundary in production via
-/// `OAuthState::new`'s assert. We do not enforce here because tests
+/// `OAuthState::new` / `OAuthState::with_defaults` asserts. We do not enforce here because tests
 /// occasionally use shorter secrets to exercise rejection paths.
 pub fn mint_jwt(sub: &str, secret: &[u8]) -> String {
     let now = Utc::now().timestamp() as u64;

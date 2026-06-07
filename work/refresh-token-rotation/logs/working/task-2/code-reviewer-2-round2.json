@@ -1,0 +1,60 @@
+{
+  "reviewer": "code-reviewer-2",
+  "round": 2,
+  "commits": {
+    "m1_whitespace_assertion_fix": "b84a031",
+    "M1_m2_fix": "b092178",
+    "SA2_security_followup": "719b5c8"
+  },
+  "task": "work/refresh-token-rotation/tasks/2.md",
+  "timestamp": "2026-06-06",
+  "verdict": "APPROVE",
+  "summary": "All three round-1 code-review findings (M1, m1, m2) are correctly addressed across b84a031 and b092178. The subsequent SA2-driven commit 719b5c8 adds correct security hardening: raw env-var string removed from INFO/DEBUG logs, and a char-boundary-safe bound_log_value helper bounds the parse-failure WARN to 16 chars. All changes verified correct with no new issues.",
+
+  "findings_resolution": {
+    "M1_code_review": {
+      "status": "RESOLVED",
+      "fix_commit": "b092178",
+      "description": "seed_jwt_ttl_from_env uses get_or_init with a captured Option<u64>. INFO fires only when newly_seeded_value is Some (this call won the init race). Re-seed path emits DEBUG with the already-stored value. Log truthfulness verified: stored comes from *JWT_TTL.get_or_init(...) which returns the actual lock value regardless of which call populated it.",
+      "note_on_719b5c8": "SA2-R1-M1 further strips the raw env-var string from both INFO and DEBUG — only the resolved numeric TTL is logged. Correct tightening: operator who pastes MCP_JWT_SECRET into MCP_JWT_TTL_SECS no longer leaks it through log aggregation."
+    },
+    "m1_whitespace_assertion": {
+      "status": "RESOLVED",
+      "fix_commit": "b84a031",
+      "description": "Second logs_contain assertion placed after the whitespace-only call, independently verifying the WARN fires for Some('   '). TR2-R1-1 attribution comment present."
+    },
+    "m2_visibility": {
+      "status": "RESOLVED",
+      "fix_commit": "b092178",
+      "description": "JWT_TTL_DEFAULT_SECS, JWT_TTL_MIN_SECS, JWT_TTL_MAX_SECS are now pub(crate). No external files reference these constants."
+    }
+  },
+
+  "new_commit_review_719b5c8": {
+    "changes_reviewed": [
+      "INFO log: raw MCP_JWT_TTL_SECS string removed; only resolved numeric TTL logged.",
+      "DEBUG log: same — raw string removed; only already-stored numeric TTL logged.",
+      "New private fn bound_log_value(s: &str, max_chars: usize) -> String — char-boundary-safe truncation via chars().take(max_chars) + ellipsis on overflow.",
+      "compute_jwt_ttl_from_env_str parse-failure WARN: trimmed echoed through bound_log_value(trimmed, 16).",
+      "New test jwt_ttl_parse_failure_warn_bounds_raw_value: 17-char input, asserts first 16 present + ellipsis + 17th absent.",
+      "New test bound_log_value_truncates_to_max_chars: no-truncation, exact-length, over-length, empty, multi-byte UTF-8."
+    ],
+    "correctness_notes": {
+      "bound_log_value_impl": "CORRECT — chars().take(max_chars) is char-boundary-safe. iter.next() after the take detects overflow without advancing past a char boundary. collect() handles multi-byte chars correctly.",
+      "utf8_test_case": "CORRECT — 'üü🦀abc' with max_chars=3: takes ü, ü, 🦀 (3 chars); iter.next() = Some('a'); result = 'üü🦀…'. Assertion matches.",
+      "existing_test_compat": "CORRECT — 'notanumber' is 10 chars (< 16 limit); bound_log_value returns it unchanged. Existing logs_contain assertion for that string still passes.",
+      "visibility": "bound_log_value is module-private (fn, not pub fn) — correct for an internal logging utility.",
+      "test_attrs": "jwt_ttl_parse_failure_warn_bounds_raw_value uses #[tracing_test::traced_test] + #[test] correctly. bound_log_value_truncates_to_max_chars uses only #[test] — correct, no tracing involved."
+    },
+    "new_findings": []
+  },
+
+  "positive_observations": [
+    "get_or_init is the idiomatic OnceLock API for this pattern — eliminates the misleading log from round 1.",
+    "Removing the raw env-var from logs proactively closes a potential credential-leakage path that the spec's Decision-14 logging policy is designed to prevent.",
+    "bound_log_value uses chars() not byte slices — correct char-boundary-safe approach for UTF-8 attacker input.",
+    "The 16-char bound is well-chosen: 'notanumber' (10 chars) fits without truncation so existing test assertions remain valid, while a 1 MB attacker payload is cut to a fixed short prefix."
+  ],
+
+  "overall_assessment": "All round-1 findings resolved. 719b5c8 security hardening is correct, well-tested, and introduces no regressions. Round 2 verdict: APPROVE."
+}

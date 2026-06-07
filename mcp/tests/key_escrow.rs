@@ -137,7 +137,7 @@ fn make_harness() -> Harness {
 /// `ExtensionBootstrapTickets` (e.g. with `ttl_seconds=0` to drive the
 /// expired-ticket path). `None` uses the production defaults.
 fn make_harness_with_tickets(tickets: Option<Arc<ExtensionBootstrapTickets>>) -> Harness {
-    let oauth_state = Arc::new(OAuthState::new(TEST_SECRET));
+    let oauth_state = Arc::new(OAuthState::with_defaults(TEST_SECRET));
     let mcp = mock_state();
     // Migrate both tables: T14's google_identity_links first (so the FK in
     // key_escrow_blobs can resolve), then T15's key_escrow_blobs.

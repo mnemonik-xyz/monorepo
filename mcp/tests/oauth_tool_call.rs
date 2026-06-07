@@ -79,7 +79,7 @@ async fn post_jsonrpc(app: &Router, body: Value, token: Option<&str>) -> (Status
 #[tokio::test]
 async fn test_tools_list_6_tools_and_sign_memory_returns_awaiting_signature() {
     let state = mock_state();
-    let oauth_state = Arc::new(OAuthState::new(TEST_SECRET));
+    let oauth_state = Arc::new(OAuthState::with_defaults(TEST_SECRET));
     let app = build_router(state, oauth_state.clone());
 
     let user_pubkey = "test-user-pubkey-base58";

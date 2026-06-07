@@ -1883,7 +1883,7 @@ mod transport_tests {
     /// `initialize` and `tools/list` without a JWT (per Decision 9) so the
     /// existing `test_chunked_response_encoding` test keeps passing.
     fn build_test_router(state: Arc<McpState>) -> Router {
-        let oauth_state = Arc::new(crate::oauth::OAuthState::new(TEST_JWT_SECRET));
+        let oauth_state = Arc::new(crate::oauth::OAuthState::with_defaults(TEST_JWT_SECRET));
         let mcp_route = post(mcp_handler).layer(axum_middleware::from_fn_with_state(
             oauth_state,
             crate::oauth::bearer_auth_middleware,
@@ -2035,7 +2035,7 @@ mod transport_tests {
     /// Wrap around `crate::oauth::issue_jwt` to keep the call shape in
     /// the TDD anchor (and any future test) short and explicit.
     fn mint_jwt_for_tests(sub: &str) -> String {
-        let oauth_state = crate::oauth::OAuthState::new(TEST_JWT_SECRET);
+        let oauth_state = crate::oauth::OAuthState::with_defaults(TEST_JWT_SECRET);
         crate::oauth::issue_jwt(&oauth_state, sub).expect("issue_jwt")
     }
 

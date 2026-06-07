@@ -108,7 +108,7 @@ async fn get_redeem(app: &Router, ticket: &str, auth: Option<&str>) -> (StatusCo
 #[tokio::test]
 async fn test_issue_and_redeem_through_real_middleware() {
     let state = mock_state();
-    let oauth_state = Arc::new(OAuthState::new(TEST_SECRET));
+    let oauth_state = Arc::new(OAuthState::with_defaults(TEST_SECRET));
     let app = build_router(state, oauth_state);
 
     // 1. Issue with a valid Bearer JWT — passes middleware, 200 + ticket_id.
@@ -167,7 +167,7 @@ async fn test_redeem_garbage_uuid_no_auth_is_404_not_401() {
     // test could not catch this because the closure was routed under a bare
     // Router with no middleware.
     let state = mock_state();
-    let oauth_state = Arc::new(OAuthState::new(TEST_SECRET));
+    let oauth_state = Arc::new(OAuthState::with_defaults(TEST_SECRET));
     let app = build_router(state, oauth_state);
 
     let (status, _body) = get_redeem(&app, "not-a-uuid-at-all", None).await;
@@ -184,7 +184,7 @@ async fn test_issue_without_bearer_is_401() {
     // /issue is NOT on the allowlist; `extract_json_rpc_method` on a non-
     // JSON-RPC body returns None → not allowlisted → 401 from middleware.
     let state = mock_state();
-    let oauth_state = Arc::new(OAuthState::new(TEST_SECRET));
+    let oauth_state = Arc::new(OAuthState::with_defaults(TEST_SECRET));
     let app = build_router(state, oauth_state);
 
     let (status, body) = post_issue(
@@ -211,7 +211,7 @@ async fn test_per_user_cap_returns_429_at_handler() {
     // `BootstrapInsertError::PerUserCapExceeded → StatusCode::TOO_MANY_REQUESTS`
     // mapping that was previously only covered at the unit-store level.
     let state = mock_state();
-    let oauth_state = Arc::new(OAuthState::new(TEST_SECRET));
+    let oauth_state = Arc::new(OAuthState::with_defaults(TEST_SECRET));
     let app = build_router(state, oauth_state);
 
     let kp_json = fake_keypair_json();

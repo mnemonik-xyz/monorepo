@@ -231,7 +231,7 @@ async fn make_harness() -> Harness {
         token_url,
         jwks,
     ));
-    let oauth_state = Arc::new(OAuthState::new(TEST_SECRET));
+    let oauth_state = Arc::new(OAuthState::with_defaults(TEST_SECRET));
     let mcp = mock_state();
     google::migrate_google_identity_links(mcp.store.lock().unwrap().conn()).unwrap();
     let app = build_app(mcp.clone(), oauth_state.clone(), google.clone());
