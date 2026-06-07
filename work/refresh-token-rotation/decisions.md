@@ -423,3 +423,51 @@ A handler-side proxy log line was also added — the rotate-internal log emissio
 - `cargo test -p mnemonic-mcp --features test-support --test auth_allowlist --test anonymous_recall --test helpers_smoke` → 9/9 pass (regression anchors green).
 - `cargo clippy -p mnemonic-mcp --tests --features test-support -- -D warnings` → clean.
 - `cargo fmt --all -- --check` → clean.
+
+## 2026-06-07 — Task 7 Security Audit
+
+**Status:** Done
+**Agent:** security-auditor
+**Verdict:** PASS (CLEAN — ship-ready). 0 BLOCKER · 0 MAJOR · 2 MINOR · 4 INFORMATIONAL.
+
+**Summary:** Wave-5 read-only holistic security audit of Tasks 1–5 final state. Every D2 / D5 / D8 / D11 / D14 / D15 / D16 decision-specific invariant verified by file:line citation plus existing test-pinning evidence; OWASP A01–A10 walk closes with no exploitable conditions on the new surface; grep-based credential-leak survey across `tracing::*!`, `format!`, `unwrap()`, env-var read sites, and `tower_governor` confirms (a) no plaintext / token_hash / salt / full access_token in any log line across all 6 rotate branches (A, B, B', C, D, E), (b) zero `format!` into SQL or credential-bearing log messages, (c) no production `unwrap()` in `refresh.rs`, (d) both env vars (`MCP_REFRESH_SALT`, `MCP_JWT_TTL_SECS`) read at exactly one site each and documented in `.env.example` + `deployment.md`, (e) `/oauth/token` still wrapped by `GovernorLayer` per-IP limiter with no bypass route. No admin-override / god-key / hardcoded-pubkey backdoor exists in the new code. The two MINOR findings (`OAuthState::with_defaults` not `#[cfg(test)]`-gated; `refresh_salt` / `refresh_store` are `pub` fields) are pre-existing design items from Tasks 3 and 4 that are documented as deferred-hardening in their respective decisions.md entries — neither blocks ship. The four INFORMATIONAL items document deliberate trade-offs (Branch B' field-set widening, in-memory pair cache, no per-`client_id` validation, `OAUTH_RATELIMIT_DISABLE` knob) that the tech-spec accepts in the open.
+
+**No fix cycle triggered** — all findings are below the MEDIUM threshold and the two MINOR items were explicitly out-of-scope for Tasks 1–5 (Task 3/4 deviations).
+
+**Report:** `work/refresh-token-rotation/logs/working/audit/security-audit.md`
+
+## 2026-06-07 — Task 6 Code Audit
+
+**Status:** Done
+**Agent:** code-auditor
+**Verdict:** CLEAN (0 BLOCKER, 0 MAJOR, 4 MINOR, 3 INFO)
+
+**Summary:** Final-state holistic audit across all files touched by Tasks 1–5. Every Decision D1–D16 is implemented as specified or with documented security-equivalent deviations. The four CLAUDE.md hard architectural rules hold. The shared-resources singleton invariants (one second `Arc<Mutex<Connection>>` on the same SQLite file, one process-global `OnceLock<u64>` for JWT TTL, one `ReuseCache` per `OAuthState`, one validated salt per deploy) match the tech-spec table. Mutex discipline is correct everywhere the refresh feature touches code — no `.await` is held under any `rusqlite::Connection` guard, and the refresh handler uses `tokio::task::spawn_blocking` to hop the writer-lock scope out of the async runtime. R6 (DB-write-failure retry-safety, delegated from Task 5) verified: `rotate` propagates `rusqlite::Error` via `anyhow::Result`, every error path explicitly `ROLLBACK`s, and a subsequent retry within the reuse window is safe under every COMMIT-failure scenario (Branch A leaves a bounded orphan cache entry that times out within 5s and can never authenticate a request because no client holds the matching plaintext). Cross-task encroachment (T3's 2-line `access_jwt` field on `RotateOutcome::Rotated` in T1's `refresh.rs`) is minimal and well-integrated. No production code change required to advance.
+
+**Findings:** 4 MINOR (sub-second `reuse_interval.as_secs()` truncation forcing 1.1s integration-test sleeps; defensive `assert!` over `anyhow::ensure!` in `OAuthState::new`; `NonZeroUsize::new(...).expect(...)` instead of const-eval `match` for `OAUTH_STATE_CAPACITY`; repeated `tracing` target literals). 3 INFO (tech-spec § Shared resources line 164 understates the `jwt_ttl_secs()` read-site count as 6 when actual is 8; bounded orphan cache on Branch A COMMIT failure is safe but worth documenting; `OAuthState::with_defaults` lives outside `#[cfg(test)]` per documented T3 trade-off). None gate Task 9.
+
+**Report:** `work/refresh-token-rotation/logs/working/audit/code-audit.md`
+
+## 2026-06-07 — Task 8 Test Audit
+
+**Status:** Done
+**Agent:** test-auditor
+**Verdict:** PASS (0 BLOCKER · 0 MAJOR · 0 MINOR · 5 INFO).
+
+**Summary:** Final-state test-quality audit of Tasks 1–5. All 13 ACs map to a dedicated integration test in `mcp/tests/oauth_refresh_e2e.rs`; D5 (put-before-COMMIT race observer), D8 (`replay_outside_window_revokes_full_family_in_one_tx`), D9 (`evictor_evicts_expired_rows`) each have a dedicated unit test in `mcp/src/oauth/refresh.rs#tests`; R6 is delegated to Task 6 by an explicit Task 5 deviation and the Task 6 verdict (CLEAN) explicitly closes R6 via the ROLLBACK-on-error contract in `rotate`. Regression anchors (`auth_allowlist.rs`, `anonymous_recall.rs`, `oauth_loopback.rs`, `oauth/mod.rs:2022-2099` bearer-auth middleware hot region) preserve every test function name and assertion intent — the only diff is a constructor rename (`OAuthState::new` → `OAuthState::with_defaults`) introduced by Task 3. No real-time sleep ≥ 1s except the documented `Duration::as_secs()`-truncation workaround on AC4/AC6/D14-Branch-C (1100 ms each, inline-justified). No litmus-failing test; the early-draft `token_request_deserializes_both_grants` / `mint_and_hash_roundtrip` pair did not re-appear. `cross_table_tokio_mutex_no_starvation` renaming + scope-clarification block correctly advertises that the test verifies tokio-Mutex fairness on TWO separate-tempfile connections (per Decision 6 helper wiring), NOT same-file SQLite writer-lock fairness; same-file variant is INFO-flagged as a follow-up. AC12 asserts byte-identity on the PAIR `(access_token, refresh_token)` across 10 parallel rotations, not just refresh.
+
+**No fix cycle triggered** — all five findings are INFO (R6 cross-audit chain documentation, same-file SQLite-writer follow-up, D5 race-observer test design rationale, `_helpers_*` test naming style, AC10 structural-not-byte-equality nuance).
+
+**Report:** `work/refresh-token-rotation/logs/working/audit/test-audit.md`
+
+## 2026-06-07 — Task 9 Pre-deploy QA
+
+**Status:** Done
+**Agent:** pre-deploy-qa
+**Verdict:** PASS_WITH_NOTES → GO. Task 10 unblocked.
+
+**Summary:** All four static/dynamic gates green on clean local workspace. `cargo test --workspace --no-fail-fast --features 'mnemonic-mcp/test-support'` — 714/714 pass, 0 fail, 4 ignored, across 43 test binaries (oauth_refresh_e2e 16/16 in 2.51s; auth_allowlist 6/6; anonymous_recall 12/12; oauth_loopback 4/4; refresh::tests + oauth::tests for D2/D5/D11/D14/D15/D16/jwt_ttl all green). `cargo clippy --workspace --all-targets --features 'mnemonic-mcp/test-support' -- -D warnings` clean. `cargo fmt --all -- --check` clean. CI-pinned `gitleaks 8.21.2 detect --source . --config .gitleaks.toml --redact` reports no leaks on both working tree AND full git history (`--log-opts='--all'`). Every user-spec AC1–AC13 mapped to a passing integration test in `oauth_refresh_e2e.rs`; every tech-spec technical AC verified by file:line citation + passing test (AC7 covered by two passing tests at unit + integration level after live-curl deviation).
+
+**Deviations:** Live HTTP boot for the AC7 `curl /.well-known/oauth-authorization-server` smoke could not run — release binary aborts at `identity::ensure failed at startup: reading identity from OS keychain`. Same sandbox limitation Tasks 2/3/4/5 documented; compensated by two passing tests covering the same wire-level contract plus direct code citation at `mcp/src/oauth/mod.rs:1917`. R1 empirical gate (Claude.ai parallel to Cursor with `MCP_JWT_TTL_SECS=60` for 2+ minutes) is deferred to Task 10 by design — out of Task 9 scope. Local gitleaks 8.30.1 (Homebrew current) reports 3 historical false-positives (Cargo.lock `curve25519-dalek` crate-name × 2, Chrome extension manifest RSA public key × 1) due to heuristic drift in newer `generic-api-key` rule; CI-pinned 8.21.2 is the contractual gate and reports clean — no action required.
+
+**Report:** `work/refresh-token-rotation/logs/working/task-9/qa-report.md`
