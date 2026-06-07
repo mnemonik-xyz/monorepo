@@ -10,7 +10,7 @@ import { readIdentity } from "../lib/storage";
  * `GET https://mcp.mnemonik.xyz/oauth/authorize?...&redirect_uri=...&state=...`
  * — the server's bootstrap (`oauth::authorize_init_handler`) builds a
  * canonical-CBOR challenge under that `state`, then 302-redirects the
- * browser here with `?challenge=<base64>&state=<state>`.
+ * browser here with `?challenge=<base64>&state=<state>&mcp_base=<origin>`.
  *
  * Flow inside this page:
  *   1. Read challenge + state from URL.
@@ -18,7 +18,7 @@ import { readIdentity } from "../lib/storage";
  *   3. Show a brief preview (we do NOT decode the CBOR — the only thing
  *      the user is approving is "let this MCP client act on my behalf").
  *   4. On Approve → WASM `sign_challenge(keypair, challenge_bytes)` →
- *      POST {state, cose_signed} to `https://mcp.mnemonik.xyz/oauth/authorize`.
+ *      POST {state, signature} to `<mcp_base>/oauth/authorize`.
  *   5. Server returns {code, state, redirect_uri}. We then 302-bounce
  *      `window.location` to `redirect_uri?code=...&state=...` so the
  *      MCP client's local OAuth callback handler picks the code up.
@@ -34,7 +34,6 @@ import { readIdentity } from "../lib/storage";
 const MCP_BASE =
   (import.meta.env?.VITE_MCP_BASE as string | undefined) ??
   "https://mcp.mnemonik.xyz";
-const MCP_AUTHORIZE_URL = `${MCP_BASE}/oauth/authorize`;
 
 type Phase =
   | { kind: "loading" }
@@ -51,10 +50,28 @@ function base64ToBytes(b64: string): Uint8Array {
   return out;
 }
 
+function normalizeMcpBase(raw: string): string | null {
+  if (!raw) return null;
+  try {
+    const url = new URL(raw);
+    const isHttps = url.protocol === "https:";
+    const isLocalHttp =
+      url.protocol === "http:" &&
+      (url.hostname === "localhost" || url.hostname === "127.0.0.1");
+    if (!isHttps && !isLocalHttp) return null;
+    if (url.username || url.password) return null;
+    if (url.pathname !== "/" || url.search || url.hash) return null;
+    return url.origin;
+  } catch {
+    return null;
+  }
+}
+
 export default function Consent() {
   const [params] = useSearchParams();
   const challenge = params.get("challenge") ?? "";
   const state = params.get("state") ?? "";
+  const mcpBase = normalizeMcpBase(params.get("mcp_base") ?? "") ?? MCP_BASE;
 
   const challengeBytes = useMemo(() => {
     try {
@@ -105,7 +122,7 @@ export default function Consent() {
       // mistakenly treating the 64-byte signature as a COSE envelope.
       const sig = wasm.sign_challenge(identity, challengeBytes);
       const sigB64 = btoa(String.fromCharCode(...sig));
-      const resp = await fetch(MCP_AUTHORIZE_URL, {
+      const resp = await fetch(`${mcpBase}/oauth/authorize`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -168,6 +185,10 @@ export default function Consent() {
         <div className="mt-1 break-all font-mono text-xs">
           {identity ? identity.pubkey_base58 : "(no keypair in this browser)"}
         </div>
+        <div className="mt-3 font-mono text-xs text-text-muted">
+          MCP server
+        </div>
+        <div className="mt-1 break-all font-mono text-xs">{mcpBase}</div>
       </div>
 
       {phase.kind === "loading" && (

@@ -202,8 +202,12 @@ pub const OAUTH_STATE_CAPACITY: usize = 10_000;
 /// Default server origin baked into the binary — used when
 /// `MCP_PUBLIC_BASE_URL` is unset. Matches the production hostname so the
 /// no-env-var deploy path is byte-identical to the legacy `pub const
-/// SERVER_ORIGIN` it replaced.
-pub const SERVER_ORIGIN_DEFAULT: &str = "https://mcp.mnemonik.xyz";
+/// SERVER_ORIGIN` it replaced. `pub(crate)` — same visibility as
+/// [`JWT_TTL_DEFAULT_SECS`]; the test module + [`server_origin`] are the
+/// only readers, and exposing it as `pub` would mislead consumers into
+/// treating the const as the public API instead of [`server_origin`]
+/// (CR-R1-MINOR-3).
+pub(crate) const SERVER_ORIGIN_DEFAULT: &str = "https://mcp.mnemonik.xyz";
 
 /// Process-global server origin, seeded once at startup by
 /// [`seed_server_origin_from_env`] (called inside `main::run_http`). Reads
@@ -241,6 +245,15 @@ pub fn seed_server_origin_from_env() {
         newly_seeded_value = Some(v.clone());
         v
     });
+    // Server origins are public URLs, not credentials — we intentionally
+    // log the full validated value (unlike `seed_jwt_ttl_from_env`, which
+    // logs only the resolved numeric TTL because that env var could be
+    // accidentally swapped with `MCP_JWT_SECRET`). Validation in
+    // `compute_server_origin_from_env_str` already rejects values
+    // containing credentials (userinfo `@`) and control chars (CRLF
+    // injection vectors), so what reaches this log is guaranteed to be
+    // a well-formed `scheme://authority` URL with no secret-bearing
+    // characters (SA-R1-M1, SA-R1-M2, CR-R1-MINOR-1).
     if let Some(value) = newly_seeded_value {
         tracing::info!(
             target: "mnemonic_mcp::oauth",
@@ -268,6 +281,14 @@ pub fn seed_server_origin_from_env() {
 /// Rejects (WARN + default):
 ///   - empty / whitespace-only
 ///   - missing `http://` or `https://` scheme prefix
+///   - any ASCII control character (\r, \n, \t, NUL, etc.) — defense-in-depth
+///     against CRLF header-injection if the value is ever interpolated into
+///     a raw HTTP header string outside `axum::http::HeaderValue::from_str`'s
+///     guard (SA-R1-M2)
+///   - userinfo (`@` in the authority) — closes both the credential-leak
+///     vector via the seed INFO log and the metadata pollution that would
+///     redirect OAuth clients to `https://user:pass@origin/oauth/authorize`
+///     (SA-R1-M1, CWE-532)
 ///   - trailing `/` (would double-slash when concatenated with endpoint paths)
 ///   - any `?` query or `#` fragment
 ///   - a path beyond the host:port (e.g. `https://host/sub`) — OAuth
@@ -286,6 +307,18 @@ pub(crate) fn compute_server_origin_from_env_str(raw: Option<&str>) -> String {
         return SERVER_ORIGIN_DEFAULT.to_string();
     }
     let bounded = bound_log_value(trimmed, 64);
+    // ASCII control-char rejection (SA-R1-M2). Must come BEFORE any
+    // strip_prefix matching: a value like `\rhttps://...` would otherwise
+    // fall through to the "missing scheme" WARN — correct outcome, but the
+    // WARN message would mislead the operator. The control-char branch
+    // surfaces the actual problem.
+    if trimmed.chars().any(|c| c.is_ascii_control()) {
+        tracing::warn!(
+            target: "mnemonic_mcp::oauth",
+            "MCP_PUBLIC_BASE_URL={bounded:?} contains ASCII control character; falling back to default {SERVER_ORIGIN_DEFAULT}"
+        );
+        return SERVER_ORIGIN_DEFAULT.to_string();
+    }
     let rest = if let Some(r) = trimmed.strip_prefix("https://") {
         r
     } else if let Some(r) = trimmed.strip_prefix("http://") {
@@ -301,6 +334,18 @@ pub(crate) fn compute_server_origin_from_env_str(raw: Option<&str>) -> String {
         tracing::warn!(
             target: "mnemonic_mcp::oauth",
             "MCP_PUBLIC_BASE_URL={bounded:?} has scheme but no host; falling back to default {SERVER_ORIGIN_DEFAULT}"
+        );
+        return SERVER_ORIGIN_DEFAULT.to_string();
+    }
+    // Userinfo rejection (SA-R1-M1). `https://user:pass@evil.com` would
+    // otherwise be reflected verbatim into OAuth metadata and INFO-logged at
+    // seed time — leaking the credential and redirecting clients through the
+    // attacker-controlled credentialed URL. RFC 8707 resource indicators do
+    // not use userinfo, so this is a pure operator-footgun cleanup.
+    if rest.contains('@') {
+        tracing::warn!(
+            target: "mnemonic_mcp::oauth",
+            "MCP_PUBLIC_BASE_URL={bounded:?} contains userinfo (@) in authority; falling back to default {SERVER_ORIGIN_DEFAULT}"
         );
         return SERVER_ORIGIN_DEFAULT.to_string();
     }
@@ -332,8 +377,9 @@ pub(crate) fn compute_server_origin_from_env_str(raw: Option<&str>) -> String {
 }
 /// Frontend webapp origin — the consent page lives here. The bootstrap
 /// endpoint `GET /oauth/authorize` redirects the user-agent (browser) to
-/// `WEBAPP_CONSENT_URL?challenge=<base64-cbor>&state=<state>` so the WASM
-/// signer can produce the COSE_Sign1 over the canonical-CBOR challenge.
+/// `WEBAPP_CONSENT_URL?challenge=<base64-cbor>&state=<state>&mcp_base=<origin>`
+/// so the WASM signer can post the approval back to the server that created
+/// the pending OAuth state.
 pub const WEBAPP_CONSENT_URL: &str = "https://mnemonik.xyz/oauth/consent";
 
 /// JWT claim set per Decision 11.
@@ -1019,7 +1065,10 @@ pub async fn authorize_init_handler(
     // URL-encode the base64 (it can contain `+/=`).
     let challenge_param = urlencoding_encode(&challenge_b64);
     let state_param = urlencoding_encode(&q.state);
-    let location = format!("{WEBAPP_CONSENT_URL}?challenge={challenge_param}&state={state_param}");
+    let mcp_base_param = urlencoding_encode(origin);
+    let location = format!(
+        "{WEBAPP_CONSENT_URL}?challenge={challenge_param}&state={state_param}&mcp_base={mcp_base_param}"
+    );
     let mut resp = Response::new(Body::empty());
     *resp.status_mut() = StatusCode::FOUND;
     if let Ok(hv) = axum::http::HeaderValue::from_str(&location) {
@@ -1048,7 +1097,10 @@ fn urlencoding_encode(s: &str) -> String {
 // ── redirect_uri allowlist (mnemonic-cli tech-spec Decision 5) ──────────────
 
 /// Exact-match allowlisted `redirect_uri`.
-const REDIRECT_EXACT: &[&str] = &["https://mnemonik.xyz/oauth/consent"];
+const REDIRECT_EXACT: &[&str] = &[
+    "https://mnemonik.xyz/oauth/consent",
+    "https://vscode.dev/redirect",
+];
 
 /// Exact-prefix allowlisted `redirect_uri`. The submitted URI must START with
 /// one of these byte-for-byte. Used for AI-tool deeplinks and the Anthropic
@@ -1065,8 +1117,9 @@ const REDIRECT_PREFIXES: &[&str] = &[
 /// Returns `true` if the URI is on one of three lists:
 /// 1. Exact match of `REDIRECT_EXACT` (e.g. webapp consent page).
 /// 2. Exact-prefix match of `REDIRECT_PREFIXES` (deeplink schemes).
-/// 3. Loopback callback `http://127.0.0.1:<port>[/<path>]` or
-///    `http://[::1]:<port>[/<path>]` for any client (RFC 8252 §7.3).
+/// 3. Loopback callback `http://127.0.0.1:<port>[/<path>]`,
+///    `http://[::1]:<port>[/<path>]`, or
+///    `http://localhost:<port>[/<path>]` for any client (RFC 8252 §7.3).
 ///
 /// `client_id` was previously used to gate loopback access to the literal
 /// `mnemonic-cli` client only, with a fixed `/callback` path. That broke
@@ -1078,7 +1131,7 @@ const REDIRECT_PREFIXES: &[&str] = &[
 /// to use loopback with any port and any path.
 ///
 /// All other URIs (`https://evil.com`, `http://0.0.0.0:1234`,
-/// `http://127.0.0.1.evil.com`) → false.
+/// `http://127.0.0.1.evil.com`, `http://localhost.evil.com`) → false.
 pub fn allowed_redirect(uri: &str, _client_id: &str) -> bool {
     if REDIRECT_EXACT.contains(&uri) {
         return true;
@@ -1119,6 +1172,8 @@ fn split_loopback_redirect(uri: &str) -> Option<(&'static str, &str)> {
         ("127.0.0.1", rest)
     } else if let Some(rest) = uri.strip_prefix("http://[::1]") {
         ("::1", rest)
+    } else if let Some(rest) = uri.strip_prefix("http://localhost") {
+        ("localhost", rest)
     } else {
         return None;
     };
@@ -1139,13 +1194,15 @@ fn split_loopback_redirect(uri: &str) -> Option<(&'static str, &str)> {
     Some((host, path))
 }
 
-/// Match `^http://127\.0\.0\.1:\d+(/.*)?$` and `^http://\[::1\]:\d+(/.*)?$`
-/// per RFC 8252 §7.3 without pulling in a `regex` crate. Hand-rolled is
-/// cheaper and fully covered by unit tests.
+/// Match `^http://127\.0\.0\.1:\d+(/.*)?$`,
+/// `^http://\[::1\]:\d+(/.*)?$`, and
+/// `^http://localhost:\d+(/.*)?$` per RFC 8252 §7.3 without pulling in a
+/// `regex` crate. Hand-rolled is cheaper and fully covered by unit tests.
 ///
 /// Rules:
-///   - host MUST be exactly `127.0.0.1` or `[::1]` (the leading-`http://`
-///     + exact-host strip rejects e.g. `http://127.0.0.1.evil.com:80/`)
+///   - host MUST be exactly `127.0.0.1`, `[::1]`, or `localhost` (the
+///     leading-`http://` + exact-host strip rejects e.g.
+///     `http://127.0.0.1.evil.com:80/`)
 ///   - port MUST be present and all-ASCII-digits (RFC 8252 forbids
 ///     omitting the port for loopback)
 ///   - path is OPTIONAL. If present, it MUST start with `/` and contain
@@ -1162,6 +1219,8 @@ fn is_loopback_redirect(uri: &str) -> bool {
     let rest = if let Some(r) = uri.strip_prefix("http://127.0.0.1:") {
         r
     } else if let Some(r) = uri.strip_prefix("http://[::1]:") {
+        r
+    } else if let Some(r) = uri.strip_prefix("http://localhost:") {
         r
     } else {
         return false;
@@ -2415,11 +2474,17 @@ fn jsonrpc_unauthorized(status: StatusCode, msg: &str) -> Response {
         // Must be a single header value per RFC 7235 §4.1. Choose `error=` per
         // RFC 6750 §3.1 to match invalid_token semantics; `error_description`
         // is the human-readable hint the client may surface to the user.
+        // `issuer` reads from the env-driven OnceLock so non-prod deploys
+        // (cloudflared tunnel, dev subdomain, third-party operator) advertise
+        // the correct resource_metadata URL instead of the prod default.
+        // `compute_server_origin_from_env_str` already rejects CRLF / control
+        // chars and userinfo, so the value cannot break the
+        // `HeaderValue::from_str` parse — the SA-R1-L1 fix.
         let www_auth = format!(
             "Bearer realm=\"{issuer}\", error=\"invalid_token\", \
              error_description=\"{esc_msg}\", \
              resource_metadata=\"{issuer}/.well-known/oauth-protected-resource\"",
-            issuer = "https://mcp.mnemonik.xyz",
+            issuer = server_origin(),
             // Strip embedded double-quotes / CR / LF from the message to keep
             // the header well-formed; we don't expect any in caller-supplied
             // strings but defense-in-depth is cheap.
@@ -3164,6 +3229,10 @@ mod tests {
         assert!(location.starts_with(WEBAPP_CONSENT_URL), "got {location}");
         assert!(location.contains("challenge="));
         assert!(location.contains("state=csrf-redir"));
+        assert!(
+            location.contains("mcp_base=https%3A%2F%2Fmcp.mnemonik.xyz"),
+            "redirect must tell the hosted consent page which MCP origin owns the state: {location}"
+        );
         // Pending entry inserted regardless of redirect vs JSON mode.
         let present = {
             let g = st.pending.lock().unwrap();
@@ -3402,13 +3471,22 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let body_bytes = resp.into_body().collect().await.unwrap().to_bytes();
         let parsed: Value = serde_json::from_slice(&body_bytes).unwrap();
-        let origin = server_origin();
-        assert_eq!(parsed["issuer"], origin);
+        // Anchor to SERVER_ORIGIN_DEFAULT directly (TR-R1-M3): asserting
+        // against `server_origin()` would be reflexively true — both the
+        // endpoint and the assertion would derive from the same OnceLock
+        // read, so a seeding regression would produce matching-but-wrong
+        // values. The test never calls `seed_server_origin_from_env`, so the
+        // OnceLock is either unset or seeded to the default by a sibling
+        // test — either way `server_origin()` MUST return the default here.
+        assert_eq!(parsed["issuer"], SERVER_ORIGIN_DEFAULT);
         assert_eq!(
             parsed["authorization_endpoint"],
-            format!("{origin}/oauth/authorize")
+            format!("{SERVER_ORIGIN_DEFAULT}/oauth/authorize")
         );
-        assert_eq!(parsed["token_endpoint"], format!("{origin}/oauth/token"));
+        assert_eq!(
+            parsed["token_endpoint"],
+            format!("{SERVER_ORIGIN_DEFAULT}/oauth/token")
+        );
         assert_eq!(parsed["response_types_supported"][0], "code");
         // refresh-token-rotation Task 3 / Decision 11 — discovery MUST
         // advertise BOTH grants so MCP clients can opt into the
@@ -3444,9 +3522,9 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let body_bytes = resp.into_body().collect().await.unwrap().to_bytes();
         let parsed: Value = serde_json::from_slice(&body_bytes).unwrap();
-        let origin = server_origin();
-        assert_eq!(parsed["resource"], origin);
-        assert_eq!(parsed["authorization_servers"][0], origin);
+        // TR-R1-M3 — anchor to the const directly; see metadata test above.
+        assert_eq!(parsed["resource"], SERVER_ORIGIN_DEFAULT);
+        assert_eq!(parsed["authorization_servers"][0], SERVER_ORIGIN_DEFAULT);
         assert_eq!(parsed["scopes_supported"][0], "mcp");
         assert_eq!(parsed["bearer_methods_supported"][0], "header");
     }
@@ -3474,13 +3552,13 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let body_bytes = resp.into_body().collect().await.unwrap().to_bytes();
         let parsed: Value = serde_json::from_slice(&body_bytes).unwrap();
-        let origin = server_origin();
+        // TR-R1-M3 — anchor to the const directly; see metadata test above.
         assert_eq!(
             parsed["resource"],
-            format!("{origin}/mcp"),
+            format!("{SERVER_ORIGIN_DEFAULT}/mcp"),
             "resource MUST equal the URL the MCP client connects to (path-specific)"
         );
-        assert_eq!(parsed["authorization_servers"][0], origin);
+        assert_eq!(parsed["authorization_servers"][0], SERVER_ORIGIN_DEFAULT);
         assert_eq!(parsed["scopes_supported"][0], "mcp");
         assert_eq!(parsed["bearer_methods_supported"][0], "header");
     }
@@ -3682,6 +3760,10 @@ mod tests {
             "https://mnemonik.xyz/oauth/consent",
             "anything"
         ));
+        assert!(allowed_redirect(
+            "https://vscode.dev/redirect",
+            "cached-dcr-client"
+        ));
         // Cursor / VS Code / Claude.ai deeplink prefixes.
         assert!(allowed_redirect(
             "cursor://anysphere.cursor-deeplink/abc",
@@ -3692,6 +3774,10 @@ mod tests {
         // Negative: arbitrary URLs must be rejected for every client.
         assert!(!allowed_redirect("https://evil.com", "mnemonic-cli"));
         assert!(!allowed_redirect("https://evil.com", "cursor"));
+        assert!(!allowed_redirect(
+            "https://vscode.dev/redirect-anything",
+            "vscode"
+        ));
         // Negative: non-host-equal lookalike (cursor:// without the
         // exact-prefix tail is rejected).
         assert!(!allowed_redirect("cursor://other-vendor/", "cursor"));
@@ -3703,6 +3789,10 @@ mod tests {
         // Negative: lookalike host (127.0.0.1.evil.com) rejected.
         assert!(!allowed_redirect(
             "http://127.0.0.1.evil.com:1234/callback",
+            "mnemonic-cli"
+        ));
+        assert!(!allowed_redirect(
+            "http://localhost.evil.com:1234/callback",
             "mnemonic-cli"
         ));
         // Negative: non-numeric port rejected.
@@ -3750,18 +3840,28 @@ mod tests {
                 "loopback / must accept client_id={client:?}"
             );
             assert!(
+                allowed_redirect("http://localhost:33418/", client),
+                "localhost loopback / must accept client_id={client:?}"
+            );
+            assert!(
                 allowed_redirect("http://[::1]:33418/", client),
                 "loopback v6 / must accept client_id={client:?}"
             );
             // Path "/callback" — mnemonic-cli's path.
             assert!(allowed_redirect("http://127.0.0.1:1234/callback", client));
+            assert!(allowed_redirect("http://localhost:1234/callback", client));
             // Path with extra segments — also allowed per RFC 8252.
             assert!(allowed_redirect(
                 "http://127.0.0.1:1234/callback/extra",
                 client
             ));
+            assert!(allowed_redirect(
+                "http://localhost:1234/callback/extra",
+                client
+            ));
             // No path at all (just port).
             assert!(allowed_redirect("http://127.0.0.1:1234", client));
+            assert!(allowed_redirect("http://localhost:1234", client));
         }
     }
 
@@ -3774,15 +3874,18 @@ mod tests {
             vec![
                 "https://vscode.dev/redirect".to_string(),
                 "http://127.0.0.1:33418/".to_string(),
+                "http://localhost:33418/".to_string(),
                 "http://[::1]:33418/".to_string(),
             ],
         );
 
         assert!(st.allows_redirect("https://vscode.dev/redirect", &client_id));
         assert!(st.allows_redirect("http://127.0.0.1:59656/", &client_id));
+        assert!(st.allows_redirect("http://localhost:59656/", &client_id));
         assert!(st.allows_redirect("http://[::1]:59656/", &client_id));
         assert!(!st.allows_redirect("https://evil.com/redirect", &client_id));
         assert!(!st.allows_redirect("http://127.0.0.1.evil.com:59656/", &client_id));
+        assert!(!st.allows_redirect("http://localhost.evil.com:59656/", &client_id));
     }
 
     #[test]
@@ -4047,6 +4150,10 @@ mod tests {
             )),
             "https://car-damages-controlling-blocked.trycloudflare.com"
         );
+        // TR-R1-L1: negative WARN assertion on the success path — catches a
+        // regression where the validation logic spuriously rejects a
+        // well-formed URL and silently falls back.
+        assert!(!logs_contain("falling back to default"));
         // http override (loopback-style dev).
         assert_eq!(
             compute_server_origin_from_env_str(Some("http://127.0.0.1:3000")),
@@ -4056,6 +4163,84 @@ mod tests {
         assert_eq!(
             compute_server_origin_from_env_str(Some("  https://mcp.dev.mnemonik.xyz  ")),
             "https://mcp.dev.mnemonik.xyz"
+        );
+        // Re-assert the negative — `logs_contain` is over the whole scope.
+        assert!(!logs_contain("falling back to default"));
+    }
+
+    #[tracing_test::traced_test]
+    #[test]
+    fn server_origin_valid_with_port() {
+        // TR-R1-missing-1: port numbers in the authority are accepted
+        // verbatim. `rest = "localhost:8443"` contains no '/', '?', '#', or
+        // '@', so it passes every rejection rule.
+        assert_eq!(
+            compute_server_origin_from_env_str(Some("https://localhost:8443")),
+            "https://localhost:8443"
+        );
+        assert!(!logs_contain("falling back to default"));
+    }
+
+    #[tracing_test::traced_test]
+    #[test]
+    fn server_origin_rejects_uppercase_scheme() {
+        // TR-R1-missing-2: byte-exact `strip_prefix` rejects mixed-case
+        // schemes. RFC 3986 says schemes are case-insensitive but
+        // recommends normalising to lowercase; rejecting upper-case is
+        // conservative and documents intent (operators must use
+        // lowercase).
+        assert_eq!(
+            compute_server_origin_from_env_str(Some("HTTPS://mcp.example.com")),
+            SERVER_ORIGIN_DEFAULT
+        );
+        assert!(logs_contain("missing http:// or https:// scheme"));
+    }
+
+    #[tracing_test::traced_test]
+    #[test]
+    fn server_origin_rejects_userinfo_in_authority() {
+        // SA-R1-M1: a value with embedded credentials (`user:pass@host`)
+        // would otherwise INFO-log the credential via
+        // `seed_server_origin_from_env` and propagate into OAuth metadata
+        // documents. Reject at validation time.
+        assert_eq!(
+            compute_server_origin_from_env_str(Some("https://user:pass@example.com")),
+            SERVER_ORIGIN_DEFAULT
+        );
+        assert!(logs_contain("contains userinfo"));
+        // Userinfo without password is also rejected.
+        assert_eq!(
+            compute_server_origin_from_env_str(Some("https://admin@example.com")),
+            SERVER_ORIGIN_DEFAULT
+        );
+    }
+
+    #[tracing_test::traced_test]
+    #[test]
+    fn server_origin_rejects_control_chars() {
+        // SA-R1-M2: CRLF / null / tab / other ASCII control chars are
+        // rejected at validation time as defense-in-depth against header
+        // injection if `server_origin()` is ever interpolated into a raw
+        // HTTP header string outside `HeaderValue::from_str`'s guard.
+        assert_eq!(
+            compute_server_origin_from_env_str(Some("https://evil.com\r\nX-Injected: pwned")),
+            SERVER_ORIGIN_DEFAULT
+        );
+        assert!(logs_contain("contains ASCII control character"));
+        // Newline alone.
+        assert_eq!(
+            compute_server_origin_from_env_str(Some("https://evil.com\nfoo")),
+            SERVER_ORIGIN_DEFAULT
+        );
+        // Tab embedded mid-host.
+        assert_eq!(
+            compute_server_origin_from_env_str(Some("https://evil\t.com")),
+            SERVER_ORIGIN_DEFAULT
+        );
+        // NUL byte.
+        assert_eq!(
+            compute_server_origin_from_env_str(Some("https://evil.com\0bar")),
+            SERVER_ORIGIN_DEFAULT
         );
     }
 
@@ -4071,10 +4256,17 @@ mod tests {
         assert!(logs_contain(
             "MCP_PUBLIC_BASE_URL is empty / whitespace-only"
         ));
+        // TR-R1-M1: whitespace-only must emit the same loud WARN as the
+        // empty case. Both `trim()` to "" and hit the `is_empty()` branch.
+        // Removing the WARN for this sub-case would leave the test green
+        // without this assertion.
         assert_eq!(
             compute_server_origin_from_env_str(Some("   ")),
             SERVER_ORIGIN_DEFAULT
         );
+        assert!(logs_contain(
+            "MCP_PUBLIC_BASE_URL is empty / whitespace-only"
+        ));
         // Missing scheme.
         assert_eq!(
             compute_server_origin_from_env_str(Some("mcp.mnemonik.xyz")),
@@ -4115,13 +4307,19 @@ mod tests {
     }
 
     #[test]
-    fn server_origin_accessor_default_pre_seed() {
-        // Pre-seed reader contract: until `seed_server_origin_from_env`
-        // populates the OnceLock, `server_origin()` returns the default.
-        // The OnceLock is process-global and may have been seeded by a
-        // sibling test in this binary — so we only assert the function
-        // does not panic and returns a non-empty `https://` value (either
-        // the default or whatever a previous test seeded).
+    fn server_origin_accessor_anti_panic_smoke() {
+        // TR-R1-M2: anti-panic smoke ONLY — NOT a default-value assertion.
+        // The OnceLock is process-global and a sibling test may have
+        // legitimately seeded it before this test runs, so we cannot
+        // assert exact equality to the default. Asserting only the
+        // scheme-prefixed-non-empty invariant catches: (a) a regression
+        // where `server_origin()` panics on pre-seed access (would fail
+        // immediately at call time), (b) a regression where it returns
+        // an empty string or non-scheme-prefixed garbage. The actual
+        // default-value contract is covered by
+        // `server_origin_defaults_when_env_unset` (which exercises the
+        // pure helper directly). Renamed from
+        // `server_origin_accessor_default_pre_seed` for honesty.
         let origin = server_origin();
         assert!(
             origin.starts_with("https://") || origin.starts_with("http://"),
