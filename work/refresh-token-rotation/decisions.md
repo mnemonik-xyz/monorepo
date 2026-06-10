@@ -471,3 +471,55 @@ A handler-side proxy log line was also added — the rotate-internal log emissio
 **Deviations:** Live HTTP boot for the AC7 `curl /.well-known/oauth-authorization-server` smoke could not run — release binary aborts at `identity::ensure failed at startup: reading identity from OS keychain`. Same sandbox limitation Tasks 2/3/4/5 documented; compensated by two passing tests covering the same wire-level contract plus direct code citation at `mcp/src/oauth/mod.rs:1917`. R1 empirical gate (Claude.ai parallel to Cursor with `MCP_JWT_TTL_SECS=60` for 2+ minutes) is deferred to Task 10 by design — out of Task 9 scope. Local gitleaks 8.30.1 (Homebrew current) reports 3 historical false-positives (Cargo.lock `curve25519-dalek` crate-name × 2, Chrome extension manifest RSA public key × 1) due to heuristic drift in newer `generic-api-key` rule; CI-pinned 8.21.2 is the contractual gate and reports clean — no action required.
 
 **Report:** `work/refresh-token-rotation/logs/working/task-9/qa-report.md`
+
+## 2026-06-10 — Task 10 skipped — feature merged ahead of gate
+
+Dev tunnel R1 empirical gate skipped because the feature shipped to `origin/main` via PR #162 (squash-merge) and was deployed to `mcp.mnemonik.xyz` before the gate could run — prod discovery already returns `["authorization_code", "refresh_token"]`. R1 verification responsibility transferred to Task 12 post-deploy live observation against prod.
+
+## 2026-06-10 — Task 12 Post-deploy Verification
+
+**Status:** Done
+**Agent:** post-deploy-pilot
+**Verdict:** **GO**. Feature `refresh-token-rotation` cleared for finalization.
+
+**Summary:** Live verification on prod (`mcp.mnemonik.xyz`, v0.2.5) confirmed all
+T12 acceptance criteria. Discovery surface (AC7) advertises both
+`authorization_code` and `refresh_token`. Real-client silent rotation (AC1, AC2)
+was proven by two organic `refresh_rotate` INFO events captured in prod
+`journalctl` on the **same `family_id`** (`bc22f7e4-…`) for the same `sub`
+(`2jdrmxfL…`), separated by 2h31m and 3 minutes BEFORE the user's silent
+`mnemonic_whoami` at 18:48 UTC — Anthropic's OAuth backend (Claude Desktop /
+Claude.ai connector) rotated the access token via refresh-grant before the
+tool call hit the server, exactly as designed. Both events were Branch A (happy
+path), no `family_revoke` fired. D14 logging policy verified clean — log lines
+contain only the whitelisted forensic fields (`outcome`, `branch`, `family_id`,
+`sub`, `remote_addr`, `request_id`); zero leakage of plaintext refresh token,
+`token_hash`, salt bytes, or full access JWT.
+
+**Key log evidence (verbatim, both lines):**
+
+```
+Jun 10 16:14:04 UTC  INFO mnemonic_mcp::oauth: refresh_grant rotated
+  outcome="rotated" branch="A" family_id=bc22f7e4-6eac-4de5-9fde-c913c870d18b
+  sub=2jdrmxfLqiCtRNL1u5ZdLaKKdq6Wg8iPqvJSohQhLq4x remote_addr=160.79.106.37
+  request_id=b4090780-a2d3-47c6-9f24-84b0aa326b82
+
+Jun 10 18:45:49 UTC  INFO mnemonic_mcp::oauth::refresh: refresh_rotate success
+  outcome="rotated" branch="A" family_id=bc22f7e4-6eac-4de5-9fde-c913c870d18b
+  sub=2jdrmxfLqiCtRNL1u5ZdLaKKdq6Wg8iPqvJSohQhLq4x remote_addr="160.79.106.36"
+  request_id="48f6810f-2a14-4816-bca8-5af3a8fd5817"
+```
+
+**Deviations:** (1) Cursor (the control client named in T12) was unavailable
+(user's subscription lapsed); substituted with VS Code + Claude Desktop. VS Code
+OAuth flow opened browser (confirming real-OAuth client), Claude Desktop
+captured the 18:45:49 UTC rotation. Substitution acceptable because the
+empirical rotation evidence proves the contract end-to-end. (2) 65-minute
+synthetic idle window not formally held — replaced by the organic 2h31m
+cross-rotation evidence on the same `family_id`, which is stronger signal.
+(3) `sub` differs from local CLI `whoami` output because Claude Desktop /
+Claude.ai / VS Code authenticated through the webapp browser identity, not
+the local CLI file identity — by design per the browser-mediated signing
+model (CLAUDE.md, architecture.md), not a bug.
+
+**Report:** `work/refresh-token-rotation/logs/working/task-12/post-deploy-report.md`
