@@ -369,6 +369,12 @@ sudo tail -f /var/log/nginx/error.log   # nginx logs
 curl http://localhost:3000/health               # MCP direct
 curl http://localhost:11434/api/tags            # Ollama models
 curl https://mnemonik.xyz/health                # via nginx+SSL
+
+# OAuth refresh-rotation events (refresh-token-rotation feature)
+sudo journalctl -u mnemonic-mcp -f | grep -E 'refresh_rotation|refresh_rotate|family_revoke|oauth/token'
+# Expected normal traffic: INFO refresh_rotate success outcome="rotated" branch="A" family_id=... sub=... remote_addr=... request_id=...
+# Per Decision 14 the log line contains only those forensic fields — never plaintext refresh, never token_hash, never salt, never full access JWT.
+# WARN family_revoke = replay-outside-reuse-window detected; whole family chain revoked in the same transaction. Investigate the sub.
 ```
 
 ### MCP-client Distribution
