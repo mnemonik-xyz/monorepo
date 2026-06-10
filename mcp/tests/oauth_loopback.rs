@@ -146,7 +146,7 @@ fn fresh_install_path() {
         let exp = now_secs() + 30;
 
         let challenge_obj = serde_json::json!({
-            "server_origin": "https://mcp.mnemonik.xyz",
+            "server_origin": mnemonic_mcp::oauth::server_origin(),
             "state": "rt-fresh",
             "client_id": "test-client",
             "redirect_uri": redirect_uri,
