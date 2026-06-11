@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   chmod,
+  readdir,
   mkdir,
   readFile,
   rename,
@@ -208,6 +209,33 @@ async function writeManifestSidecar(manifest: Manifest): Promise<void> {
   await rename(tmp, manifestPath());
 }
 
+async function findExtractedBinary(root: string): Promise<string | undefined> {
+  const names = new Set(["mnemonik-mcp", "mnemonic-mcp"]);
+  const stack = [root];
+  const matches: string[] = [];
+
+  while (stack.length > 0) {
+    const dir = stack.pop()!;
+    const entries = await readdir(dir, { withFileTypes: true });
+    for (const entry of entries) {
+      const p = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        stack.push(p);
+      } else if (entry.isFile() && names.has(entry.name)) {
+        matches.push(p);
+      }
+    }
+  }
+
+  if (matches.length === 0) return undefined;
+  if (matches.length > 1) {
+    throw new Error(
+      `release archive produced multiple candidate binaries: ${matches.join(", ")}`,
+    );
+  }
+  return matches[0];
+}
+
 /**
  * Verify the cached binary against its manifest sidecar. Returns true only
  * when both files exist AND the on-disk SHA256 matches the manifest's record.
@@ -278,18 +306,26 @@ export async function ensureBinaryCached(): Promise<string> {
   try {
     const attestationOutput = await runGhAttestationVerify(stagedTar);
 
+    // If cache verification failed because the canonical binary was
+    // tampered or stale, remove it before extracting the fresh archive.
+    // Otherwise candidate discovery would see both the old target and the
+    // newly extracted `mnemonic-mcp` source and fail as ambiguous.
+    const target = binaryPath();
+    await rm(target, { force: true });
+
     await tar.extract({
       file: stagedTar,
       cwd: binDir,
       filter: makeExtractFilter(binDir),
     });
 
-    // Locate the extracted binary. The release tarball ships
-    // `mnemonic-mcp` at the root; we keep the on-disk name `mnemonik-mcp`
-    // (note the `k`) so it matches the bin field.
-    const extractedSource = join(binDir, "mnemonic-mcp");
-    const target = binaryPath();
-    if ((await fileExists(extractedSource)) && extractedSource !== target) {
+    // Locate the extracted binary. GitHub release tarballs are wrapped in
+    // an artifact-named directory, and older builds spell the binary
+    // `mnemonic-mcp` while the npm bin is `mnemonik-mcp`. Normalize either
+    // spelling from anywhere under the extracted tree into the canonical
+    // cache path.
+    const extractedSource = await findExtractedBinary(binDir);
+    if (extractedSource && extractedSource !== target) {
       await rename(extractedSource, target);
     }
     if (!(await fileExists(target))) {

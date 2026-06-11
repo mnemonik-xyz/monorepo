@@ -56,6 +56,47 @@ export async function makeBinaryTarball(
 }
 
 /**
+ * Build a tarball matching GitHub release archive layout:
+ * `<artifact-base>/mnemonic-mcp` plus metadata files.
+ */
+export async function makeWrappedBinaryTarball(
+  destTar: string,
+  artifactBase = "mnemonic-mcp-v0.2.4-x86_64-unknown-linux-gnu",
+  binaryName = "mnemonic-mcp",
+  body = "#!/bin/sh\necho 'stub mnemonik-mcp'\n",
+): Promise<{ tarPath: string; sha256: string; archiveName: string }> {
+  const stagingDir = await freshTempDir("mnemonik-mcp-wrapped-tar-");
+  try {
+    const wrapperDir = join(stagingDir, artifactBase);
+    await mkdir(wrapperDir, { recursive: true });
+    const filePath = join(wrapperDir, binaryName);
+    await writeFile(filePath, body, { mode: 0o755 });
+    await chmod(filePath, 0o755);
+    await writeFile(join(wrapperDir, "README.md"), "# test fixture\n");
+    await mkdir(dirname(destTar), { recursive: true });
+    await tar.create(
+      {
+        gzip: true,
+        file: destTar,
+        cwd: stagingDir,
+      },
+      [artifactBase],
+    );
+    const { readFile } = await import("node:fs/promises");
+    const buf = await readFile(destTar);
+    const h = createHash("sha256");
+    h.update(buf);
+    return {
+      tarPath: destTar,
+      sha256: h.digest("hex"),
+      archiveName: `${artifactBase}/${binaryName}`,
+    };
+  } finally {
+    await rm(stagingDir, { recursive: true, force: true });
+  }
+}
+
+/**
  * Build a malicious tarball that contains BOTH a legitimate `mnemonic-mcp`
  * entry AND a path-traversal entry named `../escape.txt`. If the zip-slip
  * guard were bypassed:

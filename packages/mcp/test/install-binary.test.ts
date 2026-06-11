@@ -23,6 +23,7 @@ import {
   makeMaliciousTarball,
   makeMockGh,
   makeSymlinkTarball,
+  makeWrappedBinaryTarball,
   sha256SumsBody,
 } from "./helpers.js";
 
@@ -261,6 +262,28 @@ describe("ensureBinaryCached", () => {
     // Also assert the leading subcommand sequence.
     expect(args[0]).toBe("attestation");
     expect(args[1]).toBe("verify");
+  });
+
+  it("wrapped_release_tarball_succeeds: locates binary under artifact directory", async () => {
+    const tarFile = join(ctx.fixtures, ARTIFACT);
+    const { sha256 } = await makeWrappedBinaryTarball(tarFile);
+    const tarBytes = await readFile(tarFile);
+    const { fetch: stub } = makeFetchStub(
+      ARTIFACT_URL,
+      tarBytes,
+      SUMS_URL,
+      sha256SumsBody(sha256, ARTIFACT),
+    );
+    vi.stubGlobal("fetch", stub);
+
+    const ghDir = await makeMockGh({ exit: 0, recordPath: ctx.ghRecord });
+    process.env.PATH = `${ghDir}:${ctx.origPath ?? ""}`;
+
+    const path = await ensureBinaryCached();
+    expect(path).toBe(binaryPath());
+    const binarySt = await stat(binaryPath());
+    expect(binarySt.isFile()).toBe(true);
+    expect(binarySt.mode & 0o777).toBe(0o755);
   });
 
   it("gh_attestation_verify_rejection: throws when gh exits non-zero", async () => {
