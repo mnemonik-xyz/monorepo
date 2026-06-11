@@ -3,6 +3,7 @@ import Chat from "./pages/Chat";
 import Consent from "./pages/Consent";
 import Install from "./pages/Install";
 import Landing from "./pages/Landing";
+import Privacy from "./pages/Privacy";
 import Roadmap from "./pages/Roadmap";
 import Sign from "./pages/Sign";
 
@@ -18,6 +19,7 @@ function App() {
         <Route path="/" element={<Landing />} />
         <Route path="/install" element={<Install />} />
         <Route path="/roadmap" element={<Roadmap />} />
+        <Route path="/privacy" element={<Privacy />} />
         <Route path="/chat" element={<Chat />} />
         <Route path="/sign/:correlationId" element={<Sign />} />
         <Route path="/oauth/consent" element={<Consent />} />

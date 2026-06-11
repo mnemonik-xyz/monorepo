@@ -82,6 +82,12 @@ export default function SiteFooter() {
         <div className="mx-auto flex max-w-6xl flex-col gap-2 px-4 py-5 font-mono text-[11px] uppercase tracking-[0.16em] text-text-muted/70 sm:flex-row sm:items-center sm:justify-between sm:px-6">
           <span>© {new Date().getFullYear()} Mnemonic Protocol</span>
           <span className="flex items-center gap-3">
+            <Link
+              to="/privacy"
+              className="text-text-muted/80 transition-colors hover:text-accent-primary"
+            >
+              Privacy
+            </Link>
             <span aria-hidden="true" className="h-px w-6 bg-text-muted/30" />
             <span>Apache 2.0 · v0.1</span>
           </span>
