@@ -14,7 +14,15 @@ export function homedir(): string {
 
 export const REPO_OWNER = "mnemonik-xyz";
 export const REPO_NAME = "monorepo";
-export const SIGNER_WORKFLOW = ".github/workflows/release.yml";
+// `gh attestation verify --signer-workflow` expects the full form
+// `[host/]<owner>/<repo>/<path>/<to>/<workflow>` per `gh attestation verify --help`.
+// A bare workflow path (`.github/workflows/release.yml`) silently fails
+// verification with "Error: verifying with issuer sigstore.dev" because the
+// signer SubjectAlternativeName the cert was issued with is the FULL URL form
+// `https://github.com/<owner>/<repo>/.github/workflows/release.yml@<ref>`,
+// not the bare path. Build the qualified form from REPO_OWNER + REPO_NAME so
+// a future owner/repo rename only requires touching those constants.
+export const SIGNER_WORKFLOW = `${REPO_OWNER}/${REPO_NAME}/.github/workflows/release.yml`;
 export const RELEASE_BASE_URL =
   "https://github.com/mnemonik-xyz/monorepo/releases/download";
 

@@ -190,7 +190,9 @@ describe("ensureBinaryCached", () => {
     expect(manifest.tag).toBe(TAG);
     expect(manifest.publisher.owner).toBe("mnemonik-xyz");
     expect(manifest.publisher.repo).toBe("mnemonik-xyz/monorepo");
-    expect(manifest.publisher.workflow).toBe(".github/workflows/release.yml");
+    expect(manifest.publisher.workflow).toBe(
+      "mnemonik-xyz/monorepo/.github/workflows/release.yml",
+    );
     expect(calls).toContain(ARTIFACT_URL);
     expect(calls).toContain(SUMS_URL);
   });
@@ -245,7 +247,14 @@ describe("ensureBinaryCached", () => {
     expect(repoIdx).toBeGreaterThan(-1);
     expect(wfIdx).toBeGreaterThan(-1);
     expect(args[repoIdx + 1]).toBe("mnemonik-xyz/monorepo");
-    expect(args[wfIdx + 1]).toBe(".github/workflows/release.yml");
+    // `gh attestation verify --signer-workflow` expects the fully-qualified
+    // [host/]<owner>/<repo>/<path> form (per `gh attestation verify --help`).
+    // A bare workflow path was silently failing with "verifying with issuer
+    // sigstore.dev" — the cert's SubjectAlternativeName encodes the FULL
+    // GitHub URL form, not the bare path.
+    expect(args[wfIdx + 1]).toBe(
+      "mnemonik-xyz/monorepo/.github/workflows/release.yml",
+    );
     // --owner is intentionally absent — current `gh` CLI treats --owner and
     // --repo as mutually exclusive; --repo owner/name already pins the owner.
     expect(args.indexOf("--owner")).toBe(-1);
