@@ -311,10 +311,10 @@ export default function Privacy() {
                 Questions, deletion requests, or security disclosures relating
                 to this policy may be sent to{" "}
                 <a
-                  href="mailto:hello@mnemonik.xyz"
+                  href="mailto:dev@mnemonik.xyz"
                   className="text-accent-primary underline-offset-2 hover:underline"
                 >
-                  hello@mnemonik.xyz
+                  dev@mnemonik.xyz
                 </a>
                 . For protocol-level issues, please open an issue at{" "}
                 <a
