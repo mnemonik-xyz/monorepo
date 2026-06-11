@@ -40,12 +40,13 @@ export function manifestPath(): string {
   return join(cacheDir(), "manifest.json");
 }
 
-export type PlatformKey = "darwin-arm64";
+export type PlatformKey = "darwin-arm64" | "linux-x64";
 
 export function detectPlatform(): PlatformKey {
   const p = platform();
   const a = arch();
   if (p === "darwin" && a === "arm64") return "darwin-arm64";
+  if (p === "linux" && a === "x64") return "linux-x64";
   if (p === "darwin" && a === "x64") {
     throw new Error(
       "@mnemonik-xyz/mcp v1 ships Apple Silicon (arm64) only; " +
@@ -54,7 +55,8 @@ export function detectPlatform(): PlatformKey {
     );
   }
   throw new Error(
-    `unsupported platform ${p}/${a}; @mnemonik-xyz/mcp v1 ships macOS (arm64) only`,
+    `unsupported platform ${p}/${a}; @mnemonik-xyz/mcp v1 ships ` +
+      `macOS (arm64) and Linux (x86_64) only`,
   );
 }
 
