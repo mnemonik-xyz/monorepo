@@ -66,3 +66,45 @@ shared context needs **no `core/` or `mcp/` change** for a first cut. The adapte
 Python module in `mnemonik-dev/delm` implementing the same `read()/admit()` surface as
 `SharedLessons`. The pre-sign veracity gate (borrow from `verifier.py`) is a **separate,
 later** monorepo change, not on the v1 critical path.
+
+---
+
+## D4 — Does the DeLM concept actually work? Evidence & risks
+
+**Verdict: bounded yes.** DeLM works as a *coordination technique for parallel agents*,
+not as a universal substrate. The name oversells — it is really "a verified shared
+blackboard + async task queue + unfoldable gist hierarchy."
+
+**Evidence that holds up:**
+- **Cost efficiency (strongest).** SWE-bench Verified / Gemini 3 Flash: 65.7% Avg@1 at
+  **$0.12/task** vs best baseline 56.4% at ~$0.25 — higher accuracy at ~half cost. Same
+  budget spent on shared progress instead of redundant isolated search.
+- **Identifiable mechanism, not just aggregates.** Trace examples show a shared FAIL
+  stops peers re-walking a dead end, and a preserved constraint stops a central agent
+  softening it (their AOrchestra-Parallel trace literally fails this way).
+- **Verification ablation is falsifiable & central.** Removing admission-time
+  verification is the largest drop (60.1% → 55.2%): an *unverified* shared memory
+  actively hurts because errors propagate. Most relevant finding for us.
+- **Honest about failure.** On OOLONG (aggregation-heavy), vanilla DeLM *underperforms*
+  RLM (53.3% vs 56.0%, higher cost); only the DeLM+RLM hybrid wins. Reporting losses
+  lowers cherry-pick risk.
+
+**Risks / caveats:**
+- **Gains shrink on strong models.** Claude Opus 4.6: DeLM only +1.1pp Avg@1 over
+  mini-SWE-agent (78.0 vs 76.9) — plausibly within noise. Much of the value is
+  compensating for weaker/cheaper models; may erode at the frontier.
+- **Small benchmarks.** LongBench-v2 multi-doc = 125 samples (some domains n=14),
+  mean±std over 3 runs with multi-point stds; several "best" cells overlap baselines.
+- **Not a general substrate.** NL shared context is unreliable for exact
+  counting/filtering/aggregation; needs code-mediated execution bolted on.
+- **"Verified" = an LLM verifier.** Can false-accept/reject; the whole reliability claim
+  rests on it. (This is exactly the dependency our crypto-verifiability removes.)
+- **Single-group, June-2026, unreplicated;** cost numbers infra-sensitive (their own
+  footnote: a baseline's "real" cost is ~$1 vs ~$0.26 depending on provider cache).
+
+**Implication for this work.** Strengthens the case, with one guardrail: the two DeLM
+properties with the best evidence (verify-before-admit; retain-raw + unfold) are exactly
+what we harden — Mnemonic swaps DeLM's soft, single-run, LLM-judged verification for
+cryptographic, durable, cross-run verification. **Do not pitch on benchmark deltas**
+(model-dependent); pitch on auditability. T8 eval should target the weaker-model regime
+where the effect is real.
