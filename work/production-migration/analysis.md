@@ -21,21 +21,34 @@ So "go to production" is **not** a greenfield launch. It is **hardening a live
 soft-launch** into something that won't lose data, won't silently mischarge, and
 can be redeployed reliably.
 
-### The one fact that reframes everything
+### The launch model (corrected)
 
-The live deploy runs `STORAGE_MODE=local`, `PAYMENT_MODE=none`
-(see `deployment.md` mcp.env block). That means production today is a **free,
-SQLite-only demo** — no on-chain anchoring, no revenue. The actual product value
-(verifiable on-chain "participate" writes, paid) has *code* (`payment.rs`,
-`pricing.rs`, the `modes-user-choice` feature) but is **not proven live**, and
-issue #165 shows the pricing engine fails at boot and the `whoami` envelope then
-lies that everything is "free".
+Mnemonic ships **two modes**, and *both* are the product — there is no separate
+"free demo" vs "real product" sequencing:
 
-So there are two distinct "productions", and they should be sequenced, not merged:
+- **Self-host local.** The user runs the MCP binary themselves. SQLite-only, free,
+  no funded keypair, no payment. (`STORAGE_MODE=local`, `PAYMENT_MODE=none`.)
+- **Hosted x402.** The user points an agent at `https://mcp.mnemonik.xyz/mcp` and
+  issues a `participate` write. The memory is anchored on-chain (Arweave durable
+  bytes + Solana SPL Memo) and the agent **pays per-write in USDC via x402**: it
+  sends a USDC transfer to the operator treasury and presents the tx signature in
+  the `X-Payment` header on retry; the server verifies it with
+  `verify_usdc_transfer` before anchoring. (`PAYMENT_MODE=x402`,
+  `STORAGE_MODE=full`, `mode: "participate"` from `modes-user-choice`.)
 
-- **P-A — a reliable free service.** What's live now, made durable. Cheap, do first.
-- **P-B — the paid on-chain product.** Flip `participate`/`full` on, with payments.
-  Higher risk; gate it behind P-A + a pricing fix + a funded keypair.
+This is genuinely **minimum-effort by design**: x402 is autonomous per-call payment
+— no balance accounts, no Stripe, no user billing system, no subscription plumbing.
+The `modes-user-choice` delivery-confirmation logic already demotes a row to `local`
+and *does not consume the x402 nonce* if anchoring fails, so the failure path is
+already production-shaped.
+
+### What this means for "production"
+
+The paid hosted tier is **the launch**, not a later gated step. So the work is to
+(a) configure the hosted deploy for x402 correctly, (b) fix the one bug that breaks
+x402 pricing (#165), and (c) keep the box durable. The deployment doc is **stale** —
+its `mcp.env` still shows `PAYMENT_MODE=none` and never mentions `TREASURY_PUBKEY`
+or x402; that doc must be updated as part of the cutover.
 
 ---
 
@@ -43,45 +56,50 @@ So there are two distinct "productions", and they should be sequenced, not merge
 
 | # | Gap | Impact | Effort |
 |---|-----|--------|--------|
-| G1 | **No off-box backups.** SQLite + keypair + secrets live only on one VPS disk. | Disk loss = total, unrecoverable loss of every attestation + identity. **Highest risk.** | ~½ day |
-| G2 | **Pricing fetch fails → "free" lie (#165).** Can't safely turn on paid mode; even the free envelope is ambiguous. | Blocks P-B; misleads clients. | ~½–1 day |
-| G3 | **Build-on-box deploy.** `cargo build --release` on a 4 GB RAM box is slow and can OOM. No deploy script. | Deploys are fragile and irreproducible. | ~1 day |
-| G4 | **No uptime/error signal.** `/health` exists but nothing watches it. | Outages discovered by users, not us. | ~1 hr |
-| G5 | **claude-code OAuth interop broken (#163).** | One client class can't use hosted MCP. | unbounded — investigate, don't gate on it |
-| G6 | **Secrets durability.** `MCP_REFRESH_SALT` loss invalidates all refresh tokens; keypair loss = identity loss. Off-box copy missing. | Recoverability. | folded into G1 |
+| G1 | **x402 pricing fails → $0 (#165).** x402 challenge price is derived from the SOL/USDC pricing engine; on fetch failure it floors to ~$0 and the `whoami` envelope reports "free". | **Launch blocker** — the hosted paid tier either gives on-chain writes away or quotes a price that doesn't match what it charges. | ~½–1 day |
+| G2 | **Hosted x402 not configured for prod.** `TREASURY_PUBKEY` defaults to `""`; deploy still runs `PAYMENT_MODE=none`, `STORAGE_MODE=local`; operator keypair must be **funded** (Arweave Irys + Solana fees) to anchor. | Without this the hosted tier physically cannot do a paid on-chain write. | ~½ day + funding |
+| G3 | **No off-box backups.** SQLite + keypair + secrets live only on one VPS disk. | Disk loss = loss of local-mode rows, the recall embeddings index, identity, and `MCP_REFRESH_SALT`. *Participate* rows are recoverable from Arweave, so blast radius is smaller — but still serious. **Highest ops risk.** | ~½ day |
+| G4 | **Build-on-box deploy.** `cargo build --release` on a 4 GB RAM box is slow and can OOM. No deploy script. | Deploys are fragile and irreproducible. | ~1 day |
+| G5 | **No uptime/error signal.** `/health` exists but nothing watches it. | Outages (incl. a treasury/pricing outage that silently disables paid writes) discovered by users, not us. | ~1 hr |
+| G6 | **Stale deployment doc.** `mcp.env` example shows `PAYMENT_MODE=none`, no `TREASURY_PUBKEY`/x402. | Next deploy reproduces the non-revenue config. | folded into G2 |
+| G7 | **claude-code OAuth interop broken (#163).** | One client class can't use hosted MCP. | unbounded — investigate, don't gate launch on it |
 
-#164 (macOS keychain prompts) is **dev-loop only** — not a production concern. Skip.
+`MCP_REFRESH_SALT` / `MCP_JWT_SECRET` / keypair durability folds into G3 (back them
+up off-box). #164 (macOS keychain prompts) is **dev-loop only** — skip for prod.
 
 ---
 
 ## 3. Minimum-effort plan (do these, in order)
 
-### P0 — make it survivable (do before anything else)
-1. **Off-box backup cron (G1, G6).** Nightly `sqlite3 attestations.db .backup` +
-   copy of `keypair/id.json` and `mcp.env` (secrets), pushed with `restic`/`rclone`
-   to Cloudflare R2 or S3. One script + one cron line. This is the single highest
-   value / lowest effort item — do it first.
-2. **Fix pricing #165 (G2).** Make the `whoami` envelope tell the truth: add a
-   `pricing_status` flag (or null `amount_cents`) when the CoinGecko fetch fails,
-   and **drop `participate` from `supported_modes` while pricing is unavailable**
-   rather than offering on-chain writes at a fake $0. Background retry already
-   exists; just surface its state.
+### P0 — turn the launch model on, correctly
+1. **Fix x402 pricing #165 (G1).** Make pricing failure explicit instead of silent
+   $0: surface a `pricing_status` (or null `amount_cents`) in the `whoami` envelope
+   and **drop `participate` from `supported_modes` while pricing is unavailable**,
+   so the hosted tier refuses to quote/anchor at a fake free price. Background
+   refresh already exists — just gate on its state. This is the launch blocker.
+2. **Configure + verify the hosted x402 tier (G2, G6).** Set `PAYMENT_MODE=x402`,
+   `STORAGE_MODE=full`, a real `TREASURY_PUBKEY`, confirm `USDC_MINT` (mainnet
+   default is correct), and **fund the operator keypair** for Arweave Irys + Solana
+   fees. Then run **one end-to-end paid `participate` write** and verify it on-chain
+   (Arweave bytes + Solana memo + USDC landed in treasury). Update `deployment.md`'s
+   `mcp.env` so the config is reproducible.
+3. **Off-box backup cron (G3).** Nightly `sqlite3 attestations.db .backup` + copy of
+   `keypair/id.json` and the secrets (`MCP_REFRESH_SALT`, `MCP_JWT_SECRET`,
+   `GOOGLE_OAUTH_CLIENT_SECRET`), pushed with `restic`/`rclone` to Cloudflare R2 / S3.
+   One script + one cron line.
 
 ### P1 — make it reproducible & observed
-3. **Ship the prebuilt binary, stop building on the box (G3).** `release.yml`
+4. **Ship the prebuilt binary, stop building on the box (G4).** `release.yml`
    already cross-compiles the MCP binary. Have the VPS *pull the artifact* (binary
    + `webapp/dist`) instead of compiling. Wrap the steps in a committed `deploy.sh`.
    Removes OOM risk; cuts deploy from minutes-of-compile to seconds.
-4. **External uptime monitor (G4).** UptimeRobot / Cloudflare health check on
-   `/health` → Discord/email alert. ~15 minutes.
+5. **External uptime monitor (G5).** UptimeRobot / Cloudflare health check on
+   `/health` → Discord/email alert. ~15 minutes. Ideally also alert on the
+   pricing/treasury degraded state from step 1.
 
-### P2 — turn on the actual product (only after P0/P1)
-5. **Enable paid `participate` (P-B).** Requires: #165 fixed, a **funded** Ed25519
-   keypair for Arweave+Solana, `PAYMENT_MODE=balance` (or `both`), and one
-   end-to-end `participate` write verified on-chain. Keep `local` as the free
-   default tier so existing clients are unaffected.
-6. **Investigate #163** opportunistically. Don't let it gate the launch — browser
-   clients (the majority) already work.
+### P2 — opportunistic
+6. **Investigate #163** (claude-code OAuth). Don't gate launch on it — browser
+   clients (Claude.ai, Cursor, VS Code) and self-host local already work.
 
 ---
 
@@ -104,8 +122,13 @@ required for production** at current scale and all are large:
 
 ## 5. Bottom line
 
-Production is mostly an **operations** problem, not a code problem. The smallest
-set that gets us to a defensible production posture is **P0 (backups + pricing
-truth)** — roughly one day of work — after which the service is durable and honest.
-P1 makes deploys safe; P2 is the deliberate, gated step to actually charge money.
-Everything else on the roadmap is post-production growth, not a launch blocker.
+The launch model — self-host local (free) **or** hosted x402 (pay-per-write,
+on-chain) — is deliberately lean: x402 means no billing system to build. Production
+is therefore mostly **config + one bug fix + ops durability**, not new architecture.
+
+The smallest set that gets us to a real, revenue-capable production is **P0**:
+fix x402 pricing (#165), configure + fund the hosted x402 tier and prove one paid
+write on-chain, and add off-box backups — roughly one to two days. P1 (prebuilt-binary
+deploy + uptime alerting) makes it safe to operate. Everything else on the roadmap
+(concurrent writers, ERC-8004, Postgres/HA, balance/Stripe tiers) is post-launch
+growth, not a blocker.
