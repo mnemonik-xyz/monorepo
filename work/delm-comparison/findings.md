@@ -3,6 +3,7 @@ created: 2026-06-13
 status: research
 size: M
 branch: feat/delm-integration
+tracking_issue: mnemonik-xyz/monorepo#169
 sources:
   - DeLM paper (arXiv:2606.10662, "Decentralized Multi-Agent Systems with Shared Context", Mao & Mirhoseini, Stanford, 2026-06)
   - mnemonik-dev/DeLM @ 2d0ea48 (README, src/shared_lessons.py, src/verifier.py, src/memory_compactor.py, src/modes.py, src/agents/)

@@ -3,6 +3,7 @@ created: 2026-06-13
 status: draft
 size: M
 branch: feat/delm-integration
+tracking_issue: mnemonik-xyz/monorepo#169
 ---
 
 # User Spec: Интеграция DeLM × Mnemonic (DeLM-on-Mnemonic)
