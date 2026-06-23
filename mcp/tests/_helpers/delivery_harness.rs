@@ -37,7 +37,6 @@ use axum::{
 use http_body_util::BodyExt;
 use httpmock::prelude::*;
 use mnemonic_core::codec::{schema, sign::sign_artifact};
-use mnemonic_core::identity::pubkey_base58;
 use mnemonic_mcp::{
     mcp::{mcp_handler, McpState},
     test_support::mock_state_for_delivery,
@@ -298,50 +297,10 @@ impl MockSolana {
     }
 }
 
-/// Build a `McpState` + axum `Router` ready for `oneshot`-style calls,
-/// pointed at the supplied Arweave + Solana mocks.
-///
-/// **No OAuth middleware** — the T3 integration tests target the *inline*
-/// participate flow (no `jwt_sub`), which today is the only path that runs
-/// `sign_memory_inline` (the deferred-signing branch fires when a JWT is
-/// present and the mode isn't explicit-local). For production HTTP clients
-/// the OAuth layer attaches JWT claims; T3's delivery-guarantee code path
-/// is orthogonal to that. The payment-gate's `Bearer` header is still
-/// honoured for `payment_mode=balance` — `extract_api_key` reads the same
-/// Authorization header without needing a verified JWT to back it.
-pub fn build_state_and_router(
-    arweave_url: &str,
-    solana_url: &str,
-    payment_mode: &str,
-    cost_micro_usdc: i64,
-    quota_threshold: u32,
-    quota_window: Duration,
-    refetch_timeout: Duration,
-) -> (Arc<McpState>, Router) {
-    let state = mock_state_for_delivery(
-        "full",
-        payment_mode,
-        cost_micro_usdc,
-        arweave_url,
-        solana_url,
-        quota_threshold,
-        quota_window,
-        refetch_timeout,
-        "",
-        "",
-    );
-    let app = Router::new()
-        .route("/mcp", post(mcp_handler))
-        .with_state(state.clone());
-    (state, app)
-}
-
-/// Variant of [`build_state_and_router`] that wires `treasury_pubkey` and
-/// `usdc_mint` into the `McpState` so the x402 payment-gate (`check_payment`
-/// → `verify_usdc_transfer`) has destination addresses to match against.
-///
-/// Used exclusively by the T3.5 `demotion_on_x402_*` tests; for `balance`
-/// or `none` payment modes the regular `build_state_and_router` is enough.
+/// Build a `McpState` + axum `Router` (no OAuth middleware) wired for the
+/// x402 payment-gate: `treasury_pubkey` + `usdc_mint` give `check_payment` →
+/// `verify_usdc_transfer` destination addresses to match against. x402 is the
+/// only paid rail after Wave 4 (custodial balance mode removed).
 #[allow(clippy::too_many_arguments)]
 pub fn build_state_and_router_x402(
     arweave_url: &str,
@@ -369,73 +328,6 @@ pub fn build_state_and_router_x402(
         .route("/mcp", post(mcp_handler))
         .with_state(state.clone());
     (state, app)
-}
-
-/// Seed an `api_keys` row with the given balance and return the api_key.
-/// Used by the T3 tests to obtain a Bearer the payment middleware accepts
-/// for the `participate` path. No JWT is involved (the OAuth layer is not
-/// mounted in `build_state_and_router`); the bearer string is just an
-/// identifier the payment-gate looks up against `api_keys.api_key`.
-pub fn seed_api_key_jwt(state: &McpState, balance_micro_usdc: i64) -> String {
-    let owner = pubkey_base58(&state.keypair);
-    // Use a fresh UUID per call so concurrent tests don't collide on the
-    // PRIMARY KEY constraint. Prefix matches the production `mnm_` shape.
-    let api_key = format!("mnm_{}", uuid::Uuid::new_v4().simple());
-    let store = state.store.lock().unwrap();
-    let now = chrono::Utc::now().to_rfc3339();
-    store
-        .conn()
-        .execute(
-            "INSERT INTO api_keys (api_key, owner_pubkey, balance_micro_usdc, created_at) VALUES (?,?,?,?)",
-            rusqlite::params![api_key, owner, balance_micro_usdc, now],
-        )
-        .expect("seed api_keys row");
-    api_key
-}
-
-/// Read the current balance for an api_key (= JWT for these tests). Returns
-/// 0 on a miss, matching test ergonomics.
-pub fn balance_for(state: &McpState, api_key: &str) -> i64 {
-    let store = state.store.lock().unwrap();
-    let conn = store.conn();
-    conn.query_row(
-        "SELECT balance_micro_usdc FROM api_keys WHERE api_key = ?",
-        rusqlite::params![api_key],
-        |row| row.get::<_, i64>(0),
-    )
-    .unwrap_or(0)
-}
-
-/// Issue a `sign_memory { mode: "participate", content }` against the
-/// supplied router with the supplied bearer (JWT + api_key are the same
-/// string). Returns (status, envelope).
-pub async fn call_sign_memory_participate(
-    app: &Router,
-    bearer: &str,
-    content: &str,
-) -> (StatusCode, Value) {
-    let body = serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "tools/call",
-        "params": {
-            "name": "mnemonic_sign_memory",
-            "arguments": {"content": content, "mode": "participate"},
-        },
-    });
-    let req = Request::builder()
-        .method("POST")
-        .uri("/mcp")
-        .header("content-type", "application/json")
-        .header("authorization", format!("Bearer {bearer}"))
-        .body(Body::from(serde_json::to_vec(&body).unwrap()))
-        .unwrap();
-    let resp = app.clone().oneshot(req).await.unwrap();
-    let status = resp.status();
-    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-    let envelope: Value = serde_json::from_slice(&bytes)
-        .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(&bytes).into()));
-    (status, envelope)
 }
 
 /// Issue a `sign_memory { mode: "participate", content }` with an

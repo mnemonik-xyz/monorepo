@@ -75,187 +75,12 @@ enum Command {
     Logout,
 }
 
-// ── HTTP request/response types ───────────────────────────────────────────────
-
-#[derive(Deserialize)]
-struct CreateKeyRequest {
-    owner_pubkey: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct BalanceQuery {
-    api_key: String,
-}
-
-#[derive(Deserialize)]
-struct DepositRequest {
-    api_key: String,
-    tx_sig: String,
-}
-
 // ── Axum handlers ─────────────────────────────────────────────────────────────
 //
 // The `/mcp` JSON-RPC dispatcher (streamable HTTP per Decision 1) lives in
 // `mcp::mcp_handler` so it can be unit-tested directly from `mcp.rs::tests`.
-// The other endpoints below (api keys, balance, deposit, admin) are plain
-// JSON request/response — they do not need the streaming envelope.
-
-/// POST /api-keys — create a pre-funded API key (zero initial balance).
-async fn create_api_key(
-    State(state): State<Arc<mcp::McpState>>,
-    Json(body): Json<CreateKeyRequest>,
-) -> Response {
-    let owner = body.owner_pubkey.as_deref().unwrap_or("");
-    let store = state.store.lock().unwrap();
-    match payment::create_api_key(&store, owner) {
-        Ok(key) => Json(serde_json::json!({
-            "api_key": key,
-            "balance_micro_usdc": 0,
-        }))
-        .into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e.to_string()})),
-        )
-            .into_response(),
-    }
-}
-
-/// GET /balance?api_key=<key> — query balance.
-async fn get_balance(
-    State(state): State<Arc<mcp::McpState>>,
-    Query(q): Query<BalanceQuery>,
-) -> Response {
-    let store = state.store.lock().unwrap();
-    match payment::get_balance(&store, &q.api_key) {
-        Ok(Some(bal)) => Json(serde_json::json!({
-            "api_key": q.api_key,
-            "balance_micro_usdc": bal,
-            "balance_usdc": bal as f64 / 1_000_000.0,
-        }))
-        .into_response(),
-        Ok(None) => (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "api key not found"})),
-        )
-            .into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e.to_string()})),
-        )
-            .into_response(),
-    }
-}
-
-/// POST /deposit — credit a confirmed on-chain USDC transfer to an API key balance.
-///
-/// Flow: caller sends USDC to treasury on Solana, then POSTs the tx_sig here.
-/// Server verifies the on-chain transfer and credits the key.
-async fn deposit(
-    State(state): State<Arc<mcp::McpState>>,
-    Json(body): Json<DepositRequest>,
-) -> Response {
-    // Verify the on-chain USDC transfer and get the amount
-    let amount = match payment::verify_usdc_transfer(
-        &state.solana,
-        &body.tx_sig,
-        &state.treasury_pubkey,
-        &state.usdc_mint,
-        1, // at least 1 micro-USDC
-    )
-    .await
-    {
-        Ok(Some(a)) => a,
-        Ok(None) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({
-                    "error": "transaction does not transfer USDC to treasury"
-                })),
-            )
-                .into_response()
-        }
-        Err(e) => {
-            return (
-                StatusCode::BAD_GATEWAY,
-                Json(serde_json::json!({"error": format!("solana rpc error: {e}")})),
-            )
-                .into_response()
-        }
-    };
-
-    // Look up the API key's owner_pubkey (short lock scope, no await)
-    let owner_pubkey = {
-        let store = state.store.lock().unwrap();
-        match payment::get_owner_pubkey(&store, &body.api_key) {
-            Ok(Some(pk)) if !pk.is_empty() => pk,
-            Ok(_) => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(serde_json::json!({
-                        "error": "api key has no owner_pubkey — cannot verify deposit sender"
-                    })),
-                )
-                    .into_response()
-            }
-            Err(e) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({"error": e.to_string()})),
-                )
-                    .into_response()
-            }
-        }
-    }; // lock released here
-
-    // Verify that the API key's owner_pubkey is a signer of the deposit transaction.
-    // This prevents front-running: only the wallet that signed the tx can credit the key.
-    let signers = match state.solana.get_tx_signers(&body.tx_sig).await {
-        Ok(s) => s,
-        Err(e) => {
-            return (
-                StatusCode::BAD_GATEWAY,
-                Json(serde_json::json!({"error": format!("failed to fetch tx signers: {e}")})),
-            )
-                .into_response()
-        }
-    };
-
-    if !signers.iter().any(|s| s == &owner_pubkey) {
-        // Log full identifiers server-side for operator debugging, but do
-        // NOT leak any pubkey/tx_sig prefix to the client. The caller already
-        // knows their own pubkey + tx_sig; adding partial values to the
-        // response body only narrows key space for third-party observers.
-        tracing::warn!(
-            owner_pubkey = %owner_pubkey,
-            tx_sig = %body.tx_sig,
-            signers = ?signers,
-            "deposit rejected: API key owner is not a signer of this transaction"
-        );
-        return (
-            StatusCode::FORBIDDEN,
-            Json(serde_json::json!({
-                "error": "deposit rejected: API key owner is not a signer of this transaction"
-            })),
-        )
-            .into_response();
-    }
-
-    let store = state.store.lock().unwrap();
-    match payment::credit_deposit(&store, &body.api_key, amount as i64, &body.tx_sig) {
-        Ok(new_balance) => Json(serde_json::json!({
-            "api_key": body.api_key,
-            "deposited_micro_usdc": amount,
-            "new_balance_micro_usdc": new_balance,
-        }))
-        .into_response(),
-        Err(e) => (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": e.to_string()})),
-        )
-            .into_response(),
-    }
-}
+// Wave 4 removed the custodial api-key / balance / deposit endpoints; the
+// remaining non-`/mcp` endpoints (admin stats, health) are plain JSON.
 
 /// Fail-closed admin gate: returns true only when `admin_token` is configured
 /// (non-empty) AND the request carries a matching `Authorization: Bearer` token.
@@ -655,7 +480,6 @@ async fn main() -> anyhow::Result<()> {
         usdc_mint: cfg.usdc_mint.clone(),
         admin_token: cfg.admin_token.clone(),
         evm_payment,
-        sign_memory_cost_micro_usdc: cfg.sign_memory_cost_micro_usdc,
         pricing,
         sol_tx_fee_lamports: cfg.sol_tx_fee_lamports,
         storage_mode: cfg.storage_mode.clone(),
@@ -1204,9 +1028,6 @@ async fn run_http(
 
     let app = Router::new()
         .route("/chat", post(chat::chat_handler))
-        .route("/api-keys", post(create_api_key))
-        .route("/balance", get(get_balance))
-        .route("/deposit", post(deposit))
         .route("/admin/stats", get(admin_stats))
         .route("/stats", get(api::public_stats_handler))
         .route("/download-knowledge", get(chat::download_knowledge_handler))

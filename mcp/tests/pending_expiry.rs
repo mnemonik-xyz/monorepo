@@ -69,7 +69,6 @@ fn state_with_short_ttl(ttl_secs: i64) -> Arc<McpState> {
         usdc_mint: String::new(),
         admin_token: String::new(),
         evm_payment: None,
-        sign_memory_cost_micro_usdc: 0,
         pricing: mnemonic_mcp::pricing::PricingEngine::new(0),
         sol_tx_fee_lamports: 0,
         storage_mode: "local".into(),

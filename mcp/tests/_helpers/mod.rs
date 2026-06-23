@@ -390,20 +390,6 @@ impl TestServer {
         )
         .unwrap_or(0)
     }
-
-    /// Read the `api_keys.balance_micro_usdc` for the given api-key.
-    /// Returns `None` if the key is unknown. Used by tests that verify a
-    /// refund returns the caller's balance to pre-call value.
-    pub fn balance_for(&self, api_key: &str) -> Option<i64> {
-        let store = self.state.store.lock().expect("store mutex");
-        let conn = store.conn();
-        let result: rusqlite::Result<i64> = conn.query_row(
-            "SELECT balance_micro_usdc FROM api_keys WHERE api_key = ?",
-            rusqlite::params![api_key],
-            |row| row.get::<_, i64>(0),
-        );
-        result.ok()
-    }
 }
 
 /// Result of a `call_tool` invocation.

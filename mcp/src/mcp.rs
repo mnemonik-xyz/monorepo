@@ -393,9 +393,8 @@ pub fn delivery_not_confirmed(
 }
 
 /// Derive the per-request quota subject for the DoS guard. Returns the
-/// `blake3` hex digest of either the bearer api_key (balance mode) or the
-/// x402 tx_sig (x402 mode). `None` on stdio path (no auth headers) and on
-/// `payment_mode == "none"` (no billable subject).
+/// `blake3` hex digest of the x402 tx_sig. `None` on stdio path (no payment
+/// header) and on `payment_mode == "none"` (no billable subject).
 ///
 /// Centralised so the subject derivation is the same value at the entry
 /// quota check, the success-path nonce-consumption call (via the matching
@@ -403,27 +402,16 @@ pub fn delivery_not_confirmed(
 /// between any two of those would let an attacker bypass the quota by
 /// rotating the part of the request the failure branch doesn't see.
 ///
-/// **Subject choice rationale** (round-2 security-auditor fix):
-/// - Balance: `blake3(api_key).to_hex()` — same as round 1. Operator-issued.
-/// - x402: `blake3(tx_sig).to_hex()` — stable across retries with the
-///   same `X-Payment` header. A fresh tx_sig means a fresh USDC payment;
-///   the caller pays their own way around the quota.
-/// - `Both` mode: prefer balance if a Bearer header is present, otherwise
-///   fall back to x402 — matches the order `check_payment` uses.
+/// **Subject choice rationale**: `blake3(tx_sig).to_hex()` — stable across
+/// retries with the same `X-Payment` header. A fresh tx_sig means a fresh
+/// USDC payment; the caller pays their own way around the quota. (Wave 4
+/// removed custodial balance mode, so x402 is the only billable subject.)
 pub(crate) fn derive_quota_subject(headers: &HeaderMap, payment_mode: &str) -> Option<String> {
     if payment_mode == "none" {
         return None;
     }
-    // Balance has precedence in `both` mode — matches `check_payment`'s order.
-    if matches!(payment_mode, "balance" | "both") {
-        if let Some(raw_key) = payment::extract_api_key(headers) {
-            return Some(payment::hash_api_key(&raw_key));
-        }
-    }
-    if matches!(payment_mode, "x402" | "both") {
-        if let Some(proof) = payment::extract_x402_proof(headers) {
-            return Some(payment::hash_api_key(&proof.tx_sig));
-        }
+    if let Some(proof) = payment::extract_x402_proof(headers) {
+        return Some(payment::hash_api_key(&proof.tx_sig));
     }
     None
 }
@@ -665,10 +653,9 @@ impl Envelope {
         let amount_cents = (price_micro_usdc / 10_000).max(0);
         let payment_methods: Vec<&'static str> = match payment_mode {
             "none" => Vec::new(),
-            "balance" => vec!["balance"],
             "x402" => vec!["x402"],
-            "both" => vec!["x402", "balance"],
-            // Defensive: an unknown mode collapses to empty methods. Operator
+            // Defensive: an unknown mode collapses to empty methods (Wave 4
+            // removed the custodial "balance"/"both" modes). Operator
             // misconfiguration shouldn't leak as a misleading payment menu.
             _ => Vec::new(),
         };
@@ -687,8 +674,8 @@ impl Envelope {
 /// Price + payment-method tuple for `participate` writes. Serialised as part
 /// of `Envelope`. `currency` is currently always `"USD"`; `amount_cents` is
 /// the per-write cost in USD cents; `payment_methods` enumerates how the
-/// caller can pay (`["x402"]`, `["balance"]`, `["x402","balance"]`, or empty
-/// for `PAYMENT_MODE=none` self-operator deploys).
+/// caller can pay (`["x402"]`, or empty for `PAYMENT_MODE=none` self-operator
+/// deploys).
 #[derive(Debug, Clone, Serialize)]
 pub struct ParticipateCost {
     pub currency: &'static str,
@@ -708,7 +695,7 @@ pub struct McpState {
     pub compressor: EmbeddingCompressor,
 
     // Payment config
-    /// "none" | "balance" | "x402" | "both"
+    /// "none" | "x402" (Wave 4 removed custodial "balance"/"both")
     pub payment_mode: String,
     pub treasury_pubkey: String,
     pub usdc_mint: String,
@@ -716,9 +703,9 @@ pub struct McpState {
     pub admin_token: String,
     /// EVM x402 settlement config (Wave 1). `None` = EVM rail disabled.
     pub evm_payment: Option<crate::payment::EvmPaymentConfig>,
-    pub sign_memory_cost_micro_usdc: i64,
 
-    // Dynamic pricing
+    // Dynamic pricing — the per-call x402 price floor lives here (the static
+    // `SIGN_MEMORY_COST_MICRO_USDC` config seeds `PricingEngine`'s `min_price`).
     pub pricing: Arc<PricingEngine>,
     /// Solana memo tx fee in lamports (passed to CostHint).
     pub sol_tx_fee_lamports: u64,
@@ -1086,8 +1073,8 @@ fn ndjson_error(status: StatusCode, code: i32, message: &str) -> Response {
 /// `handle_request_with_resolved_mode` so the dispatch column and the
 /// gate decision come from the same value (drift impossible by
 /// construction). On a gate-pass we run the full
-/// `payment::check_payment` -> `deduct_balance` -> dispatch -> refund
-/// flow. Each terminal state emits exactly one NDJSON frame.
+/// `payment::check_payment` (x402) -> dispatch -> on-success x402-nonce
+/// consume flow. Each terminal state emits exactly one NDJSON frame.
 pub async fn mcp_handler(
     State(state): State<Arc<McpState>>,
     headers: HeaderMap,
@@ -1208,12 +1195,9 @@ pub async fn mcp_handler(
     );
 
     // T3 — outcome-based DoS guard. Consulted at the *entry* of the
-    // participate path, BEFORE `check_payment`/`deduct_balance`, BEFORE
-    // any Arweave/Solana write. The subject is the stable billable
-    // identifier for the request:
+    // participate path, BEFORE `check_payment`, BEFORE any Arweave/Solana
+    // write. The subject is the stable billable identifier for the request:
     //
-    //   - **balance mode**: `blake3(bearer_api_key)` — the operator-issued
-    //     api_key the caller can't rotate without re-paying.
     //   - **x402 mode**: `blake3(tx_sig)` — the on-chain payment proof.
     //     After the round-2 nonce deferral, the same tx_sig is reusable on
     //     delivery failure (no charge), so it serves as a stable
@@ -1272,23 +1256,10 @@ pub async fn mcp_handler(
         .await;
 
         match gate {
-            payment::PaymentGate::Proceed(api_key) => {
-                // Deduct balance BEFORE executing the tool (reserve funds).
-                if let Some(ref key) = api_key {
-                    let store = state.store.lock().expect("store mutex poisoned");
-                    if let Err(e) = payment::deduct_balance(
-                        &store,
-                        key,
-                        state.sign_memory_cost_micro_usdc,
-                        "mnemonic_sign_memory",
-                    ) {
-                        let err_body = serde_json::json!({
-                            "jsonrpc": "2.0", "id": req.id,
-                            "error": {"code": -32600, "message": format!("payment failed: {e}")}
-                        });
-                        return ndjson_response(StatusCode::PAYMENT_REQUIRED, &err_body);
-                    }
-                }
+            payment::PaymentGate::Proceed => {
+                // Wave 4: no custodial balance to reserve. x402 is pay-per-call
+                // and verified on-chain in `check_payment`; the nonce is only
+                // consumed AFTER a confirmed delivery (success path below).
 
                 let resp = handle_request_with_resolved_mode(
                     &req,
@@ -1299,15 +1270,12 @@ pub async fn mcp_handler(
                 )
                 .await;
 
-                // Refund + bookkeeping on tool failure. Uses
-                // `refund_balance` (not `credit_deposit`) so the per-tx_sig
-                // idempotency guard does not silently swallow repeated
-                // refunds for the same underlying failure class.
+                // Bookkeeping on tool failure (Wave 4: no custodial refund —
+                // x402 refund is implicit via the deferred nonce consume).
                 //
                 // T3 (modes-user-choice) — the typed
                 // `-32011 DeliveryNotConfirmed` carries the demoted
-                // `attestation_id` in `data.attestation_id` so the refund
-                // reason can correlate 1:1 with the downgrade. We also:
+                // `attestation_id` in `data.attestation_id`. We also:
                 //   1. Increment the per-stage `delivery_not_confirmed_total`
                 //      counter (no per-tenant label — high-cardinality
                 //      anti-pattern; per-tenant detail goes to the
@@ -1320,10 +1288,6 @@ pub async fn mcp_handler(
                 //      `derive_quota_subject(headers, payment_mode)` so it
                 //      matches the value the entry quota-check already
                 //      computed (drift-impossible).
-                //   3. On refund-itself failure write a structured
-                //      `payment_events` audit row via
-                //      `payment::record_refund_failed` so an operator can
-                //      forensically trace stuck ledger state.
                 //
                 // T3 round-2 — on SUCCESS, consume the x402 nonce here
                 // (deferred from `check_payment`). A delivery failure
@@ -1348,60 +1312,16 @@ pub async fn mcp_handler(
                         .as_ref()
                         .filter(|d| d["kind"] == "DeliveryNotConfirmed");
                     let dnc_stage = dnc_data.and_then(|d| d["stage"].as_str()).unwrap_or("");
-                    let dnc_attestation_id = dnc_data
-                        .and_then(|d| d["attestation_id"].as_str())
-                        .unwrap_or("");
 
                     if dnc_data.is_some() {
                         state.delivery_metrics.record_not_confirmed(dnc_stage);
                     }
 
-                    // Refund — balance path only. x402 refund is implicit
-                    // (the nonce was never consumed, so the same
-                    // `X-Payment` header can be retried).
-                    if let Some(ref key) = api_key {
-                        // Refund reason format includes the demoted
-                        // attestation_id so the `payment_events.description`
-                        // column lets an operator grep
-                        // `description LIKE '<id>%'` for the audit trail
-                        // (tech-spec Decision 7).
-                        let reason = if dnc_data.is_some() && !dnc_attestation_id.is_empty() {
-                            format!("delivery_not_confirmed: {dnc_attestation_id}")
-                        } else {
-                            err.message.clone()
-                        };
-
-                        let refund_result = {
-                            let store = state.store.lock().expect("store mutex poisoned");
-                            payment::refund_balance(&store, key, current_cost, &reason)
-                        }; // mutex dropped here; no `.await` while held
-
-                        if let Err(refund_err) = refund_result {
-                            let log_subject = quota_subject.clone().unwrap_or_default();
-                            tracing::warn!(
-                                subject_hash = %log_subject,
-                                error = %refund_err,
-                                attestation_id = %dnc_attestation_id,
-                                "refund failed; writing audit row"
-                            );
-                            // Best-effort audit row. Lives in `mcp/` per
-                            // the project's hard architectural rule.
-                            // Body sticks to the PII allow-list pinned
-                            // in the spec: subject_hash (NOT raw key),
-                            // attestation_id, reason, occurred_at. No
-                            // content_preview, no cose_bytes, no
-                            // embedding.
-                            let now = chrono::Utc::now().to_rfc3339();
-                            let store = state.store.lock().expect("store mutex poisoned");
-                            let _ = payment::record_refund_failed(
-                                &store,
-                                &log_subject,
-                                dnc_attestation_id,
-                                "refund-itself-failed",
-                                &now,
-                            );
-                        }
-                    }
+                    // Wave 4: no custodial balance refund. x402 refund is
+                    // implicit — the nonce is only consumed on the success
+                    // path below, so a delivery failure leaves the same
+                    // `X-Payment` header replayable (the caller's USDC is not
+                    // forfeit).
 
                     // T3 — increment the per-subject quota counter on
                     // delivery demotions only. Other failure classes
@@ -1409,9 +1329,7 @@ pub async fn mcp_handler(
                     // check) do NOT count against the quota; only the
                     // induced-refund pattern matters for the DoS
                     // mitigation. Counter increment happens OUTSIDE
-                    // the SQLite mutex (Decision 8). Fires for BOTH
-                    // balance- and x402-authed callers — the subject
-                    // derivation handles auth method dispatch.
+                    // the SQLite mutex (Decision 8).
                     if dnc_data.is_some() {
                         if let Some(ref subject) = quota_subject {
                             state.refunds_by_subject.record_failure(subject);
@@ -1848,7 +1766,6 @@ mod transport_tests {
             usdc_mint: String::new(),
             admin_token: String::new(),
             evm_payment: None,
-            sign_memory_cost_micro_usdc: 0,
             pricing: crate::pricing::PricingEngine::new(0),
             sol_tx_fee_lamports: 0,
             storage_mode: "local".into(),

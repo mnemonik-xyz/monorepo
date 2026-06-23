@@ -29,7 +29,9 @@ pub struct Config {
     pub storage_mode: String,
 
     // ── Payment ──────────────────────────────────────────────────────────────
-    /// Payment mode: "none" | "balance" | "x402" | "both"
+    /// Payment mode: "none" | "x402". Wave 4 (non-custodial) removed the
+    /// custodial "balance"/"both" modes; `check_payment` fail-closes on any
+    /// other value.
     pub payment_mode: String,
     /// Solana pubkey that receives USDC payments
     pub treasury_pubkey: String,
