@@ -553,3 +553,74 @@ So visibility is chosen **per memory at sign time**, with sensible per-type defa
 > Open decision to revisit before any confidential-deliverable use case: encrypt
 > content + how recall works over encrypted sets. For the current public path,
 > nothing blocks us.
+
+---
+
+## 18. Key management (client-side convenience)
+
+**Principle:** key management is a **client concern**. The protocol/server only
+ever sees **public keys + signatures + payment proofs** — never a private key or
+seed. Everything below lives in the client (CLI / extension / webapp / SDK).
+
+### One root, three purposes
+The fresh Ed25519 **identity seed** is the single root; every other key is
+**derived deterministically** from it, so there is exactly **one secret to back
+up**.
+
+```mermaid
+flowchart TB
+    SEED["Identity seed (32B fresh entropy) — the ONE backup"]
+    SEED --> AUTH["Ed25519 authorship key<br/>signs memories (COSE_Sign1)"]
+    SEED -->|HKDF seed,'pay/arc' mod n| PEVM["secp256k1 payment key<br/>Arc/EVM x402 + allowance"]
+    SEED -->|SLIP-0010 child| PSOL["Ed25519 payment key<br/>Solana x402"]
+    SEED -->|ed25519→x25519 convert| ENC["X25519 encryption key<br/>shared/private memories (§17)"]
+```
+
+- **Authorship** = the identity key itself (signs COSE).
+- **Payment** = derived per chain (`HKDF(seed,"pay/<chain>") mod n` for secp256k1;
+  SLIP-0010 child for Ed25519/Solana). Fund the derived address.
+- **Encryption** = the identity's Ed25519 mapped to X25519 (standard birational
+  conversion) — recipient key for shared/private memories (§17).
+- Derivation domains are fixed strings (`"pay/arc"`, `"pay/sol"`, `"enc"`) so the
+  same seed always reproduces the same key set.
+
+### Storage (already in the codebase)
+- Identity lives in the **OS keychain** with a **file-fallback stub**
+  (`~/.mnemonic/identity.json`), bootstrapped by `core/src/identity/ensure.rs`.
+  Derived keys are **recomputed on demand** from the seed — they are *not* stored
+  separately (nothing extra to leak).
+
+### Backup / restore — non-custodial, server-blind (already in the codebase)
+- The repo already ships an **encrypted key-escrow**: an Argon2id-AES-GCM blob
+  per user, **opaque to the server** (it never sees plaintext), bound to the
+  user's pubkey (`mcp/src/escrow.rs`, chrome-extension T15). This is the
+  backup/restore primitive for the seed across devices — keep it; it fits the
+  non-custodial model (operator stores ciphertext only).
+- Restore = fetch blob → decrypt client-side with the user passphrase → rederive
+  all keys from the seed.
+
+### Lifecycle
+```
+generate (fresh entropy) → store (OS keychain + stub)
+   → derive authorship / payment / encryption on demand
+   → back up (encrypted blob; server-blind)
+   → restore (decrypt → rederive everything)
+   → rotate (new identity seed = new identity; link old→new via a signed
+             statement if continuity of authorship history is needed)
+```
+
+### Caveats (recorded)
+- **Blast radius:** one seed reproduces *all* keys — guard it like a wallet seed
+  (keychain, encrypted escrow). Acceptable for single-entity self-custody.
+- **Determinism:** derivation must be fixed (domains + standard KDF) so any client
+  reproduces identical keys; pin the KDF + paths in the SDK.
+- **Per-agent identity:** each agent/identity has its **own** seed. Sponsorship
+  (one identity paying for another) is **inter-identity** and orthogonal to
+  derivation — the server stays agnostic about who pays for whom (§14).
+- **Scope:** this is a *client* convenience. No server change is required to
+  adopt it; the server contract remains "show me a pubkey, a signature, and a
+  payment proof."
+
+> Decision: **identity seed is the single root; authorship/payment/encryption keys
+> derive from it; back up via the existing server-blind encrypted escrow.**
+> Client-only — the protocol never holds keys.
