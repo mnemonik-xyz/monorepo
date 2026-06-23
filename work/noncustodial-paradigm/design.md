@@ -476,8 +476,22 @@ flowchart TD
 
 > Verdict: **Yes — drop SQL as a source of truth.** Make Arweave canonical and
 > anchor per-owner Merkle commitments so recall returns *proofs*. Keep a vector
-> index only as a rebuildable cache. Decide f32-on-Arweave vs compressed-recall
-> based on the precision you need. This is a **Wave 5** (post-payment) track.
+> index only as a rebuildable cache. This is a **Wave 5** (post-payment) track.
+
+### Precision tiers (decided): high precision is *optional* and *cheap*
+- **Default = compressed.** Recall over dequantized TurboQuant embeddings —
+  operator-independent, fine for most cases (coarse semantic match, small corpora,
+  exact-hash verification).
+- **Opt-in = high precision (full f32).** Stored **inside the signed artifact** on
+  Arweave → permanent, tamper-evident, and it *upgrades* embedding verifiability
+  (today f32 lives only in untrusted SQLite). Toggle **per-memory or per-owner**.
+- **Cost penalty is negligible:** f32 384-dim ≈ 1536 B vs TurboQuant-4bit ≈ 213 B —
+  only **~1.3 KB more** per memory, still sub-cent on Arweave (§20). Compression is
+  about index/bandwidth at scale, *not* Arweave cost — so offering high precision
+  is cheap. In demand for large corpora / fine-grained search; off by default.
+- **Privacy caveat (ties to §17):** embeddings can leak content via inversion, so
+  **f32-on-public-Arweave is a *public-memory* feature only.** Private/shared
+  memories keep embeddings **client-side** and recall stays post-decryption.
 
 ---
 
@@ -662,15 +676,21 @@ SPL USDC transfer, broadcast via the existing `SolanaClient.rpc`.
 - **Proof:** the tx hash is the x402 `X-Payment` proof; the **server EVM verifier
   is the one new piece** (Wave 1) — mirror of `verify_usdc_transfer` for EVM.
 
-### The honest gotcha: the derived address needs gas
-- To broadcast, the derived address must hold **gas**. On Arc, **gas is paid in
-  native USDC** (chain `nativeCurrency` = USDC, 18-dec) — so the address needs a
-  little **native USDC for gas** *plus* the **ERC-20 USDC** (`0x3600`, 6-dec) it
-  transfers as the fee. (Two representations of USDC: native = gas, ERC-20 = the
-  payment.) Funding the derived address is the one external step.
-- **Removing even that (optional):** a **gas sponsor / paymaster** (ERC-4337) or
-  an operator-funded relay can pay gas for the derived address, so the user funds
-  *nothing* and still self-signs. Keep as an enhancement, not a v1 requirement.
+### The honest gotcha: the derived address needs gas (and why Arc ≠ generic EVM)
+- To broadcast, the derived address must hold **gas**.
+- **Arc — no problem, no AA needed.** Gas is **native USDC** (chain
+  `nativeCurrency` = USDC, 18-dec), so you fund the derived address with the *same
+  asset* you're already paying in. Minimal friction; a derived EOA + local signing
+  is sufficient. (Note the two USDC representations: native 18-dec = gas, ERC-20
+  `0x3600` 6-dec = the transferred fee.)
+- **Generic EVM — gas is ETH → friction → AA-4337 *later*.** On a normal EVM
+  chain the EOA would need ETH for gas. The clean fix is an **ERC-4337 paymaster
+  that lets gas be paid in USDC** (or an operator relayer / EIP-2771 meta-tx). The
+  4337 account is still controlled by the **derived key** — it does *not*
+  reintroduce an external wallet; it only sponsors/abstracts gas.
+- **Sequencing (decided):** ship the plain derived-EOA path for **Arc** now (no
+  AA); add **AA-4337 (USDC paymaster) for generic EVM later** as a gas/UX
+  enhancement, not a v1 requirement and not a custody change.
 
 ### Precise framing
 > "No MetaMask" = **no external/browser wallet and no signing popups**. The client
