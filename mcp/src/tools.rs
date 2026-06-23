@@ -816,6 +816,16 @@ async fn sign_memory_deferred(
         .map_err(|e| anyhow::anyhow!("canonical CBOR encode failed: {e}"))?;
     let content_hash = blake3_hash(&canonical_cbor);
 
+    // Wave 2 — programmatic client-signing. Hand the unsigned canonical CBOR
+    // back inline (base64) so a non-browser client (SDK/CLI/agent) can
+    // COSE_Sign1 it locally with the user's own Ed25519 key and POST the
+    // signed envelope to `/api/sign-callback` — no browser `approve_url`
+    // round-trip required. This is the SAME bytes `GET /api/pending/{id}`
+    // serves; returning it inline saves the headless client one round-trip.
+    // The browser flow is untouched (it still uses `approve_url`).
+    let canonical_cbor_b64 =
+        base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &canonical_cbor);
+
     // 6. Park in PendingBundles. The store assigns the canonical
     //    `correlation_id` for the entry; we discard the value because we
     //    pre-allocated one above to keep `artifact_id == correlation_id`.
@@ -856,11 +866,33 @@ async fn sign_memory_deferred(
         "approve_url": format!("https://mnemonik.xyz/sign/{assigned_id}"),
         "correlation_id": assigned_id,
         "expires_in": 300,
+        "content_hash": content_hash,
+        // Wave 2 — programmatic (non-browser) client-signing handoff. A client
+        // that holds the user's identity key (SDK/CLI/extension/agent) signs
+        // `canonical_cbor_b64` locally and submits via `client_sign.submit_path`,
+        // bypassing the browser entirely. Paths are relative to the MCP server
+        // the client is already connected to.
+        "canonical_cbor_b64": canonical_cbor_b64,
+        "client_sign": {
+            "prepare_path": format!("/api/pending/{assigned_id}"),
+            "submit_path": "/api/sign-callback",
+            "alg": "COSE_Sign1 / Ed25519 (alg -8); kid = signer pubkey",
+            "payload": "the base64-decoded canonical_cbor_b64 (sign these exact bytes)",
+            "submit_body": {
+                "correlation_id": assigned_id,
+                "cose_signed_bytes": "<base64 of your COSE_Sign1 envelope>",
+                "signer_pubkey": "<base58 of the Ed25519 pubkey that signed; must equal the COSE kid>"
+            }
+        },
         "next_step": format!(
-            "Tell the user to open approve_url in their browser and click \
-             Approve. After they approve (typically 10-30 seconds), call \
-             mnemonic_check_pending with correlation_id={assigned_id} to \
-             retrieve the on-chain solana_tx + arweave_tx for this memory."
+            "Two ways to finish (the memory is client-signed either way): \
+             (A) Programmatic — COSE_Sign1 the bytes in canonical_cbor_b64 with \
+             your Ed25519 identity key and POST {{correlation_id, \
+             cose_signed_bytes, signer_pubkey}} to client_sign.submit_path \
+             (/api/sign-callback). (B) Browser — tell the user to open \
+             approve_url and click Approve. Then call mnemonic_check_pending \
+             with correlation_id={assigned_id} to retrieve the on-chain \
+             solana_tx + arweave_tx."
         ),
     }))
 }

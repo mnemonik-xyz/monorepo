@@ -1,5 +1,8 @@
 {
   "approve_url": "<NORMALISED>",
+  "canonical_cbor_b64": "<NORMALISED>",
+  "client_sign": "<NORMALISED>",
+  "content_hash": "<NORMALISED>",
   "correlation_id": "<NORMALISED>",
   "expires_in": 300,
   "next_step": "<NORMALISED>",

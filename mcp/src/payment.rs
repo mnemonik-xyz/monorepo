@@ -113,6 +113,10 @@ pub fn extract_x402_proof(headers: &HeaderMap) -> Option<X402PaymentProof> {
 /// Called before executing `mnemonic_sign_memory` when `payment_mode != "none"`.
 /// Returns `PaymentGate::Proceed(api_key)` if the caller may proceed,
 /// otherwise the appropriate rejection.
+// The gate fans out to per-rail verifiers (balance / Solana x402 / EVM x402)
+// and needs each rail's config; splitting into a params struct would only move
+// the same fields behind a wrapper. Wave 1 added the `evm` rail (8th arg).
+#[allow(clippy::too_many_arguments)]
 pub async fn check_payment(
     headers: &HeaderMap,
     mode: &str,

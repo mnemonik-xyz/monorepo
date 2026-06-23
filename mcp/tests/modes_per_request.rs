@@ -277,6 +277,9 @@ fn normalise_volatile(v: &serde_json::Value) -> serde_json::Value {
             "correlation_id",
             "approve_url",
             "next_step",
+            // Wave 2 — programmatic client-signing handoff (volatile bytes/ids):
+            "canonical_cbor_b64",
+            "client_sign",
         ] {
             if obj.contains_key(key) {
                 obj.insert(
