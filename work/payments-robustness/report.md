@@ -233,7 +233,7 @@ it, and no EVM-native settlement path.
 
 | # | Severity | Finding | Location |
 |---|---|---|---|
-| F1 | **High** | `GET /admin/stats` (operator P&L: revenue, cost, margin, SOL price) has **no auth gate** — financial disclosure to any caller. | `mcp/src/main.rs:261`, route `:1159` |
+| F1 | Medium | `GET /admin/stats` is intentionally public for **onboarding/usage stats**, but it *also* returns **operator P&L** (cost, margin, net) with no gate. Fix = **split** public onboarding metrics from gated P&L (not lock-all). A separate public `/stats` already exists (`api.rs:1264`). See design §13. | `mcp/src/main.rs:261`, route `:1159` |
 | F2 | Medium | `GET /balance?api_key=` accepts the secret in a **URL query** (logged by proxies/servers). | `mcp/src/main.rs:124` |
 | F3 | Medium | `POST /api-keys` (key creation) appears **ungated** — anyone can mint zero-balance keys (DoS/clutter; low direct impact since unfunded). | `mcp/src/main.rs:104` |
 | F4 | Medium | **Header overload**: payment API key and authn JWT share `Authorization: Bearer`. | `payment.rs:83` vs `oauth/mod.rs:2416` |
@@ -357,3 +357,10 @@ flowchart TD
 > "non-custodial payments" story** without sacrificing the operator-signed
 > anchoring that makes Mnemonic easy to consume. Fully trustless *anchoring*
 > (Level 3) is possible but is a different product with a much heavier client.
+
+> **Correction (post-review).** §7.3/§7.4 understated authorship. **User-signing
+> is the target paradigm, not a Level-3 opt-in** — the COSE_Sign1 signature
+> should be produced by the *user's* key, not the operator's. Operator-signed
+> anchoring is the **legacy** mode we keep for backward-compat, not the goal. The
+> target architecture (self-sovereign authorship + non-custodial payment) is
+> specified in [`../noncustodial-paradigm/design.md`](../noncustodial-paradigm/design.md).
