@@ -677,3 +677,75 @@ SPL USDC transfer, broadcast via the existing `SolanaClient.rpc`.
 > holds the derived key and signs+broadcasts itself. It is still a (programmatic,
 > self-custodied) wallet under the hood — that's unavoidable and intended; what we
 > remove is the *dependency on a third-party wallet app*, not the act of signing.
+
+---
+
+## 20. Economic alignment — storing on Arweave
+
+**Short answer: writes are well-aligned and cheap; the *recall/serving* side is
+the only real misalignment — and §16 (operator-independent recall) is what fixes
+it.** So the non-custodial direction and the economic fix are the same direction.
+
+### Arweave's model works in our favour
+Arweave is **pay-once / store-forever**: a single upload fee funds a long-horizon
+endowment, and the bytes are permanent. So storage is a **bounded, one-time cost
+per artifact** — there is no recurring storage bill. A memory is tiny (a few
+hundred bytes after TurboQuant), so the per-write Arweave cost is a fraction of a
+cent (the pricing engine even has a `min_price` floor because it rounds to ~nil,
+`mcp/src/pricing.rs:43`).
+
+### Cost vs revenue, per lifecycle
+
+```mermaid
+flowchart TB
+    PAY["Write fee paid once (x402 / self-funded Irys)"]
+    PAY --> C1["Arweave upload — ONE-TIME, permanent (endowment)"]
+    PAY --> C2["Solana memo anchor — ONE-TIME per write (~5000 lamports)"]
+    PAY --> C3["embedding compute — ONE-TIME at write"]
+    REC["Recall / serving"] --> C4["index + serve — PERPETUAL if operator-hosted"]
+    C1 --> OK["covered by the one-time fee"]
+    C2 --> OK
+    C3 --> OK
+    C4 --> GAP["NOT covered by a one-time fee → operator subsidy"]
+    GAP -. fixed by §16 .-> FIX["Arweave-canonical + operator-independent recall<br/>→ no perpetual operator cost → re-aligned"]
+```
+
+- **Write-time (aligned).** The fee is quoted as `(irys + sol_tx) × SOL/USDC ×
+  (1+margin)`, floored — so the user's one-time payment covers the permanent
+  Arweave upload + the Solana anchor + a 20% margin. Pay-once matches
+  store-forever. ✓
+- **Recall-time (the misalignment).** If recall depends on the **operator's
+  perpetual index + compute**, a one-time write fee cannot fund forever-serving —
+  the operator subsidises recall indefinitely. This is the only structural gap.
+
+### The fix is already on the roadmap (§16)
+Making recall **operator-independent** — Arweave canonical for content, a
+rebuildable/verifiable vector index, per-owner Merkle commitments — means recall
+no longer requires the operator's perpetual infrastructure. Then the **one-time
+write fee genuinely covers the artifact's whole lifecycle**, and anyone (the user,
+a third-party indexer) can serve recall. So §16 is not only a *trust* fix; it is
+the *economic-alignment* fix.
+
+### Who pays — and why each option is aligned
+- **Self-funded Irys (most aligned).** The user (the beneficiary) pays the
+  Arweave upload directly; the operator bears **zero** storage cost and is a pure
+  relay. Perfect alignment, no subsidy.
+- **Operator-fronted + x402 margin.** Operator pays Arweave/Solana and recoups via
+  the write fee at cost + margin (pricing engine guarantees price ≥ cost). Aligned
+  as long as the margin ≥ FX/volatility slippage.
+- **Free local mode.** No Arweave, no cost — trivially aligned (free for free).
+
+### Risks (bounded)
+- **FX/volatility** between USDC paid and AR/lamports cost at upload time — the
+  20% margin + live price refresh (`pricing.rs:93`, CoinGecko + Irys) buffer it.
+- **Tiny-write rounding** — the `min_price` floor ensures even sub-cent writes
+  cover the Solana anchor fee + overhead.
+- **Permanence is a one-way door** — you cannot un-store; matters for the
+  encryption/visibility decision (§17), not for cost.
+
+> Verdict: storing on Arweave is **economically sound** — pay-once/store-forever
+> matches a one-time write fee, and per-memory cost is negligible. The single
+> structural misalignment (perpetual recall serving) is closed by the §16
+> operator-independent recall track. Prefer **self-funded Irys** (or allowance) so
+> the beneficiary bears the cost; keep the margin + floor to absorb FX and the
+> Solana anchor.
