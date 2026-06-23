@@ -256,9 +256,12 @@ a blocker.**
 - The identity is a self-generated **Ed25519 keypair** (`Keypair::new()`,
   `core/src/identity/ensure.rs:248`), surfaced as `did:sol:<base58>`.
 
-Crucially, **this key is independent of any blockchain wallet.** It is generated
-and held by the Mnemonic client (CLI/extension/webapp), not derived from the
-user's Solana or Ethereum account.
+Today this key is generated independently of any blockchain wallet
+(`Keypair::new()`). It **can** instead be **deterministically derived from the
+user's wallet** (sign a fixed message → HKDF → Ed25519 seed) for single-key UX —
+see the corrected analysis in §14 (Topology 3, recommended for EVM consumers).
+Either way it stays an Ed25519 authorship key, distinct in *role* from the
+payment key.
 
 ### The two-key model has no conflict
 
@@ -317,42 +320,67 @@ sophisticated**:
 
 ---
 
-## 14. Should the payment key be derived from the authorship key? (argued)
+## 14. Can the authorship and payment keys be derived from one another? (corrected)
 
-**Recommendation: no — keep them independent at the protocol level. Offer
-*same-seed* derivation only as a client backup convenience, and bind author↔payer
-(when needed) with a *signed attestation*, not key derivation.**
+**Yes — they can, including cross-curve. My earlier "no" was wrong and is
+corrected here.** A private key on *any* curve is just a 256-bit scalar, so any
+high-entropy secret can be reduced into a valid key on Ed25519 *or* secp256k1.
+The real question is not *feasibility* but **which direction to derive, and
+whether to *enforce* the binding at the protocol level.**
 
-**For derivation (one key → both):**
-- One secret to back up / restore (single seed-phrase UX).
-- Implicit binding: "the payer is provably the author" with no extra step.
+### Feasibility — three valid topologies
 
-**Against (decisive):**
-1. **Cross-curve.** Authorship is **Ed25519**; EVM payment is **secp256k1**.
-   There is no clean, standard, safe way to *derive a secp256k1 key from an
-   Ed25519 key*. The most you can do is **one seed → SLIP-0010 → an Ed25519
-   child + a secp256k1 child** ("same seed, two curve keys") — that's *not*
-   "payment derived from authorship," it's a shared root.
-2. **Causality is backwards.** The payment key is usually a **pre-existing
-   funded wallet** (MetaMask / the user's Arc wallet). You can't derive an
-   already-funded external wallet from the Mnemonic identity. The only feasible
-   direction is the reverse — derive the *identity* from a deterministic wallet
-   signature — which couples authorship to one chain wallet (undesirable).
-3. **Sponsorship dies.** Hard-binding `payer == author` forbids
-   delegated/operator-fronted/third-party payment — the exact primitive Arco and
-   agent fleets need ("my app/treasury pays to anchor the agent's memory"). The
-   protocol must allow **payer ≠ author**.
-4. **Blast radius.** The payment key is *hot* (signs transactions constantly).
-   You do not want a leaked payment key to also forge authorship.
+```mermaid
+flowchart TB
+    subgraph T1["Topology 1 — one seed → both (HD wallet)"]
+      S["master seed (one backup)"] --> A1["Ed25519 authorship child"]
+      S --> P1["secp256k1 payment child"]
+    end
+    subgraph T2["Topology 2 — authorship → payment (KDF)"]
+      A2["Ed25519 authorship key"] -->|HKDF reduce mod n| P2["secp256k1 payment key"]
+    end
+    subgraph T3["Topology 3 — wallet → authorship (recommended for EVM)"]
+      W3["existing wallet (MetaMask/Arc)"] -->|sign fixed msg → HKDF → seed| A3["Ed25519 authorship key"]
+    end
+```
 
-**Better binding when you need "same entity":** the authorship key signs a tiny
-statement `{pays_with: <payment_addr>, chains: [...]}` (or the payment wallet
-signs `authorizes_author: <ed25519_pubkey>`). Explicit, cross-curve, revocable,
-and auditable — and it still permits sponsorship (a sponsor signs "I pay for
-author X"). The session (`jwt_sub`) already correlates the two today.
+- **T1 (one seed → both):** exactly how a seed phrase yields keys on many curves
+  (SLIP-0010 Ed25519 child + BIP32 secp256k1 child). One backup, neither key is
+  "derived from the other" — both descend from a root. Clean.
+- **T2 (authorship → payment):** `payment_priv = HKDF(authorship_seed,"evm") mod n`.
+  One-way, deterministic, cross-curve. Holding authorship reconstructs payment.
+- **T3 (wallet → authorship):** `authorship_seed = HKDF(wallet_sig_over_fixed_msg)`.
+  The user keeps **only their existing wallet**; the Mnemonic identity is
+  deterministically re-derivable on demand. **This is the best UX for Arco** — one
+  key to manage, no separate seed.
 
-> Decision: **independent keys; payer ≠ author allowed; optional one-seed
-> (SLIP-0010) client backup; link by signed attestation, never by derivation.**
+> Cross-curve is *not* a blocker (correcting the earlier claim). What you **cannot**
+> do is derive an *already-existing, externally-chosen* wallet from the identity —
+> derivation mints fresh deterministic keys, it can't reverse a pre-funded one.
+> That's why, for EVM, **T3 (derive identity *from* the wallet)** is the natural
+> direction, not the reverse.
+
+### The one caveat for T3
+Re-deriving the identity requires the wallet's signature over the fixed message to
+be **deterministic**. Ed25519 is deterministic by spec; Ethereum ECDSA uses
+**RFC 6979 deterministic-k in practice** (MetaMask et al.), so `personal_sign`
+over a fixed string is stable per key — usable as KDF input. Verify per wallet
+(some HW wallets differ); fall back to T1 (own seed) if not.
+
+### What to keep regardless of derivation: payer ≠ author must stay legal
+Even if a client *chooses* to derive both from one root, the **protocol must not
+require** `payer == author`. Sponsorship/delegated payment (operator-fronted, an
+org/treasury paying to anchor an agent's memory — what Arco and agent fleets
+need) demands that a **different** key can pay for a given author's write. So:
+derivation is a **client key-management convenience**, never a server-enforced
+constraint. Blast-radius note: deriving payment from authorship (T2) means one
+leak exposes both — prefer T1/T3 where the funded wallet stays the familiar root.
+
+> Decision (revised): **derivation is supported and encouraged for single-key UX —
+> recommend T3 (derive the Ed25519 identity *from* the user's wallet) for EVM
+> consumers.** Keep the protocol agnostic: it accepts any payer for any author, so
+> sponsorship still works. Binding, when explicitly needed, can be the derivation
+> itself *or* a signed attestation — both are fine.
 
 ---
 
