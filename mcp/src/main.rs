@@ -628,6 +628,21 @@ async fn main() -> anyhow::Result<()> {
         .build()
         .expect("failed to build reqwest client for hosted soft-fall proxy");
 
+    // EVM x402 rail (Wave 1): enabled only when all three knobs are set.
+    let evm_payment = if !cfg.evm_rpc_url.is_empty()
+        && !cfg.evm_usdc_token.is_empty()
+        && !cfg.evm_treasury.is_empty()
+    {
+        tracing::info!("EVM x402 rail enabled (rpc + token + treasury configured)");
+        Some(payment::EvmPaymentConfig {
+            rpc_url: cfg.evm_rpc_url.clone(),
+            usdc_token: cfg.evm_usdc_token.to_lowercase(),
+            treasury: cfg.evm_treasury.to_lowercase(),
+        })
+    } else {
+        None
+    };
+
     let state = Arc::new(mcp::McpState {
         keypair,
         solana: solana::SolanaClient::new(&cfg.solana_rpc_url),
@@ -639,6 +654,7 @@ async fn main() -> anyhow::Result<()> {
         treasury_pubkey: cfg.treasury_pubkey.clone(),
         usdc_mint: cfg.usdc_mint.clone(),
         admin_token: cfg.admin_token.clone(),
+        evm_payment,
         sign_memory_cost_micro_usdc: cfg.sign_memory_cost_micro_usdc,
         pricing,
         sol_tx_fee_lamports: cfg.sol_tx_fee_lamports,

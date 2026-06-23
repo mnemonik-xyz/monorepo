@@ -714,6 +714,8 @@ pub struct McpState {
     pub usdc_mint: String,
     /// Admin bearer token gating operator-only endpoints (P&L). Empty = disabled.
     pub admin_token: String,
+    /// EVM x402 settlement config (Wave 1). `None` = EVM rail disabled.
+    pub evm_payment: Option<crate::payment::EvmPaymentConfig>,
     pub sign_memory_cost_micro_usdc: i64,
 
     // Dynamic pricing
@@ -1265,6 +1267,7 @@ pub async fn mcp_handler(
             &state.treasury_pubkey,
             &state.usdc_mint,
             current_cost,
+            state.evm_payment.as_ref(),
         )
         .await;
 
@@ -1844,6 +1847,7 @@ mod transport_tests {
             treasury_pubkey: String::new(),
             usdc_mint: String::new(),
             admin_token: String::new(),
+            evm_payment: None,
             sign_memory_cost_micro_usdc: 0,
             pricing: crate::pricing::PricingEngine::new(0),
             sol_tx_fee_lamports: 0,

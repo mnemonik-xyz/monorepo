@@ -121,13 +121,14 @@ pub async fn check_payment(
     treasury: &str,
     usdc_mint: &str,
     cost: i64,
+    evm: Option<&EvmPaymentConfig>,
 ) -> PaymentGate {
     match mode {
         "none" => PaymentGate::Proceed(None),
 
         "balance" => check_balance(headers, store, cost),
 
-        "x402" => check_x402(headers, solana, store, treasury, usdc_mint, cost).await,
+        "x402" => check_x402(headers, solana, store, treasury, usdc_mint, cost, evm).await,
 
         "both" => {
             // If an API key header is present, try balance first
@@ -138,7 +139,7 @@ pub async fn check_payment(
                 // fall through to x402 on failure
             }
             // Otherwise gate via x402
-            check_x402(headers, solana, store, treasury, usdc_mint, cost).await
+            check_x402(headers, solana, store, treasury, usdc_mint, cost, evm).await
         }
 
         unknown => {
@@ -175,6 +176,17 @@ fn check_balance(
 
 // ── x402 path ────────────────────────────────────────────────────────────────
 
+/// True when an x402 proof's `network` denotes an EVM chain (Arc/Base/eip155…)
+/// rather than Solana. Used to route verification to the right rail.
+fn is_evm_network(network: &str) -> bool {
+    let n = network.to_lowercase();
+    n.starts_with("arc")
+        || n.starts_with("evm")
+        || n.starts_with("eip155")
+        || n.starts_with("base")
+        || n.starts_with("ethereum")
+}
+
 async fn check_x402(
     headers: &HeaderMap,
     solana: &SolanaClient,
@@ -182,16 +194,19 @@ async fn check_x402(
     treasury: &str,
     usdc_mint: &str,
     cost: i64,
+    evm: Option<&EvmPaymentConfig>,
 ) -> PaymentGate {
     let proof = match extract_x402_proof(headers) {
         Some(p) => p,
         None => {
-            // No payment header — return 402 payment required
+            // No payment header — return 402 payment required (advertise every
+            // rail the operator supports: Solana always, EVM when configured).
             return PaymentGate::NeedPayment(x402_required(
                 treasury,
                 usdc_mint,
                 cost,
                 "mnemonic_sign_memory attestation fee",
+                evm,
             ));
         }
     };
@@ -213,9 +228,26 @@ async fn check_x402(
         }
     }
 
-    // Verify the Solana USDC transfer
-    match verify_usdc_transfer(solana, &proof.tx_sig, treasury, usdc_mint, cost as u64).await {
-        Ok(Some(_)) => {}
+    // Verify the transfer on the rail indicated by `proof.network`. EVM when
+    // the proof names an EVM chain AND the operator has the EVM rail enabled;
+    // Solana otherwise. Both settle in micro-USDC (6-dec), so `cost` is the
+    // minimum on either chain.
+    let verify_result = match (evm, is_evm_network(&proof.network)) {
+        (Some(evm), true) => verify_evm_usdc_transfer(
+            &evm.rpc_url,
+            &proof.tx_sig,
+            &evm.treasury,
+            &evm.usdc_token,
+            cost as u128,
+        )
+        .await
+        .map(|opt| opt.map(|_| ())),
+        _ => verify_usdc_transfer(solana, &proof.tx_sig, treasury, usdc_mint, cost as u64)
+            .await
+            .map(|opt| opt.map(|_| ())),
+    };
+    match verify_result {
+        Ok(Some(())) => {}
         Ok(None) => {
             return PaymentGate::Unauthorized(format!(
                 "x402 payment not valid: tx {} does not transfer >= {cost} micro-USDC to treasury",
@@ -270,17 +302,34 @@ pub fn consume_x402_nonce_after_success(store: &SqliteStore, tx_sig: &str) -> an
 
 // ── Builder ──────────────────────────────────────────────────────────────────
 
-fn x402_required(treasury: &str, usdc_mint: &str, cost: i64, description: &str) -> X402Response {
+fn x402_required(
+    treasury: &str,
+    usdc_mint: &str,
+    cost: i64,
+    description: &str,
+    evm: Option<&EvmPaymentConfig>,
+) -> X402Response {
+    let mut accepts = vec![PaymentOption {
+        scheme: "exact".into(),
+        network: "solana-mainnet".into(),
+        max_amount_required: cost.to_string(),
+        asset: usdc_mint.to_string(),
+        pay_to: treasury.to_string(),
+        description: description.to_string(),
+    }];
+    if let Some(evm) = evm {
+        accepts.push(PaymentOption {
+            scheme: "exact".into(),
+            network: "arc".into(),
+            max_amount_required: cost.to_string(),
+            asset: evm.usdc_token.clone(),
+            pay_to: evm.treasury.clone(),
+            description: description.to_string(),
+        });
+    }
     X402Response {
         x402_version: 1,
-        accepts: vec![PaymentOption {
-            scheme: "exact".into(),
-            network: "solana-mainnet".into(),
-            max_amount_required: cost.to_string(),
-            asset: usdc_mint.to_string(),
-            pay_to: treasury.to_string(),
-            description: description.to_string(),
-        }],
+        accepts,
     }
 }
 
