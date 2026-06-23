@@ -20,6 +20,11 @@
 | 0 / F1 | `3ac84b8` | Gate `/admin/stats` P&L behind `ADMIN_TOKEN` (fail-closed). `admin_authorized()` in `main.rs`; `admin_token` on `Config` + `McpState`. |
 | 1 / p1 | `91a1a60` | EVM USDC verifier primitive in `payment.rs`: `EvmPaymentConfig`, `verify_evm_usdc_transfer`, pure `match_erc20_transfer` + 3 unit tests. |
 | 1 / p2 | `78c7865` | Wire EVM x402 into the live gate: network-aware `check_x402`/`check_payment` (route by proof `network`), 402 advertises EVM option, `EVM_RPC_URL`/`EVM_USDC_TOKEN`/`EVM_TREASURY` → `Option<EvmPaymentConfig>` on `McpState`. |
+| 2 | `dfe7b9c` | Programmatic (browser-free) client-signing: `sign_memory` deferred response returns the unsigned canonical CBOR inline (`canonical_cbor_b64`) + `client_sign` submit contract + `content_hash`, so SDK/CLI/agent clients COSE-sign locally and POST `/api/sign-callback` with no browser. New `test_programmatic_client_sign_without_pending_get`. |
+| 3 | `4a66636` | Remove operator signing for remote users: the operator key may inline-sign ONLY its own memory (`owner == operator`); every JWT write owned by a different identity (incl. explicit `mode:"local"`) routes to client-signing. `write_mode` plumbed through the pending bundle → callback persists the real mode. Defense-in-depth guard in `sign_memory_inline`. seed.rs self-authored exemption documented. |
+| 4 | `528bd75` | Remove custodial API keys + balance ledger (clean break §8): deleted `create_api_key`/`get_balance`/`deduct_balance`/`credit_deposit`/`refund_balance`/`check_balance`/`extract_api_key`/`record_refund_failed` + `/api-keys`,`/balance`,`/deposit` routes; `PaymentGate::Proceed` is now a unit variant; `PAYMENT_MODE ∈ {none,x402}`; DoS quota re-keyed on `blake3(x402 tx_sig)`. Schema tables retained for migration safety. |
+| 5 | `d9df6f1` | Verifiable-recall core: `core/src/merkle.rs` per-owner Merkle commitment (set semantics, RFC-6962 domain separation, odd-node promotion) with `commitment_root`/`prove`/`verify` (9 unit tests); `SqliteStore::owner_content_hashes` supplies the leaf set from the rebuildable cache; `integration_merkle_recall.rs` proves end-to-end inclusion + cross-owner non-forgeability. |
+| 6 | _this commit_ | Encrypted shared memories core: `core/src/encrypt.rs` X25519 ECIES seal-to-N-recipients (`seal_to_recipients`/`open`/`public_from_secret`, serde envelope) — public/private/shared-to-N, recipient-only decryption (8 unit tests). Native-only for now. |
 
 **Wave 0 F2/F3/F4 intentionally skipped** — they harden the custodial API-key
 machinery that Wave 4 deletes (throwaway). F1 was the only Wave-0 item that
@@ -66,33 +71,31 @@ Expect ~212 lib + ~207 + many integration tests, **0 failures**.
   allowlist-open. (`mnemonik-noncustodial`: scripts to mint/run exist in the
   prior session's scratch but are not committed.)
 
-## Next waves — concrete starting points
-- **Wave 2 — programmatic client-signing.** Promote the deferred sign path
-  (`tools.rs:854` `awaiting_signature` → `api.rs:128` `sign_callback_handler`
-  verifies COSE `kid == signer_pubkey` → persists `signer = owner = user`) so the
-  SDK/CLI sign the canonical CBOR locally instead of only via the browser
-  `approve_url`. Make client-sign the default. ~80% exists; this is wiring +
-  exposing the prepare→sign→submit handoff to non-browser clients.
-- **Wave 3 — remove operator signing. ⚠ LANDMINE:** `seed.rs:330+` RAG seeding
-  hard-codes the inline operator-sign path (`sign_artifact` @ `tools.rs:1057`
-  with `state.keypair`). Removing operator signing breaks startup seeding unless
-  seeding gets its own server-identity sign path OR is explicitly exempted
-  (operator signing its *own* knowledge base ≠ a user authoring a memory).
-  Also check `download-knowledge` / `chat.rs` consumers.
-- **Wave 4 — remove API keys + allowance.** Delete `mnm_` keys, `balance` mode,
-  `/api-keys`, `/deposit`, `credit_deposit`, `deduct_balance` (payment.rs +
-  main.rs routes + mcp.rs gate). Schema tables `api_keys`/`payment_events`/
-  `x402_nonces` are in `core/src/storage/sqlite.rs` — don't break migrations or
-  unrelated reads. Add the on-chain allowance draw path. This is the biggest
-  blast-radius wave — do it in a clean session with the feature-gated tests.
-- **Wave 5 — verifiable recall / drop SQL-as-truth.** Arweave canonical for
-  content + Solana-anchored per-owner Merkle commitments; recall returns inclusion
-  proofs; demote the vector store to a rebuildable cache. Precision tiers decided
-  (§16): default compressed, opt-in f32 in the signed artifact (public memories
-  only).
-- **Wave 6 — encrypted shared memories.** X25519 key-wrapping to `{client,
-  provider, evaluator}` for confidential deliverables; recall client-side
-  post-decrypt. Public is the current default.
+## Remaining integration (depends on external/chain infra — not code-only)
+
+The deterministic, code-only core of every wave is landed + tested. What's left
+needs live infrastructure (a chain/validator, a deployed contract, or a verified
+wasm build) that can't be exercised in a code-only session, so it was
+deliberately not stubbed:
+
+- **W4 — on-chain allowance (design §6, Level 2).** A user-controlled escrow
+  contract the operator draws from per signed receipt. Needs the contract
+  deployed on Arc/Solana; x402 already provides the non-custodial per-call rail,
+  so this is an additive convenience for non-interactive clients. Mirror the
+  x402 verifier shape: a server-side allowance-receipt verifier + draw path.
+- **W5 — anchor + expose.** (a) Anchor each per-owner `merkle::commitment_root`
+  on Solana per epoch (operator-relayed, mirrors the existing SPL-memo write —
+  needs a validator to test). (b) Return inclusion proofs in the
+  `mnemonic_recall` tool output + a client-side proof check against the anchored
+  root. (c) Opt-in f32 precision tier stored *inside* the signed artifact
+  (public memories only) — a `codec`/schema + recall change.
+- **W6 — wire + expose.** (a) Map the Ed25519 identity → its X25519 recipient
+  key (standard birational conversion, §18) in the client key-management layer.
+  (b) Per-type visibility defaults at sign time (deliverable→shared,
+  feedback→public, validation-evidence→shared) + store the `SealedEnvelope` on
+  Arweave for shared/private writes. (c) Flip `encrypt` on for wasm once the
+  in-browser RNG wiring is verified against the `cross-lang-build` gate (so the
+  webapp can decrypt client-side).
 
 ## Standing rule
 Every wave: full §21 gate, find-callers-before-delete, and never push a wave that

@@ -14,6 +14,12 @@ pub mod merkle;
 pub mod arweave;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod embed;
+// X25519 ECIES sealing for shared/private memories (Wave 6, §17). Native-only
+// for now (crypto_box + OsRng); in-browser (wasm) decryption for the webapp
+// client is a follow-up that must verify the wasm RNG wiring against the
+// hard `cross-lang-build` gate before flipping this on.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod encrypt;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod lineage;
 #[cfg(not(target_arch = "wasm32"))]
