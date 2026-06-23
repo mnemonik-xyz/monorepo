@@ -100,7 +100,7 @@ flowchart TB
 ```mermaid
 sequenceDiagram
     autonumber
-    actor U as User (client holds Ed25519 + wallet)
+    actor U as User (client holds identity seed → derived keys)
     participant CL as Client (SDK/CLI/extension/webapp)
     participant OP as Operator (relay/facilitator)
     participant CH as Arweave + Solana
@@ -620,3 +620,60 @@ generate (fresh entropy) → store (OS keychain + stub)
 > Decision: **identity seed is the single root; authorship/payment/encryption keys
 > derive from it; back up via the existing server-blind encrypted escrow.**
 > Client-only — the protocol never holds keys.
+
+---
+
+## 19. How a payment tx is signed & executed — without a wallet
+
+**Yes — this is fully specified, and it's standard.** "No MetaMask" does not mean
+"no signer"; it means the **client *is* a programmatic signer** (embedded key),
+not a browser extension. Nothing in the flow needs a wallet app or a popup.
+
+### The concrete path (Arc / EVM)
+```mermaid
+sequenceDiagram
+    autonumber
+    participant CL as Client (embedded signer — viem local account)
+    participant RPC as Arc RPC (rpc.testnet.arc.network)
+    participant OP as Mnemonic operator
+    participant V as EVM verifier (server, Wave 1)
+
+    Note over CL: 1. derive secp256k1 key = HKDF(identity_seed,'pay/arc') mod n
+    CL->>RPC: eth_getTransactionCount + fee data (nonce, gas)
+    Note over CL: 2. build USDC transfer: ERC-20 0x3600 transfer(treasury, cost)
+    Note over CL: 3. sign EIP-1559 tx locally with the derived key (no wallet)
+    CL->>RPC: eth_sendRawTransaction(signed)
+    RPC-->>CL: tx hash
+    CL->>OP: tools/call sign_memory + X-Payment {tx_hash, network: arc}
+    OP->>V: verify USDC transfer (tx_hash, treasury, mint, amount)
+    V->>RPC: eth_getTransactionReceipt + decode Transfer log
+    V-->>OP: ok / reject
+    OP-->>CL: anchored (or 402 if unpaid)
+```
+
+Every step is a library call (viem `privateKeyToAccount` to sign, `eth_*` JSON-RPC
+to broadcast) — the same primitives MetaMask uses internally, minus the
+extension. On **Solana** the analogue is identical: derived Ed25519 key signs an
+SPL USDC transfer, broadcast via the existing `SolanaClient.rpc`.
+
+### What must be true (and is)
+- **Signer:** viem (already a dep) signs a raw secp256k1 tx from the derived key. ✓
+- **Broadcast:** Arc RPC is public (`rpc.testnet.arc.network`). ✓
+- **Proof:** the tx hash is the x402 `X-Payment` proof; the **server EVM verifier
+  is the one new piece** (Wave 1) — mirror of `verify_usdc_transfer` for EVM.
+
+### The honest gotcha: the derived address needs gas
+- To broadcast, the derived address must hold **gas**. On Arc, **gas is paid in
+  native USDC** (chain `nativeCurrency` = USDC, 18-dec) — so the address needs a
+  little **native USDC for gas** *plus* the **ERC-20 USDC** (`0x3600`, 6-dec) it
+  transfers as the fee. (Two representations of USDC: native = gas, ERC-20 = the
+  payment.) Funding the derived address is the one external step.
+- **Removing even that (optional):** a **gas sponsor / paymaster** (ERC-4337) or
+  an operator-funded relay can pay gas for the derived address, so the user funds
+  *nothing* and still self-signs. Keep as an enhancement, not a v1 requirement.
+
+### Precise framing
+> "No MetaMask" = **no external/browser wallet and no signing popups**. The client
+> holds the derived key and signs+broadcasts itself. It is still a (programmatic,
+> self-custodied) wallet under the hood — that's unavoidable and intended; what we
+> remove is the *dependency on a third-party wallet app*, not the act of signing.
