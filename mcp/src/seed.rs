@@ -330,6 +330,16 @@ pub async fn run(state: &McpState) -> Result<()> {
             // Seeding always takes the inline (server-signing) path —
             // `jwt_sub = None` per Decision 12.
             //
+            // Wave 3 (remove operator signing) exemption: inline signing now
+            // requires `owner == operator` (the server never COSE-signs a
+            // *remote* user's content). RAG seeding satisfies this by
+            // construction — `owner_pubkey = server_owner_pubkey =
+            // pubkey(state.keypair)` — because the operator is legitimately
+            // the AUTHOR of its own knowledge base, not a custodian signing on
+            // behalf of someone else. signer == owner == operator, so the
+            // `sign_memory_inline` guard permits it. This is the intended
+            // server-identity self-authored path (design §21 landmine note).
+            //
             // T2: seeding never carries an explicit `mode` field — it
             // resolves to env-var fallback (`explicit = false`) so the
             // routing rule in `sign_memory` reads it as the legacy path,

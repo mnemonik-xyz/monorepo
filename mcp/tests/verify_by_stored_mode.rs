@@ -215,28 +215,16 @@ async fn tenant_isolation_local() {
     // return `Ok(None)` — `verify` must surface this as the
     // `not_found` shape with no identifying fields.
     let server = TestServer::builder().storage_mode("local").build();
-    let token_a = server.mint_test_jwt(USER_A_PUBKEY);
     let token_b = server.mint_test_jwt(USER_B_PUBKEY);
 
-    // Caller A writes a local row via the live MCP tool so the predicate
-    // exercise matches production wiring (signer == owner == A).
-    let resp_a = server
-        .with_token(&token_a)
-        .call_tool(
-            "mnemonic_sign_memory",
-            json!({"content": "tenant A secret", "mode": "local"}),
-        )
-        .await;
-    assert!(
-        resp_a.error().is_none(),
-        "A's sign_memory failed: {:?}",
-        resp_a.envelope
-    );
-    let inner_a = resp_a.result_text();
-    let a_sol_tx = inner_a["solana_tx"]
-        .as_str()
-        .expect("A's response missing solana_tx")
-        .to_string();
+    // Seed A's local row directly (signer == owner == A), mirroring the
+    // participate variant (3b). Wave 3 removed operator-inline-signing for
+    // remote users, so A's `mode: "local"` write now (correctly) routes to
+    // the client-signing deferred path — which `USER_A_PUBKEY` (a fake,
+    // keyless constant) cannot complete. This test only needs a local-tagged
+    // row owned by A to exercise the tenant-scoped routing isolation, not the
+    // write path itself; `seed_row` provides exactly that.
+    let (a_sol_tx, _ar) = seed_row(&server, USER_A_PUBKEY, WriteMode::Local, "tenant-iso-l");
 
     // Sanity: B's `mnemonic_recall` does not surface A's row (already
     // covered by recall_owner_isolation, but cheap to assert here for

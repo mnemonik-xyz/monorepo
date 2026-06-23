@@ -35,6 +35,7 @@ use axum::{
 };
 use chrono::{DateTime, Duration, Utc};
 use lru::LruCache;
+use mnemonic_core::storage::WriteMode;
 use tokio::sync::Mutex;
 
 /// 32 KB hard cap on `content` field — UTF-8 bytes, not chars.
@@ -79,6 +80,12 @@ pub struct PendingEntry {
     /// compatibility with future audit hooks.
     #[allow(dead_code)]
     pub metadata: serde_json::Value,
+    /// Write mode the original `mnemonic_sign_memory` request resolved to.
+    /// Carried through the pending bundle so the sign-callback persists the
+    /// row with the caller's intended mode instead of assuming `Participate`.
+    /// A `Local` deferred write (Wave 3: explicit-local writes by a remote
+    /// user are client-signed too) skips Arweave/Solana and stays free.
+    pub write_mode: WriteMode,
     /// Wall-clock expiry. Compared against `Utc::now()` on every access.
     pub exp: DateTime<Utc>,
 }
@@ -204,6 +211,7 @@ impl PendingBundles {
         canonical_cbor: Vec<u8>,
         tags: Vec<String>,
         metadata: serde_json::Value,
+        write_mode: WriteMode,
     ) -> Result<String, PendingError> {
         // Size checks first — cheaper to reject before locking.
         if content.len() > MAX_CONTENT_BYTES {
@@ -234,6 +242,7 @@ impl PendingBundles {
             canonical_cbor,
             tags,
             metadata,
+            write_mode,
             exp,
         };
 
@@ -458,7 +467,10 @@ mod tests {
     async fn test_insert_returns_correlation_id() {
         let p = PendingBundles::new(10, 300, 5);
         let (c, e, h, cb, tg, md) = dummy_entry("hello");
-        let id = p.insert("u".into(), c, e, h, cb, tg, md).await.unwrap();
+        let id = p
+            .insert("u".into(), c, e, h, cb, tg, md, WriteMode::Participate)
+            .await
+            .unwrap();
         assert_eq!(id.len(), 36, "correlation_id is uuidv4 (36 chars)");
         assert_eq!(p.len().await, 1);
     }
@@ -471,7 +483,16 @@ mod tests {
         for i in 0..4 {
             let (c, e, h, cb, tg, md) = dummy_entry(&format!("c{i}"));
             let id = p
-                .insert(format!("user{i}"), c, e, h, cb, tg, md)
+                .insert(
+                    format!("user{i}"),
+                    c,
+                    e,
+                    h,
+                    cb,
+                    tg,
+                    md,
+                    WriteMode::Participate,
+                )
                 .await
                 .unwrap();
             ids.push(id);
@@ -499,7 +520,10 @@ mod tests {
         // evicts the row.
         let p = PendingBundles::new(10, 300, 5);
         let (c, e, h, cb, tg, md) = dummy_entry("expires");
-        let id = p.insert("u".into(), c, e, h, cb, tg, md).await.unwrap();
+        let id = p
+            .insert("u".into(), c, e, h, cb, tg, md, WriteMode::Participate)
+            .await
+            .unwrap();
 
         // Within TTL → still there.
         assert!(p.get(&id, "u").await.is_ok());
@@ -518,14 +542,23 @@ mod tests {
         let mut ok_ids = Vec::new();
         for i in 0..3 {
             let (c, e, h, cb, tg, md) = dummy_entry(&format!("c{i}"));
-            ok_ids.push(p.insert("u".into(), c, e, h, cb, tg, md).await.unwrap());
+            ok_ids.push(
+                p.insert("u".into(), c, e, h, cb, tg, md, WriteMode::Participate)
+                    .await
+                    .unwrap(),
+            );
         }
         let (c, e, h, cb, tg, md) = dummy_entry("over");
-        let result = p.insert("u".into(), c, e, h, cb, tg, md).await;
+        let result = p
+            .insert("u".into(), c, e, h, cb, tg, md, WriteMode::Participate)
+            .await;
         assert!(matches!(result, Err(PendingError::PerUserCapExceeded)));
         // Other users unaffected.
         let (c, e, h, cb, tg, md) = dummy_entry("other");
-        assert!(p.insert("v".into(), c, e, h, cb, tg, md).await.is_ok());
+        assert!(p
+            .insert("v".into(), c, e, h, cb, tg, md, WriteMode::Participate)
+            .await
+            .is_ok());
         let _ = ok_ids;
     }
 
@@ -534,7 +567,9 @@ mod tests {
         let p = PendingBundles::new(10, 300, 5);
         let huge = "x".repeat(MAX_CONTENT_BYTES + 1);
         let (_, e, h, cb, tg, md) = dummy_entry("ignored");
-        let result = p.insert("u".into(), huge, e, h, cb, tg, md).await;
+        let result = p
+            .insert("u".into(), huge, e, h, cb, tg, md, WriteMode::Participate)
+            .await;
         assert!(matches!(result, Err(PendingError::OversizedPayload)));
     }
 
@@ -545,7 +580,18 @@ mod tests {
         let big_str: String = "a".repeat(MAX_METADATA_BYTES + 100);
         let metadata = serde_json::json!({"big": big_str});
         let (c, e, h, cb, tg, _) = dummy_entry("c");
-        let result = p.insert("u".into(), c, e, h, cb, tg, metadata).await;
+        let result = p
+            .insert(
+                "u".into(),
+                c,
+                e,
+                h,
+                cb,
+                tg,
+                metadata,
+                WriteMode::Participate,
+            )
+            .await;
         assert!(matches!(result, Err(PendingError::OversizedPayload)));
     }
 
@@ -553,7 +599,10 @@ mod tests {
     async fn test_get_returns_403_for_wrong_jwt_sub() {
         let p = PendingBundles::new(10, 300, 5);
         let (c, e, h, cb, tg, md) = dummy_entry("c");
-        let id = p.insert("alice".into(), c, e, h, cb, tg, md).await.unwrap();
+        let id = p
+            .insert("alice".into(), c, e, h, cb, tg, md, WriteMode::Participate)
+            .await
+            .unwrap();
         let r = p.get(&id, "bob").await;
         assert!(matches!(r, Err(PendingError::Forbidden)), "got {r:?}");
         // Rightful owner still works (entry not evicted).
@@ -564,7 +613,10 @@ mod tests {
     async fn test_consume_is_atomic_single_use() {
         let p = PendingBundles::new(10, 300, 5);
         let (c, e, h, cb, tg, md) = dummy_entry("once");
-        let id = p.insert("u".into(), c, e, h, cb, tg, md).await.unwrap();
+        let id = p
+            .insert("u".into(), c, e, h, cb, tg, md, WriteMode::Participate)
+            .await
+            .unwrap();
 
         let first = p.consume(&id, "u").await;
         assert!(first.is_ok());
@@ -584,7 +636,10 @@ mod tests {
         // DoS the victim by forcing eviction.
         let p = PendingBundles::new(10, 300, 5);
         let (c, e, h, cb, tg, md) = dummy_entry("c");
-        let id = p.insert("alice".into(), c, e, h, cb, tg, md).await.unwrap();
+        let id = p
+            .insert("alice".into(), c, e, h, cb, tg, md, WriteMode::Participate)
+            .await
+            .unwrap();
         let result = p.consume(&id, "bob").await;
         assert!(matches!(result, Err(PendingError::Forbidden)));
         // Entry remains intact for the rightful owner.
@@ -627,7 +682,10 @@ mod tests {
     async fn test_per_user_counter_decrements_on_consume() {
         let p = PendingBundles::new(10, 300, 5);
         let (c, e, h, cb, tg, md) = dummy_entry("c");
-        let id = p.insert("u".into(), c, e, h, cb, tg, md).await.unwrap();
+        let id = p
+            .insert("u".into(), c, e, h, cb, tg, md, WriteMode::Participate)
+            .await
+            .unwrap();
         assert_eq!(p.user_count("u").await, 1);
         p.consume(&id, "u").await.unwrap();
         assert_eq!(p.user_count("u").await, 0);

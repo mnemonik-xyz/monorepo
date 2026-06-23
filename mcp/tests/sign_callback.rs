@@ -178,6 +178,7 @@ async fn park_bundle(
             cbor.clone(),
             vec!["t1".into()],
             metadata,
+            mnemonic_core::storage::WriteMode::Participate,
         )
         .await
         .unwrap();

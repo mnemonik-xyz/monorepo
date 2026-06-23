@@ -158,6 +158,7 @@ async fn park_for(state: &Arc<McpState>, owner: &str, content: &str) -> (String,
             cbor.clone(),
             vec!["t".into()],
             metadata,
+            mnemonic_core::storage::WriteMode::Participate,
         )
         .await
         .unwrap();

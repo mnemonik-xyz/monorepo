@@ -337,23 +337,40 @@ pub async fn sign_memory(
             &envelope.supported_modes,
         )));
     }
-    // Routing rule (round-2 simplification — security-auditor major):
-    // - `explicit local` (caller sent `mode: "local"`) → ALWAYS inline,
-    //   regardless of deploy. The user-spec invariant "Личная память
-    //   бесплатна всегда" is honoured uniformly: scenario (b) full + JWT
-    //   + explicit local AND scenario (c) local + JWT + explicit local
-    //   both produce a synthetic-id free local write. Closes the
-    //   round-1 gap where (c) silently went to the deferred path.
-    // - Everything else with a JWT → deferred (Cloud-tier flow). This
-    //   includes mode-absent + JWT on a local-only deploy (the
-    //   chrome-extension's actual production target — preserved byte-
-    //   for-byte) AND explicit `mode: "participate"` + JWT.
-    // - No JWT → inline (stdio / Claude Code path), unchanged.
+    // Routing rule (Wave 3 — remove operator signing for remote users):
+    //
+    // The operator's keypair must NEVER produce a COSE signature over a
+    // memory authored by a *different* identity. Inline signing
+    // (`sign_memory_inline` → `sign_artifact(.., keypair)`) is therefore
+    // legal ONLY when the writer IS the operator itself — i.e. the resolved
+    // `owner_pubkey` equals the operator pubkey. That covers:
+    //   - the stdio / Claude Code single-tenant path (no JWT; owner is the
+    //     local identity == `keypair`), and
+    //   - a self-call where a JWT subject happens to be the operator's own
+    //     pubkey (e.g. RAG self-knowledge, test harness).
+    //
+    // Any JWT write owned by a different identity is routed to the
+    // client-signing (deferred) path — regardless of write_mode, INCLUDING
+    // explicit `mode: "local"`. A remote user's free local write is now
+    // client-signed too (the deferred bundle carries `write_mode` so the
+    // sign-callback persists it as `Local` with synthetic ids, still free).
+    // This closes the last custodial gap: previously explicit-local + JWT
+    // fell through to inline and the operator signed the user's content.
+    let operator_pubkey = identity::pubkey_base58(keypair);
     if let Some(sub) = jwt_sub {
-        if !resolved.is_explicit_local() {
-            return sign_memory_deferred(embedder, compressor, pending, content, tags, sub)
-                .await
-                .map_err(ToolError::Other);
+        let is_self_write = owner_pubkey == operator_pubkey;
+        if !(resolved.is_explicit_local() && is_self_write) {
+            return sign_memory_deferred(
+                embedder,
+                compressor,
+                pending,
+                content,
+                tags,
+                sub,
+                resolved.write_mode,
+            )
+            .await
+            .map_err(ToolError::Other);
         }
     }
     let inline_result = sign_memory_inline(
@@ -776,6 +793,7 @@ async fn sign_memory_deferred(
     content: &str,
     tags: &[String],
     jwt_sub: &str,
+    write_mode: WriteMode,
 ) -> anyhow::Result<serde_json::Value> {
     let now = chrono::Utc::now().to_rfc3339();
     // 1. Embed (CPU-bound, can't defer)
@@ -857,6 +875,7 @@ async fn sign_memory_deferred(
             canonical_cbor,
             tags.to_vec(),
             metadata,
+            write_mode,
         )
         .await
         .map_err(|e| anyhow::anyhow!("pending insert failed: {e}"))?;
@@ -1039,6 +1058,19 @@ async fn sign_memory_inline(
     delivery_refetch_timeout: Duration,
 ) -> Result<serde_json::Value, ToolError> {
     let pubkey = identity::pubkey_base58(keypair);
+    // Wave 3 invariant (defense in depth): inline signing uses the operator's
+    // `keypair` to produce the COSE_Sign1, so it is only legitimate when the
+    // memory is authored BY the operator — i.e. `owner_pubkey == pubkey`.
+    // The dispatcher in `sign_memory` already routes any remote-owned write to
+    // the client-signing path; this guard guarantees no future caller can
+    // smuggle a remote owner into the operator-signed path (custodial forgery).
+    if owner_pubkey != pubkey {
+        return Err(ToolError::Other(anyhow::anyhow!(
+            "refusing to operator-sign a memory owned by a different identity \
+             (owner={owner_pubkey}, operator={pubkey}); remote writes must be \
+             client-signed via the deferred path"
+        )));
+    }
     let attestation_id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
 

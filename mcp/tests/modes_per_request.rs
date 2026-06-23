@@ -161,6 +161,55 @@ async fn explicit_local_against_local_only_server_is_inline_not_deferred() {
     assert_eq!(server.write_mode_for_tx(sol_tx), Some("local".to_string()),);
 }
 
+// ── 1c (Wave 3). A REMOTE user's explicit-local write is client-signed ─────
+//     (deferred), NOT operator-inline-signed. The operator keypair must never
+//     produce a COSE signature over a memory authored by a *different*
+//     identity — even a free local write. Contrast with
+//     `explicit_local_against_local_only_server_is_inline_not_deferred`, where
+//     owner == operator (self-write) so inline signing is legitimate.
+
+#[tokio::test]
+async fn explicit_local_remote_user_is_deferred_not_operator_signed() {
+    let server = TestServer::builder()
+        .storage_mode("local")
+        .payment_mode("none")
+        .build();
+    // A remote identity distinct from the operator/server keypair.
+    let remote = "RemoteUser1111111111111111111111111111111111";
+    assert_ne!(remote, server.server_pubkey().as_str());
+
+    let result = server
+        .call_tool(
+            Some(remote),
+            "mnemonic_sign_memory",
+            json!({"content": "remote local memo", "mode": "local"}),
+        )
+        .await;
+    assert!(result.error().is_none(), "envelope: {:?}", result.envelope);
+    let inner = result.result_text();
+
+    // Deferred (client-sign) shape — operator did NOT inline-sign.
+    assert_eq!(
+        inner["status"], "awaiting_signature",
+        "remote explicit-local must defer to client-signing, got {inner:?}",
+    );
+    assert!(
+        inner["correlation_id"].is_string(),
+        "deferred response must carry a correlation_id: {inner:?}",
+    );
+    assert!(
+        inner.get("attestation_id").is_none(),
+        "no inline (operator-signed) row must be created: {inner:?}",
+    );
+    // The deferred path parks a bundle and waits for the sign-callback; no
+    // SQLite row exists yet (proves nothing was operator-signed inline).
+    assert_eq!(
+        server.attestation_count(remote),
+        0,
+        "remote explicit-local must not persist an operator-signed row",
+    );
+}
+
 // ── 2. participate against local-only server: typed UnsupportedMode ────────
 
 #[tokio::test]
