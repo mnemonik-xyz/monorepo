@@ -256,12 +256,11 @@ a blocker.**
 - The identity is a self-generated **Ed25519 keypair** (`Keypair::new()`,
   `core/src/identity/ensure.rs:248`), surfaced as `did:sol:<base58>`.
 
-Today this key is generated independently of any blockchain wallet
-(`Keypair::new()`). It **can** instead be **deterministically derived from the
-user's wallet** (sign a fixed message → HKDF → Ed25519 seed) for single-key UX —
-see the corrected analysis in §14 (Topology 3, recommended for EVM consumers).
-Either way it stays an Ed25519 authorship key, distinct in *role* from the
-payment key.
+This key is generated fresh (`Keypair::new()`) — there is no pre-existing wallet
+to reuse. It becomes the **root**: the payment key(s) are **derived from the
+identity** (`HKDF(identity_seed,"pay/<chain>") mod n`, cross-curve to secp256k1
+for Arc/EVM), so one seed backs up both. See §14. Either way the Ed25519 key is
+the authorship signer, distinct in *role* from the payment key.
 
 ### The two-key model has no conflict
 
@@ -328,58 +327,55 @@ high-entropy secret can be reduced into a valid key on Ed25519 *or* secp256k1.
 The real question is not *feasibility* but **which direction to derive, and
 whether to *enforce* the binding at the protocol level.**
 
-### Feasibility — three valid topologies
+### Greenfield: there are no pre-existing / pre-funded wallets
+
+**Clarified premise:** this is a clean-room model — we do **not** assume the user
+already holds a funded MetaMask/Arc wallet to "preserve." Keys are **created
+fresh**. That removes the only motivation for deriving identity *from* an existing
+wallet, and makes the **authorship identity the natural root**.
 
 ```mermaid
 flowchart TB
-    subgraph T1["Topology 1 — one seed → both (HD wallet)"]
-      S["master seed (one backup)"] --> A1["Ed25519 authorship child"]
-      S --> P1["secp256k1 payment child"]
-    end
-    subgraph T2["Topology 2 — authorship → payment (KDF)"]
-      A2["Ed25519 authorship key"] -->|HKDF reduce mod n| P2["secp256k1 payment key"]
-    end
-    subgraph T3["Topology 3 — wallet → authorship (recommended for EVM)"]
-      W3["existing wallet (MetaMask/Arc)"] -->|sign fixed msg → HKDF → seed| A3["Ed25519 authorship key"]
-    end
+    SEED["fresh entropy → Ed25519 authorship identity (ROOT)"]
+    SEED -->|self| AUTH["Ed25519 authorship key — signs memories"]
+    SEED -->|HKDF reduce mod n| PAYEVM["secp256k1 payment key — Arc/EVM"]
+    SEED -->|SLIP-0010 child| PAYSOL["Ed25519 payment key — Solana"]
+    AUTH --> USE1["COSE_Sign1 authorship"]
+    PAYEVM --> USE2["x402 / allowance on Arc"]
+    PAYSOL --> USE2
 ```
 
-- **T1 (one seed → both):** exactly how a seed phrase yields keys on many curves
-  (SLIP-0010 Ed25519 child + BIP32 secp256k1 child). One backup, neither key is
-  "derived from the other" — both descend from a root. Clean.
-- **T2 (authorship → payment):** `payment_priv = HKDF(authorship_seed,"evm") mod n`.
-  One-way, deterministic, cross-curve. Holding authorship reconstructs payment.
-- **T3 (wallet → authorship):** `authorship_seed = HKDF(wallet_sig_over_fixed_msg)`.
-  The user keeps **only their existing wallet**; the Mnemonic identity is
-  deterministically re-derivable on demand. **This is the best UX for Arco** — one
-  key to manage, no separate seed.
+- **Identity-rooted derivation (recommended).** Generate the Ed25519 authorship
+  identity from fresh entropy; **derive the payment key(s) from it** —
+  `payment_priv = HKDF(identity_seed, "pay/<chain>") mod n` (cross-curve to
+  secp256k1 for Arc/EVM, or a SLIP-0010 Ed25519 child for Solana). One secret to
+  back up (the identity), funds flow to the derived payment address.
+- Equivalent: one neutral master seed → both children (HD-wallet style). Same
+  net result — single backup, both keys reproducible.
+- **Topology "wallet → identity" is not needed here** (no existing wallet to keep).
+  It only matters when a consumer insists on reusing a pre-funded external wallet;
+  not our case.
 
-> Cross-curve is *not* a blocker (correcting the earlier claim). What you **cannot**
-> do is derive an *already-existing, externally-chosen* wallet from the identity —
-> derivation mints fresh deterministic keys, it can't reverse a pre-funded one.
-> That's why, for EVM, **T3 (derive identity *from* the wallet)** is the natural
-> direction, not the reverse.
+> Cross-curve derivation is **not** a blocker: a private key is just a scalar, so
+> `HKDF(...) mod n` yields a valid secp256k1 *or* Ed25519 key. Since nothing is
+> pre-funded, we derive everything **from the identity** and fund the derived
+> address — no reverse derivation required.
 
-### The one caveat for T3
-Re-deriving the identity requires the wallet's signature over the fixed message to
-be **deterministic**. Ed25519 is deterministic by spec; Ethereum ECDSA uses
-**RFC 6979 deterministic-k in practice** (MetaMask et al.), so `personal_sign`
-over a fixed string is stable per key — usable as KDF input. Verify per wallet
-(some HW wallets differ); fall back to T1 (own seed) if not.
+### What to keep regardless: payer ≠ author must stay legal at the protocol level
+Identity-rooted derivation is **intra-identity** (one entity's author + pay keys).
+It must not be confused with **inter-identity** payment: sponsorship / delegated
+pay (an operator, org, or treasury — *a different identity with its own keys* —
+paying to anchor someone else's authored memory) is exactly what Arco and agent
+fleets need. So the server **must accept any payer for any author**; derivation is
+a per-identity key-management convenience, never a `payer == author` constraint.
+Blast-radius note: identity-rooted derivation means one seed compromise exposes
+both keys — acceptable for single-entity self-custody, but the identity seed must
+be guarded like a wallet seed.
 
-### What to keep regardless of derivation: payer ≠ author must stay legal
-Even if a client *chooses* to derive both from one root, the **protocol must not
-require** `payer == author`. Sponsorship/delegated payment (operator-fronted, an
-org/treasury paying to anchor an agent's memory — what Arco and agent fleets
-need) demands that a **different** key can pay for a given author's write. So:
-derivation is a **client key-management convenience**, never a server-enforced
-constraint. Blast-radius note: deriving payment from authorship (T2) means one
-leak exposes both — prefer T1/T3 where the funded wallet stays the familiar root.
-
-> Decision (revised): **derivation is supported and encouraged for single-key UX —
-> recommend T3 (derive the Ed25519 identity *from* the user's wallet) for EVM
-> consumers.** Keep the protocol agnostic: it accepts any payer for any author, so
-> sponsorship still works. Binding, when explicitly needed, can be the derivation
+> Decision (revised): **keys are generated fresh; derive the payment key(s) *from*
+> the Ed25519 authorship identity (identity as root).** One backup, single-key UX.
+> Keep the protocol agnostic — any payer may fund any author's write, so
+> sponsorship still works. Explicit binding, when needed, is the derivation
 > itself *or* a signed attestation — both are fine.
 
 ---
