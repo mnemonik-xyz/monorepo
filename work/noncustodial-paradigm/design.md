@@ -458,3 +458,74 @@ flowchart TD
 > anchor per-owner Merkle commitments so recall returns *proofs*. Keep a vector
 > index only as a rebuildable cache. Decide f32-on-Arweave vs compressed-recall
 > based on the precision you need. This is a **Wave 5** (post-payment) track.
+
+---
+
+## 17. Visibility / access control — public vs private vs shared (Arco multi-party)
+
+**Decision for now: ship PUBLIC.** But the real Arco need is *shared-to-N*, and
+that interacts hard with the non-custodial decisions — capture it so we don't
+forget.
+
+### The reality check (important)
+Today `visibility` is **access-control only, not encryption**: recall filters by
+`owner_pubkey` + a `visibility` column (`core/src/storage/sqlite.rs:92`); there is
+**no encryption in `core/`**. So a "private" memory's **plaintext is still on
+public Arweave** — privacy is enforced *only* at the operator's recall layer.
+
+> Consequence: once we make Arweave the source of truth and remove operator trust
+> (§16), **"private"/"shared" via a SQL WHERE-clause is meaningless** — you cannot
+> access-control public, immutable storage. In the non-custodial target,
+> **private/shared ⇒ encryption**, full stop.
+
+### Three tiers
+| Tier | Who reads | Enforcement (non-custodial) |
+|---|---|---|
+| **Public** | anyone | none — plaintext on Arweave (fine; the on-chain hash is public anyway) |
+| **Private** | author only | content **encrypted to the author's key** |
+| **Shared-to-N** | an explicit set of pubkeys | content **encrypted to each recipient** (key-wrapping) |
+
+### Arco is inherently multi-party — visibility is per-artifact *type*
+```mermaid
+flowchart TB
+    subgraph JOB["ERC-8183 job parties"]
+      C["Client"]; P["Provider"]; E["Evaluator"]
+    end
+    DLV["Deliverable memory"] -->|SHARED-to-N| C
+    DLV --> E
+    DLV -.author.- P
+    FB["Reputation feedback"] -->|PUBLIC — reputation is a public signal| W["world"]
+    VAL["Validation evidence"] -->|SHARED: validator + agent| C
+    VALB["Validation *badge* (pass/fail)"] -->|PUBLIC| W
+```
+- **Deliverable** → typically **shared-to-N** = `{client, provider, evaluator}` (confidential work); *public* only for open bounties.
+- **Reputation feedback** → **public** (a reputation signal everyone should read).
+- **Validation** → the *badge* (pass/fail) public; the *evidence/report* often **shared** (validator + agent).
+
+So visibility is chosen **per memory at sign time**, with sensible per-type defaults.
+
+### Encryption model (for the shared/private target — future track)
+- Encrypt content to recipients via **X25519 ECIES / key-wrapping**. The Mnemonic
+  **Ed25519** identity maps to **X25519** (standard birational conversion), so the
+  same identity that *signs* can also be an *encryption recipient*; EVM parties can
+  use ECIES over secp256k1. (Note: encryption key ≠ signing key — same two-key
+  hygiene as §4/§14.)
+- **Recall tension:** semantic recall needs *plaintext* embeddings. For
+  encrypted memories, recall is **client-side after decryption**, or the
+  embedding is shared (encrypted) to the same recipient set. Public memories keep
+  server-side recall as today. (Merkle commitments from §16 work over hashes
+  regardless — encryption only changes the stored *content*, not the proof.)
+
+### Proposal
+- **MVP / now:** **PUBLIC** for Arco. It matches reputation transparency, keeps
+  recall simple, and the on-chain `bytes32` + handle are public regardless. Mark
+  each memory `visibility: public` explicitly.
+- **Capture as future work (Wave 6 — Encrypted shared memories):** shared-to-N via
+  X25519 key-wrapping; per-type defaults (deliverable→shared, feedback→public,
+  validation-evidence→shared); client-side recall for encrypted sets.
+- **Do not** ship "private" as a SQL ACL in the non-custodial world — it would be
+  privacy theatre over public Arweave bytes.
+
+> Open decision to revisit before any confidential-deliverable use case: encrypt
+> content + how recall works over encrypted sets. For the current public path,
+> nothing blocks us.
