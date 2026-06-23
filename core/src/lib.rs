@@ -2,6 +2,9 @@
 pub mod codec;
 pub mod compress;
 pub mod identity;
+// Per-owner Merkle commitments over content_hashes (verifiable recall, §16).
+// Pure crypto — available on every target so clients can verify proofs.
+pub mod merkle;
 
 // Native-only modules. These pull in rusqlite (bundled C SQLite), reqwest
 // (native TLS), or fastembed (ONNX runtime), none of which compile for
