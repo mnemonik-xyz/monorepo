@@ -24,8 +24,9 @@ compress, anchor, index), never a custodian of keys or funds.
 4. **Verifiable output unchanged.** blake3 + COSE + on-chain anchor still make
    every artifact independently verifiable — now with the *user's* pubkey as
    signer, which is strictly stronger.
-5. **Backward compatible.** Operator-signed inline mode stays as a legacy
-   convenience for clients that can't sign; new clients self-sign by default.
+5. **Clean break — no legacy.** Operator-signed inline mode is **removed**, not
+   kept: *all* artifacts are client-signed. Custodial `mnm_` API keys are
+   **removed**. No dual-mode, no migration shims — one scheme.
 
 ---
 
@@ -159,17 +160,19 @@ flowchart TD
 
 ---
 
-## 8. Compatibility & migration
+## 8. Cutover — no legacy (decided)
 
-- **Legacy stays.** Inline operator-signed + `balance`/x402(Solana) keep working
-  behind config — no flag-day. New behavior is additive.
-- **Default flips per client capability.** Clients that hold a key (CLI,
-  extension, webapp, SDK) self-sign by default; thin clients that can't sign fall
-  back to operator-sign (clearly labelled as such in the artifact's `signer`).
-- **Recall/verify unchanged.** Artifacts remain blake3+COSE; existing
-  operator-signed rows stay valid. `signer` simply reflects whoever signed.
-- **API keys deprecated, not deleted.** Mark `balance` mode legacy; stop issuing
-  new `mnm_` keys once allowance lands; keep redemption for existing balances.
+Per review: **clean break, no backward-compat.**
+- **Operator-signed inline mode is removed.** *Every* artifact is client-signed
+  (the operator never signs memory content again). `codec::sign` with the
+  operator key is deleted from the write path.
+- **Custodial `mnm_` API keys + `balance` mode are removed**, not deprecated —
+  no issuance, no redemption path retained.
+- **One write scheme:** prepare → client-signs → submit → operator verifies +
+  anchors. No dual-mode branching, no "thin client" fallback.
+- **Recall/verify semantics unchanged** (still blake3 + COSE), but `signer` is
+  now *always* the user. Pre-existing operator-signed rows, if any, are out of
+  scope for this clean-room target (treat as a fresh deployment).
 
 ## 9. Impact on Arco (the EVM consumer)
 
@@ -214,22 +217,29 @@ flowchart TD
   `network`-aware (`payment.rs:38` becomes meaningful); config `(chain, asset,
   treasury)`. *Unlocks Arc-USDC pay-per-call.*
 
-**Wave 2 — Programmatic user-signing**
+**Wave 2 — Programmatic user-signing (default for all clients)**
 - Extend the deferred-sign path so SDK/CLI sign the canonical CBOR **locally**
-  (not only via browser `approve_url`); make user-sign the default when a key is
-  present. *Delivers self-sovereign authorship for non-browser consumers.*
+  (not only via browser `approve_url`). Client-sign is the *only* path.
 
-**Wave 3 — On-chain allowance (true non-custodial funds)**
-- Allowance/escrow the user funds; operator draws per signed receipt; deprecate
-  new `mnm_` issuance. *Removes the operator float entirely.*
+**Wave 3 — Remove operator signing (no legacy)**
+- Delete `codec::sign`-with-operator-key from the write path; the server may
+  embed/canonicalize/anchor but **never signs content**. Reject any write that
+  arrives without a valid client COSE signature (`kid == caller`).
 
-**Wave 4 — Deprecate custodial API keys**
-- Migrate docs/clients to x402/allowance; freeze `mnm_` issuance; keep redemption
-  for existing balances. *Completes the paradigm shift.*
+**Wave 4 — Remove API keys + on-chain allowance**
+- Delete `mnm_` keys, `balance` mode, `/api-keys`, `/deposit`, `credit_deposit`,
+  `deduct_balance` (custodial ledger gone). Add the on-chain **allowance** path
+  so non-interactive clients still pay without a 402 round-trip.
+
+**Wave 5 — Verifiable recall / drop SQL-as-truth (§16)**
+- Make Arweave canonical for content; anchor per-owner Merkle commitments on
+  Solana; `recall` returns inclusion proofs; demote the vector store to a
+  rebuildable, verifiable cache. Decide f32-on-Arweave vs compressed-recall.
 
 **Suggested first step:** Wave 0 (security) in parallel with a spike on Wave 1
-(EVM x402), since Wave 1 is what Arco needs and what proves the non-custodial
-rail end-to-end.
+(EVM x402) — Wave 1 is what Arco needs and proves the non-custodial rail
+end-to-end. Waves 2–4 then execute the clean break (§8); Wave 5 (recall
+verifiability) can run independently.
 
 ---
 
@@ -304,3 +314,147 @@ sophisticated**:
 - **Operator tier** (admin-gated): P&L (`earned`, `cost`, `net`, `margin`,
   `avg_sol_price`) moves behind an admin token.
 - This replaces the blunt "gate F1" item in Wave 0 with a **split** task.
+
+---
+
+## 14. Should the payment key be derived from the authorship key? (argued)
+
+**Recommendation: no — keep them independent at the protocol level. Offer
+*same-seed* derivation only as a client backup convenience, and bind author↔payer
+(when needed) with a *signed attestation*, not key derivation.**
+
+**For derivation (one key → both):**
+- One secret to back up / restore (single seed-phrase UX).
+- Implicit binding: "the payer is provably the author" with no extra step.
+
+**Against (decisive):**
+1. **Cross-curve.** Authorship is **Ed25519**; EVM payment is **secp256k1**.
+   There is no clean, standard, safe way to *derive a secp256k1 key from an
+   Ed25519 key*. The most you can do is **one seed → SLIP-0010 → an Ed25519
+   child + a secp256k1 child** ("same seed, two curve keys") — that's *not*
+   "payment derived from authorship," it's a shared root.
+2. **Causality is backwards.** The payment key is usually a **pre-existing
+   funded wallet** (MetaMask / the user's Arc wallet). You can't derive an
+   already-funded external wallet from the Mnemonic identity. The only feasible
+   direction is the reverse — derive the *identity* from a deterministic wallet
+   signature — which couples authorship to one chain wallet (undesirable).
+3. **Sponsorship dies.** Hard-binding `payer == author` forbids
+   delegated/operator-fronted/third-party payment — the exact primitive Arco and
+   agent fleets need ("my app/treasury pays to anchor the agent's memory"). The
+   protocol must allow **payer ≠ author**.
+4. **Blast radius.** The payment key is *hot* (signs transactions constantly).
+   You do not want a leaked payment key to also forge authorship.
+
+**Better binding when you need "same entity":** the authorship key signs a tiny
+statement `{pays_with: <payment_addr>, chains: [...]}` (or the payment wallet
+signs `authorizes_author: <ed25519_pubkey>`). Explicit, cross-curve, revocable,
+and auditable — and it still permits sponsorship (a sponsor signs "I pay for
+author X"). The session (`jwt_sub`) already correlates the two today.
+
+> Decision: **independent keys; payer ≠ author allowed; optional one-seed
+> (SLIP-0010) client backup; link by signed attestation, never by derivation.**
+
+---
+
+## 15. Open question A — does client-signing break Arweave storage?
+
+**No.** Authorship and storage are two different layers:
+
+```mermaid
+flowchart TB
+    subgraph PAYLOAD["Inner payload (authorship)"]
+      CB["canonical CBOR (content + embedding + meta)"] --> COSE["COSE_Sign1 signed by USER Ed25519"]
+    end
+    subgraph ENVELOPE["Outer transaction (storage)"]
+      COSE --> TX["Arweave/Irys tx wraps the signed bytes"]
+      TX --> PAYER{"who signs/pays the upload tx?"}
+      PAYER -->|operator relay — default, metered via x402| ST["stored on Arweave"]
+      PAYER -->|user self-funds — optional| ST
+    end
+    ST --> V["anyone fetches bytes → verifies COSE (user) + blake3 + anchor"]
+```
+
+- Arweave stores **bytes**; it does not care who signed the *inner* COSE. The
+  COSE signer (user) and the Arweave-tx signer/payer (operator relay or user)
+  are **independent** — exactly as the deferred sign-callback path already works
+  today (bytes finalized client-side, then anchored).
+- **Determinism holds:** the embedding is computed in `prepare()` and included in
+  the canonical CBOR the client signs, so the uploaded bytes == the signed bytes
+  (tamper-evident). No re-canonicalization after signing.
+- The only thing that changes vs today is *who holds the signing key* (user, not
+  operator). The Arweave/Irys upload mechanics are untouched.
+
+> Verdict: client-signing is orthogonal to Arweave storage. No break.
+
+---
+
+## 16. Open question B — can we get rid of the SQL database? (verifiable, usable recall)
+
+**Answer: SQL can be demoted from a *trusted store* to a *rebuildable cache*. The
+source of truth becomes Arweave (content) + a Solana-anchored commitment
+(completeness). The catch is recall *precision*, because of how embeddings are
+stored today.**
+
+### What SQLite actually holds vs Arweave
+| Data | SQLite | Arweave |
+|---|---|---|
+| Memory **content** | cached | **canonical** (inside the signed CBOR) ✅ recoverable |
+| **Embedding** for recall | **full f32** (`attestation_embeddings.embedding BLOB`, `core/src/storage/sqlite.rs:29`) | only **TurboQuant-compressed** → decompresses to *approximate* f32 (`core/src/compress` "approximate", lossy) |
+| The **set** of an owner's memories | the index | derivable via Arweave tag query (GraphQL) |
+
+So **authenticity of any single memory is already trustless** (blake3 + COSE +
+anchor) regardless of where it's stored — SQL is not a trust root for *integrity*.
+SQL only uniquely provides two things: (1) a fast **f32 vector index**, and (2) an
+implicit claim of **completeness** (the full set).
+
+### Two gaps to close to drop SQL-as-truth
+
+```mermaid
+flowchart TD
+    subgraph TRUTH["Source of truth (no SQL)"]
+      AR["Arweave: signed artifacts (content + compressed embedding)"]
+      MR["Solana: per-owner Merkle root of content_hashes, per epoch (NEW)"]
+    end
+    subgraph INDEX["Index (untrusted, rebuildable cache)"]
+      VEC["vector index (f32) — rebuilt from Arweave; verifiable vs MR"]
+    end
+    Q["recall(query)"] --> VEC
+    VEC --> R["results + Merkle inclusion proofs"]
+    R --> CK{"client checks proofs vs MR<br/>+ verifies each COSE/blake3"}
+    CK -->|ok| USE["trusted results — censorship/omission detectable"]
+    AR -. rebuild anytime .-> VEC
+    AR --> MR
+```
+
+1. **Completeness / censorship-resistance.** Anchor a **per-owner Merkle root of
+   `content_hash`es** (per epoch) on Solana. `recall` returns results **plus
+   inclusion proofs**; the client checks them against the anchored root, so an
+   operator that omits or tampers is **detectable**. This is what makes recall
+   *"100% verifiable."*
+2. **The vector index.** Options, in order of preference:
+   - **(c) Rebuildable cache (recommended):** keep a vector index for speed, but
+     it is **reproducible from Arweave** and checkable against the Merkle root —
+     so it's a cache *anyone* can rebuild, not a trusted DB. SQLite (or any
+     vector store) survives only in this role.
+   - **(b) Store full f32 on Arweave:** makes Arweave self-sufficient for
+     high-precision recall, at higher storage cost per memory.
+   - **(a) Recall from compressed only:** zero extra storage, but recall runs
+     over *approximate* (dequantized) vectors → **lower precision**. Acceptable
+     for some uses, not for high-recall search.
+
+### The real tradeoff (be honest)
+- **"SQL as a trusted database" → can be removed.** Truth = Arweave + anchored
+  Merkle commitments; SQL becomes an optional, rebuildable, *verifiable* index.
+- **"Any index at all" → only removable for small N.** Pure client-side recall
+  (fetch an owner's artifacts from Arweave, decompress, cosine locally) is
+  feasible at small scale and is *fully* operator-independent; at large N you
+  want an index, but it can be the untrusted/rebuildable kind above.
+- **Precision caveat:** today only *compressed* embeddings are on Arweave.
+  Operator-independent recall therefore either accepts lower precision (a) or
+  pays to store f32 (b). Pick per product need; the verifiability (Merkle +
+  COSE) is independent of this choice.
+
+> Verdict: **Yes — drop SQL as a source of truth.** Make Arweave canonical and
+> anchor per-owner Merkle commitments so recall returns *proofs*. Keep a vector
+> index only as a rebuildable cache. Decide f32-on-Arweave vs compressed-recall
+> based on the precision you need. This is a **Wave 5** (post-payment) track.
