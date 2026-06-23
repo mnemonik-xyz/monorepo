@@ -987,6 +987,111 @@ pub fn record_refund_failed(
     Ok(())
 }
 
+// ── EVM x402 (Wave 1 — non-custodial Arc/EVM settlement) ─────────────────────
+//
+// Mirror of the Solana `verify_usdc_transfer` for EVM chains (Arc, Base, …): a
+// client signs an ERC-20 USDC `transfer(treasury, amount)` with its own derived
+// key (no external wallet — see work/noncustodial-paradigm/design.md §19) and
+// presents the tx hash in the `X-Payment` header. We confirm it on-chain via
+// `eth_getTransactionReceipt` and decode the ERC-20 Transfer log.
+
+/// EVM-side payment settlement config. `None` on `McpState` = EVM x402 disabled.
+#[derive(Debug, Clone)]
+pub struct EvmPaymentConfig {
+    /// EVM JSON-RPC endpoint (e.g. Arc: https://rpc.testnet.arc.network).
+    pub rpc_url: String,
+    /// ERC-20 USDC token contract address (lowercased `0x…`).
+    pub usdc_token: String,
+    /// Treasury recipient address (lowercased `0x…`).
+    pub treasury: String,
+}
+
+/// keccak256("Transfer(address,address,uint256)") — the ERC-20 Transfer topic0.
+const ERC20_TRANSFER_TOPIC0: &str =
+    "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
+
+/// Lowercase + strip `0x`; right-most 40 hex chars of a 32-byte topic = address.
+fn topic_to_address(topic: &str) -> String {
+    let t = topic.trim_start_matches("0x").to_lowercase();
+    let start = t.len().saturating_sub(40);
+    format!("0x{}", &t[start..])
+}
+
+/// Pure decoder: given a receipt's `logs` array, return the transferred amount
+/// (as u128) iff some log is an ERC-20 `Transfer` from `usdc_token` to
+/// `treasury` of at least `min_amount`. Network-free so it is unit-testable.
+fn match_erc20_transfer(
+    logs: &[serde_json::Value],
+    usdc_token: &str,
+    treasury: &str,
+    min_amount: u128,
+) -> Option<u128> {
+    let token = usdc_token.to_lowercase();
+    let to_want = treasury.to_lowercase();
+    for log in logs {
+        let addr = log["address"].as_str().unwrap_or("").to_lowercase();
+        if addr != token {
+            continue;
+        }
+        let topics = log["topics"].as_array()?;
+        if topics.len() < 3 {
+            continue;
+        }
+        if topics[0].as_str().unwrap_or("").to_lowercase() != ERC20_TRANSFER_TOPIC0 {
+            continue;
+        }
+        if topic_to_address(topics[2].as_str().unwrap_or("")) != to_want {
+            continue;
+        }
+        let data = log["data"]
+            .as_str()
+            .unwrap_or("0x")
+            .trim_start_matches("0x");
+        let amount = u128::from_str_radix(data, 16).unwrap_or(0);
+        if amount >= min_amount {
+            return Some(amount);
+        }
+    }
+    None
+}
+
+/// Verify an EVM ERC-20 USDC transfer to the treasury via `eth_getTransactionReceipt`.
+/// Returns `Ok(Some(amount))` when a matching Transfer of `>= min_amount` is found
+/// in a successful (`status == 0x1`) receipt, else `Ok(None)`.
+pub async fn verify_evm_usdc_transfer(
+    rpc_url: &str,
+    tx_hash: &str,
+    treasury: &str,
+    usdc_token: &str,
+    min_amount: u128,
+) -> anyhow::Result<Option<u128>> {
+    let client = reqwest::Client::new();
+    let body = serde_json::json!({
+        "jsonrpc": "2.0", "id": 1,
+        "method": "eth_getTransactionReceipt", "params": [tx_hash],
+    });
+    let resp: serde_json::Value = client
+        .post(rpc_url)
+        .json(&body)
+        .send()
+        .await?
+        .json()
+        .await?;
+
+    let receipt = &resp["result"];
+    if receipt.is_null() {
+        return Ok(None); // unknown / unconfirmed tx
+    }
+    // Reject reverted transactions (status 0x0).
+    if receipt["status"].as_str().unwrap_or("") != "0x1" {
+        return Ok(None);
+    }
+    let logs = receipt["logs"].as_array().cloned().unwrap_or_default();
+    Ok(match_erc20_transfer(
+        &logs, usdc_token, treasury, min_amount,
+    ))
+}
+
 // ── Tests ────────────────────────────────────────────────────────────────────
 #[cfg(test)]
 mod tests {
@@ -1000,6 +1105,68 @@ mod tests {
     use mnemonic_core::storage::SqliteStore;
     use std::sync::Arc;
     use std::thread;
+
+    // ── EVM ERC-20 Transfer decoder (Wave 1) ────────────────────────────────
+    fn transfer_log(token: &str, to_topic: &str, data_hex: &str) -> serde_json::Value {
+        serde_json::json!({
+            "address": token,
+            "topics": [
+                super::ERC20_TRANSFER_TOPIC0,
+                "0x000000000000000000000000aaaa000000000000000000000000000000000001",
+                to_topic
+            ],
+            "data": data_hex,
+        })
+    }
+
+    #[test]
+    fn evm_transfer_matches_recipient_and_amount() {
+        let token = "0x3600000000000000000000000000000000000000";
+        let treasury = "0x00000000000000000000000000000000000000fe";
+        let to_topic = "0x00000000000000000000000000000000000000000000000000000000000000fe";
+        // 1_000_000 (1 USDC, 6-dec) = 0xf4240
+        let logs = vec![transfer_log(
+            token,
+            to_topic,
+            "0x00000000000000000000000000000000000000000000000000000000000f4240",
+        )];
+        assert_eq!(
+            match_erc20_transfer(&logs, token, treasury, 1_000_000),
+            Some(1_000_000)
+        );
+        // below minimum → no match
+        assert_eq!(
+            match_erc20_transfer(&logs, token, treasury, 2_000_000),
+            None
+        );
+    }
+
+    #[test]
+    fn evm_transfer_rejects_wrong_token_or_recipient() {
+        let token = "0x3600000000000000000000000000000000000000";
+        let treasury = "0x00000000000000000000000000000000000000fe";
+        let to_topic = "0x00000000000000000000000000000000000000000000000000000000000000fe";
+        let amt = "0x00000000000000000000000000000000000000000000000000000000000f4240";
+        // wrong token contract
+        let wrong_token = vec![transfer_log(
+            "0xdeadbeef00000000000000000000000000000000",
+            to_topic,
+            amt,
+        )];
+        assert_eq!(match_erc20_transfer(&wrong_token, token, treasury, 1), None);
+        // wrong recipient
+        let other = "0x00000000000000000000000000000000000000000000000000000000000000ab";
+        let wrong_to = vec![transfer_log(token, other, amt)];
+        assert_eq!(match_erc20_transfer(&wrong_to, token, treasury, 1), None);
+    }
+
+    #[test]
+    fn topic_to_address_takes_last_20_bytes() {
+        assert_eq!(
+            topic_to_address("0x00000000000000000000000000000000000000000000000000000000000000fe"),
+            "0x00000000000000000000000000000000000000fe"
+        );
+    }
 
     fn fresh_store() -> SqliteStore {
         SqliteStore::in_memory().expect("in-memory store")
