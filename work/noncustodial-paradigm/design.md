@@ -71,23 +71,29 @@ flowchart LR
     TODAY -->|promote deferred-sign + payment overhaul| TARGET
 ```
 
-## 4. Two keys, two jobs (the key clarity)
+## 4. Two key ROLES — one identity, no external wallet
 
-A consumer has **two distinct keys** with **distinct purposes** — do not conflate:
+**No MetaMask / browser wallet anywhere.** Both keys are **client-held and
+derived from the single identity seed** (§14, §18); the client signs *authorship*
+and *payment* transactions itself. They are distinct **roles**, not distinct
+custodies or apps.
 
 ```mermaid
 flowchart TB
-    U["User / Agent"] --> K1["Authorship key<br/>Ed25519 (Mnemonic identity, did:sol)"]
-    U --> K2["Payment key<br/>chain wallet (EVM secp256k1 on Arc, or Solana)"]
-    K1 -->|COSE_Sign1 over canonical CBOR| ART["Signed memory artifact<br/>(signer = user)"]
-    K2 -->|x402 transfer / allowance draw authorization| PAY["Storage payment<br/>(USDC, user's chain)"]
+    ID["Identity seed — client-held, the one root"]
+    ID --> K1["Authorship key (Ed25519)"]
+    ID -->|derive| K2["Payment key (secp256k1 Arc / Ed25519 Solana)"]
+    K1 -->|COSE_Sign1 over canonical CBOR| ART["Signed memory (signer = user)"]
+    K2 -->|client signs the x402 / allowance tx| PAY["Storage fee in USDC, from the derived address"]
     ART --> ANCH["Operator relays anchor → Arweave + Solana"]
     PAY --> ANCH
 ```
 
-- **Authorship** = the user's Ed25519 key (already client-held in CLI/extension via the keychain). Signs the artifact. Never leaves the client.
-- **Payment** = the user's blockchain wallet (Arc/EVM for Arco, or Solana). Authorizes the storage fee. Never signs the artifact.
-- This cleanly separates *"who said it"* from *"who paid to anchor it"* — and lets an EVM consumer pay from Arc USDC while still producing an Ed25519-signed artifact.
+- **Authorship** = the identity's Ed25519 key — signs the artifact, client-side.
+- **Payment** = a key **derived from the same identity** — the client signs the
+  payment tx itself; the user only needs the **derived address funded** (faucet
+  on testnet, a transfer, or a sponsor). **No external wallet, no signing popups.**
+- Distinct *roles* ("who said it" vs "who paid"), one self-custodied root.
 
 ## 5. Target unified write flow (`sign_memory`, participate)
 
@@ -176,14 +182,16 @@ Per review: **clean break, no backward-compat.**
 
 ## 9. Impact on Arco (the EVM consumer)
 
-- Arco users already hold an **Arc wallet** (payment key) — once **EVM x402**
-  exists they pay the storage fee in **Arc USDC**, no Solana wallet needed.
-- Authorship: the Arco backend (or the agent) holds a **Mnemonic Ed25519** key
-  and signs deliverable/feedback memories — the on-chain `bytes32` then points to
-  a **user-signed** artifact, not an operator-signed one. Strictly stronger for
-  the ERC-8004/8183 provenance story.
+- **No MetaMask.** The Arco client (backend/agent) holds one **Mnemonic identity
+  seed**; it derives an **Arc payment key** from it (§14) and signs the Arc x402
+  tx itself. The only external step is **funding the derived address** (faucet on
+  testnet, or a sponsor) — there is no browser wallet in the Mnemonic flow.
+- Authorship: the same identity signs deliverable/feedback memories, so the
+  on-chain `bytes32` points to a **user-signed** artifact (not operator-signed) —
+  strictly stronger for the ERC-8004/8183 provenance story.
 - The proxy we built already isolates this: swapping operator-fronted billing for
-  user x402 is a backend change behind `/api/mnemonic/*`, invisible to the UI.
+  client-derived x402 is a backend change behind `/api/mnemonic/*`, invisible to
+  the UI.
 
 ## 10. Build ledger — already done vs new
 
@@ -243,62 +251,50 @@ verifiability) can run independently.
 
 ---
 
-## 12. Ethereum compatibility — is the Solana/Ed25519 key a blocker?
+## 12. Arc/EVM compatibility — no external wallet, no Solana-key blocker
 
-**Short answer: no hard blocker for the two-key model. The only thing the
-Ed25519 identity prevents is *single-key "sign the artifact with your Ethereum
-wallet"*, which would need additive secp256k1 COSE support — an enhancement, not
-a blocker.**
+**Short answer: no blocker, and crucially no MetaMask.** The client generates the
+identity and **derives + holds** the Arc/EVM payment key from it; it signs the
+Arc payment tx itself. The user never opens a browser wallet.
 
-### What's actually fixed to Ed25519
+### What's fixed to Ed25519 (and why it's fine)
 - Authorship signing is **EdDSA/Ed25519** (COSE alg `-8`), hardcoded in
-  `core/src/codec/sign.rs:56` (sign) and verified at `:144` (`alg == EdDSA`).
+  `core/src/codec/sign.rs:56` (sign) and verified at `:144`.
 - The identity is a self-generated **Ed25519 keypair** (`Keypair::new()`,
-  `core/src/identity/ensure.rs:248`), surfaced as `did:sol:<base58>`.
+  `core/src/identity/ensure.rs:248`). It is the **root**; the Arc/EVM payment key
+  is `HKDF(identity_seed,"pay/arc") mod n` → a valid secp256k1 key the **client
+  holds and signs with** (§14, §18).
 
-This key is generated fresh (`Keypair::new()`) — there is no pre-existing wallet
-to reuse. It becomes the **root**: the payment key(s) are **derived from the
-identity** (`HKDF(identity_seed,"pay/<chain>") mod n`, cross-curve to secp256k1
-for Arc/EVM), so one seed backs up both. See §14. Either way the Ed25519 key is
-the authorship signer, distinct in *role* from the payment key.
-
-### The two-key model has no conflict
+### Self-contained — no wallet app
 
 ```mermaid
 flowchart TB
-    ETHU["Ethereum / Arc user"] --> W["MetaMask / Arc wallet<br/>secp256k1"]
-    ETHU --> MID["Mnemonic identity<br/>Ed25519 (client-generated)"]
-    W -->|EVM x402: pay USDC on Arc| PAY["storage fee settled"]
-    MID -->|COSE_Sign1 EdDSA authorship| ART["user-signed artifact"]
-    PAY --> OK["anchored, non-custodial"]
-    ART --> OK
+    ID["Identity seed (client-held)"]
+    ID --> AUTH["Ed25519 authorship key"]
+    ID -->|HKDF mod n| PAY["secp256k1 Arc payment key (client-held)"]
+    AUTH -->|COSE_Sign1| ART["user-signed memory"]
+    PAY -->|client signs Arc x402 tx → fund the derived addr| SET["storage fee settled on Arc"]
+    ART --> OK["anchored, non-custodial — no MetaMask"]
+    SET --> OK
 ```
 
-- The Ethereum wallet (secp256k1) does the **payment** (EVM x402 / allowance) — no Ed25519 needed there.
-- The Mnemonic Ed25519 key does the **authorship** — no Ethereum key needed there.
-- An EVM user runs both, exactly like the CLI does today. **Nothing blocks this.**
+- The client signs the Arc payment with the **derived** secp256k1 key — no
+  MetaMask, no EIP-1193, no signing popups. The user only **funds the derived
+  address** (testnet faucet / transfer / sponsor).
+- Authorship and payment are both client-side from one seed.
 
-### The one real constraint (and it's optional)
-If the goal is **wallet-native authorship** — "sign the memory with MetaMask, no
-separate key" — then:
-- Ethereum keys are **secp256k1**; COSE would need **ES256K** (alg `-47`) added
-  to `sign.rs`/verify (currently EdDSA-only). *Additive, ~contained.*
-- Bigger snag: Ethereum wallets expose `personal_sign`/EIP-712 (recoverable
-  secp256k1 over a **keccak** digest), **not** arbitrary-hash ECDSA suitable for
-  a clean COSE ES256K envelope. True wallet-native COSE would need either a
-  custom verification profile or a signing shim.
-
-**Recommendation:** ship the **two-key model** (no blocker, works now with EVM
-x402). Treat **secp256k1/ES256K wallet-native authorship as a separate future
-track** if "one wallet, no extra key" UX is later deemed worth the codec work.
-
-### Other Solana touchpoints — none block EVM consumers
-| Touchpoint | Blocker for ETH? |
+### Solana touchpoints — none require a user key or wallet
+| Touchpoint | Needs a wallet / blocks EVM? |
 |---|---|
-| COSE authorship = Ed25519 | No — separate client key (two-key model) |
+| COSE authorship = Ed25519 | No — it's the client-held identity key |
+| Arc/EVM payment key | No — **derived** from the identity, client-signed (no MetaMask) |
 | `did:sol:` naming | No — cosmetic; could add `did:key`/`did:pkh` later |
 | Solana SPL-memo timestamp anchor | No — operator-relayed; user needs no Solana key |
-| Payment = Solana USDC | Yes today → **fixed by Wave 1 (EVM x402)** |
+| Payment asset = Solana USDC today | Addressed by Wave 1 (EVM x402 on Arc) |
+
+> Note: "sign the memory with your own Ethereum wallet" (single-key, secp256k1
+> COSE/ES256K) is explicitly **not a goal** — we don't use external wallets at
+> all. Authorship stays Ed25519; the codec needs no ES256K work.
 
 ---
 
@@ -329,10 +325,10 @@ whether to *enforce* the binding at the protocol level.**
 
 ### Greenfield: there are no pre-existing / pre-funded wallets
 
-**Clarified premise:** this is a clean-room model — we do **not** assume the user
-already holds a funded MetaMask/Arc wallet to "preserve." Keys are **created
-fresh**. That removes the only motivation for deriving identity *from* an existing
-wallet, and makes the **authorship identity the natural root**.
+**Clarified premise:** clean-room — there is **no external wallet (no MetaMask)**
+and nothing pre-funded to "preserve." Keys are **created fresh** and held by the
+client, which makes the **authorship identity the natural root** and the payment
+key something we *derive*, not import.
 
 ```mermaid
 flowchart TB
