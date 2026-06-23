@@ -15,7 +15,7 @@ mod tools;
 
 use axum::{
     extract::{Query, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     middleware,
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -257,11 +257,45 @@ async fn deposit(
     }
 }
 
-/// GET /admin/stats?days=<N> — P&L summary for the last N days (default 7).
+/// Fail-closed admin gate: returns true only when `admin_token` is configured
+/// (non-empty) AND the request carries a matching `Authorization: Bearer` token.
+/// Comparison is length-then-byte to avoid leaking the token via timing.
+fn admin_authorized(admin_token: &str, headers: &HeaderMap) -> bool {
+    if admin_token.is_empty() {
+        return false; // unconfigured → endpoint disabled
+    }
+    let presented = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.strip_prefix("Bearer "))
+        .map(str::trim)
+        .unwrap_or("");
+    let (a, b) = (admin_token.as_bytes(), presented.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
+/// GET /admin/stats?days=<N> — operator P&L for the last N days (default 7).
+///
+/// Operator-only: gated by the `ADMIN_TOKEN` bearer. Fail-closed — if
+/// `ADMIN_TOKEN` is unset the endpoint is disabled (403), so P&L never leaks by
+/// default. Public onboarding/usage metrics live on the unauthenticated `/stats`.
 async fn admin_stats(
     State(state): State<Arc<mcp::McpState>>,
+    headers: HeaderMap,
     Query(q): Query<StatsQuery>,
 ) -> Response {
+    if !admin_authorized(&state.admin_token, &headers) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({
+                "error": "operator-only endpoint; set ADMIN_TOKEN and send Authorization: Bearer <token>"
+            })),
+        )
+            .into_response();
+    }
     let days = q.days.unwrap_or(7);
     let store = state.store.lock().unwrap();
     match payment::get_pnl_stats(&store, days) {
@@ -604,6 +638,7 @@ async fn main() -> anyhow::Result<()> {
         payment_mode: cfg.payment_mode.clone(),
         treasury_pubkey: cfg.treasury_pubkey.clone(),
         usdc_mint: cfg.usdc_mint.clone(),
+        admin_token: cfg.admin_token.clone(),
         sign_memory_cost_micro_usdc: cfg.sign_memory_cost_micro_usdc,
         pricing,
         sol_tx_fee_lamports: cfg.sol_tx_fee_lamports,
@@ -1185,4 +1220,35 @@ async fn run_http(
     )
     .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod admin_gate_tests {
+    use super::admin_authorized;
+    use axum::http::HeaderMap;
+
+    fn with_bearer(tok: &str) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert("authorization", format!("Bearer {tok}").parse().unwrap());
+        h
+    }
+
+    #[test]
+    fn empty_admin_token_is_fail_closed() {
+        // Unconfigured ADMIN_TOKEN => disabled even if a token is presented.
+        assert!(!admin_authorized("", &with_bearer("anything")));
+        assert!(!admin_authorized("", &HeaderMap::new()));
+    }
+
+    #[test]
+    fn correct_token_authorizes() {
+        assert!(admin_authorized("s3cret", &with_bearer("s3cret")));
+    }
+
+    #[test]
+    fn wrong_or_missing_token_rejected() {
+        assert!(!admin_authorized("s3cret", &with_bearer("nope")));
+        assert!(!admin_authorized("s3cret", &with_bearer("s3cre"))); // length differs
+        assert!(!admin_authorized("s3cret", &HeaderMap::new())); // no header
+    }
 }

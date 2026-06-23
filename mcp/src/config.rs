@@ -35,6 +35,10 @@ pub struct Config {
     pub treasury_pubkey: String,
     /// USDC SPL mint address (mainnet: EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v)
     pub usdc_mint: String,
+    /// Admin bearer token gating operator-only endpoints (P&L on /admin/stats).
+    /// Empty (default) = the P&L endpoint is disabled (fail-closed); public
+    /// onboarding stats remain available on /stats.
+    pub admin_token: String,
     /// Minimum / initial cost of mnemonic_sign_memory in micro-USDC (floor price)
     pub sign_memory_cost_micro_usdc: i64,
 
@@ -149,6 +153,7 @@ impl Config {
             payment_mode: env_or("PAYMENT_MODE", "none"),
             treasury_pubkey: env_or("TREASURY_PUBKEY", ""),
             usdc_mint: env_or("USDC_MINT", "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"),
+            admin_token: env_or("ADMIN_TOKEN", ""),
             sign_memory_cost_micro_usdc: env_or("SIGN_MEMORY_COST_MICRO_USDC", "1000")
                 .parse()
                 .unwrap_or(1000),

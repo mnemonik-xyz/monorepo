@@ -712,6 +712,8 @@ pub struct McpState {
     pub payment_mode: String,
     pub treasury_pubkey: String,
     pub usdc_mint: String,
+    /// Admin bearer token gating operator-only endpoints (P&L). Empty = disabled.
+    pub admin_token: String,
     pub sign_memory_cost_micro_usdc: i64,
 
     // Dynamic pricing
@@ -1841,6 +1843,7 @@ mod transport_tests {
             payment_mode: "none".into(),
             treasury_pubkey: String::new(),
             usdc_mint: String::new(),
+            admin_token: String::new(),
             sign_memory_cost_micro_usdc: 0,
             pricing: crate::pricing::PricingEngine::new(0),
             sol_tx_fee_lamports: 0,
