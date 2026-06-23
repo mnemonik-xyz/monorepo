@@ -769,3 +769,46 @@ the *economic-alignment* fix.
 > operator-independent recall track. Prefer **self-funded Irys** (or allowance) so
 > the beneficiary bears the cost; keep the margin + floor to absorb FX and the
 > Solana anchor.
+
+---
+
+## 21. Regression safety — do not break other modules (standing rule)
+
+**Standing rule for every implementation wave:** a change is not done until the
+**whole workspace still builds, lints, and passes tests**, and the **dependent
+modules** of anything we touch are explicitly checked. The paradigm's risk is
+*removals* (operator signing, API keys, balance) — those reach into shared code.
+
+### Per-wave gate (run before every push; CI is the backstop)
+```bash
+cargo build --workspace
+cargo test --workspace --no-fail-fast
+cargo clippy --workspace --all-targets -- -D warnings
+cargo fmt --all -- --check
+```
+For any **removal**, first enumerate callers (`grep`/`rg` the symbol across
+`core/` + `mcp/`) — "find all callers before deleting."
+
+### Blast-surface map (what consumes what we're changing)
+| Change (wave) | Modules that depend on it — verify they still work |
+|---|---|
+| Remove operator signing (W3) | `tools.rs` (`sign_artifact`, `tools.rs:1057`), **`seed.rs` RAG seeding** (signs chunks with `state.keypair`), `mcp.rs` dispatch, `chat.rs`/`download-knowledge` (consumes seeded artifacts) |
+| Remove API keys / `balance` / `/deposit` (W4) | `payment.rs`, `main.rs` routes, `mcp.rs` payment gate, storage schema `api_keys`/`payment_events`/`x402_nonces`, `pricing.rs`, any `chat.rs` gating |
+| EVM x402 (W1) | `payment.rs` (`check_x402`/verifier), `mcp.rs` quota-subject, config `(chain,asset,treasury)` |
+| Drop-SQL / verifiable recall (W5) | `core/storage` (recall, `public_stats`), `lineage`, `seed.rs`, `tools.rs` recall/verify |
+| Visibility/encryption (W6) | `core/storage` recall filters, `tools.rs` (`resolve_visibility`), `recall` scoping |
+
+### Known landmines (flagged now, not discovered late)
+- **RAG self-knowledge seeding** (`seed.rs`) hard-codes the **inline
+  operator-sign** path (`seed.rs:330`+). Removing operator signing (W3) **will
+  break startup seeding** unless seeding is given a dedicated server-identity sign
+  path *or* explicitly exempted (operator signing its *own* knowledge base is a
+  legitimately different case from a user authoring a memory). Decide this in W3.
+- **`download-knowledge` / `chat.rs`** consume seeded, signed artifacts — verify
+  they still resolve after any signing/storage change.
+- **Storage schema** (`api_keys`, `payment_events`, `x402_nonces`) lives in
+  `core/src/storage/sqlite.rs`; dropping payment tables (W4) must not break
+  migrations or unrelated reads.
+
+> Rule of thumb: treat each removal as an API break — grep callers first, run the
+> full workspace gate, and never push a wave that leaves another module red.
