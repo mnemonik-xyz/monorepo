@@ -17,7 +17,7 @@ use base64::Engine;
 use mnemonic_core::codec::{schema, sign::sign_artifact};
 use mnemonic_core::compress::EmbeddingCompressor;
 use mnemonic_core::identity;
-use mnemonic_core::rebuild::{rebuild_row, rebuild_rows};
+use mnemonic_core::rebuild::{f32_embedding_to_bytes, rebuild_row, rebuild_rows, Precision};
 use mnemonic_core::storage::{AttestationStore, SqliteStore, Visibility, WriteMode};
 use solana_sdk::signature::Keypair;
 
@@ -219,4 +219,86 @@ fn tampered_artifact_is_rejected() {
     assert_eq!(ok.len(), 1, "one good row survives");
     assert_eq!(errs.len(), 1, "one bad artifact reported");
     assert_eq!(errs[0].0, 0, "the tampered artifact is at index 0");
+}
+
+/// Build an artifact carrying BOTH the compressed copy AND the opt-in f32 tier
+/// (`metadata.embedding_f32`), the way a public high-precision write would.
+fn make_artifact_f32(
+    kp: &Keypair,
+    c: &EmbeddingCompressor,
+    id: &str,
+    content: &str,
+    embedding: &[f32],
+) -> Vec<u8> {
+    let compressed_b64 =
+        base64::engine::general_purpose::STANDARD.encode(c.compress(embedding).to_bytes());
+    let f32_b64 =
+        base64::engine::general_purpose::STANDARD.encode(f32_embedding_to_bytes(embedding));
+    let artifact = serde_json::json!({
+        "artifact_id": id,
+        "type": "memory",
+        "schema_version": 1,
+        "content": content,
+        "producer": identity::did_sol(kp),
+        "created_at": "2026-01-01T00:00:00Z",
+        "tags": ["t"],
+        "metadata": {
+            "embed_provider": "stub",
+            "embed_dim": DIM,
+            "turbo_bits": BITS,
+            "embedding_compressed": compressed_b64,
+            "embedding_f32": f32_b64,
+        },
+    });
+    sign_artifact(&artifact, &schema::MEMORY_V1, kp)
+        .expect("sign")
+        .cose_bytes
+}
+
+#[test]
+fn f32_tier_rebuilds_embedding_exactly() {
+    // The opt-in f32 tier closes the precision gap the compressed-only path has
+    // (see `rebuilt_embedding_is_lossy_but_content_is_exact`): rebuild recovers
+    // the embedding bit-for-bit.
+    let kp = Keypair::new();
+    let c = compressor();
+    let emb = vec![0.83, -0.21, 0.44, 0.12, -0.67, 0.05, 0.91, -0.38];
+
+    let cose = make_artifact_f32(&kp, &c, "art-f32", "precise", &emb);
+    let row = rebuild_row(&cose, &c).expect("rebuild");
+
+    assert_eq!(
+        row.precision,
+        Precision::F32,
+        "must recover from the f32 tier"
+    );
+    assert_eq!(
+        row.embedding, emb,
+        "f32-tier rebuild must reproduce the embedding exactly (zero drift)"
+    );
+}
+
+#[test]
+fn f32_tier_is_preferred_over_compressed_when_both_present() {
+    // The artifact carries both copies; rebuild must use the lossless one.
+    let kp = Keypair::new();
+    let c = compressor();
+    let emb = vec![0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8];
+
+    let cose = make_artifact_f32(&kp, &c, "art-both", "both", &emb);
+    let row = rebuild_row(&cose, &c).expect("rebuild");
+    assert_eq!(row.precision, Precision::F32);
+    assert_eq!(row.embedding, emb);
+}
+
+#[test]
+fn compressed_only_artifact_reports_compressed_precision() {
+    // Regression guard: the default (no f32 field) path still works and is
+    // correctly tagged.
+    let kp = Keypair::new();
+    let c = compressor();
+    let emb = vec![0.5; DIM];
+    let (cose, _h, _e) = make_artifact(&kp, &c, "art-cmp", "compressed", &emb, &["t"]);
+    let row = rebuild_row(&cose, &c).expect("rebuild");
+    assert_eq!(row.precision, Precision::Compressed);
 }

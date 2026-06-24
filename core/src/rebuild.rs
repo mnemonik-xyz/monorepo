@@ -13,13 +13,16 @@
 //! is COSE-verified before any field is extracted, so a tampered or unsigned
 //! blob can never inject a row.
 //!
-//! ## Precision caveat (the motivation for the f32 tier, §16)
-//! The signed artifact carries only the **TurboQuant-compressed** embedding
-//! (`metadata.embedding_compressed`). A rebuilt embedding is therefore the
-//! *dequantized approximation* of the original f32 vector — fine for coarse
-//! semantic recall, lossy for fine-grained search. The opt-in "f32 in the
-//! signed artifact" precision tier is what closes this gap; it has a concrete
-//! acceptance test only because this rebuild path exists to consume it.
+//! ## Precision tiers (§16)
+//! Every artifact carries the **TurboQuant-compressed** embedding
+//! (`metadata.embedding_compressed`); dequantizing it yields an *approximate*
+//! f32 vector — fine for coarse recall, lossy for fine-grained search. The
+//! opt-in **f32 tier** additionally stores the full vector in
+//! `metadata.embedding_f32` (base64 little-endian f32), so `rebuild_row`
+//! recovers it **exactly** ([`Precision::F32`]) and falls back to the
+//! compressed copy ([`Precision::Compressed`]) when it's absent. f32-on-public-
+//! Arweave is a *public-memory* feature only (embeddings can leak content via
+//! inversion); the producer gates the toggle on visibility.
 //!
 //! Native-only for now (depends on the compressor); a wasm client rebuild is a
 //! follow-up gated on verifying the wasm build.
@@ -27,6 +30,43 @@
 use crate::codec::canonical::from_canonical_cbor;
 use crate::codec::sign::verify_artifact;
 use crate::compress::{CompressedEmbedding, EmbeddingCompressor};
+
+/// Which embedding representation a row was rebuilt from. The opt-in f32 tier
+/// (§16) stores the full vector in the signed artifact, so rebuild recovers it
+/// **exactly**; otherwise only the TurboQuant-compressed copy is available and
+/// the rebuilt vector is the dequantized approximation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Precision {
+    /// Recovered losslessly from `metadata.embedding_f32`.
+    F32,
+    /// Dequantized from `metadata.embedding_compressed` (lossy).
+    Compressed,
+}
+
+/// Serialize an f32 embedding to little-endian bytes (4 bytes/dim) for the
+/// `metadata.embedding_f32` artifact field. Producers base64 this; the matching
+/// reader is [`f32_embedding_from_bytes`].
+pub fn f32_embedding_to_bytes(embedding: &[f32]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(embedding.len() * 4);
+    for v in embedding {
+        out.extend_from_slice(&v.to_le_bytes());
+    }
+    out
+}
+
+/// Parse little-endian f32 bytes back to an embedding. Returns `None` if the
+/// byte length isn't a multiple of 4.
+pub fn f32_embedding_from_bytes(bytes: &[u8]) -> Option<Vec<f32>> {
+    if !bytes.len().is_multiple_of(4) {
+        return None;
+    }
+    Some(
+        bytes
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect(),
+    )
+}
 
 /// A recall-index row reconstructed from a signed artifact. Carries exactly the
 /// fields recoverable from the signed payload; storage-layer provenance the
@@ -44,8 +84,11 @@ pub struct RebuiltRow {
     /// COSE_Sign1 signer recovered from the envelope `kid`.
     pub signer_pubkey: String,
     pub created_at: String,
-    /// Dequantized (approximate) embedding — see the precision caveat above.
+    /// The recovered embedding. Exact when `precision == F32`, else the
+    /// dequantized approximation (see the precision caveat above).
     pub embedding: Vec<f32>,
+    /// Which representation `embedding` was recovered from.
+    pub precision: Precision,
 }
 
 /// Reconstruct a [`RebuiltRow`] from one signed artifact's COSE bytes.
@@ -86,17 +129,31 @@ pub fn rebuild_row(
         })
         .unwrap_or_default();
 
-    // 3. Recover the embedding from metadata.embedding_compressed.
-    let b64 = artifact
-        .get("metadata")
-        .and_then(|m| m.get("embedding_compressed"))
-        .and_then(|x| x.as_str())
-        .ok_or("artifact missing metadata.embedding_compressed")?;
-    let raw = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, b64)
-        .map_err(|e| format!("embedding_compressed is not valid base64: {e}"))?;
-    let compressed = CompressedEmbedding::from_bytes(&raw)
-        .ok_or("could not parse compressed embedding bytes")?;
-    let embedding = compressor.decompress(&compressed);
+    // 3. Recover the embedding. Prefer the opt-in full-precision f32 copy
+    //    (§16 precision tier) — lossless — and fall back to dequantizing the
+    //    always-present compressed copy.
+    let metadata = artifact.get("metadata");
+    let f32_b64 = metadata
+        .and_then(|m| m.get("embedding_f32"))
+        .and_then(|x| x.as_str());
+
+    let (embedding, precision) = if let Some(b64) = f32_b64 {
+        let raw = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, b64)
+            .map_err(|e| format!("embedding_f32 is not valid base64: {e}"))?;
+        let emb = f32_embedding_from_bytes(&raw)
+            .ok_or("embedding_f32 byte length is not a multiple of 4")?;
+        (emb, Precision::F32)
+    } else {
+        let b64 = metadata
+            .and_then(|m| m.get("embedding_compressed"))
+            .and_then(|x| x.as_str())
+            .ok_or("artifact has neither embedding_f32 nor embedding_compressed")?;
+        let raw = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, b64)
+            .map_err(|e| format!("embedding_compressed is not valid base64: {e}"))?;
+        let compressed = CompressedEmbedding::from_bytes(&raw)
+            .ok_or("could not parse compressed embedding bytes")?;
+        (compressor.decompress(&compressed), Precision::Compressed)
+    };
 
     Ok(RebuiltRow {
         attestation_id,
@@ -107,6 +164,7 @@ pub fn rebuild_row(
         signer_pubkey: v.signer,
         created_at,
         embedding,
+        precision,
     })
 }
 
