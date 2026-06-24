@@ -1847,6 +1847,49 @@ pub fn prove_identity(keypair: &Keypair, challenge: &str) -> serde_json::Value {
 /// keypair pubkey. `keypair` remains in the signature for the `total_attestations`
 /// count (per-signer, distinct from per-owner search) and forward
 /// compatibility with the `signer_pubkey` field.
+/// Build the per-owner Merkle commitment block for a recall response
+/// (Wave 5 / design §16). The `root` commits to the *set* of an owner's
+/// `content_hash`es (rebuildable from Arweave); `proofs` carries one inclusion
+/// proof per returned result so a client can check — against the root it
+/// independently anchored/observed on Solana — that the operator neither
+/// omitted nor tampered with the row. Pure local computation over the
+/// rebuildable SQLite cache; no chain call here.
+///
+/// Returns `Null` for the anonymous cross-owner public pool (no single owner →
+/// no single commitment) or if the owner's hash set can't be read.
+fn build_merkle_commitment(
+    store: &SqliteStore,
+    owner_pubkey: &str,
+    results: &[mnemonic_core::storage::SearchResult],
+) -> serde_json::Value {
+    use mnemonic_core::merkle;
+    let all_hashes = match store.owner_content_hashes(owner_pubkey) {
+        Ok(h) => h,
+        Err(_) => return serde_json::Value::Null,
+    };
+    let root = merkle::commitment_root(&all_hashes);
+    let mut proofs = serde_json::Map::new();
+    for r in results {
+        if let Some((_proof_root, steps)) = merkle::prove(&all_hashes, &r.content_hash) {
+            let steps_json: Vec<serde_json::Value> = steps
+                .iter()
+                .map(|s| {
+                    serde_json::json!({
+                        "sibling": merkle::to_hex32(&s.sibling),
+                        "right": s.sibling_is_right,
+                    })
+                })
+                .collect();
+            proofs.insert(r.content_hash.clone(), serde_json::Value::Array(steps_json));
+        }
+    }
+    serde_json::json!({
+        "root": merkle::to_hex32(&root),
+        "proofs": serde_json::Value::Object(proofs),
+        "alg": "blake3-merkle/v1: leaf=blake3(0x00||content_hash), node=blake3(0x01||l||r), sorted-set",
+    })
+}
+
 pub fn recall(
     keypair: &Keypair,
     store: &SqliteStore,
@@ -1880,6 +1923,14 @@ pub fn recall(
     // count() is signer-scoped (legacy semantic); search() is owner-scoped
     // OR cross-owner depending on the dispatcher's input.
     let total = store.count(&signer_pubkey).unwrap_or(0);
+    // Verifiable recall (§16): attach the per-owner Merkle commitment + an
+    // inclusion proof per result so an authenticated caller can detect an
+    // operator that omits/tampers. Null for the anonymous cross-owner pool
+    // (no single-owner commitment exists there).
+    let merkle_commitment = match owner_pubkey {
+        Some(owner) => build_merkle_commitment(store, owner, &results),
+        None => serde_json::Value::Null,
+    };
     serde_json::json!({
         "query": query,
         "results": results,
@@ -1891,6 +1942,7 @@ pub fn recall(
         "embed_provider": embedder.provider_name(),
         "embed_model": embedder.model_id(),
         "verifiable": embedder.is_open_weights(),
+        "merkle_commitment": merkle_commitment,
     })
 }
 

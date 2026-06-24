@@ -24,7 +24,8 @@
 | 3 | `4a66636` | Remove operator signing for remote users: the operator key may inline-sign ONLY its own memory (`owner == operator`); every JWT write owned by a different identity (incl. explicit `mode:"local"`) routes to client-signing. `write_mode` plumbed through the pending bundle → callback persists the real mode. Defense-in-depth guard in `sign_memory_inline`. seed.rs self-authored exemption documented. |
 | 4 | `528bd75` | Remove custodial API keys + balance ledger (clean break §8): deleted `create_api_key`/`get_balance`/`deduct_balance`/`credit_deposit`/`refund_balance`/`check_balance`/`extract_api_key`/`record_refund_failed` + `/api-keys`,`/balance`,`/deposit` routes; `PaymentGate::Proceed` is now a unit variant; `PAYMENT_MODE ∈ {none,x402}`; DoS quota re-keyed on `blake3(x402 tx_sig)`. Schema tables retained for migration safety. |
 | 5 | `d9df6f1` | Verifiable-recall core: `core/src/merkle.rs` per-owner Merkle commitment (set semantics, RFC-6962 domain separation, odd-node promotion) with `commitment_root`/`prove`/`verify` (9 unit tests); `SqliteStore::owner_content_hashes` supplies the leaf set from the rebuildable cache; `integration_merkle_recall.rs` proves end-to-end inclusion + cross-owner non-forgeability. |
-| 6 | _this commit_ | Encrypted shared memories core: `core/src/encrypt.rs` X25519 ECIES seal-to-N-recipients (`seal_to_recipients`/`open`/`public_from_secret`, serde envelope) — public/private/shared-to-N, recipient-only decryption (8 unit tests). Native-only for now. |
+| 6 | `fe77e9f` | Encrypted shared memories core: `core/src/encrypt.rs` X25519 ECIES seal-to-N-recipients (`seal_to_recipients`/`open`/`public_from_secret`, serde envelope) — public/private/shared-to-N, recipient-only decryption (8 unit tests). Native-only for now. |
+| 5b | _this commit_ | `mnemonic_recall` now returns `merkle_commitment` = `{root, proofs{content_hash→[steps]}}` computed from the rebuildable cache (authenticated owner only; `null` for the anonymous pool). `tools::build_merkle_commitment` + 3 integration tests (`recall_merkle_commitment.rs`) proving each returned proof verifies against the root via `merkle::verify`, tamper rejection, and the anonymous-pool null case. Verifiable recall now works end-to-end through the tool — only the on-chain root anchor remains. |
 
 **Wave 0 F2/F3/F4 intentionally skipped** — they harden the custodial API-key
 machinery that Wave 4 deletes (throwaway). F1 was the only Wave-0 item that
@@ -83,12 +84,12 @@ deliberately not stubbed:
   deployed on Arc/Solana; x402 already provides the non-custodial per-call rail,
   so this is an additive convenience for non-interactive clients. Mirror the
   x402 verifier shape: a server-side allowance-receipt verifier + draw path.
-- **W5 — anchor + expose.** (a) Anchor each per-owner `merkle::commitment_root`
+- **W5 — anchor + f32 tier.** (a) Anchor each per-owner `merkle::commitment_root`
   on Solana per epoch (operator-relayed, mirrors the existing SPL-memo write —
-  needs a validator to test). (b) Return inclusion proofs in the
-  `mnemonic_recall` tool output + a client-side proof check against the anchored
-  root. (c) Opt-in f32 precision tier stored *inside* the signed artifact
-  (public memories only) — a `codec`/schema + recall change.
+  needs a validator to test); the client then checks the proofs `recall` already
+  returns (W5b, done) against that anchored root. (c) Opt-in f32 precision tier
+  stored *inside* the signed artifact (public memories only) — a `codec`/schema
+  + recall change.
 - **W6 — wire + expose.** (a) Map the Ed25519 identity → its X25519 recipient
   key (standard birational conversion, §18) in the client key-management layer.
   (b) Per-type visibility defaults at sign time (deliverable→shared,
