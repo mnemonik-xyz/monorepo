@@ -25,7 +25,8 @@
 | 4 | `528bd75` | Remove custodial API keys + balance ledger (clean break §8): deleted `create_api_key`/`get_balance`/`deduct_balance`/`credit_deposit`/`refund_balance`/`check_balance`/`extract_api_key`/`record_refund_failed` + `/api-keys`,`/balance`,`/deposit` routes; `PaymentGate::Proceed` is now a unit variant; `PAYMENT_MODE ∈ {none,x402}`; DoS quota re-keyed on `blake3(x402 tx_sig)`. Schema tables retained for migration safety. |
 | 5 | `d9df6f1` | Verifiable-recall core: `core/src/merkle.rs` per-owner Merkle commitment (set semantics, RFC-6962 domain separation, odd-node promotion) with `commitment_root`/`prove`/`verify` (9 unit tests); `SqliteStore::owner_content_hashes` supplies the leaf set from the rebuildable cache; `integration_merkle_recall.rs` proves end-to-end inclusion + cross-owner non-forgeability. |
 | 6 | `fe77e9f` | Encrypted shared memories core: `core/src/encrypt.rs` X25519 ECIES seal-to-N-recipients (`seal_to_recipients`/`open`/`public_from_secret`, serde envelope) — public/private/shared-to-N, recipient-only decryption (8 unit tests). Native-only for now. |
-| 5b | _this commit_ | `mnemonic_recall` now returns `merkle_commitment` = `{root, proofs{content_hash→[steps]}}` computed from the rebuildable cache (authenticated owner only; `null` for the anonymous pool). `tools::build_merkle_commitment` + 3 integration tests (`recall_merkle_commitment.rs`) proving each returned proof verifies against the root via `merkle::verify`, tamper rejection, and the anonymous-pool null case. Verifiable recall now works end-to-end through the tool — only the on-chain root anchor remains. |
+| 5b | `4c044cc` | `mnemonic_recall` now returns `merkle_commitment` = `{root, proofs{content_hash→[steps]}}` computed from the rebuildable cache (authenticated owner only; `null` for the anonymous pool). `tools::build_merkle_commitment` + 3 integration tests (`recall_merkle_commitment.rs`) proving each returned proof verifies against the root via `merkle::verify`, tamper rejection, and the anonymous-pool null case. |
+| 5c | _this commit_ | Rebuild-index-from-stored-artifacts: `core/src/rebuild.rs` `rebuild_row`/`rebuild_rows` reconstruct recall-index rows from signed COSE bytes alone (COSE-verify → decode CBOR → recover content/owner/tags/content_hash + decompress embedding). Makes "SQLite = rebuildable cache" real, not aspirational. `integration_rebuild.rs` (4 tests): lossless field round-trip, recall over a rebuilt store matches the original top-1, the embedding is provably lossy (the gap the f32 tier closes), tampered artifact rejected. |
 
 **Wave 0 F2/F3/F4 intentionally skipped** — they harden the custodial API-key
 machinery that Wave 4 deletes (throwaway). F1 was the only Wave-0 item that
@@ -87,9 +88,13 @@ deliberately not stubbed:
 - **W5 — anchor + f32 tier.** (a) Anchor each per-owner `merkle::commitment_root`
   on Solana per epoch (operator-relayed, mirrors the existing SPL-memo write —
   needs a validator to test); the client then checks the proofs `recall` already
-  returns (W5b, done) against that anchored root. (c) Opt-in f32 precision tier
-  stored *inside* the signed artifact (public memories only) — a `codec`/schema
-  + recall change.
+  returns (W5b, done) against that anchored root. (b) f32 precision tier — store
+  the full f32 embedding *inside* the signed artifact (public memories only) so
+  `rebuild_row` recovers it losslessly instead of the dequantized approximation
+  (`rebuilt_embedding_is_lossy_*` quantifies today's gap). This is the next
+  code-only step: extend the artifact metadata + `rebuild` to prefer f32 when
+  present, falling back to the compressed copy. The rebuild *consumer* now
+  exists (W5c), so the tier has a concrete acceptance test.
 - **W6 — wire + expose.** (a) Map the Ed25519 identity → its X25519 recipient
   key (standard birational conversion, §18) in the client key-management layer.
   (b) Per-type visibility defaults at sign time (deliverable→shared,

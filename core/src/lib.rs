@@ -22,6 +22,11 @@ pub mod embed;
 pub mod encrypt;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod lineage;
+// Rebuild the recall index from stored signed artifacts (verifiable recall,
+// §16) — makes "SQLite is a rebuildable cache" real. Native-only for now
+// (depends on the compressor); wasm client-rebuild is a follow-up.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod rebuild;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod solana;
 #[cfg(not(target_arch = "wasm32"))]
