@@ -5,6 +5,9 @@ pub mod identity;
 // Per-owner Merkle commitments over content_hashes (verifiable recall, §16).
 // Pure crypto — available on every target so clients can verify proofs.
 pub mod merkle;
+// Client-side trustless RAG primitives (cosine + verify-and-extract). Available
+// on every target so the webapp's WASM bundle can run retrieval in-browser.
+pub mod rag;
 
 // Native-only modules. These pull in rusqlite (bundled C SQLite), reqwest
 // (native TLS), or fastembed (ONNX runtime), none of which compile for

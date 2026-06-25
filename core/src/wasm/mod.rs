@@ -329,6 +329,39 @@ pub fn blake3_hash_hex(bytes: &[u8]) -> String {
     hash_bytes(bytes)
 }
 
+// ── Wave 3: client-side trustless RAG bindings ──────────────────────────────
+//
+// The webapp runs retrieval in-browser: fetch a chunk's COSE_Sign1 bytes from
+// Arweave, verify + extract content & embedding here, embed the user query with
+// `@xenova/transformers` (all-MiniLM-L6-v2, the same model the server's
+// fastembed uses), then rank with `cosine_similarity`. No server trust needed.
+
+/// Cosine similarity between two equal-length f32 vectors. Returns 0.0 on a
+/// length mismatch or zero-magnitude vector (never throws) so one malformed
+/// chunk can't abort a retrieval pass.
+#[wasm_bindgen]
+pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+    crate::rag::cosine_similarity(a, b)
+}
+
+/// Verify a chunk's COSE_Sign1 bytes (fetched from Arweave) and return
+/// `{ valid, signer, content, embedding: Float32Array }`. The signature and
+/// content integrity are checked inside WASM, so the browser trusts the bytes,
+/// not the gateway that served them.
+#[wasm_bindgen]
+pub fn verify_and_extract_memory(cose_bytes: &[u8]) -> Result<JsValue, JsValue> {
+    let m = crate::rag::verify_and_extract_memory(cose_bytes)
+        .map_err(|e| JsValue::from_str(&format!("verify_and_extract_memory: {e}")))?;
+    let out = serde_json::json!({
+        "valid": m.valid,
+        "signer": m.signer,
+        "content": m.content,
+        "embedding": m.embedding,
+    });
+    serde_wasm_bindgen::to_value(&out)
+        .map_err(|e| JsValue::from_str(&format!("result serialization failed: {e}")))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
