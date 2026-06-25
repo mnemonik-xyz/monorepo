@@ -21,7 +21,7 @@ All providers implement the `Embedder` trait in `core/src/embed/mod.rs`. Never c
 
 ### Storage lock discipline
 
-`AttestationStore` wraps `rusqlite::Connection` which is `!Send`. In async contexts, wrap in `std::sync::Mutex` and never hold the lock across an `.await` point. The same rule extends to `DashMap` shard guards used by the in-memory `RefundsBySubject` quota counter in `mcp/src/payment.rs` (added in `modes-user-choice` T3): the per-shard lock is held briefly for the increment/read and never across an `.await`. Both lock classes (SQLite mutex + DashMap shard guard) are checked by the code-audit wave. See `work/modes-user-choice/tech-spec.md` Decision 8.
+`AttestationStore` wraps `rusqlite::Connection` which is `!Send`. In async contexts, wrap in `std::sync::Mutex` and never hold the lock across an `.await` point. The same rule extends to `DashMap` shard guards used by the in-memory `RefundsBySubject` quota counter in `mcp/src/payment.rs` (added in `modes-user-choice` T3): the per-shard lock is held briefly for the increment/read and never across an `.await`. The OAuth refresh-token path uses a SECOND `Mutex<Connection>` (`OAuthState.refresh_store`) opened on the same SQLite file as `McpState.store` per `refresh-token-rotation` Decision 6 — two independent mutex instances, NOT a clone or Arc-share, because SQLite WAL serialises writers at the file level. All three lock classes (SQLite store mutex + SQLite refresh mutex + DashMap shard guard) are checked by the code-audit wave. See `work/completed/modes-user-choice/tech-spec.md` Decision 8 and `work/completed/refresh-token-rotation/tech-spec.md` Decision 6.
 
 ### Error handling
 
@@ -53,7 +53,16 @@ Per MCP spec 2025-06-18 §2.4, JSON-RPC requests with no `id` field are notifica
 
 ### OAuth Bearer-auth allowlist
 
-`mcp/src/oauth.rs::bearer_auth_layer` enforces JWT validation on `/mcp` and `/` POSTs *except* for: discovery (`/.well-known/*`), liveness (`/health`), the OAuth flow itself (`/oauth/*`), the capability-authed pending APIs (`/api/pending/*`, `/api/sign-callback`), and JSON-RPC methods `initialize`, `tools/list`, plus any `notifications/*`. Any new tool added to `tools.rs` is paid + authenticated by default; explicit allowlist edits are required to expose anonymous methods.
+`mcp/src/oauth/mod.rs::bearer_auth_layer` enforces JWT validation on `/mcp` and `/` POSTs *except* for: discovery (`/.well-known/*`), liveness (`/health`), the OAuth flow itself (`/oauth/*`), the capability-authed pending APIs (`/api/pending/*`, `/api/sign-callback`), and JSON-RPC methods `initialize`, `tools/list`, plus any `notifications/*`. Any new tool added to `tools.rs` is paid + authenticated by default; explicit allowlist edits are required to expose anonymous methods.
+
+### Refresh-token rotation invariants
+
+`mcp/src/oauth/refresh.rs::rotate` runs the entire detect-replay-or-rotate cycle inside ONE `BEGIN IMMEDIATE` SQLite transaction. Two invariants are load-bearing and audit-pinned:
+
+- **D5 — LRU put-before-COMMIT (Branch A).** The publish order is: acquire `Mutex<Connection>`, `BEGIN IMMEDIATE`, UPDATE / INSERT, `reuse_cache.put(old_hash, (access, refresh))`, COMMIT, release. The cache `put` MUST happen between writes and COMMIT — not after. Closes a CWE-362 race where a concurrent Branch B retry would observe `revoked=1` from SQL before the cache entry is visible.
+- **D8 — family_revoke in-transaction (Branch C).** When a replay outside the reuse window is detected, the SELECT detecting it AND the UPDATE walking `family_id` to revoke every row in the family MUST execute in the same transaction. No `tx.commit()` between detect and revoke, no second transaction. The matching pair-cache entries for revoked family members are dropped in the same critical section.
+
+Server logs use a narrow forensic-field whitelist per Decision 14 (`outcome`, `branch`, `family_id`, `sub`, `remote_addr`, `request_id`) — never plaintext refresh tokens, never `token_hash`, never the salt, never the full access JWT. See `work/completed/refresh-token-rotation/tech-spec.md` Decisions 5, 8, 14.
 
 ---
 
