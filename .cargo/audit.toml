@@ -52,6 +52,20 @@ ignore = [
     # rand 0.8/0.9 directly, not 0.7.
     "RUSTSEC-2026-0097",
 
+    # memmap2 0.5.10 — unchecked pointer offset in advise_range /
+    # unchecked_advise_range / MmapMut. Severity: INFO Unsound — invalid
+    # pointer is passed to madvise/msync syscalls but never dereferenced.
+    # Fixed upstream in memmap2 0.9.11 (memmap2-rs PR #170, merged
+    # 2026-06-22); no 0.5.x backport exists. solana-sdk 2.3.x pins
+    # memmap2 0.5.x via solana-genesis-config → solana-rent-collector.
+    # The code path is the Solana validator genesis-config bootloader,
+    # which is unreachable in mnemonic-mcp: we use solana-sdk only for
+    # SPL Memo RPC writes/reads, never boot a validator. Verified
+    # `grep -rn 'memmap\|Mmap::\|GenesisConfig' core/src/ mcp/src/`
+    # returns zero hits. Removed when the broader Solana SDK 2.x → 3.x
+    # bump lands.
+    "RUSTSEC-2026-0186",
+
     # ── Transitive via reqwest 0.11 + oauth2 4.x (oauth2 5 requires
     #    reqwest 0.12 with breaking API changes; tracked as a separate
     #    HTTP-client modernization task):
