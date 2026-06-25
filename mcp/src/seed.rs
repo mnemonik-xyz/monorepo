@@ -226,6 +226,18 @@ fn walk_docs_tree(root: &Path) -> Result<Vec<PathBuf>> {
     Ok(files)
 }
 
+/// Modification time of the most recently-modified `.md` file under `root`
+/// (subject to the same exclusion rules as [`walk_docs_tree`]). Returns
+/// `None` if the tree is empty or unreadable — callers treat that as
+/// "can't decide, fall through to a full seed."
+fn newest_md_mtime(root: PathBuf) -> Option<std::time::SystemTime> {
+    walk_docs_tree(&root)
+        .ok()?
+        .into_iter()
+        .filter_map(|p| std::fs::metadata(&p).and_then(|m| m.modified()).ok())
+        .max()
+}
+
 /// Render a relative path as a forward-slash string for tags / headings.
 /// Stays stable across operating systems (Windows backslashes get normalized).
 fn rel_path_string(path: &Path) -> String {
@@ -235,29 +247,75 @@ fn rel_path_string(path: &Path) -> String {
         .join("/")
 }
 
-/// Run the RAG seeding routine. Idempotent: skips if store already has entries.
+/// Run the RAG seeding routine.
+///
+/// Idempotency model (post-fix, 2026-06):
+/// * `MNEMONIC_FORCE_RESEED=1` — always reseed regardless of artifact / DB state.
+///   Set this in CI's deploy step after a successful `git pull` so docs/ changes
+///   propagate to the chat's RAG corpus on the next restart.
+/// * Otherwise — skip iff the artifact `protocol-knowledge.zip` exists AND its
+///   mtime is at least as new as the newest `.md` under `docs/`. This means the
+///   first boot after a docs-tree change auto-reseeds; subsequent boots skip.
+///
+/// Why the change: the legacy idempotency check called `store.count(server_pubkey)`,
+/// but `AttestationStore::count` queries by `signer_pubkey` — and the server
+/// keypair is the signer for EVERY attestation (it co-signs each user write).
+/// Once any user wrote anything, count > 0 forever and the protocol-knowledge
+/// corpus was permanently frozen on the FIRST seed. Surfaced live on
+/// `mcp.mnemonik.xyz` 2026-06-25: 60-day-stale artifact, chat returned
+/// "no context about mnemonik" because the recall corpus pre-dated v0.2
+/// whitepaper revisions and the entire `work/completed/noncustodial-paradigm/`
+/// design corpus.
 pub async fn run(state: &McpState) -> Result<()> {
     let pubkey = identity::pubkey_base58(&state.keypair);
+    let force_reseed = std::env::var("MNEMONIC_FORCE_RESEED")
+        .ok()
+        .filter(|v| matches!(v.trim(), "1" | "true" | "yes" | "on"))
+        .is_some();
 
-    // Check idempotency: skip if store already has attestations
-    {
-        let store = state.store.lock().unwrap();
-        let count = store.count(&pubkey).unwrap_or(0);
-        if count > 0 {
+    // Idempotency: skip iff artifact exists AND artifact mtime >= newest docs mtime.
+    // Force-reseed (env var) bypasses entirely.
+    if !force_reseed {
+        let artifact_dir = std::path::Path::new(&state.rag_chunk_dir);
+        let zip_path = artifact_dir.join("protocol-knowledge.zip");
+        let artifact_mtime = zip_path.metadata().and_then(|m| m.modified()).ok();
+        let docs_newest_mtime = find_docs_root().ok().and_then(newest_md_mtime);
+        let skip = match (artifact_mtime, docs_newest_mtime) {
+            (Some(a), Some(d)) => a >= d,
+            // No artifact OR no docs/ → fall through to full seed logic below
+            // (it logs a clearer message and decides what to do).
+            _ => false,
+        };
+        if skip {
             tracing::info!(
-                "RAG seeding skipped: store already has {count} attestation(s) for {pubkey}"
+                "RAG seeding skipped: artifact at {} is up to date (newer than docs/)",
+                zip_path.display()
             );
-            // Still set artifact path if the zip exists on disk
-            let artifact_dir = std::path::Path::new(&state.rag_chunk_dir);
-            let zip_path = artifact_dir.join("protocol-knowledge.zip");
-            if zip_path.exists() {
-                if let Ok(canonical) = zip_path.canonicalize() {
-                    let mut path_guard = state.artifact_zip_path.lock().unwrap();
-                    *path_guard = Some(canonical.clone());
-                    tracing::info!("Artifact path set: {}", canonical.display());
-                }
+            if let Ok(canonical) = zip_path.canonicalize() {
+                let mut path_guard = state.artifact_zip_path.lock().unwrap();
+                *path_guard = Some(canonical.clone());
+                tracing::info!("Artifact path set: {}", canonical.display());
             }
             return Ok(());
+        }
+        tracing::info!(
+            "RAG seeding: docs/ newer than artifact (or artifact missing) — reseeding for {}",
+            pubkey
+        );
+    } else {
+        tracing::info!(
+            "RAG seeding: MNEMONIC_FORCE_RESEED set — reseeding for {}",
+            pubkey
+        );
+    }
+
+    // If we're reseeding, wipe any previously-seeded protocol-knowledge rows
+    // owned by this server keypair so re-runs don't duplicate the corpus.
+    // Best-effort: failures here log a warning but don't block the seed.
+    {
+        let store = state.store.lock().unwrap();
+        if let Err(e) = store.delete_protocol_knowledge_for_owner(&pubkey) {
+            tracing::warn!("RAG seeding: failed to wipe stale protocol-knowledge rows: {e}");
         }
     }
 

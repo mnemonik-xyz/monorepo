@@ -729,6 +729,22 @@ impl AttestationStore for SqliteStore {
         Ok(count)
     }
 
+    fn delete_protocol_knowledge_for_owner(&self, owner_pubkey: &str) -> anyhow::Result<usize> {
+        // `tags` is stored as canonical-CBOR-derived JSON text per the
+        // attestations schema. The substring search is correct because every
+        // seeded chunk carries the literal token `"protocol-knowledge"`
+        // (`mcp/src/seed.rs:313`) and no other tag system uses that exact
+        // string. If a future tag is introduced that contains it as a
+        // substring, this query needs to widen to a JSON_EXTRACT predicate.
+        let affected = self.conn.execute(
+            "DELETE FROM attestations \
+             WHERE owner_pubkey = ?1 \
+               AND tags LIKE '%\"protocol-knowledge\"%'",
+            params![owner_pubkey],
+        )?;
+        Ok(affected)
+    }
+
     fn search(
         &self,
         query_embedding: &[f32],

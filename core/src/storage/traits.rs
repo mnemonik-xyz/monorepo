@@ -103,6 +103,23 @@ pub trait AttestationStore {
 
     fn count(&self, signer: &str) -> anyhow::Result<i64>;
 
+    /// Wipe the previously-seeded protocol-knowledge corpus for `owner_pubkey`.
+    ///
+    /// Called by `mcp/src/seed.rs::run` before a forced reseed (`MNEMONIC_FORCE_RESEED=1`
+    /// or detected stale artifact) so the new chunks don't pile up alongside an
+    /// outdated copy. Matches rows where `owner_pubkey = ?` AND the JSON `tags`
+    /// column contains `"protocol-knowledge"` — the canonical tag every seeded
+    /// chunk carries (`mcp/src/seed.rs:313`).
+    ///
+    /// User-signed attestations (`owner_pubkey` = some OAuth pubkey, NOT the
+    /// server's signing pubkey) are never matched: those rows have an OAuth
+    /// `owner_pubkey`, while the seeded corpus has `owner_pubkey = server_pubkey`.
+    /// Returns the number of rows deleted; default impl returns `0` for stores
+    /// that don't seed (e.g. test fakes).
+    fn delete_protocol_knowledge_for_owner(&self, _owner_pubkey: &str) -> anyhow::Result<usize> {
+        Ok(0)
+    }
+
     /// Cosine-similarity search.
     ///
     /// `owner_pubkey` — `Some(pk)` scopes results to a single owner (the

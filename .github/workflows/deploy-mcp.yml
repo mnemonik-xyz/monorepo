@@ -1,0 +1,198 @@
+name: Deploy MCP
+
+# Ships the `mnemonic-mcp` HTTP server to the production VPS at
+# `mcp.mnemonik.xyz` (150.251.147.215). Borrows the action-choice ergonomics
+# from `mnemonik-dev/coding-fabric`'s `deploy-fabric.yml` while dropping the
+# OpenTofu/Hetzner provisioning layer — the VPS already exists, so this
+# workflow only handles in-place updates of the running service.
+#
+# Trigger model: manual-only by default (workflow_dispatch). A maintainer
+# clicks "Run workflow" → picks `deploy` / `smoke` / `rollback` → optional
+# `tag` field for rollback target. Auto-deploy on `v*` tag is intentionally
+# disabled — the existing `release.yml` builds GitHub Release artifacts but
+# the prod ship decision stays with a human (production downtime risk on a
+# 4 GB RAM single-node).
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: 'apply (deploy), smoke (verify only), or rollback'
+        type: choice
+        required: true
+        default: smoke
+        options:
+          - apply
+          - smoke
+          - rollback
+      ref:
+        description: 'git ref to deploy or roll back to (defaults to main; e.g. v0.2.4 or a SHA)'
+        type: string
+        required: false
+        default: main
+      force_reseed:
+        description: 'Set MNEMONIC_FORCE_RESEED=1 for one boot so docs/ changes propagate to the chat corpus.'
+        type: boolean
+        required: false
+        default: true
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  # Serialize against parallel deploys / rollbacks. Smoke checks are
+  # cheap enough that we let them queue rather than cancel a deploy.
+  group: deploy-mcp-prod
+  cancel-in-progress: false
+
+env:
+  PROD_HEALTH_URL: https://mcp.mnemonik.xyz/health
+  PROD_DISCOVERY_URL: https://mcp.mnemonik.xyz/.well-known/oauth-authorization-server
+  PROD_MCP_URL: https://mcp.mnemonik.xyz/mcp
+
+jobs:
+  deploy:
+    name: Deploy or rollback over SSH
+    if: ${{ inputs.action == 'apply' || inputs.action == 'rollback' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Verify required secrets are present
+        run: |
+          for var in VPS_HOST VPS_USER VPS_SSH_PRIVATE_KEY VPS_KNOWN_HOSTS; do
+            if [ -z "${!var:-}" ]; then
+              echo "::error::Missing required secret: $var"
+              exit 1
+            fi
+          done
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+          VPS_SSH_PRIVATE_KEY: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
+          VPS_KNOWN_HOSTS: ${{ secrets.VPS_KNOWN_HOSTS }}
+
+      - name: Configure SSH client
+        run: |
+          set -euo pipefail
+          install -m 0700 -d ~/.ssh
+          printf '%s\n' "${{ secrets.VPS_SSH_PRIVATE_KEY }}" > ~/.ssh/deploy_ed25519
+          chmod 0600 ~/.ssh/deploy_ed25519
+          printf '%s\n' "${{ secrets.VPS_KNOWN_HOSTS }}" > ~/.ssh/known_hosts
+          chmod 0644 ~/.ssh/known_hosts
+
+      - name: Deploy or rollback on VPS
+        env:
+          ACTION: ${{ inputs.action }}
+          REF: ${{ inputs.ref }}
+          FORCE_RESEED: ${{ inputs.force_reseed }}
+        run: |
+          set -euo pipefail
+          # IMPORTANT: the heredoc body runs on the VPS. Variables we want
+          # to substitute LOCALLY are unquoted (REF, ACTION); literals
+          # destined for the remote shell stay quoted ('$VAR') so they
+          # expand on the remote side. Failures inside the remote script
+          # are surfaced via `set -e` + the non-zero exit propagation
+          # through ssh.
+          ssh -i ~/.ssh/deploy_ed25519 \
+              -o IdentitiesOnly=yes \
+              -o ConnectTimeout=15 \
+              "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}" \
+              bash -s <<REMOTE_EOF
+          set -euo pipefail
+          cd /home/claude/monorepo
+
+          echo "::group::git state before deploy"
+          git rev-parse --short HEAD
+          git log --oneline -1 HEAD
+          echo "::endgroup::"
+
+          if [ "$ACTION" = "rollback" ]; then
+            echo "Rolling back to ${REF}"
+            git fetch --tags --quiet origin
+            git checkout --quiet "${REF}"
+          else
+            echo "Deploying ${REF}"
+            git fetch --quiet origin
+            git checkout --quiet "${REF}"
+            git reset --hard "origin/\$(git symbolic-ref --short HEAD 2>/dev/null || echo ${REF})" 2>/dev/null \
+              || git reset --hard "${REF}"
+          fi
+
+          echo "::group::cargo build --release"
+          source ~/.cargo/env
+          cargo build --release -p mnemonic-mcp --features local-embed
+          echo "::endgroup::"
+
+          if [ "$FORCE_RESEED" = "true" ]; then
+            echo "MNEMONIC_FORCE_RESEED=1 will be set for the next boot"
+            # Append to the systemd environment file the service reads. The
+            # variable is consumed once at startup; remove it after the run
+            # so subsequent restarts use the artifact-mtime check instead.
+            sudo sed -i '/^MNEMONIC_FORCE_RESEED=/d' /home/claude/mcp.env
+            echo "MNEMONIC_FORCE_RESEED=1" | sudo tee -a /home/claude/mcp.env >/dev/null
+          fi
+
+          echo "::group::restart service"
+          sudo systemctl restart mnemonic-mcp
+          sleep 6
+          sudo systemctl is-active mnemonic-mcp || (sudo journalctl -u mnemonic-mcp --no-pager -n 50; exit 1)
+          echo "::endgroup::"
+
+          if [ "$FORCE_RESEED" = "true" ]; then
+            echo "Removing MNEMONIC_FORCE_RESEED so the next restart uses mtime-aware idempotency"
+            sudo sed -i '/^MNEMONIC_FORCE_RESEED=/d' /home/claude/mcp.env
+          fi
+
+          echo "::group::post-restart log tail (RAG seed lines)"
+          sudo journalctl -u mnemonic-mcp --no-pager -S '15 seconds ago' \
+            | grep -iE 'seed|protocol-knowledge|Identity:|listening|server origin seeded' \
+            || true
+          echo "::endgroup::"
+          REMOTE_EOF
+
+  smoke:
+    name: Post-deploy smoke
+    needs: deploy
+    # Always run smoke (even on smoke-only invocations where `deploy` is skipped).
+    if: ${{ always() && (needs.deploy.result == 'success' || needs.deploy.result == 'skipped') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: /health
+        run: |
+          set -euo pipefail
+          curl -fsS --max-time 10 "$PROD_HEALTH_URL" | tee /tmp/health.json
+          test "$(jq -r .status </tmp/health.json)" = "ok"
+
+      - name: OAuth discovery advertises both grants
+        run: |
+          set -euo pipefail
+          curl -fsS --max-time 10 "$PROD_DISCOVERY_URL" | tee /tmp/discovery.json
+          jq -e '.grant_types_supported | index("authorization_code") and index("refresh_token")' \
+            </tmp/discovery.json >/dev/null
+
+      - name: Anonymous tools/list returns the full set
+        run: |
+          set -euo pipefail
+          payload='{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+          curl -fsS --max-time 10 -X POST "$PROD_MCP_URL" \
+            -H 'Content-Type: application/json' \
+            -d "$payload" \
+            | jq -e '(.result.tools | length) >= 7' >/dev/null
+
+      - name: Chat returns non-empty context-grounded response
+        # Smoke check for issue surfaced 2026-06-25: chat said "no context about mnemonik"
+        # because the docs/ tree on prod was 3 weeks stale and the seed idempotency
+        # check was bugged. Bare-minimum signal: chat returns a non-empty `response`.
+        # Deeper checks (does the answer cite a known whitepaper section?) belong in
+        # a separate e2e suite.
+        run: |
+          set -euo pipefail
+          payload='{"message":"What is the Mnemonic Protocol?","session_id":"deploy-smoke"}'
+          response=$(curl -fsS --max-time 30 -X POST \
+            "https://mcp.mnemonik.xyz/chat" \
+            -H 'Content-Type: application/json' \
+            -d "$payload")
+          echo "$response" | jq .
+          test -n "$(echo "$response" | jq -r '.response // empty')"
