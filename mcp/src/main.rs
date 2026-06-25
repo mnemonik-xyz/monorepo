@@ -1031,6 +1031,7 @@ async fn run_http(
         .route("/admin/stats", get(admin_stats))
         .route("/stats", get(api::public_stats_handler))
         .route("/download-knowledge", get(chat::download_knowledge_handler))
+        .route("/knowledge-manifest", get(chat::knowledge_manifest_handler))
         .route(
             "/health",
             get(|| async { Json(serde_json::json!({"status": "ok"})) }),

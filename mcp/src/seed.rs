@@ -512,6 +512,21 @@ pub async fn run(state: &McpState) -> Result<()> {
     );
     let manifest_json = serde_json::to_string_pretty(&manifest).unwrap_or_default();
 
+    // Also write the manifest as a standalone file next to the artifact so the
+    // `GET /knowledge-manifest` endpoint (Wave 2) can serve it without cracking
+    // the zip. Best-effort: a write failure logs but doesn't abort the seed.
+    let manifest_path = std::path::Path::new(&state.rag_chunk_dir).join("knowledge-manifest.json");
+    if let Err(e) = std::fs::create_dir_all(&state.rag_chunk_dir)
+        .and_then(|_| std::fs::write(&manifest_path, manifest_json.as_bytes()))
+    {
+        tracing::warn!("RAG seeding: failed to write standalone manifest: {e}");
+    } else {
+        tracing::info!(
+            "RAG seeding: manifest written to {}",
+            manifest_path.display()
+        );
+    }
+
     // Generate the .zip artifact
     let zip_path = generate_artifact(&state.rag_chunk_dir, &signed_chunks, &manifest_json)?;
 

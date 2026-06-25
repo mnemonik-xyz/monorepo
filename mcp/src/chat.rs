@@ -249,6 +249,37 @@ pub async fn download_knowledge_handler(State(state): State<Arc<McpState>>) -> R
         .into_response()
 }
 
+// ── GET /knowledge-manifest ──────────────────────────────────────────────────
+//
+// Serves the per-release knowledge manifest (D-MAN) the seed step writes to
+// `RAG_CHUNK_DIR/knowledge-manifest.json`. This is the version-addressable
+// entry point a client (the webapp's WASM RAG, Wave 3) resolves to enumerate a
+// release's chunks — each entry carries the chunk's `arweave_tx` + `content_hash`
+// so the client can fetch + verify the knowledge straight from Arweave.
+
+pub async fn knowledge_manifest_handler(State(state): State<Arc<McpState>>) -> Response {
+    let path = std::path::Path::new(&state.rag_chunk_dir).join("knowledge-manifest.json");
+    match std::fs::read(&path) {
+        Ok(bytes) => (
+            StatusCode::OK,
+            [(
+                axum::http::header::CONTENT_TYPE,
+                "application/json".to_string(),
+            )],
+            bytes,
+        )
+            .into_response(),
+        Err(_) => (
+            StatusCode::NOT_FOUND,
+            Json(ChatError {
+                error: "knowledge manifest not available".into(),
+                code: "not_found".into(),
+            }),
+        )
+            .into_response(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -468,7 +499,6 @@ mod handler_tests {
     use mnemonic_core::embed::Embedder;
     use mnemonic_core::solana::SolanaClient;
     use mnemonic_core::storage::SqliteStore;
-    use std::path::PathBuf;
     use tower::ServiceExt;
 
     /// Minimal embedder for handler tests. Returns zero vectors.
@@ -527,7 +557,10 @@ mod handler_tests {
             storage_mode: "local".into(),
             ollama_url: llm_base_url.to_string(),
             ollama_model: "test-model".into(),
-            rag_chunk_dir: PathBuf::from("/tmp"),
+            // Per-test rag dir so /knowledge-manifest tests don't race on a
+            // shared path. `keep()` leaks the tempdir (test-only) so the path
+            // stays valid for the lifetime of the test.
+            rag_chunk_dir: tempfile::tempdir().unwrap().keep(),
             llm_client,
             artifact_zip_path: std::sync::Mutex::new(None),
             ollama_client,
@@ -780,5 +813,55 @@ mod handler_tests {
 
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         assert_eq!(&bytes[..], b"PK-fake-zip-content");
+    }
+
+    // -- Knowledge manifest handler tests --
+
+    fn build_manifest_app(state: Arc<McpState>) -> Router {
+        Router::new()
+            .route("/knowledge-manifest", get(knowledge_manifest_handler))
+            .with_state(state)
+    }
+
+    async fn get_manifest(app: Router) -> axum::http::Response<axum::body::Body> {
+        let req = axum::http::Request::builder()
+            .method("GET")
+            .uri("/knowledge-manifest")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        app.oneshot(req).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn manifest_missing_returns_404() {
+        let state = build_test_state("http://localhost:0");
+        let app = build_manifest_app(state);
+        let resp = get_manifest(app).await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn manifest_exists_returns_200_json() {
+        let state = build_test_state("http://localhost:0");
+        // Write a manifest into the state's per-test rag dir.
+        let path = state.rag_chunk_dir.join("knowledge-manifest.json");
+        std::fs::write(&path, br#"{"type":"knowledge-manifest","release":"0.2.4"}"#).unwrap();
+
+        let app = build_manifest_app(state);
+        let resp = get_manifest(app).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers()
+                .get("content-type")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "application/json"
+        );
+
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let parsed: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(parsed["type"], "knowledge-manifest");
+        assert_eq!(parsed["release"], "0.2.4");
     }
 }
