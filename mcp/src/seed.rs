@@ -1,11 +1,12 @@
 //! RAG seeding: walk all `docs/**/*.md`, parse each markdown into chunks,
 //! sign each chunk, and generate a downloadable knowledge artifact.
 //!
-//! Runs once at MCP server startup. Skips if the store already has attestations
-//! for the server's pubkey (idempotent). Operators wipe the local SQLite DB to
-//! re-seed when the corpus changes — we deliberately avoid versioned tags so
-//! the chat consumer ([crate::chat]) can keep using the static
-//! `protocol-knowledge` tag for filtering.
+//! Runs at MCP server startup. Idempotency is artifact-mtime-aware (see
+//! [`run`]); `MNEMONIC_FORCE_RESEED=1` forces a reseed. Every chunk keeps the
+//! static `protocol-knowledge` tag the chat consumer ([crate::chat]) filters
+//! on, plus version-addressing tags (`release:<semver>`, `corpus_ts:<RFC3339>`
+//! — see D-VER in `work/project-knowledge-context/tech-spec.md`) and a
+//! per-release `knowledge-manifest.json` written into the artifact.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -238,6 +239,17 @@ fn newest_md_mtime(root: PathBuf) -> Option<std::time::SystemTime> {
         .max()
 }
 
+/// Resolve the knowledge-corpus release id (D-VER). `MNEMONIC_KNOWLEDGE_RELEASE`
+/// wins if set to a non-empty value; otherwise the mcp crate version. Lets a
+/// docs-only reseed mint a distinct corpus version without a crate bump.
+fn release_id() -> String {
+    std::env::var("MNEMONIC_KNOWLEDGE_RELEASE")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string())
+}
+
 /// Render a relative path as a forward-slash string for tags / headings.
 /// Stays stable across operating systems (Windows backslashes get normalized).
 fn rel_path_string(path: &Path) -> String {
@@ -352,6 +364,19 @@ pub async fn run(state: &McpState) -> Result<()> {
     // server keypair, matching the stdio single-tenant convention.
     let server_owner_pubkey = solana_sdk::signer::Signer::pubkey(&state.keypair).to_string();
 
+    // Release identity (D-VER): every chunk in this run is stamped with a
+    // `release:<semver>` tag and a single `corpus_ts:<RFC3339>` shared across
+    // the run, so a version-aware recall can answer "as of release X" / "as of
+    // moment T" and select a coherent corpus rather than a mix of reseeds.
+    // The release id defaults to the mcp crate version but is overridable via
+    // `MNEMONIC_KNOWLEDGE_RELEASE` so a docs-only reseed can mint a distinct
+    // corpus version without a crate bump (e.g. "0.2.4+wp2").
+    let release = release_id();
+    let corpus_ts = chrono::Utc::now().to_rfc3339();
+    let release_tag = format!("release:{release}");
+    let corpus_ts_tag = format!("corpus_ts:{corpus_ts}");
+    tracing::info!("RAG seeding: release={release} corpus_ts={corpus_ts}");
+
     for md_file in &md_files {
         let rel = md_file.strip_prefix(&docs_root).unwrap_or(md_file);
         let rel_str = rel_path_string(rel);
@@ -368,7 +393,13 @@ pub async fn run(state: &McpState) -> Result<()> {
         // Per-file tags: "protocol-knowledge" lets the chat handler filter the
         // whole corpus; the relative path disambiguates a chunk's source so the
         // LLM can cite it. We deliberately do NOT include "whitepaper" anymore.
-        let tags = vec!["protocol-knowledge".to_string(), rel_str.clone()];
+        // `release:` / `corpus_ts:` (D-VER) make the chunk version-addressable.
+        let tags = vec![
+            "protocol-knowledge".to_string(),
+            rel_str.clone(),
+            release_tag.clone(),
+            corpus_ts_tag.clone(),
+        ];
 
         for (i, section) in sections.iter().enumerate() {
             let body_block = if section.heading.is_empty() {
@@ -468,8 +499,21 @@ pub async fn run(state: &McpState) -> Result<()> {
         signed_chunks.len()
     );
 
+    // Release manifest (D-MAN): the version-addressable index of this corpus.
+    // Written into the downloadable artifact so a client can enumerate exactly
+    // one release's chunks (rel_path, content_hash, arweave_tx). Anchoring the
+    // manifest as its own Arweave tx is a Wave-2 concern (funded `full` mode).
+    let manifest = build_manifest(
+        &release,
+        &corpus_ts,
+        state.embedder.provider_name(),
+        state.embedder.model_id(),
+        &signed_chunks,
+    );
+    let manifest_json = serde_json::to_string_pretty(&manifest).unwrap_or_default();
+
     // Generate the .zip artifact
-    let zip_path = generate_artifact(&state.rag_chunk_dir, &signed_chunks)?;
+    let zip_path = generate_artifact(&state.rag_chunk_dir, &signed_chunks, &manifest_json)?;
 
     // Store canonical path in McpState for the download handler
     let canonical_path = zip_path.canonicalize().with_context(|| {
@@ -504,10 +548,54 @@ struct SignedChunk {
     attestation_id: String,
 }
 
+/// Build the per-release knowledge manifest (D-MAN): the version-addressable
+/// index of a corpus. One manifest per seed run; lists every chunk's source
+/// path, content hash, and Arweave tx so a client can enumerate exactly one
+/// release's knowledge from a single entry point.
+fn build_manifest(
+    release: &str,
+    corpus_ts: &str,
+    embed_provider: &str,
+    embed_model: &str,
+    chunks: &[SignedChunk],
+) -> serde_json::Value {
+    let git_sha = std::env::var("MNEMONIC_BUILD_SHA")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| "unknown".to_string());
+    let entries: Vec<serde_json::Value> = chunks
+        .iter()
+        .map(|c| {
+            serde_json::json!({
+                "rel_path": c.tags.get(1).cloned().unwrap_or_default(),
+                "heading": c.heading,
+                "content_hash": c.content_hash,
+                "arweave_tx": c.arweave_tx,
+                "attestation_id": c.attestation_id,
+            })
+        })
+        .collect();
+    serde_json::json!({
+        "type": "knowledge-manifest",
+        "release": release,
+        "corpus_ts": corpus_ts,
+        "git_sha": git_sha,
+        "embed_provider": embed_provider,
+        "embed_model": embed_model,
+        "chunk_count": entries.len(),
+        "chunks": entries,
+    })
+}
+
 /// Generate a .zip artifact containing:
 /// - `knowledge.md`: all chunks with YAML frontmatter (content_hash, signer_pubkey, timestamp)
 /// - `knowledge.json`: structured sidecar with metadata for all chunks
-fn generate_artifact(output_dir: &std::path::Path, chunks: &[SignedChunk]) -> Result<PathBuf> {
+/// - `knowledge-manifest.json`: the per-release version index (D-MAN)
+fn generate_artifact(
+    output_dir: &std::path::Path,
+    chunks: &[SignedChunk],
+    manifest_json: &str,
+) -> Result<PathBuf> {
     // Ensure output directory exists
     std::fs::create_dir_all(output_dir)
         .with_context(|| format!("failed to create dir {}", output_dir.display()))?;
@@ -529,6 +617,10 @@ fn generate_artifact(output_dir: &std::path::Path, chunks: &[SignedChunk]) -> Re
     let json_content = generate_json_sidecar(chunks);
     zip.start_file("knowledge.json", options)?;
     zip.write_all(json_content.as_bytes())?;
+
+    // Release manifest (D-MAN) — version-addressable index.
+    zip.start_file("knowledge-manifest.json", options)?;
+    zip.write_all(manifest_json.as_bytes())?;
 
     zip.finish()?;
 
@@ -764,20 +856,69 @@ Design goals overview paragraph.
             attestation_id: "id1".to_string(),
         }];
 
-        let zip_path = generate_artifact(dir.path(), &chunks).unwrap();
+        let manifest = build_manifest("0.2.4", "2026-06-25T00:00:00+00:00", "stub", "m", &chunks);
+        let manifest_json = serde_json::to_string_pretty(&manifest).unwrap();
+        let zip_path = generate_artifact(dir.path(), &chunks, &manifest_json).unwrap();
         assert!(zip_path.exists());
         assert!(zip_path.to_str().unwrap().ends_with(".zip"));
 
         // Verify zip contents
         let file = std::fs::File::open(&zip_path).unwrap();
         let mut archive = zip::ZipArchive::new(file).unwrap();
-        assert_eq!(archive.len(), 2);
+        assert_eq!(archive.len(), 3);
 
         let names: Vec<String> = (0..archive.len())
             .map(|i| archive.by_index(i).unwrap().name().to_string())
             .collect();
         assert!(names.contains(&"knowledge.md".to_string()));
         assert!(names.contains(&"knowledge.json".to_string()));
+        assert!(names.contains(&"knowledge-manifest.json".to_string()));
+    }
+
+    #[test]
+    fn release_id_prefers_env_override() {
+        // SAFETY: single-threaded test; set + remove the override around the call.
+        std::env::set_var("MNEMONIC_KNOWLEDGE_RELEASE", "0.2.4+wp2");
+        assert_eq!(release_id(), "0.2.4+wp2");
+        std::env::remove_var("MNEMONIC_KNOWLEDGE_RELEASE");
+        // Falls back to the crate version (non-empty) when unset.
+        assert_eq!(release_id(), env!("CARGO_PKG_VERSION"));
+    }
+
+    #[test]
+    fn build_manifest_indexes_chunks_by_release() {
+        let chunks = vec![SignedChunk {
+            heading: "WHITEPAPER.md > Abstract".to_string(),
+            content: "body".to_string(),
+            tags: vec![
+                "protocol-knowledge".into(),
+                "WHITEPAPER.md".into(),
+                "release:0.2.4".into(),
+                "corpus_ts:2026-06-25T00:00:00+00:00".into(),
+            ],
+            content_hash: "hashX".to_string(),
+            signer_pubkey: "p1".to_string(),
+            timestamp: "t1".to_string(),
+            arweave_tx: "local:txX".to_string(),
+            attestation_id: "attX".to_string(),
+        }];
+
+        let m = build_manifest(
+            "0.2.4",
+            "2026-06-25T00:00:00+00:00",
+            "fastembed",
+            "bge",
+            &chunks,
+        );
+        assert_eq!(m["type"], "knowledge-manifest");
+        assert_eq!(m["release"], "0.2.4");
+        assert_eq!(m["corpus_ts"], "2026-06-25T00:00:00+00:00");
+        assert_eq!(m["embed_provider"], "fastembed");
+        assert_eq!(m["chunk_count"], 1);
+        // The chunk entry derives rel_path from tags[1], not a hard-coded value.
+        assert_eq!(m["chunks"][0]["rel_path"], "WHITEPAPER.md");
+        assert_eq!(m["chunks"][0]["content_hash"], "hashX");
+        assert_eq!(m["chunks"][0]["arweave_tx"], "local:txX");
     }
 
     #[test]
