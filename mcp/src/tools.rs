@@ -238,19 +238,33 @@ impl std::fmt::Display for ToolError {
 
 /// Tool 1: whoami (sync — DB only)
 ///
+/// `identity_pubkey` is the **authenticated caller's** base58 Ed25519 public
+/// key, as resolved by the dispatcher (`claims.sub` on the HTTP/JWT path; the
+/// local server keypair on the stdio path). whoami MUST report this identity —
+/// the one that owns the caller's writes and that the caller signs with — NOT
+/// the operator's server keypair. Reporting the operator key to a remote,
+/// JWT-authenticated user caused the "pending bundle owner mismatch": `whoami`
+/// said `3d89j3z…` (operator) while `sign_memory` correctly stamped the
+/// bundle `producer`/owner from `claims.sub` (the user), so the browser signed
+/// as the wrong identity. Both endpoints now resolve identity from one source.
+///
 /// T2 extension: returns the discoverability envelope (`supported_modes`,
 /// `default_mode`, `participate_cost`) alongside the existing fields so
 /// clients can choose `local` vs `participate` BEFORE attempting to write.
 /// The legacy `storage_mode` field is kept verbatim for pre-envelope clients
 /// (chrome-extension Cloud tier still reads it).
 pub fn whoami(
-    keypair: &Keypair,
+    identity_pubkey: &str,
     store: &SqliteStore,
     storage_mode: &str,
     envelope: &Envelope,
 ) -> serde_json::Value {
-    let pubkey = identity::pubkey_base58(keypair);
-    let count = store.count(&pubkey).unwrap_or(0);
+    let count = store.count(identity_pubkey).unwrap_or(0);
+    // did:key needs the raw pubkey bytes; recover them from the base58 string.
+    // A malformed identity (should never happen — OAuth binds `sub` to a
+    // base58 Ed25519 pubkey, and the stdio path passes a real keypair pubkey)
+    // degrades to an empty did_key rather than panicking.
+    let did_key = identity::did_key_from_base58(identity_pubkey).unwrap_or_default();
     // Serialize the envelope through serde_json so the `null` rendering of
     // `participate_cost: Option<ParticipateCost>` and the static `&'static
     // str` arrays in `supported_modes` come out byte-identical to the
@@ -258,9 +272,9 @@ pub fn whoami(
     let envelope_value = serde_json::to_value(envelope).unwrap_or(serde_json::Value::Null);
     let envelope_obj = envelope_value.as_object().cloned().unwrap_or_default();
     let mut out = serde_json::json!({
-        "public_key": pubkey,
-        "did_sol": identity::did_sol(keypair),
-        "did_key": identity::did_key(keypair),
+        "public_key": identity_pubkey,
+        "did_sol": format!("did:sol:{identity_pubkey}"),
+        "did_key": did_key,
         "attestation_count": count,
         "storage_mode": storage_mode,
     });

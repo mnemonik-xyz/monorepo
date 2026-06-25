@@ -85,6 +85,25 @@ pub fn did_key(kp: &Keypair) -> String {
     format!("did:key:z{encoded}")
 }
 
+/// did:key:z<...> derived from an already-base58-encoded Ed25519 public key.
+///
+/// Mirrors [`did_key`] but takes the public key as a base58 string (e.g. an
+/// OAuth JWT `sub`) instead of a [`Keypair`]. Used by `whoami` on the
+/// HTTP/JWT path, where the server holds only the authenticated caller's
+/// public key — never their secret — so it cannot build a `Keypair` to feed
+/// [`did_key`]. Returns `None` if `pubkey_base58` is not a valid 32-byte
+/// Ed25519 public key.
+pub fn did_key_from_base58(pubkey_base58: &str) -> Option<String> {
+    let raw = bs58::decode(pubkey_base58).into_vec().ok()?;
+    if raw.len() != 32 {
+        return None;
+    }
+    // Ed25519 multicodec prefix: 0xed01
+    let mut mc = vec![0xed, 0x01];
+    mc.extend_from_slice(&raw);
+    Some(format!("did:key:z{}", bs58::encode(&mc).into_string()))
+}
+
 /// Sign arbitrary bytes with Ed25519.
 pub fn sign_bytes(kp: &Keypair, message: &[u8]) -> Vec<u8> {
     kp.sign_message(message).as_ref().to_vec()
@@ -118,6 +137,23 @@ mod tests {
         assert!(d.starts_with("did:key:z"));
         // Deterministic
         assert_eq!(d, did_key(&kp));
+    }
+
+    #[test]
+    fn test_did_key_from_base58_matches_keypair_path() {
+        let kp = Keypair::new();
+        // The base58-string path must produce byte-identical output to the
+        // Keypair path for the same public key — whoami relies on this so the
+        // HTTP/JWT response matches the stdio response shape.
+        let from_str = did_key_from_base58(&pubkey_base58(&kp));
+        assert_eq!(from_str.as_deref(), Some(did_key(&kp).as_str()));
+    }
+
+    #[test]
+    fn test_did_key_from_base58_rejects_garbage() {
+        assert_eq!(did_key_from_base58("not-base58!!!"), None);
+        // Valid base58 but wrong length (not a 32-byte Ed25519 key).
+        assert_eq!(did_key_from_base58("abc"), None);
     }
 
     #[test]

@@ -1404,9 +1404,16 @@ async fn handle_tool_call(
 ) -> Result<Value, JsonRpcError> {
     let result = match name {
         "mnemonic_whoami" => {
-            // DB-only: lock, query, release before returning
+            // DB-only: lock, query, release before returning.
+            //
+            // Report the AUTHENTICATED caller's identity (`owner_pubkey` =
+            // `claims.sub` on the JWT path, server keypair on stdio) — the same
+            // identity `sign_memory` stamps as the bundle owner. Previously this
+            // echoed `state.keypair` (the operator), so a remote user's whoami
+            // disagreed with the owner of their own writes → "pending bundle
+            // owner mismatch" at sign-callback time.
             let store = state.store.lock().unwrap();
-            tools::whoami(&state.keypair, &store, &state.storage_mode, &state.envelope)
+            tools::whoami(owner_pubkey, &store, &state.storage_mode, &state.envelope)
         }
         "mnemonic_sign_memory" => {
             let content = args["content"]
