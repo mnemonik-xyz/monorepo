@@ -69,7 +69,21 @@ Variables for `mcp/` (set by user):
 
 **mcp/ binary:** Manual on git tag. CI cross-compiles and attaches to GitHub Release. Docker image pushed to GHCR.
 
-**webapp/ + docs/:** Auto-deploy on push to `main`. Preview on every PR (Cloudflare Pages).
+**webapp/ + docs/:** Auto-deploy on push to `main` via `.github/workflows/deploy-webapp.yml` (builds WASM core + Vite bundle, publishes to Cloudflare Pages, optionally chains a prod chat corpus reseed). Preview on every PR via Cloudflare Pages git integration. Manual republish via Actions UI → "Deploy Webapp" → Run workflow, with optional `reseed_chat_corpus` toggle.
+
+**mcp/ to production VPS:** Manual via `.github/workflows/deploy-mcp.yml` (Actions UI → "Deploy MCP" → Run workflow). Three actions: `apply` (SSH + git pull + cargo build + systemctl restart), `smoke` (verify-only, no SSH), `rollback` (checkout previous tag + rebuild + restart). The `force_reseed` flag injects `MNEMONIC_FORCE_RESEED=1` into `/home/claude/mcp.env` for ONE boot so docs/ changes propagate to the chat's RAG corpus, then removes the var. Auto-deploy on `v*` tag is intentionally disabled — the prod ship decision stays with a human on the 4 GB RAM single-node. See `mcp/src/seed.rs` for the artifact-mtime-aware seed idempotency the workflow relies on.
+
+**Required deploy secrets** (set via `gh secret set -R mnemonik-xyz/monorepo <NAME>`):
+
+| Secret | Used by | Value |
+|--------|---------|-------|
+| `VPS_HOST` | deploy-mcp, deploy-webapp (reseed step) | `150.251.147.215` |
+| `VPS_USER` | deploy-mcp, deploy-webapp (reseed step) | `claude` |
+| `VPS_SSH_PRIVATE_KEY` | deploy-mcp, deploy-webapp (reseed step) | Ed25519 private key, the matching pubkey added to `claude@150.251.147.215:~/.ssh/authorized_keys` |
+| `VPS_KNOWN_HOSTS` | deploy-mcp, deploy-webapp (reseed step) | Output of `ssh-keyscan -t ed25519,rsa 150.251.147.215` — pins the host key, prevents trust-on-first-use MITM |
+| `CLOUDFLARE_API_TOKEN` | deploy-webapp | Pages-scoped API token from Cloudflare dashboard |
+| `CLOUDFLARE_ACCOUNT_ID` | deploy-webapp | The Cloudflare account hosting the Pages project |
+| `CLOUDFLARE_PROJECT_NAME` (variable, not secret) | deploy-webapp | Defaults to `mnemonic-webapp` if unset; override with `gh variable set -R mnemonik-xyz/monorepo CLOUDFLARE_PROJECT_NAME --body <name>` if the Pages project uses a different slug |
 
 **CI tests:** Every push to `main` and `dev`, every PR.
 
