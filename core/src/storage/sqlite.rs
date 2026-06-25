@@ -532,6 +532,23 @@ impl SqliteStore {
         Ok(())
     }
 
+    /// All `content_hash`es owned by `owner_pubkey`, for building the per-owner
+    /// Merkle commitment (verifiable recall, §16). Order is unspecified — the
+    /// [`crate::merkle`] layer sorts into the canonical set ordering, so the
+    /// root is reproducible from this (rebuildable-cache) query regardless of
+    /// row order. Returns an empty vec for an unknown owner.
+    pub fn owner_content_hashes(&self, owner_pubkey: &str) -> anyhow::Result<Vec<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT content_hash FROM attestations WHERE owner_pubkey = ?")?;
+        let rows = stmt.query_map(params![owner_pubkey], |r| r.get::<_, String>(0))?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
     /// Aggregate counters intended for a public traction widget.
     ///
     /// - `unique_users`: distinct non-empty `owner_pubkey` (OAuth-resolved

@@ -67,7 +67,8 @@ fn state_with_short_ttl(ttl_secs: i64) -> Arc<McpState> {
         payment_mode: "none".into(),
         treasury_pubkey: String::new(),
         usdc_mint: String::new(),
-        sign_memory_cost_micro_usdc: 0,
+        admin_token: String::new(),
+        evm_payment: None,
         pricing: mnemonic_mcp::pricing::PricingEngine::new(0),
         sol_tx_fee_lamports: 0,
         storage_mode: "local".into(),
@@ -135,6 +136,7 @@ async fn park_bundle(state: &Arc<McpState>, owner: &str) -> String {
             cbor,
             vec!["t".into()],
             metadata,
+            mnemonic_core::storage::WriteMode::Participate,
         )
         .await
         .expect("park")

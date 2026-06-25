@@ -2,6 +2,9 @@
 pub mod codec;
 pub mod compress;
 pub mod identity;
+// Per-owner Merkle commitments over content_hashes (verifiable recall, §16).
+// Pure crypto — available on every target so clients can verify proofs.
+pub mod merkle;
 
 // Native-only modules. These pull in rusqlite (bundled C SQLite), reqwest
 // (native TLS), or fastembed (ONNX runtime), none of which compile for
@@ -11,8 +14,19 @@ pub mod identity;
 pub mod arweave;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod embed;
+// X25519 ECIES sealing for shared/private memories (Wave 6, §17). Native-only
+// for now (crypto_box + OsRng); in-browser (wasm) decryption for the webapp
+// client is a follow-up that must verify the wasm RNG wiring against the
+// hard `cross-lang-build` gate before flipping this on.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod encrypt;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod lineage;
+// Rebuild the recall index from stored signed artifacts (verifiable recall,
+// §16) — makes "SQLite is a rebuildable cache" real. Native-only for now
+// (depends on the compressor); wasm client-rebuild is a follow-up.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod rebuild;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod solana;
 #[cfg(not(target_arch = "wasm32"))]

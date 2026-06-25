@@ -337,23 +337,40 @@ pub async fn sign_memory(
             &envelope.supported_modes,
         )));
     }
-    // Routing rule (round-2 simplification — security-auditor major):
-    // - `explicit local` (caller sent `mode: "local"`) → ALWAYS inline,
-    //   regardless of deploy. The user-spec invariant "Личная память
-    //   бесплатна всегда" is honoured uniformly: scenario (b) full + JWT
-    //   + explicit local AND scenario (c) local + JWT + explicit local
-    //   both produce a synthetic-id free local write. Closes the
-    //   round-1 gap where (c) silently went to the deferred path.
-    // - Everything else with a JWT → deferred (Cloud-tier flow). This
-    //   includes mode-absent + JWT on a local-only deploy (the
-    //   chrome-extension's actual production target — preserved byte-
-    //   for-byte) AND explicit `mode: "participate"` + JWT.
-    // - No JWT → inline (stdio / Claude Code path), unchanged.
+    // Routing rule (Wave 3 — remove operator signing for remote users):
+    //
+    // The operator's keypair must NEVER produce a COSE signature over a
+    // memory authored by a *different* identity. Inline signing
+    // (`sign_memory_inline` → `sign_artifact(.., keypair)`) is therefore
+    // legal ONLY when the writer IS the operator itself — i.e. the resolved
+    // `owner_pubkey` equals the operator pubkey. That covers:
+    //   - the stdio / Claude Code single-tenant path (no JWT; owner is the
+    //     local identity == `keypair`), and
+    //   - a self-call where a JWT subject happens to be the operator's own
+    //     pubkey (e.g. RAG self-knowledge, test harness).
+    //
+    // Any JWT write owned by a different identity is routed to the
+    // client-signing (deferred) path — regardless of write_mode, INCLUDING
+    // explicit `mode: "local"`. A remote user's free local write is now
+    // client-signed too (the deferred bundle carries `write_mode` so the
+    // sign-callback persists it as `Local` with synthetic ids, still free).
+    // This closes the last custodial gap: previously explicit-local + JWT
+    // fell through to inline and the operator signed the user's content.
+    let operator_pubkey = identity::pubkey_base58(keypair);
     if let Some(sub) = jwt_sub {
-        if !resolved.is_explicit_local() {
-            return sign_memory_deferred(embedder, compressor, pending, content, tags, sub)
-                .await
-                .map_err(ToolError::Other);
+        let is_self_write = owner_pubkey == operator_pubkey;
+        if !(resolved.is_explicit_local() && is_self_write) {
+            return sign_memory_deferred(
+                embedder,
+                compressor,
+                pending,
+                content,
+                tags,
+                sub,
+                resolved.write_mode,
+            )
+            .await
+            .map_err(ToolError::Other);
         }
     }
     let inline_result = sign_memory_inline(
@@ -776,6 +793,7 @@ async fn sign_memory_deferred(
     content: &str,
     tags: &[String],
     jwt_sub: &str,
+    write_mode: WriteMode,
 ) -> anyhow::Result<serde_json::Value> {
     let now = chrono::Utc::now().to_rfc3339();
     // 1. Embed (CPU-bound, can't defer)
@@ -816,6 +834,16 @@ async fn sign_memory_deferred(
         .map_err(|e| anyhow::anyhow!("canonical CBOR encode failed: {e}"))?;
     let content_hash = blake3_hash(&canonical_cbor);
 
+    // Wave 2 — programmatic client-signing. Hand the unsigned canonical CBOR
+    // back inline (base64) so a non-browser client (SDK/CLI/agent) can
+    // COSE_Sign1 it locally with the user's own Ed25519 key and POST the
+    // signed envelope to `/api/sign-callback` — no browser `approve_url`
+    // round-trip required. This is the SAME bytes `GET /api/pending/{id}`
+    // serves; returning it inline saves the headless client one round-trip.
+    // The browser flow is untouched (it still uses `approve_url`).
+    let canonical_cbor_b64 =
+        base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &canonical_cbor);
+
     // 6. Park in PendingBundles. The store assigns the canonical
     //    `correlation_id` for the entry; we discard the value because we
     //    pre-allocated one above to keep `artifact_id == correlation_id`.
@@ -847,6 +875,7 @@ async fn sign_memory_deferred(
             canonical_cbor,
             tags.to_vec(),
             metadata,
+            write_mode,
         )
         .await
         .map_err(|e| anyhow::anyhow!("pending insert failed: {e}"))?;
@@ -856,11 +885,33 @@ async fn sign_memory_deferred(
         "approve_url": format!("https://mnemonik.xyz/sign/{assigned_id}"),
         "correlation_id": assigned_id,
         "expires_in": 300,
+        "content_hash": content_hash,
+        // Wave 2 — programmatic (non-browser) client-signing handoff. A client
+        // that holds the user's identity key (SDK/CLI/extension/agent) signs
+        // `canonical_cbor_b64` locally and submits via `client_sign.submit_path`,
+        // bypassing the browser entirely. Paths are relative to the MCP server
+        // the client is already connected to.
+        "canonical_cbor_b64": canonical_cbor_b64,
+        "client_sign": {
+            "prepare_path": format!("/api/pending/{assigned_id}"),
+            "submit_path": "/api/sign-callback",
+            "alg": "COSE_Sign1 / Ed25519 (alg -8); kid = signer pubkey",
+            "payload": "the base64-decoded canonical_cbor_b64 (sign these exact bytes)",
+            "submit_body": {
+                "correlation_id": assigned_id,
+                "cose_signed_bytes": "<base64 of your COSE_Sign1 envelope>",
+                "signer_pubkey": "<base58 of the Ed25519 pubkey that signed; must equal the COSE kid>"
+            }
+        },
         "next_step": format!(
-            "Tell the user to open approve_url in their browser and click \
-             Approve. After they approve (typically 10-30 seconds), call \
-             mnemonic_check_pending with correlation_id={assigned_id} to \
-             retrieve the on-chain solana_tx + arweave_tx for this memory."
+            "Two ways to finish (the memory is client-signed either way): \
+             (A) Programmatic — COSE_Sign1 the bytes in canonical_cbor_b64 with \
+             your Ed25519 identity key and POST {{correlation_id, \
+             cose_signed_bytes, signer_pubkey}} to client_sign.submit_path \
+             (/api/sign-callback). (B) Browser — tell the user to open \
+             approve_url and click Approve. Then call mnemonic_check_pending \
+             with correlation_id={assigned_id} to retrieve the on-chain \
+             solana_tx + arweave_tx."
         ),
     }))
 }
@@ -1007,6 +1058,19 @@ async fn sign_memory_inline(
     delivery_refetch_timeout: Duration,
 ) -> Result<serde_json::Value, ToolError> {
     let pubkey = identity::pubkey_base58(keypair);
+    // Wave 3 invariant (defense in depth): inline signing uses the operator's
+    // `keypair` to produce the COSE_Sign1, so it is only legitimate when the
+    // memory is authored BY the operator — i.e. `owner_pubkey == pubkey`.
+    // The dispatcher in `sign_memory` already routes any remote-owned write to
+    // the client-signing path; this guard guarantees no future caller can
+    // smuggle a remote owner into the operator-signed path (custodial forgery).
+    if owner_pubkey != pubkey {
+        return Err(ToolError::Other(anyhow::anyhow!(
+            "refusing to operator-sign a memory owned by a different identity \
+             (owner={owner_pubkey}, operator={pubkey}); remote writes must be \
+             client-signed via the deferred path"
+        )));
+    }
     let attestation_id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
 
@@ -1783,6 +1847,49 @@ pub fn prove_identity(keypair: &Keypair, challenge: &str) -> serde_json::Value {
 /// keypair pubkey. `keypair` remains in the signature for the `total_attestations`
 /// count (per-signer, distinct from per-owner search) and forward
 /// compatibility with the `signer_pubkey` field.
+/// Build the per-owner Merkle commitment block for a recall response
+/// (Wave 5 / design §16). The `root` commits to the *set* of an owner's
+/// `content_hash`es (rebuildable from Arweave); `proofs` carries one inclusion
+/// proof per returned result so a client can check — against the root it
+/// independently anchored/observed on Solana — that the operator neither
+/// omitted nor tampered with the row. Pure local computation over the
+/// rebuildable SQLite cache; no chain call here.
+///
+/// Returns `Null` for the anonymous cross-owner public pool (no single owner →
+/// no single commitment) or if the owner's hash set can't be read.
+fn build_merkle_commitment(
+    store: &SqliteStore,
+    owner_pubkey: &str,
+    results: &[mnemonic_core::storage::SearchResult],
+) -> serde_json::Value {
+    use mnemonic_core::merkle;
+    let all_hashes = match store.owner_content_hashes(owner_pubkey) {
+        Ok(h) => h,
+        Err(_) => return serde_json::Value::Null,
+    };
+    let root = merkle::commitment_root(&all_hashes);
+    let mut proofs = serde_json::Map::new();
+    for r in results {
+        if let Some((_proof_root, steps)) = merkle::prove(&all_hashes, &r.content_hash) {
+            let steps_json: Vec<serde_json::Value> = steps
+                .iter()
+                .map(|s| {
+                    serde_json::json!({
+                        "sibling": merkle::to_hex32(&s.sibling),
+                        "right": s.sibling_is_right,
+                    })
+                })
+                .collect();
+            proofs.insert(r.content_hash.clone(), serde_json::Value::Array(steps_json));
+        }
+    }
+    serde_json::json!({
+        "root": merkle::to_hex32(&root),
+        "proofs": serde_json::Value::Object(proofs),
+        "alg": "blake3-merkle/v1: leaf=blake3(0x00||content_hash), node=blake3(0x01||l||r), sorted-set",
+    })
+}
+
 pub fn recall(
     keypair: &Keypair,
     store: &SqliteStore,
@@ -1816,6 +1923,14 @@ pub fn recall(
     // count() is signer-scoped (legacy semantic); search() is owner-scoped
     // OR cross-owner depending on the dispatcher's input.
     let total = store.count(&signer_pubkey).unwrap_or(0);
+    // Verifiable recall (§16): attach the per-owner Merkle commitment + an
+    // inclusion proof per result so an authenticated caller can detect an
+    // operator that omits/tampers. Null for the anonymous cross-owner pool
+    // (no single-owner commitment exists there).
+    let merkle_commitment = match owner_pubkey {
+        Some(owner) => build_merkle_commitment(store, owner, &results),
+        None => serde_json::Value::Null,
+    };
     serde_json::json!({
         "query": query,
         "results": results,
@@ -1827,6 +1942,7 @@ pub fn recall(
         "embed_provider": embedder.provider_name(),
         "embed_model": embedder.model_id(),
         "verifiable": embedder.is_open_weights(),
+        "merkle_commitment": merkle_commitment,
     })
 }
 

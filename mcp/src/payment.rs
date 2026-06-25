@@ -2,19 +2,16 @@
 //!
 //! This file owns all payment concerns for the MCP server:
 //!   - Payment-mode gating (`check_payment` and path selectors).
-//!   - API key & balance lifecycle in SQLite (`create_api_key`,
-//!     `get_balance`, `deduct_balance`, `credit_deposit`, `get_owner_pubkey`).
 //!   - x402 nonce replay protection (`mark_x402_nonce`).
 //!   - P&L cost accounting (`record_attestation_cost`, `get_pnl_stats`).
 //!   - Standalone `verify_usdc_transfer` over `&SolanaClient` (moved here in
 //!     Task 8; the USDC-vs-recipient policy is payment-layer, not chain-layer).
+//!   - EVM USDC x402 verifier (`verify_evm_usdc_transfer`) for Arc/Base.
 //!
-//! Two payment paths:
-//!   - balance — human users top up an API key; Cursor/Claude Desktop send
-//!     `Authorization: Bearer mnm_<key>` on every MCP request.
-//!   - x402 — autonomous agents pay per-call via a USDC Solana transfer and
-//!     present the tx sig in `X-Payment: <json>` on the retry request.
-//!   - both — balance checked first; x402 accepted as fallback.
+//! Payment paths (Wave 4 — non-custodial; custodial balance/api-keys removed):
+//!   - x402 — clients pay per-call via a USDC transfer on Solana OR an EVM
+//!     chain (Arc/Base) and present the tx sig in `X-Payment: <json>` on the
+//!     retry request. Verified on-chain; no operator-held float.
 //!   - none — open access (development / self-hosted).
 
 use axum::http::HeaderMap;
@@ -69,24 +66,17 @@ pub struct PaymentOption {
 // ── Gate result ──────────────────────────────────────────────────────────────
 
 pub enum PaymentGate {
-    /// Payment verified (or not required). Inner value = api_key if balance mode.
-    Proceed(Option<String>),
+    /// Payment verified (or not required). Wave 4 removed custodial balance
+    /// mode, so there is no longer an operator-issued api_key to carry — this
+    /// is a unit variant.
+    Proceed,
     /// Return HTTP 402 with this body.
     NeedPayment(X402Response),
-    /// Bad credentials / insufficient balance — return 401/402 error message.
+    /// Bad credentials / payment verification failure — return 401/402 message.
     Unauthorized(String),
 }
 
 // ── Header helpers ───────────────────────────────────────────────────────────
-
-/// Extract API key from `Authorization: Bearer mnm_...` header.
-pub fn extract_api_key(headers: &HeaderMap) -> Option<String> {
-    headers
-        .get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.strip_prefix("Bearer "))
-        .map(|s| s.trim().to_string())
-}
 
 /// Decode x402 payment proof from `X-Payment` header.
 /// Accepts raw JSON or base64-encoded JSON.
@@ -111,8 +101,16 @@ pub fn extract_x402_proof(headers: &HeaderMap) -> Option<X402PaymentProof> {
 /// Check payment for a paid tool call.
 ///
 /// Called before executing `mnemonic_sign_memory` when `payment_mode != "none"`.
-/// Returns `PaymentGate::Proceed(api_key)` if the caller may proceed,
-/// otherwise the appropriate rejection.
+/// Returns `PaymentGate::Proceed` if the caller may proceed, otherwise the
+/// appropriate rejection.
+///
+/// Wave 4 (non-custodial): the only paid rail is non-custodial x402 (Solana or
+/// EVM USDC, per-call, verified on-chain). The custodial `balance`/`both`
+/// modes and the operator-issued `mnm_` api_key ledger are removed — there is
+/// no operator-held float. Valid modes: `none`, `x402`.
+// Fans out to the x402 verifier with each rail's config (solana + optional
+// EVM); a params struct would only move the same fields behind a wrapper.
+#[allow(clippy::too_many_arguments)]
 pub async fn check_payment(
     headers: &HeaderMap,
     mode: &str,
@@ -121,59 +119,34 @@ pub async fn check_payment(
     treasury: &str,
     usdc_mint: &str,
     cost: i64,
+    evm: Option<&EvmPaymentConfig>,
 ) -> PaymentGate {
     match mode {
-        "none" => PaymentGate::Proceed(None),
+        "none" => PaymentGate::Proceed,
 
-        "balance" => check_balance(headers, store, cost),
-
-        "x402" => check_x402(headers, solana, store, treasury, usdc_mint, cost).await,
-
-        "both" => {
-            // If an API key header is present, try balance first
-            if extract_api_key(headers).is_some() {
-                if let PaymentGate::Proceed(k) = check_balance(headers, store, cost) {
-                    return PaymentGate::Proceed(k);
-                }
-                // fall through to x402 on failure
-            }
-            // Otherwise gate via x402
-            check_x402(headers, solana, store, treasury, usdc_mint, cost).await
-        }
+        "x402" => check_x402(headers, solana, store, treasury, usdc_mint, cost, evm).await,
 
         unknown => {
             tracing::error!("Unknown PAYMENT_MODE={unknown:?} — rejecting request (fail-closed)");
             PaymentGate::Unauthorized(format!(
-                "server misconfiguration: unknown PAYMENT_MODE={unknown:?}. Valid: none, balance, x402, both"
+                "server misconfiguration: unknown PAYMENT_MODE={unknown:?}. Valid: none, x402"
             ))
         }
     }
 }
 
-// ── Balance path ─────────────────────────────────────────────────────────────
-
-fn check_balance(
-    headers: &HeaderMap,
-    store: &std::sync::Mutex<SqliteStore>,
-    cost: i64,
-) -> PaymentGate {
-    let key = match extract_api_key(headers) {
-        Some(k) => k,
-        None => return PaymentGate::Unauthorized("missing Authorization: Bearer <api_key>".into()),
-    };
-
-    let store = store.lock().unwrap();
-    match get_balance(&store, &key) {
-        Ok(Some(bal)) if bal >= cost => PaymentGate::Proceed(Some(key)),
-        Ok(Some(bal)) => PaymentGate::Unauthorized(format!(
-            "insufficient balance: have {bal} micro-USDC, need {cost}"
-        )),
-        Ok(None) => PaymentGate::Unauthorized("api key not found".into()),
-        Err(e) => PaymentGate::Unauthorized(format!("balance lookup failed: {e}")),
-    }
-}
-
 // ── x402 path ────────────────────────────────────────────────────────────────
+
+/// True when an x402 proof's `network` denotes an EVM chain (Arc/Base/eip155…)
+/// rather than Solana. Used to route verification to the right rail.
+fn is_evm_network(network: &str) -> bool {
+    let n = network.to_lowercase();
+    n.starts_with("arc")
+        || n.starts_with("evm")
+        || n.starts_with("eip155")
+        || n.starts_with("base")
+        || n.starts_with("ethereum")
+}
 
 async fn check_x402(
     headers: &HeaderMap,
@@ -182,16 +155,19 @@ async fn check_x402(
     treasury: &str,
     usdc_mint: &str,
     cost: i64,
+    evm: Option<&EvmPaymentConfig>,
 ) -> PaymentGate {
     let proof = match extract_x402_proof(headers) {
         Some(p) => p,
         None => {
-            // No payment header — return 402 payment required
+            // No payment header — return 402 payment required (advertise every
+            // rail the operator supports: Solana always, EVM when configured).
             return PaymentGate::NeedPayment(x402_required(
                 treasury,
                 usdc_mint,
                 cost,
                 "mnemonic_sign_memory attestation fee",
+                evm,
             ));
         }
     };
@@ -213,9 +189,26 @@ async fn check_x402(
         }
     }
 
-    // Verify the Solana USDC transfer
-    match verify_usdc_transfer(solana, &proof.tx_sig, treasury, usdc_mint, cost as u64).await {
-        Ok(Some(_)) => {}
+    // Verify the transfer on the rail indicated by `proof.network`. EVM when
+    // the proof names an EVM chain AND the operator has the EVM rail enabled;
+    // Solana otherwise. Both settle in micro-USDC (6-dec), so `cost` is the
+    // minimum on either chain.
+    let verify_result = match (evm, is_evm_network(&proof.network)) {
+        (Some(evm), true) => verify_evm_usdc_transfer(
+            &evm.rpc_url,
+            &proof.tx_sig,
+            &evm.treasury,
+            &evm.usdc_token,
+            cost as u128,
+        )
+        .await
+        .map(|opt| opt.map(|_| ())),
+        _ => verify_usdc_transfer(solana, &proof.tx_sig, treasury, usdc_mint, cost as u64)
+            .await
+            .map(|opt| opt.map(|_| ())),
+    };
+    match verify_result {
+        Ok(Some(())) => {}
         Ok(None) => {
             return PaymentGate::Unauthorized(format!(
                 "x402 payment not valid: tx {} does not transfer >= {cost} micro-USDC to treasury",
@@ -229,7 +222,7 @@ async fn check_x402(
     // successful delivery confirmation (or, in the
     // legacy `payment_mode == "none"` path, never). See
     // `consume_x402_nonce_after_success`.
-    PaymentGate::Proceed(None)
+    PaymentGate::Proceed
 }
 
 /// Read-only replay check for an x402 nonce. Returns `Ok(true)` if a row
@@ -270,17 +263,34 @@ pub fn consume_x402_nonce_after_success(store: &SqliteStore, tx_sig: &str) -> an
 
 // ── Builder ──────────────────────────────────────────────────────────────────
 
-fn x402_required(treasury: &str, usdc_mint: &str, cost: i64, description: &str) -> X402Response {
+fn x402_required(
+    treasury: &str,
+    usdc_mint: &str,
+    cost: i64,
+    description: &str,
+    evm: Option<&EvmPaymentConfig>,
+) -> X402Response {
+    let mut accepts = vec![PaymentOption {
+        scheme: "exact".into(),
+        network: "solana-mainnet".into(),
+        max_amount_required: cost.to_string(),
+        asset: usdc_mint.to_string(),
+        pay_to: treasury.to_string(),
+        description: description.to_string(),
+    }];
+    if let Some(evm) = evm {
+        accepts.push(PaymentOption {
+            scheme: "exact".into(),
+            network: "arc".into(),
+            max_amount_required: cost.to_string(),
+            asset: evm.usdc_token.clone(),
+            pay_to: evm.treasury.clone(),
+            description: description.to_string(),
+        });
+    }
     X402Response {
         x402_version: 1,
-        accepts: vec![PaymentOption {
-            scheme: "exact".into(),
-            network: "solana-mainnet".into(),
-            max_amount_required: cost.to_string(),
-            asset: usdc_mint.to_string(),
-            pay_to: treasury.to_string(),
-            description: description.to_string(),
-        }],
+        accepts,
     }
 }
 
@@ -365,245 +375,6 @@ pub struct PnlStats {
     pub net_micro_usdc: i64,
     pub margin_pct: f64,
     pub avg_sol_price_usdc: f64,
-}
-
-/// Create a new API key with zero balance. Returns the key.
-pub fn create_api_key(store: &SqliteStore, owner_pubkey: &str) -> anyhow::Result<String> {
-    let key = format!("mnm_{}", hex::encode(random_bytes::<24>()?));
-    let now = chrono::Utc::now().to_rfc3339();
-    store.conn().execute(
-        "INSERT INTO api_keys (api_key, owner_pubkey, balance_micro_usdc, created_at) VALUES (?,?,0,?)",
-        params![key, owner_pubkey, now],
-    )?;
-    Ok(key)
-}
-
-/// Get the owner pubkey for an API key. Returns None if key not found.
-pub fn get_owner_pubkey(store: &SqliteStore, api_key: &str) -> anyhow::Result<Option<String>> {
-    let mut stmt = store
-        .conn()
-        .prepare("SELECT owner_pubkey FROM api_keys WHERE api_key = ?")?;
-    let mut rows = stmt.query(params![api_key])?;
-    Ok(rows.next()?.map(|r| r.get(0)).transpose()?)
-}
-
-/// Get balance in micro-USDC for an API key. Returns None if key not found.
-pub fn get_balance(store: &SqliteStore, api_key: &str) -> anyhow::Result<Option<i64>> {
-    let mut stmt = store
-        .conn()
-        .prepare("SELECT balance_micro_usdc FROM api_keys WHERE api_key = ?")?;
-    let mut rows = stmt.query(params![api_key])?;
-    Ok(rows.next()?.map(|r| r.get(0)).transpose()?)
-}
-
-/// Deduct `amount` from balance. Returns Err if insufficient funds or key not found.
-///
-/// The balance UPDATE and the `payment_events` charge INSERT are wrapped in
-/// `BEGIN IMMEDIATE` / `COMMIT` so the balance decrement and audit-trail row
-/// commit together or not at all. If the INSERT fails (e.g. disk full or an
-/// `event_id` UUID collision), the transaction rolls back and the balance is
-/// left untouched — matching the atomicity discipline of `credit_deposit` and
-/// `refund_balance`.
-///
-/// The conditional UPDATE `WHERE api_key = ? AND balance_micro_usdc >= ?` is
-/// the idempotency gate: `conn.changes() == 0` means either the key is
-/// unknown or the balance is too low. In that case we ROLLBACK and use a
-/// read-only `get_balance` call to produce the precise user-visible error.
-/// Two concurrent deducts on the same key cannot both pass the guard because
-/// SQLite serializes writes to the same table under the IMMEDIATE write lock.
-pub fn deduct_balance(
-    store: &SqliteStore,
-    api_key: &str,
-    amount: i64,
-    description: &str,
-) -> anyhow::Result<()> {
-    let conn = store.conn();
-    let now = chrono::Utc::now().to_rfc3339();
-
-    // Acquire the write lock at transaction open so the UPDATE + INSERT
-    // commit atomically.
-    conn.execute("BEGIN IMMEDIATE", [])?;
-
-    // Single-statement atomic check + decrement.
-    let update_res = conn.execute(
-        "UPDATE api_keys
-             SET balance_micro_usdc = balance_micro_usdc - ?1,
-                 last_used_at = ?2
-           WHERE api_key = ?3
-             AND balance_micro_usdc >= ?1",
-        params![amount, now, api_key],
-    );
-    let changed = match update_res {
-        Ok(n) => n,
-        Err(e) => {
-            let _ = conn.execute("ROLLBACK", []);
-            return Err(e.into());
-        }
-    };
-
-    if changed == 0 {
-        // Either the key does not exist or the balance is too low. We reuse
-        // get_balance to produce the precise error message the client expects
-        // (it's read-only, so there is no race here — worst case the message
-        // is slightly stale, which is fine for a rejection path).
-        let _ = conn.execute("ROLLBACK", []);
-        match get_balance(store, api_key)? {
-            None => anyhow::bail!("api key not found"),
-            Some(balance) => {
-                anyhow::bail!("insufficient balance: have {balance} micro-USDC, need {amount}")
-            }
-        }
-    }
-
-    let insert_res = conn.execute(
-        "INSERT INTO payment_events (event_id, api_key, amount_micro_usdc, event_type, description, created_at) VALUES (?,?,?,'charge',?,?)",
-        params![uuid::Uuid::new_v4().to_string(), api_key, amount, description, now],
-    );
-    if let Err(e) = insert_res {
-        // Audit-trail INSERT failed — roll back the balance decrement so the
-        // ledger and balance stay consistent. Without this, a disk-full or
-        // constraint error on the event row would leave the balance debited
-        // with no charge record.
-        let _ = conn.execute("ROLLBACK", []);
-        return Err(e.into());
-    }
-
-    conn.execute("COMMIT", [])?;
-    Ok(())
-}
-
-/// Credit a deposit. Returns new balance.
-///
-/// Idempotency is enforced at the SQL level via the UNIQUE index on
-/// `payment_events.tx_sig` (see `core/src/storage/sqlite.rs`). Two concurrent
-/// calls with the same `tx_sig` cannot both succeed: the second one's INSERT
-/// fails with `ConstraintViolation`, which we convert to a user-visible error.
-/// The INSERT + UPDATE are wrapped in an `IMMEDIATE` transaction so the
-/// balance is only credited when the idempotency row is actually inserted.
-pub fn credit_deposit(
-    store: &SqliteStore,
-    api_key: &str,
-    amount: i64,
-    tx_sig: &str,
-) -> anyhow::Result<i64> {
-    let conn = store.conn();
-    let now = chrono::Utc::now().to_rfc3339();
-
-    // BEGIN IMMEDIATE: acquire the write lock at transaction start so the
-    // UNIQUE-constraint check races cleanly against concurrent writers.
-    conn.execute("BEGIN IMMEDIATE", [])?;
-
-    // The idempotency-gating INSERT. If tx_sig already exists, this returns
-    // SqliteFailure(ConstraintViolation) — we translate that into a typed
-    // bail so the caller can tell apart "duplicate" from "other DB error".
-    let insert_res = conn.execute(
-        "INSERT INTO payment_events (event_id, api_key, amount_micro_usdc, event_type, tx_sig, description, created_at) VALUES (?,?,?,'deposit',?,?,?)",
-        params![uuid::Uuid::new_v4().to_string(), api_key, amount, tx_sig, "USDC deposit", now],
-    );
-
-    if let Err(rusqlite::Error::SqliteFailure(e, _)) = &insert_res {
-        if e.code == rusqlite::ErrorCode::ConstraintViolation {
-            let _ = conn.execute("ROLLBACK", []);
-            anyhow::bail!("deposit tx already applied: {tx_sig}");
-        }
-    }
-    if let Err(e) = insert_res {
-        let _ = conn.execute("ROLLBACK", []);
-        return Err(e.into());
-    }
-
-    // Credit the balance.
-    let update_res = conn.execute(
-        "UPDATE api_keys SET balance_micro_usdc = balance_micro_usdc + ? WHERE api_key = ?",
-        params![amount, api_key],
-    );
-    let changed = match update_res {
-        Ok(n) => n,
-        Err(e) => {
-            let _ = conn.execute("ROLLBACK", []);
-            return Err(e.into());
-        }
-    };
-    if changed == 0 {
-        let _ = conn.execute("ROLLBACK", []);
-        anyhow::bail!("api key not found: {api_key}");
-    }
-
-    let new_balance: i64 = match conn.query_row(
-        "SELECT balance_micro_usdc FROM api_keys WHERE api_key = ?",
-        params![api_key],
-        |r| r.get(0),
-    ) {
-        Ok(b) => b,
-        Err(e) => {
-            let _ = conn.execute("ROLLBACK", []);
-            return Err(e.into());
-        }
-    };
-
-    conn.execute("COMMIT", [])?;
-    Ok(new_balance)
-}
-
-/// Refund `amount` to `api_key`'s balance after a failed tool call.
-///
-/// This is the reverse of `deduct_balance` and intentionally does NOT use
-/// `credit_deposit`: deposits are gated by the UNIQUE(tx_sig) idempotency
-/// index, but a tool can legitimately fail the same way multiple times for
-/// the same key and each refund must apply. Refund rows are written with
-/// `tx_sig = NULL` (exempt from the partial index) and `event_type='refund'`.
-/// The read + update is wrapped in an IMMEDIATE transaction.
-pub fn refund_balance(
-    store: &SqliteStore,
-    api_key: &str,
-    amount: i64,
-    reason: &str,
-) -> anyhow::Result<i64> {
-    let conn = store.conn();
-    let now = chrono::Utc::now().to_rfc3339();
-
-    conn.execute("BEGIN IMMEDIATE", [])?;
-
-    let update_res = conn.execute(
-        "UPDATE api_keys SET balance_micro_usdc = balance_micro_usdc + ? WHERE api_key = ?",
-        params![amount, api_key],
-    );
-    let changed = match update_res {
-        Ok(n) => n,
-        Err(e) => {
-            let _ = conn.execute("ROLLBACK", []);
-            return Err(e.into());
-        }
-    };
-    if changed == 0 {
-        let _ = conn.execute("ROLLBACK", []);
-        anyhow::bail!("api key not found: {api_key}");
-    }
-
-    let description = format!("refund: {reason}");
-    let insert_res = conn.execute(
-        "INSERT INTO payment_events (event_id, api_key, amount_micro_usdc, event_type, tx_sig, description, created_at) VALUES (?,?,?,'refund',NULL,?,?)",
-        params![uuid::Uuid::new_v4().to_string(), api_key, amount, description, now],
-    );
-    if let Err(e) = insert_res {
-        let _ = conn.execute("ROLLBACK", []);
-        return Err(e.into());
-    }
-
-    let new_balance: i64 = match conn.query_row(
-        "SELECT balance_micro_usdc FROM api_keys WHERE api_key = ?",
-        params![api_key],
-        |r| r.get(0),
-    ) {
-        Ok(b) => b,
-        Err(e) => {
-            let _ = conn.execute("ROLLBACK", []);
-            return Err(e.into());
-        }
-    };
-
-    conn.execute("COMMIT", [])?;
-    Ok(new_balance)
 }
 
 /// Record an x402 tx sig as used (prevents replay). Returns Err if already used.
@@ -695,23 +466,6 @@ pub fn get_pnl_stats(store: &SqliteStore, days: u64) -> anyhow::Result<PnlStats>
     })
 }
 
-/// Cryptographically secure random bytes from `/dev/urandom`.
-///
-/// Fails loudly if OS entropy is unavailable. API keys derive directly from
-/// this output, so silently substituting a weak PRNG (time+PID+counter) on
-/// entropy-source failure would let an attacker narrow the key search space.
-/// Callers propagate the error; the caller of `create_api_key` surfaces it
-/// as a 500 to the client, which is the correct behavior.
-fn random_bytes<const N: usize>() -> anyhow::Result<[u8; N]> {
-    use std::io::Read;
-    let mut out = [0u8; N];
-    let mut f = std::fs::File::open("/dev/urandom")
-        .map_err(|e| anyhow::anyhow!("entropy source /dev/urandom unavailable: {e}"))?;
-    f.read_exact(&mut out)
-        .map_err(|e| anyhow::anyhow!("reading from /dev/urandom failed: {e}"))?;
-    Ok(out)
-}
-
 // ── Delivery DoS guard (modes-user-choice T3) ───────────────────────────────
 //
 // Outcome-based per-`api_key_hash` sliding-window counter consulted at the
@@ -734,11 +488,11 @@ fn random_bytes<const N: usize>() -> anyhow::Result<[u8; N]> {
 // returning. No `.await` between guard acquisition and drop. The
 // background eviction task respects the same rule per shard.
 
-/// Compute the blake3 digest of an api_key, hex-encoded. Used both as the
-/// quota-counter subject AND as the credential-at-rest identifier for the
-/// `payment_events` audit row written by [`record_refund_failed`]. Centralised
-/// here so call-sites cannot accidentally substitute the raw key (CWE-312
-/// hygiene).
+/// Compute the blake3 digest of a payment subject, hex-encoded. Wave 4 removed
+/// custodial api_keys; the remaining caller is the x402 delivery-DoS quota,
+/// which keys on `blake3(x402 tx_sig)` (the billable, non-rotatable subject).
+/// Centralised here so call-sites cannot accidentally substitute a raw value
+/// (CWE-312 hygiene).
 pub fn hash_api_key(api_key: &str) -> String {
     blake3::hash(api_key.as_bytes()).to_hex().to_string()
 }
@@ -948,43 +702,109 @@ impl DeliveryMetrics {
     }
 }
 
-/// Record a `refund_failed` audit row when the refund-itself path fails after
-/// a delivery demotion. Best-effort — callers should `.ok()` the result; the
-/// row is a forensic crumb, not a correctness barrier.
-///
-/// **PII allow-list** (tech-spec §"Risk & mitigations / Refund audit-trail
-/// correctness"): the row carries ONLY `{api_key_hash, attestation_id,
-/// reason, occurred_at}`. NO raw `api_key`, NO `content_preview`, NO
-/// embedding bytes, NO COSE payload. The `payment_events.api_key` column
-/// receives the `blake3` digest here (column name is legacy; the schema is
-/// untouched per the spec — no new migration needed).
-///
-/// Lives in `mcp/src/payment.rs` per the project's hard architectural rule:
-/// all payment methods live in `payment.rs`, never in `core/`. Body uses
-/// the existing schema columns; the new `event_type='refund_failed'` value
-/// is just a new enumerant.
-pub fn record_refund_failed(
-    store: &SqliteStore,
-    api_key_hash: &str,
-    attestation_id: &str,
-    reason: &str,
-    occurred_at: &str,
-) -> anyhow::Result<()> {
-    // Description carries the demoted attestation_id + the failure reason in
-    // a structured `{id} | {reason}` shape so an operator can grep
-    // `payment_events.description LIKE '<attestation_id>%'` for forensics.
-    let description = format!("{attestation_id} | {reason}");
-    store.conn().execute(
-        "INSERT INTO payment_events (event_id, api_key, amount_micro_usdc, event_type, tx_sig, description, created_at) VALUES (?,?,?,'refund_failed',NULL,?,?)",
-        params![
-            uuid::Uuid::new_v4().to_string(),
-            api_key_hash,
-            0i64,
-            description,
-            occurred_at,
-        ],
-    )?;
-    Ok(())
+// ── EVM x402 (Wave 1 — non-custodial Arc/EVM settlement) ─────────────────────
+//
+// Mirror of the Solana `verify_usdc_transfer` for EVM chains (Arc, Base, …): a
+// client signs an ERC-20 USDC `transfer(treasury, amount)` with its own derived
+// key (no external wallet — see work/noncustodial-paradigm/design.md §19) and
+// presents the tx hash in the `X-Payment` header. We confirm it on-chain via
+// `eth_getTransactionReceipt` and decode the ERC-20 Transfer log.
+
+/// EVM-side payment settlement config. `None` on `McpState` = EVM x402 disabled.
+#[derive(Debug, Clone)]
+pub struct EvmPaymentConfig {
+    /// EVM JSON-RPC endpoint (e.g. Arc: https://rpc.testnet.arc.network).
+    pub rpc_url: String,
+    /// ERC-20 USDC token contract address (lowercased `0x…`).
+    pub usdc_token: String,
+    /// Treasury recipient address (lowercased `0x…`).
+    pub treasury: String,
+}
+
+/// keccak256("Transfer(address,address,uint256)") — the ERC-20 Transfer topic0.
+const ERC20_TRANSFER_TOPIC0: &str =
+    "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
+
+/// Lowercase + strip `0x`; right-most 40 hex chars of a 32-byte topic = address.
+fn topic_to_address(topic: &str) -> String {
+    let t = topic.trim_start_matches("0x").to_lowercase();
+    let start = t.len().saturating_sub(40);
+    format!("0x{}", &t[start..])
+}
+
+/// Pure decoder: given a receipt's `logs` array, return the transferred amount
+/// (as u128) iff some log is an ERC-20 `Transfer` from `usdc_token` to
+/// `treasury` of at least `min_amount`. Network-free so it is unit-testable.
+fn match_erc20_transfer(
+    logs: &[serde_json::Value],
+    usdc_token: &str,
+    treasury: &str,
+    min_amount: u128,
+) -> Option<u128> {
+    let token = usdc_token.to_lowercase();
+    let to_want = treasury.to_lowercase();
+    for log in logs {
+        let addr = log["address"].as_str().unwrap_or("").to_lowercase();
+        if addr != token {
+            continue;
+        }
+        let topics = log["topics"].as_array()?;
+        if topics.len() < 3 {
+            continue;
+        }
+        if topics[0].as_str().unwrap_or("").to_lowercase() != ERC20_TRANSFER_TOPIC0 {
+            continue;
+        }
+        if topic_to_address(topics[2].as_str().unwrap_or("")) != to_want {
+            continue;
+        }
+        let data = log["data"]
+            .as_str()
+            .unwrap_or("0x")
+            .trim_start_matches("0x");
+        let amount = u128::from_str_radix(data, 16).unwrap_or(0);
+        if amount >= min_amount {
+            return Some(amount);
+        }
+    }
+    None
+}
+
+/// Verify an EVM ERC-20 USDC transfer to the treasury via `eth_getTransactionReceipt`.
+/// Returns `Ok(Some(amount))` when a matching Transfer of `>= min_amount` is found
+/// in a successful (`status == 0x1`) receipt, else `Ok(None)`.
+pub async fn verify_evm_usdc_transfer(
+    rpc_url: &str,
+    tx_hash: &str,
+    treasury: &str,
+    usdc_token: &str,
+    min_amount: u128,
+) -> anyhow::Result<Option<u128>> {
+    let client = reqwest::Client::new();
+    let body = serde_json::json!({
+        "jsonrpc": "2.0", "id": 1,
+        "method": "eth_getTransactionReceipt", "params": [tx_hash],
+    });
+    let resp: serde_json::Value = client
+        .post(rpc_url)
+        .json(&body)
+        .send()
+        .await?
+        .json()
+        .await?;
+
+    let receipt = &resp["result"];
+    if receipt.is_null() {
+        return Ok(None); // unknown / unconfirmed tx
+    }
+    // Reject reverted transactions (status 0x0).
+    if receipt["status"].as_str().unwrap_or("") != "0x1" {
+        return Ok(None);
+    }
+    let logs = receipt["logs"].as_array().cloned().unwrap_or_default();
+    Ok(match_erc20_transfer(
+        &logs, usdc_token, treasury, min_amount,
+    ))
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────
@@ -997,280 +817,67 @@ mod tests {
     //! spawn threads — `SqliteStore::in_memory()` gives each caller its own
     //! empty DB, which is the wrong semantic for race tests.
     use super::*;
-    use mnemonic_core::storage::SqliteStore;
-    use std::sync::Arc;
-    use std::thread;
 
-    fn fresh_store() -> SqliteStore {
-        SqliteStore::in_memory().expect("in-memory store")
-    }
-
-    fn fresh_file_store() -> (tempfile::TempDir, std::path::PathBuf) {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("mcp-test.db");
-        // Create the schema by opening + dropping.
-        let _ = SqliteStore::open(&path).expect("open store");
-        (dir, path)
+    // ── EVM ERC-20 Transfer decoder (Wave 1) ────────────────────────────────
+    fn transfer_log(token: &str, to_topic: &str, data_hex: &str) -> serde_json::Value {
+        serde_json::json!({
+            "address": token,
+            "topics": [
+                super::ERC20_TRANSFER_TOPIC0,
+                "0x000000000000000000000000aaaa000000000000000000000000000000000001",
+                to_topic
+            ],
+            "data": data_hex,
+        })
     }
 
     #[test]
-    fn refund_balance_allows_duplicate_reasons() {
-        // Covers: review round1 major finding — refund via credit_deposit
-        // silently dropped the second refund when tx_sig collided.
-        let store = fresh_store();
-        let key = create_api_key(&store, "owner_a").unwrap();
-        // Pre-fund the key by crediting two distinct deposits.
-        credit_deposit(&store, &key, 1_000, "sig_deposit_1").unwrap();
-
-        // Two refunds with the same reason — both must apply.
-        let after_1 = refund_balance(&store, &key, 100, "arweave upload failed").unwrap();
-        let after_2 = refund_balance(&store, &key, 100, "arweave upload failed").unwrap();
-
-        assert_eq!(after_1, 1_100, "first refund credits balance");
+    fn evm_transfer_matches_recipient_and_amount() {
+        let token = "0x3600000000000000000000000000000000000000";
+        let treasury = "0x00000000000000000000000000000000000000fe";
+        let to_topic = "0x00000000000000000000000000000000000000000000000000000000000000fe";
+        // 1_000_000 (1 USDC, 6-dec) = 0xf4240
+        let logs = vec![transfer_log(
+            token,
+            to_topic,
+            "0x00000000000000000000000000000000000000000000000000000000000f4240",
+        )];
         assert_eq!(
-            after_2, 1_200,
-            "second identical refund ALSO credits balance"
+            match_erc20_transfer(&logs, token, treasury, 1_000_000),
+            Some(1_000_000)
         );
-
-        // Both rows must exist in payment_events with event_type='refund'.
-        let refund_count: i64 = store
-            .conn()
-            .query_row(
-                "SELECT COUNT(*) FROM payment_events WHERE api_key = ? AND event_type = 'refund'",
-                params![key],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(refund_count, 2);
-    }
-
-    #[test]
-    fn credit_deposit_concurrent_same_tx_sig_applies_once() {
-        // Covers: security-auditor major finding — TOCTOU on credit_deposit.
-        // Two threads attempt to credit the SAME tx_sig at the same time.
-        // Exactly one must succeed; balance must increase by exactly one
-        // credit amount (not two).
-        let (_dir, path) = fresh_file_store();
-
-        // Pre-create the api_key using a short-lived connection.
-        let key = {
-            let s = SqliteStore::open(&path).unwrap();
-            create_api_key(&s, "owner_concurrent").unwrap()
-        };
-
-        let tx_sig = "same_tx_abc_123".to_string();
-        let amount = 5_000;
-        let barrier = Arc::new(std::sync::Barrier::new(2));
-
-        let p1 = path.clone();
-        let k1 = key.clone();
-        let s1 = tx_sig.clone();
-        let b1 = barrier.clone();
-        let t1 = thread::spawn(move || -> Result<i64, String> {
-            let s = SqliteStore::open(&p1).map_err(|e| e.to_string())?;
-            b1.wait();
-            credit_deposit(&s, &k1, amount, &s1).map_err(|e| e.to_string())
-        });
-
-        let p2 = path.clone();
-        let k2 = key.clone();
-        let s2 = tx_sig.clone();
-        let b2 = barrier.clone();
-        let t2 = thread::spawn(move || -> Result<i64, String> {
-            let s = SqliteStore::open(&p2).map_err(|e| e.to_string())?;
-            b2.wait();
-            credit_deposit(&s, &k2, amount, &s2).map_err(|e| e.to_string())
-        });
-
-        let r1 = t1.join().unwrap();
-        let r2 = t2.join().unwrap();
-
-        let successes = [&r1, &r2].iter().filter(|r| r.is_ok()).count();
-        let failures = [&r1, &r2].iter().filter(|r| r.is_err()).count();
+        // below minimum → no match
         assert_eq!(
-            successes, 1,
-            "exactly one credit must succeed: {r1:?} {r2:?}"
+            match_erc20_transfer(&logs, token, treasury, 2_000_000),
+            None
         );
+    }
+
+    #[test]
+    fn evm_transfer_rejects_wrong_token_or_recipient() {
+        let token = "0x3600000000000000000000000000000000000000";
+        let treasury = "0x00000000000000000000000000000000000000fe";
+        let to_topic = "0x00000000000000000000000000000000000000000000000000000000000000fe";
+        let amt = "0x00000000000000000000000000000000000000000000000000000000000f4240";
+        // wrong token contract
+        let wrong_token = vec![transfer_log(
+            "0xdeadbeef00000000000000000000000000000000",
+            to_topic,
+            amt,
+        )];
+        assert_eq!(match_erc20_transfer(&wrong_token, token, treasury, 1), None);
+        // wrong recipient
+        let other = "0x00000000000000000000000000000000000000000000000000000000000000ab";
+        let wrong_to = vec![transfer_log(token, other, amt)];
+        assert_eq!(match_erc20_transfer(&wrong_to, token, treasury, 1), None);
+    }
+
+    #[test]
+    fn topic_to_address_takes_last_20_bytes() {
         assert_eq!(
-            failures, 1,
-            "the other must fail with duplicate: {r1:?} {r2:?}"
+            topic_to_address("0x00000000000000000000000000000000000000000000000000000000000000fe"),
+            "0x00000000000000000000000000000000000000fe"
         );
-
-        let err_msg = [&r1, &r2]
-            .iter()
-            .find(|r| r.is_err())
-            .unwrap()
-            .as_ref()
-            .err()
-            .unwrap();
-        assert!(
-            err_msg.contains("deposit tx already applied"),
-            "duplicate error should surface: {err_msg}"
-        );
-
-        // Final balance: exactly one credit amount.
-        let final_store = SqliteStore::open(&path).unwrap();
-        assert_eq!(get_balance(&final_store, &key).unwrap(), Some(amount));
-
-        // Exactly one deposit row in payment_events (UNIQUE index enforced).
-        let deposit_rows: i64 = final_store
-            .conn()
-            .query_row(
-                "SELECT COUNT(*) FROM payment_events WHERE tx_sig = ?",
-                params![tx_sig],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(deposit_rows, 1);
-    }
-
-    #[test]
-    fn deduct_balance_concurrent_cannot_overdraw() {
-        // Covers: security-auditor major finding — TOCTOU on deduct_balance.
-        // Seed balance = 100. Two threads each try to deduct 75. At most
-        // ONE must succeed; the final balance must never be negative.
-        let (_dir, path) = fresh_file_store();
-
-        // Seed the key with exactly 100 micro-USDC.
-        let key = {
-            let s = SqliteStore::open(&path).unwrap();
-            let k = create_api_key(&s, "owner_overdraft").unwrap();
-            credit_deposit(&s, &k, 100, "seed_tx").unwrap();
-            k
-        };
-
-        let barrier = Arc::new(std::sync::Barrier::new(2));
-        let p1 = path.clone();
-        let k1 = key.clone();
-        let b1 = barrier.clone();
-        let t1 = thread::spawn(move || -> Result<(), String> {
-            let s = SqliteStore::open(&p1).map_err(|e| e.to_string())?;
-            b1.wait();
-            deduct_balance(&s, &k1, 75, "t1").map_err(|e| e.to_string())
-        });
-
-        let p2 = path.clone();
-        let k2 = key.clone();
-        let b2 = barrier.clone();
-        let t2 = thread::spawn(move || -> Result<(), String> {
-            let s = SqliteStore::open(&p2).map_err(|e| e.to_string())?;
-            b2.wait();
-            deduct_balance(&s, &k2, 75, "t2").map_err(|e| e.to_string())
-        });
-
-        let r1 = t1.join().unwrap();
-        let r2 = t2.join().unwrap();
-
-        let ok_count = [&r1, &r2].iter().filter(|r| r.is_ok()).count();
-        assert_eq!(ok_count, 1, "exactly one deduct succeeds: {r1:?} {r2:?}");
-
-        let final_store = SqliteStore::open(&path).unwrap();
-        let final_bal = get_balance(&final_store, &key).unwrap().unwrap();
-        assert_eq!(final_bal, 25, "balance = 100 - 75 = 25, never negative");
-        assert!(final_bal >= 0);
-    }
-
-    #[test]
-    fn deduct_balance_insufficient_leaves_balance_unchanged() {
-        let store = fresh_store();
-        let key = create_api_key(&store, "owner_b").unwrap();
-        credit_deposit(&store, &key, 50, "seed_tx_2").unwrap();
-
-        let err = deduct_balance(&store, &key, 100, "too big").unwrap_err();
-        assert!(
-            err.to_string().contains("insufficient balance"),
-            "err = {err}"
-        );
-        assert_eq!(get_balance(&store, &key).unwrap(), Some(50));
-    }
-
-    #[test]
-    fn deduct_balance_unknown_key_reports_not_found() {
-        let store = fresh_store();
-        let err = deduct_balance(&store, "mnm_nonexistent", 10, "whoops").unwrap_err();
-        assert!(err.to_string().contains("api key not found"), "err = {err}");
-    }
-
-    #[test]
-    fn deduct_balance_audit_insert_failure_rolls_back_balance() {
-        // Covers: review round2 major finding — balance decrement and audit-
-        // trail INSERT must be atomic. We install a temporary BEFORE INSERT
-        // trigger on payment_events that RAISEs ABORT when the charge row's
-        // description matches a sentinel. The balance UPDATE in
-        // deduct_balance runs first, so without transaction wrapping the
-        // balance would be debited with no matching charge row. With the
-        // round-3 fix, the failing INSERT triggers a ROLLBACK that undoes
-        // the UPDATE.
-        let store = fresh_store();
-        let key = create_api_key(&store, "owner_rollback").unwrap();
-        credit_deposit(&store, &key, 500, "seed_rollback_tx").unwrap();
-        assert_eq!(get_balance(&store, &key).unwrap(), Some(500));
-
-        // Trigger that fails only when the INSERT carries our sentinel
-        // description. Other charge rows (if any) are unaffected.
-        store
-            .conn()
-            .execute_batch(
-                "CREATE TRIGGER force_fail_charge
-                 BEFORE INSERT ON payment_events
-                 WHEN NEW.event_type = 'charge' AND NEW.description = '__FORCE_FAIL__'
-                 BEGIN SELECT RAISE(ABORT, 'forced audit insert failure'); END;",
-            )
-            .unwrap();
-
-        let err = deduct_balance(&store, &key, 100, "__FORCE_FAIL__").unwrap_err();
-        assert!(
-            err.to_string().contains("forced audit insert failure")
-                || err.to_string().to_lowercase().contains("abort"),
-            "expected INSERT-failure error, got: {err}"
-        );
-
-        // Balance must be unchanged: 500 minus the FAILED deduction = 500.
-        assert_eq!(
-            get_balance(&store, &key).unwrap(),
-            Some(500),
-            "rollback must leave balance untouched"
-        );
-
-        // No charge row must have been written for the failed attempt.
-        let charge_rows: i64 = store
-            .conn()
-            .query_row(
-                "SELECT COUNT(*) FROM payment_events WHERE api_key = ? AND event_type = 'charge'",
-                params![key],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(
-            charge_rows, 0,
-            "no charge row should exist when the INSERT aborted"
-        );
-
-        // Drop the trigger and verify a subsequent successful deduct works
-        // normally, confirming the store is not left in a stuck state after
-        // the rolled-back transaction.
-        store
-            .conn()
-            .execute("DROP TRIGGER force_fail_charge", [])
-            .unwrap();
-        deduct_balance(&store, &key, 100, "normal").unwrap();
-        assert_eq!(get_balance(&store, &key).unwrap(), Some(400));
-    }
-
-    #[test]
-    fn credit_deposit_sequential_duplicate_is_rejected() {
-        // Baseline idempotency test: sequential (same-thread) second call
-        // with the same tx_sig must be rejected, mirroring the concurrent
-        // test above but removing thread-scheduling variance.
-        let store = fresh_store();
-        let key = create_api_key(&store, "owner_c").unwrap();
-        credit_deposit(&store, &key, 500, "unique_sig").unwrap();
-        let err = credit_deposit(&store, &key, 500, "unique_sig").unwrap_err();
-        assert!(
-            err.to_string().contains("deposit tx already applied"),
-            "err = {err}"
-        );
-        assert_eq!(get_balance(&store, &key).unwrap(), Some(500));
     }
 
     // ── T3: RefundsBySubject sliding-window guard ────────────────────────────
@@ -1342,55 +949,6 @@ mod tests {
         let dropped = g.evict_idle(Duration::from_secs(60));
         assert_eq!(dropped, 0);
         assert_eq!(g.len(), 1);
-    }
-
-    #[test]
-    fn record_refund_failed_writes_audit_row_with_hash_not_raw_key() {
-        let store = fresh_store();
-        let raw_key = "mnm_secretkeyabcdefghijklmn";
-        let hash = hash_api_key(raw_key);
-        let occurred_at = chrono::Utc::now().to_rfc3339();
-        record_refund_failed(
-            &store,
-            &hash,
-            "att-id-uuid-0001",
-            "refund-itself-failed",
-            &occurred_at,
-        )
-        .unwrap();
-
-        // Row exists with the hash, not the raw key.
-        let row: (String, String, i64, String) = store
-            .conn()
-            .query_row(
-                "SELECT api_key, event_type, amount_micro_usdc, description
-                   FROM payment_events
-                  WHERE event_type = 'refund_failed'",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
-            )
-            .unwrap();
-        assert_eq!(row.0, hash, "api_key column must carry hash, not raw key");
-        assert_eq!(row.1, "refund_failed");
-        assert_eq!(row.2, 0, "amount must be 0 (refund_failed is not money)");
-        assert!(
-            row.3.starts_with("att-id-uuid-0001 | "),
-            "description must lead with the demoted attestation id: {}",
-            row.3
-        );
-        assert!(
-            row.3.contains("refund-itself-failed"),
-            "description must include the reason: {}",
-            row.3
-        );
-
-        // Negative assertion: no raw-key substring anywhere in the row.
-        for col in [&row.0, &row.1, &row.3] {
-            assert!(
-                !col.contains(raw_key),
-                "raw api_key must not appear anywhere in the audit row: {col}"
-            );
-        }
     }
 
     #[test]

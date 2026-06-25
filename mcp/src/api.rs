@@ -229,7 +229,12 @@ pub async fn sign_callback_handler(
     let attestation_id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
 
-    let (solana_tx, arweave_tx) = if state.storage_mode == "local" {
+    // Wave 3: a deferred write whose resolved mode is `Local` (a remote user's
+    // free local write, now client-signed too) skips on-chain anchoring and
+    // gets synthetic ids — exactly like a `local` storage deploy. Either
+    // condition routes to the synthetic-id branch.
+    let is_local_write = state.storage_mode == "local" || entry.write_mode == WriteMode::Local;
+    let (solana_tx, arweave_tx) = if is_local_write {
         let local_ar = format!("local:{}", &attestation_id[..8]);
         let local_sol = format!("local:{}", &entry.content_hash[..16]);
         (local_sol, local_ar)
@@ -284,25 +289,20 @@ pub async fn sign_callback_handler(
                 );
             }
         };
-        // T2 (resolved from T1 placeholder): the deferred-signing /
-        // sign-callback flow ALWAYS persists with `WriteMode::Participate`
-        // — by construction. A `local`-mode request never enters this
-        // pipeline (the deferred branch fires only for the HTTP/JWT path
-        // which exists specifically to anchor on Arweave + Solana
-        // through user-side signing). The mode was resolved at the
-        // original `mnemonic_sign_memory` dispatch time and would have
-        // been `Participate`; we don't re-derive it here because the
-        // pending bundle doesn't carry the mode field — recording
-        // `Participate` is the only value consistent with this code
-        // path having been reached. See work/modes-user-choice/
-        // tech-spec.md §"Data flow (participate write)" + decisions.md
-        // entry for T2.
+        // Wave 3 update: the pending bundle now carries the resolved
+        // `write_mode` (added when Wave 3 routed remote-owned writes —
+        // including explicit `mode: "local"` — through the client-signing
+        // path). Persist with the caller's intended mode rather than
+        // assuming `Participate`. A `Local` bundle took the synthetic-id
+        // branch above and stays free; a `Participate` bundle was anchored
+        // on Arweave + Solana. (Historically this path only ever saw
+        // `Participate` because explicit-local fell through to the inline
+        // operator-signed path; that custodial fall-through is now removed.)
         //
-        // Round-2 (T3 extension): row is persisted as `Participate` here
-        // BEFORE the delivery check. The delivery check's primary-key
-        // recall stage needs the row to exist (see
-        // `tools::perform_delivery_check`). On delivery failure the row
-        // is demoted in place via `INSERT OR REPLACE` inside
+        // Round-2 (T3 extension): the row is persisted BEFORE the delivery
+        // check. The delivery check's primary-key recall stage needs the row
+        // to exist (see `tools::perform_delivery_check`). On delivery failure
+        // the row is demoted in place via `INSERT OR REPLACE` inside
         // `confirm_delivery_or_demote`.
         // Visibility defaults to `Private` here — the deferred-sign callback
         // path is a Participate write (browser-mediated COSE_Sign1), and
@@ -319,7 +319,7 @@ pub async fn sign_callback_handler(
             &req.signer_pubkey, // signer = pubkey we just verified via COSE
             &req.signer_pubkey, // owner = same pubkey (Decision 9 — webapp flow uses keypair as identity)
             &now,
-            WriteMode::Participate,
+            entry.write_mode,
             Visibility::Private,
             &entry.embedding,
         );
@@ -350,12 +350,14 @@ pub async fn sign_callback_handler(
     // error response so the webapp can show the user a "delivery not
     // confirmed" notice rather than a green checkmark.
     //
-    // Skip the check for `local`-mode deploys (no real anchor to re-fetch).
+    // Skip the check for `local`-mode deploys AND for `Local` write-mode
+    // bundles (Wave 3) — neither anchored anything on-chain, so there is no
+    // real Arweave tx to re-fetch. Both took the synthetic-id branch above.
     // Refund-on-failure for the deferred path is out of scope: the webapp
     // owns its own credit accounting and the inline-path `mcp_handler`
     // doesn't see this code path. The demoted row + structured error
     // signal the webapp to NOT charge the user.
-    if state.storage_mode != "local" {
+    if !is_local_write {
         let ctx = crate::tools::DeliveryContext {
             arweave: &state.arweave,
             store: &state.store,

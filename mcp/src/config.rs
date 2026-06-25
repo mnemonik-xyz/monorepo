@@ -29,12 +29,24 @@ pub struct Config {
     pub storage_mode: String,
 
     // ── Payment ──────────────────────────────────────────────────────────────
-    /// Payment mode: "none" | "balance" | "x402" | "both"
+    /// Payment mode: "none" | "x402". Wave 4 (non-custodial) removed the
+    /// custodial "balance"/"both" modes; `check_payment` fail-closes on any
+    /// other value.
     pub payment_mode: String,
     /// Solana pubkey that receives USDC payments
     pub treasury_pubkey: String,
     /// USDC SPL mint address (mainnet: EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v)
     pub usdc_mint: String,
+    /// Admin bearer token gating operator-only endpoints (P&L on /admin/stats).
+    /// Empty (default) = the P&L endpoint is disabled (fail-closed); public
+    /// onboarding stats remain available on /stats.
+    pub admin_token: String,
+    /// EVM x402 settlement (Wave 1). All three must be set to enable the EVM
+    /// rail; any empty = EVM x402 disabled (Solana-only). No external wallet —
+    /// the client self-signs the ERC-20 transfer (see noncustodial design §19).
+    pub evm_rpc_url: String,
+    pub evm_usdc_token: String,
+    pub evm_treasury: String,
     /// Minimum / initial cost of mnemonic_sign_memory in micro-USDC (floor price)
     pub sign_memory_cost_micro_usdc: i64,
 
@@ -149,6 +161,10 @@ impl Config {
             payment_mode: env_or("PAYMENT_MODE", "none"),
             treasury_pubkey: env_or("TREASURY_PUBKEY", ""),
             usdc_mint: env_or("USDC_MINT", "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"),
+            admin_token: env_or("ADMIN_TOKEN", ""),
+            evm_rpc_url: env_or("EVM_RPC_URL", ""),
+            evm_usdc_token: env_or("EVM_USDC_TOKEN", ""),
+            evm_treasury: env_or("EVM_TREASURY", ""),
             sign_memory_cost_micro_usdc: env_or("SIGN_MEMORY_COST_MICRO_USDC", "1000")
                 .parse()
                 .unwrap_or(1000),

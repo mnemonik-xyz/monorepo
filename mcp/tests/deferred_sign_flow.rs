@@ -114,12 +114,19 @@ async fn sign_callback(
 /// envelope is `result.content[0].text` (JSON-encoded string) per the
 /// 2025-06-18 spec; fallback to flat-result for compatibility.
 fn extract_correlation_id(body: &Value) -> Option<String> {
+    extract_inner_result(body)?["correlation_id"]
+        .as_str()
+        .map(|s| s.to_string())
+}
+
+/// Pull the decoded inner-result JSON object out of an MCP `tools/call`
+/// response (the `result.content[0].text` JSON-encoded string).
+fn extract_inner_result(body: &Value) -> Option<Value> {
     let text_blob = body["result"]["content"][0]["text"]
         .as_str()
         .map(|s| s.to_string())
         .unwrap_or_else(|| body["result"].to_string());
-    let inner: Value = serde_json::from_str(&text_blob).ok()?;
-    inner["correlation_id"].as_str().map(|s| s.to_string())
+    serde_json::from_str(&text_blob).ok()
 }
 
 #[tokio::test]
@@ -188,4 +195,75 @@ async fn test_full_lifecycle_sign_callback_410_on_replay() {
     // 6. Replay sign-callback for the SAME correlation_id → 410 Gone.
     let (s6, _body6) = sign_callback(&app, &cid, &cose_b64, &user_pubkey, &token).await;
     assert_eq!(s6, StatusCode::GONE, "replay should be 410, got {s6}");
+}
+
+/// Wave 2 — programmatic (browser-free) client-signing. The `sign_memory`
+/// response itself carries `canonical_cbor_b64` + the `client_sign` submit
+/// contract, so a headless SDK/CLI/agent can sign locally and POST to
+/// `/api/sign-callback` WITHOUT ever calling `GET /api/pending` or opening
+/// `approve_url`. This proves the inline bytes match what the callback
+/// accepts (same blake3 content hash → persists).
+#[tokio::test]
+async fn test_programmatic_client_sign_without_pending_get() {
+    let state = mock_state();
+    let oauth_state = Arc::new(OAuthState::with_defaults(TEST_SECRET));
+    let app = build_app(state.clone(), oauth_state.clone());
+
+    let kp = Keypair::new();
+    let user_pubkey = kp.pubkey().to_string();
+    let token = oauth::issue_jwt(&oauth_state, &user_pubkey).expect("issue_jwt");
+
+    // 1. sign_memory — get the FULL deferred envelope.
+    let (s1, body1) = post_jsonrpc(
+        &app,
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "tools/call",
+            "params": {
+                "name": "mnemonic_sign_memory",
+                "arguments": {"content": "headless memo", "tags": ["prog"]},
+            },
+            "id": 1,
+        }),
+        &token,
+    )
+    .await;
+    assert_eq!(s1, StatusCode::OK, "sign_memory failed: {body1}");
+    let inner = extract_inner_result(&body1).expect("inner result");
+    assert_eq!(inner["status"], "awaiting_signature");
+
+    // 2. The bytes to sign come straight from the response — no GET pending.
+    let cbor_b64 = inner["canonical_cbor_b64"]
+        .as_str()
+        .expect("canonical_cbor_b64 present in response");
+    let cbor = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, cbor_b64)
+        .expect("canonical_cbor_b64 is valid base64");
+    assert!(!cbor.is_empty(), "decoded canonical CBOR is empty");
+
+    // The submit contract is advertised relative to the connected server.
+    assert_eq!(inner["client_sign"]["submit_path"], "/api/sign-callback");
+    let cid = inner["correlation_id"].as_str().expect("correlation_id");
+
+    // 3. Sign locally with the user's Ed25519 key — no browser.
+    let cose = sign_cose(&cbor, &kp).expect("sign_cose");
+    let cose_b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &cose);
+
+    // 4. Submit to the advertised path → 200 OK + persisted.
+    let (s4, body4) = sign_callback(&app, cid, &cose_b64, &user_pubkey, &token).await;
+    assert_eq!(s4, StatusCode::OK, "sign-callback failed: {body4}");
+    assert_eq!(body4["status"], "ok");
+
+    // 5. Row persisted with the USER as signer (self-sovereign authorship).
+    {
+        let store = state.store.lock().expect("store mutex");
+        let results = store
+            .search(&[0.1; 8], Some(user_pubkey.as_str()), None, 5)
+            .expect("search ok");
+        assert_eq!(
+            results.len(),
+            1,
+            "expected 1 persisted row, got {results:?}"
+        );
+        assert_eq!(results[0].content, "headless memo");
+    }
 }
