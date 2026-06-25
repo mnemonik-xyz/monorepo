@@ -35,6 +35,19 @@ export interface MnemonicWasm {
   sign_cose_payload: (payload: Uint8Array, keypair_json: unknown) => Uint8Array;
   export_keypair_json: (keypair_json: unknown) => string;
   import_keypair_json: (json_str: string) => unknown;
+  /** Cosine similarity between two equal-length f32 vectors (0.0 on mismatch). */
+  cosine_similarity: (a: Float32Array, b: Float32Array) => number;
+  /**
+   * Verify a chunk's COSE_Sign1 bytes (fetched from Arweave) and return its
+   * verified content + decompressed embedding. Trustless: the signature is
+   * checked inside WASM, so the gateway is not trusted.
+   */
+  verify_and_extract_memory: (cose_bytes: Uint8Array) => {
+    valid: boolean;
+    signer: string;
+    content: string;
+    embedding: number[];
+  };
 }
 
 let cached: Promise<MnemonicWasm> | null = null;

@@ -30,3 +30,36 @@ Append-only log.
   selects a coherent corpus.
 - Additive tags only — no DB migration; `protocol-knowledge` filter and
   `build_context` are untouched.
+
+## Wave 2 — manifest endpoint (done)
+
+- Seeding writes `RAG_CHUNK_DIR/knowledge-manifest.json` (standalone, in
+  addition to inside the zip). `GET /knowledge-manifest` serves it.
+- On-chain anchoring of the chunks is already handled by `sign_memory` when
+  `STORAGE_MODE=full` — so D-FUND is the operational flip (fund keypair + set
+  prod to full/participate), not new code.
+
+## Wave 3 — client-side trustless RAG
+
+- **D-R resolved: mode (b)** — owner chose full client-side WASM RAG over
+  Arweave.
+- **Done (core, tested):** `core/src/rag.rs` (`cosine_similarity`,
+  `verify_and_extract_memory`) + WASM bindings. The browser verifies each
+  chunk's COSE signature itself, so it trusts the bytes, not the gateway.
+- **Done (webapp, tested):** `webapp/src/lib/rag.ts` — manifest fetch + Arweave
+  fetch + verify + cosine rank, dependency-injected + vitest-covered (8 tests).
+  `wasm.ts` typings extended for the two new exports.
+- **D-EMB (embedder parity):** the browser must embed the query with the same
+  model the corpus used — server fastembed = `all-MiniLM-L6-v2` (384-dim),
+  which has a browser twin (`Xenova/all-MiniLM-L6-v2`). BLOCKER: both
+  `@xenova/transformers` and `@huggingface/transformers` pull `sharp`, whose
+  native libvips binary can't download behind this session's proxy (and would
+  risk the Cloudflare/VPS build). Deferred `embedder.ts` + the dep until the
+  build env can fetch sharp, or we adopt a sharp-free embedding path (e.g.
+  onnxruntime-web directly, or a `transformers.js` build with the Node image
+  backend excluded). Owner decision needed on the lib/build approach.
+- **Remaining:** (1) D-EMB embedder integration once the lib/build path is
+  settled; (2) server `/chat` extension — accept optional client-supplied
+  `context` (skip server recall) + `release`/`as_of` (D-VAR) for the version
+  selector; (3) UI — version dropdown + "trustless mode" toggle wired through
+  `retrieveContext` → `/chat`.
