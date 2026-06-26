@@ -3,11 +3,11 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "//": "Requires wasm-pack on PATH for `build:wasm` (cargo install wasm-pack). Not an npm dependency.",
+  "//": "WASM core comes from the `mnemonic-core` npm package — no Rust toolchain or wasm-pack needed at build time. Run `npm install` and the prebuilt bytes are in place. The legacy `build:wasm` script remains as an opt-in escape hatch for contributors who need to test an unpublished local change to core/ — it rebuilds wasm-pack output into `webapp/src/wasm/` AND `core/pkg-web/`, but the build pipeline no longer chains it.",
   "scripts": {
     "dev": "vite",
     "build:wasm": "bash scripts/build-wasm.sh",
-    "build": "npm run build:wasm && tsc -b && vite build",
+    "build": "tsc -b && vite build",
     "preview": "vite preview",
     "test": "vitest",
     "test:e2e": "playwright test",
@@ -16,6 +16,7 @@
   "dependencies": {
     "bs58": "^6.0.0",
     "cbor-x": "^1.6.4",
+    "mnemonic-core": "0.2.4",
     "react": "^19.2.6",
     "react-dom": "^19.2.6",
     "react-markdown": "^10.1.0",

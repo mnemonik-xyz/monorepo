@@ -3,6 +3,7 @@ import {
   sendChatMessage,
   ChatApiError,
   fetchPublicStats,
+  MCP_BASE,
   type PublicStats,
 } from "../lib/api";
 import type { Message } from "../types";
@@ -123,7 +124,7 @@ function LandingPage({
         handleSend();
       }
     },
-    [handleSend]
+    [handleSend],
   );
 
   return (
@@ -143,18 +144,9 @@ function LandingPage({
             aria-label="Network traction"
             className="grid grid-cols-3 gap-4 rounded-lg border border-text-muted/20 bg-white/5 px-4 py-5"
           >
-            <StatCell
-              value={stats.unique_users}
-              label="unique users"
-            />
-            <StatCell
-              value={stats.saved_on_node}
-              label="memories on node"
-            />
-            <StatCell
-              value={stats.saved_onchain}
-              label="memories on-chain"
-            />
+            <StatCell value={stats.unique_users} label="unique users" />
+            <StatCell value={stats.saved_on_node} label="memories on node" />
+            <StatCell value={stats.saved_onchain} label="memories on-chain" />
           </section>
         )}
 
@@ -219,7 +211,7 @@ function LandingPage({
 
         <nav className="flex flex-col items-center gap-4 sm:flex-row sm:justify-center">
           <a
-            href="/download-knowledge"
+            href={`${MCP_BASE}/download-knowledge`}
             download
             className="rounded-md border border-text-muted/30 px-6 py-3 text-sm font-semibold text-text-primary transition-colors hover:border-accent-secondary hover:text-accent-secondary focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-secondary"
           >
