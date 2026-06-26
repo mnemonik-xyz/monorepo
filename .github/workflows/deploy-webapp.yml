@@ -1,29 +1,31 @@
 name: Deploy Webapp
 
-# Builds the demo webapp (WASM core + Vite bundle) and republishes it to
-# Cloudflare Pages. The webapp's chat demo and install deeplinks live here.
+# Rebuilds the demo webapp (WASM core + Vite bundle) on the production VPS
+# at `mnemonik.xyz` (150.251.147.215). nginx serves the resulting `dist/`
+# directly from `/home/claude/monorepo/webapp/dist/` (see deployment.md
+# §VPS Deploy Process step 10) — no service restart is needed for the
+# webapp to pick up the new bundle.
+#
+# Cloudflare Pages is NOT in the stack. The webapp is co-hosted with the
+# MCP server on the same VPS: nginx routes `/` to `webapp/dist`, `/mcp` +
+# `/chat` + `/health` to the mnemonic-mcp:3000 backend (see deployment.md
+# §VPS Deploy Process step 10 for the full nginx config).
 #
 # Two trigger modes:
-#   - `workflow_dispatch` (recommended) — explicit "Run workflow" click,
-#     with an opt-in flag to ALSO reseed the prod MCP chat corpus after
-#     publishing (use when docs/ content changed and the chat needs to
-#     pick up the new whitepaper / design docs).
+#   - `workflow_dispatch` — explicit "Run workflow" click, with an opt-in
+#     flag to ALSO reseed the prod MCP chat corpus afterwards (use when
+#     docs/ changed and the chat needs to pick up the new whitepaper /
+#     design docs).
 #   - `push` to main when files under `webapp/`, `core/` (WASM bindings),
 #     or `docs/` change — auto-republish so the public site doesn't drift
 #     from main. The `docs/` trigger means a doc-only PR merge will
 #     republish AND reseed the chat corpus automatically.
-#
-# Cloudflare Pages also has a git integration that auto-deploys on push.
-# This workflow is the explicit / scriptable alternative: it lets us
-# (a) trigger a republish manually without an empty commit, (b) chain the
-# MCP reseed step so prod chat doesn't drift, and (c) record the build
-# outcome in Actions for audit.
 
 on:
   workflow_dispatch:
     inputs:
       reseed_chat_corpus:
-        description: 'After publishing, SSH to prod MCP and trigger MNEMONIC_FORCE_RESEED=1 + restart so the chat picks up new docs/.'
+        description: 'After webapp rebuild, set MNEMONIC_FORCE_RESEED=1 + restart mnemonic-mcp so the chat picks up new docs/.'
         type: boolean
         required: false
         default: false
@@ -36,84 +38,22 @@ on:
 
 permissions:
   contents: read
-  deployments: write   # cloudflare/pages-action posts a deployment status
 
 concurrency:
-  group: deploy-webapp-${{ github.ref }}
+  group: deploy-webapp-prod
   cancel-in-progress: true
 
 jobs:
-  build-and-publish:
-    name: Build WASM + Vite + publish to Cloudflare Pages
+  rebuild-webapp:
+    name: Rebuild webapp on VPS
     runs-on: ubuntu-latest
-    timeout-minutes: 20
-    outputs:
-      cf_url: ${{ steps.cf_publish.outputs.url }}
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Verify Cloudflare secrets
-        run: |
-          for var in CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID; do
-            if [ -z "${!var:-}" ]; then
-              echo "::error::Missing required secret: $var"
-              exit 1
-            fi
-          done
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-unknown-unknown
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: webapp-wasm
-
-      - name: Install wasm-pack
-        # Pin to a published version; CI cache reuses across runs.
-        run: cargo install wasm-pack --locked --version 0.13.1
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-
-      - name: Install webapp dependencies
-        working-directory: webapp
-        # `--no-audit --no-fund` to silence noise; the lockfile is at repo
-        # root, so no `npm ci` here.
-        run: npm install --no-audit --no-fund
-
-      - name: Build WASM core + Vite bundle
-        working-directory: webapp
-        run: npm run build
-
-      - name: Publish to Cloudflare Pages
-        id: cf_publish
-        uses: cloudflare/pages-action@v1
-        with:
-          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          projectName: ${{ vars.CLOUDFLARE_PROJECT_NAME || 'mnemonic-webapp' }}
-          directory: webapp/dist
-          gitHubToken: ${{ secrets.GITHUB_TOKEN }}
-
-  reseed-prod-chat:
-    name: Reseed prod chat corpus
-    needs: build-and-publish
-    # Only run when the maintainer asked for it, or when a docs-only change
-    # auto-triggered the workflow (push event with `docs/**` in the paths).
-    if: ${{ inputs.reseed_chat_corpus == true || github.event_name == 'push' }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - name: Verify VPS secrets
         run: |
           for var in VPS_HOST VPS_USER VPS_SSH_PRIVATE_KEY VPS_KNOWN_HOSTS; do
             if [ -z "${!var:-}" ]; then
-              echo "::error::Missing required secret: $var — skipping reseed"
+              echo "::error::Missing required secret: $var"
               exit 1
             fi
           done
@@ -132,42 +72,94 @@ jobs:
           printf '%s\n' "${{ secrets.VPS_KNOWN_HOSTS }}" > ~/.ssh/known_hosts
           chmod 0644 ~/.ssh/known_hosts
 
-      - name: Pull latest docs/ on VPS and force-reseed chat corpus
-        # The chat handler in mcp/ recalls from the on-disk corpus, which is
-        # built from the docs/ tree at server boot. The seed idempotency check
-        # (post-fix) is artifact-mtime-aware, so `git pull` followed by
-        # `MNEMONIC_FORCE_RESEED=1`-gated restart guarantees a fresh corpus.
+      - name: Pull, rebuild webapp, optionally reseed chat
+        env:
+          # `inputs.reseed_chat_corpus` is undefined for push events; coerce
+          # to empty string and treat as "false" downstream.
+          RESEED_FLAG: ${{ inputs.reseed_chat_corpus || 'false' }}
+          # For `push` events with `docs/` in the paths filter we should also
+          # reseed automatically. Detect by inspecting the changed paths on
+          # the push event.
+          EVENT_NAME: ${{ github.event_name }}
         run: |
           set -euo pipefail
+
+          # Decide whether to also reseed. Manual dispatch obeys the toggle.
+          # Auto-push: reseed when any `docs/**` file is in the diff.
+          should_reseed="false"
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            if [ "$RESEED_FLAG" = "true" ]; then
+              should_reseed="true"
+            fi
+          elif [ "$EVENT_NAME" = "push" ]; then
+            # GitHub's paths filter on the trigger already gates the run to
+            # webapp/, core/, OR docs/ changes — so this job only runs when
+            # at least one of those touched. We still reseed only when
+            # docs/ specifically changed.
+            if git -C "$GITHUB_WORKSPACE" diff --name-only \
+                "${{ github.event.before }}" "${{ github.event.after }}" 2>/dev/null \
+                | grep -q '^docs/'; then
+              should_reseed="true"
+            fi
+          fi
+          echo "Will reseed chat corpus: $should_reseed"
+
           ssh -i ~/.ssh/deploy_ed25519 \
               -o IdentitiesOnly=yes \
               -o ConnectTimeout=15 \
               "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}" \
-              bash -s <<'REMOTE_EOF'
+              bash -s <<REMOTE_EOF
           set -euo pipefail
           cd /home/claude/monorepo
+
+          echo "::group::git pull"
           git fetch --quiet origin main
           git checkout --quiet main
           git reset --hard origin/main
+          git log --oneline -1 HEAD
+          echo "::endgroup::"
 
-          sudo sed -i '/^MNEMONIC_FORCE_RESEED=/d' /home/claude/mcp.env
-          echo "MNEMONIC_FORCE_RESEED=1" | sudo tee -a /home/claude/mcp.env >/dev/null
-          sudo systemctl restart mnemonic-mcp
-          sleep 6
-          sudo systemctl is-active mnemonic-mcp
-          sudo sed -i '/^MNEMONIC_FORCE_RESEED=/d' /home/claude/mcp.env
+          echo "::group::webapp build (npm install + npm run build)"
+          # Matches deployment.md §Deploy Steps step 3: cd webapp && npm install && npm run build
+          # The npm build chains \`build:wasm && tsc -b && vite build\` per webapp/package.json,
+          # so the WASM core is rebuilt from current core/ source — no Rust toolchain needed
+          # in CI runner (build runs on VPS).
+          cd webapp
+          npm install --no-audit --no-fund
+          npm run build
+          cd ..
+          echo "::endgroup::"
 
-          sudo journalctl -u mnemonic-mcp --no-pager -S '15 seconds ago' \
-            | grep -iE 'seed|protocol-knowledge|Identity:|listening' \
-            || true
+          # nginx auto-serves from webapp/dist — no service restart for the webapp.
+          ls -la webapp/dist/ | head -5
+
+          if [ "${should_reseed}" = "true" ]; then
+            echo "::group::force-reseed mnemonic-mcp chat corpus"
+            sudo sed -i '/^MNEMONIC_FORCE_RESEED=/d' /home/claude/mcp.env
+            echo "MNEMONIC_FORCE_RESEED=1" | sudo tee -a /home/claude/mcp.env >/dev/null
+            sudo systemctl restart mnemonic-mcp
+            sleep 12
+            sudo systemctl is-active mnemonic-mcp
+            sudo sed -i '/^MNEMONIC_FORCE_RESEED=/d' /home/claude/mcp.env
+            sudo journalctl -u mnemonic-mcp --no-pager -S '20 seconds ago' \
+              | grep -iE 'RAG seeding|signed [0-9]+ chunks|RAG seeding complete|listening' \
+              || true
+            echo "::endgroup::"
+          fi
           REMOTE_EOF
 
-      - name: Verify chat returns a context-grounded answer
+      - name: Smoke — webapp + chat both responsive
+        # nginx serves both, so a single failure mode (502 / 503) would be
+        # caught by either curl. /chat is the deeper check because it
+        # exercises the just-(re)built WASM if docs/ changed AND the MCP
+        # backend with the freshly-seeded corpus.
         run: |
           set -euo pipefail
-          payload='{"message":"What is the Mnemonic Protocol?","session_id":"reseed-smoke"}'
-          response=$(curl -fsS --max-time 30 -X POST \
-            "https://mcp.mnemonik.xyz/chat" \
+          # Webapp HTML root
+          curl -fsS --max-time 10 -o /dev/null -w "GET / → HTTP %{http_code}\n" https://mnemonik.xyz/
+          # Chat (RAG round-trip)
+          payload='{"message":"What is the Mnemonic Protocol?","session_id":"webapp-smoke"}'
+          response=$(curl -fsS --max-time 30 -X POST https://mnemonik.xyz/chat \
             -H 'Content-Type: application/json' \
             -d "$payload")
           echo "$response" | jq .
