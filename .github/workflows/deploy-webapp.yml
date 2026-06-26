@@ -41,7 +41,8 @@ permissions:
 concurrency:
   group: deploy-webapp-${{ github.ref }}
   cancel-in-progress: true
-
+env:
+  WEBAPP_URL: https://mnemonik.xyz
 jobs:
   build-and-publish:
     name: Build WASM + Vite + publish to Cloudflare Pages
@@ -167,7 +168,7 @@ jobs:
           set -euo pipefail
           payload='{"message":"What is the Mnemonic Protocol?","session_id":"reseed-smoke"}'
           response=$(curl -fsS --max-time 30 -X POST \
-            "https://mcp.mnemonik.xyz/chat" \
+            "$WEBAPP_URL/chat" \
             -H 'Content-Type: application/json' \
             -d "$payload")
           echo "$response" | jq .
