@@ -40,8 +40,12 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
-      - name: Install build deps (g++ for fastembed local-embed)
-        run: sudo apt-get update && sudo apt-get install -y g++
+      # g++ builds fastembed's `local-embed`. `libdbus-1-dev pkg-config` are
+      # for the `keyring` crate's secret-service backend, which transitively
+      # pulls in `libdbus-sys` — its build script panics without the dbus-1
+      # system lib + pkg-config (mirrors the deps in ci.yml).
+      - name: Install build deps (g++ for fastembed, libdbus-1 for keyring)
+        run: sudo apt-get update && sudo apt-get install -y g++ libdbus-1-dev pkg-config
       - name: Build mnemonic-mcp + mint-test-jwt
         run: |
           cargo build -p mnemonic-mcp --features local-embed --bin mnemonic-mcp
