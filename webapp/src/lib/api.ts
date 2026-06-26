@@ -3,14 +3,14 @@
 // Configurable for e2e tests + local dev. Parallels the pattern in
 // Sign.tsx / Consent.tsx. Override via Vite env:
 //   VITE_MCP_BASE=http://localhost:3000 npm run dev
-// In production the default `https://mcp.mnemonik.xyz` is used, which lets
-// the static webapp be hosted anywhere (Cloudflare Pages, GitHub Pages,
-// any CDN) while the API stays on the VPS.
-// Empty string ("") = same-origin (current legacy behaviour when the
-// webapp is co-served by nginx on the same domain as the MCP server).
+// Default is "" (same-origin): the production webapp is co-served by nginx
+// on the same domain as the MCP server (VPS-served stack, PR #175), which
+// proxies `/chat`, `/mcp`, `/download-knowledge` to the backend. A non-empty
+// base (e.g. https://mcp.mnemonik.xyz) makes these cross-origin and, without
+// matching CORS/DNS, fails with a network error -- set VITE_MCP_BASE only
+// when the webapp is hosted on a different origin than the API.
 export const MCP_BASE: string =
-  (import.meta.env?.VITE_MCP_BASE as string | undefined) ??
-  "https://mcp.mnemonik.xyz";
+  (import.meta.env?.VITE_MCP_BASE as string | undefined) ?? "";
 
 export interface ChatRequest {
   message: string;
