@@ -736,12 +736,40 @@ impl AttestationStore for SqliteStore {
         // (`mcp/src/seed.rs:313`) and no other tag system uses that exact
         // string. If a future tag is introduced that contains it as a
         // substring, this query needs to widen to a JSON_EXTRACT predicate.
-        let affected = self.conn.execute(
+        //
+        // Delete in dependency order to avoid `FOREIGN KEY constraint failed`:
+        // `memory_embeddings.attestation_id` has a FK into `attestations`.
+        // `attestation_costs` has a FK too (full mode only — empty on
+        // local-only deploys, but the DELETE is cheap either way).
+        // Discovered live on prod 2026-06-26: the original single-statement
+        // DELETE was blocked by the embeddings FK; the seed code WARN-logged
+        // and continued, leaving stale chunks alongside the fresh corpus.
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            "DELETE FROM memory_embeddings \
+             WHERE attestation_id IN (\
+               SELECT attestation_id FROM attestations \
+               WHERE owner_pubkey = ?1 \
+                 AND tags LIKE '%\"protocol-knowledge\"%'\
+             )",
+            params![owner_pubkey],
+        )?;
+        tx.execute(
+            "DELETE FROM attestation_costs \
+             WHERE attestation_id IN (\
+               SELECT attestation_id FROM attestations \
+               WHERE owner_pubkey = ?1 \
+                 AND tags LIKE '%\"protocol-knowledge\"%'\
+             )",
+            params![owner_pubkey],
+        )?;
+        let affected = tx.execute(
             "DELETE FROM attestations \
              WHERE owner_pubkey = ?1 \
                AND tags LIKE '%\"protocol-knowledge\"%'",
             params![owner_pubkey],
         )?;
+        tx.commit()?;
         Ok(affected)
     }
 

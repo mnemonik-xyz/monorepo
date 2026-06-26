@@ -398,13 +398,24 @@ pub async fn run(state: &McpState) -> Result<()> {
             // `sign_memory_inline` guard permits it. This is the intended
             // server-identity self-authored path (design §21 landmine note).
             //
-            // T2: seeding never carries an explicit `mode` field — it
-            // resolves to env-var fallback (`explicit = false`) so the
-            // routing rule in `sign_memory` reads it as the legacy path,
-            // not as a "user opted into local". On a `full` deploy that's
-            // `Participate`; on `local` it's `Local`.
-            let seed_resolved = tools::resolve_write_mode(None, &state.storage_mode)
-                .expect("None always resolves to Ok per resolver contract");
+            // Seeding always uses `local` regardless of the operator's
+            // `STORAGE_MODE`. The protocol-knowledge corpus is operator-side
+            // RAG cache for the `/chat` endpoint — these rows are NEVER user
+            // memories that need durable Arweave/Solana anchoring. Forcing
+            // `local` here avoids paying chain costs on every server boot AND
+            // dodges a real failure mode discovered live 2026-06-25 on a
+            // `STORAGE_MODE=full` prod: the env-default path tried to
+            // `Participate`-anchor each seeded chunk, hit Arweave/Solana
+            // submission failure, and the whole seed errored out at chunk 0.
+            //
+            // The previous comment claimed "T2: seeding never carries an
+            // explicit `mode` field — env-var fallback path" but that only
+            // worked on `STORAGE_MODE=local` deploys; on `full` deploys the
+            // seed was silently broken.
+            let seed_mode_input = serde_json::Value::String("local".to_string());
+            let seed_resolved =
+                tools::resolve_write_mode(Some(&seed_mode_input), &state.storage_mode)
+                    .expect("'local' is a canonical input and always resolves to Ok");
             // Seeding never opts into soft-fall — RAG corpus seeding runs at
             // server boot under a server-keypair owner; an escalation to the
             // hosted endpoint would be self-loop and the corpus is always
