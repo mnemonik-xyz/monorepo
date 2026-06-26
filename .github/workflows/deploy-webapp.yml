@@ -42,7 +42,8 @@ permissions:
 concurrency:
   group: deploy-webapp-prod
   cancel-in-progress: true
-
+env:
+  WEBAPP_URL: https://mnemonik.xyz
 jobs:
   rebuild-webapp:
     name: Rebuild webapp on VPS
@@ -155,11 +156,9 @@ jobs:
         # backend with the freshly-seeded corpus.
         run: |
           set -euo pipefail
-          # Webapp HTML root
-          curl -fsS --max-time 10 -o /dev/null -w "GET / → HTTP %{http_code}\n" https://mnemonik.xyz/
-          # Chat (RAG round-trip)
-          payload='{"message":"What is the Mnemonic Protocol?","session_id":"webapp-smoke"}'
-          response=$(curl -fsS --max-time 30 -X POST https://mnemonik.xyz/chat \
+          payload='{"message":"What is the Mnemonic Protocol?","session_id":"reseed-smoke"}'
+          response=$(curl -fsS --max-time 30 -X POST \
+            "$WEBAPP_URL/chat" \
             -H 'Content-Type: application/json' \
             -d "$payload")
           echo "$response" | jq .
