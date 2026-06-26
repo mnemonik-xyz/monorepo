@@ -1,5 +1,17 @@
 /** API client for the Mnemonic Protocol chat backend. */
 
+// Configurable for e2e tests + local dev. Parallels the pattern in
+// Sign.tsx / Consent.tsx. Override via Vite env:
+//   VITE_MCP_BASE=http://localhost:3000 npm run dev
+// In production the default `https://mcp.mnemonik.xyz` is used, which lets
+// the static webapp be hosted anywhere (Cloudflare Pages, GitHub Pages,
+// any CDN) while the API stays on the VPS.
+// Empty string ("") = same-origin (current legacy behaviour when the
+// webapp is co-served by nginx on the same domain as the MCP server).
+export const MCP_BASE: string =
+  (import.meta.env?.VITE_MCP_BASE as string | undefined) ??
+  "https://mcp.mnemonik.xyz";
+
 export interface ChatRequest {
   message: string;
   session_id: string;
@@ -47,7 +59,7 @@ const BASE_DELAY_MS = 1000;
  * 5xx status codes. Non-retryable errors (400, 429) are thrown immediately.
  */
 export async function sendChatMessage(
-  request: ChatRequest
+  request: ChatRequest,
 ): Promise<ChatResponse> {
   let lastError: Error | null = null;
 
@@ -59,7 +71,7 @@ export async function sendChatMessage(
 
     let res: Response;
     try {
-      res = await fetch("/chat", {
+      res = await fetch(`${MCP_BASE}/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(request),
@@ -68,7 +80,7 @@ export async function sendChatMessage(
       lastError = new ChatApiError(
         "Network error. Check your connection.",
         "network_error",
-        0
+        0,
       );
       continue;
     }
@@ -104,7 +116,7 @@ export async function sendChatMessage(
     new ChatApiError(
       "Service temporarily unavailable. Try again later.",
       "service_unavailable",
-      503
+      503,
     )
   );
 }
@@ -118,7 +130,7 @@ export interface PublicStats {
 /** Fetches public traction counters from `GET /stats`. Returns null on error. */
 export async function fetchPublicStats(): Promise<PublicStats | null> {
   try {
-    const res = await fetch("/stats", { method: "GET" });
+    const res = await fetch(`${MCP_BASE}/stats`, { method: "GET" });
     if (!res.ok) return null;
     return (await res.json()) as PublicStats;
   } catch {
