@@ -76,9 +76,15 @@ jobs:
           mkdir -p /tmp/ci-rag
           ./target/debug/mnemonic-mcp --transport http --port 3000 &
           echo $! > /tmp/mcp.pid
-      - name: Wait for /health (30s timeout)
+      # The server runs RAG seeding (seed::run in main.rs) BEFORE it binds the
+      # HTTP listener: it walks docs/**/*.md and runs full sign_memory (fastembed
+      # embed + compress + CBOR + COSE sign) for every chunk. CI uses a fresh,
+      # empty RAG_CHUNK_DIR, so the artifact is always missing and the whole docs
+      # corpus is re-embedded from cold on each run — easily >30s. Allow 180s so
+      # /health (which only comes up post-seed) has time to bind.
+      - name: Wait for /health (180s timeout)
         run: |
-          for i in $(seq 1 30); do
+          for i in $(seq 1 180); do
             if curl -fsS http://localhost:3000/health >/dev/null 2>&1; then
               echo "/health up after ${i}s"
               exit 0
