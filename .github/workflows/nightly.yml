@@ -74,7 +74,10 @@ jobs:
           RAG_CHUNK_DIR: /tmp/ci-rag
         run: |
           mkdir -p /tmp/ci-rag
-          ./target/debug/mnemonic-mcp --transport http --port 3000 &
+          # Redirect to a log file: the server is backgrounded and outlives this
+          # step, so its stdout/stderr (incl. all RAG-seeding output) would
+          # otherwise be lost when the step's pipe closes.
+          ./target/debug/mnemonic-mcp --transport http --port 3000 >/tmp/mcp.log 2>&1 &
           echo $! > /tmp/mcp.pid
       # The server runs RAG seeding (seed::run in main.rs) BEFORE it binds the
       # HTTP listener: it walks docs/**/*.md and runs full sign_memory (fastembed
@@ -93,6 +96,9 @@ jobs:
           done
           echo "/health never came up"
           # Surface mcp logs for debugging.
+          echo "::group::mnemonic-mcp output (/tmp/mcp.log)"
+          cat /tmp/mcp.log 2>/dev/null || echo "(no log file)"
+          echo "::endgroup::"
           if [ -f /tmp/mcp.pid ]; then kill "$(cat /tmp/mcp.pid)" 2>/dev/null || true; fi
           exit 1
       - name: Validate MCP server with @modelcontextprotocol/inspector
