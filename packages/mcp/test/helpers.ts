@@ -61,7 +61,7 @@ export async function makeBinaryTarball(
  */
 export async function makeWrappedBinaryTarball(
   destTar: string,
-  artifactBase = "mnemonic-mcp-v0.2.4-x86_64-unknown-linux-gnu",
+  artifactBase = "mnemonic-mcp-v0.2.8-x86_64-unknown-linux-gnu",
   binaryName = "mnemonic-mcp",
   body = "#!/bin/sh\necho 'stub mnemonik-mcp'\n",
 ): Promise<{ tarPath: string; sha256: string; archiveName: string }> {

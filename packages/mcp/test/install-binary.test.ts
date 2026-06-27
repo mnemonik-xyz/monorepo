@@ -35,7 +35,11 @@ interface TestCtx {
 }
 
 let ctx: TestCtx;
-const TAG = "v0.2.4";
+// Must match `dist/binary-version.json` `tag` field — the shim reads the
+// manifest at runtime to construct the artifact URL, and these tests mock
+// only that URL. If you bump the manifest, bump this too (and the
+// `artifactBase` defaults in test/helpers.ts).
+const TAG = "v0.2.8";
 // Match the dist/binary-version.json darwin-arm64 mapping; tests force the
 // platform via stubbing process.platform.
 const ARTIFACT = `mnemonic-mcp-${TAG}-aarch64-apple-darwin.tar.gz`;
