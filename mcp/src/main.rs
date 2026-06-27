@@ -10,6 +10,7 @@ mod oauth;
 mod payment;
 mod pending;
 mod pricing;
+mod publish;
 mod seed;
 mod tools;
 
@@ -373,6 +374,14 @@ async fn main() -> anyhow::Result<()> {
         let quota = Quota::per_minute(NonZeroU32::new(10).unwrap());
         governor::RateLimiter::keyed(quota)
     };
+    // Publish rate limiter (webapp-rethink T9): 10 posts/min per authenticated
+    // identity, keyed on the caller pubkey rather than the IP.
+    let publish_limiter = {
+        use governor::Quota;
+        use std::num::NonZeroU32;
+        let quota = Quota::per_minute(NonZeroU32::new(10).unwrap());
+        governor::RateLimiter::keyed(quota)
+    };
 
     // ── LLM provider abstraction ────────────────────────────────────────────
     let llm_client = llm::LlmClient::new(
@@ -490,6 +499,7 @@ async fn main() -> anyhow::Result<()> {
         artifact_zip_path: std::sync::Mutex::new(None),
         ollama_client,
         chat_limiter,
+        publish_limiter,
         pending,
         bootstrap_tickets,
         bootstrap_server_x25519_secret,
@@ -794,6 +804,11 @@ async fn run_http(
     // (`initialize` / `tools/list`) does not apply — every /api/* request
     // requires a valid JWT.
     let api_subrouter = Router::new()
+        // Micropub-shaped agent publish (webapp-rethink T9, Decision 5). Authed
+        // via the same `bearer_auth_middleware` layered below — anonymous POST
+        // /blog → 401. GET /blog + GET /blog/:slug stay public on the base
+        // router; merging combines them by method.
+        .route("/blog", post(api::blog_publish_handler))
         .route(
             "/api/pending/{correlation_id}",
             axum::routing::get(api::get_pending_handler),

@@ -212,14 +212,17 @@ async fn test_stdio_tools_list_sign_memory_recall_without_oauth() {
         "initialize missing protocolVersion: {resp1}"
     );
 
-    // 2. tools/list — exactly 5 tools.
+    // 2. tools/list — the full tool inventory (8 as of webapp-rethink T9:
+    //    the original 5 + check_pending + request_public_write_confirmation +
+    //    mnemonic_publish_post). Assert `>= 8` so the test is forward-
+    //    compatible with future tool additions while still catching a drop.
     let resp2 = must_round_trip!(
         REQ_TIMEOUT,
         serde_json::json!({"jsonrpc": "2.0", "method": "tools/list", "id": 2}),
         "tools/list"
     );
     let tools = resp2["result"]["tools"].as_array().expect("tools array");
-    assert_eq!(tools.len(), 5, "expected 5 tools, got: {resp2}");
+    assert!(tools.len() >= 8, "expected >= 8 tools, got: {resp2}");
 
     // 3. mnemonic_whoami — exercises an actual tool that doesn't need
     //    embedding (proves the dispatcher is wired). `whoami` reads the

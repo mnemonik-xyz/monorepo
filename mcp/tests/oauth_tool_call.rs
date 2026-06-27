@@ -45,6 +45,8 @@ const EXPECTED_TOOLS: &[&str] = &[
     "mnemonic_recall",
     "mnemonic_check_pending",
     "request_public_write_confirmation",
+    // webapp-rethink T9 — agent-native publishing (Decision 5).
+    "mnemonic_publish_post",
 ];
 
 fn build_router(state: Arc<McpState>, oauth_state: Arc<OAuthState>) -> Router {
@@ -97,7 +99,13 @@ async fn test_tools_list_6_tools_and_sign_memory_returns_awaiting_signature() {
     .await;
     assert_eq!(s1, StatusCode::OK, "tools/list failed: {body1}");
     let tools = body1["result"]["tools"].as_array().expect("tools is array");
-    assert_eq!(tools.len(), 7, "want 7 tools, got {}: {body1}", tools.len());
+    assert_eq!(
+        tools.len(),
+        EXPECTED_TOOLS.len(),
+        "want {} tools, got {}: {body1}",
+        EXPECTED_TOOLS.len(),
+        tools.len()
+    );
     let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
     for expected in EXPECTED_TOOLS {
         assert!(

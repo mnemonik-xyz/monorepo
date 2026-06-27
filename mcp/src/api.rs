@@ -26,7 +26,7 @@ use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 use axum::{
-    body::Body,
+    body::{Body, Bytes},
     extract::{Path, Query, State},
     http::{header, HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
@@ -48,6 +48,7 @@ use uuid::Uuid;
 use crate::mcp::McpState;
 use crate::oauth::Claims;
 use crate::pending::PendingError;
+use crate::publish::{PublishError, PublishInput};
 
 /// `GET /api/pending/{correlation_id}` — webapp fetches the unsigned
 /// canonical-CBOR bytes for the user to sign.
@@ -1563,6 +1564,207 @@ fn blog_post_not_found(slug: &str) -> Response {
         Json(serde_json::json!({ "error": "blog post not found", "slug": slug })),
     )
         .into_response()
+}
+
+// ── Agent publish surface — POST /blog (webapp-rethink T9, Decision 5) ────────
+//
+// W3C-Micropub-shaped authenticated publish endpoint. Sits behind
+// `oauth::bearer_auth_middleware` in `main.rs` (anonymous → 401 there); the
+// handler ALSO checks for `Claims` so it is self-contained. Accepts BOTH
+// `application/json` and `application/x-www-form-urlencoded` (Micropub) bodies
+// and funnels them through the SAME `publish::publish_post` pipeline as the
+// `mnemonic_publish_post` MCP tool — one signing/persistence path, no drift.
+// JSON only on the way out (Decision 9 — the mcp server renders no HTML).
+
+/// `POST /blog` — Micropub-shaped agent publish. Authenticated (OAuth2 Bearer /
+/// Ed25519). On success returns `201 Created` with a `Location: /blog/:slug`
+/// header and `{ post }` (the same shape `GET /blog/:slug` serves).
+pub async fn blog_publish_handler(
+    State(state): State<Arc<McpState>>,
+    claims: Option<Extension<Claims>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    // Auth (Decision 5): in production the bearer-auth middleware validates the
+    // JWT and inserts `Claims` before this handler runs (anonymous → 401 there).
+    // This explicit check is defence-in-depth AND makes the handler reject an
+    // unauthenticated request on its own — never publish anonymously.
+    let Some(Extension(claims)) = claims else {
+        return error_resp(
+            StatusCode::UNAUTHORIZED,
+            "authentication required to publish",
+        );
+    };
+
+    let content_type = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+
+    let input = if content_type.contains("application/x-www-form-urlencoded") {
+        parse_micropub_form(&body)
+    } else if content_type.contains("application/json") || content_type.trim().is_empty() {
+        // Default to JSON when the content-type is absent (programmatic agents
+        // sometimes omit it); a malformed body is reported as 400 below.
+        match parse_publish_json(&body) {
+            Ok(i) => i,
+            Err(e) => return error_resp(StatusCode::BAD_REQUEST, &e),
+        }
+    } else {
+        return error_resp(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "Content-Type must be application/json or application/x-www-form-urlencoded",
+        );
+    };
+
+    match crate::publish::publish_post(&state, &claims.sub, input) {
+        Ok(post) => {
+            let location = format!("/blog/{}", post.slug);
+            let mut resp = (
+                StatusCode::CREATED,
+                Json(serde_json::json!({ "post": post })),
+            )
+                .into_response();
+            if let Ok(hv) = HeaderValue::from_str(&location) {
+                resp.headers_mut().insert(header::LOCATION, hv);
+            }
+            resp
+        }
+        Err(e) => blog_publish_error_response(e),
+    }
+}
+
+/// Map a [`PublishError`] to its HTTP response.
+fn blog_publish_error_response(e: PublishError) -> Response {
+    let status = match &e {
+        PublishError::InvalidInput(_) => StatusCode::BAD_REQUEST,
+        PublishError::RateLimited => StatusCode::TOO_MANY_REQUESTS,
+        PublishError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
+    };
+    error_resp(status, &e.message())
+}
+
+/// Parse a JSON publish body. Accepts the simple shape
+/// `{title, body_markdown, tags[], author?}` AND the W3C Micropub h-entry shape
+/// `{type:["h-entry"], properties:{name:[..], content:[..], category:[..]}}`.
+/// Field validation (required/empty/length) happens downstream in
+/// `publish::publish_post`, so this layer only extracts.
+fn parse_publish_json(body: &[u8]) -> Result<PublishInput, String> {
+    let v: serde_json::Value =
+        serde_json::from_slice(body).map_err(|e| format!("invalid JSON body: {e}"))?;
+
+    // Micropub h-entry: values live under `properties` as arrays.
+    if let Some(props) = v.get("properties").and_then(|p| p.as_object()) {
+        let props = serde_json::Value::Object(props.clone());
+        return Ok(PublishInput {
+            title: value_first_str(props.get("name")).unwrap_or_default(),
+            body_markdown: micropub_content(props.get("content")).unwrap_or_default(),
+            tags: value_to_str_vec(props.get("category")),
+            author: value_first_str(props.get("author")),
+        });
+    }
+
+    // Simple shape, tolerating Micropub-ish `name`/`content` aliases.
+    Ok(PublishInput {
+        title: v
+            .get("title")
+            .or_else(|| v.get("name"))
+            .and_then(|x| x.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        body_markdown: v
+            .get("body_markdown")
+            .or_else(|| v.get("content"))
+            .and_then(|x| x.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        tags: value_to_str_vec(v.get("tags").or_else(|| v.get("category"))),
+        author: v
+            .get("author")
+            .and_then(|x| x.as_str())
+            .map(|s| s.to_string()),
+    })
+}
+
+/// Parse an `application/x-www-form-urlencoded` Micropub body. Repeated
+/// `category` / `category[]` keys accumulate into the tag list (Micropub
+/// arrays). Control fields (`h`, `action`, `access_token`, …) are ignored —
+/// auth is the Bearer header, not a body field.
+fn parse_micropub_form(body: &[u8]) -> PublishInput {
+    let mut title = String::new();
+    let mut body_markdown = String::new();
+    let mut tags: Vec<String> = Vec::new();
+    let mut author: Option<String> = None;
+    for (k, val) in url::form_urlencoded::parse(body) {
+        match k.as_ref() {
+            "name" | "title" => title = val.into_owned(),
+            "content" | "body_markdown" => body_markdown = val.into_owned(),
+            "category" | "category[]" | "tags" | "tags[]" => {
+                let s = val.trim().to_string();
+                if !s.is_empty() {
+                    tags.push(s);
+                }
+            }
+            "author" => {
+                let s = val.into_owned();
+                if !s.trim().is_empty() {
+                    author = Some(s);
+                }
+            }
+            _ => {}
+        }
+    }
+    PublishInput {
+        title,
+        body_markdown,
+        tags,
+        author,
+    }
+}
+
+/// First string of a Micropub value: the value itself when a string, or the
+/// first string element when an array.
+fn value_first_str(v: Option<&serde_json::Value>) -> Option<String> {
+    match v {
+        Some(serde_json::Value::String(s)) => Some(s.clone()),
+        Some(serde_json::Value::Array(a)) => {
+            a.iter().find_map(|x| x.as_str().map(|s| s.to_string()))
+        }
+        _ => None,
+    }
+}
+
+/// Collect a Micropub value into a string vector: a single string becomes a
+/// one-element vec; an array yields each of its string elements.
+fn value_to_str_vec(v: Option<&serde_json::Value>) -> Vec<String> {
+    match v {
+        Some(serde_json::Value::String(s)) => vec![s.clone()],
+        Some(serde_json::Value::Array(a)) => a
+            .iter()
+            .filter_map(|x| x.as_str().map(|s| s.to_string()))
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Extract the Micropub `content` property. Handles a bare string, an array of
+/// strings, and the object forms `[{"markdown": "…"}]` / `[{"html": "…"}]` /
+/// `[{"value": "…"}]` that some Micropub clients send.
+fn micropub_content(v: Option<&serde_json::Value>) -> Option<String> {
+    match v {
+        Some(serde_json::Value::String(s)) => Some(s.clone()),
+        Some(serde_json::Value::Array(a)) => a.iter().find_map(|item| match item {
+            serde_json::Value::String(s) => Some(s.clone()),
+            serde_json::Value::Object(o) => o
+                .get("markdown")
+                .or_else(|| o.get("value"))
+                .or_else(|| o.get("html"))
+                .and_then(|x| x.as_str())
+                .map(|s| s.to_string()),
+            _ => None,
+        }),
+        _ => None,
+    }
 }
 
 /// Uniform 404 body for every "ticket missing / expired / consumed" path so a

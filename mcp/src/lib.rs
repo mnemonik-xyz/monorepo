@@ -28,6 +28,7 @@ pub mod oauth;
 pub mod payment;
 pub mod pending;
 pub mod pricing;
+pub mod publish;
 pub mod seed;
 /// Markdown parser shared between `build.rs` (which projects skill
 /// manifests into compile-time string constants) and the
