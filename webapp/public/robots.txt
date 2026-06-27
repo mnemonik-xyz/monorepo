@@ -1,0 +1,11 @@
+# Mnemonic Protocol — crawl policy
+# The public surfaces (landing, ledger, analytics, blog) are meant to be
+# indexed. The auth/signing surfaces are per-request flows with no public
+# content, so compliant crawlers are kept off them (defense in depth — they are
+# also absent from the sitemap). The sitemap lists the canonical public routes.
+User-agent: *
+Allow: /
+Disallow: /sign/
+Disallow: /oauth/
+
+Sitemap: https://mnemonik.xyz/sitemap.xml

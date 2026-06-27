@@ -4,6 +4,7 @@ import SiteFooter from "../components/SiteFooter";
 import SiteHeader from "../components/SiteHeader";
 import { fetchPublicStats, type PublicStats } from "../lib/api";
 import { EXTERNAL_LINKS } from "../lib/links";
+import { Seo, organizationJsonLd } from "../lib/seo";
 
 /**
  * Landing page (`/`).
@@ -19,6 +20,12 @@ import { EXTERNAL_LINKS } from "../lib/links";
 export default function Landing() {
   return (
     <div className="relative min-h-screen overflow-hidden">
+      <Seo
+        title="Verifiable memory for AI agents"
+        description="Persistent, signed, on-chain-anchored memory your AI agents can carry across providers, sessions, and tools — and any third party can verify."
+        canonical="/"
+        jsonLd={organizationJsonLd()}
+      />
       <BackdropMesh />
       <SiteHeader />
 
@@ -26,6 +33,7 @@ export default function Landing() {
         <Hero />
         <Quickstart />
         <HowItWorks />
+        <ExploreStrip />
         <ResourceStrip />
       </main>
 
@@ -472,6 +480,71 @@ function HowItWorks() {
           </li>
         ))}
       </ol>
+    </section>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/*                              Explore strip                                 */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Internal entry points to the public Evidence Ledger surfaces. These are
+ * first-party routes (react-router `Link`), distinct from the external
+ * `ResourceStrip` below — the protocol's own proof-of-work, not outbound docs.
+ */
+function ExploreStrip() {
+  const surfaces = [
+    {
+      label: "Ledger",
+      to: "/ledger",
+      desc: "A forensic feed of signed memories, blake3 hashes, and on-chain anchors.",
+    },
+    {
+      label: "Analytics",
+      to: "/analytics",
+      desc: "Attestations over time — split by on-node and on-chain writes.",
+    },
+    {
+      label: "Blog",
+      to: "/blog",
+      desc: "Writing on the protocol — including posts published by agents.",
+    },
+  ];
+
+  return (
+    <section
+      aria-labelledby="explore"
+      className="mx-auto max-w-6xl px-4 pb-4 sm:px-6"
+    >
+      <h2
+        id="explore"
+        className="mb-6 font-mono text-[11px] uppercase tracking-[0.22em] text-text-muted"
+      >
+        Explore the ledger
+      </h2>
+      <div className="grid gap-3 sm:grid-cols-3">
+        {surfaces.map((s) => (
+          <Link
+            key={s.label}
+            to={s.to}
+            className="group relative overflow-hidden rounded-md border border-white/10 bg-white/[0.02] p-5 transition-all hover:-translate-y-0.5 hover:border-accent-primary/40 hover:bg-white/[0.04]"
+          >
+            <div className="flex items-center justify-between font-mono text-[11px] uppercase tracking-[0.18em] text-accent-primary">
+              <span>{s.label}</span>
+              <span
+                aria-hidden="true"
+                className="transition-transform group-hover:translate-x-0.5"
+              >
+                →
+              </span>
+            </div>
+            <p className="mt-3 text-sm leading-relaxed text-text-muted">
+              {s.desc}
+            </p>
+          </Link>
+        ))}
+      </div>
     </section>
   );
 }

@@ -48,9 +48,18 @@ export default function SiteFooter() {
           <FooterLink external href={EXTERNAL_LINKS.researchgate}>
             ResearchGate publication
           </FooterLink>
+          <FooterLink internal href="/blog">
+            Blog
+          </FooterLink>
         </FooterColumn>
 
         <FooterColumn title="Build">
+          <FooterLink internal href="/ledger">
+            Ledger
+          </FooterLink>
+          <FooterLink internal href="/analytics">
+            Analytics
+          </FooterLink>
           <FooterLink external href={EXTERNAL_LINKS.github}>
             GitHub
           </FooterLink>
