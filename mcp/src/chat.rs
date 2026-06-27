@@ -552,6 +552,7 @@ mod handler_tests {
                 .timeout(std::time::Duration::from_secs(2))
                 .build()
                 .expect("reqwest hosted client"),
+            blog_rebuild_hook: None,
         })
     }
 

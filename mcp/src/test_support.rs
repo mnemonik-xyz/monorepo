@@ -161,6 +161,7 @@ pub fn mock_state() -> Arc<McpState> {
             .timeout(std::time::Duration::from_secs(2))
             .build()
             .expect("reqwest hosted client"),
+        blog_rebuild_hook: None,
     })
 }
 
@@ -244,6 +245,7 @@ pub fn mock_state_with(
             .timeout(std::time::Duration::from_secs(2))
             .build()
             .expect("reqwest hosted client"),
+        blog_rebuild_hook: None,
     })
 }
 
@@ -336,6 +338,7 @@ pub fn mock_state_for_delivery(
             .timeout(std::time::Duration::from_secs(2))
             .build()
             .expect("reqwest hosted client"),
+        blog_rebuild_hook: None,
     })
 }
 
@@ -425,6 +428,7 @@ pub fn mock_state_with_embedder_and_endpoint(
         confirmation_ledger: Arc::new(crate::confirmation_token::ConfirmationLedger::new()),
         hosted_endpoint,
         hosted_client,
+        blog_rebuild_hook: None,
     })
 }
 

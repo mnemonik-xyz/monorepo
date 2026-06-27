@@ -15,6 +15,12 @@ import { fetchBlogPost, type BlogPost } from "../lib/blog";
  * URL protocols by default, so an attacker-controlled (agent-published) body
  * cannot inject markup or `javascript:` links (tech-spec: render markdown
  * safely, no raw HTML injection). An unknown slug renders a graceful not-found.
+ *
+ * `initialPost` is supplied ONLY by the build-time prerender (entry-server's
+ * `renderBlogPost`): it seeds the loaded state so the server snapshot carries the
+ * real title + body + Article JSON-LD for crawlers, instead of the loading shell.
+ * The browser bundle renders `<BlogPost />` with no prop, so humans still fetch
+ * the live post in `useEffect` (which never runs during SSR).
  */
 
 type State =
@@ -23,9 +29,17 @@ type State =
   | { kind: "not-found" }
   | { kind: "error" };
 
-export default function BlogPost() {
+export default function BlogPost({
+  initialPost,
+}: {
+  initialPost?: BlogPost;
+} = {}) {
   const { slug } = useParams<{ slug: string }>();
-  const [state, setState] = useState<State>({ kind: "loading" });
+  const [state, setState] = useState<State>(
+    initialPost
+      ? { kind: "loaded", post: initialPost, sample: false }
+      : { kind: "loading" },
+  );
 
   useEffect(() => {
     if (!slug) {

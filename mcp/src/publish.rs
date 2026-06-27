@@ -301,12 +301,12 @@ pub fn publish_post(
             .map_err(|e| PublishError::Internal(format!("upsert_blog_post failed: {e}")))?;
     }
 
-    // ── Rebuild-hook seam (Task 13) ──────────────────────────────────────────
-    // On publish success a future change will fire an optional, best-effort
-    // ping to `BLOG_REBUILD_HOOK` (env) so the standalone webapp re-prerenders
-    // `/blog/:slug` for SEO freshness. Deliberately NOT implemented here — Task
-    // 13 owns the hook (and its SSRF/allowlist + non-blocking-spawn concerns).
-    // The created post is returned regardless of any future hook outcome.
+    // ── Rebuild-hook (Task 13) ───────────────────────────────────────────────
+    // On publish success fire an optional, best-effort, NON-BLOCKING ping to
+    // `BLOG_REBUILD_HOOK` so the standalone webapp re-prerenders `/blog/:slug`
+    // for SEO freshness. The created post is returned regardless of the hook's
+    // outcome — the JoinHandle is intentionally dropped (fire-and-forget).
+    fire_rebuild_hook(state.blog_rebuild_hook.as_deref(), &state.hosted_client);
 
     Ok(BlogPost {
         slug,
@@ -318,6 +318,46 @@ pub fn publish_post(
         content_hash,
         published_at: now,
     })
+}
+
+/// Per-request timeout for the rebuild ping. Short so a slow/hung deploy
+/// webhook never ties up a spawned task for long; the publish response has
+/// already been returned regardless.
+const REBUILD_HOOK_TIMEOUT_SECS: u64 = 5;
+
+/// POST the rebuild ping to `url`. Errors are swallowed: the hook is a
+/// best-effort freshness signal, never part of the publish contract.
+async fn send_rebuild_ping(client: reqwest::Client, url: String) {
+    if let Err(e) = client
+        .post(&url)
+        .timeout(std::time::Duration::from_secs(REBUILD_HOOK_TIMEOUT_SECS))
+        .send()
+        .await
+    {
+        tracing::debug!("blog rebuild hook ping failed (ignored): {e}");
+    }
+}
+
+/// Fire the best-effort, non-blocking blog-rebuild ping.
+///
+/// No-op (returns `None`) when `hook_url` is `None`/empty/whitespace, or when
+/// called outside a Tokio runtime (keeps [`publish_post`] callable from sync
+/// unit tests). Otherwise spawns [`send_rebuild_ping`] on the current runtime
+/// and returns the `JoinHandle` — production drops it (fire-and-forget); tests
+/// can await it to observe delivery. SSRF posture: the shared `hosted_client`
+/// pins `reqwest::redirect::Policy::none()`, so a deploy webhook cannot 302 the
+/// ping to an unrelated host; the URL itself is operator-supplied via env, not
+/// attacker input.
+fn fire_rebuild_hook(
+    hook_url: Option<&str>,
+    client: &reqwest::Client,
+) -> Option<tokio::task::JoinHandle<()>> {
+    let url = hook_url?.trim();
+    if url.is_empty() {
+        return None;
+    }
+    let handle = tokio::runtime::Handle::try_current().ok()?;
+    Some(handle.spawn(send_rebuild_ping(client.clone(), url.to_string())))
 }
 
 #[cfg(test)]
@@ -378,4 +418,60 @@ mod tests {
         assert!(result.valid, "POST_V1 COSE must verify");
         assert_eq!(result.signer, identity::pubkey_base58(&kp));
     }
+
+    // ── Rebuild-hook (Task 13) ───────────────────────────────────────────────
+
+    #[test]
+    fn fire_rebuild_hook_noop_when_unset_or_empty() {
+        // Unset / empty / whitespace-only URL is a no-op regardless of runtime
+        // (the empty-check short-circuits before any spawn).
+        let client = reqwest::Client::new();
+        assert!(fire_rebuild_hook(None, &client).is_none());
+        assert!(fire_rebuild_hook(Some(""), &client).is_none());
+        assert!(fire_rebuild_hook(Some("   "), &client).is_none());
+    }
+
+    #[test]
+    fn fire_rebuild_hook_noop_outside_runtime() {
+        // A set URL but no Tokio runtime in scope: must not panic, returns None
+        // (keeps publish_post callable from plain sync unit tests).
+        let client = reqwest::Client::new();
+        assert!(fire_rebuild_hook(Some("http://127.0.0.1:9/hook"), &client).is_none());
+    }
+
+    #[tokio::test]
+    async fn fire_rebuild_hook_pings_capture_server_when_set() {
+        // Fires exactly one POST against a local capture server when the hook is
+        // configured. Awaiting the returned handle proves the ping was spawned
+        // (non-blocking) and completed.
+        let server = httpmock::MockServer::start();
+        let hook = server.mock(|when, then| {
+            when.method(httpmock::Method::POST).path("/rebuild");
+            then.status(200);
+        });
+        let client = reqwest::Client::new();
+        let url = server.url("/rebuild");
+        let handle = fire_rebuild_hook(Some(&url), &client).expect("spawns within runtime");
+        handle.await.expect("ping task joins");
+        hook.assert_calls(1);
+    }
+
+    #[tokio::test]
+    async fn fire_rebuild_hook_best_effort_on_unreachable() {
+        // An unreachable target: the spawned task swallows the send error and
+        // still joins cleanly — the failure never propagates to the caller.
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_millis(200))
+            .build()
+            .expect("client");
+        let handle = fire_rebuild_hook(Some("http://127.0.0.1:9/nope"), &client)
+            .expect("spawns within runtime");
+        handle.await.expect("ping task joins despite send error");
+    }
+
+    // The hook-unset publish path (fire_rebuild_hook -> None, no-op, publish still
+    // succeeds) is exercised end-to-end by the `POST /blog` integration tests in
+    // tests/, whose `McpState` carries `blog_rebuild_hook: None` and flows through
+    // `publish_post` — so it is not duplicated as a unit test here (publish.rs is
+    // also compiled into the binary crate, which has no `test_support` module).
 }

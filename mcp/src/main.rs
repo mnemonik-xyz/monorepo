@@ -462,6 +462,26 @@ async fn main() -> anyhow::Result<()> {
         .build()
         .expect("failed to build reqwest client for hosted soft-fall proxy");
 
+    // Blog rebuild webhook (Task 13). Optional, operator-supplied via env. Only
+    // accept absolute http(s) URLs; anything else is ignored with a warning so a
+    // typo can't silently disable freshness OR become a surprising request
+    // target. The ping itself is best-effort and non-blocking (see publish.rs).
+    let blog_rebuild_hook = std::env::var("BLOG_REBUILD_HOOK")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .and_then(|url| {
+            if url.starts_with("https://") || url.starts_with("http://") {
+                tracing::info!("blog rebuild hook enabled");
+                Some(url)
+            } else {
+                tracing::warn!(
+                    "ignoring BLOG_REBUILD_HOOK — only absolute http:// or https:// URLs are accepted"
+                );
+                None
+            }
+        });
+
     // EVM x402 rail (Wave 1): enabled only when all three knobs are set.
     let evm_payment = if !cfg.evm_rpc_url.is_empty()
         && !cfg.evm_usdc_token.is_empty()
@@ -511,6 +531,7 @@ async fn main() -> anyhow::Result<()> {
         confirmation_ledger: confirmation_ledger.clone(),
         hosted_endpoint,
         hosted_client,
+        blog_rebuild_hook,
     });
 
     // Spawn the confirmation-ledger eviction loop. Held strong reference

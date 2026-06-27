@@ -827,8 +827,17 @@ pub struct McpState {
     /// [`Self::hosted_endpoint`]. Pinned `Policy::none()` on redirects so
     /// a compromised hosted operator cannot 302 us to an unrelated host
     /// (the env-var redirection vector Decision 12 closes for the
-    /// pre-connect side; this closes the mid-connection side).
+    /// pre-connect side; this closes the mid-connection side). Also reused by
+    /// the best-effort blog-rebuild ping (Task 13) — same `Policy::none()`
+    /// SSRF posture.
     pub hosted_client: reqwest::Client,
+
+    /// Optional deploy-webhook URL pinged best-effort, non-blocking after a
+    /// successful publish so the standalone webapp re-prerenders `/blog/:slug`
+    /// for SEO freshness (webapp-rethink Task 13 / Decision 4). `None` (env
+    /// `BLOG_REBUILD_HOOK` unset) = no-op; publish behaviour is identical with
+    /// or without it. The ping never blocks or fails the publish response.
+    pub blog_rebuild_hook: Option<String>,
 }
 
 // Safety: We only access store through std::sync::Mutex (short critical sections, no await)
@@ -1876,6 +1885,7 @@ mod transport_tests {
                 .timeout(std::time::Duration::from_secs(2))
                 .build()
                 .expect("reqwest hosted client"),
+            blog_rebuild_hook: None,
         })
     }
 

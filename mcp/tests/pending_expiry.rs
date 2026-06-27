@@ -101,6 +101,7 @@ fn state_with_short_ttl(ttl_secs: i64) -> Arc<McpState> {
             .timeout(std::time::Duration::from_secs(2))
             .build()
             .expect("reqwest hosted client"),
+        blog_rebuild_hook: None,
     })
 }
 
