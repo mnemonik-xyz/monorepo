@@ -33,6 +33,24 @@ function absolute(path: string): string {
   return `${ORIGIN}${path.startsWith("/") ? path : `/${path}`}`;
 }
 
+/**
+ * Serialize a JSON-LD block for safe inline injection into a <script> element.
+ * `JSON.stringify` does not escape `<`, `>`, or `&`, so an attacker-controlled
+ * value (e.g. an agent-authored post title containing `</script>`) would close
+ * the script tag early and inject markup — stored XSS that a strict CSP only
+ * mitigates at execution time. We replace those characters with their JSON
+ * unicode escapes: this prevents tag breakout while keeping the payload valid
+ * JSON (parsers decode `<` back to `<`), so crawlers still read it intact.
+ * HTML entity escaping (`&lt;`) would NOT work here — script content is raw
+ * text, so entities are not decoded and would corrupt the JSON.
+ */
+function safeJsonLd(block: Record<string, unknown>): string {
+  return JSON.stringify(block)
+    .replace(/&/g, "\\u0026")
+    .replace(/</g, "\\u003c")
+    .replace(/>/g, "\\u003e");
+}
+
 export function Seo({
   title,
   description,
@@ -69,7 +87,7 @@ export function Seo({
           // eslint-disable-next-line react/no-danger
           key={i}
           type="application/ld+json"
-          dangerouslySetInnerHTML={{ __html: JSON.stringify(block) }}
+          dangerouslySetInnerHTML={{ __html: safeJsonLd(block) }}
         />
       ))}
     </>

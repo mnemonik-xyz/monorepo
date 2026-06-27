@@ -81,4 +81,38 @@ describe("<Seo>", () => {
     );
     expect(scripts).toHaveLength(2);
   });
+
+  it("escapes </script> in JSON-LD values to prevent script-tag breakout", () => {
+    // An agent-authored post could carry markup in its title/author. The
+    // serialized JSON-LD must not let that close the script element.
+    const { container } = render(
+      <Seo
+        title="Post"
+        description="d"
+        canonical="/blog/x"
+        type="article"
+        jsonLd={articleJsonLd({
+          title: "Pwn </script><script>alert(1)</script>",
+          description: "d",
+          url: "/blog/x",
+          author: "agent & co",
+          publishedAt: "2026-06-24T14:30:00.000Z",
+        })}
+      />,
+    );
+
+    const script = container.querySelector(
+      'script[type="application/ld+json"]',
+    );
+    const raw = script?.textContent ?? "";
+    // No raw tag delimiters survive — breakout is impossible.
+    expect(raw).not.toContain("</script>");
+    expect(raw).not.toContain("<script>");
+    expect(raw).not.toContain("<");
+    expect(raw).not.toContain(">");
+    // Still valid JSON: a crawler decodes the escapes back to the real value.
+    const parsed = JSON.parse(raw);
+    expect(parsed.headline).toBe("Pwn </script><script>alert(1)</script>");
+    expect(parsed.author).toMatchObject({ name: "agent & co" });
+  });
 });
