@@ -139,7 +139,83 @@ pub fn prove(content_hashes: &[String], target_hex: &str) -> Option<([u8; 32], V
     while level.len() > 1 {
         // Sibling within the current level (if any). A promoted odd node has
         // no sibling at this level — it simply carries up.
-        if idx % 2 == 0 {
+        if idx.is_multiple_of(2) {
+            if idx + 1 < level.len() {
+                proof.push(ProofStep {
+                    sibling: level[idx + 1],
+                    sibling_is_right: true,
+                });
+            }
+        } else {
+            proof.push(ProofStep {
+                sibling: level[idx - 1],
+                sibling_is_right: false,
+            });
+        }
+        idx /= 2;
+        level = fold_level(&level);
+    }
+    Some((level[0], proof))
+}
+
+// -- Order-preserving variant (verifiable trajectories) --
+//
+// `commitment_root` / `prove` above commit to a *set* (sorted + deduped), which
+// is correct for recall completeness but WRONG for trajectories: the whole point
+// of a trajectory root is to prove *ordering*, so a reordered chain must produce
+// a different root. The functions below keep leaves in the GIVEN order (leaf
+// index = `seq`), never sort, never dedup. They reuse the same domain-separated
+// `leaf_hash` / `node_hash` / `fold_level`, so a single `verify` checks proofs
+// from either construction. This root is also the Arweave bundle manifest root:
+// the bundle lays its data items out in `seq` order, so the two coincide.
+//
+// These two constructions MUST NOT be unified (see
+// work/verifiable-trajectories/decisions.md) — doing so would silently break
+// ordering proofs.
+
+/// Build leaf hashes in the GIVEN order — NO sort, NO dedup. Returns `None` if
+/// any entry is malformed: unlike the set path, silently skipping a leaf would
+/// shift every later position and corrupt the ordering proof.
+fn ordered_leaf_hashes(content_hashes: &[String]) -> Option<Vec<[u8; 32]>> {
+    content_hashes
+        .iter()
+        .map(|h| parse_hex32(h).map(|raw| leaf_hash(&raw)))
+        .collect()
+}
+
+/// Order-preserving Merkle root over a trajectory's `seq`-ordered step hashes.
+/// Reordering the input changes the root (contrast [`commitment_root`]). The
+/// empty trajectory commits to [`empty_root`]; malformed input also yields
+/// [`empty_root`] (callers pass their own content hashes, which are well-formed
+/// by construction).
+pub fn trajectory_root(ordered_step_hashes: &[String]) -> [u8; 32] {
+    let Some(mut level) = ordered_leaf_hashes(ordered_step_hashes) else {
+        return empty_root();
+    };
+    if level.is_empty() {
+        return empty_root();
+    }
+    while level.len() > 1 {
+        level = fold_level(&level);
+    }
+    level[0]
+}
+
+/// Inclusion proof for the step at position `index` (its `seq`) within the
+/// `seq`-ordered trajectory. Returns `(root, proof)`; `None` if `index` is out
+/// of range or any hash is malformed. Verify with [`verify`].
+pub fn trajectory_prove(
+    ordered_step_hashes: &[String],
+    index: usize,
+) -> Option<([u8; 32], Vec<ProofStep>)> {
+    let mut level = ordered_leaf_hashes(ordered_step_hashes)?;
+    if index >= level.len() {
+        return None;
+    }
+    let mut idx = index;
+    let mut proof = Vec::new();
+    while level.len() > 1 {
+        if idx.is_multiple_of(2) {
             if idx + 1 < level.len() {
                 proof.push(ProofStep {
                     sibling: level[idx + 1],
@@ -293,5 +369,77 @@ mod tests {
         assert_eq!(to_hex32(&raw), h);
         assert!(parse_hex32("short").is_none());
         assert!(parse_hex32(&"z".repeat(64)).is_none());
+    }
+
+    // -- Order-preserving trajectory root --
+
+    #[test]
+    fn trajectory_root_order_sensitive() {
+        let a = trajectory_root(&[ch(1), ch(2), ch(3)]);
+        let b = trajectory_root(&[ch(3), ch(2), ch(1)]);
+        assert_ne!(a, b, "reordering steps MUST change the trajectory root");
+        // Contrast: the set-semantics root is order-independent.
+        assert_eq!(
+            commitment_root(&[ch(1), ch(2), ch(3)]),
+            commitment_root(&[ch(3), ch(2), ch(1)]),
+        );
+    }
+
+    #[test]
+    fn trajectory_root_keeps_duplicates() {
+        // A step legitimately repeating a prior content hash must NOT collapse.
+        let with_dup = trajectory_root(&[ch(1), ch(1)]);
+        let single = trajectory_root(&[ch(1)]);
+        assert_ne!(with_dup, single, "ordered root must not dedup");
+    }
+
+    #[test]
+    fn trajectory_inclusion_roundtrip() {
+        for n in 1usize..=9 {
+            let seeds: Vec<u8> = (1..=n as u8).collect();
+            let steps: Vec<String> = seeds.iter().map(|s| ch(*s)).collect();
+            let root = trajectory_root(&steps);
+            for i in 0..n {
+                let (r, proof) = trajectory_prove(&steps, i).expect("in-range index proves");
+                assert_eq!(r, root, "n={n} i={i}: proof root matches");
+                assert!(verify(&steps[i], &proof, &root), "n={n} i={i}: must verify");
+            }
+        }
+    }
+
+    #[test]
+    fn trajectory_wrong_leaf_or_index_fails() {
+        let steps = [ch(1), ch(2), ch(3), ch(4)];
+        let root = trajectory_root(&steps);
+        let (_r, proof) = trajectory_prove(&steps, 1).unwrap();
+        // Foreign leaf against position-1 proof must not verify.
+        assert!(!verify(&ch(99), &proof, &root));
+        // Verifying a different position's leaf against this proof must fail.
+        assert!(!verify(&steps[2], &proof, &root));
+        // Out-of-range index → no proof.
+        assert!(trajectory_prove(&steps, 4).is_none());
+    }
+
+    #[test]
+    fn trajectory_single_and_empty() {
+        assert_eq!(trajectory_root(&[]), empty_root());
+        let one = [ch(42)];
+        let (root, proof) = trajectory_prove(&one, 0).unwrap();
+        assert!(proof.is_empty());
+        assert_eq!(root, leaf_hash(&parse_hex32(&ch(42)).unwrap()));
+        assert!(verify(&ch(42), &proof, &root));
+    }
+
+    #[test]
+    fn root_of_roots_composes() {
+        // Each checkpoint contributes a root; the root-of-roots is just a
+        // trajectory_root over the (hex of the) ordered checkpoint roots.
+        let cp0 = trajectory_root(&[ch(1), ch(2)]);
+        let cp1 = trajectory_root(&[ch(3), ch(4)]);
+        let roots_hex = [to_hex32(&cp0), to_hex32(&cp1)];
+        let ror = trajectory_root(&roots_hex);
+        let (r, proof) = trajectory_prove(&roots_hex, 1).unwrap();
+        assert_eq!(r, ror);
+        assert!(verify(&to_hex32(&cp1), &proof, &ror));
     }
 }
