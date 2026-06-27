@@ -13,31 +13,41 @@
       http-equiv="Content-Security-Policy"
       content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; connect-src 'self' https://mcp.mnemonik.xyz https://*.trycloudflare.com http://localhost:* http://127.0.0.1:*; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; frame-ancestors 'none'; base-uri 'self'; object-src 'none'; form-action 'self'"
     />
-    <title>Mnemonic Protocol — verifiable, persistent memory for AI agents</title>
-    <meta name="description" content="Verifiable, persistent memory for AI agents. Signed COSE_Sign1 envelopes anchored on Solana via SPL Memo, accessed through MCP. Open-source, Apache-2.0." />
     <meta name="theme-color" content="#9945FF" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <link rel="icon" type="image/png" sizes="64x64" href="/favicon-64.png" />
     <link rel="apple-touch-icon" href="/logo-512.png" />
+    <meta property="og:image:width" content="1024" />
+    <meta property="og:image:height" content="1024" />
 
-    <!-- OpenGraph -->
+    <!-- Crawlable by AI clients -->
+    <link rel="alternate" type="application/json" title="Agent card" href="/.well-known/agent.json" />
+
+    <!--
+      SEO defaults for the client-rendered SPA. The build-time prerender step
+      (scripts/prerender.mjs) replaces everything between the seo:start/seo:end
+      markers with the route-specific tags emitted by <Seo> (React 19 head
+      hoisting), so each static route's dist/<route>/index.html carries its own
+      title / description / canonical / OpenGraph + Twitter / JSON-LD. Routes
+      that are NOT prerendered keep these defaults until the client hydrates and
+      <Seo> updates the head. KEEP the markers — the prerender replace anchors on
+      them. Tags OUTSIDE the markers (theme-color, icons, agent card) are global
+      and survive prerender untouched.
+    -->
+    <!-- seo:start -->
+    <title>Mnemonic Protocol — verifiable, persistent memory for AI agents</title>
+    <meta name="description" content="Verifiable, persistent memory for AI agents. Signed COSE_Sign1 envelopes anchored on Solana via SPL Memo, accessed through MCP. Open-source, Apache-2.0." />
     <meta property="og:type" content="website" />
     <meta property="og:site_name" content="Mnemonic Protocol" />
     <meta property="og:title" content="Mnemonic Protocol — verifiable memory for AI agents" />
     <meta property="og:description" content="Signed, persistent, on-chain-anchored memory for AI agents. Built on Solana, accessed via MCP." />
     <meta property="og:url" content="https://mnemonik.xyz/" />
     <meta property="og:image" content="https://mnemonik.xyz/og-image.png" />
-    <meta property="og:image:width" content="1024" />
-    <meta property="og:image:height" content="1024" />
-
-    <!-- Twitter / X -->
     <meta name="twitter:card" content="summary_large_image" />
     <meta name="twitter:title" content="Mnemonic Protocol" />
     <meta name="twitter:description" content="Verifiable, persistent memory for AI agents — signed, anchored on Solana, accessed via MCP." />
     <meta name="twitter:image" content="https://mnemonik.xyz/og-image.png" />
-
-    <!-- Crawlable by AI clients -->
-    <link rel="alternate" type="application/json" title="Agent card" href="/.well-known/agent.json" />
+    <!-- seo:end -->
   </head>
   <body class="bg-background text-text-primary min-h-screen antialiased">
     <div id="root"></div>
