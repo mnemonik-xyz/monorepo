@@ -373,3 +373,31 @@ DEFERRED — pre-public-launch open items (spec-acknowledged; tracked, NOT block
 - SEC-T14-03 (low): GET /artifacts?q= runs ONNX embedding unauth/uncached/unrated -> CPU DoS. Add a /stats-
   style cache or rate-limit before public launch.
 - code-minor: /artifacts `total` = page length, not true count.
+
+## 2026-06-27 — SEC-T14-04 closed (mcp cleanup)
+
+mcp-cleanup: hook_url_allowed() (url::Url scheme parse, http/https only) enforced at both main.rs
+env-read AND fire_rebuild_hook firing point (defense-in-depth — direct McpState callers can no longer
+bypass via main.rs). Replaces weak starts_with prefix check. +2 tests (scheme allowlist + runtime
+rejection). main.rs routing comment corrected. cargo build/test --features test-support/clippy/fmt clean.
+Committed. (SEC-T14-01/02/03 remain tracked pre-public-launch items.)
+
+## 2026-06-27 — Task 6 done (frontend sweep + live-path integration fixes)
+
+T6 (t6-fesweep): M1 ledger.ts attestation_id->id remap (live branch); M2 blog.ts deriveBlogPost
+(summary=first prose para ~160c, reading_minutes=ceil(words/200), agent=author only if automated-
+looking) wired into SPA fetch* AND entry-server prerender so live/prerendered posts get real meta +
+Article JSON-LD; F3 ledger client fallback tests; F1 new e2e/ledger.spec.ts (5/5 pass) cross-route
+smoke; F2 heading asserts fixed in app.spec + chat.spec; F5 Sign countdown ROOT-CAUSED (test never
+seeded mnemonic.identity -> first effect redirected to /install and unmounted before countdown) +
+stabilized. Verify: npm run build EXIT 0; vitest 135/135 (Sign now GREEN); e2e ledger 5/5, app 1/1.
+Committed 6ab0c0c. ORIGIN-dedupe nit skipped (seo.tsx client vs prerender-lib.mjs Node build script —
+different module systems; unifying couples bundle to build script).
+
+INVESTIGATED — chat.spec.ts 6 failures are PRE-EXISTING, NOT a webapp-rethink regression:
+origin/main already routes "/" to pages/Landing.tsx; "Start chat" exists NOWHERE in main's webapp/src,
+and "Download protocol knowledge" lives only in the LEGACY components/LandingPage.tsx which main does
+NOT route to "/". So chat.spec.ts golden-path (Start-chat button + download link) was already broken on
+main (stale e2e referencing retired UI). This feature only changed the Landing heading (T6 fixed that
+assertion). The chat.spec golden-path/nav rewrite to the current /chat-entry UX is separate pre-existing
+tech-debt, OUT OF SCOPE for webapp-rethink. e2e isn't in npm test so CI was already green despite it.
