@@ -96,14 +96,34 @@ later wave. Rejected: blocking the UI on backend.
 No chart lib is installed; a bespoke SVG fits the forensic aesthetic and adds zero
 deps/bundle weight. Rejected: recharts/d3.
 
-### Decision 4: SEO without SSR (React 19 head hoisting + static files)
-Avoid a Next/SSR migration. Use React 19 native metadata hoisting, `robots.txt`,
-`sitemap.xml`, JSON-LD, semantic HTML. Prerendering is a separate future feature.
-Rejected: SSR rewrite now.
+### Decision 4: SEO with REAL crawl coverage (prerender static + SSR blog)
+Head hoisting alone is insufficient (user: "real crawl coverage"). Build-time
+prerender the static routes (`/`, `/ledger`, `/analytics`, `/blog`) to static
+HTML; **server-render `/blog/:slug`** from the Rust server (dynamic, agent-
+published) with full HTML + meta + JSON-LD + post content. React 19 head hoisting
+still provides per-route meta for the SPA hydration path. `robots.txt` + dynamic
+`sitemap.xml` (includes published post slugs) + JSON-LD (Organization + Article).
+Rejected: client-only head hoisting; full Next/SSR rewrite.
 
-### Decision 5: Blog publish API is authenticated, reuses existing auth
-`POST /blog` requires bearer auth (same path as existing authed routes). No new
-payment methods in `core/` (CLAUDE.md rule 1). Anonymous publish rejected.
+### Decision 5: Agent-native publishing — MCP tool + Micropub, A2A for discovery
+A blog post IS a signed public attestation (POST_V1 schema, `visibility=public`),
+reusing the sign_memory pipeline; authorship provable via Ed25519. Surfaces:
+(1) **MCP tool `mnemonic_publish_post`** — primary, native path.
+(2) **Micropub-shaped `POST /blog`** (OAuth2 Bearer, JSON+form) — W3C-standard
+interop for any Micropub/agent client; advertise via `<link rel="micropub">`.
+(3) **A2A** advertises the skill in the `x-mnemonic` AgentCard extension for
+discovery only ("movement, not memory"); publish flows through MCP/Micropub.
+(4) **RSS/Atom feed** for syndication. All publish paths require auth (Bearer /
+Ed25519); no payment methods added to `core/` (CLAUDE.md rule 1). Anonymous
+publish rejected. V1 abuse control: authenticated-only + rate limit; agent
+allowlist/moderation tracked as open item.
+
+### Decision 8: Blog and Ledger share one substrate
+The blog is the ledger filtered to `tag: post` / POST_V1 schema. `GET /blog`
+is a typed view over public attestations; no separate content store is strictly
+required, though a `blog_posts` projection table MAY be added for query
+convenience (slug index, ordering). Keeps authorship verifiable and unifies the
+two pages.
 
 ### Decision 6: Ledger shows public-visibility rows only
 `GET /artifacts` filters `visibility = public` (reuse `SEARCH_SQL_PUBLIC` pattern
@@ -159,18 +179,34 @@ publish via API → appears in list.
 - T10 vitest specs for clients, `<Seo>`, cards, chart; Playwright smoke for new
   routes.
 
-### Wave 4: Backend (separate, full spec-process review)
-- T11 `blog_posts` migration + public-artifacts query + timeline query in
-  `core/src/storage/sqlite.rs`.
-- T12 axum handlers `GET /artifacts`, `GET /analytics/attestations`, `GET /blog`,
-  `GET /blog/:slug`, `POST /blog` (auth) in `mcp/`; register in `main.rs`.
-- T13 backend unit/integration tests.
+### Wave 4: Backend — data + publishing (separate, full spec-process review)
+- T11 `core`: `POST_V1` CBOR schema (post = signed public attestation); public-
+  artifacts query + timeline aggregation in `core/src/storage/sqlite.rs`; optional
+  `blog_posts` projection table (slug index/ordering).
+- T12 `mcp`: read routes `GET /artifacts`, `GET /analytics/attestations`,
+  `GET /blog`, `GET /blog/:slug`; register in `main.rs`. `/artifacts` returns
+  `visibility = public` only (Decision 6).
+- T13 `mcp`: publish surfaces — MCP tool `mnemonic_publish_post`; Micropub-shaped
+  `POST /blog` (OAuth2 Bearer, JSON+form). Auth required; rate-limited. No payment
+  methods in `core/` (rule 1).
+- T14 Discovery + syndication: add publish skill to `x-mnemonic` AgentCard
+  extension (`/.well-known/agent.json`); `<link rel="micropub">` in index.html;
+  RSS/Atom feed route.
+- T15 backend unit/integration tests (public-only artifacts; publish auth reject/
+  accept; POST_V1 round-trip; migration idempotent).
 
-### Wave 5: Audit (read-only)
-- T14 code review, security audit (artifact privacy, blog auth/spam), test review.
+### Wave 5: SEO real crawl coverage (separate)
+- T16 Build-time prerender of static routes (`/`, `/ledger`, `/analytics`,
+  `/blog`) to static HTML (Vite prerender step).
+- T17 Server-rendered `/blog/:slug` from Rust (HTML + meta + JSON-LD Article +
+  post content) for crawlers; dynamic `sitemap.xml` including post slugs.
 
-### Wave 6: Final
-- T15 pre-deploy QA, update project-knowledge, archive.
+### Wave 6: Audit (read-only)
+- T18 code review, security audit (artifact privacy, blog auth/spam, SSR XSS in
+  rendered markdown), test review.
+
+### Wave 7: Final
+- T19 pre-deploy QA, update project-knowledge, archive.
 
 ## User-Spec Deviations
 
