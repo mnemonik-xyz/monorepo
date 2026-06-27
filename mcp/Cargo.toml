@@ -141,6 +141,9 @@ default = []
 local-embed = ["mnemonic-core/local-embed"]
 # Vendor OpenSSL from source (used in CI cross-compilation).
 openssl-vendored = ["mnemonic-core/openssl-vendored"]
+# Verifiable trajectories MCP tools (attest_step / attest_verdict /
+# verify_trajectory). Forwards to mnemonic-core. Experimental — not in default.
+trajectory-experimental = ["mnemonic-core/trajectory-experimental"]
 # Exposes `mnemonic_mcp::test_support` (mock_state + mint_jwt) outside `#[cfg(test)]`
 # so the `mint-test-jwt` binary and CI helpers can reach the same JWT-issue path
 # the integration tests use. Not enabled by default — production builds NEVER

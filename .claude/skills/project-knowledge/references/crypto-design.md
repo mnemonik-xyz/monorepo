@@ -251,6 +251,34 @@ Migration: missing `version` → assumed `type: local` legacy shape. Webapp's `I
 
 ---
 
+## Verifiable trajectories — STEP/VERDICT/TRAJECTORY envelopes
+
+(`trajectory-experimental`; full design in `work/verifiable-trajectories/`.)
+
+Three new artifact schemas reuse the **unchanged** envelope (deterministic CBOR
+→ blake3 → COSE_Sign1 / Ed25519) — no new crypto:
+
+- **`STEP_V1`** — one ordered step. `seq`, `trajectory_id`, and `prev_hash` are
+  inside the signed payload; `prev_hash[i] == content_hash[i-1]`, so the chain
+  link is tamper-evident. The genesis step (`seq == 0`) carries `prev_hash:
+  null` (the field stays in `cbor_field_order` so the signed layout is stable).
+- **`VERDICT_V1`** — an independent judge's verdict, signed by the **judge**
+  keypair (must differ from the step `producer`). Binds an optional external
+  correctness proof by hash via `proof_ref` + `proof_kind`
+  (prm/deterministic/zkml/tee/opml/ocp) — Mnemonic signs *that the verdict
+  exists*, never that the model math is sound.
+- **`TRAJECTORY_V1`** — anchored summary; `batch_root` is anchored, `prev_root`
+  links checkpoints (root-of-roots).
+
+**Two Merkle constructions, one verifier.** `merkle::commitment_root` (recall)
+sorts + dedups → commits to a *set* (order-independent). `merkle::trajectory_root`
+keeps `seq` order, never sorts/dedups → commits to a *sequence* (reorder changes
+the root). Both reuse the same domain-separated leaf/node hashing
+(`0x00`/`0x01`), so a single `merkle::verify` checks inclusion proofs from
+either. The trajectory root **is** the Arweave bundle manifest root (data items
+laid out in `seq` order). These MUST NOT be unified — see the feature's
+`decisions.md`. Threat coverage: [`threat-model.md`](threat-model.md).
+
 ## Pointers
 
 - **Current Signer abstraction:** [`packages/sdk/src/signer.ts`](../../../packages/sdk/src/signer.ts), Decision 4 of `work/completed/mnemonic-cli/tech-spec.md` (when feature archives).

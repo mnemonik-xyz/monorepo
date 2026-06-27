@@ -826,7 +826,8 @@ unsafe impl Send for McpState {}
 unsafe impl Sync for McpState {}
 
 fn tool_definitions() -> Value {
-    serde_json::json!([
+    #[allow(unused_mut)]
+    let mut defs = serde_json::json!([
         {
             "name": "mnemonic_whoami",
             "description": "Returns this agent's cryptographic identity: Solana public key, did:sol, did:key, attestation count",
@@ -905,7 +906,59 @@ fn tool_definitions() -> Value {
                 "required": ["content_hash"],
             },
         },
-    ])
+    ]);
+
+    // Verifiable-trajectories tools (experimental; appended only when the
+    // feature is compiled in, so default builds advertise the base 7 tools).
+    #[cfg(feature = "trajectory-experimental")]
+    if let Some(arr) = defs.as_array_mut() {
+        arr.extend(serde_json::json!([
+            {
+                "name": "mnemonic_attest_step",
+                "description": "Store one ordered, hash-linked trajectory step. NON-CUSTODIAL: the client signs the STEP artifact locally (COSE_Sign1/Ed25519 over canonical CBOR; build it with the SDK / mnemonic_core::trajectory::build_step) and submits the envelope as hex via `signed`. The server verifies the signature, enforces dense seq + prev_hash linkage to the trajectory head, and stores it. The server signs nothing; the producer identity is the COSE signer.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "signed": {"type": "string", "description": "Hex-encoded COSE_Sign1 STEP envelope, signed by the producing agent's own key. trajectory_id/seq/prev_hash live inside the signed payload."},
+                    },
+                    "required": ["signed"],
+                },
+            },
+            {
+                "name": "mnemonic_attest_verdict",
+                "description": "Store an INDEPENDENT judge's verdict over a step. NON-CUSTODIAL: the judge signs the VERDICT locally (pass/concern/reject, optional score/proof_ref) and submits the envelope as hex via `signed`. The server verifies the signature, enforces judge != producer, and stores it. The server signs nothing; the judge identity is the COSE signer.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "signed": {"type": "string", "description": "Hex-encoded COSE_Sign1 VERDICT envelope, signed by an independent judge's own key (distinct from the step producer). step_hash/status/score/proof_ref live inside the signed payload."},
+                    },
+                    "required": ["signed"],
+                },
+            },
+            {
+                "name": "mnemonic_verify_trajectory",
+                "description": "Verify a trajectory end-to-end: chain integrity (ordered, hash-linked, signed), verdict coverage (independent judges), the order-preserving batch root, per-step inclusion proofs, and the safe_to_settle gate (chain_valid AND full coverage AND no reject).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "trajectory_id": {"type": "string", "description": "Trajectory to verify"},
+                    },
+                    "required": ["trajectory_id"],
+                },
+            },
+        ]).as_array().cloned().unwrap_or_default());
+    }
+
+    defs
+}
+
+/// Path to the local trajectory cache DB (`SqliteTrajectoryStore`). Per the
+/// storage decision the canonical store is Arweave; this is the local-mode
+/// cache. Overridable via `MNEMONIC_TRAJECTORY_DB`.
+#[cfg(feature = "trajectory-experimental")]
+fn trajectory_db_path() -> String {
+    std::env::var("MNEMONIC_TRAJECTORY_DB")
+        .unwrap_or_else(|_| "mnemonic-trajectories.db".to_string())
 }
 
 pub async fn handle_request(
@@ -1560,6 +1613,43 @@ async fn handle_tool_call(
                     .ok_or_else(|| JsonRpcError::simple(-32603, "challenge required"))?,
             )
         }
+        #[cfg(feature = "trajectory-experimental")]
+        "mnemonic_attest_step" => {
+            // Non-custodial: the client signs the STEP locally and submits the
+            // COSE_Sign1 envelope as hex. The server only verifies + stores.
+            let signed = args["signed"].as_str().ok_or_else(|| {
+                JsonRpcError::simple(-32603, "signed (hex COSE envelope) required")
+            })?;
+            let store = mnemonic_core::storage::trajectory_sqlite::SqliteTrajectoryStore::open(
+                std::path::Path::new(&trajectory_db_path()),
+            )
+            .map_err(|e| JsonRpcError::simple(-32603, e.to_string()))?;
+            crate::trajectory_tools::attest_step(&store, signed)
+        }
+        #[cfg(feature = "trajectory-experimental")]
+        "mnemonic_attest_verdict" => {
+            // Non-custodial: the judge signs the VERDICT locally; server verifies
+            // + enforces judge != producer + stores. Server signs nothing.
+            let signed = args["signed"].as_str().ok_or_else(|| {
+                JsonRpcError::simple(-32603, "signed (hex COSE envelope) required")
+            })?;
+            let store = mnemonic_core::storage::trajectory_sqlite::SqliteTrajectoryStore::open(
+                std::path::Path::new(&trajectory_db_path()),
+            )
+            .map_err(|e| JsonRpcError::simple(-32603, e.to_string()))?;
+            crate::trajectory_tools::attest_verdict(&store, signed)
+        }
+        #[cfg(feature = "trajectory-experimental")]
+        "mnemonic_verify_trajectory" => {
+            let tid = args["trajectory_id"]
+                .as_str()
+                .ok_or_else(|| JsonRpcError::simple(-32603, "trajectory_id required"))?;
+            let store = mnemonic_core::storage::trajectory_sqlite::SqliteTrajectoryStore::open(
+                std::path::Path::new(&trajectory_db_path()),
+            )
+            .map_err(|e| JsonRpcError::simple(-32603, e.to_string()))?;
+            crate::trajectory_tools::verify_trajectory(&store, tid)
+        }
         "mnemonic_recall" => {
             let query = args["query"]
                 .as_str()
@@ -1700,6 +1790,31 @@ fn tool_error_to_json_rpc(e: crate::tools::ToolError) -> JsonRpcError {
 // today (Task 4a flips its body from no-op to JWT validation, hence the
 // `#[ignore]` on the auth test which is wired now so Task 4a only has to
 // flip the ignore + assertion).
+
+#[cfg(all(test, feature = "trajectory-experimental"))]
+mod trajectory_manifest_tests {
+    use super::*;
+
+    #[test]
+    fn manifest_advertises_trajectory_tools() {
+        let defs = tool_definitions();
+        let names: Vec<&str> = defs
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|t| t["name"].as_str())
+            .collect();
+        for t in [
+            "mnemonic_attest_step",
+            "mnemonic_attest_verdict",
+            "mnemonic_verify_trajectory",
+        ] {
+            assert!(names.contains(&t), "manifest must advertise {t}");
+        }
+        // Base tools still present.
+        assert!(names.contains(&"mnemonic_sign_memory"));
+    }
+}
 
 #[cfg(test)]
 mod transport_tests {
@@ -1883,10 +1998,16 @@ mod transport_tests {
         let tools = envelope["result"]["tools"]
             .as_array()
             .expect("tools array present");
+        // 7 base tools, plus 3 when the trajectory feature is compiled in.
+        let expected = if cfg!(feature = "trajectory-experimental") {
+            10
+        } else {
+            7
+        };
         assert_eq!(
             tools.len(),
-            7,
-            "expected 7 MCP tools in tools/list response (whoami, sign_memory, verify, prove_identity, recall, check_pending, request_public_write_confirmation)",
+            expected,
+            "expected {expected} MCP tools in tools/list response (7 base + trajectory tools when enabled)",
         );
     }
 

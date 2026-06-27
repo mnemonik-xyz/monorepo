@@ -62,6 +62,11 @@ wasm = []
 # `cargo test --features golden-fixtures -p mnemonic-core --test golden_fixtures emit_fixtures -- --ignored --nocapture`.
 # See work/mnemonic-cli/tech-spec.md Decision 12.
 golden-fixtures = []
+# Verifiable trajectories (work/verifiable-trajectories/): STEP/VERDICT/TRAJECTORY
+# schemas, ordered-chain verification, and order-preserving Merkle roots.
+# Experimental until V1 GA is declared in that feature's decisions.md. Default
+# `cargo build --workspace` excludes it.
+trajectory-experimental = []
 
 [dependencies.openssl-sys]
 version = "0.9"

@@ -37,6 +37,18 @@ pub enum ArtifactType {
     Receipt,
     #[serde(rename = "memory")]
     Memory,
+    /// One ordered, hash-linked step in an agent trajectory.
+    #[cfg(feature = "trajectory-experimental")]
+    #[serde(rename = "step")]
+    Step,
+    /// An independent judge's correctness/quality verdict over a step.
+    #[cfg(feature = "trajectory-experimental")]
+    #[serde(rename = "verdict")]
+    Verdict,
+    /// Anchored summary of a trajectory (batch root + coverage).
+    #[cfg(feature = "trajectory-experimental")]
+    #[serde(rename = "trajectory")]
+    Trajectory,
 }
 
 impl ArtifactType {
@@ -47,6 +59,12 @@ impl ArtifactType {
             Self::AgentState => "agent.state",
             Self::Receipt => "receipt",
             Self::Memory => "memory",
+            #[cfg(feature = "trajectory-experimental")]
+            Self::Step => "step",
+            #[cfg(feature = "trajectory-experimental")]
+            Self::Verdict => "verdict",
+            #[cfg(feature = "trajectory-experimental")]
+            Self::Trajectory => "trajectory",
         }
     }
 
@@ -58,6 +76,12 @@ impl ArtifactType {
             "agent.state" => Some(Self::AgentState),
             "receipt" => Some(Self::Receipt),
             "memory" => Some(Self::Memory),
+            #[cfg(feature = "trajectory-experimental")]
+            "step" => Some(Self::Step),
+            #[cfg(feature = "trajectory-experimental")]
+            "verdict" => Some(Self::Verdict),
+            #[cfg(feature = "trajectory-experimental")]
+            "trajectory" => Some(Self::Trajectory),
             _ => None,
         }
     }
@@ -219,6 +243,120 @@ pub const MEMORY_V1: ArtifactSchema = ArtifactSchema {
     ],
 };
 
+/// step.v1 -- one ordered, hash-linked step in an agent trajectory.
+///
+/// `prev_hash` is REQUIRED in `cbor_field_order` (it is part of the signed
+/// payload — that is what makes the chain link tamper-evident) but it is a
+/// nullable field at the value level: the genesis step (`seq == 0`) carries
+/// `prev_hash: null`. `seq` and `trajectory_id` are required.
+#[cfg(feature = "trajectory-experimental")]
+pub const STEP_V1: ArtifactSchema = ArtifactSchema {
+    artifact_type: ArtifactType::Step,
+    version: 1,
+    required_fields: &[
+        "artifact_id",
+        "type",
+        "schema_version",
+        "content",
+        "trajectory_id",
+        "seq",
+        "producer",
+        "created_at",
+    ],
+    optional_fields: &["prev_hash", "verdict_hash", "parents", "metadata", "tags"],
+    cbor_field_order: &[
+        "artifact_id",
+        "type",
+        "schema_version",
+        "content",
+        "trajectory_id",
+        "seq",
+        "prev_hash",
+        "verdict_hash",
+        "metadata",
+        "parents",
+        "tags",
+        "created_at",
+        "producer",
+    ],
+};
+
+/// verdict.v1 -- an independent judge's verdict over a step. Signed by the judge
+/// identity, which MUST differ from the step `producer` (enforced at attest
+/// time). `status` ∈ {"pass","concern","reject"}. `proof_ref` optionally binds
+/// an external correctness proof (zkML/TEE/opML/OCP) by hash.
+#[cfg(feature = "trajectory-experimental")]
+pub const VERDICT_V1: ArtifactSchema = ArtifactSchema {
+    artifact_type: ArtifactType::Verdict,
+    version: 1,
+    required_fields: &[
+        "artifact_id",
+        "type",
+        "schema_version",
+        "step_hash",
+        "status",
+        "judge",
+        "created_at",
+    ],
+    optional_fields: &["score", "proof_ref", "proof_kind", "rationale", "tags"],
+    cbor_field_order: &[
+        "artifact_id",
+        "type",
+        "schema_version",
+        "step_hash",
+        "status",
+        "score",
+        "proof_ref",
+        "proof_kind",
+        "rationale",
+        "tags",
+        "created_at",
+        "judge",
+    ],
+};
+
+/// trajectory.v1 -- anchored summary of a trajectory (or one checkpoint of it).
+/// `batch_root` is the order-preserving Merkle root over the steps' content
+/// hashes (== the Arweave bundle manifest root). `prev_root` links this
+/// checkpoint to the prior one (root-of-roots).
+#[cfg(feature = "trajectory-experimental")]
+pub const TRAJECTORY_V1: ArtifactSchema = ArtifactSchema {
+    artifact_type: ArtifactType::Trajectory,
+    version: 1,
+    required_fields: &[
+        "artifact_id",
+        "type",
+        "schema_version",
+        "trajectory_id",
+        "step_count",
+        "batch_root",
+        "producer",
+        "created_at",
+    ],
+    optional_fields: &[
+        "verdict_coverage",
+        "chain_valid",
+        "is_final",
+        "prev_root",
+        "tags",
+    ],
+    cbor_field_order: &[
+        "artifact_id",
+        "type",
+        "schema_version",
+        "trajectory_id",
+        "step_count",
+        "batch_root",
+        "prev_root",
+        "verdict_coverage",
+        "chain_valid",
+        "is_final",
+        "tags",
+        "created_at",
+        "producer",
+    ],
+};
+
 /// Look up schema by type string and version.
 pub fn get_schema(artifact_type: &str, version: u32) -> Option<&'static ArtifactSchema> {
     match (artifact_type, version) {
@@ -227,6 +365,12 @@ pub fn get_schema(artifact_type: &str, version: u32) -> Option<&'static Artifact
         ("agent.state", 1) => Some(&AGENT_STATE_V1),
         ("receipt", 1) => Some(&RECEIPT_V1),
         ("memory", 1) => Some(&MEMORY_V1),
+        #[cfg(feature = "trajectory-experimental")]
+        ("step", 1) => Some(&STEP_V1),
+        #[cfg(feature = "trajectory-experimental")]
+        ("verdict", 1) => Some(&VERDICT_V1),
+        #[cfg(feature = "trajectory-experimental")]
+        ("trajectory", 1) => Some(&TRAJECTORY_V1),
         _ => None,
     }
 }
@@ -291,6 +435,41 @@ mod tests {
             Some(ArtifactType::Receipt)
         );
         assert_eq!(ArtifactType::from_str("invalid"), None);
+    }
+
+    #[cfg(feature = "trajectory-experimental")]
+    #[test]
+    fn trajectory_schema_lookup() {
+        assert!(get_schema("step", 1).is_some());
+        assert!(get_schema("verdict", 1).is_some());
+        assert!(get_schema("trajectory", 1).is_some());
+        assert_eq!(ArtifactType::from_str("step"), Some(ArtifactType::Step));
+        assert_eq!(ArtifactType::Verdict.as_str(), "verdict");
+    }
+
+    #[cfg(feature = "trajectory-experimental")]
+    #[test]
+    fn step_prev_hash_in_field_order() {
+        // prev_hash MUST be in the signed payload for the chain link to be
+        // tamper-evident, even though it is value-nullable for the genesis step.
+        assert!(STEP_V1.cbor_field_order.contains(&"prev_hash"));
+        assert!(STEP_V1.required_fields.contains(&"trajectory_id"));
+        assert!(STEP_V1.required_fields.contains(&"seq"));
+    }
+
+    #[cfg(feature = "trajectory-experimental")]
+    #[test]
+    fn trajectory_schemas_field_order_covers_required() {
+        for schema in [&STEP_V1, &VERDICT_V1, &TRAJECTORY_V1] {
+            for &field in schema.required_fields {
+                assert!(
+                    schema.cbor_field_order.contains(&field),
+                    "schema {:?}: required field '{}' not in cbor_field_order",
+                    schema.artifact_type,
+                    field,
+                );
+            }
+        }
     }
 
     #[test]
