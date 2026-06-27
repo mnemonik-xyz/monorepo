@@ -97,9 +97,12 @@ async function main() {
   // 3. Render each static route into its own HTML file.
   for (const route of PRERENDER_ROUTES) {
     const { head, body } = splitHead(render(route));
+    // Function replacers copy `head`/`body` in verbatim. A string replacement
+    // would interpret `$&`, `$\``, `$'`, `$<n>` specially — harmless for today's
+    // <Seo>-only content, but a hazard once T13 injects live blog content here.
     const doc = template
-      .replace(SEO_BLOCK, `<!-- seo:start -->\n${head}\n    <!-- seo:end -->`)
-      .replace(ROOT_DIV, `<div id="root">${body}</div>`);
+      .replace(SEO_BLOCK, () => `<!-- seo:start -->\n${head}\n    <!-- seo:end -->`)
+      .replace(ROOT_DIV, () => `<div id="root">${body}</div>`);
     const outPath = outPathFor(route);
     await mkdir(dirname(outPath), { recursive: true });
     await writeFile(outPath, doc, "utf8");
