@@ -1,6 +1,6 @@
 [package]
 name = "mnemonic-mcp"
-version = "0.2.4"
+version = "0.2.8"
 edition = "2021"
 description = "Mnemonic MCP server — verifiable memory attestation primitive for AI agents"
 
