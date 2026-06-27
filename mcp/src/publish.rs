@@ -338,15 +338,31 @@ async fn send_rebuild_ping(client: reqwest::Client, url: String) {
     }
 }
 
+/// True only for an absolute `http`/`https` URL.
+///
+/// The blog rebuild hook is documented as http(s)-only; this is the real
+/// enforcement of that allowlist (closing the doc/code gap flagged in the T14
+/// security audit, SEC-T14-04). Any other scheme (`file:`, `ftp:`, …), a
+/// non-absolute value, or an unparseable string is rejected — so a misconfigured
+/// operator env var can never turn the best-effort freshness ping into a request
+/// against an unintended target.
+pub fn hook_url_allowed(url: &str) -> bool {
+    match url::Url::parse(url) {
+        Ok(parsed) => matches!(parsed.scheme(), "http" | "https"),
+        Err(_) => false,
+    }
+}
+
 /// Fire the best-effort, non-blocking blog-rebuild ping.
 ///
-/// No-op (returns `None`) when `hook_url` is `None`/empty/whitespace, or when
-/// called outside a Tokio runtime (keeps [`publish_post`] callable from sync
-/// unit tests). Otherwise spawns [`send_rebuild_ping`] on the current runtime
-/// and returns the `JoinHandle` — production drops it (fire-and-forget); tests
-/// can await it to observe delivery. SSRF posture: the shared `hosted_client`
-/// pins `reqwest::redirect::Policy::none()`, so a deploy webhook cannot 302 the
-/// ping to an unrelated host; the URL itself is operator-supplied via env, not
+/// No-op (returns `None`) when `hook_url` is `None`/empty/whitespace, when its
+/// scheme is not http(s) (see [`hook_url_allowed`]), or when called outside a
+/// Tokio runtime (keeps [`publish_post`] callable from sync unit tests).
+/// Otherwise spawns [`send_rebuild_ping`] on the current runtime and returns the
+/// `JoinHandle` — production drops it (fire-and-forget); tests can await it to
+/// observe delivery. SSRF posture: the shared `hosted_client` pins
+/// `reqwest::redirect::Policy::none()`, so a deploy webhook cannot 302 the ping
+/// to an unrelated host; the URL itself is operator-supplied via env, not
 /// attacker input.
 fn fire_rebuild_hook(
     hook_url: Option<&str>,
@@ -354,6 +370,13 @@ fn fire_rebuild_hook(
 ) -> Option<tokio::task::JoinHandle<()>> {
     let url = hook_url?.trim();
     if url.is_empty() {
+        return None;
+    }
+    // Defense in depth: enforce the http(s)-only allowlist at the firing point,
+    // not only where the env var is parsed (main.rs). Any `McpState` built
+    // directly — tests, future callers — still honors it (SEC-T14-04).
+    if !hook_url_allowed(url) {
+        tracing::warn!("ignoring blog rebuild hook — only absolute http(s) URLs are allowed");
         return None;
     }
     let handle = tokio::runtime::Handle::try_current().ok()?;
@@ -420,6 +443,28 @@ mod tests {
     }
 
     // ── Rebuild-hook (Task 13) ───────────────────────────────────────────────
+
+    #[test]
+    fn hook_url_allowed_only_accepts_http_schemes() {
+        // The documented http(s)-only allowlist is enforced in code (SEC-T14-04).
+        assert!(hook_url_allowed("http://example.test/rebuild"));
+        assert!(hook_url_allowed("https://example.test/rebuild"));
+        // Non-http(s) schemes, non-absolute, and unparseable values are rejected.
+        assert!(!hook_url_allowed("file:///etc/passwd"));
+        assert!(!hook_url_allowed("ftp://example.test/x"));
+        assert!(!hook_url_allowed("/relative/path"));
+        assert!(!hook_url_allowed("not a url"));
+    }
+
+    #[tokio::test]
+    async fn fire_rebuild_hook_rejects_non_http_scheme_even_in_runtime() {
+        // A disallowed scheme is a no-op even with a Tokio runtime present —
+        // proving the rejection comes from the scheme allowlist, not the
+        // no-runtime guard (SEC-T14-04).
+        let client = reqwest::Client::new();
+        assert!(fire_rebuild_hook(Some("file:///etc/passwd"), &client).is_none());
+        assert!(fire_rebuild_hook(Some("ftp://example.test/x"), &client).is_none());
+    }
 
     #[test]
     fn fire_rebuild_hook_noop_when_unset_or_empty() {

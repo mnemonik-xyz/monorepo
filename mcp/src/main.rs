@@ -80,8 +80,11 @@ enum Command {
 //
 // The `/mcp` JSON-RPC dispatcher (streamable HTTP per Decision 1) lives in
 // `mcp::mcp_handler` so it can be unit-tested directly from `mcp.rs::tests`.
-// Wave 4 removed the custodial api-key / balance / deposit endpoints; the
-// remaining non-`/mcp` endpoints (admin stats, health) are plain JSON.
+// Wave 4 removed the custodial api-key / balance / deposit endpoints. The
+// non-`/mcp` surface is now broader: the public read endpoints (`/artifacts`,
+// `/analytics/*`, `/blog`, `/blog/feed.xml`, `/blog/{slug}`, `/stats`), admin
+// stats, health, `/chat`, plus the OAuth / `.well-known` / key-escrow
+// sub-routers — all plain JSON (XML for the Atom feed), none JSON-RPC.
 
 /// Fail-closed admin gate: returns true only when `admin_token` is configured
 /// (non-empty) AND the request carries a matching `Authorization: Bearer` token.
@@ -471,7 +474,7 @@ async fn main() -> anyhow::Result<()> {
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .and_then(|url| {
-            if url.starts_with("https://") || url.starts_with("http://") {
+            if publish::hook_url_allowed(&url) {
                 tracing::info!("blog rebuild hook enabled");
                 Some(url)
             } else {
