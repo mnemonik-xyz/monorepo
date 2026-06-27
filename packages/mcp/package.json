@@ -1,6 +1,6 @@
 {
   "name": "@mnemonik-xyz/mcp",
-  "version": "0.2.7",
+  "version": "0.2.8",
   "description": "MCP shim for Mnemonic Protocol. Downloads + verifies the matching mnemonik-mcp Rust binary from GitHub Releases on first invocation; provides install/install --check/mcp-stdio/doctor subcommands. No postinstall script — lazy install on first run. See Decisions 8/9 in work/agent-native-distribution/tech-spec.md.",
   "license": "Apache-2.0",
   "private": false,
