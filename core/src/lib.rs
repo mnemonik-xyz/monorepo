@@ -6,6 +6,13 @@ pub mod identity;
 // Pure crypto — available on every target so clients can verify proofs.
 pub mod merkle;
 
+// Verifiable trajectories (work/verifiable-trajectories/): ordered, hash-linked,
+// signed agent steps + independent verdicts. Pure (codec + merkle only), so the
+// same chain/coverage verification runs client-side and against any backend —
+// the decentralized, stateless-MCP direction. Experimental; opt-in feature.
+#[cfg(feature = "trajectory-experimental")]
+pub mod trajectory;
+
 // Native-only modules. These pull in rusqlite (bundled C SQLite), reqwest
 // (native TLS), or fastembed (ONNX runtime), none of which compile for
 // wasm32-unknown-unknown. Gating here keeps the WASM build minimal and means

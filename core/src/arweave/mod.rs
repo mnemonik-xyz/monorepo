@@ -61,6 +61,48 @@ impl ArweaveClient {
         }
     }
 
+    /// Write a tagged ANS-104 data item (Irys) / arlocal stub. The base
+    /// `App-Name` / `Content-Type` tags are always present; `extra_tags` (e.g.
+    /// `trajectory_id`, `seq`, `content_hash`) are appended so the item is
+    /// retrievable via a GraphQL tag query. Returns the tx id.
+    pub async fn write_item(
+        &self,
+        data: &[u8],
+        keypair: &Keypair,
+        extra_tags: &[(&str, &str)],
+    ) -> anyhow::Result<String> {
+        let mut tags: Vec<(&str, &str)> = vec![
+            ("Content-Type", "application/octet-stream"),
+            ("App-Name", "mnemonic-protocol"),
+        ];
+        tags.extend_from_slice(extra_tags);
+
+        if !self.bypass_local_routing && self.is_local() {
+            // arlocal dev path: store the bytes (tags are best-effort here).
+            return self.write_arlocal(data).await;
+        }
+        let item = build_data_item(keypair, data, &tags);
+        let resp = self
+            .client
+            .post(&self.upload_url)
+            .header("Content-Type", "application/octet-stream")
+            .header("x-token", "solana")
+            .body(item)
+            .send()
+            .await
+            .context("irys upload")?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            anyhow::bail!("irys upload failed: {status} -- {body}");
+        }
+        let result: serde_json::Value = resp.json().await?;
+        result["id"]
+            .as_str()
+            .map(|s| s.to_string())
+            .context("no id in irys response")
+    }
+
     pub async fn read(&self, tx_id: &str) -> anyhow::Result<Vec<u8>> {
         let url = format!("{}/{tx_id}", self.base_url);
         let resp = self.client.get(&url).send().await.context("arweave read")?;

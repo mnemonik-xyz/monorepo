@@ -260,11 +260,16 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libdbus-1-dev pkg-config
-      - name: Install wasm-pack
+      - name: Install wasm-pack (prebuilt binary)
         # SDK `npm run build` shells out to packages/sdk/scripts/build-wasm.sh
-        # which requires wasm-pack on PATH. Version pinned to match
-        # release.yml and node-test.yml — keep all three in sync.
-        run: cargo install wasm-pack --locked --version 0.14.0 || true
+        # which requires wasm-pack on PATH. Switched from
+        # `cargo install wasm-pack --locked --version 0.14.0 || true` to the
+        # prebuilt installer — the cargo path silently swallowed failures and
+        # let the next step die with "wasm-pack not found", gating unrelated
+        # PRs. Version pinned to match release.yml and node-test.yml.
+        env:
+          WASM_PACK_VERSION: 0.14.0
+        run: curl -sSf https://rustwasm.github.io/wasm-pack/installer/init.sh | sh
       - name: Build Rust mcp-server + keychain-roundtrip example
         run: |
           cargo build -p mnemonic-mcp
@@ -302,10 +307,13 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y gnome-keyring dbus-x11 libsecret-tools jq libdbus-1-dev pkg-config
-      - name: Install wasm-pack
-        # Same install as cross-lang-build — rust-cache makes this a fast
-        # no-op when the binary is already present from the prior job.
-        run: cargo install wasm-pack --locked --version 0.14.0 || true
+      - name: Install wasm-pack (prebuilt binary)
+        # Same install as cross-lang-build — prebuilt installer is ~5 s, no
+        # silent-swallow on failure. Version pinned to match release.yml and
+        # node-test.yml.
+        env:
+          WASM_PACK_VERSION: 0.14.0
+        run: curl -sSf https://rustwasm.github.io/wasm-pack/installer/init.sh | sh
       - name: Build Rust mcp-server + keychain-roundtrip example
         # cargo recompile is near-free thanks to the shared rust-cache.
         run: |

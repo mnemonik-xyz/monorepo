@@ -98,8 +98,16 @@ jobs:
       - name: Install Linux Rust system deps
         run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
 
-      - name: Install wasm-pack
-        run: cargo install wasm-pack --locked --version 0.14.0 || true
+      - name: Install wasm-pack (prebuilt binary)
+        # Was: `cargo install wasm-pack --locked --version 0.14.0 || true`.
+        # That swallowed install failures and let the next step blow up with
+        # "wasm-pack not found in PATH" — flaky and gated unrelated PRs.
+        # The prebuilt installer is a single ~5 MB tarball download (~5 s),
+        # has no build step, and fails loudly. Pin to 0.14.0 so we don't
+        # silently pull a new wasm-pack on every CI run.
+        env:
+          WASM_PACK_VERSION: 0.14.0
+        run: curl -sSf https://rustwasm.github.io/wasm-pack/installer/init.sh | sh
 
       - name: Build WASM (pkg-web target)
         run: bash packages/sdk/scripts/build-wasm.sh
@@ -200,8 +208,11 @@ jobs:
       - name: Install Linux Rust system deps
         run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
 
-      - name: Install wasm-pack
-        run: cargo install wasm-pack --locked --version 0.14.0 || true
+      - name: Install wasm-pack (prebuilt binary)
+        # See the matching step in the `test` job above for rationale.
+        env:
+          WASM_PACK_VERSION: 0.14.0
+        run: curl -sSf https://rustwasm.github.io/wasm-pack/installer/init.sh | sh
 
       - name: Build WASM + workspace
         run: |
