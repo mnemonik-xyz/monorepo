@@ -123,7 +123,15 @@ record. Allowed only as a human-facing pointer surface (event body links the
 anchored root), never the source of truth. Not in V1.
 
 **Downstream.** Task 4 pivots from "SQLite columns" to "Arweave-bundle step
-store + stateless verify"; SqliteStore demoted to optional cache. New dependency
-surface: ANS-104 bundling (Irys/Bundlr or in-house data-item encoder) + Arweave
-GraphQL client. Cost model and bundler-trust assumptions to be detailed in the
+store + stateless verify"; SqliteStore demoted to optional cache.
+
+**Substrate note (corrects the first cut).** `core/src/arweave/mod.rs` ALREADY
+constructs + signs single ANS-104 data items via Irys (deep-hash path included).
+So the work is an *extension* — single item → multi-item bundle + a GraphQL
+tag-query read path — not a net-new dependency. Likewise the on-chain
+`batch_root` and the bundle manifest root are unified: the bundle's data items
+are laid out in `seq` order, so the order-preserving `trajectory_root` (Task 3)
+IS the manifest root, and one inclusion proof serves both chain-position and
+bundle-membership. Checkpoints compose via a root-of-roots (`prev_root` on each
+`TRAJECTORY_V1`). Cost model and bundler-trust assumptions to be detailed in the
 threat model (Task 6).
