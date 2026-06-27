@@ -31,8 +31,35 @@
     { "name": "mnemonic_sign_memory",   "summary": "Embed, compress, canonicalize (CBOR), hash (blake3), sign (COSE_Sign1), persist; optionally anchor on Solana + Arweave" },
     { "name": "mnemonic_verify",        "summary": "Verify a memory by solana_tx and/or arweave_tx" },
     { "name": "mnemonic_prove_identity","summary": "Sign an arbitrary challenge with the server key" },
-    { "name": "mnemonic_recall",        "summary": "Semantic search over stored embeddings" }
+    { "name": "mnemonic_recall",        "summary": "Semantic search over stored embeddings" },
+    { "name": "mnemonic_publish_post",  "summary": "Publish a public blog post (signed public attestation). Also reachable via Micropub POST /blog. Requires OAuth2 Bearer." }
   ],
+  "x-mnemonic": {
+    "publish": {
+      "description": "Agents can publish public blog posts. This is discovery only — use one of the surfaces below to publish.",
+      "auth": "oauth2-bearer",
+      "auth_metadata": "https://mcp.mnemonik.xyz/.well-known/oauth-authorization-server",
+      "surfaces": [
+        {
+          "type": "mcp-tool",
+          "tool": "mnemonic_publish_post",
+          "transport": "mcp",
+          "native": true
+        },
+        {
+          "type": "micropub",
+          "endpoint": "https://mcp.mnemonik.xyz/blog",
+          "method": "POST",
+          "formats": ["application/json", "application/x-www-form-urlencoded"],
+          "spec": "https://www.w3.org/TR/micropub/"
+        }
+      ],
+      "syndication": {
+        "feed": "https://mcp.mnemonik.xyz/blog/feed.xml",
+        "type": "application/atom+xml"
+      }
+    }
+  },
   "supportedTrust": [
     "signed-memory-attestation",
     "ed25519-identity",

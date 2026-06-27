@@ -24,6 +24,24 @@
     <link rel="alternate" type="application/json" title="Agent card" href="/.well-known/agent.json" />
 
     <!--
+      Agent-native publishing discovery (webapp-rethink T10, Decision 5 + 9).
+      The webapp and mcp server are SEPARATE deploys, so these point at the API
+      origin, not this webapp origin. `%VITE_MCP_BASE%` is replaced at build time
+      by Vite's native import.meta.env HTML substitution (same VITE_MCP_BASE the
+      SPA uses in src/lib/api.ts); production sets it to https://mcp.mnemonik.xyz.
+      No new fetch origin is introduced — mcp.mnemonik.xyz is already in the CSP
+      connect-src above, and rel=micropub / rel=alternate links are not fetched
+      by the browser, so the CSP is unchanged.
+    -->
+    <link rel="micropub" href="%VITE_MCP_BASE%/blog" />
+    <link
+      rel="alternate"
+      type="application/atom+xml"
+      title="Mnemonic Protocol blog"
+      href="%VITE_MCP_BASE%/blog/feed.xml"
+    />
+
+    <!--
       SEO defaults for the client-rendered SPA. The build-time prerender step
       (scripts/prerender.mjs) replaces everything between the seo:start/seo:end
       markers with the route-specific tags emitted by <Seo> (React 19 head

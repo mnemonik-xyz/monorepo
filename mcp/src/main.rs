@@ -923,7 +923,12 @@ async fn run_http(
         .route(
             "/.well-known/oauth-protected-resource/mcp",
             get(oauth::oauth_protected_resource_metadata_mcp),
-        );
+        )
+        // API-origin AgentCard discovery (webapp-rethink T10, Decision 5).
+        // Advertises the publish capability (MCP tool + Micropub) via the
+        // `x-mnemonic` extension. Public, no auth, no state — see
+        // `api::agent_card_handler`.
+        .route("/.well-known/agent.json", get(api::agent_card_handler));
 
     // ── Google OAuth routes (T14, conditional) ───────────────────────────────
     // Two-layer mount: public start/callback don't go through bearer-auth;
@@ -1057,6 +1062,9 @@ async fn run_http(
             get(api::analytics_attestations_handler),
         )
         .route("/blog", get(api::blog_list_handler))
+        // Atom syndication feed (webapp-rethink T10). Public, read-only, under
+        // CORS. Registered before `/blog/{slug}` so the literal path wins.
+        .route("/blog/feed.xml", get(api::blog_feed_handler))
         .route("/blog/{slug}", get(api::blog_post_handler))
         .route("/download-knowledge", get(chat::download_knowledge_handler))
         .route(

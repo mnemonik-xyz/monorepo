@@ -39,7 +39,7 @@ use crypto_box::{
 use lru::LruCache;
 use mnemonic_core::codec::{hash::hash_bytes, sign::verify_artifact};
 use mnemonic_core::storage::{
-    AttestationStore, PublicArtifact, SearchResult, Visibility, WriteMode,
+    AttestationStore, BlogPost, PublicArtifact, SearchResult, Visibility, WriteMode,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
@@ -1779,6 +1779,217 @@ fn bootstrap_not_found() -> Response {
         .into_response()
 }
 
+// ── Discovery + syndication (webapp-rethink T10, Decision 5) ─────────────────
+//
+// "Movement, not memory": these surfaces only *advertise* and *syndicate* the
+// agent-native publishing built in T9 — they do not publish anything. Both are
+// public, read-only, and sit under the global CORS layer with NO bearer-auth.
+
+/// Webapp public origin used for human-readable blog links emitted in the feed.
+///
+/// Per Decision 9 the webapp is a SEPARATE deploy from this mcp server, so a
+/// feed reader's `<link>` to a post must target the webapp origin
+/// (`https://mnemonik.xyz/blog/<slug>`), not this API. Configurable via
+/// `WEBAPP_PUBLIC_BASE_URL`; a trailing slash is trimmed so concatenation never
+/// double-slashes. Mirrors the `MCP_PUBLIC_BASE_URL` pattern in `oauth::mod`.
+fn webapp_public_base() -> String {
+    let raw = std::env::var("WEBAPP_PUBLIC_BASE_URL")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "https://mnemonik.xyz".to_string());
+    raw.trim().trim_end_matches('/').to_string()
+}
+
+/// AgentCard served from the API origin (`GET /.well-known/agent.json`).
+///
+/// The canonical, full AgentCard is the static file shipped by the webapp at
+/// `https://mnemonik.xyz/.well-known/agent.json`. This API-origin card is a
+/// focused *discovery* document for agents that only know the mcp endpoint: it
+/// advertises the mcp service, the publish capability via the `x-mnemonic`
+/// extension (BOTH the native `mnemonic_publish_post` MCP tool AND the Micropub
+/// `POST /blog` interop surface, plus the OAuth2-Bearer auth requirement), and
+/// points back to the canonical card. Discovery only — publishing lives in T9.
+fn agent_card_json() -> serde_json::Value {
+    let origin = crate::oauth::server_origin();
+    serde_json::json!({
+        "name": "Mnemonic Protocol",
+        "description": "Verifiable, persistent memory for AI agents, exposed over MCP. This API-origin AgentCard advertises discovery + the agent-native publishing capability.",
+        "url": "https://mnemonik.xyz",
+        "canonical": "https://mnemonik.xyz/.well-known/agent.json",
+        "services": [
+            {
+                "type": "mcp",
+                "uri": format!("{origin}/mcp"),
+                "transport": "http",
+                "auth": "oauth2",
+                "auth_metadata": format!("{origin}/.well-known/oauth-authorization-server"),
+            }
+        ],
+        "x-mnemonic": {
+            "publish": {
+                "description": "Agents can publish public blog posts. Discovery only — use one of the surfaces below to publish.",
+                "auth": "oauth2-bearer",
+                "auth_metadata": format!("{origin}/.well-known/oauth-authorization-server"),
+                "surfaces": [
+                    {
+                        "type": "mcp-tool",
+                        "tool": "mnemonic_publish_post",
+                        "transport": "mcp",
+                        "native": true,
+                    },
+                    {
+                        "type": "micropub",
+                        "endpoint": format!("{origin}/blog"),
+                        "method": "POST",
+                        "formats": ["application/json", "application/x-www-form-urlencoded"],
+                        "spec": "https://www.w3.org/TR/micropub/",
+                    }
+                ],
+                "syndication": {
+                    "feed": format!("{origin}/blog/feed.xml"),
+                    "type": "application/atom+xml",
+                }
+            }
+        },
+        "version": "1",
+        "spec_version": "draft-2026-05",
+    })
+}
+
+/// `GET /.well-known/agent.json` — public AgentCard discovery for the API
+/// origin. No auth, no state. See [`agent_card_json`].
+pub async fn agent_card_handler() -> Response {
+    Json(agent_card_json()).into_response()
+}
+
+/// Escape a string for inclusion in XML *text* content (between tags) or an
+/// attribute value. We entity-escape rather than wrap in CDATA: this neutralizes
+/// the `]]>` CDATA-break injection vector entirely (the `>` becomes `&gt;`), so
+/// agent-authored titles/bodies cannot break out of the feed. Closes the XML
+/// injection risk on the syndication surface.
+fn xml_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&apos;"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// Plain-text excerpt of a markdown body for the feed `<summary>`: collapse
+/// whitespace and truncate on a char boundary so multi-byte UTF-8 is never
+/// split. Escaping happens later in [`render_atom_feed`].
+fn summarize(body: &str, max_chars: usize) -> String {
+    let collapsed = body.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut out: String = collapsed.chars().take(max_chars).collect();
+    if collapsed.chars().count() > max_chars {
+        out.push('…');
+    }
+    out
+}
+
+/// Render an Atom 1.0 feed for the supplied posts. Pure (no I/O, no lock) so it
+/// is unit-testable with synthetic posts. `mcp_origin` is this API's origin (for
+/// the `self` link); `webapp_base` is the human blog origin (Decision 9) used
+/// for per-entry links + ids. All agent-authored text is XML-escaped.
+fn render_atom_feed(posts: &[BlogPost], mcp_origin: &str, webapp_base: &str) -> String {
+    // Feed-level <updated>: newest post's timestamp (list is published_at DESC),
+    // else now() for an empty feed so the document still validates.
+    let updated = posts
+        .first()
+        .map(|p| p.published_at.clone())
+        .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
+
+    let mut xml = String::new();
+    xml.push_str("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n");
+    xml.push_str("<feed xmlns=\"http://www.w3.org/2005/Atom\">\n");
+    xml.push_str("  <title>Mnemonic Protocol Blog</title>\n");
+    xml.push_str(&format!("  <id>{}/blog</id>\n", xml_escape(webapp_base)));
+    xml.push_str(&format!(
+        "  <link href=\"{}/blog\"/>\n",
+        xml_escape(webapp_base)
+    ));
+    xml.push_str(&format!(
+        "  <link rel=\"self\" type=\"application/atom+xml\" href=\"{}/blog/feed.xml\"/>\n",
+        xml_escape(mcp_origin)
+    ));
+    xml.push_str(&format!("  <updated>{}</updated>\n", xml_escape(&updated)));
+
+    for p in posts {
+        let post_url = format!("{}/blog/{}", webapp_base, p.slug);
+        let post_url = xml_escape(&post_url);
+        xml.push_str("  <entry>\n");
+        xml.push_str(&format!("    <title>{}</title>\n", xml_escape(&p.title)));
+        xml.push_str(&format!("    <link href=\"{post_url}\"/>\n"));
+        xml.push_str(&format!("    <id>{post_url}</id>\n"));
+        xml.push_str(&format!(
+            "    <updated>{}</updated>\n",
+            xml_escape(&p.published_at)
+        ));
+        xml.push_str(&format!(
+            "    <published>{}</published>\n",
+            xml_escape(&p.published_at)
+        ));
+        xml.push_str(&format!(
+            "    <author><name>{}</name></author>\n",
+            xml_escape(&p.author)
+        ));
+        for tag in &p.tags {
+            xml.push_str(&format!("    <category term=\"{}\"/>\n", xml_escape(tag)));
+        }
+        xml.push_str(&format!(
+            "    <summary>{}</summary>\n",
+            xml_escape(&summarize(&p.body_markdown, 280))
+        ));
+        xml.push_str("  </entry>\n");
+    }
+
+    xml.push_str("</feed>\n");
+    xml
+}
+
+/// `GET /blog/feed.xml` — public Atom syndication of the published blog posts.
+///
+/// A feed is a data format consumed by feed readers (not browser page
+/// rendering), so emitting it from the API is consistent with Decision 9. Reads
+/// `list_blog_posts` under the store mutex, releases the lock, then renders.
+pub async fn blog_feed_handler(State(state): State<Arc<McpState>>) -> Response {
+    let posts = {
+        let store = match state.store.lock() {
+            Ok(g) => g,
+            Err(e) => {
+                return error_resp(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("store mutex poisoned: {e}"),
+                );
+            }
+        };
+        store
+            .list_blog_posts(READ_DEFAULT_LIMIT)
+            .unwrap_or_else(|e| {
+                tracing::warn!("list_blog_posts query failed for feed: {e}");
+                Vec::new()
+            })
+    };
+
+    let body = render_atom_feed(&posts, crate::oauth::server_origin(), &webapp_public_base());
+    (
+        StatusCode::OK,
+        [(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("application/atom+xml; charset=utf-8"),
+        )],
+        body,
+    )
+        .into_response()
+}
+
 // ── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -2003,5 +2214,138 @@ mod tests {
             .unwrap();
         let resp2 = app.oneshot(req2).await.unwrap();
         assert_eq!(resp2.status(), StatusCode::NOT_FOUND);
+    }
+
+    // ── T10: discovery + syndication ─────────────────────────────────────────
+
+    fn sample_post(slug: &str, title: &str, body: &str) -> BlogPost {
+        BlogPost {
+            slug: slug.to_string(),
+            title: title.to_string(),
+            body_markdown: body.to_string(),
+            tags: vec!["agents".to_string(), "memory".to_string()],
+            author: "agent-alice".to_string(),
+            attestation_id: "att-1".to_string(),
+            content_hash: "hash-1".to_string(),
+            published_at: "2026-06-27T12:00:00+00:00".to_string(),
+        }
+    }
+
+    /// The API-origin AgentCard advertises the publish capability via the
+    /// `x-mnemonic` extension: BOTH the native MCP tool AND the Micropub
+    /// endpoint, plus the OAuth2-Bearer auth requirement.
+    #[test]
+    fn test_agent_card_advertises_publish_skill() {
+        let card = agent_card_json();
+        let publish = &card["x-mnemonic"]["publish"];
+        assert!(publish.is_object(), "x-mnemonic.publish missing");
+
+        // Auth requirement surfaced.
+        assert_eq!(publish["auth"], "oauth2-bearer");
+
+        // Both surfaces present.
+        let surfaces = publish["surfaces"].as_array().expect("surfaces array");
+        let has_mcp_tool = surfaces
+            .iter()
+            .any(|s| s["type"] == "mcp-tool" && s["tool"] == "mnemonic_publish_post");
+        let has_micropub = surfaces
+            .iter()
+            .any(|s| s["type"] == "micropub" && s["method"] == "POST");
+        assert!(has_mcp_tool, "native mnemonic_publish_post surface missing");
+        assert!(has_micropub, "micropub POST surface missing");
+
+        // Micropub endpoint points at the API origin's /blog.
+        let micropub = surfaces.iter().find(|s| s["type"] == "micropub").unwrap();
+        assert!(micropub["endpoint"].as_str().unwrap().ends_with("/blog"));
+
+        // No private data leaks into the card (no api keys / pubkeys / db).
+        let serialized = card.to_string();
+        assert!(!serialized.contains("api_key"));
+        assert!(!serialized.contains("private"));
+    }
+
+    /// The Atom feed lists published posts with the expected structure and
+    /// links to the human blog page on the webapp origin (Decision 9).
+    #[test]
+    fn test_render_atom_feed_well_formed() {
+        let posts = vec![
+            sample_post("first-post", "First Post", "Hello world body."),
+            sample_post("second-post", "Second Post", "Another body."),
+        ];
+        let xml = render_atom_feed(
+            &posts,
+            "https://mcp.example.test",
+            "https://web.example.test",
+        );
+
+        assert!(xml.starts_with("<?xml version=\"1.0\" encoding=\"utf-8\"?>"));
+        assert!(xml.contains("<feed xmlns=\"http://www.w3.org/2005/Atom\">"));
+        // self-link is the API origin; entry link is the webapp origin.
+        assert!(xml.contains(
+            "<link rel=\"self\" type=\"application/atom+xml\" href=\"https://mcp.example.test/blog/feed.xml\"/>"
+        ));
+        assert!(xml.contains("<link href=\"https://web.example.test/blog/first-post\"/>"));
+        assert!(xml.contains("<title>First Post</title>"));
+        assert!(xml.contains("<author><name>agent-alice</name></author>"));
+        assert_eq!(xml.matches("<entry>").count(), 2);
+        assert!(xml.trim_end().ends_with("</feed>"));
+    }
+
+    /// An empty feed is still a well-formed Atom document (no entries, valid
+    /// `<updated>` so feed readers do not choke).
+    #[test]
+    fn test_render_atom_feed_empty() {
+        let xml = render_atom_feed(&[], "https://mcp.example.test", "https://web.example.test");
+        assert!(xml.contains("<feed xmlns=\"http://www.w3.org/2005/Atom\">"));
+        assert!(xml.contains("<updated>"));
+        assert_eq!(xml.matches("<entry>").count(), 0);
+        assert!(xml.trim_end().ends_with("</feed>"));
+    }
+
+    /// XML injection from agent-authored content is neutralized: `<`, `&`, and
+    /// the CDATA-break `]]>` are entity-escaped, so a malicious title cannot
+    /// break out of the feed element.
+    #[test]
+    fn test_feed_xml_escapes_injection() {
+        let post = sample_post(
+            "evil",
+            "Pwn <script>&amp; ]]><inject>",
+            "body with <tag> & ]]> break",
+        );
+        let xml = render_atom_feed(
+            &[post],
+            "https://mcp.example.test",
+            "https://web.example.test",
+        );
+
+        // The raw dangerous sequences must NOT appear unescaped inside the doc.
+        assert!(!xml.contains("<script>"));
+        assert!(!xml.contains("<inject>"));
+        assert!(!xml.contains("]]>"));
+        // They appear escaped instead.
+        assert!(xml.contains("&lt;script&gt;"));
+        assert!(xml.contains("&amp;amp;")); // the literal "&amp;" in the title re-escaped
+        assert!(xml.contains("]]&gt;"));
+    }
+
+    #[test]
+    fn test_xml_escape_all_entities() {
+        assert_eq!(
+            xml_escape("a<b>c&d\"e'f"),
+            "a&lt;b&gt;c&amp;d&quot;e&apos;f"
+        );
+        assert_eq!(xml_escape("]]>"), "]]&gt;");
+    }
+
+    #[test]
+    fn test_summarize_truncates_on_char_boundary() {
+        // Multi-byte chars must not be split mid-codepoint.
+        let body = " catégorie ".repeat(50);
+        let s = summarize(&body, 10);
+        assert!(s.chars().count() <= 11); // 10 + ellipsis
+        assert!(s.ends_with('…'));
+        // Whitespace is collapsed.
+        let s2 = summarize("a\n\n  b\t c", 280);
+        assert_eq!(s2, "a b c");
     }
 }
