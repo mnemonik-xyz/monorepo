@@ -20,12 +20,14 @@
 use serde::{Deserialize, Serialize};
 
 pub mod build;
+pub mod reconstruct;
 pub mod store;
 pub mod verify;
 
 pub use build::{
     build_step, build_trajectory_summary, build_verdict, StepInput, SummaryInput, VerdictInput,
 };
+pub use reconstruct::{step_from_cose, verdict_from_cose};
 pub use store::{InMemoryTrajectoryStore, StepRecord, TrajectoryStore, VerdictRecord};
 pub use verify::{
     build_report, trajectory_proofs, verdict_coverage, verify_chain, verify_checkpoint_chain,

@@ -915,31 +915,24 @@ fn tool_definitions() -> Value {
         arr.extend(serde_json::json!([
             {
                 "name": "mnemonic_attest_step",
-                "description": "Append one ordered, hash-linked step to an agent trajectory. Signs a STEP artifact (COSE_Sign1/Ed25519); seq and prev_hash auto-link to the trajectory head. Steps default to the local cache; the canonical store is Arweave bundles.",
+                "description": "Store one ordered, hash-linked trajectory step. NON-CUSTODIAL: the client signs the STEP artifact locally (COSE_Sign1/Ed25519 over canonical CBOR; build it with the SDK / mnemonic_core::trajectory::build_step) and submits the envelope as hex via `signed`. The server verifies the signature, enforces dense seq + prev_hash linkage to the trajectory head, and stores it. The server signs nothing; the producer identity is the COSE signer.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "trajectory_id": {"type": "string", "description": "Trajectory this step belongs to"},
-                        "content": {"type": "string", "description": "The step's content (plan, tool call, synthesis, ...)"},
-                        "seq": {"type": "integer", "description": "Optional explicit sequence number; defaults to head+1 (0 for a new trajectory)"},
+                        "signed": {"type": "string", "description": "Hex-encoded COSE_Sign1 STEP envelope, signed by the producing agent's own key. trajectory_id/seq/prev_hash live inside the signed payload."},
                     },
-                    "required": ["trajectory_id", "content"],
+                    "required": ["signed"],
                 },
             },
             {
                 "name": "mnemonic_attest_verdict",
-                "description": "Attach an independent judge's verdict (pass/concern/reject) to a step by its content_hash. Rejects self-judging (judge must differ from the step producer). Optionally binds an external correctness proof (zkML/TEE/opML/OCP/PRM) by hash via proof_ref/proof_kind.",
+                "description": "Store an INDEPENDENT judge's verdict over a step. NON-CUSTODIAL: the judge signs the VERDICT locally (pass/concern/reject, optional score/proof_ref) and submits the envelope as hex via `signed`. The server verifies the signature, enforces judge != producer, and stores it. The server signs nothing; the judge identity is the COSE signer.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "step_hash": {"type": "string", "description": "content_hash of the step being judged"},
-                        "status": {"type": "string", "enum": ["pass", "concern", "reject"], "description": "Verdict"},
-                        "score": {"type": "number", "description": "Optional PRM/quality score"},
-                        "proof_ref": {"type": "string", "description": "Optional hash of an external correctness proof"},
-                        "proof_kind": {"type": "string", "description": "prm|deterministic|zkml|tee|opml|ocp"},
-                        "rationale": {"type": "string", "description": "Optional human-readable rationale"},
+                        "signed": {"type": "string", "description": "Hex-encoded COSE_Sign1 VERDICT envelope, signed by an independent judge's own key (distinct from the step producer). step_hash/status/score/proof_ref live inside the signed payload."},
                     },
-                    "required": ["step_hash", "status"],
+                    "required": ["signed"],
                 },
             },
             {
@@ -1622,44 +1615,29 @@ async fn handle_tool_call(
         }
         #[cfg(feature = "trajectory-experimental")]
         "mnemonic_attest_step" => {
-            let tid = args["trajectory_id"]
-                .as_str()
-                .ok_or_else(|| JsonRpcError::simple(-32603, "trajectory_id required"))?;
-            let content = args["content"]
-                .as_str()
-                .ok_or_else(|| JsonRpcError::simple(-32603, "content required"))?;
-            let seq = args.get("seq").and_then(|v| v.as_u64());
+            // Non-custodial: the client signs the STEP locally and submits the
+            // COSE_Sign1 envelope as hex. The server only verifies + stores.
+            let signed = args["signed"].as_str().ok_or_else(|| {
+                JsonRpcError::simple(-32603, "signed (hex COSE envelope) required")
+            })?;
             let store = mnemonic_core::storage::trajectory_sqlite::SqliteTrajectoryStore::open(
                 std::path::Path::new(&trajectory_db_path()),
             )
             .map_err(|e| JsonRpcError::simple(-32603, e.to_string()))?;
-            let now = chrono::Utc::now().to_rfc3339();
-            crate::trajectory_tools::attest_step(&store, &state.keypair, tid, content, seq, &now)
+            crate::trajectory_tools::attest_step(&store, signed)
         }
         #[cfg(feature = "trajectory-experimental")]
         "mnemonic_attest_verdict" => {
-            let step_hash = args["step_hash"]
-                .as_str()
-                .ok_or_else(|| JsonRpcError::simple(-32603, "step_hash required"))?;
-            let status = args["status"]
-                .as_str()
-                .ok_or_else(|| JsonRpcError::simple(-32603, "status required"))?;
+            // Non-custodial: the judge signs the VERDICT locally; server verifies
+            // + enforces judge != producer + stores. Server signs nothing.
+            let signed = args["signed"].as_str().ok_or_else(|| {
+                JsonRpcError::simple(-32603, "signed (hex COSE envelope) required")
+            })?;
             let store = mnemonic_core::storage::trajectory_sqlite::SqliteTrajectoryStore::open(
                 std::path::Path::new(&trajectory_db_path()),
             )
             .map_err(|e| JsonRpcError::simple(-32603, e.to_string()))?;
-            let now = chrono::Utc::now().to_rfc3339();
-            crate::trajectory_tools::attest_verdict(
-                &store,
-                &state.keypair,
-                step_hash,
-                status,
-                args.get("score").and_then(|v| v.as_f64()).map(|f| f as f32),
-                args.get("proof_ref").and_then(|v| v.as_str()),
-                args.get("proof_kind").and_then(|v| v.as_str()),
-                args.get("rationale").and_then(|v| v.as_str()),
-                &now,
-            )
+            crate::trajectory_tools::attest_verdict(&store, signed)
         }
         #[cfg(feature = "trajectory-experimental")]
         "mnemonic_verify_trajectory" => {

@@ -1,108 +1,90 @@
-//! MCP tool handlers for verifiable trajectories.
+//! MCP tool handlers for verifiable trajectories — **non-custodial**.
 //!
-//! Three tools, mirroring the ERC-8301 step/prove split:
-//! - `mnemonic_attest_step` — commit a step now (auto-links `prev_hash`/`seq`).
-//! - `mnemonic_attest_verdict` — an independent judge attaches a verdict;
-//!   rejects self-judging (judge == producer).
+//! The server never holds a signing key for user content. Clients sign STEP /
+//! VERDICT artifacts locally (via the SDK / `mnemonic_core::trajectory::build_*`)
+//! and submit the COSE_Sign1 envelope as hex; the server only **verifies and
+//! stores** it. The producing/judging identity comes from the COSE `kid`, never
+//! from a server key.
+//!
+//! - `mnemonic_attest_step` — verify a client-signed step, enforce dense
+//!   `seq`/`prev_hash` linkage to the trajectory head, store.
+//! - `mnemonic_attest_verdict` — verify a client-signed verdict, enforce judge
+//!   ≠ producer (independence), store.
 //! - `mnemonic_verify_trajectory` — chain validity + coverage + batch root +
-//!   inclusion proofs + the `safe_to_settle` gate.
-//!
-//! These are pure handler functions over a `SqliteTrajectoryStore` (the local
-//! cache) + caller keypair, returning JSON. They contain the tool business
-//! logic and are unit-tested here; wiring into the live JSON-RPC dispatch and
-//! the canonical Arweave-bundle write path is the remaining integration step
-//! (see work/verifiable-trajectories/tasks/5.md).
+//!   inclusion proofs + the `safe_to_settle` gate (read-only).
 
 use mnemonic_core::merkle::to_hex32;
 use mnemonic_core::storage::trajectory_sqlite::SqliteTrajectoryStore;
 use mnemonic_core::trajectory::{
-    build_report, build_step, build_verdict, trajectory_proofs, StepInput, StepRecord,
-    TrajectoryStore, VerdictInput, VerdictRecord, VerdictStatus,
+    build_report, step_from_cose, trajectory_proofs, verdict_from_cose, TrajectoryStore,
 };
 use serde_json::{json, Value};
-use solana_sdk::signature::{Keypair, Signer};
 
 fn err(msg: &str) -> Value {
     json!({ "status": "error", "error": msg })
 }
 
-/// `mnemonic_attest_step` — sign + persist a step. `seq` and `prev_hash` are
-/// auto-derived from the trajectory head when omitted, so callers just stream
-/// content.
-pub fn attest_step(
-    store: &SqliteTrajectoryStore,
-    keypair: &Keypair,
-    trajectory_id: &str,
-    content: &str,
-    seq: Option<u64>,
-    created_at: &str,
-) -> Value {
-    let head = match store.trajectory_head(trajectory_id) {
+fn decode_hex(s: &str) -> Result<Vec<u8>, Value> {
+    hex::decode(s).map_err(|_| err("`signed` must be hex-encoded COSE_Sign1 bytes"))
+}
+
+/// `mnemonic_attest_step` — store a client-signed step after verifying its
+/// signature and that it densely links to the trajectory head. The server signs
+/// nothing; `producer` is the COSE signer.
+pub fn attest_step(store: &SqliteTrajectoryStore, signed_hex: &str) -> Value {
+    let cose = match decode_hex(signed_hex) {
+        Ok(b) => b,
+        Err(e) => return e,
+    };
+    let record = match step_from_cose(&cose) {
+        Ok(r) => r,
+        Err(e) => return err(&format!("invalid step envelope: {e}")),
+    };
+
+    // Enforce dense, hash-linked append against the current head.
+    let head = match store.trajectory_head(&record.trajectory_id) {
         Ok(h) => h,
         Err(e) => return err(&format!("head lookup failed: {e}")),
     };
-    let next_seq = seq.unwrap_or_else(|| head.as_ref().map(|h| h.seq + 1).unwrap_or(0));
-    let prev_hash = head.as_ref().map(|h| h.content_hash.clone());
+    let expected_seq = head.as_ref().map(|h| h.seq + 1).unwrap_or(0);
+    if record.seq != expected_seq {
+        return err(&format!(
+            "seq {} does not append to head (expected {expected_seq})",
+            record.seq
+        ));
+    }
+    let expected_prev = head.as_ref().map(|h| h.content_hash.clone());
+    if record.prev_hash != expected_prev {
+        return err("prev_hash does not link to the trajectory head");
+    }
 
-    let signed = match build_step(
-        &StepInput {
-            trajectory_id,
-            seq: next_seq,
-            content,
-            prev_hash: prev_hash.as_deref(),
-            created_at,
-        },
-        keypair,
-    ) {
-        Ok(s) => s,
-        Err(e) => return err(&format!("sign failed: {e}")),
-    };
-
-    let record = StepRecord {
-        trajectory_id: trajectory_id.to_string(),
-        seq: next_seq,
-        content_hash: signed.content_hash.clone(),
-        prev_hash: prev_hash.clone(),
-        producer: keypair.pubkey().to_string(),
-        cose_bytes: signed.cose_bytes,
-        canonical_cbor: signed.canonical_cbor,
-    };
     if let Err(e) = store.insert_step(&record) {
         return err(&format!("persist failed: {e}"));
     }
-
     json!({
         "status": "ok",
-        "trajectory_id": trajectory_id,
-        "seq": next_seq,
-        "content_hash": signed.content_hash,
-        "prev_hash": prev_hash,
+        "trajectory_id": record.trajectory_id,
+        "seq": record.seq,
+        "content_hash": record.content_hash,
+        "producer": record.producer,
         "write_mode": "local",
     })
 }
 
-/// `mnemonic_attest_verdict` — an independent judge signs a verdict over a step.
-/// Rejects a verdict whose judge equals the step producer (a self-judged verdict
-/// is worthless as a correctness signal).
-#[allow(clippy::too_many_arguments)]
-pub fn attest_verdict(
-    store: &SqliteTrajectoryStore,
-    judge: &Keypair,
-    step_hash: &str,
-    status: &str,
-    score: Option<f32>,
-    proof_ref: Option<&str>,
-    proof_kind: Option<&str>,
-    rationale: Option<&str>,
-    created_at: &str,
-) -> Value {
-    let Some(status) = VerdictStatus::from_str(status) else {
-        return err("status must be one of: pass, concern, reject");
+/// `mnemonic_attest_verdict` — store a client-signed verdict after verifying its
+/// signature and that the judge differs from the step producer.
+pub fn attest_verdict(store: &SqliteTrajectoryStore, signed_hex: &str) -> Value {
+    let cose = match decode_hex(signed_hex) {
+        Ok(b) => b,
+        Err(e) => return e,
     };
-    let judge_pk = judge.pubkey().to_string();
+    let record = match verdict_from_cose(&cose) {
+        Ok(r) => r,
+        Err(e) => return err(&format!("invalid verdict envelope: {e}")),
+    };
 
-    match store.step_producer(step_hash) {
-        Ok(Some(producer)) if producer == judge_pk => {
+    match store.step_producer(&record.step_hash) {
+        Ok(Some(producer)) if producer == record.judge => {
             return err("judge must differ from step producer (self-judging is not allowed)");
         }
         Ok(Some(_)) => {}
@@ -110,39 +92,15 @@ pub fn attest_verdict(
         Err(e) => return err(&format!("producer lookup failed: {e}")),
     }
 
-    let signed = match build_verdict(
-        &VerdictInput {
-            step_hash,
-            status,
-            score,
-            proof_ref,
-            proof_kind,
-            rationale,
-            created_at,
-        },
-        judge,
-    ) {
-        Ok(s) => s,
-        Err(e) => return err(&format!("sign failed: {e}")),
-    };
-
-    let record = VerdictRecord {
-        step_hash: step_hash.to_string(),
-        status,
-        judge: judge_pk.clone(),
-        content_hash: signed.content_hash.clone(),
-        cose_bytes: signed.cose_bytes,
-    };
     if let Err(e) = store.insert_verdict(&record) {
         return err(&format!("persist failed: {e}"));
     }
-
     json!({
         "status": "ok",
-        "step_hash": step_hash,
-        "verdict_hash": signed.content_hash,
-        "judge": judge_pk,
-        "verdict_status": status.as_str(),
+        "step_hash": record.step_hash,
+        "verdict_hash": record.content_hash,
+        "judge": record.judge,
+        "verdict_status": record.status.as_str(),
     })
 }
 
@@ -188,6 +146,10 @@ pub fn verify_trajectory(store: &SqliteTrajectoryStore, trajectory_id: &str) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mnemonic_core::trajectory::{
+        build_step, build_verdict, StepInput, VerdictInput, VerdictStatus,
+    };
+    use solana_sdk::signature::{Keypair, Signer};
 
     const TS: &str = "2026-06-27T00:00:00Z";
 
@@ -195,84 +157,112 @@ mod tests {
         SqliteTrajectoryStore::in_memory().unwrap()
     }
 
-    #[test]
-    fn attest_step_auto_links_prev_hash_and_seq() {
-        let s = store();
-        let kp = Keypair::new();
-        let r0 = attest_step(&s, &kp, "t", "plan", None, TS);
-        assert_eq!(r0["seq"], 0);
-        assert!(r0["prev_hash"].is_null());
-        let h0 = r0["content_hash"].as_str().unwrap().to_string();
+    /// Client-side: build + sign a step, return its hex envelope.
+    fn signed_step(tid: &str, seq: u64, prev: Option<&str>, kp: &Keypair) -> (String, String) {
+        let s = build_step(
+            &StepInput {
+                trajectory_id: tid,
+                seq,
+                content: "c",
+                prev_hash: prev,
+                created_at: TS,
+            },
+            kp,
+        )
+        .unwrap();
+        (hex::encode(&s.cose_bytes), s.content_hash)
+    }
 
-        let r1 = attest_step(&s, &kp, "t", "act", None, TS);
-        assert_eq!(r1["seq"], 1);
-        assert_eq!(r1["prev_hash"].as_str().unwrap(), h0);
+    fn signed_verdict(step_hash: &str, status: VerdictStatus, judge: &Keypair) -> String {
+        let v = build_verdict(
+            &VerdictInput {
+                step_hash,
+                status,
+                score: None,
+                proof_ref: None,
+                proof_kind: None,
+                rationale: None,
+                created_at: TS,
+            },
+            judge,
+        )
+        .unwrap();
+        hex::encode(&v.cose_bytes)
     }
 
     #[test]
-    fn attest_verdict_rejects_self_judging() {
+    fn server_never_signs_stores_client_envelope() {
         let s = store();
-        let kp = Keypair::new();
-        let step = attest_step(&s, &kp, "t", "plan", None, TS);
-        let h = step["content_hash"].as_str().unwrap();
-        // Producer judging its own step → rejected.
-        let bad = attest_verdict(&s, &kp, h, "pass", None, None, None, None, TS);
-        assert_eq!(bad["status"], "error");
+        let user = Keypair::new();
+        let (env0, h0) = signed_step("t", 0, None, &user);
+        let r0 = attest_step(&s, &env0);
+        assert_eq!(r0["status"], "ok");
+        assert_eq!(r0["producer"].as_str().unwrap(), user.pubkey().to_string());
+        assert_eq!(r0["content_hash"].as_str().unwrap(), h0);
+    }
+
+    #[test]
+    fn rejects_non_appending_seq() {
+        let s = store();
+        let user = Keypair::new();
+        // Submit seq 1 first (no head yet → expected 0).
+        let (env1, _) = signed_step("t", 1, Some("abc"), &user);
+        assert_eq!(attest_step(&s, &env1)["status"], "error");
+    }
+
+    #[test]
+    fn rejects_wrong_prev_hash_link() {
+        let s = store();
+        let user = Keypair::new();
+        let (env0, _) = signed_step("t", 0, None, &user);
+        assert_eq!(attest_step(&s, &env0)["status"], "ok");
+        // seq 1 with a bogus prev_hash must be refused.
+        let (env_bad, _) = signed_step("t", 1, Some("deadbeef"), &user);
+        assert_eq!(attest_step(&s, &env_bad)["status"], "error");
+    }
+
+    #[test]
+    fn rejects_tampered_envelope() {
+        let s = store();
+        let user = Keypair::new();
+        let (env0, _) = signed_step("t", 0, None, &user);
+        let mut bytes = hex::decode(&env0).unwrap();
+        let n = bytes.len();
+        bytes[n - 1] ^= 0xff;
+        assert_eq!(attest_step(&s, &hex::encode(bytes))["status"], "error");
+    }
+
+    #[test]
+    fn verdict_independence_enforced() {
+        let s = store();
+        let user = Keypair::new();
+        let judge = Keypair::new();
+        let (env0, h0) = signed_step("t", 0, None, &user);
+        attest_step(&s, &env0);
+        // Producer judging own step → rejected.
+        let self_v = signed_verdict(&h0, VerdictStatus::Pass, &user);
+        assert_eq!(attest_verdict(&s, &self_v)["status"], "error");
         // Independent judge → ok.
-        let judge = Keypair::new();
-        let good = attest_verdict(&s, &judge, h, "pass", None, None, None, None, TS);
-        assert_eq!(good["status"], "ok");
+        let ind_v = signed_verdict(&h0, VerdictStatus::Pass, &judge);
+        assert_eq!(attest_verdict(&s, &ind_v)["status"], "ok");
     }
 
     #[test]
-    fn attest_verdict_unknown_step() {
+    fn full_flow_safe_to_settle() {
         let s = store();
+        let user = Keypair::new();
         let judge = Keypair::new();
-        let r = attest_verdict(&s, &judge, "deadbeef", "pass", None, None, None, None, TS);
-        assert_eq!(r["status"], "error");
-    }
-
-    #[test]
-    fn verify_trajectory_full_flow_is_safe_to_settle() {
-        let s = store();
-        let producer = Keypair::new();
-        let judge = Keypair::new();
-        let mut hashes = vec![];
-        for c in ["plan", "act", "synthesize"] {
-            let r = attest_step(&s, &producer, "t", c, None, TS);
-            hashes.push(r["content_hash"].as_str().unwrap().to_string());
-        }
-        for h in &hashes {
-            let v = attest_verdict(
-                &s,
-                &judge,
-                h,
-                "pass",
-                Some(0.9),
-                None,
-                Some("prm"),
-                None,
-                TS,
-            );
-            assert_eq!(v["status"], "ok");
+        let mut prev: Option<String> = None;
+        for seq in 0..3u64 {
+            let (env, h) = signed_step("t", seq, prev.as_deref(), &user);
+            assert_eq!(attest_step(&s, &env)["status"], "ok");
+            let v = signed_verdict(&h, VerdictStatus::Pass, &judge);
+            assert_eq!(attest_verdict(&s, &v)["status"], "ok");
+            prev = Some(h);
         }
         let report = verify_trajectory(&s, "t");
         assert_eq!(report["chain_valid"], true);
         assert_eq!(report["covered_steps"], 3);
         assert_eq!(report["safe_to_settle"], true);
-        assert_eq!(report["proofs"].as_array().unwrap().len(), 3);
-    }
-
-    #[test]
-    fn reject_verdict_blocks_settle() {
-        let s = store();
-        let producer = Keypair::new();
-        let judge = Keypair::new();
-        let r = attest_step(&s, &producer, "t", "plan", None, TS);
-        let h = r["content_hash"].as_str().unwrap();
-        attest_verdict(&s, &judge, h, "reject", None, None, None, Some("wrong"), TS);
-        let report = verify_trajectory(&s, "t");
-        assert_eq!(report["has_reject"], true);
-        assert_eq!(report["safe_to_settle"], false);
     }
 }

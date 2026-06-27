@@ -170,6 +170,37 @@ Single-key caveat (recorded, not a bug): on a one-keypair operator,
 require a distinct judge identity — by design. Production participate-mode swaps
 the `SqliteTrajectoryStore` for `ArweaveStore` via `spawn_blocking`.
 
+---
+
+## 2026-06-27 — Correction: non-custodial — the server signs NOTHING
+
+The first dispatch wiring signed STEP/VERDICT artifacts with the operator's
+`state.keypair`. That was wrong: it violated the protocol's hard rule (the
+operator keypair must NEVER sign content authored by a different identity —
+`mcp/src/tools.rs` routing) and was the real reason the "single-key caveat"
+above appeared (producer == judge == operator → self-judge always fired).
+
+Fixed to the **non-custodial** model, matching `sign_memory`'s client-signing
+path: the client (producer/judge) signs locally with its OWN key and submits the
+COSE_Sign1 envelope as hex; the server only **verifies and stores**.
+
+- New `core::trajectory::{step_from_cose, verdict_from_cose}` (`reconstruct.rs`):
+  verify the signature, take the identity from the COSE `kid`, parse the signed
+  CBOR payload for the typed fields. Invalid signatures are rejected before any
+  write.
+- `mcp::trajectory_tools::{attest_step, attest_verdict}` now take a `signed` hex
+  envelope (no keypair argument). `attest_step` enforces dense `seq` +
+  `prev_hash` linkage to the head at write time; `attest_verdict` enforces judge
+  ≠ producer. The `signed` payload carries trajectory_id/seq/prev_hash (step) and
+  step_hash/status/score/proof_ref (verdict).
+- Manifest input schemas updated to a single `signed` field; dispatch no longer
+  references `state.keypair`.
+
+Result: nothing in the trajectory path is signed by the server. Producer and
+judge identities are whatever keys signed the envelopes, exactly as intended.
+The earlier "single-key caveat" is therefore obsolete — independence now comes
+from two real client identities, not from the server refusing its own key.
+
 **Downstream.** Task 4 pivots from "SQLite columns" to "Arweave-bundle step
 store + stateless verify"; SqliteStore demoted to optional cache.
 
