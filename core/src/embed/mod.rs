@@ -31,10 +31,30 @@ pub struct FastEmbedder {
 
 #[cfg(feature = "local-embed")]
 impl FastEmbedder {
+    // fastembed-rs 5.x defaults its cache to the literal relative path
+    // `./.fastembed_cache`, resolved against the process CWD. That works
+    // for `cargo run` from the repo but breaks when a GUI MCP host
+    // (Cursor, Claude Desktop) spawns the binary from `/` — the model
+    // lookup misses and the in-app context can't complete a fresh
+    // download. We compute an absolute path here so the binary is
+    // CWD-independent.
+    fn resolve_cache_dir() -> std::path::PathBuf {
+        if let Ok(p) = std::env::var("FASTEMBED_CACHE_DIR") {
+            return std::path::PathBuf::from(p);
+        }
+        dirs::cache_dir()
+            .unwrap_or_else(std::env::temp_dir)
+            .join("mnemonic")
+            .join("fastembed")
+    }
+
     pub fn try_new() -> Result<Self, String> {
         use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
-        let mut model = TextEmbedding::try_new(InitOptions::new(EmbeddingModel::AllMiniLML6V2))
-            .map_err(|e| format!("fastembed init failed: {e}"))?;
+        let cache_dir = Self::resolve_cache_dir();
+        let mut model = TextEmbedding::try_new(
+            InitOptions::new(EmbeddingModel::AllMiniLML6V2).with_cache_dir(cache_dir),
+        )
+        .map_err(|e| format!("fastembed init failed: {e}"))?;
 
         let sample = model
             .embed(vec!["test"], None)
@@ -372,5 +392,42 @@ mod tests {
         let e = MockEmbedder::new(0);
         let v = e.embed("test");
         assert!(v.is_empty());
+    }
+
+    // Regression test for the GUI-spawned-from-`/` failure: an absolute
+    // cache_dir must be produced even when the env var is unset, so the
+    // binary doesn't fall back to fastembed-rs's CWD-relative default.
+    #[cfg(feature = "local-embed")]
+    #[test]
+    fn fastembed_cache_dir_resolution() {
+        // Save and clear the env var so we exercise the default branch
+        // deterministically. SAFETY: tests in the same process share env;
+        // we restore on the way out.
+        let prev = std::env::var("FASTEMBED_CACHE_DIR").ok();
+        // SAFETY: single-threaded test; no other code reads this var concurrently.
+        unsafe { std::env::remove_var("FASTEMBED_CACHE_DIR") };
+
+        let default_dir = super::FastEmbedder::resolve_cache_dir();
+        assert!(
+            default_dir.is_absolute(),
+            "default cache_dir must be absolute, got {default_dir:?}"
+        );
+
+        // SAFETY: same justification as above.
+        unsafe { std::env::set_var("FASTEMBED_CACHE_DIR", "/tmp/mnemonic-test-cache") };
+        let env_dir = super::FastEmbedder::resolve_cache_dir();
+        assert_eq!(
+            env_dir,
+            std::path::PathBuf::from("/tmp/mnemonic-test-cache"),
+            "FASTEMBED_CACHE_DIR must take precedence over the default"
+        );
+
+        // Restore.
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var("FASTEMBED_CACHE_DIR", v),
+                None => std::env::remove_var("FASTEMBED_CACHE_DIR"),
+            }
+        }
     }
 }
