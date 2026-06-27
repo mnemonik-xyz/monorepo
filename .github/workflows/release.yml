@@ -55,11 +55,41 @@ jobs:
 
       - name: Install dependencies (cross aarch64)
         if: matrix.cross == true
-        # `libdbus-1-dev:arm64` via multi-arch — same libdbus-sys requirement
-        # as the native path. If multi-arch install drifts, the build will
-        # fail but `continue-on-error: true` at job level keeps the release
-        # pipeline moving (macOS is the v1 scope).
+        # Ubuntu noble runners default to `/etc/apt/sources.list.d/ubuntu.sources`
+        # (DEB822) pointing only at archive/security.ubuntu.com, which serve
+        # amd64-only. After `dpkg --add-architecture arm64`, plain `apt-get
+        # update` 404s on every `binary-arm64/Packages` URL because the arm64
+        # indexes live on ports.ubuntu.com, not security.ubuntu.com. We
+        # rewrite the sources deterministically before adding the arch:
+        # amd64 keeps the existing mirrors, arm64 gets its own DEB822 file
+        # pointing at ubuntu-ports. `continue-on-error: true` at job level
+        # remains as a safety net.
         run: |
+          set -euo pipefail
+          sudo rm -f /etc/apt/sources.list /etc/apt/sources.list.d/ubuntu.sources
+          sudo tee /etc/apt/sources.list.d/amd64.sources >/dev/null <<'EOF'
+          Types: deb
+          URIs: http://archive.ubuntu.com/ubuntu/
+          Suites: noble noble-updates noble-backports
+          Components: main universe restricted multiverse
+          Architectures: amd64
+          Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+
+          Types: deb
+          URIs: http://security.ubuntu.com/ubuntu/
+          Suites: noble-security
+          Components: main universe restricted multiverse
+          Architectures: amd64
+          Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+          EOF
+          sudo tee /etc/apt/sources.list.d/arm64.sources >/dev/null <<'EOF'
+          Types: deb
+          URIs: http://ports.ubuntu.com/ubuntu-ports/
+          Suites: noble noble-updates noble-backports noble-security
+          Components: main universe restricted multiverse
+          Architectures: arm64
+          Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+          EOF
           sudo dpkg --add-architecture arm64
           sudo apt-get update
           sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu pkg-config perl make libdbus-1-dev:arm64
