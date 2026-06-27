@@ -27,7 +27,7 @@ use std::sync::Arc;
 
 use axum::{
     body::Body,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::{header, HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     Extension, Json,
@@ -38,7 +38,9 @@ use crypto_box::{
 };
 use lru::LruCache;
 use mnemonic_core::codec::{hash::hash_bytes, sign::verify_artifact};
-use mnemonic_core::storage::{AttestationStore, Visibility, WriteMode};
+use mnemonic_core::storage::{
+    AttestationStore, PublicArtifact, SearchResult, Visibility, WriteMode,
+};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 use uuid::Uuid;
@@ -1300,6 +1302,267 @@ pub async fn public_stats_handler(State(state): State<Arc<McpState>>) -> Respons
     }
 
     Json(body).into_response()
+}
+
+// ── Public read routes — Ledger / Analytics / Blog (webapp-rethink T8) ───────
+//
+// Three unauthenticated GET surfaces consumed cross-origin by the webapp
+// (`mnemonik.xyz`, localhost). They render NO HTML (Decision 9 — the mcp
+// server is headless JSON); HTML/SEO is produced webapp-side. All rows come
+// from the Task-7 core queries on `SqliteStore`; no payment gating, no owner
+// scope leaks.
+//
+// Privacy invariant (Decision 6): `/artifacts` exposes `visibility = public`
+// rows ONLY. The plain list uses `list_public_artifacts` (public-only by
+// construction); the `?q=` content-search uses `search(.., owner = None,
+// Some(Visibility::Public), ..)` — the cross-owner *public pool* path. Neither
+// can surface a private or NULL-owner row.
+//
+// Lock discipline (CLAUDE.md): `rusqlite::Connection` is `!Send`. Every handler
+// performs any slow/`async` work (embedding the query) BEFORE taking the
+// `std::sync::Mutex` guard, then runs an await-free critical section and drops
+// the guard before serialising the response.
+
+/// Default / max page size for `GET /artifacts` and `GET /blog`. The max
+/// clamps a hostile `?limit=` so an anonymous caller cannot ask the node to
+/// materialise an unbounded result set.
+const READ_DEFAULT_LIMIT: usize = 50;
+const READ_MAX_LIMIT: usize = 200;
+
+/// Query params for `GET /artifacts?q=&limit=`.
+#[derive(Debug, Deserialize)]
+pub struct ArtifactsQuery {
+    /// Optional content search. When present, routes through the cosine
+    /// `search` path restricted to the public pool; when absent, the plain
+    /// newest-first public listing is returned.
+    #[serde(default)]
+    pub q: Option<String>,
+    /// Optional page-size override; clamped to `[1, READ_MAX_LIMIT]`.
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+/// Project a cross-owner `SearchResult` down to the `PublicArtifact` wire
+/// shape so the `?q=` search path and the plain-list path emit byte-identical
+/// row shapes. Drops `visibility` (always `Public` here by the query filter)
+/// and `relevance_score` (not part of the Ledger contract).
+fn public_artifact_from_search(r: SearchResult) -> PublicArtifact {
+    PublicArtifact {
+        attestation_id: r.attestation_id,
+        content: r.content,
+        content_hash: r.content_hash,
+        tags: r.tags,
+        solana_tx: r.solana_tx,
+        arweave_tx: r.arweave_tx,
+        created_at: r.created_at,
+        write_mode: r.write_mode,
+    }
+}
+
+/// `GET /artifacts?q=&limit=` — public Evidence Ledger listing.
+///
+/// Returns `{ artifacts: [PublicArtifact], total }`. Public-visibility rows
+/// ONLY (Decision 6). With `?q=`, runs cosine search over the cross-owner
+/// public pool; without it, returns the newest-first public listing. On a
+/// transient SQLite error we log and serve an empty list with 200 rather than
+/// 5xx the public page (mirrors `public_stats_handler`).
+pub async fn artifacts_handler(
+    State(state): State<Arc<McpState>>,
+    Query(params): Query<ArtifactsQuery>,
+) -> Response {
+    let limit = params
+        .limit
+        .unwrap_or(READ_DEFAULT_LIMIT)
+        .clamp(1, READ_MAX_LIMIT);
+    let query = params.q.as_deref().map(str::trim).filter(|s| !s.is_empty());
+
+    // Embed the search query OUTSIDE the store lock — `embed` is synchronous
+    // but potentially slow (ONNX inference in production), and the rusqlite
+    // guard must never wrap slow work.
+    let query_emb = query.map(|text| state.embedder.embed(text));
+
+    let artifacts: Vec<PublicArtifact> = {
+        let store = match state.store.lock() {
+            Ok(g) => g,
+            Err(e) => {
+                return error_resp(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("store mutex poisoned: {e}"),
+                );
+            }
+        };
+        let result = match &query_emb {
+            // Content search → cross-owner cosine search restricted to the
+            // public pool. `owner = None` paired with
+            // `Some(Visibility::Public)` is the trait-mandated safe pairing
+            // (never exposes private rows).
+            Some(emb) => store
+                .search(emb, None, Some(Visibility::Public), limit)
+                .map(|rows| rows.into_iter().map(public_artifact_from_search).collect()),
+            // Plain list → newest-first public-only chronological listing.
+            None => store.list_public_artifacts(limit),
+        };
+        match result {
+            Ok(rows) => rows,
+            Err(e) => {
+                tracing::warn!("artifacts query failed: {e}");
+                Vec::new()
+            }
+        }
+    };
+
+    let total = artifacts.len();
+    Json(serde_json::json!({ "artifacts": artifacts, "total": total })).into_response()
+}
+
+/// Query params for `GET /analytics/attestations?range=`.
+#[derive(Debug, Deserialize)]
+pub struct AnalyticsQuery {
+    /// `30d` | `90d` | `12m` | `all` (or absent). Unrecognised values fall
+    /// back to all-time so the public page never 400s on a stray param.
+    #[serde(default)]
+    pub range: Option<String>,
+}
+
+/// Map a `range` token to an inclusive ISO-8601 lower bound on `created_at`.
+/// `None` means "all time" (no lower bound). The bound is rendered with the
+/// same `to_rfc3339()` format the persistence path uses, so the SQL
+/// `created_at >= ?1` lexicographic comparison is well-defined.
+fn range_to_since(range: Option<&str>) -> Option<String> {
+    let days = match range {
+        Some("30d") => 30,
+        Some("90d") => 90,
+        Some("12m") => 365,
+        // "all", absent, or any unrecognised value → all-time.
+        _ => return None,
+    };
+    Some((chrono::Utc::now() - chrono::Duration::days(days)).to_rfc3339())
+}
+
+/// `GET /analytics/attestations?range=` — attestation traction over time.
+///
+/// Returns `{ buckets:[{date,on_node,on_chain}], total_on_node,
+/// total_on_chain, unique_users }`. Buckets are sparse (days with no rows are
+/// absent — the client fills gaps for charting). `unique_users` is the
+/// all-time distinct-owner count (`public_stats`); core exposes no
+/// range-scoped distinct-owner query, so this field is range-independent by
+/// design. Aggregate counts only — never exposes row content.
+pub async fn analytics_attestations_handler(
+    State(state): State<Arc<McpState>>,
+    Query(params): Query<AnalyticsQuery>,
+) -> Response {
+    let since = range_to_since(params.range.as_deref());
+
+    let (buckets, unique_users) = {
+        let store = match state.store.lock() {
+            Ok(g) => g,
+            Err(e) => {
+                return error_resp(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("store mutex poisoned: {e}"),
+                );
+            }
+        };
+        let buckets = store
+            .attestation_timeline(since.as_deref())
+            .unwrap_or_else(|e| {
+                tracing::warn!("attestation_timeline query failed: {e}");
+                Vec::new()
+            });
+        let unique_users = store.public_stats().map(|s| s.unique_users).unwrap_or(0);
+        (buckets, unique_users)
+    };
+
+    let total_on_node: i64 = buckets.iter().map(|b| b.on_node).sum();
+    let total_on_chain: i64 = buckets.iter().map(|b| b.on_chain).sum();
+
+    Json(serde_json::json!({
+        "buckets": buckets,
+        "total_on_node": total_on_node,
+        "total_on_chain": total_on_chain,
+        "unique_users": unique_users,
+    }))
+    .into_response()
+}
+
+/// Query params for `GET /blog?limit=`.
+#[derive(Debug, Deserialize)]
+pub struct BlogQuery {
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+/// `GET /blog?limit=` — list public blog posts newest-first.
+///
+/// Returns `{ posts: [BlogPost] }`. On a transient SQLite error we log and
+/// serve an empty list with 200 (the page stays alive).
+pub async fn blog_list_handler(
+    State(state): State<Arc<McpState>>,
+    Query(params): Query<BlogQuery>,
+) -> Response {
+    let limit = params
+        .limit
+        .unwrap_or(READ_DEFAULT_LIMIT)
+        .clamp(1, READ_MAX_LIMIT);
+
+    let posts = {
+        let store = match state.store.lock() {
+            Ok(g) => g,
+            Err(e) => {
+                return error_resp(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("store mutex poisoned: {e}"),
+                );
+            }
+        };
+        store.list_blog_posts(limit).unwrap_or_else(|e| {
+            tracing::warn!("list_blog_posts query failed: {e}");
+            Vec::new()
+        })
+    };
+
+    Json(serde_json::json!({ "posts": posts })).into_response()
+}
+
+/// `GET /blog/:slug` — fetch a single public blog post.
+///
+/// Returns `{ post: BlogPost }` on hit; `404 { error, slug }` on an unknown
+/// slug. A transient SQLite error is also surfaced as 404 (treated as "not
+/// found") so the public page falls back gracefully rather than 5xx'ing.
+pub async fn blog_post_handler(
+    State(state): State<Arc<McpState>>,
+    Path(slug): Path<String>,
+) -> Response {
+    let lookup = {
+        let store = match state.store.lock() {
+            Ok(g) => g,
+            Err(e) => {
+                return error_resp(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("store mutex poisoned: {e}"),
+                );
+            }
+        };
+        store.get_blog_post(&slug)
+    };
+
+    match lookup {
+        Ok(Some(post)) => Json(serde_json::json!({ "post": post })).into_response(),
+        Ok(None) => blog_post_not_found(&slug),
+        Err(e) => {
+            tracing::warn!("get_blog_post query failed: {e}");
+            blog_post_not_found(&slug)
+        }
+    }
+}
+
+/// Uniform 404 body for the blog-detail route.
+fn blog_post_not_found(slug: &str) -> Response {
+    (
+        StatusCode::NOT_FOUND,
+        Json(serde_json::json!({ "error": "blog post not found", "slug": slug })),
+    )
+        .into_response()
 }
 
 /// Uniform 404 body for every "ticket missing / expired / consumed" path so a

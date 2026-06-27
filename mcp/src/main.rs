@@ -1030,6 +1030,19 @@ async fn run_http(
         .route("/chat", post(chat::chat_handler))
         .route("/admin/stats", get(admin_stats))
         .route("/stats", get(api::public_stats_handler))
+        // ── Public read surface (webapp-rethink T8, Decision 9) ──────────────
+        // Unauthenticated JSON read endpoints backing the Ledger / Analytics /
+        // Blog pages. Registered on the base router so they inherit the global
+        // `.layer(cors)` (allows the webapp origin + localhost via
+        // `cors_policy::is_allowed_cors_origin`) and carry NO bearer-auth
+        // middleware. `/artifacts` is public-visibility ONLY (Decision 6).
+        .route("/artifacts", get(api::artifacts_handler))
+        .route(
+            "/analytics/attestations",
+            get(api::analytics_attestations_handler),
+        )
+        .route("/blog", get(api::blog_list_handler))
+        .route("/blog/{slug}", get(api::blog_post_handler))
         .route("/download-knowledge", get(chat::download_knowledge_handler))
         .route(
             "/health",
