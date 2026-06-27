@@ -37,6 +37,8 @@ pub enum ArtifactType {
     Receipt,
     #[serde(rename = "memory")]
     Memory,
+    #[serde(rename = "post")]
+    Post,
 }
 
 impl ArtifactType {
@@ -47,6 +49,7 @@ impl ArtifactType {
             Self::AgentState => "agent.state",
             Self::Receipt => "receipt",
             Self::Memory => "memory",
+            Self::Post => "post",
         }
     }
 
@@ -58,6 +61,7 @@ impl ArtifactType {
             "agent.state" => Some(Self::AgentState),
             "receipt" => Some(Self::Receipt),
             "memory" => Some(Self::Memory),
+            "post" => Some(Self::Post),
             _ => None,
         }
     }
@@ -219,6 +223,48 @@ pub const MEMORY_V1: ArtifactSchema = ArtifactSchema {
     ],
 };
 
+/// post.v1 -- a blog post IS a signed PUBLIC attestation (Decision 5 / 8).
+///
+/// Reuses the same CBOR/COSE_Sign1/blake3 pipeline as every other artifact:
+/// there is no parallel post store, and authorship is provable via the
+/// COSE_Sign1 Ed25519 signer. The post body is carried in the standard
+/// `content` field (same slot `sign_memory` uses), so `content_hash` commits
+/// to the rendered-markdown source exactly as for a memory. The post-specific
+/// fields — `title`, `slug`, `published_at`, and the optional human-readable
+/// `author` — sit alongside it; `producer` remains the cryptographic signer
+/// identity (distinct from the display `author`).
+pub const POST_V1: ArtifactSchema = ArtifactSchema {
+    artifact_type: ArtifactType::Post,
+    version: 1,
+    required_fields: &[
+        "artifact_id",
+        "type",
+        "schema_version",
+        "content",
+        "producer",
+        "created_at",
+        "title",
+        "slug",
+        "published_at",
+    ],
+    optional_fields: &["parents", "metadata", "tags", "author"],
+    cbor_field_order: &[
+        "artifact_id",
+        "type",
+        "schema_version",
+        "title",
+        "slug",
+        "content",
+        "author",
+        "published_at",
+        "metadata",
+        "parents",
+        "tags",
+        "created_at",
+        "producer",
+    ],
+};
+
 /// Look up schema by type string and version.
 pub fn get_schema(artifact_type: &str, version: u32) -> Option<&'static ArtifactSchema> {
     match (artifact_type, version) {
@@ -227,6 +273,7 @@ pub fn get_schema(artifact_type: &str, version: u32) -> Option<&'static Artifact
         ("agent.state", 1) => Some(&AGENT_STATE_V1),
         ("receipt", 1) => Some(&RECEIPT_V1),
         ("memory", 1) => Some(&MEMORY_V1),
+        ("post", 1) => Some(&POST_V1),
         _ => None,
     }
 }
@@ -260,8 +307,10 @@ mod tests {
         assert!(get_schema("agent.state", 1).is_some());
         assert!(get_schema("receipt", 1).is_some());
         assert!(get_schema("memory", 1).is_some());
+        assert!(get_schema("post", 1).is_some());
         assert!(get_schema("unknown", 1).is_none());
         assert!(get_schema("rag.context", 2).is_none());
+        assert!(get_schema("post", 2).is_none());
     }
 
     #[test]
@@ -286,11 +335,42 @@ mod tests {
     #[test]
     fn test_artifact_type_strings() {
         assert_eq!(ArtifactType::RagContext.as_str(), "rag.context");
+        assert_eq!(ArtifactType::Post.as_str(), "post");
         assert_eq!(
             ArtifactType::from_str("receipt"),
             Some(ArtifactType::Receipt)
         );
+        assert_eq!(ArtifactType::from_str("post"), Some(ArtifactType::Post));
         assert_eq!(ArtifactType::from_str("invalid"), None);
+    }
+
+    #[test]
+    fn test_post_v1_validates_required_fields() {
+        // A POST_V1 artifact missing a post-specific required field is rejected.
+        let full = serde_json::json!({
+            "artifact_id": "art:post-1",
+            "type": "post",
+            "schema_version": 1,
+            "content": "# Hello\n\nbody markdown",
+            "producer": "did:sol:abc",
+            "created_at": "2026-06-27T00:00:00Z",
+            "title": "Hello",
+            "slug": "hello",
+            "published_at": "2026-06-27T00:00:00Z",
+        });
+        assert!(validate_artifact(&full, &POST_V1).is_ok());
+
+        let missing_slug = serde_json::json!({
+            "artifact_id": "art:post-1",
+            "type": "post",
+            "schema_version": 1,
+            "content": "body",
+            "producer": "did:sol:abc",
+            "created_at": "2026-06-27T00:00:00Z",
+            "title": "Hello",
+            "published_at": "2026-06-27T00:00:00Z",
+        });
+        assert!(validate_artifact(&missing_slug, &POST_V1).is_err());
     }
 
     #[test]
@@ -301,6 +381,7 @@ mod tests {
             &AGENT_STATE_V1,
             &RECEIPT_V1,
             &MEMORY_V1,
+            &POST_V1,
         ] {
             for &field in schema.required_fields {
                 assert!(

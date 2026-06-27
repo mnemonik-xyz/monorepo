@@ -234,6 +234,41 @@ mod tests {
     }
 
     #[test]
+    fn test_post_v1_sign_verify_roundtrip() {
+        // A blog post IS a signed public attestation: it must round-trip
+        // through canonical CBOR + COSE_Sign1 + blake3 exactly like any other
+        // artifact, with the post-specific fields preserved in the payload.
+        let kp = Keypair::new();
+        let post = serde_json::json!({
+            "artifact_id": "art:post:hello-world",
+            "type": "post",
+            "schema_version": 1,
+            "content": "# Hello World\n\nThis is the **body** in markdown.",
+            "producer": kp.pubkey().to_string(),
+            "created_at": "2026-06-27T12:00:00Z",
+            "title": "Hello World",
+            "slug": "hello-world",
+            "author": "agent-zero",
+            "published_at": "2026-06-27T12:00:00Z",
+            "tags": ["intro", "demo"],
+        });
+        let signed = sign_artifact(&post, &POST_V1, &kp).unwrap();
+        let result = verify_artifact(&signed.cose_bytes, Some(&signed.content_hash)).unwrap();
+        assert!(result.valid, "POST_V1 must verify");
+        assert_eq!(result.signer, kp.pubkey().to_string());
+
+        // Post-specific fields survive the CBOR round-trip.
+        let recovered = crate::codec::canonical::from_canonical_cbor(&result.payload).unwrap();
+        assert_eq!(recovered["title"], "Hello World");
+        assert_eq!(recovered["slug"], "hello-world");
+        assert_eq!(recovered["author"], "agent-zero");
+        assert_eq!(
+            recovered["content"],
+            "# Hello World\n\nThis is the **body** in markdown."
+        );
+    }
+
+    #[test]
     fn test_all_schemas_sign_verify() {
         let kp = Keypair::new();
         for (schema, name) in [
