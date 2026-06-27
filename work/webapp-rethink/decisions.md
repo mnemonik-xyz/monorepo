@@ -104,3 +104,21 @@ Remaining minors accepted (stylistic plain-text paths in some tasks); no stale
 `balance`/`both` references remain. Note: the tech-spec "Implementation Tasks"
 section keeps its coarse wave grouping; the authoritative execution waves are the
 per-task frontmatter `wave:` values updated above.
+
+## 2026-06-27 — Architecture: separate webapp from mcp server (user request)
+
+User asked whether webapp can be deployed separately from the mcp server. Finding:
+**it already is.** Webapp consumes the API via `VITE_MCP_BASE` (`webapp/src/lib/api.ts`),
+mcp does not serve the webapp (no ServeDir in `main.rs`), and `cors_policy.rs` already
+allows `https://mnemonik.xyz`. Data + publish plane is cleanly headless JSON.
+
+Decisions recorded in tech-spec:
+- **Decision 9 (new):** webapp = standalone static deploy; mcp = headless JSON+OAuth API
+  on its own origin. All new routes are JSON only; mcp renders NO HTML. New read routes
+  must be covered by the existing webapp-origin CORS allowance.
+- **Decision 4 (revised):** crawlable `/blog/:slug` is now produced **webapp-side at build
+  time** (prerender each post by fetching `GET /blog`), not via Rust SSR. Publish webhook
+  (`BLOG_REBUILD_HOOK`, mcp-side, optional) triggers a webapp rebuild for freshness.
+  Sitemap generated at webapp build. Supersedes the original Rust-SSR plan.
+- **Task 13 rewritten** accordingly (webapp prerender + build-time sitemap + publish-hook
+  ping); the mcp server only pings the deploy hook, no HTML.

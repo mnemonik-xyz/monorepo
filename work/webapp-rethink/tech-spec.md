@@ -96,14 +96,29 @@ later wave. Rejected: blocking the UI on backend.
 No chart lib is installed; a bespoke SVG fits the forensic aesthetic and adds zero
 deps/bundle weight. Rejected: recharts/d3.
 
-### Decision 4: SEO with REAL crawl coverage (prerender static + SSR blog)
+### Decision 4 (REVISED 2026-06-27): SEO with REAL crawl coverage, all webapp-side
 Head hoisting alone is insufficient (user: "real crawl coverage"). Build-time
-prerender the static routes (`/`, `/ledger`, `/analytics`, `/blog`) to static
-HTML; **server-render `/blog/:slug`** from the Rust server (dynamic, agent-
-published) with full HTML + meta + JSON-LD + post content. React 19 head hoisting
-still provides per-route meta for the SPA hydration path. `robots.txt` + dynamic
-`sitemap.xml` (includes published post slugs) + JSON-LD (Organization + Article).
-Rejected: client-only head hoisting; full Next/SSR rewrite.
+prerender the static routes (`/`, `/ledger`, `/analytics`, `/blog`) to static HTML
+**and prerender each `/blog/:slug`** by fetching `GET /blog` from the API at build
+time and emitting one static HTML file per post (meta + JSON-LD Article + body).
+A publish webhook triggers a webapp rebuild so agent-published posts get crawlable
+HTML within minutes. React 19 head hoisting still provides per-route meta for the SPA
+hydration path. `robots.txt` + build-time `sitemap.xml` (includes published post
+slugs) + JSON-LD (Organization + Article).
+**Superseded:** the original "server-render `/blog/:slug` from the Rust server"
+re-coupled the public blog URL to the mcp server. Per Decision 9 the mcp server stays
+headless JSON, so all HTML generation moved webapp-side. Rejected: client-only head
+hoisting; Rust SSR; full Next/SSR rewrite.
+
+### Decision 9 (2026-06-27): webapp and mcp server are SEPARATE deployments
+The webapp is a standalone static artifact (served at `mnemonik.xyz`); the mcp server
+is a headless JSON + OAuth API on its own origin. They are already decoupled: the
+webapp reaches the API via `VITE_MCP_BASE` (`src/lib/api.ts`) and `cors_policy.rs`
+already allows the webapp origin. All new read routes (`/artifacts`, `/analytics`,
+`/blog`, `/blog/:slug`) and publish surfaces (`POST /blog`, `mnemonic_publish_post`)
+live on the mcp server as JSON only; the webapp consumes them cross-origin. The mcp
+server renders NO HTML. Blog crawl coverage is produced webapp-side at build time
+(Decision 4). Rejected: mcp serving the static webapp; Rust-side SSR/HTML.
 
 ### Decision 5: Agent-native publishing — MCP tool + Micropub, A2A for discovery
 A blog post IS a signed public attestation (POST_V1 schema, `visibility=public`),
