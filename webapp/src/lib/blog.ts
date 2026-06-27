@@ -54,7 +54,7 @@ async function getJson<T>(path: string): Promise<T | null> {
 export async function fetchBlogPosts(): Promise<BlogList> {
   const live = await getJson<{ posts: BlogPost[] }>("/blog");
   if (live && Array.isArray(live.posts)) {
-    return { posts: live.posts, sample: false };
+    return { posts: live.posts.map(deriveBlogPost), sample: false };
   }
   return { posts: sampleBlogPosts(), sample: true };
 }
@@ -65,10 +65,77 @@ export async function fetchBlogPost(slug: string): Promise<BlogDetail> {
     `/blog/${encodeURIComponent(slug)}`,
   );
   if (live && live.post) {
-    return { post: live.post, sample: false };
+    return { post: deriveBlogPost(live.post), sample: false };
   }
   const post = sampleBlogPosts().find((p) => p.slug === slug) ?? null;
   return { post, sample: true };
+}
+
+/* -------------------------------------------------------------------------- */
+/*                         Derived view fields                                */
+/*                                                                            */
+/* The core `blog_posts` row carries only title/body/author/tags/published_at */
+/* (decisions.md, Task-14 audit M2): it has no summary, reading_minutes, or    */
+/* agent column. The webapp needs all three — summary feeds the meta           */
+/* description + Article JSON-LD (Decision 4 crawl coverage), reading_minutes   */
+/* and the agent badge are shown on the post. When the backend omits them we    */
+/* derive them here, so BOTH the SPA (fetch*) and the build-time prerender      */
+/* (entry-server `renderBlogPost`) render populated meta from one code path.    */
+/* -------------------------------------------------------------------------- */
+
+const WORDS_PER_MINUTE = 200;
+const SUMMARY_MAX_CHARS = 160;
+
+/** First prose paragraph of the body, capped to ~160 chars for a meta description. */
+function deriveSummary(bodyMarkdown: string): string {
+  const paragraphs = bodyMarkdown
+    .split(/\n\s*\n/) // paragraphs are blank-line separated
+    .map((p) => p.trim())
+    .filter((p) => p.length > 0);
+  // Prefer the first prose paragraph; a body often opens with a `## heading`,
+  // which makes a poor meta description. Fall back to the first block (heading
+  // marker stripped) if every paragraph is a heading.
+  const prose =
+    paragraphs.find((p) => !/^#{1,6}\s/.test(p)) ?? paragraphs[0] ?? "";
+  const cleaned = prose.replace(/^#{1,6}\s+/, "").trim();
+  if (cleaned.length <= SUMMARY_MAX_CHARS) return cleaned;
+  return `${cleaned.slice(0, SUMMARY_MAX_CHARS - 1).trimEnd()}…`;
+}
+
+/** Estimated reading time in whole minutes, at ~200 wpm (never below 1). */
+function deriveReadingMinutes(bodyMarkdown: string): number {
+  const words = bodyMarkdown.trim().split(/\s+/).filter(Boolean).length;
+  return Math.max(1, Math.ceil(words / WORDS_PER_MINUTE));
+}
+
+/**
+ * Heuristic for whether an author is an agent rather than a human. The backend
+ * has no agent column, so an agent-published post arrives with only its author
+ * name (e.g. `research-agent-01`). We badge it only when the name clearly looks
+ * automated — `agent`/`bot` in the name, or a trailing `-NN` instance id — so a
+ * human author like "Mnemonic Protocol" never gets an (incorrect) agent badge.
+ */
+function looksLikeAgent(author: string): boolean {
+  return /agent|bot/i.test(author) || /-\d+$/.test(author);
+}
+
+/**
+ * Populate the optional view fields (summary, reading_minutes, agent) the
+ * backend may omit, deriving each from the post body/author. Already-present
+ * values are preserved verbatim, so a backend that does send them wins.
+ */
+export function deriveBlogPost(post: BlogPost): BlogPost {
+  const summary =
+    post.summary && post.summary.trim().length > 0
+      ? post.summary
+      : deriveSummary(post.body_markdown);
+  const reading_minutes =
+    typeof post.reading_minutes === "number"
+      ? post.reading_minutes
+      : deriveReadingMinutes(post.body_markdown);
+  const agent =
+    post.agent ?? (looksLikeAgent(post.author) ? post.author : undefined);
+  return { ...post, summary, reading_minutes, agent };
 }
 
 /* -------------------------------------------------------------------------- */

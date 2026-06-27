@@ -39,6 +39,17 @@ export interface ArtifactPage {
   sample: boolean;
 }
 
+/**
+ * The raw artifact row as the live backend emits it: the primary key arrives as
+ * `attestation_id` (core/mcp naming), not `id`. `fetchArtifacts` remaps it to
+ * the webapp's `id`. Both forms are typed optional so a backend that already
+ * sends `id` (or omits the key) maps cleanly without a runtime surprise.
+ */
+type LiveArtifact = Omit<Artifact, "id"> & {
+  id?: string;
+  attestation_id?: string;
+};
+
 export interface TimelineBucket {
   /** ISO date (day granularity). */
   date: string;
@@ -81,11 +92,21 @@ export async function fetchArtifacts(opts?: {
   if (opts?.q) params.set("q", opts.q);
   if (opts?.limit) params.set("limit", String(opts.limit));
   const qs = params.toString();
-  const live = await getJson<Omit<ArtifactPage, "sample">>(
+  const live = await getJson<{ artifacts: LiveArtifact[]; total: number }>(
     `/artifacts${qs ? `?${qs}` : ""}`,
   );
   if (live && Array.isArray(live.artifacts)) {
-    return { ...live, sample: false };
+    // The backend keys each row on `attestation_id`; the webapp Artifact (and
+    // <li key={a.id}> in Ledger.tsx) keys on `id`. Remap so live rows have a
+    // usable `id`. solana_tx/arweave_tx pass through untouched — including the
+    // `local:`-prefixed and null forms the explorer-link helpers expect.
+    const artifacts: Artifact[] = live.artifacts.map(
+      ({ attestation_id, ...rest }) => ({
+        ...rest,
+        id: rest.id ?? attestation_id ?? "",
+      }),
+    );
+    return { artifacts, total: live.total ?? artifacts.length, sample: false };
   }
   const all = sampleArtifacts();
   const q = opts?.q?.toLowerCase().trim();

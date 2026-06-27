@@ -6,7 +6,7 @@ import Blog from "./pages/Blog";
 import BlogPost from "./pages/BlogPost";
 import Landing from "./pages/Landing";
 import Ledger from "./pages/Ledger";
-import type { BlogPost as BlogPostData } from "./lib/blog";
+import { deriveBlogPost, type BlogPost as BlogPostData } from "./lib/blog";
 
 /**
  * Server entry used only by the build-time prerender step (scripts/prerender.mjs).
@@ -69,7 +69,7 @@ export function renderBlogPost(slug: string, post: BlogPostData): string {
   return renderToString(
     <StrictMode>
       <StaticRouter location={`/blog/${slug}`}>
-        <BlogPost initialPost={post} />
+        <BlogPost initialPost={deriveBlogPost(post)} />
       </StaticRouter>
     </StrictMode>,
   );

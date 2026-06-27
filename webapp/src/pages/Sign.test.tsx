@@ -1,4 +1,4 @@
-import { act, render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import {
   afterEach,
@@ -42,6 +42,13 @@ describe("Sign page", () => {
   beforeEach(() => {
     localStorage.clear();
     localStorage.setItem("mnemonic.jwt", buildJwt("TestSubPubKey123"));
+    // Sign's first effect redirects to /install when no identity is stored, which
+    // unmounts the page before the countdown can render — the real cause of the
+    // pre-existing flake. Seed a valid identity so the page actually mounts.
+    localStorage.setItem(
+      "mnemonic.identity",
+      JSON.stringify({ secret: [1, 2, 3], pubkey_base58: "TestSubPubKey123" }),
+    );
 
     mockNow = Date.UTC(2026, 3, 26, 12, 0, 0);
     originalDateNow = Date.now;
@@ -51,7 +58,7 @@ describe("Sign page", () => {
     fetchMock = vi.fn(async () => {
       const expiresAtSec = Math.floor(mockNow / 1000) + 5 * 60; // exactly 5min from now
       const fakeCbor = new TextEncoder().encode(
-        '{"content":"hello world test bundle preview"}'
+        '{"content":"hello world test bundle preview"}',
       );
       return new Response(fakeCbor, {
         status: 200,
@@ -72,44 +79,37 @@ describe("Sign page", () => {
   });
 
   it("countdown_displays_mm_ss", async () => {
-    // Fake only setInterval / clearInterval. Leave setTimeout real so
-    // testing-library's waitFor (which polls via setTimeout) keeps working.
-    // The component's countdown uses setInterval; that's all we need to drive.
-    vi.useFakeTimers({
-      toFake: ["setInterval", "clearInterval"],
-    });
-
+    // Real timers throughout: the earlier fake-setInterval + real-waitFor mix
+    // raced the bundle-fetch microtasks against the poll loop and flaked. Using
+    // RTL's findBy* (the canonical async query) to await the countdown, then a
+    // waitFor on the next 1s tick, makes the result deterministic — the label
+    // WILL reach 04:59 once the mocked wall-clock advances and the interval fires.
     render(
       <MemoryRouter initialEntries={[`/sign/${TEST_UUID}`]}>
         <Routes>
           <Route path="/sign/:correlationId" element={<Sign />} />
         </Routes>
-      </MemoryRouter>
+      </MemoryRouter>,
     );
 
-    // Wait for the fetch to resolve and the countdown element to appear.
-    // waitFor here uses real microtasks since Promise wasn't faked.
-    await waitFor(
-      () => {
-        const el = screen.queryByTestId("sign-countdown");
-        if (!el) throw new Error("countdown not yet rendered");
-      },
-      { timeout: 3000, interval: 25 }
+    // Appears once the bundle fetch resolves (microtask-driven); findBy* retries.
+    const countdown = await screen.findByTestId(
+      "sign-countdown",
+      {},
+      { timeout: 3000 },
     );
-
-    const countdown = screen.getByTestId("sign-countdown");
-    // Initial: ~05:00 (allow 04:59 if a tick already fired).
+    // Initial: ~05:00 (allow 04:59 if a tick already fired between mount + read).
     expect(countdown.textContent).toMatch(/Expires in 0[45]:\d{2}/);
 
-    // Advance wall-clock 1s and trigger the countdown's setInterval tick.
+    // The countdown re-reads Date.now() on a 1s interval. Advance the mocked
+    // wall-clock; the next tick must count the label down to 04:59.
     mockNow += 1000;
-    await act(async () => {
-      vi.advanceTimersByTime(1000);
-    });
-
-    const after = screen.getByTestId("sign-countdown").textContent ?? "";
-    expect(after).toMatch(/Expires in \d{2}:\d{2}/);
-
-    vi.useRealTimers();
+    await waitFor(
+      () =>
+        expect(screen.getByTestId("sign-countdown").textContent).toMatch(
+          /Expires in 04:59/,
+        ),
+      { timeout: 3000, interval: 50 },
+    );
   });
 });

@@ -20,7 +20,7 @@ async function navigateToChat(page: Page) {
   await page.goto("/");
   await page.getByRole("button", { name: "Start chat" }).click();
   await expect(
-    page.getByRole("heading", { name: "Protocol Chat" })
+    page.getByRole("heading", { name: "Protocol Chat" }),
   ).toBeVisible();
 }
 
@@ -59,7 +59,7 @@ test.describe("Chat E2E", () => {
     // Landing page is visible
     await page.goto("/");
     await expect(
-      page.getByRole("heading", { name: "Mnemonic Protocol" })
+      page.getByRole("heading", { name: "Verifiable memory for AI agents." }),
     ).toBeVisible();
 
     // Download link exists on landing with correct href
@@ -80,12 +80,12 @@ test.describe("Chat E2E", () => {
     // Navigate to chat
     await page.getByRole("button", { name: "Start chat" }).click();
     await expect(
-      page.getByRole("heading", { name: "Protocol Chat" })
+      page.getByRole("heading", { name: "Protocol Chat" }),
     ).toBeVisible();
 
     // Empty state prompt visible
     await expect(
-      page.getByText("Ask a question about the Mnemonic Protocol.")
+      page.getByText("Ask a question about the Mnemonic Protocol."),
     ).toBeVisible();
 
     // Send a question
@@ -94,7 +94,7 @@ test.describe("Chat E2E", () => {
     // User message appears in the log region
     const messageLog = page.getByRole("log");
     await expect(
-      messageLog.getByText("What is Mnemonic Protocol?")
+      messageLog.getByText("What is Mnemonic Protocol?"),
     ).toBeVisible();
 
     // Bot answer appears in the log region
@@ -133,13 +133,13 @@ test.describe("Chat E2E", () => {
       await page.getByLabel("Message input").fill(`msg ${i}`);
       await page.getByLabel("Send message").click();
       await expect(page.getByLabel("Session message counter")).toHaveText(
-        `${i}/50`
+        `${i}/50`,
       );
     }
 
     // Counter should be 49/50
     await expect(page.getByLabel("Session message counter")).toHaveText(
-      "49/50"
+      "49/50",
     );
 
     // Send the 50th message -- this should trigger the session limit
@@ -147,13 +147,13 @@ test.describe("Chat E2E", () => {
 
     // Counter at 50/50
     await expect(page.getByLabel("Session message counter")).toHaveText(
-      "50/50"
+      "50/50",
     );
 
     // Limit banner appears
     await expect(page.getByRole("alert")).toBeVisible();
     await expect(page.getByRole("alert")).toContainText(
-      "Session limit reached"
+      "Session limit reached",
     );
 
     // Input is disabled
@@ -194,7 +194,7 @@ test.describe("Chat E2E", () => {
     // The mapped message for service_unavailable is:
     // "Service temporarily unavailable. Try again later."
     await expect(
-      page.getByText("Service temporarily unavailable. Try again later.")
+      page.getByText("Service temporarily unavailable. Try again later."),
     ).toBeVisible();
 
     // Verify retries happened (should be 3 attempts)
@@ -222,8 +222,8 @@ test.describe("Chat E2E", () => {
 
     await expect(
       page.getByText(
-        "Rate limit exceeded. Wait before sending another request."
-      )
+        "Rate limit exceeded. Wait before sending another request.",
+      ),
     ).toBeVisible();
 
     // Non-retryable: should be exactly 1 call
@@ -234,7 +234,7 @@ test.describe("Chat E2E", () => {
     await navigateToChat(page);
     await page.getByLabel("Back to landing page").click();
     await expect(
-      page.getByRole("heading", { name: "Mnemonic Protocol" })
+      page.getByRole("heading", { name: "Verifiable memory for AI agents." }),
     ).toBeVisible();
   });
 });
