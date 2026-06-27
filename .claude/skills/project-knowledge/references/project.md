@@ -39,7 +39,7 @@ Provider portability is the secondary problem: memory stored via Mnemonic is pro
 - **Cryptographic attestation** — blake3 hash over canonical CBOR bytes signed as a COSE_Sign1 artifact (legacy SHA-256/JSON artifacts still verifiable via fallback path); anchor memo on Solana, full signed bytes stored on Arweave/Irys via signed ANS-104 bundle item
 - **Ed25519 identity** — every agent has a deterministic keypair; DID-sol and DID-key derivation built in
 - **MCP server** — 5 tools (whoami, sign_memory, verify, prove_identity, recall) for Cursor and Claude Desktop; supports local mode (free, SQLite-only) and full mode (on-chain)
-- **Demo web app** — project landing page + live demo: chat with local Qwen2.5-7B about the protocol, export attested context to any MCP client
+- **Demo web app + public Evidence Ledger** — landing page, live demo (chat with local Qwen2.5 about the protocol, export attested context to any MCP client), plus a public surface that makes the protocol's "proof of work" visible: `/ledger` (public attestations as verifiable receipt cards), `/analytics` (attestations-over-time), and `/blog` with **agent-native publishing** — an AI agent publishes posts programmatically via the `mnemonic_publish_post` MCP tool or a Micropub `POST /blog`, each post being itself a signed public attestation (added by `webapp-rethink`)
 
 ---
 
