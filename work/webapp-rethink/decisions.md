@@ -50,7 +50,8 @@ Bearer / Ed25519). Open: rate limit + allowlist of agent identities + moderation
 
 ### Q2 — Artifacts privacy
 Decision: **return public only.** `GET /artifacts` returns strictly
-`visibility = public` rows (reuse `SEARCH_SQL_PUBLIC` pattern). Never owner-private.
+`visibility = public` rows (reuse `SEARCH_SQL_CROSS_OWNER_VIS` at
+`core/src/storage/sqlite.rs:116`). Never owner-private.
 
 ### Q3 — SEO depth
 Decision: **real crawl coverage required** — not just head hoisting. Add
@@ -58,3 +59,48 @@ server-rendered / prerendered HTML for crawlers: build-time prerender for static
 routes (`/`, `/ledger`, `/analytics`, `/blog`) plus **server-rendered
 `/blog/:slug`** (dynamic, agent-published) emitting full HTML + meta + JSON-LD +
 post content from the Rust server. Tracked as its own decision + wave below.
+
+## 2026-06-27 — Verified codebase reality (recalled context was stale)
+
+- **Payments:** the non-custodial paradigm landed (commit `a762d87`). `PAYMENT_MODE`
+  is now ONLY `none` | `x402`; the custodial `balance`/`both` modes were removed
+  (`mcp/src/payment.rs`, "Wave 4 — non-custodial; custodial balance/api-keys
+  removed"). `check_payment` fail-closes on unknown modes. **x402 is the only
+  billable rail**, and it gates the `participate` (Arweave + Solana on-chain) write
+  path. Default is `none` (free). Bearer auth lives in
+  `mcp/src/oauth/mod.rs` (`bearer_auth_middleware`), not `payment.rs`.
+- **Storage:** SQLite is STILL the server-side attestation store
+  (`core/src/storage/sqlite.rs`, `attestations.content TEXT NOT NULL`;
+  `mcp/src/tools.rs` persists via `SqliteStore`). `ruvector.db` / `rag_chunks` are
+  RAG chat seeding, not the memory store. The cross-owner public-only query
+  constant is **`SEARCH_SQL_CROSS_OWNER_VIS`** (`sqlite.rs:116`) — there is no
+  `SEARCH_SQL_PUBLIC` (earlier spec text corrected).
+
+### Decision 9 — Blog publishing is a free `local` public write for V1
+A blog post is a signed PUBLIC attestation (Decision 8). For V1 it is written as a
+**`local` public** attestation: free, server-stored in SQLite, recallable, and
+listed at `/blog`. It is NOT a `participate` on-chain write, so it does NOT incur
+x402. Optional on-chain anchoring of a post (a `participate` write, x402-charged)
+is deferred to a later iteration. This resolves the reality-checker's open
+question on Task 9 (local vs participate). Auth on publish = the OAuth2/Ed25519
+bearer path (`oauth/mod.rs`), independent of payment.
+
+## 2026-06-27 — Validation round 1 (task-validator + reality-checker)
+
+Ran both validators on-branch (single agents, not the failed parallel fan-out).
+Reports: `logs/tasks/template-batch1-review.json`, `logs/tasks/reality-batch1-review.json`.
+
+Fixes applied (this commit):
+- **Critical:** `SEARCH_SQL_PUBLIC` → `SEARCH_SQL_CROSS_OWNER_VIS` (task 7, tech-spec
+  Decision 6, decisions Q2) — hallucinated constant removed.
+- **Re-waved backend** so every `depends_on` crosses a wave boundary:
+  T7→w5, T8→w6, T9→w7, T10/T11→w8, T12→w6, T13→w9, T14→w10, T15→w11.
+- **Task 9 context:** bearer auth is in `oauth/mod.rs`, not `payment.rs`.
+- **Task 12:** routes are added by T5 (not T9); `<Seo>` from T1 (not T5).
+- **Task 4:** `MARKDOWN_COMPONENTS` lives in `Roadmap.tsx`.
+- **Tech-spec Decision 1:** CSP is `font-src 'self' data:`.
+
+Remaining minors accepted (stylistic plain-text paths in some tasks); no stale
+`balance`/`both` references remain. Note: the tech-spec "Implementation Tasks"
+section keeps its coarse wave grouping; the authoritative execution waves are the
+per-task frontmatter `wave:` values updated above.

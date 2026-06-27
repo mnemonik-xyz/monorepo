@@ -83,7 +83,7 @@ sitemap lists public routes. No external origins added → CSP unchanged.
 ## Decisions
 
 ### Decision 1: CSP-safe system typography, no web fonts
-CSP is `font-src 'self'`. External Google Fonts would be blocked AND would force a
+CSP is `font-src 'self' data:` (no remote origins). External Google Fonts would be blocked AND would force a
 coupled nginx-header change. Use characterful system faces (Charter/Iowan serif
 display + system mono) with strong treatment. Rejected: relaxing CSP.
 
@@ -126,8 +126,9 @@ convenience (slug index, ordering). Keeps authorship verifiable and unifies the
 two pages.
 
 ### Decision 6: Ledger shows public-visibility rows only
-`GET /artifacts` filters `visibility = public` (reuse `SEARCH_SQL_PUBLIC` pattern
-in `core/src/storage/sqlite.rs`). Private owner memories never exposed.
+`GET /artifacts` filters `visibility = public` (reuse the
+`SEARCH_SQL_CROSS_OWNER_VIS` pattern at `core/src/storage/sqlite.rs:116`, the
+cross-owner public-only query). Private owner memories never exposed.
 
 ### Decision 7: Blog storage is a new `blog_posts` table
 New table (slug PK, title, body_markdown, tags, author/agent, published_at,
