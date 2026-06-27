@@ -23,3 +23,19 @@ export const EXTERNAL_LINKS = {
 } as const;
 
 export type ExternalLinkKey = keyof typeof EXTERNAL_LINKS;
+
+/**
+ * Block-explorer URL builders for the on-chain anchors attached to an
+ * attestation. `local:`-prefixed tx ids are synthetic (offline / on-node only)
+ * and have no explorer page — callers should treat a `null` return as
+ * "not anchored, render as plain text".
+ */
+export function solanaTxUrl(tx: string | null | undefined): string | null {
+  if (!tx || tx.startsWith("local:")) return null;
+  return `https://explorer.solana.com/tx/${encodeURIComponent(tx)}`;
+}
+
+export function arweaveTxUrl(tx: string | null | undefined): string | null {
+  if (!tx || tx.startsWith("local:")) return null;
+  return `https://viewblock.io/arweave/tx/${encodeURIComponent(tx)}`;
+}
