@@ -94,14 +94,31 @@ the same domain-separation constants. Document the divergence in `decisions.md`.
 This is the ERC-8301 "every preceding stage has a valid proof before a high-value
 action" invariant, computed at verify time.
 
-### Storage (`core/src/storage/sqlite.rs`)
+### Storage — Arweave bundles, stateless MCP (decisions.md 2026-06-27)
 
-Migration (idempotent `ALTER TABLE ... ADD COLUMN`, matching existing migration
-style): add `trajectory_id TEXT`, `seq INTEGER`, `prev_hash TEXT`,
-`verdict_hash TEXT` to `attestations`; new index on `(trajectory_id, seq)`. New
-`trajectory_roots(trajectory_id PK, batch_root, step_count, chain_valid,
-verdict_coverage, anchored_tx, created_at)`. No backfill — legacy rows have NULL
-trajectory fields and are unaffected.
+Owner decision: **keep everything, decentralized, no DB on the MCP side.** The
+unit of write is a *bundle*, not a step — Merkle batching applied to storage.
+
+- **Canonical store = Arweave ANS-104 bundles.** A new `ArweaveStore` impl of
+  `AttestationStore` packs a checkpoint's steps (full content + COSE) into one
+  bundled tx; each step is individually addressable (data-item id from its blake3
+  hash), tagged `trajectory_id` / `seq` / `owner_pubkey`. One write per
+  checkpoint, not per step → keep-everything is affordable.
+- **Stateless MCP.** No server DB on the canonical path. The process fetches from
+  Arweave, re-derives the root, runs `verify_chain`, checks coverage. `SqliteStore`
+  is demoted to an optional local-mode cache / offline dev backend.
+- **BYO wallet.** User supplies the Arweave wallet (or IPFS/Filecoin); protocol
+  owns the bundle format, user owns the bytes.
+- **Checkpoint roots.** Interim batch root every N steps / on a timer; each
+  references the prior (root-of-roots); anchored via Solana SPL Memo (today) or
+  OpenTimestamps→Bitcoin (chain-neutral, inherits chain-pluggable anchor).
+- **Recall, no server DB.** Exact retrieval via Arweave GraphQL tag query;
+  semantic recall = fetch embeddings + cosine client-side in V1.
+
+`trajectory_roots` summary `(trajectory_id, batch_root, step_count, chain_valid,
+verdict_coverage, anchored_tx, created_at)` is itself an Arweave/anchor artifact,
+not a server table. New dependency surface: ANS-104 bundling (Irys/Bundlr or
+in-house data-item encoder) + an Arweave GraphQL client.
 
 ### MCP tools (`mcp/src/tools.rs`)
 

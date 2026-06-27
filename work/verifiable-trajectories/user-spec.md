@@ -34,8 +34,14 @@ size: L
 3. **Per-trajectory Merkle batch root** — расширение `core/src/merkle.rs`:
    один корень на траекторию по упорядоченным хешам шагов + inclusion-proof на
    любой шаг (логарифмическое доказательство существования шага во времени).
-4. **Storage** — колонки/таблица для `trajectory_id`, `seq`, `prev_hash`,
-   `verdict_hash`, `batch_root` + миграции.
+4. **Storage — децентрализованно, без БД на стороне MCP** (решение владельца
+   2026-06-27): «keep everything» через Arweave ANS-104 bundles. Единица
+   записи — bundle, а не шаг (та же Merkle-batch идея на слой ниже), поэтому
+   «хранить всё» становится доступным по цене. MCP-сервер — stateless
+   verifier/relay; источник истины = permaweb (контент) + anchor-цепочка
+   (timestamps корней) + keychain пользователя (identity). BYO-wallet: байты
+   принадлежат пользователю. `SqliteStore` — только опциональный локальный кэш.
+   Recall — Arweave GraphQL по тегам + cosine на клиенте (V1).
 5. **Три MCP-инструмента**: `mnemonic_attest_step` (зафиксировать шаг сейчас),
    `mnemonic_attest_verdict` (пристегнуть вердикт, в т.ч. асинхронно),
    `mnemonic_verify_trajectory` (вернуть `chain_valid`, batch root, inclusion

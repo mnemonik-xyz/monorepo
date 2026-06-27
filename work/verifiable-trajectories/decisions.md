@@ -78,3 +78,52 @@ than enforced as a write-time lock, preserving live interactivity.
 All three schemas + tools land behind cargo feature `trajectory-experimental`
 until V1 GA is declared here. Default `cargo build --workspace` stays green
 without the feature. Mirrors the `a2a-experimental` gating precedent.
+
+---
+
+## 2026-06-27 — Decision: storage = Arweave bundles, stateless MCP (owner answers)
+
+Resolves the "where do we store it" open question. Owner answers: keep
+everything; decentralized, no DB on the MCP side; checkpoint roots.
+
+**Principle.** The unit of storage write is a *bundle*, not a step — the same
+Merkle-batch insight applied one layer down. This is what makes "keep
+everything" affordable.
+
+1. **Steps → Arweave ANS-104 bundles.** A checkpoint's worth of steps (full
+   content + COSE) is packed into one bundled Arweave transaction. Each step
+   stays individually addressable (data-item id derivable from its blake3 hash),
+   but cost is one write per checkpoint, not per step (~1000× reduction;
+   ~$0.0004 for a 25-step task). Arweave is pay-once permanent + decentralized
+   and already a dependency. "Keep everything" is the retention policy; bundling
+   is what makes it viable.
+2. **Stateless MCP.** No SQLite on the server. The MCP process is a
+   bundler-relay + verifier. Source of truth = permaweb (content) + anchor chain
+   (root timestamps) + user keychain (identity, `core/src/identity`). Given a
+   `trajectory_id` the server fetches from Arweave, re-derives the root, runs
+   `verify_chain`, checks coverage — holding nothing. SqliteStore stays only as
+   an optional local-mode cache / offline dev backend, never the canonical store.
+3. **BYO storage / sovereignty.** The user supplies their own Arweave wallet
+   (or IPFS pin / Filecoin deal). Protocol defines the bundle format; user owns
+   the bytes. Keeps the `AttestationStore` trait as the seam — `ArweaveStore`
+   becomes a first-class impl alongside `SqliteStore`.
+4. **Checkpoint roots → anchor chain.** Per owner answer: anchor an interim
+   batch root every N steps / on a timer; each checkpoint references the prior
+   (root-of-roots chain); final root supersedes. Anchor = Solana SPL Memo today,
+   OpenTimestamps→Bitcoin as the chain-neutral option (inherits chain-pluggable
+   anchor work).
+5. **Recall without a server DB.** Exact retrieval via Arweave GraphQL tag index
+   (`trajectory_id`, `seq`, `owner_pubkey`). Semantic recall = fetch embeddings,
+   cosine **client-side** in V1. Decentralized vector index deferred.
+
+**On "publish to calendars" (owner brainstorm).** The instinct is the
+timestamp/notarization one, already satisfied better by Solana SPL Memo /
+OpenTimestamps. Calendars are mutable + centralized → strictly worse as the
+record. Allowed only as a human-facing pointer surface (event body links the
+anchored root), never the source of truth. Not in V1.
+
+**Downstream.** Task 4 pivots from "SQLite columns" to "Arweave-bundle step
+store + stateless verify"; SqliteStore demoted to optional cache. New dependency
+surface: ANS-104 bundling (Irys/Bundlr or in-house data-item encoder) + Arweave
+GraphQL client. Cost model and bundler-trust assumptions to be detailed in the
+threat model (Task 6).
