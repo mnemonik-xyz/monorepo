@@ -12,6 +12,8 @@ mod pending;
 mod pricing;
 mod seed;
 mod tools;
+#[cfg(feature = "trajectory-experimental")]
+mod trajectory_tools;
 
 use axum::{
     extract::{Query, State},

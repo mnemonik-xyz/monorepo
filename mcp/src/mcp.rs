@@ -826,7 +826,8 @@ unsafe impl Send for McpState {}
 unsafe impl Sync for McpState {}
 
 fn tool_definitions() -> Value {
-    serde_json::json!([
+    #[allow(unused_mut)]
+    let mut defs = serde_json::json!([
         {
             "name": "mnemonic_whoami",
             "description": "Returns this agent's cryptographic identity: Solana public key, did:sol, did:key, attestation count",
@@ -905,7 +906,66 @@ fn tool_definitions() -> Value {
                 "required": ["content_hash"],
             },
         },
-    ])
+    ]);
+
+    // Verifiable-trajectories tools (experimental; appended only when the
+    // feature is compiled in, so default builds advertise the base 7 tools).
+    #[cfg(feature = "trajectory-experimental")]
+    if let Some(arr) = defs.as_array_mut() {
+        arr.extend(serde_json::json!([
+            {
+                "name": "mnemonic_attest_step",
+                "description": "Append one ordered, hash-linked step to an agent trajectory. Signs a STEP artifact (COSE_Sign1/Ed25519); seq and prev_hash auto-link to the trajectory head. Steps default to the local cache; the canonical store is Arweave bundles.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "trajectory_id": {"type": "string", "description": "Trajectory this step belongs to"},
+                        "content": {"type": "string", "description": "The step's content (plan, tool call, synthesis, ...)"},
+                        "seq": {"type": "integer", "description": "Optional explicit sequence number; defaults to head+1 (0 for a new trajectory)"},
+                    },
+                    "required": ["trajectory_id", "content"],
+                },
+            },
+            {
+                "name": "mnemonic_attest_verdict",
+                "description": "Attach an independent judge's verdict (pass/concern/reject) to a step by its content_hash. Rejects self-judging (judge must differ from the step producer). Optionally binds an external correctness proof (zkML/TEE/opML/OCP/PRM) by hash via proof_ref/proof_kind.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "step_hash": {"type": "string", "description": "content_hash of the step being judged"},
+                        "status": {"type": "string", "enum": ["pass", "concern", "reject"], "description": "Verdict"},
+                        "score": {"type": "number", "description": "Optional PRM/quality score"},
+                        "proof_ref": {"type": "string", "description": "Optional hash of an external correctness proof"},
+                        "proof_kind": {"type": "string", "description": "prm|deterministic|zkml|tee|opml|ocp"},
+                        "rationale": {"type": "string", "description": "Optional human-readable rationale"},
+                    },
+                    "required": ["step_hash", "status"],
+                },
+            },
+            {
+                "name": "mnemonic_verify_trajectory",
+                "description": "Verify a trajectory end-to-end: chain integrity (ordered, hash-linked, signed), verdict coverage (independent judges), the order-preserving batch root, per-step inclusion proofs, and the safe_to_settle gate (chain_valid AND full coverage AND no reject).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "trajectory_id": {"type": "string", "description": "Trajectory to verify"},
+                    },
+                    "required": ["trajectory_id"],
+                },
+            },
+        ]).as_array().cloned().unwrap_or_default());
+    }
+
+    defs
+}
+
+/// Path to the local trajectory cache DB (`SqliteTrajectoryStore`). Per the
+/// storage decision the canonical store is Arweave; this is the local-mode
+/// cache. Overridable via `MNEMONIC_TRAJECTORY_DB`.
+#[cfg(feature = "trajectory-experimental")]
+fn trajectory_db_path() -> String {
+    std::env::var("MNEMONIC_TRAJECTORY_DB")
+        .unwrap_or_else(|_| "mnemonic-trajectories.db".to_string())
 }
 
 pub async fn handle_request(
@@ -1560,6 +1620,58 @@ async fn handle_tool_call(
                     .ok_or_else(|| JsonRpcError::simple(-32603, "challenge required"))?,
             )
         }
+        #[cfg(feature = "trajectory-experimental")]
+        "mnemonic_attest_step" => {
+            let tid = args["trajectory_id"]
+                .as_str()
+                .ok_or_else(|| JsonRpcError::simple(-32603, "trajectory_id required"))?;
+            let content = args["content"]
+                .as_str()
+                .ok_or_else(|| JsonRpcError::simple(-32603, "content required"))?;
+            let seq = args.get("seq").and_then(|v| v.as_u64());
+            let store = mnemonic_core::storage::trajectory_sqlite::SqliteTrajectoryStore::open(
+                std::path::Path::new(&trajectory_db_path()),
+            )
+            .map_err(|e| JsonRpcError::simple(-32603, e.to_string()))?;
+            let now = chrono::Utc::now().to_rfc3339();
+            crate::trajectory_tools::attest_step(&store, &state.keypair, tid, content, seq, &now)
+        }
+        #[cfg(feature = "trajectory-experimental")]
+        "mnemonic_attest_verdict" => {
+            let step_hash = args["step_hash"]
+                .as_str()
+                .ok_or_else(|| JsonRpcError::simple(-32603, "step_hash required"))?;
+            let status = args["status"]
+                .as_str()
+                .ok_or_else(|| JsonRpcError::simple(-32603, "status required"))?;
+            let store = mnemonic_core::storage::trajectory_sqlite::SqliteTrajectoryStore::open(
+                std::path::Path::new(&trajectory_db_path()),
+            )
+            .map_err(|e| JsonRpcError::simple(-32603, e.to_string()))?;
+            let now = chrono::Utc::now().to_rfc3339();
+            crate::trajectory_tools::attest_verdict(
+                &store,
+                &state.keypair,
+                step_hash,
+                status,
+                args.get("score").and_then(|v| v.as_f64()).map(|f| f as f32),
+                args.get("proof_ref").and_then(|v| v.as_str()),
+                args.get("proof_kind").and_then(|v| v.as_str()),
+                args.get("rationale").and_then(|v| v.as_str()),
+                &now,
+            )
+        }
+        #[cfg(feature = "trajectory-experimental")]
+        "mnemonic_verify_trajectory" => {
+            let tid = args["trajectory_id"]
+                .as_str()
+                .ok_or_else(|| JsonRpcError::simple(-32603, "trajectory_id required"))?;
+            let store = mnemonic_core::storage::trajectory_sqlite::SqliteTrajectoryStore::open(
+                std::path::Path::new(&trajectory_db_path()),
+            )
+            .map_err(|e| JsonRpcError::simple(-32603, e.to_string()))?;
+            crate::trajectory_tools::verify_trajectory(&store, tid)
+        }
         "mnemonic_recall" => {
             let query = args["query"]
                 .as_str()
@@ -1700,6 +1812,31 @@ fn tool_error_to_json_rpc(e: crate::tools::ToolError) -> JsonRpcError {
 // today (Task 4a flips its body from no-op to JWT validation, hence the
 // `#[ignore]` on the auth test which is wired now so Task 4a only has to
 // flip the ignore + assertion).
+
+#[cfg(all(test, feature = "trajectory-experimental"))]
+mod trajectory_manifest_tests {
+    use super::*;
+
+    #[test]
+    fn manifest_advertises_trajectory_tools() {
+        let defs = tool_definitions();
+        let names: Vec<&str> = defs
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|t| t["name"].as_str())
+            .collect();
+        for t in [
+            "mnemonic_attest_step",
+            "mnemonic_attest_verdict",
+            "mnemonic_verify_trajectory",
+        ] {
+            assert!(names.contains(&t), "manifest must advertise {t}");
+        }
+        // Base tools still present.
+        assert!(names.contains(&"mnemonic_sign_memory"));
+    }
+}
 
 #[cfg(test)]
 mod transport_tests {
@@ -1883,10 +2020,16 @@ mod transport_tests {
         let tools = envelope["result"]["tools"]
             .as_array()
             .expect("tools array present");
+        // 7 base tools, plus 3 when the trajectory feature is compiled in.
+        let expected = if cfg!(feature = "trajectory-experimental") {
+            10
+        } else {
+            7
+        };
         assert_eq!(
             tools.len(),
-            7,
-            "expected 7 MCP tools in tools/list response (whoami, sign_memory, verify, prove_identity, recall, check_pending, request_public_write_confirmation)",
+            expected,
+            "expected {expected} MCP tools in tools/list response (7 base + trajectory tools when enabled)",
         );
     }
 

@@ -151,14 +151,24 @@ untouched.
   emitter), `references/threat-model.md`, crypto-design note. ✅
 - Task 7 — QA gate run (fmt/clippy/tests, both configs). ✅
 
-**Remaining (needs live infra, not validatable in sandbox):**
-- Canonical `ArweaveStore`: extend `arweave/mod.rs` single ANS-104 data item →
-  multi-item bundle + GraphQL tag read. Needs Irys + network.
-- Wire the three tools into `mcp/src/mcp.rs` JSON-RPC dispatch + `tools/list`
-  manifest, and construct/hold a `SqliteTrajectoryStore` (or `ArweaveStore`) in
-  server state. Needs a running server to E2E.
-The handler functions are dispatch-ready; only registration + the Arweave write
-path remain.
+**Update — both integration items now landed (2026-06-27, same day):**
+- Canonical `ArweaveStore` (`storage/trajectory_arweave.rs`): tagged ANS-104
+  writes via the existing Irys path (extended `ArweaveClient::write_item` to take
+  custom tags) + a blocking GraphQL tag-read implementing `TrajectoryStore`.
+  `canonical_cbor` recovered as the COSE payload; metadata from item tags.
+  httpmock tests cover the read-chain-and-verify and write-data-item paths.
+  Reads use a per-call blocking client (built inside the sync trait method) so
+  the struct never holds a runtime across `.await` — call via `spawn_blocking`.
+- Live dispatch: the three tools are registered in `tool_definitions()`
+  (feature-gated append → `tools/list` advertises 10 vs 7) and wired into the
+  `handle_tool_call` match in `mcp.rs`, backed by a `SqliteTrajectoryStore`
+  opened at `MNEMONIC_TRAJECTORY_DB` (local-cache default). The existing
+  `test_chunked_response_encoding` tool-count assertion was made feature-aware.
+
+Single-key caveat (recorded, not a bug): on a one-keypair operator,
+`attest_verdict` correctly refuses (judge == producer); independent verdicts
+require a distinct judge identity — by design. Production participate-mode swaps
+the `SqliteTrajectoryStore` for `ArweaveStore` via `spawn_blocking`.
 
 **Downstream.** Task 4 pivots from "SQLite columns" to "Arweave-bundle step
 store + stateless verify"; SqliteStore demoted to optional cache.
