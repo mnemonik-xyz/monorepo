@@ -122,6 +122,44 @@ OpenTimestamps. Calendars are mutable + centralized → strictly worse as the
 record. Allowed only as a human-facing pointer surface (event body links the
 anchored root), never the source of truth. Not in V1.
 
+## 2026-06-27 — Implementation landed (Waves 1–5 core)
+
+Author: claude. Built behind `trajectory-experimental` (core + mcp); default
+`cargo build --workspace` unaffected. 29 new tests green; fmt + clippy clean in
+both feature configs.
+
+**Deviation from spec (justified): a dedicated `core/src/trajectory/` module
+instead of putting `verify_chain` in `lineage/`.** `lineage/` is native-only and
+SQLite/`LineageStore`-coupled; the decentralized direction needs the verifier to
+be pure (codec + merkle only) so the *same* chain/coverage checks run
+client-side (wasm) and against any backend. `chain_valid` is materialized here
+via `ChainVerification` rather than on `LineageResult`. The `lineage` DAG is
+untouched.
+
+**What shipped + tested:**
+- Task 1 — `STEP_V1` / `VERDICT_V1` / `TRAJECTORY_V1` (schema.rs). ✅
+- Task 2 — `trajectory::verify_chain` (dense seq, prev_hash linkage, content
+  hash, signature+producer), `verdict_coverage` (independent-judge), checkpoint
+  `verify_checkpoint_chain`, `build_report`/`safe_to_settle`. ✅
+- Task 3 — order-preserving `merkle::trajectory_root` / `trajectory_prove`. ✅
+- Task 4 (local path) — `SqliteTrajectoryStore` (sanctioned local cache) +
+  `InMemoryTrajectoryStore`. ✅
+- Task 5 (logic) — `mcp::trajectory_tools::{attest_step, attest_verdict,
+  verify_trajectory}` pure handlers, unit-tested (auto prev_hash/seq, self-judge
+  rejection, settle gate, proofs JSON). ✅
+- Task 6 — golden vectors (frozen genesis hash + batch root, ignored SDK
+  emitter), `references/threat-model.md`, crypto-design note. ✅
+- Task 7 — QA gate run (fmt/clippy/tests, both configs). ✅
+
+**Remaining (needs live infra, not validatable in sandbox):**
+- Canonical `ArweaveStore`: extend `arweave/mod.rs` single ANS-104 data item →
+  multi-item bundle + GraphQL tag read. Needs Irys + network.
+- Wire the three tools into `mcp/src/mcp.rs` JSON-RPC dispatch + `tools/list`
+  manifest, and construct/hold a `SqliteTrajectoryStore` (or `ArweaveStore`) in
+  server state. Needs a running server to E2E.
+The handler functions are dispatch-ready; only registration + the Arweave write
+path remain.
+
 **Downstream.** Task 4 pivots from "SQLite columns" to "Arweave-bundle step
 store + stateless verify"; SqliteStore demoted to optional cache.
 

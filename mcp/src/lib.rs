@@ -37,6 +37,10 @@ pub mod seed;
 /// `mnemonic_mcp::skill_parse::...`.
 pub mod skill_parse;
 pub mod tools;
+// Verifiable-trajectories MCP tool handlers (attest_step / attest_verdict /
+// verify_trajectory). Experimental; gated so default builds never compile it.
+#[cfg(feature = "trajectory-experimental")]
+pub mod trajectory_tools;
 
 /// Shared test helpers for `mcp/tests/*.rs` — `mock_state()` and `mint_jwt()`.
 /// Gated behind the `test-support` feature so production binaries never
