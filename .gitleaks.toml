@@ -37,6 +37,11 @@ tags = ["jwt", "token", "secret", "mnemonic-deeplink"]
 [allowlist]
 description = "test fixtures + synthetic test JWTs / pubkeys"
 paths = [
+    # Webapp unit-test fixtures — synthetic Ed25519 pubkeys / JWT-shaped
+    # strings seeded into localStorage (e.g. `pubkey_base58: "TestSubPubKey123"`
+    # in Sign.test.tsx) to mount pages and assert redaction. Same posture as the
+    # CLI/SDK test entries below: deterministic synthetic fixtures, not real secrets.
+    '''webapp/src/.*\.test\.tsx?$''',
     # CLI test fixtures — synthetic pubkeys + JWTs assert error redaction.
     '''packages/cli/test/.*\.test\.ts''',
     # SDK test fixtures — JWT-shaped strings, mock OAuth flows.
