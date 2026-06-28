@@ -1,0 +1,10 @@
+# gitleaks false-positive suppressions (fingerprint = commit:file:rule:line).
+# All three are high-entropy strings in generated/manifest files that the
+# generic-api-key heuristic flags but are NOT secrets:
+#   - Cargo.lock checksums (deterministic registry hashes).
+#   - packages/extension/manifest.json "key" (the extension's PUBLIC key).
+# Two predate this branch (present on main); kept here so the full-history
+# scan (ci.yml `Scan full git history`, fetch-depth: 0) stays green.
+735b8f1a0f473486145f6b08f5af97a099db8fbf:Cargo.lock:generic-api-key:1141
+b01a2ab33372395d24642b3d9ada8885b900e8f9:Cargo.lock:generic-api-key:1543
+26c15bdc6dfbd9082dc7a5e9919511ec79327e59:packages/extension/manifest.json:generic-api-key:3
