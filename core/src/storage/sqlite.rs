@@ -125,36 +125,28 @@ const SEARCH_SQL_FILTERED: &str = "SELECT a.attestation_id, a.content, a.content
      JOIN attestation_embeddings ae ON a.attestation_id = ae.attestation_id
      WHERE a.owner_pubkey = ? AND a.visibility = ?";
 
-/// SQL backing `AttestationStore::search` when the caller passes
-/// `owner_pubkey = None` AND `visibility_filter = Some(v)` — the
-/// cross-owner anonymous-public path (agent-native-distribution Task 4 /
-/// SAR1-M1). Drops the owner predicate; the caller is responsible for
-/// pairing this with `Some(Visibility::Public)` so non-public rows do not
-/// leak. The `owner_pubkey is NULL` case from legacy unmigrated rows is
-/// excluded so anonymous callers don't accidentally surface unmigrated
-/// content; only rows with a non-NULL owner AND public visibility appear.
-const SEARCH_SQL_CROSS_OWNER_VIS: &str =
-    "SELECT a.attestation_id, a.content, a.content_hash, a.tags,
+/// SQL backing `AttestationStore::search` for the anonymous public-pool path
+/// (`owner_pubkey = None`). Every stored memory is public (operator decision —
+/// see the privacy note below), so this returns ALL rows regardless of the
+/// `visibility` column or `owner_pubkey` (including legacy NULL-owner rows). It
+/// carries no bound predicate; the `visibility_filter` argument is accepted for
+/// API compatibility but intentionally ignored on this path.
+const SEARCH_SQL_PUBLIC_POOL: &str = "SELECT a.attestation_id, a.content, a.content_hash, a.tags,
             a.solana_tx, a.arweave_tx, a.created_at, a.write_mode,
             a.visibility, ae.embedding
      FROM attestations a
-     JOIN attestation_embeddings ae ON a.attestation_id = ae.attestation_id
-     WHERE a.owner_pubkey IS NOT NULL AND a.visibility = ?";
+     JOIN attestation_embeddings ae ON a.attestation_id = ae.attestation_id";
 
 /// SQL backing `SqliteStore::list_public_artifacts` — the non-search Ledger
-/// listing (`GET /artifacts`, Decision 6). It extends the exact public-only
-/// predicate of `SEARCH_SQL_CROSS_OWNER_VIS` above (`owner_pubkey IS NOT NULL
-/// AND visibility = ?`) — never owner-private rows — but drops the embeddings
-/// join (a chronological list needs no cosine score) and orders newest-first
-/// with a bound `LIMIT`. Visibility is bound as a typed `Visibility` param,
-/// never interpolated. The unmigrated NULL-owner legacy rows are excluded by
-/// the same `owner_pubkey IS NOT NULL` guard so anonymous listing can never
-/// surface them.
+/// listing (`GET /artifacts`). Mirrors `SEARCH_SQL_PUBLIC_POOL`'s "all rows"
+/// semantics (every memory is public) but drops the embeddings join (a
+/// chronological list needs no cosine score) and orders newest-first with a
+/// bound `LIMIT`. No owner/visibility predicate — legacy NULL-owner rows are
+/// included too.
 const LIST_PUBLIC_ARTIFACTS_SQL: &str =
     "SELECT a.attestation_id, a.content, a.content_hash, a.tags,
             a.solana_tx, a.arweave_tx, a.created_at, a.write_mode
      FROM attestations a
-     WHERE a.owner_pubkey IS NOT NULL AND a.visibility = ?
      ORDER BY a.created_at DESC
      LIMIT ?";
 
@@ -716,16 +708,15 @@ impl SqliteStore {
         }
     }
 
-    /// List public-visibility attestations newest-first for the Ledger page
-    /// (`GET /artifacts`, Decision 6). Returns ONLY `visibility = public` rows
-    /// (the backing query reuses the public-only predicate from
-    /// `SEARCH_SQL_CROSS_OWNER_VIS`); owner-private rows and legacy NULL-owner
-    /// rows are never surfaced. `limit` caps the result; an empty table yields
-    /// an empty vec. Content search (`?q=`) is served by the cosine `search`
-    /// path with `Some(Visibility::Public)`, not by this chronological list.
+    /// List attestations newest-first for the Ledger page (`GET /artifacts`).
+    /// Every stored memory is public (operator decision), so this returns ALL
+    /// rows regardless of the `visibility` column or `owner_pubkey` — including
+    /// legacy NULL-owner rows. `limit` caps the result; an empty table yields an
+    /// empty vec. Content search (`?q=`) is served by the cosine `search` path
+    /// (anonymous public-pool branch), not by this chronological list.
     pub fn list_public_artifacts(&self, limit: usize) -> anyhow::Result<Vec<PublicArtifact>> {
         let mut stmt = self.conn.prepare(LIST_PUBLIC_ARTIFACTS_SQL)?;
-        let rows = stmt.query_map(params![Visibility::Public, limit as i64], |row| {
+        let rows = stmt.query_map(params![limit as i64], |row| {
             let tags_str: String = row.get(3)?;
             Ok(PublicArtifact {
                 attestation_id: row.get(0)?,
@@ -1089,17 +1080,13 @@ impl AttestationStore for SqliteStore {
                 let rows = stmt.query_map(params![owner], row_mapper)?;
                 rows.filter_map(|r| r.ok()).collect()
             }
-            (None, Some(v)) => {
-                let mut stmt = self.conn.prepare(SEARCH_SQL_CROSS_OWNER_VIS)?;
-                let rows = stmt.query_map(params![v], row_mapper)?;
+            (None, _) => {
+                // Anonymous public-pool path. Every memory is public, so this
+                // returns ALL rows; the `visibility_filter` argument is ignored
+                // here (kept in the signature for API compatibility).
+                let mut stmt = self.conn.prepare(SEARCH_SQL_PUBLIC_POOL)?;
+                let rows = stmt.query_map([], row_mapper)?;
                 rows.filter_map(|r| r.ok()).collect()
-            }
-            (None, None) => {
-                // Defensive: callers must not pass `None`/`None` (would
-                // expose every row anonymously). Trait doc forbids this;
-                // returning an empty result here keeps the leak closed
-                // even if a future caller violates the contract.
-                Vec::new()
             }
         };
 
@@ -1836,9 +1823,9 @@ mod tests {
     }
 
     #[test]
-    fn list_public_artifacts_returns_public_only() {
-        // Decision 6 — the Ledger list must surface public rows ONLY; private
-        // rows (even though they exist for the same owner) must never appear.
+    fn list_public_artifacts_returns_all_rows() {
+        // Every memory is public — the Ledger list surfaces ALL rows regardless
+        // of the visibility column, newest-first.
         let store = SqliteStore::in_memory().unwrap();
         seed_row(
             &store,
@@ -1869,18 +1856,20 @@ mod tests {
         );
 
         let rows = store.list_public_artifacts(10).unwrap();
-        assert_eq!(rows.len(), 2, "only the two public rows must be listed");
+        assert_eq!(
+            rows.len(),
+            3,
+            "all rows must be listed (every memory is public)"
+        );
         let ids: Vec<&str> = rows.iter().map(|r| r.attestation_id.as_str()).collect();
         assert!(ids.contains(&"pub-1"));
         assert!(ids.contains(&"pub-2"));
-        assert!(
-            !ids.contains(&"priv-1"),
-            "private row must never be listed publicly"
-        );
+        assert!(ids.contains(&"priv-1"), "private-marked rows are shown too");
 
         // Newest-first ordering by created_at.
         assert_eq!(rows[0].attestation_id, "pub-2");
-        assert_eq!(rows[1].attestation_id, "pub-1");
+        assert_eq!(rows[1].attestation_id, "priv-1");
+        assert_eq!(rows[2].attestation_id, "pub-1");
 
         // Limit is honored.
         let limited = store.list_public_artifacts(1).unwrap();
@@ -1889,9 +1878,8 @@ mod tests {
     }
 
     #[test]
-    fn list_public_artifacts_excludes_legacy_null_owner() {
-        // Unmigrated NULL-owner public rows must not leak through the anonymous
-        // listing (same guard as SEARCH_SQL_CROSS_OWNER_VIS).
+    fn list_public_artifacts_includes_legacy_null_owner() {
+        // Legacy NULL-owner rows are surfaced too (no owner predicate).
         let store = SqliteStore::in_memory().unwrap();
         seed_row(
             &store,
@@ -1909,10 +1897,9 @@ mod tests {
                 [],
             )
             .unwrap();
-        assert!(
-            store.list_public_artifacts(10).unwrap().is_empty(),
-            "NULL-owner row must not appear in the public list"
-        );
+        let rows = store.list_public_artifacts(10).unwrap();
+        assert_eq!(rows.len(), 1, "NULL-owner row must appear in the list");
+        assert_eq!(rows[0].attestation_id, "pub-null");
     }
 
     #[test]

@@ -60,7 +60,7 @@ export interface AttestationTimeline {
   unique_users: number;
 }
 
-export type TimeRange = "30d" | "90d" | "12m";
+export type TimeRange = "30d" | "90d" | "12m" | "all";
 
 const REQ_TIMEOUT_MS = 6000;
 

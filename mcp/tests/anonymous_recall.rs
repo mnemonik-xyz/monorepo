@@ -1,26 +1,23 @@
-//! Integration tests for the visibility-filter anonymous recall path
-//! (Task 4 / Decision 5 / AC13 — agent-native-distribution).
+//! Integration tests for the anonymous recall path.
+//!
+//! Every stored memory is public (operator decision), so anonymous recall
+//! surfaces ALL rows across ALL owners regardless of the `visibility` column.
 //!
 //! Anchors:
 //!
-//! 1. `filters_private_rows` — seed DB with 1 private + 1 public row
-//!    that both match a recall query string; call `recall` without
-//!    `Authorization`; only the public row appears.
+//! 1. `anonymous_recall_returns_all_rows` — seed DB with 1 private + 1 public
+//!    row that both match a recall query string; call `recall` without
+//!    `Authorization`; BOTH rows appear.
 //! 2. `authenticated_recall_returns_both` — same DB, call recall with
 //!    a valid Bearer for the owner; both rows appear.
-//! 3. `cross_owner_public_pool_visible` — round 2 / SAR1-M1: seed a
-//!    public row under owner A and a public row under owner B. Anonymous
-//!    recall must return BOTH rows. The round-1 implementation scoped
-//!    anonymous recall to the server keypair, hiding rows owned by any
-//!    other user; round 2 drops the owner predicate when `jwt_sub` is
-//!    absent so the cross-user public pool surfaces correctly.
+//! 3. `cross_owner_pool_visible` — seed rows under owner A and owner B
+//!    (including a private-marked one). Anonymous recall must return them ALL.
 //!
 //! `recall` is wired through the per-tool allowlist in
 //! `oauth::bearer_auth_middleware` so anonymous `tools/call mnemonic_recall`
-//! is reachable. The dispatcher passes `owner_pubkey = None` AND
-//! `visibility_filter = Some(Public)` when `jwt_sub.is_none()` —
-//! AC13's "public part of the pool" surfaces through the dropped owner
-//! predicate paired with the public visibility filter.
+//! is reachable. When `jwt_sub.is_none()` the dispatcher passes
+//! `owner_pubkey = None`, and the storage layer's anonymous public-pool branch
+//! returns every row.
 
 #![cfg(feature = "test-support")]
 
@@ -76,19 +73,12 @@ fn seed_one_private_one_public(server: &TestServer, owner: &str) {
 }
 
 #[tokio::test]
-async fn filters_private_rows() {
+async fn anonymous_recall_returns_all_rows() {
     let server = TestServer::builder().build();
-    // The owner_pubkey chosen for seeding is independent of any dispatcher
-    // fallback — round 2 / SAR1-M1 dropped the owner predicate for
-    // anonymous-public recall, so the seeded rows surface regardless of
-    // owner. We still use the server keypair here for symmetry with
-    // `authenticated_recall_returns_both` (which DOES depend on the owner
-    // matching the JWT sub).
     let owner = server.server_pubkey();
     seed_one_private_one_public(&server, &owner);
 
-    // Anonymous — no `sub`, no Authorization. The middleware allowlists
-    // tools/call mnemonic_recall under Decision 5/AC13.
+    // Anonymous — no `sub`, no Authorization.
     let result = server
         .call_tool(
             None,
@@ -105,15 +95,18 @@ async fn filters_private_rows() {
     );
     let inner = result.result_text();
     let rows = inner["results"].as_array().expect("results array");
-    // Only the public row appears. The private row was filtered server-
-    // side via `AND a.visibility = 'public'`.
+    // Both rows appear — every memory is public.
     assert_eq!(
         rows.len(),
-        1,
-        "anonymous recall returns exactly 1 row: {inner}"
+        2,
+        "anonymous recall returns all rows (every memory is public): {inner}"
     );
-    assert_eq!(rows[0]["attestation_id"], "public-id");
-    assert_eq!(rows[0]["visibility"], "public");
+    let ids: Vec<&str> = rows
+        .iter()
+        .map(|r| r["attestation_id"].as_str().unwrap_or(""))
+        .collect();
+    assert!(ids.contains(&"public-id"));
+    assert!(ids.contains(&"private-id"));
 }
 
 #[tokio::test]
@@ -149,13 +142,10 @@ async fn authenticated_recall_returns_both() {
 }
 
 #[tokio::test]
-async fn cross_owner_public_pool_visible() {
-    // SAR1-M1 (round 1 security audit, agent-native-distribution Task 4):
-    // anonymous recall must surface public rows from EVERY owner, not just
-    // the server keypair. Round-1 scoped to the server keypair, hiding
-    // other users' public rows entirely. This test pins the cross-owner
-    // behaviour so a regression introducing an owner predicate to the
-    // anonymous-public path would fail immediately.
+async fn cross_owner_pool_visible() {
+    // Anonymous recall must surface rows from EVERY owner. This test pins the
+    // cross-owner behaviour so a regression introducing an owner predicate to
+    // the anonymous path would fail immediately.
     let server = TestServer::builder().build();
 
     // Two distinct owner keypairs — explicitly NOT the server keypair —
@@ -198,9 +188,8 @@ async fn cross_owner_public_pool_visible() {
                 &embedding,
             )
             .expect("seed B public");
-        // Also seed a private row owned by A — to prove the visibility
-        // filter still gates these out for anonymous callers regardless
-        // of owner.
+        // Also seed a private-marked row owned by A — it surfaces too, since
+        // every memory is public.
         store
             .save_attestation(
                 "private-by-a",
@@ -230,26 +219,22 @@ async fn cross_owner_public_pool_visible() {
     let inner = result.result_text();
     let rows = inner["results"].as_array().expect("results array");
 
-    // Both public rows must surface — across both owners. The private
-    // row from owner A must NOT surface.
+    // All rows must surface — across both owners, including the private-marked
+    // one (every memory is public).
     let ids: Vec<&str> = rows
         .iter()
         .map(|r| r["attestation_id"].as_str().unwrap_or(""))
         .collect();
     assert!(
         ids.contains(&"public-by-a"),
-        "owner A's public row must surface: ids={ids:?}"
+        "owner A's row must surface: ids={ids:?}"
     );
     assert!(
         ids.contains(&"public-by-b"),
-        "owner B's public row must surface: ids={ids:?}"
+        "owner B's row must surface: ids={ids:?}"
     );
     assert!(
-        !ids.contains(&"private-by-a"),
-        "owner A's private row must NOT surface anonymously: ids={ids:?}"
-    );
-    assert!(
-        rows.iter().all(|r| r["visibility"] == "public"),
-        "every anonymous-recall row must be visibility=public: {inner}"
+        ids.contains(&"private-by-a"),
+        "owner A's private-marked row must also surface: ids={ids:?}"
     );
 }
