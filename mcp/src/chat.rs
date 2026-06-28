@@ -498,6 +498,7 @@ mod handler_tests {
         let compressor = EmbeddingCompressor::new(8, 4, 42);
         let quota = Quota::per_minute(NonZeroU32::new(10).unwrap());
         let chat_limiter = governor::RateLimiter::keyed(quota);
+        let publish_limiter = governor::RateLimiter::keyed(quota);
         let ollama_client = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .build()
@@ -532,6 +533,7 @@ mod handler_tests {
             artifact_zip_path: std::sync::Mutex::new(None),
             ollama_client,
             chat_limiter,
+            publish_limiter,
             pending: Arc::new(crate::pending::PendingBundles::with_defaults()),
             bootstrap_tickets: Arc::new(crate::api::BootstrapTickets::with_defaults()),
             bootstrap_server_x25519_secret,
@@ -550,6 +552,7 @@ mod handler_tests {
                 .timeout(std::time::Duration::from_secs(2))
                 .build()
                 .expect("reqwest hosted client"),
+            blog_rebuild_hook: None,
         })
     }
 

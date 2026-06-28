@@ -64,6 +64,22 @@ Per MCP spec 2025-06-18 §2.4, JSON-RPC requests with no `id` field are notifica
 
 Server logs use a narrow forensic-field whitelist per Decision 14 (`outcome`, `branch`, `family_id`, `sub`, `remote_addr`, `request_id`) — never plaintext refresh tokens, never `token_hash`, never the salt, never the full access JWT. See `work/completed/refresh-token-rotation/tech-spec.md` Decisions 5, 8, 14.
 
+### Graceful sample-fallback API clients (webapp public pages)
+
+The `webapp-rethink` public pages (`/ledger`, `/analytics`, `/blog`) ship and render before — or when disconnected from — the backend. Each typed client in `webapp/src/lib/{ledger,blog}.ts` fetches its mcp read route and, on any non-OK / timeout / parse failure, returns representative data tagged `sample: true`; pages MUST surface a visible "sample · not live" indicator when that flag is set (Decision 2). Clients use `VITE_MCP_BASE` only — never a hardcoded origin. Two live-wiring seams the sample path masks: the backend emits `attestation_id` where the webapp `Artifact` type uses `id` (remapped in `ledger.ts`), and `solana_tx`/`arweave_tx` are always strings (`local:`-prefixed when not anchored, never JSON null — `links.ts` treats the `local:` prefix as "not anchored").
+
+### Webapp-side derivation of omitted post fields
+
+The `blog_posts` table has no `summary` / `reading_minutes` / `agent` columns. `blog.ts::deriveBlogPost` computes them client-side (summary = first prose paragraph ~160c, reading_minutes = `ceil(words/200)`, agent from `author` only when it looks automated) and is wired into BOTH the SPA `fetch*` path and the `entry-server.tsx` prerender, so live and prerendered posts get real meta descriptions + Article JSON-LD. Don't add backend columns for these — derive at the edge.
+
+### JSON-LD XSS hardening (`safeJsonLd` + quote-aware prerender)
+
+`seo.tsx` JSON-LD becomes a stored-XSS sink once Blog renders agent-published posts (attacker-controllable title/author/body). Two layers: `safeJsonLd()` escapes `<` `>` `&` as JSON **unicode escapes** (`<` …), NOT HTML entities — script content is raw text, so entities wouldn't decode and would corrupt JSON for crawlers; unicode escapes give the same `</script>`-breakout guarantee while keeping `JSON.parse` valid. The build-time prerender head extraction is **quote-aware** (`splitHead` in the prerender lib), so it never truncates on a raw `>` inside a meta/OG attribute value and does not depend on React's escaping. react-markdown renders post bodies with no `rehype-raw` and no `dangerouslySetInnerHTML`; CSP is unchanged (`script-src 'self'`). Regression tests assert `</script>` / `<img onerror>` survive escaped.
+
+### CSP unchanged by the public pages
+
+The Evidence Ledger redesign and SEO add NO external origins: typography is system fonts (Decision 1), JSON-LD is injected same-origin inline, and the prerender adds no scripts. CSP stays `font-src 'self' data:` / `script-src 'self'`. Adding any external font/script would force a coupled nginx-header change — don't. The `<link rel="micropub">` / feed `<link rel="alternate">` in `index.html` use Vite `%VITE_MCP_BASE%` substitution (left literal if unset at build; prod sets it).
+
 ---
 
 ## Git Workflow
@@ -90,7 +106,7 @@ Pre-commit: Gitleaks scans for secrets — API keys, private keys, tokens. Commi
 
 ## Testing & Verification
 
-`cargo test --workspace` runs all unit and integration tests from the repo root. WASM tests run with `wasm-pack test --headless --chrome` inside `core/`. Benchmarks run with `cargo bench -p mnemonic-core`. Full-mode integration tests require arlocal on `:1984` and `solana-test-validator` on `:8899`; set `STORAGE_MODE=local` to skip blockchain in all other tests. See each submodule's README for full invocation details and smoke test procedures.
+`cargo test --workspace` runs all unit and integration tests from the repo root. WASM tests run with `wasm-pack test --headless --chrome` inside `core/`. Benchmarks run with `cargo bench -p mnemonic-core`. Full-mode integration tests require arlocal on `:1984` and `solana-test-validator` on `:8899`; set `STORAGE_MODE=local` to skip blockchain in all other tests. **`cargo test -p mnemonic-mcp` REQUIRES `--features test-support`** — several integration suites (e.g. the `webapp-rethink` public-read / publish tests) are gated behind that feature and plain `cargo test -p mnemonic-mcp` will not compile them; CI uses the feature flag, so QA must too. See each submodule's README for full invocation details and smoke test procedures.
 
 ---
 

@@ -80,6 +80,26 @@ CREATE TABLE IF NOT EXISTS lineage_edges (
     PRIMARY KEY (parent_id, child_id)
 );
 CREATE INDEX IF NOT EXISTS idx_lineage_edges_child ON lineage_edges(child_id);
+
+-- Blog projection over public attestations (webapp-rethink Decision 7 / 8).
+-- A blog post IS a signed public attestation; this table is a query-convenience
+-- projection (slug PK for /blog/:slug lookup, published_at index for ordered
+-- listing). `attestation_id` + `content_hash` link each row back to the signed
+-- artifact so authorship stays verifiable. Markdown is stored raw and rendered
+-- client-side. `CREATE TABLE IF NOT EXISTS` makes this idempotent alongside the
+-- other schema statements, so it needs no separate ALTER-style migration.
+CREATE TABLE IF NOT EXISTS blog_posts (
+    slug TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    body_markdown TEXT NOT NULL,
+    tags TEXT NOT NULL DEFAULT '[]',
+    author TEXT NOT NULL DEFAULT '',
+    attestation_id TEXT NOT NULL,
+    content_hash TEXT NOT NULL DEFAULT '',
+    published_at TEXT NOT NULL,
+    visibility TEXT NOT NULL DEFAULT 'public'
+);
+CREATE INDEX IF NOT EXISTS idx_blog_posts_published_at ON blog_posts(published_at);
 "#;
 
 /// SQL backing `AttestationStore::search` when the caller passes a
@@ -121,6 +141,43 @@ const SEARCH_SQL_CROSS_OWNER_VIS: &str =
      JOIN attestation_embeddings ae ON a.attestation_id = ae.attestation_id
      WHERE a.owner_pubkey IS NOT NULL AND a.visibility = ?";
 
+/// SQL backing `SqliteStore::list_public_artifacts` — the non-search Ledger
+/// listing (`GET /artifacts`, Decision 6). It extends the exact public-only
+/// predicate of `SEARCH_SQL_CROSS_OWNER_VIS` above (`owner_pubkey IS NOT NULL
+/// AND visibility = ?`) — never owner-private rows — but drops the embeddings
+/// join (a chronological list needs no cosine score) and orders newest-first
+/// with a bound `LIMIT`. Visibility is bound as a typed `Visibility` param,
+/// never interpolated. The unmigrated NULL-owner legacy rows are excluded by
+/// the same `owner_pubkey IS NOT NULL` guard so anonymous listing can never
+/// surface them.
+const LIST_PUBLIC_ARTIFACTS_SQL: &str =
+    "SELECT a.attestation_id, a.content, a.content_hash, a.tags,
+            a.solana_tx, a.arweave_tx, a.created_at, a.write_mode
+     FROM attestations a
+     WHERE a.owner_pubkey IS NOT NULL AND a.visibility = ?
+     ORDER BY a.created_at DESC
+     LIMIT ?";
+
+/// SQL backing `SqliteStore::attestation_timeline` — daily attestation counts
+/// split on-node (`write_mode = 'local'`) vs on-chain (`write_mode =
+/// 'participate'`) for the Analytics page. Buckets by the date prefix of the
+/// stored ISO-8601 `created_at` (`substr(..., 1, 10)` → `YYYY-MM-DD`); rows are
+/// persisted with explicit `Z`/UTC timestamps, so the prefix is a stable UTC
+/// day key with no per-connection timezone dependence. `created_at >= ?1`
+/// bounds the range; callers pass `""` for "all time" (every ISO timestamp
+/// sorts lexicographically after the empty string). The `'local'` /
+/// `'participate'` literals are the canonical `WriteMode` spellings — constants,
+/// not user input. This is an aggregate traction view (mirrors `public_stats`):
+/// it counts rows, never exposes content, so it intentionally spans all rows
+/// rather than a single owner.
+const TIMELINE_SQL: &str = "SELECT substr(created_at, 1, 10) AS day,
+            SUM(CASE WHEN write_mode = 'local' THEN 1 ELSE 0 END) AS on_node,
+            SUM(CASE WHEN write_mode = 'participate' THEN 1 ELSE 0 END) AS on_chain
+     FROM attestations
+     WHERE created_at >= ?1
+     GROUP BY day
+     ORDER BY day ASC";
+
 pub struct SqliteStore {
     conn: Connection,
 }
@@ -131,6 +188,49 @@ pub struct PublicStats {
     pub unique_users: i64,
     pub saved_on_node: i64,
     pub saved_onchain: i64,
+}
+
+/// A public-visibility attestation row for the Ledger listing
+/// (`GET /artifacts`). Returned by `SqliteStore::list_public_artifacts`; every
+/// row is `visibility = public` by construction of the backing query, so the
+/// field is not repeated here. `write_mode` is surfaced so the UI can badge
+/// on-node vs on-chain provenance and resolve explorer links.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PublicArtifact {
+    pub attestation_id: String,
+    pub content: String,
+    pub content_hash: String,
+    pub tags: Vec<String>,
+    pub solana_tx: String,
+    pub arweave_tx: String,
+    pub created_at: String,
+    pub write_mode: WriteMode,
+}
+
+/// One day's attestation counts for the Analytics timeline, split by
+/// `write_mode`. `on_node` counts `WriteMode::Local` writes; `on_chain` counts
+/// `WriteMode::Participate` writes. `date` is a `YYYY-MM-DD` UTC day key.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct TimelineBucket {
+    pub date: String,
+    pub on_node: i64,
+    pub on_chain: i64,
+}
+
+/// A blog post projection row (webapp-rethink Decision 7 / 8). Mirrors the
+/// `blog_posts` table; `attestation_id` + `content_hash` tie the row back to
+/// the underlying signed public attestation so authorship stays verifiable.
+/// `body_markdown` is stored raw and rendered client-side.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct BlogPost {
+    pub slug: String,
+    pub title: String,
+    pub body_markdown: String,
+    pub tags: Vec<String>,
+    pub author: String,
+    pub attestation_id: String,
+    pub content_hash: String,
+    pub published_at: String,
 }
 
 /// Shared initialization step run after `SCHEMA` for every backing store
@@ -615,6 +715,146 @@ impl SqliteStore {
             None => Ok(None),
         }
     }
+
+    /// List public-visibility attestations newest-first for the Ledger page
+    /// (`GET /artifacts`, Decision 6). Returns ONLY `visibility = public` rows
+    /// (the backing query reuses the public-only predicate from
+    /// `SEARCH_SQL_CROSS_OWNER_VIS`); owner-private rows and legacy NULL-owner
+    /// rows are never surfaced. `limit` caps the result; an empty table yields
+    /// an empty vec. Content search (`?q=`) is served by the cosine `search`
+    /// path with `Some(Visibility::Public)`, not by this chronological list.
+    pub fn list_public_artifacts(&self, limit: usize) -> anyhow::Result<Vec<PublicArtifact>> {
+        let mut stmt = self.conn.prepare(LIST_PUBLIC_ARTIFACTS_SQL)?;
+        let rows = stmt.query_map(params![Visibility::Public, limit as i64], |row| {
+            let tags_str: String = row.get(3)?;
+            Ok(PublicArtifact {
+                attestation_id: row.get(0)?,
+                content: row.get(1)?,
+                content_hash: row.get(2)?,
+                tags: serde_json::from_str(&tags_str).unwrap_or_default(),
+                solana_tx: row.get(4)?,
+                arweave_tx: row.get(5)?,
+                created_at: row.get(6)?,
+                write_mode: row.get::<_, WriteMode>(7)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    /// Daily attestation counts split on-node vs on-chain by `write_mode`, for
+    /// the Analytics timeline (`GET /analytics/attestations`). `since` is an
+    /// optional inclusive ISO-8601 lower bound on `created_at`; `None` means
+    /// "all time". Buckets are ordered oldest-first; days with no rows are
+    /// absent (the caller fills gaps for charting). Empty table → empty vec.
+    pub fn attestation_timeline(&self, since: Option<&str>) -> anyhow::Result<Vec<TimelineBucket>> {
+        let mut stmt = self.conn.prepare(TIMELINE_SQL)?;
+        let rows = stmt.query_map(params![since.unwrap_or("")], |row| {
+            Ok(TimelineBucket {
+                date: row.get(0)?,
+                on_node: row.get(1)?,
+                on_chain: row.get(2)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    /// Upsert a blog-post projection row (used by the `POST /blog` /
+    /// `mnemonic_publish_post` publish path once the underlying attestation is
+    /// signed and stored). `slug` is the primary key, so re-publishing the same
+    /// slug replaces the projection. The projection is a query convenience over
+    /// the signed attestation referenced by `attestation_id` — it is not the
+    /// source of truth for authorship.
+    #[allow(clippy::too_many_arguments)]
+    pub fn upsert_blog_post(
+        &self,
+        slug: &str,
+        title: &str,
+        body_markdown: &str,
+        tags: &[String],
+        author: &str,
+        attestation_id: &str,
+        content_hash: &str,
+        published_at: &str,
+    ) -> anyhow::Result<()> {
+        let tags_json = serde_json::to_string(tags)?;
+        self.conn.execute(
+            "INSERT OR REPLACE INTO blog_posts
+                 (slug, title, body_markdown, tags, author,
+                  attestation_id, content_hash, published_at, visibility)
+             VALUES (?,?,?,?,?,?,?,?,'public')",
+            params![
+                slug,
+                title,
+                body_markdown,
+                tags_json,
+                author,
+                attestation_id,
+                content_hash,
+                published_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// List public blog posts newest-first (`GET /blog`). `limit` caps the
+    /// result; an empty table yields an empty vec.
+    pub fn list_blog_posts(&self, limit: usize) -> anyhow::Result<Vec<BlogPost>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT slug, title, body_markdown, tags, author,
+                    attestation_id, content_hash, published_at
+             FROM blog_posts
+             WHERE visibility = 'public'
+             ORDER BY published_at DESC
+             LIMIT ?",
+        )?;
+        let rows = stmt.query_map(params![limit as i64], blog_post_from_row)?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    /// Fetch a single public blog post by slug (`GET /blog/:slug`), or `None`.
+    pub fn get_blog_post(&self, slug: &str) -> anyhow::Result<Option<BlogPost>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT slug, title, body_markdown, tags, author,
+                    attestation_id, content_hash, published_at
+             FROM blog_posts
+             WHERE slug = ? AND visibility = 'public'
+             LIMIT 1",
+        )?;
+        let mut rows = stmt.query(params![slug])?;
+        match rows.next()? {
+            Some(row) => Ok(Some(blog_post_from_row(row)?)),
+            None => Ok(None),
+        }
+    }
+}
+
+/// Map a `blog_posts` row (in the column order used by `list_blog_posts` /
+/// `get_blog_post`) into a [`BlogPost`]. Shared so the two read paths cannot
+/// drift in column order or tag decoding.
+fn blog_post_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<BlogPost> {
+    let tags_str: String = row.get(3)?;
+    Ok(BlogPost {
+        slug: row.get(0)?,
+        title: row.get(1)?,
+        body_markdown: row.get(2)?,
+        tags: serde_json::from_str(&tags_str).unwrap_or_default(),
+        author: row.get(4)?,
+        attestation_id: row.get(5)?,
+        content_hash: row.get(6)?,
+        published_at: row.get(7)?,
+    })
 }
 
 impl AttestationStore for SqliteStore {
@@ -1561,5 +1801,294 @@ mod tests {
             )
             .unwrap();
         assert_eq!(mode_final, "local");
+    }
+
+    // -- webapp-rethink T7: public artifacts, timeline, blog projection -------
+
+    /// Seed a row with explicit visibility + write_mode + created_at so the
+    /// public-list and timeline tests can assert on each axis independently.
+    #[allow(clippy::too_many_arguments)]
+    fn seed_row(
+        store: &SqliteStore,
+        id: &str,
+        owner: &str,
+        solana_tx: &str,
+        created_at: &str,
+        write_mode: WriteMode,
+        visibility: Visibility,
+    ) {
+        store
+            .save_attestation(
+                id,
+                "content",
+                "hash",
+                &["t".into()],
+                solana_tx,
+                "ar",
+                "signer",
+                owner,
+                created_at,
+                write_mode,
+                visibility,
+                &[1.0, 0.0],
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn list_public_artifacts_returns_public_only() {
+        // Decision 6 — the Ledger list must surface public rows ONLY; private
+        // rows (even though they exist for the same owner) must never appear.
+        let store = SqliteStore::in_memory().unwrap();
+        seed_row(
+            &store,
+            "pub-1",
+            "owner-a",
+            "s1",
+            "2026-06-01T00:00:00Z",
+            WriteMode::Participate,
+            Visibility::Public,
+        );
+        seed_row(
+            &store,
+            "priv-1",
+            "owner-a",
+            "s2",
+            "2026-06-02T00:00:00Z",
+            WriteMode::Local,
+            Visibility::Private,
+        );
+        seed_row(
+            &store,
+            "pub-2",
+            "owner-b",
+            "s3",
+            "2026-06-03T00:00:00Z",
+            WriteMode::Participate,
+            Visibility::Public,
+        );
+
+        let rows = store.list_public_artifacts(10).unwrap();
+        assert_eq!(rows.len(), 2, "only the two public rows must be listed");
+        let ids: Vec<&str> = rows.iter().map(|r| r.attestation_id.as_str()).collect();
+        assert!(ids.contains(&"pub-1"));
+        assert!(ids.contains(&"pub-2"));
+        assert!(
+            !ids.contains(&"priv-1"),
+            "private row must never be listed publicly"
+        );
+
+        // Newest-first ordering by created_at.
+        assert_eq!(rows[0].attestation_id, "pub-2");
+        assert_eq!(rows[1].attestation_id, "pub-1");
+
+        // Limit is honored.
+        let limited = store.list_public_artifacts(1).unwrap();
+        assert_eq!(limited.len(), 1);
+        assert_eq!(limited[0].attestation_id, "pub-2");
+    }
+
+    #[test]
+    fn list_public_artifacts_excludes_legacy_null_owner() {
+        // Unmigrated NULL-owner public rows must not leak through the anonymous
+        // listing (same guard as SEARCH_SQL_CROSS_OWNER_VIS).
+        let store = SqliteStore::in_memory().unwrap();
+        seed_row(
+            &store,
+            "pub-null",
+            "owner-x",
+            "s1",
+            "2026-06-01T00:00:00Z",
+            WriteMode::Participate,
+            Visibility::Public,
+        );
+        store
+            .conn
+            .execute(
+                "UPDATE attestations SET owner_pubkey = NULL WHERE attestation_id = 'pub-null'",
+                [],
+            )
+            .unwrap();
+        assert!(
+            store.list_public_artifacts(10).unwrap().is_empty(),
+            "NULL-owner row must not appear in the public list"
+        );
+    }
+
+    #[test]
+    fn list_public_artifacts_empty_table() {
+        let store = SqliteStore::in_memory().unwrap();
+        assert!(store.list_public_artifacts(10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn attestation_timeline_buckets_by_day_and_write_mode() {
+        let store = SqliteStore::in_memory().unwrap();
+        // Day 1: 2 local (on-node) + 1 participate (on-chain).
+        seed_row(
+            &store,
+            "d1-l1",
+            "o",
+            "local:a",
+            "2026-06-01T01:00:00Z",
+            WriteMode::Local,
+            Visibility::Private,
+        );
+        seed_row(
+            &store,
+            "d1-l2",
+            "o",
+            "local:b",
+            "2026-06-01T09:00:00Z",
+            WriteMode::Local,
+            Visibility::Private,
+        );
+        seed_row(
+            &store,
+            "d1-p1",
+            "o",
+            "sig-1",
+            "2026-06-01T23:00:00Z",
+            WriteMode::Participate,
+            Visibility::Public,
+        );
+        // Day 2: 1 participate (on-chain).
+        seed_row(
+            &store,
+            "d2-p1",
+            "o",
+            "sig-2",
+            "2026-06-02T12:00:00Z",
+            WriteMode::Participate,
+            Visibility::Public,
+        );
+
+        let buckets = store.attestation_timeline(None).unwrap();
+        assert_eq!(buckets.len(), 2, "two distinct days");
+        // Ordered oldest-first.
+        assert_eq!(buckets[0].date, "2026-06-01");
+        assert_eq!(buckets[0].on_node, 2);
+        assert_eq!(buckets[0].on_chain, 1);
+        assert_eq!(buckets[1].date, "2026-06-02");
+        assert_eq!(buckets[1].on_node, 0);
+        assert_eq!(buckets[1].on_chain, 1);
+
+        // Range filter: `since` excludes the earlier day.
+        let ranged = store.attestation_timeline(Some("2026-06-02")).unwrap();
+        assert_eq!(ranged.len(), 1);
+        assert_eq!(ranged[0].date, "2026-06-02");
+    }
+
+    #[test]
+    fn attestation_timeline_empty_table() {
+        let store = SqliteStore::in_memory().unwrap();
+        assert!(store.attestation_timeline(None).unwrap().is_empty());
+    }
+
+    #[test]
+    fn blog_posts_upsert_list_get_roundtrip() {
+        let store = SqliteStore::in_memory().unwrap();
+        store
+            .upsert_blog_post(
+                "hello-world",
+                "Hello World",
+                "# Hello\n\nbody",
+                &["intro".into(), "demo".into()],
+                "agent-zero",
+                "att-1",
+                "deadbeef",
+                "2026-06-01T00:00:00Z",
+            )
+            .unwrap();
+        store
+            .upsert_blog_post(
+                "second-post",
+                "Second",
+                "more",
+                &[],
+                "agent-zero",
+                "att-2",
+                "cafe",
+                "2026-06-05T00:00:00Z",
+            )
+            .unwrap();
+
+        // get by slug
+        let got = store.get_blog_post("hello-world").unwrap().unwrap();
+        assert_eq!(got.title, "Hello World");
+        assert_eq!(got.body_markdown, "# Hello\n\nbody");
+        assert_eq!(got.tags, vec!["intro".to_string(), "demo".to_string()]);
+        assert_eq!(got.author, "agent-zero");
+        assert_eq!(got.attestation_id, "att-1");
+        assert_eq!(got.content_hash, "deadbeef");
+
+        // unknown slug → None
+        assert!(store.get_blog_post("nope").unwrap().is_none());
+
+        // list newest-first by published_at
+        let list = store.list_blog_posts(10).unwrap();
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0].slug, "second-post");
+        assert_eq!(list[1].slug, "hello-world");
+
+        // upsert on same slug replaces, does not duplicate
+        store
+            .upsert_blog_post(
+                "hello-world",
+                "Hello (edited)",
+                "edited body",
+                &[],
+                "agent-zero",
+                "att-1b",
+                "f00d",
+                "2026-06-01T00:00:00Z",
+            )
+            .unwrap();
+        let list_after = store.list_blog_posts(10).unwrap();
+        assert_eq!(list_after.len(), 2, "upsert must replace, not append");
+        let edited = store.get_blog_post("hello-world").unwrap().unwrap();
+        assert_eq!(edited.title, "Hello (edited)");
+        assert_eq!(edited.attestation_id, "att-1b");
+    }
+
+    #[test]
+    fn blog_posts_migration_idempotent() {
+        // The blog_posts table + index come from the SCHEMA batch
+        // (CREATE ... IF NOT EXISTS), so opening the same DB twice must not
+        // error and must preserve rows.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("blog-idempotent.db");
+        {
+            let store = SqliteStore::open(&path).unwrap();
+            store
+                .upsert_blog_post(
+                    "persisted",
+                    "Persisted",
+                    "body",
+                    &[],
+                    "a",
+                    "att-x",
+                    "hash-x",
+                    "2026-06-01T00:00:00Z",
+                )
+                .unwrap();
+        }
+        // Re-open: SCHEMA runs again; row survives, table not recreated.
+        let store2 = SqliteStore::open(&path).unwrap();
+        let got = store2.get_blog_post("persisted").unwrap();
+        assert!(got.is_some(), "row must survive a re-open");
+        assert_eq!(got.unwrap().title, "Persisted");
+
+        // Exactly one index of that name — no duplicates across opens.
+        let idx_count: i64 = store2
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                   WHERE type='index' AND name='idx_blog_posts_published_at'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(idx_count, 1);
     }
 }

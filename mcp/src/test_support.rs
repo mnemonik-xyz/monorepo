@@ -105,6 +105,7 @@ pub fn mock_state() -> Arc<McpState> {
     let compressor = EmbeddingCompressor::new(8, 4, 42);
     let quota = Quota::per_minute(NonZeroU32::new(10).expect("nz"));
     let chat_limiter = governor::RateLimiter::keyed(quota);
+    let publish_limiter = governor::RateLimiter::keyed(quota);
     let ollama_client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .build()
@@ -138,6 +139,7 @@ pub fn mock_state() -> Arc<McpState> {
         artifact_zip_path: std::sync::Mutex::new(None),
         ollama_client,
         chat_limiter,
+        publish_limiter,
         pending: Arc::new(PendingBundles::with_defaults()),
         bootstrap_tickets: Arc::new(crate::api::BootstrapTickets::with_defaults()),
         bootstrap_server_x25519_secret,
@@ -159,6 +161,7 @@ pub fn mock_state() -> Arc<McpState> {
             .timeout(std::time::Duration::from_secs(2))
             .build()
             .expect("reqwest hosted client"),
+        blog_rebuild_hook: None,
     })
 }
 
@@ -183,6 +186,7 @@ pub fn mock_state_with(
     let compressor = EmbeddingCompressor::new(8, 4, 42);
     let quota = Quota::per_minute(NonZeroU32::new(10).expect("nz"));
     let chat_limiter = governor::RateLimiter::keyed(quota);
+    let publish_limiter = governor::RateLimiter::keyed(quota);
     let ollama_client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .build()
@@ -222,6 +226,7 @@ pub fn mock_state_with(
         artifact_zip_path: std::sync::Mutex::new(None),
         ollama_client,
         chat_limiter,
+        publish_limiter,
         pending: Arc::new(PendingBundles::with_defaults()),
         bootstrap_tickets: Arc::new(crate::api::BootstrapTickets::with_defaults()),
         bootstrap_server_x25519_secret,
@@ -240,6 +245,7 @@ pub fn mock_state_with(
             .timeout(std::time::Duration::from_secs(2))
             .build()
             .expect("reqwest hosted client"),
+        blog_rebuild_hook: None,
     })
 }
 
@@ -277,6 +283,7 @@ pub fn mock_state_for_delivery(
     let compressor = EmbeddingCompressor::new(8, 4, 42);
     let quota = Quota::per_minute(NonZeroU32::new(10).expect("nz"));
     let chat_limiter = governor::RateLimiter::keyed(quota);
+    let publish_limiter = governor::RateLimiter::keyed(quota);
     let ollama_client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .build()
@@ -312,6 +319,7 @@ pub fn mock_state_for_delivery(
         artifact_zip_path: std::sync::Mutex::new(None),
         ollama_client,
         chat_limiter,
+        publish_limiter,
         pending: Arc::new(PendingBundles::with_defaults()),
         bootstrap_tickets: Arc::new(crate::api::BootstrapTickets::with_defaults()),
         bootstrap_server_x25519_secret,
@@ -330,6 +338,7 @@ pub fn mock_state_for_delivery(
             .timeout(std::time::Duration::from_secs(2))
             .build()
             .expect("reqwest hosted client"),
+        blog_rebuild_hook: None,
     })
 }
 
@@ -362,6 +371,7 @@ pub fn mock_state_with_embedder_and_endpoint(
     let compressor = EmbeddingCompressor::new(dim, 4, 42);
     let quota = Quota::per_minute(NonZeroU32::new(10).expect("nz"));
     let chat_limiter = governor::RateLimiter::keyed(quota);
+    let publish_limiter = governor::RateLimiter::keyed(quota);
     let ollama_client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .build()
@@ -403,6 +413,7 @@ pub fn mock_state_with_embedder_and_endpoint(
         artifact_zip_path: std::sync::Mutex::new(None),
         ollama_client,
         chat_limiter,
+        publish_limiter,
         pending: Arc::new(PendingBundles::with_defaults()),
         bootstrap_tickets: Arc::new(crate::api::BootstrapTickets::with_defaults()),
         bootstrap_server_x25519_secret,
@@ -417,6 +428,7 @@ pub fn mock_state_with_embedder_and_endpoint(
         confirmation_ledger: Arc::new(crate::confirmation_token::ConfirmationLedger::new()),
         hosted_endpoint,
         hosted_client,
+        blog_rebuild_hook: None,
     })
 }
 

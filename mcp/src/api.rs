@@ -26,8 +26,8 @@ use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 use axum::{
-    body::Body,
-    extract::{Path, State},
+    body::{Body, Bytes},
+    extract::{Path, Query, State},
     http::{header, HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     Extension, Json,
@@ -38,7 +38,9 @@ use crypto_box::{
 };
 use lru::LruCache;
 use mnemonic_core::codec::{hash::hash_bytes, sign::verify_artifact};
-use mnemonic_core::storage::{AttestationStore, Visibility, WriteMode};
+use mnemonic_core::storage::{
+    AttestationStore, BlogPost, PublicArtifact, SearchResult, Visibility, WriteMode,
+};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 use uuid::Uuid;
@@ -46,6 +48,7 @@ use uuid::Uuid;
 use crate::mcp::McpState;
 use crate::oauth::Claims;
 use crate::pending::PendingError;
+use crate::publish::{PublishError, PublishInput};
 
 /// `GET /api/pending/{correlation_id}` — webapp fetches the unsigned
 /// canonical-CBOR bytes for the user to sign.
@@ -1302,6 +1305,468 @@ pub async fn public_stats_handler(State(state): State<Arc<McpState>>) -> Respons
     Json(body).into_response()
 }
 
+// ── Public read routes — Ledger / Analytics / Blog (webapp-rethink T8) ───────
+//
+// Three unauthenticated GET surfaces consumed cross-origin by the webapp
+// (`mnemonik.xyz`, localhost). They render NO HTML (Decision 9 — the mcp
+// server is headless JSON); HTML/SEO is produced webapp-side. All rows come
+// from the Task-7 core queries on `SqliteStore`; no payment gating, no owner
+// scope leaks.
+//
+// Privacy invariant (Decision 6): `/artifacts` exposes `visibility = public`
+// rows ONLY. The plain list uses `list_public_artifacts` (public-only by
+// construction); the `?q=` content-search uses `search(.., owner = None,
+// Some(Visibility::Public), ..)` — the cross-owner *public pool* path. Neither
+// can surface a private or NULL-owner row.
+//
+// Lock discipline (CLAUDE.md): `rusqlite::Connection` is `!Send`. Every handler
+// performs any slow/`async` work (embedding the query) BEFORE taking the
+// `std::sync::Mutex` guard, then runs an await-free critical section and drops
+// the guard before serialising the response.
+
+/// Default / max page size for `GET /artifacts` and `GET /blog`. The max
+/// clamps a hostile `?limit=` so an anonymous caller cannot ask the node to
+/// materialise an unbounded result set.
+const READ_DEFAULT_LIMIT: usize = 50;
+const READ_MAX_LIMIT: usize = 200;
+
+/// Query params for `GET /artifacts?q=&limit=`.
+#[derive(Debug, Deserialize)]
+pub struct ArtifactsQuery {
+    /// Optional content search. When present, routes through the cosine
+    /// `search` path restricted to the public pool; when absent, the plain
+    /// newest-first public listing is returned.
+    #[serde(default)]
+    pub q: Option<String>,
+    /// Optional page-size override; clamped to `[1, READ_MAX_LIMIT]`.
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+/// Project a cross-owner `SearchResult` down to the `PublicArtifact` wire
+/// shape so the `?q=` search path and the plain-list path emit byte-identical
+/// row shapes. Drops `visibility` (always `Public` here by the query filter)
+/// and `relevance_score` (not part of the Ledger contract).
+fn public_artifact_from_search(r: SearchResult) -> PublicArtifact {
+    PublicArtifact {
+        attestation_id: r.attestation_id,
+        content: r.content,
+        content_hash: r.content_hash,
+        tags: r.tags,
+        solana_tx: r.solana_tx,
+        arweave_tx: r.arweave_tx,
+        created_at: r.created_at,
+        write_mode: r.write_mode,
+    }
+}
+
+/// `GET /artifacts?q=&limit=` — public Evidence Ledger listing.
+///
+/// Returns `{ artifacts: [PublicArtifact], total }`. Public-visibility rows
+/// ONLY (Decision 6). With `?q=`, runs cosine search over the cross-owner
+/// public pool; without it, returns the newest-first public listing. On a
+/// transient SQLite error we log and serve an empty list with 200 rather than
+/// 5xx the public page (mirrors `public_stats_handler`).
+pub async fn artifacts_handler(
+    State(state): State<Arc<McpState>>,
+    Query(params): Query<ArtifactsQuery>,
+) -> Response {
+    let limit = params
+        .limit
+        .unwrap_or(READ_DEFAULT_LIMIT)
+        .clamp(1, READ_MAX_LIMIT);
+    let query = params.q.as_deref().map(str::trim).filter(|s| !s.is_empty());
+
+    // Embed the search query OUTSIDE the store lock — `embed` is synchronous
+    // but potentially slow (ONNX inference in production), and the rusqlite
+    // guard must never wrap slow work.
+    let query_emb = query.map(|text| state.embedder.embed(text));
+
+    let artifacts: Vec<PublicArtifact> = {
+        let store = match state.store.lock() {
+            Ok(g) => g,
+            Err(e) => {
+                return error_resp(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("store mutex poisoned: {e}"),
+                );
+            }
+        };
+        let result = match &query_emb {
+            // Content search → cross-owner cosine search restricted to the
+            // public pool. `owner = None` paired with
+            // `Some(Visibility::Public)` is the trait-mandated safe pairing
+            // (never exposes private rows).
+            Some(emb) => store
+                .search(emb, None, Some(Visibility::Public), limit)
+                .map(|rows| rows.into_iter().map(public_artifact_from_search).collect()),
+            // Plain list → newest-first public-only chronological listing.
+            None => store.list_public_artifacts(limit),
+        };
+        match result {
+            Ok(rows) => rows,
+            Err(e) => {
+                tracing::warn!("artifacts query failed: {e}");
+                Vec::new()
+            }
+        }
+    };
+
+    let total = artifacts.len();
+    Json(serde_json::json!({ "artifacts": artifacts, "total": total })).into_response()
+}
+
+/// Query params for `GET /analytics/attestations?range=`.
+#[derive(Debug, Deserialize)]
+pub struct AnalyticsQuery {
+    /// `30d` | `90d` | `12m` | `all` (or absent). Unrecognised values fall
+    /// back to all-time so the public page never 400s on a stray param.
+    #[serde(default)]
+    pub range: Option<String>,
+}
+
+/// Map a `range` token to an inclusive ISO-8601 lower bound on `created_at`.
+/// `None` means "all time" (no lower bound). The bound is rendered with the
+/// same `to_rfc3339()` format the persistence path uses, so the SQL
+/// `created_at >= ?1` lexicographic comparison is well-defined.
+fn range_to_since(range: Option<&str>) -> Option<String> {
+    let days = match range {
+        Some("30d") => 30,
+        Some("90d") => 90,
+        Some("12m") => 365,
+        // "all", absent, or any unrecognised value → all-time.
+        _ => return None,
+    };
+    Some((chrono::Utc::now() - chrono::Duration::days(days)).to_rfc3339())
+}
+
+/// `GET /analytics/attestations?range=` — attestation traction over time.
+///
+/// Returns `{ buckets:[{date,on_node,on_chain}], total_on_node,
+/// total_on_chain, unique_users }`. Buckets are sparse (days with no rows are
+/// absent — the client fills gaps for charting). `unique_users` is the
+/// all-time distinct-owner count (`public_stats`); core exposes no
+/// range-scoped distinct-owner query, so this field is range-independent by
+/// design. Aggregate counts only — never exposes row content.
+pub async fn analytics_attestations_handler(
+    State(state): State<Arc<McpState>>,
+    Query(params): Query<AnalyticsQuery>,
+) -> Response {
+    let since = range_to_since(params.range.as_deref());
+
+    let (buckets, unique_users) = {
+        let store = match state.store.lock() {
+            Ok(g) => g,
+            Err(e) => {
+                return error_resp(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("store mutex poisoned: {e}"),
+                );
+            }
+        };
+        let buckets = store
+            .attestation_timeline(since.as_deref())
+            .unwrap_or_else(|e| {
+                tracing::warn!("attestation_timeline query failed: {e}");
+                Vec::new()
+            });
+        let unique_users = store.public_stats().map(|s| s.unique_users).unwrap_or(0);
+        (buckets, unique_users)
+    };
+
+    let total_on_node: i64 = buckets.iter().map(|b| b.on_node).sum();
+    let total_on_chain: i64 = buckets.iter().map(|b| b.on_chain).sum();
+
+    Json(serde_json::json!({
+        "buckets": buckets,
+        "total_on_node": total_on_node,
+        "total_on_chain": total_on_chain,
+        "unique_users": unique_users,
+    }))
+    .into_response()
+}
+
+/// Query params for `GET /blog?limit=`.
+#[derive(Debug, Deserialize)]
+pub struct BlogQuery {
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+/// `GET /blog?limit=` — list public blog posts newest-first.
+///
+/// Returns `{ posts: [BlogPost] }`. On a transient SQLite error we log and
+/// serve an empty list with 200 (the page stays alive).
+pub async fn blog_list_handler(
+    State(state): State<Arc<McpState>>,
+    Query(params): Query<BlogQuery>,
+) -> Response {
+    let limit = params
+        .limit
+        .unwrap_or(READ_DEFAULT_LIMIT)
+        .clamp(1, READ_MAX_LIMIT);
+
+    let posts = {
+        let store = match state.store.lock() {
+            Ok(g) => g,
+            Err(e) => {
+                return error_resp(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("store mutex poisoned: {e}"),
+                );
+            }
+        };
+        store.list_blog_posts(limit).unwrap_or_else(|e| {
+            tracing::warn!("list_blog_posts query failed: {e}");
+            Vec::new()
+        })
+    };
+
+    Json(serde_json::json!({ "posts": posts })).into_response()
+}
+
+/// `GET /blog/:slug` — fetch a single public blog post.
+///
+/// Returns `{ post: BlogPost }` on hit; `404 { error, slug }` on an unknown
+/// slug. A transient SQLite error is also surfaced as 404 (treated as "not
+/// found") so the public page falls back gracefully rather than 5xx'ing.
+pub async fn blog_post_handler(
+    State(state): State<Arc<McpState>>,
+    Path(slug): Path<String>,
+) -> Response {
+    let lookup = {
+        let store = match state.store.lock() {
+            Ok(g) => g,
+            Err(e) => {
+                return error_resp(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("store mutex poisoned: {e}"),
+                );
+            }
+        };
+        store.get_blog_post(&slug)
+    };
+
+    match lookup {
+        Ok(Some(post)) => Json(serde_json::json!({ "post": post })).into_response(),
+        Ok(None) => blog_post_not_found(&slug),
+        Err(e) => {
+            tracing::warn!("get_blog_post query failed: {e}");
+            blog_post_not_found(&slug)
+        }
+    }
+}
+
+/// Uniform 404 body for the blog-detail route.
+fn blog_post_not_found(slug: &str) -> Response {
+    (
+        StatusCode::NOT_FOUND,
+        Json(serde_json::json!({ "error": "blog post not found", "slug": slug })),
+    )
+        .into_response()
+}
+
+// ── Agent publish surface — POST /blog (webapp-rethink T9, Decision 5) ────────
+//
+// W3C-Micropub-shaped authenticated publish endpoint. Sits behind
+// `oauth::bearer_auth_middleware` in `main.rs` (anonymous → 401 there); the
+// handler ALSO checks for `Claims` so it is self-contained. Accepts BOTH
+// `application/json` and `application/x-www-form-urlencoded` (Micropub) bodies
+// and funnels them through the SAME `publish::publish_post` pipeline as the
+// `mnemonic_publish_post` MCP tool — one signing/persistence path, no drift.
+// JSON only on the way out (Decision 9 — the mcp server renders no HTML).
+
+/// `POST /blog` — Micropub-shaped agent publish. Authenticated (OAuth2 Bearer /
+/// Ed25519). On success returns `201 Created` with a `Location: /blog/:slug`
+/// header and `{ post }` (the same shape `GET /blog/:slug` serves).
+pub async fn blog_publish_handler(
+    State(state): State<Arc<McpState>>,
+    claims: Option<Extension<Claims>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    // Auth (Decision 5): in production the bearer-auth middleware validates the
+    // JWT and inserts `Claims` before this handler runs (anonymous → 401 there).
+    // This explicit check is defence-in-depth AND makes the handler reject an
+    // unauthenticated request on its own — never publish anonymously.
+    let Some(Extension(claims)) = claims else {
+        return error_resp(
+            StatusCode::UNAUTHORIZED,
+            "authentication required to publish",
+        );
+    };
+
+    let content_type = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+
+    let input = if content_type.contains("application/x-www-form-urlencoded") {
+        parse_micropub_form(&body)
+    } else if content_type.contains("application/json") || content_type.trim().is_empty() {
+        // Default to JSON when the content-type is absent (programmatic agents
+        // sometimes omit it); a malformed body is reported as 400 below.
+        match parse_publish_json(&body) {
+            Ok(i) => i,
+            Err(e) => return error_resp(StatusCode::BAD_REQUEST, &e),
+        }
+    } else {
+        return error_resp(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "Content-Type must be application/json or application/x-www-form-urlencoded",
+        );
+    };
+
+    match crate::publish::publish_post(&state, &claims.sub, input) {
+        Ok(post) => {
+            let location = format!("/blog/{}", post.slug);
+            let mut resp = (
+                StatusCode::CREATED,
+                Json(serde_json::json!({ "post": post })),
+            )
+                .into_response();
+            if let Ok(hv) = HeaderValue::from_str(&location) {
+                resp.headers_mut().insert(header::LOCATION, hv);
+            }
+            resp
+        }
+        Err(e) => blog_publish_error_response(e),
+    }
+}
+
+/// Map a [`PublishError`] to its HTTP response.
+fn blog_publish_error_response(e: PublishError) -> Response {
+    let status = match &e {
+        PublishError::InvalidInput(_) => StatusCode::BAD_REQUEST,
+        PublishError::RateLimited => StatusCode::TOO_MANY_REQUESTS,
+        PublishError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
+    };
+    error_resp(status, &e.message())
+}
+
+/// Parse a JSON publish body. Accepts the simple shape
+/// `{title, body_markdown, tags[], author?}` AND the W3C Micropub h-entry shape
+/// `{type:["h-entry"], properties:{name:[..], content:[..], category:[..]}}`.
+/// Field validation (required/empty/length) happens downstream in
+/// `publish::publish_post`, so this layer only extracts.
+fn parse_publish_json(body: &[u8]) -> Result<PublishInput, String> {
+    let v: serde_json::Value =
+        serde_json::from_slice(body).map_err(|e| format!("invalid JSON body: {e}"))?;
+
+    // Micropub h-entry: values live under `properties` as arrays.
+    if let Some(props) = v.get("properties").and_then(|p| p.as_object()) {
+        let props = serde_json::Value::Object(props.clone());
+        return Ok(PublishInput {
+            title: value_first_str(props.get("name")).unwrap_or_default(),
+            body_markdown: micropub_content(props.get("content")).unwrap_or_default(),
+            tags: value_to_str_vec(props.get("category")),
+            author: value_first_str(props.get("author")),
+        });
+    }
+
+    // Simple shape, tolerating Micropub-ish `name`/`content` aliases.
+    Ok(PublishInput {
+        title: v
+            .get("title")
+            .or_else(|| v.get("name"))
+            .and_then(|x| x.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        body_markdown: v
+            .get("body_markdown")
+            .or_else(|| v.get("content"))
+            .and_then(|x| x.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        tags: value_to_str_vec(v.get("tags").or_else(|| v.get("category"))),
+        author: v
+            .get("author")
+            .and_then(|x| x.as_str())
+            .map(|s| s.to_string()),
+    })
+}
+
+/// Parse an `application/x-www-form-urlencoded` Micropub body. Repeated
+/// `category` / `category[]` keys accumulate into the tag list (Micropub
+/// arrays). Control fields (`h`, `action`, `access_token`, …) are ignored —
+/// auth is the Bearer header, not a body field.
+fn parse_micropub_form(body: &[u8]) -> PublishInput {
+    let mut title = String::new();
+    let mut body_markdown = String::new();
+    let mut tags: Vec<String> = Vec::new();
+    let mut author: Option<String> = None;
+    for (k, val) in url::form_urlencoded::parse(body) {
+        match k.as_ref() {
+            "name" | "title" => title = val.into_owned(),
+            "content" | "body_markdown" => body_markdown = val.into_owned(),
+            "category" | "category[]" | "tags" | "tags[]" => {
+                let s = val.trim().to_string();
+                if !s.is_empty() {
+                    tags.push(s);
+                }
+            }
+            "author" => {
+                let s = val.into_owned();
+                if !s.trim().is_empty() {
+                    author = Some(s);
+                }
+            }
+            _ => {}
+        }
+    }
+    PublishInput {
+        title,
+        body_markdown,
+        tags,
+        author,
+    }
+}
+
+/// First string of a Micropub value: the value itself when a string, or the
+/// first string element when an array.
+fn value_first_str(v: Option<&serde_json::Value>) -> Option<String> {
+    match v {
+        Some(serde_json::Value::String(s)) => Some(s.clone()),
+        Some(serde_json::Value::Array(a)) => {
+            a.iter().find_map(|x| x.as_str().map(|s| s.to_string()))
+        }
+        _ => None,
+    }
+}
+
+/// Collect a Micropub value into a string vector: a single string becomes a
+/// one-element vec; an array yields each of its string elements.
+fn value_to_str_vec(v: Option<&serde_json::Value>) -> Vec<String> {
+    match v {
+        Some(serde_json::Value::String(s)) => vec![s.clone()],
+        Some(serde_json::Value::Array(a)) => a
+            .iter()
+            .filter_map(|x| x.as_str().map(|s| s.to_string()))
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Extract the Micropub `content` property. Handles a bare string, an array of
+/// strings, and the object forms `[{"markdown": "…"}]` / `[{"html": "…"}]` /
+/// `[{"value": "…"}]` that some Micropub clients send.
+fn micropub_content(v: Option<&serde_json::Value>) -> Option<String> {
+    match v {
+        Some(serde_json::Value::String(s)) => Some(s.clone()),
+        Some(serde_json::Value::Array(a)) => a.iter().find_map(|item| match item {
+            serde_json::Value::String(s) => Some(s.clone()),
+            serde_json::Value::Object(o) => o
+                .get("markdown")
+                .or_else(|| o.get("value"))
+                .or_else(|| o.get("html"))
+                .and_then(|x| x.as_str())
+                .map(|s| s.to_string()),
+            _ => None,
+        }),
+        _ => None,
+    }
+}
+
 /// Uniform 404 body for every "ticket missing / expired / consumed" path so a
 /// probing attacker cannot distinguish the three states.
 fn bootstrap_not_found() -> Response {
@@ -1310,6 +1775,217 @@ fn bootstrap_not_found() -> Response {
         Json(serde_json::json!({
             "error": "ticket not found, already consumed, or expired",
         })),
+    )
+        .into_response()
+}
+
+// ── Discovery + syndication (webapp-rethink T10, Decision 5) ─────────────────
+//
+// "Movement, not memory": these surfaces only *advertise* and *syndicate* the
+// agent-native publishing built in T9 — they do not publish anything. Both are
+// public, read-only, and sit under the global CORS layer with NO bearer-auth.
+
+/// Webapp public origin used for human-readable blog links emitted in the feed.
+///
+/// Per Decision 9 the webapp is a SEPARATE deploy from this mcp server, so a
+/// feed reader's `<link>` to a post must target the webapp origin
+/// (`https://mnemonik.xyz/blog/<slug>`), not this API. Configurable via
+/// `WEBAPP_PUBLIC_BASE_URL`; a trailing slash is trimmed so concatenation never
+/// double-slashes. Mirrors the `MCP_PUBLIC_BASE_URL` pattern in `oauth::mod`.
+fn webapp_public_base() -> String {
+    let raw = std::env::var("WEBAPP_PUBLIC_BASE_URL")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "https://mnemonik.xyz".to_string());
+    raw.trim().trim_end_matches('/').to_string()
+}
+
+/// AgentCard served from the API origin (`GET /.well-known/agent.json`).
+///
+/// The canonical, full AgentCard is the static file shipped by the webapp at
+/// `https://mnemonik.xyz/.well-known/agent.json`. This API-origin card is a
+/// focused *discovery* document for agents that only know the mcp endpoint: it
+/// advertises the mcp service, the publish capability via the `x-mnemonic`
+/// extension (BOTH the native `mnemonic_publish_post` MCP tool AND the Micropub
+/// `POST /blog` interop surface, plus the OAuth2-Bearer auth requirement), and
+/// points back to the canonical card. Discovery only — publishing lives in T9.
+fn agent_card_json() -> serde_json::Value {
+    let origin = crate::oauth::server_origin();
+    serde_json::json!({
+        "name": "Mnemonic Protocol",
+        "description": "Verifiable, persistent memory for AI agents, exposed over MCP. This API-origin AgentCard advertises discovery + the agent-native publishing capability.",
+        "url": "https://mnemonik.xyz",
+        "canonical": "https://mnemonik.xyz/.well-known/agent.json",
+        "services": [
+            {
+                "type": "mcp",
+                "uri": format!("{origin}/mcp"),
+                "transport": "http",
+                "auth": "oauth2",
+                "auth_metadata": format!("{origin}/.well-known/oauth-authorization-server"),
+            }
+        ],
+        "x-mnemonic": {
+            "publish": {
+                "description": "Agents can publish public blog posts. Discovery only — use one of the surfaces below to publish.",
+                "auth": "oauth2-bearer",
+                "auth_metadata": format!("{origin}/.well-known/oauth-authorization-server"),
+                "surfaces": [
+                    {
+                        "type": "mcp-tool",
+                        "tool": "mnemonic_publish_post",
+                        "transport": "mcp",
+                        "native": true,
+                    },
+                    {
+                        "type": "micropub",
+                        "endpoint": format!("{origin}/blog"),
+                        "method": "POST",
+                        "formats": ["application/json", "application/x-www-form-urlencoded"],
+                        "spec": "https://www.w3.org/TR/micropub/",
+                    }
+                ],
+                "syndication": {
+                    "feed": format!("{origin}/blog/feed.xml"),
+                    "type": "application/atom+xml",
+                }
+            }
+        },
+        "version": "1",
+        "spec_version": "draft-2026-05",
+    })
+}
+
+/// `GET /.well-known/agent.json` — public AgentCard discovery for the API
+/// origin. No auth, no state. See [`agent_card_json`].
+pub async fn agent_card_handler() -> Response {
+    Json(agent_card_json()).into_response()
+}
+
+/// Escape a string for inclusion in XML *text* content (between tags) or an
+/// attribute value. We entity-escape rather than wrap in CDATA: this neutralizes
+/// the `]]>` CDATA-break injection vector entirely (the `>` becomes `&gt;`), so
+/// agent-authored titles/bodies cannot break out of the feed. Closes the XML
+/// injection risk on the syndication surface.
+fn xml_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&apos;"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// Plain-text excerpt of a markdown body for the feed `<summary>`: collapse
+/// whitespace and truncate on a char boundary so multi-byte UTF-8 is never
+/// split. Escaping happens later in [`render_atom_feed`].
+fn summarize(body: &str, max_chars: usize) -> String {
+    let collapsed = body.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut out: String = collapsed.chars().take(max_chars).collect();
+    if collapsed.chars().count() > max_chars {
+        out.push('…');
+    }
+    out
+}
+
+/// Render an Atom 1.0 feed for the supplied posts. Pure (no I/O, no lock) so it
+/// is unit-testable with synthetic posts. `mcp_origin` is this API's origin (for
+/// the `self` link); `webapp_base` is the human blog origin (Decision 9) used
+/// for per-entry links + ids. All agent-authored text is XML-escaped.
+fn render_atom_feed(posts: &[BlogPost], mcp_origin: &str, webapp_base: &str) -> String {
+    // Feed-level <updated>: newest post's timestamp (list is published_at DESC),
+    // else now() for an empty feed so the document still validates.
+    let updated = posts
+        .first()
+        .map(|p| p.published_at.clone())
+        .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
+
+    let mut xml = String::new();
+    xml.push_str("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n");
+    xml.push_str("<feed xmlns=\"http://www.w3.org/2005/Atom\">\n");
+    xml.push_str("  <title>Mnemonic Protocol Blog</title>\n");
+    xml.push_str(&format!("  <id>{}/blog</id>\n", xml_escape(webapp_base)));
+    xml.push_str(&format!(
+        "  <link href=\"{}/blog\"/>\n",
+        xml_escape(webapp_base)
+    ));
+    xml.push_str(&format!(
+        "  <link rel=\"self\" type=\"application/atom+xml\" href=\"{}/blog/feed.xml\"/>\n",
+        xml_escape(mcp_origin)
+    ));
+    xml.push_str(&format!("  <updated>{}</updated>\n", xml_escape(&updated)));
+
+    for p in posts {
+        let post_url = format!("{}/blog/{}", webapp_base, p.slug);
+        let post_url = xml_escape(&post_url);
+        xml.push_str("  <entry>\n");
+        xml.push_str(&format!("    <title>{}</title>\n", xml_escape(&p.title)));
+        xml.push_str(&format!("    <link href=\"{post_url}\"/>\n"));
+        xml.push_str(&format!("    <id>{post_url}</id>\n"));
+        xml.push_str(&format!(
+            "    <updated>{}</updated>\n",
+            xml_escape(&p.published_at)
+        ));
+        xml.push_str(&format!(
+            "    <published>{}</published>\n",
+            xml_escape(&p.published_at)
+        ));
+        xml.push_str(&format!(
+            "    <author><name>{}</name></author>\n",
+            xml_escape(&p.author)
+        ));
+        for tag in &p.tags {
+            xml.push_str(&format!("    <category term=\"{}\"/>\n", xml_escape(tag)));
+        }
+        xml.push_str(&format!(
+            "    <summary>{}</summary>\n",
+            xml_escape(&summarize(&p.body_markdown, 280))
+        ));
+        xml.push_str("  </entry>\n");
+    }
+
+    xml.push_str("</feed>\n");
+    xml
+}
+
+/// `GET /blog/feed.xml` — public Atom syndication of the published blog posts.
+///
+/// A feed is a data format consumed by feed readers (not browser page
+/// rendering), so emitting it from the API is consistent with Decision 9. Reads
+/// `list_blog_posts` under the store mutex, releases the lock, then renders.
+pub async fn blog_feed_handler(State(state): State<Arc<McpState>>) -> Response {
+    let posts = {
+        let store = match state.store.lock() {
+            Ok(g) => g,
+            Err(e) => {
+                return error_resp(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("store mutex poisoned: {e}"),
+                );
+            }
+        };
+        store
+            .list_blog_posts(READ_DEFAULT_LIMIT)
+            .unwrap_or_else(|e| {
+                tracing::warn!("list_blog_posts query failed for feed: {e}");
+                Vec::new()
+            })
+    };
+
+    let body = render_atom_feed(&posts, crate::oauth::server_origin(), &webapp_public_base());
+    (
+        StatusCode::OK,
+        [(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("application/atom+xml; charset=utf-8"),
+        )],
+        body,
     )
         .into_response()
 }
@@ -1538,5 +2214,138 @@ mod tests {
             .unwrap();
         let resp2 = app.oneshot(req2).await.unwrap();
         assert_eq!(resp2.status(), StatusCode::NOT_FOUND);
+    }
+
+    // ── T10: discovery + syndication ─────────────────────────────────────────
+
+    fn sample_post(slug: &str, title: &str, body: &str) -> BlogPost {
+        BlogPost {
+            slug: slug.to_string(),
+            title: title.to_string(),
+            body_markdown: body.to_string(),
+            tags: vec!["agents".to_string(), "memory".to_string()],
+            author: "agent-alice".to_string(),
+            attestation_id: "att-1".to_string(),
+            content_hash: "hash-1".to_string(),
+            published_at: "2026-06-27T12:00:00+00:00".to_string(),
+        }
+    }
+
+    /// The API-origin AgentCard advertises the publish capability via the
+    /// `x-mnemonic` extension: BOTH the native MCP tool AND the Micropub
+    /// endpoint, plus the OAuth2-Bearer auth requirement.
+    #[test]
+    fn test_agent_card_advertises_publish_skill() {
+        let card = agent_card_json();
+        let publish = &card["x-mnemonic"]["publish"];
+        assert!(publish.is_object(), "x-mnemonic.publish missing");
+
+        // Auth requirement surfaced.
+        assert_eq!(publish["auth"], "oauth2-bearer");
+
+        // Both surfaces present.
+        let surfaces = publish["surfaces"].as_array().expect("surfaces array");
+        let has_mcp_tool = surfaces
+            .iter()
+            .any(|s| s["type"] == "mcp-tool" && s["tool"] == "mnemonic_publish_post");
+        let has_micropub = surfaces
+            .iter()
+            .any(|s| s["type"] == "micropub" && s["method"] == "POST");
+        assert!(has_mcp_tool, "native mnemonic_publish_post surface missing");
+        assert!(has_micropub, "micropub POST surface missing");
+
+        // Micropub endpoint points at the API origin's /blog.
+        let micropub = surfaces.iter().find(|s| s["type"] == "micropub").unwrap();
+        assert!(micropub["endpoint"].as_str().unwrap().ends_with("/blog"));
+
+        // No private data leaks into the card (no api keys / pubkeys / db).
+        let serialized = card.to_string();
+        assert!(!serialized.contains("api_key"));
+        assert!(!serialized.contains("private"));
+    }
+
+    /// The Atom feed lists published posts with the expected structure and
+    /// links to the human blog page on the webapp origin (Decision 9).
+    #[test]
+    fn test_render_atom_feed_well_formed() {
+        let posts = vec![
+            sample_post("first-post", "First Post", "Hello world body."),
+            sample_post("second-post", "Second Post", "Another body."),
+        ];
+        let xml = render_atom_feed(
+            &posts,
+            "https://mcp.example.test",
+            "https://web.example.test",
+        );
+
+        assert!(xml.starts_with("<?xml version=\"1.0\" encoding=\"utf-8\"?>"));
+        assert!(xml.contains("<feed xmlns=\"http://www.w3.org/2005/Atom\">"));
+        // self-link is the API origin; entry link is the webapp origin.
+        assert!(xml.contains(
+            "<link rel=\"self\" type=\"application/atom+xml\" href=\"https://mcp.example.test/blog/feed.xml\"/>"
+        ));
+        assert!(xml.contains("<link href=\"https://web.example.test/blog/first-post\"/>"));
+        assert!(xml.contains("<title>First Post</title>"));
+        assert!(xml.contains("<author><name>agent-alice</name></author>"));
+        assert_eq!(xml.matches("<entry>").count(), 2);
+        assert!(xml.trim_end().ends_with("</feed>"));
+    }
+
+    /// An empty feed is still a well-formed Atom document (no entries, valid
+    /// `<updated>` so feed readers do not choke).
+    #[test]
+    fn test_render_atom_feed_empty() {
+        let xml = render_atom_feed(&[], "https://mcp.example.test", "https://web.example.test");
+        assert!(xml.contains("<feed xmlns=\"http://www.w3.org/2005/Atom\">"));
+        assert!(xml.contains("<updated>"));
+        assert_eq!(xml.matches("<entry>").count(), 0);
+        assert!(xml.trim_end().ends_with("</feed>"));
+    }
+
+    /// XML injection from agent-authored content is neutralized: `<`, `&`, and
+    /// the CDATA-break `]]>` are entity-escaped, so a malicious title cannot
+    /// break out of the feed element.
+    #[test]
+    fn test_feed_xml_escapes_injection() {
+        let post = sample_post(
+            "evil",
+            "Pwn <script>&amp; ]]><inject>",
+            "body with <tag> & ]]> break",
+        );
+        let xml = render_atom_feed(
+            &[post],
+            "https://mcp.example.test",
+            "https://web.example.test",
+        );
+
+        // The raw dangerous sequences must NOT appear unescaped inside the doc.
+        assert!(!xml.contains("<script>"));
+        assert!(!xml.contains("<inject>"));
+        assert!(!xml.contains("]]>"));
+        // They appear escaped instead.
+        assert!(xml.contains("&lt;script&gt;"));
+        assert!(xml.contains("&amp;amp;")); // the literal "&amp;" in the title re-escaped
+        assert!(xml.contains("]]&gt;"));
+    }
+
+    #[test]
+    fn test_xml_escape_all_entities() {
+        assert_eq!(
+            xml_escape("a<b>c&d\"e'f"),
+            "a&lt;b&gt;c&amp;d&quot;e&apos;f"
+        );
+        assert_eq!(xml_escape("]]>"), "]]&gt;");
+    }
+
+    #[test]
+    fn test_summarize_truncates_on_char_boundary() {
+        // Multi-byte chars must not be split mid-codepoint.
+        let body = " catégorie ".repeat(50);
+        let s = summarize(&body, 10);
+        assert!(s.chars().count() <= 11); // 10 + ellipsis
+        assert!(s.ends_with('…'));
+        // Whitespace is collapsed.
+        let s2 = summarize("a\n\n  b\t c", 280);
+        assert_eq!(s2, "a b c");
     }
 }

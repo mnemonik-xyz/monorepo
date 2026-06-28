@@ -742,6 +742,17 @@ pub struct McpState {
         governor::middleware::NoOpMiddleware<governor::clock::QuantaInstant>,
     >,
 
+    /// Per-identity rate limiter for the publish surfaces — the
+    /// `mnemonic_publish_post` MCP tool and `POST /blog` (webapp-rethink T9,
+    /// Decision 5 V1 abuse control). Keyed on the authenticated caller pubkey
+    /// (NOT the IP), so one agent cannot drown the blog from many addresses.
+    pub publish_limiter: governor::RateLimiter<
+        String,
+        governor::state::keyed::DashMapStateStore<String>,
+        governor::clock::DefaultClock,
+        governor::middleware::NoOpMiddleware<governor::clock::QuantaInstant>,
+    >,
+
     /// Browser-mediated signing — unsigned bundles parked between
     /// `mnemonic_sign_memory` (HTTP path) and `POST /api/sign-callback`.
     /// LRU-bounded (10k), TTL-bounded (300s), per-`jwt.sub` capped (50).
@@ -816,8 +827,17 @@ pub struct McpState {
     /// [`Self::hosted_endpoint`]. Pinned `Policy::none()` on redirects so
     /// a compromised hosted operator cannot 302 us to an unrelated host
     /// (the env-var redirection vector Decision 12 closes for the
-    /// pre-connect side; this closes the mid-connection side).
+    /// pre-connect side; this closes the mid-connection side). Also reused by
+    /// the best-effort blog-rebuild ping (Task 13) — same `Policy::none()`
+    /// SSRF posture.
     pub hosted_client: reqwest::Client,
+
+    /// Optional deploy-webhook URL pinged best-effort, non-blocking after a
+    /// successful publish so the standalone webapp re-prerenders `/blog/:slug`
+    /// for SEO freshness (webapp-rethink Task 13 / Decision 4). `None` (env
+    /// `BLOG_REBUILD_HOOK` unset) = no-op; publish behaviour is identical with
+    /// or without it. The ping never blocks or fails the publish response.
+    pub blog_rebuild_hook: Option<String>,
 }
 
 // Safety: We only access store through std::sync::Mutex (short critical sections, no await)
@@ -904,6 +924,20 @@ fn tool_definitions() -> Value {
                     "content_hash": {"type": "string", "description": "blake3 hex of the canonical-CBOR bundle the caller is about to anchor"},
                 },
                 "required": ["content_hash"],
+            },
+        },
+        {
+            "name": "mnemonic_publish_post",
+            "description": "Publishes a blog post as a signed PUBLIC attestation (agent-native publishing, webapp-rethink Decision 5). The post is signed with COSE_Sign1 (Ed25519) by the server identity, stored as a free `local` public attestation (no x402, no on-chain anchoring in V1), and listed at GET /blog. Requires authentication (OAuth2 Bearer / Ed25519). Returns the created post {slug, title, body_markdown, tags, author, attestation_id, content_hash, published_at}.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string", "description": "Post title; slugified into the URL (slug is the primary key — re-publishing the same title replaces the post)"},
+                    "body_markdown": {"type": "string", "description": "Post body as Markdown (rendered client-side; content_hash commits to this source)"},
+                    "tags": {"type": "array", "items": {"type": "string"}, "description": "Optional tags"},
+                    "author": {"type": "string", "description": "Optional human-readable agent/display name; defaults to the caller's identity. Distinct from the cryptographic signer (producer)."},
+                },
+                "required": ["title", "body_markdown"],
             },
         },
     ]);
@@ -1753,6 +1787,61 @@ async fn handle_tool_call(
                 "expires_at": expires_at,
             })
         }
+        // mnemonic_publish_post — agent-native publishing (webapp-rethink
+        // Decision 5). Authenticated-only: the bearer-auth middleware already
+        // rejects an HTTP `tools/call` for this tool without a valid JWT (it
+        // is NOT in `ALLOWLIST_TOOLS_CALL_NAMES`); the explicit `jwt_sub`
+        // guard below closes the stdio path and is defence-in-depth for the
+        // HTTP one. Flows through the SAME `publish::publish_post` pipeline as
+        // the Micropub `POST /blog` surface — one signing/persistence path.
+        "mnemonic_publish_post" => {
+            let Some(sub) = jwt_sub else {
+                return Err(JsonRpcError::simple(
+                    -32001,
+                    "mnemonic_publish_post requires authentication".to_string(),
+                ));
+            };
+            let title = args
+                .get("title")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| {
+                    invalid_params("title", &args.get("title").cloned().unwrap_or(Value::Null))
+                })?
+                .to_string();
+            let body_markdown = args
+                .get("body_markdown")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| {
+                    invalid_params(
+                        "body_markdown",
+                        &args.get("body_markdown").cloned().unwrap_or(Value::Null),
+                    )
+                })?
+                .to_string();
+            let tags: Vec<String> = args
+                .get("tags")
+                .and_then(|t| t.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let author = args
+                .get("author")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let input = crate::publish::PublishInput {
+                title,
+                body_markdown,
+                tags,
+                author,
+            };
+            let post =
+                crate::publish::publish_post(state, sub, input).map_err(|e| e.to_json_rpc())?;
+            serde_json::to_value(post)
+                .map_err(|e| JsonRpcError::simple(-32603, format!("serialize post failed: {e}")))?
+        }
         _ => {
             return Err(JsonRpcError::simple(
                 -32603,
@@ -1857,6 +1946,7 @@ mod transport_tests {
         let compressor = EmbeddingCompressor::new(8, 4, 42);
         let quota = Quota::per_minute(NonZeroU32::new(10).expect("nonzero quota"));
         let chat_limiter = governor::RateLimiter::keyed(quota);
+        let publish_limiter = governor::RateLimiter::keyed(quota);
         let ollama_client = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .build()
@@ -1891,6 +1981,7 @@ mod transport_tests {
             artifact_zip_path: std::sync::Mutex::new(None),
             ollama_client,
             chat_limiter,
+            publish_limiter,
             pending: Arc::new(crate::pending::PendingBundles::with_defaults()),
             bootstrap_tickets: Arc::new(crate::api::BootstrapTickets::with_defaults()),
             bootstrap_server_x25519_secret,
@@ -1909,6 +2000,7 @@ mod transport_tests {
                 .timeout(std::time::Duration::from_secs(2))
                 .build()
                 .expect("reqwest hosted client"),
+            blog_rebuild_hook: None,
         })
     }
 
@@ -1998,16 +2090,16 @@ mod transport_tests {
         let tools = envelope["result"]["tools"]
             .as_array()
             .expect("tools array present");
-        // 7 base tools, plus 3 when the trajectory feature is compiled in.
+        // 8 base tools (incl. publish_post), plus 3 when the trajectory feature is compiled in.
         let expected = if cfg!(feature = "trajectory-experimental") {
-            10
+            11
         } else {
-            7
+            8
         };
         assert_eq!(
             tools.len(),
             expected,
-            "expected {expected} MCP tools in tools/list response (7 base + trajectory tools when enabled)",
+            "expected {expected} MCP tools in tools/list response (8 base incl. publish_post + trajectory tools when enabled)",
         );
     }
 

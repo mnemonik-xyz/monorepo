@@ -48,6 +48,8 @@ fn state_with_short_ttl(ttl_secs: i64) -> Arc<McpState> {
     let compressor = EmbeddingCompressor::new(8, 4, 42);
     let chat_limiter =
         governor::RateLimiter::keyed(Quota::per_minute(NonZeroU32::new(10).unwrap()));
+    let publish_limiter =
+        governor::RateLimiter::keyed(Quota::per_minute(NonZeroU32::new(10).unwrap()));
     let ollama_client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .build()
@@ -79,6 +81,7 @@ fn state_with_short_ttl(ttl_secs: i64) -> Arc<McpState> {
         artifact_zip_path: std::sync::Mutex::new(None),
         ollama_client,
         chat_limiter,
+        publish_limiter,
         pending: Arc::new(PendingBundles::new(10, ttl_secs, 5)),
         bootstrap_tickets: Arc::new(mnemonic_mcp::api::BootstrapTickets::with_defaults()),
         bootstrap_server_x25519_secret: bootstrap_x25519_sk,
@@ -98,6 +101,7 @@ fn state_with_short_ttl(ttl_secs: i64) -> Arc<McpState> {
             .timeout(std::time::Duration::from_secs(2))
             .build()
             .expect("reqwest hosted client"),
+        blog_rebuild_hook: None,
     })
 }
 

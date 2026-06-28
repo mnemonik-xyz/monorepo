@@ -10,6 +10,7 @@ mod oauth;
 mod payment;
 mod pending;
 mod pricing;
+mod publish;
 mod seed;
 mod tools;
 #[cfg(feature = "trajectory-experimental")]
@@ -81,8 +82,11 @@ enum Command {
 //
 // The `/mcp` JSON-RPC dispatcher (streamable HTTP per Decision 1) lives in
 // `mcp::mcp_handler` so it can be unit-tested directly from `mcp.rs::tests`.
-// Wave 4 removed the custodial api-key / balance / deposit endpoints; the
-// remaining non-`/mcp` endpoints (admin stats, health) are plain JSON.
+// Wave 4 removed the custodial api-key / balance / deposit endpoints. The
+// non-`/mcp` surface is now broader: the public read endpoints (`/artifacts`,
+// `/analytics/*`, `/blog`, `/blog/feed.xml`, `/blog/{slug}`, `/stats`), admin
+// stats, health, `/chat`, plus the OAuth / `.well-known` / key-escrow
+// sub-routers — all plain JSON (XML for the Atom feed), none JSON-RPC.
 
 /// Fail-closed admin gate: returns true only when `admin_token` is configured
 /// (non-empty) AND the request carries a matching `Authorization: Bearer` token.
@@ -375,6 +379,14 @@ async fn main() -> anyhow::Result<()> {
         let quota = Quota::per_minute(NonZeroU32::new(10).unwrap());
         governor::RateLimiter::keyed(quota)
     };
+    // Publish rate limiter (webapp-rethink T9): 10 posts/min per authenticated
+    // identity, keyed on the caller pubkey rather than the IP.
+    let publish_limiter = {
+        use governor::Quota;
+        use std::num::NonZeroU32;
+        let quota = Quota::per_minute(NonZeroU32::new(10).unwrap());
+        governor::RateLimiter::keyed(quota)
+    };
 
     // ── LLM provider abstraction ────────────────────────────────────────────
     let llm_client = llm::LlmClient::new(
@@ -455,6 +467,26 @@ async fn main() -> anyhow::Result<()> {
         .build()
         .expect("failed to build reqwest client for hosted soft-fall proxy");
 
+    // Blog rebuild webhook (Task 13). Optional, operator-supplied via env. Only
+    // accept absolute http(s) URLs; anything else is ignored with a warning so a
+    // typo can't silently disable freshness OR become a surprising request
+    // target. The ping itself is best-effort and non-blocking (see publish.rs).
+    let blog_rebuild_hook = std::env::var("BLOG_REBUILD_HOOK")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .and_then(|url| {
+            if publish::hook_url_allowed(&url) {
+                tracing::info!("blog rebuild hook enabled");
+                Some(url)
+            } else {
+                tracing::warn!(
+                    "ignoring BLOG_REBUILD_HOOK — only absolute http:// or https:// URLs are accepted"
+                );
+                None
+            }
+        });
+
     // EVM x402 rail (Wave 1): enabled only when all three knobs are set.
     let evm_payment = if !cfg.evm_rpc_url.is_empty()
         && !cfg.evm_usdc_token.is_empty()
@@ -492,6 +524,7 @@ async fn main() -> anyhow::Result<()> {
         artifact_zip_path: std::sync::Mutex::new(None),
         ollama_client,
         chat_limiter,
+        publish_limiter,
         pending,
         bootstrap_tickets,
         bootstrap_server_x25519_secret,
@@ -503,6 +536,7 @@ async fn main() -> anyhow::Result<()> {
         confirmation_ledger: confirmation_ledger.clone(),
         hosted_endpoint,
         hosted_client,
+        blog_rebuild_hook,
     });
 
     // Spawn the confirmation-ledger eviction loop. Held strong reference
@@ -796,6 +830,11 @@ async fn run_http(
     // (`initialize` / `tools/list`) does not apply — every /api/* request
     // requires a valid JWT.
     let api_subrouter = Router::new()
+        // Micropub-shaped agent publish (webapp-rethink T9, Decision 5). Authed
+        // via the same `bearer_auth_middleware` layered below — anonymous POST
+        // /blog → 401. GET /blog + GET /blog/:slug stay public on the base
+        // router; merging combines them by method.
+        .route("/blog", post(api::blog_publish_handler))
         .route(
             "/api/pending/{correlation_id}",
             axum::routing::get(api::get_pending_handler),
@@ -910,7 +949,12 @@ async fn run_http(
         .route(
             "/.well-known/oauth-protected-resource/mcp",
             get(oauth::oauth_protected_resource_metadata_mcp),
-        );
+        )
+        // API-origin AgentCard discovery (webapp-rethink T10, Decision 5).
+        // Advertises the publish capability (MCP tool + Micropub) via the
+        // `x-mnemonic` extension. Public, no auth, no state — see
+        // `api::agent_card_handler`.
+        .route("/.well-known/agent.json", get(api::agent_card_handler));
 
     // ── Google OAuth routes (T14, conditional) ───────────────────────────────
     // Two-layer mount: public start/callback don't go through bearer-auth;
@@ -1032,6 +1076,22 @@ async fn run_http(
         .route("/chat", post(chat::chat_handler))
         .route("/admin/stats", get(admin_stats))
         .route("/stats", get(api::public_stats_handler))
+        // ── Public read surface (webapp-rethink T8, Decision 9) ──────────────
+        // Unauthenticated JSON read endpoints backing the Ledger / Analytics /
+        // Blog pages. Registered on the base router so they inherit the global
+        // `.layer(cors)` (allows the webapp origin + localhost via
+        // `cors_policy::is_allowed_cors_origin`) and carry NO bearer-auth
+        // middleware. `/artifacts` is public-visibility ONLY (Decision 6).
+        .route("/artifacts", get(api::artifacts_handler))
+        .route(
+            "/analytics/attestations",
+            get(api::analytics_attestations_handler),
+        )
+        .route("/blog", get(api::blog_list_handler))
+        // Atom syndication feed (webapp-rethink T10). Public, read-only, under
+        // CORS. Registered before `/blog/{slug}` so the literal path wins.
+        .route("/blog/feed.xml", get(api::blog_feed_handler))
+        .route("/blog/{slug}", get(api::blog_post_handler))
         .route("/download-knowledge", get(chat::download_knowledge_handler))
         .route(
             "/health",

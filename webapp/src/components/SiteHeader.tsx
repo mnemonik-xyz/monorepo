@@ -5,7 +5,8 @@ import { EXTERNAL_LINKS } from "../lib/links";
 /**
  * Sticky minimal site header. Three zones:
  *   left   — wordmark anchored to /
- *   centre — Docs dropdown (Whitepaper, ResearchGate) + GitHub link
+ *   centre — Docs dropdown (Whitepaper, ResearchGate), the public-surface links
+ *            (Ledger, Analytics, Blog), Roadmap, and the GitHub link
  *   right  — Install pill (desktop only)
  *
  * Designed to read like a research-paper masthead, not a marketing nav.
@@ -32,17 +33,14 @@ export default function SiteHeader() {
           className="flex items-center gap-1 sm:gap-3"
         >
           <DocsMenu />
-          <Link
-            to="/roadmap"
-            className="group relative px-1.5 py-1 font-mono text-[11px] uppercase tracking-[0.16em] text-text-muted transition-colors hover:text-text-primary sm:px-2"
-            aria-label="Project roadmap"
-          >
-            <span
-              aria-hidden="true"
-              className="absolute inset-x-1 -bottom-0.5 h-px origin-left scale-x-0 bg-accent-primary/70 transition-transform duration-300 group-hover:scale-x-100"
-            />
-            Roadmap
-          </Link>
+          <NavLink to="/ledger" label="Ledger" srLabel="Evidence ledger" />
+          <NavLink
+            to="/analytics"
+            label="Analytics"
+            srLabel="Attestation analytics"
+          />
+          <NavLink to="/blog" label="Blog" srLabel="Protocol blog" />
+          <NavLink to="/roadmap" label="Roadmap" srLabel="Project roadmap" />
           <ResourceLink
             href={EXTERNAL_LINKS.github}
             label="GitHub"
@@ -57,6 +55,29 @@ export default function SiteHeader() {
         </nav>
       </div>
     </header>
+  );
+}
+
+interface NavLinkProps {
+  to: string;
+  label: string;
+  srLabel: string;
+}
+
+/** Internal route link in the masthead, with the hairline underline hover. */
+function NavLink({ to, label, srLabel }: NavLinkProps) {
+  return (
+    <Link
+      to={to}
+      className="group relative px-1.5 py-1 font-mono text-[11px] uppercase tracking-[0.16em] text-text-muted transition-colors hover:text-text-primary sm:px-2"
+      aria-label={srLabel}
+    >
+      <span
+        aria-hidden="true"
+        className="absolute inset-x-1 -bottom-0.5 h-px origin-left scale-x-0 bg-accent-primary/70 transition-transform duration-300 group-hover:scale-x-100"
+      />
+      {label}
+    </Link>
   );
 }
 

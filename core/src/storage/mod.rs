@@ -16,6 +16,6 @@ pub mod trajectory_sqlite;
 pub mod trajectory_arweave;
 
 pub use mode::{Visibility, WriteMode};
-pub use sqlite::{PublicStats, SqliteStore};
+pub use sqlite::{BlogPost, PublicArtifact, PublicStats, SqliteStore, TimelineBucket};
 pub use traits::{AttestationRow, SearchResult};
 pub use traits::{AttestationStore, LineageStore};
