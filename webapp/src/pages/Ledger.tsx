@@ -18,11 +18,11 @@ import { arweaveTxUrl, solanaTxUrl } from "../lib/links";
  * public "proof of work": real signed memories, their blake3 hashes, and their
  * on-chain anchors, rendered as receipt/evidence cards.
  *
- * The page never lies about provenance: when the live `/artifacts` endpoint is
- * absent the client returns `sample: true` rows and we surface a clearly-labeled
- * "sample · not live" banner (Decision 2). On-chain rows ("participate") link to
- * the Solana + Arweave explorers; `local:` / unanchored rows render as plain
- * text, never as links (Decision 6 surfaces public rows only).
+ * The page never lies about provenance: data comes from the live `/artifacts`
+ * endpoint and a fetch failure shows an error state — never fabricated rows.
+ * On-chain rows ("participate") link to the Solana + Arweave explorers; `local:`
+ * / unanchored rows render as plain text, never as links (Decision 6 surfaces
+ * public rows only).
  */
 
 type ModeFilter = "all" | WriteMode;
@@ -79,8 +79,6 @@ export default function Ledger() {
           mode={mode}
           onModeChange={setMode}
         />
-
-        {page?.sample && <SampleBanner />}
 
         <div className="mt-8">
           {status === "loading" && <LoadingState />}
@@ -363,28 +361,6 @@ function AnchorRow({
 /* -------------------------------------------------------------------------- */
 /*                                  States                                    */
 /* -------------------------------------------------------------------------- */
-
-function SampleBanner() {
-  return (
-    <div
-      data-testid="sample-banner"
-      role="note"
-      className="mt-6 flex items-start gap-3 rounded-md border border-stamp/30 bg-stamp/[0.06] px-4 py-3"
-    >
-      <span
-        aria-hidden="true"
-        className="mt-1 inline-block h-2 w-2 shrink-0 rounded-full bg-stamp"
-      />
-      <p className="text-sm leading-relaxed text-text-muted">
-        <span className="font-mono text-[11px] uppercase tracking-[0.16em] text-stamp">
-          Sample · not live
-        </span>{" "}
-        — the live ledger endpoint is not reachable, so these are representative
-        placeholder records, not real node data.
-      </p>
-    </div>
-  );
-}
 
 function LoadingState() {
   return (

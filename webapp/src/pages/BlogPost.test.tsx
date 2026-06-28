@@ -45,7 +45,7 @@ afterEach(() => {
 
 describe("BlogPost page", () => {
   it("renders_markdown_body_as_html_elements", async () => {
-    fetchBlogPost.mockResolvedValue({ post: POST, sample: false });
+    fetchBlogPost.mockResolvedValue({ post: POST });
     renderAt("anchoring");
 
     // Title from the post header.
@@ -62,26 +62,13 @@ describe("BlogPost page", () => {
   });
 
   it("renders_not_found_for_unknown_slug", async () => {
-    fetchBlogPost.mockResolvedValue({ post: null, sample: true });
+    fetchBlogPost.mockResolvedValue({ post: null });
     renderAt("does-not-exist");
     expect(await screen.findByTestId("post-not-found")).toBeInTheDocument();
   });
 
-  it("shows_sample_banner_when_sample_true", async () => {
-    fetchBlogPost.mockResolvedValue({ post: POST, sample: true });
-    renderAt("anchoring");
-    expect(await screen.findByTestId("sample-banner")).toBeInTheDocument();
-  });
-
-  it("omits_sample_banner_for_live_data", async () => {
-    fetchBlogPost.mockResolvedValue({ post: POST, sample: false });
-    renderAt("anchoring");
-    await screen.findByTestId("post-body");
-    expect(screen.queryByTestId("sample-banner")).not.toBeInTheDocument();
-  });
-
   it("emits_per_post_seo_title_and_article_jsonld", async () => {
-    fetchBlogPost.mockResolvedValue({ post: POST, sample: false });
+    fetchBlogPost.mockResolvedValue({ post: POST });
     renderAt("anchoring");
     await screen.findByTestId("post-body");
 
@@ -108,7 +95,7 @@ describe("BlogPost page", () => {
       body_markdown:
         'Safe **text** here\n\n<img src=x onerror="alert(1)" />\n\n<script>alert(2)</script>\n\n[evil](javascript:alert(3))\n',
     };
-    fetchBlogPost.mockResolvedValue({ post: malicious, sample: false });
+    fetchBlogPost.mockResolvedValue({ post: malicious });
     renderAt("xss");
 
     const body = await screen.findByTestId("post-body");
@@ -128,7 +115,7 @@ describe("BlogPost page", () => {
 
   it("renders_empty_body_without_crashing", async () => {
     const empty: BlogPost = { ...POST, slug: "empty", body_markdown: "" };
-    fetchBlogPost.mockResolvedValue({ post: empty, sample: false });
+    fetchBlogPost.mockResolvedValue({ post: empty });
     renderAt("empty");
     expect(
       await screen.findByRole("heading", { level: 1, name: POST.title }),
@@ -149,17 +136,14 @@ describe("BlogPost page", () => {
       slug: "weird-date",
       published_at: "not-a-real-date",
     };
-    fetchBlogPost.mockResolvedValue({ post: weird, sample: false });
+    fetchBlogPost.mockResolvedValue({ post: weird });
     renderAt("weird-date");
     const time = await screen.findByText("not-a-real-date");
     expect(time.tagName).toBe("TIME");
   });
 
   it("renders_loading_state_before_resolution", async () => {
-    let resolve: (v: {
-      post: BlogPost | null;
-      sample: boolean;
-    }) => void = () => {};
+    let resolve: (v: { post: BlogPost | null }) => void = () => {};
     fetchBlogPost.mockReturnValue(
       new Promise((r) => {
         resolve = r;
@@ -167,7 +151,7 @@ describe("BlogPost page", () => {
     );
     renderAt("anchoring");
     expect(screen.getByTestId("post-loading")).toBeInTheDocument();
-    resolve({ post: POST, sample: false });
+    resolve({ post: POST });
     await screen.findByTestId("post-body");
   });
 });

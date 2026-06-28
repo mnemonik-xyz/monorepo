@@ -14,9 +14,7 @@ import { loadWasm } from "../lib/wasm";
  * and `/api/cli-bootstrap/redeem/:ticket`) live on the MCP server, not the
  * webapp origin, so we always go through this base URL.
  */
-const MCP_BASE =
-  (import.meta.env?.VITE_MCP_BASE as string | undefined) ??
-  "https://mcp.mnemonik.xyz";
+const MCP_BASE = (import.meta.env?.VITE_MCP_BASE as string | undefined) ?? "";
 
 /** Bootstrap-ticket TTL fallback when the server omits `expires_at`.
  *  Matches `BOOTSTRAP_TTL_SECS = 300` in `mcp/src/api.rs` (Decision 12). */

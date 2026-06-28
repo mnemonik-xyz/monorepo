@@ -36,9 +36,7 @@ import { loadWasm } from "../lib/wasm";
 // Configurable for e2e tests + local dev. Override via Vite env:
 // `VITE_MCP_BASE=http://localhost:3000 npm run dev` runs against a
 // locally-built mnemonic-mcp release binary.
-const MCP_BASE =
-  (import.meta.env?.VITE_MCP_BASE as string | undefined) ??
-  "https://mcp.mnemonik.xyz";
+const MCP_BASE = (import.meta.env?.VITE_MCP_BASE as string | undefined) ?? "";
 
 type Status =
   | { kind: "loading" }
@@ -128,7 +126,7 @@ export default function Sign() {
         if (jwt) headers.Authorization = `Bearer ${jwt}`;
         const res = await fetch(
           `${MCP_BASE}/api/pending/${encodeURIComponent(correlationId)}`,
-          { method: "GET", headers }
+          { method: "GET", headers },
         );
 
         if (cancelled) return;
@@ -213,7 +211,7 @@ export default function Sign() {
       // the server. sign_cose_payload wraps the exact bytes in COSE_Sign1.
       const cose = wasm.sign_cose_payload(
         status.bundle.cborBytes,
-        identity
+        identity,
       ) as Uint8Array;
 
       const cose_signed_bytes_b64 = uint8ToBase64(cose);
@@ -293,8 +291,8 @@ export default function Sign() {
     status.kind === "ready"
       ? status.bundle.expiresAtMs
       : status.kind === "signing"
-      ? null
-      : null;
+        ? null
+        : null;
   const remainingMs = expiresAtMs !== null ? Math.max(0, expiresAtMs - now) : 0;
   const remainingLabel = formatMmSs(remainingMs);
 

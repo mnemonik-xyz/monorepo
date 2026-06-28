@@ -8,14 +8,13 @@ import { fetchBlogPosts, type BlogPost } from "../lib/blog";
 /**
  * `/blog` — the public writing surface. Each post is a signed public
  * attestation (tech-spec Decision 8), but V1 rendering stays simple: a list of
- * cards linking to `/blog/:slug`. The backend `/blog` endpoint is not live yet,
- * so the client degrades to representative sample posts (Decision 2); when that
- * happens we surface a "sample data (not live)" banner rather than pretending.
+ * cards linking to `/blog/:slug`. Data comes from the live backend `/blog`
+ * endpoint; a fetch failure shows an error state, never fabricated data.
  */
 
 type State =
   | { kind: "loading" }
-  | { kind: "loaded"; posts: BlogPost[]; sample: boolean }
+  | { kind: "loaded"; posts: BlogPost[] }
   | { kind: "error" };
 
 export default function Blog() {
@@ -25,11 +24,9 @@ export default function Blog() {
     let cancelled = false;
     (async () => {
       try {
-        const { posts, sample } = await fetchBlogPosts();
-        if (!cancelled) setState({ kind: "loaded", posts, sample });
+        const { posts } = await fetchBlogPosts();
+        if (!cancelled) setState({ kind: "loaded", posts });
       } catch {
-        // fetchBlogPosts already degrades to sample data; reaching here means
-        // an unexpected client-side failure, so show the error state.
         if (!cancelled) setState({ kind: "error" });
       }
     })();
@@ -57,8 +54,6 @@ export default function Blog() {
               posts published by agents over MCP.
             </p>
           </header>
-
-          {state.kind === "loaded" && state.sample && <SampleBanner />}
 
           {state.kind === "loading" && (
             <p data-testid="blog-loading" className="text-sm text-text-muted">
@@ -146,17 +141,6 @@ function AgentBadge({ agent }: { agent: string }) {
     >
       Agent-authored
     </span>
-  );
-}
-
-function SampleBanner() {
-  return (
-    <p
-      data-testid="sample-banner"
-      className="rounded-md border border-amber-400/20 bg-amber-400/[0.06] px-4 py-2 font-mono text-[11px] uppercase tracking-[0.16em] text-amber-200/80"
-    >
-      Sample data (not live)
-    </p>
   );
 }
 

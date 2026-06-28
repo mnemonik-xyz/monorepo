@@ -1,90 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import {
-  fetchArtifacts,
-  fetchAttestationTimeline,
-  sampleArtifacts,
-  sampleTimeline,
-  type TimeRange,
-} from "./ledger";
+import { fetchArtifacts, fetchAttestationTimeline } from "./ledger";
 
 const mockFetch = () => fetch as unknown as ReturnType<typeof vi.fn>;
-
-describe("sampleTimeline", () => {
-  const cases: Array<[TimeRange, number]> = [
-    ["30d", 30],
-    ["90d", 90],
-    ["12m", 12],
-  ];
-
-  it.each(cases)("has the right bucket count for %s", (range, count) => {
-    expect(sampleTimeline(range).buckets).toHaveLength(count);
-  });
-
-  it.each(cases)(
-    "reports totals matching the sum of buckets for %s",
-    (range) => {
-      const t = sampleTimeline(range);
-      const node = t.buckets.reduce((s, b) => s + b.on_node, 0);
-      const chain = t.buckets.reduce((s, b) => s + b.on_chain, 0);
-      expect(t.total_on_node).toBe(node);
-      expect(t.total_on_chain).toBe(chain);
-    },
-  );
-
-  it("is flagged as sample data", () => {
-    expect(sampleTimeline("30d").sample).toBe(true);
-  });
-
-  it("emits ascending ISO day-granularity dates", () => {
-    const buckets = sampleTimeline("90d").buckets;
-    for (const b of buckets) {
-      expect(b.date).toMatch(/^\d{4}-\d{2}-\d{2}$/);
-    }
-    const dates = buckets.map((b) => b.date);
-    expect([...dates].sort()).toEqual(dates);
-  });
-
-  it("is deterministic across calls (no wall-clock dependence)", () => {
-    expect(sampleTimeline("12m")).toEqual(sampleTimeline("12m"));
-  });
-});
-
-describe("sampleArtifacts", () => {
-  it("mixes both write modes", () => {
-    const modes = new Set(sampleArtifacts().map((a) => a.write_mode));
-    expect(modes).toContain("local");
-    expect(modes).toContain("participate");
-  });
-
-  it("includes both real and local: / null anchors", () => {
-    const rows = sampleArtifacts();
-    const hasReal = rows.some(
-      (a) => a.solana_tx !== null && !a.solana_tx.startsWith("local:"),
-    );
-    const hasUnanchored = rows.some(
-      (a) => a.solana_tx === null || a.solana_tx.startsWith("local:"),
-    );
-    expect(hasReal).toBe(true);
-    expect(hasUnanchored).toBe(true);
-  });
-
-  it("uses blake3-style 64-hex hashes and ISO timestamps with varied tags", () => {
-    const rows = sampleArtifacts();
-    for (const a of rows) {
-      expect(a.content_hash).toMatch(/^[0-9a-f]{64}$/);
-      expect(a.created_at).toMatch(
-        /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/,
-      );
-      expect(a.tags.length).toBeGreaterThan(0);
-    }
-    const allTags = new Set(rows.flatMap((a) => a.tags));
-    expect(allTags.size).toBeGreaterThan(1);
-  });
-
-  it("is deterministic across calls", () => {
-    expect(sampleArtifacts()).toEqual(sampleArtifacts());
-  });
-});
 
 describe("fetchArtifacts", () => {
   beforeEach(() => {
@@ -117,7 +34,6 @@ describe("fetchArtifacts", () => {
     );
 
     const page = await fetchArtifacts();
-    expect(page.sample).toBe(false);
     expect(page.total).toBe(1);
     const [a] = page.artifacts;
     expect(a).toBeDefined();
@@ -132,7 +48,7 @@ describe("fetchArtifacts", () => {
     ).toBeUndefined();
   });
 
-  it("returns live rows with sample false on 200", async () => {
+  it("returns live rows on 200", async () => {
     mockFetch().mockResolvedValueOnce(
       new Response(JSON.stringify({ artifacts: [], total: 0 }), {
         status: 200,
@@ -140,33 +56,28 @@ describe("fetchArtifacts", () => {
       }),
     );
     const page = await fetchArtifacts();
-    expect(page.sample).toBe(false);
     expect(page.artifacts).toEqual([]);
+    expect(page.total).toBe(0);
   });
 
-  it("degrades to sample true on non-OK status", async () => {
+  it("throws on non-OK status (no sample fallback)", async () => {
     mockFetch().mockResolvedValueOnce(new Response("oops", { status: 503 }));
-    const page = await fetchArtifacts();
-    expect(page.sample).toBe(true);
-    expect(page.artifacts).toEqual(sampleArtifacts());
+    await expect(fetchArtifacts()).rejects.toThrow();
   });
 
-  it("degrades to sample true on network/timeout error", async () => {
+  it("throws on network/timeout error (no sample fallback)", async () => {
     mockFetch().mockRejectedValueOnce(new TypeError("network down"));
-    const page = await fetchArtifacts();
-    expect(page.sample).toBe(true);
-    expect(page.artifacts.length).toBeGreaterThan(0);
+    await expect(fetchArtifacts()).rejects.toThrow();
   });
 
-  it("filters sample rows by query when degraded", async () => {
-    mockFetch().mockRejectedValueOnce(new TypeError("offline"));
-    const page = await fetchArtifacts({ q: "turboquant" });
-    expect(page.sample).toBe(true);
-    expect(page.artifacts.length).toBeGreaterThan(0);
-    for (const a of page.artifacts) {
-      const hay = (a.content + a.tags.join(" ")).toLowerCase();
-      expect(hay).toContain("turboquant");
-    }
+  it("throws on a malformed body (missing artifacts array)", async () => {
+    mockFetch().mockResolvedValueOnce(
+      new Response(JSON.stringify({ total: 0 }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    await expect(fetchArtifacts()).rejects.toThrow();
   });
 });
 
@@ -178,7 +89,7 @@ describe("fetchAttestationTimeline", () => {
     vi.unstubAllGlobals();
   });
 
-  it("returns the live series with sample false on 200", async () => {
+  it("returns the live series on 200", async () => {
     const live = {
       buckets: [{ date: "2026-06-01", on_node: 5, on_chain: 2 }],
       total_on_node: 5,
@@ -192,22 +103,17 @@ describe("fetchAttestationTimeline", () => {
       }),
     );
     const timeline = await fetchAttestationTimeline("30d");
-    expect(timeline.sample).toBe(false);
     expect(timeline.buckets).toEqual(live.buckets);
     expect(timeline.total_on_node).toBe(5);
   });
 
-  it("degrades to the sample series on non-OK status", async () => {
+  it("throws on non-OK status (no sample fallback)", async () => {
     mockFetch().mockResolvedValueOnce(new Response("oops", { status: 500 }));
-    const timeline = await fetchAttestationTimeline("90d");
-    expect(timeline.sample).toBe(true);
-    expect(timeline).toEqual(sampleTimeline("90d"));
+    await expect(fetchAttestationTimeline("90d")).rejects.toThrow();
   });
 
-  it("degrades to the sample series on network/timeout error", async () => {
+  it("throws on network/timeout error (no sample fallback)", async () => {
     mockFetch().mockRejectedValueOnce(new TypeError("network down"));
-    const timeline = await fetchAttestationTimeline("12m");
-    expect(timeline.sample).toBe(true);
-    expect(timeline.buckets).toHaveLength(12);
+    await expect(fetchAttestationTimeline("12m")).rejects.toThrow();
   });
 });

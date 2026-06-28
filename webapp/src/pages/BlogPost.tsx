@@ -25,7 +25,7 @@ import { fetchBlogPost, type BlogPost } from "../lib/blog";
 
 type State =
   | { kind: "loading" }
-  | { kind: "loaded"; post: BlogPost; sample: boolean }
+  | { kind: "loaded"; post: BlogPost }
   | { kind: "not-found" }
   | { kind: "error" };
 
@@ -36,9 +36,7 @@ export default function BlogPost({
 } = {}) {
   const { slug } = useParams<{ slug: string }>();
   const [state, setState] = useState<State>(
-    initialPost
-      ? { kind: "loaded", post: initialPost, sample: false }
-      : { kind: "loading" },
+    initialPost ? { kind: "loaded", post: initialPost } : { kind: "loading" },
   );
 
   useEffect(() => {
@@ -50,11 +48,9 @@ export default function BlogPost({
     setState({ kind: "loading" });
     (async () => {
       try {
-        const { post, sample } = await fetchBlogPost(slug);
+        const { post } = await fetchBlogPost(slug);
         if (cancelled) return;
-        setState(
-          post ? { kind: "loaded", post, sample } : { kind: "not-found" },
-        );
+        setState(post ? { kind: "loaded", post } : { kind: "not-found" });
       } catch {
         if (!cancelled) setState({ kind: "error" });
       }
@@ -91,9 +87,7 @@ export default function BlogPost({
 
           {state.kind === "not-found" && <NotFound />}
 
-          {state.kind === "loaded" && (
-            <Article post={state.post} sample={state.sample} />
-          )}
+          {state.kind === "loaded" && <Article post={state.post} />}
         </div>
       </main>
       <SiteFooter />
@@ -120,10 +114,9 @@ function PostSeo({ post }: { post: BlogPost }) {
   );
 }
 
-function Article({ post, sample }: { post: BlogPost; sample: boolean }) {
+function Article({ post }: { post: BlogPost }) {
   return (
     <article className="space-y-6">
-      {sample && <SampleBanner />}
       <header className="space-y-3">
         <h1 className="text-3xl font-bold tracking-tight text-text-primary sm:text-4xl">
           {post.title}
@@ -182,17 +175,6 @@ function NotFound() {
         This post does not exist or is no longer published.
       </p>
     </div>
-  );
-}
-
-function SampleBanner() {
-  return (
-    <p
-      data-testid="sample-banner"
-      className="rounded-md border border-amber-400/20 bg-amber-400/[0.06] px-4 py-2 font-mono text-[11px] uppercase tracking-[0.16em] text-amber-200/80"
-    >
-      Sample data (not live)
-    </p>
   );
 }
 
