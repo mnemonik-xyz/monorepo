@@ -24,6 +24,7 @@ const RANGES: { value: TimeRange; label: string; window: string }[] = [
   { value: "30d", label: "30d", window: "last 30 days" },
   { value: "90d", label: "90d", window: "last 90 days" },
   { value: "12m", label: "12m", window: "last 12 months" },
+  { value: "all", label: "All", window: "all time" },
 ];
 
 type Status = "loading" | "ready" | "error";

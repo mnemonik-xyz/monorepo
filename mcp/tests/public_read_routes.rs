@@ -2,13 +2,13 @@
 //! `GET /artifacts`, `GET /analytics/attestations`, `GET /blog`, and
 //! `GET /blog/:slug`.
 //!
-//! These endpoints are unauthenticated JSON surfaces consumed cross-origin by
-//! the webapp. The critical guarantee under test is the privacy invariant
-//! (Decision 6): `/artifacts` exposes `visibility = public` rows ONLY — never a
-//! private or NULL-owner row, on either the plain-list or `?q=` search path.
+//! These endpoints are unauthenticated JSON surfaces consumed by the webapp.
+//! Every stored memory is public (operator decision), so `/artifacts` returns
+//! ALL rows (including private-marked and NULL-owner rows) on both the
+//! plain-list and `?q=` search paths.
 //!
 //! TDD anchors (tasks/8.md):
-//!   - `/artifacts` returns only public rows and matches the wire shape.
+//!   - `/artifacts` returns all rows and matches the wire shape.
 //!   - `/analytics` buckets/totals correct per range.
 //!   - `/blog` + `/blog/:slug` return expected JSON; unknown slug → 404.
 //!
@@ -102,7 +102,7 @@ fn seed_one_public_one_private(state: &Arc<McpState>, owner: &str) {
 }
 
 #[tokio::test]
-async fn artifacts_plain_list_returns_public_only_with_shape() {
+async fn artifacts_plain_list_returns_all_rows_with_shape() {
     let state = mock_state();
     let owner = "seed-owner-pubkey";
     seed_one_public_one_private(&state, owner);
@@ -112,13 +112,15 @@ async fn artifacts_plain_list_returns_public_only_with_shape() {
     assert_eq!(status, StatusCode::OK);
 
     let artifacts = body["artifacts"].as_array().expect("artifacts array");
-    assert_eq!(artifacts.len(), 1, "private row must not surface: {body}");
-    assert_eq!(body["total"], 1);
+    assert_eq!(artifacts.len(), 2, "all rows must surface: {body}");
+    assert_eq!(body["total"], 2);
 
     // Wire shape (lib/ledger.ts Artifact, with `attestation_id` key per the
-    // PublicArtifact contract).
-    let row = &artifacts[0];
-    assert_eq!(row["attestation_id"], "public-id");
+    // PublicArtifact contract). Locate the seeded public row regardless of order.
+    let row = artifacts
+        .iter()
+        .find(|r| r["attestation_id"] == "public-id")
+        .expect("public-id row present");
     assert_eq!(row["content"], "public ledger row");
     assert_eq!(row["content_hash"], "hash-pub");
     assert_eq!(row["tags"], serde_json::json!(["release"]));
@@ -126,29 +128,33 @@ async fn artifacts_plain_list_returns_public_only_with_shape() {
     assert_eq!(row["arweave_tx"], "ArweavePubTx");
     assert_eq!(row["created_at"], "2026-06-10T00:00:00Z");
     assert_eq!(row["write_mode"], "participate");
-    // Private-only fields are never projected onto the public wire shape.
-    assert!(row.get("visibility").is_none(), "visibility must not leak");
+    // The `visibility` and `relevance_score` fields are not part of the wire shape.
+    assert!(
+        row.get("visibility").is_none(),
+        "visibility not in wire shape"
+    );
     assert!(row.get("relevance_score").is_none());
 }
 
 #[tokio::test]
-async fn artifacts_search_query_returns_public_only() {
+async fn artifacts_search_query_returns_all_rows() {
     let state = mock_state();
     let owner = "seed-owner-pubkey";
     seed_one_public_one_private(&state, owner);
     let app = build_router(state);
 
-    // `?q=` routes through cosine search over the cross-owner public pool.
+    // `?q=` routes through cosine search over the cross-owner pool (all rows).
     let (status, body) = get_json(&app, "/artifacts?q=ledger&limit=10").await;
     assert_eq!(status, StatusCode::OK);
 
     let artifacts = body["artifacts"].as_array().expect("artifacts array");
-    assert_eq!(
-        artifacts.len(),
-        1,
-        "search must surface public rows only: {body}"
-    );
-    assert_eq!(artifacts[0]["attestation_id"], "public-id");
+    assert_eq!(artifacts.len(), 2, "search must surface all rows: {body}");
+    let ids: Vec<&str> = artifacts
+        .iter()
+        .map(|r| r["attestation_id"].as_str().unwrap_or(""))
+        .collect();
+    assert!(ids.contains(&"public-id"));
+    assert!(ids.contains(&"private-id"));
     assert!(artifacts[0].get("relevance_score").is_none());
 }
 
