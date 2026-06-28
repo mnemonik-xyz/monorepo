@@ -22,7 +22,6 @@ const TIMELINE_30D: AttestationTimeline = {
   total_on_node: 45,
   total_on_chain: 15,
   unique_users: 23,
-  sample: true,
 };
 
 const TIMELINE_90D: AttestationTimeline = {
@@ -34,7 +33,6 @@ const TIMELINE_90D: AttestationTimeline = {
   total_on_node: 567,
   total_on_chain: 234,
   unique_users: 88,
-  sample: true,
 };
 
 const fetchAttestationTimeline = vi.fn();
@@ -140,7 +138,6 @@ describe("Analytics page", () => {
       total_on_node: 0,
       total_on_chain: 0,
       unique_users: 0,
-      sample: false,
     } satisfies AttestationTimeline);
     renderAnalytics();
     expect(
@@ -233,24 +230,6 @@ describe("Analytics page", () => {
     expect(screen.getByTestId("stat-on-node")).toHaveTextContent("45");
     expect(screen.getByTestId("stat-on-chain")).toHaveTextContent("15");
     expect(screen.getByTestId("stat-users")).toHaveTextContent("23");
-  });
-
-  it("sample_banner_when_sample_true", async () => {
-    renderAnalytics();
-    expect(await screen.findByTestId("sample-banner")).toHaveTextContent(
-      /sample data/i,
-    );
-  });
-
-  it("no_sample_banner_when_sample_false", async () => {
-    // Decision 2 must be guarded both ways: live data shows no "not live" badge.
-    fetchAttestationTimeline.mockResolvedValue({
-      ...TIMELINE_30D,
-      sample: false,
-    } satisfies AttestationTimeline);
-    renderAnalytics();
-    await screen.findByTestId("timeline-chart");
-    expect(screen.queryByTestId("sample-banner")).toBeNull();
   });
 
   it("chart_has_img_role_and_aria_label", async () => {

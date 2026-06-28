@@ -3,7 +3,6 @@ import {
   deriveBlogPost,
   fetchBlogPost,
   fetchBlogPosts,
-  sampleBlogPosts,
   type BlogPost,
 } from "./blog";
 
@@ -15,7 +14,7 @@ describe("fetchBlogPosts", () => {
     vi.unstubAllGlobals();
   });
 
-  it("returns_live_posts_with_sample_false_on_200", async () => {
+  it("returns_live_posts_on_200", async () => {
     const posts = [
       {
         slug: "live",
@@ -35,7 +34,6 @@ describe("fetchBlogPosts", () => {
     );
 
     const result = await fetchBlogPosts();
-    expect(result.sample).toBe(false);
     const [p] = result.posts;
     expect(p).toBeDefined();
     // Present fields are preserved verbatim...
@@ -45,24 +43,20 @@ describe("fetchBlogPosts", () => {
     expect(p!.reading_minutes).toBeGreaterThanOrEqual(1);
   });
 
-  it("degrades_to_sample_true_on_5xx", async () => {
+  it("throws_on_5xx_no_sample_fallback", async () => {
     (fetch as unknown as ReturnType<typeof vi.fn>).mockResolvedValueOnce(
       new Response("oops", { status: 503 }),
     );
 
-    const result = await fetchBlogPosts();
-    expect(result.sample).toBe(true);
-    expect(result.posts).toEqual(sampleBlogPosts());
+    await expect(fetchBlogPosts()).rejects.toThrow();
   });
 
-  it("degrades_to_sample_true_on_network_error", async () => {
+  it("throws_on_network_error_no_sample_fallback", async () => {
     (fetch as unknown as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
       new TypeError("network down"),
     );
 
-    const result = await fetchBlogPosts();
-    expect(result.sample).toBe(true);
-    expect(result.posts.length).toBeGreaterThan(0);
+    await expect(fetchBlogPosts()).rejects.toThrow();
   });
 });
 
@@ -74,27 +68,45 @@ describe("fetchBlogPost", () => {
     vi.unstubAllGlobals();
   });
 
-  it("falls_back_to_matching_sample_post_on_failure", async () => {
-    (fetch as unknown as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
-      new TypeError("network down"),
+  it("returns_the_live_post_on_200", async () => {
+    const post = {
+      slug: "live",
+      title: "Live post",
+      summary: "s",
+      body_markdown: "b",
+      author: "node",
+      published_at: "2026-01-01T00:00:00.000Z",
+      tags: ["live"],
+    };
+    (fetch as unknown as ReturnType<typeof vi.fn>).mockResolvedValueOnce(
+      new Response(JSON.stringify({ post }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
     );
 
-    const first = sampleBlogPosts()[0];
-    expect(first).toBeDefined();
-    const slug = first!.slug;
-    const result = await fetchBlogPost(slug);
-    expect(result.sample).toBe(true);
-    expect(result.post?.slug).toBe(slug);
+    const result = await fetchBlogPost("live");
+    expect(result.post?.slug).toBe("live");
   });
 
-  it("returns_null_post_for_unknown_slug_on_failure", async () => {
-    (fetch as unknown as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
-      new TypeError("network down"),
+  it("returns_null_post_for_a_404", async () => {
+    (fetch as unknown as ReturnType<typeof vi.fn>).mockResolvedValueOnce(
+      new Response(JSON.stringify({ post: null }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
     );
 
     const result = await fetchBlogPost("does-not-exist");
-    expect(result.sample).toBe(true);
     expect(result.post).toBeNull();
+  });
+
+  it("throws_on_network_error_no_sample_fallback", async () => {
+    (fetch as unknown as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+      new TypeError("network down"),
+    );
+
+    await expect(fetchBlogPost("live")).rejects.toThrow();
   });
 });
 

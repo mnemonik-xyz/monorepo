@@ -28,9 +28,7 @@ import { readJwt, writeIdentity } from "../lib/storage";
  *   component picks it up and resumes.
  */
 
-const MCP_BASE =
-  (import.meta.env?.VITE_MCP_BASE as string | undefined) ??
-  "https://mcp.mnemonik.xyz";
+const MCP_BASE = (import.meta.env?.VITE_MCP_BASE as string | undefined) ?? "";
 
 /**
  * Redeem endpoint — placeholder constant so a name-mismatch with the

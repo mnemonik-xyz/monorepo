@@ -10,8 +10,48 @@ vi.mock("../components/SiteFooter", () => ({
   default: () => <footer data-testid="site-footer" />,
 }));
 
-// Mock the ledger client but keep the REAL sample data + filtering semantics,
-// so "search filters the list" is exercised honestly without any network.
+// Local fixture standing in for live `/artifacts` rows, with the variety the
+// rendering tests need: a real-anchored participate row, a local-only row, and
+// a `local:`-prefixed anchor row. The mock filters it by `q` so "search filters
+// the list" is exercised honestly without any network.
+import type { Artifact } from "../lib/ledger";
+
+const FIXTURE: Artifact[] = [
+  {
+    id: "a1c0ffee-0001-4a00-9c01-000000000001",
+    content: "Shipped v0.2 on Tuesday with Alex as release owner.",
+    content_hash:
+      "b1946ac92492d2347c6235b4d2611184d3f0a3f9e1c6a2e7c0d4b8a1f2e3d4c5",
+    tags: ["release", "v0.2"],
+    solana_tx: "5Nf5h5x2qQk8wq7Yk3J9p1d2c3b4a5n6m7l8k9j0i1h2g3f4e5d6c7b8a9",
+    arweave_tx: "kTQ7t1f9c2X3v4B5n6M7l8K9j0I1h2G3f4E5d6C7b8A",
+    created_at: "2026-06-26T00:00:00.000Z",
+    write_mode: "participate",
+  },
+  {
+    id: "a1c0ffee-0002-4a00-9c01-000000000002",
+    content: "Decided TurboQuant bit width stays at 4 for the production DB.",
+    content_hash:
+      "3a7bd3e2360a3d29eea436fcfb7e44c735d117c42d1c1835420b6b9942dd4f1b",
+    tags: ["architecture", "turboquant"],
+    solana_tx: null,
+    arweave_tx: null,
+    created_at: "2026-06-24T00:00:00.000Z",
+    write_mode: "local",
+  },
+  {
+    id: "a1c0ffee-0003-4a00-9c01-000000000003",
+    content: "Agent note: recall spans both local and participate writes.",
+    content_hash:
+      "2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae",
+    tags: ["recall"],
+    solana_tx: "local:offline-7f3a",
+    arweave_tx: "local:offline-7f3a",
+    created_at: "2026-06-22T00:00:00.000Z",
+    write_mode: "local",
+  },
+];
+
 vi.mock("../lib/ledger", async () => {
   const actual =
     await vi.importActual<typeof import("../lib/ledger")>("../lib/ledger");
@@ -19,16 +59,15 @@ vi.mock("../lib/ledger", async () => {
     ...actual,
     fetchArtifacts: vi.fn(
       async (opts?: { q?: string }): Promise<ArtifactPage> => {
-        const all = actual.sampleArtifacts();
         const q = opts?.q?.toLowerCase().trim();
         const artifacts = q
-          ? all.filter(
+          ? FIXTURE.filter(
               (a) =>
                 a.content.toLowerCase().includes(q) ||
                 a.tags.some((t) => t.toLowerCase().includes(q)),
             )
-          : all;
-        return { artifacts, total: artifacts.length, sample: true };
+          : FIXTURE;
+        return { artifacts, total: artifacts.length };
       },
     ),
   };
@@ -54,7 +93,7 @@ beforeEach(() => {
 });
 
 describe("Ledger page", () => {
-  it("renders_receipt_cards_from_sample_data", async () => {
+  it("renders_receipt_cards_from_live_data", async () => {
     renderLedger();
     expect(
       await screen.findByText(/Shipped v0\.2 on Tuesday/i),
@@ -62,13 +101,6 @@ describe("Ledger page", () => {
     // A semantic list of artifacts is present.
     const list = screen.getByRole("list", { name: /artifacts/i });
     expect(within(list).getAllByRole("listitem").length).toBeGreaterThan(0);
-  });
-
-  it("shows_sample_not_live_banner_when_sample_true", async () => {
-    renderLedger();
-    const banner = await screen.findByTestId("sample-banner");
-    expect(banner).toHaveTextContent(/sample/i);
-    expect(banner).toHaveTextContent(/not live/i);
   });
 
   it("renders_local_tx_as_plain_text_not_a_link", async () => {

@@ -15,10 +15,9 @@ import { Seo } from "../lib/seo";
  * rethink). A bespoke SVG time-series splits on-node (mint) from on-chain
  * (Solana-purple), with a range toggle and summary counters.
  *
- * Data comes from `fetchAttestationTimeline`; the backend endpoint does not
- * exist yet, so the client returns `sample: true` data and this page shows a
- * clearly-labelled "not live" banner (Decision 2). Tone per ux-guidelines:
- * factual, no marketing, no emojis.
+ * Data comes from the live `fetchAttestationTimeline` endpoint; a fetch failure
+ * shows an error state, never fabricated data. Tone per ux-guidelines: factual,
+ * no marketing, no emojis.
  */
 
 const RANGES: { value: TimeRange; label: string; window: string }[] = [
@@ -97,8 +96,6 @@ export default function Analytics() {
             {windowLabel}.
           </p>
         </header>
-
-        {data?.sample && <SampleBanner />}
 
         <div className="mt-8 flex items-center justify-between gap-4">
           <h2 className="font-mono text-[11px] uppercase tracking-[0.18em] text-text-muted">
@@ -306,28 +303,6 @@ function Legend() {
         />
         On chain
       </span>
-    </div>
-  );
-}
-
-function SampleBanner() {
-  return (
-    <div
-      data-testid="sample-banner"
-      role="status"
-      className="mt-6 flex items-start gap-3 rounded-md border border-stamp/30 bg-stamp/[0.06] px-4 py-3"
-    >
-      <span
-        aria-hidden="true"
-        className="mt-0.5 inline-block h-2 w-2 shrink-0 rounded-full bg-stamp"
-      />
-      <p className="text-sm leading-relaxed text-text-muted">
-        <span className="font-mono text-[11px] uppercase tracking-[0.18em] text-stamp">
-          Sample data — not live.
-        </span>{" "}
-        The analytics endpoint is not deployed yet, so this chart shows a
-        representative series. It does not reflect real attestations.
-      </p>
     </div>
   );
 }

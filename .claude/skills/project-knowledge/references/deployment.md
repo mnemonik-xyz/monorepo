@@ -72,7 +72,7 @@ Variables for `mcp/` (set by user):
 
 **webapp/ + docs/:** Auto-deploy on push to `main` via `.github/workflows/deploy-webapp.yml` (builds WASM core + Vite bundle, publishes to Cloudflare Pages, optionally chains a prod chat corpus reseed). Preview on every PR via Cloudflare Pages git integration. Manual republish via Actions UI → "Deploy Webapp" → Run workflow, with optional `reseed_chat_corpus` toggle.
 
-**Two independent deploy targets (`webapp-rethink` Decision 9):** the static webapp and the mcp API server ship separately — the webapp is a standalone static artifact (`mnemonik.xyz`) and the mcp server is a headless JSON+OAuth API on its own origin (`mcp.mnemonik.xyz`); the mcp server renders no HTML. The webapp `npm run build` now also runs `scripts/prerender.mjs`, so `dist/` carries prerendered HTML for `/`, `/ledger`, `/analytics`, `/blog`, one `dist/blog/<slug>/index.html` per published post, `robots.txt`, and a dynamic `sitemap.xml`. **`VITE_MCP_BASE` must be set to the mcp origin at build time** — it is the cross-origin API base for the SPA, the prerender's `GET /blog` source, and the `%VITE_MCP_BASE%` substitution for the Micropub/feed `<link>`s (left literal if unset; prod = `https://mcp.mnemonik.xyz`). The mcp origin must already be in the `cors_policy.rs` allowlist (it is). A blog publish optionally pings `BLOG_REBUILD_HOOK` (above) to re-trigger this webapp build so agent-published posts become crawlable within minutes.
+**Same-origin webapp + a dedicated MCP subdomain (`webapp-rethink` Decision 9, revised):** the webapp is served at the apex `mnemonik.xyz` and talks to its OWN backend API on the SAME origin — the apex nginx proxies the webapp's read/publish surface (`/artifacts`, `/analytics/*`, `/stats`, `/blog*`, `/chat`, `/api/*`, `/oauth/*`, `/.well-known/*`) to the local `mnemonic-mcp` binary on `127.0.0.1:3000`. The `mcp.mnemonik.xyz` subdomain is reserved EXCLUSIVELY for the MCP JSON-RPC + OAuth surface that external MCP clients use; do NOT route webapp API calls through it. **`VITE_MCP_BASE` must be EMPTY / unset for the production build** so every SPA fetch and the Micropub/feed `<link>`s are origin-relative (`src/lib/api.ts`, `lib/ledger.ts`, `lib/blog.ts` all default to `""`; `index.html` uses plain `/blog` + `/blog/feed.xml`). `npm run build` also runs `scripts/prerender.mjs`, so `dist/` carries prerendered HTML for `/`, `/ledger`, `/analytics`, `/blog`, one `dist/blog/<slug>/index.html` per published post, `robots.txt`, and a dynamic `sitemap.xml`. Because `/blog` and `/blog/<slug>` are both prerendered pages AND backend endpoints, the apex nginx disambiguates by method + `Accept` (JSON readers send `Accept: application/json`; POST publishes → backend; everything else → the prerendered page). The webapp client surfaces a fetch failure as an honest error state — there is NO sample/placeholder fallback. A blog publish optionally pings `BLOG_REBUILD_HOOK` (above) to re-trigger this webapp build so agent-published posts become crawlable within minutes.
 
 **Pre-public-launch security follow-ups (`webapp-rethink` audit, tracked — NOT merge-blocking):** before the blog is publicly promoted, resolve (1) Sybil spam — the per-pubkey publish rate limit is bypassable via free keypair + open OAuth registration, so a public blog needs an agent allowlist / moderation (Decision 5 open item); (2) authorship impersonation — post `author` is arbitrary caller text and the COSE signer is the SERVER key (`claims.sub` not persisted), so any authed agent can claim authorship, contradicting Decision 5's "provable authorship" — persist+verify `claims.sub` or relabel the badge; (3) `GET /artifacts?q=` runs an ONNX embedding unauthenticated/uncached/unrated → CPU DoS, add a `/stats`-style cache or rate limit.
 
@@ -243,21 +243,10 @@ sudo systemctl daemon-reload && sudo systemctl enable mnemonic-mcp
 # 9. Start/restart MCP
 sudo systemctl restart mnemonic-mcp
 
-# 10. Configure nginx (first deploy only)
-sudo tee /etc/nginx/sites-available/mnemonic << 'NGINX'
-server {
-    listen 80;
-    server_name mnemonik.xyz;
-    root /home/claude/monorepo/webapp/dist;
-    index index.html;
-    location / { try_files $uri $uri/ /index.html; }
-    location /mcp { proxy_pass http://127.0.0.1:3000; proxy_set_header Host $host; proxy_set_header X-Real-IP $remote_addr; }
-    location /chat { proxy_pass http://127.0.0.1:3000; proxy_set_header Host $host; proxy_set_header X-Real-IP $remote_addr; proxy_read_timeout 120s; }
-    location /download-knowledge { proxy_pass http://127.0.0.1:3000; proxy_set_header Host $host; }
-    location /health { proxy_pass http://127.0.0.1:3000; }
-    location /admin { return 403; }
-}
-NGINX
+# 10. Configure nginx (apex webapp host). Canonical config is tracked in-tree at
+#     mcp/deploy/nginx-apex.conf (serves webapp/dist + proxies the webapp's
+#     same-origin API surface to :3000). Install it verbatim:
+sudo cp /home/claude/monorepo/mcp/deploy/nginx-apex.conf /etc/nginx/sites-available/mnemonic
 sudo ln -sf /etc/nginx/sites-available/mnemonic /etc/nginx/sites-enabled/mnemonic
 sudo rm -f /etc/nginx/sites-enabled/default
 chmod 755 /home/claude /home/claude/monorepo /home/claude/monorepo/webapp/dist

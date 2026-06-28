@@ -54,10 +54,9 @@ afterEach(() => {
 });
 
 describe("Blog list page", () => {
-  it("renders_post_cards_from_sample_with_links", async () => {
+  it("renders_post_cards_with_links", async () => {
     fetchBlogPosts.mockResolvedValue({
       posts: [HUMAN_POST, AGENT_POST],
-      sample: true,
     });
     renderBlog();
 
@@ -77,7 +76,6 @@ describe("Blog list page", () => {
   it("marks_agent_authored_posts_distinctly", async () => {
     fetchBlogPosts.mockResolvedValue({
       posts: [HUMAN_POST, AGENT_POST],
-      sample: false,
     });
     renderBlog();
 
@@ -91,20 +89,8 @@ describe("Blog list page", () => {
     );
   });
 
-  it("shows_sample_banner_only_when_sample_true", async () => {
-    fetchBlogPosts.mockResolvedValue({ posts: [HUMAN_POST], sample: true });
-    const { unmount } = renderBlog();
-    expect(await screen.findByTestId("sample-banner")).toBeInTheDocument();
-    unmount();
-
-    fetchBlogPosts.mockResolvedValue({ posts: [HUMAN_POST], sample: false });
-    renderBlog();
-    await screen.findByRole("heading", { name: HUMAN_POST.title });
-    expect(screen.queryByTestId("sample-banner")).not.toBeInTheDocument();
-  });
-
   it("renders_empty_state_when_no_posts", async () => {
-    fetchBlogPosts.mockResolvedValue({ posts: [], sample: false });
+    fetchBlogPosts.mockResolvedValue({ posts: [] });
     renderBlog();
     expect(await screen.findByTestId("blog-empty")).toBeInTheDocument();
   });
@@ -116,7 +102,7 @@ describe("Blog list page", () => {
   });
 
   it("renders_tags_for_a_post", async () => {
-    fetchBlogPosts.mockResolvedValue({ posts: [HUMAN_POST], sample: false });
+    fetchBlogPosts.mockResolvedValue({ posts: [HUMAN_POST] });
     renderBlog();
     const heading = await screen.findByRole("heading", {
       name: HUMAN_POST.title,
@@ -129,7 +115,7 @@ describe("Blog list page", () => {
   });
 
   it("shows_loading_state_before_resolution", async () => {
-    let resolve: (v: { posts: BlogPost[]; sample: boolean }) => void = () => {};
+    let resolve: (v: { posts: BlogPost[] }) => void = () => {};
     fetchBlogPosts.mockReturnValue(
       new Promise((r) => {
         resolve = r;
@@ -137,14 +123,13 @@ describe("Blog list page", () => {
     );
     renderBlog();
     expect(screen.getByTestId("blog-loading")).toBeInTheDocument();
-    resolve({ posts: [HUMAN_POST], sample: false });
+    resolve({ posts: [HUMAN_POST] });
     await screen.findByRole("heading", { name: HUMAN_POST.title });
   });
 
   it("falls_back_to_raw_string_for_unparseable_date", async () => {
     fetchBlogPosts.mockResolvedValue({
       posts: [{ ...HUMAN_POST, published_at: "not-a-real-date" }],
-      sample: false,
     });
     renderBlog();
     const time = await screen.findByText("not-a-real-date");

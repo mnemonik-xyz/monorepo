@@ -31,9 +31,7 @@ import { readIdentity } from "../lib/storage";
  */
 
 // Configurable for e2e tests + local dev (parallel to Sign.tsx::MCP_BASE).
-const MCP_BASE =
-  (import.meta.env?.VITE_MCP_BASE as string | undefined) ??
-  "https://mcp.mnemonik.xyz";
+const MCP_BASE = (import.meta.env?.VITE_MCP_BASE as string | undefined) ?? "";
 
 type Phase =
   | { kind: "loading" }
@@ -134,7 +132,7 @@ export default function Consent() {
       if (!resp.ok) {
         const text = await resp.text();
         throw new Error(
-          `server rejected approval (HTTP ${resp.status}): ${text}`
+          `server rejected approval (HTTP ${resp.status}): ${text}`,
         );
       }
       const data: {
@@ -185,9 +183,7 @@ export default function Consent() {
         <div className="mt-1 break-all font-mono text-xs">
           {identity ? identity.pubkey_base58 : "(no keypair in this browser)"}
         </div>
-        <div className="mt-3 font-mono text-xs text-text-muted">
-          MCP server
-        </div>
+        <div className="mt-3 font-mono text-xs text-text-muted">MCP server</div>
         <div className="mt-1 break-all font-mono text-xs">{mcpBase}</div>
       </div>
 
