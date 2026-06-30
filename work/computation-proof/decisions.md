@@ -132,3 +132,19 @@ verify off-chain (already the design). On-chain later needs a STARK→SNARK wrap
 Downstream: `proof_kind` gains `"zigz"`; `core/correspondence/zigz.rs` (feature
 `corr-zigz`); `prover/src/prove/zigz.rs`; Wave 2 freezes the format + lands the
 pure-Rust verifier with differential vectors. SP1 references removed from the spec.
+
+---
+
+## 2026-06-30 — Decision: v1 design-partner vertical = agentic payments
+
+Author: claude, recording owner choice. v1 targets **agentic payments**: live
+market, AP2/Delta momentum proves demand, zkTLS evidence path is well-trodden.
+
+Pins the build: first zigz guest program = **`payment_mandate_v1`** (amount ≤ cap;
+currency/category allowed; merchant ∈ allowlist; within expiry; **action fields ==
+merchant-authenticated evidence** — the binding clause that makes it a proof about
+reality, the Delta lesson). `INTENT_V1` aligns with the AP2 Intent Mandate;
+`ACTION_V1` with Cart/Payment. Evidence: StubEvidence (W1–2) → zkTLS over
+merchant/PSP (W3). Success metric = a published purchase-intent benchmark
+(compliant verifies / non-compliant fails), no unverifiable % claims. Full scope:
+`v1-agentic-payments.md`.
