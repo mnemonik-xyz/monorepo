@@ -110,30 +110,57 @@ mutable + centralized, so it cannot *be* the anchor. It may serve as a
 **human-facing pointer** that links to an anchored root — never the source of
 truth. The cryptographic timestamp lives in OTS/TSA/Solana.
 
-## Storage: tiered, pluggable, content-addressed (solves the cost problem)
+## Storage: retrievability is a verifiable protocol guarantee (owner decision 2026-06-30)
 
-The cost pain came from conflating storage with anchoring. Separate them:
+The protocol must guarantee **the payload can be obtained** — not just that it
+matches its hash. Two distinct properties:
 
-- **Anchoring** = a tiny root on a shared clock (above). Cheap by construction.
-- **Storage** = where the bytes live. **Untrusted** — content-addressing means
-  you verify by hash regardless of who served the bytes. So storage is free to be
-  cheap and pluggable.
+- **Integrity** — bytes match `H`. Content-addressing gives this for free.
+- **Availability** — the bytes can actually be *retrieved*. Content-addressing
+  gives this **not at all**. This is the property the protocol must add.
 
-Tiers (per object, mix freely):
+**Why this is load-bearing, not a tier:** in an audit the **producer is the
+adversary**. An evidence record the subject can delete or refuse to serve is not
+evidence. So the custodian of an auditable payload **cannot be the producer** —
+it must be a party that serves it even when the producer doesn't want it served.
 
-1. **Local / producer-owned (default).** The producer keeps the bytes
-   (SQLite / file). Free, sovereign. Most objects never leave here.
-2. **Shared durable (pluggable, untrusted).** IPFS/Filecoin, S3/R2, or the
-   counterparty's store — for objects that must be fetchable by others.
-3. **Permanent (opt-in).** **Arweave only for the high-value subset** that truly
-   needs pay-once permanence. Not the default, not per-item.
+**Mechanism:** every anchored object carries a **durability commitment** — a
+verifiable declaration of *how* its payload is guaranteed obtainable. The verifier
+checks the commitment's **class** meets the relying party's bar.
 
-**Decision:** producer keeps their own bytes by default; durable/permanent tiers
-are opt-in and pluggable behind a `Store` trait. Arweave stops being mandatory.
+| Class | Mechanism | Guarantee | For |
+|---|---|---|---|
+| **D0** self-custody | producer holds bytes | none | private / dev — **invalid for audit** |
+| **D1** accountable relays | *k* signed relay receipts ("store `H`, serve on demand") | relay honesty+liveness; failure to serve = provable breach | cheap redundancy, no external network |
+| **D2** provable storage | Filecoin deal + Proof-of-Spacetime | cryptographic proof it is *still* stored | renewable, ongoing cost |
+| **D3** permanent | Arweave, pay-once (ANS-104 batched) | retrievable "forever" | audit-grade |
+
+**Principles:**
+
+1. **Bind to existing guarantee networks; do not build one.** Arweave/Filecoin
+   are *backends* behind a `Store` trait — using them is not running a node
+   network, so "protocol now, no nodes" holds.
+2. **Bundling answers "Arweave too expensive."** One ANS-104 bundle tx holds
+   thousands of individually-addressable objects → D3 at ~$0.0004/bundle
+   (measured in `verifiable-trajectories`). Batch, don't abandon.
+3. **Minimize what needs the strong class.** The *verifiable core* (Action +
+   zigz proof, tens of KB) goes in D2/D3 and must be retrievable; bulky context
+   (full memory text, embeddings) may be D0/D1. Pay the strong guarantee only for
+   the small thing that proves something.
+
+**Decision:** retrievability is a protocol-level guarantee via durability
+commitments. **D0 is invalid for audit objects.** Audit-grade default =
+**D3-batched** (Arweave ANS-104 bundle) or **D2** (Filecoin); self-custody is
+allowed only for private, non-audit objects. The commitment is part of the object
+and is verified.
 
 ## What is actually shared / global (kept minimal)
 
-- **A clock** — the anchor (existence + time + order). The only hard requirement.
+- **A clock** — the anchor (existence + time + order). Hard requirement.
+- **Durable custody** — a custodian that isn't the producer, holding the payload
+  under a verifiable durability commitment (see Storage). Hard requirement for
+  audit objects; provided by existing backends (Arweave/Filecoin) or accountable
+  relays — not a new global facility we build.
 - **Discovery** (optional) — "how do I find an agent's objects?" A plain index
   service or DHT; **not** consensus. Deferred; can be added without touching the
   object format.
