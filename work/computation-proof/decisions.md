@@ -92,3 +92,37 @@ open Delta." Compose paths (binding third-party/Delta proofs) remain supported v
 **Biggest risk on record.** zkTLS operational + specialist cost. If notary/TEE
 ops prove too heavy, fall back to compose for Layer 2 (bind external zkTLS proofs)
 while still producing Layer 3 — i.e. partial compete. Revisit at end of Wave 3.
+
+---
+
+## 2026-06-30 — Decision: zigz is the prover backend; pure-Rust verifier (option C)
+
+Author: claude, recording owner direction after cloning `mnemonik-dev/zigz`.
+
+**zigz** (owner's own Jolt-inspired Zig zkVM: sumcheck + Lasso, Binary Merkle
+commitments, **transparent / no trusted setup**, post-quantum, RISC-V RV64IM,
+already hardened vs the Jolt "unfaithful-claims" Fiat-Shamir bug) **replaces the
+SP1 assumption** as the correspondence-proof backend. The whole stack is now ours
+and open — the actual substance of "compete." Transparency also **removes the
+Groth16 trusted-setup concern** recorded in `feasibility.md`.
+
+**Verifier path = option C: a pure-Rust re-implementation of the zigz verifier in
+`core/`** — NOT FFI-to-Zig (a) and NOT CLI shell-out (b). Why C wins:
+- Only C compiles to **WASM/browser** → preserves client-side verification, the
+  stated direction and the moat. (a)/(b) cannot.
+- Independent Rust verifier ⇒ **differential testing** against the Zig prover —
+  the discipline that catches transcript/Fiat-Shamir bugs.
+- Keeps `core/` pure-Rust, zero non-Rust build/runtime dependency.
+
+**Enabling commitment:** because zigz is ours, we **freeze a versioned
+`zigz-proof-v1` serialization**; the Rust verifier targets it; CI carries
+differential conformance vectors `{program, public_inputs, π}` that BOTH verifiers
+must agree on. This neutralises the only real argument against C (format churn).
+
+**Tradeoffs on record:** hash/Merkle proofs are KB–MB and on-chain verification is
+impractical → anchor π on Arweave, verify off-chain (already the design). zigz is
+unaudited → stays behind `correspondence-experimental`; no production claims.
+
+Downstream: `proof_kind` gains `"zigz"`; `core/correspondence/zigz.rs` (feature
+`corr-zigz`); `prover/src/prove/zigz.rs`; Wave 2 freezes the format + lands the
+pure-Rust verifier with differential vectors. SP1 references removed from the spec.

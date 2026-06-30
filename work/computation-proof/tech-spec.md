@@ -15,7 +15,8 @@ depends_on: [verifiable-trajectories]
 Let a verifier prove, offline and without re-execution, that an agent's **action
 matched the principal's signed intent**, given authenticated real-world evidence.
 Mnemonic **produces** the full stack — Intent envelope, Evidence (zkTLS),
-correspondence proof (zkVM), binding/anchoring, and the knowledge link — as the
+correspondence proof (our own **zigz** zkVM), binding/anchoring, and the
+knowledge link — as the
 **open-source, AP2-aligned, permanently-anchored** alternative to Delta's closed
 hosted enforcement. Decision basis: `decisions.md` (2026-06-30, full compete);
 landscape: `positioning.md`; primitives: `feasibility.md`.
@@ -59,7 +60,7 @@ shipped schemas.
   correspondence cert), `tags`. `intent_ref == INTENT_V1.content_hash`.
 - **Correspondence certificate** (nested in `ACTION_V1.metadata.correspondence`):
   `{ intent_hash, action_commitment, evidence_commitment, policy_id, params_hash,
-  public_inputs, proof_kind: "sp1" | "snark" | "zktls", proof_ref, backend }`.
+  public_inputs, proof_kind: "zigz" | "snark" | "zktls", proof_ref, backend }`.
   `proof_ref` = blake3 of π; π itself stored on Arweave (bind-by-hash). Reuses the
   feasibility-memo binding + the `proof_kind` precedent from `VERDICT_V1`.
 
@@ -70,12 +71,49 @@ intent_ref, knowledge_refs))` — the pre-cert fields. π's public inputs commit
 `(intent_hash, action_commitment, evidence_commitment)`. Then canonicalize → blake3
 → COSE-sign the whole `ACTION_V1` including the cert. No fixed-point.
 
+## Prover backend: zigz (own zkVM)
+
+The correspondence proof is produced by **zigz** (`mnemonik-dev/zigz`) — our own
+Jolt-inspired Zig zkVM: sumcheck + Lasso lookups, **Binary Merkle commitments →
+transparent (no trusted setup), post-quantum**, proving **RISC-V RV64IM**
+execution. The policy is a RISC-V guest program; `zigz prove` emits π; public
+inputs bind `(intent_hash, action_commitment, evidence_commitment)` via zigz's
+existing public-input-to-transcript binding.
+
+**Why zigz over SP1/Groth16.** It is ours and open (the whole stack is then
+open — the point of "compete"); transparent setup **eliminates the Groth16
+trusted-setup concern** from `feasibility.md`; zigz already ships the
+Fiat-Shamir "unfaithful-claims" hardening (Jolt PR #981 / osec.io 2026-03).
+
+**Verifier path = pure-Rust re-implementation (option C).** `core/` does NOT FFI
+into Zig or shell out to the `zigz` binary; it carries a **pure-Rust verifier**
+for zigz proofs. Rationale:
+- **Embeddable moat.** A pure-Rust verifier compiles to **WASM / browser**;
+  FFI-to-Zig and CLI-shell-out cannot. Client-side verification is a stated
+  direction (`verifiable-trajectories` wanted the verifier pure for wasm).
+- **Differential security.** An independent Rust verifier that must agree with
+  the Zig prover gives cross-implementation testing — the exact discipline that
+  catches Fiat-Shamir/transcript bugs.
+- **No non-Rust build/runtime dependency** in the pure `core/`.
+
+**Format-freeze discipline (the one real cost).** zigz is experimental, so we
+**freeze a versioned `zigz-proof-v1` serialization** (field = BabyBear, transcript
+binding order, Merkle/commitment encoding) the Rust verifier targets. CI carries
+**differential conformance vectors** `{program, public_inputs, π}`: the Zig
+verifier and the Rust verifier MUST agree (accept/reject) on every vector; any
+divergence fails the build. The two implementations move in lockstep, gated here.
+
+**Tradeoffs (on record).** Hash/Merkle proofs are KB–MB (no ~200 B Groth16
+wrapper) and on-chain (Solana) verification is impractical → we **anchor π on
+Arweave and verify off-chain** (already the design). zigz is **unaudited** →
+stays behind `correspondence-experimental`; never claim production.
+
 ## `core/` — verify only (`core/src/correspondence/`)
 
 ```
 core/src/correspondence/mod.rs   # CorrespondenceVerifier trait, result types
 core/src/correspondence/verify.rs# verify_correspondence(...) orchestration
-core/src/correspondence/sp1.rs   # SP1 proof re-verify (feature corr-sp1)
+core/src/correspondence/zigz.rs  # pure-Rust zigz-proof re-verifier (feature corr-zigz)
 core/src/correspondence/mock.rs  # #[cfg(test)] MockVerifier
 ```
 
@@ -87,8 +125,10 @@ convention as `chain_valid`):
 2. `action_sig` — Ed25519/COSE over `ACTION_V1` valid; anchor resolvable.
 3. `intent_link` — `action.intent_ref == intent.content_hash`; intent not expired.
 4. `correspondence_proof` — recompute `action_commitment` from action fields,
-   assert it equals the cert's public input, fetch verifying key for `policy_id`,
-   run `backend.verify(vk, public_inputs, π)`.
+   assert it equals the cert's public input, then run the **pure-Rust zigz
+   verifier** over `(program_hash[policy_id], public_inputs, π)`. Transparent —
+   no verifying key / trusted setup. Must accept iff the Zig verifier accepts
+   (differential conformance).
 5. `evidence_proof` — re-verify the zkTLS/evidence attestation against
    `evidence_commitment`.
 
@@ -104,8 +144,8 @@ prover/src/evidence/stub.rs  # StubEvidence (trusted; Wave 1)
 prover/src/evidence/tlsn.rs  # TlsNotaryEvidence (Wave 3)
 prover/src/prove/mod.rs      # Prover trait
 prover/src/prove/mock.rs     # MockProver (Wave 1)
-prover/src/prove/sp1.rs      # Sp1Prover (Wave 2)
-prover/guests/<policy>/      # Rust zkVM guest programs (evidence ⊨ intent)
+prover/src/prove/zigz.rs     # ZigzProver — drives zigz prove (Wave 2)
+prover/guests/<policy>/      # RISC-V guest programs (Rust or Zig via `zigz build`)
 ```
 
 - `EvidenceSource::collect(action, intent) -> (Evidence, EvidenceCommitment,
@@ -142,8 +182,10 @@ prover/guests/<policy>/      # Rust zkVM guest programs (evidence ⊨ intent)
   `verify_correspondence` with `MockVerifier`; `mnemonic_prove/verify_correspondence`
   tools. End-to-end intent→action→proof→verify→anchor on a trivial policy. Default
   build stays green.
-- **Wave 2 — real zkVM.** `prover/` `Sp1Prover` + one guest program (spending-cap
-  or allowlist mandate); `core/` `corr-sp1` re-verify of the wrapped Groth16.
+- **Wave 2 — real zkVM (zigz).** `prover/` `ZigzProver` + one RISC-V guest
+  (spending-cap or allowlist mandate); **freeze `zigz-proof-v1`**; `core/`
+  `corr-zigz` **pure-Rust** re-verifier; differential conformance vectors
+  asserting Zig-prover ↔ Rust-verifier agreement in CI.
 - **Wave 3 — real zkTLS.** `TlsNotaryEvidence` behind `EvidenceSource`; evidence
   re-verify in `core/`. **Operational risk concentrated here** (notary/TEE ops).
   Partial-compete fallback available (bind external zkTLS) per decisions.md.
