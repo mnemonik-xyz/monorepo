@@ -56,3 +56,39 @@ Downstream: extend `feasibility.md`'s envelope-binding design with `INTENT_V1`,
 `intent_hash` linkage, public-input commitment to (intent_hash, action_hash,
 evidence), and a `mnemonic_verify_correspondence` surface. The benchmark Delta
 cites (28.8%→0%) is unverified — never repeat as fact.
+
+---
+
+## 2026-06-30 — Decision REVERSED: full compete (owner call, after rethink)
+
+Author: claude, recording owner decision. Supersedes the 2026-06-29
+"compose, do not compete" recommendation. Owner chose **full compete** after
+rethinking: Mnemonic will *produce*, not merely verify, the intent–action
+correspondence proof — including an Evidence Layer (zkTLS) and a zkVM prover.
+
+**Scope taken on (the two net-new layers):**
+- **Layer 2 — Evidence/zkTLS.** The hard, operationally heavy piece (MPC-TLS
+  notaries or TEE attestation infra). Mitigation: build on **TLSNotary** (Rust,
+  open) rather than from scratch; phase it behind an `EvidenceSource` trait so
+  the stack runs end-to-end with a stubbed/trusted evidence step first.
+- **Layer 3 — correspondence prover (zkVM).** Policy evaluation as a Rust guest
+  program; prove execution. Backend candidates: **SP1** (matches the competitor;
+  strong tooling; Groth16 wrapper for cheap verify) or **RISC Zero** (more
+  mature). Decision pending.
+
+**Architecture-preserving constraint (hard).** The prover lives in a NEW
+workspace member (`prover/`), NOT in `core/`. `core/` stays native-only,
+pure, and **verify-only** — the "no prover in core/" rule (2026-06-27) and the
+one-way `core → mcp` dependency both stand. MCP orchestrates: `prover/` produces
+→ `core/` verifies + binds + anchors. The lightweight open verifier remains the
+moat even while we add production.
+
+**Differentiation (why compete is not a doomed clone).** Delta is closed alpha,
+hosted, no permanence, no knowledge layer. Mnemonic-compete = the **open-source,
+AP2-aligned, permanently-anchored, knowledge-linked** correspondence stack — "the
+open Delta." Compose paths (binding third-party/Delta proofs) remain supported via
+`proof_kind`, not removed — compete is additive.
+
+**Biggest risk on record.** zkTLS operational + specialist cost. If notary/TEE
+ops prove too heavy, fall back to compose for Layer 2 (bind external zkTLS proofs)
+while still producing Layer 3 — i.e. partial compete. Revisit at end of Wave 3.
