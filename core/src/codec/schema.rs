@@ -52,6 +52,14 @@ pub enum ArtifactType {
     #[cfg(feature = "trajectory-experimental")]
     #[serde(rename = "trajectory")]
     Trajectory,
+    /// A principal-signed typed mandate (AP2-aligned Intent Mandate).
+    #[cfg(feature = "correspondence-experimental")]
+    #[serde(rename = "intent")]
+    Intent,
+    /// An agent action that references an Intent + carries a correspondence cert.
+    #[cfg(feature = "correspondence-experimental")]
+    #[serde(rename = "action")]
+    Action,
 }
 
 impl ArtifactType {
@@ -69,6 +77,10 @@ impl ArtifactType {
             Self::Verdict => "verdict",
             #[cfg(feature = "trajectory-experimental")]
             Self::Trajectory => "trajectory",
+            #[cfg(feature = "correspondence-experimental")]
+            Self::Intent => "intent",
+            #[cfg(feature = "correspondence-experimental")]
+            Self::Action => "action",
         }
     }
 
@@ -87,6 +99,10 @@ impl ArtifactType {
             "verdict" => Some(Self::Verdict),
             #[cfg(feature = "trajectory-experimental")]
             "trajectory" => Some(Self::Trajectory),
+            #[cfg(feature = "correspondence-experimental")]
+            "intent" => Some(Self::Intent),
+            #[cfg(feature = "correspondence-experimental")]
+            "action" => Some(Self::Action),
             _ => None,
         }
     }
@@ -404,6 +420,90 @@ pub const TRAJECTORY_V1: ArtifactSchema = ArtifactSchema {
     ],
 };
 
+/// intent.v1 -- a principal-signed typed mandate (AP2-aligned Intent Mandate).
+/// `constraints` carries the typed policy (limits, allowlist roots, a `policy_id`
+/// naming the guest program + its params). `intent_hash = blake3(canonical_cbor)`
+/// is what an `action.intent_ref` points back to.
+#[cfg(feature = "correspondence-experimental")]
+pub const INTENT_V1: ArtifactSchema = ArtifactSchema {
+    artifact_type: ArtifactType::Intent,
+    version: 1,
+    required_fields: &[
+        "artifact_id",
+        "type",
+        "schema_version",
+        "constraints",
+        "producer",
+        "created_at",
+    ],
+    optional_fields: &["expiry", "nonce", "metadata", "tags"],
+    cbor_field_order: &[
+        "artifact_id",
+        "type",
+        "schema_version",
+        "constraints",
+        "expiry",
+        "nonce",
+        "metadata",
+        "tags",
+        "created_at",
+        "producer",
+    ],
+};
+
+/// action.v1 -- an agent action bound to an Intent. `intent_ref` MUST equal the
+/// referenced `INTENT_V1.content_hash`. `knowledge_refs` lists the hashes of the
+/// memories the agent retrieved at decision time (the knowledge link). The
+/// correspondence certificate rides in `metadata.correspondence` (so it is part
+/// of the signed payload without a new top-level field).
+#[cfg(feature = "correspondence-experimental")]
+pub const ACTION_V1: ArtifactSchema = ArtifactSchema {
+    artifact_type: ArtifactType::Action,
+    version: 1,
+    required_fields: &[
+        "artifact_id",
+        "type",
+        "schema_version",
+        "content",
+        "intent_ref",
+        "producer",
+        "created_at",
+    ],
+    optional_fields: &["knowledge_refs", "metadata", "tags"],
+    cbor_field_order: &[
+        "artifact_id",
+        "type",
+        "schema_version",
+        "content",
+        "intent_ref",
+        "knowledge_refs",
+        "metadata",
+        "tags",
+        "created_at",
+        "producer",
+    ],
+};
+
+/// The pre-certificate field set whose blake3 IS the `action_commitment` bound
+/// into the proof's public inputs. It deliberately EXCLUDES `metadata` (which
+/// carries the cert) — that is the circularity fix: the proof commits to the
+/// action's content, not to the envelope that contains the proof. `to_canonical_cbor`
+/// only emits fields listed here, so passing the full action artifact is safe.
+#[cfg(feature = "correspondence-experimental")]
+pub const ACTION_COMMIT_V1: ArtifactSchema = ArtifactSchema {
+    artifact_type: ArtifactType::Action,
+    version: 1,
+    required_fields: &["content", "intent_ref", "producer", "created_at"],
+    optional_fields: &["knowledge_refs"],
+    cbor_field_order: &[
+        "content",
+        "intent_ref",
+        "knowledge_refs",
+        "created_at",
+        "producer",
+    ],
+};
+
 /// Look up schema by type string and version.
 pub fn get_schema(artifact_type: &str, version: u32) -> Option<&'static ArtifactSchema> {
     match (artifact_type, version) {
@@ -419,6 +519,10 @@ pub fn get_schema(artifact_type: &str, version: u32) -> Option<&'static Artifact
         ("verdict", 1) => Some(&VERDICT_V1),
         #[cfg(feature = "trajectory-experimental")]
         ("trajectory", 1) => Some(&TRAJECTORY_V1),
+        #[cfg(feature = "correspondence-experimental")]
+        ("intent", 1) => Some(&INTENT_V1),
+        #[cfg(feature = "correspondence-experimental")]
+        ("action", 1) => Some(&ACTION_V1),
         _ => None,
     }
 }
