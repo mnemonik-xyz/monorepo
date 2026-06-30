@@ -192,3 +192,26 @@ to store/verify (vs one constant-size IVC proof). Available today.
 unbounded intents. Recursion/folding is a **deferred zigz R&D track** (Path A
 first), tracked on the zigz side; it is a performance/scale upgrade, not a
 capability prerequisite. Flag as a feature request in `mnemonik-dev/zigz`.
+
+---
+
+## 2026-06-30 — Spike result: stateful multi-action intent proves+verifies on zigz
+
+Author: claude. Built + ran a real zigz guest (`payment_mandate`) proving a
+mandate over a *sequence* of payments: stateful `Σ amounts ≤ cap` + per-action
+cap + vendor allowlist membership + non-decreasing timestamps. Source + full
+table: `spikes/zigz-stateful-intent/`.
+
+**Measured (zig 0.15.2, ReleaseSmall guest):** compliant → committed ok=1; each
+violation (over aggregate cap / off-allowlist / out-of-order ts) → ok=0, correct
+totals. Verify 35–89 ms (flat, O(log n)); proof ~31 KB (4 pays) → ~53 KB (50
+pays); prove 0.8–1.5 s small, **~24 s at 2096 steps (50 pays)**.
+
+**Conclusions:**
+- "Intent more complex than a tx" is **validated** — stateful, multi-action,
+  multi-constraint policy proves and verifies, with the policy actually computed.
+- Verify cost + proof size are non-issues; **proving is ~linear in steps** and is
+  the scaling bottleneck on the current unoptimized VM.
+- v1-sized intents (handful of actions) are fine today (~1–2 s). Large/long
+  intents → empirical motivation for the recursion/aggregation track
+  (`zigz-recursion/spec.md`) and checkpoint-batching. No blocker for v1.
