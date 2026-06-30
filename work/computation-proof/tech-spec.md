@@ -103,9 +103,16 @@ binding order, Merkle/commitment encoding) the Rust verifier targets. CI carries
 verifier and the Rust verifier MUST agree (accept/reject) on every vector; any
 divergence fails the build. The two implementations move in lockstep, gated here.
 
-**Tradeoffs (on record).** Hash/Merkle proofs are KB–MB (no ~200 B Groth16
-wrapper) and on-chain (Solana) verification is impractical → we **anchor π on
-Arweave and verify off-chain** (already the design). zigz is **unaudited** →
+**Tradeoffs (on record).** zigz proofs are **~7–40 KB for policy-sized programs**
+(measured 2026-06-30 by building + running zigz: **serialized proof ~7 KB** for a
+4-step program; in-memory estimate ~29 KB→~77 KB over 16→4096 steps; verify
+~11 ms, O(log n), 4.4× faster than proving) — *not* the ~200 B of a Groth16
+wrapper, but small and barely-growing. That size is a
+non-issue for the envelope (carries only the 32-byte `proof_ref`), the Solana
+memo, off-chain verify, and Arweave storage; it is impractical only for **on-chain
+contract verification** → we **anchor π on Arweave and verify off-chain** (already
+the design). If on-chain verification is ever needed, wrap in a STARK→SNARK
+(reintroduces a trusted setup — a deliberate later trade). zigz is **unaudited** →
 stays behind `correspondence-experimental`; never claim production.
 
 ## `core/` — verify only (`core/src/correspondence/`)

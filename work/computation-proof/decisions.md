@@ -119,9 +119,15 @@ Groth16 trusted-setup concern** recorded in `feasibility.md`.
 differential conformance vectors `{program, public_inputs, π}` that BOTH verifiers
 must agree on. This neutralises the only real argument against C (format churn).
 
-**Tradeoffs on record:** hash/Merkle proofs are KB–MB and on-chain verification is
-impractical → anchor π on Arweave, verify off-chain (already the design). zigz is
-unaudited → stays behind `correspondence-experimental`; no production claims.
+**Tradeoffs on record:** zigz proofs are **~7–40 KB for policy-sized programs**
+(measured 2026-06-30, zigz built + run: serialized ~7 KB for a 4-step program;
+in-memory estimate ~29→77 KB over 16→4096 steps; verify ~11 ms, O(log n)) — a
+non-issue for the
+envelope (32-byte `proof_ref` only), the Solana memo, off-chain verify, and Arweave
+storage; impractical only for on-chain contract verification → anchor π on Arweave,
+verify off-chain (already the design). On-chain later needs a STARK→SNARK wrap
+(reintroduces trusted setup). zigz is unaudited → stays behind
+`correspondence-experimental`; no production claims.
 
 Downstream: `proof_kind` gains `"zigz"`; `core/correspondence/zigz.rs` (feature
 `corr-zigz`); `prover/src/prove/zigz.rs`; Wave 2 freezes the format + lands the
