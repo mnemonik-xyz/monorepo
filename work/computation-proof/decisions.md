@@ -148,3 +148,47 @@ reality, the Delta lesson). `INTENT_V1` aligns with the AP2 Intent Mandate;
 merchant/PSP (W3). Success metric = a published purchase-intent benchmark
 (compliant verifies / non-compliant fails), no unverifiable % claims. Full scope:
 `v1-agentic-payments.md`.
+
+---
+
+## 2026-06-30 — Finding: zigz has no recursion/folding today; v1 doesn't need it
+
+Author: claude, from source inspection of the cloned `mnemonik-dev/zigz`.
+
+**Finding.** zigz does **not** support proof recursion or folding/IVC today. All
+references are roadmap, not code: `MODULES.md` lists `src/recursion/` under
+"Future Extensions" (and the directory does not exist); `VERIFIER.md` puts
+"Proof compression and recursion" under "Remaining work (Phase 10)";
+`CONTRIBUTING.md` lists "Proof aggregation/recursion" as a Low-Priority
+contribution. Today zigz produces **monolithic proofs of a single RISC-V program
+execution**.
+
+**Impact on complex/stateful intents — none for v1.** A bounded multi-action
+stateful intent is one bigger RISC-V program (loop over actions, accumulate,
+check aggregate + per-step + sequencing) → one monolithic proof. Cost is ~O(log n)
+in size (measured: 4096 steps ≈ 77 KB), fine for dozens–thousands of actions.
+
+**Unbounded / long-running intents — covered without recursion via checkpoint
+state-chaining.** Prove in bounded checkpoint batches; each batch carries the
+accumulator as a public-input commitment; `batch[i].out_state ==
+batch[i+1].in_state`; verifier checks each batch + the linkage. Reuses the
+`verifiable-trajectories` checkpoint / root-of-roots machinery. Cost: O(batches)
+to store/verify (vs one constant-size IVC proof). Available today.
+
+**Extending zigz with recursion/folding (owner R&D track, NOT v1-blocking):**
+- **Path A — recursion via verifier-as-guest (recommended first).** Compile the
+  existing O(log n) zigz verifier to a RISC-V guest and prove its execution →
+  aggregate/compress proofs. No new proof system. Main cost = in-VM hashing;
+  mitigated by Poseidon2 (already available via the `hash-zig` dep) + a hash
+  precompile. "Engineering hard," not "research hard." Est: weeks–months.
+- **Path B — folding (Nova/ProtoStar-style).** Research-grade: zigz's hash-based
+  Merkle commitments + sumcheck/Lasso do **not** fit classic homomorphic-
+  commitment Nova folding; needs an accumulation scheme compatible with
+  sumcheck+lookups (ProtoStar-ish / split-accumulation). Higher effort + risk.
+- Recursion also unlocks the on-chain STARK→SNARK wrap and proof aggregation
+  (many attestations → one proof) — product value at scale, later.
+
+**Decision:** v1 = monolithic-bounded proofs + checkpoint state-chaining for
+unbounded intents. Recursion/folding is a **deferred zigz R&D track** (Path A
+first), tracked on the zigz side; it is a performance/scale upgrade, not a
+capability prerequisite. Flag as a feature request in `mnemonik-dev/zigz`.
