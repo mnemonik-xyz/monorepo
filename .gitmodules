@@ -1,0 +1,3 @@
+[submodule "reth"]
+	path = reth
+	url = git@github.com:paradigmxyz/reth.git
