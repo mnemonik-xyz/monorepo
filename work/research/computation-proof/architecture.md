@@ -24,12 +24,12 @@ sequenceDiagram
     participant ST as StorageAnchor
     actor V as Verifier
 
-    Note over P: ROOT OF AUTHORITY. Signs the mandate with Ed25519. Trust anchor for what was authorized.
-    Note over REG: Compiled policy programs, addressed by policy_id which equals program_hash. Public.
-    Note over AG: The agent own code, LLM and tools. May be buggy or compromised. NOT TRUSTED.
-    Note over EV: zkTLS proves bytes came from the endpoint, not that the endpoint is honest.
-    Note over PR: Runs the policy guest in the zkVM. Trusted only for SOUNDNESS, cannot prove a false statement.
-    Note over CORE: Pure verifier, Rust and wasm. TRUSTLESS, runs anywhere. Does hashing and binding.
+    Note over P: ROOT OF AUTHORITY.<br/>Signs the mandate with Ed25519.<br/>Trust anchor for<br/>what was authorized.
+    Note over REG: Compiled policy programs,<br/>addressed by policy_id<br/>which equals program_hash.<br/>Public.
+    Note over AG: The agent own code,<br/>LLM and tools. May be buggy<br/>or compromised.<br/>NOT TRUSTED.
+    Note over EV: zkTLS proves bytes came<br/>from the endpoint, not that<br/>the endpoint is honest.
+    Note over PR: Runs the policy guest<br/>in the zkVM. Trusted only<br/>for SOUNDNESS.
+    Note over CORE: Pure verifier, Rust and wasm.<br/>TRUSTLESS, runs anywhere.<br/>Does hashing and binding.
 
     P->>REG: pick policy_id such as payment_mandate_v1
     P->>P: sign INTENT with policy_id, params, expiry, nonce
@@ -101,23 +101,23 @@ honesty, or storage.**
 
 ```mermaid
 flowchart LR
-    subgraph GUEST["zigz GUEST (rv64im) - POLICY LOGIC ONLY"]
+    subgraph GUEST["zigz GUEST (rv64im)<br/>POLICY LOGIC ONLY"]
         direction TB
-        g1["arithmetic and aggregates (sum <= cap)"]
-        g2["membership (scan / range)"]
+        g1["arithmetic + aggregates<br/>(sum <= cap)"]
+        g2["membership<br/>(scan / range)"]
         g3["equality to evidence"]
         g4["temporal / sequencing"]
-        g5["*** NO in-guest hashing ***"]
+        g5["*** NO in-guest<br/>hashing ***"]
     end
-    subgraph RUST["Rust core/correspondence - VERIFY ONLY (native + wasm)"]
+    subgraph RUST["Rust core/correspondence<br/>VERIFY ONLY<br/>(native + wasm)"]
         direction TB
-        r1["blake3 hashing and commitments"]
-        r2["action_commitment binding"]
-        r3["re-verify zigz proof"]
-        r4["5-check verify_correspondence"]
+        r1["blake3 hashing<br/>+ commitments"]
+        r2["action_commitment<br/>binding"]
+        r3["re-verify<br/>zigz proof"]
+        r4["5-check<br/>verify_correspondence"]
     end
-    GUEST -->|"proof + public_inputs"| RUST
-    RUST -->|"policy_valid: Option bool"| OUT["verify result"]
+    GUEST -->|"proof +<br/>public_inputs"| RUST
+    RUST -->|"policy_valid:<br/>Option bool"| OUT["verify<br/>result"]
 ```
 
 **Why this split (measured, not aesthetic):** the recursion PoC found one real
@@ -147,42 +147,42 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    subgraph JA["JOB A - policy proving (VIABLE NOW)"]
-        a1["zigz guest proves a bounded deterministic policy"]
-        a2["seconds to prove; broad test-case range"]
+    subgraph JA["JOB A - policy proving<br/>(VIABLE NOW)"]
+        a1["zigz guest proves a<br/>bounded deterministic policy"]
+        a2["seconds to prove;<br/>broad test-case range"]
     end
-    subgraph JB["JOB B - recursion / aggregation (DEFERRED)"]
-        b1["verify a zigz proof INSIDE a guest"]
-        b2["~25.6k RISC-V steps per Poseidon2 perm (measured)"]
+    subgraph JB["JOB B - recursion / aggregation<br/>(DEFERRED)"]
+        b1["verify a zigz proof<br/>INSIDE a guest"]
+        b2["~25.6k RISC-V steps<br/>per Poseidon2 perm<br/>(measured)"]
     end
-    JA -->|"unbounded intents"| CH["checkpoint state-chaining (no recursion needed)"]
-    JB -.->|"blocked by"| GATE{{"A1: Poseidon2 Lasso precompile"}}
-    GATE -->|"unlocks later"| AGG["proof aggregation + on-chain STARK to SNARK wrap"]
+    JA -->|"unbounded<br/>intents"| CH["checkpoint<br/>state-chaining<br/>(no recursion needed)"]
+    JB -.->|"blocked by"| GATE{{"A1: Poseidon2<br/>Lasso precompile"}}
+    GATE -->|"unlocks<br/>later"| AGG["proof aggregation +<br/>on-chain STARK<br/>to SNARK wrap"]
 ```
 
 ## 5. Anchor is not storage — durability classes
 
 ```mermaid
-flowchart LR
-    OBJ["signed, content-addressed object"]
-    OBJ --> ANC["ANCHOR: batched Merkle root on a clock (default OpenTimestamps to Bitcoin)"]
-    OBJ --> DUR{durability class}
-    DUR --> D0["D0 self-custody (dev only, invalid for audit)"]
-    DUR --> D1["D1 accountable relays (k signed receipts)"]
-    DUR --> D2["D2 Filecoin PoSt (provable storage)"]
-    DUR --> D3["D3 Arweave permanent (ANS-104 batched)"]
+flowchart TD
+    OBJ["signed,<br/>content-addressed<br/>object"]
+    OBJ --> ANC["ANCHOR<br/>batched Merkle root<br/>on a clock<br/>(default OpenTimestamps<br/>to Bitcoin)"]
+    OBJ --> DUR{"durability<br/>class"}
+    DUR --> D0["D0 self-custody<br/>(dev only,<br/>invalid for audit)"]
+    DUR --> D1["D1 accountable relays<br/>(k signed receipts)"]
+    DUR --> D2["D2 Filecoin PoSt<br/>(provable storage)"]
+    DUR --> D3["D3 Arweave permanent<br/>(ANS-104 batched)"]
 ```
 
 ## 6. Workspace / dependency DAG (one-way, everything points at portable core)
 
 ```mermaid
 flowchart TD
-    core["core (portable): codec, correspondence-VERIFY, identity, merkle"]
-    prover["mnemonic-prover: zigz PRODUCE + evidence"]
-    wasm["wasm exporter"]
-    native["native: solana, arweave, storage, keychain"]
-    mcp["mcp server: orchestrate"]
-    sdk["SDK (TS + wasm)"]
+    core["core (portable)<br/>codec, correspondence-VERIFY,<br/>identity, merkle"]
+    prover["mnemonic-prover<br/>zigz PRODUCE<br/>+ evidence"]
+    wasm["wasm<br/>exporter"]
+    native["native<br/>solana, arweave,<br/>storage, keychain"]
+    mcp["mcp server<br/>orchestrate"]
+    sdk["SDK<br/>(TS + wasm)"]
     core --> prover
     core --> wasm
     core --> native
@@ -262,13 +262,13 @@ system is only as sound as the policy behind it. This is the *provenance of the
 policy itself* — a distinct flow from the runtime prove/verify.
 
 ```mermaid
-flowchart LR
-    A["1. Author writes policy SOURCE<br/>(Rust/Zig guest, e.g. payment_mandate_v1)"]
-    A --> C["2. REPRODUCIBLE compile (zigz build)<br/>deterministic -> RISC-V ELF"]
-    C --> H["3. program_hash = blake3(ELF)<br/>content address = policy_id"]
-    H --> R["4. Independent AUDIT of source<br/>logic is TRUSTED - a bad policy approves bad actions"]
-    R --> P["5. Publish REGISTRY entry:<br/>name, policy_id, params_schema, version, publisher_sig<br/>entry ANCHORED (tamper-evident, versioned)"]
-    P --> U["6. Principal's Intent binds policy_id (immutable)<br/>Verifier resolves + checks program_hash == intent.policy_id"]
+flowchart TD
+    A["1. Author writes<br/>policy SOURCE<br/>(Rust/Zig guest,<br/>e.g. payment_mandate_v1)"]
+    A --> C["2. REPRODUCIBLE<br/>compile (zigz build)<br/>deterministic -> RISC-V ELF"]
+    C --> H["3. program_hash =<br/>blake3(ELF)<br/>content address = policy_id"]
+    H --> R["4. Independent AUDIT<br/>of source<br/>(logic is TRUSTED - a bad<br/>policy approves bad actions)"]
+    R --> P["5. Publish REGISTRY entry:<br/>name, policy_id, params_schema,<br/>version, publisher_sig<br/>entry ANCHORED<br/>(tamper-evident, versioned)"]
+    P --> U["6. Principal Intent binds<br/>policy_id (immutable)<br/>Verifier checks<br/>program_hash == intent.policy_id"]
 ```
 
 ### Why it needs its own flow — the properties that make the registry trustworthy
