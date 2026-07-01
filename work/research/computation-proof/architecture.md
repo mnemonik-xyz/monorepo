@@ -120,6 +120,12 @@ flowchart LR
     RUST -->|"policy_valid: Option bool"| OUT["verify result"]
 ```
 
+**Why this split (measured, not aesthetic):** the recursion PoC found one real
+Poseidon2 hash costs **~25.6k RISC-V steps in-VM**. So hashing is kept in Rust
+(microseconds, native) and the guest does only policy arithmetic — which keeps the
+policy test-case range broad and proving cheap. The guest that hashes is the guest
+that's slow; we don't build those.
+
 ## 3. The five independent verifier checks
 
 ```mermaid
@@ -190,24 +196,24 @@ flowchart TD
 
 ```mermaid
 flowchart TB
-    subgraph CLIENTS["CLIENT SURFACES"]
-        web["Webapp (React): sign / recall / verify UI"]
-        ext["Browser Extension: client-side keys + wasm verify"]
-        cli["CLI: sign / verify / prove, keychain"]
-        agent["Agent via MCP tools: prove / verify_correspondence"]
-        aud["Auditor / Contract: VERIFY only"]
+    subgraph EDGE["CLIENT SURFACES — UNTRUSTED EDGE (hold keys, verify locally)"]
+        web["Webapp (React)<br/>sign / recall / verify UI<br/>holds user key (non-custodial)<br/>VERIFIES via wasm"]
+        ext["Browser Extension<br/>client-side keys + local recall<br/>VERIFIES via wasm"]
+        cli["CLI<br/>sign / verify / PROVE<br/>keychain identity"]
+        agent["Agent (MCP tools)<br/>requests prove/verify<br/>runs UNTRUSTED code"]
+        aud["Auditor / Smart Contract<br/>independent re-check<br/>VERIFY ONLY (trustless)"]
     end
-    subgraph SDKL["SDK LAYER (TS + wasm)"]
-        sdk["@mnemonik-xyz/sdk: wasm VERIFIER + envelope build"]
+    subgraph SDKL["SDK LAYER — TS + wasm (verification runs at the edge)"]
+        sdk["@mnemonik-xyz/sdk<br/>wasm VERIFIER + envelope build<br/>no secrets, no server trust"]
     end
-    subgraph DOMAIN["DOMAIN (Rust)"]
-        core["core: verify_correspondence, action_commitment, codec, identity (native + wasm)"]
-        prover["mnemonic-prover: zigz PRODUCE + evidence"]
-        mcpsrv["mcp server: orchestrate produce to bind to anchor"]
+    subgraph DOMAIN["DOMAIN — Rust (operator infra)"]
+        core["core (portable, native + wasm)<br/>verify_correspondence + action_commitment<br/>hashing + binding — VERIFY ONLY, never signs"]
+        prover["mnemonic-prover<br/>zigz PRODUCE + evidence<br/>trusted only for SOUNDNESS"]
+        mcpsrv["mcp server<br/>orchestrate produce to bind to anchor<br/>signs NOTHING (non-custodial)"]
     end
-    subgraph INFRA["STORAGE + ANCHOR"]
-        store["durable store (D1..D3)"]
-        anchor["anchor: OTS/Bitcoin, Solana, TSA"]
+    subgraph INFRA["STORAGE + ANCHOR — NEUTRAL, UNTRUSTED"]
+        store["durable store (D1..D3)<br/>content-addressed, untrusted<br/>durability = the guarantee"]
+        anchor["anchor: OTS/Bitcoin, Solana, TSA<br/>root only, never data"]
     end
 
     web --> sdk
@@ -223,19 +229,27 @@ flowchart TB
     prover --> core
 ```
 
+**Trust boundary.** Everything the relying party needs to trust is *cryptographic*,
+not *operational*: the **Principal's signature** and **proof soundness**. The
+client edge holds keys and **verifies locally** (wasm), so it never trusts the
+server; the operator infra **produces + orchestrates but signs nothing**
+(non-custodial); storage + anchor are **neutral and untrusted** (content-addressed
++ durability-guaranteed). An auditor or smart contract at the edge re-checks
+everything with the same open verifier — no operator trust required.
+
 ### What each level does
 
-| Level | Surface / component | Job | Produce / Verify / Anchor |
-|---|---|---|---|
-| Client | Webapp, Extension | UX + hold keys + **verify client-side (wasm)** | Verify (+ trigger produce) |
-| Client | CLI | sign / verify / prove; keychain identity | Produce + Verify |
-| Client | Agent (MCP tools) | request prove/verify of correspondence | Produce (via server) |
-| Client | Auditor / Contract | independent re-check | **Verify only** |
-| SDK | @mnemonik-xyz/sdk | wasm verifier + envelope building | Verify |
-| Domain | core | hashing, binding, `verify_correspondence` | **Verify** (never produces) |
-| Domain | mnemonic-prover | zigz policy proof + evidence | **Produce** |
-| Domain | mcp server | orchestrate produce → bind → anchor | Orchestrate |
-| Infra | durable store + anchor | availability guarantee + timestamp | Anchor / Store |
+| Level | Surface / component | Job | P/V/A | Trust |
+|---|---|---|---|---|
+| Client | Webapp, Extension | UX + hold keys + **verify client-side (wasm)** | Verify (+ trigger produce) | untrusted edge; verifies locally |
+| Client | CLI | sign / verify / prove; keychain identity | Produce + Verify | holds user key (non-custodial) |
+| Client | Agent (MCP tools) | request prove/verify | Produce (via server) | **UNTRUSTED** (adversarial) |
+| Client | Auditor / Contract | independent re-check | **Verify only** | trustless relying party |
+| SDK | @mnemonik-xyz/sdk | wasm verifier + envelope building | Verify | no secrets, no server trust |
+| Domain | core | hashing, binding, `verify_correspondence` | **Verify** (never produces) | trustless to run |
+| Domain | mnemonic-prover | zigz policy proof + evidence | **Produce** | trusted for **soundness only** |
+| Domain | mcp server | orchestrate produce → bind → anchor | Orchestrate | signs nothing (non-custodial) |
+| Infra | durable store + anchor | availability guarantee + timestamp | Anchor / Store | untrusted (content-addressed) |
 
 **Invariant:** the verifier is a *library* that runs on every client surface
 (browser, CLI, contract) — "verify everywhere." Only `mnemonic-prover` produces;
