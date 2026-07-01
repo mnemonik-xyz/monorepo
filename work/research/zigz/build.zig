@@ -127,6 +127,47 @@ pub fn build(b: *std.Build) void {
     const fibonacci_step = b.step("fibonacci", "Run the Fibonacci zkVM example (guest + host)");
     fibonacci_step.dependOn(&fibonacci_run.step);
 
+    // -- recursion PoC: verifier-as-guest de-risking (Track A) --
+    //   Two freestanding rv64im guests (verify_kernel, hash_cost) proving
+    //   verification-flavored computations, plus a native host that
+    //   proves + verifies + measures. See work/research/zigz-recursion/spec.md.
+    const recursion_guests = .{
+        .{ "verify_kernel_guest", "examples/recursion_poc/verify_kernel_guest.zig" },
+        .{ "hash_cost_guest", "examples/recursion_poc/hash_cost_guest.zig" },
+    };
+    inline for (recursion_guests) |entry| {
+        const g = b.addExecutable(.{
+            .name = entry.@"0",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(entry.@"1"),
+                .target = riscv_target,
+                .optimize = .ReleaseSmall,
+                .imports = &.{
+                    .{ .name = "zigz_io", .module = zigz_io_mod },
+                },
+            }),
+        });
+        b.installArtifact(g);
+    }
+
+    const recursion_host = b.addExecutable(.{
+        .name = "recursion_poc",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/recursion_poc/recursion_poc.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "zigz", .module = zigz_mod },
+            },
+        }),
+    });
+    b.installArtifact(recursion_host);
+
+    const recursion_run = b.addRunArtifact(recursion_host);
+    recursion_run.step.dependOn(b.getInstallStep());
+    const recursion_step = b.step("recursion_poc", "Run the recursion PoC (verify-kernel + hash-cost guests)");
+    recursion_step.dependOn(&recursion_run.step);
+
     // -- tests --
     const unit_tests = b.addTest(.{
         .root_module = b.createModule(.{
