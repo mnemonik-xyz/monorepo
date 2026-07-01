@@ -131,24 +131,44 @@ pub fn build(b: *std.Build) void {
     //   Two freestanding rv64im guests (verify_kernel, hash_cost) proving
     //   verification-flavored computations, plus a native host that
     //   proves + verifies + measures. See work/research/zigz-recursion/spec.md.
-    const recursion_guests = .{
-        .{ "verify_kernel_guest", "examples/recursion_poc/verify_kernel_guest.zig" },
-        .{ "hash_cost_guest", "examples/recursion_poc/hash_cost_guest.zig" },
-    };
-    inline for (recursion_guests) |entry| {
-        const g = b.addExecutable(.{
-            .name = entry.@"0",
-            .root_module = b.createModule(.{
-                .root_source_file = b.path(entry.@"1"),
-                .target = riscv_target,
-                .optimize = .ReleaseSmall,
-                .imports = &.{
-                    .{ .name = "zigz_io", .module = zigz_io_mod },
-                },
-            }),
-        });
-        b.installArtifact(g);
-    }
+    //
+    //   The hash_cost guest uses the REAL Poseidon2-16 permutation (the same
+    //   one zigz's commitment scheme uses), vendored freestanding-friendly from
+    //   hash-zig v2.0.0 into examples/recursion_poc/vendored_poseidon2/.
+    const poseidon2_guest_mod = b.createModule(.{
+        .root_source_file = b.path("examples/recursion_poc/vendored_poseidon2/root.zig"),
+        .target = riscv_target,
+        .optimize = .ReleaseSmall,
+    });
+
+    // verify_kernel_guest: only needs zigz_io.
+    const vk_guest = b.addExecutable(.{
+        .name = "verify_kernel_guest",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/recursion_poc/verify_kernel_guest.zig"),
+            .target = riscv_target,
+            .optimize = .ReleaseSmall,
+            .imports = &.{
+                .{ .name = "zigz_io", .module = zigz_io_mod },
+            },
+        }),
+    });
+    b.installArtifact(vk_guest);
+
+    // hash_cost_guest: zigz_io + the real Poseidon2 permutation.
+    const hc_guest = b.addExecutable(.{
+        .name = "hash_cost_guest",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/recursion_poc/hash_cost_guest.zig"),
+            .target = riscv_target,
+            .optimize = .ReleaseSmall,
+            .imports = &.{
+                .{ .name = "zigz_io", .module = zigz_io_mod },
+                .{ .name = "poseidon2", .module = poseidon2_guest_mod },
+            },
+        }),
+    });
+    b.installArtifact(hc_guest);
 
     const recursion_host = b.addExecutable(.{
         .name = "recursion_poc",
