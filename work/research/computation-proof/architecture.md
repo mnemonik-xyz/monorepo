@@ -254,3 +254,60 @@ everything with the same open verifier — no operator trust required.
 **Invariant:** the verifier is a *library* that runs on every client surface
 (browser, CLI, contract) — "verify everywhere." Only `mnemonic-prover` produces;
 `core` only verifies; the server only orchestrates and never signs.
+
+## 8. Policy lifecycle — authoring a policy into the registry
+
+The registry is a **trust root**: the Intent binds a `policy_id`, and the whole
+system is only as sound as the policy behind it. This is the *provenance of the
+policy itself* — a distinct flow from the runtime prove/verify.
+
+```mermaid
+flowchart LR
+    A["1. Author writes policy SOURCE<br/>(Rust/Zig guest, e.g. payment_mandate_v1)"]
+    A --> C["2. REPRODUCIBLE compile (zigz build)<br/>deterministic -> RISC-V ELF"]
+    C --> H["3. program_hash = blake3(ELF)<br/>content address = policy_id"]
+    H --> R["4. Independent AUDIT of source<br/>logic is TRUSTED — a bad policy approves bad actions"]
+    R --> P["5. Publish REGISTRY entry:<br/>name, policy_id, params_schema, version, publisher_sig<br/>entry ANCHORED (tamper-evident, versioned)"]
+    P --> U["6. Principal's Intent binds policy_id (immutable)<br/>Verifier resolves + checks program_hash == intent.policy_id"]
+```
+
+### Why it needs its own flow — the properties that make the registry trustworthy
+
+- **Immutable + content-addressed.** A policy *is* its `program_hash`. A "new
+  version" is a *new* hash, never an edit. So a registered policy can't be
+  silently changed.
+- **Reproducible build = verifiable trust.** Anyone can take the published source,
+  rebuild deterministically, and confirm it hashes to `program_hash`. Trust is
+  **checkable**, not authority-based. (Requires a pinned, reproducible build
+  pipeline — a hard requirement, called out.)
+- **Audit is the real trust root.** The hash proves *which* code ran; it does NOT
+  prove the code is *safe*. A policy that always returns `ok=1` would pass anything.
+  So a policy must be **audited** before registration — that human-audit judgment is
+  what the `publisher_sig` attests.
+- **No per-policy ceremony.** Because zigz is **transparent** (no trusted setup),
+  registering a policy is just *publish source + reproducible ELF + hash* — no
+  Groth16-style per-circuit ceremony. A genuine advantage over SNARK backends.
+- **Intents bind the hash, not the name.** The signed Intent commits to
+  `policy_id (= program_hash)` directly, so even if the registry's human name
+  mapping (`payment_mandate_v1` → hash) is later repointed, **already-signed
+  Intents are unaffected.** The name is a convenience; the hash is the contract.
+
+### Governance choice (open question)
+
+- **Open** — anyone publishes; Principals/Verifiers choose which policies /
+  publishers they accept (like package registries). Maximally decentralized.
+- **Curated** — a publisher authority signs a vetted policy set. Easier for
+  regulated buyers who want an accountable auditor behind each policy.
+- Recommended: **signed-by-publisher + open-source + reproducible**, with the
+  relying party free to pin the exact `program_hash`(es) it trusts. Content
+  addressing makes both models safe against silent tampering.
+
+### Registry attack surfaces
+
+| # | Attack | Mitigation |
+|---|---|---|
+| 1 | Backdoored policy that looks strict | open-source + independent audit + reproducible build (anyone re-derives the hash from source) |
+| 2 | Registry operator repoints a name to a weaker hash | name→hash mapping is signed + anchored; Intents bind the **hash**, not the name |
+| 3 | Non-deterministic build → hash ≠ source | pinned, reproducible build pipeline; published recipe |
+| 4 | Params confusion (policy fed wrong-shaped params) | `params_schema` is part of the registry entry and bound into the Intent |
+| 5 | Stale/withdrawn policy still used | `version` + optional revocation list; Verifier policy on accepted versions |
