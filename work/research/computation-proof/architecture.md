@@ -16,36 +16,36 @@ verifies; recursion is deferred behind a Poseidon2 precompile.**
 sequenceDiagram
     autonumber
     actor P as Principal
-    participant REG as Policy Registry
-    actor AG as Agent (AI)
+    participant REG as PolicyRegistry
+    actor AG as Agent
     participant EV as Evidence
-    participant PR as Prover zigz
-    participant CORE as core verify
-    participant ST as Storage plus Anchor
+    participant PR as ProverZigz
+    participant CORE as CoreVerify
+    participant ST as StorageAnchor
     actor V as Verifier
 
-    Note over P: ROOT OF AUTHORITY. Signs the mandate (Ed25519). Trust anchor for what was authorized.
-    Note over REG: Compiled policy programs (guest ELF), addressed by policy_id = program_hash. Public.
-    Note over AG: The agent's own code (LLM plus tools). May be buggy or compromised. NOT TRUSTED.
+    Note over P: ROOT OF AUTHORITY. Signs the mandate with Ed25519. Trust anchor for what was authorized.
+    Note over REG: Compiled policy programs, addressed by policy_id which equals program_hash. Public.
+    Note over AG: The agent own code, LLM and tools. May be buggy or compromised. NOT TRUSTED.
     Note over EV: zkTLS proves bytes came from the endpoint, not that the endpoint is honest.
-    Note over PR: Runs the policy guest in the zkVM. Trusted only for SOUNDNESS: cannot prove a false statement.
-    Note over CORE: Pure verifier (Rust plus wasm). TRUSTLESS, runs anywhere. Does hashing plus binding.
+    Note over PR: Runs the policy guest in the zkVM. Trusted only for SOUNDNESS, cannot prove a false statement.
+    Note over CORE: Pure verifier, Rust and wasm. TRUSTLESS, runs anywhere. Does hashing and binding.
 
-    P->>REG: pick policy_id (e.g. payment_mandate_v1)
-    P->>P: sign INTENT with policy_id, params (cap, allowlist_root), expiry, nonce
-    P-->>AG: signed Intent plus intent_hash
+    P->>REG: pick policy_id such as payment_mandate_v1
+    P->>P: sign INTENT with policy_id, params, expiry, nonce
+    P-->>AG: signed Intent and intent_hash
     Note over AG,EV: Agent decides an action, then must PROVE compliance. It cannot merely assert.
-    AG->>EV: fetch authenticated evidence (merchant receipt)
-    EV-->>AG: evidence plus attestation
-    AG->>PR: witness = action, evidence, params; program = policy_id
-    PR->>PR: execute policy guest, produce proof pi plus public_inputs
+    AG->>EV: fetch authenticated evidence, a merchant receipt
+    EV-->>AG: evidence and attestation
+    AG->>PR: witness is action, evidence, params and program is policy_id
+    PR->>PR: execute policy guest, produce proof pi and public_inputs
     PR-->>AG: pi binds program_hash, intent_hash, action_commitment, evidence_commitment
-    AG->>AG: sign ACTION with agent key (cert in metadata)
-    AG->>ST: store bytes (durability class) plus anchor batched root
+    AG->>AG: sign ACTION with agent key, cert in metadata
+    AG->>ST: store bytes with durability class and anchor batched root
     V->>ST: fetch by content hash
-    V->>CORE: verify_correspondence(intent, action, cert)
-    Note over V,CORE: Re-checks program_hash == intent.policy_id, every binding, and pi. No trust in agent/prover/storage.
-    CORE-->>V: authorship + integrity + intent_link + POLICY + evidence  =>  policy_valid
+    V->>CORE: verify_correspondence over intent, action, cert
+    Note over V,CORE: Re-checks program_hash equals intent.policy_id, every binding, and pi. No trust in agent, prover, storage.
+    CORE-->>V: authorship, integrity, intent_link, POLICY, evidence, then policy_valid
 ```
 
 ### Reading the flow — the questions this answers
@@ -101,15 +101,15 @@ honesty, or storage.**
 
 ```mermaid
 flowchart LR
-    subgraph GUEST["zigz GUEST (rv64im) — POLICY LOGIC ONLY"]
+    subgraph GUEST["zigz GUEST (rv64im) - POLICY LOGIC ONLY"]
         direction TB
-        g1["arithmetic and aggregates (sum ≤ cap)"]
+        g1["arithmetic and aggregates (sum <= cap)"]
         g2["membership (scan / range)"]
         g3["equality to evidence"]
         g4["temporal / sequencing"]
         g5["*** NO in-guest hashing ***"]
     end
-    subgraph RUST["Rust core/correspondence — VERIFY ONLY (native + wasm)"]
+    subgraph RUST["Rust core/correspondence - VERIFY ONLY (native + wasm)"]
         direction TB
         r1["blake3 hashing and commitments"]
         r2["action_commitment binding"]
@@ -130,28 +130,28 @@ that's slow; we don't build those.
 
 ```mermaid
 flowchart TD
-    S([verify_correspondence]) --> C1{intent COSE signature valid}
-    C1 -- no --> X([reject / policy_valid = false])
-    C1 -- yes --> C2{action COSE signature valid}
+    S(["verify_correspondence"]) --> C1{"intent COSE signature valid?"}
+    C1 -- no --> X(["reject: policy_valid false"])
+    C1 -- yes --> C2{"action COSE signature valid?"}
     C2 -- no --> X
-    C2 -- yes --> C3{action.intent_ref equals intent_hash}
+    C2 -- yes --> C3{"action.intent_ref equals intent_hash?"}
     C3 -- no --> X
-    C3 -- yes --> C4{recomputed action_commitment matches cert AND zigz proof verifies}
+    C3 -- yes --> C4{"action_commitment matches cert AND zigz proof verifies?"}
     C4 -- no --> X
-    C4 -- yes --> C5{evidence attestation valid}
+    C4 -- yes --> C5{"evidence attestation valid?"}
     C5 -- no --> X
-    C5 -- yes --> OK([safe = true])
+    C5 -- yes --> OK(["safe true"])
 ```
 
 ## 4. Two guest-prover jobs: viable now vs deferred
 
 ```mermaid
 flowchart TD
-    subgraph JA["JOB A — policy proving (VIABLE NOW)"]
+    subgraph JA["JOB A - policy proving (VIABLE NOW)"]
         a1["zigz guest proves a bounded deterministic policy"]
         a2["seconds to prove; broad test-case range"]
     end
-    subgraph JB["JOB B — recursion / aggregation (DEFERRED)"]
+    subgraph JB["JOB B - recursion / aggregation (DEFERRED)"]
         b1["verify a zigz proof INSIDE a guest"]
         b2["~25.6k RISC-V steps per Poseidon2 perm (measured)"]
     end
@@ -196,22 +196,22 @@ flowchart TD
 
 ```mermaid
 flowchart TB
-    subgraph EDGE["CLIENT SURFACES — UNTRUSTED EDGE (hold keys, verify locally)"]
+    subgraph EDGE["CLIENT SURFACES - UNTRUSTED EDGE (hold keys, verify locally)"]
         web["Webapp (React)<br/>sign / recall / verify UI<br/>holds user key (non-custodial)<br/>VERIFIES via wasm"]
         ext["Browser Extension<br/>client-side keys + local recall<br/>VERIFIES via wasm"]
         cli["CLI<br/>sign / verify / PROVE<br/>keychain identity"]
         agent["Agent (MCP tools)<br/>requests prove/verify<br/>runs UNTRUSTED code"]
         aud["Auditor / Smart Contract<br/>independent re-check<br/>VERIFY ONLY (trustless)"]
     end
-    subgraph SDKL["SDK LAYER — TS + wasm (verification runs at the edge)"]
+    subgraph SDKL["SDK LAYER - TS + wasm (verification runs at the edge)"]
         sdk["@mnemonik-xyz/sdk<br/>wasm VERIFIER + envelope build<br/>no secrets, no server trust"]
     end
-    subgraph DOMAIN["DOMAIN — Rust (operator infra)"]
-        core["core (portable, native + wasm)<br/>verify_correspondence + action_commitment<br/>hashing + binding — VERIFY ONLY, never signs"]
+    subgraph DOMAIN["DOMAIN - Rust (operator infra)"]
+        core["core (portable, native + wasm)<br/>verify_correspondence + action_commitment<br/>hashing + binding - VERIFY ONLY, never signs"]
         prover["mnemonic-prover<br/>zigz PRODUCE + evidence<br/>trusted only for SOUNDNESS"]
         mcpsrv["mcp server<br/>orchestrate produce to bind to anchor<br/>signs NOTHING (non-custodial)"]
     end
-    subgraph INFRA["STORAGE + ANCHOR — NEUTRAL, UNTRUSTED"]
+    subgraph INFRA["STORAGE + ANCHOR - NEUTRAL, UNTRUSTED"]
         store["durable store (D1..D3)<br/>content-addressed, untrusted<br/>durability = the guarantee"]
         anchor["anchor: OTS/Bitcoin, Solana, TSA<br/>root only, never data"]
     end
@@ -266,7 +266,7 @@ flowchart LR
     A["1. Author writes policy SOURCE<br/>(Rust/Zig guest, e.g. payment_mandate_v1)"]
     A --> C["2. REPRODUCIBLE compile (zigz build)<br/>deterministic -> RISC-V ELF"]
     C --> H["3. program_hash = blake3(ELF)<br/>content address = policy_id"]
-    H --> R["4. Independent AUDIT of source<br/>logic is TRUSTED — a bad policy approves bad actions"]
+    H --> R["4. Independent AUDIT of source<br/>logic is TRUSTED - a bad policy approves bad actions"]
     R --> P["5. Publish REGISTRY entry:<br/>name, policy_id, params_schema, version, publisher_sig<br/>entry ANCHORED (tamper-evident, versioned)"]
     P --> U["6. Principal's Intent binds policy_id (immutable)<br/>Verifier resolves + checks program_hash == intent.policy_id"]
 ```
