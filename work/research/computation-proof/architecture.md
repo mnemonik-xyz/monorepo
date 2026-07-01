@@ -16,27 +16,86 @@ verifies; recursion is deferred behind a Poseidon2 precompile.**
 sequenceDiagram
     autonumber
     actor P as Principal
-    actor A as Agent
-    participant EV as EvidenceSource
-    participant PR as Prover_zigz
-    participant CO as core_correspondence
-    participant ST as Storage_and_Anchor
+    participant REG as Policy Registry
+    actor AG as Agent (AI)
+    participant EV as Evidence
+    participant PR as Prover zigz
+    participant CORE as core verify
+    participant ST as Storage plus Anchor
     actor V as Verifier
 
-    P->>P: sign INTENT (typed mandate)
-    P-->>A: intent_hash
-    A->>A: build ACTION (references intent_hash)
-    A->>EV: collect evidence
-    EV-->>A: evidence_commitment + attestation
-    A->>CO: action_commitment = blake3(action fields)
-    A->>PR: prove policy over (action, evidence, intent)
-    PR-->>A: proof + public_inputs
-    A->>A: sign ACTION (cert in metadata)
-    A->>ST: store bytes + anchor batched Merkle root
-    V->>ST: fetch bundle by hash
-    V->>CO: verify_correspondence(intent, action, cert)
-    CO-->>V: 5 checks -> policy_valid
+    Note over P: ROOT OF AUTHORITY. Signs the mandate (Ed25519). Trust anchor for what was authorized.
+    Note over REG: Compiled policy programs (guest ELF), addressed by policy_id = program_hash. Public.
+    Note over AG: The agent's own code (LLM plus tools). May be buggy or compromised. NOT TRUSTED.
+    Note over EV: zkTLS proves bytes came from the endpoint, not that the endpoint is honest.
+    Note over PR: Runs the policy guest in the zkVM. Trusted only for SOUNDNESS: cannot prove a false statement.
+    Note over CORE: Pure verifier (Rust plus wasm). TRUSTLESS, runs anywhere. Does hashing plus binding.
+
+    P->>REG: pick policy_id (e.g. payment_mandate_v1)
+    P->>P: sign INTENT with policy_id, params (cap, allowlist_root), expiry, nonce
+    P-->>AG: signed Intent plus intent_hash
+    Note over AG,EV: Agent decides an action, then must PROVE compliance. It cannot merely assert.
+    AG->>EV: fetch authenticated evidence (merchant receipt)
+    EV-->>AG: evidence plus attestation
+    AG->>PR: witness = action, evidence, params; program = policy_id
+    PR->>PR: execute policy guest, produce proof pi plus public_inputs
+    PR-->>AG: pi binds program_hash, intent_hash, action_commitment, evidence_commitment
+    AG->>AG: sign ACTION with agent key (cert in metadata)
+    AG->>ST: store bytes (durability class) plus anchor batched root
+    V->>ST: fetch by content hash
+    V->>CORE: verify_correspondence(intent, action, cert)
+    Note over V,CORE: Re-checks program_hash == intent.policy_id, every binding, and pi. No trust in agent/prover/storage.
+    CORE-->>V: authorship + integrity + intent_link + POLICY + evidence  =>  policy_valid
 ```
+
+### Reading the flow — the questions this answers
+
+**Where does the policy live?** The policy is a **compiled program** (the zigz
+guest, e.g. `payment_mandate_v1`), content-addressed by `program_hash` and
+published in the **policy registry**. The **Principal's signed Intent names the
+`policy_id` (= program_hash) + parameters** (cap, allowlist root, expiry). So the
+policy code is public and immutable, and *which* policy applies is fixed by the
+Principal's signature. The verifier checks the proof's `program_hash` equals the
+Intent's `policy_id` — you cannot silently swap in a weaker policy.
+
+**Who is the agent, and does it run its own code?** The Agent is the autonomous
+AI (LLM + tools) acting for the Principal. It runs **arbitrary, untrusted code** —
+its reasoning is *not* proven. What gets proven is only that the **recorded action
+satisfies the policy given the evidence**. The agent drives the prover but cannot
+make it prove a false statement. Treat the agent as potentially adversarial — that
+is the whole design premise.
+
+**What is the trust assumption?** In one line: **trust the Principal's signature
+and the soundness of the proof system; trust nothing about the agent, the prover's
+honesty, or storage.**
+
+### Trust assumptions
+
+| Party | Trusted for | NOT trusted for |
+|---|---|---|
+| **Principal** | defining the mandate (root of authority), via Ed25519 sig | — |
+| **Policy registry** | serving the correct program for a `program_hash` (content-addressed, self-verifying) | — |
+| **Agent (AI)** | **nothing** | honesty, correctness, non-compromise |
+| **Prover (zigz)** | **soundness** (valid π ⇒ statement holds) | honesty (can't fake π). *Caveat: zigz unaudited → experimental* |
+| **Evidence (zkTLS)** | bytes came from *that TLS endpoint* | that the endpoint told the truth |
+| **core verifier** | correctness of the verify code (differential-tested) | — (trustless to run) |
+| **Storage / relay** | **nothing** (content-addressed) | availability → the durability class provides it |
+| **Anchor chain** | existence + time + ordering of a root | data (never holds data) |
+
+### Attack surfaces (and mitigation)
+
+| # | Attack | Mitigation |
+|---|---|---|
+| 1 | Agent lies about action data (fakes a compliant amount) | **evidence binding** — action fields must equal merchant-authenticated evidence |
+| 2 | Agent swaps in a weaker policy | verifier checks `program_hash == intent.policy_id`; Intent is Principal-signed |
+| 3 | Agent forges the Intent | Ed25519 signature — unforgeable |
+| 4 | Replay an old Intent / proof | `nonce` + `expiry` in the Intent; anchored timestamp |
+| 5 | Prover fakes a proof of a false result | **soundness** of the proof system (can't). Residual: zigz unaudited |
+| 6 | Agent fabricates evidence | zkTLS transcript is unforgeable (stub evidence is a *dev-only* trust hole) |
+| 7 | Merchant/endpoint itself lies | **NOT mitigated** — zkTLS proves origin, not truth; residual trust in the source |
+| 8 | Producer deletes the record to dodge audit | **durability class D1–D3** — independent custody; producer not sole holder |
+| 9 | Compromised agent/principal key | out of scope of the proof — identity / key-management layer |
+| 10 | Buggy verifier accepts bad proofs | pure-Rust verifier + **differential conformance** vs the Zig prover |
 
 ## 2. Division of labor (the load-bearing decision)
 
