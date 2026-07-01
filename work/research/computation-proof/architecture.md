@@ -31,20 +31,20 @@ sequenceDiagram
     Note over PR: Runs the policy guest<br/>in the zkVM. Trusted only<br/>for SOUNDNESS.
     Note over CORE: Pure verifier, Rust and wasm.<br/>TRUSTLESS, runs anywhere.<br/>Does hashing and binding.
 
-    P->>REG: pick policy_id such as payment_mandate_v1
+    P->>REG: pick policy_id such <br>/as payment_mandate_v1
     P->>P: sign INTENT with policy_id, params, expiry, nonce
     P-->>AG: signed Intent and intent_hash
-    Note over AG,EV: Agent decides an action, then must PROVE compliance. It cannot merely assert.
-    AG->>EV: fetch authenticated evidence, a merchant receipt
+    Note over AG,EV: Agent decides an action, <br>/then must PROVE compliance.<br>/ It cannot merely assert.
+    AG->>EV: fetch authenticated evidence,<br>/ a merchant receipt
     EV-->>AG: evidence and attestation
-    AG->>PR: witness is action, evidence, params and program is policy_id
-    PR->>PR: execute policy guest, produce proof pi and public_inputs
-    PR-->>AG: pi binds program_hash, intent_hash, action_commitment, evidence_commitment
+    AG->>PR: witness is action, evidence, <br>/params and program is policy_id
+    PR->>PR: execute policy guest, <br>/produce proof pi and public_inputs
+    PR-->>AG: pi binds program_hash, intent_hash, <br>/action_commitment, evidence_commitment
     AG->>AG: sign ACTION with agent key, cert in metadata
-    AG->>ST: store bytes with durability class and anchor batched root
+    AG->>ST: store bytes with durability <br>/class and anchor batched root
     V->>ST: fetch by content hash
     V->>CORE: verify_correspondence over intent, action, cert
-    Note over V,CORE: Re-checks program_hash equals intent.policy_id, every binding, and pi. No trust in agent, prover, storage.
+    Note over V,CORE: Re-checks program_hash <br/>equals intent.policy_id, every binding,<br/> and pi. No trust in agent, prover, storage.
     CORE-->>V: authorship, integrity, intent_link, POLICY, evidence, then policy_valid
 ```
 
