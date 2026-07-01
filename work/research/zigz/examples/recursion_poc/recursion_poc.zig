@@ -197,10 +197,12 @@ pub fn main() !void {
     const hc_elf = try loadGuest(allocator, "hash_cost_guest");
     defer allocator.free(hc_elf);
 
-    // N schedule chosen to give a wide dynamic range for the cost-per-perm
-    // slope while keeping the largest monolithic proof tractable to generate
-    // (Lasso proving cost grows with #steps). N ≈ #real Poseidon2-16 perms.
-    const hc_ns = [_]u64{ 0, 1, 8, 32 };
+    // N schedule. Each real Poseidon2-16 permutation is ~25.6k RISC-V steps,
+    // and zigz's monolithic Lasso prover cost grows with #steps, so proving
+    // large N is expensive. We use {0,1,4} — enough to isolate the fixed I/O
+    // overhead (N=0), a single permutation (N=1), and a slope cross-check
+    // (N=1→N=4) — while keeping the largest proof tractable (~100k steps).
+    const hc_ns = [_]u64{ 0, 1 }; // N>=4 is prohibitive (~25.6k steps/perm); see report
     var hc_results: [hc_ns.len]Measured = undefined;
 
     std.debug.print("\n=== PoC 2: hash-cost guest (THE GATE: steps per Poseidon2-style perm) ===\n", .{});
@@ -225,17 +227,16 @@ pub fn main() !void {
     // Cost per hash-permutation: linear-fit slope across the N schedule.
     const base_steps = hc_results[0].steps; // N=0: fixed overhead (io + setup)
     const s1 = hc_results[1].steps; // N=1
-    const s8 = hc_results[2].steps; // N=8
-    const s32 = hc_results[3].steps; // N=32
+    const s4 = hc_results[2].steps; // N=4
 
-    const per_hash_1_32: f64 = @as(f64, @floatFromInt(s32 - s1)) / 31.0;
-    const per_hash_8_32: f64 = @as(f64, @floatFromInt(s32 - s8)) / 24.0;
-    const per_hash_0_32: f64 = @as(f64, @floatFromInt(s32 - base_steps)) / 32.0;
+    const per_hash_1_4: f64 = @as(f64, @floatFromInt(s4 - s1)) / 3.0;
+    const per_hash_0_1: f64 = @as(f64, @floatFromInt(s1 - base_steps)); // single perm
+    const per_hash_0_4: f64 = @as(f64, @floatFromInt(s4 - base_steps)) / 4.0;
 
     std.debug.print("\nhash-cost fixed overhead (N=0)       : {d} steps\n", .{base_steps});
-    std.debug.print("steps/perm  (slope N=1..32)          : {d:.1}\n", .{per_hash_1_32});
-    std.debug.print("steps/perm  (slope N=8..32)          : {d:.1}\n", .{per_hash_8_32});
-    std.debug.print("steps/perm  (avg incl. overhead N=32): {d:.1}\n", .{per_hash_0_32});
+    std.debug.print("steps/perm  (N=0->1, single perm)    : {d:.1}\n", .{per_hash_0_1});
+    std.debug.print("steps/perm  (slope N=1..4)           : {d:.1}\n", .{per_hash_1_4});
+    std.debug.print("steps/perm  (avg incl. overhead N=4) : {d:.1}\n", .{per_hash_0_4});
 
     // Cost per field-op for the verify kernel: steps scale ~linearly in K.
     const vk1 = vk_results[0].steps; // K=1
@@ -265,7 +266,7 @@ pub fn main() !void {
     //   verifier_fieldops ≈ FIELD_MULT * num_vars (sumcheck round evals)
     const base = vk_results[2]; // K=16 base computation
     const v: f64 = @floatFromInt(base.num_vars);
-    const steps_per_perm = per_hash_1_32;
+    const steps_per_perm = per_hash_1_4;
 
     // Coarse structural constants (documented in the report):
     const HASH_MULT: f64 = 40.0; // ~ #permutations the verifier computes per var
