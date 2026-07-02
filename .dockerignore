@@ -2,11 +2,14 @@ target/
 .git/
 .github/
 work/
-docs/
 webapp/
 .claude/
 keypair/
 .env
 .env.*
 !.env.example
+# NOTE: docs/ is intentionally NOT ignored — mcp/Dockerfile bakes docs/**/*.md
+# into the image for the RAG protocol-knowledge seed (mcp/src/seed.rs). The
+# `*.md` pattern below only matches root-level markdown (README, CHANGELOG),
+# not docs/ subtree files, so the seed corpus is preserved.
 *.md

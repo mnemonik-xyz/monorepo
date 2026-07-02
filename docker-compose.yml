@@ -1,6 +1,78 @@
+# Production compose stack for the Mnemonic MCP server.
+#
+#   docker compose --env-file mcp.env up -d
+#
+# Services:
+#   mcp     — the mnemonic-mcp HTTP server (CI image from GHCR, build fallback).
+#   ollama  — local LLM for /chat. Profile-gated: co-located by default, skipped
+#             for a split deploy (COMPOSE_PROFILES= + OLLAMA_URL=remote).
+#   nginx   — TLS terminator + reverse proxy + static webapp. Domain-agnostic:
+#             uses the stable cert path /etc/letsencrypt/live/mnemonic/.
+#   certbot — renews the LetsEncrypt cert (webroot). Initial issuance is a
+#             one-shot documented in mcp/deploy/README.md (init-letsencrypt.sh).
+#
+# Topology knobs live in mcp.env (see mcp/deploy/compose.env.example).
+
 services:
+  mcp:
+    image: ${MCP_IMAGE:-ghcr.io/mnemonik-xyz/mnemonic-mcp}:${MCP_IMAGE_TAG:-latest}
+    build:
+      context: .
+      dockerfile: mcp/Dockerfile
+    restart: unless-stopped
+    env_file:
+      - mcp.env
+    environment:
+      # Default to co-located ollama; overridden by OLLAMA_URL in mcp.env.
+      OLLAMA_URL: ${OLLAMA_URL:-http://ollama:11434}
+    depends_on:
+      ollama:
+        condition: service_healthy
+        required: false
+    # Loopback by default: only the nginx container (same network) and the host
+    # reach it. Set MCP_BIND=0.0.0.0 in mcp.env if a REMOTE nginx fronts this box.
+    ports:
+      - "${MCP_BIND:-127.0.0.1}:${MCP_PORT:-3000}:3000"
+    volumes:
+      - mcp-data:/data
+      - mcp-keypair:/keypair
+    networks: [mnemonic]
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 180s
+      retries: 5
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "5" }
+
+  ollama:
+    profiles: ["ollama"]
+    build:
+      context: ./ollama
+    image: ${OLLAMA_IMAGE:-monorepo-ollama}
+    restart: unless-stopped
+    volumes:
+      - ollama-data:/root/.ollama
+    networks: [mnemonic]
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:11434/api/tags"]
+      interval: 30s
+      timeout: 5s
+      start_period: 60s
+      retries: 5
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
   nginx:
     image: nginx:1.27-alpine
+    restart: unless-stopped
     ports:
       - "80:80"
       - "443:443"
@@ -8,68 +80,37 @@ services:
       - ./nginx.conf:/etc/nginx/nginx.conf:ro
       - ./webapp/dist:/usr/share/nginx/html:ro
       - certbot-etc:/etc/letsencrypt:ro
-      - certbot-var:/var/lib/letsencrypt
+      - certbot-webroot:/var/www/certbot
     depends_on:
       mcp:
         condition: service_healthy
-    networks:
-      - mnemonic
-    restart: unless-stopped
+    networks: [mnemonic]
+    # Reload every 6h so renewed certs are picked up without a restart.
+    command: >
+      sh -c "while :; do sleep 6h & wait $${!}; nginx -s reload; done & nginx -g 'daemon off;'"
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
 
-  mcp:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    environment:
-      - MNEMONIC_KEYPAIR_PATH=/run/secrets/keypair/id.json
-      - DATABASE_PATH=/data/attestations.db
-      - STORAGE_MODE=${STORAGE_MODE:-local}
-      - EMBED_PROVIDER=${EMBED_PROVIDER:-fastembed}
-      - TURBO_BITS=${TURBO_BITS:-4}
-      - MCP_TRANSPORT=http
-      - MCP_HTTP_PORT=3000
-      - PAYMENT_MODE=${PAYMENT_MODE:-none}
-      - OLLAMA_URL=http://ollama:11434
-      - OLLAMA_MODEL=${OLLAMA_MODEL:-qwen2.5:3b}
-      - RAG_CHUNK_DIR=/data/rag_chunks
-      - RUST_LOG=${RUST_LOG:-info}
-    volumes:
-      - mcp-data:/data
-      - ./keypair:/run/secrets/keypair:ro
-    healthcheck:
-      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/3000' || exit 1"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 30s
-    depends_on:
-      ollama:
-        condition: service_healthy
-    networks:
-      - mnemonic
+  certbot:
+    image: certbot/certbot:latest
     restart: unless-stopped
-
-  ollama:
-    build:
-      context: ./ollama
-      dockerfile: Dockerfile
     volumes:
-      - ollama-data:/root/.ollama
-    healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:11434/api/tags"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
-      start_period: 60s
-    networks:
-      - mnemonic
-    restart: unless-stopped
+      - certbot-etc:/etc/letsencrypt
+      - certbot-webroot:/var/www/certbot
+    # Attempt renewal twice a day (LetsEncrypt recommended); no-op until due.
+    entrypoint: >
+      sh -c "trap exit TERM; while :; do certbot renew --webroot -w /var/www/certbot --quiet; sleep 12h & wait $${!}; done"
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
 
 volumes:
   mcp-data:
+  mcp-keypair:
   ollama-data:
   certbot-etc:
-  certbot-var:
+  certbot-webroot:
 
 networks:
   mnemonic:
