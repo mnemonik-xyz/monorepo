@@ -20,8 +20,10 @@
 FROM rust:1-bookworm AS builder
 
 # g++ + libssl-dev + pkg-config: ONNX Runtime (libstdc++) and TLS.
+# libdbus-1-dev: libdbus-sys (via the keyring crate) needs the D-Bus headers
+# at build time; without it the builder panics in libdbus-sys build.rs.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        g++ pkg-config libssl-dev \
+        g++ pkg-config libssl-dev libdbus-1-dev \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
@@ -40,7 +42,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 FROM debian:bookworm-slim AS runtime
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates libstdc++6 libgomp1 curl \
+        ca-certificates libstdc++6 libgomp1 curl libdbus-1-3 \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --system --uid 10001 --home-dir /app --shell /usr/sbin/nologin mnemonic
 
