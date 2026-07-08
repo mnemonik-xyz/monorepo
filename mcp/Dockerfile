@@ -17,7 +17,11 @@
 #     under /data — mount a volume there so it survives container replacement.
 
 # ---- Builder ---------------------------------------------------------------
-FROM rust:1-bookworm AS builder
+# trixie (glibc 2.41), NOT bookworm (glibc 2.36): the prebuilt ONNX Runtime
+# lib pulled by the `ort`/fastembed crate is compiled against glibc >= 2.38 and
+# references the C23 `__isoc23_strtol*` symbols, which bookworm's linker cannot
+# resolve (undefined symbol at link). Runtime stage must match this glibc.
+FROM rust:1-trixie AS builder
 
 # g++ + libssl-dev + pkg-config: ONNX Runtime (libstdc++) and TLS.
 # libdbus-1-dev: libdbus-sys (via the keyring crate) needs the D-Bus headers
@@ -39,7 +43,9 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     && cp /build/target/release/mnemonic-mcp /usr/local/bin/mnemonic-mcp
 
 # ---- Runtime ---------------------------------------------------------------
-FROM debian:bookworm-slim AS runtime
+# trixie-slim to match the builder's glibc 2.41 — a binary linked against 2.41
+# will not run on bookworm's 2.36.
+FROM debian:trixie-slim AS runtime
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates libstdc++6 libgomp1 curl libdbus-1-3 \
