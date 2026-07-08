@@ -1,17 +1,12 @@
 name: Deploy MCP
 
-# Ships the `mnemonic-mcp` HTTP server to the production VPS at
-# `mcp.mnemonik.xyz` (150.251.147.215). Borrows the action-choice ergonomics
-# from `mnemonik-dev/coding-fabric`'s `deploy-fabric.yml` while dropping the
-# OpenTofu/Hetzner provisioning layer — the VPS already exists, so this
-# workflow only handles in-place updates of the running service.
+# Ships the containerized mnemonic-mcp stack to the production VPS
+# (mcp.mnemonik.xyz / mnemonik.xyz). The image is built + pushed to GHCR by
+# build-mcp-image.yml — this workflow only PULLS it and swaps the running
+# container, so no Rust compiles on the 4 GB box.
 #
-# Trigger model: manual-only by default (workflow_dispatch). A maintainer
-# clicks "Run workflow" → picks `deploy` / `smoke` / `rollback` → optional
-# `tag` field for rollback target. Auto-deploy on `v*` tag is intentionally
-# disabled — the existing `release.yml` builds GitHub Release artifacts but
-# the prod ship decision stays with a human (production downtime risk on a
-# 4 GB RAM single-node).
+# Trigger model: manual-only (workflow_dispatch). Pick apply / smoke / rollback.
+# Auto-deploy on tag is intentionally disabled — the prod ship stays with a human.
 
 on:
   workflow_dispatch:
@@ -21,12 +16,9 @@ on:
         type: choice
         required: true
         default: smoke
-        options:
-          - apply
-          - smoke
-          - rollback
+        options: [apply, smoke, rollback]
       ref:
-        description: 'git ref to deploy or roll back to (defaults to main; e.g. v0.2.4 or a SHA)'
+        description: 'git ref for compose/nginx files AND the image tag: main -> :latest, vX.Y.Z -> :vX.Y.Z'
         type: string
         required: false
         default: main
@@ -41,8 +33,6 @@ permissions:
   actions: read
 
 concurrency:
-  # Serialize against parallel deploys / rollbacks. Smoke checks are
-  # cheap enough that we let them queue rather than cancel a deploy.
   group: deploy-mcp-prod
   cancel-in-progress: false
 
@@ -51,20 +41,18 @@ env:
   PROD_DISCOVERY_URL: https://mcp.mnemonik.xyz/.well-known/oauth-authorization-server
   PROD_MCP_URL: https://mcp.mnemonik.xyz/mcp
   WEBAPP_URL: https://mnemonik.xyz
+
 jobs:
   deploy:
-    name: Deploy or rollback over SSH
+    name: Deploy or rollback over SSH (compose)
     if: ${{ inputs.action == 'apply' || inputs.action == 'rollback' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 20
     steps:
       - name: Verify required secrets are present
         run: |
           for var in VPS_HOST VPS_USER VPS_SSH_PRIVATE_KEY VPS_KNOWN_HOSTS; do
-            if [ -z "${!var:-}" ]; then
-              echo "::error::Missing required secret: $var"
-              exit 1
-            fi
+            if [ -z "${!var:-}" ]; then echo "::error::Missing required secret: $var"; exit 1; fi
           done
         env:
           VPS_HOST: ${{ secrets.VPS_HOST }}
@@ -88,73 +76,67 @@ jobs:
           FORCE_RESEED: ${{ inputs.force_reseed }}
         run: |
           set -euo pipefail
-          # IMPORTANT: the heredoc body runs on the VPS. Variables we want
-          # to substitute LOCALLY are unquoted (REF, ACTION); literals
-          # destined for the remote shell stay quoted ('$VAR') so they
-          # expand on the remote side. Failures inside the remote script
-          # are surfaced via `set -e` + the non-zero exit propagation
-          # through ssh.
-          ssh -i ~/.ssh/deploy_ed25519 \
-              -o IdentitiesOnly=yes \
-              -o ConnectTimeout=15 \
-              "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}" \
-              bash -s <<REMOTE_EOF
+          ssh -i ~/.ssh/deploy_ed25519 -o IdentitiesOnly=yes -o ConnectTimeout=15 \
+              "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}" bash -s <<REMOTE_EOF
           set -euo pipefail
-          cd /home/claude/monorepo
+          REPO=/home/claude/monorepo
+          cd "\$REPO"
 
-          echo "::group::git state before deploy"
-          git rev-parse --short HEAD
-          git log --oneline -1 HEAD
+          echo "::group::sync compose/nginx files to ${REF}"
+          git fetch --tags --quiet origin
+          git checkout --quiet "${REF}"
+          git reset --hard "origin/\$(git symbolic-ref --short HEAD 2>/dev/null || echo ${REF})" 2>/dev/null \
+            || git reset --hard "${REF}"
+          # Canonical env lives next to the compose file; keep the legacy path working.
+          ln -sf "\$REPO/mcp.env" /home/claude/mcp.env
           echo "::endgroup::"
 
-          if [ "$ACTION" = "rollback" ]; then
-            echo "Rolling back to ${REF}"
-            git fetch --tags --quiet origin
-            git checkout --quiet "${REF}"
-          else
-            echo "Deploying ${REF}"
-            git fetch --quiet origin
-            git checkout --quiet "${REF}"
-            git reset --hard "origin/\$(git symbolic-ref --short HEAD 2>/dev/null || echo ${REF})" 2>/dev/null \
-              || git reset --hard "${REF}"
+          # Map the git ref to the GHCR image tag: vX.Y.Z -> that tag, else latest.
+          case "${REF}" in
+            v*) IMAGE_TAG="${REF}" ;;
+            *)  IMAGE_TAG="latest" ;;
+          esac
+          echo "Deploying image tag: \$IMAGE_TAG (action=${ACTION})"
+          sed -i '/^MCP_IMAGE_TAG=/d' "\$REPO/mcp.env"
+          echo "MCP_IMAGE_TAG=\$IMAGE_TAG" >> "\$REPO/mcp.env"
+
+          if [ "${FORCE_RESEED}" = "true" ]; then
+            sed -i '/^MNEMONIC_FORCE_RESEED=/d' "\$REPO/mcp.env"
+            echo "MNEMONIC_FORCE_RESEED=1" >> "\$REPO/mcp.env"
           fi
 
-          echo "::group::cargo build --release"
-          source ~/.cargo/env
-          cargo build --release -p mnemonic-mcp --features local-embed
+          echo "::group::pull + up"
+          docker compose --env-file "\$REPO/mcp.env" pull mcp
+          docker compose --env-file "\$REPO/mcp.env" up -d --remove-orphans
           echo "::endgroup::"
 
-          if [ "$FORCE_RESEED" = "true" ]; then
-            echo "MNEMONIC_FORCE_RESEED=1 will be set for the next boot"
-            # Append to the systemd environment file the service reads. The
-            # variable is consumed once at startup; remove it after the run
-            # so subsequent restarts use the artifact-mtime check instead.
-            sudo sed -i '/^MNEMONIC_FORCE_RESEED=/d' /home/claude/mcp.env
-            echo "MNEMONIC_FORCE_RESEED=1" | sudo tee -a /home/claude/mcp.env >/dev/null
+          echo "::group::wait for mcp health"
+          ok=0
+          for i in \$(seq 1 30); do
+            if curl -fsS --max-time 5 http://127.0.0.1:3000/health >/dev/null 2>&1; then ok=1; break; fi
+            sleep 5
+          done
+          if [ "\$ok" != "1" ]; then
+            docker compose --env-file "\$REPO/mcp.env" logs --tail 60 mcp; exit 1
           fi
-
-          echo "::group::restart service"
-          sudo systemctl restart mnemonic-mcp
-          sleep 6
-          sudo systemctl is-active mnemonic-mcp || (sudo journalctl -u mnemonic-mcp --no-pager -n 50; exit 1)
+          echo "mcp healthy"
           echo "::endgroup::"
 
-          if [ "$FORCE_RESEED" = "true" ]; then
-            echo "Removing MNEMONIC_FORCE_RESEED so the next restart uses mtime-aware idempotency"
-            sudo sed -i '/^MNEMONIC_FORCE_RESEED=/d' /home/claude/mcp.env
+          if [ "${FORCE_RESEED}" = "true" ]; then
+            # Consumed once at boot; drop it so future restarts use mtime idempotency.
+            sed -i '/^MNEMONIC_FORCE_RESEED=/d' "\$REPO/mcp.env"
           fi
 
-          echo "::group::post-restart log tail (RAG seed lines)"
-          sudo journalctl -u mnemonic-mcp --no-pager -S '15 seconds ago' \
-            | grep -iE 'seed|protocol-knowledge|Identity:|listening|server origin seeded' \
-            || true
+          docker image prune -f >/dev/null 2>&1 || true
+          echo "::group::seed log tail"
+          docker compose --env-file "\$REPO/mcp.env" logs --since 60s mcp \
+            | grep -iE 'seed|protocol-knowledge|Identity:|listening' || true
           echo "::endgroup::"
           REMOTE_EOF
 
   smoke:
     name: Post-deploy smoke
     needs: deploy
-    # Always run smoke (even on smoke-only invocations where `deploy` is skipped).
     if: ${{ always() && (needs.deploy.result == 'success' || needs.deploy.result == 'skipped') }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -182,11 +164,6 @@ jobs:
             | jq -e '(.result.tools | length) >= 7' >/dev/null
 
       - name: Chat returns non-empty context-grounded response
-        # Smoke check for issue surfaced 2026-06-25: chat said "no context about mnemonik"
-        # because the docs/ tree on prod was 3 weeks stale and the seed idempotency
-        # check was bugged. Bare-minimum signal: chat returns a non-empty `response`.
-        # Deeper checks (does the answer cite a known whitepaper section?) belong in
-        # a separate e2e suite.
         run: |
           set -euo pipefail
           payload='{"message":"What is the Mnemonic Protocol?","session_id":"deploy-smoke"}'
