@@ -1134,8 +1134,22 @@ async fn sign_memory_inline(
             (local_sol, local_ar)
         }
         WriteMode::Participate => {
-            // Arweave: store COSE_Sign1 bytes (not raw JSON)
-            let ar_tx = arweave.write_bytes(&signed.cose_bytes, keypair).await?;
+            // Arweave: store COSE_Sign1 bytes (not raw JSON). `Producer` /
+            // `Created-At` tags mirror fields already public inside the
+            // payload; they make the item aggregatable via a single gateway
+            // GraphQL query (recover-traction-from-chain) with no payload
+            // fetch — the DB-loss recovery path depends on them.
+            let producer_did = identity::did_sol(keypair);
+            let ar_tx = arweave
+                .write_item(
+                    &signed.cose_bytes,
+                    keypair,
+                    &[
+                        ("Producer", producer_did.as_str()),
+                        ("Created-At", now.as_str()),
+                    ],
+                )
+                .await?;
             arweave.mine().await?;
 
             // Solana: anchor blake3 hash + embedding model (v3 format)

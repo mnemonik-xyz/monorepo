@@ -102,6 +102,7 @@ fn state_with_short_ttl(ttl_secs: i64) -> Arc<McpState> {
             .build()
             .expect("reqwest hosted client"),
         blog_rebuild_hook: None,
+        chain_stats: None,
     })
 }
 
