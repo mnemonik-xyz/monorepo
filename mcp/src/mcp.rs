@@ -838,6 +838,13 @@ pub struct McpState {
     /// `BLOG_REBUILD_HOOK` unset) = no-op; publish behaviour is identical with
     /// or without it. The ping never blocks or fails the publish response.
     pub blog_rebuild_hook: Option<String>,
+
+    /// Chain-backed traction stats (recover-traction-from-chain). `Some`
+    /// when `CHAIN_STATS_WALLETS` is configured: `/stats` and
+    /// `/analytics/attestations` then merge the periodic Arweave-GraphQL
+    /// snapshot with the local DB so lifetime numbers survive a DB loss.
+    /// `None` (default, stdio, tests) = DB-only behaviour, unchanged.
+    pub chain_stats: Option<Arc<crate::chain_stats::ChainStatsCache>>,
 }
 
 // Safety: We only access store through std::sync::Mutex (short critical sections, no await)
@@ -2001,6 +2008,7 @@ mod transport_tests {
                 .build()
                 .expect("reqwest hosted client"),
             blog_rebuild_hook: None,
+            chain_stats: None,
         })
     }
 

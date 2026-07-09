@@ -17,6 +17,7 @@
 //! runs `tests/oauth_flow.rs` etc.
 
 pub mod api;
+pub mod chain_stats;
 pub mod chat;
 pub mod config;
 pub mod confirmation_token;

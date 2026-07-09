@@ -1,4 +1,5 @@
 mod api;
+mod chain_stats;
 mod chat;
 mod config;
 mod confirmation_token;
@@ -502,6 +503,17 @@ async fn main() -> anyhow::Result<()> {
         None
     };
 
+    // Chain-backed traction stats (recover-traction-from-chain). A bad
+    // wallet in CHAIN_STATS_WALLETS is a fatal misconfiguration — silently
+    // shrunk traction numbers are worse than a startup error.
+    let chain_stats_cache = chain_stats::ChainStatsCache::new(
+        &cfg.chain_stats_wallets,
+        &cfg.chain_stats_graphql_url,
+        &cfg.chain_stats_gateway_url,
+    )
+    .expect("invalid CHAIN_STATS_WALLETS — expected comma-separated base58 Solana pubkeys")
+    .map(Arc::new);
+
     let state = Arc::new(mcp::McpState {
         keypair,
         solana: solana::SolanaClient::new(&cfg.solana_rpc_url),
@@ -537,7 +549,25 @@ async fn main() -> anyhow::Result<()> {
         hosted_endpoint,
         hosted_client,
         blog_rebuild_hook,
+        chain_stats: chain_stats_cache.clone(),
     });
+
+    // Chain-stats refresh loop: snapshot immediately (the landing page
+    // should not wait an hour after a restart), then on the configured
+    // interval. A failed refresh keeps the previous snapshot — a gateway
+    // outage must never zero the public traction page.
+    if let Some(cache) = chain_stats_cache {
+        let interval = std::time::Duration::from_secs(cfg.chain_stats_refresh_secs.max(60));
+        tokio::spawn(async move {
+            loop {
+                match cache.refresh().await {
+                    Ok(n) => tracing::info!(items = n, "chain-stats snapshot refreshed"),
+                    Err(e) => tracing::warn!("chain-stats refresh failed: {e}"),
+                }
+                tokio::time::sleep(interval).await;
+            }
+        });
+    }
 
     // Spawn the confirmation-ledger eviction loop. Held strong reference
     // means the loop lives for the process lifetime; on shutdown the

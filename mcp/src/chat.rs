@@ -553,6 +553,7 @@ mod handler_tests {
                 .build()
                 .expect("reqwest hosted client"),
             blog_rebuild_hook: None,
+            chain_stats: None,
         })
     }
 

@@ -182,6 +182,20 @@ pub struct PublicStats {
     pub saved_onchain: i64,
 }
 
+/// Per-row facts consumed by the chain-stats merge (see `recovery_facts`).
+/// `write_mode` stays a raw string ('local' / 'participate') because the
+/// merge only compares it against the canonical spellings.
+#[derive(Debug, Clone)]
+pub struct RowFact {
+    /// Raw column value — real Arweave id, `local:<...>` synthetic, or empty.
+    pub arweave_tx: String,
+    /// OAuth-resolved tenant scope; `None` for legacy/empty rows.
+    pub owner_pubkey: Option<String>,
+    /// UTC day `YYYY-MM-DD` from the stored ISO-8601 `created_at`.
+    pub day: String,
+    pub write_mode: String,
+}
+
 /// A public-visibility attestation row for the Ledger listing
 /// (`GET /artifacts`). Returned by `SqliteStore::list_public_artifacts`; every
 /// row is `visibility = public` by construction of the backing query, so the
@@ -676,6 +690,31 @@ impl SqliteStore {
             saved_on_node,
             saved_onchain,
         })
+    }
+
+    /// Minimal per-row facts for merging DB state with an Arweave chain
+    /// snapshot (recover-traction-from-chain): the chain is the source of
+    /// truth for anchored writes; the DB contributes local-only rows plus
+    /// exact `created_at` days and owners for rows it still has. Aggregate
+    /// data only — no content, no hashes.
+    pub fn recovery_facts(&self) -> anyhow::Result<Vec<RowFact>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT arweave_tx, owner_pubkey, substr(created_at, 1, 10), write_mode
+             FROM attestations",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(RowFact {
+                arweave_tx: row.get(0)?,
+                owner_pubkey: row.get::<_, Option<String>>(1)?.filter(|s| !s.is_empty()),
+                day: row.get(2)?,
+                write_mode: row.get(3)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
     }
 
     /// Resolve a persisted attestation by the deferred-sign correlation_id.

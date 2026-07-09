@@ -138,6 +138,23 @@ pub struct Config {
     /// Default 30s.
     /// Env: `MNEMONIC_DELIVERY_QUOTA_EVICT_SECS`.
     pub delivery_quota_evict_interval_secs: u64,
+
+    // ── Chain-backed traction stats (recover-traction-from-chain) ───────────
+    /// Comma-separated base58 Solana pubkeys of every wallet that ever signed
+    /// anchored uploads (the funded server keypair(s), current and historic).
+    /// Non-empty enables the Arweave-GraphQL snapshot that lets `/stats` and
+    /// `/analytics/attestations` survive a total DB loss. Empty (default) =
+    /// disabled, DB-only behaviour. Env: `CHAIN_STATS_WALLETS`.
+    pub chain_stats_wallets: Vec<String>,
+    /// Gateway GraphQL endpoint used to enumerate anchored items.
+    /// Env: `CHAIN_STATS_GRAPHQL_URL`.
+    pub chain_stats_graphql_url: String,
+    /// Gateway base URL for fetching item payloads (legacy producer
+    /// backfill). Env: `CHAIN_STATS_GATEWAY_URL`.
+    pub chain_stats_gateway_url: String,
+    /// Snapshot refresh interval in seconds. Default 3600.
+    /// Env: `CHAIN_STATS_REFRESH_SECS`.
+    pub chain_stats_refresh_secs: u64,
 }
 
 impl Config {
@@ -203,6 +220,20 @@ impl Config {
             delivery_quota_evict_interval_secs: env_or("MNEMONIC_DELIVERY_QUOTA_EVICT_SECS", "30")
                 .parse()
                 .unwrap_or(30),
+            chain_stats_wallets: env_or("CHAIN_STATS_WALLETS", "")
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect(),
+            chain_stats_graphql_url: env_or(
+                "CHAIN_STATS_GRAPHQL_URL",
+                "https://arweave.net/graphql",
+            ),
+            chain_stats_gateway_url: env_or("CHAIN_STATS_GATEWAY_URL", "https://arweave.net"),
+            chain_stats_refresh_secs: env_or("CHAIN_STATS_REFRESH_SECS", "3600")
+                .parse()
+                .unwrap_or(3600),
         }
     }
 

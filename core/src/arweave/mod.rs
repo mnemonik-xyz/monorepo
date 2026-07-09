@@ -4,6 +4,9 @@
 //! items using the server's Solana Ed25519 keypair.  Local uploads (arlocal)
 //! use unsigned stub transactions -- no signing needed for dev/test.
 
+pub mod graphql;
+pub mod recovery;
+
 use anyhow::Context;
 use base64::Engine;
 use sha2::{Digest, Sha256, Sha384};

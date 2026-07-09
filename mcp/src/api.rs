@@ -242,8 +242,24 @@ pub async fn sign_callback_handler(
         let local_sol = format!("local:{}", &entry.content_hash[..16]);
         (local_sol, local_ar)
     } else {
-        // Arweave upload of the COSE_Sign1 envelope bytes.
-        let ar_tx = match state.arweave.write_bytes(&cose_bytes, &state.keypair).await {
+        // Arweave upload of the COSE_Sign1 envelope bytes. `Producer` /
+        // `Created-At` tags mirror fields already public inside the payload
+        // (producer = did:sol:<jwt_sub> — the USER's identity, not the
+        // server's); they make the item aggregatable via one gateway
+        // GraphQL query (recover-traction-from-chain).
+        let producer_did = format!("did:sol:{}", req.signer_pubkey);
+        let ar_tx = match state
+            .arweave
+            .write_item(
+                &cose_bytes,
+                &state.keypair,
+                &[
+                    ("Producer", producer_did.as_str()),
+                    ("Created-At", now.as_str()),
+                ],
+            )
+            .await
+        {
             Ok(t) => t,
             Err(e) => {
                 return error_resp(
@@ -1278,14 +1294,35 @@ pub async fn public_stats_handler(State(state): State<Arc<McpState>>) -> Respons
         }
     }
 
+    // Chain snapshot read (async RwLock) happens BEFORE the store mutex —
+    // the sqlite guard must never be held across an `.await` (CLAUDE.md).
+    // `None` = feature off or no successful refresh yet → DB-only numbers.
+    let chain_items = match &state.chain_stats {
+        Some(cache) => cache.items().await,
+        None => None,
+    };
+
     let body = {
         let store = state.store.lock().unwrap();
-        match store.public_stats() {
-            Ok(stats) => PublicStatsBody {
+        let db_stats = match &chain_items {
+            // Merged path: chain is the source of truth for anchored writes,
+            // the DB contributes local-only rows (recover-traction-from-chain).
+            Some(items) => store.recovery_facts().map(|facts| {
+                let m = crate::chain_stats::merge_stats(items, &facts);
+                PublicStatsBody {
+                    unique_users: m.unique_users,
+                    saved_on_node: m.saved_on_node,
+                    saved_onchain: m.saved_onchain,
+                }
+            }),
+            None => store.public_stats().map(|stats| PublicStatsBody {
                 unique_users: stats.unique_users,
                 saved_on_node: stats.saved_on_node,
                 saved_onchain: stats.saved_onchain,
-            },
+            }),
+        };
+        match db_stats {
+            Ok(body) => body,
             Err(e) => {
                 tracing::warn!("public_stats query failed: {e}");
                 PublicStatsBody {
@@ -1454,6 +1491,13 @@ pub async fn analytics_attestations_handler(
 ) -> Response {
     let since = range_to_since(params.range.as_deref());
 
+    // Chain snapshot read (async RwLock) BEFORE the store mutex — the
+    // sqlite guard must never be held across an `.await` (CLAUDE.md).
+    let chain_items = match &state.chain_stats {
+        Some(cache) => cache.items().await,
+        None => None,
+    };
+
     let (buckets, unique_users) = {
         let store = match state.store.lock() {
             Ok(g) => g,
@@ -1464,14 +1508,35 @@ pub async fn analytics_attestations_handler(
                 );
             }
         };
-        let buckets = store
-            .attestation_timeline(since.as_deref())
-            .unwrap_or_else(|e| {
-                tracing::warn!("attestation_timeline query failed: {e}");
+        if let Some(items) = &chain_items {
+            // Merged path (recover-traction-from-chain): all-time merge,
+            // then range-filter by the day prefix of the RFC-3339 bound —
+            // bucket dates are `YYYY-MM-DD`, so the lexicographic compare
+            // matches the SQL `created_at >= ?1` semantics day-for-day.
+            let facts = store.recovery_facts().unwrap_or_else(|e| {
+                tracing::warn!("recovery_facts query failed: {e}");
                 Vec::new()
             });
-        let unique_users = store.public_stats().map(|s| s.unique_users).unwrap_or(0);
-        (buckets, unique_users)
+            let merged = crate::chain_stats::merge_stats(items, &facts);
+            let since_day = since
+                .as_deref()
+                .map(|s| s.chars().take(10).collect::<String>());
+            let buckets = merged
+                .buckets
+                .into_iter()
+                .filter(|b| since_day.as_deref().is_none_or(|d| b.date.as_str() >= d))
+                .collect();
+            (buckets, merged.unique_users)
+        } else {
+            let buckets = store
+                .attestation_timeline(since.as_deref())
+                .unwrap_or_else(|e| {
+                    tracing::warn!("attestation_timeline query failed: {e}");
+                    Vec::new()
+                });
+            let unique_users = store.public_stats().map(|s| s.unique_users).unwrap_or(0);
+            (buckets, unique_users)
+        }
     };
 
     let total_on_node: i64 = buckets.iter().map(|b| b.on_node).sum();
