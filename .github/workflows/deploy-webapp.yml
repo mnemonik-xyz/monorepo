@@ -127,7 +127,14 @@ jobs:
           # in CI runner (build runs on VPS).
           cd webapp
           npm install --no-audit --no-fund
-          npm run build
+          # New-server topology: the apex host serves ONLY the static bundle —
+          # no API proxy (every /stats, /analytics/*, /chat call 404/405s on
+          # the apex; verified live 2026-07-09). The full API surface lives on
+          # https://mcp.mnemonik.xyz behind Caddy, and the server's CORS
+          # policy already allows the apex origin (mcp/src/cors_policy.rs).
+          # Build the SPA + prerender against that base so the traction
+          # strip, Analytics, Ledger, Blog, and Chat all hit the working host.
+          VITE_MCP_BASE=https://mcp.mnemonik.xyz npm run build
           cd ..
           echo "::endgroup::"
 

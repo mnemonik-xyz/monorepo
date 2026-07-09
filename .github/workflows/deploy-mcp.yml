@@ -81,6 +81,12 @@ jobs:
           # is the production anchor wallet (work/recover-traction-from-chain
           # decisions D6/D8).
           CHAIN_STATS_WALLETS: ${{ vars.CHAIN_STATS_WALLETS || 'DYVu4Bry3BzGVsR3Hj2iGVT5fNdWFoHw2zRxsdTmrG25' }}
+          # Mainnet RPC for the memo-history enumeration. The server binary's
+          # own default is localhost:8899 (dev validator), which cannot serve
+          # recovery — so the workflow owns this line too. Override with the
+          # SOLANA_RPC_URL repo variable (e.g. a Helius endpoint) if the
+          # public RPC ever rate-limits the VPS.
+          SOLANA_RPC_URL: ${{ vars.SOLANA_RPC_URL || 'https://api.mainnet-beta.solana.com' }}
         run: |
           set -euo pipefail
           ssh -i ~/.ssh/deploy_ed25519 -o IdentitiesOnly=yes -o ConnectTimeout=15 \
@@ -113,15 +119,15 @@ jobs:
           fi
 
           # Chain-backed traction stats: the workflow is the source of truth
-          # for the (public) wallet list, so it is upserted on every deploy —
-          # same pattern as MCP_IMAGE_TAG. SOLANA_RPC_URL is only added when
-          # absent: the server default is localhost:8899 (useless for memo
-          # enumeration), but an operator-set custom RPC must survive deploys.
+          # for BOTH lines (public data), so they are upserted on every
+          # deploy — same pattern as MCP_IMAGE_TAG. To use different values,
+          # set the CHAIN_STATS_WALLETS / SOLANA_RPC_URL repo variables
+          # instead of hand-editing mcp.env (a hand edit would be clobbered
+          # on the next deploy).
           sed -i '/^CHAIN_STATS_WALLETS=/d' "\$REPO/mcp.env"
           echo "CHAIN_STATS_WALLETS=${CHAIN_STATS_WALLETS}" >> "\$REPO/mcp.env"
-          if ! grep -q '^SOLANA_RPC_URL=' "\$REPO/mcp.env"; then
-            echo "SOLANA_RPC_URL=https://api.mainnet-beta.solana.com" >> "\$REPO/mcp.env"
-          fi
+          sed -i '/^SOLANA_RPC_URL=/d' "\$REPO/mcp.env"
+          echo "SOLANA_RPC_URL=${SOLANA_RPC_URL}" >> "\$REPO/mcp.env"
 
           echo "::group::pull + up"
           docker compose --env-file "\$REPO/mcp.env" pull mcp
@@ -148,7 +154,7 @@ jobs:
           docker image prune -f >/dev/null 2>&1 || true
           echo "::group::seed log tail"
           docker compose --env-file "\$REPO/mcp.env" logs --since 60s mcp \
-            | grep -iE 'seed|protocol-knowledge|Identity:|listening' || true
+            | grep -iE 'seed|protocol-knowledge|Identity:|listening|chain-stats' || true
           echo "::endgroup::"
           REMOTE_EOF
 
@@ -181,12 +187,33 @@ jobs:
             -d "$payload" \
             | jq -e '(.result.tools | length) >= 7' >/dev/null
 
+      - name: Chain-backed traction stats are live
+        run: |
+          set -euo pipefail
+          # The snapshot loads at startup (immediate refresh), so a couple of
+          # minutes covers RPC + payload fetches. saved_onchain must reflect
+          # the recovered anchored history — 0 means the refresh is failing
+          # (bad wallet/RPC env, or the RPC/gateway rejecting the VPS).
+          for i in $(seq 1 12); do
+            curl -fsS --max-time 10 "https://mcp.mnemonik.xyz/stats" >/tmp/stats.json 2>/dev/null || true
+            if jq -e '.saved_onchain >= 1' </tmp/stats.json >/dev/null 2>&1; then
+              echo "chain stats live: $(cat /tmp/stats.json)"
+              exit 0
+            fi
+            sleep 10
+          done
+          cat /tmp/stats.json 2>/dev/null || true
+          echo "::error::saved_onchain is still 0 — chain-stats refresh failing; check 'chain-stats' lines in the container logs (CHAIN_STATS_WALLETS / SOLANA_RPC_URL / gateway reachability)"
+          exit 1
+
       - name: Chat returns non-empty context-grounded response
         run: |
           set -euo pipefail
+          # The apex host serves only the static bundle on the new topology —
+          # the API surface (including /chat) lives on the MCP subdomain.
           payload='{"message":"What is the Mnemonic Protocol?","session_id":"deploy-smoke"}'
           response=$(curl -fsS --max-time 30 -X POST \
-            "$WEBAPP_URL/chat" \
+            "https://mcp.mnemonik.xyz/chat" \
             -H 'Content-Type: application/json' \
             -d "$payload")
           echo "$response" | jq .
