@@ -7,12 +7,16 @@
 //! 1. `tools/call mnemonic_recall` with **bob's** JWT returns exactly 1 row,
 //!    whose `owner_pubkey == bob.sub` and content matches what bob signed.
 //! 2. Anonymous `/mcp tools/call mnemonic_recall` (no Authorization header)
-//!    returns HTTP 401. Critically NEVER 200 with rows — that would be a
-//!    cross-tenant leak.
+//!    hits the cross-owner public pool and surfaces ALL rows — since PR #187
+//!    every stored memory is public by operator decision, so the pool query
+//!    carries no owner/visibility predicate.
 //!
-//! This is the security-critical assertion guarding the SQL `WHERE
-//! owner_pubkey = ?` filter in `SqliteStore::search`. A regression here
-//! means tenant data is observable across users.
+//! The security-critical assertion is (1), guarding the SQL `WHERE
+//! owner_pubkey = ?` filter in `SqliteStore::search` on the AUTHENTICATED
+//! path. A regression there means a caller presenting one identity's token
+//! observes another identity's rows — which matters even though the
+//! anonymous pool is global, because authenticated recall is the surface
+//! agents build on for "my memories only" semantics.
 
 use std::sync::Arc;
 
@@ -209,15 +213,12 @@ async fn test_recall_filters_by_owner_pubkey_and_anonymous_returns_401() {
         .to_string();
     assert_eq!(row_content, "bob memory 1", "bob got alice's row!");
 
-    // 2. Anonymous recall (no Authorization header) — Task 4 lands the
-    // visibility-filter recall path per AC13. Anonymous recall now returns
-    // HTTP 200 with only `visibility='public'` rows included. Alice and
-    // Bob's writes above went through the deferred-sign flow → resulting
-    // attestations are `visibility = 'private'` by default (the WASM
-    // sign-callback doesn't set visibility), so anonymous recall sees zero
-    // rows here. The critical safety property — "anonymous callers do NOT
-    // observe private rows across tenants" — is enforced by the
-    // visibility-filter clause, not by 401.
+    // 2. Anonymous recall (no Authorization header) is allowlisted and hits
+    // the cross-owner public pool. Since PR #187 every stored memory is
+    // public (operator decision — see SEARCH_SQL_PUBLIC_POOL in
+    // core/src/storage/sqlite.rs): the pool query carries no owner or
+    // visibility predicate, so all three rows written above surface,
+    // regardless of their stored `visibility` value.
     let (sa, body_a) = post_jsonrpc(
         &app,
         serde_json::json!({
@@ -244,10 +245,20 @@ async fn test_recall_filters_by_owner_pubkey_and_anonymous_returns_401() {
         .expect("anon recall content text");
     let inner: Value = serde_json::from_str(text).expect("anon recall inner json");
     let rows = inner["results"].as_array().cloned().unwrap_or_default();
-    // None of alice's or bob's private rows surface. The list is empty
-    // because none of the deferred-sign writes opted into `visibility=public`.
+    // The global pool surfaces every row written above — alice's 2 + bob's 1.
+    let mut contents: Vec<&str> = rows
+        .iter()
+        .map(|r| r["content"].as_str().expect("content field"))
+        .collect();
+    contents.sort_unstable();
+    assert_eq!(
+        contents,
+        vec!["alice memory 1", "alice memory 2", "bob memory 1"],
+        "anonymous recall must surface the global public pool: {inner}"
+    );
+    // And the pool response carries no single-owner attribution.
     assert!(
-        rows.is_empty(),
-        "anonymous recall must NOT surface private rows: {inner}"
+        inner["owner_pubkey"].is_null(),
+        "anonymous pool response must not claim a single owner: {inner}"
     );
 }
