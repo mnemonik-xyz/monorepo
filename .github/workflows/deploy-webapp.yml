@@ -12,23 +12,26 @@ name: Deploy Webapp
 # §VPS Deploy Process step 10 for the full nginx config).
 #
 # Two trigger modes:
-#   - `workflow_dispatch` — explicit "Run workflow" click, with an opt-in
-#     flag to ALSO reseed the prod MCP chat corpus afterwards (use when
-#     docs/ changed and the chat needs to pick up the new whitepaper /
-#     design docs).
+#   - `workflow_dispatch` — explicit "Run workflow" click.
 #   - `push` to main when files under `webapp/`, `core/` (WASM bindings),
 #     or `docs/` change — auto-republish so the public site doesn't drift
-#     from main. The `docs/` trigger means a doc-only PR merge will
-#     republish AND reseed the chat corpus automatically.
+#     from main.
+#
+# JOB COUPLING POLICY: this workflow touches the WEBAPP ONLY. It no longer
+# reseeds or restarts the MCP server, and its smoke no longer exercises the
+# /chat LLM path — those are MCP concerns. To propagate docs/ changes into
+# the chat RAG corpus, run "Deploy MCP" (deploy-mcp.yml) with
+# force_reseed=true instead.
+#
+# LEGACY ACCESS PATH NOTE: the rebuild below still uses direct SSH to
+# VPS_HOST (`claude@…`, /home/claude/monorepo — the old justhost box). The
+# MCP stack has moved to the coding-fabric Hetzner VM behind Tailscale
+# (see deploy-mcp.yml + .github/actions/fabric-vm-ssh). If/when the apex
+# webapp hosting moves to that VM too, migrate this workflow to the same
+# fabric-vm-ssh composite action and retire the VPS_* secrets.
 
 on:
   workflow_dispatch:
-    inputs:
-      reseed_chat_corpus:
-        description: 'After webapp rebuild, set MNEMONIC_FORCE_RESEED=1 + restart mnemonic-mcp so the chat picks up new docs/.'
-        type: boolean
-        required: false
-        default: false
   push:
     branches: [main]
     paths:
@@ -73,37 +76,9 @@ jobs:
           printf '%s\n' "${{ secrets.VPS_KNOWN_HOSTS }}" > ~/.ssh/known_hosts
           chmod 0644 ~/.ssh/known_hosts
 
-      - name: Pull, rebuild webapp, optionally reseed chat
-        env:
-          # `inputs.reseed_chat_corpus` is undefined for push events; coerce
-          # to empty string and treat as "false" downstream.
-          RESEED_FLAG: ${{ inputs.reseed_chat_corpus || 'false' }}
-          # For `push` events with `docs/` in the paths filter we should also
-          # reseed automatically. Detect by inspecting the changed paths on
-          # the push event.
-          EVENT_NAME: ${{ github.event_name }}
+      - name: Pull + rebuild webapp
         run: |
           set -euo pipefail
-
-          # Decide whether to also reseed. Manual dispatch obeys the toggle.
-          # Auto-push: reseed when any `docs/**` file is in the diff.
-          should_reseed="false"
-          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
-            if [ "$RESEED_FLAG" = "true" ]; then
-              should_reseed="true"
-            fi
-          elif [ "$EVENT_NAME" = "push" ]; then
-            # GitHub's paths filter on the trigger already gates the run to
-            # webapp/, core/, OR docs/ changes — so this job only runs when
-            # at least one of those touched. We still reseed only when
-            # docs/ specifically changed.
-            if git -C "$GITHUB_WORKSPACE" diff --name-only \
-                "${{ github.event.before }}" "${{ github.event.after }}" 2>/dev/null \
-                | grep -q '^docs/'; then
-              should_reseed="true"
-            fi
-          fi
-          echo "Will reseed chat corpus: $should_reseed"
 
           ssh -i ~/.ssh/deploy_ed25519 \
               -o IdentitiesOnly=yes \
@@ -140,33 +115,15 @@ jobs:
 
           # nginx auto-serves from webapp/dist — no service restart for the webapp.
           ls -la webapp/dist/ | head -5
-
-          if [ "${should_reseed}" = "true" ]; then
-            echo "::group::force-reseed mnemonic-mcp chat corpus"
-            sudo sed -i '/^MNEMONIC_FORCE_RESEED=/d' /home/claude/mcp.env
-            echo "MNEMONIC_FORCE_RESEED=1" | sudo tee -a /home/claude/mcp.env >/dev/null
-            sudo systemctl restart mnemonic-mcp
-            sleep 12
-            sudo systemctl is-active mnemonic-mcp
-            sudo sed -i '/^MNEMONIC_FORCE_RESEED=/d' /home/claude/mcp.env
-            sudo journalctl -u mnemonic-mcp --no-pager -S '20 seconds ago' \
-              | grep -iE 'RAG seeding|signed [0-9]+ chunks|RAG seeding complete|listening' \
-              || true
-            echo "::endgroup::"
-          fi
           REMOTE_EOF
 
-      - name: Smoke — webapp + chat both responsive
-        # nginx serves both, so a single failure mode (502 / 503) would be
-        # caught by either curl. /chat is the deeper check because it
-        # exercises the just-(re)built WASM if docs/ changed AND the MCP
-        # backend with the freshly-seeded corpus.
+      - name: Smoke — webapp bundle is served
+        # Webapp-only check: the SPA shell loads. The API surface (/chat,
+        # /stats, /mcp) lives on mcp.mnemonik.xyz and is verified by the
+        # Deploy MCP workflow's smoke job — not here.
         run: |
           set -euo pipefail
-          payload='{"message":"What is the Mnemonic Protocol?","session_id":"reseed-smoke"}'
-          response=$(curl -fsS --max-time 30 -X POST \
-            "$WEBAPP_URL/chat" \
-            -H 'Content-Type: application/json' \
-            -d "$payload")
-          echo "$response" | jq .
-          test -n "$(echo "$response" | jq -r '.response // empty')"
+          body=$(curl -fsS --max-time 15 "$WEBAPP_URL/")
+          echo "$body" | head -3
+          echo "$body" | grep -qi '<div id="root"\|<html' \
+            || { echo "::error::apex did not return the SPA shell"; exit 1; }

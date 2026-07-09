@@ -76,16 +76,20 @@ Variables for `mcp/` (set by user):
 
 **Pre-public-launch security follow-ups (`webapp-rethink` audit, tracked — NOT merge-blocking):** before the blog is publicly promoted, resolve (1) Sybil spam — the per-pubkey publish rate limit is bypassable via free keypair + open OAuth registration, so a public blog needs an agent allowlist / moderation (Decision 5 open item); (2) authorship impersonation — post `author` is arbitrary caller text and the COSE signer is the SERVER key (`claims.sub` not persisted), so any authed agent can claim authorship, contradicting Decision 5's "provable authorship" — persist+verify `claims.sub` or relabel the badge; (3) `GET /artifacts?q=` runs an ONNX embedding unauthenticated/uncached/unrated → CPU DoS, add a `/stats`-style cache or rate limit.
 
-**mcp/ to production VPS:** Manual via `.github/workflows/deploy-mcp.yml` (Actions UI → "Deploy MCP" → Run workflow). Three actions: `apply` (SSH + git pull + cargo build + systemctl restart), `smoke` (verify-only, no SSH), `rollback` (checkout previous tag + rebuild + restart). The `force_reseed` flag injects `MNEMONIC_FORCE_RESEED=1` into `/home/claude/mcp.env` for ONE boot so docs/ changes propagate to the chat's RAG corpus, then removes the var. Auto-deploy on `v*` tag is intentionally disabled — the prod ship decision stays with a human on the 4 GB RAM single-node. See `mcp/src/seed.rs` for the artifact-mtime-aware seed idempotency the workflow relies on.
+**mcp/ to production VPS:** Manual via `.github/workflows/deploy-mcp.yml` (Actions UI → "Deploy MCP" → Run workflow). The production host is the **coding-fabric Hetzner VM** (tailnet HostName `mnemonic-fabric`), whose Hetzner firewall blocks public TCP/22 — the workflow joins the tailnet as an ephemeral node (`.github/actions/fabric-vm-ssh`, same `TAILSCALE_AUTH_KEY` + `CI_SSH_PRIVATE_KEY` secrets as the coding-fabric repo) and SSHes over the tailnet as `op@<100.x IP>`. Three actions: `apply` (git sync of compose files + `docker compose pull mcp && up -d mcp`), `smoke` (verify-only, no SSH), `rollback` (checkout previous tag → its GHCR image). **Only the `mcp` compose service is started** — Caddy (coding-fabric Ansible) owns 80/443 on that VM and vhosts `mcp.mnemonik.xyz` → `127.0.0.1:3000`; the compose file's nginx/certbot services are for standalone boxes only. The `force_reseed` flag injects `MNEMONIC_FORCE_RESEED=1` into `<repo>/mcp.env` for ONE boot so docs/ changes propagate to the chat's RAG corpus, then removes the var. Smoke checks the MCP surface only (`/health`, OAuth discovery, `tools/list`, `/stats`); the `/chat` LLM round-trip is opt-in via the `smoke_chat` input. Auto-deploy on `v*` tag is intentionally disabled — the prod ship decision stays with a human. See `mcp/src/seed.rs` for the artifact-mtime-aware seed idempotency the workflow relies on.
 
 **Required deploy secrets** (set via `gh secret set -R mnemonik-xyz/monorepo <NAME>`):
 
 | Secret | Used by | Value |
 |--------|---------|-------|
-| `VPS_HOST` | deploy-mcp, deploy-webapp (reseed step) | `150.251.147.215` |
-| `VPS_USER` | deploy-mcp, deploy-webapp (reseed step) | `claude` |
-| `VPS_SSH_PRIVATE_KEY` | deploy-mcp, deploy-webapp (reseed step) | Ed25519 private key, the matching pubkey added to `claude@150.251.147.215:~/.ssh/authorized_keys` |
-| `VPS_KNOWN_HOSTS` | deploy-mcp, deploy-webapp (reseed step) | Output of `ssh-keyscan -t ed25519,rsa 150.251.147.215` — pins the host key, prevents trust-on-first-use MITM |
+| `TAILSCALE_AUTH_KEY` | deploy-mcp | Reusable tailnet auth key with `tag:fabric` baked in — same value as the coding-fabric repo secret |
+| `CI_SSH_PRIVATE_KEY` | deploy-mcp | Stable CI Ed25519 private key; matching pubkey is in `op@mnemonic-fabric:~/.ssh/authorized_keys` via cloud-init — same value as the coding-fabric repo secret |
+| `VPS_HOST` | deploy-webapp (legacy rebuild path) | `150.251.147.215` (old justhost box; retire once apex hosting is settled) |
+| `VPS_USER` | deploy-webapp (legacy rebuild path) | `claude` |
+| `VPS_SSH_PRIVATE_KEY` | deploy-webapp (legacy rebuild path) | Ed25519 private key, the matching pubkey added to `claude@150.251.147.215:~/.ssh/authorized_keys` |
+| `VPS_KNOWN_HOSTS` | deploy-webapp (legacy rebuild path) | Output of `ssh-keyscan -t ed25519,rsa 150.251.147.215` — pins the host key, prevents trust-on-first-use MITM |
+
+Optional repo **variables** for deploy-mcp: `FABRIC_VM_HOSTNAME` (default `mnemonic-fabric`), `MCP_VM_REPO_DIR` (default `/opt/mnemonik/monorepo` — set this to the ACTUAL checkout path if the operator bootstrapped the VM elsewhere, otherwise the first deploy clones a second copy and the running stack's `mcp.env` won't be found), `MCP_VM_SSH_USER` (default `op`).
 | `CLOUDFLARE_API_TOKEN` | deploy-webapp | Pages-scoped API token from Cloudflare dashboard |
 | `CLOUDFLARE_ACCOUNT_ID` | deploy-webapp | The Cloudflare account hosting the Pages project |
 | `CLOUDFLARE_PROJECT_NAME` (variable, not secret) | deploy-webapp | Defaults to `mnemonic-webapp` if unset; override with `gh variable set -R mnemonik-xyz/monorepo CLOUDFLARE_PROJECT_NAME --body <name>` if the Pages project uses a different slug |

@@ -1,0 +1,106 @@
+name: fabric-vm-ssh
+description: >
+  Join the tailnet as an ephemeral node and prepare plain-SSH access to the
+  coding-fabric VM (Hetzner, tailnet-only ingress). The VM's Hetzner firewall
+  blocks public TCP/22 — GitHub runners MUST come in over Tailscale, the same
+  path coding-fabric's deploy-fabric.yml and e2e-smoke.yml use. Auth reuses
+  the SAME two secrets as the coding-fabric repo (copy their values into this
+  repo's secrets):
+    - TAILSCALE_AUTH_KEY  — reusable auth key with tag:fabric baked in
+    - CI_SSH_PRIVATE_KEY  — stable Ed25519 key; matching pubkey is in
+                            op@VM:~/.ssh/authorized_keys via cloud-init
+  Exports to $GITHUB_ENV for downstream steps:
+    VM_IP      — the VM's tailnet IPv4 (100.x)
+    VM_TARGET  — user@VM_IP, ready for ssh/scp
+    SSH_OPTS   — key + host-key options for ssh/scp invocations
+
+inputs:
+  tailscale-authkey:
+    description: Tailscale reusable auth key (TAILSCALE_AUTH_KEY secret)
+    required: true
+  ssh-private-key:
+    description: Stable CI SSH private key (CI_SSH_PRIVATE_KEY secret)
+    required: true
+  vm-hostname:
+    description: Tailnet HostName of the target VM
+    required: false
+    default: mnemonic-fabric
+  ssh-user:
+    description: SSH user on the VM (cloud-init-provisioned op user)
+    required: false
+    default: op
+
+runs:
+  using: composite
+  steps:
+    - name: Tailscale up (ephemeral)
+      uses: tailscale/github-action@v3
+      with:
+        authkey: ${{ inputs.tailscale-authkey }}
+        args: --accept-dns --hostname=gh-runner-${{ github.run_id }}
+
+    - name: Assert runner is on tailnet
+      shell: bash
+      run: |
+        # The tailscale action retries 5 times then exits 0 even if all
+        # attempts fail — verify connectivity ourselves so downstream steps
+        # fail fast (same guard as coding-fabric deploy-fabric.yml).
+        if ! tailscale status >/dev/null 2>&1; then
+          echo "::error::tailscale is not running on the runner"
+          exit 1
+        fi
+        STATE=$(tailscale status 2>&1 | head -1)
+        if [[ "$STATE" == *"Logged out"* ]] || [[ "$STATE" == *"stopped"* ]]; then
+          echo "::error::tailscaled is up but not authenticated ($STATE)"
+          exit 1
+        fi
+        echo "Runner tailnet IPv4: $(tailscale ip -4 2>/dev/null | head -1)"
+
+    - name: Resolve VM tailnet IPv4 (poll up to 5 min)
+      shell: bash
+      env:
+        SERVER_NAME: ${{ inputs.vm-hostname }}
+      run: |
+        # The tailnet accumulates ghost <hostname>-N devices from prior CI
+        # runs; resolving by name returns the OLDEST (usually offline) one.
+        # Select ONLY the peer with HostName == SERVER_NAME AND Online ==
+        # true from status JSON (pattern proven in deploy-fabric.yml).
+        for i in $(seq 1 30); do
+          VM_IP=$(tailscale status --json 2>/dev/null | jq -r --arg name "$SERVER_NAME" '
+            [(.Peer // {} | to_entries[].value)
+              | select(.HostName == $name and .Online == true)
+              | (.TailscaleIPs // [])[]
+              | select(test("^100\\."))
+            ] | first // ""
+          ')
+          if [ -n "$VM_IP" ]; then
+            echo "VM ${SERVER_NAME} resolved to online tailnet IPv4 $VM_IP (try ${i}/30)"
+            echo "VM_IP=$VM_IP" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          echo "[$i/30] no ONLINE peer with HostName=${SERVER_NAME} yet — sleeping 10s"
+          sleep 10
+        done
+        echo "::error::no online ${SERVER_NAME} peer appeared within 5 min"
+        tailscale status || true
+        exit 1
+
+    - name: Load CI SSH private key
+      shell: bash
+      env:
+        CI_SSH_PRIVATE_KEY: ${{ inputs.ssh-private-key }}
+        SSH_USER: ${{ inputs.ssh-user }}
+      run: |
+        # Tailscale-SSH is intentionally NOT enabled on the VM (conflicts
+        # with OpenSSH on 22 + interactive auth deadlocks CI). Plain SSH
+        # over the tailnet interface with the stable CI key — same auth
+        # path coding-fabric's Ansible and e2e-smoke use.
+        if [ -z "$CI_SSH_PRIVATE_KEY" ]; then
+          echo "::error::ssh-private-key input is empty"
+          exit 1
+        fi
+        printf '%s\n' "$CI_SSH_PRIVATE_KEY" > /tmp/ci_deploy_key
+        chmod 600 /tmp/ci_deploy_key
+        echo "CI keypair restored (fp $(ssh-keygen -lf /tmp/ci_deploy_key | awk '{print $2}'))"
+        echo "VM_TARGET=${SSH_USER}@${VM_IP}" >> "$GITHUB_ENV"
+        echo "SSH_OPTS=-i /tmp/ci_deploy_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/tmp/ci_known_hosts -o ConnectTimeout=15" >> "$GITHUB_ENV"
