@@ -74,6 +74,13 @@ jobs:
           ACTION: ${{ inputs.action }}
           REF: ${{ inputs.ref }}
           FORCE_RESEED: ${{ inputs.force_reseed }}
+          # Chain-backed traction stats (recover-traction-from-chain).
+          # Public data only — the base58 address of every wallet that ever
+          # signed anchored uploads. Override via the repo variable
+          # CHAIN_STATS_WALLETS if the wallet set ever changes; the fallback
+          # is the production anchor wallet (work/recover-traction-from-chain
+          # decisions D6/D8).
+          CHAIN_STATS_WALLETS: ${{ vars.CHAIN_STATS_WALLETS || 'DYVu4Bry3BzGVsR3Hj2iGVT5fNdWFoHw2zRxsdTmrG25' }}
         run: |
           set -euo pipefail
           ssh -i ~/.ssh/deploy_ed25519 -o IdentitiesOnly=yes -o ConnectTimeout=15 \
@@ -103,6 +110,17 @@ jobs:
           if [ "${FORCE_RESEED}" = "true" ]; then
             sed -i '/^MNEMONIC_FORCE_RESEED=/d' "\$REPO/mcp.env"
             echo "MNEMONIC_FORCE_RESEED=1" >> "\$REPO/mcp.env"
+          fi
+
+          # Chain-backed traction stats: the workflow is the source of truth
+          # for the (public) wallet list, so it is upserted on every deploy —
+          # same pattern as MCP_IMAGE_TAG. SOLANA_RPC_URL is only added when
+          # absent: the server default is localhost:8899 (useless for memo
+          # enumeration), but an operator-set custom RPC must survive deploys.
+          sed -i '/^CHAIN_STATS_WALLETS=/d' "\$REPO/mcp.env"
+          echo "CHAIN_STATS_WALLETS=${CHAIN_STATS_WALLETS}" >> "\$REPO/mcp.env"
+          if ! grep -q '^SOLANA_RPC_URL=' "\$REPO/mcp.env"; then
+            echo "SOLANA_RPC_URL=https://api.mainnet-beta.solana.com" >> "\$REPO/mcp.env"
           fi
 
           echo "::group::pull + up"
