@@ -150,7 +150,10 @@ pub struct Config {
     /// Env: `CHAIN_STATS_GRAPHQL_URL`.
     pub chain_stats_graphql_url: String,
     /// Gateway base URL for fetching item payloads (legacy producer
-    /// backfill). Env: `CHAIN_STATS_GATEWAY_URL`.
+    /// backfill). Defaults to the Irys gateway: this node uploads via
+    /// Irys, and arweave.net serves an HTML placeholder page (HTTP 200!)
+    /// for Irys-bundled items it never indexed — verified live 2026-07-09.
+    /// Env: `CHAIN_STATS_GATEWAY_URL`.
     pub chain_stats_gateway_url: String,
     /// Snapshot refresh interval in seconds. Default 3600.
     /// Env: `CHAIN_STATS_REFRESH_SECS`.
@@ -230,7 +233,7 @@ impl Config {
                 "CHAIN_STATS_GRAPHQL_URL",
                 "https://arweave.net/graphql",
             ),
-            chain_stats_gateway_url: env_or("CHAIN_STATS_GATEWAY_URL", "https://arweave.net"),
+            chain_stats_gateway_url: env_or("CHAIN_STATS_GATEWAY_URL", "https://gateway.irys.xyz"),
             chain_stats_refresh_secs: env_or("CHAIN_STATS_REFRESH_SECS", "3600")
                 .parse()
                 .unwrap_or(3600),

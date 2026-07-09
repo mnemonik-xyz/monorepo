@@ -22,12 +22,18 @@
 use mnemonic_core::arweave::graphql::{solana_pubkey_to_arweave_address, GraphQlClient};
 use mnemonic_core::arweave::recovery::{normalize_producer, snapshot_chain, RecoveredItem};
 use mnemonic_core::arweave::ArweaveClient;
+use mnemonic_core::solana::SolanaClient;
 use mnemonic_core::storage::sqlite::{RowFact, TimelineBucket};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 pub struct ChainStatsCache {
     gql: GraphQlClient,
     gateway: ArweaveClient,
+    solana: SolanaClient,
+    /// Base58 Solana pubkeys — enumeration source 1 (memo history).
+    wallets: Vec<String>,
+    /// The same wallets in Arweave owner form — enumeration source 2
+    /// (gateway GraphQL, for indexed/tagged items).
     owner_addresses: Vec<String>,
     snapshot: tokio::sync::RwLock<Option<Vec<RecoveredItem>>>,
 }
@@ -40,6 +46,7 @@ impl ChainStatsCache {
         wallets: &[String],
         graphql_url: &str,
         gateway_url: &str,
+        solana_rpc_url: &str,
     ) -> anyhow::Result<Option<Self>> {
         if wallets.is_empty() {
             return Ok(None);
@@ -51,6 +58,8 @@ impl ChainStatsCache {
         Ok(Some(Self {
             gql: GraphQlClient::new(graphql_url),
             gateway: ArweaveClient::new(gateway_url),
+            solana: SolanaClient::new(solana_rpc_url),
+            wallets: wallets.to_vec(),
             owner_addresses,
             snapshot: tokio::sync::RwLock::new(None),
         }))
@@ -58,8 +67,19 @@ impl ChainStatsCache {
 
     /// Re-enumerate the chain. Errors are returned (caller logs and keeps
     /// the previous snapshot — a gateway outage must not zero the page).
+    ///
+    /// The Solana memo history is the primary source: gateways never
+    /// indexed the historical Irys-bundled items, so GraphQL alone returns
+    /// zero for them (verified live 2026-07-09 — 16 memos, 0 GraphQL
+    /// hits). GraphQL still runs to catch memo-less uploads and future
+    /// tagged items.
     pub async fn refresh(&self) -> anyhow::Result<usize> {
-        let snap = snapshot_chain(&self.gql, &self.gateway, &self.owner_addresses).await?;
+        let mut anchors = Vec::new();
+        for wallet in &self.wallets {
+            anchors.extend(self.solana.list_memo_anchors(wallet).await?);
+        }
+        let snap =
+            snapshot_chain(&self.gql, &self.gateway, &self.owner_addresses, &anchors).await?;
         let n = snap.items.len();
         *self.snapshot.write().await = Some(snap.items);
         Ok(n)

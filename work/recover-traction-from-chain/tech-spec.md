@@ -12,6 +12,12 @@ truth, no bulk re-import into the DB).
 
 ### Enumeration (core)
 
+`core/src/solana/mod.rs` — `SolanaClient::list_memo_anchors`: paginated
+`getSignaturesForAddress` over the server wallet; every anchor memo
+(`{"h", "a", "v"}`) yields `(solana_tx, arweave_tx, content_hash,
+block_time)`. This is the PRIMARY source — the gateways never indexed
+the historical Irys-bundled items (D6).
+
 `core/src/arweave/graphql.rs` — `GraphQlClient::list_anchored`: paginated
 gateway GraphQL query (`first: 100`, cursor loop, `HEIGHT_ASC`) filtered by
 `App-Name: mnemonic-protocol` and optionally `owners`. Operators configure
@@ -63,7 +69,7 @@ future recovery needs zero payload fetches.
 | --- | --- | --- |
 | `CHAIN_STATS_WALLETS` | `` | comma-separated base58 pubkeys (public only) |
 | `CHAIN_STATS_GRAPHQL_URL` | `https://arweave.net/graphql` | gateway GraphQL |
-| `CHAIN_STATS_GATEWAY_URL` | `https://arweave.net` | payload fetches |
+| `CHAIN_STATS_GATEWAY_URL` | `https://gateway.irys.xyz` | payload fetches (arweave.net serves HTML placeholders for Irys items — D7) |
 | `CHAIN_STATS_REFRESH_SECS` | `3600` | snapshot refresh (min 60) |
 
 ## Testing
@@ -72,8 +78,10 @@ future recovery needs zero payload fetches.
   address derivation, COSE producer extraction, legacy backfill (httpmock).
 - mcp: merge semantics — chain-only recovery, union dedup, local rows,
   pending-block items (pure unit tests).
-- Live verification against the real wallet address: pending (operator is
-  locating the address; only the public key is needed).
+- Live verification (2026-07-09, prod wallet `DYVu4Bry…mrG25`): 16
+  anchored memories recovered, 3 distinct users, all 16 payloads readable
+  via `gateway.irys.xyz`. Gateways' GraphQL indexed none of them — hence
+  the Solana-memo enumeration (D6).
 
 ## Known limits
 

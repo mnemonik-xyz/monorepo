@@ -8,6 +8,17 @@ pub mod graphql;
 pub mod recovery;
 
 use anyhow::Context;
+
+/// Shared reqwest client with an explicit User-Agent. Irys gateways sit
+/// behind a WAF that 403s certain default agents (verified live:
+/// `Python-urllib` blocked, named agents pass) — an identifiable UA keeps
+/// payload fetches and uploads out of that filter.
+pub(crate) fn http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .user_agent(concat!("mnemonic-core/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .unwrap_or_default()
+}
 use base64::Engine;
 use sha2::{Digest, Sha256, Sha384};
 use solana_sdk::signature::{Keypair, Signer};
@@ -30,7 +41,7 @@ impl ArweaveClient {
             // — likely renamed when Bundlr migrated to Irys L1.
             upload_url: "https://uploader.irys.xyz/tx/solana".to_string(),
             bypass_local_routing: false,
-            client: reqwest::Client::new(),
+            client: http_client(),
         }
     }
 

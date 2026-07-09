@@ -510,6 +510,7 @@ async fn main() -> anyhow::Result<()> {
         &cfg.chain_stats_wallets,
         &cfg.chain_stats_graphql_url,
         &cfg.chain_stats_gateway_url,
+        &cfg.solana_rpc_url,
     )
     .expect("invalid CHAIN_STATS_WALLETS — expected comma-separated base58 Solana pubkeys")
     .map(Arc::new);
