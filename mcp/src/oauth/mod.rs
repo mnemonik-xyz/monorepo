@@ -1172,10 +1172,8 @@ fn split_loopback_redirect(uri: &str) -> Option<(&'static str, &str)> {
         ("127.0.0.1", rest)
     } else if let Some(rest) = uri.strip_prefix("http://[::1]") {
         ("::1", rest)
-    } else if let Some(rest) = uri.strip_prefix("http://localhost") {
-        ("localhost", rest)
     } else {
-        return None;
+        ("localhost", uri.strip_prefix("http://localhost")?)
     };
 
     let path = if let Some(rest) = rest.strip_prefix(':') {

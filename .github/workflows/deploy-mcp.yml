@@ -1,12 +1,37 @@
 name: Deploy MCP
 
-# Ships the containerized mnemonic-mcp stack to the production VPS
-# (mcp.mnemonik.xyz / mnemonik.xyz). The image is built + pushed to GHCR by
-# build-mcp-image.yml — this workflow only PULLS it and swaps the running
-# container, so no Rust compiles on the 4 GB box.
+# Ships the containerized mnemonic-mcp stack to the production VPS — the
+# coding-fabric Hetzner VM (tailnet HostName `mnemonic-fabric`), which also
+# serves mcp.mnemonik.xyz via its Caddy. The image is built + pushed to GHCR
+# by build-mcp-image.yml — this workflow only PULLS it and swaps the running
+# container, so no Rust compiles on the box.
+#
+# ACCESS PATH (no public SSH): the VM's Hetzner firewall blocks TCP/22 from
+# the internet — direct SSH from a GitHub runner times out (run 29026141051).
+# The runner joins the tailnet as an ephemeral node and SSHes over the
+# tailnet interface as op@<tailnet-ip>, exactly like coding-fabric's
+# deploy-fabric.yml / e2e-smoke.yml. See .github/actions/fabric-vm-ssh.
+#
+# Required repo secrets (same VALUES as the coding-fabric repo's secrets):
+#   TAILSCALE_AUTH_KEY  — reusable tailnet auth key (tag:fabric baked in)
+#   CI_SSH_PRIVATE_KEY  — stable CI Ed25519 key, pubkey on op@VM
+# Optional repo variables:
+#   FABRIC_VM_HOSTNAME  — tailnet HostName of the VM (default mnemonic-fabric)
+#   MCP_VM_REPO_DIR     — monorepo checkout on the VM (default /opt/mnemonik/monorepo)
+#   MCP_VM_SSH_USER     — SSH user (default op)
+#
+# COEXISTENCE WITH CODING-FABRIC: Caddy (managed by coding-fabric Ansible)
+# owns 80/443 on this VM and vhosts mcp.mnemonik.xyz → 127.0.0.1:3000. This
+# workflow therefore brings up ONLY the `mcp` compose service (plus its
+# profile-gated ollama dependency) — NEVER the nginx/certbot services from
+# docker-compose.yml, which would fight Caddy for 80/443.
 #
 # Trigger model: manual-only (workflow_dispatch). Pick apply / smoke / rollback.
 # Auto-deploy on tag is intentionally disabled — the prod ship stays with a human.
+#
+# Job coupling policy: this workflow verifies the MCP surface only (/health,
+# OAuth discovery, tools/list, /stats). The webapp/chat UX is NOT checked
+# here — `smoke_chat` is an explicit opt-in for the /chat endpoint.
 
 on:
   workflow_dispatch:
@@ -18,7 +43,7 @@ on:
         default: smoke
         options: [apply, smoke, rollback]
       ref:
-        description: 'git ref for compose/nginx files AND the image tag: main -> :latest, vX.Y.Z -> :vX.Y.Z'
+        description: 'git ref for compose files AND the image tag: main -> :latest, vX.Y.Z -> :vX.Y.Z'
         type: string
         required: false
         default: main
@@ -27,6 +52,11 @@ on:
         type: boolean
         required: false
         default: true
+      smoke_chat:
+        description: 'Also smoke the /chat endpoint (LLM round-trip; slow, needs warm ollama). Off by default — chat is a webapp-facing concern.'
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: read
@@ -40,40 +70,49 @@ env:
   PROD_HEALTH_URL: https://mcp.mnemonik.xyz/health
   PROD_DISCOVERY_URL: https://mcp.mnemonik.xyz/.well-known/oauth-authorization-server
   PROD_MCP_URL: https://mcp.mnemonik.xyz/mcp
-  WEBAPP_URL: https://mnemonik.xyz
 
 jobs:
   deploy:
-    name: Deploy or rollback over SSH (compose)
+    name: Deploy or rollback over tailnet SSH (compose)
     if: ${{ inputs.action == 'apply' || inputs.action == 'rollback' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
     steps:
       - name: Verify required secrets are present
         run: |
-          for var in VPS_HOST VPS_USER VPS_SSH_PRIVATE_KEY VPS_KNOWN_HOSTS; do
-            if [ -z "${!var:-}" ]; then echo "::error::Missing required secret: $var"; exit 1; fi
+          for var in TAILSCALE_AUTH_KEY CI_SSH_PRIVATE_KEY; do
+            if [ -z "${!var:-}" ]; then
+              echo "::error::Missing required secret: $var (copy the value from the coding-fabric repo's secrets)"
+              exit 1
+            fi
           done
         env:
-          VPS_HOST: ${{ secrets.VPS_HOST }}
-          VPS_USER: ${{ secrets.VPS_USER }}
-          VPS_SSH_PRIVATE_KEY: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
-          VPS_KNOWN_HOSTS: ${{ secrets.VPS_KNOWN_HOSTS }}
+          TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
+          CI_SSH_PRIVATE_KEY: ${{ secrets.CI_SSH_PRIVATE_KEY }}
 
-      - name: Configure SSH client
-        run: |
-          set -euo pipefail
-          install -m 0700 -d ~/.ssh
-          printf '%s\n' "${{ secrets.VPS_SSH_PRIVATE_KEY }}" > ~/.ssh/deploy_ed25519
-          chmod 0600 ~/.ssh/deploy_ed25519
-          printf '%s\n' "${{ secrets.VPS_KNOWN_HOSTS }}" > ~/.ssh/known_hosts
-          chmod 0644 ~/.ssh/known_hosts
+      # Local composite actions need the repo on disk first.
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Join tailnet + prepare SSH to the fabric VM
+        uses: ./.github/actions/fabric-vm-ssh
+        with:
+          tailscale-authkey: ${{ secrets.TAILSCALE_AUTH_KEY }}
+          ssh-private-key: ${{ secrets.CI_SSH_PRIVATE_KEY }}
+          vm-hostname: ${{ vars.FABRIC_VM_HOSTNAME || 'mnemonic-fabric' }}
+          ssh-user: ${{ vars.MCP_VM_SSH_USER || 'op' }}
 
       - name: Deploy or rollback on VPS
         env:
           ACTION: ${{ inputs.action }}
           REF: ${{ inputs.ref }}
           FORCE_RESEED: ${{ inputs.force_reseed }}
+          # Monorepo checkout on the fabric VM (compose + env files live here;
+          # the app itself ships as a GHCR image). Bootstrap-cloned on first
+          # deploy; mcp.env must be created by the operator (secrets).
+          REPO_DIR: ${{ vars.MCP_VM_REPO_DIR || '/opt/mnemonik/monorepo' }}
           # Chain-backed traction stats (recover-traction-from-chain).
           # Public data only — the base58 address of every wallet that ever
           # signed anchored uploads. Override via the repo variable
@@ -89,19 +128,43 @@ jobs:
           SOLANA_RPC_URL: ${{ vars.SOLANA_RPC_URL || 'https://api.mainnet-beta.solana.com' }}
         run: |
           set -euo pipefail
-          ssh -i ~/.ssh/deploy_ed25519 -o IdentitiesOnly=yes -o ConnectTimeout=15 \
-              "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}" bash -s <<REMOTE_EOF
+          # Sanitize the operator-provided path: trim stray whitespace (a
+          # trailing space in the repo variable would otherwise create a
+          # literal '/mcp ' directory) and require an absolute path.
+          REPO_DIR="$(echo "$REPO_DIR" | xargs)"
+          case "$REPO_DIR" in
+            /?*) ;;
+            *) echo "::error::MCP_VM_REPO_DIR must be an absolute path on the VM (got '$REPO_DIR')"; exit 1 ;;
+          esac
+          ssh $SSH_OPTS "$VM_TARGET" bash -s <<REMOTE_EOF
           set -euo pipefail
-          REPO=/home/claude/monorepo
+          REPO="${REPO_DIR}"
+
+          # op is added to the docker group by coding-fabric's Ansible after
+          # Docker install; fall back to sudo if the group isn't active yet.
+          if docker info >/dev/null 2>&1; then DOCKER="docker"; else DOCKER="sudo -n docker"; fi
+
+          if [ ! -d "\$REPO/.git" ]; then
+            echo "Bootstrapping monorepo checkout at \$REPO"
+            # install -d creates parents root-owned and only the leaf dir
+            # op-owned — never chown a parent (a top-level REPO like /mcp
+            # would otherwise chown / itself). git clones fine into an
+            # existing empty dir.
+            sudo -n install -d -o "\$(id -un)" -g "\$(id -gn)" "\$REPO"
+            git clone --quiet https://github.com/mnemonik-xyz/monorepo.git "\$REPO"
+          fi
           cd "\$REPO"
 
-          echo "::group::sync compose/nginx files to ${REF}"
+          if [ ! -f "\$REPO/mcp.env" ]; then
+            echo "::error::\$REPO/mcp.env is missing on the VM. Create it once from mcp/deploy/compose.env.example and fill the secrets (MCP_JWT_SECRET, MCP_REFRESH_SALT, OAuth) — see mcp/deploy/README.md. Refusing to deploy with no env."
+            exit 1
+          fi
+
+          echo "::group::sync compose files to ${REF}"
           git fetch --tags --quiet origin
           git checkout --quiet "${REF}"
           git reset --hard "origin/\$(git symbolic-ref --short HEAD 2>/dev/null || echo ${REF})" 2>/dev/null \
             || git reset --hard "${REF}"
-          # Canonical env lives next to the compose file; keep the legacy path working.
-          ln -sf "\$REPO/mcp.env" /home/claude/mcp.env
           echo "::endgroup::"
 
           # Map the git ref to the GHCR image tag: vX.Y.Z -> that tag, else latest.
@@ -129,9 +192,14 @@ jobs:
           sed -i '/^SOLANA_RPC_URL=/d' "\$REPO/mcp.env"
           echo "SOLANA_RPC_URL=${SOLANA_RPC_URL}" >> "\$REPO/mcp.env"
 
-          echo "::group::pull + up"
-          docker compose --env-file "\$REPO/mcp.env" pull mcp
-          docker compose --env-file "\$REPO/mcp.env" up -d --remove-orphans
+          echo "::group::pull + up (mcp service ONLY — Caddy owns 80/443 on this VM)"
+          # Never 'up -d' the full stack here: the compose file also defines
+          # nginx + certbot for standalone boxes, and they'd fight the
+          # fabric-managed Caddy for ports 80/443. 'up -d mcp' also starts
+          # the profile-gated ollama dependency when COMPOSE_PROFILES=ollama
+          # is set in mcp.env.
+          \$DOCKER compose --env-file "\$REPO/mcp.env" pull mcp
+          \$DOCKER compose --env-file "\$REPO/mcp.env" up -d mcp
           echo "::endgroup::"
 
           echo "::group::wait for mcp health"
@@ -141,7 +209,7 @@ jobs:
             sleep 5
           done
           if [ "\$ok" != "1" ]; then
-            docker compose --env-file "\$REPO/mcp.env" logs --tail 60 mcp; exit 1
+            \$DOCKER compose --env-file "\$REPO/mcp.env" logs --tail 60 mcp; exit 1
           fi
           echo "mcp healthy"
           echo "::endgroup::"
@@ -151,15 +219,15 @@ jobs:
             sed -i '/^MNEMONIC_FORCE_RESEED=/d' "\$REPO/mcp.env"
           fi
 
-          docker image prune -f >/dev/null 2>&1 || true
+          \$DOCKER image prune -f >/dev/null 2>&1 || true
           echo "::group::seed log tail"
-          docker compose --env-file "\$REPO/mcp.env" logs --since 60s mcp \
+          \$DOCKER compose --env-file "\$REPO/mcp.env" logs --since 60s mcp \
             | grep -iE 'seed|protocol-knowledge|Identity:|listening|chain-stats' || true
           echo "::endgroup::"
           REMOTE_EOF
 
   smoke:
-    name: Post-deploy smoke
+    name: Post-deploy smoke (MCP surface only)
     needs: deploy
     if: ${{ always() && (needs.deploy.result == 'success' || needs.deploy.result == 'skipped') }}
     runs-on: ubuntu-latest
@@ -206,11 +274,13 @@ jobs:
           echo "::error::saved_onchain is still 0 — chain-stats refresh failing; check 'chain-stats' lines in the container logs (CHAIN_STATS_WALLETS / SOLANA_RPC_URL / gateway reachability)"
           exit 1
 
-      - name: Chat returns non-empty context-grounded response
+      - name: Chat returns non-empty context-grounded response (opt-in)
+        # Chat is a webapp-facing feature (LLM round-trip via ollama) — it is
+        # NOT part of the default MCP deploy gate. Enable with the smoke_chat
+        # input when a deploy specifically targets the chat/RAG path.
+        if: ${{ inputs.smoke_chat }}
         run: |
           set -euo pipefail
-          # The apex host serves only the static bundle on the new topology —
-          # the API surface (including /chat) lives on the MCP subdomain.
           payload='{"message":"What is the Mnemonic Protocol?","session_id":"deploy-smoke"}'
           response=$(curl -fsS --max-time 30 -X POST \
             "https://mcp.mnemonik.xyz/chat" \
