@@ -128,6 +128,14 @@ jobs:
           SOLANA_RPC_URL: ${{ vars.SOLANA_RPC_URL || 'https://api.mainnet-beta.solana.com' }}
         run: |
           set -euo pipefail
+          # Sanitize the operator-provided path: trim stray whitespace (a
+          # trailing space in the repo variable would otherwise create a
+          # literal '/mcp ' directory) and require an absolute path.
+          REPO_DIR="$(echo "$REPO_DIR" | xargs)"
+          case "$REPO_DIR" in
+            /?*) ;;
+            *) echo "::error::MCP_VM_REPO_DIR must be an absolute path on the VM (got '$REPO_DIR')"; exit 1 ;;
+          esac
           ssh $SSH_OPTS "$VM_TARGET" bash -s <<REMOTE_EOF
           set -euo pipefail
           REPO="${REPO_DIR}"
@@ -138,8 +146,11 @@ jobs:
 
           if [ ! -d "\$REPO/.git" ]; then
             echo "Bootstrapping monorepo checkout at \$REPO"
-            sudo -n mkdir -p "\$(dirname "\$REPO")"
-            sudo -n chown "\$(id -un)":"\$(id -gn)" "\$(dirname "\$REPO")"
+            # install -d creates parents root-owned and only the leaf dir
+            # op-owned — never chown a parent (a top-level REPO like /mcp
+            # would otherwise chown / itself). git clones fine into an
+            # existing empty dir.
+            sudo -n install -d -o "\$(id -un)" -g "\$(id -gn)" "\$REPO"
             git clone --quiet https://github.com/mnemonik-xyz/monorepo.git "\$REPO"
           fi
           cd "\$REPO"
