@@ -99,8 +99,32 @@ runs:
           echo "::error::ssh-private-key input is empty"
           exit 1
         fi
-        printf '%s\n' "$CI_SSH_PRIVATE_KEY" > /tmp/ci_deploy_key
+        # Normalize common paste-manglings of the secret (run 29097318643
+        # died with 'error in libcrypto' — a format problem, not auth):
+        #  - surrounding quotes, CRLF line endings
+        #  - literal backslash-n sequences instead of real newlines
+        #  - the whole key on ONE line with spaces where newlines belong
+        printf '%s\n' "$CI_SSH_PRIVATE_KEY" \
+          | sed -e '1s/^"//' -e '$s/"$//' | tr -d '\r' > /tmp/ci_deploy_key
+        if grep -q '\\n' /tmp/ci_deploy_key; then
+          sed -i 's/\\n/\n/g' /tmp/ci_deploy_key
+        fi
+        if [ "$(grep -c . /tmp/ci_deploy_key)" -le 1 ] \
+           && grep -q -- '-----BEGIN' /tmp/ci_deploy_key; then
+          header=$(grep -o -- '-----BEGIN [A-Z0-9 ]*-----' /tmp/ci_deploy_key | head -1)
+          footer=$(grep -o -- '-----END [A-Z0-9 ]*-----' /tmp/ci_deploy_key | head -1)
+          body=$(sed -e "s/.*$header//" -e "s/$footer.*//" /tmp/ci_deploy_key \
+                 | tr ' ' '\n' | grep -v '^$')
+          { echo "$header"; echo "$body"; echo "$footer"; } > /tmp/ci_deploy_key
+        fi
         chmod 600 /tmp/ci_deploy_key
+        # Fail HERE with a precise message rather than an opaque libcrypto
+        # error at ssh time.
+        if ! ssh-keygen -y -P '' -f /tmp/ci_deploy_key > /dev/null 2>&1; then
+          echo "::error::CI_SSH_PRIVATE_KEY does not parse as an (unencrypted) SSH private key even after normalization. Re-copy the key file byte-for-byte from the coding-fabric secret source: gh secret set CI_SSH_PRIVATE_KEY -R <this repo> < /path/to/key"
+          ssh-keygen -y -P '' -f /tmp/ci_deploy_key 2>&1 | head -3 || true
+          exit 1
+        fi
         echo "CI keypair restored (fp $(ssh-keygen -lf /tmp/ci_deploy_key | awk '{print $2}'))"
         echo "VM_TARGET=${SSH_USER}@${VM_IP}" >> "$GITHUB_ENV"
         echo "SSH_OPTS=-i /tmp/ci_deploy_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/tmp/ci_known_hosts -o ConnectTimeout=15" >> "$GITHUB_ENV"
