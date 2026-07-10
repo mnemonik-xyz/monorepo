@@ -95,6 +95,14 @@ runs:
         # with OpenSSH on 22 + interactive auth deadlocks CI). Plain SSH
         # over the tailnet interface with the stable CI key — same auth
         # path coding-fabric's Ansible and e2e-smoke use.
+        # run 29099690819 died SILENTLY (no output at all) here: a failed
+        # grep inside a direct `var=$(...)` assignment kills the script
+        # under `set -e` with zero diagnostics, unlike a substitution used
+        # inside an `if [ ... ]` test (which IS exempt from errexit). Trap
+        # ERR so any future silent-death mode at least prints a line number
+        # instead of vanishing.
+        trap 'echo "::error::fabric-vm-ssh key-loading step aborted at line $LINENO — this is a bug in the normalization script itself, not necessarily bad secret content. Report the line number."' ERR
+
         if [ -z "$CI_SSH_PRIVATE_KEY" ]; then
           echo "::error::ssh-private-key input is empty"
           exit 1
@@ -111,11 +119,19 @@ runs:
         fi
         if [ "$(grep -c . /tmp/ci_deploy_key)" -le 1 ] \
            && grep -q -- '-----BEGIN' /tmp/ci_deploy_key; then
-          header=$(grep -o -- '-----BEGIN [A-Z0-9 ]*-----' /tmp/ci_deploy_key | head -1)
-          footer=$(grep -o -- '-----END [A-Z0-9 ]*-----' /tmp/ci_deploy_key | head -1)
-          body=$(sed -e "s/.*$header//" -e "s/$footer.*//" /tmp/ci_deploy_key \
-                 | tr ' ' '\n' | grep -v '^$')
-          { echo "$header"; echo "$body"; echo "$footer"; } > /tmp/ci_deploy_key
+          # `|| true` on every substitution here: a non-matching grep must
+          # NOT kill the script (see trap comment above) — fall through to
+          # the ssh-keygen validation below instead, which reports failure
+          # with an explicit, readable message.
+          header=$(grep -o -- '-----BEGIN [A-Z0-9 ]*-----' /tmp/ci_deploy_key | head -1 || true)
+          footer=$(grep -o -- '-----END [A-Z0-9 ]*-----' /tmp/ci_deploy_key | head -1 || true)
+          if [ -n "$header" ] && [ -n "$footer" ]; then
+            body=$(sed -e "s/.*$header//" -e "s/$footer.*//" /tmp/ci_deploy_key \
+                   | tr ' ' '\n' | grep -v '^$' || true)
+            { echo "$header"; echo "$body"; echo "$footer"; } > /tmp/ci_deploy_key
+          else
+            echo "::warning::key looks like a single collapsed line but no -----BEGIN/END----- markers matched the expected format — leaving as-is, validation below will report the precise failure"
+          fi
         fi
         chmod 600 /tmp/ci_deploy_key
         # Fail HERE with a precise message rather than an opaque libcrypto
