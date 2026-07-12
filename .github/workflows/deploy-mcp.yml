@@ -20,11 +20,10 @@ name: Deploy MCP
 #   MCP_VM_STACK_DIR    — coding-fabric-rendered stack (default /opt/mnemonik-server)
 #   MCP_VM_SSH_USER     — SSH user (default op)
 #
-# CODING-FABRIC OWNERSHIP: coding-fabric renders /opt/mnemonik-server with
-# persistent /dev/sdb bind mounts, the `mnemonik` Compose project, and the
-# shared `vaultwarden_vaultwarden` Caddy network. This workflow only swaps the
-# image in that existing stack. It must never deploy the monorepo's standalone
-# docker-compose.yml on the fabric VM or create a second set of data volumes.
+# CODING-FABRIC OWNERSHIP: coding-fabric renders /opt/mnemonik-server with the
+# live persistent data mounts and shared Caddy network. This workflow detects
+# and reuses that stack's Compose project. It must never deploy the monorepo's
+# standalone docker-compose.yml on the fabric VM or create new data volumes.
 #
 # Trigger model: manual-only (workflow_dispatch). Pick apply / smoke / rollback.
 # Auto-deploy on tag is intentionally disabled — the prod ship stays with a human.
@@ -110,9 +109,9 @@ jobs:
           REF: ${{ inputs.ref }}
           FORCE_RESEED: ${{ inputs.force_reseed }}
           STACK_DIR: ${{ vars.MCP_VM_STACK_DIR || '/opt/mnemonik-server' }}
-          COMPOSE_PROJECT_NAME: mnemonik
           CADDY_NETWORK_NAME: ${{ vars.CADDY_NETWORK_NAME || 'vaultwarden_vaultwarden' }}
-          MCP_IMAGE_REPOSITORY: ghcr.io/mnemonik-xyz/mnemonic-mcp
+          CHAIN_STATS_WALLETS: ${{ vars.CHAIN_STATS_WALLETS || 'DYVu4Bry3BzGVsR3Hj2iGVT5fNdWFoHw2zRxsdTmrG25' }}
+          SOLANA_RPC_URL: ${{ vars.SOLANA_RPC_URL || 'https://api.mainnet-beta.solana.com' }}
         run: |
           set -euo pipefail
           STACK_DIR="$(echo "$STACK_DIR" | xargs)"
@@ -127,7 +126,6 @@ jobs:
           ssh $SSH_OPTS "$VM_TARGET" bash -s <<REMOTE_EOF
           set -euo pipefail
           STACK="${STACK_DIR}"
-          export COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME}"
 
           if docker info >/dev/null 2>&1; then DOCKER="docker"; else DOCKER="sudo -n docker"; fi
 
@@ -137,24 +135,25 @@ jobs:
           fi
           cd "\$STACK"
 
-          # Map the git ref to the GHCR image tag: vX.Y.Z -> that tag, else latest.
-          case "${REF}" in
-            v*) IMAGE_TAG="${REF}" ;;
-            *)  IMAGE_TAG="latest" ;;
-          esac
-          echo "Deploying image tag: \$IMAGE_TAG (action=${ACTION})"
+          # Reuse the project that owns the live data volumes. The known-good
+          # fabric project is mnemonik; the label keeps this safe if renamed.
+          PROJ="\$(\$DOCKER inspect mnemonik-mcp-1 --format '{{index .Config.Labels "com.docker.compose.project"}}' 2>/dev/null || true)"
+          PROJ="\${PROJ:-mnemonik}"
+          echo "compose project: \$PROJ"
 
-          # Fail closed if this is not coding-fabric's persistent stack. These
-          # checks prevent a second empty SQLite volume from looking like data loss.
-          COMPOSE_CONFIG="\$(\$DOCKER compose config)"
-          # Use here-strings instead of a printf-to-grep pipeline: with pipefail,
-          # grep's early success can SIGPIPE printf and incorrectly fail the job.
-          grep -Fq '/mnemonik/data' <<< "\$COMPOSE_CONFIG" \
-            || { echo "::error::persistent /mnemonik/data bind mount is missing"; exit 1; }
-          grep -Fq '/mnemonik/keypair' <<< "\$COMPOSE_CONFIG" \
-            || { echo "::error::persistent /mnemonik/keypair bind mount is missing"; exit 1; }
-          grep -Fq '${CADDY_NETWORK_NAME}' <<< "\$COMPOSE_CONFIG" \
-            || { echo "::error::shared Caddy network ${CADDY_NETWORK_NAME} is missing from compose"; exit 1; }
+          case "${REF}" in
+            v*|sha-*) IMAGE_TAG="${REF}" ;;
+            *)        IMAGE_TAG="latest" ;;
+          esac
+          OLD_TAG="\$(grep -oE 'mnemonic-mcp:[A-Za-z0-9._-]+' docker-compose.yml | head -1 | cut -d: -f2)"
+          echo "Image tag: \$OLD_TAG -> \$IMAGE_TAG (action=${ACTION})"
+
+          # Validate the fabric compose shape structurally. Both bind mounts
+          # and existing named volumes are valid; the critical invariant is
+          # that this project mounts persistent storage at /data and /keypair.
+          COMPOSE_JSON="\$(\$DOCKER compose -p "\$PROJ" config --format json)"
+          python3 -c 'import json,sys; c=json.load(sys.stdin); v=c["services"]["mcp"].get("volumes", []); assert any(x.get("target")=="/data" and x.get("type") in ("bind","volume") for x in v); assert any(x.get("target")=="/keypair" and x.get("type") in ("bind","volume") for x in v)' <<< "\$COMPOSE_JSON" \
+            || { echo "::error::persistent /data or /keypair mount is missing"; exit 1; }
           \$DOCKER network inspect "${CADDY_NETWORK_NAME}" >/dev/null
 
           # Remove containers from the accidental monorepo-owned project. Do
@@ -165,17 +164,9 @@ jobs:
             \$DOCKER rm -f \$ROGUE_IDS
           fi
 
-          # coding-fabric renders an explicit image reference. Pull the chosen
-          # ref and tag it to that configured reference before force-recreate;
-          # this keeps rollback working without rewriting Ansible-owned files.
-          CONFIGURED_IMAGE="\$(awk '/^[[:space:]]*image: .*mnemonic-mcp/ {image=\$2} END {print image}' <<< "\$COMPOSE_CONFIG")"
-          if [ -z "\$CONFIGURED_IMAGE" ]; then
-            echo "::error::mnemonic-mcp image is missing from coding-fabric compose config"
-            exit 1
-          fi
-          TARGET_IMAGE="${MCP_IMAGE_REPOSITORY}:\$IMAGE_TAG"
-          \$DOCKER pull "\$TARGET_IMAGE"
-          \$DOCKER tag "\$TARGET_IMAGE" "\$CONFIGURED_IMAGE"
+          # The fabric compose file pins the image tag. Update that one field
+          # in place, matching coding-fabric's own deploy-mnemonic-mcp workflow.
+          sed -i -E "s|(ghcr.io/mnemonik-xyz/mnemonic-mcp:)[A-Za-z0-9._-]+|\1\$IMAGE_TAG|" docker-compose.yml
 
           RESEED_ADDED=0
           cleanup_reseed() {
@@ -189,21 +180,32 @@ jobs:
             echo "MNEMONIC_FORCE_RESEED=1" >> "\$STACK/mcp.env"
             RESEED_ADDED=1
           fi
+          sed -i '/^CHAIN_STATS_WALLETS=/d' "\$STACK/mcp.env"
+          echo "CHAIN_STATS_WALLETS=${CHAIN_STATS_WALLETS}" >> "\$STACK/mcp.env"
+          sed -i '/^SOLANA_RPC_URL=/d' "\$STACK/mcp.env"
+          echo "SOLANA_RPC_URL=${SOLANA_RPC_URL}" >> "\$STACK/mcp.env"
 
           echo "::group::recreate coding-fabric MCP service"
-          \$DOCKER compose up -d --force-recreate --pull never mcp
+          \$DOCKER compose -p "\$PROJ" pull mcp
+          \$DOCKER compose -p "\$PROJ" up -d --force-recreate mcp
           echo "::endgroup::"
 
           echo "::group::wait for mcp health"
+          cid="\$(\$DOCKER compose -p "\$PROJ" ps -q mcp)"
           ok=0
-          for i in \$(seq 1 30); do
-            if \$DOCKER exec mnemonik-mcp-1 curl -fsS --max-time 5 http://localhost:3000/health >/dev/null 2>&1; then ok=1; break; fi
+          status=starting
+          for i in \$(seq 1 72); do
+            status="\$(\$DOCKER inspect --format '{{.State.Health.Status}}' "\$cid" 2>/dev/null || echo starting)"
+            if [ "\$status" = "healthy" ]; then ok=1; break; fi
+            if [ "\$status" = "unhealthy" ]; then break; fi
             sleep 5
           done
           if [ "\$ok" != "1" ]; then
-            \$DOCKER compose logs --tail 60 mcp; exit 1
+            echo "::error::mcp container did not become healthy (status=\$status)"
+            \$DOCKER compose -p "\$PROJ" logs --tail 80 mcp || true
+            exit 1
           fi
-          echo "mcp healthy"
+          echo "mcp healthy (tag \$IMAGE_TAG)"
           echo "::endgroup::"
 
           cleanup_reseed
@@ -212,7 +214,7 @@ jobs:
 
           \$DOCKER image prune -f >/dev/null 2>&1 || true
           echo "::group::seed log tail"
-          \$DOCKER compose logs --since 60s mcp \
+          \$DOCKER compose -p "\$PROJ" logs --since 120s mcp \
             | grep -iE 'seed|protocol-knowledge|Identity:|listening|chain-stats' || true
           echo "::endgroup::"
           REMOTE_EOF
