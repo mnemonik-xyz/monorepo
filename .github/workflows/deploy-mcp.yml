@@ -210,6 +210,21 @@ jobs:
           echo "mcp healthy (tag \$IMAGE_TAG)"
           echo "::endgroup::"
 
+          echo "::group::ensure shared Caddy network"
+          NETWORK_MEMBERS="\$(\$DOCKER network inspect "${CADDY_NETWORK_NAME}" --format '{{range .Containers}}{{.Name}} {{end}}')"
+          case " \$NETWORK_MEMBERS " in
+            *" ${CADDY_CONTAINER_NAME} "*) ;;
+            *) echo "::error::${CADDY_CONTAINER_NAME} is not attached to ${CADDY_NETWORK_NAME}"; exit 1 ;;
+          esac
+          case " \$NETWORK_MEMBERS " in
+            *" mnemonik-mcp-1 "*) ;;
+            *)
+              echo "Attaching mnemonik-mcp-1 to ${CADDY_NETWORK_NAME} with alias mnemonik-mcp"
+              \$DOCKER network connect --alias mnemonik-mcp "${CADDY_NETWORK_NAME}" "\$cid"
+              ;;
+          esac
+          echo "::endgroup::"
+
           echo "::group::reload Caddy upstream"
           # Caddy resolves the Docker alias to an IP at config load. Recreate
           # changes that IP, so reload after the healthy replacement exists.
