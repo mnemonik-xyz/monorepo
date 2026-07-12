@@ -1,6 +1,7 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import LandingPage from "./LandingPage";
+import { MCP_BASE } from "../lib/api";
 import type { Message } from "../types";
 
 function renderLanding() {
@@ -27,7 +28,7 @@ describe("LandingPage traction counters", () => {
   it("renders_three_counters_after_stats_load", async () => {
     (fetch as unknown as ReturnType<typeof vi.fn>).mockImplementation(
       (input: RequestInfo) => {
-        if (typeof input === "string" && input === "/stats") {
+        if (typeof input === "string" && input === `${MCP_BASE}/stats`) {
           return Promise.resolve(
             new Response(
               JSON.stringify({
@@ -62,7 +63,7 @@ describe("LandingPage traction counters", () => {
   it("hides_counters_when_stats_endpoint_fails", async () => {
     (fetch as unknown as ReturnType<typeof vi.fn>).mockImplementation(
       (input: RequestInfo) => {
-        if (typeof input === "string" && input === "/stats") {
+        if (typeof input === "string" && input === `${MCP_BASE}/stats`) {
           return Promise.resolve(new Response("err", { status: 500 }));
         }
         return Promise.reject(new Error(`unexpected fetch: ${input}`));
@@ -73,7 +74,9 @@ describe("LandingPage traction counters", () => {
 
     // Wait for the fetch to settle, then assert the strip never renders.
     await waitFor(() => {
-      expect(fetch).toHaveBeenCalledWith("/stats", { method: "GET" });
+      expect(fetch).toHaveBeenCalledWith(`${MCP_BASE}/stats`, {
+        method: "GET",
+      });
     });
     expect(
       screen.queryByRole("region", { name: /network traction/i }),

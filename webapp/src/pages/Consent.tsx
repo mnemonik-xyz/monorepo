@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
+import { MCP_BASE } from "../lib/api";
 import { loadWasm } from "../lib/wasm";
 import { readIdentity } from "../lib/storage";
 
@@ -29,9 +30,6 @@ import { readIdentity } from "../lib/storage";
  * the pending entry on the server). The server ships it back inside the
  * AuthorizeResponse so the browser can complete the handoff.
  */
-
-// Configurable for e2e tests + local dev (parallel to Sign.tsx::MCP_BASE).
-const MCP_BASE = (import.meta.env?.VITE_MCP_BASE as string | undefined) ?? "";
 
 type Phase =
   | { kind: "loading" }

@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import IdentityPanel from "../components/IdentityPanel";
 import InstallButtons from "../components/InstallButtons";
+import { MCP_BASE } from "../lib/api";
 import { readJwt, writeIdentity } from "../lib/storage";
 
 /**
@@ -27,8 +28,6 @@ import { readJwt, writeIdentity } from "../lib/storage";
  *   short_code in sessionStorage and redirect to OAuth. On return the
  *   component picks it up and resumes.
  */
-
-const MCP_BASE = (import.meta.env?.VITE_MCP_BASE as string | undefined) ?? "";
 
 /**
  * Redeem endpoint — placeholder constant so a name-mismatch with the

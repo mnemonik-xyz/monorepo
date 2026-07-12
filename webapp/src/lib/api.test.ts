@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { fetchPublicStats } from "./api";
+import { MCP_BASE, fetchPublicStats } from "./api";
 
 describe("fetchPublicStats", () => {
   beforeEach(() => {
@@ -28,7 +28,7 @@ describe("fetchPublicStats", () => {
       saved_onchain: 67,
     });
 
-    expect(fetch).toHaveBeenCalledWith("/stats", { method: "GET" });
+    expect(fetch).toHaveBeenCalledWith(`${MCP_BASE}/stats`, { method: "GET" });
   });
 
   it("returns_null_on_5xx", async () => {

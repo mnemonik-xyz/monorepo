@@ -1,9 +1,9 @@
 name: Deploy Webapp
 
-# Builds the Vite webapp from this monorepo and publishes webapp/dist to
-# Cloudflare Pages. The MCP/API surface is hosted separately on the Hetzner
-# coding-fabric VM at https://mcp.mnemonik.xyz, so the static bundle is built
-# with VITE_MCP_BASE pointing at that origin.
+# Verifies the Vite webapp build. Production deploy is handled by the
+# Cloudflare Pages Git integration attached to this repo/branch; there are no
+# Cloudflare API secrets in GitHub Actions. The MCP/API surface is hosted
+# separately on the Hetzner coding-fabric VM at https://mcp.mnemonik.xyz.
 
 on:
   workflow_dispatch:
@@ -17,7 +17,6 @@ on:
 
 permissions:
   contents: read
-  deployments: write
 
 concurrency:
   group: deploy-webapp-prod
@@ -28,8 +27,8 @@ env:
   VITE_MCP_BASE: https://mcp.mnemonik.xyz
 
 jobs:
-  deploy-webapp:
-    name: Build and deploy Cloudflare Pages
+  verify-webapp:
+    name: Build webapp for Cloudflare Pages
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -51,19 +50,10 @@ jobs:
         working-directory: webapp
         run: npm run build
 
-      - name: Deploy to Cloudflare Pages
-        uses: cloudflare/pages-action@v1
-        with:
-          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          projectName: mnemonik-webapp
-          directory: webapp/dist
-          gitHubToken: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Smoke webapp shell
+      - name: Verify built shell
+        working-directory: webapp
         run: |
           set -euo pipefail
-          body="$(curl -fsS --max-time 20 "$WEBAPP_URL/")"
-          printf '%s\n' "$body" | head -3
-          printf '%s\n' "$body" | grep -qi '<div id="root"\|<html' \
-            || { echo "::error::webapp did not return the SPA shell"; exit 1; }
+          test -f dist/index.html
+          grep -qi '<div id="root"\|<html' dist/index.html \
+            || { echo "::error::webapp build did not produce the SPA shell"; exit 1; }

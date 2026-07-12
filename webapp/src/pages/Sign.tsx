@@ -9,6 +9,7 @@ import {
   type KeypairJson,
 } from "../lib/storage";
 import { loadWasm } from "../lib/wasm";
+import { MCP_BASE } from "../lib/api";
 
 /**
  * Sign-approval page (`/sign/:correlationId`).
@@ -32,11 +33,6 @@ import { loadWasm } from "../lib/wasm";
  * MCP backend host: `https://mcp.mnemonik.xyz` per Decision 5. Browser CSP
  * `connect-src` allows this origin.
  */
-
-// Configurable for e2e tests + local dev. Override via Vite env:
-// `VITE_MCP_BASE=http://localhost:3000 npm run dev` runs against a
-// locally-built mnemonic-mcp release binary.
-const MCP_BASE = (import.meta.env?.VITE_MCP_BASE as string | undefined) ?? "";
 
 type Status =
   | { kind: "loading" }
