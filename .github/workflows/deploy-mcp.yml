@@ -110,6 +110,7 @@ jobs:
           FORCE_RESEED: ${{ inputs.force_reseed }}
           STACK_DIR: ${{ vars.MCP_VM_STACK_DIR || '/opt/mnemonik-server' }}
           CADDY_NETWORK_NAME: ${{ vars.CADDY_NETWORK_NAME || 'vaultwarden_vaultwarden' }}
+          CADDY_CONTAINER_NAME: ${{ vars.CADDY_CONTAINER_NAME || 'vaultwarden-caddy-1' }}
           CHAIN_STATS_WALLETS: ${{ vars.CHAIN_STATS_WALLETS || 'DYVu4Bry3BzGVsR3Hj2iGVT5fNdWFoHw2zRxsdTmrG25' }}
           SOLANA_RPC_URL: ${{ vars.SOLANA_RPC_URL || 'https://api.mainnet-beta.solana.com' }}
         run: |
@@ -207,6 +208,14 @@ jobs:
             exit 1
           fi
           echo "mcp healthy (tag \$IMAGE_TAG)"
+          echo "::endgroup::"
+
+          echo "::group::reload Caddy upstream"
+          # Caddy resolves the Docker alias to an IP at config load. Recreate
+          # changes that IP, so reload after the healthy replacement exists.
+          \$DOCKER exec "${CADDY_CONTAINER_NAME}" caddy reload \
+            --config /etc/caddy/Caddyfile --address 127.0.0.1:2019 \
+            || \$DOCKER restart "${CADDY_CONTAINER_NAME}"
           echo "::endgroup::"
 
           cleanup_reseed
