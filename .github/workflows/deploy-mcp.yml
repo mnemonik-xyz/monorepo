@@ -147,9 +147,14 @@ jobs:
           # Fail closed if this is not coding-fabric's persistent stack. These
           # checks prevent a second empty SQLite volume from looking like data loss.
           COMPOSE_CONFIG="\$(\$DOCKER compose config)"
-          printf '%s\n' "\$COMPOSE_CONFIG" | grep -q '/mnemonik/data'
-          printf '%s\n' "\$COMPOSE_CONFIG" | grep -q '/mnemonik/keypair'
-          printf '%s\n' "\$COMPOSE_CONFIG" | grep -q '${CADDY_NETWORK_NAME}'
+          # Use here-strings instead of a printf-to-grep pipeline: with pipefail,
+          # grep's early success can SIGPIPE printf and incorrectly fail the job.
+          grep -Fq '/mnemonik/data' <<< "\$COMPOSE_CONFIG" \
+            || { echo "::error::persistent /mnemonik/data bind mount is missing"; exit 1; }
+          grep -Fq '/mnemonik/keypair' <<< "\$COMPOSE_CONFIG" \
+            || { echo "::error::persistent /mnemonik/keypair bind mount is missing"; exit 1; }
+          grep -Fq '${CADDY_NETWORK_NAME}' <<< "\$COMPOSE_CONFIG" \
+            || { echo "::error::shared Caddy network ${CADDY_NETWORK_NAME} is missing from compose"; exit 1; }
           \$DOCKER network inspect "${CADDY_NETWORK_NAME}" >/dev/null
 
           # Remove containers from the accidental monorepo-owned project. Do
@@ -163,7 +168,7 @@ jobs:
           # coding-fabric renders an explicit image reference. Pull the chosen
           # ref and tag it to that configured reference before force-recreate;
           # this keeps rollback working without rewriting Ansible-owned files.
-          CONFIGURED_IMAGE="\$(printf '%s\n' "\$COMPOSE_CONFIG" | awk '/^[[:space:]]*image: .*mnemonic-mcp/ {print \$2; exit}')"
+          CONFIGURED_IMAGE="\$(awk '/^[[:space:]]*image: .*mnemonic-mcp/ {image=\$2} END {print image}' <<< "\$COMPOSE_CONFIG")"
           if [ -z "\$CONFIGURED_IMAGE" ]; then
             echo "::error::mnemonic-mcp image is missing from coding-fabric compose config"
             exit 1
