@@ -113,6 +113,15 @@ jobs:
           # the app itself ships as a GHCR image). Bootstrap-cloned on first
           # deploy; mcp.env must be created by the operator (secrets).
           REPO_DIR: ${{ vars.MCP_VM_REPO_DIR || '/opt/mnemonik/monorepo' }}
+          # Stable Docker Compose project name. The directory name must NOT
+          # control this, or a repo-dir change creates a second stack and
+          # Caddy's upstream alias breaks. Kept as 'mnemonik-server' to match
+          # the existing volumes/data on the VM; changing it would orphan them.
+          COMPOSE_PROJECT_NAME: mnemonik-server
+          # External Docker network shared with the fabric-deployed Caddy
+          # container. The MCP service joins this network with alias
+          # 'mnemonik-mcp' so Caddy can reverse_proxy to it.
+          CADDY_NETWORK_NAME: ${{ vars.CADDY_NETWORK_NAME || 'vaultwarden_default' }}
           # Chain-backed traction stats (recover-traction-from-chain).
           # Public data only — the base58 address of every wallet that ever
           # signed anchored uploads. Override via the repo variable
@@ -139,6 +148,8 @@ jobs:
           ssh $SSH_OPTS "$VM_TARGET" bash -s <<REMOTE_EOF
           set -euo pipefail
           REPO="${REPO_DIR}"
+          export COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME}"
+          export CADDY_NETWORK_NAME="${CADDY_NETWORK_NAME}"
 
           # op is added to the docker group by coding-fabric's Ansible after
           # Docker install; fall back to sudo if the group isn't active yet.
@@ -206,6 +217,19 @@ jobs:
           echo "CHAIN_STATS_WALLETS=${CHAIN_STATS_WALLETS}" >> "\$REPO/mcp.env"
           sed -i '/^SOLANA_RPC_URL=/d' "\$REPO/mcp.env"
           echo "SOLANA_RPC_URL=${SOLANA_RPC_URL}" >> "\$REPO/mcp.env"
+
+          # Caddy shared network name (used by docker-compose.yml external network).
+          sed -i '/^CADDY_NETWORK_NAME=/d' "\$REPO/mcp.env"
+          echo "CADDY_NETWORK_NAME=${CADDY_NETWORK_NAME}" >> "\$REPO/mcp.env"
+
+          echo "::group::prepare Caddy network and remove stale stacks"
+          # The MCP container must share a network with the fabric Caddy container
+          # so Caddy can resolve the 'mnemonik-mcp' alias. Create it if missing.
+          \$DOCKER network inspect "${CADDY_NETWORK_NAME}" >/dev/null 2>&1 || \$DOCKER network create "${CADDY_NETWORK_NAME}"
+          # Tear down any stale stack created by an earlier repo-dir change
+          # (e.g., mnemonik from a previous deploy path).
+          \$DOCKER compose -p mnemonik --env-file "\$REPO/mcp.env" down || true
+          echo "::endgroup::"
 
           echo "::group::pull + up (mcp service ONLY — Caddy owns 80/443 on this VM)"
           # Never 'up -d' the full stack here: the compose file also defines

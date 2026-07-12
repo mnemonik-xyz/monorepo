@@ -36,7 +36,13 @@ services:
     volumes:
       - mcp-data:/data
       - mcp-keypair:/keypair
-    networks: [mnemonic]
+    networks:
+      mnemonic:
+      caddy:
+        # Alias expected by the fabric-deployed Caddy reverse proxy
+        # (mcp.mnemonik.xyz -> http://mnemonik-mcp:3000).
+        aliases:
+          - mnemonik-mcp
     security_opt:
       - no-new-privileges:true
     tmpfs:
@@ -115,3 +121,9 @@ volumes:
 networks:
   mnemonic:
     driver: bridge
+  caddy:
+    # External network shared with the fabric-deployed Caddy container.
+    # Default matches the vaultwarden compose project on the fabric VM;
+    # override with CADDY_NETWORK_NAME in mcp.env if the project name differs.
+    external: true
+    name: ${CADDY_NETWORK_NAME:-vaultwarden_default}
