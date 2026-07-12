@@ -146,12 +146,27 @@ jobs:
 
           if [ ! -d "\$REPO/.git" ]; then
             echo "Bootstrapping monorepo checkout at \$REPO"
-            # install -d creates parents root-owned and only the leaf dir
-            # op-owned — never chown a parent (a top-level REPO like /mcp
-            # would otherwise chown / itself). git clones fine into an
-            # existing empty dir.
-            sudo -n install -d -o "\$(id -un)" -g "\$(id -gn)" "\$REPO"
-            git clone --quiet https://github.com/mnemonik-xyz/monorepo.git "\$REPO"
+            if [ -d "\$REPO" ] && [ "\$(ls -A "\$REPO" 2>/dev/null | wc -l)" -gt 0 ]; then
+              # Directory already exists with files (e.g., operator pre-staged
+              # mcp.env). git clone refuses non-empty dirs, so convert it
+              # in-place into a git checkout.
+              cd "\$REPO"
+              git init --quiet
+              git remote add origin https://github.com/mnemonik-xyz/monorepo.git
+              git fetch --depth 1 origin "${REF}" --quiet
+              if git rev-parse --verify --quiet "refs/tags/${REF}" >/dev/null; then
+                git checkout -f "${REF}"
+              else
+                git checkout -f -B "${REF}" "origin/${REF}"
+              fi
+            else
+              # install -d creates parents root-owned and only the leaf dir
+              # op-owned — never chown a parent (a top-level REPO like /mcp
+              # would otherwise chown / itself). git clones fine into an
+              # existing empty dir.
+              sudo -n install -d -o "\$(id -un)" -g "\$(id -gn)" "\$REPO"
+              git clone --quiet https://github.com/mnemonik-xyz/monorepo.git "\$REPO"
+            fi
           fi
           cd "\$REPO"
 
