@@ -145,7 +145,8 @@ jobs:
             v*|sha-*) IMAGE_TAG="${REF}" ;;
             *)        IMAGE_TAG="latest" ;;
           esac
-          OLD_TAG="\$(grep -oE 'mnemonic-mcp:[A-Za-z0-9._-]+' docker-compose.yml | head -1 | cut -d: -f2)"
+          OLD_TAG="\$(grep -oE 'mnemonic-mcp:[A-Za-z0-9._-]+' docker-compose.yml | tail -1 | cut -d: -f2 || true)"
+          OLD_TAG="\${OLD_TAG:-unknown}"
           echo "Image tag: \$OLD_TAG -> \$IMAGE_TAG (action=${ACTION})"
 
           # Validate the fabric compose shape structurally. Both bind mounts
