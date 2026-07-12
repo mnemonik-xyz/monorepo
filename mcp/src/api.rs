@@ -37,6 +37,7 @@ use crypto_box::{
     PublicKey as X25519PublicKey, SalsaBox, SecretKey as X25519SecretKey,
 };
 use lru::LruCache;
+use mnemonic_core::arweave::recovery::RecoveredItem;
 use mnemonic_core::codec::{hash::hash_bytes, sign::verify_artifact};
 use mnemonic_core::storage::{
     AttestationStore, BlogPost, PublicArtifact, SearchResult, Visibility, WriteMode,
@@ -1397,13 +1398,76 @@ fn public_artifact_from_search(r: SearchResult) -> PublicArtifact {
     }
 }
 
+/// Project a chain-recovered item into the same `PublicArtifact` wire shape
+/// used by the Ledger. Anchored items are public-by-construction (anyone can
+/// fetch them from Arweave + Solana), so they are surfaced here regardless of
+/// whether the lost DB marked them `visibility = public`.
+///
+/// `attestation_id` is set to the Arweave tx id because legacy chain items
+/// have no SQLite attestation UUID; the webapp keys rows on `id`, which falls
+/// back to `attestation_id` when the backend does not send `id`.
+fn public_artifact_from_recovered(r: &RecoveredItem) -> PublicArtifact {
+    PublicArtifact {
+        attestation_id: r.arweave_tx.clone(),
+        content: r.content.clone().unwrap_or_default(),
+        content_hash: r.content_hash.clone().unwrap_or_default(),
+        tags: r.tags.clone(),
+        solana_tx: r.solana_tx.clone().unwrap_or_default(),
+        arweave_tx: r.arweave_tx.clone(),
+        created_at: r
+            .day
+            .as_ref()
+            .map(|d| format!("{d}T00:00:00Z"))
+            .unwrap_or_else(|| "1970-01-01T00:00:00Z".to_string()),
+        write_mode: WriteMode::Participate,
+    }
+}
+
+/// Merge DB public artifacts with chain-recovered items. DB rows win the
+/// row when the same `arweave_tx` exists in both (exact `created_at` and any
+/// node-local metadata take precedence over the approximate block-day chain
+/// snapshot). Result is sorted newest-first by `created_at` and clamped to
+/// `limit`.
+fn merge_chain_artifacts(
+    chain: &[RecoveredItem],
+    mut db: Vec<PublicArtifact>,
+    limit: usize,
+) -> (Vec<PublicArtifact>, usize) {
+    use std::collections::HashSet;
+
+    let mut seen: HashSet<&str> = db.iter().map(|a| a.arweave_tx.as_str()).collect();
+    let mut merged = Vec::with_capacity(db.len() + chain.len());
+
+    for item in chain {
+        if seen.insert(item.arweave_tx.as_str()) {
+            merged.push(public_artifact_from_recovered(item));
+        }
+    }
+    merged.append(&mut db);
+
+    // ISO-8601 lexicographic sort is chronological newest-first.
+    merged.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+
+    let total = merged.len();
+    if merged.len() > limit {
+        merged.truncate(limit);
+    }
+    (merged, total)
+}
+
 /// `GET /artifacts?q=&limit=` — public Evidence Ledger listing.
 ///
 /// Returns `{ artifacts: [PublicArtifact], total }`. Public-visibility rows
-/// ONLY (Decision 6). With `?q=`, runs cosine search over the cross-owner
-/// public pool; without it, returns the newest-first public listing. On a
-/// transient SQLite error we log and serve an empty list with 200 rather than
-/// 5xx the public page (mirrors `public_stats_handler`).
+/// from the DB, unioned with chain-recovered anchored rows when
+/// `CHAIN_STATS_WALLETS` is configured. Anchored chain items are included
+/// regardless of the lost DB's visibility column because they are already
+/// public on Arweave + Solana.
+///
+/// With `?q=`, runs cosine search over the cross-owner public pool. Chain
+/// items are not included in search results because the snapshot carries no
+/// embedding vector. Without `?q=`, returns the newest-first merged listing.
+/// On a transient SQLite error we log and serve an empty list with 200 rather
+/// than 5xx the public page (mirrors `public_stats_handler`).
 pub async fn artifacts_handler(
     State(state): State<Arc<McpState>>,
     Query(params): Query<ArtifactsQuery>,
@@ -1414,12 +1478,19 @@ pub async fn artifacts_handler(
         .clamp(1, READ_MAX_LIMIT);
     let query = params.q.as_deref().map(str::trim).filter(|s| !s.is_empty());
 
+    // Chain snapshot read (async RwLock) BEFORE the store mutex — the
+    // sqlite guard must never be held across an `.await` (CLAUDE.md).
+    let chain_items = match &state.chain_stats {
+        Some(cache) => cache.items().await,
+        None => None,
+    };
+
     // Embed the search query OUTSIDE the store lock — `embed` is synchronous
     // but potentially slow (ONNX inference in production), and the rusqlite
     // guard must never wrap slow work.
     let query_emb = query.map(|text| state.embedder.embed(text));
 
-    let artifacts: Vec<PublicArtifact> = {
+    let (artifacts, total) = {
         let store = match state.store.lock() {
             Ok(g) => g,
             Err(e) => {
@@ -1429,27 +1500,46 @@ pub async fn artifacts_handler(
                 );
             }
         };
-        let result = match &query_emb {
+        match &query_emb {
             // Content search → cross-owner cosine search restricted to the
             // public pool. `owner = None` paired with
             // `Some(Visibility::Public)` is the trait-mandated safe pairing
-            // (never exposes private rows).
-            Some(emb) => store
+            // (never exposes private rows). Chain items are not included here
+            // because the snapshot carries no embedding vector.
+            Some(emb) => match store
                 .search(emb, None, Some(Visibility::Public), limit)
-                .map(|rows| rows.into_iter().map(public_artifact_from_search).collect()),
-            // Plain list → newest-first public-only chronological listing.
-            None => store.list_public_artifacts(limit),
-        };
-        match result {
-            Ok(rows) => rows,
-            Err(e) => {
-                tracing::warn!("artifacts query failed: {e}");
-                Vec::new()
-            }
+                .map(|rows| {
+                    rows.into_iter()
+                        .map(public_artifact_from_search)
+                        .collect::<Vec<_>>()
+                }) {
+                Ok(rows) => {
+                    let total = rows.len();
+                    (rows, total)
+                }
+                Err(e) => {
+                    tracing::warn!("artifacts search query failed: {e}");
+                    (Vec::new(), 0)
+                }
+            },
+            // Plain list → newest-first public-only chronological listing,
+            // merged with chain-recovered anchored items.
+            None => match store.list_public_artifacts(limit) {
+                Ok(db_rows) => match chain_items {
+                    Some(chain) => merge_chain_artifacts(&chain, db_rows, limit),
+                    None => {
+                        let total = db_rows.len();
+                        (db_rows, total)
+                    }
+                },
+                Err(e) => {
+                    tracing::warn!("artifacts list query failed: {e}");
+                    (Vec::new(), 0)
+                }
+            },
         }
     };
 
-    let total = artifacts.len();
     Json(serde_json::json!({ "artifacts": artifacts, "total": total })).into_response()
 }
 
@@ -2061,6 +2151,7 @@ pub async fn blog_feed_handler(State(state): State<Arc<McpState>>) -> Response {
 mod tests {
     //! Decision-7 unit tests for BootstrapTickets — atomic consume,
     //! per-user cap, TTL eviction, and "redeem requires no auth" smoke.
+    //! Plus chain-recovery merge tests for the Ledger listing.
 
     use super::*;
 
@@ -2412,5 +2503,115 @@ mod tests {
         // Whitespace is collapsed.
         let s2 = summarize("a\n\n  b\t c", 280);
         assert_eq!(s2, "a b c");
+    }
+
+    // ── Chain-recovery merge (Ledger listing) ────────────────────────────────
+
+    fn recovered(
+        arweave_tx: &str,
+        day: Option<&str>,
+        content: Option<&str>,
+        solana_tx: Option<&str>,
+    ) -> RecoveredItem {
+        RecoveredItem {
+            arweave_tx: arweave_tx.to_string(),
+            solana_tx: solana_tx.map(str::to_string),
+            content_hash: Some("deadbeef".to_string()),
+            content: content.map(str::to_string),
+            tags: Vec::new(),
+            day: day.map(str::to_string),
+            producer: None,
+        }
+    }
+
+    fn db_artifact(
+        attestation_id: &str,
+        arweave_tx: &str,
+        created_at: &str,
+        mode: WriteMode,
+    ) -> PublicArtifact {
+        PublicArtifact {
+            attestation_id: attestation_id.to_string(),
+            content: "db content".to_string(),
+            content_hash: "db-hash".to_string(),
+            tags: Vec::new(),
+            solana_tx: "sol-db".to_string(),
+            arweave_tx: arweave_tx.to_string(),
+            created_at: created_at.to_string(),
+            write_mode: mode,
+        }
+    }
+
+    #[test]
+    fn recovered_item_maps_to_public_artifact() {
+        let r = recovered("tx1", Some("2026-06-01"), Some("hello chain"), Some("sol1"));
+        let a = public_artifact_from_recovered(&r);
+        assert_eq!(a.attestation_id, "tx1");
+        assert_eq!(a.arweave_tx, "tx1");
+        assert_eq!(a.content, "hello chain");
+        assert_eq!(a.solana_tx, "sol1");
+        assert_eq!(a.created_at, "2026-06-01T00:00:00Z");
+        assert_eq!(a.write_mode, WriteMode::Participate);
+    }
+
+    #[test]
+    fn merge_chain_artifacts_dedupes_by_arweave_tx() {
+        // Chain item tx1 is also present in the DB; the chain copy must not
+        // duplicate. tx2 is chain-only and must appear.
+        let chain = vec![
+            recovered(
+                "tx1",
+                Some("2026-06-02"),
+                Some("chain content"),
+                Some("sol1"),
+            ),
+            recovered("tx2", Some("2026-06-03"), Some("chain only"), Some("sol2")),
+        ];
+        let db = vec![db_artifact(
+            "att-1",
+            "tx1",
+            "2026-06-01T12:00:00Z",
+            WriteMode::Participate,
+        )];
+        let (merged, total) = merge_chain_artifacts(&chain, db, 10);
+        assert_eq!(total, 2);
+        assert_eq!(merged.len(), 2);
+        // tx2 (newer) first, tx1 (DB row, older exact timestamp) second.
+        assert_eq!(merged[0].arweave_tx, "tx2");
+        assert_eq!(merged[1].arweave_tx, "tx1");
+        assert_eq!(merged[1].content, "db content");
+    }
+
+    #[test]
+    fn merge_chain_artifacts_respects_limit() {
+        let chain = vec![
+            recovered("tx1", Some("2026-06-03"), None, None),
+            recovered("tx2", Some("2026-06-02"), None, None),
+        ];
+        let db = vec![db_artifact(
+            "att-1",
+            "tx3",
+            "2026-06-01T12:00:00Z",
+            WriteMode::Participate,
+        )];
+        let (merged, total) = merge_chain_artifacts(&chain, db, 2);
+        assert_eq!(total, 3);
+        assert_eq!(merged.len(), 2);
+        assert_eq!(merged[0].arweave_tx, "tx1");
+        assert_eq!(merged[1].arweave_tx, "tx2");
+    }
+
+    #[test]
+    fn merge_chain_artifacts_empty_chain_returns_db_unchanged() {
+        let db = vec![db_artifact(
+            "att-1",
+            "tx1",
+            "2026-06-01T12:00:00Z",
+            WriteMode::Participate,
+        )];
+        let (merged, total) = merge_chain_artifacts(&[], db.clone(), 10);
+        assert_eq!(total, 1);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].attestation_id, "att-1");
     }
 }

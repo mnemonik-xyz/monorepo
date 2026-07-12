@@ -25,6 +25,15 @@ use coset::CborSerializable;
 #[derive(Debug, Clone)]
 pub struct RecoveredItem {
     pub arweave_tx: String,
+    /// Solana transaction containing the anchor memo, when recovered from
+    /// memo history. GraphQL-only Arweave items may not have one.
+    pub solana_tx: Option<String>,
+    /// Blake3 hash from the Solana memo, or recomputed from the COSE payload.
+    pub content_hash: Option<String>,
+    /// Decoded artifact `content` from the COSE payload, when fetchable.
+    pub content: Option<String>,
+    /// Decoded artifact tags from the COSE payload.
+    pub tags: Vec<String>,
     /// UTC day `YYYY-MM-DD` from the block timestamp; `None` while pending.
     pub day: Option<String>,
     /// Producer DID (`did:sol:<pubkey-or-oauth-sub>`), from the `Producer`
@@ -36,6 +45,17 @@ pub struct RecoveredItem {
 #[derive(Debug, Clone, Default)]
 pub struct ChainSnapshot {
     pub items: Vec<RecoveredItem>,
+}
+
+/// Internal staging record while we union memo anchors and GraphQL items.
+/// Named struct instead of a 5-tuple to keep clippy::type_complexity happy.
+#[derive(Debug, Clone)]
+struct PendingItem {
+    arweave_tx: String,
+    solana_tx: Option<String>,
+    content_hash: Option<String>,
+    block_time: Option<i64>,
+    producer: Option<String>,
 }
 
 /// Union memo anchors and GraphQL items into the anchored ledger, then
@@ -51,36 +71,62 @@ pub async fn snapshot_chain(
 ) -> anyhow::Result<ChainSnapshot> {
     let anchored = gql.list_anchored(owner_addresses).await?;
 
-    // (arweave_tx, block_time, producer) — memo anchors first (they carry
-    // the memo-write time, closer to the user action than the item's own
-    // block), GraphQL items add anything the memo history missed.
+    // Memo anchors first (they carry the memo-write time, closer to the user
+    // action than the item's own block), GraphQL items add anything the memo
+    // history missed.
     let mut seen = std::collections::HashSet::new();
-    let mut pending: Vec<(String, Option<i64>, Option<String>)> = Vec::new();
+    let mut pending: Vec<PendingItem> = Vec::new();
     for m in memo_anchors {
         if seen.insert(m.arweave_tx.clone()) {
-            pending.push((m.arweave_tx.clone(), m.block_time, None));
+            pending.push(PendingItem {
+                arweave_tx: m.arweave_tx.clone(),
+                solana_tx: Some(m.solana_tx.clone()),
+                content_hash: Some(m.content_hash.clone()),
+                block_time: m.block_time,
+                producer: None,
+            });
         }
     }
     for a in anchored {
         if seen.insert(a.arweave_tx.clone()) {
-            pending.push((a.arweave_tx, a.block_time, a.producer));
+            pending.push(PendingItem {
+                arweave_tx: a.arweave_tx,
+                solana_tx: None,
+                content_hash: None,
+                block_time: a.block_time,
+                producer: a.producer,
+            });
         }
     }
 
     let mut items = Vec::with_capacity(pending.len());
-    for (arweave_tx, block_time, tagged_producer) in pending {
-        let producer = match tagged_producer {
-            Some(p) => Some(p),
-            None => match gateway.read(&arweave_tx).await {
-                Ok(bytes) => producer_from_cose(&bytes),
-                Err(e) => {
-                    tracing::warn!("chain recovery: payload fetch failed for {arweave_tx}: {e}");
-                    None
-                }
-            },
+    for PendingItem {
+        arweave_tx,
+        solana_tx,
+        content_hash: memo_hash,
+        block_time,
+        producer: tagged_producer,
+    } in pending
+    {
+        let decoded = match gateway.read(&arweave_tx).await {
+            Ok(bytes) => artifact_from_cose(&bytes),
+            Err(e) => {
+                tracing::warn!("chain recovery: payload fetch failed for {arweave_tx}: {e}");
+                None
+            }
+        };
+        let producer = match (tagged_producer, decoded.as_ref()) {
+            (Some(p), _) => Some(p),
+            (None, Some(a)) => a.producer.clone(),
+            (None, None) => None,
         };
         items.push(RecoveredItem {
             arweave_tx,
+            solana_tx,
+            content_hash: memo_hash
+                .or_else(|| decoded.as_ref().and_then(|a| a.content_hash.clone())),
+            content: decoded.as_ref().and_then(|a| a.content.clone()),
+            tags: decoded.map(|a| a.tags).unwrap_or_default(),
             day: block_time.and_then(day_from_unix),
             producer,
         });
@@ -93,12 +139,48 @@ pub async fn snapshot_chain(
 /// caller only needs the identity for a distinct-count (the envelope's
 /// authenticity is anyone's to verify independently).
 pub fn producer_from_cose(cose_bytes: &[u8]) -> Option<String> {
+    artifact_from_cose(cose_bytes).and_then(|a| a.producer)
+}
+
+/// Extract public ledger fields from a COSE_Sign1 envelope over canonical CBOR.
+/// This is structural decode only; independent verification remains available
+/// through `mnemonic_verify`.
+pub fn artifact_from_cose(cose_bytes: &[u8]) -> Option<RecoveredArtifact> {
     let cose = coset::CoseSign1::from_slice(cose_bytes).ok()?;
     let payload = cose.payload.as_ref()?;
     let json = crate::codec::canonical::from_canonical_cbor(payload).ok()?;
-    json.get("producer")
+    let content = json
+        .get("content")
         .and_then(|v| v.as_str())
-        .map(str::to_string)
+        .map(str::to_string);
+    let tags = json
+        .get("tags")
+        .and_then(|v| v.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    let producer = json
+        .get("producer")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    Some(RecoveredArtifact {
+        content_hash: Some(crate::codec::hash::hash_bytes(payload)),
+        content,
+        tags,
+        producer,
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecoveredArtifact {
+    pub content_hash: Option<String>,
+    pub content: Option<String>,
+    pub tags: Vec<String>,
+    pub producer: Option<String>,
 }
 
 /// `did:sol:<sub>` → `<sub>` — aligns chain producers with the raw

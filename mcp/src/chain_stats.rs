@@ -165,6 +165,10 @@ mod tests {
     fn chain_item(tx: &str, day: Option<&str>, producer: Option<&str>) -> RecoveredItem {
         RecoveredItem {
             arweave_tx: tx.to_string(),
+            solana_tx: None,
+            content_hash: None,
+            content: None,
+            tags: Vec::new(),
             day: day.map(str::to_string),
             producer: producer.map(str::to_string),
         }
