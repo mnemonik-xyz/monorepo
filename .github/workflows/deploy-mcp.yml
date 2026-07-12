@@ -36,11 +36,11 @@ on:
   workflow_dispatch:
     inputs:
       action:
-        description: 'apply (deploy), smoke (verify only), or rollback'
+        description: 'apply, smoke, diagnose retained identities, or rollback'
         type: choice
         required: true
         default: smoke
-        options: [apply, smoke, rollback]
+        options: [apply, smoke, diagnose, rollback]
       ref:
         description: 'git ref for compose files AND the image tag: main -> :latest, vX.Y.Z -> :vX.Y.Z'
         type: string
@@ -73,7 +73,7 @@ env:
 jobs:
   deploy:
     name: Deploy or rollback over tailnet SSH (compose)
-    if: ${{ inputs.action == 'apply' || inputs.action == 'rollback' }}
+    if: ${{ inputs.action == 'apply' || inputs.action == 'diagnose' || inputs.action == 'rollback' }}
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
@@ -130,6 +130,48 @@ jobs:
           STACK="${STACK_DIR}"
 
           if docker info >/dev/null 2>&1; then DOCKER="docker"; else DOCKER="sudo -n docker"; fi
+
+          if [ "${ACTION}" = "diagnose" ]; then
+            echo "=== retained MCP identity volumes (public keys only) ==="
+            VOLUMES="\$(\$DOCKER volume ls --format '{{.Name}}' | grep -E '(^|[-_])(mcp-)?keypair$' || true)"
+            if [ -z "\$VOLUMES" ]; then
+              echo "no candidate keypair volumes found"
+              exit 0
+            fi
+            for volume in \$VOLUMES; do
+              mountpoint="\$(\$DOCKER volume inspect "\$volume" --format '{{.Mountpoint}}')"
+              summary="\$(sudo -n python3 -c '
+          import json, pathlib, sys
+          alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+          def b58(raw):
+              n = int.from_bytes(raw, "big")
+              out = ""
+              while n:
+                  n, r = divmod(n, 58)
+                  out = alphabet[r] + out
+              return alphabet[0] * (len(raw) - len(raw.lstrip(b"\\0"))) + (out or alphabet[0])
+          root = pathlib.Path(sys.argv[1])
+          found = []
+          for filename in ("identity.json", "id.json"):
+              path = root / filename
+              if not path.exists():
+                  continue
+              try:
+                  data = json.loads(path.read_text())
+                  if isinstance(data, dict) and data.get("pubkey_base58"):
+                      pubkey = data["pubkey_base58"]
+                  else:
+                      secret = data.get("secret", []) if isinstance(data, dict) else data
+                      pubkey = b58(bytes(secret)[-32:]) if len(secret) == 64 else "unreadable"
+                  found.append(f"{filename}:{pubkey}")
+              except Exception:
+                  found.append(f"{filename}:unreadable")
+          print(",".join(found) if found else "empty")
+          ' "\$mountpoint")"
+              echo "\$volume \$summary"
+            done
+            exit 0
+          fi
 
           if [ ! -f "\$STACK/docker-compose.yml" ] || [ ! -f "\$STACK/mcp.env" ]; then
             echo "::error::coding-fabric stack is missing at \$STACK; run coding-fabric's mnemonik-server role first"
