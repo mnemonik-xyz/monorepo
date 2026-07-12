@@ -55,8 +55,8 @@ describe("LandingPage traction counters", () => {
     expect(tractionRegion).toHaveTextContent("5,678");
     expect(tractionRegion).toHaveTextContent("90");
     expect(tractionRegion).toHaveTextContent(/unique users/i);
-    expect(tractionRegion).toHaveTextContent(/memories on node/i);
-    expect(tractionRegion).toHaveTextContent(/memories on-chain/i);
+    expect(tractionRegion).toHaveTextContent(/memories/i);
+    expect(tractionRegion).toHaveTextContent(/records/i);
   });
 
   it("hides_counters_when_stats_endpoint_fails", async () => {

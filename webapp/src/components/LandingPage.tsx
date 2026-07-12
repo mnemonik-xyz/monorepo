@@ -145,8 +145,8 @@ function LandingPage({
             className="grid grid-cols-3 gap-4 rounded-lg border border-text-muted/20 bg-white/5 px-4 py-5"
           >
             <StatCell value={stats.unique_users} label="unique users" />
-            <StatCell value={stats.saved_on_node} label="memories on node" />
-            <StatCell value={stats.saved_onchain} label="memories on-chain" />
+            <StatCell value={stats.saved_on_node} label="memories" />
+            <StatCell value={stats.saved_onchain} label="records" />
           </section>
         )}
 

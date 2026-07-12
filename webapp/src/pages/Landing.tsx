@@ -199,7 +199,7 @@ function TractionStrip() {
         caption="Saved"
       />
       <Stat
-        label="On-chain"
+        label="Records"
         value={fmt(stats?.saved_onchain)}
         caption="Anchored"
       />

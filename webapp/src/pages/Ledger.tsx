@@ -334,24 +334,30 @@ function AnchorRow({
   tx: string | null;
   url: string | null;
 }) {
+  const display = tx ? truncateMiddle(tx, 10, 8) : "not anchored";
+
   return (
-    <div className="flex items-baseline gap-2">
-      <dt className="font-mono text-[10px] uppercase tracking-[0.16em] text-text-faint">
+    <div className="flex min-w-0 items-baseline gap-2">
+      <dt className="shrink-0 font-mono text-[10px] uppercase tracking-[0.16em] text-text-faint">
         {label}
       </dt>
-      <dd className="min-w-0 flex-1 truncate font-mono text-[11px]">
+      <dd className="min-w-0 flex-1 font-mono text-[11px]">
         {url ? (
           <a
             href={url}
             target="_blank"
             rel="noopener noreferrer"
-            className="text-accent-primary underline-offset-2 hover:underline"
+            title={tx ?? undefined}
+            className="inline-flex max-w-full items-baseline gap-1.5 text-accent-primary underline-offset-2 hover:underline"
           >
-            View ↗
+            <span className="min-w-0 truncate">{display}</span>
+            <span aria-hidden="true" className="shrink-0">
+              ↗
+            </span>
           </a>
         ) : (
           // `local:` / unanchored rows are NOT links — plain text only.
-          <span className="text-text-faint">{tx ?? "not anchored"}</span>
+          <span className="text-text-faint">{display}</span>
         )}
       </dd>
     </div>
@@ -428,4 +434,9 @@ function formatDate(iso: string): string {
     month: "short",
     day: "2-digit",
   });
+}
+
+function truncateMiddle(value: string, start: number, end: number): string {
+  if (value.length <= start + end + 1) return value;
+  return `${value.slice(0, start)}...${value.slice(-end)}`;
 }

@@ -1,129 +1,69 @@
 name: Deploy Webapp
 
-# Rebuilds the demo webapp (WASM core + Vite bundle) on the production VPS
-# at `mnemonik.xyz` (150.251.147.215). nginx serves the resulting `dist/`
-# directly from `/home/claude/monorepo/webapp/dist/` (see deployment.md
-# §VPS Deploy Process step 10) — no service restart is needed for the
-# webapp to pick up the new bundle.
-#
-# Cloudflare Pages is NOT in the stack. The webapp is co-hosted with the
-# MCP server on the same VPS: nginx routes `/` to `webapp/dist`, `/mcp` +
-# `/chat` + `/health` to the mnemonic-mcp:3000 backend (see deployment.md
-# §VPS Deploy Process step 10 for the full nginx config).
-#
-# Two trigger modes:
-#   - `workflow_dispatch` — explicit "Run workflow" click.
-#   - `push` to main when files under `webapp/`, `core/` (WASM bindings),
-#     or `docs/` change — auto-republish so the public site doesn't drift
-#     from main.
-#
-# JOB COUPLING POLICY: this workflow touches the WEBAPP ONLY. It no longer
-# reseeds or restarts the MCP server, and its smoke no longer exercises the
-# /chat LLM path — those are MCP concerns. To propagate docs/ changes into
-# the chat RAG corpus, run "Deploy MCP" (deploy-mcp.yml) with
-# force_reseed=true instead.
-#
-# LEGACY ACCESS PATH NOTE: the rebuild below still uses direct SSH to
-# VPS_HOST (`claude@…`, /home/claude/monorepo — the old justhost box). The
-# MCP stack has moved to the coding-fabric Hetzner VM behind Tailscale
-# (see deploy-mcp.yml + .github/actions/fabric-vm-ssh). If/when the apex
-# webapp hosting moves to that VM too, migrate this workflow to the same
-# fabric-vm-ssh composite action and retire the VPS_* secrets.
+# Builds the Vite webapp from this monorepo and publishes webapp/dist to
+# Cloudflare Pages. The MCP/API surface is hosted separately on the Hetzner
+# coding-fabric VM at https://mcp.mnemonik.xyz, so the static bundle is built
+# with VITE_MCP_BASE pointing at that origin.
 
 on:
   workflow_dispatch:
   push:
     branches: [main]
     paths:
-      - 'webapp/**'
-      - 'core/**'
-      - 'docs/**'
+      - ".github/workflows/deploy-webapp.yml"
+      - "webapp/**"
+      - "core/**"
+      - "docs/**"
 
 permissions:
   contents: read
+  deployments: write
 
 concurrency:
   group: deploy-webapp-prod
   cancel-in-progress: true
+
 env:
-  WEBAPP_URL: https://mnemonik.xyz
+  WEBAPP_URL: https://www.mnemonik.xyz
+  VITE_MCP_BASE: https://mcp.mnemonik.xyz
+
 jobs:
-  rebuild-webapp:
-    name: Rebuild webapp on VPS
+  deploy-webapp:
+    name: Build and deploy Cloudflare Pages
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - name: Verify VPS secrets
-        run: |
-          for var in VPS_HOST VPS_USER VPS_SSH_PRIVATE_KEY VPS_KNOWN_HOSTS; do
-            if [ -z "${!var:-}" ]; then
-              echo "::error::Missing required secret: $var"
-              exit 1
-            fi
-          done
-        env:
-          VPS_HOST: ${{ secrets.VPS_HOST }}
-          VPS_USER: ${{ secrets.VPS_USER }}
-          VPS_SSH_PRIVATE_KEY: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
-          VPS_KNOWN_HOSTS: ${{ secrets.VPS_KNOWN_HOSTS }}
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: Configure SSH client
-        run: |
-          set -euo pipefail
-          install -m 0700 -d ~/.ssh
-          printf '%s\n' "${{ secrets.VPS_SSH_PRIVATE_KEY }}" > ~/.ssh/deploy_ed25519
-          chmod 0600 ~/.ssh/deploy_ed25519
-          printf '%s\n' "${{ secrets.VPS_KNOWN_HOSTS }}" > ~/.ssh/known_hosts
-          chmod 0644 ~/.ssh/known_hosts
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: webapp/package-lock.json
 
-      - name: Pull + rebuild webapp
-        run: |
-          set -euo pipefail
+      - name: Install dependencies
+        working-directory: webapp
+        run: npm ci --no-audit --no-fund
 
-          ssh -i ~/.ssh/deploy_ed25519 \
-              -o IdentitiesOnly=yes \
-              -o ConnectTimeout=15 \
-              "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}" \
-              bash -s <<REMOTE_EOF
-          set -euo pipefail
-          cd /home/claude/monorepo
+      - name: Build webapp
+        working-directory: webapp
+        run: npm run build
 
-          echo "::group::git pull"
-          git fetch --quiet origin main
-          git checkout --quiet main
-          git reset --hard origin/main
-          git log --oneline -1 HEAD
-          echo "::endgroup::"
+      - name: Deploy to Cloudflare Pages
+        uses: cloudflare/pages-action@v1
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          projectName: mnemonik-webapp
+          directory: webapp/dist
+          gitHubToken: ${{ secrets.GITHUB_TOKEN }}
 
-          echo "::group::webapp build (npm install + npm run build)"
-          # Matches deployment.md §Deploy Steps step 3: cd webapp && npm install && npm run build
-          # The npm build chains \`build:wasm && tsc -b && vite build\` per webapp/package.json,
-          # so the WASM core is rebuilt from current core/ source — no Rust toolchain needed
-          # in CI runner (build runs on VPS).
-          cd webapp
-          npm install --no-audit --no-fund
-          # New-server topology: the apex host serves ONLY the static bundle —
-          # no API proxy (every /stats, /analytics/*, /chat call 404/405s on
-          # the apex; verified live 2026-07-09). The full API surface lives on
-          # https://mcp.mnemonik.xyz behind Caddy, and the server's CORS
-          # policy already allows the apex origin (mcp/src/cors_policy.rs).
-          # Build the SPA + prerender against that base so the traction
-          # strip, Analytics, Ledger, Blog, and Chat all hit the working host.
-          VITE_MCP_BASE=https://mcp.mnemonik.xyz npm run build
-          cd ..
-          echo "::endgroup::"
-
-          # nginx auto-serves from webapp/dist — no service restart for the webapp.
-          ls -la webapp/dist/ | head -5
-          REMOTE_EOF
-
-      - name: Smoke — webapp bundle is served
-        # Webapp-only check: the SPA shell loads. The API surface (/chat,
-        # /stats, /mcp) lives on mcp.mnemonik.xyz and is verified by the
-        # Deploy MCP workflow's smoke job — not here.
+      - name: Smoke webapp shell
         run: |
           set -euo pipefail
-          body=$(curl -fsS --max-time 15 "$WEBAPP_URL/")
-          echo "$body" | head -3
-          echo "$body" | grep -qi '<div id="root"\|<html' \
-            || { echo "::error::apex did not return the SPA shell"; exit 1; }
+          body="$(curl -fsS --max-time 20 "$WEBAPP_URL/")"
+          printf '%s\n' "$body" | head -3
+          printf '%s\n' "$body" | grep -qi '<div id="root"\|<html' \
+            || { echo "::error::webapp did not return the SPA shell"; exit 1; }

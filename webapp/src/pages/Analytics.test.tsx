@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import TimelineChart from "../components/TimelineChart";
-import type { AttestationTimeline, TimeRange } from "../lib/ledger";
+import type { Artifact, AttestationTimeline, TimeRange } from "../lib/ledger";
 import Analytics from "./Analytics";
 
 // SiteFooter / Seo pull in unrelated concerns (links, React 19 head hoisting)
@@ -36,11 +36,38 @@ const TIMELINE_90D: AttestationTimeline = {
 };
 
 const fetchAttestationTimeline = vi.fn();
+const fetchArtifacts = vi.fn();
 
 vi.mock("../lib/ledger", () => ({
+  fetchArtifacts: (opts?: { limit?: number }) => fetchArtifacts(opts),
   fetchAttestationTimeline: (range: TimeRange) =>
     fetchAttestationTimeline(range),
 }));
+
+const ARTIFACTS: Artifact[] = [
+  {
+    id: "anchored-1",
+    content: "Anchored memory from the public ledger.",
+    content_hash:
+      "b1946ac92492d2347c6235b4d2611184d3f0a3f9e1c6a2e7c0d4b8a1f2e3d4c5",
+    tags: ["release"],
+    solana_tx: "5Nf5h5x2qQk8wq7Yk3J9p1d2c3b4a5n6m7l8k9j0i1h2g3f4e5d6c7b8a9",
+    arweave_tx: "kTQ7t1f9c2X3v4B5n6M7l8K9j0I1h2G3f4E5d6C7b8A",
+    created_at: "2026-06-26T00:00:00.000Z",
+    write_mode: "participate",
+  },
+  {
+    id: "local-1",
+    content: "Local-only memory.",
+    content_hash:
+      "3a7bd3e2360a3d29eea436fcfb7e44c735d117c42d1c1835420b6b9942dd4f1b",
+    tags: [],
+    solana_tx: "local:offline",
+    arweave_tx: "local:offline",
+    created_at: "2026-06-25T00:00:00.000Z",
+    write_mode: "local",
+  },
+];
 
 function renderAnalytics() {
   return render(
@@ -65,6 +92,11 @@ describe("Analytics page", () => {
     fetchAttestationTimeline.mockImplementation(async (range: TimeRange) =>
       range === "90d" ? TIMELINE_90D : TIMELINE_30D,
     );
+    fetchArtifacts.mockReset();
+    fetchArtifacts.mockResolvedValue({
+      artifacts: ARTIFACTS,
+      total: ARTIFACTS.length,
+    });
   });
 
   it("renders_svg_path_from_timeline", async () => {
@@ -230,6 +262,24 @@ describe("Analytics page", () => {
     expect(screen.getByTestId("stat-on-node")).toHaveTextContent("45");
     expect(screen.getByTestId("stat-on-chain")).toHaveTextContent("15");
     expect(screen.getByTestId("stat-users")).toHaveTextContent("23");
+  });
+
+  it("shows_recent_anchored_record_references", async () => {
+    renderAnalytics();
+    await screen.findByTestId("timeline-chart");
+    expect(fetchArtifacts).toHaveBeenCalledWith({ limit: 24 });
+    expect(
+      await screen.findByText(/Anchored memory from the public ledger/i),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/Local-only memory/i)).toBeNull();
+
+    const solanaLink = screen
+      .getAllByRole("link")
+      .find((a) =>
+        a.getAttribute("href")?.startsWith("https://explorer.solana.com/tx/"),
+      );
+    expect(solanaLink).toBeDefined();
+    expect(solanaLink).toHaveAttribute("target", "_blank");
   });
 
   it("chart_has_img_role_and_aria_label", async () => {

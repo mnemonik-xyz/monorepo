@@ -4,10 +4,13 @@ import SiteFooter from "../components/SiteFooter";
 import SiteHeader from "../components/SiteHeader";
 import TimelineChart from "../components/TimelineChart";
 import {
+  fetchArtifacts,
   fetchAttestationTimeline,
+  type Artifact,
   type AttestationTimeline,
   type TimeRange,
 } from "../lib/ledger";
+import { arweaveTxUrl, solanaTxUrl } from "../lib/links";
 import { Seo } from "../lib/seo";
 
 /**
@@ -34,7 +37,9 @@ const numberFmt = new Intl.NumberFormat("en-US");
 export default function Analytics() {
   const [range, setRange] = useState<TimeRange>("30d");
   const [data, setData] = useState<AttestationTimeline | null>(null);
+  const [anchored, setAnchored] = useState<Artifact[]>([]);
   const [status, setStatus] = useState<Status>("loading");
+  const [anchoredStatus, setAnchoredStatus] = useState<Status>("loading");
 
   useEffect(() => {
     let cancelled = false;
@@ -54,6 +59,25 @@ export default function Analytics() {
       cancelled = true;
     };
   }, [range]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setAnchoredStatus("loading");
+    fetchArtifacts({ limit: 24 })
+      .then((page) => {
+        if (cancelled) return;
+        setAnchored(page.artifacts.filter(isAnchored).slice(0, 6));
+        setAnchoredStatus("ready");
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setAnchored([]);
+        setAnchoredStatus("error");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const windowLabel =
     RANGES.find((r) => r.value === range)?.window ?? "selected range";
@@ -111,12 +135,134 @@ export default function Analytics() {
 
         <SummaryGrid data={data} />
 
+        <AnchoredReferences status={anchoredStatus} artifacts={anchored} />
+
         <Legend />
       </main>
 
       <SiteFooter />
     </div>
   );
+}
+
+/* -------------------------------------------------------------------------- */
+/*                           Anchored references                              */
+/* -------------------------------------------------------------------------- */
+
+function AnchoredReferences({
+  status,
+  artifacts,
+}: {
+  status: Status;
+  artifacts: Artifact[];
+}) {
+  return (
+    <section
+      aria-labelledby="anchored-references"
+      className="mt-8 border-t border-white/5 pt-6"
+    >
+      <div className="mb-4 flex items-center justify-between gap-4">
+        <h2
+          id="anchored-references"
+          className="font-mono text-[11px] uppercase tracking-[0.18em] text-text-muted"
+        >
+          Anchored records
+        </h2>
+        <Link
+          to="/ledger"
+          className="font-mono text-[11px] uppercase tracking-[0.16em] text-accent-primary underline-offset-2 hover:underline"
+        >
+          Ledger →
+        </Link>
+      </div>
+
+      {status === "loading" && (
+        <p className="font-mono text-[11px] uppercase tracking-[0.18em] text-text-muted">
+          Loading anchors…
+        </p>
+      )}
+      {status === "error" && (
+        <p className="font-mono text-[11px] uppercase tracking-[0.18em] text-error">
+          Could not load anchored records.
+        </p>
+      )}
+      {status === "ready" && artifacts.length === 0 && (
+        <p className="font-mono text-[11px] uppercase tracking-[0.18em] text-text-muted">
+          No anchored records available.
+        </p>
+      )}
+      {status === "ready" && artifacts.length > 0 && (
+        <ul role="list" className="grid gap-3 sm:grid-cols-2">
+          {artifacts.map((artifact) => (
+            <li key={artifact.id}>
+              <AnchoredReference artifact={artifact} />
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}
+
+function AnchoredReference({ artifact }: { artifact: Artifact }) {
+  const solUrl = solanaTxUrl(artifact.solana_tx);
+  const arUrl = arweaveTxUrl(artifact.arweave_tx);
+
+  return (
+    <article className="rounded-md border border-white/5 bg-white/[0.02] p-4">
+      <p className="line-clamp-2 text-sm leading-relaxed text-text-primary">
+        {artifact.content}
+      </p>
+      <dl className="mt-3 space-y-1.5">
+        <ReferenceLink label="Solana" tx={artifact.solana_tx} url={solUrl} />
+        <ReferenceLink label="Arweave" tx={artifact.arweave_tx} url={arUrl} />
+      </dl>
+    </article>
+  );
+}
+
+function ReferenceLink({
+  label,
+  tx,
+  url,
+}: {
+  label: string;
+  tx: string | null;
+  url: string | null;
+}) {
+  if (!url || !tx) return null;
+  return (
+    <div className="flex min-w-0 items-baseline gap-2">
+      <dt className="shrink-0 font-mono text-[10px] uppercase tracking-[0.16em] text-text-faint">
+        {label}
+      </dt>
+      <dd className="min-w-0 flex-1 font-mono text-[11px]">
+        <a
+          href={url}
+          target="_blank"
+          rel="noopener noreferrer"
+          title={tx}
+          className="inline-flex max-w-full items-baseline gap-1.5 text-accent-primary underline-offset-2 hover:underline"
+        >
+          <span className="min-w-0 truncate">{truncateMiddle(tx, 10, 8)}</span>
+          <span aria-hidden="true" className="shrink-0">
+            ↗
+          </span>
+        </a>
+      </dd>
+    </div>
+  );
+}
+
+function isAnchored(artifact: Artifact): boolean {
+  return Boolean(
+    solanaTxUrl(artifact.solana_tx) || arweaveTxUrl(artifact.arweave_tx),
+  );
+}
+
+function truncateMiddle(value: string, start: number, end: number): string {
+  if (value.length <= start + end + 1) return value;
+  return `${value.slice(0, start)}...${value.slice(-end)}`;
 }
 
 /* -------------------------------------------------------------------------- */
