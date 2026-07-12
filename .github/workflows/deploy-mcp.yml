@@ -113,6 +113,7 @@ jobs:
           CADDY_CONTAINER_NAME: ${{ vars.CADDY_CONTAINER_NAME || 'vaultwarden-caddy-1' }}
           CHAIN_STATS_WALLETS: ${{ vars.CHAIN_STATS_WALLETS || 'DYVu4Bry3BzGVsR3Hj2iGVT5fNdWFoHw2zRxsdTmrG25' }}
           SOLANA_RPC_URL: ${{ vars.SOLANA_RPC_URL || 'https://api.mainnet-beta.solana.com' }}
+          LLM_MODEL: ${{ vars.LLM_MODEL || 'qwen2.5:3b' }}
         run: |
           set -euo pipefail
           STACK_DIR="$(echo "$STACK_DIR" | xargs)"
@@ -186,8 +187,20 @@ jobs:
           echo "CHAIN_STATS_WALLETS=${CHAIN_STATS_WALLETS}" >> "\$STACK/mcp.env"
           sed -i '/^SOLANA_RPC_URL=/d' "\$STACK/mcp.env"
           echo "SOLANA_RPC_URL=${SOLANA_RPC_URL}" >> "\$STACK/mcp.env"
+          # Keep the live env aligned with coding-fabric's mnemonik-server
+          # template. Without these lines MCP defaults to localhost:11434,
+          # which is the wrong network namespace inside the container.
+          for key in OLLAMA_URL LLM_API_URL LLM_PROVIDER LLM_MODEL OLLAMA_MODEL; do
+            sed -i "/^\${key}=/d" "\$STACK/mcp.env"
+          done
+          echo "OLLAMA_URL=http://ollama:11434" >> "\$STACK/mcp.env"
+          echo "LLM_API_URL=http://ollama:11434" >> "\$STACK/mcp.env"
+          echo "LLM_PROVIDER=ollama" >> "\$STACK/mcp.env"
+          echo "LLM_MODEL=${LLM_MODEL}" >> "\$STACK/mcp.env"
+          echo "OLLAMA_MODEL=${LLM_MODEL}" >> "\$STACK/mcp.env"
 
           echo "::group::recreate coding-fabric MCP service"
+          \$DOCKER compose -p "\$PROJ" up -d ollama
           \$DOCKER compose -p "\$PROJ" pull mcp
           \$DOCKER compose -p "\$PROJ" up -d --force-recreate mcp
           echo "::endgroup::"

@@ -380,7 +380,7 @@ pub(crate) fn compute_server_origin_from_env_str(raw: Option<&str>) -> String {
 /// `WEBAPP_CONSENT_URL?challenge=<base64-cbor>&state=<state>&mcp_base=<origin>`
 /// so the WASM signer can post the approval back to the server that created
 /// the pending OAuth state.
-pub const WEBAPP_CONSENT_URL: &str = "https://mnemonik.xyz/oauth/consent";
+pub const WEBAPP_CONSENT_URL: &str = "https://www.mnemonik.xyz/oauth/consent";
 
 /// JWT claim set per Decision 11.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1099,6 +1099,7 @@ fn urlencoding_encode(s: &str) -> String {
 /// Exact-match allowlisted `redirect_uri`.
 const REDIRECT_EXACT: &[&str] = &[
     "https://mnemonik.xyz/oauth/consent",
+    "https://www.mnemonik.xyz/oauth/consent",
     "https://vscode.dev/redirect",
 ];
 
@@ -3756,6 +3757,10 @@ mod tests {
         // Exact-match webapp consent page.
         assert!(allowed_redirect(
             "https://mnemonik.xyz/oauth/consent",
+            "anything"
+        ));
+        assert!(allowed_redirect(
+            "https://www.mnemonik.xyz/oauth/consent",
             "anything"
         ));
         assert!(allowed_redirect(
