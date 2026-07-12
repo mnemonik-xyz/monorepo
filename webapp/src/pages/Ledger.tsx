@@ -7,6 +7,7 @@ import {
   fetchArtifacts,
   type Artifact,
   type ArtifactPage,
+  type ArtifactSource,
   type WriteMode,
 } from "../lib/ledger";
 import { arweaveTxUrl, solanaTxUrl } from "../lib/links";
@@ -46,7 +47,25 @@ export default function Ledger() {
   useEffect(() => {
     let cancelled = false;
     setStatus("loading");
-    fetchArtifacts({ q: query, limit: LEDGER_PAGE_LIMIT })
+    const fetchPage = (): Promise<ArtifactPage> => {
+      const common = { q: query, limit: LEDGER_PAGE_LIMIT };
+      if (mode !== "all") {
+        const source: ArtifactSource =
+          mode === "local" ? "on_node" : "on_chain";
+        return fetchArtifacts({ ...common, source });
+      }
+      return Promise.all([
+        fetchArtifacts({ ...common, source: "on_node" }),
+        fetchArtifacts({ ...common, source: "on_chain" }),
+      ]).then(([onNode, onChain]) => ({
+        artifacts: [...onNode.artifacts, ...onChain.artifacts].sort((a, b) =>
+          b.created_at.localeCompare(a.created_at),
+        ),
+        total: onNode.total + onChain.total,
+      }));
+    };
+
+    fetchPage()
       .then((res) => {
         if (cancelled) return;
         setPage(res);
@@ -60,7 +79,7 @@ export default function Ledger() {
     return () => {
       cancelled = true;
     };
-  }, [query]);
+  }, [query, mode]);
 
   const artifacts = page?.artifacts ?? [];
   const visible =

@@ -150,6 +150,14 @@ const LIST_PUBLIC_ARTIFACTS_SQL: &str =
      ORDER BY a.created_at DESC
      LIMIT ?";
 
+const LIST_PUBLIC_ARTIFACTS_BY_MODE_SQL: &str =
+    "SELECT a.attestation_id, a.content, a.content_hash, a.tags,
+            a.solana_tx, a.arweave_tx, a.created_at, a.write_mode
+     FROM attestations a
+     WHERE a.write_mode = ?1
+     ORDER BY a.created_at DESC
+     LIMIT ?2";
+
 /// SQL backing `SqliteStore::attestation_timeline` — daily attestation counts
 /// split on-node (`write_mode = 'local'`) vs on-chain (`write_mode =
 /// 'participate'`) for the Analytics page. Buckets by the date prefix of the
@@ -771,6 +779,35 @@ impl SqliteStore {
         let mut out = Vec::new();
         for r in rows {
             out.push(r?);
+        }
+        Ok(out)
+    }
+
+    /// List Ledger rows for one provenance mode. This powers source-aware
+    /// pagination so a large on-node history cannot crowd every anchored row
+    /// out of the first page (and vice versa).
+    pub fn list_public_artifacts_by_mode(
+        &self,
+        mode: WriteMode,
+        limit: usize,
+    ) -> anyhow::Result<Vec<PublicArtifact>> {
+        let mut stmt = self.conn.prepare(LIST_PUBLIC_ARTIFACTS_BY_MODE_SQL)?;
+        let rows = stmt.query_map(params![mode, limit as i64], |row| {
+            let tags_str: String = row.get(3)?;
+            Ok(PublicArtifact {
+                attestation_id: row.get(0)?,
+                content: row.get(1)?,
+                content_hash: row.get(2)?,
+                tags: serde_json::from_str(&tags_str).unwrap_or_default(),
+                solana_tx: row.get(4)?,
+                arweave_tx: row.get(5)?,
+                created_at: row.get(6)?,
+                write_mode: row.get::<_, WriteMode>(7)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
         }
         Ok(out)
     }
@@ -1939,6 +1976,40 @@ mod tests {
         let rows = store.list_public_artifacts(10).unwrap();
         assert_eq!(rows.len(), 1, "NULL-owner row must appear in the list");
         assert_eq!(rows[0].attestation_id, "pub-null");
+    }
+
+    #[test]
+    fn list_public_artifacts_by_mode_keeps_sources_independent() {
+        let store = SqliteStore::in_memory().unwrap();
+        seed_row(
+            &store,
+            "local-1",
+            "owner-a",
+            "s1",
+            "2026-06-03T00:00:00Z",
+            WriteMode::Local,
+            Visibility::Public,
+        );
+        seed_row(
+            &store,
+            "chain-1",
+            "owner-a",
+            "s2",
+            "2026-06-01T00:00:00Z",
+            WriteMode::Participate,
+            Visibility::Public,
+        );
+
+        let local = store
+            .list_public_artifacts_by_mode(WriteMode::Local, 10)
+            .unwrap();
+        let chain = store
+            .list_public_artifacts_by_mode(WriteMode::Participate, 10)
+            .unwrap();
+        assert_eq!(local.len(), 1);
+        assert_eq!(local[0].attestation_id, "local-1");
+        assert_eq!(chain.len(), 1);
+        assert_eq!(chain[0].attestation_id, "chain-1");
     }
 
     #[test]

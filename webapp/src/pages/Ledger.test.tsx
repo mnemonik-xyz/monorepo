@@ -58,15 +58,24 @@ vi.mock("../lib/ledger", async () => {
   return {
     ...actual,
     fetchArtifacts: vi.fn(
-      async (opts?: { q?: string; limit?: number }): Promise<ArtifactPage> => {
+      async (opts?: {
+        q?: string;
+        limit?: number;
+        source?: "all" | "on_node" | "on_chain";
+      }): Promise<ArtifactPage> => {
         const q = opts?.q?.toLowerCase().trim();
-        const artifacts = q
+        let artifacts = q
           ? FIXTURE.filter(
               (a) =>
                 a.content.toLowerCase().includes(q) ||
                 a.tags.some((t) => t.toLowerCase().includes(q)),
             )
           : FIXTURE;
+        if (opts?.source === "on_node") {
+          artifacts = artifacts.filter((a) => a.write_mode === "local");
+        } else if (opts?.source === "on_chain") {
+          artifacts = artifacts.filter((a) => a.write_mode === "participate");
+        }
         return { artifacts, total: artifacts.length };
       },
     ),
@@ -145,9 +154,15 @@ describe("Ledger page", () => {
     expect(
       screen.getByText(/TurboQuant bit width stays at 4/i),
     ).toBeInTheDocument();
-    expect(fetchArtifacts).toHaveBeenLastCalledWith({
+    expect(fetchArtifacts).toHaveBeenCalledWith({
       q: "turboquant",
       limit: 200,
+      source: "on_node",
+    });
+    expect(fetchArtifacts).toHaveBeenCalledWith({
+      q: "turboquant",
+      limit: 200,
+      source: "on_chain",
     });
   });
 
@@ -155,7 +170,16 @@ describe("Ledger page", () => {
     renderLedger();
     await screen.findByText(/Shipped v0\.2 on Tuesday/i);
 
-    expect(fetchArtifacts).toHaveBeenLastCalledWith({ q: "", limit: 200 });
+    expect(fetchArtifacts).toHaveBeenCalledWith({
+      q: "",
+      limit: 200,
+      source: "on_node",
+    });
+    expect(fetchArtifacts).toHaveBeenCalledWith({
+      q: "",
+      limit: 200,
+      source: "on_chain",
+    });
   });
 
   it("write_mode_filter_chip_narrows_to_on_chain_rows", async () => {

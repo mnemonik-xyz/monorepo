@@ -76,6 +76,22 @@ describe("fetchArtifacts", () => {
     );
   });
 
+  it("passes a source-aware page to the backend", async () => {
+    mockFetch().mockResolvedValueOnce(
+      new Response(JSON.stringify({ artifacts: [], total: 0 }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+
+    await fetchArtifacts({ limit: 24, source: "on_chain" });
+
+    expect(mockFetch()).toHaveBeenCalledWith(
+      expect.stringMatching(/\/artifacts\?limit=24&source=on_chain$/),
+      expect.any(Object),
+    );
+  });
+
   it("throws on non-OK status (no sample fallback)", async () => {
     mockFetch().mockResolvedValueOnce(new Response("oops", { status: 503 }));
     await expect(fetchArtifacts()).rejects.toThrow();

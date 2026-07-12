@@ -63,7 +63,7 @@ export default function Analytics() {
   useEffect(() => {
     let cancelled = false;
     setAnchoredStatus("loading");
-    fetchArtifacts({ limit: 24 })
+    fetchArtifacts({ limit: 24, source: "on_chain" })
       .then((page) => {
         if (cancelled) return;
         setAnchored(page.artifacts.filter(isAnchored).slice(0, 6));

@@ -39,7 +39,8 @@ const fetchAttestationTimeline = vi.fn();
 const fetchArtifacts = vi.fn();
 
 vi.mock("../lib/ledger", () => ({
-  fetchArtifacts: (opts?: { limit?: number }) => fetchArtifacts(opts),
+  fetchArtifacts: (opts?: { limit?: number; source?: string }) =>
+    fetchArtifacts(opts),
   fetchAttestationTimeline: (range: TimeRange) =>
     fetchAttestationTimeline(range),
 }));
@@ -267,7 +268,10 @@ describe("Analytics page", () => {
   it("shows_recent_anchored_record_references", async () => {
     renderAnalytics();
     await screen.findByTestId("timeline-chart");
-    expect(fetchArtifacts).toHaveBeenCalledWith({ limit: 24 });
+    expect(fetchArtifacts).toHaveBeenCalledWith({
+      limit: 24,
+      source: "on_chain",
+    });
     expect(
       await screen.findByText(/Anchored memory from the public ledger/i),
     ).toBeInTheDocument();

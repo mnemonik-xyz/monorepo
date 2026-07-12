@@ -1379,6 +1379,26 @@ pub struct ArtifactsQuery {
     /// Optional page-size override; clamped to `[1, READ_MAX_LIMIT]`.
     #[serde(default)]
     pub limit: Option<usize>,
+    /// Optional provenance page. Source-aware reads prevent one large source
+    /// from exhausting the page before the other source reaches the webapp.
+    #[serde(default)]
+    pub source: Option<ArtifactSource>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ArtifactSource {
+    All,
+    OnNode,
+    OnChain,
+}
+
+fn artifact_matches_source(artifact: &PublicArtifact, source: ArtifactSource) -> bool {
+    match source {
+        ArtifactSource::All => true,
+        ArtifactSource::OnNode => artifact.write_mode == WriteMode::Local,
+        ArtifactSource::OnChain => artifact.write_mode == WriteMode::Participate,
+    }
 }
 
 /// Project a cross-owner `SearchResult` down to the `PublicArtifact` wire
@@ -1477,6 +1497,7 @@ pub async fn artifacts_handler(
         .unwrap_or(READ_DEFAULT_LIMIT)
         .clamp(1, READ_MAX_LIMIT);
     let query = params.q.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    let source = params.source.unwrap_or(ArtifactSource::All);
 
     // Chain snapshot read (async RwLock) BEFORE the store mutex — the
     // sqlite guard must never be held across an `.await` (CLAUDE.md).
@@ -1511,6 +1532,7 @@ pub async fn artifacts_handler(
                 .map(|rows| {
                     rows.into_iter()
                         .map(public_artifact_from_search)
+                        .filter(|artifact| artifact_matches_source(artifact, source))
                         .collect::<Vec<_>>()
                 }) {
                 Ok(rows) => {
@@ -1524,17 +1546,40 @@ pub async fn artifacts_handler(
             },
             // Plain list → newest-first public-only chronological listing,
             // merged with chain-recovered anchored items.
-            None => match store.list_public_artifacts(limit) {
-                Ok(db_rows) => match chain_items {
-                    Some(chain) => merge_chain_artifacts(&chain, db_rows, limit),
-                    None => {
-                        let total = db_rows.len();
-                        (db_rows, total)
+            None => match source {
+                ArtifactSource::OnNode => {
+                    match store.list_public_artifacts_by_mode(WriteMode::Local, limit) {
+                        Ok(rows) => {
+                            let total = rows.len();
+                            (rows, total)
+                        }
+                        Err(e) => {
+                            tracing::warn!("on-node artifacts list query failed: {e}");
+                            (Vec::new(), 0)
+                        }
                     }
-                },
-                Err(e) => {
-                    tracing::warn!("artifacts list query failed: {e}");
-                    (Vec::new(), 0)
+                }
+                ArtifactSource::All | ArtifactSource::OnChain => {
+                    let db_result = match source {
+                        ArtifactSource::All => store.list_public_artifacts(limit),
+                        ArtifactSource::OnChain => {
+                            store.list_public_artifacts_by_mode(WriteMode::Participate, limit)
+                        }
+                        ArtifactSource::OnNode => unreachable!(),
+                    };
+                    match db_result {
+                        Ok(db_rows) => match chain_items {
+                            Some(chain) => merge_chain_artifacts(&chain, db_rows, limit),
+                            None => {
+                                let total = db_rows.len();
+                                (db_rows, total)
+                            }
+                        },
+                        Err(e) => {
+                            tracing::warn!("artifacts list query failed: {e}");
+                            (Vec::new(), 0)
+                        }
+                    }
                 }
             },
         }

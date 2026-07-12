@@ -12,6 +12,7 @@
 import { MCP_BASE } from "./api";
 
 export type WriteMode = "local" | "participate";
+export type ArtifactSource = "all" | "on_node" | "on_chain";
 
 export interface Artifact {
   /** attestation_id (uuid). */
@@ -89,10 +90,12 @@ async function getJson<T>(path: string): Promise<T> {
 export async function fetchArtifacts(opts?: {
   q?: string;
   limit?: number;
+  source?: ArtifactSource;
 }): Promise<ArtifactPage> {
   const params = new URLSearchParams();
   if (opts?.q) params.set("q", opts.q);
   if (opts?.limit) params.set("limit", String(opts.limit));
+  if (opts?.source && opts.source !== "all") params.set("source", opts.source);
   const qs = params.toString();
   const live = await getJson<{ artifacts: LiveArtifact[]; total?: number }>(
     `/artifacts${qs ? `?${qs}` : ""}`,
