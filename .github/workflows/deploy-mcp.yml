@@ -122,6 +122,8 @@ jobs:
           # container. The MCP service joins this network with alias
           # 'mnemonik-mcp' so Caddy can reverse_proxy to it.
           CADDY_NETWORK_NAME: ${{ vars.CADDY_NETWORK_NAME || 'vaultwarden_default' }}
+          # Docker container name for the fabric Caddy instance.
+          CADDY_CONTAINER_NAME: ${{ vars.CADDY_CONTAINER_NAME || 'vaultwarden-caddy-1' }}
           # Chain-backed traction stats (recover-traction-from-chain).
           # Public data only — the base58 address of every wallet that ever
           # signed anchored uploads. Override via the repo variable
@@ -150,6 +152,7 @@ jobs:
           REPO="${REPO_DIR}"
           export COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME}"
           export CADDY_NETWORK_NAME="${CADDY_NETWORK_NAME}"
+          export CADDY_CONTAINER_NAME="${CADDY_CONTAINER_NAME}"
 
           # op is added to the docker group by coding-fabric's Ansible after
           # Docker install; fall back to sudo if the group isn't active yet.
@@ -251,6 +254,13 @@ jobs:
             \$DOCKER compose --env-file "\$REPO/mcp.env" logs --tail 60 mcp; exit 1
           fi
           echo "mcp healthy"
+          echo "::endgroup::"
+
+          echo "::group::reload Caddy"
+          # Caddy caches reverse_proxy upstreams until reload. Use the explicit
+          # IPv4 admin address because localhost can resolve to ::1 first.
+          \$DOCKER exec "\$CADDY_CONTAINER_NAME" caddy reload --config /etc/caddy/Caddyfile --address 127.0.0.1:2019 \
+            || \$DOCKER restart "\$CADDY_CONTAINER_NAME"
           echo "::endgroup::"
 
           if [ "${FORCE_RESEED}" = "true" ]; then
