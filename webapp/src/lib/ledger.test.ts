@@ -60,6 +60,22 @@ describe("fetchArtifacts", () => {
     expect(page.total).toBe(0);
   });
 
+  it("passes the requested bounded page size to the backend", async () => {
+    mockFetch().mockResolvedValueOnce(
+      new Response(JSON.stringify({ artifacts: [], total: 0 }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+
+    await fetchArtifacts({ limit: 200 });
+
+    expect(mockFetch()).toHaveBeenCalledWith(
+      expect.stringMatching(/\/artifacts\?limit=200$/),
+      expect.any(Object),
+    );
+  });
+
   it("throws on non-OK status (no sample fallback)", async () => {
     mockFetch().mockResolvedValueOnce(new Response("oops", { status: 503 }));
     await expect(fetchArtifacts()).rejects.toThrow();

@@ -58,7 +58,7 @@ vi.mock("../lib/ledger", async () => {
   return {
     ...actual,
     fetchArtifacts: vi.fn(
-      async (opts?: { q?: string }): Promise<ArtifactPage> => {
+      async (opts?: { q?: string; limit?: number }): Promise<ArtifactPage> => {
         const q = opts?.q?.toLowerCase().trim();
         const artifacts = q
           ? FIXTURE.filter(
@@ -145,7 +145,17 @@ describe("Ledger page", () => {
     expect(
       screen.getByText(/TurboQuant bit width stays at 4/i),
     ).toBeInTheDocument();
-    expect(fetchArtifacts).toHaveBeenLastCalledWith({ q: "turboquant" });
+    expect(fetchArtifacts).toHaveBeenLastCalledWith({
+      q: "turboquant",
+      limit: 200,
+    });
+  });
+
+  it("requests_the_bounded_maximum_so_chain_rows_do_not_hide_on_node_rows", async () => {
+    renderLedger();
+    await screen.findByText(/Shipped v0\.2 on Tuesday/i);
+
+    expect(fetchArtifacts).toHaveBeenLastCalledWith({ q: "", limit: 200 });
   });
 
   it("write_mode_filter_chip_narrows_to_on_chain_rows", async () => {

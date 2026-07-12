@@ -28,6 +28,12 @@ import { arweaveTxUrl, solanaTxUrl } from "../lib/links";
 type ModeFilter = "all" | WriteMode;
 type Status = "loading" | "ready" | "error";
 
+// The public endpoint defaults to 50 rows. Chain recovery can legitimately
+// contribute more than that, so use the server's bounded maximum for the
+// Ledger; otherwise recovered anchors can fill the first page before any
+// on-node memories reach the client-side mode filter.
+const LEDGER_PAGE_LIMIT = 200;
+
 export default function Ledger() {
   // `query` is the committed search term that drives the fetch; `draft` is the
   // controlled input value awaiting submit.
@@ -40,7 +46,7 @@ export default function Ledger() {
   useEffect(() => {
     let cancelled = false;
     setStatus("loading");
-    fetchArtifacts({ q: query })
+    fetchArtifacts({ q: query, limit: LEDGER_PAGE_LIMIT })
       .then((res) => {
         if (cancelled) return;
         setPage(res);

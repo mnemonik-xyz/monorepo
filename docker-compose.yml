@@ -123,7 +123,7 @@ networks:
     driver: bridge
   caddy:
     # External network shared with the fabric-deployed Caddy container.
-    # Default matches the vaultwarden compose project on the fabric VM;
-    # override with CADDY_NETWORK_NAME in mcp.env if the project name differs.
+    # Default matches coding-fabric's explicit cross-role network contract;
+    # override with CADDY_NETWORK_NAME for standalone deployments.
     external: true
-    name: ${CADDY_NETWORK_NAME:-vaultwarden_default}
+    name: ${CADDY_NETWORK_NAME:-vaultwarden_vaultwarden}

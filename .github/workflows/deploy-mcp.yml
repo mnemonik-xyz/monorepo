@@ -17,14 +17,14 @@ name: Deploy MCP
 #   CI_SSH_PRIVATE_KEY  — stable CI Ed25519 key, pubkey on op@VM
 # Optional repo variables:
 #   FABRIC_VM_HOSTNAME  — tailnet HostName of the VM (default mnemonic-fabric)
-#   MCP_VM_REPO_DIR     — monorepo checkout on the VM (default /opt/mnemonik/monorepo)
+#   MCP_VM_STACK_DIR    — coding-fabric-rendered stack (default /opt/mnemonik-server)
 #   MCP_VM_SSH_USER     — SSH user (default op)
 #
-# COEXISTENCE WITH CODING-FABRIC: Caddy (managed by coding-fabric Ansible)
-# owns 80/443 on this VM and vhosts mcp.mnemonik.xyz → 127.0.0.1:3000. This
-# workflow therefore brings up ONLY the `mcp` compose service (plus its
-# profile-gated ollama dependency) — NEVER the nginx/certbot services from
-# docker-compose.yml, which would fight Caddy for 80/443.
+# CODING-FABRIC OWNERSHIP: coding-fabric renders /opt/mnemonik-server with
+# persistent /dev/sdb bind mounts, the `mnemonik` Compose project, and the
+# shared `vaultwarden_vaultwarden` Caddy network. This workflow only swaps the
+# image in that existing stack. It must never deploy the monorepo's standalone
+# docker-compose.yml on the fabric VM or create a second set of data volumes.
 #
 # Trigger model: manual-only (workflow_dispatch). Pick apply / smoke / rollback.
 # Auto-deploy on tag is intentionally disabled — the prod ship stays with a human.
@@ -109,92 +109,33 @@ jobs:
           ACTION: ${{ inputs.action }}
           REF: ${{ inputs.ref }}
           FORCE_RESEED: ${{ inputs.force_reseed }}
-          # Monorepo checkout on the fabric VM (compose + env files live here;
-          # the app itself ships as a GHCR image). Bootstrap-cloned on first
-          # deploy; mcp.env must be created by the operator (secrets).
-          REPO_DIR: ${{ vars.MCP_VM_REPO_DIR || '/opt/mnemonik/monorepo' }}
-          # Stable Docker Compose project name. The directory name must NOT
-          # control this, or a repo-dir change creates a second stack and
-          # Caddy's upstream alias breaks. Kept as 'mnemonik-server' to match
-          # the existing volumes/data on the VM; changing it would orphan them.
-          COMPOSE_PROJECT_NAME: mnemonik-server
-          # External Docker network shared with the fabric-deployed Caddy
-          # container. The MCP service joins this network with alias
-          # 'mnemonik-mcp' so Caddy can reverse_proxy to it.
-          CADDY_NETWORK_NAME: ${{ vars.CADDY_NETWORK_NAME || 'vaultwarden_default' }}
-          # Docker container name for the fabric Caddy instance.
-          CADDY_CONTAINER_NAME: ${{ vars.CADDY_CONTAINER_NAME || 'vaultwarden-caddy-1' }}
-          # Chain-backed traction stats (recover-traction-from-chain).
-          # Public data only — the base58 address of every wallet that ever
-          # signed anchored uploads. Override via the repo variable
-          # CHAIN_STATS_WALLETS if the wallet set ever changes; the fallback
-          # is the production anchor wallet (work/recover-traction-from-chain
-          # decisions D6/D8).
-          CHAIN_STATS_WALLETS: ${{ vars.CHAIN_STATS_WALLETS || 'DYVu4Bry3BzGVsR3Hj2iGVT5fNdWFoHw2zRxsdTmrG25' }}
-          # Mainnet RPC for the memo-history enumeration. The server binary's
-          # own default is localhost:8899 (dev validator), which cannot serve
-          # recovery — so the workflow owns this line too. Override with the
-          # SOLANA_RPC_URL repo variable (e.g. a Helius endpoint) if the
-          # public RPC ever rate-limits the VPS.
-          SOLANA_RPC_URL: ${{ vars.SOLANA_RPC_URL || 'https://api.mainnet-beta.solana.com' }}
+          STACK_DIR: ${{ vars.MCP_VM_STACK_DIR || '/opt/mnemonik-server' }}
+          COMPOSE_PROJECT_NAME: mnemonik
+          CADDY_NETWORK_NAME: ${{ vars.CADDY_NETWORK_NAME || 'vaultwarden_vaultwarden' }}
+          MCP_IMAGE_REPOSITORY: ghcr.io/mnemonik-xyz/mnemonic-mcp
         run: |
           set -euo pipefail
-          # Sanitize the operator-provided path: trim stray whitespace (a
-          # trailing space in the repo variable would otherwise create a
-          # literal '/mcp ' directory) and require an absolute path.
-          REPO_DIR="$(echo "$REPO_DIR" | xargs)"
-          case "$REPO_DIR" in
+          STACK_DIR="$(echo "$STACK_DIR" | xargs)"
+          case "$STACK_DIR" in
             /?*) ;;
-            *) echo "::error::MCP_VM_REPO_DIR must be an absolute path on the VM (got '$REPO_DIR')"; exit 1 ;;
+            *) echo "::error::MCP_VM_STACK_DIR must be an absolute path on the VM (got '$STACK_DIR')"; exit 1 ;;
           esac
+          # SSH_OPTS is an argument bundle emitted by fabric-vm-ssh. The
+          # heredoc deliberately expands workflow values on the runner while
+          # escaped runtime values expand on the VM.
+          # shellcheck disable=SC2086,SC2087
           ssh $SSH_OPTS "$VM_TARGET" bash -s <<REMOTE_EOF
           set -euo pipefail
-          REPO="${REPO_DIR}"
+          STACK="${STACK_DIR}"
           export COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME}"
-          export CADDY_NETWORK_NAME="${CADDY_NETWORK_NAME}"
-          export CADDY_CONTAINER_NAME="${CADDY_CONTAINER_NAME}"
 
-          # op is added to the docker group by coding-fabric's Ansible after
-          # Docker install; fall back to sudo if the group isn't active yet.
           if docker info >/dev/null 2>&1; then DOCKER="docker"; else DOCKER="sudo -n docker"; fi
 
-          if [ ! -d "\$REPO/.git" ]; then
-            echo "Bootstrapping monorepo checkout at \$REPO"
-            if [ -d "\$REPO" ] && [ "\$(ls -A "\$REPO" 2>/dev/null | wc -l)" -gt 0 ]; then
-              # Directory already exists with files (e.g., operator pre-staged
-              # mcp.env). git clone refuses non-empty dirs, so convert it
-              # in-place into a git checkout.
-              cd "\$REPO"
-              git init --quiet
-              git remote add origin https://github.com/mnemonik-xyz/monorepo.git
-              git fetch --depth 1 origin "${REF}" --quiet
-              if git rev-parse --verify --quiet "refs/tags/${REF}" >/dev/null; then
-                git checkout -f "${REF}"
-              else
-                git checkout -f -B "${REF}" "origin/${REF}"
-              fi
-            else
-              # install -d creates parents root-owned and only the leaf dir
-              # op-owned — never chown a parent (a top-level REPO like /mcp
-              # would otherwise chown / itself). git clones fine into an
-              # existing empty dir.
-              sudo -n install -d -o "\$(id -un)" -g "\$(id -gn)" "\$REPO"
-              git clone --quiet https://github.com/mnemonik-xyz/monorepo.git "\$REPO"
-            fi
-          fi
-          cd "\$REPO"
-
-          if [ ! -f "\$REPO/mcp.env" ]; then
-            echo "::error::\$REPO/mcp.env is missing on the VM. Create it once from mcp/deploy/compose.env.example and fill the secrets (MCP_JWT_SECRET, MCP_REFRESH_SALT, OAuth) — see mcp/deploy/README.md. Refusing to deploy with no env."
+          if [ ! -f "\$STACK/docker-compose.yml" ] || [ ! -f "\$STACK/mcp.env" ]; then
+            echo "::error::coding-fabric stack is missing at \$STACK; run coding-fabric's mnemonik-server role first"
             exit 1
           fi
-
-          echo "::group::sync compose files to ${REF}"
-          git fetch --tags --quiet origin
-          git checkout --quiet "${REF}"
-          git reset --hard "origin/\$(git symbolic-ref --short HEAD 2>/dev/null || echo ${REF})" 2>/dev/null \
-            || git reset --hard "${REF}"
-          echo "::endgroup::"
+          cd "\$STACK"
 
           # Map the git ref to the GHCR image tag: vX.Y.Z -> that tag, else latest.
           case "${REF}" in
@@ -202,75 +143,71 @@ jobs:
             *)  IMAGE_TAG="latest" ;;
           esac
           echo "Deploying image tag: \$IMAGE_TAG (action=${ACTION})"
-          sed -i '/^MCP_IMAGE_TAG=/d' "\$REPO/mcp.env"
-          echo "MCP_IMAGE_TAG=\$IMAGE_TAG" >> "\$REPO/mcp.env"
 
-          if [ "${FORCE_RESEED}" = "true" ]; then
-            sed -i '/^MNEMONIC_FORCE_RESEED=/d' "\$REPO/mcp.env"
-            echo "MNEMONIC_FORCE_RESEED=1" >> "\$REPO/mcp.env"
+          # Fail closed if this is not coding-fabric's persistent stack. These
+          # checks prevent a second empty SQLite volume from looking like data loss.
+          COMPOSE_CONFIG="\$(\$DOCKER compose config)"
+          printf '%s\n' "\$COMPOSE_CONFIG" | grep -q '/mnemonik/data'
+          printf '%s\n' "\$COMPOSE_CONFIG" | grep -q '/mnemonik/keypair'
+          printf '%s\n' "\$COMPOSE_CONFIG" | grep -q '${CADDY_NETWORK_NAME}'
+          \$DOCKER network inspect "${CADDY_NETWORK_NAME}" >/dev/null
+
+          # Remove containers from the accidental monorepo-owned project. Do
+          # not pass -v: its volumes are retained for forensic recovery.
+          ROGUE_IDS="\$(\$DOCKER ps -aq --filter label=com.docker.compose.project=mnemonik-server)"
+          if [ -n "\$ROGUE_IDS" ]; then
+            echo "Removing accidental mnemonik-server containers (volumes retained)"
+            \$DOCKER rm -f \$ROGUE_IDS
           fi
 
-          # Chain-backed traction stats: the workflow is the source of truth
-          # for BOTH lines (public data), so they are upserted on every
-          # deploy — same pattern as MCP_IMAGE_TAG. To use different values,
-          # set the CHAIN_STATS_WALLETS / SOLANA_RPC_URL repo variables
-          # instead of hand-editing mcp.env (a hand edit would be clobbered
-          # on the next deploy).
-          sed -i '/^CHAIN_STATS_WALLETS=/d' "\$REPO/mcp.env"
-          echo "CHAIN_STATS_WALLETS=${CHAIN_STATS_WALLETS}" >> "\$REPO/mcp.env"
-          sed -i '/^SOLANA_RPC_URL=/d' "\$REPO/mcp.env"
-          echo "SOLANA_RPC_URL=${SOLANA_RPC_URL}" >> "\$REPO/mcp.env"
+          # coding-fabric renders an explicit image reference. Pull the chosen
+          # ref and tag it to that configured reference before force-recreate;
+          # this keeps rollback working without rewriting Ansible-owned files.
+          CONFIGURED_IMAGE="\$(printf '%s\n' "\$COMPOSE_CONFIG" | awk '/^[[:space:]]*image: .*mnemonic-mcp/ {print \$2; exit}')"
+          if [ -z "\$CONFIGURED_IMAGE" ]; then
+            echo "::error::mnemonic-mcp image is missing from coding-fabric compose config"
+            exit 1
+          fi
+          TARGET_IMAGE="${MCP_IMAGE_REPOSITORY}:\$IMAGE_TAG"
+          \$DOCKER pull "\$TARGET_IMAGE"
+          \$DOCKER tag "\$TARGET_IMAGE" "\$CONFIGURED_IMAGE"
 
-          # Caddy shared network name (used by docker-compose.yml external network).
-          sed -i '/^CADDY_NETWORK_NAME=/d' "\$REPO/mcp.env"
-          echo "CADDY_NETWORK_NAME=${CADDY_NETWORK_NAME}" >> "\$REPO/mcp.env"
+          RESEED_ADDED=0
+          cleanup_reseed() {
+            if [ "\$RESEED_ADDED" = "1" ]; then
+              sed -i '/^MNEMONIC_FORCE_RESEED=/d' "\$STACK/mcp.env"
+            fi
+          }
+          trap cleanup_reseed EXIT
+          if [ "${FORCE_RESEED}" = "true" ]; then
+            sed -i '/^MNEMONIC_FORCE_RESEED=/d' "\$STACK/mcp.env"
+            echo "MNEMONIC_FORCE_RESEED=1" >> "\$STACK/mcp.env"
+            RESEED_ADDED=1
+          fi
 
-          echo "::group::prepare Caddy network and remove stale stacks"
-          # The MCP container must share a network with the fabric Caddy container
-          # so Caddy can resolve the 'mnemonik-mcp' alias. Create it if missing.
-          \$DOCKER network inspect "${CADDY_NETWORK_NAME}" >/dev/null 2>&1 || \$DOCKER network create "${CADDY_NETWORK_NAME}"
-          # Tear down any stale stack created by an earlier repo-dir change
-          # (e.g., mnemonik from a previous deploy path).
-          \$DOCKER compose -p mnemonik --env-file "\$REPO/mcp.env" down || true
-          echo "::endgroup::"
-
-          echo "::group::pull + up (mcp service ONLY — Caddy owns 80/443 on this VM)"
-          # Never 'up -d' the full stack here: the compose file also defines
-          # nginx + certbot for standalone boxes, and they'd fight the
-          # fabric-managed Caddy for ports 80/443. 'up -d mcp' also starts
-          # the profile-gated ollama dependency when COMPOSE_PROFILES=ollama
-          # is set in mcp.env.
-          \$DOCKER compose --env-file "\$REPO/mcp.env" pull mcp
-          \$DOCKER compose --env-file "\$REPO/mcp.env" up -d mcp
+          echo "::group::recreate coding-fabric MCP service"
+          \$DOCKER compose up -d --force-recreate --pull never mcp
           echo "::endgroup::"
 
           echo "::group::wait for mcp health"
           ok=0
           for i in \$(seq 1 30); do
-            if curl -fsS --max-time 5 http://127.0.0.1:3000/health >/dev/null 2>&1; then ok=1; break; fi
+            if \$DOCKER exec mnemonik-mcp-1 curl -fsS --max-time 5 http://localhost:3000/health >/dev/null 2>&1; then ok=1; break; fi
             sleep 5
           done
           if [ "\$ok" != "1" ]; then
-            \$DOCKER compose --env-file "\$REPO/mcp.env" logs --tail 60 mcp; exit 1
+            \$DOCKER compose logs --tail 60 mcp; exit 1
           fi
           echo "mcp healthy"
           echo "::endgroup::"
 
-          echo "::group::reload Caddy"
-          # Caddy caches reverse_proxy upstreams until reload. Use the explicit
-          # IPv4 admin address because localhost can resolve to ::1 first.
-          \$DOCKER exec "\$CADDY_CONTAINER_NAME" caddy reload --config /etc/caddy/Caddyfile --address 127.0.0.1:2019 \
-            || \$DOCKER restart "\$CADDY_CONTAINER_NAME"
-          echo "::endgroup::"
-
-          if [ "${FORCE_RESEED}" = "true" ]; then
-            # Consumed once at boot; drop it so future restarts use mtime idempotency.
-            sed -i '/^MNEMONIC_FORCE_RESEED=/d' "\$REPO/mcp.env"
-          fi
+          cleanup_reseed
+          RESEED_ADDED=0
+          trap - EXIT
 
           \$DOCKER image prune -f >/dev/null 2>&1 || true
           echo "::group::seed log tail"
-          \$DOCKER compose --env-file "\$REPO/mcp.env" logs --since 60s mcp \
+          \$DOCKER compose logs --since 60s mcp \
             | grep -iE 'seed|protocol-knowledge|Identity:|listening|chain-stats' || true
           echo "::endgroup::"
           REMOTE_EOF
@@ -304,23 +241,23 @@ jobs:
             -d "$payload" \
             | jq -e '(.result.tools | length) >= 7' >/dev/null
 
-      - name: Chain-backed traction stats are live
+      - name: On-node and chain-backed memories are live
         run: |
           set -euo pipefail
           # The snapshot loads at startup (immediate refresh), so a couple of
-          # minutes covers RPC + payload fetches. saved_onchain must reflect
-          # the recovered anchored history — 0 means the refresh is failing
-          # (bad wallet/RPC env, or the RPC/gateway rejecting the VPS).
-          for i in $(seq 1 12); do
+          # minutes covers RPC + payload fetches. Requiring both counters also
+          # proves that the server opened coding-fabric's persistent SQLite
+          # bind mount instead of a fresh Docker named volume.
+          for _ in $(seq 1 12); do
             curl -fsS --max-time 10 "https://mcp.mnemonik.xyz/stats" >/tmp/stats.json 2>/dev/null || true
-            if jq -e '.saved_onchain >= 1' </tmp/stats.json >/dev/null 2>&1; then
-              echo "chain stats live: $(cat /tmp/stats.json)"
+            if jq -e '.saved_on_node >= 1 and .saved_onchain >= 1' </tmp/stats.json >/dev/null 2>&1; then
+              echo "memory stats live: $(cat /tmp/stats.json)"
               exit 0
             fi
             sleep 10
           done
           cat /tmp/stats.json 2>/dev/null || true
-          echo "::error::saved_onchain is still 0 — chain-stats refresh failing; check 'chain-stats' lines in the container logs (CHAIN_STATS_WALLETS / SOLANA_RPC_URL / gateway reachability)"
+          echo "::error::on-node or chain-backed memories are missing — verify the persistent /mnemonik/data bind mount, then check chain-stats RPC/gateway logs"
           exit 1
 
       - name: Chat returns non-empty context-grounded response (opt-in)
