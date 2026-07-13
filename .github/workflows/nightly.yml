@@ -39,7 +39,8 @@ jobs:
           shared-key: workspace
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          # Inspector >=0.21 requires Node >=22.7.5.
+          node-version: '22'
       # g++ builds fastembed's `local-embed`. `libdbus-1-dev pkg-config` are
       # for the `keyring` crate's secret-service backend, which transitively
       # pulls in `libdbus-sys` — its build script panics without the dbus-1
@@ -116,16 +117,14 @@ jobs:
           exit 1
       - name: Validate MCP server with @modelcontextprotocol/inspector
         run: |
-          # Exact pin to 0.5.1 — the last release before the 0.6.0 CLI
-          # rewrite that registered an `--env` option and tripped Node
-          # 20.20.2's stricter `util.parseArgs` with
-          # `ERR_PARSE_ARGS_INVALID_OPTION_VALUE: Option '--env'
-          # argument is ambiguous` before our own `--validate` flag was
-          # ever consumed. Bump deliberately, in lockstep with MCP spec
-          # releases — never via a `.x` wildcard.
-          npx --yes @modelcontextprotocol/inspector@0.5.1 \
-            --validate http://localhost:3000/mcp \
-            -H "Authorization: Bearer ${{ steps.jwt.outputs.token }}" \
+          # Exact pin: CLI mode performs one protocol request and exits. The
+          # old 0.5.1 pin had no CLI/--validate mode and launched its persistent
+          # web UI instead, causing Nightly to hang indefinitely.
+          npx --yes @modelcontextprotocol/inspector@0.22.0 \
+            --cli http://localhost:3000/mcp \
+            --transport http \
+            --method tools/list \
+            --header "Authorization: Bearer ${{ steps.jwt.outputs.token }}" \
             || (echo "MCP Inspector validation failed"; exit 1)
       - name: Stop mcp server
         if: always()
