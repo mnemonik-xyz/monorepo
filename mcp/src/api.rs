@@ -237,7 +237,16 @@ pub async fn sign_callback_handler(
     // free local write, now client-signed too) skips on-chain anchoring and
     // gets synthetic ids — exactly like a `local` storage deploy. Either
     // condition routes to the synthetic-id branch.
-    let is_local_write = state.storage_mode == "local" || entry.write_mode == WriteMode::Local;
+    //
+    // `MNEMONIC_DEFERRED_SYNTHETIC_ANCHOR=1` forces the same synthetic-id path
+    // for full-mode deploys. This lets end-to-end tests exercise the complete
+    // deferred-signing flow (quote → payment → COSE sign-callback → recall)
+    // without requiring a live Arweave + Solana stack.
+    let force_synthetic_anchor =
+        std::env::var("MNEMONIC_DEFERRED_SYNTHETIC_ANCHOR").is_ok_and(|v| v == "1");
+    let is_local_write = state.storage_mode == "local"
+        || entry.write_mode == WriteMode::Local
+        || force_synthetic_anchor;
     let (solana_tx, arweave_tx) = if is_local_write {
         let local_ar = format!("local:{}", &attestation_id[..8]);
         let local_sol = format!("local:{}", &entry.content_hash[..16]);
