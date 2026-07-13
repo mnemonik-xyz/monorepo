@@ -965,7 +965,7 @@ pub async fn check_pending(
         let arweave_url = if arweave_tx.starts_with("local:") {
             String::new()
         } else {
-            format!("https://arweave.net/{arweave_tx}")
+            format!("https://gateway.irys.xyz/{arweave_tx}")
         };
         return serde_json::json!({
             "status": "signed",

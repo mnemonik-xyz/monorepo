@@ -10,7 +10,7 @@ import {
   type ArtifactSource,
   type WriteMode,
 } from "../lib/ledger";
-import { arweaveTxUrl, solanaTxUrl } from "../lib/links";
+import { irysDataUrl, solanaTxUrl } from "../lib/links";
 
 /**
  * Ledger page (`/ledger`).
@@ -21,7 +21,7 @@ import { arweaveTxUrl, solanaTxUrl } from "../lib/links";
  *
  * The page never lies about provenance: data comes from the live `/artifacts`
  * endpoint and a fetch failure shows an error state — never fabricated rows.
- * On-chain rows ("participate") link to the Solana + Arweave explorers; `local:`
+ * On-chain rows ("participate") link to Solana and the Irys data gateway; `local:`
  * / unanchored rows render as plain text, never as links (Decision 6 surfaces
  * public rows only).
  */
@@ -89,7 +89,7 @@ export default function Ledger() {
     <div className="relative min-h-screen overflow-hidden">
       <Seo
         title="Ledger"
-        description="A forensic feed of recalled artifacts saved on the node — signed memories, blake3 hashes, and their Solana + Arweave anchors."
+        description="A forensic feed of recalled artifacts saved on the node — signed memories, blake3 hashes, Solana anchors, and Irys data receipts."
         canonical="/ledger"
       />
       <SiteHeader />
@@ -155,8 +155,8 @@ function PageHeader() {
       </h1>
       <p className="max-w-2xl text-text-muted">
         Public, signed memories saved on the node. Each carries a blake3 content
-        hash and — when minted on-chain — Solana + Arweave anchors anyone can
-        verify.
+        hash and — when minted on-chain — a Solana anchor plus independently
+        retrievable signed bytes on Irys.
       </p>
     </header>
   );
@@ -244,9 +244,10 @@ function Controls({
 /* -------------------------------------------------------------------------- */
 
 function ArtifactCard({ artifact: a }: { artifact: Artifact }) {
+  const [expanded, setExpanded] = useState(false);
   const onChain = a.write_mode === "participate";
   const solUrl = solanaTxUrl(a.solana_tx);
-  const arUrl = arweaveTxUrl(a.arweave_tx);
+  const dataUrl = irysDataUrl(a.arweave_tx);
 
   return (
     <article className="relative overflow-hidden rounded-md border border-white/10 bg-panel/60 p-5 transition-colors hover:border-accent-primary/30">
@@ -265,9 +266,22 @@ function ArtifactCard({ artifact: a }: { artifact: Artifact }) {
         </div>
       </div>
 
-      <p className="mt-4 line-clamp-6 text-[15px] leading-relaxed text-text-primary">
+      <p
+        className={`mt-4 whitespace-pre-wrap text-[15px] leading-relaxed text-text-primary ${
+          expanded ? "" : "line-clamp-6"
+        }`}
+      >
         {a.content}
       </p>
+
+      <button
+        type="button"
+        aria-expanded={expanded}
+        onClick={() => setExpanded((value) => !value)}
+        className="mt-2 font-mono text-[10px] uppercase tracking-[0.14em] text-accent-primary underline-offset-2 hover:underline"
+      >
+        {expanded ? "Collapse memory" : "Show full memory"}
+      </button>
 
       <HashRow hash={a.content_hash} />
 
@@ -286,7 +300,7 @@ function ArtifactCard({ artifact: a }: { artifact: Artifact }) {
 
       <dl className="mt-4 grid grid-cols-1 gap-x-6 gap-y-2 border-t border-white/5 pt-3 sm:grid-cols-2">
         <AnchorRow label="Solana" tx={a.solana_tx} url={solUrl} />
-        <AnchorRow label="Arweave" tx={a.arweave_tx} url={arUrl} />
+        <AnchorRow label="Irys data" tx={a.arweave_tx} url={dataUrl} />
       </dl>
     </article>
   );

@@ -25,17 +25,21 @@ export const EXTERNAL_LINKS = {
 export type ExternalLinkKey = keyof typeof EXTERNAL_LINKS;
 
 /**
- * Block-explorer URL builders for the on-chain anchors attached to an
- * attestation. `local:`-prefixed tx ids are synthetic (offline / on-node only)
- * and have no explorer page — callers should treat a `null` return as
- * "not anchored, render as plain text".
+ * External URL builders for the on-chain anchors and storage receipts attached
+ * to an attestation. `local:`-prefixed ids are synthetic (offline / on-node
+ * only) and have no external page.
  */
 export function solanaTxUrl(tx: string | null | undefined): string | null {
   if (!tx || tx.startsWith("local:")) return null;
   return `https://explorer.solana.com/tx/${encodeURIComponent(tx)}`;
 }
 
-export function arweaveTxUrl(tx: string | null | undefined): string | null {
+/**
+ * Production storage currently returns an Irys ANS-104 DataItem id, not an
+ * Arweave L1 transaction id. ViewBlock therefore returns 404 for these ids;
+ * the canonical retrieval URL is the Irys gateway.
+ */
+export function irysDataUrl(tx: string | null | undefined): string | null {
   if (!tx || tx.startsWith("local:")) return null;
-  return `https://viewblock.io/arweave/tx/${encodeURIComponent(tx)}`;
+  return `https://gateway.irys.xyz/${encodeURIComponent(tx)}`;
 }

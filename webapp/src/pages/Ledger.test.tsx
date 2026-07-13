@@ -136,6 +136,35 @@ describe("Ledger page", () => {
       "rel",
       expect.stringContaining("noopener"),
     );
+
+    const irysLink = screen
+      .getAllByRole("link")
+      .find((a) =>
+        a.getAttribute("href")?.startsWith("https://gateway.irys.xyz/"),
+      );
+    expect(irysLink).toHaveAttribute(
+      "href",
+      `https://gateway.irys.xyz/${FIXTURE[0]!.arweave_tx}`,
+    );
+    expect(irysLink?.getAttribute("href")).not.toContain("viewblock.io");
+  });
+
+  it("expands_and_collapses_the_recovered_memory", async () => {
+    const user = userEvent.setup();
+    renderLedger();
+    await screen.findByText(/Shipped v0\.2 on Tuesday/i);
+
+    const [expand] = screen.getAllByRole("button", {
+      name: /show full memory/i,
+    });
+    expect(expand).toHaveAttribute("aria-expanded", "false");
+
+    await user.click(expand!);
+    expect(expand).toHaveAttribute("aria-expanded", "true");
+    expect(expand).toHaveTextContent(/collapse memory/i);
+
+    await user.click(expand!);
+    expect(expand).toHaveAttribute("aria-expanded", "false");
   });
 
   it("search_narrows_the_list", async () => {

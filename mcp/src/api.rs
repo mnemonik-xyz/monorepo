@@ -117,8 +117,8 @@ pub struct SignCallbackResponse {
     /// Convenience explorer URL — `https://solscan.io/tx/{solana_tx}` for real
     /// txs; empty string for synthetic `local:` ids.
     pub solana_explorer_url: String,
-    /// Convenience gateway URL — `https://arweave.net/{arweave_tx}` for real
-    /// uploads; empty string for synthetic `local:` ids.
+    /// Convenience gateway URL — `https://gateway.irys.xyz/{arweave_tx}` for
+    /// production Irys DataItems; empty string for synthetic `local:` ids.
     pub arweave_url: String,
 }
 
@@ -438,7 +438,7 @@ pub async fn sign_callback_handler(
     let arweave_url = if arweave_tx.starts_with("local:") {
         String::new()
     } else {
-        format!("https://arweave.net/{arweave_tx}")
+        format!("https://gateway.irys.xyz/{arweave_tx}")
     };
 
     let body = SignCallbackResponse {

@@ -10,7 +10,7 @@ import {
   type AttestationTimeline,
   type TimeRange,
 } from "../lib/ledger";
-import { arweaveTxUrl, solanaTxUrl } from "../lib/links";
+import { irysDataUrl, solanaTxUrl } from "../lib/links";
 import { Seo } from "../lib/seo";
 
 /**
@@ -117,7 +117,8 @@ export default function Analytics() {
           <p className="max-w-2xl text-text-muted">
             Every signed memory is an attestation. On-node records live on the
             operator&rsquo;s node; on-chain records are additionally anchored on
-            Solana and Arweave. The split below tracks both across the{" "}
+            Solana, with signed bytes retrievable from Irys. The split below
+            tracks both across the{" "}
             {windowLabel}.
           </p>
         </header>
@@ -206,7 +207,7 @@ function AnchoredReferences({
 
 function AnchoredReference({ artifact }: { artifact: Artifact }) {
   const solUrl = solanaTxUrl(artifact.solana_tx);
-  const arUrl = arweaveTxUrl(artifact.arweave_tx);
+  const arUrl = irysDataUrl(artifact.arweave_tx);
 
   return (
     <article className="rounded-md border border-white/5 bg-white/[0.02] p-4">
@@ -215,7 +216,7 @@ function AnchoredReference({ artifact }: { artifact: Artifact }) {
       </p>
       <dl className="mt-3 space-y-1.5">
         <ReferenceLink label="Solana" tx={artifact.solana_tx} url={solUrl} />
-        <ReferenceLink label="Arweave" tx={artifact.arweave_tx} url={arUrl} />
+        <ReferenceLink label="Irys data" tx={artifact.arweave_tx} url={arUrl} />
       </dl>
     </article>
   );
@@ -256,7 +257,7 @@ function ReferenceLink({
 
 function isAnchored(artifact: Artifact): boolean {
   return Boolean(
-    solanaTxUrl(artifact.solana_tx) || arweaveTxUrl(artifact.arweave_tx),
+    solanaTxUrl(artifact.solana_tx) || irysDataUrl(artifact.arweave_tx),
   );
 }
 
