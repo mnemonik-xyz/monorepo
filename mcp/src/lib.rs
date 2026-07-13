@@ -39,6 +39,7 @@ pub mod seed;
 /// `mnemonic_mcp::skill_parse::...`.
 pub mod skill_parse;
 pub mod tools;
+pub mod universal_paywall;
 // Verifiable-trajectories MCP tool handlers (attest_step / attest_verdict /
 // verify_trajectory). Experimental; gated so default builds never compile it.
 #[cfg(feature = "trajectory-experimental")]

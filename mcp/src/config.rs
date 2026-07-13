@@ -50,6 +50,24 @@ pub struct Config {
     /// Minimum / initial cost of mnemonic_sign_memory in micro-USDC (floor price)
     pub sign_memory_cost_micro_usdc: i64,
 
+    // ── Universal Paywall integration (exact x402 rail) ───────────────────────
+    /// Optional URL of the Universal Paywall synchronous session API.
+    /// When set, the x402 gate is routed through Universal Paywall instead of
+    /// being verified directly against a Solana/EVM RPC.
+    pub universal_paywall_url: String,
+    /// API key for the Universal Paywall service.
+    pub universal_paywall_api_key: String,
+    /// Network identifier for the operation binding, e.g. "eip155:31337".
+    pub universal_paywall_network: String,
+    /// USDC token contract address on the target EVM chain.
+    pub universal_paywall_asset: String,
+    /// EVM address that receives settled USDC.
+    pub universal_paywall_pay_to: String,
+    /// EVM address of the payer whose wallet signs the EIP-3009 authorization.
+    pub universal_paywall_payer_wallet: String,
+    /// Base URL the browser approval page is served from.
+    pub universal_paywall_approval_url_base: String,
+
     // ── Dynamic pricing ───────────────────────────────────────────────────────
     /// How often to refresh Irys + SOL prices (seconds). Default 1800 (30 min).
     pub price_refresh_secs: u64,
@@ -188,6 +206,13 @@ impl Config {
             sign_memory_cost_micro_usdc: env_or("SIGN_MEMORY_COST_MICRO_USDC", "1000")
                 .parse()
                 .unwrap_or(1000),
+            universal_paywall_url: env_or("UNIVERSAL_PAYWALL_URL", ""),
+            universal_paywall_api_key: env_or("UNIVERSAL_PAYWALL_API_KEY", ""),
+            universal_paywall_network: env_or("UNIVERSAL_PAYWALL_NETWORK", ""),
+            universal_paywall_asset: env_or("UNIVERSAL_PAYWALL_ASSET", ""),
+            universal_paywall_pay_to: env_or("UNIVERSAL_PAYWALL_PAY_TO", ""),
+            universal_paywall_payer_wallet: env_or("UNIVERSAL_PAYWALL_PAYER_WALLET", ""),
+            universal_paywall_approval_url_base: env_or("UNIVERSAL_PAYWALL_APPROVAL_URL_BASE", ""),
             price_refresh_secs: env_or("PRICE_REFRESH_SECS", "1800").parse().unwrap_or(1800),
             pricing_margin_bps: env_or("PRICING_MARGIN_BPS", "2000").parse().unwrap_or(2000),
             typical_payload_bytes: env_or("TYPICAL_PAYLOAD_BYTES", "2048")

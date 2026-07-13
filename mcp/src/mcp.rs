@@ -22,6 +22,7 @@ use crate::{
     pricing::PricingEngine, tools,
 };
 use mnemonic_core::arweave::ArweaveClient;
+use mnemonic_core::codec::hash::hash_bytes as blake3_hash;
 use mnemonic_core::compress::EmbeddingCompressor;
 use mnemonic_core::embed::Embedder;
 use mnemonic_core::solana::SolanaClient;
@@ -703,6 +704,8 @@ pub struct McpState {
     pub admin_token: String,
     /// EVM x402 settlement config (Wave 1). `None` = EVM rail disabled.
     pub evm_payment: Option<crate::payment::EvmPaymentConfig>,
+    /// Optional Universal Paywall exact-payment config. `None` = disabled.
+    pub universal_paywall: Option<crate::universal_paywall::UniversalPaywallConfig>,
 
     // Dynamic pricing — the per-call x402 price floor lives here (the static
     // `SIGN_MEMORY_COST_MICRO_USDC` config seeds `PricingEngine`'s `min_price`).
@@ -758,6 +761,11 @@ pub struct McpState {
     /// LRU-bounded (10k), TTL-bounded (300s), per-`jwt.sub` capped (50).
     /// See `pending.rs` for the Decision-12 design.
     pub pending: Arc<PendingBundles>,
+
+    /// In-memory store of Universal Paywall operation quotes created by the
+    /// payment gate. Used for idempotent retry and to replay the binding on
+    /// settlement. Process-local only — a restart drops pending quotes.
+    pub universal_paywall_quotes: Arc<dashmap::DashMap<String, crate::universal_paywall::StoredQuote>>,
 
     /// CLI bootstrap-ticket store (mnemonic-cli tech-spec Decision 7).
     /// Webapp issues a ticket via `POST /api/cli-bootstrap/issue` (Bearer
@@ -1337,17 +1345,41 @@ pub async fn mcp_handler(
     if is_sign_memory && participate_gate && state.payment_mode != "none" {
         // Use live price from pricing engine (refreshed in background).
         let current_cost = state.pricing.current_price();
-        let gate = payment::check_payment(
-            &headers,
-            &state.payment_mode,
-            &state.store,
-            &state.solana,
-            &state.treasury_pubkey,
-            &state.usdc_mint,
-            current_cost,
-            state.evm_payment.as_ref(),
-        )
-        .await;
+
+        // Extract content + optional operation_id for the Universal Paywall
+        // exact rail. The artifact_hash is computed from the raw content
+        // string so the browser approval page can re-derive the same binding.
+        let sign_args = req.params.get("arguments").cloned().unwrap_or_default();
+        let content = sign_args.get("content").and_then(|v| v.as_str()).unwrap_or("");
+        let artifact_hash = blake3_hash(content.as_bytes());
+        let operation_id = sign_args.get("operation_id").and_then(|v| v.as_str());
+
+        let gate = if let Some(up_config) = state.universal_paywall.as_ref() {
+            let up_client = crate::universal_paywall::UniversalPaywallClient::new(up_config.clone());
+            payment::check_universal_paywall(
+                &headers,
+                &up_client,
+                up_config,
+                current_cost,
+                &state.universal_paywall_quotes,
+                &owner_pubkey,
+                &artifact_hash,
+                operation_id,
+            )
+            .await
+        } else {
+            payment::check_payment(
+                &headers,
+                &state.payment_mode,
+                &state.store,
+                &state.solana,
+                &state.treasury_pubkey,
+                &state.usdc_mint,
+                current_cost,
+                state.evm_payment.as_ref(),
+            )
+            .await
+        };
 
         match gate {
             payment::PaymentGate::Proceed => {
@@ -1461,6 +1493,18 @@ pub async fn mcp_handler(
             }
             payment::PaymentGate::NeedPayment(x402) => {
                 ndjson_response(StatusCode::PAYMENT_REQUIRED, &x402)
+            }
+            payment::PaymentGate::NeedUniversalPaywall(up_req) => {
+                let body = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": req.id,
+                    "error": {
+                        "code": -32012,
+                        "message": "payment required",
+                        "data": up_req
+                    }
+                });
+                ndjson_response(StatusCode::PAYMENT_REQUIRED, &body)
             }
             payment::PaymentGate::Unauthorized(msg) => {
                 let err_body = serde_json::json!({
@@ -1990,6 +2034,7 @@ mod transport_tests {
             chat_limiter,
             publish_limiter,
             pending: Arc::new(crate::pending::PendingBundles::with_defaults()),
+            universal_paywall_quotes: Arc::new(dashmap::DashMap::new()),
             bootstrap_tickets: Arc::new(crate::api::BootstrapTickets::with_defaults()),
             bootstrap_server_x25519_secret,
             bootstrap_server_x25519_public,

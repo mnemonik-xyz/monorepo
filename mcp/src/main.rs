@@ -14,6 +14,7 @@ mod pricing;
 mod publish;
 mod seed;
 mod tools;
+mod universal_paywall;
 #[cfg(feature = "trajectory-experimental")]
 mod trajectory_tools;
 
@@ -503,6 +504,29 @@ async fn main() -> anyhow::Result<()> {
         None
     };
 
+    // Universal Paywall exact x402 rail: enabled only when the URL and all
+    // binding fields are set.
+    let universal_paywall = if !cfg.universal_paywall_url.is_empty()
+        && !cfg.universal_paywall_api_key.is_empty()
+        && !cfg.universal_paywall_network.is_empty()
+        && !cfg.universal_paywall_asset.is_empty()
+        && !cfg.universal_paywall_pay_to.is_empty()
+        && !cfg.universal_paywall_payer_wallet.is_empty()
+    {
+        tracing::info!("Universal Paywall exact rail enabled");
+        Some(universal_paywall::UniversalPaywallConfig {
+            url: cfg.universal_paywall_url.clone(),
+            api_key: cfg.universal_paywall_api_key.clone(),
+            network: cfg.universal_paywall_network.clone(),
+            asset: cfg.universal_paywall_asset.clone(),
+            pay_to: cfg.universal_paywall_pay_to.clone(),
+            payer_wallet: cfg.universal_paywall_payer_wallet.clone(),
+            approval_url_base: cfg.universal_paywall_approval_url_base.clone(),
+        })
+    } else {
+        None
+    };
+
     // Chain-backed traction stats (recover-traction-from-chain). A bad
     // wallet in CHAIN_STATS_WALLETS is a fatal misconfiguration — silently
     // shrunk traction numbers are worse than a startup error.
@@ -527,6 +551,7 @@ async fn main() -> anyhow::Result<()> {
         usdc_mint: cfg.usdc_mint.clone(),
         admin_token: cfg.admin_token.clone(),
         evm_payment,
+        universal_paywall,
         pricing,
         sol_tx_fee_lamports: cfg.sol_tx_fee_lamports,
         storage_mode: cfg.storage_mode.clone(),
@@ -539,6 +564,7 @@ async fn main() -> anyhow::Result<()> {
         chat_limiter,
         publish_limiter,
         pending,
+        universal_paywall_quotes: Arc::new(dashmap::DashMap::new()),
         bootstrap_tickets,
         bootstrap_server_x25519_secret,
         bootstrap_server_x25519_public,

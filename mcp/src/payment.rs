@@ -26,6 +26,11 @@ use std::time::{Duration, Instant};
 use mnemonic_core::solana::SolanaClient;
 use mnemonic_core::storage::SqliteStore;
 
+use crate::universal_paywall::{
+    ExactAuthorization, OperationBinding, OperationScope, StoredQuote, UniversalPaywallClient,
+    UniversalPaywallConfig,
+};
+
 // ── x402 wire types ──────────────────────────────────────────────────────────
 
 /// Payload sent in the `X-Payment` header by the agent.
@@ -72,8 +77,25 @@ pub enum PaymentGate {
     Proceed,
     /// Return HTTP 402 with this body.
     NeedPayment(X402Response),
+    /// Return HTTP 402 with a Universal Paywall exact quote.
+    NeedUniversalPaywall(UniversalPaywallPaymentRequired),
     /// Bad credentials / payment verification failure — return 401/402 message.
     Unauthorized(String),
+}
+
+/// Body returned with HTTP 402 when Universal Paywall is the payment rail.
+#[derive(Debug, Serialize)]
+pub struct UniversalPaywallPaymentRequired {
+    pub operation_id: String,
+    pub quote_id: String,
+    pub approval_url: String,
+    pub scheme: String,
+    pub network: String,
+    pub asset: String,
+    pub pay_to: String,
+    pub payer_wallet: String,
+    pub amount: String,
+    pub binding_digest: String,
 }
 
 // ── Header helpers ───────────────────────────────────────────────────────────
@@ -133,6 +155,128 @@ pub async fn check_payment(
             ))
         }
     }
+}
+
+// ── Universal Paywall exact x402 path ────────────────────────────────────────
+
+/// Payment proof sent in the `X-Payment` header for the Universal Paywall rail.
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+pub struct UniversalPaywallPaymentProof {
+    pub scheme: String,
+    pub payer_wallet: String,
+    pub authorization: ExactAuthorization,
+}
+
+/// Decode Universal Paywall exact payment proof from `X-Payment` header.
+pub fn extract_universal_paywall_proof(headers: &HeaderMap) -> Option<UniversalPaywallPaymentProof> {
+    let raw = headers.get("x-payment").and_then(|v| v.to_str().ok())?;
+    serde_json::from_str::<UniversalPaywallPaymentProof>(raw).ok()
+}
+
+/// Gate for the Universal Paywall `exact` one-time x402 rail.
+///
+/// First call (no payment header): create an immutable quote, store it in
+/// `quotes`, and return `PaymentGate::NeedUniversalPaywall` so the client can
+/// open a browser approval page.
+///
+/// Retry (with `X-Payment` exact authorization): settle through Universal
+/// Paywall and return `PaymentGate::Proceed` on success. Idempotent retries
+/// return `Proceed` once the receipt is cached.
+#[allow(clippy::too_many_arguments)]
+pub async fn check_universal_paywall(
+    headers: &HeaderMap,
+    client: &UniversalPaywallClient,
+    config: &UniversalPaywallConfig,
+    cost: i64,
+    quotes: &DashMap<String, StoredQuote>,
+    payer_subject: &str,
+    artifact_hash: &str,
+    operation_id: Option<&str>,
+) -> PaymentGate {
+    // Retry path: the client already signed an EIP-3009 authorization.
+    if let Some(proof) = extract_universal_paywall_proof(headers) {
+        let op_id = match operation_id {
+            Some(id) => id.to_string(),
+            None => return PaymentGate::Unauthorized("missing operation_id for payment retry".into()),
+        };
+        let quote = match quotes.get(&op_id) {
+            Some(q) => q.clone(),
+            None => return PaymentGate::Unauthorized("unknown or expired operation_id".into()),
+        };
+        // Idempotent fast path: already settled in this process.
+        if quote.receipt.is_some() {
+            return PaymentGate::Proceed;
+        }
+        let receipt = match client.settle_exact(&quote.binding, &proof.authorization).await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(operation_id = %op_id, error = %e, "universal-paywall settle_exact failed");
+                return PaymentGate::Unauthorized(format!("payment settlement failed: {e}"));
+            }
+        };
+        quotes.entry(op_id).and_modify(|q| q.receipt = Some(receipt));
+        return PaymentGate::Proceed;
+    }
+
+    // First call: create a quote and ask the client to pay.
+    let operation_id = operation_id.map(|s| s.to_string()).unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let nonce = uuid::Uuid::new_v4().to_string();
+    let now = chrono::Utc::now();
+    let expires_at = (now + chrono::TimeDelta::minutes(5)).to_rfc3339();
+
+    let binding = OperationBinding {
+        version: 1,
+        operation_id: operation_id.clone(),
+        payer_subject: payer_subject.to_string(),
+        payer_wallet: config.payer_wallet.clone(),
+        artifact_hash: artifact_hash.to_string(),
+        amount: cost.to_string(),
+        asset: config.asset.clone(),
+        network: config.network.clone(),
+        pay_to: config.pay_to.clone(),
+        expires_at,
+        nonce,
+        scope: OperationScope {
+            workspace_hash: None,
+            visibility: "private".into(),
+            action: "manual".into(),
+        },
+    };
+
+    let quote = match client.create_quote(&binding).await {
+        Ok(q) => q,
+        Err(e) => {
+            tracing::error!(error = %e, "universal-paywall create_quote failed");
+            return PaymentGate::Unauthorized(format!("payment provider unavailable: {e}"));
+        }
+    };
+
+    let approval_url = client.approval_url(&operation_id, &quote.quote_id);
+
+    quotes.insert(
+        operation_id.clone(),
+        StoredQuote {
+            operation_id: operation_id.clone(),
+            quote_id: quote.quote_id.clone(),
+            binding: binding.clone(),
+            binding_digest: quote.binding_digest.clone(),
+            receipt: None,
+        },
+    );
+
+    PaymentGate::NeedUniversalPaywall(UniversalPaywallPaymentRequired {
+        operation_id,
+        quote_id: quote.quote_id,
+        approval_url,
+        scheme: "exact".into(),
+        network: config.network.clone(),
+        asset: config.asset.clone(),
+        pay_to: config.pay_to.clone(),
+        payer_wallet: config.payer_wallet.clone(),
+        amount: cost.to_string(),
+        binding_digest: quote.binding_digest,
+    })
 }
 
 // ── x402 path ────────────────────────────────────────────────────────────────
