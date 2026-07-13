@@ -50,12 +50,17 @@ jobs:
         run: |
           cargo build -p mnemonic-mcp --features local-embed --bin mnemonic-mcp
           cargo build -p mnemonic-mcp --features test-support --bin mint-test-jwt
-      - name: Generate JWT secret + test token
+      - name: Generate runtime secrets + test token
         id: jwt
         run: |
-          # 32-byte random base64 secret.
+          # The Nightly database is disposable, so fresh per-run secrets are
+          # correct here. Production keeps MCP_REFRESH_SALT stable across boots.
           SECRET="$(openssl rand -base64 32)"
+          REFRESH_SALT="$(openssl rand -base64 32)"
+          echo "::add-mask::$SECRET"
+          echo "::add-mask::$REFRESH_SALT"
           echo "secret=$SECRET" >> "$GITHUB_OUTPUT"
+          echo "refresh_salt=$REFRESH_SALT" >> "$GITHUB_OUTPUT"
           # Mint a JWT for the canonical CI subject.
           TOKEN="$(MCP_JWT_SECRET="$SECRET" \
             ./target/debug/mint-test-jwt --sub ci-test)"
@@ -69,6 +74,7 @@ jobs:
           # ~/.cache/fastembed dir on subsequent runs.
           EMBED_PROVIDER: fastembed
           MCP_JWT_SECRET: ${{ steps.jwt.outputs.secret }}
+          MCP_REFRESH_SALT: ${{ steps.jwt.outputs.refresh_salt }}
           MNEMONIC_KEYPAIR_PATH: /tmp/ci-mcp-id.json
           DATABASE_PATH: /tmp/ci-mcp.db
           RAG_CHUNK_DIR: /tmp/ci-rag
@@ -87,7 +93,17 @@ jobs:
       # /health (which only comes up post-seed) has time to bind.
       - name: Wait for /health (180s timeout)
         run: |
+          dump_mcp_log() {
+            echo "::group::mnemonic-mcp output (/tmp/mcp.log)"
+            cat /tmp/mcp.log 2>/dev/null || echo "(no log file)"
+            echo "::endgroup::"
+          }
           for i in $(seq 1 180); do
+            if ! kill -0 "$(cat /tmp/mcp.pid)" 2>/dev/null; then
+              echo "mnemonic-mcp exited before /health became ready"
+              dump_mcp_log
+              exit 1
+            fi
             if curl -fsS http://localhost:3000/health >/dev/null 2>&1; then
               echo "/health up after ${i}s"
               exit 0
@@ -95,10 +111,7 @@ jobs:
             sleep 1
           done
           echo "/health never came up"
-          # Surface mcp logs for debugging.
-          echo "::group::mnemonic-mcp output (/tmp/mcp.log)"
-          cat /tmp/mcp.log 2>/dev/null || echo "(no log file)"
-          echo "::endgroup::"
+          dump_mcp_log
           if [ -f /tmp/mcp.pid ]; then kill "$(cat /tmp/mcp.pid)" 2>/dev/null || true; fi
           exit 1
       - name: Validate MCP server with @modelcontextprotocol/inspector
