@@ -172,6 +172,28 @@ impl UniversalPaywallClient {
         self.config.api_key.clone()
     }
 
+    /// Fetch a previously created quote by operation id.
+    pub async fn get_quote_by_operation_id(
+        &self,
+        operation_id: &str,
+    ) -> anyhow::Result<QuoteResponse> {
+        let url = format!("{}/v1/quotes/{}", self.config.url, operation_id);
+        let resp = self
+            .client
+            .get(&url)
+            .header("X-API-Key", self.auth_header())
+            .send()
+            .await
+            .context("universal-paywall get_quote request")?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            anyhow::bail!("get_quote failed (HTTP {status}): {body}");
+        }
+        resp.json().await.context("parse get_quote response")
+    }
+
     /// Ask Universal Paywall to accept and identify an immutable operation quote.
     pub async fn create_quote(&self, binding: &OperationBinding) -> anyhow::Result<QuoteResponse> {
         let url = format!("{}/v1/quotes", self.config.url);

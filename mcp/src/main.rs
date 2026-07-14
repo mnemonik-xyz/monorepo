@@ -1,4 +1,5 @@
 mod api;
+mod approval;
 mod chain_stats;
 mod chat;
 mod config;
@@ -78,6 +79,9 @@ enum Command {
     /// Idempotent — absent file exits 0 silently. Always prints
     /// "mnemonic: logged out" to stderr on success.
     Logout,
+    /// Print the server's base58 Ed25519 identity pubkey and exit.
+    /// Useful for funding a local solana-test-validator before startup.
+    Identity,
 }
 
 // ── Axum handlers ─────────────────────────────────────────────────────────────
@@ -200,6 +204,19 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    if matches!(cli.command, Some(Command::Identity)) {
+        match mnemonic_core::identity::ensure() {
+            Ok(id) => {
+                println!("{}", id.pubkey_base58);
+                return Ok(());
+            }
+            Err(e) => {
+                eprintln!("mnemonic: identity resolution failed: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
+
     let cfg = config::Config::from_env();
 
     // ── Hosted endpoint resolution (Decision 12 + SAR5-M1 round 3) ───────────
@@ -236,7 +253,9 @@ async fn main() -> anyhow::Result<()> {
     // existing `mnemonic-mcp --transport stdio` invocation is unchanged.
     let transport = match cli.command {
         Some(Command::McpStdio) => "stdio".to_string(),
-        Some(Command::Logout) => unreachable!("logout short-circuits above"),
+        Some(Command::Logout) | Some(Command::Identity) => {
+            unreachable!("logout and identity short-circuit above")
+        }
         None => {
             if std::env::var("MCP_TRANSPORT").is_ok() {
                 cfg.transport.clone()
@@ -552,6 +571,26 @@ async fn main() -> anyhow::Result<()> {
         admin_token: cfg.admin_token.clone(),
         evm_payment,
         universal_paywall,
+        universal_paywall_eip712_name: cfg.universal_paywall_eip712_name.clone(),
+        universal_paywall_eip712_version: cfg.universal_paywall_eip712_version.clone(),
+        approval_ui_dist: {
+            let p = cfg.approval_ui_dist.clone();
+            if p.as_os_str().is_empty() {
+                None
+            } else {
+                Some(p)
+            }
+        },
+        approval_mock_signer: if cfg.approval_mock_signer.is_empty() {
+            None
+        } else {
+            Some(cfg.approval_mock_signer.clone())
+        },
+        approval_chain_rpc_url: cfg.approval_chain_rpc_url.clone(),
+        approval_chain_name: cfg.approval_chain_name.clone(),
+        approval_chain_currency_symbol: cfg.approval_chain_currency_symbol.clone(),
+        approval_chain_currency_decimals: cfg.approval_chain_currency_decimals,
+        approval_authorizations: Arc::new(dashmap::DashMap::new()),
         pricing,
         sol_tx_fee_lamports: cfg.sol_tx_fee_lamports,
         storage_mode: cfg.storage_mode.clone(),
@@ -764,6 +803,7 @@ async fn run_http(
     use axum::http::{header, Method};
     use tower_governor::{governor::GovernorConfigBuilder, GovernorLayer};
     use tower_http::cors::{AllowOrigin, CorsLayer};
+    use tower_http::services::ServeDir;
 
     // ── OAuth state + JWT secret (Decisions 9 + 11) ──────────────────────────
     let secret = load_jwt_secret()?;
@@ -1129,7 +1169,23 @@ async fn run_http(
         Router::new()
     };
 
-    let app = Router::new()
+    // Per-IP rate limiter for the browser approval surface. A genuine user
+    // flow generates ~5 requests (page, quote, chain metadata, settle,
+    // authorization poll). We allow a burst of 30 and 1 req/s refill so
+    // rapid retries / polling do not starve other users. Mounted only on
+    // the approval router, so it does not affect /mcp or /oauth/* limits.
+    let approval_governor_conf = Arc::new(
+        GovernorConfigBuilder::default()
+            .per_second(1)
+            .burst_size(30)
+            .finish()
+            .ok_or_else(|| anyhow::anyhow!("failed to build approval governor config"))?,
+    );
+    let approval_router = approval::router(state.clone()).layer(GovernorLayer {
+        config: approval_governor_conf,
+    });
+
+    let mut app = Router::new()
         .route("/chat", post(chat::chat_handler))
         .route("/admin/stats", get(admin_stats))
         .route("/stats", get(api::public_stats_handler))
@@ -1154,7 +1210,7 @@ async fn run_http(
             "/health",
             get(|| async { Json(serde_json::json!({"status": "ok"})) }),
         )
-        .with_state(state)
+        .with_state(state.clone())
         .merge(mcp_subrouter)
         .merge(api_subrouter)
         .merge(oauth_routes)
@@ -1165,7 +1221,15 @@ async fn run_http(
         .merge(extension_bootstrap_redeem_router)
         .merge(key_escrow_router)
         .merge(well_known_routes)
-        .layer(cors);
+        .merge(approval_router);
+
+    // Serve the approval UI static assets (JS/CSS) from the built dist dir.
+    // The /approve HTML route lives in approval::router().
+    if let Some(dist) = &state.approval_ui_dist {
+        app = app.nest_service("/assets", ServeDir::new(dist.join("assets")));
+    }
+
+    let app = app.layer(cors);
 
     let addr = format!("{host}:{port}");
     tracing::info!("MCP server listening on http://{addr}/mcp");

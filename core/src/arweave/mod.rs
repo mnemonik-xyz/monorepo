@@ -4,6 +4,7 @@
 //! items using the server's Solana Ed25519 keypair.  Local uploads (arlocal)
 //! use unsigned stub transactions -- no signing needed for dev/test.
 
+pub mod arlocal;
 pub mod graphql;
 pub mod recovery;
 
@@ -19,8 +20,8 @@ pub(crate) fn http_client() -> reqwest::Client {
         .build()
         .unwrap_or_default()
 }
-use base64::Engine;
-use sha2::{Digest, Sha256, Sha384};
+
+use sha2::{Digest, Sha384};
 use solana_sdk::signature::{Keypair, Signer};
 
 pub struct ArweaveClient {
@@ -59,7 +60,7 @@ impl ArweaveClient {
     /// Write string payload to Arweave.
     pub async fn write(&self, payload: &str, keypair: &Keypair) -> anyhow::Result<String> {
         if !self.bypass_local_routing && self.is_local() {
-            self.write_arlocal(payload.as_bytes()).await
+            self.write_arlocal(payload.as_bytes(), keypair).await
         } else {
             self.write_irys(keypair, payload.as_bytes()).await
         }
@@ -69,7 +70,7 @@ impl ArweaveClient {
     /// Used for COSE_Sign1 encoded artifacts.
     pub async fn write_bytes(&self, data: &[u8], keypair: &Keypair) -> anyhow::Result<String> {
         if !self.bypass_local_routing && self.is_local() {
-            self.write_arlocal(data).await
+            self.write_arlocal(data, keypair).await
         } else {
             self.write_irys(keypair, data).await
         }
@@ -92,8 +93,11 @@ impl ArweaveClient {
         tags.extend_from_slice(extra_tags);
 
         if !self.bypass_local_routing && self.is_local() {
-            // arlocal dev path: store the bytes (tags are best-effort here).
-            return self.write_arlocal(data).await;
+            // arlocal dev path: post a signed ANS-104 data item the same way
+            // Irys accepts it. arlocal's /tx/solana endpoint validates the
+            // signature and data root, so the previous unsigned JSON stub no
+            // longer works with modern arlocal versions.
+            return self.write_arlocal(data, keypair).await;
         }
         let item = build_data_item(keypair, data, &tags);
         let resp = self
@@ -152,35 +156,18 @@ impl ArweaveClient {
 
     // -- Local (arlocal) --
 
-    async fn write_arlocal(&self, data: &[u8]) -> anyhow::Result<String> {
-        let b64url = base64::engine::general_purpose::URL_SAFE_NO_PAD;
-        let mut sig_bytes = vec![0u8; 512];
-        prng_fill(&mut sig_bytes);
-        let id_hash = Sha256::digest(&sig_bytes);
-        let id = b64url.encode(id_hash);
+    async fn write_arlocal(&self, data: &[u8], _keypair: &Keypair) -> anyhow::Result<String> {
+        let (tx, id, address) = arlocal::build_signed_transaction(data)?;
 
-        let mut owner = vec![0u8; 256];
-        prng_fill(&mut owner);
-
-        let data_root = Sha256::digest(data);
-
-        let tx = serde_json::json!({
-            "format": 2,
-            "id": id,
-            "last_tx": "",
-            "owner": b64url.encode(&owner),
-            "tags": [
-                {"name": b64url.encode(b"Content-Type"), "value": b64url.encode(b"application/json")},
-                {"name": b64url.encode(b"App-Name"),     "value": b64url.encode(b"mnemonic-protocol")},
-            ],
-            "target": "",
-            "quantity": "0",
-            "data_size": data.len().to_string(),
-            "data": b64url.encode(data),
-            "data_root": b64url.encode(data_root),
-            "reward": "0",
-            "signature": b64url.encode(&sig_bytes),
-        });
+        // Fund the derived Arweave wallet on arlocal. The mint endpoint is
+        // idempotent; calling it before every upload keeps the local client
+        // self-sufficient.
+        let _ = self
+            .client
+            .get(format!("{}/mint/{address}/1000000000000", self.base_url))
+            .send()
+            .await
+            .context("arlocal mint")?;
 
         let resp = self
             .client
@@ -188,10 +175,10 @@ impl ArweaveClient {
             .json(&tx)
             .send()
             .await
-            .context("arweave POST")?;
+            .context("arlocal POST")?;
         if !resp.status().is_success() {
             let body = resp.text().await.unwrap_or_default();
-            anyhow::bail!("arweave write failed: {body}");
+            anyhow::bail!("arlocal write failed: {body}");
         }
         Ok(id)
     }
@@ -327,21 +314,6 @@ fn build_data_item(keypair: &Keypair, data: &[u8], tags: &[(&str, &str)]) -> Vec
     item.extend_from_slice(&avro_tags);
     item.extend_from_slice(data);
     item
-}
-
-fn prng_fill(buf: &mut [u8]) {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let seed = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos() as u64;
-    let mut state = seed;
-    for byte in buf.iter_mut() {
-        state = state
-            .wrapping_mul(6364136223846793005)
-            .wrapping_add(1442695040888963407);
-        *byte = (state >> 33) as u8;
-    }
 }
 
 #[cfg(test)]

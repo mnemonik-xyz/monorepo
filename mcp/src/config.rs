@@ -67,6 +67,25 @@ pub struct Config {
     pub universal_paywall_payer_wallet: String,
     /// Base URL the browser approval page is served from.
     pub universal_paywall_approval_url_base: String,
+    /// EIP-712 domain name for the USDC token contract (default "USD Coin").
+    pub universal_paywall_eip712_name: String,
+    /// EIP-712 domain version for the USDC token contract (default "2").
+    pub universal_paywall_eip712_version: String,
+
+    // ── Embedded approval page (production browser UI) ─────────────────────────
+    /// Absolute path to the built @universal-paywall/approval-ui dist directory.
+    /// When empty, the /approve route and static assets are NOT mounted.
+    pub approval_ui_dist: PathBuf,
+    /// Test-only hex private key that enables /api/mock-sign. Empty = disabled.
+    pub approval_mock_signer: String,
+    /// RPC URL advertised to the browser for wallet_addEthereumChain.
+    pub approval_chain_rpc_url: String,
+    /// Human-readable chain name advertised to the browser.
+    pub approval_chain_name: String,
+    /// Native currency symbol for the advertised chain.
+    pub approval_chain_currency_symbol: String,
+    /// Native currency decimals for the advertised chain.
+    pub approval_chain_currency_decimals: u8,
 
     // ── Dynamic pricing ───────────────────────────────────────────────────────
     /// How often to refresh Irys + SOL prices (seconds). Default 1800 (30 min).
@@ -213,6 +232,22 @@ impl Config {
             universal_paywall_pay_to: env_or("UNIVERSAL_PAYWALL_PAY_TO", ""),
             universal_paywall_payer_wallet: env_or("UNIVERSAL_PAYWALL_PAYER_WALLET", ""),
             universal_paywall_approval_url_base: env_or("UNIVERSAL_PAYWALL_APPROVAL_URL_BASE", ""),
+            universal_paywall_eip712_name: env_or("UNIVERSAL_PAYWALL_EIP712_NAME", "USD Coin"),
+            universal_paywall_eip712_version: env_or("UNIVERSAL_PAYWALL_EIP712_VERSION", "2"),
+            approval_ui_dist: expand_path(&env_or("MNEMONIC_APPROVAL_UI_DIST", "")),
+            approval_mock_signer: env_or("MNEMONIC_APPROVAL_MOCK_SIGNER", ""),
+            approval_chain_rpc_url: env_or("UNIVERSAL_PAYWALL_CHAIN_RPC_URL", ""),
+            approval_chain_name: env_or("UNIVERSAL_PAYWALL_CHAIN_NAME", ""),
+            approval_chain_currency_symbol: env_or(
+                "UNIVERSAL_PAYWALL_CHAIN_CURRENCY_SYMBOL",
+                "ETH",
+            ),
+            approval_chain_currency_decimals: env_or(
+                "UNIVERSAL_PAYWALL_CHAIN_CURRENCY_DECIMALS",
+                "18",
+            )
+            .parse()
+            .unwrap_or(18),
             price_refresh_secs: env_or("PRICE_REFRESH_SECS", "1800").parse().unwrap_or(1800),
             pricing_margin_bps: env_or("PRICING_MARGIN_BPS", "2000").parse().unwrap_or(2000),
             typical_payload_bytes: env_or("TYPICAL_PAYLOAD_BYTES", "2048")

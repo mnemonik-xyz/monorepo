@@ -23,7 +23,15 @@ bytes = "1"
 
 # HTTP server (remote MCP transport)
 axum = { version = "0.8", features = ["json", "macros"] }
-tower-http = { version = "0.6", features = ["cors"] }
+tower-http = { version = "0.6", features = ["cors", "fs"] }
+
+# Optional: EIP-712 mock signer for the approval page e2e path.
+# Gated behind the `approval-mock-signer` feature so production binaries
+# never compile Ethereum signing code.
+alloy-signer = { version = "1.6", optional = true, features = ["eip712"] }
+alloy-signer-local = { version = "1.6", optional = true }
+alloy-dyn-abi = { version = "1.6", optional = true, features = ["eip712"] }
+alloy-primitives = { version = "1.6", optional = true }
 # Form-urlencoded body parsing for /oauth/token (RFC 6749 §3.2 mandates
 # Content-Type: application/x-www-form-urlencoded; VS Code, Claude.ai,
 # and most OAuth client libraries default to that — only Cursor sends JSON).
@@ -139,6 +147,13 @@ tempfile = { version = "3", optional = true }
 default = []
 # Forwards to mnemonic-core's local-embed feature (fastembed ONNX runtime).
 local-embed = ["mnemonic-core/local-embed"]
+# Enables the test-only /api/mock-sign route for headless e2e runs.
+approval-mock-signer = [
+  "dep:alloy-signer",
+  "dep:alloy-signer-local",
+  "dep:alloy-dyn-abi",
+  "dep:alloy-primitives",
+]
 # Vendor OpenSSL from source (used in CI cross-compilation).
 openssl-vendored = ["mnemonic-core/openssl-vendored"]
 # Verifiable trajectories MCP tools (attest_step / attest_verdict /

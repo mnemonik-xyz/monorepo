@@ -706,6 +706,27 @@ pub struct McpState {
     pub evm_payment: Option<crate::payment::EvmPaymentConfig>,
     /// Optional Universal Paywall exact-payment config. `None` = disabled.
     pub universal_paywall: Option<crate::universal_paywall::UniversalPaywallConfig>,
+    /// EIP-712 domain name/version for the USDC token contract, surfaced to
+    /// the browser approval page so it can sign with the right domain.
+    pub universal_paywall_eip712_name: String,
+    pub universal_paywall_eip712_version: String,
+
+    // Embedded approval page configuration.
+    /// Absolute path to the built approval UI dist directory. `None` means the
+    /// /approve route is disabled.
+    pub approval_ui_dist: Option<std::path::PathBuf>,
+    /// Test-only hex private key enabling /api/mock-sign. `None` = disabled.
+    #[allow(dead_code)]
+    pub approval_mock_signer: Option<String>,
+    /// Chain metadata advertised to the browser for wallet_addEthereumChain.
+    pub approval_chain_rpc_url: String,
+    pub approval_chain_name: String,
+    pub approval_chain_currency_symbol: String,
+    pub approval_chain_currency_decimals: u8,
+    /// Settled authorizations keyed by operation_id, used by the e2e harness
+    /// (and any other caller) to retrieve the signed authorization after the
+    /// browser has submitted it.
+    pub approval_authorizations: Arc<dashmap::DashMap<String, crate::universal_paywall::PaymentAuthorization>>,
 
     // Dynamic pricing — the per-call x402 price floor lives here (the static
     // `SIGN_MEMORY_COST_MICRO_USDC` config seeds `PricingEngine`'s `min_price`).
