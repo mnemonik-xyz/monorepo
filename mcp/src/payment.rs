@@ -15,6 +15,7 @@
 //!   - none — open access (development / self-hosted).
 
 use axum::http::HeaderMap;
+use rand::RngCore;
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
 
@@ -221,7 +222,9 @@ pub async fn check_universal_paywall(
 
     // First call: create a quote and ask the client to pay.
     let operation_id = operation_id.map(|s| s.to_string()).unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-    let nonce = uuid::Uuid::new_v4().to_string();
+    let mut nonce_bytes = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut nonce_bytes);
+    let nonce = format!("0x{}", hex::encode(nonce_bytes));
     let now = chrono::Utc::now();
     let expires_at = (now + chrono::TimeDelta::minutes(5)).to_rfc3339();
 
