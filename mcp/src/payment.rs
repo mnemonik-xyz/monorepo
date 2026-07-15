@@ -196,6 +196,7 @@ pub async fn check_universal_paywall(
     store: &std::sync::Mutex<SqliteStore>,
     quotes: &DashMap<String, StoredQuote>,
     payer_subject: &str,
+    payer_wallet: &str,
     artifact_hash: &str,
     operation_id: Option<&str>,
 ) -> PaymentGate {
@@ -368,7 +369,7 @@ pub async fn check_universal_paywall(
                 network: config.network.clone(),
                 asset: config.asset.clone(),
                 pay_to: config.pay_to.clone(),
-                payer_wallet: config.payer_wallet.clone(),
+                payer_wallet: payer_wallet.to_string(),
                 amount: cost.to_string(),
                 binding_digest: quote.binding_digest,
             });
@@ -385,7 +386,7 @@ pub async fn check_universal_paywall(
         version: 1,
         operation_id: operation_id.clone(),
         payer_subject: payer_subject.to_string(),
-        payer_wallet: config.payer_wallet.clone(),
+        payer_wallet: payer_wallet.to_string(),
         artifact_hash: artifact_hash.to_string(),
         amount: cost.to_string(),
         asset: config.asset.clone(),
@@ -447,7 +448,7 @@ pub async fn check_universal_paywall(
         network: config.network.clone(),
         asset: config.asset.clone(),
         pay_to: config.pay_to.clone(),
-        payer_wallet: config.payer_wallet.clone(),
+        payer_wallet: payer_wallet.to_string(),
         amount: cost.to_string(),
         binding_digest: quote.binding_digest,
     })

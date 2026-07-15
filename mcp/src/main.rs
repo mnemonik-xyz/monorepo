@@ -536,7 +536,6 @@ async fn main() -> anyhow::Result<()> {
         && !cfg.universal_paywall_network.is_empty()
         && !cfg.universal_paywall_asset.is_empty()
         && !cfg.universal_paywall_pay_to.is_empty()
-        && !cfg.universal_paywall_payer_wallet.is_empty()
     {
         tracing::info!("Universal Paywall exact rail enabled");
         Some(universal_paywall::UniversalPaywallConfig {

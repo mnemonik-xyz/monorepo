@@ -15,11 +15,13 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
+use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 use crate::mcp::McpState;
 use crate::universal_paywall::{OperationBinding, PaymentAuthorization, UniversalPaywallClient};
+use crate::wallet_link;
 
 const MAX_OPERATION_ID_LEN: usize = 128;
 
@@ -89,6 +91,104 @@ async fn quote_handler(
             tracing::warn!(operation_id, error = %e, "facilitator quote lookup failed");
             error_resp(StatusCode::BAD_GATEWAY, "facilitator unavailable")
         }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct WalletLinkRequest {
+    signature: String,
+}
+
+async fn wallet_link_get_handler(
+    State(state): State<Arc<McpState>>,
+    Path(operation_id): Path<String>,
+) -> Response {
+    if operation_id.is_empty() || operation_id.len() > MAX_OPERATION_ID_LEN {
+        return error_resp(StatusCode::BAD_REQUEST, "invalid operation_id");
+    }
+    let challenge = match state.store.lock() {
+        Ok(store) => match get_wallet_link_challenge(store.conn(), &operation_id) {
+            Ok(challenge) => challenge,
+            Err(_) => {
+                return error_resp(StatusCode::INTERNAL_SERVER_ERROR, "wallet link unavailable")
+            }
+        },
+        Err(_) => return error_resp(StatusCode::INTERNAL_SERVER_ERROR, "wallet link unavailable"),
+    };
+    let Some(challenge) = challenge else {
+        return error_resp(StatusCode::NOT_FOUND, "wallet link challenge not found");
+    };
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "challenge": challenge,
+            "message": wallet_link::challenge_message(&challenge),
+        })),
+    )
+        .into_response()
+}
+
+async fn wallet_link_post_handler(
+    State(state): State<Arc<McpState>>,
+    Path(operation_id): Path<String>,
+    Json(req): Json<WalletLinkRequest>,
+) -> Response {
+    let challenge = match state.store.lock() {
+        Ok(store) => match get_wallet_link_challenge(store.conn(), &operation_id) {
+            Ok(Some(challenge)) => challenge,
+            Ok(None) => {
+                return error_resp(StatusCode::NOT_FOUND, "wallet link challenge not found")
+            }
+            Err(_) => {
+                return error_resp(StatusCode::INTERNAL_SERVER_ERROR, "wallet link unavailable")
+            }
+        },
+        Err(_) => return error_resp(StatusCode::INTERNAL_SERVER_ERROR, "wallet link unavailable"),
+    };
+    match state.store.lock() {
+        Ok(store) => match wallet_link::verify_and_record(
+            store.conn(),
+            &challenge,
+            &req.signature,
+            chrono::Utc::now(),
+        ) {
+            Ok(link) => (
+                StatusCode::OK,
+                Json(serde_json::json!({"wallet_address": link.wallet_address})),
+            )
+                .into_response(),
+            Err(error) => {
+                tracing::warn!(operation_id, error = %error, "wallet link verification failed");
+                error_resp(StatusCode::UNAUTHORIZED, "wallet link signature rejected")
+            }
+        },
+        Err(_) => error_resp(StatusCode::INTERNAL_SERVER_ERROR, "wallet link unavailable"),
+    }
+}
+
+fn get_wallet_link_challenge(
+    conn: &rusqlite::Connection,
+    operation_id: &str,
+) -> anyhow::Result<Option<wallet_link::WalletLinkChallenge>> {
+    // Reconstruct via the public create-or-get function only after first
+    // looking up the subject and chain from the durable row.
+    let row: Option<(String, u64)> = conn
+        .query_row(
+            "SELECT subject_hash, chain_id FROM paid_wallet_links WHERE operation_id = ?1",
+            rusqlite::params![operation_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    match row {
+        Some((subject_hash, chain_id)) => wallet_link::create_or_get_challenge(
+            conn,
+            operation_id,
+            &subject_hash,
+            chain_id,
+            chrono::Utc::now(),
+        )
+        .map(Some),
+        None => Ok(None),
     }
 }
 
@@ -279,6 +379,10 @@ pub fn router(state: Arc<McpState>) -> Router<()> {
     Router::new()
         .route("/approve", get(approve_page_handler))
         .route("/api/quote/{operation_id}", get(quote_handler))
+        .route(
+            "/api/wallet-link/{operation_id}",
+            get(wallet_link_get_handler).post(wallet_link_post_handler),
+        )
         .route("/api/settle", post(settle_handler))
         .route("/api/authorization", get(authorization_handler))
         .route("/api/chains/{chain_id}", get(chain_handler))

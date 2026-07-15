@@ -52,6 +52,7 @@ use crate::paid_artifact;
 use crate::payment::{self, PaymentGate};
 use crate::pending::PendingError;
 use crate::publish::{PublishError, PublishInput};
+use crate::wallet_link;
 
 /// `GET /api/pending/{correlation_id}` — webapp fetches the unsigned
 /// canonical-CBOR bytes for the user to sign.
@@ -274,6 +275,52 @@ pub async fn sign_callback_handler(
                 }
             };
             let client = crate::universal_paywall::UniversalPaywallClient::new(config.clone());
+            let subject_hash = blake3::hash(req.signer_pubkey.as_bytes())
+                .to_hex()
+                .to_string();
+            let chain_id = match config
+                .network
+                .strip_prefix("eip155:")
+                .and_then(|value| value.parse::<u64>().ok())
+            {
+                Some(chain_id) => chain_id,
+                None => {
+                    return error_resp(StatusCode::INTERNAL_SERVER_ERROR, "invalid payment chain")
+                }
+            };
+            let wallet_link = match state.store.lock() {
+                Ok(store) => match wallet_link::get_verified(store.conn(), &req.correlation_id) {
+                    Ok(Some(link)) if link.subject_hash == subject_hash && link.chain_id == chain_id => link,
+                    Ok(Some(_)) => return error_resp(StatusCode::UNAUTHORIZED, "wallet link does not match operation"),
+                    Ok(None) => match wallet_link::create_or_get_challenge(
+                        store.conn(),
+                        &req.correlation_id,
+                        &subject_hash,
+                        chain_id,
+                        chrono::Utc::now(),
+                    ) {
+                        Ok(challenge) => return (
+                            StatusCode::PRECONDITION_REQUIRED,
+                            Json(serde_json::json!({
+                                "status": "awaiting_wallet_link",
+                                "operation_id": req.correlation_id,
+                                "wallet_link_url": format!("/approve?operation_id={}", req.correlation_id),
+                                "challenge": challenge,
+                                "message": wallet_link::challenge_message(&challenge),
+                            })),
+                        ).into_response(),
+                        Err(error) => {
+                            tracing::error!(correlation_id = %req.correlation_id, error = %error, "create wallet link challenge failed");
+                            return error_resp(StatusCode::INTERNAL_SERVER_ERROR, "wallet link unavailable");
+                        }
+                    },
+                    Err(error) => {
+                        tracing::error!(correlation_id = %req.correlation_id, error = %error, "read wallet link failed");
+                        return error_resp(StatusCode::INTERNAL_SERVER_ERROR, "wallet link unavailable");
+                    }
+                },
+                Err(_) => return error_resp(StatusCode::INTERNAL_SERVER_ERROR, "wallet link unavailable"),
+            };
             let gate = payment::check_universal_paywall(
                 &HeaderMap::new(),
                 &client,
@@ -282,6 +329,7 @@ pub async fn sign_callback_handler(
                 &state.store,
                 &state.universal_paywall_quotes,
                 &req.signer_pubkey,
+                &wallet_link.wallet_address,
                 &staged.artifact_hash,
                 Some(&req.correlation_id),
             )

@@ -31,6 +31,11 @@ sequenceDiagram
     M->>M: verify COSE and canonical-CBOR content hash
     M->>DB: stage COSE + delivery context
     M->>M: artifact_hash = blake3(domain || exact COSE bytes)
+    M-->>C: 428 wallet-link challenge
+    C->>W: open wallet_link_url and sign EIP-191 challenge
+    W->>M: verify wallet link signature
+    M->>M: recover EVM wallet address
+    C->>M: same sign-callback(correlation_id, same COSE)
     M->>UP: create_quote(operation binding)
     UP-->>M: immutable exact quote
     M-->>C: 402 awaiting_payment + approval_url
@@ -84,6 +89,15 @@ flowchart LR
   attestations. They are needed only until delivery is confirmed or abandoned.
 - Universal Paywall remains the independent source of truth for settlement.
   Arweave and Solana remain the independent evidence of completed delivery.
+
+## Wallet link requirement
+
+Before a quote, Mnemonic issues an EIP-191 `personal_sign` message bound to
+the opaque Mnemonic subject hash, operation id, configured EVM chain, random
+nonce, and five-minute expiry. Mnemonic recovers the signer address server
+side and stores the verified link as single-use metadata. The Universal Paywall
+binding uses that recovered address; `UNIVERSAL_PAYWALL_PAYER_WALLET` is no
+longer used as the production quote source.
 
 ## Restart-resume path
 

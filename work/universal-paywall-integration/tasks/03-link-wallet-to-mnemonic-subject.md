@@ -35,6 +35,9 @@ bound to the authenticated Mnemonic subject and the operation context.
 `mcp/src/wallet_link.rs` defines a five-minute EIP-191 `personal_sign`
 challenge bound to the opaque subject hash, operation id, EVM chain id, and a
 random nonce. Its persistent record is single-use and the verifier recovers
-the signer address server-side. The next slice wires this challenge into the
-approval UI and makes quote creation reject operations without its verified
-wallet link.
+the signer address server-side. The approval UI signs and posts this challenge
+at `/api/wallet-link/:operation` before a quote exists. The signed-artifact
+callback returns HTTP 428 until the link is verified, and quote creation
+receives the recovered wallet address explicitly instead of reading the
+configured test wallet. The local E2E proves the 428 → verified link → quote
+route with the same server verifier.
