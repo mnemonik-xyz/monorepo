@@ -251,7 +251,10 @@ impl UniversalPaywallClient {
 
     /// Recover durable payment status and receipt.
     #[allow(dead_code)]
-    pub async fn payment_status(&self, operation_id: &str) -> anyhow::Result<ProviderPaymentStatus> {
+    pub async fn payment_status(
+        &self,
+        operation_id: &str,
+    ) -> anyhow::Result<ProviderPaymentStatus> {
         let url = format!("{}/v1/payments/{}", self.config.url, operation_id);
         let resp = self
             .client

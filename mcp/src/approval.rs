@@ -19,9 +19,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 use crate::mcp::McpState;
-use crate::universal_paywall::{
-    OperationBinding, PaymentAuthorization, UniversalPaywallClient,
-};
+use crate::universal_paywall::{OperationBinding, PaymentAuthorization, UniversalPaywallClient};
 
 const MAX_OPERATION_ID_LEN: usize = 128;
 
@@ -55,13 +53,17 @@ async fn approve_page_handler(State(state): State<Arc<McpState>>) -> Response {
             );
             headers.insert(
                 axum::http::header::CONTENT_SECURITY_POLICY,
-                HeaderValue::try_from(csp).unwrap_or_else(|_| HeaderValue::from_static("default-src 'self'")),
+                HeaderValue::try_from(csp)
+                    .unwrap_or_else(|_| HeaderValue::from_static("default-src 'self'")),
             );
             (StatusCode::OK, headers, html).into_response()
         }
         Err(e) => {
             tracing::warn!(path = %path.display(), error = %e, "failed to read approval page");
-            error_resp(StatusCode::INTERNAL_SERVER_ERROR, "approval page unavailable")
+            error_resp(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "approval page unavailable",
+            )
         }
     }
 }
@@ -75,7 +77,10 @@ async fn quote_handler(
         return error_resp(StatusCode::BAD_REQUEST, "invalid operation_id");
     }
     let Some(cfg) = state.universal_paywall.clone() else {
-        return error_resp(StatusCode::SERVICE_UNAVAILABLE, "universal paywall not configured");
+        return error_resp(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "universal paywall not configured",
+        );
     };
     let client = UniversalPaywallClient::new(cfg);
     match client.get_quote_by_operation_id(&operation_id).await {
@@ -104,7 +109,10 @@ async fn settle_handler(
         return error_resp(StatusCode::BAD_REQUEST, "invalid operation_id");
     }
     let Some(cfg) = state.universal_paywall.clone() else {
-        return error_resp(StatusCode::SERVICE_UNAVAILABLE, "universal paywall not configured");
+        return error_resp(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "universal paywall not configured",
+        );
     };
     let client = UniversalPaywallClient::new(cfg);
     match client
@@ -161,10 +169,7 @@ struct NativeCurrencyResponse {
 }
 
 /// GET /api/chains/:chain_id — chain metadata for wallet_addEthereumChain.
-async fn chain_handler(
-    State(state): State<Arc<McpState>>,
-    Path(chain_id): Path<u64>,
-) -> Response {
+async fn chain_handler(State(state): State<Arc<McpState>>, Path(chain_id): Path<u64>) -> Response {
     let configured_chain_id = state
         .universal_paywall
         .as_ref()
@@ -225,10 +230,7 @@ async fn mock_sign_handler(
     let typed_data: TypedData = match serde_json::from_value(req.typed_data) {
         Ok(t) => t,
         Err(e) => {
-            return error_resp(
-                StatusCode::BAD_REQUEST,
-                &format!("invalid typed data: {e}"),
-            );
+            return error_resp(StatusCode::BAD_REQUEST, &format!("invalid typed data: {e}"));
         }
     };
 
