@@ -45,7 +45,9 @@ gate:
 - recovery of a settled exact payment through provider status before creating a
   new quote.
 
-The existing local mocked E2E passes with this path. This is deliberately not
-marked complete yet: restart/reload and delivery-retry scenarios need direct
+The existing local mocked E2E passes with this path and now restarts MCP after
+browser settlement before delivering the signed artifact. This proves receipt
+and delivery-context recovery from SQLite. This is deliberately not marked
+complete yet: browser reload and delivery-retry scenarios need direct
 integration coverage, and the remaining in-process maps must cease to be a
 required source of truth.

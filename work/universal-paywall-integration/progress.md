@@ -36,10 +36,11 @@ without storing artifact plaintext. On a resumed payment gate it asks the
 provider for the existing operation status before issuing a quote, so a settled
 exact payment can be recovered after the MCP's in-memory state is gone.
 
-The unit suite (`cargo test -p mnemonic-mcp --lib`, 231 tests) and the local
-mocked E2E pass with this foundation. Dedicated MCP-restart, browser-reload,
-and delivery-retry integration tests are still required before calling the
-recovery requirement complete.
+The unit suite (`cargo test -p mnemonic-mcp --lib`, 235 tests) and the local
+mocked E2E pass with this foundation. The E2E now restarts MCP after browser
+settlement and before the delivery callback, proving that the staged COSE,
+delivery context, and provider receipt resume the same operation. Browser
+reload, delivery-retry, and failure-path tests remain required.
 
 The quote is now derived from a verified, staged COSE_Sign1 envelope using the
 versioned signed-artifact hash; raw request content is no longer used by the

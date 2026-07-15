@@ -154,18 +154,34 @@ pub async fn sign_callback_handler(
     // provider reports that the exact payment is settled.
     let entry = match state.pending.peek_by_id(&req.correlation_id).await {
         Ok(e) => e,
-        Err(e) => {
-            // PendingError::NotFound → 404. But per Decision 12 a missing
-            // entry on the callback is "already consumed or expired", which
-            // is semantically 410 Gone. Override here.
-            if matches!(e, PendingError::NotFound) {
-                return error_resp(
-                    StatusCode::GONE,
-                    "pending bundle missing or already consumed",
-                );
+        Err(PendingError::NotFound) => match state.store.lock() {
+            Ok(store) => {
+                match paid_artifact::get_staged_delivery_context(store.conn(), &req.correlation_id)
+                {
+                    Ok(Some(context)) => context.into_pending_entry(),
+                    Ok(None) => {
+                        return error_resp(
+                            StatusCode::GONE,
+                            "pending bundle missing or already consumed",
+                        )
+                    }
+                    Err(error) => {
+                        tracing::error!(correlation_id = %req.correlation_id, error = %error, "recover staged paid delivery context failed");
+                        return error_resp(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            "payment recovery unavailable",
+                        );
+                    }
+                }
             }
-            return e.into_response();
-        }
+            Err(_) => {
+                return error_resp(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "payment recovery unavailable",
+                )
+            }
+        },
+        Err(error) => return error.into_response(),
     };
 
     if entry.jwt_sub != req.signer_pubkey {
@@ -227,7 +243,21 @@ pub async fn sign_callback_handler(
                     &cose_bytes,
                     &now,
                 ) {
-                    Ok(staged) => staged,
+                    Ok(staged) => {
+                        if let Err(error) = paid_artifact::stage_delivery_context(
+                            store.conn(),
+                            &req.correlation_id,
+                            &entry,
+                            &now,
+                        ) {
+                            tracing::error!(correlation_id = %req.correlation_id, error = %error, "stage paid delivery context failed");
+                            return error_resp(
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                "paid delivery context staging failed",
+                            );
+                        }
+                        staged
+                    }
                     Err(error) => {
                         tracing::error!(correlation_id = %req.correlation_id, error = %error, "stage signed paid artifact failed");
                         return error_resp(
@@ -283,19 +313,56 @@ pub async fn sign_callback_handler(
         }
     }
 
-    // Atomically consume only after payment is ready. A duplicate callback
-    // cannot produce a second anchor.
+    // Atomically claim the durable paid context before anchoring. This also
+    // protects the restart fallback below, where the in-memory pending LRU is
+    // no longer available to provide its usual single-use consume semantics.
+    let is_paid_participate =
+        entry.write_mode == WriteMode::Participate && state.universal_paywall.is_some();
+    if is_paid_participate {
+        let now = chrono::Utc::now().to_rfc3339();
+        let claimed = match state.store.lock() {
+            Ok(store) => {
+                match paid_artifact::claim_delivery_context(store.conn(), &req.correlation_id, &now)
+                {
+                    Ok(claimed) => claimed,
+                    Err(error) => {
+                        tracing::error!(correlation_id = %req.correlation_id, error = %error, "claim paid delivery context failed");
+                        return error_resp(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            "payment recovery unavailable",
+                        );
+                    }
+                }
+            }
+            Err(_) => {
+                return error_resp(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "payment recovery unavailable",
+                )
+            }
+        };
+        if !claimed {
+            return error_resp(
+                StatusCode::GONE,
+                "paid artifact is already being anchored or was anchored",
+            );
+        }
+    }
+
+    // Consume the in-memory copy when present. After a restart, use the
+    // verified durable context recovered above; its claim prevents a replay.
     let entry = match state
         .pending
         .consume_by_id(&req.correlation_id, &req.signer_pubkey)
         .await
     {
         Ok(entry) => entry,
+        Err(PendingError::NotFound) if is_paid_participate => entry,
         Err(PendingError::NotFound) => {
             return error_resp(
                 StatusCode::GONE,
                 "pending bundle missing or already consumed",
-            );
+            )
         }
         Err(error) => return error.into_response(),
     };

@@ -52,4 +52,6 @@ The quote route is now active: Universal Paywall participate writes first
 return unsigned canonical CBOR, then `POST /api/sign-callback` verifies and
 stages the COSE envelope and returns the exact quote bound to its hash. After
 browser settlement, submitting the same envelope again recovers the provider
-receipt and anchors it. The local E2E proves this full sequence.
+receipt and anchors it. Its staged delivery context contains the original
+embedding and does not re-embed after restart. The local E2E restarts MCP at
+that boundary and proves the full recovery sequence.
