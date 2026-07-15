@@ -9,17 +9,17 @@ mod escrow;
 mod llm;
 mod mcp;
 mod oauth;
-mod payment;
 mod paid_artifact;
 mod paid_operation;
+mod payment;
 mod pending;
 mod pricing;
 mod publish;
 mod seed;
 mod tools;
-mod universal_paywall;
 #[cfg(feature = "trajectory-experimental")]
 mod trajectory_tools;
+mod universal_paywall;
 
 use axum::{
     extract::{Query, State},
@@ -378,6 +378,7 @@ async fn main() -> anyhow::Result<()> {
 
     let store = SqliteStore::open(&cfg.database_path)?;
     paid_operation::migrate_paid_operations(store.conn())?;
+    paid_artifact::migrate_paid_artifact_staging(store.conn())?;
     // ── T14: Google OAuth identity-link table (idempotent migration) ─────────
     // Lives in `mcp/` per Decision 9 (`core/` reserved for the cross-client
     // attestation schema). No-op when the table already exists; skipped
