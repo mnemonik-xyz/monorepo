@@ -170,6 +170,50 @@ fn recall_over_rebuilt_store_matches_original() {
 }
 
 #[test]
+fn legacy_v1_signed_artifact_remains_recallable_after_rebuild() {
+    // This fixture deliberately represents an already-anchored v1 artifact.
+    // Its fixed timestamp is test data, not a production clock value.
+    let kp = Keypair::new();
+    let c = compressor();
+    let owner = identity::pubkey_base58(&kp);
+    let embedding = vec![0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0];
+    let (cose, content_hash, _) = make_artifact(
+        &kp,
+        &c,
+        "legacy-v1-anchor",
+        "legacy anchored memory",
+        &embedding,
+        &["legacy"],
+    );
+
+    let recovered = rebuild_row(&cose, &c).expect("legacy v1 artifact rebuilds");
+    let store = SqliteStore::in_memory().expect("store");
+    store
+        .save_attestation(
+            &recovered.attestation_id,
+            &recovered.content,
+            &content_hash,
+            &recovered.tags,
+            "legacy:solana",
+            "legacy:arweave",
+            &recovered.signer_pubkey,
+            &owner,
+            &recovered.created_at,
+            WriteMode::Participate,
+            Visibility::Public,
+            &recovered.embedding,
+        )
+        .expect("legacy row saved");
+
+    let recalled = store
+        .search(&embedding, Some(&owner), None, 1)
+        .expect("legacy row recalled");
+    assert_eq!(recalled.len(), 1);
+    assert_eq!(recalled[0].content, "legacy anchored memory");
+    assert_eq!(recalled[0].content_hash, content_hash);
+}
+
+#[test]
 fn rebuilt_embedding_is_lossy_but_content_is_exact() {
     // This is the precision gap that motivates the f32 tier: content/integrity
     // survive exactly, but the embedding recovered from the artifact is only
