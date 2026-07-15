@@ -45,6 +45,10 @@ changing the fast local CI path.
 - Completed: the staging stack now contains its own Mnemonic MCP and a
   same-origin approval UI asset volume. Caddy exposes only the configured
   staging hostname on the tailnet; the facilitator remains private behind MCP.
+- Completed: Coding Fabric renders the staging `.env`, facilitator receipt
+  key, and Mnemonic delivery keypair from its existing age/SOPS secret source.
+  `UNIVERSAL_PAYWALL_URL` is the explicit MCP-to-facilitator location boundary,
+  so the reference co-located VPS topology can be split across servers later.
 - Still required: provision the protected `paywall-staging` GitHub Environment
   and SOPS-rendered VM secrets, deploy a reviewed staging image, wire a staging
   MCP/approval UI to the facilitator, then implement and run the external E2E
