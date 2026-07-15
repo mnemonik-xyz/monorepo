@@ -27,6 +27,7 @@ pub mod llm;
 pub mod mcp;
 pub mod oauth;
 pub mod payment;
+pub mod paid_artifact;
 pub mod paid_operation;
 pub mod pending;
 pub mod pricing;

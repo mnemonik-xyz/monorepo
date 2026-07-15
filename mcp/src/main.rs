@@ -10,6 +10,7 @@ mod llm;
 mod mcp;
 mod oauth;
 mod payment;
+mod paid_artifact;
 mod paid_operation;
 mod pending;
 mod pricing;
