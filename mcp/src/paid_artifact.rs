@@ -52,6 +52,19 @@ CREATE TABLE IF NOT EXISTS paid_artifact_delivery_claims (
     correlation_id TEXT PRIMARY KEY,
     claimed_at TEXT NOT NULL,
     FOREIGN KEY(correlation_id) REFERENCES paid_artifact_delivery_context(correlation_id)
+);
+CREATE TABLE IF NOT EXISTS paid_artifact_delivery_attempts (
+    correlation_id TEXT PRIMARY KEY,
+    state TEXT NOT NULL,
+    arweave_tx TEXT,
+    solana_tx TEXT,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    lease_id TEXT,
+    lease_expires_at TEXT,
+    last_error TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY(correlation_id) REFERENCES paid_artifact_delivery_context(correlation_id)
 );";
 
 /// A verified signed envelope held while payment completes.
@@ -273,6 +286,134 @@ pub fn claim_delivery_context(conn: &Connection, correlation_id: &str, now: &str
     Ok(changed == 1)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeliveryAttempt {
+    pub correlation_id: String,
+    pub state: String,
+    pub arweave_tx: Option<String>,
+    pub solana_tx: Option<String>,
+    pub attempts: u32,
+    pub lease_id: String,
+}
+
+/// Acquire a short lease for one paid delivery. The durable attempt records
+/// partial progress, so a retry continues from a stored Arweave id rather
+/// than uploading or charging for the same artifact again.
+pub fn acquire_delivery_attempt(
+    conn: &Connection,
+    correlation_id: &str,
+    lease_id: &str,
+    now: &str,
+    lease_expires_at: &str,
+) -> Result<Option<DeliveryAttempt>> {
+    let existing: Option<(String, Option<String>, Option<String>, u32, Option<String>)> = conn
+        .query_row(
+            "SELECT state, arweave_tx, solana_tx, attempts, lease_expires_at \
+             FROM paid_artifact_delivery_attempts WHERE correlation_id = ?1",
+            params![correlation_id],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )
+        .optional()
+        .context("read paid delivery attempt")?;
+    if let Some((state, arweave_tx, solana_tx, attempts, existing_lease)) = existing {
+        if state == "completed" || existing_lease.as_deref().is_some_and(|until| until > now) {
+            return Ok(None);
+        }
+        conn.execute(
+            "UPDATE paid_artifact_delivery_attempts SET state = ?1, attempts = ?2, lease_id = ?3, \
+             lease_expires_at = ?4, updated_at = ?5 WHERE correlation_id = ?6",
+            params![
+                "anchoring",
+                attempts + 1,
+                lease_id,
+                lease_expires_at,
+                now,
+                correlation_id
+            ],
+        )
+        .context("reacquire paid delivery attempt")?;
+        return Ok(Some(DeliveryAttempt {
+            correlation_id: correlation_id.into(),
+            state,
+            arweave_tx,
+            solana_tx,
+            attempts: attempts + 1,
+            lease_id: lease_id.into(),
+        }));
+    }
+    conn.execute(
+        "INSERT INTO paid_artifact_delivery_attempts \
+         (correlation_id, state, attempts, lease_id, lease_expires_at, created_at, updated_at) \
+         VALUES (?1, 'anchoring', 1, ?2, ?3, ?4, ?4)",
+        params![correlation_id, lease_id, lease_expires_at, now],
+    )
+    .context("create paid delivery attempt")?;
+    Ok(Some(DeliveryAttempt {
+        correlation_id: correlation_id.into(),
+        state: "anchoring".into(),
+        arweave_tx: None,
+        solana_tx: None,
+        attempts: 1,
+        lease_id: lease_id.into(),
+    }))
+}
+
+pub fn record_arweave_uploaded(
+    conn: &Connection,
+    attempt: &DeliveryAttempt,
+    arweave_tx: &str,
+    now: &str,
+) -> Result<()> {
+    let changed = conn.execute(
+        "UPDATE paid_artifact_delivery_attempts SET state = 'arweave_uploaded', arweave_tx = ?1, updated_at = ?2 \
+         WHERE correlation_id = ?3 AND lease_id = ?4 AND arweave_tx IS NULL",
+        params![arweave_tx, now, attempt.correlation_id, attempt.lease_id],
+    ).context("record paid Arweave delivery")?;
+    if changed != 1 {
+        return Err(anyhow!("paid_delivery_lease_conflict"));
+    }
+    Ok(())
+}
+
+pub fn mark_delivery_retryable(
+    conn: &Connection,
+    attempt: &DeliveryAttempt,
+    error: &str,
+    now: &str,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE paid_artifact_delivery_attempts SET state = 'delivery_retryable', lease_id = NULL, lease_expires_at = NULL, last_error = ?1, updated_at = ?2 \
+         WHERE correlation_id = ?3 AND lease_id = ?4",
+        params![error, now, attempt.correlation_id, attempt.lease_id],
+    ).context("mark paid delivery retryable")?;
+    Ok(())
+}
+
+pub fn mark_delivery_completed(
+    conn: &Connection,
+    attempt: &DeliveryAttempt,
+    solana_tx: &str,
+    now: &str,
+) -> Result<()> {
+    let changed = conn.execute(
+        "UPDATE paid_artifact_delivery_attempts SET state = 'completed', solana_tx = ?1, lease_id = NULL, lease_expires_at = NULL, updated_at = ?2 \
+         WHERE correlation_id = ?3 AND lease_id = ?4",
+        params![solana_tx, now, attempt.correlation_id, attempt.lease_id],
+    ).context("mark paid delivery completed")?;
+    if changed != 1 {
+        return Err(anyhow!("paid_delivery_lease_conflict"));
+    }
+    Ok(())
+}
+
 fn encode_embedding(embedding: &[f32]) -> Vec<u8> {
     embedding
         .iter()
@@ -366,5 +507,57 @@ mod tests {
         assert_eq!(recovered.write_mode, WriteMode::Participate);
         assert!(claim_delivery_context(&conn, "correlation", "later").unwrap());
         assert!(!claim_delivery_context(&conn, "correlation", "again").unwrap());
+    }
+
+    #[test]
+    fn delivery_retry_reuses_recorded_arweave_progress_without_a_new_claim() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate_paid_artifact_staging(&conn).unwrap();
+        let entry = PendingEntry {
+            jwt_sub: "signer".into(),
+            content: "private memory".into(),
+            embedding: vec![],
+            content_hash: "hash".into(),
+            canonical_cbor: vec![1],
+            tags: vec![],
+            metadata: serde_json::json!({}),
+            write_mode: WriteMode::Participate,
+            exp: Utc::now(),
+        };
+        stage_verified_cose(&conn, "correlation", "signer", b"cose", "now").unwrap();
+        stage_delivery_context(&conn, "correlation", &entry, "now").unwrap();
+        let first = acquire_delivery_attempt(
+            &conn,
+            "correlation",
+            "lease-1",
+            "2026-07-15T00:00:00Z",
+            "2026-07-15T00:10:00Z",
+        )
+        .unwrap()
+        .unwrap();
+        record_arweave_uploaded(&conn, &first, "arweave-1", "2026-07-15T00:01:00Z").unwrap();
+        mark_delivery_retryable(&conn, &first, "solana unavailable", "2026-07-15T00:02:00Z")
+            .unwrap();
+        let retry = acquire_delivery_attempt(
+            &conn,
+            "correlation",
+            "lease-2",
+            "2026-07-15T00:03:00Z",
+            "2026-07-15T00:13:00Z",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(retry.arweave_tx.as_deref(), Some("arweave-1"));
+        assert_eq!(retry.attempts, 2);
+        mark_delivery_completed(&conn, &retry, "solana-1", "2026-07-15T00:04:00Z").unwrap();
+        assert!(acquire_delivery_attempt(
+            &conn,
+            "correlation",
+            "lease-3",
+            "2026-07-15T00:05:00Z",
+            "2026-07-15T00:15:00Z",
+        )
+        .unwrap()
+        .is_none());
     }
 }

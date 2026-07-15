@@ -52,7 +52,9 @@ Turn the current happy-path E2E into a release gate for exact payment safety.
   derived from the facilitator secret and the immutable operation, quote, and
   quote expiry. It survives MCP restart without persisting a browser bearer
   secret. The mock end-to-end test covers this path.
-- Delivery retry state is not yet implemented: the current one-shot delivery
-  claim must be replaced by a durable attempt state that records partial
-  Arweave/Solana progress before bounded retries are safe. This is the next
-  implementation slice; no automatic retry is enabled until it is complete.
+- Delivery attempts now have a durable lease and state. A successful Arweave
+  upload is recorded before Solana anchoring; a later callback can reuse that
+  stored Arweave id and retry the remaining delivery without returning to
+  payment settlement. Automatic background retry/backoff and Solana
+  submission-reconciliation remain follow-up work; retries currently occur
+  only through the normal explicit resume path.

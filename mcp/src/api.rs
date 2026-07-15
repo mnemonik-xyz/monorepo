@@ -361,20 +361,28 @@ pub async fn sign_callback_handler(
         }
     }
 
-    // Atomically claim the durable paid context before anchoring. This also
-    // protects the restart fallback below, where the in-memory pending LRU is
-    // no longer available to provide its usual single-use consume semantics.
+    // Acquire a durable, expiring delivery lease before anchoring. Payment is
+    // already final at this point: a retry resumes this attempt and must never
+    // re-enter exact settlement or create another customer charge.
     let is_paid_participate =
         entry.write_mode == WriteMode::Participate && state.universal_paywall.is_some();
+    let mut delivery_attempt = None;
     if is_paid_participate {
         let now = chrono::Utc::now().to_rfc3339();
-        let claimed = match state.store.lock() {
+        let lease_id = uuid::Uuid::new_v4().to_string();
+        let lease_expires_at = (chrono::Utc::now() + chrono::TimeDelta::minutes(10)).to_rfc3339();
+        let acquired = match state.store.lock() {
             Ok(store) => {
-                match paid_artifact::claim_delivery_context(store.conn(), &req.correlation_id, &now)
-                {
-                    Ok(claimed) => claimed,
+                match paid_artifact::acquire_delivery_attempt(
+                    store.conn(),
+                    &req.correlation_id,
+                    &lease_id,
+                    &now,
+                    &lease_expires_at,
+                ) {
+                    Ok(attempt) => attempt,
                     Err(error) => {
-                        tracing::error!(correlation_id = %req.correlation_id, error = %error, "claim paid delivery context failed");
+                        tracing::error!(correlation_id = %req.correlation_id, error = %error, "acquire paid delivery attempt failed");
                         return error_resp(
                             StatusCode::INTERNAL_SERVER_ERROR,
                             "payment recovery unavailable",
@@ -389,12 +397,13 @@ pub async fn sign_callback_handler(
                 )
             }
         };
-        if !claimed {
+        let Some(attempt) = acquired else {
             return error_resp(
-                StatusCode::GONE,
-                "paid artifact is already being anchored or was anchored",
+                StatusCode::CONFLICT,
+                "paid artifact delivery is already in progress or completed",
             );
-        }
+        };
+        delivery_attempt = Some(attempt);
     }
 
     // Consume the in-memory copy when present. After a restart, use the
@@ -457,25 +466,58 @@ pub async fn sign_callback_handler(
         // server's); they make the item aggregatable via one gateway
         // GraphQL query (recover-traction-from-chain).
         let producer_did = format!("did:sol:{}", req.signer_pubkey);
-        let ar_tx = match state
-            .arweave
-            .write_item(
-                &cose_bytes,
-                &state.keypair,
-                &[
-                    ("Producer", producer_did.as_str()),
-                    ("Created-At", now.as_str()),
-                ],
-            )
-            .await
+        let ar_tx = if let Some(existing) = delivery_attempt
+            .as_ref()
+            .and_then(|attempt| attempt.arweave_tx.clone())
         {
-            Ok(t) => t,
-            Err(e) => {
-                return error_resp(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    &format!("arweave upload failed: {e}"),
-                );
+            existing
+        } else {
+            let uploaded = match state
+                .arweave
+                .write_item(
+                    &cose_bytes,
+                    &state.keypair,
+                    &[
+                        ("Producer", producer_did.as_str()),
+                        ("Created-At", now.as_str()),
+                    ],
+                )
+                .await
+            {
+                Ok(t) => t,
+                Err(e) => {
+                    if let Some(attempt) = &delivery_attempt {
+                        if let Ok(store) = state.store.lock() {
+                            let _ = paid_artifact::mark_delivery_retryable(
+                                store.conn(),
+                                attempt,
+                                &e.to_string(),
+                                &now,
+                            );
+                        }
+                    }
+                    return error_resp(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        &format!("arweave upload failed: {e}"),
+                    );
+                }
+            };
+            if let Some(attempt) = &delivery_attempt {
+                if let Ok(store) = state.store.lock() {
+                    if let Err(error) = paid_artifact::record_arweave_uploaded(
+                        store.conn(),
+                        attempt,
+                        &uploaded,
+                        &now,
+                    ) {
+                        return error_resp(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            &format!("delivery state failed: {error}"),
+                        );
+                    }
+                }
             }
+            uploaded
         };
         // No-op for production Irys (mine() only writes against arlocal).
         let _ = state.arweave.mine().await;
@@ -497,6 +539,16 @@ pub async fn sign_callback_handler(
         {
             Ok(t) => t,
             Err(e) => {
+                if let Some(attempt) = &delivery_attempt {
+                    if let Ok(store) = state.store.lock() {
+                        let _ = paid_artifact::mark_delivery_retryable(
+                            store.conn(),
+                            attempt,
+                            &e.to_string(),
+                            &now,
+                        );
+                    }
+                }
                 return error_resp(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     &format!("solana memo write failed: {e}"),
@@ -606,6 +658,16 @@ pub async fn sign_callback_handler(
                 // Happy path — fall through to the success envelope.
             }
             Ok(crate::tools::DeliveryOutcome::Demoted { stage }) => {
+                if let Some(attempt) = &delivery_attempt {
+                    if let Ok(store) = state.store.lock() {
+                        let _ = paid_artifact::mark_delivery_retryable(
+                            store.conn(),
+                            attempt,
+                            "delivery_not_confirmed",
+                            &now,
+                        );
+                    }
+                }
                 state.delivery_metrics.record_not_confirmed(stage);
                 tracing::warn!(
                     attestation_id = %attestation_id,
@@ -630,9 +692,32 @@ pub async fn sign_callback_handler(
                 return (StatusCode::OK, Json(body)).into_response();
             }
             Err(e) => {
+                if let Some(attempt) = &delivery_attempt {
+                    if let Ok(store) = state.store.lock() {
+                        let _ = paid_artifact::mark_delivery_retryable(
+                            store.conn(),
+                            attempt,
+                            &e.to_string(),
+                            &now,
+                        );
+                    }
+                }
                 return error_resp(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     &format!("delivery check internal error: {e}"),
+                );
+            }
+        }
+    }
+
+    if let Some(attempt) = &delivery_attempt {
+        if let Ok(store) = state.store.lock() {
+            if let Err(error) =
+                paid_artifact::mark_delivery_completed(store.conn(), attempt, &solana_tx, &now)
+            {
+                return error_resp(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("delivery state failed: {error}"),
                 );
             }
         }
