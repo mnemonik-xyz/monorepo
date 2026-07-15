@@ -55,7 +55,15 @@ changing the fast local CI path.
   moveable tags) and requires both the facilitator and MCP health checks before
   it reloads the public approval route. The current MCP image is likewise
   available under an immutable GHCR digest.
+- Completed: `e2e` now has `npm run test:staging`, an opt-in headless runner
+  for the deployed same-origin approval UI. It preflights the Base Sepolia
+  configuration, uses a dedicated staging OAuth token and test wallet, and
+  keeps the wallet key outside the page by accepting only the provider-issued
+  exact EIP-3009 typed data. It verifies facilitator health, durable receipt,
+  one USDC settlement, external Solana confirmation, duplicate-callback
+  rejection, and recall; its evidence output excludes the raw authorization
+  and all credentials.
 - Still required: provision the protected `paywall-staging` GitHub Environment
   and SOPS-rendered VM secrets, deploy a reviewed staging image, wire a staging
-  MCP/approval UI to the facilitator, then implement and run the external E2E
-  to produce redacted evidence.
+  MCP/approval UI to the facilitator, then run the external E2E to produce
+  redacted evidence.
