@@ -1,5 +1,5 @@
 ---
-status: ready
+status: in_progress
 priority: P1
 depends_on:
   - tasks/06-add-payment-recovery-and-security-matrix.md
@@ -33,3 +33,16 @@ changing the fast local CI path.
 - A dry-run reports required configuration keys but never their values.
 - The automated test emits a minimal redacted evidence record on success.
 
+## Progress
+
+- Completed: `e2e` has a fail-closed `staging:validate` configuration command
+  and a secret-free `.env.staging.example`; it refuses localhost, Anvil, and
+  malformed public endpoints.
+- Completed: Universal Paywall publishes an immutable facilitator image, while
+  Coding Fabric provides a separate, approval-gated Base Sepolia compose stack
+  and manual deployment workflow. The stack is loopback-only, exact-only, and
+  does not share the production MCP directory or volumes.
+- Still required: provision the protected `paywall-staging` GitHub Environment
+  and SOPS-rendered VM secrets, deploy a reviewed staging image, wire a staging
+  MCP/approval UI to the facilitator, then implement and run the external E2E
+  to produce redacted evidence.
