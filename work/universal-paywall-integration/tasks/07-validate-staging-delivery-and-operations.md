@@ -1,11 +1,14 @@
 ---
-status: ready
+status: superseded
 priority: P1
 depends_on:
   - tasks/06-add-payment-recovery-and-security-matrix.md
 ---
 
 # Validate staging Irys/Solana delivery and operational readiness
+
+> Superseded by Tasks 07a–07c. This file remains as the parent scope and
+> acceptance record; execute the smaller tasks in order.
 
 ## Goal
 
