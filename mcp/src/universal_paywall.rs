@@ -272,10 +272,28 @@ impl UniversalPaywallClient {
         resp.json().await.context("parse payment_status response")
     }
 
-    pub fn approval_url(&self, operation_id: &str, quote_id: &str) -> String {
+    /// A deterministic, expiring bearer capability for the approval browser.
+    /// It is derived from the facilitator API secret, never the public
+    /// operation id alone, and can be regenerated after an MCP restart.
+    pub fn resume_token(&self, operation_id: &str, quote_id: &str, expires_at: &str) -> String {
+        let key = blake3::hash(self.config.api_key.as_bytes());
+        let mut material = Vec::new();
+        material.extend_from_slice(b"mnemonic:approval-resume:v1\0");
+        material.extend_from_slice(operation_id.as_bytes());
+        material.push(0);
+        material.extend_from_slice(quote_id.as_bytes());
+        material.push(0);
+        material.extend_from_slice(expires_at.as_bytes());
+        blake3::keyed_hash(key.as_bytes(), &material)
+            .to_hex()
+            .to_string()
+    }
+
+    pub fn approval_url(&self, operation_id: &str, quote_id: &str, expires_at: &str) -> String {
+        let resume_token = self.resume_token(operation_id, quote_id, expires_at);
         format!(
-            "{}?operation_id={}&quote_id={}",
-            self.config.approval_url_base, operation_id, quote_id
+            "{}?operation_id={}&quote_id={}&resume_token={}",
+            self.config.approval_url_base, operation_id, quote_id, resume_token
         )
     }
 }

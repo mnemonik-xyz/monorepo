@@ -128,8 +128,9 @@ The approval server rejects a settlement unless its operation id, recovered
 authorization payer, and complete binding match the immutable provider quote.
 It persists only the signed provider receipt. The removed legacy
 `/api/authorization` route never returns raw EIP-3009 signatures or typed-data
-payloads; the operation id is an opaque, high-entropy capability carried by
-the signed-artifact journey and its approval URL.
+payloads. Approval URLs carry a single-purpose, expiry-bound resume capability
+derived from the server-side facilitator secret plus the immutable operation
+and quote; an operation id alone cannot read status.
 
 ## Phase 1 capability policy
 

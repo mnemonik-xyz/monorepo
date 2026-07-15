@@ -9,7 +9,7 @@
 //! `MNEMONIC_APPROVAL_MOCK_SIGNER` is set.
 
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::{HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -27,6 +27,11 @@ use crate::universal_paywall::{
 use crate::wallet_link;
 
 const MAX_OPERATION_ID_LEN: usize = 128;
+
+#[derive(Debug, Deserialize)]
+struct ResumeQuery {
+    resume_token: String,
+}
 
 fn error_resp(status: StatusCode, message: &str) -> Response {
     let body = serde_json::json!({ "error": message });
@@ -380,6 +385,7 @@ fn settled_response(receipt: PaymentReceipt) -> Response {
 async fn operation_status_handler(
     State(state): State<Arc<McpState>>,
     Path(operation_id): Path<String>,
+    Query(query): Query<ResumeQuery>,
 ) -> Response {
     if operation_id.is_empty() || operation_id.len() > MAX_OPERATION_ID_LEN {
         return error_resp(StatusCode::BAD_REQUEST, "invalid operation_id");
@@ -402,6 +408,27 @@ async fn operation_status_handler(
             )
         }
     };
+    let Some(config) = state.universal_paywall.clone() else {
+        return error_resp(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "universal paywall not configured",
+        );
+    };
+    let (Some(quote_id), Some(expires_at)) = (&operation.quote_id, &operation.quote_expires_at)
+    else {
+        return error_resp(StatusCode::CONFLICT, "operation has no resumable quote");
+    };
+    if chrono::DateTime::parse_from_rfc3339(expires_at)
+        .map(|expires| expires <= chrono::Utc::now())
+        .unwrap_or(true)
+    {
+        return error_resp(StatusCode::GONE, "resume capability expired");
+    }
+    let expected =
+        UniversalPaywallClient::new(config).resume_token(&operation_id, quote_id, expires_at);
+    if query.resume_token.len() != expected.len() || query.resume_token != expected {
+        return error_resp(StatusCode::UNAUTHORIZED, "invalid resume capability");
+    }
     (StatusCode::OK, Json(serde_json::json!({
         "operation_id": operation.operation_id,
         "state": operation.state.as_str(),

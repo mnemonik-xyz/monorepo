@@ -1,5 +1,5 @@
 ---
-status: ready
+status: in_progress
 priority: P1
 depends_on:
   - tasks/01-persist-paid-operations.md
@@ -34,3 +34,25 @@ Turn the current happy-path E2E into a release gate for exact payment safety.
 - Mock E2E remains the fast CI gate; real-wallet E2E runs as a staging or
   pre-release gate.
 
+## Agreed recovery invariants
+
+- A durable exact provider receipt is the sole authority to begin or resume
+  delivery. Delivery retries must never request another EIP-3009 signature or
+  call exact settlement again.
+- Phase 1 has no vault. When stake is introduced later, delivery retries must
+  work from a single durable reservation and may commit it once only; retrying
+  delivery must never drain the allowance/vault.
+- A settled-but-undelivered operation remains recoverable with bounded
+  retries. It becomes `abandoned` / refund-or-credit eligible only after
+  durable evidence says delivery cannot be recovered.
+
+## Progress
+
+- Approval/status resume now requires an expiring single-purpose capability
+  derived from the facilitator secret and the immutable operation, quote, and
+  quote expiry. It survives MCP restart without persisting a browser bearer
+  secret. The mock end-to-end test covers this path.
+- Delivery retry state is not yet implemented: the current one-shot delivery
+  claim must be replaced by a durable attempt state that records partial
+  Arweave/Solana progress before bounded retries are safe. This is the next
+  implementation slice; no automatic retry is enabled until it is complete.

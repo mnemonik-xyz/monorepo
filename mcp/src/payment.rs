@@ -351,6 +351,7 @@ pub async fn check_universal_paywall(
                     "operation binding does not match request".into(),
                 );
             }
+            let quote_expires_at = quote.binding.expires_at.clone();
             quotes.insert(
                 operation_id.clone(),
                 StoredQuote {
@@ -364,7 +365,11 @@ pub async fn check_universal_paywall(
             return PaymentGate::NeedUniversalPaywall(UniversalPaywallPaymentRequired {
                 operation_id: operation_id.clone(),
                 quote_id: quote.quote_id.clone(),
-                approval_url: client.approval_url(&operation_id, &quote.quote_id),
+                approval_url: client.approval_url(
+                    &operation_id,
+                    &quote.quote_id,
+                    &quote_expires_at,
+                ),
                 scheme: "exact".into(),
                 network: config.network.clone(),
                 asset: config.asset.clone(),
@@ -427,7 +432,7 @@ pub async fn check_universal_paywall(
         Err(_) => return PaymentGate::Unauthorized("payment state unavailable".into()),
     }
 
-    let approval_url = client.approval_url(&operation_id, &quote.quote_id);
+    let approval_url = client.approval_url(&operation_id, &quote.quote_id, &binding.expires_at);
 
     quotes.insert(
         operation_id.clone(),
