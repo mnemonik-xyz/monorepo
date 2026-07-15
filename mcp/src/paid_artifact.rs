@@ -397,6 +397,23 @@ pub fn mark_delivery_retryable(
     Ok(())
 }
 
+pub fn record_solana_submitted(
+    conn: &Connection,
+    attempt: &DeliveryAttempt,
+    solana_tx: &str,
+    now: &str,
+) -> Result<()> {
+    let changed = conn.execute(
+        "UPDATE paid_artifact_delivery_attempts SET state = 'solana_submitted', solana_tx = ?1, updated_at = ?2 \
+         WHERE correlation_id = ?3 AND lease_id = ?4 AND solana_tx IS NULL",
+        params![solana_tx, now, attempt.correlation_id, attempt.lease_id],
+    ).context("record paid Solana submission")?;
+    if changed != 1 {
+        return Err(anyhow!("paid_delivery_lease_conflict"));
+    }
+    Ok(())
+}
+
 pub fn mark_delivery_completed(
     conn: &Connection,
     attempt: &DeliveryAttempt,

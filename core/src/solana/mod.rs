@@ -75,6 +75,16 @@ impl SolanaClient {
     }
 
     pub async fn write_memo(&self, keypair: &Keypair, memo: &str) -> anyhow::Result<String> {
+        let sig = self.submit_memo(keypair, memo).await?;
+        self.confirm_tx(&sig).await?;
+        Ok(sig)
+    }
+
+    /// Submit a memo and return its signature before confirmation. Callers
+    /// that persist multi-network delivery state must store this signature
+    /// before awaiting confirmation so an ambiguous RPC timeout can be
+    /// reconciled instead of submitting a duplicate transaction.
+    pub async fn submit_memo(&self, keypair: &Keypair, memo: &str) -> anyhow::Result<String> {
         let memo_pid = Pubkey::from_str(MEMO_PROGRAM_ID)?;
         let ix = Instruction {
             program_id: memo_pid,
@@ -115,7 +125,6 @@ impl SolanaClient {
             .await?;
         let sig = result.as_str().context("no tx signature")?.to_string();
 
-        self.confirm_tx(&sig).await?;
         Ok(sig)
     }
 
@@ -242,7 +251,7 @@ impl SolanaClient {
         Ok(signers)
     }
 
-    async fn confirm_tx(&self, sig: &str) -> anyhow::Result<()> {
+    pub async fn confirm_tx(&self, sig: &str) -> anyhow::Result<()> {
         for _ in 0..30 {
             let result = self
                 .rpc("getSignatureStatuses", serde_json::json!([[sig]]))

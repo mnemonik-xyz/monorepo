@@ -532,13 +532,11 @@ pub async fn sign_callback_handler(
             "a": ar_tx,
             "v": 2,
         });
-        let sol_tx = match state
-            .solana
-            .write_memo(&state.keypair, &memo.to_string())
-            .await
+        let sol_tx = if let Some(existing) = delivery_attempt
+            .as_ref()
+            .and_then(|attempt| attempt.solana_tx.clone())
         {
-            Ok(t) => t,
-            Err(e) => {
+            if let Err(e) = state.solana.confirm_tx(&existing).await {
                 if let Some(attempt) = &delivery_attempt {
                     if let Ok(store) = state.store.lock() {
                         let _ = paid_artifact::mark_delivery_retryable(
@@ -551,9 +549,66 @@ pub async fn sign_callback_handler(
                 }
                 return error_resp(
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    &format!("solana memo write failed: {e}"),
+                    &format!("solana memo confirmation failed: {e}"),
                 );
             }
+            existing
+        } else {
+            let submitted = match state
+                .solana
+                .submit_memo(&state.keypair, &memo.to_string())
+                .await
+            {
+                Ok(signature) => signature,
+                Err(e) => {
+                    if let Some(attempt) = &delivery_attempt {
+                        if let Ok(store) = state.store.lock() {
+                            let _ = paid_artifact::mark_delivery_retryable(
+                                store.conn(),
+                                attempt,
+                                &e.to_string(),
+                                &now,
+                            );
+                        }
+                    }
+                    return error_resp(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        &format!("solana memo write failed: {e}"),
+                    );
+                }
+            };
+            if let Some(attempt) = &delivery_attempt {
+                if let Ok(store) = state.store.lock() {
+                    if let Err(error) = paid_artifact::record_solana_submitted(
+                        store.conn(),
+                        attempt,
+                        &submitted,
+                        &now,
+                    ) {
+                        return error_resp(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            &format!("delivery state failed: {error}"),
+                        );
+                    }
+                }
+            }
+            if let Err(e) = state.solana.confirm_tx(&submitted).await {
+                if let Some(attempt) = &delivery_attempt {
+                    if let Ok(store) = state.store.lock() {
+                        let _ = paid_artifact::mark_delivery_retryable(
+                            store.conn(),
+                            attempt,
+                            &e.to_string(),
+                            &now,
+                        );
+                    }
+                }
+                return error_resp(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("solana memo confirmation failed: {e}"),
+                );
+            }
+            submitted
         };
         (sol_tx, ar_tx)
     };
