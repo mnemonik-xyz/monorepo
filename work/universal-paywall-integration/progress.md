@@ -16,9 +16,8 @@ related:
 The local exact-payment smoke test is working end to end:
 
 ```text
-quote -> browser approval -> MetaMask EIP-3009 signature -> settlement
--> MCP gate pass -> client COSE_Sign1 callback -> local Solana + Arweave
-anchoring -> recall
+canonical artifact -> client COSE_Sign1 -> quote -> browser approval
+-> MetaMask EIP-3009 settlement -> local Solana + Arweave anchoring -> recall
 ```
 
 The real MetaMask mode now selects the local Anvil chain automatically and
@@ -41,6 +40,12 @@ The unit suite (`cargo test -p mnemonic-mcp --lib`, 231 tests) and the local
 mocked E2E pass with this foundation. Dedicated MCP-restart, browser-reload,
 and delivery-retry integration tests are still required before calling the
 recovery requirement complete.
+
+The quote is now derived from a verified, staged COSE_Sign1 envelope using the
+versioned signed-artifact hash; raw request content is no longer used by the
+Universal Paywall route. The mocked E2E exercises this ordering and no longer
+reads or resends the raw EIP-3009 authorization. The public legacy
+authorization endpoint still exists and is scheduled for removal in Task 04.
 
 ## Review findings
 

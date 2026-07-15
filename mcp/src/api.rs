@@ -48,6 +48,8 @@ use uuid::Uuid;
 
 use crate::mcp::McpState;
 use crate::oauth::Claims;
+use crate::paid_artifact;
+use crate::payment::{self, PaymentGate};
 use crate::pending::PendingError;
 use crate::publish::{PublishError, PublishInput};
 
@@ -147,17 +149,10 @@ pub async fn sign_callback_handler(
         }
     };
 
-    // 3. Atomic consume — pop the entry from the LRU under a single lock.
-    //    A concurrent second callback for the same correlation_id observes
-    //    `NotFound` after this point. We do NOT verify the COSE before
-    //    popping; otherwise two concurrent valid callbacks would both
-    //    proceed to step 5 (persistence), inserting two SQLite rows for the
-    //    same logical attestation.
-    let entry = match state
-        .pending
-        .consume_by_id(&req.correlation_id, &req.signer_pubkey)
-        .await
-    {
+    // 3. Read without consuming. A paid bundle remains available while the
+    // browser completes its wallet approval; it is consumed only after the
+    // provider reports that the exact payment is settled.
+    let entry = match state.pending.peek_by_id(&req.correlation_id).await {
         Ok(e) => e,
         Err(e) => {
             // PendingError::NotFound → 404. But per Decision 12 a missing
@@ -173,10 +168,12 @@ pub async fn sign_callback_handler(
         }
     };
 
-    // 4. Verify COSE against the stored content hash. If verification fails
-    //    the entry is already gone from the LRU; the user's bundle is
-    //    effectively forfeit. This is the right tradeoff: tampered or
-    //    replayed signatures should not allow retries.
+    if entry.jwt_sub != req.signer_pubkey {
+        return error_resp(StatusCode::FORBIDDEN, "pending bundle owner mismatch");
+    }
+
+    // 4. Verify COSE before a quote can be created. A bad signature cannot
+    // create a payable operation and leaves the pending bundle retryable.
     let result = match verify_artifact(&cose_bytes, Some(&entry.content_hash)) {
         Ok(r) => r,
         Err(e) => {
@@ -215,6 +212,93 @@ pub async fn sign_callback_handler(
             "stored content_hash differs from COSE payload hash",
         );
     }
+
+    // Paid participate writes bind the exact quote to the verified COSE
+    // envelope, not raw editor text. The first callback returns a quote; a
+    // later callback sees the durable provider receipt and may anchor.
+    if entry.write_mode == WriteMode::Participate {
+        if let Some(config) = state.universal_paywall.as_ref() {
+            let now = chrono::Utc::now().to_rfc3339();
+            let staged = match state.store.lock() {
+                Ok(store) => match paid_artifact::stage_verified_cose(
+                    store.conn(),
+                    &req.correlation_id,
+                    &req.signer_pubkey,
+                    &cose_bytes,
+                    &now,
+                ) {
+                    Ok(staged) => staged,
+                    Err(error) => {
+                        tracing::error!(correlation_id = %req.correlation_id, error = %error, "stage signed paid artifact failed");
+                        return error_resp(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            "signed artifact staging failed",
+                        );
+                    }
+                },
+                Err(_) => {
+                    return error_resp(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "payment state unavailable",
+                    )
+                }
+            };
+            let client = crate::universal_paywall::UniversalPaywallClient::new(config.clone());
+            let gate = payment::check_universal_paywall(
+                &HeaderMap::new(),
+                &client,
+                config,
+                state.pricing.current_price(),
+                &state.store,
+                &state.universal_paywall_quotes,
+                &req.signer_pubkey,
+                &staged.artifact_hash,
+                Some(&req.correlation_id),
+            )
+            .await;
+            match gate {
+                PaymentGate::Proceed => {}
+                PaymentGate::NeedUniversalPaywall(payment) => {
+                    return (
+                        StatusCode::PAYMENT_REQUIRED,
+                        Json(serde_json::json!({
+                            "status": "awaiting_payment",
+                            "correlation_id": req.correlation_id,
+                            "artifact_hash": staged.artifact_hash,
+                            "payment": payment,
+                        })),
+                    )
+                        .into_response();
+                }
+                PaymentGate::NeedPayment(_) => {
+                    return error_resp(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "unexpected payment rail",
+                    );
+                }
+                PaymentGate::Unauthorized(message) => {
+                    return error_resp(StatusCode::UNAUTHORIZED, &message);
+                }
+            }
+        }
+    }
+
+    // Atomically consume only after payment is ready. A duplicate callback
+    // cannot produce a second anchor.
+    let entry = match state
+        .pending
+        .consume_by_id(&req.correlation_id, &req.signer_pubkey)
+        .await
+    {
+        Ok(entry) => entry,
+        Err(PendingError::NotFound) => {
+            return error_resp(
+                StatusCode::GONE,
+                "pending bundle missing or already consumed",
+            );
+        }
+        Err(error) => return error.into_response(),
+    };
 
     // 5. Persist + (optionally) anchor on-chain.
     //

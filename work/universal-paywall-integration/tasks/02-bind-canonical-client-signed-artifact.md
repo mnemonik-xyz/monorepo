@@ -47,3 +47,9 @@ persist the remaining pending delivery context between signature verification
 and payment completion, then create the quote from the staged hash. Existing
 stored artifacts retain their current recall/verification format and are not
 reinterpreted.
+
+The quote route is now active: Universal Paywall participate writes first
+return unsigned canonical CBOR, then `POST /api/sign-callback` verifies and
+stages the COSE envelope and returns the exact quote bound to its hash. After
+browser settlement, submitting the same envelope again recovers the provider
+receipt and anchors it. The local E2E proves this full sequence.
