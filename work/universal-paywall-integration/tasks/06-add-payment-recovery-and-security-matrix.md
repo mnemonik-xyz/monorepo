@@ -1,5 +1,5 @@
 ---
-status: in_progress
+status: ready_for_staging
 priority: P1
 depends_on:
   - tasks/01-persist-paid-operations.md
@@ -68,11 +68,11 @@ Turn the current happy-path E2E into a release gate for exact payment safety.
   rejection, and replay attempts which alter every quote-bound field. The
   mock E2E covers MCP restart before delivery and a duplicate browser callback
   without a second charge.
+- The core rebuild suite now proves that a previously anchored schema-v1
+  signed artifact can be rebuilt into SQLite and recalled with its original
+  content hash.
 
 ## Remaining release-gate evidence
 
 - Run the real-wallet E2E against staging as a pre-release gate (it is not a
   fast CI test).
-- Add an explicit legacy anchored-artifact recall/verification regression case
-  to the integration harness; existing recall tests cover the current format
-  only.
