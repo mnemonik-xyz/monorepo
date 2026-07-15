@@ -1382,6 +1382,7 @@ pub async fn mcp_handler(
                 &up_client,
                 up_config,
                 current_cost,
+                &state.store,
                 &state.universal_paywall_quotes,
                 &owner_pubkey,
                 &artifact_hash,

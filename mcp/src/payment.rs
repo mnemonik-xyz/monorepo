@@ -27,6 +27,7 @@ use std::time::{Duration, Instant};
 use mnemonic_core::solana::SolanaClient;
 use mnemonic_core::storage::SqliteStore;
 
+use crate::paid_operation::{self, NewPaidOperation, PaidOperationState};
 use crate::universal_paywall::{
     ExactAuthorization, OperationBinding, OperationScope, StoredQuote, UniversalPaywallClient,
     UniversalPaywallConfig,
@@ -170,7 +171,9 @@ pub struct UniversalPaywallPaymentProof {
 }
 
 /// Decode Universal Paywall exact payment proof from `X-Payment` header.
-pub fn extract_universal_paywall_proof(headers: &HeaderMap) -> Option<UniversalPaywallPaymentProof> {
+pub fn extract_universal_paywall_proof(
+    headers: &HeaderMap,
+) -> Option<UniversalPaywallPaymentProof> {
     let raw = headers.get("x-payment").and_then(|v| v.to_str().ok())?;
     serde_json::from_str::<UniversalPaywallPaymentProof>(raw).ok()
 }
@@ -190,43 +193,193 @@ pub async fn check_universal_paywall(
     client: &UniversalPaywallClient,
     config: &UniversalPaywallConfig,
     cost: i64,
+    store: &std::sync::Mutex<SqliteStore>,
     quotes: &DashMap<String, StoredQuote>,
     payer_subject: &str,
     artifact_hash: &str,
     operation_id: Option<&str>,
 ) -> PaymentGate {
+    let subject_hash = blake3::hash(payer_subject.as_bytes()).to_hex().to_string();
+    let now = chrono::Utc::now().to_rfc3339();
+
     // Retry path: the client already signed an EIP-3009 authorization.
     if let Some(proof) = extract_universal_paywall_proof(headers) {
         let op_id = match operation_id {
             Some(id) => id.to_string(),
-            None => return PaymentGate::Unauthorized("missing operation_id for payment retry".into()),
+            None => {
+                return PaymentGate::Unauthorized("missing operation_id for payment retry".into())
+            }
         };
-        let quote = match quotes.get(&op_id) {
-            Some(q) => q.clone(),
-            None => return PaymentGate::Unauthorized("unknown or expired operation_id".into()),
+        let operation = match store.lock() {
+            Ok(store) => match paid_operation::get(store.conn(), &op_id) {
+                Ok(Some(operation)) => operation,
+                Ok(None) => {
+                    return PaymentGate::Unauthorized("unknown or expired operation_id".into())
+                }
+                Err(error) => {
+                    tracing::error!(operation_id = %op_id, error = %error, "read paid operation failed");
+                    return PaymentGate::Unauthorized("payment state unavailable".into());
+                }
+            },
+            Err(_) => return PaymentGate::Unauthorized("payment state unavailable".into()),
         };
-        // Idempotent fast path: already settled in this process.
-        if quote.receipt.is_some() {
+        if operation.subject_hash != subject_hash || operation.artifact_hash != artifact_hash {
+            return PaymentGate::Unauthorized("operation binding does not match request".into());
+        }
+        if operation.state == PaidOperationState::PaymentReady {
             return PaymentGate::Proceed;
         }
-        let receipt = match client.settle_exact(&quote.binding, &proof.authorization).await {
+        let quote = match quotes.get(&op_id) {
+            Some(q) => q.clone(),
+            None => match client.get_quote_by_operation_id(&op_id).await {
+                Ok(quote) => StoredQuote {
+                    operation_id: op_id.clone(),
+                    quote_id: quote.quote_id,
+                    binding: quote.binding,
+                    binding_digest: quote.binding_digest,
+                    receipt: None,
+                },
+                Err(error) => {
+                    tracing::warn!(operation_id = %op_id, error = %error, "recover exact quote failed");
+                    return PaymentGate::Unauthorized("unknown or expired operation_id".into());
+                }
+            },
+        };
+        if quote.binding.artifact_hash != artifact_hash
+            || quote.binding.payer_subject != payer_subject
+        {
+            return PaymentGate::Unauthorized("operation binding does not match request".into());
+        }
+        if let Ok(store) = store.lock() {
+            if let Err(error) = paid_operation::mark_payment_authorizing(store.conn(), &op_id, &now)
+            {
+                tracing::warn!(operation_id = %op_id, error = %error, "mark payment authorizing failed");
+                return PaymentGate::Unauthorized("payment state conflict".into());
+            }
+        } else {
+            return PaymentGate::Unauthorized("payment state unavailable".into());
+        }
+        let receipt = match client
+            .settle_exact(&quote.binding, &proof.authorization)
+            .await
+        {
             Ok(r) => r,
             Err(e) => {
                 tracing::warn!(operation_id = %op_id, error = %e, "universal-paywall settle_exact failed");
                 return PaymentGate::Unauthorized(format!("payment settlement failed: {e}"));
             }
         };
-        quotes.entry(op_id).and_modify(|q| q.receipt = Some(receipt));
+        let receipt_json = match serde_json::to_string(&receipt) {
+            Ok(value) => value,
+            Err(error) => {
+                tracing::error!(operation_id = %op_id, error = %error, "serialize provider receipt failed");
+                return PaymentGate::Unauthorized("payment receipt unavailable".into());
+            }
+        };
+        match store.lock() {
+            Ok(store) => {
+                if let Err(error) = paid_operation::record_provider_receipt(
+                    store.conn(),
+                    &op_id,
+                    &receipt_json,
+                    &now,
+                ) {
+                    tracing::error!(operation_id = %op_id, error = %error, "persist provider receipt failed");
+                    return PaymentGate::Unauthorized("payment state unavailable".into());
+                }
+            }
+            Err(_) => return PaymentGate::Unauthorized("payment state unavailable".into()),
+        }
+        quotes
+            .entry(op_id)
+            .and_modify(|q| q.receipt = Some(receipt));
         return PaymentGate::Proceed;
     }
 
     // First call: create a quote and ask the client to pay.
-    let operation_id = operation_id.map(|s| s.to_string()).unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let operation_id = operation_id
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let operation = match store.lock() {
+        Ok(store) => match paid_operation::create_or_get(
+            store.conn(),
+            NewPaidOperation {
+                operation_id: &operation_id,
+                subject_hash: &subject_hash,
+                artifact_hash,
+                created_at: &now,
+            },
+        ) {
+            Ok(operation) => operation,
+            Err(error) => return PaymentGate::Unauthorized(error.to_string()),
+        },
+        Err(_) => return PaymentGate::Unauthorized("payment state unavailable".into()),
+    };
+    if operation.state == PaidOperationState::PaymentReady {
+        return PaymentGate::Proceed;
+    }
+
+    // A browser may have settled while Mnemonic was restarting. Provider
+    // status is durable evidence, so recover it before returning another 402.
+    if operation.quote_id.is_some() {
+        if let Ok(status) = client.payment_status(&operation_id).await {
+            if status.status == "settled" {
+                if let Some(receipt) = status.receipt {
+                    if let Ok(receipt_json) = serde_json::to_string(&receipt) {
+                        if let Ok(store) = store.lock() {
+                            if paid_operation::record_provider_receipt(
+                                store.conn(),
+                                &operation_id,
+                                &receipt_json,
+                                &now,
+                            )
+                            .is_ok()
+                            {
+                                return PaymentGate::Proceed;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if let Ok(quote) = client.get_quote_by_operation_id(&operation_id).await {
+            if quote.binding.artifact_hash != artifact_hash
+                || quote.binding.payer_subject != payer_subject
+            {
+                return PaymentGate::Unauthorized(
+                    "operation binding does not match request".into(),
+                );
+            }
+            quotes.insert(
+                operation_id.clone(),
+                StoredQuote {
+                    operation_id: operation_id.clone(),
+                    quote_id: quote.quote_id.clone(),
+                    binding: quote.binding,
+                    binding_digest: quote.binding_digest.clone(),
+                    receipt: None,
+                },
+            );
+            return PaymentGate::NeedUniversalPaywall(UniversalPaywallPaymentRequired {
+                operation_id: operation_id.clone(),
+                quote_id: quote.quote_id.clone(),
+                approval_url: client.approval_url(&operation_id, &quote.quote_id),
+                scheme: "exact".into(),
+                network: config.network.clone(),
+                asset: config.asset.clone(),
+                pay_to: config.pay_to.clone(),
+                payer_wallet: config.payer_wallet.clone(),
+                amount: cost.to_string(),
+                binding_digest: quote.binding_digest,
+            });
+        }
+    }
+
     let mut nonce_bytes = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut nonce_bytes);
     let nonce = format!("0x{}", hex::encode(nonce_bytes));
-    let now = chrono::Utc::now();
-    let expires_at = (now + chrono::TimeDelta::minutes(5)).to_rfc3339();
+    let quote_now = chrono::Utc::now();
+    let expires_at = (quote_now + chrono::TimeDelta::minutes(5)).to_rfc3339();
 
     let binding = OperationBinding {
         version: 1,
@@ -254,6 +407,24 @@ pub async fn check_universal_paywall(
             return PaymentGate::Unauthorized(format!("payment provider unavailable: {e}"));
         }
     };
+
+    match store.lock() {
+        Ok(store) => {
+            if let Err(error) = paid_operation::record_quote(
+                store.conn(),
+                &operation_id,
+                &binding.payer_wallet,
+                &quote.binding_digest,
+                &quote.quote_id,
+                &binding.expires_at,
+                &now,
+            ) {
+                tracing::error!(operation_id = %operation_id, error = %error, "persist payment quote failed");
+                return PaymentGate::Unauthorized("payment state unavailable".into());
+            }
+        }
+        Err(_) => return PaymentGate::Unauthorized("payment state unavailable".into()),
+    }
 
     let approval_url = client.approval_url(&operation_id, &quote.quote_id);
 

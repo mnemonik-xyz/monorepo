@@ -203,6 +203,83 @@ pub fn transition(
     get(conn, operation_id)?.ok_or_else(|| anyhow!("paid operation disappeared"))
 }
 
+pub fn record_quote(
+    conn: &Connection,
+    operation_id: &str,
+    payer_wallet: &str,
+    binding_digest: &str,
+    quote_id: &str,
+    quote_expires_at: &str,
+    updated_at: &str,
+) -> Result<PaidOperation> {
+    let changed = conn
+        .execute(
+            "UPDATE paid_operations SET payer_wallet = ?1, binding_digest = ?2, quote_id = ?3, \
+             quote_expires_at = ?4, state = ?5, updated_at = ?6 \
+             WHERE operation_id = ?7 AND state IN ('awaiting_signature', 'awaiting_payment', 'quote_expired')",
+            params![
+                payer_wallet,
+                binding_digest,
+                quote_id,
+                quote_expires_at,
+                PaidOperationState::AwaitingPayment.as_str(),
+                updated_at,
+                operation_id,
+            ],
+        )
+        .context("record paid operation quote")?;
+    if changed != 1 {
+        return Err(anyhow!("paid_operation_state_conflict"));
+    }
+    get(conn, operation_id)?.ok_or_else(|| anyhow!("paid operation disappeared"))
+}
+
+pub fn mark_payment_authorizing(
+    conn: &Connection,
+    operation_id: &str,
+    updated_at: &str,
+) -> Result<PaidOperation> {
+    let changed = conn
+        .execute(
+            "UPDATE paid_operations SET state = ?1, updated_at = ?2 \
+             WHERE operation_id = ?3 AND state IN ('awaiting_payment', 'payment_authorizing')",
+            params![
+                PaidOperationState::PaymentAuthorizing.as_str(),
+                updated_at,
+                operation_id,
+            ],
+        )
+        .context("mark payment authorizing")?;
+    if changed != 1 {
+        return Err(anyhow!("paid_operation_state_conflict"));
+    }
+    get(conn, operation_id)?.ok_or_else(|| anyhow!("paid operation disappeared"))
+}
+
+pub fn record_provider_receipt(
+    conn: &Connection,
+    operation_id: &str,
+    receipt_json: &str,
+    updated_at: &str,
+) -> Result<PaidOperation> {
+    let changed = conn
+        .execute(
+            "UPDATE paid_operations SET provider_receipt_json = ?1, state = ?2, updated_at = ?3 \
+             WHERE operation_id = ?4 AND state IN ('awaiting_payment', 'payment_authorizing', 'payment_ready')",
+            params![
+                receipt_json,
+                PaidOperationState::PaymentReady.as_str(),
+                updated_at,
+                operation_id,
+            ],
+        )
+        .context("record provider receipt")?;
+    if changed != 1 {
+        return Err(anyhow!("paid_operation_state_conflict"));
+    }
+    get(conn, operation_id)?.ok_or_else(|| anyhow!("paid operation disappeared"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -295,5 +372,45 @@ mod tests {
         .unwrap_err()
         .to_string()
         .contains("paid_operation_state_conflict"));
+    }
+
+    #[test]
+    fn quote_and_receipt_are_durable_operation_metadata() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate_paid_operations(&conn).unwrap();
+        create_or_get(
+            &conn,
+            NewPaidOperation {
+                operation_id: "op-1",
+                subject_hash: "subject-hash",
+                artifact_hash: "hash-a",
+                created_at: "2026-07-15T00:00:00Z",
+            },
+        )
+        .unwrap();
+        record_quote(
+            &conn,
+            "op-1",
+            "0x1111111111111111111111111111111111111111",
+            "0xdigest",
+            "q_1",
+            "2026-07-15T00:05:00Z",
+            "2026-07-15T00:00:01Z",
+        )
+        .unwrap();
+        mark_payment_authorizing(&conn, "op-1", "2026-07-15T00:00:02Z").unwrap();
+        let settled = record_provider_receipt(
+            &conn,
+            "op-1",
+            r#"{\"status\":\"settled\"}"#,
+            "2026-07-15T00:00:03Z",
+        )
+        .unwrap();
+        assert_eq!(settled.state, PaidOperationState::PaymentReady);
+        assert_eq!(settled.quote_id.as_deref(), Some("q_1"));
+        assert_eq!(
+            settled.provider_receipt_json.as_deref(),
+            Some(r#"{\"status\":\"settled\"}"#)
+        );
     }
 }
