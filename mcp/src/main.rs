@@ -622,6 +622,21 @@ async fn main() -> anyhow::Result<()> {
         chain_stats: chain_stats_cache.clone(),
     });
 
+    // Retry only already-settled paid deliveries. The worker re-enters the
+    // staged delivery path and has no payment proof or settlement authority.
+    if state.universal_paywall.is_some() {
+        let retry_state = state.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                let resumed = api::resume_due_paid_deliveries(retry_state.clone()).await;
+                if resumed > 0 {
+                    tracing::info!(resumed, "resumed due paid delivery attempts");
+                }
+            }
+        });
+    }
+
     // Chain-stats refresh loop: snapshot immediately (the landing page
     // should not wait an hour after a restart), then on the configured
     // interval. A failed refresh keeps the previous snapshot — a gateway

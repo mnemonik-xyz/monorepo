@@ -55,6 +55,24 @@ Turn the current happy-path E2E into a release gate for exact payment safety.
 - Delivery attempts now have a durable lease and state. A successful Arweave
   upload is recorded before Solana anchoring; a later callback can reuse that
   stored Arweave id and retry the remaining delivery without returning to
-  payment settlement. Automatic background retry/backoff and Solana
-  submission-reconciliation remain follow-up work; retries currently occur
-  only through the normal explicit resume path.
+  payment settlement.
+- The MCP runs a bounded background recovery worker for settled paid
+  deliveries. It polls due attempts in batches of 16, reuses the staged COSE
+  envelope, and has no payment proof or settlement authority. Retry delays are
+  1, 2, 4, 8, 16, 32, 60, and 60 minutes; the eighth failure is terminal
+  `abandoned`, rejects late callbacks, and creates one durable operator review
+  case. Production timing is always calculated from `Utc::now()`; fixed
+  datetimes exist only in deterministic unit tests.
+- The exact provider suite now covers fifty concurrent attempts, provider
+  restart with a durable exact receipt, quote expiry, insufficient-USDC
+  rejection, and replay attempts which alter every quote-bound field. The
+  mock E2E covers MCP restart before delivery and a duplicate browser callback
+  without a second charge.
+
+## Remaining release-gate evidence
+
+- Run the real-wallet E2E against staging as a pre-release gate (it is not a
+  fast CI test).
+- Add an explicit legacy anchored-artifact recall/verification regression case
+  to the integration harness; existing recall tests cover the current format
+  only.

@@ -104,6 +104,40 @@ pub struct SignCallbackRequest {
     pub signer_pubkey: String,
 }
 
+/// Resume a bounded batch of already-settled delivery attempts. This uses the
+/// same cryptographic callback path as the browser, but only from durable
+/// staged bytes; it never possesses or submits a payment authorization.
+pub async fn resume_due_paid_deliveries(state: Arc<McpState>) -> usize {
+    let now = chrono::Utc::now().to_rfc3339();
+    let ids = match state.store.lock() {
+        Ok(store) => {
+            crate::paid_artifact::due_delivery_retries(store.conn(), &now, 16).unwrap_or_default()
+        }
+        Err(_) => return 0,
+    };
+    let mut resumed = 0;
+    for correlation_id in ids {
+        let staged = match state.store.lock() {
+            Ok(store) => crate::paid_artifact::get_staged_cose(store.conn(), &correlation_id)
+                .ok()
+                .flatten(),
+            Err(_) => None,
+        };
+        let Some(staged) = staged else { continue };
+        let request = SignCallbackRequest {
+            correlation_id,
+            cose_signed_bytes: base64::Engine::encode(
+                &base64::engine::general_purpose::STANDARD,
+                staged.cose_sign1,
+            ),
+            signer_pubkey: staged.signer_pubkey,
+        };
+        let _ = sign_callback_handler(State(state.clone()), Json(request)).await;
+        resumed += 1;
+    }
+    resumed
+}
+
 /// Successful response of `POST /api/sign-callback`.
 ///
 /// Includes the on-chain anchor identifiers so the webapp's success page can

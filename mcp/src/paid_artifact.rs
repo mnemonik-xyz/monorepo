@@ -61,10 +61,18 @@ CREATE TABLE IF NOT EXISTS paid_artifact_delivery_attempts (
     attempts INTEGER NOT NULL DEFAULT 0,
     lease_id TEXT,
     lease_expires_at TEXT,
+    next_retry_at TEXT,
     last_error TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     FOREIGN KEY(correlation_id) REFERENCES paid_artifact_delivery_context(correlation_id)
+);
+CREATE TABLE IF NOT EXISTS paid_delivery_review_cases (
+    correlation_id TEXT PRIMARY KEY,
+    reason TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'open',
+    created_at TEXT NOT NULL,
+    FOREIGN KEY(correlation_id) REFERENCES paid_artifact_delivery_attempts(correlation_id)
 );";
 
 /// A verified signed envelope held while payment completes.
@@ -114,7 +122,18 @@ impl StagedDeliveryContext {
 /// Create the independent artifact-staging table.
 pub fn migrate_paid_artifact_staging(conn: &Connection) -> Result<()> {
     conn.execute_batch(MIGRATION_SQL)
-        .context("create paid artifact staging table")
+        .context("create paid artifact staging table")?;
+    let mut statement = conn.prepare("PRAGMA table_info(paid_artifact_delivery_attempts)")?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    if !columns.iter().any(|column| column == "next_retry_at") {
+        conn.execute(
+            "ALTER TABLE paid_artifact_delivery_attempts ADD COLUMN next_retry_at TEXT",
+            [],
+        )?;
+    }
+    Ok(())
 }
 
 /// Persist a verified client-signed envelope exactly once.
@@ -324,7 +343,13 @@ pub fn acquire_delivery_attempt(
         .optional()
         .context("read paid delivery attempt")?;
     if let Some((state, arweave_tx, solana_tx, attempts, existing_lease)) = existing {
-        if state == "completed" || existing_lease.as_deref().is_some_and(|until| until > now) {
+        // An abandoned delivery is terminal: only an explicit, audited operator
+        // action may reopen it. In particular, a late browser callback must not
+        // silently start another delivery after the bounded retry budget ends.
+        if state == "completed"
+            || state == "abandoned"
+            || existing_lease.as_deref().is_some_and(|until| until > now)
+        {
             return Ok(None);
         }
         conn.execute(
@@ -389,12 +414,46 @@ pub fn mark_delivery_retryable(
     error: &str,
     now: &str,
 ) -> Result<()> {
+    let delay_secs = match attempt.attempts {
+        1 => 60,
+        2 => 120,
+        3 => 240,
+        4 => 480,
+        5 => 960,
+        6 => 1920,
+        _ => 3600,
+    };
+    let retry_at = chrono::DateTime::parse_from_rfc3339(now)
+        .context("parse delivery retry time")?
+        .with_timezone(&Utc)
+        .checked_add_signed(chrono::TimeDelta::seconds(delay_secs))
+        .ok_or_else(|| anyhow!("delivery retry time overflow"))?
+        .to_rfc3339();
+    let terminal = attempt.attempts >= 8;
     conn.execute(
-        "UPDATE paid_artifact_delivery_attempts SET state = 'delivery_retryable', lease_id = NULL, lease_expires_at = NULL, last_error = ?1, updated_at = ?2 \
-         WHERE correlation_id = ?3 AND lease_id = ?4",
-        params![error, now, attempt.correlation_id, attempt.lease_id],
+        "UPDATE paid_artifact_delivery_attempts SET state = ?1, lease_id = NULL, lease_expires_at = NULL, next_retry_at = ?2, last_error = ?3, updated_at = ?4 \
+         WHERE correlation_id = ?5 AND lease_id = ?6",
+        params![if terminal { "abandoned" } else { "delivery_retryable" }, if terminal { None } else { Some(retry_at) }, error, now, attempt.correlation_id, attempt.lease_id],
     ).context("mark paid delivery retryable")?;
+    if terminal {
+        conn.execute(
+            "INSERT INTO paid_delivery_review_cases (correlation_id, reason, created_at) VALUES (?1, ?2, ?3) ON CONFLICT(correlation_id) DO NOTHING",
+            params![attempt.correlation_id, error, now],
+        ).context("open paid delivery review case")?;
+    }
     Ok(())
+}
+
+pub fn due_delivery_retries(conn: &Connection, now: &str, limit: usize) -> Result<Vec<String>> {
+    let mut statement = conn.prepare(
+        "SELECT correlation_id FROM paid_artifact_delivery_attempts \
+         WHERE state = 'delivery_retryable' AND next_retry_at <= ?1 ORDER BY next_retry_at LIMIT ?2",
+    )?;
+    let retries = statement
+        .query_map(params![now, limit as i64], |row| row.get(0))?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .context("list due delivery retries")?;
+    Ok(retries)
 }
 
 pub fn record_solana_submitted(
@@ -573,6 +632,82 @@ mod tests {
             "lease-3",
             "2026-07-15T00:05:00Z",
             "2026-07-15T00:15:00Z",
+        )
+        .unwrap()
+        .is_none());
+    }
+
+    #[test]
+    fn retry_schedule_is_due_only_after_backoff_and_eighth_failure_is_abandoned() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate_paid_artifact_staging(&conn).unwrap();
+        let entry = PendingEntry {
+            jwt_sub: "signer".into(),
+            content: "private memory".into(),
+            embedding: vec![],
+            content_hash: "hash".into(),
+            canonical_cbor: vec![1],
+            tags: vec![],
+            metadata: serde_json::json!({}),
+            write_mode: WriteMode::Participate,
+            exp: Utc::now(),
+        };
+        stage_verified_cose(&conn, "retry", "signer", b"cose", "now").unwrap();
+        stage_delivery_context(&conn, "retry", &entry, "now").unwrap();
+        let first = acquire_delivery_attempt(
+            &conn,
+            "retry",
+            "lease-1",
+            "2026-07-15T00:00:00Z",
+            "2026-07-15T00:10:00Z",
+        )
+        .unwrap()
+        .unwrap();
+        mark_delivery_retryable(&conn, &first, "temporary", "2026-07-15T00:00:00Z").unwrap();
+        assert!(due_delivery_retries(&conn, "2026-07-15T00:00:59Z", 10)
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            due_delivery_retries(&conn, "2026-07-15T00:01:00Z", 10).unwrap(),
+            vec!["retry"]
+        );
+        for attempt_number in 2..=8 {
+            let attempt = acquire_delivery_attempt(
+                &conn,
+                "retry",
+                &format!("lease-{attempt_number}"),
+                "2026-07-15T02:00:00Z",
+                "2026-07-15T02:10:00Z",
+            )
+            .unwrap()
+            .unwrap();
+            mark_delivery_retryable(&conn, &attempt, "temporary", "2026-07-15T02:00:00Z").unwrap();
+        }
+        assert!(due_delivery_retries(&conn, "2026-07-15T23:00:00Z", 10)
+            .unwrap()
+            .is_empty());
+        let state: String = conn
+            .query_row(
+                "SELECT state FROM paid_artifact_delivery_attempts WHERE correlation_id = 'retry'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(state, "abandoned");
+        let review_reason: String = conn
+            .query_row(
+                "SELECT reason FROM paid_delivery_review_cases WHERE correlation_id = 'retry'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(review_reason, "temporary");
+        assert!(acquire_delivery_attempt(
+            &conn,
+            "retry",
+            "late-callback",
+            "2026-07-16T00:00:00Z",
+            "2026-07-16T00:10:00Z",
         )
         .unwrap()
         .is_none());
