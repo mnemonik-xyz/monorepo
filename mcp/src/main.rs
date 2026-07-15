@@ -10,6 +10,7 @@ mod llm;
 mod mcp;
 mod oauth;
 mod payment;
+mod paid_operation;
 mod pending;
 mod pricing;
 mod publish;
@@ -375,6 +376,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let store = SqliteStore::open(&cfg.database_path)?;
+    paid_operation::migrate_paid_operations(store.conn())?;
     // ── T14: Google OAuth identity-link table (idempotent migration) ─────────
     // Lives in `mcp/` per Decision 9 (`core/` reserved for the cross-client
     // attestation schema). No-op when the table already exists; skipped
