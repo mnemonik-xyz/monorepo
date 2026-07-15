@@ -41,7 +41,9 @@ versioned signed-artifact binding -> quote/payment -> anchor`. The binding is
 to the artifact payload, signature, protected headers, and signer key id.
 
 `mcp/src/paid_artifact.rs` now owns this derivation and its regression tests.
-The next implementation slice must persist the verified COSE envelope and its
-pending delivery context between signature verification and payment completion;
-only then may it create the quote. Existing stored artifacts retain their
-current recall/verification format and are not reinterpreted.
+It also has a separate SQLite staging table for the verified COSE envelope;
+the payment table remains metadata-only. The next implementation slice must
+persist the remaining pending delivery context between signature verification
+and payment completion, then create the quote from the staged hash. Existing
+stored artifacts retain their current recall/verification format and are not
+reinterpreted.
