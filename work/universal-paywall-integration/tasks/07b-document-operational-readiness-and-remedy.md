@@ -1,5 +1,5 @@
 ---
-status: ready
+status: complete
 priority: P1
 depends_on:
   - tasks/07a-build-staging-external-delivery-gate.md
@@ -32,3 +32,9 @@ settled exact payment whose external delivery is delayed or permanently fails.
 - An abandoned operation has a defined owner, audit record, and user-visible
   outcome.
 
+## Delivered
+
+`../staging-operations.md` defines the restricted-data diagnostic path,
+health/readiness checks, metric dimensions, reconciliation rules, explicit
+abandoned-operation review, and the production-switch evidence set. It states
+that retries resume delivery only and cannot resettle or recharge a wallet.
