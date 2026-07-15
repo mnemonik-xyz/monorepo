@@ -29,6 +29,19 @@ is in the local clone at commit `96aa291`; E2E consumes it through a temporary
 This is a local Phase 1 smoke-test milestone. It is not a production-readiness
 claim and it does not validate real Irys or production Solana delivery.
 
+### Durable-operation progress
+
+Mnemonic now has a minimal SQLite-backed `PaidOperation` record. It persists
+the operation binding reference, quote metadata, state, and provider receipt
+without storing artifact plaintext. On a resumed payment gate it asks the
+provider for the existing operation status before issuing a quote, so a settled
+exact payment can be recovered after the MCP's in-memory state is gone.
+
+The unit suite (`cargo test -p mnemonic-mcp --lib`, 231 tests) and the local
+mocked E2E pass with this foundation. Dedicated MCP-restart, browser-reload,
+and delivery-retry integration tests are still required before calling the
+recovery requirement complete.
+
 ## Review findings
 
 The following items block Phase 2, staging-hosted paid anchoring, and mainnet

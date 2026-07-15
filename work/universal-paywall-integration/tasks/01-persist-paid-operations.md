@@ -1,5 +1,5 @@
 ---
-status: ready
+status: in_progress
 priority: P1
 depends_on:
   - tasks/00-restore-mcp-test-fixtures.md
@@ -34,3 +34,18 @@ SQLite-backed `PaidOperation` record keyed by `operation_id`.
 - Existing legacy artifacts remain recallable without reading paid-operation
   records.
 
+## Implementation progress (2026-07-15)
+
+Implemented in `mcp/src/paid_operation.rs` and the Universal Paywall payment
+gate:
+
+- an idempotent `paid_operations` SQLite migration and typed operation states;
+- minimal persistent records that exclude artifact plaintext;
+- persisted quote metadata and provider receipts; and
+- recovery of a settled exact payment through provider status before creating a
+  new quote.
+
+The existing local mocked E2E passes with this path. This is deliberately not
+marked complete yet: restart/reload and delivery-retry scenarios need direct
+integration coverage, and the remaining in-process maps must cease to be a
+required source of truth.
