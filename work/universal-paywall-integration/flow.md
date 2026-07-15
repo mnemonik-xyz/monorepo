@@ -131,6 +131,15 @@ It persists only the signed provider receipt. The removed legacy
 payloads; the operation id is an opaque, high-entropy capability carried by
 the signed-artifact journey and its approval URL.
 
+## Phase 1 capability policy
+
+Phase 1 exposes only the `exact` EIP-3009 x402 method. There is no vault,
+pre-deposit, or recurring approval in the quote or approval UI. The
+facilitator retains the stake/session rail behind an explicit disabled
+capability. It may be enabled only after its independent payee-binding,
+reservation, reconciliation, expiry/revocation, concurrency, and security
+review gates are complete.
+
 ## Current limits and follow-on work
 
 - The operation lease, quote-expiry, concurrent callback, delivery failure,
