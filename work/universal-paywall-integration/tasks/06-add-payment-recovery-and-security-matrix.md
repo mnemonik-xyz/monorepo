@@ -1,5 +1,5 @@
 ---
-status: ready_for_staging
+status: complete
 priority: P1
 depends_on:
   - tasks/01-persist-paid-operations.md
@@ -64,15 +64,29 @@ Turn the current happy-path E2E into a release gate for exact payment safety.
   case. Production timing is always calculated from `Utc::now()`; fixed
   datetimes exist only in deterministic unit tests.
 - The exact provider suite now covers fifty concurrent attempts, provider
-  restart with a durable exact receipt, quote expiry, insufficient-USDC
-  rejection, and replay attempts which alter every quote-bound field. The
-  mock E2E covers MCP restart before delivery and a duplicate browser callback
-  without a second charge.
+  restart in created, settling, failed-retryable, rejected, and settled states
+  with a durable exact receipt, quote expiry, insufficient-USDC rejection, and
+  replay attempts which alter every quote-bound field. It verifies every exact
+  receipt's Ed25519 signature and no-recharge reconciliation after ambiguous
+  settlement.
+- The mock E2E rejects the first EIP-3009 signature using the standard wallet
+  rejection code, verifies the page makes the quote safely retryable, then
+  verifies exactly one USDC payment, restart-before-delivery recovery,
+  duplicate callback rejection, anchoring, and recall. It now throws rather
+  than exits inside assertions so failed iterations reliably clean up their
+  validators and browser processes.
 - The core rebuild suite now proves that a previously anchored schema-v1
   signed artifact can be rebuilt into SQLite and recalled with its original
   content hash.
+- The fully automated real MetaMask/Dappwright pre-release gate was run after
+  the final harness changes and passed, as did the mock E2E and full
+  facilitator and MCP test suites.
 
-## Remaining release-gate evidence
+## Verification commands
 
-- Run the real-wallet E2E against staging as a pre-release gate (it is not a
-  fast CI test).
+- `cargo test -p mnemonic-mcp --lib` — 238 passing tests.
+- `cargo test -p mnemonic-core --test integration_rebuild` — 8 passing tests.
+- `npm test && npm run typecheck` in `packages/facilitator` — 43 passing
+  tests and TypeScript check.
+- `npm run typecheck && npm test` and `npm run test:real-metamask` in `e2e` —
+  mock and fully automated real-wallet pre-release gates passed.
