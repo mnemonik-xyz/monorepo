@@ -26,9 +26,9 @@ pub mod escrow;
 pub mod llm;
 pub mod mcp;
 pub mod oauth;
-pub mod payment;
 pub mod paid_artifact;
 pub mod paid_operation;
+pub mod payment;
 pub mod pending;
 pub mod pricing;
 pub mod publish;
@@ -42,6 +42,7 @@ pub mod seed;
 pub mod skill_parse;
 pub mod tools;
 pub mod universal_paywall;
+pub mod wallet_link;
 // Verifiable-trajectories MCP tool handlers (attest_step / attest_verdict /
 // verify_trajectory). Experimental; gated so default builds never compile it.
 #[cfg(feature = "trajectory-experimental")]

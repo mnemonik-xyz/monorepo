@@ -1,5 +1,5 @@
 ---
-status: ready
+status: in_progress
 priority: P1
 depends_on:
   - tasks/01-persist-paid-operations.md
@@ -30,3 +30,11 @@ bound to the authenticated Mnemonic subject and the operation context.
 - A quote binds the verified wallet, not an environment default.
 - Test and production paths use the same verification logic.
 
+## Implementation progress (2026-07-15)
+
+`mcp/src/wallet_link.rs` defines a five-minute EIP-191 `personal_sign`
+challenge bound to the opaque subject hash, operation id, EVM chain id, and a
+random nonce. Its persistent record is single-use and the verifier recovers
+the signer address server-side. The next slice wires this challenge into the
+approval UI and makes quote creation reject operations without its verified
+wallet link.

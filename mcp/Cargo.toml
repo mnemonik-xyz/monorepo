@@ -31,7 +31,7 @@ tower-http = { version = "0.6", features = ["cors", "fs"] }
 alloy-signer = { version = "1.6", optional = true, features = ["eip712"] }
 alloy-signer-local = { version = "1.6", optional = true }
 alloy-dyn-abi = { version = "1.6", optional = true, features = ["eip712"] }
-alloy-primitives = { version = "1.6", optional = true }
+alloy-primitives = { version = "1.6", features = ["k256"] }
 # Form-urlencoded body parsing for /oauth/token (RFC 6749 §3.2 mandates
 # Content-Type: application/x-www-form-urlencoded; VS Code, Claude.ai,
 # and most OAuth client libraries default to that — only Cursor sends JSON).
@@ -152,7 +152,6 @@ approval-mock-signer = [
   "dep:alloy-signer",
   "dep:alloy-signer-local",
   "dep:alloy-dyn-abi",
-  "dep:alloy-primitives",
 ]
 # Vendor OpenSSL from source (used in CI cross-compilation).
 openssl-vendored = ["mnemonic-core/openssl-vendored"]
