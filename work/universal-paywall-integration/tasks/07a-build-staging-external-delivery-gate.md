@@ -49,6 +49,12 @@ changing the fast local CI path.
   key, and Mnemonic delivery keypair from its existing age/SOPS secret source.
   `UNIVERSAL_PAYWALL_URL` is the explicit MCP-to-facilitator location boundary,
   so the reference co-located VPS topology can be split across servers later.
+- Completed: the merged Universal Paywall release workflow successfully
+  published pullable facilitator and approval-UI images to GHCR. Coding
+  Fabric's deployment gate now accepts only `@sha256:` digest references (not
+  moveable tags) and requires both the facilitator and MCP health checks before
+  it reloads the public approval route. The current MCP image is likewise
+  available under an immutable GHCR digest.
 - Still required: provision the protected `paywall-staging` GitHub Environment
   and SOPS-rendered VM secrets, deploy a reviewed staging image, wire a staging
   MCP/approval UI to the facilitator, then implement and run the external E2E
