@@ -6,8 +6,8 @@ scope: phase-1-exact-payment
 
 # Universal Paywall exact-payment flow
 
-This document describes the Phase 1 exact-payment journey as implemented and
-the restart-resume boundary being completed before wallet identity linking.
+This document describes the implemented Phase 1 exact-payment journey,
+including wallet linking and the receipt-based restart/resume boundary.
 Local writes remain free and do not enter this flow.
 
 ## Primary journey
@@ -41,8 +41,12 @@ sequenceDiagram
     M-->>C: 402 awaiting_payment + approval_url
     C->>W: open approval_url
     W->>W: EIP-3009 authorization (wallet)
-    W->>UP: settle exact authorization
-    UP-->>W: signed payment receipt
+    W->>M: settle exact authorization + immutable quote binding
+    M->>UP: settle exact authorization
+    UP-->>M: signed payment receipt
+    M->>DB: persist provider receipt (raw authorization discarded)
+    W->>M: GET operation status
+    M-->>W: durable receipt + recovery state
     C->>M: same sign-callback(correlation_id, same COSE)
     M->>UP: status(operation_id)
     UP-->>M: settled receipt
@@ -99,10 +103,12 @@ side and stores the verified link as single-use metadata. The Universal Paywall
 binding uses that recovered address; `UNIVERSAL_PAYWALL_PAYER_WALLET` is no
 longer used as the production quote source.
 
-## Restart-resume path
+## Approval and restart-resume path
 
 ```mermaid
 flowchart TD
+    B[Browser reload / IDE reconnect] --> O[GET operation status<br/>operation-id capability]
+    O --> Y
     X[MCP restart after client signature] --> Y{Payment settled?}
     Y -->|No| Z[Read staged COSE + context<br/>return same approval URL / operation status]
     Y -->|Yes| P[Read provider receipt by operation_id]
@@ -118,13 +124,15 @@ flowchart TD
 The recovery route must never create a replacement quote, change the signed
 artifact, request another wallet authorization, or re-embed content.
 
+The approval server rejects a settlement unless its operation id, recovered
+authorization payer, and complete binding match the immutable provider quote.
+It persists only the signed provider receipt. The removed legacy
+`/api/authorization` route never returns raw EIP-3009 signatures or typed-data
+payloads; the operation id is an opaque, high-entropy capability carried by
+the signed-artifact journey and its approval URL.
+
 ## Current limits and follow-on work
 
-- Wallet-to-Mnemonic-subject binding is not yet implemented; the configured
-  payer wallet remains a development-only identity source. This is Task 03.
-- The legacy `/api/authorization` endpoint still exists but the active E2E
-  flow no longer calls it. Task 04 removes it and adds authenticated status /
-  resume surfaces.
 - The operation lease, quote-expiry, concurrent callback, delivery failure,
   and provider/MCP restart cases require explicit integration tests in Task 06
   before production readiness.

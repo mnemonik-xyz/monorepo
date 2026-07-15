@@ -722,11 +722,6 @@ pub struct McpState {
     pub approval_chain_name: String,
     pub approval_chain_currency_symbol: String,
     pub approval_chain_currency_decimals: u8,
-    /// Settled authorizations keyed by operation_id, used by the e2e harness
-    /// (and any other caller) to retrieve the signed authorization after the
-    /// browser has submitted it.
-    pub approval_authorizations: Arc<dashmap::DashMap<String, crate::universal_paywall::PaymentAuthorization>>,
-
     // Dynamic pricing — the per-call x402 price floor lives here (the static
     // `SIGN_MEMORY_COST_MICRO_USDC` config seeds `PricingEngine`'s `min_price`).
     pub pricing: Arc<PricingEngine>,
@@ -785,7 +780,8 @@ pub struct McpState {
     /// In-memory store of Universal Paywall operation quotes created by the
     /// payment gate. Used for idempotent retry and to replay the binding on
     /// settlement. Process-local only — a restart drops pending quotes.
-    pub universal_paywall_quotes: Arc<dashmap::DashMap<String, crate::universal_paywall::StoredQuote>>,
+    pub universal_paywall_quotes:
+        Arc<dashmap::DashMap<String, crate::universal_paywall::StoredQuote>>,
 
     /// CLI bootstrap-ticket store (mnemonic-cli tech-spec Decision 7).
     /// Webapp issues a ticket via `POST /api/cli-bootstrap/issue` (Bearer
@@ -2035,7 +2031,6 @@ mod transport_tests {
             approval_chain_name: String::new(),
             approval_chain_currency_symbol: "ETH".into(),
             approval_chain_currency_decimals: 18,
-            approval_authorizations: Arc::new(dashmap::DashMap::new()),
             pricing: crate::pricing::PricingEngine::new(0),
             sol_tx_fee_lamports: 0,
             storage_mode: "local".into(),

@@ -265,7 +265,7 @@ pub fn record_provider_receipt(
     let changed = conn
         .execute(
             "UPDATE paid_operations SET provider_receipt_json = ?1, state = ?2, updated_at = ?3 \
-             WHERE operation_id = ?4 AND state IN ('awaiting_payment', 'payment_authorizing', 'payment_ready')",
+             WHERE operation_id = ?4 AND state IN ('awaiting_payment', 'payment_authorizing')",
             params![
                 receipt_json,
                 PaidOperationState::PaymentReady.as_str(),
@@ -412,5 +412,14 @@ mod tests {
             settled.provider_receipt_json.as_deref(),
             Some(r#"{\"status\":\"settled\"}"#)
         );
+        assert!(record_provider_receipt(
+            &conn,
+            "op-1",
+            r#"{\"status\":\"different\"}"#,
+            "2026-07-15T00:00:04Z",
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("paid_operation_state_conflict"));
     }
 }

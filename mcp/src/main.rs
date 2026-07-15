@@ -595,7 +595,6 @@ async fn main() -> anyhow::Result<()> {
         approval_chain_name: cfg.approval_chain_name.clone(),
         approval_chain_currency_symbol: cfg.approval_chain_currency_symbol.clone(),
         approval_chain_currency_decimals: cfg.approval_chain_currency_decimals,
-        approval_authorizations: Arc::new(dashmap::DashMap::new()),
         pricing,
         sol_tx_fee_lamports: cfg.sol_tx_fee_lamports,
         storage_mode: cfg.storage_mode.clone(),

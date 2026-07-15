@@ -15,7 +15,7 @@ pub type HexHash = String;
 
 /// Operation binding v1 — must stay byte-compatible with
 /// `packages/facilitator/schemas/operation-binding.v1.schema.json`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct OperationBinding {
     pub version: u32,
@@ -32,7 +32,7 @@ pub struct OperationBinding {
     pub scope: OperationScope,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct OperationScope {
     #[serde(skip_serializing_if = "Option::is_none")]

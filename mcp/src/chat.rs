@@ -532,7 +532,6 @@ mod handler_tests {
             approval_chain_name: String::new(),
             approval_chain_currency_symbol: "ETH".into(),
             approval_chain_currency_decimals: 18,
-            approval_authorizations: Arc::new(dashmap::DashMap::new()),
             pricing: crate::pricing::PricingEngine::new(0),
             sol_tx_fee_lamports: 0,
             storage_mode: "local".into(),

@@ -9,7 +9,7 @@
 //! `MNEMONIC_APPROVAL_MOCK_SIGNER` is set.
 
 use axum::{
-    extract::{Path, Query, State},
+    extract::{Path, State},
     http::{HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -20,7 +20,10 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 use crate::mcp::McpState;
-use crate::universal_paywall::{OperationBinding, PaymentAuthorization, UniversalPaywallClient};
+use crate::paid_operation;
+use crate::universal_paywall::{
+    OperationBinding, PaymentAuthorization, PaymentReceipt, UniversalPaywallClient,
+};
 use crate::wallet_link;
 
 const MAX_OPERATION_ID_LEN: usize = 128;
@@ -199,14 +202,31 @@ struct SettleRequest {
     authorization: PaymentAuthorization,
 }
 
-/// POST /api/settle — proxy settlement to the facilitator and remember the
-/// signed authorization so the e2e harness can pick it up.
+/// POST /api/settle — proxy settlement without retaining the raw wallet
+/// authorization. Only the signed provider receipt is persisted for resume.
 async fn settle_handler(
     State(state): State<Arc<McpState>>,
     Json(req): Json<SettleRequest>,
 ) -> Response {
     if req.operation_id.is_empty() || req.operation_id.len() > MAX_OPERATION_ID_LEN {
         return error_resp(StatusCode::BAD_REQUEST, "invalid operation_id");
+    }
+    if req.binding.operation_id != req.operation_id {
+        return error_resp(
+            StatusCode::BAD_REQUEST,
+            "operation_id does not match payment binding",
+        );
+    }
+    if !same_address(&req.binding.payer_wallet, &req.authorization.payer_wallet)
+        || !same_address(
+            &req.binding.payer_wallet,
+            &req.authorization.authorization.authorization.from,
+        )
+    {
+        return error_resp(
+            StatusCode::BAD_REQUEST,
+            "authorization payer does not match payment binding",
+        );
     }
     let Some(cfg) = state.universal_paywall.clone() else {
         return error_resp(
@@ -215,15 +235,121 @@ async fn settle_handler(
         );
     };
     let client = UniversalPaywallClient::new(cfg);
+    let existing_receipt = match state.store.lock() {
+        Ok(store) => match paid_operation::get(store.conn(), &req.operation_id) {
+            Ok(Some(operation)) => operation.provider_receipt_json,
+            Ok(None) => return error_resp(StatusCode::NOT_FOUND, "operation not found"),
+            Err(_) => {
+                return error_resp(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "payment state unavailable",
+                )
+            }
+        },
+        Err(_) => {
+            return error_resp(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "payment state unavailable",
+            )
+        }
+    };
+    if let Some(receipt_json) = existing_receipt {
+        let receipt = match serde_json::from_str::<PaymentReceipt>(&receipt_json) {
+            Ok(receipt) => receipt,
+            Err(_) => {
+                return error_resp(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "stored receipt unavailable",
+                )
+            }
+        };
+        return settled_response(receipt);
+    }
+
+    // The browser must settle precisely the provider-issued immutable quote,
+    // never a binding reconstructed from URL parameters or client input.
+    let quote = match client.get_quote_by_operation_id(&req.operation_id).await {
+        Ok(quote) => quote,
+        Err(error) => {
+            tracing::warn!(operation_id = req.operation_id, error = %error, "facilitator quote lookup failed before settlement");
+            return error_resp(StatusCode::BAD_REQUEST, "payment quote unavailable");
+        }
+    };
+    if quote.binding != req.binding {
+        return error_resp(
+            StatusCode::BAD_REQUEST,
+            "payment binding does not match provider quote",
+        );
+    }
+    let marked = match state.store.lock() {
+        Ok(store) => paid_operation::mark_payment_authorizing(
+            store.conn(),
+            &req.operation_id,
+            &chrono::Utc::now().to_rfc3339(),
+        ),
+        Err(_) => {
+            return error_resp(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "payment state unavailable",
+            )
+        }
+    };
+    if let Err(error) = marked {
+        tracing::warn!(operation_id = req.operation_id, error = %error, "payment operation cannot be settled in its current state");
+        return error_resp(
+            StatusCode::CONFLICT,
+            "payment operation is not ready to settle",
+        );
+    }
     match client
         .settle_exact(&req.binding, &req.authorization.authorization)
         .await
     {
-        Ok(_receipt) => {
-            state
-                .approval_authorizations
-                .insert(req.operation_id.clone(), req.authorization);
-            (StatusCode::OK, Json(serde_json::json!({ "ok": true }))).into_response()
+        Ok(receipt) => {
+            let receipt_json = match serde_json::to_string(&receipt) {
+                Ok(value) => value,
+                Err(_) => {
+                    return error_resp(StatusCode::INTERNAL_SERVER_ERROR, "receipt unavailable")
+                }
+            };
+            let persisted = match state.store.lock() {
+                Ok(store) => paid_operation::record_provider_receipt(
+                    store.conn(),
+                    &req.operation_id,
+                    &receipt_json,
+                    &chrono::Utc::now().to_rfc3339(),
+                ),
+                Err(_) => {
+                    return error_resp(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "payment state unavailable",
+                    )
+                }
+            };
+            if let Err(error) = persisted {
+                tracing::error!(operation_id = req.operation_id, error = %error, "persist settled provider receipt failed");
+                // A concurrent duplicate browser callback can settle the same
+                // provider operation while this request is in flight. The
+                // receipt is immutable; return the winner's durable receipt
+                // instead of turning an already-paid operation into an error.
+                let concurrent_receipt = match state.store.lock() {
+                    Ok(store) => paid_operation::get(store.conn(), &req.operation_id)
+                        .ok()
+                        .flatten()
+                        .and_then(|operation| operation.provider_receipt_json),
+                    Err(_) => None,
+                };
+                if let Some(receipt_json) = concurrent_receipt {
+                    if let Ok(receipt) = serde_json::from_str::<PaymentReceipt>(&receipt_json) {
+                        return settled_response(receipt);
+                    }
+                }
+                return error_resp(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "payment state unavailable",
+                );
+            }
+            settled_response(receipt)
         }
         Err(e) => {
             tracing::warn!(operation_id = req.operation_id, error = %e, "facilitator settle failed");
@@ -232,23 +358,57 @@ async fn settle_handler(
     }
 }
 
-#[derive(Debug, Deserialize)]
-struct AuthorizationQuery {
-    operation_id: String,
+fn same_address(left: &str, right: &str) -> bool {
+    left.eq_ignore_ascii_case(right)
 }
 
-/// GET /api/authorization?operation_id=... — retrieve a stored authorization.
-async fn authorization_handler(
+fn settled_response(receipt: PaymentReceipt) -> Response {
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "status": "settled",
+            "operation_id": receipt.operation_id,
+            "receipt": receipt,
+        })),
+    )
+        .into_response()
+}
+
+/// GET /api/operations/:operation_id — return durable, non-secret operation
+/// state. The operation ID is an unguessable capability issued only with the
+/// client-signed artifact; raw EIP-3009 payloads are never returned.
+async fn operation_status_handler(
     State(state): State<Arc<McpState>>,
-    Query(query): Query<AuthorizationQuery>,
+    Path(operation_id): Path<String>,
 ) -> Response {
-    if query.operation_id.is_empty() || query.operation_id.len() > MAX_OPERATION_ID_LEN {
+    if operation_id.is_empty() || operation_id.len() > MAX_OPERATION_ID_LEN {
         return error_resp(StatusCode::BAD_REQUEST, "invalid operation_id");
     }
-    match state.approval_authorizations.get(&query.operation_id) {
-        Some(entry) => (StatusCode::OK, Json(entry.value().clone())).into_response(),
-        None => error_resp(StatusCode::NOT_FOUND, "authorization not found"),
-    }
+    let operation = match state.store.lock() {
+        Ok(store) => match paid_operation::get(store.conn(), &operation_id) {
+            Ok(Some(operation)) => operation,
+            Ok(None) => return error_resp(StatusCode::NOT_FOUND, "operation not found"),
+            Err(_) => {
+                return error_resp(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "payment state unavailable",
+                )
+            }
+        },
+        Err(_) => {
+            return error_resp(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "payment state unavailable",
+            )
+        }
+    };
+    (StatusCode::OK, Json(serde_json::json!({
+        "operation_id": operation.operation_id,
+        "state": operation.state.as_str(),
+        "quote_id": operation.quote_id,
+        "expires_at": operation.quote_expires_at,
+        "receipt": operation.provider_receipt_json.and_then(|value| serde_json::from_str::<serde_json::Value>(&value).ok()),
+    }))).into_response()
 }
 
 #[derive(Debug, Serialize)]
@@ -384,7 +544,10 @@ pub fn router(state: Arc<McpState>) -> Router<()> {
             get(wallet_link_get_handler).post(wallet_link_post_handler),
         )
         .route("/api/settle", post(settle_handler))
-        .route("/api/authorization", get(authorization_handler))
+        .route(
+            "/api/operations/{operation_id}",
+            get(operation_status_handler),
+        )
         .route("/api/chains/{chain_id}", get(chain_handler))
         .route("/api/mock-sign", post(mock_sign_handler))
         .with_state(state)
