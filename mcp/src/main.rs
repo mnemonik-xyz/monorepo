@@ -276,12 +276,51 @@ async fn main() -> anyhow::Result<()> {
     let (keypair, identity_storage) = match std::env::var_os("MNEMONIC_KEYPAIR_PATH") {
         Some(path) if !path.is_empty() => {
             let path = std::path::PathBuf::from(path);
-            let keypair = solana_sdk::signature::read_keypair_file(&path).map_err(|e| {
+            // Accept both the Solana CLI array and Mnemonic's established
+            // legacy identity document (`{"secret":[…], …}`). The latter is
+            // what the protected deployment identity already uses.
+            let raw = std::fs::read(&path).map_err(|e| {
                 anyhow::anyhow!(
-                    "failed to load MNEMONIC_KEYPAIR_PATH {}: {e}",
+                    "failed to read MNEMONIC_KEYPAIR_PATH {}: {e}",
                     path.display()
                 )
             })?;
+            let json: serde_json::Value = serde_json::from_slice(&raw).map_err(|e| {
+                anyhow::anyhow!(
+                    "failed to parse MNEMONIC_KEYPAIR_PATH {}: {e}",
+                    path.display()
+                )
+            })?;
+            let secret = match json {
+                serde_json::Value::Array(secret) => secret,
+                serde_json::Value::Object(mut identity) => identity
+                    .remove("secret")
+                    .and_then(|secret| secret.as_array().cloned())
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "MNEMONIC_KEYPAIR_PATH {} must be a Solana keypair array or a Mnemonic identity object with a secret array",
+                            path.display()
+                        )
+                    })?,
+                _ => anyhow::bail!(
+                    "MNEMONIC_KEYPAIR_PATH {} must be a Solana keypair array or a Mnemonic identity object",
+                    path.display()
+                ),
+            };
+            let secret: Vec<u8> = serde_json::from_value(serde_json::Value::Array(secret))
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "MNEMONIC_KEYPAIR_PATH {} contains an invalid secret array: {e}",
+                        path.display()
+                    )
+                })?;
+            let keypair =
+                solana_sdk::signature::Keypair::try_from(secret.as_slice()).map_err(|e| {
+                    anyhow::anyhow!(
+                        "MNEMONIC_KEYPAIR_PATH {} is not a valid Solana keypair: {e}",
+                        path.display()
+                    )
+                })?;
             (keypair, format!("explicit keypair at {}", path.display()))
         }
         _ => {
