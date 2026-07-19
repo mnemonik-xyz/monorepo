@@ -151,11 +151,12 @@ pub struct SignCallbackResponse {
     pub content_hash: String,
     pub solana_tx: String,
     pub arweave_tx: String,
-    /// Convenience explorer URL — `https://solscan.io/tx/{solana_tx}` for real
-    /// txs; empty string for synthetic `local:` ids.
+    /// `mainnet`, `devnet`, or `local`, so clients do not mix anchor
+    /// environments in one view.
+    pub anchoring_network: &'static str,
+    /// Convenience cluster-aware explorer URL; empty for synthetic local ids.
     pub solana_explorer_url: String,
-    /// Convenience gateway URL — `https://gateway.irys.xyz/{arweave_tx}` for
-    /// production Irys DataItems; empty string for synthetic `local:` ids.
+    /// Convenience configured Irys gateway URL; empty for synthetic local ids.
     pub arweave_url: String,
 }
 
@@ -812,16 +813,7 @@ pub async fn sign_callback_handler(
         }
     }
 
-    let solana_explorer_url = if solana_tx.starts_with("local:") {
-        String::new()
-    } else {
-        format!("https://solscan.io/tx/{solana_tx}")
-    };
-    let arweave_url = if arweave_tx.starts_with("local:") {
-        String::new()
-    } else {
-        format!("https://gateway.irys.xyz/{arweave_tx}")
-    };
+    let links = crate::tools::anchor_links(&state.arweave, &solana_tx, &arweave_tx);
 
     let body = SignCallbackResponse {
         status: "ok",
@@ -829,8 +821,9 @@ pub async fn sign_callback_handler(
         content_hash: entry.content_hash,
         solana_tx,
         arweave_tx,
-        solana_explorer_url,
-        arweave_url,
+        anchoring_network: links.network,
+        solana_explorer_url: links.solana_explorer_url,
+        arweave_url: links.arweave_url,
     };
     (StatusCode::OK, Json(body)).into_response()
 }

@@ -48,6 +48,7 @@ impl IrysNetwork {
 pub struct ArweaveClient {
     base_url: String,
     upload_url: String,
+    network: IrysNetwork,
     bypass_local_routing: bool,
     client: reqwest::Client,
 }
@@ -61,6 +62,7 @@ impl ArweaveClient {
         Self {
             base_url: base_url.trim_end_matches('/').to_string(),
             upload_url: network.upload_url().to_string(),
+            network,
             bypass_local_routing: false,
             client: http_client(),
         }
@@ -70,12 +72,23 @@ impl ArweaveClient {
         Self::new_with_network(base_url, IrysNetwork::Mainnet)
     }
 
+    /// Configured Irys read gateway, without a trailing slash.
+    pub fn gateway_url(&self) -> &str {
+        &self.base_url
+    }
+
+    /// Irys network selected for uploads and data links.
+    pub fn network(&self) -> IrysNetwork {
+        self.network
+    }
+
     #[cfg(test)]
     pub fn new_for_test(base_url: String) -> Self {
         let upload_url = format!("{}/upload", base_url);
         Self {
             base_url,
             upload_url,
+            network: IrysNetwork::Mainnet,
             bypass_local_routing: true,
             client: reqwest::Client::new(),
         }

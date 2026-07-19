@@ -937,7 +937,7 @@ fn tool_definitions() -> Value {
         },
         {
             "name": "mnemonic_check_pending",
-            "description": "Resolves a deferred-sign correlation_id to its on-chain state. Use this AFTER mnemonic_sign_memory returns awaiting_signature and the user has approved in the browser. Returns {status: 'signed', solana_tx, arweave_tx, solana_explorer_url, arweave_url, attestation_id, ...} on success, {status: 'awaiting_signature'} if user has not approved yet, or {status: 'not_found'} if expired.",
+            "description": "Resolves a deferred-sign correlation_id to its on-chain state. Use this AFTER mnemonic_sign_memory returns awaiting_signature and the user has approved in the browser. Returns {status: 'signed', anchoring_network, solana_tx, arweave_tx, solana_explorer_url, arweave_url, attestation_id, ...} on success, {status: 'awaiting_signature'} if user has not approved yet, or {status: 'not_found'} if expired.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1778,7 +1778,7 @@ async fn handle_tool_call(
                 .as_str()
                 .ok_or_else(|| JsonRpcError::simple(-32603, "correlation_id required"))?
                 .to_string();
-            tools::check_pending(&state.pending, &state.store, &cid).await
+            tools::check_pending(&state.pending, &state.store, &state.arweave, &cid).await
         }
         // request_public_write_confirmation — Decision 5b. Mints an
         // HMAC-bound, single-use confirmation token for a specific

@@ -9,7 +9,7 @@ use solana_sdk::signature::Keypair;
 
 use std::time::Duration;
 
-use mnemonic_core::arweave::ArweaveClient;
+use mnemonic_core::arweave::{ArweaveClient, IrysNetwork};
 use mnemonic_core::codec::{
     canonical::{from_canonical_cbor, to_canonical_cbor},
     hash::hash_bytes as blake3_hash,
@@ -28,6 +28,41 @@ use crate::mcp::{
 };
 use crate::pending::PendingBundles;
 use crate::{payment, pricing::CostHint};
+
+/// Public anchor metadata returned after a successful signing/delivery flow.
+/// It is derived from the configured Irys client rather than hard-coded, so a
+/// separate Devnet MCP cannot direct users to production explorers or data.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AnchorLinks {
+    pub network: &'static str,
+    pub solana_explorer_url: String,
+    pub arweave_url: String,
+}
+
+pub fn anchor_links(arweave: &ArweaveClient, solana_tx: &str, arweave_tx: &str) -> AnchorLinks {
+    if solana_tx.starts_with("local:") || arweave_tx.starts_with("local:") {
+        return AnchorLinks {
+            network: "local",
+            solana_explorer_url: String::new(),
+            arweave_url: String::new(),
+        };
+    }
+
+    match arweave.network() {
+        IrysNetwork::Mainnet => AnchorLinks {
+            network: "mainnet",
+            solana_explorer_url: format!("https://explorer.solana.com/tx/{solana_tx}"),
+            arweave_url: format!("{}/{arweave_tx}", arweave.gateway_url()),
+        },
+        IrysNetwork::Devnet => AnchorLinks {
+            network: "devnet",
+            solana_explorer_url: format!(
+                "https://explorer.solana.com/tx/{solana_tx}?cluster=devnet"
+            ),
+            arweave_url: format!("{}/{arweave_tx}", arweave.gateway_url()),
+        },
+    }
+}
 
 /// Outcome of resolving the per-request `mode` field. Carries the resolved
 /// [`WriteMode`] **plus** whether it came from the caller's explicit input
@@ -921,8 +956,9 @@ async fn sign_memory_deferred(
 /// browser. Returns one of:
 ///
 ///   - `{status: "signed", attestation_id, content_hash, solana_tx,
-///     arweave_tx, signer_pubkey, signed_at, solana_explorer_url,
-///     arweave_url}` — sign-callback completed, row persisted.
+///     arweave_tx, signer_pubkey, signed_at, anchoring_network,
+///     solana_explorer_url, arweave_url}` — sign-callback completed, row
+///     persisted.
 ///   - `{status: "awaiting_signature", correlation_id, expires_at}` —
 ///     bundle still parked in the LRU; user has not yet approved.
 ///   - `{status: "not_found", correlation_id}` — never issued, expired
@@ -935,6 +971,7 @@ async fn sign_memory_deferred(
 pub async fn check_pending(
     pending: &PendingBundles,
     store: &std::sync::Mutex<SqliteStore>,
+    arweave: &ArweaveClient,
     correlation_id: &str,
 ) -> serde_json::Value {
     // 1. DB lookup first — happy path is "row already persisted".
@@ -957,16 +994,7 @@ pub async fn check_pending(
     if let Some((attestation_id, content_hash, solana_tx, arweave_tx, signer_pubkey, created_at)) =
         signed
     {
-        let solana_explorer_url = if solana_tx.starts_with("local:") {
-            String::new()
-        } else {
-            format!("https://solscan.io/tx/{solana_tx}")
-        };
-        let arweave_url = if arweave_tx.starts_with("local:") {
-            String::new()
-        } else {
-            format!("https://gateway.irys.xyz/{arweave_tx}")
-        };
+        let links = anchor_links(arweave, &solana_tx, &arweave_tx);
         return serde_json::json!({
             "status": "signed",
             "attestation_id": attestation_id,
@@ -975,8 +1003,9 @@ pub async fn check_pending(
             "arweave_tx": arweave_tx,
             "signer_pubkey": signer_pubkey,
             "signed_at": created_at,
-            "solana_explorer_url": solana_explorer_url,
-            "arweave_url": arweave_url,
+            "anchoring_network": links.network,
+            "solana_explorer_url": links.solana_explorer_url,
+            "arweave_url": links.arweave_url,
         });
     }
 
@@ -2337,5 +2366,34 @@ mod resolve_write_mode_tests {
         let v = serde_json::json!("local ");
         let err = resolve_write_mode(Some(&v), "local").expect_err("trailing space rejects");
         assert_invalid_params(err, &v);
+    }
+}
+
+#[cfg(test)]
+mod anchor_links_tests {
+    use super::*;
+
+    #[test]
+    fn devnet_links_use_devnet_cluster_and_gateway() {
+        let arweave =
+            ArweaveClient::new_with_network("https://devnet.irys.xyz/", IrysNetwork::Devnet);
+        let links = anchor_links(&arweave, "solana-signature", "irys-data-item");
+
+        assert_eq!(links.network, "devnet");
+        assert_eq!(
+            links.solana_explorer_url,
+            "https://explorer.solana.com/tx/solana-signature?cluster=devnet"
+        );
+        assert_eq!(links.arweave_url, "https://devnet.irys.xyz/irys-data-item");
+    }
+
+    #[test]
+    fn local_ids_have_no_external_links() {
+        let arweave = ArweaveClient::new("https://gateway.irys.xyz");
+        let links = anchor_links(&arweave, "local:solana", "local:irys");
+
+        assert_eq!(links.network, "local");
+        assert!(links.solana_explorer_url.is_empty());
+        assert!(links.arweave_url.is_empty());
     }
 }
