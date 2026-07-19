@@ -268,12 +268,31 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
-    let identity_struct = mnemonic_core::identity::ensure()
-        .map_err(|e| anyhow::anyhow!("identity::ensure failed at startup: {e}"))?;
-    let keypair = identity_struct.keypair;
+    // A hosted deployment supplies its durable delivery identity explicitly.
+    // Local/stdio use keeps the existing OS-keychain/file-fallback behaviour.
+    // Do not call `identity::ensure` when the explicit file is configured: it
+    // creates `~/.mnemonic`, which is intentionally unavailable in a
+    // read-only container.
+    let (keypair, identity_storage) = match std::env::var_os("MNEMONIC_KEYPAIR_PATH") {
+        Some(path) if !path.is_empty() => {
+            let path = std::path::PathBuf::from(path);
+            let keypair = solana_sdk::signature::read_keypair_file(&path).map_err(|e| {
+                anyhow::anyhow!(
+                    "failed to load MNEMONIC_KEYPAIR_PATH {}: {e}",
+                    path.display()
+                )
+            })?;
+            (keypair, format!("explicit keypair at {}", path.display()))
+        }
+        _ => {
+            let identity = mnemonic_core::identity::ensure()
+                .map_err(|e| anyhow::anyhow!("identity::ensure failed at startup: {e}"))?;
+            (identity.keypair, format!("{:?}", identity.storage))
+        }
+    };
     tracing::info!("Identity: {}", keypair.pubkey());
     tracing::info!("did:sol: {}", mnemonic_core::identity::did_sol(&keypair));
-    tracing::info!("Identity storage: {:?}", identity_struct.storage);
+    tracing::info!("Identity storage: {identity_storage}");
 
     let embedder = embed::build_embedder(
         &cfg.embed_provider,
