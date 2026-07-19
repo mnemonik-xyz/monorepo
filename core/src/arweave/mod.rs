@@ -24,6 +24,27 @@ pub(crate) fn http_client() -> reqwest::Client {
 use sha2::{Digest, Sha384};
 use solana_sdk::signature::{Keypair, Signer};
 
+/// Irys network used for ANS-104 uploads.
+///
+/// The upload endpoint is deliberately selected from this enum rather than
+/// accepted as an arbitrary environment URL. In particular, a test-only MCP
+/// must not be able to turn a Devnet deployment into a mainnet upload through
+/// a copied or mistyped endpoint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IrysNetwork {
+    Mainnet,
+    Devnet,
+}
+
+impl IrysNetwork {
+    fn upload_url(self) -> &'static str {
+        match self {
+            Self::Mainnet => "https://uploader.irys.xyz/tx/solana",
+            Self::Devnet => "https://devnet.irys.xyz/tx/solana",
+        }
+    }
+}
+
 pub struct ArweaveClient {
     base_url: String,
     upload_url: String,
@@ -32,18 +53,21 @@ pub struct ArweaveClient {
 }
 
 impl ArweaveClient {
-    pub fn new(base_url: &str) -> Self {
+    /// Construct an Irys-backed client for an explicit network.
+    ///
+    /// `base_url` remains the read gateway. Uploads always use the fixed,
+    /// network-specific ANS-104 endpoint selected by `network`.
+    pub fn new_with_network(base_url: &str, network: IrysNetwork) -> Self {
         Self {
             base_url: base_url.trim_end_matches('/').to_string(),
-            // Irys ANS-104 upload endpoint. Per the bundler API,
-            // path is `/tx/<token>` where <token> identifies the
-            // signing currency. Solana-signed data items go to
-            // `/tx/solana`. The legacy `/upload` path returns 404
-            // — likely renamed when Bundlr migrated to Irys L1.
-            upload_url: "https://uploader.irys.xyz/tx/solana".to_string(),
+            upload_url: network.upload_url().to_string(),
             bypass_local_routing: false,
             client: http_client(),
         }
+    }
+
+    pub fn new(base_url: &str) -> Self {
+        Self::new_with_network(base_url, IrysNetwork::Mainnet)
     }
 
     #[cfg(test)]
@@ -391,6 +415,14 @@ mod tests {
         let result = client.write_bytes(b"data", &keypair).await;
         // arlocal path will be taken (is_local=true, bypass=false) and also fail
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn devnet_uses_the_devnet_upload_endpoint() {
+        let client =
+            ArweaveClient::new_with_network("https://devnet.irys.xyz", IrysNetwork::Devnet);
+        assert_eq!(client.base_url, "https://devnet.irys.xyz");
+        assert_eq!(client.upload_url, "https://devnet.irys.xyz/tx/solana");
     }
 
     /// Sign a data item, then re-derive the deep hash from the buffer's

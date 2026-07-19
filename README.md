@@ -146,6 +146,20 @@ Selected via `STORAGE_MODE`:
 - `local` (default) — SQLite only. No Solana / Arweave writes, no payment gate. Synthetic tx ids (`local:...`). Ideal for dev, demos, and UX testing.
 - `full` — signed COSE bytes written to Arweave, anchor memo written to Solana, searchable embeddings kept in SQLite. Payment gate applies on HTTP when enabled.
 
+`full` deployments also select an anchoring environment with
+`ANCHORING_NETWORK`:
+
+- `mainnet` (default) — uses the production Irys upload endpoint and the
+  operator-selected mainnet-compatible read gateway/RPC.
+- `devnet` — test-only anchoring. MCP permits only
+  `SOLANA_RPC_URL=https://api.devnet.solana.com` and
+  `IRYS_GATEWAY_URL=https://devnet.irys.xyz`, then selects Irys Devnet’s
+  upload endpoint internally. A production or custom endpoint causes startup
+  to fail rather than risk a billable upload.
+
+Irys Devnet artifacts are disposable test data; do not use this mode for
+durable user memory.
+
 ---
 
 ## Payment modes (HTTP only, `full` mode only)
@@ -173,7 +187,8 @@ All configuration is env-driven (`mcp/src/config.rs`). The most relevant variabl
 | `EMBED_PROVIDER` | `fastembed` | `fastembed` \| `openai` \| `hash` (tests only) |
 | `OPENAI_API_KEY` / `OPENAI_EMBED_MODEL` | — | When using OpenAI embeddings |
 | `TURBO_BITS` | `4` | TurboQuant bit width (2/3/4) |
-| `SOLANA_RPC_URL` / `ARWEAVE_URL` | localhost | External anchoring endpoints (`full` mode) |
+| `ANCHORING_NETWORK` | `mainnet` | `mainnet` or fail-closed test-only `devnet` |
+| `SOLANA_RPC_URL` / `IRYS_GATEWAY_URL` | localhost | External anchoring endpoints (`full` mode); `ARWEAVE_URL` is a legacy fallback for the gateway only |
 | `PAYMENT_MODE` | `none` | `none` \| `balance` \| `x402` \| `both` |
 | `TREASURY_PUBKEY` / `USDC_MINT` | — / mainnet USDC | Payment routing |
 | `SIGN_MEMORY_COST_MICRO_USDC` | `1000` | Floor price for sign-memory |

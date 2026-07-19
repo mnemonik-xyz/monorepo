@@ -1,4 +1,39 @@
 use std::path::PathBuf;
+use std::str::FromStr;
+
+use mnemonic_core::arweave::IrysNetwork;
+
+/// Selects where a full-storage MCP writes its Irys bundle items and Solana
+/// memo anchors. `devnet` is intentionally strict: it is the non-billable
+/// staging mode and must never accept a production endpoint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnchoringNetwork {
+    Mainnet,
+    Devnet,
+}
+
+impl AnchoringNetwork {
+    fn as_irys_network(self) -> IrysNetwork {
+        match self {
+            Self::Mainnet => IrysNetwork::Mainnet,
+            Self::Devnet => IrysNetwork::Devnet,
+        }
+    }
+}
+
+impl FromStr for AnchoringNetwork {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "mainnet" => Ok(Self::Mainnet),
+            "devnet" => Ok(Self::Devnet),
+            _ => Err(format!(
+                "ANCHORING_NETWORK must be 'mainnet' or 'devnet', got: {value}"
+            )),
+        }
+    }
+}
 
 #[derive(Clone)]
 pub struct Config {
@@ -13,7 +48,12 @@ pub struct Config {
     #[allow(dead_code)]
     pub http_port: u16,
     pub solana_rpc_url: String,
+    /// Irys read gateway. `IRYS_GATEWAY_URL` is the preferred name;
+    /// `ARWEAVE_URL` remains a backwards-compatible fallback.
     pub arweave_url: String,
+    /// Raw environment value, parsed and validated at startup so invalid
+    /// values fail closed rather than silently falling back to mainnet.
+    pub anchoring_network: String,
     pub database_path: PathBuf,
     /// "hash" (default, offline) or "openai" (requires OPENAI_API_KEY)
     pub embed_provider: String,
@@ -205,7 +245,12 @@ impl Config {
             http_host: env_or("MCP_HTTP_HOST", "0.0.0.0"),
             http_port: env_or("MCP_HTTP_PORT", "3000").parse().unwrap_or(3000),
             solana_rpc_url: env_or("SOLANA_RPC_URL", "http://localhost:8899"),
-            arweave_url: env_or("ARWEAVE_URL", "http://localhost:1984"),
+            arweave_url: env_or_fallback(
+                "IRYS_GATEWAY_URL",
+                "ARWEAVE_URL",
+                "http://localhost:1984",
+            ),
+            anchoring_network: env_or("ANCHORING_NETWORK", "mainnet"),
             database_path: expand_path(&env_or(
                 "DATABASE_PATH",
                 &format!("{}/.mnemonic/attestations.db", home),
@@ -308,6 +353,36 @@ impl Config {
     pub fn validate_ollama_url(&self) -> Result<(), String> {
         validate_ollama_url(&self.ollama_url)
     }
+
+    /// Resolve the requested anchoring network. Kept separate from
+    /// `from_env` so startup can emit a clear fatal configuration error.
+    pub fn resolved_anchoring_network(&self) -> Result<AnchoringNetwork, String> {
+        self.anchoring_network.parse()
+    }
+
+    /// In Devnet mode, every external anchoring endpoint is fixed and
+    /// non-production. This is deliberately stricter than the legacy mainnet
+    /// configuration, which supports custom gateways and local test rigs.
+    pub fn validate_anchoring_config(&self) -> Result<AnchoringNetwork, String> {
+        let network = self.resolved_anchoring_network()?;
+        if network == AnchoringNetwork::Devnet {
+            validate_exact_https_origin(
+                "SOLANA_RPC_URL",
+                &self.solana_rpc_url,
+                "https://api.devnet.solana.com",
+            )?;
+            validate_exact_https_origin(
+                "IRYS_GATEWAY_URL",
+                &self.arweave_url,
+                "https://devnet.irys.xyz",
+            )?;
+        }
+        Ok(network)
+    }
+
+    pub fn irys_network(&self) -> Result<IrysNetwork, String> {
+        Ok(self.resolved_anchoring_network()?.as_irys_network())
+    }
 }
 
 /// Validate that `url` matches the OLLAMA_URL whitelist.
@@ -334,6 +409,29 @@ fn validate_ollama_url(url: &str) -> Result<(), String> {
 
 fn env_or(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
+}
+
+fn env_or_fallback(preferred_key: &str, legacy_key: &str, default: &str) -> String {
+    std::env::var(preferred_key)
+        .or_else(|_| std::env::var(legacy_key))
+        .unwrap_or_else(|_| default.to_string())
+}
+
+fn validate_exact_https_origin(key: &str, value: &str, expected: &str) -> Result<(), String> {
+    let parsed = url::Url::parse(value)
+        .map_err(|error| format!("{key} is not a valid URL ({value}): {error}"))?;
+    let normalized = parsed.origin().ascii_serialization();
+    if parsed.scheme() != "https"
+        || normalized != expected
+        || parsed.path() != "/"
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+    {
+        return Err(format!(
+            "ANCHORING_NETWORK=devnet requires {key}={expected}, got: {value}"
+        ));
+    }
+    Ok(())
 }
 
 fn expand_path(p: &str) -> PathBuf {
@@ -404,5 +502,44 @@ mod tests {
         // 127.0.0.1 is semantically localhost but must use the hostname form
         let result = validate_ollama_url("http://127.0.0.1:11434");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn resolves_supported_anchoring_networks() {
+        assert_eq!(
+            "mainnet".parse::<AnchoringNetwork>(),
+            Ok(AnchoringNetwork::Mainnet)
+        );
+        assert_eq!(
+            "devnet".parse::<AnchoringNetwork>(),
+            Ok(AnchoringNetwork::Devnet)
+        );
+        assert!("testnet".parse::<AnchoringNetwork>().is_err());
+    }
+
+    #[test]
+    fn devnet_rejects_production_and_custom_endpoints() {
+        let mut cfg = Config::from_env();
+        cfg.anchoring_network = "devnet".to_string();
+        cfg.solana_rpc_url = "https://api.mainnet-beta.solana.com".to_string();
+        cfg.arweave_url = "https://gateway.irys.xyz".to_string();
+        assert!(cfg.validate_anchoring_config().is_err());
+
+        cfg.solana_rpc_url = "https://api.devnet.solana.com".to_string();
+        cfg.arweave_url = "https://devnet.irys.xyz".to_string();
+        assert_eq!(
+            cfg.validate_anchoring_config(),
+            Ok(AnchoringNetwork::Devnet)
+        );
+
+        // A trailing slash is semantically the same origin, but a path must
+        // not be accepted: it could point uploads/reads at an unexpected API.
+        cfg.arweave_url = "https://devnet.irys.xyz/".to_string();
+        assert_eq!(
+            cfg.validate_anchoring_config(),
+            Ok(AnchoringNetwork::Devnet)
+        );
+        cfg.arweave_url = "https://devnet.irys.xyz/custom".to_string();
+        assert!(cfg.validate_anchoring_config().is_err());
     }
 }

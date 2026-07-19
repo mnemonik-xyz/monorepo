@@ -316,6 +316,23 @@ async fn main() -> anyhow::Result<()> {
         tracing::error!("FATAL: {msg}");
         std::process::exit(1);
     }
+
+    let anchoring_network = match cfg.validate_anchoring_config() {
+        Ok(network) => network,
+        Err(msg) => {
+            tracing::error!("FATAL: {msg}");
+            std::process::exit(1);
+        }
+    };
+    let irys_network = cfg
+        .irys_network()
+        .expect("anchoring network was validated immediately above");
+    tracing::info!(
+        "Anchoring network: {:?} (Solana RPC: {}, Irys gateway: {})",
+        anchoring_network,
+        cfg.solana_rpc_url,
+        cfg.arweave_url
+    );
     tracing::info!(
         "Ollama URL: {} (model: {})",
         cfg.ollama_url,
@@ -566,7 +583,7 @@ async fn main() -> anyhow::Result<()> {
     let state = Arc::new(mcp::McpState {
         keypair,
         solana: solana::SolanaClient::new(&cfg.solana_rpc_url),
-        arweave: arweave::ArweaveClient::new(&cfg.arweave_url),
+        arweave: arweave::ArweaveClient::new_with_network(&cfg.arweave_url, irys_network),
         store: std::sync::Mutex::new(store),
         embedder,
         compressor,
