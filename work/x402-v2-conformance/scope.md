@@ -9,6 +9,8 @@ related:
   - "https://github.com/x402-foundation/x402/blob/main/specs/transports-v2/http.md"
   - "https://github.com/x402-foundation/x402/blob/main/specs/schemes/exact/scheme_exact_svm.md"
   - "work/universal-paywall-integration/ — the shipped bespoke rail this replaces"
+  - "mnemonik-dev/universal-paywall — the facilitator; packages/facilitator/src/x402.ts"
+  - "https://github.com/x402-foundation/x402/blob/main/specs/schemes/batch-settlement/scheme_batch_settlement.md"
 ---
 
 # Scope: real x402 v2 conformance (server side)
@@ -67,32 +69,92 @@ Consequences of the current model that the spec's model removes:
 
 Keeping `tx_sig` means not implementing x402, whatever the headers say.
 
-## Gating decision 1 — chain: stay on Solana
+## Universal Paywall: what it actually is
 
-`exact` has a normative SVM binding (`scheme_exact_svm.md`), so conformance does
-**not** require an EVM pivot. Existing `treasury_pubkey`, `usdc_mint` and
-`solana_rpc_url` config carries over; the network identifier becomes CAIP-2.
+Read at `mnemonik-dev/universal-paywall@31761ec`. This section corrects an
+earlier draft of this document that scoped the work without it.
 
-EVM (`evm_usdc_token`, `evm_treasury`, EIP-3009) can remain as a second entry in
-`accepts[]` later. It is not on the critical path.
+UP is a **stake + session-key rail**: the payer locks USDC in a non-custodial
+`StakeVault` and grants the facilitator a bounded, revocable policy (cap,
+expiry). The facilitator meters charges, batches them, and settles on-chain.
+Contracts are Solidity (`contracts/src/rail/StakeVault.sol`); the client library
+is viem. **The rail is EVM-only.**
 
-## Gating decision 2 — facilitator: unresolved, blocks everything
+### Does it correspond to x402?
 
-In SVM `exact` the facilitator is also the **sponsor**: it holds a keypair, signs
-as `feePayer`, funds fees, and submits. That is an operational commitment, not an
-integration detail. Three options:
+Partially — x402-shaped at the edge, bespoke underneath.
 
-1. **Conform Universal Paywall** — it already proxies settlement
-   (`universal_paywall.rs:224` → `POST {url}/v1/payments/settle`). Needs
-   `/verify`, `/settle`, `/supported` at the spec's contracts. Cheapest if the
-   provider is ours to change.
-2. **Public facilitator** — no sponsor keypair to run; adds a third-party
-   dependency on the paid path and constrains supported networks.
-3. **Self-host** — the spec explicitly permits the resource server to host these
-   endpoints. Most control, most operational burden (hot wallet, fee funding,
-   sponsor acceptance policy).
+| | UP | x402 v2 |
+| --- | --- | --- |
+| 402 body | `accepts[]`, CAIP-2 networks | same idea | 
+| Version | `x402Version: 1` everywhere | `2` |
+| Scheme | `"stake"` — unregistered | `exact` / `upto` / `batch-settlement` / `auth-capture` |
+| Extra fields | top-level `grant{}` | not in schema |
+| Transport | JSON body | `PAYMENT-REQUIRED` / `PAYMENT-SIGNATURE` / `PAYMENT-RESPONSE` headers |
+| Facilitator API | `/charge`, `/flush`, `/v1/quotes`, `/v1/payments/settle`, `/v1/sessions` | `/verify`, `/settle`, `/supported` |
 
-**This decision must be made before T3.** Everything downstream inherits it.
+### The `stake` scheme is already standardised
+
+x402 v2's `batch-settlement` describes UP's model almost verbatim — a
+capital-backed commitment where "the trust anchor is the client's own funds",
+access is granted immediately, and "value moves later, through the network
+binding's redemption process". UP's `/charge` + `/flush` is that redemption
+process; `StakeVault` is that capital.
+
+So conformance does **not** mean inventing a scheme or abandoning the rail. It
+means mapping `stake` onto `batch-settlement` (and metered/variable pricing onto
+`upto`), then exposing the standard facilitator contract over the existing
+implementation.
+
+### UP's own phase gate
+
+`packages/facilitator/src/session-service.ts:42` — hosted Phase 1 supports
+one-time `exact` only; `stake` is opt-in "until its separate
+reservation/reconciliation hardening gate is approved". Stake is not hosted-ready
+regardless of what we do here.
+
+## Gating decision 1 — chains: both, in two phases
+
+x402 is multi-chain by construction: `accepts[]` is an array of scheme+network
+pairs, the client picks one, and `/supported` advertises
+`signers: {"eip155:*": […], "solana:*": […]}`. Every scheme we need has both
+bindings — `scheme_{exact,upto,batch_settlement}_{evm,svm}.md`.
+
+So both work, but they are not equally cheap:
+
+- **`exact` on both — cheap.** Solana already has `treasury_pubkey`, `usdc_mint`,
+  `solana_rpc_url`; EVM already has `evm_treasury`, `evm_usdc_token` and an
+  EIP-3009 path. Both become `accepts[]` entries with CAIP-2 ids.
+- **`batch-settlement` (= UP stake) on Solana — expensive.** The rail is
+  `StakeVault.sol`. An SVM binding needs an equivalent Solana program, not a
+  config change.
+
+**Decision: ship conformant `exact` on eip155 + solana first. Add
+`batch-settlement` on EVM when UP's hardening gate opens. Solana stake last, and
+only if the product needs it.**
+
+## Gating decision 2 — facilitator
+
+UP is ours (`mnemonik-dev/universal-paywall`), so this is a sequencing question,
+not a build-or-buy one.
+
+1. **Conform UP to x402 v2, mnemonic passes through.** Add `/verify`, `/settle`,
+   `/supported`; move to v2 types and header transport; map `stake` →
+   `batch-settlement`. The rail and contracts stay as they are. Clients then talk
+   real x402 and can use off-the-shelf libraries. **Most of this work lands in the
+   universal-paywall repo, not this one.**
+2. **Keep UP bespoke, mnemonic keeps wrapping it.** What upstream ships today
+   (`api.rs:376` → `awaiting_payment` + `approval_url`). Works now; never
+   conformant from the client's point of view.
+3. **Public facilitator for `exact` now, UP for `batch-settlement` later.**
+   Fastest route to genuine x402, at the cost of running two rails during the
+   transition.
+
+**Recommended: 1, with 3 as a bridge if conformance is needed before UP can
+move.** Note that in SVM `exact` the facilitator is also the *sponsor* — it holds
+a keypair, signs as `feePayer`, funds fees and submits. That is an operational
+commitment (hot wallet, funding alerts, sponsor acceptance policy) that nothing
+in either repo does today.
 
 ## Tasks
 
