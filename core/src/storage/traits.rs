@@ -13,6 +13,28 @@ pub struct AttestationRow {
     pub signer_pubkey: String,
 }
 
+/// Everything needed to rebuild the canonical-CBOR artifact for a stored row.
+///
+/// Local-mode rows keep only the *result* of signing (`content_hash`), not the
+/// canonical CBOR or the COSE envelope. To check that hash later, `verify` has
+/// to rebuild the artifact byte-for-byte, which needs the row fields that went
+/// into it — `tags` and `created_at` beyond what `AttestationRow` carries —
+/// plus the raw embedding, because `metadata.embedding_compressed` is a
+/// deterministic function of it.
+#[derive(Debug, Clone)]
+pub struct ReconstructionInputs {
+    pub attestation_id: String,
+    pub content: String,
+    pub content_hash: String,
+    pub tags: Vec<String>,
+    pub solana_tx: String,
+    pub arweave_tx: String,
+    pub signer_pubkey: String,
+    pub created_at: String,
+    /// Raw (uncompressed) f32 embedding as written at sign time.
+    pub embedding: Vec<f32>,
+}
+
 /// Search result with relevance scoring.
 ///
 /// `write_mode` is surfaced so callers (notably `recall`) can render mixed-
@@ -89,6 +111,20 @@ pub trait AttestationStore {
     /// T4).
     fn find_by_tx(&self, tx_id: &str, owner_pubkey: &str)
         -> anyhow::Result<Option<AttestationRow>>;
+
+    /// Fetch the canonical-CBOR reconstruction inputs for a row, scoped to
+    /// `owner_pubkey` with the same tenant-isolation contract as
+    /// [`AttestationStore::find_by_tx`]: another tenant's row returns
+    /// `Ok(None)`, indistinguishable from a genuine miss.
+    ///
+    /// Returns `Ok(None)` when the row exists but has no stored embedding —
+    /// its artifact cannot be rebuilt, which is distinct from "tampered" and
+    /// callers must not conflate the two.
+    fn reconstruction_inputs_by_tx(
+        &self,
+        tx_id: &str,
+        owner_pubkey: &str,
+    ) -> anyhow::Result<Option<ReconstructionInputs>>;
 
     /// Look up the stored `write_mode` for a row by `solana_tx` OR
     /// `arweave_tx`, scoped to the caller's `owner_pubkey`. Used by
