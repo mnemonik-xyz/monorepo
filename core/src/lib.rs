@@ -13,6 +13,14 @@ pub mod merkle;
 #[cfg(feature = "trajectory-experimental")]
 pub mod trajectory;
 
+// Intent–action correspondence (work/research/computation-proof/): INTENT/ACTION
+// schemas + a VERIFY-ONLY layer (verify_correspondence, action_commitment). Pure
+// (codec only) so it runs client-side / wasm and against any backend. Proving is
+// produced externally (the `mnemonic-prover` crate); core only verifies + binds.
+// Experimental; opt-in feature.
+#[cfg(feature = "correspondence-experimental")]
+pub mod correspondence;
+
 // Native-only modules. These pull in rusqlite (bundled C SQLite), reqwest
 // (native TLS), or fastembed (ONNX runtime), none of which compile for
 // wasm32-unknown-unknown. Gating here keeps the WASM build minimal and means

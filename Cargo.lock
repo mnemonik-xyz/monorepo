@@ -4374,6 +4374,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "mnemonic-prover"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "mnemonic-core",
+ "serde",
+ "serde_json",
+ "solana-sdk",
+]
+
+[[package]]
 name = "monostate"
 version = "0.1.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"

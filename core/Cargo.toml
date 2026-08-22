@@ -72,6 +72,12 @@ golden-fixtures = []
 # Experimental until V1 GA is declared in that feature's decisions.md. Default
 # `cargo build --workspace` excludes it.
 trajectory-experimental = []
+# Intent–action correspondence (work/research/computation-proof/): INTENT/ACTION
+# schemas + a verify-only correspondence layer (verify_correspondence,
+# action_commitment, policy_valid tri-state). Experimental until V1 GA. Default
+# `cargo build --workspace` excludes it. Proving lives in the `mnemonic-prover`
+# crate, never here (the "no prover in core/" rule stands).
+correspondence-experimental = []
 
 [dependencies.openssl-sys]
 version = "0.9"
