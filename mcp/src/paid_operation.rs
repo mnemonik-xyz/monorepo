@@ -7,6 +7,22 @@
 use anyhow::{anyhow, Context, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 
+/// Column tuple for the paid-operation SELECT.
+type PaidOperationRow = (
+    String,
+    String,
+    Option<String>,
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    String,
+    Option<String>,
+    Option<String>,
+    String,
+    String,
+);
+
 /// Idempotent server-side migration. The paid-operation table is independent
 /// of attestations so existing anchored-memory recall never depends on it.
 pub const MIGRATION_SQL: &str = "CREATE TABLE IF NOT EXISTS paid_operations (
@@ -161,7 +177,7 @@ pub fn get(conn: &Connection, operation_id: &str) -> Result<Option<PaidOperation
     )
     .optional()
     .context("read paid operation")?
-    .map(|row: (String, String, Option<String>, String, Option<String>, Option<String>, Option<String>, String, Option<String>, Option<String>, String, String)| {
+    .map(|row: PaidOperationRow| {
         Ok(PaidOperation {
             operation_id: row.0,
             subject_hash: row.1,
@@ -183,6 +199,9 @@ pub fn get(conn: &Connection, operation_id: &str) -> Result<Option<PaidOperation
 /// Move an operation only from an expected state. This makes a duplicate
 /// browser callback or recovery worker observe a conflict instead of silently
 /// overwriting a newer state.
+// Reserved for the in-flight paid-anchoring work; exercised by tests but not
+// yet reached from the binary. Reworked by M3 (work/x402-v2-conformance).
+#[allow(dead_code)]
 pub fn transition(
     conn: &Connection,
     operation_id: &str,

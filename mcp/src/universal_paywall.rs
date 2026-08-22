@@ -150,6 +150,9 @@ pub struct UniversalPaywallConfig {
     pub network: String,
     pub asset: HexAddress,
     pub pay_to: HexAddress,
+    // Reserved for the in-flight paid-anchoring work; not yet read from the
+    // binary. Reworked by M3 (work/x402-v2-conformance).
+    #[allow(dead_code)]
     pub payer_wallet: HexAddress,
     pub approval_url_base: String,
 }

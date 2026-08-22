@@ -18,7 +18,28 @@ use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::pending::PendingEntry;
 
+/// Column tuple for the staged-delivery SELECT. Named so the query and the
+/// struct construction below stay legible.
+type StagedDeliveryRow = (
+    String,
+    String,
+    String,
+    Vec<u8>,
+    String,
+    Vec<u8>,
+    String,
+    String,
+    String,
+    String,
+);
+
+/// Column tuple for the delivery-attempt SELECT.
+type DeliveryAttemptRow = (String, Option<String>, Option<String>, u32, Option<String>);
+
 /// Current paid-artifact binding format.
+// Reserved for the in-flight paid-anchoring work; exercised by tests but not
+// yet reached from the binary. Reworked by M3 (work/x402-v2-conformance).
+#[allow(dead_code)]
 pub const PAID_ARTIFACT_BINDING_VERSION: u8 = 1;
 
 const DOMAIN_SEPARATOR: &[u8] = b"mnemonic:paid-artifact:v1\0";
@@ -91,6 +112,9 @@ pub struct StagedPaidArtifact {
 /// existing SQLite at-rest trust boundary.
 #[derive(Debug, Clone)]
 pub struct StagedDeliveryContext {
+    // Reserved for the in-flight paid-anchoring work; not yet read from the
+    // binary. Reworked by M3 (work/x402-v2-conformance).
+    #[allow(dead_code)]
     pub correlation_id: String,
     pub signer_pubkey: String,
     pub content: String,
@@ -271,7 +295,7 @@ pub fn get_staged_delivery_context(
     )
     .optional()
     .context("read staged delivery context")?
-    .map(|row: (String, String, String, Vec<u8>, String, Vec<u8>, String, String, String, String)| {
+    .map(|row: StagedDeliveryRow| {
         Ok(StagedDeliveryContext {
             correlation_id: row.0,
             signer_pubkey: row.1,
@@ -294,6 +318,9 @@ pub fn get_staged_delivery_context(
 /// Atomically claim a staged context for its single anchoring attempt.
 /// A second callback (including one after a restart) must not create a second
 /// Arweave/Solana delivery for the same paid operation.
+// Reserved for the in-flight paid-anchoring work; exercised by tests but not
+// yet reached from the binary. Reworked by M3 (work/x402-v2-conformance).
+#[allow(dead_code)]
 pub fn claim_delivery_context(conn: &Connection, correlation_id: &str, now: &str) -> Result<bool> {
     let changed = conn
         .execute(
@@ -325,7 +352,7 @@ pub fn acquire_delivery_attempt(
     now: &str,
     lease_expires_at: &str,
 ) -> Result<Option<DeliveryAttempt>> {
-    let existing: Option<(String, Option<String>, Option<String>, u32, Option<String>)> = conn
+    let existing: Option<DeliveryAttemptRow> = conn
         .query_row(
             "SELECT state, arweave_tx, solana_tx, attempts, lease_expires_at \
              FROM paid_artifact_delivery_attempts WHERE correlation_id = ?1",
@@ -498,12 +525,14 @@ fn encode_embedding(embedding: &[f32]) -> Vec<u8> {
 }
 
 fn decode_embedding(bytes: &[u8]) -> Result<Vec<f32>> {
-    if bytes.len() % 4 != 0 {
+    if !bytes.len().is_multiple_of(4) {
         return Err(anyhow!("invalid staged embedding"));
     }
     Ok(bytes
-        .chunks_exact(4)
-        .map(|chunk| f32::from_le_bytes(chunk.try_into().expect("four-byte chunk")))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|chunk| f32::from_le_bytes(*chunk))
         .collect())
 }
 

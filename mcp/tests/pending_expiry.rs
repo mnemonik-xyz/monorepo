@@ -45,6 +45,13 @@ const TEST_SECRET: &[u8; 32] = b"pending-expiry-secret-32-bytes-!";
 fn state_with_short_ttl(ttl_secs: i64) -> Arc<McpState> {
     let tmp = tempfile::NamedTempFile::new().expect("tempfile");
     let store = SqliteStore::open(tmp.path()).expect("sqlite");
+    // Mirror main.rs: paid-anchoring tables are migrated unconditionally at
+    // startup. Without them the sign-callback recovery branch turns an expired
+    // or replayed bundle into a 500 instead of a 410.
+    mnemonic_mcp::paid_operation::migrate_paid_operations(store.conn())
+        .expect("migrate paid operations");
+    mnemonic_mcp::paid_artifact::migrate_paid_artifact_staging(store.conn())
+        .expect("migrate paid artifact staging");
     let compressor = EmbeddingCompressor::new(8, 4, 42);
     let chat_limiter =
         governor::RateLimiter::keyed(Quota::per_minute(NonZeroU32::new(10).unwrap()));
@@ -60,6 +67,16 @@ fn state_with_short_ttl(ttl_secs: i64) -> Arc<McpState> {
     let bootstrap_x25519_sk = crypto_box::SecretKey::generate(&mut crypto_box::aead::OsRng);
     let bootstrap_x25519_pk = bootstrap_x25519_sk.public_key();
     Arc::new(McpState {
+        universal_paywall: None,
+        universal_paywall_eip712_name: "USD Coin".to_string(),
+        universal_paywall_eip712_version: "2".to_string(),
+        universal_paywall_quotes: Default::default(),
+        approval_ui_dist: None,
+        approval_mock_signer: None,
+        approval_chain_rpc_url: String::new(),
+        approval_chain_name: String::new(),
+        approval_chain_currency_symbol: "ETH".to_string(),
+        approval_chain_currency_decimals: 18,
         keypair: Keypair::new(),
         solana: SolanaClient::new("http://localhost:0"),
         arweave: ArweaveClient::new("http://localhost:0"),

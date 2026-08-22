@@ -79,6 +79,16 @@ fn build_state() -> Arc<McpState> {
     let bootstrap_x25519_sk = crypto_box::SecretKey::generate(&mut crypto_box::aead::OsRng);
     let bootstrap_x25519_pk = bootstrap_x25519_sk.public_key();
     Arc::new(McpState {
+        universal_paywall: None,
+        universal_paywall_eip712_name: "USD Coin".to_string(),
+        universal_paywall_eip712_version: "2".to_string(),
+        universal_paywall_quotes: Default::default(),
+        approval_ui_dist: None,
+        approval_mock_signer: None,
+        approval_chain_rpc_url: String::new(),
+        approval_chain_name: String::new(),
+        approval_chain_currency_symbol: "ETH".to_string(),
+        approval_chain_currency_decimals: 18,
         keypair: Keypair::new(),
         solana: SolanaClient::new("http://localhost:0"),
         arweave: ArweaveClient::new("http://localhost:0"),

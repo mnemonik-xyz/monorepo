@@ -102,6 +102,13 @@ pub fn mock_state() -> Arc<McpState> {
     let path_buf = path.keep().expect("keep tempfile");
 
     let store = SqliteStore::open(&path_buf).expect("sqlite open");
+    // Mirror main.rs: the paid-anchoring tables are migrated unconditionally at
+    // startup. Without them `get_staged_delivery_context` errors instead of
+    // returning `Ok(None)`, and the sign-callback recovery branch turns an
+    // expired or replayed bundle into a 500 rather than a 410.
+    crate::paid_operation::migrate_paid_operations(store.conn()).expect("migrate paid operations");
+    crate::paid_artifact::migrate_paid_artifact_staging(store.conn())
+        .expect("migrate paid artifact staging");
     let compressor = EmbeddingCompressor::new(8, 4, 42);
     let quota = Quota::per_minute(NonZeroU32::new(10).expect("nz"));
     let chat_limiter = governor::RateLimiter::keyed(quota);
@@ -118,6 +125,16 @@ pub fn mock_state() -> Arc<McpState> {
     let bootstrap_server_x25519_public = bootstrap_server_x25519_secret.public_key();
 
     Arc::new(McpState {
+        universal_paywall: None,
+        universal_paywall_eip712_name: "USD Coin".to_string(),
+        universal_paywall_eip712_version: "2".to_string(),
+        universal_paywall_quotes: Default::default(),
+        approval_ui_dist: None,
+        approval_mock_signer: None,
+        approval_chain_rpc_url: String::new(),
+        approval_chain_name: String::new(),
+        approval_chain_currency_symbol: "ETH".to_string(),
+        approval_chain_currency_decimals: 18,
         keypair: Keypair::new(),
         solana: SolanaClient::new("http://localhost:0"),
         arweave: ArweaveClient::new("http://localhost:0"),
@@ -184,6 +201,13 @@ pub fn mock_state_with(
     let path_buf = path.keep().expect("keep tempfile");
 
     let store = SqliteStore::open(&path_buf).expect("sqlite open");
+    // Mirror main.rs: the paid-anchoring tables are migrated unconditionally at
+    // startup. Without them `get_staged_delivery_context` errors instead of
+    // returning `Ok(None)`, and the sign-callback recovery branch turns an
+    // expired or replayed bundle into a 500 rather than a 410.
+    crate::paid_operation::migrate_paid_operations(store.conn()).expect("migrate paid operations");
+    crate::paid_artifact::migrate_paid_artifact_staging(store.conn())
+        .expect("migrate paid artifact staging");
     let compressor = EmbeddingCompressor::new(8, 4, 42);
     let quota = Quota::per_minute(NonZeroU32::new(10).expect("nz"));
     let chat_limiter = governor::RateLimiter::keyed(quota);
@@ -206,6 +230,16 @@ pub fn mock_state_with(
     let pricing = PricingEngine::new(sign_memory_cost_micro_usdc);
 
     Arc::new(McpState {
+        universal_paywall: None,
+        universal_paywall_eip712_name: "USD Coin".to_string(),
+        universal_paywall_eip712_version: "2".to_string(),
+        universal_paywall_quotes: Default::default(),
+        approval_ui_dist: None,
+        approval_mock_signer: None,
+        approval_chain_rpc_url: String::new(),
+        approval_chain_name: String::new(),
+        approval_chain_currency_symbol: "ETH".to_string(),
+        approval_chain_currency_decimals: 18,
         keypair: Keypair::new(),
         solana: SolanaClient::new("http://localhost:0"),
         arweave: ArweaveClient::new("http://localhost:0"),
@@ -282,6 +316,13 @@ pub fn mock_state_for_delivery(
     let path_buf = path.keep().expect("keep tempfile");
 
     let store = SqliteStore::open(&path_buf).expect("sqlite open");
+    // Mirror main.rs: the paid-anchoring tables are migrated unconditionally at
+    // startup. Without them `get_staged_delivery_context` errors instead of
+    // returning `Ok(None)`, and the sign-callback recovery branch turns an
+    // expired or replayed bundle into a 500 rather than a 410.
+    crate::paid_operation::migrate_paid_operations(store.conn()).expect("migrate paid operations");
+    crate::paid_artifact::migrate_paid_artifact_staging(store.conn())
+        .expect("migrate paid artifact staging");
     let compressor = EmbeddingCompressor::new(8, 4, 42);
     let quota = Quota::per_minute(NonZeroU32::new(10).expect("nz"));
     let chat_limiter = governor::RateLimiter::keyed(quota);
@@ -300,6 +341,16 @@ pub fn mock_state_for_delivery(
     let pricing = PricingEngine::new(sign_memory_cost_micro_usdc);
 
     Arc::new(McpState {
+        universal_paywall: None,
+        universal_paywall_eip712_name: "USD Coin".to_string(),
+        universal_paywall_eip712_version: "2".to_string(),
+        universal_paywall_quotes: Default::default(),
+        approval_ui_dist: None,
+        approval_mock_signer: None,
+        approval_chain_rpc_url: String::new(),
+        approval_chain_name: String::new(),
+        approval_chain_currency_symbol: "ETH".to_string(),
+        approval_chain_currency_decimals: 18,
         keypair: Keypair::new(),
         solana: SolanaClient::new(solana_rpc_url),
         arweave: ArweaveClient::new(arweave_url),
@@ -371,6 +422,13 @@ pub fn mock_state_with_embedder_and_endpoint(
 
     let dim = embedder.dim();
     let store = SqliteStore::open(&path_buf).expect("sqlite open");
+    // Mirror main.rs: the paid-anchoring tables are migrated unconditionally at
+    // startup. Without them `get_staged_delivery_context` errors instead of
+    // returning `Ok(None)`, and the sign-callback recovery branch turns an
+    // expired or replayed bundle into a 500 rather than a 410.
+    crate::paid_operation::migrate_paid_operations(store.conn()).expect("migrate paid operations");
+    crate::paid_artifact::migrate_paid_artifact_staging(store.conn())
+        .expect("migrate paid artifact staging");
     let compressor = EmbeddingCompressor::new(dim, 4, 42);
     let quota = Quota::per_minute(NonZeroU32::new(10).expect("nz"));
     let chat_limiter = governor::RateLimiter::keyed(quota);
@@ -395,6 +453,16 @@ pub fn mock_state_with_embedder_and_endpoint(
         .expect("reqwest hosted client");
 
     Arc::new(McpState {
+        universal_paywall: None,
+        universal_paywall_eip712_name: "USD Coin".to_string(),
+        universal_paywall_eip712_version: "2".to_string(),
+        universal_paywall_quotes: Default::default(),
+        approval_ui_dist: None,
+        approval_mock_signer: None,
+        approval_chain_rpc_url: String::new(),
+        approval_chain_name: String::new(),
+        approval_chain_currency_symbol: "ETH".to_string(),
+        approval_chain_currency_decimals: 18,
         keypair: Keypair::new(),
         solana: SolanaClient::new("http://localhost:0"),
         arweave: ArweaveClient::new("http://localhost:0"),

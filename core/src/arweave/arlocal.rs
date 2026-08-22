@@ -95,6 +95,11 @@ fn deep_hash_list_of_blobs(items: &[&[u8]]) -> [u8; 48] {
 }
 
 /// Deep-hash the format-2 transaction fields the same way arweave-js does.
+///
+/// The argument list mirrors arweave-js's field order deliberately — grouping
+/// them into a struct would obscure the correspondence this function exists to
+/// preserve.
+#[allow(clippy::too_many_arguments)]
 fn transaction_deep_hash(
     owner: &[u8],
     target: &[u8],
@@ -140,12 +145,11 @@ fn arweave_address(owner_n: &[u8]) -> String {
 }
 
 /// Build a signed arlocal format-2 transaction JSON body for the given data.
-pub fn build_signed_transaction(data: &[u8]) -> anyhow::Result<(serde_json::Value, String, String)> {
+pub fn build_signed_transaction(
+    data: &[u8],
+) -> anyhow::Result<(serde_json::Value, String, String)> {
     let key = cached_rsa_key();
-    let n = key
-        .to_public_key()
-        .n()
-        .to_bytes_be();
+    let n = key.to_public_key().n().to_bytes_be();
     let owner_b64 = b64url_encode(&n);
     let address = arweave_address(&n);
 
