@@ -1,237 +1,216 @@
 ---
 created: 2026-08-22
+updated: 2026-08-22
 status: draft
 type: scope
-size: L
+size: M
 priority: P1
 related:
+  - "mnemonik-dev/universal-paywall@31761ec — the payment rail"
+  - "https://github.com/x402-foundation/x402/blob/main/specs/x402-specification-v1.md"
   - "https://github.com/x402-foundation/x402/blob/main/specs/x402-specification-v2.md"
-  - "https://github.com/x402-foundation/x402/blob/main/specs/transports-v2/http.md"
-  - "https://github.com/x402-foundation/x402/blob/main/specs/schemes/exact/scheme_exact_svm.md"
-  - "work/universal-paywall-integration/ — the shipped bespoke rail this replaces"
-  - "mnemonik-dev/universal-paywall — the facilitator; packages/facilitator/src/x402.ts"
   - "https://github.com/x402-foundation/x402/blob/main/specs/schemes/batch-settlement/scheme_batch_settlement.md"
+  - "work/universal-paywall-integration/ — the wrapper this replaces"
 ---
 
-# Scope: real x402 v2 conformance (server side)
+# Scope: put mnemonic-mcp on the real x402 rail
 
-## Why
+## Summary
 
-The server advertises x402 but does not implement it. Three separate wire
-contracts exist in the codebase and none matches the spec:
+Universal Paywall already implements x402. mnemonic-mcp bypassed it.
 
-- `X402Response` — `x402Version: 1`, v1 field names, JSON body
-- `UniversalPaywallPaymentRequired` — bespoke `{status:"awaiting_payment", payment:{…}}`
-- the unmerged July client — `{status:"payment_required", accepts:[{scheme:"stake"}]}`
+An earlier draft of this document scoped a six-task rebuild of x402 inside the
+monorepo. That was wrong, and it was wrong because it was written without
+reading the facilitator. The rail exists and works; the defect is that
+mnemonic-mcp integrates one layer beneath it and re-implements payment badly on
+top.
 
-Worse, the *closest-to-conformant* rail is wired as a hard error:
-`api.rs:386` returns `500 "unexpected payment rail"` for `PaymentGate::NeedPayment`.
+The work is therefore: **stop wrapping, start speaking the protocol** — plus a
+cross-language seam that has to exist because mnemonic-mcp is Rust and UP's
+x402 layer is TypeScript.
 
-Goal: one conformant x402 v2 rail, settled through a real facilitator, with no
-mock signer in the path.
+## Product decision (settled)
 
-## Conformance gaps
+**Agents pay unattended. Human approval is an option, not the path.**
 
-Evidence is `mcp/src/` at `944ccf7`.
+An agent hits a 402, pays from its own policy, retries — no browser, no wallet
+prompt. The approval UI remains available as a fallback for callers that cannot
+pay autonomously. Two surfaces, one rail. UP already has both:
+`packages/resource-adapter` (agent) and `packages/approval-ui` (human).
 
-| Concern | x402 v2 | Current | Where |
-| --- | --- | --- | --- |
-| Version | `x402Version: 2` | `1` | `payment.rs:52,616` |
-| 402 transport | base64 `PAYMENT-REQUIRED` **header** | JSON body | `mcp.rs:1494`, `api.rs:376` |
-| Client header | `PAYMENT-SIGNATURE` | `X-Payment` | `payment.rs:107` |
-| Amount field | `amount` | `maxAmountRequired` | `payment.rs:63` |
-| Network id | CAIP-2 (`solana:5eykt4Us…`) | `"solana-mainnet"` | `payment.rs:599` |
-| Required fields | `resource{}`, `maxTimeoutSeconds` | absent | `payment.rs:51-72` |
-| **Client proof** | `payload.transaction` — partially-signed tx | `{tx_sig, network}` | `payment.rs:40` |
-| **Settlement** | facilitator `/verify` + `/settle` | direct on-chain lookup | `payment.rs:629` |
-| Settlement reply | base64 `PAYMENT-RESPONSE` header | none | — |
-| Replay defence | scheme + facilitator | `x402_nonces` keyed by `tx_sig` | `payment.rs:560-590` |
+## What UP already provides
 
-The bolded two are the redesign. The rest is renaming and relocation.
-
-### The one that matters
-
-`X402PaymentProof { tx_sig, network }` encodes **pay-first-then-prove**: the
-client submits its own transaction and presents the signature as a receipt.
-
-The spec's `exact` SVM scheme is the inverse. The client builds a transaction
-paying the merchant, signs it **partially** — leaving the sponsor's `feePayer`
-signature missing — and base64-serializes it into `payload.transaction`. The
-sponsor verifies, adds the final signature, and submits.
-
-Consequences of the current model that the spec's model removes:
-
-- the client pays fees and needs SOL, not just USDC
-- payment and request are separate events, so "paid but the request then failed"
-  is a real state the server must reconcile
-- the server can only observe payment after the fact, so replay defence has to be
-  bolted on (`x402_nonces`)
-
-Keeping `tx_sig` means not implementing x402, whatever the headers say.
-
-## Universal Paywall: what it actually is
-
-Read at `mnemonik-dev/universal-paywall@31761ec`. This section corrects an
-earlier draft of this document that scoped the work without it.
+Read at `mnemonik-dev/universal-paywall@31761ec`.
 
 UP is a **stake + session-key rail**: the payer locks USDC in a non-custodial
-`StakeVault` and grants the facilitator a bounded, revocable policy (cap,
-expiry). The facilitator meters charges, batches them, and settles on-chain.
-Contracts are Solidity (`contracts/src/rail/StakeVault.sol`); the client library
-is viem. **The rail is EVM-only.**
+`StakeVault`, grants the facilitator a bounded revocable policy (cap, expiry);
+the facilitator meters charges, batches, and settles on-chain. Contracts are
+Solidity, client is viem — **the rail is EVM-only**.
 
-### Does it correspond to x402?
+Its x402 implementation is real, not decorative:
 
-Partially — x402-shaped at the edge, bespoke underneath.
-
-| | UP | x402 v2 |
+| Piece | Where | What it does |
 | --- | --- | --- |
-| 402 body | `accepts[]`, CAIP-2 networks | same idea | 
-| Version | `x402Version: 1` everywhere | `2` |
-| Scheme | `"stake"` — unregistered | `exact` / `upto` / `batch-settlement` / `auth-capture` |
-| Extra fields | top-level `grant{}` | not in schema |
-| Transport | JSON body | `PAYMENT-REQUIRED` / `PAYMENT-SIGNATURE` / `PAYMENT-RESPONSE` headers |
-| Facilitator API | `/charge`, `/flush`, `/v1/quotes`, `/v1/payments/settle`, `/v1/sessions` | `/verify`, `/settle`, `/supported` |
+| 402 edge | `packages/facilitator/src/x402.ts` | `build402Body` → `{x402Version:1, accepts[], grant{}}` |
+| Resource gate | `packages/resource-adapter/src/gate.ts` | emits 402, checks on-chain grant headroom, verifies payer proof |
+| Payment path | `packages/middleware/src/core.ts` | decodes `X-PAYMENT`, verifies EIP-3009, settles on-chain, returns `X-PAYMENT-RESPONSE` |
 
-### The `stake` scheme is already standardised
+That is the x402 `exact` flow as specified. The facilitator logic runs in-process
+rather than behind HTTP, which the spec explicitly permits ("resource servers to
+delegate blockchain operations to trusted third parties **or host the endpoints
+themselves**").
 
-x402 v2's `batch-settlement` describes UP's model almost verbatim — a
-capital-backed commitment where "the trust anchor is the client's own funds",
-access is granted immediately, and "value moves later, through the network
-binding's redemption process". UP's `/charge` + `/flush` is that redemption
-process; `StakeVault` is that capital.
+**v1 is not obsolete.** The spec repo carries `x402-specification-v1.md` and
+`x402-specification-v2.md` side by side, with `transports-v1` and
+`transports-v2`. UP built to a live version of the spec and implemented it
+correctly.
 
-So conformance does **not** mean inventing a scheme or abandoning the rail. It
-means mapping `stake` onto `batch-settlement` (and metered/variable pricing onto
-`upto`), then exposing the standard facilitator contract over the existing
-implementation.
+Two genuine gaps remain, both narrow:
 
-### UP's own phase gate
+- **`stake` is unregistered.** UP's `accepts[].scheme = "stake"` plus a
+  non-standard top-level `grant{}` means an off-the-shelf x402 client cannot
+  participate in the session model. `exact` is conformant; `stake` is a private
+  extension.
+- **v1, not v2.** A migration (header transport, `amount` over
+  `maxAmountRequired`, `resource{}`, `maxTimeoutSeconds`), not a rebuild.
 
-`packages/facilitator/src/session-service.ts:42` — hosted Phase 1 supports
-one-time `exact` only; `stake` is opt-in "until its separate
-reservation/reconciliation hardening gate is approved". Stake is not hosted-ready
-regardless of what we do here.
+## The actual defect
 
-## Gating decision 1 — chains: both, in two phases
+`universal_paywall.rs:224` calls `POST {url}/v1/payments/settle` — the
+facilitator's **internal REST API**. mnemonic-mcp skipped `resource-adapter` and
+`middleware` entirely and integrated one layer below UP's x402 surface.
 
-x402 is multi-chain by construction: `accepts[]` is an array of scheme+network
-pairs, the client picks one, and `/supported` advertises
-`signers: {"eip155:*": […], "solana:*": […]}`. Every scheme we need has both
-bindings — `scheme_{exact,upto,batch_settlement}_{evm,svm}.md`.
+Everything downstream follows from that one choice:
 
-So both work, but they are not equally cheap:
+| Symptom | Where |
+| --- | --- |
+| Bespoke 402 body `{status:"awaiting_payment", approval_url}` | `api.rs:376` |
+| The conformant rail wired as a hard error, `500 "unexpected payment rail"` | `api.rs:386` |
+| A third payment model, `X402PaymentProof { tx_sig }` — pay-first-then-prove, not any x402 scheme | `payment.rs:40` |
+| Legacy `X-Payment` reader for that model | `payment.rs:107` |
+| Replay defence bolted on because payment is only observable after the fact | `payment.rs:560-590` |
 
-- **`exact` on both — cheap.** Solana already has `treasury_pubkey`, `usdc_mint`,
-  `solana_rpc_url`; EVM already has `evm_treasury`, `evm_usdc_token` and an
-  EIP-3009 path. Both become `accepts[]` entries with CAIP-2 ids.
-- **`batch-settlement` (= UP stake) on Solana — expensive.** The rail is
-  `StakeVault.sol`. An SVM binding needs an equivalent Solana program, not a
-  config change.
+The unmerged July client (`wip/universal-paywall-july`) was written against UP's
+*real* 402 — `accepts:[{scheme:"stake"}]`, `recommendedCap`, `validForSeconds`,
+matching `Payment402Body` field for field. It was correct. It failed against
+mnemonic-mcp only because the wrapper hides the rail.
 
-**Decision: ship conformant `exact` on eip155 + solana first. Add
-`batch-settlement` on EVM when UP's hardening gate opens. Solana stake last, and
-only if the product needs it.**
+## The seam: why HTTP, not a library
 
-## Gating decision 2 — facilitator
+mnemonic-mcp is Rust. `resource-adapter` and `middleware` are TypeScript. "Just
+use the adapter" is not available to us.
 
-UP is ours (`mnemonik-dev/universal-paywall`), so this is a sequencing question,
-not a build-or-buy one.
+This is exactly what x402's facilitator API is for — it is specified as HTTP so
+resource servers in any language can delegate chain work. UP embedded its
+facilitator in a TS library, which serves TS resource servers and nothing else.
 
-1. **Conform UP to x402 v2, mnemonic passes through.** Add `/verify`, `/settle`,
-   `/supported`; move to v2 types and header transport; map `stake` →
-   `batch-settlement`. The rail and contracts stay as they are. Clients then talk
-   real x402 and can use off-the-shelf libraries. **Most of this work lands in the
-   universal-paywall repo, not this one.**
-2. **Keep UP bespoke, mnemonic keeps wrapping it.** What upstream ships today
-   (`api.rs:376` → `awaiting_payment` + `approval_url`). Works now; never
-   conformant from the client's point of view.
-3. **Public facilitator for `exact` now, UP for `batch-settlement` later.**
-   Fastest route to genuine x402, at the cost of running two rails during the
-   transition.
+So responsibility splits cleanly:
 
-**Recommended: 1, with 3 as a bridge if conformance is needed before UP can
-move.** Note that in SVM `exact` the facilitator is also the *sponsor* — it holds
-a keypair, signs as `feePayer`, funds fees and submits. That is an operational
-commitment (hot wallet, funding alerts, sponsor acceptance policy) that nothing
-in either repo does today.
+- **UP** exposes the facilitator contract over HTTP: `POST /verify`,
+  `POST /settle`, `GET /supported`. The logic already exists in `middleware`;
+  this is mostly wiring it to routes alongside the existing
+  `/v1/quotes`, `/v1/sessions`, `/v1/payments/settle`.
+- **mnemonic-mcp** implements only the *resource server* half: emit a conformant
+  402, read the payment header, call the facilitator, emit the response header.
+  No EIP-3009 verification, no chain writes, no sponsor keypair in this repo.
+
+Porting the gate to Rust is the alternative and is rejected: it duplicates
+signature verification and settlement in a second language, against contracts
+that will change.
+
+## Chains
+
+UP is EVM-only (viem, `StakeVault.sol`, `eip155:*`). So:
+
+- **EVM `exact` — available now.** UP's middleware does it today; `evm_treasury`
+  and `evm_usdc_token` already exist in config.
+- **Solana `exact` — later, and not via UP.** `scheme_exact_svm.md` requires a
+  sponsor that countersigns as `feePayer` and submits. UP has no Solana rail.
+  Options are a Solana-capable public facilitator or new UP work. The monorepo
+  already has `treasury_pubkey` / `usdc_mint` / `solana_rpc_url`, so the
+  resource-server half is cheap; the facilitator half is not.
+- **`stake` on Solana — last.** Needs a Solana program equivalent to
+  `StakeVault.sol`.
+
+Because `accepts[]` is an array, adding a chain later is additive — no rework.
 
 ## Tasks
 
-| # | Task | Size | Depends |
-| --- | --- | --- | --- |
-| 1 | v2 wire types | S | — |
-| 2 | HTTP transport binding | S | 1 |
-| 3 | Facilitator client | M | 1, decision 2 |
-| 4 | `exact` SVM payment path | L | 3 |
-| 5 | Make conformant rail primary | M | 4 |
-| 6 | Remove mocks, stage on real facilitator | M | 5 |
+### This repo
 
-**T1 — v2 wire types.** `PaymentRequired`, `PaymentRequirements`, `ResourceInfo`,
-`PaymentPayload`, `SettlementResponse`. `x402Version: 2`, `amount` not
-`maxAmountRequired`, CAIP-2 networks, `maxTimeoutSeconds`. Replaces
-`X402Response` / `PaymentOption`. Pure types, no behaviour.
+| # | Task | Size |
+| --- | --- | --- |
+| M1 | Emit a conformant 402 from the paid path | S |
+| M2 | Accept the payment header and delegate to the facilitator | M |
+| M3 | Delete the wrapper and the `tx_sig` model | M |
 
-**T2 — HTTP transport binding.** Emit base64 `PAYMENT-REQUIRED` on 402; read
-`PAYMENT-SIGNATURE`; emit base64 `PAYMENT-RESPONSE` on success. Retire
-`extract_x402_proof`'s `X-Payment` path. Decide whether the JSON body is retained
-transitionally for existing callers — the MCP JSON-RPC envelope at `mcp.rs:1494`
-still needs *some* body.
+**M1.** Replace `UniversalPaywallPaymentRequired` (`api.rs:376`) with a real
+`PaymentRequired` carrying `accepts[]`. Keep the human approval URL as an
+`extensions` entry, not a top-level field.
 
-**T3 — Facilitator client.** `POST /verify`, `POST /settle`, `GET /supported`,
-with the spec's error codes (`insufficient_funds`, `unsupported_scheme`, …).
-Reuse the HTTP plumbing in `universal_paywall.rs`; replace the bespoke contract.
-`/supported` should gate which `accepts[]` entries are advertised.
+**M2.** Read the payment header, forward `{paymentPayload, paymentRequirements}`
+to the facilitator's `/verify` and `/settle`, return the settlement header.
+Replaces the bespoke `/v1/payments/settle` call at `universal_paywall.rs:224`.
 
-**T4 — `exact` SVM payment path.** The redesign. Accept
-`payload.transaction`, forward to `/verify`, run the resource, `/settle`.
-Delete `verify_usdc_transfer` from the x402 path. Rework replay: `x402_nonces`
-keyed by `tx_sig` is meaningless before settlement — the transaction is not
-submitted by the client and has no signature yet. Reconcile with
-`paid_operation`'s state machine, which assumes the approval-URL flow.
+**M3.** Delete `X402PaymentProof`, `x402_required`, `verify_usdc_transfer` on the
+x402 path, and the `x402_nonces` replay table — replay becomes the scheme's and
+facilitator's job. Make `PaymentGate::NeedPayment` the success path, not the 500
+at `api.rs:386`. Retire the `approval_url` wrapper flow.
 
-**T5 — Make conformant rail primary.** Replace the `500 "unexpected payment
-rail"` at `api.rs:386` with the real path. Retire
-`UniversalPaywallPaymentRequired`. Reconcile the two 402 emitters
-(`mcp.rs:1494` JSON-RPC and `api.rs:376` sign-callback) onto one shape.
+### universal-paywall repo
 
-**T6 — Remove mocks, stage on a real facilitator.** Drop `/api/mock-sign` and
-`approval_mock_signer` (`approval.rs:504-579`) and the
-`MNEMONIC_DEFERRED_SYNTHETIC_ANCHOR` bypass. Note the ordering trap: removing
-mocks before a facilitator exists leaves the paid path untestable. T6 lands after
-T3, never before.
+| # | Task | Size |
+| --- | --- | --- |
+| U1 | Expose `/verify`, `/settle`, `/supported` over HTTP | M |
+| U2 | Migrate the wire format to v2 | M |
+| U3 | Map `stake` onto `batch-settlement` | L |
 
-## Open question — is the browser approval page still needed?
+**U1.** Route-level exposure of logic that already exists in `middleware`.
+Unblocks every non-TypeScript resource server, not just this one.
 
-`approval.rs` (581 lines) plus the embedded approval UI implement a
-human-in-the-browser flow: 402 carries `approval_url`, the user opens a page,
-connects a wallet, approves.
+**U2.** `x402Version: 2`, header transport (`PAYMENT-REQUIRED` /
+`PAYMENT-SIGNATURE` / `PAYMENT-RESPONSE`), `amount`, `resource{}`,
+`maxTimeoutSeconds`.
 
-x402 is agent-to-server. The client signs and retries a header; no browser, no
-redirect. For agent callers the approval page is not part of the flow.
+**U3.** x402 v2's `batch-settlement` describes UP's model almost verbatim — a
+capital-backed commitment where "the trust anchor is the client's own funds",
+access granted immediately, "value moves later, through the network binding's
+redemption process". `StakeVault` is that capital; `/charge` + `/flush` is that
+redemption. Mapping `stake` onto it, with metered pricing onto `upto`, retires
+the private scheme and the non-standard `grant{}` — after which agents can use
+stock x402 clients for the session model.
 
-If the product still needs a human path, it survives as a *separate* surface, not
-as the x402 rail. If it does not, T5 gets substantially larger — and mostly
-deletions. Worth answering before T5 is planned in detail.
+Gated on UP's own review: `packages/facilitator/src/session-service.ts:42`
+records that hosted Phase 1 is `exact`-only, with `stake` opt-in "until its
+separate reservation/reconciliation hardening gate is approved".
+
+### Ordering
+
+`U1 → M1 → M2 → M3` ships agent-unattended `exact` on EVM.
+`U2` and `U3` follow and are independent of the monorepo work.
+
+## Mocks
+
+Drop `/api/mock-sign` and `approval_mock_signer` (`approval.rs:504-579`) and the
+`MNEMONIC_DEFERRED_SYNTHETIC_ANCHOR` bypass — but only after U1, or the paid path
+becomes untestable. Real settlement needs a testnet and a live facilitator, which
+UP already runs.
 
 ## Non-goals
 
-- **Sessions / spending caps.** The July client's `stake` scheme with
-  `recommendedCap` / `maxPerAnchor` / `validForSeconds` is not in the spec. v2
-  supports this via `extensions` and scheme extensibility, but it needs a written
-  scheme definition on top of conformant `exact`. Upstream's "exact-only phase
-  one" call was right; keep it.
-- **EVM.** Second `accepts[]` entry later.
-- **Client work.** SDK, webapp and CLI come after the server contract is real —
-  writing them first means writing them twice. Prefer an off-the-shelf x402
-  client; this repo currently has zero x402 dependencies and hand-rolls all of it.
+- **Building x402 in this repo.** The rail exists. This is integration.
+- **A sponsor keypair here.** Chain work stays behind the facilitator.
+- **Solana**, until there is a facilitator that can sponsor SVM `exact`.
+- **Client work**, until the server contract is real — otherwise it gets written
+  twice. The July client on `wip/universal-paywall-july` is close to correct
+  already and should be revisited after M2, not rewritten now.
 
 ## Risks
 
-- **Sponsor operations.** A hot keypair that funds fees and submits transactions
-  needs a risk policy, monitoring, and funding alerts. Currently nothing in the
-  repo does this.
-- **`paid_operation` assumptions.** The state machine was built around
-  approval-URL semantics; `exact` may not need most of those states.
-- **Protocol surface owned in-house.** Every hand-rolled wire type is drift risk
-  against a moving spec. v2 already superseded v1 here.
+- **UP's phase gate is upstream of U3.** If stake hardening stalls, the session
+  model stalls with it; `exact` is unaffected.
+- **v1 vs v2 timing.** Doing U2 before M1/M2 means building the monorepo side
+  against a moving target; doing it after means one deliberate migration. Prefer
+  after.
+- **Two repos, one feature.** M2 cannot be verified end to end until U1 lands.
+  Sequence accordingly rather than developing them in parallel.
