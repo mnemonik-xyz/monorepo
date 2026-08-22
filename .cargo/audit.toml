@@ -79,6 +79,16 @@ ignore = [
     "RUSTSEC-2026-0098",
     "RUSTSEC-2026-0104",
 
+    # h2 0.3.27 — unbounded empty DATA frames (HTTP/2 server DoS). Transitive
+    # via reqwest 0.11 -> hyper 0.14, which we use only as an outbound HTTP
+    # *client* (Google OAuth token/JWKS fetches). Our own server is axum 0.8 on
+    # hyper 1.x, which does not use h2 0.3. The advisory requires a malicious
+    # peer to flood a server we operate; the client path never accepts inbound
+    # HTTP/2. Verified `cargo tree -i hyper@0.14` shows only hyper-rustls and
+    # reqwest 0.11 as dependents. Removed with the oauth2 5 / reqwest 0.12
+    # migration below.
+    "RUSTSEC-2026-0258",
+
     # rustls-pemfile 1.x — unmaintained, transitive via reqwest 0.11.
     "RUSTSEC-2025-0134",
 
@@ -88,13 +98,16 @@ ignore = [
     # number_prefix — unmaintained, used by indicatif via hf-hub.
     "RUSTSEC-2025-0119",
 
-    # ── Direct dep, accepted with mitigations:
 
-    # lru 0.12.5 — unsound IterMut violates Stacked Borrows. We never call
-    # IterMut on the LRUs (only `put`/`pop`/`peek`/`peek_by_id`), so the
-    # advisory is unreachable in our codepaths. Bump to 0.13.x tracked
-    # in the broader dep-refresh sweep.
-    "RUSTSEC-2026-0002",
+    # ── Transitive via alloy (EVM payment support):
+
+    # proc-macro-error2 — unmaintained. Build-time only, pulled in by
+    # alloy-sol-macro / alloy-sol-macro-expander to emit Solidity type
+    # bindings. It runs in the compiler, never ships in the binary, and
+    # processes only our own macro input. Removed when alloy drops it.
+    "RUSTSEC-2026-0173",
+
+    # ── Direct dep, accepted with mitigations:
 
     # rsa 0.9.x — Marvin Attack (timing sidechannel during RSA decryption).
     # No fixed upgrade is available upstream. We only pull this in as a

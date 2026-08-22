@@ -99,7 +99,7 @@ fn seed_row(
             "turbo_bits": compressed.bit_width,
             "embedding_compressed": base64::Engine::encode(
                 &base64::engine::general_purpose::STANDARD,
-                &compressed.to_bytes(),
+                compressed.to_bytes(),
             ),
         },
     });
