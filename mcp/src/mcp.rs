@@ -1685,6 +1685,8 @@ async fn handle_tool_call(
                 ar,
                 owner_pubkey,
                 &state.storage_mode,
+                state.embedder.as_ref(),
+                &state.compressor,
             )
             .await
             .map_err(|e| JsonRpcError::simple(-32603, e.to_string()))?
