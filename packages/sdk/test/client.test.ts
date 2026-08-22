@@ -15,6 +15,7 @@ import { MnemonicClient } from "../src/client.js";
 import {
   AuthError,
   IntegrityError,
+  PaymentRequiredError,
   ServerError,
   UserError,
 } from "../src/errors.js";
@@ -134,6 +135,7 @@ afterEach(() => {
 async function makeClient(opts?: {
   jwt?: string;
   responses?: CannedResponse[];
+  paymentHandler?: import("../src/types.js").PaymentHandler;
 }): Promise<{
   client: MnemonicClient;
   calls: CapturedCall[];
@@ -147,6 +149,9 @@ async function makeClient(opts?: {
     signer,
     fetch: fetchImpl,
     ...(opts?.jwt !== undefined ? { jwt: opts.jwt } : {}),
+    ...(opts?.paymentHandler !== undefined
+      ? { paymentHandler: opts.paymentHandler }
+      : {}),
   });
   client.setKeypair(keypair);
   return { client, calls, keypair };
@@ -322,6 +327,208 @@ describe("signMemory pending-bundle flow", () => {
       ],
     });
     await expect(client.signMemory("x")).rejects.toBeInstanceOf(AuthError);
+  });
+
+  it("returns a typed resumable challenge when payment is required", async () => {
+    const { client } = await makeClient({
+      responses: [
+        { body: mcpResult({ correlation_id: "paid-1" }) },
+        { body: new Uint8Array([0xa0]) },
+        {
+          status: 402,
+          body: {
+            status: "payment_required",
+            operation_id: "paid-1",
+            artifact_hash: "abc",
+            binding_digest: "digest-1",
+            binding: {
+              version: 1,
+              operation_id: "paid-1",
+              payer_subject: "subject",
+              payer_wallet: "",
+              artifact_hash: "abc",
+              amount: "1000",
+              asset: "0xasset",
+              network: "eip155:1",
+              pay_to: "0xpayee",
+              expires_at: "2026-07-13T12:00:00Z",
+              nonce: "nonce-1",
+              scope: { visibility: "private", action: "manual" },
+            },
+            quote: {
+              amount: "1000",
+              asset: "0xasset",
+              network: "eip155:1",
+              pay_to: "0xpayee",
+              expires_at: "2026-07-13T12:00:00Z",
+              accepts: [{ scheme: "stake" }, { scheme: "exact" }],
+            },
+          },
+        },
+      ],
+    });
+    const error = await client
+      .signMemory("paid", { mode: "participate" })
+      .catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(PaymentRequiredError);
+    expect((error as PaymentRequiredError).challenge.operationId).toBe("paid-1");
+    expect((error as PaymentRequiredError).challenge.quote.accepts[0]!.scheme).toBe(
+      "stake"
+    );
+  });
+
+  it("uses a payment handler and retries the same signed callback", async () => {
+    const { client, calls } = await makeClient({
+      paymentHandler: async () => ({
+        scheme: "stake",
+        session_id: "session-1",
+        payer_wallet: "0x0000000000000000000000000000000000000003",
+        authorization: { signature: "0xproof" },
+      }),
+      responses: [
+        { body: mcpResult({ correlation_id: "paid-2" }) },
+        { body: new Uint8Array([0xa0]) },
+        {
+          status: 402,
+          body: {
+            status: "payment_required",
+            operation_id: "paid-2",
+            artifact_hash: "def",
+            binding_digest: "digest-2",
+            binding: {
+              version: 1,
+              operation_id: "paid-2",
+              payer_subject: "subject",
+              payer_wallet: "",
+              artifact_hash: "def",
+              amount: "1000",
+              asset: "0xasset",
+              network: "eip155:1",
+              pay_to: "0xpayee",
+              expires_at: "2026-07-13T12:00:00Z",
+              nonce: "nonce-2",
+              scope: { visibility: "private", action: "manual" },
+            },
+            quote: {
+              amount: "1000",
+              asset: "0xasset",
+              network: "eip155:1",
+              pay_to: "0xpayee",
+              expires_at: "2026-07-13T12:00:00Z",
+              accepts: [{ scheme: "stake" }, { scheme: "exact" }],
+            },
+          },
+        },
+        {
+          body: {
+            status: "payment_prepared",
+            operation_id: "paid-2",
+            binding_status: "final",
+            binding_digest: "digest-2-bound",
+            binding: {
+              version: 1,
+              operation_id: "paid-2",
+              payer_subject: "subject",
+              payer_wallet: "0x0000000000000000000000000000000000000003",
+              artifact_hash: "def",
+              amount: "1000",
+              asset: "0xasset",
+              network: "eip155:1",
+              pay_to: "0xpayee",
+              expires_at: "2026-07-13T12:00:00Z",
+              nonce: "nonce-2",
+              scope: { visibility: "private", action: "manual" },
+            },
+          },
+        },
+        {
+          body: {
+            status: "ok",
+            attestation_id: "att-paid",
+            operation_id: "paid-2",
+            payment_receipt: {
+              operation_id: "paid-2",
+              scheme: "stake",
+              status: "settled",
+              binding_digest: "digest-2-bound",
+              payer_wallet: "0x0000000000000000000000000000000000000003",
+              amount: "1000",
+              asset: "0xasset",
+              network: "eip155:1",
+              pay_to: "0xpayee",
+              settled_at: "2026-07-13T12:00:01Z",
+              receipt: { signature: "provider" },
+            },
+          },
+        },
+      ],
+    });
+    const result = await client.signMemory("paid", { mode: "participate" });
+    expect(result.attestationId).toBe("att-paid");
+    expect(result.operationId).toBe("paid-2");
+    expect(calls).toHaveLength(5);
+    const firstCallback = calls[2]!.body as Record<string, unknown>;
+    const prepareCall = calls[3]!.body as Record<string, unknown>;
+    const paidCallback = calls[4]!.body as Record<string, unknown>;
+    expect(firstCallback.payment).toBeUndefined();
+    expect(prepareCall.payer_wallet).toBe(
+      "0x0000000000000000000000000000000000000003"
+    );
+    expect(paidCallback.cose_signed_bytes).toBe(firstCallback.cose_signed_bytes);
+    expect(paidCallback.payment).toMatchObject({
+      scheme: "stake",
+      session_id: "session-1",
+    });
+  });
+});
+
+describe("paid operation status", () => {
+  it("returns a typed durable anchored receipt", async () => {
+    const { client } = await makeClient({
+      responses: [
+        {
+          body: {
+            operation_id: "paid-status-1",
+            status: "anchored",
+            binding_digest: "digest",
+            binding: {
+              version: 1,
+              operation_id: "paid-status-1",
+              payer_subject: "subject",
+              payer_wallet: "0xwallet",
+              artifact_hash: "artifact",
+              amount: "1000",
+              asset: "0xasset",
+              network: "eip155:1",
+              pay_to: "0xpayee",
+              expires_at: "2026-07-13T12:00:00Z",
+              nonce: "nonce",
+              scope: { visibility: "private", action: "manual" },
+            },
+            receipt: {
+              operation_id: "paid-status-1",
+              scheme: "exact",
+              status: "settled",
+              binding_digest: "digest",
+              payer_wallet: "0xwallet",
+              amount: "1000",
+              asset: "0xasset",
+              network: "eip155:1",
+              pay_to: "0xpayee",
+              settled_at: "2026-07-13T12:00:01Z",
+              receipt: { signature: "provider" },
+            },
+            attestation_id: "att-1",
+            solana_tx: "sol-1",
+            arweave_tx: "ar-1",
+          },
+        },
+      ],
+    });
+    const status = await client.paidOperationStatus("paid-status-1");
+    expect(status.status).toBe("anchored");
+    expect(status.receipt?.scheme).toBe("exact");
+    expect(status.attestationId).toBe("att-1");
   });
 });
 

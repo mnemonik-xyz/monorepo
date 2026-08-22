@@ -35,7 +35,7 @@ use axum::{
 };
 use chrono::{DateTime, Duration, Utc};
 use lru::LruCache;
-use mnemonic_core::storage::WriteMode;
+use mnemonic_core::storage::{Visibility, WriteMode};
 use tokio::sync::Mutex;
 
 /// 32 KB hard cap on `content` field — UTF-8 bytes, not chars.
@@ -86,6 +86,18 @@ pub struct PendingEntry {
     /// A `Local` deferred write (Wave 3: explicit-local writes by a remote
     /// user are client-signed too) skips Arweave/Solana and stays free.
     pub write_mode: WriteMode,
+    /// Visibility resolved from the original tool call. Deferred writes must
+    /// preserve this value: defaulting here would silently turn an explicitly
+    /// public, client-confirmed artifact back into a private row.
+    pub visibility: Visibility,
+    /// Payment/session action requested by the client. `manual` is the
+    /// default; automatic integrations use an explicitly scoped value such as
+    /// `pre_compaction` or `session_end`.
+    pub checkpoint_type: String,
+    /// Human-readable workspace selected by the client. Mnemonic retains it
+    /// for the approval UI, while only its hash is sent to the payment
+    /// provider.
+    pub workspace: Option<String>,
     /// Wall-clock expiry. Compared against `Utc::now()` on every access.
     pub exp: DateTime<Utc>,
 }
@@ -113,6 +125,8 @@ pub enum PendingError {
     PerUserCapExceeded,
     /// Content > 32 KB or metadata > 4 KB. Caller should chunk.
     OversizedPayload,
+    /// A caller-supplied correlation ID is malformed or already live.
+    InvalidCorrelationId,
 }
 
 impl std::fmt::Display for PendingError {
@@ -123,6 +137,7 @@ impl std::fmt::Display for PendingError {
             PendingError::Forbidden => "pending bundle owner mismatch",
             PendingError::PerUserCapExceeded => "per-user pending bundle cap exceeded",
             PendingError::OversizedPayload => "payload too large",
+            PendingError::InvalidCorrelationId => "invalid or duplicate correlation id",
         };
         f.write_str(msg)
     }
@@ -138,6 +153,7 @@ impl IntoResponse for PendingError {
             PendingError::Forbidden => StatusCode::FORBIDDEN,
             PendingError::PerUserCapExceeded => StatusCode::TOO_MANY_REQUESTS,
             PendingError::OversizedPayload => StatusCode::PAYLOAD_TOO_LARGE,
+            PendingError::InvalidCorrelationId => StatusCode::CONFLICT,
         };
         let msg = self.to_string();
         (status, Json(serde_json::json!({"error": msg}))).into_response()
@@ -202,6 +218,7 @@ impl PendingBundles {
     /// guard. If the LRU evicts an unrelated entry to make room, that
     /// entry's user-counter is decremented too.
     #[allow(clippy::too_many_arguments)]
+    #[allow(dead_code)]
     pub async fn insert(
         &self,
         jwt_sub: String,
@@ -212,6 +229,43 @@ impl PendingBundles {
         tags: Vec<String>,
         metadata: serde_json::Value,
         write_mode: WriteMode,
+    ) -> Result<String, PendingError> {
+        self.insert_scoped(
+            None,
+            jwt_sub,
+            content,
+            embedding,
+            content_hash,
+            canonical_cbor,
+            tags,
+            metadata,
+            write_mode,
+            Visibility::Private,
+            "manual".to_string(),
+            None,
+        )
+        .await
+    }
+
+    /// Insert a bundle with the complete user-approved storage/payment scope.
+    /// A caller-supplied correlation ID lets the canonical artifact ID and the
+    /// durable operation ID remain identical, which makes restart recovery and
+    /// chain retries idempotent.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn insert_scoped(
+        &self,
+        correlation_id: Option<String>,
+        jwt_sub: String,
+        content: String,
+        embedding: Vec<f32>,
+        content_hash: String,
+        canonical_cbor: Vec<u8>,
+        tags: Vec<String>,
+        metadata: serde_json::Value,
+        write_mode: WriteMode,
+        visibility: Visibility,
+        checkpoint_type: String,
+        workspace: Option<String>,
     ) -> Result<String, PendingError> {
         // Size checks first — cheaper to reject before locking.
         if content.len() > MAX_CONTENT_BYTES {
@@ -232,7 +286,10 @@ impl PendingBundles {
             return Err(PendingError::PerUserCapExceeded);
         }
 
-        let correlation_id = uuid::Uuid::new_v4().to_string();
+        let correlation_id = correlation_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        if uuid::Uuid::parse_str(&correlation_id).is_err() || guard.lru.contains(&correlation_id) {
+            return Err(PendingError::InvalidCorrelationId);
+        }
         let exp = Utc::now() + Duration::seconds(guard.ttl_secs);
         let entry = PendingEntry {
             jwt_sub: jwt_sub.clone(),
@@ -243,6 +300,9 @@ impl PendingBundles {
             tags,
             metadata,
             write_mode,
+            visibility,
+            checkpoint_type,
+            workspace,
             exp,
         };
 
@@ -671,6 +731,7 @@ mod tests {
                 PendingError::OversizedPayload,
                 StatusCode::PAYLOAD_TOO_LARGE,
             ),
+            (PendingError::InvalidCorrelationId, StatusCode::CONFLICT),
         ];
         for (err, expected) in cases {
             let resp = err.into_response();

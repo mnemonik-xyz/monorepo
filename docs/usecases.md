@@ -25,7 +25,7 @@ Memory belongs to the agent or its operator rather than a provider: an operator 
 
 ### 6 Settlement-Aware Memory Infrastructure
 
-Networked memory services need metering and payment; Mnemonic already supports balance and x402-style HTTP payment flows so agents can autonomously pay for memory writes, recall, and verification. This evolves into agent-payable memory infrastructure where verification remains open and paid operations sustain node operators.
+Networked memory services need metering and payment. Mnemonic keeps local writes, recall, and verification free, while an explicitly selected on-chain anchor can use a capped, expiring Universal Paywall session or optional one-time x402 payment. The client signs the artifact first; an operation-bound receipt settles before the operator incurs Irys and Solana costs. This evolves into agent-payable memory infrastructure without granting the server signing authority.
 [See deep-dive in docs/usecases/settlement-aware-memory-infrastructure.md.]
 
 ### 7 Task Memory Ledger

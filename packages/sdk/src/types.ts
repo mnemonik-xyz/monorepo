@@ -52,11 +52,116 @@ export interface MnemonicClientConfig {
    * runtime's global `fetch`. Must conform to the standard Fetch API.
    */
   fetch?: typeof fetch;
+  /**
+   * Optional wallet/payment bridge. When a paid participate callback returns
+   * HTTP 402, the SDK passes the typed quote here and retries the exact same
+   * client-signed operation with the returned authorization.
+   */
+  paymentHandler?: PaymentHandler;
 }
+
+export type PaymentAuthorization =
+  | {
+      /** `session` is the preferred product name; `stake` is the V1 wire alias. */
+      scheme: "session" | "stake";
+      session_id: string;
+      payer_wallet: string;
+      authorization?: unknown;
+    }
+  | {
+      scheme: "exact";
+      payer_wallet: string;
+      authorization: unknown;
+    };
+
+export interface PaymentOperationScope {
+  workspace_hash?: string;
+  visibility: "private" | "public";
+  action: "manual" | "pre_compaction" | "session_end";
+}
+
+export interface PaymentOperationBinding {
+  version: 1;
+  operation_id: string;
+  payer_subject: string;
+  payer_wallet: string;
+  artifact_hash: string;
+  amount: string;
+  asset: string;
+  network: string;
+  pay_to: string;
+  expires_at: string;
+  nonce: string;
+  scope: PaymentOperationScope;
+}
+
+export interface PaymentReceipt {
+  operation_id: string;
+  scheme: "stake" | "exact";
+  status: "settled";
+  binding_digest: string;
+  payer_wallet: string;
+  amount: string;
+  asset: string;
+  network: string;
+  pay_to: string;
+  settlement_tx?: string;
+  settled_at: string;
+  receipt: unknown;
+}
+
+export interface PaymentQuote {
+  amount: string;
+  asset: string;
+  network: string;
+  pay_to: string;
+  expires_at: string;
+  accepts: Array<Record<string, unknown> & { scheme: "stake" | "exact" }>;
+}
+
+export interface SignedPaymentChallenge {
+  operationId: string;
+  artifactHash: string;
+  binding: PaymentOperationBinding;
+  bindingDigest: string;
+  /** Initial 402s are provisional until the payer wallet is connected. */
+  bindingStatus: "provisional" | "final";
+  workspace?: string;
+  refreshed: boolean;
+  quote: PaymentQuote;
+  /** Opaque callback material used by `resumePaidMemory`; do not modify. */
+  callback: {
+    correlation_id: string;
+    cose_signed_bytes: string;
+    signer_pubkey: string;
+  };
+}
+
+export interface PreparedPaymentOperation {
+  operationId: string;
+  binding: PaymentOperationBinding;
+  bindingDigest: string;
+}
+
+export type PreparePaymentOperation = (
+  payerWallet: string
+) => Promise<PreparedPaymentOperation>;
+
+export type PaymentHandler = (
+  challenge: SignedPaymentChallenge,
+  /** Finalize the binding after wallet connection, before signing payment. */
+  prepare: PreparePaymentOperation
+) => Promise<PaymentAuthorization>;
 
 /** Caller-supplied options for `signMemory`. */
 export interface SignMemoryOptions {
   tags?: string[];
+  mode?: "local" | "participate";
+  visibility?: "private" | "public";
+  checkpointType?: "manual" | "pre_compaction" | "session_end";
+  workspace?: string;
+  /** Reuse an already approved session or supply an exact x402 authorization. */
+  payment?: PaymentAuthorization;
 }
 
 /** Server response shape from `signMemory` after the callback completes. */
@@ -68,6 +173,30 @@ export interface SignMemoryResult {
   contentHash?: string;
   arweaveTx?: string;
   solanaTx?: string;
+  operationId?: string;
+  paymentReceipt?: PaymentReceipt;
+}
+
+export interface PaidOperationStatus {
+  operationId: string;
+  status:
+    | "awaiting_payment"
+    | "payment_authorizing"
+    | "payment_ready"
+    | "anchoring"
+    | "verifying_delivery"
+    | "anchored"
+    | "payment_failed"
+    | "delivery_retryable";
+  binding: PaymentOperationBinding;
+  bindingDigest: string;
+  bindingStatus: "provisional" | "final";
+  workspace?: string;
+  receipt?: PaymentReceipt;
+  attestationId?: string;
+  solanaTx?: string;
+  arweaveTx?: string;
+  lastError?: string;
 }
 
 /**

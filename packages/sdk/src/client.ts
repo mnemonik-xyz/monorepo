@@ -21,6 +21,7 @@ import {
   AuthError,
   IntegrityError,
   MnemonicError,
+  PaymentRequiredError,
   ServerError,
   UserError,
   redactJWT,
@@ -28,11 +29,19 @@ import {
 import type { Keypair, KeypairJson } from "./keypair.js";
 import type {
   MnemonicClientConfig,
+  PaymentAuthorization,
+  PaymentHandler,
+  PaymentOperationBinding,
+  PaymentQuote,
+  PaymentReceipt,
+  PreparedPaymentOperation,
+  PaidOperationStatus,
   ProveResult,
   RecallHit,
   RecallResult,
   SignMemoryOptions,
   SignMemoryResult,
+  SignedPaymentChallenge,
   SignerInterface,
   VerifyResult,
   WhoamiResult,
@@ -51,6 +60,7 @@ export class MnemonicClient {
   private readonly signer: SignerInterface;
   private jwt: string | undefined;
   private readonly fetchImpl: typeof fetch;
+  private readonly paymentHandler: PaymentHandler | undefined;
   /**
    * Optional keypair — needed only for `signMemory` (the COSE step needs
    * the JSON form, which `Signer.pubkey` can't provide). When the client
@@ -75,6 +85,7 @@ export class MnemonicClient {
     this.signer = config.signer;
     if (config.jwt !== undefined) this.jwt = config.jwt;
     this.fetchImpl = config.fetch ?? globalThis.fetch.bind(globalThis);
+    this.paymentHandler = config.paymentHandler;
   }
 
   /**
@@ -169,6 +180,10 @@ export class MnemonicClient {
 
     const args: Record<string, unknown> = { content };
     if (opts.tags && opts.tags.length > 0) args.tags = opts.tags;
+    if (opts.mode) args.mode = opts.mode;
+    if (opts.visibility) args.visibility = opts.visibility;
+    if (opts.checkpointType) args.checkpoint_type = opts.checkpointType;
+    if (opts.workspace) args.workspace = opts.workspace;
 
     // 1. Open the deferred sign — server returns correlation_id.
     const openResp = await this.callTool("mnemonic_sign_memory", args);
@@ -214,16 +229,162 @@ export class MnemonicClient {
 
     // 4. POST /api/sign-callback (NO Bearer JWT — capability auth via
     //    correlation_id + signature chain, identical to the webapp flow).
-    const callbackUrl = `${this.baseUrl}/api/sign-callback`;
-    const callbackRes = await safeFetch(this.fetchImpl, callbackUrl, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        correlation_id: correlationId,
-        cose_signed_bytes: bytesToBase64(cose),
-        signer_pubkey: this.signer.pubkey,
-      }),
-    });
+    const callback = {
+      correlation_id: correlationId,
+      cose_signed_bytes: bytesToBase64(cose),
+      signer_pubkey: this.signer.pubkey,
+    };
+    return this.submitSignedCallback(callback, opts.payment, true);
+  }
+
+  /** Continue a previously signed operation after an external wallet flow. */
+  async resumePaidMemory(
+    challenge: SignedPaymentChallenge,
+    payment: PaymentAuthorization
+  ): Promise<SignMemoryResult> {
+    if (challenge.callback.signer_pubkey !== this.signer.pubkey) {
+      throw new UserError("payment challenge belongs to a different signer");
+    }
+    if (challenge.operationId !== challenge.callback.correlation_id) {
+      throw new IntegrityError("payment challenge operation binding is invalid");
+    }
+    if (challenge.bindingStatus === "provisional") {
+      await this.preparePaidOperation(challenge.operationId, payment.payer_wallet);
+    }
+    return this.submitSignedCallback(challenge.callback, payment, false);
+  }
+
+  /**
+   * Bind the connected payer wallet and return the final immutable operation
+   * binding. Payment authorization must be signed against this response.
+   */
+  async preparePaidOperation(
+    operationId: string,
+    payerWallet: string
+  ): Promise<PreparedPaymentOperation> {
+    if (!operationId || !payerWallet) {
+      throw new UserError("preparePaidOperation: operationId and payerWallet are required");
+    }
+    const response = await safeFetch(
+      this.fetchImpl,
+      `${this.baseUrl}/api/paid-operations/${encodeURIComponent(operationId)}/prepare`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Accept: "application/json" },
+        body: JSON.stringify({ payer_wallet: payerWallet }),
+      }
+    );
+    if (!response.ok) {
+      const detail = await readBodySafely(response);
+      throw new ServerError(
+        `payment preparation failed: HTTP ${response.status} ${detail}`,
+        response.status
+      );
+    }
+    const body = (await response.json().catch(() => ({}))) as Record<
+      string,
+      unknown
+    >;
+    if (
+      body.status !== "payment_prepared" ||
+      body.operation_id !== operationId ||
+      body.binding_status !== "final" ||
+      typeof body.binding_digest !== "string"
+    ) {
+      throw new ServerError("payment preparation response was malformed");
+    }
+    const binding = parsePaymentBinding(body.binding);
+    if (
+      binding.operation_id !== operationId ||
+      binding.payer_wallet.toLowerCase() !== payerWallet.toLowerCase()
+    ) {
+      throw new IntegrityError("prepared payment binding does not match request");
+    }
+    return {
+      operationId,
+      binding,
+      bindingDigest: body.binding_digest,
+    };
+  }
+
+  /** Read durable payment/anchoring progress. This call is strictly read-only. */
+  async paidOperationStatus(operationId: string): Promise<PaidOperationStatus> {
+    if (!operationId || typeof operationId !== "string") {
+      throw new UserError("paidOperationStatus: operationId is required");
+    }
+    const response = await safeFetch(
+      this.fetchImpl,
+      `${this.baseUrl}/api/paid-operations/${encodeURIComponent(operationId)}`,
+      { method: "GET", headers: { Accept: "application/json" } }
+    );
+    if (response.status === 401 || response.status === 403) {
+      throw new AuthError(`payment status rejected: HTTP ${response.status}`);
+    }
+    if (!response.ok) {
+      const detail = await readBodySafely(response);
+      throw new ServerError(
+        `payment status failed: HTTP ${response.status} ${detail}`,
+        response.status
+      );
+    }
+    const body = (await response.json().catch(() => ({}))) as Record<
+      string,
+      unknown
+    >;
+    return parsePaidOperationStatus(body, operationId);
+  }
+
+  private async submitSignedCallback(
+    callback: SignedPaymentChallenge["callback"],
+    payment: PaymentAuthorization | undefined,
+    allowPaymentHandler: boolean
+  ): Promise<SignMemoryResult> {
+    const callbackRes = await safeFetch(
+      this.fetchImpl,
+      `${this.baseUrl}/api/sign-callback`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          ...callback,
+          ...(payment ? { payment } : {}),
+        }),
+      }
+    );
+
+    if (callbackRes.status === 402) {
+      const raw = (await callbackRes.json().catch(() => ({}))) as Record<
+        string,
+        unknown
+      >;
+      const challenge = parsePaymentChallenge(raw, callback);
+      if (allowPaymentHandler && !payment && this.paymentHandler) {
+        const authorization = await this.paymentHandler(
+          challenge,
+          (payerWallet) =>
+            this.preparePaidOperation(challenge.operationId, payerWallet)
+        );
+        if (challenge.bindingStatus === "provisional") {
+          await this.preparePaidOperation(
+            challenge.operationId,
+            authorization.payer_wallet
+          );
+        }
+        return this.submitSignedCallback(callback, authorization, false);
+      }
+      throw new PaymentRequiredError(challenge);
+    }
+    if (callbackRes.status === 202) {
+      const raw = (await callbackRes.json().catch(() => ({}))) as Record<
+        string,
+        unknown
+      >;
+      const operationId =
+        typeof raw.operation_id === "string"
+          ? raw.operation_id
+          : callback.correlation_id;
+      return this.pollPaidOperation(operationId);
+    }
     if (callbackRes.status === 410) {
       throw new ServerError(
         "pending bundle expired or already consumed",
@@ -240,38 +401,42 @@ export class MnemonicClient {
         callbackRes.status
       );
     }
-
-    const cbBody = (await callbackRes.json().catch(() => ({}))) as Record<
+    const body = (await callbackRes.json().catch(() => ({}))) as Record<
       string,
       unknown
     >;
-    const attestationId =
-      typeof cbBody.attestation_id === "string" ? cbBody.attestation_id : null;
-    if (!attestationId) {
-      throw new IntegrityError("sign-callback did not return attestation_id");
+    return normalizeSignResult(body);
+  }
+
+  private async pollPaidOperation(
+    operationId: string
+  ): Promise<SignMemoryResult> {
+    for (let attempt = 0; attempt < 40; attempt++) {
+      const status = await this.paidOperationStatus(operationId);
+      if (status.status === "anchored") {
+        return normalizeSignResult({
+          status: "anchored",
+          operation_id: status.operationId,
+          attestation_id: status.attestationId,
+          solana_tx: status.solanaTx,
+          arweave_tx: status.arweaveTx,
+          receipt: status.receipt,
+          content_hash: status.binding.artifact_hash,
+        });
+      }
+      if (
+        status.status === "payment_failed" ||
+        status.status === "delivery_retryable"
+      ) {
+        throw new ServerError(
+          `paid operation ${operationId} requires retry: ${String(
+            status.lastError ?? status.status
+          )}`
+        );
+      }
+      await new Promise((resolve) => setTimeout(resolve, 250));
     }
-    return {
-      attestationId,
-      signedAt:
-        typeof cbBody.signed_at === "string"
-          ? cbBody.signed_at
-          : new Date().toISOString(),
-      status:
-        cbBody.status === "anchored"
-          ? "anchored"
-          : cbBody.status === "pending"
-          ? "pending"
-          : "signed",
-      ...(typeof cbBody.content_hash === "string"
-        ? { contentHash: cbBody.content_hash }
-        : {}),
-      ...(typeof cbBody.arweave_tx === "string"
-        ? { arweaveTx: cbBody.arweave_tx }
-        : {}),
-      ...(typeof cbBody.solana_tx === "string"
-        ? { solanaTx: cbBody.solana_tx }
-        : {}),
-    };
+    throw new ServerError(`paid operation ${operationId} is still pending`);
   }
 
   /**
@@ -460,6 +625,199 @@ export class MnemonicClient {
 // --------------------------------------------------------------------------
 // Internal helpers
 // --------------------------------------------------------------------------
+
+function parsePaymentChallenge(
+  raw: Record<string, unknown>,
+  callback: SignedPaymentChallenge["callback"]
+): SignedPaymentChallenge {
+  if (
+    (raw.status !== "payment_required" && raw.status !== "quote_refreshed") ||
+    typeof raw.operation_id !== "string" ||
+    typeof raw.artifact_hash !== "string" ||
+    typeof raw.binding_digest !== "string" ||
+    !isRecord(raw.quote)
+  ) {
+    throw new ServerError("payment-required response was malformed", 402);
+  }
+  const quote = raw.quote;
+  if (
+    typeof quote.amount !== "string" ||
+    typeof quote.asset !== "string" ||
+    typeof quote.network !== "string" ||
+    typeof quote.pay_to !== "string" ||
+    typeof quote.expires_at !== "string" ||
+    !Array.isArray(quote.accepts) ||
+    !quote.accepts.every(
+      (item) =>
+        isRecord(item) && (item.scheme === "stake" || item.scheme === "exact")
+    )
+  ) {
+    throw new ServerError("payment quote was malformed", 402);
+  }
+  if (raw.operation_id !== callback.correlation_id) {
+    throw new IntegrityError("payment quote operation_id does not match callback");
+  }
+  const binding = parsePaymentBinding(raw.binding);
+  if (
+    binding.operation_id !== raw.operation_id ||
+    binding.artifact_hash !== raw.artifact_hash
+  ) {
+    throw new IntegrityError("payment quote binding does not match signed operation");
+  }
+  return {
+    operationId: raw.operation_id,
+    artifactHash: raw.artifact_hash,
+    binding,
+    bindingDigest: raw.binding_digest,
+    bindingStatus:
+      raw.binding_status === "final" || binding.payer_wallet !== ""
+        ? "final"
+        : "provisional",
+    ...(typeof raw.workspace === "string" ? { workspace: raw.workspace } : {}),
+    refreshed: raw.status === "quote_refreshed",
+    quote: quote as unknown as PaymentQuote,
+    callback: { ...callback },
+  };
+}
+
+function normalizeSignResult(body: Record<string, unknown>): SignMemoryResult {
+  const attestationId =
+    typeof body.attestation_id === "string" ? body.attestation_id : null;
+  if (!attestationId) {
+    throw new IntegrityError("sign-callback did not return attestation_id");
+  }
+  return {
+    attestationId,
+    signedAt:
+      typeof body.signed_at === "string"
+        ? body.signed_at
+        : new Date().toISOString(),
+    status:
+      body.status === "anchored"
+        ? "anchored"
+        : body.status === "pending"
+        ? "pending"
+        : "signed",
+    ...(typeof body.content_hash === "string"
+      ? { contentHash: body.content_hash }
+      : {}),
+    ...(typeof body.arweave_tx === "string"
+      ? { arweaveTx: body.arweave_tx }
+      : {}),
+    ...(typeof body.solana_tx === "string"
+      ? { solanaTx: body.solana_tx }
+      : {}),
+    ...(typeof body.operation_id === "string"
+      ? { operationId: body.operation_id }
+      : {}),
+    ...(body.payment_receipt !== undefined
+      ? { paymentReceipt: parsePaymentReceipt(body.payment_receipt) }
+      : body.receipt !== undefined
+      ? { paymentReceipt: parsePaymentReceipt(body.receipt) }
+      : {}),
+  };
+}
+
+function parsePaymentBinding(value: unknown): PaymentOperationBinding {
+  if (!isRecord(value) || !isRecord(value.scope)) {
+    throw new ServerError("payment operation binding was malformed");
+  }
+  const scope = value.scope;
+  const strings = [
+    "operation_id",
+    "payer_subject",
+    "payer_wallet",
+    "artifact_hash",
+    "amount",
+    "asset",
+    "network",
+    "pay_to",
+    "expires_at",
+    "nonce",
+  ] as const;
+  if (
+    value.version !== 1 ||
+    strings.some((field) => typeof value[field] !== "string") ||
+    (scope.visibility !== "private" && scope.visibility !== "public") ||
+    !["manual", "pre_compaction", "session_end"].includes(
+      String(scope.action)
+    ) ||
+    (scope.workspace_hash !== undefined &&
+      typeof scope.workspace_hash !== "string")
+  ) {
+    throw new ServerError("payment operation binding was malformed");
+  }
+  return value as unknown as PaymentOperationBinding;
+}
+
+function parsePaymentReceipt(value: unknown): PaymentReceipt {
+  if (!isRecord(value)) throw new ServerError("payment receipt was malformed");
+  const strings = [
+    "operation_id",
+    "scheme",
+    "status",
+    "binding_digest",
+    "payer_wallet",
+    "amount",
+    "asset",
+    "network",
+    "pay_to",
+    "settled_at",
+  ] as const;
+  if (
+    strings.some((field) => typeof value[field] !== "string") ||
+    (value.scheme !== "stake" && value.scheme !== "exact") ||
+    value.status !== "settled" ||
+    value.receipt === undefined
+  ) {
+    throw new ServerError("payment receipt was malformed");
+  }
+  return value as unknown as PaymentReceipt;
+}
+
+function parsePaidOperationStatus(
+  body: Record<string, unknown>,
+  expectedOperationId: string
+): PaidOperationStatus {
+  const allowed = [
+    "awaiting_payment",
+    "payment_authorizing",
+    "payment_ready",
+    "anchoring",
+    "verifying_delivery",
+    "anchored",
+    "payment_failed",
+    "delivery_retryable",
+  ];
+  if (
+    body.operation_id !== expectedOperationId ||
+    typeof body.status !== "string" ||
+    !allowed.includes(body.status) ||
+    typeof body.binding_digest !== "string"
+  ) {
+    throw new ServerError("paid operation status was malformed");
+  }
+  const binding = parsePaymentBinding(body.binding);
+  const result: PaidOperationStatus = {
+    operationId: expectedOperationId,
+    status: body.status as PaidOperationStatus["status"],
+    binding,
+    bindingDigest: body.binding_digest,
+    bindingStatus:
+      body.binding_status === "final" || binding.payer_wallet !== ""
+        ? "final"
+        : "provisional",
+  };
+  if (typeof body.workspace === "string") result.workspace = body.workspace;
+  if (body.receipt !== null && body.receipt !== undefined) {
+    result.receipt = parsePaymentReceipt(body.receipt);
+  }
+  if (typeof body.attestation_id === "string") result.attestationId = body.attestation_id;
+  if (typeof body.solana_tx === "string") result.solanaTx = body.solana_tx;
+  if (typeof body.arweave_tx === "string") result.arweaveTx = body.arweave_tx;
+  if (typeof body.last_error === "string") result.lastError = body.last_error;
+  return result;
+}
 
 /**
  * MCP tools/call results are wrapped in `{content: [{type:'text', text:'<JSON>'}]}`

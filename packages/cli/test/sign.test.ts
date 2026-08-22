@@ -119,6 +119,94 @@ describe("runSign", () => {
     expect(calls.some((u) => u.includes("/api/sign-callback"))).toBe(true);
   });
 
+  it("payment required is a resumable success handoff, not a CLI error", async () => {
+    const kp = mock.generate_keypair();
+    saveIdentityJson(kp);
+    saveToken({
+      jwt: makeJwt(kp.pubkey_base58),
+      expires_at: new Date(Date.now() + 3600_000).toISOString(),
+      sub: kp.pubkey_base58,
+    });
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/mcp")) {
+        return new Response(
+          JSON.stringify({
+            jsonrpc: "2.0",
+            id: 1,
+            result: {
+              content: [
+                { type: "text", text: JSON.stringify({ correlation_id: "paid-1" }) },
+              ],
+            },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      if (url.includes("/api/pending/")) {
+        return new Response(new Uint8Array([0xa0]), { status: 200 });
+      }
+      return new Response(
+        JSON.stringify({
+          status: "payment_required",
+          operation_id: "paid-1",
+          artifact_hash: "artifact",
+          binding_digest: "binding-digest",
+          binding: {
+            version: 1,
+            operation_id: "paid-1",
+            payer_subject: "subject",
+            payer_wallet: "",
+            artifact_hash: "artifact",
+            amount: "1000",
+            asset: "0xasset",
+            network: "eip155:1",
+            pay_to: "0xpayee",
+            expires_at: "2026-07-13T12:00:00Z",
+            nonce: "nonce",
+            scope: {
+              workspace_hash: "workspace-hash",
+              visibility: "private",
+              action: "pre_compaction",
+            },
+          },
+          quote: {
+            amount: "1000",
+            asset: "0xasset",
+            network: "eip155:1",
+            pay_to: "0xpayee",
+            expires_at: "2026-07-13T12:00:00Z",
+            accepts: [
+              {
+                scheme: "stake",
+                payment_url: "https://pay.example/approve",
+              },
+              { scheme: "exact" },
+            ],
+          },
+        }),
+        { status: 402, headers: { "content-type": "application/json" } },
+      );
+    });
+    globalThis.fetch = fetchMock as never;
+
+    await expect(
+      runSign("checkpoint", {
+        content: "checkpoint",
+        baseUrl: "http://test",
+        mode: "participate",
+        checkpointType: "pre_compaction",
+        workspace: "workspace-alpha",
+        json: true,
+        openPayment: false,
+      }),
+    ).resolves.toBeUndefined();
+    const output = vi.mocked(process.stdout.write).mock.calls.join("\n");
+    expect(output).toContain("payment_required");
+    expect(output).not.toContain("binding_digest=");
+    expect(output).toContain("scheme=stake");
+  });
+
   it("AuthError 403 on sign-callback → UserError post-mortem with mismatch hint", async () => {
     // Preflight checks the saved file fields (id.pubkey vs token.sub). If
     // token.sub matches identity.pubkey at preflight-time but the JWT inside

@@ -18,8 +18,10 @@
 //!   5. persist via `AttestationStore::save_attestation(... owner_pubkey = jwt.sub)`
 //!   6. return `{"status": "ok", "attestation_id": <uuid>}`
 //!
-//! Auth model: both endpoints sit behind `oauth::bearer_auth_middleware`;
-//! `Claims` is read from request extensions.
+//! Auth model: the correlation UUID is a short-lived capability and the
+//! callback additionally verifies the complete Ed25519/COSE ownership chain.
+//! A durable paid-operation continuation uses the same capability after the
+//! in-memory bundle expires.
 
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
@@ -48,7 +50,7 @@ use uuid::Uuid;
 
 use crate::mcp::McpState;
 use crate::oauth::Claims;
-use crate::pending::PendingError;
+use crate::pending::{PendingEntry, PendingError};
 use crate::publish::{PublishError, PublishInput};
 
 /// `GET /api/pending/{correlation_id}` — webapp fetches the unsigned
@@ -99,6 +101,10 @@ pub struct SignCallbackRequest {
     pub cose_signed_bytes: String,
     /// base58 user pubkey — must equal `jwt.sub` and the COSE kid.
     pub signer_pubkey: String,
+    /// Present only for a paid `participate` callback. `stake` is the primary
+    /// capped-session method; `exact` is the optional one-operation x402 path.
+    #[serde(default)]
+    pub payment: Option<crate::paid_operation::PaymentAuthorization>,
 }
 
 /// Successful response of `POST /api/sign-callback`.
@@ -120,6 +126,447 @@ pub struct SignCallbackResponse {
     /// Convenience gateway URL — `https://gateway.irys.xyz/{arweave_tx}` for
     /// production Irys DataItems; empty string for synthetic `local:` ids.
     pub arweave_url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub payment_receipt: Option<crate::paid_operation::PaymentReceipt>,
+}
+
+fn mark_paid_delivery_retryable(state: &McpState, operation_id: &str, error: &str) {
+    if state.payment_mode != "universal" {
+        return;
+    }
+    if let Ok(store) = state.store.lock() {
+        if let Err(mark_error) =
+            crate::paid_operation::mark_delivery_retryable(&store, operation_id, error)
+        {
+            tracing::error!(
+                operation_id,
+                error = %mark_error,
+                "failed to persist paid delivery retry state"
+            );
+        }
+    }
+}
+
+fn paid_operation_entry(operation: &crate::paid_operation::PaidOperation) -> PendingEntry {
+    PendingEntry {
+        jwt_sub: operation.signer_pubkey.clone(),
+        content: operation.content.clone(),
+        embedding: operation.embedding.clone(),
+        content_hash: operation.binding.artifact_hash.clone(),
+        canonical_cbor: Vec::new(),
+        tags: operation.tags.clone(),
+        metadata: serde_json::Value::Null,
+        write_mode: WriteMode::Participate,
+        visibility: operation.visibility,
+        checkpoint_type: operation.binding.scope.action.clone(),
+        workspace: operation.workspace.clone(),
+        exp: chrono::Utc::now() + chrono::Duration::minutes(5),
+    }
+}
+
+fn paid_progress(state: &str, operation_id: &str) -> Response {
+    (
+        StatusCode::ACCEPTED,
+        Json(serde_json::json!({
+            "status": state,
+            "operation_id": operation_id,
+            "retryable": true,
+        })),
+    )
+        .into_response()
+}
+
+fn payment_required_response(
+    operation: &crate::paid_operation::PaidOperation,
+    paid: &crate::paid_operation::PaidAnchoring,
+    status: &str,
+) -> Response {
+    let digest = crate::paid_operation::binding_digest(&operation.binding).unwrap_or_default();
+    (
+        StatusCode::PAYMENT_REQUIRED,
+        Json(serde_json::json!({
+            "status": status,
+            "operation_id": operation.binding.operation_id,
+            "artifact_hash": operation.binding.artifact_hash,
+            "binding": operation.binding,
+            "binding_digest": digest,
+            // The first quote is created before a wallet is connected. The
+            // hosted paywall MUST call /prepare after wallet connection and
+            // sign only the final binding returned there.
+            "binding_status": if operation.binding.payer_wallet.is_empty() {
+                "provisional"
+            } else {
+                "final"
+            },
+            "workspace": operation.workspace,
+            "quote": {
+                "amount": operation.binding.amount,
+                "asset": paid.quote.asset,
+                "network": paid.quote.network,
+                "pay_to": paid.quote.pay_to,
+                "expires_at": operation.binding.expires_at,
+                "scope": operation.binding.scope,
+                "accepts": [
+                    {
+                        "scheme": "stake",
+                        "recommended": true,
+                        "payment_url": paid.quote.payment_url,
+                        "recommended_cap": paid.quote.session_cap,
+                        "max_per_anchor": paid.quote.session_max_per_anchor,
+                        "valid_for_seconds": paid.quote.session_valid_for_seconds,
+                    },
+                    {
+                        "scheme": "exact",
+                        "protocol": "x402",
+                        "recommended": false,
+                    }
+                ]
+            }
+        })),
+    )
+        .into_response()
+}
+
+fn stored_payment_authorization(
+    operation: &crate::paid_operation::PaidOperation,
+) -> Option<crate::paid_operation::PaymentAuthorization> {
+    match operation.payment_scheme.as_deref()? {
+        "stake" => Some(crate::paid_operation::PaymentAuthorization::Stake {
+            session_id: operation.session_id.clone()?,
+            payer_wallet: operation.binding.payer_wallet.clone(),
+            authorization: serde_json::Value::Null,
+        }),
+        "exact" => Some(crate::paid_operation::PaymentAuthorization::Exact {
+            payer_wallet: operation.binding.payer_wallet.clone(),
+            authorization: serde_json::Value::Null,
+        }),
+        _ => None,
+    }
+}
+
+fn paid_anchored_response(operation: &crate::paid_operation::PaidOperation) -> Option<Response> {
+    if operation.state != "anchored" {
+        return None;
+    }
+    let attestation_id = operation.attestation_id.as_ref()?;
+    let solana_tx = operation.solana_tx.as_ref()?;
+    let arweave_tx = operation.arweave_tx.as_ref()?;
+    let solana_explorer_url = format!("https://solscan.io/tx/{solana_tx}");
+    let arweave_url = format!("https://gateway.irys.xyz/{arweave_tx}");
+    Some(
+        (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "status": "ok",
+                "operation_id": operation.binding.operation_id,
+                "attestation_id": attestation_id,
+                "content_hash": operation.binding.artifact_hash,
+                "solana_tx": solana_tx,
+                "arweave_tx": arweave_tx,
+                "solana_explorer_url": solana_explorer_url,
+                "arweave_url": arweave_url,
+                "payment_receipt": operation.receipt,
+            })),
+        )
+            .into_response(),
+    )
+}
+
+async fn ensure_universal_payment(
+    state: &McpState,
+    req: &SignCallbackRequest,
+    entry: &PendingEntry,
+    cose_bytes: &[u8],
+) -> Result<crate::paid_operation::PaidOperation, Response> {
+    let paid = state.paid_anchoring.as_ref().ok_or_else(|| {
+        error_resp(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "PAYMENT_MODE=universal is missing provider configuration",
+        )
+    })?;
+
+    let mut operation = {
+        let store = state.store.lock().map_err(|e| {
+            error_resp(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("store mutex poisoned: {e}"),
+            )
+        })?;
+        match crate::paid_operation::read(&store, &req.correlation_id) {
+            Ok(Some(operation)) => operation,
+            Ok(None) => {
+                let binding = crate::paid_operation::new_binding(
+                    &req.correlation_id,
+                    &req.signer_pubkey,
+                    "",
+                    &entry.content_hash,
+                    state.pricing.current_price(),
+                    &paid.quote,
+                    crate::paid_operation::OperationScope::new(
+                        entry.workspace.as_deref(),
+                        entry.visibility,
+                        &entry.checkpoint_type,
+                    ),
+                );
+                let draft = crate::paid_operation::NewPaidOperation {
+                    binding,
+                    signer_pubkey: req.signer_pubkey.clone(),
+                    cose_signed_bytes: cose_bytes.to_vec(),
+                    content: entry.content.clone(),
+                    tags: entry.tags.clone(),
+                    embedding: entry.embedding.clone(),
+                    workspace: entry.workspace.clone(),
+                    visibility: entry.visibility,
+                };
+                crate::paid_operation::create_or_read(&store, &draft).map_err(|e| {
+                    error_resp(
+                        StatusCode::CONFLICT,
+                        &format!("paid operation conflict: {e}"),
+                    )
+                })?
+            }
+            Err(e) => {
+                return Err(error_resp(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("paid operation read failed: {e}"),
+                ));
+            }
+        }
+    };
+
+    if let Some(response) = paid_anchored_response(&operation) {
+        return Err(response);
+    }
+    if matches!(
+        operation.state.as_str(),
+        "payment_ready" | "delivery_retryable"
+    ) {
+        return Ok(operation);
+    }
+    if matches!(operation.state.as_str(), "anchoring" | "verifying_delivery") {
+        return Err(paid_progress(&operation.state, &req.correlation_id));
+    }
+
+    if operation.state == "payment_authorizing" {
+        match paid.provider.status(&req.correlation_id).await {
+            Ok(status) if status.status == "settled" => {
+                let receipt = status.receipt.ok_or_else(|| {
+                    error_resp(
+                        StatusCode::BAD_GATEWAY,
+                        "provider reports settled payment without a receipt",
+                    )
+                })?;
+                let recovery_payment =
+                    stored_payment_authorization(&operation).ok_or_else(|| {
+                        error_resp(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            "paid operation is missing its selected payment method",
+                        )
+                    })?;
+                let store = state.store.lock().map_err(|e| {
+                    error_resp(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        &format!("store mutex poisoned: {e}"),
+                    )
+                })?;
+                crate::paid_operation::record_receipt(
+                    &store,
+                    &req.correlation_id,
+                    &recovery_payment,
+                    &receipt,
+                )
+                .map_err(|e| {
+                    error_resp(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        &format!("recovered receipt persistence failed: {e}"),
+                    )
+                })?;
+                operation = crate::paid_operation::read(&store, &req.correlation_id)
+                    .map_err(|e| error_resp(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+                    .ok_or_else(|| {
+                        error_resp(StatusCode::INTERNAL_SERVER_ERROR, "paid operation missing")
+                    })?;
+                return Ok(operation);
+            }
+            Ok(status) if matches!(status.status.as_str(), "created" | "settling") => {
+                return Err(paid_progress("payment_authorizing", &req.correlation_id));
+            }
+            Ok(status) => {
+                let store = state.store.lock().map_err(|e| {
+                    error_resp(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        &format!("store mutex poisoned: {e}"),
+                    )
+                })?;
+                let _ = crate::paid_operation::mark_payment_failed(
+                    &store,
+                    &req.correlation_id,
+                    &format!("provider status: {}", status.status),
+                );
+                operation = crate::paid_operation::read(&store, &req.correlation_id)
+                    .map_err(|e| error_resp(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+                    .ok_or_else(|| {
+                        error_resp(StatusCode::INTERNAL_SERVER_ERROR, "paid operation missing")
+                    })?;
+            }
+            Err(error) => {
+                return Err((
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(serde_json::json!({
+                        "status": "payment_reconciliation_failed",
+                        "operation_id": req.correlation_id,
+                        "error": error.to_string(),
+                        "retryable": true,
+                    })),
+                )
+                    .into_response());
+            }
+        }
+    }
+
+    let quote_was_refreshed = if crate::paid_operation::quote_expired(&operation.binding) {
+        let store = state.store.lock().map_err(|error| {
+            error_resp(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("store mutex poisoned: {error}"),
+            )
+        })?;
+        operation = crate::paid_operation::refresh_unpaid_quote(
+            &store,
+            &req.correlation_id,
+            state.pricing.current_price(),
+        )
+        .map_err(|error| {
+            error_resp(
+                StatusCode::CONFLICT,
+                &format!("quote refresh failed: {error}"),
+            )
+        })?;
+        true
+    } else {
+        false
+    };
+
+    let Some(payment) = req.payment.as_ref() else {
+        return Err(payment_required_response(
+            &operation,
+            paid,
+            if quote_was_refreshed {
+                "quote_refreshed"
+            } else {
+                "payment_required"
+            },
+        ));
+    };
+    // An authorization supplied for an expired nonce must never be applied to
+    // the refreshed quote. Return the complete new binding and let the wallet
+    // approve it explicitly.
+    if quote_was_refreshed {
+        return Err(payment_required_response(
+            &operation,
+            paid,
+            "quote_refreshed",
+        ));
+    }
+
+    if let Err(error) = payment.validate() {
+        return Err(error_resp(StatusCode::BAD_REQUEST, &error.to_string()));
+    }
+
+    operation = {
+        let store = state.store.lock().map_err(|e| {
+            error_resp(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("store mutex poisoned: {e}"),
+            )
+        })?;
+        crate::paid_operation::bind_payer_wallet(
+            &store,
+            &req.correlation_id,
+            payment.payer_wallet(),
+        )
+        .map_err(|e| error_resp(StatusCode::CONFLICT, &e.to_string()))?
+    };
+
+    let claimed = {
+        let store = state.store.lock().map_err(|e| {
+            error_resp(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("store mutex poisoned: {e}"),
+            )
+        })?;
+        crate::paid_operation::claim_payment(&store, &req.correlation_id, payment).map_err(|e| {
+            error_resp(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("payment claim failed: {e}"),
+            )
+        })?
+    };
+    if !claimed {
+        return Err(paid_progress("payment_authorizing", &req.correlation_id));
+    }
+
+    let settle_request = crate::paid_operation::SettleRequest {
+        binding: operation.binding.clone(),
+        payment: payment.clone(),
+    };
+    let receipt = match paid.provider.settle(&settle_request).await {
+        Ok(receipt) => receipt,
+        Err(error) => {
+            let store = state.store.lock().map_err(|e| {
+                error_resp(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("store mutex poisoned: {e}"),
+                )
+            })?;
+            let _ = crate::paid_operation::mark_payment_failed(
+                &store,
+                &req.correlation_id,
+                &error.to_string(),
+            );
+            let status = match error {
+                crate::paid_operation::ProviderError::Rejected { .. } => {
+                    StatusCode::PAYMENT_REQUIRED
+                }
+                _ => StatusCode::SERVICE_UNAVAILABLE,
+            };
+            return Err((
+                status,
+                Json(serde_json::json!({
+                    "status": "payment_failed",
+                    "operation_id": req.correlation_id,
+                    "error": error.to_string(),
+                    "retryable": true,
+                })),
+            )
+                .into_response());
+        }
+    };
+
+    let store = state.store.lock().map_err(|e| {
+        error_resp(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("store mutex poisoned: {e}"),
+        )
+    })?;
+    if let Err(error) =
+        crate::paid_operation::record_receipt(&store, &req.correlation_id, payment, &receipt)
+    {
+        let _ = crate::paid_operation::mark_payment_failed(
+            &store,
+            &req.correlation_id,
+            &format!("invalid provider receipt: {error}"),
+        );
+        return Err(error_resp(
+            StatusCode::BAD_GATEWAY,
+            &format!("payment provider returned an invalid receipt: {error}"),
+        ));
+    }
+    crate::paid_operation::read(&store, &req.correlation_id)
+        .map_err(|e| error_resp(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+        .ok_or_else(|| error_resp(StatusCode::INTERNAL_SERVER_ERROR, "paid operation missing"))
 }
 
 /// `POST /api/sign-callback` — webapp delivers the user's COSE_Sign1.
@@ -147,36 +594,64 @@ pub async fn sign_callback_handler(
         }
     };
 
-    // 3. Atomic consume — pop the entry from the LRU under a single lock.
-    //    A concurrent second callback for the same correlation_id observes
-    //    `NotFound` after this point. We do NOT verify the COSE before
-    //    popping; otherwise two concurrent valid callbacks would both
-    //    proceed to step 5 (persistence), inserting two SQLite rows for the
-    //    same logical attestation.
-    let entry = match state
-        .pending
-        .consume_by_id(&req.correlation_id, &req.signer_pubkey)
-        .await
-    {
-        Ok(e) => e,
-        Err(e) => {
-            // PendingError::NotFound → 404. But per Decision 12 a missing
-            // entry on the callback is "already consumed or expired", which
-            // is semantically 410 Gone. Override here.
-            if matches!(e, PendingError::NotFound) {
+    // Paid operations survive loss of the in-memory pending bundle. A retry
+    // can reconstruct the signed operation from the separate payment ledger.
+    let (entry, pending_live) = match state.pending.peek_by_id(&req.correlation_id).await {
+        Ok(entry) => (entry, true),
+        Err(PendingError::NotFound | PendingError::Expired)
+            if state.payment_mode == "universal" =>
+        {
+            let operation = {
+                let store = match state.store.lock() {
+                    Ok(store) => store,
+                    Err(e) => {
+                        return error_resp(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            &format!("store mutex poisoned: {e}"),
+                        )
+                    }
+                };
+                match crate::paid_operation::read(&store, &req.correlation_id) {
+                    Ok(Some(operation)) => operation,
+                    Ok(None) => {
+                        return error_resp(
+                            StatusCode::GONE,
+                            "pending bundle missing or already consumed",
+                        )
+                    }
+                    Err(e) => {
+                        return error_resp(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            &format!("paid operation read failed: {e}"),
+                        )
+                    }
+                }
+            };
+            if operation.signer_pubkey != req.signer_pubkey
+                || operation.cose_signed_bytes != cose_bytes
+            {
                 return error_resp(
-                    StatusCode::GONE,
-                    "pending bundle missing or already consumed",
+                    StatusCode::FORBIDDEN,
+                    "paid operation signer or signed payload mismatch",
                 );
             }
-            return e.into_response();
+            (paid_operation_entry(&operation), false)
         }
+        Err(PendingError::NotFound) => {
+            return error_resp(
+                StatusCode::GONE,
+                "pending bundle missing or already consumed",
+            )
+        }
+        Err(e) => return e.into_response(),
     };
 
-    // 4. Verify COSE against the stored content hash. If verification fails
-    //    the entry is already gone from the LRU; the user's bundle is
-    //    effectively forfeit. This is the right tradeoff: tampered or
-    //    replayed signatures should not allow retries.
+    if entry.jwt_sub != req.signer_pubkey {
+        return error_resp(StatusCode::FORBIDDEN, "pending bundle owner mismatch");
+    }
+
+    // Verify before consuming the pending bundle. Paid callbacks may need to
+    // return 402 and retry the exact same client-signed artifact.
     let result = match verify_artifact(&cose_bytes, Some(&entry.content_hash)) {
         Ok(r) => r,
         Err(e) => {
@@ -216,6 +691,68 @@ pub async fn sign_callback_handler(
         );
     }
 
+    let is_universal_paid = state.payment_mode == "universal"
+        && state.storage_mode != "local"
+        && entry.write_mode == WriteMode::Participate;
+    let paid_operation = if is_universal_paid {
+        match ensure_universal_payment(&state, &req, &entry, &cose_bytes).await {
+            Ok(operation) => Some(operation),
+            Err(response) => return response,
+        }
+    } else {
+        None
+    };
+
+    if let Some(operation) = paid_operation.as_ref() {
+        if let Some(response) = paid_anchored_response(operation) {
+            return response;
+        }
+        let claimed = {
+            let store = match state.store.lock() {
+                Ok(store) => store,
+                Err(e) => {
+                    return error_resp(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        &format!("store mutex poisoned: {e}"),
+                    )
+                }
+            };
+            match crate::paid_operation::claim_anchoring(&store, &req.correlation_id) {
+                Ok(claimed) => claimed,
+                Err(e) => {
+                    return error_resp(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        &format!("anchoring claim failed: {e}"),
+                    )
+                }
+            }
+        };
+        if !claimed {
+            return paid_progress("anchoring", &req.correlation_id);
+        }
+    }
+
+    // Consume only after signature verification and, for paid operations,
+    // after a durable receipt and exclusive anchoring claim exist.
+    if pending_live {
+        if let Err(e) = state
+            .pending
+            .consume_by_id(&req.correlation_id, &req.signer_pubkey)
+            .await
+        {
+            if is_universal_paid {
+                if let Ok(store) = state.store.lock() {
+                    let _ = crate::paid_operation::mark_delivery_retryable(
+                        &store,
+                        &req.correlation_id,
+                        "pending bundle was concurrently consumed",
+                    );
+                }
+            }
+            return e.into_response();
+        }
+    }
+
     // 5. Persist + (optionally) anchor on-chain.
     //
     // Originally Decision 4 forced `local:` ids on the deferred path. That
@@ -230,7 +767,9 @@ pub async fn sign_callback_handler(
     //     on-chain anchor — a third party fetching the memo can re-fetch
     //     the COSE bytes from Arweave and verify the user's COSE signature
     //     end-to-end without contacting Mnemonic.
-    let attestation_id = uuid::Uuid::new_v4().to_string();
+    // Deferred signing embeds the correlation UUID as artifact_id. Reusing it
+    // here gives chain retries and database persistence a stable identity.
+    let attestation_id = req.correlation_id.clone();
     let now = chrono::Utc::now().to_rfc3339();
 
     // Wave 3: a deferred write whose resolved mode is `Local` (a remote user's
@@ -243,31 +782,63 @@ pub async fn sign_callback_handler(
         let local_sol = format!("local:{}", &entry.content_hash[..16]);
         (local_sol, local_ar)
     } else {
-        // Arweave upload of the COSE_Sign1 envelope bytes. `Producer` /
-        // `Created-At` tags mirror fields already public inside the payload
-        // (producer = did:sol:<jwt_sub> — the USER's identity, not the
-        // server's); they make the item aggregatable via one gateway
-        // GraphQL query (recover-traction-from-chain).
-        let producer_did = format!("did:sol:{}", req.signer_pubkey);
-        let ar_tx = match state
-            .arweave
-            .write_item(
-                &cose_bytes,
-                &state.keypair,
-                &[
-                    ("Producer", producer_did.as_str()),
-                    ("Created-At", now.as_str()),
-                ],
-            )
-            .await
+        // Paid delivery records each completed side effect before starting the
+        // next one. A retry therefore reuses the same Irys item and Solana
+        // transaction. Non-paid legacy delivery keeps its original behavior.
+        let ar_tx = if let Some(existing) = paid_operation
+            .as_ref()
+            .and_then(|operation| operation.arweave_tx.clone())
         {
-            Ok(t) => t,
-            Err(e) => {
-                return error_resp(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    &format!("arweave upload failed: {e}"),
-                );
+            existing
+        } else {
+            let producer_did = format!("did:sol:{}", req.signer_pubkey);
+            let written = match state
+                .arweave
+                .write_item(
+                    &cose_bytes,
+                    &state.keypair,
+                    &[
+                        ("Producer", producer_did.as_str()),
+                        ("Created-At", now.as_str()),
+                    ],
+                )
+                .await
+            {
+                Ok(tx) => tx,
+                Err(error) => {
+                    mark_paid_delivery_retryable(
+                        &state,
+                        &req.correlation_id,
+                        &format!("arweave upload failed: {error}"),
+                    );
+                    return error_resp(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        &format!("arweave upload failed: {error}"),
+                    );
+                }
+            };
+            if is_universal_paid {
+                let record_result = state
+                    .store
+                    .lock()
+                    .map_err(|error| error.to_string())
+                    .and_then(|store| {
+                        crate::paid_operation::record_arweave(&store, &req.correlation_id, &written)
+                            .map_err(|error| error.to_string())
+                    });
+                if let Err(error) = record_result {
+                    mark_paid_delivery_retryable(
+                        &state,
+                        &req.correlation_id,
+                        &format!("failed to record Irys delivery: {error}"),
+                    );
+                    return error_resp(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        &format!("failed to record Irys delivery: {error}"),
+                    );
+                }
             }
+            written
         };
         // No-op for production Irys (mine() only writes against arlocal).
         let _ = state.arweave.mine().await;
@@ -282,18 +853,52 @@ pub async fn sign_callback_handler(
             "a": ar_tx,
             "v": 2,
         });
-        let sol_tx = match state
-            .solana
-            .write_memo(&state.keypair, &memo.to_string())
-            .await
+        let sol_tx = if let Some(existing) = paid_operation
+            .as_ref()
+            .and_then(|operation| operation.solana_tx.clone())
         {
-            Ok(t) => t,
-            Err(e) => {
-                return error_resp(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    &format!("solana memo write failed: {e}"),
-                );
+            existing
+        } else {
+            let written = match state
+                .solana
+                .write_memo(&state.keypair, &memo.to_string())
+                .await
+            {
+                Ok(tx) => tx,
+                Err(error) => {
+                    mark_paid_delivery_retryable(
+                        &state,
+                        &req.correlation_id,
+                        &format!("solana memo write failed: {error}"),
+                    );
+                    return error_resp(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        &format!("solana memo write failed: {error}"),
+                    );
+                }
+            };
+            if is_universal_paid {
+                let record_result = state
+                    .store
+                    .lock()
+                    .map_err(|error| error.to_string())
+                    .and_then(|store| {
+                        crate::paid_operation::record_solana(&store, &req.correlation_id, &written)
+                            .map_err(|error| error.to_string())
+                    });
+                if let Err(error) = record_result {
+                    mark_paid_delivery_retryable(
+                        &state,
+                        &req.correlation_id,
+                        &format!("failed to record Solana delivery: {error}"),
+                    );
+                    return error_resp(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        &format!("failed to record Solana delivery: {error}"),
+                    );
+                }
             }
+            written
         };
         (sol_tx, ar_tx)
     };
@@ -324,11 +929,9 @@ pub async fn sign_callback_handler(
         // to exist (see `tools::perform_delivery_check`). On delivery failure
         // the row is demoted in place via `INSERT OR REPLACE` inside
         // `confirm_delivery_or_demote`.
-        // Visibility defaults to `Private` here — the deferred-sign callback
-        // path is a Participate write (browser-mediated COSE_Sign1), and
-        // until the JSON-input resolver lands (Task 5) every such write is
-        // private-by-default (AC13). Public visibility will become an
-        // explicit opt-in propagated from the original `sign_memory` call.
+        // Visibility was resolved (including the public-write ceremony) on
+        // the original tool call and carried through the pending/durable
+        // operation. Never default it again at callback time.
         let save_res = store.save_attestation(
             &attestation_id,
             &entry.content,
@@ -340,7 +943,7 @@ pub async fn sign_callback_handler(
             &req.signer_pubkey, // owner = same pubkey (Decision 9 — webapp flow uses keypair as identity)
             &now,
             entry.write_mode,
-            Visibility::Private,
+            entry.visibility,
             &entry.embedding,
         );
         // Stamp the correlation_id onto the row so `mnemonic_check_pending`
@@ -352,6 +955,7 @@ pub async fn sign_callback_handler(
         save_res
     };
     if let Err(e) = persist_res {
+        mark_paid_delivery_retryable(&state, &req.correlation_id, &format!("persist failed: {e}"));
         // Persistence failed AFTER the LRU consumed the entry AND after any
         // on-chain anchor was written. The user's bundle is gone. Surface a
         // 500 — the failure mode here is operator-visible (DB I/O / disk
@@ -373,11 +977,33 @@ pub async fn sign_callback_handler(
     // Skip the check for `local`-mode deploys AND for `Local` write-mode
     // bundles (Wave 3) — neither anchored anything on-chain, so there is no
     // real Arweave tx to re-fetch. Both took the synthetic-id branch above.
-    // Refund-on-failure for the deferred path is out of scope: the webapp
-    // owns its own credit accounting and the inline-path `mcp_handler`
-    // doesn't see this code path. The demoted row + structured error
-    // signal the webapp to NOT charge the user.
+    // Universal Paywall settlement is already durable at this point. A
+    // delivery failure keeps the operation and receipt retryable; it never
+    // asks for another payment. Any eventual abandonment/refund policy is a
+    // separate provider operation, not an implicit nonce rollback.
     if !is_local_write {
+        if is_universal_paid {
+            let store = match state.store.lock() {
+                Ok(store) => store,
+                Err(e) => {
+                    mark_paid_delivery_retryable(
+                        &state,
+                        &req.correlation_id,
+                        &format!("store mutex poisoned before delivery verify: {e}"),
+                    );
+                    return error_resp(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        &format!("store mutex poisoned: {e}"),
+                    );
+                }
+            };
+            if let Err(e) = crate::paid_operation::mark_verifying(&store, &req.correlation_id) {
+                return error_resp(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("paid operation verify transition failed: {e}"),
+                );
+            }
+        }
         let ctx = crate::tools::DeliveryContext {
             arweave: &state.arweave,
             store: &state.store,
@@ -398,6 +1024,7 @@ pub async fn sign_callback_handler(
                 // Happy path — fall through to the success envelope.
             }
             Ok(crate::tools::DeliveryOutcome::Demoted { stage }) => {
+                mark_paid_delivery_retryable(&state, &req.correlation_id, stage);
                 state.delivery_metrics.record_not_confirmed(stage);
                 tracing::warn!(
                     attestation_id = %attestation_id,
@@ -422,6 +1049,11 @@ pub async fn sign_callback_handler(
                 return (StatusCode::OK, Json(body)).into_response();
             }
             Err(e) => {
+                mark_paid_delivery_retryable(
+                    &state,
+                    &req.correlation_id,
+                    &format!("delivery check internal error: {e}"),
+                );
                 return error_resp(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     &format!("delivery check internal error: {e}"),
@@ -441,6 +1073,32 @@ pub async fn sign_callback_handler(
         format!("https://gateway.irys.xyz/{arweave_tx}")
     };
 
+    if is_universal_paid {
+        let store = match state.store.lock() {
+            Ok(store) => store,
+            Err(e) => {
+                return error_resp(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("store mutex poisoned: {e}"),
+                )
+            }
+        };
+        if let Err(e) = crate::paid_operation::mark_anchored(
+            &store,
+            &req.correlation_id,
+            &attestation_id,
+            &solana_tx,
+            &arweave_tx,
+        ) {
+            // Delivery is already proven at this point. Do not report the
+            // artifact as undelivered; surface a retryable receipt-state error.
+            return error_resp(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("anchor delivered but paid receipt finalization failed: {e}"),
+            );
+        }
+    }
+
     let body = SignCallbackResponse {
         status: "ok",
         attestation_id,
@@ -449,6 +1107,8 @@ pub async fn sign_callback_handler(
         arweave_tx,
         solana_explorer_url,
         arweave_url,
+        operation_id: is_universal_paid.then(|| req.correlation_id.clone()),
+        payment_receipt: paid_operation.and_then(|operation| operation.receipt),
     };
     (StatusCode::OK, Json(body)).into_response()
 }
@@ -459,6 +1119,194 @@ fn error_resp(status: StatusCode, msg: &str) -> Response {
         Json(serde_json::json!({"status": "error", "error": msg})),
     )
         .into_response()
+}
+
+/// Read-only restart/resume surface for a paid anchoring operation.
+pub async fn paid_operation_status_handler(
+    State(state): State<Arc<McpState>>,
+    Path(operation_id): Path<String>,
+) -> Response {
+    let operation = {
+        let store = match state.store.lock() {
+            Ok(store) => store,
+            Err(e) => {
+                return error_resp(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("store mutex poisoned: {e}"),
+                )
+            }
+        };
+        match crate::paid_operation::read(&store, &operation_id) {
+            Ok(Some(operation)) => operation,
+            Ok(None) => return error_resp(StatusCode::NOT_FOUND, "paid operation not found"),
+            Err(e) => {
+                return error_resp(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("paid operation read failed: {e}"),
+                )
+            }
+        }
+    };
+    let quote = state.paid_anchoring.as_ref().map(|paid| {
+        serde_json::json!({
+            "payment_url": paid.quote.payment_url,
+            "recommended_cap": paid.quote.session_cap,
+            "max_per_anchor": paid.quote.session_max_per_anchor,
+            "valid_for_seconds": paid.quote.session_valid_for_seconds,
+            "accepts": [
+                {"scheme":"stake","recommended":true},
+                {"scheme":"exact","recommended":false,"protocol":"x402"}
+            ]
+        })
+    });
+    let binding_digest =
+        crate::paid_operation::binding_digest(&operation.binding).unwrap_or_default();
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "operation_id": operation.binding.operation_id,
+            "status": operation.state,
+            "binding": operation.binding,
+            "binding_digest": binding_digest,
+            "binding_status": if operation.binding.payer_wallet.is_empty() {
+                "provisional"
+            } else {
+                "final"
+            },
+            "workspace": operation.workspace,
+            "visibility": operation.visibility.as_str(),
+            "checkpoint_type": operation.binding.scope.action,
+            "scheme": operation.payment_scheme,
+            "session_id": operation.session_id,
+            "amount": operation.binding.amount,
+            "asset": operation.binding.asset,
+            "network": operation.binding.network,
+            "pay_to": operation.binding.pay_to,
+            "expires_at": operation.binding.expires_at,
+            "receipt": operation.receipt,
+            "attestation_id": operation.attestation_id,
+            "solana_tx": operation.solana_tx,
+            "arweave_tx": operation.arweave_tx,
+            "last_error": operation.last_error,
+            "quote": quote,
+        })),
+    )
+        .into_response()
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PaidOperationAuthorizeRequest {
+    pub payment: crate::paid_operation::PaymentAuthorization,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PaidOperationPrepareRequest {
+    pub payer_wallet: String,
+}
+
+/// Finalize the operation binding after the hosted paywall connects a wallet.
+/// Wallet authorization must be produced over the binding returned by this
+/// endpoint, never over the provisional digest in the initial HTTP 402.
+pub async fn paid_operation_prepare_handler(
+    State(state): State<Arc<McpState>>,
+    Path(operation_id): Path<String>,
+    Json(request): Json<PaidOperationPrepareRequest>,
+) -> Response {
+    if state.payment_mode != "universal" || state.paid_anchoring.is_none() {
+        return error_resp(StatusCode::NOT_FOUND, "paid anchoring is not enabled");
+    }
+
+    let operation = {
+        let store = match state.store.lock() {
+            Ok(store) => store,
+            Err(e) => {
+                return error_resp(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("store mutex poisoned: {e}"),
+                )
+            }
+        };
+        let operation = match crate::paid_operation::read(&store, &operation_id) {
+            Ok(Some(operation)) => operation,
+            Ok(None) => return error_resp(StatusCode::NOT_FOUND, "paid operation not found"),
+            Err(e) => {
+                return error_resp(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("paid operation read failed: {e}"),
+                )
+            }
+        };
+        if crate::paid_operation::quote_expired(&operation.binding) {
+            if let Err(e) = crate::paid_operation::refresh_unpaid_quote(
+                &store,
+                &operation_id,
+                state.pricing.current_price(),
+            ) {
+                return error_resp(StatusCode::CONFLICT, &e.to_string());
+            }
+        }
+        match crate::paid_operation::bind_payer_wallet(&store, &operation_id, &request.payer_wallet)
+        {
+            Ok(operation) => operation,
+            Err(e) => return error_resp(StatusCode::CONFLICT, &e.to_string()),
+        }
+    };
+    let digest = match crate::paid_operation::binding_digest(&operation.binding) {
+        Ok(digest) => digest,
+        Err(e) => return error_resp(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+    };
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "status": "payment_prepared",
+            "operation_id": operation.binding.operation_id,
+            "binding": operation.binding,
+            "binding_digest": digest,
+            "binding_status": "final",
+        })),
+    )
+        .into_response()
+}
+
+/// Browser/paywall continuation endpoint. The original callback already
+/// verified and durably stored the client's COSE envelope before returning
+/// 402, so the wallet surface only supplies payment authorization here.
+pub async fn paid_operation_authorize_handler(
+    State(state): State<Arc<McpState>>,
+    Path(operation_id): Path<String>,
+    Json(request): Json<PaidOperationAuthorizeRequest>,
+) -> Response {
+    let operation = {
+        let store = match state.store.lock() {
+            Ok(store) => store,
+            Err(e) => {
+                return error_resp(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("store mutex poisoned: {e}"),
+                )
+            }
+        };
+        match crate::paid_operation::read(&store, &operation_id) {
+            Ok(Some(operation)) => operation,
+            Ok(None) => return error_resp(StatusCode::NOT_FOUND, "paid operation not found"),
+            Err(e) => {
+                return error_resp(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("paid operation read failed: {e}"),
+                )
+            }
+        }
+    };
+    let callback = SignCallbackRequest {
+        correlation_id: operation_id,
+        cose_signed_bytes: base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            &operation.cose_signed_bytes,
+        ),
+        signer_pubkey: operation.signer_pubkey,
+        payment: Some(request.payment),
+    };
+    sign_callback_handler(State(state), Json(callback)).await
 }
 
 // ── Bootstrap-ticket flow (mnemonic-cli tech-spec Decision 7) ───────────────

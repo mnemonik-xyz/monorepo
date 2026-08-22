@@ -44,7 +44,7 @@ Cargo workspace, `resolver = "2"`, two members:
 
 **Hard architectural rules** (audit-enforced):
 
-1. Payment methods (`create_api_key`, `deduct_balance`, `credit_deposit`, `mark_x402_nonce`, `record_attestation_cost`, `get_pnl_stats`, `get_owner_pubkey`, `verify_usdc_transfer`) live **only** in `mcp/src/payment.rs`. None in `core/`.
+1. Legacy x402 verification and delivery-accounting helpers live in `mcp/src/payment.rs`; durable Universal Paywall operation/receipt logic lives in `mcp/src/paid_operation.rs`. Payment code never lives in `core/`, and anchored recall never depends on the payment tables.
 2. `verify_usdc_transfer` is a **standalone function** taking `&SolanaClient`, not a method on it.
 3. `pricing.rs` lives in `mcp/`, never in `core/`.
 4. No `HashEmbedder` anywhere — use `MockEmbedder` in `#[cfg(test)]` blocks for tests.
@@ -54,7 +54,7 @@ Cargo workspace, `resolver = "2"`, two members:
 
 **Storage modes** (`STORAGE_MODE`): `local` — SQLite only, synthetic `local:` tx IDs, free, offline. `full` — Arweave + Solana writes, requires funded Ed25519 keypair. `STORAGE_MODE` now sets the operator's *capability/default*, not a global switch: write mode is a **per-request user choice** via the optional `mode: "local" | "participate"` field on `mnemonic_sign_memory` (default `local`; requests without the field fall back to the env-var for shipped legacy clients). Rows are tagged via the `write_mode` column and `recall` spans both modes for one owner — so a single owner's `local` and `participate` writes coexist in one DB by design. A `participate` write only succeeds after the anchored bytes pass a recall+verify round-trip; on failure the row is demoted to `local` and no payment is charged. Rationale + decisions: `work/modes-user-choice/user-spec.md` and `work/modes-user-choice/decisions.md`.
 
-**Payment modes** (`PAYMENT_MODE`, HTTP + `full` only): `none` | `balance` (Bearer token, balance checked against live pricing engine) | `x402` (HTTP 402 + retry with `X-Payment` header) | `both`. Only `mnemonic_sign_memory` is paid.
+**Payment modes** (`PAYMENT_MODE`, HTTP + `full` only): `none` | `x402` (legacy one-time transaction proof) | `universal` (capped, expiring Universal Paywall session first; exact one-time x402 optional). Only `mnemonic_sign_memory { mode: "participate" }` is paid. Universal settlement happens after the client COSE-signs and before Irys/Solana spending; durable operation state lives in `mcp/src/paid_operation.rs`, independently of recall.
 
 **Storage lock discipline:** `rusqlite::Connection` is `!Send`. Wrap in `std::sync::Mutex` in async contexts; **never** hold the lock across `.await`.
 

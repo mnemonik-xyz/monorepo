@@ -523,6 +523,7 @@ mod handler_tests {
             usdc_mint: String::new(),
             admin_token: String::new(),
             evm_payment: None,
+            paid_anchoring: None,
             pricing: crate::pricing::PricingEngine::new(0),
             sol_tx_fee_lamports: 0,
             storage_mode: "local".into(),

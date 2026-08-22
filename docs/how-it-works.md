@@ -34,13 +34,19 @@ Implemented in `mcp/src/tools.rs::sign_memory`.
 
 ## End-to-end walkthrough — recall
 
-Implemented in `mcp/src/tools.rs::recall` over `core/src/storage/sqlite.rs`.
+Implemented in `mcp/src/tools.rs::recall_with_chain` over
+`core/src/storage/sqlite.rs` plus the latest `ChainStatsCache` snapshot.
 
 1. Embed the query with the same provider used at sign time.
 2. Cosine-score the query vector against every uncompressed f32 embedding in the local `memory_embeddings` table.
 3. Return the top-k rows ordered by score, joined to their `attestations` row metadata.
 
-Recall is intentionally local: SQLite read plus an in-process scan, no chain calls. Uncompressed f32 wins here because cosine similarity is sensitive to small magnitude shifts and TurboQuant compressed bytes are optimized for portability and inner-product approximation, not for being the canonical retrieval index. The compressed form on Arweave is proof-of-existence; the uncompressed form in SQLite is the search index.
+Normal recall uses the SQLite f32 index. When `CHAIN_STATS_WALLETS` is
+configured, a background job reconstructs readable anchored artifacts from
+Irys/Arweave plus Solana Memo history. Recall merges that in-memory snapshot and
+embeds recovered plaintext on demand, so an empty or replaced SQLite cache does
+not erase anchored memories. A recall request itself performs no chain network
+call. SQLite remains the fast index; chain recovery is the durable fallback.
 
 ## End-to-end walkthrough — verify
 
@@ -52,13 +58,16 @@ Implemented in `mcp/src/tools.rs::verify`.
 ## Operational notes
 
 - **Storage modes** (`STORAGE_MODE`). `local` is the default: SQLite only, synthetic `local:` tx IDs, free, offline; suitable for development and single-node use. `full` writes COSE bytes to Arweave and an SPL Memo to Solana on every sign and requires a funded Ed25519 keypair on a live RPC. The mode is set at startup, not per call; never mix modes in one DB.
-- **Payment modes** (`PAYMENT_MODE`, HTTP transport in `full` mode only). `none` | `balance` (Bearer-token API key checked against the live pricing engine) | `x402` (HTTP 402 challenge, retry with `X-Payment` header) | `both`. Only `mnemonic_sign_memory` is paid; `whoami`, `recall`, `verify`, and `prove_identity` are free.
+- **Payment modes** (`PAYMENT_MODE`, HTTP transport in `full` mode only). `none` | `x402` (legacy one-time transaction proof) | `universal` (capped, expiring session as the primary path plus optional exact x402). Only `mnemonic_sign_memory { mode: "participate" }` is paid; local writes, `whoami`, `recall`, `verify`, and `prove_identity` are free. The client signs first, payment settles second, and Irys/Solana delivery starts only after a durable receipt exists.
 - **Lock discipline.** `rusqlite::Connection` is `!Send`. Always wrap `SqliteStore` in `std::sync::Mutex` in async contexts and never hold the lock across an `.await`. Tool handlers explicitly take `&std::sync::Mutex<SqliteStore>` and scope their guards before any IO.
 - **TurboQuant bit width.** Default 4 bits per dimension. Never change for an existing database — old and new compressed embeddings become incomparable, breaking any cross-node comparison and the artifact metadata commitment.
 
 ## Architectural rules (audit-enforced)
 
-- Payment methods (`create_api_key`, `deduct_balance`, `credit_deposit`, `mark_x402_nonce`, `record_attestation_cost`, `get_pnl_stats`, `get_owner_pubkey`, `verify_usdc_transfer`) live only in `mcp/src/payment.rs`. None in `core/`.
+- Legacy balance/x402 helpers live in `mcp/src/payment.rs`. The new durable,
+  provider-neutral paid-operation state and Universal Paywall boundary live in
+  `mcp/src/paid_operation.rs`. Payment state remains separate from recall and
+  is never consulted while reconstructing anchored memories.
 - `verify_usdc_transfer` is a standalone function taking `&SolanaClient`, not a method on it.
 - `pricing.rs` lives in `mcp/`, never in `core/`.
 - No `HashEmbedder` anywhere; `MockEmbedder` is allowed only inside `#[cfg(test)]` blocks.

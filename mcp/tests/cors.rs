@@ -36,6 +36,7 @@ const CLAUDE_AI_ORIGIN: &str = "https://claude.ai";
 const CLAUDE_AI_SUBDOMAIN_ORIGIN: &str = "https://console.claude.ai";
 const CURSOR_ORIGIN: &str = "https://cursor.sh";
 const CHATGPT_ORIGIN: &str = "https://chatgpt.com";
+const PAYWALL_ORIGIN: &str = "https://mnemonik-dev.github.io";
 const EVIL_ORIGIN: &str = "https://evil.example.com";
 const LOOKALIKE_ORIGIN: &str = "https://evilclaude.ai";
 
@@ -139,6 +140,17 @@ async fn test_preflight_allows_cursor_and_chatgpt() {
     let (s_chatgpt, allow_chatgpt) = preflight(&app, CHATGPT_ORIGIN).await;
     assert!(s_chatgpt == StatusCode::OK || s_chatgpt == StatusCode::NO_CONTENT);
     assert_eq!(allow_chatgpt.as_deref(), Some(CHATGPT_ORIGIN));
+}
+
+#[tokio::test]
+async fn test_preflight_allows_exact_hosted_paywall_origin() {
+    let app = build_cors_router();
+    let (status, allow) = preflight(&app, PAYWALL_ORIGIN).await;
+    assert!(status == StatusCode::OK || status == StatusCode::NO_CONTENT);
+    assert_eq!(allow.as_deref(), Some(PAYWALL_ORIGIN));
+
+    let (_, unrelated) = preflight(&app, "https://evil.github.io").await;
+    assert!(unrelated.is_none());
 }
 
 #[tokio::test]

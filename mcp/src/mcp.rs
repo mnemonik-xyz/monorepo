@@ -365,10 +365,10 @@ pub fn invalid_params(field: &str, received: &Value) -> JsonRpcError {
 /// `-32011 DeliveryNotConfirmed` — the participate write hit Arweave + Solana
 /// but the post-anchor recall+verify round-trip failed at `stage`. The
 /// attestation row was persisted as `local` (so the embed/signature aren't
-/// wasted), the reserved payment was refunded, no `attestation_costs` row
-/// was written. The client may either accept the local-only persistence or
-/// retry; on x402 retries the same payment header is still good (the nonce
-/// stays unconsumed). T3 — modes-user-choice.
+/// wasted), no `attestation_costs` row was written, and a legacy x402 proof
+/// remains reusable because its nonce stays unconsumed. Universal Paywall
+/// callbacks use the durable paid-operation retry state instead of this
+/// inline-path error. T3 — modes-user-choice.
 ///
 /// `data` shape: `{kind, arweave_tx, solana_tx, stage, row_demoted_to,
 /// attestation_id}`.
@@ -654,6 +654,7 @@ impl Envelope {
         let payment_methods: Vec<&'static str> = match payment_mode {
             "none" => Vec::new(),
             "x402" => vec!["x402"],
+            "universal" => vec!["session", "x402"],
             // Defensive: an unknown mode collapses to empty methods (Wave 4
             // removed the custodial "balance"/"both" modes). Operator
             // misconfiguration shouldn't leak as a misleading payment menu.
@@ -695,7 +696,7 @@ pub struct McpState {
     pub compressor: EmbeddingCompressor,
 
     // Payment config
-    /// "none" | "x402" (Wave 4 removed custodial "balance"/"both")
+    /// "none" | "x402" | "universal".
     pub payment_mode: String,
     pub treasury_pubkey: String,
     pub usdc_mint: String,
@@ -703,6 +704,9 @@ pub struct McpState {
     pub admin_token: String,
     /// EVM x402 settlement config (Wave 1). `None` = EVM rail disabled.
     pub evm_payment: Option<crate::payment::EvmPaymentConfig>,
+    /// Provider-neutral paid-session integration. Present only for
+    /// PAYMENT_MODE=universal; local writes never consult it.
+    pub paid_anchoring: Option<Arc<crate::paid_operation::PaidAnchoring>>,
 
     // Dynamic pricing — the per-call x402 price floor lives here (the static
     // `SIGN_MEMORY_COST_MICRO_USDC` config seeds `PricingEngine`'s `min_price`).
@@ -872,6 +876,22 @@ fn tool_definitions() -> Value {
                         "type": "string",
                         "enum": ["local", "participate"],
                         "description": "Per-request write intent (T2 — modes-user-choice). 'local' keeps the artifact on the server's own SQLite (free, no chain writes). 'participate' anchors on Arweave + Solana (paid on hosted operators; cost surfaced via mnemonic_whoami). Optional — omit to use the server's default; call mnemonic_whoami to see supported_modes / default_mode / participate_cost first.",
+                    },
+                    "visibility": {
+                        "type": "string",
+                        "enum": ["private", "public"],
+                        "description": "Anchored-artifact visibility. Valid only with mode='participate'; defaults to private.",
+                    },
+                    "checkpoint_type": {
+                        "type": "string",
+                        "enum": ["manual", "pre_compaction", "session_end"],
+                        "default": "manual",
+                        "description": "Action scope used by a paid session. Automatic checkpoint types require workspace.",
+                    },
+                    "workspace": {
+                        "type": "string",
+                        "maxLength": 256,
+                        "description": "Workspace label for session scoping. Required for automatic checkpoint types; only its hash is sent to the payment provider.",
                     },
                 },
                 "required": ["content"],
@@ -1306,7 +1326,7 @@ pub async fn mcp_handler(
     // No-op on the stdio path (no Bearer JWT, no x402 header) since stdio
     // is trusted-local. No-op on `payment_mode == "none"` since there is
     // no billable subject to key on.
-    if is_sign_memory && participate_gate && state.payment_mode != "none" {
+    if is_sign_memory && participate_gate && state.payment_mode == "x402" {
         if let Some(subject) = derive_quota_subject(&headers, &state.payment_mode) {
             if state.refunds_by_subject.is_over(&subject) {
                 state.delivery_metrics.record_quota_short_circuit();
@@ -1334,7 +1354,7 @@ pub async fn mcp_handler(
         }
     }
 
-    if is_sign_memory && participate_gate && state.payment_mode != "none" {
+    if is_sign_memory && participate_gate && state.payment_mode == "x402" {
         // Use live price from pricing engine (refreshed in background).
         let current_cost = state.pricing.current_price();
         let gate = payment::check_payment(
@@ -1719,9 +1739,14 @@ async fn handle_tool_call(
             } else {
                 (Some(owner_pubkey), None)
             };
-            // DB-only: lock, query, release
+            // Read the async chain snapshot before taking the synchronous
+            // SQLite mutex. Anchored recall must survive an empty/lost DB.
+            let chain_items = match &state.chain_stats {
+                Some(cache) => cache.items().await.unwrap_or_default(),
+                None => Vec::new(),
+            };
             let store = state.store.lock().unwrap();
-            tools::recall(
+            tools::recall_with_chain(
                 &state.keypair,
                 &store,
                 state.embedder.as_ref(),
@@ -1729,6 +1754,7 @@ async fn handle_tool_call(
                 limit,
                 recall_owner,
                 visibility_filter,
+                &chain_items,
             )
         }
         "mnemonic_check_pending" => {
@@ -1980,6 +2006,7 @@ mod transport_tests {
             usdc_mint: String::new(),
             admin_token: String::new(),
             evm_payment: None,
+            paid_anchoring: None,
             pricing: crate::pricing::PricingEngine::new(0),
             sol_tx_fee_lamports: 0,
             storage_mode: "local".into(),

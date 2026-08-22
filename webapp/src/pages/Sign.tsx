@@ -40,6 +40,11 @@ type Status =
   | { kind: "expired"; reason: string }
   | { kind: "signing" }
   | {
+      kind: "payment_required";
+      operationId: string;
+      quote: PaymentDetails;
+    }
+  | {
       kind: "success";
       attestationId: string | null;
       solanaTx: string | null;
@@ -61,6 +66,21 @@ interface PendingBundle {
   expiresAtMs: number;
   /** Embedding bytes — server-supplied for the signing call. */
   embeddingBytes: Uint8Array;
+}
+
+interface PaymentDetails {
+  amount: string;
+  asset: string;
+  network: string;
+  payTo: string;
+  expiresAt: string;
+  paymentUrl: string;
+  recommendedCap: string;
+  maxPerAnchor: string;
+  validForSeconds: number;
+  workspace: string | null;
+  visibility: "private" | "public";
+  checkpointType: "manual" | "pre_compaction" | "session_end";
 }
 
 /** UUID v4 shape — used to validate the path param before hitting the API. */
@@ -128,6 +148,18 @@ export default function Sign() {
         if (cancelled) return;
 
         if (res.status === 410 || res.status === 404) {
+          const paid = await fetch(
+            `${MCP_BASE}/api/paid-operations/${encodeURIComponent(correlationId)}`,
+            { headers: { Accept: "application/json" } },
+          );
+          if (paid.ok) {
+            const recovered = await paid.json().catch(() => null);
+            const recoveredStatus = statusFromPaidOperation(recovered);
+            if (recoveredStatus) {
+              setStatus(recoveredStatus);
+              return;
+            }
+          }
           setStatus({
             kind: "expired",
             reason:
@@ -189,6 +221,34 @@ export default function Sign() {
       }
     };
   }, []);
+
+  // A concurrent callback, provider reconciliation, or page reload may leave
+  // the operation in a durable intermediate state. Polling is read-only and
+  // can never create a payment or session.
+  useEffect(() => {
+    if (status.kind !== "signing" || !correlationId) return;
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const response = await fetch(
+          `${MCP_BASE}/api/paid-operations/${encodeURIComponent(correlationId)}`,
+          { headers: { Accept: "application/json" } },
+        );
+        if (!response.ok || cancelled) return;
+        const next = statusFromPaidOperation(await response.json());
+        if (next && next.kind !== "signing" && !cancelled) setStatus(next);
+      } catch {
+        // A transient status read never changes the paid operation. The next
+        // interval retries; the callback itself remains authoritative.
+      }
+    };
+    void poll();
+    const timer = window.setInterval(() => void poll(), 1000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [correlationId, status.kind]);
 
   const handleSign = useCallback(async () => {
     if (status.kind !== "ready") return;
@@ -255,6 +315,23 @@ export default function Sign() {
           arweaveTx,
           solanaExplorerUrl,
           arweaveUrl,
+        });
+        return;
+      }
+      if (res.status === 402) {
+        const body = await res.json().catch(() => null);
+        const quote = paymentDetailsFromRequired(body);
+        const operationId =
+          body && typeof body.operation_id === "string"
+            ? body.operation_id
+            : correlationId;
+        if (quote && operationId) {
+          setStatus({ kind: "payment_required", operationId, quote });
+          return;
+        }
+        setStatus({
+          kind: "error",
+          message: "Payment quote was malformed. The signed memory is still saved for retry.",
         });
         return;
       }
@@ -374,6 +451,65 @@ export default function Sign() {
           <p className="text-sm text-text-muted" data-testid="sign-signing">
             Signing memory...
           </p>
+        )}
+
+        {status.kind === "payment_required" && (
+          <div
+            className="space-y-4 rounded-md border border-accent-primary/30 bg-accent-primary/10 p-4 text-sm text-text-primary"
+            data-testid="sign-payment-required"
+          >
+            <div>
+              <div className="font-semibold">Choose how to fund anchoring</div>
+              <p className="mt-1 text-text-muted">
+                Your artifact is already signed locally. Payment authorizes only
+                Irys and Solana anchoring; it never authorizes Mnemonic to sign.
+              </p>
+            </div>
+            <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 font-mono text-xs">
+              <dt className="text-text-muted">Current anchor</dt>
+              <dd>{formatMicroUsdc(status.quote.amount)} USDC</dd>
+              <dt className="text-text-muted">Session limit</dt>
+              <dd>{formatMicroUsdc(status.quote.recommendedCap)} USDC</dd>
+              <dt className="text-text-muted">Per-anchor ceiling</dt>
+              <dd>{formatMicroUsdc(status.quote.maxPerAnchor)} USDC</dd>
+              <dt className="text-text-muted">Session expiry</dt>
+              <dd>{formatDuration(status.quote.validForSeconds)}</dd>
+              <dt className="text-text-muted">Visibility</dt>
+              <dd>{status.quote.visibility}</dd>
+              <dt className="text-text-muted">Checkpoint</dt>
+              <dd>{formatCheckpointType(status.quote.checkpointType)}</dd>
+              {status.quote.workspace && (
+                <>
+                  <dt className="text-text-muted">Workspace</dt>
+                  <dd className="break-all">{status.quote.workspace}</dd>
+                </>
+              )}
+              <dt className="text-text-muted">Network</dt>
+              <dd className="break-all">{status.quote.network}</dd>
+              <dt className="text-text-muted">Recipient</dt>
+              <dd className="break-all">{status.quote.payTo}</dd>
+            </dl>
+            <div className="flex flex-wrap gap-3">
+              <a
+                href={buildPaywallUrl(status.quote, status.operationId, "stake")}
+                className="rounded-md bg-accent-primary px-5 py-2.5 font-semibold text-background"
+                data-testid="start-paid-session"
+              >
+                Start seamless anchoring
+              </a>
+              <a
+                href={buildPaywallUrl(status.quote, status.operationId, "exact")}
+                className="rounded-md border border-text-muted/30 px-5 py-2.5 text-text-primary"
+                data-testid="pay-once"
+              >
+                Pay once
+              </a>
+            </div>
+            <p className="text-xs text-text-muted">
+              Sessions are capped and expiring and never renew automatically.
+              Pay once authorizes only this operation.
+            </p>
+          </div>
         )}
 
         {status.kind === "success" && (
@@ -590,6 +726,193 @@ function formatError(e: unknown): string {
   } catch {
     return "unknown error";
   }
+}
+
+function paymentDetailsFromRequired(body: unknown): PaymentDetails | null {
+  if (!body || typeof body !== "object") return null;
+  const quote = (body as Record<string, unknown>).quote;
+  if (!quote || typeof quote !== "object") return null;
+  const q = quote as Record<string, unknown>;
+  const root = body as Record<string, unknown>;
+  const binding = root.binding;
+  if (!binding || typeof binding !== "object") return null;
+  const scope = (binding as Record<string, unknown>).scope;
+  if (!scope || typeof scope !== "object") return null;
+  const scoped = scope as Record<string, unknown>;
+  const accepts = Array.isArray(q.accepts) ? q.accepts : [];
+  const stake = accepts.find(
+    (item) =>
+      item &&
+      typeof item === "object" &&
+      (item as Record<string, unknown>).scheme === "stake",
+  ) as Record<string, unknown> | undefined;
+  if (
+    typeof q.amount !== "string" ||
+    typeof q.asset !== "string" ||
+    typeof q.network !== "string" ||
+    typeof q.pay_to !== "string" ||
+    typeof q.expires_at !== "string" ||
+    typeof root.binding_digest !== "string" ||
+    (scoped.visibility !== "private" && scoped.visibility !== "public") ||
+    (scoped.action !== "manual" &&
+      scoped.action !== "pre_compaction" &&
+      scoped.action !== "session_end") ||
+    typeof stake?.payment_url !== "string"
+  ) {
+    return null;
+  }
+  return {
+    amount: q.amount,
+    asset: q.asset,
+    network: q.network,
+    payTo: q.pay_to,
+    expiresAt: q.expires_at,
+    paymentUrl: stake.payment_url,
+    recommendedCap:
+      typeof stake.recommended_cap === "string"
+        ? stake.recommended_cap
+        : q.amount,
+    maxPerAnchor:
+      typeof stake.max_per_anchor === "string"
+        ? stake.max_per_anchor
+        : q.amount,
+    validForSeconds:
+      typeof stake.valid_for_seconds === "number"
+        ? stake.valid_for_seconds
+        : 3600,
+    workspace: typeof root.workspace === "string" ? root.workspace : null,
+    visibility: scoped.visibility,
+    checkpointType: scoped.action,
+  };
+}
+
+function statusFromPaidOperation(body: unknown): Status | null {
+  if (!body || typeof body !== "object") return null;
+  const value = body as Record<string, unknown>;
+  if (value.status === "anchored") {
+    return {
+      kind: "success",
+      attestationId:
+        typeof value.attestation_id === "string" ? value.attestation_id : null,
+      solanaTx: typeof value.solana_tx === "string" ? value.solana_tx : null,
+      arweaveTx: typeof value.arweave_tx === "string" ? value.arweave_tx : null,
+      solanaExplorerUrl:
+        typeof value.solana_tx === "string"
+          ? `https://solscan.io/tx/${value.solana_tx}`
+          : null,
+      arweaveUrl:
+        typeof value.arweave_tx === "string"
+          ? `https://gateway.irys.xyz/${value.arweave_tx}`
+          : null,
+    };
+  }
+  if (value.status === "delivery_retryable") {
+    return {
+      kind: "error",
+      message:
+        typeof value.last_error === "string"
+          ? `Anchoring needs retry: ${value.last_error}`
+          : "Anchoring needs retry. No second payment is required.",
+    };
+  }
+  if (value.status === "awaiting_payment" || value.status === "payment_failed") {
+    const quote = value.quote;
+    if (!quote || typeof quote !== "object") return null;
+    const q = quote as Record<string, unknown>;
+    if (
+      typeof value.operation_id !== "string" ||
+      typeof value.amount !== "string" ||
+      typeof value.asset !== "string" ||
+      typeof value.network !== "string" ||
+      typeof value.pay_to !== "string" ||
+      typeof value.expires_at !== "string" ||
+      typeof q.payment_url !== "string"
+    ) {
+      return null;
+    }
+    return {
+      kind: "payment_required",
+      operationId: value.operation_id,
+      quote: {
+        amount: value.amount,
+        asset: value.asset,
+        network: value.network,
+        payTo: value.pay_to,
+        expiresAt: value.expires_at,
+        paymentUrl: q.payment_url,
+        recommendedCap:
+          typeof q.recommended_cap === "string"
+            ? q.recommended_cap
+            : value.amount,
+        maxPerAnchor:
+          typeof q.max_per_anchor === "string"
+            ? q.max_per_anchor
+            : value.amount,
+        validForSeconds:
+          typeof q.valid_for_seconds === "number" ? q.valid_for_seconds : 3600,
+        workspace: typeof value.workspace === "string" ? value.workspace : null,
+        visibility:
+          value.visibility === "public" ? "public" : "private",
+        checkpointType:
+          value.checkpoint_type === "pre_compaction" ||
+          value.checkpoint_type === "session_end"
+            ? value.checkpoint_type
+            : "manual",
+      },
+    };
+  }
+  if (
+    value.status === "payment_authorizing" ||
+    value.status === "payment_ready" ||
+    value.status === "anchoring" ||
+    value.status === "verifying_delivery"
+  ) {
+    return { kind: "signing" };
+  }
+  return null;
+}
+
+function buildPaywallUrl(
+  quote: PaymentDetails,
+  operationId: string,
+  scheme: "stake" | "exact",
+): string {
+  try {
+    const url = new URL(quote.paymentUrl);
+    url.searchParams.set("operation_id", operationId);
+    url.searchParams.set("scheme", scheme);
+    url.searchParams.set("mcp_base", MCP_BASE);
+    if (typeof window !== "undefined") {
+      url.searchParams.set("return_url", window.location.href);
+    }
+    return url.toString();
+  } catch {
+    return quote.paymentUrl;
+  }
+}
+
+function formatMicroUsdc(value: string): string {
+  try {
+    const raw = BigInt(value);
+    const whole = raw / 1_000_000n;
+    const fraction = (raw % 1_000_000n).toString().padStart(6, "0");
+    return `${whole}.${fraction.replace(/0+$/, "") || "0"}`;
+  } catch {
+    return value;
+  }
+}
+
+function formatDuration(seconds: number): string {
+  const days = Math.floor(seconds / 86_400);
+  if (days >= 1) return `${days} day${days === 1 ? "" : "s"}`;
+  const hours = Math.max(1, Math.floor(seconds / 3_600));
+  return `${hours} hour${hours === 1 ? "" : "s"}`;
+}
+
+function formatCheckpointType(value: PaymentDetails["checkpointType"]): string {
+  if (value === "pre_compaction") return "Before context compression";
+  if (value === "session_end") return "End of session";
+  return "Manual anchor";
 }
 
 // Test-only re-exports — internal helpers that vitest exercises directly.

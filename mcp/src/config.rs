@@ -29,7 +29,7 @@ pub struct Config {
     pub storage_mode: String,
 
     // ── Payment ──────────────────────────────────────────────────────────────
-    /// Payment mode: "none" | "x402". Wave 4 (non-custodial) removed the
+    /// Payment mode: "none" | "x402" | "universal". Wave 4 removed the
     /// custodial "balance"/"both" modes; `check_payment` fail-closes on any
     /// other value.
     pub payment_mode: String,
@@ -47,6 +47,17 @@ pub struct Config {
     pub evm_rpc_url: String,
     pub evm_usdc_token: String,
     pub evm_treasury: String,
+    /// Universal Paywall HTTP provider. All fields are required when
+    /// PAYMENT_MODE=universal; startup fails closed when any is missing.
+    pub universal_paywall_url: String,
+    pub universal_paywall_api_key: String,
+    pub universal_paywall_payment_url: String,
+    pub universal_paywall_network: String,
+    pub universal_paywall_asset: String,
+    pub universal_paywall_pay_to: String,
+    pub universal_paywall_session_cap: String,
+    pub universal_paywall_session_max_per_anchor: String,
+    pub universal_paywall_session_valid_for_secs: u64,
     /// Minimum / initial cost of mnemonic_sign_memory in micro-USDC (floor price)
     pub sign_memory_cost_micro_usdc: i64,
 
@@ -185,6 +196,29 @@ impl Config {
             evm_rpc_url: env_or("EVM_RPC_URL", ""),
             evm_usdc_token: env_or("EVM_USDC_TOKEN", ""),
             evm_treasury: env_or("EVM_TREASURY", ""),
+            universal_paywall_url: env_or("UNIVERSAL_PAYWALL_URL", ""),
+            universal_paywall_api_key: env_or("UNIVERSAL_PAYWALL_API_KEY", ""),
+            universal_paywall_payment_url: env_or(
+                "UNIVERSAL_PAYWALL_PAYMENT_URL",
+                "https://mnemonik-dev.github.io/universal-paywall-site/",
+            ),
+            universal_paywall_network: env_or("UNIVERSAL_PAYWALL_NETWORK", ""),
+            universal_paywall_asset: env_or("UNIVERSAL_PAYWALL_ASSET", ""),
+            universal_paywall_pay_to: env_or("UNIVERSAL_PAYWALL_PAY_TO", ""),
+            universal_paywall_session_cap: env_or(
+                "UNIVERSAL_PAYWALL_SESSION_CAP_MICRO_USDC",
+                "5000000",
+            ),
+            universal_paywall_session_max_per_anchor: env_or(
+                "UNIVERSAL_PAYWALL_SESSION_MAX_PER_ANCHOR_MICRO_USDC",
+                "50000",
+            ),
+            universal_paywall_session_valid_for_secs: env_or(
+                "UNIVERSAL_PAYWALL_SESSION_VALID_FOR_SECS",
+                "604800",
+            )
+            .parse()
+            .unwrap_or(604800),
             sign_memory_cost_micro_usdc: env_or("SIGN_MEMORY_COST_MICRO_USDC", "1000")
                 .parse()
                 .unwrap_or(1000),

@@ -19,6 +19,7 @@
 ///
 /// Trust list:
 ///   - first-party webapp: `https://mnemonik.xyz` (apex + any subdomain)
+///   - hosted Universal Paywall: `https://mnemonik-dev.github.io` (exact)
 ///   - Anthropic: `https://claude.ai` + `*.claude.ai`,
 ///     `https://anthropic.com` + `*.anthropic.com`
 ///   - Cursor: `https://cursor.sh` + `*.cursor.sh`, `https://cursor.com` +
@@ -65,6 +66,7 @@ pub fn is_allowed_cors_origin(origin: &[u8]) -> bool {
     // Exact-match apex domains.
     let exact_allow = [
         "mnemonik.xyz",
+        "mnemonik-dev.github.io",
         "claude.ai",
         "anthropic.com",
         "cursor.sh",
@@ -101,6 +103,8 @@ mod tests {
     fn allows_first_party_webapp() {
         assert!(is_allowed_cors_origin(b"https://mnemonik.xyz"));
         assert!(is_allowed_cors_origin(b"https://app.mnemonik.xyz"));
+        assert!(is_allowed_cors_origin(b"https://mnemonik-dev.github.io"));
+        assert!(!is_allowed_cors_origin(b"https://evil.github.io"));
     }
 
     #[test]

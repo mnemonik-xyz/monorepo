@@ -103,7 +103,7 @@ curl -s http://localhost:3000/mcp \
 Run the test suite:
 
 ```bash
-cargo test --workspace
+cargo test --workspace --features mnemonic-mcp/test-support
 ```
 
 Enable local ONNX embeddings (`fastembed`) when you want real semantic recall:
@@ -124,7 +124,7 @@ The server exposes 5 tools over JSON-RPC at `POST /mcp` (and stdio):
 | `mnemonic_sign_memory` | Embed + compress + canonicalize (CBOR) + hash (blake3) + sign (COSE_Sign1) + persist |
 | `mnemonic_verify` | Verify a memory by `solana_tx` and/or `arweave_tx` (version-aware) |
 | `mnemonic_prove_identity` | Sign an arbitrary challenge with the server key |
-| `mnemonic_recall` | Semantic search over stored embeddings (SQLite) |
+| `mnemonic_recall` | Semantic search over the SQLite cache plus chain-recovered anchored artifacts |
 
 Current artifact format: **canonical CBOR + COSE_Sign1, blake3 hashing**. Older SHA-256/JSON artifacts are still verifiable via a legacy fallback path.
 
@@ -137,6 +137,33 @@ Two npm packages let you drive the same hosted MCP server without writing your o
 - [`@mnemonik-xyz/cli`](packages/cli/) — `mnemonic` binary for terminal use. Recommended setup: open `mnemonik.xyz/install` → click "Send to CLI" → `mnemonic init --ticket <uuid> && mnemonic login && mnemonic sign "hello"`. Standalone mode (`mnemonic init --standalone`) is also available for CLI-only use.
 - [`@mnemonik-xyz/sdk`](packages/sdk/) — runtime-agnostic TypeScript SDK (`MnemonicClient`, `LocalSigner`, `Keypair`, OAuth helpers). Pure ESM; runs on Node 20+, Bun, Deno, and modern browsers.
 
+Copyable CLI flows:
+
+```bash
+# Free, private, server-stored memory (the default)
+npx @mnemonik-xyz/cli sign "remember this locally"
+
+# Client-signed on-chain anchor. If no paid session is active, the CLI opens
+# the capped-session approval page and also prints an optional pay-once URL.
+npx @mnemonik-xyz/cli sign --mode participate --visibility private \
+  --workspace "$PWD" "checkpoint before refactor"
+
+# An automatic integration may use a paid session only when its approved
+# workspace/action scope matches. Otherwise it must keep the checkpoint local.
+npx @mnemonik-xyz/cli sign --mode participate \
+  --checkpoint-type pre_compaction --workspace "$PWD" "context checkpoint"
+```
+
+The artifact is always Ed25519/COSE-signed by the client before payment. A
+payment authorizes anchoring costs only; retrying the same operation reuses its
+durable receipt and cannot charge it twice.
+
+Hosted payment approval is provided by
+[Universal Paywall](https://mnemonik-dev.github.io/universal-paywall-site/).
+After wallet connection it asks MCP to finalize the wallet-bound operation,
+then signs/settles that final binding; provisional quote digests are never used
+as payment authorizations.
+
 ---
 
 ## Storage modes
@@ -144,16 +171,19 @@ Two npm packages let you drive the same hosted MCP server without writing your o
 Selected via `STORAGE_MODE`:
 
 - `local` (default) — SQLite only. No Solana / Arweave writes, no payment gate. Synthetic tx ids (`local:...`). Ideal for dev, demos, and UX testing.
-- `full` — signed COSE bytes written to Arweave, anchor memo written to Solana, searchable embeddings kept in SQLite. Payment gate applies on HTTP when enabled.
+- `full` — signed COSE bytes written through Irys, anchor memo written to Solana, searchable embeddings cached in SQLite. A configured chain snapshot can rebuild anchored recall after SQLite loss. Payment gate applies on HTTP when enabled.
 
 ---
 
 ## Payment modes (HTTP only, `full` mode only)
 
-`PAYMENT_MODE` ∈ `none` | `balance` | `x402` | `both`.
+`PAYMENT_MODE` ∈ `none` | `x402` | `universal`.
 
-- `balance` — `Authorization: Bearer mnm_<key>`, balance checked against the live pricing engine quote and reserved before execution.
-- `x402` — first request returns HTTP 402, retry with `X-Payment: {"tx_sig":"...","network":"solana-mainnet"}`.
+- `x402` — legacy one-time transaction-proof gate.
+- `universal` — verifies the client-signed artifact first, then offers a capped,
+  expiring Universal Paywall session as the primary path and one-time exact
+  x402 as an optional fallback. Settlement is durable and completes before
+  Irys/Solana spending; delivery retries reuse the same receipt.
 
 Only `mnemonic_sign_memory` is paid. Deposits are validated against the treasury pubkey + USDC mint + signer ownership on the tx.
 
@@ -174,7 +204,12 @@ All configuration is env-driven (`mcp/src/config.rs`). The most relevant variabl
 | `OPENAI_API_KEY` / `OPENAI_EMBED_MODEL` | — | When using OpenAI embeddings |
 | `TURBO_BITS` | `4` | TurboQuant bit width (2/3/4) |
 | `SOLANA_RPC_URL` / `ARWEAVE_URL` | localhost | External anchoring endpoints (`full` mode) |
-| `PAYMENT_MODE` | `none` | `none` \| `balance` \| `x402` \| `both` |
+| `PAYMENT_MODE` | `none` | `none` \| `x402` \| `universal` |
+| `UNIVERSAL_PAYWALL_URL` / `UNIVERSAL_PAYWALL_API_KEY` | — | Synchronous provider API and scoped service credential |
+| `UNIVERSAL_PAYWALL_PAYMENT_URL` | hosted paywall | Canonical wallet/session approval page |
+| `UNIVERSAL_PAYWALL_NETWORK` / `UNIVERSAL_PAYWALL_ASSET` / `UNIVERSAL_PAYWALL_PAY_TO` | — | Fixed settlement binding |
+| `UNIVERSAL_PAYWALL_SESSION_CAP_MICRO_USDC` | `5000000` | Recommended visible session cap |
+| `UNIVERSAL_PAYWALL_SESSION_MAX_PER_ANCHOR_MICRO_USDC` | `50000` | Recommended per-anchor ceiling |
 | `TREASURY_PUBKEY` / `USDC_MINT` | — / mainnet USDC | Payment routing |
 | `SIGN_MEMORY_COST_MICRO_USDC` | `1000` | Floor price for sign-memory |
 | `PRICE_REFRESH_SECS` / `PRICING_MARGIN_BPS` | `1800` / `2000` | Dynamic pricing engine |

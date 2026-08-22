@@ -2328,6 +2328,7 @@ pub async fn bearer_auth_middleware(
         || path.starts_with("/.well-known/")
         || path.starts_with("/api/pending/")
         || path == "/api/sign-callback"
+        || path.starts_with("/api/paid-operations/")
         // CLI bootstrap-ticket redeem endpoint (mnemonic-cli tech-spec
         // Decision 7). The UUID in the path IS the capability — the CLI
         // does not yet have a JWT at redeem time (the whole point of

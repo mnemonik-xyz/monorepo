@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 // T18 — cloud-sync drain unit tests.
 //
 // D13 anchor: `alarm_drains_queue_on_reconnect`. Seeds 3 rows into

@@ -11,6 +11,8 @@
 //
 // CLI translates these classes to exit codes; the SDK only throws.
 
+import type { SignedPaymentChallenge } from "./types.js";
+
 /**
  * JWT-shape regex. Matches the prefix `eyJ` followed by ≥20 base64url chars,
  * which captures every realistic three-segment JWT header. We do NOT try to
@@ -135,6 +137,20 @@ export class UserError extends MnemonicError {
   constructor(message: string, cause?: unknown) {
     super(message, cause);
     this.name = "UserError";
+  }
+}
+
+/**
+ * A paid participate artifact is signed and safely parked, but wallet
+ * authorization is still required. Applications may render `challenge.quote`
+ * and continue with `MnemonicClient.resumePaidMemory(...)`.
+ */
+export class PaymentRequiredError extends MnemonicError {
+  readonly challenge: SignedPaymentChallenge;
+  constructor(challenge: SignedPaymentChallenge) {
+    super("payment authorization required for anchored memory");
+    this.name = "PaymentRequiredError";
+    this.challenge = challenge;
   }
 }
 

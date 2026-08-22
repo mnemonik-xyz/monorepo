@@ -1,4 +1,4 @@
-import { render } from "@testing-library/react";
+import { render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -168,5 +168,20 @@ describe("Install — ?pull= redeem wire shape", () => {
     await vi.waitFor(() => {
       expect(localStorage.getItem("mnemonic.identity")).toBeNull();
     });
+  });
+
+  it("documents free local and explicit paid CLI journeys", async () => {
+    const { default: Install } = await import("./Install");
+    render(
+      <MemoryRouter initialEntries={["/install"]}>
+        <Install />
+      </MemoryRouter>,
+    );
+
+    const howto = screen.getByTestId("cli-howto");
+    expect(howto.textContent).toContain("--mode local");
+    expect(howto.textContent).toContain("--mode participate");
+    expect(howto.textContent).toContain("--checkpoint-type pre_compaction");
+    expect(howto.textContent).toMatch(/never auto-renews/i);
   });
 });

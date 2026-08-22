@@ -133,49 +133,53 @@ wallet; the client pays the quoted anchoring service cost in USDC through x402.
 [Universal Paywall](https://mnemonik-dev.github.io/universal-paywall-site/) is
 the candidate payment rail. The integration follows the
 [frictionless payment user spec](../work/universal-paywall-integration/user-spec.md)
-and [technical spec](../work/universal-paywall-integration/tech-spec.md): a
-standard one-time x402 payment is the default, while a capped and expiring
-allowance is an optional convenience for people who anchor repeatedly.
+and [technical spec](../work/universal-paywall-integration/tech-spec.md): the
+primary journey is a capped, expiring seamless anchoring session approved once
+in the wallet. One-time x402 remains an optional trial and fallback.
 
 Product rules:
 
 - `local` writes are free and never invoke a payment gate.
-- `participate` is always an explicit user choice. The client shows the exact
-  price, settlement network, public/private visibility, and operation being
-  purchased before requesting wallet approval.
+- `participate` is authorized either by an explicitly started paid session or by
+  an optional one-time payment. The client shows the cap, per-anchor ceiling,
+  expiry, settlement network, visibility, recipient, workspace, and allowed
+  checkpoint types before requesting session approval.
 - Payment authorizes storage and anchoring work only. It never authorizes the
   MCP server to sign on the client's behalf.
-- One-time x402 must remain available without creating a vault, deposit, or
-  recurring spending permission. After wallet connection, the target is one
-  payment approval for one anchor.
-- A recurring allowance is opt-in, restricted to the Mnemonic payee, capped,
-  expiring, visible, and revocable. It reduces future wallet prompts but never
-  removes the explicit **Anchor on-chain** action.
-- Automatic capture, context-compaction checkpoints, background sync, and
-  retries must never create a new payment without an explicit user action.
+- A paid session is opt-in, restricted to the Mnemonic payee, capped, expiring,
+  visible, and revocable. It may authorize automatic checkpoints only for the
+  workspace, visibility, checkpoint types, and per-anchor ceiling approved by
+  the user.
+- One-time x402 remains available without creating a vault, deposit, or future
+  spending permission, but it is not the primary returning-user journey.
+- Automatic capture outside an active paid session remains local and free.
+  Polling and retry never create a new charge, and sessions never renew
+  automatically.
 
 Canonical paid journey:
 
-1. The user selects **Anchor on-chain**; free local saving remains the default.
-2. The client fetches a fresh quote and prepares the canonical artifact.
-3. The user previews the content, visibility, price, and network, then signs the
-   artifact locally.
-4. MCP returns a quote bound to the user identity, content hash, correlation ID,
-   amount, network, recipient, and expiry. The quote offers one-time x402 first
-   and, when available, the user's existing allowance.
-5. For one-time x402, the wallet approves exactly this operation. With an active
-   allowance, the payment rail atomically reserves the quoted amount after the
-   user confirms in Mnemonic; no wallet prompt is required.
-6. MCP uploads the client-signed bytes to Irys, writes the Solana Memo, refetches
-   and verifies delivery, then commits an allowance reservation if applicable
-   and returns a complete receipt.
-7. If delivery fails after payment or reservation, the same payment state
-   resumes the same operation;
+1. The user selects **Start seamless anchoring** and approves a cap, per-anchor
+   ceiling, expiry, workspace, visibility, recipient, and allowed checkpoint
+   types. Free local saving remains the default outside this session.
+2. For each authorized manual or automatic checkpoint, the client prepares and
+   signs the canonical artifact locally.
+3. MCP returns a quote bound to the session, user identity, content hash,
+   correlation ID, amount, network, recipient, scope, and expiry. After wallet
+   connection, the payment page finalizes the payer-wallet field and obtains
+   the immutable binding that is actually authorized.
+4. Universal Paywall synchronously settles that operation from the allowance
+   before MCP incurs anchoring costs and returns a durable idempotent receipt.
+5. MCP uploads the client-signed bytes to Irys, writes the Solana Memo, refetches
+   and verifies delivery, then attaches the delivery result to the receipt.
+6. If delivery fails after settlement, the same receipt resumes the same
+   operation;
    the client must not ask for a second payment. Recovery status remains visible
    until the write succeeds or is explicitly abandoned.
+7. A user who does not want a session may choose optional **Pay once**, which
+   follows the same operation binding, settlement, delivery, and retry contract.
 
 Every surface must expose the same resumable states:
-`awaiting_signature` → `awaiting_payment` → `payment_confirming` → `anchoring`
+`awaiting_signature` → `awaiting_payment` → `payment_authorizing` → `payment_ready` → `anchoring`
 → `verifying_delivery` → `anchored`. The webapp provides the approval/payment
 page used by IDE handoffs; CLI and SDK expose explicit `participate` selection
 and x402 retry handling; the browser extension keeps automatic capture local
@@ -186,11 +190,14 @@ Rollout order:
 - Bind quotes and payment proofs to one idempotent anchoring operation and make
   failure/retry semantics honest: a transferred payment is reusable for that
   operation, not refunded merely because its nonce was not consumed.
-- Productize Universal Paywall's standard one-time x402 path first. It is the
-  minimum-friction and compatibility path and must not depend on StakeVault.
-- Add the recurring allowance only after Universal Paywall has durable atomic
-  reservations, funded-headroom accounting, operation-bound typed proofs,
-  payee-restricted policies, signed receipts, and restart reconciliation.
+- Make Universal Paywall's capped allowance the primary path: payee-restricted
+  policy, funded-headroom checks, operation-bound typed proofs, durable
+  idempotency, signed receipts, and synchronous per-operation settlement before
+  anchoring.
+- Keep standard one-time x402 as an optional compatibility and fallback path.
+- Defer reservation, commit/release, and batched settlement until real volume
+  shows that facilitator gas savings justify the added concurrency and recovery
+  complexity.
 - Finish SDK, CLI, webapp, IDE handoff, and extension support before changing
   production payment configuration.
 - Run real-wallet staging tests for approval rejection, insufficient funds,

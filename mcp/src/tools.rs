@@ -9,7 +9,7 @@ use solana_sdk::signature::Keypair;
 
 use std::time::Duration;
 
-use mnemonic_core::arweave::ArweaveClient;
+use mnemonic_core::arweave::{recovery::RecoveredItem, ArweaveClient};
 use mnemonic_core::codec::{
     canonical::{from_canonical_cbor, to_canonical_cbor},
     hash::hash_bytes as blake3_hash,
@@ -17,7 +17,7 @@ use mnemonic_core::codec::{
     sign::{sign_artifact, verify_artifact as cose_verify},
 };
 use mnemonic_core::compress::EmbeddingCompressor;
-use mnemonic_core::embed::Embedder;
+use mnemonic_core::embed::{cosine_similarity, Embedder};
 use mnemonic_core::identity;
 use mnemonic_core::solana::SolanaClient;
 use mnemonic_core::storage::{AttestationStore, SqliteStore, Visibility, WriteMode};
@@ -175,6 +175,43 @@ pub fn resolve_visibility(
             }
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckpointScope {
+    pub checkpoint_type: String,
+    pub workspace: Option<String>,
+}
+
+/// Validate the optional payment/session scope carried by sign-memory calls.
+/// Automatic checkpoint kinds require a workspace so a future paid session
+/// cannot accidentally authorize background work across every project.
+pub fn resolve_checkpoint_scope(args: &serde_json::Value) -> Result<CheckpointScope, JsonRpcError> {
+    let checkpoint_type = match args.get("checkpoint_type") {
+        None => "manual".to_string(),
+        Some(serde_json::Value::String(value))
+            if matches!(value.as_str(), "manual" | "pre_compaction" | "session_end") =>
+        {
+            value.clone()
+        }
+        Some(value) => return Err(invalid_params("checkpoint_type", value)),
+    };
+    let workspace = match args.get("workspace") {
+        None => None,
+        Some(serde_json::Value::String(value))
+            if !value.trim().is_empty() && value.len() <= 256 =>
+        {
+            Some(value.clone())
+        }
+        Some(value) => return Err(invalid_params("workspace", value)),
+    };
+    if checkpoint_type != "manual" && workspace.is_none() {
+        return Err(invalid_params("workspace", &serde_json::Value::Null));
+    }
+    Ok(CheckpointScope {
+        checkpoint_type,
+        workspace,
+    })
 }
 
 /// Resolve the per-request `allow_fallback_to_participate` field
@@ -360,6 +397,7 @@ pub async fn sign_memory(
     if let Some(sub) = jwt_sub {
         let is_self_write = owner_pubkey == operator_pubkey;
         if !(resolved.is_explicit_local() && is_self_write) {
+            let checkpoint = resolve_checkpoint_scope(args).map_err(ToolError::TypedRpc)?;
             return sign_memory_deferred(
                 embedder,
                 compressor,
@@ -368,6 +406,8 @@ pub async fn sign_memory(
                 tags,
                 sub,
                 resolved.write_mode,
+                visibility,
+                checkpoint,
             )
             .await
             .map_err(ToolError::Other);
@@ -786,6 +826,7 @@ async fn proxy_participate(
 /// browser-side WASM signer is signing bytes that already encode the user's
 /// identity. Parks the bundle in `PendingBundles`; the webapp picks it up
 /// via `GET /api/pending/{correlation_id}`.
+#[allow(clippy::too_many_arguments)]
 async fn sign_memory_deferred(
     embedder: &dyn Embedder,
     compressor: &EmbeddingCompressor,
@@ -794,6 +835,8 @@ async fn sign_memory_deferred(
     tags: &[String],
     jwt_sub: &str,
     write_mode: WriteMode,
+    visibility: Visibility,
+    checkpoint: CheckpointScope,
 ) -> anyhow::Result<serde_json::Value> {
     let now = chrono::Utc::now().to_rfc3339();
     // 1. Embed (CPU-bound, can't defer)
@@ -844,30 +887,12 @@ async fn sign_memory_deferred(
     let canonical_cbor_b64 =
         base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &canonical_cbor);
 
-    // 6. Park in PendingBundles. The store assigns the canonical
-    //    `correlation_id` for the entry; we discard the value because we
-    //    pre-allocated one above to keep `artifact_id == correlation_id`.
-    //    On per-user cap or oversized payload, the error surfaces as a
-    //    JSON-RPC -32603 envelope; the caller (mcp_handler) then maps it.
-    //
-    //    NOTE: PendingBundles::insert generates its own UUID. We re-insert
-    //    under that returned id and overwrite our pre-allocated correlation
-    //    by re-reading the result. The artifact_id baked into the canonical
-    //    CBOR is the pre-allocated one; for the webapp flow this is fine
-    //    because the browser only signs what we hand it — the server's
-    //    `entry.canonical_cbor` is the source of truth.
-    //
-    //    To keep `artifact_id == returned correlation_id` exactly, we use a
-    //    helper that accepts a caller-supplied id. But the public API of
-    //    `PendingBundles::insert` doesn't accept one — adding that surface
-    //    would expand the public API. Instead we store the pre-allocated
-    //    id INSIDE the canonical CBOR and let the store generate a separate
-    //    `correlation_id` for routing. The two IDs serve different purposes:
-    //    `artifact_id` is the eventual SQLite primary key; `correlation_id`
-    //    is the URL token. They differ for HTTP path; webapp uses
-    //    `correlation_id` only. SQLite write happens on the callback.
+    // 6. Park under the same UUID already embedded as `artifact_id`. Keeping
+    //    artifact, operation, callback and eventual attestation identifiers
+    //    identical makes retries deterministic and avoids duplicate rows.
     let assigned_id = pending
-        .insert(
+        .insert_scoped(
+            Some(correlation_id.clone()),
             jwt_sub.to_string(),
             content.to_string(),
             embedding,
@@ -876,6 +901,9 @@ async fn sign_memory_deferred(
             tags.to_vec(),
             metadata,
             write_mode,
+            visibility,
+            checkpoint.checkpoint_type,
+            checkpoint.workspace,
         )
         .await
         .map_err(|e| anyhow::anyhow!("pending insert failed: {e}"))?;
@@ -2002,6 +2030,33 @@ pub fn recall(
     owner_pubkey: Option<&str>,
     visibility_filter: Option<Visibility>,
 ) -> serde_json::Value {
+    recall_with_chain(
+        keypair,
+        store,
+        embedder,
+        query,
+        limit,
+        owner_pubkey,
+        visibility_filter,
+        &[],
+    )
+}
+
+/// Semantic recall over the node cache plus the latest verified chain
+/// recovery snapshot. SQLite remains a rebuildable cache: when it is empty,
+/// anchored items with a readable COSE payload are embedded on demand and
+/// returned directly from the Arweave/Solana snapshot.
+#[allow(clippy::too_many_arguments)]
+pub fn recall_with_chain(
+    keypair: &Keypair,
+    store: &SqliteStore,
+    embedder: &dyn Embedder,
+    query: &str,
+    limit: usize,
+    owner_pubkey: Option<&str>,
+    visibility_filter: Option<Visibility>,
+    chain_items: &[RecoveredItem],
+) -> serde_json::Value {
     let signer_pubkey = identity::pubkey_base58(keypair);
     let query_emb = embedder.embed(query);
     // Visibility-aware recall (Decision 5 / AC13 — agent-native-distribution).
@@ -2020,9 +2075,68 @@ pub fn recall(
     // be paired with `Some(visibility)` so the storage layer never exposes
     // every row to an anonymous caller. The dispatcher constructs the
     // pair correctly at the `handle_tool_call` boundary.
-    let results = store
+    let mut results = store
         .search(&query_emb, owner_pubkey, visibility_filter, limit)
         .unwrap_or_default();
+    let db_chain_ids: std::collections::HashSet<String> = store
+        .recovery_facts()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|fact| {
+            owner_pubkey
+                .map(|owner| fact.owner_pubkey.as_deref() == Some(owner))
+                .unwrap_or(true)
+        })
+        .map(|fact| fact.arweave_tx)
+        .filter(|tx| !tx.is_empty() && !tx.starts_with("local:"))
+        .collect();
+    let mut recovered_count = 0usize;
+    for item in chain_items {
+        if db_chain_ids.contains(&item.arweave_tx) {
+            continue;
+        }
+        if let Some(owner) = owner_pubkey {
+            let producer_matches = item
+                .producer
+                .as_deref()
+                .map(mnemonic_core::arweave::recovery::normalize_producer)
+                .as_deref()
+                == Some(owner);
+            if !producer_matches {
+                continue;
+            }
+        }
+        let Some(content) = item.content.as_deref().filter(|value| !value.is_empty()) else {
+            continue;
+        };
+        let relevance_score = cosine_similarity(&query_emb, &embedder.embed(content));
+        results.push(mnemonic_core::storage::SearchResult {
+            attestation_id: item.arweave_tx.clone(),
+            content: content.to_string(),
+            content_hash: item.content_hash.clone().unwrap_or_default(),
+            tags: item.tags.clone(),
+            solana_tx: item.solana_tx.clone().unwrap_or_default(),
+            arweave_tx: item.arweave_tx.clone(),
+            created_at: item
+                .day
+                .as_ref()
+                .map(|day| format!("{day}T00:00:00Z"))
+                .unwrap_or_else(|| "1970-01-01T00:00:00Z".to_string()),
+            write_mode: WriteMode::Participate,
+            // Once plaintext is anchored on Arweave it is independently
+            // fetchable. Lost SQLite visibility metadata cannot make it
+            // private again, so recovered rows use the public wire value.
+            visibility: Visibility::Public,
+            relevance_score,
+        });
+        recovered_count += 1;
+    }
+    results.sort_by(|a, b| {
+        b.relevance_score
+            .partial_cmp(&a.relevance_score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    results.truncate(limit);
     // count() is signer-scoped (legacy semantic); search() is owner-scoped
     // OR cross-owner depending on the dispatcher's input.
     let total = store.count(&signer_pubkey).unwrap_or(0);
@@ -2030,14 +2144,14 @@ pub fn recall(
     // inclusion proof per result so an authenticated caller can detect an
     // operator that omits/tampers. Null for the anonymous cross-owner pool
     // (no single-owner commitment exists there).
-    let merkle_commitment = match owner_pubkey {
-        Some(owner) => build_merkle_commitment(store, owner, &results),
-        None => serde_json::Value::Null,
+    let merkle_commitment = match (owner_pubkey, recovered_count) {
+        (Some(owner), 0) => build_merkle_commitment(store, owner, &results),
+        _ => serde_json::Value::Null,
     };
     serde_json::json!({
         "query": query,
         "results": results,
-        "total_attestations": total,
+        "total_attestations": total + recovered_count as i64,
         // `owner_pubkey` echoes the resolved scope:
         // - authenticated → the JWT sub (server-side derived)
         // - anonymous → `null` to signal cross-owner public-pool search
@@ -2046,10 +2160,107 @@ pub fn recall(
         "embed_model": embedder.model_id(),
         "verifiable": embedder.is_open_weights(),
         "merkle_commitment": merkle_commitment,
+        "chain_recovered": recovered_count,
     })
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod chain_recall_tests {
+    use super::*;
+
+    struct SemanticStub;
+
+    impl Embedder for SemanticStub {
+        fn embed(&self, text: &str) -> Vec<f32> {
+            if text.contains("alpha") {
+                vec![1.0, 0.0]
+            } else {
+                vec![0.0, 1.0]
+            }
+        }
+
+        fn dim(&self) -> usize {
+            2
+        }
+
+        fn provider_name(&self) -> &str {
+            "chain-test"
+        }
+
+        fn model_id(&self) -> &str {
+            "chain-test/v1"
+        }
+    }
+
+    fn recovered(tx: &str, owner: &str, content: &str) -> RecoveredItem {
+        RecoveredItem {
+            arweave_tx: tx.to_string(),
+            solana_tx: Some(format!("sol-{tx}")),
+            content_hash: Some(format!("hash-{tx}")),
+            content: Some(content.to_string()),
+            tags: vec!["recovered".to_string()],
+            day: Some("2026-07-13".to_string()),
+            producer: Some(format!("did:sol:{owner}")),
+        }
+    }
+
+    #[test]
+    fn anchored_owner_recall_works_with_an_empty_sqlite_cache() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let store = SqliteStore::open(file.path()).unwrap();
+        let keypair = Keypair::new();
+        let items = vec![
+            recovered("ar-alpha", "alice", "alpha checkpoint"),
+            recovered("ar-beta", "bob", "beta checkpoint"),
+        ];
+
+        let output = recall_with_chain(
+            &keypair,
+            &store,
+            &SemanticStub,
+            "alpha",
+            5,
+            Some("alice"),
+            None,
+            &items,
+        );
+
+        assert_eq!(output["chain_recovered"], 1);
+        assert_eq!(output["total_attestations"], 1);
+        assert_eq!(output["results"].as_array().unwrap().len(), 1);
+        assert_eq!(output["results"][0]["arweave_tx"], "ar-alpha");
+        assert_eq!(output["results"][0]["content"], "alpha checkpoint");
+        assert!(output["merkle_commitment"].is_null());
+    }
+
+    #[test]
+    fn anonymous_chain_recall_exposes_only_already_anchored_items() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let store = SqliteStore::open(file.path()).unwrap();
+        let keypair = Keypair::new();
+        let items = vec![
+            recovered("ar-alpha", "alice", "alpha checkpoint"),
+            recovered("ar-beta", "bob", "beta checkpoint"),
+        ];
+
+        let output = recall_with_chain(
+            &keypair,
+            &store,
+            &SemanticStub,
+            "alpha",
+            5,
+            None,
+            Some(Visibility::Public),
+            &items,
+        );
+
+        assert_eq!(output["chain_recovered"], 2);
+        assert_eq!(output["results"].as_array().unwrap().len(), 2);
+        assert_eq!(output["results"][0]["arweave_tx"], "ar-alpha");
+    }
+}
 
 #[cfg(test)]
 mod sign_memory_tests {

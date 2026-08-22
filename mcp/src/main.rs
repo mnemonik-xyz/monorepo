@@ -8,6 +8,7 @@ mod escrow;
 mod llm;
 mod mcp;
 mod oauth;
+mod paid_operation;
 mod payment;
 mod pending;
 mod pricing;
@@ -355,6 +356,10 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let store = SqliteStore::open(&cfg.database_path)?;
+    if cfg.payment_mode == "universal" {
+        paid_operation::migrate(&store)
+            .map_err(|error| anyhow::anyhow!("paid-operation migration failed: {error}"))?;
+    }
     // ── T14: Google OAuth identity-link table (idempotent migration) ─────────
     // Lives in `mcp/` per Decision 9 (`core/` reserved for the cross-client
     // attestation schema). No-op when the table already exists; skipped
@@ -503,6 +508,98 @@ async fn main() -> anyhow::Result<()> {
         None
     };
 
+    let paid_anchoring = if cfg.payment_mode == "universal" {
+        let required = [
+            ("UNIVERSAL_PAYWALL_URL", cfg.universal_paywall_url.as_str()),
+            (
+                "UNIVERSAL_PAYWALL_API_KEY",
+                cfg.universal_paywall_api_key.as_str(),
+            ),
+            (
+                "UNIVERSAL_PAYWALL_PAYMENT_URL",
+                cfg.universal_paywall_payment_url.as_str(),
+            ),
+            (
+                "UNIVERSAL_PAYWALL_NETWORK",
+                cfg.universal_paywall_network.as_str(),
+            ),
+            (
+                "UNIVERSAL_PAYWALL_ASSET",
+                cfg.universal_paywall_asset.as_str(),
+            ),
+            (
+                "UNIVERSAL_PAYWALL_PAY_TO",
+                cfg.universal_paywall_pay_to.as_str(),
+            ),
+        ];
+        if let Some((name, _)) = required.iter().find(|(_, value)| value.trim().is_empty()) {
+            anyhow::bail!("PAYMENT_MODE=universal requires {name}");
+        }
+        let valid_evm_address = |value: &str| {
+            value.len() == 42
+                && value.starts_with("0x")
+                && value[2..].bytes().all(|byte| byte.is_ascii_hexdigit())
+        };
+        if !cfg
+            .universal_paywall_network
+            .strip_prefix("eip155:")
+            .is_some_and(|chain| !chain.is_empty() && chain.bytes().all(|b| b.is_ascii_digit()))
+        {
+            anyhow::bail!("UNIVERSAL_PAYWALL_NETWORK must be a CAIP-2 eip155:<chain-id>");
+        }
+        if !valid_evm_address(&cfg.universal_paywall_asset)
+            || !valid_evm_address(&cfg.universal_paywall_pay_to)
+        {
+            anyhow::bail!(
+                "UNIVERSAL_PAYWALL_ASSET and UNIVERSAL_PAYWALL_PAY_TO must be 20-byte EVM addresses"
+            );
+        }
+        let session_cap = cfg
+            .universal_paywall_session_cap
+            .parse::<u64>()
+            .map_err(|_| anyhow::anyhow!("invalid UNIVERSAL_PAYWALL_SESSION_CAP_MICRO_USDC"))?;
+        let max_per_anchor = cfg
+            .universal_paywall_session_max_per_anchor
+            .parse::<u64>()
+            .map_err(|_| {
+                anyhow::anyhow!("invalid UNIVERSAL_PAYWALL_SESSION_MAX_PER_ANCHOR_MICRO_USDC")
+            })?;
+        if session_cap == 0
+            || max_per_anchor == 0
+            || max_per_anchor > session_cap
+            || max_per_anchor < pricing.current_price().max(0) as u64
+        {
+            anyhow::bail!(
+                "Universal Paywall session limits must be positive, cap >= per-anchor ceiling >= current anchor price"
+            );
+        }
+        if !(60..=2_592_000).contains(&cfg.universal_paywall_session_valid_for_secs) {
+            anyhow::bail!(
+                "UNIVERSAL_PAYWALL_SESSION_VALID_FOR_SECS must be between 60 seconds and 30 days"
+            );
+        }
+        paid_operation::validate_secure_http_url(&cfg.universal_paywall_payment_url)
+            .map_err(|error| anyhow::anyhow!("invalid UNIVERSAL_PAYWALL_PAYMENT_URL: {error}"))?;
+        let provider = paid_operation::UniversalPaywallClient::new(
+            &cfg.universal_paywall_url,
+            &cfg.universal_paywall_api_key,
+        )?;
+        Some(Arc::new(paid_operation::PaidAnchoring {
+            provider: Arc::new(provider),
+            quote: paid_operation::PaymentQuoteConfig {
+                payment_url: cfg.universal_paywall_payment_url.clone(),
+                network: cfg.universal_paywall_network.clone(),
+                asset: cfg.universal_paywall_asset.to_lowercase(),
+                pay_to: cfg.universal_paywall_pay_to.to_lowercase(),
+                session_cap: cfg.universal_paywall_session_cap.clone(),
+                session_max_per_anchor: cfg.universal_paywall_session_max_per_anchor.clone(),
+                session_valid_for_seconds: cfg.universal_paywall_session_valid_for_secs,
+            },
+        }))
+    } else {
+        None
+    };
+
     // Chain-backed traction stats (recover-traction-from-chain). A bad
     // wallet in CHAIN_STATS_WALLETS is a fatal misconfiguration — silently
     // shrunk traction numbers are worse than a startup error.
@@ -527,6 +624,7 @@ async fn main() -> anyhow::Result<()> {
         usdc_mint: cfg.usdc_mint.clone(),
         admin_token: cfg.admin_token.clone(),
         evm_payment,
+        paid_anchoring,
         pricing,
         sol_tx_fee_lamports: cfg.sol_tx_fee_lamports,
         storage_mode: cfg.storage_mode.clone(),
@@ -856,10 +954,10 @@ async fn run_http(
     // ── /api/* webapp surface (Decision 12) ──────────────────────────────────
     // GET /api/pending/{id} returns the unsigned canonical-CBOR for the
     // browser to sign; POST /api/sign-callback ingests the COSE_Sign1 and
-    // persists the attestation. Both routes sit behind the same Bearer-auth
-    // middleware as /mcp; non-JSON-RPC, so the body-peek allowlist
-    // (`initialize` / `tools/list`) does not apply — every /api/* request
-    // requires a valid JWT.
+    // persists the attestation. Pending/signing and paid-operation routes use
+    // unguessable UUID capabilities plus the verified COSE ownership chain;
+    // the remaining /api routes continue to require Bearer auth (see the
+    // middleware's exact URI allow-list).
     let api_subrouter = Router::new()
         // Micropub-shaped agent publish (webapp-rethink T9, Decision 5). Authed
         // via the same `bearer_auth_middleware` layered below — anonymous POST
@@ -871,6 +969,18 @@ async fn run_http(
             axum::routing::get(api::get_pending_handler),
         )
         .route("/api/sign-callback", post(api::sign_callback_handler))
+        .route(
+            "/api/paid-operations/{operation_id}",
+            axum::routing::get(api::paid_operation_status_handler),
+        )
+        .route(
+            "/api/paid-operations/{operation_id}/authorize",
+            post(api::paid_operation_authorize_handler),
+        )
+        .route(
+            "/api/paid-operations/{operation_id}/prepare",
+            post(api::paid_operation_prepare_handler),
+        )
         // CLI bootstrap-ticket flow — mnemonic-cli tech-spec Decision 7.
         // /issue requires Bearer JWT (enforced by bearer_auth_middleware,
         // which inserts Claims into the request extension before the

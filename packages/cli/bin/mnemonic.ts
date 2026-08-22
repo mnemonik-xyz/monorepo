@@ -170,15 +170,70 @@ export function buildProgram(): Command {
     .command("sign [content]")
     .description("sign a memory (content from arg or stdin)")
     .option("--tags <list>", "comma-separated tags")
+    .option("--mode <mode>", "local (free) or participate (paid)", "local")
+    .option("--visibility <visibility>", "private or public (participate only)")
+    .option(
+      "--checkpoint-type <type>",
+      "manual, pre_compaction, or session_end",
+      "manual",
+    )
+    .option("--workspace <workspace>", "workspace scope for paid checkpoints")
+    .option("--no-open", "do not open the recommended payment page")
     .option("--base-url <url>", "override the server base URL")
     .action(
       async (
         content: string | undefined,
-        cmdOpts: { tags?: string; baseUrl?: string },
+        cmdOpts: {
+          tags?: string;
+          mode?: string;
+          visibility?: string;
+          checkpointType?: string;
+          workspace?: string;
+          open?: boolean;
+          baseUrl?: string;
+        },
       ) => {
+        if (cmdOpts.mode !== "local" && cmdOpts.mode !== "participate") {
+          throw new Error("--mode must be 'local' or 'participate'");
+        }
+        if (
+          cmdOpts.visibility !== undefined &&
+          cmdOpts.visibility !== "private" &&
+          cmdOpts.visibility !== "public"
+        ) {
+          throw new Error("--visibility must be 'private' or 'public'");
+        }
+        if (
+          cmdOpts.checkpointType !== "manual" &&
+          cmdOpts.checkpointType !== "pre_compaction" &&
+          cmdOpts.checkpointType !== "session_end"
+        ) {
+          throw new Error(
+            "--checkpoint-type must be 'manual', 'pre_compaction', or 'session_end'",
+          );
+        }
+        if (cmdOpts.checkpointType !== "manual" && !cmdOpts.workspace) {
+          throw new Error(
+            "--workspace is required for automatic checkpoint types",
+          );
+        }
         await runSign(content, {
           ...rootOpts(program),
           ...(cmdOpts.tags !== undefined ? { tags: cmdOpts.tags } : {}),
+          mode: cmdOpts.mode,
+          ...(cmdOpts.visibility !== undefined
+            ? {
+                visibility: cmdOpts.visibility as "private" | "public",
+              }
+            : {}),
+          checkpointType: cmdOpts.checkpointType as
+            | "manual"
+            | "pre_compaction"
+            | "session_end",
+          ...(cmdOpts.workspace !== undefined
+            ? { workspace: cmdOpts.workspace }
+            : {}),
+          openPayment: cmdOpts.open !== false,
           ...(cmdOpts.baseUrl !== undefined
             ? { baseUrl: cmdOpts.baseUrl }
             : {}),

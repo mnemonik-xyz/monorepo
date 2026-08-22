@@ -16,6 +16,7 @@ tokio-stream = "0.1"
 # Streams + futures combinators (used by Body::from_stream for chunked responses).
 # Pinned explicitly — do NOT rely on it being a transitive of axum/tokio.
 futures = "0.3"
+async-trait = "0.1"
 # Frame buffers used in the streamable HTTP NDJSON pipeline. Pinned explicitly
 # rather than relying on the axum/tokio transitive — Body::from_stream emits
 # `Bytes` directly.

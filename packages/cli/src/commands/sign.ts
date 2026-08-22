@@ -12,6 +12,7 @@ import {
   AuthError,
   LocalSigner,
   MnemonicClient,
+  PaymentRequiredError,
   parseJwtPayload,
 } from "@mnemonik-xyz/sdk";
 
@@ -31,6 +32,11 @@ import {
 export interface SignOptions extends OutputOptions {
   tags?: string;
   baseUrl?: string;
+  mode?: "local" | "participate";
+  visibility?: "private" | "public";
+  checkpointType?: "manual" | "pre_compaction" | "session_end";
+  workspace?: string;
+  openPayment?: boolean;
   /** Internal — read content from this string instead of stdin (tests). */
   content?: string;
 }
@@ -72,8 +78,48 @@ export async function runSign(
   hint("signing memory...", opts);
   let result;
   try {
-    result = await client.signMemory(content, tags.length > 0 ? { tags } : {});
+    result = await client.signMemory(content, {
+      ...(tags.length > 0 ? { tags } : {}),
+      mode: opts.mode ?? "local",
+      ...(opts.visibility ? { visibility: opts.visibility } : {}),
+      ...(opts.checkpointType ? { checkpointType: opts.checkpointType } : {}),
+      ...(opts.workspace ? { workspace: opts.workspace } : {}),
+    });
   } catch (e) {
+    if (e instanceof PaymentRequiredError) {
+      const { session, exact } = paymentUrls(e, baseUrl);
+      const pending = {
+        status: "payment_required",
+        operation_id: e.challenge.operationId,
+        amount: e.challenge.quote.amount,
+        asset: e.challenge.quote.asset,
+        session_url: session,
+        pay_once_url: exact,
+        expires_at: e.challenge.quote.expires_at,
+      };
+      format(pending, opts, () =>
+        [
+          "This signed memory is waiting for anchoring payment.",
+          `Start a capped seamless session: ${session}`,
+          `Optional pay-once x402:        ${exact}`,
+          "The signed operation is stored and can be resumed without signing or paying twice.",
+        ].join("\n"),
+      );
+      if (
+        opts.openPayment !== false &&
+        !opts.json &&
+        !opts.quiet &&
+        process.stdout.isTTY
+      ) {
+        try {
+          const { default: open } = await import("open");
+          await open(session);
+        } catch {
+          // The printed URL is the reliable fallback on headless systems.
+        }
+      }
+      return;
+    }
     // Post-mortem on 403 from /api/sign-callback: the only way that can
     // happen is `pending.jwt_sub !== body.signer_pubkey`. Preflight already
     // checks the saved fields, but a stale file-read, a token-rotation race,
@@ -98,6 +144,27 @@ export async function runSign(
     if (result.solanaTx) lines.push(`solana_tx:      ${result.solanaTx}`);
     return lines.join("\n");
   });
+}
+
+function paymentUrls(
+  error: PaymentRequiredError,
+  baseUrl: string,
+): { session: string; exact: string } {
+  const stake = error.challenge.quote.accepts.find(
+    (option) => option.scheme === "stake",
+  );
+  const raw =
+    stake && typeof stake.payment_url === "string"
+      ? stake.payment_url
+      : "https://mnemonik-dev.github.io/universal-paywall-site/";
+  const build = (scheme: "stake" | "exact") => {
+    const url = new URL(raw);
+    url.searchParams.set("operation_id", error.challenge.operationId);
+    url.searchParams.set("scheme", scheme);
+    url.searchParams.set("mcp_base", baseUrl);
+    return url.toString();
+  };
+  return { session: build("stake"), exact: build("exact") };
 }
 
 async function resolveContent(

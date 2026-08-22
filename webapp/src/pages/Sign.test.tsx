@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import {
   afterEach,
@@ -17,6 +17,7 @@ vi.mock("../lib/wasm", () => ({
     generate_keypair: vi.fn(),
     sign_challenge: vi.fn(),
     sign_attestation_bundle: vi.fn(() => new Uint8Array([1, 2, 3])),
+    sign_cose_payload: vi.fn(() => new Uint8Array([1, 2, 3])),
     export_keypair_json: vi.fn(),
     import_keypair_json: vi.fn(),
   })),
@@ -111,5 +112,76 @@ describe("Sign page", () => {
         ),
       { timeout: 3000, interval: 50 },
     );
+  });
+
+  it("offers a seamless session first and pay-once second after 402", async () => {
+    let call = 0;
+    fetchMock.mockImplementation(async () => {
+      call += 1;
+      if (call === 1) {
+        return new Response(new Uint8Array([0xa0]), {
+          status: 200,
+          headers: {
+            "content-type": "application/cbor",
+            "x-mnemonic-content-hash": "deadbeef",
+            "x-mnemonic-expires-at": String(Math.floor(mockNow / 1000) + 300),
+          },
+        });
+      }
+      return new Response(
+        JSON.stringify({
+          status: "payment_required",
+          operation_id: TEST_UUID,
+          artifact_hash: "deadbeef",
+          binding_digest: "binding-digest",
+          workspace: "workspace-alpha",
+          binding: {
+            scope: {
+              visibility: "private",
+              action: "pre_compaction",
+              workspace_hash: "workspace-hash",
+            },
+          },
+          quote: {
+            amount: "1000",
+            asset: "0xasset",
+            network: "eip155:5042002",
+            pay_to: "0xpayee",
+            expires_at: "2026-07-13T12:00:00Z",
+            accepts: [
+              {
+                scheme: "stake",
+                payment_url: "https://pay.example/approve",
+                recommended_cap: "5000000",
+                max_per_anchor: "50000",
+                valid_for_seconds: 604800,
+              },
+              { scheme: "exact", protocol: "x402" },
+            ],
+          },
+        }),
+        { status: 402, headers: { "content-type": "application/json" } },
+      );
+    });
+
+    render(
+      <MemoryRouter initialEntries={[`/sign/${TEST_UUID}`]}>
+        <Routes>
+          <Route path="/sign/:correlationId" element={<Sign />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    fireEvent.click(await screen.findByTestId("sign-approve"));
+    await screen.findByTestId("sign-payment-required");
+    const session = screen.getByTestId("start-paid-session") as HTMLAnchorElement;
+    const once = screen.getByTestId("pay-once") as HTMLAnchorElement;
+    expect(session.textContent).toContain("Start seamless anchoring");
+    expect(session.href).toContain("scheme=stake");
+    expect(session.href).toContain(`operation_id=${TEST_UUID}`);
+    expect(session.href).not.toContain("binding_digest=");
+    expect(once.href).toContain("scheme=exact");
+    expect(screen.getByText("workspace-alpha")).toBeInTheDocument();
+    expect(screen.getByText("Before context compression")).toBeInTheDocument();
+    expect(screen.getByText(/never renew automatically/i)).toBeInTheDocument();
   });
 });

@@ -368,6 +368,44 @@ export default function Install() {
             </article>
           </div>
         </section>
+
+        <section
+          aria-labelledby="cli-howto"
+          className="space-y-4 rounded-md border border-text-muted/20 bg-white/5 p-5"
+          data-testid="cli-howto"
+        >
+          <div className="space-y-1">
+            <h2 id="cli-howto" className="text-lg font-semibold text-text-primary">
+              CLI quick start
+            </h2>
+            <p className="text-sm text-text-muted">
+              Local memory is free and remains the default. Participating mode
+              creates the client signature first, then opens the payment page
+              for a capped session or optional one-time x402 payment.
+            </p>
+          </div>
+          <pre className="overflow-x-auto rounded-md bg-black/30 p-4 text-xs text-text-primary">
+            <code>{`# Pair with the identity created above
+npx @mnemonik-xyz/cli init --ticket <uuid>
+npx @mnemonik-xyz/cli login
+
+# Free, private, on-node memory
+npx @mnemonik-xyz/cli sign --mode local "remember this"
+
+# Client-signed, paid external anchoring
+npx @mnemonik-xyz/cli sign --mode participate --visibility private \\
+  --workspace "$PWD" "checkpoint before refactor"
+
+# Explicit automatic-checkpoint scope (requires an authorized paid session)
+npx @mnemonik-xyz/cli sign --mode participate \\
+  --checkpoint-type pre_compaction --workspace "$PWD" "context checkpoint"`}</code>
+          </pre>
+          <p className="text-xs text-text-muted">
+            The CLI never auto-renews a session. If no matching paid session is
+            active, the signed operation remains resumable and no anchor charge
+            is made until you approve one of the displayed payment choices.
+          </p>
+        </section>
       </div>
     </main>
   );

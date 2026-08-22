@@ -26,6 +26,7 @@ pub mod escrow;
 pub mod llm;
 pub mod mcp;
 pub mod oauth;
+pub mod paid_operation;
 pub mod payment;
 pub mod pending;
 pub mod pricing;

@@ -134,6 +134,11 @@ export class CloudClient {
   ): Promise<SignRemoteResult> {
     const openBody = {
       content: args.content,
+      // Automatic/background extension sync has no wallet-approved paid
+      // session context. Pin it to free local mode so it can never trigger an
+      // anchoring payment. A future explicit Anchor action will pass a scoped
+      // session authorization through the SDK instead.
+      mode: "local" as const,
       ...(args.tags.length > 0 ? { tags: args.tags } : {}),
       ...(args.source_meta ? { source_meta: args.source_meta } : {}),
     };

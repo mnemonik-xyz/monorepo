@@ -33,7 +33,7 @@ For Claude / Cursor / VS Code / Windsurf — install from [mnemonik.xyz/install]
 | Tool | Inputs | Returns |
 |---|---|---|
 | `mnemonic_whoami` | — | server pubkey, DIDs, storage mode, attestation count |
-| `mnemonic_sign_memory` | `{ content: string, tags?: string[] }` | `correlation_id` for the deferred-sign / sign-callback flow (SDK handles the COSE-sign step locally) |
+| `mnemonic_sign_memory` | `{ content: string, tags?: string[], mode?: "local" \| "participate", visibility?: "private" \| "public", checkpoint_type?: "manual" \| "pre_compaction" \| "session_end", workspace?: string }` | `correlation_id` for the deferred-sign / sign-callback flow (SDK handles the COSE-sign step locally; paid `participate` continues through the operation-bound payment flow) |
 | `mnemonic_recall` | `{ query: string, limit?: number, tags?: string[] }` | top-k semantically similar attestations |
 | `mnemonic_verify` | `{ solana_tx?: string, arweave_tx?: string, attestation_id?: string }` | verification result with the recovered envelope and chain-of-trust |
 | `mnemonic_prove_identity` | `{ challenge: string }` | server-signed challenge bytes |
@@ -52,7 +52,7 @@ The signing flow is intentionally split: the server returns a canonical CBOR bun
 
 A consumer of a memory can independently verify it without trusting Mnemonic:
 
-1. Fetch `arweave_tx` from any Arweave gateway → raw COSE_Sign1 bytes.
+1. Fetch the external data-item ID (`arweave_tx` in the V1 wire shape) from the Irys gateway or another gateway that indexes it → raw COSE_Sign1 bytes.
 2. Recompute `blake3(canonical_cbor_payload)` → 32-byte hash.
 3. Verify `cose_signature` against the writer's Ed25519 pubkey embedded in the envelope.
 4. Fetch the Solana transaction by `solana_tx` (any RPC) → SPL Memo program data field equals the same hash.

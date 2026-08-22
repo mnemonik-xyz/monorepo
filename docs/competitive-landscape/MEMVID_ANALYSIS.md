@@ -110,7 +110,7 @@ The `src/` tree gives a more honest picture of scope than the README:
 | **Retrieval** | First-class — Tantivy BM25 + HNSW + reranker + graph + timeline + sketch + CLIP + Whisper | Cosine similarity over decompressed f32 embeddings; deliberately minimal (the protocol is not in the retrieval-quality race) |
 | **Storage model** | Append-only frames inside one binary file | One row per attestation in SQLite + remote anchor IDs |
 | **Compression** | Zstd / LZ4 per frame; PQ on vectors | TurboQuant scalar quantisation (2–4 bits/dim) on embeddings, primarily so the compressed vector fits on-chain |
-| **Server** | None — library only | MCP server (`mnemonic-mcp`) exposing 5 JSON-RPC tools; OAuth 2.1 + PKCE; payment gate (balance / x402); browser-mediated signing |
+| **Server** | None — library only | MCP server (`mnemonic-mcp`) with OAuth 2.1 + PKCE; client-side COSE signing; free local writes; capped Universal Paywall sessions with optional one-time x402 for anchored writes |
 | **Interface to agents** | Native Rust + Node/Python/CLI SDKs | MCP (Cursor, Claude Desktop, Claude.ai, VS Code) |
 | **Multi-tenant** | ACL fields on frames; single-writer file | OAuth-resolved `owner_pubkey` tenant isolation; multi-user by design |
 | **Payment / settlement** | Not a concern | First-class — x402 + USDC, dynamic pricing engine |
