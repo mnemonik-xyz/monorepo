@@ -38,10 +38,16 @@ pub struct WalletLinkChallenge {
 
 #[derive(Debug, Clone)]
 pub struct VerifiedWalletLink {
+    // Reserved for the in-flight paid-anchoring work; not yet read from the
+    // binary. Reworked by M3 (work/x402-v2-conformance).
+    #[allow(dead_code)]
     pub operation_id: String,
     pub subject_hash: String,
     pub chain_id: u64,
     pub wallet_address: String,
+    // Reserved for the in-flight paid-anchoring work; not yet read from the
+    // binary. Reworked by M3 (work/x402-v2-conformance).
+    #[allow(dead_code)]
     pub verified_at: String,
 }
 

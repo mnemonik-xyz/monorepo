@@ -72,6 +72,11 @@ pub struct PaymentOption {
 
 // ── Gate result ──────────────────────────────────────────────────────────────
 
+// `NeedUniversalPaywall` is materially larger than the other variants.
+// Boxing it would churn every construction and match site of a variant that
+// M3 removes outright when the bespoke rail goes away — see
+// work/x402-v2-conformance/tasks/M3-remove-the-wrapper.md.
+#[allow(clippy::large_enum_variant)]
 pub enum PaymentGate {
     /// Payment verified (or not required). Wave 4 removed custodial balance
     /// mode, so there is no longer an operator-issued api_key to carry — this
