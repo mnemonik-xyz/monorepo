@@ -56,7 +56,7 @@ blake3 = "1"
 oauth2 = "=4.4.2"
 jsonwebtoken = "=9.3.0"
 # LRU cache for OAuthState pending challenges + issued codes; Task 5 reuses this dep.
-lru = "=0.12.5"
+lru = "0.18"
 # Per-IP rate limiting on /mcp + /oauth/*. Pinned to 0.7.0 — the latest version
 # whose transitive `governor` crate matches the existing `governor = "0.8"` dep
 # from `pricing.rs`. Tech-spec suggested `=0.8.0` but that version pulls in

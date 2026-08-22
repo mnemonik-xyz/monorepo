@@ -225,9 +225,9 @@ mod tests {
         let (tx, id, address) = build_signed_transaction(b"hello world").unwrap();
         assert_eq!(tx["id"].as_str().unwrap(), id);
         assert_eq!(tx["format"], 2);
-        assert!(tx["owner"].as_str().unwrap().len() > 0);
-        assert!(tx["signature"].as_str().unwrap().len() > 0);
-        assert!(tx["data_root"].as_str().unwrap().len() > 0);
-        assert!(address.len() > 0);
+        assert!(!tx["owner"].as_str().unwrap().is_empty());
+        assert!(!tx["signature"].as_str().unwrap().is_empty());
+        assert!(!tx["data_root"].as_str().unwrap().is_empty());
+        assert!(!address.is_empty());
     }
 }
