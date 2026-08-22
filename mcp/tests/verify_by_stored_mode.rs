@@ -52,17 +52,22 @@ const LEAKY_FIELDS: &[&str] = &[
 /// going through the env-dependent inline / deferred sign flow. Returns
 /// the `solana_tx` and `arweave_tx` for the row.
 ///
-/// The stored `content_hash` is `blake3(content)` so `verify_local`'s
-/// raw-content integrity check passes — otherwise a happy-path local
-/// verify would surface as `tampered` and the test couldn't distinguish
-/// the routing outcome from a content-integrity failure.
+/// The stored `content_hash` is the real thing — `blake3` over the canonical
+/// CBOR artifact, built exactly as `sign_memory_inline` builds it — so a
+/// happy-path local verify comes back `verified` and the test can attribute a
+/// `tampered` result to routing rather than a synthetic fixture.
+///
+/// This previously stored `blake3(content)` instead, which matched the old
+/// (broken) raw-content comparison in `verify_local` and so kept the routing
+/// assertion green while every real row on disk reported `tampered`. Build the
+/// fixture through the same construction as production, or the test proves
+/// nothing about production.
 fn seed_row(
     server: &TestServer,
     owner: &str,
     write_mode: WriteMode,
     seed_id: &str,
 ) -> (String, String) {
-    use blake3::hash;
     let attestation_id = format!("att-{seed_id}");
     let (sol, ar) = match write_mode {
         WriteMode::Local => (
@@ -78,7 +83,31 @@ fn seed_row(
     };
     let now = chrono::Utc::now().to_rfc3339();
     let content = format!("seeded content for {seed_id}");
-    let content_hash = hash(content.as_bytes()).to_hex().to_string();
+    let embedding = [0.1f32; 8];
+    let compressed = server.state.compressor.compress(&embedding);
+    let artifact = serde_json::json!({
+        "artifact_id": attestation_id,
+        "type": "memory",
+        "schema_version": 1,
+        "content": content,
+        "producer": format!("did:sol:{owner}"),
+        "created_at": now,
+        "tags": ["t"],
+        "metadata": {
+            "embed_provider": server.state.embedder.provider_name(),
+            "embed_dim": embedding.len(),
+            "turbo_bits": compressed.bit_width,
+            "embedding_compressed": base64::Engine::encode(
+                &base64::engine::general_purpose::STANDARD,
+                &compressed.to_bytes(),
+            ),
+        },
+    });
+    let content_hash = mnemonic_core::codec::hash::hash_artifact(
+        &artifact,
+        &mnemonic_core::codec::schema::MEMORY_V1,
+    )
+    .expect("hash artifact");
     let store = server.state.store.lock().unwrap();
     store
         .save_attestation(
@@ -93,7 +122,7 @@ fn seed_row(
             &now,
             write_mode,
             Visibility::Private,
-            &[0.1; 8],
+            &embedding,
         )
         .expect("save row");
     (sol, ar)
@@ -368,5 +397,103 @@ async fn recall_surfaces_write_mode() {
         modes.get(&participate_seed_sol).map(|s| s.as_str()),
         Some("participate"),
         "participate row must carry write_mode=participate; modes={modes:?}"
+    );
+}
+
+// ── 5. verify_local checks the real artifact hash, not a raw-content digest ──
+
+/// Regression pin for the `verify_local` hash-domain bug.
+///
+/// `sign_memory` stores `blake3(canonical_cbor(artifact))`, but `verify_local`
+/// used to recompute `blake3(content)` — a different preimage — and compare the
+/// two for equality. The comparison could never succeed, so every CBOR-era row
+/// verified as `tampered`. The bug survived from April because the only local
+/// verify fixture stored `blake3(content)` too, matching the broken check.
+///
+/// This test drives the real `sign_memory` path and asserts the round trip, so
+/// any future divergence between the two constructions fails here.
+#[tokio::test]
+async fn local_sign_then_verify_round_trips() {
+    let server = TestServer::builder().storage_mode("local").build();
+    let owner = server.server_pubkey();
+
+    let signed = server
+        .call_tool(
+            Some(&owner),
+            "mnemonic_sign_memory",
+            json!({"content": "round trip through the real sign path", "mode": "local"}),
+        )
+        .await;
+    assert!(
+        signed.error().is_none(),
+        "sign envelope: {:?}",
+        signed.envelope
+    );
+    let signed = signed.result_text();
+    let sol = signed["solana_tx"].as_str().expect("solana_tx").to_string();
+
+    let result = server
+        .call_tool(Some(&owner), "mnemonic_verify", json!({"solana_tx": sol}))
+        .await;
+    assert!(
+        result.error().is_none(),
+        "verify envelope: {:?}",
+        result.envelope
+    );
+    let inner = result.result_text();
+
+    assert_eq!(
+        inner["status"], "verified",
+        "a row written by sign_memory must verify; got {inner:?}"
+    );
+    assert_eq!(
+        inner["content_hash"].as_str(),
+        signed["content_hash"].as_str(),
+        "verify must echo the hash sign_memory stored"
+    );
+    assert_eq!(
+        inner["checks"]["artifact_reconstructed"], true,
+        "the CBOR artifact must be rebuilt, not fall through to a legacy digest"
+    );
+}
+
+/// The flip side: a row whose `content` column was edited behind the store's
+/// back must still be caught. Without this, "always verified" would pass the
+/// test above just as happily as a correct implementation.
+#[tokio::test]
+async fn local_verify_detects_edited_content() {
+    let server = TestServer::builder().storage_mode("local").build();
+    let owner = server.server_pubkey();
+
+    let signed = server
+        .call_tool(
+            Some(&owner),
+            "mnemonic_sign_memory",
+            json!({"content": "original content", "mode": "local"}),
+        )
+        .await;
+    let signed = signed.result_text();
+    let sol = signed["solana_tx"].as_str().expect("solana_tx").to_string();
+
+    // Edit the content column directly, leaving content_hash untouched —
+    // exactly the tamper this check exists to catch.
+    {
+        let store = server.state.store.lock().unwrap();
+        store
+            .conn()
+            .execute(
+                "UPDATE attestations SET content = ?1 WHERE solana_tx = ?2",
+                rusqlite::params!["tampered content", &sol],
+            )
+            .expect("tamper");
+    }
+
+    let result = server
+        .call_tool(Some(&owner), "mnemonic_verify", json!({"solana_tx": sol}))
+        .await;
+    let inner = result.result_text();
+    assert_eq!(
+        inner["status"], "tampered",
+        "an edited content column must be detected; got {inner:?}"
     );
 }

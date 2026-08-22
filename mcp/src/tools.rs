@@ -1595,6 +1595,7 @@ pub async fn confirm_delivery_or_demote(
 /// `storage_mode` is _unused — routing is by stored `write_mode`_. It is
 /// kept in the signature for ABI compatibility with internal callers that
 /// pre-date the routing change.
+#[allow(clippy::too_many_arguments)]
 pub async fn verify(
     solana: &SolanaClient,
     arweave: &ArweaveClient,
@@ -1603,6 +1604,8 @@ pub async fn verify(
     arweave_tx: Option<&str>,
     owner_pubkey: &str,
     _storage_mode: &str,
+    embedder: &dyn Embedder,
+    compressor: &EmbeddingCompressor,
 ) -> anyhow::Result<serde_json::Value> {
     let lookup_id = match solana_tx.or(arweave_tx) {
         Some(id) => id,
@@ -1623,7 +1626,14 @@ pub async fn verify(
     };
 
     match routed_mode {
-        Some(WriteMode::Local) => verify_local(store, solana_tx, arweave_tx, owner_pubkey),
+        Some(WriteMode::Local) => verify_local(
+            store,
+            solana_tx,
+            arweave_tx,
+            owner_pubkey,
+            embedder,
+            compressor,
+        ),
         Some(WriteMode::Participate) => {
             verify_participate(solana, arweave, solana_tx, arweave_tx).await
         }
@@ -1771,7 +1781,26 @@ fn verify_legacy_json(
     Ok(serde_json::json!({"status": "hash_computed", "content_hash": actual_hash}))
 }
 
-/// Local-mode verification: SQLite lookup + blake3 recompute.
+/// Local-mode verification: rebuild the canonical CBOR artifact and compare
+/// its blake3 against the stored `content_hash`.
+///
+/// Local rows keep only the *result* of signing — `content_hash` — and discard
+/// the canonical CBOR and the COSE envelope that produced it. So the check has
+/// to rebuild the artifact exactly as `sign_memory_inline` built it, over the
+/// same `MEMORY_V1` field order, and hash that.
+///
+/// The one non-obvious input is `metadata.embedding_compressed`. It is not
+/// stored, but it does not need to be: TurboQuant is a pure function of
+/// `(dim, bit_width, seed, embedding)`, and the raw embedding *is* stored, so
+/// re-compressing it reproduces those bytes exactly.
+///
+/// Two inputs are not recoverable from the row and are taken from the running
+/// server: `embed_provider` (from `embedder`) and `bit_width`/`seed` (from
+/// `compressor`). A row written under a different embedding provider or
+/// `TURBO_BITS` therefore rebuilds to a different hash. That is
+/// indistinguishable from tampering here, so the mismatch branch names the
+/// assumptions instead of asserting foul play — a false accusation is worse
+/// than an inconclusive answer.
 ///
 /// `owner_pubkey` scopes the lookup so a tenant cannot probe another
 /// tenant's row via `verify`. The wrapping `verify()` already routed here
@@ -1783,63 +1812,123 @@ fn verify_local(
     solana_tx: Option<&str>,
     arweave_tx: Option<&str>,
     owner_pubkey: &str,
+    embedder: &dyn Embedder,
+    compressor: &EmbeddingCompressor,
 ) -> anyhow::Result<serde_json::Value> {
     let lookup_id = solana_tx
         .or(arweave_tx)
         .ok_or_else(|| anyhow::anyhow!("provide solana_tx or arweave_tx"))?;
 
-    let store = store.lock().expect("store mutex poisoned");
-    let att = store.find_by_tx(lookup_id, owner_pubkey)?;
+    let row = {
+        let store = store.lock().expect("store mutex poisoned");
+        store.reconstruction_inputs_by_tx(lookup_id, owner_pubkey)?
+    };
 
-    match att {
-        Some(a) => {
-            // Local tamper detection: recompute blake3 of raw content and compare
-            // against stored content_hash. This catches SQLite content column edits.
-            //
-            // Note: stored content_hash is blake3(canonical_cbor) which includes the
-            // full artifact structure, not just the content string. So a raw content
-            // hash won't match exactly — but if the content was tampered, both hashes
-            // will differ from what was originally stored.
-            let content_hash_check = blake3_hash(a.content.as_bytes());
-            let content_untampered = content_hash_check == a.content_hash || {
-                // Fallback: the stored hash might be SHA-256 from legacy v1
-                use sha2::{Digest, Sha256};
-                hex::encode(Sha256::digest(a.content.as_bytes())) == a.content_hash
-            };
-
-            // If raw content hash doesn't match AND it's not a legacy hash,
-            // the content has been tampered in SQLite
-            if content_untampered {
-                Ok(serde_json::json!({
-                    "status": "verified",
-                    "storage_mode": "local",
-                    "content_hash": a.content_hash,
-                    "solana_tx": a.solana_tx,
-                    "arweave_tx": a.arweave_tx,
-                    "signer": a.signer_pubkey,
-                    "content_preview": &a.content[..a.content.len().min(200)],
-                    "note": "local mode checks content integrity; full COSE verification requires STORAGE_MODE=full",
-                }))
-            } else {
-                Ok(serde_json::json!({
-                    "status": "tampered",
-                    "storage_mode": "local",
-                    "expected_hash": a.content_hash,
-                    "actual_content_hash": content_hash_check,
-                    "note": "content column in SQLite appears modified",
-                }))
-            }
-        }
+    let Some(row) = row else {
         // Tenant-isolation parity (T4 round-1 security finding, CWE-203):
         // the `not_found` shape must match the top-level routing-miss
         // shape exactly. Including `storage_mode: "local"` here would
         // distinguish "row belongs to another local tenant" from "row
         // doesn't exist anywhere", giving an attacker an existence oracle.
-        None => Ok(serde_json::json!({
+        return Ok(serde_json::json!({
             "status": "not_found",
             "lookup_id": lookup_id,
-        })),
+        }));
+    };
+
+    let recomputed = rebuild_content_hash(&row, embedder, compressor);
+
+    // Legacy fallback: pre-CBOR v1 rows stored sha256 over the bare content.
+    let legacy_match = || {
+        use sha2::{Digest, Sha256};
+        hex::encode(Sha256::digest(row.content.as_bytes())) == row.content_hash
+    };
+
+    if recomputed.as_deref() == Some(row.content_hash.as_str()) || legacy_match() {
+        return Ok(serde_json::json!({
+            "status": "verified",
+            "storage_mode": "local",
+            "content_hash": row.content_hash,
+            "solana_tx": row.solana_tx,
+            "arweave_tx": row.arweave_tx,
+            "signer": row.signer_pubkey,
+            "content_preview": &row.content[..row.content.len().min(200)],
+            "checks": {
+                "content_integrity": true,
+                "artifact_reconstructed": recomputed.is_some(),
+            },
+            "note": "local mode rebuilds the canonical CBOR artifact and checks its blake3 \
+                     against the stored content_hash; the COSE signature itself is not \
+                     retained for local rows, so this proves integrity, not authorship",
+        }));
     }
+
+    Ok(serde_json::json!({
+        "status": "tampered",
+        "storage_mode": "local",
+        "expected_hash": row.content_hash,
+        "actual_content_hash": recomputed,
+        "note": "rebuilt artifact hash does not match the stored content_hash. This means \
+                 the row was modified — or that it was written under a different \
+                 embed_provider/TURBO_BITS than this server runs, since those two inputs \
+                 are not stored per row and are assumed from the running config.",
+        "assumed": {
+            "embed_provider": embedder.provider_name(),
+            "turbo_bits": compressor.bit_width(),
+            "embed_dim": row.embedding.len(),
+        },
+    }))
+}
+
+/// Rebuild `blake3(canonical_cbor(artifact))` for a stored row.
+///
+/// Mirrors the artifact construction in `sign_memory_inline` field for field;
+/// the two must stay in lockstep or every local `verify` reports a mismatch.
+/// Returns `None` if the row carries no embedding (nothing to re-compress) or
+/// if CBOR encoding fails.
+fn rebuild_content_hash(
+    row: &mnemonic_core::storage::ReconstructionInputs,
+    embedder: &dyn Embedder,
+    compressor: &EmbeddingCompressor,
+) -> Option<String> {
+    if row.embedding.is_empty() {
+        return None;
+    }
+
+    // Match the stored vector's width rather than the server's configured
+    // dim, so a row written before a dim change still rebuilds.
+    let dim = row.embedding.len();
+    let sized;
+    let compressor = if compressor.dim() == dim {
+        compressor
+    } else {
+        sized = EmbeddingCompressor::new(dim, compressor.bit_width(), compressor.seed());
+        &sized
+    };
+    let compressed = compressor.compress(&row.embedding);
+
+    let artifact = serde_json::json!({
+        "artifact_id": row.attestation_id,
+        "type": "memory",
+        "schema_version": 1,
+        "content": row.content,
+        "producer": format!("did:sol:{}", row.signer_pubkey),
+        "created_at": row.created_at,
+        "tags": row.tags,
+        "metadata": {
+            "embed_provider": embedder.provider_name(),
+            "embed_dim": dim,
+            "turbo_bits": compressed.bit_width,
+            "embedding_compressed": base64::Engine::encode(
+                &base64::engine::general_purpose::STANDARD,
+                compressed.to_bytes(),
+            ),
+        },
+    });
+
+    to_canonical_cbor(&artifact, &schema::MEMORY_V1)
+        .ok()
+        .map(|cbor| blake3_hash(&cbor))
 }
 
 /// Tool 4: prove_identity (sync — pure crypto)

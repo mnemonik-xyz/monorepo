@@ -106,17 +106,50 @@ impl CompressedEmbedding {
     }
 }
 
+/// Canonical TurboQuant seed.
+///
+/// The seed fixes the projection TurboQuant uses, so `compress()` is a pure
+/// function of `(dim, bit_width, seed, embedding)`. `verify` depends on that
+/// determinism: it re-compresses the stored raw embedding to rebuild the
+/// exact `metadata.embedding_compressed` bytes that went into the hashed
+/// artifact. Changing this value re-keys every future artifact hash and makes
+/// existing rows unverifiable, so it lives here as one constant rather than a
+/// literal repeated at each construction site.
+pub const DEFAULT_SEED: u64 = 42;
+
 /// Compressor wrapping TurboQuant.
 pub struct EmbeddingCompressor {
     tq: TurboQuant,
     dim: usize,
     bit_width: usize,
+    seed: u64,
 }
 
 impl EmbeddingCompressor {
     pub fn new(dim: usize, bit_width: usize, seed: u64) -> Self {
         let tq = TurboQuant::new(dim, bit_width, seed, true);
-        Self { tq, dim, bit_width }
+        Self {
+            tq,
+            dim,
+            bit_width,
+            seed,
+        }
+    }
+
+    /// Vector width this compressor was built for.
+    pub fn dim(&self) -> usize {
+        self.dim
+    }
+
+    /// Quantization bit width — mirrored into `metadata.turbo_bits`.
+    pub fn bit_width(&self) -> usize {
+        self.bit_width
+    }
+
+    /// Projection seed. Exposed so `verify` can rebuild a dimension-matched
+    /// compressor for a stored row without re-reading server config.
+    pub fn seed(&self) -> u64 {
+        self.seed
     }
 
     /// Compress an f32 embedding vector.

@@ -8,7 +8,9 @@ use rusqlite::{params, Connection};
 use std::path::Path;
 
 use super::mode::{Visibility, WriteMode};
-use super::traits::{AttestationRow, AttestationStore, LineageStore, SearchResult};
+use super::traits::{
+    AttestationRow, AttestationStore, LineageStore, ReconstructionInputs, SearchResult,
+};
 
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS attestations (
@@ -1001,6 +1003,45 @@ impl AttestationStore for SqliteStore {
                 arweave_tx: row.get(4)?,
                 signer_pubkey: row.get(5)?,
             })),
+            None => Ok(None),
+        }
+    }
+
+    fn reconstruction_inputs_by_tx(
+        &self,
+        tx_id: &str,
+        owner_pubkey: &str,
+    ) -> anyhow::Result<Option<ReconstructionInputs>> {
+        // Same tenant predicate as `find_by_tx` — see the note there. The
+        // JOIN is INNER on purpose: a row with no embedding cannot have its
+        // artifact rebuilt, and reporting that as `None` keeps the caller
+        // from mistaking "cannot verify" for "hash mismatch".
+        let mut stmt = self.conn.prepare(
+            "SELECT a.attestation_id, a.content, a.content_hash, a.tags,
+                    a.solana_tx, a.arweave_tx, a.signer_pubkey, a.created_at,
+                    ae.embedding
+             FROM attestations a
+             JOIN attestation_embeddings ae ON a.attestation_id = ae.attestation_id
+             WHERE (a.solana_tx = ?1 OR a.arweave_tx = ?1) AND a.owner_pubkey = ?2
+             LIMIT 1",
+        )?;
+        let mut rows = stmt.query(params![tx_id, owner_pubkey])?;
+        match rows.next()? {
+            Some(row) => {
+                let tags_str: String = row.get(3)?;
+                let emb_blob: Vec<u8> = row.get(8)?;
+                Ok(Some(ReconstructionInputs {
+                    attestation_id: row.get(0)?,
+                    content: row.get(1)?,
+                    content_hash: row.get(2)?,
+                    tags: serde_json::from_str(&tags_str).unwrap_or_default(),
+                    solana_tx: row.get(4)?,
+                    arweave_tx: row.get(5)?,
+                    signer_pubkey: row.get(6)?,
+                    created_at: row.get(7)?,
+                    embedding: bytes_to_floats(&emb_blob),
+                }))
+            }
             None => Ok(None),
         }
     }
