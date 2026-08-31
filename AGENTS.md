@@ -30,15 +30,22 @@ For Claude / Cursor / VS Code / Windsurf — install from [mnemonik.xyz/install]
 
 ## Tools exposed (MCP)
 
+Eight tools ship by default. Full reference — outputs, auth, error shapes — in [`docs/tools.md`](./docs/tools.md).
+
 | Tool | Inputs | Returns |
 |---|---|---|
-| `mnemonic_whoami` | — | server pubkey, DIDs, storage mode, attestation count |
-| `mnemonic_sign_memory` | `{ content: string, tags?: string[] }` | `correlation_id` for the deferred-sign / sign-callback flow (SDK handles the COSE-sign step locally) |
-| `mnemonic_recall` | `{ query: string, limit?: number, tags?: string[] }` | top-k semantically similar attestations |
-| `mnemonic_verify` | `{ solana_tx?: string, arweave_tx?: string, attestation_id?: string }` | verification result with the recovered envelope and chain-of-trust |
+| `mnemonic_whoami` | — | server pubkey, DIDs, storage mode, attestation count, and the capability envelope (`supported_modes`, `default_mode`, `participate_cost`) |
+| `mnemonic_sign_memory` | `{ content: string, tags?: string[], mode?: "local" \| "participate" }` | over HTTP: `{ status: "awaiting_signature", correlation_id, approve_url, content_hash, expires_in }` for the deferred-sign / sign-callback flow (the SDK handles the COSE-sign step locally) |
+| `mnemonic_check_pending` | `{ correlation_id: string }` | `{ status: "signed", attestation_id, solana_tx, arweave_tx, ... }`, or `awaiting_signature` / `not_found` |
+| `mnemonic_recall` | `{ query: string, limit?: number }` | top-k semantically similar attestations. Authenticated → your own corpus; anonymous → the cross-owner public pool only |
+| `mnemonic_verify` | `{ solana_tx?: string, arweave_tx?: string }` (supply at least one) | verification result with the recovered envelope and chain-of-trust |
 | `mnemonic_prove_identity` | `{ challenge: string }` | server-signed challenge bytes |
+| `mnemonic_publish_post` | `{ title: string, body_markdown: string, tags?: string[], author?: string }` | the created post; requires auth |
+| `request_public_write_confirmation` | `{ content_hash: string }` | internal public-write ceremony gate (not user-facing) |
 
-The signing flow is intentionally split: the server returns a canonical CBOR bundle that the client signs locally with COSE_Sign1, then posts back. This means Mnemonic never holds the user's private key.
+Three more — `mnemonic_attest_step`, `mnemonic_attest_verdict`, `mnemonic_verify_trajectory` — cover hash-linked agent trajectories with independent judge verdicts. They are **experimental**, compiled in only with `--features trajectory-experimental`, and are not advertised by default builds or the hosted server. Call `tools/list` to see what a given endpoint actually exposes.
+
+The signing flow is intentionally split: the server returns a canonical CBOR bundle that the client signs locally with COSE_Sign1, then posts back. This means Mnemonic never holds the user's private key. The operator's key signs inline only when the writer *is* the operator (the stdio / single-tenant path); every remote JWT write is client-signed, including an explicit `mode: "local"`.
 
 ## Identity model
 

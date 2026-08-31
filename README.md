@@ -9,7 +9,7 @@
 
 **Live:** [mnemonik.xyz](https://mnemonik.xyz) · **Hosted MCP:** `https://mcp.mnemonik.xyz/mcp` · **Discord:** [discord.gg/ws6wruJj](https://discord.gg/ws6wruJj)
 
-**Docs:** [Quickstart](./docs/QUICKSTART.md) · [Whitepaper](./docs/WHITEPAPER.md) · [How it works](./docs/how-it-works.md) · [Comparisons](./docs/comparisons.md) · [AGENTS.md](./AGENTS.md)
+**Docs:** [Quickstart](./docs/QUICKSTART.md) · [Tool reference](./docs/tools.md) · [Whitepaper](./docs/WHITEPAPER.md) · [How it works](./docs/how-it-works.md) · [Comparisons](./docs/comparisons.md) · [AGENTS.md](./AGENTS.md)
 
 ```bash
 # Recommended: pair with the webapp (open mnemonik.xyz/install, click
@@ -47,12 +47,15 @@ The protocol is exposed through the [Model Context Protocol](https://modelcontex
 
 ### Repository layout
 
-This is a Cargo workspace with two crates:
+A Cargo workspace with two crates, plus the TypeScript clients and the webapp:
 
 ```
-core/   # mnemonic-core   — library: codec, identity, embed, compress, storage, solana, arweave, lineage
-mcp/    # mnemonic-mcp    — binary: MCP server (HTTP + stdio), payment gate, pricing engine
-work/   # active features / bugs (spec-driven work)
+core/      # mnemonic-core — library: codec, identity, embed, compress, storage, solana, arweave, lineage
+mcp/       # mnemonic-mcp  — binary: MCP server (HTTP + stdio), payment gate, pricing engine
+packages/  # npm clients: cli, sdk, mcp (shim), extension
+webapp/    # mnemonik.xyz — install / approve / blog surfaces
+docs/      # protocol docs: quickstart, tool reference, whitepaper, specs, research
+work/      # active features / bugs (spec-driven work); completed/ is archived
 .claude/
 └── skills/
     └── project-knowledge/   # architecture, patterns, deployment docs for AI agents
@@ -116,17 +119,36 @@ cargo build --release --features local-embed
 
 ## MCP tools
 
-The server exposes 5 tools over JSON-RPC at `POST /mcp` (and stdio):
+The server exposes **8 tools** over JSON-RPC at `POST /mcp` (and stdio):
 
 | Tool | Purpose |
 |---|---|
-| `mnemonic_whoami` | Server identity (Ed25519 pubkey, DIDs, storage mode, attestation count) |
-| `mnemonic_sign_memory` | Embed + compress + canonicalize (CBOR) + hash (blake3) + sign (COSE_Sign1) + persist |
+| `mnemonic_whoami` | Server identity (Ed25519 pubkey, DIDs, storage mode, attestation count) plus the capability envelope (`supported_modes`, `default_mode`, `participate_cost`) |
+| `mnemonic_sign_memory` | Embed + compress + canonicalize (CBOR) + hash (blake3) + sign (COSE_Sign1) + persist. Takes an optional per-request `mode: "local" \| "participate"` |
+| `mnemonic_check_pending` | Resolve a deferred-sign `correlation_id` to its final on-chain state |
+| `mnemonic_recall` | Semantic search over stored embeddings (SQLite) |
 | `mnemonic_verify` | Verify a memory by `solana_tx` and/or `arweave_tx` (version-aware) |
 | `mnemonic_prove_identity` | Sign an arbitrary challenge with the server key |
-| `mnemonic_recall` | Semantic search over stored embeddings (SQLite) |
+| `mnemonic_publish_post` | Publish a signed public blog post (agent-native publishing) |
+| `request_public_write_confirmation` | Internal ceremony gate before a public on-chain write (not user-facing) |
+
+Three further tools — `mnemonic_attest_step`, `mnemonic_attest_verdict`, and
+`mnemonic_verify_trajectory` — are **experimental** and compiled in only with
+`--features trajectory-experimental` (not in `default`). Enumerate any server's
+live surface with a `tools/list` call.
+
+**→ Full reference with inputs, outputs, auth, and the write-mode howto: [docs/tools.md](./docs/tools.md).**
 
 Current artifact format: **canonical CBOR + COSE_Sign1, blake3 hashing**. Older SHA-256/JSON artifacts are still verifiable via a legacy fallback path.
+
+### Signing is non-custodial
+
+Over HTTP, the operator's key never signs content authored by another identity.
+A JWT write owned by a remote user returns `{status: "awaiting_signature",
+correlation_id, approve_url, ...}`; the client signs the canonical bundle locally
+and posts it back, and only then is anything persisted or anchored. Inline
+server-side signing happens only when the writer *is* the operator (the stdio /
+single-tenant path). See [docs/tools.md](./docs/tools.md#mnemonic_sign_memory).
 
 ---
 
@@ -211,18 +233,26 @@ Active work lives in `work/`. Completed features are archived under `work/comple
 
 Agent guidance and project knowledge for this repo live in `.claude/skills/project-knowledge/` and `CLAUDE.md`.
 
-Default branch: `dev`.
+Default branch: `main`. Feature branches are cut from `main` and PR'd back to it; tagged releases (`v*`) are cut from `main`.
 
 ---
 
 ## Further reading
 
-Deeper specification and API docs are maintained in the sibling `mnemonic-protocol` documentation repo:
+All protocol documentation lives in this repository under [`docs/`](./docs/):
 
-- `docs/versions/v0.0.3/SPEC.md` — full technical spec
-- `docs/versions/v0.0.3/API.md` — MCP + management REST reference
-- `docs/IMPLEMENTATION_STATUS.md` / `IMPLEMENTATION_AUDIT.md` — current implementation truth
-- `docs/adr/ADR.md`, `docs/research/*` — design rationale and research lineage
+- [`docs/QUICKSTART.md`](./docs/QUICKSTART.md) — install, identity, first signed memory
+- [`docs/tools.md`](./docs/tools.md) — MCP tool reference: inputs, outputs, auth, write modes
+- [`docs/how-it-works.md`](./docs/how-it-works.md) — module-level walkthrough of the pipeline
+- [`docs/WHITEPAPER.md`](./docs/WHITEPAPER.md) ([RU](./docs/WHITEPAPER_RU.md)) — protocol design and trust model
+- [`docs/spec/memory-composition.md`](./docs/spec/memory-composition.md) — cognitive typing, capability tokens, rehydration
+- [`docs/ROADMAP.md`](./docs/ROADMAP.md) — what is shipped and what is next
+- [`docs/comparisons.md`](./docs/comparisons.md) and [`docs/competitive-landscape/`](./docs/competitive-landscape/) — positioning
+- [`docs/usecases/`](./docs/usecases/) — agent-memory roles for the protocol
+- [`docs/research/`](./docs/research/) — foundational paper and TurboQuant analysis
+- [`docs/problems/`](./docs/problems/) — open questions
+
+Client docs live with their packages: [`packages/cli/README.md`](./packages/cli/README.md) and [`packages/sdk/README.md`](./packages/sdk/README.md).
 
 ---
 
