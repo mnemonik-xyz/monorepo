@@ -6,6 +6,8 @@
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](./LICENSE)
 [![npm: cli](https://img.shields.io/npm/v/%40mnemonik-xyz%2Fcli.svg?label=%40mnemonik-xyz%2Fcli)](https://www.npmjs.com/package/@mnemonik-xyz/cli)
 [![npm: sdk](https://img.shields.io/npm/v/%40mnemonik-xyz%2Fsdk.svg?label=%40mnemonik-xyz%2Fsdk)](https://www.npmjs.com/package/@mnemonik-xyz/sdk)
+[![npm: mcp](https://img.shields.io/npm/v/%40mnemonik-xyz%2Fmcp.svg?label=%40mnemonik-xyz%2Fmcp)](https://www.npmjs.com/package/@mnemonik-xyz/mcp)
+[![container: ghcr.io](https://img.shields.io/badge/ghcr.io-mnemonic--mcp-2496ED?logo=docker&logoColor=white)](https://github.com/mnemonik-xyz/monorepo/pkgs/container/mnemonic-mcp)
 
 **Live:** [mnemonik.xyz](https://mnemonik.xyz) · **Hosted MCP:** `https://mcp.mnemonik.xyz/mcp` · **Discord:** [discord.gg/ws6wruJj](https://discord.gg/ws6wruJj)
 
