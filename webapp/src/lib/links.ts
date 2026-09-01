@@ -9,7 +9,7 @@ export const EXTERNAL_LINKS = {
   whitepaper:
     "https://github.com/mnemonik-xyz/monorepo/blob/main/docs/WHITEPAPER.md",
   quickstart:
-    "https://github.com/mnemonik-xyz/monorepo/blob/main/docs/quickstart.md",
+    "https://github.com/mnemonik-xyz/monorepo/blob/main/docs/QUICKSTART.md",
   howItWorks:
     "https://github.com/mnemonik-xyz/monorepo/blob/main/docs/how-it-works.md",
   paper:

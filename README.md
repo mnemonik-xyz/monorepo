@@ -9,7 +9,7 @@
 
 **Live:** [mnemonik.xyz](https://mnemonik.xyz) · **Hosted MCP:** `https://mcp.mnemonik.xyz/mcp` · **Discord:** [discord.gg/ws6wruJj](https://discord.gg/ws6wruJj)
 
-**Docs:** [Quickstart](./docs/QUICKSTART.md) · [Whitepaper](./docs/WHITEPAPER.md) · [How it works](./docs/how-it-works.md) · [Comparisons](./docs/comparisons.md) · [AGENTS.md](./AGENTS.md)
+**Docs:** [Quickstart](./docs/QUICKSTART.md) · [Tool reference](./docs/tools.md) · [Whitepaper](./docs/WHITEPAPER.md) · [How it works](./docs/how-it-works.md) · [Comparisons](./docs/comparisons.md) · [AGENTS.md](./AGENTS.md)
 
 ```bash
 # Recommended: pair with the webapp (open mnemonik.xyz/install, click
@@ -47,12 +47,15 @@ The protocol is exposed through the [Model Context Protocol](https://modelcontex
 
 ### Repository layout
 
-This is a Cargo workspace with two crates:
+A Cargo workspace with two crates, plus the TypeScript clients and the webapp:
 
 ```
-core/   # mnemonic-core   — library: codec, identity, embed, compress, storage, solana, arweave, lineage
-mcp/    # mnemonic-mcp    — binary: MCP server (HTTP + stdio), payment gate, pricing engine
-work/   # active features / bugs (spec-driven work)
+core/      # mnemonic-core — library: codec, identity, embed, compress, storage, solana, arweave, lineage
+mcp/       # mnemonic-mcp  — binary: MCP server (HTTP + stdio), payment gate, pricing engine
+packages/  # npm clients: cli, sdk, mcp (shim), extension
+webapp/    # mnemonik.xyz — install / approve / blog surfaces
+docs/      # protocol docs: quickstart, tool reference, whitepaper, specs, research
+work/      # active features / bugs (spec-driven work); completed/ is archived
 .claude/
 └── skills/
     └── project-knowledge/   # architecture, patterns, deployment docs for AI agents
@@ -116,17 +119,36 @@ cargo build --release --features local-embed
 
 ## MCP tools
 
-The server exposes 5 tools over JSON-RPC at `POST /mcp` (and stdio):
+The server exposes **8 tools** over JSON-RPC at `POST /mcp` (and stdio):
 
 | Tool | Purpose |
 |---|---|
-| `mnemonic_whoami` | Server identity (Ed25519 pubkey, DIDs, storage mode, attestation count) |
-| `mnemonic_sign_memory` | Embed + compress + canonicalize (CBOR) + hash (blake3) + sign (COSE_Sign1) + persist |
+| `mnemonic_whoami` | Server identity (Ed25519 pubkey, DIDs, storage mode, attestation count) plus the capability envelope (`supported_modes`, `default_mode`, `participate_cost`) |
+| `mnemonic_sign_memory` | Embed + compress + canonicalize (CBOR) + hash (blake3) + sign (COSE_Sign1) + persist. Takes an optional per-request `mode: "local" \| "participate"` |
+| `mnemonic_check_pending` | Resolve a deferred-sign `correlation_id` to its final on-chain state |
+| `mnemonic_recall` | Semantic search over stored embeddings (SQLite) |
 | `mnemonic_verify` | Verify a memory by `solana_tx` and/or `arweave_tx` (version-aware) |
 | `mnemonic_prove_identity` | Sign an arbitrary challenge with the server key |
-| `mnemonic_recall` | Semantic search over stored embeddings (SQLite) |
+| `mnemonic_publish_post` | Publish a signed public blog post (agent-native publishing) |
+| `request_public_write_confirmation` | Internal ceremony gate before a public on-chain write (not user-facing) |
+
+Three further tools — `mnemonic_attest_step`, `mnemonic_attest_verdict`, and
+`mnemonic_verify_trajectory` — are **experimental** and compiled in only with
+`--features trajectory-experimental` (not in `default`). Enumerate any server's
+live surface with a `tools/list` call.
+
+**→ Full reference with inputs, outputs, auth, and the write-mode howto: [docs/tools.md](./docs/tools.md).**
 
 Current artifact format: **canonical CBOR + COSE_Sign1, blake3 hashing**. Older SHA-256/JSON artifacts are still verifiable via a legacy fallback path.
+
+### Signing is non-custodial
+
+Over HTTP, the operator's key never signs content authored by another identity.
+A JWT write owned by a remote user returns `{status: "awaiting_signature",
+correlation_id, approve_url, ...}`; the client signs the canonical bundle locally
+and posts it back, and only then is anything persisted or anchored. Inline
+server-side signing happens only when the writer *is* the operator (the stdio /
+single-tenant path). See [docs/tools.md](./docs/tools.md#mnemonic_sign_memory).
 
 ---
 
@@ -211,18 +233,51 @@ Active work lives in `work/`. Completed features are archived under `work/comple
 
 Agent guidance and project knowledge for this repo live in `.claude/skills/project-knowledge/` and `CLAUDE.md`.
 
-Default branch: `dev`.
+Default branch: `main`. Feature branches are cut from `main` and PR'd back to it; tagged releases (`v*`) are cut from `main`.
 
 ---
 
 ## Further reading
 
-Deeper specification and API docs are maintained in the sibling `mnemonic-protocol` documentation repo:
+All protocol documentation lives in this repository. Start at the top of
+whichever column matches what you are here to do.
 
-- `docs/versions/v0.0.3/SPEC.md` — full technical spec
-- `docs/versions/v0.0.3/API.md` — MCP + management REST reference
-- `docs/IMPLEMENTATION_STATUS.md` / `IMPLEMENTATION_AUDIT.md` — current implementation truth
-- `docs/adr/ADR.md`, `docs/research/*` — design rationale and research lineage
+### Use it
+
+- [`docs/QUICKSTART.md`](./docs/QUICKSTART.md) — install, identity, first signed memory in three commands
+- [`docs/tools.md`](./docs/tools.md) — MCP tool reference: every tool's inputs, outputs, auth, and the `local` vs `participate` write-mode howto
+- [`packages/cli/README.md`](./packages/cli/README.md) — `@mnemonik-xyz/cli`: every command, flag, and exit code
+- [`packages/sdk/README.md`](./packages/sdk/README.md) — `@mnemonik-xyz/sdk`: TypeScript client, OAuth helpers, COSE verification
+- [`packages/mcp/README.md`](./packages/mcp/README.md) — `@mnemonik-xyz/mcp`: one-command install into Claude Desktop, Claude Code, and Cursor
+- [`packages/extension/README.md`](./packages/extension/README.md) — the MV3 browser extension
+
+### Understand it
+
+- [`docs/how-it-works.md`](./docs/how-it-works.md) — sign / recall / verify walked through the actual modules
+- [`docs/WHITEPAPER.md`](./docs/WHITEPAPER.md) ([RU](./docs/WHITEPAPER_RU.md)) — protocol design, artifact model, trust model
+- [`docs/spec/memory-composition.md`](./docs/spec/memory-composition.md) — cognitive typing, capability tokens, rehydration pipelines
+- [`docs/research/`](./docs/research/) — the foundational paper and the TurboQuant analysis behind the compression choices
+
+### Run it
+
+- [`Dockerfile`](./Dockerfile) and [`docker-compose.yml`](./docker-compose.yml) — containerised server, optional local Ollama embedder, nginx + certbot TLS
+- [`smithery.yaml`](./smithery.yaml) — Smithery MCP-registry manifest
+- [`.claude/skills/project-knowledge/references/deployment.md`](./.claude/skills/project-knowledge/references/deployment.md) — CI/CD, secrets, environments, rollback
+
+### Situate it
+
+- [`docs/usecases.md`](./docs/usecases.md) — ten agent-memory use cases, one paragraph each (start here), with deep-dives in [`docs/usecases/`](./docs/usecases/)
+- [`docs/comparisons.md`](./docs/comparisons.md) — how Mnemonic relates to adjacent memory and RAG systems
+- [`docs/competitive-landscape/`](./docs/competitive-landscape/) — decentralized RAG, zkTAM, V3DB, and neighbouring directions
+- [`docs/ROADMAP.md`](./docs/ROADMAP.md) — what is shipped and what is next
+- [`docs/problems/`](./docs/problems/) — open questions we have not solved
+
+### For agents and machines
+
+- [`AGENTS.md`](./AGENTS.md) — the agent-facing service card: endpoints, tool surface, identity and verification models
+- [`/.well-known/agent.json`](https://mnemonik.xyz/.well-known/agent.json) — machine-readable discovery
+- [`/llms.txt`](https://mnemonik.xyz/llms.txt) — condensed summary for LLM crawlers
+- [`CLAUDE.md`](./CLAUDE.md) and [`.claude/skills/project-knowledge/`](./.claude/skills/project-knowledge/) — repo conventions and architecture notes for AI coding agents
 
 ---
 
@@ -230,6 +285,7 @@ Deeper specification and API docs are maintained in the sibling `mnemonic-protoc
 
 - **GitHub Discussions** — long-form Q&A and design proposals.
 - **Discord** — [discord.gg/ws6wruJj](https://discord.gg/ws6wruJj)
+- **Telegram** — [@mnemonikprotocol](https://t.me/mnemonikprotocol) · announcements: [@mnemonik_xyz_announcements](https://t.me/mnemonik_xyz_announcements)
 - **Issues** — file bugs at [github.com/mnemonik-xyz/monorepo/issues](https://github.com/mnemonik-xyz/monorepo/issues). For security reports see [`SECURITY.md`](./SECURITY.md) — do **not** file public issues for vulnerabilities.
 
 Before contributing, please read [`CONTRIBUTING.md`](./CONTRIBUTING.md) and [`CODE_OF_CONDUCT.md`](./CODE_OF_CONDUCT.md).

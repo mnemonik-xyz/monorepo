@@ -16,7 +16,7 @@ The repository is a Cargo workspace (`resolver = "2"`) with two members. The dep
 | `mnemonic-core::arweave` | Full-mode persistence: ANS-104 bundle builder, Irys upload, deep hash + Avro encoding. |
 | `mnemonic-core::solana` | Full-mode anchoring: `SolanaClient` for SPL Memo writes/reads. |
 | `mnemonic-core::lineage` | Parent-child artifact DAG with cycle detection and BFS traversal (`Direction::{Ancestors, Descendants, Both}`). |
-| `mnemonic-mcp` | JSON-RPC 2.0 dispatcher (`mcp.rs`), five MCP tools (`tools.rs`), Axum bootstrap (`main.rs`), payment gating (`payment.rs`), pricing engine (`pricing.rs`), env-driven config (`config.rs`). |
+| `mnemonic-mcp` | JSON-RPC 2.0 dispatcher (`mcp.rs`), the MCP tools (`tools.rs`; 8 by default, 11 with `trajectory-experimental`), Axum bootstrap (`main.rs`), payment gating (`payment.rs`), pricing engine (`pricing.rs`), env-driven config (`config.rs`). |
 
 ## End-to-end walkthrough — sign_memory
 
@@ -27,7 +27,9 @@ Implemented in `mcp/src/tools.rs::sign_memory`.
 3. **Build artifact.** Assemble the canonical JSON shape: `artifact_id`, `type`, `schema_version`, `content`, `producer` (DID-sol), `created_at`, `tags`, embedding metadata.
 4. **Canonicalize.** `codec::canonical::to_canonical_cbor` produces a deterministic byte sequence with stable field ordering. Determinism is required so the hash is reproducible across runtimes.
 5. **Hash.** `codec::hash::hash_bytes` computes blake3 over the canonical CBOR. This is the artifact's identity.
-6. **Sign.** `codec::sign::sign_artifact` wraps the CBOR payload in a COSE_Sign1 envelope under the server's Ed25519 identity.
+6. **Sign.** The CBOR payload is wrapped in a COSE_Sign1 envelope. **Who holds the signing key depends on the caller** — the operator's key never signs content authored by another identity:
+   - **Inline (server-signed).** Taken only when the writer *is* the operator: the stdio / single-tenant path with no JWT, or a JWT whose subject equals the operator's own pubkey. `codec::sign::sign_artifact` signs under the server's Ed25519 identity and the flow continues to step 7.
+   - **Deferred (client-signed).** Taken for every JWT write owned by a different identity — *including* an explicit `mode: "local"`. The server parks the canonical bundle and returns `{status: "awaiting_signature", correlation_id, approve_url, content_hash, expires_in: 300}`. The client signs locally (browser approval, or a headless `POST /api/sign-callback`), and only then does step 7 run. Nothing is persisted or anchored until the callback lands; bundles expire after 300 seconds. `mnemonic_check_pending` resolves the `correlation_id` to the final state.
 7. **Persist.**
    - **Local mode:** write COSE bytes plus the uncompressed embedding to `SqliteStore`; return synthetic `local:` tx IDs.
    - **Full mode:** upload COSE bytes to Arweave via the Irys client; submit an SPL Memo on Solana carrying `{"h": blake3, "a": arweave_tx, "v": 2}`; record both tx IDs alongside the row in SQLite. Cost is captured in `attestation_costs` for P&L tracking.
@@ -51,8 +53,8 @@ Implemented in `mcp/src/tools.rs::verify`.
 
 ## Operational notes
 
-- **Storage modes** (`STORAGE_MODE`). `local` is the default: SQLite only, synthetic `local:` tx IDs, free, offline; suitable for development and single-node use. `full` writes COSE bytes to Arweave and an SPL Memo to Solana on every sign and requires a funded Ed25519 keypair on a live RPC. The mode is set at startup, not per call; never mix modes in one DB.
-- **Payment modes** (`PAYMENT_MODE`, HTTP transport in `full` mode only). `none` | `balance` (Bearer-token API key checked against the live pricing engine) | `x402` (HTTP 402 challenge, retry with `X-Payment` header) | `both`. Only `mnemonic_sign_memory` is paid; `whoami`, `recall`, `verify`, and `prove_identity` are free.
+- **Storage modes** (`STORAGE_MODE`). `local`: SQLite only, synthetic `local:` tx IDs, free, offline; suitable for development and single-node use. `full`: COSE bytes to Arweave and an SPL Memo to Solana, requiring a funded Ed25519 keypair on a live RPC. `STORAGE_MODE` sets the operator's *capability and default*, **not** a global switch — the write mode is a per-request choice via the optional `mode: "local" | "participate"` field on `mnemonic_sign_memory` (requests that omit it fall back to the operator default, so shipped legacy clients keep working). Rows are tagged with a `write_mode` column and `recall` spans both modes for one owner, so a single owner's `local` and `participate` writes coexist in one DB by design. A `participate` write only succeeds after the anchored bytes pass a recall+verify round-trip; on failure the row is demoted to `local` and no payment is charged. See [tools.md § Write modes](./tools.md#write-modes-local-vs-participate).
+- **Payment modes** (`PAYMENT_MODE`, HTTP transport in `full` mode only). `none` | `balance` (Bearer-token API key checked against the live pricing engine) | `x402` (HTTP 402 challenge, retry with `X-Payment` header) | `both`. Only `mnemonic_sign_memory` is paid, and only for `participate` writes; `whoami`, `recall`, `verify`, `prove_identity`, `check_pending`, and `publish_post` are free.
 - **Lock discipline.** `rusqlite::Connection` is `!Send`. Always wrap `SqliteStore` in `std::sync::Mutex` in async contexts and never hold the lock across an `.await`. Tool handlers explicitly take `&std::sync::Mutex<SqliteStore>` and scope their guards before any IO.
 - **TurboQuant bit width.** Default 4 bits per dimension. Never change for an existing database — old and new compressed embeddings become incomparable, breaking any cross-node comparison and the artifact metadata commitment.
 
@@ -66,6 +68,7 @@ Implemented in `mcp/src/tools.rs::verify`.
 
 ## Pointers
 
+- [tools.md](./tools.md) — full MCP tool reference: inputs, outputs, auth, write modes.
 - [WHITEPAPER.md](./WHITEPAPER.md) — §4 Core Insight, §5 Architecture Overview (including §5.3 Pipeline Walkthrough), §6 Artifact Model, §7 Trust Model, §11 Current Implementation Status.
 - [research/condensed-principles.md](./research/condensed-principles.md) — TurboQuant design principles distilled.
 - [usecases/](./usecases/) — concrete agent-memory use-case roles for the protocol.
