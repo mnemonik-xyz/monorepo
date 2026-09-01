@@ -239,20 +239,45 @@ Default branch: `main`. Feature branches are cut from `main` and PR'd back to it
 
 ## Further reading
 
-All protocol documentation lives in this repository under [`docs/`](./docs/):
+All protocol documentation lives in this repository. Start at the top of
+whichever column matches what you are here to do.
 
-- [`docs/QUICKSTART.md`](./docs/QUICKSTART.md) — install, identity, first signed memory
-- [`docs/tools.md`](./docs/tools.md) — MCP tool reference: inputs, outputs, auth, write modes
-- [`docs/how-it-works.md`](./docs/how-it-works.md) — module-level walkthrough of the pipeline
-- [`docs/WHITEPAPER.md`](./docs/WHITEPAPER.md) ([RU](./docs/WHITEPAPER_RU.md)) — protocol design and trust model
-- [`docs/spec/memory-composition.md`](./docs/spec/memory-composition.md) — cognitive typing, capability tokens, rehydration
+### Use it
+
+- [`docs/QUICKSTART.md`](./docs/QUICKSTART.md) — install, identity, first signed memory in three commands
+- [`docs/tools.md`](./docs/tools.md) — MCP tool reference: every tool's inputs, outputs, auth, and the `local` vs `participate` write-mode howto
+- [`packages/cli/README.md`](./packages/cli/README.md) — `@mnemonik-xyz/cli`: every command, flag, and exit code
+- [`packages/sdk/README.md`](./packages/sdk/README.md) — `@mnemonik-xyz/sdk`: TypeScript client, OAuth helpers, COSE verification
+- [`packages/mcp/README.md`](./packages/mcp/README.md) — `@mnemonik-xyz/mcp`: one-command install into Claude Desktop, Claude Code, and Cursor
+- [`packages/extension/README.md`](./packages/extension/README.md) — the MV3 browser extension
+
+### Understand it
+
+- [`docs/how-it-works.md`](./docs/how-it-works.md) — sign / recall / verify walked through the actual modules
+- [`docs/WHITEPAPER.md`](./docs/WHITEPAPER.md) ([RU](./docs/WHITEPAPER_RU.md)) — protocol design, artifact model, trust model
+- [`docs/spec/memory-composition.md`](./docs/spec/memory-composition.md) — cognitive typing, capability tokens, rehydration pipelines
+- [`docs/research/`](./docs/research/) — the foundational paper and the TurboQuant analysis behind the compression choices
+
+### Run it
+
+- [`Dockerfile`](./Dockerfile) and [`docker-compose.yml`](./docker-compose.yml) — containerised server, optional local Ollama embedder, nginx + certbot TLS
+- [`smithery.yaml`](./smithery.yaml) — Smithery MCP-registry manifest
+- [`.claude/skills/project-knowledge/references/deployment.md`](./.claude/skills/project-knowledge/references/deployment.md) — CI/CD, secrets, environments, rollback
+
+### Situate it
+
+- [`docs/usecases.md`](./docs/usecases.md) — ten agent-memory use cases, one paragraph each (start here), with deep-dives in [`docs/usecases/`](./docs/usecases/)
+- [`docs/comparisons.md`](./docs/comparisons.md) — how Mnemonic relates to adjacent memory and RAG systems
+- [`docs/competitive-landscape/`](./docs/competitive-landscape/) — decentralized RAG, zkTAM, V3DB, and neighbouring directions
 - [`docs/ROADMAP.md`](./docs/ROADMAP.md) — what is shipped and what is next
-- [`docs/comparisons.md`](./docs/comparisons.md) and [`docs/competitive-landscape/`](./docs/competitive-landscape/) — positioning
-- [`docs/usecases/`](./docs/usecases/) — agent-memory roles for the protocol
-- [`docs/research/`](./docs/research/) — foundational paper and TurboQuant analysis
-- [`docs/problems/`](./docs/problems/) — open questions
+- [`docs/problems/`](./docs/problems/) — open questions we have not solved
 
-Client docs live with their packages: [`packages/cli/README.md`](./packages/cli/README.md) and [`packages/sdk/README.md`](./packages/sdk/README.md).
+### For agents and machines
+
+- [`AGENTS.md`](./AGENTS.md) — the agent-facing service card: endpoints, tool surface, identity and verification models
+- [`/.well-known/agent.json`](https://mnemonik.xyz/.well-known/agent.json) — machine-readable discovery
+- [`/llms.txt`](https://mnemonik.xyz/llms.txt) — condensed summary for LLM crawlers
+- [`CLAUDE.md`](./CLAUDE.md) and [`.claude/skills/project-knowledge/`](./.claude/skills/project-knowledge/) — repo conventions and architecture notes for AI coding agents
 
 ---
 
@@ -260,6 +285,7 @@ Client docs live with their packages: [`packages/cli/README.md`](./packages/cli/
 
 - **GitHub Discussions** — long-form Q&A and design proposals.
 - **Discord** — [discord.gg/ws6wruJj](https://discord.gg/ws6wruJj)
+- **Telegram** — [@mnemonikprotocol](https://t.me/mnemonikprotocol) · announcements: [@mnemonik_xyz_announcements](https://t.me/mnemonik_xyz_announcements)
 - **Issues** — file bugs at [github.com/mnemonik-xyz/monorepo/issues](https://github.com/mnemonik-xyz/monorepo/issues). For security reports see [`SECURITY.md`](./SECURITY.md) — do **not** file public issues for vulnerabilities.
 
 Before contributing, please read [`CONTRIBUTING.md`](./CONTRIBUTING.md) and [`CODE_OF_CONDUCT.md`](./CODE_OF_CONDUCT.md).
