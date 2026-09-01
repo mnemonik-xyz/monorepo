@@ -28,22 +28,55 @@ Mnemonic gives an AI agent a persistent and verifiable artifact/memory layer: si
 
 AI agents forget. Conversations, decisions, and learned context vanish between sessions, and when they do survive, there is no way for anyone else to verify what the agent actually remembered or claimed.
 
-**Mnemonic Protocol** is a verifiable memory layer for AI agents. Every memory an agent saves is:
+**Mnemonic Protocol** is a verifiable memory layer for AI agents. An agent writes a memory; anyone can later check *who* wrote it, *that it has not changed*, and *when it existed* — without trusting the agent, or us.
+
+### What happens to a memory
+
+Every memory an agent saves is:
 
 - **Semantically embedded** so it can be recalled by meaning, not by keyword.
-- **Compressed** with TurboQuant so embeddings travel cheaply across systems.
+- **Compressed** with TurboQuant, so a portable form of the embedding travels inside the artifact itself.
 - **Canonicalized** to deterministic CBOR and hashed with blake3, so the same content always produces the same fingerprint.
-- **Signed** as a COSE_Sign1 artifact with the server's Ed25519 identity, so authorship is cryptographically provable.
-- **Optionally anchored** on Arweave (durable storage) and Solana (timestamped anchor), so third parties can independently verify the memory existed at a point in time — without trusting the agent or its operator.
+- **Signed** as a COSE_Sign1 artifact under an Ed25519 identity, so authorship is cryptographically provable.
+- **Optionally anchored** on Arweave (durable storage) and Solana (timestamped anchor), so third parties can independently verify the memory existed at a point in time.
 
-The protocol is exposed through the [Model Context Protocol](https://modelcontextprotocol.io/) (MCP), so any MCP-compatible client — Claude, Cursor, custom agents — can use it as a drop-in memory backend over HTTP or stdio.
+### You keep the key
+
+Signing is **non-custodial**. The private key lives with the client — your CLI, your browser, your agent — and the server never holds it.
+
+Over HTTP the server builds the canonical bundle and hands it back unsigned; your client signs it locally and posts the signature. The operator's own key signs only memories the operator itself authored. Anything else is refused outright, in code:
+
+```
+refusing to operator-sign a memory owned by a different identity;
+remote writes must be client-signed via the deferred path
+```
+
+This is what makes "agent X claimed Y" checkable by a third party. If we could sign on your behalf, we could forge your memories, and the signature would prove nothing.
+
+### You choose what goes on-chain
+
+Every write carries an explicit intent, chosen per request — not a server-wide setting:
+
+| | `local` | `participate` |
+|---|---|---|
+| Where it lives | The node's own SQLite | Arweave bytes + a Solana SPL Memo, plus SQLite |
+| Cost | Free, always | Priced by the operator |
+| Who can verify | You, from the signature and hash | Anyone, against public chains |
+
+`local` is the default and is free by construction, not by configuration. A `participate` write counts as delivered only after the anchored bytes pass a recall-and-verify round-trip; if that fails the memory is demoted to `local` and **you are not charged**. Both kinds coexist in one database, and recall spans them.
+
+### How you reach it
+
+The protocol is exposed through the [Model Context Protocol](https://modelcontextprotocol.io/) (MCP), so any MCP-compatible client — Claude, Cursor, VS Code, Windsurf, custom agents — can use it as a drop-in memory backend over HTTP or stdio. There is also a [CLI](./packages/cli/), a [TypeScript SDK](./packages/sdk/), and a browser extension.
 
 ### Why it matters
 
 - **Persistent memory across sessions and models.** A memory signed by one agent is readable and verifiable by any other.
 - **Verifiable claims.** When an agent says "I remembered X on date Y," that claim can be checked against an on-chain anchor and a signed artifact — not just taken on faith.
 - **Portable.** Artifacts are self-describing (typed schema, canonical encoding, embedded compression metadata) and can be rehydrated anywhere.
-- **Offline-first.** Runs fully locally in `local` mode (SQLite only, no chain, no payment) for development and demos; flips to `full` mode when you want durable external anchoring.
+- **Offline-first.** `local` writes need no chain, no payment, and no network beyond the embedder — good for development, demos, and memories that were never meant to leave the machine.
+
+New here? [**Quickstart**](./docs/QUICKSTART.md) gets you a signed memory in three commands; [**docs/tools.md**](./docs/tools.md) is the full tool reference.
 
 ### Repository layout
 
@@ -141,14 +174,16 @@ live surface with a `tools/list` call.
 
 Current artifact format: **canonical CBOR + COSE_Sign1, blake3 hashing**. Older SHA-256/JSON artifacts are still verifiable via a legacy fallback path.
 
-### Signing is non-custodial
+### The deferred-signing flow
 
-Over HTTP, the operator's key never signs content authored by another identity.
-A JWT write owned by a remote user returns `{status: "awaiting_signature",
-correlation_id, approve_url, ...}`; the client signs the canonical bundle locally
-and posts it back, and only then is anything persisted or anchored. Inline
-server-side signing happens only when the writer *is* the operator (the stdio /
-single-tenant path). See [docs/tools.md](./docs/tools.md#mnemonic_sign_memory).
+The mechanics behind [You keep the key](#you-keep-the-key). A JWT write owned by
+a remote user returns `{status: "awaiting_signature", correlation_id,
+approve_url, ...}`; the client signs the canonical bundle locally and posts it
+back to `/api/sign-callback`, and only then is anything persisted or anchored.
+`mnemonic_check_pending` resolves the `correlation_id` to the final state.
+Bundles expire after 300 seconds. Inline server-side signing happens only when
+the writer *is* the operator (the stdio / single-tenant path). Full detail in
+[docs/tools.md](./docs/tools.md#mnemonic_sign_memory).
 
 ---
 
@@ -163,7 +198,10 @@ Two npm packages let you drive the same hosted MCP server without writing your o
 
 ## Storage modes
 
-Selected via `STORAGE_MODE`:
+`STORAGE_MODE` sets what an operator *can* do and what it defaults to. It is not
+the same knob as the per-request `mode` a caller picks on each write (see
+[You choose what goes on-chain](#you-choose-what-goes-on-chain)) — a `local`
+request stays free even on a `full` deployment.
 
 - `local` (default) — SQLite only. No Solana / Arweave writes, no payment gate. Synthetic tx ids (`local:...`). Ideal for dev, demos, and UX testing.
 - `full` — signed COSE bytes written to Arweave, anchor memo written to Solana, searchable embeddings kept in SQLite. Payment gate applies on HTTP when enabled.
