@@ -3,6 +3,7 @@
 **Draft:** v0.3  
 **Date:** May 2026  
 **Status:** Working draft  
+**Simplified version:** [WHITEPAPER-SIMPLE.md](./WHITEPAPER-SIMPLE.md) (plain English, ASD-STE100 style)  
 
 ---
 
