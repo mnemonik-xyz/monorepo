@@ -93,7 +93,7 @@ pub async fn chat_handler(
     // chunks (Decision 9 ownership filter scopes search by owner_pubkey).
     // Use the local server keypair so /chat returns the seeded knowledge
     // base regardless of the caller's auth state — chat is not personalized.
-    let chat_owner_pubkey = solana_sdk::signer::Signer::pubkey(&state.keypair).to_string();
+    let chat_owner_pubkey = state.keypair.pubkey_base58();
     let recall_result = {
         let store = state.store.lock().unwrap();
         tools::recall(
@@ -512,7 +512,9 @@ mod handler_tests {
         let bootstrap_server_x25519_public = bootstrap_server_x25519_secret.public_key();
 
         Arc::new(McpState {
-            keypair: solana_sdk::signature::Keypair::new(),
+            keypair: mnemonic_core::identity::LazyKeypair::ready(
+                solana_sdk::signature::Keypair::new(),
+            ),
             solana: SolanaClient::new("http://localhost:0"),
             arweave: ArweaveClient::new("http://localhost:0"),
             store: std::sync::Mutex::new(store),

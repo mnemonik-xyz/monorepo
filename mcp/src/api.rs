@@ -507,11 +507,20 @@ pub async fn sign_callback_handler(
         {
             existing
         } else {
+            let operator_keypair = match state.keypair.keypair() {
+                Ok(kp) => kp,
+                Err(e) => {
+                    return error_resp(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        &format!("operator identity unavailable: {e:#}"),
+                    );
+                }
+            };
             let uploaded = match state
                 .arweave
                 .write_item(
                     &cose_bytes,
-                    &state.keypair,
+                    operator_keypair,
                     &[
                         ("Producer", producer_did.as_str()),
                         ("Created-At", now.as_str()),
@@ -589,9 +598,18 @@ pub async fn sign_callback_handler(
             }
             existing
         } else {
+            let operator_keypair = match state.keypair.keypair() {
+                Ok(kp) => kp,
+                Err(e) => {
+                    return error_resp(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        &format!("operator identity unavailable: {e:#}"),
+                    );
+                }
+            };
             let submitted = match state
                 .solana
-                .submit_memo(&state.keypair, &memo.to_string())
+                .submit_memo(operator_keypair, &memo.to_string())
                 .await
             {
                 Ok(signature) => signature,

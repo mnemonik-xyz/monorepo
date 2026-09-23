@@ -4,12 +4,14 @@ pub mod keystore_file;
 #[cfg(test)]
 pub mod keystore_memory;
 pub mod keystore_os;
+pub mod lazy;
 pub mod token_store;
 
-pub use ensure::{ensure, ensure_with_stores, KeyStores};
+pub use ensure::{ensure, ensure_lazy, ensure_lazy_with_stores, ensure_with_stores, KeyStores};
 pub use keystore::{KeyStore, KeystoreEntry, KeystoreError};
 pub use keystore_file::FileKeyStore;
 pub use keystore_os::OsKeyStore;
+pub use lazy::LazyKeypair;
 pub use token_store::{
     delete_token, delete_token_at, read_token, read_token_from, save_token, save_token_to,
     token_path, TokenJson, TokenStoreError,
@@ -72,12 +74,22 @@ pub fn pubkey_base58(kp: &Keypair) -> String {
 
 /// did:sol:<base58_pubkey>
 pub fn did_sol(kp: &Keypair) -> String {
-    format!("did:sol:{}", kp.pubkey())
+    did_sol_from_pubkey(&kp.pubkey())
+}
+
+/// did:sol:<base58_pubkey> from a public key alone.
+pub fn did_sol_from_pubkey(pk: &Pubkey) -> String {
+    format!("did:sol:{pk}")
 }
 
 /// did:key:z<base58btc(multicodec_ed25519 + raw_pubkey)>
 pub fn did_key(kp: &Keypair) -> String {
-    let raw = kp.pubkey().to_bytes();
+    did_key_from_pubkey(&kp.pubkey())
+}
+
+/// did:key from a public key alone.
+pub fn did_key_from_pubkey(pk: &Pubkey) -> String {
+    let raw = pk.to_bytes();
     // Ed25519 multicodec prefix: 0xed01
     let mut mc = vec![0xed, 0x01];
     mc.extend_from_slice(&raw);

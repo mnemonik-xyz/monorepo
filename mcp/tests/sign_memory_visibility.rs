@@ -143,8 +143,8 @@ async fn visibility_threads_through_to_storage() {
     // `sign_memory` itself. Direct call to `sign_memory` bypasses the
     // gate and is the right surface to prove visibility threads through
     // to `save_attestation`.
-    let kp = solana_sdk::signature::Keypair::new();
-    let owner_kp = mnemonic_core::identity::pubkey_base58(&kp);
+    let kp = mnemonic_core::identity::LazyKeypair::ready(solana_sdk::signature::Keypair::new());
+    let owner_kp = kp.pubkey_base58();
     let resolved = resolve_write_mode(None, "local").expect("None resolves");
 
     let cost_hint = mnemonic_mcp::pricing::CostHint {

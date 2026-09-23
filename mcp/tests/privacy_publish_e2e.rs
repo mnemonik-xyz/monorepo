@@ -371,7 +371,6 @@ async fn publish_rate_limit_trips_after_quota() {
 async fn published_attestation_is_verifiable_via_live_path() {
     use mnemonic_core::codec::schema::{validate_artifact, POST_V1};
     use mnemonic_core::codec::sign::{sign_artifact, verify_artifact};
-    use mnemonic_core::identity;
 
     let state = mock_state();
     let post = publish::publish_post(
@@ -407,10 +406,11 @@ async fn published_attestation_is_verifiable_via_live_path() {
         "published_at": post.published_at,
         "tags": post.tags,
         "created_at": post.published_at,
-        "producer": identity::did_sol(&state.keypair),
+        "producer": state.keypair.did_sol(),
     });
     validate_artifact(&artifact, &POST_V1).expect("POST_V1 validates");
-    let signed = sign_artifact(&artifact, &POST_V1, &state.keypair).expect("sign");
+    let signed =
+        sign_artifact(&artifact, &POST_V1, state.keypair.keypair().unwrap()).expect("sign");
 
     assert_eq!(
         signed.content_hash, post.content_hash,
@@ -418,5 +418,5 @@ async fn published_attestation_is_verifiable_via_live_path() {
     );
     let result = verify_artifact(&signed.cose_bytes, Some(&post.content_hash)).expect("verify");
     assert!(result.valid, "published POST_V1 COSE must verify");
-    assert_eq!(result.signer, identity::pubkey_base58(&state.keypair));
+    assert_eq!(result.signer, state.keypair.pubkey_base58());
 }

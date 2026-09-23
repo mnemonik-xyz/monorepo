@@ -57,7 +57,7 @@ fn parse_proof(steps: &serde_json::Value) -> Vec<ProofStep> {
 #[test]
 fn recall_returns_verifiable_merkle_proofs_per_result() {
     let store = SqliteStore::in_memory().expect("store");
-    let kp = Keypair::new();
+    let kp = mnemonic_core::identity::LazyKeypair::ready(Keypair::new());
     let embedder = StubEmbedder::default();
 
     let hashes: Vec<String> = (0..4).map(|i| ch(&format!("m{i}"))).collect();
@@ -99,7 +99,7 @@ fn recall_returns_verifiable_merkle_proofs_per_result() {
 #[test]
 fn tampered_proof_from_recall_does_not_verify() {
     let store = SqliteStore::in_memory().expect("store");
-    let kp = Keypair::new();
+    let kp = mnemonic_core::identity::LazyKeypair::ready(Keypair::new());
     let embedder = StubEmbedder::default();
     for i in 0..4 {
         seed(&store, &format!("att-{i}"), &ch(&format!("m{i}")));
@@ -132,7 +132,7 @@ fn tampered_proof_from_recall_does_not_verify() {
 #[test]
 fn anonymous_pool_recall_has_no_single_owner_commitment() {
     let store = SqliteStore::in_memory().expect("store");
-    let kp = Keypair::new();
+    let kp = mnemonic_core::identity::LazyKeypair::ready(Keypair::new());
     let embedder = StubEmbedder::default();
     seed(&store, "att-0", &ch("m0"));
 

@@ -25,7 +25,6 @@
 
 use mnemonic_core::codec::schema::{validate_artifact, POST_V1};
 use mnemonic_core::codec::sign::sign_artifact;
-use mnemonic_core::identity;
 use mnemonic_core::storage::{AttestationStore, BlogPost, Visibility, WriteMode};
 
 use crate::mcp::McpState;
@@ -229,8 +228,8 @@ pub fn publish_post(
 
     let attestation_id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
-    let signer = identity::pubkey_base58(&state.keypair);
-    let producer = identity::did_sol(&state.keypair);
+    let signer = state.keypair.pubkey_base58();
+    let producer = state.keypair.did_sol();
 
     // Build the POST_V1 artifact. The markdown body sits in the standard
     // `content` slot so `content_hash` commits to the rendered source exactly
@@ -252,7 +251,11 @@ pub fn publish_post(
     validate_artifact(&artifact, &POST_V1)
         .map_err(|e| PublishError::Internal(format!("POST_V1 validation failed: {e}")))?;
 
-    let signed = sign_artifact(&artifact, &POST_V1, &state.keypair)
+    let operator_keypair = state
+        .keypair
+        .keypair()
+        .map_err(|e| PublishError::Internal(format!("operator identity unavailable: {e:#}")))?;
+    let signed = sign_artifact(&artifact, &POST_V1, operator_keypair)
         .map_err(|e| PublishError::Internal(format!("COSE signing failed: {e}")))?;
     let content_hash = signed.content_hash;
 
@@ -387,6 +390,7 @@ fn fire_rebuild_hook(
 mod tests {
     use super::*;
     use mnemonic_core::codec::sign::verify_artifact;
+    use mnemonic_core::identity;
     use solana_sdk::signature::Keypair;
 
     #[test]

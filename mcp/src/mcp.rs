@@ -15,7 +15,6 @@ use bytes::Bytes;
 use futures::stream;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use solana_sdk::signature::Keypair;
 
 use crate::{
     api::BootstrapTickets, llm::LlmClient, payment, pending::PendingBundles,
@@ -565,7 +564,6 @@ pub fn local_storage_busy(retry_after_ms: u64) -> JsonRpcError {
 /// Production trigger lives in Task 5/6 keychain wire-up.
 ///
 /// `data` shape: `{kind, reason, repair_hint}`.
-#[allow(dead_code)]
 pub fn identity_bootstrap_failed(reason: &str, repair_hint: &str) -> JsonRpcError {
     JsonRpcError {
         code: -32094,
@@ -687,7 +685,9 @@ pub struct ParticipateCost {
 /// AttestationStore uses rusqlite (not Sync), so we wrap in std::sync::Mutex
 /// and never hold the lock across await points.
 pub struct McpState {
-    pub keypair: Keypair,
+    /// Operator identity. The secret is read from the OS keychain only when
+    /// an operation must sign (see `tools::signing_keypair`).
+    pub keypair: mnemonic_core::identity::LazyKeypair,
     pub solana: SolanaClient,
     pub arweave: ArweaveClient,
     pub store: std::sync::Mutex<SqliteStore>,
@@ -1254,7 +1254,7 @@ pub async fn mcp_handler(
     //     value is unused on those paths.
     let owner_pubkey: String = match &claims {
         Some(c) => c.sub.clone(),
-        None => mnemonic_core::identity::pubkey_base58(&state.keypair),
+        None => state.keypair.pubkey_base58(),
     };
     // Decision 12: HTTP/JWT presence is the trigger for the deferred-signing
     // branch in `tools::sign_memory`. Stdio path always passes `None` here.
@@ -1693,8 +1693,15 @@ async fn handle_tool_call(
         }
         "mnemonic_prove_identity" => {
             // Pure crypto, no DB or network
+            let keypair = match tools::signing_keypair(&state.keypair) {
+                Ok(kp) => kp,
+                Err(tools::ToolError::TypedRpc(e)) => return Err(e),
+                Err(tools::ToolError::Other(e)) => {
+                    return Err(JsonRpcError::simple(-32603, e.to_string()))
+                }
+            };
             tools::prove_identity(
-                &state.keypair,
+                keypair,
                 args["challenge"]
                     .as_str()
                     .ok_or_else(|| JsonRpcError::simple(-32603, "challenge required"))?,
@@ -2013,7 +2020,9 @@ mod transport_tests {
         let bootstrap_server_x25519_public = bootstrap_server_x25519_secret.public_key();
 
         Arc::new(McpState {
-            keypair: solana_sdk::signature::Keypair::new(),
+            keypair: mnemonic_core::identity::LazyKeypair::ready(
+                solana_sdk::signature::Keypair::new(),
+            ),
             solana: SolanaClient::new("http://localhost:0"),
             arweave: ArweaveClient::new("http://localhost:0"),
             store: std::sync::Mutex::new(store),
@@ -2256,7 +2265,7 @@ mod transport_tests {
 
         // The owner pubkey must match jwt.sub for the OAuth middleware to
         // bind the request to a real Claims extension.
-        let owner = mnemonic_core::identity::pubkey_base58(&state.keypair);
+        let owner = state.keypair.pubkey_base58();
         let body = serde_json::json!({
             "jsonrpc": "2.0",
             "id": 1,
@@ -2307,7 +2316,7 @@ mod transport_tests {
     async fn invalid_mode_string_returns_invalid_params() {
         let state = build_test_state();
         let app = build_test_router(state.clone());
-        let owner = mnemonic_core::identity::pubkey_base58(&state.keypair);
+        let owner = state.keypair.pubkey_base58();
         let body = serde_json::json!({
             "jsonrpc": "2.0",
             "id": 2,

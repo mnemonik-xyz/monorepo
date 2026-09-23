@@ -43,7 +43,6 @@ use axum::{
     Router,
 };
 use http_body_util::BodyExt;
-use mnemonic_core::identity::pubkey_base58;
 use mnemonic_core::storage::AttestationStore;
 use mnemonic_mcp::{
     api::{get_pending_handler, sign_callback_handler},
@@ -282,7 +281,7 @@ impl TestServer {
     /// tests that don't care about multi-tenancy. Equal to `claims.sub`
     /// when the test mints a JWT via `self.mint_jwt(&self.server_pubkey())`.
     pub fn server_pubkey(&self) -> String {
-        pubkey_base58(&self.state.keypair)
+        self.state.keypair.pubkey_base58()
     }
 
     /// Issue an authenticated `tools/call` to `/mcp`. Returns the parsed
