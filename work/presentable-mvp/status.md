@@ -17,7 +17,17 @@ Read order for a new session: this file → `plan.md` (design + decisions)
 | D2 | Plan, user-spec, use cases | `4f68eb5` | `plan.md`, `user-spec.md`, `docs/USE_CASES.md` |
 | D3 | Server never signs user posts | `974fd47` | `mnemonic_publish_post` / `POST /blog` need `signed_post` (hex COSE_Sign1 by the author). Operator identity only may send plain fields. Slug and artifact_id overwrite holes closed. |
 | D4 | Owner decisions + sealed-memory design | `4973417` | `plan.md` §Decisions, §Design: sealed memory |
-| D5 | CI moved to nightly | this commit | `ci.yml`, `node-test.yml`, `docs-link-check.yml`, `ext-e2e.yml`: schedule + manual only. CLAUDE.md §CI updated. |
+| D5 | CI moved to nightly | `138f81f` | `ci.yml`, `node-test.yml`, `docs-link-check.yml`, `ext-e2e.yml`: schedule + manual only. CLAUDE.md §CI updated. |
+| D6 | Hard guard: hosted transport never signs a memory | `fix(mcp): hard-guard…` | `tools::sign_memory` refuses server signing for any JWT participate write (paid, free-quota, or operator subject). Test `test_hosted_participate_never_signs_with_server_key`. |
+
+Signing model (owner rule: "MCP never signs memories"):
+- Hosted server: never signs a memory or post. It verifies the user's
+  COSE signature (`api.rs` sign-callback: kid == owner) and only signs the
+  *transport*: the Irys/Arweave upload item that wraps the user-signed bytes
+  and the Solana memo transaction as fee payer. Free quota (C1) must reuse
+  this path unchanged.
+- Local stdio binary: runs on the user's machine with the user's own key;
+  it signs only for participate/public/sealed writes, as the user.
 
 Known test failures that also fail on `main` (not caused by this branch):
 `identity::ensure::tests::ensure_rolls_back_on_partial_failure` (fails as
@@ -54,7 +64,7 @@ root), `public_read_routes::analytics_buckets_and_totals_by_write_mode`
 ### P0 code — "works for a first-time tester"
 
 - [ ] **C1 Free quota 100/week** per `owner_pubkey` (SQLite counter, rolling
-  7 days). Expose `free_anchors_left` in `mnemonic_whoami`. Gate in
+  7 days). Only on the client-signed deferred path (see Signing model). Expose `free_anchors_left` in `mnemonic_whoami`. Gate in
   `mcp/src/mcp.rs` participate path before payment.
 - [ ] **C2 SDK payment handling**: typed `PaymentRequiredError` with
   `approval_url` + amount (`packages/sdk/src/client.ts:236`); `mode` option
@@ -78,6 +88,13 @@ root), `public_read_routes::analytics_buckets_and_totals_by_write_mode`
 - [ ] **S4** `mnemonic_import` (verify, decrypt, store locally with
   `received_from`), anonymous `mnemonic_verify` by hash / link.
 - [ ] **S5** Webapp `/m/:hash` page with in-browser signature check.
+
+### Security
+
+- [ ] **X1** Webapp→CLI key handoff (`api.rs` `finalize_redeem`, Webapp
+  origin) passes the user's secret through the server in plain form
+  (in memory, short-lived ticket). Make it end-to-end wrapped like the
+  Cli-origin flow, so the server never sees a user secret.
 
 ### Ops
 

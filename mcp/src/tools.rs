@@ -408,6 +408,18 @@ pub async fn sign_memory(
             .map_err(ToolError::Other);
         }
     }
+    // Hard invariant: on the hosted transport (any JWT caller) the server
+    // NEVER produces a memory signature — not for paid writes, not for
+    // free-quota writes, not for the operator's own subject. The only inline
+    // path left for a JWT caller is an explicit-local self write, which
+    // stores a hash and signs nothing. Participate writes over HTTP are
+    // always client-signed via the deferred path above.
+    if jwt_sub.is_some() && resolved.write_mode == WriteMode::Participate {
+        return Err(ToolError::Other(anyhow::anyhow!(
+            "refusing server-side memory signing on the hosted transport; \
+             participate writes must be client-signed"
+        )));
+    }
     let inline_result = sign_memory_inline(
         keypair,
         solana,
@@ -2257,6 +2269,48 @@ mod sign_memory_tests {
         assert!(result["content_hash"].is_string());
         let s = store.lock().unwrap();
         assert_eq!(s.count(&owner).unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_hosted_participate_never_signs_with_server_key() {
+        // Even when the JWT subject IS the operator identity (the one case
+        // that used to be allowed), a participate write over the hosted
+        // transport must go to client signing, never to the server key.
+        let (kp, sol, ar, store, emb, comp, pending, hint) = fixtures();
+        let operator = LazyKeypair::deferred(kp.pubkey(), || {
+            panic!("server key must not be loaded for a hosted memory write")
+        });
+        let owner = kp.pubkey().to_string();
+        let resolved = resolve_write_mode(Some(&serde_json::json!("participate")), "full").unwrap();
+        let (hosted_client, args) = no_softfall();
+        let env = Envelope::from_config("full", "none", 0);
+        let result = sign_memory(
+            &operator,
+            &sol,
+            &ar,
+            &store,
+            &emb,
+            &comp,
+            &pending,
+            "hosted participate",
+            &[],
+            &hint,
+            "full",
+            &owner,
+            Some(&owner),
+            resolved,
+            Visibility::Private,
+            &env,
+            std::time::Duration::from_secs(15),
+            false,
+            "",
+            &hosted_client,
+            &args,
+        )
+        .await
+        .unwrap();
+        assert_eq!(result["status"], "awaiting_signature", "{result}");
+        assert!(!operator.is_loaded());
     }
 
     #[tokio::test]
