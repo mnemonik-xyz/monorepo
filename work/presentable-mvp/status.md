@@ -34,6 +34,9 @@ Known test failures that also fail on `main` (not caused by this branch):
 root), `public_read_routes::analytics_buckets_and_totals_by_write_mode`
 (date-dependent).
 
+Working rule (owner): small PRs, push often. One PR per backlog item,
+branched from `main` unless it depends on #224.
+
 ## Owner decisions (2026-09-23) — do not re-ask
 
 1. Server never signs user content.
@@ -51,7 +54,7 @@ root), `public_read_routes::analytics_buckets_and_totals_by_write_mode`
 
 ### Documents (next)
 
-- [ ] **B1 Simplified whitepaper** in ASD-STE100 style → `docs/WHITEPAPER-SIMPLE.md`.
+- [x] **B1 Simplified whitepaper** — PR #225 (branch `claude/whitepaper-ste`). in ASD-STE100 style → `docs/WHITEPAPER-SIMPLE.md`.
   Source: `docs/WHITEPAPER.md`. Rules to apply: one topic per sentence,
   max 20 words per procedural sentence / 25 per descriptive, active voice,
   approved simple verbs, no idioms, define every abbreviation on first use.
