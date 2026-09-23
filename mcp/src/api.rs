@@ -2254,6 +2254,7 @@ fn parse_publish_json(body: &[u8]) -> Result<PublishInput, String> {
             body_markdown: micropub_content(props.get("content")).unwrap_or_default(),
             tags: value_to_str_vec(props.get("category")),
             author: value_first_str(props.get("author")),
+            signed_post: None,
         });
     }
 
@@ -2276,6 +2277,12 @@ fn parse_publish_json(body: &[u8]) -> Result<PublishInput, String> {
             .get("author")
             .and_then(|x| x.as_str())
             .map(|s| s.to_string()),
+        signed_post: match v.get("signed_post").and_then(|x| x.as_str()) {
+            Some(h) => {
+                Some(hex::decode(h.trim()).map_err(|_| "signed_post must be hex".to_string())?)
+            }
+            None => None,
+        },
     })
 }
 
@@ -2312,6 +2319,9 @@ fn parse_micropub_form(body: &[u8]) -> PublishInput {
         body_markdown,
         tags,
         author,
+        // Form posts cannot carry a signature: accepted only from the
+        // operator's own identity (see `publish::publish_post`).
+        signed_post: None,
     }
 }
 

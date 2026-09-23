@@ -959,7 +959,7 @@ fn tool_definitions() -> Value {
         },
         {
             "name": "mnemonic_publish_post",
-            "description": "Publishes a blog post as a signed PUBLIC attestation (agent-native publishing, webapp-rethink Decision 5). The post is signed with COSE_Sign1 (Ed25519) by the server identity, stored as a free `local` public attestation (no x402, no on-chain anchoring in V1), and listed at GET /blog. Requires authentication (OAuth2 Bearer / Ed25519). Returns the created post {slug, title, body_markdown, tags, author, attestation_id, content_hash, published_at}.",
+            "description": "Publishes a blog post as a signed PUBLIC attestation (agent-native publishing, webapp-rethink Decision 5). The post MUST be signed by the caller: pass `signed_post` = hex COSE_Sign1 (Ed25519, kid = your pubkey) over the canonical-CBOR POST_V1 artifact; title/body/tags/author are then read from the signed payload. The server never signs on your behalf (only the operator's own identity may send plain fields). Stored as a free `local` public attestation (no x402, no on-chain anchoring in V1), and listed at GET /blog. Requires authentication (OAuth2 Bearer / Ed25519). Returns the created post {slug, title, body_markdown, tags, author, attestation_id, content_hash, published_at}.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -967,8 +967,9 @@ fn tool_definitions() -> Value {
                     "body_markdown": {"type": "string", "description": "Post body as Markdown (rendered client-side; content_hash commits to this source)"},
                     "tags": {"type": "array", "items": {"type": "string"}, "description": "Optional tags"},
                     "author": {"type": "string", "description": "Optional human-readable agent/display name; defaults to the caller's identity. Distinct from the cryptographic signer (producer)."},
+                    "signed_post": {"type": "string", "description": "Hex COSE_Sign1 over the canonical-CBOR POST_V1 artifact, signed with YOUR key (producer = did:sol:<your pubkey>, slug = slugified title). Required unless you are the operator identity."},
                 },
-                "required": ["title", "body_markdown"],
+                "required": [],
             },
         },
     ]);
@@ -1861,23 +1862,20 @@ async fn handle_tool_call(
                     "mnemonic_publish_post requires authentication".to_string(),
                 ));
             };
-            let title = args
-                .get("title")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| {
-                    invalid_params("title", &args.get("title").cloned().unwrap_or(Value::Null))
-                })?
-                .to_string();
-            let body_markdown = args
-                .get("body_markdown")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| {
-                    invalid_params(
-                        "body_markdown",
-                        &args.get("body_markdown").cloned().unwrap_or(Value::Null),
-                    )
-                })?
-                .to_string();
+            // With `signed_post`, title/body come from the signed payload.
+            let has_signed = args.get("signed_post").is_some();
+            let str_arg = |k: &str| -> Result<String, JsonRpcError> {
+                match args.get(k).and_then(|v| v.as_str()) {
+                    Some(v) => Ok(v.to_string()),
+                    None if has_signed => Ok(String::new()),
+                    None => Err(invalid_params(
+                        k,
+                        &args.get(k).cloned().unwrap_or(Value::Null),
+                    )),
+                }
+            };
+            let title = str_arg("title")?;
+            let body_markdown = str_arg("body_markdown")?;
             let tags: Vec<String> = args
                 .get("tags")
                 .and_then(|t| t.as_array())
@@ -1891,11 +1889,19 @@ async fn handle_tool_call(
                 .get("author")
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string());
+            let signed_post = match args.get("signed_post").and_then(|v| v.as_str()) {
+                Some(h) => Some(
+                    hex::decode(h.trim())
+                        .map_err(|_| invalid_params("signed_post", &args["signed_post"]))?,
+                ),
+                None => None,
+            };
             let input = crate::publish::PublishInput {
                 title,
                 body_markdown,
                 tags,
                 author,
+                signed_post,
             };
             let post =
                 crate::publish::publish_post(state, sub, input).map_err(|e| e.to_json_rpc())?;
