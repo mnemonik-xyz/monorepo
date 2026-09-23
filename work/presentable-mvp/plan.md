@@ -119,3 +119,61 @@ A2A (agent-to-agent) bridge stays in `work/a2a-bridge` as spec.
 3. Can a sharer delete/revoke? (proposal: hide from `/m` page; signature
    copies already imported stay valid — say so in UI)
 4. Keep `mnemonic_publish_post` or fold it into `mnemonic_share`?
+
+## Decisions 2026-09-23 (owner)
+
+1. Server never signs user content. Memory writes already client-signed;
+   posts fixed in `974fd47` (`signed_post` required; operator-only
+   plain fields; slug / artifact_id overwrite holes closed).
+2. Plan P0/P1 accepted.
+3. Shared memories are **private by default**: hash anchored on Solana,
+   ciphertext on Arweave, readable only by the intended reader(s).
+4. Free anchoring quota: **100 per identity per week**.
+5. **Public memories** exist too: plaintext, signed, readable by anyone.
+6. Listed vs unlisted is irrelevant for public memories.
+7. No revocation: anchored data is permanent. Arweave node operators can
+   filter data by their own content policies, but that is not a delete
+   the author controls (docs.arweave.org/developers/llms-full.txt).
+
+## Design: sealed memory, reader chosen later
+
+Problem: the author must anchor now, but may not know the reader yet.
+
+Envelope encryption (same idea as HPKE, RFC 9180):
+
+1. **Seal at write time.** Generate a random content key `K` per memory.
+   Encrypt the canonical CBOR with `K` (XChaCha20-Poly1305). Anchor
+   `blake3(ciphertext)` + author signature. Upload ciphertext to Arweave.
+   `K` is wrapped to the **author's own** X25519 key (derived from the
+   Ed25519 identity), so only the author can open it now.
+2. **Grant later.** When a reader appears, the author wraps `K` to the
+   reader's public key: a small signed `grant` record
+   `{memory_hash, reader_pubkey, wrapped_K}`. No re-upload of the memory.
+   Grants travel off-chain (link, A2A message) or are anchored (costs one
+   quota unit).
+3. **Grant by link (reader has no key yet).** Put `K` in the URL fragment:
+   `mnemonik.xyz/m/<hash>#k=<K>`. Browsers do not send the fragment to
+   the server (RFC 3986 §3.5), so the server never sees `K`. Whoever holds
+   the link can read: a bearer capability. The reader's agent imports it
+   and re-wraps `K` to its own key.
+4. **Options for later (P2+).**
+   - Delegation without the author online: threshold proxy re-encryption
+     (e.g. Umbral, github.com/nucypher/pyUmbral).
+   - Time release ("open after date X"): timelock encryption over drand
+     (github.com/drand/tlock).
+
+Consequences:
+- Privacy: hash the **ciphertext**, not the plaintext, so short secrets
+  cannot be confirmed by guessing.
+- No revocation of a granted `K`; a new version gets a new `K`.
+- Recall on the reader side uses the local decrypted copy + local
+  embedding; encrypted bytes on Arweave stay proof of existence only.
+- TurboQuant/embeddings never leave the device for sealed memories.
+
+Modes after this change:
+
+| Mode | Where | Who can read | Cost |
+|---|---|---|---|
+| `local` | device SQLite | author | free |
+| `sealed` | Arweave ciphertext + Solana hash | author + granted readers | quota, then paid |
+| `public` | Arweave plaintext + Solana hash | anyone | quota, then paid |
