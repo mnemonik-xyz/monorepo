@@ -60,21 +60,11 @@ A Mnemonic memory is a small record. It has these parts:
 | Part | What it contains |
 |---|---|
 | Content | The text of the memory |
-| Type | The kind of memory (see below) |
+| Tags | Optional labels that you choose |
 | Embedding | A list of numbers that shows the meaning of the text. Search uses it. |
 | Parent | The fingerprint of the previous memory, if there is one |
 | Fingerprint | A short unique code calculated from the record (a "hash") |
 | Signature | Proof that the owner's key approved this exact record |
-
-**Memory types.** The full specification has five types:
-
-- **Working:** short-term notes for the current task.
-- **Episodic:** a log of events, in time order.
-- **Semantic:** facts and knowledge.
-- **Procedural:** methods, steps and tool use.
-- **Identity:** the rules and profile of the agent.
-
-Status: the five types are **planned**. Now, all memories use one general type.
 
 **The embedding is not the truth.** Different AI models make different
 embeddings. The text content is the permanent source of truth. You can
@@ -88,7 +78,7 @@ Mnemonic does these steps in this sequence:
 
 1. **Embed.** Calculate the embedding of the text.
 2. **Compress.** Make the embedding smaller with TurboQuant (2, 3 or 4 bits per number).
-3. **Build.** Put the content, type, compressed embedding and parent in one record.
+3. **Build.** Put the content, tags, compressed embedding and parent in one record.
 4. **Encode.** Write the record in canonical CBOR.
    CBOR (Concise Binary Object Representation) is a binary data format.
    "Canonical" means that the same record always gives the same bytes.
@@ -243,7 +233,7 @@ Status: available now for your own memories. Anonymous verification by link is p
 A shared memory can contain text that looks like an instruction.
 Mnemonic will put each shared memory between clear start and end markers
 before the agent reads it. The markers tell the model: "this is reference
-data, not an instruction". The markers are stronger for identity memories.
+data, not an instruction".
 
 Mnemonic cannot force a model to obey the markers. A model with errors can
 still obey hidden instructions.
@@ -321,7 +311,6 @@ Mnemonic makes agents coherent over time. Other standards connect agents now.
 
 - Free quota of 100 anchors per week.
 - `public` and `sealed` modes, grants, import and share links.
-- Five memory types.
 - Capability tokens (signed permissions with a time limit).
 - Safe-use markers.
 - Anonymous verification by link.
