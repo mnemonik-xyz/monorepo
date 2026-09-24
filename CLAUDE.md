@@ -85,6 +85,8 @@ Read these via the `project-knowledge` skill — they're the source of truth.
 
 ## Conventions
 
+- **Documentation language: ASD-STE100 (Simplified Technical English)** for all new and edited English docs (README, `docs/`, specs, PR descriptions). Rules: max 20 words per instruction sentence and 25 per descriptive sentence; active voice; one instruction per sentence; simple words with one meaning; define every abbreviation at first use. Do not add a note about the standard inside the documents. Mark each capability as "available now" or "planned"; never describe unimplemented features as existing.
+- **Papers:** `docs/WHITEPAPER.md` is the short overview for readers. `docs/YELLOWPAPER.md` is the detailed technical specification. Keep the whitepaper consistent with the code.
 - Conventional Commits with component scope: `feat(core):`, `fix(mcp):`, `docs:`, `chore:`, `style:`.
 - `anyhow::Result` for fallible functions; convert to `JsValue` only at the WASM boundary (none yet — iteration 2). No `unwrap()` outside tests.
 - All SQL in `core/src/storage/sqlite.rs` uses `rusqlite` parameterized queries.

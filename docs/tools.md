@@ -395,4 +395,4 @@ Payment applies only on HTTP, only in `full` mode, and only to
 - [`packages/cli/README.md`](../packages/cli/README.md) — every CLI command
 - [`packages/sdk/README.md`](../packages/sdk/README.md) — TypeScript SDK + OAuth
 - [AGENTS.md](../AGENTS.md) — agent-facing service card
-- [Whitepaper](./WHITEPAPER.md) — §5 architecture, §6 artifact model, §7 trust
+- [Yellow paper](./YELLOWPAPER.md) — §5 architecture, §6 artifact model, §7 trust
