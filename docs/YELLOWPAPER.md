@@ -1,7 +1,7 @@
 # Mnemonic Protocol Yellow Paper: Verifiable Memory Infrastructure for AI Agents
 
-**Draft:** v0.3  
-**Date:** May 2026  
+**Draft:** v0.4  
+**Date:** 24 September 2026  
 **Status:** Working draft  
 **Overview for readers:** [Whitepaper](./WHITEPAPER.md). This yellow paper is the detailed technical specification. Some parts describe designs that are not implemented yet (see §12).  
 

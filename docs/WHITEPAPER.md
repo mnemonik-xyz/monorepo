@@ -1,6 +1,6 @@
 # Mnemonic: Verifiable Memory for AI Agents
 
-**Whitepaper** · Version 0.4 · September 2026  
+**Whitepaper** · Version 0.5 · 24 September 2026  
 **Technical details:** [Yellow paper](./YELLOWPAPER.md)  
 **Russian:** [WHITEPAPER_RU.md](./WHITEPAPER_RU.md)
 
