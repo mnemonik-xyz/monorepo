@@ -172,10 +172,13 @@ async fn artifacts_lists_all_memories_blog_lists_only_posts() {
     let oauth_state = Arc::new(OAuthState::with_defaults(TEST_SECRET));
     let state = mock_state();
     seed_public_and_private(&state, "owner-pubkey-1");
+    // Operator identity: the only caller allowed to publish plain fields
+    // (its own key signs). User publishes must be client-signed.
+    let operator = state.keypair.pubkey_base58();
     let app = build_router(state, oauth_state.clone());
 
     // A published post coexists with the seeded rows.
-    let token = oauth::issue_jwt(&oauth_state, "PublisherAgent").expect("issue_jwt");
+    let token = oauth::issue_jwt(&oauth_state, &operator).expect("issue_jwt");
     let (status, _h, _b) = send(
         &app,
         post_blog_json(
@@ -229,8 +232,11 @@ async fn artifacts_lists_all_memories_blog_lists_only_posts() {
 #[tokio::test]
 async fn republish_same_title_replaces_row_across_surfaces() {
     let oauth_state = Arc::new(OAuthState::with_defaults(TEST_SECRET));
-    let app = build_router(mock_state(), oauth_state.clone());
-    let token = oauth::issue_jwt(&oauth_state, "EditorAgent").expect("issue_jwt");
+    let state = mock_state();
+    // Operator identity: the only caller allowed to publish plain fields.
+    let operator = state.keypair.pubkey_base58();
+    let app = build_router(state, oauth_state.clone());
+    let token = oauth::issue_jwt(&oauth_state, &operator).expect("issue_jwt");
 
     // v1 via the MCP tool.
     let (status, _v) = tools_call_publish(
@@ -276,7 +282,10 @@ async fn republish_same_title_replaces_row_across_surfaces() {
 #[tokio::test]
 async fn anonymous_rejected_then_single_bearer_authorises_both_surfaces() {
     let oauth_state = Arc::new(OAuthState::with_defaults(TEST_SECRET));
-    let app = build_router(mock_state(), oauth_state.clone());
+    let state = mock_state();
+    // Operator identity: the only caller allowed to publish plain fields.
+    let operator = state.keypair.pubkey_base58();
+    let app = build_router(state, oauth_state.clone());
 
     // Anonymous → 401 on the HTTP surface and the MCP tool surface.
     let (status, _h, _b) = send(
@@ -294,7 +303,7 @@ async fn anonymous_rejected_then_single_bearer_authorises_both_surfaces() {
     );
 
     // One bearer authorises a publish on each surface.
-    let token = oauth::issue_jwt(&oauth_state, "DualSurfaceAgent").expect("issue_jwt");
+    let token = oauth::issue_jwt(&oauth_state, &operator).expect("issue_jwt");
     let (status, _h, _b) = send(
         &app,
         post_blog_json(
@@ -330,8 +339,11 @@ async fn anonymous_rejected_then_single_bearer_authorises_both_surfaces() {
 #[tokio::test]
 async fn publish_rate_limit_trips_after_quota() {
     let oauth_state = Arc::new(OAuthState::with_defaults(TEST_SECRET));
-    let app = build_router(mock_state(), oauth_state.clone());
-    let token = oauth::issue_jwt(&oauth_state, "FloodAgent").expect("issue_jwt");
+    let state = mock_state();
+    // Operator identity: the only caller allowed to publish plain fields.
+    let operator = state.keypair.pubkey_base58();
+    let app = build_router(state, oauth_state.clone());
+    let token = oauth::issue_jwt(&oauth_state, &operator).expect("issue_jwt");
 
     for i in 0..10 {
         let (status, _h, _b) = send(
@@ -360,63 +372,121 @@ async fn publish_rate_limit_trips_after_quota() {
     );
 }
 
-/// The attestation a publish signs is VERIFIABLE end-to-end: drive the LIVE
-/// `publish::publish_post` pipeline, then reconstruct the POST_V1 artifact from
-/// only the returned `BlogPost` fields + the server signer, re-sign, and prove
-/// (a) the content_hash is reproducible from the published projection and
-/// (b) the COSE_Sign1 envelope verifies against that hash. Distinct from the
-/// `publish.rs` unit test, which hand-builds an artifact instead of using the
-/// live path's output.
+/// Publish is non-custodial: the AUTHOR signs the POST_V1, the live pipeline
+/// only verifies it. The stored content_hash is the author's signed hash, and
+/// the signer of record is the author, never the server.
 #[tokio::test]
-async fn published_attestation_is_verifiable_via_live_path() {
-    use mnemonic_core::codec::schema::{validate_artifact, POST_V1};
-    use mnemonic_core::codec::sign::{sign_artifact, verify_artifact};
-    use mnemonic_core::identity;
+async fn published_attestation_is_author_signed_via_live_path() {
+    use mnemonic_core::codec::sign::verify_artifact;
+    use mnemonic_mcp::test_support::sign_post;
+    use solana_sdk::signature::{Keypair, Signer};
 
     let state = mock_state();
+    let author = Keypair::new();
+    let author_pk = author.pubkey().to_string();
+    let cose = sign_post(
+        &author,
+        "Verifiable Post",
+        "# Heading\n\nverifiable body",
+        &["proof"],
+        "Author Name",
+    );
+    let expected = verify_artifact(&cose, None).expect("verify");
+
     let post = publish::publish_post(
         &state,
-        "AuthorPubkey",
+        &author_pk,
         PublishInput {
-            title: "Verifiable Post".into(),
-            body_markdown: "# Heading\n\nverifiable body".into(),
-            tags: vec!["proof".into()],
-            author: Some("Author Name".into()),
+            title: String::new(),
+            body_markdown: String::new(),
+            tags: vec![],
+            author: None,
+            signed_post: Some(cose),
         },
     )
     .expect("live publish");
 
-    // content_hash must be a 64-char blake3 hex.
-    assert_eq!(
-        post.content_hash.len(),
-        64,
-        "blake3 hex: {}",
-        post.content_hash
-    );
+    assert_eq!(post.content_hash, expected.content_hash);
+    assert_eq!(post.title, "Verifiable Post");
+    assert_eq!(post.author, "Author Name");
+    assert_ne!(author_pk, state.keypair.pubkey_base58());
+}
 
-    // Reconstruct the exact POST_V1 artifact the live path signed, using only
-    // fields exposed on the returned BlogPost plus the server's signer identity.
-    let artifact = json!({
-        "artifact_id": post.attestation_id,
-        "type": "post",
-        "schema_version": 1,
-        "title": post.title,
-        "slug": post.slug,
-        "content": post.body_markdown,
-        "author": post.author,
-        "published_at": post.published_at,
-        "tags": post.tags,
-        "created_at": post.published_at,
-        "producer": identity::did_sol(&state.keypair),
-    });
-    validate_artifact(&artifact, &POST_V1).expect("POST_V1 validates");
-    let signed = sign_artifact(&artifact, &POST_V1, &state.keypair).expect("sign");
+/// A non-operator caller sending plain fields is refused: the server must
+/// never sign a post on a user's behalf.
+#[tokio::test]
+async fn unsigned_publish_from_user_is_rejected() {
+    let state = mock_state();
+    let err = publish::publish_post(
+        &state,
+        "SomeUserPubkey",
+        PublishInput {
+            title: "Forged".into(),
+            body_markdown: "server must not sign this".into(),
+            tags: vec![],
+            author: None,
+            signed_post: None,
+        },
+    )
+    .expect_err("must reject");
+    assert!(err.message().contains("signed_post"), "{}", err.message());
+}
 
-    assert_eq!(
-        signed.content_hash, post.content_hash,
-        "live publish content_hash must be reproducible from the projection"
+/// A post signed by one key cannot be published under another identity.
+#[tokio::test]
+async fn signed_post_from_other_identity_is_rejected() {
+    use mnemonic_mcp::test_support::sign_post;
+    use solana_sdk::signature::Keypair;
+
+    let state = mock_state();
+    let cose = sign_post(&Keypair::new(), "Stolen", "body", &[], "x");
+    let err = publish::publish_post(
+        &state,
+        "VictimPubkey",
+        PublishInput {
+            title: String::new(),
+            body_markdown: String::new(),
+            tags: vec![],
+            author: None,
+            signed_post: Some(cose),
+        },
+    )
+    .expect_err("must reject");
+    assert!(
+        err.message().contains("does not match"),
+        "{}",
+        err.message()
     );
-    let result = verify_artifact(&signed.cose_bytes, Some(&post.content_hash)).expect("verify");
-    assert!(result.valid, "published POST_V1 COSE must verify");
-    assert_eq!(result.signer, identity::pubkey_base58(&state.keypair));
+}
+
+/// One author cannot overwrite another author's post by reusing its title.
+#[tokio::test]
+async fn other_author_cannot_replace_post_by_same_slug() {
+    use mnemonic_mcp::test_support::sign_post;
+    use solana_sdk::signature::{Keypair, Signer};
+
+    let state = mock_state();
+    let publish = |kp: &Keypair, body: &str| {
+        publish::publish_post(
+            &state,
+            &kp.pubkey().to_string(),
+            PublishInput {
+                title: String::new(),
+                body_markdown: String::new(),
+                tags: vec![],
+                author: None,
+                signed_post: Some(sign_post(kp, "Shared Title", body, &[], "")),
+            },
+        )
+    };
+    let alice = Keypair::new();
+    let mallory = Keypair::new();
+    publish(&alice, "original").expect("alice publishes");
+    let err = publish(&mallory, "hijack").expect_err("mallory must be refused");
+    assert!(
+        err.message().contains("another author"),
+        "{}",
+        err.message()
+    );
+    publish(&alice, "edited").expect("owner may replace own post");
 }

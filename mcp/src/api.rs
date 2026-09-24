@@ -507,11 +507,20 @@ pub async fn sign_callback_handler(
         {
             existing
         } else {
+            let operator_keypair = match state.keypair.keypair() {
+                Ok(kp) => kp,
+                Err(e) => {
+                    return error_resp(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        &format!("operator identity unavailable: {e:#}"),
+                    );
+                }
+            };
             let uploaded = match state
                 .arweave
                 .write_item(
                     &cose_bytes,
-                    &state.keypair,
+                    operator_keypair,
                     &[
                         ("Producer", producer_did.as_str()),
                         ("Created-At", now.as_str()),
@@ -589,9 +598,18 @@ pub async fn sign_callback_handler(
             }
             existing
         } else {
+            let operator_keypair = match state.keypair.keypair() {
+                Ok(kp) => kp,
+                Err(e) => {
+                    return error_resp(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        &format!("operator identity unavailable: {e:#}"),
+                    );
+                }
+            };
             let submitted = match state
                 .solana
-                .submit_memo(&state.keypair, &memo.to_string())
+                .submit_memo(operator_keypair, &memo.to_string())
                 .await
             {
                 Ok(signature) => signature,
@@ -2236,6 +2254,7 @@ fn parse_publish_json(body: &[u8]) -> Result<PublishInput, String> {
             body_markdown: micropub_content(props.get("content")).unwrap_or_default(),
             tags: value_to_str_vec(props.get("category")),
             author: value_first_str(props.get("author")),
+            signed_post: None,
         });
     }
 
@@ -2258,6 +2277,12 @@ fn parse_publish_json(body: &[u8]) -> Result<PublishInput, String> {
             .get("author")
             .and_then(|x| x.as_str())
             .map(|s| s.to_string()),
+        signed_post: match v.get("signed_post").and_then(|x| x.as_str()) {
+            Some(h) => {
+                Some(hex::decode(h.trim()).map_err(|_| "signed_post must be hex".to_string())?)
+            }
+            None => None,
+        },
     })
 }
 
@@ -2294,6 +2319,9 @@ fn parse_micropub_form(body: &[u8]) -> PublishInput {
         body_markdown,
         tags,
         author,
+        // Form posts cannot carry a signature: accepted only from the
+        // operator's own identity (see `publish::publish_post`).
+        signed_post: None,
     }
 }
 

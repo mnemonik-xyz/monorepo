@@ -135,7 +135,7 @@ pub fn mock_state() -> Arc<McpState> {
         approval_chain_name: String::new(),
         approval_chain_currency_symbol: "ETH".to_string(),
         approval_chain_currency_decimals: 18,
-        keypair: Keypair::new(),
+        keypair: mnemonic_core::identity::LazyKeypair::ready(Keypair::new()),
         solana: SolanaClient::new("http://localhost:0"),
         arweave: ArweaveClient::new("http://localhost:0"),
         store: std::sync::Mutex::new(store),
@@ -240,7 +240,7 @@ pub fn mock_state_with(
         approval_chain_name: String::new(),
         approval_chain_currency_symbol: "ETH".to_string(),
         approval_chain_currency_decimals: 18,
-        keypair: Keypair::new(),
+        keypair: mnemonic_core::identity::LazyKeypair::ready(Keypair::new()),
         solana: SolanaClient::new("http://localhost:0"),
         arweave: ArweaveClient::new("http://localhost:0"),
         store: std::sync::Mutex::new(store),
@@ -351,7 +351,7 @@ pub fn mock_state_for_delivery(
         approval_chain_name: String::new(),
         approval_chain_currency_symbol: "ETH".to_string(),
         approval_chain_currency_decimals: 18,
-        keypair: Keypair::new(),
+        keypair: mnemonic_core::identity::LazyKeypair::ready(Keypair::new()),
         solana: SolanaClient::new(solana_rpc_url),
         arweave: ArweaveClient::new(arweave_url),
         store: std::sync::Mutex::new(store),
@@ -463,7 +463,7 @@ pub fn mock_state_with_embedder_and_endpoint(
         approval_chain_name: String::new(),
         approval_chain_currency_symbol: "ETH".to_string(),
         approval_chain_currency_decimals: 18,
-        keypair: Keypair::new(),
+        keypair: mnemonic_core::identity::LazyKeypair::ready(Keypair::new()),
         solana: SolanaClient::new("http://localhost:0"),
         arweave: ArweaveClient::new("http://localhost:0"),
         store: std::sync::Mutex::new(store),
@@ -542,4 +542,28 @@ pub fn mint_jwt(sub: &str, secret: &[u8]) -> String {
         &EncodingKey::from_secret(secret),
     )
     .expect("JWT encode")
+}
+
+/// Build a client-signed `POST_V1` (COSE_Sign1 bytes) the way an SDK would:
+/// the AUTHOR's key signs, the server only verifies (non-custodial publish).
+pub fn sign_post(kp: &Keypair, title: &str, body: &str, tags: &[&str], author: &str) -> Vec<u8> {
+    use mnemonic_core::codec::schema::POST_V1;
+    use mnemonic_core::codec::sign::sign_artifact;
+    let now = Utc::now().to_rfc3339();
+    let artifact = serde_json::json!({
+        "artifact_id": Uuid::new_v4().to_string(),
+        "type": "post",
+        "schema_version": 1,
+        "title": title,
+        "slug": crate::publish::slugify(title),
+        "content": body,
+        "author": author,
+        "published_at": now,
+        "tags": tags,
+        "created_at": now,
+        "producer": mnemonic_core::identity::did_sol(kp),
+    });
+    sign_artifact(&artifact, &POST_V1, kp)
+        .expect("sign POST_V1")
+        .cose_bytes
 }

@@ -94,13 +94,13 @@ Read these via the `project-knowledge` skill — they're the source of truth.
 
 ## CI
 
-`.github/workflows/ci.yml` runs on push to `main` and every PR: rustfmt check, clippy with `-D warnings`, `cargo test --workspace`, gitleaks (working tree + full history). `.github/workflows/release.yml` runs on `v*` tags: cross-compile mcp binary, build Docker image, publish to GHCR/crates.io. Toolchain pinned via `rust-toolchain.toml`.
+`.github/workflows/ci.yml` runs **nightly (02:00 UTC) and on manual dispatch only** — PR and push triggers are off since 2026-09-23 (owner decision: PRs merge without waiting on CI). Same for `node-test.yml` (02:30), `docs-link-check.yml` (03:00) and `ext-e2e.yml` (03:30). Jobs: rustfmt check, clippy with `-D warnings`, `cargo test --workspace`, gitleaks (working tree + full history). Because nothing gates a PR, run the fast local checks (fmt, clippy, changed-crate tests) before pushing, and check the nightly result the next morning. `.github/workflows/release.yml` runs on `v*` tags: cross-compile mcp binary, build Docker image, publish to GHCR/crates.io. Toolchain pinned via `rust-toolchain.toml`.
 
 ### CI gate policy
 
 The cross-language interop coverage is intentionally split into two jobs with different gate semantics — do not collapse them or flip the toggles without following the procedure below.
 
-- **`cross-lang-build (gate)`** — hard required gate. Builds the Rust binaries + SDK WASM + CLI dist that the keychain interop test would need. Deterministic. Never carries `continue-on-error`. If this is red, real build infra is broken (e.g. wasm-pack missing, libdbus header gone) and the PR must block.
+- **`cross-lang-build (gate)`** — hard gate *of the nightly run* (PR gating is off, see above). Builds the Rust binaries + SDK WASM + CLI dist that the keychain interop test would need. Deterministic. Never carries `continue-on-error`. If this is red, real build infra is broken (e.g. wasm-pack missing, libdbus header gone) and the PR must block.
 - **`cross-lang-keychain (informational)`** — `needs: cross-lang-build`, permanently `continue-on-error: true`. Drives the actual Rust ↔ Node keychain roundtrip under a CI-spawned `gnome-keyring` + D-Bus session. Sub-test B has an unresolved daemon-coupling issue on Ubuntu 24.04 (see commit `fde7f72` — survived 5 rounds of debugging). The job stays in the matrix as a visible signal but does not gate.
 
 **Yo-yo prevention rule:** the `continue-on-error: true` on `cross-lang-keychain` is permanent until the daemon-coupling sub-test B is fixed upstream. Do not flip it on/off — that pattern previously masked a `wasm-pack`-missing build regression that shipped to main untouched during PR #151. If you believe the test is now stable enough to gate, the procedure is:

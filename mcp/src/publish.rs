@@ -7,12 +7,15 @@
 //! drift in signing, persistence, or validation semantics.
 //!
 //! Pipeline (reuses the Task-7 core API exactly):
-//!   1. build a `POST_V1` JSON artifact (markdown body in the standard
-//!      `content` slot so `content_hash` commits to the rendered source);
-//!      `producer` = the server's Ed25519 signer, `author` = the caller's
-//!      agent/display name.
-//!   2. `codec::schema::validate_artifact(&json, &POST_V1)`
-//!   3. `codec::sign::sign_artifact(&json, &POST_V1, &keypair)`
+//!   1. the caller sends `signed_post`: a COSE_Sign1 over a canonical-CBOR
+//!      `POST_V1` artifact, signed with the CALLER's own Ed25519 key
+//!      (`producer` = `did:sol:<caller>`, `author` = display name).
+//!   2. verify signature, canonical encoding and schema; the COSE `kid` MUST
+//!      equal the authenticated caller. The server NEVER signs a post on a
+//!      user's behalf (non-custodial invariant, same as memory writes).
+//!      Only the operator's own identity may send plain fields and have the
+//!      server sign with its own key.
+//!   3. `content_hash` = blake3 of the signed canonical payload.
 //!   4. persist the attestation with `Visibility::Public` + `WriteMode::Local`
 //!      (Decision 9 — a V1 post is a FREE `local` public write; it is NOT a
 //!      `participate` on-chain write, so it never touches x402).
@@ -23,9 +26,9 @@
 //! `oauth/mod.rs`), independent of x402. Anonymous publish is rejected before
 //! reaching this module.
 
+use mnemonic_core::codec::canonical::{from_canonical_cbor, to_canonical_cbor};
 use mnemonic_core::codec::schema::{validate_artifact, POST_V1};
-use mnemonic_core::codec::sign::sign_artifact;
-use mnemonic_core::identity;
+use mnemonic_core::codec::sign::{sign_artifact, verify_artifact};
 use mnemonic_core::storage::{AttestationStore, BlogPost, Visibility, WriteMode};
 
 use crate::mcp::McpState;
@@ -57,7 +60,17 @@ pub struct PublishInput {
     /// Optional human-readable agent/display name. Falls back to the caller's
     /// authenticated identity when absent.
     pub author: Option<String>,
+    /// COSE_Sign1 bytes over the canonical-CBOR `POST_V1` artifact, signed by
+    /// the caller's own key. Required for every caller except the operator's
+    /// own identity. When present, the fields above are ignored: title, body,
+    /// tags and author come from the signed payload.
+    pub signed_post: Option<Vec<u8>>,
 }
+
+/// Error text for a publish without a client signature.
+pub const SIGNED_POST_REQUIRED: &str = "publish requires `signed_post`: a COSE_Sign1 over the \
+     canonical-CBOR POST_V1 artifact, signed with your own key. The server never signs on \
+     your behalf.";
 
 /// Failure modes of [`publish_post`]. Each caller maps these to its own
 /// transport: the MCP tool to a `JsonRpcError`, `POST /blog` to an HTTP status.
@@ -210,51 +223,24 @@ pub fn publish_post(
         return Err(PublishError::RateLimited);
     }
 
-    let (title, body, tags, author_raw) = validate_input(&input)?;
-    // Author display defaults to the authenticated identity when the caller
-    // didn't supply one. `author` carries the agent name; `producer` (below)
-    // is the cryptographic signer and stays distinct.
-    let author = if author_raw.is_empty() {
-        identity.to_string()
-    } else {
-        author_raw
+    let operator = state.keypair.pubkey_base58();
+    let (post, content_hash) = match input.signed_post.as_deref() {
+        Some(cose) => verify_signed_post(cose, identity)?,
+        // The operator's own identity is the only author the server may sign
+        // for: the key IS the author's key.
+        None if identity == operator => operator_signed_post(state, identity, &input)?,
+        None => return Err(PublishError::InvalidInput(SIGNED_POST_REQUIRED.into())),
     };
-
-    let slug = slugify(&title);
-    if slug.is_empty() {
-        return Err(PublishError::InvalidInput(
-            "title produces an empty slug (needs at least one ASCII letter or digit)".into(),
-        ));
-    }
-
-    let attestation_id = uuid::Uuid::new_v4().to_string();
-    let now = chrono::Utc::now().to_rfc3339();
-    let signer = identity::pubkey_base58(&state.keypair);
-    let producer = identity::did_sol(&state.keypair);
-
-    // Build the POST_V1 artifact. The markdown body sits in the standard
-    // `content` slot so `content_hash` commits to the rendered source exactly
-    // as a memory's does (Decision 8).
-    let artifact = serde_json::json!({
-        "artifact_id": attestation_id,
-        "type": "post",
-        "schema_version": 1,
-        "title": title,
-        "slug": slug,
-        "content": body,
-        "author": author,
-        "published_at": now,
-        "tags": tags,
-        "created_at": now,
-        "producer": producer,
-    });
-
-    validate_artifact(&artifact, &POST_V1)
-        .map_err(|e| PublishError::Internal(format!("POST_V1 validation failed: {e}")))?;
-
-    let signed = sign_artifact(&artifact, &POST_V1, &state.keypair)
-        .map_err(|e| PublishError::Internal(format!("COSE signing failed: {e}")))?;
-    let content_hash = signed.content_hash;
+    let SignedPost {
+        attestation_id,
+        title,
+        slug,
+        body,
+        tags,
+        author,
+        published_at: now,
+    } = post;
+    let signer = identity.to_string();
 
     // Embed the body for recall (blog = the ledger filtered to posts). Done
     // BEFORE the store lock — embedding may be slow (ONNX) and the rusqlite
@@ -269,6 +255,27 @@ pub fn publish_post(
             .store
             .lock()
             .map_err(|e| PublishError::Internal(format!("store mutex poisoned: {e}")))?;
+        // Slug is the post's primary key: only its current owner may replace
+        // it, so one author cannot overwrite another author's post.
+        match store.blog_post_owner(&slug) {
+            Ok(Some(owner)) if owner != signer => {
+                return Err(PublishError::InvalidInput(format!(
+                    "slug '{slug}' is already used by another author; choose a different title"
+                )));
+            }
+            Ok(_) => {}
+            Err(e) => return Err(PublishError::Internal(format!("slug lookup failed: {e}"))),
+        }
+        // A client-chosen artifact_id must not replace someone else's row.
+        match store.attestation_owner(&attestation_id) {
+            Ok(Some(owner)) if owner != signer => {
+                return Err(PublishError::InvalidInput(
+                    "artifact_id is already used by another identity".into(),
+                ));
+            }
+            Ok(_) => {}
+            Err(e) => return Err(PublishError::Internal(format!("id lookup failed: {e}"))),
+        }
         let local_sol = format!("local:{}", &content_hash[..content_hash.len().min(16)]);
         let local_ar = format!("local:{}", &attestation_id[..attestation_id.len().min(8)]);
         store
@@ -280,7 +287,7 @@ pub fn publish_post(
                 &local_sol,
                 &local_ar,
                 &signer,
-                &signer, // owner = server signer: the post's publisher of record
+                &signer, // owner = the author who signed the post
                 &now,
                 WriteMode::Local,
                 Visibility::Public,
@@ -318,6 +325,165 @@ pub fn publish_post(
         content_hash,
         published_at: now,
     })
+}
+
+/// Post fields taken from a verified, signed `POST_V1` artifact.
+struct SignedPost {
+    attestation_id: String,
+    title: String,
+    slug: String,
+    body: String,
+    tags: Vec<String>,
+    author: String,
+    published_at: String,
+}
+
+fn invalid(msg: impl Into<String>) -> PublishError {
+    PublishError::InvalidInput(msg.into())
+}
+
+/// Verify a client-signed post. The COSE `kid` must be the authenticated
+/// caller, the payload must be canonical CBOR of a valid `POST_V1`, and the
+/// signed fields must pass the same limits as the plain-field path.
+fn verify_signed_post(cose: &[u8], identity: &str) -> Result<(SignedPost, String), PublishError> {
+    let v =
+        verify_artifact(cose, None).map_err(|e| invalid(format!("invalid signed_post: {e}")))?;
+    if !v.valid {
+        return Err(invalid("signed_post signature is not valid"));
+    }
+    if v.signer != identity {
+        return Err(invalid(format!(
+            "signed_post signer {} does not match the authenticated identity {identity}",
+            v.signer
+        )));
+    }
+    let json = from_canonical_cbor(&v.payload)
+        .map_err(|e| invalid(format!("signed_post payload is not CBOR: {e}")))?;
+    validate_artifact(&json, &POST_V1)
+        .map_err(|e| invalid(format!("signed_post is not a valid POST_V1: {e}")))?;
+    let canonical = to_canonical_cbor(&json, &POST_V1)
+        .map_err(|e| invalid(format!("signed_post payload: {e}")))?;
+    if canonical != v.payload {
+        return Err(invalid("signed_post payload is not canonical CBOR"));
+    }
+    let field = |k: &str| {
+        json.get(k)
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string()
+    };
+    if field("type") != "post" {
+        return Err(invalid("signed_post type must be \"post\""));
+    }
+    if field("producer") != format!("did:sol:{identity}") {
+        return Err(invalid(
+            "signed_post producer must be did:sol:<your pubkey>",
+        ));
+    }
+    let tags: Vec<String> = json
+        .get("tags")
+        .and_then(|t| t.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    let raw = PublishInput {
+        title: field("title"),
+        body_markdown: field("content"),
+        tags: tags.clone(),
+        author: json
+            .get("author")
+            .and_then(|x| x.as_str())
+            .map(String::from),
+        signed_post: None,
+    };
+    let (title, body, norm_tags, author) = validate_input(&raw)?;
+    if title != raw.title || norm_tags != tags {
+        return Err(invalid(
+            "signed_post title and tags must be trimmed and non-empty",
+        ));
+    }
+    let slug = field("slug");
+    if slug.is_empty() || slug != slugify(&title) {
+        return Err(invalid("signed_post slug must equal slugify(title)"));
+    }
+    let attestation_id = field("artifact_id");
+    if attestation_id.is_empty() || attestation_id.len() > 64 {
+        return Err(invalid("signed_post artifact_id must be 1-64 characters"));
+    }
+    let post = SignedPost {
+        attestation_id,
+        title,
+        slug,
+        body,
+        tags,
+        author: if author.is_empty() {
+            identity.to_string()
+        } else {
+            author
+        },
+        published_at: field("published_at"),
+    };
+    Ok((post, v.content_hash))
+}
+
+/// Plain-field publish by the operator's own identity: the server signs with
+/// its own key, which is the author's key in this case only.
+fn operator_signed_post(
+    state: &McpState,
+    identity: &str,
+    input: &PublishInput,
+) -> Result<(SignedPost, String), PublishError> {
+    let (title, body, tags, author_raw) = validate_input(input)?;
+    let author = if author_raw.is_empty() {
+        identity.to_string()
+    } else {
+        author_raw
+    };
+    let slug = slugify(&title);
+    if slug.is_empty() {
+        return Err(invalid(
+            "title produces an empty slug (needs at least one ASCII letter or digit)",
+        ));
+    }
+    let attestation_id = uuid::Uuid::new_v4().to_string();
+    let now = chrono::Utc::now().to_rfc3339();
+    // The markdown body sits in the standard `content` slot so
+    // `content_hash` commits to the rendered source exactly as a memory's
+    // does (Decision 8).
+    let artifact = serde_json::json!({
+        "artifact_id": attestation_id,
+        "type": "post",
+        "schema_version": 1,
+        "title": title,
+        "slug": slug,
+        "content": body,
+        "author": author,
+        "published_at": now,
+        "tags": tags,
+        "created_at": now,
+        "producer": state.keypair.did_sol(),
+    });
+    validate_artifact(&artifact, &POST_V1)
+        .map_err(|e| PublishError::Internal(format!("POST_V1 validation failed: {e}")))?;
+    let operator_keypair = state
+        .keypair
+        .keypair()
+        .map_err(|e| PublishError::Internal(format!("operator identity unavailable: {e:#}")))?;
+    let signed = sign_artifact(&artifact, &POST_V1, operator_keypair)
+        .map_err(|e| PublishError::Internal(format!("COSE signing failed: {e}")))?;
+    let post = SignedPost {
+        attestation_id,
+        title,
+        slug,
+        body,
+        tags,
+        author,
+        published_at: now,
+    };
+    Ok((post, signed.content_hash))
 }
 
 /// Per-request timeout for the rebuild ping. Short so a slow/hung deploy
@@ -387,6 +553,7 @@ fn fire_rebuild_hook(
 mod tests {
     use super::*;
     use mnemonic_core::codec::sign::verify_artifact;
+    use mnemonic_core::identity;
     use solana_sdk::signature::Keypair;
 
     #[test]

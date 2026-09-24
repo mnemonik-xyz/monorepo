@@ -13,7 +13,6 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use walkdir::WalkDir;
 
-use mnemonic_core::identity;
 use mnemonic_core::storage::AttestationStore;
 
 use crate::mcp::McpState;
@@ -267,7 +266,7 @@ fn rel_path_string(path: &Path) -> String {
 /// whitepaper revisions and the entire `work/completed/noncustodial-paradigm/`
 /// design corpus.
 pub async fn run(state: &McpState) -> Result<()> {
-    let pubkey = identity::pubkey_base58(&state.keypair);
+    let pubkey = state.keypair.pubkey_base58();
     let force_reseed = std::env::var("MNEMONIC_FORCE_RESEED")
         .ok()
         .filter(|v| matches!(v.trim(), "1" | "true" | "yes" | "on"))
@@ -350,7 +349,7 @@ pub async fn run(state: &McpState) -> Result<()> {
 
     // Seeding runs at startup with no JWT context — owner is the local
     // server keypair, matching the stdio single-tenant convention.
-    let server_owner_pubkey = solana_sdk::signer::Signer::pubkey(&state.keypair).to_string();
+    let server_owner_pubkey = state.keypair.pubkey_base58();
 
     for md_file in &md_files {
         let rel = md_file.strip_prefix(&docs_root).unwrap_or(md_file);

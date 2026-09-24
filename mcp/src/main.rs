@@ -33,7 +33,6 @@ use axum::{
 use clap::{Parser, Subcommand};
 use mnemonic_core::{arweave, compress, embed, solana, storage::SqliteStore};
 use serde::Deserialize;
-use solana_sdk::signer::Signer;
 use std::sync::Arc;
 
 // ── CLI ───────────────────────────────────────────────────────────────────────
@@ -321,17 +320,27 @@ async fn main() -> anyhow::Result<()> {
                         path.display()
                     )
                 })?;
-            (keypair, format!("explicit keypair at {}", path.display()))
+            (
+                mnemonic_core::identity::LazyKeypair::ready(keypair),
+                format!("explicit keypair at {}", path.display()),
+            )
         }
         _ => {
-            let identity = mnemonic_core::identity::ensure()
+            // Deferred: a keychain-backed identity is NOT unlocked here. Its
+            // secret is read on the first operation that must sign
+            // (participate write, prove_identity), so local writes and recall
+            // never trigger an OS keychain prompt.
+            let (keypair, storage) = mnemonic_core::identity::ensure_lazy()
                 .map_err(|e| anyhow::anyhow!("identity::ensure failed at startup: {e}"))?;
-            (identity.keypair, format!("{:?}", identity.storage))
+            (keypair, format!("{storage:?}"))
         }
     };
     tracing::info!("Identity: {}", keypair.pubkey());
-    tracing::info!("did:sol: {}", mnemonic_core::identity::did_sol(&keypair));
-    tracing::info!("Identity storage: {identity_storage}");
+    tracing::info!("did:sol: {}", keypair.did_sol());
+    tracing::info!(
+        "Identity storage: {identity_storage} (secret loaded: {})",
+        keypair.is_loaded()
+    );
 
     let embedder = embed::build_embedder(
         &cfg.embed_provider,

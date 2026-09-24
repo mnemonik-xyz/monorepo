@@ -190,14 +190,14 @@ async fn catalogue_embedder_invalid() {
     use mnemonic_core::storage::SqliteStore;
     use mnemonic_mcp::mcp::Envelope;
     use mnemonic_mcp::tools::{resolve_write_mode, sign_memory, ToolError};
-    use solana_sdk::signature::{Keypair, Signer};
+    use solana_sdk::signature::Keypair;
 
     let tmp = tempfile::NamedTempFile::new().expect("tempfile");
     let store = std::sync::Mutex::new(SqliteStore::open(tmp.path()).expect("sqlite"));
     let compressor = EmbeddingCompressor::new(8, 4, 42);
     let pending = mnemonic_mcp::pending::PendingBundles::with_defaults();
     let embedder = FailingEmbedder::default();
-    let kp = Keypair::new();
+    let kp = mnemonic_core::identity::LazyKeypair::ready(Keypair::new());
     let owner = kp.pubkey().to_string();
     let envelope = Envelope::from_config("local", "none", 0);
     let resolved = resolve_write_mode(None, "local").unwrap();

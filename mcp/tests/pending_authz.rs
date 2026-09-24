@@ -89,7 +89,7 @@ fn build_state() -> Arc<McpState> {
         approval_chain_name: String::new(),
         approval_chain_currency_symbol: "ETH".to_string(),
         approval_chain_currency_decimals: 18,
-        keypair: Keypair::new(),
+        keypair: mnemonic_core::identity::LazyKeypair::ready(Keypair::new()),
         solana: SolanaClient::new("http://localhost:0"),
         arweave: ArweaveClient::new("http://localhost:0"),
         store: std::sync::Mutex::new(store),

@@ -32,9 +32,10 @@ use mnemonic_mcp::{
     api,
     mcp::{self, McpState},
     oauth::{self, OAuthState},
-    test_support::mock_state,
+    test_support::{mock_state, sign_post},
 };
 use serde_json::{json, Value};
+use solana_sdk::signature::{Keypair, Signer};
 use tower::ServiceExt;
 
 const TEST_SECRET: &[u8; 32] = b"blog-publish-secret-32-bytes!!!!";
@@ -109,17 +110,18 @@ async fn post_blog_anonymous_rejected() {
 async fn post_blog_json_authed_persists_and_roundtrips() {
     let oauth_state = Arc::new(OAuthState::with_defaults(TEST_SECRET));
     let app = build_router(mock_state(), oauth_state.clone());
-    let token = oauth::issue_jwt(&oauth_state, "AgentPubkeyBase58").expect("issue_jwt");
-
-    let req = post_blog_json(
-        json!({
-            "title": "Hello, World!",
-            "body_markdown": "# Hi\n\nFirst post body.",
-            "tags": ["intro", "demo"],
-            "author": "Agent Smith"
-        }),
-        Some(&token),
+    // The author signs with their own key; the JWT subject is that key.
+    let author = Keypair::new();
+    let token = oauth::issue_jwt(&oauth_state, &author.pubkey().to_string()).expect("issue_jwt");
+    let cose = sign_post(
+        &author,
+        "Hello, World!",
+        "# Hi\n\nFirst post body.",
+        &["intro", "demo"],
+        "Agent Smith",
     );
+
+    let req = post_blog_json(json!({ "signed_post": hex::encode(cose) }), Some(&token));
     let (status, headers, body) = send(&app, req).await;
     assert_eq!(
         status,
@@ -161,10 +163,27 @@ async fn post_blog_json_authed_persists_and_roundtrips() {
 }
 
 #[tokio::test]
-async fn post_blog_form_micropub_accepted() {
+async fn post_blog_form_micropub_operator_only() {
     let oauth_state = Arc::new(OAuthState::with_defaults(TEST_SECRET));
-    let app = build_router(mock_state(), oauth_state.clone());
-    let token = oauth::issue_jwt(&oauth_state, "FormAgent").expect("issue_jwt");
+    let state = mock_state();
+    let operator = state.keypair.pubkey_base58();
+    let app = build_router(state, oauth_state.clone());
+
+    // A form post carries no signature: a regular user is refused, because
+    // the server never signs on a user's behalf.
+    let user_token = oauth::issue_jwt(&oauth_state, "FormAgent").expect("issue_jwt");
+    let user_req = Request::builder()
+        .method("POST")
+        .uri("/blog")
+        .header("content-type", "application/x-www-form-urlencoded")
+        .header("authorization", format!("Bearer {user_token}"))
+        .body(Body::from("h=entry&name=Nope&content=unsigned"))
+        .unwrap();
+    let (status, _h, body) = send(&app, user_req).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+
+    // The operator's own identity may use the plain form (its key, its post).
+    let token = oauth::issue_jwt(&oauth_state, &operator).expect("issue_jwt");
 
     // Micropub x-www-form-urlencoded: `name` (title), `content` (body), and a
     // repeated `category` (tags array).
@@ -227,11 +246,25 @@ async fn mcp_tool_publish_requires_auth_then_persists() {
         "anonymous tool publish must 401"
     );
 
-    // Authed tools/call → 200, returns the post; then visible on GET /blog.
-    let token = oauth::issue_jwt(&oauth_state, "ToolAgent").expect("issue_jwt");
-    let (status, v) = tools_call(
+    // Authed but unsigned → refused (server never signs for a user).
+    let author = Keypair::new();
+    let token = oauth::issue_jwt(&oauth_state, &author.pubkey().to_string()).expect("issue_jwt");
+    let (_status, v) = tools_call(
         &app,
         json!({"title": "Tool Made This", "body_markdown": "via mcp tool"}),
+        Some(&token),
+    )
+    .await;
+    assert!(
+        v["error"].is_object(),
+        "unsigned tool publish must fail: {v}"
+    );
+
+    // Authed + author-signed → 200, returns the post; then visible on GET /blog.
+    let cose = sign_post(&author, "Tool Made This", "via mcp tool", &[], "");
+    let (status, v) = tools_call(
+        &app,
+        json!({"signed_post": hex::encode(cose)}),
         Some(&token),
     )
     .await;
