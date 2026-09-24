@@ -99,6 +99,10 @@ branched from `main` unless it depends on #224.
   (in memory, short-lived ticket). Make it end-to-end wrapped like the
   Cli-origin flow, so the server never sees a user secret.
 
+- [x] **X2** Recall provenance + framing of foreign memories (layers 2, 4, part of 5) — PR "recall provenance".
+- [ ] **X3** Owner decision: anonymous recall returns private rows (see plan.md §Open decision).
+- [ ] **X4** Trusted-author list, source-named recall, full import cleaning (layers 1, 3, 5) — required before P1.
+
 ### Ops
 
 - [ ] **O1 Owner action:** in GitHub → Settings → Branches (or Rulesets)

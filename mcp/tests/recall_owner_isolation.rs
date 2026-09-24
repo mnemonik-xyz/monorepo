@@ -246,9 +246,26 @@ async fn test_recall_filters_by_owner_pubkey_and_anonymous_returns_401() {
     let inner: Value = serde_json::from_str(text).expect("anon recall inner json");
     let rows = inner["results"].as_array().cloned().unwrap_or_default();
     // The global pool surfaces every row written above — alice's 2 + bob's 1.
+    // An anonymous caller owns none of them, so each row is labelled
+    // "foreign" and its text is framed with this response's boundary.
+    let boundary = inner["untrusted_boundary"]
+        .as_str()
+        .expect("untrusted_boundary present for foreign rows");
     let mut contents: Vec<&str> = rows
         .iter()
-        .map(|r| r["content"].as_str().expect("content field"))
+        .map(|r| {
+            assert_eq!(r["source"], "foreign", "anonymous rows are foreign: {r}");
+            let framed = r["content"].as_str().expect("content field");
+            let body = framed
+                .split_once(">>>\n")
+                .and_then(|(_, rest)| {
+                    rest.strip_suffix(&format!(
+                        "\n<<<END_MNEMONIC_UNTRUSTED_MEMORY boundary={boundary}>>>"
+                    ))
+                })
+                .expect("foreign content is framed");
+            body
+        })
         .collect();
     contents.sort_unstable();
     assert_eq!(
