@@ -4,7 +4,7 @@
 //! callers must wrap it in `std::sync::Mutex` and never hold the lock across an `.await` point.
 
 use anyhow::Context;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use std::path::Path;
 
 use super::mode::{Visibility, WriteMode};
@@ -890,6 +890,40 @@ impl SqliteStore {
             out.push(r?);
         }
         Ok(out)
+    }
+
+    /// Owner of the attestation row `attestation_id` (falls back to the
+    /// signer for legacy rows), or `None` when no such row exists.
+    pub fn attestation_owner(&self, attestation_id: &str) -> anyhow::Result<Option<String>> {
+        let owner = self
+            .conn
+            .query_row(
+                "SELECT CASE WHEN COALESCE(owner_pubkey, '') = ''
+                        THEN signer_pubkey ELSE owner_pubkey END
+                   FROM attestations WHERE attestation_id = ?1",
+                params![attestation_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?;
+        Ok(owner.flatten())
+    }
+
+    /// Owner (`owner_pubkey` of the backing attestation) of the post at
+    /// `slug`, or `None` when no post uses that slug.
+    pub fn blog_post_owner(&self, slug: &str) -> anyhow::Result<Option<String>> {
+        let owner = self
+            .conn
+            .query_row(
+                "SELECT CASE WHEN COALESCE(a.owner_pubkey, '') = ''
+                        THEN a.signer_pubkey ELSE a.owner_pubkey END
+                   FROM blog_posts b
+                   JOIN attestations a ON a.attestation_id = b.attestation_id
+                  WHERE b.slug = ?1",
+                rusqlite::params![slug],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?;
+        Ok(owner.flatten())
     }
 
     /// Fetch a single public blog post by slug (`GET /blog/:slug`), or `None`.

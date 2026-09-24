@@ -87,7 +87,7 @@ async fn default_no_silent_escalation() {
     let args = serde_json::json!({"content": "no-silent-escalation"});
 
     let result = sign_memory(
-        &kp,
+        &mnemonic_core::identity::LazyKeypair::ready(kp.insecure_clone()),
         &state.solana,
         &state.arweave,
         &state.store,
@@ -175,7 +175,7 @@ async fn opt_in_escalation_returns_escalated_field() {
     let args = serde_json::json!({"content": "trigger-escalation"});
 
     let result = sign_memory(
-        &kp,
+        &mnemonic_core::identity::LazyKeypair::ready(kp.insecure_clone()),
         &state.solana,
         &state.arweave,
         &state.store,
@@ -267,7 +267,7 @@ async fn opt_in_escalation_no_confirmation_token() {
     let args = serde_json::json!({"content": "pub-without-token", "visibility": "public"});
 
     let result = sign_memory(
-        &kp,
+        &mnemonic_core::identity::LazyKeypair::ready(kp.insecure_clone()),
         &state.solana,
         &state.arweave,
         &state.store,
@@ -361,7 +361,7 @@ async fn opt_in_escalation_with_valid_confirmation_token_reaches_hosted() {
     });
 
     let result = sign_memory(
-        &kp,
+        &mnemonic_core::identity::LazyKeypair::ready(kp.insecure_clone()),
         &state.solana,
         &state.arweave,
         &state.store,
@@ -430,7 +430,7 @@ async fn opt_in_escalation_no_network() {
     let args = serde_json::json!({"content": "no-network-escalation"});
 
     let result = sign_memory(
-        &kp,
+        &mnemonic_core::identity::LazyKeypair::ready(kp.insecure_clone()),
         &state.solana,
         &state.arweave,
         &state.store,
@@ -515,7 +515,7 @@ async fn opt_in_escalation_hosted_malformed_response_surfaces_hosted_unavailable
     let args = serde_json::json!({"content": "hosted-malformed"});
 
     let result = sign_memory(
-        &kp,
+        &mnemonic_core::identity::LazyKeypair::ready(kp.insecure_clone()),
         &state.solana,
         &state.arweave,
         &state.store,
@@ -637,7 +637,7 @@ fn expired_cached_token_surfaces_token_expired_typed_error() {
             let args = serde_json::json!({"content": "expired-token-test"});
 
             let result = sign_memory(
-                &kp,
+                &mnemonic_core::identity::LazyKeypair::ready(kp.insecure_clone()),
                 &state.solana,
                 &state.arweave,
                 &state.store,
@@ -701,7 +701,7 @@ async fn empty_endpoint_sentinel_propagates_local_error() {
     let args = serde_json::json!({"content": "empty-endpoint-sentinel"});
 
     let result = sign_memory(
-        &kp,
+        &mnemonic_core::identity::LazyKeypair::ready(kp.insecure_clone()),
         &state.solana,
         &state.arweave,
         &state.store,

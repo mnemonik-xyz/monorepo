@@ -22,7 +22,8 @@ use tempfile::NamedTempFile;
 use tracing::warn;
 
 use crate::identity::keystore::{KeyStore, KeystoreEntry, KeystoreError};
-use crate::identity::{Identity, IdentityStorage};
+use crate::identity::{Identity, IdentityStorage, LazyKeypair};
+use solana_sdk::pubkey::Pubkey;
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -34,6 +35,66 @@ use crate::identity::{Identity, IdentityStorage};
 /// injected `MemoryKeyStore` backends.
 pub fn ensure() -> anyhow::Result<Identity> {
     ensure_with_stores(default_stores()?)
+}
+
+/// Like [`ensure`], but when the identity file is a keychain stub the OS
+/// keychain is NOT read now: the returned [`LazyKeypair`] knows the public
+/// key from the stub and fetches the secret on the first signing request.
+/// First-run creation and legacy migration still go through [`ensure`],
+/// since they must write the keychain anyway.
+pub fn ensure_lazy() -> anyhow::Result<(LazyKeypair, IdentityStorage)> {
+    ensure_lazy_with_stores(default_stores()?)
+}
+
+/// Test seam for [`ensure_lazy`].
+pub fn ensure_lazy_with_stores(
+    stores: KeyStores,
+) -> anyhow::Result<(LazyKeypair, IdentityStorage)> {
+    let stub = if stores.os.is_some() {
+        stub_pubkey(&stores.identity_path)?
+    } else {
+        None
+    };
+    let Some(pubkey) = stub else {
+        let identity = ensure_with_stores(stores)?;
+        return Ok((LazyKeypair::ready(identity.keypair), identity.storage));
+    };
+    let KeyStores {
+        os, identity_path, ..
+    } = stores;
+    let os = os.ok_or_else(|| anyhow::anyhow!("OS keychain backend missing"))?;
+    let lazy = LazyKeypair::deferred(pubkey, move || {
+        let raw = std::fs::read(&identity_path)
+            .with_context(|| format!("reading {}", identity_path.display()))?;
+        let json: Value = serde_json::from_slice(&raw)
+            .with_context(|| format!("parsing {}", identity_path.display()))?;
+        Ok(handle_stub(json, Some(os.as_ref()), &identity_path)?.keypair)
+    });
+    Ok((lazy, IdentityStorage::OsKeychain))
+}
+
+/// Public key from a stub-shaped identity file; `None` for any other shape
+/// (absent, legacy secret-bearing, unparsable — left to [`ensure`]).
+fn stub_pubkey(identity_path: &Path) -> anyhow::Result<Option<Pubkey>> {
+    let Ok(raw) = std::fs::read(identity_path) else {
+        return Ok(None);
+    };
+    let Ok(json) = serde_json::from_slice::<Value>(&raw) else {
+        return Ok(None);
+    };
+    if json.get("secret").is_some() || json.get("keychain_ref").is_none() {
+        return Ok(None);
+    }
+    let Some(b58) = json.get("pubkey_base58").and_then(|v| v.as_str()) else {
+        return Ok(None);
+    };
+    let pubkey = b58.parse::<Pubkey>().with_context(|| {
+        format!(
+            "stub file {} has invalid 'pubkey_base58'",
+            identity_path.display()
+        )
+    })?;
+    Ok(Some(pubkey))
 }
 
 /// Test seam: all I/O goes through `stores`, no hard-coded paths.
@@ -622,6 +683,7 @@ For help: https://mnemonik.xyz/docs/identity
 mod tests {
     use super::*;
     use crate::identity::keystore_memory::MemoryKeyStore;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use tempfile::TempDir;
 
     // Helper: build a KeyStores with MemoryKeyStore for both OS and file
@@ -666,6 +728,69 @@ mod tests {
         fn name(&self) -> &'static str {
             self.0.name()
         }
+    }
+
+    /// Counts `get()` calls so tests can prove the keychain was not read.
+    struct CountingStore(std::sync::Arc<MemoryKeyStore>, std::sync::Arc<AtomicUsize>);
+
+    impl KeyStore for CountingStore {
+        fn get(&self) -> Result<Option<KeystoreEntry>, KeystoreError> {
+            self.1.fetch_add(1, Ordering::SeqCst);
+            self.0.get()
+        }
+        fn set(&self, entry: &KeystoreEntry) -> Result<(), KeystoreError> {
+            self.0.set(entry)
+        }
+        fn remove(&self) -> Result<(), KeystoreError> {
+            self.0.remove()
+        }
+        fn available(&self) -> Result<bool, KeystoreError> {
+            self.0.available()
+        }
+        fn name(&self) -> &'static str {
+            self.0.name()
+        }
+    }
+
+    #[test]
+    fn ensure_lazy_defers_keychain_read_for_stub() {
+        let dir = TempDir::new().unwrap();
+        let keypair = Keypair::new();
+        let pubkey = keypair.pubkey().to_string();
+        let stub_path = dir.path().join("identity.json");
+        std::fs::write(&stub_path, build_stub_json(&pubkey, "2026-09-23T00:00:00Z")).unwrap();
+
+        let os_arc = std::sync::Arc::new(MemoryKeyStore::new());
+        os_arc
+            .set(&KeystoreEntry {
+                secret: keypair.to_bytes(),
+                pubkey_base58: pubkey.clone(),
+            })
+            .unwrap();
+        let gets = std::sync::Arc::new(AtomicUsize::new(0));
+        let stores = KeyStores {
+            os: Some(Box::new(CountingStore(os_arc, gets.clone()))),
+            file: Box::new(MemoryKeyStore::new()),
+            identity_path: stub_path,
+            readme_path: dir.path().join("README.txt"),
+        };
+
+        let (lazy, storage) = ensure_lazy_with_stores(stores).unwrap();
+        assert!(matches!(storage, IdentityStorage::OsKeychain));
+        assert_eq!(lazy.pubkey_base58(), pubkey);
+        assert_eq!(
+            gets.load(Ordering::SeqCst),
+            0,
+            "startup must not read keychain"
+        );
+
+        assert_eq!(lazy.keypair().unwrap().pubkey(), keypair.pubkey());
+        lazy.keypair().unwrap();
+        assert_eq!(
+            gets.load(Ordering::SeqCst),
+            1,
+            "secret is read once, then cached"
+        );
     }
 
     // ---------------------------------------------------------------------------

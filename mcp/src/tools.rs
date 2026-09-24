@@ -18,7 +18,7 @@ use mnemonic_core::codec::{
 };
 use mnemonic_core::compress::EmbeddingCompressor;
 use mnemonic_core::embed::Embedder;
-use mnemonic_core::identity;
+use mnemonic_core::identity::{self, LazyKeypair};
 use mnemonic_core::solana::SolanaClient;
 use mnemonic_core::storage::{AttestationStore, SqliteStore, Visibility, WriteMode};
 
@@ -279,12 +279,12 @@ impl std::fmt::Display for ToolError {
 /// The legacy `storage_mode` field is kept verbatim for pre-envelope clients
 /// (chrome-extension Cloud tier still reads it).
 pub fn whoami(
-    keypair: &Keypair,
+    keypair: &LazyKeypair,
     store: &SqliteStore,
     storage_mode: &str,
     envelope: &Envelope,
 ) -> serde_json::Value {
-    let pubkey = identity::pubkey_base58(keypair);
+    let pubkey = keypair.pubkey_base58();
     let count = store.count(&pubkey).unwrap_or(0);
     // Serialize the envelope through serde_json so the `null` rendering of
     // `participate_cost: Option<ParticipateCost>` and the static `&'static
@@ -294,8 +294,8 @@ pub fn whoami(
     let envelope_obj = envelope_value.as_object().cloned().unwrap_or_default();
     let mut out = serde_json::json!({
         "public_key": pubkey,
-        "did_sol": identity::did_sol(keypair),
-        "did_key": identity::did_key(keypair),
+        "did_sol": keypair.did_sol(),
+        "did_key": keypair.did_key(),
         "attestation_count": count,
         "storage_mode": storage_mode,
     });
@@ -332,7 +332,7 @@ pub fn whoami(
 /// the local keypair pubkey.
 #[allow(clippy::too_many_arguments)]
 pub async fn sign_memory(
-    keypair: &Keypair,
+    keypair: &LazyKeypair,
     solana: &SolanaClient,
     arweave: &ArweaveClient,
     store: &std::sync::Mutex<SqliteStore>,
@@ -391,7 +391,7 @@ pub async fn sign_memory(
     // sign-callback persists it as `Local` with synthetic ids, still free).
     // This closes the last custodial gap: previously explicit-local + JWT
     // fell through to inline and the operator signed the user's content.
-    let operator_pubkey = identity::pubkey_base58(keypair);
+    let operator_pubkey = keypair.pubkey_base58();
     if let Some(sub) = jwt_sub {
         let is_self_write = owner_pubkey == operator_pubkey;
         if !(resolved.is_explicit_local() && is_self_write) {
@@ -407,6 +407,18 @@ pub async fn sign_memory(
             .await
             .map_err(ToolError::Other);
         }
+    }
+    // Hard invariant: on the hosted transport (any JWT caller) the server
+    // NEVER produces a memory signature — not for paid writes, not for
+    // free-quota writes, not for the operator's own subject. The only inline
+    // path left for a JWT caller is an explicit-local self write, which
+    // stores a hash and signs nothing. Participate writes over HTTP are
+    // always client-signed via the deferred path above.
+    if jwt_sub.is_some() && resolved.write_mode == WriteMode::Participate {
+        return Err(ToolError::Other(anyhow::anyhow!(
+            "refusing server-side memory signing on the hosted transport; \
+             participate writes must be client-signed"
+        )));
     }
     let inline_result = sign_memory_inline(
         keypair,
@@ -1071,7 +1083,7 @@ pub async fn check_pending(
 /// NOT take the envelope.
 #[allow(clippy::too_many_arguments)]
 async fn sign_memory_inline(
-    keypair: &Keypair,
+    keypair: &LazyKeypair,
     solana: &SolanaClient,
     arweave: &ArweaveClient,
     store: &std::sync::Mutex<SqliteStore>,
@@ -1086,7 +1098,7 @@ async fn sign_memory_inline(
     visibility: Visibility,
     delivery_refetch_timeout: Duration,
 ) -> Result<serde_json::Value, ToolError> {
-    let pubkey = identity::pubkey_base58(keypair);
+    let pubkey = keypair.pubkey_base58();
     // Wave 3 invariant (defense in depth): inline signing uses the operator's
     // `keypair` to produce the COSE_Sign1, so it is only legitimate when the
     // memory is authored BY the operator — i.e. `owner_pubkey == pubkey`.
@@ -1132,7 +1144,7 @@ async fn sign_memory_inline(
         "type": "memory",
         "schema_version": 1,
         "content": content,
-        "producer": identity::did_sol(keypair),
+        "producer": keypair.did_sol(),
         "created_at": now,
         "tags": tags,
         "metadata": {
@@ -1146,11 +1158,13 @@ async fn sign_memory_inline(
         },
     });
 
-    // 4. Sign with COSE_Sign1 (canonical CBOR → blake3 → Ed25519)
-    let signed = sign_artifact(&artifact, &schema::MEMORY_V1, keypair)
-        .map_err(|e| anyhow::anyhow!("COSE signing failed: {e}"))?;
-
-    let content_hash = signed.content_hash.clone();
+    // 4. Canonical CBOR → blake3. The COSE_Sign1 over it is only produced
+    //    for participate writes: local rows persist the hash, never the
+    //    signature, so a local write needs no secret and never triggers an
+    //    OS keychain unlock prompt.
+    let canonical = to_canonical_cbor(&artifact, &schema::MEMORY_V1)
+        .map_err(|e| anyhow::anyhow!("canonical CBOR encoding failed: {e}"))?;
+    let content_hash = blake3_hash(&canonical);
     let embed_model = embedder.model_id().to_string();
 
     // 5. Store on-chain (or locally) — routed by per-request `write_mode`,
@@ -1168,6 +1182,10 @@ async fn sign_memory_inline(
             // payload; they make the item aggregatable via a single gateway
             // GraphQL query (recover-traction-from-chain) with no payload
             // fetch — the DB-loss recovery path depends on them.
+            let keypair = signing_keypair(keypair)?;
+            let signed = sign_artifact(&artifact, &schema::MEMORY_V1, keypair)
+                .map_err(|e| anyhow::anyhow!("COSE signing failed: {e}"))?;
+            debug_assert_eq!(signed.content_hash, content_hash);
             let producer_did = identity::did_sol(keypair);
             let ar_tx = arweave
                 .write_item(
@@ -1306,7 +1324,7 @@ async fn sign_memory_inline(
         "solana_tx": solana_tx,
         "arweave_tx": arweave_tx,
         "signer": pubkey,
-        "did_sol": identity::did_sol(keypair),
+        "did_sol": keypair.did_sol(),
         "timestamp": now,
         "storage_mode": storage_mode,
         "write_mode": write_mode.as_str(),
@@ -1961,6 +1979,19 @@ fn rebuild_content_hash(
 }
 
 /// Tool 4: prove_identity (sync — pure crypto)
+/// The identity secret for an operation that must sign, reading the OS
+/// keychain on first use. Failure (locked store, dismissed prompt) maps to
+/// the typed `-32094 IdentityBootstrapFailed` so agents can branch on it.
+pub fn signing_keypair(keypair: &LazyKeypair) -> Result<&Keypair, ToolError> {
+    keypair.keypair().map_err(|e| {
+        ToolError::TypedRpc(crate::mcp::identity_bootstrap_failed(
+            &format!("{e:#}"),
+            "Unlock the OS keychain (or approve the access prompt) and retry. \
+             Local-mode writes and recall do not need the keychain.",
+        ))
+    })
+}
+
 pub fn prove_identity(keypair: &Keypair, challenge: &str) -> serde_json::Value {
     let sig = identity::sign_bytes(keypair, challenge.as_bytes());
     serde_json::json!({
@@ -2023,7 +2054,7 @@ fn build_merkle_commitment(
 }
 
 pub fn recall(
-    keypair: &Keypair,
+    keypair: &LazyKeypair,
     store: &SqliteStore,
     embedder: &dyn Embedder,
     query: &str,
@@ -2031,7 +2062,7 @@ pub fn recall(
     owner_pubkey: Option<&str>,
     visibility_filter: Option<Visibility>,
 ) -> serde_json::Value {
-    let signer_pubkey = identity::pubkey_base58(keypair);
+    let signer_pubkey = keypair.pubkey_base58();
     let query_emb = embedder.embed(query);
     // Visibility-aware recall (Decision 5 / AC13 — agent-native-distribution).
     //
@@ -2166,7 +2197,7 @@ mod sign_memory_tests {
         let resolved = resolve_write_mode(None, "local").unwrap();
         let (hosted_client, args) = no_softfall();
         let result = sign_memory(
-            &kp,
+            &LazyKeypair::ready(kp.insecure_clone()),
             &sol,
             &ar,
             &store,
@@ -2209,7 +2240,7 @@ mod sign_memory_tests {
         let resolved = resolve_write_mode(None, "local").unwrap();
         let (hosted_client, args) = no_softfall();
         let result = sign_memory(
-            &kp,
+            &LazyKeypair::ready(kp.insecure_clone()),
             &sol,
             &ar,
             &store,
@@ -2241,6 +2272,99 @@ mod sign_memory_tests {
     }
 
     #[tokio::test]
+    async fn test_hosted_participate_never_signs_with_server_key() {
+        // Even when the JWT subject IS the operator identity (the one case
+        // that used to be allowed), a participate write over the hosted
+        // transport must go to client signing, never to the server key.
+        let (kp, sol, ar, store, emb, comp, pending, hint) = fixtures();
+        let operator = LazyKeypair::deferred(kp.pubkey(), || {
+            panic!("server key must not be loaded for a hosted memory write")
+        });
+        let owner = kp.pubkey().to_string();
+        let resolved = resolve_write_mode(Some(&serde_json::json!("participate")), "full").unwrap();
+        let (hosted_client, args) = no_softfall();
+        let env = Envelope::from_config("full", "none", 0);
+        let result = sign_memory(
+            &operator,
+            &sol,
+            &ar,
+            &store,
+            &emb,
+            &comp,
+            &pending,
+            "hosted participate",
+            &[],
+            &hint,
+            "full",
+            &owner,
+            Some(&owner),
+            resolved,
+            Visibility::Private,
+            &env,
+            std::time::Duration::from_secs(15),
+            false,
+            "",
+            &hosted_client,
+            &args,
+        )
+        .await
+        .unwrap();
+        assert_eq!(result["status"], "awaiting_signature", "{result}");
+        assert!(!operator.is_loaded());
+    }
+
+    #[tokio::test]
+    async fn test_local_write_and_recall_never_read_the_keychain() {
+        // A locked / denied OS keychain must not block free local memory:
+        // local writes persist only the hash, so no secret is needed.
+        let (kp, sol, ar, store, emb, comp, pending, hint) = fixtures();
+        let owner = kp.pubkey().to_string();
+        let locked = LazyKeypair::deferred(kp.pubkey(), || anyhow::bail!("keychain is locked"));
+        let resolved = resolve_write_mode(None, "local").unwrap();
+        let (hosted_client, args) = no_softfall();
+        let result = sign_memory(
+            &locked,
+            &sol,
+            &ar,
+            &store,
+            &emb,
+            &comp,
+            &pending,
+            "no prompt please",
+            &[],
+            &hint,
+            "local",
+            &owner,
+            None,
+            resolved,
+            Visibility::Private,
+            &local_envelope(),
+            std::time::Duration::from_secs(15),
+            false,
+            "",
+            &hosted_client,
+            &args,
+        )
+        .await
+        .unwrap();
+        assert_eq!(result["signer"], owner);
+        assert_eq!(result["write_mode"], "local");
+
+        let s = store.lock().unwrap();
+        let out = recall(&locked, &s, &emb, "no prompt", 5, Some(&owner), None);
+        assert!(!out["results"].as_array().unwrap().is_empty());
+        let who = whoami(&locked, &s, "local", &local_envelope());
+        assert_eq!(who["public_key"], owner);
+        assert!(!locked.is_loaded());
+
+        // Signing operations surface the typed IdentityBootstrapFailed error.
+        match signing_keypair(&locked) {
+            Err(ToolError::TypedRpc(e)) => assert_eq!(e.code, -32094),
+            _ => panic!("expected -32094"),
+        }
+    }
+
+    #[tokio::test]
     async fn test_explicit_local_with_jwt_takes_inline_path() {
         // T2 round-2 (security-auditor major): explicit `mode: "local"`
         // with a JWT MUST short-circuit to the inline path regardless
@@ -2258,7 +2382,7 @@ mod sign_memory_tests {
         assert!(resolved_explicit_local.is_explicit_local());
         let (hosted_client, args) = no_softfall();
         let result = sign_memory(
-            &kp,
+            &LazyKeypair::ready(kp.insecure_clone()),
             &sol,
             &ar,
             &store,
@@ -2294,7 +2418,7 @@ mod sign_memory_tests {
         assert!(resolved_explicit_local_full.is_explicit_local());
         let (hosted_client, args) = no_softfall();
         let result = sign_memory(
-            &kp,
+            &LazyKeypair::ready(kp.insecure_clone()),
             &sol,
             &ar,
             &store,
