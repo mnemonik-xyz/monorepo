@@ -254,7 +254,7 @@ whichever column matches what you are here to do.
 ### Understand it
 
 - [`docs/how-it-works.md`](./docs/how-it-works.md) — sign / recall / verify walked through the actual modules
-- [`docs/WHITEPAPER.md`](./docs/WHITEPAPER.md) — overview: what Mnemonic does, modes, who signs, costs, status
+- [`docs/WHITEPAPER.md`](./docs/WHITEPAPER.md) ([RU](./docs/WHITEPAPER_RU.md)) — overview: what Mnemonic does, modes, who signs, costs, status
 - [`docs/YELLOWPAPER.md`](./docs/YELLOWPAPER.md) ([RU](./docs/YELLOWPAPER_RU.md)) — detailed protocol design, artifact model, trust model
 - [`docs/spec/memory-composition.md`](./docs/spec/memory-composition.md) — cognitive typing, capability tokens, rehydration pipelines
 - [`docs/research/`](./docs/research/) — the foundational paper and the TurboQuant analysis behind the compression choices
