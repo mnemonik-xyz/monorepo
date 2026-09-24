@@ -9,7 +9,7 @@
 
 **Live:** [mnemonik.xyz](https://mnemonik.xyz) · **Hosted MCP:** `https://mcp.mnemonik.xyz/mcp` · **Discord:** [discord.gg/ws6wruJj](https://discord.gg/ws6wruJj)
 
-**Docs:** [Quickstart](./docs/QUICKSTART.md) · [Tool reference](./docs/tools.md) · [Whitepaper](./docs/WHITEPAPER.md) · [How it works](./docs/how-it-works.md) · [Comparisons](./docs/comparisons.md) · [AGENTS.md](./AGENTS.md)
+**Docs:** [Quickstart](./docs/QUICKSTART.md) · [Tool reference](./docs/tools.md) · [Whitepaper](./docs/WHITEPAPER.md) · [Yellow paper](./docs/YELLOWPAPER.md) · [How it works](./docs/how-it-works.md) · [Comparisons](./docs/comparisons.md) · [AGENTS.md](./AGENTS.md)
 
 ```bash
 # Recommended: pair with the webapp (open mnemonik.xyz/install, click
@@ -254,7 +254,8 @@ whichever column matches what you are here to do.
 ### Understand it
 
 - [`docs/how-it-works.md`](./docs/how-it-works.md) — sign / recall / verify walked through the actual modules
-- [`docs/WHITEPAPER.md`](./docs/WHITEPAPER.md) ([RU](./docs/WHITEPAPER_RU.md)) — protocol design, artifact model, trust model
+- [`docs/WHITEPAPER.md`](./docs/WHITEPAPER.md) — overview: what Mnemonic does, modes, who signs, costs, status
+- [`docs/YELLOWPAPER.md`](./docs/YELLOWPAPER.md) ([RU](./docs/YELLOWPAPER_RU.md)) — detailed protocol design, artifact model, trust model
 - [`docs/spec/memory-composition.md`](./docs/spec/memory-composition.md) — cognitive typing, capability tokens, rehydration pipelines
 - [`docs/research/`](./docs/research/) — the foundational paper and the TurboQuant analysis behind the compression choices
 

@@ -1,7 +1,7 @@
 
 # Memory Composition and Sharing Specification
 
-**Companion to:** `WHITEPAPER.md` §7
+**Companion to:** `YELLOWPAPER.md` §7
 
 **Status:** v0.3 Specification
 

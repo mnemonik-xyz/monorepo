@@ -1,6 +1,6 @@
 # How Mnemonic Works
 
-Companion to [WHITEPAPER §5.3 Pipeline Walkthrough](./WHITEPAPER.md#53-pipeline-walkthrough-sign--recall--verify). Where the whitepaper sketches the sign / recall / verify flows at protocol granularity, this document maps each step onto the actual `mnemonic-core` and `mnemonic-mcp` modules so contributors can navigate the codebase, understand the dependency direction, and reason about operational concerns such as lock discipline, storage modes, and payment gating.
+Companion to [Yellow paper §5.3 Pipeline Walkthrough](./YELLOWPAPER.md#53-pipeline-walkthrough-sign--recall--verify). Where the whitepaper sketches the sign / recall / verify flows at protocol granularity, this document maps each step onto the actual `mnemonic-core` and `mnemonic-mcp` modules so contributors can navigate the codebase, understand the dependency direction, and reason about operational concerns such as lock discipline, storage modes, and payment gating.
 
 ## Module map
 
@@ -69,7 +69,7 @@ Implemented in `mcp/src/tools.rs::verify`.
 ## Pointers
 
 - [tools.md](./tools.md) — full MCP tool reference: inputs, outputs, auth, write modes.
-- [WHITEPAPER.md](./WHITEPAPER.md) — §4 Core Insight, §5 Architecture Overview (including §5.3 Pipeline Walkthrough), §6 Artifact Model, §7 Trust Model, §11 Current Implementation Status.
+- [YELLOWPAPER.md](./YELLOWPAPER.md) — §4 Core Insight, §5 Architecture Overview (including §5.3 Pipeline Walkthrough), §6 Artifact Model, §7 Trust Model, §11 Current Implementation Status.
 - [research/condensed-principles.md](./research/condensed-principles.md) — TurboQuant design principles distilled.
 - [usecases/](./usecases/) — concrete agent-memory use-case roles for the protocol.
 - [competitive-landscape/](./competitive-landscape/) — positioning vs decentralized RAG, zkTAM, V3DB, and adjacent directions.
