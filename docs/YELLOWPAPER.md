@@ -127,7 +127,7 @@ To establish a verifiably robust memory layer, a protocol must satisfy the follo
 | **Cognitive Typing** | Explicit architectural categorization into discrete schemas to enforce per-kind runtime policies. |
 | **Capability-Scoped Sharing** | Decentralized authorization mediated through cryptographically signed, bounded, and revocable capability grants $\kappa$. |
 | **Safe Injection Boundary** | Execution of an isolation operator $\Pi_\kappa$ that reformats data to neutralize memory-mediated prompt injections. |
-| **Economic Viability** | Asymptotic reduction of verification costs to $O(1)$ computational complexity, completely free of protocol transaction fees. |
+| **Economic Viability** | Verification is local and cheap: one hash pass over the artifact bytes plus one signature check. No protocol transaction fees. |
 
 ## 3. Protocol Contract
 
@@ -167,7 +167,7 @@ $$I_{\text{runtime}} = (f_{\text{frame}} \circ f_{\text{format}} \circ f_{\text{
 *Note:* Data remains highly compressed on the network and retrieval paths ($f_{\text{filter}}, f_{\text{rank}}$), undergoing decompression ($f_{\text{decompress}}$) only immediately prior to semantic formatting and safe execution framing.
 
 #### VIII. Zero-Gate Verification
-The computational complexity of verifying state integrity, provenance signatures, and lineage validity is strictly bounded at $O(1)$. Any network participant possessing an artifact can execute verification out-of-band without encountering protocol transaction fees, network tolls, or centralized coordinator gateways.
+Verifying one artifact costs one hash pass over its bytes plus one signature check. It does not depend on network size. Lineage checks grow linearly with the length of the checked chain. Any network participant possessing an artifact can execute verification out-of-band without encountering protocol transaction fees, network tolls, or centralized coordinator gateways.
 
 #### IX. Autonomous Self-Hosting Equity
 The protocol guarantees universal data-plane and verification autonomy. Any operator can deploy a fully compliant node to read, write, and verify states independently, without structural dependence on, or rent extraction from, external peer operations.
@@ -404,7 +404,7 @@ Mnemonic structurally isolates the non-monetizable protocol validation layer fro
 
 The protocol enforces that two operational fields can never be subject to rent extraction or gating by any network entity:
 
-* **State Verification:** The execution complexity of checking signature validity, content hashes, and lineage integrity is bounded at constant time ($O(1)$) and runs locally without network tolls.
+* **State Verification:** Checking a signature and a content hash is a small local computation per artifact (linear in artifact size; lineage checks linear in chain length). It runs without network tolls.
 * **Deployment Independence:** Any entity can spin up an autonomous node across `cli`, `sdk`, or `browser-extension` surfaces to read and sign blocks without paying fees to external operators.
 
 #### 5.7.2 Service-Layer Monetization
@@ -623,7 +623,7 @@ $$\text{BLAKE3}\big(\text{cCBOR}(A_i')\big) \neq \text{CID}(A_i) \implies \text{
 * **Asynchronous Temporal Verification:** When public ledger anchoring is active, the system generates mathematical inclusion proofs linking batched Merkle roots directly to consensus state checkpoints, providing a robust defense against historical backdating attacks.
 * **Tokenized Isolation Scoping:** Cross-runtime data synchronization requires a valid capability token. Consuming entities can verify authorization rights and delegation chains back to the root keyholder non-interactively without relying on central lookup tables.
 * **Auditable State Transitions:** The peer-to-peer sharing handshake outputs a dual-signed transaction receipt node. This block is concurrently appended to the lineage trees of both participating entities, turning data transit events into clear historical landmarks.
-* **Decoupled Verification Autonomy:** State verification computational complexity is strictly bounded at constant time ($O(1)$) and runs locally without checking in with central authorization gateways or paying protocol processing tolls.
+* **Decoupled Verification Autonomy:** State verification is a small local computation per artifact (one hash pass plus one signature check) and runs locally without checking in with central authorization gateways or paying protocol processing tolls.
 
 ---
 
@@ -912,88 +912,73 @@ DISTRIBUTION MATRIX EXPANSION
 * **Decoupled System Distributables:** Available now. The CLI (`packages/cli`) and the SDK (`packages/sdk`) are separate npm packages. The MCP server binary is distributed through `packages/mcp`.
 
 
-## 13. Empirical Evaluation Framework and Performance Metrics
+## 13. Empirical Evaluation and Performance Metrics
 
-This section details the empirical evaluation matrix used to benchmark the performance parameters of the canonical Rust implementation. To guarantee technical accuracy, all metrics reflect the current execution capabilities of the version 0.2 codebase or are explicitly labeled as baseline simulated research parameters.
+This section reports only measured values. Each value names the benchmark that produced it. Values that nobody has measured yet are marked "not measured".
+
+**Test machine:** shared cloud virtual machine, 4 vCPU, Intel Xeon @ 2.10 GHz, Linux. Measured on 24 September 2026 with `criterion` (release profile). A shared machine adds noise; treat differences below ~10% as noise.
 
 ---
 
-### 13.1 Cryptographic Processing and Serialization Latency
+### 13.1 Serialization, Hashing and Signing Latency
 
-The table below catalogs processing overhead for the core serialization and signing pipelines, measured across $10,000$ sequential iterations on an Apple M3 Max (16-core configuration, local single-threaded execution):
+Source: `cargo bench -p mnemonic-core --bench cbor_codec`. Median time per operation:
 
-| Operational Pipeline Step | Input Payload Boundary | Underlying Primitive Suite | Mean Latency Profile |
+| Step | 100 B content | 500 B | 2,000 B | 10,000 B |
+| :--- | :--- | :--- | :--- | :--- |
+| Canonical CBOR (`to_canonical_cbor`) | 1.06 µs | 1.25 µs | 1.53 µs | 1.43 µs |
+| BLAKE3 hash of the CBOR bytes | 0.35 µs | 0.66 µs | 1.21 µs | 3.77 µs |
+| COSE_Sign1 + Ed25519 sign | 25.6 µs | 27.9 µs | 33.1 µs | not measured |
+| Full pipeline (CBOR + hash + sign) | 20.8 µs | 20.9 µs | 30.5 µs | not measured |
+
+The full pipeline is faster than signing alone for small inputs. This is within the noise of the shared machine. The main result: one memory is encoded, hashed and signed in about 20–35 µs. Verification (hash recompute + signature check) is **not measured** yet.
+
+---
+
+### 13.2 TurboQuant Compression and Retrieval Fidelity
+
+Sources: `cargo bench -p mnemonic-core --bench decompress_fidelity` (synthetic) and `--bench decompress_fidelity_real --features local-embed` (real). Method and full tables: [decompression-fidelity.md](./research/decompression-fidelity.md). "Top-K recall" is the overlap of the top 10 results before and after compression.
+
+**Real embeddings** — model `all-MiniLM-L6-v2` (384 dimensions), 60 sentences, 10 queries:
+
+| Bits per dimension | Size reduction | Mean cosine | Top-10 recall |
 | :--- | :--- | :--- | :--- |
-| **Canonical Serialization** | 4 Kilobytes Structured Map | `cCBOR` (RFC 8949) | 12.4 $\mu$s |
-| **Content Identifier Hash** | 4 Kilobytes Serialized Bytes | `BLAKE3` Engine | 3.8 $\mu$s |
-| **Envelope Sealing Matrix** | 32-Byte Payload Hash | `COSE_Sign1` + `Ed25519` | 48.2 $\mu$s |
-| **Pipeline Verification Loop**| Fully Encapsulated Envelope | Hash Recompute + Signature Check | 62.1 $\mu$s |
+| 4 | 7.68× (87%) | 0.974 | **94%** |
+| 3 | 10.11× (90%) | 0.919 | 91% |
+| 2 | 14.77× (93%) | 0.787 | 83% |
 
-The evaluation demonstrates that the core cryptographic verification layer processes transactions at an efficiency profile well under $100$ microseconds ($< 0.1\text{ ms}$), validating the design goal of low-overhead, out-of-band execution.
+**Synthetic worst case** — random uniform vectors, 1,536 dimensions: 4-bit gives 7.92× and **80%** Top-10 recall. Random vectors have many near-ties, so this is a lower bound.
 
----
+The real corpus is small. A standard benchmark set (MTEB or BEIR) is needed for a headline number.
 
-### 13.2 TurboQuant Compression Ratios and Retrieval Distortion
-
-Vector memory compression performance was evaluated using standard text embedding configurations mapping over sample semantic datasets (1536-dimensional coordinate matrices).
-
-```text
-[TURBOQUANT RETENTION MATRIX]
-
-Full 32-bit Float  ──► [100% Vector Precision Base Baseline]  ──► Top-K Recall: 1.00
-4-bit Scalar Quant ──► [87.5% Memory Footprint Reduction]    ──► Top-K Recall: 0.982
-2-bit Scalar Quant ──► [93.7% Memory Footprint Reduction]    ──► Top-K Recall: 0.914
-
-```
-
-#### I. Accuracy Retention and Distortion Mechanics
-
-* **4-bit Configuration:** Reduces the structural memory footprint by **87.5%** relative to raw 32-bit floating-point metrics. Mean Squared Error distortion maps at a tight boundary ($\text{MSE} = 0.0024$), retaining a Top-10 semantic retrieval accuracy index of **98.2%**.
-* **2-bit Configuration:** Yields a **93.7%** reduction in metadata transit bulk. Top-10 recall tracks at **91.4%**, matching requirements for bandwidth-constrained network transports.
-
-#### II. Provider Agnosticism
-
-The quantization profile operates predictably across diverse models including local `fastembed` structures and public cloud engines, confirming that dimension-wise coordinate scaling factor arrays effectively preserve relative distance measurements during compression.
+**Effect on the product today:** none. Recall ranks over uncompressed f32 embeddings (§4.3.3). Compressed bytes serve as proof of existence only.
 
 ---
 
-### 13.3 Amortized Ledger Persistence and Infrastructure Fees
+### 13.3 Anchoring Cost and Latency
 
-Physical write latencies and network costs split cleanly along our hybrid local/remote storage boundaries:
-
-* **Local Caching (SQLite Layer):** Storage confirmation is effectively instantaneous ($< 2\text{ ms}$) at zero economic cost. Hot access pipelines are optimized for immediate execution.
-* **Distributed Consensus Anchoring:** Writing individual tracking entries directly to public ledgers like Solana or permanent networks like Arweave introduces clear transaction latency barriers ($1\text{ s}$ to $10\text{ s}$). Mnemonic minimizes this overhead by using a background task worker that bundles state blocks into a local Merkle tree topology.
-
-By anchoring only the derived `BatchRoot` content identifier, the cost per individual memory block scales down logarithmically as batch density grows:
+- **Local write (SQLite):** no network, no fee. Latency is **not measured** as a benchmark.
+- **Anchored write (Arweave + Solana):** each memory uses its own Arweave upload and its own Solana memo (§5.6). Latency is **not measured** as a benchmark. It depends on the Arweave gateway and Solana confirmation.
+- **Price:** the operator charges `max(minimum, (Irys + Solana fee) × SOL/USD × 1.2)`. The default minimum is 0.001 USDC (`mcp/src/pricing.rs`, `mcp/src/config.rs`).
+- **Batch anchoring** (§5.6.1) is a design. With a batch of $N$ memories, the ledger cost per memory would fall as $1/N$:
 
 $$T_{\text{amortized}} = \frac{T_{\text{batch\_compile}} + T_{\text{ledger}}}{N}$$
 
 ---
 
-### 13.4 Network Transit Fee Metrics (x402 Framework)
+### 13.4 x402 Payment Overhead
 
-Integrating payment gating routines through the **x402 Internet-Native Payment Standard** inserts a minor network proxy challenge-response delay into remote data calls:
-
-```text
-[x402 TRANSACTION LOOP LATENCY OVERHEAD]
-
-Standard Unauthenticated Query   ──► [14ms Local Transit Node Latency]
-x402 Payment-Gated Handshake Loop ──► [42ms Total Latency (Invoice Issuance + Verification)]
-
-```
-
-The additional $28\text{ ms}$ of overhead represents the time required to issue an invoice token, process the machine wallet signature check, and release the active tool barrier. This latency remains well below typical Large Language Model inference token collection thresholds ($300\text{ ms}$–$1000\text{ ms}$), proving that automated metering routines do not bottleneck agent interaction flows.
+**Not measured.** An earlier draft gave 14 ms and 42 ms. No benchmark or log in the repository supports those numbers, so they are removed.
 
 ---
 
-### 13.5 Fault Isolation and Boundary Simulation
+### 13.5 Fault Handling (tested behaviour)
 
-Adversarial injection testing confirms the security resilience parameters of the runtime:
+These statements are covered by automated tests:
 
-* **Payload Corruption Recovery:** Modifying a single bit inside an encapsulated cCBOR structure automatically forces a verification failure ($\bot$), dropping the transaction out-of-band before it can route to search indexes.
-* **Lineage Cycle Mitigation:** Ingesting a cyclic history sequence (e.g., $A \to B \to C \to A$) triggers an immediate loop-detection event during Breadth-First Search (BFS) indexing. The runtime walls off the offending branch and logs a structural validation fault.
-* **Remote Consensus Gaps:** If the Arweave upload, the Solana memo or the read-back check fails, the memory is kept as `local` and no payment is charged. On the hosted paid path, the delivery is marked as retryable.
-
+* **Tampered payload:** changing bytes inside a COSE_Sign1 envelope makes verification fail (`core/tests/integration_cbor.rs`, `test_tampered_cose_detected`).
+* **Lineage cycles:** writing an artifact that would create a cycle is refused with `CYCLE_DETECTED` (`core/src/lineage/mod.rs`).
+* **Failed anchoring:** if the Arweave upload, the Solana memo or the read-back check fails, the memory is kept as `local` and no payment is charged. On the hosted paid path, the delivery is marked as retryable.
 
 ---
 
