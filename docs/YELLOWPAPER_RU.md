@@ -329,20 +329,20 @@ trait StorageBackend {
 
 ### 5.6 Криптографическое якорение
 
-Якорение в реестре усиливает утверждения на основе подписей. Оно добавляет публичные временные метки третьей стороны и предотвращает атаки с подделкой даты задним числом.
+Якорение в реестре усиливает утверждения на основе подписей. Оно добавляет публичные временные метки третьей стороны и предотвращает атаки с подделкой даты задним числом. Поток якорения идёт после конвейера подписания:
 
 ```text
-[Raw Semantic Content]
+[Sealed COSE_Sign1 Envelopes — SignedUnanchored]
 
-EMBED           ──► Generate High-Dimensional Vector v ∈ ℝᵈ
-QUANTIZE        ──► Apply TurboQuant Scalar Compression to v_q ∈ ℤ_𝘲ᵈ
-ENCAPSULATE     ──► Bind Content, v_q, Type Meta, and Parent CID
-CANONICALIZE    ──► Serialize Structure to Deterministic cCBOR
-HASH            ──► Compute Content Identifier (CID) via BLAKE3
-SEAL            ──► Sign CID via Ed25519 to Produce COSE_Sign1 Envelope
-PERSIST         ──► Write Sealed Envelope to Distributed Storage Layers
-
+BATCH           ──► Collect Leaf CIDs as Parents of a batch.root Artifact (§5.6.1)
+HASH            ──► Compute CID(R_batch) via BLAKE3 over cCBOR
+SUBMIT          ──► Write CID(R_batch) to the Anchoring Backend — AnchorPending
+CONFIRM         ──► Obtain Consensus Inclusion Proof π — Anchored
+PROVE           ──► Verify Each Leaf via Its Ancestral Path to CID(R_batch)
+FALLBACK        ──► On Drop or Reversion, Keep Local State and Retry — AnchorFailed
 ```
+
+Состояния этого потока определены в §5.6.2.
 
 #### 5.6.1 Merkle-батчинг через родословную
 
@@ -744,7 +744,7 @@ NFT (Non-Fungible Token, невзаимозаменяемый токен) иде
 Mnemonic поддерживает семейство шаблонов памяти агентов. Поля данных, последовательности выполнения и математические формулы описаны в документе [Usecases](./usecases.md) (на английском).
 
 
-### 11. Анализ связанных работ
+## 11. Анализ связанных работ
 
 Архитектура Mnemonic Protocol находится в уникальной точке пересечения векторной индексации, децентрализованного хранения данных и систем криптографической верификации:
 
@@ -936,6 +936,7 @@ x402 Payment-Gated Handshake Loop ──► [42ms Total Latency (Invoice Issuanc
 * **Разрывы удалённого консенсуса:** соединение с Arweave может истечь по таймауту. Транзакция якоря Solana может выпасть из мемпулов сети. Тогда конвейер плавно возвращается к состояниям верификации по локальному кэшу. Транзакция удалённого якорения переходит в асинхронную очередь повторов. Это сохраняет доступность системы.
 
 
+## 14. Ограничения и открытые вопросы
 
 ### 14.1 Криптографическое стирание и парадокс неизменяемости
 
@@ -1020,7 +1021,7 @@ Mnemonic математически гарантирует композицию 
 * Моделирование граничных сбоев в децентрализованной инфраструктуре. Тесты проверяют поведение узлов при отключении постоянного хранилища, выпадении транзакций из мемпулов консенсуса и порче локального кэша.
 
 
-## 16. Дорожная карта
+## 15. Дорожная карта
 
 Будет дополнено (TBD).
 
