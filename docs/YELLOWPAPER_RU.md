@@ -1089,12 +1089,16 @@ Mnemonic рассматривает память агента как подпи�
 ## Литература
 
 
+<a id="ref-1"></a>
 1. *[TurboQuant: Online Vector Quantization with Near-Optimal Distortion Rate](https://arxiv.org/abs/2504.19874).*  Zandieh, A. and Mirrokni, V. arXiv:2504.19874.
 
 
+<a id="ref-2"></a>
 2. *[Sublinear Verifiable Recall: An Inverted-File Cascade for Compressed Embedding Retrieval in the Mnemonic Protocol](https://www.researchgate.net/publication/404381758_Sublinear_Verifiable_Recall_An_Inverted-File_Cascade_for_Compressed_Embedding_Retrieval_in_the_Mnemonic_Protocol).*
 
+<a id="ref-3"></a>
 3. *[Portable Agent Memory: A Protocol for Cryptographically-Verified Memory Transfer Across Heterogeneous AI Agents](https://arxiv.org/abs/2605.11032).* arXiv:2605.11032.
 
 
-4. *[ERC-8004: Trustless Agents](https://eips.ethereum.org/EIPS/eip-8004)
+<a id="ref-4"></a>
+4. *[ERC-8004: Trustless Agents](https://eips.ethereum.org/EIPS/eip-8004).*
