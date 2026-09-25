@@ -177,3 +177,32 @@ Modes after this change:
 | `local` | device SQLite | author | free |
 | `sealed` | Arweave ciphertext + Solana hash | author + granted readers | quota, then paid |
 | `public` | Arweave plaintext + Solana hash | anyone | quota, then paid |
+
+## Design: protect agents from malicious third-party memory
+
+Prompt injection cannot be fully prevented
+(<https://genai.owasp.org/llmrisk/llm01-prompt-injection/>). The goal is
+layers that make it unlikely and traceable. Layers in priority order:
+
+| # | Layer | Status |
+|---|---|---|
+| 1 | **Source separation.** Foreign memories never mix into normal recall. They enter only through explicit import or a recall that names a source. Authenticated recall already returns only the caller's rows. | Partly available. Must hold for P1 share/import. |
+| 2 | **Provenance on every result.** `author_did` and `source: own/foreign` on each recall hit. | Available (PR "recall provenance"). Signature status per hit: planned. |
+| 3 | **Trusted-author list.** Owner keeps trusted DIDs. Unknown authors are held back unless asked for. Every foreign memory is signed, so a bad author can be blocked by DID. | Planned (P1). |
+| 4 | **Mark foreign text as data ("spotlighting").** Wrap foreign text in markers with a random per-call boundary, plus a notice to the model. Reported to cut attack success from >50% to <2% in GPT-family tests (<https://arxiv.org/abs/2403.14720>). | Available (PR "recall provenance"). |
+| 5 | **Clean on import.** Remove zero-width and bidirectional control characters; defuse Markdown images (data leak via URL); size limits; flag imperative text. | Partly available (characters + images). Rest planned. |
+| 6 | **Human approval for risky actions** triggered after reading foreign memory (public write, payment, sending data out). | Pattern exists for public writes (`request_public_write_confirmation`). Rest planned. |
+
+Rule: layers 1, 2 and 4 are required before P1 sharing ships.
+
+### Open decision (owner): the anonymous public pool
+
+The storage layer returns **all rows** to an anonymous recall, including
+rows with `visibility = private` (`core/src/storage/sqlite.rs`,
+`SEARCH_SQL_PUBLIC_POOL`, documented there as "every stored memory is
+public (operator decision)"). This conflicts with decision 3 (shared
+memories are sealed/private by default). Options:
+
+1. Keep it (hosted memories are public by design) and say so in the UI and docs.
+2. Filter anonymous recall to `visibility = public` only (one-line SQL change + test update).
+3. Remove anonymous recall; require a login.

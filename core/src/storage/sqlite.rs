@@ -111,7 +111,7 @@ CREATE INDEX IF NOT EXISTS idx_blog_posts_published_at ON blog_posts(published_a
 /// Decision 9.
 const SEARCH_SQL_ALL: &str = "SELECT a.attestation_id, a.content, a.content_hash, a.tags,
             a.solana_tx, a.arweave_tx, a.created_at, a.write_mode,
-            a.visibility, ae.embedding
+            a.visibility, ae.embedding, a.signer_pubkey, COALESCE(a.owner_pubkey, '')
      FROM attestations a
      JOIN attestation_embeddings ae ON a.attestation_id = ae.attestation_id
      WHERE a.owner_pubkey = ?";
@@ -122,7 +122,7 @@ const SEARCH_SQL_ALL: &str = "SELECT a.attestation_id, a.content, a.content_hash
 /// interpolated as text.
 const SEARCH_SQL_FILTERED: &str = "SELECT a.attestation_id, a.content, a.content_hash, a.tags,
             a.solana_tx, a.arweave_tx, a.created_at, a.write_mode,
-            a.visibility, ae.embedding
+            a.visibility, ae.embedding, a.signer_pubkey, COALESCE(a.owner_pubkey, '')
      FROM attestations a
      JOIN attestation_embeddings ae ON a.attestation_id = ae.attestation_id
      WHERE a.owner_pubkey = ? AND a.visibility = ?";
@@ -135,7 +135,7 @@ const SEARCH_SQL_FILTERED: &str = "SELECT a.attestation_id, a.content, a.content
 /// API compatibility but intentionally ignored on this path.
 const SEARCH_SQL_PUBLIC_POOL: &str = "SELECT a.attestation_id, a.content, a.content_hash, a.tags,
             a.solana_tx, a.arweave_tx, a.created_at, a.write_mode,
-            a.visibility, ae.embedding
+            a.visibility, ae.embedding, a.signer_pubkey, COALESCE(a.owner_pubkey, '')
      FROM attestations a
      JOIN attestation_embeddings ae ON a.attestation_id = ae.attestation_id";
 
@@ -1208,6 +1208,8 @@ impl AttestationStore for SqliteStore {
                 write_mode: row.get::<_, WriteMode>(7)?,
                 visibility: row.get::<_, Visibility>(8)?,
                 relevance_score: score,
+                signer_pubkey: row.get(10)?,
+                owner_pubkey: row.get(11)?,
             })
         };
 

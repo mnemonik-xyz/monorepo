@@ -58,6 +58,10 @@ pub struct SearchResult {
     pub write_mode: WriteMode,
     pub visibility: Visibility,
     pub relevance_score: f32,
+    /// Base58 Ed25519 key that signed the stored record (the author).
+    pub signer_pubkey: String,
+    /// Tenant that owns the row. Empty for legacy rows without an owner.
+    pub owner_pubkey: String,
 }
 
 /// Attestation CRUD and cosine search.
