@@ -139,6 +139,21 @@ runs:
         if ! ssh-keygen -y -P '' -f /tmp/ci_deploy_key > /dev/null 2>&1; then
           echo "::error::CI_SSH_PRIVATE_KEY does not parse as an (unencrypted) SSH private key even after normalization. Re-copy the key file byte-for-byte from the coding-fabric secret source: gh secret set CI_SSH_PRIVATE_KEY -R <this repo> < /path/to/key"
           ssh-keygen -y -P '' -f /tmp/ci_deploy_key 2>&1 | head -3 || true
+          # Diagnostics that reveal the SHAPE of the problem without ever
+          # printing secret content: GitHub's log masking only catches
+          # exact matches of the WHOLE registered secret, so echoing a raw
+          # substring (even a prefix) would risk leaking it — everything
+          # below is a derived count/hash/boolean instead.
+          echo "::notice::diagnostics (no key content shown) — byte_len=$(wc -c < /tmp/ci_deploy_key) sha256=$(sha256sum /tmp/ci_deploy_key | cut -d' ' -f1) lines=$(wc -l < /tmp/ci_deploy_key)"
+          if grep -qE '^(ssh-ed25519|ssh-rsa|ecdsa-sha2-|ssh-dss) ' /tmp/ci_deploy_key; then
+            echo "::error::the secret looks like a PUBLIC key (starts with ssh-<type>) — CI_SSH_PRIVATE_KEY must hold the PRIVATE half, not the .pub file"
+          elif grep -qiE '^age1|AGE-SECRET-KEY|age-encryption\.org' /tmp/ci_deploy_key; then
+            echo "::error::the secret looks like an age key/blob (sops encryption), not a plaintext SSH private key — CI_SSH_PRIVATE_KEY must be the DECRYPTED key, not the encrypted artifact"
+          elif grep -qE '^[A-Za-z0-9+/=]+$' /tmp/ci_deploy_key; then
+            echo "::error::the secret looks like a single base64 blob with no PEM markers at all — did the copy strip the -----BEGIN/END----- lines?"
+          elif [ "$(wc -c < /tmp/ci_deploy_key)" -lt 100 ]; then
+            echo "::error::the secret is suspiciously short ($(wc -c < /tmp/ci_deploy_key) bytes) for an SSH private key — looks truncated"
+          fi
           exit 1
         fi
         echo "CI keypair restored (fp $(ssh-keygen -lf /tmp/ci_deploy_key | awk '{print $2}'))"
