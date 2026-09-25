@@ -53,15 +53,21 @@ Both are `harness = false` and print a table to stdout.
 
 Per-vector reconstruction is excellent (mean cos ≈ 0.974 at 4-bit). Top-K recall is ~80% because i.i.d. uniform top-K results are near-tied within a thin cosine band and quantization shuffles ties — a known artifact of the test distribution, not a TurboQuant failure.
 
-### Real embeddings (fill in by running locally)
+### Real embeddings
 
-> The sandbox where this report was first drafted blocks the ONNX-runtime prebuilt binary download. Run locally and paste the table below.
+Measured on 24 September 2026: shared cloud VM, 4 vCPU Intel Xeon @ 2.10 GHz.
+Command: `cargo bench -p mnemonic-core --bench decompress_fidelity_real --features local-embed`.
+Corpus: 60 sentences, 10 queries, `all-MiniLM-L6-v2` (384 dimensions), Top-K = 10.
 
 ```
-[ table here after `cargo bench -p mnemonic-core --bench decompress_fidelity_real --features local-embed` ]
+ bits    mean MSE   mean cos   min cos   Top-K rec      ratio
+---------------------------------------------------------------
+    2    0.001621     0.7867    0.7522      83.00%     14.77x
+    3    0.000485     0.9187    0.8991      91.00%     10.11x
+    4    0.000139     0.9744    0.9686      94.00%      7.68x
 ```
 
-Expected at 4-bit: Top-K recall ≥ 95%, matching whitepaper §13.2's 98.2% within sampling noise on this corpus size.
+At 4 bits, Top-10 recall is 94%. This is below the 95% gate in the next section, so compressed vectors are not yet ready as a primary recall index. The corpus is small; a standard set (MTEB or BEIR) is needed for a headline number. An earlier whitepaper draft stated 98.2%; no measurement supported it, and the yellow paper now reports 94%.
 
 ## What this means for the protocol
 
