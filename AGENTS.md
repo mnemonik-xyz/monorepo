@@ -53,7 +53,7 @@ The signing flow is intentionally split: the server returns a canonical CBOR bun
 - DIDs:
   - `did:sol:<base58 pubkey>` — Solana-native DID resolver (default).
   - `did:key:z6Mk...` — multibase-encoded Ed25519 (interop).
-- For multi-agent setups, **one keypair per agent** is the recommended pattern; lineage is preserved through CBOR `prev_id` references.
+- For multi-agent setups, **one keypair per agent** is the recommended pattern; lineage is preserved through the CBOR `parents` field (up to 16 parent references per artifact).
 
 ## Verification model
 
@@ -62,10 +62,10 @@ A consumer of a memory can independently verify it without trusting Mnemonic:
 1. Fetch `arweave_tx` from any Arweave gateway → raw COSE_Sign1 bytes.
 2. Recompute `blake3(canonical_cbor_payload)` → 32-byte hash.
 3. Verify `cose_signature` against the writer's Ed25519 pubkey embedded in the envelope.
-4. Fetch the Solana transaction by `solana_tx` (any RPC) → SPL Memo program data field equals the same hash.
+4. Fetch the Solana transaction by `solana_tx` (any RPC) → the SPL Memo is JSON, and its `h` field equals the same hash.
 5. If all four match, the memory is authentic, content-addressed, and timestamped.
 
-Reference verifier code is in `core/src/codec/verify.rs` (Rust) and `packages/sdk/src/verify.ts` (TypeScript).
+Reference verifier code is in `core/src/codec/sign.rs` (`verify_artifact`) and `core/src/codec/hash.rs` (`verify_hash`).
 
 ## Composability with other agent protocols
 

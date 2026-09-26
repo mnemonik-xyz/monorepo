@@ -28,7 +28,7 @@ The MCP server requires an embedder. The simplest local path:
 
 ```bash
 STORAGE_MODE=local PAYMENT_MODE=none \
-  cargo run -p mnemonic-mcp --release --features local-embed -- --transport http --port 3000
+  cargo run -p mnemonic-mcp --bin mnemonic-mcp --release --features local-embed -- --transport http --port 3000
 ```
 
 ## Tests
