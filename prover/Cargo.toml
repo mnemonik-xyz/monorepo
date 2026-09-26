@@ -1,0 +1,23 @@
+[package]
+name = "mnemonic-prover"
+version = "0.1.0"
+edition = "2021"
+description = "Mnemonic correspondence prover — PRODUCES intent–action correspondence certificates (zigz backend, Wave 2). Verify-only lives in mnemonic-core. Experimental."
+
+[features]
+default = []
+# Forwards to core's gated correspondence layer. Default `cargo build --workspace`
+# builds this crate EMPTY (mirrors trajectory-experimental): the body is gated, so
+# the experimental invariant holds. Use:
+#   cargo test -p mnemonic-prover --features correspondence-experimental
+correspondence-experimental = ["mnemonic-core/correspondence-experimental"]
+
+[dependencies]
+mnemonic-core = { path = "../core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+blake3 = "1"
+
+[dev-dependencies]
+# Signing in the end-to-end test (produce cert -> sign -> core verify).
+solana-sdk = "2.2"
