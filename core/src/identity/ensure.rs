@@ -1231,20 +1231,15 @@ mod tests {
 
         let os_arc = std::sync::Arc::new(MemoryKeyStore::new());
 
-        // Use a read-only identity path to force the stub-file write to fail.
-        // We create a subdirectory and immediately remove write permissions on it.
-        let ro_dir = dir.path().join("readonly");
-        std::fs::create_dir(&ro_dir).unwrap();
+        // Force the stub-file write to fail by making the identity path's
+        // parent a regular file. Creating the temp file inside it fails with
+        // ENOTDIR for every user. A read-only directory is not enough: root
+        // ignores directory permissions, so the write would succeed under root.
+        let not_a_dir = dir.path().join("not-a-dir");
+        std::fs::write(&not_a_dir, b"").unwrap();
 
-        let identity_path = ro_dir.join("identity.json");
+        let identity_path = not_a_dir.join("identity.json");
         let readme_path = dir.path().join("README.txt");
-
-        // Make the directory read-only (Unix only; on Windows this test is vacuous).
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&ro_dir, std::fs::Permissions::from_mode(0o555)).unwrap();
-        }
 
         let stores = KeyStores {
             os: Some(Box::new(ArcMemoryKeyStore(os_arc.clone()))),
@@ -1253,31 +1248,15 @@ mod tests {
             readme_path,
         };
 
-        // On Unix the stub write will fail (read-only dir).
-        // On non-Unix we skip the assertion but still call ensure to verify
-        // it doesn't panic.
-        #[cfg(unix)]
-        {
-            let result = ensure_with_stores(stores);
-            assert!(result.is_err(), "ensure must fail when stub write fails");
+        let result = ensure_with_stores(stores);
+        assert!(result.is_err(), "ensure must fail when stub write fails");
 
-            // Keychain entry must have been rolled back.
-            let after = os_arc.get().unwrap();
-            assert!(
-                after.is_none(),
-                "keychain entry must be rolled back after partial failure"
-            );
-
-            // Restore permissions so TempDir cleanup succeeds.
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&ro_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
-
-        #[cfg(not(unix))]
-        {
-            // On non-Unix, just verify no panic.
-            let _ = ensure_with_stores(stores);
-        }
+        // Keychain entry must have been rolled back.
+        let after = os_arc.get().unwrap();
+        assert!(
+            after.is_none(),
+            "keychain entry must be rolled back after partial failure"
+        );
     }
 
     // ---------------------------------------------------------------------------

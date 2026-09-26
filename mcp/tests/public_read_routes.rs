@@ -172,6 +172,10 @@ async fn artifacts_empty_store_is_empty_list() {
 async fn analytics_buckets_and_totals_by_write_mode() {
     let state = mock_state();
     let owner = "seed-owner-pubkey";
+    // Seed yesterday (UTC), not a fixed date: a fixed date drifts out of the
+    // 90-day window and the test starts to fail on its own.
+    let day = (chrono::Utc::now() - chrono::Duration::days(1)).date_naive();
+    let created_at = format!("{day}T12:00:00Z");
     {
         let store = state.store.lock().expect("store");
         let embedding = vec![0.1f32; 8];
@@ -194,7 +198,7 @@ async fn analytics_buckets_and_totals_by_write_mode() {
                     "local:y",
                     owner,
                     owner,
-                    "2026-06-15T00:00:00Z",
+                    &created_at,
                     mode,
                     vis,
                     &embedding,
@@ -209,7 +213,7 @@ async fn analytics_buckets_and_totals_by_write_mode() {
 
     let buckets = body["buckets"].as_array().expect("buckets array");
     assert_eq!(buckets.len(), 1, "all rows on one UTC day: {body}");
-    assert_eq!(buckets[0]["date"], "2026-06-15");
+    assert_eq!(buckets[0]["date"], day.to_string());
     assert_eq!(buckets[0]["on_node"], 2);
     assert_eq!(buckets[0]["on_chain"], 1);
     assert_eq!(body["total_on_node"], 2);
