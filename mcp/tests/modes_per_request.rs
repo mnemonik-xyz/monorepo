@@ -12,6 +12,11 @@
 //!    (round-2 regression guard) — local-only deploy + JWT + explicit
 //!    `mode: "local"` routes through the inline path, NOT the deferred
 //!    branch. Round-1 had this case silently routing to deferred.
+//!    `explicit_local_remote_user_is_hash_only_not_signed` — a remote JWT
+//!    subject's explicit-local write is an inline hash-only row owned by
+//!    that subject (no operator or client signature);
+//!    `participate_remote_user_is_deferred_not_operator_signed` — a remote
+//!    participate write stays on the client-signing path.
 //! 2. `participate_against_local_only_server_returns_unsupported` —
 //!    `STORAGE_MODE=local`, `mode: "participate"` → JSON-RPC `-32010
 //!    UnsupportedMode { supported: ["local"] }`, DB unchanged.
@@ -161,22 +166,22 @@ async fn explicit_local_against_local_only_server_is_inline_not_deferred() {
     assert_eq!(server.write_mode_for_tx(sol_tx), Some("local".to_string()),);
 }
 
-// ── 1c (Wave 3). A REMOTE user's explicit-local write is client-signed ─────
-//     (deferred), NOT operator-inline-signed. The operator keypair must never
-//     produce a COSE signature over a memory authored by a *different*
-//     identity — even a free local write. Contrast with
-//     `explicit_local_against_local_only_server_is_inline_not_deferred`, where
-//     owner == operator (self-write) so inline signing is legitimate.
+// ── 1c. A REMOTE user's explicit-local write is a hash-only row ──────────
+//     owned by the remote user. Nothing is signed: no operator signature
+//     (the operator never signs for another identity) and no client
+//     signature (a free local write needs no keychain prompt). Only
+//     participate writes are client-signed — see 1d.
 
 #[tokio::test]
-async fn explicit_local_remote_user_is_deferred_not_operator_signed() {
+async fn explicit_local_remote_user_is_hash_only_not_signed() {
     let server = TestServer::builder()
         .storage_mode("local")
         .payment_mode("none")
         .build();
     // A remote identity distinct from the operator/server keypair.
     let remote = "RemoteUser1111111111111111111111111111111111";
-    assert_ne!(remote, server.server_pubkey().as_str());
+    let operator = server.server_pubkey();
+    assert_ne!(remote, operator.as_str());
 
     let result = server
         .call_tool(
@@ -188,26 +193,73 @@ async fn explicit_local_remote_user_is_deferred_not_operator_signed() {
     assert!(result.error().is_none(), "envelope: {:?}", result.envelope);
     let inner = result.result_text();
 
-    // Deferred (client-sign) shape — operator did NOT inline-sign.
+    // Inline shape, not the deferred client-signing envelope.
+    assert!(
+        inner.get("correlation_id").is_none() && inner.get("status").is_none(),
+        "remote explicit-local must not defer to client signing, got {inner:?}",
+    );
+    assert!(inner["attestation_id"].is_string(), "{inner:?}");
+    assert_eq!(inner["write_mode"], "local");
+    // The envelope names the owner and states that nothing signed it.
+    assert_eq!(inner["signer"], remote);
+    assert_eq!(inner["signature"], "none");
+    assert_eq!(inner["did_sol"], format!("did:sol:{remote}"));
+    let sol_tx = inner["solana_tx"].as_str().expect("solana_tx");
+    assert!(sol_tx.starts_with("local:"), "got sol_tx={sol_tx}");
+
+    // Row: owner = signer = remote subject; the operator signed nothing.
+    let row = server
+        .fetch_attestation_by_tx(sol_tx, remote)
+        .expect("row scoped to the remote owner");
+    assert_eq!(row.signer_pubkey, remote);
+    assert!(server.fetch_attestation_by_tx(sol_tx, &operator).is_none());
+    assert_eq!(server.attestation_count(remote), 1);
+    assert_eq!(server.attestation_count(&operator), 0);
+
+    // Recall under the remote JWT returns the row.
+    let recall = server
+        .call_tool(
+            Some(remote),
+            "mnemonic_recall",
+            json!({"query": "remote local memo", "limit": 5}),
+        )
+        .await;
+    assert!(recall.error().is_none(), "envelope: {:?}", recall.envelope);
+    let results = recall.result_text()["results"].clone();
+    assert_eq!(results.as_array().map(Vec::len), Some(1), "{results:?}");
+}
+
+// ── 1d. A REMOTE user's participate write stays client-signed ─────────────
+//     (deferred). The operator key never signs an anchored memory for
+//     another identity.
+
+#[tokio::test]
+async fn participate_remote_user_is_deferred_not_operator_signed() {
+    let server = TestServer::builder()
+        .storage_mode("full")
+        .payment_mode("none")
+        .build();
+    let remote = "RemoteUser1111111111111111111111111111111111";
+    let operator = server.server_pubkey();
+    assert_ne!(remote, operator.as_str());
+
+    let result = server
+        .call_tool(
+            Some(remote),
+            "mnemonic_sign_memory",
+            json!({"content": "remote anchored memo", "mode": "participate"}),
+        )
+        .await;
+    assert!(result.error().is_none(), "envelope: {:?}", result.envelope);
+    let inner = result.result_text();
     assert_eq!(
         inner["status"], "awaiting_signature",
-        "remote explicit-local must defer to client-signing, got {inner:?}",
+        "remote participate must defer to client signing, got {inner:?}",
     );
-    assert!(
-        inner["correlation_id"].is_string(),
-        "deferred response must carry a correlation_id: {inner:?}",
-    );
-    assert!(
-        inner.get("attestation_id").is_none(),
-        "no inline (operator-signed) row must be created: {inner:?}",
-    );
-    // The deferred path parks a bundle and waits for the sign-callback; no
-    // SQLite row exists yet (proves nothing was operator-signed inline).
-    assert_eq!(
-        server.attestation_count(remote),
-        0,
-        "remote explicit-local must not persist an operator-signed row",
-    );
+    assert!(inner["correlation_id"].is_string(), "{inner:?}");
+    assert!(inner.get("attestation_id").is_none(), "{inner:?}");
+    assert_eq!(server.attestation_count(remote), 0);
+    assert_eq!(server.attestation_count(&operator), 0);
 }
 
 // ── 2. participate against local-only server: typed UnsupportedMode ────────

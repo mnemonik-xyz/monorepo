@@ -257,10 +257,13 @@ fn rel_path_string(path: &Path) -> String {
 ///   first boot after a docs-tree change auto-reseeds; subsequent boots skip.
 ///
 /// Why the change: the legacy idempotency check called `store.count(server_pubkey)`,
-/// but `AttestationStore::count` queries by `signer_pubkey` — and the server
-/// keypair is the signer for EVERY attestation (it co-signs each user write).
-/// Once any user wrote anything, count > 0 forever and the protocol-knowledge
-/// corpus was permanently frozen on the FIRST seed. Surfaced live on
+/// but `AttestationStore::count` queries by `signer_pubkey`. At the time the
+/// server keypair also signed user writes, so it was the `signer_pubkey` of
+/// rows beyond the seeded corpus. (It no longer signs for anyone else: a
+/// remote participate write is client-signed, and a remote local write is a
+/// hash-only row whose `signer_pubkey` is the user.) Once any such row
+/// existed, count > 0 forever and the protocol-knowledge corpus was
+/// permanently frozen on the FIRST seed. Surfaced live on
 /// `mcp.mnemonik.xyz` 2026-06-25: 60-day-stale artifact, chat returned
 /// "no context about mnemonik" because the recall corpus pre-dated v0.2
 /// whitepaper revisions and the entire `work/completed/noncustodial-paradigm/`
@@ -384,18 +387,16 @@ pub async fn run(state: &McpState) -> Result<()> {
                 format!("{} > {}", rel_str, section.heading)
             };
 
-            // Seeding always takes the inline (server-signing) path —
-            // `jwt_sub = None` per Decision 12.
+            // Seeding always takes the inline path — `jwt_sub = None` per
+            // Decision 12. Seeded rows are `local`, so nothing is signed:
+            // the row stores the blake3 hash only, with
+            // `owner_pubkey = signer_pubkey = pubkey(state.keypair)`. The
+            // operator is legitimately the AUTHOR of its own knowledge base
+            // (design §21 landmine note).
             //
-            // Wave 3 (remove operator signing) exemption: inline signing now
-            // requires `owner == operator` (the server never COSE-signs a
-            // *remote* user's content). RAG seeding satisfies this by
-            // construction — `owner_pubkey = server_owner_pubkey =
-            // pubkey(state.keypair)` — because the operator is legitimately
-            // the AUTHOR of its own knowledge base, not a custodian signing on
-            // behalf of someone else. signer == owner == operator, so the
-            // `sign_memory_inline` guard permits it. This is the intended
-            // server-identity self-authored path (design §21 landmine note).
+            // `Transport::Http` is the most restrictive value: seeding runs
+            // for both transports and never needs inline participate
+            // signing, which `sign_memory` allows only on `Transport::Stdio`.
             //
             // Seeding always uses `local` regardless of the operator's
             // `STORAGE_MODE`. The protocol-knowledge corpus is operator-side
@@ -434,6 +435,7 @@ pub async fn run(state: &McpState) -> Result<()> {
                 &state.storage_mode,
                 &server_owner_pubkey,
                 None,
+                tools::Transport::Http,
                 seed_resolved,
                 // Seeded knowledge rows are always private — the RAG corpus
                 // is owner-scoped (server keypair) and never enters the

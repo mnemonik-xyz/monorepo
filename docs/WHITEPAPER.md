@@ -142,9 +142,11 @@ you can possibly want to remove.
 - **Local MCP (on your computer).** It uses your own key. Your key stays in the
   keychain of your operating system (OS). Mnemonic asks you to unlock the
   keychain only when a memory must be signed: publish, anchor or prove identity.
-- **Hosted MCP (on the Mnemonic server).** Your client signs the memory. The
-  server checks that the signature belongs to you. Then the server stores and
-  anchors the memory.
+- **Hosted MCP (on the Mnemonic server).** Your client signs each memory that
+  you anchor. The server checks that the signature belongs to you. Then the
+  server stores and anchors the memory. A `local` memory gets no signature.
+  The server stores only its fingerprint, under your identity. Thus, local
+  work does not ask you to unlock your key.
 - **What the server signs.** The server signs only the transport: the Arweave
   upload package that contains your signed record, and the Solana transaction
   that pays the network fee. These signatures do not change your record.

@@ -127,7 +127,7 @@ async fn visibility_threads_through_to_storage() {
     // + save_attestation. `STORAGE_MODE=local` keeps the Arweave/Solana
     // clients untouched (synthetic `local:` tx ids), so the success path
     // is deterministic.
-    use mnemonic_mcp::tools::{resolve_write_mode, sign_memory};
+    use mnemonic_mcp::tools::{resolve_write_mode, sign_memory, Transport};
     use std::time::Duration;
 
     let server = TestServer::builder()
@@ -169,6 +169,7 @@ async fn visibility_threads_through_to_storage() {
         "local",
         &owner_kp,
         None,
+        Transport::Stdio,
         resolved,
         Visibility::Private,
         &server.state.envelope,
@@ -217,6 +218,7 @@ async fn visibility_threads_through_to_storage() {
         "local",
         &owner_kp,
         None,
+        Transport::Stdio,
         resolved,
         Visibility::Public,
         &server.state.envelope,

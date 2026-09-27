@@ -1032,13 +1032,14 @@ pub async fn handle_request(
     state: &McpState,
     owner_pubkey: &str,
     jwt_sub: Option<&str>,
+    transport: crate::tools::Transport,
 ) -> JsonRpcResponse {
     // T2 round-2: callers without a pre-resolved mode (stdio dispatch via
     // `run_stdio` → `handle_request`) get `None` here. The dispatcher
     // resolves on demand inside `handle_tool_call`. `mcp_handler` (HTTP)
     // resolves up front for the paywall gate and passes the result in via
     // `handle_request_with_resolved_mode` below.
-    handle_request_with_resolved_mode(req, state, owner_pubkey, jwt_sub, None).await
+    handle_request_with_resolved_mode(req, state, owner_pubkey, jwt_sub, transport, None).await
 }
 
 /// Variant of [`handle_request`] that accepts a pre-resolved `mode`. The
@@ -1052,6 +1053,9 @@ pub async fn handle_request_with_resolved_mode(
     state: &McpState,
     owner_pubkey: &str,
     jwt_sub: Option<&str>,
+    // Which transport delivered the request. Only `Stdio` may reach inline
+    // operator signing (`tools::sign_memory`); see `tools::Transport`.
+    transport: crate::tools::Transport,
     pre_resolved_mode: Option<crate::tools::ResolvedMode>,
 ) -> JsonRpcResponse {
     let result: Result<Value, JsonRpcError> = match req.method.as_str() {
@@ -1081,7 +1085,16 @@ pub async fn handle_request_with_resolved_mode(
                 .and_then(|n| n.as_str())
                 .unwrap_or("");
             let args = req.params.get("arguments").cloned().unwrap_or_default();
-            handle_tool_call(name, &args, state, owner_pubkey, jwt_sub, pre_resolved_mode).await
+            handle_tool_call(
+                name,
+                &args,
+                state,
+                owner_pubkey,
+                jwt_sub,
+                transport,
+                pre_resolved_mode,
+            )
+            .await
         }
         "notifications/initialized" | "ping" => Ok(serde_json::json!({})),
         _ => Err(JsonRpcError::simple(
@@ -1252,7 +1265,11 @@ pub async fn mcp_handler(
     //   - Otherwise (allowlisted methods like `tools/list`): fall back to
     //     the local server keypair so legacy code paths in tools.rs do not
     //     blow up. `tools/list` and `initialize` never touch storage so the
-    //     value is unused on those paths.
+    //     value is unused on those paths. Even if an unauthenticated
+    //     `mnemonic_sign_memory` got past the middleware, this owner cannot
+    //     reach operator signing: every dispatch below passes
+    //     `Transport::Http`, and `tools::sign_memory` refuses inline
+    //     participate on that transport.
     let owner_pubkey: String = match &claims {
         Some(c) => c.sub.clone(),
         None => state.keypair.pubkey_base58(),
@@ -1361,11 +1378,15 @@ pub async fn mcp_handler(
 
     // Universal Paywall is gated after deferred client signing. Its callback
     // verifies the COSE envelope and quotes its immutable signed hash; the
-    // other rails retain this pre-execution gate.
+    // other rails retain this pre-execution gate. `active_universal_paywall`
+    // is `Some` only for `PAYMENT_MODE=x402` + a UP config — the same
+    // predicate the sign-callback uses — so an unknown `PAYMENT_MODE` with
+    // a UP config still reaches `check_payment` and fails closed here.
     if is_sign_memory
         && participate_gate
         && state.payment_mode != "none"
-        && state.universal_paywall.is_none()
+        && payment::active_universal_paywall(&state.payment_mode, state.universal_paywall.as_ref())
+            .is_none()
     {
         // Use live price from pricing engine (refreshed in background).
         let current_cost = state.pricing.current_price();
@@ -1393,6 +1414,7 @@ pub async fn mcp_handler(
                     &state,
                     &owner_pubkey,
                     jwt_sub.as_deref(),
+                    crate::tools::Transport::Http,
                     resolved_mode_for_gate,
                 )
                 .await;
@@ -1521,6 +1543,7 @@ pub async fn mcp_handler(
             &state,
             &owner_pubkey,
             jwt_sub.as_deref(),
+            crate::tools::Transport::Http,
             resolved_mode_for_gate,
         )
         .await;
@@ -1539,6 +1562,7 @@ async fn handle_tool_call(
     state: &McpState,
     owner_pubkey: &str,
     jwt_sub: Option<&str>,
+    transport: crate::tools::Transport,
     pre_resolved_mode: Option<crate::tools::ResolvedMode>,
 ) -> Result<Value, JsonRpcError> {
     let result = match name {
@@ -1659,6 +1683,7 @@ async fn handle_tool_call(
                 &state.storage_mode,
                 owner_pubkey,
                 jwt_sub,
+                transport,
                 resolved,
                 visibility,
                 &state.envelope,
