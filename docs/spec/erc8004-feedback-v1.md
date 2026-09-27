@@ -16,59 +16,44 @@ Mnemonic closes that gap. Every agent interaction is signed with a long-lived Ed
 
 ## Architecture
 
-```plantuml
-@startuml erc8004-architecture
-!theme plain
-skinparam componentStyle rectangle
-skinparam defaultFontSize 12
+```mermaid
+flowchart TD
+    subgraph AgentBox["AI Agent (Rater)"]
+        identity["🔑 Ed25519 Identity\n(long-lived keypair)"]
+        store["🗄️ Signed Memory Store\n(SQLite + Arweave index)"]
+        wallet["💳 EVM Wallet\n(submits giveFeedback tx)"]
+        sdk["📦 @mnemonik-xyz/sdk\nprepareFeedback()"]
+    end
 
-package "AI Agent (Rater)" {
-  component [Ed25519 Identity\n(long-lived keypair)] as identity
-  component [Signed Memory Store\n(SQLite + Arweave index)] as store
-  component [EVM Wallet\n(submits giveFeedback tx)] as wallet
-  component [@mnemonik-xyz/sdk\nprepareFeedback()] as sdk
-}
+    subgraph MnemonicBox["Mnemonic Protocol"]
+        mcp["⚙️ MCP Server\n(sign_memory, recall)"]
+        arweave["🌊 Arweave Anchor\n(COSE envelope, permanent)"]
+        solana["☀️ Solana Memo Anchor\n(SPL Memo, content hash)"]
+    end
 
-package "Mnemonic Protocol" {
-  component [MCP Server\n(sign_memory, recall)] as mcp
-  component [Arweave Anchor\n(COSE envelope, ANS-104)] as arweave
-  component [Solana Memo Anchor\n(SPL Memo, content hash)] as solana
-}
+    subgraph EthBox["Ethereum Mainnet"]
+        idReg["🪪 Identity Registry\n0x8004A169...e432\n(ERC-721)"]
+        repReg["⭐ Reputation Registry\n0x8004BAa1...b63\ngiveFeedback()"]
+    end
 
-package "Ethereum Mainnet" {
-  component [Identity Registry\n0x8004A169...e432\n(ERC-721, one NFT per agent)] as idReg
-  component [Reputation Registry\n0x8004BAa1...b63\ngiveFeedback()] as repReg
-}
+    hosting[("🌐 Caller-hosted URI\nHTTPS / IPFS / Arweave")]
+    verifier(["👁️ Third-party Verifier\n(anyone)"])
 
-cloud "Off-chain Hosting" {
-  component [Caller-hosted URI\n(HTTPS / IPFS / Arweave*)] as hosting
-}
+    identity -->|"signs payload_hash (Ed25519)"| sdk
+    store -->|"attestation_id + blake3"| sdk
+    sdk -->|"MNEMONIC_FEEDBACK_V1 JSON"| hosting
+    sdk -->|"giveFeedback calldata + preflight"| wallet
+    wallet -->|"sendTransaction"| repReg
+    repReg -->|"ownerOf / isApprovedForAll\n(self-promo guard)"| idReg
 
-actor "Third-party Verifier\n(anyone)" as verifier
+    mcp --> arweave
+    mcp --> solana
+    arweave -->|"anchor proof (tx id)"| store
+    solana -->|"anchor proof (sig)"| store
 
-identity -right-> sdk : signs payload_hash\n(Ed25519)
-store --> sdk : attestation_id\nblake3, anchor ref
-sdk -right-> hosting : MNEMONIC_FEEDBACK_V1\n(plain JSON)
-sdk -right-> wallet : giveFeedback calldata\n+ preflight warnings
-wallet -down-> repReg : sendTransaction(to, data)
-repReg -left-> idReg : ownerOf() / isApprovedForAll()\n(self-promo guard)
-
-mcp --> arweave : COSE_Sign1 envelope
-mcp --> solana : SPL Memo (blake3 + arweave_tx)
-arweave --> store : anchor proof (tx id)
-solana --> store : anchor proof (sig)
-
-verifier -up-> repReg : readFeedback()\nfeedbakURI + feedbackHash
-verifier --> hosting : GET document
-verifier --> sdk : verifyFeedbackDocument()
-
-note bottom of hosting
-  * Arweave hosting is a planned
-  additive flag (Round 2).
-  Round 1: caller provides the URI.
-end note
-
-@enduml
+    verifier -->|"readFeedback()\nfeedbackURI + feedbackHash"| repReg
+    verifier -->|"GET document"| hosting
+    verifier -->|"verifyFeedbackDocument()"| sdk
 ```
 
 ---
@@ -176,33 +161,32 @@ sequenceDiagram
     participant A as AI Agent (Rater)
     participant SDK as @mnemonik-xyz/sdk
     participant Host as Document Host
-    participant ETH as Ethereum<br/>Reputation Registry
+    participant ETH as Reputation Registry
     participant IR as Identity Registry
 
     Note over A: Has an anchored memory of<br/>working with Agent B
 
     A->>SDK: prepareFeedback({<br/>  agentId, value, valueDecimals,<br/>  attestationId, clientAddress,<br/>  feedbackUri, tags?<br/>})
-
-    SDK->>SDK: build feedback object<br/>(JCS-validate all values)
+    SDK->>SDK: build feedback object
     SDK->>SDK: payload_hash = keccak256(JCS(feedback))
-    SDK->>SDK: Ed25519.sign("MNEMONIC_FEEDBACK_V1:0x<payload_hash>")<br/>→ ed25519 proof
-    SDK->>SDK: assemble document<br/>{ schema, feedback, payload_hash, proofs }
+    SDK->>SDK: Ed25519.sign("MNEMONIC_FEEDBACK_V1:0x…") → proof
+    SDK->>SDK: assemble document + proofs
     SDK->>SDK: feedbackHash = keccak256(JCS(document))
-    SDK->>SDK: ABI-encode giveFeedback(..., feedbackHash)<br/>→ calldata (0xd5d1e4af...)
-    SDK-->>A: PreparedFeedback {<br/>  documentJson, feedbackHash,<br/>  onchain: { chainId, to, data },<br/>  preflight: { requiredSender, warnings }<br/>}
+    SDK->>SDK: ABI-encode giveFeedback(…) → calldata
+    SDK-->>A: PreparedFeedback { document, feedbackHash, onchain, preflight }
 
-    A->>Host: PUT documentJson at feedbackUri
+    A->>Host: PUT document at feedbackUri
     Host-->>A: 200 OK — URI live
 
-    Note over A: Document must be reachable<br/>BEFORE the tx lands
+    Note over A: Document must be reachable BEFORE tx lands
 
-    A->>ETH: wallet.sendTransaction({<br/>  to: 0x8004BAa1...b63,<br/>  data: calldata<br/>})
-    ETH->>IR: ownerOf(agentId) → owner
+    A->>ETH: wallet.sendTransaction({ to, data: calldata })
+    ETH->>IR: ownerOf(agentId)
     ETH->>IR: isApprovedForAll(owner, sender)
     ETH->>IR: getApproved(agentId)
     IR-->>ETH: results
-    ETH->>ETH: require(sender ≠ owner, ...)<br/>self-promo guard
-    ETH-->>A: tx confirmed<br/>emit NewFeedback(agentId, sender,<br/>  feedbackIndex, value, ..., feedbackHash)
+    ETH->>ETH: require(sender ≠ owner …) self-promo guard
+    ETH-->>A: tx confirmed — NewFeedback event emitted
 ```
 
 ---
@@ -212,32 +196,26 @@ sequenceDiagram
 ```mermaid
 sequenceDiagram
     participant V as Verifier (anyone)
-    participant ETH as Ethereum<br/>Reputation Registry
+    participant ETH as Reputation Registry
     participant Host as Document Host
     participant SDK as @mnemonik-xyz/sdk
     participant ARW as Arweave
 
     V->>ETH: readFeedback(agentId, clientAddr, idx)
     ETH-->>V: feedbackURI, feedbackHash (bytes32)
-
     V->>Host: GET feedbackURI
     Host-->>V: MNEMONIC_FEEDBACK_V1 JSON
-
-    V->>SDK: verifyFeedbackDocument({<br/>  document,<br/>  onchainFeedbackHash,<br/>  onchainSender?<br/>})
-
-    SDK->>SDK: ① recompute feedbackHash<br/>keccak256(JCS(document))<br/>== onchainFeedbackHash ?
-    SDK->>SDK: ② verify payload_hash<br/>keccak256(JCS(document.feedback))<br/>== document.payload_hash ?
-    SDK->>SDK: ③ verify Ed25519 proof<br/>ed25519.verify(sig, "MNEMONIC_FEEDBACK_V1:0x<payload_hash>", pubkey)
-    SDK->>SDK: ④ check sender binding<br/>onchainSender == feedback.clientAddress ?
-
+    V->>SDK: verifyFeedbackDocument({ document, onchainFeedbackHash, onchainSender? })
+    SDK->>SDK: ① keccak256(JCS(document)) == feedbackHash ?
+    SDK->>SDK: ② keccak256(JCS(feedback)) == payload_hash ?
+    SDK->>SDK: ③ Ed25519.verify(sig, payload_hash, pubkey) ?
+    SDK->>SDK: ④ onchainSender == clientAddress ?
     opt Arweave deep-check (optional)
         V->>ARW: fetch cose_envelope_uri
         ARW-->>V: COSE_Sign1 envelope
-        V->>SDK: verifyFeedbackDocument(..., { checkArweave: true })
         SDK->>SDK: blake3(COSE bytes) == mnemonic.blake3 ?
     end
-
-    SDK-->>V: VerifyFeedbackResult {<br/>  valid: true,<br/>  senderBinding: "verified" | "not-checked",<br/>  checks: { hash, payloadHash, ed25519, sender }<br/>}
+    SDK-->>V: VerifyFeedbackResult { valid, senderBinding, checks }
 ```
 
 ---
@@ -246,23 +224,22 @@ sequenceDiagram
 
 ```mermaid
 flowchart TD
-    A([prepareFeedback called]) --> B{clientAddress format\nvalid? EIP-55 checksum?}
-    B -- no --> ERR1[throw: invalid clientAddress]
-    B -- yes --> C{clientAddress == agentId address?\nzero address?}
-    C -- yes --> ERR2[throw: obvious self-promotion]
+    A([prepareFeedback called]) --> B{clientAddress valid?\nEIP-55 checksum OK?}
+    B -- no --> ERR1[❌ throw: invalid clientAddress]
+    B -- yes --> C{zero address?}
+    C -- yes --> ERR2[❌ throw: zero address]
     C -- no --> D{RPC URL available?}
-
-    D -- no --> WARN[emit warning: self-promo check\nskipped — no RPC endpoint\ncontinue with calldata]
+    D -- no --> WARN[⚠️ warning: self-promo check skipped\ncontinue with calldata]
     D -- yes --> E[eth_call: ownerOf agentId]
     E --> F{sender == owner?}
-    F -- yes --> ERR3[throw: sender is agent owner]
-    F -- no --> G[eth_call: isApprovedForAll\nowner, sender]
+    F -- yes --> ERR3[❌ throw: sender is agent owner]
+    F -- no --> G[eth_call: isApprovedForAll]
     G --> H{sender is operator?}
-    H -- yes --> ERR4[throw: sender is approved operator]
+    H -- yes --> ERR4[❌ throw: sender is approved operator]
     H -- no --> I[eth_call: getApproved agentId]
-    I --> J{sender is approved address?}
-    J -- yes --> ERR5[throw: sender is approved address]
-    J -- no --> OK([return PreparedFeedback])
+    I --> J{sender is approved?}
+    J -- yes --> ERR5[❌ throw: sender is approved address]
+    J -- no --> OK([✅ return PreparedFeedback])
 
     style ERR1 fill:#fdd,stroke:#c00
     style ERR2 fill:#fdd,stroke:#c00
@@ -278,33 +255,22 @@ flowchart TD
 ### Flow 4 — Evidence chain (why Mnemonic ratings are harder to fake)
 
 ```mermaid
-timeline
-    title Evidence chain for a Mnemonic-backed rating
+flowchart LR
+    T0["**T₀** Interaction\nAgent A works with Agent B"]
+    T1["**T₁** Sign memory\nEd25519 signs COSE envelope\nblake3 hash computed"]
+    T2["**T₂** Anchor\nArweave upload → permanent\nSolana SPL Memo → immutable timestamp"]
+    T3["**T₃** prepareFeedback\nCites blake3 from T₁\nEd25519 signs payload_hash"]
+    T4["**T₄** giveFeedback tx\nfeedbackHash on-chain\nimmutable forever"]
+    T5["**T₅** Verification\nAnyone checks chain + document\nOptional: confirm T₂ < T₄ on Arweave"]
 
-    section Interaction happens
-        T₀ : Agent A works with Agent B
-           : Interaction recorded in Agent A's Mnemonic store
+    T0 --> T1 --> T2 --> T3 --> T4 --> T5
 
-    section Anchoring (before the rating)
-        T₁ : sign_memory called
-           : Ed25519 signs the COSE_Sign1 envelope
-           : blake3 hash computed
-        T₂ : Arweave upload — COSE bytes pinned permanently
-           : Solana SPL Memo — blake3 + arweave_tx anchored on-chain
-           : Anchor timestamp is now immutable
-
-    section Rating submitted (after anchoring)
-        T₃ : prepareFeedback called
-           : Document cites blake3 from T₁ (already anchored)
-           : payload_hash signed with same Ed25519 key
-           : feedbackHash = keccak256(JCS(document))
-        T₄ : giveFeedback tx confirmed on Ethereum
-           : feedbackHash stored immutably on-chain
-
-    section Verification (any time after T₄)
-        T₅ : Verifier checks feedbackHash on-chain
-           : Downloads document, verifies hashes + sig
-           : Optionally fetches Arweave anchor to confirm T₂ < T₄
+    style T0 fill:#e8f4f8,stroke:#5b9bd5
+    style T1 fill:#e8f4f8,stroke:#5b9bd5
+    style T2 fill:#d4edda,stroke:#28a745
+    style T3 fill:#fff3cd,stroke:#ffc107
+    style T4 fill:#fff3cd,stroke:#ffc107
+    style T5 fill:#f0e6ff,stroke:#6f42c1
 ```
 
 ---
@@ -382,8 +348,6 @@ The optional EIP-191 proof is a standard personal_sign over the same string. The
 
 ## Reproducible fixture verification
 
-The canonical fixture at `packages/sdk/test/fixtures/erc8004-feedback-v1.json` is reproducible by any third party with no Mnemonic code:
-
 ```bash
 # Recompute feedbackHash from the document bytes alone:
 jq -j '.documentJson' packages/sdk/test/fixtures/erc8004-feedback-v1.json | cast keccak
@@ -393,5 +357,3 @@ jq -j '.documentJson' packages/sdk/test/fixtures/erc8004-feedback-v1.json | cast
 cast 4byte 0xd5d1e4af
 # Must return: giveFeedback(uint256,int128,uint8,string,string,string,string,bytes32)
 ```
-
-The Rust parity test (`mcp/tests/erc8004_feedback_parity.rs`) reads the same fixture and asserts both hashes using `alloy_primitives::keccak256` — cross-ecosystem proof that the TypeScript JCS + keccak256 matches the Rust implementation.
