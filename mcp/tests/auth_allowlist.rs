@@ -61,6 +61,114 @@ async fn post_json(app: &Router, body: Value, auth: Option<&str>) -> (StatusCode
     (status, parsed)
 }
 
+/// HS256 JWT with the production `iss`/`aud` that expired an hour ago
+/// (well past jsonwebtoken's default 60 s leeway).
+fn expired_jwt(sub: &str) -> String {
+    let now = chrono::Utc::now().timestamp() as u64;
+    let claims = serde_json::json!({
+        "iss": "mcp.mnemonik.xyz",
+        "aud": "mcp",
+        "sub": sub,
+        "iat": now - 7200,
+        "exp": now - 3600,
+        "jti": "expired-jti",
+    });
+    jsonwebtoken::encode(
+        &jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS256),
+        &claims,
+        &jsonwebtoken::EncodingKey::from_secret(TEST_SECRET),
+    )
+    .expect("encode")
+}
+
+/// #163 — claude-code showed "✓ Connected" and then "OAuth expired" on
+/// every tool call. The MCP authorization spec (2025-06-18, "Token
+/// Handling") says "Invalid or expired tokens MUST receive a HTTP 401
+/// response", and the 401 MUST carry `WWW-Authenticate` with
+/// `resource_metadata`. An expired token must therefore fail `initialize`
+/// (so the client refreshes at connect time) and anonymous recall (so the
+/// caller does not silently get public-only results), not only gated tools.
+#[tokio::test]
+async fn test_expired_jwt_is_401_challenge_on_initialize_recall_and_gated_tools() {
+    let state = mock_state();
+    let oauth_state = Arc::new(OAuthState::with_defaults(TEST_SECRET));
+    let app = build_router(state, oauth_state);
+    let expired = expired_jwt("expired-owner");
+
+    let bodies = [
+        serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}),
+        serde_json::json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+            "params": {"name": "mnemonic_recall", "arguments": {"query": "x"}}}),
+        serde_json::json!({"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+            "params": {"name": "mnemonic_whoami", "arguments": {}}}),
+    ];
+    for body in bodies {
+        let req = Request::builder()
+            .method("POST")
+            .uri("/mcp")
+            .header("content-type", "application/json")
+            .header("authorization", format!("Bearer {expired}"))
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "{body}");
+        let www = resp
+            .headers()
+            .get("www-authenticate")
+            .expect("401 must carry WWW-Authenticate")
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert!(www.starts_with("Bearer "), "{www}");
+        assert!(www.contains("error=\"invalid_token\""), "{www}");
+        assert!(
+            www.contains("resource_metadata=\"")
+                && www.contains("/.well-known/oauth-protected-resource/mcp\""),
+            "{www}"
+        );
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let parsed: Value = serde_json::from_slice(&bytes).expect("JSON body");
+        assert_eq!(parsed["error"]["code"], -32001, "{parsed}");
+    }
+
+    // Without any token the same discovery + recall calls stay anonymous,
+    // and a gated tool gets a challenge WITHOUT an error code (RFC 6750
+    // §3.1) so the client starts the authorization flow.
+    let (status, _) = post_json(
+        &app,
+        serde_json::json!({"jsonrpc": "2.0", "id": 4, "method": "initialize", "params": {}}),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = post_json(
+        &app,
+        serde_json::json!({"jsonrpc": "2.0", "id": 5, "method": "tools/call",
+            "params": {"name": "mnemonic_recall", "arguments": {"query": "x"}}}),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let req = Request::builder()
+        .method("POST")
+        .uri("/mcp")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::to_vec(&serde_json::json!({"jsonrpc": "2.0", "id": 6,
+                "method": "tools/call", "params": {"name": "mnemonic_whoami", "arguments": {}}}))
+            .unwrap(),
+        ))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    let www = resp.headers()["www-authenticate"].to_str().unwrap();
+    assert!(!www.contains("error="), "{www}");
+    assert!(
+        www.contains("/.well-known/oauth-protected-resource/mcp\""),
+        "{www}"
+    );
+}
+
 #[tokio::test]
 async fn test_tools_list_initialize_no_auth_200_sign_memory_no_auth_401() {
     let state = mock_state();

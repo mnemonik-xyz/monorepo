@@ -39,6 +39,21 @@ pub struct RecoveredItem {
     /// Producer DID (`did:sol:<pubkey-or-oauth-sub>`), from the `Producer`
     /// tag or decoded from the COSE payload for legacy items.
     pub producer: Option<String>,
+    /// Recall embedding carried in the signed payload, when present. Lets a
+    /// server search chain-recovered memories by meaning without SQLite.
+    pub embedding: Option<RecoveredEmbedding>,
+}
+
+/// Embedding bytes decoded (base64 only) from a signed memory payload. The
+/// compressed form still needs a compressor configured like the producer's
+/// (same `dim` / `bit_width` / seed) to become an f32 vector.
+#[derive(Debug, Clone, PartialEq)]
+pub enum RecoveredEmbedding {
+    /// `metadata.embedding_f32`: the exact vector (opt-in precision tier).
+    F32(Vec<f32>),
+    /// `metadata.embedding_compressed`: serialized TurboQuant bytes
+    /// (`CompressedEmbedding::to_bytes`).
+    Compressed(Vec<u8>),
 }
 
 /// Point-in-time view of every item this node's wallet(s) ever anchored.
@@ -126,6 +141,7 @@ pub async fn snapshot_chain(
             content_hash: memo_hash
                 .or_else(|| decoded.as_ref().and_then(|a| a.content_hash.clone())),
             content: decoded.as_ref().and_then(|a| a.content.clone()),
+            embedding: decoded.as_ref().and_then(|a| a.embedding.clone()),
             tags: decoded.map(|a| a.tags).unwrap_or_default(),
             day: block_time.and_then(day_from_unix),
             producer,
@@ -172,15 +188,40 @@ pub fn artifact_from_cose(cose_bytes: &[u8]) -> Option<RecoveredArtifact> {
         content,
         tags,
         producer,
+        embedding: embedding_from_metadata(json.get("metadata")),
     })
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Pull the recall embedding out of an artifact's `metadata`. Prefers the
+/// exact `embedding_f32` copy and falls back to `embedding_compressed`
+/// (same order as [`crate::rebuild::rebuild_row`]). Malformed base64 or a
+/// torn f32 byte length yields `None` — the item stays listable and falls
+/// back to text matching.
+fn embedding_from_metadata(metadata: Option<&serde_json::Value>) -> Option<RecoveredEmbedding> {
+    use base64::Engine as _;
+    let field = |k: &str| metadata.and_then(|m| m.get(k)).and_then(|v| v.as_str());
+    let b64 = base64::engine::general_purpose::STANDARD;
+    if let Some(f32_b64) = field("embedding_f32") {
+        if let Some(v) = b64
+            .decode(f32_b64)
+            .ok()
+            .and_then(|raw| crate::rebuild::f32_embedding_from_bytes(&raw))
+        {
+            return Some(RecoveredEmbedding::F32(v));
+        }
+    }
+    field("embedding_compressed")
+        .and_then(|c| b64.decode(c).ok())
+        .map(RecoveredEmbedding::Compressed)
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct RecoveredArtifact {
     pub content_hash: Option<String>,
     pub content: Option<String>,
     pub tags: Vec<String>,
     pub producer: Option<String>,
+    pub embedding: Option<RecoveredEmbedding>,
 }
 
 /// `did:sol:<sub>` → `<sub>` — aligns chain producers with the raw
@@ -227,6 +268,56 @@ mod tests {
             producer_from_cose(&cose).as_deref(),
             Some("did:sol:user-123")
         );
+    }
+
+    fn signed_cose_with_metadata(metadata: serde_json::Value) -> Vec<u8> {
+        let artifact = serde_json::json!({
+            "artifact_id": "11111111-2222-3333-4444-555555555555",
+            "type": "memory",
+            "schema_version": 1,
+            "content": "the sky over the port",
+            "producer": "did:sol:user",
+            "created_at": "2026-07-01T00:00:00Z",
+            "tags": ["test"],
+            "metadata": metadata,
+        });
+        sign_artifact(&artifact, &MEMORY_V1, &Keypair::new())
+            .expect("sign")
+            .cose_bytes
+    }
+
+    #[test]
+    fn embedding_extracted_from_cose_metadata() {
+        use base64::Engine as _;
+        let b64 = base64::engine::general_purpose::STANDARD;
+
+        // No embedding fields → None (item still decodes).
+        let a = artifact_from_cose(&signed_memory_cose("did:sol:u")).unwrap();
+        assert_eq!(a.embedding, None);
+
+        // Compressed only → raw TurboQuant bytes.
+        let cose = signed_cose_with_metadata(
+            serde_json::json!({ "embedding_compressed": b64.encode([1u8, 2, 3]) }),
+        );
+        assert_eq!(
+            artifact_from_cose(&cose).unwrap().embedding,
+            Some(RecoveredEmbedding::Compressed(vec![1, 2, 3]))
+        );
+
+        // f32 wins over compressed when both are present.
+        let f32_bytes = crate::rebuild::f32_embedding_to_bytes(&[0.5, -1.0]);
+        let cose = signed_cose_with_metadata(serde_json::json!({
+            "embedding_compressed": b64.encode([1u8, 2, 3]),
+            "embedding_f32": b64.encode(f32_bytes),
+        }));
+        assert_eq!(
+            artifact_from_cose(&cose).unwrap().embedding,
+            Some(RecoveredEmbedding::F32(vec![0.5, -1.0]))
+        );
+
+        // Malformed base64 → None, never an error.
+        let cose = signed_cose_with_metadata(serde_json::json!({ "embedding_compressed": "%%%" }));
+        assert_eq!(artifact_from_cose(&cose).unwrap().embedding, None);
     }
 
     #[test]

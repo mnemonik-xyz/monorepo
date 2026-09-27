@@ -23,19 +23,23 @@ is compiled with the `trajectory-experimental` cargo feature.
 
 | Tool | Auth | Paid | Purpose |
 |---|---|---|---|
-| [`mnemonic_whoami`](#mnemonic_whoami) | optional | no | Server identity, storage capabilities, pricing |
+| [`mnemonic_whoami`](#mnemonic_whoami) | required on HTTP | no | Server identity, storage capabilities, pricing |
 | [`mnemonic_sign_memory`](#mnemonic_sign_memory) | required for `participate` | `participate` only | Create a signed memory attestation |
 | [`mnemonic_check_pending`](#mnemonic_check_pending) | required | no | Resolve a deferred-sign `correlation_id` |
 | [`mnemonic_recall`](#mnemonic_recall) | optional (changes scope) | no | Semantic search over stored memories |
-| [`mnemonic_verify`](#mnemonic_verify) | optional | no | Verify an attestation against its chain anchors |
-| [`mnemonic_prove_identity`](#mnemonic_prove_identity) | optional | no | Sign an arbitrary challenge with the server key |
+| [`mnemonic_verify`](#mnemonic_verify) | required on HTTP | no | Verify an attestation against its chain anchors |
+| [`mnemonic_prove_identity`](#mnemonic_prove_identity) | required on HTTP | no | Sign an arbitrary challenge with the server key |
 | [`mnemonic_publish_post`](#mnemonic_publish_post) | required | no | Publish a signed public blog post |
 | [`request_public_write_confirmation`](#request_public_write_confirmation) | — | no | Internal ceremony gate (not user-facing) |
 | [`mnemonic_attest_step`](#mnemonic_attest_step) ⚗️ | required | no | Append a hash-linked trajectory step |
 | [`mnemonic_attest_verdict`](#mnemonic_attest_verdict) ⚗️ | required | no | Record an independent judge's verdict |
-| [`mnemonic_verify_trajectory`](#mnemonic_verify_trajectory) ⚗️ | optional | no | Verify a trajectory end-to-end |
+| [`mnemonic_verify_trajectory`](#mnemonic_verify_trajectory) ⚗️ | required on HTTP | no | Verify a trajectory end-to-end |
 
 ⚗️ = experimental, behind `trajectory-experimental`.
+
+The Auth column applies to the HTTP transport. The stdio transport uses the
+local keypair and needs no token. Refer to
+[Authentication over HTTP](#authentication-over-http).
 
 Only `mnemonic_sign_memory` is ever charged, and only for `participate` writes on
 an operator that has a payment mode enabled. Everything else is free.
@@ -72,6 +76,40 @@ curl -s https://mcp.mnemonik.xyz/mcp \
 
 ---
 
+## Authentication over HTTP
+
+The HTTP endpoint uses OAuth 2.1 with PKCE (Proof Key for Code Exchange).
+Send the access token in each request as `Authorization: Bearer <token>`.
+The token is a JWT (JSON Web Token). These rules are available now.
+
+**Requests that work without a token:**
+
+- `initialize`, `ping` and `tools/list`
+- `prompts/list`, `prompts/get`, `resources/list` and `resources/read`
+- JSON-RPC notifications, for example `notifications/initialized`
+- `tools/call` for `mnemonic_recall` (it searches the public pool only)
+
+All other requests need a valid token.
+
+**Error responses.** The server sends HTTP 401 (Unauthorized) in two cases.
+Each 401 has a `WWW-Authenticate: Bearer` header with a `resource_metadata`
+parameter. For `/mcp`, this parameter points to
+`/.well-known/oauth-protected-resource/mcp`.
+
+| Case | HTTP status | `WWW-Authenticate` parameters |
+|---|---|---|
+| The request needs a token and has no token | 401 | `realm`, `resource_metadata` (no `error`) |
+| The request has a token that is expired or not valid | 401 | `realm`, `error="invalid_token"`, `error_description`, `resource_metadata` |
+
+The second case applies to all methods, also to the methods in the list above.
+An expired token on `initialize` gets a 401, so the client can refresh the token
+before it calls a tool. To use a method from the list without a token, send no
+`Authorization` header.
+
+The body of each 401 is a JSON-RPC error with code `-32001`.
+
+---
+
 ## `mnemonic_whoami`
 
 Identity and capability discovery. Call this **first** — it tells you which write
@@ -91,7 +129,13 @@ choose before attempting a write that might be rejected or charged.
   "storage_mode": "full",          // legacy field, kept for pre-envelope clients
   "supported_modes": ["local", "participate"],
   "default_mode": "local",
-  "participate_cost": { /* null when the operator does not charge */ },
+  "participate_cost": {            // null when the server cannot anchor (local only)
+    "currency": "USD",
+    "amount_micro_usdc": 1000,
+    "amount_cents": 1,
+    "pricing_status": "fallback",
+    "payment_methods": ["x402"]
+  },
   "free_anchors": {                // HTTP + PAYMENT_MODE=x402 only
     "per_day": 10,
     "remaining": 7,
@@ -103,6 +147,25 @@ choose before attempting a write that might be rejected or charged.
 
 `storage_mode` reflects the operator's *capability*, not a global switch — see
 [Write modes](#write-modes-local-vs-participate).
+
+**`participate_cost` fields:**
+
+| Field | Type | Meaning |
+|---|---|---|
+| `currency` | `string` | Always `"USD"`. |
+| `amount_micro_usdc` | `integer` | Price of one `participate` write, in micro-USDC (1 USDC = 1,000,000 micro-USDC). This is the exact price. |
+| `amount_cents` | `integer` | The same price in US cents. The server rounds up, so a price above zero never shows as `0`. |
+| `pricing_status` | `"live" \| "fallback" \| "disabled"` | The source of the price. Refer to the list below. |
+| `payment_methods` | `string[]` | The payment methods that the server accepts: `["x402"]`, or `[]` when the server does not charge. |
+
+**`pricing_status` values:**
+
+- `live`: The last price refresh was successful. The price comes from current Irys and SOL/USDC quotes.
+- `fallback`: The server has no current quote, or the last refresh failed. The price is the operator floor or the last good quote. The server still charges this price.
+- `disabled`: The operator does not charge (`PAYMENT_MODE=none`). Both amounts are `0`.
+
+The server calculates `participate_cost` again for each `mnemonic_whoami` call.
+Do not show a `participate` write as free unless `pricing_status` is `disabled`.
 
 `free_anchors` shows the free daily quota of the caller (available now). See
 [Free daily quota](#free-daily-quota). The server adds the field only over HTTP

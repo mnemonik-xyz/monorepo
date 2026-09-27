@@ -26,7 +26,9 @@ use axum::{
     Router,
 };
 use http_body_util::BodyExt;
+use mnemonic_core::arweave::recovery::{RecoveredEmbedding, RecoveredItem};
 use mnemonic_core::storage::{AttestationStore, Visibility, WriteMode};
+use mnemonic_mcp::chain_stats::ChainStatsCache;
 use mnemonic_mcp::{api, mcp::McpState, test_support::mock_state};
 use serde_json::Value;
 use tower::ServiceExt;
@@ -156,6 +158,147 @@ async fn artifacts_search_query_returns_all_rows() {
     assert!(ids.contains(&"public-id"));
     assert!(ids.contains(&"private-id"));
     assert!(artifacts[0].get("relevance_score").is_none());
+}
+
+// ── Recall over chain-recovered anchored memories (#201) ─────────────────
+
+/// Attach a pre-loaded chain snapshot to a fresh `mock_state()`. The state
+/// is not shared yet, so `Arc::get_mut` succeeds.
+fn state_with_chain(items: Vec<RecoveredItem>) -> Arc<McpState> {
+    let mut state = mock_state();
+    Arc::get_mut(&mut state)
+        .expect("state not shared yet")
+        .chain_stats = Some(Arc::new(ChainStatsCache::from_items(items)));
+    state
+}
+
+fn chain_item(
+    tx: &str,
+    hash: &str,
+    content: &str,
+    embedding: Option<RecoveredEmbedding>,
+) -> RecoveredItem {
+    RecoveredItem {
+        arweave_tx: tx.to_string(),
+        solana_tx: Some(format!("sol-{tx}")),
+        content_hash: Some(hash.to_string()),
+        content: Some(content.to_string()),
+        tags: Vec::new(),
+        day: Some("2026-07-01".to_string()),
+        producer: None,
+        embedding,
+    }
+}
+
+/// TurboQuant bytes as `mock_state()`'s compressor (8 dims, 4 bits, seed
+/// 42) would have written them into `metadata.embedding_compressed`.
+fn compressed(v: &[f32]) -> Option<RecoveredEmbedding> {
+    let c = mnemonic_core::compress::EmbeddingCompressor::new(8, 4, 42);
+    Some(RecoveredEmbedding::Compressed(c.compress(v).to_bytes()))
+}
+
+fn rows_by_tx(body: &Value) -> Vec<(String, String)> {
+    body["artifacts"]
+        .as_array()
+        .expect("artifacts array")
+        .iter()
+        .map(|r| {
+            (
+                r["arweave_tx"].as_str().unwrap_or("").to_string(),
+                r["match"].as_str().unwrap_or("").to_string(),
+            )
+        })
+        .collect()
+}
+
+/// Production repro: `?q=memory&source=on_chain` returned `[]` while the
+/// plain On-chain listing showed 16 recovered items. With an empty DB the
+/// query must now search the recovered snapshot itself.
+#[tokio::test]
+async fn artifacts_recall_finds_chain_recovered_items_with_empty_db() {
+    // StubEmbedder embeds every query as [0.1; 8].
+    let near = [0.1f32; 8];
+    let far = [1.0, -1.0, 1.0, -1.0, 1.0, -1.0, 1.0, -1.0];
+    let app = build_router(state_with_chain(vec![
+        chain_item("tx-near", "h1", "close in meaning", compressed(&near)),
+        chain_item("tx-far", "h2", "far in meaning", compressed(&far)),
+        chain_item("tx-text", "h3", "a recovered Memory", None),
+        chain_item("tx-miss", "h4", "nothing to see", None),
+    ]));
+
+    for source in ["on_chain", "all"] {
+        let uri = format!("/artifacts?q=memory&limit=10&source={source}");
+        let (status, body) = get_json(&app, &uri).await;
+        assert_eq!(status, StatusCode::OK);
+        let rows = rows_by_tx(&body);
+        let pos = |tx: &str| rows.iter().position(|(t, _)| t == tx);
+        assert_eq!(rows.len(), 3, "[{source}] {body}");
+        assert_eq!(body["total"], 3);
+        assert!(pos("tx-miss").is_none(), "no embedding + no text match");
+        assert!(pos("tx-near") < pos("tx-far"), "ranked by cosine: {body}");
+        let kind = |tx: &str| rows[pos(tx).unwrap()].1.clone();
+        assert_eq!(kind("tx-near"), "semantic");
+        assert_eq!(kind("tx-far"), "semantic");
+        assert_eq!(kind("tx-text"), "text", "fallback is labelled");
+
+        let text_row = &body["artifacts"][pos("tx-text").unwrap()];
+        assert_eq!(text_row["write_mode"], "participate");
+        assert_eq!(text_row["content_hash"], "h3");
+        assert_eq!(text_row["solana_tx"], "sol-tx-text");
+    }
+
+    // `limit` still caps the combined page.
+    let (_, body) = get_json(&app, "/artifacts?q=memory&limit=1&source=on_chain").await;
+    assert_eq!(rows_by_tx(&body).len(), 1);
+
+    // Empty query keeps the complete recovered listing.
+    let (_, body) = get_json(&app, "/artifacts?limit=10&source=on_chain").await;
+    assert_eq!(body["artifacts"].as_array().unwrap().len(), 4, "{body}");
+    assert!(body["artifacts"][0].get("match").is_none());
+
+    // On-node recall never includes chain items.
+    let (_, body) = get_json(&app, "/artifacts?q=memory&source=on_node").await;
+    assert_eq!(body["total"], 0, "{body}");
+}
+
+/// `source=all` must union SQLite and chain matches without duplicates. A
+/// chain item repeats a DB row when it has the same `arweave_tx` or the
+/// same `content_hash`; the DB row wins.
+#[tokio::test]
+async fn artifacts_recall_source_all_dedupes_db_and_chain() {
+    let state = state_with_chain(vec![
+        chain_item("ArweavePubTx", "hash-other", "memory dup by tx", None),
+        chain_item("tx-hash-dup", "hash-pub", "memory dup by hash", None),
+        chain_item("tx-chain-only", "hash-chain", "memory chain only", None),
+    ]);
+    seed_one_public_one_private(&state, "seed-owner-pubkey");
+    let app = build_router(state);
+
+    let (status, body) = get_json(&app, "/artifacts?q=memory&limit=10&source=all").await;
+    assert_eq!(status, StatusCode::OK);
+    let rows = rows_by_tx(&body);
+    let txs: Vec<&str> = rows.iter().map(|(t, _)| t.as_str()).collect();
+    assert_eq!(rows.len(), 3, "{body}");
+    assert_eq!(txs.iter().filter(|t| **t == "ArweavePubTx").count(), 1);
+    assert!(!txs.contains(&"tx-hash-dup"), "same content_hash as DB row");
+    assert!(txs.contains(&"tx-chain-only"));
+    assert!(txs.contains(&"local:priv-ar"));
+
+    let db_row = body["artifacts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["arweave_tx"] == "ArweavePubTx")
+        .unwrap();
+    assert_eq!(db_row["attestation_id"], "public-id", "DB row wins");
+    assert_eq!(db_row["match"], "semantic");
+
+    // `on_chain` keeps the anchored DB row + chain-only item, drops the
+    // local row.
+    let (_, body) = get_json(&app, "/artifacts?q=memory&limit=10&source=on_chain").await;
+    let mut txs: Vec<String> = rows_by_tx(&body).into_iter().map(|(t, _)| t).collect();
+    txs.sort();
+    assert_eq!(txs, vec!["ArweavePubTx", "tx-chain-only"], "{body}");
 }
 
 #[tokio::test]
