@@ -82,5 +82,5 @@ Also run a local HTTP smoke test (`STORAGE_MODE=local PAYMENT_MODE=none`): `whoa
 ## Environment notes
 
 - Do not share one `CARGO_TARGET_DIR` across git worktrees. Cargo can link a workspace crate built from another worktree and fail with bogus errors (seen: E0063). If you must share it, touch `core/` and `mcp/` sources before each gate run.
-- A debug `target/` for the full test suite needs about 18 GB. On a small disk, use `CARGO_INCREMENTAL=0` and share one `CARGO_TARGET_DIR` across worktrees.
+- A debug `target/` for the full test suite needs about 18 GB. On a small disk, use `CARGO_INCREMENTAL=0` and run one Rust worktree at a time.
 - CI runs nightly and on manual dispatch only. Nothing gates a PR, so run the gate above before each push.
