@@ -6,6 +6,19 @@ pub mod identity;
 // Pure crypto — available on every target so clients can verify proofs.
 pub mod merkle;
 
+// Rebuild the recall index from stored signed artifacts (verifiable recall,
+// §16) — makes "SQLite is a rebuildable cache, not a source of truth" real.
+// Portable since work/arweave-as-source-of-truth Wave 2: it uses only `codec`,
+// `compress` and `base64`, all of which are in the shared dependency table, so
+// a browser client can restore its own index from Arweave without a native
+// binary. The earlier "native-only (depends on the compressor)" gate was stale
+// — `compress` is portable, listed above.
+//
+// Discovery stays native: `arweave::recovery` and `arweave::graphql` use
+// `reqwest`. A wasm client enumerates its items with `fetch` in TypeScript and
+// calls the per-artifact rebuild exported from `core::wasm`.
+pub mod rebuild;
+
 // Verifiable trajectories (work/verifiable-trajectories/): ordered, hash-linked,
 // signed agent steps + independent verdicts. Pure (codec + merkle only), so the
 // same chain/coverage verification runs client-side and against any backend —
@@ -29,11 +42,6 @@ pub mod embed;
 pub mod encrypt;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod lineage;
-// Rebuild the recall index from stored signed artifacts (verifiable recall,
-// §16) — makes "SQLite is a rebuildable cache" real. Native-only for now
-// (depends on the compressor); wasm client-rebuild is a follow-up.
-#[cfg(not(target_arch = "wasm32"))]
-pub mod rebuild;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod solana;
 #[cfg(not(target_arch = "wasm32"))]

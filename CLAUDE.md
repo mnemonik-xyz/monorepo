@@ -57,8 +57,8 @@ The extension (`packages/extension`) tests run with `bun test` in CI.
 Cargo workspace (`resolver = "2"`) with two members, plus an npm workspace:
 
 - **`core/` (`mnemonic-core`)** — all domain logic. Modules in `core/src/lib.rs`:
-  - Portable (also build for wasm32): `codec` (canonical CBOR, blake3 hash, COSE sign/verify, schema), `compress` (TurboQuant), `identity` (keypair, OS keychain / file / memory key stores, lazy creation), `merkle`.
-  - Native only (`cfg(not(target_arch = "wasm32"))`): `arweave`, `embed`, `encrypt`, `lineage`, `rebuild`, `solana`, `storage`.
+  - Portable (also build for wasm32): `codec` (canonical CBOR, blake3 hash, COSE sign/verify, schema), `compress` (TurboQuant), `identity` (keypair, OS keychain / file / memory key stores, lazy creation), `merkle`, `rebuild` (reconstruct a recall row from signed artifact bytes, so a client can restore its index from Arweave).
+  - Native only (`cfg(not(target_arch = "wasm32"))`): `arweave`, `embed`, `encrypt`, `lineage`, `solana`, `storage`.
   - Feature-gated: `trajectory` (`trajectory-experimental`), `wasm` (wasm32 + `wasm` feature; wasm-bindgen wrappers used by the SDK, webapp and extension).
 - **`mcp/` (`mnemonic-mcp`)** — library + binary. `main.rs` (clap, subcommands `mcp-stdio`, `logout`, `identity`), `mcp.rs` (JSON-RPC dispatch, tool list, `McpState`), `tools.rs` (tool handlers), `api.rs` (REST routes), `oauth/` (OAuth 2.1 + PKCE, Google sign-in, refresh tokens), `pending.rs` + `approval.rs` (deferred signing), `payment.rs` / `pricing.rs` (x402). Domain types come from `mnemonic_core::` — never re-declare `codec`, `storage` etc. inside `mcp/src/`.
 - **`packages/`** — `sdk` (`@mnemonik-xyz/sdk`, TS client + WASM core), `cli` (`@mnemonik-xyz/cli`), `mcp` (`@mnemonik-xyz/mcp`, npm launcher that downloads the Rust binary per platform), `extension` (browser extension).

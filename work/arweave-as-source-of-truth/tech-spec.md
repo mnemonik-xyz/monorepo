@@ -234,11 +234,12 @@ Restoration concerns anchored rows alone, so the fields land exactly where they 
 
 ## Sequencing (waves)
 
-- **Wave 1 — artifact completeness.** `MEMORY_V1` optional fields, `turbo_seed`, `embedding_f32`
+- **Wave 1 — artifact completeness. DONE (#246).** `MEMORY_V1` optional fields, `turbo_seed`, `embedding_f32`
   with the visibility rule, and the byte-compatibility regression test. Nothing else compiles on a
   complete artifact until this lands.
-- **Wave 2 — portable rebuild.** Move the module, add the WASM export, add the browser test.
-  Parallel with Wave 3.
+- **Wave 2 — portable rebuild. DONE.** Moved the module, added `rebuild_row_self_describing`
+  and the `rebuild_row` WASM export, and covered it from Rust and from JS against the
+  real WASM artifact.
 - **Wave 3 — restore driver and CLI.** `core/src/restore/`, `mnemonic export`, `mnemonic restore`.
 - **Wave 4 — server removal.** Drop the memory tables, change the anchor confirmation, refuse
   `local` over HTTP, rename the mode, update the envelope.
