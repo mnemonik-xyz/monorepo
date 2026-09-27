@@ -161,7 +161,7 @@ Ship: a CLI command `mnemonic erc8004 register-file --pubkey ...` emitting the J
 }
 ```
 
-`feedbackHash` = blake3 of canonical JSON. Trust upgrade: today any wallet can spam `giveFeedback`; Mnemonic-signed feedback proves the rater is the same long-lived signing identity that produced N other attestations. Ship: SDK + CLI helper that produces the URI bytes, hashes, and emits the on-chain call.
+**CORRECTED 2026-09-27 — see `work/erc8004-reputation/` D-1.** `feedbackHash` is keccak256 over RFC 8785 (JCS) canonical JSON, **not** blake3: it is a `bytes32` that EVM consumers read, and they have keccak256 built in and no blake3. blake3 stays as `mnemonic.blake3`, the content hash of the cited attestation. The sample payload above is also incomplete — it needs `payload_hash`, `proofs[]` and `mnemonic.ed25519_pubkey`, without which the `mnemonic` namespace proves nothing about the rater, and its `"schema": "MEMORY_V1"` belongs under `mnemonic.schema` (the document's own schema is `MNEMONIC_FEEDBACK_V1`). Trust upgrade: today any wallet can spam `giveFeedback`; Mnemonic-signed feedback proves the rater is the same long-lived signing identity that produced N other attestations. Ship: SDK + CLI helper that produces the URI bytes, hashes, and emits the on-chain call.
 
 #### Path 4 — Three-way identity reconciliation via `did:mnemonic:`
 
