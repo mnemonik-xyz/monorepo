@@ -243,8 +243,11 @@ Restoration concerns anchored rows alone, so the fields land exactly where they 
 - **Wave 3 — restore driver. DONE (restore).** `core/src/restore/` plus the
   `mnemonic-mcp restore` subcommand. `mnemonic export` moves to Wave 5, where the
   migration actually needs it (it also closes #47).
-- **Wave 4 — server removal.** Drop the memory tables, change the anchor confirmation, refuse
-  `local` over HTTP, rename the mode, update the envelope.
+- **Wave 4a — retire hosted `local` writes. DONE.** An explicit `mode: "local"` over HTTP
+  returns `-32010`. The mode rename landed in Wave 1.
+- **Wave 4b — server memory removal.** Drop `content` and the embedding from anchored rows,
+  change the anchor confirmation to a chain re-fetch, and settle the public read surface.
+  Blocked on decisions.md D-2 Q-1 and Q-2.
 - **Wave 5 — migration and documents.** The relabel, the user announcement, and every affected
   document.
 - **Wave 6 — audit.** Read-only. Confirm no private content reaches Arweave in plaintext, and

@@ -393,6 +393,55 @@ async fn recall_surfaces_write_mode() {
 
 // ── 5. verify_local checks the real artifact hash, not a raw-content digest ──
 
+/// Write a `local` row through the **stdio** transport.
+///
+/// `local` is refused over HTTP now (work/arweave-as-source-of-truth Decision 8):
+/// it means the agent's own machine, and a hosted deploy cannot provide that. The
+/// verify path for a local row is still real — legacy rows exist, and a locally
+/// installed server writes them — so the coverage below stays, driven through the
+/// transport where the mode is legal and where the operator key really is the
+/// agent's own identity.
+async fn sign_local_via_stdio(server: &TestServer, content: &str) -> serde_json::Value {
+    use mnemonic_mcp::tools::{resolve_write_mode, sign_memory, Transport};
+    use std::time::Duration;
+
+    let resolved =
+        resolve_write_mode(Some(&json!("local")), "local").expect("explicit local resolves");
+    let cost_hint = mnemonic_mcp::pricing::CostHint {
+        irys_lamports: 0,
+        sol_tx_fee_lamports: 0,
+        sol_price_usdc: 0.0,
+        charge_micro_usdc: 0,
+    };
+    let owner = server.server_pubkey();
+    sign_memory(
+        &server.state.keypair,
+        &server.state.solana,
+        &server.state.arweave,
+        &server.state.store,
+        server.state.embedder.as_ref(),
+        &server.state.compressor,
+        &server.state.pending,
+        content,
+        &[],
+        &cost_hint,
+        "local",
+        &owner,
+        None,
+        Transport::Stdio,
+        resolved,
+        mnemonic_core::storage::Visibility::Private,
+        &server.state.envelope,
+        Duration::from_secs(15),
+        false,
+        &server.state.hosted_endpoint,
+        &server.state.hosted_client,
+        &json!({}),
+    )
+    .await
+    .expect("stdio local sign succeeds with the stub embedder")
+}
+
 /// Regression pin for the `verify_local` hash-domain bug.
 ///
 /// `sign_memory` stores `blake3(canonical_cbor(artifact))`, but `verify_local`
@@ -403,24 +452,13 @@ async fn recall_surfaces_write_mode() {
 ///
 /// This test drives the real `sign_memory` path and asserts the round trip, so
 /// any future divergence between the two constructions fails here.
+
 #[tokio::test]
 async fn local_sign_then_verify_round_trips() {
     let server = TestServer::builder().storage_mode("local").build();
     let owner = server.server_pubkey();
 
-    let signed = server
-        .call_tool(
-            Some(&owner),
-            "mnemonic_sign_memory",
-            json!({"content": "round trip through the real sign path", "mode": "local"}),
-        )
-        .await;
-    assert!(
-        signed.error().is_none(),
-        "sign envelope: {:?}",
-        signed.envelope
-    );
-    let signed = signed.result_text();
+    let signed = sign_local_via_stdio(&server, "round trip through the real sign path").await;
     let sol = signed["solana_tx"].as_str().expect("solana_tx").to_string();
 
     let result = server
@@ -456,14 +494,7 @@ async fn local_verify_detects_edited_content() {
     let server = TestServer::builder().storage_mode("local").build();
     let owner = server.server_pubkey();
 
-    let signed = server
-        .call_tool(
-            Some(&owner),
-            "mnemonic_sign_memory",
-            json!({"content": "original content", "mode": "local"}),
-        )
-        .await;
-    let signed = signed.result_text();
+    let signed = sign_local_via_stdio(&server, "original content").await;
     let sol = signed["solana_tx"].as_str().expect("solana_tx").to_string();
 
     // Edit the content column directly, leaving content_hash untouched —

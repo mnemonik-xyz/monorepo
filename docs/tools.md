@@ -213,7 +213,7 @@ Embed → compress (TurboQuant) → canonical CBOR → blake3 → COSE_Sign1
 |---|---|---|---|
 | `content` | `string` | yes | The text to attest |
 | `tags` | `string[]` | no | Free-form tags, usable as recall filters |
-| `mode` | `"local" \| "anchored"` | no | Per-request write intent. Omit to use the operator's `default_mode` |
+| `mode` | `"local" \| "anchored"` | no | Per-request write intent. Omit to use the operator's `default_mode`. `"local"` is refused over HTTP (`-32010`) |
 
 **This tool has two response shapes.** The write mode and the transport select
 the shape. Only an `anchored` write gets a signature. A local write stores a
@@ -226,14 +226,15 @@ The server returns the finished attestation in these cases (available now):
 
 - **Stdio, no JSON Web Token (JWT).** The operator key is the identity of the
   local agent. An `anchored` write gets a COSE_Sign1 signature from this key.
-- **HTTP with a JWT and `mode: "local"`.** The server stores a hash-only row
-  that the JWT subject owns. The client does not sign it. The operator key does
-  not sign it.
+- **HTTP with `mode: "local"`.** Refused with `-32010 UnsupportedMode` and
+  `supported: ["anchored"]`. `local` means the memory stays on your own machine,
+  and a hosted server cannot do that: the memory would live in the operator's
+  database instead. Install the server locally for free local storage, or use
+  `anchored`.
 
 Over HTTP, the operator key never signs a memory. A request without a JWT
-cannot start an inline `anchored` write. To write a local memory over HTTP
-with no signing step, set `mode: "local"`. A request without `mode` uses the
-deferred path.
+cannot start an inline `anchored` write. A request without `mode` uses the
+operator's `default_mode` and the deferred path.
 
 ```jsonc
 {
