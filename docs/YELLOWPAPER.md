@@ -420,7 +420,7 @@ Operators providing real-world computing, storage allocation, and network bandwi
 
 The validation layer maintains absolute neutrality. There are no canonical data coordinators, structurally privileged master nodes, or restricted identity registries. Because artifacts are portable by signature and self-describing via cCBOR, users can migrate across commercial operators or drop back to raw self-hosting without fracturing their agent's historical context graph.
 
-The two protocol-level paths exposed to the user surface this split directly. A `local` write (default on `mnemonic_sign_memory`) realizes §5.7.1: the artifact stays on the user's own filesystem or self-hosted node, signature/hash/lineage verification runs locally and free, and no operator can gate it. A `participate` write realizes §5.7.2: durable anchoring on Arweave + Solana with operator-priced service work (storage allocation, consensus anchoring, optional embedding compute), where "delivered" is defined as anchored AND verified by a recall round-trip — never a silent receipt. The `mode` field is a per-request user choice; the same keypair and the same API serve both, so users move freely between the two as §5.7.3 requires. See `work/modes-user-choice/user-spec.md` for the canonical model.
+The two protocol-level paths exposed to the user surface this split directly. A `local` write (default on `mnemonic_sign_memory`) realizes §5.7.1: the artifact stays on the user's own filesystem or self-hosted node, hash and lineage verification runs locally and free (a `local` write stores a hash and no signature), and no operator can gate it. A `participate` write realizes §5.7.2: durable anchoring on Arweave + Solana with operator-priced service work (storage allocation, consensus anchoring, optional embedding compute), where "delivered" is defined as anchored AND verified by a recall round-trip — never a silent receipt. The `mode` field is a per-request user choice; the same keypair and the same API serve both, so users move freely between the two as §5.7.3 requires. See `work/modes-user-choice/user-spec.md` for the canonical model.
 
 ---
 
@@ -853,7 +853,7 @@ The active runtime environment enforces the following protocol primitives direct
 
 #### I. Transport & Interface Layers
 *   **Multi-Transport MCP Middleware:** Two transports: standard input/output (`stdio`) and HTTP. The HTTP endpoint `/mcp` returns chunked newline-delimited JSON (`application/x-ndjson`).
-*   **MCP Tools:** eight tools: `mnemonic_whoami`, `mnemonic_sign_memory`, `mnemonic_recall`, `mnemonic_verify`, `mnemonic_prove_identity`, `mnemonic_check_pending`, `request_public_write_confirmation` and `mnemonic_publish_post`. The server never signs a user's memory or post; hosted writes are signed by the client.
+*   **MCP Tools:** eight tools: `mnemonic_whoami`, `mnemonic_sign_memory`, `mnemonic_recall`, `mnemonic_verify`, `mnemonic_prove_identity`, `mnemonic_check_pending`, `request_public_write_confirmation` and `mnemonic_publish_post`. The server never signs a user's memory or post. The client signs each hosted `participate` write. A hosted `local` write has no signature: the server stores only its BLAKE3 hash, under the identity of the user.
 
 #### II. Cryptography & Serialization
 *   **Deterministic Binary Layout:** Strict serialization of artifact payloads matching the **Concise Binary Object Representation (CBOR)** validation mechanics defined in RFC 8949 Section 4.2.

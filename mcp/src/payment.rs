@@ -166,6 +166,26 @@ pub async fn check_payment(
 
 // ── Universal Paywall exact x402 path ────────────────────────────────────────
 
+/// The Universal Paywall config that may charge a participate write, or
+/// `None` when that rail is off.
+///
+/// A Universal Paywall config alone does not turn charging on: the rail is
+/// an x402 rail, so it charges only when `PAYMENT_MODE=x402`. On a
+/// `PAYMENT_MODE=none` deploy (or any other value) this returns `None`, and
+/// the sign-callback anchors without a quote. The pre-execution gate in
+/// `mcp_handler` uses the same helper, so an unknown `PAYMENT_MODE` still
+/// reaches `check_payment` and fails closed there.
+pub fn active_universal_paywall<'a>(
+    payment_mode: &str,
+    config: Option<&'a UniversalPaywallConfig>,
+) -> Option<&'a UniversalPaywallConfig> {
+    if payment_mode == "x402" {
+        config
+    } else {
+        None
+    }
+}
+
 /// Payment proof sent in the `X-Payment` header for the Universal Paywall rail.
 #[derive(Debug, Deserialize)]
 #[allow(dead_code)]
@@ -1146,6 +1166,30 @@ mod tests {
     //! spawn threads — `SqliteStore::in_memory()` gives each caller its own
     //! empty DB, which is the wrong semantic for race tests.
     use super::*;
+
+    // ── Universal Paywall activation follows PAYMENT_MODE ───────────────────
+    fn up_config() -> UniversalPaywallConfig {
+        UniversalPaywallConfig {
+            url: "http://localhost:0".into(),
+            api_key: "k".into(),
+            network: "eip155:84532".into(),
+            asset: "0x0000000000000000000000000000000000000001".into(),
+            pay_to: "0x0000000000000000000000000000000000000002".into(),
+            payer_wallet: String::new(),
+            approval_url_base: String::new(),
+        }
+    }
+
+    #[test]
+    fn universal_paywall_charges_only_in_x402_mode() {
+        let cfg = up_config();
+        assert!(active_universal_paywall("x402", Some(&cfg)).is_some());
+        // A configured Universal Paywall must not charge on a free deploy,
+        // nor on an unknown mode (that one fails closed in `check_payment`).
+        assert!(active_universal_paywall("none", Some(&cfg)).is_none());
+        assert!(active_universal_paywall("balance", Some(&cfg)).is_none());
+        assert!(active_universal_paywall("x402", None).is_none());
+    }
 
     // ── EVM ERC-20 Transfer decoder (Wave 1) ────────────────────────────────
     fn transfer_log(token: &str, to_topic: &str, data_hex: &str) -> serde_json::Value {

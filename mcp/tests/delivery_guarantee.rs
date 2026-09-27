@@ -1,23 +1,28 @@
 //! Integration tests for the delivery guarantee under the non-custodial
 //! (Wave 4) payment model. Custodial `balance`-mode tests were removed when
-//! Wave 4 deleted the api-key ledger; the delivery-confirmation contract is
-//! now exercised entirely over the x402 rail (the only paid path).
+//! Wave 4 deleted the api-key ledger.
+//!
+//! The harness mounts `mcp_handler` WITHOUT the OAuth middleware, so an HTTP
+//! call here carries no JWT and `mcp_handler` falls back to owner = operator.
+//! Over HTTP the operator key never signs a memory, so inline participate
+//! delivery exists only on the single-tenant stdio transport.
 //!
 //! Scenarios:
 //!
 //! 1. `happy_path` — `#[ignore]` sentinel; the real success path needs an
 //!    arlocal + solana-test-validator harness. The failure tests below cover
 //!    the same code paths in their failure direction.
-//! 2. `demotion_on_x402_leaves_nonce_reusable` — induced Arweave refetch
-//!    failure under PAYMENT_MODE=x402. Asserts the nonce deferral
-//!    (`mark_x402_nonce` fires only after delivery success): after a failed
-//!    delivery the `x402_nonces` table is empty, so the caller can retry with
-//!    the same `X-Payment` header without an "already consumed" rejection.
-//! 3. `quota_exceeded_x402_short_circuits_before_chain_write` — N consecutive
-//!    demotions for the same payment subject (blake3(tx_sig)); the next
-//!    `participate` call short-circuits with `DeliveryQuotaExceeded` BEFORE
-//!    any chain call (the outcome-based DoS guard, now keyed on the x402
-//!    tx_sig).
+//! 2. `stdio_participate_demotes_on_refetch_failure` — induced Arweave
+//!    refetch failure on the stdio inline path (the agent signs its own
+//!    memory). The row is demoted to `local`, the typed `-32011` error names
+//!    the stage, and no cost row is written.
+//! 3. `x402_participate_without_jwt_is_refused_before_chain_write` — an
+//!    HTTP participate call without a JWT (valid x402 proof) is refused
+//!    before any chain write: no operator signature, no row, and the x402
+//!    nonce stays reusable.
+//! 4. `quota_exceeded_x402_short_circuits_before_chain_write` — a payment
+//!    subject (blake3(tx_sig)) at the quota threshold short-circuits with
+//!    `DeliveryQuotaExceeded` BEFORE any chain call.
 
 #[path = "_helpers/delivery_harness.rs"]
 mod delivery_harness;
@@ -32,6 +37,15 @@ use axum::http::StatusCode;
 
 const CHEAP_COST: i64 = 1_000; // 0.001 USDC per write
 
+// A real-looking Solana tx signature (base58, ~88 chars). Doesn't have to
+// verify on-chain — the mock dispatcher just substring-matches on it.
+const TX_SIG: &str =
+    "5VfYdM3GjRZqkBdYNz2hVnQYsBfP1k8fL3jHkMb7vYqXrJzGw2XaRpUyMcNvDsW4eLkR1tFqGxKyPmAhU6Dv8nQT";
+// Synthetic operator treasury + mainnet USDC mint. The mock proof says this
+// exact owner+mint received `CHEAP_COST` micro-USDC.
+const TREASURY: &str = "TreaSurYMockPayToMnemonik11111111111111111";
+const USDC_MINT: &str = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+
 // ── 1. Happy path — see #[ignore] note above ────────────────────────────────
 
 #[ignore = "requires real arlocal + solana-test-validator harness; per-stage failure tests below exercise the same code paths in their non-failure direction"]
@@ -41,41 +55,99 @@ async fn happy_path() {
     // the `#[ignore]` without restructuring.
 }
 
-// ── 7. T3.5 — x402 nonce reusable after demotion ────────────────────────────
+// ── 2. Stdio inline participate: demotion on refetch failure ────────────────
 
-/// `demotion_on_x402_leaves_nonce_reusable` — under PAYMENT_MODE=x402, an
-/// induced delivery failure must NOT consume the x402 nonce. This pins the
-/// T3-round-2 deferral (`consume_x402_nonce_after_success` runs only on a
-/// confirmed delivery) end-to-end: an attacker / unlucky caller can retry
-/// with the same `X-Payment` header without seeing a misleading "already
-/// consumed" rejection, and the operator hasn't double-billed.
-///
-/// Mocks `getTransaction` on Solana so `verify_usdc_transfer` passes
-/// without us minting an actual on-chain transaction. The delivery still
-/// fails for the regular T3 reason (corrupted Arweave GET), so the
-/// post-anchor demotion + refund path is what's actually exercised here.
+/// On stdio the operator key is the local agent's own identity, so inline
+/// participate is legitimate. Anchor PUT succeeds; GET returns 404 → the
+/// refetch budget exhausts and the delivery check exits at `refetch`. The
+/// row must be demoted to `local` and no cost row written.
 #[tokio::test]
-async fn demotion_on_x402_leaves_nonce_reusable() {
-    // A real-looking Solana tx signature (base58, ~88 chars). Doesn't have to
-    // verify on-chain — the mock dispatcher just substring-matches on it.
-    const TX_SIG: &str =
-        "5VfYdM3GjRZqkBdYNz2hVnQYsBfP1k8fL3jHkMb7vYqXrJzGw2XaRpUyMcNvDsW4eLkR1tFqGxKyPmAhU6Dv8nQT";
-    // Synthetic operator treasury + mainnet USDC mint. The mock proof says
-    // this exact owner+mint received `CHEAP_COST` micro-USDC.
-    const TREASURY: &str = "TreaSurYMockPayToMnemonik11111111111111111";
-    const USDC_MINT: &str = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
-
-    // Anchor PUT succeeds; GET returns 404 → refetch budget exhausts, the
-    // delivery check exits at the `refetch` stage — same shape as
-    // `demotion_on_refetch_failure` but under PAYMENT_MODE=x402 instead of
-    // `balance`. (Using `read_fails` rather than `corrupted_get` because
-    // the latter routes through `verify_cose` and ends at stage=`verify`,
-    // which is a separate test in this file.)
-    let arweave = MockArweave::read_fails("AR_TX_X402");
+async fn stdio_participate_demotes_on_refetch_failure() {
+    let arweave = MockArweave::read_fails("AR_TX_STDIO");
     arweave.install();
     let solana =
         MockSolana::happy_with_x402_payment(TX_SIG, TREASURY, USDC_MINT, CHEAP_COST as u64);
+    let (state, _app) = build_state_and_router_x402(
+        &arweave.base_url(),
+        &solana.base_url(),
+        CHEAP_COST,
+        5,
+        Duration::from_secs(60),
+        Duration::from_secs(2),
+        TREASURY,
+        USDC_MINT,
+    );
 
+    let req: mnemonic_mcp::mcp::JsonRpcRequest = serde_json::from_value(serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {
+            "name": "mnemonic_sign_memory",
+            "arguments": {"content": "hello-stdio", "mode": "participate"},
+        },
+    }))
+    .expect("request");
+    let owner = state.keypair.pubkey_base58();
+    let resp = mnemonic_mcp::mcp::handle_request(
+        &req,
+        &state,
+        &owner,
+        None,
+        mnemonic_mcp::tools::Transport::Stdio,
+    )
+    .await;
+    let envelope = serde_json::to_value(&resp).expect("response serializes");
+
+    let err = envelope["error"]
+        .as_object()
+        .expect("expected JSON-RPC error envelope");
+    assert_eq!(err["code"], -32011, "{envelope}");
+    let data = err["data"].as_object().expect("data");
+    assert_eq!(data["stage"], "refetch");
+    assert_eq!(data["row_demoted_to"], "local");
+    let attestation_id = data["attestation_id"]
+        .as_str()
+        .expect("attestation_id in -32011 error data")
+        .to_string();
+
+    let store = state.store.lock().unwrap();
+    let (write_mode, signer): (String, String) = store
+        .conn()
+        .query_row(
+            "SELECT write_mode, signer_pubkey FROM attestations WHERE attestation_id = ?",
+            rusqlite::params![attestation_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .expect("row exists after demotion");
+    assert_eq!(write_mode, "local");
+    // The agent signed its own memory: signer == owner == operator key.
+    assert_eq!(signer, owner);
+    let costs_count: i64 = store
+        .conn()
+        .query_row(
+            "SELECT COUNT(*) FROM attestation_costs WHERE attestation_id = ?",
+            rusqlite::params![attestation_id],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    assert_eq!(costs_count, 0, "demoted writes must not record a cost row");
+}
+
+// ── 3. HTTP participate without a JWT: refused before any chain write ───────
+
+/// Before the transport guard this call reached inline operator signing
+/// (Arweave upload + Solana memo under the operator key). Now `sign_memory`
+/// refuses it: over HTTP the operator key never signs a memory. The refusal
+/// leaves no row and no Arweave upload, and it does NOT consume the x402
+/// nonce (`consume_x402_nonce_after_success` runs only on success), so the
+/// payment proof stays reusable for a client-signed retry.
+#[tokio::test]
+async fn x402_participate_without_jwt_is_refused_before_chain_write() {
+    let arweave = MockArweave::read_fails("AR_TX_X402");
+    let post_tx_mock = arweave.install();
+    let solana =
+        MockSolana::happy_with_x402_payment(TX_SIG, TREASURY, USDC_MINT, CHEAP_COST as u64);
     let (state, app) = build_state_and_router_x402(
         &arweave.base_url(),
         &solana.base_url(),
@@ -87,41 +159,27 @@ async fn demotion_on_x402_leaves_nonce_reusable() {
         USDC_MINT,
     );
 
-    // Submit the request with X-Payment pointing at TX_SIG.
     let (status, envelope) = call_sign_memory_participate_x402(&app, TX_SIG, "hello-x402").await;
     assert_eq!(status, StatusCode::OK);
-
-    // Same -32011 shape as the other demotion tests.
     let err = envelope["error"]
         .as_object()
         .expect("expected JSON-RPC error envelope");
-    assert_eq!(err["code"], -32011);
-    let data = err["data"].as_object().expect("data");
-    assert_eq!(data["stage"], "refetch");
-    assert_eq!(data["row_demoted_to"], "local");
-    let attestation_id = data["attestation_id"]
-        .as_str()
-        .expect("attestation_id in -32011 error data")
-        .to_string();
+    assert_eq!(err["code"], -32603, "{envelope}");
+    assert!(
+        err["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("client-signed"),
+        "{envelope}"
+    );
+    assert_eq!(post_tx_mock.calls(), 0, "no Arweave upload may happen");
 
     let store = state.store.lock().unwrap();
-
-    // Demotion landed in storage.
-    let row_write_mode: String = store
+    let rows: i64 = store
         .conn()
-        .query_row(
-            "SELECT write_mode FROM attestations WHERE attestation_id = ?",
-            rusqlite::params![attestation_id],
-            |r| r.get::<_, String>(0),
-        )
-        .expect("row exists after demotion");
-    assert_eq!(row_write_mode, "local");
-
-    // ── THE T3.5 LOAD-BEARING ASSERTION ─────────────────────────────────
-    // x402 nonce was NOT consumed: `mark_x402_nonce` fires only via
-    // `consume_x402_nonce_after_success` on a confirmed delivery. A failed
-    // delivery must leave the row absent so retry with the same payment
-    // succeeds without a misleading "already consumed" rejection.
+        .query_row("SELECT COUNT(*) FROM attestations", [], |r| r.get(0))
+        .expect("count attestations");
+    assert_eq!(rows, 0, "a refused write must not persist a row");
     let nonce_consumed: bool = store
         .conn()
         .query_row(
@@ -132,53 +190,28 @@ async fn demotion_on_x402_leaves_nonce_reusable() {
         .expect("x402_nonces query");
     assert!(
         !nonce_consumed,
-        "T3 R2 nonce-deferral: failed delivery must leave x402 nonce \
-         reusable. tx_sig=`{TX_SIG}` should NOT appear in x402_nonces, \
-         but it does."
+        "a refused write must leave the x402 nonce reusable"
     );
-
-    // No cost row written: Participate cost-record fires only on success.
-    let costs_count: i64 = store
+    let costs: i64 = store
         .conn()
-        .query_row(
-            "SELECT COUNT(*) FROM attestation_costs WHERE attestation_id = ?",
-            rusqlite::params![attestation_id],
-            |r| r.get(0),
-        )
+        .query_row("SELECT COUNT(*) FROM attestation_costs", [], |r| r.get(0))
         .unwrap_or(0);
-    assert_eq!(
-        costs_count, 0,
-        "demoted writes must not record an attestation_costs row"
-    );
-
-    drop(store);
-
-    // Counter increments under the per-stage label for operator observability.
-    assert_eq!(state.delivery_metrics.not_confirmed("refetch"), 1);
+    assert_eq!(costs, 0, "a refused write must not record a cost row");
 }
 
-// ── 3. Quota guard (x402) short-circuits before chain write ─────────────────
+// ── 4. Quota guard (x402) short-circuits before chain write ─────────────────
 
-/// The outcome-based DoS guard, now keyed on `blake3(x402 tx_sig)` (Wave 4
-/// removed the custodial `blake3(api_key)` subject). Reusing the SAME tx_sig
-/// is legitimate after a failed delivery (the nonce is never consumed on
-/// failure — see test 2), so each retry bumps the same quota subject. After
-/// `threshold` consecutive demotions the next `participate` call must
-/// short-circuit with `DeliveryQuotaExceeded` BEFORE any Arweave spend.
+/// The outcome-based DoS guard, keyed on `blake3(x402 tx_sig)`. It runs in
+/// `mcp_handler` before the payment check and before dispatch, so an
+/// over-quota subject never reaches a chain write. HTTP can no longer
+/// produce inline demotions (the operator key never signs there), so the
+/// test seeds the counter with `threshold` failures directly.
 #[tokio::test]
 async fn quota_exceeded_x402_short_circuits_before_chain_write() {
-    const TX_SIG: &str =
-        "5VfYdM3GjRZqkBdYNz2hVnQYsBfP1k8fL3jHkMb7vYqXrJzGw2XaRpUyMcNvDsW4eLkR1tFqGxKyPmAhU6Dv8nQT";
-    const TREASURY: &str = "TreaSurYMockPayToMnemonik11111111111111111";
-    const USDC_MINT: &str = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
-
-    // Anchor PUT succeeds, GET 404s → every call demotes at the refetch stage.
     let arweave = MockArweave::read_fails("AR_TX_QUOTA_X402");
     let post_tx_mock = arweave.install();
     let solana =
         MockSolana::happy_with_x402_payment(TX_SIG, TREASURY, USDC_MINT, CHEAP_COST as u64);
-
-    // Tight threshold (3) so the 4th call trips the guard — keeps the test fast.
     let (state, app) = build_state_and_router_x402(
         &arweave.base_url(),
         &solana.base_url(),
@@ -190,19 +223,11 @@ async fn quota_exceeded_x402_short_circuits_before_chain_write() {
         USDC_MINT,
     );
 
-    // Three demotions (same tx_sig → same quota subject) reach the threshold.
-    for i in 0..3 {
-        let (status, env) =
-            call_sign_memory_participate_x402(&app, TX_SIG, &format!("quota-bump-{i}")).await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(
-            env["error"]["data"]["kind"], "DeliveryNotConfirmed",
-            "iteration {i} must demote before the quota fires"
-        );
+    let subject = mnemonic_mcp::payment::hash_api_key(TX_SIG);
+    for _ in 0..3 {
+        state.refunds_by_subject.record_failure(&subject);
     }
-
-    // Capture the Arweave POST hit count BEFORE the short-circuited call.
-    let pre_arweave_hits = post_tx_mock.calls();
+    assert!(state.refunds_by_subject.is_over(&subject));
 
     let (status, env) = call_sign_memory_participate_x402(&app, TX_SIG, "quota-bump-final").await;
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
@@ -210,10 +235,10 @@ async fn quota_exceeded_x402_short_circuits_before_chain_write() {
     assert_eq!(err["code"], -32011);
     assert_eq!(err["data"]["kind"], "DeliveryQuotaExceeded");
 
-    // The short-circuit must not spend any further Arweave fee.
+    // The short-circuit must not spend any Arweave fee.
     assert_eq!(
         post_tx_mock.calls(),
-        pre_arweave_hits,
+        0,
         "quota short-circuit must not spend Arweave fees"
     );
     assert_eq!(state.delivery_metrics.quota_short_circuit(), 1);

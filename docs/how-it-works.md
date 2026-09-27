@@ -27,11 +27,12 @@ Implemented in `mcp/src/tools.rs::sign_memory`.
 3. **Build artifact.** Assemble the canonical JSON shape: `artifact_id`, `type`, `schema_version`, `content`, `producer` (DID-sol), `created_at`, `tags`, embedding metadata.
 4. **Canonicalize.** `codec::canonical::to_canonical_cbor` produces a deterministic byte sequence with stable field ordering. Determinism is required so the hash is reproducible across runtimes.
 5. **Hash.** `codec::hash::hash_bytes` computes blake3 over the canonical CBOR. This is the artifact's identity.
-6. **Sign.** The CBOR payload is wrapped in a COSE_Sign1 envelope. **Who holds the signing key depends on the caller** — the operator's key never signs content authored by another identity:
-   - **Inline (server-signed).** Taken only when the writer *is* the operator: the stdio / single-tenant path with no JWT, or a JWT whose subject equals the operator's own pubkey. `codec::sign::sign_artifact` signs under the server's Ed25519 identity and the flow continues to step 7.
-   - **Deferred (client-signed).** Taken for every JWT write owned by a different identity — *including* an explicit `mode: "local"`. The server parks the canonical bundle and returns `{status: "awaiting_signature", correlation_id, approve_url, content_hash, expires_in: 300}`. The client signs locally (browser approval, or a headless `POST /api/sign-callback`), and only then does step 7 run. Nothing is persisted or anchored until the callback lands; bundles expire after 300 seconds. `mnemonic_check_pending` resolves the `correlation_id` to the final state.
+6. **Sign.** Only a `participate` write gets a COSE_Sign1 envelope. The author of the memory signs it. The operator key never signs content from a different identity:
+   - **Local write (no signature).** The server stores the blake3 hash only. Nothing signs the row, so no keychain prompt occurs. Over HTTP, a JSON Web Token (JWT) write with an explicit `mode: "local"` takes this path. The JWT subject owns the row.
+   - **Inline (agent-signed).** The stdio path with no JWT, in `participate` mode. The operator key is the identity of the local agent. `codec::sign::sign_artifact` signs, then step 7 runs. HTTP requests never take this path.
+   - **Deferred (client-signed).** Each JWT write in `participate` mode, and each JWT write without a `mode` field. The server parks the canonical bundle and returns `{status: "awaiting_signature", correlation_id, approve_url, content_hash, expires_in: 300}`. The client signs locally (browser approval, or a headless `POST /api/sign-callback`). Then step 7 runs. Nothing is persisted or anchored until the callback lands. Bundles expire after 300 seconds. `mnemonic_check_pending` resolves the `correlation_id` to the final state.
 7. **Persist.**
-   - **Local mode:** write COSE bytes plus the uncompressed embedding to `SqliteStore`; return synthetic `local:` tx IDs.
+   - **Local mode:** write the content hash plus the uncompressed embedding to `SqliteStore`; return synthetic `local:` tx IDs.
    - **Full mode:** upload COSE bytes to Arweave via the Irys client; submit an SPL Memo on Solana carrying `{"h": blake3, "a": arweave_tx, "v": 2}`; record both tx IDs alongside the row in SQLite. Cost is captured in `attestation_costs` for P&L tracking.
 
 ## End-to-end walkthrough — recall
