@@ -2,6 +2,7 @@ mod api;
 mod approval;
 mod chain_stats;
 mod chat;
+mod client_ip;
 mod config;
 mod confirmation_token;
 mod cors_policy;
@@ -461,6 +462,13 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
+    // Reverse proxies whose forwarding headers carry the real client IP. A
+    // malformed list aborts the boot: a silent fallback could put every user
+    // into one rate-limit bucket, or trust a spoofed header.
+    let trusted_proxies = Arc::new(
+        client_ip::TrustedProxies::parse(&cfg.trusted_proxies)
+            .map_err(|e| anyhow::anyhow!("invalid TRUSTED_PROXIES: {e}"))?,
+    );
     let store = SqliteStore::open(&cfg.database_path)?;
     paid_operation::migrate_paid_operations(store.conn())?;
     paid_artifact::migrate_paid_artifact_staging(store.conn())?;
@@ -699,9 +707,13 @@ async fn main() -> anyhow::Result<()> {
         delivery_refetch_timeout: std::time::Duration::from_secs(cfg.delivery_refetch_timeout_secs),
         refunds_by_subject: refunds_by_subject.clone(),
         free_anchors: payment::FreeAnchorLimits {
-            per_key: cfg.free_anchors_per_day,
+            per_account: cfg.free_anchors_per_day,
+            per_ip: cfg.free_anchors_per_ip_per_day,
             global: cfg.free_anchors_global_per_day,
+            max_bytes: cfg.free_anchor_max_bytes,
         },
+        trusted_proxies: trusted_proxies.clone(),
+        max_content_bytes: cfg.max_content_bytes,
         delivery_metrics: delivery_metrics.clone(),
         confirmation_ledger: confirmation_ledger.clone(),
         hosted_endpoint,
@@ -971,8 +983,13 @@ async fn run_http(
     // sign_memory ≤ 5/min/IP, recall ≤ 30/min/IP — we apply the looser of the
     // two (30/min) at the route-level limiter and rely on PendingBundles
     // (Task 5) for the per-method 5/min cap on sign_memory.
+    // Key every limiter on the REAL client IP (trusted-proxy aware, IPv6 by
+    // /64), not the TCP peer: behind Caddy the peer is the proxy, and one
+    // bucket would be shared by every user (`client_ip.rs`).
+    let ip_key = client_ip::ClientIpKeyExtractor::new(state.trusted_proxies.clone());
     let mcp_governor_conf = Arc::new(
         GovernorConfigBuilder::default()
+            .key_extractor(ip_key.clone())
             .per_second(2) // 30 / 60 = 0.5/s smoothed; per_second uses int
             .burst_size(30)
             .finish()
@@ -990,6 +1007,7 @@ async fn run_http(
     };
     let oauth_governor_conf = Arc::new(
         GovernorConfigBuilder::default()
+            .key_extractor(ip_key.clone())
             .per_second(oauth_per_sec)
             .burst_size(oauth_burst)
             .finish()
@@ -1287,6 +1305,7 @@ async fn run_http(
     // the approval router, so it does not affect /mcp or /oauth/* limits.
     let approval_governor_conf = Arc::new(
         GovernorConfigBuilder::default()
+            .key_extractor(ip_key.clone())
             .per_second(1)
             .burst_size(30)
             .finish()

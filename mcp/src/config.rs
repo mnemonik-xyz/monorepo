@@ -217,16 +217,36 @@ pub struct Config {
     pub delivery_quota_evict_interval_secs: u64,
 
     // ── Free daily quota for anchored writes ────────────────────────────────
-    /// Free `participate` (on-chain anchored) writes per agent Ed25519 key
-    /// per UTC day, before payment is required. Applies only over HTTP with
-    /// `PAYMENT_MODE=x402`. `0` disables the per-key allowance. Default 10.
+    /// Free `participate` (on-chain anchored) writes per Google account per
+    /// UTC day, before payment is required. Only a signer whose key is
+    /// linked to a Google account gets free anchors; all keys linked to one
+    /// account share this quota. Applies only over HTTP with
+    /// `PAYMENT_MODE=x402`. `0` disables free anchors. Default 10.
     /// Env: `MNEMONIC_FREE_ANCHORS_PER_DAY`.
     pub free_anchors_per_day: u32,
-    /// Global cap on free anchored writes per UTC day across all keys. New
-    /// keys cost nothing to mint, so this bounds the operator's daily
-    /// chain spend on free writes. `0` = no free anchors at all. Default 1000.
+    /// Free anchored writes per client IP per UTC day (IPv6 grouped by /64),
+    /// the per-IP share of the global cap. `0` disables free anchors.
+    /// Default 20. Env: `MNEMONIC_FREE_ANCHORS_PER_IP_PER_DAY`.
+    pub free_anchors_per_ip_per_day: u32,
+    /// Global cap on free anchored writes per UTC day across all accounts.
+    /// It bounds the operator's daily chain spend on free writes. `0` = no
+    /// free anchors at all. Default 1000.
     /// Env: `MNEMONIC_FREE_ANCHORS_GLOBAL_PER_DAY`.
     pub free_anchors_global_per_day: u32,
+    /// Largest COSE_Sign1 (bytes) a free anchor may carry. A larger write
+    /// takes the paid path. Default 16384 (16 KiB).
+    /// Env: `MNEMONIC_FREE_ANCHOR_MAX_BYTES`.
+    pub free_anchor_max_bytes: usize,
+    /// Largest `mnemonic_sign_memory` content in bytes, on every transport.
+    /// Values above 32768 are clamped to 32768 (the pending-bundle cap).
+    /// Default 32768. Env: `MNEMONIC_MAX_CONTENT_BYTES`.
+    pub max_content_bytes: usize,
+    /// Comma-separated CIDR list of reverse proxies whose `X-Forwarded-For`
+    /// and `X-Real-IP` headers are trusted for the real client IP (rate
+    /// limits, per-IP free anchor counter). Default: loopback + private
+    /// ranges (`client_ip::DEFAULT_TRUSTED_PROXIES`). Empty = trust none.
+    /// Env: `TRUSTED_PROXIES`.
+    pub trusted_proxies: String,
 
     // ── Chain-backed traction stats (recover-traction-from-chain) ───────────
     /// Comma-separated base58 Solana pubkeys of every wallet that ever signed
@@ -343,9 +363,21 @@ impl Config {
             free_anchors_per_day: env_or("MNEMONIC_FREE_ANCHORS_PER_DAY", "10")
                 .parse()
                 .unwrap_or(10),
+            free_anchors_per_ip_per_day: env_or("MNEMONIC_FREE_ANCHORS_PER_IP_PER_DAY", "20")
+                .parse()
+                .unwrap_or(20),
             free_anchors_global_per_day: env_or("MNEMONIC_FREE_ANCHORS_GLOBAL_PER_DAY", "1000")
                 .parse()
                 .unwrap_or(1000),
+            free_anchor_max_bytes: env_or("MNEMONIC_FREE_ANCHOR_MAX_BYTES", "16384")
+                .parse()
+                .unwrap_or(16384),
+            max_content_bytes: env_or("MNEMONIC_MAX_CONTENT_BYTES", "32768")
+                .parse::<usize>()
+                .unwrap_or(32768)
+                .clamp(1, 32768),
+            trusted_proxies: std::env::var("TRUSTED_PROXIES")
+                .unwrap_or_else(|_| crate::client_ip::DEFAULT_TRUSTED_PROXIES.to_string()),
             chain_stats_wallets: env_or("CHAIN_STATS_WALLETS", "")
                 .split(',')
                 .map(str::trim)

@@ -92,6 +92,12 @@ pub struct PendingEntry {
     /// The sign-callback must then consume one free anchor before it
     /// anchors, or answer 402. `false` for every other bundle.
     pub free_quota: bool,
+    /// Real client IP of the agent whose `mnemonic_sign_memory` call parked
+    /// this bundle (set by `mcp_handler` through
+    /// [`PendingBundles::set_requester_ip`]). The per-IP free anchor counter
+    /// charges this IP, not the IP of the browser that later posts the
+    /// signature. Held in memory only for the bundle's 300 s life.
+    pub requester_ip: Option<std::net::IpAddr>,
     /// Wall-clock expiry. Compared against `Utc::now()` on every access.
     pub exp: DateTime<Utc>,
 }
@@ -250,6 +256,7 @@ impl PendingBundles {
             metadata,
             write_mode,
             free_quota: false,
+            requester_ip: None,
             exp,
         };
 
@@ -283,6 +290,33 @@ impl PendingBundles {
                 Ok(())
             }
             None => Err(PendingError::NotFound),
+        }
+    }
+
+    /// Record the real client IP of the agent that parked this bundle (see
+    /// [`PendingEntry::requester_ip`]). `NotFound` when the bundle is gone.
+    pub async fn set_requester_ip(
+        &self,
+        correlation_id: &str,
+        ip: std::net::IpAddr,
+    ) -> Result<(), PendingError> {
+        let mut guard = self.inner.lock().await;
+        match guard.lru.peek_mut(correlation_id) {
+            Some(entry) => {
+                entry.requester_ip = Some(ip);
+                Ok(())
+            }
+            None => Err(PendingError::NotFound),
+        }
+    }
+
+    /// Drop a parked bundle without delivering it (the pre-parking gate
+    /// parked a write that turned out too large for the free tier, and the
+    /// write must take the paid path instead). No-op when it is gone.
+    pub async fn discard(&self, correlation_id: &str) {
+        let mut guard = self.inner.lock().await;
+        if let Some(entry) = guard.lru.pop(correlation_id) {
+            guard.dec_user(&entry.jwt_sub);
         }
     }
 
@@ -431,7 +465,8 @@ impl PendingBundles {
     }
 
     /// Test helper: read the per-user counter without mutation.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
+    #[allow(dead_code)] // test fixtures only; the bin compiles this module too.
     pub async fn user_count(&self, jwt_sub: &str) -> usize {
         self.inner
             .lock()

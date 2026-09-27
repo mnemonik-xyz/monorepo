@@ -41,3 +41,33 @@ with no trust in the server.
   an ERC-8004 Reputation-Registry concern, not this layer.
 - **Key compromise**: a stolen producer or judge key forges valid signatures.
   Out of scope here; covered by the identity/keychain boundary.
+
+---
+
+## Free anchor quota and replay boundary
+
+Available now. Code: `mcp/src/payment.rs` (free quota, x402 nonces),
+`mcp/src/client_ip.rs`, `mcp/src/api.rs` (`sign_callback_handler`). Audit log:
+`work/free-quota-hardening/decisions.md`.
+
+| # | Attack | Defeating check | Class |
+|---|---|---|---|
+| 1 | **Key farming** — mint many Ed25519 keys to get many free quotas | Free anchors need a Google-linked key (`google_identity_links`, possession proof at link time). The per-account counter is keyed on the Google account, so all keys of one account share one quota | Availability (cost) |
+| 2 | **Account farming from one host** — many Google accounts from one machine | Per-IP share (`MNEMONIC_FREE_ANCHORS_PER_IP_PER_DAY`), IPv6 grouped by /64; global cap bounds the total daily spend | Availability (cost) |
+| 3 | **Header spoofing** — send `X-Forwarded-For` to pick a rate-limit bucket or per-IP counter | Forwarding headers are read only when the TCP peer is in `TRUSTED_PROXIES`; the rightmost untrusted hop is used, never the leftmost | Availability |
+| 4 | **Shared proxy bucket** — behind Caddy every user has the proxy's IP | The `tower_governor` limiters, the chat limiter and the per-IP counter use the resolved client IP (`ClientIpKeyExtractor`) | Availability |
+| 5 | **Large free writes** — anchor big payloads at the operator's cost | COSE bytes above `MNEMONIC_FREE_ANCHOR_MAX_BYTES` take the paid path; content above `MNEMONIC_MAX_CONTENT_BYTES` is refused | Availability (cost) |
+| 6 | **Refund farming** — force delivery failures to get the quota back and repeat | After the chain write starts, a refund gives back the account and IP counters but not the global one; the delivery-failure quota (`RefundsBySubject`) also applies | Availability (cost) |
+| 7 | **Callback replay** — post one signed bundle twice or concurrently | The pending bundle is consumed once (`consume_by_id`); losers get 410 and their free anchor claim is refunded before any chain write; an anchored `content_hash` is never anchored again | Integrity (single anchor) |
+| 8 | **x402 payment reuse** — one USDC transfer for two writes | `claim_x402_nonce` reserves the transaction atomically before the paid call; a failed call releases it; EVM hashes are normalized to lowercase | Integrity (single charge) |
+
+### Residual
+
+- A Solana or EVM transfer to the treasury is not bound to the payer: whoever
+  presents an unused transaction first can use it. Binding needs a memo or
+  reference in the transfer (planned, not available now).
+- A paid delivery attempt whose lease expires (10 minutes) while its first run
+  is still in progress can upload to Arweave or submit a memo a second time.
+  The payment is not charged twice; the operator pays the extra chain fee.
+- IP-based limits do not stop an attacker with many real IPv4 addresses. The
+  global cap bounds the cost.

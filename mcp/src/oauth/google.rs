@@ -367,6 +367,43 @@ fn lookup_link(conn: &rusqlite::Connection, google_sub: &str) -> Result<Option<S
     }
 }
 
+/// The Google account linked to the Ed25519 key `pubkey_base58`, if any.
+///
+/// Server-side source of truth for "is this identity Google-linked" (the
+/// free anchor quota needs it). A link exists only after `/oauth/google/link`
+/// verified a possession proof for the key, so a caller cannot claim another
+/// person's Google account. When several Google accounts linked the same
+/// key, the earliest link wins, so the key maps to one stable account.
+///
+/// A deploy without Google OAuth never creates the table: that reads as
+/// "not linked", not as an error.
+pub fn google_sub_for_pubkey(
+    conn: &rusqlite::Connection,
+    pubkey_base58: &str,
+) -> Result<Option<String>> {
+    use rusqlite::OptionalExtension;
+    let table_exists = conn
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'google_identity_links'",
+            [],
+            |_| Ok(()),
+        )
+        .optional()
+        .context("check google_identity_links table")?
+        .is_some();
+    if !table_exists {
+        return Ok(None);
+    }
+    conn.query_row(
+        "SELECT google_sub FROM google_identity_links WHERE pubkey_base58 = ?1 \
+         ORDER BY linked_at ASC, google_sub ASC LIMIT 1",
+        params![pubkey_base58],
+        |row| row.get::<_, String>(0),
+    )
+    .optional()
+    .context("read google link for pubkey")
+}
+
 /// Insert a fresh link atomically. Returns `Ok(true)` when a new row was
 /// written and `Ok(false)` when a row for `google_sub` already existed.
 ///

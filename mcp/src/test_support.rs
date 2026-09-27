@@ -169,6 +169,8 @@ pub fn mock_state() -> Arc<McpState> {
             5,
         )),
         free_anchors: crate::payment::FreeAnchorLimits::disabled(),
+        trusted_proxies: std::sync::Arc::new(crate::client_ip::TrustedProxies::default()),
+        max_content_bytes: crate::pending::MAX_CONTENT_BYTES,
         delivery_metrics: Arc::new(crate::payment::DeliveryMetrics::default()),
         confirmation_ledger: Arc::new(crate::confirmation_token::ConfirmationLedger::new()),
         // Empty endpoint sentinel — `tools::sign_memory` treats an empty
@@ -276,6 +278,8 @@ pub fn mock_state_with(
             5,
         )),
         free_anchors: crate::payment::FreeAnchorLimits::disabled(),
+        trusted_proxies: std::sync::Arc::new(crate::client_ip::TrustedProxies::default()),
+        max_content_bytes: crate::pending::MAX_CONTENT_BYTES,
         delivery_metrics: Arc::new(crate::payment::DeliveryMetrics::default()),
         confirmation_ledger: Arc::new(crate::confirmation_token::ConfirmationLedger::new()),
         hosted_endpoint: String::new(),
@@ -389,6 +393,8 @@ pub fn mock_state_for_delivery(
             quota_threshold,
         )),
         free_anchors: crate::payment::FreeAnchorLimits::disabled(),
+        trusted_proxies: std::sync::Arc::new(crate::client_ip::TrustedProxies::default()),
+        max_content_bytes: crate::pending::MAX_CONTENT_BYTES,
         delivery_metrics: Arc::new(crate::payment::DeliveryMetrics::default()),
         confirmation_ledger: Arc::new(crate::confirmation_token::ConfirmationLedger::new()),
         hosted_endpoint: String::new(),
@@ -503,6 +509,8 @@ pub fn mock_state_with_embedder_and_endpoint(
             5,
         )),
         free_anchors: crate::payment::FreeAnchorLimits::disabled(),
+        trusted_proxies: std::sync::Arc::new(crate::client_ip::TrustedProxies::default()),
+        max_content_bytes: crate::pending::MAX_CONTENT_BYTES,
         delivery_metrics: Arc::new(crate::payment::DeliveryMetrics::default()),
         confirmation_ledger: Arc::new(crate::confirmation_token::ConfirmationLedger::new()),
         hosted_endpoint,
@@ -524,6 +532,22 @@ struct LocalClaims {
     iat: u64,
     exp: u64,
     jti: String,
+}
+
+/// Link the Ed25519 key `pubkey` to the Google account `google_sub` in
+/// `store`, as `/oauth/google/link` does after a possession proof. Creates
+/// the link table when needed. Free anchors need such a link.
+pub fn link_google_account(store: &SqliteStore, google_sub: &str, pubkey: &str) {
+    crate::oauth::google::migrate_google_identity_links(store.conn())
+        .expect("migrate google links");
+    store
+        .conn()
+        .execute(
+            "INSERT INTO google_identity_links (google_sub, pubkey_base58, linked_at) \
+             VALUES (?1, ?2, strftime('%s','now'))",
+            rusqlite::params![google_sub, pubkey],
+        )
+        .expect("insert google link");
 }
 
 /// Mint a valid HS256 JWT for `sub` using `secret`. Same claim shape as
