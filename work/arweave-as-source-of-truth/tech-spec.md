@@ -249,8 +249,9 @@ Restoration concerns anchored rows alone, so the fields land exactly where they 
   and no embedding; `search` drops unscoreable rows. The anchor confirmation already re-fetched
   from Arweave and COSE-verified, so Decision 5 needed no change — its third stage only checks
   that the index row exists. `/artifacts` presentation (D-2 Q-2) is still open.
-- **Wave 5 — migration and documents.** The relabel, the user announcement, and every affected
-  document.
+- **Wave 5 — export and migration. `mnemonic-mcp export` DONE (closes #47).** The D-8 relabel
+  landed separately in #245. What remains is operational rather than code: announce the change,
+  give a window for export, then stop accepting writes to the legacy rows.
 - **Wave 6 — audit.** Read-only. Confirm no private content reaches Arweave in plaintext, and
   confirm no memory row remains on the server.
 

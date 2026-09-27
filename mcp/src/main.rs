@@ -102,6 +102,17 @@ enum Command {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Write every memory this identity owns to stdout as JSON Lines, then exit
+    /// (issue #47, work/arweave-as-source-of-truth Wave 5).
+    ///
+    /// One JSON object per line, oldest first, so two exports diff readably and
+    /// the output streams into any line-oriented tool. Owner-scoped: it exports
+    /// this identity's rows and nothing else.
+    ///
+    /// `content` is empty for a row a hosted operator wrote under the anchored
+    /// path — the operator never had the text. `arweave_tx` is where those bytes
+    /// live, and `mnemonic-mcp restore` fetches them back.
+    Export,
 }
 
 // ── Axum handlers ─────────────────────────────────────────────────────────────
@@ -239,6 +250,50 @@ async fn main() -> anyhow::Result<()> {
 
     let cfg = config::Config::from_env();
 
+    // ── `export` subcommand (issue #47, Wave 5) ───────────────────────────────
+    // Placed with `restore` because it needs the same resolved config, and
+    // before any server wiring because it exits when done.
+    if matches!(cli.command, Some(Command::Export)) {
+        let identity = match mnemonic_core::identity::ensure() {
+            Ok(id) => id,
+            Err(e) => {
+                eprintln!("mnemonic: identity resolution failed: {e}");
+                std::process::exit(1);
+            }
+        };
+        let store = match mnemonic_core::storage::SqliteStore::open(&cfg.database_path) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("mnemonic: opening the database failed: {e:#}");
+                std::process::exit(1);
+            }
+        };
+        let rows = match store.export_rows(&identity.pubkey_base58) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("mnemonic: export failed: {e:#}");
+                std::process::exit(1);
+            }
+        };
+        for row in &rows {
+            // One object per line. A serialisation failure for a single row must
+            // not silently shorten a backup, so it is loud and fatal.
+            match serde_json::to_string(row) {
+                Ok(line) => println!("{line}"),
+                Err(e) => {
+                    eprintln!("mnemonic: serialising {} failed: {e}", row.attestation_id);
+                    std::process::exit(1);
+                }
+            }
+        }
+        eprintln!(
+            "mnemonic: exported {} row(s) for {}",
+            rows.len(),
+            identity.pubkey_base58
+        );
+        return Ok(());
+    }
+
     // ── `restore` subcommand (work/arweave-as-source-of-truth Wave 3) ─────────
     // Rebuild the local index from the chain. Placed after config resolution
     // because it needs the gateway, RPC and database paths, and before any
@@ -359,8 +414,11 @@ async fn main() -> anyhow::Result<()> {
     // existing `mnemonic-mcp --transport stdio` invocation is unchanged.
     let transport = match cli.command {
         Some(Command::McpStdio) => "stdio".to_string(),
-        Some(Command::Logout) | Some(Command::Identity) | Some(Command::Restore { .. }) => {
-            unreachable!("logout, identity and restore short-circuit above")
+        Some(Command::Logout)
+        | Some(Command::Identity)
+        | Some(Command::Restore { .. })
+        | Some(Command::Export) => {
+            unreachable!("logout, identity, restore and export short-circuit above")
         }
         None => {
             if std::env::var("MCP_TRANSPORT").is_ok() {
