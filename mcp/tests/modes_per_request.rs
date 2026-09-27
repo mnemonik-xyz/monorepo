@@ -438,6 +438,9 @@ async fn whoami_envelope_per_deploy_variant() {
             .expect("participate_cost must be an object on full + none");
         assert_eq!(cost["currency"], "USD");
         assert_eq!(cost["amount_cents"], 0);
+        assert_eq!(cost["amount_micro_usdc"], 0);
+        // #165: "free" is explicit, not a side effect of truncation.
+        assert_eq!(cost["pricing_status"], "disabled");
         assert_eq!(cost["payment_methods"], json!([]));
     }
 
@@ -463,8 +466,82 @@ async fn whoami_envelope_per_deploy_variant() {
             .expect("participate_cost must be an object on full + x402");
         assert_eq!(cost["currency"], "USD");
         assert_eq!(cost["amount_cents"], 5);
+        assert_eq!(cost["amount_micro_usdc"], 50_000);
+        // No refresh has run in the test server: the seed price is a floor.
+        assert_eq!(cost["pricing_status"], "fallback");
         assert_eq!(cost["payment_methods"], json!(["x402"]));
     }
+}
+
+// ── 4b. whoami pricing block: floor rounding + live refresh (#165) ─────────
+
+fn whoami_cost(inner: &serde_json::Value) -> serde_json::Map<String, serde_json::Value> {
+    inner["participate_cost"]
+        .as_object()
+        .cloned()
+        .expect("participate_cost must be an object on full + x402")
+}
+
+/// The default 1000 µUSDC floor ($0.001) used to truncate to
+/// `amount_cents: 0` and read as "free". It must round UP to 1 cent, carry
+/// the exact micro-USDC amount, and say it is a fallback price.
+#[tokio::test]
+async fn whoami_floor_price_never_renders_as_zero() {
+    let server = TestServer::builder()
+        .storage_mode("full")
+        .payment_mode("x402")
+        .sign_memory_cost_micro_usdc(1000)
+        .build();
+    let owner = server.server_pubkey();
+    let result = server
+        .call_tool(Some(&owner), "mnemonic_whoami", json!({}))
+        .await;
+    let cost = whoami_cost(&result.result_text());
+    assert_eq!(cost["amount_micro_usdc"], 1000);
+    assert_eq!(cost["amount_cents"], 1, "non-zero price must not show 0");
+    assert_eq!(cost["pricing_status"], "fallback");
+}
+
+/// The envelope used to be frozen at boot. A background refresh (or a
+/// refresh failure) must show up on the next `mnemonic_whoami` call.
+#[tokio::test]
+async fn whoami_tracks_live_pricing_engine_state() {
+    let server = TestServer::builder()
+        .storage_mode("full")
+        .payment_mode("x402")
+        .sign_memory_cost_micro_usdc(1000)
+        .build();
+    let owner = server.server_pubkey();
+    let pricing_cfg = mnemonic_mcp::pricing::PricingConfig {
+        margin_bps: 0,
+        min_price_micro_usdc: 1000,
+        typical_payload_bytes: 2048,
+        sol_tx_fee_lamports: 0,
+    };
+    // 200_000 lamports at $100/SOL = 20_000 µUSDC = 2 cents.
+    server
+        .state
+        .pricing
+        .apply_quote(200_000, 100.0, &pricing_cfg)
+        .expect("valid quote");
+
+    let result = server
+        .call_tool(Some(&owner), "mnemonic_whoami", json!({}))
+        .await;
+    let cost = whoami_cost(&result.result_text());
+    assert_eq!(cost["amount_micro_usdc"], 20_000);
+    assert_eq!(cost["amount_cents"], 2);
+    assert_eq!(cost["pricing_status"], "live");
+    assert_eq!(cost["payment_methods"], json!(["x402"]));
+
+    // Next refresh fails: last good quote stays, status degrades.
+    server.state.pricing.record_refresh_failure();
+    let result = server
+        .call_tool(Some(&owner), "mnemonic_whoami", json!({}))
+        .await;
+    let cost = whoami_cost(&result.result_text());
+    assert_eq!(cost["amount_micro_usdc"], 20_000);
+    assert_eq!(cost["pricing_status"], "fallback");
 }
 
 // ── 5. Malformed `mode` returns InvalidParams (table-driven) ──────────────

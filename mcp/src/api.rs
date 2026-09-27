@@ -1876,7 +1876,7 @@ fn merge_chain_artifacts(
     (merged, total)
 }
 
-/// `GET /artifacts?q=&limit=` — public Evidence Ledger listing.
+/// `GET /artifacts?q=&limit=&source=` — public Evidence Ledger listing.
 ///
 /// Returns `{ artifacts: [PublicArtifact], total }`. Public-visibility rows
 /// from the DB, unioned with chain-recovered anchored rows when
@@ -1884,9 +1884,9 @@ fn merge_chain_artifacts(
 /// regardless of the lost DB's visibility column because they are already
 /// public on Arweave + Solana.
 ///
-/// With `?q=`, runs cosine search over the cross-owner public pool. Chain
-/// items are not included in search results because the snapshot carries no
-/// embedding vector. Without `?q=`, returns the newest-first merged listing.
+/// With `?q=`, see [`recall_artifacts`]: SQLite and chain-recovered matches
+/// are ranked together and each row carries `match: "semantic" | "text"`.
+/// Without `?q=`, returns the newest-first merged listing.
 /// On a transient SQLite error we log and serve an empty list with 200 rather
 /// than 5xx the public page (mirrors `public_stats_handler`).
 pub async fn artifacts_handler(
@@ -1902,15 +1902,14 @@ pub async fn artifacts_handler(
 
     // Chain snapshot read (async RwLock) BEFORE the store mutex — the
     // sqlite guard must never be held across an `.await` (CLAUDE.md).
-    let chain_items = match &state.chain_stats {
-        Some(cache) => cache.items().await,
+    let chain = match &state.chain_stats {
+        Some(cache) => cache.ledger().await,
         None => None,
     };
 
-    // Embed the search query OUTSIDE the store lock — `embed` is synchronous
-    // but potentially slow (ONNX inference in production), and the rusqlite
-    // guard must never wrap slow work.
-    let query_emb = query.map(|text| state.embedder.embed(text));
+    if let Some(text) = query {
+        return recall_artifacts(&state, text, source, limit, chain.as_deref());
+    }
 
     let (artifacts, total) = {
         let store = match state.store.lock() {
@@ -1922,71 +1921,184 @@ pub async fn artifacts_handler(
                 );
             }
         };
-        match &query_emb {
-            // Content search → cross-owner cosine search restricted to the
-            // public pool. `owner = None` paired with
-            // `Some(Visibility::Public)` is the trait-mandated safe pairing
-            // (never exposes private rows). Chain items are not included here
-            // because the snapshot carries no embedding vector.
-            Some(emb) => match store
-                .search(emb, None, Some(Visibility::Public), limit)
-                .map(|rows| {
-                    rows.into_iter()
-                        .map(public_artifact_from_search)
-                        .filter(|artifact| artifact_matches_source(artifact, source))
-                        .collect::<Vec<_>>()
-                }) {
-                Ok(rows) => {
-                    let total = rows.len();
-                    (rows, total)
-                }
-                Err(e) => {
-                    tracing::warn!("artifacts search query failed: {e}");
-                    (Vec::new(), 0)
-                }
-            },
-            // Plain list → newest-first public-only chronological listing,
-            // merged with chain-recovered anchored items.
-            None => match source {
-                ArtifactSource::OnNode => {
-                    match store.list_public_artifacts_by_mode(WriteMode::Local, limit) {
-                        Ok(rows) => {
-                            let total = rows.len();
-                            (rows, total)
-                        }
-                        Err(e) => {
-                            tracing::warn!("on-node artifacts list query failed: {e}");
-                            (Vec::new(), 0)
-                        }
+        // Plain list → newest-first public-only chronological listing,
+        // merged with chain-recovered anchored items.
+        match source {
+            ArtifactSource::OnNode => {
+                match store.list_public_artifacts_by_mode(WriteMode::Local, limit) {
+                    Ok(rows) => {
+                        let total = rows.len();
+                        (rows, total)
+                    }
+                    Err(e) => {
+                        tracing::warn!("on-node artifacts list query failed: {e}");
+                        (Vec::new(), 0)
                     }
                 }
-                ArtifactSource::All | ArtifactSource::OnChain => {
-                    let db_result = match source {
-                        ArtifactSource::All => store.list_public_artifacts(limit),
-                        ArtifactSource::OnChain => {
-                            store.list_public_artifacts_by_mode(WriteMode::Participate, limit)
+            }
+            ArtifactSource::All | ArtifactSource::OnChain => {
+                let db_result = match source {
+                    ArtifactSource::OnChain => {
+                        store.list_public_artifacts_by_mode(WriteMode::Participate, limit)
+                    }
+                    _ => store.list_public_artifacts(limit),
+                };
+                match db_result {
+                    Ok(db_rows) => match &chain {
+                        Some(ledger) => merge_chain_artifacts(ledger.items(), db_rows, limit),
+                        None => {
+                            let total = db_rows.len();
+                            (db_rows, total)
                         }
-                        ArtifactSource::OnNode => unreachable!(),
-                    };
-                    match db_result {
-                        Ok(db_rows) => match chain_items {
-                            Some(chain) => merge_chain_artifacts(&chain, db_rows, limit),
-                            None => {
-                                let total = db_rows.len();
-                                (db_rows, total)
-                            }
-                        },
-                        Err(e) => {
-                            tracing::warn!("artifacts list query failed: {e}");
-                            (Vec::new(), 0)
-                        }
+                    },
+                    Err(e) => {
+                        tracing::warn!("artifacts list query failed: {e}");
+                        (Vec::new(), 0)
                     }
                 }
-            },
+            }
         }
     };
 
     Json(serde_json::json!({ "artifacts": artifacts, "total": total })).into_response()
+}
+
+/// One `?q=` result row: the `PublicArtifact` wire shape plus how it matched.
+#[derive(Debug, Serialize)]
+struct RecallArtifact {
+    #[serde(flatten)]
+    artifact: PublicArtifact,
+    /// `semantic` (embedding cosine) or `text` (literal content/tag
+    /// fallback for chain items without a usable embedding).
+    #[serde(rename = "match")]
+    match_kind: crate::chain_stats::MatchKind,
+}
+
+/// `?q=` branch of [`artifacts_handler`] (#201).
+///
+/// Two candidate sets, ranked together by score and cut to `limit`:
+///
+/// 1. SQLite: cosine search over the cross-owner public pool.
+/// 2. Chain: recall over the chain-recovered snapshot. It runs in memory
+///    only (no SQLite access): semantic when an item's signed embedding
+///    decodes, else a literal content/tag match.
+///
+/// A chain item that duplicates a SQLite hit (same `arweave_tx` or
+/// `content_hash`) is dropped — the DB row wins, as in the plain listing.
+fn recall_artifacts(
+    state: &McpState,
+    text: &str,
+    source: ArtifactSource,
+    limit: usize,
+    chain: Option<&crate::chain_stats::ChainLedger>,
+) -> Response {
+    // Embed and run the chain recall OUTSIDE the store lock — `embed` is
+    // synchronous but potentially slow (ONNX inference in production), and
+    // the rusqlite guard must never wrap slow work.
+    let query_emb = state.embedder.embed(text);
+    let chain_hits = match chain {
+        Some(ledger) if source != ArtifactSource::OnNode => {
+            ledger.recall(text, &query_emb, &state.compressor)
+        }
+        _ => Vec::new(),
+    };
+
+    // The source filter runs after scoring, so a filtered request takes
+    // every scored row and cuts to `limit` after the filter. `search`
+    // scores every row either way; only the returned length differs.
+    let db_limit = if source == ArtifactSource::All {
+        limit
+    } else {
+        usize::MAX
+    };
+    let db_hits = {
+        let store = match state.store.lock() {
+            Ok(g) => g,
+            Err(e) => {
+                return error_resp(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("store mutex poisoned: {e}"),
+                );
+            }
+        };
+        // `owner = None` paired with `Some(Visibility::Public)` is the
+        // trait-mandated safe pairing (never exposes private rows).
+        match store.search(&query_emb, None, Some(Visibility::Public), db_limit) {
+            Ok(rows) => rows,
+            Err(e) => {
+                tracing::warn!("artifacts search query failed: {e}");
+                Vec::new()
+            }
+        }
+    };
+
+    let artifacts = rank_recall_hits(db_hits, &chain_hits, source, limit);
+    let total = artifacts.len();
+    Json(serde_json::json!({ "artifacts": artifacts, "total": total })).into_response()
+}
+
+/// Merge SQLite and chain recall hits: filter by `source`, drop chain
+/// duplicates of SQLite rows, sort by score (ties: newest first), cut to
+/// `limit`.
+fn rank_recall_hits(
+    db: Vec<SearchResult>,
+    chain: &[crate::chain_stats::ChainHit<'_>],
+    source: ArtifactSource,
+    limit: usize,
+) -> Vec<RecallArtifact> {
+    use crate::chain_stats::MatchKind;
+    use std::collections::HashSet;
+
+    let mut seen_tx: HashSet<String> = HashSet::new();
+    let mut seen_hash: HashSet<String> = HashSet::new();
+    let mut scored: Vec<(f32, RecallArtifact)> = Vec::with_capacity(db.len() + chain.len());
+
+    for row in db {
+        let score = row.relevance_score;
+        let artifact = public_artifact_from_search(row);
+        if !artifact_matches_source(&artifact, source) {
+            continue;
+        }
+        if !artifact.arweave_tx.is_empty() {
+            seen_tx.insert(artifact.arweave_tx.clone());
+        }
+        if !artifact.content_hash.is_empty() {
+            seen_hash.insert(artifact.content_hash.clone());
+        }
+        scored.push((
+            score,
+            RecallArtifact {
+                artifact,
+                match_kind: MatchKind::Semantic,
+            },
+        ));
+    }
+
+    for hit in chain {
+        let dup_hash = hit
+            .item
+            .content_hash
+            .as_ref()
+            .is_some_and(|h| seen_hash.contains(h));
+        if dup_hash || !seen_tx.insert(hit.item.arweave_tx.clone()) {
+            continue;
+        }
+        scored.push((
+            hit.score,
+            RecallArtifact {
+                artifact: public_artifact_from_recovered(hit.item),
+                match_kind: hit.kind,
+            },
+        ));
+    }
+
+    scored.sort_by(|a, b| {
+        b.0.partial_cmp(&a.0)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| b.1.artifact.created_at.cmp(&a.1.artifact.created_at))
+    });
+    scored.truncate(limit);
+    scored.into_iter().map(|(_, a)| a).collect()
 }
 
 /// Query params for `GET /analytics/attestations?range=`.
@@ -2977,6 +3089,7 @@ mod tests {
             tags: Vec::new(),
             day: day.map(str::to_string),
             producer: None,
+            embedding: None,
         }
     }
 

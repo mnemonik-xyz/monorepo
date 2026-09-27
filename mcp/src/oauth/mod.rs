@@ -2299,8 +2299,18 @@ const ALLOWLIST_TOOLS_CALL_NAMES: &[&str] = &["mnemonic_recall"];
 ///
 /// On `/oauth/*` and `/health` the body is never read — those routes are
 /// allowlisted by URI path. For `/mcp` the body is buffered (capped at 1 MiB)
-/// and parsed for the JSON-RPC `method` field — `initialize` and `tools/list`
-/// pass through; everything else demands a valid Bearer JWT.
+/// and parsed for the JSON-RPC `method` field:
+///
+/// - No token: allowlisted methods (`initialize`, `tools/list`, anonymous
+///   `mnemonic_recall`, …) pass through anonymously; everything else gets a
+///   401 challenge without an `error` code (RFC 6750 §3.1).
+/// - A token that fails validation (bad signature, wrong `aud`/`iss`,
+///   expired) gets a 401 `error="invalid_token"` challenge on EVERY method,
+///   allowlisted or not. MCP authorization spec 2025-06-18 §"Token
+///   Handling": "Invalid or expired tokens MUST receive a HTTP 401
+///   response." Before #163 an expired token on `initialize` was silently
+///   downgraded to anonymous, so clients showed "Connected" and failed on
+///   the first gated tool call instead of refreshing.
 pub async fn bearer_auth_middleware(
     State(state): State<Arc<OAuthState>>,
     request: Request<Body>,
@@ -2365,7 +2375,7 @@ pub async fn bearer_auth_middleware(
     let body_bytes = match axum::body::to_bytes(body, MAX_PEEK_BODY).await {
         Ok(b) => b,
         Err(e) => {
-            return jsonrpc_unauthorized(
+            return jsonrpc_error_response(
                 StatusCode::PAYLOAD_TOO_LARGE,
                 &format!("body too large or unreadable: {e}"),
             );
@@ -2401,100 +2411,124 @@ pub async fn bearer_auth_middleware(
         })
         .unwrap_or(false);
 
-    // Try to extract a Bearer JWT from the Authorization header. We do this
-    // for BOTH gated and allowlisted requests so the downstream handler can
-    // see `Claims` when present — the allowlist only relaxes "JWT MUST be
-    // present and valid", it does not mean "ignore the JWT if the client
-    // sent one". Allowlisted discovery methods (`initialize` / `tools/list`)
-    // may still arrive with a Bearer token mid-session; downstream code can
-    // branch on `Claims` if it cares.
-    let bearer = parts
-        .headers
-        .get(axum::http::header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.strip_prefix("Bearer "))
-        .map(|s| s.trim().to_string());
+    // Extract a Bearer token for BOTH gated and allowlisted requests. The
+    // allowlist only relaxes "a token MUST be present"; it never means
+    // "ignore the token if the client sent one". Allowlisted discovery
+    // methods (`initialize` / `tools/list`) may arrive with a Bearer token
+    // mid-session; downstream code can branch on `Claims`.
+    let bearer = bearer_token(&parts.headers);
 
-    if !allowlisted {
-        // Gated path — JWT is required AND must verify.
-        let token = match bearer {
-            Some(t) if !t.is_empty() => t,
-            _ => return jsonrpc_unauthorized(StatusCode::UNAUTHORIZED, "missing Bearer JWT"),
-        };
-        let claims = match verify_jwt(&state, &token) {
-            Ok(c) => c,
-            Err(e) => {
-                return jsonrpc_unauthorized(
-                    StatusCode::UNAUTHORIZED,
-                    &format!("invalid JWT: {e}"),
-                );
-            }
-        };
-        // Re-inject the body and attach Claims for downstream handlers.
-        let mut new_req = Request::from_parts(parts, Body::from(body_bytes));
-        new_req.extensions_mut().insert(claims);
-        return next.run(new_req).await;
-    }
+    let claims = match bearer {
+        Some(token) => match verify_jwt(&state, &token) {
+            Ok(c) => Some(c),
+            // A presented token that fails validation is a 401 on every
+            // method — the client must refresh or re-authorize instead of
+            // silently continuing as anonymous (#163).
+            Err(e) => return bearer_challenge(&path, Some(&format!("invalid JWT: {e}"))),
+        },
+        None if allowlisted => None,
+        None => return bearer_challenge(&path, None),
+    };
 
-    // Allowlisted path — JWT is OPTIONAL. If a Bearer header is present and
-    // verifies, attach Claims so downstream handlers that want the caller
-    // identity can branch on it. If absent or invalid, proceed without
-    // Claims (allowlisted requests must not 401 on bad tokens — discovery
-    // methods are reached before the client has a token).
+    // Re-inject the body and attach Claims (when present) for downstream
+    // handlers.
     let mut new_req = Request::from_parts(parts, Body::from(body_bytes));
-    if let Some(token) = bearer.filter(|t| !t.is_empty()) {
-        if let Ok(claims) = verify_jwt(&state, &token) {
-            new_req.extensions_mut().insert(claims);
-        }
+    if let Some(c) = claims {
+        new_req.extensions_mut().insert(c);
     }
     next.run(new_req).await
 }
 
-/// Emit a JSON-RPC-shaped 401 envelope for failed bearer-auth checks.
+/// Token from an `Authorization: Bearer <token>` header. The scheme name is
+/// case-insensitive (RFC 7235 §2.1). `None` when the header is absent, uses
+/// another scheme, or carries an empty token — all of which count as "no
+/// credentials", not as an invalid token.
+fn bearer_token(headers: &axum::http::HeaderMap) -> Option<String> {
+    let value = headers
+        .get(axum::http::header::AUTHORIZATION)?
+        .to_str()
+        .ok()?;
+    let (scheme, token) = value.trim().split_once(' ')?;
+    let token = token.trim();
+    (scheme.eq_ignore_ascii_case("bearer") && !token.is_empty()).then(|| token.to_string())
+}
+
+/// Protected-resource metadata URL advertised in a 401 challenge (RFC 9728
+/// §5.1). Requests to the MCP endpoint point at the path-specific document
+/// whose `resource` is `<origin>/mcp` — the URL the client connected to.
+/// Every other protected route points at the origin-wide document.
+fn resource_metadata_url(path: &str) -> String {
+    let origin = server_origin();
+    if path == "/mcp" || path.starts_with("/mcp/") {
+        format!("{origin}/.well-known/oauth-protected-resource/mcp")
+    } else {
+        format!("{origin}/.well-known/oauth-protected-resource")
+    }
+}
+
+/// Keep only characters RFC 6750 §3 allows inside a quoted
+/// `error_description` (%x20-21 / %x23-5B / %x5D-7E); replace the rest
+/// with a space so the header value always parses.
+fn sanitize_auth_param(msg: &str) -> String {
+    msg.chars()
+        .map(|c| match c {
+            ' ' | '!' | '#'..='[' | ']'..='~' => c,
+            _ => ' ',
+        })
+        .collect()
+}
+
+/// HTTP 401 + `WWW-Authenticate` challenge for a failed bearer-auth check.
 ///
-/// MCP authorization spec + RFC 6750 §3 require a `WWW-Authenticate` header
-/// on any 401 from a Bearer-protected resource. The `resource_metadata`
-/// parameter tells the MCP client where the protected-resource metadata
-/// lives (`/.well-known/oauth-protected-resource`); without this header,
-/// some MCP-OAuth clients (Cursor's recent versions) fail the connection
-/// silently instead of prompting the user to authenticate.
+/// MCP authorization spec 2025-06-18: servers "MUST use the HTTP header
+/// `WWW-Authenticate` when returning a 401 Unauthorized to indicate the
+/// location of the resource server metadata URL" (RFC 9728 §5.1), and
+/// "Invalid or expired tokens MUST receive a HTTP 401 response".
 ///
-/// We always emit the same realm + resource_metadata pair regardless of
-/// `status` because the client behavior is the same for any 401-class auth
-/// failure (missing/invalid/expired Bearer).
-fn jsonrpc_unauthorized(status: StatusCode, msg: &str) -> Response {
+/// - `invalid_token = None`: the request carried no credentials. Per RFC
+///   6750 §3.1 the challenge has no `error` code. A client reading
+///   `error="invalid_token"` here reports an expired token instead of
+///   starting the authorization flow (#163).
+/// - `invalid_token = Some(reason)`: a token was presented and failed
+///   validation. `error="invalid_token"` tells the client to refresh or
+///   re-authorize.
+///
+/// `realm` and `resource_metadata` read the env-driven server origin, so
+/// non-prod deploys advertise their own metadata URL.
+/// `compute_server_origin_from_env_str` already rejects CRLF / control
+/// chars and userinfo, so the value cannot break the header parse.
+fn bearer_challenge(path: &str, invalid_token: Option<&str>) -> Response {
+    let msg = invalid_token.unwrap_or("missing Bearer JWT");
+    let mut resp = jsonrpc_error_response(StatusCode::UNAUTHORIZED, msg);
+    let mut www_auth = format!("Bearer realm=\"{}\"", server_origin());
+    if let Some(reason) = invalid_token {
+        www_auth.push_str(&format!(
+            ", error=\"invalid_token\", error_description=\"{}\"",
+            sanitize_auth_param(reason)
+        ));
+    }
+    www_auth.push_str(&format!(
+        ", resource_metadata=\"{}\"",
+        resource_metadata_url(path)
+    ));
+    // Must be a single header value per RFC 7235 §4.1.
+    if let Ok(hv) = axum::http::HeaderValue::from_str(&www_auth) {
+        resp.headers_mut()
+            .insert(axum::http::header::WWW_AUTHENTICATE, hv);
+    }
+    resp
+}
+
+/// JSON-RPC-shaped error body (`-32001 unauthorized: …`) with the given
+/// HTTP status. The 401 callers go through [`bearer_challenge`], which adds
+/// the `WWW-Authenticate` header.
+fn jsonrpc_error_response(status: StatusCode, msg: &str) -> Response {
     let body = serde_json::json!({
         "jsonrpc": "2.0",
         "id": Value::Null,
         "error": {"code": -32001, "message": format!("unauthorized: {msg}")}
     });
-    let mut resp = (status, Json(body)).into_response();
-    if status == StatusCode::UNAUTHORIZED {
-        // Must be a single header value per RFC 7235 §4.1. Choose `error=` per
-        // RFC 6750 §3.1 to match invalid_token semantics; `error_description`
-        // is the human-readable hint the client may surface to the user.
-        // `issuer` reads from the env-driven OnceLock so non-prod deploys
-        // (cloudflared tunnel, dev subdomain, third-party operator) advertise
-        // the correct resource_metadata URL instead of the prod default.
-        // `compute_server_origin_from_env_str` already rejects CRLF / control
-        // chars and userinfo, so the value cannot break the
-        // `HeaderValue::from_str` parse — the SA-R1-L1 fix.
-        let www_auth = format!(
-            "Bearer realm=\"{issuer}\", error=\"invalid_token\", \
-             error_description=\"{esc_msg}\", \
-             resource_metadata=\"{issuer}/.well-known/oauth-protected-resource\"",
-            issuer = server_origin(),
-            // Strip embedded double-quotes / CR / LF from the message to keep
-            // the header well-formed; we don't expect any in caller-supplied
-            // strings but defense-in-depth is cheap.
-            esc_msg = msg.replace('"', "'").replace(['\r', '\n'], " "),
-        );
-        if let Ok(hv) = axum::http::HeaderValue::from_str(&www_auth) {
-            resp.headers_mut()
-                .insert(axum::http::header::WWW_AUTHENTICATE, hv);
-        }
-    }
-    resp
+    (status, Json(body)).into_response()
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────
@@ -3591,12 +3625,190 @@ mod tests {
             "WWW-Authenticate scheme MUST be Bearer, got: {www_auth}"
         );
         assert!(
-            www_auth.contains("resource_metadata="),
-            "WWW-Authenticate MUST include resource_metadata param so MCP clients can discover the metadata URL: {www_auth}"
+            www_auth.contains(&format!(
+                "resource_metadata=\"{}/.well-known/oauth-protected-resource/mcp\"",
+                server_origin()
+            )),
+            "WWW-Authenticate MUST point /mcp at the path-specific metadata URL: {www_auth}"
+        );
+        // #163: no credentials → no error code (RFC 6750 §3.1). An
+        // `invalid_token` here made claude-code report "OAuth expired"
+        // instead of starting the authorization flow.
+        assert!(
+            !www_auth.contains("error="),
+            "missing-token challenge MUST NOT carry an error code: {www_auth}"
+        );
+    }
+
+    // ── #163: invalid / expired tokens always get a 401 challenge ───────
+
+    fn expired_jwt(st: &OAuthState, sub: &str) -> String {
+        let now = now_secs();
+        let claims = Claims {
+            iss: JWT_ISSUER.to_string(),
+            aud: JWT_AUDIENCE.to_string(),
+            sub: sub.to_string(),
+            iat: now - 7200,
+            // Well past jsonwebtoken's default 60 s leeway.
+            exp: now - 3600,
+            jti: uuid::Uuid::new_v4().to_string(),
+            google_sub: None,
+        };
+        encode(
+            &Header::new(Algorithm::HS256),
+            &claims,
+            &st.jwt_encoding_key,
+        )
+        .unwrap()
+    }
+
+    async fn post_mcp(app: Router, body: Value, bearer: Option<&str>) -> Response {
+        let mut req = Request::builder()
+            .method("POST")
+            .uri("/mcp")
+            .header("content-type", "application/json");
+        if let Some(t) = bearer {
+            req = req.header("authorization", format!("Bearer {t}"));
+        }
+        app.oneshot(
+            req.body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+    }
+
+    fn www_authenticate(resp: &Response) -> String {
+        resp.headers()
+            .get(axum::http::header::WWW_AUTHENTICATE)
+            .expect("401 MUST carry WWW-Authenticate")
+            .to_str()
+            .unwrap()
+            .to_string()
+    }
+
+    fn assert_invalid_token_challenge(resp: &Response, ctx: &str) {
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "{ctx}");
+        let www = www_authenticate(resp);
+        assert!(www.starts_with("Bearer "), "{ctx}: {www}");
+        assert!(www.contains("error=\"invalid_token\""), "{ctx}: {www}");
+        assert!(
+            www.contains(&format!(
+                "resource_metadata=\"{}/.well-known/oauth-protected-resource/mcp\"",
+                server_origin()
+            )),
+            "{ctx}: {www}"
         );
         assert!(
-            www_auth.contains("error=\"invalid_token\""),
-            "WWW-Authenticate SHOULD include error=invalid_token per RFC 6750: {www_auth}"
+            axum::http::HeaderValue::from_str(&www).is_ok(),
+            "{ctx}: header must stay well-formed"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_expired_or_invalid_jwt_is_401_on_every_method() {
+        // MCP authorization spec 2025-06-18 §"Token Handling": "Invalid or
+        // expired tokens MUST receive a HTTP 401 response." Allowlisted
+        // methods used to downgrade a bad token to anonymous, so an expired
+        // session still "connected" and never refreshed.
+        let st = fresh_state();
+        let expired = expired_jwt(&st, "expired-sub");
+        let bodies = [
+            serde_json::json!({"jsonrpc": "2.0", "method": "initialize", "id": 1}),
+            serde_json::json!({"jsonrpc": "2.0", "method": "tools/list", "id": 2}),
+            serde_json::json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
+            serde_json::json!({"jsonrpc": "2.0", "method": "tools/call", "id": 3,
+                "params": {"name": "mnemonic_recall", "arguments": {"query": "x"}}}),
+            serde_json::json!({"jsonrpc": "2.0", "method": "tools/call", "id": 4,
+                "params": {"name": "mnemonic_whoami", "arguments": {}}}),
+        ];
+        for body in bodies {
+            let method = body["method"].as_str().unwrap().to_string();
+            for token in [expired.as_str(), "not-a-jwt"] {
+                let resp =
+                    post_mcp(build_authn_router(st.clone()), body.clone(), Some(token)).await;
+                assert_invalid_token_challenge(&resp, &format!("{method} / {token:.12}"));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_missing_token_keeps_anonymous_discovery_and_recall() {
+        let st = fresh_state();
+        for body in [
+            serde_json::json!({"jsonrpc": "2.0", "method": "initialize", "id": 1}),
+            serde_json::json!({"jsonrpc": "2.0", "method": "tools/list", "id": 2}),
+            serde_json::json!({"jsonrpc": "2.0", "method": "tools/call", "id": 3,
+                "params": {"name": "mnemonic_recall", "arguments": {"query": "x"}}}),
+        ] {
+            let resp = post_mcp(build_authn_router(st.clone()), body.clone(), None).await;
+            assert_eq!(resp.status(), StatusCode::OK, "{body}");
+        }
+        // A gated tool without a token: 401 challenge, no error code.
+        let resp = post_mcp(
+            build_authn_router(st.clone()),
+            serde_json::json!({"jsonrpc": "2.0", "method": "tools/call", "id": 4,
+                "params": {"name": "mnemonic_whoami", "arguments": {}}}),
+            None,
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        let www = www_authenticate(&resp);
+        assert!(!www.contains("error="), "{www}");
+        assert!(www.contains("resource_metadata="), "{www}");
+    }
+
+    #[tokio::test]
+    async fn test_valid_jwt_still_passes_on_gated_and_allowlisted() {
+        let st = fresh_state();
+        let token = issue_jwt(&st, "live-sub").unwrap();
+        for body in [
+            serde_json::json!({"jsonrpc": "2.0", "method": "initialize", "id": 1}),
+            serde_json::json!({"jsonrpc": "2.0", "method": "tools/call", "id": 2,
+                "params": {"name": "mnemonic_whoami", "arguments": {}}}),
+        ] {
+            let resp = post_mcp(build_authn_router(st.clone()), body.clone(), Some(&token)).await;
+            assert_eq!(resp.status(), StatusCode::OK, "{body}");
+        }
+    }
+
+    #[test]
+    fn test_bearer_token_parsing() {
+        let hm = |v: Option<&str>| {
+            let mut h = axum::http::HeaderMap::new();
+            if let Some(v) = v {
+                h.insert(axum::http::header::AUTHORIZATION, v.parse().unwrap());
+            }
+            h
+        };
+        assert_eq!(
+            bearer_token(&hm(Some("Bearer abc"))).as_deref(),
+            Some("abc")
+        );
+        assert_eq!(
+            bearer_token(&hm(Some("bearer  abc "))).as_deref(),
+            Some("abc")
+        );
+        assert_eq!(bearer_token(&hm(Some("Bearer "))), None);
+        assert_eq!(bearer_token(&hm(Some("Basic abc"))), None);
+        assert_eq!(bearer_token(&hm(None)), None);
+    }
+
+    #[test]
+    fn test_resource_metadata_url_and_param_sanitizing() {
+        let origin = server_origin();
+        assert_eq!(
+            resource_metadata_url("/mcp"),
+            format!("{origin}/.well-known/oauth-protected-resource/mcp")
+        );
+        assert_eq!(
+            resource_metadata_url("/api/cli-bootstrap/issue"),
+            format!("{origin}/.well-known/oauth-protected-resource")
+        );
+        assert_eq!(
+            sanitize_auth_param("bad \"q\"\r\n\\ é ok"),
+            // `"`, CR, LF, `\` and `é` each become one space.
+            format!("bad  q{}ok", " ".repeat(7))
         );
     }
 

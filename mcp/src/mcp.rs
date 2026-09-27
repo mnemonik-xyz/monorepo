@@ -17,8 +17,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{
-    api::BootstrapTickets, llm::LlmClient, payment, pending::PendingBundles,
-    pricing::PricingEngine, tools,
+    api::BootstrapTickets,
+    llm::LlmClient,
+    payment,
+    pending::PendingBundles,
+    pricing::{PricingEngine, PricingStatus},
+    tools,
 };
 use mnemonic_core::arweave::ArweaveClient;
 use mnemonic_core::compress::EmbeddingCompressor;
@@ -598,11 +602,12 @@ pub fn hosted_unavailable(last_error: &str, retry_after_ms: u64) -> JsonRpcError
     }
 }
 
-/// `whoami` discoverability envelope — derived once at process start from
-/// `Config` (storage_mode + payment_mode + pricing engine snapshot) and
-/// returned through `mnemonic_whoami` so clients learn what the server can
-/// serve **before** they try to write. See user-spec §"Discoverability через
-/// whoami" and tech-spec Decision 3.
+/// `whoami` discoverability envelope. The static part (`supported_modes`,
+/// `default_mode`, `payment_methods`) is derived once at process start from
+/// `Config`; the price block is re-read from the live pricing engine on every
+/// `mnemonic_whoami` call (see `Envelope::with_live_pricing`, issue #165).
+/// Clients learn what the server can serve **before** they try to write. See
+/// user-spec §"Discoverability через whoami" and tech-spec Decision 3.
 #[derive(Debug, Clone, Serialize)]
 pub struct Envelope {
     /// Modes the server is willing to accept for `sign_memory.mode`. A pure
@@ -613,8 +618,8 @@ pub struct Envelope {
     /// for V1 (user-spec invariant — "default `local`").
     pub default_mode: &'static str,
     /// Price metadata for the `participate` mode. `None` on a local-only
-    /// server (the field renders as JSON `null`); `Some` with `amount_cents`
-    /// and `payment_methods` on any `full`-mode server.
+    /// server (the field renders as JSON `null`); `Some` with the price,
+    /// `pricing_status` and `payment_methods` on any `full`-mode server.
     pub participate_cost: Option<ParticipateCost>,
 }
 
@@ -626,14 +631,14 @@ impl Envelope {
         self.supported_modes.contains(&"participate")
     }
 
-    /// Derive the envelope from operator-side env-vars and the current
-    /// pricing snapshot. Pure — no I/O, no clock; safe to call at process
-    /// start AND inside tests.
+    /// Derive the envelope from operator-side env-vars and a price snapshot.
+    /// Pure — no I/O, no clock; safe to call at process start AND inside
+    /// tests.
     ///
     /// `storage_mode` resolves `supported_modes`. `payment_mode` resolves
-    /// `participate_cost.payment_methods`. `price_micro_usdc` is divided by
-    /// `10_000` to produce USD cents — the pricing engine quotes in
-    /// micro-USDC (1e-6 USD).
+    /// `participate_cost.payment_methods` and whether pricing is `disabled`.
+    /// A charging deploy starts as `fallback`: the snapshot is the floor
+    /// price until the pricing engine reports a live quote.
     pub fn from_config(storage_mode: &str, payment_mode: &str, price_micro_usdc: i64) -> Self {
         if storage_mode == "local" {
             // Local-only deploy. The server CANNOT anchor and must say so
@@ -646,9 +651,6 @@ impl Envelope {
                 participate_cost: None,
             };
         }
-        // Full deploy: micro-USDC → cents (round half-to-zero — the integer
-        // truncation matches the existing `record_attestation_cost` math).
-        let amount_cents = (price_micro_usdc / 10_000).max(0);
         let payment_methods: Vec<&'static str> = match payment_mode {
             "none" => Vec::new(),
             "x402" => vec!["x402"],
@@ -657,28 +659,157 @@ impl Envelope {
             // misconfiguration shouldn't leak as a misleading payment menu.
             _ => Vec::new(),
         };
+        // `check_payment` charges only under `x402`: `none` proceeds for
+        // free and any other value fail-closes. Neither quotes a price.
+        let status = if payment_mode == "x402" {
+            PricingStatus::Fallback
+        } else {
+            PricingStatus::Disabled
+        };
         Self {
             supported_modes: vec!["local", "participate"],
             default_mode: "local",
-            participate_cost: Some(ParticipateCost {
-                currency: "USD",
-                amount_cents,
+            participate_cost: Some(ParticipateCost::new(
+                price_micro_usdc,
+                status,
                 payment_methods,
-            }),
+            )),
         }
+    }
+
+    /// Copy of this envelope with the price block re-read from the live
+    /// pricing engine. `mnemonic_whoami` calls this per request so the
+    /// response tracks background refreshes instead of the boot snapshot.
+    /// A `disabled` (non-charging) or local-only envelope is returned as is.
+    pub fn with_live_pricing(&self, pricing: &PricingEngine) -> Self {
+        let mut out = self.clone();
+        if let Some(cost) = out.participate_cost.as_mut() {
+            if cost.pricing_status != PricingStatus::Disabled {
+                *cost = ParticipateCost::new(
+                    pricing.current_price(),
+                    pricing.status(),
+                    std::mem::take(&mut cost.payment_methods),
+                );
+            }
+        }
+        out
     }
 }
 
 /// Price + payment-method tuple for `participate` writes. Serialised as part
-/// of `Envelope`. `currency` is currently always `"USD"`; `amount_cents` is
-/// the per-write cost in USD cents; `payment_methods` enumerates how the
-/// caller can pay (`["x402"]`, or empty for `PAYMENT_MODE=none` self-operator
-/// deploys).
+/// of `Envelope`.
+///
+/// - `currency` is always `"USD"`.
+/// - `amount_micro_usdc` is the exact per-write price (1e-6 USD) — the unit
+///   the pricing engine and the paywall use.
+/// - `amount_cents` is the same price in USD cents, rounded **up**, so a
+///   non-zero price never renders as `0` (the 1000 µUSDC floor is 1 cent).
+/// - `pricing_status` is `live` (fresh quote), `fallback` (price feed failed
+///   or not yet fetched: floor or last good quote) or `disabled` (the
+///   operator does not charge; both amounts are 0).
+/// - `payment_methods` enumerates how the caller can pay (`["x402"]`, or
+///   empty for `PAYMENT_MODE=none` self-operator deploys).
 #[derive(Debug, Clone, Serialize)]
 pub struct ParticipateCost {
     pub currency: &'static str,
     pub amount_cents: i64,
+    pub amount_micro_usdc: i64,
+    pub pricing_status: PricingStatus,
     pub payment_methods: Vec<&'static str>,
+}
+
+impl ParticipateCost {
+    fn new(
+        price_micro_usdc: i64,
+        pricing_status: PricingStatus,
+        payment_methods: Vec<&'static str>,
+    ) -> Self {
+        let amount_micro_usdc = if pricing_status == PricingStatus::Disabled {
+            0
+        } else {
+            price_micro_usdc.max(0)
+        };
+        Self {
+            currency: "USD",
+            amount_cents: micro_usdc_to_cents_ceil(amount_micro_usdc),
+            amount_micro_usdc,
+            pricing_status,
+            payment_methods,
+        }
+    }
+}
+
+/// Micro-USDC → USD cents, rounded up (1 cent = 10_000 µUSDC). Negative
+/// input clamps to 0.
+pub fn micro_usdc_to_cents_ceil(micro_usdc: i64) -> i64 {
+    let micro = u64::try_from(micro_usdc).unwrap_or(0);
+    i64::try_from(micro.div_ceil(10_000)).unwrap_or(i64::MAX)
+}
+
+#[cfg(test)]
+mod envelope_pricing_tests {
+    use super::*;
+
+    #[test]
+    fn cents_round_up_and_clamp() {
+        assert_eq!(micro_usdc_to_cents_ceil(0), 0);
+        assert_eq!(micro_usdc_to_cents_ceil(-5), 0);
+        assert_eq!(micro_usdc_to_cents_ceil(1), 1);
+        assert_eq!(micro_usdc_to_cents_ceil(1000), 1);
+        assert_eq!(micro_usdc_to_cents_ceil(10_000), 1);
+        assert_eq!(micro_usdc_to_cents_ceil(10_001), 2);
+        assert_eq!(micro_usdc_to_cents_ceil(50_000), 5);
+        assert_eq!(micro_usdc_to_cents_ceil(i64::MAX), i64::MAX / 10_000 + 1);
+    }
+
+    #[test]
+    fn from_config_status_per_payment_mode() {
+        let cost = |pm: &str| {
+            Envelope::from_config("full", pm, 1000)
+                .participate_cost
+                .expect("full deploy has a cost block")
+        };
+        let x402 = cost("x402");
+        assert_eq!(x402.pricing_status, PricingStatus::Fallback);
+        assert_eq!(x402.amount_micro_usdc, 1000);
+        assert_eq!(x402.amount_cents, 1);
+        for pm in ["none", "balance"] {
+            let c = cost(pm);
+            assert_eq!(c.pricing_status, PricingStatus::Disabled, "{pm}");
+            assert_eq!(c.amount_micro_usdc, 0, "{pm}");
+            assert_eq!(c.amount_cents, 0, "{pm}");
+        }
+        assert!(Envelope::from_config("local", "x402", 1000)
+            .participate_cost
+            .is_none());
+    }
+
+    #[test]
+    fn with_live_pricing_reads_engine_but_keeps_disabled() {
+        let engine = PricingEngine::new(1000);
+        let cfg = crate::pricing::PricingConfig {
+            margin_bps: 0,
+            min_price_micro_usdc: 1000,
+            typical_payload_bytes: 2048,
+            sol_tx_fee_lamports: 0,
+        };
+        engine.apply_quote(300_000, 100.0, &cfg).expect("quote");
+
+        let live = Envelope::from_config("full", "x402", 1000).with_live_pricing(&engine);
+        let c = live.participate_cost.expect("cost");
+        assert_eq!(c.pricing_status, PricingStatus::Live);
+        assert_eq!(c.amount_micro_usdc, 30_000);
+        assert_eq!(c.amount_cents, 3);
+        assert_eq!(c.payment_methods, vec!["x402"]);
+
+        let free = Envelope::from_config("full", "none", 1000).with_live_pricing(&engine);
+        let c = free.participate_cost.expect("cost");
+        assert_eq!(c.pricing_status, PricingStatus::Disabled);
+        assert_eq!(c.amount_micro_usdc, 0);
+
+        let local = Envelope::from_config("local", "x402", 1000).with_live_pricing(&engine);
+        assert!(local.participate_cost.is_none());
+    }
 }
 
 /// Shared state for the MCP server.
@@ -801,8 +932,9 @@ pub struct McpState {
 
     /// `whoami` discoverability envelope — populated once at process start
     /// from `Config` (storage_mode + payment_mode + initial pricing
-    /// snapshot). See `Envelope::from_config`. Threaded into
-    /// `tools::whoami` for the new envelope-output contract AND into
+    /// snapshot). See `Envelope::from_config`. `mnemonic_whoami` re-prices
+    /// it per request via `Envelope::with_live_pricing` before threading it
+    /// into `tools::whoami`; the boot copy is also passed into
     /// `tools::sign_memory` so the `participate`-on-local-only rejection
     /// path can return `unsupported_mode("participate", &supported)`
     /// without re-deriving the list. Decision 3 in
@@ -1568,8 +1700,11 @@ async fn handle_tool_call(
     let result = match name {
         "mnemonic_whoami" => {
             // DB-only: lock, query, release before returning
+            // Price block comes from the live pricing engine, not the boot
+            // snapshot (#165).
+            let envelope = state.envelope.with_live_pricing(&state.pricing);
             let store = state.store.lock().unwrap();
-            tools::whoami(&state.keypair, &store, &state.storage_mode, &state.envelope)
+            tools::whoami(&state.keypair, &store, &state.storage_mode, &envelope)
         }
         "mnemonic_sign_memory" => {
             let content = args["content"]
