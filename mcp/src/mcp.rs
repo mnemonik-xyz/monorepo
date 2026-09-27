@@ -330,7 +330,7 @@ impl JsonRpcError {
 // §"Typed errors" for the wire-format contract.
 
 /// `-32010 UnsupportedMode` — the caller requested a mode the server cannot
-/// serve (e.g. `participate` on a `STORAGE_MODE=local` deploy). Never used as
+/// serve (e.g. `anchored` on a `STORAGE_MODE=local` deploy). Never used as
 /// a silent downgrade; the user explicitly asked for chain-anchoring and the
 /// server must say "I can't" so the client picks `local` or another operator.
 ///
@@ -349,7 +349,7 @@ pub fn unsupported_mode(requested: &str, supported: &[&str]) -> JsonRpcError {
 
 /// `-32602 InvalidParams` — a request parameter is malformed. The T2 resolver
 /// emits this for `mode` values that are not exactly `"local"` or
-/// `"participate"` (case-variant, whitespace, null, non-string, unknown).
+/// `"anchored"` (case-variant, whitespace, null, non-string, unknown).
 /// The verbatim received value is echoed back in `data.received` so the
 /// caller can diff against its own outgoing payload.
 ///
@@ -365,7 +365,7 @@ pub fn invalid_params(field: &str, received: &Value) -> JsonRpcError {
     }
 }
 
-/// `-32011 DeliveryNotConfirmed` — the participate write hit Arweave + Solana
+/// `-32011 DeliveryNotConfirmed` — the anchored write hit Arweave + Solana
 /// but the post-anchor recall+verify round-trip failed at `stage`. The
 /// attestation row was persisted as `local` (so the embed/signature aren't
 /// wasted), the reserved payment was refunded, no `attestation_costs` row
@@ -429,7 +429,7 @@ pub(crate) fn derive_quota_subject(headers: &HeaderMap, payment_mode: &str) -> O
 /// `data` shape: `{kind: "TokenExpired", expires_at, pubkey}`.
 ///
 /// Wired into the soft-fall proxy path by Task 5 round-3 (SAR5-INFO3 —
-/// security-audit round 1): `tools::proxy_participate` maps
+/// security-audit round 1): `tools::proxy_anchored` maps
 /// `TokenStoreError::Expired` from `mnemonic_core::identity::read_token`
 /// to this typed JSON-RPC error so the agent sees the canonical `-32099
 /// TokenExpired` code from the AC16 error catalogue instead of the
@@ -446,7 +446,7 @@ pub fn token_expired(expires_at: &str, pubkey: &str) -> JsonRpcError {
     }
 }
 
-/// `-32011 DeliveryQuotaExceeded` — entry-of-participate-path short-circuit
+/// `-32011 DeliveryQuotaExceeded` — entry-of-anchored-path short-circuit
 /// fired by `mcp_handler` BEFORE any Arweave/Solana write because the
 /// caller's `api_key_hash` has accumulated `>= threshold` delivery-failure
 /// demotions inside the sliding window. Spends zero chain fees. The error
@@ -477,7 +477,7 @@ pub fn delivery_quota_exceeded(window_secs: u64, threshold: u32) -> JsonRpcError
 // rather than hand-crafting a response.
 
 /// `-32095 PublicWriteRequiresConfirmation` — `sign_memory` arrived with
-/// `mode=participate + visibility=public` but the `public_write_confirmation`
+/// `mode=anchored + visibility=public` but the `public_write_confirmation`
 /// field was missing, malformed, replayed, expired, cross-owner, or
 /// content_hash-mismatched. The caller must rerun
 /// `request_public_write_confirmation` to mint a fresh token and retry.
@@ -502,7 +502,7 @@ pub fn public_write_requires_confirmation(content_hash: &str) -> JsonRpcError {
 /// `-32096 OAuthTimeout` — the OAuth-loopback browser flow exceeded the
 /// per-call deadline (`MNEMONIC_OAUTH_TIMEOUT_SECS`, default 120s) without
 /// the user finishing consent. Decision 4 + AC11. Production trigger lives
-/// in Task 5 (`mcp-stdio` participate-mode); helper is defined here so the
+/// in Task 5 (`mcp-stdio` anchored-mode); helper is defined here so the
 /// Error Catalogue table has one canonical home.
 ///
 /// `data` shape: `{kind, sign_url, expires_at, attempted_at}`.
@@ -526,7 +526,7 @@ pub fn oauth_timeout(sign_url: &str, expires_at: u64, attempted_at: u64) -> Json
 /// code path in `sign_memory_inline` surfaces this typed error by treating
 /// an empty `Vec::new()` return from `embed()` as the failure signal.
 /// `fallback_available` advertises whether the request could be retried with
-/// `allow_fallback_to_participate=true`.
+/// `allow_fallback_to_anchored=true`.
 ///
 /// `data` shape: `{kind, reason, repair_hint, fallback_available}`.
 pub fn embedder_invalid(reason: &str, repair_hint: &str, fallback_available: bool) -> JsonRpcError {
@@ -580,7 +580,7 @@ pub fn identity_bootstrap_failed(reason: &str, repair_hint: &str) -> JsonRpcErro
     }
 }
 
-/// `-32011 HostedUnavailable` — `mcp-stdio`'s participate-mode proxy could
+/// `-32011 HostedUnavailable` — `mcp-stdio`'s anchored-mode proxy could
 /// not reach `MNEMONIC_HOSTED_ENDPOINT` (DNS, TCP, TLS, or 5xx-after-retry).
 /// Shares `-32011` with `DeliveryNotConfirmed` and `DeliveryQuotaExceeded`;
 /// clients discriminate via `data.kind`. Decision 4 (soft-fall) maps
@@ -612,23 +612,23 @@ pub fn hosted_unavailable(last_error: &str, retry_after_ms: u64) -> JsonRpcError
 pub struct Envelope {
     /// Modes the server is willing to accept for `sign_memory.mode`. A pure
     /// `STORAGE_MODE=local` deploy returns `["local"]`; a `full` deploy
-    /// returns `["local", "participate"]`.
+    /// returns `["local", "anchored"]`.
     pub supported_modes: Vec<&'static str>,
     /// Mode applied when the caller omits the `mode` field. Always `"local"`
     /// for V1 (user-spec invariant — "default `local`").
     pub default_mode: &'static str,
-    /// Price metadata for the `participate` mode. `None` on a local-only
+    /// Price metadata for the `anchored` mode. `None` on a local-only
     /// server (the field renders as JSON `null`); `Some` with the price,
     /// `pricing_status` and `payment_methods` on any `full`-mode server.
-    pub participate_cost: Option<ParticipateCost>,
+    pub anchored_cost: Option<AnchoredCost>,
 }
 
 impl Envelope {
-    /// True if `supported_modes` contains `"participate"`. Used by the
-    /// `sign_memory` entrypoint to reject `participate` requests with a typed
+    /// True if `supported_modes` contains `"anchored"`. Used by the
+    /// `sign_memory` entrypoint to reject `anchored` requests with a typed
     /// `UnsupportedMode` instead of a silent downgrade.
-    pub fn supports_participate(&self) -> bool {
-        self.supported_modes.contains(&"participate")
+    pub fn supports_anchored(&self) -> bool {
+        self.supported_modes.contains(&"anchored")
     }
 
     /// Derive the envelope from operator-side env-vars and a price snapshot.
@@ -636,19 +636,19 @@ impl Envelope {
     /// tests.
     ///
     /// `storage_mode` resolves `supported_modes`. `payment_mode` resolves
-    /// `participate_cost.payment_methods` and whether pricing is `disabled`.
+    /// `anchored_cost.payment_methods` and whether pricing is `disabled`.
     /// A charging deploy starts as `fallback`: the snapshot is the floor
     /// price until the pricing engine reports a live quote.
     pub fn from_config(storage_mode: &str, payment_mode: &str, price_micro_usdc: i64) -> Self {
         if storage_mode == "local" {
             // Local-only deploy. The server CANNOT anchor and must say so
-            // up front — `participate_cost` is null (the field is present
+            // up front — `anchored_cost` is null (the field is present
             // in the JSON, not omitted, so clients can distinguish
-            // "no participate support" from "old server without envelope").
+            // "no anchored support" from "old server without envelope").
             return Self {
                 supported_modes: vec!["local"],
                 default_mode: "local",
-                participate_cost: None,
+                anchored_cost: None,
             };
         }
         let payment_methods: Vec<&'static str> = match payment_mode {
@@ -667,13 +667,9 @@ impl Envelope {
             PricingStatus::Disabled
         };
         Self {
-            supported_modes: vec!["local", "participate"],
+            supported_modes: vec!["local", "anchored"],
             default_mode: "local",
-            participate_cost: Some(ParticipateCost::new(
-                price_micro_usdc,
-                status,
-                payment_methods,
-            )),
+            anchored_cost: Some(AnchoredCost::new(price_micro_usdc, status, payment_methods)),
         }
     }
 
@@ -683,9 +679,9 @@ impl Envelope {
     /// A `disabled` (non-charging) or local-only envelope is returned as is.
     pub fn with_live_pricing(&self, pricing: &PricingEngine) -> Self {
         let mut out = self.clone();
-        if let Some(cost) = out.participate_cost.as_mut() {
+        if let Some(cost) = out.anchored_cost.as_mut() {
             if cost.pricing_status != PricingStatus::Disabled {
-                *cost = ParticipateCost::new(
+                *cost = AnchoredCost::new(
                     pricing.current_price(),
                     pricing.status(),
                     std::mem::take(&mut cost.payment_methods),
@@ -696,7 +692,7 @@ impl Envelope {
     }
 }
 
-/// Price + payment-method tuple for `participate` writes. Serialised as part
+/// Price + payment-method tuple for `anchored` writes. Serialised as part
 /// of `Envelope`.
 ///
 /// - `currency` is always `"USD"`.
@@ -710,7 +706,7 @@ impl Envelope {
 /// - `payment_methods` enumerates how the caller can pay (`["x402"]`, or
 ///   empty for `PAYMENT_MODE=none` self-operator deploys).
 #[derive(Debug, Clone, Serialize)]
-pub struct ParticipateCost {
+pub struct AnchoredCost {
     pub currency: &'static str,
     pub amount_cents: i64,
     pub amount_micro_usdc: i64,
@@ -718,7 +714,7 @@ pub struct ParticipateCost {
     pub payment_methods: Vec<&'static str>,
 }
 
-impl ParticipateCost {
+impl AnchoredCost {
     fn new(
         price_micro_usdc: i64,
         pricing_status: PricingStatus,
@@ -766,7 +762,7 @@ mod envelope_pricing_tests {
     fn from_config_status_per_payment_mode() {
         let cost = |pm: &str| {
             Envelope::from_config("full", pm, 1000)
-                .participate_cost
+                .anchored_cost
                 .expect("full deploy has a cost block")
         };
         let x402 = cost("x402");
@@ -780,7 +776,7 @@ mod envelope_pricing_tests {
             assert_eq!(c.amount_cents, 0, "{pm}");
         }
         assert!(Envelope::from_config("local", "x402", 1000)
-            .participate_cost
+            .anchored_cost
             .is_none());
     }
 
@@ -796,19 +792,19 @@ mod envelope_pricing_tests {
         engine.apply_quote(300_000, 100.0, &cfg).expect("quote");
 
         let live = Envelope::from_config("full", "x402", 1000).with_live_pricing(&engine);
-        let c = live.participate_cost.expect("cost");
+        let c = live.anchored_cost.expect("cost");
         assert_eq!(c.pricing_status, PricingStatus::Live);
         assert_eq!(c.amount_micro_usdc, 30_000);
         assert_eq!(c.amount_cents, 3);
         assert_eq!(c.payment_methods, vec!["x402"]);
 
         let free = Envelope::from_config("full", "none", 1000).with_live_pricing(&engine);
-        let c = free.participate_cost.expect("cost");
+        let c = free.anchored_cost.expect("cost");
         assert_eq!(c.pricing_status, PricingStatus::Disabled);
         assert_eq!(c.amount_micro_usdc, 0);
 
         let local = Envelope::from_config("local", "x402", 1000).with_live_pricing(&engine);
-        assert!(local.participate_cost.is_none());
+        assert!(local.anchored_cost.is_none());
     }
 }
 
@@ -935,27 +931,27 @@ pub struct McpState {
     /// snapshot). See `Envelope::from_config`. `mnemonic_whoami` re-prices
     /// it per request via `Envelope::with_live_pricing` before threading it
     /// into `tools::whoami`; the boot copy is also passed into
-    /// `tools::sign_memory` so the `participate`-on-local-only rejection
-    /// path can return `unsupported_mode("participate", &supported)`
+    /// `tools::sign_memory` so the `anchored`-on-local-only rejection
+    /// path can return `unsupported_mode("anchored", &supported)`
     /// without re-deriving the list. Decision 3 in
     /// work/modes-user-choice/tech-spec.md.
     pub envelope: Envelope,
 
     /// Wall-clock budget for the post-anchor Arweave re-fetch in the
-    /// participate delivery-guarantee flow (T3). Used by
+    /// anchored delivery-guarantee flow (T3). Used by
     /// `tools::sign_memory_inline` to bound the exponential-backoff retry
     /// loop. Operator-tunable via `MNEMONIC_DELIVERY_REFETCH_TIMEOUT_SECS`.
     pub delivery_refetch_timeout: std::time::Duration,
 
     /// Outcome-based per-`api_key_hash` quota counter (T3 — DoS guard).
-    /// Consulted at the *entry* of the participate path in `mcp_handler`
+    /// Consulted at the *entry* of the anchored path in `mcp_handler`
     /// BEFORE any Arweave/Solana write; incremented in the failure branch
     /// of `sign_memory_inline` after a delivery demotion. Bounded by the
     /// background eviction task spawned in `main.rs::run_http`. Keyed on
     /// `api_key_hash` (blake3(api_key).to_hex()), NEVER `owner_pubkey`.
     pub refunds_by_subject: Arc<payment::RefundsBySubject>,
 
-    /// Free daily anchor quota: free participate writes per Google account,
+    /// Free daily anchor quota: free anchored writes per Google account,
     /// per client IP and across all accounts per UTC day, plus the largest
     /// free COSE_Sign1, before x402 payment is required
     /// (`MNEMONIC_FREE_ANCHORS_PER_DAY`, `MNEMONIC_FREE_ANCHORS_PER_IP_PER_DAY`,
@@ -982,13 +978,13 @@ pub struct McpState {
     /// In-process ledger for the public-write confirmation ceremony
     /// (Decision 5b — agent-native-distribution). `request_public_write_confirmation`
     /// mints an HMAC-bound token; `sign_memory` with
-    /// `mode=participate + visibility=public` consumes it. The HMAC secret
+    /// `mode=anchored + visibility=public` consumes it. The HMAC secret
     /// is regenerated at construction time and never persisted; a process
     /// restart invalidates every in-flight token (intentional graceful-
     /// degradation — the agent reruns the 3s ceremony).
     pub confirmation_ledger: Arc<crate::confirmation_token::ConfirmationLedger>,
 
-    /// Resolved hosted MCP endpoint for the participate-mode soft-fall
+    /// Resolved hosted MCP endpoint for the anchored-mode soft-fall
     /// proxy on `mcp-stdio` (Decision 4 + Decision 12 —
     /// agent-native-distribution). Default
     /// [`crate::DEFAULT_HOSTED_ENDPOINT`] unless the operator passed
@@ -1044,8 +1040,8 @@ fn tool_definitions() -> Value {
                     "tags": {"type": "array", "items": {"type": "string"}, "description": "Optional tags"},
                     "mode": {
                         "type": "string",
-                        "enum": ["local", "participate"],
-                        "description": "Per-request write intent (T2 — modes-user-choice). 'local' keeps the artifact on the server's own SQLite (free, no chain writes). 'participate' anchors on Arweave + Solana (paid on hosted operators; cost surfaced via mnemonic_whoami). Optional — omit to use the server's default; call mnemonic_whoami to see supported_modes / default_mode / participate_cost first.",
+                        "enum": ["local", "anchored"],
+                        "description": "Per-request write intent (T2 — modes-user-choice). 'local' keeps the artifact on the agent's own machine (free, no chain writes). 'anchored' stores it on Arweave + Solana (paid on hosted operators; cost surfaced via mnemonic_whoami). Optional — omit to use the server's default; call mnemonic_whoami to see supported_modes / default_mode / anchored_cost first.",
                     },
                 },
                 "required": ["content"],
@@ -1098,7 +1094,7 @@ fn tool_definitions() -> Value {
         },
         {
             "name": "request_public_write_confirmation",
-            "description": "Public-write ceremony gate: presents the content_hash about to be anchored on Arweave + Solana so the user can confirm or refuse in-turn before any chain write fires. Consumed by Task 4's handler; not user-facing — agent skills invoke it inline whenever they intend to issue a `mode='participate'` write with `visibility='public'`.",
+            "description": "Public-write ceremony gate: presents the content_hash about to be anchored on Arweave + Solana so the user can confirm or refuse in-turn before any chain write fires. Consumed by Task 4's handler; not user-facing — agent skills invoke it inline whenever they intend to issue a `mode='anchored'` write with `visibility='public'`.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1347,7 +1343,7 @@ fn ndjson_error(status: StatusCode, code: i32, message: &str) -> Response {
 ///
 /// Payment-gating semantics (T2 round-2 — modes-user-choice): the gate
 /// fires only when `mnemonic_sign_memory` is invoked AND the resolved
-/// per-request `mode` is `Participate` AND `payment_mode != "none"`.
+/// per-request `mode` is `Anchored` AND `payment_mode != "none"`.
 /// A `Local` request (explicit or env-fallback) bypasses the gate
 /// entirely regardless of `STORAGE_MODE` — the whitepaper §5.7.1
 /// free-local invariant is now structural, not configurational. The
@@ -1422,7 +1418,7 @@ pub async fn mcp_handler(
     //     `mnemonic_sign_memory` got past the middleware, this owner cannot
     //     reach operator signing: every dispatch below passes
     //     `Transport::Http`, and `tools::sign_memory` refuses inline
-    //     participate on that transport.
+    //     anchored on that transport.
     let owner_pubkey: String = match &claims {
         Some(c) => c.sub.clone(),
         None => state.keypair.pubkey_base58(),
@@ -1474,17 +1470,17 @@ pub async fn mcp_handler(
         None
     };
 
-    // Paywall fires only on resolved `Participate` + a paid deploy. A
+    // Paywall fires only on resolved `Anchored` + a paid deploy. A
     // `Local` write on a `STORAGE_MODE=full + PAYMENT_MODE=x402` server
     // bypasses the gate entirely — the whitepaper §5.7.1 free-local
     // invariant is now structural, not configurational.
-    let participate_gate = matches!(
+    let anchored_gate = matches!(
         resolved_mode_for_gate.map(|r| r.write_mode),
-        Some(WriteMode::Participate)
+        Some(WriteMode::Anchored)
     );
 
     // T3 — outcome-based DoS guard. Consulted at the *entry* of the
-    // participate path, BEFORE `check_payment`, BEFORE any Arweave/Solana
+    // anchored path, BEFORE `check_payment`, BEFORE any Arweave/Solana
     // write. The subject is the stable billable identifier for the request:
     //
     //   - **x402 mode**: `blake3(tx_sig)` — the on-chain payment proof.
@@ -1501,7 +1497,7 @@ pub async fn mcp_handler(
     // No-op on the stdio path (no Bearer JWT, no x402 header) since stdio
     // is trusted-local. No-op on `payment_mode == "none"` since there is
     // no billable subject to key on.
-    if is_sign_memory && participate_gate && state.payment_mode != "none" {
+    if is_sign_memory && anchored_gate && state.payment_mode != "none" {
         if let Some(subject) = derive_quota_subject(&headers, &state.payment_mode) {
             if state.refunds_by_subject.is_over(&subject) {
                 state.delivery_metrics.record_quota_short_circuit();
@@ -1513,7 +1509,7 @@ pub async fn mcp_handler(
                     subject_hash = %subject,
                     threshold = state.refunds_by_subject.threshold(),
                     window_secs = state.refunds_by_subject.window().as_secs(),
-                    "delivery quota exceeded — short-circuiting participate request"
+                    "delivery quota exceeded — short-circuiting anchored request"
                 );
                 let resp = JsonRpcResponse {
                     jsonrpc: "2.0".into(),
@@ -1536,7 +1532,7 @@ pub async fn mcp_handler(
     // predicate the sign-callback uses — so an unknown `PAYMENT_MODE` with
     // a UP config still reaches `check_payment` and fails closed here.
     if is_sign_memory
-        && participate_gate
+        && anchored_gate
         && state.payment_mode != "none"
         && payment::active_universal_paywall(&state.payment_mode, state.universal_paywall.as_ref())
             .is_none()
@@ -1690,9 +1686,9 @@ pub async fn mcp_handler(
                 //      anti-pattern; per-tenant detail goes to the
                 //      `tracing::warn!` line emitted from
                 //      `sign_memory_inline`).
-                //   2. On the participate path the SAME error increments
+                //   2. On the anchored path the SAME error increments
                 //      the `RefundsBySubject` counter so the entry-of-
-                //      participate quota guard fires after `threshold`
+                //      anchored quota guard fires after `threshold`
                 //      consecutive demotions. The subject is derived from
                 //      `derive_quota_subject(headers, payment_mode)` so it
                 //      matches the value the entry quota-check already
@@ -1802,7 +1798,7 @@ pub async fn mcp_handler(
         .await;
         // The Universal Paywall callback may grant a free anchor: remember
         // the agent's IP for the per-IP counter.
-        if let (Some(ip), true) = (client_ip, is_sign_memory && participate_gate) {
+        if let (Some(ip), true) = (client_ip, is_sign_memory && anchored_gate) {
             if let Some(correlation_id) = parked_correlation_id(&resp) {
                 let _ = state.pending.set_requester_ip(&correlation_id, ip).await;
             }
@@ -1849,7 +1845,7 @@ fn free_anchor_status(
     client_ip: Option<std::net::IpAddr>,
     denied: Option<payment::FreeAnchorDenied>,
 ) -> Option<payment::FreeAnchorStatus> {
-    if !payment::free_quota_applies(&state.payment_mode) || !state.envelope.supports_participate() {
+    if !payment::free_quota_applies(&state.payment_mode) || !state.envelope.supports_anchored() {
         return None;
     }
     let store = state.store.lock().ok()?;
@@ -1969,7 +1965,7 @@ async fn handle_tool_call(
                 },
             };
             // Task 4 — visibility (Decision 3 + AC14) and the
-            // allow_fallback_to_participate opt-in (Decision 4). Both
+            // allow_fallback_to_anchored opt-in (Decision 4). Both
             // resolved here so the public-write gate can fire BEFORE the
             // tool body and so soft-fall routing in Task 5 has the resolved
             // value. Visibility may NOT be present alongside `mode=local`
@@ -1980,11 +1976,11 @@ async fn handle_tool_call(
             // rejected at the dispatcher boundary before storage / payment
             // side effects. Task 5 wires this into `tools::sign_memory`'s
             // post-failure branch in `mcp/src/tools.rs`: when
-            // `allow_fallback_to_participate=true` AND local execution fails
+            // `allow_fallback_to_anchored=true` AND local execution fails
             // with one of the soft-fallable typed errors (`-32098
             // EmbedderInvalid`, `-32099 LocalStorageBusy`, `-32094
             // IdentityBootstrapFailed`), `sign_memory` re-dispatches the
-            // same arguments through the hosted participate-mode proxy
+            // same arguments through the hosted anchored-mode proxy
             // (`state.hosted_endpoint`, resolved at process start and gated
             // behind `--allow-custom-endpoint` per Decision 12). The
             // response gains an `escalated: { from, to, reason }` marker
@@ -1994,13 +1990,13 @@ async fn handle_tool_call(
             let allow_fallback = tools::resolve_allow_fallback(args)?;
 
             // Decision 5b — public-write confirmation gate. Fires only when
-            // the caller has explicitly opted into `participate + public`;
+            // the caller has explicitly opted into `anchored + public`;
             // the default `private` path is unaffected. Owner_pubkey is
             // server-derived (the dispatcher's `owner_pubkey` is sourced
             // from `claims.sub` on the HTTP path), never client-supplied —
             // a cross-owner replay would present mismatched owner here and
             // the consume returns `Invalid`.
-            if resolved.write_mode == mnemonic_core::storage::WriteMode::Participate
+            if resolved.write_mode == mnemonic_core::storage::WriteMode::Anchored
                 && visibility == mnemonic_core::storage::Visibility::Public
             {
                 let token_b64 = args
@@ -2646,7 +2642,7 @@ mod transport_tests {
     }
 
     /// TDD anchor for T2 (modes-user-choice). Drives end-to-end:
-    /// `sign_memory { mode: "participate" }` against a local-only
+    /// `sign_memory { mode: "anchored" }` against a local-only
     /// server (default `STORAGE_MODE=local` from `build_test_state`)
     /// returns the typed `-32010 UnsupportedMode` envelope with
     /// `data.supported == ["local"]` and writes ZERO rows. Same
@@ -2655,7 +2651,7 @@ mod transport_tests {
     /// existing in-module test plumbing so we have a fast unit-level
     /// regression guard inside the dispatcher's own test module.
     #[tokio::test]
-    async fn participate_against_local_only_server_returns_unsupported_mode() {
+    async fn anchored_against_local_only_server_returns_unsupported_mode() {
         let state = build_test_state(); // STORAGE_MODE defaults to "local"
         let app = build_test_router(state.clone());
 
@@ -2668,7 +2664,7 @@ mod transport_tests {
             "method": "tools/call",
             "params": {
                 "name": "mnemonic_sign_memory",
-                "arguments": {"content": "hi", "mode": "participate"},
+                "arguments": {"content": "hi", "mode": "anchored"},
             },
         });
         let req = Request::builder()
@@ -2694,7 +2690,7 @@ mod transport_tests {
             .as_object()
             .expect("typed error must carry `data`");
         assert_eq!(data["kind"], "UnsupportedMode");
-        assert_eq!(data["requested"], "participate");
+        assert_eq!(data["requested"], "anchored");
         assert_eq!(data["supported"], serde_json::json!(["local"]));
 
         // DB must be unchanged — no row written, no synthetic id minted.

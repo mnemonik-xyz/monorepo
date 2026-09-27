@@ -116,7 +116,7 @@ impl TestServerBuilder {
     }
 
     /// Per-write cost in micro-USDC (1 USDC = 1_000_000). Default is 0.
-    /// Surfaces in the whoami envelope as `participate_cost.amount_cents`
+    /// Surfaces in the whoami envelope as `anchored_cost.amount_cents`
     /// (divided by 10_000) — set this to 10_000 to get `1` cent and verify
     /// the integer math.
     pub fn sign_memory_cost_micro_usdc(mut self, v: i64) -> Self {
@@ -161,7 +161,7 @@ impl TestServerBuilder {
     /// `MNEMONIC_FREE_ANCHORS_GLOBAL_PER_DAY`), with a generous per-IP share
     /// (in-process requests have no peer IP and share one bucket) and the
     /// default size limit. Default: disabled, so the paid-path tests see a
-    /// 402 on the first participate write.
+    /// 402 on the first anchored write.
     pub fn free_anchors(self, per_account: u32, global: u32) -> Self {
         self.free_anchor_limits(mnemonic_mcp::payment::FreeAnchorLimits {
             per_account,
@@ -432,7 +432,7 @@ impl TestServer {
 
     /// Number of rows in `attestation_costs` for a given attestation id.
     /// 0 means the cost-recording branch did NOT fire (free / local path);
-    /// 1 means it did (paid participate path).
+    /// 1 means it did (paid anchored path).
     pub fn attestation_cost_rows(&self, attestation_id: &str) -> i64 {
         let store = self.state.store.lock().expect("store mutex");
         let conn = store.conn();

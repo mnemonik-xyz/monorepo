@@ -1,13 +1,13 @@
 //! Chain-backed traction stats (recover-traction-from-chain).
 //!
 //! After the server migration lost the SQLite database, the on-chain record
-//! is the only surviving history: every `participate` write is an Arweave
+//! is the only surviving history: every `anchored` write is an Arweave
 //! data item signed by the server wallet and tagged `App-Name:
 //! mnemonic-protocol`. This module periodically snapshots that record via
 //! gateway GraphQL and merges it with whatever the (fresh) local DB holds,
 //! so `/stats` and `/analytics/attestations` show true lifetime numbers:
 //!
-//! - **anchored** — union of chain items and DB `participate` rows, deduped
+//! - **anchored** — union of chain items and DB `anchored` rows, deduped
 //!   by `arweave_tx` (a new write appears in the DB before the gateway
 //!   indexes it; the union keeps the count exact in both directions).
 //! - **users** — distinct chain producers (normalized `did:sol:` → sub)
@@ -294,7 +294,7 @@ pub fn merge_stats(chain: &[RecoveredItem], db: &[RowFact]) -> MergedStats {
             users.insert(owner.clone());
         }
         let real_arweave = !row.arweave_tx.is_empty() && !row.arweave_tx.starts_with("local:");
-        if row.write_mode == "participate" && real_arweave {
+        if row.write_mode == "anchored" && real_arweave {
             // DB day wins: exact write time vs. eventual block time.
             anchored_days.insert(row.arweave_tx.as_str(), Some(row.day.as_str()));
         } else {
@@ -379,8 +379,8 @@ mod tests {
         // a fresh anchor the gateway hasn't indexed yet. Neither double-counts.
         let chain = vec![chain_item("tx1", Some("2026-06-05"), Some("did:sol:alice"))];
         let db = vec![
-            db_row("tx1", Some("alice"), "2026-06-01", "participate"),
-            db_row("tx-new", Some("carol"), "2026-07-01", "participate"),
+            db_row("tx1", Some("alice"), "2026-06-01", "anchored"),
+            db_row("tx-new", Some("carol"), "2026-07-01", "anchored"),
         ];
         let m = merge_stats(&chain, &db);
         assert_eq!(m.saved_onchain, 2);

@@ -18,7 +18,7 @@
 //!   3. `content_hash` = blake3 of the signed canonical payload.
 //!   4. persist the attestation with `Visibility::Public` + `WriteMode::Local`
 //!      (Decision 9 — a V1 post is a FREE `local` public write; it is NOT a
-//!      `participate` on-chain write, so it never touches x402).
+//!      `anchored` on-chain write, so it never touches x402).
 //!   5. `store.upsert_blog_post(...)` keyed on `slug` (PK — re-publishing the
 //!      same title REPLACES the row).
 //!

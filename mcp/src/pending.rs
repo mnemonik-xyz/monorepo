@@ -82,11 +82,11 @@ pub struct PendingEntry {
     pub metadata: serde_json::Value,
     /// Write mode the original `mnemonic_sign_memory` request resolved to.
     /// Carried through the pending bundle so the sign-callback persists the
-    /// row with the caller's intended mode instead of assuming `Participate`.
+    /// row with the caller's intended mode instead of assuming `Anchored`.
     /// A `Local` deferred write (Wave 3: explicit-local writes by a remote
     /// user are client-signed too) skips Arweave/Solana and stays free.
     pub write_mode: WriteMode,
-    /// True when the pre-parking x402 gate let this participate bundle
+    /// True when the pre-parking x402 gate let this anchored bundle
     /// through on the signer's free daily anchor quota instead of a payment
     /// (set by `mcp_handler` through [`PendingBundles::mark_free_quota`]).
     /// The sign-callback must then consume one free anchor before it
@@ -524,7 +524,7 @@ mod tests {
         let p = PendingBundles::new(10, 300, 5);
         let (c, e, h, cb, tg, md) = dummy_entry("hello");
         let id = p
-            .insert("u".into(), c, e, h, cb, tg, md, WriteMode::Participate)
+            .insert("u".into(), c, e, h, cb, tg, md, WriteMode::Anchored)
             .await
             .unwrap();
         assert_eq!(id.len(), 36, "correlation_id is uuidv4 (36 chars)");
@@ -539,16 +539,7 @@ mod tests {
         for i in 0..4 {
             let (c, e, h, cb, tg, md) = dummy_entry(&format!("c{i}"));
             let id = p
-                .insert(
-                    format!("user{i}"),
-                    c,
-                    e,
-                    h,
-                    cb,
-                    tg,
-                    md,
-                    WriteMode::Participate,
-                )
+                .insert(format!("user{i}"), c, e, h, cb, tg, md, WriteMode::Anchored)
                 .await
                 .unwrap();
             ids.push(id);
@@ -577,7 +568,7 @@ mod tests {
         let p = PendingBundles::new(10, 300, 5);
         let (c, e, h, cb, tg, md) = dummy_entry("expires");
         let id = p
-            .insert("u".into(), c, e, h, cb, tg, md, WriteMode::Participate)
+            .insert("u".into(), c, e, h, cb, tg, md, WriteMode::Anchored)
             .await
             .unwrap();
 
@@ -599,20 +590,20 @@ mod tests {
         for i in 0..3 {
             let (c, e, h, cb, tg, md) = dummy_entry(&format!("c{i}"));
             ok_ids.push(
-                p.insert("u".into(), c, e, h, cb, tg, md, WriteMode::Participate)
+                p.insert("u".into(), c, e, h, cb, tg, md, WriteMode::Anchored)
                     .await
                     .unwrap(),
             );
         }
         let (c, e, h, cb, tg, md) = dummy_entry("over");
         let result = p
-            .insert("u".into(), c, e, h, cb, tg, md, WriteMode::Participate)
+            .insert("u".into(), c, e, h, cb, tg, md, WriteMode::Anchored)
             .await;
         assert!(matches!(result, Err(PendingError::PerUserCapExceeded)));
         // Other users unaffected.
         let (c, e, h, cb, tg, md) = dummy_entry("other");
         assert!(p
-            .insert("v".into(), c, e, h, cb, tg, md, WriteMode::Participate)
+            .insert("v".into(), c, e, h, cb, tg, md, WriteMode::Anchored)
             .await
             .is_ok());
         let _ = ok_ids;
@@ -624,7 +615,7 @@ mod tests {
         let huge = "x".repeat(MAX_CONTENT_BYTES + 1);
         let (_, e, h, cb, tg, md) = dummy_entry("ignored");
         let result = p
-            .insert("u".into(), huge, e, h, cb, tg, md, WriteMode::Participate)
+            .insert("u".into(), huge, e, h, cb, tg, md, WriteMode::Anchored)
             .await;
         assert!(matches!(result, Err(PendingError::OversizedPayload)));
     }
@@ -637,16 +628,7 @@ mod tests {
         let metadata = serde_json::json!({"big": big_str});
         let (c, e, h, cb, tg, _) = dummy_entry("c");
         let result = p
-            .insert(
-                "u".into(),
-                c,
-                e,
-                h,
-                cb,
-                tg,
-                metadata,
-                WriteMode::Participate,
-            )
+            .insert("u".into(), c, e, h, cb, tg, metadata, WriteMode::Anchored)
             .await;
         assert!(matches!(result, Err(PendingError::OversizedPayload)));
     }
@@ -656,7 +638,7 @@ mod tests {
         let p = PendingBundles::new(10, 300, 5);
         let (c, e, h, cb, tg, md) = dummy_entry("c");
         let id = p
-            .insert("alice".into(), c, e, h, cb, tg, md, WriteMode::Participate)
+            .insert("alice".into(), c, e, h, cb, tg, md, WriteMode::Anchored)
             .await
             .unwrap();
         let r = p.get(&id, "bob").await;
@@ -670,7 +652,7 @@ mod tests {
         let p = PendingBundles::new(10, 300, 5);
         let (c, e, h, cb, tg, md) = dummy_entry("once");
         let id = p
-            .insert("u".into(), c, e, h, cb, tg, md, WriteMode::Participate)
+            .insert("u".into(), c, e, h, cb, tg, md, WriteMode::Anchored)
             .await
             .unwrap();
 
@@ -693,7 +675,7 @@ mod tests {
         let p = PendingBundles::new(10, 300, 5);
         let (c, e, h, cb, tg, md) = dummy_entry("c");
         let id = p
-            .insert("alice".into(), c, e, h, cb, tg, md, WriteMode::Participate)
+            .insert("alice".into(), c, e, h, cb, tg, md, WriteMode::Anchored)
             .await
             .unwrap();
         let result = p.consume(&id, "bob").await;
@@ -739,7 +721,7 @@ mod tests {
         let p = PendingBundles::new(10, 300, 5);
         let (c, e, h, cb, tg, md) = dummy_entry("c");
         let id = p
-            .insert("u".into(), c, e, h, cb, tg, md, WriteMode::Participate)
+            .insert("u".into(), c, e, h, cb, tg, md, WriteMode::Anchored)
             .await
             .unwrap();
         assert_eq!(p.user_count("u").await, 1);

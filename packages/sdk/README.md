@@ -22,7 +22,7 @@ const { attestationId } = await client.signMemory('hello', { tags: ['demo'] });
 
 - `mode: "local"`: the server stores a hash-only row and returns it at
   once (`status: "stored"`). The SDK needs no keypair for this call.
-- `mode: "participate"`: the SDK uses the deferred pending-bundle /
+- `mode: "anchored"`: the SDK uses the deferred pending-bundle /
   sign-callback flow. The server returns a `correlation_id`. The SDK gets
   the canonical-CBOR bundle, signs it locally (COSE_Sign1) and sends the
   envelope back. The server then anchors the memory on-chain.
@@ -43,7 +43,7 @@ from read-only agent flows.
 const client = new MnemonicClient({ baseUrl, signer: pubkeyOnlySigner, jwt });
 client.setKeypairProvider(() => loadKeypairFromKeychain()); // called lazily, once
 await client.signMemory('private note', { mode: 'local' });   // no key access
-await client.signMemory('public claim', { mode: 'participate' }); // loads the key
+await client.signMemory('public claim', { mode: 'anchored' }); // loads the key
 ```
 
 ### Renew the session without a new login (issue #33)
@@ -229,7 +229,7 @@ All names below are re-exported from the package root.
   `setKeypair` or `setKeypairProvider` (necessary for a signed
   `signMemory`, not for `mode: "local"`), `setTokenRefresher`.
 - **`SignMemoryOptions`** — `{tags?, mode?}`. **`WriteMode`** —
-  `"local" | "participate"`. **`SignMemoryResult.status`** — `stored`,
+  `"local" | "anchored"`. **`SignMemoryResult.status`** — `stored`,
   `signed`, `pending` or `anchored`.
 
 ### Signer

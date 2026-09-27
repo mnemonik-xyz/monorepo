@@ -230,7 +230,7 @@ pub fn mock_state_with(
 
     // Pricing engine seeded with the cost the caller wants quoted. `Envelope`
     // reads this same value via `current_price()` so the wire-format
-    // `participate_cost.amount_cents` matches what the paywall actually
+    // `anchored_cost.amount_cents` matches what the paywall actually
     // charges (single source of truth — drift impossible by construction).
     let pricing = PricingEngine::new(sign_memory_cost_micro_usdc);
 

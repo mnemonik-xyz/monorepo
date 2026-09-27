@@ -15,7 +15,7 @@
 //! invariant (TDD anchor for `fresh_install_path`) and the "OAuth re-fires
 //! on corrupted token" invariant (TDD anchor for `corrupted_token_path`)
 //! are intentionally deferred to Task 5 of agent-native-distribution,
-//! which wires the outbound participate-mode proxy. The tests below
+//! which wires the outbound anchored-mode proxy. The tests below
 //! cover the V1-scope library and server-side contracts and add a
 //! second-read assertion in `fresh_install_path` to prove the cache reuse
 //! property a future outbound caller would rely on.

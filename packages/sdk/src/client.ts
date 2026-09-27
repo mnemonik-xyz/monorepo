@@ -235,9 +235,14 @@ export class MnemonicClient {
       throw new UserError("signMemory: content must be a non-empty string");
     }
     const mode = opts.mode;
-    if (mode !== undefined && mode !== "local" && mode !== "participate") {
+    if (
+      mode !== undefined &&
+      mode !== "local" &&
+      mode !== "anchored" &&
+      mode !== "participate"
+    ) {
       throw new UserError(
-        `signMemory: mode must be "local" or "participate", got ${JSON.stringify(
+        `signMemory: mode must be "local" or "anchored", got ${JSON.stringify(
           mode
         )}`
       );
@@ -672,7 +677,9 @@ function writeModeField(
   raw: unknown,
   requested: WriteMode | undefined
 ): { writeMode?: WriteMode } {
-  if (raw === "local" || raw === "participate") return { writeMode: raw };
+  // Accept the legacy spelling so an older server response still parses.
+  if (raw === "participate") return { writeMode: "anchored" };
+  if (raw === "local" || raw === "anchored") return { writeMode: raw };
   return requested ? { writeMode: requested } : {};
 }
 

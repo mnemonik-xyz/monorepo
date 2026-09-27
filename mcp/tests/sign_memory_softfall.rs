@@ -1,9 +1,9 @@
 //! Task 5 — agent-native-distribution soft-fall routing tests.
 //!
-//! Decision 4: when `allow_fallback_to_participate=true` AND the local path
+//! Decision 4: when `allow_fallback_to_anchored=true` AND the local path
 //! returns one of the soft-fallable typed errors (`-32098 EmbedderInvalid`,
 //! `-32099 LocalStorageBusy`, `-32094 IdentityBootstrapFailed`),
-//! `sign_memory` re-dispatches the same arguments through the participate
+//! `sign_memory` re-dispatches the same arguments through the anchored
 //! HTTPS proxy at `state.hosted_endpoint`. On success the response carries
 //! `escalated: { from, to, reason }`. On hosted unavailability the typed
 //! error becomes `-32011 HostedUnavailable` — NOT the original local code.
@@ -71,7 +71,7 @@ async fn default_no_silent_escalation() {
     // before touching `read_token()` so the expired-token fixture's
     // MNEMONIC_CONFIG_DIR override does not leak across tests.
     let _env_guard = softfall_env_guard();
-    // `allow_fallback_to_participate=false` (the default). Local path
+    // `allow_fallback_to_anchored=false` (the default). Local path
     // fails with `-32098 EmbedderInvalid`; the response MUST be the
     // typed local error, never a silent escalation. The hosted_endpoint
     // is intentionally pointed at an unreachable URL so any accidental
@@ -144,7 +144,7 @@ async fn opt_in_escalation_returns_escalated_field() {
         "did_sol": "did:sol:hosted",
         "timestamp": "2026-06-04T00:00:00Z",
         "storage_mode": "full",
-        "write_mode": "participate",
+        "write_mode": "anchored",
         "visibility": "private",
     });
     let hosted_text = hosted_result.to_string();
@@ -207,14 +207,14 @@ async fn opt_in_escalation_returns_escalated_field() {
         .get("escalated")
         .expect("escalated field present on success");
     assert_eq!(escalated["from"], "local");
-    assert_eq!(escalated["to"], "participate");
+    assert_eq!(escalated["to"], "anchored");
     assert_eq!(
         escalated["reason"], "embedder_unavailable",
         "FailingEmbedder triggers EmbedderInvalid → embedder_unavailable"
     );
     // Hosted-result fields flow through verbatim.
     assert_eq!(result["attestation_id"], "hosted-uuid");
-    assert_eq!(result["write_mode"], "participate");
+    assert_eq!(result["write_mode"], "anchored");
 
     // The mock saw exactly one POST — proves the escalation actually
     // proxied through the network, not stubbed inside `sign_memory`.
@@ -236,7 +236,7 @@ async fn opt_in_escalation_no_confirmation_token() {
     let mock = httpmock::MockServer::start();
     let hosted_success = serde_json::json!({
         "attestation_id": "hosted-success-that-should-not-be-trusted",
-        "write_mode": "participate",
+        "write_mode": "anchored",
         "visibility": "public",
     });
     let m = mock.mock(|when, then| {
@@ -329,7 +329,7 @@ async fn opt_in_escalation_with_valid_confirmation_token_reaches_hosted() {
     let mock = httpmock::MockServer::start();
     let hosted_success = serde_json::json!({
         "attestation_id": "hosted-pub-uuid",
-        "write_mode": "participate",
+        "write_mode": "anchored",
         "visibility": "public",
     });
     let m = mock.mock(|when, then| {

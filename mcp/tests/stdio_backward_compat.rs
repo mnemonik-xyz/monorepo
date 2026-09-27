@@ -103,7 +103,7 @@ async fn test_stdio_tools_list_sign_memory_recall_without_oauth() {
                 // tx, but the migration's backfill rule already covers that on
                 // upgrade. T2 will pass the resolved mode here once the
                 // resolver is in place.
-                WriteMode::Participate,
+                WriteMode::Anchored,
                 Visibility::Private,
                 &[0.0; 8],
             )

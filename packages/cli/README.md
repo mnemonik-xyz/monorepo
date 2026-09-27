@@ -98,7 +98,7 @@ absent and stdin is piped — from stdin. Tags are comma-separated.
 - **Default (write mode `local`)**: the server stores the memory for your
   identity only. There is no on-chain anchor and no charge. The CLI uses
   only your public key and does not read the private key.
-- **`--anchor`** (alias `--participate`, write mode `participate`): the
+- **`--anchor`** (alias `--anchored`, write mode `anchored`): the
   CLI reads your private key and signs the memory locally (COSE_Sign1).
   The server then anchors it on Arweave and Solana. This write can be
   paid.
@@ -113,7 +113,7 @@ content_hash:   6c7f...
 
 $ mnemonic sign "public claim" --anchor
 status:         anchored
-write_mode:     participate
+write_mode:     anchored
 ```
 
 An older server can ask for a signature on a local write. Then the CLI

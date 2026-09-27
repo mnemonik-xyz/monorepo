@@ -138,7 +138,7 @@ fn seed_public_and_private(state: &Arc<McpState>, owner: &str) {
             owner,
             owner,
             "2026-06-10T00:00:00Z",
-            WriteMode::Participate,
+            WriteMode::Anchored,
             Visibility::Public,
             &embedding,
         )

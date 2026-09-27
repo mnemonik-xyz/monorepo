@@ -330,7 +330,7 @@ pub fn build_state_and_router_x402(
     (state, app)
 }
 
-/// Issue a `sign_memory { mode: "participate", content }` with an
+/// Issue a `sign_memory { mode: "anchored", content }` with an
 /// `X-Payment` header pointing at the supplied `tx_sig`. The payload is
 /// the raw JSON shape that `payment::extract_x402_proof` accepts (it
 /// tries raw JSON before falling back to base64).
@@ -338,7 +338,7 @@ pub fn build_state_and_router_x402(
 /// The on-chain payment proof itself is mocked elsewhere (see
 /// [`MockSolana::happy_with_x402_payment`]); this helper only constructs
 /// the HTTP request.
-pub async fn call_sign_memory_participate_x402(
+pub async fn call_sign_memory_anchored_x402(
     app: &Router,
     tx_sig: &str,
     content: &str,
@@ -349,7 +349,7 @@ pub async fn call_sign_memory_participate_x402(
         "method": "tools/call",
         "params": {
             "name": "mnemonic_sign_memory",
-            "arguments": {"content": content, "mode": "participate"},
+            "arguments": {"content": content, "mode": "anchored"},
         },
     });
     // Raw JSON shape per X402PaymentProof; extract_x402_proof tries this

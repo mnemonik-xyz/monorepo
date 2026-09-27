@@ -99,7 +99,7 @@ You choose the mode for each memory. The same key and the same tools serve all m
 |---|---|---|---|---|
 | `local` | A database on your computer | Only you | Free | Available now |
 | `sealed` | Encrypted on Arweave. Fingerprint on Solana. | You and the readers that you approve | Free quota, then paid | Planned |
-| `public` | Arweave. Fingerprint on Solana. | Anyone | Free quota, then paid | Planned (today: "participate" mode, not encrypted) |
+| `public` | Arweave. Fingerprint on Solana. | Anyone | Free quota, then paid | Planned (today: "anchored" mode, not encrypted) |
 
 **Free quota.** Each identity can anchor 100 memories per week free of charge (planned).
 After the quota, one anchored memory costs approximately 0.001 US dollars.
@@ -124,7 +124,7 @@ When you anchor a memory:
    Mnemonic reports "delivered" only after this check passes.
    If the check fails, Mnemonic keeps the memory as `local` and does not charge you.
 
-Status: available now ("participate" mode).
+Status: available now ("anchored" mode).
 
 **You cannot delete anchored data.** Arweave calls itself "permanent information
 storage" (<https://www.arweave.org/>). Arweave node operators can filter data
@@ -295,7 +295,7 @@ Mnemonic makes agents coherent over time. Other standards connect agents now.
   `mnemonic_recall`, `mnemonic_verify`, `mnemonic_prove_identity`,
   `mnemonic_check_pending`, `request_public_write_confirmation`,
   `mnemonic_publish_post`.
-- Local mode and anchored mode ("participate").
+- Local mode and anchored mode ("anchored").
 - Signatures with Ed25519, COSE_Sign1 envelopes, BLAKE3 fingerprints, canonical CBOR.
 - Identities as `did:key` and `did:sol`. DID means Decentralized Identifier.
 - TurboQuant compression. Search by meaning in a local SQLite database.

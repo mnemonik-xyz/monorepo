@@ -1,6 +1,6 @@
 //! Public-write confirmation ledger (Decision 5b, agent-native-distribution).
 //!
-//! Any `sign_memory { mode: "participate", visibility: "public" }` request
+//! Any `sign_memory { mode: "anchored", visibility: "public" }` request
 //! must carry a server-issued, HMAC-bound confirmation token. The token is
 //! minted by the `request_public_write_confirmation` MCP tool (JWT required)
 //! and consumed exactly once by `sign_memory`. The HMAC tuple is

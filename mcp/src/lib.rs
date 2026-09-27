@@ -69,7 +69,7 @@ pub mod test_support;
 /// that both compilation units agree on.
 pub use mcp::EMBEDDER_MODEL_VERSION;
 
-/// Compile-time-baked default hosted MCP endpoint used by the participate-
+/// Compile-time-baked default hosted MCP endpoint used by the anchored-
 /// mode soft-fall proxy on `mnemonic-mcp mcp-stdio`. Decision 12 of
 /// agent-native-distribution: this constant is the *only* hosted peer the
 /// binary will speak to unless the operator explicitly passes
@@ -106,7 +106,7 @@ pub enum HostedEndpointWarning {
 }
 
 /// Validate that a candidate hosted-endpoint URL is safe to use as a
-/// participate-mode proxy destination. Decision 12 + SAR5-M1: only
+/// anchored-mode proxy destination. Decision 12 + SAR5-M1: only
 /// production-shape (`https://`) and dev-loopback (`http://127.0.0.1`,
 /// `http://localhost`, `http://[::1]`) URLs survive — `file://`,
 /// cloud-metadata IPs (`http://169.254.169.254`), and arbitrary
@@ -150,7 +150,7 @@ fn is_safe_hosted_endpoint(url: &str) -> bool {
     false
 }
 
-/// Resolve the hosted MCP endpoint for participate-mode soft-fall.
+/// Resolve the hosted MCP endpoint for anchored-mode soft-fall.
 ///
 /// Decision 12 (Task 5) — gating logic in three layers:
 /// 1. **No flag** → env var is fully ignored; default returned. When env

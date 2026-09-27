@@ -4,7 +4,7 @@
 //!
 //! The harness mounts `mcp_handler` WITHOUT the OAuth middleware, so an HTTP
 //! call here carries no JWT and `mcp_handler` falls back to owner = operator.
-//! Over HTTP the operator key never signs a memory, so inline participate
+//! Over HTTP the operator key never signs a memory, so inline anchored
 //! delivery exists only on the single-tenant stdio transport.
 //!
 //! Scenarios:
@@ -12,12 +12,12 @@
 //! 1. `happy_path` — `#[ignore]` sentinel; the real success path needs an
 //!    arlocal + solana-test-validator harness. The failure tests below cover
 //!    the same code paths in their failure direction.
-//! 2. `stdio_participate_demotes_on_refetch_failure` — induced Arweave
+//! 2. `stdio_anchored_demotes_on_refetch_failure` — induced Arweave
 //!    refetch failure on the stdio inline path (the agent signs its own
 //!    memory). The row is demoted to `local`, the typed `-32011` error names
 //!    the stage, and no cost row is written.
-//! 3. `x402_participate_without_jwt_is_refused_before_chain_write` — an
-//!    HTTP participate call without a JWT (valid x402 proof) is refused
+//! 3. `x402_anchored_without_jwt_is_refused_before_chain_write` — an
+//!    HTTP anchored call without a JWT (valid x402 proof) is refused
 //!    before any chain write: no operator signature, no row, and the x402
 //!    nonce stays reusable.
 //! 4. `quota_exceeded_x402_short_circuits_before_chain_write` — a payment
@@ -28,7 +28,7 @@
 mod delivery_harness;
 
 use delivery_harness::{
-    build_state_and_router_x402, call_sign_memory_participate_x402, MockArweave, MockSolana,
+    build_state_and_router_x402, call_sign_memory_anchored_x402, MockArweave, MockSolana,
 };
 
 use std::time::Duration;
@@ -55,14 +55,14 @@ async fn happy_path() {
     // the `#[ignore]` without restructuring.
 }
 
-// ── 2. Stdio inline participate: demotion on refetch failure ────────────────
+// ── 2. Stdio inline anchored: demotion on refetch failure ────────────────
 
 /// On stdio the operator key is the local agent's own identity, so inline
-/// participate is legitimate. Anchor PUT succeeds; GET returns 404 → the
+/// anchored is legitimate. Anchor PUT succeeds; GET returns 404 → the
 /// refetch budget exhausts and the delivery check exits at `refetch`. The
 /// row must be demoted to `local` and no cost row written.
 #[tokio::test]
-async fn stdio_participate_demotes_on_refetch_failure() {
+async fn stdio_anchored_demotes_on_refetch_failure() {
     let arweave = MockArweave::read_fails("AR_TX_STDIO");
     arweave.install();
     let solana =
@@ -84,7 +84,7 @@ async fn stdio_participate_demotes_on_refetch_failure() {
         "method": "tools/call",
         "params": {
             "name": "mnemonic_sign_memory",
-            "arguments": {"content": "hello-stdio", "mode": "participate"},
+            "arguments": {"content": "hello-stdio", "mode": "anchored"},
         },
     }))
     .expect("request");
@@ -134,7 +134,7 @@ async fn stdio_participate_demotes_on_refetch_failure() {
     assert_eq!(costs_count, 0, "demoted writes must not record a cost row");
 }
 
-// ── 3. HTTP participate without a JWT: refused before any chain write ───────
+// ── 3. HTTP anchored without a JWT: refused before any chain write ───────
 
 /// Before the transport guard this call reached inline operator signing
 /// (Arweave upload + Solana memo under the operator key). Now `sign_memory`
@@ -143,7 +143,7 @@ async fn stdio_participate_demotes_on_refetch_failure() {
 /// nonce (a failed call releases its `claim_x402_nonce` reservation), so the
 /// payment proof stays reusable for a client-signed retry.
 #[tokio::test]
-async fn x402_participate_without_jwt_is_refused_before_chain_write() {
+async fn x402_anchored_without_jwt_is_refused_before_chain_write() {
     let arweave = MockArweave::read_fails("AR_TX_X402");
     let post_tx_mock = arweave.install();
     let solana =
@@ -159,7 +159,7 @@ async fn x402_participate_without_jwt_is_refused_before_chain_write() {
         USDC_MINT,
     );
 
-    let (status, envelope) = call_sign_memory_participate_x402(&app, TX_SIG, "hello-x402").await;
+    let (status, envelope) = call_sign_memory_anchored_x402(&app, TX_SIG, "hello-x402").await;
     assert_eq!(status, StatusCode::OK);
     let err = envelope["error"]
         .as_object()
@@ -229,7 +229,7 @@ async fn quota_exceeded_x402_short_circuits_before_chain_write() {
     }
     assert!(state.refunds_by_subject.is_over(&subject));
 
-    let (status, env) = call_sign_memory_participate_x402(&app, TX_SIG, "quota-bump-final").await;
+    let (status, env) = call_sign_memory_anchored_x402(&app, TX_SIG, "quota-bump-final").await;
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
     let err = env["error"].as_object().expect("error");
     assert_eq!(err["code"], -32011);

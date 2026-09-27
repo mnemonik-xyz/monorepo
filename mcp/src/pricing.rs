@@ -16,8 +16,8 @@ use std::sync::{
 
 // ── Status ────────────────────────────────────────────────────────────────────
 
-/// Where the quoted `participate` price comes from. Surfaced in the
-/// `mnemonic_whoami` envelope as `participate_cost.pricing_status` so a
+/// Where the quoted `anchored` price comes from. Surfaced in the
+/// `mnemonic_whoami` envelope as `anchored_cost.pricing_status` so a
 /// client can tell "free" apart from "the price feed is down" (issue #165).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]

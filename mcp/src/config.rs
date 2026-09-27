@@ -184,7 +184,7 @@ pub struct Config {
 
     // ── Delivery guarantee (modes-user-choice T3) ───────────────────────────
     //
-    // Wall-clock budget + outcome-based DoS guard for the participate
+    // Wall-clock budget + outcome-based DoS guard for the anchored
     // delivery confirmation (Arweave re-fetch → verify_cose → in-process
     // recall). All four knobs are operator-tunable env vars so the
     // production sweet-spot can be found empirically without a redeploy of
@@ -198,7 +198,7 @@ pub struct Config {
     pub delivery_refetch_timeout_secs: u64,
     /// Quota threshold for the outcome-based DoS guard: when an
     /// `api_key_hash` accumulates this many delivery-failure demotions
-    /// within `delivery_quota_window_secs`, subsequent `participate`
+    /// within `delivery_quota_window_secs`, subsequent `anchored`
     /// requests from the same subject short-circuit with `-32011
     /// DeliveryQuotaExceeded` BEFORE any Arweave/Solana write. Keyed on
     /// `api_key_hash`, not `owner_pubkey` — Ed25519 keys rotate for free
@@ -217,7 +217,7 @@ pub struct Config {
     pub delivery_quota_evict_interval_secs: u64,
 
     // ── Free daily quota for anchored writes ────────────────────────────────
-    /// Free `participate` (on-chain anchored) writes per Google account per
+    /// Free `anchored` (on-chain anchored) writes per Google account per
     /// UTC day, before payment is required. Only a signer whose key is
     /// linked to a Google account gets free anchors; all keys linked to one
     /// account share this quota. Applies only over HTTP with

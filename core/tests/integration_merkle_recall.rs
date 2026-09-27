@@ -37,7 +37,7 @@ fn seed(store: &SqliteStore, owner: &str, id: &str, content_hash: &str) {
             owner, // signer == owner (self-sovereign, post Wave 3)
             owner,
             "2026-01-01T00:00:00Z",
-            WriteMode::Participate,
+            WriteMode::Anchored,
             Visibility::Public,
             &[0.1, 0.2],
         )

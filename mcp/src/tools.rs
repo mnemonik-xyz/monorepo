@@ -71,7 +71,7 @@ pub fn anchor_links(arweave: &ArweaveClient, solana_tx: &str, arweave_tx: &str) 
 /// Round-2 review (security-auditor major): keeping these two dimensions
 /// distinct lets the routing rule in `sign_memory` say "**explicit local
 /// always goes inline**" without bringing the envelope into the predicate
-/// — the envelope's `supports_participate` check was a workaround for the
+/// — the envelope's `supports_anchored` check was a workaround for the
 /// missing explicit-vs-fallback distinction and silently broke scenario
 /// (c) (explicit `mode: "local"` on a local-only deploy went to the
 /// deferred branch instead of the free inline path the user-spec
@@ -80,7 +80,7 @@ pub fn anchor_links(arweave: &ArweaveClient, solana_tx: &str, arweave_tx: &str) 
 pub struct ResolvedMode {
     pub write_mode: WriteMode,
     /// True when the caller sent an explicit `"mode": "local"` /
-    /// `"mode": "participate"` field. False when the caller omitted the
+    /// `"mode": "anchored"` field. False when the caller omitted the
     /// field and the resolver applied env-var fallback.
     pub explicit: bool,
 }
@@ -114,9 +114,9 @@ impl ResolvedMode {
 ///
 /// Only [`Transport::Stdio`] is single-tenant: there the operator keypair
 /// IS the local agent's own identity (OS keychain via `identity::ensure_lazy`
-/// or `MNEMONIC_KEYPAIR_PATH`), so an inline participate write is the agent
+/// or `MNEMONIC_KEYPAIR_PATH`), so an inline anchored write is the agent
 /// signing its own memory. On [`Transport::Http`] the operator key serves
-/// many tenants and must never produce a memory signature — participate
+/// many tenants and must never produce a memory signature — anchored
 /// writes are always client-signed via the deferred path, and a call
 /// without a JWT can never reach inline operator signing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -145,9 +145,9 @@ impl Transport {
 /// | Input             | Output                                                        |
 /// |-------------------|---------------------------------------------------------------|
 /// | `None` (absent)   | env-var fallback: `local` iff `env_storage_mode == "local"`,  |
-/// |                   | else `Participate` (marked `explicit = false`)                |
+/// |                   | else `Anchored` (marked `explicit = false`)                |
 /// | `"local"`         | `WriteMode::Local` (`explicit = true`)                        |
-/// | `"participate"`   | `WriteMode::Participate` (`explicit = true`)                  |
+/// | `"anchored"`   | `WriteMode::Anchored` (`explicit = true`)                  |
 /// | anything else     | `Err(invalid_params("mode", received_verbatim))`              |
 ///
 /// "Anything else" covers: JSON `null`, non-string types (integer, array,
@@ -171,7 +171,7 @@ pub fn resolve_write_mode(
             if env_storage_mode == "local" {
                 Ok(ResolvedMode::fallback(WriteMode::Local))
             } else {
-                Ok(ResolvedMode::fallback(WriteMode::Participate))
+                Ok(ResolvedMode::fallback(WriteMode::Anchored))
             }
         }
         Some(serde_json::Value::String(s)) => match WriteMode::from_str_strict(s) {
@@ -201,13 +201,13 @@ pub fn resolve_write_mode(
 /// | Input                                            | Output                                           |
 /// |--------------------------------------------------|--------------------------------------------------|
 /// | absent                                           | `Visibility::Private`                            |
-/// | `"private"` / `"public"` AND mode = participate  | parsed variant                                   |
+/// | `"private"` / `"public"` AND mode = anchored  | parsed variant                                   |
 /// | any present value AND mode = local               | `Err(invalid_params("visibility", ...))` (AC14)  |
-/// | non-string / non-canonical (under participate)   | `Err(invalid_params("visibility", received))`    |
+/// | non-string / non-canonical (under anchored)   | `Err(invalid_params("visibility", received))`    |
 ///
 /// The local-mode rejection fires for ANY present `visibility` value
 /// (including the literal `"private"`), not only `"public"`. Visibility is a
-/// participate-only concept; allowing `"private"` on local writes would leak
+/// anchored-only concept; allowing `"private"` on local writes would leak
 /// dead metadata into a column the row never consults.
 ///
 /// Pure function — no I/O, no globals.
@@ -236,18 +236,18 @@ pub fn resolve_visibility(
     }
 }
 
-/// Resolve the per-request `allow_fallback_to_participate` field
+/// Resolve the per-request `allow_fallback_to_anchored` field
 /// (Decision 4 — agent-native-distribution soft-fall opt-in).
 ///
 /// Strict bool. Absent → `false`. Non-bool returns `invalid_params` with the
 /// verbatim received value echoed back so a misbehaving client can diff
 /// against its own outgoing payload.
 pub fn resolve_allow_fallback(args: &serde_json::Value) -> Result<bool, JsonRpcError> {
-    let raw = args.get("allow_fallback_to_participate");
+    let raw = args.get("allow_fallback_to_anchored");
     match raw {
         None => Ok(false),
         Some(serde_json::Value::Bool(b)) => Ok(*b),
-        Some(v) => Err(invalid_params("allow_fallback_to_participate", v)),
+        Some(v) => Err(invalid_params("allow_fallback_to_anchored", v)),
     }
 }
 
@@ -298,8 +298,8 @@ impl std::fmt::Display for ToolError {
 /// Tool 1: whoami (sync — DB only)
 ///
 /// T2 extension: returns the discoverability envelope (`supported_modes`,
-/// `default_mode`, `participate_cost`) alongside the existing fields so
-/// clients can choose `local` vs `participate` BEFORE attempting to write.
+/// `default_mode`, `anchored_cost`) alongside the existing fields so
+/// clients can choose `local` vs `anchored` BEFORE attempting to write.
 /// The legacy `storage_mode` field is kept verbatim for pre-envelope clients
 /// (chrome-extension Cloud tier still reads it).
 pub fn whoami(
@@ -311,7 +311,7 @@ pub fn whoami(
     let pubkey = keypair.pubkey_base58();
     let count = store.count(&pubkey).unwrap_or(0);
     // Serialize the envelope through serde_json so the `null` rendering of
-    // `participate_cost: Option<ParticipateCost>` and the static `&'static
+    // `anchored_cost: Option<AnchoredCost>` and the static `&'static
     // str` arrays in `supported_modes` come out byte-identical to the
     // spec'd wire shape (no manual JSON construction drift).
     let envelope_value = serde_json::to_value(envelope).unwrap_or(serde_json::Value::Null);
@@ -324,7 +324,7 @@ pub fn whoami(
         "storage_mode": storage_mode,
     });
     // Merge envelope keys (`supported_modes`, `default_mode`,
-    // `participate_cost`) into the response. Done as a post-merge rather
+    // `anchored_cost`) into the response. Done as a post-merge rather
     // than inline so the field order in the json! macro stays stable for
     // the golden fixture.
     if let Some(map) = out.as_object_mut() {
@@ -338,7 +338,7 @@ pub fn whoami(
 /// Tool 2: sign_memory — branches on `jwt_sub`, the resolved write mode and
 /// the `transport`.
 ///
-/// **HTTP/JWT participate (or `mode` absent)** (Decision 12):
+/// **HTTP/JWT anchored (or `mode` absent)** (Decision 12):
 ///   embed content → compress → build canonical-CBOR over the unsigned
 ///   artifact → blake3-hash → park in `PendingBundles` and return
 ///   `{status: "awaiting_signature", approve_url, correlation_id, expires_in: 300}`.
@@ -351,7 +351,7 @@ pub fn whoami(
 ///   signature, no client signature, no keychain prompt.
 ///
 /// **Stdio path** (`jwt_sub.is_none()`, `Transport::Stdio`):
-///   the inline pipeline: JSON → canonical CBOR → blake3 → (participate
+///   the inline pipeline: JSON → canonical CBOR → blake3 → (anchored
 ///   only) COSE_Sign1 → Arweave + Solana, or synthetic tx IDs (local) →
 ///   SQLite. The keypair is the local agent's own identity.
 ///
@@ -381,7 +381,7 @@ pub async fn sign_memory(
     // Task 5 — agent-native-distribution Decision 4. The soft-fall router
     // sits BETWEEN this entrypoint and the failing inline path. Set to
     // `true` only when the caller has explicitly opted in via
-    // `allow_fallback_to_participate`. The hosted_endpoint + hosted_client
+    // `allow_fallback_to_anchored`. The hosted_endpoint + hosted_client
     // come from `McpState`; an empty `hosted_endpoint` disables soft-fall
     // (test fixture sentinel).
     allow_fallback: bool,
@@ -390,20 +390,20 @@ pub async fn sign_memory(
     args: &serde_json::Value,
 ) -> Result<serde_json::Value, ToolError> {
     // T2 — UnsupportedMode check fires BEFORE the JWT-deferred branch so a
-    // browser client asking for `participate` against a local-only deploy
+    // browser client asking for `anchored` against a local-only deploy
     // gets the typed error even when it would otherwise enter the
     // deferred-signing path. The user explicitly asked to anchor on-chain;
     // the server cannot fulfil that intent regardless of whether the
     // signing path is server-side or browser-side.
-    if resolved.write_mode == WriteMode::Participate && !envelope.supports_participate() {
+    if resolved.write_mode == WriteMode::Anchored && !envelope.supports_anchored() {
         return Err(ToolError::TypedRpc(unsupported_mode(
-            "participate",
+            "anchored",
             &envelope.supported_modes,
         )));
     }
     // Routing rule — who signs a memory:
     //
-    // 1. Only a memory anchored on-chain (`participate`) carries a COSE
+    // 1. Only a memory anchored on-chain (`anchored`) carries a COSE
     //    signature. A local write stores the blake3 hash of the canonical
     //    CBOR and signs NOTHING, so it needs no secret and never triggers an
     //    OS keychain prompt — for the operator AND for a remote JWT user.
@@ -418,14 +418,14 @@ pub async fn sign_memory(
     //   - JWT + explicit `mode: "local"` → inline hash-only row owned by the
     //     JWT subject (`owner_pubkey`); `signer_pubkey` column = owner, the
     //     same shape as the operator's own local rows. No signature.
-    //   - JWT + participate → deferred client signing (keychain prompt on the
+    //   - JWT + anchored → deferred client signing (keychain prompt on the
     //     client). The operator never signs it.
     //   - JWT + `mode` absent → deferred, even when it resolves to `Local`
     //     via the env fallback. The shipped SDK (`signMemory`) and the
     //     browser extension (`signRemote`) omit `mode` and always expect a
     //     `correlation_id`; the sign-callback persists a local bundle with
     //     synthetic ids, still free.
-    //   - no JWT (stdio) → inline; participate additionally requires
+    //   - no JWT (stdio) → inline; anchored additionally requires
     //     `Transport::Stdio`, so an unauthenticated HTTP call can never reach
     //     operator signing.
     if let Some(sub) = jwt_sub {
@@ -447,14 +447,14 @@ pub async fn sign_memory(
     // caller at all) the server NEVER produces a memory signature — not for
     // paid writes, not for free-quota writes, not for the operator's own
     // subject. The only inline path left for a JWT caller is an explicit
-    // local write, which stores a hash and signs nothing. Participate writes
+    // local write, which stores a hash and signs nothing. Anchored writes
     // over HTTP are always client-signed via the deferred path above.
-    if resolved.write_mode == WriteMode::Participate
+    if resolved.write_mode == WriteMode::Anchored
         && (jwt_sub.is_some() || !transport.allows_operator_signing())
     {
         return Err(ToolError::Other(anyhow::anyhow!(
             "refusing server-side memory signing on the hosted transport; \
-             participate writes must be client-signed"
+             anchored writes must be client-signed"
         )));
     }
     let inline_result = sign_memory_inline(
@@ -480,7 +480,7 @@ pub async fn sign_memory(
         Ok(v) => Ok(v),
         Err(e) => {
             // Decision 4 — soft-fall opt-in. The router runs ONLY if all of:
-            //   (1) caller passed `allow_fallback_to_participate=true`
+            //   (1) caller passed `allow_fallback_to_anchored=true`
             //   (2) the local error is in the soft-fallable catalogue
             //       (EmbedderInvalid / LocalStorageBusy / IdentityBootstrapFailed)
             //   (3) a non-empty hosted endpoint is configured
@@ -501,7 +501,7 @@ pub async fn sign_memory(
                 return Err(e);
             };
             // Proxy the same arguments through the hosted endpoint with
-            // `mode` swapped to `participate`. Visibility resolution runs
+            // `mode` swapped to `anchored`. Visibility resolution runs
             // AGAIN on the hosted side (Decision 4 — the public-write
             // confirmation gate from Task 4 still fires). On hosted
             // unavailability we return `-32011 HostedUnavailable` so the
@@ -510,9 +510,9 @@ pub async fn sign_memory(
             tracing::warn!(
                 target: "mnemonic_mcp::tools",
                 reason = reason.as_str(),
-                "sign_memory: soft-fall escalating to participate via hosted endpoint"
+                "sign_memory: soft-fall escalating to anchored via hosted endpoint"
             );
-            proxy_participate(hosted_client, hosted_endpoint, args, jwt_sub, reason).await
+            proxy_anchored(hosted_client, hosted_endpoint, args, jwt_sub, reason).await
         }
     }
 }
@@ -598,7 +598,7 @@ fn scrub_reqwest_error(e: &reqwest::Error) -> String {
 
 /// Proxy the caller's `sign_memory` arguments to the resolved hosted MCP
 /// endpoint as a JSON-RPC `tools/call` for `mnemonic_sign_memory` with
-/// `mode` rewritten to `"participate"`. Reuses the caller's `jwt_sub` for
+/// `mode` rewritten to `"anchored"`. Reuses the caller's `jwt_sub` for
 /// Bearer auth when present; if no token is cached the hosted side will
 /// return `-32001 unauthorized` and the agent must re-OAuth (Decision 7).
 ///
@@ -610,7 +610,7 @@ fn scrub_reqwest_error(e: &reqwest::Error) -> String {
 /// returned a JSON-RPC error (e.g. `-32095 PublicWriteRequiresConfirmation`
 /// because the caller didn't supply `public_write_confirmation`), that
 /// error is propagated verbatim — Decision 4 + 5b interaction.
-async fn proxy_participate(
+async fn proxy_anchored(
     client: &reqwest::Client,
     endpoint: &str,
     args: &serde_json::Value,
@@ -618,7 +618,7 @@ async fn proxy_participate(
     reason: EscalationReason,
 ) -> Result<serde_json::Value, ToolError> {
     // Build the re-dispatch arguments: clone the caller's args, override
-    // `mode` to participate. `allow_fallback_to_participate` is dropped to
+    // `mode` to anchored. `allow_fallback_to_anchored` is dropped to
     // prevent recursive escalation if the hosted side itself reports a
     // local failure (mock-server bug, partial deploy). Visibility flows
     // through verbatim so the hosted public-write gate sees the same
@@ -627,20 +627,20 @@ async fn proxy_participate(
     if let Some(obj) = proxied_args.as_object_mut() {
         obj.insert(
             "mode".to_string(),
-            serde_json::Value::String("participate".to_string()),
+            serde_json::Value::String("anchored".to_string()),
         );
-        obj.remove("allow_fallback_to_participate");
+        obj.remove("allow_fallback_to_anchored");
     }
 
     // Decision 4 + 5b — post-escalation visibility re-resolution.
     //
     // The local request resolved with `mode=local + visibility=public +
-    // allow_fallback_to_participate=true`; the dispatcher boundary at
+    // allow_fallback_to_anchored=true`; the dispatcher boundary at
     // `resolve_visibility` rejects local+public via AC14 before any of
     // this code runs, so reaching this branch implies an internal caller
     // that already pre-resolved a `Visibility::Public` value (or a future
     // refactor that admits public on the local path). EITHER way, the
-    // soft-fall would now effectively land as a participate write —
+    // soft-fall would now effectively land as an anchored write —
     // exactly the path Decision 5b's HMAC-bound `public_write_confirmation`
     // gate exists to authorise. The hosted side will fire the gate AGAIN
     // (defence-in-depth, see test `opt_in_escalation_no_confirmation_token`),
@@ -860,7 +860,7 @@ async fn proxy_participate(
         "escalated".to_string(),
         serde_json::json!({
             "from": "local",
-            "to": "participate",
+            "to": "anchored",
             "reason": reason.as_str(),
         }),
     );
@@ -1085,7 +1085,7 @@ pub async fn check_pending(
 ///   signed; the `signer_pubkey` column and the artifact `producer` both
 ///   name the owner (the operator on stdio, the JWT subject on HTTP), so
 ///   `verify` rebuilds the same canonical CBOR later.
-/// - `WriteMode::Participate`: COSE_Sign1 with the operator keypair. Legal
+/// - `WriteMode::Anchored`: COSE_Sign1 with the operator keypair. Legal
 ///   only when `transport` is `Stdio` AND `owner_pubkey` is the operator
 ///   pubkey — i.e. the local agent signs its own memory.
 ///
@@ -1094,7 +1094,7 @@ pub async fn check_pending(
 ///
 /// - The `write_mode` parameter replaces `storage_mode` as the routing
 ///   decision. `WriteMode::Local` → synthetic-id no-anchor path
-///   regardless of env-var. `WriteMode::Participate` → real Arweave +
+///   regardless of env-var. `WriteMode::Anchored` → real Arweave +
 ///   Solana writes regardless of env-var (the paywall gate in
 ///   `mcp_handler` has already ensured the deploy supports it).
 /// - `storage_mode` is retained ONLY for the legacy whoami-echo field in
@@ -1104,9 +1104,9 @@ pub async fn check_pending(
 ///   maps `None` (no `mode` field) to env-var fallback, producing the same
 ///   `WriteMode` value the env-var would have selected.
 ///
-/// T3 changes (delivery guarantee on participate):
+/// T3 changes (delivery guarantee on anchored):
 ///
-/// - After `solana.write_memo` returns, the participate path re-fetches the
+/// - After `solana.write_memo` returns, the anchored path re-fetches the
 ///   COSE bytes from Arweave with an exponential-backoff loop capped by
 ///   `delivery_refetch_timeout`, then runs `verify_cose` over the re-fetched
 ///   bytes, then runs an in-process recall against `content_hash` and
@@ -1116,7 +1116,7 @@ pub async fn check_pending(
 ///   and the function returns `ToolError::TypedRpc(delivery_not_confirmed)`.
 ///   `mcp_handler` consumes the typed error to drive refund + counter
 ///   bookkeeping (api_key is only available at the dispatcher boundary).
-/// - On success the row is persisted with `WriteMode::Participate` and the
+/// - On success the row is persisted with `WriteMode::Anchored` and the
 ///   success envelope gains `delivery_receipt { arweave_tx, solana_tx,
 ///   recall_verified_at }`. `recall_verified_at` is operator-attested per
 ///   the tech-spec's trust-model note; the cryptographically verifiable
@@ -1127,7 +1127,7 @@ pub async fn check_pending(
 ///   SQLite mutex for save_attestation(Local) and drops it BEFORE returning
 ///   the typed error. No `.await` is held while either lock is in scope.
 ///
-/// The participate-on-local-only short-circuit lives in `sign_memory` (the
+/// The anchored-on-local-only short-circuit lives in `sign_memory` (the
 /// public entry point) — fires before deferred-vs-inline branching so the
 /// user gets the typed error regardless of path. `sign_memory_inline` does
 /// NOT take the envelope.
@@ -1149,23 +1149,23 @@ async fn sign_memory_inline(
     visibility: Visibility,
     delivery_refetch_timeout: Duration,
 ) -> Result<serde_json::Value, ToolError> {
-    // Participate-only invariants (defense in depth). Only the participate
+    // Anchored-only invariants (defense in depth). Only the anchored
     // arm below produces a COSE_Sign1, and it signs with the operator
     // `keypair`. That is legitimate only when the memory is authored BY the
     // operator (`owner_pubkey == operator pubkey`) AND the call came over
     // the single-tenant stdio transport, where the operator key is the
     // agent's own identity. The dispatcher in `sign_memory` already routes
-    // every hosted participate write to client signing; these guards make
+    // every hosted anchored write to client signing; these guards make
     // sure no future caller can smuggle a remote owner, or an
     // unauthenticated HTTP call, into the operator-signed path (custodial
     // forgery). Checked before embedding so a refused call costs nothing.
     // Local writes sign nothing, so they need neither check.
-    if write_mode == WriteMode::Participate {
+    if write_mode == WriteMode::Anchored {
         let operator = keypair.pubkey_base58();
         if !transport.allows_operator_signing() {
             return Err(ToolError::Other(anyhow::anyhow!(
                 "refusing to operator-sign a memory on the {transport:?} transport; \
-                 participate writes over HTTP must be client-signed via the deferred path"
+                 anchored writes over HTTP must be client-signed via the deferred path"
             )));
         }
         if owner_pubkey != operator {
@@ -1186,7 +1186,7 @@ async fn sign_memory_inline(
     // `-32098 EmbedderInvalid` so the agent can branch on the structured
     // error rather than parsing a free-text message. `fallback_available`
     // is `true` — the caller can retry with
-    // `allow_fallback_to_participate=true` to proxy through the hosted
+    // `allow_fallback_to_anchored=true` to proxy through the hosted
     // endpoint (Decision 4).
     let embedding = embedder.embed(content);
     if embedding.is_empty() {
@@ -1204,14 +1204,14 @@ async fn sign_memory_inline(
 
     // 3. Build artifact JSON for CBOR canonicalization. `producer` names the
     //    OWNER: `did:sol:<owner_pubkey>`. For operator-owned rows (stdio,
-    //    and every participate write — enforced above) this is byte-identical
+    //    and every anchored write — enforced above) this is byte-identical
     //    to `keypair.did_sol()`. For a hosted explicit-local row it is the
     //    JWT subject's DID, the same convention as `sign_memory_deferred`.
     //    `rebuild_content_hash` rebuilds it as `did:sol:<signer_pubkey>`,
     //    and step 6a stores `signer_pubkey = owner_pubkey`, so `verify` of
     //    a local row reproduces this exact hash.
     let owner_did = format!("did:sol:{owner_pubkey}");
-    let artifact = serde_json::json!({
+    let mut artifact = serde_json::json!({
         "artifact_id": attestation_id,
         "type": "memory",
         "schema_version": 1,
@@ -1231,9 +1231,20 @@ async fn sign_memory_inline(
     });
 
     // 4. Canonical CBOR → blake3. The COSE_Sign1 over it is only produced
-    //    for participate writes: local rows persist the hash, never the
+    //    for anchored writes: local rows persist the hash, never the
     //    signature, so a local write needs no secret and never triggers an
     //    OS keychain unlock prompt.
+    // work/arweave-as-source-of-truth D-1: an ANCHORED artifact must carry
+    // everything a restore needs, because Arweave is then the only durable
+    // copy. A LOCAL artifact deliberately keeps the pre-existing field set:
+    // local rows hold no signature and are verified by reconstruction from
+    // columns (`rebuild_content_hash`), whose field list is hardcoded — adding
+    // fields unconditionally would break verification of every existing row.
+    // A local index is never restored from Arweave, so it loses nothing.
+    if write_mode == WriteMode::Anchored {
+        add_anchored_restore_fields(&mut artifact, visibility, compressor.seed(), &embedding);
+    }
+
     let canonical = to_canonical_cbor(&artifact, &schema::MEMORY_V1)
         .map_err(|e| anyhow::anyhow!("canonical CBOR encoding failed: {e}"))?;
     let content_hash = blake3_hash(&canonical);
@@ -1248,7 +1259,7 @@ async fn sign_memory_inline(
             let local_sol = format!("local:{}", &content_hash[..16]);
             (local_sol, local_ar)
         }
-        WriteMode::Participate => {
+        WriteMode::Anchored => {
             // Arweave: store COSE_Sign1 bytes (not raw JSON). `Producer` /
             // `Created-At` tags mirror fields already public inside the
             // payload; they make the item aggregatable via a single gateway
@@ -1292,7 +1303,7 @@ async fn sign_memory_inline(
     //       (INSERT OR REPLACE) so the embed + signature aren't wasted
     //       even though the chain anchor isn't proved retrievable.
     //
-    // Owner decision D-8 (2026-09-27): an anchored participate write is
+    // Owner decision D-8 (2026-09-27): an anchored anchored write is
     // plain text on Arweave, so it is stored and reported as `public` with
     // `plaintext_on_arweave = true`, whatever visibility was requested.
     // Sealed (encrypted) writes are planned. `save_attestation` applies the
@@ -1309,11 +1320,11 @@ async fn sign_memory_inline(
         // Visibility is threaded from the resolver in `handle_tool_call`
         // (Task 4 / Decision 3+5). For `write_mode == Local` the resolver
         // has already rejected any explicit visibility request via AC14,
-        // so we expect `Visibility::Private` here; for participate writes
+        // so we expect `Visibility::Private` here; for anchored writes
         // the resolved value (`Private` default or `Public` after the
         // public-write ceremony) flows through verbatim.
         //
-        // `signer_pubkey` column = `owner_pubkey`. For a participate row the
+        // `signer_pubkey` column = `owner_pubkey`. For an anchored row the
         // guard at the top forces owner == operator, so this is the key that
         // signed. For a local row nothing signs; the column names the owner,
         // exactly like the operator's own local rows always did.
@@ -1333,7 +1344,7 @@ async fn sign_memory_inline(
         )?;
     }
 
-    // 6b. Delivery confirmation — Participate ONLY. T3 (modes-user-choice).
+    // 6b. Delivery confirmation — Anchored ONLY. T3 (modes-user-choice).
     //
     // We just successfully wrote to Arweave + Solana AND persisted the row.
     // Before claiming "delivered" we must prove the chain bytes are
@@ -1351,7 +1362,7 @@ async fn sign_memory_inline(
     // `confirm_delivery_or_demote` and is shared with the deferred-path
     // (`api::sign_callback_handler`). Same primitives, same behaviour,
     // one code path.
-    let recall_verified_at: Option<String> = if write_mode == WriteMode::Participate {
+    let recall_verified_at: Option<String> = if write_mode == WriteMode::Anchored {
         let ctx = DeliveryContext {
             arweave,
             store,
@@ -1382,13 +1393,13 @@ async fn sign_memory_inline(
         None
     };
 
-    // 6c. Cost recording — Participate-success ONLY. A `Local` request
+    // 6c. Cost recording — Anchored-success ONLY. A `Local` request
     // can hit this code path against a `STORAGE_MODE=full +
     // PAYMENT_MODE=x402` server and MUST NOT produce an
     // `attestation_costs` row — that would charge the caller for a free
     // path. Also fires AFTER the delivery check passes (on a demotion we
     // return before reaching here).
-    if write_mode == WriteMode::Participate {
+    if write_mode == WriteMode::Anchored {
         let store = store.lock().unwrap();
         let _ = payment::record_attestation_cost(
             &store,
@@ -1403,15 +1414,15 @@ async fn sign_memory_inline(
     let ratio = compressor.compression_ratio();
     // Envelope identity fields. `signer` and `did_sol` name the OWNER, never
     // the operator on someone else's behalf. For operator-owned rows (stdio,
-    // every participate write) the values are byte-identical to the old
+    // every anchored write) the values are byte-identical to the old
     // `keypair` values. For a hosted explicit-local row they name the JWT
     // subject — deriving `did_sol` from the owner keeps the field present
     // with the same type (least disruptive for clients) instead of omitting
     // it. `signature` states what actually signed: `"none"` for a local
-    // hash-only row, `"cose_sign1"` for an anchored participate row.
+    // hash-only row, `"cose_sign1"` for an anchored anchored row.
     let signature = match write_mode {
         WriteMode::Local => "none",
-        WriteMode::Participate => "cose_sign1",
+        WriteMode::Anchored => "cose_sign1",
     };
     let mut out = serde_json::json!({
         "attestation_id": attestation_id,
@@ -1443,7 +1454,7 @@ async fn sign_memory_inline(
         },
     });
 
-    // Participate success envelope addition — T3. `delivery_receipt`
+    // Anchored success envelope addition — T3. `delivery_receipt`
     // documents the delivery proof: the chain tx ids plus the
     // operator-attested timestamp of the successful read-back.
     if let Some(ts) = recall_verified_at {
@@ -1463,7 +1474,7 @@ async fn sign_memory_inline(
     Ok(out)
 }
 
-/// Run the post-anchor delivery-confirmation pipeline for a participate
+/// Run the post-anchor delivery-confirmation pipeline for an anchored
 /// write. Three sequential checks; the first failure short-circuits with
 /// the stage label suitable for the typed error envelope.
 ///
@@ -1641,7 +1652,7 @@ pub struct DeliveryContext<'a> {
 
 /// Outcome of [`confirm_delivery_or_demote`].
 pub enum DeliveryOutcome {
-    /// All three stages passed. Caller persists cost (Participate) and
+    /// All three stages passed. Caller persists cost (Anchored) and
     /// emits the success envelope including `delivery_receipt`.
     Confirmed { recall_verified_at: String },
     /// One of the stages failed. Caller emits the typed `-32011
@@ -1665,7 +1676,7 @@ pub enum DeliveryOutcome {
 /// No mutex is held across the network calls.
 ///
 /// **Pre-condition:** the caller MUST have already persisted the row with
-/// `WriteMode::Participate` BEFORE calling this. The recall stage performs
+/// `WriteMode::Anchored` BEFORE calling this. The recall stage performs
 /// a primary-key existence check; if the row isn't there yet, the helper
 /// will report stage = "recall" and demote (which on a fresh-row scenario
 /// has no row to overwrite, leading to a confusing demotion-of-nothing).
@@ -1694,8 +1705,8 @@ pub async fn confirm_delivery_or_demote(
             {
                 let store = ctx.store.lock().unwrap();
                 // Demoted local rows are always private — `Visibility` is a
-                // participate-only concept (AC14). Even if the original
-                // participate write had `visibility=public`, demotion strips
+                // anchored-only concept (AC14). Even if the original
+                // anchored write had `visibility=public`, demotion strips
                 // it: a local row can't be anonymously discoverable.
                 store.save_attestation(
                     ctx.attestation_id,
@@ -1729,7 +1740,7 @@ pub async fn confirm_delivery_or_demote(
 ///
 /// Routes by the row's stored `write_mode` (Decision 9 / T4), not by env-var:
 /// - `WriteMode::Local`  → `verify_local` (SQLite lookup + blake3 recompute).
-/// - `WriteMode::Participate` → fetch COSE bytes from Arweave → COSE verify →
+/// - `WriteMode::Anchored` → fetch COSE bytes from Arweave → COSE verify →
 ///   compare hash with the Solana anchor (`verify_cose` / `verify_legacy_json`
 ///   fallback for v1 rows).
 ///
@@ -1799,7 +1810,7 @@ pub async fn verify(
             compressor,
         )
         .map(with_flag),
-        Some(WriteMode::Participate) => verify_participate(solana, arweave, solana_tx, arweave_tx)
+        Some(WriteMode::Anchored) => verify_anchored(solana, arweave, solana_tx, arweave_tx)
             .await
             .map(with_flag),
         // Tenant isolation: a row owned by a different tenant returns
@@ -1814,11 +1825,11 @@ pub async fn verify(
     }
 }
 
-/// Participate-mode verification: fetch COSE bytes from Arweave, verify the
+/// Anchored-mode verification: fetch COSE bytes from Arweave, verify the
 /// COSE signature, compare blake3 hash against the Solana anchor. Extracted
 /// from the pre-T4 env-var branch so the routing decision in `verify`
 /// remains a flat `match`.
-async fn verify_participate(
+async fn verify_anchored(
     solana: &SolanaClient,
     arweave: &ArweaveClient,
     solana_tx: Option<&str>,
@@ -2094,6 +2105,60 @@ fn rebuild_content_hash(
     to_canonical_cbor(&artifact, &schema::MEMORY_V1)
         .ok()
         .map(|cbor| blake3_hash(&cbor))
+}
+
+/// Add the fields an anchored artifact needs so that its Arweave copy alone is
+/// enough to restore a recall row (work/arweave-as-source-of-truth, D-1).
+///
+/// Called only for [`WriteMode::Anchored`]. Three additions:
+///
+/// - `visibility` and `anchor` at the top level, so a restore recovers them from
+///   the signed payload instead of from a database column that no longer exists.
+/// - `metadata.turbo_seed`, without which a third party cannot reproduce the
+///   TurboQuant dequantization and the compressed embedding is useless to
+///   anyone but this operator.
+/// - `metadata.embedding_f32`, the exact vector, **only for a public memory**.
+///   An embedding inverts to an approximation of its source text, so writing one
+///   beside private content on permanent public storage would leak the
+///   plaintext. Sealed mode (`work/sealed-memories/`) carries it inside the
+///   ciphertext instead, which is why the private case is a deliberate omission
+///   and not an oversight.
+///
+/// Every field is OPTIONAL in `MEMORY_V1`, and `to_canonical_cbor` skips absent
+/// fields, so a local artifact that never calls this hashes exactly as it did
+/// before these fields existed.
+fn add_anchored_restore_fields(
+    artifact: &mut serde_json::Value,
+    visibility: Visibility,
+    turbo_seed: u64,
+    embedding: &[f32],
+) {
+    let obj = artifact
+        .as_object_mut()
+        .expect("artifact was built as a JSON object");
+    obj.insert(
+        "visibility".to_string(),
+        serde_json::json!(visibility.as_str()),
+    );
+    obj.insert(
+        "anchor".to_string(),
+        serde_json::json!(mnemonic_core::storage::mode::ANCHOR_ARWEAVE),
+    );
+
+    let meta = obj
+        .get_mut("metadata")
+        .and_then(|m| m.as_object_mut())
+        .expect("metadata was built as a JSON object");
+    meta.insert("turbo_seed".to_string(), serde_json::json!(turbo_seed));
+    if visibility == Visibility::Public {
+        meta.insert(
+            "embedding_f32".to_string(),
+            serde_json::json!(base64::Engine::encode(
+                &base64::engine::general_purpose::STANDARD,
+                mnemonic_core::rebuild::f32_embedding_to_bytes(embedding),
+            )),
+        );
+    }
 }
 
 /// Tool 4: prove_identity (sync — pure crypto)
@@ -2466,16 +2531,16 @@ mod sign_memory_tests {
     }
 
     #[tokio::test]
-    async fn test_hosted_participate_never_signs_with_server_key() {
+    async fn test_hosted_anchored_never_signs_with_server_key() {
         // Even when the JWT subject IS the operator identity (the one case
-        // that used to be allowed), a participate write over the hosted
+        // that used to be allowed), an anchored write over the hosted
         // transport must go to client signing, never to the server key.
         let (kp, sol, ar, store, emb, comp, pending, hint) = fixtures();
         let operator = LazyKeypair::deferred(kp.pubkey(), || {
             panic!("server key must not be loaded for a hosted memory write")
         });
         let owner = kp.pubkey().to_string();
-        let resolved = resolve_write_mode(Some(&serde_json::json!("participate")), "full").unwrap();
+        let resolved = resolve_write_mode(Some(&serde_json::json!("anchored")), "full").unwrap();
         let (hosted_client, args) = no_softfall();
         let env = Envelope::from_config("full", "none", 0);
         let result = sign_memory(
@@ -2486,7 +2551,7 @@ mod sign_memory_tests {
             &emb,
             &comp,
             &pending,
-            "hosted participate",
+            "hosted anchored",
             &[],
             &hint,
             "full",
@@ -2566,7 +2631,7 @@ mod sign_memory_tests {
         // with a JWT MUST short-circuit to the inline path regardless
         // of deploy variant — both local-only AND full deploys honour
         // the "Личная память бесплатна всегда" invariant uniformly.
-        // Round-1's `envelope.supports_participate()` workaround broke
+        // Round-1's `envelope.supports_anchored()` workaround broke
         // this for local-only deploys.
         let (kp, sol, ar, store, emb, comp, pending, hint) = fixtures();
         let owner = kp.pubkey().to_string();
@@ -2805,12 +2870,12 @@ mod sign_memory_tests {
     }
 
     #[tokio::test]
-    async fn test_jwt_participate_remote_owner_stays_deferred() {
+    async fn test_jwt_anchored_remote_owner_stays_deferred() {
         // Owner requirement 1: an anchored memory is signed by the client.
         let (kp, _sol, _ar, store, _emb, _comp, pending, _hint) = fixtures();
         let (operator, attempts) = watched_operator(kp.pubkey());
         let remote = Keypair::new().pubkey().to_string();
-        let resolved = resolve_write_mode(Some(&serde_json::json!("participate")), "full").unwrap();
+        let resolved = resolve_write_mode(Some(&serde_json::json!("anchored")), "full").unwrap();
         let out = sign_as(
             &operator,
             &store,
@@ -2833,15 +2898,15 @@ mod sign_memory_tests {
     }
 
     #[tokio::test]
-    async fn test_no_path_operator_signs_participate_for_foreign_owner() {
-        // Exhaustive over (jwt_sub, transport, explicit/fallback participate)
+    async fn test_no_path_operator_signs_anchored_for_foreign_owner() {
+        // Exhaustive over (jwt_sub, transport, explicit/fallback anchored)
         // with owner != operator: the operator secret is never read, so no
         // anchored artifact can carry the operator key as COSE kid. Each
         // call either defers to client signing or is refused.
         let (kp, _sol, _ar, store, _emb, _comp, pending, _hint) = fixtures();
         let (operator, attempts) = watched_operator(kp.pubkey());
         let remote = Keypair::new().pubkey().to_string();
-        let explicit = resolve_write_mode(Some(&serde_json::json!("participate")), "full").unwrap();
+        let explicit = resolve_write_mode(Some(&serde_json::json!("anchored")), "full").unwrap();
         let fallback = resolve_write_mode(None, "full").unwrap();
         for jwt in [None, Some(remote.as_str())] {
             for transport in [Transport::Stdio, Transport::Http] {
@@ -2876,12 +2941,12 @@ mod sign_memory_tests {
     #[tokio::test]
     async fn test_http_without_jwt_cannot_reach_operator_signing() {
         // Transport guard: an unauthenticated HTTP call falls back to
-        // owner = operator in `mcp_handler`. Even so, participate must not
+        // owner = operator in `mcp_handler`. Even so, anchored must not
         // reach inline operator signing — only `Transport::Stdio` may.
         let (kp, _sol, _ar, store, _emb, _comp, pending, _hint) = fixtures();
         let (operator, attempts) = watched_operator(kp.pubkey());
         let operator_pk = kp.pubkey().to_string();
-        let resolved = resolve_write_mode(Some(&serde_json::json!("participate")), "full").unwrap();
+        let resolved = resolve_write_mode(Some(&serde_json::json!("anchored")), "full").unwrap();
         let err = sign_as(
             &operator,
             &store,
@@ -2891,7 +2956,7 @@ mod sign_memory_tests {
             Transport::Http,
             resolved,
             "full",
-            "anon participate",
+            "anon anchored",
         )
         .await
         .expect_err("HTTP without JWT must be refused");
@@ -2914,22 +2979,22 @@ mod sign_memory_tests {
             &store,
             &StubEmbedder,
             &comp,
-            "anon participate",
+            "anon anchored",
             &[],
             &hint,
             "full",
             &operator_pk,
             Transport::Http,
-            WriteMode::Participate,
+            WriteMode::Anchored,
             Visibility::Private,
             std::time::Duration::from_secs(1),
         )
         .await
-        .expect_err("inline participate over HTTP must be refused");
+        .expect_err("inline anchored over HTTP must be refused");
         assert!(err.to_string().contains("Http transport"), "{err}");
         assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 0);
 
-        // The same self-owned participate write on stdio DOES reach the
+        // The same self-owned anchored write on stdio DOES reach the
         // signing step (the agent signs its own memory): the watched loader
         // is consulted exactly once and reports the locked keychain.
         let err = sign_as(
@@ -2941,7 +3006,7 @@ mod sign_memory_tests {
             Transport::Stdio,
             resolved,
             "full",
-            "stdio participate",
+            "stdio anchored",
         )
         .await
         .expect_err("watched loader always fails");
@@ -2986,11 +3051,11 @@ mod resolve_write_mode_tests {
     }
 
     #[test]
-    fn none_with_env_full_resolves_to_participate_fallback() {
+    fn none_with_env_full_resolves_to_anchored_fallback() {
         // Legacy compat: pre-T2 clients (chrome-extension Cloud) on a full
-        // deploy fall back to env-var behaviour — Participate.
+        // deploy fall back to env-var behaviour — Anchored.
         let r = resolve_write_mode(None, "full").expect("None+full resolves");
-        assert_eq!(r.write_mode, WriteMode::Participate);
+        assert_eq!(r.write_mode, WriteMode::Anchored);
         assert!(!r.explicit);
     }
 
@@ -3004,13 +3069,13 @@ mod resolve_write_mode_tests {
     }
 
     #[test]
-    fn explicit_participate_string_resolves_to_participate_explicit() {
-        let v = serde_json::json!("participate");
-        let r = resolve_write_mode(Some(&v), "local").expect("explicit participate");
+    fn explicit_anchored_string_resolves_to_anchored_explicit() {
+        let v = serde_json::json!("anchored");
+        let r = resolve_write_mode(Some(&v), "local").expect("explicit anchored");
         // Note: even on a `STORAGE_MODE=local` env, the resolver returns
-        // Participate; rejection happens later in `sign_memory` via the
+        // Anchored; rejection happens later in `sign_memory` via the
         // envelope check. The resolver's job is parse-only.
-        assert_eq!(r.write_mode, WriteMode::Participate);
+        assert_eq!(r.write_mode, WriteMode::Anchored);
         assert!(r.explicit);
     }
 
@@ -3064,7 +3129,7 @@ mod resolve_write_mode_tests {
     }
 
     #[test]
-    fn uppercase_participate_rejects() {
+    fn uppercase_anchored_rejects() {
         let v = serde_json::json!("PARTICIPATE");
         let err = resolve_write_mode(Some(&v), "local").expect_err("PARTICIPATE rejects");
         assert_invalid_params(err, &v);
@@ -3207,5 +3272,83 @@ mod recall_provenance_tests {
         assert!(!text.contains("!["), "markdown image defused");
         // The fake end marker inside the memory does not carry the real boundary.
         assert_eq!(text.matches(&format!("boundary={boundary}")).count(), 2);
+    }
+}
+
+#[cfg(test)]
+mod anchored_restore_fields_tests {
+    use super::*;
+
+    fn base_artifact() -> serde_json::Value {
+        serde_json::json!({
+            "artifact_id": "att-restore",
+            "type": "memory",
+            "schema_version": 1,
+            "content": "restore me",
+            "producer": "did:sol:11111111111111111111111111111111",
+            "created_at": "2026-09-27T12:00:00Z",
+            "tags": [],
+            "metadata": { "embed_provider": "mock", "embed_dim": 4, "turbo_bits": 4 },
+        })
+    }
+
+    fn assert_no_exact_embedding(artifact: &serde_json::Value) {
+        assert!(
+            artifact["metadata"].get("embedding_f32").is_none(),
+            "a private memory must never publish an exact embedding: {:?}",
+            artifact["metadata"]
+        );
+    }
+
+    /// A public anchored memory carries the exact vector, so a restored index is
+    /// lossless rather than coarse. It must round-trip bit-for-bit.
+    #[test]
+    fn public_anchored_artifact_carries_exact_embedding() {
+        let embedding = vec![0.5f32, -0.25, 0.125, 1.0];
+        let mut artifact = base_artifact();
+        add_anchored_restore_fields(&mut artifact, Visibility::Public, 42, &embedding);
+
+        assert_eq!(artifact["visibility"], "public");
+        assert_eq!(artifact["anchor"], "arweave");
+        assert_eq!(artifact["metadata"]["turbo_seed"], 42);
+
+        let b64 = artifact["metadata"]["embedding_f32"]
+            .as_str()
+            .expect("public anchored artifact must carry embedding_f32");
+        let raw = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, b64)
+            .expect("embedding_f32 must be valid base64");
+        let recovered = mnemonic_core::rebuild::f32_embedding_from_bytes(&raw)
+            .expect("embedding_f32 must decode to f32s");
+        assert_eq!(
+            recovered, embedding,
+            "the exact tier must round-trip bit-for-bit, not approximately"
+        );
+    }
+
+    /// A private memory must NOT publish its embedding. An embedding inverts to
+    /// an approximation of its source text, and Arweave is permanent and public,
+    /// so writing one here would leak the plaintext irreversibly. This is the
+    /// regression test for that leak.
+    #[test]
+    fn private_anchored_artifact_withholds_exact_embedding() {
+        let embedding = vec![0.5f32, -0.25, 0.125, 1.0];
+        let mut artifact = base_artifact();
+        add_anchored_restore_fields(&mut artifact, Visibility::Private, 42, &embedding);
+
+        assert_eq!(artifact["visibility"], "private");
+        assert_no_exact_embedding(&artifact);
+
+        // The seed is still recorded: it describes the compressed copy, which is
+        // present on every artifact and leaks nothing on its own.
+        assert_eq!(artifact["metadata"]["turbo_seed"], 42);
+    }
+
+    /// The seed must be whatever the producing compressor used, not a hardcoded
+    /// constant — a restore builds its compressor from this value.
+    #[test]
+    fn turbo_seed_reflects_the_producing_compressor() {
+        let mut artifact = base_artifact();
+        add_anchored_restore_fields(&mut artifact, Visibility::Private, 7, &[0.1f32]);
+        assert_eq!(artifact["metadata"]["turbo_seed"], 7);
     }
 }

@@ -6,7 +6,7 @@
 //! 1. `visibility_rejected_on_local_writes` — `{ mode: "local",
 //!    visibility: "public" }` returns `-32602 InvalidParams` with
 //!    `data.field == "visibility"` (AC14).
-//! 2. `visibility_persisted_on_participate_public` — full participate flow
+//! 2. `visibility_persisted_on_anchored_public` — full anchored flow
 //!    with a valid confirmation token writes a row with `visibility='public'`.
 //!
 //! Both run against the in-process `TestServer` harness shared with
@@ -63,7 +63,7 @@ async fn visibility_rejected_on_local_writes() {
 async fn visibility_rejected_on_local_writes_even_for_private_value() {
     // The rejection is on the PRESENCE of the field for local writes, not
     // on the value. A literal `"private"` is still invalid params — AC14
-    // says visibility is a participate-only concept.
+    // says visibility is an anchored-only concept.
     let server = TestServer::builder().build();
     let owner = server.server_pubkey();
 
@@ -87,7 +87,7 @@ async fn visibility_rejected_on_local_writes_even_for_private_value() {
 
 #[tokio::test]
 async fn visibility_rejected_for_non_canonical_value() {
-    // Case-variant / typo'd values on participate-mode still return
+    // Case-variant / typo'd values on anchored-mode still return
     // -32602; the resolver's contract is strict like `resolve_write_mode`.
     let server = TestServer::builder()
         .storage_mode("full")
@@ -102,7 +102,7 @@ async fn visibility_rejected_for_non_canonical_value() {
                 "mnemonic_sign_memory",
                 json!({
                     "content": format!("bad-vis-{bad}"),
-                    "mode": "participate",
+                    "mode": "anchored",
                     "visibility": bad,
                 }),
             )
@@ -116,7 +116,7 @@ async fn visibility_rejected_for_non_canonical_value() {
 
 #[tokio::test]
 async fn visibility_threads_through_to_storage() {
-    // The dispatcher's HTTP-with-JWT path routes a participate-mode write
+    // The dispatcher's HTTP-with-JWT path routes an anchored-mode write
     // through the deferred branch (the WASM signer finishes it client-
     // side), which does not persist a row from this surface. Asserting
     // visibility persistence end-to-end here would require an arlocal
@@ -137,7 +137,7 @@ async fn visibility_threads_through_to_storage() {
     let owner = server.server_pubkey();
 
     // The visibility resolver rejects `visibility=public` with `mode=local`
-    // (AC14). Inline participate-mode + visibility=public on the stdio
+    // (AC14). Inline anchored-mode + visibility=public on the stdio
     // path needs a confirmation token because the dispatcher's gate
     // still applies — but the gate lives in `handle_tool_call`, not in
     // `sign_memory` itself. Direct call to `sign_memory` bypasses the
@@ -254,7 +254,7 @@ async fn visibility_threads_through_to_storage() {
 
 #[tokio::test]
 async fn allow_fallback_strict_bool() {
-    // `allow_fallback_to_participate` must be a strict bool. Any non-bool
+    // `allow_fallback_to_anchored` must be a strict bool. Any non-bool
     // returns -32602 with data.field set.
     let server = TestServer::builder().build();
     let owner = server.server_pubkey();
@@ -266,12 +266,12 @@ async fn allow_fallback_strict_bool() {
             json!({
                 "content": "non-bool-fallback",
                 "mode": "local",
-                "allow_fallback_to_participate": "yes",
+                "allow_fallback_to_anchored": "yes",
             }),
         )
         .await;
     let err = result.expect_error();
     assert_eq!(err["code"], -32602);
-    assert_eq!(err["data"]["field"], "allow_fallback_to_participate");
+    assert_eq!(err["data"]["field"], "allow_fallback_to_anchored");
     assert_eq!(err["data"]["received"], "yes");
 }

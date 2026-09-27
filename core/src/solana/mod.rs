@@ -165,7 +165,7 @@ impl SolanaClient {
     ///
     /// The authoritative recovery source (recover-traction-from-chain):
     /// gateway GraphQL does NOT index the historical Irys-bundled items,
-    /// but each `participate` write also produced an SPL Memo
+    /// but each `anchored` write also produced an SPL Memo
     /// (`{"h": blake3, "a": arweave_tx, "v": 2|3}`) from the server wallet,
     /// and `getSignaturesForAddress` returns the memo text inline — one
     /// paginated RPC enumerates the full anchored ledger. Non-anchor memos

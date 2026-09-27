@@ -250,7 +250,7 @@ async fn mcp_stdio_accepts_jsonrpc_on_stdin() {
                 &pubkey,
                 &pubkey,
                 &chrono::Utc::now().to_rfc3339(),
-                WriteMode::Participate,
+                WriteMode::Anchored,
                 Visibility::Private,
                 &[0.0; 8],
             )
@@ -410,7 +410,7 @@ async fn run_stdio_with_env(
                 &pubkey,
                 &pubkey,
                 &chrono::Utc::now().to_rfc3339(),
-                WriteMode::Participate,
+                WriteMode::Anchored,
                 Visibility::Private,
                 &[0.0; 8],
             )
@@ -539,7 +539,7 @@ async fn env_var_rejected_when_unsafe() {
     // and the default endpoint substituted. This is the defence against an
     // attacker who can flip BOTH the flag and the env var (e.g., a
     // compromised npm postinstall script) but still cannot redirect
-    // participate-mode writes to arbitrary SSRF targets.
+    // anchored-mode writes to arbitrary SSRF targets.
     let tmp = tempfile::tempdir().expect("tempdir");
     let db_path = tmp.path().join("attestations.db");
     let stderr_text = run_stdio_with_env(

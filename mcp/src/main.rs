@@ -58,11 +58,11 @@ struct Cli {
     host: String,
 
     /// Allow `MNEMONIC_HOSTED_ENDPOINT` to override the compiled-in default
-    /// hosted peer used by participate-mode soft-fall (Decision 12 —
+    /// hosted peer used by anchored-mode soft-fall (Decision 12 —
     /// agent-native-distribution). Without this flag, the env var is ignored
     /// and a single-line stderr warning is emitted if it is set, so a local
     /// attacker that injects the env var cannot silently redirect outbound
-    /// participate writes to an attacker-controlled host.
+    /// anchored writes to an attacker-controlled host.
     #[arg(long, global = true, default_value_t = false)]
     allow_custom_endpoint: bool,
 
@@ -329,7 +329,7 @@ async fn main() -> anyhow::Result<()> {
         _ => {
             // Deferred: a keychain-backed identity is NOT unlocked here. Its
             // secret is read on the first operation that must sign
-            // (participate write, prove_identity), so local writes and recall
+            // (anchored write, prove_identity), so local writes and recall
             // never trigger an OS keychain prompt.
             let (keypair, storage) = mnemonic_core::identity::ensure_lazy()
                 .map_err(|e| anyhow::anyhow!("identity::ensure failed at startup: {e}"))?;
@@ -563,7 +563,7 @@ async fn main() -> anyhow::Result<()> {
         initial_price_micro_usdc,
     );
 
-    // T3: outcome-based DoS guard for participate writes. Threshold +
+    // T3: outcome-based DoS guard for anchored writes. Threshold +
     // window come from `Config`; the background eviction task is spawned
     // immediately after the `Arc<McpState>` is built (see below).
     let refunds_by_subject = Arc::new(payment::RefundsBySubject::new(
@@ -878,7 +878,7 @@ async fn run_stdio(state: Arc<mcp::McpState>) -> anyhow::Result<()> {
         // `Transport::Stdio` routes `sign_memory` through the inline branch
         // rather than the deferred (PendingBundles) one — Decision 12. Here
         // the keypair is the local agent's own identity, so an inline
-        // participate write is the agent signing its own memory; local
+        // anchored write is the agent signing its own memory; local
         // writes sign nothing.
         let owner_pubkey = state.keypair.pubkey().to_string();
         let resp =
