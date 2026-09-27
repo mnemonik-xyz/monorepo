@@ -228,7 +228,7 @@ describe("mnemonic sign write modes", () => {
     expect(calls).toHaveLength(1); // pending bundle never fetched
   });
 
-  it("--anchor sends mode=participate and reads the key to sign", async () => {
+  it("--anchor sends mode=anchored and reads the key to sign", async () => {
     saveValidToken();
     const calls = installFetch((c) => {
       if (c.url.endsWith("/mcp")) {
@@ -240,7 +240,7 @@ describe("mnemonic sign write modes", () => {
       return json({
         attestation_id: "att-p",
         status: "anchored",
-        write_mode: "participate",
+        write_mode: "anchored",
       });
     });
     await runSign("claim", {
@@ -249,7 +249,10 @@ describe("mnemonic sign write modes", () => {
       anchor: true,
       json: true,
     });
-    expect(toolArgs(calls[0]!).mode).toBe("participate");
+    // `anchored` is the canonical wire token since 2026-09-27. A server built
+    // before that rejects it, so the hosted server must be deployed before this
+    // CLI version is published.
+    expect(toolArgs(calls[0]!).mode).toBe("anchored");
     expect(calls.map((c) => c.url)).toEqual([
       `${BASE}/mcp`,
       `${BASE}/api/pending/c1`,
