@@ -30,6 +30,17 @@ Append-only. Owner decisions, task reports and audit findings go here.
 
 ---
 
+## Owner decisions (2026-09-27)
+
+| ID | Decision | Effect |
+|---|---|---|
+| D-1 | Accept. The hosted connector sees the text during a write. Docs say this clearly. | The server seals to the owner's key at once and keeps no plaintext. Only a client-side tool (local MCP, SDK, CLI, extension) is end to end. |
+| D-3 | **Client-side only.** No hosted recall session. | The recommendation is not taken. The hosted connector cannot recall sealed memories. Remove the opt-in hosted "recall session" from task 13 and from the tech spec. |
+| D-7 | **Leave old rows, seal new rows only.** | The recommendation is not taken. Existing hosted plaintext `local` rows stay as they are (owner-only through the API). There is no in-place sealing, `VACUUM` or backup rotation. |
+| D-8 | Relabel public and notify. | Anchored rows labelled `private` become `public` and get `plaintext_on_arweave: true`. Tell the affected users. |
+
+D-2, D-4, D-5, D-6, D-9, D-10 and D-11 are still open. Until the owner decides, the tasks use the recommended option of each.
+
 ## Open owner decisions
 
 Each item: options, recommendation. Tasks that wait are named.
