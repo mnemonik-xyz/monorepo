@@ -104,6 +104,7 @@ Note: root `AGENTS.md` is a **public** page for external agents that want to use
 
 ## Conventions
 
+- **Docs change with code.** Every code change updates the affected docs in the same commit or PR: `docs/tools.md`, `docs/how-it-works.md`, package READMEs, `docs/QUICKSTART.md`, the white/yellow papers and this file when they describe the changed behaviour. A PR that changes behaviour without a doc update is incomplete.
 - **Documentation language: ASD-STE100 (Simplified Technical English)** for all new and edited English docs (README, `docs/`, specs, PR descriptions). Rules: max 20 words per instruction sentence and 25 per descriptive sentence; active voice; one instruction per sentence; simple words with one meaning; define every abbreviation at first use. Do not add a note about the standard inside the documents. Mark each capability as "available now" or "planned"; never describe unimplemented features as existing.
 - **Papers:** `docs/WHITEPAPER.md` is the short overview for readers. `docs/YELLOWPAPER.md` is the detailed technical specification. Keep the whitepaper consistent with the code.
 - Conventional Commits with component scope: `feat(core):`, `fix(mcp):`, `docs:`, `chore:`, `style:`.
