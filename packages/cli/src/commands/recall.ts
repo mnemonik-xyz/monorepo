@@ -3,13 +3,15 @@
 // Reads identity + token, calls `client.recall(query, {topK, tags})`, prints
 // the hits. Default top-k = 5; `--tag` is shorthand for a single-element
 // `tags` filter.
+//
+// Works from the public key alone: never reads the private key or the OS
+// keychain. An expired token is renewed silently only when that needs no
+// keychain access (see `session.ts`); otherwise a clear hint is printed
+// rather than a silent anonymous (public-pool) recall.
 
-import { LocalSigner, MnemonicClient } from "@mnemonik-xyz/sdk";
-
-import { loadIdentity, loadToken } from "../config.js";
 import { fromSdkError, UserError } from "../errors.js";
 import { format, type OutputOptions } from "../output.js";
-import { assertIdentityMatchesToken } from "../preflight.js";
+import { openSession } from "../session.js";
 
 export interface RecallOptions extends OutputOptions {
   topK?: number;
@@ -31,16 +33,8 @@ export async function runRecall(
   const baseUrl =
     opts.baseUrl ?? process.env.MNEMONIC_BASE_URL ?? DEFAULT_BASE_URL;
   const topK = typeof opts.topK === "number" ? opts.topK : DEFAULT_TOP_K;
-  // Pre-flight: catch identity/JWT mismatch BEFORE any fetch is built.
-  assertIdentityMatchesToken();
-  const kp = await loadIdentity();
-  const tok = loadToken();
-
-  const client = new MnemonicClient({
-    baseUrl,
-    signer: new LocalSigner(kp),
-    jwt: tok.jwt,
-  });
+  // Pre-flight (identity/JWT mismatch) runs inside, BEFORE any fetch.
+  const { client } = await openSession(baseUrl, opts, false);
 
   let result;
   try {

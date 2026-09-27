@@ -66,43 +66,64 @@ Set up the CLI identity at `~/.mnemonic/identity.json`. Pick exactly one mode:
 
 `--force` overwrites an existing `identity.json`. Use with care — losing the previous keypair means losing access to memories signed under it. Run `mnemonic identity export --file backup.json` first.
 
-### `mnemonic login [--token <jwt>] [--base-url <url>]`
+### `mnemonic login [--browser | --token <jwt>] [--base-url <url>]`
 
-Two modes:
+Three modes:
 
-- **Interactive** (default): binds a one-shot `127.0.0.1:0` loopback
-  server, opens your browser at `/oauth/authorize`, awaits the callback,
-  and exchanges the code for a JWT. PKCE state and `redirect_uri` are
-  validated before any token request.
+- **Browserless** (default): the CLI signs the server challenge with the
+  local keypair and gets a JSON Web Token (JWT). No browser is necessary.
+  This mode reads the private key.
+- **Browser** (`--browser`): the CLI opens your browser at
+  `/oauth/authorize`. The webapp keypair signs the challenge. PKCE state
+  and `redirect_uri` are validated before any token request.
 - **Headless** (`--token <jwt>`): persist a pre-issued JWT. The token is
   parsed locally (alg=HS256, fresh `exp`, present `sub`) but not
   verified against the server.
 
+The browserless and browser modes also save an OAuth refresh token in
+`token.json` (available now). See [Session renewal](#session-renewal).
+
 ```bash
 $ mnemonic login
-opening browser: https://mcp.mnemonik.xyz/oauth/authorize?...
 login OK
 sub: 6ZsT...3kQp
 expires: 2026-04-29T18:32:11.000Z
 ```
 
-### `mnemonic sign <content> [--tags <list>] [--base-url <url>]`
+### `mnemonic sign <content> [--anchor] [--tags <list>] [--base-url <url>]`
 
-Sign a memory. Content is read from the positional argument or — if
+Save a memory. Content is read from the positional argument or — if
 absent and stdin is piped — from stdin. Tags are comma-separated.
+
+- **Default (write mode `local`)**: the server stores the memory for your
+  identity only. There is no on-chain anchor and no charge. The CLI uses
+  only your public key and does not read the private key.
+- **`--anchor`** (alias `--participate`, write mode `participate`): the
+  CLI reads your private key and signs the memory locally (COSE_Sign1).
+  The server then anchors it on Arweave and Solana. This write can be
+  paid.
 
 ```bash
 $ mnemonic sign "hello world" --tags=demo,test
 attestation_id: 01HX9F2KQ7...
 signed_at:      2026-04-28T11:14:22.901Z
-status:         signed
-content_hash:   blake3:6c7f...
+status:         stored
+write_mode:     local
+content_hash:   6c7f...
+
+$ mnemonic sign "public claim" --anchor
+status:         anchored
+write_mode:     participate
 ```
+
+An older server can ask for a signature on a local write. Then the CLI
+uses a key stored in a file. It does not read the OS keychain; it stops
+with an error instead. Upgrade the server or use `--anchor`.
 
 ### `mnemonic recall <query> [--top-k <n>] [--tag <tag>] [--base-url <url>]`
 
 Semantic recall over your stored memories. Default `--top-k` is 5;
-`--tag` filters to a single tag.
+`--tag` filters to a single tag. Uses only your public key.
 
 ```bash
 $ mnemonic recall "hello" --top-k=3
@@ -179,6 +200,53 @@ identity exported: /tmp/k.json
 pubkey: 6ZsT...3kQp
 mode:   0600 (file permissions restricted to current user)
 ```
+
+## Private key access
+
+The CLI reads your private key only when a command must make a signature.
+When the key is in the OS keychain, a read can show a system prompt. The
+public key in `~/.mnemonic/identity.json` is sufficient for all other
+commands.
+
+| Command | Reads the private key |
+|---|---|
+| `recall`, `verify`, `whoami` (also `--with-count`) | Never |
+| `sign` (write mode `local`, the default) | Never |
+| `sign --anchor` | Yes, to sign the memory |
+| `login` (browserless), `prove`, `identity export` | Yes, to sign or export |
+
+These rules also apply (available now, CLI 0.3.0):
+
+- A command that does not read the key does not create an identity.
+  With no identity, it tells you to run `mnemonic init`.
+- The CLI does not move a file-stored key into the OS keychain. It also
+  does not check the keychain entry before each command.
+
+## Session renewal
+
+The access JWT expires after one hour. You do not have to run
+`mnemonic login` again when it expires (available now, CLI 0.3.0). Before
+each server call, the CLI renews an expired token in this sequence:
+
+1. It sends the saved refresh token to the server. This needs no private
+   key and shows no prompt. The server rotates the refresh token on each
+   use; one refresh token stays valid for one year.
+2. It uses a newer `token.json` that another CLI process saved.
+3. It does a browserless login with your identity key. The CLI does this
+   automatically only when reading the key cannot show a prompt. This is
+   true when the key is in a file, or when the command reads the key
+   anyway (`sign --anchor`).
+
+If all three fail, the command stops with one message: run
+`mnemonic login` once. This occurs when a token has no refresh token,
+because an older CLI or `login --token` saved it. It also occurs when the
+server rejects the refresh token.
+
+`recall` does not continue with an expired token. The server would answer
+anonymously and return only the public memories, not your own memories.
+
+If the server rejects a token that is not expired, the CLI renews the
+token and retries the call one time.
 
 ## Output flags
 

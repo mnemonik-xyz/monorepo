@@ -193,7 +193,7 @@ the writer *is* the operator (the stdio / single-tenant path). Full detail in
 
 Two npm packages let you drive the same hosted MCP server without writing your own JSON-RPC client. Both reuse the OAuth 2.1 + PKCE handshake and the COSE_Sign1 signing substrate that the Cursor / VS Code / Claude.ai connectors and the webapp use — only the renderer differs.
 
-- [`@mnemonik-xyz/cli`](packages/cli/) — `mnemonic` binary for terminal use. Recommended setup: open `mnemonik.xyz/install` → click "Send to CLI" → `mnemonic init --ticket <uuid> && mnemonic login && mnemonic sign "hello"`. Standalone mode (`mnemonic init --standalone`) is also available for CLI-only use.
+- [`@mnemonik-xyz/cli`](packages/cli/) — `mnemonic` binary for terminal use. Recommended setup: open `mnemonik.xyz/install` → click "Send to CLI" → `mnemonic init --ticket <uuid> && mnemonic login && mnemonic sign "hello"`. Standalone mode (`mnemonic init --standalone`) is also available for CLI-only use. `mnemonic sign` makes a private local write from your public key only. `mnemonic sign --anchor` signs with your private key and anchors the memory on-chain. The CLI renews an expired session automatically with a refresh token.
 - [`@mnemonik-xyz/sdk`](packages/sdk/) — runtime-agnostic TypeScript SDK (`MnemonicClient`, `LocalSigner`, `Keypair`, OAuth helpers). Pure ESM; runs on Node 20+, Bun, Deno, and modern browsers.
 
 ---

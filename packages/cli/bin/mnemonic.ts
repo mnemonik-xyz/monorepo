@@ -139,7 +139,7 @@ export function buildProgram(): Command {
   program
     .command("login")
     .description(
-      "OAuth login — default signs the server challenge with the local CLI keypair (browserless). Use --browser for the legacy webapp-localStorage flow, or --token <jwt> for a pre-issued JWT.",
+      "OAuth login — default signs the server challenge with the local CLI keypair (browserless) and saves a refresh token, so later commands renew the session automatically. Use --browser for the legacy webapp-localStorage flow, or --token <jwt> for a pre-issued JWT (no auto-renewal).",
     )
     .option("--token <jwt>", "headless: persist a pre-issued JWT")
     .option(
@@ -168,16 +168,30 @@ export function buildProgram(): Command {
 
   program
     .command("sign [content]")
-    .description("sign a memory (content from arg or stdin)")
+    .description(
+      "save a memory (content from arg or stdin). Default: local write from the public key only — the private key is not read. --anchor signs with your private key (OS keychain) and anchors on Arweave + Solana",
+    )
     .option("--tags <list>", "comma-separated tags")
+    .option(
+      "--anchor",
+      "sign locally and anchor on-chain (write mode `participate`; reads the private key; may be paid)",
+    )
+    .option("--participate", "alias for --anchor")
     .option("--base-url <url>", "override the server base URL")
     .action(
       async (
         content: string | undefined,
-        cmdOpts: { tags?: string; baseUrl?: string },
+        cmdOpts: {
+          tags?: string;
+          anchor?: boolean;
+          participate?: boolean;
+          baseUrl?: string;
+        },
       ) => {
+        const anchor = Boolean(cmdOpts.anchor || cmdOpts.participate);
         await runSign(content, {
           ...rootOpts(program),
+          ...(anchor ? { anchor } : {}),
           ...(cmdOpts.tags !== undefined ? { tags: cmdOpts.tags } : {}),
           ...(cmdOpts.baseUrl !== undefined
             ? { baseUrl: cmdOpts.baseUrl }
@@ -188,7 +202,7 @@ export function buildProgram(): Command {
 
   program
     .command("recall <query>")
-    .description("recall similar memories")
+    .description("recall similar memories (public key only; no keychain access)")
     .option("--top-k <n>", "max hits to return", (v) => parseInt(v, 10), 5)
     .option("--tag <tag>", "filter by a single tag")
     .option("--base-url <url>", "override the server base URL")
@@ -210,7 +224,9 @@ export function buildProgram(): Command {
 
   program
     .command("verify <attestation_id>")
-    .description("verify an attestation (exit: 0 ok, 3 tampered, 1 not found)")
+    .description(
+      "verify an attestation (exit: 0 ok, 3 tampered, 1 not found; public key only)",
+    )
     .option("--base-url <url>", "override the server base URL")
     .action(async (id: string, cmdOpts: { baseUrl?: string }) => {
       await runVerify(id, {
