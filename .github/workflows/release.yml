@@ -390,3 +390,53 @@ jobs:
           else
             npm publish --access public --provenance --workspace packages/mcp
           fi
+
+  # Publishes server.json to the official MCP Registry
+  # (registry.modelcontextprotocol.io). Runs after the npm shim, because the
+  # registry verifies `mcpName` in the published @mnemonik-xyz/mcp package.
+  # Auth is GitHub OIDC for the io.github.mnemonik-xyz/* namespace — no
+  # secret needed. A version that already exists in the registry fails the
+  # publish (versions are immutable); the job skips in that case so tag
+  # re-runs stay idempotent. See docs/mcp-registries.md.
+  publish-mcp-registry:
+    name: Publish to the official MCP Registry
+    needs: [publish-mcp-shim]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install mcp-publisher
+        run: |
+          set -euo pipefail
+          curl -fsSL "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_linux_amd64.tar.gz" | tar xz mcp-publisher
+
+      - name: Set server.json version from packages/mcp/package.json
+        run: |
+          set -euo pipefail
+          VERSION=$(node -p "require('./packages/mcp/package.json').version")
+          jq --arg v "$VERSION" '.version = $v | .packages[0].version = $v' server.json > server.tmp
+          mv server.tmp server.json
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+
+      - name: Validate server.json
+        run: ./mcp-publisher validate server.json
+
+      - name: Skip if this version is already in the registry
+        id: exists
+        run: |
+          set -euo pipefail
+          FOUND=$(curl -fsSL "https://registry.modelcontextprotocol.io/v0/servers?search=io.github.mnemonik-xyz/mnemonic&version=$VERSION" \
+            | jq --arg v "$VERSION" '[.servers[]? | select((.server.version // .version) == $v)] | length')
+          echo "found=$FOUND" >> "$GITHUB_OUTPUT"
+
+      - name: Log in with GitHub OIDC
+        if: steps.exists.outputs.found == '0'
+        run: ./mcp-publisher login github-oidc
+
+      - name: Publish
+        if: steps.exists.outputs.found == '0'
+        run: ./mcp-publisher publish

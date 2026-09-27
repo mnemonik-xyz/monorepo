@@ -1,15 +1,16 @@
 # Smithery manifest for Mnemonic Memory MCP server
 # Listed at https://smithery.ai/mcp/mnemonic once submitted via the Smithery web UI.
 #
-# Decision 5 of work/mnemonic-integrations/tech-spec.md: Smithery is the single registry
-# in Phase 1. Other registries (Anthropic Connectors, mcp.directory, Glama) are deferred.
+# The official MCP Registry entry lives in server.json (published by release.yml).
+# Other registries and the manual steps: docs/mcp-registries.md.
 #
 # Notes:
 # - URL points to mcp.mnemonik.xyz (NOT mcp.mnemonic.dev — Deviation 2 of tech-spec).
 # - Description leads with utility ("verifiable knowledge memory"), avoids leading
 #   with crypto framing per the Risks-table mitigation (tech-spec line 280):
 #   Smithery community review may reject heavy crypto framing.
-# - Five tools listed match mcp/src/tools.rs.
+# - The eight tools listed match the default build (docs/tools.md).
+# - Smithery now publishes by URL (smithery.ai/new); see docs/mcp-registries.md.
 
 version: "1"
 name: "mnemonic"
@@ -46,21 +47,26 @@ mcp_servers:
           authorizationUrl: "https://mcp.mnemonik.xyz/oauth/authorize"
           tokenUrl: "https://mcp.mnemonik.xyz/oauth/token"
           scopes:
-            identity: "Read user identity (DID + pubkey)"
-            memory: "Sign and recall the user's own attested memories"
+            mcp: "Call the Mnemonic MCP tools as the signed-in identity"
     features:
       - "tools"
     tools:
       - name: "mnemonic_whoami"
-        description: "Return the caller's DID and pubkey resolved from the OAuth identity"
+        description: "Server identity, storage capabilities and pricing"
       - name: "mnemonic_sign_memory"
-        description: "Sign a memory bundle (async — completes via browser-mediated WASM signing)"
+        description: "Store a memory: free local write, or client-signed on-chain anchor (participate)"
+      - name: "mnemonic_check_pending"
+        description: "Resolve a deferred client-signing request by correlation_id"
       - name: "mnemonic_recall"
-        description: "Semantic recall over the caller's own attested memories"
+        description: "Semantic search over stored memories"
       - name: "mnemonic_verify"
-        description: "Verify a COSE_Sign1 attestation against its declared signer"
+        description: "Verify an attestation against its signature and chain anchors"
       - name: "mnemonic_prove_identity"
-        description: "Produce a fresh signed identity proof for cross-tool linking"
+        description: "Sign a challenge with the server key to prove its identity"
+      - name: "mnemonic_publish_post"
+        description: "Publish a client-signed public post"
+      - name: "request_public_write_confirmation"
+        description: "Confirmation gate before a public write"
 
 install:
   cursor: "cursor://anysphere.cursor-deeplink/mcp/install?name=Mnemonic&url=https%3A%2F%2Fmcp.mnemonik.xyz"

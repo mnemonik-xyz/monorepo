@@ -1,0 +1,35 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.mnemonik-xyz/mnemonic",
+  "title": "Mnemonic",
+  "description": "Verifiable, persistent memory for AI agents: signed memories you can recall and verify.",
+  "repository": {
+    "url": "https://github.com/mnemonik-xyz/monorepo",
+    "source": "github",
+    "subfolder": "packages/mcp"
+  },
+  "websiteUrl": "https://mnemonik.xyz",
+  "version": "0.2.8",
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://mcp.mnemonik.xyz/mcp"
+    }
+  ],
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "@mnemonik-xyz/mcp",
+      "version": "0.2.8",
+      "transport": {
+        "type": "stdio"
+      },
+      "packageArguments": [
+        {
+          "type": "positional",
+          "value": "mcp-stdio"
+        }
+      ]
+    }
+  ]
+}
