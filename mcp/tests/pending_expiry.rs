@@ -110,6 +110,7 @@ fn state_with_short_ttl(ttl_secs: i64) -> Arc<McpState> {
             std::time::Duration::from_secs(60),
             5,
         )),
+        free_anchors: mnemonic_mcp::payment::FreeAnchorLimits::disabled(),
         delivery_metrics: Arc::new(mnemonic_mcp::payment::DeliveryMetrics::default()),
         confirmation_ledger: Arc::new(mnemonic_mcp::confirmation_token::ConfirmationLedger::new()),
         hosted_endpoint: String::new(),

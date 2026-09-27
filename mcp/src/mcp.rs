@@ -823,6 +823,12 @@ pub struct McpState {
     /// `api_key_hash` (blake3(api_key).to_hex()), NEVER `owner_pubkey`.
     pub refunds_by_subject: Arc<payment::RefundsBySubject>,
 
+    /// Free daily anchor quota: free participate writes per agent key and
+    /// across all keys per UTC day, before x402 payment is required
+    /// (`MNEMONIC_FREE_ANCHORS_PER_DAY`, `MNEMONIC_FREE_ANCHORS_GLOBAL_PER_DAY`).
+    /// See the "Free daily anchor quota" section of `payment.rs`.
+    pub free_anchors: payment::FreeAnchorLimits,
+
     /// Process-lifetime counters incremented by the delivery-guarantee
     /// flow. Stub for the eventual Prometheus surface — see
     /// `payment::DeliveryMetrics` for the four counters and the
@@ -1388,6 +1394,51 @@ pub async fn mcp_handler(
         && payment::active_universal_paywall(&state.payment_mode, state.universal_paywall.as_ref())
             .is_none()
     {
+        // Free daily anchor quota — PEEK here, consume later. A JWT caller
+        // with no `X-Payment` header and a free anchor left today skips the
+        // 402. Consumption happens exactly once, at anchor time: the parked
+        // bundle is flagged `free_quota`, and `api::sign_callback_handler`
+        // consumes one free anchor before it anchors (refunded when delivery
+        // is not confirmed). Consuming here instead would spend quota on
+        // bundles that are never signed (they expire after 300 s). A caller
+        // that sends `X-Payment` keeps the paid path below; its bundle is not
+        // flagged and never touches the quota.
+        if let Some(sub) = jwt_sub.as_deref() {
+            if payment::free_quota_applies(&state.payment_mode)
+                && payment::extract_x402_proof(&headers).is_none()
+                && free_anchor_available(&state, sub)
+            {
+                let resp = handle_request_with_resolved_mode(
+                    &req,
+                    &state,
+                    &owner_pubkey,
+                    jwt_sub.as_deref(),
+                    crate::tools::Transport::Http,
+                    resolved_mode_for_gate,
+                )
+                .await;
+                if resp.error.is_none() {
+                    // Fail closed: an unflagged parked bundle would anchor
+                    // with no payment and no quota consumption.
+                    let flagged = match parked_correlation_id(&resp) {
+                        Some(correlation_id) => {
+                            state.pending.mark_free_quota(&correlation_id).await.is_ok()
+                        }
+                        None => false,
+                    };
+                    if !flagged {
+                        tracing::error!("free anchor: parked bundle could not be flagged");
+                        return ndjson_error(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            -32603,
+                            "free anchor bookkeeping failed; retry the call",
+                        );
+                    }
+                }
+                return ndjson_response(StatusCode::OK, &resp);
+            }
+        }
+
         // Use live price from pricing engine (refreshed in background).
         let current_cost = state.pricing.current_price();
 
@@ -1514,7 +1565,9 @@ pub async fn mcp_handler(
 
                 ndjson_response(StatusCode::OK, &resp)
             }
-            payment::PaymentGate::NeedPayment(x402) => {
+            payment::PaymentGate::NeedPayment(mut x402) => {
+                // Tell the agent why it must pay: its free quota state.
+                x402.free_anchors = free_anchor_status(&state, jwt_sub.as_deref());
                 ndjson_response(StatusCode::PAYMENT_REQUIRED, &x402)
             }
             payment::PaymentGate::NeedUniversalPaywall(up_req) => {
@@ -1551,6 +1604,57 @@ pub async fn mcp_handler(
     }
 }
 
+/// Peek the caller's free daily anchor quota (no consumption). A store error
+/// counts as "no free anchor", so the caller falls back to the 402 path.
+fn free_anchor_available(state: &McpState, subject: &str) -> bool {
+    let Ok(store) = state.store.lock() else {
+        return false;
+    };
+    let today = payment::utc_day(chrono::Utc::now());
+    payment::free_anchor_available(store.conn(), subject, &today, state.free_anchors)
+        .unwrap_or_else(|error| {
+            tracing::warn!(error = %error, "free anchor peek failed");
+            false
+        })
+}
+
+/// The caller's `free_anchors` block for a 402 body or `mnemonic_whoami`, or
+/// `None` when the quota does not apply on this deploy.
+fn free_anchor_status(
+    state: &McpState,
+    subject: Option<&str>,
+) -> Option<payment::FreeAnchorStatus> {
+    if !payment::free_quota_applies(&state.payment_mode) || !state.envelope.supports_participate() {
+        return None;
+    }
+    let store = state.store.lock().ok()?;
+    payment::free_anchor_status(
+        store.conn(),
+        subject,
+        chrono::Utc::now(),
+        state.free_anchors,
+    )
+    .map_err(|error| tracing::warn!(error = %error, "free anchor status unavailable"))
+    .ok()
+}
+
+/// `correlation_id` of the bundle a `mnemonic_sign_memory` call just parked
+/// (`status: "awaiting_signature"`), read from the tool result text.
+fn parked_correlation_id(resp: &JsonRpcResponse) -> Option<String> {
+    let text = resp
+        .result
+        .as_ref()?
+        .get("content")?
+        .get(0)?
+        .get("text")?
+        .as_str()?;
+    let result: Value = serde_json::from_str(text).ok()?;
+    if result.get("status")?.as_str()? != "awaiting_signature" {
+        return None;
+    }
+    result.get("correlation_id")?.as_str().map(str::to_string)
+}
+
 // Bearer-auth middleware lives in `oauth.rs::bearer_auth_middleware`. The
 // `bearer_auth_layer` scaffolding from Task 1 has been removed as part of
 // Task 4 — there is no longer a "no-op" path. `main.rs::run_http` wires
@@ -1568,8 +1672,23 @@ async fn handle_tool_call(
     let result = match name {
         "mnemonic_whoami" => {
             // DB-only: lock, query, release before returning
-            let store = state.store.lock().unwrap();
-            tools::whoami(&state.keypair, &store, &state.storage_mode, &state.envelope)
+            let mut out = {
+                let store = state.store.lock().unwrap();
+                tools::whoami(&state.keypair, &store, &state.storage_mode, &state.envelope)
+            };
+            // Free daily anchor quota for the caller (JWT subject). HTTP only:
+            // stdio is never gated, so the block would mean nothing there.
+            if transport == crate::tools::Transport::Http {
+                if let (Some(status), Some(map)) =
+                    (free_anchor_status(state, jwt_sub), out.as_object_mut())
+                {
+                    map.insert(
+                        "free_anchors".into(),
+                        serde_json::to_value(status).unwrap_or(Value::Null),
+                    );
+                }
+            }
+            out
         }
         "mnemonic_sign_memory" => {
             let content = args["content"]
@@ -2095,6 +2214,7 @@ mod transport_tests {
                 std::time::Duration::from_secs(60),
                 5,
             )),
+            free_anchors: crate::payment::FreeAnchorLimits::disabled(),
             delivery_metrics: Arc::new(crate::payment::DeliveryMetrics::default()),
             confirmation_ledger: Arc::new(crate::confirmation_token::ConfirmationLedger::new()),
             hosted_endpoint: String::new(),

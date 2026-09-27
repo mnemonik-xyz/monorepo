@@ -2,6 +2,8 @@
 
 Status: **draft notes for future deliberation**. Not a decision document. Captures the cost picture of flipping `STORAGE_MODE=local` → `STORAGE_MODE=full` on hosted `mcp.mnemonik.xyz`, plus the inseparable billing question (`PAYMENT_MODE`).
 
+**Shipped since these notes (available now):** a free daily quota for anchored writes on `PAYMENT_MODE=x402`. Each agent Ed25519 key gets `MNEMONIC_FREE_ANCHORS_PER_DAY` (default 10) free `participate` writes per UTC day. All keys share a global cap, `MNEMONIC_FREE_ANCHORS_GLOBAL_PER_DAY` (default 1000), because new keys cost nothing to mint. The global cap bounds the operator's daily chain spend on free writes (about 1000 × the per-anchor cost). A write that fails the delivery check gets its free write back. See `docs/tools.md` § "Free daily quota" and `mcp/src/payment.rs`.
+
 ---
 
 ## Engineering cost (low)

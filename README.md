@@ -235,6 +235,8 @@ durable user memory.
 
 Only `mnemonic_sign_memory` is paid. Deposits are validated against the treasury pubkey + USDC mint + signer ownership on the tx.
 
+Free daily quota (available now, `x402` only): each agent Ed25519 key gets 10 free `participate` writes per UTC (Coordinated Universal Time) day. A global cap of 1000 free writes per day applies across all keys. The agent needs no wallet and gets no payment prompt for these writes. `mnemonic_whoami` shows the remaining quota in `free_anchors`.
+
 ---
 
 ## Configuration
@@ -256,6 +258,8 @@ All configuration is env-driven (`mcp/src/config.rs`). The most relevant variabl
 | `PAYMENT_MODE` | `none` | `none` \| `balance` \| `x402` \| `both` |
 | `TREASURY_PUBKEY` / `USDC_MINT` | — / mainnet USDC | Payment routing |
 | `SIGN_MEMORY_COST_MICRO_USDC` | `1000` | Floor price for sign-memory |
+| `MNEMONIC_FREE_ANCHORS_PER_DAY` | `10` | Free `participate` writes per agent key per UTC day (`x402` only); `0` disables |
+| `MNEMONIC_FREE_ANCHORS_GLOBAL_PER_DAY` | `1000` | Free `participate` writes per UTC day across all keys; `0` = none |
 | `PRICE_REFRESH_SECS` / `PRICING_MARGIN_BPS` | `1800` / `2000` | Dynamic pricing engine |
 
 Copy `.env.example` to `.env` to start.

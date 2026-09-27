@@ -161,6 +161,7 @@ fn build_state_with_payment(
             std::time::Duration::from_secs(60),
             5,
         )),
+        free_anchors: mnemonic_mcp::payment::FreeAnchorLimits::disabled(),
         delivery_metrics: std::sync::Arc::new(mnemonic_mcp::payment::DeliveryMetrics::default()),
         confirmation_ledger: std::sync::Arc::new(
             mnemonic_mcp::confirmation_token::ConfirmationLedger::new(),

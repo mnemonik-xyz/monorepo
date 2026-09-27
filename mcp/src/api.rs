@@ -274,6 +274,64 @@ pub async fn sign_callback_handler(
     // lives in `payment.rs`).
     let universal_paywall =
         payment::active_universal_paywall(&state.payment_mode, state.universal_paywall.as_ref());
+
+    // Free daily anchor quota (see `payment.rs`). On a paid deploy a
+    // participate write first takes one of the signer's free anchors for
+    // today. This is the single consumption point. The grant refunds itself
+    // on drop, so every early return below (upload failure, delivery not
+    // confirmed, replayed bundle) gives the anchor back; only a confirmed
+    // delivery keeps it (`keep()` further down). No return below this point
+    // happens while the free-anchor path holds the store lock.
+    //
+    //   - Universal Paywall rail: try the quota unless the operation already
+    //     has a quote (the payer may be mid-payment). A granted anchor skips
+    //     the wallet link, the quote and the charge.
+    //   - Bespoke x402 rail: the pre-parking gate in `mcp_handler` peeked and
+    //     flagged the bundle `free_quota`. A paid bundle is not flagged and
+    //     never touches the quota. A flagged bundle whose free anchor is gone
+    //     by now gets 402 and stays parked, so the client can retry later or
+    //     pay through a new `mnemonic_sign_memory` call with `X-Payment`.
+    let mut free_anchor = None;
+    if entry.write_mode == WriteMode::Participate
+        && payment::free_quota_applies(&state.payment_mode)
+        && (universal_paywall.is_some() || entry.free_quota)
+    {
+        let paid_operation_id = universal_paywall.map(|_| req.correlation_id.as_str());
+        free_anchor = match payment::claim_free_anchor(
+            &state.store,
+            &req.signer_pubkey,
+            paid_operation_id,
+            state.free_anchors,
+        ) {
+            Ok(grant) => grant,
+            Err(error) => {
+                tracing::error!(correlation_id = %req.correlation_id, error = %error, "claim free anchor failed");
+                return error_resp(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "payment state unavailable",
+                );
+            }
+        };
+        if free_anchor.is_none() && universal_paywall.is_none() {
+            return (
+                StatusCode::PAYMENT_REQUIRED,
+                Json(serde_json::json!({
+                    "status": "payment_required",
+                    "error": "free daily anchor quota is used up; call mnemonic_sign_memory again with an X-Payment header",
+                    "correlation_id": req.correlation_id,
+                    "free_anchors": free_anchor_status(&state, &req.signer_pubkey),
+                })),
+            )
+                .into_response();
+        }
+    }
+    // A free anchor replaces the charge for this write.
+    let universal_paywall = if free_anchor.is_some() {
+        None
+    } else {
+        universal_paywall
+    };
+
     if entry.write_mode == WriteMode::Participate {
         if let Some(config) = universal_paywall {
             let now = chrono::Utc::now().to_rfc3339();
@@ -329,6 +387,9 @@ pub async fn sign_callback_handler(
                     return error_resp(StatusCode::INTERNAL_SERVER_ERROR, "invalid payment chain")
                 }
             };
+            // Computed before the lock below: the payment-required bodies
+            // show the signer why it must pay.
+            let free_anchors = free_anchor_status(&state, &req.signer_pubkey);
             let wallet_link = match state.store.lock() {
                 Ok(store) => match wallet_link::get_verified(store.conn(), &req.correlation_id) {
                     Ok(Some(link)) if link.subject_hash == subject_hash && link.chain_id == chain_id => link,
@@ -348,6 +409,7 @@ pub async fn sign_callback_handler(
                                 "wallet_link_url": format!("/approve?operation_id={}", req.correlation_id),
                                 "challenge": challenge,
                                 "message": wallet_link::challenge_message(&challenge),
+                                "free_anchors": free_anchors,
                             })),
                         ).into_response(),
                         Err(error) => {
@@ -385,6 +447,7 @@ pub async fn sign_callback_handler(
                             "correlation_id": req.correlation_id,
                             "artifact_hash": staged.artifact_hash,
                             "payment": payment,
+                            "free_anchors": free_anchors,
                         })),
                     )
                         .into_response();
@@ -826,6 +889,12 @@ pub async fn sign_callback_handler(
         }
     }
 
+    // Delivery is confirmed (or the anchor ids are synthetic): the free
+    // anchor, if this write used one, stays consumed.
+    if let Some(grant) = free_anchor.take() {
+        grant.keep();
+    }
+
     if let Some(attempt) = &delivery_attempt {
         if let Ok(store) = state.store.lock() {
             if let Err(error) =
@@ -852,6 +921,21 @@ pub async fn sign_callback_handler(
         arweave_url: links.arweave_url,
     };
     (StatusCode::OK, Json(body)).into_response()
+}
+
+/// The signer's `free_anchors` block for a payment-required body. `None`
+/// (JSON `null`) when the store is unavailable. Takes the store lock: never
+/// call it while the lock is held.
+fn free_anchor_status(state: &McpState, subject: &str) -> Option<payment::FreeAnchorStatus> {
+    let store = state.store.lock().ok()?;
+    payment::free_anchor_status(
+        store.conn(),
+        Some(subject),
+        chrono::Utc::now(),
+        state.free_anchors,
+    )
+    .map_err(|error| tracing::warn!(error = %error, "free anchor status unavailable"))
+    .ok()
 }
 
 fn error_resp(status: StatusCode, msg: &str) -> Response {

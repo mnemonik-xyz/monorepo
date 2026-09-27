@@ -91,12 +91,32 @@ choose before attempting a write that might be rejected or charged.
   "storage_mode": "full",          // legacy field, kept for pre-envelope clients
   "supported_modes": ["local", "participate"],
   "default_mode": "local",
-  "participate_cost": { /* null when the operator does not charge */ }
+  "participate_cost": { /* null when the operator does not charge */ },
+  "free_anchors": {                // HTTP + PAYMENT_MODE=x402 only
+    "per_day": 10,
+    "remaining": 7,
+    "global_remaining": 812,
+    "resets_at": "2026-09-28T00:00:00Z"
+  }
 }
 ```
 
 `storage_mode` reflects the operator's *capability*, not a global switch — see
 [Write modes](#write-modes-local-vs-participate).
+
+`free_anchors` shows the free daily quota of the caller (available now). See
+[Free daily quota](#free-daily-quota). The server adds the field only over HTTP
+on a `PAYMENT_MODE=x402` deploy that supports `participate`:
+
+| Field | Meaning |
+|---|---|
+| `per_day` | Free `participate` writes per key per UTC (Coordinated Universal Time) day |
+| `remaining` | Free writes that the caller's key can still use today |
+| `global_remaining` | Free writes left today for all keys together |
+| `resets_at` | Next UTC midnight, when both counters start again |
+
+`remaining` is never more than `global_remaining`. For a caller without a JWT,
+the block has only `per_day` and `resets_at`.
 
 ---
 
@@ -402,6 +422,41 @@ Payment applies only on HTTP, only in `full` mode, and only to
 
 `whoami`, `recall`, `verify`, `prove_identity`, `check_pending`, and
 `publish_post` are always free.
+
+### Free daily quota
+
+Available now, on `PAYMENT_MODE=x402` over HTTP. Each agent Ed25519 key gets
+free `participate` writes every UTC day before payment is required. The agent
+needs no wallet and gets no payment prompt for these writes. The operator sets
+two limits:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `MNEMONIC_FREE_ANCHORS_PER_DAY` | `10` | Free writes per key per UTC day. `0` disables the quota. |
+| `MNEMONIC_FREE_ANCHORS_GLOBAL_PER_DAY` | `1000` | Free writes per UTC day for all keys together. `0` means no free writes. |
+
+The global cap exists because a new key costs nothing to make. The quota
+follows these rules:
+
+- A free write uses the quota only when the anchor is confirmed. The quota
+  counts the write when the client posts the signed bundle to
+  `/api/sign-callback`. A bundle that expires unsigned uses nothing.
+- If the delivery check fails, the server demotes the row to `local` and gives
+  the free write back.
+- A request with an `X-Payment` header uses the paid path. It does not use the
+  quota.
+- `PAYMENT_MODE=none` is free already and does not count writes. Stdio is
+  never charged.
+- Both counters start again at UTC midnight.
+
+When no free write is left, the payment-required responses add a
+`free_anchors` block (the same shape as in `mnemonic_whoami`). This applies to
+the HTTP 402 of `mnemonic_sign_memory` and to the wallet-link (HTTP 428) and
+payment (HTTP 402) steps of `/api/sign-callback`. The block tells the agent why
+it must pay. If a parked bundle loses its free write before the callback (for example,
+you parked more bundles than you have free writes), `/api/sign-callback`
+returns HTTP 402 with `status: "payment_required"`. The bundle stays parked.
+To pay, call `mnemonic_sign_memory` again with `X-Payment`.
 
 ---
 

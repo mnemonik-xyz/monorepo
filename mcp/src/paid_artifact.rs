@@ -138,6 +138,7 @@ impl StagedDeliveryContext {
             tags: self.tags,
             metadata: self.metadata,
             write_mode: self.write_mode,
+            free_quota: false,
             exp: self.exp,
         }
     }
@@ -598,6 +599,7 @@ mod tests {
             tags: vec!["tag".into()],
             metadata: serde_json::json!({"turbo_bits": 4}),
             write_mode: WriteMode::Participate,
+            free_quota: false,
             exp: Utc::now(),
         };
         stage_verified_cose(&conn, "correlation", "signer", b"cose", "now").unwrap();
@@ -627,6 +629,7 @@ mod tests {
             tags: vec![],
             metadata: serde_json::json!({}),
             write_mode: WriteMode::Participate,
+            free_quota: false,
             exp: Utc::now(),
         };
         stage_verified_cose(&conn, "correlation", "signer", b"cose", "now").unwrap();
@@ -679,6 +682,7 @@ mod tests {
             tags: vec![],
             metadata: serde_json::json!({}),
             write_mode: WriteMode::Participate,
+            free_quota: false,
             exp: Utc::now(),
         };
         stage_verified_cose(&conn, "retry", "signer", b"cose", "now").unwrap();
