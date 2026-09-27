@@ -29,7 +29,9 @@ use crate::codec::hash::hash_bytes;
 use crate::codec::schema::MEMORY_V1;
 use crate::codec::sign::sign_cose;
 use crate::compress::{CompressedEmbedding, EmbeddingCompressor};
-use crate::identity::{pubkey_base58, sign_bytes};
+use crate::identity::{pubkey_base58, sign_bytes, verify_signature};
+use solana_sdk::pubkey::Pubkey;
+use std::str::FromStr;
 
 /// Deterministic seed used by every `EmbeddingCompressor` instance —
 /// must match `mcp/src/main.rs:309` and every test compressor in the
@@ -93,6 +95,21 @@ pub fn generate_keypair() -> Result<JsValue, JsValue> {
     };
     serde_wasm_bindgen::to_value(&payload)
         .map_err(|e| JsValue::from_str(&format!("keypair serialization failed: {e}")))
+}
+
+/// Verify a raw Ed25519 signature produced outside COSE/CBOR.
+///
+/// Used by the cross-ecosystem parity test (`mcp/tests/erc8004_feedback_parity.rs`)
+/// to confirm that a `MNEMONIC_FEEDBACK_V1` proof verifies in both TypeScript
+/// (`@noble/ed25519`) and Rust (`identity::verify_signature`).
+///
+/// Returns `true` when valid, `false` on any mismatch or parse failure (never panics).
+#[wasm_bindgen]
+pub fn verify_ed25519(pubkey_b58: &str, message: &[u8], signature: &[u8]) -> bool {
+    let Ok(pubkey) = Pubkey::from_str(pubkey_b58) else {
+        return false;
+    };
+    verify_signature(&pubkey, message, signature)
 }
 
 /// Sign an arbitrary challenge byte string with the given keypair.
