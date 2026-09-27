@@ -85,6 +85,23 @@ enum Command {
     /// Print the server's base58 Ed25519 identity pubkey and exit.
     /// Useful for funding a local solana-test-validator before startup.
     Identity,
+    /// Rebuild the local recall index from Arweave, then exit
+    /// (work/arweave-as-source-of-truth Wave 3).
+    ///
+    /// Enumerates every item this wallet anchored — Solana memo history first,
+    /// because it is authoritative for legacy items, then the Arweave gateway
+    /// index — fetches each artifact, verifies its COSE_Sign1 signature, and
+    /// writes the verified rows into the local database. Only memories authored
+    /// by this identity are imported.
+    ///
+    /// Idempotent: rows are keyed by the `artifact_id` inside the signed
+    /// payload, so running it twice converges rather than duplicating. Safe to
+    /// run against a populated database.
+    Restore {
+        /// Report what would be restored without writing anything.
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 // ── Axum handlers ─────────────────────────────────────────────────────────────
@@ -222,6 +239,92 @@ async fn main() -> anyhow::Result<()> {
 
     let cfg = config::Config::from_env();
 
+    // ── `restore` subcommand (work/arweave-as-source-of-truth Wave 3) ─────────
+    // Rebuild the local index from the chain. Placed after config resolution
+    // because it needs the gateway, RPC and database paths, and before any
+    // server wiring because it exits when done.
+    if let Some(Command::Restore { dry_run }) = cli.command {
+        use mnemonic_core::arweave::graphql::{solana_pubkey_to_arweave_address, GraphQlClient};
+        use mnemonic_core::arweave::ArweaveClient;
+        use mnemonic_core::solana::SolanaClient;
+
+        let identity = match mnemonic_core::identity::ensure() {
+            Ok(id) => id,
+            Err(e) => {
+                eprintln!("mnemonic: identity resolution failed: {e}");
+                std::process::exit(1);
+            }
+        };
+        let owner = identity.pubkey_base58.clone();
+        eprintln!("mnemonic: restoring memories for {owner}");
+
+        let solana = SolanaClient::new(&cfg.solana_rpc_url);
+        let gateway = ArweaveClient::new(&cfg.arweave_url);
+        let gql = GraphQlClient::new(&cfg.chain_stats_gateway_url);
+        // A gateway owner filter is an optimisation, not a requirement: the memo
+        // history already enumerates the historical items, and `list_anchored`
+        // treats an empty address list as "tag-only". So a derivation failure
+        // degrades the search rather than aborting the restore.
+        let arweave_addresses: Vec<String> = match solana_pubkey_to_arweave_address(&owner) {
+            Ok(addr) => vec![addr],
+            Err(e) => {
+                eprintln!(
+                    "mnemonic: could not derive the Arweave address ({e}); enumerating by tag only"
+                );
+                Vec::new()
+            }
+        };
+
+        let enumerated =
+            mnemonic_core::restore::enumerate_anchored(&gql, &solana, &owner, &arweave_addresses)
+                .await;
+        eprintln!(
+            "mnemonic: {} anchored item(s) found on chain",
+            enumerated.len()
+        );
+
+        let (items, fetch_failed) =
+            mnemonic_core::restore::fetch_restorable(&gateway, &enumerated).await;
+        for (tx, reason) in &fetch_failed {
+            eprintln!("mnemonic: skipping {tx}: {reason}");
+        }
+
+        if dry_run {
+            let mine = items.iter().filter(|i| i.row.owner_pubkey == owner).count();
+            println!(
+                "dry run: {} enumerated, {} verified, {} authored by this identity, {} unreadable",
+                enumerated.len(),
+                items.len(),
+                mine,
+                fetch_failed.len()
+            );
+            return Ok(());
+        }
+
+        // Open the store only now: nothing above needs it, and the store must
+        // never be held across an `.await` (it is `!Send`). Every network call
+        // has already completed.
+        let store = match mnemonic_core::storage::SqliteStore::open(&cfg.database_path) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("mnemonic: opening the database failed: {e:#}");
+                std::process::exit(1);
+            }
+        };
+        let report = mnemonic_core::restore::apply_restore(&store, &owner, &items);
+        for (tx, reason) in &report.failed {
+            eprintln!("mnemonic: failed {tx}: {reason}");
+        }
+        println!(
+            "restored {} of {} anchored item(s); {} belong to another identity; {} failed",
+            report.restored,
+            enumerated.len(),
+            report.skipped_other_owner,
+            report.failed.len() + fetch_failed.len()
+        );
+        return Ok(());
+    }
+
     // ── Hosted endpoint resolution (Decision 12 + SAR5-M1 round 3) ───────────
     // The compile-time `DEFAULT_HOSTED_ENDPOINT` wins unless the operator
     // explicitly passed `--allow-custom-endpoint` AND set the env var AND
@@ -256,8 +359,8 @@ async fn main() -> anyhow::Result<()> {
     // existing `mnemonic-mcp --transport stdio` invocation is unchanged.
     let transport = match cli.command {
         Some(Command::McpStdio) => "stdio".to_string(),
-        Some(Command::Logout) | Some(Command::Identity) => {
-            unreachable!("logout and identity short-circuit above")
+        Some(Command::Logout) | Some(Command::Identity) | Some(Command::Restore { .. }) => {
+            unreachable!("logout, identity and restore short-circuit above")
         }
         None => {
             if std::env::var("MCP_TRANSPORT").is_ok() {

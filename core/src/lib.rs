@@ -42,6 +42,11 @@ pub mod embed;
 pub mod encrypt;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod lineage;
+// Restore a recall index from Arweave (work/arweave-as-source-of-truth Wave 3).
+// Native-only because enumeration and fetching use `reqwest`; the per-artifact
+// rebuild it calls is portable and also exported to wasm.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod restore;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod solana;
 #[cfg(not(target_arch = "wasm32"))]

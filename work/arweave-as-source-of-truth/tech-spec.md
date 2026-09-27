@@ -240,7 +240,9 @@ Restoration concerns anchored rows alone, so the fields land exactly where they 
 - **Wave 2 — portable rebuild. DONE.** Moved the module, added `rebuild_row_self_describing`
   and the `rebuild_row` WASM export, and covered it from Rust and from JS against the
   real WASM artifact.
-- **Wave 3 — restore driver and CLI.** `core/src/restore/`, `mnemonic export`, `mnemonic restore`.
+- **Wave 3 — restore driver. DONE (restore).** `core/src/restore/` plus the
+  `mnemonic-mcp restore` subcommand. `mnemonic export` moves to Wave 5, where the
+  migration actually needs it (it also closes #47).
 - **Wave 4 — server removal.** Drop the memory tables, change the anchor confirmation, refuse
   `local` over HTTP, rename the mode, update the envelope.
 - **Wave 5 — migration and documents.** The relabel, the user announcement, and every affected

@@ -91,6 +91,15 @@ pub struct RebuiltRow {
     pub embedding: Vec<f32>,
     /// Which representation `embedding` was recovered from.
     pub precision: Precision,
+    /// The signed `visibility` label, when the artifact carries one. Anchored
+    /// artifacts record it (work/arweave-as-source-of-truth Wave 1) precisely so
+    /// a restore does not have to guess. `None` for a legacy artifact written
+    /// before the field existed; a caller must then default to the private,
+    /// non-disclosing side.
+    pub visibility: Option<String>,
+    /// The signed `anchor` label naming the durable backend, when present. Lets
+    /// a restore recover the write mode from the artifact instead of a column.
+    pub anchor: Option<String>,
 }
 
 /// Reconstruct a [`RebuiltRow`] from one signed artifact's COSE bytes.
@@ -167,6 +176,8 @@ pub fn rebuild_row(
         created_at,
         embedding,
         precision,
+        visibility: get_str("visibility"),
+        anchor: get_str("anchor"),
     })
 }
 
