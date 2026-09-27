@@ -6,6 +6,12 @@
 //! - Uses deterministic CBOR (RFC 8949 S4.2): sorted map keys, no indefinite lengths
 //! - Timestamps encoded as CBOR tag 1 (epoch-based datetime)
 //! - Null/missing optional fields are omitted (not encoded as CBOR null)
+//!
+//! Scope: **memory artifacts only.** Do not use this for a document that crosses into
+//! another ecosystem. Non-integer numbers are encoded as text and RFC 3339 strings become
+//! CBOR tag 1 epoch seconds, so a numeric score or a precise timestamp does not survive.
+//! Cross-ecosystem documents use that ecosystem's canonicalization and hash — see
+//! `work/erc8004-reputation/` D-1, which uses RFC 8785 (JCS) with keccak256.
 
 use ciborium::Value as CborValue;
 use serde_json::Value as JsonValue;
