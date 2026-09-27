@@ -69,3 +69,52 @@ the old shape, which is correct, because a local index is never restored from Ar
 
 **Follow-up.** When the legacy local rows are gone, `rebuild_content_hash` is deleted with them.
 Note that in the Wave 4 task.
+
+### D-2. What "no SQL for anchored memories" means precisely (2026-09-27)
+
+The owner's instruction is "no SQL for anchored memories storage; utility SQL is ok". Two
+dependencies found while scoping Wave 4 make the boundary matter:
+
+- **F9.** The replay guard behind `already_anchored` (`find_anchored_by_content_hash`, added by
+  #244) reads server-stored anchored rows. Remove them and an artifact can be anchored twice:
+  a duplicate chain write and a second free grant spent for one memory.
+- **F10.** The public ledger (`/artifacts`, `list_public_artifacts`) serves `content` from the
+  `attestations` table.
+
+**Decision.** The server keeps **no memory** — no `content`, no embedding. It keeps an **anchor
+index**: `attestation_id`, `content_hash`, the two transaction ids, `owner_pubkey`,
+`created_at`, `write_mode`, `visibility`. A hash and a transaction id are not memory; they are
+the operator's own bookkeeping, and the replay guard and verify routing depend on them. The
+memory itself — the text and the vector — lives on Arweave only.
+
+**Consequences that still need the owner.** Both are deferred to Wave 4b rather than guessed:
+
+- **Q-1. Hosted semantic recall of anchored memories becomes impossible**, because the server
+  holds no embedding. Client-side recall over a restored index is the replacement. Confirm that
+  hosted `mnemonic_recall` returning nothing for anchored memories is acceptable, or whether the
+  operator should keep a public-only derived index.
+- **Q-2. `/artifacts` can no longer show content** from the database. Options: fetch from Arweave
+  per request, keep a derived public-only cache rebuilt by `core/src/restore/` (tech-spec
+  Decision 7), or show hashes and links only.
+
+### D-3. Wave 4 splits; hosted `local` writes are retired first (2026-09-27)
+
+Wave 4 as specified bundles four changes with a wide blast radius. Landing them together would
+mix a bounded, reviewable change with a product decision that is still open (D-2 Q-1 and Q-2).
+
+Shipped now (Wave 4a): an explicit `mode: "local"` over HTTP returns `-32010 UnsupportedMode`.
+`local` means the agent's own machine; a hosted deploy cannot provide it, and quietly storing
+the memory in the operator's database under that name was the dishonest part. This retires the
+"free hosted SQLite" tier that `work/binary-mode-cleanup/` calls a deploy anti-pattern.
+
+Only an **explicit** `local` is refused. A caller that sends no `mode` still resolves from the
+operator's configuration, so clients that never learned the field keep working. Moving them onto
+a paid path is a billing decision and not this change's to make.
+
+Deferred to Wave 4b: dropping `content` and the embedding from anchored rows, chain-based anchor
+confirmation (tech-spec Decision 5), and the public read surface (D-2 Q-2).
+
+Test impact, recorded because it looks like lost coverage and is not: five tests asserted the
+retired tier. Three became one test asserting the refusal. Two — the local sign-then-verify round
+trip and its tamper-detection counterpart — now drive the stdio transport, where `local` is still
+legal, so the verify coverage is unchanged.

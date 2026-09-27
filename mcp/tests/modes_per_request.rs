@@ -48,68 +48,38 @@ use serde_json::json;
 // ── 1. local-mode write against a full-mode + paid server is free ──────────
 
 #[tokio::test]
-async fn local_against_full_server_returns_free() {
-    // Full + x402 + non-zero cost. A `local` request must bypass the
-    // paywall entirely (no x402 challenge, no charge) and persist with
-    // synthetic `local:` ids — proves the gate is keyed on resolved
-    // `WriteMode`, not env-var.
-    let server = TestServer::builder()
-        .storage_mode("full")
-        .payment_mode("x402")
-        .sign_memory_cost_micro_usdc(10_000) // 1 cent / write
-        .build();
-    let owner = server.server_pubkey();
+async fn explicit_local_over_http_is_refused() {
+    // Replaces three tests that asserted a hosted `mode: "local"` write landed
+    // in the OPERATOR's database — free on a local-only deploy, hash-only for a
+    // remote JWT subject. That tier is retired: `local` means the agent's own
+    // machine, and a hosted deploy cannot provide it
+    // (work/binary-mode-cleanup, work/arweave-as-source-of-truth Decision 8).
+    //
+    // Local-mode coverage did not disappear: it moved to the stdio transport,
+    // where the mode is still legal and where the operator key really is the
+    // agent's own identity.
+    for storage_mode in ["local", "full"] {
+        let server = TestServer::builder().storage_mode(storage_mode).build();
+        let owner = server.server_pubkey();
 
-    let result = server
-        .call_tool(
-            Some(&owner),
-            "mnemonic_sign_memory",
-            json!({"content": "free local note", "mode": "local"}),
-        )
-        .await;
+        let result = server
+            .call_tool(
+                Some(&owner),
+                "mnemonic_sign_memory",
+                json!({"content": "hosted local is gone", "mode": "local"}),
+            )
+            .await;
 
-    // (a) Paywall bypassed entirely: a `Local` request on an x402 deploy
-    // MUST NOT trigger the 402-challenge path. If the paywall fired, the
-    // response would be a `402 Payment Required` body (PaymentGate::
-    // NeedPayment) or a `-32600` "missing Authorization" envelope —
-    // neither is a 200 OK with a tool result.
-    assert_eq!(
-        result.status,
-        axum::http::StatusCode::OK,
-        "Local request must NOT receive 402; got status {} body {:?}",
-        result.status,
-        result.envelope,
-    );
-    // (b) No JSON-RPC error in the envelope (we have a real result).
-    assert!(
-        result.error().is_none(),
-        "expected success; got {:?}",
-        result.envelope
-    );
-
-    let inner = result.result_text();
-    assert_eq!(
-        inner["write_mode"], "local",
-        "response envelope must report write_mode = local"
-    );
-    let sol_tx = inner["solana_tx"].as_str().expect("solana_tx");
-    let ar_tx = inner["arweave_tx"].as_str().expect("arweave_tx");
-    assert!(sol_tx.starts_with("local:"), "got sol_tx={sol_tx}");
-    assert!(ar_tx.starts_with("local:"), "got ar_tx={ar_tx}");
-
-    // DB: 1 row, write_mode='local', no attestation_costs.
-    assert_eq!(server.attestation_count(&owner), 1);
-    let attestation_id = inner["attestation_id"].as_str().expect("attestation_id");
-    assert_eq!(
-        server.write_mode_for_tx(sol_tx),
-        Some("local".to_string()),
-        "row must be tagged write_mode='local'"
-    );
-    assert_eq!(
-        server.attestation_cost_rows(attestation_id),
-        0,
-        "free path must NOT write an attestation_costs row"
-    );
+        let err = result.expect_error();
+        assert_eq!(err["code"], -32010, "on {storage_mode}: {err:?}");
+        assert_eq!(err["data"]["kind"], "UnsupportedMode");
+        assert_eq!(err["data"]["requested"], "local");
+        assert_eq!(
+            server.attestation_count(&owner),
+            0,
+            "a refused write must leave no row behind"
+        );
+    }
 }
 
 // ── 1b (round-2). Explicit local request on a local-only deploy bypasses ───
@@ -119,115 +89,11 @@ async fn local_against_full_server_returns_free() {
 //     deploys. The user-spec invariant "Личная память бесплатна всегда"
 //     applies uniformly across deploys, not just to `full + JWT`.
 
-#[tokio::test]
-async fn explicit_local_against_local_only_server_is_inline_not_deferred() {
-    let server = TestServer::builder()
-        .storage_mode("local")
-        .payment_mode("none")
-        .build();
-    let owner = server.server_pubkey();
-
-    let result = server
-        .call_tool(
-            Some(&owner),
-            "mnemonic_sign_memory",
-            json!({"content": "explicit-local on local-only", "mode": "local"}),
-        )
-        .await;
-
-    assert!(
-        result.error().is_none(),
-        "explicit local must succeed inline; envelope={:?}",
-        result.envelope,
-    );
-
-    let inner = result.result_text();
-    // Inline shape: carries `attestation_id` + `write_mode`. Deferred
-    // shape would carry `status: "awaiting_signature"` + `correlation_id`
-    // and NO `attestation_id`.
-    assert!(
-        inner["attestation_id"].is_string(),
-        "expected inline `attestation_id`, got {inner:?} — round-1 regression: deferred path fired",
-    );
-    assert!(
-        inner.get("status") != Some(&json!("awaiting_signature")),
-        "must NOT return awaiting_signature for explicit-local: {inner:?}",
-    );
-    assert_eq!(inner["write_mode"], "local");
-    let sol_tx = inner["solana_tx"].as_str().expect("solana_tx");
-    let ar_tx = inner["arweave_tx"].as_str().expect("arweave_tx");
-    assert!(sol_tx.starts_with("local:"), "got sol_tx={sol_tx}");
-    assert!(ar_tx.starts_with("local:"), "got ar_tx={ar_tx}");
-
-    // Row persisted (inline path writes the SQLite row immediately,
-    // unlike the deferred path which parks a bundle and waits for the
-    // sign-callback).
-    assert_eq!(server.attestation_count(&owner), 1);
-    assert_eq!(server.write_mode_for_tx(sol_tx), Some("local".to_string()),);
-}
-
 // ── 1c. A REMOTE user's explicit-local write is a hash-only row ──────────
 //     owned by the remote user. Nothing is signed: no operator signature
 //     (the operator never signs for another identity) and no client
 //     signature (a free local write needs no keychain prompt). Only
 //     anchored writes are client-signed — see 1d.
-
-#[tokio::test]
-async fn explicit_local_remote_user_is_hash_only_not_signed() {
-    let server = TestServer::builder()
-        .storage_mode("local")
-        .payment_mode("none")
-        .build();
-    // A remote identity distinct from the operator/server keypair.
-    let remote = "RemoteUser1111111111111111111111111111111111";
-    let operator = server.server_pubkey();
-    assert_ne!(remote, operator.as_str());
-
-    let result = server
-        .call_tool(
-            Some(remote),
-            "mnemonic_sign_memory",
-            json!({"content": "remote local memo", "mode": "local"}),
-        )
-        .await;
-    assert!(result.error().is_none(), "envelope: {:?}", result.envelope);
-    let inner = result.result_text();
-
-    // Inline shape, not the deferred client-signing envelope.
-    assert!(
-        inner.get("correlation_id").is_none() && inner.get("status").is_none(),
-        "remote explicit-local must not defer to client signing, got {inner:?}",
-    );
-    assert!(inner["attestation_id"].is_string(), "{inner:?}");
-    assert_eq!(inner["write_mode"], "local");
-    // The envelope names the owner and states that nothing signed it.
-    assert_eq!(inner["signer"], remote);
-    assert_eq!(inner["signature"], "none");
-    assert_eq!(inner["did_sol"], format!("did:sol:{remote}"));
-    let sol_tx = inner["solana_tx"].as_str().expect("solana_tx");
-    assert!(sol_tx.starts_with("local:"), "got sol_tx={sol_tx}");
-
-    // Row: owner = signer = remote subject; the operator signed nothing.
-    let row = server
-        .fetch_attestation_by_tx(sol_tx, remote)
-        .expect("row scoped to the remote owner");
-    assert_eq!(row.signer_pubkey, remote);
-    assert!(server.fetch_attestation_by_tx(sol_tx, &operator).is_none());
-    assert_eq!(server.attestation_count(remote), 1);
-    assert_eq!(server.attestation_count(&operator), 0);
-
-    // Recall under the remote JWT returns the row.
-    let recall = server
-        .call_tool(
-            Some(remote),
-            "mnemonic_recall",
-            json!({"query": "remote local memo", "limit": 5}),
-        )
-        .await;
-    assert!(recall.error().is_none(), "envelope: {:?}", recall.envelope);
-    let results = recall.result_text()["results"].clone();
-    assert_eq!(results.as_array().map(Vec::len), Some(1), "{results:?}");
-}
 
 // ── 1d. A REMOTE user's anchored write stays client-signed ─────────────
 //     (deferred). The operator key never signs an anchored memory for

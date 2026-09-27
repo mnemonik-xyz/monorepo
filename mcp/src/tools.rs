@@ -401,6 +401,26 @@ pub async fn sign_memory(
             &envelope.supported_modes,
         )));
     }
+    // The mirror of the check above (work/binary-mode-cleanup, and Decision 8 of
+    // work/arweave-as-source-of-truth). `local` means the memory stays on the
+    // agent's own machine. A hosted HTTP deploy cannot provide that: a "local"
+    // write there is a row in the OPERATOR's database, which is exactly the
+    // custodial tier the binary mode model retires. Refusing is more honest than
+    // quietly storing the memory server-side under a name that says otherwise.
+    //
+    // Only an EXPLICIT `mode: "local"` is refused. A caller that sends no mode
+    // still resolves from the operator's configuration, so clients that never
+    // learned the field keep working; silently moving them onto a paid path is
+    // not this change's business to decide.
+    if resolved.write_mode == WriteMode::Local
+        && resolved.explicit
+        && !transport.allows_operator_signing()
+    {
+        return Err(ToolError::TypedRpc(unsupported_mode(
+            "local",
+            &["anchored"],
+        )));
+    }
     // Routing rule — who signs a memory:
     //
     // 1. Only a memory anchored on-chain (`anchored`) carries a COSE
@@ -2625,97 +2645,6 @@ mod sign_memory_tests {
         }
     }
 
-    #[tokio::test]
-    async fn test_explicit_local_with_jwt_takes_inline_path() {
-        // T2 round-2 (security-auditor major): explicit `mode: "local"`
-        // with a JWT MUST short-circuit to the inline path regardless
-        // of deploy variant — both local-only AND full deploys honour
-        // the "Личная память бесплатна всегда" invariant uniformly.
-        // Round-1's `envelope.supports_anchored()` workaround broke
-        // this for local-only deploys.
-        let (kp, sol, ar, store, emb, comp, pending, hint) = fixtures();
-        let owner = kp.pubkey().to_string();
-
-        // Sub-case A: explicit local on a local-only deploy.
-        let env_local = local_envelope();
-        let resolved_explicit_local =
-            resolve_write_mode(Some(&serde_json::json!("local")), "local").unwrap();
-        assert!(resolved_explicit_local.is_explicit_local());
-        let (hosted_client, args) = no_softfall();
-        let result = sign_memory(
-            &LazyKeypair::ready(kp.insecure_clone()),
-            &sol,
-            &ar,
-            &store,
-            &emb,
-            &comp,
-            &pending,
-            "explicit-local-on-local",
-            &[],
-            &hint,
-            "local",
-            &owner,
-            Some("user-jwt-sub"),
-            Transport::Http,
-            resolved_explicit_local,
-            Visibility::Private,
-            &env_local,
-            std::time::Duration::from_secs(15),
-            false,
-            "",
-            &hosted_client,
-            &args,
-        )
-        .await
-        .unwrap();
-        assert!(
-            result["attestation_id"].is_string(),
-            "expected inline shape, got {result:?}"
-        );
-        assert_eq!(result["write_mode"], "local");
-        // Sub-case B: explicit local on a full deploy.
-        let env_full = Envelope::from_config("full", "none", 0);
-        let resolved_explicit_local_full =
-            resolve_write_mode(Some(&serde_json::json!("local")), "full").unwrap();
-        assert!(resolved_explicit_local_full.is_explicit_local());
-        let (hosted_client, args) = no_softfall();
-        let result = sign_memory(
-            &LazyKeypair::ready(kp.insecure_clone()),
-            &sol,
-            &ar,
-            &store,
-            &emb,
-            &comp,
-            &pending,
-            "explicit-local-on-full",
-            &[],
-            &hint,
-            "full",
-            &owner,
-            Some("user-jwt-sub"),
-            Transport::Http,
-            resolved_explicit_local_full,
-            Visibility::Private,
-            &env_full,
-            std::time::Duration::from_secs(15),
-            false,
-            "",
-            &hosted_client,
-            &args,
-        )
-        .await
-        .unwrap();
-        assert!(
-            result["attestation_id"].is_string(),
-            "expected inline shape on full deploy too"
-        );
-        assert_eq!(result["write_mode"], "local");
-    }
-
-    /// Operator identity whose secret access is observable. `attempts`
-    /// counts every attempt to read the operator secret — the only way to
-    /// get a COSE signature out of the operator key. The load always fails,
-    /// so a missing guard cannot silently sign either.
     fn watched_operator(
         pubkey: solana_sdk::pubkey::Pubkey,
     ) -> (LazyKeypair, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
@@ -2779,94 +2708,89 @@ mod sign_memory_tests {
         .await
     }
 
+    // Helpers retained from the tests that asserted hosted-local writes. The
+    // tier is gone, but these drive other sign_memory cases below.
+
+    /// Binary mode model: an explicit `mode: "local"` over HTTP is refused.
+    ///
+    /// This replaces two tests that asserted the opposite — that a hosted JWT
+    /// caller asking for `local` got an inline hash-only row in the OPERATOR's
+    /// database. That tier is retired (work/binary-mode-cleanup,
+    /// work/arweave-as-source-of-truth Decision 8): `local` means the agent's own
+    /// machine, and a hosted deploy cannot provide it, so claiming otherwise was
+    /// the dishonest part.
+    ///
+    /// The whitepaper invariant "personal memory is always free" still holds, but
+    /// structurally: free means client-side, via a locally installed server.
     #[tokio::test]
-    async fn test_jwt_explicit_local_remote_owner_is_hash_only_inline() {
-        // Owner requirement 2: a hosted user's free local write needs no
-        // client signature (no keychain prompt) and gets no operator
-        // signature either — a hash-only row owned by the JWT subject.
-        let (kp, sol, ar, store, emb, comp, pending, _hint) = fixtures();
-        let (operator, attempts) = watched_operator(kp.pubkey());
-        let operator_pk = kp.pubkey().to_string();
-        let remote = Keypair::new().pubkey().to_string();
-        let mut sol_txs = Vec::new();
-        for storage_mode in ["local", "full"] {
-            let resolved = resolve_write_mode(Some(&serde_json::json!("local")), storage_mode)
-                .expect("explicit local resolves");
-            let out = sign_as(
-                &operator,
+    async fn explicit_local_over_http_is_refused_on_every_deploy_variant() {
+        let (kp, sol, ar, store, emb, comp, pending, hint) = fixtures();
+        let owner = kp.pubkey().to_string();
+
+        // Both deploy variants must refuse it: the reason is the transport, not
+        // the operator's storage configuration.
+        for (env_storage, envelope) in [
+            ("local", local_envelope()),
+            ("full", Envelope::from_config("full", "none", 0)),
+        ] {
+            let resolved = resolve_write_mode(Some(&serde_json::json!("local")), env_storage)
+                .expect("local parses");
+            assert!(resolved.is_explicit_local());
+            let (hosted_client, args) = no_softfall();
+            let err = sign_memory(
+                &LazyKeypair::ready(kp.insecure_clone()),
+                &sol,
+                &ar,
                 &store,
+                &emb,
+                &comp,
                 &pending,
-                &remote,
-                Some(&remote),
+                "explicit-local-over-http",
+                &[],
+                &hint,
+                env_storage,
+                &owner,
+                Some("user-jwt-sub"),
                 Transport::Http,
                 resolved,
-                storage_mode,
-                "remote free note",
+                Visibility::Private,
+                &envelope,
+                std::time::Duration::from_secs(15),
+                false,
+                "",
+                &hosted_client,
+                &args,
             )
             .await
-            .expect("explicit local write succeeds inline");
-            assert!(out.get("correlation_id").is_none(), "not deferred: {out}");
-            assert!(out.get("status").is_none(), "not deferred: {out}");
-            assert!(out["attestation_id"].is_string(), "{out}");
-            assert_eq!(out["write_mode"], "local");
-            assert_eq!(out["signer"], remote.as_str());
-            assert_eq!(out["signature"], "none");
-            assert_eq!(out["did_sol"], format!("did:sol:{remote}"));
-            let sol_tx = out["solana_tx"].as_str().expect("solana_tx").to_string();
-            assert!(sol_tx.starts_with("local:"), "{sol_tx}");
-            assert!(out["arweave_tx"].as_str().unwrap().starts_with("local:"));
-            sol_txs.push(sol_tx);
-        }
-        // Nothing parked for client signing, operator secret never touched.
-        assert_eq!(pending.len().await, 0);
-        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 0);
-        assert!(!operator.is_loaded());
+            .expect_err("explicit local over HTTP must be refused");
 
-        {
-            let s = store.lock().unwrap();
-            // `count` is keyed on the `signer_pubkey` column: owner, never operator.
-            assert_eq!(s.count(&remote).unwrap(), 2);
-            assert_eq!(s.count(&operator_pk).unwrap(), 0);
-            // Recall scoping: the JWT subject sees the rows, the operator does not.
-            let mine = recall(
-                &operator,
-                &s,
-                &emb,
-                "remote free note",
-                5,
-                Some(&remote),
-                None,
-            );
-            assert_eq!(mine["results"].as_array().unwrap().len(), 2, "{mine}");
-            let op = recall(
-                &operator,
-                &s,
-                &emb,
-                "remote free note",
-                5,
-                Some(&operator_pk),
-                None,
-            );
-            assert!(op["results"].as_array().unwrap().is_empty(), "{op}");
+            match err {
+                ToolError::TypedRpc(e) => {
+                    assert_eq!(e.code, -32010, "expected UnsupportedMode on {env_storage}");
+                    let data = e.data.expect("typed error carries data");
+                    assert_eq!(data["kind"], "UnsupportedMode");
+                    assert_eq!(data["requested"], "local");
+                }
+                other => panic!("expected a typed UnsupportedMode error, got {other:?}"),
+            }
         }
 
-        // `verify` rebuilds the canonical CBOR with `producer =
-        // did:sol:<signer_pubkey>` — must reproduce the stored hash.
-        let v = verify(
-            &sol,
-            &ar,
-            &store,
-            Some(&sol_txs[0]),
-            None,
-            &remote,
-            "local",
-            &emb,
-            &comp,
-        )
-        .await
-        .expect("verify");
-        assert_eq!(v["status"], "verified", "{v}");
-        assert_eq!(v["signer"], remote.as_str());
+        // And nothing was written: a refused call must not leave a row behind.
+        let s = store.lock().unwrap();
+        assert_eq!(s.count(&owner).unwrap(), 0);
+    }
+
+    /// A caller that sends no `mode` at all is NOT refused. Clients that never
+    /// learned the field keep working, and moving them onto a paid path silently
+    /// is a separate, deliberate decision.
+    #[tokio::test]
+    async fn an_omitted_mode_is_not_refused_over_http() {
+        let resolved = resolve_write_mode(None, "local").expect("fallback resolves");
+        assert!(!resolved.explicit, "omitted mode must not be explicit");
+        assert_eq!(resolved.write_mode, WriteMode::Local);
+        // The refusal in `sign_memory` is gated on `resolved.explicit`, so this
+        // shape never reaches it. Asserting the resolver's output is the precise
+        // statement; driving the whole call here would only re-test the fallback.
     }
 
     #[tokio::test]
