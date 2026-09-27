@@ -346,3 +346,134 @@ fn compressed_only_artifact_reports_compressed_precision() {
     let row = rebuild_row(&cose, &c).expect("rebuild");
     assert_eq!(row.precision, Precision::Compressed);
 }
+
+// -- work/arweave-as-source-of-truth Wave 2 ------------------------------------
+
+/// Build an artifact that records its own TurboQuant seed, the way an anchored
+/// write does after Wave 1. `seed` is deliberately NOT the protocol default, so
+/// a rebuild that silently assumed 42 would produce a different vector and fail.
+fn make_artifact_with_seed(
+    kp: &Keypair,
+    id: &str,
+    content: &str,
+    embedding: &[f32],
+    seed: u64,
+) -> Vec<u8> {
+    let c = EmbeddingCompressor::new(DIM, BITS, seed);
+    let b64 = base64::engine::general_purpose::STANDARD.encode(c.compress(embedding).to_bytes());
+    let artifact = serde_json::json!({
+        "artifact_id": id,
+        "type": "memory",
+        "schema_version": 1,
+        "content": content,
+        "producer": identity::did_sol(kp),
+        "created_at": "2026-01-01T00:00:00Z",
+        "tags": [],
+        "visibility": "public",
+        "anchor": "arweave",
+        "metadata": {
+            "embed_provider": "stub",
+            "embed_dim": DIM,
+            "turbo_bits": BITS,
+            "turbo_seed": seed,
+            "embedding_compressed": b64,
+        },
+    });
+    sign_artifact(&artifact, &schema::MEMORY_V1, kp)
+        .expect("sign")
+        .cose_bytes
+}
+
+/// The point of the whole restore story: anyone holding the Arweave bytes can
+/// rebuild the row without being told any constant out of band. A non-default
+/// seed proves the value is really read from the artifact.
+#[test]
+fn self_describing_rebuild_needs_no_out_of_band_constants() {
+    let kp = Keypair::new();
+    let embedding: Vec<f32> = (0..DIM).map(|i| (i as f32) * 0.1 - 0.3).collect();
+    let cose = make_artifact_with_seed(&kp, "att-seed", "seeded", &embedding, 9_001);
+
+    let row = mnemonic_core::rebuild::rebuild_row_self_describing(&cose)
+        .expect("an artifact that declares its own seed must rebuild");
+
+    assert_eq!(row.content, "seeded");
+    assert_eq!(row.attestation_id, "att-seed");
+
+    // Same vector the producer's compressor would yield for that seed, and NOT
+    // the one the default seed would yield.
+    let producer = EmbeddingCompressor::new(DIM, BITS, 9_001);
+    let expected = producer.decompress(&producer.compress(&embedding));
+    assert_eq!(row.embedding, expected);
+
+    let wrong = compressor(); // seed 42
+    let wrong_vec = wrong.decompress(&wrong.compress(&embedding));
+    assert_ne!(
+        row.embedding, wrong_vec,
+        "the seed must come from the artifact, not from a hardcoded default"
+    );
+}
+
+/// A legacy artifact predates `turbo_seed`. It must still rebuild, using the
+/// seed every producer of that era used.
+#[test]
+fn self_describing_rebuild_falls_back_for_legacy_artifacts() {
+    let kp = Keypair::new();
+    let c = compressor();
+    let embedding: Vec<f32> = (0..DIM).map(|i| 0.05 * i as f32).collect();
+    let (cose, _, _) = make_artifact(&kp, &c, "att-legacy", "no seed field", &embedding, &[]);
+
+    let row = mnemonic_core::rebuild::rebuild_row_self_describing(&cose)
+        .expect("a legacy artifact must still rebuild");
+    assert_eq!(row.content, "no seed field");
+    assert_eq!(row.embedding, c.decompress(&c.compress(&embedding)));
+    assert_eq!(
+        mnemonic_core::rebuild::LEGACY_TURBO_SEED,
+        SEED,
+        "the documented fallback must match what pre-change producers used"
+    );
+}
+
+/// A tampered artifact must be refused before any field is trusted, on this
+/// path too — not only on `rebuild_row`.
+#[test]
+fn self_describing_rebuild_rejects_a_tampered_artifact() {
+    let kp = Keypair::new();
+    let embedding = vec![0.1f32; DIM];
+    let mut cose = make_artifact_with_seed(&kp, "att-bad", "tamper me", &embedding, 42);
+    let last = cose.len() - 1;
+    cose[last] ^= 0xff;
+    assert!(mnemonic_core::rebuild::rebuild_row_self_describing(&cose).is_err());
+}
+
+/// `embed_dim` disagreeing with the compressed bytes means the artifact is
+/// internally inconsistent. Rebuilding anyway would yield a wrong vector under
+/// a confident-looking API, so it is an error.
+#[test]
+fn self_describing_rebuild_rejects_a_dim_mismatch() {
+    let kp = Keypair::new();
+    let embedding = vec![0.2f32; DIM];
+    let c = compressor();
+    let b64 = base64::engine::general_purpose::STANDARD.encode(c.compress(&embedding).to_bytes());
+    let artifact = serde_json::json!({
+        "artifact_id": "att-dim",
+        "type": "memory",
+        "schema_version": 1,
+        "content": "mismatched",
+        "producer": identity::did_sol(&kp),
+        "created_at": "2026-01-01T00:00:00Z",
+        "tags": [],
+        "metadata": {
+            "embed_provider": "stub",
+            "embed_dim": DIM + 4, // lie
+            "turbo_bits": BITS,
+            "turbo_seed": SEED,
+            "embedding_compressed": b64,
+        },
+    });
+    let cose = sign_artifact(&artifact, &schema::MEMORY_V1, &kp)
+        .expect("sign")
+        .cose_bytes;
+    let err = mnemonic_core::rebuild::rebuild_row_self_describing(&cose)
+        .expect_err("a dim mismatch must not rebuild");
+    assert!(err.contains("embed_dim"), "unhelpful error: {err}");
+}

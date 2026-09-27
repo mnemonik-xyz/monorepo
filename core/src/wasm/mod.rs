@@ -344,6 +344,101 @@ mod tests {
         serde_wasm_bindgen::from_value::<KeypairJson>(value.clone()).expect("deserialise keypair")
     }
 
+    /// Wave 2 of work/arweave-as-source-of-truth: a browser client must be able
+    /// to rebuild a row from Arweave bytes on its own. This signs an artifact in
+    /// the WASM build, rebuilds it through the exported entry point, and checks
+    /// the recovered fields — including that the seed came from the artifact
+    /// rather than a hardcoded default.
+    #[wasm_bindgen_test]
+    fn rebuild_row_reconstructs_a_row_in_the_browser() {
+        use crate::compress::EmbeddingCompressor;
+        use base64::Engine as _;
+
+        let dim = 8usize;
+        let bits = 4usize;
+        let seed = 9_001u64; // deliberately not the protocol default
+        let embedding: Vec<f32> = (0..dim).map(|i| i as f32 * 0.25 - 1.0).collect();
+
+        let kp_value = generate_keypair().expect("generate_keypair");
+        let kpj = read_keypair(&kp_value);
+        let signer_b58 = kpj.pubkey_base58.clone();
+        let kp = keypair_from_json(kpj).expect("keypair from json");
+
+        let c = EmbeddingCompressor::new(dim, bits, seed);
+        let b64 =
+            base64::engine::general_purpose::STANDARD.encode(c.compress(&embedding).to_bytes());
+        let artifact = serde_json::json!({
+            "artifact_id": "att-wasm",
+            "type": "memory",
+            "schema_version": 1,
+            "content": "rebuilt in the browser",
+            "producer": crate::identity::did_sol(&kp),
+            "created_at": "2026-09-27T00:00:00Z",
+            "tags": ["wasm"],
+            "visibility": "public",
+            "anchor": "arweave",
+            "metadata": {
+                "embed_provider": "stub",
+                "embed_dim": dim,
+                "turbo_bits": bits,
+                "turbo_seed": seed,
+                "embedding_compressed": b64,
+            },
+        });
+        let signed =
+            crate::codec::sign::sign_artifact(&artifact, &crate::codec::schema::MEMORY_V1, &kp)
+                .expect("sign artifact");
+
+        let value = rebuild_row(&signed.cose_bytes).expect("rebuild_row must succeed in wasm");
+        let row: crate::wasm::RebuiltRowJs =
+            serde_wasm_bindgen::from_value(value).expect("row deserialises");
+
+        assert_eq!(row.attestation_id, "att-wasm");
+        assert_eq!(row.content, "rebuilt in the browser");
+        assert_eq!(row.content_hash, signed.content_hash);
+        assert_eq!(row.tags, vec!["wasm".to_string()]);
+        assert_eq!(row.signer_pubkey, signer_b58);
+        assert_eq!(row.precision, "compressed");
+        assert_eq!(
+            row.embedding,
+            c.decompress(&c.compress(&embedding)),
+            "the seed must be read from the artifact, not assumed"
+        );
+    }
+
+    /// A tampered artifact must be refused in the browser too.
+    #[wasm_bindgen_test]
+    fn rebuild_row_rejects_a_tampered_artifact() {
+        use crate::compress::EmbeddingCompressor;
+        use base64::Engine as _;
+
+        let kp_value = generate_keypair().expect("generate_keypair");
+        let kpj = read_keypair(&kp_value);
+        let kp = keypair_from_json(kpj).expect("keypair from json");
+        let c = EmbeddingCompressor::new(8, 4, 42);
+        let b64 = base64::engine::general_purpose::STANDARD
+            .encode(c.compress(&vec![0.1f32; 8]).to_bytes());
+        let artifact = serde_json::json!({
+            "artifact_id": "att-bad",
+            "type": "memory",
+            "schema_version": 1,
+            "content": "tamper me",
+            "producer": crate::identity::did_sol(&kp),
+            "created_at": "2026-09-27T00:00:00Z",
+            "metadata": { "embed_dim": 8, "turbo_bits": 4, "embedding_compressed": b64 },
+        });
+        let mut cose =
+            crate::codec::sign::sign_artifact(&artifact, &crate::codec::schema::MEMORY_V1, &kp)
+                .expect("sign")
+                .cose_bytes;
+        let last = cose.len() - 1;
+        cose[last] ^= 0xff;
+        assert!(
+            rebuild_row(&cose).is_err(),
+            "a tampered artifact must not rebuild"
+        );
+    }
+
     #[wasm_bindgen_test]
     fn keypair_gen_produces_valid_ed25519() {
         let kp_value = generate_keypair().expect("generate_keypair");
@@ -454,4 +549,61 @@ mod tests {
             "signer kid matches generated pubkey"
         );
     }
+}
+
+/// One row rebuilt from a signed artifact, shaped for JavaScript.
+///
+/// Mirrors [`crate::rebuild::RebuiltRow`] but with camelCase keys and the
+/// precision tier as a string, so the SDK consumes it without a mapping layer.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct RebuiltRowJs {
+    pub attestation_id: String,
+    pub content: String,
+    pub content_hash: String,
+    pub tags: Vec<String>,
+    pub owner_pubkey: String,
+    pub signer_pubkey: String,
+    pub created_at: String,
+    pub embedding: Vec<f32>,
+    /// `"f32"` when the artifact carried the exact vector, `"compressed"` when
+    /// only the lossy TurboQuant copy was available. A client showing search
+    /// quality should surface the difference rather than hide it.
+    pub precision: String,
+}
+
+/// Rebuild one recall row from the signed artifact bytes stored on Arweave.
+///
+/// This is the client half of "Arweave is the source of truth": given the
+/// COSE_Sign1 bytes of an item, the browser reconstructs the row — content,
+/// tags, author, hash and embedding — with no server involved. Enumeration of
+/// *which* items to fetch stays in JavaScript (the Arweave gateway GraphQL and
+/// Solana memo history are plain HTTP), because the Rust discovery helpers need
+/// `reqwest` and are native-only.
+///
+/// The signature is verified before any field is read, so a tampered or
+/// unsigned blob can never inject a row. Unlike [`decompress_embedding`], this
+/// takes no `dim` and no seed: it reads `metadata.embed_dim`, `turbo_bits` and
+/// `turbo_seed` from the artifact itself, falling back to the legacy seed for
+/// items written before that field existed. Callers therefore need no
+/// out-of-band constant.
+#[wasm_bindgen]
+pub fn rebuild_row(cose_bytes: &[u8]) -> Result<JsValue, JsValue> {
+    let row = crate::rebuild::rebuild_row_self_describing(cose_bytes)
+        .map_err(|e| JsValue::from_str(&format!("rebuild_row: {e}")))?;
+    let out = RebuiltRowJs {
+        attestation_id: row.attestation_id,
+        content: row.content,
+        content_hash: row.content_hash,
+        tags: row.tags,
+        owner_pubkey: row.owner_pubkey,
+        signer_pubkey: row.signer_pubkey,
+        created_at: row.created_at,
+        embedding: row.embedding,
+        precision: match row.precision {
+            crate::rebuild::Precision::F32 => "f32".to_string(),
+            crate::rebuild::Precision::Compressed => "compressed".to_string(),
+        },
+    };
+    serde_wasm_bindgen::to_value(&out)
+        .map_err(|e| JsValue::from_str(&format!("rebuild_row: serialise failed: {e}")))
 }

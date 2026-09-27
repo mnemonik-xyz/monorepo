@@ -188,3 +188,72 @@ pub fn rebuild_rows(
     }
     (ok, errs)
 }
+
+/// The TurboQuant seed every producer used before `metadata.turbo_seed` was
+/// recorded in the artifact (work/arweave-as-source-of-truth Wave 1). It is a
+/// protocol constant, not a tuning knob: change it and every pre-existing
+/// compressed embedding becomes undequantizable.
+pub const LEGACY_TURBO_SEED: u64 = 42;
+
+/// Rebuild a row from the artifact alone, deriving the compressor from what the
+/// artifact declares about itself.
+///
+/// [`rebuild_row`] makes the caller supply a compressor configured exactly like
+/// the producer's, which is a hidden out-of-band dependency: `embed_dim` and
+/// `turbo_bits` were always in `metadata`, but the seed was not — it was a
+/// constant inside the producing code, so a third party could not reproduce the
+/// dequantization from the data alone. Anchored artifacts now record
+/// `metadata.turbo_seed`, and this function reads all three.
+///
+/// A legacy artifact that predates `turbo_seed` falls back to
+/// [`LEGACY_TURBO_SEED`], which is what every producer used at the time, so old
+/// items still rebuild.
+///
+/// `embed_dim` is only a cross-check: the compressed bytes carry their own
+/// dimension, and that is what the compressor is built from, because a mismatch
+/// between the two would otherwise silently produce a wrong vector.
+///
+/// This is the entry point a client should use — including the WebAssembly
+/// build, where there is no operator compressor to borrow.
+pub fn rebuild_row_self_describing(cose_bytes: &[u8]) -> Result<RebuiltRow, String> {
+    // Verify before reading any field, exactly as `rebuild_row` does. The work
+    // is repeated inside `rebuild_row` below; that is deliberate, so there is
+    // one verification path rather than an unchecked shortcut here.
+    let v = verify_artifact(cose_bytes, None)?;
+    if !(v.valid && v.cose_signature && v.content_integrity && v.algorithm_valid) {
+        return Err("artifact failed COSE verification; refusing to rebuild from it".into());
+    }
+    let artifact = from_canonical_cbor(&v.payload)?;
+    let metadata = artifact.get("metadata");
+
+    let seed = metadata
+        .and_then(|m| m.get("turbo_seed"))
+        .and_then(|x| x.as_u64())
+        .unwrap_or(LEGACY_TURBO_SEED);
+
+    // The compressed bytes are authoritative for dim and bit width; they are
+    // what the vector must be decoded against.
+    let b64 = metadata
+        .and_then(|m| m.get("embedding_compressed"))
+        .and_then(|x| x.as_str())
+        .ok_or("artifact has no metadata.embedding_compressed")?;
+    let raw = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, b64)
+        .map_err(|e| format!("embedding_compressed is not valid base64: {e}"))?;
+    let compressed = CompressedEmbedding::from_bytes(&raw)
+        .ok_or("could not parse compressed embedding bytes")?;
+
+    if let Some(declared) = metadata
+        .and_then(|m| m.get("embed_dim"))
+        .and_then(|x| x.as_u64())
+    {
+        if declared as usize != compressed.dim {
+            return Err(format!(
+                "metadata.embed_dim ({declared}) disagrees with the compressed bytes ({})",
+                compressed.dim
+            ));
+        }
+    }
+
+    let compressor = EmbeddingCompressor::new(compressed.dim, compressed.bit_width, seed);
+    rebuild_row(cose_bytes, &compressor)
+}
