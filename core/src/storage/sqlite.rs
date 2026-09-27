@@ -2458,7 +2458,11 @@ mod tests {
 
         let rows = store.list_public_artifacts(10).unwrap();
         let ids: Vec<&str> = rows.iter().map(|r| r.attestation_id.as_str()).collect();
-        assert_eq!(ids, vec!["pub-2", "pub-1"], "public rows only, newest first");
+        assert_eq!(
+            ids,
+            vec!["pub-2", "pub-1"],
+            "public rows only, newest first"
+        );
 
         // Limit is honored.
         let limited = store.list_public_artifacts(1).unwrap();
@@ -2560,7 +2564,10 @@ mod tests {
             .search(&[1.0, 0.0], None, Some(Visibility::Private), 10)
             .unwrap()
             .is_empty());
-        assert!(store.search(&[1.0, 0.0], None, None, 10).unwrap().is_empty());
+        assert!(store
+            .search(&[1.0, 0.0], None, None, 10)
+            .unwrap()
+            .is_empty());
 
         // The owner still sees own private rows.
         let own = store

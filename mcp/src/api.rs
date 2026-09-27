@@ -3399,7 +3399,8 @@ mod tests {
             "2026-06-01T12:00:00Z",
             WriteMode::Participate,
         )];
-        let (merged, total) = merge_chain_artifacts(&chain, db, &NonPublicAnchorKeys::default(), 10);
+        let (merged, total) =
+            merge_chain_artifacts(&chain, db, &NonPublicAnchorKeys::default(), 10);
         assert_eq!(total, 2);
         assert_eq!(merged.len(), 2);
         // tx2 (newer) first, tx1 (DB row, older exact timestamp) second.
@@ -3435,7 +3436,8 @@ mod tests {
             "2026-06-01T12:00:00Z",
             WriteMode::Participate,
         )];
-        let (merged, total) = merge_chain_artifacts(&[], db.clone(), &NonPublicAnchorKeys::default(), 10);
+        let (merged, total) =
+            merge_chain_artifacts(&[], db.clone(), &NonPublicAnchorKeys::default(), 10);
         assert_eq!(total, 1);
         assert_eq!(merged.len(), 1);
         assert_eq!(merged[0].attestation_id, "att-1");

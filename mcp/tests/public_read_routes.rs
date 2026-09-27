@@ -307,7 +307,10 @@ async fn artifacts_recall_source_all_dedupes_db_and_chain() {
     assert_eq!(txs.iter().filter(|t| **t == "ArweavePubTx").count(), 1);
     assert!(!txs.contains(&"tx-hash-dup"), "same content_hash as DB row");
     assert!(txs.contains(&"tx-chain-only"));
-    assert!(!txs.contains(&"local:priv-ar"), "private DB row is not served");
+    assert!(
+        !txs.contains(&"local:priv-ar"),
+        "private DB row is not served"
+    );
 
     let db_row = body["artifacts"]
         .as_array()
@@ -333,7 +336,12 @@ async fn artifacts_recall_source_all_dedupes_db_and_chain() {
 async fn artifacts_chain_items_matching_private_rows_are_dropped() {
     let state = state_with_chain(vec![
         chain_item("ArweavePrivTx", "hash-x", "memory secret by tx", None),
-        chain_item("tx-by-hash", "hash-priv-anchored", "memory secret by hash", None),
+        chain_item(
+            "tx-by-hash",
+            "hash-priv-anchored",
+            "memory secret by hash",
+            None,
+        ),
         chain_item("tx-chain-only", "hash-chain", "memory chain only", None),
     ]);
     {
