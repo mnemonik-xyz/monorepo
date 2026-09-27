@@ -86,6 +86,12 @@ pub struct PendingEntry {
     /// A `Local` deferred write (Wave 3: explicit-local writes by a remote
     /// user are client-signed too) skips Arweave/Solana and stays free.
     pub write_mode: WriteMode,
+    /// True when the pre-parking x402 gate let this participate bundle
+    /// through on the signer's free daily anchor quota instead of a payment
+    /// (set by `mcp_handler` through [`PendingBundles::mark_free_quota`]).
+    /// The sign-callback must then consume one free anchor before it
+    /// anchors, or answer 402. `false` for every other bundle.
+    pub free_quota: bool,
     /// Wall-clock expiry. Compared against `Utc::now()` on every access.
     pub exp: DateTime<Utc>,
 }
@@ -243,6 +249,7 @@ impl PendingBundles {
             tags,
             metadata,
             write_mode,
+            free_quota: false,
             exp,
         };
 
@@ -263,6 +270,20 @@ impl PendingBundles {
         *guard.per_user.entry(jwt_sub).or_insert(0) += 1;
 
         Ok(correlation_id)
+    }
+
+    /// Mark a parked bundle as admitted on the signer's free daily anchor
+    /// quota (see [`PendingEntry::free_quota`]). `NotFound` when the bundle
+    /// is gone; the caller must then fail the request.
+    pub async fn mark_free_quota(&self, correlation_id: &str) -> Result<(), PendingError> {
+        let mut guard = self.inner.lock().await;
+        match guard.lru.peek_mut(correlation_id) {
+            Some(entry) => {
+                entry.free_quota = true;
+                Ok(())
+            }
+            None => Err(PendingError::NotFound),
+        }
     }
 
     /// Capability-based lookup — validates TTL only, NOT owner. Used by

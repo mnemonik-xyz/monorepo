@@ -465,6 +465,7 @@ async fn main() -> anyhow::Result<()> {
     paid_operation::migrate_paid_operations(store.conn())?;
     paid_artifact::migrate_paid_artifact_staging(store.conn())?;
     wallet_link::migrate_wallet_links(store.conn())?;
+    payment::migrate_free_anchor_usage(store.conn())?;
     // ── T14: Google OAuth identity-link table (idempotent migration) ─────────
     // Lives in `mcp/` per Decision 9 (`core/` reserved for the cross-client
     // attestation schema). No-op when the table already exists; skipped
@@ -697,6 +698,10 @@ async fn main() -> anyhow::Result<()> {
         envelope,
         delivery_refetch_timeout: std::time::Duration::from_secs(cfg.delivery_refetch_timeout_secs),
         refunds_by_subject: refunds_by_subject.clone(),
+        free_anchors: payment::FreeAnchorLimits {
+            per_key: cfg.free_anchors_per_day,
+            global: cfg.free_anchors_global_per_day,
+        },
         delivery_metrics: delivery_metrics.clone(),
         confirmation_ledger: confirmation_ledger.clone(),
         hosted_endpoint,

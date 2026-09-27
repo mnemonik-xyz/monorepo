@@ -556,6 +556,7 @@ mod handler_tests {
                 std::time::Duration::from_secs(60),
                 5,
             )),
+            free_anchors: crate::payment::FreeAnchorLimits::disabled(),
             delivery_metrics: Arc::new(crate::payment::DeliveryMetrics::default()),
             confirmation_ledger: Arc::new(crate::confirmation_token::ConfirmationLedger::new()),
             hosted_endpoint: String::new(),

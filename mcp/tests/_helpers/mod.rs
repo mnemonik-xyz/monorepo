@@ -82,6 +82,8 @@ pub struct TestServerBuilder {
     oauth_token: bool,
     reuse_interval: Option<Duration>,
     evictor_tick: Option<Duration>,
+    free_anchors: Option<mnemonic_mcp::payment::FreeAnchorLimits>,
+    universal_paywall: Option<mnemonic_mcp::universal_paywall::UniversalPaywallConfig>,
 }
 
 impl Default for TestServerBuilder {
@@ -93,6 +95,8 @@ impl Default for TestServerBuilder {
             oauth_token: false,
             reuse_interval: None,
             evictor_tick: None,
+            free_anchors: None,
+            universal_paywall: None,
         }
     }
 }
@@ -153,13 +157,44 @@ impl TestServerBuilder {
         self
     }
 
+    /// Free daily anchor quota (`MNEMONIC_FREE_ANCHORS_PER_DAY` and
+    /// `MNEMONIC_FREE_ANCHORS_GLOBAL_PER_DAY`). Default: disabled, so the
+    /// paid-path tests see a 402 on the first participate write.
+    pub fn free_anchors(mut self, per_key: u32, global: u32) -> Self {
+        self.free_anchors = Some(mnemonic_mcp::payment::FreeAnchorLimits { per_key, global });
+        self
+    }
+
+    /// Configure the Universal Paywall rail (it charges only with
+    /// `payment_mode("x402")`). Also migrates the wallet-link table.
+    pub fn universal_paywall(
+        mut self,
+        config: mnemonic_mcp::universal_paywall::UniversalPaywallConfig,
+    ) -> Self {
+        self.universal_paywall = Some(config);
+        self
+    }
+
     /// Materialise into a `TestServer`.
     pub fn build(self) -> TestServer {
-        let state = mock_state_with(
+        let mut state = mock_state_with(
             &self.storage_mode,
             &self.payment_mode,
             self.sign_memory_cost_micro_usdc,
         );
+        {
+            // The state was just built, so this is its only owner.
+            let inner = Arc::get_mut(&mut state).expect("fresh McpState has one owner");
+            if let Some(limits) = self.free_anchors {
+                inner.free_anchors = limits;
+            }
+            if let Some(config) = self.universal_paywall {
+                inner.universal_paywall = Some(config);
+                let store = inner.store.lock().expect("store mutex");
+                mnemonic_mcp::wallet_link::migrate_wallet_links(store.conn())
+                    .expect("migrate wallet links");
+            }
+        }
 
         // Construct OAuthState. When the OAuth routes are mounted, we open
         // our own tempfile-backed connection so `refresh::hash_refresh_token`

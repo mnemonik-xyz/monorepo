@@ -36,7 +36,7 @@ Eight tools ship by default. Full reference — outputs, auth, error shapes — 
 
 | Tool | Inputs | Returns |
 |---|---|---|
-| `mnemonic_whoami` | — | server pubkey, DIDs, storage mode, attestation count, and the capability envelope (`supported_modes`, `default_mode`, `participate_cost`) |
+| `mnemonic_whoami` | — | server pubkey, DIDs, storage mode, attestation count, and the capability envelope (`supported_modes`, `default_mode`, `participate_cost`); on a paid (`x402`) deploy also `free_anchors`, your free daily quota of anchored writes |
 | `mnemonic_sign_memory` | `{ content: string, tags?: string[], mode?: "local" \| "participate" }` | over HTTP: `{ status: "awaiting_signature", correlation_id, approve_url, content_hash, expires_in }` for the deferred-sign / sign-callback flow (the SDK handles the COSE-sign step locally). With `mode: "local"`: the stored row at once (`attestation_id`, `signature: "none"`), with no signing step |
 | `mnemonic_check_pending` | `{ correlation_id: string }` | `{ status: "signed", attestation_id, solana_tx, arweave_tx, ... }`, or `awaiting_signature` / `not_found` |
 | `mnemonic_recall` | `{ query: string, limit?: number }` | top-k semantically similar attestations. Authenticated → your own corpus; anonymous → the cross-owner public pool only |
