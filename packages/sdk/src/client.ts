@@ -15,6 +15,14 @@
 // signer_pubkey + cryptographic chain (server validates signer matches the
 // stored jwt_sub for that correlation_id, AND COSE_Sign1 verifies against
 // signer_pubkey).
+//
+// Exception — `mode: "local"`: the server stores a hash-only row and answers
+// step 1 with `{attestation_id, content_hash, write_mode: "local"}` (no
+// `correlation_id`). Steps 2-4 are skipped and no keypair is needed, so a
+// lazy keypair source (`setKeypairProvider`) is never invoked.
+//
+// Access-token refresh (issue #33): with a `tokenRefresher`, `callTool`
+// renews the JWT before it expires and retries once after a 401/403.
 
 import { coseSignPayload } from "./cose.js";
 import {
@@ -26,7 +34,9 @@ import {
   redactJWT,
 } from "./errors.js";
 import type { Keypair, KeypairJson } from "./keypair.js";
+import { readJwtExp } from "./oauth.js";
 import type {
+  KeypairProvider,
   MnemonicClientConfig,
   ProveResult,
   RecallHit,
@@ -34,9 +44,19 @@ import type {
   SignMemoryOptions,
   SignMemoryResult,
   SignerInterface,
+  TokenRefresher,
   VerifyResult,
   WhoamiResult,
+  WriteMode,
 } from "./types.js";
+
+/**
+ * Refresh the JWT when it expires within this window, so a request never
+ * reaches the server with a token that expires in flight. This matters
+ * for `mnemonic_recall`: the server treats an expired token on that tool
+ * as anonymous (public pool only) instead of returning 401.
+ */
+const REFRESH_SKEW_MS = 60_000;
 
 /**
  * Stateless HTTP client for the hosted MCP server.
@@ -59,6 +79,14 @@ export class MnemonicClient {
    * `signMemory`.
    */
   private keypairJson: KeypairJson | null = null;
+  /** Lazy keypair source — see {@link setKeypairProvider}. */
+  private keypairProvider: KeypairProvider | null = null;
+  /** Memoised provider result (reset on failure or a new provider). */
+  private providedKeypair: Promise<KeypairJson> | null = null;
+  /** Access-token refresher — see {@link setTokenRefresher}. */
+  private tokenRefresher: TokenRefresher | null = null;
+  /** Single in-flight refresh, shared by concurrent tool calls. */
+  private refreshInFlight: Promise<string | undefined> | null = null;
 
   constructor(config: MnemonicClientConfig) {
     if (!config.baseUrl || !/^https?:\/\//.test(config.baseUrl)) {
@@ -75,6 +103,8 @@ export class MnemonicClient {
     this.signer = config.signer;
     if (config.jwt !== undefined) this.jwt = config.jwt;
     this.fetchImpl = config.fetch ?? globalThis.fetch.bind(globalThis);
+    if (config.keypairProvider) this.keypairProvider = config.keypairProvider;
+    if (config.tokenRefresher) this.tokenRefresher = config.tokenRefresher;
   }
 
   /**
@@ -98,6 +128,41 @@ export class MnemonicClient {
    */
   setKeypair(keypair: Keypair): void {
     this.keypairJson = keypair.toJSON();
+  }
+
+  /**
+   * Bind a lazy keypair source. `signMemory` calls it only when the server
+   * asks for a client signature (a `participate` write, or a legacy write
+   * without `mode`), and at most once per client: the result is memoised.
+   * A `local` write never calls it. Use this to defer an OS-keychain read
+   * until the keypair is really needed. A keypair bound with
+   * {@link setKeypair} takes priority.
+   *
+   * @param provider - Returns the keypair (or a promise of it); `null`
+   *                   removes the provider.
+   * @returns void.
+   */
+  setKeypairProvider(provider: KeypairProvider | null): void {
+    this.keypairProvider = provider;
+    this.providedKeypair = null;
+  }
+
+  /**
+   * Bind an access-token refresher (issue #33). The client calls it:
+   *
+   * - before a tool call, when there is no JWT or the JWT expires within
+   *   60 s (so `recall` never silently falls back to anonymous);
+   * - once after a tool call fails with 401 / 403, and then retries it once.
+   *
+   * Concurrent calls share one refresh. Build a refresher on top of
+   * `refreshAccessToken` and persist the rotated refresh token each time.
+   *
+   * @param refresher - Returns a fresh JWT, or `undefined` if it cannot
+   *                    refresh; `null` removes the refresher.
+   * @returns void.
+   */
+  setTokenRefresher(refresher: TokenRefresher | null): void {
+    this.tokenRefresher = refresher;
   }
 
   // ------------------------------------------------------------------------
@@ -130,8 +195,11 @@ export class MnemonicClient {
   }
 
   /**
-   * Sign a memory. Always uses the deferred pending-bundle / sign-callback
-   * flow:
+   * Save a memory. With `mode: "local"` the server stores it as a hash-only
+   * row and returns it at once (`status: "stored"`): no keypair is needed
+   * and the keypair provider is not called. Otherwise (and whenever the
+   * server answers `awaiting_signature`) this uses the deferred
+   * pending-bundle / sign-callback flow:
    *
    * 1. `POST /mcp tools/call mnemonic_sign_memory` returns a `correlation_id`.
    * 2. `GET /api/pending/{correlation_id}` fetches the canonical-CBOR bytes
@@ -142,12 +210,17 @@ export class MnemonicClient {
    *    `attestation_id`.
    *
    * @param content - Non-empty UTF-8 string to sign.
-   * @param opts    - Optional tags array (forwarded to the server verbatim).
+   * @param opts    - Optional tags array (forwarded to the server verbatim)
+   *                  and write `mode` (`local` / `participate`).
    * @returns The `attestation_id`, server-issued `signed_at`, the terminal
-   *          `status` (`signed` / `pending` / `anchored`), and any optional
+   *          `status` (`stored` / `signed` / `pending` / `anchored`), the
+   *          applied `writeMode` when known, and any optional
    *          `arweave_tx` / `solana_tx` / `content_hash` echoes.
-   * @throws `UserError` if `content` is empty or no keypair is bound (call
-   *         {@link setKeypair} first).
+   * @throws `UserError` if `content` is empty, `mode` is invalid, or a
+   *         signature is needed but no keypair is available (call
+   *         {@link setKeypair} or {@link setKeypairProvider} first). Without
+   *         `mode: "local"` this check runs before any request. Errors from
+   *         the keypair provider propagate unchanged.
    * @throws `AuthError` on 401 / 403 from `/mcp` or the sign-callback.
    * @throws `ServerError` on 5xx, network failure, or malformed JSON.
    * @throws `IntegrityError` if the sign-callback omits `attestation_id`
@@ -161,27 +234,51 @@ export class MnemonicClient {
     if (typeof content !== "string" || content.length === 0) {
       throw new UserError("signMemory: content must be a non-empty string");
     }
-    if (!this.keypairJson) {
+    const mode = opts.mode;
+    if (mode !== undefined && mode !== "local" && mode !== "participate") {
       throw new UserError(
-        "signMemory: no keypair bound — call setKeypair(keypair) before signMemory"
+        `signMemory: mode must be "local" or "participate", got ${JSON.stringify(
+          mode
+        )}`
+      );
+    }
+    // Legacy (no mode) and participate writes always end in a client
+    // signature — fail fast, before any network call, when no keypair
+    // source exists. A local write needs no keypair.
+    if (mode !== "local" && !this.keypairJson && !this.keypairProvider) {
+      throw new UserError(
+        "signMemory: no keypair bound — call setKeypair(keypair) or setKeypairProvider(fn) before signMemory"
       );
     }
 
     const args: Record<string, unknown> = { content };
     if (opts.tags && opts.tags.length > 0) args.tags = opts.tags;
+    if (mode !== undefined) args.mode = mode;
 
-    // 1. Open the deferred sign — server returns correlation_id.
+    // 1. Open the write — the server either stores a hash-only row
+    //    (`local`) or returns a correlation_id for the deferred sign.
     const openResp = await this.callTool("mnemonic_sign_memory", args);
     const open = isRecord(openResp) ? openResp : {};
     const correlationId =
       typeof open.correlation_id === "string" ? open.correlation_id : null;
     if (!correlationId) {
+      if (
+        typeof open.attestation_id === "string" &&
+        open.attestation_id.length > 0 &&
+        open.status !== "awaiting_signature"
+      ) {
+        return storedRowResult(open, open.attestation_id, mode);
+      }
       throw new ServerError(
-        `mnemonic_sign_memory did not return correlation_id; got ${redactJWT(
+        `mnemonic_sign_memory did not return correlation_id or attestation_id; got ${redactJWT(
           JSON.stringify(open)
         )}`
       );
     }
+
+    // A signature is needed from here on — resolve the keypair now (this
+    // is the only place a lazy provider runs).
+    const keypairJson = await this.resolveKeypairJson();
 
     // 2. Fetch the canonical-CBOR bundle for the correlation_id.
     const pendingUrl = `${this.baseUrl}/api/pending/${encodeURIComponent(
@@ -210,7 +307,7 @@ export class MnemonicClient {
 
     // 3. COSE-sign the bytes (verbatim — DO NOT re-encode in JS, the server
     //    built these bytes and any drift breaks content_integrity).
-    const cose = await coseSignPayload(cborBytes, this.keypairJson);
+    const cose = await coseSignPayload(cborBytes, keypairJson);
 
     // 4. POST /api/sign-callback (NO Bearer JWT — capability auth via
     //    correlation_id + signature chain, identical to the webapp flow).
@@ -262,6 +359,7 @@ export class MnemonicClient {
           : cbBody.status === "pending"
           ? "pending"
           : "signed",
+      ...writeModeField(cbBody.write_mode, mode),
       ...(typeof cbBody.content_hash === "string"
         ? { contentHash: cbBody.content_hash }
         : {}),
@@ -382,6 +480,94 @@ export class MnemonicClient {
   }
 
   // ------------------------------------------------------------------------
+  // Internal: lazy keypair + access-token refresh
+  // ------------------------------------------------------------------------
+
+  /**
+   * Return the keypair JSON for a COSE signature: the one bound with
+   * `setKeypair`, else the (memoised) provider result. Checks that it
+   * matches `signer.pubkey`, because the sign-callback sends that pubkey.
+   */
+  private async resolveKeypairJson(): Promise<KeypairJson> {
+    let json: KeypairJson;
+    if (this.keypairJson) {
+      json = this.keypairJson;
+    } else if (this.keypairProvider) {
+      if (!this.providedKeypair) {
+        const provider = this.keypairProvider;
+        const p = Promise.resolve()
+          .then(() => provider())
+          .then((kp) => kp.toJSON());
+        // Forget a failed attempt so a later call can retry.
+        p.catch(() => {
+          if (this.providedKeypair === p) this.providedKeypair = null;
+        });
+        this.providedKeypair = p;
+      }
+      json = await this.providedKeypair;
+    } else {
+      throw new UserError(
+        "signMemory: the server asked for a client signature, but no keypair is bound — call setKeypair(keypair) or setKeypairProvider(fn)"
+      );
+    }
+    if (json.pubkey_base58 !== this.signer.pubkey) {
+      throw new UserError(
+        `signMemory: keypair pubkey ${json.pubkey_base58} does not match signer pubkey ${this.signer.pubkey}`
+      );
+    }
+    return json;
+  }
+
+  /** True when the bound JWT expires within `REFRESH_SKEW_MS`. */
+  private jwtNeedsRefresh(): boolean {
+    if (!this.jwt) return true;
+    const exp = readJwtExp(this.jwt);
+    if (exp === undefined) return false; // opaque token: let the server decide
+    return exp * 1000 - Date.now() <= REFRESH_SKEW_MS;
+  }
+
+  /** Run the refresher once, shared by concurrent callers. */
+  private refreshJwt(refresher: TokenRefresher): Promise<string | undefined> {
+    if (!this.refreshInFlight) {
+      const p = (async () => {
+        try {
+          const fresh = await refresher();
+          if (typeof fresh === "string" && fresh.length > 0) this.jwt = fresh;
+          return fresh;
+        } finally {
+          this.refreshInFlight = null;
+        }
+      })();
+      this.refreshInFlight = p;
+    }
+    return this.refreshInFlight;
+  }
+
+  /**
+   * Tool call with access-token refresh. Refreshes first when the JWT is
+   * missing or about to expire, and retries once after a 401 / 403 if the
+   * refresher produced a different token. Without a refresher this is a
+   * plain single call.
+   */
+  private async callTool(
+    name: string,
+    args: Record<string, unknown>
+  ): Promise<unknown> {
+    const refresher = this.tokenRefresher;
+    if (!refresher) return this.callToolOnce(name, args);
+    if (this.jwtNeedsRefresh()) await this.refreshJwt(refresher);
+    try {
+      return await this.callToolOnce(name, args);
+    } catch (e) {
+      if (!(e instanceof AuthError)) throw e;
+      const before = this.jwt;
+      const fresh = await this.refreshJwt(refresher);
+      if (!fresh || fresh === before) throw e;
+      return this.callToolOnce(name, args);
+    }
+  }
+
+  // ------------------------------------------------------------------------
   // Internal: JSON-RPC over HTTP to /mcp
   // ------------------------------------------------------------------------
 
@@ -391,7 +577,7 @@ export class MnemonicClient {
    * (some tools return their result in `result.content[0].text` JSON-encoded,
    * others return it in `result` directly).
    */
-  private async callTool(
+  private async callToolOnce(
     name: string,
     args: Record<string, unknown>
   ): Promise<unknown> {
@@ -479,6 +665,56 @@ function extractToolResult(result: unknown): unknown {
     }
   }
   return result;
+}
+
+/** `{writeMode}` from the server's `write_mode`, else the requested mode. */
+function writeModeField(
+  raw: unknown,
+  requested: WriteMode | undefined
+): { writeMode?: WriteMode } {
+  if (raw === "local" || raw === "participate") return { writeMode: raw };
+  return requested ? { writeMode: requested } : {};
+}
+
+/**
+ * Project a stored-row response (a `local` write that the server stored
+ * without a client signature) onto `SignMemoryResult`.
+ */
+function storedRowResult(
+  open: Record<string, unknown>,
+  attestationId: string,
+  requested: WriteMode | undefined
+): SignMemoryResult {
+  const signedAt =
+    typeof open.signed_at === "string"
+      ? open.signed_at
+      : typeof open.timestamp === "string"
+      ? open.timestamp
+      : typeof open.created_at === "string"
+      ? open.created_at
+      : new Date().toISOString();
+  const status: SignMemoryResult["status"] =
+    open.status === "anchored" ||
+    open.status === "pending" ||
+    open.status === "signed" ||
+    open.status === "stored"
+      ? open.status
+      : typeof open.solana_tx === "string"
+      ? "anchored"
+      : "stored";
+  return {
+    attestationId,
+    signedAt,
+    status,
+    ...writeModeField(open.write_mode, requested),
+    ...(typeof open.content_hash === "string"
+      ? { contentHash: open.content_hash }
+      : {}),
+    ...(typeof open.arweave_tx === "string"
+      ? { arweaveTx: open.arweave_tx }
+      : {}),
+    ...(typeof open.solana_tx === "string" ? { solanaTx: open.solana_tx } : {}),
+  };
 }
 
 function isRecord(v: unknown): v is Record<string, unknown> {
