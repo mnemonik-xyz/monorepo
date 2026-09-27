@@ -245,9 +245,10 @@ Restoration concerns anchored rows alone, so the fields land exactly where they 
   migration actually needs it (it also closes #47).
 - **Wave 4a — retire hosted `local` writes. DONE.** An explicit `mode: "local"` over HTTP
   returns `-32010`. The mode rename landed in Wave 1.
-- **Wave 4b — server memory removal.** Drop `content` and the embedding from anchored rows,
-  change the anchor confirmation to a chain re-fetch, and settle the public read surface.
-  Blocked on decisions.md D-2 Q-1 and Q-2.
+- **Wave 4b — server memory removal. DONE.** The hosted anchored write path stores no content
+  and no embedding; `search` drops unscoreable rows. The anchor confirmation already re-fetched
+  from Arweave and COSE-verified, so Decision 5 needed no change — its third stage only checks
+  that the index row exists. `/artifacts` presentation (D-2 Q-2) is still open.
 - **Wave 5 — migration and documents.** The relabel, the user announcement, and every affected
   document.
 - **Wave 6 — audit.** Read-only. Confirm no private content reaches Arweave in plaintext, and
