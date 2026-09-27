@@ -255,6 +255,29 @@ pub struct PublicArtifact {
     pub plaintext_on_arweave: bool,
 }
 
+/// One row as `mnemonic-mcp export` emits it (issue #47,
+/// work/arweave-as-source-of-truth Wave 5).
+///
+/// Every column an owner could need to reconstruct or audit their own history,
+/// including the labels. `content` is empty for a row a hosted operator wrote
+/// under the anchored path — it never had the text (D-2) — and `arweave_tx` is
+/// then where the bytes actually live.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ExportRow {
+    pub attestation_id: String,
+    pub content: String,
+    pub content_hash: String,
+    pub tags: Vec<String>,
+    pub solana_tx: String,
+    pub arweave_tx: String,
+    pub signer_pubkey: String,
+    pub owner_pubkey: String,
+    pub created_at: String,
+    pub write_mode: WriteMode,
+    pub visibility: Visibility,
+    pub plaintext_on_arweave: bool,
+}
+
 /// Keys of every non-public row, returned by
 /// `SqliteStore::non_public_anchor_keys`. `GET /artifacts` drops any
 /// chain-snapshot item whose Arweave tx id or content hash is in one of these
@@ -993,6 +1016,47 @@ impl SqliteStore {
             Some(row) => Ok(Some((row.get(0)?, row.get(1)?, row.get(2)?))),
             None => Ok(None),
         }
+    }
+
+    /// Every row owned by `owner_pubkey`, oldest first, for `mnemonic-mcp export`.
+    ///
+    /// Oldest first on purpose: an export is a backup, and append order matching
+    /// write order makes a diff between two exports readable.
+    ///
+    /// Owner-scoped with no exceptions. An export is the owner's own data, and a
+    /// cross-owner variant of this query would be a bulk disclosure primitive, so
+    /// the predicate is not optional.
+    pub fn export_rows(&self, owner_pubkey: &str) -> anyhow::Result<Vec<ExportRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT attestation_id, content, content_hash, tags, solana_tx, arweave_tx,
+                    signer_pubkey, owner_pubkey, created_at, write_mode, visibility,
+                    plaintext_on_arweave
+             FROM attestations
+             WHERE owner_pubkey = ?1
+             ORDER BY created_at ASC",
+        )?;
+        let rows = stmt.query_map(params![owner_pubkey], |row| {
+            let tags_str: String = row.get(3)?;
+            Ok(ExportRow {
+                attestation_id: row.get(0)?,
+                content: row.get(1)?,
+                content_hash: row.get(2)?,
+                tags: serde_json::from_str(&tags_str).unwrap_or_default(),
+                solana_tx: row.get(4)?,
+                arweave_tx: row.get(5)?,
+                signer_pubkey: row.get(6)?,
+                owner_pubkey: row.get(7)?,
+                created_at: row.get(8)?,
+                write_mode: row.get::<_, WriteMode>(9)?,
+                visibility: row.get::<_, Visibility>(10)?,
+                plaintext_on_arweave: row.get(11)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
     }
 
     /// List public attestations newest-first for the Ledger page

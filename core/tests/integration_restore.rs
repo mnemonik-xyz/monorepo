@@ -247,3 +247,85 @@ fn restored_rows_carry_the_anchor_mode_and_their_chain_ids() {
     );
     let _ = Visibility::Public; // keeps the import meaningful if asserts change
 }
+
+// -- Wave 5: export (issue #47) ------------------------------------------------
+
+#[test]
+fn export_rows_is_owner_scoped_and_oldest_first() {
+    // An export is the owner's own data. A cross-owner variant of this query
+    // would be a bulk disclosure primitive, so the scoping is not optional and
+    // this test is what holds that line.
+    let me = Keypair::new();
+    let someone_else = Keypair::new();
+    let mine = identity::pubkey_base58(&me);
+
+    let store = SqliteStore::in_memory().unwrap();
+    let save = |kp: &Keypair, id: &str, content: &str, created_at: &str| {
+        store
+            .save_attestation(
+                id,
+                content,
+                &format!("{id}-hash"),
+                &["exported".to_string()],
+                &format!("local:{id}"),
+                &format!("local:{id}"),
+                &identity::pubkey_base58(kp),
+                &identity::pubkey_base58(kp),
+                created_at,
+                WriteMode::Local,
+                Visibility::Private,
+                &[0.1; 8],
+            )
+            .unwrap();
+    };
+    // Deliberately saved out of order, to prove the ORDER BY rather than luck.
+    save(&me, "second", "mine, later", "2026-02-01T00:00:00Z");
+    save(&me, "first", "mine, earlier", "2026-01-01T00:00:00Z");
+    save(&someone_else, "theirs", "not mine", "2026-01-15T00:00:00Z");
+
+    let rows = store.export_rows(&mine).unwrap();
+    let ids: Vec<&str> = rows.iter().map(|r| r.attestation_id.as_str()).collect();
+    assert_eq!(
+        ids,
+        vec!["first", "second"],
+        "owner-scoped and oldest first: {ids:?}"
+    );
+    assert!(
+        !ids.contains(&"theirs"),
+        "another identity's rows must never appear in my export"
+    );
+    assert_eq!(rows[0].content, "mine, earlier");
+    assert_eq!(rows[0].tags, vec!["exported".to_string()]);
+}
+
+#[test]
+fn export_serializes_to_one_json_object_per_line() {
+    // The output contract is JSON Lines: one object per line, so it streams into
+    // line-oriented tools and two backups diff readably.
+    let kp = Keypair::new();
+    let owner = identity::pubkey_base58(&kp);
+    let items = vec![restorable(
+        &kp,
+        "exported",
+        "round trip",
+        Some("public"),
+        "ar-1",
+        Some("sol-1"),
+    )];
+    let store = SqliteStore::in_memory().unwrap();
+    apply_restore(&store, &owner, &items);
+
+    let rows = store.export_rows(&owner).unwrap();
+    assert_eq!(rows.len(), 1);
+    let line = serde_json::to_string(&rows[0]).expect("row serializes");
+    assert!(!line.contains('\n'), "a row must occupy exactly one line");
+
+    let back: serde_json::Value = serde_json::from_str(&line).expect("valid JSON");
+    assert_eq!(back["attestation_id"], "exported");
+    assert_eq!(back["arweave_tx"], "ar-1");
+    assert_eq!(
+        back["write_mode"], "anchored",
+        "modes use the canonical name"
+    );
+    assert_eq!(back["content_hash"].as_str().unwrap().len(), 64);
+}
