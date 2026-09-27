@@ -4,7 +4,8 @@
 //   default   → `mode: "local"`. The server stores a hash-only row for this
 //               identity. Needs only the public key: the private key and
 //               the OS keychain are NOT read.
-//   --anchor  → `mode: "participate"` (alias `--participate`). The CLI
+//   --anchor  → `mode: "anchored"` (flag alias `--participate` kept for
+//               existing scripts; the wire value is `anchored`). The CLI
 //               reads the private key, COSE-signs the canonical bundle
 //               (pending-bundle / sign-callback flow) and the server
 //               anchors it on Arweave + Solana. The ONLY command that
@@ -28,7 +29,7 @@ import { openSession } from "../session.js";
 export interface SignOptions extends OutputOptions {
   tags?: string;
   baseUrl?: string;
-  /** `--anchor` / `--participate`: sign locally and anchor on-chain. */
+  /** `--anchor` (alias `--participate`): sign locally and anchor on-chain. */
   anchor?: boolean;
   /** Internal — read content from this string instead of stdin (tests). */
   content?: string;

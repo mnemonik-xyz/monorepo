@@ -174,7 +174,7 @@ export function buildProgram(): Command {
     .option("--tags <list>", "comma-separated tags")
     .option(
       "--anchor",
-      "sign locally and anchor on-chain (write mode `participate`; reads the private key; may be paid)",
+      "sign locally and anchor on-chain (write mode `anchored`; reads the private key; may be paid)",
     )
     .option("--participate", "alias for --anchor")
     .option("--base-url <url>", "override the server base URL")
