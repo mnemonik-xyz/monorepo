@@ -26,7 +26,7 @@ Orient a newly-connected agent (or its operator) to what Mnemonic offers, when e
 
 ## Tool
 
-No MCP tool call. This skill is purely informational: surface the list of available skills (`mnemonik-init`, `mnemonik-recall`, `mnemonik-attest`, `mnemonik-checkpoint`, `mnemonik-verify`, `mnemonik-status`) with one-line purposes, and the two-mode mental model (local = offline, free, private; participate = chain-anchored, paid, optionally public).
+No MCP tool call. This skill is purely informational: surface the list of available skills (`mnemonik-init`, `mnemonik-recall`, `mnemonik-attest`, `mnemonik-checkpoint`, `mnemonik-verify`, `mnemonik-status`) with one-line purposes, and the two-mode mental model (local = offline, free, private; participate = chain-anchored, paid, always public plain text on Arweave until sealed mode ships).
 
 ## Guardrails
 

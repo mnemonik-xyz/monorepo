@@ -40,8 +40,9 @@ Implemented in `mcp/src/tools.rs::sign_memory`.
 Implemented in `mcp/src/tools.rs::recall` over `core/src/storage/sqlite.rs`.
 
 1. Embed the query with the same provider used at sign time.
-2. Cosine-score the query vector against every uncompressed f32 embedding in the local `memory_embeddings` table.
-3. Return the top-k rows ordered by score, joined to their `attestations` row metadata.
+2. Select the candidate rows. An authenticated caller gets only its own rows, private and public. An anonymous caller gets only rows with `visibility = 'public'`, from all owners. A private row goes only to its owner.
+3. Cosine-score the query vector against the uncompressed f32 embedding of each candidate row.
+4. Return the top-k rows ordered by score, joined to their `attestations` row metadata.
 
 Recall is intentionally local: SQLite read plus an in-process scan, no chain calls. Uncompressed f32 wins here because cosine similarity is sensitive to small magnitude shifts and TurboQuant compressed bytes are optimized for portability and inner-product approximation, not for being the canonical retrieval index. The compressed form on Arweave is proof-of-existence; the uncompressed form in SQLite is the search index.
 
@@ -57,6 +58,8 @@ Query parameters:
 | `limit` | Maximum number of rows in the page. |
 | `source` | `all` (default), `on_node` (local writes) or `on_chain` (anchored writes). |
 
+Privacy rule (available now): the route returns only SQLite rows with `visibility = 'public'`. This applies to the listing and to recall, for each `source` value. The route never returns a private row. A row with no `visibility` value (a legacy row) counts as private. A local write is always private, so `source=on_node` shows only memories published with `mnemonic_publish_post`. An anchored `participate` write is always public, because its content is plain text on Arweave (owner decision D-8). Each row has `plaintext_on_arweave`: `true` when the content is plain text on Arweave. Sealed (encrypted) anchored writes are planned.
+
 Chain recovery (available now): when the operator sets `CHAIN_STATS_WALLETS`, the server reads its anchored memories from Solana memos and Arweave. It keeps them in memory as a snapshot. SQLite does not store this snapshot.
 
 Recall with `q` (available now):
@@ -67,7 +70,9 @@ Recall with `q` (available now):
 4. A snapshot item without a usable embedding matches only if its content or tags contain `q`. The match ignores letter case. These items get a score of 1.0, equal to a perfect cosine match.
 5. The server sorts all matches by score and returns the first `limit` rows.
 
-A snapshot item that has the same `arweave_tx` or `content_hash` as a SQLite row does not appear. The SQLite row appears instead. With `source=on_node`, the result contains no snapshot items.
+A snapshot item that has the same `arweave_tx` or `content_hash` as a SQLite row does not appear. If that SQLite row is public, the SQLite row appears instead. If that SQLite row is private, neither appears. A snapshot item with no SQLite row appears, because its bytes are already public on Arweave. With `source=on_node`, the result contains no snapshot items.
+
+The same rules apply to a listing without `q`.
 
 Each recall row has a `match` field: `semantic` (cosine score) or `text` (text match). A listing without `q` has no `match` field.
 

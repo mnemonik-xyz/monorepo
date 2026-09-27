@@ -116,6 +116,8 @@ fn migrate_visibility_column_idempotent_on_clean_db() {
 // same migration sequence operators see on upgrade.
 #[test]
 fn migrate_visibility_column_backfills_legacy_rows() {
+    // Local rows: D-8 (2026-09-27) stores anchored rows with a real Arweave
+    // id as public, so visibility plumbing is tested on local rows.
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("legacy.db");
 
@@ -152,11 +154,11 @@ fn migrate_visibility_column_backfills_legacy_rows() {
                         "h",
                         "[]",
                         "sol",
-                        "ar",
+                        "local:ar",
                         SIGNER,
                         "2026-01-01",
                         OWNER,
-                        "participate",
+                        "local",
                     ],
                 )
                 .unwrap();
@@ -195,11 +197,11 @@ fn save_attestation_persists_visibility() {
             "hash-public-1",
             &["public".to_string()],
             "sol-tx-public",
-            "ar-tx-public",
+            "local:ar-tx-public",
             SIGNER,
             OWNER,
             "2026-01-01T00:00:00Z",
-            WriteMode::Participate,
+            WriteMode::Local,
             Visibility::Public,
             &[0.5, 0.5],
         )
@@ -212,11 +214,11 @@ fn save_attestation_persists_visibility() {
             "hash-private-1",
             &["private".to_string()],
             "sol-tx-private",
-            "ar-tx-private",
+            "local:ar-tx-private",
             SIGNER,
             OWNER,
             "2026-01-01T00:00:00Z",
-            WriteMode::Participate,
+            WriteMode::Local,
             Visibility::Private,
             &[1.0, 0.0],
         )
@@ -259,11 +261,11 @@ fn search_visibility_filter_excludes_private() {
             "h-public",
             &[],
             "sol-public",
-            "ar-public",
+            "local:ar-public",
             SIGNER,
             OWNER,
             "2026-01-01",
-            WriteMode::Participate,
+            WriteMode::Local,
             Visibility::Public,
             &query,
         )
@@ -275,11 +277,11 @@ fn search_visibility_filter_excludes_private() {
             "h-private",
             &[],
             "sol-private",
-            "ar-private",
+            "local:ar-private",
             SIGNER,
             OWNER,
             "2026-01-01",
-            WriteMode::Participate,
+            WriteMode::Local,
             Visibility::Private,
             &query,
         )
@@ -316,11 +318,11 @@ fn search_no_filter_returns_both() {
             "h-public",
             &[],
             "sol-public",
-            "ar-public",
+            "local:ar-public",
             SIGNER,
             OWNER,
             "2026-01-01",
-            WriteMode::Participate,
+            WriteMode::Local,
             Visibility::Public,
             &query,
         )
@@ -332,11 +334,11 @@ fn search_no_filter_returns_both() {
             "h-private",
             &[],
             "sol-private",
-            "ar-private",
+            "local:ar-private",
             SIGNER,
             OWNER,
             "2026-01-01",
-            WriteMode::Participate,
+            WriteMode::Local,
             Visibility::Private,
             &query,
         )

@@ -1292,6 +1292,14 @@ async fn sign_memory_inline(
     //       (INSERT OR REPLACE) so the embed + signature aren't wasted
     //       even though the chain anchor isn't proved retrievable.
     //
+    // Owner decision D-8 (2026-09-27): an anchored participate write is
+    // plain text on Arweave, so it is stored and reported as `public` with
+    // `plaintext_on_arweave = true`, whatever visibility was requested.
+    // Sealed (encrypted) writes are planned. `save_attestation` applies the
+    // same rule; shadowing here keeps the response consistent with the row.
+    let (visibility, plaintext_on_arweave) =
+        mnemonic_core::storage::effective_visibility(write_mode, &arweave_tx, visibility);
+
     // ONE short critical section: take the SQLite mutex, write the
     // attestation row, drop the mutex. No `.await` while held (Decision 8).
     {
@@ -1419,6 +1427,7 @@ async fn sign_memory_inline(
         "storage_mode": storage_mode,
         "write_mode": write_mode.as_str(),
         "visibility": visibility.as_str(),
+        "plaintext_on_arweave": plaintext_on_arweave,
         "embedding": {
             "model": embed_model,
             "provider": embedder.provider_name(),
@@ -1757,9 +1766,27 @@ pub async fn verify(
     // Storage lock discipline: SqliteStore is !Send. Hold the mutex
     // briefly for the routing lookup and DROP before any `.await` on
     // Arweave / Solana clients.
-    let routed_mode = {
+    let (routed_mode, plaintext_on_arweave) = {
         let store = store.lock().expect("store mutex poisoned");
-        store.find_write_mode_by_tx(lookup_id, owner_pubkey)?
+        (
+            store.find_write_mode_by_tx(lookup_id, owner_pubkey)?,
+            store
+                .plaintext_on_arweave_by_tx(lookup_id, owner_pubkey)?
+                .unwrap_or(false),
+        )
+    };
+
+    // Owner decision D-8: tell the caller when the content is plain text on
+    // Arweave. Only the owner reaches this point (non-owners get
+    // `not_found` below).
+    let with_flag = |mut v: serde_json::Value| {
+        if let Some(obj) = v.as_object_mut() {
+            obj.insert(
+                "plaintext_on_arweave".to_string(),
+                serde_json::Value::Bool(plaintext_on_arweave),
+            );
+        }
+        v
     };
 
     match routed_mode {
@@ -1770,10 +1797,11 @@ pub async fn verify(
             owner_pubkey,
             embedder,
             compressor,
-        ),
-        Some(WriteMode::Participate) => {
-            verify_participate(solana, arweave, solana_tx, arweave_tx).await
-        }
+        )
+        .map(with_flag),
+        Some(WriteMode::Participate) => verify_participate(solana, arweave, solana_tx, arweave_tx)
+            .await
+            .map(with_flag),
         // Tenant isolation: a row owned by a different tenant returns
         // `Ok(None)` from `find_write_mode_by_tx` — same shape as a
         // genuine miss. NO `content_hash`, `signer_pubkey`, `content`,

@@ -190,6 +190,18 @@ async fn test_full_lifecycle_sign_callback_410_on_replay() {
             "expected 1 persisted row, got {results:?}"
         );
         assert_eq!(results[0].content, "lifecycle test memo");
+        // Owner decision D-8: an anchored participate row is public and
+        // flagged; any other row keeps its private default and no flag.
+        let r = &results[0];
+        let anchored = mnemonic_core::storage::is_anchored_arweave_tx(&r.arweave_tx);
+        assert_eq!(r.plaintext_on_arweave, anchored, "{r:?}");
+        let expect_public =
+            anchored && r.write_mode == mnemonic_core::storage::WriteMode::Participate;
+        assert_eq!(
+            r.visibility == mnemonic_core::storage::Visibility::Public,
+            expect_public,
+            "{r:?}"
+        );
     }
 
     // 6. Replay sign-callback for the SAME correlation_id → 410 Gone.

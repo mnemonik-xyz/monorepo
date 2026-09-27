@@ -1,23 +1,27 @@
 //! Integration tests for the anonymous recall path.
 //!
-//! Every stored memory is public (operator decision), so anonymous recall
-//! surfaces ALL rows across ALL owners regardless of the `visibility` column.
+//! Private means private (owner decision 2026-09-27): anonymous recall
+//! surfaces only `visibility = 'public'` rows, across all owners. A private
+//! row goes only to its owner.
 //!
 //! Anchors:
 //!
-//! 1. `anonymous_recall_returns_all_rows` — seed DB with 1 private + 1 public
-//!    row that both match a recall query string; call `recall` without
-//!    `Authorization`; BOTH rows appear.
+//! 1. `anonymous_recall_returns_public_rows_only` — seed DB with 1 private +
+//!    1 public row that both match a recall query string; call `recall`
+//!    without `Authorization`; ONLY the public row appears.
 //! 2. `authenticated_recall_returns_both` — same DB, call recall with
 //!    a valid Bearer for the owner; both rows appear.
-//! 3. `cross_owner_pool_visible` — seed rows under owner A and owner B
-//!    (including a private-marked one). Anonymous recall must return them ALL.
+//! 3. `cross_owner_pool_visible` — seed public rows under owner A and owner B
+//!    plus a private row of A. Anonymous recall returns both public rows and
+//!    never the private one.
+//! 4. `foreign_public_rows_not_in_authenticated_recall` — an authenticated
+//!    caller sees only own rows (no other owner's rows, public or private).
 //!
 //! `recall` is wired through the per-tool allowlist in
 //! `oauth::bearer_auth_middleware` so anonymous `tools/call mnemonic_recall`
 //! is reachable. When `jwt_sub.is_none()` the dispatcher passes
-//! `owner_pubkey = None`, and the storage layer's anonymous public-pool branch
-//! returns every row.
+//! `owner_pubkey = None` + `Some(Visibility::Public)`, and the storage layer
+//! binds `visibility = 'public'` in SQL.
 
 #![cfg(feature = "test-support")]
 
@@ -73,7 +77,7 @@ fn seed_one_private_one_public(server: &TestServer, owner: &str) {
 }
 
 #[tokio::test]
-async fn anonymous_recall_returns_all_rows() {
+async fn anonymous_recall_returns_public_rows_only() {
     let server = TestServer::builder().build();
     let owner = server.server_pubkey();
     seed_one_private_one_public(&server, &owner);
@@ -95,18 +99,16 @@ async fn anonymous_recall_returns_all_rows() {
     );
     let inner = result.result_text();
     let rows = inner["results"].as_array().expect("results array");
-    // Both rows appear — every memory is public.
-    assert_eq!(
-        rows.len(),
-        2,
-        "anonymous recall returns all rows (every memory is public): {inner}"
-    );
+    // Only the public row appears — a private row goes only to its owner.
     let ids: Vec<&str> = rows
         .iter()
         .map(|r| r["attestation_id"].as_str().unwrap_or(""))
         .collect();
-    assert!(ids.contains(&"public-id"));
-    assert!(ids.contains(&"private-id"));
+    assert_eq!(ids, vec!["public-id"], "anonymous recall: {inner}");
+    assert!(
+        !inner.to_string().contains("private row"),
+        "private content must not appear anywhere in the response: {inner}"
+    );
 }
 
 #[tokio::test]
@@ -188,8 +190,7 @@ async fn cross_owner_pool_visible() {
                 &embedding,
             )
             .expect("seed B public");
-        // Also seed a private-marked row owned by A — it surfaces too, since
-        // every memory is public.
+        // Also seed a private row owned by A — it must NOT surface.
         store
             .save_attestation(
                 "private-by-a",
@@ -219,8 +220,7 @@ async fn cross_owner_pool_visible() {
     let inner = result.result_text();
     let rows = inner["results"].as_array().expect("results array");
 
-    // All rows must surface — across both owners, including the private-marked
-    // one (every memory is public).
+    // Both owners' public rows surface; the private row does not.
     let ids: Vec<&str> = rows
         .iter()
         .map(|r| r["attestation_id"].as_str().unwrap_or(""))
@@ -234,7 +234,74 @@ async fn cross_owner_pool_visible() {
         "owner B's row must surface: ids={ids:?}"
     );
     assert!(
-        ids.contains(&"private-by-a"),
-        "owner A's private-marked row must also surface: ids={ids:?}"
+        !ids.contains(&"private-by-a"),
+        "owner A's private row must not surface: ids={ids:?}"
     );
+    assert_eq!(ids.len(), 2, "ids={ids:?}");
+}
+
+#[tokio::test]
+async fn foreign_public_rows_not_in_authenticated_recall() {
+    // Authenticated recall is owner-scoped: own rows of any visibility, and
+    // no rows of other owners (public or private). Pins the current scope so
+    // this PR does not widen it.
+    let server = TestServer::builder().build();
+    let me = server.server_pubkey();
+    seed_one_private_one_public(&server, &me);
+    let other = "other-owner-base58-pubkey";
+    {
+        let store = server.state.store.lock().expect("store");
+        store
+            .save_attestation(
+                "foreign-public",
+                "shared keyword foreign public",
+                "hash-foreign",
+                &["seed".to_string()],
+                "local:foreign",
+                "local:foreign-ar",
+                other,
+                other,
+                "2026-06-04T00:00:05Z",
+                WriteMode::Local,
+                Visibility::Public,
+                &[0.1f32; 8],
+            )
+            .expect("seed foreign");
+    }
+
+    let result = server
+        .call_tool(
+            Some(&me),
+            "mnemonic_recall",
+            json!({ "query": "shared keyword", "limit": 10 }),
+        )
+        .await;
+    assert_eq!(result.status, axum::http::StatusCode::OK);
+    let inner = result.result_text();
+    let mut ids: Vec<&str> = inner["results"]
+        .as_array()
+        .expect("results array")
+        .iter()
+        .map(|r| r["attestation_id"].as_str().unwrap_or(""))
+        .collect();
+    ids.sort_unstable();
+    assert_eq!(ids, vec!["private-id", "public-id"], "{inner}");
+
+    // The same foreign public row IS in the anonymous pool.
+    let anon = server
+        .call_tool(
+            None,
+            "mnemonic_recall",
+            json!({ "query": "shared keyword", "limit": 10 }),
+        )
+        .await;
+    let anon_inner = anon.result_text();
+    let anon_ids: Vec<&str> = anon_inner["results"]
+        .as_array()
+        .expect("results array")
+        .iter()
+        .map(|r| r["attestation_id"].as_str().unwrap_or(""))
+        .collect();
+    assert!(anon_ids.contains(&"foreign-public"), "{anon_inner}");
+    assert!(!anon_ids.contains(&"private-id"), "{anon_inner}");
 }

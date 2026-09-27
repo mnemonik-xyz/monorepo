@@ -506,7 +506,7 @@ While the fundamental serialization rules establish the layout of an isolated me
 | §7.5 Safe-injection framing | Design, not implemented. Recalled text is returned without isolation markers. |
 | §7.6 Portability | Available now for signed records. A record verifies the same way on any backend. |
 
-Today, an authenticated recall returns only the caller's own memories. An anonymous recall returns memories from the public pool of all users as plain text, without framing.
+Today, an authenticated recall returns only the caller's own memories, private and public. An anonymous recall returns only public memories (`visibility = 'public'`) of all users. The server never returns a private memory to a caller other than its owner. A memory with no `visibility` value counts as private. "Private" is an access rule on this server, not encryption. A `participate` write puts plain text on Arweave, so the server stores it as public with `plaintext_on_arweave = 1`, and a migration relabelled older anchored rows that were marked private. Sealed (encrypted) anchored writes are planned.
 
 ---
 

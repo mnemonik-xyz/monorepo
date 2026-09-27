@@ -32,7 +32,7 @@ This skill is load-bearing for adoption: over-attesting pollutes the user's memo
 - The **decision or outcome itself** in 1-3 sentences — what was decided, what is the resulting state.
 - The **why** — the constraint, evidence, or trade-off that drove the decision. Future-you will not remember it.
 - The **scope of applicability** — the file, module, project, or topic it pertains to. Used as `tags`.
-- Whether the user wants this **public** (shared on the protocol pool) or **private** (local only). Default private. For public writes, you MUST get explicit user confirmation in the same turn — do not infer consent from prior turns.
+- Whether the user wants this **public** or **private**. Private means `mode="local"`: only the owner can recall it. Every `mode="participate"` (anchored) write is **public plain text on Arweave** today, even without `visibility`; the server stores it as public with `plaintext_on_arweave: true`. Sealed (encrypted) anchored writes are planned. Before any participate write, you MUST get explicit user confirmation in the same turn — do not infer consent from prior turns.
 
 ## Tool
 

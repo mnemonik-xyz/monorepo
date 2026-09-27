@@ -40,7 +40,8 @@ use lru::LruCache;
 use mnemonic_core::arweave::recovery::RecoveredItem;
 use mnemonic_core::codec::{hash::hash_bytes, sign::verify_artifact};
 use mnemonic_core::storage::{
-    AttestationStore, BlogPost, PublicArtifact, SearchResult, Visibility, WriteMode,
+    AttestationStore, BlogPost, NonPublicAnchorKeys, PublicArtifact, SearchResult, Visibility,
+    WriteMode,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
@@ -873,11 +874,16 @@ pub async fn sign_callback_handler(
         // to exist (see `tools::perform_delivery_check`). On delivery failure
         // the row is demoted in place via `INSERT OR REPLACE` inside
         // `confirm_delivery_or_demote`.
-        // Visibility defaults to `Private` here — the deferred-sign callback
-        // path is a Participate write (browser-mediated COSE_Sign1), and
-        // until the JSON-input resolver lands (Task 5) every such write is
-        // private-by-default (AC13). Public visibility will become an
-        // explicit opt-in propagated from the original `sign_memory` call.
+        // Visibility (owner decision D-8, 2026-09-27): an anchored
+        // Participate row is plain text on Arweave, so it is stored `public`
+        // with `plaintext_on_arweave = 1`. A Local bundle stays `private`.
+        // `save_attestation` applies the same rule; computing it here keeps
+        // the intent visible at the call site.
+        let (visibility, _plaintext_on_arweave) = mnemonic_core::storage::effective_visibility(
+            entry.write_mode,
+            &arweave_tx,
+            Visibility::Private,
+        );
         let save_res = store.save_attestation(
             &attestation_id,
             &entry.content,
@@ -889,7 +895,7 @@ pub async fn sign_callback_handler(
             &req.signer_pubkey, // owner = same pubkey (Decision 9 — webapp flow uses keypair as identity)
             &now,
             entry.write_mode,
-            Visibility::Private,
+            visibility,
             &entry.embedding,
         );
         // Stamp the correlation_id onto the row so `mnemonic_check_pending`
@@ -1954,11 +1960,19 @@ pub async fn public_stats_handler(State(state): State<Arc<McpState>>) -> Respons
 // from the Task-7 core queries on `SqliteStore`; no payment gating, no owner
 // scope leaks.
 //
-// Privacy invariant (Decision 6): `/artifacts` exposes `visibility = public`
-// rows ONLY. The plain list uses `list_public_artifacts` (public-only by
-// construction); the `?q=` content-search uses `search(.., owner = None,
-// Some(Visibility::Public), ..)` — the cross-owner *public pool* path. Neither
-// can surface a private or NULL-owner row.
+// Privacy invariant (Decision 6, owner decision 2026-09-27): `/artifacts`
+// exposes `visibility = public` DB rows ONLY. The plain list uses
+// `list_public_artifacts{,_by_mode}` (bound `visibility = ?` predicate); the
+// `?q=` content-search uses `search(.., owner = None, Some(Visibility::Public),
+// ..)` — the cross-owner *public pool* path, also a bound predicate. Neither
+// can surface a private row or a legacy row with NULL visibility (the
+// migration backfills those to 'private').
+//
+// Chain snapshot items (`CHAIN_STATS_WALLETS`) are merged in. A chain item
+// whose Arweave tx id or content hash matches a non-public DB row is DROPPED
+// (`NonPublicAnchorKeys`), so the API never presents a row its owner marked
+// private. A chain-only item with no DB row stays: its bytes are already
+// public on Arweave.
 //
 // Lock discipline (CLAUDE.md): `rusqlite::Connection` is `!Send`. Every handler
 // performs any slow/`async` work (embedding the query) BEFORE taking the
@@ -2018,13 +2032,14 @@ fn public_artifact_from_search(r: SearchResult) -> PublicArtifact {
         arweave_tx: r.arweave_tx,
         created_at: r.created_at,
         write_mode: r.write_mode,
+        plaintext_on_arweave: r.plaintext_on_arweave,
     }
 }
 
 /// Project a chain-recovered item into the same `PublicArtifact` wire shape
-/// used by the Ledger. Anchored items are public-by-construction (anyone can
-/// fetch them from Arweave + Solana), so they are surfaced here regardless of
-/// whether the lost DB marked them `visibility = public`.
+/// used by the Ledger. Callers first drop items that match a non-public DB
+/// row (see [`merge_chain_artifacts`] / [`rank_recall_hits`]); the remaining
+/// chain-only items are already public on Arweave + Solana.
 ///
 /// `attestation_id` is set to the Arweave tx id because legacy chain items
 /// have no SQLite attestation UUID; the webapp keys rows on `id`, which falls
@@ -2043,17 +2058,21 @@ fn public_artifact_from_recovered(r: &RecoveredItem) -> PublicArtifact {
             .map(|d| format!("{d}T00:00:00Z"))
             .unwrap_or_else(|| "1970-01-01T00:00:00Z".to_string()),
         write_mode: WriteMode::Participate,
+        // Read back from Arweave, so it is plain text there by definition.
+        plaintext_on_arweave: true,
     }
 }
 
 /// Merge DB public artifacts with chain-recovered items. DB rows win the
 /// row when the same `arweave_tx` exists in both (exact `created_at` and any
 /// node-local metadata take precedence over the approximate block-day chain
-/// snapshot). Result is sorted newest-first by `created_at` and clamped to
+/// snapshot). Chain items that match a non-public DB row (`hidden`) are
+/// dropped. Result is sorted newest-first by `created_at` and clamped to
 /// `limit`.
 fn merge_chain_artifacts(
     chain: &[RecoveredItem],
     mut db: Vec<PublicArtifact>,
+    hidden: &NonPublicAnchorKeys,
     limit: usize,
 ) -> (Vec<PublicArtifact>, usize) {
     use std::collections::HashSet;
@@ -2062,6 +2081,9 @@ fn merge_chain_artifacts(
     let mut merged = Vec::with_capacity(db.len() + chain.len());
 
     for item in chain {
+        if hidden.matches(&item.arweave_tx, item.content_hash.as_deref()) {
+            continue;
+        }
         if seen.insert(item.arweave_tx.as_str()) {
             merged.push(public_artifact_from_recovered(item));
         }
@@ -2082,9 +2104,9 @@ fn merge_chain_artifacts(
 ///
 /// Returns `{ artifacts: [PublicArtifact], total }`. Public-visibility rows
 /// from the DB, unioned with chain-recovered anchored rows when
-/// `CHAIN_STATS_WALLETS` is configured. Anchored chain items are included
-/// regardless of the lost DB's visibility column because they are already
-/// public on Arweave + Solana.
+/// `CHAIN_STATS_WALLETS` is configured. A chain item that matches a private
+/// DB row is dropped; a chain-only item (no DB row) is included because it
+/// is already public on Arweave + Solana.
 ///
 /// With `?q=`, see [`recall_artifacts`]: SQLite and chain-recovered matches
 /// are ranked together and each row carries `match: "semantic" | "text"`.
@@ -2147,7 +2169,18 @@ pub async fn artifacts_handler(
                 };
                 match db_result {
                     Ok(db_rows) => match &chain {
-                        Some(ledger) => merge_chain_artifacts(ledger.items(), db_rows, limit),
+                        // Fail closed: if the private-row keys cannot be
+                        // read, serve DB rows only (no chain items).
+                        Some(ledger) => match store.non_public_anchor_keys() {
+                            Ok(hidden) => {
+                                merge_chain_artifacts(ledger.items(), db_rows, &hidden, limit)
+                            }
+                            Err(e) => {
+                                tracing::warn!("non-public keys query failed: {e}");
+                                let total = db_rows.len();
+                                (db_rows, total)
+                            }
+                        },
                         None => {
                             let total = db_rows.len();
                             (db_rows, total)
@@ -2213,7 +2246,7 @@ fn recall_artifacts(
     } else {
         usize::MAX
     };
-    let db_hits = {
+    let (db_hits, hidden) = {
         let store = match state.store.lock() {
             Ok(g) => g,
             Err(e) => {
@@ -2225,26 +2258,44 @@ fn recall_artifacts(
         };
         // `owner = None` paired with `Some(Visibility::Public)` is the
         // trait-mandated safe pairing (never exposes private rows).
-        match store.search(&query_emb, None, Some(Visibility::Public), db_limit) {
+        let db_hits = match store.search(&query_emb, None, Some(Visibility::Public), db_limit) {
             Ok(rows) => rows,
             Err(e) => {
                 tracing::warn!("artifacts search query failed: {e}");
                 Vec::new()
             }
-        }
+        };
+        // Keys of private DB rows, so chain hits that match one are dropped.
+        // Fail closed (`None`): on error, drop every chain hit.
+        let hidden = if chain_hits.is_empty() {
+            Some(NonPublicAnchorKeys::default())
+        } else {
+            match store.non_public_anchor_keys() {
+                Ok(keys) => Some(keys),
+                Err(e) => {
+                    tracing::warn!("non-public keys query failed: {e}");
+                    None
+                }
+            }
+        };
+        (db_hits, hidden)
     };
 
-    let artifacts = rank_recall_hits(db_hits, &chain_hits, source, limit);
+    let artifacts = match hidden {
+        Some(hidden) => rank_recall_hits(db_hits, &chain_hits, &hidden, source, limit),
+        None => rank_recall_hits(db_hits, &[], &NonPublicAnchorKeys::default(), source, limit),
+    };
     let total = artifacts.len();
     Json(serde_json::json!({ "artifacts": artifacts, "total": total })).into_response()
 }
 
-/// Merge SQLite and chain recall hits: filter by `source`, drop chain
-/// duplicates of SQLite rows, sort by score (ties: newest first), cut to
-/// `limit`.
+/// Merge SQLite and chain recall hits: filter by `source`, drop chain hits
+/// that match a non-public DB row (`hidden`), drop chain duplicates of SQLite
+/// rows, sort by score (ties: newest first), cut to `limit`.
 fn rank_recall_hits(
     db: Vec<SearchResult>,
     chain: &[crate::chain_stats::ChainHit<'_>],
+    hidden: &NonPublicAnchorKeys,
     source: ArtifactSource,
     limit: usize,
 ) -> Vec<RecallArtifact> {
@@ -2277,6 +2328,9 @@ fn rank_recall_hits(
     }
 
     for hit in chain {
+        if hidden.matches(&hit.item.arweave_tx, hit.item.content_hash.as_deref()) {
+            continue;
+        }
         let dup_hash = hit
             .item
             .content_hash
@@ -3310,6 +3364,7 @@ mod tests {
             arweave_tx: arweave_tx.to_string(),
             created_at: created_at.to_string(),
             write_mode: mode,
+            plaintext_on_arweave: mode == WriteMode::Participate,
         }
     }
 
@@ -3344,7 +3399,8 @@ mod tests {
             "2026-06-01T12:00:00Z",
             WriteMode::Participate,
         )];
-        let (merged, total) = merge_chain_artifacts(&chain, db, 10);
+        let (merged, total) =
+            merge_chain_artifacts(&chain, db, &NonPublicAnchorKeys::default(), 10);
         assert_eq!(total, 2);
         assert_eq!(merged.len(), 2);
         // tx2 (newer) first, tx1 (DB row, older exact timestamp) second.
@@ -3365,7 +3421,7 @@ mod tests {
             "2026-06-01T12:00:00Z",
             WriteMode::Participate,
         )];
-        let (merged, total) = merge_chain_artifacts(&chain, db, 2);
+        let (merged, total) = merge_chain_artifacts(&chain, db, &NonPublicAnchorKeys::default(), 2);
         assert_eq!(total, 3);
         assert_eq!(merged.len(), 2);
         assert_eq!(merged[0].arweave_tx, "tx1");
@@ -3380,9 +3436,60 @@ mod tests {
             "2026-06-01T12:00:00Z",
             WriteMode::Participate,
         )];
-        let (merged, total) = merge_chain_artifacts(&[], db.clone(), 10);
+        let (merged, total) =
+            merge_chain_artifacts(&[], db.clone(), &NonPublicAnchorKeys::default(), 10);
         assert_eq!(total, 1);
         assert_eq!(merged.len(), 1);
         assert_eq!(merged[0].attestation_id, "att-1");
+    }
+
+    #[test]
+    fn merge_chain_artifacts_drops_items_matching_private_rows() {
+        // tx-priv matches a private DB row by Arweave tx id; tx-hash matches
+        // one by content hash. Both must be dropped. tx-open is chain-only
+        // (no DB row) and stays: it is already public on Arweave.
+        let mut by_hash = recovered("tx-hash", Some("2026-06-03"), Some("secret 2"), None);
+        by_hash.content_hash = Some("priv-hash".to_string());
+        let mut open = recovered("tx-open", Some("2026-06-04"), Some("open"), None);
+        open.content_hash = Some("open-hash".to_string());
+        let mut priv_tx = recovered("tx-priv", Some("2026-06-02"), Some("secret 1"), None);
+        priv_tx.content_hash = Some("other-hash".to_string());
+        let chain = vec![priv_tx, by_hash, open];
+
+        let mut hidden = NonPublicAnchorKeys::default();
+        hidden.arweave_txs.insert("tx-priv".to_string());
+        hidden.content_hashes.insert("priv-hash".to_string());
+
+        let (merged, total) = merge_chain_artifacts(&chain, Vec::new(), &hidden, 10);
+        assert_eq!(total, 1);
+        assert_eq!(merged[0].arweave_tx, "tx-open");
+        assert!(merged.iter().all(|a| !a.content.starts_with("secret")));
+    }
+
+    #[test]
+    fn rank_recall_hits_drops_chain_hits_matching_private_rows() {
+        use crate::chain_stats::{ChainHit, MatchKind};
+        let mut priv_item = recovered("tx-priv", Some("2026-06-02"), Some("secret"), None);
+        priv_item.content_hash = Some("priv-hash".to_string());
+        let mut open_item = recovered("tx-open", Some("2026-06-03"), Some("open"), None);
+        open_item.content_hash = Some("open-hash".to_string());
+        let chain = vec![
+            ChainHit {
+                item: &priv_item,
+                score: 0.9,
+                kind: MatchKind::Text,
+            },
+            ChainHit {
+                item: &open_item,
+                score: 0.5,
+                kind: MatchKind::Text,
+            },
+        ];
+        let mut hidden = NonPublicAnchorKeys::default();
+        hidden.content_hashes.insert("priv-hash".to_string());
+
+        let hits = rank_recall_hits(Vec::new(), &chain, &hidden, ArtifactSource::All, 10);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].artifact.arweave_tx, "tx-open");
     }
 }

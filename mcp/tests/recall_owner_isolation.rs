@@ -7,16 +7,15 @@
 //! 1. `tools/call mnemonic_recall` with **bob's** JWT returns exactly 1 row,
 //!    whose `owner_pubkey == bob.sub` and content matches what bob signed.
 //! 2. Anonymous `/mcp tools/call mnemonic_recall` (no Authorization header)
-//!    hits the cross-owner public pool and surfaces ALL rows — since PR #187
-//!    every stored memory is public by operator decision, so the pool query
-//!    carries no owner/visibility predicate.
+//!    hits the cross-owner public pool, which holds only
+//!    `visibility = 'public'` rows. The three memories above use the default
+//!    visibility (`private`), so the anonymous caller gets NONE of them
+//!    (owner decision 2026-09-27: private rows go only to their owner).
 //!
-//! The security-critical assertion is (1), guarding the SQL `WHERE
+//! Both assertions are security-critical: (1) guards the SQL `WHERE
 //! owner_pubkey = ?` filter in `SqliteStore::search` on the AUTHENTICATED
-//! path. A regression there means a caller presenting one identity's token
-//! observes another identity's rows — which matters even though the
-//! anonymous pool is global, because authenticated recall is the surface
-//! agents build on for "my memories only" semantics.
+//! path; (2) guards the bound `visibility = 'public'` predicate on the
+//! anonymous path.
 
 use std::sync::Arc;
 
@@ -214,11 +213,8 @@ async fn test_recall_filters_by_owner_pubkey_and_anonymous_returns_401() {
     assert_eq!(row_content, "bob memory 1", "bob got alice's row!");
 
     // 2. Anonymous recall (no Authorization header) is allowlisted and hits
-    // the cross-owner public pool. Since PR #187 every stored memory is
-    // public (operator decision — see SEARCH_SQL_PUBLIC_POOL in
-    // core/src/storage/sqlite.rs): the pool query carries no owner or
-    // visibility predicate, so all three rows written above surface,
-    // regardless of their stored `visibility` value.
+    // the cross-owner public pool. The pool holds only public rows; the three
+    // memories above are private (default visibility), so none surface.
     let (sa, body_a) = post_jsonrpc(
         &app,
         serde_json::json!({
@@ -245,34 +241,16 @@ async fn test_recall_filters_by_owner_pubkey_and_anonymous_returns_401() {
         .expect("anon recall content text");
     let inner: Value = serde_json::from_str(text).expect("anon recall inner json");
     let rows = inner["results"].as_array().cloned().unwrap_or_default();
-    // The global pool surfaces every row written above — alice's 2 + bob's 1.
-    // An anonymous caller owns none of them, so each row is labelled
-    // "foreign" and its text is framed with this response's boundary.
-    let boundary = inner["untrusted_boundary"]
-        .as_str()
-        .expect("untrusted_boundary present for foreign rows");
-    let mut contents: Vec<&str> = rows
-        .iter()
-        .map(|r| {
-            assert_eq!(r["source"], "foreign", "anonymous rows are foreign: {r}");
-            let framed = r["content"].as_str().expect("content field");
-            let body = framed
-                .split_once(">>>\n")
-                .and_then(|(_, rest)| {
-                    rest.strip_suffix(&format!(
-                        "\n<<<END_MNEMONIC_UNTRUSTED_MEMORY boundary={boundary}>>>"
-                    ))
-                })
-                .expect("foreign content is framed");
-            body
-        })
-        .collect();
-    contents.sort_unstable();
-    assert_eq!(
-        contents,
-        vec!["alice memory 1", "alice memory 2", "bob memory 1"],
-        "anonymous recall must surface the global public pool: {inner}"
+    assert!(
+        rows.is_empty(),
+        "anonymous recall must not return private rows: {inner}"
     );
+    for secret in ["alice memory 1", "alice memory 2", "bob memory 1"] {
+        assert!(
+            !text.contains(secret),
+            "private content {secret:?} leaked to an anonymous caller: {inner}"
+        );
+    }
     // And the pool response carries no single-owner attribution.
     assert!(
         inner["owner_pubkey"].is_null(),

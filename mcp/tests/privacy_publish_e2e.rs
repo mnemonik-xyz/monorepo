@@ -5,10 +5,11 @@
 //! file deliberately does NOT re-test those.
 //!
 //! The load-bearing guarantees exercised here:
-//!   - Surface separation: every stored memory is public, so `GET /artifacts`
-//!     (plain AND `?q=`) lists ALL attestation rows; but `GET /blog` /
-//!     `GET /blog/:slug` read the separate `blog_posts` table, so a plain
-//!     memory (not a published post) never appears on the blog surfaces.
+//!   - Surface separation: `GET /artifacts` (plain AND `?q=`) lists only
+//!     `visibility = 'public'` attestation rows (a private row goes only to
+//!     its owner); `GET /blog` / `GET /blog/:slug` read the separate
+//!     `blog_posts` table, so a plain memory (not a published post) never
+//!     appears on the blog surfaces.
 //!   - Cross-surface publish upsert (Decision 5/7): re-publishing the same
 //!     title via a DIFFERENT surface REPLACES the row (slug is the PK).
 //!   - Cross-surface auth (Decision 5): anonymous publish is rejected on both
@@ -163,12 +164,12 @@ fn seed_public_and_private(state: &Arc<McpState>, owner: &str) {
 const PUBLIC_SENTINEL: &str = "PUBLIC-LEDGER-ROW-VISIBLE-payload";
 const PRIVATE_SENTINEL: &str = "TOPSECRET-PRIVATE-PAYLOAD-do-not-leak";
 
-/// Surface separation: every memory is public so BOTH attestation rows surface
-/// on `/artifacts`, but the blog surfaces (`/blog`, `/blog/:slug`) read the
-/// separate `blog_posts` table and therefore never carry a plain memory's
-/// content — only published posts.
+/// Surface separation: only the PUBLIC attestation row surfaces on
+/// `/artifacts`; the private row never does. The blog surfaces (`/blog`,
+/// `/blog/:slug`) read the separate `blog_posts` table and therefore never
+/// carry a plain memory's content — only published posts.
 #[tokio::test]
-async fn artifacts_lists_all_memories_blog_lists_only_posts() {
+async fn artifacts_lists_public_memories_blog_lists_only_posts() {
     let oauth_state = Arc::new(OAuthState::with_defaults(TEST_SECRET));
     let state = mock_state();
     seed_public_and_private(&state, "owner-pubkey-1");
@@ -205,7 +206,7 @@ async fn artifacts_lists_all_memories_blog_lists_only_posts() {
         );
     }
 
-    // /artifacts lists ALL attestation rows — both seeded memories surface.
+    // /artifacts lists public attestation rows only.
     for uri in ["/artifacts", "/artifacts?q=payload&limit=50"] {
         let (status, artifacts) = get_json(&app, uri).await;
         assert_eq!(status, StatusCode::OK, "{uri} should 200");
@@ -220,8 +221,12 @@ async fn artifacts_lists_all_memories_blog_lists_only_posts() {
             "{uri}: public row present: {ids:?}"
         );
         assert!(
-            ids.contains(&"priv-id"),
-            "{uri}: every memory is public, private-marked row present too: {ids:?}"
+            !ids.contains(&"priv-id"),
+            "{uri}: private row must not be listed: {ids:?}"
+        );
+        assert!(
+            !artifacts.to_string().contains(PRIVATE_SENTINEL),
+            "{uri}: private content leaked: {artifacts}"
         );
     }
 }

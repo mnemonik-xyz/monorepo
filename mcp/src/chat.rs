@@ -14,7 +14,6 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use crate::mcp::McpState;
-use crate::tools;
 
 // ── Request / Response types ─────────────────────────────────────────────────
 
@@ -41,6 +40,9 @@ struct ChatError {
 
 const MAX_MESSAGE_LEN: usize = 2000;
 const RECALL_LIMIT: usize = 3;
+/// Tag carried by every seeded knowledge chunk (`seed.rs`). `/chat` reads only
+/// rows with this tag.
+const KNOWLEDGE_TAG: &str = "protocol-knowledge";
 
 // ── POST /chat ───────────────────────────────────────────────────────────────
 
@@ -96,18 +98,25 @@ pub async fn chat_handler(
     // chunks (Decision 9 ownership filter scopes search by owner_pubkey).
     // Use the local server keypair so /chat returns the seeded knowledge
     // base regardless of the caller's auth state — chat is not personalized.
+    //
+    // Privacy: /chat is anonymous, so it reads ONLY rows tagged
+    // `protocol-knowledge` (the seeded corpus). Other rows owned by the
+    // operator key (for example, private memories written over stdio into
+    // the same database) never reach the LLM prompt.
     let chat_owner_pubkey = state.keypair.pubkey_base58();
+    // Embed before taking the store lock (the embedder can be slow).
+    let query_emb = state.embedder.embed(message);
     let recall_result = {
         let store = state.store.lock().unwrap();
-        tools::recall(
-            &state.keypair,
-            &store,
-            state.embedder.as_ref(),
-            message,
-            RECALL_LIMIT,
-            Some(chat_owner_pubkey.as_str()),
-            None,
-        )
+        let hits = store
+            .search_owner_tagged(
+                &query_emb,
+                chat_owner_pubkey.as_str(),
+                KNOWLEDGE_TAG,
+                RECALL_LIMIT,
+            )
+            .unwrap_or_default();
+        serde_json::json!({ "results": hits })
     }; // lock dropped here -- safe to .await below
 
     // Extract context from recall results
@@ -743,6 +752,69 @@ mod handler_tests {
             "adversarial input must reach the LLM with the defensive wrapper intact"
         );
         assert_eq!(body["response"], "declined");
+    }
+
+    // -- Privacy: /chat reads only the seeded knowledge corpus --
+
+    #[tokio::test]
+    async fn chat_context_excludes_operator_rows_without_knowledge_tag() {
+        use mnemonic_core::storage::{AttestationStore, Visibility, WriteMode};
+
+        let mock_server = MockServer::start();
+        let mock = mock_server.mock(|when, then| {
+            when.method(httpmock::Method::POST)
+                .path("/v1/chat/completions")
+                .body_includes("KB-CHUNK-TEXT")
+                .body_excludes("SECRET-PRIVATE-NOTE");
+            then.status(200)
+                .header("content-type", "application/json")
+                .body(r#"{"choices":[{"message":{"content":"ok"}}]}"#);
+        });
+
+        let state = build_test_state(&mock_server.base_url());
+        let operator = state.keypair.pubkey_base58();
+        {
+            let store = state.store.lock().unwrap();
+            let emb = vec![0.1f32; 8];
+            store
+                .save_attestation(
+                    "kb-1",
+                    "KB-CHUNK-TEXT about the protocol",
+                    "hash-kb",
+                    &["protocol-knowledge".to_string(), "a.md".to_string()],
+                    "local:kb",
+                    "local:kb-ar",
+                    &operator,
+                    &operator,
+                    "2026-06-01T00:00:00Z",
+                    WriteMode::Local,
+                    Visibility::Private,
+                    &emb,
+                )
+                .unwrap();
+            store
+                .save_attestation(
+                    "note-1",
+                    "SECRET-PRIVATE-NOTE of the operator",
+                    "hash-note",
+                    &["personal".to_string()],
+                    "local:note",
+                    "local:note-ar",
+                    &operator,
+                    &operator,
+                    "2026-06-01T00:00:01Z",
+                    WriteMode::Local,
+                    Visibility::Private,
+                    &emb,
+                )
+                .unwrap();
+        }
+
+        let app = build_app(state);
+        let (status, body) = post_chat(app, serde_json::json!({"message": "protocol"})).await;
+        assert_eq!(status, StatusCode::OK, "body: {body}");
+        assert_eq!(body["response"], "ok");
+        mock.assert();
     }
 
     // -- Download handler tests --

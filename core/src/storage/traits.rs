@@ -62,6 +62,10 @@ pub struct SearchResult {
     pub signer_pubkey: String,
     /// Tenant that owns the row. Empty for legacy rows without an owner.
     pub owner_pubkey: String,
+    /// True when the content was submitted to Arweave as plain text that
+    /// anyone can read (owner decision D-8). Anchored memories are public
+    /// plain text until sealed (encrypted) writes ship.
+    pub plaintext_on_arweave: bool,
 }
 
 /// Attestation CRUD and cosine search.
@@ -176,6 +180,10 @@ pub trait AttestationStore {
     /// `owner_pubkey = Some(pk)`) pass `None` to see all their own rows;
     /// anonymous callers (with `owner_pubkey = None`) pass
     /// `Some(Visibility::Public)` to discover the cross-owner public pool.
+    ///
+    /// Private rows go only to their owner. The SQLite implementation
+    /// returns an empty result for `owner_pubkey = None` with any filter
+    /// other than `Some(Visibility::Public)`.
     fn search(
         &self,
         query_embedding: &[f32],
