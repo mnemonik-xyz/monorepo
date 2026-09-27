@@ -36,18 +36,22 @@ export const TESTNET_ADDRESSES = {
 } as const;
 
 // Chain IDs for commonly used networks, overridable by flag.
+// Arc is Circle's native USDC L1 (launched 2026-09-16). ERC-8004 contracts
+// are confirmed deployed via CREATE2 at the standard mainnet addresses on Arc.
 export const CHAIN_IDS = {
   ethereumMainnet: 1,
   baseMainnet: 8453,
   ethereumSepolia: 11155111,
   baseSepolia: 84532,
+  arcMainnet: 5042,
+  arcTestnet: 5042002,
 } as const;
 
 // Returns registry addresses for a given chain ID.
 // Any chain not listed here is assumed mainnet-class (same CREATE2 result).
 // The caller can always override via the `registryOverride` option.
 export function addressesForChain(chainId: number): typeof MAINNET_ADDRESSES | typeof TESTNET_ADDRESSES {
-  const TESTNET_IDS = new Set([11155111, 84532, 80002, 421614, 44787, 534351, 97, 43113, 59141, 5003, 6342, 11155420]);
+  const TESTNET_IDS = new Set([11155111, 84532, 80002, 421614, 44787, 534351, 97, 43113, 59141, 5003, 6342, 11155420, 5042002]);
   return TESTNET_IDS.has(chainId) ? TESTNET_ADDRESSES : MAINNET_ADDRESSES;
 }
 
