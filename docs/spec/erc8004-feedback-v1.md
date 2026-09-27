@@ -301,7 +301,7 @@ function giveFeedback(
 ) external
 ```
 
-4-byte selector: `0xd5d1e4af`
+4-byte selector: `0x3c036a7e`
 (`keccak256("giveFeedback(uint256,int128,uint8,string,string,string,string,bytes32)")[0:4]`)
 
 **Deviations from the original backlog spec (`work/a2a-bridge/backlog.md` Path 3):**
@@ -354,6 +354,6 @@ jq -j '.documentJson' packages/sdk/test/fixtures/erc8004-feedback-v1.json | cast
 # Must equal fixture.feedbackHash
 
 # Verify the giveFeedback calldata selector:
-cast 4byte 0xd5d1e4af
+cast 4byte 0x3c036a7e
 # Must return: giveFeedback(uint256,int128,uint8,string,string,string,string,bytes32)
 ```

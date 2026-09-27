@@ -66,7 +66,7 @@ export const GIVE_FEEDBACK_SIG =
 // Verification: cast keccak "giveFeedback(uint256,int128,uint8,string,string,string,string,bytes32)"
 // Expected output starts with this value.
 // Asserted in erc8004.abi.test.ts.
-export const GIVE_FEEDBACK_SELECTOR = "0xd5d1e4af" as const;
+export const GIVE_FEEDBACK_SELECTOR = "0x3c036a7e" as const;
 
 // Self-promotion guard: these require() checks mirror what the contract enforces.
 // The client runs them pre-flight so a doomed tx is never sent.
