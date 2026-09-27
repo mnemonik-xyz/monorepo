@@ -49,10 +49,13 @@ const KNOWLEDGE_TAG: &str = "protocol-knowledge";
 pub async fn chat_handler(
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     State(state): State<Arc<McpState>>,
+    headers: axum::http::HeaderMap,
     Json(body): Json<ChatRequest>,
 ) -> Response {
-    // -- Rate limiting: 10 req/min per IP --
-    let ip_key = addr.ip().to_string();
+    // -- Rate limiting: 10 req/min per real client IP (trusted-proxy aware,
+    // IPv6 by /64; see `client_ip.rs`), not per TCP peer --
+    let client = state.trusted_proxies.client_ip(addr.ip(), &headers);
+    let ip_key = crate::client_ip::rate_limit_key(client).to_string();
     if state.chat_limiter.check_key(&ip_key).is_err() {
         return (
             StatusCode::TOO_MANY_REQUESTS,
@@ -566,6 +569,8 @@ mod handler_tests {
                 5,
             )),
             free_anchors: crate::payment::FreeAnchorLimits::disabled(),
+            trusted_proxies: std::sync::Arc::new(crate::client_ip::TrustedProxies::default()),
+            max_content_bytes: crate::pending::MAX_CONTENT_BYTES,
             delivery_metrics: Arc::new(crate::payment::DeliveryMetrics::default()),
             confirmation_ledger: Arc::new(crate::confirmation_token::ConfirmationLedger::new()),
             hosted_endpoint: String::new(),

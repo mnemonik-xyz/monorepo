@@ -2,13 +2,15 @@
 //!
 //! This file owns all payment concerns for the MCP server:
 //!   - Payment-mode gating (`check_payment` and path selectors).
-//!   - x402 nonce replay protection (`mark_x402_nonce`).
+//!   - x402 nonce replay protection (`claim_x402_nonce`, `release_x402_nonce`).
 //!   - P&L cost accounting (`record_attestation_cost`, `get_pnl_stats`).
 //!   - Standalone `verify_usdc_transfer` over `&SolanaClient` (moved here in
 //!     Task 8; the USDC-vs-recipient policy is payment-layer, not chain-layer).
 //!   - EVM USDC x402 verifier (`verify_evm_usdc_transfer`) for Arc/Base.
 //!   - Free daily anchor quota (`try_consume_free_anchor`,
-//!     `refund_free_anchor`, `free_anchors_remaining`, `claim_free_anchor`).
+//!     `refund_free_anchor`, `check_free_anchor`, `claim_free_anchor`):
+//!     Google-linked accounts only, per-account + per-IP + global caps, a
+//!     size limit, and no global refund after a chain write.
 //!
 //! Payment paths (Wave 4 — non-custodial; custodial balance/api-keys removed):
 //!   - x402 — clients pay per-call via a USDC transfer on Solana OR an EVM
@@ -24,6 +26,7 @@ use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBe
 use serde::{Deserialize, Serialize};
 
 use dashmap::DashMap;
+use std::net::IpAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -122,15 +125,33 @@ pub fn extract_x402_proof(headers: &HeaderMap) -> Option<X402PaymentProof> {
 
     // Try raw JSON first
     if let Ok(p) = serde_json::from_str::<X402PaymentProof>(raw) {
-        return Some(p);
+        return Some(normalize_x402_proof(p));
     }
     // Fallback: base64-encoded JSON (Coinbase CDK sends this)
     if let Ok(decoded) = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, raw) {
         if let Ok(p) = serde_json::from_slice::<X402PaymentProof>(&decoded) {
-            return Some(p);
+            return Some(normalize_x402_proof(p));
         }
     }
     None
+}
+
+/// One spelling per payment, so a replay cannot pass the `x402_nonces`
+/// check with a different spelling of the same transaction. An EVM tx hash
+/// is hex and case-insensitive at the RPC: store it lowercase with `0x`. A
+/// Solana signature is base58 (case matters) and is only trimmed.
+fn normalize_x402_proof(mut proof: X402PaymentProof) -> X402PaymentProof {
+    let sig = proof.tx_sig.trim();
+    proof.tx_sig = if is_evm_network(&proof.network) {
+        let hex = sig
+            .strip_prefix("0x")
+            .or_else(|| sig.strip_prefix("0X"))
+            .unwrap_or(sig);
+        format!("0x{}", hex.to_ascii_lowercase())
+    } else {
+        sig.to_string()
+    };
+    proof
 }
 
 // ── Main gate function ───────────────────────────────────────────────────────
@@ -529,13 +550,11 @@ async fn check_x402(
         }
     };
 
-    // T3 round-2 — replay-detect WITHOUT consuming. If this nonce has
-    // already been consumed (by a successful delivery on an earlier
-    // request), reject. The actual `INSERT INTO x402_nonces` happens
-    // AFTER `confirm_delivery_or_demote` succeeds (see
-    // `consume_x402_nonce_after_success` below) so a delivery failure
-    // leaves the nonce reusable — the caller's USDC payment is not
-    // forfeit when the operator's anchor isn't proved retrievable.
+    // Replay fast path WITHOUT consuming: reject a nonce another call
+    // already owns before the RPC round-trip. The atomic reservation is
+    // `claim_x402_nonce`, which `mcp_handler` runs after this gate and
+    // before the paid call; a failed call releases it
+    // (`release_x402_nonce`), so the caller's USDC is not forfeit.
     {
         let store = store.lock().unwrap();
         if x402_nonce_already_consumed(&store, &proof.tx_sig).unwrap_or(false) {
@@ -575,10 +594,8 @@ async fn check_x402(
         Err(e) => return PaymentGate::Unauthorized(format!("x402 verification error: {e}")),
     }
 
-    // Do NOT mark the nonce here. The nonce is consumed only after a
-    // successful delivery confirmation (or, in the
-    // legacy `payment_mode == "none"` path, never). See
-    // `consume_x402_nonce_after_success`.
+    // Do NOT mark the nonce here: `mcp_handler` reserves it atomically with
+    // `claim_x402_nonce` right before the paid call.
     PaymentGate::Proceed
 }
 
@@ -587,9 +604,8 @@ async fn check_x402(
 ///
 /// Used by `check_x402` to fail-fast on replay BEFORE the more expensive
 /// `verify_usdc_transfer` Solana RPC. Note: a race window exists between
-/// this read and the eventual `consume_x402_nonce_after_success` INSERT
-/// — the loser gets `mark_x402_nonce` ConstraintViolation, which is the
-/// correct outcome (one of the two concurrent requests wins).
+/// this read and the paid call; the atomic `claim_x402_nonce` in
+/// `mcp_handler` closes it (one of two concurrent requests wins).
 pub fn x402_nonce_already_consumed(store: &SqliteStore, tx_sig: &str) -> anyhow::Result<bool> {
     let exists: bool = store
         .conn()
@@ -602,20 +618,37 @@ pub fn x402_nonce_already_consumed(store: &SqliteStore, tx_sig: &str) -> anyhow:
     Ok(exists)
 }
 
-/// Consume an x402 nonce by inserting it into `x402_nonces`. Called by
-/// the caller AFTER the delivery confirmation passes (T3 round-2
-/// deferral). Returns `Err` on ConstraintViolation if the same nonce was
-/// concurrently consumed by another request.
+/// Reserve an x402 payment for ONE paid call, before the call runs.
+/// `Ok(true)` when this call now owns the payment, `Ok(false)` when another
+/// call already used (or is using) it.
 ///
-/// Round-2 split: the original `check_x402` consumed the nonce at gate
-/// time, which made delivery failures permanently spend the caller's
-/// USDC. With the nonce deferred to here, a delivery failure leaves the
-/// nonce reusable and the caller can retry with the same `X-Payment`
-/// header — they pay Arweave/Solana fees again on the retry (operator
-/// bleed), but the DoS quota guard caps how many such retries cost the
-/// operator.
-pub fn consume_x402_nonce_after_success(store: &SqliteStore, tx_sig: &str) -> anyhow::Result<()> {
-    mark_x402_nonce(store, tx_sig)
+/// The single `INSERT OR IGNORE` on the `x402_nonces.tx_sig` primary key is
+/// atomic, so two concurrent requests with the same `X-Payment` can never
+/// both proceed. (Before, the nonce was inserted only after the call
+/// succeeded. Two concurrent calls both passed the read-only check, both
+/// parked a paid bundle, and the loser's INSERT failure was only logged: one
+/// payment bought two anchors.)
+pub fn claim_x402_nonce(store: &SqliteStore, tx_sig: &str) -> anyhow::Result<bool> {
+    let now = chrono::Utc::now().to_rfc3339();
+    let changed = store
+        .conn()
+        .execute(
+            "INSERT OR IGNORE INTO x402_nonces (tx_sig, used_at) VALUES (?1, ?2)",
+            params![tx_sig, now],
+        )
+        .context("claim x402 nonce")?;
+    Ok(changed == 1)
+}
+
+/// Give back a payment reserved by [`claim_x402_nonce`] when the paid call
+/// failed (for example a delivery that was not confirmed), so the caller can
+/// retry with the same `X-Payment` header and its USDC is not lost.
+pub fn release_x402_nonce(store: &SqliteStore, tx_sig: &str) -> anyhow::Result<()> {
+    store
+        .conn()
+        .execute("DELETE FROM x402_nonces WHERE tx_sig = ?1", params![tx_sig])
+        .context("release x402 nonce")?;
+    Ok(())
 }
 
 // ── Builder ──────────────────────────────────────────────────────────────────
@@ -733,24 +766,6 @@ pub struct PnlStats {
     pub net_micro_usdc: i64,
     pub margin_pct: f64,
     pub avg_sol_price_usdc: f64,
-}
-
-/// Record an x402 tx sig as used (prevents replay). Returns Err if already used.
-pub fn mark_x402_nonce(store: &SqliteStore, tx_sig: &str) -> anyhow::Result<()> {
-    let now = chrono::Utc::now().to_rfc3339();
-    let result = store.conn().execute(
-        "INSERT INTO x402_nonces (tx_sig, used_at) VALUES (?,?)",
-        params![tx_sig, now],
-    );
-    match result {
-        Ok(_) => Ok(()),
-        Err(rusqlite::Error::SqliteFailure(e, _))
-            if e.code == rusqlite::ErrorCode::ConstraintViolation =>
-        {
-            anyhow::bail!("x402 payment already used: {tx_sig}")
-        }
-        Err(e) => Err(e.into()),
-    }
 }
 
 /// Record actual server costs alongside each completed attestation.
@@ -1062,24 +1077,39 @@ impl DeliveryMetrics {
 
 // ── Free daily anchor quota ──────────────────────────────────────────────────
 //
-// Each agent Ed25519 key gets `per_key` free `participate` (on-chain
-// anchored) writes per UTC day before payment is required. All keys also
-// share a global daily cap (`global`), because a new key costs nothing to
-// mint. The quota applies only where a payment would otherwise be required:
-// HTTP with `PAYMENT_MODE=x402` (`free_quota_applies`). `PAYMENT_MODE=none`
-// is already free and never touches the counters; stdio is never gated.
+// A free `participate` (on-chain anchored) write needs ALL of:
+//   - a Google-linked identity: the signer's Ed25519 key has a row in
+//     `google_identity_links` (`oauth::google::google_sub_for_pubkey`). The
+//     per-account counter is keyed on the Google account, so every key linked
+//     to one Google account shares one quota. A key with no Google link, or an
+//     anonymous caller, gets no free anchor (paid x402 needs no Google link);
+//   - the per-account counter below `per_account` (default 10 per UTC day);
+//   - the per-IP counter below `per_ip`: the real client IP
+//     (`client_ip.rs`, IPv6 grouped by /64) of the agent that asked for the
+//     write;
+//   - the global counter below `global`, the operator's daily fee budget;
+//   - the anchored COSE_Sign1 bytes at most `max_bytes` long. A larger write
+//     goes the paid path.
+// The quota applies only where a payment would otherwise be required: HTTP
+// with `PAYMENT_MODE=x402` (`free_quota_applies`). `PAYMENT_MODE=none` is
+// already free and never touches the counters; stdio is never gated.
 //
 // Storage: one mcp-owned table, `free_anchor_usage(subject, day, n)`.
-// `subject` is `blake3(pubkey)` hex — the same derivation as
-// `paid_operations.subject_hash`. The global counter uses the reserved
-// subject `*`, which can never collide with a 64-char hex digest. `day` is the
-// UTC date `YYYY-MM-DD`, so each day starts from zero without a reset job.
+// Subjects: `blake3("free-anchor/google:" + google_sub)` for an account,
+// `blake3_keyed(salt, "free-anchor/ip:" + ip)` for an IP (the salt lives in
+// `free_anchor_secret`, so a leaked table does not reveal IPv4 addresses by
+// brute force), and the reserved `*` for the global counter. Raw IPs and raw
+// Google ids are never stored here. `day` is the UTC date `YYYY-MM-DD`, so
+// each day starts from zero without a reset job.
 //
 // Single consumption: a free anchor is consumed once per anchored write, at
 // anchor time, in `api::sign_callback_handler` (`claim_free_anchor`). The
 // pre-parking x402 gate in `mcp_handler` only peeks
-// (`free_anchor_available`). A write whose delivery is not confirmed gets
-// its free anchor back (`FreeAnchorGrant` refunds on drop).
+// (`check_free_anchor`). A write whose delivery is not confirmed gets its
+// free anchor back (`FreeAnchorGrant` refunds on drop): all three counters
+// before any chain write, the per-account and per-IP counters only after one
+// (the operator really paid the Arweave/Solana fees, so the global budget
+// stays spent).
 
 /// Idempotent mcp-owned migration for the free daily anchor quota.
 pub const FREE_ANCHOR_USAGE_MIGRATION_SQL: &str = "CREATE TABLE IF NOT EXISTS free_anchor_usage (
@@ -1087,20 +1117,42 @@ pub const FREE_ANCHOR_USAGE_MIGRATION_SQL: &str = "CREATE TABLE IF NOT EXISTS fr
     day TEXT NOT NULL,
     n INTEGER NOT NULL,
     PRIMARY KEY (subject, day)
+);
+CREATE TABLE IF NOT EXISTS free_anchor_secret (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    salt BLOB NOT NULL
 );";
 
 /// Reserved `free_anchor_usage.subject` for the global (all-keys) counter.
 const GLOBAL_FREE_ANCHOR_SUBJECT: &str = "*";
 
-/// Daily free anchor limits. `0` in either field means no free anchors.
+/// Default `MNEMONIC_FREE_ANCHOR_MAX_BYTES`: 16 KiB of COSE_Sign1 bytes. A
+/// typical memory (about 1 KiB of text, 384-dimension embedding) makes a
+/// COSE_Sign1 of about 1.7 KiB (see the `typical_artifact_size` test), so
+/// 16 KiB leaves room for about 15 KiB of text and tags.
+pub const DEFAULT_FREE_ANCHOR_MAX_BYTES: usize = 16 * 1024;
+
+/// Upper bound of the COSE_Sign1 envelope around the canonical CBOR payload
+/// (protected header, signer key id, 64-byte Ed25519 signature). The
+/// pre-parking gate adds it to the unsigned payload size; the measured
+/// overhead is 140 bytes (`typical_artifact_size` test).
+pub const COSE_SIGN1_OVERHEAD_BYTES: usize = 256;
+
+/// Daily free anchor limits. `0` in any counter field means no free anchors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FreeAnchorLimits {
-    /// Free anchored writes per agent key per UTC day
+    /// Free anchored writes per Google account per UTC day
     /// (`MNEMONIC_FREE_ANCHORS_PER_DAY`, default 10).
-    pub per_key: u32,
-    /// Free anchored writes per UTC day across all keys
+    pub per_account: u32,
+    /// Free anchored writes per client IP per UTC day
+    /// (`MNEMONIC_FREE_ANCHORS_PER_IP_PER_DAY`, default 20).
+    pub per_ip: u32,
+    /// Free anchored writes per UTC day across all accounts
     /// (`MNEMONIC_FREE_ANCHORS_GLOBAL_PER_DAY`, default 1000).
     pub global: u32,
+    /// Largest COSE_Sign1 (bytes) a free anchor may carry
+    /// (`MNEMONIC_FREE_ANCHOR_MAX_BYTES`, default 16 KiB).
+    pub max_bytes: usize,
 }
 
 impl FreeAnchorLimits {
@@ -1109,32 +1161,96 @@ impl FreeAnchorLimits {
     #[allow(dead_code)] // used by test fixtures; the bin compiles this module too.
     pub const fn disabled() -> Self {
         Self {
-            per_key: 0,
+            per_account: 0,
+            per_ip: 0,
             global: 0,
+            max_bytes: DEFAULT_FREE_ANCHOR_MAX_BYTES,
         }
     }
 
     /// True when at least one free anchor can exist today.
     pub fn is_enabled(&self) -> bool {
-        self.per_key > 0 && self.global > 0
+        self.per_account > 0 && self.per_ip > 0 && self.global > 0 && self.max_bytes > 0
     }
 }
+
+/// Why a write gets no free anchor. The `reason` string goes into the
+/// `free_anchors` block of `mnemonic_whoami` and of every 402 body.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FreeAnchorDenied {
+    /// The quota is off on this deploy (a limit is 0).
+    Disabled,
+    /// No authenticated caller.
+    AuthenticationRequired,
+    /// The signer's key is not linked to a Google account.
+    GoogleAccountRequired,
+    /// The anchored bytes are larger than `max_bytes`.
+    TooLarge,
+    /// The Google account used its free anchors for today.
+    AccountQuotaUsed,
+    /// The client IP used its free anchors for today.
+    IpQuotaUsed,
+    /// The operator's global daily budget is spent.
+    GlobalQuotaUsed,
+    /// A Universal Paywall quote already exists for this write: it stays on
+    /// the paid path, so it is never both charged and free.
+    PaidOperationInProgress,
+}
+
+impl FreeAnchorDenied {
+    pub fn reason(self) -> &'static str {
+        match self {
+            Self::Disabled => "free_quota_disabled",
+            Self::AuthenticationRequired => "authentication_required",
+            Self::GoogleAccountRequired => "google_account_required",
+            Self::TooLarge => "too_large",
+            Self::AccountQuotaUsed => "account_quota_used",
+            Self::IpQuotaUsed => "ip_quota_used",
+            Self::GlobalQuotaUsed => "global_quota_used",
+            Self::PaidOperationInProgress => "paid_operation_in_progress",
+        }
+    }
+}
+
+/// How to become eligible after `google_account_required`.
+pub const GOOGLE_LINK_HINT: &str = "Sign in with Google in the Mnemonic browser extension \
+     and link this agent key (POST /oauth/google/link). Paid x402 writes need no Google account.";
 
 /// The caller's free anchor quota, as shown by `mnemonic_whoami` and in the
 /// 402 payment-required bodies.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct FreeAnchorStatus {
-    /// Free anchored writes per key per UTC day.
+    /// True when the caller can get a free anchor at all (Google-linked key,
+    /// quota on). A spent quota keeps `eligible: true` with `remaining: 0`.
+    pub eligible: bool,
+    /// Why the last write (or this caller) gets no free anchor. Absent when
+    /// a free anchor is available.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<&'static str>,
+    /// How to become eligible. Present with `google_account_required`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub link_hint: Option<&'static str>,
+    /// Free anchored writes per Google account per UTC day.
     pub per_day: u32,
-    /// Free anchored writes left today for the caller's key. Absent for an
-    /// anonymous caller.
+    /// Free anchored writes per client IP per UTC day.
+    pub per_ip_per_day: u32,
+    /// Largest COSE_Sign1 (bytes) a free anchor may carry.
+    pub max_bytes: usize,
+    /// Free anchored writes left today for the caller's Google account
+    /// (never more than the global or known per-IP remainder). Absent when
+    /// the caller is not eligible.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub remaining: Option<u32>,
-    /// Free anchored writes left today across all keys. Absent for an
-    /// anonymous caller.
+    /// Free anchored writes left today for the caller's IP. Absent when the
+    /// IP is not known (for example in `mnemonic_whoami` over a transport
+    /// without one) or the caller is not eligible.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ip_remaining: Option<u32>,
+    /// Free anchored writes left today across all accounts. Absent when the
+    /// caller is not eligible.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub global_remaining: Option<u32>,
-    /// Next UTC midnight (RFC 3339), when both counters start again.
+    /// Next UTC midnight (RFC 3339), when all counters start again.
     pub resets_at: String,
 }
 
@@ -1145,10 +1261,18 @@ pub fn free_quota_applies(payment_mode: &str) -> bool {
     payment_mode == "x402"
 }
 
-/// Create the `free_anchor_usage` table. Idempotent.
+/// Create the free quota tables and the IP-hash salt. Idempotent.
 pub fn migrate_free_anchor_usage(conn: &Connection) -> anyhow::Result<()> {
     conn.execute_batch(FREE_ANCHOR_USAGE_MIGRATION_SQL)
-        .context("create free_anchor_usage table")
+        .context("create free_anchor_usage table")?;
+    let mut salt = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut salt);
+    conn.execute(
+        "INSERT OR IGNORE INTO free_anchor_secret (id, salt) VALUES (1, ?1)",
+        params![salt.to_vec()],
+    )
+    .context("create free anchor salt")?;
+    Ok(())
 }
 
 /// UTC day key (`YYYY-MM-DD`) for `now`.
@@ -1162,32 +1286,86 @@ pub fn next_utc_midnight(now: DateTime<Utc>) -> String {
     format!("{}T00:00:00Z", next_day.format("%Y-%m-%d"))
 }
 
-/// Per-key counter subject: `blake3(pubkey)` hex.
-fn free_anchor_subject(pubkey: &str) -> String {
-    blake3::hash(pubkey.as_bytes()).to_hex().to_string()
+/// The counter subjects for one free anchor: the Google account and the
+/// client IP, both hashed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FreeAnchorKeys {
+    account: String,
+    ip: String,
 }
 
-/// Atomically consume one free anchor for `subject` (the agent's base58
-/// Ed25519 pubkey) on `day`. Returns `Ok(true)` when both the per-key and
-/// the global counter stayed within their limits, `Ok(false)` otherwise.
+impl FreeAnchorKeys {
+    /// Build keys from raw parts (unit tests and fixtures).
+    pub fn from_parts(conn: &Connection, google_sub: &str, ip: IpAddr) -> anyhow::Result<Self> {
+        Ok(Self {
+            account: account_subject(google_sub),
+            ip: ip_subject(conn, ip)?,
+        })
+    }
+}
+
+fn account_subject(google_sub: &str) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"free-anchor/google:");
+    hasher.update(google_sub.as_bytes());
+    hasher.finalize().to_hex().to_string()
+}
+
+fn ip_subject(conn: &Connection, ip: IpAddr) -> anyhow::Result<String> {
+    let salt: Vec<u8> = conn
+        .query_row(
+            "SELECT salt FROM free_anchor_secret WHERE id = 1",
+            [],
+            |row| row.get(0),
+        )
+        .context("read free anchor salt")?;
+    let key: [u8; 32] = salt
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("free anchor salt has the wrong length"))?;
+    let bucket = crate::client_ip::rate_limit_key(ip);
+    let mut hasher = blake3::Hasher::new_keyed(&key);
+    hasher.update(b"free-anchor/ip:");
+    hasher.update(bucket.to_string().as_bytes());
+    Ok(hasher.finalize().to_hex().to_string())
+}
+
+/// Resolve the counter keys for the signer `pubkey` asking from `client_ip`.
+/// `Ok(None)` when the key is not linked to a Google account. An unknown IP
+/// (in-process callers only) shares one bucket, so it never bypasses the
+/// per-IP limit.
+pub fn free_anchor_keys(
+    conn: &Connection,
+    pubkey: &str,
+    client_ip: Option<IpAddr>,
+) -> anyhow::Result<Option<FreeAnchorKeys>> {
+    if pubkey.is_empty() {
+        return Ok(None);
+    }
+    let Some(google_sub) = crate::oauth::google::google_sub_for_pubkey(conn, pubkey)? else {
+        return Ok(None);
+    };
+    let ip = client_ip.unwrap_or(crate::client_ip::UNKNOWN_CLIENT);
+    Ok(Some(FreeAnchorKeys::from_parts(conn, &google_sub, ip)?))
+}
+
+/// Atomically consume one free anchor for `keys` on `day`. Returns
+/// `Ok(None)` when the per-account, per-IP and global counters all stayed
+/// within their limits, or the first limit that was reached.
 ///
-/// One `BEGIN IMMEDIATE` transaction with two conditional UPSERTs: each
-/// increments only while `n < limit`. When either does not change a row the
-/// transaction rolls back, so the per-key increment never leaks. Concurrent
-/// callers on any number of connections can never push a counter past its
-/// limit: the write lock serialises them and the `WHERE n < ?` guard runs
-/// inside it.
+/// One `BEGIN IMMEDIATE` transaction with three conditional UPSERTs: each
+/// increments only while `n < limit`. When one does not change a row the
+/// transaction rolls back, so no increment leaks. Concurrent callers on any
+/// number of connections can never push a counter past its limit: the write
+/// lock serialises them and the `WHERE n < ?` guard runs inside it.
 pub fn try_consume_free_anchor(
     conn: &Connection,
-    subject: &str,
+    keys: &FreeAnchorKeys,
     day: &str,
-    per_key_limit: u32,
-    global_limit: u32,
-) -> anyhow::Result<bool> {
-    if per_key_limit == 0 || global_limit == 0 || subject.is_empty() {
-        return Ok(false);
+    limits: FreeAnchorLimits,
+) -> anyhow::Result<Option<FreeAnchorDenied>> {
+    if !limits.is_enabled() {
+        return Ok(Some(FreeAnchorDenied::Disabled));
     }
-    let key = free_anchor_subject(subject);
     let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)
         .context("begin free anchor transaction")?;
     let bump = |counter: &str, limit: u32| -> anyhow::Result<bool> {
@@ -1200,22 +1378,37 @@ pub fn try_consume_free_anchor(
             .context("increment free anchor counter")?;
         Ok(changed == 1)
     };
-    // Dropping `tx` without `commit` rolls both increments back.
-    if !bump(&key, per_key_limit)? || !bump(GLOBAL_FREE_ANCHOR_SUBJECT, global_limit)? {
-        return Ok(false);
+    // Dropping `tx` without `commit` rolls every increment back.
+    if !bump(&keys.account, limits.per_account)? {
+        return Ok(Some(FreeAnchorDenied::AccountQuotaUsed));
+    }
+    if !bump(&keys.ip, limits.per_ip)? {
+        return Ok(Some(FreeAnchorDenied::IpQuotaUsed));
+    }
+    if !bump(GLOBAL_FREE_ANCHOR_SUBJECT, limits.global)? {
+        return Ok(Some(FreeAnchorDenied::GlobalQuotaUsed));
     }
     tx.commit().context("commit free anchor transaction")?;
-    Ok(true)
+    Ok(None)
 }
 
-/// Give back one free anchor consumed on `day`: decrement the per-key and the
-/// global counter, never below 0. Use the day of the consumption, not today,
-/// so a write that fails after midnight refunds the right day.
-pub fn refund_free_anchor(conn: &Connection, subject: &str, day: &str) -> anyhow::Result<()> {
-    let key = free_anchor_subject(subject);
+/// Give back one free anchor consumed on `day`: decrement the per-account and
+/// per-IP counters, and the global counter only when `refund_global` (no
+/// chain write happened), never below 0. Use the day of the consumption, not
+/// today, so a write that fails after midnight refunds the right day.
+pub fn refund_free_anchor(
+    conn: &Connection,
+    keys: &FreeAnchorKeys,
+    day: &str,
+    refund_global: bool,
+) -> anyhow::Result<()> {
     let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)
         .context("begin free anchor refund")?;
-    for counter in [key.as_str(), GLOBAL_FREE_ANCHOR_SUBJECT] {
+    let mut counters = vec![keys.account.as_str(), keys.ip.as_str()];
+    if refund_global {
+        counters.push(GLOBAL_FREE_ANCHOR_SUBJECT);
+    }
+    for counter in counters {
         tx.execute(
             "UPDATE free_anchor_usage SET n = n - 1 WHERE subject = ?1 AND day = ?2 AND n > 0",
             params![counter, day],
@@ -1226,70 +1419,148 @@ pub fn refund_free_anchor(conn: &Connection, subject: &str, day: &str) -> anyhow
     Ok(())
 }
 
-/// Free anchors left on `day`: `(per_key_remaining, global_remaining)`.
+/// Free anchors left on `day` for each counter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FreeAnchorsRemaining {
+    pub account: u32,
+    pub ip: u32,
+    pub global: u32,
+}
+
+impl FreeAnchorsRemaining {
+    /// The first counter that is spent, if any.
+    pub fn spent(&self) -> Option<FreeAnchorDenied> {
+        if self.account == 0 {
+            Some(FreeAnchorDenied::AccountQuotaUsed)
+        } else if self.ip == 0 {
+            Some(FreeAnchorDenied::IpQuotaUsed)
+        } else if self.global == 0 {
+            Some(FreeAnchorDenied::GlobalQuotaUsed)
+        } else {
+            None
+        }
+    }
+}
+
+fn counter_used(conn: &Connection, counter: &str, day: &str) -> anyhow::Result<u32> {
+    let n: Option<i64> = conn
+        .query_row(
+            "SELECT n FROM free_anchor_usage WHERE subject = ?1 AND day = ?2",
+            params![counter, day],
+            |row| row.get(0),
+        )
+        .optional()
+        .context("read free anchor counter")?;
+    Ok(u32::try_from(n.unwrap_or(0).max(0)).unwrap_or(u32::MAX))
+}
+
+/// Free anchors left on `day` for `keys`.
 pub fn free_anchors_remaining(
     conn: &Connection,
-    subject: &str,
+    keys: &FreeAnchorKeys,
     day: &str,
     limits: FreeAnchorLimits,
-) -> anyhow::Result<(u32, u32)> {
-    let used = |counter: &str| -> anyhow::Result<u32> {
-        let n: Option<i64> = conn
-            .query_row(
-                "SELECT n FROM free_anchor_usage WHERE subject = ?1 AND day = ?2",
-                params![counter, day],
-                |row| row.get(0),
-            )
-            .optional()
-            .context("read free anchor counter")?;
-        Ok(u32::try_from(n.unwrap_or(0).max(0)).unwrap_or(u32::MAX))
-    };
-    let per_key = limits
-        .per_key
-        .saturating_sub(used(&free_anchor_subject(subject))?);
-    let global = limits
-        .global
-        .saturating_sub(used(GLOBAL_FREE_ANCHOR_SUBJECT)?);
-    Ok((per_key, global))
+) -> anyhow::Result<FreeAnchorsRemaining> {
+    Ok(FreeAnchorsRemaining {
+        account: limits
+            .per_account
+            .saturating_sub(counter_used(conn, &keys.account, day)?),
+        ip: limits
+            .per_ip
+            .saturating_sub(counter_used(conn, &keys.ip, day)?),
+        global: limits
+            .global
+            .saturating_sub(counter_used(conn, GLOBAL_FREE_ANCHOR_SUBJECT, day)?),
+    })
 }
 
-/// Peek (no consumption): true when `subject` could take a free anchor on
-/// `day`. The pre-parking x402 gate uses this to skip the 402.
-pub fn free_anchor_available(
+/// Peek (no consumption): can the signer `pubkey`, asking from `client_ip`,
+/// take a free anchor for `anchored_bytes` bytes on `day`? `Ok(Ok(keys))`
+/// when yes, `Ok(Err(reason))` when not. The pre-parking x402 gate uses this
+/// to skip the 402.
+pub fn check_free_anchor(
     conn: &Connection,
-    subject: &str,
+    pubkey: &str,
+    client_ip: Option<IpAddr>,
+    anchored_bytes: usize,
     day: &str,
     limits: FreeAnchorLimits,
-) -> anyhow::Result<bool> {
-    if !limits.is_enabled() || subject.is_empty() {
-        return Ok(false);
+) -> anyhow::Result<Result<FreeAnchorKeys, FreeAnchorDenied>> {
+    if !limits.is_enabled() {
+        return Ok(Err(FreeAnchorDenied::Disabled));
     }
-    let (per_key, global) = free_anchors_remaining(conn, subject, day, limits)?;
-    Ok(per_key > 0 && global > 0)
+    if pubkey.is_empty() {
+        return Ok(Err(FreeAnchorDenied::AuthenticationRequired));
+    }
+    let Some(keys) = free_anchor_keys(conn, pubkey, client_ip)? else {
+        return Ok(Err(FreeAnchorDenied::GoogleAccountRequired));
+    };
+    if anchored_bytes > limits.max_bytes {
+        return Ok(Err(FreeAnchorDenied::TooLarge));
+    }
+    match free_anchors_remaining(conn, &keys, day, limits)?.spent() {
+        Some(reason) => Ok(Err(reason)),
+        None => Ok(Ok(keys)),
+    }
 }
 
-/// Build the `free_anchors` block for `subject` at `now`. An anonymous caller
-/// (`None`) gets `per_day` and `resets_at` only.
+/// Build the `free_anchors` block for the caller `pubkey` (asking from
+/// `client_ip`, when known) at `now`. `denied` names why the current write
+/// gets no free anchor, when the caller already knows (for example
+/// `too_large`); otherwise the reason comes from the counters.
 pub fn free_anchor_status(
     conn: &Connection,
-    subject: Option<&str>,
+    pubkey: Option<&str>,
+    client_ip: Option<IpAddr>,
     now: DateTime<Utc>,
     limits: FreeAnchorLimits,
+    denied: Option<FreeAnchorDenied>,
 ) -> anyhow::Result<FreeAnchorStatus> {
-    let (remaining, global_remaining) = match subject {
-        Some(subject) => {
-            let (per_key, global) = free_anchors_remaining(conn, subject, &utc_day(now), limits)?;
-            // No per-key anchor is usable once the global cap is spent.
-            (Some(per_key.min(global)), Some(global))
-        }
-        None => (None, None),
-    };
-    Ok(FreeAnchorStatus {
-        per_day: limits.per_key,
-        remaining,
-        global_remaining,
+    let mut status = FreeAnchorStatus {
+        eligible: false,
+        reason: None,
+        link_hint: None,
+        per_day: limits.per_account,
+        per_ip_per_day: limits.per_ip,
+        max_bytes: limits.max_bytes,
+        remaining: None,
+        ip_remaining: None,
+        global_remaining: None,
         resets_at: next_utc_midnight(now),
-    })
+    };
+    let keys = match pubkey.filter(|p| !p.is_empty()) {
+        None => {
+            status.reason = Some(FreeAnchorDenied::AuthenticationRequired.reason());
+            return Ok(status);
+        }
+        Some(pubkey) => free_anchor_keys(conn, pubkey, client_ip)?,
+    };
+    let Some(keys) = keys else {
+        status.reason = Some(FreeAnchorDenied::GoogleAccountRequired.reason());
+        status.link_hint = Some(GOOGLE_LINK_HINT);
+        return Ok(status);
+    };
+    if !limits.is_enabled() {
+        status.reason = Some(FreeAnchorDenied::Disabled.reason());
+        return Ok(status);
+    }
+    let left = free_anchors_remaining(conn, &keys, &utc_day(now), limits)?;
+    status.eligible = true;
+    status.global_remaining = Some(left.global);
+    // No account anchor is usable once the global (or known IP) cap is spent.
+    let mut usable = left.account.min(left.global);
+    if client_ip.is_some() {
+        status.ip_remaining = Some(left.ip);
+        usable = usable.min(left.ip);
+    }
+    status.remaining = Some(usable);
+    let spent = if client_ip.is_some() {
+        left.spent()
+    } else {
+        FreeAnchorsRemaining { ip: 1, ..left }.spent()
+    };
+    status.reason = denied.or(spent).map(FreeAnchorDenied::reason);
+    Ok(status)
 }
 
 /// One free anchor consumed for an anchored write in progress.
@@ -1298,20 +1569,29 @@ pub fn free_anchor_status(
 /// anchor. The sign-callback holds it across the anchoring steps, so every
 /// early return (upload failure, delivery not confirmed, replayed bundle,
 /// cancelled request) gives the anchor back without a refund call at each
-/// return site. `Drop` locks the store synchronously: the caller must not
-/// hold the store lock when the grant goes out of scope.
+/// return site. After [`FreeAnchorGrant::mark_chain_write`] the refund skips
+/// the global counter: the operator already paid the chain fees. `Drop`
+/// locks the store synchronously: the caller must not hold the store lock
+/// when the grant goes out of scope.
 #[must_use = "dropping a FreeAnchorGrant refunds the free anchor"]
 pub struct FreeAnchorGrant<'a> {
     store: &'a std::sync::Mutex<SqliteStore>,
-    subject: String,
+    keys: FreeAnchorKeys,
     day: String,
     kept: bool,
+    chain_written: bool,
 }
 
 impl FreeAnchorGrant<'_> {
     /// The anchored write is confirmed: keep the consumption.
     pub fn keep(mut self) {
         self.kept = true;
+    }
+
+    /// A chain write (Arweave upload) happened: from now on a refund gives
+    /// back the per-account and per-IP anchors but not the global one.
+    pub fn mark_chain_write(&mut self) {
+        self.chain_written = true;
     }
 }
 
@@ -1322,7 +1602,9 @@ impl Drop for FreeAnchorGrant<'_> {
         }
         match self.store.lock() {
             Ok(store) => {
-                if let Err(error) = refund_free_anchor(store.conn(), &self.subject, &self.day) {
+                if let Err(error) =
+                    refund_free_anchor(store.conn(), &self.keys, &self.day, !self.chain_written)
+                {
                     tracing::error!(day = %self.day, error = %error, "free anchor refund failed");
                 }
             }
@@ -1331,43 +1613,69 @@ impl Drop for FreeAnchorGrant<'_> {
     }
 }
 
-/// Consume one free anchor for `subject` today and return a refund-on-drop
-/// grant, or `None` when no free anchor is left (or the quota is off).
+/// Result of [`claim_free_anchor`].
+pub enum FreeAnchorClaim<'a> {
+    /// One free anchor is consumed; drop the grant to refund it.
+    Granted(FreeAnchorGrant<'a>),
+    /// No free anchor for this write, and why.
+    Denied(FreeAnchorDenied),
+}
+
+/// Consume one free anchor today for the signer `pubkey`, whose write was
+/// requested from `client_ip` and anchors `anchored_bytes` bytes. Returns a
+/// refund-on-drop grant, or the reason there is none.
 ///
 /// `paid_operation_id` names a Universal Paywall operation. When that
 /// operation already has a quote (the payer may be mid-payment, or has
-/// paid), the write stays on the paid path and this returns `None`, so one
-/// write is never both charged and counted as free.
+/// paid), the write stays on the paid path, so one write is never both
+/// charged and counted as free.
 ///
 /// The store lock is taken and released inside; no `.await` runs under it.
 pub fn claim_free_anchor<'a>(
     store: &'a std::sync::Mutex<SqliteStore>,
-    subject: &str,
+    pubkey: &str,
+    client_ip: Option<IpAddr>,
+    anchored_bytes: usize,
     paid_operation_id: Option<&str>,
     limits: FreeAnchorLimits,
-) -> anyhow::Result<Option<FreeAnchorGrant<'a>>> {
-    if !limits.is_enabled() || subject.is_empty() {
-        return Ok(None);
+) -> anyhow::Result<FreeAnchorClaim<'a>> {
+    if !limits.is_enabled() {
+        return Ok(FreeAnchorClaim::Denied(FreeAnchorDenied::Disabled));
     }
     let day = utc_day(Utc::now());
-    let granted = {
-        let guard = store
-            .lock()
-            .map_err(|_| anyhow::anyhow!("store mutex poisoned"))?;
-        if let Some(operation_id) = paid_operation_id {
-            if let Some(operation) = paid_operation::get(guard.conn(), operation_id)? {
-                if operation.state != PaidOperationState::AwaitingSignature {
-                    return Ok(None);
-                }
+    let guard = store
+        .lock()
+        .map_err(|_| anyhow::anyhow!("store mutex poisoned"))?;
+    if let Some(operation_id) = paid_operation_id {
+        if let Some(operation) = paid_operation::get(guard.conn(), operation_id)? {
+            if operation.state != PaidOperationState::AwaitingSignature {
+                return Ok(FreeAnchorClaim::Denied(
+                    FreeAnchorDenied::PaidOperationInProgress,
+                ));
             }
         }
-        try_consume_free_anchor(guard.conn(), subject, &day, limits.per_key, limits.global)?
+    }
+    let keys = match check_free_anchor(
+        guard.conn(),
+        pubkey,
+        client_ip,
+        anchored_bytes,
+        &day,
+        limits,
+    )? {
+        Ok(keys) => keys,
+        Err(reason) => return Ok(FreeAnchorClaim::Denied(reason)),
     };
-    Ok(granted.then(|| FreeAnchorGrant {
+    if let Some(reason) = try_consume_free_anchor(guard.conn(), &keys, &day, limits)? {
+        return Ok(FreeAnchorClaim::Denied(reason));
+    }
+    drop(guard);
+    Ok(FreeAnchorClaim::Granted(FreeAnchorGrant {
         store,
-        subject: subject.to_string(),
+        keys,
         day,
         kept: false,
+        chain_written: false,
     }))
 }
 
@@ -1667,13 +1975,53 @@ mod tests {
     fn quota_conn() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
         migrate_free_anchor_usage(&conn).unwrap();
-        // Idempotent.
+        // Idempotent, and the salt survives a second migration.
+        let salt: Vec<u8> = conn
+            .query_row("SELECT salt FROM free_anchor_secret", [], |r| r.get(0))
+            .unwrap();
         migrate_free_anchor_usage(&conn).unwrap();
+        let again: Vec<u8> = conn
+            .query_row("SELECT salt FROM free_anchor_secret", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(salt, again);
         conn
     }
 
-    fn limits(per_key: u32, global: u32) -> FreeAnchorLimits {
-        FreeAnchorLimits { per_key, global }
+    fn limits(per_account: u32, per_ip: u32, global: u32) -> FreeAnchorLimits {
+        FreeAnchorLimits {
+            per_account,
+            per_ip,
+            global,
+            max_bytes: DEFAULT_FREE_ANCHOR_MAX_BYTES,
+        }
+    }
+
+    fn ip(s: &str) -> IpAddr {
+        s.parse().unwrap()
+    }
+
+    fn keys(conn: &Connection, account: &str, addr: &str) -> FreeAnchorKeys {
+        FreeAnchorKeys::from_parts(conn, account, ip(addr)).unwrap()
+    }
+
+    fn left(
+        conn: &Connection,
+        k: &FreeAnchorKeys,
+        day: &str,
+        l: FreeAnchorLimits,
+    ) -> (u32, u32, u32) {
+        let r = free_anchors_remaining(conn, k, day, l).unwrap();
+        (r.account, r.ip, r.global)
+    }
+
+    /// Link `pubkey` to Google account `google_sub` in `conn`.
+    fn link(conn: &Connection, google_sub: &str, pubkey: &str, linked_at: i64) {
+        crate::oauth::google::migrate_google_identity_links(conn).unwrap();
+        conn.execute(
+            "INSERT INTO google_identity_links (google_sub, pubkey_base58, linked_at) VALUES (?1, ?2, ?3)",
+            params![google_sub, pubkey, linked_at],
+        )
+        .unwrap();
     }
 
     #[test]
@@ -1685,106 +2033,128 @@ mod tests {
     }
 
     #[test]
-    fn ten_free_anchors_per_key_then_payment_and_second_key_has_its_own() {
+    fn ten_free_anchors_per_account_then_payment_and_a_second_account_has_its_own() {
         let conn = quota_conn();
+        let l = limits(10, 100, 1000);
+        let a = keys(&conn, "google-a", "198.51.100.1");
         for i in 0..10 {
-            assert!(
-                try_consume_free_anchor(&conn, "key-a", DAY, 10, 1000).unwrap(),
-                "anchor {i} must be free"
+            assert_eq!(
+                try_consume_free_anchor(&conn, &a, DAY, l).unwrap(),
+                None,
+                "anchor {i}"
             );
         }
-        assert!(
-            !try_consume_free_anchor(&conn, "key-a", DAY, 10, 1000).unwrap(),
-            "the 11th anchor must require payment"
-        );
         assert_eq!(
-            free_anchors_remaining(&conn, "key-a", DAY, limits(10, 1000)).unwrap(),
-            (0, 990)
+            try_consume_free_anchor(&conn, &a, DAY, l).unwrap(),
+            Some(FreeAnchorDenied::AccountQuotaUsed)
         );
-        // A second key still has its own 10.
-        for _ in 0..10 {
-            assert!(try_consume_free_anchor(&conn, "key-b", DAY, 10, 1000).unwrap());
-        }
-        assert!(!try_consume_free_anchor(&conn, "key-b", DAY, 10, 1000).unwrap());
+        assert_eq!(left(&conn, &a, DAY, l), (0, 90, 990));
+        let b = keys(&conn, "google-b", "198.51.100.1");
+        assert_eq!(try_consume_free_anchor(&conn, &b, DAY, l).unwrap(), None);
+        assert_eq!(left(&conn, &b, DAY, l), (9, 89, 989));
     }
 
     #[test]
-    fn global_cap_blocks_new_keys_and_rolls_back_the_per_key_increment() {
+    fn per_ip_share_blocks_many_accounts_from_one_ip_and_rolls_back() {
         let conn = quota_conn();
-        for key in ["k1", "k2", "k3"] {
-            assert!(try_consume_free_anchor(&conn, key, DAY, 10, 3).unwrap());
+        let l = limits(10, 3, 1000);
+        for n in 0..3 {
+            let k = keys(&conn, &format!("acct-{n}"), "2001:db8:1:2::1");
+            assert_eq!(try_consume_free_anchor(&conn, &k, DAY, l).unwrap(), None);
         }
-        assert!(
-            !try_consume_free_anchor(&conn, "k4", DAY, 10, 3).unwrap(),
-            "the 4th anchor across keys must require payment"
-        );
-        // The failed global UPSERT rolled back k4's per-key increment.
+        // Another address in the same IPv6 /64 is the same client.
+        let fourth = keys(&conn, "acct-4", "2001:db8:1:2:ffff::9");
         assert_eq!(
-            free_anchors_remaining(&conn, "k4", DAY, limits(10, 3)).unwrap(),
-            (10, 0)
+            try_consume_free_anchor(&conn, &fourth, DAY, l).unwrap(),
+            Some(FreeAnchorDenied::IpQuotaUsed)
         );
-        assert!(!free_anchor_available(&conn, "k4", DAY, limits(10, 3)).unwrap());
+        // The rolled-back transaction left the account and global counters alone.
+        assert_eq!(left(&conn, &fourth, DAY, l), (10, 0, 997));
+        // A different IP still works for the same account.
+        let elsewhere = keys(&conn, "acct-4", "203.0.113.9");
+        assert_eq!(
+            try_consume_free_anchor(&conn, &elsewhere, DAY, l).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn global_cap_blocks_new_accounts_and_rolls_back_the_other_increments() {
+        let conn = quota_conn();
+        let l = limits(10, 100, 3);
+        for n in 0..3 {
+            let k = keys(&conn, &format!("g{n}"), &format!("198.51.100.{n}"));
+            assert_eq!(try_consume_free_anchor(&conn, &k, DAY, l).unwrap(), None);
+        }
+        let k4 = keys(&conn, "g4", "198.51.100.44");
+        assert_eq!(
+            try_consume_free_anchor(&conn, &k4, DAY, l).unwrap(),
+            Some(FreeAnchorDenied::GlobalQuotaUsed)
+        );
+        assert_eq!(left(&conn, &k4, DAY, l), (10, 100, 0));
     }
 
     #[test]
     fn zero_limits_disable_free_anchors() {
         let conn = quota_conn();
-        assert!(!try_consume_free_anchor(&conn, "k", DAY, 0, 1000).unwrap());
-        assert!(!try_consume_free_anchor(&conn, "k", DAY, 10, 0).unwrap());
-        assert!(!free_anchor_available(&conn, "k", DAY, limits(0, 1000)).unwrap());
-        assert!(!free_anchor_available(&conn, "k", DAY, limits(10, 0)).unwrap());
-        assert!(!FreeAnchorLimits::disabled().is_enabled());
+        let k = keys(&conn, "g", "198.51.100.1");
+        for l in [limits(0, 10, 10), limits(10, 0, 10), limits(10, 10, 0)] {
+            assert_eq!(
+                try_consume_free_anchor(&conn, &k, DAY, l).unwrap(),
+                Some(FreeAnchorDenied::Disabled)
+            );
+        }
         let rows: i64 = conn
             .query_row("SELECT COUNT(*) FROM free_anchor_usage", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(rows, 0, "a disabled quota must not write counters");
+        assert_eq!(rows, 0);
     }
 
     #[test]
-    fn refund_returns_one_anchor_and_never_goes_below_zero() {
+    fn refund_after_a_chain_write_keeps_the_global_counter_spent() {
         let conn = quota_conn();
-        // Refund with no usage is a no-op, not an error.
-        refund_free_anchor(&conn, "k", DAY).unwrap();
-        assert_eq!(
-            free_anchors_remaining(&conn, "k", DAY, limits(2, 5)).unwrap(),
-            (2, 5)
-        );
-        assert!(try_consume_free_anchor(&conn, "k", DAY, 2, 5).unwrap());
-        assert!(try_consume_free_anchor(&conn, "k", DAY, 2, 5).unwrap());
-        assert!(!try_consume_free_anchor(&conn, "k", DAY, 2, 5).unwrap());
-        refund_free_anchor(&conn, "k", DAY).unwrap();
-        assert_eq!(
-            free_anchors_remaining(&conn, "k", DAY, limits(2, 5)).unwrap(),
-            (1, 4)
-        );
-        assert!(try_consume_free_anchor(&conn, "k", DAY, 2, 5).unwrap());
+        let l = limits(2, 5, 10);
+        let k = keys(&conn, "g", "198.51.100.1");
+        // Refund with nothing consumed stays at the limit.
+        refund_free_anchor(&conn, &k, DAY, true).unwrap();
+        assert_eq!(left(&conn, &k, DAY, l), (2, 5, 10));
+        assert_eq!(try_consume_free_anchor(&conn, &k, DAY, l).unwrap(), None);
+        assert_eq!(try_consume_free_anchor(&conn, &k, DAY, l).unwrap(), None);
+        assert_eq!(left(&conn, &k, DAY, l), (0, 3, 8));
+        // Failure before any chain write: all three counters come back.
+        refund_free_anchor(&conn, &k, DAY, true).unwrap();
+        assert_eq!(left(&conn, &k, DAY, l), (1, 4, 9));
+        // Failure after the chain write: the operator paid, global stays spent.
+        refund_free_anchor(&conn, &k, DAY, false).unwrap();
+        assert_eq!(left(&conn, &k, DAY, l), (2, 5, 9));
         for _ in 0..5 {
-            refund_free_anchor(&conn, "k", DAY).unwrap();
+            refund_free_anchor(&conn, &k, DAY, true).unwrap();
         }
-        assert_eq!(
-            free_anchors_remaining(&conn, "k", DAY, limits(2, 5)).unwrap(),
-            (2, 5)
-        );
+        assert_eq!(left(&conn, &k, DAY, l), (2, 5, 10));
     }
 
     #[test]
     fn day_rollover_resets_the_quota() {
         let conn = quota_conn();
+        let l = limits(10, 100, 1000);
+        let k = keys(&conn, "g", "198.51.100.1");
         for _ in 0..10 {
-            assert!(try_consume_free_anchor(&conn, "k", "2026-09-27", 10, 1000).unwrap());
+            assert_eq!(
+                try_consume_free_anchor(&conn, &k, "2026-09-27", l).unwrap(),
+                None
+            );
         }
-        assert!(!try_consume_free_anchor(&conn, "k", "2026-09-27", 10, 1000).unwrap());
-        assert!(try_consume_free_anchor(&conn, "k", "2026-09-28", 10, 1000).unwrap());
+        assert!(try_consume_free_anchor(&conn, &k, "2026-09-27", l)
+            .unwrap()
+            .is_some());
+        assert_eq!(
+            try_consume_free_anchor(&conn, &k, "2026-09-28", l).unwrap(),
+            None
+        );
         // A refund for yesterday's write lands on yesterday's counter.
-        refund_free_anchor(&conn, "k", "2026-09-27").unwrap();
-        assert_eq!(
-            free_anchors_remaining(&conn, "k", "2026-09-27", limits(10, 1000)).unwrap(),
-            (1, 991)
-        );
-        assert_eq!(
-            free_anchors_remaining(&conn, "k", "2026-09-28", limits(10, 1000)).unwrap(),
-            (9, 999)
-        );
+        refund_free_anchor(&conn, &k, "2026-09-27", true).unwrap();
+        assert_eq!(left(&conn, &k, "2026-09-27", l), (1, 91, 991));
+        assert_eq!(left(&conn, &k, "2026-09-28", l), (9, 99, 999));
     }
 
     #[test]
@@ -1801,8 +2171,37 @@ mod tests {
         assert_eq!(next_utc_midnight(new_year), "2027-01-01T00:00:00Z");
     }
 
+    #[test]
+    fn stored_subjects_never_contain_raw_ips_or_google_ids() {
+        let conn = quota_conn();
+        let k = keys(&conn, "108234567890", "198.51.100.77");
+        assert_eq!(
+            try_consume_free_anchor(&conn, &k, DAY, limits(1, 1, 1)).unwrap(),
+            None
+        );
+        let subjects: Vec<String> = conn
+            .prepare("SELECT subject FROM free_anchor_usage")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(subjects.len(), 3);
+        for s in &subjects {
+            assert!(
+                !s.contains("198.51.100.77") && !s.contains("108234567890"),
+                "{s}"
+            );
+        }
+        // The IP hash is keyed: plain blake3 of the address does not match.
+        let plain = blake3::hash(b"free-anchor/ip:198.51.100.77")
+            .to_hex()
+            .to_string();
+        assert!(!subjects.contains(&plain));
+    }
+
     /// Many threads, each with its OWN connection to one file-backed DB, race
-    /// `try_consume_free_anchor`. The grants must never exceed either limit.
+    /// `try_consume_free_anchor`. The grants must never exceed any limit.
     #[test]
     fn concurrent_consumers_never_exceed_the_limits() {
         let tmp = tempfile::NamedTempFile::new().unwrap();
@@ -1814,126 +2213,261 @@ mod tests {
         }
         const THREADS: usize = 16;
         const ATTEMPTS: usize = 10;
-        // 4 keys x per-key 10 = 40 possible, but the global cap is 30.
-        let (per_key, global) = (10, 30);
+        // 4 accounts x 10 = 40 possible, 4 IPs x 9 = 36, but the global cap is 30.
+        let l = limits(10, 9, 30);
         let handles: Vec<_> = (0..THREADS)
             .map(|t| {
                 let conn = Connection::open(&path).unwrap();
                 conn.execute_batch("PRAGMA busy_timeout=10000;").unwrap();
                 std::thread::spawn(move || {
-                    let key = format!("key-{}", t % 4);
+                    let k = keys(
+                        &conn,
+                        &format!("acct-{}", t % 4),
+                        &format!("198.51.100.{}", t % 4),
+                    );
                     (0..ATTEMPTS)
                         .filter(|_| {
-                            try_consume_free_anchor(&conn, &key, DAY, per_key, global).unwrap()
+                            try_consume_free_anchor(&conn, &k, DAY, l)
+                                .unwrap()
+                                .is_none()
                         })
                         .count()
                 })
             })
             .collect();
         let granted: usize = handles.into_iter().map(|h| h.join().unwrap()).sum();
-        assert_eq!(
-            granted, global as usize,
-            "grants must stop at the global cap"
-        );
+        assert_eq!(granted, 30, "grants must stop at the global cap");
 
-        let conn = Connection::open(&path).unwrap();
-        let mut per_key_total = 0;
-        for k in 0..4 {
-            let (left, global_left) =
-                free_anchors_remaining(&conn, &format!("key-{k}"), DAY, limits(per_key, global))
-                    .unwrap();
-            assert_eq!(global_left, 0);
-            per_key_total += per_key - left;
-        }
-        assert_eq!(per_key_total, global, "per-key counters match the grants");
-
-        // Same race on one key: exactly `per_key` grants.
+        // Same race on one account + one IP: exactly `per_account` grants.
         let handles: Vec<_> = (0..THREADS)
             .map(|_| {
                 let conn = Connection::open(&path).unwrap();
                 conn.execute_batch("PRAGMA busy_timeout=10000;").unwrap();
                 std::thread::spawn(move || {
+                    let k = keys(&conn, "solo", "203.0.113.1");
                     (0..ATTEMPTS)
                         .filter(|_| {
-                            try_consume_free_anchor(&conn, "solo", "2026-09-28", 25, 1000).unwrap()
+                            try_consume_free_anchor(&conn, &k, "2026-09-28", limits(25, 100, 1000))
+                                .unwrap()
+                                .is_none()
                         })
                         .count()
                 })
             })
             .collect();
         let granted: usize = handles.into_iter().map(|h| h.join().unwrap()).sum();
-        assert_eq!(granted, 25, "grants must stop at the per-key limit");
+        assert_eq!(granted, 25, "grants must stop at the per-account limit");
     }
 
     #[test]
-    fn free_anchor_status_for_known_and_anonymous_callers() {
+    fn google_link_decides_eligibility_and_the_earliest_link_wins() {
+        let conn = quota_conn();
+        let l = limits(10, 20, 1000);
+        // No link table at all (Google OAuth off): not linked, not an error.
+        assert_eq!(
+            check_free_anchor(&conn, "pk-1", Some(ip("198.51.100.1")), 100, DAY, l).unwrap(),
+            Err(FreeAnchorDenied::GoogleAccountRequired)
+        );
+        assert_eq!(
+            check_free_anchor(&conn, "", None, 100, DAY, l).unwrap(),
+            Err(FreeAnchorDenied::AuthenticationRequired)
+        );
+        link(&conn, "google-late", "pk-1", 200);
+        conn.execute(
+            "INSERT INTO google_identity_links (google_sub, pubkey_base58, linked_at) VALUES ('google-early', 'pk-1', 100)",
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            crate::oauth::google::google_sub_for_pubkey(&conn, "pk-1")
+                .unwrap()
+                .as_deref(),
+            Some("google-early")
+        );
+        let k = check_free_anchor(&conn, "pk-1", Some(ip("198.51.100.1")), 100, DAY, l)
+            .unwrap()
+            .expect("eligible");
+        assert_eq!(k, keys(&conn, "google-early", "198.51.100.1"));
+        // Too large for the free tier.
+        assert_eq!(
+            check_free_anchor(
+                &conn,
+                "pk-1",
+                None,
+                DEFAULT_FREE_ANCHOR_MAX_BYTES + 1,
+                DAY,
+                l
+            )
+            .unwrap(),
+            Err(FreeAnchorDenied::TooLarge)
+        );
+        assert!(
+            check_free_anchor(&conn, "pk-1", None, DEFAULT_FREE_ANCHOR_MAX_BYTES, DAY, l)
+                .unwrap()
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn keys_linked_to_one_google_account_share_one_quota() {
+        let conn = quota_conn();
+        let l = limits(2, 100, 1000);
+        // Two agent keys whose Google account is the same resolve to one
+        // account counter (the counter is keyed on the Google id).
+        let a = keys(&conn, "google-shared", "198.51.100.1");
+        let b = keys(&conn, "google-shared", "203.0.113.2");
+        assert_eq!(try_consume_free_anchor(&conn, &a, DAY, l).unwrap(), None);
+        assert_eq!(try_consume_free_anchor(&conn, &b, DAY, l).unwrap(), None);
+        assert_eq!(
+            try_consume_free_anchor(&conn, &a, DAY, l).unwrap(),
+            Some(FreeAnchorDenied::AccountQuotaUsed)
+        );
+    }
+
+    #[test]
+    fn free_anchor_status_for_linked_unlinked_and_anonymous_callers() {
         let conn = quota_conn();
         let now = DateTime::parse_from_rfc3339("2026-09-27T10:00:00Z")
             .unwrap()
             .with_timezone(&Utc);
+        let l = limits(10, 20, 5);
+        link(&conn, "google-k", "pk-k", 1);
+        let k = keys(&conn, "google-k", "198.51.100.1");
         for _ in 0..3 {
-            assert!(try_consume_free_anchor(&conn, "k", DAY, 10, 5).unwrap());
+            assert_eq!(try_consume_free_anchor(&conn, &k, DAY, l).unwrap(), None);
         }
-        let status = free_anchor_status(&conn, Some("k"), now, limits(10, 5)).unwrap();
+        let status =
+            free_anchor_status(&conn, Some("pk-k"), Some(ip("198.51.100.1")), now, l, None)
+                .unwrap();
+        assert!(status.eligible);
+        assert_eq!(status.reason, None);
         assert_eq!(status.per_day, 10);
-        // 7 left for the key, but only 2 left globally.
+        assert_eq!(status.per_ip_per_day, 20);
+        assert_eq!(status.max_bytes, DEFAULT_FREE_ANCHOR_MAX_BYTES);
+        // 7 left for the account, 17 for the IP, but only 2 left globally.
         assert_eq!(status.remaining, Some(2));
+        assert_eq!(status.ip_remaining, Some(17));
         assert_eq!(status.global_remaining, Some(2));
         assert_eq!(status.resets_at, "2026-09-28T00:00:00Z");
+        // Unknown IP (whoami): no ip_remaining.
+        let status = free_anchor_status(&conn, Some("pk-k"), None, now, l, None).unwrap();
+        assert_eq!(status.ip_remaining, None);
+        assert_eq!(status.remaining, Some(2));
+        // A caller-supplied reason wins for an eligible caller.
+        let status = free_anchor_status(
+            &conn,
+            Some("pk-k"),
+            None,
+            now,
+            l,
+            Some(FreeAnchorDenied::TooLarge),
+        )
+        .unwrap();
+        assert_eq!(status.reason, Some("too_large"));
 
-        let anon = free_anchor_status(&conn, None, now, limits(10, 5)).unwrap();
+        let unlinked = free_anchor_status(&conn, Some("pk-other"), None, now, l, None).unwrap();
+        let json = serde_json::to_value(&unlinked).unwrap();
+        assert_eq!(json["eligible"], false);
+        assert_eq!(json["reason"], "google_account_required");
+        assert!(json["link_hint"]
+            .as_str()
+            .unwrap()
+            .contains("/oauth/google/link"));
+        assert!(json.get("remaining").is_none());
+
+        let anon = free_anchor_status(&conn, None, None, now, l, None).unwrap();
         let json = serde_json::to_value(&anon).unwrap();
         assert_eq!(
             json,
-            serde_json::json!({"per_day": 10, "resets_at": "2026-09-28T00:00:00Z"})
+            serde_json::json!({
+                "eligible": false,
+                "reason": "authentication_required",
+                "per_day": 10,
+                "per_ip_per_day": 20,
+                "max_bytes": DEFAULT_FREE_ANCHOR_MAX_BYTES,
+                "resets_at": "2026-09-28T00:00:00Z",
+            })
         );
     }
 
-    fn quota_store() -> std::sync::Mutex<SqliteStore> {
+    fn quota_store(pubkey: &str, google_sub: &str) -> std::sync::Mutex<SqliteStore> {
         let store = SqliteStore::in_memory().unwrap();
         migrate_free_anchor_usage(store.conn()).unwrap();
         paid_operation::migrate_paid_operations(store.conn()).unwrap();
+        link(store.conn(), google_sub, pubkey, 1);
         std::sync::Mutex::new(store)
     }
 
-    fn remaining_today(store: &std::sync::Mutex<SqliteStore>, key: &str) -> (u32, u32) {
+    fn store_left(store: &std::sync::Mutex<SqliteStore>, google_sub: &str) -> (u32, u32, u32) {
         let guard = store.lock().unwrap();
-        free_anchors_remaining(guard.conn(), key, &utc_day(Utc::now()), limits(2, 100)).unwrap()
+        let k =
+            FreeAnchorKeys::from_parts(guard.conn(), google_sub, crate::client_ip::UNKNOWN_CLIENT)
+                .unwrap();
+        left(guard.conn(), &k, &utc_day(Utc::now()), limits(2, 10, 100))
+    }
+
+    fn claim<'a>(
+        store: &'a std::sync::Mutex<SqliteStore>,
+        pubkey: &str,
+        op: Option<&str>,
+        l: FreeAnchorLimits,
+    ) -> FreeAnchorClaim<'a> {
+        claim_free_anchor(store, pubkey, None, 500, op, l).unwrap()
+    }
+
+    fn granted(c: FreeAnchorClaim<'_>) -> FreeAnchorGrant<'_> {
+        match c {
+            FreeAnchorClaim::Granted(g) => g,
+            FreeAnchorClaim::Denied(reason) => panic!("expected a grant, got {reason:?}"),
+        }
+    }
+
+    fn denied(c: FreeAnchorClaim<'_>) -> FreeAnchorDenied {
+        match c {
+            FreeAnchorClaim::Granted(_) => panic!("expected a denial"),
+            FreeAnchorClaim::Denied(reason) => reason,
+        }
     }
 
     #[test]
     fn dropped_grant_refunds_and_kept_grant_stays_consumed() {
-        let store = quota_store();
-        let grant = claim_free_anchor(&store, "k", None, limits(2, 100))
-            .unwrap()
-            .expect("first anchor is free");
-        assert_eq!(remaining_today(&store, "k"), (1, 99));
-        // Delivery not confirmed → the grant is dropped → refund.
+        let store = quota_store("pk", "g");
+        let l = limits(2, 10, 100);
+        let grant = granted(claim(&store, "pk", None, l));
+        assert_eq!(store_left(&store, "g"), (1, 9, 99));
+        // Delivery not confirmed before any chain write → full refund.
         drop(grant);
-        assert_eq!(remaining_today(&store, "k"), (2, 100));
+        assert_eq!(store_left(&store, "g"), (2, 10, 100));
 
-        claim_free_anchor(&store, "k", None, limits(2, 100))
-            .unwrap()
-            .expect("free")
-            .keep();
-        claim_free_anchor(&store, "k", None, limits(2, 100))
-            .unwrap()
-            .expect("free")
-            .keep();
-        assert_eq!(remaining_today(&store, "k"), (0, 98));
-        assert!(claim_free_anchor(&store, "k", None, limits(2, 100))
-            .unwrap()
-            .is_none());
-        assert!(
-            claim_free_anchor(&store, "k", None, FreeAnchorLimits::disabled())
-                .unwrap()
-                .is_none()
+        // Delivery not confirmed AFTER the chain write → global stays spent.
+        let mut grant = granted(claim(&store, "pk", None, l));
+        grant.mark_chain_write();
+        drop(grant);
+        assert_eq!(store_left(&store, "g"), (2, 10, 99));
+
+        granted(claim(&store, "pk", None, l)).keep();
+        granted(claim(&store, "pk", None, l)).keep();
+        assert_eq!(store_left(&store, "g"), (0, 8, 97));
+        assert_eq!(
+            denied(claim(&store, "pk", None, l)),
+            FreeAnchorDenied::AccountQuotaUsed
         );
+        assert_eq!(
+            denied(claim(&store, "pk", None, FreeAnchorLimits::disabled())),
+            FreeAnchorDenied::Disabled
+        );
+        assert_eq!(
+            denied(claim(&store, "pk-unlinked", None, l)),
+            FreeAnchorDenied::GoogleAccountRequired
+        );
+        let big = claim_free_anchor(&store, "pk", None, l.max_bytes + 1, None, l).unwrap();
+        assert_eq!(denied(big), FreeAnchorDenied::TooLarge);
     }
 
     #[test]
     fn claim_skips_an_operation_already_on_the_paid_path() {
-        let store = quota_store();
+        let store = quota_store("pk", "g");
+        let l = limits(2, 10, 100);
         {
             let guard = store.lock().unwrap();
             paid_operation::create_or_get(
@@ -1958,17 +2492,128 @@ mod tests {
             .unwrap();
         }
         // A quoted operation stays paid: no free anchor, no counter change.
-        assert!(
-            claim_free_anchor(&store, "k", Some("op-quoted"), limits(2, 100))
-                .unwrap()
-                .is_none()
+        assert_eq!(
+            denied(claim(&store, "pk", Some("op-quoted"), l)),
+            FreeAnchorDenied::PaidOperationInProgress
         );
-        assert_eq!(remaining_today(&store, "k"), (2, 100));
+        assert_eq!(store_left(&store, "g"), (2, 10, 100));
         // An operation with no paid state yet may use the free quota.
-        claim_free_anchor(&store, "k", Some("op-new"), limits(2, 100))
-            .unwrap()
-            .expect("free")
-            .keep();
-        assert_eq!(remaining_today(&store, "k"), (1, 99));
+        granted(claim(&store, "pk", Some("op-new"), l)).keep();
+        assert_eq!(store_left(&store, "g"), (1, 9, 99));
+    }
+
+    /// Measure a typical anchored artifact, built exactly like
+    /// `tools::sign_memory_deferred`, to justify `DEFAULT_FREE_ANCHOR_MAX_BYTES`
+    /// and `COSE_SIGN1_OVERHEAD_BYTES`.
+    #[test]
+    fn typical_artifact_size() {
+        use mnemonic_core::codec::{canonical::to_canonical_cbor, schema, sign::sign_cose};
+        use mnemonic_core::compress::EmbeddingCompressor;
+        let keypair = solana_sdk::signature::Keypair::new();
+        let content = "The user prefers concise answers and deploys on Fridays. ".repeat(18);
+        assert!(content.len() >= 1000);
+        let mut sizes = Vec::new();
+        // 384 dims = fastembed (the default embedder). A 1536-dim OpenAI embedding
+        // adds 768 base64 bytes over 384 dims, about 2.5 KiB in total;
+        // building that compressor is too slow for a unit test.
+        {
+            let dim = 384usize;
+            let embedding: Vec<f32> = (0..dim).map(|i| ((i as f32) * 0.37).sin()).collect();
+            let compressed = EmbeddingCompressor::new(dim, 4, 42).compress(&embedding);
+            let artifact = serde_json::json!({
+                "artifact_id": uuid::Uuid::new_v4().to_string(),
+                "type": "memory",
+                "schema_version": 1,
+                "content": content,
+                "producer": "did:sol:9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin",
+                "created_at": "2026-09-27T10:00:00+00:00",
+                "tags": ["preferences", "deploy"],
+                "metadata": {
+                    "embed_provider": "fastembed",
+                    "embed_dim": dim,
+                    "turbo_bits": compressed.bit_width,
+                    "embedding_compressed": base64::Engine::encode(
+                        &base64::engine::general_purpose::STANDARD,
+                        compressed.to_bytes(),
+                    ),
+                },
+            });
+            let cbor = to_canonical_cbor(&artifact, &schema::MEMORY_V1).unwrap();
+            let cose = sign_cose(&cbor, &keypair).unwrap();
+            let overhead = cose.len() - cbor.len();
+            eprintln!(
+                "dim {dim}: content {} B, canonical CBOR {} B, COSE_Sign1 {} B, envelope overhead {overhead} B",
+                content.len(),
+                cbor.len(),
+                cose.len()
+            );
+            assert!(overhead <= COSE_SIGN1_OVERHEAD_BYTES, "overhead {overhead}");
+            sizes.push(cose.len());
+        }
+        // A 1 KiB memory stays far below the free limit.
+        assert!(sizes[0] < 4 * 1024, "{sizes:?}");
+        assert!(sizes.iter().all(|s| *s * 4 < DEFAULT_FREE_ANCHOR_MAX_BYTES));
+    }
+
+    // ── x402 replay protection ──────────────────────────────────────────────
+
+    #[test]
+    fn x402_nonce_claim_is_single_use_until_released() {
+        let store = SqliteStore::in_memory().unwrap();
+        assert!(claim_x402_nonce(&store, "sig-1").unwrap());
+        // A second (or concurrent) request with the same payment loses.
+        assert!(!claim_x402_nonce(&store, "sig-1").unwrap());
+        assert!(x402_nonce_already_consumed(&store, "sig-1").unwrap());
+        // A failed call gives the payment back for a retry.
+        release_x402_nonce(&store, "sig-1").unwrap();
+        assert!(!x402_nonce_already_consumed(&store, "sig-1").unwrap());
+        assert!(claim_x402_nonce(&store, "sig-1").unwrap());
+    }
+
+    #[test]
+    fn concurrent_x402_claims_have_exactly_one_winner() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path().to_path_buf();
+        drop(SqliteStore::open(&path).unwrap());
+        let handles: Vec<_> = (0..12)
+            .map(|_| {
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    let store = SqliteStore::open(&path).unwrap();
+                    store
+                        .conn()
+                        .execute_batch("PRAGMA busy_timeout=10000;")
+                        .unwrap();
+                    claim_x402_nonce(&store, "raced-sig").unwrap()
+                })
+            })
+            .collect();
+        let winners = handles
+            .into_iter()
+            .map(|h| h.join().unwrap())
+            .filter(|won| *won)
+            .count();
+        assert_eq!(winners, 1);
+    }
+
+    #[test]
+    fn evm_tx_hash_spellings_normalize_to_one_nonce() {
+        let proof = |sig: &str, network: &str| {
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                "x-payment",
+                serde_json::json!({"tx_sig": sig, "network": network})
+                    .to_string()
+                    .parse()
+                    .unwrap(),
+            );
+            extract_x402_proof(&headers).unwrap().tx_sig
+        };
+        let canonical = "0xabcdef0123";
+        assert_eq!(proof("0xABCDEF0123", "arc"), canonical);
+        assert_eq!(proof("0XabcDEF0123", "eip155:84532"), canonical);
+        assert_eq!(proof(" abcdef0123 ", "base"), canonical);
+        // Solana base58 is case-sensitive: only trimmed.
+        assert_eq!(proof(" 5AbC ", "solana-mainnet"), "5AbC");
     }
 }

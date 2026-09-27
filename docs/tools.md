@@ -138,7 +138,10 @@ choose before attempting a write that might be rejected or charged.
     "payment_methods": ["x402"]
   },
   "free_anchors": {                // HTTP + PAYMENT_MODE=x402 only
+    "eligible": true,
     "per_day": 10,
+    "per_ip_per_day": 20,
+    "max_bytes": 16384,
     "remaining": 7,
     "global_remaining": 812,
     "resets_at": "2026-09-28T00:00:00Z"
@@ -174,13 +177,28 @@ on a `PAYMENT_MODE=x402` deploy that supports `participate`:
 
 | Field | Meaning |
 |---|---|
-| `per_day` | Free `participate` writes per key per UTC (Coordinated Universal Time) day |
-| `remaining` | Free writes that the caller's key can still use today |
-| `global_remaining` | Free writes left today for all keys together |
-| `resets_at` | Next UTC midnight, when both counters start again |
+| `eligible` | `true` when the caller's key is linked to a Google account and the quota is on |
+| `reason` | Why the caller (or this write) gets no free write. Absent when a free write is available. Refer to the list below |
+| `link_hint` | How to link a Google account. Present only with `reason: "google_account_required"` |
+| `per_day` | Free `participate` writes per Google account per UTC (Coordinated Universal Time) day |
+| `per_ip_per_day` | Free writes per client IP (Internet Protocol) address per UTC day |
+| `max_bytes` | Largest signed envelope (COSE_Sign1 bytes) that a free write can carry |
+| `remaining` | Free writes that the caller's Google account can still use today. Absent when `eligible` is `false` |
+| `ip_remaining` | Free writes left today for the caller's IP address. Present only in HTTP 402 bodies, where the server knows the IP |
+| `global_remaining` | Free writes left today for all accounts together. Absent when `eligible` is `false` |
+| `resets_at` | Next UTC midnight, when all counters start again |
 
-`remaining` is never more than `global_remaining`. For a caller without a JWT,
-the block has only `per_day` and `resets_at`.
+`remaining` is never more than `global_remaining` or `ip_remaining`.
+
+**`reason` values:**
+
+- `authentication_required`: the call has no JWT (JSON Web Token).
+- `google_account_required`: the caller's key is not linked to a Google account.
+- `account_quota_used`: the Google account used all its free writes today.
+- `ip_quota_used`: the client IP address used all its free writes today.
+- `global_quota_used`: the free writes of all accounts are used for today.
+- `too_large`: the write is larger than `max_bytes`.
+- `free_quota_disabled`: the operator set a limit to `0`.
 
 ---
 
@@ -523,13 +541,99 @@ Payment applies only on HTTP, only in `full` mode, and only to
 
 ### Free daily quota
 
-Available now, on `PAYMENT_MODE=x402` over HTTP. Each agent Ed25519 key gets
-free `participate` writes every UTC day before payment is required. The agent
-needs no wallet and gets no payment prompt for these writes. The operator sets
-two limits:
+Available now, on `PAYMENT_MODE=x402` over HTTP. An agent key that is linked to
+a Google account gets free `participate` writes every UTC day before payment is
+required. The agent needs no wallet and gets no payment prompt for these
+writes. Paid writes (x402) do not need a Google account.
+
+A free write must pass all of these checks:
+
+1. **Google account.** The signer's Ed25519 key is linked to a Google account.
+   The server reads the link from its `google_identity_links` table. The browser
+   extension creates the link at Google sign-in (`POST /oauth/google/link`,
+   with a possession proof for the key). All keys that link to one Google
+   account share one quota. A key without a link, or a call without a JWT,
+   gets no free write.
+2. **Per-account quota.** The Google account has free writes left today.
+3. **Per-IP share.** The client IP address of the agent that made the
+   `mnemonic_sign_memory` call has free writes left today. The server groups
+   IPv6 addresses by their /64 prefix.
+4. **Global cap.** Free writes of all accounts together are below the daily
+   cap. This cap limits the chain fees that the operator pays.
+5. **Size.** The signed envelope (COSE_Sign1 bytes, which the server uploads to
+   Arweave) is not larger than `MNEMONIC_FREE_ANCHOR_MAX_BYTES`. A typical
+   memory of 1 KiB text makes an envelope of about 1.7 KiB.
+
+The operator sets these limits:
 
 | Variable | Default | Meaning |
 |---|---|---|
+| `MNEMONIC_FREE_ANCHORS_PER_DAY` | `10` | Free writes per Google account per UTC day. `0` disables the quota. |
+| `MNEMONIC_FREE_ANCHORS_PER_IP_PER_DAY` | `20` | Free writes per client IP address per UTC day. `0` disables the quota. |
+| `MNEMONIC_FREE_ANCHORS_GLOBAL_PER_DAY` | `1000` | Free writes per UTC day for all accounts together. `0` means no free writes. |
+| `MNEMONIC_FREE_ANCHOR_MAX_BYTES` | `16384` | Largest COSE_Sign1 envelope, in bytes, for a free write. A larger write uses the paid path. |
+| `TRUSTED_PROXIES` | loopback + private ranges | Reverse proxies whose `X-Forwarded-For` header gives the client IP address. |
+
+The quota follows these rules:
+
+- A free write uses the quota only when the anchor is confirmed. The quota
+  counts the write when the client posts the signed bundle to
+  `/api/sign-callback`. A bundle that expires unsigned uses nothing.
+- If the write fails before the server starts a chain write, the server gives
+  back all three counters.
+- If the write fails after the server started the Arweave upload (for example,
+  the delivery check fails and the row is demoted to `local`), the server gives
+  back the account and IP counters. The global counter stays used, because
+  the operator paid the chain fees.
+- The server counts the IP address of the agent that parked the bundle. The IP
+  address of the browser that posts the signature does not count.
+- The server takes the client IP address from `X-Forwarded-For` only when the
+  TCP (Transmission Control Protocol) peer is a trusted proxy. It uses the
+  rightmost address that is not a trusted proxy. From any other peer, the
+  server ignores `X-Forwarded-For` and `X-Real-IP`.
+- A request with an `X-Payment` header uses the paid path. It does not use the
+  quota.
+- `PAYMENT_MODE=none` is free already and does not count writes. Stdio is
+  never charged.
+- All counters start again at UTC midnight.
+- The server stores only hashes of Google account IDs and IP addresses in the
+  counter table. The IP hash uses a secret salt.
+
+When no free write is available, the payment-required responses add a
+`free_anchors` block (the same shape as in `mnemonic_whoami`) with a
+`reason`. This applies to the HTTP 402 of `mnemonic_sign_memory` and to the
+wallet-link (HTTP 428) and payment (HTTP 402) steps of `/api/sign-callback`. The
+block tells the agent why it must pay. A write that is too large gets HTTP 402
+with `reason: "too_large"`, and the server keeps no parked bundle. If a parked
+bundle loses its free write before the callback (for example, you parked more
+bundles than you have free writes), `/api/sign-callback` returns HTTP 402 with
+`status: "payment_required"`. The bundle stays parked. To pay, call
+`mnemonic_sign_memory` again with `X-Payment`.
+
+### Content size limit
+
+Available now. `mnemonic_sign_memory` refuses `content` larger than
+`MNEMONIC_MAX_CONTENT_BYTES` (default and maximum 32768 bytes) on every
+transport and in both modes. The error is JSON-RPC (JSON Remote Procedure Call)
+`-32602`. The HTTP server also limits the request body: 1 MiB on `/mcp` and
+2 MB on `/api/sign-callback`.
+
+### Replay protection
+
+Available now. The server gives these guarantees:
+
+- `/api/sign-callback` anchors one bundle at most once. A second post of the
+  same `correlation_id` (also a concurrent one) gets HTTP 410 and uses no free
+  write. A bundle expires after 300 seconds.
+- If an artifact with the same `content_hash` is already anchored, the callback
+  returns the existing anchor with `already_anchored: true`. It writes nothing
+  new, charges nothing and uses no free write.
+- One x402 payment (`X-Payment` transaction) pays for one call. The server
+  reserves the payment before the call. Two concurrent calls with one payment
+  cannot both succeed. A failed call releases the payment for a retry. EVM
+  (Ethereum Virtual Machine) transaction hashes are compared in lowercase.
+
+---|---|---|
 | `MNEMONIC_FREE_ANCHORS_PER_DAY` | `10` | Free writes per key per UTC day. `0` disables the quota. |
 | `MNEMONIC_FREE_ANCHORS_GLOBAL_PER_DAY` | `1000` | Free writes per UTC day for all keys together. `0` means no free writes. |
 

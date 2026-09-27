@@ -139,6 +139,7 @@ impl StagedDeliveryContext {
             metadata: self.metadata,
             write_mode: self.write_mode,
             free_quota: false,
+            requester_ip: None,
             exp: self.exp,
         }
     }
@@ -600,6 +601,7 @@ mod tests {
             metadata: serde_json::json!({"turbo_bits": 4}),
             write_mode: WriteMode::Participate,
             free_quota: false,
+            requester_ip: None,
             exp: Utc::now(),
         };
         stage_verified_cose(&conn, "correlation", "signer", b"cose", "now").unwrap();
@@ -630,6 +632,7 @@ mod tests {
             metadata: serde_json::json!({}),
             write_mode: WriteMode::Participate,
             free_quota: false,
+            requester_ip: None,
             exp: Utc::now(),
         };
         stage_verified_cose(&conn, "correlation", "signer", b"cose", "now").unwrap();
@@ -683,6 +686,7 @@ mod tests {
             metadata: serde_json::json!({}),
             write_mode: WriteMode::Participate,
             free_quota: false,
+            requester_ip: None,
             exp: Utc::now(),
         };
         stage_verified_cose(&conn, "retry", "signer", b"cose", "now").unwrap();

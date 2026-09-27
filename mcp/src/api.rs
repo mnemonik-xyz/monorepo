@@ -47,6 +47,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
+use crate::client_ip::ClientIp;
 use crate::mcp::McpState;
 use crate::oauth::Claims;
 use crate::paid_artifact;
@@ -105,6 +106,23 @@ pub struct SignCallbackRequest {
     pub signer_pubkey: String,
 }
 
+impl axum::extract::FromRequestParts<Arc<McpState>> for ClientIp {
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        state: &Arc<McpState>,
+    ) -> Result<Self, Self::Rejection> {
+        let peer = parts
+            .extensions
+            .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+            .map(|info| info.0.ip());
+        Ok(ClientIp(peer.map(|peer| {
+            state.trusted_proxies.client_ip(peer, &parts.headers)
+        })))
+    }
+}
+
 /// Resume a bounded batch of already-settled delivery attempts. This uses the
 /// same cryptographic callback path as the browser, but only from durable
 /// staged bytes; it never possesses or submits a payment authorization.
@@ -133,7 +151,7 @@ pub async fn resume_due_paid_deliveries(state: Arc<McpState>) -> usize {
             ),
             signer_pubkey: staged.signer_pubkey,
         };
-        let _ = sign_callback_handler(State(state.clone()), Json(request)).await;
+        let _ = sign_callback_handler(State(state.clone()), ClientIp(None), Json(request)).await;
         resumed += 1;
     }
     resumed
@@ -159,6 +177,11 @@ pub struct SignCallbackResponse {
     pub solana_explorer_url: String,
     /// Convenience configured Irys gateway URL; empty for synthetic local ids.
     pub arweave_url: String,
+    /// True when this artifact (same `content_hash`) was already anchored:
+    /// the ids are the existing anchor, and nothing new was written, charged
+    /// or counted against the free quota.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub already_anchored: bool,
 }
 
 /// `POST /api/sign-callback` — webapp delivers the user's COSE_Sign1.
@@ -170,6 +193,7 @@ pub struct SignCallbackResponse {
 /// `correlation_id` cannot forge this without the user's private key.
 pub async fn sign_callback_handler(
     State(state): State<Arc<McpState>>,
+    ClientIp(client_ip): ClientIp,
     Json(req): Json<SignCallbackRequest>,
 ) -> Response {
     // 2. Decode the COSE bytes.
@@ -278,11 +302,16 @@ pub async fn sign_callback_handler(
 
     // Free daily anchor quota (see `payment.rs`). On a paid deploy a
     // participate write first takes one of the signer's free anchors for
-    // today. This is the single consumption point. The grant refunds itself
-    // on drop, so every early return below (upload failure, delivery not
-    // confirmed, replayed bundle) gives the anchor back; only a confirmed
-    // delivery keeps it (`keep()` further down). No return below this point
-    // happens while the free-anchor path holds the store lock.
+    // today. This is the single consumption point. A free anchor needs a
+    // Google-linked signer, room in the per-account, per-IP and global
+    // counters, and COSE bytes within `max_bytes`. The per-IP counter
+    // charges the agent that parked the bundle (`entry.requester_ip`), else
+    // this request's client. The grant refunds itself on drop, so every
+    // early return below (upload failure, delivery not confirmed, replayed
+    // bundle) gives the anchor back; only a confirmed delivery keeps it
+    // (`keep()` further down). After the chain write starts, a refund keeps
+    // the global counter spent. No return below this point happens while
+    // the free-anchor path holds the store lock.
     //
     //   - Universal Paywall rail: try the quota unless the operation already
     //     has a quote (the payer may be mid-payment). A granted anchor skips
@@ -293,18 +322,23 @@ pub async fn sign_callback_handler(
     //     by now gets 402 and stays parked, so the client can retry later or
     //     pay through a new `mnemonic_sign_memory` call with `X-Payment`.
     let mut free_anchor = None;
+    let mut free_denied = None;
+    let requester_ip = entry.requester_ip.or(client_ip);
     if entry.write_mode == WriteMode::Participate
         && payment::free_quota_applies(&state.payment_mode)
         && (universal_paywall.is_some() || entry.free_quota)
     {
         let paid_operation_id = universal_paywall.map(|_| req.correlation_id.as_str());
-        free_anchor = match payment::claim_free_anchor(
+        match payment::claim_free_anchor(
             &state.store,
             &req.signer_pubkey,
+            requester_ip,
+            cose_bytes.len(),
             paid_operation_id,
             state.free_anchors,
         ) {
-            Ok(grant) => grant,
+            Ok(payment::FreeAnchorClaim::Granted(grant)) => free_anchor = Some(grant),
+            Ok(payment::FreeAnchorClaim::Denied(reason)) => free_denied = Some(reason),
             Err(error) => {
                 tracing::error!(correlation_id = %req.correlation_id, error = %error, "claim free anchor failed");
                 return error_resp(
@@ -314,13 +348,24 @@ pub async fn sign_callback_handler(
             }
         };
         if free_anchor.is_none() && universal_paywall.is_none() {
+            let error = match free_denied {
+                Some(payment::FreeAnchorDenied::TooLarge) => {
+                    "this write is larger than the free anchor size limit; call mnemonic_sign_memory again with an X-Payment header"
+                }
+                Some(payment::FreeAnchorDenied::GoogleAccountRequired) => {
+                    "free anchors need a Google-linked identity; link one, or call mnemonic_sign_memory again with an X-Payment header"
+                }
+                _ => {
+                    "free daily anchor quota is used up; call mnemonic_sign_memory again with an X-Payment header"
+                }
+            };
             return (
                 StatusCode::PAYMENT_REQUIRED,
                 Json(serde_json::json!({
                     "status": "payment_required",
-                    "error": "free daily anchor quota is used up; call mnemonic_sign_memory again with an X-Payment header",
+                    "error": error,
                     "correlation_id": req.correlation_id,
-                    "free_anchors": free_anchor_status(&state, &req.signer_pubkey),
+                    "free_anchors": free_anchor_status(&state, &req.signer_pubkey, requester_ip, free_denied),
                 })),
             )
                 .into_response();
@@ -390,7 +435,8 @@ pub async fn sign_callback_handler(
             };
             // Computed before the lock below: the payment-required bodies
             // show the signer why it must pay.
-            let free_anchors = free_anchor_status(&state, &req.signer_pubkey);
+            let free_anchors =
+                free_anchor_status(&state, &req.signer_pubkey, requester_ip, free_denied);
             let wallet_link = match state.store.lock() {
                 Ok(store) => match wallet_link::get_verified(store.conn(), &req.correlation_id) {
                     Ok(Some(link)) if link.subject_hash == subject_hash && link.chain_id == chain_id => link,
@@ -543,8 +589,66 @@ pub async fn sign_callback_handler(
     //     on-chain anchor — a third party fetching the memo can re-fetch
     //     the COSE bytes from Arweave and verify the user's COSE signature
     //     end-to-end without contacting Mnemonic.
-    let attestation_id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
+
+    // Replay guards (work/free-quota-hardening/decisions.md, R2):
+    //   - An artifact whose `content_hash` is already anchored is never
+    //     anchored again. Return the existing anchor; the free grant (if any)
+    //     drops before any chain write and is fully refunded, and nothing is
+    //     charged. `content_hash` covers a fresh `artifact_id` and
+    //     `created_at`, so only the same signed bundle can collide.
+    //   - A retry of the same correlation id (paid delivery resume) reuses
+    //     the row it wrote before (`INSERT OR REPLACE`), so a retry never
+    //     leaves a second row for one artifact.
+    let (existing_anchor, existing_row) = match state.store.lock() {
+        Ok(store) => {
+            let anchored = if entry.write_mode == WriteMode::Participate {
+                store.find_anchored_by_content_hash(&entry.content_hash)
+            } else {
+                Ok(None)
+            };
+            let row = store.find_by_correlation_id(&req.correlation_id);
+            match (anchored, row) {
+                (Ok(anchored), Ok(row)) => (anchored, row.map(|r| r.0)),
+                (Err(error), _) | (_, Err(error)) => {
+                    tracing::error!(correlation_id = %req.correlation_id, error = %error, "replay guard lookup failed");
+                    return error_resp(StatusCode::INTERNAL_SERVER_ERROR, "store unavailable");
+                }
+            }
+        }
+        Err(_) => return error_resp(StatusCode::INTERNAL_SERVER_ERROR, "store unavailable"),
+    };
+    if let Some((existing_id, solana_tx, arweave_tx)) = existing_anchor {
+        drop(free_anchor.take());
+        if let Some(attempt) = &delivery_attempt {
+            if let Ok(store) = state.store.lock() {
+                if let Err(error) =
+                    paid_artifact::mark_delivery_completed(store.conn(), attempt, &solana_tx, &now)
+                {
+                    tracing::error!(correlation_id = %req.correlation_id, error = %error, "complete replayed paid delivery failed");
+                }
+            }
+        }
+        tracing::warn!(
+            correlation_id = %req.correlation_id,
+            content_hash = %entry.content_hash,
+            "sign-callback for an artifact that is already anchored; returning the existing anchor"
+        );
+        let links = crate::tools::anchor_links(&state.arweave, &solana_tx, &arweave_tx);
+        let body = SignCallbackResponse {
+            status: "ok",
+            attestation_id: existing_id,
+            content_hash: entry.content_hash,
+            solana_tx,
+            arweave_tx,
+            anchoring_network: links.network,
+            solana_explorer_url: links.solana_explorer_url,
+            arweave_url: links.arweave_url,
+            already_anchored: true,
+        };
+        return (StatusCode::OK, Json(body)).into_response();
+    }
+    let attestation_id = existing_row.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
     // Wave 3: a deferred write whose resolved mode is `Local` (a legacy
     // client that omitted `mode` on a local-only deploy; explicit
@@ -588,6 +692,12 @@ pub async fn sign_callback_handler(
                     );
                 }
             };
+            // From here the operator may pay chain fees (an upload can be
+            // billed even when its response is lost): a refund of the free
+            // anchor no longer gives back the global counter.
+            if let Some(grant) = free_anchor.as_mut() {
+                grant.mark_chain_write();
+            }
             let uploaded = match state
                 .arweave
                 .write_item(
@@ -925,6 +1035,7 @@ pub async fn sign_callback_handler(
         anchoring_network: links.network,
         solana_explorer_url: links.solana_explorer_url,
         arweave_url: links.arweave_url,
+        already_anchored: false,
     };
     (StatusCode::OK, Json(body)).into_response()
 }
@@ -932,13 +1043,20 @@ pub async fn sign_callback_handler(
 /// The signer's `free_anchors` block for a payment-required body. `None`
 /// (JSON `null`) when the store is unavailable. Takes the store lock: never
 /// call it while the lock is held.
-fn free_anchor_status(state: &McpState, subject: &str) -> Option<payment::FreeAnchorStatus> {
+fn free_anchor_status(
+    state: &McpState,
+    subject: &str,
+    client_ip: Option<std::net::IpAddr>,
+    denied: Option<payment::FreeAnchorDenied>,
+) -> Option<payment::FreeAnchorStatus> {
     let store = state.store.lock().ok()?;
     payment::free_anchor_status(
         store.conn(),
         Some(subject),
+        client_ip,
         chrono::Utc::now(),
         state.free_anchors,
+        denied,
     )
     .map_err(|error| tracing::warn!(error = %error, "free anchor status unavailable"))
     .ok()

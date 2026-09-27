@@ -158,10 +158,22 @@ impl TestServerBuilder {
     }
 
     /// Free daily anchor quota (`MNEMONIC_FREE_ANCHORS_PER_DAY` and
-    /// `MNEMONIC_FREE_ANCHORS_GLOBAL_PER_DAY`). Default: disabled, so the
-    /// paid-path tests see a 402 on the first participate write.
-    pub fn free_anchors(mut self, per_key: u32, global: u32) -> Self {
-        self.free_anchors = Some(mnemonic_mcp::payment::FreeAnchorLimits { per_key, global });
+    /// `MNEMONIC_FREE_ANCHORS_GLOBAL_PER_DAY`), with a generous per-IP share
+    /// (in-process requests have no peer IP and share one bucket) and the
+    /// default size limit. Default: disabled, so the paid-path tests see a
+    /// 402 on the first participate write.
+    pub fn free_anchors(self, per_account: u32, global: u32) -> Self {
+        self.free_anchor_limits(mnemonic_mcp::payment::FreeAnchorLimits {
+            per_account,
+            per_ip: 1000,
+            global,
+            max_bytes: mnemonic_mcp::payment::DEFAULT_FREE_ANCHOR_MAX_BYTES,
+        })
+    }
+
+    /// Full free anchor limits, per-IP share and size limit included.
+    pub fn free_anchor_limits(mut self, limits: mnemonic_mcp::payment::FreeAnchorLimits) -> Self {
+        self.free_anchors = Some(limits);
         self
     }
 
@@ -365,6 +377,13 @@ impl TestServer {
     /// Total attestation rows persisted for `signer`. Empty string acts as
     /// "all signers" because `count` is signer-scoped and we want a single
     /// global pre/post assertion in some tests.
+    /// Link `pubkey` to the Google account `google_sub` (free anchors need
+    /// a Google-linked key).
+    pub fn link_google(&self, google_sub: &str, pubkey: &str) {
+        let store = self.state.store.lock().expect("store mutex");
+        mnemonic_mcp::test_support::link_google_account(&store, google_sub, pubkey);
+    }
+
     pub fn attestation_count(&self, signer: &str) -> i64 {
         let store = self.state.store.lock().expect("store mutex");
         store.count(signer).unwrap_or(0)

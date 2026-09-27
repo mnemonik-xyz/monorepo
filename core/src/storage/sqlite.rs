@@ -35,6 +35,7 @@ CREATE TABLE IF NOT EXISTS attestation_embeddings (
     FOREIGN KEY (attestation_id) REFERENCES attestations(attestation_id)
 );
 CREATE INDEX IF NOT EXISTS idx_attestations_signer ON attestations(signer_pubkey);
+CREATE INDEX IF NOT EXISTS idx_attestations_content_hash ON attestations(content_hash);
 
 CREATE TABLE IF NOT EXISTS api_keys (
     api_key TEXT PRIMARY KEY,
@@ -915,6 +916,27 @@ impl SqliteStore {
                 row.get(4)?,
                 row.get(5)?,
             ))),
+            None => Ok(None),
+        }
+    }
+
+    /// The earliest `participate` (anchored) row for `content_hash`, as
+    /// `(attestation_id, solana_tx, arweave_tx)`, or `None`. A row demoted
+    /// to `local` after a failed delivery check does not count. The deferred
+    /// sign-callback uses this to never anchor one artifact twice.
+    pub fn find_anchored_by_content_hash(
+        &self,
+        content_hash: &str,
+    ) -> anyhow::Result<Option<(String, String, String)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT attestation_id, solana_tx, arweave_tx
+             FROM attestations
+             WHERE content_hash = ?1 AND write_mode = 'participate'
+             ORDER BY created_at ASC LIMIT 1",
+        )?;
+        let mut rows = stmt.query(params![content_hash])?;
+        match rows.next()? {
+            Some(row) => Ok(Some((row.get(0)?, row.get(1)?, row.get(2)?))),
             None => Ok(None),
         }
     }

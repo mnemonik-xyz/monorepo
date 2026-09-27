@@ -955,11 +955,23 @@ pub struct McpState {
     /// `api_key_hash` (blake3(api_key).to_hex()), NEVER `owner_pubkey`.
     pub refunds_by_subject: Arc<payment::RefundsBySubject>,
 
-    /// Free daily anchor quota: free participate writes per agent key and
-    /// across all keys per UTC day, before x402 payment is required
-    /// (`MNEMONIC_FREE_ANCHORS_PER_DAY`, `MNEMONIC_FREE_ANCHORS_GLOBAL_PER_DAY`).
+    /// Free daily anchor quota: free participate writes per Google account,
+    /// per client IP and across all accounts per UTC day, plus the largest
+    /// free COSE_Sign1, before x402 payment is required
+    /// (`MNEMONIC_FREE_ANCHORS_PER_DAY`, `MNEMONIC_FREE_ANCHORS_PER_IP_PER_DAY`,
+    /// `MNEMONIC_FREE_ANCHORS_GLOBAL_PER_DAY`, `MNEMONIC_FREE_ANCHOR_MAX_BYTES`).
     /// See the "Free daily anchor quota" section of `payment.rs`.
     pub free_anchors: payment::FreeAnchorLimits,
+
+    /// Reverse proxies whose `X-Forwarded-For` / `X-Real-IP` are trusted
+    /// (`TRUSTED_PROXIES`). Resolves the real client IP for the per-IP
+    /// free anchor counter; the rate limiter uses the same list.
+    pub trusted_proxies: Arc<crate::client_ip::TrustedProxies>,
+
+    /// Largest `mnemonic_sign_memory` content, in bytes, on every transport
+    /// (`MNEMONIC_MAX_CONTENT_BYTES`, default and ceiling 32 KiB — the
+    /// pending-bundle cap).
+    pub max_content_bytes: usize,
 
     /// Process-lifetime counters incremented by the delivery-guarantee
     /// flow. Stub for the eventual Prometheus surface — see
@@ -1355,6 +1367,9 @@ pub async fn mcp_handler(
     // (`initialize`, `tools/list`) reach this handler without Claims —
     // those paths never touch storage so the fallback below is safe.
     let claims = request.extensions().get::<crate::oauth::Claims>().cloned();
+    // Real client IP (trusted-proxy aware, see `client_ip.rs`) for the
+    // per-IP free anchor counter. `None` only for in-process callers.
+    let client_ip = crate::client_ip::resolve(&state.trusted_proxies, &request);
 
     // Buffer the body — middleware already consumed and re-injected once;
     // a second consumption is fine.
@@ -1535,11 +1550,22 @@ pub async fn mcp_handler(
         // bundles that are never signed (they expire after 300 s). A caller
         // that sends `X-Payment` keeps the paid path below; its bundle is not
         // flagged and never touches the quota.
+        // The size of the anchored bytes is known only once the bundle is
+        // parked; a parked bundle over `max_bytes` is discarded and the call
+        // takes the paid path with `reason: "too_large"`.
+        let mut free_denied = None;
         if let Some(sub) = jwt_sub.as_deref() {
-            if payment::free_quota_applies(&state.payment_mode)
+            let free_check = if payment::free_quota_applies(&state.payment_mode)
                 && payment::extract_x402_proof(&headers).is_none()
-                && free_anchor_available(&state, sub)
             {
+                Some(check_free_anchor(&state, sub, client_ip, 0))
+            } else {
+                None
+            };
+            if let Some(Err(reason)) = free_check {
+                free_denied = Some(reason);
+            }
+            if let Some(Ok(())) = free_check {
                 let resp = handle_request_with_resolved_mode(
                     &req,
                     &state,
@@ -1549,16 +1575,40 @@ pub async fn mcp_handler(
                     resolved_mode_for_gate,
                 )
                 .await;
-                if resp.error.is_none() {
-                    // Fail closed: an unflagged parked bundle would anchor
-                    // with no payment and no quota consumption.
-                    let flagged = match parked_correlation_id(&resp) {
-                        Some(correlation_id) => {
-                            state.pending.mark_free_quota(&correlation_id).await.is_ok()
-                        }
-                        None => false,
-                    };
+                if resp.error.is_some() {
+                    return ndjson_response(StatusCode::OK, &resp);
+                }
+                // Fail closed: an unflagged parked bundle would anchor with
+                // no payment and no quota consumption.
+                let Some(correlation_id) = parked_correlation_id(&resp) else {
+                    tracing::error!("free anchor: parked bundle has no correlation id");
+                    return ndjson_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        -32603,
+                        "free anchor bookkeeping failed; retry the call",
+                    );
+                };
+                let anchored_bytes = match state.pending.peek_by_id(&correlation_id).await {
+                    Ok(entry) => entry.canonical_cbor.len() + payment::COSE_SIGN1_OVERHEAD_BYTES,
+                    Err(_) => usize::MAX,
+                };
+                if anchored_bytes > state.free_anchors.max_bytes {
+                    // Too large for the free tier: nothing stays parked, and
+                    // the call falls through to the paid path below.
+                    state.pending.discard(&correlation_id).await;
+                    free_denied = Some(payment::FreeAnchorDenied::TooLarge);
+                } else {
+                    let flagged = state.pending.mark_free_quota(&correlation_id).await.is_ok()
+                        && match client_ip {
+                            Some(ip) => state
+                                .pending
+                                .set_requester_ip(&correlation_id, ip)
+                                .await
+                                .is_ok(),
+                            None => true,
+                        };
                     if !flagged {
+                        state.pending.discard(&correlation_id).await;
                         tracing::error!("free anchor: parked bundle could not be flagged");
                         return ndjson_error(
                             StatusCode::INTERNAL_SERVER_ERROR,
@@ -1566,8 +1616,8 @@ pub async fn mcp_handler(
                             "free anchor bookkeeping failed; retry the call",
                         );
                     }
+                    return ndjson_response(StatusCode::OK, &resp);
                 }
-                return ndjson_response(StatusCode::OK, &resp);
             }
         }
 
@@ -1589,8 +1639,35 @@ pub async fn mcp_handler(
         match gate {
             payment::PaymentGate::Proceed => {
                 // Wave 4: no custodial balance to reserve. x402 is pay-per-call
-                // and verified on-chain in `check_payment`; the nonce is only
-                // consumed AFTER a confirmed delivery (success path below).
+                // and verified on-chain in `check_payment`. Reserve the
+                // payment atomically BEFORE the call, so two concurrent
+                // requests with one `X-Payment` cannot both park a paid
+                // bundle; a failed call releases it below.
+                let x402_proof = payment::extract_x402_proof(&headers);
+                if let Some(proof) = x402_proof.as_ref() {
+                    let claimed = match state.store.lock() {
+                        Ok(store) => payment::claim_x402_nonce(&store, &proof.tx_sig),
+                        Err(_) => Err(anyhow::anyhow!("store mutex poisoned")),
+                    };
+                    match claimed {
+                        Ok(true) => {}
+                        Ok(false) => {
+                            let err_body = serde_json::json!({
+                                "jsonrpc": "2.0", "id": req.id,
+                                "error": {"code": -32600, "message": format!("x402 payment already used: {}", proof.tx_sig)}
+                            });
+                            return ndjson_response(StatusCode::UNAUTHORIZED, &err_body);
+                        }
+                        Err(error) => {
+                            tracing::error!(error = %error, "x402 nonce claim failed");
+                            return ndjson_error(
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                -32603,
+                                "payment state unavailable",
+                            );
+                        }
+                    }
+                }
 
                 let resp = handle_request_with_resolved_mode(
                     &req,
@@ -1632,7 +1709,6 @@ pub async fn mcp_handler(
                 // behaviour for two concurrent requests with the same
                 // payment.
                 let quota_subject = derive_quota_subject(&headers, &state.payment_mode);
-                let x402_proof = payment::extract_x402_proof(&headers);
 
                 if let Some(ref err) = resp.error {
                     // T3 — DeliveryNotConfirmed-specific bookkeeping.
@@ -1667,30 +1743,21 @@ pub async fn mcp_handler(
                             state.refunds_by_subject.record_failure(subject);
                         }
                     }
-                } else {
-                    // Success path — consume the x402 nonce now that the
-                    // delivery confirmation has passed. ConstraintViolation
-                    // on a concurrent retry is fine (one of the two
-                    // requests wins; the other gets the
-                    // `x402_nonce_already_consumed` reject on its next
-                    // entry).
+                }
+                // A failed call gives the payment back, so the caller can
+                // retry with the same `X-Payment` and its USDC is not lost.
+                // A successful call keeps it reserved for good.
+                if resp.error.is_some() {
                     if let Some(proof) = x402_proof.as_ref() {
-                        let store = state.store.lock().expect("store mutex poisoned");
-                        if let Err(e) =
-                            payment::consume_x402_nonce_after_success(&store, &proof.tx_sig)
-                        {
-                            // Log only — by the time we reach here the
-                            // anchor + DB write have already happened, so
-                            // a nonce-consume failure cannot un-deliver
-                            // the artefact. The operator may see a
-                            // duplicate-charge later if the caller replays
-                            // the same `X-Payment` and the original
-                            // INSERT actually did succeed under a race.
-                            tracing::warn!(
-                                tx_sig = %proof.tx_sig,
-                                error = %e,
-                                "x402 nonce consume failed post-success"
-                            );
+                        match state.store.lock() {
+                            Ok(store) => {
+                                if let Err(error) =
+                                    payment::release_x402_nonce(&store, &proof.tx_sig)
+                                {
+                                    tracing::warn!(tx_sig = %proof.tx_sig, error = %error, "x402 nonce release failed");
+                                }
+                            }
+                            Err(_) => tracing::warn!("x402 nonce release: store mutex poisoned"),
                         }
                     }
                 }
@@ -1699,7 +1766,8 @@ pub async fn mcp_handler(
             }
             payment::PaymentGate::NeedPayment(mut x402) => {
                 // Tell the agent why it must pay: its free quota state.
-                x402.free_anchors = free_anchor_status(&state, jwt_sub.as_deref());
+                x402.free_anchors =
+                    free_anchor_status(&state, jwt_sub.as_deref(), client_ip, free_denied);
                 ndjson_response(StatusCode::PAYMENT_REQUIRED, &x402)
             }
             payment::PaymentGate::NeedUniversalPaywall(up_req) => {
@@ -1732,22 +1800,45 @@ pub async fn mcp_handler(
             resolved_mode_for_gate,
         )
         .await;
+        // The Universal Paywall callback may grant a free anchor: remember
+        // the agent's IP for the per-IP counter.
+        if let (Some(ip), true) = (client_ip, is_sign_memory && participate_gate) {
+            if let Some(correlation_id) = parked_correlation_id(&resp) {
+                let _ = state.pending.set_requester_ip(&correlation_id, ip).await;
+            }
+        }
         ndjson_response(StatusCode::OK, &resp)
     }
 }
 
 /// Peek the caller's free daily anchor quota (no consumption). A store error
-/// counts as "no free anchor", so the caller falls back to the 402 path.
-fn free_anchor_available(state: &McpState, subject: &str) -> bool {
+/// counts as "no free anchor" (`Disabled`), so the caller falls back to the
+/// 402 path.
+fn check_free_anchor(
+    state: &McpState,
+    subject: &str,
+    client_ip: Option<std::net::IpAddr>,
+    anchored_bytes: usize,
+) -> Result<(), payment::FreeAnchorDenied> {
     let Ok(store) = state.store.lock() else {
-        return false;
+        return Err(payment::FreeAnchorDenied::Disabled);
     };
     let today = payment::utc_day(chrono::Utc::now());
-    payment::free_anchor_available(store.conn(), subject, &today, state.free_anchors)
-        .unwrap_or_else(|error| {
+    match payment::check_free_anchor(
+        store.conn(),
+        subject,
+        client_ip,
+        anchored_bytes,
+        &today,
+        state.free_anchors,
+    ) {
+        Ok(Ok(_)) => Ok(()),
+        Ok(Err(reason)) => Err(reason),
+        Err(error) => {
             tracing::warn!(error = %error, "free anchor peek failed");
-            false
-        })
+            Err(payment::FreeAnchorDenied::Disabled)
+        }
+    }
 }
 
 /// The caller's `free_anchors` block for a 402 body or `mnemonic_whoami`, or
@@ -1755,6 +1846,8 @@ fn free_anchor_available(state: &McpState, subject: &str) -> bool {
 fn free_anchor_status(
     state: &McpState,
     subject: Option<&str>,
+    client_ip: Option<std::net::IpAddr>,
+    denied: Option<payment::FreeAnchorDenied>,
 ) -> Option<payment::FreeAnchorStatus> {
     if !payment::free_quota_applies(&state.payment_mode) || !state.envelope.supports_participate() {
         return None;
@@ -1763,8 +1856,10 @@ fn free_anchor_status(
     payment::free_anchor_status(
         store.conn(),
         subject,
+        client_ip,
         chrono::Utc::now(),
         state.free_anchors,
+        denied,
     )
     .map_err(|error| tracing::warn!(error = %error, "free anchor status unavailable"))
     .ok()
@@ -1814,9 +1909,10 @@ async fn handle_tool_call(
             // Free daily anchor quota for the caller (JWT subject). HTTP only:
             // stdio is never gated, so the block would mean nothing there.
             if transport == crate::tools::Transport::Http {
-                if let (Some(status), Some(map)) =
-                    (free_anchor_status(state, jwt_sub), out.as_object_mut())
-                {
+                if let (Some(status), Some(map)) = (
+                    free_anchor_status(state, jwt_sub, None, None),
+                    out.as_object_mut(),
+                ) {
                     map.insert(
                         "free_anchors".into(),
                         serde_json::to_value(status).unwrap_or(Value::Null),
@@ -1830,6 +1926,18 @@ async fn handle_tool_call(
                 .as_str()
                 .ok_or_else(|| JsonRpcError::simple(-32603, "content required"))?
                 .to_string();
+            // Server-wide content cap on every transport (stdio included),
+            // checked before the embedder runs.
+            if content.len() > state.max_content_bytes {
+                return Err(JsonRpcError::simple(
+                    -32602,
+                    format!(
+                        "content is {} bytes; the maximum is {} bytes (MNEMONIC_MAX_CONTENT_BYTES)",
+                        content.len(),
+                        state.max_content_bytes
+                    ),
+                ));
+            }
             let tags: Vec<String> = args
                 .get("tags")
                 .and_then(|t| t.as_array())
@@ -2350,6 +2458,8 @@ mod transport_tests {
                 5,
             )),
             free_anchors: crate::payment::FreeAnchorLimits::disabled(),
+            trusted_proxies: std::sync::Arc::new(crate::client_ip::TrustedProxies::default()),
+            max_content_bytes: crate::pending::MAX_CONTENT_BYTES,
             delivery_metrics: Arc::new(crate::payment::DeliveryMetrics::default()),
             confirmation_ledger: Arc::new(crate::confirmation_token::ConfirmationLedger::new()),
             hosted_endpoint: String::new(),
