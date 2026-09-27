@@ -18,11 +18,53 @@ client.setKeypair(kp);
 const { attestationId } = await client.signMemory('hello', { tags: ['demo'] });
 ```
 
-`signMemory` always uses the deferred pending-bundle / sign-callback flow:
-the server returns a `correlation_id`, the SDK fetches the canonical-CBOR
-bundle, COSE-signs it locally, and POSTs the envelope back. The SDK never
-re-encodes the CBOR in JS, so the byte-level content_hash matches what the
-server stores.
+`signMemory` accepts a write `mode` (available now):
+
+- `mode: "local"`: the server stores a hash-only row and returns it at
+  once (`status: "stored"`). The SDK needs no keypair for this call.
+- `mode: "participate"`: the SDK uses the deferred pending-bundle /
+  sign-callback flow. The server returns a `correlation_id`. The SDK gets
+  the canonical-CBOR bundle, signs it locally (COSE_Sign1) and sends the
+  envelope back. The server then anchors the memory on-chain.
+- No `mode`: the server applies its default (legacy behavior). Bind a
+  keypair before the call.
+
+The SDK never re-encodes the CBOR in JS, so the byte-level content_hash
+matches what the server stores.
+
+### Load the private key only when a signature is necessary
+
+Use `setKeypairProvider` in place of `setKeypair`. The SDK calls the
+provider only when the server asks for a signature. A `local` write, a
+recall and a verify never call it. This keeps an OS-keychain prompt away
+from read-only agent flows.
+
+```typescript
+const client = new MnemonicClient({ baseUrl, signer: pubkeyOnlySigner, jwt });
+client.setKeypairProvider(() => loadKeypairFromKeychain()); // called lazily, once
+await client.signMemory('private note', { mode: 'local' });   // no key access
+await client.signMemory('public claim', { mode: 'participate' }); // loads the key
+```
+
+### Renew the session without a new login (issue #33)
+
+The server issues an OAuth refresh token with each login (one-year rolling
+lifetime). `loginWithIdentity` and `exchangeCodeForToken` return it as
+`refreshToken`. `refreshAccessToken` exchanges it for a new JWT. This
+needs no private key. The server rotates the refresh token on each use,
+so always keep the new value.
+
+```typescript
+let refreshToken = saved.refreshToken;
+client.setTokenRefresher(async () => {
+  const r = await refreshAccessToken({ baseUrl, refreshToken });
+  refreshToken = r.refreshToken; // persist it: the old one is now spent
+  return r.jwt;
+});
+```
+
+With a refresher, the client renews the JWT when it expires within 60
+seconds. It also retries a call one time after a 401 or 403 response.
 
 ## Examples
 
@@ -184,7 +226,11 @@ All names below are re-exported from the package root.
 - **`MnemonicClient`** — stateless HTTP client for the hosted MCP server.
   Methods: `whoami()`, `signMemory(content, opts?)`, `recall(query, opts?)`,
   `verify(attestationId)`, `proveIdentity(challenge)`. Setters: `setJwt`,
-  `setKeypair` (required before `signMemory`).
+  `setKeypair` or `setKeypairProvider` (necessary for a signed
+  `signMemory`, not for `mode: "local"`), `setTokenRefresher`.
+- **`SignMemoryOptions`** — `{tags?, mode?}`. **`WriteMode`** —
+  `"local" | "participate"`. **`SignMemoryResult.status`** — `stored`,
+  `signed`, `pending` or `anchored`.
 
 ### Signer
 
@@ -214,7 +260,14 @@ All names below are re-exported from the package root.
   `{verifier, state, redirectUri, sessionId}` tuple for later validation.
 - **`exchangeCodeForToken({baseUrl, code, state, redirectUri, sessionId})`**
   — validates `state` and `redirectUri` against the stored session and
-  posts to `/oauth/token`. Returns `{jwt, expiresAt}`.
+  posts to `/oauth/token`. Returns `{jwt, expiresAt, refreshToken?}`.
+- **`loginWithIdentity({baseUrl, clientId, keypair})`** — browserless
+  login. Signs the server challenge with the local keypair. Returns
+  `{jwt, expiresAt, sub, refreshToken?}`.
+- **`refreshAccessToken({baseUrl, refreshToken, clientId?})`** — gets a
+  new JWT with `grant_type=refresh_token`. Returns
+  `{jwt, expiresAt, sub, refreshToken}`. Keep the rotated `refreshToken`.
+  Throws `AuthError` when the server rejects the token.
 - **`parseJwtPayload(jwt)`** — decodes a JWT payload without signature
   verification. Asserts `alg=HS256` (Decision 6), required claims, and
   fresh `exp`. Throws `AuthError` otherwise.

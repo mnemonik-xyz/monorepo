@@ -52,7 +52,11 @@ step 8, an attestation_id minted by another identity for step 10.
    ```
 
    Expected: an `attestation_id` is printed within ~5 seconds. Exit 0.
-   Save the id for step 6.
+   Save the id for step 6. The default is a local write
+   (`status: stored`, `write_mode: local`); no OS keychain prompt may
+   appear. To test the signed, anchored path, run
+   `mnemonic sign --anchor "hello"` instead. That path reads the private
+   key and can be paid.
 
 5. **Recall the just-signed memory.**
 

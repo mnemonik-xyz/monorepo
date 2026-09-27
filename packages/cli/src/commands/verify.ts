@@ -4,13 +4,13 @@
 //   verified  → 0
 //   tampered  → 3 (IntegrityError)
 //   not_found → 1 (UserError)
+//
+// Works from the public key alone: never reads the private key or the OS
+// keychain (token renewal rules: see `session.ts`).
 
-import { LocalSigner, MnemonicClient } from "@mnemonik-xyz/sdk";
-
-import { loadIdentity, loadToken } from "../config.js";
 import { fromSdkError, IntegrityError, UserError } from "../errors.js";
 import { format, type OutputOptions } from "../output.js";
-import { assertIdentityMatchesToken } from "../preflight.js";
+import { openSession } from "../session.js";
 
 export interface VerifyOptions extends OutputOptions {
   baseUrl?: string;
@@ -28,16 +28,8 @@ export async function runVerify(
 
   const baseUrl =
     opts.baseUrl ?? process.env.MNEMONIC_BASE_URL ?? DEFAULT_BASE_URL;
-  // Pre-flight: catch identity/JWT mismatch BEFORE any fetch is built.
-  assertIdentityMatchesToken();
-  const kp = await loadIdentity();
-  const tok = loadToken();
-
-  const client = new MnemonicClient({
-    baseUrl,
-    signer: new LocalSigner(kp),
-    jwt: tok.jwt,
-  });
+  // Pre-flight (identity/JWT mismatch) runs inside, BEFORE any fetch.
+  const { client } = await openSession(baseUrl, opts, false);
 
   let result;
   try {

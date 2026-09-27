@@ -16,6 +16,7 @@
 //!   - `test_sign_callback_persists_attestation_then_evicts`
 //!   - `test_sign_callback_rejects_tampered_content_hash`
 //!   - `test_sign_callback_rejects_invalid_signature`
+//!   - `test_sign_callback_universal_paywall_follows_payment_mode`
 
 use std::sync::Arc;
 
@@ -68,6 +69,27 @@ impl Embedder for StubEmbedder {
 }
 
 fn build_state() -> Arc<McpState> {
+    build_state_with_payment("none", None)
+}
+
+/// Universal Paywall config for the payment-gate tests. No network call is
+/// made before the wallet-link challenge, so the URL is never contacted.
+fn up_config() -> mnemonic_mcp::universal_paywall::UniversalPaywallConfig {
+    mnemonic_mcp::universal_paywall::UniversalPaywallConfig {
+        url: "http://localhost:0".into(),
+        api_key: "test-key".into(),
+        network: "eip155:84532".into(),
+        asset: "0x0000000000000000000000000000000000000001".into(),
+        pay_to: "0x0000000000000000000000000000000000000002".into(),
+        payer_wallet: String::new(),
+        approval_url_base: String::new(),
+    }
+}
+
+fn build_state_with_payment(
+    payment_mode: &str,
+    universal_paywall: Option<mnemonic_mcp::universal_paywall::UniversalPaywallConfig>,
+) -> Arc<McpState> {
     use governor::Quota;
     use std::num::NonZeroU32;
     let tmp = tempfile::NamedTempFile::new().unwrap();
@@ -79,6 +101,7 @@ fn build_state() -> Arc<McpState> {
         .expect("migrate paid operations");
     mnemonic_mcp::paid_artifact::migrate_paid_artifact_staging(store.conn())
         .expect("migrate paid artifact staging");
+    mnemonic_mcp::wallet_link::migrate_wallet_links(store.conn()).expect("migrate wallet links");
     let compressor = EmbeddingCompressor::new(8, 4, 42);
     let quota = Quota::per_minute(NonZeroU32::new(10).unwrap());
     let chat_limiter = governor::RateLimiter::keyed(quota);
@@ -93,7 +116,7 @@ fn build_state() -> Arc<McpState> {
     let bootstrap_x25519_sk = crypto_box::SecretKey::generate(&mut crypto_box::aead::OsRng);
     let bootstrap_x25519_pk = bootstrap_x25519_sk.public_key();
     Arc::new(McpState {
-        universal_paywall: None,
+        universal_paywall,
         universal_paywall_eip712_name: "USD Coin".to_string(),
         universal_paywall_eip712_version: "2".to_string(),
         universal_paywall_quotes: Default::default(),
@@ -109,7 +132,7 @@ fn build_state() -> Arc<McpState> {
         store: std::sync::Mutex::new(store),
         embedder: Box::new(StubEmbedder),
         compressor,
-        payment_mode: "none".into(),
+        payment_mode: payment_mode.into(),
         treasury_pubkey: String::new(),
         usdc_mint: String::new(),
         admin_token: String::new(),
@@ -386,4 +409,38 @@ async fn test_sign_callback_rejects_invalid_signature() {
     let token = oauth::issue_jwt(&oauth_state, &pubkey).unwrap();
     let (status, _body) = post_callback(&app, &token, &cid, &bad_b64, &pubkey).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+/// Sign a parked participate bundle and post it with the given state.
+async fn sign_and_post(state: &Arc<McpState>, content: &str) -> (StatusCode, Value) {
+    let oauth_state = Arc::new(OAuthState::with_defaults(TEST_SECRET));
+    let app = build_router(state.clone(), oauth_state.clone());
+    let kp = Keypair::new();
+    let pubkey = kp.pubkey().to_string();
+    let (cid, _hash, cbor) = park_bundle(state, &kp, content).await;
+    let token = oauth::issue_jwt(&oauth_state, &pubkey).unwrap();
+    let cose = sign_cose(&cbor, &kp).unwrap();
+    let cose_b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &cose);
+    post_callback(&app, &token, &cid, &cose_b64, &pubkey).await
+}
+
+#[tokio::test]
+async fn test_sign_callback_universal_paywall_follows_payment_mode() {
+    // PAYMENT_MODE=none + a Universal Paywall config: the UP gate must NOT
+    // run — no wallet link, no quote, no charge. The write completes.
+    let free = build_state_with_payment("none", Some(up_config()));
+    let (status, body) = sign_and_post(&free, "free deploy participate").await;
+    assert_eq!(status, StatusCode::OK, "body={body}");
+    assert_eq!(body["status"], "ok", "body={body}");
+    assert!(
+        body.get("payment").is_none(),
+        "no payment on a free deploy: {body}"
+    );
+
+    // PAYMENT_MODE=x402 + the same config: the UP gate runs. Its first
+    // step asks for a wallet link before any quote (no network needed).
+    let paid = build_state_with_payment("x402", Some(up_config()));
+    let (status, body) = sign_and_post(&paid, "paid deploy participate").await;
+    assert_eq!(status, StatusCode::PRECONDITION_REQUIRED, "body={body}");
+    assert_eq!(body["status"], "awaiting_wallet_link", "body={body}");
 }

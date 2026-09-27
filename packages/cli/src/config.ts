@@ -42,6 +42,12 @@ export interface TokenJson {
   expires_at: string;
   /** JWT `sub` claim — the OAuth subject (typically the user's pubkey). */
   sub: string;
+  /**
+   * OAuth refresh token (issue #33). Lets the CLI renew an expired JWT
+   * without the private key. Rotated on each use. Absent for tokens saved
+   * by `login --token` or by CLI versions before 0.3.0.
+   */
+  refresh_token?: string;
 }
 
 /** Resolve the config directory (with env override for tests). */
@@ -203,6 +209,39 @@ export function identityExists(): boolean {
   return existsSync(identityPath()) || existsSync(legacyIdJsonPath());
 }
 
+/**
+ * Return the identity's base58 public key WITHOUT touching the OS keychain.
+ * A keychain-backed stub carries the pubkey in the file; a file-backed
+ * identity carries it next to the secret. Throws the same `UserError` as
+ * {@link loadIdentityJson} when no identity exists.
+ */
+export function loadIdentityPubkey(): string {
+  try {
+    return loadIdentityJson().pubkey_base58;
+  } catch (e) {
+    if (e instanceof IdentityRequiresKeystore) return e.pubkey_base58;
+    throw e;
+  }
+}
+
+/**
+ * True iff the private key is stored in a file (`identity.json` with a
+ * `secret`, or the legacy `id.json`), so reading it cannot trigger an OS
+ * keychain prompt. False for a keychain-backed stub or a missing identity.
+ */
+export function identitySecretInFile(): boolean {
+  const path = identityPath();
+  if (existsSync(path)) {
+    try {
+      return isKeypairJson(JSON.parse(readFileSync(path, "utf8")));
+    } catch {
+      return false;
+    }
+  }
+  // Legacy self-host `id.json` always holds the raw secret.
+  return existsSync(legacyIdJsonPath());
+}
+
 export function loadIdentityJson(): KeypairJson {
   const path = identityPath();
   if (existsSync(path)) {
@@ -352,7 +391,8 @@ function isTokenJson(v: unknown): v is TokenJson {
     typeof o.jwt === "string" &&
     o.jwt.length > 0 &&
     typeof o.expires_at === "string" &&
-    typeof o.sub === "string"
+    typeof o.sub === "string" &&
+    (o.refresh_token === undefined || typeof o.refresh_token === "string")
   );
 }
 
@@ -361,10 +401,34 @@ export function tokenExists(): boolean {
 }
 
 /**
+ * True iff the token's `expires_at` is more than `skewMs` in the future.
+ * An unparseable `expires_at` counts as fresh (the server decides).
+ */
+export function isTokenFresh(token: TokenJson, skewMs = 0): boolean {
+  const exp = Date.parse(token.expires_at);
+  return !Number.isFinite(exp) || exp - skewMs > Date.now();
+}
+
+/**
  * Read the persisted JWT token. Throws if missing OR expired (`expires_at`
  * is strictly in the past, comparing wall-clock).
  */
 export function loadToken(): TokenJson {
+  const parsed = readTokenFile();
+  if (!isTokenFresh(parsed)) {
+    throw new UserError(
+      `token expired at ${parsed.expires_at}; run \`mnemonic login\` again`,
+    );
+  }
+  return parsed;
+}
+
+/**
+ * Read the persisted token WITHOUT the expiry check. Throws if the file is
+ * missing, unreadable or malformed. Callers that can renew an expired
+ * token (see `session.ts`) use this.
+ */
+export function readTokenFile(): TokenJson {
   const path = tokenPath();
   if (!existsSync(path)) {
     throw new UserError(`no token at ${path}; run \`mnemonic login\` first`);
@@ -384,12 +448,6 @@ export function loadToken(): TokenJson {
   if (!isTokenJson(parsed)) {
     throw new UserError(
       `token has wrong shape; expected {jwt, expires_at, sub}`,
-    );
-  }
-  const exp = Date.parse(parsed.expires_at);
-  if (Number.isFinite(exp) && exp <= Date.now()) {
-    throw new UserError(
-      `token expired at ${parsed.expires_at}; run \`mnemonic login\` again`,
     );
   }
   return parsed;

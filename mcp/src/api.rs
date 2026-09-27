@@ -268,8 +268,14 @@ pub async fn sign_callback_handler(
     // Paid participate writes bind the exact quote to the verified COSE
     // envelope, not raw editor text. The first callback returns a quote; a
     // later callback sees the durable provider receipt and may anchor.
+    //
+    // The Universal Paywall charges only when `PAYMENT_MODE=x402`: a UP
+    // config on a `PAYMENT_MODE=none` deploy must not charge (the decision
+    // lives in `payment.rs`).
+    let universal_paywall =
+        payment::active_universal_paywall(&state.payment_mode, state.universal_paywall.as_ref());
     if entry.write_mode == WriteMode::Participate {
-        if let Some(config) = state.universal_paywall.as_ref() {
+        if let Some(config) = universal_paywall {
             let now = chrono::Utc::now().to_rfc3339();
             let staged = match state.store.lock() {
                 Ok(store) => match paid_artifact::stage_verified_cose(
@@ -400,7 +406,7 @@ pub async fn sign_callback_handler(
     // already final at this point: a retry resumes this attempt and must never
     // re-enter exact settlement or create another customer charge.
     let is_paid_participate =
-        entry.write_mode == WriteMode::Participate && state.universal_paywall.is_some();
+        entry.write_mode == WriteMode::Participate && universal_paywall.is_some();
     let mut delivery_attempt = None;
     if is_paid_participate {
         let now = chrono::Utc::now().to_rfc3339();
@@ -476,10 +482,12 @@ pub async fn sign_callback_handler(
     let attestation_id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
 
-    // Wave 3: a deferred write whose resolved mode is `Local` (a remote user's
-    // free local write, now client-signed too) skips on-chain anchoring and
-    // gets synthetic ids — exactly like a `local` storage deploy. Either
-    // condition routes to the synthetic-id branch.
+    // Wave 3: a deferred write whose resolved mode is `Local` (a legacy
+    // client that omitted `mode` on a local-only deploy; explicit
+    // `mode: "local"` writes are stored inline as hash-only rows and never
+    // reach this callback) skips on-chain anchoring and gets synthetic ids —
+    // exactly like a `local` storage deploy. Either condition routes to the
+    // synthetic-id branch.
     //
     // `MNEMONIC_DEFERRED_SYNTHETIC_ANCHOR=1` forces the same synthetic-id path
     // for full-mode deploys. This lets end-to-end tests exercise the complete

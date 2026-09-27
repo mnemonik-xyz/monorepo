@@ -857,11 +857,15 @@ async fn run_stdio(state: Arc<mcp::McpState>) -> anyhow::Result<()> {
 
         // Stdio path: no JWT, single-tenant CLI mode. Use the local keypair
         // pubkey as owner scope so attestations land under a stable owner
-        // and `recall` returns the local user's rows. `jwt_sub = None`
-        // routes `sign_memory` through the inline (server-signing) branch
-        // rather than the deferred (PendingBundles) one — Decision 12.
+        // and `recall` returns the local user's rows. `jwt_sub = None` +
+        // `Transport::Stdio` routes `sign_memory` through the inline branch
+        // rather than the deferred (PendingBundles) one — Decision 12. Here
+        // the keypair is the local agent's own identity, so an inline
+        // participate write is the agent signing its own memory; local
+        // writes sign nothing.
         let owner_pubkey = state.keypair.pubkey().to_string();
-        let resp = mcp::handle_request(&req, &state, &owner_pubkey, None).await;
+        let resp =
+            mcp::handle_request(&req, &state, &owner_pubkey, None, tools::Transport::Stdio).await;
         stdout
             .write_all(serde_json::to_string(&resp)?.as_bytes())
             .await?;

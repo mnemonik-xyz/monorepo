@@ -11,9 +11,11 @@ Mnemonic Protocol is itself an *agent service*: an MCP server that any AI agent 
 # Pair with the webapp identity (open mnemonik.xyz/install, click Send to CLI):
 npx @mnemonik-xyz/cli init --ticket <uuid>
 npx @mnemonik-xyz/cli login
-npx @mnemonik-xyz/cli sign "first memory"
+npx @mnemonik-xyz/cli sign "first memory"            # private local write, public key only
+npx @mnemonik-xyz/cli sign "public claim" --anchor   # signed with your key, anchored on-chain
 
 # Or standalone (CLI-only): npx @mnemonik-xyz/cli init --standalone
+# The CLI renews an expired session automatically (refresh token); log in one time.
 ```
 
 For Claude / Cursor / VS Code / Windsurf — install from [mnemonik.xyz/install](https://mnemonik.xyz/install) (one-click connector). HTTP MCP endpoint: `https://mcp.mnemonik.xyz/mcp`. OAuth 2.1 + PKCE.
@@ -35,7 +37,7 @@ Eight tools ship by default. Full reference — outputs, auth, error shapes — 
 | Tool | Inputs | Returns |
 |---|---|---|
 | `mnemonic_whoami` | — | server pubkey, DIDs, storage mode, attestation count, and the capability envelope (`supported_modes`, `default_mode`, `participate_cost`) |
-| `mnemonic_sign_memory` | `{ content: string, tags?: string[], mode?: "local" \| "participate" }` | over HTTP: `{ status: "awaiting_signature", correlation_id, approve_url, content_hash, expires_in }` for the deferred-sign / sign-callback flow (the SDK handles the COSE-sign step locally) |
+| `mnemonic_sign_memory` | `{ content: string, tags?: string[], mode?: "local" \| "participate" }` | over HTTP: `{ status: "awaiting_signature", correlation_id, approve_url, content_hash, expires_in }` for the deferred-sign / sign-callback flow (the SDK handles the COSE-sign step locally). With `mode: "local"`: the stored row at once (`attestation_id`, `signature: "none"`), with no signing step |
 | `mnemonic_check_pending` | `{ correlation_id: string }` | `{ status: "signed", attestation_id, solana_tx, arweave_tx, ... }`, or `awaiting_signature` / `not_found` |
 | `mnemonic_recall` | `{ query: string, limit?: number }` | top-k semantically similar attestations. Authenticated → your own corpus; anonymous → the cross-owner public pool only |
 | `mnemonic_verify` | `{ solana_tx?: string, arweave_tx?: string }` (supply at least one) | verification result with the recovered envelope and chain-of-trust |

@@ -165,7 +165,8 @@ Do not show a `participate` write as free unless `pricing_status` is `disabled`.
 
 ## `mnemonic_sign_memory`
 
-Embed → compress (TurboQuant) → canonical CBOR → blake3 → COSE_Sign1 → persist.
+Embed → compress (TurboQuant) → canonical CBOR → blake3 → COSE_Sign1
+(`participate` only) → persist.
 
 **Input:**
 
@@ -175,13 +176,25 @@ Embed → compress (TurboQuant) → canonical CBOR → blake3 → COSE_Sign1 →
 | `tags` | `string[]` | no | Free-form tags, usable as recall filters |
 | `mode` | `"local" \| "participate"` | no | Per-request write intent. Omit to use the operator's `default_mode` |
 
-**This tool has two response shapes**, decided by *who signs*:
+**This tool has two response shapes.** The write mode and the transport select
+the shape. Only a `participate` write gets a signature. A local write stores a
+hash and signs nothing, so it never opens an operating system (OS) keychain
+prompt.
 
-### Inline (server-signed) — stdio / single-tenant
+### Inline — stdio, or an explicit local write over HTTP
 
-Taken only when the writer **is** the operator: the stdio path with no JWT, or a
-JWT whose subject equals the operator's own pubkey. Returns the finished
-attestation:
+The server returns the finished attestation in these cases (available now):
+
+- **Stdio, no JSON Web Token (JWT).** The operator key is the identity of the
+  local agent. A `participate` write gets a COSE_Sign1 signature from this key.
+- **HTTP with a JWT and `mode: "local"`.** The server stores a hash-only row
+  that the JWT subject owns. The client does not sign it. The operator key does
+  not sign it.
+
+Over HTTP, the operator key never signs a memory. A request without a JWT
+cannot start an inline `participate` write. To write a local memory over HTTP
+with no signing step, set `mode: "local"`. A request without `mode` uses the
+deferred path.
 
 ```jsonc
 {
@@ -191,8 +204,9 @@ attestation:
   "encoding": "cbor+cose",
   "solana_tx": "<sig>",     // "local:..." in local mode
   "arweave_tx": "<tx id>",  // "local:..." in local mode
-  "signer": "<base58>",
-  "did_sol": "did:sol:...",
+  "signer": "<base58>",     // the owner of the memory
+  "signature": "cose_sign1", // "none" for a local hash-only row
+  "did_sol": "did:sol:...", // DID of the owner
   "timestamp": "...",
   "storage_mode": "full",
   "write_mode": "participate",
@@ -203,9 +217,11 @@ attestation:
 
 ### Deferred (client-signed) — the non-custodial HTTP path
 
-Taken for **every** JWT write owned by an identity other than the operator —
-including an explicit `mode: "local"`. The operator's key never signs content
-authored by someone else, so the server returns a bundle for you to sign:
+The server uses this path for each JWT write in `participate` mode (available
+now). It also uses this path for a JWT write without a `mode` field. The SDK and
+the browser extension send no `mode` field and expect this shape. The operator
+key never signs content from a different identity. Thus the server returns a
+bundle for you to sign:
 
 ```jsonc
 {
@@ -402,7 +418,8 @@ switch. The write mode is a per-request user choice on `mnemonic_sign_memory`.
 | Storage | Operator's SQLite only | Arweave bytes + Solana SPL Memo, plus SQLite |
 | Tx ids | Synthetic `local:...` | Real `arweave_tx` / `solana_tx` |
 | Cost | Free | Priced by the operator (`participate_cost` from `whoami`) |
-| Verifiable by third parties | Signature + hash only | Signature, hash, **and** independent on-chain timestamp |
+| Signed by | Nobody (hash-only row, no keychain prompt) | The author: the client over HTTP, the local agent key over stdio |
+| Verifiable by third parties | Hash only | Signature, hash, **and** independent on-chain timestamp |
 
 Choosing one:
 

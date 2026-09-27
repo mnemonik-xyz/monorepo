@@ -1,4 +1,4 @@
-# Quickstart — 60 seconds to your first signed memory
+# Quickstart — 60 seconds to your first memory
 
 > Three commands. No build. The hosted MCP server at `mcp.mnemonik.xyz` is free for the public beta.
 
@@ -10,12 +10,13 @@
 # 3. Run:
 npx @mnemonik-xyz/cli init --ticket <uuid>
 npx @mnemonik-xyz/cli login
-npx @mnemonik-xyz/cli sign "first memory"
+npx @mnemonik-xyz/cli sign "first memory"            # private, local write
+npx @mnemonik-xyz/cli sign "public claim" --anchor   # signed + anchored on-chain
 ```
 
 (If you prefer a standalone CLI-only keypair without webapp pairing, replace step 3's first command with `npx @mnemonik-xyz/cli init --standalone`.)
 
-That's it. You now have a verifiable, persistent memory anchored against the production Mnemonic server.
+That's it. The first `sign` saves a private memory on the production Mnemonic server. The `--anchor` write is signed with your key and anchored on-chain, so anyone can verify it.
 
 ---
 
@@ -53,11 +54,11 @@ If `~/.mnemonic/identity.json` already exists, both modes refuse to overwrite. P
 npx @mnemonik-xyz/cli login
 ```
 
-Opens your default browser to the OAuth 2.1 + PKCE authorization page at `mcp.mnemonik.xyz`. Approve in the browser, return to the terminal — the CLI captures the JWT and persists it at `~/.mnemonic/token.json` (also mode 0600).
+The CLI signs the OAuth 2.1 + PKCE challenge with the Ed25519 keypair from step 1. No browser is necessary. The signature tells the server that the JSON Web Token (JWT) belongs to you. The CLI saves the JWT and a refresh token in `~/.mnemonic/token.json` (also mode 0600). Use `login --browser` to let the webapp sign the challenge instead.
 
-The browser-side step is required because the OAuth challenge is signed with the same Ed25519 keypair you just created — that's how the server knows the JWT belongs to you.
+You log in one time. The JWT expires after one hour, but the CLI renews it automatically with the refresh token. This renewal does not read your private key (available now, CLI 0.3.0).
 
-### 3. Sign your first memory (3 seconds)
+### 3. Save your first memory (3 seconds)
 
 ```bash
 npx @mnemonik-xyz/cli sign "first memory"
@@ -68,13 +69,34 @@ Output:
 ```
 attestation_id: Qm9...
 signed_at:      2026-05-02T10:00:00Z
-status:         signed
+status:         stored
+write_mode:     local
+content_hash:   <blake3 of your content>
+```
+
+The default write mode is `local`. The server keeps the memory for your identity only. There is no on-chain anchor and no charge. The CLI uses only your public key for this write, so the OS keychain does not show a prompt.
+
+### 3b. Anchor a memory on-chain
+
+```bash
+npx @mnemonik-xyz/cli sign "public claim" --anchor
+```
+
+Output:
+
+```
+attestation_id: Qm9...
+signed_at:      2026-05-02T10:00:00Z
+status:         anchored
+write_mode:     participate
 content_hash:   <blake3 of your content>
 solana_tx:      <real Solana SPL Memo tx>      ← anchor on mainnet
 arweave_tx:     <real Arweave tx>              ← bytes preserved
 ```
 
-You now have a memory that:
+`--anchor` (alias `--participate`) reads your private key and signs the memory locally. The server then anchors it on Arweave and Solana. This write can be paid. It is the only memory write that reads the private key.
+
+An anchored memory:
 
 - Anyone can semantically search.
 - Anyone with the `solana_tx` can independently verify (no Mnemonic-server dependency).
@@ -94,7 +116,7 @@ Returns the top-k most similar attestations by cosine similarity — *not* keywo
 npx @mnemonik-xyz/cli verify <attestation_id>
 ```
 
-Or, fully outside the Mnemonic ecosystem, anyone can verify your memory using only public infrastructure:
+Or, fully outside the Mnemonic ecosystem, anyone can verify an anchored (`--anchor`) memory using only public infrastructure:
 
 ```bash
 # Fetch raw COSE bytes from Arweave (any gateway)
@@ -134,16 +156,19 @@ const client = new MnemonicClient({ baseUrl: "https://mcp.mnemonik.xyz", signer 
 
 // (Run OAuth flow elsewhere, persist the JWT, then:)
 client.setJwt(jwtFromOauth);
-client.setKeypair(keypair);
+client.setKeypairProvider(() => keypair); // called only when a signature is necessary
 
-const result = await client.signMemory("first memory", { tags: ["demo"] });
-console.log(result.attestationId, result.solanaTx, result.arweaveTx);
+const note = await client.signMemory("first memory", { mode: "local", tags: ["demo"] });
+console.log(note.attestationId, note.status);             // "stored", no key used
+
+const claim = await client.signMemory("public claim", { mode: "participate" });
+console.log(claim.attestationId, claim.solanaTx, claim.arweaveTx);
 
 const hits = await client.recall("first");
 console.log(hits);
 ```
 
-The SDK runs unmodified in Node 20+, Bun, Deno, and modern browsers.
+The SDK runs unmodified in Node 20+, Bun, Deno, and modern browsers. To renew the JWT without a new login, pass the refresh token from the login to `refreshAccessToken` in a `setTokenRefresher` callback. The SDK README shows the full example.
 
 ---
 

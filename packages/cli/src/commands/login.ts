@@ -34,6 +34,7 @@ import {
   buildAuthorizeUrl,
   exchangeCodeForToken,
   loginWithIdentity,
+  type LoginWithIdentityResult,
   parseJwtPayload,
 } from "@mnemonik-xyz/sdk";
 
@@ -103,7 +104,7 @@ async function runBrowserless(
   verbose(`base_url=${baseUrl}`, opts);
   verbose(`signing OAuth challenge with local pubkey=${kp.pubkey}`, opts);
 
-  let result: { jwt: string; expiresAt: string; sub: string };
+  let result: LoginWithIdentityResult;
   try {
     result = await loginWithIdentity({
       baseUrl,
@@ -114,11 +115,18 @@ async function runBrowserless(
     throw fromSdkError(e);
   }
   verbose(`server returned JWT.sub=${result.sub}`, opts);
+  verbose(
+    `refresh token ${result.refreshToken ? "saved (auto-renewal on)" : "not issued by server"}`,
+    opts,
+  );
 
+  // The refresh token lets later commands renew the session without the
+  // private key (issue #33).
   saveToken({
     jwt: result.jwt,
     expires_at: result.expiresAt,
     sub: result.sub,
+    ...(result.refreshToken ? { refresh_token: result.refreshToken } : {}),
   });
 
   format(
@@ -217,8 +225,8 @@ async function runInteractive(
     );
   }
 
-  // 6. Exchange code → JWT.
-  let token: { jwt: string; expiresAt: string };
+  // 6. Exchange code → JWT (+ refresh token when the server issues one).
+  let token: { jwt: string; expiresAt: string; refreshToken?: string };
   try {
     token = await exchangeCodeForToken({
       baseUrl,
@@ -238,7 +246,12 @@ async function runInteractive(
   } catch (e) {
     throw fromSdkError(e);
   }
-  saveToken({ jwt: token.jwt, expires_at: token.expiresAt, sub: payload.sub });
+  saveToken({
+    jwt: token.jwt,
+    expires_at: token.expiresAt,
+    sub: payload.sub,
+    ...(token.refreshToken ? { refresh_token: token.refreshToken } : {}),
+  });
   warnIfMismatch(payload.sub);
 
   format(

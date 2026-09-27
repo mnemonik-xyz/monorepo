@@ -1,5 +1,14 @@
-// `mnemonic sign [content]` — read identity + token, instantiate a
-// MnemonicClient, run the pending-bundle / sign-callback flow.
+// `mnemonic sign [content] [--anchor]` — save a memory.
+//
+// Write modes (per-request `mode` on `mnemonic_sign_memory`):
+//   default   → `mode: "local"`. The server stores a hash-only row for this
+//               identity. Needs only the public key: the private key and
+//               the OS keychain are NOT read.
+//   --anchor  → `mode: "participate"` (alias `--participate`). The CLI
+//               reads the private key, COSE-signs the canonical bundle
+//               (pending-bundle / sign-callback flow) and the server
+//               anchors it on Arweave + Solana. The ONLY command that
+//               reads the key for a memory write.
 //
 // Content sources:
 //   1. positional argument (preferred)
@@ -8,29 +17,19 @@
 //
 // Tags from `--tags=a,b,c` (comma-separated, trimmed, empty entries dropped).
 
-import {
-  AuthError,
-  LocalSigner,
-  MnemonicClient,
-  parseJwtPayload,
-} from "@mnemonik-xyz/sdk";
+import { AuthError, parseJwtPayload } from "@mnemonik-xyz/sdk";
 
-import {
-  identityPath,
-  loadIdentity,
-  loadToken,
-  tokenPath,
-} from "../config.js";
+import { identityPath, identitySecretInFile, tokenPath } from "../config.js";
 import { fromSdkError, UserError } from "../errors.js";
 import { format, hint, type OutputOptions, verbose } from "../output.js";
-import {
-  assertIdentityMatchesToken,
-  formatMismatchError,
-} from "../preflight.js";
+import { formatMismatchError } from "../preflight.js";
+import { openSession } from "../session.js";
 
 export interface SignOptions extends OutputOptions {
   tags?: string;
   baseUrl?: string;
+  /** `--anchor` / `--participate`: sign locally and anchor on-chain. */
+  anchor?: boolean;
   /** Internal — read content from this string instead of stdin (tests). */
   content?: string;
 }
@@ -52,27 +51,38 @@ export async function runSign(
   }
 
   const tags = parseTags(opts.tags);
-  // Pre-flight: catch identity/JWT mismatch BEFORE any fetch is built (bug 3 /
-  // Decision 7). UserError points at three remediation paths.
-  assertIdentityMatchesToken();
-  const kp = await loadIdentity();
-  const tok = loadToken();
+  const anchor = opts.anchor === true;
+  const mode = anchor ? "participate" : "local";
+  // Pre-flight (identity/JWT mismatch, bug 3 / Decision 7) runs inside
+  // openSession BEFORE any fetch. Only an anchored write may read the OS
+  // keychain (for a silent re-login or the signature itself).
+  const { client, signer, token: tok } = await openSession(baseUrl, opts, anchor);
 
   verbose(`base_url=${baseUrl}`, opts);
-  verbose(`local pubkey=${kp.pubkey}`, opts);
+  verbose(`local pubkey=${signer.pubkey}`, opts);
   verbose(`token.sub=${tok.sub}`, opts);
+  verbose(`mode=${mode}`, opts);
 
-  const client = new MnemonicClient({
-    baseUrl,
-    signer: new LocalSigner(kp),
-    jwt: tok.jwt,
+  // The private key is read lazily — only if the server asks for a client
+  // signature. For `local` that happens only against an older server that
+  // predates hash-only local writes; then we use a file-stored key (no
+  // prompt) but refuse to read the OS keychain.
+  client.setKeypairProvider(() => {
+    if (anchor || identitySecretInFile()) return signer.keypair();
+    throw new UserError(
+      "the server asked for a client signature on a local write (it predates hash-only local writes). " +
+        "`mnemonic sign` reads the private key from the OS keychain only with --anchor. " +
+        "Upgrade the server, or re-run with --anchor to sign and anchor the memory on-chain.",
+    );
   });
-  client.setKeypair(kp);
 
-  hint("signing memory...", opts);
+  hint(anchor ? "signing and anchoring memory..." : "saving memory...", opts);
   let result;
   try {
-    result = await client.signMemory(content, tags.length > 0 ? { tags } : {});
+    result = await client.signMemory(content, {
+      mode,
+      ...(tags.length > 0 ? { tags } : {}),
+    });
   } catch (e) {
     // Post-mortem on 403 from /api/sign-callback: the only way that can
     // happen is `pending.jwt_sub !== body.signer_pubkey`. Preflight already
@@ -82,7 +92,7 @@ export async function runSign(
     // same remediation hints preflight uses, so the user sees a directly
     // actionable error instead of `HTTP 403`.
     if (e instanceof AuthError && /HTTP 403/.test(e.message)) {
-      throw new UserError(buildPostMortem(kp.pubkey, tok.jwt), e);
+      throw new UserError(buildPostMortem(signer.pubkey, tok.jwt), e);
     }
     throw fromSdkError(e);
   }
@@ -93,6 +103,7 @@ export async function runSign(
       `signed_at:      ${result.signedAt}`,
       `status:         ${result.status}`,
     ];
+    if (result.writeMode) lines.push(`write_mode:     ${result.writeMode}`);
     if (result.contentHash) lines.push(`content_hash:   ${result.contentHash}`);
     if (result.arweaveTx) lines.push(`arweave_tx:     ${result.arweaveTx}`);
     if (result.solanaTx) lines.push(`solana_tx:      ${result.solanaTx}`);
