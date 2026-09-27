@@ -323,16 +323,40 @@ async fn test_sign_callback_persists_attestation_then_evicts() {
     assert_eq!(s1, StatusCode::OK, "body={body}");
     let _attestation_id = body["attestation_id"].as_str().unwrap();
 
-    // Recall: a search for this content under the user's owner_pubkey
-    // should return the persisted row. Scoped to drop the guard before the
-    // next `.await` (clippy::await_holding_lock).
+    // The operator keeps an ANCHOR INDEX row, not the memory
+    // (work/arweave-as-source-of-truth D-2). This test previously asserted the
+    // opposite — that a search returned the row with its content — which is the
+    // custodial behaviour the design removes. Arweave holds the bytes and the
+    // Solana memo holds the hash; the operator holds neither the text nor the
+    // vector, so it cannot read the memory and cannot rank it by meaning.
+    //
+    // Scoped to drop the guard before the next `.await`
+    // (clippy::await_holding_lock).
     {
         let store = state.store.lock().unwrap();
+
+        // Recall must NOT surface it: with no embedding the row cannot be scored,
+        // and an unscoreable hit with empty content is worse than no hit.
         let results = store
             .search(&[0.1; 8], Some(pubkey.as_str()), None, 5)
             .expect("search ok");
-        assert_eq!(results.len(), 1, "attestation row missing");
-        assert_eq!(results[0].content, "persisted memory");
+        assert!(
+            results.is_empty(),
+            "an anchored row has no embedding, so recall must not return it: {results:?}"
+        );
+
+        // But the index row exists, and the replay guard and the delivery check
+        // depend on it. It carries the hash and the chain ids, and no content.
+        let (content, hash): (String, String) = store
+            .conn()
+            .query_row(
+                "SELECT content, content_hash FROM attestations WHERE owner_pubkey = ?",
+                rusqlite::params![pubkey.as_str()],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .expect("the anchor index row exists");
+        assert_eq!(content, "", "the operator must not store the memory text");
+        assert_eq!(hash.len(), 64, "but it does keep the blake3 hash: {hash}");
     }
 
     // GET /api/pending/<id> now returns 410 (the entry has been consumed).

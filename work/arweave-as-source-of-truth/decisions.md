@@ -118,3 +118,32 @@ Test impact, recorded because it looks like lost coverage and is not: five tests
 retired tier. Three became one test asserting the refusal. Two — the local sign-then-verify round
 trip and its tamper-detection counterpart — now drive the stdio transport, where `local` is still
 legal, so the verify coverage is unchanged.
+
+### D-4. Q-1 resolved: hosted recall cannot return anchored memories (2026-09-27)
+
+D-2 left open whether a hosted operator should keep a derived index so it could still answer
+recall. It should not, and the reason is not preference: an embedding inverts to an
+approximation of its source text, so an operator holding embeddings holds the memory in all but
+name. Keeping one would re-create the custodial position the whole effort removes.
+
+So the hosted anchored write path (`/api/sign-callback`) now stores `content = ""` and no
+embedding. What remains is the anchor index of D-2.
+
+Consequence, accepted and tested: hosted `mnemonic_recall` returns nothing for anchored
+memories. `SqliteStore::search` also drops any row that carries no vector. That is not a
+cosmetic filter — such a row cannot be ranked by meaning, so returning it would claim a
+relevance it does not have and hand the caller an empty `content`. A hit that cannot be scored
+is worse than no hit.
+
+The replacement is real, not theoretical: `mnemonic-mcp restore` (Wave 3) rebuilds a client's own
+index from the chain, and recall then runs locally over it.
+
+A locally installed server is unaffected. There the SQLite *is* the agent's own machine, and
+`core/src/rebuild.rs` already frames it as a rebuildable cache rather than something forbidden.
+Only the hosted path, writing for an identity that is not the operator's, stores nothing.
+
+**Q-2 (what `/artifacts` shows) stays open** and is now visible rather than latent: a public
+anchored row lists with an empty `content` and its Arweave id. The honest options are to fetch
+from the gateway per request, to keep a public-only derived cache rebuilt by
+`core/src/restore/`, or to show hashes and links only. This needs the owner, and it affects a
+public web page rather than correctness.

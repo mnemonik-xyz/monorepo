@@ -883,9 +883,32 @@ pub async fn sign_callback_handler(
             &arweave_tx,
             Visibility::Private,
         );
+        // work/arweave-as-source-of-truth D-2: the operator stores no memory for
+        // an anchored write. Arweave holds the bytes and the Solana memo holds
+        // the hash, so persisting the text here would make the operator a
+        // custodian of content it does not need and cannot be trusted with.
+        //
+        // What stays is an ANCHOR INDEX: the id, the content hash, the two
+        // transaction ids, the owner, the timestamp and the labels. Those are
+        // the operator's own bookkeeping, and two things depend on them — the
+        // replay guard behind `already_anchored` (a second anchor would spend a
+        // second free grant for one memory) and the delivery check's existence
+        // stage. Neither reads the content.
+        //
+        // The embedding goes too, and deliberately: a vector inverts to an
+        // approximation of its source text, so keeping it would keep the memory
+        // in all but name. The consequence is real and intended — the operator
+        // cannot run semantic recall over these rows. A client restores its own
+        // index from Arweave (`mnemonic-mcp restore`) and searches locally.
+        let (stored_content, stored_embedding): (&str, &[f32]) =
+            if entry.write_mode == WriteMode::Anchored {
+                ("", &[])
+            } else {
+                (entry.content.as_str(), entry.embedding.as_slice())
+            };
         let save_res = store.save_attestation(
             &attestation_id,
-            &entry.content,
+            stored_content,
             &entry.content_hash,
             &entry.tags,
             &solana_tx,
@@ -895,7 +918,7 @@ pub async fn sign_callback_handler(
             &now,
             entry.write_mode,
             visibility,
-            &entry.embedding,
+            stored_embedding,
         );
         // Stamp the correlation_id onto the row so `mnemonic_check_pending`
         // can resolve it later. Best-effort; an UPDATE failure here doesn't

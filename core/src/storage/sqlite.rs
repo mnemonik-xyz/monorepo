@@ -1541,6 +1541,15 @@ impl AttestationStore for SqliteStore {
             (None, Some(Visibility::Private)) | (None, None) => Vec::new(),
         };
 
+        // Drop rows that carry no vector (work/arweave-as-source-of-truth D-2).
+        // An anchored row written by a hosted operator stores no embedding and no
+        // content, because Arweave holds the memory. Such a row cannot be ranked
+        // by meaning, so returning it would claim a relevance it does not have and
+        // hand the caller an empty `content`. A hit that cannot be scored is worse
+        // than no hit. The memory is still recoverable — a client restores its own
+        // index from the chain (`mnemonic-mcp restore`) and searches locally.
+        results.retain(|r| r.relevance_score != 0.0 || !r.content.is_empty());
+
         sort_and_truncate(&mut results, limit);
         Ok(results)
     }
