@@ -23,19 +23,23 @@ is compiled with the `trajectory-experimental` cargo feature.
 
 | Tool | Auth | Paid | Purpose |
 |---|---|---|---|
-| [`mnemonic_whoami`](#mnemonic_whoami) | optional | no | Server identity, storage capabilities, pricing |
+| [`mnemonic_whoami`](#mnemonic_whoami) | required on HTTP | no | Server identity, storage capabilities, pricing |
 | [`mnemonic_sign_memory`](#mnemonic_sign_memory) | required for `participate` | `participate` only | Create a signed memory attestation |
 | [`mnemonic_check_pending`](#mnemonic_check_pending) | required | no | Resolve a deferred-sign `correlation_id` |
 | [`mnemonic_recall`](#mnemonic_recall) | optional (changes scope) | no | Semantic search over stored memories |
-| [`mnemonic_verify`](#mnemonic_verify) | optional | no | Verify an attestation against its chain anchors |
-| [`mnemonic_prove_identity`](#mnemonic_prove_identity) | optional | no | Sign an arbitrary challenge with the server key |
+| [`mnemonic_verify`](#mnemonic_verify) | required on HTTP | no | Verify an attestation against its chain anchors |
+| [`mnemonic_prove_identity`](#mnemonic_prove_identity) | required on HTTP | no | Sign an arbitrary challenge with the server key |
 | [`mnemonic_publish_post`](#mnemonic_publish_post) | required | no | Publish a signed public blog post |
 | [`request_public_write_confirmation`](#request_public_write_confirmation) | — | no | Internal ceremony gate (not user-facing) |
 | [`mnemonic_attest_step`](#mnemonic_attest_step) ⚗️ | required | no | Append a hash-linked trajectory step |
 | [`mnemonic_attest_verdict`](#mnemonic_attest_verdict) ⚗️ | required | no | Record an independent judge's verdict |
-| [`mnemonic_verify_trajectory`](#mnemonic_verify_trajectory) ⚗️ | optional | no | Verify a trajectory end-to-end |
+| [`mnemonic_verify_trajectory`](#mnemonic_verify_trajectory) ⚗️ | required on HTTP | no | Verify a trajectory end-to-end |
 
 ⚗️ = experimental, behind `trajectory-experimental`.
+
+The Auth column applies to the HTTP transport. The stdio transport uses the
+local keypair and needs no token. Refer to
+[Authentication over HTTP](#authentication-over-http).
 
 Only `mnemonic_sign_memory` is ever charged, and only for `participate` writes on
 an operator that has a payment mode enabled. Everything else is free.
@@ -69,6 +73,40 @@ curl -s https://mcp.mnemonik.xyz/mcp \
   -H 'content-type: application/json' \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | jq '.result.tools[].name'
 ```
+
+---
+
+## Authentication over HTTP
+
+The HTTP endpoint uses OAuth 2.1 with PKCE (Proof Key for Code Exchange).
+Send the access token in each request as `Authorization: Bearer <token>`.
+The token is a JWT (JSON Web Token). These rules are available now.
+
+**Requests that work without a token:**
+
+- `initialize`, `ping` and `tools/list`
+- `prompts/list`, `prompts/get`, `resources/list` and `resources/read`
+- JSON-RPC notifications, for example `notifications/initialized`
+- `tools/call` for `mnemonic_recall` (it searches the public pool only)
+
+All other requests need a valid token.
+
+**Error responses.** The server sends HTTP 401 (Unauthorized) in two cases.
+Each 401 has a `WWW-Authenticate: Bearer` header with a `resource_metadata`
+parameter. For `/mcp`, this parameter points to
+`/.well-known/oauth-protected-resource/mcp`.
+
+| Case | HTTP status | `WWW-Authenticate` parameters |
+|---|---|---|
+| The request needs a token and has no token | 401 | `realm`, `resource_metadata` (no `error`) |
+| The request has a token that is expired or not valid | 401 | `realm`, `error="invalid_token"`, `error_description`, `resource_metadata` |
+
+The second case applies to all methods, also to the methods in the list above.
+An expired token on `initialize` gets a 401, so the client can refresh the token
+before it calls a tool. To use a method from the list without a token, send no
+`Authorization` header.
+
+The body of each 401 is a JSON-RPC error with code `-32001`.
 
 ---
 
