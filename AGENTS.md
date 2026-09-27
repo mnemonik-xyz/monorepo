@@ -11,12 +11,14 @@ Mnemonic Protocol is itself an *agent service*: an MCP server that any AI agent 
 # Pair with the webapp identity (open mnemonik.xyz/install, click Send to CLI):
 npx @mnemonik-xyz/cli init --ticket <uuid>
 npx @mnemonik-xyz/cli login
-npx @mnemonik-xyz/cli sign "first memory"            # private local write, public key only
-npx @mnemonik-xyz/cli sign "public claim" --anchor   # signed with your key, anchored on-chain
+npx @mnemonik-xyz/cli sign "first memory"            # local write: private (owner-only), not encrypted
+npx @mnemonik-xyz/cli sign "public claim" --anchor   # signed with your key, anchored on-chain (plain text on Arweave)
 
 # Or standalone (CLI-only): npx @mnemonik-xyz/cli init --standalone
 # The CLI renews an expired session automatically (refresh token); log in one time.
 ```
+
+"Private" means that this server returns the memory only to its owner. The server does not encrypt it yet; encryption is planned. An anchored (`--anchor`, `mode: "participate"`) write puts the content as plain text on Arweave, where anyone can read it.
 
 For Claude / Cursor / VS Code / Windsurf — install from [mnemonik.xyz/install](https://mnemonik.xyz/install) (one-click connector). HTTP MCP endpoint: `https://mcp.mnemonik.xyz/mcp`. OAuth 2.1 + PKCE.
 

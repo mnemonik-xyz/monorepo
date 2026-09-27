@@ -37,7 +37,7 @@ export default function Privacy() {
                 Privacy Policy
               </h1>
               <p className="font-mono text-[11px] uppercase tracking-[0.16em] text-text-muted">
-                Effective date: 2026-06-11
+                Effective date: 2026-09-27
               </p>
               <p className="text-[14px] leading-relaxed text-text-muted">
                 This policy describes what data the Mnemonic Protocol handles
@@ -190,9 +190,23 @@ export default function Privacy() {
               </Bullets>
               <P>
                 We do not sell, share, or otherwise disclose attestation content
-                to third parties. We do not use it to train models. The only
-                entity reading your private (local-mode) attestations is the MCP
-                server itself, when answering your own recall queries.
+                to third parties. We do not use it to train models.
+              </P>
+              <P>
+                Each attestation is private or public. Local-mode attestations
+                are always private. The server returns a private attestation
+                only to its owner: in your own recall results. Anonymous recall
+                and the public Ledger never show private attestations. The chat
+                assistant uses only the protocol documentation that the operator
+                loads; it never reads user attestations. Only attestations
+                marked public are shown to other people.
+              </P>
+              <P>
+                Private does not mean encrypted. The server stores the content
+                as plain text in its database. Encryption of stored and anchored
+                content is planned, not available now. Full-mode attestations
+                put the content as plain text on Arweave, private or public
+                (see section 6).
               </P>
             </Section>
 
@@ -202,8 +216,8 @@ export default function Privacy() {
                 machine. The private key never leaves the client process and is
                 not transmitted to mnemonik.xyz or any third party. The
                 corresponding public key is treated as a pseudonymous identifier
-                — it appears in attestation headers, in the on-chain anchor when
-                full mode is used, and in operational logs.
+                — it appears in attestation headers, in the signed bytes stored
+                on Arweave when full mode is used, and in operational logs.
               </P>
               <P>
                 Possession of the private key is the only way to issue
@@ -230,16 +244,18 @@ export default function Privacy() {
                 </li>
                 <li>
                   <strong className="text-text-primary">Solana</strong> records
-                  an SPL Memo transaction containing a content identifier and
-                  the public key of the signer. Solana transactions are public
-                  and not deletable.
+                  an SPL Memo transaction. The memo contains only the content
+                  hash, the Arweave transaction id, the embedding model name and
+                  a format version. It does not contain your public key. Solana
+                  transactions are public and not deletable.
                 </li>
               </Bullets>
               <P>
                 Operators of Mnemonic — including the maintainers of
                 mnemonik.xyz — cannot retract data committed to Arweave or
-                Solana. Use full mode only with content for which permanent
-                public disclosure is acceptable.
+                Solana. The Arweave bytes contain your content as plain text,
+                even for a private attestation. Use full mode only with content
+                for which permanent public disclosure is acceptable.
               </P>
             </Section>
 

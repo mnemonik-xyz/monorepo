@@ -176,6 +176,10 @@ pub trait AttestationStore {
     /// `owner_pubkey = Some(pk)`) pass `None` to see all their own rows;
     /// anonymous callers (with `owner_pubkey = None`) pass
     /// `Some(Visibility::Public)` to discover the cross-owner public pool.
+    ///
+    /// Private rows go only to their owner. The SQLite implementation
+    /// returns an empty result for `owner_pubkey = None` with any filter
+    /// other than `Some(Visibility::Public)`.
     fn search(
         &self,
         query_embedding: &[f32],

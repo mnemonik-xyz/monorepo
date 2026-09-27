@@ -87,7 +87,8 @@ The token is a JWT (JSON Web Token). These rules are available now.
 - `initialize`, `ping` and `tools/list`
 - `prompts/list`, `prompts/get`, `resources/list` and `resources/read`
 - JSON-RPC notifications, for example `notifications/initialized`
-- `tools/call` for `mnemonic_recall` (it searches the public pool only)
+- `tools/call` for `mnemonic_recall` (it searches public rows only; private
+  rows go only to their owner)
 
 All other requests need a valid token.
 
@@ -306,10 +307,25 @@ calls — recall is a local read.
 | Authenticated (JWT) | Your own corpus, across both visibilities and **both** `local` and `participate` writes |
 | Anonymous | The cross-owner **public** pool only (`visibility = 'public'`) |
 
-Private rows never surface to an anonymous caller, whoever owns them.
+**Private rows go only to their owner** (available now):
+
+- An anonymous caller gets only rows with `visibility = 'public'`, from all
+  owners. The server applies this filter in the SQL query.
+- An authenticated caller gets only rows that the caller owns. The result
+  includes private and public rows. It does not include rows of other owners.
+- A row with no `visibility` value (a legacy row) counts as private. The
+  database migration sets these rows to `private`.
+- A local write is always private. Only a `participate` write can be public.
 
 Returns the top-k rows ordered by cosine score, joined to their attestation
 metadata.
+
+> **Warning: private is not encrypted.** "Private" means that this server
+> shows the row only to its owner. The server stores the content as plain
+> text. A `participate` (anchored) write puts the content as plain text on
+> Arweave, whatever its `visibility`. Anyone can read Arweave. Encrypted
+> ("sealed") anchored writes are planned. Until they ship, do not anchor
+> content that must stay secret.
 
 ---
 
@@ -466,6 +482,10 @@ Rules worth knowing:
   silent receipt.
 - **Both modes coexist in one database** for a single owner, tagged by the
   `write_mode` column, and `recall` spans both. Mixing them is by design.
+- **A `participate` write puts plain text on Arweave today.** This is true for
+  `private` and `public` writes. Anyone can read Arweave. `private` only stops
+  this server from showing the row to other callers. Sealed (encrypted)
+  anchored writes are planned.
 
 Rationale and the full decision log: `work/modes-user-choice/user-spec.md` and
 `work/modes-user-choice/decisions.md`; whitepaper §5.7.

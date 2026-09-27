@@ -3,12 +3,13 @@
 //! `GET /blog/:slug`.
 //!
 //! These endpoints are unauthenticated JSON surfaces consumed by the webapp.
-//! Every stored memory is public (operator decision), so `/artifacts` returns
-//! ALL rows (including private-marked and NULL-owner rows) on both the
-//! plain-list and `?q=` search paths.
+//! Private means private (owner decision 2026-09-27): `/artifacts` returns
+//! only `visibility = 'public'` DB rows on the plain-list and `?q=` search
+//! paths, for every `source` filter. A chain-snapshot item that matches a
+//! private DB row is dropped; a chain-only item stays (public on Arweave).
 //!
 //! TDD anchors (tasks/8.md):
-//!   - `/artifacts` returns all rows and matches the wire shape.
+//!   - `/artifacts` returns public rows only and matches the wire shape.
 //!   - `/analytics` buckets/totals correct per range.
 //!   - `/blog` + `/blog/:slug` return expected JSON; unknown slug → 404.
 //!
@@ -104,18 +105,32 @@ fn seed_one_public_one_private(state: &Arc<McpState>, owner: &str) {
 }
 
 #[tokio::test]
-async fn artifacts_plain_list_returns_all_rows_with_shape() {
+async fn artifacts_plain_list_returns_public_rows_only_with_shape() {
     let state = mock_state();
     let owner = "seed-owner-pubkey";
     seed_one_public_one_private(&state, owner);
     let app = build_router(state);
 
+    // No source filter returns a private row.
+    for uri in [
+        "/artifacts?source=all",
+        "/artifacts?source=on_node",
+        "/artifacts?source=on_chain",
+    ] {
+        let (status, body) = get_json(&app, uri).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            !body.to_string().contains("private ledger row"),
+            "{uri}: private content leaked: {body}"
+        );
+    }
+
     let (status, body) = get_json(&app, "/artifacts").await;
     assert_eq!(status, StatusCode::OK);
 
     let artifacts = body["artifacts"].as_array().expect("artifacts array");
-    assert_eq!(artifacts.len(), 2, "all rows must surface: {body}");
-    assert_eq!(body["total"], 2);
+    assert_eq!(artifacts.len(), 1, "public rows only: {body}");
+    assert_eq!(body["total"], 1);
 
     // Wire shape (lib/ledger.ts Artifact, with `attestation_id` key per the
     // PublicArtifact contract). Locate the seeded public row regardless of order.
@@ -139,25 +154,32 @@ async fn artifacts_plain_list_returns_all_rows_with_shape() {
 }
 
 #[tokio::test]
-async fn artifacts_search_query_returns_all_rows() {
+async fn artifacts_search_query_returns_public_rows_only() {
     let state = mock_state();
     let owner = "seed-owner-pubkey";
     seed_one_public_one_private(&state, owner);
     let app = build_router(state);
 
-    // `?q=` routes through cosine search over the cross-owner pool (all rows).
+    // `?q=` routes through cosine search over the cross-owner public pool.
     let (status, body) = get_json(&app, "/artifacts?q=ledger&limit=10").await;
     assert_eq!(status, StatusCode::OK);
 
     let artifacts = body["artifacts"].as_array().expect("artifacts array");
-    assert_eq!(artifacts.len(), 2, "search must surface all rows: {body}");
     let ids: Vec<&str> = artifacts
         .iter()
         .map(|r| r["attestation_id"].as_str().unwrap_or(""))
         .collect();
-    assert!(ids.contains(&"public-id"));
-    assert!(ids.contains(&"private-id"));
+    assert_eq!(ids, vec!["public-id"], "public rows only: {body}");
     assert!(artifacts[0].get("relevance_score").is_none());
+
+    for source in ["all", "on_node", "on_chain"] {
+        let uri = format!("/artifacts?q=ledger&limit=10&source={source}");
+        let (_, body) = get_json(&app, &uri).await;
+        assert!(
+            !body.to_string().contains("private ledger row"),
+            "{uri}: private content leaked: {body}"
+        );
+    }
 }
 
 // ── Recall over chain-recovered anchored memories (#201) ─────────────────
@@ -278,11 +300,11 @@ async fn artifacts_recall_source_all_dedupes_db_and_chain() {
     assert_eq!(status, StatusCode::OK);
     let rows = rows_by_tx(&body);
     let txs: Vec<&str> = rows.iter().map(|(t, _)| t.as_str()).collect();
-    assert_eq!(rows.len(), 3, "{body}");
+    assert_eq!(rows.len(), 2, "{body}");
     assert_eq!(txs.iter().filter(|t| **t == "ArweavePubTx").count(), 1);
     assert!(!txs.contains(&"tx-hash-dup"), "same content_hash as DB row");
     assert!(txs.contains(&"tx-chain-only"));
-    assert!(txs.contains(&"local:priv-ar"));
+    assert!(!txs.contains(&"local:priv-ar"), "private DB row is not served");
 
     let db_row = body["artifacts"]
         .as_array()
@@ -299,6 +321,62 @@ async fn artifacts_recall_source_all_dedupes_db_and_chain() {
     let mut txs: Vec<String> = rows_by_tx(&body).into_iter().map(|(t, _)| t).collect();
     txs.sort();
     assert_eq!(txs, vec!["ArweavePubTx", "tx-chain-only"], "{body}");
+}
+
+/// A chain-snapshot item that matches a private DB row (by Arweave tx id or
+/// by content hash) is dropped from the plain listing and from `?q=`, for
+/// every source. A chain-only item with no DB row stays.
+#[tokio::test]
+async fn artifacts_chain_items_matching_private_rows_are_dropped() {
+    let state = state_with_chain(vec![
+        chain_item("ArweavePrivTx", "hash-x", "memory secret by tx", None),
+        chain_item("tx-by-hash", "hash-priv-anchored", "memory secret by hash", None),
+        chain_item("tx-chain-only", "hash-chain", "memory chain only", None),
+    ]);
+    {
+        let store = state.store.lock().expect("store");
+        store
+            .save_attestation(
+                "priv-anchored",
+                "memory secret db row",
+                "hash-priv-anchored",
+                &[],
+                "sol-priv",
+                "ArweavePrivTx",
+                "owner-a",
+                "owner-a",
+                "2026-06-12T00:00:00Z",
+                WriteMode::Participate,
+                Visibility::Private,
+                &[0.1f32; 8],
+            )
+            .expect("seed private anchored");
+    }
+    let app = build_router(state);
+
+    for uri in [
+        "/artifacts?limit=10",
+        "/artifacts?limit=10&source=all",
+        "/artifacts?limit=10&source=on_chain",
+        "/artifacts?limit=10&source=on_node",
+        "/artifacts?q=memory&limit=10",
+        "/artifacts?q=memory&limit=10&source=all",
+        "/artifacts?q=memory&limit=10&source=on_chain",
+        "/artifacts?q=memory&limit=10&source=on_node",
+    ] {
+        let (status, body) = get_json(&app, uri).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            !body.to_string().contains("secret"),
+            "{uri}: private content leaked: {body}"
+        );
+        let txs: Vec<String> = rows_by_tx(&body).into_iter().map(|(t, _)| t).collect();
+        if uri.contains("on_node") {
+            assert!(txs.is_empty(), "{uri}: {body}");
+        } else {
+            assert_eq!(txs, vec!["tx-chain-only"], "{uri}: {body}");
+        }
+    }
 }
 
 #[tokio::test]

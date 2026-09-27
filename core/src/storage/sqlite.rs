@@ -128,37 +128,59 @@ const SEARCH_SQL_FILTERED: &str = "SELECT a.attestation_id, a.content, a.content
      WHERE a.owner_pubkey = ? AND a.visibility = ?";
 
 /// SQL backing `AttestationStore::search` for the anonymous public-pool path
-/// (`owner_pubkey = None`). Every stored memory is public (operator decision —
-/// see the privacy note below), so this returns ALL rows regardless of the
-/// `visibility` column or `owner_pubkey` (including legacy NULL-owner rows). It
-/// carries no bound predicate; the `visibility_filter` argument is accepted for
-/// API compatibility but intentionally ignored on this path.
+/// (`owner_pubkey = None`). Returns rows from EVERY owner, but only rows whose
+/// `visibility` equals the bound parameter. The only caller binds
+/// `Visibility::Public`, so private rows never reach an anonymous caller.
+/// Legacy rows with a NULL or empty `visibility` are backfilled to `'private'`
+/// by `migrate_visibility_column`, and a NULL never equals the bound value, so
+/// they also stay out of the pool (privacy-by-default).
 const SEARCH_SQL_PUBLIC_POOL: &str = "SELECT a.attestation_id, a.content, a.content_hash, a.tags,
             a.solana_tx, a.arweave_tx, a.created_at, a.write_mode,
             a.visibility, ae.embedding, a.signer_pubkey, COALESCE(a.owner_pubkey, '')
      FROM attestations a
-     JOIN attestation_embeddings ae ON a.attestation_id = ae.attestation_id";
+     JOIN attestation_embeddings ae ON a.attestation_id = ae.attestation_id
+     WHERE a.visibility = ?1";
+
+/// SQL backing `SqliteStore::search_owner_tagged` — owner-scoped cosine search
+/// limited to rows whose JSON `tags` array contains one exact tag. The caller
+/// binds the owner and a `%"<tag>"%` LIKE pattern. Used by the public `/chat`
+/// endpoint so it reads only the seeded `protocol-knowledge` corpus, never
+/// other rows that the operator key owns.
+const SEARCH_SQL_OWNER_TAGGED: &str = "SELECT a.attestation_id, a.content, a.content_hash, a.tags,
+            a.solana_tx, a.arweave_tx, a.created_at, a.write_mode,
+            a.visibility, ae.embedding, a.signer_pubkey, COALESCE(a.owner_pubkey, '')
+     FROM attestations a
+     JOIN attestation_embeddings ae ON a.attestation_id = ae.attestation_id
+     WHERE a.owner_pubkey = ?1 AND a.tags LIKE ?2 ESCAPE '\\'";
 
 /// SQL backing `SqliteStore::list_public_artifacts` — the non-search Ledger
-/// listing (`GET /artifacts`). Mirrors `SEARCH_SQL_PUBLIC_POOL`'s "all rows"
-/// semantics (every memory is public) but drops the embeddings join (a
-/// chronological list needs no cosine score) and orders newest-first with a
-/// bound `LIMIT`. No owner/visibility predicate — legacy NULL-owner rows are
-/// included too.
+/// listing (`GET /artifacts`). Cross-owner, newest-first, bound `LIMIT`. Only
+/// rows whose `visibility` equals the bound parameter (always
+/// `Visibility::Public`) are returned; private and legacy NULL rows are not.
 const LIST_PUBLIC_ARTIFACTS_SQL: &str =
     "SELECT a.attestation_id, a.content, a.content_hash, a.tags,
             a.solana_tx, a.arweave_tx, a.created_at, a.write_mode
      FROM attestations a
+     WHERE a.visibility = ?1
      ORDER BY a.created_at DESC
-     LIMIT ?";
+     LIMIT ?2";
 
+/// Same as `LIST_PUBLIC_ARTIFACTS_SQL`, restricted to one `write_mode`.
 const LIST_PUBLIC_ARTIFACTS_BY_MODE_SQL: &str =
     "SELECT a.attestation_id, a.content, a.content_hash, a.tags,
             a.solana_tx, a.arweave_tx, a.created_at, a.write_mode
      FROM attestations a
-     WHERE a.write_mode = ?1
+     WHERE a.write_mode = ?1 AND a.visibility = ?2
      ORDER BY a.created_at DESC
-     LIMIT ?2";
+     LIMIT ?3";
+
+/// SQL backing `SqliteStore::non_public_anchor_keys`. Returns the Arweave tx
+/// id and content hash of every row that is NOT public. `IS NOT` is NULL-safe,
+/// so a legacy NULL `visibility` counts as non-public. The caller binds
+/// `Visibility::Public`.
+const NON_PUBLIC_ANCHOR_KEYS_SQL: &str = "SELECT arweave_tx, content_hash
+     FROM attestations
+     WHERE visibility IS NOT ?1";
 
 /// SQL backing `SqliteStore::attestation_timeline` — daily attestation counts
 /// split on-node (`write_mode = 'local'`) vs on-chain (`write_mode =
@@ -221,6 +243,25 @@ pub struct PublicArtifact {
     pub arweave_tx: String,
     pub created_at: String,
     pub write_mode: WriteMode,
+}
+
+/// Keys of every non-public row, returned by
+/// `SqliteStore::non_public_anchor_keys`. `GET /artifacts` drops any
+/// chain-snapshot item whose Arweave tx id or content hash is in one of these
+/// sets.
+#[derive(Debug, Clone, Default)]
+pub struct NonPublicAnchorKeys {
+    pub arweave_txs: std::collections::HashSet<String>,
+    pub content_hashes: std::collections::HashSet<String>,
+}
+
+impl NonPublicAnchorKeys {
+    /// True when the Arweave tx id or the content hash belongs to a
+    /// non-public row.
+    pub fn matches(&self, arweave_tx: &str, content_hash: Option<&str>) -> bool {
+        self.arweave_txs.contains(arweave_tx)
+            || content_hash.is_some_and(|h| self.content_hashes.contains(h))
+    }
 }
 
 /// One day's attestation counts for the Analytics timeline, split by
@@ -757,15 +798,16 @@ impl SqliteStore {
         }
     }
 
-    /// List attestations newest-first for the Ledger page (`GET /artifacts`).
-    /// Every stored memory is public (operator decision), so this returns ALL
-    /// rows regardless of the `visibility` column or `owner_pubkey` — including
-    /// legacy NULL-owner rows. `limit` caps the result; an empty table yields an
-    /// empty vec. Content search (`?q=`) is served by the cosine `search` path
+    /// List public attestations newest-first for the Ledger page
+    /// (`GET /artifacts`). Cross-owner, but only `visibility = 'public'` rows:
+    /// private rows and legacy rows with a NULL or empty `visibility` are never
+    /// returned (owner decision 2026-09-27: private rows go only to their
+    /// owner). `limit` caps the result; an empty table yields an empty vec.
+    /// Content search (`?q=`) is served by the cosine `search` path
     /// (anonymous public-pool branch), not by this chronological list.
     pub fn list_public_artifacts(&self, limit: usize) -> anyhow::Result<Vec<PublicArtifact>> {
         let mut stmt = self.conn.prepare(LIST_PUBLIC_ARTIFACTS_SQL)?;
-        let rows = stmt.query_map(params![limit as i64], |row| {
+        let rows = stmt.query_map(params![Visibility::Public, limit as i64], |row| {
             let tags_str: String = row.get(3)?;
             Ok(PublicArtifact {
                 attestation_id: row.get(0)?,
@@ -785,16 +827,17 @@ impl SqliteStore {
         Ok(out)
     }
 
-    /// List Ledger rows for one provenance mode. This powers source-aware
-    /// pagination so a large on-node history cannot crowd every anchored row
-    /// out of the first page (and vice versa).
+    /// List public Ledger rows for one provenance mode. This powers
+    /// source-aware pagination so a large on-node history cannot crowd every
+    /// anchored row out of the first page (and vice versa). Same visibility
+    /// rule as `list_public_artifacts`: only `visibility = 'public'` rows.
     pub fn list_public_artifacts_by_mode(
         &self,
         mode: WriteMode,
         limit: usize,
     ) -> anyhow::Result<Vec<PublicArtifact>> {
         let mut stmt = self.conn.prepare(LIST_PUBLIC_ARTIFACTS_BY_MODE_SQL)?;
-        let rows = stmt.query_map(params![mode, limit as i64], |row| {
+        let rows = stmt.query_map(params![mode, Visibility::Public, limit as i64], |row| {
             let tags_str: String = row.get(3)?;
             Ok(PublicArtifact {
                 attestation_id: row.get(0)?,
@@ -812,6 +855,65 @@ impl SqliteStore {
             out.push(row?);
         }
         Ok(out)
+    }
+
+    /// Arweave tx ids and content hashes of every row that is NOT public
+    /// (private, or a legacy NULL `visibility`). `GET /artifacts` uses this
+    /// to drop chain-snapshot items that match a private DB row, so the API
+    /// never presents a row that its owner marked private. Empty strings are
+    /// skipped.
+    pub fn non_public_anchor_keys(&self) -> anyhow::Result<NonPublicAnchorKeys> {
+        let mut stmt = self.conn.prepare(NON_PUBLIC_ANCHOR_KEYS_SQL)?;
+        let rows = stmt.query_map(params![Visibility::Public], |row| {
+            Ok((
+                row.get::<_, Option<String>>(0)?,
+                row.get::<_, Option<String>>(1)?,
+            ))
+        })?;
+        let mut keys = NonPublicAnchorKeys::default();
+        for row in rows {
+            let (arweave_tx, content_hash) = row?;
+            if let Some(tx) = arweave_tx.filter(|s| !s.is_empty()) {
+                keys.arweave_txs.insert(tx);
+            }
+            if let Some(h) = content_hash.filter(|s| !s.is_empty()) {
+                keys.content_hashes.insert(h);
+            }
+        }
+        Ok(keys)
+    }
+
+    /// Owner-scoped cosine search limited to rows that carry `tag` exactly
+    /// (JSON `tags` array element). Returns rows of any visibility, because
+    /// the owner scope is the tenant boundary. The public `/chat` endpoint
+    /// calls this with the operator key and `"protocol-knowledge"`, so chat
+    /// context comes only from the seeded knowledge corpus.
+    pub fn search_owner_tagged(
+        &self,
+        query_embedding: &[f32],
+        owner_pubkey: &str,
+        tag: &str,
+        limit: usize,
+    ) -> anyhow::Result<Vec<SearchResult>> {
+        // Match the tag as one JSON string element: serialize it the way the
+        // `tags` column stores it, then escape the LIKE wildcards so the tag
+        // matches literally (`ESCAPE '\'` in the SQL).
+        let json_tag = serde_json::to_string(tag)?;
+        let mut pattern = String::with_capacity(json_tag.len() + 2);
+        pattern.push('%');
+        for c in json_tag.chars() {
+            if matches!(c, '%' | '_' | '\\') {
+                pattern.push('\\');
+            }
+            pattern.push(c);
+        }
+        pattern.push('%');
+        let mut stmt = self.conn.prepare(SEARCH_SQL_OWNER_TAGGED)?;
+        let scorer = CosineScorer::new(query_embedding);
+        let rows = stmt.query_map(params![owner_pubkey, pattern], |row| scorer.map_row(row))?;
+        let mut results: Vec<SearchResult> = rows.filter_map(|r| r.ok()).collect();
+        sort_and_truncate(&mut results, limit);
+        Ok(results)
     }
 
     /// Daily attestation counts split on-node vs on-chain by `write_mode`, for
@@ -1162,8 +1264,10 @@ impl AttestationStore for SqliteStore {
         visibility_filter: Option<Visibility>,
         limit: usize,
     ) -> anyhow::Result<Vec<SearchResult>> {
-        // Mandatory ownership filter (Decision 9). No carve-out; legacy rows
-        // with NULL `owner_pubkey` will not match any caller.
+        // Ownership filter (Decision 9) on every owner-scoped path. No
+        // carve-out; legacy rows with NULL `owner_pubkey` match no owner.
+        // They reach the anonymous pool only if `visibility = 'public'`, and
+        // the migration backfills legacy NULL visibility to `'private'`.
         //
         // Optional visibility filter (Decision 5): the anonymous-recall path
         // passes `Some(Visibility::Public)`; authenticated callers pass
@@ -1176,52 +1280,21 @@ impl AttestationStore for SqliteStore {
         // having to mentally fold a `format!` call (security-auditor round 1
         // SEC-T3-01, code-reviewer round 1 CR-T3-2).
 
-        let q_norm = l2_norm(query_embedding);
-        let q_normalized: Vec<f32> = if q_norm > 0.0 {
-            query_embedding.iter().map(|x| x / q_norm).collect()
-        } else {
-            query_embedding.to_vec()
-        };
+        let scorer = CosineScorer::new(query_embedding);
+        let row_mapper = |row: &rusqlite::Row<'_>| scorer.map_row(row);
 
-        let row_mapper = |row: &rusqlite::Row<'_>| -> rusqlite::Result<SearchResult> {
-            let emb_blob: Vec<u8> = row.get(9)?;
-            let emb = bytes_to_floats(&emb_blob);
-            let e_norm = l2_norm(&emb);
-            let score = if e_norm > 0.0 {
-                q_normalized
-                    .iter()
-                    .zip(emb.iter())
-                    .map(|(a, b)| a * b / e_norm)
-                    .sum::<f32>()
-            } else {
-                0.0
-            };
-            let tags_str: String = row.get(3)?;
-            Ok(SearchResult {
-                attestation_id: row.get(0)?,
-                content: row.get(1)?,
-                content_hash: row.get(2)?,
-                tags: serde_json::from_str(&tags_str).unwrap_or_default(),
-                solana_tx: row.get(4)?,
-                arweave_tx: row.get(5)?,
-                created_at: row.get(6)?,
-                write_mode: row.get::<_, WriteMode>(7)?,
-                visibility: row.get::<_, Visibility>(8)?,
-                relevance_score: score,
-                signer_pubkey: row.get(10)?,
-                owner_pubkey: row.get(11)?,
-            })
-        };
-
-        // Three search shapes per Decision 5 + SAR1-M1 (agent-native-distribution):
-        //   (Some(owner), Some(v))  → owner-scoped + visibility-filtered
-        //   (Some(owner), None)     → owner-scoped (authenticated, full corpus)
-        //   (None,        Some(v))  → cross-owner + visibility-filtered (anonymous-public)
-        //   (None,        None)     → DISALLOWED — would expose all rows; the
-        //                             trait doc requires `None` owner to be
-        //                             paired with `Some(visibility)`. Defensive
-        //                             early-return keeps the storage layer from
-        //                             silently leaking on a future caller bug.
+        // Search shapes per Decision 5 + SAR1-M1 (agent-native-distribution)
+        // and the owner decision of 2026-09-27 ("private means private"):
+        //   (Some(owner), Some(v))      → owner-scoped + visibility-filtered
+        //   (Some(owner), None)         → owner-scoped (authenticated, full corpus)
+        //   (None,        Some(Public)) → cross-owner public pool (anonymous);
+        //                                 `visibility = 'public'` is a bound
+        //                                 SQL predicate
+        //   (None,        Some(Private)) and
+        //   (None,        None)         → DISALLOWED. Either would expose other
+        //                                 owners' private rows. Defensive empty
+        //                                 result keeps the storage layer from
+        //                                 leaking on a future caller bug.
         let mut results: Vec<SearchResult> = match (owner_pubkey, visibility_filter) {
             (Some(owner), Some(v)) => {
                 let mut stmt = self.conn.prepare(SEARCH_SQL_FILTERED)?;
@@ -1233,20 +1306,76 @@ impl AttestationStore for SqliteStore {
                 let rows = stmt.query_map(params![owner], row_mapper)?;
                 rows.filter_map(|r| r.ok()).collect()
             }
-            (None, _) => {
-                // Anonymous public-pool path. Every memory is public, so this
-                // returns ALL rows; the `visibility_filter` argument is ignored
-                // here (kept in the signature for API compatibility).
+            (None, Some(Visibility::Public)) => {
                 let mut stmt = self.conn.prepare(SEARCH_SQL_PUBLIC_POOL)?;
-                let rows = stmt.query_map([], row_mapper)?;
+                let rows = stmt.query_map(params![Visibility::Public], row_mapper)?;
                 rows.filter_map(|r| r.ok()).collect()
             }
+            (None, Some(Visibility::Private)) | (None, None) => Vec::new(),
         };
 
-        results.sort_by(|a, b| b.relevance_score.partial_cmp(&a.relevance_score).unwrap());
-        results.truncate(limit);
+        sort_and_truncate(&mut results, limit);
         Ok(results)
     }
+}
+
+/// Cosine scorer shared by every search query. Normalizes the query vector
+/// once and maps one SQL row (the column layout of the `SEARCH_SQL_*`
+/// constants) to a scored `SearchResult`.
+struct CosineScorer {
+    q_normalized: Vec<f32>,
+}
+
+impl CosineScorer {
+    fn new(query_embedding: &[f32]) -> Self {
+        let q_norm = l2_norm(query_embedding);
+        let q_normalized = if q_norm > 0.0 {
+            query_embedding.iter().map(|x| x / q_norm).collect()
+        } else {
+            query_embedding.to_vec()
+        };
+        Self { q_normalized }
+    }
+
+    fn map_row(&self, row: &rusqlite::Row<'_>) -> rusqlite::Result<SearchResult> {
+        let emb_blob: Vec<u8> = row.get(9)?;
+        let emb = bytes_to_floats(&emb_blob);
+        let e_norm = l2_norm(&emb);
+        let score = if e_norm > 0.0 {
+            self.q_normalized
+                .iter()
+                .zip(emb.iter())
+                .map(|(a, b)| a * b / e_norm)
+                .sum::<f32>()
+        } else {
+            0.0
+        };
+        let tags_str: String = row.get(3)?;
+        Ok(SearchResult {
+            attestation_id: row.get(0)?,
+            content: row.get(1)?,
+            content_hash: row.get(2)?,
+            tags: serde_json::from_str(&tags_str).unwrap_or_default(),
+            solana_tx: row.get(4)?,
+            arweave_tx: row.get(5)?,
+            created_at: row.get(6)?,
+            write_mode: row.get::<_, WriteMode>(7)?,
+            visibility: row.get::<_, Visibility>(8)?,
+            relevance_score: score,
+            signer_pubkey: row.get(10)?,
+            owner_pubkey: row.get(11)?,
+        })
+    }
+}
+
+/// Sort search hits by score, best first, and keep the top `limit`.
+fn sort_and_truncate(results: &mut Vec<SearchResult>, limit: usize) {
+    results.sort_by(|a, b| {
+        b.relevance_score
+            .partial_cmp(&a.relevance_score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    results.truncate(limit);
 }
 
 impl LineageStore for SqliteStore {
@@ -1978,9 +2107,9 @@ mod tests {
     }
 
     #[test]
-    fn list_public_artifacts_returns_all_rows() {
-        // Every memory is public — the Ledger list surfaces ALL rows regardless
-        // of the visibility column, newest-first.
+    fn list_public_artifacts_returns_public_rows_only() {
+        // Private means private (owner decision 2026-09-27): the Ledger list
+        // surfaces only `visibility = 'public'` rows, newest-first.
         let store = SqliteStore::in_memory().unwrap();
         seed_row(
             &store,
@@ -2011,30 +2140,198 @@ mod tests {
         );
 
         let rows = store.list_public_artifacts(10).unwrap();
-        assert_eq!(
-            rows.len(),
-            3,
-            "all rows must be listed (every memory is public)"
-        );
         let ids: Vec<&str> = rows.iter().map(|r| r.attestation_id.as_str()).collect();
-        assert!(ids.contains(&"pub-1"));
-        assert!(ids.contains(&"pub-2"));
-        assert!(ids.contains(&"priv-1"), "private-marked rows are shown too");
-
-        // Newest-first ordering by created_at.
-        assert_eq!(rows[0].attestation_id, "pub-2");
-        assert_eq!(rows[1].attestation_id, "priv-1");
-        assert_eq!(rows[2].attestation_id, "pub-1");
+        assert_eq!(ids, vec!["pub-2", "pub-1"], "public rows only, newest first");
 
         // Limit is honored.
         let limited = store.list_public_artifacts(1).unwrap();
         assert_eq!(limited.len(), 1);
         assert_eq!(limited[0].attestation_id, "pub-2");
+
+        // The by-mode listing applies the same visibility rule.
+        let local = store
+            .list_public_artifacts_by_mode(WriteMode::Local, 10)
+            .unwrap();
+        assert!(local.is_empty(), "private local row must not be listed");
+    }
+
+    #[test]
+    fn legacy_null_visibility_is_treated_as_private() {
+        // A row whose `visibility` is NULL or empty (hand-edited or
+        // re-imported legacy DB) is normalized to 'private' by the migration
+        // and then never reaches a public read path.
+        let store = SqliteStore::in_memory().unwrap();
+        seed_row(
+            &store,
+            "legacy",
+            "owner-a",
+            "s1",
+            "2026-06-01T00:00:00Z",
+            WriteMode::Local,
+            Visibility::Public,
+        );
+        store
+            .conn
+            .execute(
+                "UPDATE attestations SET visibility = '' WHERE attestation_id = 'legacy'",
+                [],
+            )
+            .unwrap();
+        super::migrate_visibility_column(store.conn()).unwrap();
+
+        assert!(store.list_public_artifacts(10).unwrap().is_empty());
+        assert!(store
+            .list_public_artifacts_by_mode(WriteMode::Local, 10)
+            .unwrap()
+            .is_empty());
+        assert!(store
+            .search(&[1.0, 0.0], None, Some(Visibility::Public), 10)
+            .unwrap()
+            .is_empty());
+        // The owner still sees the row.
+        let own = store
+            .search(&[1.0, 0.0], Some("owner-a"), None, 10)
+            .unwrap();
+        assert_eq!(own.len(), 1);
+        assert_eq!(own[0].visibility, Visibility::Private);
+        // And its keys are reported as non-public.
+        let keys = store.non_public_anchor_keys().unwrap();
+        assert!(keys.matches("ar", None));
+    }
+
+    #[test]
+    fn anonymous_search_returns_public_rows_only() {
+        let store = SqliteStore::in_memory().unwrap();
+        seed_row(
+            &store,
+            "pub-a",
+            "owner-a",
+            "s1",
+            "2026-06-01T00:00:00Z",
+            WriteMode::Local,
+            Visibility::Public,
+        );
+        seed_row(
+            &store,
+            "priv-a",
+            "owner-a",
+            "s2",
+            "2026-06-02T00:00:00Z",
+            WriteMode::Participate,
+            Visibility::Private,
+        );
+        seed_row(
+            &store,
+            "pub-b",
+            "owner-b",
+            "s3",
+            "2026-06-03T00:00:00Z",
+            WriteMode::Participate,
+            Visibility::Public,
+        );
+
+        let pool = store
+            .search(&[1.0, 0.0], None, Some(Visibility::Public), 10)
+            .unwrap();
+        let mut ids: Vec<&str> = pool.iter().map(|r| r.attestation_id.as_str()).collect();
+        ids.sort_unstable();
+        assert_eq!(ids, vec!["pub-a", "pub-b"]);
+        assert!(pool.iter().all(|r| r.visibility == Visibility::Public));
+
+        // Cross-owner shapes that could expose private rows return nothing.
+        assert!(store
+            .search(&[1.0, 0.0], None, Some(Visibility::Private), 10)
+            .unwrap()
+            .is_empty());
+        assert!(store.search(&[1.0, 0.0], None, None, 10).unwrap().is_empty());
+
+        // The owner still sees own private rows.
+        let own = store
+            .search(&[1.0, 0.0], Some("owner-a"), None, 10)
+            .unwrap();
+        let mut own_ids: Vec<&str> = own.iter().map(|r| r.attestation_id.as_str()).collect();
+        own_ids.sort_unstable();
+        assert_eq!(own_ids, vec!["priv-a", "pub-a"]);
+    }
+
+    #[test]
+    fn non_public_anchor_keys_lists_private_rows_only() {
+        let store = SqliteStore::in_memory().unwrap();
+        store
+            .save_attestation(
+                "priv",
+                "secret",
+                "hash-priv",
+                &[],
+                "sol-priv",
+                "ar-priv",
+                "signer",
+                "owner-a",
+                "2026-06-01T00:00:00Z",
+                WriteMode::Participate,
+                Visibility::Private,
+                &[1.0, 0.0],
+            )
+            .unwrap();
+        store
+            .save_attestation(
+                "pub",
+                "open",
+                "hash-pub",
+                &[],
+                "sol-pub",
+                "ar-pub",
+                "signer",
+                "owner-a",
+                "2026-06-01T00:00:01Z",
+                WriteMode::Participate,
+                Visibility::Public,
+                &[1.0, 0.0],
+            )
+            .unwrap();
+        let keys = store.non_public_anchor_keys().unwrap();
+        assert!(keys.matches("ar-priv", None));
+        assert!(keys.matches("other", Some("hash-priv")));
+        assert!(!keys.matches("ar-pub", Some("hash-pub")));
+    }
+
+    #[test]
+    fn search_owner_tagged_matches_exact_tag_only() {
+        let store = SqliteStore::in_memory().unwrap();
+        let save = |id: &str, owner: &str, tags: &[String]| {
+            store
+                .save_attestation(
+                    id,
+                    "c",
+                    id,
+                    tags,
+                    "sol",
+                    "ar",
+                    "signer",
+                    owner,
+                    "2026-06-01T00:00:00Z",
+                    WriteMode::Local,
+                    Visibility::Private,
+                    &[1.0, 0.0],
+                )
+                .unwrap();
+        };
+        save("kb", "op", &["protocol-knowledge".into(), "a.md".into()]);
+        save("note", "op", &["personal".into()]);
+        save("near", "op", &["protocol-knowledge-x".into()]);
+        save("other-owner", "someone", &["protocol-knowledge".into()]);
+
+        let hits = store
+            .search_owner_tagged(&[1.0, 0.0], "op", "protocol-knowledge", 10)
+            .unwrap();
+        let ids: Vec<&str> = hits.iter().map(|r| r.attestation_id.as_str()).collect();
+        assert_eq!(ids, vec!["kb"]);
     }
 
     #[test]
     fn list_public_artifacts_includes_legacy_null_owner() {
-        // Legacy NULL-owner rows are surfaced too (no owner predicate).
+        // A NULL-owner row that is explicitly public is listed: the public
+        // list has no owner predicate, only the visibility predicate.
         let store = SqliteStore::in_memory().unwrap();
         seed_row(
             &store,
