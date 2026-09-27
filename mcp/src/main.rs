@@ -315,7 +315,17 @@ async fn main() -> anyhow::Result<()> {
 
         let solana = SolanaClient::new(&cfg.solana_rpc_url);
         let gateway = ArweaveClient::new(&cfg.arweave_url);
-        let gql = GraphQlClient::new(&cfg.chain_stats_gateway_url);
+        // NOTE the two distinct config fields, which are easy to confuse:
+        //   `chain_stats_graphql_url` — the GraphQL INDEX endpoint
+        //                               (`https://arweave.net/graphql`).
+        //   `chain_stats_gateway_url` — the PAYLOAD-FETCH gateway
+        //                               (`https://gateway.irys.xyz`), because
+        //                               arweave.net serves HTML placeholders for
+        //                               Irys-bundled items.
+        // Passing the gateway URL here silently enumerates nothing: the payload
+        // host answers a GraphQL POST with an empty body, and an empty index is
+        // indistinguishable from a failed query.
+        let gql = GraphQlClient::new(&cfg.chain_stats_graphql_url);
         // A gateway owner filter is an optimisation, not a requirement: the memo
         // history already enumerates the historical items, and `list_anchored`
         // treats an empty address list as "tag-only". So a derivation failure
