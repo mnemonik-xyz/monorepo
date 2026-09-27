@@ -223,7 +223,7 @@ describe("ensure rejects corrupted keychain entry (Decision 17 case c)", () => {
 // ---------------------------------------------------------------------------
 
 describe("ensure reads existing stub (no side effects)", () => {
-  it("verifies keychain entry and returns without creating or migrating", async () => {
+  it("returns the stub pubkey WITHOUT reading the OS keychain", async () => {
     const dir = tmpDir();
     const osStore = new MemoryKeyStore();
     const entry = fakeEntry();
@@ -234,7 +234,19 @@ describe("ensure reads existing stub (no side effects)", () => {
     // Write stub file.
     await writeStubFile(stores.identityPath, entry.pubkey_base58);
 
+    // Any keychain access is a failure (0.3.0 key-access rule).
+    const touched: string[] = [];
+    osStore.get = async () => {
+      touched.push("get");
+      return null;
+    };
+    osStore.available = async () => {
+      touched.push("available");
+      return true;
+    };
+
     const result = await ensureWithStores(stores);
+    expect(touched).toEqual([]);
 
     expect(result.created).toBe(false);
     expect(result.migrated).toBe(false);
@@ -249,11 +261,11 @@ describe("ensure reads existing stub (no side effects)", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Scenario 3 — LEGACY → MIGRATE to OS keychain
+// Scenario 3 — LEGACY → KEEP (no keychain migration since CLI 0.3.0)
 // ---------------------------------------------------------------------------
 
-describe("ensure migrates legacy file to OS keychain", () => {
-  it("moves secret to keychain and rewrites file as stub", async () => {
+describe("ensure keeps a legacy file-backed identity", () => {
+  it("does not migrate the secret to the OS keychain", async () => {
     const dir = tmpDir();
     const osStore = new MemoryKeyStore(); // starts empty
     const entry = fakeEntry();
@@ -261,23 +273,21 @@ describe("ensure migrates legacy file to OS keychain", () => {
     const stores = await makeStores(dir, osStore);
     // Write legacy file.
     await writeLegacyFile(stores.identityPath, entry);
+    const before = await fs.readFile(stores.identityPath, "utf8");
 
     const result = await ensureWithStores(stores);
 
     expect(result.created).toBe(false);
-    expect(result.migrated).toBe(true);
-    expect(result.storage).toBe("os-keychain");
+    expect(result.migrated).toBe(false);
+    expect(result.storage).toBe("file");
     expect(result.pubkey_base58).toBe(entry.pubkey_base58);
 
-    // Keychain should now hold the entry.
-    const osEntry = await osStore.get();
-    expect(osEntry).not.toBeNull();
+    // Keychain stays empty.
+    expect(await osStore.get()).toBeNull();
 
-    // File should now be a stub (no secret).
-    const raw = await fs.readFile(stores.identityPath, "utf8");
-    const parsed = JSON.parse(raw) as Record<string, unknown>;
-    expect("keychain_ref" in parsed).toBe(true);
-    expect("secret" in parsed).toBe(false);
+    // File is unchanged (still holds the secret).
+    const after = await fs.readFile(stores.identityPath, "utf8");
+    expect(after).toBe(before);
   });
 });
 
@@ -370,8 +380,27 @@ describe("shouldSkipEnsure", () => {
     );
   });
 
-  it("returns false for a regular command", () => {
-    expect(shouldSkipEnsure(["node", "mnemonic", "sign", "x"])).toBe(false);
+  it("returns false for a command that needs the private key", () => {
+    expect(shouldSkipEnsure(["node", "mnemonic", "sign", "x", "--anchor"])).toBe(
+      false,
+    );
+    expect(
+      shouldSkipEnsure(["node", "mnemonic", "sign", "--participate", "x"]),
+    ).toBe(false);
+    expect(shouldSkipEnsure(["node", "mnemonic", "login"])).toBe(false);
+    expect(shouldSkipEnsure(["node", "mnemonic", "prove"])).toBe(false);
+  });
+
+  it("returns true for pubkey-only commands (no identity creation)", () => {
+    for (const argv of [
+      ["node", "mnemonic", "recall", "q"],
+      ["node", "mnemonic", "verify", "att"],
+      ["node", "mnemonic", "whoami", "--with-count"],
+      ["node", "mnemonic", "sign", "x"],
+      ["node", "mnemonic", "--json", "recall", "q"],
+    ]) {
+      expect(shouldSkipEnsure(argv)).toBe(true);
+    }
   });
 
   it("returns false for identity export (not status)", () => {

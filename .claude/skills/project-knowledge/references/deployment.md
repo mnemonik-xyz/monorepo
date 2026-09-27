@@ -55,6 +55,8 @@ Variables for `mcp/` (set by user):
 | `MCP_TRANSPORT` | `http` | `stdio` or `http` |
 | `MCP_HTTP_PORT` | `3000` | HTTP transport port |
 | `PAYMENT_MODE` | `none` | `none`, `balance`, `x402`, `both` |
+| `MNEMONIC_FREE_ANCHORS_PER_DAY` | `10` | Free `participate` writes per agent key per UTC day before x402 payment (HTTP + `PAYMENT_MODE=x402` only). `0` disables |
+| `MNEMONIC_FREE_ANCHORS_GLOBAL_PER_DAY` | `1000` | Free `participate` writes per UTC day across all keys (bounds operator chain spend). `0` = no free writes |
 | `MCP_JWT_SECRET` | — | HS256 secret for OAuth Bearer JWTs (required in hosted mode; ≥32 random bytes — `openssl rand -base64 32`) |
 | `MCP_JWT_TTL_SECS` | `3600` | Optional access-token TTL override. Clamped to `[60, 604800]` (1 min - 7 days) at startup; out-of-range, empty, or unparseable values WARN-log and fall back to the clamp / default. Set to `60` only for the local Task 10 R1 empirical gate behind a temporary HTTPS tunnel; leave unset in prod (`refresh-token-rotation` Decision 12). |
 | `MCP_REFRESH_SALT` | — | **Mandatory** in hosted mode. Per-deploy salt for `blake3(salt \|\| plaintext)` at-rest hashing of refresh tokens (`refresh-token-rotation` Decision 2). Generate via `openssl rand -base64 32` — standard padded base64 with `+/=` charset, NOT url-safe-no-pad. Boot ABORTS if the env var is absent OR if the decoded byte length is < 32 (closes the 32-ASCII-chars / ~5-bytes-of-entropy footgun). Rotating the salt invalidates EVERY live refresh token because the at-rest hash function changes; treat with the same operational discipline as `MCP_JWT_SECRET`. |

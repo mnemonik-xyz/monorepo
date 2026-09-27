@@ -17,8 +17,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{
-    api::BootstrapTickets, llm::LlmClient, payment, pending::PendingBundles,
-    pricing::PricingEngine, tools,
+    api::BootstrapTickets,
+    llm::LlmClient,
+    payment,
+    pending::PendingBundles,
+    pricing::{PricingEngine, PricingStatus},
+    tools,
 };
 use mnemonic_core::arweave::ArweaveClient;
 use mnemonic_core::compress::EmbeddingCompressor;
@@ -598,11 +602,12 @@ pub fn hosted_unavailable(last_error: &str, retry_after_ms: u64) -> JsonRpcError
     }
 }
 
-/// `whoami` discoverability envelope — derived once at process start from
-/// `Config` (storage_mode + payment_mode + pricing engine snapshot) and
-/// returned through `mnemonic_whoami` so clients learn what the server can
-/// serve **before** they try to write. See user-spec §"Discoverability через
-/// whoami" and tech-spec Decision 3.
+/// `whoami` discoverability envelope. The static part (`supported_modes`,
+/// `default_mode`, `payment_methods`) is derived once at process start from
+/// `Config`; the price block is re-read from the live pricing engine on every
+/// `mnemonic_whoami` call (see `Envelope::with_live_pricing`, issue #165).
+/// Clients learn what the server can serve **before** they try to write. See
+/// user-spec §"Discoverability через whoami" and tech-spec Decision 3.
 #[derive(Debug, Clone, Serialize)]
 pub struct Envelope {
     /// Modes the server is willing to accept for `sign_memory.mode`. A pure
@@ -613,8 +618,8 @@ pub struct Envelope {
     /// for V1 (user-spec invariant — "default `local`").
     pub default_mode: &'static str,
     /// Price metadata for the `participate` mode. `None` on a local-only
-    /// server (the field renders as JSON `null`); `Some` with `amount_cents`
-    /// and `payment_methods` on any `full`-mode server.
+    /// server (the field renders as JSON `null`); `Some` with the price,
+    /// `pricing_status` and `payment_methods` on any `full`-mode server.
     pub participate_cost: Option<ParticipateCost>,
 }
 
@@ -626,14 +631,14 @@ impl Envelope {
         self.supported_modes.contains(&"participate")
     }
 
-    /// Derive the envelope from operator-side env-vars and the current
-    /// pricing snapshot. Pure — no I/O, no clock; safe to call at process
-    /// start AND inside tests.
+    /// Derive the envelope from operator-side env-vars and a price snapshot.
+    /// Pure — no I/O, no clock; safe to call at process start AND inside
+    /// tests.
     ///
     /// `storage_mode` resolves `supported_modes`. `payment_mode` resolves
-    /// `participate_cost.payment_methods`. `price_micro_usdc` is divided by
-    /// `10_000` to produce USD cents — the pricing engine quotes in
-    /// micro-USDC (1e-6 USD).
+    /// `participate_cost.payment_methods` and whether pricing is `disabled`.
+    /// A charging deploy starts as `fallback`: the snapshot is the floor
+    /// price until the pricing engine reports a live quote.
     pub fn from_config(storage_mode: &str, payment_mode: &str, price_micro_usdc: i64) -> Self {
         if storage_mode == "local" {
             // Local-only deploy. The server CANNOT anchor and must say so
@@ -646,9 +651,6 @@ impl Envelope {
                 participate_cost: None,
             };
         }
-        // Full deploy: micro-USDC → cents (round half-to-zero — the integer
-        // truncation matches the existing `record_attestation_cost` math).
-        let amount_cents = (price_micro_usdc / 10_000).max(0);
         let payment_methods: Vec<&'static str> = match payment_mode {
             "none" => Vec::new(),
             "x402" => vec!["x402"],
@@ -657,28 +659,157 @@ impl Envelope {
             // misconfiguration shouldn't leak as a misleading payment menu.
             _ => Vec::new(),
         };
+        // `check_payment` charges only under `x402`: `none` proceeds for
+        // free and any other value fail-closes. Neither quotes a price.
+        let status = if payment_mode == "x402" {
+            PricingStatus::Fallback
+        } else {
+            PricingStatus::Disabled
+        };
         Self {
             supported_modes: vec!["local", "participate"],
             default_mode: "local",
-            participate_cost: Some(ParticipateCost {
-                currency: "USD",
-                amount_cents,
+            participate_cost: Some(ParticipateCost::new(
+                price_micro_usdc,
+                status,
                 payment_methods,
-            }),
+            )),
         }
+    }
+
+    /// Copy of this envelope with the price block re-read from the live
+    /// pricing engine. `mnemonic_whoami` calls this per request so the
+    /// response tracks background refreshes instead of the boot snapshot.
+    /// A `disabled` (non-charging) or local-only envelope is returned as is.
+    pub fn with_live_pricing(&self, pricing: &PricingEngine) -> Self {
+        let mut out = self.clone();
+        if let Some(cost) = out.participate_cost.as_mut() {
+            if cost.pricing_status != PricingStatus::Disabled {
+                *cost = ParticipateCost::new(
+                    pricing.current_price(),
+                    pricing.status(),
+                    std::mem::take(&mut cost.payment_methods),
+                );
+            }
+        }
+        out
     }
 }
 
 /// Price + payment-method tuple for `participate` writes. Serialised as part
-/// of `Envelope`. `currency` is currently always `"USD"`; `amount_cents` is
-/// the per-write cost in USD cents; `payment_methods` enumerates how the
-/// caller can pay (`["x402"]`, or empty for `PAYMENT_MODE=none` self-operator
-/// deploys).
+/// of `Envelope`.
+///
+/// - `currency` is always `"USD"`.
+/// - `amount_micro_usdc` is the exact per-write price (1e-6 USD) — the unit
+///   the pricing engine and the paywall use.
+/// - `amount_cents` is the same price in USD cents, rounded **up**, so a
+///   non-zero price never renders as `0` (the 1000 µUSDC floor is 1 cent).
+/// - `pricing_status` is `live` (fresh quote), `fallback` (price feed failed
+///   or not yet fetched: floor or last good quote) or `disabled` (the
+///   operator does not charge; both amounts are 0).
+/// - `payment_methods` enumerates how the caller can pay (`["x402"]`, or
+///   empty for `PAYMENT_MODE=none` self-operator deploys).
 #[derive(Debug, Clone, Serialize)]
 pub struct ParticipateCost {
     pub currency: &'static str,
     pub amount_cents: i64,
+    pub amount_micro_usdc: i64,
+    pub pricing_status: PricingStatus,
     pub payment_methods: Vec<&'static str>,
+}
+
+impl ParticipateCost {
+    fn new(
+        price_micro_usdc: i64,
+        pricing_status: PricingStatus,
+        payment_methods: Vec<&'static str>,
+    ) -> Self {
+        let amount_micro_usdc = if pricing_status == PricingStatus::Disabled {
+            0
+        } else {
+            price_micro_usdc.max(0)
+        };
+        Self {
+            currency: "USD",
+            amount_cents: micro_usdc_to_cents_ceil(amount_micro_usdc),
+            amount_micro_usdc,
+            pricing_status,
+            payment_methods,
+        }
+    }
+}
+
+/// Micro-USDC → USD cents, rounded up (1 cent = 10_000 µUSDC). Negative
+/// input clamps to 0.
+pub fn micro_usdc_to_cents_ceil(micro_usdc: i64) -> i64 {
+    let micro = u64::try_from(micro_usdc).unwrap_or(0);
+    i64::try_from(micro.div_ceil(10_000)).unwrap_or(i64::MAX)
+}
+
+#[cfg(test)]
+mod envelope_pricing_tests {
+    use super::*;
+
+    #[test]
+    fn cents_round_up_and_clamp() {
+        assert_eq!(micro_usdc_to_cents_ceil(0), 0);
+        assert_eq!(micro_usdc_to_cents_ceil(-5), 0);
+        assert_eq!(micro_usdc_to_cents_ceil(1), 1);
+        assert_eq!(micro_usdc_to_cents_ceil(1000), 1);
+        assert_eq!(micro_usdc_to_cents_ceil(10_000), 1);
+        assert_eq!(micro_usdc_to_cents_ceil(10_001), 2);
+        assert_eq!(micro_usdc_to_cents_ceil(50_000), 5);
+        assert_eq!(micro_usdc_to_cents_ceil(i64::MAX), i64::MAX / 10_000 + 1);
+    }
+
+    #[test]
+    fn from_config_status_per_payment_mode() {
+        let cost = |pm: &str| {
+            Envelope::from_config("full", pm, 1000)
+                .participate_cost
+                .expect("full deploy has a cost block")
+        };
+        let x402 = cost("x402");
+        assert_eq!(x402.pricing_status, PricingStatus::Fallback);
+        assert_eq!(x402.amount_micro_usdc, 1000);
+        assert_eq!(x402.amount_cents, 1);
+        for pm in ["none", "balance"] {
+            let c = cost(pm);
+            assert_eq!(c.pricing_status, PricingStatus::Disabled, "{pm}");
+            assert_eq!(c.amount_micro_usdc, 0, "{pm}");
+            assert_eq!(c.amount_cents, 0, "{pm}");
+        }
+        assert!(Envelope::from_config("local", "x402", 1000)
+            .participate_cost
+            .is_none());
+    }
+
+    #[test]
+    fn with_live_pricing_reads_engine_but_keeps_disabled() {
+        let engine = PricingEngine::new(1000);
+        let cfg = crate::pricing::PricingConfig {
+            margin_bps: 0,
+            min_price_micro_usdc: 1000,
+            typical_payload_bytes: 2048,
+            sol_tx_fee_lamports: 0,
+        };
+        engine.apply_quote(300_000, 100.0, &cfg).expect("quote");
+
+        let live = Envelope::from_config("full", "x402", 1000).with_live_pricing(&engine);
+        let c = live.participate_cost.expect("cost");
+        assert_eq!(c.pricing_status, PricingStatus::Live);
+        assert_eq!(c.amount_micro_usdc, 30_000);
+        assert_eq!(c.amount_cents, 3);
+        assert_eq!(c.payment_methods, vec!["x402"]);
+
+        let free = Envelope::from_config("full", "none", 1000).with_live_pricing(&engine);
+        let c = free.participate_cost.expect("cost");
+        assert_eq!(c.pricing_status, PricingStatus::Disabled);
+        assert_eq!(c.amount_micro_usdc, 0);
+
+        let local = Envelope::from_config("local", "x402", 1000).with_live_pricing(&engine);
+        assert!(local.participate_cost.is_none());
+    }
 }
 
 /// Shared state for the MCP server.
@@ -801,8 +932,9 @@ pub struct McpState {
 
     /// `whoami` discoverability envelope — populated once at process start
     /// from `Config` (storage_mode + payment_mode + initial pricing
-    /// snapshot). See `Envelope::from_config`. Threaded into
-    /// `tools::whoami` for the new envelope-output contract AND into
+    /// snapshot). See `Envelope::from_config`. `mnemonic_whoami` re-prices
+    /// it per request via `Envelope::with_live_pricing` before threading it
+    /// into `tools::whoami`; the boot copy is also passed into
     /// `tools::sign_memory` so the `participate`-on-local-only rejection
     /// path can return `unsupported_mode("participate", &supported)`
     /// without re-deriving the list. Decision 3 in
@@ -822,6 +954,12 @@ pub struct McpState {
     /// background eviction task spawned in `main.rs::run_http`. Keyed on
     /// `api_key_hash` (blake3(api_key).to_hex()), NEVER `owner_pubkey`.
     pub refunds_by_subject: Arc<payment::RefundsBySubject>,
+
+    /// Free daily anchor quota: free participate writes per agent key and
+    /// across all keys per UTC day, before x402 payment is required
+    /// (`MNEMONIC_FREE_ANCHORS_PER_DAY`, `MNEMONIC_FREE_ANCHORS_GLOBAL_PER_DAY`).
+    /// See the "Free daily anchor quota" section of `payment.rs`.
+    pub free_anchors: payment::FreeAnchorLimits,
 
     /// Process-lifetime counters incremented by the delivery-guarantee
     /// flow. Stub for the eventual Prometheus surface — see
@@ -1032,13 +1170,14 @@ pub async fn handle_request(
     state: &McpState,
     owner_pubkey: &str,
     jwt_sub: Option<&str>,
+    transport: crate::tools::Transport,
 ) -> JsonRpcResponse {
     // T2 round-2: callers without a pre-resolved mode (stdio dispatch via
     // `run_stdio` → `handle_request`) get `None` here. The dispatcher
     // resolves on demand inside `handle_tool_call`. `mcp_handler` (HTTP)
     // resolves up front for the paywall gate and passes the result in via
     // `handle_request_with_resolved_mode` below.
-    handle_request_with_resolved_mode(req, state, owner_pubkey, jwt_sub, None).await
+    handle_request_with_resolved_mode(req, state, owner_pubkey, jwt_sub, transport, None).await
 }
 
 /// Variant of [`handle_request`] that accepts a pre-resolved `mode`. The
@@ -1052,6 +1191,9 @@ pub async fn handle_request_with_resolved_mode(
     state: &McpState,
     owner_pubkey: &str,
     jwt_sub: Option<&str>,
+    // Which transport delivered the request. Only `Stdio` may reach inline
+    // operator signing (`tools::sign_memory`); see `tools::Transport`.
+    transport: crate::tools::Transport,
     pre_resolved_mode: Option<crate::tools::ResolvedMode>,
 ) -> JsonRpcResponse {
     let result: Result<Value, JsonRpcError> = match req.method.as_str() {
@@ -1081,7 +1223,16 @@ pub async fn handle_request_with_resolved_mode(
                 .and_then(|n| n.as_str())
                 .unwrap_or("");
             let args = req.params.get("arguments").cloned().unwrap_or_default();
-            handle_tool_call(name, &args, state, owner_pubkey, jwt_sub, pre_resolved_mode).await
+            handle_tool_call(
+                name,
+                &args,
+                state,
+                owner_pubkey,
+                jwt_sub,
+                transport,
+                pre_resolved_mode,
+            )
+            .await
         }
         "notifications/initialized" | "ping" => Ok(serde_json::json!({})),
         _ => Err(JsonRpcError::simple(
@@ -1252,7 +1403,11 @@ pub async fn mcp_handler(
     //   - Otherwise (allowlisted methods like `tools/list`): fall back to
     //     the local server keypair so legacy code paths in tools.rs do not
     //     blow up. `tools/list` and `initialize` never touch storage so the
-    //     value is unused on those paths.
+    //     value is unused on those paths. Even if an unauthenticated
+    //     `mnemonic_sign_memory` got past the middleware, this owner cannot
+    //     reach operator signing: every dispatch below passes
+    //     `Transport::Http`, and `tools::sign_memory` refuses inline
+    //     participate on that transport.
     let owner_pubkey: String = match &claims {
         Some(c) => c.sub.clone(),
         None => state.keypair.pubkey_base58(),
@@ -1361,12 +1516,61 @@ pub async fn mcp_handler(
 
     // Universal Paywall is gated after deferred client signing. Its callback
     // verifies the COSE envelope and quotes its immutable signed hash; the
-    // other rails retain this pre-execution gate.
+    // other rails retain this pre-execution gate. `active_universal_paywall`
+    // is `Some` only for `PAYMENT_MODE=x402` + a UP config — the same
+    // predicate the sign-callback uses — so an unknown `PAYMENT_MODE` with
+    // a UP config still reaches `check_payment` and fails closed here.
     if is_sign_memory
         && participate_gate
         && state.payment_mode != "none"
-        && state.universal_paywall.is_none()
+        && payment::active_universal_paywall(&state.payment_mode, state.universal_paywall.as_ref())
+            .is_none()
     {
+        // Free daily anchor quota — PEEK here, consume later. A JWT caller
+        // with no `X-Payment` header and a free anchor left today skips the
+        // 402. Consumption happens exactly once, at anchor time: the parked
+        // bundle is flagged `free_quota`, and `api::sign_callback_handler`
+        // consumes one free anchor before it anchors (refunded when delivery
+        // is not confirmed). Consuming here instead would spend quota on
+        // bundles that are never signed (they expire after 300 s). A caller
+        // that sends `X-Payment` keeps the paid path below; its bundle is not
+        // flagged and never touches the quota.
+        if let Some(sub) = jwt_sub.as_deref() {
+            if payment::free_quota_applies(&state.payment_mode)
+                && payment::extract_x402_proof(&headers).is_none()
+                && free_anchor_available(&state, sub)
+            {
+                let resp = handle_request_with_resolved_mode(
+                    &req,
+                    &state,
+                    &owner_pubkey,
+                    jwt_sub.as_deref(),
+                    crate::tools::Transport::Http,
+                    resolved_mode_for_gate,
+                )
+                .await;
+                if resp.error.is_none() {
+                    // Fail closed: an unflagged parked bundle would anchor
+                    // with no payment and no quota consumption.
+                    let flagged = match parked_correlation_id(&resp) {
+                        Some(correlation_id) => {
+                            state.pending.mark_free_quota(&correlation_id).await.is_ok()
+                        }
+                        None => false,
+                    };
+                    if !flagged {
+                        tracing::error!("free anchor: parked bundle could not be flagged");
+                        return ndjson_error(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            -32603,
+                            "free anchor bookkeeping failed; retry the call",
+                        );
+                    }
+                }
+                return ndjson_response(StatusCode::OK, &resp);
+            }
+        }
+
         // Use live price from pricing engine (refreshed in background).
         let current_cost = state.pricing.current_price();
 
@@ -1393,6 +1597,7 @@ pub async fn mcp_handler(
                     &state,
                     &owner_pubkey,
                     jwt_sub.as_deref(),
+                    crate::tools::Transport::Http,
                     resolved_mode_for_gate,
                 )
                 .await;
@@ -1492,7 +1697,9 @@ pub async fn mcp_handler(
 
                 ndjson_response(StatusCode::OK, &resp)
             }
-            payment::PaymentGate::NeedPayment(x402) => {
+            payment::PaymentGate::NeedPayment(mut x402) => {
+                // Tell the agent why it must pay: its free quota state.
+                x402.free_anchors = free_anchor_status(&state, jwt_sub.as_deref());
                 ndjson_response(StatusCode::PAYMENT_REQUIRED, &x402)
             }
             payment::PaymentGate::NeedUniversalPaywall(up_req) => {
@@ -1521,11 +1728,63 @@ pub async fn mcp_handler(
             &state,
             &owner_pubkey,
             jwt_sub.as_deref(),
+            crate::tools::Transport::Http,
             resolved_mode_for_gate,
         )
         .await;
         ndjson_response(StatusCode::OK, &resp)
     }
+}
+
+/// Peek the caller's free daily anchor quota (no consumption). A store error
+/// counts as "no free anchor", so the caller falls back to the 402 path.
+fn free_anchor_available(state: &McpState, subject: &str) -> bool {
+    let Ok(store) = state.store.lock() else {
+        return false;
+    };
+    let today = payment::utc_day(chrono::Utc::now());
+    payment::free_anchor_available(store.conn(), subject, &today, state.free_anchors)
+        .unwrap_or_else(|error| {
+            tracing::warn!(error = %error, "free anchor peek failed");
+            false
+        })
+}
+
+/// The caller's `free_anchors` block for a 402 body or `mnemonic_whoami`, or
+/// `None` when the quota does not apply on this deploy.
+fn free_anchor_status(
+    state: &McpState,
+    subject: Option<&str>,
+) -> Option<payment::FreeAnchorStatus> {
+    if !payment::free_quota_applies(&state.payment_mode) || !state.envelope.supports_participate() {
+        return None;
+    }
+    let store = state.store.lock().ok()?;
+    payment::free_anchor_status(
+        store.conn(),
+        subject,
+        chrono::Utc::now(),
+        state.free_anchors,
+    )
+    .map_err(|error| tracing::warn!(error = %error, "free anchor status unavailable"))
+    .ok()
+}
+
+/// `correlation_id` of the bundle a `mnemonic_sign_memory` call just parked
+/// (`status: "awaiting_signature"`), read from the tool result text.
+fn parked_correlation_id(resp: &JsonRpcResponse) -> Option<String> {
+    let text = resp
+        .result
+        .as_ref()?
+        .get("content")?
+        .get(0)?
+        .get("text")?
+        .as_str()?;
+    let result: Value = serde_json::from_str(text).ok()?;
+    if result.get("status")?.as_str()? != "awaiting_signature" {
+        return None;
+    }
+    result.get("correlation_id")?.as_str().map(str::to_string)
 }
 
 // Bearer-auth middleware lives in `oauth.rs::bearer_auth_middleware`. The
@@ -1539,13 +1798,32 @@ async fn handle_tool_call(
     state: &McpState,
     owner_pubkey: &str,
     jwt_sub: Option<&str>,
+    transport: crate::tools::Transport,
     pre_resolved_mode: Option<crate::tools::ResolvedMode>,
 ) -> Result<Value, JsonRpcError> {
     let result = match name {
         "mnemonic_whoami" => {
             // DB-only: lock, query, release before returning
-            let store = state.store.lock().unwrap();
-            tools::whoami(&state.keypair, &store, &state.storage_mode, &state.envelope)
+            // Price block comes from the live pricing engine, not the boot
+            // snapshot (#165).
+            let envelope = state.envelope.with_live_pricing(&state.pricing);
+            let mut out = {
+                let store = state.store.lock().unwrap();
+                tools::whoami(&state.keypair, &store, &state.storage_mode, &envelope)
+            };
+            // Free daily anchor quota for the caller (JWT subject). HTTP only:
+            // stdio is never gated, so the block would mean nothing there.
+            if transport == crate::tools::Transport::Http {
+                if let (Some(status), Some(map)) =
+                    (free_anchor_status(state, jwt_sub), out.as_object_mut())
+                {
+                    map.insert(
+                        "free_anchors".into(),
+                        serde_json::to_value(status).unwrap_or(Value::Null),
+                    );
+                }
+            }
+            out
         }
         "mnemonic_sign_memory" => {
             let content = args["content"]
@@ -1659,6 +1937,7 @@ async fn handle_tool_call(
                 &state.storage_mode,
                 owner_pubkey,
                 jwt_sub,
+                transport,
                 resolved,
                 visibility,
                 &state.envelope,
@@ -2070,6 +2349,7 @@ mod transport_tests {
                 std::time::Duration::from_secs(60),
                 5,
             )),
+            free_anchors: crate::payment::FreeAnchorLimits::disabled(),
             delivery_metrics: Arc::new(crate::payment::DeliveryMetrics::default()),
             confirmation_ledger: Arc::new(crate::confirmation_token::ConfirmationLedger::new()),
             hosted_endpoint: String::new(),

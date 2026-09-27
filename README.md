@@ -46,7 +46,7 @@ Every memory an agent saves is:
 
 Signing is **non-custodial**. The private key lives with the client — your CLI, your browser, your agent — and the server never holds it.
 
-Over HTTP the server builds the canonical bundle and hands it back unsigned; your client signs it locally and posts the signature. The operator's own key signs only memories the operator itself authored. Anything else is refused outright, in code:
+Over HTTP, an anchored (`participate`) write returns the canonical bundle unsigned. Your client signs it locally and posts the signature. A `local` write gets no signature: the server stores only its hash, under your identity, so it never asks for your key. The operator's own key signs only on the stdio path, where it is the key of the local agent. Anything else is refused outright, in code:
 
 ```
 refusing to operator-sign a memory owned by a different identity;
@@ -178,13 +178,15 @@ Current artifact format: **canonical CBOR + COSE_Sign1, blake3 hashing**. Older 
 
 ### The deferred-signing flow
 
-The mechanics behind [You keep the key](#you-keep-the-key). A JWT write owned by
-a remote user returns `{status: "awaiting_signature", correlation_id,
-approve_url, ...}`; the client signs the canonical bundle locally and posts it
-back to `/api/sign-callback`, and only then is anything persisted or anchored.
-`mnemonic_check_pending` resolves the `correlation_id` to the final state.
-Bundles expire after 300 seconds. Inline server-side signing happens only when
-the writer *is* the operator (the stdio / single-tenant path). Full detail in
+The mechanics behind [You keep the key](#you-keep-the-key). A JWT `participate`
+write, or a JWT write without a `mode` field, returns `{status:
+"awaiting_signature", correlation_id, approve_url, ...}`. The client signs the
+canonical bundle locally and posts it back to `/api/sign-callback`. Only then is
+anything persisted or anchored. `mnemonic_check_pending` resolves the
+`correlation_id` to the final state. Bundles expire after 300 seconds. A JWT
+write with `mode: "local"` is stored at once as a hash-only row, with no
+signature. Inline signing happens only on the stdio path, where the key is the
+key of the local agent. Full detail in
 [docs/tools.md](./docs/tools.md#mnemonic_sign_memory).
 
 ---
@@ -193,7 +195,7 @@ the writer *is* the operator (the stdio / single-tenant path). Full detail in
 
 Two npm packages let you drive the same hosted MCP server without writing your own JSON-RPC client. Both reuse the OAuth 2.1 + PKCE handshake and the COSE_Sign1 signing substrate that the Cursor / VS Code / Claude.ai connectors and the webapp use — only the renderer differs.
 
-- [`@mnemonik-xyz/cli`](packages/cli/) — `mnemonic` binary for terminal use. Recommended setup: open `mnemonik.xyz/install` → click "Send to CLI" → `mnemonic init --ticket <uuid> && mnemonic login && mnemonic sign "hello"`. Standalone mode (`mnemonic init --standalone`) is also available for CLI-only use.
+- [`@mnemonik-xyz/cli`](packages/cli/) — `mnemonic` binary for terminal use. Recommended setup: open `mnemonik.xyz/install` → click "Send to CLI" → `mnemonic init --ticket <uuid> && mnemonic login && mnemonic sign "hello"`. Standalone mode (`mnemonic init --standalone`) is also available for CLI-only use. `mnemonic sign` makes a private local write from your public key only. `mnemonic sign --anchor` signs with your private key and anchors the memory on-chain. The CLI renews an expired session automatically with a refresh token.
 - [`@mnemonik-xyz/sdk`](packages/sdk/) — runtime-agnostic TypeScript SDK (`MnemonicClient`, `LocalSigner`, `Keypair`, OAuth helpers). Pure ESM; runs on Node 20+, Bun, Deno, and modern browsers.
 
 ---
@@ -233,6 +235,8 @@ durable user memory.
 
 Only `mnemonic_sign_memory` is paid. Deposits are validated against the treasury pubkey + USDC mint + signer ownership on the tx.
 
+Free daily quota (available now, `x402` only): each agent Ed25519 key gets 10 free `participate` writes per UTC (Coordinated Universal Time) day. A global cap of 1000 free writes per day applies across all keys. The agent needs no wallet and gets no payment prompt for these writes. `mnemonic_whoami` shows the remaining quota in `free_anchors`.
+
 ---
 
 ## Configuration
@@ -254,6 +258,8 @@ All configuration is env-driven (`mcp/src/config.rs`). The most relevant variabl
 | `PAYMENT_MODE` | `none` | `none` \| `balance` \| `x402` \| `both` |
 | `TREASURY_PUBKEY` / `USDC_MINT` | — / mainnet USDC | Payment routing |
 | `SIGN_MEMORY_COST_MICRO_USDC` | `1000` | Floor price for sign-memory |
+| `MNEMONIC_FREE_ANCHORS_PER_DAY` | `10` | Free `participate` writes per agent key per UTC day (`x402` only); `0` disables |
+| `MNEMONIC_FREE_ANCHORS_GLOBAL_PER_DAY` | `1000` | Free `participate` writes per UTC day across all keys; `0` = none |
 | `PRICE_REFRESH_SECS` / `PRICING_MARGIN_BPS` | `1800` / `2000` | Dynamic pricing engine |
 
 Copy `.env.example` to `.env` to start.

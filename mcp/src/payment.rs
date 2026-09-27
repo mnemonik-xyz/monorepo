@@ -7,6 +7,8 @@
 //!   - Standalone `verify_usdc_transfer` over `&SolanaClient` (moved here in
 //!     Task 8; the USDC-vs-recipient policy is payment-layer, not chain-layer).
 //!   - EVM USDC x402 verifier (`verify_evm_usdc_transfer`) for Arc/Base.
+//!   - Free daily anchor quota (`try_consume_free_anchor`,
+//!     `refund_free_anchor`, `free_anchors_remaining`, `claim_free_anchor`).
 //!
 //! Payment paths (Wave 4 — non-custodial; custodial balance/api-keys removed):
 //!   - x402 — clients pay per-call via a USDC transfer on Solana OR an EVM
@@ -14,9 +16,11 @@
 //!     retry request. Verified on-chain; no operator-held float.
 //!   - none — open access (development / self-hosted).
 
+use anyhow::Context;
 use axum::http::HeaderMap;
+use chrono::{DateTime, Utc};
 use rand::RngCore;
-use rusqlite::params;
+use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 
 use dashmap::DashMap;
@@ -52,6 +56,10 @@ pub struct X402Response {
     #[serde(rename = "x402Version")]
     pub x402_version: u8,
     pub accepts: Vec<PaymentOption>,
+    /// The caller's free daily anchor quota, so an agent can see why it must
+    /// pay. Absent when the quota does not apply.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub free_anchors: Option<FreeAnchorStatus>,
 }
 
 #[derive(Debug, Serialize)]
@@ -165,6 +173,26 @@ pub async fn check_payment(
 }
 
 // ── Universal Paywall exact x402 path ────────────────────────────────────────
+
+/// The Universal Paywall config that may charge a participate write, or
+/// `None` when that rail is off.
+///
+/// A Universal Paywall config alone does not turn charging on: the rail is
+/// an x402 rail, so it charges only when `PAYMENT_MODE=x402`. On a
+/// `PAYMENT_MODE=none` deploy (or any other value) this returns `None`, and
+/// the sign-callback anchors without a quote. The pre-execution gate in
+/// `mcp_handler` uses the same helper, so an unknown `PAYMENT_MODE` still
+/// reaches `check_payment` and fails closed there.
+pub fn active_universal_paywall<'a>(
+    payment_mode: &str,
+    config: Option<&'a UniversalPaywallConfig>,
+) -> Option<&'a UniversalPaywallConfig> {
+    if payment_mode == "x402" {
+        config
+    } else {
+        None
+    }
+}
 
 /// Payment proof sent in the `X-Payment` header for the Universal Paywall rail.
 #[derive(Debug, Deserialize)]
@@ -620,6 +648,7 @@ fn x402_required(
     X402Response {
         x402_version: 1,
         accepts,
+        free_anchors: None,
     }
 }
 
@@ -1031,6 +1060,317 @@ impl DeliveryMetrics {
     }
 }
 
+// ── Free daily anchor quota ──────────────────────────────────────────────────
+//
+// Each agent Ed25519 key gets `per_key` free `participate` (on-chain
+// anchored) writes per UTC day before payment is required. All keys also
+// share a global daily cap (`global`), because a new key costs nothing to
+// mint. The quota applies only where a payment would otherwise be required:
+// HTTP with `PAYMENT_MODE=x402` (`free_quota_applies`). `PAYMENT_MODE=none`
+// is already free and never touches the counters; stdio is never gated.
+//
+// Storage: one mcp-owned table, `free_anchor_usage(subject, day, n)`.
+// `subject` is `blake3(pubkey)` hex — the same derivation as
+// `paid_operations.subject_hash`. The global counter uses the reserved
+// subject `*`, which can never collide with a 64-char hex digest. `day` is the
+// UTC date `YYYY-MM-DD`, so each day starts from zero without a reset job.
+//
+// Single consumption: a free anchor is consumed once per anchored write, at
+// anchor time, in `api::sign_callback_handler` (`claim_free_anchor`). The
+// pre-parking x402 gate in `mcp_handler` only peeks
+// (`free_anchor_available`). A write whose delivery is not confirmed gets
+// its free anchor back (`FreeAnchorGrant` refunds on drop).
+
+/// Idempotent mcp-owned migration for the free daily anchor quota.
+pub const FREE_ANCHOR_USAGE_MIGRATION_SQL: &str = "CREATE TABLE IF NOT EXISTS free_anchor_usage (
+    subject TEXT NOT NULL,
+    day TEXT NOT NULL,
+    n INTEGER NOT NULL,
+    PRIMARY KEY (subject, day)
+);";
+
+/// Reserved `free_anchor_usage.subject` for the global (all-keys) counter.
+const GLOBAL_FREE_ANCHOR_SUBJECT: &str = "*";
+
+/// Daily free anchor limits. `0` in either field means no free anchors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FreeAnchorLimits {
+    /// Free anchored writes per agent key per UTC day
+    /// (`MNEMONIC_FREE_ANCHORS_PER_DAY`, default 10).
+    pub per_key: u32,
+    /// Free anchored writes per UTC day across all keys
+    /// (`MNEMONIC_FREE_ANCHORS_GLOBAL_PER_DAY`, default 1000).
+    pub global: u32,
+}
+
+impl FreeAnchorLimits {
+    /// No free anchors. Test fixtures use this so the paid-path tests keep
+    /// seeing a 402 on the first participate write.
+    #[allow(dead_code)] // used by test fixtures; the bin compiles this module too.
+    pub const fn disabled() -> Self {
+        Self {
+            per_key: 0,
+            global: 0,
+        }
+    }
+
+    /// True when at least one free anchor can exist today.
+    pub fn is_enabled(&self) -> bool {
+        self.per_key > 0 && self.global > 0
+    }
+}
+
+/// The caller's free anchor quota, as shown by `mnemonic_whoami` and in the
+/// 402 payment-required bodies.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct FreeAnchorStatus {
+    /// Free anchored writes per key per UTC day.
+    pub per_day: u32,
+    /// Free anchored writes left today for the caller's key. Absent for an
+    /// anonymous caller.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remaining: Option<u32>,
+    /// Free anchored writes left today across all keys. Absent for an
+    /// anonymous caller.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub global_remaining: Option<u32>,
+    /// Next UTC midnight (RFC 3339), when both counters start again.
+    pub resets_at: String,
+}
+
+/// True when a participate write on this deploy would otherwise be paid, so
+/// the free daily quota applies. `PAYMENT_MODE=none` is free already; an
+/// unknown mode fails closed in `check_payment` and gets no free anchors.
+pub fn free_quota_applies(payment_mode: &str) -> bool {
+    payment_mode == "x402"
+}
+
+/// Create the `free_anchor_usage` table. Idempotent.
+pub fn migrate_free_anchor_usage(conn: &Connection) -> anyhow::Result<()> {
+    conn.execute_batch(FREE_ANCHOR_USAGE_MIGRATION_SQL)
+        .context("create free_anchor_usage table")
+}
+
+/// UTC day key (`YYYY-MM-DD`) for `now`.
+pub fn utc_day(now: DateTime<Utc>) -> String {
+    now.format("%Y-%m-%d").to_string()
+}
+
+/// Next UTC midnight after `now`, as RFC 3339 (`2026-09-28T00:00:00Z`).
+pub fn next_utc_midnight(now: DateTime<Utc>) -> String {
+    let next_day = now.date_naive() + chrono::Days::new(1);
+    format!("{}T00:00:00Z", next_day.format("%Y-%m-%d"))
+}
+
+/// Per-key counter subject: `blake3(pubkey)` hex.
+fn free_anchor_subject(pubkey: &str) -> String {
+    blake3::hash(pubkey.as_bytes()).to_hex().to_string()
+}
+
+/// Atomically consume one free anchor for `subject` (the agent's base58
+/// Ed25519 pubkey) on `day`. Returns `Ok(true)` when both the per-key and
+/// the global counter stayed within their limits, `Ok(false)` otherwise.
+///
+/// One `BEGIN IMMEDIATE` transaction with two conditional UPSERTs: each
+/// increments only while `n < limit`. When either does not change a row the
+/// transaction rolls back, so the per-key increment never leaks. Concurrent
+/// callers on any number of connections can never push a counter past its
+/// limit: the write lock serialises them and the `WHERE n < ?` guard runs
+/// inside it.
+pub fn try_consume_free_anchor(
+    conn: &Connection,
+    subject: &str,
+    day: &str,
+    per_key_limit: u32,
+    global_limit: u32,
+) -> anyhow::Result<bool> {
+    if per_key_limit == 0 || global_limit == 0 || subject.is_empty() {
+        return Ok(false);
+    }
+    let key = free_anchor_subject(subject);
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)
+        .context("begin free anchor transaction")?;
+    let bump = |counter: &str, limit: u32| -> anyhow::Result<bool> {
+        let changed = tx
+            .execute(
+                "INSERT INTO free_anchor_usage (subject, day, n) VALUES (?1, ?2, 1) \
+                 ON CONFLICT(subject, day) DO UPDATE SET n = n + 1 WHERE n < ?3",
+                params![counter, day, i64::from(limit)],
+            )
+            .context("increment free anchor counter")?;
+        Ok(changed == 1)
+    };
+    // Dropping `tx` without `commit` rolls both increments back.
+    if !bump(&key, per_key_limit)? || !bump(GLOBAL_FREE_ANCHOR_SUBJECT, global_limit)? {
+        return Ok(false);
+    }
+    tx.commit().context("commit free anchor transaction")?;
+    Ok(true)
+}
+
+/// Give back one free anchor consumed on `day`: decrement the per-key and the
+/// global counter, never below 0. Use the day of the consumption, not today,
+/// so a write that fails after midnight refunds the right day.
+pub fn refund_free_anchor(conn: &Connection, subject: &str, day: &str) -> anyhow::Result<()> {
+    let key = free_anchor_subject(subject);
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)
+        .context("begin free anchor refund")?;
+    for counter in [key.as_str(), GLOBAL_FREE_ANCHOR_SUBJECT] {
+        tx.execute(
+            "UPDATE free_anchor_usage SET n = n - 1 WHERE subject = ?1 AND day = ?2 AND n > 0",
+            params![counter, day],
+        )
+        .context("refund free anchor counter")?;
+    }
+    tx.commit().context("commit free anchor refund")?;
+    Ok(())
+}
+
+/// Free anchors left on `day`: `(per_key_remaining, global_remaining)`.
+pub fn free_anchors_remaining(
+    conn: &Connection,
+    subject: &str,
+    day: &str,
+    limits: FreeAnchorLimits,
+) -> anyhow::Result<(u32, u32)> {
+    let used = |counter: &str| -> anyhow::Result<u32> {
+        let n: Option<i64> = conn
+            .query_row(
+                "SELECT n FROM free_anchor_usage WHERE subject = ?1 AND day = ?2",
+                params![counter, day],
+                |row| row.get(0),
+            )
+            .optional()
+            .context("read free anchor counter")?;
+        Ok(u32::try_from(n.unwrap_or(0).max(0)).unwrap_or(u32::MAX))
+    };
+    let per_key = limits
+        .per_key
+        .saturating_sub(used(&free_anchor_subject(subject))?);
+    let global = limits
+        .global
+        .saturating_sub(used(GLOBAL_FREE_ANCHOR_SUBJECT)?);
+    Ok((per_key, global))
+}
+
+/// Peek (no consumption): true when `subject` could take a free anchor on
+/// `day`. The pre-parking x402 gate uses this to skip the 402.
+pub fn free_anchor_available(
+    conn: &Connection,
+    subject: &str,
+    day: &str,
+    limits: FreeAnchorLimits,
+) -> anyhow::Result<bool> {
+    if !limits.is_enabled() || subject.is_empty() {
+        return Ok(false);
+    }
+    let (per_key, global) = free_anchors_remaining(conn, subject, day, limits)?;
+    Ok(per_key > 0 && global > 0)
+}
+
+/// Build the `free_anchors` block for `subject` at `now`. An anonymous caller
+/// (`None`) gets `per_day` and `resets_at` only.
+pub fn free_anchor_status(
+    conn: &Connection,
+    subject: Option<&str>,
+    now: DateTime<Utc>,
+    limits: FreeAnchorLimits,
+) -> anyhow::Result<FreeAnchorStatus> {
+    let (remaining, global_remaining) = match subject {
+        Some(subject) => {
+            let (per_key, global) = free_anchors_remaining(conn, subject, &utc_day(now), limits)?;
+            // No per-key anchor is usable once the global cap is spent.
+            (Some(per_key.min(global)), Some(global))
+        }
+        None => (None, None),
+    };
+    Ok(FreeAnchorStatus {
+        per_day: limits.per_key,
+        remaining,
+        global_remaining,
+        resets_at: next_utc_midnight(now),
+    })
+}
+
+/// One free anchor consumed for an anchored write in progress.
+///
+/// Dropping the grant without calling [`FreeAnchorGrant::keep`] refunds the
+/// anchor. The sign-callback holds it across the anchoring steps, so every
+/// early return (upload failure, delivery not confirmed, replayed bundle,
+/// cancelled request) gives the anchor back without a refund call at each
+/// return site. `Drop` locks the store synchronously: the caller must not
+/// hold the store lock when the grant goes out of scope.
+#[must_use = "dropping a FreeAnchorGrant refunds the free anchor"]
+pub struct FreeAnchorGrant<'a> {
+    store: &'a std::sync::Mutex<SqliteStore>,
+    subject: String,
+    day: String,
+    kept: bool,
+}
+
+impl FreeAnchorGrant<'_> {
+    /// The anchored write is confirmed: keep the consumption.
+    pub fn keep(mut self) {
+        self.kept = true;
+    }
+}
+
+impl Drop for FreeAnchorGrant<'_> {
+    fn drop(&mut self) {
+        if self.kept {
+            return;
+        }
+        match self.store.lock() {
+            Ok(store) => {
+                if let Err(error) = refund_free_anchor(store.conn(), &self.subject, &self.day) {
+                    tracing::error!(day = %self.day, error = %error, "free anchor refund failed");
+                }
+            }
+            Err(_) => tracing::error!(day = %self.day, "free anchor refund: store mutex poisoned"),
+        }
+    }
+}
+
+/// Consume one free anchor for `subject` today and return a refund-on-drop
+/// grant, or `None` when no free anchor is left (or the quota is off).
+///
+/// `paid_operation_id` names a Universal Paywall operation. When that
+/// operation already has a quote (the payer may be mid-payment, or has
+/// paid), the write stays on the paid path and this returns `None`, so one
+/// write is never both charged and counted as free.
+///
+/// The store lock is taken and released inside; no `.await` runs under it.
+pub fn claim_free_anchor<'a>(
+    store: &'a std::sync::Mutex<SqliteStore>,
+    subject: &str,
+    paid_operation_id: Option<&str>,
+    limits: FreeAnchorLimits,
+) -> anyhow::Result<Option<FreeAnchorGrant<'a>>> {
+    if !limits.is_enabled() || subject.is_empty() {
+        return Ok(None);
+    }
+    let day = utc_day(Utc::now());
+    let granted = {
+        let guard = store
+            .lock()
+            .map_err(|_| anyhow::anyhow!("store mutex poisoned"))?;
+        if let Some(operation_id) = paid_operation_id {
+            if let Some(operation) = paid_operation::get(guard.conn(), operation_id)? {
+                if operation.state != PaidOperationState::AwaitingSignature {
+                    return Ok(None);
+                }
+            }
+        }
+        try_consume_free_anchor(guard.conn(), subject, &day, limits.per_key, limits.global)?
+    };
+    Ok(granted.then(|| FreeAnchorGrant {
+        store,
+        subject: subject.to_string(),
+        day,
+        kept: false,
+    }))
+}
+
 // ── EVM x402 (Wave 1 — non-custodial Arc/EVM settlement) ─────────────────────
 //
 // Mirror of the Solana `verify_usdc_transfer` for EVM chains (Arc, Base, …): a
@@ -1146,6 +1486,30 @@ mod tests {
     //! spawn threads — `SqliteStore::in_memory()` gives each caller its own
     //! empty DB, which is the wrong semantic for race tests.
     use super::*;
+
+    // ── Universal Paywall activation follows PAYMENT_MODE ───────────────────
+    fn up_config() -> UniversalPaywallConfig {
+        UniversalPaywallConfig {
+            url: "http://localhost:0".into(),
+            api_key: "k".into(),
+            network: "eip155:84532".into(),
+            asset: "0x0000000000000000000000000000000000000001".into(),
+            pay_to: "0x0000000000000000000000000000000000000002".into(),
+            payer_wallet: String::new(),
+            approval_url_base: String::new(),
+        }
+    }
+
+    #[test]
+    fn universal_paywall_charges_only_in_x402_mode() {
+        let cfg = up_config();
+        assert!(active_universal_paywall("x402", Some(&cfg)).is_some());
+        // A configured Universal Paywall must not charge on a free deploy,
+        // nor on an unknown mode (that one fails closed in `check_payment`).
+        assert!(active_universal_paywall("none", Some(&cfg)).is_none());
+        assert!(active_universal_paywall("balance", Some(&cfg)).is_none());
+        assert!(active_universal_paywall("x402", None).is_none());
+    }
 
     // ── EVM ERC-20 Transfer decoder (Wave 1) ────────────────────────────────
     fn transfer_log(token: &str, to_topic: &str, data_hex: &str) -> serde_json::Value {
@@ -1294,5 +1658,317 @@ mod tests {
         assert_eq!(m.not_confirmed("refetch"), 2);
         assert_eq!(m.not_confirmed("verify"), 1);
         assert_eq!(m.not_confirmed("recall"), 0);
+    }
+
+    // ── Free daily anchor quota ─────────────────────────────────────────────
+
+    const DAY: &str = "2026-09-27";
+
+    fn quota_conn() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate_free_anchor_usage(&conn).unwrap();
+        // Idempotent.
+        migrate_free_anchor_usage(&conn).unwrap();
+        conn
+    }
+
+    fn limits(per_key: u32, global: u32) -> FreeAnchorLimits {
+        FreeAnchorLimits { per_key, global }
+    }
+
+    #[test]
+    fn free_quota_applies_only_to_x402() {
+        assert!(free_quota_applies("x402"));
+        assert!(!free_quota_applies("none"));
+        assert!(!free_quota_applies("balance"));
+        assert!(!free_quota_applies(""));
+    }
+
+    #[test]
+    fn ten_free_anchors_per_key_then_payment_and_second_key_has_its_own() {
+        let conn = quota_conn();
+        for i in 0..10 {
+            assert!(
+                try_consume_free_anchor(&conn, "key-a", DAY, 10, 1000).unwrap(),
+                "anchor {i} must be free"
+            );
+        }
+        assert!(
+            !try_consume_free_anchor(&conn, "key-a", DAY, 10, 1000).unwrap(),
+            "the 11th anchor must require payment"
+        );
+        assert_eq!(
+            free_anchors_remaining(&conn, "key-a", DAY, limits(10, 1000)).unwrap(),
+            (0, 990)
+        );
+        // A second key still has its own 10.
+        for _ in 0..10 {
+            assert!(try_consume_free_anchor(&conn, "key-b", DAY, 10, 1000).unwrap());
+        }
+        assert!(!try_consume_free_anchor(&conn, "key-b", DAY, 10, 1000).unwrap());
+    }
+
+    #[test]
+    fn global_cap_blocks_new_keys_and_rolls_back_the_per_key_increment() {
+        let conn = quota_conn();
+        for key in ["k1", "k2", "k3"] {
+            assert!(try_consume_free_anchor(&conn, key, DAY, 10, 3).unwrap());
+        }
+        assert!(
+            !try_consume_free_anchor(&conn, "k4", DAY, 10, 3).unwrap(),
+            "the 4th anchor across keys must require payment"
+        );
+        // The failed global UPSERT rolled back k4's per-key increment.
+        assert_eq!(
+            free_anchors_remaining(&conn, "k4", DAY, limits(10, 3)).unwrap(),
+            (10, 0)
+        );
+        assert!(!free_anchor_available(&conn, "k4", DAY, limits(10, 3)).unwrap());
+    }
+
+    #[test]
+    fn zero_limits_disable_free_anchors() {
+        let conn = quota_conn();
+        assert!(!try_consume_free_anchor(&conn, "k", DAY, 0, 1000).unwrap());
+        assert!(!try_consume_free_anchor(&conn, "k", DAY, 10, 0).unwrap());
+        assert!(!free_anchor_available(&conn, "k", DAY, limits(0, 1000)).unwrap());
+        assert!(!free_anchor_available(&conn, "k", DAY, limits(10, 0)).unwrap());
+        assert!(!FreeAnchorLimits::disabled().is_enabled());
+        let rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM free_anchor_usage", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rows, 0, "a disabled quota must not write counters");
+    }
+
+    #[test]
+    fn refund_returns_one_anchor_and_never_goes_below_zero() {
+        let conn = quota_conn();
+        // Refund with no usage is a no-op, not an error.
+        refund_free_anchor(&conn, "k", DAY).unwrap();
+        assert_eq!(
+            free_anchors_remaining(&conn, "k", DAY, limits(2, 5)).unwrap(),
+            (2, 5)
+        );
+        assert!(try_consume_free_anchor(&conn, "k", DAY, 2, 5).unwrap());
+        assert!(try_consume_free_anchor(&conn, "k", DAY, 2, 5).unwrap());
+        assert!(!try_consume_free_anchor(&conn, "k", DAY, 2, 5).unwrap());
+        refund_free_anchor(&conn, "k", DAY).unwrap();
+        assert_eq!(
+            free_anchors_remaining(&conn, "k", DAY, limits(2, 5)).unwrap(),
+            (1, 4)
+        );
+        assert!(try_consume_free_anchor(&conn, "k", DAY, 2, 5).unwrap());
+        for _ in 0..5 {
+            refund_free_anchor(&conn, "k", DAY).unwrap();
+        }
+        assert_eq!(
+            free_anchors_remaining(&conn, "k", DAY, limits(2, 5)).unwrap(),
+            (2, 5)
+        );
+    }
+
+    #[test]
+    fn day_rollover_resets_the_quota() {
+        let conn = quota_conn();
+        for _ in 0..10 {
+            assert!(try_consume_free_anchor(&conn, "k", "2026-09-27", 10, 1000).unwrap());
+        }
+        assert!(!try_consume_free_anchor(&conn, "k", "2026-09-27", 10, 1000).unwrap());
+        assert!(try_consume_free_anchor(&conn, "k", "2026-09-28", 10, 1000).unwrap());
+        // A refund for yesterday's write lands on yesterday's counter.
+        refund_free_anchor(&conn, "k", "2026-09-27").unwrap();
+        assert_eq!(
+            free_anchors_remaining(&conn, "k", "2026-09-27", limits(10, 1000)).unwrap(),
+            (1, 991)
+        );
+        assert_eq!(
+            free_anchors_remaining(&conn, "k", "2026-09-28", limits(10, 1000)).unwrap(),
+            (9, 999)
+        );
+    }
+
+    #[test]
+    fn utc_day_and_reset_time() {
+        let late = DateTime::parse_from_rfc3339("2026-09-27T23:59:59Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        assert_eq!(utc_day(late), "2026-09-27");
+        assert_eq!(next_utc_midnight(late), "2026-09-28T00:00:00Z");
+        let new_year = DateTime::parse_from_rfc3339("2026-12-31T08:00:00+05:00")
+            .unwrap()
+            .with_timezone(&Utc);
+        assert_eq!(utc_day(new_year), "2026-12-31");
+        assert_eq!(next_utc_midnight(new_year), "2027-01-01T00:00:00Z");
+    }
+
+    /// Many threads, each with its OWN connection to one file-backed DB, race
+    /// `try_consume_free_anchor`. The grants must never exceed either limit.
+    #[test]
+    fn concurrent_consumers_never_exceed_the_limits() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path().to_path_buf();
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch("PRAGMA journal_mode=WAL;").unwrap();
+            migrate_free_anchor_usage(&conn).unwrap();
+        }
+        const THREADS: usize = 16;
+        const ATTEMPTS: usize = 10;
+        // 4 keys x per-key 10 = 40 possible, but the global cap is 30.
+        let (per_key, global) = (10, 30);
+        let handles: Vec<_> = (0..THREADS)
+            .map(|t| {
+                let conn = Connection::open(&path).unwrap();
+                conn.execute_batch("PRAGMA busy_timeout=10000;").unwrap();
+                std::thread::spawn(move || {
+                    let key = format!("key-{}", t % 4);
+                    (0..ATTEMPTS)
+                        .filter(|_| {
+                            try_consume_free_anchor(&conn, &key, DAY, per_key, global).unwrap()
+                        })
+                        .count()
+                })
+            })
+            .collect();
+        let granted: usize = handles.into_iter().map(|h| h.join().unwrap()).sum();
+        assert_eq!(
+            granted, global as usize,
+            "grants must stop at the global cap"
+        );
+
+        let conn = Connection::open(&path).unwrap();
+        let mut per_key_total = 0;
+        for k in 0..4 {
+            let (left, global_left) =
+                free_anchors_remaining(&conn, &format!("key-{k}"), DAY, limits(per_key, global))
+                    .unwrap();
+            assert_eq!(global_left, 0);
+            per_key_total += per_key - left;
+        }
+        assert_eq!(per_key_total, global, "per-key counters match the grants");
+
+        // Same race on one key: exactly `per_key` grants.
+        let handles: Vec<_> = (0..THREADS)
+            .map(|_| {
+                let conn = Connection::open(&path).unwrap();
+                conn.execute_batch("PRAGMA busy_timeout=10000;").unwrap();
+                std::thread::spawn(move || {
+                    (0..ATTEMPTS)
+                        .filter(|_| {
+                            try_consume_free_anchor(&conn, "solo", "2026-09-28", 25, 1000).unwrap()
+                        })
+                        .count()
+                })
+            })
+            .collect();
+        let granted: usize = handles.into_iter().map(|h| h.join().unwrap()).sum();
+        assert_eq!(granted, 25, "grants must stop at the per-key limit");
+    }
+
+    #[test]
+    fn free_anchor_status_for_known_and_anonymous_callers() {
+        let conn = quota_conn();
+        let now = DateTime::parse_from_rfc3339("2026-09-27T10:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        for _ in 0..3 {
+            assert!(try_consume_free_anchor(&conn, "k", DAY, 10, 5).unwrap());
+        }
+        let status = free_anchor_status(&conn, Some("k"), now, limits(10, 5)).unwrap();
+        assert_eq!(status.per_day, 10);
+        // 7 left for the key, but only 2 left globally.
+        assert_eq!(status.remaining, Some(2));
+        assert_eq!(status.global_remaining, Some(2));
+        assert_eq!(status.resets_at, "2026-09-28T00:00:00Z");
+
+        let anon = free_anchor_status(&conn, None, now, limits(10, 5)).unwrap();
+        let json = serde_json::to_value(&anon).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({"per_day": 10, "resets_at": "2026-09-28T00:00:00Z"})
+        );
+    }
+
+    fn quota_store() -> std::sync::Mutex<SqliteStore> {
+        let store = SqliteStore::in_memory().unwrap();
+        migrate_free_anchor_usage(store.conn()).unwrap();
+        paid_operation::migrate_paid_operations(store.conn()).unwrap();
+        std::sync::Mutex::new(store)
+    }
+
+    fn remaining_today(store: &std::sync::Mutex<SqliteStore>, key: &str) -> (u32, u32) {
+        let guard = store.lock().unwrap();
+        free_anchors_remaining(guard.conn(), key, &utc_day(Utc::now()), limits(2, 100)).unwrap()
+    }
+
+    #[test]
+    fn dropped_grant_refunds_and_kept_grant_stays_consumed() {
+        let store = quota_store();
+        let grant = claim_free_anchor(&store, "k", None, limits(2, 100))
+            .unwrap()
+            .expect("first anchor is free");
+        assert_eq!(remaining_today(&store, "k"), (1, 99));
+        // Delivery not confirmed → the grant is dropped → refund.
+        drop(grant);
+        assert_eq!(remaining_today(&store, "k"), (2, 100));
+
+        claim_free_anchor(&store, "k", None, limits(2, 100))
+            .unwrap()
+            .expect("free")
+            .keep();
+        claim_free_anchor(&store, "k", None, limits(2, 100))
+            .unwrap()
+            .expect("free")
+            .keep();
+        assert_eq!(remaining_today(&store, "k"), (0, 98));
+        assert!(claim_free_anchor(&store, "k", None, limits(2, 100))
+            .unwrap()
+            .is_none());
+        assert!(
+            claim_free_anchor(&store, "k", None, FreeAnchorLimits::disabled())
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn claim_skips_an_operation_already_on_the_paid_path() {
+        let store = quota_store();
+        {
+            let guard = store.lock().unwrap();
+            paid_operation::create_or_get(
+                guard.conn(),
+                NewPaidOperation {
+                    operation_id: "op-quoted",
+                    subject_hash: "h",
+                    artifact_hash: "a",
+                    created_at: "2026-09-27T00:00:00Z",
+                },
+            )
+            .unwrap();
+            paid_operation::record_quote(
+                guard.conn(),
+                "op-quoted",
+                "0x1111111111111111111111111111111111111111",
+                "0xdigest",
+                "q_1",
+                "2026-09-27T00:05:00Z",
+                "2026-09-27T00:00:01Z",
+            )
+            .unwrap();
+        }
+        // A quoted operation stays paid: no free anchor, no counter change.
+        assert!(
+            claim_free_anchor(&store, "k", Some("op-quoted"), limits(2, 100))
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(remaining_today(&store, "k"), (2, 100));
+        // An operation with no paid state yet may use the free quota.
+        claim_free_anchor(&store, "k", Some("op-new"), limits(2, 100))
+            .unwrap()
+            .expect("free")
+            .keep();
+        assert_eq!(remaining_today(&store, "k"), (1, 99));
     }
 }

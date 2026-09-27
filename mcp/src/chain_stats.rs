@@ -20,11 +20,15 @@
 //! endpoints keep their DB-only behaviour.
 
 use mnemonic_core::arweave::graphql::{solana_pubkey_to_arweave_address, GraphQlClient};
-use mnemonic_core::arweave::recovery::{normalize_producer, snapshot_chain, RecoveredItem};
+use mnemonic_core::arweave::recovery::{
+    normalize_producer, snapshot_chain, RecoveredEmbedding, RecoveredItem,
+};
 use mnemonic_core::arweave::ArweaveClient;
+use mnemonic_core::compress::{CompressedEmbedding, EmbeddingCompressor};
 use mnemonic_core::solana::SolanaClient;
 use mnemonic_core::storage::sqlite::{RowFact, TimelineBucket};
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::{Arc, OnceLock};
 
 pub struct ChainStatsCache {
     gql: GraphQlClient,
@@ -35,7 +39,7 @@ pub struct ChainStatsCache {
     /// The same wallets in Arweave owner form — enumeration source 2
     /// (gateway GraphQL, for indexed/tagged items).
     owner_addresses: Vec<String>,
-    snapshot: tokio::sync::RwLock<Option<Vec<RecoveredItem>>>,
+    snapshot: tokio::sync::RwLock<Option<Arc<ChainLedger>>>,
 }
 
 impl ChainStatsCache {
@@ -81,14 +85,181 @@ impl ChainStatsCache {
         let snap =
             snapshot_chain(&self.gql, &self.gateway, &self.owner_addresses, &anchors).await?;
         let n = snap.items.len();
-        *self.snapshot.write().await = Some(snap.items);
+        *self.snapshot.write().await = Some(Arc::new(ChainLedger::new(snap.items)));
         Ok(n)
     }
 
     /// Latest snapshot, or `None` until the first successful refresh.
     pub async fn items(&self) -> Option<Vec<RecoveredItem>> {
+        self.snapshot
+            .read()
+            .await
+            .as_ref()
+            .map(|ledger| ledger.items().to_vec())
+    }
+
+    /// Latest snapshot with its recall index, or `None` until the first
+    /// successful refresh. Cheap (`Arc` clone); used by `?q=` recall.
+    pub async fn ledger(&self) -> Option<Arc<ChainLedger>> {
         self.snapshot.read().await.clone()
     }
+
+    /// Cache pre-loaded with `items`, for tests that exercise the chain
+    /// merge and recall paths without a Solana / Arweave backend.
+    #[cfg(any(test, feature = "test-support"))]
+    #[allow(dead_code)]
+    pub fn from_items(items: Vec<RecoveredItem>) -> Self {
+        Self {
+            gql: GraphQlClient::new("http://localhost:0/graphql"),
+            gateway: ArweaveClient::new("http://localhost:0"),
+            solana: SolanaClient::new("http://localhost:0"),
+            wallets: Vec::new(),
+            owner_addresses: Vec::new(),
+            snapshot: tokio::sync::RwLock::new(Some(Arc::new(ChainLedger::new(items)))),
+        }
+    }
+}
+
+// ── Chain recall (#201) ───────────────────────────────────────────────────────
+
+/// Score a literal text match gets when a recovered item has no usable
+/// embedding. Equal to a perfect cosine match, so a memory that literally
+/// contains the query is never pushed out of the result page by weaker
+/// semantic neighbours.
+pub const TEXT_MATCH_SCORE: f32 = 1.0;
+
+/// How a recall hit matched the query.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MatchKind {
+    /// Cosine similarity between the query and the memory embedding.
+    Semantic,
+    /// Case-insensitive substring match on content or tags (fallback for
+    /// items whose embedding is missing or not decodable by this server).
+    Text,
+}
+
+/// One chain-recovered memory that matched a recall query.
+#[derive(Debug, Clone)]
+pub struct ChainHit<'a> {
+    pub item: &'a RecoveredItem,
+    pub score: f32,
+    pub kind: MatchKind,
+}
+
+/// One chain snapshot plus a disposable in-memory recall index over it.
+///
+/// The index holds unit-length f32 embeddings decoded from each item's
+/// signed payload. It is built on the first query and dropped with the
+/// snapshot on the next refresh, so it is rebuilt from the external
+/// artifacts alone — SQLite is never read or written for chain recall.
+pub struct ChainLedger {
+    items: Vec<RecoveredItem>,
+    recall_index: OnceLock<Vec<Option<Vec<f32>>>>,
+}
+
+impl ChainLedger {
+    pub fn new(items: Vec<RecoveredItem>) -> Self {
+        Self {
+            items,
+            recall_index: OnceLock::new(),
+        }
+    }
+
+    pub fn items(&self) -> &[RecoveredItem] {
+        &self.items
+    }
+
+    /// Search the snapshot for `query_text` / `query_emb`.
+    ///
+    /// Items with an embedding decodable by `compressor` (same dimension and
+    /// bit width as this server's) are scored by cosine similarity, like the
+    /// SQLite recall path, so every such item is a candidate. Items without
+    /// one match only when the query text occurs in their content or tags,
+    /// and score [`TEXT_MATCH_SCORE`]. Hits come back unsorted; the caller
+    /// ranks them together with SQLite hits.
+    pub fn recall(
+        &self,
+        query_text: &str,
+        query_emb: &[f32],
+        compressor: &EmbeddingCompressor,
+    ) -> Vec<ChainHit<'_>> {
+        let index = self
+            .recall_index
+            .get_or_init(|| build_recall_index(&self.items, compressor));
+        let query = unit(query_emb);
+        let needle = query_text.trim().to_lowercase();
+        let mut hits = Vec::new();
+        for (item, emb) in self.items.iter().zip(index) {
+            if let (Some(q), Some(e)) = (query.as_deref(), emb.as_deref()) {
+                if q.len() == e.len() {
+                    let score: f32 = q.iter().zip(e).map(|(a, b)| a * b).sum();
+                    if score.is_finite() {
+                        hits.push(ChainHit {
+                            item,
+                            score,
+                            kind: MatchKind::Semantic,
+                        });
+                        continue;
+                    }
+                }
+            }
+            if !needle.is_empty() && text_matches(item, &needle) {
+                hits.push(ChainHit {
+                    item,
+                    score: TEXT_MATCH_SCORE,
+                    kind: MatchKind::Text,
+                });
+            }
+        }
+        hits
+    }
+}
+
+fn text_matches(item: &RecoveredItem, needle_lower: &str) -> bool {
+    item.content
+        .as_deref()
+        .is_some_and(|c| c.to_lowercase().contains(needle_lower))
+        || item
+            .tags
+            .iter()
+            .any(|t| t.to_lowercase().contains(needle_lower))
+}
+
+/// Scale `v` to unit length. `None` for an empty, zero or non-finite vector.
+fn unit(v: &[f32]) -> Option<Vec<f32>> {
+    let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+    (norm.is_finite() && norm > 0.0).then(|| v.iter().map(|x| x / norm).collect())
+}
+
+fn build_recall_index(
+    items: &[RecoveredItem],
+    compressor: &EmbeddingCompressor,
+) -> Vec<Option<Vec<f32>>> {
+    // TurboQuant's dequantize asserts on shape mismatches, so a compressed
+    // blob is decoded only when its dimension, bit width and packed lengths
+    // equal what this compressor itself produces.
+    let probe = compressor.compress(&vec![1.0; compressor.dim()]);
+    items
+        .iter()
+        .map(|item| {
+            let raw = match item.embedding.as_ref()? {
+                RecoveredEmbedding::F32(v) => v.clone(),
+                RecoveredEmbedding::Compressed(bytes) => {
+                    let c = CompressedEmbedding::from_bytes(bytes)?;
+                    let same_shape = c.dim == probe.dim
+                        && c.bit_width == probe.bit_width
+                        && c.mse_indices_packed.len() == probe.mse_indices_packed.len()
+                        && c.qjl_signs_packed.len() == probe.qjl_signs_packed.len();
+                    if !same_shape {
+                        return None;
+                    }
+                    compressor.decompress(&c)
+                }
+            };
+            unit(&raw)
+        })
+        .collect()
 }
 
 /// All-time merged traction numbers plus the daily timeline.
@@ -171,6 +342,7 @@ mod tests {
             tags: Vec::new(),
             day: day.map(str::to_string),
             producer: producer.map(str::to_string),
+            embedding: None,
         }
     }
 
@@ -246,5 +418,104 @@ mod tests {
         assert_eq!(m.saved_onchain, 1);
         assert_eq!(m.unique_users, 0);
         assert!(m.buckets.is_empty());
+    }
+
+    // ── Chain recall (#201) ──────────────────────────────────────────────
+
+    fn recall_item(
+        tx: &str,
+        content: Option<&str>,
+        tags: &[&str],
+        embedding: Option<RecoveredEmbedding>,
+    ) -> RecoveredItem {
+        RecoveredItem {
+            content: content.map(str::to_string),
+            tags: tags.iter().map(|t| t.to_string()).collect(),
+            embedding,
+            ..chain_item(tx, Some("2026-07-01"), None)
+        }
+    }
+
+    fn compressed(compressor: &EmbeddingCompressor, v: &[f32]) -> Option<RecoveredEmbedding> {
+        Some(RecoveredEmbedding::Compressed(
+            compressor.compress(v).to_bytes(),
+        ))
+    }
+
+    fn hit_for<'a>(hits: &'a [ChainHit<'a>], tx: &str) -> Option<&'a ChainHit<'a>> {
+        hits.iter().find(|h| h.item.arweave_tx == tx)
+    }
+
+    #[test]
+    fn recall_scores_decoded_embeddings_semantically() {
+        let compressor = EmbeddingCompressor::new(8, 4, 42);
+        let query = [0.1f32; 8];
+        let orthogonal = [1.0, -1.0, 1.0, -1.0, 1.0, -1.0, 1.0, -1.0];
+        let ledger = ChainLedger::new(vec![
+            recall_item("near", Some("x"), &[], compressed(&compressor, &query)),
+            recall_item("far", Some("y"), &[], compressed(&compressor, &orthogonal)),
+            recall_item(
+                "exact",
+                Some("z"),
+                &[],
+                Some(RecoveredEmbedding::F32(query.to_vec())),
+            ),
+        ]);
+        let hits = ledger.recall("anything", &query, &compressor);
+        assert_eq!(hits.len(), 3, "every decodable item is a candidate");
+        assert!(hits.iter().all(|h| h.kind == MatchKind::Semantic));
+        let near = hit_for(&hits, "near").unwrap().score;
+        let far = hit_for(&hits, "far").unwrap().score;
+        let exact = hit_for(&hits, "exact").unwrap().score;
+        assert!(near > 0.8, "dequantized neighbour stays close: {near}");
+        assert!(far < near, "far={far} near={near}");
+        assert!((exact - 1.0).abs() < 1e-5, "f32 copy is exact: {exact}");
+    }
+
+    #[test]
+    fn recall_falls_back_to_text_match_without_usable_embedding() {
+        let compressor = EmbeddingCompressor::new(8, 4, 42);
+        // A 16-dim blob from another deploy must not reach dequantize
+        // (it would panic on the shape mismatch) — it falls back to text.
+        let other = EmbeddingCompressor::new(16, 4, 42);
+        let ledger = ChainLedger::new(vec![
+            recall_item("content-hit", Some("A Memory from chain"), &[], None),
+            recall_item("tag-hit", Some("unrelated"), &["memory-log"], None),
+            recall_item("miss", Some("unrelated"), &["other"], None),
+            recall_item("no-content", None, &[], None),
+            recall_item(
+                "wrong-shape",
+                Some("memory in a foreign embedding space"),
+                &[],
+                compressed(&other, &[0.1; 16]),
+            ),
+            recall_item(
+                "garbage",
+                Some("no match here"),
+                &[],
+                Some(RecoveredEmbedding::Compressed(vec![9, 9, 9])),
+            ),
+        ]);
+        let hits = ledger.recall("  MEMORY ", &[0.1; 8], &compressor);
+        let mut txs: Vec<&str> = hits.iter().map(|h| h.item.arweave_tx.as_str()).collect();
+        txs.sort_unstable();
+        assert_eq!(txs, vec!["content-hit", "tag-hit", "wrong-shape"]);
+        for h in &hits {
+            assert_eq!(h.kind, MatchKind::Text);
+            assert_eq!(h.score, TEXT_MATCH_SCORE);
+        }
+    }
+
+    #[test]
+    fn cache_from_items_exposes_ledger_and_items() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("runtime");
+        let cache = ChainStatsCache::from_items(vec![recall_item("tx1", Some("c"), &[], None)]);
+        rt.block_on(async {
+            assert_eq!(cache.items().await.map(|v| v.len()), Some(1));
+            let ledger = cache.ledger().await.expect("ledger");
+            assert_eq!(ledger.items()[0].arweave_tx, "tx1");
+        });
     }
 }

@@ -268,8 +268,72 @@ pub async fn sign_callback_handler(
     // Paid participate writes bind the exact quote to the verified COSE
     // envelope, not raw editor text. The first callback returns a quote; a
     // later callback sees the durable provider receipt and may anchor.
+    //
+    // The Universal Paywall charges only when `PAYMENT_MODE=x402`: a UP
+    // config on a `PAYMENT_MODE=none` deploy must not charge (the decision
+    // lives in `payment.rs`).
+    let universal_paywall =
+        payment::active_universal_paywall(&state.payment_mode, state.universal_paywall.as_ref());
+
+    // Free daily anchor quota (see `payment.rs`). On a paid deploy a
+    // participate write first takes one of the signer's free anchors for
+    // today. This is the single consumption point. The grant refunds itself
+    // on drop, so every early return below (upload failure, delivery not
+    // confirmed, replayed bundle) gives the anchor back; only a confirmed
+    // delivery keeps it (`keep()` further down). No return below this point
+    // happens while the free-anchor path holds the store lock.
+    //
+    //   - Universal Paywall rail: try the quota unless the operation already
+    //     has a quote (the payer may be mid-payment). A granted anchor skips
+    //     the wallet link, the quote and the charge.
+    //   - Bespoke x402 rail: the pre-parking gate in `mcp_handler` peeked and
+    //     flagged the bundle `free_quota`. A paid bundle is not flagged and
+    //     never touches the quota. A flagged bundle whose free anchor is gone
+    //     by now gets 402 and stays parked, so the client can retry later or
+    //     pay through a new `mnemonic_sign_memory` call with `X-Payment`.
+    let mut free_anchor = None;
+    if entry.write_mode == WriteMode::Participate
+        && payment::free_quota_applies(&state.payment_mode)
+        && (universal_paywall.is_some() || entry.free_quota)
+    {
+        let paid_operation_id = universal_paywall.map(|_| req.correlation_id.as_str());
+        free_anchor = match payment::claim_free_anchor(
+            &state.store,
+            &req.signer_pubkey,
+            paid_operation_id,
+            state.free_anchors,
+        ) {
+            Ok(grant) => grant,
+            Err(error) => {
+                tracing::error!(correlation_id = %req.correlation_id, error = %error, "claim free anchor failed");
+                return error_resp(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "payment state unavailable",
+                );
+            }
+        };
+        if free_anchor.is_none() && universal_paywall.is_none() {
+            return (
+                StatusCode::PAYMENT_REQUIRED,
+                Json(serde_json::json!({
+                    "status": "payment_required",
+                    "error": "free daily anchor quota is used up; call mnemonic_sign_memory again with an X-Payment header",
+                    "correlation_id": req.correlation_id,
+                    "free_anchors": free_anchor_status(&state, &req.signer_pubkey),
+                })),
+            )
+                .into_response();
+        }
+    }
+    // A free anchor replaces the charge for this write.
+    let universal_paywall = if free_anchor.is_some() {
+        None
+    } else {
+        universal_paywall
+    };
+
     if entry.write_mode == WriteMode::Participate {
-        if let Some(config) = state.universal_paywall.as_ref() {
+        if let Some(config) = universal_paywall {
             let now = chrono::Utc::now().to_rfc3339();
             let staged = match state.store.lock() {
                 Ok(store) => match paid_artifact::stage_verified_cose(
@@ -323,6 +387,9 @@ pub async fn sign_callback_handler(
                     return error_resp(StatusCode::INTERNAL_SERVER_ERROR, "invalid payment chain")
                 }
             };
+            // Computed before the lock below: the payment-required bodies
+            // show the signer why it must pay.
+            let free_anchors = free_anchor_status(&state, &req.signer_pubkey);
             let wallet_link = match state.store.lock() {
                 Ok(store) => match wallet_link::get_verified(store.conn(), &req.correlation_id) {
                     Ok(Some(link)) if link.subject_hash == subject_hash && link.chain_id == chain_id => link,
@@ -342,6 +409,7 @@ pub async fn sign_callback_handler(
                                 "wallet_link_url": format!("/approve?operation_id={}", req.correlation_id),
                                 "challenge": challenge,
                                 "message": wallet_link::challenge_message(&challenge),
+                                "free_anchors": free_anchors,
                             })),
                         ).into_response(),
                         Err(error) => {
@@ -379,6 +447,7 @@ pub async fn sign_callback_handler(
                             "correlation_id": req.correlation_id,
                             "artifact_hash": staged.artifact_hash,
                             "payment": payment,
+                            "free_anchors": free_anchors,
                         })),
                     )
                         .into_response();
@@ -400,7 +469,7 @@ pub async fn sign_callback_handler(
     // already final at this point: a retry resumes this attempt and must never
     // re-enter exact settlement or create another customer charge.
     let is_paid_participate =
-        entry.write_mode == WriteMode::Participate && state.universal_paywall.is_some();
+        entry.write_mode == WriteMode::Participate && universal_paywall.is_some();
     let mut delivery_attempt = None;
     if is_paid_participate {
         let now = chrono::Utc::now().to_rfc3339();
@@ -476,10 +545,12 @@ pub async fn sign_callback_handler(
     let attestation_id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
 
-    // Wave 3: a deferred write whose resolved mode is `Local` (a remote user's
-    // free local write, now client-signed too) skips on-chain anchoring and
-    // gets synthetic ids — exactly like a `local` storage deploy. Either
-    // condition routes to the synthetic-id branch.
+    // Wave 3: a deferred write whose resolved mode is `Local` (a legacy
+    // client that omitted `mode` on a local-only deploy; explicit
+    // `mode: "local"` writes are stored inline as hash-only rows and never
+    // reach this callback) skips on-chain anchoring and gets synthetic ids —
+    // exactly like a `local` storage deploy. Either condition routes to the
+    // synthetic-id branch.
     //
     // `MNEMONIC_DEFERRED_SYNTHETIC_ANCHOR=1` forces the same synthetic-id path
     // for full-mode deploys. This lets end-to-end tests exercise the complete
@@ -818,6 +889,12 @@ pub async fn sign_callback_handler(
         }
     }
 
+    // Delivery is confirmed (or the anchor ids are synthetic): the free
+    // anchor, if this write used one, stays consumed.
+    if let Some(grant) = free_anchor.take() {
+        grant.keep();
+    }
+
     if let Some(attempt) = &delivery_attempt {
         if let Ok(store) = state.store.lock() {
             if let Err(error) =
@@ -844,6 +921,21 @@ pub async fn sign_callback_handler(
         arweave_url: links.arweave_url,
     };
     (StatusCode::OK, Json(body)).into_response()
+}
+
+/// The signer's `free_anchors` block for a payment-required body. `None`
+/// (JSON `null`) when the store is unavailable. Takes the store lock: never
+/// call it while the lock is held.
+fn free_anchor_status(state: &McpState, subject: &str) -> Option<payment::FreeAnchorStatus> {
+    let store = state.store.lock().ok()?;
+    payment::free_anchor_status(
+        store.conn(),
+        Some(subject),
+        chrono::Utc::now(),
+        state.free_anchors,
+    )
+    .map_err(|error| tracing::warn!(error = %error, "free anchor status unavailable"))
+    .ok()
 }
 
 fn error_resp(status: StatusCode, msg: &str) -> Response {
@@ -1868,7 +1960,7 @@ fn merge_chain_artifacts(
     (merged, total)
 }
 
-/// `GET /artifacts?q=&limit=` — public Evidence Ledger listing.
+/// `GET /artifacts?q=&limit=&source=` — public Evidence Ledger listing.
 ///
 /// Returns `{ artifacts: [PublicArtifact], total }`. Public-visibility rows
 /// from the DB, unioned with chain-recovered anchored rows when
@@ -1876,9 +1968,9 @@ fn merge_chain_artifacts(
 /// regardless of the lost DB's visibility column because they are already
 /// public on Arweave + Solana.
 ///
-/// With `?q=`, runs cosine search over the cross-owner public pool. Chain
-/// items are not included in search results because the snapshot carries no
-/// embedding vector. Without `?q=`, returns the newest-first merged listing.
+/// With `?q=`, see [`recall_artifacts`]: SQLite and chain-recovered matches
+/// are ranked together and each row carries `match: "semantic" | "text"`.
+/// Without `?q=`, returns the newest-first merged listing.
 /// On a transient SQLite error we log and serve an empty list with 200 rather
 /// than 5xx the public page (mirrors `public_stats_handler`).
 pub async fn artifacts_handler(
@@ -1894,15 +1986,14 @@ pub async fn artifacts_handler(
 
     // Chain snapshot read (async RwLock) BEFORE the store mutex — the
     // sqlite guard must never be held across an `.await` (CLAUDE.md).
-    let chain_items = match &state.chain_stats {
-        Some(cache) => cache.items().await,
+    let chain = match &state.chain_stats {
+        Some(cache) => cache.ledger().await,
         None => None,
     };
 
-    // Embed the search query OUTSIDE the store lock — `embed` is synchronous
-    // but potentially slow (ONNX inference in production), and the rusqlite
-    // guard must never wrap slow work.
-    let query_emb = query.map(|text| state.embedder.embed(text));
+    if let Some(text) = query {
+        return recall_artifacts(&state, text, source, limit, chain.as_deref());
+    }
 
     let (artifacts, total) = {
         let store = match state.store.lock() {
@@ -1914,71 +2005,184 @@ pub async fn artifacts_handler(
                 );
             }
         };
-        match &query_emb {
-            // Content search → cross-owner cosine search restricted to the
-            // public pool. `owner = None` paired with
-            // `Some(Visibility::Public)` is the trait-mandated safe pairing
-            // (never exposes private rows). Chain items are not included here
-            // because the snapshot carries no embedding vector.
-            Some(emb) => match store
-                .search(emb, None, Some(Visibility::Public), limit)
-                .map(|rows| {
-                    rows.into_iter()
-                        .map(public_artifact_from_search)
-                        .filter(|artifact| artifact_matches_source(artifact, source))
-                        .collect::<Vec<_>>()
-                }) {
-                Ok(rows) => {
-                    let total = rows.len();
-                    (rows, total)
-                }
-                Err(e) => {
-                    tracing::warn!("artifacts search query failed: {e}");
-                    (Vec::new(), 0)
-                }
-            },
-            // Plain list → newest-first public-only chronological listing,
-            // merged with chain-recovered anchored items.
-            None => match source {
-                ArtifactSource::OnNode => {
-                    match store.list_public_artifacts_by_mode(WriteMode::Local, limit) {
-                        Ok(rows) => {
-                            let total = rows.len();
-                            (rows, total)
-                        }
-                        Err(e) => {
-                            tracing::warn!("on-node artifacts list query failed: {e}");
-                            (Vec::new(), 0)
-                        }
+        // Plain list → newest-first public-only chronological listing,
+        // merged with chain-recovered anchored items.
+        match source {
+            ArtifactSource::OnNode => {
+                match store.list_public_artifacts_by_mode(WriteMode::Local, limit) {
+                    Ok(rows) => {
+                        let total = rows.len();
+                        (rows, total)
+                    }
+                    Err(e) => {
+                        tracing::warn!("on-node artifacts list query failed: {e}");
+                        (Vec::new(), 0)
                     }
                 }
-                ArtifactSource::All | ArtifactSource::OnChain => {
-                    let db_result = match source {
-                        ArtifactSource::All => store.list_public_artifacts(limit),
-                        ArtifactSource::OnChain => {
-                            store.list_public_artifacts_by_mode(WriteMode::Participate, limit)
+            }
+            ArtifactSource::All | ArtifactSource::OnChain => {
+                let db_result = match source {
+                    ArtifactSource::OnChain => {
+                        store.list_public_artifacts_by_mode(WriteMode::Participate, limit)
+                    }
+                    _ => store.list_public_artifacts(limit),
+                };
+                match db_result {
+                    Ok(db_rows) => match &chain {
+                        Some(ledger) => merge_chain_artifacts(ledger.items(), db_rows, limit),
+                        None => {
+                            let total = db_rows.len();
+                            (db_rows, total)
                         }
-                        ArtifactSource::OnNode => unreachable!(),
-                    };
-                    match db_result {
-                        Ok(db_rows) => match chain_items {
-                            Some(chain) => merge_chain_artifacts(&chain, db_rows, limit),
-                            None => {
-                                let total = db_rows.len();
-                                (db_rows, total)
-                            }
-                        },
-                        Err(e) => {
-                            tracing::warn!("artifacts list query failed: {e}");
-                            (Vec::new(), 0)
-                        }
+                    },
+                    Err(e) => {
+                        tracing::warn!("artifacts list query failed: {e}");
+                        (Vec::new(), 0)
                     }
                 }
-            },
+            }
         }
     };
 
     Json(serde_json::json!({ "artifacts": artifacts, "total": total })).into_response()
+}
+
+/// One `?q=` result row: the `PublicArtifact` wire shape plus how it matched.
+#[derive(Debug, Serialize)]
+struct RecallArtifact {
+    #[serde(flatten)]
+    artifact: PublicArtifact,
+    /// `semantic` (embedding cosine) or `text` (literal content/tag
+    /// fallback for chain items without a usable embedding).
+    #[serde(rename = "match")]
+    match_kind: crate::chain_stats::MatchKind,
+}
+
+/// `?q=` branch of [`artifacts_handler`] (#201).
+///
+/// Two candidate sets, ranked together by score and cut to `limit`:
+///
+/// 1. SQLite: cosine search over the cross-owner public pool.
+/// 2. Chain: recall over the chain-recovered snapshot. It runs in memory
+///    only (no SQLite access): semantic when an item's signed embedding
+///    decodes, else a literal content/tag match.
+///
+/// A chain item that duplicates a SQLite hit (same `arweave_tx` or
+/// `content_hash`) is dropped — the DB row wins, as in the plain listing.
+fn recall_artifacts(
+    state: &McpState,
+    text: &str,
+    source: ArtifactSource,
+    limit: usize,
+    chain: Option<&crate::chain_stats::ChainLedger>,
+) -> Response {
+    // Embed and run the chain recall OUTSIDE the store lock — `embed` is
+    // synchronous but potentially slow (ONNX inference in production), and
+    // the rusqlite guard must never wrap slow work.
+    let query_emb = state.embedder.embed(text);
+    let chain_hits = match chain {
+        Some(ledger) if source != ArtifactSource::OnNode => {
+            ledger.recall(text, &query_emb, &state.compressor)
+        }
+        _ => Vec::new(),
+    };
+
+    // The source filter runs after scoring, so a filtered request takes
+    // every scored row and cuts to `limit` after the filter. `search`
+    // scores every row either way; only the returned length differs.
+    let db_limit = if source == ArtifactSource::All {
+        limit
+    } else {
+        usize::MAX
+    };
+    let db_hits = {
+        let store = match state.store.lock() {
+            Ok(g) => g,
+            Err(e) => {
+                return error_resp(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("store mutex poisoned: {e}"),
+                );
+            }
+        };
+        // `owner = None` paired with `Some(Visibility::Public)` is the
+        // trait-mandated safe pairing (never exposes private rows).
+        match store.search(&query_emb, None, Some(Visibility::Public), db_limit) {
+            Ok(rows) => rows,
+            Err(e) => {
+                tracing::warn!("artifacts search query failed: {e}");
+                Vec::new()
+            }
+        }
+    };
+
+    let artifacts = rank_recall_hits(db_hits, &chain_hits, source, limit);
+    let total = artifacts.len();
+    Json(serde_json::json!({ "artifacts": artifacts, "total": total })).into_response()
+}
+
+/// Merge SQLite and chain recall hits: filter by `source`, drop chain
+/// duplicates of SQLite rows, sort by score (ties: newest first), cut to
+/// `limit`.
+fn rank_recall_hits(
+    db: Vec<SearchResult>,
+    chain: &[crate::chain_stats::ChainHit<'_>],
+    source: ArtifactSource,
+    limit: usize,
+) -> Vec<RecallArtifact> {
+    use crate::chain_stats::MatchKind;
+    use std::collections::HashSet;
+
+    let mut seen_tx: HashSet<String> = HashSet::new();
+    let mut seen_hash: HashSet<String> = HashSet::new();
+    let mut scored: Vec<(f32, RecallArtifact)> = Vec::with_capacity(db.len() + chain.len());
+
+    for row in db {
+        let score = row.relevance_score;
+        let artifact = public_artifact_from_search(row);
+        if !artifact_matches_source(&artifact, source) {
+            continue;
+        }
+        if !artifact.arweave_tx.is_empty() {
+            seen_tx.insert(artifact.arweave_tx.clone());
+        }
+        if !artifact.content_hash.is_empty() {
+            seen_hash.insert(artifact.content_hash.clone());
+        }
+        scored.push((
+            score,
+            RecallArtifact {
+                artifact,
+                match_kind: MatchKind::Semantic,
+            },
+        ));
+    }
+
+    for hit in chain {
+        let dup_hash = hit
+            .item
+            .content_hash
+            .as_ref()
+            .is_some_and(|h| seen_hash.contains(h));
+        if dup_hash || !seen_tx.insert(hit.item.arweave_tx.clone()) {
+            continue;
+        }
+        scored.push((
+            hit.score,
+            RecallArtifact {
+                artifact: public_artifact_from_recovered(hit.item),
+                match_kind: hit.kind,
+            },
+        ));
+    }
+
+    scored.sort_by(|a, b| {
+        b.0.partial_cmp(&a.0)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| b.1.artifact.created_at.cmp(&a.1.artifact.created_at))
+    });
+    scored.truncate(limit);
+    scored.into_iter().map(|(_, a)| a).collect()
 }
 
 /// Query params for `GET /analytics/attestations?range=`.
@@ -2969,6 +3173,7 @@ mod tests {
             tags: Vec::new(),
             day: day.map(str::to_string),
             producer: None,
+            embedding: None,
         }
     }
 

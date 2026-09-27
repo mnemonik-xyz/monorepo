@@ -109,6 +109,7 @@ pub fn mock_state() -> Arc<McpState> {
     crate::paid_operation::migrate_paid_operations(store.conn()).expect("migrate paid operations");
     crate::paid_artifact::migrate_paid_artifact_staging(store.conn())
         .expect("migrate paid artifact staging");
+    crate::payment::migrate_free_anchor_usage(store.conn()).expect("migrate free anchor usage");
     let compressor = EmbeddingCompressor::new(8, 4, 42);
     let quota = Quota::per_minute(NonZeroU32::new(10).expect("nz"));
     let chat_limiter = governor::RateLimiter::keyed(quota);
@@ -167,6 +168,7 @@ pub fn mock_state() -> Arc<McpState> {
             std::time::Duration::from_secs(60),
             5,
         )),
+        free_anchors: crate::payment::FreeAnchorLimits::disabled(),
         delivery_metrics: Arc::new(crate::payment::DeliveryMetrics::default()),
         confirmation_ledger: Arc::new(crate::confirmation_token::ConfirmationLedger::new()),
         // Empty endpoint sentinel — `tools::sign_memory` treats an empty
@@ -208,6 +210,7 @@ pub fn mock_state_with(
     crate::paid_operation::migrate_paid_operations(store.conn()).expect("migrate paid operations");
     crate::paid_artifact::migrate_paid_artifact_staging(store.conn())
         .expect("migrate paid artifact staging");
+    crate::payment::migrate_free_anchor_usage(store.conn()).expect("migrate free anchor usage");
     let compressor = EmbeddingCompressor::new(8, 4, 42);
     let quota = Quota::per_minute(NonZeroU32::new(10).expect("nz"));
     let chat_limiter = governor::RateLimiter::keyed(quota);
@@ -272,6 +275,7 @@ pub fn mock_state_with(
             std::time::Duration::from_secs(60),
             5,
         )),
+        free_anchors: crate::payment::FreeAnchorLimits::disabled(),
         delivery_metrics: Arc::new(crate::payment::DeliveryMetrics::default()),
         confirmation_ledger: Arc::new(crate::confirmation_token::ConfirmationLedger::new()),
         hosted_endpoint: String::new(),
@@ -323,6 +327,7 @@ pub fn mock_state_for_delivery(
     crate::paid_operation::migrate_paid_operations(store.conn()).expect("migrate paid operations");
     crate::paid_artifact::migrate_paid_artifact_staging(store.conn())
         .expect("migrate paid artifact staging");
+    crate::payment::migrate_free_anchor_usage(store.conn()).expect("migrate free anchor usage");
     let compressor = EmbeddingCompressor::new(8, 4, 42);
     let quota = Quota::per_minute(NonZeroU32::new(10).expect("nz"));
     let chat_limiter = governor::RateLimiter::keyed(quota);
@@ -383,6 +388,7 @@ pub fn mock_state_for_delivery(
             quota_window,
             quota_threshold,
         )),
+        free_anchors: crate::payment::FreeAnchorLimits::disabled(),
         delivery_metrics: Arc::new(crate::payment::DeliveryMetrics::default()),
         confirmation_ledger: Arc::new(crate::confirmation_token::ConfirmationLedger::new()),
         hosted_endpoint: String::new(),
@@ -429,6 +435,7 @@ pub fn mock_state_with_embedder_and_endpoint(
     crate::paid_operation::migrate_paid_operations(store.conn()).expect("migrate paid operations");
     crate::paid_artifact::migrate_paid_artifact_staging(store.conn())
         .expect("migrate paid artifact staging");
+    crate::payment::migrate_free_anchor_usage(store.conn()).expect("migrate free anchor usage");
     let compressor = EmbeddingCompressor::new(dim, 4, 42);
     let quota = Quota::per_minute(NonZeroU32::new(10).expect("nz"));
     let chat_limiter = governor::RateLimiter::keyed(quota);
@@ -495,6 +502,7 @@ pub fn mock_state_with_embedder_and_endpoint(
             std::time::Duration::from_secs(60),
             5,
         )),
+        free_anchors: crate::payment::FreeAnchorLimits::disabled(),
         delivery_metrics: Arc::new(crate::payment::DeliveryMetrics::default()),
         confirmation_ledger: Arc::new(crate::confirmation_token::ConfirmationLedger::new()),
         hosted_endpoint,

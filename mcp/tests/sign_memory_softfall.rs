@@ -37,7 +37,7 @@ use std::time::Duration;
 
 use mnemonic_core::storage::Visibility;
 use mnemonic_mcp::test_support::mock_state_with_embedder_and_endpoint;
-use mnemonic_mcp::tools::{resolve_write_mode, sign_memory, ToolError};
+use mnemonic_mcp::tools::{resolve_write_mode, sign_memory, ToolError, Transport};
 
 mod support;
 use support::FailingEmbedder;
@@ -100,6 +100,7 @@ async fn default_no_silent_escalation() {
         "local",
         &owner,
         None,
+        Transport::Stdio,
         resolved,
         Visibility::Private,
         &state.envelope,
@@ -188,6 +189,7 @@ async fn opt_in_escalation_returns_escalated_field() {
         "local",
         &owner,
         None,
+        Transport::Stdio,
         resolved,
         Visibility::Private,
         &state.envelope,
@@ -280,6 +282,7 @@ async fn opt_in_escalation_no_confirmation_token() {
         "local",
         &owner,
         None,
+        Transport::Stdio,
         resolved,
         Visibility::Public,
         &state.envelope,
@@ -374,6 +377,7 @@ async fn opt_in_escalation_with_valid_confirmation_token_reaches_hosted() {
         "local",
         &owner,
         None,
+        Transport::Stdio,
         resolved,
         Visibility::Public,
         &state.envelope,
@@ -443,6 +447,7 @@ async fn opt_in_escalation_no_network() {
         "local",
         &owner,
         None,
+        Transport::Stdio,
         resolved,
         Visibility::Private,
         &state.envelope,
@@ -528,6 +533,7 @@ async fn opt_in_escalation_hosted_malformed_response_surfaces_hosted_unavailable
         "local",
         &owner,
         None,
+        Transport::Stdio,
         resolved,
         Visibility::Private,
         &state.envelope,
@@ -650,6 +656,7 @@ fn expired_cached_token_surfaces_token_expired_typed_error() {
                 "local",
                 &owner,
                 None,
+                Transport::Stdio,
                 resolved,
                 Visibility::Private,
                 &state.envelope,
@@ -714,6 +721,7 @@ async fn empty_endpoint_sentinel_propagates_local_error() {
         "local",
         &owner,
         None,
+        Transport::Stdio,
         resolved,
         Visibility::Private,
         &state.envelope,

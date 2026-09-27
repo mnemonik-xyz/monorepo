@@ -4,6 +4,8 @@
 // consumer use; internal helpers stay unexported (re-exports happen in
 // `src/index.ts`).
 
+import type { Keypair } from "./keypair.js";
+
 /**
  * Pluggable signing primitive for raw Ed25519 signatures over arbitrary
  * byte payloads.
@@ -52,18 +54,68 @@ export interface MnemonicClientConfig {
    * runtime's global `fetch`. Must conform to the standard Fetch API.
    */
   fetch?: typeof fetch;
+  /**
+   * Optional lazy keypair source for `signMemory`. The client calls it only
+   * when the server asks for a client signature (`awaiting_signature`).
+   * See {@link MnemonicClient.setKeypairProvider}.
+   */
+  keypairProvider?: KeypairProvider;
+  /**
+   * Optional access-token refresher. See
+   * {@link MnemonicClient.setTokenRefresher}.
+   */
+  tokenRefresher?: TokenRefresher;
 }
+
+/**
+ * Per-request write mode for `signMemory`.
+ *
+ * - `"local"`: the server stores the memory for the caller only. There is
+ *   no on-chain anchor, no charge and no client signature. The call works
+ *   from the public key alone.
+ * - `"participate"`: the client signs the canonical bundle (COSE_Sign1)
+ *   and the server anchors it on Arweave and Solana. This needs the
+ *   private key.
+ */
+export type WriteMode = "local" | "participate";
+
+/**
+ * Lazy keypair source. The client calls it only when it must make a
+ * signature, so a caller can defer an OS-keychain read (and its prompt)
+ * until then. It can return the keypair or a promise of it.
+ */
+export type KeypairProvider = () => Keypair | Promise<Keypair>;
+
+/**
+ * Access-token refresher. It returns a fresh access JWT, or `undefined`
+ * when it cannot refresh (the client then keeps the current token). An
+ * error it throws goes to the caller of the tool method.
+ */
+export type TokenRefresher = () => Promise<string | undefined>;
 
 /** Caller-supplied options for `signMemory`. */
 export interface SignMemoryOptions {
   tags?: string[];
+  /**
+   * Write mode, sent to the server as `mode`. If you omit it, the server
+   * uses its own default and the client needs a keypair before the call
+   * (legacy behavior).
+   */
+  mode?: WriteMode;
 }
 
-/** Server response shape from `signMemory` after the callback completes. */
+/** Server response shape from `signMemory`. */
 export interface SignMemoryResult {
   attestationId: string;
   signedAt: string;
-  status: "signed" | "pending" | "anchored";
+  /**
+   * `stored`: the server stored the memory without a client signature (a
+   * `local` write). `signed` / `pending` / `anchored`: the client signed
+   * the bundle. `anchored` means that the on-chain anchor is confirmed.
+   */
+  status: "stored" | "signed" | "pending" | "anchored";
+  /** Write mode that the server applied, when the server reports it. */
+  writeMode?: WriteMode;
   /** Server content_hash echo (hex blake3 of canonical CBOR). */
   contentHash?: string;
   arweaveTx?: string;

@@ -8,10 +8,30 @@
 //! Stores result atomically so reads are always wait-free.
 
 use anyhow::Context;
+use serde::Serialize;
 use std::sync::{
-    atomic::{AtomicI64, AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering},
     Arc,
 };
+
+// ── Status ────────────────────────────────────────────────────────────────────
+
+/// Where the quoted `participate` price comes from. Surfaced in the
+/// `mnemonic_whoami` envelope as `participate_cost.pricing_status` so a
+/// client can tell "free" apart from "the price feed is down" (issue #165).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PricingStatus {
+    /// The most recent refresh succeeded: the price comes from live Irys +
+    /// SOL/USDC quotes.
+    Live,
+    /// No refresh has succeeded yet, or the most recent refresh failed. The
+    /// price is the configured floor or the last good quote.
+    Fallback,
+    /// The operator does not charge (`PAYMENT_MODE=none`). Set by the
+    /// envelope, never by the engine.
+    Disabled,
+}
 
 // ── Config ────────────────────────────────────────────────────────────────────
 
@@ -51,6 +71,9 @@ pub struct PricingEngine {
     sol_price_bits: AtomicU64,
     /// Irys upload estimate (lamports) for `typical_payload_bytes`.
     irys_lamports: AtomicI64,
+    /// True only while the most recent refresh succeeded. Starts false: the
+    /// seed price is the configured floor, not a live quote.
+    last_refresh_ok: AtomicBool,
     client: reqwest::Client,
 }
 
@@ -60,6 +83,7 @@ impl PricingEngine {
             price_micro_usdc: AtomicI64::new(initial_price),
             sol_price_bits: AtomicU64::new(0f64.to_bits()),
             irys_lamports: AtomicI64::new(0),
+            last_refresh_ok: AtomicBool::new(false),
             client: reqwest::Client::new(),
         })
     }
@@ -79,6 +103,21 @@ impl PricingEngine {
         self.irys_lamports.load(Ordering::Relaxed)
     }
 
+    /// `Live` while the most recent refresh succeeded, else `Fallback`.
+    pub fn status(&self) -> PricingStatus {
+        if self.last_refresh_ok.load(Ordering::Relaxed) {
+            PricingStatus::Live
+        } else {
+            PricingStatus::Fallback
+        }
+    }
+
+    /// Record a failed refresh. The quoted price keeps its previous value
+    /// (floor or last good quote); only the status flips to `Fallback`.
+    pub fn record_refresh_failure(&self) {
+        self.last_refresh_ok.store(false, Ordering::Relaxed);
+    }
+
     /// Build a cost hint snapshot for recording alongside an attestation.
     pub fn cost_hint(&self, sol_tx_fee_lamports: u64) -> CostHint {
         CostHint {
@@ -90,7 +129,18 @@ impl PricingEngine {
     }
 
     /// Fetch fresh prices, recompute quoted price, store atomically.
+    ///
+    /// On any failure the previous price stays in place and `status()`
+    /// reports `Fallback` until the next successful refresh.
     pub async fn refresh(&self, config: &PricingConfig) -> anyhow::Result<()> {
+        let result = self.fetch_and_apply(config).await;
+        if result.is_err() {
+            self.record_refresh_failure();
+        }
+        result
+    }
+
+    async fn fetch_and_apply(&self, config: &PricingConfig) -> anyhow::Result<()> {
         let irys_lamports = fetch_irys_price(&self.client, config.typical_payload_bytes)
             .await
             .context("irys price fetch")?;
@@ -99,6 +149,31 @@ impl PricingEngine {
             .await
             .context("sol price fetch")?;
 
+        let new_price = self.apply_quote(irys_lamports, sol_price, config)?;
+
+        tracing::info!(
+            irys_lamports,
+            sol_price_usdc = sol_price,
+            new_price_micro_usdc = new_price,
+            "pricing refreshed"
+        );
+        Ok(())
+    }
+
+    /// Recompute the quoted price from fetched quotes, store it, and mark the
+    /// engine `Live`. Returns the new price (micro-USDC).
+    ///
+    /// A SOL/USDC rate that is not a finite positive number is a failed
+    /// fetch, not a free price: it is rejected and nothing is stored.
+    pub fn apply_quote(
+        &self,
+        irys_lamports: u64,
+        sol_price: f64,
+        config: &PricingConfig,
+    ) -> anyhow::Result<i64> {
+        if !sol_price.is_finite() || sol_price <= 0.0 {
+            anyhow::bail!("invalid SOL/USDC rate: {sol_price}");
+        }
         let new_price = compute_price(
             irys_lamports,
             config.sol_tx_fee_lamports,
@@ -112,14 +187,8 @@ impl PricingEngine {
         self.sol_price_bits
             .store(sol_price.to_bits(), Ordering::Relaxed);
         self.price_micro_usdc.store(new_price, Ordering::Relaxed);
-
-        tracing::info!(
-            irys_lamports,
-            sol_price_usdc = sol_price,
-            new_price_micro_usdc = new_price,
-            "pricing refreshed"
-        );
-        Ok(())
+        self.last_refresh_ok.store(true, Ordering::Relaxed);
+        Ok(new_price)
     }
 }
 
@@ -178,4 +247,61 @@ async fn fetch_sol_price(client: &reqwest::Client) -> anyhow::Result<f64> {
     json["solana"]["usd"]
         .as_f64()
         .context("CoinGecko: missing solana.usd field")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cfg() -> PricingConfig {
+        PricingConfig {
+            margin_bps: 2000,
+            min_price_micro_usdc: 1000,
+            typical_payload_bytes: 2048,
+            sol_tx_fee_lamports: 5000,
+        }
+    }
+
+    #[test]
+    fn new_engine_reports_fallback_at_floor() {
+        let engine = PricingEngine::new(1000);
+        assert_eq!(engine.current_price(), 1000);
+        assert_eq!(engine.status(), PricingStatus::Fallback);
+    }
+
+    #[test]
+    fn apply_quote_marks_live_and_failure_keeps_last_price() {
+        let engine = PricingEngine::new(1000);
+        // (1_000_000 + 5_000) lamports at $150/SOL = 150_750 µUSDC, +20 % margin.
+        let price = engine.apply_quote(1_000_000, 150.0, &cfg()).unwrap();
+        assert_eq!(price, 180_900);
+        assert_eq!(engine.current_price(), 180_900);
+        assert_eq!(engine.status(), PricingStatus::Live);
+
+        engine.record_refresh_failure();
+        assert_eq!(engine.status(), PricingStatus::Fallback);
+        assert_eq!(engine.current_price(), 180_900, "last good quote is kept");
+    }
+
+    #[test]
+    fn apply_quote_rejects_zero_or_non_finite_sol_rate() {
+        let engine = PricingEngine::new(1000);
+        for bad in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            assert!(engine.apply_quote(1_000_000, bad, &cfg()).is_err());
+        }
+        assert_eq!(engine.status(), PricingStatus::Fallback);
+        assert_eq!(engine.current_price(), 1000);
+        assert_eq!(engine.current_sol_price(), 0.0);
+    }
+
+    #[test]
+    fn pricing_status_serializes_lowercase() {
+        let v = serde_json::to_value([
+            PricingStatus::Live,
+            PricingStatus::Fallback,
+            PricingStatus::Disabled,
+        ])
+        .unwrap();
+        assert_eq!(v, serde_json::json!(["live", "fallback", "disabled"]));
+    }
 }

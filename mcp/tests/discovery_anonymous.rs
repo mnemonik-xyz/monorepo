@@ -15,8 +15,11 @@
 //!      sub-strings from its matching skill manifest.
 //!   5. `initialize_surfaces_embedder_metadata` — `initialize` carries
 //!      `embedder.model_id`, `embedder.model_version`, `embedder.dim`.
-//!   6. `prompts_list_with_invalid_bearer_passes_through` — allowlisted
-//!      methods must NOT 401 on a malformed Bearer.
+//!   6. `prompts_list_with_invalid_bearer_gets_401_challenge` — an
+//!      allowlisted method works WITHOUT a Bearer, but a malformed or
+//!      expired Bearer gets a 401 `invalid_token` challenge (#163, MCP
+//!      authorization spec: "Invalid or expired tokens MUST receive a HTTP
+//!      401 response").
 //!
 //! The middleware wiring mirrors `tests/auth_allowlist.rs` so we share
 //! the same `mock_state` + `OAuthState` plumbing.
@@ -312,30 +315,53 @@ async fn initialize_surfaces_embedder_metadata() {
 }
 
 #[tokio::test]
-async fn prompts_list_with_invalid_bearer_passes_through() {
+async fn prompts_list_with_invalid_bearer_gets_401_challenge() {
     let state = mock_state();
     let oauth_state = Arc::new(OAuthState::with_defaults(TEST_SECRET));
     let app = build_router(state, oauth_state);
 
-    // Garbage JWT — must not turn an allowlisted call into a 401. Per
-    // `oauth/mod.rs` lines 1378-1384, allowlisted methods treat a bad
-    // Bearer as if it were absent (no Claims attached, request proceeds).
+    // Garbage JWT on an allowlisted method. Before #163 the middleware
+    // treated it as absent and returned 200, so a client holding an expired
+    // token looked "connected" and never refreshed. Now it gets the same
+    // 401 challenge as a gated call, pointing at the /mcp metadata document.
+    for method in ["prompts/list", "initialize"] {
+        let req = Request::builder()
+            .method("POST")
+            .uri("/mcp")
+            .header("content-type", "application/json")
+            .header("authorization", "Bearer not-a-real-jwt")
+            .body(Body::from(
+                serde_json::to_vec(
+                    &serde_json::json!({"jsonrpc": "2.0", "method": method, "id": 6}),
+                )
+                .unwrap(),
+            ))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "{method}");
+        let www = resp
+            .headers()
+            .get("www-authenticate")
+            .expect("401 must carry WWW-Authenticate")
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert!(www.contains("error=\"invalid_token\""), "{method}: {www}");
+        assert!(
+            www.contains("/.well-known/oauth-protected-resource/mcp\""),
+            "{method}: {www}"
+        );
+    }
+
+    // The same call without any Bearer stays anonymous and succeeds.
     let (status, body) = post_json(
         &app,
-        serde_json::json!({"jsonrpc": "2.0", "method": "prompts/list", "id": 6}),
-        Some("not-a-real-jwt"),
+        serde_json::json!({"jsonrpc": "2.0", "method": "prompts/list", "id": 7}),
+        None,
     )
     .await;
-
-    assert_eq!(
-        status,
-        StatusCode::OK,
-        "allowlisted prompts/list must ignore bad bearer (got {status}): {body}"
-    );
-    assert!(
-        body["result"]["prompts"].is_array(),
-        "response must still carry prompts array: {body}"
-    );
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body["result"]["prompts"].is_array(), "{body}");
 }
 
 /// Round-1 code-review CR2-02: cover the unknown-name branch of

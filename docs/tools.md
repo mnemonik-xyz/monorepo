@@ -23,19 +23,23 @@ is compiled with the `trajectory-experimental` cargo feature.
 
 | Tool | Auth | Paid | Purpose |
 |---|---|---|---|
-| [`mnemonic_whoami`](#mnemonic_whoami) | optional | no | Server identity, storage capabilities, pricing |
+| [`mnemonic_whoami`](#mnemonic_whoami) | required on HTTP | no | Server identity, storage capabilities, pricing |
 | [`mnemonic_sign_memory`](#mnemonic_sign_memory) | required for `participate` | `participate` only | Create a signed memory attestation |
 | [`mnemonic_check_pending`](#mnemonic_check_pending) | required | no | Resolve a deferred-sign `correlation_id` |
 | [`mnemonic_recall`](#mnemonic_recall) | optional (changes scope) | no | Semantic search over stored memories |
-| [`mnemonic_verify`](#mnemonic_verify) | optional | no | Verify an attestation against its chain anchors |
-| [`mnemonic_prove_identity`](#mnemonic_prove_identity) | optional | no | Sign an arbitrary challenge with the server key |
+| [`mnemonic_verify`](#mnemonic_verify) | required on HTTP | no | Verify an attestation against its chain anchors |
+| [`mnemonic_prove_identity`](#mnemonic_prove_identity) | required on HTTP | no | Sign an arbitrary challenge with the server key |
 | [`mnemonic_publish_post`](#mnemonic_publish_post) | required | no | Publish a signed public blog post |
 | [`request_public_write_confirmation`](#request_public_write_confirmation) | — | no | Internal ceremony gate (not user-facing) |
 | [`mnemonic_attest_step`](#mnemonic_attest_step) ⚗️ | required | no | Append a hash-linked trajectory step |
 | [`mnemonic_attest_verdict`](#mnemonic_attest_verdict) ⚗️ | required | no | Record an independent judge's verdict |
-| [`mnemonic_verify_trajectory`](#mnemonic_verify_trajectory) ⚗️ | optional | no | Verify a trajectory end-to-end |
+| [`mnemonic_verify_trajectory`](#mnemonic_verify_trajectory) ⚗️ | required on HTTP | no | Verify a trajectory end-to-end |
 
 ⚗️ = experimental, behind `trajectory-experimental`.
+
+The Auth column applies to the HTTP transport. The stdio transport uses the
+local keypair and needs no token. Refer to
+[Authentication over HTTP](#authentication-over-http).
 
 Only `mnemonic_sign_memory` is ever charged, and only for `participate` writes on
 an operator that has a payment mode enabled. Everything else is free.
@@ -72,6 +76,40 @@ curl -s https://mcp.mnemonik.xyz/mcp \
 
 ---
 
+## Authentication over HTTP
+
+The HTTP endpoint uses OAuth 2.1 with PKCE (Proof Key for Code Exchange).
+Send the access token in each request as `Authorization: Bearer <token>`.
+The token is a JWT (JSON Web Token). These rules are available now.
+
+**Requests that work without a token:**
+
+- `initialize`, `ping` and `tools/list`
+- `prompts/list`, `prompts/get`, `resources/list` and `resources/read`
+- JSON-RPC notifications, for example `notifications/initialized`
+- `tools/call` for `mnemonic_recall` (it searches the public pool only)
+
+All other requests need a valid token.
+
+**Error responses.** The server sends HTTP 401 (Unauthorized) in two cases.
+Each 401 has a `WWW-Authenticate: Bearer` header with a `resource_metadata`
+parameter. For `/mcp`, this parameter points to
+`/.well-known/oauth-protected-resource/mcp`.
+
+| Case | HTTP status | `WWW-Authenticate` parameters |
+|---|---|---|
+| The request needs a token and has no token | 401 | `realm`, `resource_metadata` (no `error`) |
+| The request has a token that is expired or not valid | 401 | `realm`, `error="invalid_token"`, `error_description`, `resource_metadata` |
+
+The second case applies to all methods, also to the methods in the list above.
+An expired token on `initialize` gets a 401, so the client can refresh the token
+before it calls a tool. To use a method from the list without a token, send no
+`Authorization` header.
+
+The body of each 401 is a JSON-RPC error with code `-32001`.
+
+---
+
 ## `mnemonic_whoami`
 
 Identity and capability discovery. Call this **first** — it tells you which write
@@ -91,18 +129,64 @@ choose before attempting a write that might be rejected or charged.
   "storage_mode": "full",          // legacy field, kept for pre-envelope clients
   "supported_modes": ["local", "participate"],
   "default_mode": "local",
-  "participate_cost": { /* null when the operator does not charge */ }
+  "participate_cost": {            // null when the server cannot anchor (local only)
+    "currency": "USD",
+    "amount_micro_usdc": 1000,
+    "amount_cents": 1,
+    "pricing_status": "fallback",
+    "payment_methods": ["x402"]
+  },
+  "free_anchors": {                // HTTP + PAYMENT_MODE=x402 only
+    "per_day": 10,
+    "remaining": 7,
+    "global_remaining": 812,
+    "resets_at": "2026-09-28T00:00:00Z"
+  }
 }
 ```
 
 `storage_mode` reflects the operator's *capability*, not a global switch — see
 [Write modes](#write-modes-local-vs-participate).
 
+**`participate_cost` fields:**
+
+| Field | Type | Meaning |
+|---|---|---|
+| `currency` | `string` | Always `"USD"`. |
+| `amount_micro_usdc` | `integer` | Price of one `participate` write, in micro-USDC (1 USDC = 1,000,000 micro-USDC). This is the exact price. |
+| `amount_cents` | `integer` | The same price in US cents. The server rounds up, so a price above zero never shows as `0`. |
+| `pricing_status` | `"live" \| "fallback" \| "disabled"` | The source of the price. Refer to the list below. |
+| `payment_methods` | `string[]` | The payment methods that the server accepts: `["x402"]`, or `[]` when the server does not charge. |
+
+**`pricing_status` values:**
+
+- `live`: The last price refresh was successful. The price comes from current Irys and SOL/USDC quotes.
+- `fallback`: The server has no current quote, or the last refresh failed. The price is the operator floor or the last good quote. The server still charges this price.
+- `disabled`: The operator does not charge (`PAYMENT_MODE=none`). Both amounts are `0`.
+
+The server calculates `participate_cost` again for each `mnemonic_whoami` call.
+Do not show a `participate` write as free unless `pricing_status` is `disabled`.
+
+`free_anchors` shows the free daily quota of the caller (available now). See
+[Free daily quota](#free-daily-quota). The server adds the field only over HTTP
+on a `PAYMENT_MODE=x402` deploy that supports `participate`:
+
+| Field | Meaning |
+|---|---|
+| `per_day` | Free `participate` writes per key per UTC (Coordinated Universal Time) day |
+| `remaining` | Free writes that the caller's key can still use today |
+| `global_remaining` | Free writes left today for all keys together |
+| `resets_at` | Next UTC midnight, when both counters start again |
+
+`remaining` is never more than `global_remaining`. For a caller without a JWT,
+the block has only `per_day` and `resets_at`.
+
 ---
 
 ## `mnemonic_sign_memory`
 
-Embed → compress (TurboQuant) → canonical CBOR → blake3 → COSE_Sign1 → persist.
+Embed → compress (TurboQuant) → canonical CBOR → blake3 → COSE_Sign1
+(`participate` only) → persist.
 
 **Input:**
 
@@ -112,13 +196,25 @@ Embed → compress (TurboQuant) → canonical CBOR → blake3 → COSE_Sign1 →
 | `tags` | `string[]` | no | Free-form tags, usable as recall filters |
 | `mode` | `"local" \| "participate"` | no | Per-request write intent. Omit to use the operator's `default_mode` |
 
-**This tool has two response shapes**, decided by *who signs*:
+**This tool has two response shapes.** The write mode and the transport select
+the shape. Only a `participate` write gets a signature. A local write stores a
+hash and signs nothing, so it never opens an operating system (OS) keychain
+prompt.
 
-### Inline (server-signed) — stdio / single-tenant
+### Inline — stdio, or an explicit local write over HTTP
 
-Taken only when the writer **is** the operator: the stdio path with no JWT, or a
-JWT whose subject equals the operator's own pubkey. Returns the finished
-attestation:
+The server returns the finished attestation in these cases (available now):
+
+- **Stdio, no JSON Web Token (JWT).** The operator key is the identity of the
+  local agent. A `participate` write gets a COSE_Sign1 signature from this key.
+- **HTTP with a JWT and `mode: "local"`.** The server stores a hash-only row
+  that the JWT subject owns. The client does not sign it. The operator key does
+  not sign it.
+
+Over HTTP, the operator key never signs a memory. A request without a JWT
+cannot start an inline `participate` write. To write a local memory over HTTP
+with no signing step, set `mode: "local"`. A request without `mode` uses the
+deferred path.
 
 ```jsonc
 {
@@ -128,8 +224,9 @@ attestation:
   "encoding": "cbor+cose",
   "solana_tx": "<sig>",     // "local:..." in local mode
   "arweave_tx": "<tx id>",  // "local:..." in local mode
-  "signer": "<base58>",
-  "did_sol": "did:sol:...",
+  "signer": "<base58>",     // the owner of the memory
+  "signature": "cose_sign1", // "none" for a local hash-only row
+  "did_sol": "did:sol:...", // DID of the owner
   "timestamp": "...",
   "storage_mode": "full",
   "write_mode": "participate",
@@ -140,9 +237,11 @@ attestation:
 
 ### Deferred (client-signed) — the non-custodial HTTP path
 
-Taken for **every** JWT write owned by an identity other than the operator —
-including an explicit `mode: "local"`. The operator's key never signs content
-authored by someone else, so the server returns a bundle for you to sign:
+The server uses this path for each JWT write in `participate` mode (available
+now). It also uses this path for a JWT write without a `mode` field. The SDK and
+the browser extension send no `mode` field and expect this shape. The operator
+key never signs content from a different identity. Thus the server returns a
+bundle for you to sign:
 
 ```jsonc
 {
@@ -339,7 +438,8 @@ switch. The write mode is a per-request user choice on `mnemonic_sign_memory`.
 | Storage | Operator's SQLite only | Arweave bytes + Solana SPL Memo, plus SQLite |
 | Tx ids | Synthetic `local:...` | Real `arweave_tx` / `solana_tx` |
 | Cost | Free | Priced by the operator (`participate_cost` from `whoami`) |
-| Verifiable by third parties | Signature + hash only | Signature, hash, **and** independent on-chain timestamp |
+| Signed by | Nobody (hash-only row, no keychain prompt) | The author: the client over HTTP, the local agent key over stdio |
+| Verifiable by third parties | Hash only | Signature, hash, **and** independent on-chain timestamp |
 
 Choosing one:
 
@@ -385,6 +485,41 @@ Payment applies only on HTTP, only in `full` mode, and only to
 
 `whoami`, `recall`, `verify`, `prove_identity`, `check_pending`, and
 `publish_post` are always free.
+
+### Free daily quota
+
+Available now, on `PAYMENT_MODE=x402` over HTTP. Each agent Ed25519 key gets
+free `participate` writes every UTC day before payment is required. The agent
+needs no wallet and gets no payment prompt for these writes. The operator sets
+two limits:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `MNEMONIC_FREE_ANCHORS_PER_DAY` | `10` | Free writes per key per UTC day. `0` disables the quota. |
+| `MNEMONIC_FREE_ANCHORS_GLOBAL_PER_DAY` | `1000` | Free writes per UTC day for all keys together. `0` means no free writes. |
+
+The global cap exists because a new key costs nothing to make. The quota
+follows these rules:
+
+- A free write uses the quota only when the anchor is confirmed. The quota
+  counts the write when the client posts the signed bundle to
+  `/api/sign-callback`. A bundle that expires unsigned uses nothing.
+- If the delivery check fails, the server demotes the row to `local` and gives
+  the free write back.
+- A request with an `X-Payment` header uses the paid path. It does not use the
+  quota.
+- `PAYMENT_MODE=none` is free already and does not count writes. Stdio is
+  never charged.
+- Both counters start again at UTC midnight.
+
+When no free write is left, the payment-required responses add a
+`free_anchors` block (the same shape as in `mnemonic_whoami`). This applies to
+the HTTP 402 of `mnemonic_sign_memory` and to the wallet-link (HTTP 428) and
+payment (HTTP 402) steps of `/api/sign-callback`. The block tells the agent why
+it must pay. If a parked bundle loses its free write before the callback (for example,
+you parked more bundles than you have free writes), `/api/sign-callback`
+returns HTTP 402 with `status: "payment_required"`. The bundle stays parked.
+To pay, call `mnemonic_sign_memory` again with `X-Payment`.
 
 ---
 

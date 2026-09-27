@@ -110,6 +110,30 @@ impl ResolvedMode {
     }
 }
 
+/// The transport that delivered a `sign_memory` call.
+///
+/// Only [`Transport::Stdio`] is single-tenant: there the operator keypair
+/// IS the local agent's own identity (OS keychain via `identity::ensure_lazy`
+/// or `MNEMONIC_KEYPAIR_PATH`), so an inline participate write is the agent
+/// signing its own memory. On [`Transport::Http`] the operator key serves
+/// many tenants and must never produce a memory signature — participate
+/// writes are always client-signed via the deferred path, and a call
+/// without a JWT can never reach inline operator signing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Transport {
+    /// `mcp-stdio` — single tenant, the operator key is the agent's key.
+    Stdio,
+    /// Streamable HTTP — hosted, multi-tenant.
+    Http,
+}
+
+impl Transport {
+    /// True when the operator keypair may sign a memory inline (stdio only).
+    pub fn allows_operator_signing(self) -> bool {
+        self == Transport::Stdio
+    }
+}
+
 /// Resolve the per-request `mode` field on `mnemonic_sign_memory` to a
 /// concrete [`ResolvedMode`]. This is the **single source of truth** that
 /// drives BOTH the paywall gate in `mcp_handler` AND the persisted
@@ -311,21 +335,25 @@ pub fn whoami(
     out
 }
 
-/// Tool 2: sign_memory — branches on `jwt_sub`.
+/// Tool 2: sign_memory — branches on `jwt_sub`, the resolved write mode and
+/// the `transport`.
 ///
-/// **HTTP/JWT path** (`jwt_sub.is_some()`, Decision 12):
+/// **HTTP/JWT participate (or `mode` absent)** (Decision 12):
 ///   embed content → compress → build canonical-CBOR over the unsigned
 ///   artifact → blake3-hash → park in `PendingBundles` and return
 ///   `{status: "awaiting_signature", approve_url, correlation_id, expires_in: 300}`.
 ///   No COSE signing, no Arweave/Solana writes, no SQLite row created.
-///   The webapp finishes the flow by signing locally and POSTing
-///   `/api/sign-callback` (handled in `mcp.rs`).
+///   The client finishes the flow by signing locally and POSTing
+///   `/api/sign-callback` (handled in `api.rs`).
 ///
-/// **Stdio path** (`jwt_sub.is_none()`):
-///   preserves the existing inline pipeline byte-for-byte:
-///   JSON → canonical CBOR → blake3 → COSE_Sign1 → Arweave + Solana (full
-///   mode) or synthetic tx IDs (local mode) → SQLite. Backward-compat for
-///   single-tenant CLI / Claude Code.
+/// **HTTP/JWT explicit `mode: "local"`**: inline, hash-only row owned by
+///   `owner_pubkey` (the JWT subject). Nothing is signed — no operator
+///   signature, no client signature, no keychain prompt.
+///
+/// **Stdio path** (`jwt_sub.is_none()`, `Transport::Stdio`):
+///   the inline pipeline: JSON → canonical CBOR → blake3 → (participate
+///   only) COSE_Sign1 → Arweave + Solana, or synthetic tx IDs (local) →
+///   SQLite. The keypair is the local agent's own identity.
 ///
 /// `owner_pubkey` (Decision 9) is the OAuth-resolved tenant scope used by
 /// `recall`. HTTP transport passes `claims.sub`; stdio transport passes
@@ -345,6 +373,7 @@ pub async fn sign_memory(
     storage_mode: &str,
     owner_pubkey: &str,
     jwt_sub: Option<&str>,
+    transport: Transport,
     resolved: ResolvedMode,
     visibility: Visibility,
     envelope: &Envelope,
@@ -372,29 +401,35 @@ pub async fn sign_memory(
             &envelope.supported_modes,
         )));
     }
-    // Routing rule (Wave 3 — remove operator signing for remote users):
+    // Routing rule — who signs a memory:
     //
-    // The operator's keypair must NEVER produce a COSE signature over a
-    // memory authored by a *different* identity. Inline signing
-    // (`sign_memory_inline` → `sign_artifact(.., keypair)`) is therefore
-    // legal ONLY when the writer IS the operator itself — i.e. the resolved
-    // `owner_pubkey` equals the operator pubkey. That covers:
-    //   - the stdio / Claude Code single-tenant path (no JWT; owner is the
-    //     local identity == `keypair`), and
-    //   - a self-call where a JWT subject happens to be the operator's own
-    //     pubkey (e.g. RAG self-knowledge, test harness).
+    // 1. Only a memory anchored on-chain (`participate`) carries a COSE
+    //    signature. A local write stores the blake3 hash of the canonical
+    //    CBOR and signs NOTHING, so it needs no secret and never triggers an
+    //    OS keychain prompt — for the operator AND for a remote JWT user.
     //
-    // Any JWT write owned by a different identity is routed to the
-    // client-signing (deferred) path — regardless of write_mode, INCLUDING
-    // explicit `mode: "local"`. A remote user's free local write is now
-    // client-signed too (the deferred bundle carries `write_mode` so the
-    // sign-callback persists it as `Local` with synthetic ids, still free).
-    // This closes the last custodial gap: previously explicit-local + JWT
-    // fell through to inline and the operator signed the user's content.
-    let operator_pubkey = keypair.pubkey_base58();
+    // 2. An anchored memory is signed by its author, never by the operator
+    //    on someone else's behalf. The operator key signs inline only on the
+    //    single-tenant stdio transport, where it IS the agent's own identity
+    //    and `owner_pubkey == operator pubkey` (both checked again inside
+    //    `sign_memory_inline`).
+    //
+    // Resulting routes:
+    //   - JWT + explicit `mode: "local"` → inline hash-only row owned by the
+    //     JWT subject (`owner_pubkey`); `signer_pubkey` column = owner, the
+    //     same shape as the operator's own local rows. No signature.
+    //   - JWT + participate → deferred client signing (keychain prompt on the
+    //     client). The operator never signs it.
+    //   - JWT + `mode` absent → deferred, even when it resolves to `Local`
+    //     via the env fallback. The shipped SDK (`signMemory`) and the
+    //     browser extension (`signRemote`) omit `mode` and always expect a
+    //     `correlation_id`; the sign-callback persists a local bundle with
+    //     synthetic ids, still free.
+    //   - no JWT (stdio) → inline; participate additionally requires
+    //     `Transport::Stdio`, so an unauthenticated HTTP call can never reach
+    //     operator signing.
     if let Some(sub) = jwt_sub {
-        let is_self_write = owner_pubkey == operator_pubkey;
-        if !(resolved.is_explicit_local() && is_self_write) {
+        if !resolved.is_explicit_local() {
             return sign_memory_deferred(
                 embedder,
                 compressor,
@@ -408,13 +443,15 @@ pub async fn sign_memory(
             .map_err(ToolError::Other);
         }
     }
-    // Hard invariant: on the hosted transport (any JWT caller) the server
-    // NEVER produces a memory signature — not for paid writes, not for
-    // free-quota writes, not for the operator's own subject. The only inline
-    // path left for a JWT caller is an explicit-local self write, which
-    // stores a hash and signs nothing. Participate writes over HTTP are
-    // always client-signed via the deferred path above.
-    if jwt_sub.is_some() && resolved.write_mode == WriteMode::Participate {
+    // Hard invariant: on the hosted transport (any JWT caller, or any HTTP
+    // caller at all) the server NEVER produces a memory signature — not for
+    // paid writes, not for free-quota writes, not for the operator's own
+    // subject. The only inline path left for a JWT caller is an explicit
+    // local write, which stores a hash and signs nothing. Participate writes
+    // over HTTP are always client-signed via the deferred path above.
+    if resolved.write_mode == WriteMode::Participate
+        && (jwt_sub.is_some() || !transport.allows_operator_signing())
+    {
         return Err(ToolError::Other(anyhow::anyhow!(
             "refusing server-side memory signing on the hosted transport; \
              participate writes must be client-signed"
@@ -432,6 +469,7 @@ pub async fn sign_memory(
         cost_hint,
         storage_mode,
         owner_pubkey,
+        transport,
         resolved.write_mode,
         visibility,
         delivery_refetch_timeout,
@@ -449,7 +487,10 @@ pub async fn sign_memory(
             // Any other failure (UnsupportedMode, DeliveryNotConfirmed,
             // PublicWriteRequiresConfirmation, opaque Other) flows through
             // verbatim — soft-fall is for *local capability* failures only.
-            if !allow_fallback || hosted_endpoint.is_empty() {
+            // Soft-fall is an `mcp-stdio` feature: a hosted HTTP server that
+            // now stores a JWT user's explicit-local write inline must not
+            // proxy that user's content to another endpoint.
+            if !allow_fallback || hosted_endpoint.is_empty() || transport != Transport::Stdio {
                 return Err(e);
             }
             let reason = match &e {
@@ -1037,7 +1078,16 @@ pub async fn check_pending(
     }
 }
 
-/// Stdio branch — inline server-side signing (Decision 4 single-tenant flow).
+/// Inline branch — stdio writes (Decision 4 single-tenant flow) and hosted
+/// explicit-local writes.
+///
+/// - `WriteMode::Local`: hash-only row owned by `owner_pubkey`. Nothing is
+///   signed; the `signer_pubkey` column and the artifact `producer` both
+///   name the owner (the operator on stdio, the JWT subject on HTTP), so
+///   `verify` rebuilds the same canonical CBOR later.
+/// - `WriteMode::Participate`: COSE_Sign1 with the operator keypair. Legal
+///   only when `transport` is `Stdio` AND `owner_pubkey` is the operator
+///   pubkey — i.e. the local agent signs its own memory.
 ///
 /// T2 changes (routing now driven by per-request `write_mode`, not the
 /// operator's `STORAGE_MODE` env-var):
@@ -1094,23 +1144,37 @@ async fn sign_memory_inline(
     cost_hint: &CostHint,
     storage_mode: &str,
     owner_pubkey: &str,
+    transport: Transport,
     write_mode: WriteMode,
     visibility: Visibility,
     delivery_refetch_timeout: Duration,
 ) -> Result<serde_json::Value, ToolError> {
-    let pubkey = keypair.pubkey_base58();
-    // Wave 3 invariant (defense in depth): inline signing uses the operator's
-    // `keypair` to produce the COSE_Sign1, so it is only legitimate when the
-    // memory is authored BY the operator — i.e. `owner_pubkey == pubkey`.
-    // The dispatcher in `sign_memory` already routes any remote-owned write to
-    // the client-signing path; this guard guarantees no future caller can
-    // smuggle a remote owner into the operator-signed path (custodial forgery).
-    if owner_pubkey != pubkey {
-        return Err(ToolError::Other(anyhow::anyhow!(
-            "refusing to operator-sign a memory owned by a different identity \
-             (owner={owner_pubkey}, operator={pubkey}); remote writes must be \
-             client-signed via the deferred path"
-        )));
+    // Participate-only invariants (defense in depth). Only the participate
+    // arm below produces a COSE_Sign1, and it signs with the operator
+    // `keypair`. That is legitimate only when the memory is authored BY the
+    // operator (`owner_pubkey == operator pubkey`) AND the call came over
+    // the single-tenant stdio transport, where the operator key is the
+    // agent's own identity. The dispatcher in `sign_memory` already routes
+    // every hosted participate write to client signing; these guards make
+    // sure no future caller can smuggle a remote owner, or an
+    // unauthenticated HTTP call, into the operator-signed path (custodial
+    // forgery). Checked before embedding so a refused call costs nothing.
+    // Local writes sign nothing, so they need neither check.
+    if write_mode == WriteMode::Participate {
+        let operator = keypair.pubkey_base58();
+        if !transport.allows_operator_signing() {
+            return Err(ToolError::Other(anyhow::anyhow!(
+                "refusing to operator-sign a memory on the {transport:?} transport; \
+                 participate writes over HTTP must be client-signed via the deferred path"
+            )));
+        }
+        if owner_pubkey != operator {
+            return Err(ToolError::Other(anyhow::anyhow!(
+                "refusing to operator-sign a memory owned by a different identity \
+                 (owner={owner_pubkey}, operator={operator}); remote writes must be \
+                 client-signed via the deferred path"
+            )));
+        }
     }
     let attestation_id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
@@ -1138,13 +1202,21 @@ async fn sign_memory_inline(
     let compressed = compressor.compress(&embedding);
     let compressed_bytes = compressed.to_bytes();
 
-    // 3. Build artifact JSON for CBOR canonicalization
+    // 3. Build artifact JSON for CBOR canonicalization. `producer` names the
+    //    OWNER: `did:sol:<owner_pubkey>`. For operator-owned rows (stdio,
+    //    and every participate write — enforced above) this is byte-identical
+    //    to `keypair.did_sol()`. For a hosted explicit-local row it is the
+    //    JWT subject's DID, the same convention as `sign_memory_deferred`.
+    //    `rebuild_content_hash` rebuilds it as `did:sol:<signer_pubkey>`,
+    //    and step 6a stores `signer_pubkey = owner_pubkey`, so `verify` of
+    //    a local row reproduces this exact hash.
+    let owner_did = format!("did:sol:{owner_pubkey}");
     let artifact = serde_json::json!({
         "artifact_id": attestation_id,
         "type": "memory",
         "schema_version": 1,
         "content": content,
-        "producer": keypair.did_sol(),
+        "producer": owner_did,
         "created_at": now,
         "tags": tags,
         "metadata": {
@@ -1232,6 +1304,11 @@ async fn sign_memory_inline(
         // so we expect `Visibility::Private` here; for participate writes
         // the resolved value (`Private` default or `Public` after the
         // public-write ceremony) flows through verbatim.
+        //
+        // `signer_pubkey` column = `owner_pubkey`. For a participate row the
+        // guard at the top forces owner == operator, so this is the key that
+        // signed. For a local row nothing signs; the column names the owner,
+        // exactly like the operator's own local rows always did.
         store.save_attestation(
             &attestation_id,
             content,
@@ -1239,7 +1316,7 @@ async fn sign_memory_inline(
             tags,
             &solana_tx,
             &arweave_tx,
-            &pubkey,
+            owner_pubkey,
             owner_pubkey,
             &now,
             write_mode,
@@ -1277,7 +1354,7 @@ async fn sign_memory_inline(
             tags,
             solana_tx: &solana_tx,
             arweave_tx: &arweave_tx,
-            signer_pubkey: &pubkey,
+            signer_pubkey: owner_pubkey,
             owner_pubkey,
             created_at: &now,
             embedding: &embedding,
@@ -1316,6 +1393,18 @@ async fn sign_memory_inline(
     }
 
     let ratio = compressor.compression_ratio();
+    // Envelope identity fields. `signer` and `did_sol` name the OWNER, never
+    // the operator on someone else's behalf. For operator-owned rows (stdio,
+    // every participate write) the values are byte-identical to the old
+    // `keypair` values. For a hosted explicit-local row they name the JWT
+    // subject — deriving `did_sol` from the owner keeps the field present
+    // with the same type (least disruptive for clients) instead of omitting
+    // it. `signature` states what actually signed: `"none"` for a local
+    // hash-only row, `"cose_sign1"` for an anchored participate row.
+    let signature = match write_mode {
+        WriteMode::Local => "none",
+        WriteMode::Participate => "cose_sign1",
+    };
     let mut out = serde_json::json!({
         "attestation_id": attestation_id,
         "content_hash": content_hash,
@@ -1323,8 +1412,9 @@ async fn sign_memory_inline(
         "encoding": "cbor+cose",
         "solana_tx": solana_tx,
         "arweave_tx": arweave_tx,
-        "signer": pubkey,
-        "did_sol": keypair.did_sol(),
+        "signer": owner_pubkey,
+        "signature": signature,
+        "did_sol": owner_did,
         "timestamp": now,
         "storage_mode": storage_mode,
         "write_mode": write_mode.as_str(),
@@ -2284,6 +2374,7 @@ mod sign_memory_tests {
             "local",
             &owner,
             Some("user-jwt-sub"),
+            Transport::Http,
             resolved,
             Visibility::Private,
             &env,
@@ -2327,6 +2418,7 @@ mod sign_memory_tests {
             "local",
             &owner,
             None,
+            Transport::Stdio,
             resolved,
             Visibility::Private,
             &env,
@@ -2372,6 +2464,7 @@ mod sign_memory_tests {
             "full",
             &owner,
             Some(&owner),
+            Transport::Http,
             resolved,
             Visibility::Private,
             &env,
@@ -2410,6 +2503,7 @@ mod sign_memory_tests {
             "local",
             &owner,
             None,
+            Transport::Stdio,
             resolved,
             Visibility::Private,
             &local_envelope(),
@@ -2469,6 +2563,7 @@ mod sign_memory_tests {
             "local",
             &owner,
             Some("user-jwt-sub"),
+            Transport::Http,
             resolved_explicit_local,
             Visibility::Private,
             &env_local,
@@ -2505,6 +2600,7 @@ mod sign_memory_tests {
             "full",
             &owner,
             Some("user-jwt-sub"),
+            Transport::Http,
             resolved_explicit_local_full,
             Visibility::Private,
             &env_full,
@@ -2521,6 +2617,311 @@ mod sign_memory_tests {
             "expected inline shape on full deploy too"
         );
         assert_eq!(result["write_mode"], "local");
+    }
+
+    /// Operator identity whose secret access is observable. `attempts`
+    /// counts every attempt to read the operator secret — the only way to
+    /// get a COSE signature out of the operator key. The load always fails,
+    /// so a missing guard cannot silently sign either.
+    fn watched_operator(
+        pubkey: solana_sdk::pubkey::Pubkey,
+    ) -> (LazyKeypair, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seen = attempts.clone();
+        let operator = LazyKeypair::deferred(pubkey, move || {
+            seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            anyhow::bail!("operator secret must not be read for this write")
+        });
+        (operator, attempts)
+    }
+
+    /// `sign_memory` with the network-free fixtures and soft-fall disabled.
+    #[allow(clippy::too_many_arguments)]
+    async fn sign_as(
+        operator: &LazyKeypair,
+        store: &std::sync::Mutex<SqliteStore>,
+        pending: &PendingBundles,
+        owner: &str,
+        jwt_sub: Option<&str>,
+        transport: Transport,
+        resolved: ResolvedMode,
+        storage_mode: &str,
+        content: &str,
+    ) -> Result<serde_json::Value, ToolError> {
+        let sol = SolanaClient::new("http://localhost:0");
+        let ar = ArweaveClient::new("http://localhost:0");
+        let comp = EmbeddingCompressor::new(8, 4, 42);
+        let hint = crate::pricing::CostHint {
+            irys_lamports: 0,
+            sol_tx_fee_lamports: 0,
+            sol_price_usdc: 0.0,
+            charge_micro_usdc: 0,
+        };
+        let env = Envelope::from_config(storage_mode, "none", 0);
+        let (hosted_client, args) = no_softfall();
+        sign_memory(
+            operator,
+            &sol,
+            &ar,
+            store,
+            &StubEmbedder,
+            &comp,
+            pending,
+            content,
+            &[],
+            &hint,
+            storage_mode,
+            owner,
+            jwt_sub,
+            transport,
+            resolved,
+            Visibility::Private,
+            &env,
+            std::time::Duration::from_secs(15),
+            false,
+            "",
+            &hosted_client,
+            &args,
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn test_jwt_explicit_local_remote_owner_is_hash_only_inline() {
+        // Owner requirement 2: a hosted user's free local write needs no
+        // client signature (no keychain prompt) and gets no operator
+        // signature either — a hash-only row owned by the JWT subject.
+        let (kp, sol, ar, store, emb, comp, pending, _hint) = fixtures();
+        let (operator, attempts) = watched_operator(kp.pubkey());
+        let operator_pk = kp.pubkey().to_string();
+        let remote = Keypair::new().pubkey().to_string();
+        let mut sol_txs = Vec::new();
+        for storage_mode in ["local", "full"] {
+            let resolved = resolve_write_mode(Some(&serde_json::json!("local")), storage_mode)
+                .expect("explicit local resolves");
+            let out = sign_as(
+                &operator,
+                &store,
+                &pending,
+                &remote,
+                Some(&remote),
+                Transport::Http,
+                resolved,
+                storage_mode,
+                "remote free note",
+            )
+            .await
+            .expect("explicit local write succeeds inline");
+            assert!(out.get("correlation_id").is_none(), "not deferred: {out}");
+            assert!(out.get("status").is_none(), "not deferred: {out}");
+            assert!(out["attestation_id"].is_string(), "{out}");
+            assert_eq!(out["write_mode"], "local");
+            assert_eq!(out["signer"], remote.as_str());
+            assert_eq!(out["signature"], "none");
+            assert_eq!(out["did_sol"], format!("did:sol:{remote}"));
+            let sol_tx = out["solana_tx"].as_str().expect("solana_tx").to_string();
+            assert!(sol_tx.starts_with("local:"), "{sol_tx}");
+            assert!(out["arweave_tx"].as_str().unwrap().starts_with("local:"));
+            sol_txs.push(sol_tx);
+        }
+        // Nothing parked for client signing, operator secret never touched.
+        assert_eq!(pending.len().await, 0);
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert!(!operator.is_loaded());
+
+        {
+            let s = store.lock().unwrap();
+            // `count` is keyed on the `signer_pubkey` column: owner, never operator.
+            assert_eq!(s.count(&remote).unwrap(), 2);
+            assert_eq!(s.count(&operator_pk).unwrap(), 0);
+            // Recall scoping: the JWT subject sees the rows, the operator does not.
+            let mine = recall(
+                &operator,
+                &s,
+                &emb,
+                "remote free note",
+                5,
+                Some(&remote),
+                None,
+            );
+            assert_eq!(mine["results"].as_array().unwrap().len(), 2, "{mine}");
+            let op = recall(
+                &operator,
+                &s,
+                &emb,
+                "remote free note",
+                5,
+                Some(&operator_pk),
+                None,
+            );
+            assert!(op["results"].as_array().unwrap().is_empty(), "{op}");
+        }
+
+        // `verify` rebuilds the canonical CBOR with `producer =
+        // did:sol:<signer_pubkey>` — must reproduce the stored hash.
+        let v = verify(
+            &sol,
+            &ar,
+            &store,
+            Some(&sol_txs[0]),
+            None,
+            &remote,
+            "local",
+            &emb,
+            &comp,
+        )
+        .await
+        .expect("verify");
+        assert_eq!(v["status"], "verified", "{v}");
+        assert_eq!(v["signer"], remote.as_str());
+    }
+
+    #[tokio::test]
+    async fn test_jwt_participate_remote_owner_stays_deferred() {
+        // Owner requirement 1: an anchored memory is signed by the client.
+        let (kp, _sol, _ar, store, _emb, _comp, pending, _hint) = fixtures();
+        let (operator, attempts) = watched_operator(kp.pubkey());
+        let remote = Keypair::new().pubkey().to_string();
+        let resolved = resolve_write_mode(Some(&serde_json::json!("participate")), "full").unwrap();
+        let out = sign_as(
+            &operator,
+            &store,
+            &pending,
+            &remote,
+            Some(&remote),
+            Transport::Http,
+            resolved,
+            "full",
+            "anchor me",
+        )
+        .await
+        .expect("deferred envelope");
+        assert_eq!(out["status"], "awaiting_signature", "{out}");
+        assert!(out["correlation_id"].is_string());
+        assert!(out.get("attestation_id").is_none());
+        assert_eq!(pending.len().await, 1);
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(store.lock().unwrap().count(&remote).unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_no_path_operator_signs_participate_for_foreign_owner() {
+        // Exhaustive over (jwt_sub, transport, explicit/fallback participate)
+        // with owner != operator: the operator secret is never read, so no
+        // anchored artifact can carry the operator key as COSE kid. Each
+        // call either defers to client signing or is refused.
+        let (kp, _sol, _ar, store, _emb, _comp, pending, _hint) = fixtures();
+        let (operator, attempts) = watched_operator(kp.pubkey());
+        let remote = Keypair::new().pubkey().to_string();
+        let explicit = resolve_write_mode(Some(&serde_json::json!("participate")), "full").unwrap();
+        let fallback = resolve_write_mode(None, "full").unwrap();
+        for jwt in [None, Some(remote.as_str())] {
+            for transport in [Transport::Stdio, Transport::Http] {
+                for resolved in [explicit, fallback] {
+                    let res = sign_as(
+                        &operator, &store, &pending, &remote, jwt, transport, resolved, "full",
+                        "foreign",
+                    )
+                    .await;
+                    match res {
+                        Ok(v) => {
+                            assert!(jwt.is_some(), "no-JWT call must be refused: {v}");
+                            assert_eq!(v["status"], "awaiting_signature", "{v}");
+                        }
+                        Err(e) => assert!(jwt.is_none(), "JWT call must defer, got {e}"),
+                    }
+                }
+            }
+        }
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(store.lock().unwrap().count(&remote).unwrap(), 0);
+        assert_eq!(
+            store
+                .lock()
+                .unwrap()
+                .count(&kp.pubkey().to_string())
+                .unwrap(),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn test_http_without_jwt_cannot_reach_operator_signing() {
+        // Transport guard: an unauthenticated HTTP call falls back to
+        // owner = operator in `mcp_handler`. Even so, participate must not
+        // reach inline operator signing — only `Transport::Stdio` may.
+        let (kp, _sol, _ar, store, _emb, _comp, pending, _hint) = fixtures();
+        let (operator, attempts) = watched_operator(kp.pubkey());
+        let operator_pk = kp.pubkey().to_string();
+        let resolved = resolve_write_mode(Some(&serde_json::json!("participate")), "full").unwrap();
+        let err = sign_as(
+            &operator,
+            &store,
+            &pending,
+            &operator_pk,
+            None,
+            Transport::Http,
+            resolved,
+            "full",
+            "anon participate",
+        )
+        .await
+        .expect_err("HTTP without JWT must be refused");
+        assert!(err.to_string().contains("client-signed"), "{err}");
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(store.lock().unwrap().count(&operator_pk).unwrap(), 0);
+
+        // Defense in depth: the inline function itself refuses as well.
+        let comp = EmbeddingCompressor::new(8, 4, 42);
+        let hint = crate::pricing::CostHint {
+            irys_lamports: 0,
+            sol_tx_fee_lamports: 0,
+            sol_price_usdc: 0.0,
+            charge_micro_usdc: 0,
+        };
+        let err = sign_memory_inline(
+            &operator,
+            &SolanaClient::new("http://localhost:0"),
+            &ArweaveClient::new("http://localhost:0"),
+            &store,
+            &StubEmbedder,
+            &comp,
+            "anon participate",
+            &[],
+            &hint,
+            "full",
+            &operator_pk,
+            Transport::Http,
+            WriteMode::Participate,
+            Visibility::Private,
+            std::time::Duration::from_secs(1),
+        )
+        .await
+        .expect_err("inline participate over HTTP must be refused");
+        assert!(err.to_string().contains("Http transport"), "{err}");
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+        // The same self-owned participate write on stdio DOES reach the
+        // signing step (the agent signs its own memory): the watched loader
+        // is consulted exactly once and reports the locked keychain.
+        let err = sign_as(
+            &operator,
+            &store,
+            &pending,
+            &operator_pk,
+            None,
+            Transport::Stdio,
+            resolved,
+            "full",
+            "stdio participate",
+        )
+        .await
+        .expect_err("watched loader always fails");
+        match err {
+            ToolError::TypedRpc(e) => assert_eq!(e.code, -32094),
+            other => panic!("expected IdentityBootstrapFailed, got {other}"),
+        }
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 }
 

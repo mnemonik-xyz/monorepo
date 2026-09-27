@@ -12,7 +12,7 @@
 // time we validate that both match the originally-issued tuple before
 // issuing the HTTP request. A mismatch terminates the flow.
 
-import { AuthError } from "./errors.js";
+import { AuthError, UserError } from "./errors.js";
 import type { Keypair } from "./keypair.js";
 import { loadWasm } from "./wasm.js";
 
@@ -284,6 +284,12 @@ export interface ExchangeCodeForTokenInput {
 export interface ExchangeCodeForTokenResult {
   jwt: string;
   expiresAt: string;
+  /**
+   * OAuth refresh token (RFC 6749 §5.1), when the server issues one. Keep
+   * it and pass it to {@link refreshAccessToken} to get a new JWT without
+   * a new login.
+   */
+  refreshToken?: string;
 }
 
 /**
@@ -395,7 +401,125 @@ export async function exchangeCodeForToken(
   }
 
   deleteSession(sessionId);
-  return { jwt, expiresAt };
+  const refreshToken = readRefreshToken(body);
+  return { jwt, expiresAt, ...(refreshToken ? { refreshToken } : {}) };
+}
+
+/** Read a non-empty `refresh_token` string from a token-endpoint body. */
+function readRefreshToken(body: unknown): string | undefined {
+  if (!body || typeof body !== "object") return undefined;
+  const v = (body as { refresh_token?: unknown }).refresh_token;
+  return typeof v === "string" && v.length > 0 ? v : undefined;
+}
+
+// ── refresh-token grant (issue #33) ─────────────────────────────────────────
+
+export interface RefreshAccessTokenInput {
+  baseUrl: string;
+  /** The refresh token from the last login or the last refresh. */
+  refreshToken: string;
+  /** OAuth client id. Defaults to `"mnemonic-cli"`. */
+  clientId?: string;
+  /** Override the global fetch (testing). */
+  fetch?: typeof fetch;
+}
+
+export interface RefreshAccessTokenResult {
+  jwt: string;
+  expiresAt: string;
+  /** JWT `sub` claim of the new access token. */
+  sub: string;
+  /**
+   * The rotated refresh token. The server rotates the token on each use,
+   * so the caller MUST keep this value and discard the old one.
+   */
+  refreshToken: string;
+}
+
+/**
+ * Get a new access JWT with `grant_type=refresh_token` at
+ * `POST /oauth/token`. This needs no private key and no user interaction.
+ *
+ * The server rotates the refresh token on each use (one-year rolling
+ * lifetime). A second use of the same old token inside a short reuse
+ * window returns the same new pair. A later reuse revokes the whole token
+ * family, so always keep the returned `refreshToken`.
+ *
+ * @throws `UserError` if `refreshToken` is empty.
+ * @throws `AuthError` if the server rejects the token (`invalid_grant`:
+ *         expired, revoked or reused), on network failure, on a non-2xx
+ *         response, or on a malformed body.
+ */
+export async function refreshAccessToken(
+  input: RefreshAccessTokenInput
+): Promise<RefreshAccessTokenResult> {
+  const { baseUrl, refreshToken } = input;
+  if (typeof refreshToken !== "string" || refreshToken.length === 0) {
+    throw new UserError("refreshAccessToken: refreshToken must be non-empty");
+  }
+  const doFetch = input.fetch ?? fetch;
+  const tokenUrl = new URL("/oauth/token", baseUrl).toString();
+  let res: Response;
+  try {
+    res = await doFetch(tokenUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        grant_type: "refresh_token",
+        refresh_token: refreshToken,
+        client_id: input.clientId ?? "mnemonic-cli",
+      }),
+    });
+  } catch (cause) {
+    throw new AuthError("oauth: token endpoint unreachable", cause);
+  }
+  let body: unknown;
+  try {
+    body = await res.json();
+  } catch (cause) {
+    if (!res.ok) {
+      throw new AuthError(`oauth: refresh rejected (HTTP ${res.status})`);
+    }
+    throw new AuthError("oauth: token endpoint returned non-JSON body", cause);
+  }
+  if (!res.ok) {
+    // Echo only the RFC 6749 §5.2 error code — never the token.
+    const code =
+      body && typeof body === "object" &&
+      typeof (body as { error?: unknown }).error === "string"
+        ? (body as { error: string }).error
+        : "unknown";
+    throw new AuthError(
+      `oauth: refresh rejected (HTTP ${res.status}, ${code.slice(0, 64)})`
+    );
+  }
+  const obj = (body && typeof body === "object" ? body : {}) as {
+    access_token?: unknown;
+    expires_in?: unknown;
+  };
+  const jwt = typeof obj.access_token === "string" ? obj.access_token : "";
+  if (!jwt) {
+    throw new AuthError("oauth: token endpoint returned malformed body");
+  }
+  let sub: string;
+  let exp: number;
+  try {
+    ({ sub, exp } = parseJwtPayload(jwt));
+  } catch (cause) {
+    throw new AuthError("oauth: refreshed JWT is invalid", cause);
+  }
+  const expiresAt =
+    typeof obj.expires_in === "number" && Number.isFinite(obj.expires_in)
+      ? new Date(Date.now() + obj.expires_in * 1000).toISOString()
+      : new Date(exp * 1000).toISOString();
+  return {
+    jwt,
+    expiresAt,
+    sub,
+    // The server always rotates; keep the old value only if a server
+    // does not send a new one (the old one then stays valid).
+    refreshToken: readRefreshToken(body) ?? refreshToken,
+  };
 }
 
 // ── browserless (programmatic) OAuth ────────────────────────────────────────
@@ -423,6 +547,11 @@ export interface LoginWithIdentityResult {
   jwt: string;
   expiresAt: string;
   sub: string;
+  /**
+   * OAuth refresh token, when the server issues one. Pass it to
+   * {@link refreshAccessToken} to renew the JWT without the private key.
+   */
+  refreshToken?: string;
 }
 
 /**
@@ -633,7 +762,13 @@ export async function loginWithIdentity(
   // `sub` is guaranteed to equal `keypair.pubkey` by construction
   // (the server bound `expected_pubkey = pubkey` at GET-time and asserted
   // `signer_pubkey == expected_pubkey` at POST-time before issuing the code).
-  return { jwt, expiresAt, sub: pubkey };
+  const refreshToken = readRefreshToken(tokenBody);
+  return {
+    jwt,
+    expiresAt,
+    sub: pubkey,
+    ...(refreshToken ? { refreshToken } : {}),
+  };
 }
 
 /** Standard base64 (with padding) → bytes. Distinct from `base64url`. */
@@ -709,6 +844,24 @@ const JWT_ALLOWED_ALGS = new Set(["HS256"]);
  * @throws `AuthError` for malformed tokens, disallowed `alg`, missing
  *         required claims, or `exp` strictly in the past.
  */
+/**
+ * Internal: read the `exp` claim (seconds) of a JWT without validating it.
+ * Returns `undefined` for a malformed token. Used by `MnemonicClient` to
+ * refresh a token that is about to expire. Not re-exported.
+ */
+export function readJwtExp(jwt: string): number | undefined {
+  const parts = typeof jwt === "string" ? jwt.split(".") : [];
+  if (parts.length !== 3) return undefined;
+  try {
+    const obj = JSON.parse(decodeBase64UrlToString(parts[1]!)) as unknown;
+    if (!obj || typeof obj !== "object") return undefined;
+    const exp = (obj as { exp?: unknown }).exp;
+    return typeof exp === "number" && Number.isFinite(exp) ? exp : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export function parseJwtPayload(jwt: string): JwtPayload {
   if (typeof jwt !== "string" || jwt.length === 0) {
     throw new AuthError("jwt: empty or non-string token");

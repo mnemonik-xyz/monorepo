@@ -16,12 +16,11 @@
 // command (sign / recall / verify, and whoami's --with-count) BEFORE any
 // HTTP request is constructed.
 
-import { IdentityRequiresKeystore } from "@mnemonik-xyz/sdk";
-
 import {
   identityPath,
-  loadIdentityJson,
+  loadIdentityPubkey,
   loadToken,
+  type TokenJson,
   tokenPath,
 } from "./config.js";
 import { UserError } from "./errors.js";
@@ -71,21 +70,13 @@ export function formatMismatchError(ctx: MismatchContext): string {
  * files, so a failed pre-flight in those branches surfaces the appropriate
  * "no identity" / "no token" hint instead of crashing.
  */
-export function assertIdentityMatchesToken(): void {
-  // identity.json may be a stub (keychain-backed) — extract the pubkey from
-  // the typed throw rather than the full keypair JSON; we only need the
-  // pubkey here, so resolving from the keychain is unnecessary.
-  let identityPubkey: string;
-  try {
-    identityPubkey = loadIdentityJson().pubkey_base58;
-  } catch (e) {
-    if (e instanceof IdentityRequiresKeystore) {
-      identityPubkey = e.pubkey_base58;
-    } else {
-      throw e;
-    }
-  }
-  const tok = loadToken();
+export function assertIdentityMatchesToken(token?: TokenJson): void {
+  // identity.json may be a stub (keychain-backed) — read only the pubkey;
+  // resolving the secret from the keychain is unnecessary here.
+  const identityPubkey = loadIdentityPubkey();
+  // Callers that can renew an expired token pass the raw token (read
+  // without the expiry check); `sub` does not change on renewal.
+  const tok = token ?? loadToken();
   if (identityPubkey !== tok.sub) {
     throw new UserError(
       formatMismatchError({

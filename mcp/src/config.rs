@@ -216,6 +216,18 @@ pub struct Config {
     /// Env: `MNEMONIC_DELIVERY_QUOTA_EVICT_SECS`.
     pub delivery_quota_evict_interval_secs: u64,
 
+    // ── Free daily quota for anchored writes ────────────────────────────────
+    /// Free `participate` (on-chain anchored) writes per agent Ed25519 key
+    /// per UTC day, before payment is required. Applies only over HTTP with
+    /// `PAYMENT_MODE=x402`. `0` disables the per-key allowance. Default 10.
+    /// Env: `MNEMONIC_FREE_ANCHORS_PER_DAY`.
+    pub free_anchors_per_day: u32,
+    /// Global cap on free anchored writes per UTC day across all keys. New
+    /// keys cost nothing to mint, so this bounds the operator's daily
+    /// chain spend on free writes. `0` = no free anchors at all. Default 1000.
+    /// Env: `MNEMONIC_FREE_ANCHORS_GLOBAL_PER_DAY`.
+    pub free_anchors_global_per_day: u32,
+
     // ── Chain-backed traction stats (recover-traction-from-chain) ───────────
     /// Comma-separated base58 Solana pubkeys of every wallet that ever signed
     /// anchored uploads (the funded server keypair(s), current and historic).
@@ -328,6 +340,12 @@ impl Config {
             delivery_quota_evict_interval_secs: env_or("MNEMONIC_DELIVERY_QUOTA_EVICT_SECS", "30")
                 .parse()
                 .unwrap_or(30),
+            free_anchors_per_day: env_or("MNEMONIC_FREE_ANCHORS_PER_DAY", "10")
+                .parse()
+                .unwrap_or(10),
+            free_anchors_global_per_day: env_or("MNEMONIC_FREE_ANCHORS_GLOBAL_PER_DAY", "1000")
+                .parse()
+                .unwrap_or(1000),
             chain_stats_wallets: env_or("CHAIN_STATS_WALLETS", "")
                 .split(',')
                 .map(str::trim)

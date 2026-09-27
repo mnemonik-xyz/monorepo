@@ -189,7 +189,7 @@ async fn catalogue_embedder_invalid() {
     use mnemonic_core::solana::SolanaClient;
     use mnemonic_core::storage::SqliteStore;
     use mnemonic_mcp::mcp::Envelope;
-    use mnemonic_mcp::tools::{resolve_write_mode, sign_memory, ToolError};
+    use mnemonic_mcp::tools::{resolve_write_mode, sign_memory, ToolError, Transport};
     use solana_sdk::signature::Keypair;
 
     let tmp = tempfile::NamedTempFile::new().expect("tempfile");
@@ -228,6 +228,7 @@ async fn catalogue_embedder_invalid() {
         "local",
         &owner,
         None,
+        Transport::Stdio,
         resolved,
         Visibility::Private,
         &envelope,
