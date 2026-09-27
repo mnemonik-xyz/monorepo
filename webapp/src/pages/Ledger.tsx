@@ -21,7 +21,7 @@ import { irysDataUrl, solanaTxUrl } from "../lib/links";
  *
  * The page never lies about provenance: data comes from the live `/artifacts`
  * endpoint and a fetch failure shows an error state — never fabricated rows.
- * On-chain rows ("participate") link to Solana and the Irys data gateway; `local:`
+ * On-chain rows ("anchored") link to Solana and the Irys data gateway; `local:`
  * / unanchored rows render as plain text, never as links (Decision 6 surfaces
  * public rows only).
  */
@@ -82,8 +82,14 @@ export default function Ledger() {
   }, [query, mode]);
 
   const artifacts = page?.artifacts ?? [];
+  // "anchored" must also match rows still carrying the pre-rename
+  // "participate" spelling, so filter on "not local" rather than on equality.
   const visible =
-    mode === "all" ? artifacts : artifacts.filter((a) => a.write_mode === mode);
+    mode === "all"
+      ? artifacts
+      : artifacts.filter((a) =>
+          mode === "local" ? a.write_mode === "local" : a.write_mode !== "local"
+        );
 
   return (
     <div className="relative min-h-screen overflow-hidden">
@@ -169,7 +175,7 @@ function PageHeader() {
 const MODE_CHIPS: Array<{ value: ModeFilter; label: string }> = [
   { value: "all", label: "All" },
   { value: "local", label: "On-node" },
-  { value: "participate", label: "On-chain" },
+  { value: "anchored", label: "On-chain" },
 ];
 
 function Controls({
@@ -245,7 +251,9 @@ function Controls({
 
 function ArtifactCard({ artifact: a }: { artifact: Artifact }) {
   const [expanded, setExpanded] = useState(false);
-  const onChain = a.write_mode === "participate";
+  // Not `=== "anchored"`: a row written before the participate->anchored
+  // rename still carries the old spelling, and would render as on-node.
+  const onChain = a.write_mode !== "local";
   const solUrl = solanaTxUrl(a.solana_tx);
   const dataUrl = irysDataUrl(a.arweave_tx);
 
@@ -307,7 +315,7 @@ function ArtifactCard({ artifact: a }: { artifact: Artifact }) {
 }
 
 function ModeBadge({ mode }: { mode: WriteMode }) {
-  if (mode === "participate") {
+  if (mode !== "local") {
     return (
       <span className="inline-flex items-center gap-1.5 rounded-sm border border-accent-secondary/40 bg-accent-secondary/10 px-2 py-0.5 font-mono text-[10px] uppercase tracking-[0.16em] text-accent-secondary">
         On-chain

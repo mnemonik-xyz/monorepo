@@ -11,7 +11,13 @@
  */
 import { MCP_BASE } from "./api";
 
-export type WriteMode = "local" | "participate";
+/**
+ * `"anchored"` is the canonical spelling. `"participate"` is the pre-2026-09-27
+ * name for the same mode; a row written before the rename, or an older
+ * server, can still return it. Treat anything that is not `"local"` as
+ * anchored rather than comparing against one spelling.
+ */
+export type WriteMode = "local" | "anchored" | "participate";
 export type ArtifactSource = "all" | "on_node" | "on_chain";
 
 export interface Artifact {

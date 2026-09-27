@@ -178,7 +178,7 @@ export default function Privacy() {
                   </code>{" "}
                   by default,{" "}
                   <code className="rounded bg-white/[0.06] px-1 py-0.5 font-mono text-[12px] text-text-primary">
-                    mode: "participate"
+                    mode: "anchored"
                   </code>{" "}
                   for on-chain anchoring);
                 </li>

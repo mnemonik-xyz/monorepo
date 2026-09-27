@@ -11,7 +11,7 @@ vi.mock("../components/SiteFooter", () => ({
 }));
 
 // Local fixture standing in for live `/artifacts` rows, with the variety the
-// rendering tests need: a real-anchored participate row, a local-only row, and
+// rendering tests need: a real-anchored anchored row, a local-only row, and
 // a `local:`-prefixed anchor row. The mock filters it by `q` so "search filters
 // the list" is exercised honestly without any network.
 import type { Artifact } from "../lib/ledger";
@@ -26,7 +26,7 @@ const FIXTURE: Artifact[] = [
     solana_tx: "5Nf5h5x2qQk8wq7Yk3J9p1d2c3b4a5n6m7l8k9j0i1h2g3f4e5d6c7b8a9",
     arweave_tx: "kTQ7t1f9c2X3v4B5n6M7l8K9j0I1h2G3f4E5d6C7b8A",
     created_at: "2026-06-26T00:00:00.000Z",
-    write_mode: "participate",
+    write_mode: "anchored",
   },
   {
     id: "a1c0ffee-0002-4a00-9c01-000000000002",
@@ -41,7 +41,7 @@ const FIXTURE: Artifact[] = [
   },
   {
     id: "a1c0ffee-0003-4a00-9c01-000000000003",
-    content: "Agent note: recall spans both local and participate writes.",
+    content: "Agent note: recall spans both local and anchored writes.",
     content_hash:
       "2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae",
     tags: ["recall"],
@@ -74,7 +74,7 @@ vi.mock("../lib/ledger", async () => {
         if (opts?.source === "on_node") {
           artifacts = artifacts.filter((a) => a.write_mode === "local");
         } else if (opts?.source === "on_chain") {
-          artifacts = artifacts.filter((a) => a.write_mode === "participate");
+          artifacts = artifacts.filter((a) => a.write_mode !== "local");
         }
         return { artifacts, total: artifacts.length };
       },
