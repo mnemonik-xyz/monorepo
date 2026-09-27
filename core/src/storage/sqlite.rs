@@ -111,7 +111,8 @@ CREATE INDEX IF NOT EXISTS idx_blog_posts_published_at ON blog_posts(published_a
 /// Decision 9.
 const SEARCH_SQL_ALL: &str = "SELECT a.attestation_id, a.content, a.content_hash, a.tags,
             a.solana_tx, a.arweave_tx, a.created_at, a.write_mode,
-            a.visibility, ae.embedding, a.signer_pubkey, COALESCE(a.owner_pubkey, '')
+            a.visibility, ae.embedding, a.signer_pubkey, COALESCE(a.owner_pubkey, ''),
+            a.plaintext_on_arweave
      FROM attestations a
      JOIN attestation_embeddings ae ON a.attestation_id = ae.attestation_id
      WHERE a.owner_pubkey = ?";
@@ -122,7 +123,8 @@ const SEARCH_SQL_ALL: &str = "SELECT a.attestation_id, a.content, a.content_hash
 /// interpolated as text.
 const SEARCH_SQL_FILTERED: &str = "SELECT a.attestation_id, a.content, a.content_hash, a.tags,
             a.solana_tx, a.arweave_tx, a.created_at, a.write_mode,
-            a.visibility, ae.embedding, a.signer_pubkey, COALESCE(a.owner_pubkey, '')
+            a.visibility, ae.embedding, a.signer_pubkey, COALESCE(a.owner_pubkey, ''),
+            a.plaintext_on_arweave
      FROM attestations a
      JOIN attestation_embeddings ae ON a.attestation_id = ae.attestation_id
      WHERE a.owner_pubkey = ? AND a.visibility = ?";
@@ -136,7 +138,8 @@ const SEARCH_SQL_FILTERED: &str = "SELECT a.attestation_id, a.content, a.content
 /// they also stay out of the pool (privacy-by-default).
 const SEARCH_SQL_PUBLIC_POOL: &str = "SELECT a.attestation_id, a.content, a.content_hash, a.tags,
             a.solana_tx, a.arweave_tx, a.created_at, a.write_mode,
-            a.visibility, ae.embedding, a.signer_pubkey, COALESCE(a.owner_pubkey, '')
+            a.visibility, ae.embedding, a.signer_pubkey, COALESCE(a.owner_pubkey, ''),
+            a.plaintext_on_arweave
      FROM attestations a
      JOIN attestation_embeddings ae ON a.attestation_id = ae.attestation_id
      WHERE a.visibility = ?1";
@@ -148,7 +151,8 @@ const SEARCH_SQL_PUBLIC_POOL: &str = "SELECT a.attestation_id, a.content, a.cont
 /// other rows that the operator key owns.
 const SEARCH_SQL_OWNER_TAGGED: &str = "SELECT a.attestation_id, a.content, a.content_hash, a.tags,
             a.solana_tx, a.arweave_tx, a.created_at, a.write_mode,
-            a.visibility, ae.embedding, a.signer_pubkey, COALESCE(a.owner_pubkey, '')
+            a.visibility, ae.embedding, a.signer_pubkey, COALESCE(a.owner_pubkey, ''),
+            a.plaintext_on_arweave
      FROM attestations a
      JOIN attestation_embeddings ae ON a.attestation_id = ae.attestation_id
      WHERE a.owner_pubkey = ?1 AND a.tags LIKE ?2 ESCAPE '\\'";
@@ -159,7 +163,8 @@ const SEARCH_SQL_OWNER_TAGGED: &str = "SELECT a.attestation_id, a.content, a.con
 /// `Visibility::Public`) are returned; private and legacy NULL rows are not.
 const LIST_PUBLIC_ARTIFACTS_SQL: &str =
     "SELECT a.attestation_id, a.content, a.content_hash, a.tags,
-            a.solana_tx, a.arweave_tx, a.created_at, a.write_mode
+            a.solana_tx, a.arweave_tx, a.created_at, a.write_mode,
+            a.plaintext_on_arweave
      FROM attestations a
      WHERE a.visibility = ?1
      ORDER BY a.created_at DESC
@@ -168,7 +173,8 @@ const LIST_PUBLIC_ARTIFACTS_SQL: &str =
 /// Same as `LIST_PUBLIC_ARTIFACTS_SQL`, restricted to one `write_mode`.
 const LIST_PUBLIC_ARTIFACTS_BY_MODE_SQL: &str =
     "SELECT a.attestation_id, a.content, a.content_hash, a.tags,
-            a.solana_tx, a.arweave_tx, a.created_at, a.write_mode
+            a.solana_tx, a.arweave_tx, a.created_at, a.write_mode,
+            a.plaintext_on_arweave
      FROM attestations a
      WHERE a.write_mode = ?1 AND a.visibility = ?2
      ORDER BY a.created_at DESC
@@ -243,6 +249,9 @@ pub struct PublicArtifact {
     pub arweave_tx: String,
     pub created_at: String,
     pub write_mode: WriteMode,
+    /// True when the content was submitted to Arweave as plain text that
+    /// anyone can read (owner decision D-8).
+    pub plaintext_on_arweave: bool,
 }
 
 /// Keys of every non-public row, returned by
@@ -552,6 +561,116 @@ fn migrate_write_mode_column(conn: &Connection) -> anyhow::Result<()> {
     }
 }
 
+/// SQL predicate text for "the row has a real Arweave tx id" (not empty and
+/// not a synthetic `local:` id). A constant, never user input. Mirrors
+/// [`is_anchored_arweave_tx`].
+const ANCHORED_TX_PREDICATE: &str = "arweave_tx <> '' AND arweave_tx NOT LIKE 'local:%'";
+
+/// True when `arweave_tx` is a real Arweave tx id: not empty and not a
+/// synthetic `local:` id. The bytes behind such an id were submitted to
+/// Arweave, which anyone can read.
+pub fn is_anchored_arweave_tx(arweave_tx: &str) -> bool {
+    !arweave_tx.is_empty() && !arweave_tx.starts_with("local:")
+}
+
+/// Owner decision D-8 (2026-09-27): content anchored on Arweave is plain text
+/// that anyone can read, so the server must not label it private. Returns
+/// the `(visibility, plaintext_on_arweave)` pair that `save_attestation`
+/// stores:
+///
+/// - A real Arweave tx id sets `plaintext_on_arweave = true` (this also
+///   covers a demoted row whose bytes were already submitted).
+/// - A `participate` row with a real Arweave tx id is stored `public`,
+///   whatever the caller asked for. Sealed (encrypted) writes are planned;
+///   until they ship, anchored content is public plain text.
+/// - Every other row keeps the requested visibility.
+pub fn effective_visibility(
+    write_mode: WriteMode,
+    arweave_tx: &str,
+    requested: Visibility,
+) -> (Visibility, bool) {
+    let anchored = is_anchored_arweave_tx(arweave_tx);
+    let visibility = if anchored && write_mode == WriteMode::Participate {
+        Visibility::Public
+    } else {
+        requested
+    };
+    (visibility, anchored)
+}
+
+/// Idempotent migration for owner decision D-8 (2026-09-27).
+///
+/// Adds `attestations.plaintext_on_arweave INTEGER NOT NULL DEFAULT 0` and
+/// `attestations.relabelled_public_at TEXT` (NULL by default), then:
+///
+/// 1. sets `plaintext_on_arweave = 1` on every row with a real Arweave tx id;
+/// 2. relabels `participate` rows with a real Arweave tx id that are not
+///    `public` to `public`, and stamps `relabelled_public_at` with the
+///    migration time. Operators use this column to find the owners to
+///    notify: `SELECT DISTINCT owner_pubkey FROM attestations WHERE
+///    relabelled_public_at IS NOT NULL`.
+///
+/// Both UPDATEs touch only rows that still need the change, so a re-run is a
+/// no-op and never moves an existing `relabelled_public_at` stamp.
+fn migrate_plaintext_on_arweave_column(conn: &Connection) -> anyhow::Result<()> {
+    let need_flag = !attestations_has_column(conn, "plaintext_on_arweave")?;
+    let need_stamp = !attestations_has_column(conn, "relabelled_public_at")?;
+
+    conn.execute_batch("BEGIN IMMEDIATE;")
+        .context("opening plaintext_on_arweave migration transaction")?;
+
+    let do_migration = || -> anyhow::Result<()> {
+        if need_flag {
+            conn.execute(
+                "ALTER TABLE attestations
+                    ADD COLUMN plaintext_on_arweave INTEGER NOT NULL DEFAULT 0",
+                [],
+            )
+            .context("adding attestations.plaintext_on_arweave")?;
+        }
+        if need_stamp {
+            conn.execute(
+                "ALTER TABLE attestations ADD COLUMN relabelled_public_at TEXT",
+                [],
+            )
+            .context("adding attestations.relabelled_public_at")?;
+        }
+        conn.execute(
+            &format!(
+                "UPDATE attestations SET plaintext_on_arweave = 1
+                  WHERE plaintext_on_arweave = 0 AND {ANCHORED_TX_PREDICATE}"
+            ),
+            [],
+        )
+        .context("backfilling attestations.plaintext_on_arweave")?;
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            &format!(
+                "UPDATE attestations
+                    SET visibility = ?1, relabelled_public_at = ?2
+                  WHERE write_mode = ?3
+                    AND visibility IS NOT ?1
+                    AND {ANCHORED_TX_PREDICATE}"
+            ),
+            params![Visibility::Public, now, WriteMode::Participate],
+        )
+        .context("relabelling anchored private rows to public")?;
+        Ok(())
+    };
+
+    match do_migration() {
+        Ok(()) => {
+            conn.execute_batch("COMMIT;")
+                .context("committing plaintext_on_arweave migration")?;
+            Ok(())
+        }
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK;");
+            Err(e)
+        }
+    }
+}
+
 /// Idempotent ADD-COLUMN migration for per-attestation `visibility`
 /// (feature `agent-native-distribution`, T3 / Decision 2).
 ///
@@ -648,6 +767,7 @@ impl SqliteStore {
         migrate_correlation_id_column(&conn)?;
         migrate_write_mode_column(&conn)?;
         migrate_visibility_column(&conn)?;
+        migrate_plaintext_on_arweave_column(&conn)?;
         Ok(Self { conn })
     }
 
@@ -665,6 +785,7 @@ impl SqliteStore {
         migrate_correlation_id_column(&conn)?;
         migrate_write_mode_column(&conn)?;
         migrate_visibility_column(&conn)?;
+        migrate_plaintext_on_arweave_column(&conn)?;
         Ok(Self { conn })
     }
 
@@ -818,6 +939,7 @@ impl SqliteStore {
                 arweave_tx: row.get(5)?,
                 created_at: row.get(6)?,
                 write_mode: row.get::<_, WriteMode>(7)?,
+                plaintext_on_arweave: row.get(8)?,
             })
         })?;
         let mut out = Vec::new();
@@ -848,6 +970,7 @@ impl SqliteStore {
                 arweave_tx: row.get(5)?,
                 created_at: row.get(6)?,
                 write_mode: row.get::<_, WriteMode>(7)?,
+                plaintext_on_arweave: row.get(8)?,
             })
         })?;
         let mut out = Vec::new();
@@ -881,6 +1004,28 @@ impl SqliteStore {
             }
         }
         Ok(keys)
+    }
+
+    /// `plaintext_on_arweave` flag of the row that `tx_id` names (Solana or
+    /// Arweave tx id), scoped to `owner_pubkey` with the same tenant
+    /// predicate as `find_write_mode_by_tx`. `None` when no such row exists
+    /// for this owner.
+    pub fn plaintext_on_arweave_by_tx(
+        &self,
+        tx_id: &str,
+        owner_pubkey: &str,
+    ) -> anyhow::Result<Option<bool>> {
+        let flag = self
+            .conn
+            .query_row(
+                "SELECT plaintext_on_arweave FROM attestations
+                 WHERE (solana_tx = ?1 OR arweave_tx = ?1) AND owner_pubkey = ?2
+                 LIMIT 1",
+                params![tx_id, owner_pubkey],
+                |row| row.get::<_, bool>(0),
+            )
+            .optional()?;
+        Ok(flag)
     }
 
     /// Owner-scoped cosine search limited to rows that carry `tag` exactly
@@ -1079,6 +1224,11 @@ impl AttestationStore for SqliteStore {
         embedding: &[f32],
     ) -> anyhow::Result<()> {
         let tags_json = serde_json::to_string(tags)?;
+        // Owner decision D-8: anchored content is public plain text on
+        // Arweave, so an anchored participate row is stored `public` and
+        // every row with a real Arweave tx id is flagged.
+        let (visibility, plaintext_on_arweave) =
+            effective_visibility(write_mode, arweave_tx, visibility);
         // Explicit column list — `owner_pubkey`, `write_mode`, and
         // `visibility` were added by migration helpers after the original
         // table CREATE, so the column count and order in
@@ -1088,8 +1238,8 @@ impl AttestationStore for SqliteStore {
             "INSERT OR REPLACE INTO attestations
                  (attestation_id, content, content_hash, tags,
                   solana_tx, arweave_tx, signer_pubkey, created_at, owner_pubkey,
-                  write_mode, visibility)
-             VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                  write_mode, visibility, plaintext_on_arweave)
+             VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
             params![
                 attestation_id,
                 content,
@@ -1102,6 +1252,7 @@ impl AttestationStore for SqliteStore {
                 owner_pubkey,
                 write_mode.as_str(),
                 visibility.as_str(),
+                plaintext_on_arweave,
             ],
         )?;
         let emb_bytes = floats_to_bytes(embedding);
@@ -1364,6 +1515,7 @@ impl CosineScorer {
             relevance_score: score,
             signer_pubkey: row.get(10)?,
             owner_pubkey: row.get(11)?,
+            plaintext_on_arweave: row.get(12)?,
         })
     }
 }
@@ -2106,6 +2258,149 @@ mod tests {
             .unwrap();
     }
 
+    // -- Owner decision D-8: anchored content is public plain text ---------
+
+    /// Raw INSERT that bypasses `save_attestation` (and so the D-8 rule),
+    /// to model rows written before the migration existed.
+    fn raw_insert(conn: &Connection, id: &str, arweave_tx: &str, mode: &str, vis: &str) {
+        conn.execute(
+            "INSERT INTO attestations
+                 (attestation_id, content, content_hash, tags, solana_tx, arweave_tx,
+                  signer_pubkey, created_at, owner_pubkey, write_mode, visibility)
+             VALUES (?1, 'c', ?1, '[]', 'sol', ?2, 'signer', '2026-06-01T00:00:00Z',
+                     ?3, ?4, ?5)",
+            params![id, arweave_tx, format!("owner-{id}"), mode, vis],
+        )
+        .unwrap();
+    }
+
+    fn row_state(conn: &Connection, id: &str) -> (String, bool, Option<String>) {
+        conn.query_row(
+            "SELECT visibility, plaintext_on_arweave, relabelled_public_at
+               FROM attestations WHERE attestation_id = ?1",
+            params![id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn plaintext_migration_relabels_anchored_private_rows() {
+        // A DB from before D-8: every earlier migration ran, the new one
+        // did not, so the columns do not exist yet.
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(SCHEMA).unwrap();
+        super::migrate_owner_pubkey_columns(&conn).unwrap();
+        super::migrate_correlation_id_column(&conn).unwrap();
+        super::migrate_write_mode_column(&conn).unwrap();
+        super::migrate_visibility_column(&conn).unwrap();
+        assert!(!super::attestations_has_column(&conn, "plaintext_on_arweave").unwrap());
+
+        raw_insert(&conn, "anchored-priv", "ArTx1", "participate", "private");
+        raw_insert(&conn, "anchored-pub", "ArTx2", "participate", "public");
+        raw_insert(&conn, "synthetic", "local:x", "participate", "private");
+        raw_insert(&conn, "demoted", "ArTx3", "local", "private");
+        raw_insert(&conn, "local", "local:y", "local", "private");
+
+        super::migrate_plaintext_on_arweave_column(&conn).unwrap();
+
+        let (vis, flag, stamp) = row_state(&conn, "anchored-priv");
+        assert_eq!(vis, "public");
+        assert!(flag);
+        let first_stamp = stamp.expect("relabelled row is stamped");
+
+        let (vis, flag, stamp) = row_state(&conn, "anchored-pub");
+        assert_eq!((vis.as_str(), flag, stamp), ("public", true, None));
+        let (vis, flag, stamp) = row_state(&conn, "synthetic");
+        assert_eq!((vis.as_str(), flag, stamp), ("private", false, None));
+        let (vis, flag, stamp) = row_state(&conn, "demoted");
+        assert_eq!((vis.as_str(), flag, stamp), ("private", true, None));
+        let (vis, flag, stamp) = row_state(&conn, "local");
+        assert_eq!((vis.as_str(), flag, stamp), ("private", false, None));
+
+        // The ops query that finds the owners to notify.
+        let owners: Vec<String> = conn
+            .prepare(
+                "SELECT DISTINCT owner_pubkey FROM attestations
+                  WHERE relabelled_public_at IS NOT NULL",
+            )
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert_eq!(owners, vec!["owner-anchored-priv".to_string()]);
+
+        // Idempotent: a second run changes nothing and keeps the stamp.
+        super::migrate_plaintext_on_arweave_column(&conn).unwrap();
+        let (vis, flag, stamp) = row_state(&conn, "anchored-priv");
+        assert_eq!((vis.as_str(), flag), ("public", true));
+        assert_eq!(stamp.as_deref(), Some(first_stamp.as_str()));
+    }
+
+    #[test]
+    fn save_attestation_applies_d8_rule() {
+        let store = SqliteStore::in_memory().unwrap();
+        let save = |id: &str, arweave_tx: &str, mode: WriteMode| {
+            store
+                .save_attestation(
+                    id,
+                    "c",
+                    id,
+                    &[],
+                    &format!("sol-{id}"),
+                    arweave_tx,
+                    "signer",
+                    "owner-a",
+                    "2026-06-01T00:00:00Z",
+                    mode,
+                    Visibility::Private,
+                    &[1.0, 0.0],
+                )
+                .unwrap();
+        };
+        save("anchored", "ArTx1", WriteMode::Participate);
+        save("synthetic", "local:x", WriteMode::Participate);
+        save("demoted", "ArTx2", WriteMode::Local);
+
+        let conn = store.conn();
+        let (vis, flag, stamp) = row_state(conn, "anchored");
+        assert_eq!((vis.as_str(), flag, stamp), ("public", true, None));
+        let (vis, flag, _) = row_state(conn, "synthetic");
+        assert_eq!((vis.as_str(), flag), ("private", false));
+        let (vis, flag, _) = row_state(conn, "demoted");
+        assert_eq!((vis.as_str(), flag), ("private", true));
+
+        // The flag reaches search hits, Ledger rows and the verify lookup.
+        let own = store
+            .search(&[1.0, 0.0], Some("owner-a"), None, 10)
+            .unwrap();
+        let flag_of = |id: &str| {
+            own.iter()
+                .find(|r| r.attestation_id == id)
+                .map(|r| r.plaintext_on_arweave)
+        };
+        assert_eq!(flag_of("anchored"), Some(true));
+        assert_eq!(flag_of("synthetic"), Some(false));
+        let listed = store.list_public_artifacts(10).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].attestation_id, "anchored");
+        assert!(listed[0].plaintext_on_arweave);
+        assert_eq!(
+            store
+                .plaintext_on_arweave_by_tx("sol-anchored", "owner-a")
+                .unwrap(),
+            Some(true)
+        );
+        assert_eq!(
+            store
+                .plaintext_on_arweave_by_tx("sol-anchored", "owner-b")
+                .unwrap(),
+            None,
+            "tenant-scoped"
+        );
+    }
+
     #[test]
     fn list_public_artifacts_returns_public_rows_only() {
         // Private means private (owner decision 2026-09-27): the Ledger list
@@ -2217,7 +2512,7 @@ mod tests {
             "owner-a",
             "s2",
             "2026-06-02T00:00:00Z",
-            WriteMode::Participate,
+            WriteMode::Local,
             Visibility::Private,
         );
         seed_row(
@@ -2268,7 +2563,8 @@ mod tests {
                 "signer",
                 "owner-a",
                 "2026-06-01T00:00:00Z",
-                WriteMode::Participate,
+                // A demoted row: real Arweave tx, but `local` and private.
+                WriteMode::Local,
                 Visibility::Private,
                 &[1.0, 0.0],
             )

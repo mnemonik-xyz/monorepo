@@ -145,6 +145,9 @@ async fn artifacts_plain_list_returns_public_rows_only_with_shape() {
     assert_eq!(row["arweave_tx"], "ArweavePubTx");
     assert_eq!(row["created_at"], "2026-06-10T00:00:00Z");
     assert_eq!(row["write_mode"], "participate");
+    // Owner decision D-8: an anchored row says its content is plain text on
+    // Arweave.
+    assert_eq!(row["plaintext_on_arweave"], true);
     // The `visibility` and `relevance_score` fields are not part of the wire shape.
     assert!(
         row.get("visibility").is_none(),
@@ -346,7 +349,9 @@ async fn artifacts_chain_items_matching_private_rows_are_dropped() {
                 "owner-a",
                 "owner-a",
                 "2026-06-12T00:00:00Z",
-                WriteMode::Participate,
+                // A demoted row: its bytes went to Arweave, but the delivery
+                // check failed, so the row is `local` and stays private.
+                WriteMode::Local,
                 Visibility::Private,
                 &[0.1f32; 8],
             )

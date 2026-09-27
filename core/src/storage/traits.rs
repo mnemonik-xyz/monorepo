@@ -62,6 +62,10 @@ pub struct SearchResult {
     pub signer_pubkey: String,
     /// Tenant that owns the row. Empty for legacy rows without an owner.
     pub owner_pubkey: String,
+    /// True when the content was submitted to Arweave as plain text that
+    /// anyone can read (owner decision D-8). Anchored memories are public
+    /// plain text until sealed (encrypted) writes ship.
+    pub plaintext_on_arweave: bool,
 }
 
 /// Attestation CRUD and cosine search.

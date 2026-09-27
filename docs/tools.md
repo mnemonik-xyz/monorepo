@@ -231,7 +231,8 @@ deferred path.
   "timestamp": "...",
   "storage_mode": "full",
   "write_mode": "participate",
-  "visibility": "private",
+  "visibility": "public",       // always "public" for an anchored write
+  "plaintext_on_arweave": true, // the content is plain text on Arweave
   "embedding": { "model": "...", "provider": "..." }
 }
 ```
@@ -315,17 +316,29 @@ calls — recall is a local read.
   includes private and public rows. It does not include rows of other owners.
 - A row with no `visibility` value (a legacy row) counts as private. The
   database migration sets these rows to `private`.
-- A local write is always private. Only a `participate` write can be public.
+- A local write is always private.
+- An anchored `participate` write is always public, whatever `visibility` the
+  request sets. Its content is plain text on Arweave, so the server does not
+  call it private.
 
 Returns the top-k rows ordered by cosine score, joined to their attestation
 metadata.
 
-> **Warning: private is not encrypted.** "Private" means that this server
-> shows the row only to its owner. The server stores the content as plain
-> text. A `participate` (anchored) write puts the content as plain text on
-> Arweave, whatever its `visibility`. Anyone can read Arweave. Encrypted
-> ("sealed") anchored writes are planned. Until they ship, do not anchor
-> content that must stay secret.
+Each result has a `plaintext_on_arweave` field. It is `true` when the
+content went to Arweave as plain text.
+
+> **Warning: anchored memories are public plain text today.** A
+> `participate` (anchored) write puts the content as plain text on Arweave.
+> Anyone can read Arweave, and nobody can delete it. The server stores such a
+> row as `public` with `plaintext_on_arweave: true`. "Private" means only
+> that this server shows a local row to its owner; the server does not
+> encrypt it. Sealed (encrypted) anchored writes are planned (design:
+> `work/sealed-memories/`). Until they ship, do not anchor content that must
+> stay secret.
+>
+> Rows that were anchored and marked `private` before 2026-09-27 are now
+> `public`. The database migration relabels them and records the time in the
+> `relabelled_public_at` column.
 
 ---
 
@@ -339,7 +352,9 @@ verify through a fallback path.
 
 **Returns** a `status` of `verified`, `tampered`, `not_found`,
 `anchor_not_found`, or `arweave_not_found`, alongside `content_hash`,
-`solana_tx`, and `arweave_tx`.
+`solana_tx`, and `arweave_tx`. For a row that the caller owns, the result
+also has `plaintext_on_arweave` (`true` when the content is plain text on
+Arweave). A caller who does not own the row gets `not_found`, with no content.
 
 The chain-anchored path additionally fetches the SPL Memo, parses its
 `{h, a, v}` payload, and confirms the on-chain hash and Arweave tx match the
@@ -482,10 +497,10 @@ Rules worth knowing:
   silent receipt.
 - **Both modes coexist in one database** for a single owner, tagged by the
   `write_mode` column, and `recall` spans both. Mixing them is by design.
-- **A `participate` write puts plain text on Arweave today.** This is true for
-  `private` and `public` writes. Anyone can read Arweave. `private` only stops
-  this server from showing the row to other callers. Sealed (encrypted)
-  anchored writes are planned.
+- **A `participate` write is public plain text today.** The content goes to
+  Arweave as plain text, which anyone can read. The server stores the row as
+  `public` with `plaintext_on_arweave: true`, even if the request sets
+  `visibility: "private"`. Sealed (encrypted) anchored writes are planned.
 
 Rationale and the full decision log: `work/modes-user-choice/user-spec.md` and
 `work/modes-user-choice/decisions.md`; whitepaper §5.7.

@@ -18,7 +18,7 @@ npx @mnemonik-xyz/cli sign "public claim" --anchor   # signed with your key, anc
 # The CLI renews an expired session automatically (refresh token); log in one time.
 ```
 
-"Private" means that this server returns the memory only to its owner. The server does not encrypt it yet; encryption is planned. An anchored (`--anchor`, `mode: "participate"`) write puts the content as plain text on Arweave, where anyone can read it.
+A local memory is private: this server returns it only to its owner. The server does not encrypt it yet; encryption is planned. An anchored (`--anchor`, `mode: "participate"`) memory is public: its content is plain text on Arweave, where anyone can read it. Results mark it with `plaintext_on_arweave: true`. Sealed (encrypted) anchored memories are planned.
 
 For Claude / Cursor / VS Code / Windsurf — install from [mnemonik.xyz/install](https://mnemonik.xyz/install) (one-click connector). HTTP MCP endpoint: `https://mcp.mnemonik.xyz/mcp`. OAuth 2.1 + PKCE.
 

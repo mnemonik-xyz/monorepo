@@ -58,7 +58,7 @@ Query parameters:
 | `limit` | Maximum number of rows in the page. |
 | `source` | `all` (default), `on_node` (local writes) or `on_chain` (anchored writes). |
 
-Privacy rule (available now): the route returns only SQLite rows with `visibility = 'public'`. This applies to the listing and to recall, for each `source` value. The route never returns a private row. A row with no `visibility` value (a legacy row) counts as private. A local write is always private, so `source=on_node` shows only memories published with `mnemonic_publish_post`.
+Privacy rule (available now): the route returns only SQLite rows with `visibility = 'public'`. This applies to the listing and to recall, for each `source` value. The route never returns a private row. A row with no `visibility` value (a legacy row) counts as private. A local write is always private, so `source=on_node` shows only memories published with `mnemonic_publish_post`. An anchored `participate` write is always public, because its content is plain text on Arweave (owner decision D-8). Each row has `plaintext_on_arweave`: `true` when the content is plain text on Arweave. Sealed (encrypted) anchored writes are planned.
 
 Chain recovery (available now): when the operator sets `CHAIN_STATS_WALLETS`, the server reads its anchored memories from Solana memos and Arweave. It keeps them in memory as a snapshot. SQLite does not store this snapshot.
 

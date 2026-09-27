@@ -194,7 +194,8 @@ export default function Privacy() {
               </P>
               <P>
                 Each attestation is private or public. Local-mode attestations
-                are always private. The server returns a private attestation
+                are always private. Full-mode (anchored) attestations are always
+                public, because their content is plain text on Arweave. The server returns a private attestation
                 only to its owner: in your own recall results. Anonymous recall
                 and the public Ledger never show private attestations. The chat
                 assistant uses only the protocol documentation that the operator
@@ -205,8 +206,9 @@ export default function Privacy() {
                 Private does not mean encrypted. The server stores the content
                 as plain text in its database. Encryption of stored and anchored
                 content is planned, not available now. Full-mode attestations
-                put the content as plain text on Arweave, private or public
-                (see section 6).
+                put the content as plain text on Arweave (see section 6).
+                Full-mode attestations that were marked private before
+                2026-09-27 are now marked public for this reason.
               </P>
             </Section>
 
@@ -253,8 +255,7 @@ export default function Privacy() {
               <P>
                 Operators of Mnemonic — including the maintainers of
                 mnemonik.xyz — cannot retract data committed to Arweave or
-                Solana. The Arweave bytes contain your content as plain text,
-                even for a private attestation. Use full mode only with content
+                Solana. The Arweave bytes contain your content as plain text. Use full mode only with content
                 for which permanent public disclosure is acceptable.
               </P>
             </Section>

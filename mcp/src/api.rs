@@ -764,11 +764,16 @@ pub async fn sign_callback_handler(
         // to exist (see `tools::perform_delivery_check`). On delivery failure
         // the row is demoted in place via `INSERT OR REPLACE` inside
         // `confirm_delivery_or_demote`.
-        // Visibility defaults to `Private` here — the deferred-sign callback
-        // path is a Participate write (browser-mediated COSE_Sign1), and
-        // until the JSON-input resolver lands (Task 5) every such write is
-        // private-by-default (AC13). Public visibility will become an
-        // explicit opt-in propagated from the original `sign_memory` call.
+        // Visibility (owner decision D-8, 2026-09-27): an anchored
+        // Participate row is plain text on Arweave, so it is stored `public`
+        // with `plaintext_on_arweave = 1`. A Local bundle stays `private`.
+        // `save_attestation` applies the same rule; computing it here keeps
+        // the intent visible at the call site.
+        let (visibility, _plaintext_on_arweave) = mnemonic_core::storage::effective_visibility(
+            entry.write_mode,
+            &arweave_tx,
+            Visibility::Private,
+        );
         let save_res = store.save_attestation(
             &attestation_id,
             &entry.content,
@@ -780,7 +785,7 @@ pub async fn sign_callback_handler(
             &req.signer_pubkey, // owner = same pubkey (Decision 9 — webapp flow uses keypair as identity)
             &now,
             entry.write_mode,
-            Visibility::Private,
+            visibility,
             &entry.embedding,
         );
         // Stamp the correlation_id onto the row so `mnemonic_check_pending`
@@ -1909,6 +1914,7 @@ fn public_artifact_from_search(r: SearchResult) -> PublicArtifact {
         arweave_tx: r.arweave_tx,
         created_at: r.created_at,
         write_mode: r.write_mode,
+        plaintext_on_arweave: r.plaintext_on_arweave,
     }
 }
 
@@ -1934,6 +1940,8 @@ fn public_artifact_from_recovered(r: &RecoveredItem) -> PublicArtifact {
             .map(|d| format!("{d}T00:00:00Z"))
             .unwrap_or_else(|| "1970-01-01T00:00:00Z".to_string()),
         write_mode: WriteMode::Participate,
+        // Read back from Arweave, so it is plain text there by definition.
+        plaintext_on_arweave: true,
     }
 }
 
@@ -3238,6 +3246,7 @@ mod tests {
             arweave_tx: arweave_tx.to_string(),
             created_at: created_at.to_string(),
             write_mode: mode,
+            plaintext_on_arweave: mode == WriteMode::Participate,
         }
     }
 
