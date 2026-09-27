@@ -9,24 +9,17 @@
 // fetch a total memory count. Off by default — Decision 14's TDD anchor
 // asserts `whoami` makes ≤ 1 fetch by default.
 
-import {
-  IdentityRequiresKeystore,
-  Keypair,
-  LocalSigner,
-  MnemonicClient,
-  parseJwtPayload,
-} from "@mnemonik-xyz/sdk";
+import { parseJwtPayload } from "@mnemonik-xyz/sdk";
 
 import {
   identityExists,
-  loadIdentityJson,
+  loadIdentityPubkey,
   loadToken,
-  resolveKeypairFromKeystore,
   tokenExists,
 } from "../config.js";
 import { fromSdkError } from "../errors.js";
 import { format, type OutputOptions } from "../output.js";
-import { assertIdentityMatchesToken } from "../preflight.js";
+import { openSession } from "../session.js";
 
 export interface WhoamiOptions extends OutputOptions {
   withCount?: boolean;
@@ -56,22 +49,10 @@ export async function runWhoami(opts: WhoamiOptions): Promise<void> {
   };
 
   if (identityExists()) {
-    // identity.json may be the new stub shape (keychain-backed). For the
-    // default whoami output we only need `pubkey_base58`, which the typed
-    // `IdentityRequiresKeystore` throw carries directly — no need to
-    // resolve the secret via the OS keychain at all.
-    try {
-      const id = loadIdentityJson();
-      result.pubkey = id.pubkey_base58;
-      result.did = `did:sol:${id.pubkey_base58}`;
-    } catch (e) {
-      if (e instanceof IdentityRequiresKeystore) {
-        result.pubkey = e.pubkey_base58;
-        result.did = `did:sol:${e.pubkey_base58}`;
-      } else {
-        throw e;
-      }
-    }
+    // identity.json may be the stub shape (keychain-backed). whoami needs
+    // only `pubkey_base58` — never resolve the secret via the OS keychain.
+    result.pubkey = loadIdentityPubkey();
+    result.did = `did:sol:${result.pubkey}`;
   }
 
   if (tokenExists()) {
@@ -95,29 +76,13 @@ export async function runWhoami(opts: WhoamiOptions): Promise<void> {
   if (opts.withCount && result.pubkey && result.jwt) {
     // Optional one-shot server call — gated behind --with-count so the
     // TDD anchor's "no fetch by default" assertion holds.
-    // Pre-flight: catch identity/JWT mismatch BEFORE any fetch is built.
-    // Default (no --with-count) whoami remains diagnostic and never throws
-    // here; signer_match is surfaced in the rendered output instead.
-    assertIdentityMatchesToken();
+    // Pre-flight: catch identity/JWT mismatch BEFORE any fetch is built
+    // (inside openSession). Default (no --with-count) whoami remains
+    // diagnostic and never throws here; signer_match is surfaced in the
+    // rendered output instead. Public key only — no keychain access.
     const baseUrl =
       opts.baseUrl ?? process.env.MNEMONIC_BASE_URL ?? DEFAULT_BASE_URL;
-    const id = loadIdentityJson();
-    let kp: Keypair;
-    try {
-      kp = await Keypair.fromJSON(id);
-    } catch (e) {
-      if (e instanceof IdentityRequiresKeystore) {
-        kp = await resolveKeypairFromKeystore(e.pubkey_base58);
-      } else {
-        throw e;
-      }
-    }
-    const tok = loadToken();
-    const client = new MnemonicClient({
-      baseUrl,
-      signer: new LocalSigner(kp),
-      jwt: tok.jwt,
-    });
+    const { client } = await openSession(baseUrl, opts, false);
     try {
       const r = await client.recall(" ", { topK: 0 });
       result.total_memories = r.total;

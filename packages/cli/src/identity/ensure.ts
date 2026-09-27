@@ -1,14 +1,20 @@
 /**
  * identity/ensure.ts — invisible bootstrap for the CLI identity.
  *
- * Mirrors the Rust `core/src/identity/ensure.rs` five-path algorithm:
+ * Paths (derived from the Rust `core/src/identity/ensure.rs` algorithm):
  *   1. ENOENT  → CREATE: generate keypair, store in OS keychain (if available)
  *      or fall back to file.
- *   2. LEGACY  → MIGRATE: file has `secret` key → move to OS keychain,
- *      rewrite file as stub.
- *   3. STUB    → VERIFY: file has `keychain_ref` → confirm OS keychain entry
- *      exists.
- *   (implicitly: no-op when already in correct stub state)
+ *   2. LEGACY  → KEEP: file has `secret` key → leave it as a file-backed
+ *      identity. (CLI 0.3.0+ no longer migrates it to the OS keychain on an
+ *      arbitrary command — that was a keychain write outside an anchor.)
+ *   3. STUB    → TRUST: file has `keychain_ref` → return its pubkey WITHOUT
+ *      reading the OS keychain. A missing entry surfaces later, only when a
+ *      command really needs the private key.
+ *
+ * Owner rule (0.3.0): the CLI touches the OS keychain only when a command
+ * needs the private key. `ensure()` therefore never reads the keychain for
+ * an existing identity, and pubkey-only commands skip it entirely (see
+ * `shouldSkipEnsure`).
  *
  * SECURITY: KeystoreEntry.secret bytes MUST NEVER appear in logs, error
  * messages, or Error.cause.  All error paths must redact the secret.
@@ -140,6 +146,9 @@ function buildStubContent(pubkey_base58: string): string {
 
 const HELP_FLAGS = new Set(["--help", "-h", "--version", "-V"]);
 
+/** Commands that work from the public key alone (never create a key). */
+const PUBKEY_ONLY_COMMANDS = new Set(["recall", "verify", "whoami"]);
+
 /**
  * Return true when `ensure()` should be skipped.
  *
@@ -147,11 +156,29 @@ const HELP_FLAGS = new Set(["--help", "-h", "--version", "-V"]);
  *   - Any help/version flag in argv (no I/O before printing usage).
  *   - `identity status` subcommand (must run even with no identity present).
  *   - `init --force` (init manages its own identity lifecycle).
+ *   - Pubkey-only commands: `recall`, `verify`, `whoami`, and `sign`
+ *     without `--anchor` / `--participate`. They must not create an
+ *     identity (a keychain write) as a side effect; with no identity they
+ *     report it instead.
  */
 export function shouldSkipEnsure(argv: string[]): boolean {
   if (argv.some((a) => HELP_FLAGS.has(a))) return true;
-  if (argv[2] === "identity" && argv[3] === "status") return true;
-  if (argv[2] === "init" && argv.includes("--force")) return true;
+  // First non-flag argument after the script path is the command (the
+  // root flags --json/--quiet/--no-color/--verbose take no values).
+  const rest = argv.slice(2);
+  const i = rest.findIndex((a) => !a.startsWith("-"));
+  const cmd = i >= 0 ? rest[i] : undefined;
+  const sub = i >= 0 ? rest[i + 1] : undefined;
+  if (cmd === "identity" && sub === "status") return true;
+  if (cmd === "init" && argv.includes("--force")) return true;
+  if (cmd !== undefined && PUBKEY_ONLY_COMMANDS.has(cmd)) return true;
+  if (
+    cmd === "sign" &&
+    !argv.includes("--anchor") &&
+    !argv.includes("--participate")
+  ) {
+    return true;
+  }
   return false;
 }
 
@@ -253,14 +280,14 @@ export async function ensureWithStores(
 
   const obj = parsed as Record<string, unknown>;
 
-  // ---------- LEGACY → MIGRATE or FILE-ONLY ----------
+  // ---------- LEGACY → KEEP (file-backed) ----------
   if ("secret" in obj) {
-    return handleLegacy(obj, stores);
+    return handleLegacy(obj);
   }
 
-  // ---------- STUB → VERIFY ----------
+  // ---------- STUB → TRUST (no keychain read) ----------
   if ("keychain_ref" in obj && typeof obj.pubkey_base58 === "string") {
-    return handleStub(obj.pubkey_base58, stores);
+    return handleStub(obj.pubkey_base58);
   }
 
   throw new Error(
@@ -384,12 +411,11 @@ async function createIdentity(stores: KeyStores): Promise<EnsureResult> {
 }
 
 // ---------------------------------------------------------------------------
-// LEGACY → MIGRATE path
+// LEGACY → KEEP path (no keychain migration)
 // ---------------------------------------------------------------------------
 
 async function handleLegacy(
   obj: Record<string, unknown>,
-  stores: KeyStores,
 ): Promise<EnsureResult> {
   // Validate basic shape.
   if (!Array.isArray(obj.secret) || typeof obj.pubkey_base58 !== "string") {
@@ -398,85 +424,26 @@ async function handleLegacy(
     );
   }
 
-  const entry = {
-    secret: Array.from(obj.secret as ArrayLike<number>),
+  // Keep the file-backed identity as-is. Migrating it to the OS keychain
+  // here would be a keychain write triggered by an arbitrary command,
+  // which the 0.3.0 key-access rule forbids. Reading a file-backed key
+  // never prompts, which also lets the CLI re-login silently (#33).
+  return {
     pubkey_base58: obj.pubkey_base58,
+    storage: "file",
+    created: false,
+    migrated: false,
   };
-  const pubkey_base58 = entry.pubkey_base58;
-
-  const osAvail = stores.os !== null && (await stores.os.available());
-
-  const doWriteStub = stores._writeStub ?? writeStubAtomic;
-
-  if (osAvail && stores.os !== null) {
-    // Migrate: write to OS keychain, then rewrite file as stub. Catch
-    // PlatformUnavailable specifically so a dead Secret Service daemon
-    // doesn't force the user into an unrecoverable state — we keep the
-    // legacy file in place and proceed as if `osAvail` had been false.
-    try {
-      await stores.os.set(entry);
-    } catch (err) {
-      if (isPlatformUnavailable(err)) {
-        // OS keychain claimed to be available but `set` failed at the
-        // D-Bus boundary. Skip migration; preserve the legacy file as-is
-        // and return a file-storage result identical to the no-OS path.
-        log(
-          `mnemonic: identity stays in ~/.mnemonic/identity.json (OS keychain unavailable on set)`,
-        );
-        return {
-          pubkey_base58,
-          storage: "file",
-          created: false,
-          migrated: false,
-        };
-      }
-      throw err;
-    }
-
-    try {
-      await doWriteStub(stores.identityPath, pubkey_base58);
-    } catch (err) {
-      // File rewrite failed — roll back keychain entry.
-      await safeOsRemove(stores.os);
-      throw err;
-    }
-
-    log("mnemonic: legacy identity migrated to OS keychain");
-    return {
-      pubkey_base58,
-      storage: "os-keychain",
-      created: false,
-      migrated: true,
-    };
-  }
-
-  // OS unavailable — keep file as-is (legacy shape stays on disk).
-  return { pubkey_base58, storage: "file", created: false, migrated: false };
 }
 
 // ---------------------------------------------------------------------------
-// STUB → VERIFY path
+// STUB → TRUST path (no keychain read)
 // ---------------------------------------------------------------------------
 
-async function handleStub(
-  pubkey_base58: string,
-  stores: KeyStores,
-): Promise<EnsureResult> {
-  if (stores.os === null) {
-    throw new Error(
-      `identity.json is a stub referencing the OS keychain, but OS keychain is unavailable on this platform. ` +
-        `Run \`mnemonic identity pull-from-webapp\` to re-import your key.`,
-    );
-  }
-
-  const entry = await stores.os.get();
-  if (entry === null) {
-    throw new Error(
-      `identity.json references the OS keychain but the keychain entry is missing. ` +
-        `Run \`mnemonic identity pull-from-webapp\` to re-import your key.`,
-    );
-  }
-
+async function handleStub(pubkey_base58: string): Promise<EnsureResult> {
+  // Do NOT probe the OS keychain: a read can prompt, and most commands need
+  // only the pubkey. If the entry is missing, the command that needs the
+  // private key reports it (`resolveKeypairFromKeystore`).
   return {
     pubkey_base58,
     storage: "os-keychain",

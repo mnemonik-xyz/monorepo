@@ -28,6 +28,7 @@ export type { KeypairJson } from "./keypair.js";
 export { LocalSigner } from "./signer.js";
 export type { Signer } from "./signer.js";
 export type {
+  KeypairProvider,
   MnemonicClientConfig,
   ProveResult,
   RecallHit,
@@ -35,8 +36,10 @@ export type {
   SignMemoryOptions,
   SignMemoryResult,
   SignerInterface,
+  TokenRefresher,
   VerifyResult,
   WhoamiResult,
+  WriteMode,
 } from "./types.js";
 
 // ── T3: OAuth surface ──────────────────────────────────────────────────────
@@ -45,6 +48,7 @@ export {
   exchangeCodeForToken,
   loginWithIdentity,
   parseJwtPayload,
+  refreshAccessToken,
   generatePkceVerifier,
   pkceChallenge,
   randomState,
@@ -60,4 +64,6 @@ export type {
   LoginWithIdentityInput,
   LoginWithIdentityResult,
   PendingAuthSession,
+  RefreshAccessTokenInput,
+  RefreshAccessTokenResult,
 } from "./oauth.js";

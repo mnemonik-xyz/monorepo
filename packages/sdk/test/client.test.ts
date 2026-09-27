@@ -721,3 +721,296 @@ describe("readBodySafely redact-then-slice", () => {
     expect(msg).not.toMatch(/eyJ[A-Za-z0-9_-]{20,}/);
   });
 });
+
+// ── signMemory write modes + lazy keypair provider ─────────────────────────
+
+/** Client with NO bound keypair; optional lazy provider (call-counted). */
+async function makeKeylessClient(opts: {
+  responses: CannedResponse[];
+  withProvider?: boolean;
+  providerKeypair?: Keypair;
+}): Promise<{
+  client: MnemonicClient;
+  calls: CapturedCall[];
+  keypair: Keypair;
+  providerCalls: () => number;
+}> {
+  const keypair = await Keypair.generate();
+  const { fetchImpl, calls } = makeMockFetch(opts.responses);
+  const client = new MnemonicClient({
+    baseUrl: "https://example.test",
+    signer: new LocalSigner(keypair),
+    fetch: fetchImpl,
+    jwt: "eyJhbGciOiJIUzI1NiJ9.e30.sig",
+  });
+  let n = 0;
+  if (opts.withProvider) {
+    client.setKeypairProvider(async () => {
+      n++;
+      return opts.providerKeypair ?? keypair;
+    });
+  }
+  return { client, calls, keypair, providerCalls: () => n };
+}
+
+const STORED_ROW = {
+  attestation_id: "att-local-1",
+  content_hash: "abc123",
+  write_mode: "local",
+  timestamp: "2026-09-27T00:00:00Z",
+};
+
+describe("signMemory mode: local", () => {
+  it("returns the stored row without a keypair and sends mode", async () => {
+    const { client, calls } = await makeKeylessClient({
+      responses: [{ body: mcpResult(STORED_ROW) }],
+    });
+    const r = await client.signMemory("note", { mode: "local", tags: ["t"] });
+    expect(r).toEqual({
+      attestationId: "att-local-1",
+      signedAt: "2026-09-27T00:00:00Z",
+      status: "stored",
+      writeMode: "local",
+      contentHash: "abc123",
+    });
+    expect(calls).toHaveLength(1);
+    const body = calls[0]!.body as { params: { arguments: unknown } };
+    expect(body.params.arguments).toEqual({
+      content: "note",
+      tags: ["t"],
+      mode: "local",
+    });
+  });
+
+  it("never calls the keypair provider for a stored row", async () => {
+    const { client, providerCalls } = await makeKeylessClient({
+      responses: [{ body: mcpResult(STORED_ROW) }],
+      withProvider: true,
+    });
+    await client.signMemory("note", { mode: "local" });
+    expect(providerCalls()).toBe(0);
+  });
+
+  it("falls back to the provider when the server still asks for a signature", async () => {
+    const { client, calls, keypair, providerCalls } = await makeKeylessClient({
+      responses: [
+        { body: mcpResult({ status: "awaiting_signature", correlation_id: "c9" }) },
+        { body: new Uint8Array([0xa0]) },
+        { body: { attestation_id: "att-9", write_mode: "local" } },
+      ],
+      withProvider: true,
+    });
+    const r = await client.signMemory("note", { mode: "local" });
+    expect(r.attestationId).toBe("att-9");
+    expect(r.status).toBe("signed");
+    expect(r.writeMode).toBe("local");
+    expect(providerCalls()).toBe(1);
+    const cb = calls[2]!.body as Record<string, unknown>;
+    expect(cb.signer_pubkey).toBe(keypair.pubkey);
+  });
+
+  it("throws UserError when a signature is needed and no keypair exists", async () => {
+    const { client, calls } = await makeKeylessClient({
+      responses: [{ body: mcpResult({ correlation_id: "c9" }) }],
+    });
+    await expect(
+      client.signMemory("note", { mode: "local" })
+    ).rejects.toThrow(/asked for a client signature/);
+    // The pending bundle is never fetched.
+    expect(calls).toHaveLength(1);
+  });
+
+  it("does not treat an awaiting_signature row as stored", async () => {
+    const { client } = await makeKeylessClient({
+      responses: [
+        { body: mcpResult({ status: "awaiting_signature", attestation_id: "x" }) },
+      ],
+    });
+    await expect(
+      client.signMemory("note", { mode: "local" })
+    ).rejects.toBeInstanceOf(ServerError);
+  });
+});
+
+describe("signMemory mode: participate", () => {
+  const signFlow = (): CannedResponse[] => [
+    { body: mcpResult({ status: "awaiting_signature", correlation_id: "c1" }) },
+    { body: new Uint8Array([0xa0]) },
+    {
+      body: {
+        attestation_id: "att-p",
+        status: "anchored",
+        write_mode: "participate",
+        solana_tx: "sol1",
+      },
+    },
+  ];
+
+  it("resolves the lazy provider once, after the open call", async () => {
+    const { client, calls, providerCalls } = await makeKeylessClient({
+      responses: [...signFlow(), ...signFlow()],
+      withProvider: true,
+    });
+    const r = await client.signMemory("x", { mode: "participate" });
+    expect(r).toMatchObject({
+      attestationId: "att-p",
+      status: "anchored",
+      writeMode: "participate",
+      solanaTx: "sol1",
+    });
+    const body = calls[0]!.body as { params: { arguments: { mode: string } } };
+    expect(body.params.arguments.mode).toBe("participate");
+    await client.signMemory("y", { mode: "participate" });
+    expect(providerCalls()).toBe(1); // memoised
+  });
+
+  it("fails fast without any keypair source (no request sent)", async () => {
+    const { client, calls } = await makeKeylessClient({ responses: [] });
+    await expect(
+      client.signMemory("x", { mode: "participate" })
+    ).rejects.toThrow(/no keypair/);
+    expect(calls).toHaveLength(0);
+  });
+
+  it("rejects a provider keypair that does not match the signer", async () => {
+    const other = await Keypair.generate();
+    const { client } = await makeKeylessClient({
+      responses: signFlow(),
+      withProvider: true,
+      providerKeypair: other,
+    });
+    await expect(
+      client.signMemory("x", { mode: "participate" })
+    ).rejects.toThrow(/does not match signer pubkey/);
+  });
+
+  it("propagates a provider error and retries the provider next time", async () => {
+    const keypair = await Keypair.generate();
+    // First attempt stops after the open call (the provider throws).
+    const { fetchImpl } = makeMockFetch([signFlow()[0]!, ...signFlow()]);
+    const client = new MnemonicClient({
+      baseUrl: "https://example.test",
+      signer: new LocalSigner(keypair),
+      fetch: fetchImpl,
+    });
+    let n = 0;
+    client.setKeypairProvider(() => {
+      n++;
+      if (n === 1) throw new UserError("keychain locked");
+      return keypair;
+    });
+    await expect(
+      client.signMemory("x", { mode: "participate" })
+    ).rejects.toThrow(/keychain locked/);
+    const r = await client.signMemory("x", { mode: "participate" });
+    expect(r.attestationId).toBe("att-p");
+    expect(n).toBe(2);
+  });
+
+  it("rejects an unknown mode", async () => {
+    const { client } = await makeClient();
+    await expect(
+      client.signMemory("x", { mode: "PARTICIPATE" as never })
+    ).rejects.toBeInstanceOf(UserError);
+  });
+});
+
+// ── access-token refresh (issue #33) ───────────────────────────────────────
+
+function jwtWithExp(expSecondsFromNow: number, tag: string): string {
+  const b64 = (o: unknown) =>
+    btoa(JSON.stringify(o))
+      .replace(/\+/g, "-")
+      .replace(/\//g, "_")
+      .replace(/=+$/, "");
+  const now = Math.floor(Date.now() / 1000);
+  return `${b64({ alg: "HS256" })}.${b64({
+    sub: tag,
+    iat: now,
+    exp: now + expSecondsFromNow,
+  })}.sig`;
+}
+
+describe("token refresher", () => {
+  const recallOk = (): CannedResponse => ({
+    body: mcpResult({ hits: [], total: 0 }),
+  });
+
+  it("refreshes an expired JWT before the call", async () => {
+    const fresh = jwtWithExp(3600, "fresh");
+    const { client, calls } = await makeClient({
+      jwt: jwtWithExp(-10, "old"),
+      responses: [recallOk()],
+    });
+    let n = 0;
+    client.setTokenRefresher(async () => {
+      n++;
+      return fresh;
+    });
+    await client.recall("q");
+    expect(n).toBe(1);
+    expect(calls[0]!.headers.authorization).toBe(`Bearer ${fresh}`);
+  });
+
+  it("does not refresh a JWT that is still valid", async () => {
+    const valid = jwtWithExp(3600, "valid");
+    const { client, calls } = await makeClient({
+      jwt: valid,
+      responses: [recallOk()],
+    });
+    let n = 0;
+    client.setTokenRefresher(async () => {
+      n++;
+      return "unused";
+    });
+    await client.recall("q");
+    expect(n).toBe(0);
+    expect(calls[0]!.headers.authorization).toBe(`Bearer ${valid}`);
+  });
+
+  it("retries once after a 401 with the refreshed JWT", async () => {
+    const fresh = jwtWithExp(3600, "fresh");
+    const { client, calls } = await makeClient({
+      jwt: jwtWithExp(3600, "revoked"),
+      responses: [{ status: 401, body: "invalid JWT" }, recallOk()],
+    });
+    client.setTokenRefresher(async () => fresh);
+    const r = await client.recall("q");
+    expect(r.total).toBe(0);
+    expect(calls).toHaveLength(2);
+    expect(calls[1]!.headers.authorization).toBe(`Bearer ${fresh}`);
+  });
+
+  it("rethrows the 401 when the refresher cannot refresh", async () => {
+    const { client, calls } = await makeClient({
+      jwt: jwtWithExp(3600, "revoked"),
+      responses: [{ status: 401, body: "invalid JWT" }],
+    });
+    client.setTokenRefresher(async () => undefined);
+    await expect(client.verify("att")).rejects.toBeInstanceOf(AuthError);
+    expect(calls).toHaveLength(1);
+  });
+
+  it("propagates a refresher error", async () => {
+    const { client } = await makeClient({ jwt: jwtWithExp(-10, "old") });
+    client.setTokenRefresher(async () => {
+      throw new UserError("run `mnemonic login`");
+    });
+    await expect(client.recall("q")).rejects.toThrow(/mnemonic login/);
+  });
+
+  it("shares one refresh between concurrent calls", async () => {
+    const { client } = await makeClient({
+      jwt: jwtWithExp(-10, "old"),
+      responses: [recallOk(), recallOk()],
+    });
+    let n = 0;
+    client.setTokenRefresher(async () => {
+      n++;
+      await new Promise((r) => setTimeout(r, 5));
+      return jwtWithExp(3600, "fresh");
+    });
+    await Promise.all([client.recall("a"), client.recall("b")]);
+    expect(n).toBe(1);
+  });
+});
