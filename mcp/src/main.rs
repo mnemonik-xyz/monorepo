@@ -541,13 +541,12 @@ async fn main() -> anyhow::Result<()> {
     let bootstrap_server_x25519_secret = crypto_box::SecretKey::generate(&mut rand::rngs::OsRng);
     let bootstrap_server_x25519_public = bootstrap_server_x25519_secret.public_key();
 
-    // T2: derive the whoami discoverability envelope once at process start.
-    // The initial `current_price()` snapshot may be zero before the pricing
-    // engine's first refresh — that maps to `participate_cost.amount_cents:
-    // 0` on a `full + x402` deploy until the background refresher updates.
-    // Operators running with a non-zero `sign_memory_cost_micro_usdc` config
-    // value get a stable opening price; `PricingEngine::new(initial)` seeds
-    // exactly that. See tech-spec Decision 3.
+    // T2: derive the static part of the whoami discoverability envelope
+    // (supported modes, payment methods, disabled-vs-charging) once at
+    // process start. The price block is NOT frozen here: `mnemonic_whoami`
+    // re-reads it from the live pricing engine on every call
+    // (`Envelope::with_live_pricing`), together with a `pricing_status` of
+    // `live` / `fallback` / `disabled` (#165). See tech-spec Decision 3.
     let initial_price_micro_usdc = pricing.current_price();
     let envelope = mcp::Envelope::from_config(
         &cfg.storage_mode,

@@ -91,12 +91,37 @@ choose before attempting a write that might be rejected or charged.
   "storage_mode": "full",          // legacy field, kept for pre-envelope clients
   "supported_modes": ["local", "participate"],
   "default_mode": "local",
-  "participate_cost": { /* null when the operator does not charge */ }
+  "participate_cost": {            // null when the server cannot anchor (local only)
+    "currency": "USD",
+    "amount_micro_usdc": 1000,
+    "amount_cents": 1,
+    "pricing_status": "fallback",
+    "payment_methods": ["x402"]
+  }
 }
 ```
 
 `storage_mode` reflects the operator's *capability*, not a global switch — see
 [Write modes](#write-modes-local-vs-participate).
+
+**`participate_cost` fields:**
+
+| Field | Type | Meaning |
+|---|---|---|
+| `currency` | `string` | Always `"USD"`. |
+| `amount_micro_usdc` | `integer` | Price of one `participate` write, in micro-USDC (1 USDC = 1,000,000 micro-USDC). This is the exact price. |
+| `amount_cents` | `integer` | The same price in US cents. The server rounds up, so a price above zero never shows as `0`. |
+| `pricing_status` | `"live" \| "fallback" \| "disabled"` | The source of the price. Refer to the list below. |
+| `payment_methods` | `string[]` | The payment methods that the server accepts: `["x402"]`, or `[]` when the server does not charge. |
+
+**`pricing_status` values:**
+
+- `live`: The last price refresh was successful. The price comes from current Irys and SOL/USDC quotes.
+- `fallback`: The server has no current quote, or the last refresh failed. The price is the operator floor or the last good quote. The server still charges this price.
+- `disabled`: The operator does not charge (`PAYMENT_MODE=none`). Both amounts are `0`.
+
+The server calculates `participate_cost` again for each `mnemonic_whoami` call.
+Do not show a `participate` write as free unless `pricing_status` is `disabled`.
 
 ---
 
