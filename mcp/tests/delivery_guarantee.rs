@@ -140,7 +140,7 @@ async fn stdio_participate_demotes_on_refetch_failure() {
 /// (Arweave upload + Solana memo under the operator key). Now `sign_memory`
 /// refuses it: over HTTP the operator key never signs a memory. The refusal
 /// leaves no row and no Arweave upload, and it does NOT consume the x402
-/// nonce (`consume_x402_nonce_after_success` runs only on success), so the
+/// nonce (a failed call releases its `claim_x402_nonce` reservation), so the
 /// payment proof stays reusable for a client-signed retry.
 #[tokio::test]
 async fn x402_participate_without_jwt_is_refused_before_chain_write() {

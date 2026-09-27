@@ -123,6 +123,8 @@ fn build_state() -> Arc<McpState> {
             5,
         )),
         free_anchors: mnemonic_mcp::payment::FreeAnchorLimits::disabled(),
+        trusted_proxies: std::sync::Arc::new(mnemonic_mcp::client_ip::TrustedProxies::default()),
+        max_content_bytes: mnemonic_mcp::pending::MAX_CONTENT_BYTES,
         delivery_metrics: Arc::new(mnemonic_mcp::payment::DeliveryMetrics::default()),
         confirmation_ledger: Arc::new(mnemonic_mcp::confirmation_token::ConfirmationLedger::new()),
         hosted_endpoint: String::new(),

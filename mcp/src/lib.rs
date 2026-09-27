@@ -19,6 +19,7 @@
 pub mod api;
 pub mod chain_stats;
 pub mod chat;
+pub mod client_ip;
 pub mod config;
 pub mod confirmation_token;
 pub mod cors_policy;
