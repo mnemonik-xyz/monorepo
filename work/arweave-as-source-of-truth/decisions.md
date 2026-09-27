@@ -147,3 +147,38 @@ anchored row lists with an empty `content` and its Arweave id. The honest option
 from the gateway per request, to keep a public-only derived cache rebuilt by
 `core/src/restore/`, or to show hashes and links only. This needs the owner, and it affects a
 public web page rather than correctness.
+
+### D-5. Solana memo enumeration is load-bearing; verified, not assumed (2026-09-27)
+
+I earlier claimed the memo's enumeration role was "a migration artifact" and that tagged items
+were discoverable through Arweave GraphQL. That was wrong, and it came from testing the query
+against the wrong endpoint. Corrected here with live evidence.
+
+**The query is valid.** `sort: HEIGHT_ASC` and `block { timestamp }` are accepted by
+Arweave-schema gateways. Verified on 2026-09-27 against `arweave-search.goldsky.com/graphql` and
+`permagate.io/graphql`: both returned `{"data":{"transactions":{...,"edges":[]}}}` with no
+validation error. Do not "simplify" the query; it is correct for its configured endpoint.
+
+**But it finds nothing.** Both gateways returned **zero** edges for
+`tags: [{name: "App-Name", values: ["mnemonic-protocol"]}]`, while the Irys GraphQL endpoint
+returned a full first page of 100 for the same tag filter. So our items live on Irys and are not
+indexed by Arweave-schema gateways, by tag, today — new items included.
+
+This **confirms** the note in `core/src/arweave/recovery.rs` ("gateways' GraphQL never indexed
+the old Irys-bundled items", 16 memos and 0 GraphQL hits on 2026-07-09) and extends it: the same
+holds for current items.
+
+**Consequence.** Solana memo history is currently the ONLY working enumeration source for
+restore. Dropping the memo writer would make anchored memories unenumerable, and therefore
+unrestorable, even though their bytes are on Arweave. The memo is not redundant.
+
+Also noted: `https://arweave.net/graphql` returned a CDN 504 on two separate attempts while
+`https://arweave.net/info` answered 200. The default GraphQL endpoint is flaky independently of
+anything here.
+
+**Open, and a real improvement rather than a guess (Q-3).** Pointing the GraphQL source at the
+Irys endpoint would find our items — but Irys uses a different schema: no `sort` argument, no
+`block` field, and `timestamp` on the node in milliseconds. That is a deliberate change with its
+own migration, not a config tweak, and it would let the memo writer become optional. It needs the
+owner, and it must not be confused with `chain_stats_gateway_url`, which is the payload-fetch
+gateway and correctly points at Irys already.
