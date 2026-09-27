@@ -44,6 +44,32 @@ Implemented in `mcp/src/tools.rs::recall` over `core/src/storage/sqlite.rs`.
 
 Recall is intentionally local: SQLite read plus an in-process scan, no chain calls. Uncompressed f32 wins here because cosine similarity is sensitive to small magnitude shifts and TurboQuant compressed bytes are optimized for portability and inner-product approximation, not for being the canonical retrieval index. The compressed form on Arweave is proof-of-existence; the uncompressed form in SQLite is the search index.
 
+## Public Ledger listing and recall — `GET /artifacts`
+
+Implemented in `mcp/src/api.rs::artifacts_handler` and `mcp/src/chain_stats.rs`. The webapp Ledger page uses this route. The route needs no authentication (available now).
+
+Query parameters:
+
+| Parameter | Meaning |
+|---|---|
+| `q` | Recall text. If you omit it, the route returns the newest rows first. |
+| `limit` | Maximum number of rows in the page. |
+| `source` | `all` (default), `on_node` (local writes) or `on_chain` (anchored writes). |
+
+Chain recovery (available now): when the operator sets `CHAIN_STATS_WALLETS`, the server reads its anchored memories from Solana memos and Arweave. It keeps them in memory as a snapshot. SQLite does not store this snapshot.
+
+Recall with `q` (available now):
+
+1. The server embeds `q` one time.
+2. SQLite rows get a cosine score against their f32 embeddings.
+3. Each snapshot item gets a cosine score against the embedding in its signed payload. The server decodes `metadata.embedding_f32` or `metadata.embedding_compressed` (TurboQuant) into an in-memory index. The server builds this index again after each snapshot refresh.
+4. A snapshot item without a usable embedding matches only if its content or tags contain `q`. The match ignores letter case. These items get a score of 1.0, equal to a perfect cosine match.
+5. The server sorts all matches by score and returns the first `limit` rows.
+
+A snapshot item that has the same `arweave_tx` or `content_hash` as a SQLite row does not appear. The SQLite row appears instead. With `source=on_node`, the result contains no snapshot items.
+
+Each recall row has a `match` field: `semantic` (cosine score) or `text` (text match). A listing without `q` has no `match` field.
+
 ## End-to-end walkthrough — verify
 
 Implemented in `mcp/src/tools.rs::verify`.
