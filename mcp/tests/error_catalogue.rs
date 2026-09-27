@@ -9,8 +9,8 @@
 //! Rows in scope of Task 4:
 //!
 //! - `-32602 InvalidParams` (visibility on local writes) — via dispatcher.
-//! - `-32602 InvalidParams` (non-bool allow_fallback_to_participate).
-//! - `-32010 UnsupportedMode` (participate against local-only deploy).
+//! - `-32602 InvalidParams` (non-bool allow_fallback_to_anchored).
+//! - `-32010 UnsupportedMode` (anchored against local-only deploy).
 //! - `-32095 PublicWriteRequiresConfirmation` (missing token).
 //! - `-32098 EmbedderInvalid` (FailingEmbedder returns empty vec).
 //!
@@ -102,18 +102,18 @@ async fn catalogue_invalid_params_non_bool_allow_fallback() {
             "mnemonic_sign_memory",
             json!({
                 "content": "x",
-                "allow_fallback_to_participate": 42,
+                "allow_fallback_to_anchored": 42,
             }),
         )
         .await;
     let err = res.expect_error();
     assert_eq!(err["code"], -32602);
-    assert_eq!(err["data"]["field"], "allow_fallback_to_participate");
+    assert_eq!(err["data"]["field"], "allow_fallback_to_anchored");
 }
 
 #[tokio::test]
-async fn catalogue_unsupported_mode_participate_on_local_only() {
-    // `STORAGE_MODE=local` envelope rejects `mode=participate` at the
+async fn catalogue_unsupported_mode_anchored_on_local_only() {
+    // `STORAGE_MODE=local` envelope rejects `mode=anchored` at the
     // dispatcher boundary with -32010 + supported list.
     let server = TestServer::builder().build();
     let owner = server.server_pubkey();
@@ -123,7 +123,7 @@ async fn catalogue_unsupported_mode_participate_on_local_only() {
             "mnemonic_sign_memory",
             json!({
                 "content": "x",
-                "mode": "participate",
+                "mode": "anchored",
             }),
         )
         .await;
@@ -153,7 +153,7 @@ async fn catalogue_public_write_requires_confirmation() {
             "mnemonic_sign_memory",
             json!({
                 "content": "x",
-                "mode": "participate",
+                "mode": "anchored",
                 "visibility": "public",
             }),
         )
@@ -273,7 +273,7 @@ fn catalogue_typed_helpers_pin_data_shapes() {
         public_write_requires_confirmation, token_expired, unsupported_mode,
     };
 
-    let e = unsupported_mode("participate", &["local"]);
+    let e = unsupported_mode("anchored", &["local"]);
     assert_eq!(e.code, -32010);
     assert_eq!(e.data.as_ref().unwrap()["kind"], "UnsupportedMode");
 

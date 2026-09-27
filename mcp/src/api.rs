@@ -290,7 +290,7 @@ pub async fn sign_callback_handler(
         );
     }
 
-    // Paid participate writes bind the exact quote to the verified COSE
+    // Paid anchored writes bind the exact quote to the verified COSE
     // envelope, not raw editor text. The first callback returns a quote; a
     // later callback sees the durable provider receipt and may anchor.
     //
@@ -301,7 +301,7 @@ pub async fn sign_callback_handler(
         payment::active_universal_paywall(&state.payment_mode, state.universal_paywall.as_ref());
 
     // Free daily anchor quota (see `payment.rs`). On a paid deploy a
-    // participate write first takes one of the signer's free anchors for
+    // anchored write first takes one of the signer's free anchors for
     // today. This is the single consumption point. A free anchor needs a
     // Google-linked signer, room in the per-account, per-IP and global
     // counters, and COSE bytes within `max_bytes`. The per-IP counter
@@ -324,7 +324,7 @@ pub async fn sign_callback_handler(
     let mut free_anchor = None;
     let mut free_denied = None;
     let requester_ip = entry.requester_ip.or(client_ip);
-    if entry.write_mode == WriteMode::Participate
+    if entry.write_mode == WriteMode::Anchored
         && payment::free_quota_applies(&state.payment_mode)
         && (universal_paywall.is_some() || entry.free_quota)
     {
@@ -378,7 +378,7 @@ pub async fn sign_callback_handler(
         universal_paywall
     };
 
-    if entry.write_mode == WriteMode::Participate {
+    if entry.write_mode == WriteMode::Anchored {
         if let Some(config) = universal_paywall {
             let now = chrono::Utc::now().to_rfc3339();
             let staged = match state.store.lock() {
@@ -515,10 +515,9 @@ pub async fn sign_callback_handler(
     // Acquire a durable, expiring delivery lease before anchoring. Payment is
     // already final at this point: a retry resumes this attempt and must never
     // re-enter exact settlement or create another customer charge.
-    let is_paid_participate =
-        entry.write_mode == WriteMode::Participate && universal_paywall.is_some();
+    let is_paid_anchored = entry.write_mode == WriteMode::Anchored && universal_paywall.is_some();
     let mut delivery_attempt = None;
-    if is_paid_participate {
+    if is_paid_anchored {
         let now = chrono::Utc::now().to_rfc3339();
         let lease_id = uuid::Uuid::new_v4().to_string();
         let lease_expires_at = (chrono::Utc::now() + chrono::TimeDelta::minutes(10)).to_rfc3339();
@@ -565,7 +564,7 @@ pub async fn sign_callback_handler(
         .await
     {
         Ok(entry) => entry,
-        Err(PendingError::NotFound) if is_paid_participate => entry,
+        Err(PendingError::NotFound) if is_paid_anchored => entry,
         Err(PendingError::NotFound) => {
             return error_resp(
                 StatusCode::GONE,
@@ -602,7 +601,7 @@ pub async fn sign_callback_handler(
     //     leaves a second row for one artifact.
     let (existing_anchor, existing_row) = match state.store.lock() {
         Ok(store) => {
-            let anchored = if entry.write_mode == WriteMode::Participate {
+            let anchored = if entry.write_mode == WriteMode::Anchored {
                 store.find_anchored_by_content_hash(&entry.content_hash)
             } else {
                 Ok(None)
@@ -863,10 +862,10 @@ pub async fn sign_callback_handler(
         // `write_mode` (added when Wave 3 routed remote-owned writes —
         // including explicit `mode: "local"` — through the client-signing
         // path). Persist with the caller's intended mode rather than
-        // assuming `Participate`. A `Local` bundle took the synthetic-id
-        // branch above and stays free; a `Participate` bundle was anchored
+        // assuming `Anchored`. A `Local` bundle took the synthetic-id
+        // branch above and stays free; a `Anchored` bundle was anchored
         // on Arweave + Solana. (Historically this path only ever saw
-        // `Participate` because explicit-local fell through to the inline
+        // `Anchored` because explicit-local fell through to the inline
         // operator-signed path; that custodial fall-through is now removed.)
         //
         // Round-2 (T3 extension): the row is persisted BEFORE the delivery
@@ -875,7 +874,7 @@ pub async fn sign_callback_handler(
         // the row is demoted in place via `INSERT OR REPLACE` inside
         // `confirm_delivery_or_demote`.
         // Visibility (owner decision D-8, 2026-09-27): an anchored
-        // Participate row is plain text on Arweave, so it is stored `public`
+        // Anchored row is plain text on Arweave, so it is stored `public`
         // with `plaintext_on_arweave = 1`. A Local bundle stays `private`.
         // `save_attestation` applies the same rule; computing it here keeps
         // the intent visible at the call site.
@@ -2014,7 +2013,7 @@ fn artifact_matches_source(artifact: &PublicArtifact, source: ArtifactSource) ->
     match source {
         ArtifactSource::All => true,
         ArtifactSource::OnNode => artifact.write_mode == WriteMode::Local,
-        ArtifactSource::OnChain => artifact.write_mode == WriteMode::Participate,
+        ArtifactSource::OnChain => artifact.write_mode == WriteMode::Anchored,
     }
 }
 
@@ -2057,7 +2056,7 @@ fn public_artifact_from_recovered(r: &RecoveredItem) -> PublicArtifact {
             .as_ref()
             .map(|d| format!("{d}T00:00:00Z"))
             .unwrap_or_else(|| "1970-01-01T00:00:00Z".to_string()),
-        write_mode: WriteMode::Participate,
+        write_mode: WriteMode::Anchored,
         // Read back from Arweave, so it is plain text there by definition.
         plaintext_on_arweave: true,
     }
@@ -2163,7 +2162,7 @@ pub async fn artifacts_handler(
             ArtifactSource::All | ArtifactSource::OnChain => {
                 let db_result = match source {
                     ArtifactSource::OnChain => {
-                        store.list_public_artifacts_by_mode(WriteMode::Participate, limit)
+                        store.list_public_artifacts_by_mode(WriteMode::Anchored, limit)
                     }
                     _ => store.list_public_artifacts(limit),
                 };
@@ -3364,7 +3363,7 @@ mod tests {
             arweave_tx: arweave_tx.to_string(),
             created_at: created_at.to_string(),
             write_mode: mode,
-            plaintext_on_arweave: mode == WriteMode::Participate,
+            plaintext_on_arweave: mode == WriteMode::Anchored,
         }
     }
 
@@ -3377,7 +3376,7 @@ mod tests {
         assert_eq!(a.content, "hello chain");
         assert_eq!(a.solana_tx, "sol1");
         assert_eq!(a.created_at, "2026-06-01T00:00:00Z");
-        assert_eq!(a.write_mode, WriteMode::Participate);
+        assert_eq!(a.write_mode, WriteMode::Anchored);
     }
 
     #[test]
@@ -3397,7 +3396,7 @@ mod tests {
             "att-1",
             "tx1",
             "2026-06-01T12:00:00Z",
-            WriteMode::Participate,
+            WriteMode::Anchored,
         )];
         let (merged, total) =
             merge_chain_artifacts(&chain, db, &NonPublicAnchorKeys::default(), 10);
@@ -3419,7 +3418,7 @@ mod tests {
             "att-1",
             "tx3",
             "2026-06-01T12:00:00Z",
-            WriteMode::Participate,
+            WriteMode::Anchored,
         )];
         let (merged, total) = merge_chain_artifacts(&chain, db, &NonPublicAnchorKeys::default(), 2);
         assert_eq!(total, 3);
@@ -3434,7 +3433,7 @@ mod tests {
             "att-1",
             "tx1",
             "2026-06-01T12:00:00Z",
-            WriteMode::Participate,
+            WriteMode::Anchored,
         )];
         let (merged, total) =
             merge_chain_artifacts(&[], db.clone(), &NonPublicAnchorKeys::default(), 10);

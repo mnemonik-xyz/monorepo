@@ -77,7 +77,12 @@ export interface MnemonicClientConfig {
  *   and the server anchors it on Arweave and Solana. This needs the
  *   private key.
  */
-export type WriteMode = "local" | "participate";
+/**
+ * `"anchored"` is the canonical spelling. `"participate"` is the deprecated
+ * pre-2026-09-27 name for the same mode, accepted on input for one release
+ * so existing callers keep working. The server never returns it.
+ */
+export type WriteMode = "local" | "anchored" | "participate";
 
 /**
  * Lazy keypair source. The client calls it only when it must make a

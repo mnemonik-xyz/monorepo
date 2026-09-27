@@ -203,7 +203,7 @@ const NON_PUBLIC_ANCHOR_KEYS_SQL: &str = "SELECT arweave_tx, content_hash
 /// rather than a single owner.
 const TIMELINE_SQL: &str = "SELECT substr(created_at, 1, 10) AS day,
             SUM(CASE WHEN write_mode = 'local' THEN 1 ELSE 0 END) AS on_node,
-            SUM(CASE WHEN write_mode = 'participate' THEN 1 ELSE 0 END) AS on_chain
+            SUM(CASE WHEN write_mode <> 'local' THEN 1 ELSE 0 END) AS on_chain
      FROM attestations
      WHERE created_at >= ?1
      GROUP BY day
@@ -276,7 +276,7 @@ impl NonPublicAnchorKeys {
 
 /// One day's attestation counts for the Analytics timeline, split by
 /// `write_mode`. `on_node` counts `WriteMode::Local` writes; `on_chain` counts
-/// `WriteMode::Participate` writes. `date` is a `YYYY-MM-DD` UTC day key.
+/// `WriteMode::Anchored` writes. `date` is a `YYYY-MM-DD` UTC day key.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct TimelineBucket {
     pub date: String,
@@ -495,7 +495,7 @@ fn attestations_has_column(conn: &Connection, column: &str) -> anyhow::Result<bo
 ///
 /// `DEFAULT 'participate'` is the conservative choice for legacy rows: a row
 /// that existed under the previous global `STORAGE_MODE=full` operator was,
-/// by definition, a paid participate write. Silently re-tagging those rows
+/// by definition, a paid anchored write. Silently re-tagging those rows
 /// as `'local'` would destroy billing history and downgrade the integrity
 /// claim attached to the row.
 ///
@@ -581,7 +581,7 @@ pub fn is_anchored_arweave_tx(arweave_tx: &str) -> bool {
 ///
 /// - A real Arweave tx id sets `plaintext_on_arweave = true` (this also
 ///   covers a demoted row whose bytes were already submitted).
-/// - A `participate` row with a real Arweave tx id is stored `public`,
+/// - A `anchored` row with a real Arweave tx id is stored `public`,
 ///   whatever the caller asked for. Sealed (encrypted) writes are planned;
 ///   until they ship, anchored content is public plain text.
 /// - Every other row keeps the requested visibility.
@@ -591,7 +591,7 @@ pub fn effective_visibility(
     requested: Visibility,
 ) -> (Visibility, bool) {
     let anchored = is_anchored_arweave_tx(arweave_tx);
-    let visibility = if anchored && write_mode == WriteMode::Participate {
+    let visibility = if anchored && write_mode == WriteMode::Anchored {
         Visibility::Public
     } else {
         requested
@@ -605,7 +605,7 @@ pub fn effective_visibility(
 /// `attestations.relabelled_public_at TEXT` (NULL by default), then:
 ///
 /// 1. sets `plaintext_on_arweave = 1` on every row with a real Arweave tx id;
-/// 2. relabels `participate` rows with a real Arweave tx id that are not
+/// 2. relabels `anchored` rows with a real Arweave tx id that are not
 ///    `public` to `public`, and stamps `relabelled_public_at` with the
 ///    migration time. Operators use this column to find the owners to
 ///    notify: `SELECT DISTINCT owner_pubkey FROM attestations WHERE
@@ -653,7 +653,7 @@ fn migrate_plaintext_on_arweave_column(conn: &Connection) -> anyhow::Result<()> 
                     AND visibility IS NOT ?1
                     AND {ANCHORED_TX_PREDICATE}"
             ),
-            params![Visibility::Public, now, WriteMode::Participate],
+            params![Visibility::Public, now, WriteMode::Anchored],
         )
         .context("relabelling anchored private rows to public")?;
         Ok(())
@@ -740,6 +740,52 @@ fn migrate_visibility_column(conn: &Connection) -> anyhow::Result<()> {
     }
 }
 
+/// Normalize the deprecated `write_mode` value `'participate'` to the canonical
+/// `'anchored'` (work/arweave-as-source-of-truth, 2026-09-27).
+///
+/// The rename is a spelling change only; the meaning is unchanged — the memory
+/// lives on Arweave. `WriteMode::from_str_strict` still accepts the old token,
+/// so a read of an un-migrated row never fails. This migration exists so that
+/// **SQL** can keep comparing the column against a single literal: `TIMELINE_SQL`
+/// and the `WHERE a.write_mode = ?1` listing would otherwise each have to match
+/// two spellings, and one missed site silently undercounts rows.
+///
+/// Idempotent: after the first run the UPDATE matches zero rows. It needs no
+/// `PRAGMA table_info` guard because `migrate_write_mode_column` runs before it
+/// in both callers, so the column always exists.
+///
+/// The column DEFAULT stays `'participate'`: changing it requires a full table
+/// rebuild in SQLite, and every INSERT passes `write_mode` explicitly, so the
+/// default never applies to a new row. Any row that did acquire it is normalized
+/// on the next open.
+fn migrate_write_mode_anchored_rename(conn: &Connection) -> anyhow::Result<()> {
+    conn.execute_batch("BEGIN IMMEDIATE;")
+        .context("opening write_mode anchored-rename transaction")?;
+
+    let do_migration = || -> anyhow::Result<()> {
+        conn.execute(
+            "UPDATE attestations
+                SET write_mode = 'anchored'
+              WHERE write_mode = 'participate'",
+            [],
+        )
+        .context("normalizing attestations.write_mode 'participate' to 'anchored'")?;
+        Ok(())
+    };
+
+    match do_migration() {
+        Ok(()) => {
+            conn.execute_batch("COMMIT;")
+                .context("committing write_mode anchored-rename migration")?;
+            Ok(())
+        }
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK;");
+            Err(e)
+        }
+    }
+}
+
 impl SqliteStore {
     pub fn open(path: &Path) -> anyhow::Result<Self> {
         if let Some(parent) = path.parent() {
@@ -768,6 +814,7 @@ impl SqliteStore {
         migrate_correlation_id_column(&conn)?;
         migrate_write_mode_column(&conn)?;
         migrate_visibility_column(&conn)?;
+        migrate_write_mode_anchored_rename(&conn)?;
         migrate_plaintext_on_arweave_column(&conn)?;
         Ok(Self { conn })
     }
@@ -786,6 +833,7 @@ impl SqliteStore {
         migrate_correlation_id_column(&conn)?;
         migrate_write_mode_column(&conn)?;
         migrate_visibility_column(&conn)?;
+        migrate_write_mode_anchored_rename(&conn)?;
         migrate_plaintext_on_arweave_column(&conn)?;
         Ok(Self { conn })
     }
@@ -920,7 +968,7 @@ impl SqliteStore {
         }
     }
 
-    /// The earliest `participate` (anchored) row for `content_hash`, as
+    /// The earliest `anchored` (anchored) row for `content_hash`, as
     /// `(attestation_id, solana_tx, arweave_tx)`, or `None`. A row demoted
     /// to `local` after a failed delivery check does not count. The deferred
     /// sign-callback uses this to never anchor one artifact twice.
@@ -931,7 +979,13 @@ impl SqliteStore {
         let mut stmt = self.conn.prepare(
             "SELECT attestation_id, solana_tx, arweave_tx
              FROM attestations
-             WHERE content_hash = ?1 AND write_mode = 'participate'
+             -- `<> 'local'` rather than `= 'anchored'`: this is a REPLAY GUARD,
+             -- so any already-anchored row must block a second anchor. Matching
+             -- one spelling would miss a row written before the
+             -- participate->anchored rename, and re-anchor it — spending a
+             -- second free grant and creating a duplicate chain write. It is
+             -- also future-proof for a second anchor backend (issue #70).
+             WHERE content_hash = ?1 AND write_mode <> 'local'
              ORDER BY created_at ASC LIMIT 1",
         )?;
         let mut rows = stmt.query(params![content_hash])?;
@@ -1247,7 +1301,7 @@ impl AttestationStore for SqliteStore {
     ) -> anyhow::Result<()> {
         let tags_json = serde_json::to_string(tags)?;
         // Owner decision D-8: anchored content is public plain text on
-        // Arweave, so an anchored participate row is stored `public` and
+        // Arweave, so an anchored anchored row is stored `public` and
         // every row with a real Arweave tx id is flagged.
         let (visibility, plaintext_on_arweave) =
             effective_visibility(write_mode, arweave_tx, visibility);
@@ -1620,7 +1674,7 @@ mod tests {
                 "signer1",
                 TEST_OWNER,
                 "2026-04-13T00:00:00Z",
-                WriteMode::Participate,
+                WriteMode::Anchored,
                 Visibility::Private,
                 &[1.0, 0.0],
             )
@@ -1665,16 +1719,16 @@ mod tests {
             .unwrap();
         store
             .save_attestation(
-                "att-participate",
-                "participate content",
-                "h-participate",
+                "att-anchored",
+                "anchored content",
+                "h-anchored",
                 &[],
                 "sol-different",
-                "ar-participate",
+                "ar-anchored",
                 "signer-b",
                 "owner-b",
                 "2026-04-13T00:00:00Z",
-                WriteMode::Participate,
+                WriteMode::Anchored,
                 Visibility::Private,
                 &[0.0, 1.0],
             )
@@ -1687,12 +1741,12 @@ mod tests {
                 .unwrap(),
             Some(WriteMode::Local)
         );
-        // owner-b's row is participate
+        // owner-b's row is anchored
         assert_eq!(
             store
                 .find_write_mode_by_tx("sol-different", "owner-b")
                 .unwrap(),
-            Some(WriteMode::Participate)
+            Some(WriteMode::Anchored)
         );
         // Wrong tenant for an existing tx → None (no leak).
         assert_eq!(
@@ -1725,7 +1779,7 @@ mod tests {
                     "signer_a",
                     TEST_OWNER,
                     "2026-01-01",
-                    WriteMode::Participate,
+                    WriteMode::Anchored,
                     Visibility::Private,
                     &[1.0, 0.0],
                 )
@@ -1742,7 +1796,7 @@ mod tests {
                 "signer_b",
                 TEST_OWNER,
                 "2026-01-01",
-                WriteMode::Participate,
+                WriteMode::Anchored,
                 Visibility::Private,
                 &[1.0, 0.0],
             )
@@ -1769,7 +1823,7 @@ mod tests {
                 "agent",
                 "owner_agent",
                 "2026-01-01",
-                WriteMode::Participate,
+                WriteMode::Anchored,
                 Visibility::Private,
                 &[1.0, 0.0],
             )
@@ -1785,7 +1839,7 @@ mod tests {
                 "agent",
                 "owner_agent",
                 "2026-01-01",
-                WriteMode::Participate,
+                WriteMode::Anchored,
                 Visibility::Private,
                 &[0.0, 1.0],
             )
@@ -1815,7 +1869,7 @@ mod tests {
                 "signer_x",
                 "owner_alice",
                 "2026-01-01",
-                WriteMode::Participate,
+                WriteMode::Anchored,
                 Visibility::Private,
                 &[1.0, 0.0],
             )
@@ -1831,7 +1885,7 @@ mod tests {
                 "signer_x",
                 "owner_bob",
                 "2026-01-01",
-                WriteMode::Participate,
+                WriteMode::Anchored,
                 Visibility::Private,
                 &[1.0, 0.0],
             )
@@ -1911,7 +1965,7 @@ mod tests {
                 server,
                 server,
                 "2026-01-01",
-                WriteMode::Participate,
+                WriteMode::Anchored,
                 Visibility::Private,
                 &[1.0, 0.0],
             )
@@ -1958,7 +2012,7 @@ mod tests {
                 "s1",
                 TEST_OWNER,
                 "2026-01-01",
-                WriteMode::Participate,
+                WriteMode::Anchored,
                 Visibility::Private,
                 &[1.0],
             )
@@ -1974,7 +2028,7 @@ mod tests {
             "s1",
             TEST_OWNER,
             "2026-01-01",
-            WriteMode::Participate,
+            WriteMode::Anchored,
             Visibility::Private,
             &[1.0],
         );
@@ -2149,6 +2203,12 @@ mod tests {
             "local",
             "'local:abc' must be backfilled to 'local'"
         );
+        // NOTE: this test drives `migrate_write_mode_column` directly, i.e. the
+        // legacy migration in isolation. At that point the raw column value is
+        // still the historical DEFAULT `'participate'`; the rename to
+        // `'anchored'` is a separate, later migration
+        // (`migrate_write_mode_anchored_rename`). Asserting the raw string here
+        // is deliberate.
         assert_eq!(
             read_mode("att-bareprefix"),
             "participate",
@@ -2182,7 +2242,7 @@ mod tests {
                 "s",
                 TEST_OWNER,
                 "2026-01-01",
-                WriteMode::Participate,
+                WriteMode::Anchored,
                 Visibility::Private,
                 &[1.0, 0.0],
             )
@@ -2318,9 +2378,9 @@ mod tests {
         super::migrate_visibility_column(&conn).unwrap();
         assert!(!super::attestations_has_column(&conn, "plaintext_on_arweave").unwrap());
 
-        raw_insert(&conn, "anchored-priv", "ArTx1", "participate", "private");
-        raw_insert(&conn, "anchored-pub", "ArTx2", "participate", "public");
-        raw_insert(&conn, "synthetic", "local:x", "participate", "private");
+        raw_insert(&conn, "anchored-priv", "ArTx1", "anchored", "private");
+        raw_insert(&conn, "anchored-pub", "ArTx2", "anchored", "public");
+        raw_insert(&conn, "synthetic", "local:x", "anchored", "private");
         raw_insert(&conn, "demoted", "ArTx3", "local", "private");
         raw_insert(&conn, "local", "local:y", "local", "private");
 
@@ -2381,8 +2441,8 @@ mod tests {
                 )
                 .unwrap();
         };
-        save("anchored", "ArTx1", WriteMode::Participate);
-        save("synthetic", "local:x", WriteMode::Participate);
+        save("anchored", "ArTx1", WriteMode::Anchored);
+        save("synthetic", "local:x", WriteMode::Anchored);
         save("demoted", "ArTx2", WriteMode::Local);
 
         let conn = store.conn();
@@ -2434,7 +2494,7 @@ mod tests {
             "owner-a",
             "s1",
             "2026-06-01T00:00:00Z",
-            WriteMode::Participate,
+            WriteMode::Anchored,
             Visibility::Public,
         );
         seed_row(
@@ -2452,7 +2512,7 @@ mod tests {
             "owner-b",
             "s3",
             "2026-06-03T00:00:00Z",
-            WriteMode::Participate,
+            WriteMode::Anchored,
             Visibility::Public,
         );
 
@@ -2547,7 +2607,7 @@ mod tests {
             "owner-b",
             "s3",
             "2026-06-03T00:00:00Z",
-            WriteMode::Participate,
+            WriteMode::Anchored,
             Visibility::Public,
         );
 
@@ -2609,7 +2669,7 @@ mod tests {
                 "signer",
                 "owner-a",
                 "2026-06-01T00:00:01Z",
-                WriteMode::Participate,
+                WriteMode::Anchored,
                 Visibility::Public,
                 &[1.0, 0.0],
             )
@@ -2664,7 +2724,7 @@ mod tests {
             "owner-x",
             "s1",
             "2026-06-01T00:00:00Z",
-            WriteMode::Participate,
+            WriteMode::Anchored,
             Visibility::Public,
         );
         store
@@ -2697,7 +2757,7 @@ mod tests {
             "owner-a",
             "s2",
             "2026-06-01T00:00:00Z",
-            WriteMode::Participate,
+            WriteMode::Anchored,
             Visibility::Public,
         );
 
@@ -2705,7 +2765,7 @@ mod tests {
             .list_public_artifacts_by_mode(WriteMode::Local, 10)
             .unwrap();
         let chain = store
-            .list_public_artifacts_by_mode(WriteMode::Participate, 10)
+            .list_public_artifacts_by_mode(WriteMode::Anchored, 10)
             .unwrap();
         assert_eq!(local.len(), 1);
         assert_eq!(local[0].attestation_id, "local-1");
@@ -2722,7 +2782,7 @@ mod tests {
     #[test]
     fn attestation_timeline_buckets_by_day_and_write_mode() {
         let store = SqliteStore::in_memory().unwrap();
-        // Day 1: 2 local (on-node) + 1 participate (on-chain).
+        // Day 1: 2 local (on-node) + 1 anchored (on-chain).
         seed_row(
             &store,
             "d1-l1",
@@ -2747,17 +2807,17 @@ mod tests {
             "o",
             "sig-1",
             "2026-06-01T23:00:00Z",
-            WriteMode::Participate,
+            WriteMode::Anchored,
             Visibility::Public,
         );
-        // Day 2: 1 participate (on-chain).
+        // Day 2: 1 anchored (on-chain).
         seed_row(
             &store,
             "d2-p1",
             "o",
             "sig-2",
             "2026-06-02T12:00:00Z",
-            WriteMode::Participate,
+            WriteMode::Anchored,
             Visibility::Public,
         );
 

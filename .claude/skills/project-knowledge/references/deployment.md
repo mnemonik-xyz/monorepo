@@ -55,9 +55,9 @@ Variables for `mcp/` (set by user):
 | `MCP_TRANSPORT` | `http` | `stdio` or `http` |
 | `MCP_HTTP_PORT` | `3000` | HTTP transport port |
 | `PAYMENT_MODE` | `none` | `none`, `balance`, `x402`, `both` |
-| `MNEMONIC_FREE_ANCHORS_PER_DAY` | `10` | Free `participate` writes per Google account per UTC day before x402 payment (HTTP + `PAYMENT_MODE=x402` only; only keys linked to a Google account). `0` disables |
-| `MNEMONIC_FREE_ANCHORS_PER_IP_PER_DAY` | `20` | Free `participate` writes per client IP address per UTC day (IPv6 by /64). `0` disables |
-| `MNEMONIC_FREE_ANCHORS_GLOBAL_PER_DAY` | `1000` | Free `participate` writes per UTC day across all accounts (bounds operator chain spend). `0` = no free writes |
+| `MNEMONIC_FREE_ANCHORS_PER_DAY` | `10` | Free `anchored` writes per Google account per UTC day before x402 payment (HTTP + `PAYMENT_MODE=x402` only; only keys linked to a Google account). `0` disables |
+| `MNEMONIC_FREE_ANCHORS_PER_IP_PER_DAY` | `20` | Free `anchored` writes per client IP address per UTC day (IPv6 by /64). `0` disables |
+| `MNEMONIC_FREE_ANCHORS_GLOBAL_PER_DAY` | `1000` | Free `anchored` writes per UTC day across all accounts (bounds operator chain spend). `0` = no free writes |
 | `MNEMONIC_FREE_ANCHOR_MAX_BYTES` | `16384` | Largest COSE_Sign1 envelope for a free write; larger writes are paid |
 | `MNEMONIC_MAX_CONTENT_BYTES` | `32768` | Largest `mnemonic_sign_memory` content on every transport (clamped to 32768) |
 | `TRUSTED_PROXIES` | `127.0.0.0/8,::1/128,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,fc00::/7` | CIDR list of reverse proxies whose `X-Forwarded-For` / `X-Real-IP` give the real client IP (rate limiters, per-IP free quota). The rightmost untrusted hop wins. Empty = trust no proxy. A malformed list aborts the boot |

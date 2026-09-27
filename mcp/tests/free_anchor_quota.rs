@@ -1,6 +1,6 @@
 //! Integration tests for the free daily anchor quota.
 //!
-//! Each Google-linked account gets N free `participate` (on-chain anchored)
+//! Each Google-linked account gets N free `anchored` (on-chain anchored)
 //! writes per UTC day on a `PAYMENT_MODE=x402` deploy, under a per-IP share
 //! and a global daily cap, for COSE bytes up to a size limit. The
 //! pre-parking x402 gate in `mcp_handler` only peeks; the sign-callback
@@ -146,7 +146,7 @@ async fn post_json_from(
     (status, json)
 }
 
-/// `tools/call mnemonic_sign_memory` (participate) as `kp`. Returns the HTTP
+/// `tools/call mnemonic_sign_memory` (anchored) as `kp`. Returns the HTTP
 /// status and the raw response envelope.
 async fn sign_memory(
     app: &Router,
@@ -174,7 +174,7 @@ async fn sign_memory_from(
         "method": "tools/call",
         "params": {
             "name": "mnemonic_sign_memory",
-            "arguments": {"content": content, "mode": "participate"},
+            "arguments": {"content": content, "mode": "anchored"},
         },
     });
     post_json_from(app, "/mcp", &headers, body, peer).await
@@ -208,7 +208,7 @@ async fn submit(app: &Router, kp: &Keypair, parked: &Value) -> (StatusCode, Valu
     post_json(app, "/api/sign-callback", &[], body).await
 }
 
-/// Park, sign and anchor one participate write; assert it anchored.
+/// Park, sign and anchor one anchored write; assert it anchored.
 async fn anchor_ok(app: &Router, kp: &Keypair, content: &str) {
     let (status, envelope) = sign_memory(app, kp, content, &[]).await;
     assert_eq!(status, StatusCode::OK, "{envelope}");
@@ -682,7 +682,7 @@ async fn content_over_the_server_cap_is_refused_on_every_mode() {
     let kp = Keypair::new();
     let jwt = mnemonic_mcp::test_support::mint_jwt(&kp.pubkey().to_string(), TEST_JWT_SECRET);
     let too_big = "y".repeat(mnemonic_mcp::pending::MAX_CONTENT_BYTES + 1);
-    for mode in ["local", "participate"] {
+    for mode in ["local", "anchored"] {
         let body = json!({
             "jsonrpc": "2.0",
             "id": 1,
@@ -795,7 +795,7 @@ async fn an_already_anchored_content_hash_is_not_anchored_again() {
                 &kp.pubkey().to_string(),
                 &kp.pubkey().to_string(),
                 &chrono::Utc::now().to_rfc3339(),
-                mnemonic_core::storage::WriteMode::Participate,
+                mnemonic_core::storage::WriteMode::Anchored,
                 mnemonic_core::storage::Visibility::Private,
                 &[0.1; 8],
             )

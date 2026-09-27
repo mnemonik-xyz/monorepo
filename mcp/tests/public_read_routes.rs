@@ -81,7 +81,7 @@ fn seed_one_public_one_private(state: &Arc<McpState>, owner: &str) {
             owner,
             owner,
             "2026-06-10T00:00:00Z",
-            WriteMode::Participate,
+            WriteMode::Anchored,
             Visibility::Public,
             &embedding,
         )
@@ -144,7 +144,7 @@ async fn artifacts_plain_list_returns_public_rows_only_with_shape() {
     assert_eq!(row["solana_tx"], "5NfSolanaPubSig");
     assert_eq!(row["arweave_tx"], "ArweavePubTx");
     assert_eq!(row["created_at"], "2026-06-10T00:00:00Z");
-    assert_eq!(row["write_mode"], "participate");
+    assert_eq!(row["write_mode"], "anchored");
     // Owner decision D-8: an anchored row says its content is plain text on
     // Arweave.
     assert_eq!(row["plaintext_on_arweave"], true);
@@ -267,7 +267,7 @@ async fn artifacts_recall_finds_chain_recovered_items_with_empty_db() {
         assert_eq!(kind("tx-text"), "text", "fallback is labelled");
 
         let text_row = &body["artifacts"][pos("tx-text").unwrap()];
-        assert_eq!(text_row["write_mode"], "participate");
+        assert_eq!(text_row["write_mode"], "anchored");
         assert_eq!(text_row["content_hash"], "h3");
         assert_eq!(text_row["solana_tx"], "sol-tx-text");
     }
@@ -413,11 +413,11 @@ async fn analytics_buckets_and_totals_by_write_mode() {
     {
         let store = state.store.lock().expect("store");
         let embedding = vec![0.1f32; 8];
-        // Two on-node (local) + one on-chain (participate) on the same UTC day.
+        // Two on-node (local) + one on-chain (anchored) on the same UTC day.
         for (i, (mode, vis)) in [
             (WriteMode::Local, Visibility::Private),
             (WriteMode::Local, Visibility::Public),
-            (WriteMode::Participate, Visibility::Public),
+            (WriteMode::Anchored, Visibility::Public),
         ]
         .into_iter()
         .enumerate()

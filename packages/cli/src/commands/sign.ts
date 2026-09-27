@@ -52,7 +52,7 @@ export async function runSign(
 
   const tags = parseTags(opts.tags);
   const anchor = opts.anchor === true;
-  const mode = anchor ? "participate" : "local";
+  const mode = anchor ? "anchored" : "local";
   // Pre-flight (identity/JWT mismatch, bug 3 / Decision 7) runs inside
   // openSession BEFORE any fetch. Only an anchored write may read the OS
   // keychain (for a silent re-login or the signature itself).

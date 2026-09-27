@@ -52,7 +52,7 @@ fn seed_one_private_one_public(server: &TestServer, owner: &str) {
             owner,
             owner,
             "2026-06-04T00:00:00Z",
-            WriteMode::Participate,
+            WriteMode::Anchored,
             Visibility::Private,
             &embedding,
         )
@@ -69,7 +69,7 @@ fn seed_one_private_one_public(server: &TestServer, owner: &str) {
             owner,
             owner,
             "2026-06-04T00:00:01Z",
-            WriteMode::Participate,
+            WriteMode::Anchored,
             Visibility::Public,
             &embedding,
         )
@@ -169,7 +169,7 @@ async fn cross_owner_pool_visible() {
                 owner_a,
                 owner_a,
                 "2026-06-04T00:00:00Z",
-                WriteMode::Participate,
+                WriteMode::Anchored,
                 Visibility::Public,
                 &embedding,
             )
@@ -185,7 +185,7 @@ async fn cross_owner_pool_visible() {
                 owner_b,
                 owner_b,
                 "2026-06-04T00:00:01Z",
-                WriteMode::Participate,
+                WriteMode::Anchored,
                 Visibility::Public,
                 &embedding,
             )
@@ -202,7 +202,7 @@ async fn cross_owner_pool_visible() {
                 owner_a,
                 owner_a,
                 "2026-06-04T00:00:02Z",
-                WriteMode::Participate,
+                WriteMode::Anchored,
                 Visibility::Private,
                 &embedding,
             )

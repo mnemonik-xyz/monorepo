@@ -15,24 +15,24 @@
 //!    `explicit_local_remote_user_is_hash_only_not_signed` — a remote JWT
 //!    subject's explicit-local write is an inline hash-only row owned by
 //!    that subject (no operator or client signature);
-//!    `participate_remote_user_is_deferred_not_operator_signed` — a remote
-//!    participate write stays on the client-signing path.
-//! 2. `participate_against_local_only_server_returns_unsupported` —
-//!    `STORAGE_MODE=local`, `mode: "participate"` → JSON-RPC `-32010
+//!    `anchored_remote_user_is_deferred_not_operator_signed` — a remote
+//!    anchored write stays on the client-signing path.
+//! 2. `anchored_against_local_only_server_returns_unsupported` —
+//!    `STORAGE_MODE=local`, `mode: "anchored"` → JSON-RPC `-32010
 //!    UnsupportedMode { supported: ["local"] }`, DB unchanged.
 //! 3. `mode_absent_response_shape_is_unchanged_from_legacy` — golden-
 //!    fixture byte-equality on the response envelope for a `mode`-absent
 //!    request (compat guard for the shipped chrome-extension's Cloud-tier
 //!    consumer).
 //! 4. `whoami_envelope_per_deploy_variant` — three sub-cases pinning the
-//!    `supported_modes` / `default_mode` / `participate_cost` shape on
+//!    `supported_modes` / `default_mode` / `anchored_cost` shape on
 //!    local-only, self-operator (`full + none`), hosted-x402.
 //! 5. `invalid_mode_returns_invalid_params` — table-driven over `null`,
 //!    integer, array, object, `""`, `" "`, `"Local"`, `"PARTICIPATE"`,
 //!    `"unknown"`. Each returns `-32602 InvalidParams` with
 //!    `data.field == "mode"` and `data.received` echoing the input.
 //! 6. `mixed_mode_coexistence_recall_returns_both` — one DB with one
-//!    `local` row and one `participate` row for the same owner; `recall`
+//!    `local` row and one `anchored` row for the same owner; `recall`
 //!    surfaces both, each carries its stored `write_mode`. (NOTE:
 //!    surfacing `write_mode` in the recall result envelope is T4 — this
 //!    test seeds the rows directly via `save_attestation` and verifies
@@ -115,7 +115,7 @@ async fn local_against_full_server_returns_free() {
 // ── 1b (round-2). Explicit local request on a local-only deploy bypasses ───
 //     the deferred-signing path. Without the round-2 fix this case routed
 //     to deferred (returning `awaiting_signature`) because the round-1
-//     `envelope.supports_participate()` predicate was false on local
+//     `envelope.supports_anchored()` predicate was false on local
 //     deploys. The user-spec invariant "Личная память бесплатна всегда"
 //     applies uniformly across deploys, not just to `full + JWT`.
 
@@ -170,7 +170,7 @@ async fn explicit_local_against_local_only_server_is_inline_not_deferred() {
 //     owned by the remote user. Nothing is signed: no operator signature
 //     (the operator never signs for another identity) and no client
 //     signature (a free local write needs no keychain prompt). Only
-//     participate writes are client-signed — see 1d.
+//     anchored writes are client-signed — see 1d.
 
 #[tokio::test]
 async fn explicit_local_remote_user_is_hash_only_not_signed() {
@@ -229,12 +229,12 @@ async fn explicit_local_remote_user_is_hash_only_not_signed() {
     assert_eq!(results.as_array().map(Vec::len), Some(1), "{results:?}");
 }
 
-// ── 1d. A REMOTE user's participate write stays client-signed ─────────────
+// ── 1d. A REMOTE user's anchored write stays client-signed ─────────────
 //     (deferred). The operator key never signs an anchored memory for
 //     another identity.
 
 #[tokio::test]
-async fn participate_remote_user_is_deferred_not_operator_signed() {
+async fn anchored_remote_user_is_deferred_not_operator_signed() {
     let server = TestServer::builder()
         .storage_mode("full")
         .payment_mode("none")
@@ -247,14 +247,14 @@ async fn participate_remote_user_is_deferred_not_operator_signed() {
         .call_tool(
             Some(remote),
             "mnemonic_sign_memory",
-            json!({"content": "remote anchored memo", "mode": "participate"}),
+            json!({"content": "remote anchored memo", "mode": "anchored"}),
         )
         .await;
     assert!(result.error().is_none(), "envelope: {:?}", result.envelope);
     let inner = result.result_text();
     assert_eq!(
         inner["status"], "awaiting_signature",
-        "remote participate must defer to client signing, got {inner:?}",
+        "remote anchored must defer to client signing, got {inner:?}",
     );
     assert!(inner["correlation_id"].is_string(), "{inner:?}");
     assert!(inner.get("attestation_id").is_none(), "{inner:?}");
@@ -262,10 +262,10 @@ async fn participate_remote_user_is_deferred_not_operator_signed() {
     assert_eq!(server.attestation_count(&operator), 0);
 }
 
-// ── 2. participate against local-only server: typed UnsupportedMode ────────
+// ── 2. anchored against local-only server: typed UnsupportedMode ────────
 
 #[tokio::test]
-async fn participate_against_local_only_server_returns_unsupported() {
+async fn anchored_against_local_only_server_returns_unsupported() {
     let server = TestServer::builder()
         .storage_mode("local")
         .payment_mode("none")
@@ -276,7 +276,7 @@ async fn participate_against_local_only_server_returns_unsupported() {
         .call_tool(
             Some(&owner),
             "mnemonic_sign_memory",
-            json!({"content": "would-be paid", "mode": "participate"}),
+            json!({"content": "would-be paid", "mode": "anchored"}),
         )
         .await;
 
@@ -285,7 +285,7 @@ async fn participate_against_local_only_server_returns_unsupported() {
     assert_eq!(err["message"], "Unsupported mode");
     let data = err["data"].as_object().expect("data object");
     assert_eq!(data["kind"], "UnsupportedMode");
-    assert_eq!(data["requested"], "participate");
+    assert_eq!(data["requested"], "anchored");
     assert_eq!(
         data["supported"],
         json!(["local"]),
@@ -413,14 +413,14 @@ async fn whoami_envelope_per_deploy_variant() {
         assert_eq!(inner["supported_modes"], json!(["local"]));
         assert_eq!(inner["default_mode"], "local");
         assert!(
-            inner["participate_cost"].is_null(),
-            "local-only deploy must render participate_cost = null"
+            inner["anchored_cost"].is_null(),
+            "local-only deploy must render anchored_cost = null"
         );
         // Legacy `storage_mode` field still present (chrome-extension reads it).
         assert_eq!(inner["storage_mode"], "local");
     }
 
-    // 4b. Self-operator (`full + none`) → ["local","participate"], cost 0 / [].
+    // 4b. Self-operator (`full + none`) → ["local","anchored"], cost 0 / [].
     {
         let server = TestServer::builder()
             .storage_mode("full")
@@ -431,11 +431,11 @@ async fn whoami_envelope_per_deploy_variant() {
             .call_tool(Some(&owner), "mnemonic_whoami", json!({}))
             .await;
         let inner = result.result_text();
-        assert_eq!(inner["supported_modes"], json!(["local", "participate"]));
+        assert_eq!(inner["supported_modes"], json!(["local", "anchored"]));
         assert_eq!(inner["default_mode"], "local");
-        let cost = inner["participate_cost"]
+        let cost = inner["anchored_cost"]
             .as_object()
-            .expect("participate_cost must be an object on full + none");
+            .expect("anchored_cost must be an object on full + none");
         assert_eq!(cost["currency"], "USD");
         assert_eq!(cost["amount_cents"], 0);
         assert_eq!(cost["amount_micro_usdc"], 0);
@@ -456,14 +456,14 @@ async fn whoami_envelope_per_deploy_variant() {
             .call_tool(Some(&owner), "mnemonic_whoami", json!({}))
             .await;
         let inner = result.result_text();
-        assert_eq!(inner["supported_modes"], json!(["local", "participate"]));
+        assert_eq!(inner["supported_modes"], json!(["local", "anchored"]));
         // `default_mode` is invariant across deploys: always "local"
         // (user-spec — the free-private-memory path is the default,
         // operators don't get to override).
         assert_eq!(inner["default_mode"], "local");
-        let cost = inner["participate_cost"]
+        let cost = inner["anchored_cost"]
             .as_object()
-            .expect("participate_cost must be an object on full + x402");
+            .expect("anchored_cost must be an object on full + x402");
         assert_eq!(cost["currency"], "USD");
         assert_eq!(cost["amount_cents"], 5);
         assert_eq!(cost["amount_micro_usdc"], 50_000);
@@ -476,10 +476,10 @@ async fn whoami_envelope_per_deploy_variant() {
 // ── 4b. whoami pricing block: floor rounding + live refresh (#165) ─────────
 
 fn whoami_cost(inner: &serde_json::Value) -> serde_json::Map<String, serde_json::Value> {
-    inner["participate_cost"]
+    inner["anchored_cost"]
         .as_object()
         .cloned()
-        .expect("participate_cost must be an object on full + x402")
+        .expect("anchored_cost must be an object on full + x402")
 }
 
 /// The default 1000 µUSDC floor ($0.001) used to truncate to
@@ -595,7 +595,7 @@ async fn invalid_mode_returns_invalid_params() {
 
 #[tokio::test]
 async fn mixed_mode_coexistence_recall_returns_both() {
-    // Seed one local row + one participate row directly via the storage
+    // Seed one local row + one anchored row directly via the storage
     // API so the test is independent of which env-var resolution path
     // produces each row (the resolver is already covered elsewhere).
     let server = TestServer::builder().storage_mode("local").build();
@@ -622,22 +622,22 @@ async fn mixed_mode_coexistence_recall_returns_both() {
             .expect("save local row");
         store
             .save_attestation(
-                "att-participate-id",
-                "participate content",
-                "hash-participate",
+                "att-anchored-id",
+                "anchored content",
+                "hash-anchored",
                 &["t".to_string()],
                 // Real-looking (non-`local:`) tx ids so the row falls on
-                // the participate side of the synthetic-id discrimination.
+                // the anchored side of the synthetic-id discrimination.
                 "5j2K9aRRRRYWfLh8x2y2y9X7Cxe1aN3aN3aN3aN3aN3a",
                 "PdhTPLPmHvX0iE6iAtJ8X5Y0WqQ8MzC8KvU9JhQ0aN0",
                 &owner,
                 &owner,
                 &now,
-                WriteMode::Participate,
+                WriteMode::Anchored,
                 Visibility::Private,
                 &[0.1; 8],
             )
-            .expect("save participate row");
+            .expect("save anchored row");
     }
 
     // Recall via the MCP tool: a search should surface both rows under the
@@ -659,7 +659,7 @@ async fn mixed_mode_coexistence_recall_returns_both() {
     assert_eq!(
         results.len(),
         2,
-        "expected both local + participate rows to surface in recall"
+        "expected both local + anchored rows to surface in recall"
     );
 
     // Verify each row's stored `write_mode` matches the seeded value. The
@@ -671,6 +671,6 @@ async fn mixed_mode_coexistence_recall_returns_both() {
     );
     assert_eq!(
         server.write_mode_for_tx("5j2K9aRRRRYWfLh8x2y2y9X7Cxe1aN3aN3aN3aN3aN3a"),
-        Some("participate".to_string())
+        Some("anchored".to_string())
     );
 }

@@ -195,7 +195,7 @@ pub async fn check_payment(
 
 // ── Universal Paywall exact x402 path ────────────────────────────────────────
 
-/// The Universal Paywall config that may charge a participate write, or
+/// The Universal Paywall config that may charge an anchored write, or
 /// `None` when that rail is off.
 ///
 /// A Universal Paywall config alone does not turn charging on: the rail is
@@ -842,9 +842,9 @@ pub fn get_pnl_stats(store: &SqliteStore, days: u64) -> anyhow::Result<PnlStats>
 // ── Delivery DoS guard (modes-user-choice T3) ───────────────────────────────
 //
 // Outcome-based per-`api_key_hash` sliding-window counter consulted at the
-// *entry* of the participate path in `mcp_handler` BEFORE any Arweave or
+// *entry* of the anchored path in `mcp_handler` BEFORE any Arweave or
 // Solana write. Increments on every delivery-not-confirmed demotion. When a
-// caller crosses the threshold within the window the next `participate`
+// caller crosses the threshold within the window the next `anchored`
 // request short-circuits with `-32011 DeliveryQuotaExceeded` so a
 // systematically-failing client cannot bleed operator margin by triggering
 // chain spend that is always refunded.
@@ -1077,7 +1077,7 @@ impl DeliveryMetrics {
 
 // ── Free daily anchor quota ──────────────────────────────────────────────────
 //
-// A free `participate` (on-chain anchored) write needs ALL of:
+// A free `anchored` (on-chain anchored) write needs ALL of:
 //   - a Google-linked identity: the signer's Ed25519 key has a row in
 //     `google_identity_links` (`oauth::google::google_sub_for_pubkey`). The
 //     per-account counter is keyed on the Google account, so every key linked
@@ -1157,7 +1157,7 @@ pub struct FreeAnchorLimits {
 
 impl FreeAnchorLimits {
     /// No free anchors. Test fixtures use this so the paid-path tests keep
-    /// seeing a 402 on the first participate write.
+    /// seeing a 402 on the first anchored write.
     #[allow(dead_code)] // used by test fixtures; the bin compiles this module too.
     pub const fn disabled() -> Self {
         Self {
@@ -1254,7 +1254,7 @@ pub struct FreeAnchorStatus {
     pub resets_at: String,
 }
 
-/// True when a participate write on this deploy would otherwise be paid, so
+/// True when an anchored write on this deploy would otherwise be paid, so
 /// the free daily quota applies. `PAYMENT_MODE=none` is free already; an
 /// unknown mode fails closed in `check_payment` and gets no free anchors.
 pub fn free_quota_applies(payment_mode: &str) -> bool {

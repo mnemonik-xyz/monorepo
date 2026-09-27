@@ -55,7 +55,7 @@ const ARTIFACTS: Artifact[] = [
     solana_tx: "5Nf5h5x2qQk8wq7Yk3J9p1d2c3b4a5n6m7l8k9j0i1h2g3f4e5d6c7b8a9",
     arweave_tx: "kTQ7t1f9c2X3v4B5n6M7l8K9j0I1h2G3f4E5d6C7b8A",
     created_at: "2026-06-26T00:00:00.000Z",
-    write_mode: "participate",
+    write_mode: "anchored",
   },
   {
     id: "local-1",

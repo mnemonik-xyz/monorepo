@@ -832,7 +832,7 @@ describe("signMemory mode: local", () => {
   });
 });
 
-describe("signMemory mode: participate", () => {
+describe("signMemory mode: anchored", () => {
   const signFlow = (): CannedResponse[] => [
     { body: mcpResult({ status: "awaiting_signature", correlation_id: "c1" }) },
     { body: new Uint8Array([0xa0]) },
@@ -840,7 +840,7 @@ describe("signMemory mode: participate", () => {
       body: {
         attestation_id: "att-p",
         status: "anchored",
-        write_mode: "participate",
+        write_mode: "anchored",
         solana_tx: "sol1",
       },
     },
@@ -851,23 +851,23 @@ describe("signMemory mode: participate", () => {
       responses: [...signFlow(), ...signFlow()],
       withProvider: true,
     });
-    const r = await client.signMemory("x", { mode: "participate" });
+    const r = await client.signMemory("x", { mode: "anchored" });
     expect(r).toMatchObject({
       attestationId: "att-p",
       status: "anchored",
-      writeMode: "participate",
+      writeMode: "anchored",
       solanaTx: "sol1",
     });
     const body = calls[0]!.body as { params: { arguments: { mode: string } } };
-    expect(body.params.arguments.mode).toBe("participate");
-    await client.signMemory("y", { mode: "participate" });
+    expect(body.params.arguments.mode).toBe("anchored");
+    await client.signMemory("y", { mode: "anchored" });
     expect(providerCalls()).toBe(1); // memoised
   });
 
   it("fails fast without any keypair source (no request sent)", async () => {
     const { client, calls } = await makeKeylessClient({ responses: [] });
     await expect(
-      client.signMemory("x", { mode: "participate" })
+      client.signMemory("x", { mode: "anchored" })
     ).rejects.toThrow(/no keypair/);
     expect(calls).toHaveLength(0);
   });
@@ -880,7 +880,7 @@ describe("signMemory mode: participate", () => {
       providerKeypair: other,
     });
     await expect(
-      client.signMemory("x", { mode: "participate" })
+      client.signMemory("x", { mode: "anchored" })
     ).rejects.toThrow(/does not match signer pubkey/);
   });
 
@@ -900,9 +900,9 @@ describe("signMemory mode: participate", () => {
       return keypair;
     });
     await expect(
-      client.signMemory("x", { mode: "participate" })
+      client.signMemory("x", { mode: "anchored" })
     ).rejects.toThrow(/keychain locked/);
-    const r = await client.signMemory("x", { mode: "participate" });
+    const r = await client.signMemory("x", { mode: "anchored" });
     expect(r.attestationId).toBe("att-p");
     expect(n).toBe(2);
   });
@@ -912,6 +912,32 @@ describe("signMemory mode: participate", () => {
     await expect(
       client.signMemory("x", { mode: "PARTICIPATE" as never })
     ).rejects.toBeInstanceOf(UserError);
+  });
+
+  // The mode was called "participate" before 2026-09-27. Callers that still send
+  // the old token must keep working, and a server that still answers with it
+  // must be normalised, so downstream code only ever sees "anchored".
+  it("accepts the legacy participate spelling and normalises the response", async () => {
+    const legacyFlow = (): CannedResponse[] => [
+      { body: mcpResult({ status: "awaiting_signature", correlation_id: "c1" }) },
+      { body: new Uint8Array([0xa0]) },
+      {
+        body: {
+          attestation_id: "att-p",
+          status: "anchored",
+          write_mode: "participate",
+          solana_tx: "sol1",
+        },
+      },
+    ];
+    const { client, calls } = await makeKeylessClient({
+      responses: legacyFlow(),
+      withProvider: true,
+    });
+    const r = await client.signMemory("x", { mode: "participate" });
+    expect(r).toMatchObject({ attestationId: "att-p", writeMode: "anchored" });
+    const body = calls[0]!.body as { params: { arguments: { mode: string } } };
+    expect(body.params.arguments.mode).toBe("participate");
   });
 });
 

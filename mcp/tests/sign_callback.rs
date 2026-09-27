@@ -224,7 +224,7 @@ async fn park_bundle(
             cbor.clone(),
             vec!["t1".into()],
             metadata,
-            mnemonic_core::storage::WriteMode::Participate,
+            mnemonic_core::storage::WriteMode::Anchored,
         )
         .await
         .unwrap();
@@ -414,7 +414,7 @@ async fn test_sign_callback_rejects_invalid_signature() {
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 }
 
-/// Sign a parked participate bundle and post it with the given state.
+/// Sign a parked anchored bundle and post it with the given state.
 async fn sign_and_post(state: &Arc<McpState>, content: &str) -> (StatusCode, Value) {
     let oauth_state = Arc::new(OAuthState::with_defaults(TEST_SECRET));
     let app = build_router(state.clone(), oauth_state.clone());
@@ -432,7 +432,7 @@ async fn test_sign_callback_universal_paywall_follows_payment_mode() {
     // PAYMENT_MODE=none + a Universal Paywall config: the UP gate must NOT
     // run — no wallet link, no quote, no charge. The write completes.
     let free = build_state_with_payment("none", Some(up_config()));
-    let (status, body) = sign_and_post(&free, "free deploy participate").await;
+    let (status, body) = sign_and_post(&free, "free deploy anchored").await;
     assert_eq!(status, StatusCode::OK, "body={body}");
     assert_eq!(body["status"], "ok", "body={body}");
     assert!(
@@ -443,7 +443,7 @@ async fn test_sign_callback_universal_paywall_follows_payment_mode() {
     // PAYMENT_MODE=x402 + the same config: the UP gate runs. Its first
     // step asks for a wallet link before any quote (no network needed).
     let paid = build_state_with_payment("x402", Some(up_config()));
-    let (status, body) = sign_and_post(&paid, "paid deploy participate").await;
+    let (status, body) = sign_and_post(&paid, "paid deploy anchored").await;
     assert_eq!(status, StatusCode::PRECONDITION_REQUIRED, "body={body}");
     assert_eq!(body["status"], "awaiting_wallet_link", "body={body}");
 }

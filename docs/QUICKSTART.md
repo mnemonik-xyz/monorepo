@@ -88,13 +88,13 @@ Output:
 attestation_id: Qm9...
 signed_at:      2026-05-02T10:00:00Z
 status:         anchored
-write_mode:     participate
+write_mode:     anchored
 content_hash:   <blake3 of your content>
 solana_tx:      <real Solana SPL Memo tx>      ← anchor on mainnet
 arweave_tx:     <real Arweave tx>              ← bytes preserved
 ```
 
-`--anchor` (alias `--participate`) reads your private key and signs the memory locally. The server then anchors it on Arweave and Solana. This write can be paid. It is the only memory write that reads the private key.
+`--anchor` (alias `--anchored`) reads your private key and signs the memory locally. The server then anchors it on Arweave and Solana. This write can be paid. It is the only memory write that reads the private key.
 
 An anchored memory:
 
@@ -161,7 +161,7 @@ client.setKeypairProvider(() => keypair); // called only when a signature is nec
 const note = await client.signMemory("first memory", { mode: "local", tags: ["demo"] });
 console.log(note.attestationId, note.status);             // "stored", no key used
 
-const claim = await client.signMemory("public claim", { mode: "participate" });
+const claim = await client.signMemory("public claim", { mode: "anchored" });
 console.log(claim.attestationId, claim.solanaTx, claim.arweaveTx);
 
 const hits = await client.recall("first");

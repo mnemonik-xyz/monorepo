@@ -398,7 +398,7 @@ fn search_visibility_filter_respects_owner_isolation() {
             SIGNER,
             owner_a,
             "2026-01-01",
-            WriteMode::Participate,
+            WriteMode::Anchored,
             Visibility::Public,
             &query,
         )
@@ -414,7 +414,7 @@ fn search_visibility_filter_respects_owner_isolation() {
             SIGNER,
             owner_b,
             "2026-01-01",
-            WriteMode::Participate,
+            WriteMode::Anchored,
             Visibility::Public,
             &query,
         )

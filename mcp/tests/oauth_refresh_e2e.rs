@@ -596,7 +596,7 @@ async fn test_anonymous_recall_unchanged() {
                 &owner,
                 &owner,
                 "2026-06-04T00:00:00Z",
-                WriteMode::Participate,
+                WriteMode::Anchored,
                 Visibility::Public,
                 &embedding,
             )

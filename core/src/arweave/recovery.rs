@@ -3,7 +3,7 @@
 //! Two enumeration sources, unioned by `arweave_tx`:
 //!
 //! 1. **Solana memo history** — authoritative for the historical items:
-//!    every `participate` write left an SPL Memo naming its Arweave tx,
+//!    every `anchored` write left an SPL Memo naming its Arweave tx,
 //!    and `getSignaturesForAddress` enumerates them even though the
 //!    gateways' GraphQL never indexed the old Irys-bundled items
 //!    (verified live 2026-07-09: 16 memos, 0 GraphQL hits).

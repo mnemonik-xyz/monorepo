@@ -126,7 +126,7 @@ async fn consume_succeeds_for_matching_args() {
             "mnemonic_sign_memory",
             json!({
                 "content": content,
-                "mode": "participate",
+                "mode": "anchored",
                 "visibility": "public",
                 "public_write_confirmation": token,
                 "jti": jti.to_string(),
@@ -177,7 +177,7 @@ async fn consume_replay_rejected() {
             "mnemonic_sign_memory",
             json!({
                 "content": content,
-                "mode": "participate",
+                "mode": "anchored",
                 "visibility": "public",
                 "public_write_confirmation": token.clone(),
                 "jti": jti.to_string(),
@@ -192,7 +192,7 @@ async fn consume_replay_rejected() {
             "mnemonic_sign_memory",
             json!({
                 "content": content,
-                "mode": "participate",
+                "mode": "anchored",
                 "visibility": "public",
                 "public_write_confirmation": token,
                 "jti": jti.to_string(),
@@ -228,7 +228,7 @@ async fn consume_with_different_content_hash_rejected() {
             "mnemonic_sign_memory",
             json!({
                 "content": "H2",
-                "mode": "participate",
+                "mode": "anchored",
                 "visibility": "public",
                 "public_write_confirmation": token,
                 "jti": jti.to_string(),
@@ -267,7 +267,7 @@ async fn consume_with_different_owner_rejected() {
             "mnemonic_sign_memory",
             json!({
                 "content": content,
-                "mode": "participate",
+                "mode": "anchored",
                 "visibility": "public",
                 "public_write_confirmation": token,
                 "jti": jti.to_string(),
@@ -294,7 +294,7 @@ async fn consume_with_no_token_field_rejected() {
             "mnemonic_sign_memory",
             json!({
                 "content": "no-token",
-                "mode": "participate",
+                "mode": "anchored",
                 "visibility": "public",
             }),
         )
@@ -325,7 +325,7 @@ async fn consume_with_malformed_jti_rejected() {
             "mnemonic_sign_memory",
             json!({
                 "content": content,
-                "mode": "participate",
+                "mode": "anchored",
                 "visibility": "public",
                 "public_write_confirmation": token,
                 "jti": "not-a-valid-uuid",
@@ -337,8 +337,8 @@ async fn consume_with_malformed_jti_rejected() {
 }
 
 #[tokio::test]
-async fn participate_private_without_token_succeeds_path() {
-    // The gate fires ONLY for participate + public. participate + private
+async fn anchored_private_without_token_succeeds_path() {
+    // The gate fires ONLY for anchored + public. anchored + private
     // (the default) must not hit the gate.
     let server = TestServer::builder()
         .storage_mode("full")
@@ -350,8 +350,8 @@ async fn participate_private_without_token_succeeds_path() {
             Some(&owner),
             "mnemonic_sign_memory",
             json!({
-                "content": "default-private-participate",
-                "mode": "participate",
+                "content": "default-private-anchored",
+                "mode": "anchored",
             }),
         )
         .await;

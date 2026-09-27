@@ -8,7 +8,7 @@
 //! verifiable).
 //!
 //! `Visibility` encodes the agent-native-distribution intent for
-//! participate-mode writes: `Private` (default) keeps the row hidden from
+//! anchored-mode writes: `Private` (default) keeps the row hidden from
 //! anonymous discovery; `Public` opts the row into anonymous recall. Local
 //! writes never carry a meaningful visibility — they don't leave the user's
 //! machine — so the resolver in `mcp/` rejects `mode=local + visibility=...`
@@ -18,7 +18,7 @@
 //! Both types live in `core/` so both the storage layer (which persists them
 //! on every attestation row) and the MCP layer (which resolves them from JSON
 //! input) share one type. JSON wire format is lowercase
-//! (`"local"`/`"participate"`, `"private"`/`"public"`) to match the user-spec
+//! (`"local"`/`"anchored"`, `"private"`/`"public"`) to match the user-spec
 //! tables; rusqlite round-trips via the same lowercase strings stored in the
 //! `attestations.write_mode` and `attestations.visibility` columns.
 
@@ -33,9 +33,12 @@ use serde::{Deserialize, Serialize};
 /// `Local` — artifact stays on the user's own filesystem / self-hosted store.
 /// Free, offline. Whitepaper §5.7.1 guaranteed-free path.
 ///
-/// `Participate` — artifact is anchored on Arweave + Solana and proved
-/// retrievable. Paid service-layer path; "delivered = anchored AND verified
-/// by recall."
+/// `Anchored` — artifact is stored on Arweave, with its hash in a Solana SPL
+/// Memo, and proved retrievable. Paid service-layer path; "delivered =
+/// anchored AND verified".
+///
+/// The two modes name *where the memory lives*, and nothing else: `Local` means
+/// the agent's own machine only, `Anchored` means Arweave.
 ///
 /// Default is `Local` — the user-spec default ("default `local`; кто ничего
 /// не настраивал получает бесплатную личную память").
@@ -44,8 +47,24 @@ use serde::{Deserialize, Serialize};
 pub enum WriteMode {
     #[default]
     Local,
-    Participate,
+    /// Renamed from `Anchored` on 2026-09-27
+    /// (work/arweave-as-source-of-truth). The serde alias keeps existing
+    /// clients and existing database rows readable; see `from_str_strict`.
+    #[serde(alias = "participate")]
+    Anchored,
 }
+
+/// Value of the optional signed `anchor` field on an anchored artifact
+/// (work/arweave-as-source-of-truth). It names the durable backend that holds
+/// the bytes, so a restore can recover `WriteMode` from the artifact itself
+/// rather than from a database column. A second backend (issue #70) adds a new
+/// value here; it never changes this one.
+pub const ANCHOR_ARWEAVE: &str = "arweave";
+
+/// Deprecated wire and column spelling of [`WriteMode::Anchored`]. Accepted on
+/// input for one release, never produced on output. Remove it once the release
+/// that introduced `"anchored"` is the oldest supported client.
+pub const LEGACY_ANCHORED_TOKEN: &str = "participate";
 
 impl WriteMode {
     /// Canonical lowercase string form. This is the on-the-wire (JSON) and
@@ -53,23 +72,31 @@ impl WriteMode {
     pub fn as_str(&self) -> &'static str {
         match self {
             WriteMode::Local => "local",
-            WriteMode::Participate => "participate",
+            WriteMode::Anchored => "anchored",
         }
     }
 
-    /// Strict parser: accepts ONLY the exact canonical lowercase tokens
-    /// `"local"` / `"participate"`. Every other input — case-variant
-    /// (`"Local"`, `"PARTICIPATE"`), empty, whitespace, unknown,
-    /// trailing-space — returns `None`.
+    /// Parser for the canonical lowercase tokens `"local"` / `"anchored"`,
+    /// plus the deprecated alias `"anchored"` for [`WriteMode::Anchored`].
+    /// Every other input — case-variant (`"Local"`, `"ANCHORED"`), empty,
+    /// whitespace, unknown, trailing-space — returns `None`.
     ///
-    /// Strictness is intentional: the resolver in `mcp/` maps `None` to a
-    /// typed JSON-RPC `-32602 InvalidParams` error rather than silently
-    /// downgrading or normalizing. Loosening this contract would let
+    /// Strictness is otherwise intentional: the resolver in `mcp/` maps `None`
+    /// to a typed JSON-RPC `-32602 InvalidParams` error rather than silently
+    /// downgrading or normalizing. Loosening this contract further would let
     /// hand-crafted clients drift from the documented wire format.
+    ///
+    /// The one alias is what makes the rename free of a data migration: this
+    /// function backs [`FromSql`], so a row written as `'participate'` before
+    /// the rename still reads back as [`WriteMode::Anchored`]. New writes
+    /// always store `'anchored'`, so the column may legitimately hold both
+    /// spellings. Never compare the column against a string literal in SQL —
+    /// see the query helpers in `core/src/storage/sqlite.rs`.
     pub fn from_str_strict(s: &str) -> Option<Self> {
         match s {
             "local" => Some(WriteMode::Local),
-            "participate" => Some(WriteMode::Participate),
+            "anchored" => Some(WriteMode::Anchored),
+            LEGACY_ANCHORED_TOKEN => Some(WriteMode::Anchored),
             _ => None,
         }
     }
@@ -113,10 +140,10 @@ impl FromSql for WriteMode {
 /// `recall`. Authenticated owners always see their own private rows.
 ///
 /// `Public` — row is included in anonymous `recall` results. Only valid on
-/// `WriteMode::Participate` writes; the resolver in `mcp/` rejects
+/// `WriteMode::Anchored` writes; the resolver in `mcp/` rejects
 /// `mode=local + visibility=...` at the JSON-RPC boundary (Decision 3 / AC14).
 ///
-/// Default is `Private` — user-spec privacy-by-default for participate writes
+/// Default is `Private` — user-spec privacy-by-default for anchored writes
 /// (the column exists on every row, so the `'private'` default also covers
 /// the legacy backfill case).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -191,7 +218,7 @@ mod tests {
 
     #[test]
     fn write_mode_as_str_round_trips_with_from_str_strict() {
-        for variant in [WriteMode::Local, WriteMode::Participate] {
+        for variant in [WriteMode::Local, WriteMode::Anchored] {
             let s = variant.as_str();
             assert_eq!(WriteMode::from_str_strict(s), Some(variant));
         }
@@ -201,13 +228,21 @@ mod tests {
     fn write_mode_from_str_strict_accepts_only_canonical_lowercase() {
         assert_eq!(WriteMode::from_str_strict("local"), Some(WriteMode::Local));
         assert_eq!(
-            WriteMode::from_str_strict("participate"),
-            Some(WriteMode::Participate)
+            WriteMode::from_str_strict("anchored"),
+            Some(WriteMode::Anchored)
+        );
+        // Deprecated alias, kept for one release so existing clients and
+        // un-migrated rows keep parsing. See LEGACY_ANCHORED_TOKEN.
+        assert_eq!(
+            WriteMode::from_str_strict(LEGACY_ANCHORED_TOKEN),
+            Some(WriteMode::Anchored)
         );
         for bad in [
             "Local",
             "PARTICIPATE",
-            "Participate",
+            "Anchored",
+            "Anchored",
+            "ANCHORED",
             "LOCAL",
             "",
             " ",
@@ -215,7 +250,7 @@ mod tests {
             "unknown",
             "local ",
             " local",
-            "participate\n",
+            "anchored\n",
             "null",
             "0",
         ] {
@@ -235,11 +270,24 @@ mod tests {
         let back: WriteMode = serde_json::from_str(&json).unwrap();
         assert_eq!(back, WriteMode::Local);
 
-        // Participate
-        let json = serde_json::to_string(&WriteMode::Participate).unwrap();
-        assert_eq!(json, "\"participate\"");
+        // Anchored serializes to the canonical spelling only.
+        let json = serde_json::to_string(&WriteMode::Anchored).unwrap();
+        assert_eq!(json, "\"anchored\"");
         let back: WriteMode = serde_json::from_str(&json).unwrap();
-        assert_eq!(back, WriteMode::Participate);
+        assert_eq!(back, WriteMode::Anchored);
+    }
+
+    /// The rename must not break a client that still sends the old token.
+    /// Deserialization accepts it; serialization never emits it again.
+    #[test]
+    fn write_mode_serde_accepts_legacy_participate_alias() {
+        let back: WriteMode = serde_json::from_str("\"anchored\"").unwrap();
+        assert_eq!(back, WriteMode::Anchored);
+        assert_eq!(
+            serde_json::to_string(&back).unwrap(),
+            "\"anchored\"",
+            "the legacy token must never be produced on output"
+        );
     }
 
     #[test]
@@ -258,7 +306,7 @@ mod tests {
         conn.execute_batch("CREATE TABLE t (id INTEGER PRIMARY KEY, mode TEXT NOT NULL)")
             .unwrap();
 
-        for mode in [WriteMode::Local, WriteMode::Participate] {
+        for mode in [WriteMode::Local, WriteMode::Anchored] {
             conn.execute("INSERT INTO t (mode) VALUES (?)", rusqlite::params![mode])
                 .unwrap();
         }
@@ -270,7 +318,7 @@ mod tests {
             .map(|r| r.unwrap())
             .collect();
 
-        assert_eq!(modes, vec![WriteMode::Local, WriteMode::Participate]);
+        assert_eq!(modes, vec![WriteMode::Local, WriteMode::Anchored]);
     }
 
     #[test]

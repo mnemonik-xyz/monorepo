@@ -24,7 +24,7 @@ is compiled with the `trajectory-experimental` cargo feature.
 | Tool | Auth | Paid | Purpose |
 |---|---|---|---|
 | [`mnemonic_whoami`](#mnemonic_whoami) | required on HTTP | no | Server identity, storage capabilities, pricing |
-| [`mnemonic_sign_memory`](#mnemonic_sign_memory) | required for `participate` | `participate` only | Create a signed memory attestation |
+| [`mnemonic_sign_memory`](#mnemonic_sign_memory) | required for `anchored` | `anchored` only | Create a signed memory attestation |
 | [`mnemonic_check_pending`](#mnemonic_check_pending) | required | no | Resolve a deferred-sign `correlation_id` |
 | [`mnemonic_recall`](#mnemonic_recall) | optional (changes scope) | no | Semantic search over stored memories |
 | [`mnemonic_verify`](#mnemonic_verify) | required on HTTP | no | Verify an attestation against its chain anchors |
@@ -41,7 +41,7 @@ The Auth column applies to the HTTP transport. The stdio transport uses the
 local keypair and needs no token. Refer to
 [Authentication over HTTP](#authentication-over-http).
 
-Only `mnemonic_sign_memory` is ever charged, and only for `participate` writes on
+Only `mnemonic_sign_memory` is ever charged, and only for `anchored` writes on
 an operator that has a payment mode enabled. Everything else is free.
 
 ---
@@ -114,7 +114,7 @@ The body of each 401 is a JSON-RPC error with code `-32001`.
 ## `mnemonic_whoami`
 
 Identity and capability discovery. Call this **first** — it tells you which write
-modes the operator supports and what a `participate` write costs, so a client can
+modes the operator supports and what an `anchored` write costs, so a client can
 choose before attempting a write that might be rejected or charged.
 
 **Input:** none.
@@ -128,9 +128,9 @@ choose before attempting a write that might be rejected or charged.
   "did_key": "did:key:z6Mk...",
   "attestation_count": 42,
   "storage_mode": "full",          // legacy field, kept for pre-envelope clients
-  "supported_modes": ["local", "participate"],
+  "supported_modes": ["local", "anchored"],
   "default_mode": "local",
-  "participate_cost": {            // null when the server cannot anchor (local only)
+  "anchored_cost": {            // null when the server cannot anchor (local only)
     "currency": "USD",
     "amount_micro_usdc": 1000,
     "amount_cents": 1,
@@ -150,14 +150,14 @@ choose before attempting a write that might be rejected or charged.
 ```
 
 `storage_mode` reflects the operator's *capability*, not a global switch — see
-[Write modes](#write-modes-local-vs-participate).
+[Write modes](#write-modes-local-vs-anchored).
 
-**`participate_cost` fields:**
+**`anchored_cost` fields:**
 
 | Field | Type | Meaning |
 |---|---|---|
 | `currency` | `string` | Always `"USD"`. |
-| `amount_micro_usdc` | `integer` | Price of one `participate` write, in micro-USDC (1 USDC = 1,000,000 micro-USDC). This is the exact price. |
+| `amount_micro_usdc` | `integer` | Price of one `anchored` write, in micro-USDC (1 USDC = 1,000,000 micro-USDC). This is the exact price. |
 | `amount_cents` | `integer` | The same price in US cents. The server rounds up, so a price above zero never shows as `0`. |
 | `pricing_status` | `"live" \| "fallback" \| "disabled"` | The source of the price. Refer to the list below. |
 | `payment_methods` | `string[]` | The payment methods that the server accepts: `["x402"]`, or `[]` when the server does not charge. |
@@ -168,19 +168,19 @@ choose before attempting a write that might be rejected or charged.
 - `fallback`: The server has no current quote, or the last refresh failed. The price is the operator floor or the last good quote. The server still charges this price.
 - `disabled`: The operator does not charge (`PAYMENT_MODE=none`). Both amounts are `0`.
 
-The server calculates `participate_cost` again for each `mnemonic_whoami` call.
-Do not show a `participate` write as free unless `pricing_status` is `disabled`.
+The server calculates `anchored_cost` again for each `mnemonic_whoami` call.
+Do not show an `anchored` write as free unless `pricing_status` is `disabled`.
 
 `free_anchors` shows the free daily quota of the caller (available now). See
 [Free daily quota](#free-daily-quota). The server adds the field only over HTTP
-on a `PAYMENT_MODE=x402` deploy that supports `participate`:
+on a `PAYMENT_MODE=x402` deploy that supports `anchored`:
 
 | Field | Meaning |
 |---|---|
 | `eligible` | `true` when the caller's key is linked to a Google account and the quota is on |
 | `reason` | Why the caller (or this write) gets no free write. Absent when a free write is available. Refer to the list below |
 | `link_hint` | How to link a Google account. Present only with `reason: "google_account_required"` |
-| `per_day` | Free `participate` writes per Google account per UTC (Coordinated Universal Time) day |
+| `per_day` | Free `anchored` writes per Google account per UTC (Coordinated Universal Time) day |
 | `per_ip_per_day` | Free writes per client IP (Internet Protocol) address per UTC day |
 | `max_bytes` | Largest signed envelope (COSE_Sign1 bytes) that a free write can carry |
 | `remaining` | Free writes that the caller's Google account can still use today. Absent when `eligible` is `false` |
@@ -205,7 +205,7 @@ on a `PAYMENT_MODE=x402` deploy that supports `participate`:
 ## `mnemonic_sign_memory`
 
 Embed → compress (TurboQuant) → canonical CBOR → blake3 → COSE_Sign1
-(`participate` only) → persist.
+(`anchored` only) → persist.
 
 **Input:**
 
@@ -213,10 +213,10 @@ Embed → compress (TurboQuant) → canonical CBOR → blake3 → COSE_Sign1
 |---|---|---|---|
 | `content` | `string` | yes | The text to attest |
 | `tags` | `string[]` | no | Free-form tags, usable as recall filters |
-| `mode` | `"local" \| "participate"` | no | Per-request write intent. Omit to use the operator's `default_mode` |
+| `mode` | `"local" \| "anchored"` | no | Per-request write intent. Omit to use the operator's `default_mode` |
 
 **This tool has two response shapes.** The write mode and the transport select
-the shape. Only a `participate` write gets a signature. A local write stores a
+the shape. Only an `anchored` write gets a signature. A local write stores a
 hash and signs nothing, so it never opens an operating system (OS) keychain
 prompt.
 
@@ -225,13 +225,13 @@ prompt.
 The server returns the finished attestation in these cases (available now):
 
 - **Stdio, no JSON Web Token (JWT).** The operator key is the identity of the
-  local agent. A `participate` write gets a COSE_Sign1 signature from this key.
+  local agent. An `anchored` write gets a COSE_Sign1 signature from this key.
 - **HTTP with a JWT and `mode: "local"`.** The server stores a hash-only row
   that the JWT subject owns. The client does not sign it. The operator key does
   not sign it.
 
 Over HTTP, the operator key never signs a memory. A request without a JWT
-cannot start an inline `participate` write. To write a local memory over HTTP
+cannot start an inline `anchored` write. To write a local memory over HTTP
 with no signing step, set `mode: "local"`. A request without `mode` uses the
 deferred path.
 
@@ -248,7 +248,7 @@ deferred path.
   "did_sol": "did:sol:...", // DID of the owner
   "timestamp": "...",
   "storage_mode": "full",
-  "write_mode": "participate",
+  "write_mode": "anchored",
   "visibility": "public",       // always "public" for an anchored write
   "plaintext_on_arweave": true, // the content is plain text on Arweave
   "embedding": { "model": "...", "provider": "..." }
@@ -257,7 +257,7 @@ deferred path.
 
 ### Deferred (client-signed) — the non-custodial HTTP path
 
-The server uses this path for each JWT write in `participate` mode (available
+The server uses this path for each JWT write in `anchored` mode (available
 now). It also uses this path for a JWT write without a `mode` field. The SDK and
 the browser extension send no `mode` field and expect this shape. The operator
 key never signs content from a different identity. Thus the server returns a
@@ -323,7 +323,7 @@ calls — recall is a local read.
 
 | Caller | Scope |
 |---|---|
-| Authenticated (JWT) | Your own corpus, across both visibilities and **both** `local` and `participate` writes |
+| Authenticated (JWT) | Your own corpus, across both visibilities and **both** `local` and `anchored` writes |
 | Anonymous | The cross-owner **public** pool only (`visibility = 'public'`) |
 
 **Private rows go only to their owner** (available now):
@@ -335,7 +335,7 @@ calls — recall is a local read.
 - A row with no `visibility` value (a legacy row) counts as private. The
   database migration sets these rows to `private`.
 - A local write is always private.
-- An anchored `participate` write is always public, whatever `visibility` the
+- An anchored `anchored` write is always public, whatever `visibility` the
   request sets. Its content is plain text on Arweave, so the server does not
   call it private.
 
@@ -346,7 +346,7 @@ Each result has a `plaintext_on_arweave` field. It is `true` when the
 content went to Arweave as plain text.
 
 > **Warning: anchored memories are public plain text today.** A
-> `participate` (anchored) write puts the content as plain text on Arweave.
+> `anchored` (anchored) write puts the content as plain text on Arweave.
 > Anyone can read Arweave, and nobody can delete it. The server stores such a
 > row as `public` with `plaintext_on_arweave: true`. "Private" means only
 > that this server shows a local row to its owner; the server does not
@@ -420,7 +420,7 @@ no on-chain anchoring in V1.
 
 **Not user-facing.** A ceremony gate that surfaces the `content_hash` about to be
 anchored so a user can confirm or refuse before any chain write fires. Agent
-skills invoke it inline before issuing a `mode: "participate"` write with
+skills invoke it inline before issuing a `mode: "anchored"` write with
 `visibility: "public"`. Listed here only because it appears in `tools/list`.
 
 **Input:** `content_hash` (string, required).
@@ -477,16 +477,16 @@ when the chain is valid **and** coverage is complete **and** no verdict is a
 
 ---
 
-## Write modes: `local` vs `participate`
+## Write modes: `local` vs `anchored`
 
 `STORAGE_MODE` sets the operator's **capability and default**, not a global
 switch. The write mode is a per-request user choice on `mnemonic_sign_memory`.
 
-| | `local` | `participate` |
+| | `local` | `anchored` |
 |---|---|---|
 | Storage | Operator's SQLite only | Arweave bytes + Solana SPL Memo, plus SQLite |
 | Tx ids | Synthetic `local:...` | Real `arweave_tx` / `solana_tx` |
-| Cost | Free | Priced by the operator (`participate_cost` from `whoami`) |
+| Cost | Free | Priced by the operator (`anchored_cost` from `whoami`) |
 | Signed by | Nobody (hash-only row, no keychain prompt) | The author: the client over HTTP, the local agent key over stdio |
 | Verifiable by third parties | Hash only | Signature, hash, **and** independent on-chain timestamp |
 
@@ -497,25 +497,25 @@ Choosing one:
 { "name": "mnemonic_sign_memory",
   "arguments": { "content": "a private note", "mode": "local" } }
 
-// explicit participate — anchored and independently verifiable
+// explicit anchored — anchored and independently verifiable
 { "name": "mnemonic_sign_memory",
-  "arguments": { "content": "a claim I want provable", "mode": "participate" } }
+  "arguments": { "content": "a claim I want provable", "mode": "anchored" } }
 ```
 
 Rules worth knowing:
 
 - **Omitting `mode`** falls back to the operator's default (legacy clients keep
   working). Call `whoami` to read `default_mode`.
-- **Asking for `participate` on a local-only operator** returns a typed
+- **Asking for `anchored` on a local-only operator** returns a typed
   `UnsupportedMode` error listing `supported_modes` — it does not silently
   downgrade.
-- **A `participate` write only succeeds after the anchored bytes pass a
+- **An `anchored` write only succeeds after the anchored bytes pass a
   recall+verify round-trip.** On failure the row is demoted to `local` and **no
   payment is charged**. "Delivered" means anchored *and* verified, never a
   silent receipt.
 - **Both modes coexist in one database** for a single owner, tagged by the
   `write_mode` column, and `recall` spans both. Mixing them is by design.
-- **A `participate` write is public plain text today.** The content goes to
+- **An `anchored` write is public plain text today.** The content goes to
   Arweave as plain text, which anyone can read. The server stores the row as
   `public` with `plaintext_on_arweave: true`, even if the request sets
   `visibility: "private"`. Sealed (encrypted) anchored writes are planned.
@@ -528,7 +528,7 @@ Rationale and the full decision log: `work/modes-user-choice/user-spec.md` and
 ## Payment
 
 Payment applies only on HTTP, only in `full` mode, and only to
-`mnemonic_sign_memory` `participate` writes. `PAYMENT_MODE` ∈ `none` |
+`mnemonic_sign_memory` `anchored` writes. `PAYMENT_MODE` ∈ `none` |
 `balance` | `x402` | `both`.
 
 - `balance` — send `Authorization: Bearer mnm_<key>`. The balance is checked
@@ -542,7 +542,7 @@ Payment applies only on HTTP, only in `full` mode, and only to
 ### Free daily quota
 
 Available now, on `PAYMENT_MODE=x402` over HTTP. An agent key that is linked to
-a Google account gets free `participate` writes every UTC day before payment is
+a Google account gets free `anchored` writes every UTC day before payment is
 required. The agent needs no wallet and gets no payment prompt for these
 writes. Paid writes (x402) do not need a Google account.
 

@@ -260,7 +260,7 @@ fn rel_path_string(path: &Path) -> String {
 /// but `AttestationStore::count` queries by `signer_pubkey`. At the time the
 /// server keypair also signed user writes, so it was the `signer_pubkey` of
 /// rows beyond the seeded corpus. (It no longer signs for anyone else: a
-/// remote participate write is client-signed, and a remote local write is a
+/// remote anchored write is client-signed, and a remote local write is a
 /// hash-only row whose `signer_pubkey` is the user.) Once any such row
 /// existed, count > 0 forever and the protocol-knowledge corpus was
 /// permanently frozen on the FIRST seed. Surfaced live on
@@ -395,7 +395,7 @@ pub async fn run(state: &McpState) -> Result<()> {
             // (design §21 landmine note).
             //
             // `Transport::Http` is the most restrictive value: seeding runs
-            // for both transports and never needs inline participate
+            // for both transports and never needs inline anchored
             // signing, which `sign_memory` allows only on `Transport::Stdio`.
             //
             // Seeding always uses `local` regardless of the operator's
@@ -405,7 +405,7 @@ pub async fn run(state: &McpState) -> Result<()> {
             // `local` here avoids paying chain costs on every server boot AND
             // dodges a real failure mode discovered live 2026-06-25 on a
             // `STORAGE_MODE=full` prod: the env-default path tried to
-            // `Participate`-anchor each seeded chunk, hit Arweave/Solana
+            // `Anchored`-anchor each seeded chunk, hit Arweave/Solana
             // submission failure, and the whole seed errored out at chunk 0.
             //
             // The previous comment claimed "T2: seeding never carries an

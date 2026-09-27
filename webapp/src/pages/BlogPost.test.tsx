@@ -20,7 +20,7 @@ import BlogPostPage from "./BlogPost";
 const POST: BlogPost = {
   slug: "anchoring",
   title: "Anchoring memory on Solana and Arweave",
-  summary: "How a participate write earns its anchors.",
+  summary: "How a anchored write earns its anchors.",
   body_markdown:
     "## Two anchors\n\nA write earns **two anchors**:\n\n- Solana SPL Memo\n- Arweave bytes\n",
   author: "Mnemonic Protocol",

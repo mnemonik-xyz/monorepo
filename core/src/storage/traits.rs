@@ -39,7 +39,7 @@ pub struct ReconstructionInputs {
 ///
 /// `write_mode` is surfaced so callers (notably `recall`) can render mixed-
 /// mode lists with provenance visible: each row carries the per-request
-/// intent that produced it (`Local` — free, offline; `Participate` —
+/// intent that produced it (`Local` — free, offline; `Anchored` —
 /// anchored on Arweave + Solana).
 ///
 /// `visibility` is surfaced so callers can render the per-row sharing
@@ -83,11 +83,11 @@ pub trait AttestationStore {
     /// scope used by `search`. In the single-tenant browser-mediated flow they
     /// are equal (Decision 4); in stdio/CLI mode the caller passes the local
     /// keypair pubkey for both.
-    /// `write_mode` is the per-request user intent (`Local` / `Participate`)
+    /// `write_mode` is the per-request user intent (`Local` / `Anchored`)
     /// resolved at the MCP entry point. It is persisted on the row so `verify`
     /// can route by stored intent (T4) and `recall` can surface it back to the
     /// caller. Internal/legacy callsites that pre-date this parameter pass
-    /// `WriteMode::Participate` to preserve their previous "real anchor"
+    /// `WriteMode::Anchored` to preserve their previous "real anchor"
     /// semantics.
     /// `visibility` is the per-request sharing intent (`Private` / `Public`)
     /// resolved at the MCP entry point. Local-mode writes are always

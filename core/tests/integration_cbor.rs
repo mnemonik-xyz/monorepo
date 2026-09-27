@@ -205,3 +205,77 @@ fn test_tampered_cose_detected() {
         Err(_) => { /* parse failure is also acceptable */ }
     }
 }
+
+// -- work/arweave-as-source-of-truth D-1 ---------------------------------------
+
+/// `MEMORY_V1` gained two OPTIONAL fields (`visibility`, `anchor`) so an anchored
+/// artifact can be restored from Arweave alone. The whole design rests on those
+/// additions being byte-neutral for artifacts that omit them — otherwise every
+/// existing `content_hash` would move and every stored signature would break.
+///
+/// This proves it directly: encode the same artifact under the live `MEMORY_V1`
+/// and under a replica of its pre-change field order, and require identical
+/// bytes. If someone adds a required field, reorders `cbor_field_order`, or
+/// inserts a field in the middle, this test fails.
+#[test]
+fn optional_restore_fields_are_byte_neutral_when_absent() {
+    use mnemonic_core::codec::canonical::to_canonical_cbor;
+    use mnemonic_core::codec::schema::{ArtifactSchema, ArtifactType, MEMORY_V1};
+
+    // Exactly MEMORY_V1 as it was before `visibility` / `anchor` were added.
+    const PRE_CHANGE_MEMORY_V1: ArtifactSchema = ArtifactSchema {
+        artifact_type: ArtifactType::Memory,
+        version: 1,
+        required_fields: &[
+            "artifact_id",
+            "type",
+            "schema_version",
+            "content",
+            "producer",
+            "created_at",
+        ],
+        optional_fields: &["parents", "metadata", "tags"],
+        cbor_field_order: &[
+            "artifact_id",
+            "type",
+            "schema_version",
+            "content",
+            "metadata",
+            "parents",
+            "tags",
+            "created_at",
+            "producer",
+        ],
+    };
+
+    let artifact = serde_json::json!({
+        "artifact_id": "att-d1",
+        "type": "memory",
+        "schema_version": 1,
+        "content": "a memory written before the restore fields existed",
+        "producer": "did:sol:11111111111111111111111111111111",
+        "created_at": "2026-09-27T12:00:00Z",
+        "tags": ["alpha", "beta"],
+        "metadata": { "embed_provider": "mock", "embed_dim": 8, "turbo_bits": 4 },
+    });
+
+    let now = to_canonical_cbor(&artifact, &MEMORY_V1).expect("encodes under current schema");
+    let before = to_canonical_cbor(&artifact, &PRE_CHANGE_MEMORY_V1)
+        .expect("encodes under pre-change shape");
+
+    assert_eq!(
+        now, before,
+        "adding optional fields must not change the bytes of an artifact that omits them"
+    );
+
+    // And when they ARE present the bytes must differ, or the fields are not
+    // actually covered by the hash and the signature would not protect them.
+    let mut anchored = artifact.clone();
+    anchored["visibility"] = serde_json::json!("public");
+    anchored["anchor"] = serde_json::json!("arweave");
+    let with_fields = to_canonical_cbor(&anchored, &MEMORY_V1).expect("encodes with new fields");
+    assert_ne!(
+        with_fields, now,
+        "visibility/anchor must be inside the signed bytes when present"
+    );
+}

@@ -599,7 +599,7 @@ mod tests {
             canonical_cbor: vec![1, 2, 3],
             tags: vec!["tag".into()],
             metadata: serde_json::json!({"turbo_bits": 4}),
-            write_mode: WriteMode::Participate,
+            write_mode: WriteMode::Anchored,
             free_quota: false,
             requester_ip: None,
             exp: Utc::now(),
@@ -613,7 +613,7 @@ mod tests {
         assert_eq!(recovered.content, entry.content);
         assert_eq!(recovered.embedding, entry.embedding);
         assert_eq!(recovered.canonical_cbor, entry.canonical_cbor);
-        assert_eq!(recovered.write_mode, WriteMode::Participate);
+        assert_eq!(recovered.write_mode, WriteMode::Anchored);
         assert!(claim_delivery_context(&conn, "correlation", "later").unwrap());
         assert!(!claim_delivery_context(&conn, "correlation", "again").unwrap());
     }
@@ -630,7 +630,7 @@ mod tests {
             canonical_cbor: vec![1],
             tags: vec![],
             metadata: serde_json::json!({}),
-            write_mode: WriteMode::Participate,
+            write_mode: WriteMode::Anchored,
             free_quota: false,
             requester_ip: None,
             exp: Utc::now(),
@@ -684,7 +684,7 @@ mod tests {
             canonical_cbor: vec![1],
             tags: vec![],
             metadata: serde_json::json!({}),
-            write_mode: WriteMode::Participate,
+            write_mode: WriteMode::Anchored,
             free_quota: false,
             requester_ip: None,
             exp: Utc::now(),

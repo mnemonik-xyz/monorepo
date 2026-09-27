@@ -6,14 +6,14 @@
 //! 1. `verify_routes_local_for_local_row` — a row tagged
 //!    `write_mode='local'` produces the local-shape envelope regardless of
 //!    the operator's `STORAGE_MODE`. Pins the routing-by-stored-mode rule.
-//! 2. `verify_routes_participate_for_participate_row` — a row tagged
-//!    `write_mode='participate'` produces the participate-shape envelope
+//! 2. `verify_routes_anchored_for_anchored_row` — a row tagged
+//!    `write_mode='participate'` produces the anchored-shape envelope
 //!    regardless of `STORAGE_MODE`. Same pin from the other side.
-//! 3. `tenant_isolation_local` / `tenant_isolation_participate` — caller A
+//! 3. `tenant_isolation_local` / `tenant_isolation_anchored` — caller A
 //!    writes a row, caller B asks to verify A's `solana_tx`. Must return
 //!    the `not_found` shape with NO leakage of `content_hash`,
 //!    `signer_pubkey`, content, or preview fields. Repeated for both
-//!    `local` and `participate` row shapes.
+//!    `local` and `anchored` row shapes.
 //! 4. `recall_surfaces_write_mode` — seed mixed-mode rows under one owner;
 //!    `recall` must surface each row's stored `write_mode` tag.
 //!
@@ -74,9 +74,9 @@ fn seed_row(
             format!("local:{seed_id}-sol"),
             format!("local:{seed_id}-ar"),
         ),
-        WriteMode::Participate => (
+        WriteMode::Anchored => (
             // Real-looking (non-`local:`) prefix so any downstream
-            // discrimination by id-shape sees this as participate.
+            // discrimination by id-shape sees this as anchored.
             format!("solx{seed_id}aRRRRYWfLh8x2y2y9X7Cxe1aN3aN3aN3aN3"),
             format!("PdhTPLPmHvX0iE6iAtJ8X5Y0WqQ8MzC8KvU9JhQ0aN0{seed_id}"),
         ),
@@ -152,7 +152,7 @@ async fn verify_routes_local_for_local_row() {
         let inner = result.result_text();
         // verify_local always emits `storage_mode: "local"` regardless of
         // the operator's actual mode — this is the load-bearing shape that
-        // distinguishes the local route from the participate route.
+        // distinguishes the local route from the anchored route.
         assert_eq!(
             inner["storage_mode"], "local",
             "[{storage_mode}] expected local-shape envelope; got {inner:?}"
@@ -173,17 +173,17 @@ async fn verify_routes_local_for_local_row() {
     }
 }
 
-// ── 2. Participate-tagged rows always route to verify_participate ──────────
+// ── 2. Anchored-tagged rows always route to verify_anchored ──────────
 
 #[tokio::test]
-async fn verify_routes_participate_for_participate_row() {
-    // Same shape as #1 but from the other side. A `participate` row must
+async fn verify_routes_anchored_for_anchored_row() {
+    // Same shape as #1 but from the other side. A `anchored` row must
     // route to the Arweave / Solana fetch path even under
     // `STORAGE_MODE=local` — the env-var branch is gone in T4.
     //
-    // The participate path reaches out to the configured `SolanaClient`,
+    // The anchored path reaches out to the configured `SolanaClient`,
     // which in test mode points at `http://localhost:0`. The relevant
-    // assertion is therefore that we DID try the participate path — i.e.
+    // assertion is therefore that we DID try the anchored path — i.e.
     // the response shape is `anchor_not_found` (or an outright network
     // error) rather than the `local`-shape envelope. The shape contract
     // is enough to pin the routing decision; we don't re-test the deep
@@ -192,35 +192,35 @@ async fn verify_routes_participate_for_participate_row() {
     for storage_mode in ["local", "full"] {
         let server = TestServer::builder().storage_mode(storage_mode).build();
         let owner = server.server_pubkey();
-        let (sol, _ar) = seed_row(&server, &owner, WriteMode::Participate, "participate-route");
+        let (sol, _ar) = seed_row(&server, &owner, WriteMode::Anchored, "anchored-route");
 
         let result = server
             .call_tool(Some(&owner), "mnemonic_verify", json!({"solana_tx": sol}))
             .await;
 
-        // Two acceptable outcomes prove routing went to the participate
+        // Two acceptable outcomes prove routing went to the anchored
         // branch: (a) the tool returned a JSON-RPC error (network-fetch
         // failure on the test SolanaClient pointing at localhost:0), or
-        // (b) the tool returned a `participate`-side status such as
+        // (b) the tool returned a `anchored`-side status such as
         // `anchor_not_found`. EITHER outcome rules out the local route.
         if let Some(err) = result.error() {
-            // The participate path bubbled a fetch failure; confirm the
+            // The anchored path bubbled a fetch failure; confirm the
             // message is NOT the local "provide solana_tx or arweave_tx"
             // signal.
             let msg = err["message"].as_str().unwrap_or("");
             assert!(
                 !msg.contains("provide solana_tx"),
-                "[{storage_mode}] participate path must not echo local error"
+                "[{storage_mode}] anchored path must not echo local error"
             );
         } else {
             let inner = result.result_text();
             // The local route stamps `storage_mode: "local"` on its
-            // success/not_found envelope; participate route never does.
+            // success/not_found envelope; anchored route never does.
             assert_ne!(
                 inner["storage_mode"], "local",
-                "[{storage_mode}] participate row routed to LOCAL path: {inner:?}"
+                "[{storage_mode}] anchored row routed to LOCAL path: {inner:?}"
             );
-            // The participate path emits one of these statuses on a
+            // The anchored path emits one of these statuses on a
             // non-network test SolanaClient.
             let status = inner["status"].as_str().unwrap_or("");
             assert!(
@@ -228,7 +228,7 @@ async fn verify_routes_participate_for_participate_row() {
                     status,
                     "anchor_not_found" | "arweave_not_found" | "verified" | "tampered" | "error"
                 ),
-                "[{storage_mode}] unexpected participate-path status: {inner:?}"
+                "[{storage_mode}] unexpected anchored-path status: {inner:?}"
             );
         }
     }
@@ -247,7 +247,7 @@ async fn tenant_isolation_local() {
     let token_b = server.mint_test_jwt(USER_B_PUBKEY);
 
     // Seed A's local row directly (signer == owner == A), mirroring the
-    // participate variant (3b). Wave 3 removed operator-inline-signing for
+    // anchored variant (3b). Wave 3 removed operator-inline-signing for
     // remote users, so A's `mode: "local"` write now (correctly) routes to
     // the client-signing deferred path — which `USER_A_PUBKEY` (a fake,
     // keyless constant) cannot complete. This test only needs a local-tagged
@@ -297,28 +297,23 @@ async fn tenant_isolation_local() {
     }
 }
 
-// ── 3b. Tenant isolation: participate row ──────────────────────────────────
+// ── 3b. Tenant isolation: anchored row ──────────────────────────────────
 
 #[tokio::test]
-async fn tenant_isolation_participate() {
+async fn tenant_isolation_anchored() {
     // Same shape as `tenant_isolation_local`, but A's row is tagged
-    // `participate`. The routing query (`find_write_mode_by_tx`) is
+    // `anchored`. The routing query (`find_write_mode_by_tx`) is
     // tenant-scoped — B must see the `not_found` shape and zero
     // identifying fields.
     let server = TestServer::builder().storage_mode("local").build();
     let token_b = server.mint_test_jwt(USER_B_PUBKEY);
 
-    // Seed A's participate row directly. The MCP sign path with
-    // `mode: "participate"` under STORAGE_MODE=local would (correctly)
-    // reject as UnsupportedMode; this test only needs a participate-
-    // tagged row to exercise the routing isolation, not the participate
+    // Seed A's anchored row directly. The MCP sign path with
+    // `mode: "anchored"` under STORAGE_MODE=local would (correctly)
+    // reject as UnsupportedMode; this test only needs an anchored-
+    // tagged row to exercise the routing isolation, not the anchored
     // happy path.
-    let (a_sol_tx, _ar) = seed_row(
-        &server,
-        USER_A_PUBKEY,
-        WriteMode::Participate,
-        "tenant-iso-p",
-    );
+    let (a_sol_tx, _ar) = seed_row(&server, USER_A_PUBKEY, WriteMode::Anchored, "tenant-iso-p");
 
     let resp_b = server
         .with_token(&token_b)
@@ -332,12 +327,12 @@ async fn tenant_isolation_participate() {
     let result = resp_b.result_text();
     assert_eq!(
         result["status"], "not_found",
-        "expected not_found for cross-tenant participate row, got {result:?}"
+        "expected not_found for cross-tenant anchored row, got {result:?}"
     );
     for leaky in LEAKY_FIELDS {
         assert!(
             result.get(leaky).is_none(),
-            "leaked field {leaky:?} in participate tenant-isolation response: {result:?}"
+            "leaked field {leaky:?} in anchored tenant-isolation response: {result:?}"
         );
     }
 }
@@ -346,18 +341,13 @@ async fn tenant_isolation_participate() {
 
 #[tokio::test]
 async fn recall_surfaces_write_mode() {
-    // Seed one local + one participate row under the same owner; recall
+    // Seed one local + one anchored row under the same owner; recall
     // must surface each row's stored `write_mode` so a mixed-mode client
     // can render provenance.
     let server = TestServer::builder().storage_mode("local").build();
     let owner = server.server_pubkey();
     seed_row(&server, &owner, WriteMode::Local, "recall-local");
-    seed_row(
-        &server,
-        &owner,
-        WriteMode::Participate,
-        "recall-participate",
-    );
+    seed_row(&server, &owner, WriteMode::Anchored, "recall-anchored");
 
     let result = server
         .call_tool(
@@ -386,17 +376,18 @@ async fn recall_surfaces_write_mode() {
         modes.insert(sol, mode);
     }
     let local_seed_sol = "local:recall-local-sol".to_string();
-    let participate_seed_sol =
-        "solxrecall-participateaRRRRYWfLh8x2y2y9X7Cxe1aN3aN3aN3aN3".to_string();
+    // Must match the synthetic id `seed_row` derives from the "recall-anchored"
+    // label above; keep the two in step if either changes.
+    let anchored_seed_sol = "solxrecall-anchoredaRRRRYWfLh8x2y2y9X7Cxe1aN3aN3aN3aN3".to_string();
     assert_eq!(
         modes.get(&local_seed_sol).map(|s| s.as_str()),
         Some("local"),
         "local row must carry write_mode=local; modes={modes:?}"
     );
     assert_eq!(
-        modes.get(&participate_seed_sol).map(|s| s.as_str()),
-        Some("participate"),
-        "participate row must carry write_mode=participate; modes={modes:?}"
+        modes.get(&anchored_seed_sol).map(|s| s.as_str()),
+        Some("anchored"),
+        "anchored row must carry write_mode=anchored; modes={modes:?}"
     );
 }
 

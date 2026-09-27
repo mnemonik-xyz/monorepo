@@ -29,7 +29,7 @@ fn seed(store: &SqliteStore, id: &str, content_hash: &str) {
             OWNER,
             OWNER,
             "2026-01-01T00:00:00Z",
-            WriteMode::Participate,
+            WriteMode::Anchored,
             Visibility::Public,
             &[0.1; 8], // matches StubEmbedder's query vector → all rows match
         )

@@ -234,7 +234,16 @@ pub const MEMORY_V1: ArtifactSchema = ArtifactSchema {
         "producer",
         "created_at",
     ],
-    optional_fields: &["parents", "metadata", "tags"],
+    // `visibility` and `anchor` are additive and OPTIONAL on purpose
+    // (work/arweave-as-source-of-truth, D-1). `to_canonical_cbor` writes only
+    // present, non-null fields, so an artifact that omits them hashes exactly
+    // as it did before they existed — no `MEMORY_V2`, no migration, no moved
+    // `content_hash`. Only anchored writes populate them, because an anchored
+    // artifact is verified from its Arweave bytes and never rebuilt from
+    // columns (`rebuild_content_hash` keeps the pre-existing field set).
+    // NEVER reorder `cbor_field_order` and never promote these to required:
+    // either change would move every existing hash.
+    optional_fields: &["parents", "metadata", "tags", "visibility", "anchor"],
     cbor_field_order: &[
         "artifact_id",
         "type",
@@ -245,6 +254,8 @@ pub const MEMORY_V1: ArtifactSchema = ArtifactSchema {
         "tags",
         "created_at",
         "producer",
+        "visibility",
+        "anchor",
     ],
 };
 

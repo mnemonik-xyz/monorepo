@@ -1,7 +1,7 @@
 //! Arweave gateway GraphQL client — enumerates anchored mnemonic-protocol
 //! data items so traction stats survive a total node-database loss.
 //!
-//! Every `participate` write uploads a COSE_Sign1 envelope as an ANS-104
+//! Every `anchored` write uploads a COSE_Sign1 envelope as an ANS-104
 //! item signed by the server's Solana keypair and tagged
 //! `App-Name: mnemonic-protocol` (see `ArweaveClient::write_irys` /
 //! `write_item`). Gateways (arweave.net, goldsky) index those items, so a

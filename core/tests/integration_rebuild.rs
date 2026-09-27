@@ -124,7 +124,7 @@ fn recall_over_rebuilt_store_matches_original() {
                 &owner,
                 &owner,
                 "2026-01-01T00:00:00Z",
-                WriteMode::Participate,
+                WriteMode::Anchored,
                 Visibility::Public,
                 emb,
             )
@@ -145,7 +145,7 @@ fn recall_over_rebuilt_store_matches_original() {
                 &row.signer_pubkey,
                 &row.owner_pubkey,
                 &row.created_at,
-                WriteMode::Participate,
+                WriteMode::Anchored,
                 Visibility::Public,
                 &row.embedding,
             )
@@ -199,7 +199,7 @@ fn legacy_v1_signed_artifact_remains_recallable_after_rebuild() {
             &recovered.signer_pubkey,
             &owner,
             &recovered.created_at,
-            WriteMode::Participate,
+            WriteMode::Anchored,
             Visibility::Public,
             &recovered.embedding,
         )
