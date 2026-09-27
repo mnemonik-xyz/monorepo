@@ -28,15 +28,23 @@ This file records the state of the work so that another session can continue it.
   - `server.json` (passes `mcp-publisher validate`), `mcpName` in `packages/mcp/package.json`.
   - `publish-mcp-registry` job in `release.yml`, updated `smithery.yaml`, guide `docs/mcp-registries.md`.
 
-## Open PRs
+## Open PRs (state on 2026-09-27)
 
-All three branch from `main` at `d4deb60`.
+All branch from `main` at `d4deb60`, except #238 (from `db0ab28`).
 
-| Branch / PR | Scope | State |
-|---|---|---|
-| `claude/hopeful-newton-9x6nwt-signing` (#235, draft) | Server: signing rules, hash-only hosted local writes, UP (Universal Paywall) gate on `PAYMENT_MODE=x402`, stale `seed.rs` comment | Code and test edits in `mcp/src/{tools,mcp,api,payment,main,seed}.rs`, `mcp/tests/*`, `docs/tools.md`. Not yet run through the full suite. |
-| `claude/hopeful-newton-9x6nwt-cli` (#237, ready) | CLI/SDK 0.3.0: lazy signer, `mnemonic sign` defaults to `local`, `--anchor` for participate, refresh-token session renewal (#33) | Done. SDK 172/172 and CLI 157 (+2 skipped) tests pass; `tsc` clean. Merge and deploy #235 first, then publish CLI 0.3.0. |
-| `claude/hopeful-newton-9x6nwt-bugfixes` (#236, draft) | #165 whoami pricing display; #201 and #163 | #165 edits only (`pricing.rs`, `mcp.rs`, `main.rs`). #201 and #163 not started. |
+| Branch / PR | Scope | State | Next step |
+|---|---|---|---|
+| `claude/hopeful-newton-9x6nwt-cli` (#237, ready) | CLI/SDK 0.3.0: lazy signer, `mnemonic sign` defaults to `local`, `--anchor` for participate, refresh-token session renewal (#33) | Done. SDK 172/172, CLI 157 pass (+2 skipped); `tsc` clean. | Merge after #235 is deployed, then publish CLI 0.3.0. |
+| `claude/hopeful-newton-9x6nwt-signing` (#235, draft) | Server signing rules (below), `tools::Transport` guard, `payment::active_universal_paywall` (UP charge only with `PAYMENT_MODE=x402`), docs incl. CLAUDE.md | Code complete (`b2f051d`, `2610f08`). Agent run: mcp 683 pass, core 222 pass, fmt and clippy clean. Independent re-run: fmt and clippy clean; full test suite not finished. | Run the full test gate. Update the PR body. Mark ready. |
+| `claude/hopeful-newton-9x6nwt-bugfixes` (#236, draft) | #165 whoami pricing, #201 recall with chain rows, #163 OAuth 401 challenge | #165 committed (`e40222b`). #201 committed (`23fcd05`). #163 WIP snapshot (`d90e530`, untested: `oauth/mod.rs`, `auth_allowlist.rs`, `discovery_anonymous.rs`). | Finish #163 (see below), run the gate, update the PR body, mark ready. |
+| `claude/hopeful-newton-9x6nwt` (#238, ready) | Docs: docs-with-code rule in CLAUDE.md, this hand-off | Docs only. | Merge. |
+
+### #163 target behaviour
+
+- Auth-required tool calls with a missing, invalid or expired token return HTTP 401 and `WWW-Authenticate: Bearer resource_metadata="https://mcp.mnemonik.xyz/.well-known/oauth-protected-resource/mcp"` (add `error="invalid_token"` for a bad token).
+- Source: https://modelcontextprotocol.io/specification/2025-06-18/basic/authorization
+- Anonymous `initialize`, `tools/list` and anonymous `mnemonic_recall` keep working. An expired token on `initialize` gets 401, so the client refreshes.
+- On 2026-09-27 production returned HTTP 200 to an unauthenticated `tools/call`. Smithery detects OAuth only from a 401.
 
 ### Server signing rules (target behaviour)
 
@@ -48,15 +56,17 @@ All three branch from `main` at `d4deb60`.
 
 ## Not started
 
-- Free anchoring quota. Design:
+- Free anchoring quota (no code yet; branch `claude/hopeful-newton-9x6nwt-quota` does not exist on the remote). Build it on top of `claude/hopeful-newton-9x6nwt-signing`. It reuses `payment::active_universal_paywall` and `tools::Transport`. Design:
   - `MNEMONIC_FREE_ANCHORS_PER_DAY` (default 10) per Ed25519 key, plus `MNEMONIC_FREE_ANCHORS_GLOBAL_PER_DAY`.
   - Logic in `mcp/src/payment.rs` (`try_consume_free_anchor`, `refund_free_anchor`); an mcp-owned migration for table `free_anchor_usage(subject, day, n)`.
   - Call sites: `api.rs` sign-callback before the paywall gate (key = verified `signer_pubkey`), and the pre-parking gate in `mcp.rs`.
   - Refund on demotion. Report `free_anchors_remaining` in whoami and in the 402 body.
-  - Build it on top of the signing branch.
 - Version bump to 0.3.0 (`core/Cargo.toml`, `mcp/Cargo.toml`, `Cargo.lock`, `packages/mcp`). Then tag a release and run `deploy-mcp.yml` (apply, then smoke). The owner runs the deploy.
 - x402 conformance tasks M1–M3 (`work/x402-v2-conformance/tasks/`).
-- Privacy review of anchored memories: private vs public, what goes on Arweave, encryption, private sharing with a specific agent. A research workflow ran; see its results in the PR discussion when posted.
+- Privacy review of anchored memories: private vs public, what goes on Arweave, encryption, private sharing with a specific agent. Not finished; run it again. Known so far: no code shares a memory privately with a specific agent. The design is in `docs/spec/memory-composition.md` and issue #211.
+- Follow-ups from the signing change:
+  - The `-32011` refund and quota logic in the x402 branch of `mcp_handler` can no longer fire over HTTP. It is dead code; remove it in a later PR.
+  - SDK `verify` on a hash-only local row: check the server response.
 
 ## Test gate for every PR
 
@@ -71,5 +81,6 @@ Also run a local HTTP smoke test (`STORAGE_MODE=local PAYMENT_MODE=none`): `whoa
 
 ## Environment notes
 
+- Do not share one `CARGO_TARGET_DIR` across git worktrees. Cargo can link a workspace crate built from another worktree and fail with bogus errors (seen: E0063). If you must share it, touch `core/` and `mcp/` sources before each gate run.
 - A debug `target/` for the full test suite needs about 18 GB. On a small disk, use `CARGO_INCREMENTAL=0` and share one `CARGO_TARGET_DIR` across worktrees.
 - CI runs nightly and on manual dispatch only. Nothing gates a PR, so run the gate above before each push.
