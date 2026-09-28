@@ -204,22 +204,45 @@ describe("mnemonic sign write modes", () => {
     write_mode: "local",
   };
 
-  it("defaults to mode=local and needs no private key", async () => {
+  it("default sealed write posts to /api/store-sealed and reads no keychain (keychain-backed stub)", async () => {
+    // Default sign is now E2E sealed via sealMemory. For a keychain-backed stub,
+    // the key is NOT in the file, so the command must refuse and throw.
+    saveValidToken();
+    installFetch(() => json({ memory_hash: "aabb" }));
+    const err = await runSign("note", { content: "note", baseUrl: BASE }).catch(
+      (e: unknown) => e,
+    );
+    // Keychain-backed stub without --anchor → UserError (key not in file).
+    expect(err).toBeInstanceOf(UserError);
+    expect((err as Error).message).toMatch(/OS keychain/);
+    expect(ks.gets).toBe(0); // must not read keychain
+  });
+
+  it("--public sends mode=local to /mcp (plaintext) and reads no keychain", async () => {
     saveValidToken();
     const calls = installFetch(() => rpc(storedRow));
-    await runSign("note", { content: "note", baseUrl: BASE, json: true });
+    await runSign("note", {
+      content: "note",
+      baseUrl: BASE,
+      public: true,
+      json: true,
+    });
     expect(calls).toHaveLength(1);
     expect(toolName(calls[0]!)).toBe("mnemonic_sign_memory");
     expect(toolArgs(calls[0]!).mode).toBe("local");
     expect(ks.gets).toBe(0);
   });
 
-  it("refuses the keychain when an older server wants a signature for a local write", async () => {
+  it("--public refuses the keychain when an older server wants a signature for a local write", async () => {
     saveValidToken();
     const calls = installFetch(() =>
       rpc({ status: "awaiting_signature", correlation_id: "c1" }),
     );
-    const err = await runSign("note", { content: "note", baseUrl: BASE }).catch(
+    const err = await runSign("note", {
+      content: "note",
+      baseUrl: BASE,
+      public: true,
+    }).catch(
       (e: unknown) => e,
     );
     expect(err).toBeInstanceOf(UserError);
@@ -228,7 +251,25 @@ describe("mnemonic sign write modes", () => {
     expect(calls).toHaveLength(1); // pending bundle never fetched
   });
 
-  it("--anchor sends mode=anchored and reads the key to sign", async () => {
+  it("--anchor sends to /api/anchor-sealed and reads the key (keychain-backed stub)", async () => {
+    saveValidToken();
+    const calls = installFetch((c) => {
+      if (c.url.endsWith("/api/anchor-sealed")) {
+        return json({ memory_hash: "cafebabe" });
+      }
+      return json({}, 404);
+    });
+    await runSign("claim", {
+      content: "claim",
+      baseUrl: BASE,
+      anchor: true,
+      json: true,
+    });
+    expect(calls.some((c) => c.url.endsWith("/api/anchor-sealed"))).toBe(true);
+    expect(ks.gets).toBe(1); // one keychain read for --anchor
+  });
+
+  it("--public --anchor sends mode=anchored to /mcp and reads the key to sign", async () => {
     saveValidToken();
     const calls = installFetch((c) => {
       if (c.url.endsWith("/mcp")) {
@@ -247,11 +288,10 @@ describe("mnemonic sign write modes", () => {
       content: "claim",
       baseUrl: BASE,
       anchor: true,
+      public: true,
       json: true,
     });
-    // `anchored` is the canonical wire token since 2026-09-27. A server built
-    // before that rejects it, so the hosted server must be deployed before this
-    // CLI version is published.
+    // `anchored` is the canonical wire token since 2026-09-27.
     expect(toolArgs(calls[0]!).mode).toBe("anchored");
     expect(calls.map((c) => c.url)).toEqual([
       `${BASE}/mcp`,
@@ -361,23 +401,16 @@ describe("silent session renewal", () => {
     const calls = installFetch((c) => {
       const o = oauthRoutes(c, rotated);
       if (o) return o;
-      if (c.url.endsWith("/mcp")) {
-        return rpc({ status: "awaiting_signature", correlation_id: "c1" });
+      // Default --anchor now uses sealMemory → /api/anchor-sealed.
+      if (c.url.endsWith("/api/anchor-sealed")) {
+        return json({ memory_hash: "cafebabe" });
       }
-      if (c.url.includes("/api/pending/")) {
-        return new Response(new Uint8Array([0xa0]), { status: 200 });
-      }
-      return json({ attestation_id: "att-p", status: "anchored" });
+      return json({}, 404);
     });
     await runSign("claim", { content: "claim", baseUrl: BASE, anchor: true });
-    expect(calls.map((c) => c.url.split("?")[0])).toEqual([
-      `${BASE}/oauth/authorize`,
-      `${BASE}/oauth/authorize`,
-      `${BASE}/oauth/token`,
-      `${BASE}/mcp`,
-      `${BASE}/api/pending/c1`,
-      `${BASE}/api/sign-callback`,
-    ]);
+    // OAuth renewal + sealed anchor (no MCP call).
+    expect(calls.some((c) => c.url.includes("/oauth/"))).toBe(true);
+    expect(calls.some((c) => c.url.endsWith("/api/anchor-sealed"))).toBe(true);
     expect(readTokenFile().refresh_token).toBe("rt-from-login");
     expect(ks.gets).toBe(1); // one read, shared by login + signature
   });

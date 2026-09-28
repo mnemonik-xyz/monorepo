@@ -48,7 +48,7 @@ describe("runSign", () => {
     );
   });
 
-  it("happy path: posts to /mcp and surfaces attestation_id", async () => {
+  it("happy path (--public): posts to /mcp and surfaces attestation_id", async () => {
     const kp = mock.generate_keypair();
     saveIdentityJson(kp);
     const sub = kp.pubkey_base58;
@@ -111,6 +111,7 @@ describe("runSign", () => {
       content: "hello",
       baseUrl: "http://test",
       tags: "a, b",
+      public: true, // use plaintext path to test signMemory flow
     });
     expect(fetchMock).toHaveBeenCalled();
     const calls = fetchMock.mock.calls.map((c) => String(c[0]));
@@ -119,7 +120,7 @@ describe("runSign", () => {
     expect(calls.some((u) => u.includes("/api/sign-callback"))).toBe(true);
   });
 
-  it("AuthError 403 on sign-callback → UserError post-mortem with mismatch hint", async () => {
+  it("AuthError 403 on sign-callback → UserError post-mortem with mismatch hint (--public)", async () => {
     // Preflight checks the saved file fields (id.pubkey vs token.sub). If
     // token.sub matches identity.pubkey at preflight-time but the JWT inside
     // token.jwt actually carries a DIFFERENT sub (e.g. token.json was
@@ -174,6 +175,7 @@ describe("runSign", () => {
     const err = await runSign("hello", {
       content: "hello",
       baseUrl: "http://test",
+      public: true, // use plaintext path to trigger the signMemory/sign-callback flow
     }).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(UserError);
     const msg = (err as UserError).message;
@@ -183,7 +185,7 @@ describe("runSign", () => {
     expect(msg).toContain(jwtRealSub);
   });
 
-  it("ServerError (exit 2) when /mcp returns 500", async () => {
+  it("ServerError (exit 2) when /api/store-sealed returns 500 (default sealed path)", async () => {
     const kp = mock.generate_keypair();
     saveIdentityJson(kp);
     const sub = kp.pubkey_base58;

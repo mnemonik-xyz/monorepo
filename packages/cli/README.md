@@ -90,46 +90,106 @@ sub: 6ZsT...3kQp
 expires: 2026-04-29T18:32:11.000Z
 ```
 
-### `mnemonic sign <content> [--anchor] [--tags <list>] [--base-url <url>]`
+### `mnemonic sign <content> [--anchor] [--public] [--tags <list>] [--base-url <url>]`
 
 Save a memory. Content is read from the positional argument or — if
 absent and stdin is piped — from stdin. Tags are comma-separated.
 
-- **Default (write mode `local`)**: the server stores the memory for your
-  identity only. There is no on-chain anchor and no charge. The CLI uses
-  only your public key and does not read the private key.
-- **`--anchor`** (alias `--anchored`, write mode `anchored`): the
-  CLI reads your private key and signs the memory locally (COSE_Sign1).
-  The server then anchors it on Arweave and Solana. This write can be
+- **Default (sealed local write)**: the memory is encrypted client-side
+  before leaving the device (`sealMemory`, write mode `store`). The server
+  stores only ciphertext. The CLI reads your keypair from the file
+  (`~/.mnemonic/identity.json`) and does not read the OS keychain.
+- **`--anchor`** (seal + anchor, write mode `anchor`): same E2E
+  encryption, but also anchors the sealed blob on Arweave and Solana.
+  The CLI reads the private key (one keychain read). This write can be
   paid.
+- **`--public`** (plaintext local, legacy write mode `local`): no
+  encryption. The server stores the plaintext. Does not read the private
+  key. Add `--public --anchor` for a plaintext on-chain anchor.
 
 ```bash
-$ mnemonic sign "hello world" --tags=demo,test
-attestation_id: 01HX9F2KQ7...
-signed_at:      2026-04-28T11:14:22.901Z
-status:         stored
-write_mode:     local
-content_hash:   6c7f...
+$ mnemonic sign "private note" --tags=demo
+memory_hash: 6c7f9b2a...
 
-$ mnemonic sign "public claim" --anchor
+$ mnemonic sign "sealed claim" --anchor
+memory_hash: cafebabe...
+
+$ mnemonic sign "public claim" --public
+attestation_id: 01HX9F2KQ7...
+write_mode:     local
+
+$ mnemonic sign "public anchor" --public --anchor
 status:         anchored
 write_mode:     anchored
 ```
 
-An older server can ask for a signature on a local write. Then the CLI
-uses a key stored in a file. It does not read the OS keychain; it stops
-with an error instead. Upgrade the server or use `--anchor`.
+An older server can ask for a signature on a plaintext local write
+(`--public`). Then the CLI uses a key stored in a file. It does not read
+the OS keychain; it stops with an error instead. Upgrade the server or
+use `--anchor`.
 
-### `mnemonic recall <query> [--top-k <n>] [--tag <tag>] [--base-url <url>]`
+### `mnemonic open <hash|link> [--base-url <url>]`
+
+Decrypt and print a sealed memory. Accepts either a content hash (hex)
+returned by `mnemonic sign`, or a share link (URL with `#k=<base64url>`
+fragment). Reads the private key.
+
+```bash
+$ mnemonic open 6c7f9b2a...
+private note
+
+$ mnemonic open "https://mcp.mnemonik.xyz/open/6c7f9b2a...#k=AAEC..."
+private note
+```
+
+### `mnemonic share <hash> --link | --to <did|key> [--base-url <url>]`
+
+Grant access to a sealed memory.
+
+- **`--link`**: create an anonymous bearer link. Anyone with the URL can
+  decrypt the memory. The content key is encoded in the `#k=` fragment.
+- **`--to <did|key>`**: targeted grant for a specific reader DID or
+  X25519 public key.
+
+Reads the private key.
+
+```bash
+$ mnemonic share 6c7f9b2a... --link
+url: https://mcp.mnemonik.xyz/open/6c7f9b2a...#k=AAEC...
+
+$ mnemonic share 6c7f9b2a... --to did:sol:6ZsT...
+grant_cbor: 8201...
+```
+
+### `mnemonic grants [--base-url <url>]`
+
+List access grants you have created. Uses only your public key.
+
+```bash
+$ mnemonic grants
+2 grant(s):
+  grant-001     6c7f9b2a...  2026-09-01T00:00:00Z  → (anonymous link)
+  grant-002     deadbeef...  2026-09-02T00:00:00Z  → did:sol:6ZsT...
+```
+
+### `mnemonic recall <query> [--top-k <n>] [--tag <tag>] [--sealed] [--base-url <url>]`
 
 Semantic recall over your stored memories. Default `--top-k` is 5;
 `--tag` filters to a single tag. Uses only your public key.
+
+Add `--sealed` to also search sealed memories. The query is embedded
+locally and ranked by cosine similarity — the server never sees the
+plaintext query. Reads the private key.
 
 ```bash
 $ mnemonic recall "hello" --top-k=3
 2 hit(s) of 14:
   01HX9F2KQ7  sim=0.987  [demo,test]  hello world
   01HX9F0YBZ  sim=0.812  [demo]       hello again
+
+$ mnemonic recall "private" --sealed
+1 sealed hit(s):
+  6c7f9b2a...       sim=0.923
 ```
 
 ### `mnemonic verify <attestation_id> [--base-url <url>]`
@@ -210,9 +270,13 @@ commands.
 
 | Command | Reads the private key |
 |---|---|
-| `recall`, `verify`, `whoami` (also `--with-count`) | Never |
-| `sign` (write mode `local`, the default) | Never |
-| `sign --anchor` | Yes, to sign the memory |
+| `recall`, `verify`, `whoami` (also `--with-count`), `grants` | Never |
+| `sign` (default sealed local write) | From file only — never from keychain |
+| `sign --anchor` | Yes, to encrypt and anchor |
+| `sign --public` (plaintext local) | Never |
+| `sign --public --anchor` | Yes, to sign the memory |
+| `open`, `share` | Yes, to decrypt / re-wrap |
+| `recall --sealed` | Yes, to open sealed memories |
 | `login` (browserless), `prove`, `identity export` | Yes, to sign or export |
 
 These rules also apply (available now, CLI 0.3.0):
@@ -221,6 +285,8 @@ These rules also apply (available now, CLI 0.3.0):
   With no identity, it tells you to run `mnemonic init`.
 - The CLI does not move a file-stored key into the OS keychain. It also
   does not check the keychain entry before each command.
+- The default `sign` uses E2E encryption: the server stores only
+  ciphertext. Use `--public` for the legacy plaintext path.
 
 ## Session renewal
 

@@ -15,6 +15,9 @@ import { Command } from "commander";
 import { runInit } from "../src/commands/init.js";
 import { runLogin } from "../src/commands/login.js";
 import { runSign } from "../src/commands/sign.js";
+import { runOpen } from "../src/commands/open.js";
+import { runShare } from "../src/commands/share.js";
+import { runGrants } from "../src/commands/grants.js";
 import { runRecall } from "../src/commands/recall.js";
 import { runVerify } from "../src/commands/verify.js";
 import { runWhoami } from "../src/commands/whoami.js";
@@ -169,14 +172,18 @@ export function buildProgram(): Command {
   program
     .command("sign [content]")
     .description(
-      "save a memory (content from arg or stdin). Default: local write from the public key only — the private key is not read. --anchor signs with your private key (OS keychain) and anchors on Arweave + Solana",
+      "save a memory (content from arg or stdin). Default: sealed local write (E2E encrypted, key from file). --anchor seals and anchors on-chain. --public writes plaintext (legacy path).",
     )
     .option("--tags <list>", "comma-separated tags")
     .option(
       "--anchor",
-      "sign locally and anchor on-chain (write mode `anchored`; reads the private key; may be paid)",
+      "seal and anchor on-chain (reads the private key; may be paid)",
     )
     .option("--participate", "alias for --anchor")
+    .option(
+      "--public",
+      "plaintext write (legacy local/anchored path; no E2E encryption)",
+    )
     .option("--base-url <url>", "override the server base URL")
     .action(
       async (
@@ -185,6 +192,7 @@ export function buildProgram(): Command {
           tags?: string;
           anchor?: boolean;
           participate?: boolean;
+          public?: boolean;
           baseUrl?: string;
         },
       ) => {
@@ -192,6 +200,7 @@ export function buildProgram(): Command {
         await runSign(content, {
           ...rootOpts(program),
           ...(anchor ? { anchor } : {}),
+          ...(cmdOpts.public ? { public: true } : {}),
           ...(cmdOpts.tags !== undefined ? { tags: cmdOpts.tags } : {}),
           ...(cmdOpts.baseUrl !== undefined
             ? { baseUrl: cmdOpts.baseUrl }
@@ -201,20 +210,74 @@ export function buildProgram(): Command {
     );
 
   program
+    .command("open <hash_or_link>")
+    .description(
+      "decrypt and print a sealed memory (by content hash or share link)",
+    )
+    .option("--base-url <url>", "override the server base URL")
+    .action(
+      async (hashOrLink: string, cmdOpts: { baseUrl?: string }) => {
+        await runOpen(hashOrLink, {
+          ...rootOpts(program),
+          ...(cmdOpts.baseUrl !== undefined
+            ? { baseUrl: cmdOpts.baseUrl }
+            : {}),
+        });
+      },
+    );
+
+  program
+    .command("share <hash>")
+    .description("create a share link or targeted grant for a sealed memory")
+    .option("--link", "create an anonymous bearer link with embedded key")
+    .option("--to <did|key>", "grant access to a specific reader DID or key")
+    .option("--base-url <url>", "override the server base URL")
+    .action(
+      async (
+        hash: string,
+        cmdOpts: { link?: boolean; to?: string; baseUrl?: string },
+      ) => {
+        await runShare(hash, {
+          ...rootOpts(program),
+          ...(cmdOpts.link !== undefined ? { link: cmdOpts.link } : {}),
+          ...(cmdOpts.to !== undefined ? { to: cmdOpts.to } : {}),
+          ...(cmdOpts.baseUrl !== undefined
+            ? { baseUrl: cmdOpts.baseUrl }
+            : {}),
+        });
+      },
+    );
+
+  program
+    .command("grants")
+    .description("list access grants created by or for this identity")
+    .option("--base-url <url>", "override the server base URL")
+    .action(async (cmdOpts: { baseUrl?: string }) => {
+      await runGrants({
+        ...rootOpts(program),
+        ...(cmdOpts.baseUrl !== undefined ? { baseUrl: cmdOpts.baseUrl } : {}),
+      });
+    });
+
+  program
     .command("recall <query>")
-    .description("recall similar memories (public key only; no keychain access)")
+    .description(
+      "recall similar memories (public key only; no keychain access). Add --sealed to also search sealed memories.",
+    )
     .option("--top-k <n>", "max hits to return", (v) => parseInt(v, 10), 5)
     .option("--tag <tag>", "filter by a single tag")
+    .option("--sealed", "also recall sealed memories (reads private key)")
     .option("--base-url <url>", "override the server base URL")
     .action(
       async (
         query: string,
-        cmdOpts: { topK?: number; tag?: string; baseUrl?: string },
+        cmdOpts: { topK?: number; tag?: string; sealed?: boolean; baseUrl?: string },
       ) => {
         await runRecall(query, {
           ...rootOpts(program),
           ...(cmdOpts.topK !== undefined ? { topK: cmdOpts.topK } : {}),
           ...(cmdOpts.tag !== undefined ? { tag: cmdOpts.tag } : {}),
+          ...(cmdOpts.sealed !== undefined ? { sealed: cmdOpts.sealed } : {}),
           ...(cmdOpts.baseUrl !== undefined
             ? { baseUrl: cmdOpts.baseUrl }
             : {}),

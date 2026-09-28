@@ -147,7 +147,7 @@ function buildStubContent(pubkey_base58: string): string {
 const HELP_FLAGS = new Set(["--help", "-h", "--version", "-V"]);
 
 /** Commands that work from the public key alone (never create a key). */
-const PUBKEY_ONLY_COMMANDS = new Set(["recall", "verify", "whoami"]);
+const PUBKEY_ONLY_COMMANDS = new Set(["recall", "verify", "whoami", "grants"]);
 
 /**
  * Return true when `ensure()` should be skipped.
@@ -179,6 +179,9 @@ export function shouldSkipEnsure(argv: string[]): boolean {
   ) {
     return true;
   }
+  // `open` and `share` read the private key, but they must not auto-create a
+  // new identity as a side effect (they would fail with "no identity" instead).
+  if (cmd === "open" || cmd === "share") return true;
   return false;
 }
 
