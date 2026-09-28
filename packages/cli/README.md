@@ -173,6 +173,98 @@ challenge: 00112233
 signature: 7f3a...c411
 ```
 
+### `mnemonic erc8004 feedback` — build a `MNEMONIC_FEEDBACK_V1` document
+
+Build a `MNEMONIC_FEEDBACK_V1` reputation feedback document, sign it with
+your local Ed25519 identity, and emit the `giveFeedback` calldata ready to
+send. **Entirely offline — no server call, no gas, no transaction.** The
+private key is read from the local keystore (same as `mnemonic prove`).
+
+```
+mnemonic erc8004 feedback
+  --agent-id <id>          ERC-8004 agent token ID (decimal string)
+  --value <n>              Fixed-point score numerator (int128)
+  --value-decimals <n>     Decimal places (0–18; default 2)
+  --client-address <addr>  Your EVM address — MUST equal msg.sender of the tx
+  --uri <url>              URI where you will host the document (feedbackUri)
+  --attestation-id <id>    Mnemonic attestation_id of the cited memory
+  --blake3 <hex>           blake3 hash of the cited attestation
+  --tag1 <str>             Optional rating tag 1
+  --tag2 <str>             Optional rating tag 2
+  --note <text>            Optional note (max 280 chars)
+  --rpc-url <url>          Optional RPC URL for the self-promotion pre-flight check
+  --registry <addr>        Override the default registry address
+  --chain-id <n>           Override chain ID (default 1)
+  --out <path>             Write the document JSON to a file instead of stdout
+  --json                   Machine-readable JSON output
+```
+
+The document must be uploaded to `--uri` **before** the transaction lands.
+Send the tx with:
+
+```bash
+# viem
+# const { hash } = await wallet.sendTransaction({ to, data })
+
+# cast
+$ cast send <to> <data> --private-key $KEY --rpc-url $RPC
+```
+
+Example:
+
+```bash
+$ mnemonic erc8004 feedback \
+    --agent-id 42 \
+    --value 9800 --value-decimals 2 \
+    --client-address 0xAb5801a7D398351b8bE11C439e05C5B3259aeC9B \
+    --uri https://example.com/feedback/1.json \
+    --attestation-id mn_01j... \
+    --blake3 aaaa...aaaa \
+    --tag1 quality --tag2 research
+
+feedbackHash:    0xe16ec856...
+calldata:        0x3c036a7e...
+document:        { "schema": "MNEMONIC_FEEDBACK_V1", ... }
+
+WARNING  self-promotion check skipped (no --rpc-url)
+PREFLIGHT  send from: 0xAb5801a7D398351b8bE11C439e05C5B3259aeC9B
+PREFLIGHT  chain: 1
+PREFLIGHT  registry: 0x8004BAa17C55a88189AE136b182e5fdA19dE9b63
+```
+
+Use `--json` for machine-readable output. Exit codes follow the standard table.
+
+### `mnemonic erc8004 feedback-verify` — verify a `MNEMONIC_FEEDBACK_V1` document
+
+Verify the hashes and Ed25519 proof of a hosted feedback document — entirely
+offline. Optionally supply the on-chain `feedbackHash` and `msg.sender` to
+confirm the on-chain binding.
+
+```
+mnemonic erc8004 feedback-verify
+  --document <path|url>          Path to a local file or HTTPS URL of the document
+  --feedback-hash <0x...>        On-chain feedbackHash to verify against (optional)
+  --sender <0xaddr>              On-chain msg.sender to check against clientAddress (optional)
+  --json                         Machine-readable JSON output
+```
+
+Example:
+
+```bash
+$ mnemonic erc8004 feedback-verify \
+    --document /tmp/feedback-1.json \
+    --feedback-hash 0xe16ec856f50f9686ab1cfb50eb4e547737f25ed75ee0e7709e5cff0314af61aa \
+    --sender 0xAb5801a7D398351b8bE11C439e05C5B3259aeC9B
+
+valid:          yes
+feedbackHash:   ok
+payloadHash:    ok
+ed25519:        ok (kid: 3F5qRPtK...)
+senderBinding:  verified
+```
+
+Exit codes: `0` valid, `1` invalid (bad hash or proof), `2` network/parse error.
+
 ### `mnemonic identity import [--ticket <uuid> | --file <path>] [--force] [--base-url <url>]`
 
 Import a keypair from either a webapp "Send to CLI" ticket (via

@@ -292,6 +292,77 @@ documented exit code (Decision 10).
   leak into stderr.
 - **`redactJWT(input)`** — exported helper for downstream consumers.
 
+### ERC-8004 reputation feedback (offline, no server required)
+
+Four free functions for building and verifying `MNEMONIC_FEEDBACK_V1` documents
+that commit Mnemonic reputation evidence to the ERC-8004 Reputation Registry on
+Ethereum. No EVM signer, no gas handling, no network: the functions are pure and
+run offline.
+
+- **`prepareFeedback(input, opts)`** — builds the `MNEMONIC_FEEDBACK_V1` document,
+  signs the payload with the caller's Ed25519 identity, computes
+  `feedbackHash = keccak256(JCS(document))` and returns ABI-encoded `giveFeedback`
+  calldata ready to send. See `docs/spec/erc8004-feedback-v1.md` for the full
+  document format.
+  - `input`: `{agentId, value, valueDecimals, clientAddress, feedbackUri, mnemonic, tags?, createdAt?, chainId?, registryAddress?, note?}`
+  - `opts.signer`: any `Signer` — the Ed25519 identity that endorses the document.
+  - Returns `PreparedFeedback`: `{document, documentJson, feedbackHash, payloadHash, onchain, preflight, warnings}`.
+
+- **`verifyFeedbackDocument(input)`** — offline verifier. Re-derives both hashes,
+  verifies the Ed25519 proof via `@noble/ed25519`, and optionally checks the
+  `msg.sender == feedback.clientAddress` binding.
+  - `input`: `{documentJson, onchainFeedbackHash?, onchainSender?}`
+  - Returns `VerifyFeedbackResult`: `{valid, checks: {feedbackHash, payloadHash, ed25519, senderBinding}, error?}`.
+
+- **`checkSelfPromotion(opts)`** — pre-flight guard. Offline: rejects zero address
+  and bad EIP-55 checksum. Online (requires `rpcUrl`): calls `ownerOf`,
+  `isApprovedForAll`, `getApproved` to detect controller ratings.
+  - Returns `SelfPromotionCheck`: `{allowed, reason?, warnings}`.
+
+- **`encodeGiveFeedback(args)`** — low-level ABI encoder for `giveFeedback(uint256,
+  int128,uint8,string,string,string,string,bytes32)`. Used internally by
+  `prepareFeedback`. Exported for custom calldata construction.
+
+All four functions and their TypeScript interfaces are re-exported from
+`@mnemonik-xyz/sdk`. The canonical document format and verification procedure are
+specified in `docs/spec/erc8004-feedback-v1.md`. The reproducible fixture at
+`test/fixtures/erc8004-feedback-v1.json` lets any third party verify
+`feedbackHash` with `cast keccak` and no Mnemonic code.
+
+```typescript
+import { prepareFeedback, verifyFeedbackDocument } from '@mnemonik-xyz/sdk';
+
+// Build the feedback document and calldata — offline, no server call.
+const prepared = await prepareFeedback({
+  agentId: '42',
+  value: 9800,
+  valueDecimals: 2,
+  clientAddress: '0xAb5801a7D398351b8bE11C439e05C5B3259aeC9B',
+  feedbackUri: 'https://example.com/feedback/1.json',
+  mnemonic: {
+    schema: 'MEMORY_V1',
+    attestation_id: 'mn_01j...',
+    blake3: '<64 hex chars>',
+    ed25519_pubkey: '<base58>',
+  },
+  tags: { tag1: 'quality', tag2: 'research' },
+  createdAt: '2026-09-27T12:00:00Z',
+  chainId: 1,
+}, { signer });
+
+// Upload prepared.documentJson to prepared.onchain.to (feedbackUri) BEFORE sending the tx.
+// Then send the transaction:
+// await wallet.sendTransaction({ to: prepared.onchain.to, data: prepared.onchain.data });
+
+// Verify any MNEMONIC_FEEDBACK_V1 document — offline.
+const result = await verifyFeedbackDocument({
+  documentJson: prepared.documentJson,
+  onchainFeedbackHash: prepared.feedbackHash,
+  onchainSender: '0xAb5801a7D398351b8bE11C439e05C5B3259aeC9B',
+});
+// result.valid === true, result.checks.senderBinding === 'verified'
+```
+
 ## Golden COSE fixture
 
 `test/fixtures/golden-cose.json` (and its checksum `golden-cose.sha256`)
