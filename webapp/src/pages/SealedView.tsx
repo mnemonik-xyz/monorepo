@@ -413,21 +413,17 @@ function base64urlToBytes(b64url: string): Uint8Array | null {
 }
 
 /**
- * Derive the key commitment: blake3::derive_key(KC_DERIVE_LABEL, K).
- * Since Web Crypto does not support blake3, we use the WASM blake3_hash
- * with a domain-separation prefix that matches the Rust side.
+ * Derive the key commitment via the WASM `key_commitment` binding.
  *
- * Mirrors `core/src/sealed/mod.rs::derive_kc`.
+ * The Rust side uses `blake3::derive_key("mnemonic sealed v1 key commitment", K)`,
+ * which is a keyed BLAKE3 KDF — NOT a plain hash of (label || K). Using a plain
+ * hash would produce a different output and cause every kc check to fail.
+ * The WASM binding calls the identical Rust function, so this is byte-exact.
  */
 async function deriveKeyCommitment(key: Uint8Array): Promise<Uint8Array> {
   try {
     const wasm = await loadWasm();
-    // Encode label as UTF-8 then concatenate with key bytes for domain separation.
-    const label = new TextEncoder().encode(KC_DERIVE_LABEL);
-    const input = new Uint8Array(label.length + key.length);
-    input.set(label, 0);
-    input.set(key, label.length);
-    return wasm.blake3_hash(input);
+    return wasm.key_commitment(key);
   } catch {
     // WASM unavailable — return a dummy that won't match (kc check will fail safely).
     return new Uint8Array(32);
