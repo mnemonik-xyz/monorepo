@@ -571,6 +571,251 @@ pub struct RebuiltRowJs {
     pub precision: String,
 }
 
+// ── T5: Sealed-memory WASM bindings ─────────────────────────────────────────
+//
+// These exports expose the T3 sealed-memory API (`core::sealed`) to JavaScript.
+// All secret inputs (x25519_secret, k) arrive as `&[u8]` and are copied into
+// `Zeroizing<Vec<u8>>` so the Rust-side copy is wiped when it goes out of scope.
+// Errors are converted to `JsValue::from_str` at this boundary only — no
+// business logic lives here.
+
+/// Seal an inner memory JSON blob for the given author.
+///
+/// Generates a fresh content key `K` and nonce internally (WebCrypto via
+/// `getrandom` `js` feature).  Returns a JS object:
+/// `{ outer_cbor: Uint8Array, content_hash: Uint8Array }`.
+/// `K` is intentionally NOT returned — callers that need it (for grants /
+/// bearer links) must call `make_grant` or `link_fragment` in a single
+/// server-side call before discarding the key.
+///
+/// # Parameters
+/// - `inner_json`         — raw bytes of the inner memory artifact JSON.
+/// - `author_ed25519_pub` — author's Ed25519 public key (32 bytes).
+/// - `artifact_id`        — the outer artifact's unique ID string.
+/// - `producer`           — the author's DID / identity string.
+/// - `created_at`         — ISO 8601 creation timestamp.
+#[wasm_bindgen]
+pub fn seal_memory(
+    inner_json: &[u8],
+    author_ed25519_pub: &[u8],
+    artifact_id: &str,
+    producer: &str,
+    created_at: &str,
+) -> Result<JsValue, JsValue> {
+    let pub_bytes: [u8; 32] = author_ed25519_pub
+        .try_into()
+        .map_err(|_| JsValue::from_str(&format!(
+            "seal_memory: author_ed25519_pub must be 32 bytes, got {}",
+            author_ed25519_pub.len()
+        )))?;
+
+    let mut rng = rand_core::OsRng;
+    let artifact = crate::sealed::seal_memory(
+        inner_json,
+        &pub_bytes,
+        artifact_id,
+        producer,
+        created_at,
+        &mut rng,
+    )
+    .map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+    #[derive(serde::Serialize)]
+    struct SealResult {
+        outer_cbor: Vec<u8>,
+        content_hash: Vec<u8>,
+    }
+    let result = SealResult {
+        outer_cbor: artifact.outer_cbor,
+        content_hash: artifact.content_hash,
+    };
+    serde_wasm_bindgen::to_value(&result)
+        .map_err(|e| JsValue::from_str(&format!("seal_memory: serialise failed: {e}")))
+}
+
+/// Open a sealed memory using the recipient's X25519 secret key (32 bytes).
+///
+/// Returns the inner memory JSON as a `Uint8Array`.
+/// The `x25519_secret` copy is zeroized after use.
+#[wasm_bindgen]
+pub fn open_memory(outer_cbor: &[u8], x25519_secret: &[u8]) -> Result<Vec<u8>, JsValue> {
+    let secret = zeroize::Zeroizing::new(
+        x25519_secret.to_vec(),
+    );
+    let key: [u8; 32] = secret.as_slice()
+        .try_into()
+        .map_err(|_| JsValue::from_str(&format!(
+            "open_memory: x25519_secret must be 32 bytes, got {}",
+            x25519_secret.len()
+        )))?;
+    crate::sealed::open_memory(outer_cbor, &key)
+        .map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+/// Open a sealed memory when `K` is already known (bearer links / grants).
+///
+/// Returns the inner memory JSON as a `Uint8Array`.
+/// The `k` copy is zeroized after use.
+#[wasm_bindgen]
+pub fn open_with_key(outer_cbor: &[u8], k: &[u8]) -> Result<Vec<u8>, JsValue> {
+    let secret = zeroize::Zeroizing::new(k.to_vec());
+    let key: [u8; 32] = secret.as_slice()
+        .try_into()
+        .map_err(|_| JsValue::from_str(&format!(
+            "open_with_key: k must be 32 bytes, got {}",
+            k.len()
+        )))?;
+    crate::sealed::open_with_key(outer_cbor, &key)
+        .map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+/// Build an unsigned GRANT_V1 CBOR artifact.
+///
+/// - `memory_hash` — 32-byte hash of the sealed artifact this grant unlocks.
+/// - `outer_cbor`  — the SEALED_V1 CBOR bytes (used to extract `producer`).
+/// - `k`           — 32-byte content encryption key (zeroized after use).
+/// - `reader_pk`   — optional 32-byte X25519 public key for a targeted grant;
+///                   `undefined` / absent for an anonymous (bearer) grant.
+/// - `author_did`  — the author's DID string.
+/// - `perms`       — optional JSON permission token / expiry string.
+/// - `created_at`  — ISO 8601 timestamp.
+///
+/// Returns the raw GRANT_V1 CBOR bytes as a `Uint8Array`.
+#[wasm_bindgen]
+pub fn make_grant(
+    memory_hash: &[u8],
+    outer_cbor: &[u8],
+    k: &[u8],
+    reader_pk: Option<Vec<u8>>,
+    author_did: &str,
+    perms: Option<String>,
+    created_at: &str,
+) -> Result<Vec<u8>, JsValue> {
+    let k_secret = zeroize::Zeroizing::new(k.to_vec());
+    let k_arr: [u8; 32] = k_secret.as_slice()
+        .try_into()
+        .map_err(|_| JsValue::from_str(&format!(
+            "make_grant: k must be 32 bytes, got {}",
+            k.len()
+        )))?;
+    let hash_arr: [u8; 32] = memory_hash
+        .try_into()
+        .map_err(|_| JsValue::from_str(&format!(
+            "make_grant: memory_hash must be 32 bytes, got {}",
+            memory_hash.len()
+        )))?;
+
+    let reader_pk_arr: Option<[u8; 32]> = match reader_pk {
+        Some(ref rpk) => {
+            let arr: [u8; 32] = rpk.as_slice()
+                .try_into()
+                .map_err(|_| JsValue::from_str(&format!(
+                    "make_grant: reader_pk must be 32 bytes, got {}",
+                    rpk.len()
+                )))?;
+            Some(arr)
+        }
+        None => None,
+    };
+
+    crate::sealed::make_grant(
+        &hash_arr,
+        outer_cbor,
+        &k_arr,
+        reader_pk_arr.as_ref(),
+        author_did,
+        perms.as_deref(),
+        created_at,
+    )
+    .map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+/// Extract the content key `K` from a GRANT_V1 CBOR artifact for a targeted
+/// recipient.
+///
+/// The `x25519_secret` copy is zeroized after use.
+/// Returns the raw 32-byte `K` as a `Uint8Array`.
+#[wasm_bindgen]
+pub fn open_grant(grant_cbor: &[u8], x25519_secret: &[u8]) -> Result<Vec<u8>, JsValue> {
+    let secret = zeroize::Zeroizing::new(x25519_secret.to_vec());
+    let key: [u8; 32] = secret.as_slice()
+        .try_into()
+        .map_err(|_| JsValue::from_str(&format!(
+            "open_grant: x25519_secret must be 32 bytes, got {}",
+            x25519_secret.len()
+        )))?;
+    let k = crate::sealed::open_grant(grant_cbor, &key)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    Ok(k.to_vec())
+}
+
+/// Derive the X25519 public key from a raw Ed25519 public-key byte array (32 bytes).
+///
+/// Returns the 32-byte X25519 public key as a `Uint8Array`.
+#[wasm_bindgen]
+pub fn x25519_public_from_ed25519(ed25519_pub: &[u8]) -> Result<Vec<u8>, JsValue> {
+    let pub_bytes: [u8; 32] = ed25519_pub
+        .try_into()
+        .map_err(|_| JsValue::from_str(&format!(
+            "x25519_public_from_ed25519: ed25519_pub must be 32 bytes, got {}",
+            ed25519_pub.len()
+        )))?;
+    crate::sealed::x25519_public_from_ed25519(&pub_bytes)
+        .map(|k| k.to_vec())
+        .map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+/// Encode the 32-byte content key `K` as a URL fragment: `k=<base64url-nopad>`.
+///
+/// Returns the fragment string (without the leading `#`).
+#[wasm_bindgen]
+pub fn link_fragment(k: &[u8]) -> String {
+    match k.try_into() as Result<[u8; 32], _> {
+        Ok(arr) => crate::sealed::link_fragment(&arr),
+        Err(_) => format!("link_fragment: k must be 32 bytes, got {}", k.len()),
+    }
+}
+
+/// Parse a URL fragment of the form `k=<base64url-nopad>` back to a 32-byte `K`.
+///
+/// Returns the raw 32 key bytes as a `Uint8Array`.
+#[wasm_bindgen]
+pub fn parse_link_fragment(fragment: &str) -> Result<Vec<u8>, JsValue> {
+    crate::sealed::parse_link_fragment(fragment)
+        .map(|k| k.to_vec())
+        .map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+/// Verify the outer COSE_Sign1 signature of a `sealed.v1` artifact and extract
+/// its metadata.
+///
+/// Returns a JS object:
+/// `{ producer: string, content_hash: Uint8Array, created_at: string, wrap_count: number }`.
+///
+/// This function NEVER decrypts anything — it only verifies the envelope
+/// signature and extracts the header fields.
+#[wasm_bindgen]
+pub fn verify_sealed(cose_bytes: &[u8]) -> Result<JsValue, JsValue> {
+    let sv = crate::codec::sign::verify_sealed(cose_bytes)
+        .map_err(|e| JsValue::from_str(&e))?;
+
+    #[derive(serde::Serialize)]
+    struct SealedVerificationJs {
+        producer: String,
+        content_hash: Vec<u8>,
+        created_at: String,
+        wrap_count: usize,
+    }
+    let out = SealedVerificationJs {
+        producer: sv.producer,
+        content_hash: sv.content_hash,
+        created_at: sv.created_at,
+        wrap_count: sv.wrap_count,
+    };
+    serde_wasm_bindgen::to_value(&out)
+        .map_err(|e| JsValue::from_str(&format!("verify_sealed: serialise failed: {e}")))
+}
+
 /// Rebuild one recall row from the signed artifact bytes stored on Arweave.
 ///
 /// This is the client half of "Arweave is the source of truth": given the

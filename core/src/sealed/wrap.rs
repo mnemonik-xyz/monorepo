@@ -136,7 +136,10 @@ pub fn wrap_key(
 
     let aad = canonical_aad(ct_hash, author_did)?;
 
-    let mut csprng = rand::rngs::OsRng;
+    // Use rand_core::OsRng (backed by getrandom with `js` feature on wasm32)
+    // so wrap_key compiles on both native and wasm32-unknown-unknown without
+    // pulling the full `rand` crate into the shared dependency graph.
+    let mut csprng = rand_core::OsRng;
     let (enc_key, wk) =
         hpke::single_shot_seal::<ChaCha20Poly1305, HkdfSha256, X25519HkdfSha256, _>(
             &OpModeS::Base,
@@ -204,9 +207,9 @@ mod tests {
     use hpke::kem::Kem as KemTrait;
 
     fn random_recipient_keypair() -> ([u8; 32], [u8; 32]) {
-        let mut csprng = rand::rngs::OsRng;
+        let mut csprng = rand_core::OsRng;
         let (sk, pk) = X25519HkdfSha256::gen_keypair(&mut csprng);
-        (sk.to_bytes().try_into().unwrap(), pk.to_bytes().try_into().unwrap())
+        (sk.to_bytes().into(), pk.to_bytes().into())
     }
 
     fn make_ct_hash() -> [u8; 32] {

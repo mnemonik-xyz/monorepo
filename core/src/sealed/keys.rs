@@ -127,11 +127,11 @@ fn constant_time_eq(a: &[u8; 32], b: &[u8; 32]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rand::RngCore;
+    use rand_core::RngCore;
 
     /// Generate a valid (non-small-order) Ed25519 signing key for tests.
     fn random_signing_key() -> SigningKey {
-        let mut rng = rand::rngs::OsRng;
+        let mut rng = rand_core::OsRng;
         let mut seed = [0u8; 32];
         rng.fill_bytes(&mut seed);
         SigningKey::from_bytes(&seed)

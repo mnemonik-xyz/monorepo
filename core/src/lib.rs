@@ -42,9 +42,9 @@ pub mod embed;
 pub mod encrypt;
 // HPKE-based sealed memories (Wave 6+, §17): bucket-padded XChaCha20Poly1305
 // content encryption + X25519HkdfSha256 key-wrapping, with Ed25519→X25519 key
-// derivation from the identity keypair.  Native-only: uses OsRng and the hpke
-// `std` feature; a wasm port would require a CSPRNG wiring audit first.
-#[cfg(not(target_arch = "wasm32"))]
+// derivation from the identity keypair.  Pure crypto — available on every
+// target.  The RNG path (OsRng / getrandom) is gated internally so the WASM
+// build uses WebCrypto via getrandom's `js` feature.
 pub mod sealed;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod lineage;

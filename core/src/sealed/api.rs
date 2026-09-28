@@ -12,7 +12,7 @@
 //! * [`parse_link_fragment`] — decode the URL fragment back to K.
 
 use base64::Engine as _;
-use rand::RngCore;
+use rand_core::RngCore;
 use zeroize::Zeroizing;
 
 use crate::codec::canonical::to_canonical_cbor;
@@ -435,7 +435,7 @@ mod tests {
     fn seal_test_memory(inner: &[u8], sk: &SigningKey) -> SealedArtifact {
         let vk = sk.verifying_key();
         let vk_bytes = vk.to_bytes();
-        let mut rng = rand::rngs::OsRng;
+        let mut rng = rand_core::OsRng;
         seal_memory(
             inner,
             &vk_bytes,
@@ -581,7 +581,7 @@ mod tests {
     #[test]
     fn make_open_grant_targeted_round_trip() {
         use hpke::kem::{Kem as KemTrait, X25519HkdfSha256};
-        use hpke::{Deserializable, Serializable};
+        use hpke::Serializable;
 
         let sk = test_signing_key();
         let inner = b"targeted grant content";
@@ -589,9 +589,9 @@ mod tests {
         let memory_hash: [u8; 32] = artifact.content_hash[..32].try_into().unwrap();
 
         // Generate a reader X25519 keypair.
-        let (reader_sk_hpke, reader_pk_hpke) = X25519HkdfSha256::gen_keypair(&mut rand::rngs::OsRng);
-        let reader_sk_bytes: [u8; 32] = reader_sk_hpke.to_bytes().try_into().unwrap();
-        let reader_pk_bytes: [u8; 32] = reader_pk_hpke.to_bytes().try_into().unwrap();
+        let (reader_sk_hpke, reader_pk_hpke) = X25519HkdfSha256::gen_keypair(&mut rand_core::OsRng);
+        let reader_sk_bytes: [u8; 32] = reader_sk_hpke.to_bytes().into();
+        let reader_pk_bytes: [u8; 32] = reader_pk_hpke.to_bytes().into();
 
         let grant_cbor = make_grant(
             &memory_hash,
