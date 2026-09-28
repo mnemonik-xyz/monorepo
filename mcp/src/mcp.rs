@@ -1017,6 +1017,13 @@ pub struct McpState {
     /// snapshot with the local DB so lifetime numbers survive a DB loss.
     /// `None` (default, stdio, tests) = DB-only behaviour, unchanged.
     pub chain_stats: Option<Arc<crate::chain_stats::ChainStatsCache>>,
+
+    /// Process-local cache for the X25519 decryption secret derived from the
+    /// agent's Ed25519 identity key (sealed-memories T12). Populated on the
+    /// first `open_memory` call via the OS keychain / identity loader; never
+    /// populated on HTTP transport (only stdio needs to decrypt locally).
+    /// The inner `Mutex` is never held across `.await`.
+    pub unlock_cache: mnemonic_core::identity::UnlockCache,
 }
 
 // Safety: We only access store through std::sync::Mutex (short critical sections, no await)
@@ -2147,38 +2154,57 @@ async fn handle_tool_call(
                 .as_str()
                 .ok_or_else(|| JsonRpcError::simple(-32603, "query required"))?;
             let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(5) as usize;
-            // Decision 5 / AC13 — agent-native-distribution (round 2 / SAR1-M1):
-            //
-            //   - Anonymous caller (`jwt_sub.is_none()`): scope is the
-            //     CROSS-OWNER public pool. Pass `owner_pubkey = None` AND
-            //     `visibility_filter = Some(Public)`. The storage layer
-            //     drops the owner predicate; only `visibility = 'public'`
-            //     rows surface (private rows stay invisible regardless of
-            //     owner — privacy contract preserved).
-            //   - Authenticated caller: scope is the caller's own corpus
-            //     across both visibilities. Pass `owner_pubkey = Some(sub)`
-            //     AND `visibility_filter = None`.
-            //
-            // SAR1-M1 round-1 had `owner_pubkey = owner_pubkey` (server
-            // keypair fallback) for anonymous — that scoped anonymous recall
-            // to server-keypair rows only, contradicting the user-spec
-            // "public part of the pool". Fixed here.
-            let (recall_owner, visibility_filter): (Option<&str>, _) = if jwt_sub.is_none() {
-                (None, Some(mnemonic_core::storage::Visibility::Public))
+            // Task 12: stdio recall includes sealed rows and foreign grants.
+            // For the single-tenant stdio transport (no JWT), use
+            // `recall_with_sealed` which opens sealed rows with the unlock cache
+            // (one keychain read per process) and fetches foreign grants.
+            if transport == crate::tools::Transport::Stdio {
+                tools::recall_with_sealed(
+                    &state.keypair,
+                    &state.store,
+                    state.embedder.as_ref(),
+                    query,
+                    limit,
+                    owner_pubkey,
+                    &state.unlock_cache,
+                    &state.hosted_endpoint,
+                    &state.hosted_client,
+                )
+                .await
             } else {
-                (Some(owner_pubkey), None)
-            };
-            // DB-only: lock, query, release
-            let store = state.store.lock().unwrap();
-            tools::recall(
-                &state.keypair,
-                &store,
-                state.embedder.as_ref(),
-                query,
-                limit,
-                recall_owner,
-                visibility_filter,
-            )
+                // Decision 5 / AC13 — agent-native-distribution (round 2 / SAR1-M1):
+                //
+                //   - Anonymous caller (`jwt_sub.is_none()`): scope is the
+                //     CROSS-OWNER public pool. Pass `owner_pubkey = None` AND
+                //     `visibility_filter = Some(Public)`. The storage layer
+                //     drops the owner predicate; only `visibility = 'public'`
+                //     rows surface (private rows stay invisible regardless of
+                //     owner — privacy contract preserved).
+                //   - Authenticated caller: scope is the caller's own corpus
+                //     across both visibilities. Pass `owner_pubkey = Some(sub)`
+                //     AND `visibility_filter = None`.
+                //
+                // SAR1-M1 round-1 had `owner_pubkey = owner_pubkey` (server
+                // keypair fallback) for anonymous — that scoped anonymous recall
+                // to server-keypair rows only, contradicting the user-spec
+                // "public part of the pool". Fixed here.
+                let (recall_owner, visibility_filter): (Option<&str>, _) = if jwt_sub.is_none() {
+                    (None, Some(mnemonic_core::storage::Visibility::Public))
+                } else {
+                    (Some(owner_pubkey), None)
+                };
+                // DB-only: lock, query, release
+                let store = state.store.lock().unwrap();
+                tools::recall(
+                    &state.keypair,
+                    &store,
+                    state.embedder.as_ref(),
+                    query,
+                    limit,
+                    recall_owner,
+                    visibility_filter,
+                )
+            }
         }
         "mnemonic_check_pending" => {
             let cid = args["correlation_id"]
@@ -2522,6 +2548,7 @@ mod transport_tests {
                 .expect("reqwest hosted client"),
             blog_rebuild_hook: None,
             chain_stats: None,
+            unlock_cache: mnemonic_core::identity::UnlockCache::with_ttl(None),
         })
     }
 

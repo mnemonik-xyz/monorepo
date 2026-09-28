@@ -1039,6 +1039,9 @@ async fn main() -> anyhow::Result<()> {
         hosted_client,
         blog_rebuild_hook,
         chain_stats: chain_stats_cache.clone(),
+        unlock_cache: mnemonic_core::identity::UnlockCache::with_ttl(
+            cfg.unlock_ttl_secs.map(std::time::Duration::from_secs),
+        ),
     });
 
     // Retry only already-settled paid deliveries. The worker re-enters the

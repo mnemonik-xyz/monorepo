@@ -499,6 +499,42 @@ pub async fn sign_memory(
              anchored writes must be client-signed"
         )));
     }
+
+    // Task 12 — stdio `participate` + explicit `private` → sealed anchored write.
+    //
+    // When the caller EXPLICITLY passes `visibility: "private"` (not the
+    // default) with `mode: "anchored"` (or `"participate"`) on the single-
+    // tenant stdio transport, the inner MEMORY_V1 is sealed before uploading
+    // to Arweave. The COSE_Sign1 wraps the SEALED_V1 outer CBOR (not plain
+    // MEMORY_V1) and carries `Mnemonic-Type: sealed` Arweave tag + v:3 memo.
+    // Plaintext never reaches Arweave; no embedding row is written.
+    //
+    // Routing only fires when `visibility` field is EXPLICITLY present in
+    // `args` — absent visibility resolves to `Private` (the default) but
+    // must not silently seal a plain `mode: "anchored"` call (that would
+    // break existing agents that omit `visibility`).
+    let explicit_private = args
+        .get("visibility")
+        .and_then(|v| v.as_str())
+        .map(|s| s == "private")
+        .unwrap_or(false);
+    if transport.allows_operator_signing()
+        && resolved.write_mode == WriteMode::Anchored
+        && explicit_private
+    {
+        return sign_memory_sealed_anchored(
+            keypair,
+            solana,
+            arweave,
+            store,
+            content,
+            tags,
+            storage_mode,
+            owner_pubkey,
+        )
+        .await;
+    }
+
     let inline_result = sign_memory_inline(
         keypair,
         solana,
@@ -2582,6 +2618,347 @@ fn sanitize_untrusted(content: &str) -> String {
     cleaned.replace("![", "[image: ")
 }
 
+// ── Task 12: sealed anchored write (stdio + participate + private) ────────────
+
+/// Stdio `mnemonic_sign_memory` sealed-anchored path (Task 12).
+///
+/// Called when `transport == Stdio`, `write_mode == Anchored`, and
+/// `visibility == Private`. Seals the inner MEMORY_V1 artifact with the
+/// owner's Ed25519 public key, wraps the outer SEALED_V1 CBOR in
+/// COSE_Sign1 (signed by the agent key), uploads to Arweave with a
+/// `Mnemonic-Type: sealed` tag, and writes a Solana SPL memo with `v: 3`.
+///
+/// # Critical-section discipline (Decision 8)
+///
+/// The SQLite mutex is taken only for the final `save_sealed_attestation`
+/// call and dropped before returning. No `.await` is held while the mutex
+/// is in scope.
+#[allow(clippy::too_many_arguments)]
+pub async fn sign_memory_sealed_anchored(
+    keypair: &LazyKeypair,
+    solana: &mnemonic_core::solana::SolanaClient,
+    arweave: &mnemonic_core::arweave::ArweaveClient,
+    store: &std::sync::Mutex<SqliteStore>,
+    content: &str,
+    tags: &[String],
+    storage_mode: &str,
+    owner_pubkey: &str,
+) -> Result<serde_json::Value, ToolError> {
+    use mnemonic_core::codec::sign::sign_cose;
+    use mnemonic_core::sealed::seal_memory;
+
+    let attestation_id = uuid::Uuid::new_v4().to_string();
+    let now = chrono::Utc::now().to_rfc3339();
+    let owner_did = format!("did:sol:{owner_pubkey}");
+
+    // 1. Build inner MEMORY_V1 CBOR (contains plaintext — stays in process memory).
+    let inner_artifact = serde_json::json!({
+        "artifact_id": attestation_id,
+        "type": "memory",
+        "schema_version": 1,
+        "content": content,
+        "producer": &owner_did,
+        "created_at": &now,
+        "tags": tags,
+    });
+    let mut inner_cbor = to_canonical_cbor(&inner_artifact, &schema::MEMORY_V1)
+        .map_err(|e| anyhow::anyhow!("inner CBOR encode failed: {e}"))?;
+
+    // 2. Decode owner Ed25519 pub → seal inner CBOR.
+    let sol_pubkey: solana_sdk::pubkey::Pubkey = owner_pubkey
+        .parse()
+        .map_err(|e| anyhow::anyhow!("owner_pubkey is not a valid Solana pubkey: {e}"))?;
+    let owner_ed25519: [u8; 32] = sol_pubkey.to_bytes();
+
+    let sealed_art = seal_memory(
+        &inner_cbor,
+        &owner_ed25519,
+        &attestation_id,
+        &owner_did,
+        &now,
+        &mut rand::rngs::OsRng,
+    )
+    .map_err(|e| anyhow::anyhow!("seal_memory failed: {e}"))?;
+
+    // 3. Zeroize sensitive material.
+    inner_cbor.zeroize();
+    let outer_cbor = sealed_art.outer_cbor;
+    let content_hash = blake3_hash(&outer_cbor);
+    drop(sealed_art.k); // Zeroizing<[u8;32]> — explicit drop for clarity
+
+    // 4. Sign the outer CBOR with COSE_Sign1 (agent identity key).
+    let kp = signing_keypair(keypair)?;
+    let cose_bytes = sign_cose(&outer_cbor, kp)
+        .map_err(|e| anyhow::anyhow!("COSE signing of sealed artifact failed: {e}"))?;
+
+    // 5. Upload to Arweave + Solana memo.
+    let producer_did = identity::did_sol(kp);
+    let ar_tx = arweave
+        .write_item(
+            &cose_bytes,
+            kp,
+            &[
+                ("Producer", producer_did.as_str()),
+                ("Created-At", now.as_str()),
+                ("Mnemonic-Type", "sealed"),
+            ],
+        )
+        .await?;
+    arweave.mine().await?;
+
+    let memo = serde_json::json!({
+        "h": content_hash,
+        "a": ar_tx,
+        "v": 3,
+    });
+    let sol_tx = solana.write_memo(kp, &memo.to_string()).await?;
+
+    // 6. Persist sealed row (short critical section, no await while held).
+    {
+        let store_g = store.lock().unwrap();
+        store_g.save_sealed_attestation(
+            &attestation_id,
+            &content_hash,
+            tags,
+            &sol_tx,
+            &ar_tx,
+            owner_pubkey,
+            owner_pubkey,
+            &now,
+            WriteMode::Anchored,
+            &cose_bytes,
+        )?;
+    }
+
+    Ok(serde_json::json!({
+        "attestation_id": attestation_id,
+        "content_hash": content_hash,
+        "hash_algorithm": "blake3",
+        "encoding": "cbor+sealed+cose",
+        "solana_tx": sol_tx,
+        "arweave_tx": ar_tx,
+        "signer": owner_pubkey,
+        "signature": "cose_sign1",
+        "did_sol": owner_did,
+        "timestamp": now,
+        "storage_mode": storage_mode,
+        "write_mode": "anchored",
+        "visibility": "private",
+        "plaintext_on_arweave": false,
+        "sealed": true,
+    }))
+}
+
+// ── Task 12: stdio recall with sealed rows + foreign grants ──────────────────
+
+/// stdio `mnemonic_recall` with sealed-row decryption (Task 12).
+///
+/// Augments the standard recall result with:
+///
+/// 1. **Own sealed rows**: listed from the device index via `list_sealed`,
+///    opened with the owner's X25519 secret (derived from their Ed25519 key
+///    via `unlock_cache.get_or_unlock`). Successfully opened rows are appended
+///    to `results` with `source: "own"` and `sealed: true`.
+///
+/// 2. **Foreign grants**: fetched from `GET <hosted_endpoint>/api/grants?reader=<kid>`,
+///    opened into local memory, and appended with `source: "foreign"` and
+///    spotlighting.
+///
+/// The `unlock_cache` ensures the OS keychain is called **at most once** per
+/// process even if this function is invoked many times (Task 12 acceptance
+/// criterion).
+///
+/// # Mutex discipline (Decision 8)
+///
+/// The SQLite mutex is taken for at most one brief synchronous section and
+/// dropped before any `.await`. No mutex is held while doing keychain I/O.
+#[allow(clippy::too_many_arguments)]
+pub async fn recall_with_sealed(
+    keypair: &LazyKeypair,
+    store: &std::sync::Mutex<SqliteStore>,
+    embedder: &dyn Embedder,
+    query: &str,
+    limit: usize,
+    owner_pubkey: &str,
+    unlock_cache: &mnemonic_core::identity::UnlockCache,
+    hosted_endpoint: &str,
+    hosted_client: &reqwest::Client,
+) -> serde_json::Value {
+    use mnemonic_core::sealed::open_memory;
+    use mnemonic_core::sealed::x25519_secret_from_solana_keypair;
+
+    let signer_pubkey = keypair.pubkey_base58();
+
+    // 1. Standard recall (non-sealed rows).
+    let (std_results, total, merkle_commitment, sealed_hidden_count) = {
+        let store_g = store.lock().unwrap();
+        let query_emb = embedder.embed(query);
+        let found = store_g
+            .search(&query_emb, Some(owner_pubkey), None, limit)
+            .unwrap_or_default();
+        let total = store_g.count(&signer_pubkey).unwrap_or(0);
+        let merkle_commitment = build_merkle_commitment(&store_g, owner_pubkey, &found);
+        let sealed_hidden = store_g.count_sealed(owner_pubkey).unwrap_or(0);
+        (found, total, merkle_commitment, sealed_hidden)
+    };
+
+    // Label standard results.
+    let (mut labelled_results, std_boundary) = label_recall_results(std_results, Some(owner_pubkey));
+    let boundary = std_boundary.unwrap_or_else(|| {
+        uuid::Uuid::new_v4().simple().to_string()[..16].to_string()
+    });
+
+    // 2. Sealed rows — open with owner's X25519 secret.
+    let sealed_rows: Vec<mnemonic_core::storage::sqlite::SealedRow> = {
+        let store_g = store.lock().unwrap();
+        store_g.list_sealed(owner_pubkey, None, limit).unwrap_or_default()
+    };
+
+    let mut any_foreign = false;
+
+    if !sealed_rows.is_empty() {
+        // Get (or cache) the X25519 secret — at most one keychain read per process.
+        let x25519_secret_result = unlock_cache.get_or_unlock(|| {
+            // Derive X25519 secret from the agent's Ed25519 signing key.
+            let kp = keypair.keypair()?;
+            Ok(*x25519_secret_from_solana_keypair(kp))
+        });
+
+        if let Ok(x25519_secret) = x25519_secret_result {
+            for row in sealed_rows {
+                // Try to open each sealed blob.
+                if let Ok(inner_bytes) = open_memory(&row.sealed_blob, &x25519_secret) {
+                    // Decode the inner MEMORY_V1 JSON.
+                    if let Ok(inner_json) = mnemonic_core::codec::canonical::from_canonical_cbor(&inner_bytes) {
+                        let inner_content = inner_json["content"].as_str().unwrap_or("").to_string();
+                        let author_did = format!("did:sol:{}", row.signer_pubkey);
+                        labelled_results.push(serde_json::json!({
+                            "attestation_id": row.attestation_id,
+                            "content_hash": row.content_hash,
+                            "solana_tx": row.solana_tx,
+                            "arweave_tx": row.arweave_tx,
+                            "content": inner_content,
+                            "created_at": row.created_at,
+                            "signer_pubkey": row.signer_pubkey,
+                            "owner_pubkey": row.owner_pubkey,
+                            "source": "own",
+                            "sealed": true,
+                            "author_did": author_did,
+                            "score": 0.0_f32,
+                        }));
+                    }
+                }
+            }
+        }
+    }
+
+    // 3. Foreign grants — fetch from hosted endpoint.
+    if !hosted_endpoint.is_empty() {
+        let reader_kid = owner_pubkey;
+        let grants_url = format!("{hosted_endpoint}/api/grants?reader={reader_kid}");
+        if let Ok(resp) = hosted_client.get(&grants_url).send().await {
+            if let Ok(body) = resp.json::<serde_json::Value>().await {
+                if let Some(grants) = body["grants"].as_array() {
+                    // Get the X25519 secret to open targeted grants.
+                    let x25519_secret_opt = unlock_cache.get_or_unlock(|| {
+                        let kp = keypair.keypair()?;
+                        Ok(*x25519_secret_from_solana_keypair(kp))
+                    }).ok();
+
+                    for grant in grants {
+                        let grant_cose_b64 = match grant["grant_cose_b64"].as_str() {
+                            Some(s) => s,
+                            None => continue,
+                        };
+                        let memory_hash = match grant["memory_hash"].as_str() {
+                            Some(s) => s,
+                            None => continue,
+                        };
+                        let author_pubkey = grant["author_pubkey"].as_str().unwrap_or("");
+
+                        let grant_cose = match base64::Engine::decode(
+                            &base64::engine::general_purpose::STANDARD,
+                            grant_cose_b64.as_bytes(),
+                        ) {
+                            Ok(b) => b,
+                            Err(_) => continue,
+                        };
+
+                        // Open the grant to get K, then open the sealed memory.
+                        let k = match x25519_secret_opt.as_ref() {
+                            Some(secret) => {
+                                mnemonic_core::sealed::open_grant(&grant_cose, secret).ok()
+                            }
+                            None => continue,
+                        };
+
+                        if let Some(k) = k {
+                            // Fetch the sealed blob from the store by content_hash.
+                            let sealed_blob_opt = {
+                                let store_g = store.lock().unwrap();
+                                store_g.list_sealed(owner_pubkey, None, 1000)
+                                    .unwrap_or_default()
+                                    .into_iter()
+                                    .find(|r| r.content_hash == memory_hash)
+                                    .map(|r| r.sealed_blob)
+                            };
+
+                            let sealed_blob = match sealed_blob_opt {
+                                Some(b) => b,
+                                None => continue,
+                            };
+
+                            // Open with K.
+                            if let Ok(inner_bytes) = mnemonic_core::sealed::open_with_key(&sealed_blob, &k) {
+                                if let Ok(inner_json) = mnemonic_core::codec::canonical::from_canonical_cbor(&inner_bytes) {
+                                    let inner_content = inner_json["content"].as_str().unwrap_or("").to_string();
+                                    any_foreign = true;
+                                    let author_did = format!("did:sol:{author_pubkey}");
+                                    let framed = frame_untrusted(&inner_content, &author_did, &boundary);
+                                    labelled_results.push(serde_json::json!({
+                                        "memory_hash": memory_hash,
+                                        "content": framed,
+                                        "author_did": author_did,
+                                        "source": "foreign",
+                                        "sealed": true,
+                                        "score": 0.0_f32,
+                                    }));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let mut out = serde_json::json!({
+        "query": query,
+        "results": labelled_results,
+        "total_attestations": total,
+        "owner_pubkey": owner_pubkey,
+        "embed_provider": embedder.provider_name(),
+        "embed_model": embedder.model_id(),
+        "verifiable": embedder.is_open_weights(),
+        "merkle_commitment": merkle_commitment,
+    });
+
+    if sealed_hidden_count > 0 {
+        out["sealed_hidden"] = serde_json::json!(sealed_hidden_count);
+        out["sealed_hint"] = serde_json::json!(format!(
+            "{sealed_hidden_count} sealed memories available (some may be shown above if unlocked)"
+        ));
+    }
+
+    if any_foreign {
+        out["untrusted_notice"] = serde_json::json!(UNTRUSTED_NOTICE);
+        out["untrusted_boundary"] = serde_json::json!(boundary);
+    }
+
+    out
+}
+
+
 // ── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -3689,5 +4066,253 @@ mod anchored_restore_fields_tests {
         let mut artifact = base_artifact();
         add_anchored_restore_fields(&mut artifact, Visibility::Private, 7, &[0.1f32]);
         assert_eq!(artifact["metadata"]["turbo_seed"], 7);
+    }
+}
+
+// ── Task 12 — UnlockCache acceptance tests ───────────────────────────────────
+
+#[cfg(test)]
+mod unlock_cache_recall_tests {
+    //! Acceptance tests for Task 12:
+    //!
+    //! * One keychain read per process in a test with 10 sealed recalls
+    //!   (mock keychain — count reads via AtomicUsize).
+    //! * `recall_with_sealed` returns sealed rows in the output.
+
+    use super::*;
+    use mnemonic_core::identity::UnlockCache;
+    use mnemonic_core::sealed::{seal_memory, x25519_secret_from_solana_keypair};
+    use mnemonic_core::storage::SqliteStore;
+    use solana_sdk::signature::{Keypair, Signer};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    struct StubEmb;
+    impl Embedder for StubEmb {
+        fn embed(&self, _: &str) -> Vec<f32> {
+            vec![0.1; 8]
+        }
+        fn dim(&self) -> usize {
+            8
+        }
+        fn provider_name(&self) -> &str {
+            "stub"
+        }
+        fn model_id(&self) -> &str {
+            "stub"
+        }
+    }
+
+    /// Write a sealed attestation row for `owner` to `store`.
+    fn write_sealed_row(store: &SqliteStore, kp: &Keypair) -> String {
+        let owner_pubkey = kp.pubkey().to_string();
+        let owner_ed25519: [u8; 32] = kp.pubkey().to_bytes();
+        let attestation_id = uuid::Uuid::new_v4().to_string();
+        let now = chrono::Utc::now().to_rfc3339();
+        let producer = format!("did:sol:{owner_pubkey}");
+
+        // Build a proper inner MEMORY_V1 CBOR (as seal_memory expects).
+        let inner_artifact = serde_json::json!({
+            "artifact_id": &attestation_id,
+            "type": "memory",
+            "schema_version": 1,
+            "content": "sealed test memory",
+            "producer": &producer,
+            "created_at": &now,
+            "tags": serde_json::json!([]),
+        });
+        let inner_cbor = to_canonical_cbor(&inner_artifact, &schema::MEMORY_V1)
+            .expect("inner CBOR encode");
+
+        let artifact = seal_memory(
+            &inner_cbor,
+            &owner_ed25519,
+            &attestation_id,
+            &producer,
+            &now,
+            &mut rand::rngs::OsRng,
+        )
+        .expect("seal_memory");
+
+        let content_hash = mnemonic_core::codec::hash::hash_bytes(&artifact.outer_cbor);
+        store
+            .save_sealed_attestation(
+                &attestation_id,
+                &content_hash,
+                &[],
+                &format!("local:{}", &content_hash[..16]),
+                &format!("local:{}", &attestation_id[..8]),
+                &owner_pubkey,
+                &owner_pubkey,
+                &now,
+                WriteMode::Local,
+                &artifact.outer_cbor,
+            )
+            .expect("save_sealed_attestation");
+
+        attestation_id
+    }
+
+    /// One keychain read per process for 10 sealed recalls.
+    ///
+    /// Wires a `LazyKeypair::deferred` whose loader increments an atomic
+    /// counter — if the counter exceeds 1 after 10 calls, the test fails.
+    #[tokio::test]
+    async fn one_keychain_read_for_ten_sealed_recalls() {
+        let kp = Keypair::new();
+        let kp_bytes = kp.to_bytes();
+        let owner_pubkey = kp.pubkey().to_string();
+
+        // Counter for keychain reads.
+        let read_count = Arc::new(AtomicUsize::new(0));
+        let counter = read_count.clone();
+        let lazy_kp = LazyKeypair::deferred(kp.pubkey(), move || {
+            counter.fetch_add(1, Ordering::SeqCst);
+            Ok(Keypair::try_from(&kp_bytes[..]).unwrap())
+        });
+
+        // Set up a temporary SQLite store.
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let store = {
+            let s = SqliteStore::open(tmp.path()).unwrap();
+            // Write 3 sealed rows.
+            for _ in 0..3 {
+                write_sealed_row(&s, &kp);
+            }
+            s
+        };
+        let store_mutex = std::sync::Mutex::new(store);
+
+        // Build the unlock cache.
+        let unlock_cache = UnlockCache::with_ttl(None);
+
+        let emb = StubEmb;
+        let client = reqwest::Client::new();
+
+        // Run 10 sealed recalls.
+        for _ in 0..10 {
+            let _result = recall_with_sealed(
+                &lazy_kp,
+                &store_mutex,
+                &emb,
+                "test query",
+                10,
+                &owner_pubkey,
+                &unlock_cache,
+                "",  // no hosted endpoint
+                &client,
+            )
+            .await;
+        }
+
+        let total_reads = read_count.load(Ordering::SeqCst);
+        assert_eq!(
+            total_reads, 1,
+            "keychain must be read exactly once for 10 sealed recalls, got {total_reads}"
+        );
+
+        // Keep tmp alive.
+        std::mem::forget(tmp);
+    }
+
+    /// Verify that the X25519 key derivation from Solana Keypair matches
+    /// the sealing path (crypto consistency check).
+    #[test]
+    fn x25519_seal_open_round_trip_via_solana_keypair() {
+        let kp = Keypair::new();
+        let owner_ed25519: [u8; 32] = kp.pubkey().to_bytes();
+
+        // Use proper CBOR inner content.
+        let inner_artifact = serde_json::json!({
+            "artifact_id": "test-id",
+            "type": "memory",
+            "schema_version": 1,
+            "content": "test sealed content",
+            "producer": "did:sol:test",
+            "created_at": "2026-09-28T00:00:00Z",
+            "tags": serde_json::json!([]),
+        });
+        let inner = to_canonical_cbor(&inner_artifact, &schema::MEMORY_V1)
+            .expect("inner CBOR encode");
+
+        let artifact = seal_memory(
+            &inner,
+            &owner_ed25519,
+            "test-id",
+            "did:sol:test",
+            "2026-09-28T00:00:00Z",
+            &mut rand::rngs::OsRng,
+        )
+        .expect("seal_memory");
+
+        let x25519_secret = x25519_secret_from_solana_keypair(&kp);
+        let opened = mnemonic_core::sealed::open_memory(&artifact.outer_cbor, &x25519_secret)
+            .expect("open_memory should succeed");
+        assert_eq!(opened, inner);
+    }
+
+    /// `recall_with_sealed` returns opened sealed rows in the results.
+    #[tokio::test]
+    async fn recall_with_sealed_returns_opened_rows() {
+        let kp = Keypair::new();
+        let kp_bytes = kp.to_bytes();
+        let owner_pubkey = kp.pubkey().to_string();
+
+        let lazy_kp = LazyKeypair::deferred(kp.pubkey(), move || {
+            Ok(Keypair::try_from(&kp_bytes[..]).unwrap())
+        });
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let store = {
+            let s = SqliteStore::open(tmp.path()).unwrap();
+            write_sealed_row(&s, &kp);
+            s
+        };
+
+        // Verify list_sealed and open_memory work.
+        {
+            let s = SqliteStore::open(tmp.path()).unwrap();
+            let rows = s.list_sealed(&owner_pubkey, None, 10).unwrap();
+            assert!(!rows.is_empty(), "list_sealed returned 0 rows");
+            let x25519 = x25519_secret_from_solana_keypair(
+                &Keypair::try_from(&kp_bytes[..]).unwrap()
+            );
+            let inner = mnemonic_core::sealed::open_memory(&rows[0].sealed_blob, &x25519)
+                .expect("direct open_memory failed");
+            let parsed = mnemonic_core::codec::canonical::from_canonical_cbor(&inner)
+                .expect("from_canonical_cbor failed on inner");
+            assert_eq!(
+                parsed["content"].as_str().unwrap_or(""),
+                "sealed test memory"
+            );
+        }
+
+        let store_mutex = std::sync::Mutex::new(store);
+        let unlock_cache = UnlockCache::with_ttl(None);
+        let emb = StubEmb;
+        let client = reqwest::Client::new();
+
+        let result = recall_with_sealed(
+            &lazy_kp,
+            &store_mutex,
+            &emb,
+            "sealed test memory",
+            10,
+            &owner_pubkey,
+            &unlock_cache,
+            "",
+            &client,
+        )
+        .await;
+
+        let results = result["results"].as_array().expect("results array");
+        let sealed: Vec<_> = results.iter().filter(|r| r["sealed"] == true).collect();
+        assert!(
+            !sealed.is_empty(),
+            "expected at least one sealed row in results, got {results:?}"
+        );
+
+        // Keep tmp alive.
+        std::mem::forget(tmp);
     }
 }

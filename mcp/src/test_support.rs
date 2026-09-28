@@ -184,6 +184,7 @@ pub fn mock_state() -> Arc<McpState> {
             .expect("reqwest hosted client"),
         blog_rebuild_hook: None,
         chain_stats: None,
+        unlock_cache: mnemonic_core::identity::UnlockCache::with_ttl(None),
     })
 }
 
@@ -290,6 +291,7 @@ pub fn mock_state_with(
             .expect("reqwest hosted client"),
         blog_rebuild_hook: None,
         chain_stats: None,
+        unlock_cache: mnemonic_core::identity::UnlockCache::with_ttl(None),
     })
 }
 
@@ -405,6 +407,7 @@ pub fn mock_state_for_delivery(
             .expect("reqwest hosted client"),
         blog_rebuild_hook: None,
         chain_stats: None,
+        unlock_cache: mnemonic_core::identity::UnlockCache::with_ttl(None),
     })
 }
 
@@ -517,6 +520,7 @@ pub fn mock_state_with_embedder_and_endpoint(
         hosted_client,
         blog_rebuild_hook: None,
         chain_stats: None,
+        unlock_cache: mnemonic_core::identity::UnlockCache::with_ttl(None),
     })
 }
 

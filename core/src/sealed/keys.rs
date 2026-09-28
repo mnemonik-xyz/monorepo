@@ -118,6 +118,26 @@ pub fn x25519_secret_from_ed25519(signing_key: &SigningKey) -> Zeroizing<[u8; 32
     Zeroizing::new(signing_key.to_scalar_bytes())
 }
 
+/// Derive the X25519 secret scalar from a Solana [`solana_sdk::signature::Keypair`].
+///
+/// This bridges the Solana-SDK keypair to the X25519 key derivation used
+/// by the sealed-memories decryption path, without requiring callers to
+/// import `ed25519-dalek` directly.
+///
+/// The returned value is wrapped in [`Zeroizing`] so it is wiped from
+/// memory when it goes out of scope.
+pub fn x25519_secret_from_solana_keypair(
+    kp: &solana_sdk::signature::Keypair,
+) -> Zeroizing<[u8; 32]> {
+    // `secret_bytes()` returns the 32-byte seed (the secret portion only,
+    // not the combined 64-byte serialisation). `SigningKey::from_bytes` takes
+    // that seed and computes `SHA-512(seed)` internally; `to_scalar_bytes()`
+    // returns the first 32 bytes of that hash — the scalar used for DH.
+    let secret_bytes: &[u8; 32] = kp.secret_bytes();
+    let signing_key = SigningKey::from_bytes(secret_bytes);
+    x25519_secret_from_ed25519(&signing_key)
+}
+
 /// Constant-time equality check for 32-byte slices.
 fn constant_time_eq(a: &[u8; 32], b: &[u8; 32]) -> bool {
     use subtle::ConstantTimeEq;

@@ -6,12 +6,14 @@ pub mod keystore_memory;
 pub mod keystore_os;
 pub mod lazy;
 pub mod token_store;
+pub mod unlock_cache;
 
 pub use ensure::{ensure, ensure_lazy, ensure_lazy_with_stores, ensure_with_stores, KeyStores};
 pub use keystore::{KeyStore, KeystoreEntry, KeystoreError};
 pub use keystore_file::FileKeyStore;
 pub use keystore_os::OsKeyStore;
 pub use lazy::LazyKeypair;
+pub use unlock_cache::UnlockCache;
 pub use token_store::{
     delete_token, delete_token_at, read_token, read_token_from, save_token, save_token_to,
     token_path, TokenJson, TokenStoreError,

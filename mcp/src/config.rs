@@ -248,6 +248,14 @@ pub struct Config {
     /// Env: `TRUSTED_PROXIES`.
     pub trusted_proxies: String,
 
+    // ── Unlock-cache TTL (sealed-memories T12) ─────────────────────────────
+    /// How long (seconds) the X25519 decryption secret derived from the
+    /// Ed25519 identity key is kept in the process-local unlock cache before
+    /// the OS keychain is consulted again.  `None` (default) = process
+    /// lifetime (keychain read at most once per process start).
+    /// Env: `MNEMONIC_UNLOCK_TTL`.
+    pub unlock_ttl_secs: Option<u64>,
+
     // ── Chain-backed traction stats (recover-traction-from-chain) ───────────
     /// Comma-separated base58 Solana pubkeys of every wallet that ever signed
     /// anchored uploads (the funded server keypair(s), current and historic).
@@ -392,6 +400,10 @@ impl Config {
             chain_stats_refresh_secs: env_or("CHAIN_STATS_REFRESH_SECS", "3600")
                 .parse()
                 .unwrap_or(3600),
+            unlock_ttl_secs: std::env::var("MNEMONIC_UNLOCK_TTL")
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())
+                .filter(|&n| n > 0),
         }
     }
 

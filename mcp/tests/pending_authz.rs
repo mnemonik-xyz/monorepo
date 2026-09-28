@@ -135,6 +135,7 @@ fn build_state() -> Arc<McpState> {
             .expect("reqwest hosted client"),
         blog_rebuild_hook: None,
         chain_stats: None,
+        unlock_cache: mnemonic_core::identity::UnlockCache::with_ttl(None),
     })
 }
 

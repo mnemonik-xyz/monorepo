@@ -123,6 +123,7 @@ fn state_with_short_ttl(ttl_secs: i64) -> Arc<McpState> {
             .expect("reqwest hosted client"),
         blog_rebuild_hook: None,
         chain_stats: None,
+        unlock_cache: mnemonic_core::identity::UnlockCache::with_ttl(None),
     })
 }
 
