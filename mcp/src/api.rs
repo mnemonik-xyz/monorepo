@@ -759,104 +759,12 @@ pub async fn sign_callback_handler(
         // No-op for production Irys (mine() only writes against arlocal).
         let _ = state.arweave.mine().await;
 
-        // Solana SPL Memo anchor.
-        // Plain (public) deferred writes use v=2 (h=hash, a=arweave_tx).
-        // Sealed writes use v=3 to signal the sealed-memory schema; the
-        // inline plain path also uses v=3 with embed_model.
-        let memo_version: u8 = if entry.is_sealed { 3 } else { 2 };
-        let memo = serde_json::json!({
-            "h": entry.content_hash,
-            "a": ar_tx,
-            "v": memo_version,
-        });
-        let sol_tx = if let Some(existing) = delivery_attempt
-            .as_ref()
-            .and_then(|attempt| attempt.solana_tx.clone())
-        {
-            if let Err(e) = state.solana.confirm_tx(&existing).await {
-                if let Some(attempt) = &delivery_attempt {
-                    if let Ok(store) = state.store.lock() {
-                        let _ = paid_artifact::mark_delivery_retryable(
-                            store.conn(),
-                            attempt,
-                            &e.to_string(),
-                            &now,
-                        );
-                    }
-                }
-                return error_resp(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    &format!("solana memo confirmation failed: {e}"),
-                );
-            }
-            existing
-        } else {
-            let operator_keypair = match state.keypair.keypair() {
-                Ok(kp) => kp,
-                Err(e) => {
-                    return error_resp(
-                        StatusCode::SERVICE_UNAVAILABLE,
-                        &format!("operator identity unavailable: {e:#}"),
-                    );
-                }
-            };
-            let submitted = match state
-                .solana
-                .submit_memo(operator_keypair, &memo.to_string())
-                .await
-            {
-                Ok(signature) => signature,
-                Err(e) => {
-                    if let Some(attempt) = &delivery_attempt {
-                        if let Ok(store) = state.store.lock() {
-                            let _ = paid_artifact::mark_delivery_retryable(
-                                store.conn(),
-                                attempt,
-                                &e.to_string(),
-                                &now,
-                            );
-                        }
-                    }
-                    return error_resp(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        &format!("solana memo write failed: {e}"),
-                    );
-                }
-            };
-            if let Some(attempt) = &delivery_attempt {
-                if let Ok(store) = state.store.lock() {
-                    if let Err(error) = paid_artifact::record_solana_submitted(
-                        store.conn(),
-                        attempt,
-                        &submitted,
-                        &now,
-                    ) {
-                        return error_resp(
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            &format!("delivery state failed: {error}"),
-                        );
-                    }
-                }
-            }
-            if let Err(e) = state.solana.confirm_tx(&submitted).await {
-                if let Some(attempt) = &delivery_attempt {
-                    if let Ok(store) = state.store.lock() {
-                        let _ = paid_artifact::mark_delivery_retryable(
-                            store.conn(),
-                            attempt,
-                            &e.to_string(),
-                            &now,
-                        );
-                    }
-                }
-                return error_resp(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    &format!("solana memo confirmation failed: {e}"),
-                );
-            }
-            submitted
-        };
-        (sol_tx, ar_tx)
+        // Stage 2 (chain-agnostic/decisions.md): WriteMode::Anchored no
+        // longer writes an SPL Memo. New rows store solana_tx = '' (empty
+        // string, already a valid RowFact state). Memo readers
+        // (read_memo, list_memo_anchors, parse_anchor_memo) stay intact
+        // forever for legacy-row enumeration and verification.
+        (String::new(), ar_tx)
     };
 
     let persist_res = {

@@ -1365,7 +1365,11 @@ pub async fn check_pending(
 #[allow(clippy::too_many_arguments)]
 async fn sign_memory_inline(
     keypair: &LazyKeypair,
-    solana: &SolanaClient,
+    // Stage 2 (chain-agnostic/decisions.md): `solana` is no longer used to
+    // write memos on the anchored path. The parameter is kept in the signature
+    // so callers do not need updating; it remains available for any future
+    // re-introduction without an ABI break. `_solana` suppresses the lint.
+    _solana: &SolanaClient,
     arweave: &ArweaveClient,
     store: &std::sync::Mutex<SqliteStore>,
     embedder: &dyn Embedder,
@@ -1513,15 +1517,13 @@ async fn sign_memory_inline(
                 .await?;
             arweave.mine().await?;
 
-            // Solana: anchor blake3 hash + embedding model (v3 format)
-            let memo = serde_json::json!({
-                "h": content_hash,
-                "a": ar_tx,
-                "m": embed_model,
-                "v": 3,
-            });
-            let sol_tx = solana.write_memo(keypair, &memo.to_string()).await?;
-            (sol_tx, ar_tx)
+            // Stage 2 (chain-agnostic/decisions.md): WriteMode::Anchored no
+            // longer writes an SPL Memo. New rows store solana_tx = '' (empty
+            // string, already a valid RowFact state per the schema). Memo
+            // readers (read_memo, list_memo_anchors, parse_anchor_memo) stay
+            // intact forever for legacy-row enumeration and verification.
+            let _ = embed_model; // kept for the artifact field; no longer in memo
+            (String::new(), ar_tx)
         }
     };
 
@@ -1753,12 +1755,17 @@ pub async fn perform_delivery_check(
         Err(_) => return Err("refetch"),
     };
 
-    // Stage 2: COSE verify the re-fetched bytes against the expected
-    // content hash + the chain tx ids. `verify_cose` returns a JSON Value;
-    // `status == "verified"` is the only pass condition. Anything else
-    // (`"tampered"`, hash mismatch, decoder error) is a fail.
+    // Stage 2: COSE-verify the re-fetched bytes against the expected content
+    // hash. The Arweave re-fetch + COSE verification is the stronger half of
+    // the delivery check; the Solana memo comparison is dropped (stage 2,
+    // chain-agnostic/decisions.md): new rows store solana_tx = '' so the
+    // comparison would always fail for them, and legacy rows can still be
+    // verified directly via `verify_anchored` → `read_memo`.
+    // `solana_tx` is retained in the function signature for the stage-3 recall
+    // label and for tracing; it is no longer passed into `verify_cose`.
+    let _ = solana_tx;
     let verify_result =
-        match verify_cose(&refetched, Some(content_hash), Some(solana_tx), arweave_tx) {
+        match verify_cose(&refetched, Some(content_hash), None, arweave_tx) {
             Ok(v) => v,
             Err(_) => return Err("verify"),
         };
@@ -2712,12 +2719,12 @@ pub async fn sign_memory_sealed_anchored(
         .await?;
     arweave.mine().await?;
 
-    let memo = serde_json::json!({
-        "h": content_hash,
-        "a": ar_tx,
-        "v": 3,
-    });
-    let sol_tx = solana.write_memo(kp, &memo.to_string()).await?;
+    // Stage 2 (chain-agnostic/decisions.md): WriteMode::Anchored no longer
+    // writes an SPL Memo. New rows store solana_tx = '' (empty string).
+    // Memo readers stay intact for legacy rows. `solana` parameter is kept
+    // in the signature; it is still used by `verify_usdc_transfer`.
+    let _ = solana;
+    let sol_tx = String::new();
 
     // 6. Persist sealed row (short critical section, no await while held).
     {

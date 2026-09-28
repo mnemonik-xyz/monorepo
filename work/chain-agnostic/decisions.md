@@ -102,3 +102,7 @@ before stage 2 starts. This requires running against real data with
 `GRAPHQL_URL=https://uploader.irys.xyz/graphql`.
 
 **Stage 2 is blocked until the gate passes.**
+
+## Stage 2 shipped (2026-09-28)
+WriteMode::Anchored no longer writes SPL Memos. New rows store solana_tx = ''.
+Memo readers (read_memo, list_memo_anchors, parse_anchor_memo) stay intact.

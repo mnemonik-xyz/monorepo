@@ -487,6 +487,14 @@ pub fn due_delivery_retries(conn: &Connection, now: &str, limit: usize) -> Resul
     Ok(retries)
 }
 
+/// Record that the Solana memo for a paid anchored delivery has been submitted
+/// but not yet confirmed. Stage 2 (chain-agnostic/decisions.md) stopped writing
+/// SPL Memos, so this function is no longer called on the new write path. It is
+/// kept for forward compatibility: a future re-introduction of an anchor writer
+/// can call it again without an ABI change. `allow(dead_code)` instead of
+/// deletion because removing it would silently break any operator running a
+/// mixed-version deployment that still has `solana_submitted` rows in flight.
+#[allow(dead_code)]
 pub fn record_solana_submitted(
     conn: &Connection,
     attempt: &DeliveryAttempt,
