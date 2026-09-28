@@ -1042,6 +1042,9 @@ async fn main() -> anyhow::Result<()> {
         unlock_cache: mnemonic_core::identity::UnlockCache::with_ttl(
             cfg.unlock_ttl_secs.map(std::time::Duration::from_secs),
         ),
+        recall_sessions: std::sync::Arc::new(tokio::sync::Mutex::new(
+            api::RecallSessionMap::new(),
+        )),
     });
 
     // Retry only already-settled paid deliveries. The worker re-enters the
@@ -1438,6 +1441,12 @@ async fn run_http(
         .route(
             "/api/cli-bootstrap/server-pub",
             axum::routing::get(api::bootstrap_server_pub_handler),
+        )
+        // Task 13 — hosted recall session (opt-in, in-RAM only).
+        .route(
+            "/api/recall-session",
+            post(api::recall_session_start_handler)
+                .delete(api::recall_session_delete_handler),
         )
         .layer(middleware::from_fn_with_state(
             oauth_state.clone(),

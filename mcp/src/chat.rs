@@ -582,6 +582,9 @@ mod handler_tests {
             blog_rebuild_hook: None,
             chain_stats: None,
             unlock_cache: mnemonic_core::identity::UnlockCache::with_ttl(None),
+            recall_sessions: Arc::new(tokio::sync::Mutex::new(
+                crate::api::RecallSessionMap::new(),
+            )),
         })
     }
 

@@ -177,6 +177,9 @@ fn build_state_with_payment(
         blog_rebuild_hook: None,
         chain_stats: None,
         unlock_cache: mnemonic_core::identity::UnlockCache::with_ttl(None),
+        recall_sessions: std::sync::Arc::new(tokio::sync::Mutex::new(
+            mnemonic_mcp::api::RecallSessionMap::new(),
+        )),
     })
 }
 

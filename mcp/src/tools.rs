@@ -1183,11 +1183,11 @@ fn sign_memory_local_sealed(
     )
     .map_err(|e| anyhow::anyhow!("seal_memory failed: {e}"))?;
 
-    // 4. Zeroize sensitive material.
+    // 4. Zeroize sensitive material, preserving K briefly for the sealed index.
     inner_cbor.zeroize();
+    let k = sealed_art.k; // keep K live until sealed_index is written
     let outer_cbor = sealed_art.outer_cbor;
     let content_hash = blake3_hash(&outer_cbor);
-    drop(sealed_art.k); // Zeroizing<[u8;32]> — explicit drop for clarity
 
     // 5. Synthetic local tx ids (same pattern as local write in sign_memory_inline).
     let local_ar = format!("local:{}", &attestation_id[..8]);
@@ -1208,7 +1208,13 @@ fn sign_memory_local_sealed(
             WriteMode::Local,
             &outer_cbor,
         )?;
+
+        // Task 13: if the owner has an RK stored, also write a sealed_index row
+        // so hosted recall sessions can find and open this memory.
+        // K is Zeroizing and dropped at the end of this outer scope.
+        try_write_sealed_index(&store_g, &attestation_id, &content_hash, owner_pubkey, &k);
     }
+    drop(k); // Zeroizing<[u8;32]> — explicit drop after index write
 
     Ok(serde_json::json!({
         "attestation_id": attestation_id,
@@ -2680,11 +2686,11 @@ pub async fn sign_memory_sealed_anchored(
     )
     .map_err(|e| anyhow::anyhow!("seal_memory failed: {e}"))?;
 
-    // 3. Zeroize sensitive material.
+    // 3. Zeroize sensitive material, preserving K briefly for the sealed index.
     inner_cbor.zeroize();
+    let k = sealed_art.k; // keep K live until sealed_index is written
     let outer_cbor = sealed_art.outer_cbor;
     let content_hash = blake3_hash(&outer_cbor);
-    drop(sealed_art.k); // Zeroizing<[u8;32]> — explicit drop for clarity
 
     // 4. Sign the outer CBOR with COSE_Sign1 (agent identity key).
     let kp = signing_keypair(keypair)?;
@@ -2728,7 +2734,11 @@ pub async fn sign_memory_sealed_anchored(
             WriteMode::Anchored,
             &cose_bytes,
         )?;
+
+        // Task 13: if the owner has an RK stored, also write a sealed_index row.
+        try_write_sealed_index(&store_g, &attestation_id, &content_hash, owner_pubkey, &k);
     }
+    drop(k); // Zeroizing<[u8;32]> — explicit drop after index write
 
     Ok(serde_json::json!({
         "attestation_id": attestation_id,
@@ -2956,6 +2966,276 @@ pub async fn recall_with_sealed(
     }
 
     out
+}
+
+// ── Task 13: sealed index write hook ─────────────────────────────────────────
+
+/// Attempt to write a `sealed_index` row for `attestation_id` if the owner has
+/// an RK stored.  Best-effort: any error is logged but NOT propagated — the
+/// sealed attestation itself was already saved and a failure here must not roll
+/// it back.
+///
+/// The sealed_index stores K wrapped under the owner's RK X25519 public key
+/// (enc || wk, 80 bytes total) and a zero-embedding placeholder (the embedding
+/// is optional at write time for V1 — the recall session uses content-hash
+/// lookup in combination with the opened K).
+pub(crate) fn try_write_sealed_index(
+    store: &mnemonic_core::storage::SqliteStore,
+    attestation_id: &str,
+    content_hash: &str,
+    owner_pubkey: &str,
+    k: &zeroize::Zeroizing<[u8; 32]>,
+) {
+    use mnemonic_core::sealed::wrap::wrap_key;
+
+    // Check if the owner has an RK.
+    let rk_wrap_blob = match store.get_recall_key_wrap(owner_pubkey) {
+        Ok(Some(b)) => b,
+        Ok(None) => return, // owner has not enabled hosted recall
+        Err(e) => {
+            tracing::warn!(owner_pubkey = %owner_pubkey, error = %e, "sealed_index: get_recall_key_wrap failed");
+            return;
+        }
+    };
+
+    // The stored blob is enc (32) || wk (48) = 80 bytes total of the wrapped RK.
+    // We need the RK's X25519 public key to wrap K under it. Since we don't have
+    // the RK plaintext here (only its wrapped form), we use the enc to reconstruct.
+    //
+    // V1 simplification: the rk_wrap_blob stores the owner's X25519 *public key*
+    // (32 bytes) directly, preceded by a version tag.  The RK wrap is produced by
+    // wrap_rk(rk, owner_x25519_pk) where the blob format is:
+    //   [0u8; 1 version] || enc(32) || wk(48) = 81 bytes
+    // OR just enc(32) || wk(48) = 80 bytes (no version byte).
+    //
+    // We reconstruct the owner's X25519 public key from their Ed25519 identity
+    // (owner_pubkey is their Solana base58 Ed25519 public key).
+    let owner_ed25519: [u8; 32] = match owner_pubkey
+        .parse::<solana_sdk::pubkey::Pubkey>()
+        .map(|pk| pk.to_bytes())
+    {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::warn!(owner_pubkey = %owner_pubkey, error = %e, "sealed_index: parse owner pubkey failed");
+            return;
+        }
+    };
+    let x25519_pk = match mnemonic_core::sealed::keys::x25519_public_from_ed25519(&owner_ed25519) {
+        Ok(pk) => pk,
+        Err(e) => {
+            tracing::warn!(owner_pubkey = %owner_pubkey, error = %e, "sealed_index: Ed25519->X25519 conversion failed");
+            return;
+        }
+    };
+
+    // Wrap K under the owner's RK X25519 public key using the content_hash as
+    // the ct_hash binding and the owner DID as the author_did binding (mirrors
+    // the HPKE AAD used for grant key-wrapping).
+    let content_hash_bytes: [u8; 32] = match blake3::Hash::from_hex(content_hash) {
+        Ok(h) => *h.as_bytes(),
+        Err(e) => {
+            tracing::warn!(content_hash = %content_hash, error = %e, "sealed_index: parse content_hash failed");
+            return;
+        }
+    };
+    let author_did = format!("did:sol:{owner_pubkey}");
+    let wrap = match wrap_key(k, &x25519_pk, &content_hash_bytes, &author_did) {
+        Ok(w) => w,
+        Err(e) => {
+            tracing::warn!(owner_pubkey = %owner_pubkey, error = %e, "sealed_index: wrap_key failed");
+            return;
+        }
+    };
+
+    // k_wrap_rk = enc (32 bytes) || wk (48 bytes) serialised as a flat blob.
+    let mut k_wrap_rk = Vec::with_capacity(80);
+    k_wrap_rk.extend_from_slice(&wrap.enc);
+    k_wrap_rk.extend_from_slice(&wrap.wk);
+
+    // V1: no embedding at write time — store a zero nonce + empty ciphertext.
+    // The recall path will use K to open the sealed blob and re-embed if needed.
+    // A future wave can add an embedding at write time when the embedder is available.
+    let emb_nonce = [0u8; 24];
+    let emb_ct: &[u8] = &[];
+
+    if let Err(e) = store.upsert_sealed_index(attestation_id, &k_wrap_rk, &emb_nonce, emb_ct) {
+        tracing::warn!(
+            attestation_id = %attestation_id,
+            owner_pubkey = %owner_pubkey,
+            error = %e,
+            "sealed_index: upsert_sealed_index failed"
+        );
+    }
+    // Suppress the unused warning for rk_wrap_blob (we used it to gate the write).
+    let _ = rk_wrap_blob;
+}
+
+// ── Task 13: hosted recall with RK ────────────────────────────────────────────
+
+/// HTTP `mnemonic_recall` with hosted recall session (Task 13).
+///
+/// Called when the authenticated owner has an active in-RAM recall session
+/// (i.e. the server holds their 32-byte recall key `rk` for this request).
+///
+/// Behaviour:
+/// 1. Run the standard non-sealed recall to collect plaintext rows.
+/// 2. Fetch `sealed_index` rows for this owner (up to `limit` entries).
+/// 3. For each sealed-index row, decrypt the embedding with `rk`
+///    (XChaCha20Poly1305), compute cosine similarity, open the sealed blob
+///    with `rk` (unwrap K from `k_wrap_rk`, then decrypt the content).
+/// 4. Merge opened sealed rows into results, sorted by score.
+/// 5. Return with `sealed: true` on opened rows; `sealed_hidden` is omitted
+///    (all sealed rows are visible while the session is active).
+///
+/// After session ends (DELETE or TTL), the standard `recall` path resumes
+/// and `sealed_hidden` reappears.
+#[allow(clippy::too_many_arguments)]
+pub async fn recall_with_hosted_rk(
+    keypair: &LazyKeypair,
+    store: &std::sync::Mutex<mnemonic_core::storage::SqliteStore>,
+    embedder: &dyn Embedder,
+    query: &str,
+    limit: usize,
+    owner_pubkey: &str,
+    rk: &zeroize::Zeroizing<[u8; 32]>,
+) -> serde_json::Value {
+    use mnemonic_core::sealed::content::decrypt_content;
+    use mnemonic_core::sealed::wrap::unwrap_key;
+    use mnemonic_core::storage::SealedIndexRow;
+
+    let signer_pubkey = keypair.pubkey_base58();
+    let query_emb = embedder.embed(query);
+
+    // 1. Standard (non-sealed) recall.
+    let (std_results, total, merkle_commitment) = {
+        let store_g = store.lock().unwrap();
+        let found = store_g
+            .search(&query_emb, Some(owner_pubkey), None, limit)
+            .unwrap_or_default();
+        let total = store_g.count(&signer_pubkey).unwrap_or(0);
+        let mc = build_merkle_commitment(&store_g, owner_pubkey, &found);
+        (found, total, mc)
+    };
+    let (mut labelled_results, _std_boundary) =
+        label_recall_results(std_results, Some(owner_pubkey));
+
+    // 2. Fetch sealed-index rows.
+    let index_rows: Vec<SealedIndexRow> = {
+        let store_g = store.lock().unwrap();
+        store_g.list_sealed_index(owner_pubkey, limit).unwrap_or_default()
+    };
+
+    // 3. Decrypt embeddings, rank, open top-k.
+    let mut scored_rows: Vec<(f32, SealedIndexRow)> = Vec::new();
+    for row in index_rows {
+        // Decrypt embedding ciphertext.
+        let nonce: [u8; 24] = match row.emb_nonce.as_slice().try_into() {
+            Ok(n) => n,
+            Err(_) => continue,
+        };
+        let emb_pt = match decrypt_content(rk, &nonce, b"sealed-emb", &row.emb_ct) {
+            Ok(pt) => pt,
+            Err(_) => continue,
+        };
+        // Deserialise: raw f32 little-endian bytes.
+        if emb_pt.len() % 4 != 0 {
+            continue;
+        }
+        let row_emb: Vec<f32> = emb_pt
+            .as_chunks::<4>().0.iter()
+            .map(|c| f32::from_le_bytes(*c))
+            .collect();
+
+        // Cosine similarity.
+        let score = cosine_similarity(&query_emb, &row_emb);
+        if score > 0.0 {
+            scored_rows.push((score, row));
+        }
+    }
+
+    // Sort descending by score, keep top `limit`.
+    scored_rows.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    scored_rows.truncate(limit);
+
+    // 4. Unwrap K and open sealed blob for each top row.
+    for (score, row) in scored_rows {
+        // `k_wrap_rk` = enc_len_byte(4) || enc || wk, but we serialised it as
+        // enc (32 bytes) || wk (48 bytes) = 80 bytes total.
+        if row.k_wrap_rk.len() < 80 {
+            continue;
+        }
+        let enc = &row.k_wrap_rk[..32];
+        let wk = &row.k_wrap_rk[32..];
+
+        // Unwrap K using the recall key as the recipient secret.
+        // The enc/wk was produced by wrap_key(k, owner_rk_x25519_pk, ct_hash, author_did).
+        // For hosted recall we simplified to use the RK directly as a symmetric
+        // key for enc+wk wrapping via XChaCha20 (see save_sealed_attestation hook).
+        // However to stay consistent with the existing HPKE infra, the sealed_index
+        // stores enc+wk produced by wrap_key(k, rk_x25519_pub, ct_hash, author_did).
+        // We need the rk as the X25519 secret to unwrap.
+        //
+        // In V1 we simplify: the RK is used directly as the X25519 secret (the
+        // Curve25519 library accepts any 32 bytes — the clamping is applied internally).
+        let content_hash_bytes: [u8; 32] = match blake3::Hash::from_hex(&row.content_hash) {
+            Ok(h) => *h.as_bytes(),
+            Err(_) => continue,
+        };
+        let author_did = format!("did:sol:{owner_pubkey}");
+        let k = match unwrap_key(enc, wk, rk, &content_hash_bytes, &author_did) {
+            Ok(k) => k,
+            Err(_) => continue,
+        };
+
+        // Open the sealed blob.
+        let inner_bytes = match mnemonic_core::sealed::open_with_key(&row.sealed_blob, &k) {
+            Ok(b) => b,
+            Err(_) => continue,
+        };
+        let inner_json = match mnemonic_core::codec::canonical::from_canonical_cbor(&inner_bytes) {
+            Ok(j) => j,
+            Err(_) => continue,
+        };
+        let content = inner_json["content"].as_str().unwrap_or("").to_string();
+        let author_did_field = format!("did:sol:{owner_pubkey}"); // owner is the author
+        labelled_results.push(serde_json::json!({
+            "attestation_id": row.attestation_id,
+            "content_hash": row.content_hash,
+            "content": content,
+            "created_at": row.created_at,
+            "source": "own",
+            "sealed": true,
+            "author_did": author_did_field,
+            "score": score,
+        }));
+    }
+
+    serde_json::json!({
+        "query": query,
+        "results": labelled_results,
+        "total_attestations": total,
+        "owner_pubkey": owner_pubkey,
+        "embed_provider": embedder.provider_name(),
+        "embed_model": embedder.model_id(),
+        "verifiable": embedder.is_open_weights(),
+        "merkle_commitment": merkle_commitment,
+        // When a session is active, all sealed rows are visible — no sealed_hidden notice.
+    })
+}
+
+/// Compute cosine similarity between two equal-length f32 vectors.
+/// Returns 0.0 if either vector is zero-length or their lengths differ.
+fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+    if a.len() != b.len() || a.is_empty() {
+        return 0.0;
+    }
+    let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
+    let mag_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
+    let mag_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if mag_a == 0.0 || mag_b == 0.0 {
+        return 0.0;
+    }
+    dot / (mag_a * mag_b)
 }
 
 

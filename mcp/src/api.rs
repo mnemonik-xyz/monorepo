@@ -24,6 +24,7 @@
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
+use std::time::Instant;
 
 use axum::{
     body::{Body, Bytes},
@@ -3023,6 +3024,192 @@ pub async fn blog_feed_handler(State(state): State<Arc<McpState>>) -> Response {
         body,
     )
         .into_response()
+}
+
+// ── Recall sessions (Task 13) ─────────────────────────────────────────────────
+//
+// `POST /api/recall-session {enc, wk, ttl_secs}` — unwrap the owner's recall
+// key (RK) from the provided HPKE blob and store it in process RAM keyed on
+// the owner's pubkey.  The RK is NEVER written to SQLite, logs or metrics.
+//
+// `DELETE /api/recall-session` — remove the session immediately.
+//
+// Max TTL: 3600 seconds.  Audit log: `tracing::info!` on session start and
+// end, recording owner pubkey + duration, but NOT the RK or any content.
+
+/// Maximum allowed TTL for a recall session in seconds.
+pub const RECALL_SESSION_MAX_TTL_SECS: u64 = 3600;
+
+/// An active recall session held in RAM only.
+#[derive(Debug)]
+pub struct RecallSession {
+    /// Plaintext 32-byte recall key — zeroed when the session is removed.
+    pub rk: zeroize::Zeroizing<[u8; 32]>,
+    /// Wall-clock expiry.
+    pub expires_at: Instant,
+    /// ISO-8601 start time for audit log continuity.
+    pub started_at: String,
+}
+
+/// Map from `owner_pubkey` → `RecallSession`.  Never written to disk.
+pub type RecallSessionMap = HashMap<String, RecallSession>;
+
+/// Request body for `POST /api/recall-session`.
+#[derive(Debug, Deserialize)]
+pub struct RecallSessionStartRequest {
+    /// HPKE encapsulated key (base64-standard, 32 bytes for X25519).
+    pub enc: String,
+    /// HPKE ciphertext wrapping the RK (base64-standard, 48 bytes).
+    pub wk: String,
+    /// Requested session TTL in seconds (max 3600).
+    #[serde(default)]
+    pub ttl_secs: Option<u64>,
+}
+
+/// `POST /api/recall-session` — unwrap the owner's recall key and store it in RAM.
+///
+/// Auth: Bearer JWT (same middleware as the rest of `/api/…`).
+pub async fn recall_session_start_handler(
+    State(state): State<Arc<McpState>>,
+    Extension(claims): Extension<Claims>,
+    Json(req): Json<RecallSessionStartRequest>,
+) -> Response {
+    let owner = &claims.sub;
+
+    // Decode enc / wk.
+    let enc_bytes = match base64::Engine::decode(
+        &base64::engine::general_purpose::STANDARD,
+        req.enc.as_bytes(),
+    ) {
+        Ok(b) => b,
+        Err(e) => {
+            return error_resp(
+                StatusCode::BAD_REQUEST,
+                &format!("enc is not valid base64: {e}"),
+            );
+        }
+    };
+    let wk_bytes = match base64::Engine::decode(
+        &base64::engine::general_purpose::STANDARD,
+        req.wk.as_bytes(),
+    ) {
+        Ok(b) => b,
+        Err(e) => {
+            return error_resp(
+                StatusCode::BAD_REQUEST,
+                &format!("wk is not valid base64: {e}"),
+            );
+        }
+    };
+
+    // Resolve TTL — cap at RECALL_SESSION_MAX_TTL_SECS.
+    let ttl_secs = req
+        .ttl_secs
+        .unwrap_or(RECALL_SESSION_MAX_TTL_SECS)
+        .min(RECALL_SESSION_MAX_TTL_SECS);
+
+    // Unwrap the recall key.  The owner must have wrapped their RK to their own
+    // X25519 key and supplied the (enc, wk) blob via this request.
+    // V1: the client wraps the plaintext RK to the server's static x25519 key.
+    // This lets the webapp unwrap the stored enc+wk locally, then re-wrap the
+    // plaintext RK to this server key to hand it over for the session.
+    let server_x25519_sk: [u8; 32] = state.bootstrap_server_x25519_secret.to_bytes();
+    let rk = match mnemonic_core::identity::recall_key::unwrap_rk(
+        &enc_bytes,
+        &wk_bytes,
+        &server_x25519_sk,
+    ) {
+        Ok(rk) => rk,
+        Err(e) => {
+            return error_resp(
+                StatusCode::UNAUTHORIZED,
+                &format!("recall key unwrap failed: {e}"),
+            );
+        }
+    };
+
+    let now_str = chrono::Utc::now().to_rfc3339();
+    let expires_at = Instant::now() + std::time::Duration::from_secs(ttl_secs);
+
+    {
+        let mut sessions = state.recall_sessions.lock().await;
+        sessions.insert(
+            owner.clone(),
+            RecallSession {
+                rk,
+                expires_at,
+                started_at: now_str.clone(),
+            },
+        );
+    }
+
+    tracing::info!(
+        owner_pubkey = %owner,
+        ttl_secs = ttl_secs,
+        started_at = %now_str,
+        "recall session started"
+    );
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "status": "ok",
+            "ttl_secs": ttl_secs,
+            "started_at": now_str,
+        })),
+    )
+        .into_response()
+}
+
+/// `DELETE /api/recall-session` — terminate the caller's active recall session.
+pub async fn recall_session_delete_handler(
+    State(state): State<Arc<McpState>>,
+    Extension(claims): Extension<Claims>,
+) -> Response {
+    let owner = &claims.sub;
+    let mut sessions = state.recall_sessions.lock().await;
+
+    if let Some(session) = sessions.remove(owner) {
+        let duration_secs = session
+            .expires_at
+            .checked_duration_since(Instant::now())
+            .map(|rem| RECALL_SESSION_MAX_TTL_SECS.saturating_sub(rem.as_secs()))
+            .unwrap_or(RECALL_SESSION_MAX_TTL_SECS);
+
+        tracing::info!(
+            owner_pubkey = %owner,
+            started_at = %session.started_at,
+            used_secs = duration_secs,
+            "recall session ended"
+        );
+        // `session.rk` is `Zeroizing` — it is wiped on drop here.
+    }
+
+    (StatusCode::OK, Json(serde_json::json!({"status": "ok"}))).into_response()
+}
+
+/// Look up an active (non-expired) recall session for `owner_pubkey`.
+///
+/// Expired sessions are lazily evicted here.  Returns a copy of the 32-byte
+/// RK so callers do not need to hold the `Mutex` guard across `.await`.
+pub async fn get_active_rk(
+    sessions: &tokio::sync::Mutex<RecallSessionMap>,
+    owner_pubkey: &str,
+) -> Option<zeroize::Zeroizing<[u8; 32]>> {
+    let mut guard = sessions.lock().await;
+    let session = guard.get(owner_pubkey)?;
+    if Instant::now() >= session.expires_at {
+        // Expired — evict lazily.
+        let session = guard.remove(owner_pubkey)?;
+        tracing::info!(
+            owner_pubkey = %owner_pubkey,
+            started_at = %session.started_at,
+            "recall session expired (lazy eviction)"
+        );
+        return None;
+    }
+    // Return a copy of the RK bytes so the lock can be dropped immediately.
+    Some(session.rk.clone())
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────

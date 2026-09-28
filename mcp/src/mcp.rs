@@ -1024,6 +1024,18 @@ pub struct McpState {
     /// populated on HTTP transport (only stdio needs to decrypt locally).
     /// The inner `Mutex` is never held across `.await`.
     pub unlock_cache: mnemonic_core::identity::UnlockCache,
+
+    /// In-RAM recall sessions (Task 13 — hosted recall).
+    ///
+    /// Maps `owner_pubkey` → `(rk: [u8;32], expires_at: Instant)`.  The RK
+    /// is the owner's 32-byte plaintext recall key, unwrapped from their
+    /// `owner_recall_keys` blob at session-start time.
+    ///
+    /// **Never persisted** to SQLite, logs or metrics.  A process restart
+    /// drops every session, which is the T13 acceptance criterion.  The
+    /// session map is `Arc<tokio::sync::Mutex<…>>` so it can be shared across
+    /// Axum handlers without `unsafe Send` gymnastics.
+    pub recall_sessions: Arc<tokio::sync::Mutex<crate::api::RecallSessionMap>>,
 }
 
 // Safety: We only access store through std::sync::Mutex (short critical sections, no await)
@@ -2193,17 +2205,49 @@ async fn handle_tool_call(
                 } else {
                     (Some(owner_pubkey), None)
                 };
-                // DB-only: lock, query, release
-                let store = state.store.lock().unwrap();
-                tools::recall(
-                    &state.keypair,
-                    &store,
-                    state.embedder.as_ref(),
-                    query,
-                    limit,
-                    recall_owner,
-                    visibility_filter,
-                )
+
+                // Task 13: if an active recall session exists for the
+                // authenticated owner, use it to decrypt sealed rows and
+                // include them in the results.
+                if jwt_sub.is_some() {
+                    let active_rk =
+                        crate::api::get_active_rk(&state.recall_sessions, owner_pubkey).await;
+                    if let Some(rk) = active_rk {
+                        tools::recall_with_hosted_rk(
+                            &state.keypair,
+                            &state.store,
+                            state.embedder.as_ref(),
+                            query,
+                            limit,
+                            owner_pubkey,
+                            &rk,
+                        )
+                        .await
+                    } else {
+                        let store = state.store.lock().unwrap();
+                        tools::recall(
+                            &state.keypair,
+                            &store,
+                            state.embedder.as_ref(),
+                            query,
+                            limit,
+                            recall_owner,
+                            visibility_filter,
+                        )
+                    }
+                } else {
+                    // DB-only: lock, query, release
+                    let store = state.store.lock().unwrap();
+                    tools::recall(
+                        &state.keypair,
+                        &store,
+                        state.embedder.as_ref(),
+                        query,
+                        limit,
+                        recall_owner,
+                        visibility_filter,
+                    )
+                }
             }
         }
         "mnemonic_check_pending" => {
@@ -2549,6 +2593,9 @@ mod transport_tests {
             blog_rebuild_hook: None,
             chain_stats: None,
             unlock_cache: mnemonic_core::identity::UnlockCache::with_ttl(None),
+            recall_sessions: Arc::new(tokio::sync::Mutex::new(
+                crate::api::RecallSessionMap::new(),
+            )),
         })
     }
 

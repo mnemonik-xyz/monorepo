@@ -5,6 +5,7 @@ pub mod keystore_file;
 pub mod keystore_memory;
 pub mod keystore_os;
 pub mod lazy;
+pub mod recall_key;
 pub mod token_store;
 pub mod unlock_cache;
 

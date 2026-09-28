@@ -124,6 +124,9 @@ fn state_with_short_ttl(ttl_secs: i64) -> Arc<McpState> {
         blog_rebuild_hook: None,
         chain_stats: None,
         unlock_cache: mnemonic_core::identity::UnlockCache::with_ttl(None),
+        recall_sessions: std::sync::Arc::new(tokio::sync::Mutex::new(
+            mnemonic_mcp::api::RecallSessionMap::new(),
+        )),
     })
 }
 

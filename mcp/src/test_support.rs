@@ -185,6 +185,9 @@ pub fn mock_state() -> Arc<McpState> {
         blog_rebuild_hook: None,
         chain_stats: None,
         unlock_cache: mnemonic_core::identity::UnlockCache::with_ttl(None),
+        recall_sessions: Arc::new(tokio::sync::Mutex::new(
+            crate::api::RecallSessionMap::new(),
+        )),
     })
 }
 
@@ -292,6 +295,9 @@ pub fn mock_state_with(
         blog_rebuild_hook: None,
         chain_stats: None,
         unlock_cache: mnemonic_core::identity::UnlockCache::with_ttl(None),
+        recall_sessions: Arc::new(tokio::sync::Mutex::new(
+            crate::api::RecallSessionMap::new(),
+        )),
     })
 }
 
@@ -408,6 +414,9 @@ pub fn mock_state_for_delivery(
         blog_rebuild_hook: None,
         chain_stats: None,
         unlock_cache: mnemonic_core::identity::UnlockCache::with_ttl(None),
+        recall_sessions: Arc::new(tokio::sync::Mutex::new(
+            crate::api::RecallSessionMap::new(),
+        )),
     })
 }
 
@@ -521,6 +530,9 @@ pub fn mock_state_with_embedder_and_endpoint(
         blog_rebuild_hook: None,
         chain_stats: None,
         unlock_cache: mnemonic_core::identity::UnlockCache::with_ttl(None),
+        recall_sessions: Arc::new(tokio::sync::Mutex::new(
+            crate::api::RecallSessionMap::new(),
+        )),
     })
 }
 

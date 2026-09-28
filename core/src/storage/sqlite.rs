@@ -944,6 +944,23 @@ pub struct GrantRow {
     pub withdrawn_at: Option<String>,
 }
 
+/// A row from `sealed_index` joined with `attestations`, returned by
+/// `SqliteStore::list_sealed_index` (Task 13 hosted recall).
+#[derive(Debug, Clone)]
+pub struct SealedIndexRow {
+    pub attestation_id: String,
+    /// HPKE-wrapped content key K under the owner's recall key.
+    pub k_wrap_rk: Vec<u8>,
+    /// 24-byte XChaCha20 nonce for the encrypted embedding.
+    pub emb_nonce: Vec<u8>,
+    /// Ciphertext of the f32 embedding under the recall key.
+    pub emb_ct: Vec<u8>,
+    /// Raw COSE_Sign1 / CBOR sealed-artifact bytes (from `attestations.sealed_blob`).
+    pub sealed_blob: Vec<u8>,
+    pub content_hash: String,
+    pub created_at: String,
+}
+
 impl SqliteStore {
     pub fn open(path: &Path) -> anyhow::Result<Self> {
         if let Some(parent) = path.parent() {
@@ -1668,6 +1685,99 @@ impl SqliteStore {
             |row| row.get(0),
         )?;
         Ok(count > 0)
+    }
+
+    // ── Recall key (Task 13) ──────────────────────────────────────────────────
+
+    /// Store or replace the wrapped recall key for `owner_pubkey`.
+    ///
+    /// `rk_wrap` is the HPKE-wrapped 32-byte RK (enc || wk bytes, serialized
+    /// as a single blob by the caller).  Only one entry exists per owner;
+    /// `INSERT OR REPLACE` is idempotent.
+    pub fn upsert_recall_key(&self, owner_pubkey: &str, rk_wrap: &[u8]) -> anyhow::Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO owner_recall_keys (owner_pubkey, rk_wrap) VALUES (?1, ?2)",
+            params![owner_pubkey, rk_wrap],
+        )?;
+        Ok(())
+    }
+
+    /// Fetch the wrapped recall key blob for `owner_pubkey`, or `None` if the
+    /// owner has not yet enabled hosted recall.
+    pub fn get_recall_key_wrap(&self, owner_pubkey: &str) -> anyhow::Result<Option<Vec<u8>>> {
+        let res = self.conn.query_row(
+            "SELECT rk_wrap FROM owner_recall_keys WHERE owner_pubkey = ?1",
+            params![owner_pubkey],
+            |row| row.get::<_, Vec<u8>>(0),
+        ).optional()?;
+        Ok(res)
+    }
+
+    /// Remove the recall key for `owner_pubkey` (opt-out).
+    pub fn delete_recall_key(&self, owner_pubkey: &str) -> anyhow::Result<()> {
+        self.conn.execute(
+            "DELETE FROM owner_recall_keys WHERE owner_pubkey = ?1",
+            params![owner_pubkey],
+        )?;
+        Ok(())
+    }
+
+    // ── Sealed index (Task 13) ────────────────────────────────────────────────
+
+    /// Insert or replace a sealed-index row for `attestation_id`.
+    ///
+    /// - `k_wrap_rk`  — HPKE-wrapped content key K under the owner's RK.
+    /// - `emb_nonce`  — 24-byte XChaCha20 nonce for the encrypted embedding.
+    /// - `emb_ct`     — ciphertext of the embedding under RK.
+    pub fn upsert_sealed_index(
+        &self,
+        attestation_id: &str,
+        k_wrap_rk: &[u8],
+        emb_nonce: &[u8],
+        emb_ct: &[u8],
+    ) -> anyhow::Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO sealed_index \
+             (attestation_id, k_wrap_rk, emb_nonce, emb_ct) \
+             VALUES (?1, ?2, ?3, ?4)",
+            params![attestation_id, k_wrap_rk, emb_nonce, emb_ct],
+        )?;
+        Ok(())
+    }
+
+    /// List sealed-index rows for `owner_pubkey`, joining against the
+    /// `attestations` table to scope by owner.  Returns rows in descending
+    /// `created_at` order, up to `limit`.
+    pub fn list_sealed_index(
+        &self,
+        owner_pubkey: &str,
+        limit: usize,
+    ) -> anyhow::Result<Vec<SealedIndexRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT si.attestation_id, si.k_wrap_rk, si.emb_nonce, si.emb_ct,
+                    a.sealed_blob, a.content_hash, a.created_at
+             FROM sealed_index si
+             JOIN attestations a ON si.attestation_id = a.attestation_id
+             WHERE a.owner_pubkey = ?1 AND a.privacy = 'sealed'
+             ORDER BY a.created_at DESC
+             LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![owner_pubkey, limit as i64], |row| {
+            Ok(SealedIndexRow {
+                attestation_id: row.get(0)?,
+                k_wrap_rk: row.get::<_, Vec<u8>>(1)?,
+                emb_nonce: row.get::<_, Vec<u8>>(2)?,
+                emb_ct: row.get::<_, Vec<u8>>(3)?,
+                sealed_blob: row.get::<_, Vec<u8>>(4)?,
+                content_hash: row.get(5)?,
+                created_at: row.get(6)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
     }
 }
 
