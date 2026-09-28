@@ -170,6 +170,37 @@ The hosted server sees plaintext during a write (F2).
 
 **Verification:** `cargo test --workspace --features mnemonic-mcp/test-support` — all pass (0 failures). `cargo clippy --workspace --features mnemonic-mcp/test-support -- -D warnings` — clean.
 
+### Task 9 — Extension: seal before cloud sync
+
+**Status:** done  
+**Agent:** claude-sonnet-4-6 (2026-09-28)
+
+**Summary:**
+
+1. `cose.ts`: Extended the `MnemonicCoreModule` interface with `seal_memory`, `open_memory`, and `x25519_public_from_ed25519` WASM bindings (matching the Task 5 exports in `core/src/wasm/mod.rs`). Added `sealMemory`, `openMemory`, and `x25519PublicFromEd25519` TypeScript wrappers. Added the X25519 unlock cache (`deriveOrGetX25519Secret`, `clearUnlockCache`, `__setUnlockCacheForTesting`) with a 15-minute TTL per tech-spec §7.5.
+
+2. `cloud-client.ts`: Added `anchorSealed` (POST `/api/anchor-sealed`), `storeSealed` (POST `/api/store-sealed`), and `fetchSealed` (GET `/api/sealed`) methods to `CloudClient`. Added `SealedBlobItem` wire type and `base64ToBytes` helper. All three methods follow the existing typed-error contract (`ReauthRequiredError`, `PermanentSyncError`, `TransientSyncError`).
+
+3. `cloud-sync.ts`: Added `SealableCloudClient` interface extending `CloudSignClient` with `anchorSealed`/`storeSealed`. Added `buildSealedPayload` helper (seals inner MEMORY_V1 JSON + optionally signs for anchored mode) and `openSealedBlob` helper (decrypts via unlock cache). Updated the drain to fire-and-forget `storeSealed` alongside the existing `signRemote` path when the client supports it. Added `isSealableClient` type-guard.
+
+**Tests added (`sealed-sync.test.ts`, 18 tests, 1 skipped):**
+- `anchorSealed` / `storeSealed` / `fetchSealed` route, header, and typed-error tests (GROUP A, no WASM needed).
+- Unlock cache TTL constant and helper tests.
+- `sync_body_never_contains_plaintext` — sliding-window scan confirms plaintext absent from sealed COSE/CBOR bytes.
+- `seal_then_open_round_trip` — `sealMemory` + `openMemory` recovers original content; wrong-key rejects.
+- `openSealedBlob` cloud-sync helper round-trip.
+- T3 golden COSE vector parity test (skipped pending `core/pkg-web/` build from Task 5; uses `describe.skipIf`).
+
+**Implementation notes:**
+- The stub WASM injected via `__setWasmForTesting` uses XOR cipher for seal/open round-trips when the real pkg-web WASM binary is absent. All tests pass with the stub; the golden-vector test is gated by `WASM_AVAILABLE`.
+- The drain's sealed path is additive (fire-and-forget beside `signRemote`) to allow incremental rollout without breaking existing sync behavior.
+- X25519 secret derivation follows the Solana keypair convention (bytes 0–31 of the 64-byte secret = Ed25519 seed = X25519 scalar).
+
+**Deviations from spec:**
+- `Restore.tsx` was not modified. The restore flow relies on `fetchSealed` + `openMemory` which are now available, but the Restore component itself only handles escrow (passphrase-protected Ed25519 keypair); a follow-up task should add the sealed-blob index rebuild step to the post-restore flow once the server endpoints are live.
+
+**Test impact:** 18 new tests added, 0 pre-existing tests broken. Pre-existing failures (`cose.test.ts` missing pkg-web WASM, `cloud-sync.test.ts` addEventListener mock) are unchanged.
+
 ## Audit findings
 
 <!-- Written by tasks 16 and 17. -->
