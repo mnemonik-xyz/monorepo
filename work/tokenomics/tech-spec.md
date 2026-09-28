@@ -81,11 +81,15 @@ These rules hold in every phase. A governance vote cannot change them.
 - **I-4. Local mode stays free.** It runs on the agent's own machine and costs the protocol
   nothing.
 - **I-5. No reward is larger than the fee the rewarded action pays.** Otherwise self-dealing is
-  profitable. Trading rewards on LooksRare produced this failure at scale [T9].
+  profitable. On LooksRare, which paid token rewards for trading, a 2022 analysis found about
+  98 % of volume was wash trading [T9].
 - **I-6. Slashing applies only to faults that anyone can prove from data.** No slashing by vote.
 - **I-7. Prices are cost-plus and public.** The protocol fee is a separate, visible line.
-- **I-8. Chain-agnostic at the edges.** Clients pay on any supported x402 network. The token,
-  if it exists, lives on one home chain and is not required on the others.
+- **I-8. Chain-agnostic at the edges.** Clients pay on any supported x402 network [T15]. The
+  token, if it exists, lives on one home chain and is not required on the others.
+- **I-9. The token never pays for storage.** Storage networks have their own economics: Arweave
+  funds permanent storage from an endowment [T16], and Walrus pays nodes and stakers over time
+  [T17]. The operator pays each backend in its own currency. Mnemonic does not compete with them.
 
 ## 4. Roles, and which ones need collateral
 
@@ -128,8 +132,9 @@ independent indexers remove that single-provider risk.
 ## 5. Why collateral should be a stablecoin first
 
 A native-token stake is reflexive. When the protocol struggles, the token falls, and the
-security falls with it at the worst moment. The EigenLayer whitepaper makes this argument about
-services that bootstrap their own token-staked trust [T6].
+security falls with it at the worst moment. The EigenLayer whitepaper notes that such services
+are usually secured by their own native token. It argues that this fragments security, and that
+the cost to corrupt a system is no more than the cost to corrupt its weakest dependency [T6].
 
 So the design separates two jobs:
 
@@ -219,9 +224,15 @@ The loop "breathes" through real demand. Agents pay stablecoins. Workers earn st
 `MNEM`. Part of the fee buys `MNEM` back and pays it to workers who did verified work. Part funds
 the people who build the next integration, which brings the next paying agent.
 
-**Buyback-to-workers, not burn.** A burn transfers value to every holder, whether or not they
-work. Paying bought-back tokens for verified work rewards the service itself. Counsel must check
-both options against the SEC and CFTC interpretation of 2026-03-17 [S1].
+**Buyback-to-workers, not burn.** Burning is a common choice: Ethereum burns its base fee
+[T13], and Uniswap governance executed a fee switch with a programmatic UNI burn in December 2025
+[T20]. A burn transfers value to every holder, whether or not they work. Paying bought-back
+tokens for verified work rewards the service itself. Counsel must check both options against
+the SEC and CFTC interpretation of 2026-03-17 [S1].
+
+**Why not burn-and-mint credits.** Helium sells USD-pegged, non-transferable Data Credits that
+users create by burning the network token [T3]. That gives users a stable price. Mnemonic already
+has a stable price, because x402 settles in USDC. A credit layer would add a step and no value.
 
 ### 7.3 Revenue-bounded emissions
 
@@ -286,7 +297,7 @@ Rules for the launch:
 Scope: treasury budgets, the protocol fee inside fixed bounds, the router split, emission
 parameters inside the schedule cap, and the operator registry rules.
 
-Out of scope, for ever: the invariants I-1 to I-8, the artifact format, the COSE `kid` format and
+Out of scope, for ever: the invariants I-1 to I-9, the artifact format, the COSE `kid` format and
 the `MEMORY_V1` field order (`CLAUDE.md` § Anchored artifacts).
 
 Safeguards against capture:
@@ -295,8 +306,9 @@ Safeguards against capture:
 - A quorum, and a contributor council that can veto only proposals that breach the scope above.
 - Treasury transfers above a limit need two separate votes.
 
-Compound Proposal 289 in 2024 shows why: a concentrated group of holders voted a large treasury
-transfer to itself [T19].
+Compound Proposal 289 in 2024 shows why. A large holder passed, over objections, a proposal that
+moved 5 % of the treasury (499,000 COMP, about 24 million USD) into a product its backers had
+designed [T19].
 
 ### 7.7 Chain placement
 
@@ -310,8 +322,8 @@ Criteria for the home chain (owner decision, `decisions.md` Q-4):
 3. Native USDC with CCTP support, for fee consolidation [T14].
 4. Mature audit tooling for the staking and slashing contracts.
 
-**Do not bridge the token to every chain.** Bridges are a large, repeated target for theft
-[T8]. If a second chain needs `MNEM`, use a native burn-and-mint standard with rate limits.
+**Do not bridge the token to every chain.** In 2022, 64 % of the 3.1 billion USD stolen in
+crypto hacks came from cross-chain bridges [T8]. If a second chain needs `MNEM`, use a native burn-and-mint standard with rate limits.
 
 ## 8. Gates for a token launch
 
@@ -337,12 +349,12 @@ revenue or from outside money first.
 | # | Mechanism | Phase | How it works | Failure mode | Mitigation |
 |---|---|---|---|---|---|
 | M-1 | **Development share** | 0 | A fixed part of every protocol fee streams to a contributor pool in USDC | Small while usage is small | Combine with M-5; the share grows with usage automatically |
-| M-2 | **Retro funding rounds** | 1 | Each quarter, reward shipped work by measured impact | Popularity voting; heavy load on voters | Use metrics, narrow scopes per round [T10] |
+| M-2 | **Retro funding rounds** | 1 | Each quarter, reward shipped work by measured impact | Large rounds become popularity contests; slow feedback | Use metrics and narrow scopes, as Optimism did after two years of rounds [T10] |
 | M-3 | **Adapter bounties** | 1 | A fixed bounty for each storage backend that passes the eligibility bar, each anchor adapter, each SDK with conformance vectors | Low-quality adapters | Pay only on merge plus a passing conformance test |
 | M-4 | **Integrator rebate** | 1 | An `integrator_id` in the payment gets a share of the protocol fee from its writes | Self-dealing | Rebate is always below the fee (I-5) |
 | M-5 | **Outside grants** | 0 | Ecosystem grant programs and quadratic-funding rounds [T12] [T18] | Dependence on outside priorities | Treat as a bridge, not a model |
 | M-6 | **Security bounties** | 0 | Paid from the reserve | Under-funded reserve | Fixed reserve share in the router |
-| M-7 | **Contributor pool rules** | 0 | Members are weighted by time contributed and vest over time, as in Protocol Guild [T11] | Closed membership | Published entry rules; current members admit new ones |
+| M-7 | **Contributor pool rules** | 0 | Members are weighted by time contributed and claim vested funds from a split contract, as in Protocol Guild [T11] | Closed membership | Published entry rules; current members admit new ones |
 | M-8 | **Token allocations** | 2 | Contributors and ecosystem receive vested `MNEM` (7.4) | Sell pressure; funding shrinks when the price falls | Pay core salaries from M-1 in USDC; tokens are a supplement |
 
 **Proposed router split (owner decision, `decisions.md` Q-2):**
@@ -455,3 +467,50 @@ evidence.
 - **[S5]** SEC press release 2026-76, "SEC Proposes New Regulation Crypto Assets", 2026-08-18:
   <https://www.sec.gov/newsroom/press-releases/2026-76-sec-proposes-new-regulation-crypto-assets>
 - **[S6]** ERC-8004 "Trustless Agents" (status: Draft): <https://eips.ethereum.org/EIPS/eip-8004>
+
+### Token design and market evidence
+
+- **[T1]** K. Samani, "Understanding Token Velocity", Multicoin Capital, 2017-12-08:
+  <https://multicoin.capital/2017/12/08/understanding-token-velocity/>
+- **[T2]** K. Samani, "New Models for Utility Tokens" (work token model), Multicoin Capital,
+  2018-02-13: <https://multicoin.capital/2018/02/13/new-models-utility-tokens/>
+- **[T3]** Helium, "Data Credit": <https://docs.helium.com/tokens/data-credit/>
+- **[T4]** The Graph, "Tokenomics": <https://thegraph.com/docs/en/resources/tokenomics/>, and
+  "Indexing overview" (proofs of indexing, disputes, slashing):
+  <https://thegraph.com/docs/en/indexing/overview/>
+- **[T5]** Filecoin, "FIL collateral":
+  <https://docs.filecoin.io/provide-storage/filecoin-economics/fil-collateral>, and "Slashing":
+  <https://docs.filecoin.io/provide-storage/filecoin-economics/slashing>
+- **[T6]** EigenLayer whitepaper (official Layr-Labs repository copy):
+  <https://raw.githubusercontent.com/Layr-Labs/eigenlayer-docs/main/static/pdf/EigenLayer_WhitePaper.pdf>
+- **[T7]** Binance Research, "Low Float & High FDV: How Did We Get Here?", 2024-05-17:
+  <https://www.binance.com/en/research/analysis/low-float-and-high-fdv-how-did-we-get-here>
+- **[T8]** Chainalysis, "2022 Biggest Year Ever For Crypto Hacking", 2023-02-01:
+  <https://www.chainalysis.com/blog/2022-biggest-year-ever-for-crypto-hacking/>
+- **[T9]** CoinDesk, "Over $30B of NFT Trading Volume on Ethereum Is Wash Trading, Research
+  Suggests", 2022-12-23:
+  <https://www.coindesk.com/web3/2022/12/23/over-30b-of-nft-trading-volume-on-ethereum-is-wash-trading-research-suggests>
+- **[T10]** Optimism, "Lessons learned from two years of Retroactive Public Goods Funding",
+  2024-11-05: <https://gov.optimism.io/t/lessons-learned-from-two-years-of-retroactive-public-goods-funding/9239>,
+  and "Retro Funding 2025", 2024-11-21: <https://www.optimism.io/blog/retro-funding-2025>
+- **[T11]** Protocol Guild documentation: <https://protocol-guild.readthedocs.io/en/latest/>,
+  and membership weighting:
+  <https://protocol-guild.readthedocs.io/en/latest/01-membership.html>
+- **[T12]** V. Buterin, Z. Hitzig, E. G. Weyl, "A Flexible Design for Funding Public Goods"
+  (quadratic funding): <https://arxiv.org/abs/1809.06421>
+- **[T13]** EIP-1559, fee market change (the base fee is burned):
+  <https://eips.ethereum.org/EIPS/eip-1559>
+- **[T14]** Circle, "Cross-Chain Transfer Protocol": <https://developers.circle.com/cctp>
+- **[T15]** x402 payment standard: <https://github.com/coinbase/x402> and <https://www.x402.org/>
+- **[T16]** Arweave yellow paper, § 3.2.3 storage endowment:
+  <https://www.arweave.org/yellow-paper.pdf>
+- **[T17]** Walrus, "WAL token": <https://walrus.xyz/wal-token/>, and "WAL staking rewards",
+  2025-03-24: <https://blog.walrus.xyz/wal-staking-rewards/>
+- **[T18]** Grant programs: Ethereum Foundation Ecosystem Support Program
+  <https://esp.ethereum.foundation/>; Solana Foundation <https://solana.org/grants-funding>;
+  Gitcoin Grants 24 <https://gitcoin.co/campaigns/gitcoin-grants-24-gg24>
+- **[T19]** The Block, "$24 million Compound Finance proposal passed by whale over DAO
+  objections", 2024-07-28:
+  <https://www.theblock.co/post/307943/24-million-compound-finance-proposal-passed-by-whale-over-dao-objections>
+- **[T20]** Uniswap, "UNIfication" proposal, 2025-11-10: <https://blog.uniswap.org/unification>;
+  executed on-chain as proposal 93: <https://vote.uniswapfoundation.org/proposals/93>
