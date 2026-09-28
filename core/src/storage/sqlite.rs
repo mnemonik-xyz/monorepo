@@ -866,6 +866,41 @@ fn migrate_write_mode_anchored_rename(conn: &Connection) -> anyhow::Result<()> {
 /// SQLite `ALTER TABLE ... ADD COLUMN` lacks `IF NOT EXISTS`, so presence is
 /// gated via `PRAGMA table_info`. Wrapped in `BEGIN IMMEDIATE` to serialize
 /// against any concurrent opener. Idempotent across deploys.
+/// Idempotent ADD-COLUMN migration for A2A `context_id` (a2a-bridge Task 2).
+///
+/// Adds `attestations.context_id TEXT` (nullable) — the A2A `contextId` field
+/// that groups all attestations belonging to one multi-turn collaboration. NULL
+/// for legacy `MEMORY_V1` rows, which have no A2A context.
+///
+/// `recall_by_context` queries `WHERE context_id = ?`; a NULL row never matches
+/// an explicit string, so legacy rows are invisible to context-keyed recall
+/// without any special-casing (correct per Decision 2 / tech-spec).
+///
+/// Index `idx_attestations_context_created` speeds up the bounded
+/// `ORDER BY created_at DESC LIMIT ?` recall query.
+///
+/// SQLite `ALTER TABLE ... ADD COLUMN` lacks `IF NOT EXISTS`, so presence is
+/// gated via `PRAGMA table_info`. No transaction wrapper needed: a single
+/// `ALTER TABLE` is implicitly atomic in SQLite, and `CREATE INDEX IF NOT
+/// EXISTS` is idempotent.
+fn migrate_context_id_column(conn: &Connection) -> anyhow::Result<()> {
+    if !attestations_has_column(conn, "context_id")? {
+        conn.execute(
+            "ALTER TABLE attestations ADD COLUMN context_id TEXT",
+            [],
+        )
+        .context("adding attestations.context_id")?;
+    }
+    // Always attempt; `IF NOT EXISTS` makes it idempotent.
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_attestations_context_created \
+             ON attestations(context_id, created_at)",
+        [],
+    )
+    .context("creating idx_attestations_context_created")?;
+    Ok(())
+}
+
 fn migrate_sealed_columns(conn: &Connection) -> anyhow::Result<()> {
     let need_privacy = !attestations_has_column(conn, "privacy")?;
     let need_sealed_blob = !attestations_has_column(conn, "sealed_blob")?;
@@ -992,6 +1027,7 @@ impl SqliteStore {
         migrate_write_mode_anchored_rename(&conn)?;
         migrate_plaintext_on_arweave_column(&conn)?;
         migrate_sealed_columns(&conn)?;
+        migrate_context_id_column(&conn)?;
         Ok(Self { conn })
     }
 
@@ -1012,6 +1048,7 @@ impl SqliteStore {
         migrate_write_mode_anchored_rename(&conn)?;
         migrate_plaintext_on_arweave_column(&conn)?;
         migrate_sealed_columns(&conn)?;
+        migrate_context_id_column(&conn)?;
         Ok(Self { conn })
     }
 
@@ -1779,6 +1816,56 @@ impl SqliteStore {
         }
         Ok(out)
     }
+
+    // ── A2A context recall (a2a-bridge Task 2) ───────────────────────────────
+
+    /// Return attestation rows whose `context_id` equals `context_id`,
+    /// ordered by `created_at DESC`, optionally capped at `limit`.
+    ///
+    /// This is the inner implementation shared by both the direct concrete
+    /// method and the `AttestationStore` trait impl below. `NULL` rows are
+    /// never matched (SQL `= ?` predicate — correct backfill semantic for
+    /// legacy `MEMORY_V1` rows per a2a-bridge Decision 2).
+    pub fn recall_by_context_impl(
+        &self,
+        context_id: &str,
+        limit: Option<usize>,
+    ) -> anyhow::Result<Vec<AttestationRow>> {
+        let mapper = |row: &rusqlite::Row<'_>| {
+            Ok(AttestationRow {
+                attestation_id: row.get(0)?,
+                content: row.get(1)?,
+                content_hash: row.get(2)?,
+                solana_tx: row.get(3)?,
+                arweave_tx: row.get(4)?,
+                signer_pubkey: row.get(5)?,
+            })
+        };
+        let mut out = Vec::new();
+        if let Some(n) = limit {
+            let mut stmt = self.conn.prepare(
+                "SELECT attestation_id, content, content_hash, solana_tx, arweave_tx, signer_pubkey \
+                 FROM attestations \
+                 WHERE context_id = ?1 \
+                 ORDER BY created_at DESC \
+                 LIMIT ?2",
+            ).context("preparing recall_by_context (limited) query")?;
+            for r in stmt.query_map(params![context_id, n as i64], mapper)? {
+                out.push(r?);
+            }
+        } else {
+            let mut stmt = self.conn.prepare(
+                "SELECT attestation_id, content, content_hash, solana_tx, arweave_tx, signer_pubkey \
+                 FROM attestations \
+                 WHERE context_id = ?1 \
+                 ORDER BY created_at DESC",
+            ).context("preparing recall_by_context (unlimited) query")?;
+            for r in stmt.query_map(params![context_id], mapper)? {
+                out.push(r?);
+            }
+        }
+        Ok(out)
+    }
 }
 
 /// Map a `grants` row (in the column order used by `grants_for_reader` /
@@ -2065,21 +2152,28 @@ impl AttestationStore for SqliteStore {
         //                                 owners' private rows. Defensive empty
         //                                 result keeps the storage layer from
         //                                 leaking on a future caller bug.
+        // CODE-AUDIT-003 fix: collect with `?` so a row-level rusqlite error
+        // (e.g. type mismatch in the embedding blob) propagates as `Err(_)`
+        // rather than silently dropping the bad row. `filter_map(|r| r.ok())`
+        // was the old pattern; it obscured data-integrity problems.
         let mut results: Vec<SearchResult> = match (owner_pubkey, visibility_filter) {
             (Some(owner), Some(v)) => {
                 let mut stmt = self.conn.prepare(SEARCH_SQL_FILTERED)?;
                 let rows = stmt.query_map(params![owner, v], row_mapper)?;
-                rows.filter_map(|r| r.ok()).collect()
+                rows.collect::<rusqlite::Result<Vec<_>>>()
+                    .context("search (owner+vis filtered): row decode error")?
             }
             (Some(owner), None) => {
                 let mut stmt = self.conn.prepare(SEARCH_SQL_ALL)?;
                 let rows = stmt.query_map(params![owner], row_mapper)?;
-                rows.filter_map(|r| r.ok()).collect()
+                rows.collect::<rusqlite::Result<Vec<_>>>()
+                    .context("search (owner all): row decode error")?
             }
             (None, Some(Visibility::Public)) => {
                 let mut stmt = self.conn.prepare(SEARCH_SQL_PUBLIC_POOL)?;
                 let rows = stmt.query_map(params![Visibility::Public], row_mapper)?;
-                rows.filter_map(|r| r.ok()).collect()
+                rows.collect::<rusqlite::Result<Vec<_>>>()
+                    .context("search (public pool): row decode error")?
             }
             (None, Some(Visibility::Private)) | (None, None) => Vec::new(),
         };
@@ -2095,6 +2189,14 @@ impl AttestationStore for SqliteStore {
 
         sort_and_truncate(&mut results, limit);
         Ok(results)
+    }
+
+    fn recall_by_context(
+        &self,
+        context_id: &str,
+        limit: Option<usize>,
+    ) -> anyhow::Result<Vec<AttestationRow>> {
+        self.recall_by_context_impl(context_id, limit)
     }
 }
 
@@ -2404,6 +2506,100 @@ mod tests {
             .unwrap();
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].attestation_id, "att-0");
+    }
+
+    /// Regression test for Task 18 (CODE-AUDIT-003): a row-level rusqlite error
+    /// during `search` must propagate as `Err(_)` rather than silently producing
+    /// fewer results (the old `filter_map(|r| r.ok())` behaviour).
+    ///
+    /// We force a rusqlite type error by storing an INTEGER value in a column
+    /// that the row mapper reads as `Vec<u8>` (a BLOB type). rusqlite's
+    /// `Vec<u8>` FromSql impl only accepts `ValueRef::Blob` and returns
+    /// `FromSqlError::InvalidType` for any other type including Integer.
+    #[test]
+    fn test_search_propagates_row_error_on_corrupt_embedding() {
+        use rusqlite::params as rp;
+
+        let store = SqliteStore::in_memory().unwrap();
+        store
+            .save_attestation(
+                "att-corrupt",
+                "content",
+                "hash",
+                &[],
+                "sol",
+                "ar",
+                "signer",
+                "owner_corrupt",
+                "2026-01-01",
+                WriteMode::Anchored,
+                Visibility::Private,
+                &[1.0, 0.0],
+            )
+            .unwrap();
+
+        // Force an integer-typed value into the BLOB embedding column.
+        // SQLite's dynamic typing stores it as Integer affinity; rusqlite's
+        // `Vec<u8>` decoder then returns InvalidType, causing the row mapper to
+        // return Err — which the new collect::<Result<Vec>>()? propagates to
+        // the caller.
+        //
+        // Note: SQLite's BLOB column affinity does NOT automatically convert
+        // Integer to Blob on read. The stored type is Integer; ValueRef::Integer
+        // is what rusqlite sees; Vec<u8>::column_result rejects it.
+        //
+        // We use a raw INSERT to bypass the FK check and directly verify
+        // what the search path sees.
+        store
+            .conn
+            .execute(
+                // Insert a row whose embedding is stored as Integer (type mismatch
+                // at rusqlite layer, not at SQLite layer). We delete the existing
+                // row first since attestation_id is the PK.
+                "DELETE FROM attestation_embeddings WHERE attestation_id = ?1",
+                rp!["att-corrupt"],
+            )
+            .unwrap();
+        // Insert with an integer literal in the BLOB column position —
+        // SQLite stores this as Integer type, not Blob.
+        store
+            .conn
+            .execute(
+                "INSERT INTO attestation_embeddings (attestation_id, embedding_dim, embedding)                  VALUES (?1, 2, 999)",
+                rp!["att-corrupt"],
+            )
+            .unwrap();
+
+        // Verify the row exists but has integer type in the embedding column.
+        let type_name: String = store
+            .conn
+            .query_row(
+                "SELECT TYPEOF(embedding) FROM attestation_embeddings WHERE attestation_id = ?1",
+                rp!["att-corrupt"],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(type_name, "integer", "embedding must be integer type to trigger rusqlite decode error");
+
+        // Debug: check if the JOIN query returns any rows
+        let join_count: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM attestations a                  JOIN attestation_embeddings ae ON a.attestation_id = ae.attestation_id                  WHERE a.owner_pubkey = ?1 AND (a.privacy IS NULL OR a.privacy = 'plaintext')",
+                rp!["owner_corrupt"],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(join_count, 1, "JOIN must return exactly 1 row before search");
+
+        // Now search: the new collect::<rusqlite::Result<Vec<_>>>()? propagates
+        // the InvalidType error instead of silently dropping the row.
+        let result = store.search(&[1.0, 0.0], Some("owner_corrupt"), None, 10);
+        assert!(
+            result.is_err(),
+            "search must propagate row-level decode error, not return Ok([]); got: {:?}",
+            result
+        );
     }
 
     #[test]
@@ -3839,4 +4035,173 @@ mod tests {
             assert_eq!(count, 1, "index '{idx}' must exist");
         }
     }
+
+    #[test]
+    fn test_rusqlite_integer_blob_type_check() {
+        use rusqlite::Connection;
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE t (data BLOB NOT NULL)").unwrap();
+        conn.execute("INSERT INTO t (data) VALUES (999)", []).unwrap();
+
+        let type_name: String = conn.query_row("SELECT TYPEOF(data) FROM t", [], |r| r.get(0)).unwrap();
+        // This should be "integer" because 999 is stored as integer.
+        assert_eq!(type_name, "integer");
+
+        // rusqlite should return InvalidColumnType for Vec<u8> on integer column.
+        let result: rusqlite::Result<Vec<u8>> = conn.query_row("SELECT data FROM t", [], |r| r.get(0));
+        assert!(result.is_err(), "expected Err but got: {:?}", result);
+    }
+
+    // ── a2a-bridge Task 2: context_id column + recall_by_context ─────────────
+
+    /// Helper: set context_id on an already-persisted attestation row (direct SQL,
+    /// not through the public API — mirrors what the A2A adapter will do).
+    fn set_context_id(store: &SqliteStore, attestation_id: &str, ctx: &str) {
+        store
+            .conn()
+            .execute(
+                "UPDATE attestations SET context_id = ?1 WHERE attestation_id = ?2",
+                params![ctx, attestation_id],
+            )
+            .expect("set context_id");
+    }
+
+    #[test]
+    fn context_id_column_exists_after_open() {
+        // TDD anchor: migrate_context_id_column adds the column + index.
+        let store = SqliteStore::in_memory().unwrap();
+        let has_col: bool = attestations_has_column(store.conn(), "context_id").unwrap();
+        assert!(has_col, "context_id column must exist after open");
+
+        let idx_count: i64 = store
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type='index' AND name='idx_attestations_context_created'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            idx_count, 1,
+            "idx_attestations_context_created must exist after open"
+        );
+    }
+
+    #[test]
+    fn context_id_migration_is_idempotent() {
+        // TDD anchor: calling migrate_context_id_column twice must not error.
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(SCHEMA).unwrap();
+        migrate_context_id_column(&conn).expect("first migrate_context_id_column");
+        migrate_context_id_column(&conn).expect("second migrate_context_id_column (idempotent)");
+    }
+
+    #[test]
+    fn recall_by_context_returns_rows_newest_first() {
+        // TDD anchor: rows ordered by created_at DESC.
+        let store = SqliteStore::in_memory().unwrap();
+        for (id, ts) in [
+            ("ctx-att-1", "2026-01-01T00:00:01Z"),
+            ("ctx-att-2", "2026-01-01T00:00:02Z"),
+            ("ctx-att-3", "2026-01-01T00:00:03Z"),
+        ] {
+            store
+                .save_attestation(
+                    id,
+                    &format!("content-{id}"),
+                    &format!("hash-{id}"),
+                    &[],
+                    &format!("sol-{id}"),
+                    &format!("ar-{id}"),
+                    "signer",
+                    TEST_OWNER,
+                    ts,
+                    WriteMode::Local,
+                    Visibility::Private,
+                    &[1.0, 0.0],
+                )
+                .unwrap();
+            set_context_id(&store, id, "ctx-abc");
+        }
+        let rows = store.recall_by_context("ctx-abc", None).unwrap();
+        assert_eq!(rows.len(), 3);
+        // newest first
+        assert_eq!(rows[0].attestation_id, "ctx-att-3");
+        assert_eq!(rows[1].attestation_id, "ctx-att-2");
+        assert_eq!(rows[2].attestation_id, "ctx-att-1");
+    }
+
+    #[test]
+    fn recall_by_context_respects_limit() {
+        // TDD anchor: limit is honoured.
+        let store = SqliteStore::in_memory().unwrap();
+        for (id, ts) in [
+            ("lim-att-1", "2026-01-01T00:00:01Z"),
+            ("lim-att-2", "2026-01-01T00:00:02Z"),
+            ("lim-att-3", "2026-01-01T00:00:03Z"),
+        ] {
+            store
+                .save_attestation(
+                    id,
+                    "c",
+                    &format!("h-{id}"),
+                    &[],
+                    &format!("s-{id}"),
+                    &format!("a-{id}"),
+                    "signer",
+                    TEST_OWNER,
+                    ts,
+                    WriteMode::Local,
+                    Visibility::Private,
+                    &[1.0, 0.0],
+                )
+                .unwrap();
+            set_context_id(&store, id, "ctx-limit");
+        }
+        let rows = store.recall_by_context("ctx-limit", Some(2)).unwrap();
+        assert_eq!(rows.len(), 2, "limit must be respected");
+        // still newest first
+        assert_eq!(rows[0].attestation_id, "lim-att-3");
+    }
+
+    #[test]
+    fn recall_by_context_legacy_null_rows_invisible() {
+        // TDD anchor: existing MEMORY_V1 rows (NULL context_id) are never
+        // returned by recall_by_context (backfill semantic per Decision 2).
+        let store = SqliteStore::in_memory().unwrap();
+        store
+            .save_attestation(
+                "legacy-att",
+                "legacy content",
+                "hash-legacy",
+                &[],
+                "sol-legacy",
+                "ar-legacy",
+                "signer",
+                TEST_OWNER,
+                "2026-01-01T00:00:01Z",
+                WriteMode::Local,
+                Visibility::Private,
+                &[1.0, 0.0],
+            )
+            .unwrap();
+        // context_id stays NULL — no set_context_id call.
+        let rows = store
+            .recall_by_context("ctx-anything", None)
+            .unwrap();
+        assert!(
+            rows.is_empty(),
+            "legacy NULL context_id rows must be invisible to recall_by_context"
+        );
+    }
+
+    #[test]
+    fn recall_by_context_unknown_context_returns_empty() {
+        // TDD anchor: unknown context_id yields empty vec.
+        let store = SqliteStore::in_memory().unwrap();
+        let rows = store.recall_by_context("no-such-ctx", None).unwrap();
+        assert!(rows.is_empty());
+    }
+
 }

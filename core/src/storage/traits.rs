@@ -191,6 +191,26 @@ pub trait AttestationStore {
         visibility_filter: Option<Visibility>,
         limit: usize,
     ) -> anyhow::Result<Vec<SearchResult>>;
+
+    /// Return all attestation rows whose `context_id` column equals
+    /// `context_id`, ordered by `created_at DESC` (newest first). `limit`
+    /// caps the result; `None` returns all matching rows.
+    ///
+    /// A2A bridge Decision 2 (a2a-bridge Task 2): `contextId` is the primary
+    /// index for grouping multi-turn A2A collaborations. Legacy `MEMORY_V1`
+    /// rows have NULL `context_id` and are never matched by this query, which
+    /// is the correct semantic — they belong to no A2A context.
+    ///
+    /// The default implementation returns an empty vec, which is correct for
+    /// stores that pre-date the `context_id` column (e.g. test fakes that do
+    /// not override this method).
+    fn recall_by_context(
+        &self,
+        _context_id: &str,
+        _limit: Option<usize>,
+    ) -> anyhow::Result<Vec<AttestationRow>> {
+        Ok(Vec::new())
+    }
 }
 
 /// Minimal storage-level lineage operations.
