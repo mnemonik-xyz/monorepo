@@ -12,6 +12,7 @@ import { fileURLToPath } from "node:url";
 
 import { Command } from "commander";
 
+import { runA2AAttest, runA2ARecall, runA2AVerify } from "../src/commands/a2a.js";
 import { runInit } from "../src/commands/init.js";
 import { runLogin } from "../src/commands/login.js";
 import { runSign } from "../src/commands/sign.js";
@@ -325,6 +326,90 @@ export function buildProgram(): Command {
           : {}),
       });
     });
+
+  // a2a {attest, recall, verify}
+  const a2a = program
+    .command("a2a")
+    .description(
+      "A2A protocol attestation — attest tasks, messages, and artifacts; recall and verify"
+    );
+
+  a2a
+    .command("attest")
+    .description(
+      "attest an A2A object (task|message|artifact) from a JSON file"
+    )
+    .requiredOption("--kind <kind>", "object kind: task, message, or artifact")
+    .requiredOption("--file <path>", "path to a JSON file containing the A2A object")
+    .requiredOption("--context <id>", "context identifier")
+    .option("--prev <id>", "link to a prior attestation")
+    .option("--base-url <url>", "override the server base URL")
+    .action(
+      async (cmdOpts: {
+        kind: string;
+        file: string;
+        context: string;
+        prev?: string;
+        baseUrl?: string;
+      }) => {
+        const kind = cmdOpts.kind as "task" | "message" | "artifact";
+        await runA2AAttest({
+          ...rootOpts(program),
+          kind,
+          file: cmdOpts.file,
+          context: cmdOpts.context,
+          ...(cmdOpts.prev !== undefined ? { prev: cmdOpts.prev } : {}),
+          ...(cmdOpts.baseUrl !== undefined ? { baseUrl: cmdOpts.baseUrl } : {}),
+        });
+      }
+    );
+
+  a2a
+    .command("recall")
+    .description("recall attestations for an A2A context")
+    .requiredOption("--context <id>", "context identifier")
+    .option("--limit <n>", "max results", (v) => parseInt(v, 10))
+    .option(
+      "--kind <kind>",
+      "filter by kind: task, message, artifact, or all",
+      "all"
+    )
+    .option("--base-url <url>", "override the server base URL")
+    .action(
+      async (cmdOpts: {
+        context: string;
+        limit?: number;
+        kind?: string;
+        baseUrl?: string;
+      }) => {
+        await runA2ARecall({
+          ...rootOpts(program),
+          context: cmdOpts.context,
+          ...(cmdOpts.limit !== undefined ? { limit: cmdOpts.limit } : {}),
+          ...(cmdOpts.kind
+            ? { kind: cmdOpts.kind as "task" | "message" | "artifact" | "all" }
+            : {}),
+          ...(cmdOpts.baseUrl !== undefined ? { baseUrl: cmdOpts.baseUrl } : {}),
+        });
+      }
+    );
+
+  a2a
+    .command("verify")
+    .description(
+      "verify an A2A attestation by ID (exit: 0 ok, 3 tampered, 1 not found)"
+    )
+    .requiredOption("--attestation <id>", "attestation ID to verify")
+    .option("--base-url <url>", "override the server base URL")
+    .action(
+      async (cmdOpts: { attestation: string; baseUrl?: string }) => {
+        await runA2AVerify({
+          ...rootOpts(program),
+          attestation: cmdOpts.attestation,
+          ...(cmdOpts.baseUrl !== undefined ? { baseUrl: cmdOpts.baseUrl } : {}),
+        });
+      }
+    );
 
   // identity {import, export}
   const identity = program

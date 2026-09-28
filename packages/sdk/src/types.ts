@@ -253,3 +253,135 @@ export interface SealedHit {
 export interface Embedder {
   embed(text: string): Promise<Float32Array>;
 }
+
+// ── A2A types (Task 7) ────────────────────────────────────────────────────────
+// Field names match A2A v1.0.0-rc.
+
+/**
+ * A part of an A2A message — text, file, or data.
+ *
+ * @see https://google.github.io/A2A/spec/
+ */
+export type A2APart =
+  | { type: "text"; text: string }
+  | {
+      type: "file";
+      file: {
+        name?: string;
+        mimeType?: string;
+        bytes?: string;
+        uri?: string;
+      };
+    }
+  | { type: "data"; data: Record<string, unknown> };
+
+/**
+ * An A2A task — the top-level unit of work exchanged between agents.
+ *
+ * Corresponds to `Task` in the A2A v1.0.0-rc specification.
+ */
+export interface A2ATask {
+  /** Unique task identifier. */
+  id: string;
+  /** Context identifier grouping related tasks / messages. */
+  contextId?: string;
+  /** Task status. */
+  status: {
+    state:
+      | "submitted"
+      | "working"
+      | "input-required"
+      | "completed"
+      | "canceled"
+      | "failed"
+      | "unknown";
+    message?: A2AMessage;
+    timestamp?: string;
+  };
+  /** Task history (prior messages). */
+  history?: A2AMessage[];
+  /** Artifacts produced by the task. */
+  artifacts?: A2AArtifact[];
+  /** Agent-specific metadata. */
+  metadata?: Record<string, unknown>;
+}
+
+/**
+ * An A2A message — a single turn in an agent conversation.
+ *
+ * Corresponds to `Message` in the A2A v1.0.0-rc specification.
+ */
+export interface A2AMessage {
+  /** Unique message identifier. */
+  messageId: string;
+  /** The task this message belongs to. */
+  taskId?: string;
+  /** Context identifier. */
+  contextId?: string;
+  /** Sender role. */
+  role: "user" | "agent";
+  /** Message content parts. */
+  parts: A2APart[];
+  /** Agent-specific metadata. */
+  metadata?: Record<string, unknown>;
+  /** ISO-8601 timestamp. */
+  timestamp?: string;
+}
+
+/**
+ * An A2A artifact — output produced by an agent task.
+ *
+ * Corresponds to `Artifact` in the A2A v1.0.0-rc specification.
+ */
+export interface A2AArtifact {
+  /** Artifact identifier. */
+  artifactId: string;
+  /** The task that produced this artifact. */
+  taskId?: string;
+  /** Human-readable name. */
+  name?: string;
+  /** Description of the artifact. */
+  description?: string;
+  /** Artifact content parts. */
+  parts: A2APart[];
+  /** Agent-specific metadata. */
+  metadata?: Record<string, unknown>;
+  /** ISO-8601 timestamp. */
+  createdAt?: string;
+  /** Artifact index (when multiple artifacts per task). */
+  index?: number;
+  /** Whether this is the last artifact (for streaming). */
+  lastChunk?: boolean;
+  /** Whether the artifact should be appended to a previous one. */
+  append?: boolean;
+}
+
+/** Opaque attestation identifier returned by all attest* methods. */
+export type AttestationId = string;
+
+/** Options for `attestA2ATask`, `attestA2AMessage`, `attestA2AArtifact`. */
+export interface AttestA2AOptions {
+  /** Link to a prior attestation in the same context. */
+  prevId?: string;
+}
+
+/**
+ * A single attestation record returned by `recallA2AContext`.
+ */
+export interface Attestation {
+  attestationId: string;
+  /** "task" | "message" | "artifact" */
+  kind: "task" | "message" | "artifact";
+  /** ISO-8601 timestamp of when the attestation was signed. */
+  signedAt: string;
+  /** The attested object (verbatim from the server). */
+  payload: Record<string, unknown>;
+}
+
+/** Options for `recallA2AContext`. */
+export interface RecallA2AContextOptions {
+  /** Max number of attestations to return. Default: server-side. */
+  limit?: number;
+  /** Filter by object kind. Defaults to `"all"`. */
+  kind?: "task" | "message" | "artifact" | "all";
+}

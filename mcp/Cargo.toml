@@ -281,6 +281,93 @@ name = "oauth_refresh_e2e"
 path = "tests/oauth_refresh_e2e.rs"
 required-features = ["test-support"]
 
+# Tests added after the initial required-features sweep. All use
+# `mnemonic_mcp::test_support` and must be gated the same way.
+[[test]]
+name = "auth_allowlist"
+path = "tests/auth_allowlist.rs"
+required-features = ["test-support"]
+
+[[test]]
+name = "blog_publish"
+path = "tests/blog_publish.rs"
+required-features = ["test-support"]
+
+[[test]]
+name = "cli_bootstrap_auth_allowlist"
+path = "tests/cli_bootstrap_auth_allowlist.rs"
+required-features = ["test-support"]
+
+[[test]]
+name = "deferred_sign_flow"
+path = "tests/deferred_sign_flow.rs"
+required-features = ["test-support"]
+
+[[test]]
+name = "free_anchor_quota"
+path = "tests/free_anchor_quota.rs"
+required-features = ["test-support"]
+
+[[test]]
+name = "modes_per_request"
+path = "tests/modes_per_request.rs"
+required-features = ["test-support"]
+
+[[test]]
+name = "oauth_tool_call"
+path = "tests/oauth_tool_call.rs"
+required-features = ["test-support"]
+
+[[test]]
+name = "pending_expiry"
+path = "tests/pending_expiry.rs"
+required-features = ["test-support"]
+
+[[test]]
+name = "pending_user_cap"
+path = "tests/pending_user_cap.rs"
+required-features = ["test-support"]
+
+[[test]]
+name = "privacy_publish_e2e"
+path = "tests/privacy_publish_e2e.rs"
+required-features = ["test-support"]
+
+[[test]]
+name = "public_read_routes"
+path = "tests/public_read_routes.rs"
+required-features = ["test-support"]
+
+[[test]]
+name = "recall_merkle_commitment"
+path = "tests/recall_merkle_commitment.rs"
+required-features = ["test-support"]
+
+[[test]]
+name = "recall_owner_isolation"
+path = "tests/recall_owner_isolation.rs"
+required-features = ["test-support"]
+
+[[test]]
+name = "recall_session"
+path = "tests/recall_session.rs"
+required-features = ["test-support"]
+
+[[test]]
+name = "sealed_routes"
+path = "tests/sealed_routes.rs"
+required-features = ["test-support"]
+
+[[test]]
+name = "stage2_no_solana_memo"
+path = "tests/stage2_no_solana_memo.rs"
+required-features = ["test-support"]
+
+[[test]]
+name = "verify_by_stored_mode"
+path = "tests/verify_by_stored_mode.rs"
+required-features = ["test-support"]
+
 [dev-dependencies]
 tempfile = "3"
 # Ed25519 signing key for sealed-memory unit tests (Task 6). Same major as core.

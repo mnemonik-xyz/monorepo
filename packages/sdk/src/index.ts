@@ -28,12 +28,20 @@ export type { KeypairJson } from "./keypair.js";
 export { LocalSigner } from "./signer.js";
 export type { Signer } from "./signer.js";
 export type {
+  A2AArtifact,
+  A2AMessage,
+  A2APart,
+  A2ATask,
+  AttestA2AOptions,
+  AttestationId,
+  Attestation,
   Embedder,
   GrantEntry,
   KeypairProvider,
   MnemonicClientConfig,
   OpenMemoryResult,
   ProveResult,
+  RecallA2AContextOptions,
   RecallHit,
   RecallResult,
   RecallSealedOptions,

@@ -411,6 +411,18 @@ Addressed findings from `code-reviewer-round1.json` (changes-required; 1 major +
 - `grep -rn 'let _ = result' core/src/compress/` → 0 matches
 - `cargo test -p mnemonic-core compress::tests` → 7 pass
 
+## Task 16: Pre-deploy QA
+
+**Status:** Done (with fix)
+**Commit:** (pending)
+**Agent:** qa-runner
+**Summary:** Full acceptance testing pass. All criteria PASS after one fix: 17 mcp test files added after the initial required-features sweep were missing `required-features = ["test-support"]` entries in `mcp/Cargo.toml`, causing `cargo test --workspace` to fail with unresolved-import errors. Added the 17 missing `[[test]]` entries to `mcp/Cargo.toml`. After fix: `cargo test --workspace` → 1040 passed / 0 failed; `cargo test -p mnemonic-core` → 342 passed / 0 failed; `cargo clippy --workspace -- -D warnings` → clean; `cargo build -p mnemonic-mcp` → success; MCP stdio round-trip returns 11 tools (spec says 5, stale — subsequent tasks added A2A, share, publish_post, check_pending, confirm-gate, recall_a2a; mcp.rs inline test asserts 11). All grep checks pass: HashEmbedder absent, payment methods absent (one doc comment match — not executable code), architecture.md has both codec/ and lineage/ references.
+**Deviations:** Applied one fix (17 missing required-features entries in mcp/Cargo.toml) — this was a compilation blocker for `cargo test --workspace`, which is a required acceptance criterion. MCP tools/list criterion specifies 5 tools but current server returns 11 — spec is stale, not a regression; the mcp.rs inline test correctly asserts 11.
+
+**Deferred to post-deploy:** User keypair pubkey verification (requires local keypair file); old attestations.db migration check (requires pre-migration DB). See qa-report.json §deferredToPostDeploy.
+
+**Report:** [logs/working/qa-report.json](logs/working/qa-report.json)
+
 ## Task 23: Replace magic-number `0.05` in MSE roundtrip test with named threshold constant
 
 **Status:** Done

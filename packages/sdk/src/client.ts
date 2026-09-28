@@ -27,6 +27,12 @@
 // Sealed-memory extensions (T7):
 //   sealMemory, openMemory, share, importLink, listGrants, recallSealed.
 
+import {
+  attestA2AArtifact,
+  attestA2AMessage,
+  attestA2ATask,
+  recallA2AContext,
+} from "./a2a.js";
 import { coseSignPayload } from "./cose.js";
 import {
   AuthError,
@@ -39,12 +45,19 @@ import {
 import type { Keypair, KeypairJson } from "./keypair.js";
 import { readJwtExp } from "./oauth.js";
 import type {
+  A2AArtifact,
+  A2AMessage,
+  A2ATask,
+  AttestA2AOptions,
+  AttestationId,
+  Attestation,
   Embedder,
   GrantEntry,
   KeypairProvider,
   MnemonicClientConfig,
   OpenMemoryResult,
   ProveResult,
+  RecallA2AContextOptions,
   RecallHit,
   RecallResult,
   RecallSealedOptions,
@@ -926,13 +939,16 @@ export class MnemonicClient {
       unknown
     >;
     const raw = Array.isArray(body.grants) ? body.grants : [];
-    return raw.filter(isRecord).map((g) => ({
-      grantId: typeof g.grant_id === "string" ? g.grant_id : "",
-      memoryHash: typeof g.memory_hash === "string" ? g.memory_hash : "",
-      reader: typeof g.reader === "string" ? g.reader : undefined,
-      createdAt:
-        typeof g.created_at === "string" ? g.created_at : new Date().toISOString(),
-    }));
+    return raw.filter(isRecord).map((g) => {
+      const entry: { grantId: string; memoryHash: string; createdAt: string; reader?: string } = {
+        grantId: typeof g.grant_id === "string" ? g.grant_id : "",
+        memoryHash: typeof g.memory_hash === "string" ? g.memory_hash : "",
+        createdAt:
+          typeof g.created_at === "string" ? g.created_at : new Date().toISOString(),
+      };
+      if (typeof g.reader === "string") entry.reader = g.reader;
+      return entry;
+    });
   }
 
   /**
@@ -1032,6 +1048,87 @@ export class MnemonicClient {
       memoryHash: s.memoryHash,
       similarity: s.similarity,
     }));
+  }
+
+  // ------------------------------------------------------------------------
+  // A2A attestation methods (Task 7)
+  // ------------------------------------------------------------------------
+
+  /**
+   * Attest an A2A Task object under `contextId`. Returns the opaque
+   * `attestation_id` for the new attestation.
+   *
+   * @param task      - The A2A Task object (must have a non-empty `id`).
+   * @param contextId - Context that groups related A2A attestations.
+   * @param opts      - Optional `prevId` linking to a prior attestation.
+   * @throws `UserError`  if `task.id` or `contextId` is missing.
+   * @throws `ServerError` if the server does not return `attestation_id`.
+   * @throws `AuthError`  on 401/403.
+   */
+  attestA2ATask(
+    task: A2ATask,
+    contextId: string,
+    opts?: AttestA2AOptions
+  ): Promise<AttestationId> {
+    return attestA2ATask.call(this, task, contextId, opts);
+  }
+
+  /**
+   * Attest an A2A Message object under `contextId`.
+   *
+   * @param msg       - The A2A Message object (must have a non-empty `messageId`).
+   * @param contextId - Context that groups related A2A attestations.
+   * @param opts      - Optional `prevId`.
+   */
+  attestA2AMessage(
+    msg: A2AMessage,
+    contextId: string,
+    opts?: AttestA2AOptions
+  ): Promise<AttestationId> {
+    return attestA2AMessage.call(this, msg, contextId, opts);
+  }
+
+  /**
+   * Attest an A2A Artifact object under `contextId`.
+   *
+   * @param art       - The A2A Artifact object (must have a non-empty `artifactId`).
+   * @param contextId - Context that groups related A2A attestations.
+   * @param opts      - Optional `prevId`.
+   */
+  attestA2AArtifact(
+    art: A2AArtifact,
+    contextId: string,
+    opts?: AttestA2AOptions
+  ): Promise<AttestationId> {
+    return attestA2AArtifact.call(this, art, contextId, opts);
+  }
+
+  /**
+   * Recall all attestations anchored under a given A2A context.
+   *
+   * @param contextId - The context identifier to query.
+   * @param opts      - Optional `limit` and `kind` filter.
+   * @returns An array of `Attestation` records (tasks, messages, artifacts).
+   */
+  recallA2AContext(
+    contextId: string,
+    opts?: RecallA2AContextOptions
+  ): Promise<Attestation[]> {
+    return recallA2AContext.call(this, contextId, opts);
+  }
+
+  /**
+   * Internal bridge so A2A mixin functions can call `callTool` without
+   * exposing it on the public surface. Named `_callToolA2A` to signal that
+   * it is for A2A mixin use only.
+   *
+   * @internal
+   */
+  _callToolA2A(
+    name: string,
+    args: Record<string, unknown>
+  ): Promise<unknown> {
+    return this.callTool(name, args);
   }
 
   // ------------------------------------------------------------------------
