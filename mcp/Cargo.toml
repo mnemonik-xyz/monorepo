@@ -9,6 +9,10 @@ description = "Mnemonic MCP server — verifiable memory attestation primitive f
 # arweave, solana, lineage flow in from here).
 mnemonic-core = { path = "../core", features = ["a2a-experimental"] }
 
+# A2A adapter — attest_task / attest_message / attest_artifact / recall_by_context
+# used by the `mnemonic_attest_a2a` and `mnemonic_recall_a2a` MCP tools (Task 5).
+mnemonic-a2a = { path = "../mnemonic-a2a" }
+
 # Async runtime
 tokio = { version = "1", features = ["full"] }
 # Stream wrappers for streamable HTTP NDJSON framing (Decision 1)
@@ -175,6 +179,13 @@ test-support = ["dep:tempfile"]
 # message when the flag is omitted instead of silently producing
 # `0 tests, 0 benchmarks` from the file-level `#![cfg(feature = ...)]` gate
 # (round-1 test-reviewer finding #1).
+# A2A bridge Task 5 — mnemonic_attest_a2a + mnemonic_recall_a2a MCP tools.
+# Uses `TestServer` from `_helpers` which imports `mnemonic_mcp::test_support`.
+[[test]]
+name = "integration_a2a_mcp_tools"
+path = "tests/integration_a2a_mcp_tools.rs"
+required-features = ["test-support"]
+
 [[test]]
 name = "oauth_google"
 path = "tests/oauth_google.rs"
@@ -275,6 +286,9 @@ tempfile = "3"
 # Ed25519 signing key for sealed-memory unit tests (Task 6). Same major as core.
 ed25519-dalek = { version = "2", features = ["hazmat"] }
 httpmock = "0.8"
+# EIP-191 personal_sign test-signer for T03 wallet-link unit tests.
+alloy-signer = { version = "1.6", features = ["eip712"] }
+alloy-signer-local = "1.6"
 # `#[traced_test]` macro + `logs_contain` helper used by the WARN-log
 # assertions in oauth::tests::jwt_ttl_* (Task 2, refresh-token-rotation).
 # Tech-spec Dependencies list it; landing here lets Task 3

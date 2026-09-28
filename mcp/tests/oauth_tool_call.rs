@@ -50,6 +50,9 @@ const EXPECTED_TOOLS: &[&str] = &[
     "mnemonic_publish_post",
     // Task 10 — sealed-memory sharing (Decision D-11).
     "mnemonic_share",
+    // A2A bridge Task 5 — attest + recall A2A objects.
+    "mnemonic_attest_a2a",
+    "mnemonic_recall_a2a",
 ];
 
 fn build_router(state: Arc<McpState>, oauth_state: Arc<OAuthState>) -> Router {

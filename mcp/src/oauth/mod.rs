@@ -2288,11 +2288,16 @@ pub fn extract_tools_call_name(bytes: &[u8]) -> Option<String> {
 /// (e.g. `mnemonic_recall` filters by `visibility='public'` when
 /// `jwt_sub` is absent — AC13).
 ///
-/// Only `mnemonic_recall` belongs here in v1 of agent-native-distribution.
 /// Adding a new entry expands the anonymous attack surface — review
 /// carefully and pair with explicit visibility / tenancy guards in the
 /// downstream handler.
-const ALLOWLIST_TOOLS_CALL_NAMES: &[&str] = &["mnemonic_recall"];
+const ALLOWLIST_TOOLS_CALL_NAMES: &[&str] = &[
+    "mnemonic_recall",
+    // mnemonic_recall_a2a is read-only and free — no storage writes, no
+    // payment gate. Anonymous access is safe: it returns rows for the
+    // supplied context_id only (A2A attestation rows, no personal content).
+    "mnemonic_recall_a2a",
+];
 
 /// Bearer-auth middleware. Inserts the resolved `Claims` into the request
 /// extension on success so downstream handlers can read `jwt.sub` via
