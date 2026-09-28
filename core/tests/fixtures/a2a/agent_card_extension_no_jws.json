@@ -1,0 +1,15 @@
+{
+  "name": "Mnemonic Protocol Agent (unsigned)",
+  "description": "An agent with the x-mnemonic extension present but JWS signatures absent — MUST FAIL coverage check.",
+  "url": "https://mnemonik.xyz",
+  "version": "1",
+  "spec_version": "draft-2026-05",
+  "extensions": [
+    {
+      "uri": "https://mnemonik.xyz/extensions/x-mnemonic/v1",
+      "ed25519_pubkey_base58": "3MrF7MAkQV3vNtNPeXqfWtLFGNYFMmT2gkS5PVJGQ1ej",
+      "attestation_endpoint": "https://api.mnemonik.xyz/a2a",
+      "conformance_version": "1"
+    }
+  ]
+}

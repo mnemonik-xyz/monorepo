@@ -487,18 +487,43 @@ pub async fn sign_callback_handler(
             .await;
             match gate {
                 PaymentGate::Proceed => {}
-                PaymentGate::NeedUniversalPaywall(payment) => {
-                    return (
-                        StatusCode::PAYMENT_REQUIRED,
-                        Json(serde_json::json!({
-                            "status": "awaiting_payment",
-                            "correlation_id": req.correlation_id,
-                            "artifact_hash": staged.artifact_hash,
-                            "payment": payment,
-                            "free_anchors": free_anchors,
-                        })),
-                    )
-                        .into_response();
+                PaymentGate::NeedUniversalPaywall(ref up) => {
+                    // M1: emit a conformant x402 v2 `PaymentRequired` body.
+                    // The approval URL and bespoke fields move into `extensions`
+                    // so the top level has no unrecognised fields. The
+                    // correlation_id / artifact_hash context is preserved for
+                    // the browser approval page via `extensions`.
+                    let mut x402 = payment::up_payment_required(up, "");
+                    x402.free_anchors = free_anchors;
+                    if let Some(entry) = x402.accepts.first_mut() {
+                        let mut ext = entry
+                            .extensions
+                            .take()
+                            .unwrap_or(serde_json::Value::Object(Default::default()));
+                        if let Some(obj) = ext.as_object_mut() {
+                            obj.insert(
+                                "correlation_id".into(),
+                                serde_json::Value::String(req.correlation_id.clone()),
+                            );
+                            obj.insert(
+                                "artifact_hash".into(),
+                                serde_json::Value::String(staged.artifact_hash.clone()),
+                            );
+                        }
+                        entry.extensions = Some(ext);
+                    }
+                    // x402 v2 transport: base64 `PAYMENT-REQUIRED` header.
+                    let mut resp = (StatusCode::PAYMENT_REQUIRED, Json(&x402)).into_response();
+                    if let Ok(json) = serde_json::to_string(&x402) {
+                        let b64 = base64::Engine::encode(
+                            &base64::engine::general_purpose::STANDARD,
+                            json.as_bytes(),
+                        );
+                        if let Ok(hv) = HeaderValue::from_str(&b64) {
+                            resp.headers_mut().insert("payment-required", hv);
+                        }
+                    }
+                    return resp;
                 }
                 PaymentGate::NeedPayment(_) => {
                     return error_resp(
@@ -2753,13 +2778,38 @@ fn webapp_public_base() -> String {
 /// extension (BOTH the native `mnemonic_publish_post` MCP tool AND the Micropub
 /// `POST /blog` interop surface, plus the OAuth2-Bearer auth requirement), and
 /// points back to the canonical card. Discovery only — publishing lives in T9.
+///
+/// When the env var `SERVER_ATTESTATION_PUBKEY` is set to a base58-encoded
+/// Ed25519 public key, the card also includes an `extensions` array containing
+/// the `x-mnemonic` extension descriptor (Decision 3 in work/a2a-bridge).
+/// This lets any A2A-native verifier locate the Mnemonic attestation key
+/// directly from the AgentCard without a separate lookup.
 fn agent_card_json() -> serde_json::Value {
     let origin = crate::oauth::server_origin();
+
+    // Decision 3 (a2a-bridge): if an attestation pubkey is configured, include
+    // the x-mnemonic extension in the AgentCard's `extensions` array so that
+    // A2A verifiers can locate the Ed25519 attestation key directly.
+    let extensions: serde_json::Value = match std::env::var("SERVER_ATTESTATION_PUBKEY")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+    {
+        Some(pubkey) => {
+            use mnemonic_core::codec::a2a::build_x_mnemonic_extension;
+            let attestation_endpoint = format!("{origin}/a2a");
+            serde_json::json!([
+                build_x_mnemonic_extension(&pubkey, Some(&attestation_endpoint))
+            ])
+        }
+        None => serde_json::json!([]),
+    };
+
     serde_json::json!({
         "name": "Mnemonic Protocol",
         "description": "Verifiable, persistent memory for AI agents, exposed over MCP. This API-origin AgentCard advertises discovery + the agent-native publishing capability.",
         "url": "https://mnemonik.xyz",
         "canonical": "https://mnemonik.xyz/.well-known/agent.json",
+        "extensions": extensions,
         "services": [
             {
                 "type": "mcp",

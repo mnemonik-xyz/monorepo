@@ -1,0 +1,22 @@
+{
+  "name": "Mnemonic Protocol Agent",
+  "description": "An AI agent with Mnemonic verifiable memory attestation.",
+  "url": "https://mnemonik.xyz",
+  "version": "1",
+  "spec_version": "draft-2026-05",
+  "extensions": [
+    {
+      "uri": "https://mnemonik.xyz/extensions/x-mnemonic/v1",
+      "ed25519_pubkey_base58": "3MrF7MAkQV3vNtNPeXqfWtLFGNYFMmT2gkS5PVJGQ1ej",
+      "attestation_endpoint": "https://api.mnemonik.xyz/a2a",
+      "conformance_version": "1"
+    }
+  ],
+  "signatures": [
+    {
+      "payload": "dGVzdC1wYXlsb2Fk",
+      "protected": "eyJhbGciOiJFZERTQSJ9",
+      "signature": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    }
+  ]
+}

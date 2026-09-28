@@ -1,0 +1,15 @@
+{
+  "name": "Plain A2A Agent",
+  "description": "A standard A2A agent with no Mnemonic extension.",
+  "url": "https://example.com",
+  "version": "1",
+  "spec_version": "draft-2026-05",
+  "extensions": [],
+  "signatures": [
+    {
+      "payload": "dGVzdC1wYXlsb2Fk",
+      "protected": "eyJhbGciOiJFZERTQSJ9",
+      "signature": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    }
+  ]
+}

@@ -8,11 +8,16 @@
 //! Enabled only with `--features a2a-experimental`.
 
 pub mod artifact;
+pub mod extension;
 pub mod message;
 pub mod part;
 pub mod task;
 
 pub use artifact::A2aArtifact;
+pub use extension::{
+    build_x_mnemonic_extension, extract_x_mnemonic, verify_card_covers_extension,
+    XMnemonicExtension, CONFORMANCE_VERSION, EXTENSION_URI,
+};
 pub use message::Message;
 pub use part::Part;
 pub use task::Task;

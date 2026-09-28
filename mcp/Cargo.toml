@@ -7,7 +7,7 @@ description = "Mnemonic MCP server — verifiable memory attestation primitive f
 [dependencies]
 # Core library (all domain types: codec, identity, embed, compress, storage,
 # arweave, solana, lineage flow in from here).
-mnemonic-core = { path = "../core" }
+mnemonic-core = { path = "../core", features = ["a2a-experimental"] }
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
