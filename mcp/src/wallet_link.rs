@@ -178,4 +178,82 @@ mod tests {
         assert!(challenge_message(&first).contains("operation_id: operation"));
         assert!(create_or_get_challenge(&conn, "operation", "other-subject", 31_337, now).is_err());
     }
+
+    /// T03: A wallet proof cannot be replayed for another subject, operation,
+    /// or chain. The challenge is single-use: once `wallet_address` is set the
+    /// row is locked against a second verification.
+    #[test]
+    fn wallet_proof_cannot_be_replayed_for_different_context() {
+        use alloy_primitives::hex;
+        use alloy_signer::Signer;
+        use alloy_signer_local::PrivateKeySigner;
+
+        let conn = Connection::open_in_memory().unwrap();
+        migrate_wallet_links(&conn).unwrap();
+        let now = Utc::now();
+
+        // Create a challenge for operation-A with chain 31337.
+        let challenge_a =
+            create_or_get_challenge(&conn, "op-a", "subject-a", 31_337, now).unwrap();
+        assert!(challenge_message(&challenge_a).contains("operation_id: op-a"));
+        assert!(challenge_message(&challenge_a).contains("chain_id: 31337"));
+
+        // A different subject or chain is rejected at challenge creation time.
+        assert!(create_or_get_challenge(&conn, "op-a", "subject-b", 31_337, now).is_err());
+        assert!(create_or_get_challenge(&conn, "op-a", "subject-a", 1, now).is_err());
+
+        // Sign the challenge with a deterministic test key (Anvil key #0).
+        let key_bytes =
+            hex::decode("ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80")
+                .unwrap();
+        let signer = PrivateKeySigner::from_slice(&key_bytes).unwrap();
+        let msg = challenge_message(&challenge_a);
+        let signature = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(signer.sign_message(msg.as_bytes()))
+            .unwrap();
+        let sig_hex = format!("0x{}", hex::encode(signature.as_bytes()));
+
+        // Verify and record the link.
+        let link = verify_and_record(&conn, &challenge_a, &sig_hex, now).unwrap();
+        assert!(!link.wallet_address.is_empty());
+        assert_eq!(link.subject_hash, "subject-a");
+        assert_eq!(link.chain_id, 31_337);
+
+        // The same challenge cannot be verified a second time (single-use).
+        assert!(verify_and_record(&conn, &challenge_a, &sig_hex, now)
+            .unwrap_err()
+            .to_string()
+            .contains("wallet_link_already_used_or_mismatched"));
+
+        // A different operation cannot reuse this link (get_verified is op-scoped).
+        assert!(get_verified(&conn, "op-b").unwrap().is_none());
+
+        // The verified link is retrievable for the original operation.
+        let recovered = get_verified(&conn, "op-a").unwrap().unwrap();
+        assert_eq!(recovered.wallet_address, link.wallet_address);
+    }
+
+    /// T03: An expired challenge is rejected. The five-minute expiry is
+    /// enforced by `verify_and_record`, not just by a wall-clock check.
+    #[test]
+    fn expired_wallet_link_challenge_is_rejected() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate_wallet_links(&conn).unwrap();
+
+        // Create a challenge that was issued five minutes + one second ago.
+        let issued_at = Utc::now() - chrono::TimeDelta::seconds(301);
+        let challenge =
+            create_or_get_challenge(&conn, "exp-op", "exp-subject", 31_337, issued_at).unwrap();
+
+        // Attempting to verify with `now` must fail because the challenge expired.
+        let now = Utc::now();
+        let error = verify_and_record(&conn, &challenge, "0x1234", now)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("wallet_link_expired"),
+            "expected wallet_link_expired, got: {error}"
+        );
+    }
 }
