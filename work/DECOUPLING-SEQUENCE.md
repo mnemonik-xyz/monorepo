@@ -12,11 +12,12 @@ obvious, and getting the order wrong is the only way this work destroys value.
 |---|---|---|---|
 | 0 | [`arweave-as-source-of-truth`](arweave-as-source-of-truth/) | Until Arweave is the only copy, the operator's database is a silent fallback and nothing below is testable | **shipped** (#246–#252) |
 | 1 | [`chain-agnostic`](chain-agnostic/) stage 1 — enumeration | The Solana memo is today the ONLY working enumeration source. Nothing may remove it before a replacement is **measured** | next |
-| 2 | [`chain-agnostic`](chain-agnostic/) stage 2 — drop the memo writer | Frees the per-write Solana fee. Readers stay for ever | after 1 |
-| 3 | [`dual-key-identity`](dual-key-identity/) | ERC-8004 needs an EVM address bound to the Mnemonic identity. Cheap, and it removes the only urgent reason for step 6 | parallel with 1–2 |
-| 4 | [`erc8004-reputation`](erc8004-reputation/) | Consumes step 3's binding. Otherwise the `mnemonic` namespace proves nothing about the rater | after 3 |
-| 5 | [`pluggable-storage`](pluggable-storage/) | Generalises the enumeration problem solved in step 1. Doing it first would mean solving that problem twice | after 1 |
-| 6 | [`multi-suite-signing`](multi-suite-signing/) | Unrecoverable failure mode. Last, and only if step 3 proves insufficient | last |
+| 2 | [`pluggable-anchoring`](pluggable-anchoring/) — Solana as a **choice** | Makes step 3 a config change rather than a code deletion, so it is reversible on a deploy | after 1 |
+| 3 | [`chain-agnostic`](chain-agnostic/) stage 2 — select `Anchor::None` | Frees the per-write Solana fee. Readers stay for ever | after 2, and only past the gate |
+| 4 | [`dual-key-identity`](dual-key-identity/) | ERC-8004 needs an EVM address bound to the Mnemonic identity. Cheap, and it removes the only urgent reason for step 7 | parallel with 1–3 |
+| 5 | [`erc8004-reputation`](erc8004-reputation/) | Consumes the dual-key binding. Otherwise the `mnemonic` namespace proves nothing about the rater | after 4 |
+| 6 | [`pluggable-storage`](pluggable-storage/) | Generalises the enumeration problem solved in step 1. Doing it first would mean solving that problem twice | after 1 |
+| 7 | [`multi-suite-signing`](multi-suite-signing/) | Unrecoverable failure mode. Last, and only if dual-key identity proves insufficient | last |
 | — | [`sealed-memories`](sealed-memories/) | Independent of all of the above. Its waves 1–5 are pure `core/` work with no conflicts | any time |
 
 ## The three constraints that set this order
@@ -52,6 +53,19 @@ conflate — one confusion between `chain_stats_gateway_url` (payload) and
 
 `pluggable-storage` comes after `chain-agnostic` stage 1 because both need "list everything this
 owner stored", and solving it once generically beats solving it twice.
+
+**4. Prefer making a thing optional over deleting it.**
+
+`pluggable-anchoring` sits before the memo removal for a reason discovered while writing these
+specs: an `AnchorWriter` selection expresses "no Solana anchor" as a configuration value rather
+than as deleted code. Choosing `Anchor::None` is reversible on a deploy; deleting the write path
+is reversible only on a revert.
+
+That also answers `chain-agnostic` Q-1, which asked whether the removal should hide behind an
+environment flag. It should not need one — the anchor type *is* the flag.
+
+It does not weaken constraint 1. Pluggability makes the switch reversible; only a measured
+enumeration result makes it safe.
 
 ## What is deliberately not sequenced
 
