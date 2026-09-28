@@ -102,6 +102,9 @@ pub fn mock_state() -> Arc<McpState> {
     let path_buf = path.keep().expect("keep tempfile");
 
     let store = SqliteStore::open(&path_buf).expect("sqlite open");
+    // Mirror main.rs: init_payment_schema creates the payment tables
+    // (x402_nonces, payment_events, etc.) that x402 handlers query.
+    crate::payment::init_payment_schema(store.conn()).expect("init payment schema");
     // Mirror main.rs: the paid-anchoring tables are migrated unconditionally at
     // startup. Without them `get_staged_delivery_context` errors instead of
     // returning `Ok(None)`, and the sign-callback recovery branch turns an
@@ -209,6 +212,11 @@ pub fn mock_state_with(
     let path_buf = path.keep().expect("keep tempfile");
 
     let store = SqliteStore::open(&path_buf).expect("sqlite open");
+    // Mirror main.rs startup sequence: init_payment_schema FIRST (creates
+    // x402_nonces, payment_events, api_keys, attestation_costs), then the
+    // per-feature migrations. Without init_payment_schema, x402 handlers
+    // fail with sqlite "no such table" errors → 500 instead of 402/200.
+    crate::payment::init_payment_schema(store.conn()).expect("init payment schema");
     // Mirror main.rs: the paid-anchoring tables are migrated unconditionally at
     // startup. Without them `get_staged_delivery_context` errors instead of
     // returning `Ok(None)`, and the sign-callback recovery branch turns an
@@ -332,6 +340,11 @@ pub fn mock_state_for_delivery(
     let path_buf = path.keep().expect("keep tempfile");
 
     let store = SqliteStore::open(&path_buf).expect("sqlite open");
+    // Mirror main.rs startup sequence: init_payment_schema FIRST (creates
+    // x402_nonces, payment_events, api_keys, attestation_costs), then the
+    // per-feature migrations. Without init_payment_schema, x402 handlers
+    // fail with sqlite "no such table" errors → 500 instead of 402/200.
+    crate::payment::init_payment_schema(store.conn()).expect("init payment schema");
     // Mirror main.rs: the paid-anchoring tables are migrated unconditionally at
     // startup. Without them `get_staged_delivery_context` errors instead of
     // returning `Ok(None)`, and the sign-callback recovery branch turns an
@@ -446,6 +459,11 @@ pub fn mock_state_with_embedder_and_endpoint(
 
     let dim = embedder.dim();
     let store = SqliteStore::open(&path_buf).expect("sqlite open");
+    // Mirror main.rs startup sequence: init_payment_schema FIRST (creates
+    // x402_nonces, payment_events, api_keys, attestation_costs), then the
+    // per-feature migrations. Without init_payment_schema, x402 handlers
+    // fail with sqlite "no such table" errors → 500 instead of 402/200.
+    crate::payment::init_payment_schema(store.conn()).expect("init payment schema");
     // Mirror main.rs: the paid-anchoring tables are migrated unconditionally at
     // startup. Without them `get_staged_delivery_context` errors instead of
     // returning `Ok(None)`, and the sign-callback recovery branch turns an
