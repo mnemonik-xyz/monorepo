@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS attestations (
     -- single source of truth for both fresh DBs (where it ALTERs immediately)
     -- and legacy DBs (where it backfills). PRAGMA table_info gates the ALTER
     -- so it runs at most once per DB.
+    -- privacy TEXT and sealed_blob BLOB are added by migrate_sealed_columns().
 );
 CREATE TABLE IF NOT EXISTS attestation_embeddings (
     attestation_id TEXT PRIMARY KEY,
@@ -36,6 +37,42 @@ CREATE TABLE IF NOT EXISTS attestation_embeddings (
 );
 CREATE INDEX IF NOT EXISTS idx_attestations_signer ON attestations(signer_pubkey);
 CREATE INDEX IF NOT EXISTS idx_attestations_content_hash ON attestations(content_hash);
+
+-- Sealed-memories tables (task 4).
+-- `grants` stores decryption grants linking a sealed memory to an authorised
+-- reader (or broadcast). `memory_hash` is the blake3 hash of the sealed
+-- attestation. `reader_kid` is NULL for anonymous/broadcast grants.
+-- `grant_cose` is the raw COSE_Sign1 envelope of the grant artifact.
+-- `withdrawn_at` is set when the author revokes the grant.
+CREATE TABLE IF NOT EXISTS grants (
+    id TEXT PRIMARY KEY,
+    memory_hash TEXT NOT NULL,
+    reader_kid TEXT,
+    grant_cose BLOB NOT NULL,
+    author_pubkey TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    withdrawn_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_grants_memory_hash ON grants(memory_hash);
+CREATE INDEX IF NOT EXISTS idx_grants_reader_kid ON grants(reader_kid);
+
+-- Per-owner recall key store (tech-spec §7.4, used by task 13).
+-- `rk_wrap` is the recall key wrapped for the owner's identity key.
+CREATE TABLE IF NOT EXISTS owner_recall_keys (
+    owner_pubkey TEXT PRIMARY KEY,
+    rk_wrap BLOB NOT NULL
+);
+
+-- Sealed-index table (tech-spec §7.4, used by task 13).
+-- `k_wrap_rk` is the content key wrapped under the recall key.
+-- `emb_nonce` + `emb_ct` store the AEAD-encrypted embedding so the owner
+-- can later rebuild their index from the sealed row.
+CREATE TABLE IF NOT EXISTS sealed_index (
+    attestation_id TEXT PRIMARY KEY,
+    k_wrap_rk BLOB NOT NULL,
+    emb_nonce BLOB NOT NULL,
+    emb_ct BLOB NOT NULL
+);
 
 CREATE TABLE IF NOT EXISTS api_keys (
     api_key TEXT PRIMARY KEY,
@@ -109,26 +146,31 @@ CREATE INDEX IF NOT EXISTS idx_blog_posts_published_at ON blog_posts(published_a
 /// `Some(owner)` AND `visibility_filter = None` (authenticated path —
 /// sees all of the owner's own rows regardless of visibility per
 /// Decision 5). Owner scope is the mandatory tenant predicate from
-/// Decision 9.
+/// Decision 9. Sealed rows (`privacy = 'sealed'`) are excluded: their
+/// content is encrypted and stored in `sealed_blob`, not in the `content`
+/// column that search results carry.
 const SEARCH_SQL_ALL: &str = "SELECT a.attestation_id, a.content, a.content_hash, a.tags,
             a.solana_tx, a.arweave_tx, a.created_at, a.write_mode,
             a.visibility, ae.embedding, a.signer_pubkey, COALESCE(a.owner_pubkey, ''),
             a.plaintext_on_arweave
      FROM attestations a
      JOIN attestation_embeddings ae ON a.attestation_id = ae.attestation_id
-     WHERE a.owner_pubkey = ?";
+     WHERE a.owner_pubkey = ?
+       AND (a.privacy IS NULL OR a.privacy = 'plaintext')";
 
 /// SQL backing `AttestationStore::search` when the caller passes a
 /// `Some(owner)` AND `Some(visibility)` (owner-scoped + visibility-filtered).
 /// Owner scope is preserved; visibility is bound via `ToSql`, never
-/// interpolated as text.
+/// interpolated as text. Sealed rows are excluded (same rationale as
+/// `SEARCH_SQL_ALL`).
 const SEARCH_SQL_FILTERED: &str = "SELECT a.attestation_id, a.content, a.content_hash, a.tags,
             a.solana_tx, a.arweave_tx, a.created_at, a.write_mode,
             a.visibility, ae.embedding, a.signer_pubkey, COALESCE(a.owner_pubkey, ''),
             a.plaintext_on_arweave
      FROM attestations a
      JOIN attestation_embeddings ae ON a.attestation_id = ae.attestation_id
-     WHERE a.owner_pubkey = ? AND a.visibility = ?";
+     WHERE a.owner_pubkey = ? AND a.visibility = ?
+       AND (a.privacy IS NULL OR a.privacy = 'plaintext')";
 
 /// SQL backing `AttestationStore::search` for the anonymous public-pool path
 /// (`owner_pubkey = None`). Returns rows from EVERY owner, but only rows whose
@@ -136,27 +178,30 @@ const SEARCH_SQL_FILTERED: &str = "SELECT a.attestation_id, a.content, a.content
 /// `Visibility::Public`, so private rows never reach an anonymous caller.
 /// Legacy rows with a NULL or empty `visibility` are backfilled to `'private'`
 /// by `migrate_visibility_column`, and a NULL never equals the bound value, so
-/// they also stay out of the pool (privacy-by-default).
+/// they also stay out of the pool (privacy-by-default). Sealed rows are
+/// excluded (same rationale as `SEARCH_SQL_ALL`).
 const SEARCH_SQL_PUBLIC_POOL: &str = "SELECT a.attestation_id, a.content, a.content_hash, a.tags,
             a.solana_tx, a.arweave_tx, a.created_at, a.write_mode,
             a.visibility, ae.embedding, a.signer_pubkey, COALESCE(a.owner_pubkey, ''),
             a.plaintext_on_arweave
      FROM attestations a
      JOIN attestation_embeddings ae ON a.attestation_id = ae.attestation_id
-     WHERE a.visibility = ?1";
+     WHERE a.visibility = ?1
+       AND (a.privacy IS NULL OR a.privacy = 'plaintext')";
 
 /// SQL backing `SqliteStore::search_owner_tagged` — owner-scoped cosine search
 /// limited to rows whose JSON `tags` array contains one exact tag. The caller
 /// binds the owner and a `%"<tag>"%` LIKE pattern. Used by the public `/chat`
 /// endpoint so it reads only the seeded `protocol-knowledge` corpus, never
-/// other rows that the operator key owns.
+/// other rows that the operator key owns. Sealed rows are excluded.
 const SEARCH_SQL_OWNER_TAGGED: &str = "SELECT a.attestation_id, a.content, a.content_hash, a.tags,
             a.solana_tx, a.arweave_tx, a.created_at, a.write_mode,
             a.visibility, ae.embedding, a.signer_pubkey, COALESCE(a.owner_pubkey, ''),
             a.plaintext_on_arweave
      FROM attestations a
      JOIN attestation_embeddings ae ON a.attestation_id = ae.attestation_id
-     WHERE a.owner_pubkey = ?1 AND a.tags LIKE ?2 ESCAPE '\\'";
+     WHERE a.owner_pubkey = ?1 AND a.tags LIKE ?2 ESCAPE '\\'
+       AND (a.privacy IS NULL OR a.privacy = 'plaintext')";
 
 /// SQL backing `SqliteStore::list_public_artifacts` — the non-search Ledger
 /// listing (`GET /artifacts`). Cross-owner, newest-first, bound `LIMIT`. Only
@@ -809,6 +854,96 @@ fn migrate_write_mode_anchored_rename(conn: &Connection) -> anyhow::Result<()> {
     }
 }
 
+/// Idempotent ADD-COLUMN migration for sealed-memories support (task 4).
+///
+/// Adds two columns to `attestations`:
+///   - `privacy TEXT NOT NULL DEFAULT 'plaintext'` — the privacy mode of the
+///     row. Values: `'plaintext'` (unencrypted, default for all existing rows)
+///     or `'sealed'` (content is encrypted; stored in `sealed_blob`).
+///   - `sealed_blob BLOB` — the raw COSE_Sign1 sealed artifact for
+///     `privacy = 'sealed'` rows. NULL for plaintext rows.
+///
+/// SQLite `ALTER TABLE ... ADD COLUMN` lacks `IF NOT EXISTS`, so presence is
+/// gated via `PRAGMA table_info`. Wrapped in `BEGIN IMMEDIATE` to serialize
+/// against any concurrent opener. Idempotent across deploys.
+fn migrate_sealed_columns(conn: &Connection) -> anyhow::Result<()> {
+    let need_privacy = !attestations_has_column(conn, "privacy")?;
+    let need_sealed_blob = !attestations_has_column(conn, "sealed_blob")?;
+
+    if !need_privacy && !need_sealed_blob {
+        return Ok(());
+    }
+
+    conn.execute_batch("BEGIN IMMEDIATE;")
+        .context("opening sealed_columns migration transaction")?;
+
+    let do_migration = || -> anyhow::Result<()> {
+        if need_privacy {
+            conn.execute(
+                "ALTER TABLE attestations
+                    ADD COLUMN privacy TEXT NOT NULL DEFAULT 'plaintext'",
+                [],
+            )
+            .context("adding attestations.privacy")?;
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_attestations_privacy
+                     ON attestations(privacy)",
+                [],
+            )
+            .context("creating idx_attestations_privacy")?;
+        }
+        if need_sealed_blob {
+            conn.execute(
+                "ALTER TABLE attestations ADD COLUMN sealed_blob BLOB",
+                [],
+            )
+            .context("adding attestations.sealed_blob")?;
+        }
+        Ok(())
+    };
+
+    match do_migration() {
+        Ok(()) => {
+            conn.execute_batch("COMMIT;")
+                .context("committing sealed_columns migration")?;
+            Ok(())
+        }
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK;");
+            Err(e)
+        }
+    }
+}
+
+/// A row returned by `SqliteStore::list_sealed`.
+#[derive(Debug, Clone)]
+pub struct SealedRow {
+    pub attestation_id: String,
+    pub content_hash: String,
+    pub solana_tx: String,
+    pub arweave_tx: String,
+    pub signer_pubkey: String,
+    pub owner_pubkey: String,
+    pub created_at: String,
+    /// The raw COSE_Sign1 sealed-artifact bytes.
+    pub sealed_blob: Vec<u8>,
+}
+
+/// A grant row returned by `SqliteStore::grants_for_reader` /
+/// `SqliteStore::grants_for_memory`.
+#[derive(Debug, Clone)]
+pub struct GrantRow {
+    pub id: String,
+    pub memory_hash: String,
+    /// `None` for anonymous / broadcast grants.
+    pub reader_kid: Option<String>,
+    /// Raw COSE_Sign1 envelope of the grant artifact.
+    pub grant_cose: Vec<u8>,
+    pub author_pubkey: String,
+    pub created_at: String,
+    pub withdrawn_at: Option<String>,
+}
+
 impl SqliteStore {
     pub fn open(path: &Path) -> anyhow::Result<Self> {
         if let Some(parent) = path.parent() {
@@ -839,6 +974,7 @@ impl SqliteStore {
         migrate_visibility_column(&conn)?;
         migrate_write_mode_anchored_rename(&conn)?;
         migrate_plaintext_on_arweave_column(&conn)?;
+        migrate_sealed_columns(&conn)?;
         Ok(Self { conn })
     }
 
@@ -858,6 +994,7 @@ impl SqliteStore {
         migrate_visibility_column(&conn)?;
         migrate_write_mode_anchored_rename(&conn)?;
         migrate_plaintext_on_arweave_column(&conn)?;
+        migrate_sealed_columns(&conn)?;
         Ok(Self { conn })
     }
 
@@ -1328,6 +1465,222 @@ impl SqliteStore {
             None => Ok(None),
         }
     }
+
+    // -- sealed-memories (task 4) --------------------------------------------
+
+    /// Persist a sealed attestation row. `sealed_blob` is the raw COSE_Sign1
+    /// bytes of the sealed artifact. `content` is stored as an empty string
+    /// (the ciphertext lives in `sealed_blob`). No embedding row is created:
+    /// sealed rows are opaque to vector search. `privacy` is set to `'sealed'`.
+    ///
+    /// Callers supply the same column set as `save_attestation`, except
+    /// `content` and `embedding` are absent — they have no meaning for a
+    /// sealed artifact.
+    #[allow(clippy::too_many_arguments)]
+    pub fn save_sealed_attestation(
+        &self,
+        attestation_id: &str,
+        content_hash: &str,
+        tags: &[String],
+        solana_tx: &str,
+        arweave_tx: &str,
+        signer_pubkey: &str,
+        owner_pubkey: &str,
+        created_at: &str,
+        write_mode: WriteMode,
+        sealed_blob: &[u8],
+    ) -> anyhow::Result<()> {
+        let tags_json = serde_json::to_string(tags)?;
+        self.conn.execute(
+            "INSERT OR REPLACE INTO attestations
+                 (attestation_id, content, content_hash, tags,
+                  solana_tx, arweave_tx, signer_pubkey, created_at, owner_pubkey,
+                  write_mode, visibility, plaintext_on_arweave,
+                  privacy, sealed_blob)
+             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            params![
+                attestation_id,
+                "",          // content — empty for sealed rows
+                content_hash,
+                tags_json,
+                solana_tx,
+                arweave_tx,
+                signer_pubkey,
+                created_at,
+                owner_pubkey,
+                write_mode.as_str(),
+                Visibility::Private.as_str(), // sealed rows are always private
+                false,                        // plaintext_on_arweave
+                "sealed",
+                sealed_blob,
+            ],
+        )?;
+        // Intentionally NO attestation_embeddings row — sealed content is
+        // opaque to vector search (task 4, TDD anchor).
+        Ok(())
+    }
+
+    /// List sealed attestation rows owned by `owner`, optionally after
+    /// `since` (ISO-8601), newest-first, capped at `limit`.
+    pub fn list_sealed(
+        &self,
+        owner: &str,
+        since: Option<&str>,
+        limit: usize,
+    ) -> anyhow::Result<Vec<SealedRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT attestation_id, content_hash, solana_tx, arweave_tx,
+                    signer_pubkey, COALESCE(owner_pubkey, ''), created_at,
+                    sealed_blob
+             FROM attestations
+             WHERE owner_pubkey = ?1
+               AND privacy = 'sealed'
+               AND created_at > ?2
+             ORDER BY created_at DESC
+             LIMIT ?3",
+        )?;
+        let rows = stmt.query_map(
+            params![owner, since.unwrap_or(""), limit as i64],
+            |row| {
+                Ok(SealedRow {
+                    attestation_id: row.get(0)?,
+                    content_hash: row.get(1)?,
+                    solana_tx: row.get(2)?,
+                    arweave_tx: row.get(3)?,
+                    signer_pubkey: row.get(4)?,
+                    owner_pubkey: row.get(5)?,
+                    created_at: row.get(6)?,
+                    sealed_blob: row.get::<_, Option<Vec<u8>>>(7)?.unwrap_or_default(),
+                })
+            },
+        )?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    /// Count sealed rows owned by `owner`.
+    pub fn count_sealed(&self, owner: &str) -> anyhow::Result<i64> {
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM attestations
+             WHERE owner_pubkey = ?1 AND privacy = 'sealed'",
+            params![owner],
+            |row| row.get(0),
+        )?;
+        Ok(count)
+    }
+
+    /// Persist a grant that links a sealed memory to an authorised reader.
+    ///
+    /// `reader_kid` is `None` for anonymous/broadcast grants.
+    /// `grant_cose` is the raw COSE_Sign1 envelope of the grant artifact.
+    #[allow(clippy::too_many_arguments)]
+    pub fn save_grant(
+        &self,
+        id: &str,
+        memory_hash: &str,
+        reader_kid: Option<&str>,
+        grant_cose: &[u8],
+        author_pubkey: &str,
+        created_at: &str,
+    ) -> anyhow::Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO grants
+                 (id, memory_hash, reader_kid, grant_cose, author_pubkey, created_at)
+             VALUES (?,?,?,?,?,?)",
+            params![id, memory_hash, reader_kid, grant_cose, author_pubkey, created_at],
+        )?;
+        Ok(())
+    }
+
+    /// Return all non-withdrawn grants for `reader_kid`. A `None` reader_kid
+    /// returns anonymous/broadcast grants.
+    pub fn grants_for_reader(&self, reader_kid: &str) -> anyhow::Result<Vec<GrantRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, memory_hash, reader_kid, grant_cose,
+                    author_pubkey, created_at, withdrawn_at
+             FROM grants
+             WHERE reader_kid = ?1
+               AND withdrawn_at IS NULL",
+        )?;
+        let rows = stmt.query_map(params![reader_kid], grant_row_from_row)?;
+        collect_grant_rows(rows)
+    }
+
+    /// Return all grants (withdrawn or not) for a sealed memory identified by
+    /// `memory_hash`.
+    pub fn grants_for_memory(&self, memory_hash: &str) -> anyhow::Result<Vec<GrantRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, memory_hash, reader_kid, grant_cose,
+                    author_pubkey, created_at, withdrawn_at
+             FROM grants
+             WHERE memory_hash = ?1",
+        )?;
+        let rows = stmt.query_map(params![memory_hash], grant_row_from_row)?;
+        collect_grant_rows(rows)
+    }
+
+    /// Withdraw a grant by setting `withdrawn_at` to the current UTC time.
+    /// No-op if the grant does not exist or is already withdrawn.
+    pub fn withdraw_grant(&self, id: &str) -> anyhow::Result<()> {
+        let now = chrono::Utc::now().to_rfc3339();
+        self.conn.execute(
+            "UPDATE grants SET withdrawn_at = ?1
+             WHERE id = ?2 AND withdrawn_at IS NULL",
+            params![now, id],
+        )?;
+        Ok(())
+    }
+
+    /// Data-fix for F1 (plaintext anchored rows): rows with
+    /// `write_mode = 'anchored'` and `visibility = 'private'` that were
+    /// written before decision D-8 may still have `privacy = 'plaintext'`
+    /// (the default) but may need their `privacy` column confirmed. This
+    /// function ensures anchored rows with `visibility = 'private'` get
+    /// `privacy = 'plaintext'`. Idempotent.
+    ///
+    /// Note: in practice the default `'plaintext'` covers these rows already.
+    /// This function is the explicit, testable contract that task 6 calls.
+    pub fn relabel_plaintext_anchors(&self) -> anyhow::Result<()> {
+        self.conn.execute(
+            "UPDATE attestations
+                SET privacy = 'plaintext'
+              WHERE visibility = 'private'
+                AND (privacy IS NULL OR privacy <> 'sealed')",
+            [],
+        )?;
+        Ok(())
+    }
+}
+
+/// Map a `grants` row (in the column order used by `grants_for_reader` /
+/// `grants_for_memory`) into a [`GrantRow`]. Shared so the two read paths
+/// cannot drift in column order.
+fn grant_row_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<GrantRow> {
+    Ok(GrantRow {
+        id: row.get(0)?,
+        memory_hash: row.get(1)?,
+        reader_kid: row.get(2)?,
+        grant_cose: row.get::<_, Vec<u8>>(3)?,
+        author_pubkey: row.get(4)?,
+        created_at: row.get(5)?,
+        withdrawn_at: row.get(6)?,
+    })
+}
+
+/// Collect a `MappedRows` iterator of `GrantRow` results into a `Vec`,
+/// discarding rows that fail to decode (should never happen on a well-formed
+/// DB, but keeps the read paths from unwinding on a single bad row).
+fn collect_grant_rows(
+    rows: rusqlite::MappedRows<'_, impl FnMut(&rusqlite::Row<'_>) -> rusqlite::Result<GrantRow>>,
+) -> anyhow::Result<Vec<GrantRow>> {
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r?);
+    }
+    Ok(out)
 }
 
 /// Map a `blog_posts` row (in the column order used by `list_blog_posts` /
@@ -3021,5 +3374,343 @@ mod tests {
             )
             .unwrap();
         assert_eq!(idx_count, 1);
+    }
+
+    // -- sealed-memories task 4 -----------------------------------------------
+
+    /// Helper: save a sealed row and return it.
+    fn save_sealed(store: &SqliteStore, id: &str, owner: &str) {
+        store
+            .save_sealed_attestation(
+                id,
+                &format!("hash-{id}"),
+                &[],
+                &format!("sol-{id}"),
+                &format!("ar-{id}"),
+                "signer",
+                owner,
+                "2026-09-28T10:00:00Z",
+                WriteMode::Local,
+                b"encrypted-blob",
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn migrate_sealed_columns_idempotent_on_existing_db() {
+        // Re-running the migration on an already-migrated (in_memory) DB
+        // must be a no-op and must not return an error.
+        let store = SqliteStore::in_memory().unwrap();
+        super::migrate_sealed_columns(store.conn()).unwrap();
+        super::migrate_sealed_columns(store.conn()).unwrap();
+
+        let cols: Vec<String> = store
+            .conn()
+            .prepare("PRAGMA table_info(attestations)")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+        assert!(
+            cols.contains(&"privacy".to_string()),
+            "privacy column must be present after idempotent migration"
+        );
+        assert!(
+            cols.contains(&"sealed_blob".to_string()),
+            "sealed_blob column must be present after idempotent migration"
+        );
+
+        // Exactly one index of that name — no duplicates from multiple runs.
+        let idx_count: i64 = store
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                   WHERE type='index' AND name='idx_attestations_privacy'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(idx_count, 1, "exactly one privacy index");
+    }
+
+    #[test]
+    fn sealed_row_never_appears_in_vector_search() {
+        // TDD anchor: a sealed row must never appear in any search variant.
+        let store = SqliteStore::in_memory().unwrap();
+        let owner = "owner-sealed-test";
+
+        // One sealed row and one plaintext row, same owner.
+        save_sealed(&store, "sealed-1", owner);
+        store
+            .save_attestation(
+                "plain-1",
+                "visible content",
+                "hash-plain",
+                &[],
+                "sol-plain",
+                "ar-plain",
+                "signer",
+                owner,
+                "2026-09-28T10:01:00Z",
+                WriteMode::Local,
+                Visibility::Private,
+                &[1.0, 0.0],
+            )
+            .unwrap();
+
+        // Owner-scoped authenticated search: sealed row must not appear.
+        let results = store.search(&[1.0, 0.0], Some(owner), None, 10).unwrap();
+        let ids: Vec<&str> = results.iter().map(|r| r.attestation_id.as_str()).collect();
+        assert!(
+            !ids.contains(&"sealed-1"),
+            "sealed row must not appear in owner-scoped search"
+        );
+        assert!(
+            ids.contains(&"plain-1"),
+            "plaintext row must appear in owner-scoped search"
+        );
+        assert_eq!(results.len(), 1, "exactly one result — the plaintext row");
+
+        // count_sealed only counts the sealed row.
+        assert_eq!(store.count_sealed(owner).unwrap(), 1);
+    }
+
+    #[test]
+    fn save_sealed_attestation_creates_no_embedding_row() {
+        // TDD anchor: sealed rows must not have an attestation_embeddings entry.
+        let store = SqliteStore::in_memory().unwrap();
+        save_sealed(&store, "sealed-emb", "owner-emb");
+
+        let emb_count: i64 = store
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM attestation_embeddings
+                 WHERE attestation_id = 'sealed-emb'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(emb_count, 0, "sealed rows must have no embedding row");
+
+        // But the row itself must exist in attestations.
+        let att_count: i64 = store
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM attestations
+                 WHERE attestation_id = 'sealed-emb' AND privacy = 'sealed'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(att_count, 1, "sealed row must exist in attestations");
+
+        // content must be empty.
+        let content: String = store
+            .conn()
+            .query_row(
+                "SELECT content FROM attestations WHERE attestation_id = 'sealed-emb'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(content.is_empty(), "sealed row content must be empty");
+    }
+
+    #[test]
+    fn grants_for_reader_returns_only_non_withdrawn() {
+        // TDD anchor: withdrawn grants must not be returned by grants_for_reader.
+        let store = SqliteStore::in_memory().unwrap();
+
+        store
+            .save_grant(
+                "grant-active",
+                "mem-hash-1",
+                Some("reader-kid-1"),
+                b"cose-bytes-active",
+                "author-pubkey",
+                "2026-09-28T10:00:00Z",
+            )
+            .unwrap();
+        store
+            .save_grant(
+                "grant-withdrawn",
+                "mem-hash-1",
+                Some("reader-kid-1"),
+                b"cose-bytes-withdrawn",
+                "author-pubkey",
+                "2026-09-28T10:01:00Z",
+            )
+            .unwrap();
+        // Withdraw the second grant.
+        store.withdraw_grant("grant-withdrawn").unwrap();
+
+        let active = store.grants_for_reader("reader-kid-1").unwrap();
+        let ids: Vec<&str> = active.iter().map(|g| g.id.as_str()).collect();
+        assert_eq!(ids, vec!["grant-active"], "only non-withdrawn grant returned");
+
+        // grants_for_memory returns both (including withdrawn).
+        let all = store.grants_for_memory("mem-hash-1").unwrap();
+        assert_eq!(all.len(), 2, "grants_for_memory returns all grants");
+
+        // The withdrawn grant has withdrawn_at set.
+        let withdrawn = all.iter().find(|g| g.id == "grant-withdrawn").unwrap();
+        assert!(
+            withdrawn.withdrawn_at.is_some(),
+            "withdrawn grant must have withdrawn_at"
+        );
+
+        // Second withdraw is idempotent (no error, stamp unchanged).
+        let stamp_before = withdrawn.withdrawn_at.clone().unwrap();
+        store.withdraw_grant("grant-withdrawn").unwrap();
+        let all2 = store.grants_for_memory("mem-hash-1").unwrap();
+        let withdrawn2 = all2.iter().find(|g| g.id == "grant-withdrawn").unwrap();
+        assert_eq!(
+            withdrawn2.withdrawn_at.as_deref(),
+            Some(stamp_before.as_str()),
+            "second withdraw must not move the stamp"
+        );
+    }
+
+    #[test]
+    fn relabel_plaintext_anchors_is_idempotent() {
+        // Rows with visibility='private' and privacy not already 'sealed'
+        // must get privacy='plaintext'. Running twice must be a no-op.
+        let store = SqliteStore::in_memory().unwrap();
+        store
+            .save_attestation(
+                "plain-priv",
+                "content",
+                "hash-pp",
+                &[],
+                "sol-pp",
+                "ar-pp",
+                "signer",
+                "owner-rel",
+                "2026-09-28T10:00:00Z",
+                WriteMode::Local,
+                Visibility::Private,
+                &[1.0, 0.0],
+            )
+            .unwrap();
+        save_sealed(&store, "sealed-rel", "owner-rel");
+
+        // First call.
+        store.relabel_plaintext_anchors().unwrap();
+
+        let privacy_plain: String = store
+            .conn()
+            .query_row(
+                "SELECT privacy FROM attestations WHERE attestation_id = 'plain-priv'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let privacy_sealed: String = store
+            .conn()
+            .query_row(
+                "SELECT privacy FROM attestations WHERE attestation_id = 'sealed-rel'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(privacy_plain, "plaintext", "private row must be plaintext");
+        assert_eq!(privacy_sealed, "sealed", "sealed row must remain sealed");
+
+        // Second call: idempotent — values unchanged.
+        store.relabel_plaintext_anchors().unwrap();
+        let privacy_plain2: String = store
+            .conn()
+            .query_row(
+                "SELECT privacy FROM attestations WHERE attestation_id = 'plain-priv'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            privacy_plain2, "plaintext",
+            "idempotent: plaintext stays plaintext"
+        );
+    }
+
+    #[test]
+    fn list_sealed_respects_owner_and_since() {
+        let store = SqliteStore::in_memory().unwrap();
+        let owner = "owner-list-sealed";
+
+        // Three sealed rows at different times.
+        for (id, ts) in [
+            ("s-1", "2026-09-28T08:00:00Z"),
+            ("s-2", "2026-09-28T09:00:00Z"),
+            ("s-3", "2026-09-28T10:00:00Z"),
+        ] {
+            store
+                .save_sealed_attestation(
+                    id,
+                    &format!("hash-{id}"),
+                    &[],
+                    &format!("sol-{id}"),
+                    &format!("ar-{id}"),
+                    "signer",
+                    owner,
+                    ts,
+                    WriteMode::Local,
+                    b"blob",
+                )
+                .unwrap();
+        }
+        // One row for a different owner — must never appear.
+        save_sealed(&store, "s-other", "other-owner");
+
+        // All sealed rows for owner, no since filter.
+        let all = store.list_sealed(owner, None, 10).unwrap();
+        assert_eq!(all.len(), 3, "all three sealed rows for owner");
+        // Newest first.
+        assert_eq!(all[0].attestation_id, "s-3");
+        assert_eq!(all[2].attestation_id, "s-1");
+
+        // Since filter: only rows strictly after s-1's timestamp.
+        let after = store
+            .list_sealed(owner, Some("2026-09-28T08:00:00Z"), 10)
+            .unwrap();
+        assert_eq!(after.len(), 2, "rows after since");
+        let after_ids: Vec<&str> = after.iter().map(|r| r.attestation_id.as_str()).collect();
+        assert!(after_ids.contains(&"s-2") && after_ids.contains(&"s-3"));
+
+        // Limit is honored.
+        let limited = store.list_sealed(owner, None, 2).unwrap();
+        assert_eq!(limited.len(), 2);
+    }
+
+    #[test]
+    fn grants_tables_exist_after_open() {
+        // Verify that the grants / owner_recall_keys / sealed_index tables
+        // exist after in_memory() initialises the schema.
+        let store = SqliteStore::in_memory().unwrap();
+        for table in ["grants", "owner_recall_keys", "sealed_index"] {
+            let count: i64 = store
+                .conn()
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master
+                     WHERE type='table' AND name=?1",
+                    params![table],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(count, 1, "table '{table}' must exist");
+        }
+        for idx in ["idx_grants_memory_hash", "idx_grants_reader_kid"] {
+            let count: i64 = store
+                .conn()
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master
+                     WHERE type='index' AND name=?1",
+                    params![idx],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(count, 1, "index '{idx}' must exist");
+        }
     }
 }
