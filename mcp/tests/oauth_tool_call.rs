@@ -48,6 +48,8 @@ const EXPECTED_TOOLS: &[&str] = &[
     "request_public_write_confirmation",
     // webapp-rethink T9 — agent-native publishing (Decision 5).
     "mnemonic_publish_post",
+    // Task 10 — sealed-memory sharing (Decision D-11).
+    "mnemonic_share",
 ];
 
 fn build_router(state: Arc<McpState>, oauth_state: Arc<OAuthState>) -> Router {

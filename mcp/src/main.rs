@@ -16,6 +16,7 @@ mod payment;
 mod pending;
 mod pricing;
 mod publish;
+mod sealed_routes;
 mod seed;
 mod tools;
 #[cfg(feature = "trajectory-experimental")]
@@ -1384,6 +1385,29 @@ async fn run_http(
             axum::routing::get(api::get_pending_handler),
         )
         .route("/api/sign-callback", post(api::sign_callback_handler))
+        // Task 10 — sealed-memory routes (all require Bearer JWT).
+        .route(
+            "/api/anchor-sealed",
+            post(sealed_routes::anchor_sealed_handler),
+        )
+        .route(
+            "/api/store-sealed",
+            post(sealed_routes::store_sealed_handler),
+        )
+        .route(
+            "/api/sealed",
+            axum::routing::get(sealed_routes::list_sealed_handler),
+        )
+        .route(
+            "/api/grants",
+            post(sealed_routes::create_grant_handler)
+                .get(sealed_routes::list_grants_handler),
+        )
+        .route(
+            "/api/grants/{id}",
+            axum::routing::delete(sealed_routes::delete_grant_handler),
+        )
+        .route("/api/embed", post(sealed_routes::embed_handler))
         // CLI bootstrap-ticket flow — mnemonic-cli tech-spec Decision 7.
         // /issue requires Bearer JWT (enforced by bearer_auth_middleware,
         // which inserts Claims into the request extension before the

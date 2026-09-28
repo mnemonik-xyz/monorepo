@@ -1653,6 +1653,22 @@ impl SqliteStore {
         )?;
         Ok(())
     }
+
+    /// Return `true` when the row identified by `tx_id` (Solana or Arweave tx)
+    /// is owned by `owner_pubkey` AND has `privacy = 'sealed'`.
+    /// Returns `false` for any other combination (not found, different owner,
+    /// or plaintext privacy) — the caller does not need to distinguish the cases.
+    pub fn is_sealed_by_tx(&self, tx_id: &str, owner_pubkey: &str) -> anyhow::Result<bool> {
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM attestations
+             WHERE (solana_tx = ?1 OR arweave_tx = ?1)
+               AND owner_pubkey = ?2
+               AND privacy = 'sealed'",
+            params![tx_id, owner_pubkey],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
+    }
 }
 
 /// Map a `grants` row (in the column order used by `grants_for_reader` /

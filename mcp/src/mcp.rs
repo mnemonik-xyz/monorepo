@@ -200,6 +200,8 @@ fn skill_for_tool(tool: &str) -> Option<&'static skills::SkillManifest> {
         "mnemonic_verify" => "mnemonik-verify",
         "mnemonic_recall" => "mnemonik-recall",
         "mnemonic_prove_identity" => "mnemonik-init",
+        // mnemonic_share — no dedicated skill manifest yet; share attest skill
+        "mnemonic_share" => "mnemonik-attest",
         _ => return None,
     };
     skills::ALL_SKILLS.iter().find(|s| s.name == target)
@@ -1116,6 +1118,18 @@ fn tool_definitions() -> Value {
                     "signed_post": {"type": "string", "description": "Hex COSE_Sign1 over the canonical-CBOR POST_V1 artifact, signed with YOUR key (producer = did:sol:<your pubkey>, slug = slugified title). Required unless you are the operator identity."},
                 },
                 "required": [],
+            },
+        },
+        {
+            "name": "mnemonic_share",
+            "description": "Initiate a sharing flow for a sealed (E2E encrypted) memory. Returns awaiting_signature with an approve_url that the webapp uses to let the owner sign a GRANT_V1 in their browser, granting a reader decryption access. The server never possesses the content key (K) — the approval must happen client-side.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "memory_hash": {"type": "string", "description": "blake3 hex hash of the sealed memory to share"},
+                    "reader": {"type": "string", "description": "DID / public-key identifier of the intended reader (kid)"},
+                },
+                "required": ["memory_hash", "reader"],
             },
         },
     ]);
@@ -2291,6 +2305,48 @@ async fn handle_tool_call(
             serde_json::to_value(post)
                 .map_err(|e| JsonRpcError::simple(-32603, format!("serialize post failed: {e}")))?
         }
+        // mnemonic_share — Task 10. Initiates a browser-mediated GRANT_V1 signing
+        // flow for a sealed memory. The server never possesses K; the webapp
+        // signs the grant client-side. Returns `awaiting_signature` with an
+        // `approve_url` that the webapp renders so the owner can sign.
+        "mnemonic_share" => {
+            // Auth required: must be the owner of the sealed memory.
+            let Some(sub) = jwt_sub else {
+                return Err(JsonRpcError::simple(
+                    -32001,
+                    "mnemonic_share requires authentication",
+                ));
+            };
+            let memory_hash = args
+                .get("memory_hash")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| {
+                    invalid_params(
+                        "memory_hash",
+                        &args.get("memory_hash").cloned().unwrap_or(Value::Null),
+                    )
+                })?;
+            let reader = args
+                .get("reader")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| {
+                    invalid_params("reader", &args.get("reader").cloned().unwrap_or(Value::Null))
+                })?;
+            // Build a correlation_id for the grant-signing flow. The webapp
+            // reads this to render the signing page; the client polls via
+            // mnemonic_check_pending (re-using the same correlation_id semantics).
+            let correlation_id = uuid::Uuid::new_v4().to_string();
+            let approve_url = format!("/approve-grant?correlation_id={correlation_id}&memory_hash={memory_hash}&reader={reader}&owner={sub}");
+            serde_json::json!({
+                "status": "awaiting_signature",
+                "correlation_id": correlation_id,
+                "approve_url": approve_url,
+                "memory_hash": memory_hash,
+                "reader": reader,
+                "owner": sub,
+                "note": "Open approve_url in the browser to sign the GRANT_V1 with your wallet. The server never possesses the content key (K).",
+            })
+        }
         _ => {
             return Err(JsonRpcError::simple(
                 -32603,
@@ -2555,16 +2611,16 @@ mod transport_tests {
         let tools = envelope["result"]["tools"]
             .as_array()
             .expect("tools array present");
-        // 8 base tools (incl. publish_post), plus 3 when the trajectory feature is compiled in.
+        // 9 base tools (incl. publish_post + mnemonic_share), plus 3 when the trajectory feature is compiled in.
         let expected = if cfg!(feature = "trajectory-experimental") {
-            11
+            12
         } else {
-            8
+            9
         };
         assert_eq!(
             tools.len(),
             expected,
-            "expected {expected} MCP tools in tools/list response (8 base incl. publish_post + trajectory tools when enabled)",
+            "expected {expected} MCP tools in tools/list response (9 base incl. publish_post + mnemonic_share + trajectory tools when enabled)",
         );
     }
 

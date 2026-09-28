@@ -1966,15 +1966,29 @@ pub async fn verify(
     // Storage lock discipline: SqliteStore is !Send. Hold the mutex
     // briefly for the routing lookup and DROP before any `.await` on
     // Arweave / Solana clients.
-    let (routed_mode, plaintext_on_arweave) = {
+    let (routed_mode, plaintext_on_arweave, is_sealed) = {
         let store = store.lock().expect("store mutex poisoned");
         (
             store.find_write_mode_by_tx(lookup_id, owner_pubkey)?,
             store
                 .plaintext_on_arweave_by_tx(lookup_id, owner_pubkey)?
                 .unwrap_or(false),
+            store.is_sealed_by_tx(lookup_id, owner_pubkey)?,
         )
     };
+
+    // Task 10: sealed rows must never attempt content decryption or hash
+    // reconstruction. Return `{sealed: true, readable: false}` immediately so
+    // the caller knows the row exists but its content is encrypted.
+    if is_sealed {
+        return Ok(serde_json::json!({
+            "status": "sealed",
+            "sealed": true,
+            "readable": false,
+            "lookup_id": lookup_id,
+            "note": "this memory is sealed (E2E encrypted); use mnemonic_share to grant a reader access",
+        }));
+    }
 
     // Owner decision D-8: tell the caller when the content is plain text on
     // Arweave. Only the owner reaches this point (non-owners get
@@ -2467,6 +2481,13 @@ pub fn recall(
         None => serde_json::Value::Null,
     };
     let (results, boundary) = label_recall_results(results, owner_pubkey);
+    // Task 10: count sealed rows for the authenticated owner so the agent
+    // knows hidden memories exist.  Anonymous callers (no owner_pubkey)
+    // never see sealed counts — sealed rows are personal.
+    let sealed_hidden: i64 = match owner_pubkey {
+        Some(owner) => store.count_sealed(owner).unwrap_or(0),
+        None => 0,
+    };
     let mut out = serde_json::json!({
         "query": query,
         "results": results,
@@ -2480,6 +2501,12 @@ pub fn recall(
         "verifiable": embedder.is_open_weights(),
         "merkle_commitment": merkle_commitment,
     });
+    if sealed_hidden > 0 {
+        out["sealed_hidden"] = serde_json::json!(sealed_hidden);
+        out["sealed_hint"] = serde_json::json!(format!(
+            "{sealed_hidden} sealed memories not shown — use mnemonic_share to grant access"
+        ));
+    }
     if let Some(boundary) = boundary {
         out["untrusted_notice"] = serde_json::json!(UNTRUSTED_NOTICE);
         out["untrusted_boundary"] = serde_json::json!(boundary);
