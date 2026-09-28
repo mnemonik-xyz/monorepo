@@ -23,8 +23,9 @@ describe("scaffold · manifest.json", () => {
   });
 
   it("has the expected permission set", () => {
-    // T10 round-2: `clipboardWrite` dropped (least-privilege; T13 adds
-    // it back when the recall overlay's "copy hash" gesture lands).
+    // T20: `clipboardWrite` added for the recall overlay's "Copy markdown"
+    // action (CWS permissions-justification row). This was deferred in
+    // T10 round-2 until the exact recall UX gesture landed.
     // Audit S3 / FW-S-07: `scripting` removed — T13 landed without
     // any `chrome.scripting.executeScript` call site (manifest
     // content_scripts cover all overlay injection paths). Re-add
@@ -36,10 +37,10 @@ describe("scaffold · manifest.json", () => {
         "identity",
         "contextMenus",
         "activeTab",
+        "clipboardWrite",
         "alarms",
       ]),
     );
-    expect(manifest.permissions).not.toContain("clipboardWrite");
     expect(manifest.permissions).not.toContain("scripting");
   });
 

@@ -19,6 +19,7 @@
 // its `cose.golden.test.ts`.
 
 import { describe, it, expect, beforeAll } from "vitest";
+import { existsSync } from "node:fs";
 import { readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
@@ -64,7 +65,15 @@ interface ManifestEntry {
 
 let manifest: ManifestEntry[] = [];
 
+// Skip the whole suite when the WASM artefacts have not been built yet.
+// Build them with:  cargo build -p mnemonic-core --target-dir core/pkg-web
+// Running `cargo build-wasm` from the repo root produces both pkg-web/ and
+// pkg-nodejs/ outputs. The test reporter surfaces this as a skip (yellow)
+// rather than a failure (red) so CI on a JS-only runner stays green.
+const WASM_AVAILABLE = existsSync(WEB_WASM_JS) && existsSync(WEB_WASM_BIN);
+
 beforeAll(async () => {
+  if (!WASM_AVAILABLE) return;
   const manifestPath = path.join(FIXTURE_DIR, "manifest.json");
   manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as ManifestEntry[];
   expect(manifest.length).toBeGreaterThanOrEqual(5);
@@ -96,7 +105,7 @@ function keypairFromSecret(secretHex: string, pubkey: string): KeypairJson {
   return { secret: Array.from(bytes), pubkey_base58: pubkey };
 }
 
-describe("WASM crypto pipeline parity (T05 golden fixtures)", () => {
+describe.skipIf(!WASM_AVAILABLE)("WASM crypto pipeline parity (T05 golden fixtures)", () => {
   it("loads ≥5 fixtures from disk", () => {
     expect(manifest.length).toBeGreaterThanOrEqual(5);
     expect(manifest[0]!.dim).toBe(384);

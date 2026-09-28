@@ -15,6 +15,8 @@ export default defineConfig({
     environmentMatchGlobs: [
       ["tests/component/**/*.test.tsx", "jsdom"],
       ["tests/unit/content/**/*.test.ts", "jsdom"],
+      // cloud-sync test dispatches CustomEvent on globalThis; needs jsdom.
+      ["tests/unit/background/**/*.test.ts", "jsdom"],
     ],
     exclude: ["tests/e2e/**", "node_modules/**", "dist/**"],
     setupFiles: ["./tests/setup.popup.ts"],

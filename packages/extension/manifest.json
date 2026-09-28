@@ -33,6 +33,7 @@
     "identity",
     "contextMenus",
     "activeTab",
+    "clipboardWrite",
     "alarms"
   ],
   "host_permissions": [

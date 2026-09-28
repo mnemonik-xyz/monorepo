@@ -209,6 +209,42 @@ function LandingPage({
           )}
         </div>
 
+        {/* T20 — Chrome extension section */}
+        <section
+          id="extension"
+          className="space-y-3 rounded-lg border border-text-muted/20 bg-white/5 p-6 text-left"
+          aria-label="Chrome extension"
+        >
+          <h2 className="text-base font-semibold text-text-primary">
+            Chrome Extension
+          </h2>
+          <p className="text-sm leading-relaxed text-text-muted">
+            Capture AI conversations from ChatGPT, Claude and Gemini — and any
+            web selection — as verifiable memory. Local-only (free) or synced to
+            managed Mnemonik infrastructure (paid).
+          </p>
+          <a
+            href="https://chromewebstore.google.com/detail/mnemonik"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-block rounded-md bg-accent-primary px-5 py-2.5 text-sm font-semibold text-background transition-opacity hover:opacity-90"
+            aria-label="Install Mnemonik on the Chrome Web Store"
+          >
+            Install from Chrome Web Store
+          </a>
+          <p className="text-xs text-text-muted">
+            Privacy policy:{" "}
+            <a
+              href="https://mnemonik.xyz/extension/privacy"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-accent-primary hover:underline"
+            >
+              mnemonik.xyz/extension/privacy
+            </a>
+          </p>
+        </section>
+
         <nav className="flex flex-col items-center gap-4 sm:flex-row sm:justify-center">
           <a
             href={`${MCP_BASE}/download-knowledge`}
