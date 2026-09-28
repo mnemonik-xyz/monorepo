@@ -43,6 +43,7 @@ tempfile = "3"
 subtle = "2"
 zeroize = { version = "1", features = ["derive", "zeroize_derive"] }
 fastembed = { version = "5", optional = true }
+serde_jcs = { version = "0.2", optional = true }
 tokio = { version = "1", features = ["time", "rt"] }
 
 # Native-only deps: rusqlite (bundled C SQLite) and reqwest do not compile for
@@ -78,6 +79,10 @@ golden-fixtures = []
 # Experimental until V1 GA is declared in that feature's decisions.md. Default
 # `cargo build --workspace` excludes it.
 trajectory-experimental = []
+# A2A (Agent-to-Agent) protocol v1.0.0-rc bindings: typed Rust mirrors of A2A
+# wire types with JCS (RFC 8785) canonicalization and COSE_Sign1 envelopes.
+# Experimental until the A2A spec GA is declared. Default cargo build excludes it.
+a2a-experimental = ["serde_jcs"]
 
 [dependencies.openssl-sys]
 version = "0.9"

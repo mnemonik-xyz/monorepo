@@ -10,3 +10,6 @@ pub mod canonical;
 pub mod hash;
 pub mod schema;
 pub mod sign;
+
+#[cfg(feature = "a2a-experimental")]
+pub mod a2a;

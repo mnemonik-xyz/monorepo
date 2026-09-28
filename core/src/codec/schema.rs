@@ -58,6 +58,18 @@ pub enum ArtifactType {
     #[cfg(feature = "trajectory-experimental")]
     #[serde(rename = "trajectory")]
     Trajectory,
+    /// An A2A Task object (A2A v1.0.0-rc).
+    #[cfg(feature = "a2a-experimental")]
+    #[serde(rename = "a2a.task")]
+    A2aTask,
+    /// An A2A Message object (A2A v1.0.0-rc).
+    #[cfg(feature = "a2a-experimental")]
+    #[serde(rename = "a2a.message")]
+    A2aMessage,
+    /// An A2A Artifact object (A2A v1.0.0-rc).
+    #[cfg(feature = "a2a-experimental")]
+    #[serde(rename = "a2a.artifact")]
+    A2aArtifact,
 }
 
 impl ArtifactType {
@@ -77,6 +89,12 @@ impl ArtifactType {
             Self::Verdict => "verdict",
             #[cfg(feature = "trajectory-experimental")]
             Self::Trajectory => "trajectory",
+            #[cfg(feature = "a2a-experimental")]
+            Self::A2aTask => "a2a.task",
+            #[cfg(feature = "a2a-experimental")]
+            Self::A2aMessage => "a2a.message",
+            #[cfg(feature = "a2a-experimental")]
+            Self::A2aArtifact => "a2a.artifact",
         }
     }
 
@@ -97,6 +115,12 @@ impl ArtifactType {
             "verdict" => Some(Self::Verdict),
             #[cfg(feature = "trajectory-experimental")]
             "trajectory" => Some(Self::Trajectory),
+            #[cfg(feature = "a2a-experimental")]
+            "a2a.task" => Some(Self::A2aTask),
+            #[cfg(feature = "a2a-experimental")]
+            "a2a.message" => Some(Self::A2aMessage),
+            #[cfg(feature = "a2a-experimental")]
+            "a2a.artifact" => Some(Self::A2aArtifact),
             _ => None,
         }
     }
@@ -511,6 +535,46 @@ pub const TRAJECTORY_V1: ArtifactSchema = ArtifactSchema {
     bytes_fields: &[],
 };
 
+/// a2a.task.v1 -- A2A Task object (A2A v1.0.0-rc).
+///
+/// Required fields match the A2A spec wire format exactly.
+/// `history` and `artifacts` are optional arrays of nested objects.
+#[cfg(feature = "a2a-experimental")]
+pub const A2A_TASK_V1: ArtifactSchema = ArtifactSchema {
+    artifact_type: ArtifactType::A2aTask,
+    version: 1,
+    required_fields: &["id", "contextId", "status"],
+    optional_fields: &["history", "artifacts"],
+    cbor_field_order: &["id", "contextId", "status", "history", "artifacts"],
+    bytes_fields: &[],
+};
+
+/// a2a.message.v1 -- A2A Message object (A2A v1.0.0-rc).
+///
+/// `role` ∈ {"user","agent"}. `parts` is a required array of Part objects.
+#[cfg(feature = "a2a-experimental")]
+pub const A2A_MESSAGE_V1: ArtifactSchema = ArtifactSchema {
+    artifact_type: ArtifactType::A2aMessage,
+    version: 1,
+    required_fields: &["role", "parts", "messageId"],
+    optional_fields: &["taskId", "contextId"],
+    cbor_field_order: &["role", "parts", "messageId", "taskId", "contextId"],
+    bytes_fields: &[],
+};
+
+/// a2a.artifact.v1 -- A2A Artifact object (A2A v1.0.0-rc).
+///
+/// `parts` is required. `artifactId` and `name` are optional.
+#[cfg(feature = "a2a-experimental")]
+pub const A2A_ARTIFACT_V1: ArtifactSchema = ArtifactSchema {
+    artifact_type: ArtifactType::A2aArtifact,
+    version: 1,
+    required_fields: &["parts"],
+    optional_fields: &["artifactId", "name"],
+    cbor_field_order: &["artifactId", "name", "parts"],
+    bytes_fields: &[],
+};
+
 /// Look up schema by type string and version.
 pub fn get_schema(artifact_type: &str, version: u32) -> Option<&'static ArtifactSchema> {
     match (artifact_type, version) {
@@ -528,6 +592,12 @@ pub fn get_schema(artifact_type: &str, version: u32) -> Option<&'static Artifact
         ("verdict", 1) => Some(&VERDICT_V1),
         #[cfg(feature = "trajectory-experimental")]
         ("trajectory", 1) => Some(&TRAJECTORY_V1),
+        #[cfg(feature = "a2a-experimental")]
+        ("a2a.task", 1) => Some(&A2A_TASK_V1),
+        #[cfg(feature = "a2a-experimental")]
+        ("a2a.message", 1) => Some(&A2A_MESSAGE_V1),
+        #[cfg(feature = "a2a-experimental")]
+        ("a2a.artifact", 1) => Some(&A2A_ARTIFACT_V1),
         _ => None,
     }
 }
