@@ -9,7 +9,7 @@ use std::path::Path;
 
 use super::mode::{Visibility, WriteMode};
 use super::traits::{
-    AttestationRow, AttestationStore, LineageStore, ReconstructionInputs, SearchResult,
+    AttestationRow, AttestationStore, ReconstructionInputs, SearchResult,
 };
 
 const SCHEMA: &str = r#"
@@ -73,53 +73,6 @@ CREATE TABLE IF NOT EXISTS sealed_index (
     emb_nonce BLOB NOT NULL,
     emb_ct BLOB NOT NULL
 );
-
-CREATE TABLE IF NOT EXISTS api_keys (
-    api_key TEXT PRIMARY KEY,
-    owner_pubkey TEXT NOT NULL DEFAULT '',
-    balance_micro_usdc INTEGER NOT NULL DEFAULT 0,
-    created_at TEXT NOT NULL,
-    last_used_at TEXT
-);
-
-CREATE TABLE IF NOT EXISTS payment_events (
-    event_id TEXT PRIMARY KEY,
-    api_key TEXT NOT NULL,
-    amount_micro_usdc INTEGER NOT NULL,
-    event_type TEXT NOT NULL,
-    tx_sig TEXT,
-    description TEXT NOT NULL DEFAULT '',
-    created_at TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_payment_events_key ON payment_events(api_key);
--- Note: the partial UNIQUE index on payment_events(tx_sig) is created
--- separately in `SqliteStore::open` / `SqliteStore::in_memory` AFTER a
--- one-shot dedup pass. Creating it here would fail on legacy databases
--- that accumulated duplicate tx_sigs under the old TOCTOU-vulnerable
--- code path. See `open()` for the migration sequence.
-
-CREATE TABLE IF NOT EXISTS x402_nonces (
-    tx_sig TEXT PRIMARY KEY,
-    used_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS attestation_costs (
-    attestation_id TEXT PRIMARY KEY,
-    irys_cost_lamports INTEGER NOT NULL,
-    sol_tx_fee_lamports INTEGER NOT NULL,
-    sol_price_usdc REAL NOT NULL,
-    earned_micro_usdc INTEGER NOT NULL,
-    created_at TEXT NOT NULL,
-    FOREIGN KEY (attestation_id) REFERENCES attestations(attestation_id)
-);
-
-CREATE TABLE IF NOT EXISTS lineage_edges (
-    parent_id TEXT NOT NULL,
-    child_id TEXT NOT NULL,
-    depth INTEGER NOT NULL,
-    PRIMARY KEY (parent_id, child_id)
-);
-CREATE INDEX IF NOT EXISTS idx_lineage_edges_child ON lineage_edges(child_id);
 
 -- Blog projection over public attestations (webapp-rethink Decision 7 / 8).
 -- A blog post IS a signed public attestation; this table is a query-convenience
@@ -368,53 +321,15 @@ pub struct BlogPost {
     pub published_at: String,
 }
 
-/// Shared initialization step run after `SCHEMA` for every backing store
-/// (file-backed via `open` and in-memory via `in_memory`).
-///
-/// Dedups any pre-existing duplicate non-NULL `tx_sig` rows, then creates
-/// the partial UNIQUE index on `payment_events(tx_sig)`. The dedup keeps
-/// the earliest row per `tx_sig` (lowest `rowid`) and deletes the rest —
-/// it is a no-op on fresh or already-clean databases, and cleans up
-/// legacy rows produced by the old TOCTOU-vulnerable `credit_deposit`.
-///
-/// Wrapped in `BEGIN IMMEDIATE` / `COMMIT` so that a concurrent opener
-/// cannot see a half-migrated state. `CREATE UNIQUE INDEX IF NOT EXISTS`
-/// is idempotent, so repeated opens of a clean DB execute cheaply.
-fn migrate_payment_events_unique_index(conn: &Connection) -> anyhow::Result<()> {
-    conn.execute_batch(
-        "BEGIN IMMEDIATE;
-         DELETE FROM payment_events
-          WHERE tx_sig IS NOT NULL
-            AND rowid NOT IN (
-                SELECT MIN(rowid) FROM payment_events
-                 WHERE tx_sig IS NOT NULL
-                 GROUP BY tx_sig
-            );
-         CREATE UNIQUE INDEX IF NOT EXISTS uq_payment_events_tx_sig
-             ON payment_events(tx_sig) WHERE tx_sig IS NOT NULL;
-         COMMIT;",
-    )
-    .context("migrating payment_events UNIQUE(tx_sig) index")?;
-    Ok(())
-}
-
 /// Idempotent ADD-COLUMN migration for OAuth ownership scope (Decision 9 + 11).
 ///
-/// Adds two columns:
-///   - `attestations.owner_pubkey TEXT` — the OAuth-resolved tenant scope
-///     used by `AttestationStore::search`. Distinct from the existing
-///     `signer_pubkey` column (the COSE_Sign1 signer identity).
-///   - `api_keys.oauth_pubkey TEXT` — links an API key to the OAuth user
-///     pubkey. Distinct from the existing `api_keys.owner_pubkey` (deposit
-///     owner — wallet that funds the key). Both can coexist.
+/// Adds `attestations.owner_pubkey TEXT` — the OAuth-resolved tenant scope
+/// used by `AttestationStore::search`. Distinct from the existing `signer_pubkey`
+/// column (the COSE_Sign1 signer identity).
 ///
-/// After ensuring the columns exist, backfills any pre-OAuth rows where
-/// `owner_pubkey` is NULL or empty by copying `signer_pubkey` into it. Pre-
-/// OAuth attestations were single-tenant by construction (server signs and
-/// implicitly owns), and without this backfill the mandatory owner filter in
-/// `search` hides them — including the RAG seed corpus that powers `/chat`.
-/// The backfill runs unconditionally and is idempotent (UPDATE only touches
-/// matching rows).
+/// `api_keys.oauth_pubkey` was previously added here but was moved to
+/// `mcp/src/payment.rs::init_payment_schema` in Task 17, since `api_keys` is
+/// a payment concern and does not belong in core.
 ///
 /// SQLite `ALTER TABLE ... ADD COLUMN` does not support `IF NOT EXISTS`, so
 /// presence is checked via `PRAGMA table_info(...)` and the ALTER runs only
@@ -436,7 +351,6 @@ fn migrate_owner_pubkey_columns(conn: &Connection) -> anyhow::Result<()> {
     }
 
     let need_attestations_col = !has_column(conn, "attestations", "owner_pubkey")?;
-    let need_api_keys_col = !has_column(conn, "api_keys", "oauth_pubkey")?;
 
     conn.execute_batch("BEGIN IMMEDIATE;")
         .context("opening owner_pubkey migration transaction")?;
@@ -451,10 +365,6 @@ fn migrate_owner_pubkey_columns(conn: &Connection) -> anyhow::Result<()> {
                 [],
             )
             .context("creating idx_attestations_owner")?;
-        }
-        if need_api_keys_col {
-            conn.execute("ALTER TABLE api_keys ADD COLUMN oauth_pubkey TEXT", [])
-                .context("adding api_keys.oauth_pubkey")?;
         }
         // Backfill legacy rows. Runs every open: cheap on clean DBs (zero
         // matches), correct on DBs that had the column added without a
@@ -1019,7 +929,6 @@ impl SqliteStore {
         )
         .context("setting WAL + busy_timeout + foreign_keys pragmas")?;
         conn.execute_batch(SCHEMA).context("initializing schema")?;
-        migrate_payment_events_unique_index(&conn)?;
         migrate_owner_pubkey_columns(&conn)?;
         migrate_correlation_id_column(&conn)?;
         migrate_write_mode_column(&conn)?;
@@ -1040,7 +949,6 @@ impl SqliteStore {
         // are enforced in tests using `in_memory()` too.
         conn.execute_batch("PRAGMA busy_timeout=5000; PRAGMA foreign_keys=ON;")?;
         conn.execute_batch(SCHEMA)?;
-        migrate_payment_events_unique_index(&conn)?;
         migrate_owner_pubkey_columns(&conn)?;
         migrate_correlation_id_column(&conn)?;
         migrate_write_mode_column(&conn)?;
@@ -1387,7 +1295,7 @@ impl SqliteStore {
         let mut stmt = self.conn.prepare(SEARCH_SQL_OWNER_TAGGED)?;
         let scorer = CosineScorer::new(query_embedding);
         let rows = stmt.query_map(params![owner_pubkey, pattern], |row| scorer.map_row(row))?;
-        let mut results: Vec<SearchResult> = rows.filter_map(|r| r.ok()).collect();
+        let mut results: Vec<SearchResult> = rows.collect::<rusqlite::Result<Vec<_>>>()?;
         sort_and_truncate(&mut results, limit);
         Ok(results)
     }
@@ -2087,16 +1995,7 @@ impl AttestationStore for SqliteStore {
         // and continued, leaving stale chunks alongside the fresh corpus.
         let tx = self.conn.unchecked_transaction()?;
         tx.execute(
-            "DELETE FROM memory_embeddings \
-             WHERE attestation_id IN (\
-               SELECT attestation_id FROM attestations \
-               WHERE owner_pubkey = ?1 \
-                 AND tags LIKE '%\"protocol-knowledge\"%'\
-             )",
-            params![owner_pubkey],
-        )?;
-        tx.execute(
-            "DELETE FROM attestation_costs \
+            "DELETE FROM attestation_embeddings \
              WHERE attestation_id IN (\
                SELECT attestation_id FROM attestations \
                WHERE owner_pubkey = ?1 \
@@ -2260,33 +2159,6 @@ fn sort_and_truncate(results: &mut Vec<SearchResult>, limit: usize) {
     results.truncate(limit);
 }
 
-impl LineageStore for SqliteStore {
-    fn save_edge(&self, parent_id: &str, child_id: &str, depth: i64) -> anyhow::Result<()> {
-        self.conn.execute(
-            "INSERT OR REPLACE INTO lineage_edges (parent_id, child_id, depth) VALUES (?,?,?)",
-            params![parent_id, child_id, depth],
-        )?;
-        Ok(())
-    }
-
-    fn get_edges(&self, child_id: &str) -> anyhow::Result<Vec<(String, i64)>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT parent_id, depth FROM lineage_edges WHERE child_id = ?")?;
-        let rows = stmt.query_map(params![child_id], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
-        })?;
-        Ok(rows.filter_map(|r| r.ok()).collect())
-    }
-
-    fn clear_edges(&self, artifact_id: &str) -> anyhow::Result<()> {
-        self.conn.execute(
-            "DELETE FROM lineage_edges WHERE parent_id = ? OR child_id = ?",
-            params![artifact_id, artifact_id],
-        )?;
-        Ok(())
-    }
-}
 
 fn floats_to_bytes(v: &[f32]) -> Vec<u8> {
     v.iter().flat_map(|f| f.to_le_bytes()).collect()
@@ -2314,10 +2186,66 @@ mod tests {
     /// (single tenant, single owner) while exercising the new column.
     const TEST_OWNER: &str = "test-owner-pubkey";
 
+    // ── Task 21: trait-reference contract test helper ─────────────────────────
+
+    /// Run the core attestation contract tests against any `&dyn AttestationStore`.
+    /// Called from test functions using a concrete `SqliteStore` to guarantee the
+    /// trait shape matches the implementation.
+    fn run_attestation_contract(store: &dyn AttestationStore) {
+        store
+            .save_attestation(
+                "contract-att",
+                "contract content",
+                "contract-hash",
+                &["contract-tag".into()],
+                "sol-contract",
+                "ar-contract",
+                "signer-contract",
+                "contract-owner",
+                "2026-01-01T00:00:00Z",
+                WriteMode::Anchored,
+                Visibility::Private,
+                &[1.0, 0.0],
+            )
+            .expect("save_attestation via trait ref");
+
+        let found = store
+            .find_by_tx("sol-contract", "contract-owner")
+            .expect("find_by_tx via trait ref");
+        assert!(found.is_some(), "trait ref: save + find_by_tx roundtrip");
+        let row = found.unwrap();
+        assert_eq!(row.attestation_id, "contract-att");
+
+        let miss = store
+            .find_by_tx("sol-contract", "wrong-owner")
+            .expect("find_by_tx wrong-tenant via trait ref");
+        assert!(miss.is_none(), "wrong-tenant must be indistinguishable from miss");
+
+        let n = store
+            .count("signer-contract")
+            .expect("count via trait ref");
+        assert!(n >= 1, "count must be >= 1 after save");
+
+        let results = store
+            .search(&[1.0, 0.0], Some("contract-owner"), None, 10)
+            .expect("search via trait ref");
+        assert_eq!(results.len(), 1, "search must return the saved row");
+        assert_eq!(results[0].attestation_id, "contract-att");
+    }
+
+    /// Task 21 (TEST-STORAGE-CONTRACT-1): exercises `AttestationStore` through a
+    /// `&dyn` reference, verifying the trait shape and object-safety.
+    #[test]
+    fn test_attestation_store_contract_via_dyn_ref() {
+        let store = SqliteStore::in_memory().unwrap();
+        run_attestation_contract(&store);
+    }
+
     #[test]
     fn test_save_and_find_by_tx() {
         let store = SqliteStore::in_memory().unwrap();
-        store
+        let store_ref: &dyn AttestationStore = &store;
+        store_ref
             .save_attestation(
                 "att-1",
                 "content",
@@ -2334,7 +2262,7 @@ mod tests {
             )
             .unwrap();
 
-        let found = store.find_by_tx("sol_tx_1", TEST_OWNER).unwrap();
+        let found = store_ref.find_by_tx("sol_tx_1", TEST_OWNER).unwrap();
         assert!(found.is_some());
         let row = found.unwrap();
         assert_eq!(row.attestation_id, "att-1");
@@ -2343,7 +2271,7 @@ mod tests {
 
         // Tenant-isolation predicate: a wrong-tenant lookup returns
         // `Ok(None)` indistinguishable from a genuine miss.
-        let other_tenant = store.find_by_tx("sol_tx_1", "different-owner").unwrap();
+        let other_tenant = store_ref.find_by_tx("sol_tx_1", "different-owner").unwrap();
         assert!(
             other_tenant.is_none(),
             "wrong-tenant lookup must return None"
@@ -2421,8 +2349,9 @@ mod tests {
     #[test]
     fn test_count_by_signer() {
         let store = SqliteStore::in_memory().unwrap();
+        let store_ref: &dyn AttestationStore = &store;
         for i in 0..2 {
-            store
+            store_ref
                 .save_attestation(
                     &format!("att-{i}"),
                     "c",
@@ -2439,7 +2368,7 @@ mod tests {
                 )
                 .unwrap();
         }
-        store
+        store_ref
             .save_attestation(
                 "att-other",
                 "c",
@@ -2456,17 +2385,18 @@ mod tests {
             )
             .unwrap();
 
-        // count() is unchanged — still by signer_pubkey, not owner.
-        assert_eq!(store.count("signer_a").unwrap(), 2);
-        assert_eq!(store.count("signer_b").unwrap(), 1);
+        // count() through trait ref.
+        assert_eq!(store_ref.count("signer_a").unwrap(), 2);
+        assert_eq!(store_ref.count("signer_b").unwrap(), 1);
     }
 
     #[test]
     fn test_search_ranking() {
         let store = SqliteStore::in_memory().unwrap();
+        let store_ref: &dyn AttestationStore = &store;
         // Two attestations with distinct embeddings, both owned by the same
         // tenant so the post-Decision-9 owner filter does not drop them.
-        store
+        store_ref
             .save_attestation(
                 "att-0",
                 "topic zero",
@@ -2482,7 +2412,7 @@ mod tests {
                 &[1.0, 0.0],
             )
             .unwrap();
-        store
+        store_ref
             .save_attestation(
                 "att-1",
                 "topic one",
@@ -2499,9 +2429,8 @@ mod tests {
             )
             .unwrap();
 
-        // Query closer to att-0's embedding; search is now scoped by
-        // `owner_pubkey`, not by `signer_pubkey`.
-        let results = store
+        // Query through trait ref.
+        let results = store_ref
             .search(&[1.0, 0.0], Some("owner_agent"), None, 2)
             .unwrap();
         assert_eq!(results.len(), 2);
@@ -2680,15 +2609,8 @@ mod tests {
             .collect();
         assert!(attestations_cols.contains(&"owner_pubkey".to_string()));
 
-        let api_keys_cols: Vec<String> = store
-            .conn()
-            .prepare("PRAGMA table_info(api_keys)")
-            .unwrap()
-            .query_map([], |row| row.get::<_, String>(1))
-            .unwrap()
-            .filter_map(|r| r.ok())
-            .collect();
-        assert!(api_keys_cols.contains(&"oauth_pubkey".to_string()));
+        // Note: api_keys.oauth_pubkey is now owned by mcp/src/payment.rs
+        // (Task 17 — payment schema moved out of core).
     }
 
     #[test]
@@ -2742,14 +2664,16 @@ mod tests {
     #[test]
     fn test_find_by_tx_not_found() {
         let store = SqliteStore::in_memory().unwrap();
-        let found = store.find_by_tx("nonexistent", TEST_OWNER).unwrap();
+        let store_ref: &dyn AttestationStore = &store;
+        let found = store_ref.find_by_tx("nonexistent", TEST_OWNER).unwrap();
         assert!(found.is_none());
     }
 
     #[test]
     fn test_duplicate_attestation_id() {
         let store = SqliteStore::in_memory().unwrap();
-        store
+        let store_ref: &dyn AttestationStore = &store;
+        store_ref
             .save_attestation(
                 "att-dup",
                 "c1",
@@ -2765,8 +2689,8 @@ mod tests {
                 &[1.0],
             )
             .unwrap();
-        // INSERT OR REPLACE so this succeeds (replaces)
-        let result = store.save_attestation(
+        // INSERT OR REPLACE through trait ref.
+        let result = store_ref.save_attestation(
             "att-dup",
             "c2",
             "h2",
@@ -2781,32 +2705,8 @@ mod tests {
             &[1.0],
         );
         assert!(result.is_ok());
-        // Content should be updated
-        let row = store.find_by_tx("sol2", TEST_OWNER).unwrap().unwrap();
+        let row = store_ref.find_by_tx("sol2", TEST_OWNER).unwrap().unwrap();
         assert_eq!(row.content, "c2");
-    }
-
-    #[test]
-    fn test_lineage_save_and_get() {
-        let store = SqliteStore::in_memory().unwrap();
-        store.save_edge("parent-1", "child-1", 1).unwrap();
-        store.save_edge("parent-2", "child-1", 1).unwrap();
-
-        let edges = store.get_edges("child-1").unwrap();
-        assert_eq!(edges.len(), 2);
-    }
-
-    #[test]
-    fn test_lineage_clear() {
-        let store = SqliteStore::in_memory().unwrap();
-        store.save_edge("p1", "c1", 1).unwrap();
-        store.save_edge("c1", "c2", 2).unwrap();
-        store.clear_edges("c1").unwrap();
-
-        let edges_c1 = store.get_edges("c1").unwrap();
-        assert!(edges_c1.is_empty());
-        let edges_c2 = store.get_edges("c2").unwrap();
-        assert!(edges_c2.is_empty());
     }
 
     // -- modes-user-choice T1 ------------------------------------------------

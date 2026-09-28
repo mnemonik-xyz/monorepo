@@ -213,16 +213,3 @@ pub trait AttestationStore {
     }
 }
 
-/// Minimal storage-level lineage operations.
-///
-/// Authorization is the caller's responsibility. These methods operate on the
-/// full database and do not enforce per-signer scoping.
-pub trait LineageStore {
-    fn save_edge(&self, parent_id: &str, child_id: &str, depth: i64) -> anyhow::Result<()>;
-
-    fn get_edges(&self, child_id: &str) -> anyhow::Result<Vec<(String, i64)>>;
-
-    fn clear_edges(&self, artifact_id: &str) -> anyhow::Result<()>;
-
-    // TODO(task-9): add get_lineage, get_ancestry, validate_chain methods after lineage types are in core
-}

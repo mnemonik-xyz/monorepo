@@ -58,7 +58,10 @@ impl SolanaClient {
         }
     }
 
-    pub async fn rpc(
+    /// Raw JSON-RPC call. Internal use only — typed methods are the public API surface.
+    /// Demoted to `pub(crate)` in Task 20 (CODE-AUDIT-005); all cross-crate callers
+    /// should use typed methods instead.
+    pub(crate) async fn rpc(
         &self,
         method: &str,
         params: serde_json::Value,
@@ -271,6 +274,61 @@ impl SolanaClient {
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         }
         anyhow::bail!("tx {sig} not confirmed")
+    }
+    /// Fetch the token balance delta for `recipient` holding `mint` in a confirmed
+    /// transaction. Returns `None` when the tx doesn't exist, failed on-chain, or
+    /// has no matching token account change. Returns the amount received (in the
+    /// token's smallest unit, e.g. micro-USDC for USDC) when positive.
+    ///
+    /// This replaces a direct `client.rpc("getTransaction", ...)` call in
+    /// `mcp/src/payment.rs::verify_usdc_transfer` (Task 20 / CODE-AUDIT-005).
+    /// Core handles RPC mechanics; the USDC-vs-recipient policy stays in mcp.
+    pub async fn get_token_balance_delta(
+        &self,
+        tx_sig: &str,
+        recipient: &str,
+        mint: &str,
+    ) -> anyhow::Result<Option<u64>> {
+        let result = self.rpc("getTransaction", serde_json::json!([
+            tx_sig,
+            {"encoding": "jsonParsed", "commitment": "confirmed", "maxSupportedTransactionVersion": 0}
+        ])).await?;
+
+        if result.is_null() {
+            return Ok(None);
+        }
+
+        if !result["meta"]["err"].is_null() {
+            return Ok(None);
+        }
+
+        let pre = result["meta"]["preTokenBalances"].as_array();
+        let post = result["meta"]["postTokenBalances"].as_array();
+
+        if let (Some(pre_balances), Some(post_balances)) = (pre, post) {
+            for post_entry in post_balances {
+                let owner = post_entry["owner"].as_str().unwrap_or("");
+                let entry_mint = post_entry["mint"].as_str().unwrap_or("");
+                if owner != recipient || entry_mint != mint {
+                    continue;
+                }
+                let post_amount: u64 = post_entry["uiTokenAmount"]["amount"]
+                    .as_str().unwrap_or("0").parse().unwrap_or(0);
+                let account_index = post_entry["accountIndex"].as_u64().unwrap_or(u64::MAX);
+                let pre_amount: u64 = pre_balances
+                    .iter()
+                    .find(|e| e["accountIndex"].as_u64() == Some(account_index))
+                    .and_then(|e| e["uiTokenAmount"]["amount"].as_str())
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0);
+                let delta = post_amount.saturating_sub(pre_amount);
+                if delta > 0 {
+                    return Ok(Some(delta));
+                }
+            }
+        }
+
+        Ok(None)
     }
 }
 
@@ -496,4 +554,45 @@ mod tests {
         assert_eq!(anchors[1].solana_tx, "sig-new");
         assert_eq!(anchors[1].block_time, Some(1747756800));
     }
+    /// Task 20: verify `get_token_balance_delta` returns the correct delta.
+    #[tokio::test]
+    async fn test_get_token_balance_delta_success() {
+        let server = MockServer::start();
+        let recipient = "RecipientPubkey11111111111111111111111111111";
+        let usdc_mint = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+        server.mock(|when, then| {
+            when.method(POST).path("/").body_includes("getTransaction");
+            then.status(200).body(format!(
+                r#"{{"jsonrpc":"2.0","id":1,"result":{{"meta":{{"err":null,"preTokenBalances":[{{"accountIndex":1,"mint":"{usdc_mint}","owner":"{recipient}","uiTokenAmount":{{"amount":"1000000","decimals":6}}}}],"postTokenBalances":[{{"accountIndex":1,"mint":"{usdc_mint}","owner":"{recipient}","uiTokenAmount":{{"amount":"2500000","decimals":6}}}}]}},"transaction":{{}},"slot":1}}}}"#
+            ));
+        });
+        let client = SolanaClient::new(&server.base_url());
+        let delta = client.get_token_balance_delta("any_sig", recipient, usdc_mint).await.unwrap();
+        assert_eq!(delta, Some(1_500_000));
+    }
+
+    #[tokio::test]
+    async fn test_get_token_balance_delta_failed_tx() {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(POST).path("/").body_includes("getTransaction");
+            then.status(200).body(r#"{"jsonrpc":"2.0","id":1,"result":{"meta":{"err":{"InstructionError":[0,"Custom"]}},"transaction":{},"slot":1}}"#);
+        });
+        let client = SolanaClient::new(&server.base_url());
+        let delta = client.get_token_balance_delta("fail_sig", "Recip", "Mint").await.unwrap();
+        assert_eq!(delta, None);
+    }
+
+    #[tokio::test]
+    async fn test_get_token_balance_delta_missing_tx() {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(POST).path("/").body_includes("getTransaction");
+            then.status(200).body(r#"{"jsonrpc":"2.0","id":1,"result":null}"#);
+        });
+        let client = SolanaClient::new(&server.base_url());
+        let delta = client.get_token_balance_delta("missing_sig", "Recip", "Mint").await.unwrap();
+        assert_eq!(delta, None);
+    }
+
 }

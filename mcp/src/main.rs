@@ -130,6 +130,22 @@ enum Command {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Validate the Universal Paywall staging configuration and exit (T07a).
+    ///
+    /// Checks that all required environment variables are present and that no
+    /// loopback / Anvil endpoints are configured. Never opens a wallet, makes
+    /// a network call, or emits config values. Exit 0 on success, non-zero on
+    /// failure, with the missing or invalid key *names* (never values) printed
+    /// to stderr.
+    ///
+    /// Use this as a pre-flight before running `test:staging` or deploying to
+    /// the protected `paywall-staging` environment.
+    StagingValidate {
+        /// Print the required configuration key names and exit, regardless of
+        /// what is currently set. Never prints values.
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 // ── Axum handlers ─────────────────────────────────────────────────────────────
@@ -530,6 +546,31 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    // ── `staging-validate` subcommand (T07a — external delivery gate) ──────────
+    // Validates the Universal Paywall staging configuration fail-closed and exits.
+    // Does NOT open a wallet, make any network call, or emit config values.
+    if let Some(Command::StagingValidate { dry_run }) = cli.command {
+        if dry_run {
+            println!("Required staging configuration keys (values are never printed):");
+            for key in config::STAGING_REQUIRED_KEYS {
+                println!("  {key}");
+            }
+            return Ok(());
+        }
+        match config::validate_staging_config(&cfg) {
+            Ok(()) => {
+                println!("staging configuration: ok");
+                return Ok(());
+            }
+            Err(errors) => {
+                for error in &errors {
+                    eprintln!("staging configuration error: {error}");
+                }
+                std::process::exit(1);
+            }
+        }
+    }
+
     // ── Hosted endpoint resolution (Decision 12 + SAR5-M1 round 3) ───────────
     // The compile-time `DEFAULT_HOSTED_ENDPOINT` wins unless the operator
     // explicitly passed `--allow-custom-endpoint` AND set the env var AND
@@ -568,8 +609,9 @@ async fn main() -> anyhow::Result<()> {
         | Some(Command::Identity)
         | Some(Command::Restore { .. })
         | Some(Command::Export)
-        | Some(Command::SealLocalRows { .. }) => {
-            unreachable!("logout, identity, restore, export and seal-local-rows short-circuit above")
+        | Some(Command::SealLocalRows { .. })
+        | Some(Command::StagingValidate { .. }) => {
+            unreachable!("logout, identity, restore, export, seal-local-rows, and staging-validate short-circuit above")
         }
         None => {
             if std::env::var("MCP_TRANSPORT").is_ok() {
@@ -782,6 +824,10 @@ async fn main() -> anyhow::Result<()> {
             .map_err(|e| anyhow::anyhow!("invalid TRUSTED_PROXIES: {e}"))?,
     );
     let store = SqliteStore::open(&cfg.database_path)?;
+    // ── T17: Payment schema init (moved from mnemonic-core) ──────────────────
+    // `api_keys`, `payment_events`, `x402_nonces`, `attestation_costs` are
+    // payment concerns that do not belong in the public `mnemonic-core` crate.
+    payment::init_payment_schema(store.conn())?;
     paid_operation::migrate_paid_operations(store.conn())?;
     paid_artifact::migrate_paid_artifact_staging(store.conn())?;
     wallet_link::migrate_wallet_links(store.conn())?;

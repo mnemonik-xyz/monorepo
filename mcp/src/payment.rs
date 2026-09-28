@@ -40,6 +40,103 @@ use crate::universal_paywall::{
     UniversalPaywallConfig,
 };
 
+// ── Payment schema init (Task 17 — moved from mnemonic-core) ─────────────────
+//
+// The four payment-specific tables (`api_keys`, `payment_events`, `x402_nonces`,
+// `attestation_costs`) and their associated migration are payment concerns that
+// must not leak into the public `mnemonic-core` crate API. They live here, and
+// `init_payment_schema` is called once at MCP startup after the core schema is
+// initialized.
+
+/// Initialize payment-specific tables and run the `payment_events` UNIQUE index
+/// dedup migration.
+///
+/// Called once at MCP startup (after `SqliteStore::open`) from `main.rs`. Safe
+/// to call on every restart — all DDL uses `IF NOT EXISTS` and the dedup is
+/// idempotent (deletes nothing on a clean DB, cleans up legacy duplicates on an
+/// older one).
+///
+/// **Core is not aware of these tables.** A downstream consumer of `mnemonic-core`
+/// from crates.io will not have these tables in their database unless they also
+/// call this function.
+pub fn init_payment_schema(conn: &Connection) -> anyhow::Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS api_keys (
+            api_key TEXT PRIMARY KEY,
+            owner_pubkey TEXT NOT NULL DEFAULT '',
+            balance_micro_usdc INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            last_used_at TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS payment_events (
+            event_id TEXT PRIMARY KEY,
+            api_key TEXT NOT NULL,
+            amount_micro_usdc INTEGER NOT NULL,
+            event_type TEXT NOT NULL,
+            tx_sig TEXT,
+            description TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_payment_events_key ON payment_events(api_key);
+
+        CREATE TABLE IF NOT EXISTS x402_nonces (
+            tx_sig TEXT PRIMARY KEY,
+            used_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS attestation_costs (
+            attestation_id TEXT PRIMARY KEY,
+            irys_cost_lamports INTEGER NOT NULL,
+            sol_tx_fee_lamports INTEGER NOT NULL,
+            sol_price_usdc REAL NOT NULL,
+            earned_micro_usdc INTEGER NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (attestation_id) REFERENCES attestations(attestation_id)
+        );",
+    )
+    .context("creating payment tables")?;
+
+    // Add oauth_pubkey to api_keys if missing (migrated from
+    // `migrate_owner_pubkey_columns` in mnemonic-core — Task 17).
+    let needs_oauth_col = {
+        let mut stmt = conn.prepare("PRAGMA table_info(api_keys)")?;
+        let mut rows = stmt.query([])?;
+        let mut found = false;
+        while let Some(row) = rows.next()? {
+            let name: String = row.get(1)?;
+            if name == "oauth_pubkey" {
+                found = true;
+                break;
+            }
+        }
+        !found
+    };
+    if needs_oauth_col {
+        conn.execute("ALTER TABLE api_keys ADD COLUMN oauth_pubkey TEXT", [])
+            .context("adding api_keys.oauth_pubkey")?;
+    }
+
+    // Dedup any pre-existing duplicate non-NULL `tx_sig` rows, then create
+    // the partial UNIQUE index on `payment_events(tx_sig)`. Idempotent.
+    conn.execute_batch(
+        "BEGIN IMMEDIATE;
+         DELETE FROM payment_events
+          WHERE tx_sig IS NOT NULL
+            AND rowid NOT IN (
+                SELECT MIN(rowid) FROM payment_events
+                 WHERE tx_sig IS NOT NULL
+                 GROUP BY tx_sig
+            );
+         CREATE UNIQUE INDEX IF NOT EXISTS uq_payment_events_tx_sig
+             ON payment_events(tx_sig) WHERE tx_sig IS NOT NULL;
+         COMMIT;",
+    )
+    .context("migrating payment_events UNIQUE(tx_sig) index")?;
+
+    Ok(())
+}
+
 // ── x402 wire types ──────────────────────────────────────────────────────────
 
 /// Payload sent in the `X-Payment` header by the agent.
@@ -826,7 +923,6 @@ pub async fn verify_usdc_transfer(
     usdc_mint: &str,
     min_amount: u64,
 ) -> anyhow::Result<Option<u64>> {
-    // Delegate raw RPC + JSON parsing to the typed core method.
     match client.get_token_balance_delta(tx_sig, recipient, usdc_mint).await? {
         Some(delta) if delta >= min_amount => Ok(Some(delta)),
         _ => Ok(None),
@@ -2648,6 +2744,7 @@ mod tests {
     #[test]
     fn x402_nonce_claim_is_single_use_until_released() {
         let store = SqliteStore::in_memory().unwrap();
+        init_payment_schema(store.conn()).unwrap();
         assert!(claim_x402_nonce(&store, "sig-1").unwrap());
         // A second (or concurrent) request with the same payment loses.
         assert!(!claim_x402_nonce(&store, "sig-1").unwrap());
@@ -2662,7 +2759,10 @@ mod tests {
     fn concurrent_x402_claims_have_exactly_one_winner() {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let path = tmp.path().to_path_buf();
-        drop(SqliteStore::open(&path).unwrap());
+        {
+            let store = SqliteStore::open(&path).unwrap();
+            init_payment_schema(store.conn()).unwrap();
+        }
         let handles: Vec<_> = (0..12)
             .map(|_| {
                 let path = path.clone();

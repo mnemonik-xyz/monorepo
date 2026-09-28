@@ -1180,6 +1180,56 @@ fn tool_definitions() -> Value {
                 "required": ["memory_hash", "reader"],
             },
         },
+        {
+            "name": "mnemonic_attest_a2a",
+            "description": "Attest an A2A (Agent-to-Agent) protocol v1 object — task, message, or artifact — with a COSE_Sign1 Ed25519 signature. The attestation is stored locally (synthetic local: id) and linked to the supplied context_id for multi-turn session grouping. Returns {attestation_id, blake3, cose_envelope_hex}. This tool is paid on x402 deployments.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "kind": {
+                        "type": "string",
+                        "enum": ["task", "message", "artifact"],
+                        "description": "A2A object type to attest",
+                    },
+                    "payload": {
+                        "type": "object",
+                        "description": "The A2A object body (must conform to the A2A v1 wire schema for the given kind)",
+                    },
+                    "context_id": {
+                        "type": "string",
+                        "description": "A2A contextId — groups all attested objects belonging to one conversation or workflow",
+                    },
+                    "prev_id": {
+                        "type": "string",
+                        "description": "Optional parent attestation_id for lineage tracking",
+                    },
+                },
+                "required": ["kind", "payload", "context_id"],
+            },
+        },
+        {
+            "name": "mnemonic_recall_a2a",
+            "description": "Return attestation rows stored under a given A2A context_id, newest first. Optional kind filter (task | message | artifact | all) and limit. Free — no payment required.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "context_id": {
+                        "type": "string",
+                        "description": "A2A contextId to query",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum number of rows to return (default: all)",
+                    },
+                    "kind": {
+                        "type": "string",
+                        "enum": ["task", "message", "artifact", "all"],
+                        "description": "Filter by A2A object type (default: all)",
+                    },
+                },
+                "required": ["context_id"],
+            },
+        },
     ]);
 
     // Verifiable-trajectories tools (experimental; appended only when the
@@ -1491,6 +1541,14 @@ pub async fn mcp_handler(
 
     let is_sign_memory = req.method == "tools/call"
         && req.params.get("name").and_then(|n| n.as_str()) == Some("mnemonic_sign_memory");
+
+    // `mnemonic_attest_a2a` is a paid tool (per Task 5 spec). Gate it with
+    // the same `check_payment` path as `mnemonic_sign_memory`, but without
+    // the WriteMode/mode complexity — A2A attestations are always local-row
+    // writes, so there is no "anchored vs local" distinction and no
+    // free-anchor-quota peeks.
+    let is_attest_a2a = req.method == "tools/call"
+        && req.params.get("name").and_then(|n| n.as_str()) == Some("mnemonic_attest_a2a");
 
     // T2 round-2: resolve the per-request `mode` field ONCE here, before
     // the paywall gate. The resolved value drives THREE things:
@@ -1855,6 +1913,95 @@ pub async fn mcp_handler(
                         "message": "payment required",
                         "data": x402
                     }
+                });
+                ndjson_response(StatusCode::PAYMENT_REQUIRED, &body)
+            }
+            payment::PaymentGate::Unauthorized(msg) => {
+                let err_body = serde_json::json!({
+                    "jsonrpc": "2.0", "id": req.id,
+                    "error": {"code": -32600, "message": msg}
+                });
+                ndjson_response(StatusCode::UNAUTHORIZED, &err_body)
+            }
+        }
+    } else if is_attest_a2a && state.payment_mode != "none" {
+        // Payment gate for `mnemonic_attest_a2a`. Simpler than sign_memory:
+        // no WriteMode complexity, no free-anchor-quota, no deferred-signing
+        // flow — A2A attestations are always synchronous local-row writes.
+        let gate = payment::check_payment(
+            &headers,
+            &state.payment_mode,
+            &state.store,
+            &state.solana,
+            &state.treasury_pubkey,
+            &state.usdc_mint,
+            state.pricing.current_price(),
+            state.evm_payment.as_ref(),
+        )
+        .await;
+
+        match gate {
+            payment::PaymentGate::Proceed => {
+                let x402_proof = payment::extract_x402_proof(&headers);
+                if let Some(proof) = x402_proof.as_ref() {
+                    let claimed = match state.store.lock() {
+                        Ok(store) => payment::claim_x402_nonce(&store, &proof.tx_sig),
+                        Err(_) => Err(anyhow::anyhow!("store mutex poisoned")),
+                    };
+                    match claimed {
+                        Ok(true) => {}
+                        Ok(false) => {
+                            let err_body = serde_json::json!({
+                                "jsonrpc": "2.0", "id": req.id,
+                                "error": {"code": -32600, "message": format!("x402 payment already used: {}", proof.tx_sig)}
+                            });
+                            return ndjson_response(StatusCode::UNAUTHORIZED, &err_body);
+                        }
+                        Err(error) => {
+                            tracing::error!(error = %error, "x402 nonce claim failed (attest_a2a)");
+                            return ndjson_error(
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                -32603,
+                                "payment state unavailable",
+                            );
+                        }
+                    }
+                }
+                let resp = handle_request_with_resolved_mode(
+                    &req,
+                    &state,
+                    &owner_pubkey,
+                    jwt_sub.as_deref(),
+                    crate::tools::Transport::Http,
+                    resolved_mode_for_gate,
+                )
+                .await;
+                // On failure, release the nonce so the caller can retry.
+                if resp.error.is_some() {
+                    if let Some(proof) = x402_proof.as_ref() {
+                        match state.store.lock() {
+                            Ok(store) => {
+                                if let Err(error) =
+                                    payment::release_x402_nonce(&store, &proof.tx_sig)
+                                {
+                                    tracing::warn!(tx_sig = %proof.tx_sig, error = %error, "x402 nonce release failed (attest_a2a)");
+                                }
+                            }
+                            Err(_) => tracing::warn!("x402 nonce release (attest_a2a): store mutex poisoned"),
+                        }
+                    }
+                }
+                ndjson_response(StatusCode::OK, &resp)
+            }
+            payment::PaymentGate::NeedPayment(x402) => {
+                ndjson_response(StatusCode::PAYMENT_REQUIRED, &x402)
+            }
+            payment::PaymentGate::NeedUniversalPaywall(ref up_req) => {
+                let x402 = payment::up_payment_required(up_req, "");
+                let body = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": req.id,
+                    "error": {"code": -32012, "message": "payment required", "data": x402}
                 });
                 ndjson_response(StatusCode::PAYMENT_REQUIRED, &body)
             }
@@ -2464,6 +2611,43 @@ async fn handle_tool_call(
                 "note": "Open approve_url in the browser to sign the GRANT_V1 with your wallet. The server never possesses the content key (K).",
             })
         }
+        // mnemonic_attest_a2a — A2A attestation (paid). The payment gate in
+        // `mcp_handler` fires for this tool on x402 deploys (see
+        // `is_attest_a2a` predicate). No WriteMode/mode field — A2A
+        // attestations are always stored as local rows by the adapter.
+        "mnemonic_attest_a2a" => {
+            let kind = args
+                .get("kind")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| invalid_params("kind", &args.get("kind").cloned().unwrap_or(serde_json::Value::Null)))?;
+            let payload = args
+                .get("payload")
+                .cloned()
+                .ok_or_else(|| invalid_params("payload", &serde_json::Value::Null))?;
+            let context_id = args
+                .get("context_id")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| invalid_params("context_id", &args.get("context_id").cloned().unwrap_or(serde_json::Value::Null)))?;
+            let prev_id = args.get("prev_id").and_then(|v| v.as_str());
+            tools::attest_a2a(
+                &state.keypair,
+                &state.store,
+                kind,
+                &payload,
+                context_id,
+                prev_id,
+            )?
+        }
+        // mnemonic_recall_a2a — A2A recall by context_id (free, read-only).
+        "mnemonic_recall_a2a" => {
+            let context_id = args
+                .get("context_id")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| invalid_params("context_id", &args.get("context_id").cloned().unwrap_or(serde_json::Value::Null)))?;
+            let limit = args.get("limit").and_then(|v| v.as_u64()).map(|n| n as usize);
+            let kind = args.get("kind").and_then(|v| v.as_str());
+            tools::recall_a2a(&state.store, context_id, limit, kind)?
+        }
         _ => {
             return Err(JsonRpcError::simple(
                 -32603,
@@ -2732,16 +2916,17 @@ mod transport_tests {
         let tools = envelope["result"]["tools"]
             .as_array()
             .expect("tools array present");
-        // 9 base tools (incl. publish_post + mnemonic_share), plus 3 when the trajectory feature is compiled in.
+        // 11 base tools (incl. publish_post + mnemonic_share + attest_a2a + recall_a2a),
+        // plus 3 when the trajectory feature is compiled in.
         let expected = if cfg!(feature = "trajectory-experimental") {
-            12
+            14
         } else {
-            9
+            11
         };
         assert_eq!(
             tools.len(),
             expected,
-            "expected {expected} MCP tools in tools/list response (9 base incl. publish_post + mnemonic_share + trajectory tools when enabled)",
+            "expected {expected} MCP tools in tools/list response (11 base incl. publish_post + mnemonic_share + attest_a2a + recall_a2a + trajectory tools when enabled)",
         );
     }
 
@@ -2970,7 +3155,11 @@ mod transport_tests {
         use tower::ServiceExt;
 
         let state = build_test_state();
-        let bearer = format!("Bearer {}", state.keypair.pubkey());
+        // `tools/list` is allowlisted (no auth required per the MCP spec
+        // for listing tools), so we don't need a real JWT here. But to
+        // exercise the code path, we mint a test JWT.
+        let owner = state.keypair.pubkey().to_string();
+        let bearer = format!("Bearer {}", mint_jwt_for_tests(&owner));
 
         let tasks: Vec<_> = (0..8)
             .map(|i| {

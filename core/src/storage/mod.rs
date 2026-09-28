@@ -21,4 +21,4 @@ pub use sqlite::{
     PublicStats, SealedIndexRow, SqliteStore, TimelineBucket,
 };
 pub use traits::{AttestationRow, ReconstructionInputs, SearchResult};
-pub use traits::{AttestationStore, LineageStore};
+pub use traits::AttestationStore;

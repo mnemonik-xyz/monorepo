@@ -194,6 +194,21 @@ impl EmbeddingCompressor {
 mod tests {
     use super::*;
 
+    /// Maximum acceptable mean-squared error after a turboquant 4-bit roundtrip
+    /// for a 384-dim normalized embedding. Empirically established at <0.05;
+    /// regressions above this likely indicate a quantization codec change.
+    /// Referenced in Task 23 (TEST-COMPRESS-MSE-CONST-1) and tied to the V1
+    /// retrieval quality gates documented in ADR-016 (94.2% recall@10 at 10K,
+    /// 99.4% at 1K).
+    const MAX_ROUNDTRIP_MSE_4BIT_384: f32 = 0.05;
+
+    /// Maximum acceptable MSE for 128-dim roundtrip test. Looser than 384-dim
+    /// because fewer dimensions mean less averaging of quantization error.
+    const MAX_ROUNDTRIP_MSE_4BIT_128: f32 = 0.1;
+
+    /// Maximum acceptable MSE for a single-element (dim=1) roundtrip.
+    const MAX_ROUNDTRIP_MSE_4BIT_1: f32 = 0.1;
+
     fn sample_vector(dim: usize) -> Vec<f32> {
         (0..dim).map(|i| ((i as f32) * 0.01).sin()).collect()
     }
@@ -211,7 +226,7 @@ mod tests {
             .map(|(a, b)| (a - b).powi(2))
             .sum::<f32>()
             / original.len() as f32;
-        assert!(mse < 0.1, "MSE too high: {mse}");
+        assert!(mse < MAX_ROUNDTRIP_MSE_4BIT_128, "MSE {mse} exceeded threshold {MAX_ROUNDTRIP_MSE_4BIT_128}");
     }
 
     #[test]
@@ -269,26 +284,33 @@ mod tests {
             .sum::<f32>()
             / original.len() as f32;
         assert!(
-            mse < 0.05,
-            "MSE {mse} exceeds 0.05 threshold for 384-dim 4-bit"
+            mse < MAX_ROUNDTRIP_MSE_4BIT_384,
+            "mse {mse} exceeded threshold {MAX_ROUNDTRIP_MSE_4BIT_384}"
         );
     }
 
+    /// Task 22 (TEST-COMPRESS-EDGE-1): the empty-embedding edge case panics
+    /// inside turboquant_plus_rs. The panic is the contracted behavior — locked
+    /// in via `#[should_panic]` so a regression (e.g. silently returning an
+    /// incorrect value) causes the test to fail.
     #[test]
+    #[should_panic]
     fn test_compress_empty_embedding() {
-        let result = std::panic::catch_unwind(|| {
-            let c = EmbeddingCompressor::new(0, 4, 42);
-            c.compress(&[]);
-        });
-        let _ = result; // documents behavior without asserting panic/success
+        let c = EmbeddingCompressor::new(0, 4, 42);
+        c.compress(&[]);
     }
 
+    /// Task 22 (TEST-COMPRESS-EDGE-1): a single-element embedding compresses
+    /// successfully and can be decompressed (roundtrip).
     #[test]
     fn test_compress_single_element() {
-        let result = std::panic::catch_unwind(|| {
-            let c = EmbeddingCompressor::new(1, 4, 42);
-            c.compress(&[0.5]);
-        });
-        let _ = result;
+        let c = EmbeddingCompressor::new(1, 4, 42);
+        let compressed = c.compress(&[0.5]);
+        assert_eq!(compressed.dim, 1, "compressed.dim must match constructor dim");
+        assert_eq!(compressed.bit_width, 4, "compressed.bit_width must match constructor bit_width");
+        let restored = c.decompress(&compressed);
+        assert_eq!(restored.len(), 1, "decompress must return 1-element vec for dim=1");
+        let mse = (0.5_f32 - restored[0]).powi(2);
+        assert!(mse < MAX_ROUNDTRIP_MSE_4BIT_1, "single-element MSE {mse} exceeded threshold {MAX_ROUNDTRIP_MSE_4BIT_1}");
     }
 }

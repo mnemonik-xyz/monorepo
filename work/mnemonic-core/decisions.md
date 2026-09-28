@@ -334,3 +334,91 @@ Addressed findings from `code-reviewer-round1.json` (changes-required; 1 major +
 
 **Follow-up note for pre-deploy QA (task 16):** No findings are blocking pre-deploy QA. The two non-trivial items to address in a follow-up cycle are TEST-STORAGE-CONTRACT-1 (cast to `&dyn AttestationStore` / `&dyn LineageStore` in storage tests so the trait abstraction provides actual contract guarantees) and TEST-COMPRESS-EDGE-1 (replace the `let _ = result;` discard with a real assertion on the empty/single-element edge cases). Both can be addressed by editing existing test functions; no new test infrastructure required.
 
+
+## Task 17: Move payment schema out of core + delete vestigial LineageStore trait
+
+**Status:** Done
+**Commit:** (pending)
+**Agent:** main agent
+**Summary:** Moved payment DDL (`api_keys`, `payment_events`, `x402_nonces`, `attestation_costs`) and `migrate_payment_events_unique_index` from `core/src/storage/sqlite.rs` into a new `init_payment_schema(conn)` function in `mcp/src/payment.rs`, called once at startup from `mcp/src/main.rs`. Deleted `LineageStore` trait and its `impl LineageStore for SqliteStore` block (dead code since Task 9 introduced `core/src/lineage/`). Removed `lineage_edges` DDL. Split `migrate_owner_pubkey_columns` to remove the `api_keys.oauth_pubkey` column addition (moved into `init_payment_schema`). Updated the two existing lineage tests (`test_lineage_save_and_get`, `test_lineage_clear`) as deletions (they tested dead code). `delete_protocol_knowledge_for_owner` updated to use `attestation_embeddings` instead of removed `memory_embeddings` and `attestation_costs`.
+**Deviations:** None.
+
+**Verification:**
+- `grep -rn 'api_keys|payment_events|x402_nonces|attestation_costs' core/src/` → only comments/notes
+- `grep -rn 'lineage_edges|LineageStore|save_edge|get_edges|clear_edges' core/src/` → empty
+- `cargo build --workspace` → pass
+- `cargo test -p mnemonic-core` → 277 passed
+
+## Task 18: Replace error-swallowing `filter_map(|r| r.ok())` with proper error propagation
+
+**Status:** Done
+**Commit:** (pending)
+**Agent:** main agent
+**Summary:** Replaced all `filter_map(|r| r.ok())` calls on `query_map` result iterators in `AttestationStore::search` (3 arms) and `search_owner_tagged` with `rows.collect::<rusqlite::Result<Vec<_>>>()?`. A row-level DB error (type mismatch, decode failure) now propagates as `Err` rather than silently dropping the row. Added regression test `test_search_propagates_row_error_on_corrupt_embedding` that forces an INTEGER-typed value into the BLOB embedding column and asserts `search` returns `Err`. Also added `test_rusqlite_integer_blob_type_check` as a standalone verification that rusqlite rejects Integer as Vec<u8>. Convention is now uniform with Task 9 (lineage module).
+**Deviations:** None.
+
+**Verification:**
+- `grep -rn 'filter_map.*\.ok()' core/src/storage/` → 0 matches in production code
+- `cargo test -p mnemonic-core test_search_propagates_row_error` → pass
+
+## Task 19: Replace `unsafe impl Send/Sync for McpState` with safe alternative
+
+**Status:** Done (Option C: SAFETY comments)
+**Commit:** (pending)
+**Agent:** main agent
+**Summary:** Option C applied (SAFETY comment) per task spec guidance. Replaced the bare single-line comment with a 200-word SAFETY block on each `unsafe impl` explaining: (1) the specific invariant (no `.await` across `MutexGuard`), (2) why `rusqlite::Connection` is `!Send`, (3) the verification strategy (code review + concurrent tests), and (4) a maintenance contract note. Added `test_concurrent_tools_list_no_deadlock` test (gated on `test-support` feature) that fires 8 concurrent `tools/list` requests against the same `Arc<McpState>` and asserts all return 200 OK without deadlock.
+**Deviations:** Option C chosen over A/B; follow-up task for actor pattern (Option A) is the right post-deploy improvement.
+
+**Verification:**
+- `grep -nE '^\s*unsafe\s+impl' mcp/src/mcp.rs` → 2 matches, both with preceding `// SAFETY:` comment
+- concurrent test passes
+
+## Task 20: Demote `SolanaClient::rpc` and add typed high-level method
+
+**Status:** Done
+**Commit:** (pending)
+**Agent:** main agent
+**Summary:** Changed `pub async fn rpc` to `pub(crate) async fn rpc` in `core/src/solana/mod.rs`. Added `pub async fn get_token_balance_delta(tx_sig, recipient, mint) -> anyhow::Result<Option<u64>>` that wraps the `getTransaction` RPC call + token balance diff logic previously inline in `mcp/src/payment.rs::verify_usdc_transfer`. Updated `verify_usdc_transfer` to delegate to the new typed method. Added 3 httpmock tests for `get_token_balance_delta` (success, failed tx, missing tx). This closes the deviation noted in Task 8 decisions.
+**Deviations:** None.
+
+**Verification:**
+- `grep -nE 'SolanaClient::rpc|client\.rpc\(' mcp/src/` → empty
+- `grep -nE 'pub\s+fn\s+rpc' core/src/solana/mod.rs` → empty (only `pub(crate)`)
+- `cargo test -p mnemonic-core` → solana tests pass
+
+## Task 21: Storage tests — exercise traits via `&dyn AttestationStore` references
+
+**Status:** Done
+**Commit:** (pending)
+**Agent:** main agent
+**Summary:** Added `run_attestation_contract(store: &dyn AttestationStore)` helper and `test_attestation_store_contract_via_dyn_ref` test in `core/src/storage/sqlite.rs`. Updated 5 contract-tested methods in `test_save_and_find_by_tx`, `test_count_by_signer`, `test_search_ranking`, `test_find_by_tx_not_found`, and `test_duplicate_attestation_id` to use `let store_ref: &dyn AttestationStore = &store` for the trait-method calls. No trait methods were added (all called methods were already on the trait). `LineageStore` tests were deleted in Task 17, so no `&dyn LineageStore` refactor was needed.
+**Deviations:** None.
+
+**Verification:**
+- `grep -nE '&dyn AttestationStore' core/src/storage/sqlite.rs` → 8+ matches
+- `cargo test -p mnemonic-core` → all pass
+
+## Task 22: Replace `catch_unwind` + `let _ = result` with real assertions in compress edge tests
+
+**Status:** Done
+**Commit:** (pending)
+**Agent:** main agent
+**Summary:** Rewrote `test_compress_empty_embedding` and `test_compress_single_element` in `core/src/compress/mod.rs`. Empty-input behavior is a panic (inside turboquant_plus_rs on dim=0); locked in via `#[should_panic]`. Single-element compress succeeds and is roundtrip-verified: decompressed length is 1, MSE < `MAX_ROUNDTRIP_MSE_4BIT_1`. Both tests now fail if behavior regresses (litmus test passed).
+**Deviations:** None.
+
+**Verification:**
+- `grep -rn 'catch_unwind' core/src/compress/` → 0 matches
+- `grep -rn 'let _ = result' core/src/compress/` → 0 matches
+- `cargo test -p mnemonic-core compress::tests` → 7 pass
+
+## Task 23: Replace magic-number `0.05` in MSE roundtrip test with named threshold constant
+
+**Status:** Done
+**Commit:** (pending)
+**Agent:** main agent
+**Summary:** Added `MAX_ROUNDTRIP_MSE_4BIT_384: f32 = 0.05`, `MAX_ROUNDTRIP_MSE_4BIT_128: f32 = 0.1`, and `MAX_ROUNDTRIP_MSE_4BIT_1: f32 = 0.1` constants at the top of `core/src/compress/mod.rs::tests`. Each has a doc comment citing ADR-016. Replaced all three bare float thresholds in assertions with the named constants. Values are unchanged.
+**Deviations:** None. Three constants defined (one per threshold context), not one, to make the bit-depth+dim context explicit.
+
+**Verification:**
+- `grep -nE 'assert!.*\b0\.[0-9]+|< 0\.[0-9]+' core/src/compress/` → 0 matches in test code
+- `cargo test -p mnemonic-core compress::tests::test_compress_roundtrip_mse` → pass
