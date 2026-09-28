@@ -650,9 +650,9 @@ function peekArtifactType(buf: Uint8Array): string {
  */
 async function decryptSealedContent(buf: Uint8Array): Promise<string> {
   try {
-    const wasm = await loadWasm();
-    const identityMod = await import("../lib/storage");
-    const identity = identityMod.readIdentity();
+    const { loadWasm: wasmLoader } = await import("../lib/wasm");
+    const wasm = await wasmLoader();
+    const identity = (await import("../lib/storage")).readIdentity();
     const wasmRecord = wasm as Record<string, unknown>;
 
     if (typeof wasmRecord.open_memory === "function" && identity) {
@@ -664,10 +664,8 @@ async function decryptSealedContent(buf: Uint8Array): Promise<string> {
     }
 
     // WASM sealed crypto not yet available — show informative placeholder.
-    return (
-      "[Sealed memory — decryption requires a newer WASM build. " +
-      "The ciphertext is shown below. Sign only if you trust the server.]"
-    );
+    return "[Sealed memory — decryption requires a newer WASM build. " +
+      "The ciphertext is shown below. Sign only if you trust the server.]";
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     return `[Sealed memory — decrypt failed: ${msg}]`;
