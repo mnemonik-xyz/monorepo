@@ -4383,6 +4383,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "mnemonic-a2a"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "blake3",
+ "chrono",
+ "hex",
+ "mnemonic-core",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "solana-sdk",
+ "uuid",
+]
+
+[[package]]
 name = "mnemonic-core"
 version = "0.2.8"
 dependencies = [
