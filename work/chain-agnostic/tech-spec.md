@@ -7,6 +7,11 @@ branch: feat/drop-solana-anchor
 
 # Tech Spec: chain-agnostic Mnemonic, starting with the Solana anchor
 
+> **Order:** this is one step of a larger sequence. See
+> [`work/DECOUPLING-SEQUENCE.md`](../DECOUPLING-SEQUENCE.md) for where it sits and what must
+> land first.
+
+
 ## How deep the coupling goes
 
 Measured on 2026-09-28, not estimated. The result changes the plan, so it comes first.

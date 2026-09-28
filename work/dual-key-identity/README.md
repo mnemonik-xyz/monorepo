@@ -1,5 +1,10 @@
 # dual-key-identity — parking lot
 
+> **Order:** this is one step of a larger sequence. See
+> [`work/DECOUPLING-SEQUENCE.md`](../DECOUPLING-SEQUENCE.md) for where it sits and what must
+> land first.
+
+
 Status: **TODO — mostly already built; needs assembling, not inventing.**
 
 Lets one agent hold an Ed25519 Mnemonic identity **and** a secp256k1 Ethereum key, with a

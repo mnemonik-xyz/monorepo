@@ -1,5 +1,10 @@
 # pluggable-storage — parking lot
 
+> **Order:** this is one step of a larger sequence. See
+> [`work/DECOUPLING-SEQUENCE.md`](../DECOUPLING-SEQUENCE.md) for where it sits and what must
+> land first.
+
+
 Status: **TODO — brief, then run user-spec-planning.**
 
 Siblings, and the reason this is its own folder:
