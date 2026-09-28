@@ -778,6 +778,7 @@ static CHALLENGE_SCHEMA: mnemonic_core::codec::schema::ArtifactSchema =
             "state",
         ],
         optional_fields: &[],
+        bytes_fields: &[],
         // Alphabetical — matches the canonical-CBOR sorted-key output.
         cbor_field_order: &[
             "client_id",

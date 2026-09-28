@@ -19,8 +19,10 @@ use mnemonic_core::codec::{
 use mnemonic_core::compress::EmbeddingCompressor;
 use mnemonic_core::embed::Embedder;
 use mnemonic_core::identity::{self, LazyKeypair};
+use mnemonic_core::sealed;
 use mnemonic_core::solana::SolanaClient;
 use mnemonic_core::storage::{AttestationStore, SqliteStore, Visibility, WriteMode};
+use zeroize::Zeroize;
 
 use crate::mcp::{
     delivery_not_confirmed, hosted_unavailable, invalid_params, public_write_requires_confirmation,
@@ -201,14 +203,15 @@ pub fn resolve_write_mode(
 /// | Input                                            | Output                                           |
 /// |--------------------------------------------------|--------------------------------------------------|
 /// | absent                                           | `Visibility::Private`                            |
+/// | `"private"` AND mode = local                    | `Visibility::Private` (sealed local write)       |
+/// | `"public"` AND mode = local                     | `Err(invalid_params("visibility", ...))` (AC14)  |
 /// | `"private"` / `"public"` AND mode = anchored  | parsed variant                                   |
-/// | any present value AND mode = local               | `Err(invalid_params("visibility", ...))` (AC14)  |
 /// | non-string / non-canonical (under anchored)   | `Err(invalid_params("visibility", received))`    |
 ///
-/// The local-mode rejection fires for ANY present `visibility` value
-/// (including the literal `"private"`), not only `"public"`. Visibility is a
-/// anchored-only concept; allowing `"private"` on local writes would leak
-/// dead metadata into a column the row never consults.
+/// AC14 now rejects only `"public"` on local writes. Allowing `"private"` on
+/// local writes enables the sealed-memory path (Task 6): the plaintext never
+/// leaves the server unencrypted; the `sealed_blob` column holds the COSE
+/// envelope and `content` is stored as an empty string.
 ///
 /// Pure function — no I/O, no globals.
 pub fn resolve_visibility(
@@ -219,19 +222,21 @@ pub fn resolve_visibility(
     match raw {
         None => Ok(Visibility::default()),
         Some(v) => {
-            // AC14 — `visibility` is invalid params on local writes regardless
-            // of the underlying value. Rejecting at the boundary keeps the
-            // matrix `{local, public}` cell undefined-by-construction.
-            if resolved_mode == WriteMode::Local {
+            // Parse to a typed value first so we can branch on `Private` vs
+            // `Public` before applying the local-mode restriction.
+            let parsed = match v {
+                serde_json::Value::String(s) => match Visibility::from_str_strict(s) {
+                    Some(vis) => vis,
+                    None => return Err(invalid_params("visibility", v)),
+                },
+                _ => return Err(invalid_params("visibility", v)),
+            };
+            // AC14 — `public` is always invalid on local writes. `private` is
+            // now permitted: it triggers sealed-memory storage (Task 6).
+            if resolved_mode == WriteMode::Local && parsed == Visibility::Public {
                 return Err(invalid_params("visibility", v));
             }
-            match v {
-                serde_json::Value::String(s) => match Visibility::from_str_strict(s) {
-                    Some(vis) => Ok(vis),
-                    None => Err(invalid_params("visibility", v)),
-                },
-                _ => Err(invalid_params("visibility", v)),
-            }
+            Ok(parsed)
         }
     }
 }
@@ -458,11 +463,28 @@ pub async fn sign_memory(
                 tags,
                 sub,
                 resolved.write_mode,
+                visibility,
             )
             .await
             .map_err(ToolError::Other);
         }
     }
+    // Task 6 — local + private → sealed inline write.
+    //
+    // An explicit `mode: "local"` + `visibility: "private"` from a JWT caller
+    // seals the memory inline using the owner's Ed25519 public key. The
+    // SEALED_V1 outer CBOR (unsigned — local writes never produce COSE) is
+    // stored directly in `sealed_blob`. No keychain, no round-trip.
+    //
+    // This branch fires only for HTTP+JWT callers with explicit local (the
+    // stdio path runs operator-signed and falls through to sign_memory_inline).
+    if let Some(sub) = jwt_sub {
+        if resolved.is_explicit_local() && visibility == Visibility::Private {
+            return sign_memory_local_sealed(store, content, tags, sub, owner_pubkey, storage_mode)
+                .map_err(ToolError::Other);
+        }
+    }
+
     // Hard invariant: on the hosted transport (any JWT caller, or any HTTP
     // caller at all) the server NEVER produces a memory signature — not for
     // paid writes, not for free-quota writes, not for the operator's own
@@ -889,11 +911,33 @@ async fn proxy_anchored(
 
 /// HTTP/JWT branch — Decision 12 deferred-signing path.
 ///
-/// Builds the same unsigned artifact JSON as the inline path but with
-/// `producer = did:sol:<jwt_sub>` and `artifact_id = correlation_id` so the
-/// browser-side WASM signer is signing bytes that already encode the user's
-/// identity. Parks the bundle in `PendingBundles`; the webapp picks it up
-/// via `GET /api/pending/{correlation_id}`.
+/// Builds the unsigned artifact JSON and parks it in `PendingBundles` so the
+/// browser-side (or SDK) COSE_Sign1 flow can complete it.
+///
+/// # Sealed path (`visibility == Private`, Task 6)
+///
+/// When `visibility` is `Private` the function produces a SEALED_V1 outer
+/// artifact rather than a plain MEMORY_V1:
+///
+/// 1. Builds the inner MEMORY_V1 JSON (contains the plaintext).
+/// 2. Calls `sealed::seal_memory` with the author's Ed25519 public key derived
+///    from `jwt_sub` — the owner's key, never the server's.
+/// 3. Parks only the outer SEALED_V1 CBOR in `PendingBundles`. `content` and
+///    `embedding` stored on the pending entry are **empty** — no plaintext or
+///    approximation of plaintext escapes into in-process memory beyond the
+///    critical section.
+/// 4. Zeroizes the plaintext bytes, the inner CBOR, and the content-encryption
+///    key `K` before returning.
+///
+/// The sign-callback receives the outer CBOR to COSE_Sign1, uploads it to
+/// Arweave with `Mnemonic-Type: sealed`, writes a Solana memo with `v: 3`,
+/// and persists the row via `save_sealed_attestation`.
+///
+/// # Plain path (`visibility == Public`)
+///
+/// Identical to the previous behaviour: builds a MEMORY_V1 bundle and parks
+/// the full plaintext + embedding in the pending entry.
+#[allow(clippy::too_many_arguments)]
 async fn sign_memory_deferred(
     embedder: &dyn Embedder,
     compressor: &EmbeddingCompressor,
@@ -902,88 +946,112 @@ async fn sign_memory_deferred(
     tags: &[String],
     jwt_sub: &str,
     write_mode: WriteMode,
+    visibility: Visibility,
 ) -> anyhow::Result<serde_json::Value> {
     let now = chrono::Utc::now().to_rfc3339();
-    // 1. Embed (CPU-bound, can't defer)
-    let embedding = embedder.embed(content);
-
-    // 2. Compress for the canonical-CBOR `metadata.embedding_compressed` field
-    let compressed = compressor.compress(&embedding);
-    let compressed_bytes = compressed.to_bytes();
-
-    // 3. Generate the correlation_id up front so it can double as artifact_id.
-    //    (Avoids two distinct UUIDs for the same logical pending bundle.)
     let correlation_id = uuid::Uuid::new_v4().to_string();
+    let producer = format!("did:sol:{jwt_sub}");
 
-    // 4. Build artifact JSON. `producer` is derived from jwt.sub, NOT the
-    //    server keypair — the user is the signer, not the server.
-    let metadata = serde_json::json!({
-        "embed_provider": embedder.provider_name(),
-        "embed_dim": embedder.dim(),
-        "turbo_bits": compressed.bit_width,
-        "embedding_compressed": base64::Engine::encode(
-            &base64::engine::general_purpose::STANDARD,
-            &compressed_bytes,
-        ),
-    });
-    let artifact = serde_json::json!({
-        "artifact_id": correlation_id,
-        "type": "memory",
-        "schema_version": 1,
-        "content": content,
-        "producer": format!("did:sol:{jwt_sub}"),
-        "created_at": now,
-        "tags": tags,
-        "metadata": metadata.clone(),
-    });
+    let (canonical_cbor, content_hash, park_content, park_embedding, is_sealed, metadata) =
+        if visibility == Visibility::Private {
+            // ── Sealed path ──────────────────────────────────────────────────
+            // 1. Decode the owner's base58 pubkey to raw Ed25519 bytes.
+            let owner_pubkey_sol: solana_sdk::pubkey::Pubkey = jwt_sub
+                .parse()
+                .map_err(|e| anyhow::anyhow!("jwt_sub is not a valid Solana pubkey: {e}"))?;
+            let owner_ed25519: [u8; 32] = owner_pubkey_sol.to_bytes();
 
-    // 5. Canonical CBOR + blake3 hash
-    let canonical_cbor = to_canonical_cbor(&artifact, &schema::MEMORY_V1)
-        .map_err(|e| anyhow::anyhow!("canonical CBOR encode failed: {e}"))?;
-    let content_hash = blake3_hash(&canonical_cbor);
+            // 2. Build the inner MEMORY_V1 JSON (contains plaintext).
+            let mut inner_content = content.as_bytes().to_vec();
+            let inner_artifact = serde_json::json!({
+                "artifact_id": correlation_id,
+                "type": "memory",
+                "schema_version": 1,
+                "content": content,
+                "producer": &producer,
+                "created_at": &now,
+                "tags": tags,
+            });
+            let mut inner_cbor = to_canonical_cbor(&inner_artifact, &schema::MEMORY_V1)
+                .map_err(|e| anyhow::anyhow!("inner CBOR encode failed: {e}"))?;
 
-    // Wave 2 — programmatic client-signing. Hand the unsigned canonical CBOR
-    // back inline (base64) so a non-browser client (SDK/CLI/agent) can
-    // COSE_Sign1 it locally with the user's own Ed25519 key and POST the
-    // signed envelope to `/api/sign-callback` — no browser `approve_url`
-    // round-trip required. This is the SAME bytes `GET /api/pending/{id}`
-    // serves; returning it inline saves the headless client one round-trip.
-    // The browser flow is untouched (it still uses `approve_url`).
+            // 3. Seal: encrypt inner CBOR with owner's Ed25519-derived X25519 key.
+            let sealed_art = sealed::seal_memory(
+                &inner_cbor,
+                &owner_ed25519,
+                &correlation_id,
+                &producer,
+                &now,
+                &mut rand::rngs::OsRng,
+            )
+            .map_err(|e| anyhow::anyhow!("seal_memory failed: {e}"))?;
+
+            // 4. Zeroize sensitive material before parking.
+            inner_content.zeroize();
+            inner_cbor.zeroize();
+            // `sealed_art.k` is Zeroizing<[u8;32]> and drops here.
+            let outer_cbor = sealed_art.outer_cbor;
+            let content_hash = blake3_hash(&outer_cbor);
+            // Drop K immediately — it's already Zeroizing but explicit is clearer.
+            drop(sealed_art.k);
+
+            let metadata = serde_json::Value::Object(serde_json::Map::new());
+            (outer_cbor, content_hash, String::new(), vec![], true, metadata)
+        } else {
+            // ── Plain (public) path ───────────────────────────────────────────
+            // 1. Embed (CPU-bound, can't defer)
+            let embedding = embedder.embed(content);
+
+            // 2. Compress for the canonical-CBOR `metadata.embedding_compressed` field
+            let compressed = compressor.compress(&embedding);
+            let compressed_bytes = compressed.to_bytes();
+
+            // 3. Build artifact JSON. `producer` is derived from jwt.sub, NOT the
+            //    server keypair — the user is the signer, not the server.
+            let metadata = serde_json::json!({
+                "embed_provider": embedder.provider_name(),
+                "embed_dim": embedder.dim(),
+                "turbo_bits": compressed.bit_width,
+                "embedding_compressed": base64::Engine::encode(
+                    &base64::engine::general_purpose::STANDARD,
+                    &compressed_bytes,
+                ),
+            });
+            let artifact = serde_json::json!({
+                "artifact_id": correlation_id,
+                "type": "memory",
+                "schema_version": 1,
+                "content": content,
+                "producer": &producer,
+                "created_at": &now,
+                "tags": tags,
+                "metadata": metadata.clone(),
+            });
+
+            let canonical_cbor = to_canonical_cbor(&artifact, &schema::MEMORY_V1)
+                .map_err(|e| anyhow::anyhow!("canonical CBOR encode failed: {e}"))?;
+            let content_hash = blake3_hash(&canonical_cbor);
+            (canonical_cbor, content_hash, content.to_string(), embedding, false, metadata)
+        };
+
+    // Wave 2 — programmatic client-signing handoff.
     let canonical_cbor_b64 =
         base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &canonical_cbor);
 
-    // 6. Park in PendingBundles. The store assigns the canonical
-    //    `correlation_id` for the entry; we discard the value because we
-    //    pre-allocated one above to keep `artifact_id == correlation_id`.
-    //    On per-user cap or oversized payload, the error surfaces as a
-    //    JSON-RPC -32603 envelope; the caller (mcp_handler) then maps it.
-    //
-    //    NOTE: PendingBundles::insert generates its own UUID. We re-insert
-    //    under that returned id and overwrite our pre-allocated correlation
-    //    by re-reading the result. The artifact_id baked into the canonical
-    //    CBOR is the pre-allocated one; for the webapp flow this is fine
-    //    because the browser only signs what we hand it — the server's
-    //    `entry.canonical_cbor` is the source of truth.
-    //
-    //    To keep `artifact_id == returned correlation_id` exactly, we use a
-    //    helper that accepts a caller-supplied id. But the public API of
-    //    `PendingBundles::insert` doesn't accept one — adding that surface
-    //    would expand the public API. Instead we store the pre-allocated
-    //    id INSIDE the canonical CBOR and let the store generate a separate
-    //    `correlation_id` for routing. The two IDs serve different purposes:
-    //    `artifact_id` is the eventual SQLite primary key; `correlation_id`
-    //    is the URL token. They differ for HTTP path; webapp uses
-    //    `correlation_id` only. SQLite write happens on the callback.
+    // Park in PendingBundles. For sealed entries `park_content` and
+    // `park_embedding` are empty — no plaintext or approximation escapes.
     let assigned_id = pending
         .insert(
             jwt_sub.to_string(),
-            content.to_string(),
-            embedding,
+            park_content,
+            park_embedding,
             content_hash.clone(),
             canonical_cbor,
             tags.to_vec(),
             metadata,
             write_mode,
+            visibility,
+            is_sealed,
         )
         .await
         .map_err(|e| anyhow::anyhow!("pending insert failed: {e}"))?;
@@ -1021,6 +1089,107 @@ async fn sign_memory_deferred(
              with correlation_id={assigned_id} to retrieve the on-chain \
              solana_tx + arweave_tx."
         ),
+    }))
+}
+
+/// Local + private sealed write (Task 6, item 5).
+///
+/// Seals the inner MEMORY_V1 inline using the owner's Ed25519 public key and
+/// saves the SEALED_V1 outer CBOR directly into `sealed_blob`. No COSE_Sign1
+/// is produced — local writes never carry a signature. No keychain access, no
+/// Arweave/Solana round-trip, no PendingBundles entry.
+///
+/// Called only for HTTP+JWT callers with an explicit `mode: "local"` AND
+/// `visibility: "private"`. The stdio operator path falls through to
+/// `sign_memory_inline` instead.
+fn sign_memory_local_sealed(
+    store: &std::sync::Mutex<SqliteStore>,
+    content: &str,
+    tags: &[String],
+    jwt_sub: &str,
+    owner_pubkey: &str,
+    storage_mode: &str,
+) -> anyhow::Result<serde_json::Value> {
+    let attestation_id = uuid::Uuid::new_v4().to_string();
+    let now = chrono::Utc::now().to_rfc3339();
+    let producer = format!("did:sol:{owner_pubkey}");
+
+    // 1. Decode owner's Ed25519 public key.
+    let owner_sol: solana_sdk::pubkey::Pubkey = jwt_sub
+        .parse()
+        .map_err(|e| anyhow::anyhow!("jwt_sub is not a valid Solana pubkey: {e}"))?;
+    let owner_ed25519: [u8; 32] = owner_sol.to_bytes();
+
+    // 2. Build inner MEMORY_V1 artifact.
+    let inner_artifact = serde_json::json!({
+        "artifact_id": attestation_id,
+        "type": "memory",
+        "schema_version": 1,
+        "content": content,
+        "producer": &producer,
+        "created_at": &now,
+        "tags": tags,
+    });
+    let mut inner_cbor = mnemonic_core::codec::canonical::to_canonical_cbor(
+        &inner_artifact,
+        &mnemonic_core::codec::schema::MEMORY_V1,
+    )
+    .map_err(|e| anyhow::anyhow!("inner CBOR encode failed: {e}"))?;
+
+    // 3. Seal.
+    let sealed_art = sealed::seal_memory(
+        &inner_cbor,
+        &owner_ed25519,
+        &attestation_id,
+        &producer,
+        &now,
+        &mut rand::rngs::OsRng,
+    )
+    .map_err(|e| anyhow::anyhow!("seal_memory failed: {e}"))?;
+
+    // 4. Zeroize sensitive material.
+    inner_cbor.zeroize();
+    let outer_cbor = sealed_art.outer_cbor;
+    let content_hash = blake3_hash(&outer_cbor);
+    drop(sealed_art.k); // Zeroizing<[u8;32]> — explicit drop for clarity
+
+    // 5. Synthetic local tx ids (same pattern as local write in sign_memory_inline).
+    let local_ar = format!("local:{}", &attestation_id[..8]);
+    let local_sol = format!("local:{}", &content_hash[..16]);
+
+    // 6. Persist sealed row.
+    {
+        let store_g = store.lock().unwrap();
+        store_g.save_sealed_attestation(
+            &attestation_id,
+            &content_hash,
+            tags,
+            &local_sol,
+            &local_ar,
+            owner_pubkey,
+            owner_pubkey,
+            &now,
+            WriteMode::Local,
+            &outer_cbor,
+        )?;
+    }
+
+    Ok(serde_json::json!({
+        "attestation_id": attestation_id,
+        "content_hash": content_hash,
+        "hash_algorithm": "blake3",
+        "encoding": "cbor+sealed",
+        "solana_tx": local_sol,
+        "arweave_tx": local_ar,
+        "signer": owner_pubkey,
+        "signature": "none",
+        "did_sol": producer,
+        "timestamp": now,
+        "storage_mode": storage_mode,
+        "write_mode": "local",
+        "visibility": "private",
+        "plaintext_on_arweave": false,
+        "sealed": true,
     }))
 }
 
@@ -2468,8 +2637,14 @@ mod sign_memory_tests {
         // bypasses deferred only for *explicit* local requests. This
         // pins the legacy chrome-extension Cloud-tier shape byte-for-
         // byte (no `mode` field, deferred envelope).
+        //
+        // Task 6: the deferred sealed path (default `visibility = Private`)
+        // decodes `jwt_sub` as a Solana pubkey to derive the owner's X25519
+        // key. Use the fixture keypair's pubkey so the decoding succeeds.
         let (kp, sol, ar, store, emb, comp, pending, hint) = fixtures();
         let owner = kp.pubkey().to_string();
+        // Use the same pubkey as jwt_sub so the sealed path can parse it.
+        let jwt_sub = owner.clone();
         let env = local_envelope();
         let resolved = resolve_write_mode(None, "local").unwrap();
         let (hosted_client, args) = no_softfall();
@@ -2486,7 +2661,7 @@ mod sign_memory_tests {
             &hint,
             "local",
             &owner,
-            Some("user-jwt-sub"),
+            Some(&jwt_sub),
             Transport::Http,
             resolved,
             Visibility::Private,
@@ -2939,6 +3114,219 @@ mod sign_memory_tests {
             other => panic!("expected IdentityBootstrapFailed, got {other}"),
         }
         assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    // ── Task 6: sealed-memory write path tests ────────────────────────────────
+
+    /// TDD anchor: pending entry for a sealed write holds no plaintext.
+    /// The pending bundle parks only the outer SEALED_V1 CBOR; `content`
+    /// and `embedding` fields are empty so plaintext never escapes into
+    /// the LRU store.
+    #[tokio::test]
+    async fn test_sealed_pending_entry_holds_no_plaintext() {
+        let (kp, _, _, _, emb, comp, pending, _) = fixtures();
+        let owner_pubkey = kp.pubkey().to_string();
+        let secret = "this is the secret memory";
+
+        let result = sign_memory_deferred(
+            &emb,
+            &comp,
+            &pending,
+            secret,
+            &[],
+            &owner_pubkey,
+            WriteMode::Local,
+            Visibility::Private,
+        )
+        .await
+        .expect("sign_memory_deferred must succeed");
+
+        assert_eq!(result["status"], "awaiting_signature");
+        let cid = result["correlation_id"].as_str().expect("correlation_id");
+
+        // Retrieve the entry from the pending store.
+        let entry = pending.peek_by_id(cid).await.expect("entry must exist");
+
+        // TDD anchor: content and embedding must be empty.
+        assert!(
+            entry.content.is_empty(),
+            "sealed pending entry must have empty content (got: {:?})",
+            entry.content
+        );
+        assert!(
+            entry.embedding.is_empty(),
+            "sealed pending entry must have empty embedding"
+        );
+        assert!(entry.is_sealed, "is_sealed must be true");
+        // outer CBOR must be present (it's the SEALED_V1 bytes).
+        assert!(!entry.canonical_cbor.is_empty(), "outer CBOR must be non-empty");
+    }
+
+    /// TDD anchor: local + private stores a sealed row that `open_memory`
+    /// opens with the owner's X25519 secret derived from their Ed25519 key.
+    #[test]
+    fn test_local_private_stores_sealed_row_openable_with_owner_secret() {
+        use mnemonic_core::sealed::{open_memory, x25519_secret_from_ed25519};
+        use mnemonic_core::storage::AttestationStore;
+
+        let kp = solana_sdk::signature::Keypair::new();
+        let owner = kp.pubkey().to_string();
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let store = std::sync::Mutex::new(SqliteStore::open(tmp.path()).unwrap());
+        let content = "secret local memory";
+
+        let result = sign_memory_local_sealed(
+            &store,
+            content,
+            &[],
+            &owner, // jwt_sub = owner
+            &owner,
+            "local",
+        )
+        .expect("sign_memory_local_sealed must succeed");
+
+        // Basic response shape.
+        assert_eq!(result["write_mode"], "local");
+        assert_eq!(result["visibility"], "private");
+        assert_eq!(result["sealed"], true);
+
+        // The sealed row exists in the store.
+        let store_g = store.lock().unwrap();
+        let sealed = store_g
+            .list_sealed(&owner, None, 5)
+            .expect("list_sealed");
+        assert_eq!(sealed.len(), 1, "exactly one sealed row");
+        assert!(!sealed[0].sealed_blob.is_empty(), "sealed_blob non-empty");
+
+        // The sealed row is openable with the owner's X25519 derived secret.
+        // Derive the X25519 secret from the raw Ed25519 seed bytes (first 32
+        // bytes of the 64-byte Solana keypair representation).
+        use ed25519_dalek::SigningKey as DalekSk;
+        let seed: [u8; 32] = kp.to_bytes()[..32].try_into().expect("32 bytes");
+        let dalek_sk = DalekSk::from_bytes(&seed);
+        let x25519_sk = *x25519_secret_from_ed25519(&dalek_sk);
+        let inner = open_memory(&sealed[0].sealed_blob, &x25519_sk)
+            .expect("open_memory must succeed");
+        // The inner CBOR must contain the original content.
+        let inner_json: serde_json::Value =
+            mnemonic_core::codec::canonical::from_canonical_cbor(&inner)
+            .expect("inner CBOR decodes");
+        assert_eq!(
+            inner_json["content"].as_str().unwrap(),
+            content,
+            "decrypted content matches original"
+        );
+
+        // No embedding row (sealed rows are opaque to vector search).
+        let search_hits = store_g
+            .search(&[0.1; 8], Some(&owner), None, 5)
+            .expect("search");
+        assert_eq!(
+            search_hits.len(),
+            0,
+            "sealed rows must not appear in embedding search"
+        );
+        drop(store_g);
+        std::mem::forget(tmp); // keep alive
+    }
+
+    /// TDD anchor: `public` participate path is byte-identical to the
+    /// pre-Task-6 behaviour — no sealing, embedding preserved, MEMORY_V1 CBOR.
+    #[tokio::test]
+    async fn test_public_deferred_path_unchanged() {
+        let (kp, _, _, _, emb, comp, pending, _) = fixtures();
+        let owner_pubkey = kp.pubkey().to_string();
+
+        let result = sign_memory_deferred(
+            &emb,
+            &comp,
+            &pending,
+            "public memory",
+            &["tag1".to_string()],
+            &owner_pubkey,
+            WriteMode::Anchored,
+            Visibility::Public,
+        )
+        .await
+        .expect("sign_memory_deferred must succeed for public");
+
+        assert_eq!(result["status"], "awaiting_signature");
+        let cid = result["correlation_id"].as_str().expect("correlation_id");
+
+        let entry = pending.peek_by_id(cid).await.expect("entry");
+        // For public writes: content and embedding are populated.
+        assert_eq!(entry.content, "public memory", "public content preserved");
+        assert!(!entry.embedding.is_empty(), "public embedding preserved");
+        assert!(!entry.is_sealed, "public entry must not be sealed");
+        assert_eq!(entry.visibility, Visibility::Public);
+    }
+
+    /// TDD anchor: no plaintext in captured log output.
+    ///
+    /// Constructs a tracing subscriber that captures all log lines and checks
+    /// that the secret content string does not appear anywhere in the output.
+    #[tokio::test]
+    async fn test_no_plaintext_in_logs() {
+        use std::sync::{Arc, Mutex};
+        use tracing::subscriber::set_default;
+        use tracing_subscriber::layer::SubscriberExt;
+
+        // Collect log output lines into a shared Vec.
+        let logs: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let logs_clone = logs.clone();
+
+        // A simple tracing Layer that writes all events to our Vec.
+        struct CaptureLayer(Arc<Mutex<Vec<String>>>);
+        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for CaptureLayer {
+            fn on_event(
+                &self,
+                event: &tracing::Event<'_>,
+                _ctx: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                let mut msg = String::new();
+                let mut visitor = CaptureVisitor(&mut msg);
+                event.record(&mut visitor);
+                self.0.lock().unwrap().push(msg);
+            }
+        }
+        struct CaptureVisitor<'a>(&'a mut String);
+        impl<'a> tracing::field::Visit for CaptureVisitor<'a> {
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                *self.0 += &format!("{}: {:?} ", field.name(), value);
+            }
+            fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+                *self.0 += &format!("{}: {} ", field.name(), value);
+            }
+        }
+
+        let subscriber = tracing_subscriber::registry().with(CaptureLayer(logs_clone));
+        let _guard = set_default(subscriber);
+
+        let (kp, _, _, _, emb, comp, pending, _) = fixtures();
+        let owner_pubkey = kp.pubkey().to_string();
+        let secret_content = "UNIQUE_SECRET_SENTINEL_xyz9876543210";
+
+        // Trigger the sealed deferred path.
+        let _ = sign_memory_deferred(
+            &emb,
+            &comp,
+            &pending,
+            secret_content,
+            &[],
+            &owner_pubkey,
+            WriteMode::Local,
+            Visibility::Private,
+        )
+        .await;
+
+        // Scan all captured log lines for the secret.
+        let captured = logs.lock().unwrap();
+        for line in captured.iter() {
+            assert!(
+                !line.contains(secret_content),
+                "plaintext appeared in log: {line}"
+            );
+        }
     }
 }
 

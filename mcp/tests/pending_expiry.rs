@@ -162,6 +162,8 @@ async fn park_bundle(state: &Arc<McpState>, owner: &str) -> String {
             vec!["t".into()],
             metadata,
             mnemonic_core::storage::WriteMode::Anchored,
+        mnemonic_core::storage::Visibility::Private,
+        false,
         )
         .await
         .expect("park")

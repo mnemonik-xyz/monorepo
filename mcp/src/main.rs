@@ -113,6 +113,22 @@ enum Command {
     /// path — the operator never had the text. `arweave_tx` is where those bytes
     /// live, and `mnemonic-mcp restore` fetches them back.
     Export,
+    /// Seal all local plaintext rows in place (Decision 7 migration, Task 6).
+    ///
+    /// Reads every local row that has non-empty `content`, encrypts it with the
+    /// operator's identity key, rewrites the row as a sealed entry (`privacy =
+    /// 'sealed'`, `content = ''`, `sealed_blob = <outer CBOR>`), drops the
+    /// plaintext embedding row, then runs `VACUUM` to reclaim disk space.
+    ///
+    /// **Take a backup before running this command.** The migration is
+    /// irreversible without the operator keypair.
+    ///
+    /// Idempotent: already-sealed rows are skipped.
+    SealLocalRows {
+        /// Report what would be sealed without writing anything.
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 // ── Axum handlers ─────────────────────────────────────────────────────────────
@@ -390,6 +406,129 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    // ── `seal-local-rows` subcommand (D-7, Task 6) ───────────────────────────
+    // Seal all local plaintext rows in place, then VACUUM.
+    if let Some(Command::SealLocalRows { dry_run }) = cli.command {
+        use mnemonic_core::sealed;
+
+        let identity = match mnemonic_core::identity::ensure() {
+            Ok(id) => id,
+            Err(e) => {
+                eprintln!("mnemonic: identity resolution failed: {e}");
+                std::process::exit(1);
+            }
+        };
+        let owner = identity.pubkey_base58.clone();
+        eprintln!("mnemonic: sealing local rows for {owner}");
+
+        // Ed25519 public key (32 bytes) from the Solana keypair.
+        use solana_sdk::signature::Signer as _;
+        let owner_ed25519: [u8; 32] = identity.keypair.pubkey().to_bytes();
+
+        let store = match mnemonic_core::storage::SqliteStore::open(&cfg.database_path) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("mnemonic: opening the database failed: {e:#}");
+                std::process::exit(1);
+            }
+        };
+        let rows = match store.export_rows(&owner) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("mnemonic: export_rows failed: {e:#}");
+                std::process::exit(1);
+            }
+        };
+        // Filter to local plaintext rows (non-empty content, not already sealed).
+        let plaintext_rows: Vec<_> = rows
+            .iter()
+            .filter(|r| {
+                r.write_mode == mnemonic_core::storage::WriteMode::Local && !r.content.is_empty()
+            })
+            .collect();
+        eprintln!(
+            "mnemonic: {} local plaintext row(s) found, {} already sealed or anchored",
+            plaintext_rows.len(),
+            rows.len() - plaintext_rows.len()
+        );
+
+        if dry_run {
+            for r in &plaintext_rows {
+                println!("would seal: {}", r.attestation_id);
+            }
+            println!("dry run: {} row(s) would be sealed", plaintext_rows.len());
+            return Ok(());
+        }
+
+        let mut sealed_count = 0usize;
+        let mut failed_count = 0usize;
+        for r in &plaintext_rows {
+            let producer = format!("did:sol:{owner}");
+            let inner_artifact = serde_json::json!({
+                "artifact_id": r.attestation_id,
+                "type": "memory",
+                "schema_version": 1,
+                "content": r.content,
+                "producer": &producer,
+                "created_at": &r.created_at,
+                "tags": &r.tags,
+            });
+            let inner_cbor = match mnemonic_core::codec::canonical::to_canonical_cbor(
+                &inner_artifact,
+                &mnemonic_core::codec::schema::MEMORY_V1,
+            ) {
+                Ok(b) => b,
+                Err(e) => {
+                    eprintln!("mnemonic: CBOR encode failed for {}: {e}", r.attestation_id);
+                    failed_count += 1;
+                    continue;
+                }
+            };
+            let sealed_art = match sealed::seal_memory(
+                &inner_cbor,
+                &owner_ed25519,
+                &r.attestation_id,
+                &producer,
+                &r.created_at,
+                &mut rand::rngs::OsRng,
+            ) {
+                Ok(a) => a,
+                Err(e) => {
+                    eprintln!("mnemonic: seal_memory failed for {}: {e}", r.attestation_id);
+                    failed_count += 1;
+                    continue;
+                }
+            };
+            let content_hash = mnemonic_core::codec::hash::hash_bytes(&sealed_art.outer_cbor);
+            if let Err(e) = store.save_sealed_attestation(
+                &r.attestation_id,
+                &content_hash,
+                &r.tags,
+                &r.solana_tx,
+                &r.arweave_tx,
+                &r.signer_pubkey,
+                &r.owner_pubkey,
+                &r.created_at,
+                r.write_mode,
+                &sealed_art.outer_cbor,
+            ) {
+                eprintln!("mnemonic: save_sealed_attestation failed for {}: {e}", r.attestation_id);
+                failed_count += 1;
+                continue;
+            }
+            sealed_count += 1;
+        }
+        // VACUUM to reclaim space from the overwritten plaintext.
+        if sealed_count > 0 {
+            let _ = store.conn().execute_batch("VACUUM");
+        }
+        println!(
+            "sealed {} row(s); {} failed",
+            sealed_count, failed_count
+        );
+        return Ok(());
+    }
+
     // ── Hosted endpoint resolution (Decision 12 + SAR5-M1 round 3) ───────────
     // The compile-time `DEFAULT_HOSTED_ENDPOINT` wins unless the operator
     // explicitly passed `--allow-custom-endpoint` AND set the env var AND
@@ -427,8 +566,9 @@ async fn main() -> anyhow::Result<()> {
         Some(Command::Logout)
         | Some(Command::Identity)
         | Some(Command::Restore { .. })
-        | Some(Command::Export) => {
-            unreachable!("logout, identity, restore and export short-circuit above")
+        | Some(Command::Export)
+        | Some(Command::SealLocalRows { .. }) => {
+            unreachable!("logout, identity, restore, export and seal-local-rows short-circuit above")
         }
         None => {
             if std::env::var("MCP_TRANSPORT").is_ok() {
@@ -645,6 +785,13 @@ async fn main() -> anyhow::Result<()> {
     paid_artifact::migrate_paid_artifact_staging(store.conn())?;
     wallet_link::migrate_wallet_links(store.conn())?;
     payment::migrate_free_anchor_usage(store.conn())?;
+    // F1 fix (Task 6, D-8): relabel legacy anchored rows that were stored as
+    // `private` before the visibility column was wired. Sets `visibility =
+    // 'public'` and `plaintext_on_arweave = 1` on rows that have a real
+    // Arweave tx id. Idempotent — safe to run on every startup.
+    if let Err(e) = store.relabel_plaintext_anchors() {
+        tracing::warn!("relabel_plaintext_anchors failed (non-fatal): {e}");
+    }
     // ── T14: Google OAuth identity-link table (idempotent migration) ─────────
     // Lives in `mcp/` per Decision 9 (`core/` reserved for the cross-client
     // attestation schema). No-op when the table already exists; skipped

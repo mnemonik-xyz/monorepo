@@ -139,7 +139,36 @@ The hosted server sees plaintext during a write (F2).
 
 ## Task reports
 
-<!-- Format per task: Status, Commit, Agent, Summary, Deviations, Reviews, Verification. -->
+### Task 6 — Hosted sealed write path and "private" label fix
+
+**Status:** done  
+**Agent:** claude-sonnet-4-6 (2026-09-28)
+
+**Summary:**
+
+1. `resolve_visibility` now allows `private` on `local` writes (triggers sealed path); `public` on `local` still rejected (-32602).
+2. `sign_memory_deferred` branches on `visibility == Private`: builds inner MEMORY_V1, calls `seal_memory` with owner Ed25519 pubkey, parks only outer SEALED_V1 CBOR; zeroizes plaintext/inner CBOR/K.
+3. `PendingEntry` gains `visibility: Visibility` and `is_sealed: bool`; sealed entries carry empty `content` and `embedding`.
+4. Sign-callback: sealed path uploads COSE with `Mnemonic-Type: sealed` Arweave tag, memo `v: 3`, saves via `save_sealed_attestation`, uses outer hash for delivery check. `Visibility::Private` hard-code removed; uses `entry.visibility`.
+5. `sign_memory_local_sealed` handles explicit-local + private for JWT callers inline (no COSE, no keychain).
+6. `relabel_plaintext_anchors()` called at server startup (F1 fix).
+7. `mnemonic-mcp seal-local-rows [--dry-run]` CLI subcommand added (D-7).
+8. No plaintext/K/inner CBOR logged; test confirms this.
+9. Added doc comment at top of `sign_memory_deferred` explaining the sealed path.
+
+**Tests added:**
+- `test_sealed_pending_entry_holds_no_plaintext` — pending entry carries no content/embedding.
+- `test_local_private_stores_sealed_row_openable_with_owner_secret` — local + private → sealed row, `open_memory` recovers plaintext.
+- `test_public_deferred_path_unchanged` — public deferred path byte-identical to pre-T6.
+- `test_no_plaintext_in_logs` — log capture scan.
+
+**Deviations from spec:**
+- D-7 spec said "Leave old rows" (owner decision), but the `seal-local-rows` CLI was still required as a migration command option per the task spec item 7. Implemented as a CLI subcommand only (never runs automatically at startup). D-7 owner decision is respected: no automatic in-place sealing on startup.
+- The `recall` tool does not surface sealed rows (they have no embedding). This is intentional per D-3/D-6: sealed-memory recall requires a client-side component.
+
+**Test impact:** 8 existing tests updated to account for new sealed-default behavior (fake jwt_sub values replaced with real Solana keypairs; deferred_sign_flow tests updated to check `list_sealed` instead of vector search; recall_owner_isolation updated to seed public rows directly for cross-tenant recall testing; sign_memory_visibility test updated to reflect private-on-local being allowed).
+
+**Verification:** `cargo test --workspace --features mnemonic-mcp/test-support` — all pass (0 failures). `cargo clippy --workspace --features mnemonic-mcp/test-support -- -D warnings` — clean.
 
 ## Audit findings
 

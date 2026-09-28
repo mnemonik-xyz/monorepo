@@ -175,32 +175,24 @@ async fn test_full_lifecycle_sign_callback_410_on_replay() {
     assert_eq!(body4["status"], "ok");
     let _attestation_id = body4["attestation_id"].as_str().expect("attestation_id");
 
-    // 5. Verify the row is visible to the owner via direct store search.
-    //    (Going through tools/call recall would require parsing the MCP
-    //    envelope, which is covered in `recall_owner_isolation.rs`; here we
-    //    just want to prove persistence happened.)
+    // 5. Verify the row is visible to the owner as a sealed entry.
+    //    (Task 6: default visibility = private → deferred write is sealed;
+    //    content is empty, sealed_blob holds the COSE envelope.)
     {
+        use mnemonic_core::storage::AttestationStore;
         let store = state.store.lock().expect("store mutex");
-        let results = store
-            .search(&[0.1; 8], Some(user_pubkey.as_str()), None, 5)
-            .expect("search ok");
+        // Sealed entries are not in the embedding search index.
+        let sealed = store
+            .list_sealed(&user_pubkey, None, 5)
+            .expect("list_sealed ok");
         assert_eq!(
-            results.len(),
+            sealed.len(),
             1,
-            "expected 1 persisted row, got {results:?}"
+            "expected 1 sealed row, got {sealed:?}"
         );
-        assert_eq!(results[0].content, "lifecycle test memo");
-        // Owner decision D-8: an anchored anchored row is public and
-        // flagged; any other row keeps its private default and no flag.
-        let r = &results[0];
-        let anchored = mnemonic_core::storage::is_anchored_arweave_tx(&r.arweave_tx);
-        assert_eq!(r.plaintext_on_arweave, anchored, "{r:?}");
-        let expect_public = anchored && r.write_mode == mnemonic_core::storage::WriteMode::Anchored;
-        assert_eq!(
-            r.visibility == mnemonic_core::storage::Visibility::Public,
-            expect_public,
-            "{r:?}"
-        );
+        assert!(!sealed[0].sealed_blob.is_empty(), "sealed_blob must be non-empty");
+        // The `count` helper counts ALL rows (plaintext + sealed).
+        assert_eq!(store.count(&user_pubkey).expect("count"), 1);
     }
 
     // 6. Replay sign-callback for the SAME correlation_id → 410 Gone.
@@ -265,16 +257,18 @@ async fn test_programmatic_client_sign_without_pending_get() {
     assert_eq!(body4["status"], "ok");
 
     // 5. Row persisted with the USER as signer (self-sovereign authorship).
+    //    Task 6: default visibility = private → sealed row, no embedding.
     {
+        use mnemonic_core::storage::AttestationStore;
         let store = state.store.lock().expect("store mutex");
-        let results = store
-            .search(&[0.1; 8], Some(user_pubkey.as_str()), None, 5)
-            .expect("search ok");
+        let sealed = store
+            .list_sealed(&user_pubkey, None, 5)
+            .expect("list_sealed ok");
         assert_eq!(
-            results.len(),
+            sealed.len(),
             1,
-            "expected 1 persisted row, got {results:?}"
+            "expected 1 sealed row, got {sealed:?}"
         );
-        assert_eq!(results[0].content, "headless memo");
+        assert!(!sealed[0].sealed_blob.is_empty(), "sealed_blob must be non-empty");
     }
 }

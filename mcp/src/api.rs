@@ -675,6 +675,8 @@ pub async fn sign_callback_handler(
         // (producer = did:sol:<jwt_sub> — the USER's identity, not the
         // server's); they make the item aggregatable via one gateway
         // GraphQL query (recover-traction-from-chain).
+        // Sealed entries get an additional `Mnemonic-Type: sealed` tag so
+        // gateway queries can distinguish them without fetching the payload.
         let producer_did = format!("did:sol:{}", req.signer_pubkey);
         let ar_tx = if let Some(existing) = delivery_attempt
             .as_ref()
@@ -697,15 +699,24 @@ pub async fn sign_callback_handler(
             if let Some(grant) = free_anchor.as_mut() {
                 grant.mark_chain_write();
             }
+            // Build Arweave tags. Sealed entries additionally carry
+            // `Mnemonic-Type: sealed` for gateway indexing.
+            let base_tags: &[(&str, &str)] = &[
+                ("Producer", producer_did.as_str()),
+                ("Created-At", now.as_str()),
+            ];
+            let sealed_tags: &[(&str, &str)] = &[
+                ("Producer", producer_did.as_str()),
+                ("Created-At", now.as_str()),
+                ("Mnemonic-Type", "sealed"),
+            ];
+            let ar_tags: &[(&str, &str)] = if entry.is_sealed { sealed_tags } else { base_tags };
             let uploaded = match state
                 .arweave
                 .write_item(
                     &cose_bytes,
                     operator_keypair,
-                    &[
-                        ("Producer", producer_did.as_str()),
-                        ("Created-At", now.as_str()),
-                    ],
+                    ar_tags,
                 )
                 .await
             {
@@ -747,15 +758,15 @@ pub async fn sign_callback_handler(
         // No-op for production Irys (mine() only writes against arlocal).
         let _ = state.arweave.mine().await;
 
-        // Solana SPL Memo anchor — `v=2` schema (h=hash, a=arweave_tx) so
-        // existing verifiers continue to parse without an alg field. The
-        // inline path emits v=3 with embed_model; the deferred path's
-        // `entry` carries metadata in its CBOR but not as a flat string,
-        // so v=2 is the conservative choice to avoid embed-model drift.
+        // Solana SPL Memo anchor.
+        // Plain (public) deferred writes use v=2 (h=hash, a=arweave_tx).
+        // Sealed writes use v=3 to signal the sealed-memory schema; the
+        // inline plain path also uses v=3 with embed_model.
+        let memo_version: u8 = if entry.is_sealed { 3 } else { 2 };
         let memo = serde_json::json!({
             "h": entry.content_hash,
             "a": ar_tx,
-            "v": 2,
+            "v": memo_version,
         });
         let sol_tx = if let Some(existing) = delivery_attempt
             .as_ref()
@@ -873,6 +884,13 @@ pub async fn sign_callback_handler(
         // to exist (see `tools::perform_delivery_check`). On delivery failure
         // the row is demoted in place via `INSERT OR REPLACE` inside
         // `confirm_delivery_or_demote`.
+        //
+        // Task 6 (sealed-memory write path): use the visibility from the
+        // pending entry rather than the hard-coded `Visibility::Private` so
+        // future non-sealed private writes are handled correctly. For sealed
+        // entries the persist path calls `save_sealed_attestation` which
+        // always stores `privacy = 'sealed'`, `content = ''`, and no embedding.
+        //
         // Visibility (owner decision D-8, 2026-09-27): an anchored
         // Anchored row is plain text on Arweave, so it is stored `public`
         // with `plaintext_on_arweave = 1`. A Local bundle stays `private`.
@@ -881,45 +899,61 @@ pub async fn sign_callback_handler(
         let (visibility, _plaintext_on_arweave) = mnemonic_core::storage::effective_visibility(
             entry.write_mode,
             &arweave_tx,
-            Visibility::Private,
+            entry.visibility, // use pending entry's resolved visibility, not hard-coded Private
         );
-        // work/arweave-as-source-of-truth D-2: the operator stores no memory for
-        // an anchored write. Arweave holds the bytes and the Solana memo holds
-        // the hash, so persisting the text here would make the operator a
-        // custodian of content it does not need and cannot be trusted with.
-        //
-        // What stays is an ANCHOR INDEX: the id, the content hash, the two
-        // transaction ids, the owner, the timestamp and the labels. Those are
-        // the operator's own bookkeeping, and two things depend on them — the
-        // replay guard behind `already_anchored` (a second anchor would spend a
-        // second free grant for one memory) and the delivery check's existence
-        // stage. Neither reads the content.
-        //
-        // The embedding goes too, and deliberately: a vector inverts to an
-        // approximation of its source text, so keeping it would keep the memory
-        // in all but name. The consequence is real and intended — the operator
-        // cannot run semantic recall over these rows. A client restores its own
-        // index from Arweave (`mnemonic-mcp restore`) and searches locally.
-        let (stored_content, stored_embedding): (&str, &[f32]) =
-            if entry.write_mode == WriteMode::Anchored {
-                ("", &[])
-            } else {
-                (entry.content.as_str(), entry.embedding.as_slice())
-            };
-        let save_res = store.save_attestation(
-            &attestation_id,
-            stored_content,
-            &entry.content_hash,
-            &entry.tags,
-            &solana_tx,
-            &arweave_tx,
-            &req.signer_pubkey, // signer = pubkey we just verified via COSE
-            &req.signer_pubkey, // owner = same pubkey (Decision 9 — webapp flow uses keypair as identity)
-            &now,
-            entry.write_mode,
-            visibility,
-            stored_embedding,
-        );
+
+        let save_res = if entry.is_sealed {
+            // Sealed path: `cose_bytes` IS the signed COSE_Sign1 over the
+            // SEALED_V1 outer CBOR. Store it as-is; `content` and embedding
+            // are empty. The outer hash (`entry.content_hash`) is the delivery
+            // check anchor.
+            store.save_sealed_attestation(
+                &attestation_id,
+                &entry.content_hash,
+                &entry.tags,
+                &solana_tx,
+                &arweave_tx,
+                &req.signer_pubkey, // signer = pubkey we just verified
+                &req.signer_pubkey, // owner = same pubkey
+                &now,
+                entry.write_mode,
+                &cose_bytes,
+            )
+        } else {
+            // Plain path (public or non-sealed private).
+            // work/arweave-as-source-of-truth D-2: the operator stores no
+            // memory for an anchored write. Arweave holds the bytes and the
+            // Solana memo holds the hash, so persisting the text here would
+            // make the operator a custodian of content it does not need and
+            // cannot be trusted with.
+            //
+            // What stays is an ANCHOR INDEX: the id, the content hash, the two
+            // transaction ids, the owner, the timestamp and the labels.
+            //
+            // The embedding goes too, and deliberately: a vector inverts to an
+            // approximation of its source text, so keeping it would keep the
+            // memory in all but name.
+            let (stored_content, stored_embedding): (&str, &[f32]) =
+                if entry.write_mode == WriteMode::Anchored {
+                    ("", &[])
+                } else {
+                    (entry.content.as_str(), entry.embedding.as_slice())
+                };
+            store.save_attestation(
+                &attestation_id,
+                stored_content,
+                &entry.content_hash,
+                &entry.tags,
+                &solana_tx,
+                &arweave_tx,
+                &req.signer_pubkey, // signer = pubkey we just verified via COSE
+                &req.signer_pubkey, // owner = same pubkey (Decision 9 — webapp flow uses keypair as identity)
+                &now,
+                entry.write_mode,
+                visibility,
+                stored_embedding,
+            )
+        };
         // Stamp the correlation_id onto the row so `mnemonic_check_pending`
         // can resolve it later. Best-effort; an UPDATE failure here doesn't
         // invalidate the attestation itself.

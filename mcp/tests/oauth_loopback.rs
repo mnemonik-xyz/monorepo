@@ -171,6 +171,7 @@ fn fresh_install_path() {
                     "state",
                 ],
                 optional_fields: &[],
+                bytes_fields: &[],
                 cbor_field_order: &[
                     "client_id",
                     "code_challenge",

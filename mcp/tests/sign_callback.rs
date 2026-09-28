@@ -225,6 +225,8 @@ async fn park_bundle(
             vec!["t1".into()],
             metadata,
             mnemonic_core::storage::WriteMode::Anchored,
+        mnemonic_core::storage::Visibility::Private,
+        false,
         )
         .await
         .unwrap();

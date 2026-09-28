@@ -35,7 +35,7 @@ use axum::{
 };
 use chrono::{DateTime, Duration, Utc};
 use lru::LruCache;
-use mnemonic_core::storage::WriteMode;
+use mnemonic_core::storage::{Visibility, WriteMode};
 use tokio::sync::Mutex;
 
 /// 32 KB hard cap on `content` field — UTF-8 bytes, not chars.
@@ -56,20 +56,29 @@ pub const DEFAULT_TTL_SECS: i64 = 300;
 /// (b) verify the returned signature's payload-hash matches what we built
 /// (`content_hash`), and (c) persist the final attestation row including
 /// the raw embedding for `recall` searches (`embedding`).
+///
+/// For a **sealed** entry (`is_sealed = true`):
+/// - `content` is empty — the plaintext is encrypted inside the COSE envelope.
+/// - `embedding` is empty — sealed rows are opaque to vector search.
+/// - `canonical_cbor` holds the outer SEALED_V1 CBOR (unsigned, ready for
+///   COSE_Sign1 by the client).
 #[derive(Debug, Clone)]
 pub struct PendingEntry {
     /// JWT subject (base58 user pubkey) of the AI-tool caller. Used for both
     /// the per-user cap on insert and the owner-check on get/consume.
     pub jwt_sub: String,
     /// Original raw text content of the memory.
+    /// Empty for sealed entries — the plaintext is encrypted inside `canonical_cbor`.
     pub content: String,
     /// Raw embedding from `Embedder::embed(content)`. Re-used on callback
     /// for `save_attestation(... embedding: &[f32] ...)` — never re-embedded.
+    /// Empty for sealed entries — sealed rows are opaque to vector search.
     pub embedding: Vec<f32>,
     /// blake3-hex of `canonical_cbor`. Returned in the COSE_Sign1 payload's
     /// hash slot; the callback verifies the signed COSE matches this hash.
     pub content_hash: String,
     /// Bytes the user must sign — canonical-CBOR of the unsigned artifact JSON.
+    /// For sealed entries this is the outer SEALED_V1 CBOR (not MEMORY_V1).
     pub canonical_cbor: Vec<u8>,
     /// Tags from the original `tools/call mnemonic_sign_memory` request.
     /// Stored separately because `save_attestation` takes them as a slice.
@@ -86,6 +95,14 @@ pub struct PendingEntry {
     /// A `Local` deferred write (Wave 3: explicit-local writes by a remote
     /// user are client-signed too) skips Arweave/Solana and stays free.
     pub write_mode: WriteMode,
+    /// Visibility resolved from the original `mnemonic_sign_memory` request.
+    /// Carried through so the sign-callback does not hard-code a value.
+    pub visibility: Visibility,
+    /// `true` when this entry was built by the sealed write path (Task 6):
+    /// `content` and `embedding` are empty; `canonical_cbor` is the outer
+    /// SEALED_V1 CBOR. The sign-callback calls `save_sealed_attestation`
+    /// instead of `save_attestation`.
+    pub is_sealed: bool,
     /// True when the pre-parking x402 gate let this anchored bundle
     /// through on the signer's free daily anchor quota instead of a payment
     /// (set by `mcp_handler` through [`PendingBundles::mark_free_quota`]).
@@ -213,6 +230,9 @@ impl PendingBundles {
     /// Atomicity: the per-user counter and the LRU mutate under a single
     /// guard. If the LRU evicts an unrelated entry to make room, that
     /// entry's user-counter is decremented too.
+    ///
+    /// For a sealed write (`is_sealed = true`) `content` and `embedding`
+    /// must be empty — the sealed path never parks plaintext in memory.
     #[allow(clippy::too_many_arguments)]
     pub async fn insert(
         &self,
@@ -224,6 +244,8 @@ impl PendingBundles {
         tags: Vec<String>,
         metadata: serde_json::Value,
         write_mode: WriteMode,
+        visibility: Visibility,
+        is_sealed: bool,
     ) -> Result<String, PendingError> {
         // Size checks first — cheaper to reject before locking.
         if content.len() > MAX_CONTENT_BYTES {
@@ -255,6 +277,8 @@ impl PendingBundles {
             tags,
             metadata,
             write_mode,
+            visibility,
+            is_sealed,
             free_quota: false,
             requester_ip: None,
             exp,
@@ -524,7 +548,7 @@ mod tests {
         let p = PendingBundles::new(10, 300, 5);
         let (c, e, h, cb, tg, md) = dummy_entry("hello");
         let id = p
-            .insert("u".into(), c, e, h, cb, tg, md, WriteMode::Anchored)
+            .insert("u".into(), c, e, h, cb, tg, md, WriteMode::Anchored, Visibility::Private, false)
             .await
             .unwrap();
         assert_eq!(id.len(), 36, "correlation_id is uuidv4 (36 chars)");
@@ -539,7 +563,7 @@ mod tests {
         for i in 0..4 {
             let (c, e, h, cb, tg, md) = dummy_entry(&format!("c{i}"));
             let id = p
-                .insert(format!("user{i}"), c, e, h, cb, tg, md, WriteMode::Anchored)
+                .insert(format!("user{i}"), c, e, h, cb, tg, md, WriteMode::Anchored, Visibility::Private, false)
                 .await
                 .unwrap();
             ids.push(id);
@@ -568,7 +592,7 @@ mod tests {
         let p = PendingBundles::new(10, 300, 5);
         let (c, e, h, cb, tg, md) = dummy_entry("expires");
         let id = p
-            .insert("u".into(), c, e, h, cb, tg, md, WriteMode::Anchored)
+            .insert("u".into(), c, e, h, cb, tg, md, WriteMode::Anchored, Visibility::Private, false)
             .await
             .unwrap();
 
@@ -590,20 +614,20 @@ mod tests {
         for i in 0..3 {
             let (c, e, h, cb, tg, md) = dummy_entry(&format!("c{i}"));
             ok_ids.push(
-                p.insert("u".into(), c, e, h, cb, tg, md, WriteMode::Anchored)
+                p.insert("u".into(), c, e, h, cb, tg, md, WriteMode::Anchored, Visibility::Private, false)
                     .await
                     .unwrap(),
             );
         }
         let (c, e, h, cb, tg, md) = dummy_entry("over");
         let result = p
-            .insert("u".into(), c, e, h, cb, tg, md, WriteMode::Anchored)
+            .insert("u".into(), c, e, h, cb, tg, md, WriteMode::Anchored, Visibility::Private, false)
             .await;
         assert!(matches!(result, Err(PendingError::PerUserCapExceeded)));
         // Other users unaffected.
         let (c, e, h, cb, tg, md) = dummy_entry("other");
         assert!(p
-            .insert("v".into(), c, e, h, cb, tg, md, WriteMode::Anchored)
+            .insert("v".into(), c, e, h, cb, tg, md, WriteMode::Anchored, Visibility::Private, false)
             .await
             .is_ok());
         let _ = ok_ids;
@@ -615,7 +639,7 @@ mod tests {
         let huge = "x".repeat(MAX_CONTENT_BYTES + 1);
         let (_, e, h, cb, tg, md) = dummy_entry("ignored");
         let result = p
-            .insert("u".into(), huge, e, h, cb, tg, md, WriteMode::Anchored)
+            .insert("u".into(), huge, e, h, cb, tg, md, WriteMode::Anchored, Visibility::Private, false)
             .await;
         assert!(matches!(result, Err(PendingError::OversizedPayload)));
     }
@@ -628,7 +652,7 @@ mod tests {
         let metadata = serde_json::json!({"big": big_str});
         let (c, e, h, cb, tg, _) = dummy_entry("c");
         let result = p
-            .insert("u".into(), c, e, h, cb, tg, metadata, WriteMode::Anchored)
+            .insert("u".into(), c, e, h, cb, tg, metadata, WriteMode::Anchored, Visibility::Private, false)
             .await;
         assert!(matches!(result, Err(PendingError::OversizedPayload)));
     }
@@ -638,7 +662,7 @@ mod tests {
         let p = PendingBundles::new(10, 300, 5);
         let (c, e, h, cb, tg, md) = dummy_entry("c");
         let id = p
-            .insert("alice".into(), c, e, h, cb, tg, md, WriteMode::Anchored)
+            .insert("alice".into(), c, e, h, cb, tg, md, WriteMode::Anchored, Visibility::Private, false)
             .await
             .unwrap();
         let r = p.get(&id, "bob").await;
@@ -652,7 +676,7 @@ mod tests {
         let p = PendingBundles::new(10, 300, 5);
         let (c, e, h, cb, tg, md) = dummy_entry("once");
         let id = p
-            .insert("u".into(), c, e, h, cb, tg, md, WriteMode::Anchored)
+            .insert("u".into(), c, e, h, cb, tg, md, WriteMode::Anchored, Visibility::Private, false)
             .await
             .unwrap();
 
@@ -675,7 +699,7 @@ mod tests {
         let p = PendingBundles::new(10, 300, 5);
         let (c, e, h, cb, tg, md) = dummy_entry("c");
         let id = p
-            .insert("alice".into(), c, e, h, cb, tg, md, WriteMode::Anchored)
+            .insert("alice".into(), c, e, h, cb, tg, md, WriteMode::Anchored, Visibility::Private, false)
             .await
             .unwrap();
         let result = p.consume(&id, "bob").await;
@@ -721,7 +745,7 @@ mod tests {
         let p = PendingBundles::new(10, 300, 5);
         let (c, e, h, cb, tg, md) = dummy_entry("c");
         let id = p
-            .insert("u".into(), c, e, h, cb, tg, md, WriteMode::Anchored)
+            .insert("u".into(), c, e, h, cb, tg, md, WriteMode::Anchored, Visibility::Private, false)
             .await
             .unwrap();
         assert_eq!(p.user_count("u").await, 1);

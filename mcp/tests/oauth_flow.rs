@@ -126,6 +126,7 @@ async fn full_authorize_token_jwt_roundtrip() {
             "state",
         ],
         optional_fields: &[],
+        bytes_fields: &[],
         cbor_field_order: &[
             "client_id",
             "code_challenge",

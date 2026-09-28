@@ -44,6 +44,7 @@ mod _helpers;
 use _helpers::TestServer;
 use mnemonic_core::storage::{AttestationStore, Visibility, WriteMode};
 use serde_json::json;
+use solana_sdk::signature::{Keypair, Signer as _};
 
 // ── 1. local-mode write against a full-mode + paid server is free ──────────
 
@@ -105,13 +106,17 @@ async fn anchored_remote_user_is_deferred_not_operator_signed() {
         .storage_mode("full")
         .payment_mode("none")
         .build();
-    let remote = "RemoteUser1111111111111111111111111111111111";
+    // Use a valid base58 Solana pubkey (32 bytes decoded). Task 6: the sealed
+    // path (default visibility = private) decodes jwt_sub as a Solana pubkey to
+    // derive the owner's X25519 key for encryption.
+    let remote_kp = solana_sdk::signature::Keypair::new();
+    let remote = remote_kp.pubkey().to_string();
     let operator = server.server_pubkey();
     assert_ne!(remote, operator.as_str());
 
     let result = server
         .call_tool(
-            Some(remote),
+            Some(remote.as_str()),
             "mnemonic_sign_memory",
             json!({"content": "remote anchored memo", "mode": "anchored"}),
         )
@@ -124,7 +129,7 @@ async fn anchored_remote_user_is_deferred_not_operator_signed() {
     );
     assert!(inner["correlation_id"].is_string(), "{inner:?}");
     assert!(inner.get("attestation_id").is_none(), "{inner:?}");
-    assert_eq!(server.attestation_count(remote), 0);
+    assert_eq!(server.attestation_count(remote.as_str()), 0);
     assert_eq!(server.attestation_count(&operator), 0);
 }
 

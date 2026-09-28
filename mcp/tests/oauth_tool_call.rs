@@ -33,6 +33,7 @@ use mnemonic_mcp::{
     test_support::mock_state,
 };
 use serde_json::Value;
+use solana_sdk::signature::{Keypair, Signer as _};
 use tower::ServiceExt;
 
 const TEST_SECRET: &[u8; 32] = b"oauth-tool-call-secret-32-bytes!";
@@ -84,8 +85,11 @@ async fn test_tools_list_6_tools_and_sign_memory_returns_awaiting_signature() {
     let oauth_state = Arc::new(OAuthState::with_defaults(TEST_SECRET));
     let app = build_router(state, oauth_state.clone());
 
-    let user_pubkey = "test-user-pubkey-base58";
-    let token = oauth::issue_jwt(&oauth_state, user_pubkey).expect("issue_jwt");
+    // Task 6: the sealed path decodes jwt_sub as a Solana pubkey.
+    // Use a real keypair so pubkey parsing succeeds in sign_memory_deferred.
+    let user_kp = Keypair::new();
+    let user_pubkey = user_kp.pubkey().to_string();
+    let token = oauth::issue_jwt(&oauth_state, &user_pubkey).expect("issue_jwt");
 
     // 1. tools/list — assert exactly 7 expected tools by name (Decision 12
     // added `mnemonic_check_pending` on top of the original 5;

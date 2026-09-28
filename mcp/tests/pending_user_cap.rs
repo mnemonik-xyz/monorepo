@@ -25,6 +25,7 @@ use mnemonic_mcp::{
     test_support::mock_state,
 };
 use serde_json::Value;
+use solana_sdk::signature::{Keypair, Signer as _};
 use tower::ServiceExt;
 
 const TEST_SECRET: &[u8; 32] = b"pending-user-cap-secret-32-bytes";
@@ -94,8 +95,10 @@ async fn test_51st_sign_memory_returns_429_with_retry_after() {
     let oauth_state = Arc::new(OAuthState::with_defaults(TEST_SECRET));
     let app = build_app(state.clone(), oauth_state.clone());
 
-    let user_pubkey = "user-cap-test-pubkey";
-    let token = oauth::issue_jwt(&oauth_state, user_pubkey).expect("issue_jwt");
+    // Task 6: jwt_sub must be a valid Solana pubkey for the sealed path.
+    let user_kp = Keypair::new();
+    let user_pubkey = user_kp.pubkey().to_string();
+    let token = oauth::issue_jwt(&oauth_state, &user_pubkey).expect("issue_jwt");
 
     // Fire PER_USER_CAP successful sign_memory calls.
     for i in 0..PER_USER_CAP {

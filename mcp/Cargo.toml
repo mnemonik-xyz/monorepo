@@ -128,6 +128,10 @@ rand = "0.8"
 # `SalsaBox` (XSalsa20-Poly1305 + Curve25519) — same major as core's dep.
 crypto_box = "0.9"
 
+# Secure zeroing of sensitive buffers (plaintext, inner CBOR, K) in the
+# sealed-memory write path (Task 6). Pinned to the same major as core.
+zeroize = "1"
+
 # ZIP archive (artifact generation in seed.rs)
 zip = { version = "2", default-features = false, features = ["deflate"] }
 
@@ -268,6 +272,8 @@ required-features = ["test-support"]
 
 [dev-dependencies]
 tempfile = "3"
+# Ed25519 signing key for sealed-memory unit tests (Task 6). Same major as core.
+ed25519-dalek = { version = "2", features = ["hazmat"] }
 httpmock = "0.8"
 # `#[traced_test]` macro + `logs_contain` helper used by the WARN-log
 # assertions in oauth::tests::jwt_ttl_* (Task 2, refresh-token-rotation).
