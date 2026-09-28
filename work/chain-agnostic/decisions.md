@@ -67,8 +67,13 @@ but it is a trade, and the documents must not present it as pure gain.
 
 ## Open questions
 
-- **Q-1.** Should stage 2 ship behind a flag (`MNEMONIC_ANCHOR_SOLANA_MEMO=0`) so the memo can be
-  re-enabled without a redeploy while confidence builds, or as a straight removal?
+- **Q-1. ANSWERED 2026-09-28 — see `work/pluggable-anchoring/`.** Neither. An environment flag
+  and a straight removal were the wrong two options. Anchor pluggability (#70) expresses "no
+  Solana anchor" as a configuration value — `Anchor::None` — so there is no second mechanism
+  and no dead code path. Selecting it is reversible on a deploy; deleting the write path would
+  be reversible only on a revert. Pluggability therefore lands BEFORE stage 2, which becomes a
+  configuration change. The D-1 gate is unaffected: reversible is not the same as safe, and a
+  measured enumeration result is still required.
 - **Q-2.** Is the single-provider dependency on Irys acceptable, or should a second index be
   found before the memo is switched off? This is the substantive question in D-4, and it is the
   owner's to answer.
