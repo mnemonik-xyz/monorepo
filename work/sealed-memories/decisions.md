@@ -204,3 +204,252 @@ The hosted server sees plaintext during a write (F2).
 ## Audit findings
 
 <!-- Written by tasks 16 and 17. -->
+
+## Audit findings (T17) — 2026-09-28
+
+Auditor: claude-sonnet-4-6. Read-only audit. All findings reference specific file
+paths and line numbers.
+
+---
+
+### 1. Golden vectors cross-language
+
+**1a. Rust integration test (core/tests/integration_sealed_wasm.rs) — PASS**
+
+`integration_sealed_wasm.rs` contains `wasm_binding_golden_vector_structural_invariants`
+(lines 291–331) which checks, with a fixed Ed25519 seed (`0x42 × 32`), that:
+- A: `content_hash == blake3(outer_cbor)`.
+- B: `open_memory` recovers the original inner JSON byte-for-byte.
+- C: `open_with_key` produces the same result as `open_memory`.
+- D: `kc` field in CBOR equals `key_commitment(K)`.
+
+These are structural invariants anchored to a fixed key, not fully pre-computed
+byte vectors (sealing uses a random nonce), but they are repeatable property-based
+checks. All pass (0 failures confirmed by `cargo test -p mnemonic-core` — see
+item 2 below).
+
+**1b. Rust unit tests in core/src/sealed/api.rs — PASS**
+
+`api.rs` (lines 422–643) contains 12 unit tests covering seal+open round-trips,
+wrong-key rejection, key-commitment check (`seal_returns_k_that_matches_kc`),
+grant round-trips (anonymous + targeted), and link_fragment. Fixed seed `0x42 × 32`
+used throughout.
+
+**1c. SDK test (packages/sdk/test/sealed.test.ts) — PASS (mock WASM, no real crypto)**
+
+`sealed.test.ts` lines 783–833 implement the "T3 golden vector structural invariants
+(mock WASM)" group checking the same three properties (A, B, C) plus
+`link_fragment + parse_link_fragment` round-trip. These use the mock WASM (XOR /
+sentinel-based fake), not the real XChaCha20Poly1305. The file explicitly comments
+(line 779–781) that the actual byte vectors live in
+`core/tests/golden_fixtures.rs` and `core/tests/integration_sealed_wasm.rs`. PASS
+for SDK-level wiring; structural equivalence to Rust confirmed by the shared
+property checks.
+
+**1d. Extension test (packages/extension/tests/unit/runtime/sealed-sync.test.ts) — PARTIAL**
+
+Lines 615–634 define `describe.skipIf(!WASM_AVAILABLE)` for T3 golden COSE vector
+parity through `signCosePayload`. The describe block is gated on whether
+`core/pkg-web/mnemonic_core.js` exists. Since the pkg-web WASM build (Task 5) was
+not verified present during this audit, the golden-vector test is conditionally
+skipped. The GROUP B tests (`seal_then_open_round_trip`, `sync_body_never_contains_plaintext`,
+`openSealedBlob`) do run using the XOR stub WASM. **The cross-language parity gate
+for the extension exists but will only execute if the Task 5 WASM build is present.**
+
+**1e. RFC 9180 A.2 vector in Rust — FAIL (not present)**
+
+`grep` for `A\.2`, `rfc9180`, `RFC.9180`, `dhkem_x25519`, or similar across
+`core/src/` and `core/tests/` returned no matches. The HPKE wrap/unwrap tests
+(`core/src/sealed/wrap.rs`) use round-trips only; they do not check against the
+published RFC 9180 Appendix A.2 test vector. No explicit A.2 interoperability
+assertion exists in the test suite.
+
+**Summary for item 1:**  PARTIAL. Structural invariants are well-covered in all
+three environments. Byte-identical golden vectors between Rust and WASM are gated
+on the pkg-web build being present (Task 5, skipped when absent). RFC 9180 A.2
+vector is absent — this is a gap if third-party HPKE implementations must
+interoperate.
+
+---
+
+### 2. MEMORY_V1 golden fixtures unchanged — PASS
+
+Command run:
+```
+cd /home/op/Projects/monorepo && \
+  PATH="/home/op/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin:/home/op/.cargo/bin:$PATH" \
+  cargo test -p mnemonic-core 2>&1 | grep "test result"
+```
+
+Results: all test suites reported `ok. N passed; 0 failed`. The full run (all
+test files) shows 0 failures out of 269 + 6 + 3 + 12 + 9 + 15 + 6 + 8 + 3 tests
+across the various integration and unit test binaries.
+
+`core/tests/golden_fixtures.rs` contains `test_emitter_deterministic` (line 362)
+and `test_fixture_count_and_unique_names` (line 371). Both are in the run and pass.
+MEMORY_V1 golden fixtures are unchanged.
+
+---
+
+### 3. SQLite migration idempotency — PASS
+
+`core/src/storage/sqlite.rs` function `migrate_sealed_columns` (lines 869–916):
+- Checks `attestations_has_column(conn, "privacy")` and `"sealed_blob"` before any
+  ALTER TABLE (line 870–871). Returns early (line 873–875) if both columns exist.
+- Wrapped in `BEGIN IMMEDIATE` / `COMMIT` with a `ROLLBACK` on error.
+- Adds `privacy TEXT NOT NULL DEFAULT 'plaintext'` and `sealed_blob BLOB` only when
+  absent (lines 881–901).
+- Creates `idx_attestations_privacy` with `CREATE INDEX IF NOT EXISTS` (line 888),
+  which is itself idempotent.
+
+Idempotency is tested at line 3526 (`migrate_sealed_columns_idempotent_on_existing_db`):
+calls the migration twice on the same in-memory DB and asserts columns present +
+exactly one index (no duplicates). This test passes (confirmed by item 2 run).
+
+**Regarding D-7 (VACUUM and backups):** Owner decision D-7 is "Leave old rows".
+No automatic in-place sealing or VACUUM runs at startup (confirmed by code inspection).
+The `seal-local-rows` CLI subcommand (documented in T6 task report, line 7) is
+the only migration path and is opt-in. The D-7 procedure (VACUUM, backups) is not
+documented in decisions.md beyond the owner's decision text. There is no
+`VACUUM` call in the migration path. PASS for idempotency; the D-7 VACUUM and
+backup rotation procedure is noted as undocumented in code or decisions.md.
+
+---
+
+### 4. Legacy client compatibility — PASS
+
+**4a. Old SDK sign path for non-sealed bundles (mcp/src/tools.rs, `sign_memory_deferred`):**
+
+Lines 991–1071 show that `sign_memory_deferred` branches on
+`visibility == Visibility::Private`. When `visibility` is `Public` (line 1036+),
+the function takes the plain path: embeds, compresses, builds MEMORY_V1 CBOR,
+hashes, parks in pending with `is_sealed = false`. The public path is byte-identical
+to pre-T6 behavior (confirmed by the `test_public_deferred_path_unchanged` test at
+line 3917). An old SDK (without `seal_memory`) signing a non-sealed pending bundle
+is unaffected. The plain path logic is unchanged.
+
+**4b. New SDK throws IntegrityError for mismatched bundle:**
+
+`packages/sdk/test/sealed.test.ts` lines 277–302: the test
+`"throws IntegrityError when SEALED_V1 decrypted content mismatches input"` confirms
+that `client.signMemory` raises `IntegrityError` when the sealed bundle's decrypted
+content differs from the input. The test passes (npm test suite).
+
+Both requirements PASS.
+
+---
+
+### 5. Chain recovery with sealed items — PARTIAL
+
+`core/src/restore/mod.rs` (`apply_restore` and `fetch_restorable`) does not have
+special handling for sealed artifacts. `fetch_restorable` calls
+`rebuild_row_self_describing` on every fetched Arweave item. `rebuild_row_self_describing`
+(core/src/rebuild.rs line 261) requires `metadata.embedding_compressed` to be
+present; sealed artifacts have none (their `metadata` is an empty map — see
+tools.rs line 1034). A sealed item fetched during restore would therefore fail
+inside `rebuild_row_self_describing` with `"artifact has no metadata.embedding_compressed"`
+and be pushed into `report.failed`, not `report.restored`.
+
+This means:
+- Sealed items are NOT silently dropped — they appear in `report.failed` with a
+  descriptive error (counted but not content-read).
+- The restore does not panic or abort; other items continue to be processed.
+- However, the failure entry does NOT distinguish "sealed — skipped intentionally"
+  from "corrupt artifact"; both surface as failures.
+- There is no dedicated `sealed_skipped` counter in `RestoreReport`.
+- There is no integration test that seeds sealed items in a restore run and
+  asserts they are counted + skipped gracefully.
+
+`core/src/rebuild.rs` does define `rebuild_sealed_row` (lines 224–239) which
+opens a sealed artifact when the X25519 secret is supplied, but this function is
+not called from the restore flow.
+
+**PARTIAL.** Sealed items during chain recovery are counted (in `failed`) and do
+not cause the restore to abort or read their plaintext. However the spec requirement
+"counts sealed items without reading content" is met only incidentally — sealed
+items are treated as unrecognised artifacts and fail out, rather than being
+explicitly detected and gracefully counted as a distinct category.
+
+---
+
+### 6. Architectural rules
+
+**6a. No payment code in core/ — PARTIAL**
+
+`grep -r "payment\|Payment\|verify_usdc" core/src/ --include="*.rs"` returns
+matches only in `core/src/storage/sqlite.rs`:
+- `payment_events` table definition (SQL schema, lines 85–94)
+- `migrate_payment_events_unique_index` function (lines 383–398)
+- SQL identifiers `payment_events`, `api_keys` used in that schema
+
+These are storage schema definitions for the `payment_events` and `api_keys`
+tables — they live in `core/` because `SqliteStore` is the shared DB layer. They
+do not implement payment logic (no USDC verification, no on-chain payment calls).
+No `verify_usdc` or payment-flow functions exist in `core/src/`. The `api_keys`
+and `payment_events` tables are queried by `mcp/` only. This is a grey area:
+the schema is present in `core/` storage but payment logic is in `mcp/`.
+
+**PARTIAL.** No payment logic code in `core/`; payment schema tables exist in the
+shared `SqliteStore` (the only SQLite implementation). This is a layering
+compromise, not a violation of the spirit of the rule.
+
+**6b. core/ does not depend on mcp/ — PASS**
+
+`core/Cargo.toml` has no dependency on `mnemonic-mcp` or any `mcp/` crate. The
+dependency graph flows `mcp/` → `core/` only.
+
+**6c. No store lock across .await — PASS**
+
+`mcp/src/mcp.rs` line 822: `pub store: std::sync::Mutex<SqliteStore>` — the store
+uses `std::sync::Mutex`, which requires `.lock()` without `.await`.
+
+Checked all `state.store.lock()` call sites in `mcp/src/api.rs`:
+- Line 132: lock inside `match { ... }` block; guard dropped before `.await` on
+  line 155 (the `.await` is a new call, not holding the previous guard).
+- Lines 525–550: lock within `match { ... }` block ending at line 550; guard
+  dropped before `.await` on line 565.
+- Lines 603–620: lock within `match { ... }` block ending at line 620; guard
+  dropped before early return or fall-through to line 637.
+- Lines 862–975: lock inside an explicit `let persist_res = { ... };` block
+  annotated "Short, await-free critical section" (line 862). The `.await` on
+  line 1008 is outside this block.
+
+The `.lock().await` patterns at lines 1365, 1400, 1419, 1441, 1448, 1460, 1470
+and 3135, 3170 are for `tokio::sync::Mutex` (imported at line 48;
+`recall_sessions` declared as `Arc<tokio::sync::Mutex<...>>`). Holding a tokio
+async Mutex across `.await` is correct and expected.
+
+`std::sync::Mutex<SqliteStore>` is never held across `.await`. PASS.
+
+---
+
+### Summary table
+
+| # | Check | Result | Notes |
+|---|-------|--------|-------|
+| 1a | Rust golden vectors (integration_sealed_wasm.rs) | PASS | Structural invariants, fixed seed |
+| 1b | Rust fixed test vectors (sealed/api.rs) | PASS | 12 unit tests |
+| 1c | SDK T3 golden vectors (sealed.test.ts) | PASS | Mock WASM; real-crypto gate needs pkg-web |
+| 1d | Extension golden parity gate (sealed-sync.test.ts) | PARTIAL | Skipped when pkg-web absent |
+| 1e | RFC 9180 A.2 vector | FAIL | Not present in any test file |
+| 2 | MEMORY_V1 golden fixtures unchanged | PASS | 0 failures, cargo test confirmed |
+| 3 | SQLite migration idempotency | PASS | PRAGMA-gated, idempotency test passes |
+| 4a | Legacy client non-sealed sign path unchanged | PASS | Public path byte-identical, test present |
+| 4b | New SDK IntegrityError on mismatch | PASS | Test present and passes |
+| 5 | Chain recovery with sealed items | PARTIAL | Counted as failed, not as sealed-skipped |
+| 6a | No payment code in core/ | PARTIAL | Schema only; no payment logic |
+| 6b | core/ does not depend on mcp/ | PASS | Cargo.toml confirms |
+| 6c | No store lock across .await | PASS | All call sites verified |
+
+**Failures requiring follow-up:**
+- **1e (FAIL):** Add RFC 9180 A.2 HPKE vector test to `core/src/sealed/wrap.rs` or
+  a new test file.
+- **1d / 1c (PARTIAL):** Once pkg-web WASM build (Task 5) is present, verify that
+  the `describe.skipIf(!WASM_AVAILABLE)` block in `sealed-sync.test.ts` runs and
+  passes, and that the SDK golden vector test in `cose.golden.test.ts` continues
+  to pass.
+- **5 (PARTIAL):** Consider adding a `sealed_skipped` counter to `RestoreReport`
+  and detecting `Mnemonic-Type: sealed` tag (available in `AnchoredItem.tags`) to
+  skip gracefully rather than failing.
+- **3 note:** D-7 VACUUM/backup rotation procedure should be documented in
+  decisions.md or an ops runbook if in-place sealing is ever run.
