@@ -71,3 +71,25 @@ This is the cleanest near-term role because it directly matches the core product
 ## Recommended priority
 
 Highest priority. This is the most straightforward and defensible A2A building block for Mnemonic.
+
+---
+
+## Reference implementation
+
+**Bridge mode:** library (`mnemonic-a2a`). Each agent in the workflow links the library directly and writes to a shared `contextId` namespace without a proxy.
+
+**Schemas involved:** `A2A_MESSAGE_V1` (contributions from each agent), `A2A_ARTIFACT_V1` (shared findings and outputs).
+
+```typescript
+// Agent writes a finding to the shared namespace.
+await client.callTool("mnemonic_attest_a2a", {
+  object_type: "message",
+  payload: JSON.stringify({
+    role: "agent", messageId: crypto.randomUUID(),
+    parts: [{ kind: "text", text: "Discovered 3 relevant sources." }],
+    contextId: "ctx-research-project-alpha",
+  }),
+});
+```
+
+**`recall_by_context` query:** all agents share `context_id: "ctx-research-project-alpha"`. Any agent joining mid-workflow calls `mnemonic_recall_by_context` with that id to retrieve the full accumulated context, ordered by insertion time.

@@ -1,0 +1,1 @@
+{"jsonrpc":"2.0","method":"message/send","params":{"message":{"role":"user","parts":[{"kind":"text","text":"hi"}],"messageId":"m2"}},"id":1}

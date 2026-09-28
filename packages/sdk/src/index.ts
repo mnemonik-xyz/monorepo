@@ -60,6 +60,25 @@ export type {
   WriteMode,
 } from "./types.js";
 
+// ── ERC-8004 reputation feedback ──────────────────────────────────────────
+export { prepareFeedback, verifyFeedbackDocument, FeedbackError } from "./erc8004/feedback.js";
+export { checkSelfPromotion } from "./erc8004/self-promotion.js";
+export type {
+  MnemonicFeedbackV1,
+  PreparedFeedback,
+  PrepareFeedbackInput,
+  PrepareFeedbackOpts,
+  FeedbackSigner,
+  VerifyFeedbackInput,
+  VerifyFeedbackResult,
+  SenderBindingStatus,
+} from "./erc8004/types.js";
+export type {
+  SelfPromotionCheckResult,
+  SelfPromotionStatus,
+  CheckSelfPromotionInput,
+} from "./erc8004/self-promotion.js";
+
 // ── T3: OAuth surface ──────────────────────────────────────────────────────
 export {
   buildAuthorizeUrl,

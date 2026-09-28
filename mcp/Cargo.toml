@@ -186,6 +186,14 @@ name = "integration_a2a_mcp_tools"
 path = "tests/integration_a2a_mcp_tools.rs"
 required-features = ["test-support"]
 
+# ERC-8004 Wave 5 cross-ecosystem parity test: Rust keccak256 == TS prepareFeedback.
+# Reads the pinned fixture from packages/sdk/test/fixtures/ and asserts byte-for-byte
+# equality of feedbackHash, payloadHash, and the giveFeedback selector.
+# No new dependencies — alloy_primitives is already a non-optional dep of this crate.
+[[test]]
+name = "erc8004_feedback_parity"
+path = "tests/erc8004_feedback_parity.rs"
+
 [[test]]
 name = "oauth_google"
 path = "tests/oauth_google.rs"

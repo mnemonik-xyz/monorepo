@@ -143,25 +143,49 @@ Ship: a CLI command `mnemonic erc8004 register-file --pubkey ...` emitting the J
 
 #### Path 3 — Mnemonic-attested entries in the Reputation Registry
 
-`giveFeedback` accepts `feedbackURI` + `feedbackHash` for off-chain richness. The spec example payload already carries `a2a` and `mcp` namespaces. Add a third:
+`giveFeedback` accepts `feedbackURI` + `feedbackHash` for off-chain richness. The
+`MNEMONIC_FEEDBACK_V1` document schema is specified in `docs/spec/erc8004-feedback-v1.md`
+and implemented in `@mnemonik-xyz/sdk` (`prepareFeedback`, `verifyFeedbackDocument`).
+
+Canonical document shape (`feedbackHash = keccak256(JCS(document))`, **not** blake3 —
+Decision 1 of `work/erc8004-reputation/tech-spec.md`):
 
 ```jsonc
 {
-  "agentRegistry": "eip155:1:0x...",
-  "agentId": "<tokenId>",
-  "clientAddress": "0x...",
-  "createdAt": "2026-...",
-  "value": 9800, "valueDecimals": 2,
-  "mnemonic": {
-    "schema": "MEMORY_V1",
-    "attestation_id": "...",
-    "cose_envelope_uri": "ar://...",
-    "blake3": "..."
-  }
+  "schema": "MNEMONIC_FEEDBACK_V1",
+  "feedback": {
+    "agentRegistry": "eip155:1:0x8004BAa17C55a88189AE136b182e5fdA19dE9b63",
+    "agentId": "<tokenId>",                 // decimal STRING; uint256 exceeds JSON safe range
+    "clientAddress": "0x<EIP-55>",          // MUST equal msg.sender of the giveFeedback tx
+    "createdAt": "2026-...",
+    "value": 9800, "valueDecimals": 2,
+    "mnemonic": {
+      "schema": "MEMORY_V1",               // schema of the CITED attestation
+      "attestation_id": "...",
+      "blake3": "<64 hex>",               // content hash of the CITED attestation (not feedbackHash)
+      "ed25519_pubkey": "<base58>",        // rater's long-lived signing key
+      "cose_envelope_uri": "ar://...",     // optional Arweave link
+      "anchor": { "chain": "solana", "kind": "spl-memo", "ref": "<sig>" }
+    }
+  },
+  "payload_hash": "0x<keccak256(JCS(feedback))>",
+  "proofs": [
+    { "type": "ed25519", "kid": "<base58>", "sig": "<base64>" }
+  ]
 }
 ```
 
-**CORRECTED 2026-09-27 — see `work/erc8004-reputation/` D-1.** `feedbackHash` is keccak256 over RFC 8785 (JCS) canonical JSON, **not** blake3: it is a `bytes32` that EVM consumers read, and they have keccak256 built in and no blake3. blake3 stays as `mnemonic.blake3`, the content hash of the cited attestation. The sample payload above is also incomplete — it needs `payload_hash`, `proofs[]` and `mnemonic.ed25519_pubkey`, without which the `mnemonic` namespace proves nothing about the rater, and its `"schema": "MEMORY_V1"` belongs under `mnemonic.schema` (the document's own schema is `MNEMONIC_FEEDBACK_V1`). Trust upgrade: today any wallet can spam `giveFeedback`; Mnemonic-signed feedback proves the rater is the same long-lived signing identity that produced N other attestations. Ship: SDK + CLI helper that produces the URI bytes, hashes, and emits the on-chain call.
+Two hash roles (Decision 1 + Decision 2):
+- `mnemonic.blake3` — content hash of the **cited attestation** (already on Solana/Arweave).
+- `feedbackHash` — `keccak256(JCS(document))` — the `bytes32` that goes on-chain in `giveFeedback`.
+
+`feedbackHash` uses keccak256 because every EVM tool (`cast keccak`, viem, ethers, Solidity)
+has it built in. Blake3 in that slot is well-formed but practically unverifiable.
+
+Trust upgrade: any wallet can spam `giveFeedback` today. Mnemonic-signed feedback proves
+the rater is the same long-lived signing identity that produced N anchored attestations,
+none of which can be backdated. Calldata emitted by `mnemonic erc8004 feedback`; the
+wallet's owner submits the transaction — Mnemonic never holds the EVM key.
 
 #### Path 4 — Three-way identity reconciliation via `did:mnemonic:`
 

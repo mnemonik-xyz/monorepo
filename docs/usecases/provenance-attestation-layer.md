@@ -67,3 +67,26 @@ This role is especially valuable in:
 ## Why this role is strong
 
 This is one of the strongest ways to make Mnemonic materially useful inside multi-agent systems. It turns agent workflows from opaque message passing into auditable knowledge production systems.
+
+---
+
+## Reference implementation
+
+**Bridge mode:** sidecar (`bridge-a2a`) with `FAILURE_MODE=attest-strict`. The sidecar fails the proxied response if attestation fails, ensuring no un-attested artifact reaches downstream agents.
+
+**Schemas involved:** `A2A_ARTIFACT_V1` (artifact hash + producing agent pubkey), `A2A_TASK_V1` (parent task with `prev_id` lineage linking artifact to task to message chain).
+
+```typescript
+// Attest an artifact with explicit upstream lineage.
+await client.callTool("mnemonic_attest_a2a", {
+  object_type: "artifact",
+  context_id: taskContextId,
+  prev_id: parentTaskAttestationId,   // lineage: artifact → task → messages
+  payload: JSON.stringify({
+    artifactId: "art-evidence-001", name: "evidence-bundle",
+    parts: [{ kind: "data", data: evidenceJson, mimeType: "application/json" }],
+  }),
+});
+```
+
+**`recall_by_context` query:** `context_id: taskContextId` returns all attestations in the workflow. Walk `prev_id` links to reconstruct the causal chain from initial message through task to final artifact.

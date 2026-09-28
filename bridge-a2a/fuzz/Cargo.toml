@@ -1,0 +1,31 @@
+[package]
+name = "bridge-a2a-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+serde_json = "1"
+# mnemonic-core: use the features available in this repo. The `a2a-experimental`
+# feature will be added in Task 2 when core::codec::a2a is created.
+mnemonic-core = { path = "../../core" }
+solana-sdk = "2.2"
+
+[dependencies.arbitrary]
+version = "1"
+features = ["derive"]
+
+# Cargo-fuzz requires a release profile for the fuzzer binary.
+[profile.release]
+debug = true
+
+[[bin]]
+name = "fuzz_attest_message"
+path = "fuzz_targets/fuzz_attest_message.rs"
+test = false
+doc = false
+bench = false

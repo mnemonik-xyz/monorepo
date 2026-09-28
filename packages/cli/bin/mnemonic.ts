@@ -13,6 +13,10 @@ import { fileURLToPath } from "node:url";
 import { Command } from "commander";
 
 import { runA2AAttest, runA2ARecall, runA2AVerify } from "../src/commands/a2a.js";
+import {
+  runErc8004Feedback,
+  runErc8004FeedbackVerify,
+} from "../src/commands/erc8004.js";
 import { runInit } from "../src/commands/init.js";
 import { runLogin } from "../src/commands/login.js";
 import { runSign } from "../src/commands/sign.js";
@@ -514,6 +518,94 @@ export function buildProgram(): Command {
         });
         process.exit(code);
       },
+    );
+
+  // erc8004 {feedback, feedback-verify}
+  const erc8004 = program
+    .command("erc8004")
+    .description("ERC-8004 reputation feedback — prepare and verify MNEMONIC_FEEDBACK_V1 documents");
+
+  erc8004
+    .command("feedback")
+    .description(
+      "build a signed MNEMONIC_FEEDBACK_V1 document and giveFeedback calldata (offline, reads local keypair)"
+    )
+    .requiredOption("--agent-id <decimal>", "ERC-721 token ID of the rated agent")
+    .requiredOption("--value <integer>", "feedback score (int128)")
+    .option("--value-decimals <n>", "decimal places 0–18 (default: 2)", (v) => parseInt(v, 10), 2)
+    .requiredOption("--client-address <0x...>", "rater's EVM address — MUST equal msg.sender")
+    .requiredOption("--feedback-uri <uri>", "URI where the document will be hosted")
+    .requiredOption("--attestation-id <id>", "Mnemonic attestation ID of the cited memory")
+    .requiredOption("--blake3 <hex>", "blake3 content hash of the cited attestation (64 hex chars)")
+    .option("--tag1 <str>", "optional tag1")
+    .option("--tag2 <str>", "optional tag2")
+    .option("--endpoint <url>", "optional rated agent service endpoint")
+    .option("--note <text>", "optional note (≤280 chars)")
+    .option("--created-at <iso>", "RFC 3339 timestamp (default: now)")
+    .option("--chain-id <n>", "EIP-155 chain ID (default: 1 = Ethereum mainnet)", (v) => parseInt(v, 10))
+    .option("--registry <0x...>", "override Reputation Registry address")
+    .option("--rpc-url <url>", "RPC endpoint for self-promotion pre-flight check")
+    .option("--out <file>", "write documentJson to a file")
+    .action(
+      async (cmdOpts: {
+        agentId: string;
+        value: string;
+        valueDecimals: number;
+        clientAddress: string;
+        feedbackUri: string;
+        attestationId: string;
+        blake3: string;
+        tag1?: string;
+        tag2?: string;
+        endpoint?: string;
+        note?: string;
+        createdAt?: string;
+        chainId?: number;
+        registry?: string;
+        rpcUrl?: string;
+        out?: string;
+      }) => {
+        await runErc8004Feedback({
+          ...rootOpts(program),
+          agentId: cmdOpts.agentId,
+          value: cmdOpts.value,
+          valueDecimals: cmdOpts.valueDecimals,
+          clientAddress: cmdOpts.clientAddress,
+          feedbackUri: cmdOpts.feedbackUri,
+          attestationId: cmdOpts.attestationId,
+          blake3: cmdOpts.blake3,
+          ...(cmdOpts.tag1 !== undefined ? { tag1: cmdOpts.tag1 } : {}),
+          ...(cmdOpts.tag2 !== undefined ? { tag2: cmdOpts.tag2 } : {}),
+          ...(cmdOpts.endpoint !== undefined ? { endpoint: cmdOpts.endpoint } : {}),
+          ...(cmdOpts.note !== undefined ? { note: cmdOpts.note } : {}),
+          ...(cmdOpts.createdAt !== undefined ? { createdAt: cmdOpts.createdAt } : {}),
+          ...(cmdOpts.chainId !== undefined ? { chainId: cmdOpts.chainId } : {}),
+          ...(cmdOpts.registry !== undefined ? { registry: cmdOpts.registry } : {}),
+          ...(cmdOpts.rpcUrl !== undefined ? { rpcUrl: cmdOpts.rpcUrl } : {}),
+          ...(cmdOpts.out !== undefined ? { out: cmdOpts.out } : {}),
+        });
+      }
+    );
+
+  erc8004
+    .command("feedback-verify")
+    .description(
+      "verify a MNEMONIC_FEEDBACK_V1 document — checks hashes and Ed25519 proof (offline)"
+    )
+    .option("--file <path>", "path to the feedback document JSON (default: stdin)")
+    .option("--feedback-hash <hex>", "feedbackHash bytes32 read from the Reputation Registry")
+    .option("--sender <0x...>", "msg.sender of the giveFeedback transaction")
+    .action(
+      async (cmdOpts: { file?: string; feedbackHash?: string; sender?: string }) => {
+        await runErc8004FeedbackVerify({
+          ...rootOpts(program),
+          ...(cmdOpts.file !== undefined ? { file: cmdOpts.file } : {}),
+          ...(cmdOpts.feedbackHash !== undefined
+            ? { feedbackHash: cmdOpts.feedbackHash }
+            : {}),
+          ...(cmdOpts.sender !== undefined ? { sender: cmdOpts.sender } : {}),
+        });
+      }
     );
 
   return program;

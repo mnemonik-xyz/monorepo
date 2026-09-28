@@ -1,0 +1,52 @@
+{
+  "name": "@mnemonik-xyz/conformance",
+  "version": "1.0.0",
+  "description": "A2A protocol conformance test vectors for the Mnemonic attestation pipeline. Third-party implementations load this package and verify byte-for-byte parity of JCS canonicalization, CBOR envelope, and COSE_Sign1 serialization.",
+  "license": "Apache-2.0",
+  "private": false,
+  "type": "module",
+  "main": "./src/index.js",
+  "types": "./src/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.d.ts",
+      "import": "./src/index.js",
+      "default": "./src/index.js"
+    },
+    "./vectors": "./vectors-a2a-v1.0.0.json"
+  },
+  "files": [
+    "src",
+    "vectors-a2a-v1.0.0.json"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mnemonik-xyz/monorepo.git",
+    "directory": "packages/conformance"
+  },
+  "homepage": "https://github.com/mnemonik-xyz/monorepo#readme",
+  "bugs": "https://github.com/mnemonik-xyz/monorepo/issues",
+  "keywords": [
+    "mnemonic",
+    "a2a",
+    "conformance",
+    "cose",
+    "jcs",
+    "cbor",
+    "attestation",
+    "test-vectors"
+  ],
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "devDependencies": {
+    "vitest": "^1.6.0"
+  }
+}
