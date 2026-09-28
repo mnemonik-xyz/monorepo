@@ -1,6 +1,6 @@
 //! Sealed-memory primitives for private / shared Mnemonik memories (Wave 6+).
 //!
-//! Three co-operating sub-modules implement the sealing pipeline:
+//! Four co-operating sub-modules implement the sealing pipeline:
 //!
 //! * [`keys`] — Ed25519 ↔ X25519 key conversion for identity-derived
 //!   encryption keys.
@@ -8,11 +8,17 @@
 //!   key commitment.
 //! * [`wrap`] — HPKE (X25519HkdfSha256 / HkdfSha256 / ChaCha20Poly1305)
 //!   key-wrapping for per-recipient delivery of the content key.
+//! * [`api`] — High-level seal / open / grant / link API (Task 3).
 
+pub mod api;
 pub mod content;
 pub mod keys;
 pub mod wrap;
 
+pub use api::{
+    link_fragment, make_grant, open_grant, open_memory, open_with_key, parse_link_fragment,
+    seal_memory, SealError, SealedArtifact,
+};
 pub use content::{
     decrypt_content, encrypt_content, key_commitment, pad_to_bucket, unpad, BUCKET_SIZE,
 };

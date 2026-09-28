@@ -206,6 +206,38 @@ pub fn rebuild_rows(
 /// compressed embedding becomes undequantizable.
 pub const LEGACY_TURBO_SEED: u64 = 42;
 
+/// Decrypt a sealed COSE_Sign1 artifact and return the inner memory JSON bytes.
+///
+/// This is the sealed-memory counterpart of [`rebuild_row`]: given the COSE
+/// bytes of a `sealed.v1` artifact (as stored on Arweave) and the recipient's
+/// X25519 secret key, it:
+///
+/// 1. Parses the COSE_Sign1 envelope to extract the canonical CBOR payload.
+/// 2. Calls [`crate::sealed::open_memory`] to unwrap K and decrypt the content.
+/// 3. Returns the raw inner memory JSON bytes.
+///
+/// The function does **not** verify the COSE signature — callers that need
+/// provenance guarantees should call [`verify_artifact`] first.  The content key
+/// commitment check inside `open_memory` still ensures the ciphertext was not
+/// tampered with.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn rebuild_sealed_row(
+    cose_bytes: &[u8],
+    x25519_secret: &[u8; 32],
+) -> Result<Vec<u8>, String> {
+    use coset::CborSerializable;
+
+    let cose_sign1 = coset::CoseSign1::from_slice(cose_bytes)
+        .map_err(|e| format!("invalid COSE_Sign1: {e}"))?;
+    let payload = cose_sign1
+        .payload
+        .as_ref()
+        .ok_or_else(|| "COSE_Sign1 has no payload".to_string())?;
+
+    crate::sealed::open_memory(payload, x25519_secret)
+        .map_err(|e| format!("sealed open failed: {e}"))
+}
+
 /// Rebuild a row from the artifact alone, deriving the compressor from what the
 /// artifact declares about itself.
 ///
