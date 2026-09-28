@@ -70,10 +70,14 @@ pub struct AnchoredItem {
     pub producer: Option<String>,
 }
 
-/// Derive the Arweave owner address of an ANS-104 item signed by an Ed25519
-/// (Solana) key: `base64url_nopad(sha256(pubkey_bytes))` — the arbundles
-/// `ownerToAddress` rule. This lets operators configure the familiar base58
-/// Solana wallet address while we query the gateway by its Arweave form.
+/// Derive the **Arweave-gateway** owner address for an ANS-104 item signed by
+/// an Ed25519 (Solana) key: `base64url_nopad(sha256(pubkey_bytes))` — the
+/// arbundles `ownerToAddress` rule.
+///
+/// **This address is only correct for `GatewayFlavour::Arweave` queries.**
+/// Irys indexes items by the raw base58 Solana pubkey, not by this SHA-256
+/// derived form. When querying Irys, pass the base58 pubkey directly as the
+/// `owners` filter value (see [`GatewayFlavour`] and [`GraphQlClient::list_anchored`]).
 pub fn solana_pubkey_to_arweave_address(pubkey_base58: &str) -> anyhow::Result<String> {
     let bytes = bs58::decode(pubkey_base58.trim())
         .into_vec()
@@ -113,9 +117,15 @@ impl GraphQlClient {
         self.flavour
     }
 
-    /// Enumerate all anchored items, oldest-first. `owner_addresses` are
-    /// Arweave-form addresses (see [`solana_pubkey_to_arweave_address`]);
-    /// empty = no owner filter (tag-only — fine for a private App-Name).
+    /// Enumerate all anchored items, oldest-first.
+    ///
+    /// `owner_addresses` format depends on the gateway flavour:
+    /// - `GatewayFlavour::Irys` — pass the **raw base58 Solana pubkey**. Irys
+    ///   indexes items by the raw pubkey, not by the SHA-256-derived Arweave
+    ///   address. Verified 2026-09-28 against `uploader.irys.xyz`.
+    /// - `GatewayFlavour::Arweave` — pass the Arweave-form address produced by
+    ///   [`solana_pubkey_to_arweave_address`] (SHA-256 / base64url-nopad).
+    /// - Empty slice — no owner filter (tag-only query).
     pub async fn list_anchored(
         &self,
         owner_addresses: &[String],
