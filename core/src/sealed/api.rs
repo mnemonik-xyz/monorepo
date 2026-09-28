@@ -392,6 +392,129 @@ pub fn open_grant(grant_cbor: &[u8], x25519_secret: &[u8; 32]) -> Result<Zeroizi
     Ok(k)
 }
 
+// ─── seal_chunk / open_chunk ─────────────────────────────────────────────────
+
+/// Output of a [`seal_chunk`] call.
+///
+/// Each chunk is independently sealed with a fresh nonce under the same content
+/// key `k`.  `hash` is `blake3(sealed_cbor)` and forms a link in the lineage
+/// chain — callers should chain `prev_hash` ← `hash` ← `hash` … to get an
+/// ordered, tamper-evident sequence.
+pub struct SealedChunk {
+    /// Canonical CBOR bytes of the chunk (nonce || ciphertext).
+    ///
+    /// Wire format (JSON-based CBOR map, schema-free):
+    /// `{ "idx": u64, "nonce": bstr(24), "ct": bstr, "prev_hash": bstr(32) }`
+    pub sealed_cbor: Vec<u8>,
+    /// blake3 hash of `sealed_cbor` — links into the lineage chain.
+    pub hash: [u8; 32],
+}
+
+/// Seal one ordered chunk of a streaming payload.
+///
+/// # Parameters
+/// - `chunk` — raw plaintext bytes for this chunk.
+/// - `k` — the 32-byte symmetric content-encryption key (shared across
+///   all chunks in the stream, set by `seal_memory`).
+/// - `idx` — 0-based sequence number; must be monotonically increasing.
+/// - `prev_hash` — blake3 hash of the previous chunk's `sealed_cbor` (or the
+///   `content_hash` of the opening `seal_memory` artifact for `idx == 0`).
+/// - `rng` — cryptographically secure RNG for fresh nonce generation.
+///
+/// # Returns
+/// A [`SealedChunk`] whose `hash` should become `prev_hash` for the next call.
+pub fn seal_chunk(
+    chunk: &[u8],
+    k: &[u8; 32],
+    idx: u64,
+    prev_hash: &[u8; 32],
+    rng: &mut impl RngCore,
+) -> Result<SealedChunk, SealError> {
+    // Fresh 24-byte nonce for this chunk.
+    let mut nonce = [0u8; 24];
+    rng.fill_bytes(&mut nonce);
+
+    // AAD: prev_hash bound to the AEAD so swapping chunks is detectable.
+    let ct = encrypt_content(k, &nonce, prev_hash.as_slice(), chunk)?;
+
+    // Encode as a minimal JSON map (no schema overhead).
+    let nonce_b64 = base64::engine::general_purpose::STANDARD.encode(nonce);
+    let ct_b64 = base64::engine::general_purpose::STANDARD.encode(&ct);
+    let prev_b64 = base64::engine::general_purpose::STANDARD.encode(prev_hash);
+
+    let payload = serde_json::json!({
+        "idx": idx,
+        "nonce": nonce_b64,
+        "ct": ct_b64,
+        "prev_hash": prev_b64,
+    });
+
+    // Use ciborium directly for a compact, deterministic CBOR encoding.
+    let mut sealed_cbor = Vec::new();
+    ciborium::ser::into_writer(&payload, &mut sealed_cbor)
+        .map_err(|e| SealError::Codec(format!("chunk cbor encode: {e}")))?;
+
+    let hash = *blake3::hash(&sealed_cbor).as_bytes();
+    Ok(SealedChunk { sealed_cbor, hash })
+}
+
+/// Open one sealed chunk and recover the plaintext.
+///
+/// Verifies that the `prev_hash` inside the CBOR matches the supplied
+/// `expected_prev_hash` (preventing chunk reorder / splicing attacks), then
+/// decrypts with `k`.
+///
+/// # Parameters
+/// - `sealed_cbor`         — the `SealedChunk::sealed_cbor` bytes.
+/// - `k`                   — the 32-byte content-encryption key.
+/// - `expected_idx`        — the expected 0-based sequence number.
+/// - `expected_prev_hash`  — must equal the `prev_hash` field inside the CBOR.
+pub fn open_chunk(
+    sealed_cbor: &[u8],
+    k: &[u8; 32],
+    expected_idx: u64,
+    expected_prev_hash: &[u8; 32],
+) -> Result<Vec<u8>, SealError> {
+    // Decode CBOR.
+    let value: serde_json::Value = ciborium::de::from_reader(sealed_cbor)
+        .map_err(|e| SealError::Malformed(format!("chunk cbor decode: {e}")))?;
+    let obj = value.as_object()
+        .ok_or_else(|| SealError::Malformed("chunk: not a map".into()))?;
+
+    // Check sequence index.
+    let idx = obj.get("idx")
+        .and_then(|v| v.as_u64())
+        .ok_or_else(|| SealError::Malformed("chunk: missing 'idx'".into()))?;
+    if idx != expected_idx {
+        return Err(SealError::Malformed(format!(
+            "chunk sequence mismatch: expected idx={expected_idx}, got {idx}"
+        )));
+    }
+
+    // Decode fields.
+    let nonce_bytes = get_bytes_field(obj, "nonce")?;
+    let ct_bytes = get_bytes_field(obj, "ct")?;
+    let prev_hash_bytes = get_bytes_field(obj, "prev_hash")?;
+
+    // Verify prev_hash linkage.
+    if prev_hash_bytes != expected_prev_hash.as_slice() {
+        return Err(SealError::Malformed(
+            "chunk prev_hash mismatch — chain broken or chunk spliced".into(),
+        ));
+    }
+
+    let nonce: [u8; 24] = nonce_bytes
+        .try_into()
+        .map_err(|_| SealError::Malformed("chunk nonce is not 24 bytes".into()))?;
+    let prev_arr: [u8; 32] = prev_hash_bytes
+        .try_into()
+        .map_err(|_| SealError::Malformed("chunk prev_hash not 32 bytes".into()))?;
+
+    // Decrypt with prev_hash as AAD (must match what was used at seal time).
+    let plaintext = decrypt_content(k, &nonce, prev_arr.as_slice(), &ct_bytes)?;
+    Ok(plaintext)
+}
+
 // ─── link_fragment / parse_link_fragment ─────────────────────────────────────
 
 /// Encode `K` as a URL fragment component: `k=<base64url-nopad>`.

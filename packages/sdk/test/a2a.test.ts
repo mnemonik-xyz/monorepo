@@ -1,6 +1,9 @@
 // Unit tests for MnemonicClient A2A methods:
 //   attestA2ATask, attestA2AMessage, attestA2AArtifact, recallA2AContext
 //
+// Plus T14 conformance vectors for sealed A2A DataPart helpers:
+//   buildSealedDataPart, extractSealedDataPart, SEALED_CBOR_MEDIA_TYPE
+//
 // Uses the same mock-fetch pattern as client.test.ts.
 
 import { beforeEach, afterEach, describe, expect, it } from "vitest";
@@ -11,6 +14,11 @@ import { Keypair } from "../src/keypair.js";
 import { LocalSigner } from "../src/signer.js";
 import { __setWasmForTesting } from "../src/wasm.js";
 import { buildWasmMock } from "./helpers/wasm-mock.js";
+import {
+  SEALED_CBOR_MEDIA_TYPE,
+  buildSealedDataPart,
+  extractSealedDataPart,
+} from "../src/a2a.js";
 import type {
   A2AArtifact,
   A2AMessage,
@@ -303,5 +311,79 @@ describe("recallA2AContext", () => {
   it("throws UserError when contextId is empty", async () => {
     const { client } = await makeClient([]);
     await expect(client.recallA2AContext("")).rejects.toBeInstanceOf(UserError);
+  });
+});
+
+// ── T14 conformance: sealed A2A DataPart ──────────────────────────────────────
+
+describe("buildSealedDataPart / extractSealedDataPart (T14 §9.1)", () => {
+  it("SEALED_CBOR_MEDIA_TYPE has the expected value", () => {
+    expect(SEALED_CBOR_MEDIA_TYPE).toBe("application/vnd.mnemonic.sealed+cbor");
+  });
+
+  it("buildSealedDataPart produces a DataPart with correct mimeType", () => {
+    const fakeSealed = new Uint8Array([1, 2, 3, 4]);
+    const part = buildSealedDataPart(fakeSealed, []);
+    expect(part.kind).toBe("data");
+    expect(part.mimeType).toBe(SEALED_CBOR_MEDIA_TYPE);
+    expect(typeof part.data.sealed).toBe("string");
+    expect(part.data.grants).toEqual([]);
+  });
+
+  it("round-trips sealed + grants through build/extract", () => {
+    const sealed = new Uint8Array([10, 20, 30, 40, 50]);
+    const grant1 = new Uint8Array([11, 22, 33]);
+    const grant2 = new Uint8Array([44, 55, 66]);
+
+    const part = buildSealedDataPart(sealed, [grant1, grant2]);
+    const { sealedCbor, grants } = extractSealedDataPart(part);
+
+    expect(sealedCbor).toEqual(sealed);
+    expect(grants).toHaveLength(2);
+    expect(grants[0]).toEqual(grant1);
+    expect(grants[1]).toEqual(grant2);
+  });
+
+  it("extractSealedDataPart throws UserError for non-data kind", () => {
+    expect(() =>
+      extractSealedDataPart({
+        kind: "text",
+        mimeType: SEALED_CBOR_MEDIA_TYPE,
+      })
+    ).toThrow(UserError);
+  });
+
+  it("extractSealedDataPart throws UserError for wrong mimeType", () => {
+    expect(() =>
+      extractSealedDataPart({
+        kind: "data",
+        data: { sealed: "AAAA", grants: [] },
+        mimeType: "application/json",
+      })
+    ).toThrow(UserError);
+  });
+
+  it("extractSealedDataPart throws UserError when data.sealed is missing", () => {
+    expect(() =>
+      extractSealedDataPart({
+        kind: "data",
+        data: { grants: [] },
+        mimeType: SEALED_CBOR_MEDIA_TYPE,
+      })
+    ).toThrow(UserError);
+  });
+
+  it("buildSealedDataPart with no grants produces empty grants array", () => {
+    const part = buildSealedDataPart(new Uint8Array([99]));
+    expect(part.data.grants).toEqual([]);
+    // extracting with no grants should work
+    const { grants } = extractSealedDataPart(part);
+    expect(grants).toEqual([]);
+  });
+
+  it("empty Uint8Array round-trips", () => {
+    const part = buildSealedDataPart(new Uint8Array(0));
+    const { sealedCbor } = extractSealedDataPart(part);
+    expect(sealedCbor).toEqual(new Uint8Array(0));
   });
 });

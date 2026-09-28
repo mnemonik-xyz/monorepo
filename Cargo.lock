@@ -4134,7 +4134,6 @@ dependencies = [
  "byteorder",
  "linux-keyutils",
  "log",
- "openssl",
  "security-framework 2.11.1",
  "security-framework 3.7.0",
  "windows-sys 0.60.2",

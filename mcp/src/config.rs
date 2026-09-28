@@ -475,6 +475,80 @@ fn validate_ollama_url(url: &str) -> Result<(), String> {
     }
 }
 
+/// Environment variable keys required for the Universal Paywall staging mode.
+///
+/// All keys must be set (non-empty) before the staging gate is activated.
+/// Used by the `staging-validate` subcommand (dry-run prints these, validation
+/// checks them).
+pub const STAGING_REQUIRED_KEYS: &[&str] = &[
+    "UNIVERSAL_PAYWALL_URL",
+    "UNIVERSAL_PAYWALL_API_KEY",
+    "UNIVERSAL_PAYWALL_NETWORK",
+    "UNIVERSAL_PAYWALL_ASSET",
+    "UNIVERSAL_PAYWALL_PAY_TO",
+    "UNIVERSAL_PAYWALL_APPROVAL_URL_BASE",
+];
+
+/// Validate the Universal Paywall staging configuration fail-closed.
+///
+/// Checks that:
+/// - every key in [`STAGING_REQUIRED_KEYS`] is set to a non-empty value;
+/// - `UNIVERSAL_PAYWALL_URL` and `UNIVERSAL_PAYWALL_CHAIN_RPC_URL` are not
+///   loopback addresses (localhost, 127.0.0.1, ::1);
+/// - `UNIVERSAL_PAYWALL_NETWORK` is not the Anvil development chain (31337);
+/// - `PAYMENT_MODE` is `x402`.
+///
+/// Returns `Ok(())` on success, or `Err(Vec<String>)` with one human-readable
+/// error message per failing check. Never includes config values in error text.
+pub fn validate_staging_config(cfg: &Config) -> Result<(), Vec<String>> {
+    let mut errors = Vec::new();
+    if cfg.universal_paywall_url.is_empty() {
+        errors.push("UNIVERSAL_PAYWALL_URL is required but not set".to_string());
+    }
+    if cfg.universal_paywall_api_key.is_empty() {
+        errors.push("UNIVERSAL_PAYWALL_API_KEY is required but not set".to_string());
+    }
+    if cfg.universal_paywall_network.is_empty() {
+        errors.push("UNIVERSAL_PAYWALL_NETWORK is required but not set".to_string());
+    }
+    if cfg.universal_paywall_asset.is_empty() {
+        errors.push("UNIVERSAL_PAYWALL_ASSET is required but not set".to_string());
+    }
+    if cfg.universal_paywall_pay_to.is_empty() {
+        errors.push("UNIVERSAL_PAYWALL_PAY_TO is required but not set".to_string());
+    }
+    if cfg.universal_paywall_approval_url_base.is_empty() {
+        errors.push("UNIVERSAL_PAYWALL_APPROVAL_URL_BASE is required but not set".to_string());
+    }
+    // Fail closed: PAYMENT_MODE must be x402 for staging.
+    if cfg.payment_mode != "x402" {
+        errors.push("PAYMENT_MODE must be 'x402' for staging".to_string());
+    }
+    // Reject loopback endpoints for the Universal Paywall URL only —
+    // other endpoints (Solana RPC, Irys) may legitimately use local URLs
+    // during development.
+    if !cfg.universal_paywall_url.is_empty() && staging_is_loopback(&cfg.universal_paywall_url) {
+        errors.push("UNIVERSAL_PAYWALL_URL must not be a loopback address for staging".to_string());
+    }
+    // Reject the Anvil development chain (eip155:31337 or bare 31337).
+    if cfg.universal_paywall_network.contains("31337") {
+        errors.push(
+            "UNIVERSAL_PAYWALL_NETWORK must not be the Anvil development chain (31337)".to_string(),
+        );
+    }
+    if errors.is_empty() { Ok(()) } else { Err(errors) }
+}
+
+/// True when `url` contains a loopback address. Used by
+/// [`validate_staging_config`] to refuse local/mock endpoints.
+fn staging_is_loopback(url: &str) -> bool {
+    let lower = url.to_lowercase();
+    lower.contains("localhost")
+        || lower.contains("127.0.0.1")
+        || lower.contains("::1")
+        || lower.contains("//[::1]")
+}
+
 fn env_or(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
 }
@@ -609,5 +683,83 @@ mod tests {
         );
         cfg.arweave_url = "https://devnet.irys.xyz/custom".to_string();
         assert!(cfg.validate_anchoring_config().is_err());
+    }
+
+    /// T07a: staging validate — fail-closed when required config is absent,
+    /// loopback is used, or the Anvil development chain is configured.
+    #[test]
+    fn staging_validate_fails_closed_on_missing_or_local_config() {
+        // A fully missing config fails with one error per required key.
+        let mut cfg = Config::from_env();
+        cfg.payment_mode = "none".to_string();
+        cfg.universal_paywall_url = String::new();
+        cfg.universal_paywall_api_key = String::new();
+        cfg.universal_paywall_network = String::new();
+        cfg.universal_paywall_asset = String::new();
+        cfg.universal_paywall_pay_to = String::new();
+        cfg.universal_paywall_approval_url_base = String::new();
+        let result = validate_staging_config(&cfg);
+        assert!(result.is_err());
+        let errors = result.unwrap_err();
+        assert!(!errors.is_empty(), "missing config must produce errors");
+        assert!(
+            errors.iter().any(|e| e.contains("PAYMENT_MODE")),
+            "must reject non-x402 mode: {errors:?}"
+        );
+
+        // A loopback Universal Paywall URL is rejected even when other keys
+        // are present.
+        let mut cfg = Config::from_env();
+        cfg.payment_mode = "x402".to_string();
+        cfg.universal_paywall_url = "http://localhost:3001".to_string();
+        cfg.universal_paywall_api_key = "test-key".to_string();
+        cfg.universal_paywall_network = "eip155:84532".to_string();
+        cfg.universal_paywall_asset = "0x036CbD53842c5426634e7929541eC2318f3dCF7e".to_string();
+        cfg.universal_paywall_pay_to = "0xaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaA".to_string();
+        cfg.universal_paywall_approval_url_base = "https://staging.mnemonik.xyz/approve".to_string();
+        let result = validate_staging_config(&cfg);
+        assert!(result.is_err());
+        let errors = result.unwrap_err();
+        assert!(
+            errors.iter().any(|e| e.contains("UNIVERSAL_PAYWALL_URL")),
+            "must reject loopback UNIVERSAL_PAYWALL_URL: {errors:?}"
+        );
+
+        // Anvil chain (31337) is rejected.
+        cfg.universal_paywall_url = "https://paywall.staging.mnemonik.xyz".to_string();
+        cfg.universal_paywall_network = "eip155:31337".to_string();
+        cfg.solana_rpc_url = "https://api.devnet.solana.com".to_string();
+        cfg.arweave_url = "https://devnet.irys.xyz".to_string();
+        cfg.approval_chain_rpc_url = "https://base-sepolia-rpc.publicnode.com".to_string();
+        let result = validate_staging_config(&cfg);
+        assert!(result.is_err());
+        let errors = result.unwrap_err();
+        assert!(
+            errors.iter().any(|e| e.contains("31337")),
+            "must reject Anvil chain 31337: {errors:?}"
+        );
+
+        // A valid staging config passes.
+        cfg.universal_paywall_network = "eip155:84532".to_string();
+        assert!(
+            validate_staging_config(&cfg).is_ok(),
+            "a well-formed staging config must pass validation"
+        );
+    }
+
+    /// T07a: dry-run lists required key names but never values.
+    #[test]
+    fn staging_required_keys_are_listed_for_dry_run() {
+        // Each key in STAGING_REQUIRED_KEYS must be a non-empty, non-secret name.
+        for key in STAGING_REQUIRED_KEYS {
+            assert!(
+                !key.is_empty() && !key.contains(' '),
+                "STAGING_REQUIRED_KEYS entry must be a valid env-var name: {key}"
+            );
+            assert!(
+                key.chars().all(|c| c.is_ascii_uppercase() || c == '_'),
+                "STAGING_REQUIRED_KEYS entry must be uppercase: {key}"
+            );
+        }
     }
 }

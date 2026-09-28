@@ -16,8 +16,8 @@ pub mod keys;
 pub mod wrap;
 
 pub use api::{
-    link_fragment, make_grant, open_grant, open_memory, open_with_key, parse_link_fragment,
-    seal_memory, SealError, SealedArtifact,
+    link_fragment, make_grant, open_chunk, open_grant, open_memory, open_with_key,
+    parse_link_fragment, seal_chunk, seal_memory, SealError, SealedArtifact, SealedChunk,
 };
 pub use content::{
     decrypt_content, encrypt_content, key_commitment, pad_to_bucket, unpad, BUCKET_SIZE,

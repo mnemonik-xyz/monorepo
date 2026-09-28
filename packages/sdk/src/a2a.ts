@@ -14,6 +14,13 @@
 // The methods are declared here and merged onto MnemonicClient in client.ts
 // via `Object.assign(MnemonicClient.prototype, a2aMethods)`. They share the
 // private `callTool` surface via the `WithCallTool` interface below.
+//
+// ## Sealed A2A DataPart (T14 §9.1)
+//
+// `SEALED_CBOR_MEDIA_TYPE` is the media type for sealed A2A DataParts.
+// `buildSealedDataPart` and `extractSealedDataPart` are pure helpers that
+// construct / parse the `{ sealed, grants[] }` payload without touching the
+// server — decryption remains client-side.
 
 import { ServerError, UserError } from "./errors.js";
 import type {
@@ -182,4 +189,124 @@ export async function recallA2AContext(
   if (opts.kind && opts.kind !== "all") args.kind = opts.kind;
   const result = await this._callToolA2A("mnemonic_recall_a2a", args);
   return parseAttestations(result);
+}
+
+// ── Sealed A2A DataPart helpers (T14 §9.1) ───────────────────────────────────
+
+/**
+ * Media type for a sealed-memory A2A DataPart.
+ *
+ * DataParts with this `mimeType` carry a `{ sealed, grants[] }` payload where
+ * `sealed` is the base64-encoded SEALED_V1 CBOR bytes and `grants` is an
+ * array of base64-encoded GRANT_V1 CBOR blobs.
+ *
+ * Decryption is always client-side — the operator never sees the content key.
+ */
+export const SEALED_CBOR_MEDIA_TYPE =
+  "application/vnd.mnemonic.sealed+cbor" as const;
+
+/**
+ * Wire payload of a sealed A2A DataPart.
+ */
+export interface SealedA2APartPayload {
+  /** Base64-encoded SEALED_V1 CBOR bytes. */
+  sealed: string;
+  /** Base64-encoded GRANT_V1 CBOR blobs — one per authorised reader. */
+  grants: string[];
+}
+
+/**
+ * A2A DataPart shape (kind="data") used to carry a sealed memory.
+ */
+export interface SealedA2ADataPart {
+  kind: "data";
+  data: SealedA2APartPayload;
+  mimeType: typeof SEALED_CBOR_MEDIA_TYPE;
+}
+
+/**
+ * Build an A2A DataPart that carries sealed-memory content.
+ *
+ * @param sealedCbor - Raw SEALED_V1 CBOR bytes (the `outer_cbor` from
+ *   `seal_memory`).
+ * @param grants - Optional list of GRANT_V1 CBOR byte arrays to attach.
+ * @returns An A2A DataPart with `mimeType = SEALED_CBOR_MEDIA_TYPE`.
+ */
+export function buildSealedDataPart(
+  sealedCbor: Uint8Array,
+  grants: Uint8Array[] = []
+): SealedA2ADataPart {
+  const sealedB64 = uint8ArrayToBase64(sealedCbor);
+  const grantsB64 = grants.map((g) => uint8ArrayToBase64(g));
+  return {
+    kind: "data",
+    data: { sealed: sealedB64, grants: grantsB64 },
+    mimeType: SEALED_CBOR_MEDIA_TYPE,
+  };
+}
+
+/**
+ * Extract `{ sealedCbor, grants }` from an A2A DataPart carrying
+ * `SEALED_CBOR_MEDIA_TYPE`.
+ *
+ * @throws `UserError` if the part is not a sealed DataPart.
+ */
+export function extractSealedDataPart(part: {
+  kind: string;
+  data?: unknown;
+  mimeType?: string;
+}): { sealedCbor: Uint8Array; grants: Uint8Array[] } {
+  if (part.kind !== "data") {
+    throw new UserError(
+      `extractSealedDataPart: expected kind="data", got "${part.kind}"`
+    );
+  }
+  if (part.mimeType !== SEALED_CBOR_MEDIA_TYPE) {
+    throw new UserError(
+      `extractSealedDataPart: expected mimeType="${SEALED_CBOR_MEDIA_TYPE}", ` +
+        `got "${part.mimeType ?? "(none)"}"`
+    );
+  }
+  if (!isRecord(part.data)) {
+    throw new UserError("extractSealedDataPart: data field is not an object");
+  }
+  const payload = part.data as Record<string, unknown>;
+  if (typeof payload.sealed !== "string") {
+    throw new UserError(
+      'extractSealedDataPart: data.sealed must be a base64 string'
+    );
+  }
+  const grantsRaw = Array.isArray(payload.grants) ? payload.grants : [];
+  const sealedCbor = base64ToUint8Array(payload.sealed);
+  const grants = grantsRaw.map((g, i) => {
+    if (typeof g !== "string") {
+      throw new UserError(
+        `extractSealedDataPart: grants[${i}] must be a base64 string`
+      );
+    }
+    return base64ToUint8Array(g);
+  });
+  return { sealedCbor, grants };
+}
+
+// ── Base64 utilities ──────────────────────────────────────────────────────────
+
+/** Encode a Uint8Array to standard (padded) base64. */
+function uint8ArrayToBase64(bytes: Uint8Array): string {
+  // Use btoa via a temporary binary string.
+  let binary = "";
+  for (let i = 0; i < bytes.length; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return btoa(binary);
+}
+
+/** Decode a standard (padded) base64 string to Uint8Array. */
+function base64ToUint8Array(b64: string): Uint8Array {
+  const binary = atob(b64);
+  const out = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    out[i] = binary.charCodeAt(i);
+  }
+  return out;
 }

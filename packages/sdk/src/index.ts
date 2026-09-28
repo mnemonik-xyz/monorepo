@@ -79,6 +79,14 @@ export type {
   CheckSelfPromotionInput,
 } from "./erc8004/self-promotion.js";
 
+// ── T14: Sealed A2A DataPart helpers ──────────────────────────────────────
+export {
+  SEALED_CBOR_MEDIA_TYPE,
+  buildSealedDataPart,
+  extractSealedDataPart,
+} from "./a2a.js";
+export type { SealedA2ADataPart, SealedA2APartPayload } from "./a2a.js";
+
 // ── T3: OAuth surface ──────────────────────────────────────────────────────
 export {
   buildAuthorizeUrl,
