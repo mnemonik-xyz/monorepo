@@ -765,4 +765,72 @@ mod tests {
         .unwrap()
         .is_none());
     }
+
+    /// T02: the `artifact_hash` written to `paid_operations` must equal the
+    /// hash derived from the staged COSE envelope. Any change to the envelope
+    /// (payload, signature, protected headers, key id) produces a different
+    /// hash, so a quote is always bound to the exact client-signed artifact.
+    #[test]
+    fn staged_cose_hash_matches_paid_operation_artifact_hash() {
+        use crate::paid_operation;
+
+        let conn = Connection::open_in_memory().unwrap();
+        migrate_paid_artifact_staging(&conn).unwrap();
+        paid_operation::migrate_paid_operations(&conn).unwrap();
+
+        let cose_bytes = b"exact-client-signed-cose-envelope";
+        let expected_hash = hash_client_signed_cose(cose_bytes);
+
+        // Stage the COSE envelope.
+        let staged =
+            stage_verified_cose(&conn, "corr-1", "signer-1", cose_bytes, "2026-07-15T00:00:00Z")
+                .unwrap();
+        assert_eq!(
+            staged.artifact_hash, expected_hash,
+            "staged artifact_hash must equal hash_client_signed_cose result"
+        );
+
+        // The paid_operation is created with the same artifact_hash, binding
+        // the quote to the exact signed artifact.
+        paid_operation::create_or_get(
+            &conn,
+            paid_operation::NewPaidOperation {
+                operation_id: "corr-1",
+                subject_hash: "subject-hash",
+                artifact_hash: &staged.artifact_hash,
+                created_at: "2026-07-15T00:00:00Z",
+            },
+        )
+        .unwrap();
+
+        let op = paid_operation::get(&conn, "corr-1").unwrap().unwrap();
+        assert_eq!(
+            op.artifact_hash, expected_hash,
+            "paid_operation.artifact_hash must match staged COSE hash"
+        );
+
+        // A different COSE envelope produces a different hash; the operation
+        // cannot be rebound to a different artifact.
+        let other_cose = b"a-different-cose-envelope";
+        let other_hash = hash_client_signed_cose(other_cose);
+        assert_ne!(
+            other_hash, expected_hash,
+            "a different COSE envelope must produce a different artifact_hash"
+        );
+        assert!(
+            paid_operation::create_or_get(
+                &conn,
+                paid_operation::NewPaidOperation {
+                    operation_id: "corr-1",
+                    subject_hash: "subject-hash",
+                    artifact_hash: &other_hash,
+                    created_at: "2026-07-15T00:00:01Z",
+                },
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("operation_id_conflict"),
+            "a settled receipt cannot be reused for a different artifact"
+        );
+    }
 }
