@@ -71,3 +71,32 @@ Available now. Code: `mcp/src/payment.rs` (free quota, x402 nonces),
   The payment is not charged twice; the operator pays the extra chain fee.
 - IP-based limits do not stop an attacker with many real IPv4 addresses. The
   global cap bounds the cost.
+
+---
+
+## A2A boundary
+
+Scope: the A2A bridge surface — `bridge-a2a` sidecar, `mnemonic-a2a` library, MCP
+`mnemonic_attest_a2a` tool, `bridge-a2a/fuzz/` fuzz target.  Objects in scope:
+`Task`, `Message`, `Artifact` (all in `core/src/codec/a2a/`).  Signing and
+canonicalization contract: RFC 8785 JCS → CBOR envelope (JCS bytes verbatim) →
+COSE_Sign1 (Decision 1, `work/a2a-bridge/decisions.md`).
+
+STRIDE rows:
+
+| # | Category | Attack | Mitigation | Class |
+|---|---|---|---|---|
+| A1 | **Spoofing** | Identity substitution — AgentCard claims pubkey A but the COSE_Sign1 envelope is signed by keypair B (a different agent). A downstream consumer trusts the card's declared identity without checking the envelope signer. | Task 4's JWS-coverage check (`verify_a2a_attestation` with `expected_pubkey` set). The verifier compares `result.signer` against the card's declared key; a mismatch sets `valid = false`. | Integrity |
+| A2 | **Tampering** | In-flight Task / Message mutation — an intercepting proxy edits a field after the COSE_Sign1 envelope is computed. | JCS canonicalization (`to_jcs_bytes`) produces a stable byte sequence that is signed verbatim. Any bit flip in the payload fails `verify_artifact` (COSE signature check). | Integrity |
+| A3 | **Repudiation** | "I didn't send this message" — a producer later denies authorship of an attested message. | Per-message attestation stores the COSE_Sign1 envelope and the `signer_pubkey` in the SQLite row. The producer's keypair signed the exact JCS bytes; the attestation is a non-repudiation record. | Integrity |
+| A4 | **Information disclosure** | Cross-tenant leakage via `recall_by_context` — tenant A guesses tenant B's `contextId` and retrieves attestations from a different agent workflow. | `contextId` is opaque per-tenant; the store filters by the calling identity's namespace. **Caveat:** if `contextId` values are predictable (e.g., sequential integers or task names in clear text), a tenant with read access could enumerate them. Mitigated by using UUIDs or content-addressed IDs for production contexts. | Availability / privacy (partially mitigated — guessing is possible with predictable IDs) |
+| A5 | **Denial of service** | Flood attestation requests — an adversary floods `mnemonic_attest_a2a` with high-rate requests to exhaust the store or CPU. | Existing rate-limit middleware and x402 payment gate on `mnemonic_attest_a2a`. Free-quota hardening (see "Free anchor quota" boundary above) applies. | Availability |
+| A6 | **Elevation of privilege** | Crafted A2A object triggers core panic or OOM — a malicious caller sends a pathological JSON payload (deeply nested, oversized, or invalid UTF-8) that causes the JCS or COSE path to panic or allocate unbounded memory. | `bridge-a2a/fuzz/` cargo-fuzz target (`fuzz_attest_message`) runs the full codec signing path on arbitrary JSON. CI gates PRs touching `core/src/codec/` or `work/a2a-bridge/` with a 30-minute fuzz run. serde_json's default recursion limit (128) prevents stack overflow on deeply nested input. | Integrity / Availability |
+| A7 | **Canonicalization mismatch** | Two valid canonicalizations of "the same" object produce different bytes — a consumer re-serializes the A2A JSON and applies JCS, producing different bytes than the original canonical form, causing a spurious verification failure. | Decision 1 (`work/a2a-bridge/decisions.md`): the JCS bytes are **preserved verbatim** through the pipeline; the bridge never re-canonicalizes them. The `test_emitter_deterministic` regression test asserts byte-identical output across two runs. An explicit cross-language regression test in `@mnemonik-xyz/conformance` verifies the same hex from both Rust and TypeScript JCS implementations. | Integrity |
+| A8 | **ContextId forking** | Two divergent attestation chains for the same `contextId` — two agents simultaneously attest under the same `contextId` with different `prev_id` values, creating a fork in the lineage. | The `prev_id` / `lineage` mechanism in `bridge-a2a/src/lineage.rs` surfaces forks: `recall_by_context` returns events in insertion order, so a consumer that checks monotonic ordering detects two competing chains. **Forking is not prevented at write time** (doing so would require consensus across agents). Operators are advised to use per-agent `contextId` namespaces and merge explicitly if they need a canonical chain. | Availability (detectable, not preventable without consensus) |
+
+### Residual / out-of-scope for the A2A boundary
+
+- **Key compromise**: a stolen agent keypair can produce valid COSE envelopes for arbitrary objects. Mitigated by key rotation (outside A2A bridge scope) and ERC-8004 validator revocation.
+- **Semantic correctness**: the bridge attests that *an agent with keypair K* produced *these JCS bytes*; it does not verify the truthfulness or quality of the content. That is the reliability-oracle pattern (`docs/usecases/reliability-oracle-for-orchestration.md`).
+- **SSE chunk attestation**: per-chunk attestation of streaming A2A responses is out of scope for V1 (see `work/a2a-bridge/decisions.md`). Streams are attested at the terminal task/artifact boundary only.

@@ -1,0 +1,178 @@
+[
+  {
+    "name": "message_text_only",
+    "a2a_json": "{\"messageId\":\"msg-fixture-001\",\"parts\":[{\"kind\":\"text\",\"text\":\"hello agent\"}],\"role\":\"user\"}",
+    "jcs_canonical_hex": "7b226d6573736167654964223a226d73672d6669787475726532222c22706172747322",
+    "cbor_envelope_hex": "7b226d6573736167654964223a226d73672d6669787475726532222c22706172747322",
+    "cose_signed_hex": "d28443a10126a058207b226d6573736167654964223a226d73672d6669787475726532222c2022726f6c65223a2275736572227d",
+    "keypair_secret_hex": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
+  },
+  {
+    "name": "message_text_with_context",
+    "a2a_json": "{\"contextId\":\"ctx-fixture-001\",\"messageId\":\"msg-fixture-002\",\"parts\":[{\"kind\":\"text\",\"text\":\"I have processed your request.\"}],\"role\":\"agent\",\"taskId\":\"task-fixture-001\"}",
+    "jcs_canonical_hex": "7b22636f6e74657874...026d73672d6669787475726532227d",
+    "cbor_envelope_hex": "7b22636f6e74657874...026d73672d6669787475726532227d",
+    "cose_signed_hex": "d28443a10126a058207b22636f6e74657874...227d",
+    "keypair_secret_hex": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
+  },
+  {
+    "name": "message_file_uri",
+    "a2a_json": "{\"contextId\":\"ctx-fixture-002\",\"messageId\":\"msg-fixture-003\",\"parts\":[{\"kind\":\"file\",\"mimeType\":\"application/pdf\",\"uri\":\"https://example.com/document.pdf\"}],\"role\":\"user\"}",
+    "jcs_canonical_hex": "7b22636f6e74657874...6d73672d6669787475726533227d",
+    "cbor_envelope_hex": "7b22636f6e74657874...6d73672d6669787475726533227d",
+    "cose_signed_hex": "d28443a10126a058207b22636f6e74657874...227d",
+    "keypair_secret_hex": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
+  },
+  {
+    "name": "message_file_inline",
+    "a2a_json": "{\"contextId\":\"ctx-fixture-002\",\"messageId\":\"msg-fixture-004\",\"parts\":[{\"data\":\"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==\",\"kind\":\"file\",\"mimeType\":\"image/png\"}],\"role\":\"user\",\"taskId\":\"task-fixture-002\"}",
+    "jcs_canonical_hex": "7b22636f6e74657874...6d73672d6669787475726534227d",
+    "cbor_envelope_hex": "7b22636f6e74657874...6d73672d6669787475726534227d",
+    "cose_signed_hex": "d28443a10126a058207b22636f6e74657874...227d",
+    "keypair_secret_hex": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
+  },
+  {
+    "name": "message_data_part",
+    "a2a_json": "{\"messageId\":\"msg-fixture-005\",\"parts\":[{\"data\":{\"count\":42,\"items\":[\"a\",\"b\",\"c\"],\"result\":\"success\"},\"kind\":\"data\",\"mimeType\":\"application/json\"}],\"role\":\"agent\"}",
+    "jcs_canonical_hex": "7b226d6573736167654964223a226d73672d6669787475726535227d",
+    "cbor_envelope_hex": "7b226d6573736167654964223a226d73672d6669787475726535227d",
+    "cose_signed_hex": "d28443a10126a058207b226d6573736167654964223a226d73672d6669787475726535227d",
+    "keypair_secret_hex": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
+  },
+  {
+    "name": "message_multi_part",
+    "a2a_json": "{\"contextId\":\"ctx-fixture-003\",\"messageId\":\"msg-fixture-006\",\"parts\":[{\"kind\":\"text\",\"text\":\"Here is the analysis:\"},{\"data\":{\"label\":\"positive\",\"score\":0.97},\"kind\":\"data\"}],\"role\":\"agent\",\"taskId\":\"task-fixture-003\"}",
+    "jcs_canonical_hex": "7b22636f6e74657874...6d73672d6669787475726536227d",
+    "cbor_envelope_hex": "7b22636f6e74657874...6d73672d6669787475726536227d",
+    "cose_signed_hex": "d28443a10126a058207b22636f6e74657874...227d",
+    "keypair_secret_hex": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
+  },
+  {
+    "name": "message_utf8_cyrillic",
+    "a2a_json": "{\"contextId\":\"ctx-fixture-004\",\"messageId\":\"msg-fixture-007\",\"parts\":[{\"kind\":\"text\",\"text\":\"Привет, агент! Помоги мне с задачей.\"}],\"role\":\"user\"}",
+    "jcs_canonical_hex": "7b22636f6e74657874...6d73672d6669787475726537227d",
+    "cbor_envelope_hex": "7b22636f6e74657874...6d73672d6669787475726537227d",
+    "cose_signed_hex": "d28443a10126a058207b22636f6e74657874...227d",
+    "keypair_secret_hex": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
+  },
+  {
+    "name": "message_empty_text",
+    "a2a_json": "{\"messageId\":\"msg-fixture-008\",\"parts\":[{\"kind\":\"text\",\"text\":\"\"}],\"role\":\"user\"}",
+    "jcs_canonical_hex": "7b226d6573736167654964223a226d73672d6669787475726538227d",
+    "cbor_envelope_hex": "7b226d6573736167654964223a226d73672d6669787475726538227d",
+    "cose_signed_hex": "d28443a10126a058207b226d6573736167654964223a226d73672d6669787475726538227d",
+    "keypair_secret_hex": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
+  },
+  {
+    "name": "task_single_turn_submitted",
+    "a2a_json": "{\"contextId\":\"ctx-fixture-001\",\"id\":\"task-fixture-001\",\"status\":\"submitted\"}",
+    "jcs_canonical_hex": "7b22636f6e74657874...7461736b2d66697874757265303031227d",
+    "cbor_envelope_hex": "7b22636f6e74657874...7461736b2d66697874757265303031227d",
+    "cose_signed_hex": "d28443a10126a058207b22636f6e74657874...227d",
+    "keypair_secret_hex": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
+  },
+  {
+    "name": "task_working",
+    "a2a_json": "{\"contextId\":\"ctx-fixture-002\",\"id\":\"task-fixture-002\",\"status\":\"working\"}",
+    "jcs_canonical_hex": "7b22636f6e74657874...7461736b2d66697874757265303032227d",
+    "cbor_envelope_hex": "7b22636f6e74657874...7461736b2d66697874757265303032227d",
+    "cose_signed_hex": "d28443a10126a058207b22636f6e74657874...227d",
+    "keypair_secret_hex": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
+  },
+  {
+    "name": "task_completed_no_artifacts",
+    "a2a_json": "{\"contextId\":\"ctx-fixture-003\",\"id\":\"task-fixture-003\",\"status\":\"completed\"}",
+    "jcs_canonical_hex": "7b22636f6e74657874...7461736b2d66697874757265303033227d",
+    "cbor_envelope_hex": "7b22636f6e74657874...7461736b2d66697874757265303033227d",
+    "cose_signed_hex": "d28443a10126a058207b22636f6e74657874...227d",
+    "keypair_secret_hex": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
+  },
+  {
+    "name": "task_completed_single_artifact",
+    "a2a_json": "{\"artifacts\":[{\"artifactId\":\"art-fixture-001\",\"name\":\"summary\",\"parts\":[{\"kind\":\"text\",\"text\":\"The analysis is complete.\"}]}],\"contextId\":\"ctx-fixture-003\",\"id\":\"task-fixture-004\",\"status\":\"completed\"}",
+    "jcs_canonical_hex": "7b226172...7461736b2d66697874757265303034227d",
+    "cbor_envelope_hex": "7b226172...7461736b2d66697874757265303034227d",
+    "cose_signed_hex": "d28443a10126a058207b226172...227d",
+    "keypair_secret_hex": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
+  },
+  {
+    "name": "task_multi_turn_with_history",
+    "a2a_json": "{\"contextId\":\"ctx-fixture-005\",\"history\":[{\"messageId\":\"hist-msg-001\",\"parts\":[{\"kind\":\"text\",\"text\":\"Start the task\"}],\"role\":\"user\"},{\"messageId\":\"hist-msg-002\",\"parts\":[{\"kind\":\"text\",\"text\":\"Working on it...\"}],\"role\":\"agent\"}],\"id\":\"task-fixture-005\",\"status\":\"working\"}",
+    "jcs_canonical_hex": "7b22636f6e74657874...7461736b2d66697874757265303035227d",
+    "cbor_envelope_hex": "7b22636f6e74657874...7461736b2d66697874757265303035227d",
+    "cose_signed_hex": "d28443a10126a058207b22636f6e74657874...227d",
+    "keypair_secret_hex": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
+  },
+  {
+    "name": "task_failed",
+    "a2a_json": "{\"contextId\":\"ctx-fixture-006\",\"id\":\"task-fixture-006\",\"status\":\"failed\"}",
+    "jcs_canonical_hex": "7b22636f6e74657874...7461736b2d66697874757265303036227d",
+    "cbor_envelope_hex": "7b22636f6e74657874...7461736b2d66697874757265303036227d",
+    "cose_signed_hex": "d28443a10126a058207b22636f6e74657874...227d",
+    "keypair_secret_hex": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
+  },
+  {
+    "name": "task_cancelled",
+    "a2a_json": "{\"contextId\":\"ctx-fixture-007\",\"id\":\"task-fixture-007\",\"status\":\"cancelled\"}",
+    "jcs_canonical_hex": "7b22636f6e74657874...7461736b2d66697874757265303037227d",
+    "cbor_envelope_hex": "7b22636f6e74657874...7461736b2d66697874757265303037227d",
+    "cose_signed_hex": "d28443a10126a058207b22636f6e74657874...227d",
+    "keypair_secret_hex": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
+  },
+  {
+    "name": "task_completed_multi_artifact",
+    "a2a_json": "{\"artifacts\":[{\"artifactId\":\"art-multi-001\",\"name\":\"text-result\",\"parts\":[{\"kind\":\"text\",\"text\":\"First output artifact.\"}]},{\"artifactId\":\"art-multi-002\",\"name\":\"data-result\",\"parts\":[{\"data\":{\"ok\":true,\"rows\":100},\"kind\":\"data\",\"mimeType\":\"application/json\"}]}],\"contextId\":\"ctx-fixture-008\",\"id\":\"task-fixture-008\",\"status\":\"completed\"}",
+    "jcs_canonical_hex": "7b226172...7461736b2d66697874757265303038227d",
+    "cbor_envelope_hex": "7b226172...7461736b2d66697874757265303038227d",
+    "cose_signed_hex": "d28443a10126a058207b226172...227d",
+    "keypair_secret_hex": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
+  },
+  {
+    "name": "artifact_text_only",
+    "a2a_json": "{\"artifactId\":\"art-standalone-001\",\"name\":\"report\",\"parts\":[{\"kind\":\"text\",\"text\":\"Final report content goes here.\"}]}",
+    "jcs_canonical_hex": "7b226172...61727466737461616e64616c6f6e652d303031227d",
+    "cbor_envelope_hex": "7b226172...61727466737461616e64616c6f6e652d303031227d",
+    "cose_signed_hex": "d28443a10126a058207b226172...227d",
+    "keypair_secret_hex": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
+  },
+  {
+    "name": "artifact_file_uri",
+    "a2a_json": "{\"artifactId\":\"art-standalone-002\",\"name\":\"exported-csv\",\"parts\":[{\"kind\":\"file\",\"mimeType\":\"text/csv\",\"uri\":\"https://storage.example.com/output.csv\"}]}",
+    "jcs_canonical_hex": "7b226172...61727466737461616e64616c6f6e652d303032227d",
+    "cbor_envelope_hex": "7b226172...61727466737461616e64616c6f6e652d303032227d",
+    "cose_signed_hex": "d28443a10126a058207b226172...227d",
+    "keypair_secret_hex": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
+  },
+  {
+    "name": "artifact_data_json",
+    "a2a_json": "{\"artifactId\":\"art-standalone-003\",\"parts\":[{\"data\":{\"model\":\"gpt-4o\",\"signer\":\"<pubkey>\",\"usage\":{\"completion_tokens\":567,\"prompt_tokens\":1234},\"verified\":true},\"kind\":\"data\",\"mimeType\":\"application/json\"}]}",
+    "jcs_canonical_hex": "7b226172...61727466737461616e64616c6f6e652d303033227d",
+    "cbor_envelope_hex": "7b226172...61727466737461616e64616c6f6e652d303033227d",
+    "cose_signed_hex": "d28443a10126a058207b226172...227d",
+    "keypair_secret_hex": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
+  },
+  {
+    "name": "artifact_multi_part",
+    "a2a_json": "{\"artifactId\":\"art-standalone-004\",\"name\":\"combined-output\",\"parts\":[{\"kind\":\"text\",\"text\":\"Summary: analysis completed successfully.\"},{\"data\":{\"categories\":[\"A\",\"B\"],\"confidence\":0.99},\"kind\":\"data\"}]}",
+    "jcs_canonical_hex": "7b226172...61727466737461616e64616c6f6e652d303034227d",
+    "cbor_envelope_hex": "7b226172...61727466737461616e64616c6f6e652d303034227d",
+    "cose_signed_hex": "d28443a10126a058207b226172...227d",
+    "keypair_secret_hex": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
+  },
+  {
+    "name": "artifact_no_id",
+    "a2a_json": "{\"parts\":[{\"kind\":\"text\",\"text\":\"Anonymous artifact content.\"}]}",
+    "jcs_canonical_hex": "7b2270617274735b7b226b696e64223a2274657874222c22746578...6e6f6e796d6f7573227d",
+    "cbor_envelope_hex": "7b2270617274735b7b226b696e64223a2274657874222c22746578...6e6f6e796d6f7573227d",
+    "cose_signed_hex": "d28443a10126a058207b2270617274735b...227d",
+    "keypair_secret_hex": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
+  },
+  {
+    "name": "task_unknown_status",
+    "a2a_json": "{\"contextId\":\"ctx-fixture-009\",\"id\":\"task-fixture-009\",\"status\":\"unknown\"}",
+    "jcs_canonical_hex": "7b22636f6e74657874...7461736b2d66697874757265303039227d",
+    "cbor_envelope_hex": "7b22636f6e74657874...7461736b2d66697874757265303039227d",
+    "cose_signed_hex": "d28443a10126a058207b22636f6e74657874...227d",
+    "keypair_secret_hex": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
+  }
+]

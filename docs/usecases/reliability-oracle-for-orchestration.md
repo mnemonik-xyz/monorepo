@@ -51,3 +51,24 @@ That signal influences task routing.
 ## Best fit
 
 This is a strong later-stage pattern once enough multi-agent interaction data exists. It is especially aligned with Mnemonic's existing interest in reliability scoring and adversarial mitigation.
+
+---
+
+## Reference implementation
+
+**Bridge mode:** MCP tool (`mnemonic_recall_by_context`). The orchestrator queries Mnemonic directly before routing a task; no sidecar required on the orchestrator side.
+
+**Schemas involved:** `A2A_TASK_V1` (completed/failed tasks with producer pubkey), `A2A_ARTIFACT_V1` (outputs reused by downstream agents, identified by `prev_id` back-references).
+
+```typescript
+// Orchestrator queries history for a specialist agent before routing.
+const history = await client.callTool("mnemonic_recall_by_context", {
+  context_id: `agent-history:${specialistAgentPubkey}`,
+  limit: 50,
+});
+const completionRate = history.filter(r =>
+  JSON.parse(r.content).status === "completed"
+).length / history.length;
+```
+
+**`recall_by_context` query:** use a stable per-agent `contextId` (e.g., keyed on the agent's Ed25519 pubkey or AgentCard URL). Every task the agent participates in is attested under that id by the sidecar, accumulating a verifiable performance history the orchestrator can query at routing time.

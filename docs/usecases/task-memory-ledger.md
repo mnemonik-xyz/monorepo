@@ -55,3 +55,24 @@ Each delegation becomes a memory entry. Later agents can query:
 ## Best fit
 
 Strong for enterprise workflows, research pipelines, operational assistants, and compliance-sensitive agent systems.
+
+---
+
+## Reference implementation
+
+**Bridge mode:** sidecar (`bridge-a2a`). Drop the sidecar in front of any A2A-compliant agent; it intercepts every `tasks/get` and `message/send` call and attests the task without modifying agent code.
+
+**Schemas involved:** `A2A_TASK_V1` (task status + history), `A2A_MESSAGE_V1` (per-turn messages in the task history).
+
+```typescript
+// Query the task memory ledger for a context: retrieve the last 20 attestations.
+const rows = await client.callTool("mnemonic_recall_by_context", {
+  context_id: "ctx-purchasing-workflow-001",
+  limit: 20,
+});
+// Each row: { attestation_id, content (JCS-canonical Task JSON), content_hash }
+const lastTask = JSON.parse(rows[0].content);
+console.log("last known status:", lastTask.status);
+```
+
+**`recall_by_context` query:** `context_id` is the A2A `contextId` field. The sidecar writes one attestation per terminal task event; recall returns them newest-first so the most recent status is always `rows[0]`.
