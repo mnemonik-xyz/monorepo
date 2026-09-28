@@ -1,5 +1,10 @@
 # pluggable-anchoring — parking lot
 
+> **Order:** this is one step of a larger sequence. See
+> [`work/DECOUPLING-SEQUENCE.md`](../DECOUPLING-SEQUENCE.md) for where it sits and what must
+> land first.
+
+
 Status: **TODO — brief, then run user-spec-planning.**
 
 Tracks issue **#70** (`erc8004-0`, "Anchor pluggability (Phase 3α)"), which #69 marks as a

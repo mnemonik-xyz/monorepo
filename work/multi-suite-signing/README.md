@@ -1,5 +1,10 @@
 # multi-suite-signing — parking lot
 
+> **Order:** this is one step of a larger sequence. See
+> [`work/DECOUPLING-SEQUENCE.md`](../DECOUPLING-SEQUENCE.md) for where it sits and what must
+> land first.
+
+
 Status: **TODO — last in the sequence. Needs its own spec and a golden-vector proof.**
 
 Tracks issue **#29** ("Crypto-flexibility (Phase 2): off-chain alg-pluggable Signer"). Lets an

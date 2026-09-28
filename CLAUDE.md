@@ -104,6 +104,8 @@ Features and bugs live in `work/<feature>/`:
 - `tasks/<n>.md` — atomic units with `status`, `depends_on`, `wave`, `skills`, `reviewers` frontmatter
 - `decisions.md` — append-only log of decisions and audit findings
 
+Several `work/` folders are steps of one larger effort, and their order matters more than it looks — `work/DECOUPLING-SEQUENCE.md` names that order and why each step blocks the next. Read it before starting any of `chain-agnostic`, `pluggable-anchoring`, `pluggable-storage`, `dual-key-identity` or `multi-suite-signing`.
+
 Tasks come in waves. Tasks in one wave may run in parallel if they don't touch shared files (`core/src/lib.rs`, `mcp/src/tools.rs`, `mcp/src/mcp.rs`, `mcp/src/main.rs` are common conflict points). Audit waves are read-only and write to `decisions.md`.
 
 ## Project knowledge skill
