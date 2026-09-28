@@ -4,11 +4,13 @@ import Blog from "./pages/Blog";
 import BlogPost from "./pages/BlogPost";
 import Chat from "./pages/Chat";
 import Consent from "./pages/Consent";
+import GrantApprove from "./pages/GrantApprove";
 import Install from "./pages/Install";
 import Landing from "./pages/Landing";
 import Ledger from "./pages/Ledger";
 import Privacy from "./pages/Privacy";
 import Roadmap from "./pages/Roadmap";
+import SealedView from "./pages/SealedView";
 import Sign from "./pages/Sign";
 
 /**
@@ -32,6 +34,10 @@ function App() {
         <Route path="/chat" element={<Chat />} />
         <Route path="/sign/:correlationId" element={<Sign />} />
         <Route path="/oauth/consent" element={<Consent />} />
+        {/* Sealed memory viewer: /m/<blake3-hash>[#k=<base64url-key>] */}
+        <Route path="/m/:hash" element={<SealedView />} />
+        {/* Grant approve flow for mnemonic_share approve_url */}
+        <Route path="/grant/approve" element={<GrantApprove />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
     </BrowserRouter>

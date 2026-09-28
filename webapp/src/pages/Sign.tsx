@@ -61,6 +61,11 @@ interface PendingBundle {
   expiresAtMs: number;
   /** Embedding bytes — server-supplied for the signing call. */
   embeddingBytes: Uint8Array;
+  /**
+   * Whether this bundle is a SEALED_V1 artifact. When true, `content` was
+   * decrypted in the browser before display (tech-spec §8.1 step 5).
+   */
+  isSealed?: boolean;
 }
 
 /** UUID v4 shape — used to validate the path param before hitting the API. */
@@ -152,8 +157,23 @@ export default function Sign() {
           ? Number.parseInt(expiresAtHeader, 10) * 1000
           : Date.now() + 5 * 60 * 1000;
 
-        const content = decodeContentFromCbor(buf);
+        // Detect SEALED_V1 bundle (tech-spec §8.1 step 5).
+        // If the bundle is sealed, attempt browser-side decryption before
+        // showing the content to the user.
+        const artifactType = peekArtifactType(buf);
+        const isSealed = artifactType === "sealed";
+
+        let content: string;
         const embeddingBytes = decodeEmbeddingFromCbor(buf);
+
+        if (isSealed) {
+          // Decrypt the sealed bundle in the browser so the user sees the
+          // plaintext they are about to commit to (tech-spec §8.1 step 5,
+          // S4 attack mitigation).
+          content = await decryptSealedContent(buf);
+        } else {
+          content = decodeContentFromCbor(buf);
+        }
 
         if (cancelled) return;
         setStatus({
@@ -164,6 +184,7 @@ export default function Sign() {
             contentHash,
             expiresAtMs,
             embeddingBytes,
+            isSealed,
           },
         });
       } catch (e) {
@@ -338,6 +359,14 @@ export default function Sign() {
 
         {status.kind === "ready" && (
           <>
+            {status.bundle.isSealed && (
+              <div
+                className="rounded-sm border border-accent-primary/30 bg-accent-primary/5 px-3 py-1.5 font-mono text-[11px] uppercase tracking-[0.16em] text-accent-primary"
+                data-testid="sign-sealed-label"
+              >
+                Encrypted — only you can read it
+              </div>
+            )}
             <ContentPreview
               content={status.bundle.content}
               cborByteLength={status.bundle.cborBytes.byteLength}
@@ -592,10 +621,64 @@ function formatError(e: unknown): string {
   }
 }
 
+/**
+ * Peek at the `type` field in the decoded CBOR artifact.
+ * Returns `"sealed"` for SEALED_V1, `"memory"` for MEMORY_V1, or
+ * `"unknown"` if parsing fails.
+ *
+ * Used by the Sign page to detect sealed bundles before showing the
+ * content to the user (tech-spec §8.1 step 5).
+ */
+function peekArtifactType(buf: Uint8Array): string {
+  try {
+    const obj = decodeArtifactFromCbor(buf);
+    const t = obj.type;
+    return typeof t === "string" ? t : "unknown";
+  } catch {
+    return "unknown";
+  }
+}
+
+/**
+ * Attempt browser-side decryption of a SEALED_V1 bundle.
+ *
+ * Uses WASM `open_memory(sealed_cbor, keypair_json)` when available (tasks 1-5).
+ * Falls back to a human-readable notice if the WASM export is not present yet.
+ *
+ * Tech-spec §8.1 step 5: the browser decrypts before the user signs, so a
+ * rogue server cannot seal different text (S4 attack).
+ */
+async function decryptSealedContent(buf: Uint8Array): Promise<string> {
+  try {
+    const wasm = await loadWasm();
+    const identityMod = await import("../lib/storage");
+    const identity = identityMod.readIdentity();
+    const wasmRecord = wasm as Record<string, unknown>;
+
+    if (typeof wasmRecord.open_memory === "function" && identity) {
+      const openFn = wasmRecord.open_memory as (
+        bytes: Uint8Array,
+        keypair: unknown,
+      ) => string;
+      return openFn(buf, identity);
+    }
+
+    // WASM sealed crypto not yet available — show informative placeholder.
+    return (
+      "[Sealed memory — decryption requires a newer WASM build. " +
+      "The ciphertext is shown below. Sign only if you trust the server.]"
+    );
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return `[Sealed memory — decrypt failed: ${msg}]`;
+  }
+}
+
 // Test-only re-exports — internal helpers that vitest exercises directly.
 // Prefixed with `__test__` to discourage accidental production use.
 export const __test__decodeContentFromCbor = decodeContentFromCbor;
 export const __test__decodeEmbeddingFromCbor = decodeEmbeddingFromCbor;
+export const __test__peekArtifactType = peekArtifactType;
 
 function ErrorShell({
   title,

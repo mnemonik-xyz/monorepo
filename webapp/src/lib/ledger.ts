@@ -35,6 +35,13 @@ export interface Artifact {
   /** ISO-8601 timestamp. */
   created_at: string;
   write_mode: WriteMode;
+  /**
+   * Privacy classification (F1 finding — tech-spec §2, §10).
+   * `"plaintext"` = row was written before encryption existed; bytes on
+   * Arweave are readable by anyone. `"sealed"` = encrypted.
+   * The field may be absent on older rows; treat absence as `"plaintext"`.
+   */
+  privacy?: "plaintext" | "sealed";
 }
 
 export interface ArtifactPage {

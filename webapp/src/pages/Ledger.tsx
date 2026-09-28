@@ -256,10 +256,25 @@ function ArtifactCard({ artifact: a }: { artifact: Artifact }) {
   const onChain = a.write_mode !== "local";
   const solUrl = solanaTxUrl(a.solana_tx);
   const dataUrl = irysDataUrl(a.arweave_tx);
+  // F1 label (tech-spec §2, §10): rows with privacy=plaintext that are
+  // anchored on-chain must carry an honest disclosure — the bytes are
+  // permanently readable on Arweave.
+  const showF1Label =
+    onChain && (!a.privacy || a.privacy === "plaintext");
 
   return (
     <article className="relative overflow-hidden rounded-md border border-white/10 bg-panel/60 p-5 transition-colors hover:border-accent-primary/30">
       <div className="grain pointer-events-none absolute inset-0 -z-10 opacity-50" />
+
+      {showF1Label && (
+        <div
+          className="mb-3 rounded-sm border border-text-muted/20 bg-white/[0.03] px-3 py-1.5 font-mono text-[10px] uppercase tracking-[0.14em] text-text-muted"
+          data-testid="f1-label"
+          role="note"
+        >
+          Published before encryption existed. Readable on Arweave.
+        </div>
+      )}
 
       <div className="flex items-start justify-between gap-3">
         <ModeBadge mode={a.write_mode} />
