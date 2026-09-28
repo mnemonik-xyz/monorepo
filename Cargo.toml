@@ -1,3 +1,3 @@
 [workspace]
-members = ["core", "mcp", "mnemonic-a2a"]
+members = ["core", "mcp", "mnemonic-a2a", "bridge-a2a"]
 resolver = "2"

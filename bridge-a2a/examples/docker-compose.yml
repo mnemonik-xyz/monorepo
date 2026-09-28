@@ -1,0 +1,52 @@
+# docker-compose example: bridge-a2a in front of a stub A2A server.
+#
+# Usage:
+#   docker compose -f bridge-a2a/examples/docker-compose.yml up
+#
+# The bridge listens on localhost:8080; the stub A2A server listens on
+# localhost:9000.  Send JSON-RPC requests to :8080 and the bridge will
+# forward them to :9000, attest responses, and inject x-mnemonic extensions.
+
+version: "3.9"
+
+services:
+  # ── Stub A2A server ───────────────────────────────────────────────────────
+  # Replace with your real A2A server image.  This stub uses `httpbin` to echo
+  # the request body back as JSON so the bridge can demonstrate attestation.
+  stub-a2a:
+    image: kennethreitz/httpbin:latest
+    ports:
+      - "9000:80"
+    networks:
+      - a2a-net
+
+  # ── Mnemonic bridge sidecar ───────────────────────────────────────────────
+  bridge:
+    image: bridge-a2a:latest
+    build:
+      context: ../..
+      dockerfile: bridge-a2a/examples/Dockerfile
+    ports:
+      - "8080:8080"
+    volumes:
+      - bridge-data:/data
+    environment:
+      BRIDGE_UPSTREAM: "http://stub-a2a:80"
+      BRIDGE_LISTEN: "0.0.0.0:8080"
+      BRIDGE_DB_PATH: "/data/bridge-a2a.db"
+      BRIDGE_FAILURE_MODE: "attest-best-effort"
+      BRIDGE_CONTEXT_STRATEGY: "generate"
+      # To use a persistent keypair, mount a JSON keypair file and set:
+      # BRIDGE_KEYPAIR: "/run/secrets/bridge_keypair"
+      RUST_LOG: "info"
+    depends_on:
+      - stub-a2a
+    networks:
+      - a2a-net
+
+networks:
+  a2a-net:
+    driver: bridge
+
+volumes:
+  bridge-data:
