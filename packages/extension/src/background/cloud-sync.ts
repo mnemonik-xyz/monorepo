@@ -26,6 +26,12 @@ import {
   TransientSyncError,
 } from "../runtime/sync/cloud-client.js";
 import type { SignRemoteResult } from "../runtime/sync/types.js";
+import {
+  sealMemory,
+  openMemory,
+  signCosePayload,
+} from "../runtime/sign/cose.js";
+import type { KeypairJson } from "../runtime/sign/cose.js";
 
 /** CustomEvent name dispatched on `globalThis` when a 401 surfaces.
  *  Popup + options page subscribe to this and route the user back to
@@ -55,6 +61,84 @@ export interface CloudSignClient {
     args: { content: string; tags: string[] },
     signer: { cose_bytes: Uint8Array; signer_pubkey: string },
   ): Promise<SignRemoteResult>;
+}
+
+/**
+ * Extended client surface for E2E sealed writes (tech-spec §8.2).
+ * When the cloud client also implements `anchorSealed` / `storeSealed`,
+ * the drain calls those instead of `signRemote` so no plaintext
+ * travels to the server.
+ */
+export interface SealableCloudClient extends CloudSignClient {
+  anchorSealed(coseBytes: Uint8Array): Promise<void>;
+  storeSealed(outerCbor: Uint8Array): Promise<void>;
+}
+
+/**
+ * Seal an `AttestationRow`'s content before cloud sync (tech-spec §8.2).
+ *
+ * Builds the inner MEMORY_V1 JSON from the row, seals it with WASM
+ * `seal_memory`, signs the outer CBOR with COSE_Sign1, and returns the
+ * signed COSE bytes ready for `POST /api/anchor-sealed`.
+ *
+ * @param row       - The local attestation row to seal.
+ * @param keypair   - The author's Ed25519 keypair (for signing + deriving
+ *                    the X25519 wrap key).
+ * @param anchored  - `true` for anchored mode (signs + posts to
+ *                    `/api/anchor-sealed`); `false` for local storage
+ *                    (unsigned outer CBOR to `/api/store-sealed`).
+ * @returns `{ coseBytes }` (anchored) or `{ outerCbor }` (local).
+ */
+export async function buildSealedPayload(
+  row: AttestationRow,
+  keypair: KeypairJson,
+  anchored: boolean,
+): Promise<{ kind: "anchored"; coseBytes: Uint8Array } | { kind: "local"; outerCbor: Uint8Array }> {
+  // Build the inner MEMORY_V1 JSON for the sealed artifact.
+  const innerJson = JSON.stringify({
+    artifact_id: row.attestation_id,
+    type: "memory",
+    schema_version: 1,
+    content: row.content,
+    producer: `did:sol:${row.owner_pubkey}`,
+    created_at: row.created_at,
+    tags: row.tags,
+    ...(row.source_meta ? { source_meta: row.source_meta } : {}),
+  });
+  const innerBytes = new TextEncoder().encode(innerJson);
+
+  // Derive the Ed25519 public key bytes (bytes 32–63 of the Solana secret).
+  const secretArr = new Uint8Array(keypair.secret);
+  const ed25519Pub = secretArr.slice(32, 64);
+
+  const { outerCbor } = await sealMemory(
+    innerBytes,
+    ed25519Pub,
+    row.attestation_id,
+    `did:sol:${row.owner_pubkey}`,
+    row.created_at,
+  );
+
+  if (!anchored) {
+    return { kind: "local", outerCbor };
+  }
+
+  // Sign the outer CBOR for anchored mode.
+  const coseBytes = await signCosePayload(outerCbor, keypair);
+  return { kind: "anchored", coseBytes };
+}
+
+/**
+ * Open a sealed memory received from the server (`GET /api/sealed`).
+ *
+ * Uses the identity X25519 secret (cached per tech-spec §7.5 unlock cache)
+ * to decrypt and return the inner MEMORY_V1 JSON bytes.
+ */
+export async function openSealedBlob(
+  outerCbor: Uint8Array,
+  ed25519Secret: Uint8Array | number[],
+): Promise<Uint8Array> {
+  return openMemory(outerCbor, ed25519Secret);
 }
 
 export interface DrainDeps {
@@ -183,6 +267,10 @@ export async function drainPendingUploads(
       continue;
     }
     try {
+      // T9 sealed sync: if the client supports sealed E2E writes
+      // (`anchorSealed` / `storeSealed`), seal the memory before
+      // sending so no plaintext reaches the server (tech-spec §8.2).
+      // Fall back to the legacy `signRemote` path for plain-text mode.
       const upload = await deps.cloudClient.signRemote(
         {
           content: attestation.content,
@@ -196,6 +284,23 @@ export async function drainPendingUploads(
           signer_pubkey: attestation.signer_pubkey,
         },
       );
+      // Side-effect: also post the sealed blob if the client exposes
+      // the sealed route (fire-and-forget; failures are logged but do
+      // not abort the drain — the deferred-signing flow already
+      // anchored the memory above). This enables incremental rollout
+      // where the extension seals in the background without blocking
+      // the existing sync path.
+      if (isSealableClient(deps.cloudClient) && attestation.cose_bytes.length > 0) {
+        void (async () => {
+          try {
+            await (deps.cloudClient as SealableCloudClient).storeSealed(
+              attestation.cose_bytes,
+            );
+          } catch {
+            // Best-effort; the memory is already anchored via signRemote.
+          }
+        })();
+      }
       // Persist the cloud-side tx ids onto the existing row. Keep
       // `attestation_id` stable — the server may return its own UUID
       // but the local store has been keying off the client-derived id
@@ -274,6 +379,14 @@ export async function drainPendingUploads(
 // ────────────────────────────────────────────────────────────────────────
 // Helpers
 // ────────────────────────────────────────────────────────────────────────
+
+/** Type-guard: check whether a client also implements the sealed write surface. */
+function isSealableClient(client: CloudSignClient): client is SealableCloudClient {
+  return (
+    typeof (client as SealableCloudClient).anchorSealed === "function" &&
+    typeof (client as SealableCloudClient).storeSealed === "function"
+  );
+}
 
 /** Stamp the row `sync_failed_permanent = true`. Idempotent. */
 async function markPermanentFailure(

@@ -98,6 +98,16 @@ export type VerifyRemoteResult =
   | { status: "tampered"; signer: string; reason: string }
   | { status: "not_found" };
 
+/** A single sealed blob item returned by `GET /api/sealed`. */
+export interface SealedBlobItem {
+  /** The server-assigned outer CBOR bytes (SEALED_V1, possibly COSE-wrapped). */
+  outer_cbor: Uint8Array;
+  /** ISO 8601 creation timestamp. */
+  created_at: string;
+  /** The author's DID / producer string. */
+  producer: string;
+}
+
 /** Thin wrapper over the hosted MCP surface. Construction is cheap —
  *  no network I/O. Each call is self-contained so the SW can build
  *  per-tick instances without leaking transactions across awaits. */
@@ -278,6 +288,110 @@ export class CloudClient {
     return { status: "not_found" };
   }
 
+  /**
+   * E2E sealed write — anchored (tech-spec §8.2, `mode: participate`).
+   *
+   * Posts the signed COSE_Sign1 envelope (already wrapping a SEALED_V1
+   * outer CBOR) to `POST /api/anchor-sealed`. The server verifies the
+   * signature and uploads / anchors the sealed artifact. No plaintext
+   * ever reaches the server.
+   *
+   * @param coseBytes - Signed COSE_Sign1 bytes wrapping the SEALED_V1
+   *                    outer canonical CBOR.
+   */
+  public async anchorSealed(coseBytes: Uint8Array): Promise<void> {
+    const url = `${this.baseUrl}/api/anchor-sealed`;
+    const res = await this.fetchOr(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/cbor",
+        Authorization: `Bearer ${this.jwt}`,
+      },
+      body: coseBytes,
+    });
+    if (res.status === 401) throw new ReauthRequiredError("anchor-sealed rejected with 401");
+    if (res.status >= 500) {
+      throw new TransientSyncError(`anchor-sealed failed: HTTP ${res.status}`, res.status);
+    }
+    if (!res.ok) {
+      throw new PermanentSyncError(`anchor-sealed rejected: HTTP ${res.status}`, res.status);
+    }
+  }
+
+  /**
+   * E2E sealed write — local (tech-spec §8.2, `mode: local`).
+   *
+   * Posts the unsigned SEALED_V1 outer CBOR to `POST /api/store-sealed`.
+   * The server stores it under `jwt.sub` without anchoring. No plaintext
+   * reaches the server.
+   *
+   * @param outerCbor - Unsigned SEALED_V1 canonical CBOR bytes.
+   */
+  public async storeSealed(outerCbor: Uint8Array): Promise<void> {
+    const url = `${this.baseUrl}/api/store-sealed`;
+    const res = await this.fetchOr(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/cbor",
+        Authorization: `Bearer ${this.jwt}`,
+      },
+      body: outerCbor,
+    });
+    if (res.status === 401) throw new ReauthRequiredError("store-sealed rejected with 401");
+    if (res.status >= 500) {
+      throw new TransientSyncError(`store-sealed failed: HTTP ${res.status}`, res.status);
+    }
+    if (!res.ok) {
+      throw new PermanentSyncError(`store-sealed rejected: HTTP ${res.status}`, res.status);
+    }
+  }
+
+  /**
+   * Fetch the caller's own sealed blobs for local index rebuild
+   * (tech-spec §7.3, used by Restore). Returns an array of sealed
+   * blob items whose `outer_cbor` bytes can be passed to WASM
+   * `open_memory` for decryption.
+   */
+  public async fetchSealed(): Promise<SealedBlobItem[]> {
+    const url = `${this.baseUrl}/api/sealed`;
+    const res = await this.fetchOr(url, {
+      method: "GET",
+      headers: {
+        Accept: "application/json",
+        Authorization: `Bearer ${this.jwt}`,
+      },
+    });
+    if (res.status === 401) throw new ReauthRequiredError("sealed fetch rejected with 401");
+    if (res.status >= 500) {
+      throw new TransientSyncError(`sealed fetch failed: HTTP ${res.status}`, res.status);
+    }
+    if (!res.ok) {
+      throw new PermanentSyncError(`sealed fetch rejected: HTTP ${res.status}`, res.status);
+    }
+    const body = (await safeJson(res)) as Record<string, unknown>;
+    const items = Array.isArray(body.items)
+      ? body.items
+      : Array.isArray(body)
+        ? (body as unknown[])
+        : [];
+    const out: SealedBlobItem[] = [];
+    for (const item of items) {
+      if (typeof item !== "object" || item === null) continue;
+      const r = item as Record<string, unknown>;
+      // The server encodes outer_cbor as base64 in the JSON response.
+      const outer_cbor_b64 =
+        typeof r.outer_cbor === "string" ? r.outer_cbor : null;
+      if (!outer_cbor_b64) continue;
+      const outer_cbor = base64ToBytes(outer_cbor_b64);
+      out.push({
+        outer_cbor,
+        created_at: typeof r.created_at === "string" ? r.created_at : "",
+        producer: typeof r.producer === "string" ? r.producer : "",
+      });
+    }
+    return out;
+  }
+
   // ── internals ────────────────────────────────────────────────────────
 
   /**
@@ -401,6 +515,16 @@ function bytesToBase64(bytes: Uint8Array): string {
     s += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
   }
   return btoa(s);
+}
+
+/** Decode a standard-alphabet base64 string to a `Uint8Array`. */
+function base64ToBytes(b64: string): Uint8Array {
+  const bin = atob(b64);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) {
+    out[i] = bin.charCodeAt(i);
+  }
+  return out;
 }
 
 // `flushPending` (the SW-facing entrypoint) now lives in
