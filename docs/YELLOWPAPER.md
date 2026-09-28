@@ -500,13 +500,24 @@ While the fundamental serialization rules establish the layout of an isolated me
 | Subsection | Status |
 |---|---|
 | §7.1 Cognitive typing (five schemas) | Design, not implemented. One flat `memory` schema is used. |
-| §7.2 Capability tokens | Design, not implemented. |
-| §7.3 Sharing handshake | Design, not implemented. |
-| §7.4 Rehydration pipeline | Design, not implemented. Recall returns stored text directly. |
+| §7.2 Capability tokens (formal `capability.token` schema) | Design, not implemented. Grants deliver the content key `K` directly (not a scoped token). Grant-based access is available now; full capability-token delegation is planned. |
+| §7.3 Sharing handshake (ECDH tunnel) | Simplified form available now: a `GRANT_V1` record wraps `K` with the reader's X25519 public key via HPKE (RFC 9180). The full multi-step mutual authentication handshake is a design. |
+| §7.4 Rehydration pipeline | Design, not implemented. Recall returns stored text directly after client-side decryption for sealed rows. |
 | §7.5 Safe-injection framing | Design, not implemented. Recalled text is returned without isolation markers. |
 | §7.6 Portability | Available now for signed records. A record verifies the same way on any backend. |
 
-Today, an authenticated recall returns only the caller's own memories, private and public. An anonymous recall returns only public memories (`visibility = 'public'`) of all users. The server never returns a private memory to a caller other than its owner. A memory with no `visibility` value counts as private. "Private" is an access rule on this server, not encryption. An `anchored` write puts plain text on Arweave, so the server stores it as public with `plaintext_on_arweave = 1`, and a migration relabelled older anchored rows that were marked private. Sealed (encrypted) anchored writes are planned.
+Today, an authenticated recall returns only the caller's own memories, private and public. An anonymous recall returns only public memories (`visibility = 'public'`) of all users. The server never returns a private memory to a caller other than its owner. A memory with no `visibility` value counts as private. A `local` write is always private. An `anchored` write with `visibility = 'public'` puts plain text on Arweave; the server stores it as public with `plaintext_on_arweave = 1`, and a migration relabelled older anchored rows that were marked private.
+
+**Sealed memories (available now on client-side paths).** A sealed write
+encrypts the `MEMORY_V1` inner artifact with a random content key `K` and
+stores only the `SEALED_V1` outer ciphertext. Recall over sealed memories
+decrypts on the client. A grant record delivers `K` wrapped to a reader's
+X25519 key. The server holds only the ciphertext and is never required to
+decrypt. An opt-in hosted recall session decrypts transiently server-side.
+Revocation is not possible after a grant is delivered; the UI and
+`mnemonic_share` state this before delivery. `mnemonic_recall` reports
+`sealed_hidden` when the caller has sealed memories the current key has
+not unlocked.
 
 ---
 
@@ -633,9 +644,22 @@ To maintain an un-compromised core execution layer, the protocol deliberately bo
 
 * **Semantic Veracity of Content:** The protocol validates data provenance, payload integrity, and temporal sequence, but cannot evaluate whether the natural language assertions written inside a memory block are factually true or coherent.
 * **Front-Running State-Withholding Attacks:** While the protocol instantly catches interior context deletions or historical tree forks, it cannot compel a malicious local node to write or broadcast a newly generated memory node at the current operational tip.
-* **Enforced Payload Encryption-at-Rest:** The protocol layer requires metadata headers (such as cognitive kinds and lineage parameters) to remain unencrypted for vector processing and validation routing. However, the system is payload-agnostic; operators managing high-sensitivity fields can natively store **Authenticated Encryption with Associated Data (AEAD)** ciphertexts inside the content attribute:
-
-$$C_{\text{envelope}} = \text{AEAD}_{\mathbf{K}}(\text{RawText})$$
+* **Sealed memory encryption design.** The `SEALED_V1` artifact type provides
+  client-side encryption of memory content. The plaintext `MEMORY_V1` inner
+  artifact is encrypted with XChaCha20-Poly1305 under a random 32-byte content
+  key `K`. The outer `SEALED_V1` holds the ciphertext, a key commitment
+  `kc = blake3("mnemonic sealed v1 key commitment", K)`, and one or more HPKE
+  wraps of `K`. The Ed25519 identity key is mapped to X25519 via the birational
+  map (`VerifyingKey::to_montgomery`). The HPKE suite is
+  X25519HkdfSha256 (KEM `0x0020`) / HkdfSha256 (KDF `0x0001`) /
+  ChaCha20Poly1305 (AEAD `0x0003`). The signed COSE_Sign1 envelope covers the
+  outer ciphertext, not the plaintext. This is available now for client-side
+  paths (local MCP, CLI, extension, webapp). **Explicit limits:** revocation is
+  not possible after a grant delivers `K` to a reader. An opt-in hosted recall
+  session decrypts transiently server-side; that exposure is stated to the user
+  before they opt in. A hosted MCP call delivers the plaintext to the server
+  over TLS; only a client-side component can seal before the text leaves the
+  device (finding F2 in `work/sealed-memories/tech-spec.md`).
 
 * **Unilateral Runtime Enforcement:** The protocol cannot physically compel a degraded or malicious downstream Large Language Model (LLM) execution container to respect isolation framing tags. Mnemonic guarantees the *generation* and *cryptographic attribution* of compliance markers; downstream processing vulnerabilities are isolated via signed compliance attestations that expose negligent runtimes to forensic accountability during system audits.
 * **Concurrent Multi-Writer Consensus Semantics:** Version 1 enforces point-to-point capability scoping and append-only linear chains. It does not establish multi-party conflict-resolution topologies, Conflict-Free Replicated Data Type (CRDT) mechanics, or state convergence models for shared memory zones experiencing concurrent, distributed writes.

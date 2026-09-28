@@ -18,7 +18,16 @@ npx @mnemonik-xyz/cli sign "public claim" --anchor   # signed with your key, anc
 # The CLI renews an expired session automatically (refresh token); log in one time.
 ```
 
-A local memory is private: this server returns it only to its owner. The server does not encrypt it yet; encryption is planned. An anchored (`--anchor`, `mode: "anchored"`) memory is public: its content is plain text on Arweave, where anyone can read it. Results mark it with `plaintext_on_arweave: true`. Sealed (encrypted) anchored memories are planned.
+A local memory is private: this server returns it only to its owner. A sealed
+memory is encrypted client-side: the server stores only the ciphertext and
+can never read the content. Sealed mode is available now on client-side paths
+(local MCP, CLI, extension, webapp). An anchored (`--anchor`, `mode: "anchored"`)
+memory with `visibility: "public"` is plain text on Arweave, where anyone can
+read it. Results mark it with `plaintext_on_arweave: true`.
+
+**Keychain rule.** The keychain (OS key store) is opened only for signed writes
+(`anchored` mode) and for sealed-memory operations that need the identity key.
+A `local` write never opens the keychain.
 
 For Claude / Cursor / VS Code / Windsurf — install from [mnemonik.xyz/install](https://mnemonik.xyz/install) (one-click connector). HTTP MCP endpoint: `https://mcp.mnemonik.xyz/mcp`. OAuth 2.1 + PKCE.
 
@@ -34,7 +43,7 @@ For Claude / Cursor / VS Code / Windsurf — install from [mnemonik.xyz/install]
 
 ## Tools exposed (MCP)
 
-Eight tools ship by default. Full reference — outputs, auth, error shapes — in [`docs/tools.md`](./docs/tools.md).
+Nine tools ship by default. Full reference — outputs, auth, error shapes — in [`docs/tools.md`](./docs/tools.md).
 
 | Tool | Inputs | Returns |
 |---|---|---|
@@ -45,6 +54,7 @@ Eight tools ship by default. Full reference — outputs, auth, error shapes — 
 | `mnemonic_verify` | `{ solana_tx?: string, arweave_tx?: string }` (supply at least one) | verification result with the recovered envelope and chain-of-trust |
 | `mnemonic_prove_identity` | `{ challenge: string }` | server-signed challenge bytes |
 | `mnemonic_publish_post` | `{ title: string, body_markdown: string, tags?: string[], author?: string }` | the created post; requires auth |
+| `mnemonic_share` | `{ attestation_id: string, reader_pubkey: string, link?: boolean }` | grant a reader access to a sealed memory; returns a deferred-sign bundle; revocation is not possible after delivery |
 | `request_public_write_confirmation` | `{ content_hash: string }` | internal public-write ceremony gate (not user-facing) |
 
 Three more — `mnemonic_attest_step`, `mnemonic_attest_verdict`, `mnemonic_verify_trajectory` — cover hash-linked agent trajectories with independent judge verdicts. They are **experimental**, compiled in only with `--features trajectory-experimental`, and are not advertised by default builds or the hosted server. Call `tools/list` to see what a given endpoint actually exposes.

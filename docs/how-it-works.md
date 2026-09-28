@@ -12,7 +12,8 @@ The repository is a Cargo workspace (`resolver = "2"`) with two members. The dep
 | `mnemonic-core::embed` | `Embedder` trait plus providers: `OpenAIEmbedder`, `FastEmbedder` (behind `local-embed`, ships an ONNX model on first run), `MockEmbedder` (`#[cfg(test)]` only). |
 | `mnemonic-core::compress` | TurboQuant scalar quantization at 2/3/4 bits per dimension; default 4. |
 | `mnemonic-core::identity` | Ed25519 keypair load/generate, base58 encoding, `did:sol` and `did:key` derivation. |
-| `mnemonic-core::storage` | `AttestationStore` trait and `SqliteStore` implementation; `LineageStore` trait; SQL lives in `core/src/storage/sqlite.rs`. |
+| `mnemonic-core::sealed` | `seal_memory`, `open_memory`, `open_with_key`, `make_grant`, `open_grant`, `link_fragment`: sealed write / open / grant / bearer-link operations. Uses `core/src/encrypt.rs` (XChaCha20-Poly1305 + HPKE) and `core/src/identity/recall_key.rs`. |
+| `mnemonic-core::storage` | `AttestationStore` trait and `SqliteStore` implementation; `LineageStore` trait; SQL lives in `core/src/storage/sqlite.rs`. Sealed rows store outer CBOR in the `sealed_blob` column; `content` is empty. |
 | `mnemonic-core::arweave` | Full-mode persistence: ANS-104 bundle builder, Irys upload, deep hash + Avro encoding. |
 | `mnemonic-core::solana` | Full-mode anchoring: `SolanaClient` for SPL Memo writes/reads. |
 | `mnemonic-core::lineage` | Parent-child artifact DAG with cycle detection and BFS traversal (`Direction::{Ancestors, Descendants, Both}`). |
@@ -35,14 +36,51 @@ Implemented in `mcp/src/tools.rs::sign_memory`.
    - **Local mode:** write the content hash plus the uncompressed embedding to `SqliteStore`; return synthetic `local:` tx IDs.
    - **Full mode:** upload COSE bytes to Arweave via the Irys client; submit an SPL Memo on Solana carrying `{"h": blake3, "a": arweave_tx, "v": 2}`; record both tx IDs alongside the row in SQLite. Cost is captured in `attestation_costs` for P&L tracking.
 
+## End-to-end walkthrough — sealed write (client-side paths)
+
+Implemented in `core/src/sealed/api.rs::seal_memory`, called from the local
+MCP server, CLI, browser extension, and webapp before any network call.
+
+1. **Generate K.** `OsRng` produces 32 bytes. This is the content key.
+2. **Derive X25519 key.** The author's Ed25519 identity key is mapped to X25519
+   via `VerifyingKey::to_montgomery`. The keychain is opened at this step.
+3. **Seal.** The inner `MEMORY_V1` canonical CBOR (content, tags, embedding)
+   is padded to the next multiple of 256 bytes and encrypted with
+   `XChaCha20Poly1305` under `K` and a 24-byte `OsRng` nonce.
+4. **Key commitment.** `kc = blake3::derive_key("mnemonic sealed v1 key commitment", K)`.
+5. **Wrap.** `K` is wrapped to the author's X25519 public key using HPKE
+   (X25519HkdfSha256 / HkdfSha256 / ChaCha20Poly1305, RFC 9180). One wrap is
+   written to `SEALED_V1.wraps`. The wrap holds `enc` (ephemeral sender key,
+   32 bytes) and the wrapped key (48 bytes).
+6. **Zeroize K.** `K` is zeroized immediately after the wrap.
+7. **Build SEALED_V1.** Assemble outer artifact: `artifact_id`, `type`,
+   `schema_version`, `alg`, `nonce`, `ct`, `kc`, `wraps`, `created_at`, `producer`.
+8. **Sign (anchored only).** COSE_Sign1 over the outer canonical CBOR. The
+   signature is over the ciphertext, not the plaintext.
+9. **Persist.** `SqliteStore` stores the outer CBOR in the `sealed_blob` column.
+   The `content` column is empty. The uncompressed f32 embedding is not stored
+   in SQLite for sealed rows (it would invert to approximate plaintext).
+
+**Sealed recall (client-side).** The client fetches the `sealed_blob` from
+the server, calls `open_memory(sealed_blob, x25519_secret)`, verifies `kc`,
+and decrypts. Search scores are computed locally over the decrypted inner
+embedding.
+
+**Grant flow (`mnemonic_share`).** `make_grant(k, reader_x25519_pubkey)` wraps
+`K` to the reader using HPKE with a fresh ephemeral key. The signed `GRANT_V1`
+record is stored on the server. The reader calls `open_grant(grant_cbor, their_x25519_secret)`
+to recover `K`, then `open_with_key(sealed_blob, k)` to decrypt.
+
+---
+
 ## End-to-end walkthrough — recall
 
 Implemented in `mcp/src/tools.rs::recall` over `core/src/storage/sqlite.rs`.
 
 1. Embed the query with the same provider used at sign time.
-2. Select the candidate rows. An authenticated caller gets only its own rows, private and public. An anonymous caller gets only rows with `visibility = 'public'`, from all owners. A private row goes only to its owner.
-3. Cosine-score the query vector against the uncompressed f32 embedding of each candidate row.
-4. Return the top-k rows ordered by score, joined to their `attestations` row metadata.
+2. Select the candidate rows. An authenticated caller gets only its own rows, private and public. An anonymous caller gets only rows with `visibility = 'public'`, from all owners. A private row goes only to its owner. Sealed rows (`sealed_blob IS NOT NULL`) are counted separately as `sealed_hidden` in the anonymous path and excluded from the public vector index.
+3. Cosine-score the query vector against the uncompressed f32 embedding of each candidate row. Sealed rows whose inner artifact was decrypted by the recall key contribute their decrypted embedding.
+4. Return the top-k rows ordered by score, joined to their `attestations` row metadata. Sealed rows that were decrypted carry `sealed: true`; undecrypted sealed rows are counted in `sealed_hidden`.
 
 Recall is intentionally local: SQLite read plus an in-process scan, no chain calls. Uncompressed f32 wins here because cosine similarity is sensitive to small magnitude shifts and TurboQuant compressed bytes are optimized for portability and inner-product approximation, not for being the canonical retrieval index. The compressed form on Arweave is proof-of-existence; the uncompressed form in SQLite is the search index.
 

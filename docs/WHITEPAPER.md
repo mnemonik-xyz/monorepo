@@ -98,7 +98,7 @@ You choose the mode for each memory. The same key and the same tools serve all m
 | Mode | Where Mnemonic keeps it | Who can read it | Cost | Status |
 |---|---|---|---|---|
 | `local` | A database on your computer | Only you | Free | Available now |
-| `sealed` | Encrypted on Arweave. Fingerprint on Solana. | You and the readers that you approve | Free quota, then paid | Planned |
+| `sealed` | Encrypted on Arweave. Fingerprint on Solana. | You and the readers that you approve | Free quota, then paid | Available now (client-side paths: local MCP, CLI, extension, webapp; hosted path: planned) |
 | `public` | Arweave. Fingerprint on Solana. | Anyone | Free quota, then paid | Planned (today: "anchored" mode, not encrypted) |
 
 **Free quota.** Each identity can anchor 100 memories per week free of charge (planned).
@@ -142,6 +142,8 @@ you can possibly want to remove.
 - **Local MCP (on your computer).** It uses your own key. Your key stays in the
   keychain of your operating system (OS). Mnemonic asks you to unlock the
   keychain only when a memory must be signed: publish, anchor or prove identity.
+  For a `sealed` memory, the keychain also unlocks the identity key to derive
+  the X25519 encryption key. **The keychain is never opened for a `local` write.**
 - **Hosted MCP (on the Mnemonic server).** Your client signs each memory that
   you anchor. The server checks that the signature belongs to you. Then the
   server stores and anchors the memory. A `local` memory gets no signature.
@@ -151,7 +153,8 @@ you can possibly want to remove.
   upload package that contains your signed record, and the Solana transaction
   that pays the network fee. These signatures do not change your record.
 
-Status: available now.
+Status: available now. The keychain rule (no keychain access for `local` writes)
+is available now.
 
 ---
 
@@ -164,7 +167,7 @@ You get a link, for example `mnemonik.xyz/m/<fingerprint>`.
 The web page shows the text, the author and a "Signature valid" result.
 The browser does the check. The reader does not need an account.
 
-### 8.2 Sealed memory (planned)
+### 8.2 Sealed memory
 
 A sealed memory is encrypted. Only approved readers can open it.
 You can approve a reader after you save the memory. You do not need to know
@@ -173,17 +176,21 @@ the reader in advance.
 The method is "envelope encryption":
 
 1. Mnemonic makes a new random key `K` for the memory.
-2. Mnemonic encrypts the memory with `K`.
-3. Mnemonic uploads the encrypted memory to Arweave.
+2. Mnemonic encrypts the memory with `K` (XChaCha20-Poly1305).
+3. For anchored sealed memories, Mnemonic uploads the **encrypted** data to Arweave.
    Mnemonic writes the fingerprint **of the encrypted data** to Solana.
    Thus, nobody can guess the text and compare it with the fingerprint.
-4. Mnemonic encrypts `K` with your own public key. Now only you can open the memory.
+4. Mnemonic wraps `K` with your X25519 public key (derived from your Ed25519 identity)
+   using HPKE (RFC 9180, <https://www.rfc-editor.org/rfc/rfc9180>).
+   Now only you can open the memory.
 5. **Later**, when you find a reader, you give that reader access.
-   Mnemonic encrypts `K` with the reader's public key. This is a "grant".
+   Mnemonic wraps `K` with the reader's public key. This is a "grant".
    Mnemonic does not upload the memory again.
 
-This method follows the idea of Hybrid Public Key Encryption (HPKE),
-RFC 9180 (<https://www.rfc-editor.org/rfc/rfc9180>).
+**Key commitment.** The sealed artifact holds
+`kc = blake3("mnemonic sealed v1 key commitment", K)`.
+A reader verifies `kc` before decryption to detect key substitution attacks.
+Status: available now (client-side paths: local MCP, CLI, extension, webapp).
 
 **Grant by link.** Sometimes the reader does not have a key yet. Then Mnemonic
 puts `K` in the part of the link after the `#` sign.
@@ -191,9 +198,18 @@ Browsers do not send this part to the server
 (RFC 3986, section 3.5: <https://www.rfc-editor.org/rfc/rfc3986#section-3.5>).
 Thus, the server never sees `K`. Each person with the link can read the memory.
 Keep the link secret.
+Status: available now.
 
 **You cannot cancel a grant.** When a reader has `K`, the reader can keep a copy.
 To stop future access, save a new version with a new key.
+This is a hard limit of the design. The UI and the `mnemonic_share` tool state
+this before the grant is delivered.
+
+**Hosted recall session.** When you recall a sealed memory from the hosted server
+and the server does the decryption, the server sees the plaintext briefly in
+memory. This is opt-in and is documented as transient server-side exposure.
+Status: available now (opt-in, hosted path only). The client-side paths (local
+MCP, CLI, extension, webapp) never send the plaintext to the server.
 
 ### 8.3 Import
 
@@ -291,23 +307,29 @@ Mnemonic makes agents coherent over time. Other standards connect agents now.
 
 **Available now:**
 
-- MCP server with 8 tools: `mnemonic_whoami`, `mnemonic_sign_memory`,
+- MCP server with 9 tools: `mnemonic_whoami`, `mnemonic_sign_memory`,
   `mnemonic_recall`, `mnemonic_verify`, `mnemonic_prove_identity`,
   `mnemonic_check_pending`, `request_public_write_confirmation`,
-  `mnemonic_publish_post`.
+  `mnemonic_publish_post`, `mnemonic_share`.
 - Local mode and anchored mode ("anchored").
+- Sealed mode (encrypted memories): write, open, grant, bearer-link, and
+  hosted recall session. Available on client-side paths (local MCP, CLI,
+  extension, webapp). Hosted sealed write is planned.
 - Signatures with Ed25519, COSE_Sign1 envelopes, BLAKE3 fingerprints, canonical CBOR.
 - Identities as `did:key` and `did:sol`. DID means Decentralized Identifier.
 - TurboQuant compression. Search by meaning in a local SQLite database.
 - Payment by x402 (a standard for payments over the web with HTTP code 402).
+- Free daily quota of anchored writes for keys linked to a Google account.
 
 **Planned:**
 
-- Free quota of 100 anchors per week.
-- `public` and `sealed` modes, grants, import and share links.
+- Free quota of 100 anchors per week (the current quota is 10 per day).
+- `public` mode and import with author provenance.
+- Hosted sealed write (server encrypts and signs without seeing the plaintext).
 - Capability tokens (signed permissions with a time limit).
 - Safe-use markers.
 - Anonymous verification by link.
+- A2A sealed payloads (carrying sealed memories in agent-to-agent messages).
 
 ---
 

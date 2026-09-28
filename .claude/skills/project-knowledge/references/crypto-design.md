@@ -131,6 +131,70 @@ Recommendation: keep WASM-first signing (current Phase 1 design) for Option B. P
 
 ---
 
+---
+
+## Sealed memories — crypto design (available now)
+
+Status: implemented in `core/src/sealed/`. Spec: `work/sealed-memories/tech-spec.md §5`.
+
+### X25519 key source
+
+The X25519 public key for HPKE wraps is derived from the Ed25519 identity key
+via the birational map between edwards25519 and curve25519 (RFC 7748 §4.1).
+
+In Rust: `ed25519_dalek::VerifyingKey::to_montgomery()` returns the X25519
+public key. The corresponding secret scalar comes from
+`SigningKey::to_scalar_bytes()`.
+
+This means: anyone who knows a Mnemonic DID can derive the recipient's X25519
+public key and seal to them without a key directory. No extra key material is
+stored in the keychain. A planned K2 path (`work/sealed-memories/tech-spec.md §5.3`)
+uses a separate X25519 key published in a signed record; the wire format is
+compatible.
+
+Checks on every X25519 operation:
+- All-zero shared secret is rejected (RFC 9180 §7.1.4 MUST).
+- Small-order Ed25519 points are rejected before mapping.
+
+### HPKE suite
+
+Suite used for key wrapping (`GRANT_V1` records and self-wraps):
+
+| Layer | Algorithm | IANA ID |
+|---|---|---|
+| KEM | DHKEM(X25519, HKDF-SHA256) | `0x0020` |
+| KDF | HKDF-SHA256 | `0x0001` |
+| AEAD | ChaCha20Poly1305 | `0x0003` |
+
+RFC 9180, Appendix A.2 provides test vectors for this exact suite.
+Implementation: `hpke` crate (`core/Cargo.toml`).
+
+Wrap inputs (single-shot API, §6 of RFC 9180):
+- `pkR` = reader's X25519 public key.
+- `info` = `"mnemonic/sealed/v1/wrap" || ct_hash || pkR`, where
+  `ct_hash = blake3(nonce || ciphertext)`.
+- `aad` = UTF-8 bytes of the author DID (`did:sol:<base58>`).
+- `pt` = `K` (32 bytes).
+- Output: `enc` (32 bytes) + wrapped key (48 bytes).
+
+### Content key K
+
+- `K` = 32 bytes from `rand::rngs::OsRng`. One `K` per memory version.
+- Nonce = 24 bytes from `OsRng`. One nonce per content block (XChaCha20-Poly1305 supports 192-bit random nonces safely).
+- Cipher: `XChaCha20Poly1305` from the RustCrypto `chacha20poly1305` crate.
+- Plaintext: padded inner `MEMORY_V1` canonical CBOR (padding to next multiple of 256 bytes).
+- Associated data: canonical CBOR of the outer header `{v, alg, artifact_id, producer, created_at, kc}`.
+
+### Key commitment
+
+`kc = blake3::derive_key("mnemonic sealed v1 key commitment", K)`
+
+Stored in the outer `SEALED_V1` artifact. Readers verify `kc` before AEAD
+decryption. This defeats key-substitution attacks where a dishonest author
+gives two readers two different keys that both decrypt to different plaintexts.
+
+---
+
 ## Phase 1.x — Turnkey custody integration (detailed)
 
 **Why it slots between Phase 1 and Phase 1.5:** Phase 1's `LocalSigner` stores raw Ed25519 secret in `localStorage` (browser) or `~/.mnemonic/identity.json` (CLI). If user loses the device or clears storage — keypair gone, attestations unrecoverable. Public launch requires email/passkey recovery; Turnkey is the cleanest path.

@@ -18,7 +18,7 @@ the reference you come back to.
 
 ## Tool index
 
-The default build advertises **8 tools**. Three more appear only when the server
+The default build advertises **9 tools**. Three more appear only when the server
 is compiled with the `trajectory-experimental` cargo feature.
 
 | Tool | Auth | Paid | Purpose |
@@ -30,6 +30,7 @@ is compiled with the `trajectory-experimental` cargo feature.
 | [`mnemonic_verify`](#mnemonic_verify) | required on HTTP | no | Verify an attestation against its chain anchors |
 | [`mnemonic_prove_identity`](#mnemonic_prove_identity) | required on HTTP | no | Sign an arbitrary challenge with the server key |
 | [`mnemonic_publish_post`](#mnemonic_publish_post) | required | no | Publish a signed public blog post |
+| [`mnemonic_share`](#mnemonic_share) | required | no | Grant a reader access to a sealed memory |
 | [`request_public_write_confirmation`](#request_public_write_confirmation) | — | no | Internal ceremony gate (not user-facing) |
 | [`mnemonic_attest_step`](#mnemonic_attest_step) ⚗️ | required | no | Append a hash-linked trajectory step |
 | [`mnemonic_attest_verdict`](#mnemonic_attest_verdict) ⚗️ | required | no | Record an independent judge's verdict |
@@ -346,6 +347,12 @@ metadata.
 Each result has a `plaintext_on_arweave` field. It is `true` when the
 content went to Arweave as plain text.
 
+**Sealed memories and `sealed_hidden`.** When an authenticated caller has
+sealed memories that the current session key has not decrypted, the result
+includes a `sealed_hidden` integer field and a note. Sealed rows that have
+been decrypted by the recall key are included in results with `sealed: true`.
+Anonymous callers never see sealed rows.
+
 > **Warning: anchored memories are public plain text today.** A
 > `anchored` (anchored) write puts the content as plain text on Arweave.
 > Anyone can read Arweave, and nobody can delete it. The server stores such a
@@ -374,6 +381,11 @@ verify through a fallback path.
 `solana_tx`, and `arweave_tx`. For a row that the caller owns, the result
 also has `plaintext_on_arweave` (`true` when the content is plain text on
 Arweave). A caller who does not own the row gets `not_found`, with no content.
+
+**Sealed-aware.** For a sealed memory (`sealed: true`), the `content_hash`
+is the hash of the `SEALED_V1` outer ciphertext. The verify result confirms
+the COSE_Sign1 signature over the ciphertext and the on-chain hash match.
+It does not decrypt the content.
 
 The chain-anchored path additionally fetches the SPL Memo, parses its
 `{h, a, v}` payload, and confirms the on-chain hash and Arweave tx match the
@@ -414,6 +426,45 @@ no on-chain anchoring in V1.
 | `author` | `string` | no | Human-readable display name. Distinct from the cryptographic signer (`producer`), which is always the caller's identity |
 
 **Returns:** `{ slug, title, body_markdown, tags, author, attestation_id, content_hash, published_at }`.
+
+---
+
+## `mnemonic_share`
+
+Grant a reader access to a sealed memory. The server builds a `GRANT_V1`
+record that wraps the content key `K` to the reader's X25519 public key using
+HPKE, and signs it with the author's key via the deferred-sign flow. The
+server never sees `K`.
+
+Available now. Requires authentication.
+
+**Input:**
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `attestation_id` | `string` | yes | The sealed memory to share |
+| `reader_pubkey` | `string` | yes | The reader's Ed25519 public key (base58). Derived to X25519 server-side for the HPKE wrap. |
+| `link` | `boolean` | no | When `true`, returns a bearer link with `K` in the URL fragment instead of (or in addition to) a grant record. The server never sees `K` in the fragment. |
+
+**Returns** (deferred-sign flow, same as `mnemonic_sign_memory`):
+
+```jsonc
+{
+  "status": "awaiting_signature",
+  "correlation_id": "<uuid>",
+  "approve_url": "https://mnemonik.xyz/approve?...",
+  "expires_in": 300
+}
+```
+
+After the caller signs and posts to `/api/sign-callback`, the grant is
+stored. The reader can then call `mnemonic_recall` (or use the SDK) to
+open the sealed memory.
+
+**Revocation limit.** Once the grant is delivered, revocation is not possible.
+The reader can keep a copy of `K`. To stop future access, create a new version
+of the memory with a new `K` and do not grant the reader access to the new version.
+This limit is stated in the tool output before the grant is signed.
 
 ---
 

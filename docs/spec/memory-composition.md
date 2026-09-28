@@ -50,6 +50,14 @@ All network operators must enforce these defaults. Any structural override must 
 
 ## 2. Cryptographic Capability Tokens
 
+**Implementation note.** The full `capability.token` schema below is a design,
+not yet implemented. The shipped form of access control for sealed memories is
+a `GRANT_V1` record: the author signs a record that wraps the content key `K`
+to the reader's X25519 public key via HPKE. The grant *delivers* `K` directly.
+The `capability.token` schema describes the *permission*, and is advisory only
+after the key is delivered: once a reader holds `K`, no capability check can
+revoke it. See `work/sealed-memories/tech-spec.md §5.5` and whitepaper §8.2.
+
 A capability token is a standalone, content-addressed artifact conforming to the `capability.token` schema layout, sealed via a **CBOR Object Signing and Encryption (COSE)** single-signer envelope (`COSE_Sign1`).
 
 ### 2.1 Schema Definition
@@ -98,6 +106,12 @@ Nodes must evaluate token identifiers against these attestation logs based on th
 ---
 
 ## 3. Trust-Boundary Sharing Handshake
+
+**Implementation note.** The full multi-step mutual authentication handshake
+below is a design. The shipped form is the `GRANT_V1` path: the grant delivers
+`K` wrapped with HPKE to the reader's X25519 public key. The reader verifies
+`kc` before AEAD decryption. No ephemeral ECDH tunnel or dual-signed receipt
+is generated in the current implementation.
 
 The sharing handshake establishes the cryptographic secure transit channel between decoupled execution runtimes.
 

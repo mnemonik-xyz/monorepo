@@ -71,3 +71,31 @@ Available now. Code: `mcp/src/payment.rs` (free quota, x402 nonces),
   The payment is not charged twice; the operator pays the extra chain fee.
 - IP-based limits do not stop an attacker with many real IPv4 addresses. The
   global cap bounds the cost.
+
+---
+
+## Sealed memories boundary
+
+Scope: the `SEALED_V1` artifact type and the write / recall / share / grant /
+link flows. Code: `core/src/sealed/`, `mcp/src/sealed_routes.rs`,
+`mcp/src/tools.rs` (sealed paths). Threat model tech-spec: §11 and §12 of
+`work/sealed-memories/tech-spec.md`.
+
+| # | Boundary | What enforces it | Class |
+|---|---|---|---|
+| S1 | **Plaintext never leaves client on private write** — on client-side paths (local MCP, CLI, extension, webapp) the inner `MEMORY_V1` CBOR is encrypted before any network call | `core/src/sealed/api.rs::seal_memory` runs in the client process; the tool argument or SDK call only transmits the `SEALED_V1` outer ciphertext | Integrity |
+| S2 | **K zeroized after sealing** — the 32-byte content key must not persist after the wrap is made | `seal_memory` wraps `K` then zeroizes it via `Zeroizing<[u8;32]>`; `K` is never written to SQLite or Arweave | Integrity |
+| S3 | **Server never receives K on share / link / E2E paths** — HPKE wrap sends `enc` + wrapped `K`; the server stores the grant but cannot open it | The grant endpoint stores `GRANT_V1` CBOR verbatim; `open_grant` runs client-side; `link_fragment` puts `K` in the URL fragment which browsers do not send in HTTP requests (RFC 3986 §3.5) | Integrity |
+| S4 | **Approve page decrypts in browser before signing** — on the browser deferred-sign path the approval page decrypts the inner artifact to show the user what they are signing | `webapp/src/pages/Approve.tsx` calls `open_memory` (WASM) before rendering the approve dialog | Integrity |
+| S5 | **kc verified before AEAD** — key commitment check happens before decryption; a key substitution attack fails immediately | `open_memory` and `open_with_key` verify `kc == blake3::derive_key("mnemonic sealed v1 key commitment", K)` and return `SealError::KeyCommitmentMismatch` on failure | Integrity |
+| S6 | **Fragment never sent in HTTP requests** — the bearer-link puts `K` after `#`; browsers strip the fragment before sending | RFC 3986 §3.5 defines fragment as client-side only; `link_fragment` / `parse_link_fragment` encode / decode `K` in base64url after `#` | Integrity |
+| S7 | **No third-party scripts on /m/ route** — the memory view page must not load external scripts that could read the fragment | CSP header on `/m/*` routes blocks third-party scripts; the page uses only WASM from the same origin | Integrity |
+| S8 | **RK stored in RAM only, not SQLite** — the recall key (X25519 secret) derived from the identity key is held in an in-process cache and not written to the database | `core/src/identity/recall_key.rs` and `mcp/src/identity/unlock_cache.rs` hold the key in a `Mutex<Option<Zeroizing<[u8;32]>>>` and evict it on session end | Integrity |
+| S9 | **Audit log: session start / end, no content** — the hosted recall session writes an audit record that does not include the plaintext | `mcp/src/sealed_routes.rs` writes `recall_session_start` / `recall_session_end` events; content is never included | Integrity |
+| S10 | **PendingBundles holds no plaintext for sealed entries** — the deferred-sign bundle for a sealed write contains the outer ciphertext, not the inner plaintext | `mcp/src/pending.rs` stores the canonical CBOR bundle verbatim; the bundle is the SEALED_V1 outer artifact for a sealed write | Integrity |
+| S11 | **sealed_blob never appears in vector search** — sealed rows are excluded from the cross-owner public vector search; their embeddings are not in the public index | `mcp/src/tools.rs::recall` skips rows where `sealed_blob IS NOT NULL` in the anonymous (public) query path; `sealed_hidden` is reported instead | Integrity |
+| S12 | **Nonces from OS random source** — the 32-byte `K` and the 24-byte content nonce come from `OsRng` | `core/src/sealed/content.rs` uses `rand::rngs::OsRng` for both; no seed, no counter | Integrity |
+| S13 | **All-zero shared secret rejected** — DHKEM with X25519 must reject the all-zero output per RFC 9180 §7.1.4 | The `hpke` crate enforces this; the wrap / unwrap path returns an error on the degenerate case | Integrity |
+| S14 | **Small-order keys rejected** — X25519 public keys from small-order Ed25519 points are rejected | `core/src/sealed/wrap.rs` maps the Ed25519 verifying key to Montgomery form and checks for the small-order identity point before HPKE operations | Integrity |
+| S15 | **Revocation not possible after grant delivery** — once a reader holds `K` they can keep a copy; the server can stop serving the grant record but cannot invalidate a copy | Stated explicitly in whitepaper §8.2, YELLOWPAPER §8.2, and in the `mnemonic_share` tool output before the grant is signed. There is no technical revocation mechanism. Authors must make a new version with a new `K` to stop future access. | Out-of-scope (design limit, documented) |
+| S16 | **Hosted recall session: transient server-side exposure, opt-in only** — when the user opts in to a hosted recall session the server decrypts `SEALED_V1` artifacts in RAM to answer recall queries; the plaintext is not written to disk | `mcp/src/sealed_routes.rs` holds the decrypted text in a short-lived in-memory struct, writes nothing to SQLite, and zeroizes at session end. The user must explicitly start the session. The UI and tool docs state the exposure before the user opts in. | Availability / privacy (documented) |
