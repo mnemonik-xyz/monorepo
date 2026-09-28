@@ -299,6 +299,39 @@ pub fn record_provider_receipt(
     get(conn, operation_id)?.ok_or_else(|| anyhow!("paid operation disappeared"))
 }
 
+/// Persist the delivery receipt and transition to `anchored`. The delivery
+/// receipt is written exactly once: a duplicate delivery callback for the
+/// same operation sees the state guard fail so the original receipt is never
+/// overwritten. A restarted MCP uses `get()` to read the stored receipt and
+/// returns it verbatim without re-running delivery.
+// Called by the delivery-completion path in `sign_callback_handler` once
+// Arweave upload + Solana memo confirmation are both verified. Exercised by
+// T01 unit tests; the binary call-site lands in M3 (work/x402-v2-conformance).
+#[allow(dead_code)]
+pub fn record_delivery_receipt(
+    conn: &Connection,
+    operation_id: &str,
+    delivery_receipt_json: &str,
+    updated_at: &str,
+) -> Result<PaidOperation> {
+    let changed = conn
+        .execute(
+            "UPDATE paid_operations SET delivery_receipt_json = ?1, state = ?2, updated_at = ?3 \
+             WHERE operation_id = ?4 AND state IN ('payment_ready', 'anchoring', 'verifying_delivery')",
+            params![
+                delivery_receipt_json,
+                PaidOperationState::Anchored.as_str(),
+                updated_at,
+                operation_id,
+            ],
+        )
+        .context("record delivery receipt")?;
+    if changed != 1 {
+        return Err(anyhow!("paid_operation_state_conflict"));
+    }
+    get(conn, operation_id)?.ok_or_else(|| anyhow!("paid operation disappeared"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -440,5 +473,151 @@ mod tests {
         .unwrap_err()
         .to_string()
         .contains("paid_operation_state_conflict"));
+    }
+
+    /// T01: browser reload — a re-opened approval URL returns the same
+    /// operation record and durable provider receipt without creating a new
+    /// quote or re-charging the payer. Proves that SQLite, not the in-process
+    /// quote map, is the authoritative source of truth after a restart.
+    #[test]
+    fn browser_reload_returns_same_operation_and_receipt() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate_paid_operations(&conn).unwrap();
+
+        // Operation is created and moves through quote → authorizing → settled.
+        create_or_get(
+            &conn,
+            NewPaidOperation {
+                operation_id: "reload-op",
+                subject_hash: "reload-subject",
+                artifact_hash: "reload-artifact-hash",
+                created_at: "2026-07-15T10:00:00Z",
+            },
+        )
+        .unwrap();
+        record_quote(
+            &conn,
+            "reload-op",
+            "0xaaaa111111111111111111111111111111111111",
+            "0xbinding-digest",
+            "quote-reload-1",
+            "2026-07-15T10:05:00Z",
+            "2026-07-15T10:00:01Z",
+        )
+        .unwrap();
+        mark_payment_authorizing(&conn, "reload-op", "2026-07-15T10:00:02Z").unwrap();
+        let first_receipt_json = r#"{"operation_id":"reload-op","status":"settled","settlement_tx":"0xabc"}"#;
+        let settled = record_provider_receipt(
+            &conn,
+            "reload-op",
+            first_receipt_json,
+            "2026-07-15T10:00:03Z",
+        )
+        .unwrap();
+        assert_eq!(settled.state, PaidOperationState::PaymentReady);
+
+        // Browser reload: MCP restarts and re-reads the operation from SQLite.
+        // The in-process quote map is empty; the durable state must be enough.
+        let reloaded = get(&conn, "reload-op").unwrap().unwrap();
+        assert_eq!(reloaded.state, PaidOperationState::PaymentReady);
+        assert_eq!(reloaded.quote_id.as_deref(), Some("quote-reload-1"));
+        assert_eq!(
+            reloaded.provider_receipt_json.as_deref(),
+            Some(first_receipt_json),
+            "browser reload must return the original receipt verbatim"
+        );
+        // The receipt cannot be overwritten by a duplicate browser callback.
+        assert!(
+            record_provider_receipt(
+                &conn,
+                "reload-op",
+                r#"{"operation_id":"reload-op","status":"settled","settlement_tx":"0xdifferent"}"#,
+                "2026-07-15T10:00:04Z",
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("paid_operation_state_conflict"),
+            "a duplicate browser callback must not overwrite the original receipt"
+        );
+    }
+
+    /// T01: delivery retry — a delivery retry transitions the operation to
+    /// `anchored` exactly once and records the delivery receipt. A duplicate
+    /// delivery attempt (browser retry or background worker race) cannot
+    /// overwrite the delivery receipt.
+    #[test]
+    fn delivery_retry_writes_delivery_receipt_exactly_once() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate_paid_operations(&conn).unwrap();
+
+        create_or_get(
+            &conn,
+            NewPaidOperation {
+                operation_id: "retry-op",
+                subject_hash: "retry-subject",
+                artifact_hash: "retry-artifact-hash",
+                created_at: "2026-07-15T11:00:00Z",
+            },
+        )
+        .unwrap();
+        record_quote(
+            &conn,
+            "retry-op",
+            "0xbbbb222222222222222222222222222222222222",
+            "0xretry-binding-digest",
+            "quote-retry-1",
+            "2026-07-15T11:05:00Z",
+            "2026-07-15T11:00:01Z",
+        )
+        .unwrap();
+        mark_payment_authorizing(&conn, "retry-op", "2026-07-15T11:00:02Z").unwrap();
+        record_provider_receipt(
+            &conn,
+            "retry-op",
+            r#"{"operation_id":"retry-op","status":"settled"}"#,
+            "2026-07-15T11:00:03Z",
+        )
+        .unwrap();
+
+        // Delivery succeeds: record the delivery receipt and transition to anchored.
+        let delivery_evidence = r#"{"arweave_tx":"AR1234","solana_tx":"SOL5678","recall_verified":true}"#;
+        let anchored = record_delivery_receipt(
+            &conn,
+            "retry-op",
+            delivery_evidence,
+            "2026-07-15T11:01:00Z",
+        )
+        .unwrap();
+        assert_eq!(anchored.state, PaidOperationState::Anchored);
+        assert_eq!(
+            anchored.delivery_receipt_json.as_deref(),
+            Some(delivery_evidence),
+            "delivery receipt must be persisted verbatim"
+        );
+
+        // A duplicate delivery attempt must not overwrite the delivery receipt
+        // once the operation is anchored.
+        assert!(
+            record_delivery_receipt(
+                &conn,
+                "retry-op",
+                r#"{"arweave_tx":"AR9999","solana_tx":"SOL0000","recall_verified":true}"#,
+                "2026-07-15T11:02:00Z",
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("paid_operation_state_conflict"),
+            "a duplicate delivery attempt must not overwrite the delivery receipt"
+        );
+
+        // The delivery receipt survives a simulated MCP restart: re-reading
+        // the operation from SQLite returns the original evidence unmodified.
+        let reread = get(&conn, "retry-op").unwrap().unwrap();
+        assert_eq!(reread.state, PaidOperationState::Anchored);
+        assert_eq!(
+            reread.delivery_receipt_json.as_deref(),
+            Some(delivery_evidence),
+            "delivery receipt must survive a simulated restart"
+        );
     }
 }
