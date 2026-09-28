@@ -205,6 +205,211 @@ The hosted server sees plaintext during a write (F2).
 
 <!-- Written by tasks 16 and 17. -->
 
+## Audit findings (T16) — 2026-09-28
+
+Auditor: claude-sonnet-4-6. Read-only. Nine checks from task spec.
+
+---
+
+### F-16-1: Primitives match tech-spec §5 — PARTIAL
+
+**XChaCha20-Poly1305 for content** — PASS
+Evidence: `core/src/sealed/content.rs:20-23` — `use chacha20poly1305::{..., XChaCha20Poly1305}`;
+used in `encrypt_content` / `decrypt_content`.
+
+**HPKE suite X25519HkdfSha256 / HkdfSha256 / ChaCha20Poly1305 (KEM 0x0020 / KDF 0x0001 / AEAD 0x0003)** — PASS
+Evidence: `core/src/sealed/wrap.rs:30-35` — `use hpke::{aead::ChaCha20Poly1305, kdf::HkdfSha256,
+kem::X25519HkdfSha256}` with `single_shot_seal` / `single_shot_open`. Correct suite.
+
+**`info = b"mnemonic sealed v1"`** — FAIL (undocumented spec deviation)
+Evidence: `core/src/sealed/wrap.rs:40` — `const INFO: &[u8] = b"mnemonic sealed v1";`
+Tech-spec §5.2 specifies `info = "mnemonic/sealed/v1/wrap" || ct_hash || pkR`.
+The implementation uses a shorter static label; `ct_hash` and `pkR` are NOT bound
+into `info`. Domain binding is partially recovered via `canonical_aad` (see next
+item), but the spec's exact `info` construction is not met. No decisions.md entry
+records this deviation.
+
+**`aad = canonical_aad(ct_hash, author_did)` [CBOR-encoded, not plain DID bytes]** — PARTIAL
+Evidence: `core/src/sealed/wrap.rs:94-117` — `canonical_aad` encodes
+`[bstr ct_hash, tstr author_did]` as deterministic CBOR 2-element array.
+Tech-spec §5.2 specifies `aad = UTF-8 bytes of the author DID` and `ct_hash`
+bound in `info`. Implementation moves `ct_hash` into `aad`; security property
+(binding wrap to specific ciphertext and author) is preserved — wrong hash or
+DID fails unwrap — but wire format diverges from spec. Undocumented deviation.
+
+**`ct_hash = blake3(ciphertext)` vs spec `blake3(nonce || ciphertext)`** — PARTIAL
+Evidence: `core/src/sealed/api.rs:123-124` — `let ct_hash_arr: [u8; 32] = *blake3::hash(&ct).as_bytes();`
+(ciphertext only). Tech-spec §5.2 says `ct_hash = blake3(nonce || ciphertext)`.
+The nonce is excluded from the hash; uniqueness is preserved because ct is
+nonce-dependent, but the spec's exact construction is not followed. Undocumented deviation.
+
+**Content AEAD AD is empty, not outer header CBOR** — FAIL
+Evidence: `core/src/sealed/api.rs:115` — `encrypt_content(&k, &nonce, b"", &padded)`.
+Tech-spec §5.1 specifies `AD = {v, alg, artifact_id, producer, created_at, kc}`.
+Moving the ct into another artifact's artifact_id is NOT rejected at the AEAD
+layer; only the HPKE binding provides this protection. Undocumented deviation.
+
+**`kc` checked BEFORE AEAD in `open_memory`** — PASS
+Evidence: `core/src/sealed/api.rs:241-253` — HPKE `unwrap_key` first (line 241),
+then `key_commitment` check lines 244-247, then `decrypt_content` line 253.
+
+**`kc` checked BEFORE AEAD in `open_with_key`** — PASS
+Evidence: `core/src/sealed/api.rs:270-278` — kc verified lines 270-274,
+then `decrypt_content` line 278.
+
+---
+
+### F-16-2: `hpke` crate — version and known advisories — PARTIAL
+
+**Version:** `core/Cargo.toml:40` — `hpke = { version = "0.12", default-features = false, features = ["x25519", "std"] }`.
+This is the most recent stable 0.12.x release series.
+
+**`cargo audit`:** `cargo-audit` is not installed in this environment
+(`cargo audit` → "no such command"). Automated advisory scanning could not
+complete. No public RUSTSEC advisories for `hpke` at 0.12 are known. The
+tech-spec §5.2 note acknowledges "We found no public audit statement for
+the `hpke` crate" and explicitly flags this as a T16 review obligation.
+No critical CVEs found. Gap: `cargo-audit` is absent from CI.
+
+---
+
+### F-16-3: Nonce source — OS CSPRNG, no reuse possible — PASS
+
+Evidence: `core/src/sealed/wrap.rs:142` — `rand_core::OsRng` for HPKE ephemeral key.
+`core/src/sealed/api.rs:107,110-111` — K and 24-byte nonce generated via
+`rng.fill_bytes` where callers pass `rand::rngs::OsRng` (`mcp/src/tools.rs:1021`,
+`mcp/src/tools.rs:1182`) or `rand_core::OsRng` (`api.rs:438`).
+Both `rand_core::OsRng` and `rand::rngs::OsRng` delegate to the OS CSPRNG via
+`getrandom`. Each `seal_memory` call generates a fresh random nonce; no counter
+or deterministic nonce path exists in the sealed module.
+
+---
+
+### F-16-4: All-zero shared secret and small-order key rejection — PASS
+
+**All-zero DH output:** `core/src/sealed/wrap.rs:69-72` — `HpkeError::EncapError`
+and `HpkeError::DecapError` map to `WrapError::ZeroSharedSecret`. The `hpke`
+crate implements RFC 9180 §7.1.4 mandatory all-zero check.
+
+**Small-order keys:** `core/src/sealed/keys.rs:22-72` — `SMALL_ORDER_MONTGOMERY`
+table of 8 low-order Montgomery points (including zero and p-1).
+`x25519_public_from_ed25519` lines 99-104 checks the derived point against this
+table using `subtle::ConstantTimeEq`. Returns `Err(KeyError::SmallOrderPoint)`.
+
+Note: entries [0] and [1] in `SMALL_ORDER_MONTGOMERY` are both `[0u8;32]` (the
+identity and order-2 Edwards points share Montgomery u=0). Duplicate entry is
+harmless — the check is correct.
+
+---
+
+### F-16-5: Secrets zeroized and never logged — PASS
+
+**Zeroizing usage:**
+- `core/src/sealed/keys.rs:117-118` — `x25519_secret_from_ed25519` returns `Zeroizing<[u8;32]>`.
+- `core/src/sealed/wrap.rs:175,201` — `unwrap_key` returns `Zeroizing<[u8;32]>`.
+- `core/src/sealed/api.rs:80,108` — `SealedArtifact.k` is `Zeroizing<[u8;32]>`.
+- `core/src/sealed/api.rs:404,416` — `parse_link_fragment` returns `Zeroizing<[u8;32]>`.
+- `mcp/src/tools.rs:1026-1032` — `inner_content.zeroize(); inner_cbor.zeroize(); drop(sealed_art.k)`.
+
+**Plaintext logging scan:** no `tracing::debug|info|warn|error` call in
+`mcp/src/tools.rs` includes `content`, `plaintext`, `inner_content`, K, or key
+bytes. The only tracing call near the sealed path is `tools.rs:3037`
+(`tracing::warn!(content_hash = ...)` for a parse error) — logs hash, not content.
+
+---
+
+### F-16-6: Hosted path — no plaintext in pending entries, 300 s TTL — PASS
+
+Evidence: `mcp/src/pending.rs:50` — `DEFAULT_TTL_SECS: i64 = 300`.
+`mcp/src/pending.rs:60-77` — `PendingEntry` doc: sealed entries carry empty
+`content` and empty `embedding`.
+`mcp/src/tools.rs:1035` — sealed branch returns
+`(outer_cbor, content_hash, String::new(), vec![], true, metadata)`.
+
+---
+
+### F-16-7: Server never receives K — PASS
+
+`mcp/src/tools.rs:1032` — `drop(sealed_art.k)` immediately after extracting
+`outer_cbor`. K is never serialised or included in the pending entry.
+`mcp/src/sealed_routes.rs:335-409` — `POST /api/grants` stores `grant_cose`
+bytes which contain HPKE-wrapped `wk` inside GRANT_V1; the server does not
+parse or retain K.
+Bootstrap paths (`mcp/src/api.rs`) use x25519-wrapped keypair blobs; no
+sealed-memory K appears.
+
+---
+
+### F-16-8: Webapp `/m/` route — third-party scripts and fragment guard — PARTIAL
+
+**No third-party scripts:** PASS
+`webapp/index.html` CSP — `script-src 'self' 'wasm-unsafe-eval'`. No external
+`script-src` origins. `SealedView.tsx` imports only project-local and bundled
+dependencies.
+
+**Fragment never sent in network requests:** PASS
+`webapp/src/pages/SealedView.tsx:105-112` — `window.location.hash` is read only
+AFTER `await res.arrayBuffer()` completes. RFC 3986 §3.5 also ensures the
+browser strips the fragment from HTTP requests. Belt-and-suspenders: code comment
+at line 13-16 documents this explicitly.
+
+**Key commitment derivation mismatch — kc pre-check broken in webapp:** FAIL
+Evidence: `webapp/src/pages/SealedView.tsx:422-435` — `deriveKeyCommitment`
+calls `wasm.blake3_hash(label_bytes || key_bytes)` which is the WASM export
+`blake3_hash` at `core/src/wasm/mod.rs:320-322` (`blake3::hash(bytes)` — a
+standard BLAKE3 hash of the concatenation).
+But `core/src/sealed/content.rs:135-137` — `key_commitment(key)` calls
+`blake3::derive_key("mnemonic sealed v1 key commitment", key)`.
+`blake3::derive_key` uses the label as a BLAKE3 domain-separation context
+(changes the IV), producing a different output than `blake3::hash(label || key)`.
+The webapp's kc pre-check will always fail for valid bearer links.
+Effect: bearer links via the `/m/` route always show "Key commitment check
+failed" (`kc-fail` UI state, line 135-137). The WASM `open_with_key` call is
+never reached, making browser-side decryption non-functional. The failure is
+safe (no plaintext shown on kc-fail), but bearer links in the browser are
+entirely broken.
+
+---
+
+### F-16-9: Docs state required security properties — PARTIAL
+
+**Revocation limit:** PARTIAL
+`docs/WHITEPAPER.md` — no explicit statement that grant withdrawal does NOT
+remove Arweave-anchored content (i.e., revocation is advisory). YELLOWPAPER
+mentions revocation maps generically (§VII) for attestation grants, not for
+sealed-memory grants. `decisions.md` §"Fixed inputs" says "No revocation of
+anchored data" but this is an internal dev note, not user-facing documentation.
+
+**Hosted transient exposure:** FAIL
+Neither `docs/WHITEPAPER.md` nor `docs/YELLOWPAPER.md` mentions the 300 s
+pending-bundle window during which the hosted path holds pre-sealed plaintext.
+`decisions.md` D-1 states the trust wording but it remains in dev notes only.
+
+**Recall-session exposure:** PASS (by absence)
+D-3 decision ("Client-side only. No hosted recall session.") removed the recall
+session path. No recall-session exposure exists to document.
+
+**Metadata leaks:** FAIL
+Neither public doc states that sealed-row metadata (artifact_id, producer DID,
+created_at, content_hash, solana_tx, arweave_tx, tags) is stored in plaintext
+and accessible to the server operator. The encrypted blob hides content but
+metadata is not a secret.
+
+---
+
+## Action items (T16)
+
+| # | Sev | Finding | Recommended fix |
+|---|-----|---------|-----------------|
+| A-16-1 | HIGH | `F-16-8` webapp `deriveKeyCommitment` uses `blake3::hash` not `blake3::derive_key` — bearer links broken | Add a WASM export `blake3_derive_key(context: &[u8], key: &[u8]) -> Vec<u8>` backed by `blake3::derive_key`. Replace the concatenation + `blake3_hash` call in `SealedView.tsx:422-435`. |
+| A-16-2 | HIGH | `F-16-1` HPKE `info` is `b"mnemonic sealed v1"`, not `"mnemonic/sealed/v1/wrap" \|\| ct_hash \|\| pkR` as in spec §5.2 | Either (a) update tech-spec §5.2 to document the current `info` + CBOR `aad` construction as the canonical wire format, or (b) implement spec-compliant `info` with a schema_version bump. Must be decided before adding any external interoperability requirement. |
+| A-16-3 | MEDIUM | `F-16-1` Content AEAD uses empty AD; spec §5.1 requires outer header CBOR | Update `seal_memory` to pass the outer header CBOR as `ad`, or update spec §5.1 to document empty AD with a note that ciphertext portability is provided by HPKE binding only. Wire-breaking if changed; requires schema_version bump. |
+| A-16-4 | MEDIUM | `F-16-9` Public docs silent on: (a) grant-revocation limits, (b) hosted transient plaintext, (c) metadata-in-plaintext | Add "Security properties and limitations" section to WHITEPAPER.md covering all three items. |
+| A-16-5 | LOW | `F-16-2` `cargo-audit` not installed | Add `cargo-audit` to CI (`cargo install cargo-audit && cargo audit`). |
+| A-16-6 | LOW | `F-16-1` `ct_hash = blake3(ciphertext)` not `blake3(nonce \|\| ciphertext)` | Either update spec to reflect current construction, or include nonce. Not exploitable; divergence increases review burden. |
+
+---
+
 ## Audit findings (T17) — 2026-09-28
 
 Auditor: claude-sonnet-4-6. Read-only audit. All findings reference specific file
