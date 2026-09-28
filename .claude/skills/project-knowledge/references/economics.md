@@ -210,6 +210,8 @@ Hold $MNEMONIC token to access paid tier. Or: NFT-gated tiers ("Founder Pass" = 
 
 **When to revisit:** if a token launch makes sense for protocol governance / decentralization. Not before.
 
+**Update 2026-09-28:** the token question now has a design in [`work/tokenomics/`](../../../../work/tokenomics/tech-spec.md). Its verdict: no token before measured gates; users always pay in stablecoins; a token, if launched, is for supply-side staking, a revenue-bounded bootstrap subsidy and governance only.
+
 ---
 
 ## Enterprise self-host (locked candidate, expanded)
