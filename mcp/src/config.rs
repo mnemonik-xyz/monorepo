@@ -386,7 +386,7 @@ impl Config {
                 .collect(),
             chain_stats_graphql_url: env_or(
                 "CHAIN_STATS_GRAPHQL_URL",
-                "https://arweave.net/graphql",
+                "https://uploader.irys.xyz/graphql",
             ),
             chain_stats_gateway_url: env_or("CHAIN_STATS_GATEWAY_URL", "https://gateway.irys.xyz"),
             chain_stats_refresh_secs: env_or("CHAIN_STATS_REFRESH_SECS", "3600")
