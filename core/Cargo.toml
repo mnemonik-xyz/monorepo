@@ -34,8 +34,13 @@ futures = "0.3"
 tracing = "0.1"
 keyring = { version = "3", default-features = false, features = ["apple-native", "windows-native", "sync-secret-service", "vendored"] }
 dirs = "6"
+chacha20poly1305 = { version = "0.10", features = ["std"] }
 crypto_box = "0.9"
+ed25519-dalek = { version = "2", features = ["hazmat"] }
+hpke = { version = "0.12", default-features = false, features = ["x25519", "std"] }
 tempfile = "3"
+subtle = "2"
+zeroize = { version = "1", features = ["derive", "zeroize_derive"] }
 fastembed = { version = "5", optional = true }
 tokio = { version = "1", features = ["time", "rt"] }
 

@@ -13,6 +13,7 @@
 //! Cross-ecosystem documents use that ecosystem's canonicalization and hash — see
 //! `work/erc8004-reputation/` D-1, which uses RFC 8785 (JCS) with keccak256.
 
+use base64::Engine as _;
 use ciborium::Value as CborValue;
 use serde_json::Value as JsonValue;
 
@@ -35,7 +36,12 @@ pub fn to_canonical_cbor(artifact: &JsonValue, schema: &ArtifactSchema) -> Resul
         if let Some(value) = obj.get(field_name) {
             if !value.is_null() {
                 let key = CborValue::Text(field_name.to_string());
-                let val = json_to_cbor(value);
+                let is_bytes = schema.bytes_fields.contains(&field_name);
+                let val = if is_bytes {
+                    json_string_to_cbor_bytes(value, field_name)?
+                } else {
+                    json_to_cbor(value)
+                };
                 entries.push((key, val));
             }
         }
@@ -104,6 +110,28 @@ fn json_to_cbor(json: &JsonValue) -> CborValue {
             });
             CborValue::Map(entries)
         }
+    }
+}
+
+/// Decode a JSON string field that carries base64-encoded binary data into a
+/// CBOR bstr (`CborValue::Bytes`).
+///
+/// Used for `bytes_fields` declared on a schema (e.g. `nonce`, `ct`, `kc`,
+/// `enc`, `wk`). The JSON value MUST be a string containing standard base64
+/// (with padding). Returns an error if the value is not a string or is not
+/// valid base64.
+fn json_string_to_cbor_bytes(json: &JsonValue, field_name: &str) -> Result<CborValue, String> {
+    match json {
+        JsonValue::String(s) => {
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(s)
+                .map_err(|e| format!("field '{}': invalid base64: {e}", field_name))?;
+            Ok(CborValue::Bytes(bytes))
+        }
+        _ => Err(format!(
+            "field '{}' is a bytes_field and must be a base64 string in JSON",
+            field_name
+        )),
     }
 }
 

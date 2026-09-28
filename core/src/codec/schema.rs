@@ -40,6 +40,12 @@ pub enum ArtifactType {
     /// A published blog post (a signed PUBLIC attestation).
     #[serde(rename = "post")]
     Post,
+    /// An encrypted, sealed memory artifact (AEAD-wrapped payload).
+    #[serde(rename = "sealed")]
+    Sealed,
+    /// A decryption grant -- wraps the content key for a specific reader.
+    #[serde(rename = "grant")]
+    Grant,
     /// One ordered, hash-linked step in an agent trajectory.
     #[cfg(feature = "trajectory-experimental")]
     #[serde(rename = "step")]
@@ -63,6 +69,8 @@ impl ArtifactType {
             Self::Receipt => "receipt",
             Self::Memory => "memory",
             Self::Post => "post",
+            Self::Sealed => "sealed",
+            Self::Grant => "grant",
             #[cfg(feature = "trajectory-experimental")]
             Self::Step => "step",
             #[cfg(feature = "trajectory-experimental")]
@@ -81,6 +89,8 @@ impl ArtifactType {
             "receipt" => Some(Self::Receipt),
             "memory" => Some(Self::Memory),
             "post" => Some(Self::Post),
+            "sealed" => Some(Self::Sealed),
+            "grant" => Some(Self::Grant),
             #[cfg(feature = "trajectory-experimental")]
             "step" => Some(Self::Step),
             #[cfg(feature = "trajectory-experimental")]
@@ -102,6 +112,11 @@ pub struct ArtifactSchema {
     /// Canonical CBOR field order -- determines serialization byte sequence.
     /// This order MUST NOT change within a schema version.
     pub cbor_field_order: &'static [&'static str],
+    /// Fields that carry raw binary data and must encode as CBOR bstr.
+    /// In JSON they are represented as standard base64 (no URL encoding, no padding
+    /// stripping). `to_canonical_cbor` decodes them before encoding as bstr;
+    /// `from_canonical_cbor` re-encodes them as base64 on the way out.
+    pub bytes_fields: &'static [&'static str],
 }
 
 // -- Schema definitions --
@@ -131,6 +146,7 @@ pub const RAG_CONTEXT_V1: ArtifactSchema = ArtifactSchema {
         "created_at",
         "producer",
     ],
+    bytes_fields: &[],
 };
 
 /// rag.result.v1 -- answer + context_artifact refs + citations
@@ -165,6 +181,7 @@ pub const RAG_RESULT_V1: ArtifactSchema = ArtifactSchema {
         "created_at",
         "producer",
     ],
+    bytes_fields: &[],
 };
 
 /// agent.state.v1 -- memory snapshot with parent state ref
@@ -192,6 +209,7 @@ pub const AGENT_STATE_V1: ArtifactSchema = ArtifactSchema {
         "created_at",
         "producer",
     ],
+    bytes_fields: &[],
 };
 
 /// receipt.v1 -- execution/retrieval receipt
@@ -220,6 +238,7 @@ pub const RECEIPT_V1: ArtifactSchema = ArtifactSchema {
         "created_at",
         "producer",
     ],
+    bytes_fields: &[],
 };
 
 /// memory.v1 -- backward-compatible with existing sign_memory attestations
@@ -257,6 +276,7 @@ pub const MEMORY_V1: ArtifactSchema = ArtifactSchema {
         "visibility",
         "anchor",
     ],
+    bytes_fields: &[],
 };
 
 /// post.v1 -- a blog post IS a signed PUBLIC attestation (Decision 5 / 8).
@@ -299,6 +319,79 @@ pub const POST_V1: ArtifactSchema = ArtifactSchema {
         "created_at",
         "producer",
     ],
+    bytes_fields: &[],
+};
+
+/// sealed.v1 -- AEAD-encrypted memory artifact.
+///
+/// The plaintext payload is encrypted and stored in `ct` (ciphertext bstr).
+/// `nonce` is the AEAD nonce (bstr). `kc` is the content key commitment
+/// (e.g. blake3 hash of the plaintext key, bstr). `wraps` lists grant
+/// artifact_ids that carry the encrypted content key for authorised readers.
+/// `alg` names the AEAD algorithm (e.g. "AES-256-GCM").
+pub const SEALED_V1: ArtifactSchema = ArtifactSchema {
+    artifact_type: ArtifactType::Sealed,
+    version: 1,
+    required_fields: &[
+        "artifact_id",
+        "type",
+        "schema_version",
+        "alg",
+        "nonce",
+        "ct",
+        "kc",
+        "wraps",
+        "created_at",
+        "producer",
+    ],
+    optional_fields: &[],
+    cbor_field_order: &[
+        "artifact_id",
+        "type",
+        "schema_version",
+        "alg",
+        "nonce",
+        "ct",
+        "kc",
+        "wraps",
+        "created_at",
+        "producer",
+    ],
+    bytes_fields: &["nonce", "ct", "kc"],
+};
+
+/// grant.v1 -- decryption grant wrapping a content key for a reader.
+///
+/// `enc` is the wrapped (encrypted) content key bstr. `wk` is the wrapping
+/// key identifier / ephemeral public key material (bstr). `memory_hash` is
+/// the blake3 hash of the sealed artifact this grant unlocks. `reader` is
+/// the DID of the authorised reader (optional -- grants may be broadcast).
+/// `perms` carries an optional permission token / expiry JSON object.
+pub const GRANT_V1: ArtifactSchema = ArtifactSchema {
+    artifact_type: ArtifactType::Grant,
+    version: 1,
+    required_fields: &[
+        "type",
+        "schema_version",
+        "memory_hash",
+        "enc",
+        "wk",
+        "created_at",
+        "producer",
+    ],
+    optional_fields: &["reader", "perms"],
+    cbor_field_order: &[
+        "type",
+        "schema_version",
+        "memory_hash",
+        "enc",
+        "wk",
+        "reader",
+        "perms",
+        "created_at",
+        "producer",
+    ],
+    bytes_fields: &["enc", "wk"],
 };
 
 /// step.v1 -- one ordered, hash-linked step in an agent trajectory.
@@ -337,6 +430,7 @@ pub const STEP_V1: ArtifactSchema = ArtifactSchema {
         "created_at",
         "producer",
     ],
+    bytes_fields: &[],
 };
 
 /// verdict.v1 -- an independent judge's verdict over a step. Signed by the judge
@@ -371,6 +465,7 @@ pub const VERDICT_V1: ArtifactSchema = ArtifactSchema {
         "created_at",
         "judge",
     ],
+    bytes_fields: &[],
 };
 
 /// trajectory.v1 -- anchored summary of a trajectory (or one checkpoint of it).
@@ -413,6 +508,7 @@ pub const TRAJECTORY_V1: ArtifactSchema = ArtifactSchema {
         "created_at",
         "producer",
     ],
+    bytes_fields: &[],
 };
 
 /// Look up schema by type string and version.
@@ -424,6 +520,8 @@ pub fn get_schema(artifact_type: &str, version: u32) -> Option<&'static Artifact
         ("receipt", 1) => Some(&RECEIPT_V1),
         ("memory", 1) => Some(&MEMORY_V1),
         ("post", 1) => Some(&POST_V1),
+        ("sealed", 1) => Some(&SEALED_V1),
+        ("grant", 1) => Some(&GRANT_V1),
         #[cfg(feature = "trajectory-experimental")]
         ("step", 1) => Some(&STEP_V1),
         #[cfg(feature = "trajectory-experimental")]
@@ -579,5 +677,140 @@ mod tests {
                 );
             }
         }
+    }
+
+    // -- sealed.v1 + grant.v1 tests --
+
+    #[test]
+    fn sealed_v1_schema_lookup() {
+        let s = get_schema("sealed", 1).expect("sealed v1 must be registered");
+        assert_eq!(s.version, 1);
+        assert!(matches!(s.artifact_type, ArtifactType::Sealed));
+    }
+
+    #[test]
+    fn grant_v1_schema_lookup() {
+        let s = get_schema("grant", 1).expect("grant v1 must be registered");
+        assert_eq!(s.version, 1);
+        assert!(matches!(s.artifact_type, ArtifactType::Grant));
+    }
+
+    #[test]
+    fn sealed_v1_field_order_stable() {
+        // cbor_field_order must be exactly the canonical order specified in the task.
+        let expected = [
+            "artifact_id",
+            "type",
+            "schema_version",
+            "alg",
+            "nonce",
+            "ct",
+            "kc",
+            "wraps",
+            "created_at",
+            "producer",
+        ];
+        assert_eq!(SEALED_V1.cbor_field_order, &expected[..]);
+    }
+
+    #[test]
+    fn grant_v1_field_order_stable() {
+        let expected = [
+            "type",
+            "schema_version",
+            "memory_hash",
+            "enc",
+            "wk",
+            "reader",
+            "perms",
+            "created_at",
+            "producer",
+        ];
+        assert_eq!(GRANT_V1.cbor_field_order, &expected[..]);
+    }
+
+    #[test]
+    fn sealed_v1_required_field_order_covers_cbor_order() {
+        for &field in SEALED_V1.required_fields {
+            assert!(
+                SEALED_V1.cbor_field_order.contains(&field),
+                "sealed v1: required field '{}' not in cbor_field_order",
+                field
+            );
+        }
+    }
+
+    #[test]
+    fn grant_v1_required_field_order_covers_cbor_order() {
+        for &field in GRANT_V1.required_fields {
+            assert!(
+                GRANT_V1.cbor_field_order.contains(&field),
+                "grant v1: required field '{}' not in cbor_field_order",
+                field
+            );
+        }
+    }
+
+    #[test]
+    fn sealed_v1_missing_required_field_rejected() {
+        // Missing `ct` -- must fail validation.
+        let art = serde_json::json!({
+            "artifact_id": "art:sealed-1",
+            "type": "sealed",
+            "schema_version": 1,
+            "alg": "AES-256-GCM",
+            "nonce": "AAAAAAAAAAAAAAAA",
+            // ct is intentionally absent
+            "kc": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+            "wraps": [],
+            "created_at": "2026-09-28T00:00:00Z",
+            "producer": "did:sol:test",
+        });
+        let err = validate_artifact(&art, &SEALED_V1);
+        assert!(err.is_err(), "missing 'ct' must be rejected");
+        assert!(err.unwrap_err().contains("ct"));
+    }
+
+    #[test]
+    fn grant_v1_missing_required_field_rejected() {
+        // Missing `enc` -- must fail.
+        let art = serde_json::json!({
+            "type": "grant",
+            "schema_version": 1,
+            "memory_hash": "abc123",
+            // enc absent
+            "wk": "AAAA",
+            "created_at": "2026-09-28T00:00:00Z",
+            "producer": "did:sol:test",
+        });
+        let err = validate_artifact(&art, &GRANT_V1);
+        assert!(err.is_err(), "missing 'enc' must be rejected");
+        assert!(err.unwrap_err().contains("enc"));
+    }
+
+    #[test]
+    fn memory_v1_golden_fixtures_unchanged() {
+        // Ensure existing MEMORY_V1 schema is not disturbed.
+        assert_eq!(MEMORY_V1.version, 1);
+        assert!(matches!(MEMORY_V1.artifact_type, ArtifactType::Memory));
+        // Field order hasn't changed.
+        let expected = [
+            "artifact_id",
+            "type",
+            "schema_version",
+            "content",
+            "metadata",
+            "parents",
+            "tags",
+            "created_at",
+            "producer",
+            "visibility",
+            "anchor",
+        ];
+        assert_eq!(MEMORY_V1.cbor_field_order, &expected[..]);
+        // Required fields unchanged.
+        assert!(MEMORY_V1.required_fields.contains(&"content"));
+        assert!(MEMORY_V1.required_fields.contains(&"artifact_id"));
+        assert!(MEMORY_V1.bytes_fields.is_empty());
     }
 }

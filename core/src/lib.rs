@@ -40,6 +40,12 @@ pub mod embed;
 // hard `cross-lang-build` gate before flipping this on.
 #[cfg(not(target_arch = "wasm32"))]
 pub mod encrypt;
+// HPKE-based sealed memories (Wave 6+, §17): bucket-padded XChaCha20Poly1305
+// content encryption + X25519HkdfSha256 key-wrapping, with Ed25519→X25519 key
+// derivation from the identity keypair.  Native-only: uses OsRng and the hpke
+// `std` feature; a wasm port would require a CSPRNG wiring audit first.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod sealed;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod lineage;
 // Restore a recall index from Arweave (work/arweave-as-source-of-truth Wave 3).

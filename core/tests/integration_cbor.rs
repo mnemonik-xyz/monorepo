@@ -246,6 +246,7 @@ fn optional_restore_fields_are_byte_neutral_when_absent() {
             "created_at",
             "producer",
         ],
+        bytes_fields: &[],
     };
 
     let artifact = serde_json::json!({

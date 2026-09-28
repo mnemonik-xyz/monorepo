@@ -159,6 +159,93 @@ pub fn verify_artifact(
 
 use std::str::FromStr;
 
+/// Metadata extracted from a verified `sealed.v1` COSE_Sign1 artifact.
+#[derive(Debug)]
+pub struct SealedVerification {
+    /// DID / pubkey of the producer (from the `producer` field in the payload).
+    pub producer: String,
+    /// Raw bytes of the `kc` field (content key commitment).
+    pub content_hash: Vec<u8>,
+    /// ISO 8601 timestamp from the `created_at` field.
+    pub created_at: String,
+    /// Number of entries in the `wraps` array.
+    pub wrap_count: usize,
+}
+
+/// Verify the outer COSE_Sign1 signature of a `sealed.v1` artifact and extract
+/// its metadata.
+///
+/// This function NEVER decrypts anything. It only:
+/// 1. Parses the COSE_Sign1 envelope.
+/// 2. Verifies the Ed25519 signature over the canonical CBOR payload.
+/// 3. Checks that the `kid` in the unprotected header matches the `producer`
+///    field in the payload.
+/// 4. Extracts and returns [`SealedVerification`].
+pub fn verify_sealed(cose_bytes: &[u8]) -> Result<SealedVerification, String> {
+    // Step 1 + 2: reuse verify_artifact (no expected_hash needed here).
+    let result = verify_artifact(cose_bytes, None)?;
+
+    if !result.cose_signature {
+        return Err("COSE_Sign1 signature is invalid".to_string());
+    }
+
+    // Step 3: decode the canonical CBOR payload to extract fields.
+    let payload_json = super::canonical::from_canonical_cbor(&result.payload)
+        .map_err(|e| format!("payload CBOR decode failed: {e}"))?;
+
+    let obj = payload_json
+        .as_object()
+        .ok_or_else(|| "payload is not a CBOR map".to_string())?;
+
+    // Extract producer.
+    let producer = obj
+        .get("producer")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "missing 'producer' field in sealed payload".to_string())?
+        .to_string();
+
+    // Verify kid == producer.
+    if result.signer != producer {
+        return Err(format!(
+            "kid/producer mismatch: kid='{}', producer='{}'",
+            result.signer, producer
+        ));
+    }
+
+    // Extract created_at.
+    let created_at = obj
+        .get("created_at")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "missing 'created_at' field in sealed payload".to_string())?
+        .to_string();
+
+    // Extract kc (content key commitment) -- stored as base64 in JSON after
+    // from_canonical_cbor re-encodes CBOR bstr fields.
+    let kc_b64 = obj
+        .get("kc")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "missing 'kc' field in sealed payload".to_string())?;
+    let content_hash = base64::engine::general_purpose::STANDARD
+        .decode(kc_b64)
+        .map_err(|e| format!("'kc' is not valid base64: {e}"))?;
+
+    // Extract wrap_count from the `wraps` array.
+    let wrap_count = obj
+        .get("wraps")
+        .and_then(|v| v.as_array())
+        .map(|a| a.len())
+        .unwrap_or(0);
+
+    Ok(SealedVerification {
+        producer,
+        content_hash,
+        created_at,
+        wrap_count,
+    })
+}
+
+use base64::Engine as _;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -288,5 +375,98 @@ mod tests {
                 verify_artifact(&signed.cose_bytes, Some(&signed.content_hash)).expect(name);
             assert!(result.valid, "{name} failed");
         }
+    }
+
+    // -- verify_sealed tests --
+
+    fn sample_sealed_artifact(kp: &Keypair) -> serde_json::Value {
+        use base64::Engine as _;
+        let nonce_b64 = base64::engine::general_purpose::STANDARD.encode([0u8; 12]);
+        let ct_b64 = base64::engine::general_purpose::STANDARD.encode(b"encrypted-payload");
+        let kc_b64 = base64::engine::general_purpose::STANDARD.encode([0u8; 32]);
+        serde_json::json!({
+            "artifact_id": "art:sealed-test",
+            "type": "sealed",
+            "schema_version": 1,
+            "alg": "AES-256-GCM",
+            "nonce": nonce_b64,
+            "ct": ct_b64,
+            "kc": kc_b64,
+            "wraps": ["art:grant-1", "art:grant-2"],
+            "created_at": "2026-09-28T00:00:00Z",
+            "producer": kp.pubkey().to_string(),
+        })
+    }
+
+    #[test]
+    fn verify_sealed_roundtrip() {
+        let kp = Keypair::new();
+        let art = sample_sealed_artifact(&kp);
+        let signed = sign_artifact(&art, &SEALED_V1, &kp).unwrap();
+        let sv = verify_sealed(&signed.cose_bytes).unwrap();
+        assert_eq!(sv.producer, kp.pubkey().to_string());
+        assert_eq!(sv.wrap_count, 2);
+        assert!(!sv.created_at.is_empty());
+        assert_eq!(sv.content_hash.len(), 32); // kc is 32 zero bytes
+    }
+
+    #[test]
+    fn verify_sealed_fails_on_tampered_ct() {
+        let kp = Keypair::new();
+        let art = sample_sealed_artifact(&kp);
+        let signed = sign_artifact(&art, &SEALED_V1, &kp).unwrap();
+
+        // Tamper with the cose bytes: flip a byte in the payload area.
+        // The COSE_Sign1 payload is embedded in the bytes; flipping a byte
+        // inside the payload will make the Ed25519 signature invalid.
+        let mut tampered = signed.cose_bytes.clone();
+        let mid = tampered.len() / 2;
+        tampered[mid] ^= 0xFF;
+
+        // Either parsing or signature verification must fail.
+        let result = verify_sealed(&tampered);
+        // Some tamper positions corrupt CBOR structure (parse error) and some
+        // corrupt only the payload (sig check fails). Both are errors or
+        // produce cose_signature=false.
+        match result {
+            Err(_) => {} // parse or sig error -- expected
+            Ok(_) => panic!("tampered ct must not verify"),
+        }
+    }
+
+    #[test]
+    fn verify_sealed_fails_on_kid_producer_mismatch() {
+        let kp = Keypair::new();
+        let other_kp = Keypair::new();
+
+        // Sign with `kp` but put `other_kp`'s pubkey as `producer` in payload.
+        // This makes kid (== kp.pubkey) != producer (== other_kp.pubkey).
+        use base64::Engine as _;
+        let nonce_b64 = base64::engine::general_purpose::STANDARD.encode([0u8; 12]);
+        let ct_b64 = base64::engine::general_purpose::STANDARD.encode(b"enc");
+        let kc_b64 = base64::engine::general_purpose::STANDARD.encode([0u8; 32]);
+        let art = serde_json::json!({
+            "artifact_id": "art:sealed-mismatch",
+            "type": "sealed",
+            "schema_version": 1,
+            "alg": "AES-256-GCM",
+            "nonce": nonce_b64,
+            "ct": ct_b64,
+            "kc": kc_b64,
+            "wraps": [],
+            "created_at": "2026-09-28T00:00:00Z",
+            // producer is other_kp, but we sign with kp
+            "producer": other_kp.pubkey().to_string(),
+        });
+
+        // Sign with `kp` -- kid will be kp.pubkey, but payload says other_kp
+        let signed = sign_artifact(&art, &SEALED_V1, &kp).unwrap();
+        let err = verify_sealed(&signed.cose_bytes);
+        assert!(
+            err.is_err(),
+            "kid/producer mismatch must be rejected: got {:?}",
+            err
+        );
+        assert!(err.unwrap_err().contains("mismatch"));
     }
 }

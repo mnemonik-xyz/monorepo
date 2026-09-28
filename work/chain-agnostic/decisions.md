@@ -79,3 +79,26 @@ but it is a trade, and the documents must not present it as pure gain.
   owner's to answer.
 - **Q-3.** Does `verify_usdc_transfer` stay on Solana indefinitely, or does the EVM rail become
   the default once ERC-8004 work lands?
+
+## Stage 1 shipped (2026-09-28)
+
+`GatewayFlavour` (Arweave | Irys), dual-query schema, millisecond timestamp 
+conversion, and client-side ordering are all live on main in 
+`core/src/arweave/graphql.rs`. Shipped as part of #246–#252
+(`work/arweave-as-source-of-truth/`).
+
+Tests added:
+- `arweave_query_contains_sort_and_block` — Arweave schema integrity
+- `irys_query_omits_sort_and_block` — Irys schema correctness  
+- `timestamp_units_irys_converts_ms_to_s` — ms→s conversion
+- `timestamp_units_arweave_passes_through` — Arweave unchanged
+- `irys_results_are_sorted_oldest_first` — client-side ordering
+- `paginates_until_last_page` — pagination
+- `flavour_detection_from_url` — URL-based detection
+
+**Gate status:** Pending live verification — the Irys enumeration returning a
+superset of the memo enumeration for a real production wallet must be confirmed
+before stage 2 starts. This requires running against real data with
+`GRAPHQL_URL=https://uploader.irys.xyz/graphql`.
+
+**Stage 2 is blocked until the gate passes.**
