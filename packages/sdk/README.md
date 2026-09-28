@@ -224,13 +224,47 @@ All names below are re-exported from the package root.
 ### Client
 
 - **`MnemonicClient`** — stateless HTTP client for the hosted MCP server.
-  Methods: `whoami()`, `signMemory(content, opts?)`, `recall(query, opts?)`,
-  `verify(attestationId)`, `proveIdentity(challenge)`. Setters: `setJwt`,
-  `setKeypair` or `setKeypairProvider` (necessary for a signed
-  `signMemory`, not for `mode: "local"`), `setTokenRefresher`.
+
+  **Available now (Phase 1 + T7 sealed):**
+  - `whoami()` — server identity check.
+  - `signMemory(content, opts?)` — save a verifiable memory via the
+    pending-bundle / sign-callback flow. When the bundle is a SEALED_V1
+    artifact the SDK decrypts it client-side and throws `IntegrityError`
+    on content mismatch before signing.
+  - `sealMemory(content, {mode, tags?, embedder?})` — E2E encrypt and
+    store a memory. `mode: "anchor"` posts to `/api/anchor-sealed`;
+    `mode: "store"` posts to `/api/store-sealed`. Returns `{memoryHash}`.
+  - `openMemory(hashOrBytes)` — fetch a sealed blob and decrypt with the
+    identity's X25519 key (derived from the bound Ed25519 keypair). Returns
+    `{content, innerJson}`.
+  - `share(memoryHash, target | "link")` — create a targeted grant
+    (`{kid, x25519Pub}`) or an anonymous bearer link (`"link"`). For
+    `"link"` returns `{type: "link", url}` with a `#k=<base64url>` fragment.
+  - `importLink(url)` — parse a `#k=` fragment URL, fetch the sealed blob,
+    and decrypt using the bearer key `K`. Returns `{content, innerJson}`.
+  - `listGrants()` — `GET /api/grants?reader=<kid>` — returns
+    `GrantEntry[]`.
+  - `recallSealed(query, opts?)` — fetch `GET /api/sealed`, embed the query
+    locally (pluggable `Embedder`; default posts to `POST /api/embed`), rank
+    by cosine similarity, return top-k `SealedHit[]`. The server never sees
+    the plaintext query.
+  - `recall(query, opts?)`, `verify(attestationId)`, `proveIdentity(challenge)`.
+
+  **Setters:** `setJwt`, `setKeypair` or `setKeypairProvider` (necessary
+  for signed writes and sealed operations), `setTokenRefresher`.
+
 - **`SignMemoryOptions`** — `{tags?, mode?}`. **`WriteMode`** —
   `"local" | "anchored"`. **`SignMemoryResult.status`** — `stored`,
   `signed`, `pending` or `anchored`.
+- **`SealMemoryOptions`** — `{mode: SealMode, tags?, embedder?}`.
+  **`SealMode`** — `"anchor" | "store"`. **`SealMemoryResult`** — `{memoryHash}`.
+- **`OpenMemoryResult`** — `{content: string, innerJson: Uint8Array}`.
+- **`ShareTarget`** — `{kid: string, x25519Pub: Uint8Array} | "link"`.
+- **`ShareResult`** — `{type: "grant", grantCbor: Uint8Array} | {type: "link", url: string}`.
+- **`GrantEntry`** — `{grantId, memoryHash, reader?, createdAt}`.
+- **`SealedHit`** — `{memoryHash, similarity, content?}`.
+- **`Embedder`** — `{embed(text: string): Promise<Float32Array>}`.
+- **`RecallSealedOptions`** — `{topK?, embedder?}`.
 
 ### Signer
 

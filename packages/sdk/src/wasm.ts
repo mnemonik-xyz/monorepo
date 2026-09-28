@@ -50,6 +50,29 @@ interface MnemonicCoreModule {
   sign_cose_payload: (payload: Uint8Array, kp: unknown) => Uint8Array;
   import_keypair_json: (s: string) => unknown;
   export_keypair_json: (kp: unknown) => string;
+  // T5: sealed-memory bindings
+  seal_memory?: (
+    inner_json: Uint8Array,
+    author_ed25519_pub: Uint8Array,
+    artifact_id: string,
+    producer: string,
+    created_at: string
+  ) => unknown; // { outer_cbor: Uint8Array, content_hash: Uint8Array }
+  open_memory?: (outer_cbor: Uint8Array, x25519_secret: Uint8Array) => Uint8Array;
+  open_with_key?: (outer_cbor: Uint8Array, k: Uint8Array) => Uint8Array;
+  make_grant?: (
+    memory_hash: Uint8Array,
+    outer_cbor: Uint8Array,
+    k: Uint8Array,
+    reader_pk: Uint8Array | undefined,
+    author_did: string,
+    perms: string | undefined,
+    created_at: string
+  ) => Uint8Array;
+  open_grant?: (grant_cbor: Uint8Array, x25519_secret: Uint8Array) => Uint8Array;
+  x25519_public_from_ed25519?: (ed25519_pub: Uint8Array) => Uint8Array;
+  link_fragment?: (k: Uint8Array) => string;
+  parse_link_fragment?: (fragment: string) => Uint8Array;
 }
 
 let modulePromise: Promise<MnemonicCoreModule> | null = null;

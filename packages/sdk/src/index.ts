@@ -28,11 +28,21 @@ export type { KeypairJson } from "./keypair.js";
 export { LocalSigner } from "./signer.js";
 export type { Signer } from "./signer.js";
 export type {
+  Embedder,
+  GrantEntry,
   KeypairProvider,
   MnemonicClientConfig,
+  OpenMemoryResult,
   ProveResult,
   RecallHit,
   RecallResult,
+  RecallSealedOptions,
+  SealMemoryOptions,
+  SealMemoryResult,
+  SealMode,
+  SealedHit,
+  ShareResult,
+  ShareTarget,
   SignMemoryOptions,
   SignMemoryResult,
   SignerInterface,

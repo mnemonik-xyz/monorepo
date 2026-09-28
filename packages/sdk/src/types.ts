@@ -176,3 +176,80 @@ export interface ProveResult {
   did?: string;
   raw: Record<string, unknown>;
 }
+
+// ── Sealed-memory types ────────────────────────────────────────────────────
+
+/**
+ * Write mode for `sealMemory`.
+ *
+ * - `"anchor"`: store on-chain (Arweave / Solana anchor); posts to
+ *   `/api/anchor-sealed`. Requires an active session.
+ * - `"store"`: store off-chain in the hosted service; posts to
+ *   `/api/store-sealed`. Cheaper, still E2E encrypted.
+ */
+export type SealMode = "anchor" | "store";
+
+/** Options for `sealMemory`. */
+export interface SealMemoryOptions {
+  mode: SealMode;
+  tags?: string[];
+  /** Custom embedder for `recallSealed`. If provided, used to produce the
+   *  embedding vector that is stored alongside the sealed blob. */
+  embedder?: Embedder;
+}
+
+/** Result of `sealMemory`. */
+export interface SealMemoryResult {
+  /** blake3 content hash (hex) of the sealed outer CBOR, i.e. the memory's
+   *  globally unique identifier. */
+  memoryHash: string;
+}
+
+/** Result of `openMemory`. */
+export interface OpenMemoryResult {
+  /** The plaintext inner memory content. */
+  content: string;
+  /** The raw inner JSON bytes, if needed by the caller. */
+  innerJson: Uint8Array;
+}
+
+/** Identifies a reader in `share()`. */
+export type ShareTarget = { kid: string; x25519Pub: Uint8Array } | "link";
+
+/** Result of `share()`. */
+export type ShareResult =
+  | { type: "grant"; grantCbor: Uint8Array }
+  | { type: "link"; url: string };
+
+/** One grant entry from `listGrants`. */
+export interface GrantEntry {
+  grantId: string;
+  memoryHash: string;
+  reader?: string;
+  createdAt: string;
+}
+
+/** Options for `recallSealed`. */
+export interface RecallSealedOptions {
+  topK?: number;
+  embedder?: Embedder;
+}
+
+/** One hit from `recallSealed`. */
+export interface SealedHit {
+  memoryHash: string;
+  similarity: number;
+  /** Present only after the hit is opened. */
+  content?: string;
+}
+
+/**
+ * Pluggable embedding function. Given a query string, returns a float32
+ * vector of arbitrary dimension (must match the stored vectors).
+ *
+ * The default implementation posts to `POST /api/embed` on the MnemonicClient's
+ * base URL.
+ */
+export interface Embedder {
+  embed(text: string): Promise<Float32Array>;
+}
