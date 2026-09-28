@@ -931,10 +931,22 @@ async fn main() -> anyhow::Result<()> {
         && !cfg.evm_treasury.is_empty()
     {
         tracing::info!("EVM x402 rail enabled (rpc + token + treasury configured)");
+        // Normalise EVM_CHAIN_ID: accept a bare integer (e.g. "84532") or the
+        // full CAIP-2 form (e.g. "eip155:84532"). The 402 body always uses
+        // the full CAIP-2 form.
+        let caip2_network = {
+            let raw = cfg.evm_chain_id.trim();
+            if raw.starts_with("eip155:") {
+                raw.to_string()
+            } else {
+                format!("eip155:{raw}")
+            }
+        };
         Some(payment::EvmPaymentConfig {
             rpc_url: cfg.evm_rpc_url.clone(),
             usdc_token: cfg.evm_usdc_token.to_lowercase(),
             treasury: cfg.evm_treasury.to_lowercase(),
+            caip2_network,
         })
     } else {
         None

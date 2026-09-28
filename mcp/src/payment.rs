@@ -53,7 +53,80 @@ pub struct X402PaymentProof {
     pub network: String,
 }
 
+// ── x402 v2 wire types (M1 — x402-v2-conformance) ────────────────────────────
+//
+// Replaces the bespoke `X402Response` / `PaymentOption` pair with the shapes
+// the x402 v2 spec defines. The old types are kept for reference (M3 removes
+// them); this block is the canonical v2 representation.
+//
+// x402 v2 `PaymentRequired` body:
+//   { x402Version: 2, accepts: [ PaymentRequirements, … ] }
+//
+// A conformant off-the-shelf x402 client can parse this without any custom
+// code. The human approval URL is never a top-level field here; it lives in
+// `extensions` inside the relevant `accepts[]` entry.
+
+/// x402 v2 `PaymentRequired` response body.
+///
+/// Emitted on HTTP 402; the full JSON is also base64-encoded and sent in the
+/// `PAYMENT-REQUIRED` response header (canonical for the REST path, per spec
+/// transport-v2).
+#[derive(Debug, Clone, Serialize)]
+pub struct PaymentRequired {
+    #[serde(rename = "x402Version")]
+    pub x402_version: u8,
+    pub accepts: Vec<PaymentRequirements>,
+    /// The caller's free daily anchor quota, so an agent can see why it must
+    /// pay. Absent when the quota does not apply. Not part of the x402 spec;
+    /// carried as a non-conflicting top-level extension until M3.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub free_anchors: Option<FreeAnchorStatus>,
+}
+
+/// One payment option inside `PaymentRequired.accepts[]`.
+///
+/// Field names are camelCase to match the x402 v2 wire format exactly.
+#[derive(Debug, Clone, Serialize)]
+pub struct PaymentRequirements {
+    /// "exact" — the only registered EVM scheme. `stake` is not advertised
+    /// until U3 maps it onto `batch-settlement`.
+    pub scheme: String,
+    /// CAIP-2 network identifier, e.g. `eip155:84532`.
+    pub network: String,
+    /// Amount in smallest units (micro-USDC), as a decimal string.
+    /// x402 v2 field name — replaces the v1 `maxAmountRequired`.
+    pub amount: String,
+    /// ERC-20 token contract address.
+    pub asset: String,
+    /// Treasury recipient address.
+    #[serde(rename = "payTo")]
+    pub pay_to: String,
+    /// Maximum seconds the payer has to complete the payment.
+    #[serde(rename = "maxTimeoutSeconds")]
+    pub max_timeout_seconds: u32,
+    /// Resource descriptor: URI + human description of what is being paid for.
+    pub resource: ResourceInfo,
+    /// Optional extensions. Used to carry the human approval URL for
+    /// browser-mediated signing without polluting the top-level shape.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extensions: Option<serde_json::Value>,
+}
+
+/// x402 v2 `resource` object — what the payer is paying for.
+#[derive(Debug, Clone, Serialize)]
+pub struct ResourceInfo {
+    /// Canonical URI of the resource (e.g. `https://api.mnemonik.xyz/sign`).
+    pub uri: String,
+    /// Human-readable description shown in approval UIs.
+    pub description: String,
+}
+
+// ── Legacy v1 wire types (kept through M3) ────────────────────────────────────
+
 /// Body returned with HTTP 402 to describe what payment is required.
+/// Kept for the non-Universal-Paywall x402 Solana/EVM path until M3.
+/// New code should use `PaymentRequired` instead.
+#[allow(dead_code)]
 #[derive(Debug, Serialize)]
 pub struct X402Response {
     #[serde(rename = "x402Version")]
@@ -65,6 +138,7 @@ pub struct X402Response {
     pub free_anchors: Option<FreeAnchorStatus>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Serialize)]
 pub struct PaymentOption {
     /// "exact" — caller must send exactly this token + amount.
@@ -93,8 +167,8 @@ pub enum PaymentGate {
     /// mode, so there is no longer an operator-issued api_key to carry — this
     /// is a unit variant.
     Proceed,
-    /// Return HTTP 402 with this body.
-    NeedPayment(X402Response),
+    /// Return HTTP 402 with a conformant x402 v2 body.
+    NeedPayment(PaymentRequired),
     /// Return HTTP 402 with a Universal Paywall exact quote.
     NeedUniversalPaywall(UniversalPaywallPaymentRequired),
     /// Bad credentials / payment verification failure — return 401/402 message.
@@ -653,33 +727,84 @@ pub fn release_x402_nonce(store: &SqliteStore, tx_sig: &str) -> anyhow::Result<(
 
 // ── Builder ──────────────────────────────────────────────────────────────────
 
-fn x402_required(
+/// Build a conformant x402 v2 `PaymentRequired` from a Universal Paywall quote.
+///
+/// The human approval URL is carried in `extensions.approval_url` (not at the
+/// top level) so the body has no unrecognised top-level fields. An off-the-shelf
+/// x402 client that doesn't know about `extensions` simply ignores it.
+pub fn up_payment_required(
+    up: &UniversalPaywallPaymentRequired,
+    resource_uri: &str,
+) -> PaymentRequired {
+    let extensions = serde_json::json!({
+        "approval_url": up.approval_url,
+        "operation_id": up.operation_id,
+        "quote_id": up.quote_id,
+        "binding_digest": up.binding_digest,
+        "payer_wallet": up.payer_wallet,
+    });
+    let req = PaymentRequirements {
+        scheme: "exact".into(),
+        network: up.network.clone(),
+        amount: up.amount.clone(),
+        asset: up.asset.clone(),
+        pay_to: up.pay_to.clone(),
+        max_timeout_seconds: 300,
+        resource: ResourceInfo {
+            uri: resource_uri.to_string(),
+            description: "Mnemonic anchored memory write".into(),
+        },
+        extensions: Some(extensions),
+    };
+    PaymentRequired {
+        x402_version: 2,
+        accepts: vec![req],
+        free_anchors: None,
+    }
+}
+
+/// Build an x402 v2 conformant `PaymentRequired` body.
+///
+/// `accepts[]` carries one `exact` entry per configured network. Solana is
+/// always present (using the `solana-mainnet` network id — a CAIP-2 SVM
+/// namespace does not yet exist in the x402 spec; kept unchanged so existing
+/// Solana clients remain unaffected). EVM entries use CAIP-2 ids from
+/// `EvmPaymentConfig.caip2_network`.
+pub fn x402_required(
     treasury: &str,
     usdc_mint: &str,
     cost: i64,
     description: &str,
     evm: Option<&EvmPaymentConfig>,
-) -> X402Response {
-    let mut accepts = vec![PaymentOption {
+) -> PaymentRequired {
+    let resource = ResourceInfo {
+        uri: String::new(),
+        description: description.to_string(),
+    };
+    let mut accepts = vec![PaymentRequirements {
         scheme: "exact".into(),
         network: "solana-mainnet".into(),
-        max_amount_required: cost.to_string(),
+        amount: cost.to_string(),
         asset: usdc_mint.to_string(),
         pay_to: treasury.to_string(),
-        description: description.to_string(),
+        max_timeout_seconds: 300,
+        resource: resource.clone(),
+        extensions: None,
     }];
     if let Some(evm) = evm {
-        accepts.push(PaymentOption {
+        accepts.push(PaymentRequirements {
             scheme: "exact".into(),
-            network: "arc".into(),
-            max_amount_required: cost.to_string(),
+            network: evm.caip2_network.clone(),
+            amount: cost.to_string(),
             asset: evm.usdc_token.clone(),
             pay_to: evm.treasury.clone(),
-            description: description.to_string(),
+            max_timeout_seconds: 300,
+            resource: resource.clone(),
+            extensions: None,
         });
     }
-    X402Response {
-        x402_version: 1,
+    PaymentRequired {
+        x402_version: 2,
         accepts,
         free_anchors: None,
     }
@@ -688,11 +813,12 @@ fn x402_required(
 // ── USDC transfer verification ───────────────────────────────────────────────
 
 /// Verify that `tx_sig` transfers at least `min_amount` micro-USDC of `usdc_mint`
-/// to `recipient`.  Returns the actual amount transferred (>= min_amount) on
+/// to `recipient`. Returns the actual amount transferred (>= min_amount) on
 /// success, or `Ok(None)` if the transfer is absent / insufficient.
 ///
 /// This is a payment concern and lives here (not in `mnemonic_core::solana`):
-/// core knows chain primitives; the `USDC vs recipient` policy is mcp's.
+/// core provides the typed `get_token_balance_delta` primitive; the policy
+/// (which token, which recipient, minimum amount) lives here (Task 20).
 pub async fn verify_usdc_transfer(
     client: &SolanaClient,
     tx_sig: &str,
@@ -700,53 +826,11 @@ pub async fn verify_usdc_transfer(
     usdc_mint: &str,
     min_amount: u64,
 ) -> anyhow::Result<Option<u64>> {
-    let result = client.rpc("getTransaction", serde_json::json!([
-        tx_sig,
-        {"encoding": "jsonParsed", "commitment": "confirmed", "maxSupportedTransactionVersion": 0}
-    ])).await?;
-
-    if result.is_null() {
-        return Ok(None);
+    // Delegate raw RPC + JSON parsing to the typed core method.
+    match client.get_token_balance_delta(tx_sig, recipient, usdc_mint).await? {
+        Some(delta) if delta >= min_amount => Ok(Some(delta)),
+        _ => Ok(None),
     }
-
-    // Reject failed transactions
-    if !result["meta"]["err"].is_null() {
-        return Ok(None);
-    }
-
-    // Walk postTokenBalances looking for recipient + mint with increased balance
-    let pre = result["meta"]["preTokenBalances"].as_array();
-    let post = result["meta"]["postTokenBalances"].as_array();
-
-    if let (Some(pre_balances), Some(post_balances)) = (pre, post) {
-        for post_entry in post_balances {
-            let owner = post_entry["owner"].as_str().unwrap_or("");
-            let mint = post_entry["mint"].as_str().unwrap_or("");
-            if owner != recipient || mint != usdc_mint {
-                continue;
-            }
-            let post_amount: u64 = post_entry["uiTokenAmount"]["amount"]
-                .as_str()
-                .unwrap_or("0")
-                .parse()
-                .unwrap_or(0);
-
-            let account_index = post_entry["accountIndex"].as_u64().unwrap_or(u64::MAX);
-            let pre_amount: u64 = pre_balances
-                .iter()
-                .find(|e| e["accountIndex"].as_u64() == Some(account_index))
-                .and_then(|e| e["uiTokenAmount"]["amount"].as_str())
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(0);
-
-            let delta = post_amount.saturating_sub(pre_amount);
-            if delta >= min_amount {
-                return Ok(Some(delta));
-            }
-        }
-    }
-
-    Ok(None)
 }
 
 // ── Payment DB helpers (operate on SqliteStore from mnemonic-core) ───────────
@@ -1696,6 +1780,10 @@ pub struct EvmPaymentConfig {
     pub usdc_token: String,
     /// Treasury recipient address (lowercased `0x…`).
     pub treasury: String,
+    /// CAIP-2 network identifier, e.g. `eip155:84532`. Used in the conformant
+    /// x402 v2 `PaymentRequired` body. Defaults to `"eip155:1"` when not set
+    /// (EVM_CHAIN_ID env var absent).
+    pub caip2_network: String,
 }
 
 /// keccak256("Transfer(address,address,uint256)") — the ERC-20 Transfer topic0.
@@ -2615,5 +2703,103 @@ mod tests {
         assert_eq!(proof(" abcdef0123 ", "base"), canonical);
         // Solana base58 is case-sensitive: only trimmed.
         assert_eq!(proof(" 5AbC ", "solana-mainnet"), "5AbC");
+    }
+
+    // ── M1: x402 v2 wire format (x402-v2-conformance) ──────────────────────
+
+    /// x402_required produces a conformant v2 body with no unrecognised
+    /// top-level fields and CAIP-2 network ids.
+    #[test]
+    fn x402_required_v2_shape_solana_only() {
+        let body = x402_required(
+            "treasury111",
+            "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+            1000,
+            "mnemonic_sign_memory attestation fee",
+            None,
+        );
+        assert_eq!(body.x402_version, 2, "must be x402Version 2");
+        assert_eq!(body.accepts.len(), 1);
+        let a = &body.accepts[0];
+        assert_eq!(a.scheme, "exact");
+        assert_eq!(a.network, "solana-mainnet");
+        assert_eq!(a.amount, "1000");
+        assert_eq!(a.asset, "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v");
+        assert_eq!(a.pay_to, "treasury111");
+        assert_eq!(a.max_timeout_seconds, 300);
+        // No approval_url at top level — it goes in extensions for the UP rail.
+        let json = serde_json::to_value(&body).unwrap();
+        assert!(json.get("approval_url").is_none(), "approval_url must not be top-level");
+        assert!(json.get("status").is_none(), "status must not be top-level");
+        assert!(json.get("correlation_id").is_none(), "correlation_id must not be top-level");
+    }
+
+    #[test]
+    fn x402_required_v2_shape_evm_network_caip2() {
+        let evm = EvmPaymentConfig {
+            rpc_url: "http://rpc.example".into(),
+            usdc_token: "0xtoken".into(),
+            treasury: "0xtreasury".into(),
+            caip2_network: "eip155:84532".into(),
+        };
+        let body = x402_required("sol_treasury", "sol_mint", 500, "fee", Some(&evm));
+        assert_eq!(body.x402_version, 2);
+        assert_eq!(body.accepts.len(), 2, "Solana + EVM entries");
+        let evm_entry = &body.accepts[1];
+        assert_eq!(evm_entry.network, "eip155:84532", "EVM entry must use CAIP-2");
+        assert_eq!(evm_entry.amount, "500");
+        assert_eq!(evm_entry.asset, "0xtoken");
+        assert_eq!(evm_entry.pay_to, "0xtreasury");
+    }
+
+    #[test]
+    fn up_payment_required_approval_url_in_extensions() {
+        let up = UniversalPaywallPaymentRequired {
+            operation_id: "op-1".into(),
+            quote_id: "q-1".into(),
+            approval_url: "https://example.com/approve?op=op-1".into(),
+            scheme: "exact".into(),
+            network: "eip155:84532".into(),
+            asset: "0xasset".into(),
+            pay_to: "0xpayto".into(),
+            payer_wallet: "0xpayer".into(),
+            amount: "2000".into(),
+            binding_digest: "0xdigest".into(),
+        };
+        let body = up_payment_required(&up, "https://api.example.com/mcp");
+        assert_eq!(body.x402_version, 2);
+        assert_eq!(body.accepts.len(), 1);
+        let a = &body.accepts[0];
+        assert_eq!(a.scheme, "exact");
+        assert_eq!(a.network, "eip155:84532");
+        assert_eq!(a.amount, "2000");
+        // approval_url must be in extensions, not at the top level.
+        let ext = a.extensions.as_ref().unwrap();
+        assert_eq!(ext["approval_url"], "https://example.com/approve?op=op-1");
+        assert_eq!(ext["operation_id"], "op-1");
+        assert_eq!(ext["payer_wallet"], "0xpayer");
+        // Top-level must have no unrecognised fields.
+        let json = serde_json::to_value(&body).unwrap();
+        assert!(json.get("approval_url").is_none(), "approval_url must not be top-level");
+        assert!(json.get("operation_id").is_none(), "operation_id must not be top-level");
+    }
+
+    /// Serialised `PaymentRequired` has exactly the fields the spec expects:
+    /// x402Version (camelCase), accepts, and optionally free_anchors.
+    #[test]
+    fn payment_required_top_level_field_names() {
+        let body = x402_required("t", "m", 100, "d", None);
+        let json = serde_json::to_value(&body).unwrap();
+        let obj = json.as_object().unwrap();
+        let keys: Vec<_> = obj.keys().collect();
+        // Only x402Version and accepts at the top level (free_anchors is absent).
+        assert!(keys.contains(&&"x402Version".to_string()), "x402Version key missing");
+        assert!(keys.contains(&&"accepts".to_string()), "accepts key missing");
+        // maxAmountRequired must NOT appear (v1 field).
+        let accepts = &json["accepts"][0];
+        assert!(accepts.get("maxAmountRequired").is_none(), "v1 field maxAmountRequired must be absent");
+        assert!(accepts.get("amount").is_some(), "v2 field amount must be present");
+        assert!(accepts.get("resource").is_some(), "resource object must be present");
+        assert!(accepts.get("maxTimeoutSeconds").is_some(), "maxTimeoutSeconds must be present");
     }
 }

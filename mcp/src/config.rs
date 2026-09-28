@@ -87,6 +87,11 @@ pub struct Config {
     pub evm_rpc_url: String,
     pub evm_usdc_token: String,
     pub evm_treasury: String,
+    /// CAIP-2 chain id for the EVM rail, e.g. `eip155:84532` (Base Sepolia) or
+    /// `eip155:1` (Ethereum mainnet). Used in the x402 v2 `PaymentRequired`
+    /// body. Defaults to `"eip155:1"` when EVM_CHAIN_ID is unset. The prefix
+    /// `eip155:` is added automatically if the value is a bare integer.
+    pub evm_chain_id: String,
     /// Minimum / initial cost of mnemonic_sign_memory in micro-USDC (floor price)
     pub sign_memory_cost_micro_usdc: i64,
 
@@ -307,6 +312,7 @@ impl Config {
             evm_rpc_url: env_or("EVM_RPC_URL", ""),
             evm_usdc_token: env_or("EVM_USDC_TOKEN", ""),
             evm_treasury: env_or("EVM_TREASURY", ""),
+            evm_chain_id: env_or("EVM_CHAIN_ID", "eip155:1"),
             sign_memory_cost_micro_usdc: env_or("SIGN_MEMORY_COST_MICRO_USDC", "1000")
                 .parse()
                 .unwrap_or(1000),
