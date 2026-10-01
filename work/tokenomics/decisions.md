@@ -67,3 +67,41 @@ never the salary base.
 - **Q-5.** Governance: token vote, contributor council, or both (tech-spec § 7.6)?
 - **Q-6.** The numbers for gates G-1 to G-3.
 - **Q-7.** Raise outside money or not? It changes the 7.4 allocation and the legal work.
+
+---
+
+## 2026-10-01 — Product scope update
+
+**Owner input:** there is no current goal to move to a native token.
+The current goal is to define and sell signed-memory delivery and independent recovery.
+
+The earlier D-1–D-5 proposals remain historical proposals.
+They do not authorize token implementation, issuance or launch.
+Use [product protocol](../protocol-product/README.md) for the current product plan.
+
+### Disposition of Q-1–Q-7
+
+| Question | Current disposition | Authority |
+|---|---|---|
+| Q-1 Token timing | No token in the active product roadmap; any future launch needs a new decision | Owner input |
+| Q-2 Router split | Defer numeric split; measure service costs and incident reserve first | Recommendation |
+| Q-3 Wrapper and signers | Entity, jurisdiction and legal obligations need counsel; custody controls need owner approval | Counsel and owner |
+| Q-4 Home chain | Defer token home chain; preserve modular existing payment rails | Recommendation |
+| Q-5 Governance | Publish maintainer decisions and spending controls; no token voting in current scope | Recommendation |
+| Q-6 Numeric gates | Token gates remain dormant; use delivery, recovery and pilot evidence for product release | Recommendation |
+| Q-7 Outside financing | Evaluate customer revenue, grants or equity against runway; no token-sale dependency | Owner and counsel |
+
+### Qualifications to audit findings
+
+F1 is incomplete: the current MCP dispatcher also gates `mnemonic_attest_a2a` on paid deployments.
+F2 is not a universal payment-rail guarantee.
+Payment acceptance or settlement can precede verified delivery on some paths.
+Separate financial and delivery states, with an explicit failure remedy.
+
+F3 provides inclusion evidence from a SQL commitment.
+It does not prove omission without independently authenticated scope and a trusted commitment.
+It does not prove complete history or correct semantic ranking.
+
+These qualifications come from static inspection at `44fc172e3afa0efcd3beff2fa555b05dd8583eec`.
+They do not claim that the proposed implementation changes have shipped.
+
