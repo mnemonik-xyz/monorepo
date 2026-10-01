@@ -30,6 +30,9 @@ export interface A2AAttestOptions extends OutputOptions {
   context: string;
   /** Optional previous attestation ID */
   prev?: string;
+  /** JSON list of {card, trustedCardSigner}. */
+  recipientsFile?: string;
+  chunkSize?: number;
   baseUrl?: string;
 }
 
@@ -60,9 +63,21 @@ export async function runA2AAttest(opts: A2AAttestOptions): Promise<void> {
   }
 
   const baseUrl = opts.baseUrl ?? process.env.MNEMONIC_BASE_URL ?? DEFAULT_BASE_URL;
-  const { client } = await openSession(baseUrl, opts, false);
+  const { client, signer } = await openSession(baseUrl, opts, true);
+  client.setKeypairProvider(() => signer.keypair());
 
-  const attestOpts = prev ? { prevId: prev } : {};
+  let recipients: import("@mnemonik-xyz/sdk").A2ARecipientCard[] | undefined;
+  if (opts.recipientsFile) {
+    try {
+      recipients = JSON.parse(readFileSync(opts.recipientsFile,"utf8"));
+      if (!Array.isArray(recipients) || recipients.length === 0) throw new Error("expected a non-empty recipient list");
+    } catch (e) { throw new UserError(`a2a attest: invalid recipients file: ${String(e)}`); }
+  }
+  if (opts.chunkSize !== undefined && !recipients) throw new UserError("--chunk-size requires --recipients-file");
+  const attestOpts = {
+    ...(prev ? {prevId:prev}:{}),
+    ...(recipients ? {sealed:{recipients,...(opts.chunkSize !== undefined?{chunkSize:opts.chunkSize}:{})}}:{})
+  };
   let attestationId: string;
 
   try {
@@ -91,6 +106,9 @@ export interface A2ARecallOptions extends OutputOptions {
   context: string;
   limit?: number;
   kind?: "task" | "message" | "artifact" | "all";
+  sealed?: boolean;
+  /** Verify this pinned author and decrypt each result locally. */
+  openAuthor?: string;
   baseUrl?: string;
 }
 
@@ -100,18 +118,25 @@ export async function runA2ARecall(opts: A2ARecallOptions): Promise<void> {
   }
 
   const baseUrl = opts.baseUrl ?? process.env.MNEMONIC_BASE_URL ?? DEFAULT_BASE_URL;
-  const { client } = await openSession(baseUrl, opts, false);
+  const { client, signer } = await openSession(baseUrl, opts, !!opts.openAuthor);
+  if (opts.openAuthor) client.setKeypairProvider(() => signer.keypair());
 
   let results;
   try {
     results = await client.recallA2AContext(opts.context, {
       ...(typeof opts.limit === "number" ? { limit: opts.limit } : {}),
       ...(opts.kind ? { kind: opts.kind } : {}),
+      ...(opts.sealed !== undefined ? {sealed:opts.sealed}:{}),
     });
   } catch (e) {
     throw fromSdkError(e);
   }
 
+  if (opts.openAuthor) {
+    try {
+      results = await Promise.all(results.map(async (a) => ({...a,payload:await client.openA2AAttestation(a,opts.openAuthor!)})));
+    } catch (e) { throw fromSdkError(e); }
+  }
   format({ results }, opts, (_d, _color) => {
     if (results.length === 0) {
       return `no attestations found for context: ${opts.context}`;

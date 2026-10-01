@@ -442,3 +442,14 @@ publishing a new version.
 ## License
 
 Apache-2.0.
+
+## Sealed A2A
+
+```sh
+mnemonic a2a attest --kind message --file message.json --context ctx --recipients-file recipients.json --chunk-size 16384
+mnemonic a2a recall --context ctx --sealed --open-author TRUSTED_AUTHOR_PUBKEY --json
+```
+
+`recipients.json` is an array of `{card, trustedCardSigner}`. Signing and opening
+use the local identity/keychain. The trusted author and card-signing keys must
+come from your trust configuration. See [Sealed A2A](../../docs/sealed-a2a.md).

@@ -35,7 +35,7 @@ cd "$REPO_ROOT"
 # Wipe any stale default-output directory before building.
 rm -rf core/pkg core/pkg-web core/pkg-nodejs
 
-wasm-pack build core --target web --features wasm
+wasm-pack build core --target web --features wasm,a2a-experimental
 
 # Re-anchor the output to a target-suffixed dir so multiple targets can coexist
 # and the path is unambiguous from the SDK side.
@@ -46,7 +46,7 @@ echo "✓ SDK wasm artifact at $REPO_ROOT/core/pkg-web/"
 # test (`packages/sdk/test/cose.golden.test.ts`) which loads the WASM via
 # Node's CJS-friendly `import()` path. This artifact is NOT shipped in the
 # npm tarball — production consumers use the `--target web` build above.
-wasm-pack build core --target nodejs --features wasm
+wasm-pack build core --target nodejs --features wasm,a2a-experimental
 mv core/pkg core/pkg-nodejs
 echo "✓ test wasm artifact at $REPO_ROOT/core/pkg-nodejs/"
 

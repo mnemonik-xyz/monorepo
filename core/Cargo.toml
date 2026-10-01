@@ -154,3 +154,7 @@ wasm-bindgen-test = "=0.3.50"
 
 [[example]]
 name = "enumerate"
+
+[[example]]
+name = "emit_sealed_a2a"
+required-features = ["a2a-experimental"]

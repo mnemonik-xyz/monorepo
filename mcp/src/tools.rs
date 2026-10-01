@@ -5,7 +5,7 @@
 //! - Arweave payload: COSE_Sign1 envelope (not raw JSON)
 //! - Solana anchor: {"h": blake3_hash, "a": arweave_tx, "v": 2}
 
-use solana_sdk::signature::{Keypair, Signer};
+use solana_sdk::signature::Keypair;
 
 use std::time::Duration;
 
@@ -4606,148 +4606,41 @@ mod unlock_cache_recall_tests {
 
 // ── A2A MCP tools ─────────────────────────────────────────────────────────────
 
-/// `mnemonic_attest_a2a` handler.
-///
-/// Attests an A2A object (task / message / artifact) using the operator's
-/// signing keypair and the `mnemonic-a2a` adapter. Returns
-/// `{attestation_id, blake3, cose_envelope_hex}`.
-///
-/// In `local` storage mode every attestation gets a synthetic `local:<uuid>`
-/// arweave_tx (the a2a adapter already does this internally). Full-mode Arweave
-/// anchoring for A2A events is opt-in via a future `anchor: true` flag and is
-/// not yet implemented.
-pub fn attest_a2a(
-    keypair_lazy: &LazyKeypair,
+/// Ingest client signatures without reading any operator secret.
+#[allow(clippy::too_many_arguments)]
+pub fn ingest_a2a(
     store: &std::sync::Mutex<SqliteStore>,
+    signed_hex: &str,
+    owner: &str,
     kind: &str,
-    payload: &serde_json::Value,
-    context_id: &str,
-    prev_id: Option<&str>,
+    context: &str,
+    sealed: bool,
+    prev: Option<&str>,
 ) -> Result<serde_json::Value, JsonRpcError> {
-    let kp = match signing_keypair(keypair_lazy) {
-        Ok(kp) => kp,
-        Err(ToolError::TypedRpc(e)) => return Err(e),
-        Err(ToolError::Other(e)) => return Err(JsonRpcError::simple(-32603, e.to_string())),
-    };
-
-    let store_guard = store
+    if signed_hex.len() > mnemonic_core::codec::a2a::signed::MAX_A2A_BYTES * 2 {
+        return Err(JsonRpcError::simple(-32602, "A2A envelope too large"));
+    }
+    let signed =
+        hex::decode(signed_hex).map_err(|_| JsonRpcError::simple(-32602, "invalid signed hex"))?;
+    let guard = store
         .lock()
         .map_err(|_| JsonRpcError::simple(-32603, "store mutex poisoned"))?;
-
-    let attestation_id = match kind {
-        "task" => {
-            let task: mnemonic_a2a::Task =
-                serde_json::from_value(payload.clone()).map_err(|e| {
-                    JsonRpcError::simple(-32602, format!("payload is not a valid Task: {e}"))
-                })?;
-            mnemonic_a2a::attest_task(&*store_guard, &task, kp, prev_id)
-                .map_err(|e| JsonRpcError::simple(-32603, e.to_string()))?
-        }
-        "message" => {
-            let msg: mnemonic_a2a::Message =
-                serde_json::from_value(payload.clone()).map_err(|e| {
-                    JsonRpcError::simple(-32602, format!("payload is not a valid Message: {e}"))
-                })?;
-            mnemonic_a2a::attest_message(&*store_guard, &msg, kp, prev_id)
-                .map_err(|e| JsonRpcError::simple(-32603, e.to_string()))?
-        }
-        "artifact" => {
-            let art: mnemonic_a2a::A2aArtifact =
-                serde_json::from_value(payload.clone()).map_err(|e| {
-                    JsonRpcError::simple(
-                        -32602,
-                        format!("payload is not a valid A2aArtifact: {e}"),
-                    )
-                })?;
-            mnemonic_a2a::attest_artifact(&*store_guard, &art, context_id, kp, prev_id)
-                .map_err(|e| JsonRpcError::simple(-32603, e.to_string()))?
-        }
-        _ => {
-            return Err(JsonRpcError::simple(
-                -32602,
-                format!("unknown kind {kind:?}; expected task | message | artifact"),
-            ))
-        }
-    };
-
-    // Retrieve the stored COSE envelope hex (stored in arweave_tx column by
-    // attest_jcs internally). attest_jcs stores `local:<attestation_id>` in
-    // solana_tx, so use find_by_tx on that synthetic id.
-    let local_tx = format!("local:{attestation_id}");
-    // find_by_tx is owner-scoped; use the signer pubkey as owner (A2A rows
-    // are written with owner_pubkey == signer_pubkey by attest_jcs).
-    let signer_pubkey = kp.pubkey().to_string();
-    let row = store_guard
-        .find_by_tx(&local_tx, &signer_pubkey)
-        .map_err(|e| JsonRpcError::simple(-32603, format!("find_by_tx: {e}")))?;
-
-    let (cose_envelope_hex, blake3) = match row {
-        Some(r) => (r.arweave_tx, r.content_hash),
-        None => (String::new(), String::new()),
-    };
-
-    Ok(serde_json::json!({
-        "attestation_id": attestation_id,
-        "blake3": blake3,
-        "cose_envelope_hex": cose_envelope_hex,
-    }))
+    mnemonic_a2a::ingest_signed_a2a(&guard, &signed, owner, kind, context, sealed, prev)
+        .map_err(|e| JsonRpcError::simple(-32602, e.to_string()))
 }
 
-/// `mnemonic_recall_a2a` handler.
-///
-/// Returns all attestation rows stored under `context_id`, newest first.
-/// `kind` (optional, default `"all"`) filters by the tag added by `attest_*`:
-/// `"task"` → tag `"a2a-task"`, `"message"` → `"a2a-message"`,
-/// `"artifact"` → `"a2a-artifact"`. `limit` caps the returned rows.
-pub fn recall_a2a(
+pub fn recall_signed_a2a(
     store: &std::sync::Mutex<SqliteStore>,
-    context_id: &str,
-    limit: Option<usize>,
+    owner: &str,
+    context: &str,
     kind: Option<&str>,
+    sealed: Option<bool>,
+    limit: usize,
 ) -> Result<serde_json::Value, JsonRpcError> {
-    let store_guard = store
+    let guard = store
         .lock()
         .map_err(|_| JsonRpcError::simple(-32603, "store mutex poisoned"))?;
-
-    let rows = mnemonic_a2a::recall_by_context(&*store_guard, context_id, limit)
-        .map_err(|e| JsonRpcError::simple(-32603, e.to_string()))?;
-
-    // Optional kind filter: map the user-facing kind name to the internal tag.
-    let kind_tag: Option<&str> = match kind {
-        None | Some("all") => None,
-        Some("task") => Some("a2a-task"),
-        Some("message") => Some("a2a-message"),
-        Some("artifact") => Some("a2a-artifact"),
-        Some(other) => {
-            return Err(JsonRpcError::simple(
-                -32602,
-                format!("unknown kind {other:?}; expected task | message | artifact | all"),
-            ))
-        }
-    };
-
-    // Filter rows by tag when a kind was specified. AttestationRow does not
-    // carry tags directly; filter is a no-op when kind == None / "all".
-    // Tags are stored in the separate `attestation_tags` table and not
-    // returned in AttestationRow, so we skip tag-filtering here and return
-    // all rows for the context_id (the kind filter is advisory for the
-    // caller's display logic). This is correct because the a2a adapter
-    // already segregates rows by kind via the tag mechanism, and callers
-    // who need strict kind-isolation should query by separate context_ids.
-    let _ = kind_tag; // acknowledged: filtering skipped, all rows returned
-
-    let items: Vec<serde_json::Value> = rows
-        .into_iter()
-        .map(|r| {
-            serde_json::json!({
-                "attestation_id": r.attestation_id,
-                "content_hash": r.content_hash,
-                "solana_tx": r.solana_tx,
-                "cose_envelope_hex": r.arweave_tx,
-                "signer_pubkey": r.signer_pubkey,
-            })
-        })
-        .collect();
-
-    Ok(serde_json::json!({ "attestations": items }))
+    let rows = mnemonic_a2a::recall_signed_a2a(&guard, owner, context, kind, sealed, limit)
+        .map_err(|e| JsonRpcError::simple(-32602, e.to_string()))?;
+    Ok(serde_json::json!({"attestations":rows}))
 }

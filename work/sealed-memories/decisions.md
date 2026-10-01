@@ -658,3 +658,22 @@ async Mutex across `.await` is correct and expected.
   skip gracefully rather than failing.
 - **3 note:** D-7 VACUUM/backup rotation procedure should be documented in
   decisions.md or an ops runbook if in-place sealing is ever run.
+
+
+## 2026-10-01: Client signatures cover A2A routing and sealed stream finality
+
+Use a client-signed JCS binding (`mnemonic.a2a.signed.v1`) to cover kind, context,
+parent, time, sealed carrier and optional completed chunk manifest. HTTP MCP
+verifies the JWT subject against every author signature; it never seals or
+signs for a remote caller. Preserve canonical A2A JSON fields inside the
+ciphertext; do not recast the original payload through lossy typed codecs.
+
+Verify detached AgentCard JWS using caller-pinned keys before discovering the
+recipient identity or optional signed base64 X25519 `enc_key`. Do not treat
+structural JWS coverage or a card-supplied signing key as trusted verification.
+
+A separate completed stream codec binds header, stream, index, previous hash
+and final flag in AEAD, with random per-stream nonce prefix. It leaves the
+existing index-only chunk helpers unchanged. Verify chain before releasing
+plaintext. #61 per-SSE transport integration remains open; do not close task 14
+or #242 on the strength of a local completed-manifest round-trip alone.

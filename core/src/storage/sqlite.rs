@@ -93,6 +93,14 @@ CREATE TABLE IF NOT EXISTS blog_posts (
     visibility TEXT NOT NULL DEFAULT 'public'
 );
 CREATE INDEX IF NOT EXISTS idx_blog_posts_published_at ON blog_posts(published_at);
+CREATE TABLE IF NOT EXISTS a2a_bindings (
+    attestation_id TEXT PRIMARY KEY REFERENCES attestations(attestation_id),
+    kind TEXT NOT NULL,
+    memory_hash TEXT,
+    prev_id TEXT,
+    signed_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_a2a_memory_hash ON a2a_bindings(memory_hash);
 "#;
 
 /// SQL backing `AttestationStore::search` when the caller passes a
@@ -2174,6 +2182,93 @@ fn bytes_to_floats(b: &[u8]) -> Vec<f32> {
 
 fn l2_norm(v: &[f32]) -> f32 {
     v.iter().map(|x| x * x).sum::<f32>().sqrt()
+}
+
+#[cfg(feature = "a2a-experimental")]
+impl SqliteStore {
+    /// Save verified client bytes and their indexes in one transaction.
+    pub fn save_signed_a2a(
+        &self,
+        signed: &[u8],
+        v: &crate::codec::a2a::signed::VerifiedBinding,
+    ) -> anyhow::Result<serde_json::Value> {
+        use base64::Engine as _;
+        let id = format!("a2a:{}", v.content_hash);
+        let b = &v.binding;
+        let tx = self.conn.unchecked_transaction()?;
+        if let Some(parent) = &b.prev_id {
+            let exists: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM attestations a JOIN a2a_bindings b ON b.attestation_id=a.attestation_id WHERE a.attestation_id=?1 AND a.context_id=?2 AND (a.owner_pubkey=?3 OR EXISTS(SELECT 1 FROM grants g WHERE g.memory_hash=b.memory_hash AND g.reader_kid=?3 AND g.author_pubkey=a.signer_pubkey AND g.withdrawn_at IS NULL)))", params![parent,b.context_id,v.signer], |r| r.get(0))?;
+            anyhow::ensure!(exists, "parent not found in signed context");
+        }
+        let tags = serde_json::to_string(&vec!["a2a".to_string(), format!("a2a-{}", b.kind)])?;
+        let content = if b.sealed {
+            String::new()
+        } else {
+            serde_json::to_string(&b.payload)?
+        };
+        let envelope = hex::encode(signed);
+        tx.execute("INSERT OR IGNORE INTO attestations
+            (attestation_id, content, content_hash, tags, solana_tx, arweave_tx, signer_pubkey, created_at, owner_pubkey, write_mode, visibility, plaintext_on_arweave, privacy, sealed_blob, context_id)
+            VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?7,'local','private',0,?9,?10,?11)",
+            params![id,content,v.content_hash,tags,format!("local:{id}"),envelope,v.signer,b.created_at,if b.sealed { "sealed" } else { "plaintext" },v.sealed_cose,b.context_id])?;
+        let memory_hash = v.grants.first().map(|g| g.2.as_str());
+        tx.execute("INSERT OR IGNORE INTO a2a_bindings(attestation_id,kind,memory_hash,prev_id,signed_at) VALUES (?1,?2,?3,?4,?5)", params![id,b.kind,memory_hash,b.prev_id,b.created_at])?;
+        for (reader, grant, hash) in &v.grants {
+            let grant_id = blake3::hash(grant).to_hex().to_string();
+            tx.execute("INSERT OR IGNORE INTO grants(id,memory_hash,reader_kid,grant_cose,author_pubkey,created_at) VALUES (?1,?2,?3,?4,?5,?6)",params![grant_id,hash,reader,grant,v.signer,b.created_at])?;
+        }
+        tx.commit()?;
+        Ok(
+            serde_json::json!({"attestation_id":id,"blake3":v.content_hash,"cose_envelope_hex":envelope,"sealed":b.sealed,
+            "sealed_payload": b.sealed.then(|| b.payload["parts"][0]["data"].clone()),
+            "sealed_cose":v.sealed_cose.as_ref().map(|s|base64::engine::general_purpose::STANDARD.encode(s))}),
+        )
+    }
+
+    /// Return only the author or a signed grant recipient's records.
+    pub fn recall_signed_a2a(
+        &self,
+        owner: &str,
+        context: &str,
+        kind: Option<&str>,
+        sealed: Option<bool>,
+        limit: usize,
+    ) -> anyhow::Result<Vec<serde_json::Value>> {
+        use crate::codec::a2a::signed::verify_signed_a2a;
+        let kind = match kind {
+            None | Some("all") => None,
+            Some(k @ ("task" | "message" | "artifact")) => Some(k),
+            _ => anyhow::bail!("invalid kind"),
+        };
+        anyhow::ensure!((1..=1000).contains(&limit), "limit must be 1..1000");
+        let mut stmt = self.conn.prepare("SELECT a.attestation_id,a.arweave_tx,a.content_hash,a.signer_pubkey FROM attestations a
+            JOIN a2a_bindings b ON b.attestation_id=a.attestation_id
+            WHERE a.context_id=?1 AND (?2 IS NULL OR b.kind=?2) AND (?3 IS NULL OR (a.privacy='sealed')=?3)
+            AND (a.owner_pubkey=?4 OR EXISTS(SELECT 1 FROM grants g WHERE g.memory_hash=b.memory_hash AND g.reader_kid=?4 AND g.author_pubkey=a.signer_pubkey AND g.withdrawn_at IS NULL))
+            ORDER BY a.created_at DESC,a.attestation_id DESC LIMIT ?5")?;
+        let rows = stmt.query_map(params![context, kind, sealed, owner, limit as i64], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (id, cose, hash, signer) = row?;
+            let verified = verify_signed_a2a(&hex::decode(&cose)?, Some(&signer))?;
+            anyhow::ensure!(
+                verified.content_hash == hash && verified.binding.context_id == context,
+                "stored binding mismatch"
+            );
+            let b = verified.binding;
+            out.push(serde_json::json!({"attestation_id":id,"content_hash":hash,"signer_pubkey":signer,"cose_envelope_hex":cose,
+                "kind":b.kind,"signed_at":b.created_at,"context_id":b.context_id,"prev_id":b.prev_id,"sealed":b.sealed,
+                "payload":b.payload,"sealed_payload":b.sealed.then(||b.payload["parts"][0]["data"].clone()),"stream":b.stream}));
+        }
+        Ok(out)
+    }
 }
 
 #[cfg(test)]

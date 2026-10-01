@@ -347,6 +347,8 @@ export function buildProgram(): Command {
     .requiredOption("--file <path>", "path to a JSON file containing the A2A object")
     .requiredOption("--context <id>", "context identifier")
     .option("--prev <id>", "link to a prior attestation")
+    .option("--recipients-file <path>", "seal for signed AgentCards with pinned card-signing keys")
+    .option("--chunk-size <n>", "seal a stream with this chunk size", Number)
     .option("--base-url <url>", "override the server base URL")
     .action(
       async (cmdOpts: {
@@ -354,6 +356,8 @@ export function buildProgram(): Command {
         file: string;
         context: string;
         prev?: string;
+        recipientsFile?: string;
+        chunkSize?: number;
         baseUrl?: string;
       }) => {
         const kind = cmdOpts.kind as "task" | "message" | "artifact";
@@ -363,6 +367,8 @@ export function buildProgram(): Command {
           file: cmdOpts.file,
           context: cmdOpts.context,
           ...(cmdOpts.prev !== undefined ? { prev: cmdOpts.prev } : {}),
+          ...(cmdOpts.recipientsFile ? {recipientsFile:cmdOpts.recipientsFile}:{}),
+          ...(cmdOpts.chunkSize !== undefined ? {chunkSize:cmdOpts.chunkSize}:{}),
           ...(cmdOpts.baseUrl !== undefined ? { baseUrl: cmdOpts.baseUrl } : {}),
         });
       }
@@ -378,17 +384,23 @@ export function buildProgram(): Command {
       "filter by kind: task, message, artifact, or all",
       "all"
     )
+    .option("--sealed", "return sealed records only")
+    .option("--open-author <pubkey>", "verify this author and decrypt locally")
     .option("--base-url <url>", "override the server base URL")
     .action(
       async (cmdOpts: {
         context: string;
         limit?: number;
+        sealed?: boolean;
+        openAuthor?: string;
         kind?: string;
         baseUrl?: string;
       }) => {
         await runA2ARecall({
           ...rootOpts(program),
           context: cmdOpts.context,
+          ...(cmdOpts.sealed ? {sealed:true}:{}),
+          ...(cmdOpts.openAuthor ? {openAuthor:cmdOpts.openAuthor}:{}),
           ...(cmdOpts.limit !== undefined ? { limit: cmdOpts.limit } : {}),
           ...(cmdOpts.kind
             ? { kind: cmdOpts.kind as "task" | "message" | "artifact" | "all" }

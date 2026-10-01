@@ -422,3 +422,13 @@ backends, Cloudflare Workers smoke).
 ## License
 
 Apache-2.0.
+
+## Sealed A2A
+
+All A2A attestations are signed locally. Use `sealed: { recipients }` on
+`attestA2AMessage`/`attestA2AArtifact`, then `recallA2AContext(context, {sealed:true})`
+and `openA2AAttestation(row, trustedAuthor)` on the recipient client. A recipient
+is `{card, trustedCardSigner}`; the card must carry a valid detached EdDSA JWS.
+`verifyA2AAttestation(hex, trustedAuthor)` needs no private key. Optional
+`sealed.chunkSize` seals a completed payload into a verified chunk chain.
+See [the contract and threat notes](../../docs/sealed-a2a.md).

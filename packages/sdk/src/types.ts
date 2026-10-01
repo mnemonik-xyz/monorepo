@@ -360,7 +360,16 @@ export interface A2AArtifact {
 export type AttestationId = string;
 
 /** Options for `attestA2ATask`, `attestA2AMessage`, `attestA2AArtifact`. */
+export interface A2ARecipientCard {
+  /** Complete AgentCard, including detached JWS signatures. */
+  card: Record<string, unknown>;
+  /** Pinned card-signing Ed25519 key. Obtain this from trusted configuration. */
+  trustedCardSigner: string;
+}
+
 export interface AttestA2AOptions {
+  /** Seal in the client for these recipients. Omit for a plain signed binding. */
+  sealed?: { recipients: A2ARecipientCard[]; chunkSize?: number };
   /** Link to a prior attestation in the same context. */
   prevId?: string;
 }
@@ -368,8 +377,25 @@ export interface AttestA2AOptions {
 /**
  * A single attestation record returned by `recallA2AContext`.
  */
+/** Signed completed-stream manifest; wire field names match the protocol. */
+export interface SealedA2AStream {
+  stream_id: string;
+  nonce_prefix: string;
+  header_hash: string;
+  head: string;
+  chunks: {index:number; last:boolean; prev_hash:string; ciphertext:string; hash:string}[];
+}
+
 export interface Attestation {
   attestationId: string;
+  contextId?: string;
+  prevId?: string | null;
+  coseEnvelopeHex?: string;
+  contentHash?: string;
+  signerPubkey?: string;
+  sealed?: boolean;
+  sealedPayload?: { sealed: string; grants: string[] };
+  stream?: SealedA2AStream;
   /** "task" | "message" | "artifact" */
   kind: "task" | "message" | "artifact";
   /** ISO-8601 timestamp of when the attestation was signed. */
@@ -380,6 +406,8 @@ export interface Attestation {
 
 /** Options for `recallA2AContext`. */
 export interface RecallA2AContextOptions {
+  /** Filter sealed or plaintext records. Omit to retrieve both. */
+  sealed?: boolean;
   /** Max number of attestations to return. Default: server-side. */
   limit?: number;
   /** Filter by object kind. Defaults to `"all"`. */

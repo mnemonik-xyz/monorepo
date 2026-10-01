@@ -172,3 +172,8 @@ pub fn verify_a2a_attestation(
 ) -> anyhow::Result<VerifiedA2AContent> {
     attest::verify_a2a_attestation_impl(envelope_bytes, expected_pubkey)
 }
+
+#[cfg(not(target_arch = "wasm32"))]
+mod signed;
+#[cfg(not(target_arch = "wasm32"))]
+pub use signed::{ingest_signed_a2a, recall_signed_a2a, validate_signed_a2a};

@@ -722,3 +722,10 @@ To pay, call `mnemonic_sign_memory` again with `X-Payment`.
 - [`packages/sdk/README.md`](../packages/sdk/README.md) — TypeScript SDK + OAuth
 - [AGENTS.md](../AGENTS.md) — agent-facing service card
 - [Yellow paper](./YELLOWPAPER.md) — §5 architecture, §6 artifact model, §7 trust
+
+## Client-signed A2A tools
+
+`mnemonic_attest_a2a` accepts signed client envelopes and an optional `sealed`
+flag. `mnemonic_recall_a2a` returns original signatures and sealed payloads to
+the author or a named grant recipient. See [Sealed A2A](./sealed-a2a.md) for the
+complete input/output contract, SDK/CLI usage and streaming limits.

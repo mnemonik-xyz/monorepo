@@ -1,228 +1,398 @@
-//! Integration tests for `mnemonic_attest_a2a` and `mnemonic_recall_a2a`
-//! (a2a-bridge Task 5).
-//!
-//! Tests:
-//! 1. `attest_a2a_kind_task_returns_attestation_id` — call `mnemonic_attest_a2a`
-//!    with `kind="task"` and a minimal Task payload; response carries
-//!    `attestation_id`, `blake3`, `cose_envelope_hex`.
-//! 2. `recall_a2a_returns_attested_row` — after attesting, `mnemonic_recall_a2a`
-//!    with the same `context_id` returns the row.
-//! 3. `attest_a2a_payment_required_without_bearer` — on an `x402` deploy,
-//!    `mnemonic_attest_a2a` without auth → 402.
-//! 4. `recall_a2a_free_without_bearer` — `mnemonic_recall_a2a` without auth →
-//!    200 (read-only, free, allowed by the allowlist).
-
+//! Client signatures, sealed storage, recipient recall and real SDK HTTP tests.
 mod _helpers;
-
 use _helpers::TestServer;
-use serde_json::json;
+use mnemonic_core::codec::a2a::signed::prepare_signed_a2a;
+use serde_json::{json, Value};
+use solana_sdk::signature::{Keypair, Signer};
 
-// ── Minimal A2A Task payload ─────────────────────────────────────────────────
-
-fn minimal_task(context_id: &str) -> serde_json::Value {
-    // Task wire shape: id (string), contextId (string), status (string).
-    // The A2A v1 Task type uses TaskStatus = String (e.g. "submitted").
-    json!({
-        "id": "task-001",
-        "contextId": context_id,
-        "status": "submitted"
-    })
+fn result(resp: &_helpers::CallResult) -> Value {
+    assert!(resp.envelope["error"].is_null(), "{:?}", resp.envelope);
+    serde_json::from_str(
+        resp.envelope["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap()
+}
+fn vectors() -> Value {
+    serde_json::from_str(include_str!(
+        "../../packages/sdk/test/fixtures/sealed-a2a.json"
+    ))
+    .unwrap()
+}
+fn signed_args(v: &Value, key: &str) -> Value {
+    json!({"kind":"message","context_id":"fixture-ctx","signed":v[key],"sealed":key!="plain"})
 }
 
-// ── 1. attest kind=task returns attestation_id ────────────────────────────────
-
 #[tokio::test]
-async fn attest_a2a_kind_task_returns_attestation_id() {
+async fn sealed_a2a_ingest_recall_is_non_custodial_and_recipient_scoped() {
     let server = TestServer::builder().build();
-    let sub = server.server_pubkey();
-    let ctx = "ctx-test-001";
-
+    let v = vectors();
+    let author = v["author"]["pubkey_base58"].as_str().unwrap();
+    let reader = v["reader"]["pubkey_base58"].as_str().unwrap();
+    let outsider = v["outsider"]["pubkey_base58"].as_str().unwrap();
+    assert_ne!(author, server.server_pubkey());
     let resp = server
         .call_tool(
-            Some(&sub),
+            Some(author),
             "mnemonic_attest_a2a",
-            json!({
-                "kind": "task",
-                "payload": minimal_task(ctx),
-                "context_id": ctx,
-            }),
+            signed_args(&v, "sealed"),
         )
         .await;
-
-    assert_eq!(
-        resp.status,
-        axum::http::StatusCode::OK,
-        "attest_a2a must return 200: {:?}",
-        resp.envelope
+    let stored = result(&resp);
+    let replay = result(
+        &server
+            .call_tool(
+                Some(author),
+                "mnemonic_attest_a2a",
+                signed_args(&v, "sealed"),
+            )
+            .await,
     );
-    assert!(
-        resp.envelope["error"].is_null(),
-        "attest_a2a must not return a JSON-RPC error: {:?}",
-        resp.envelope
-    );
-
-    // Unwrap the MCP content envelope.
-    let text = resp.envelope["result"]["content"][0]["text"]
-        .as_str()
-        .expect("result.content[0].text must be a string");
-    let result: serde_json::Value =
-        serde_json::from_str(text).expect("content text must be JSON");
-
-    assert!(
-        result["attestation_id"].is_string(),
-        "result must carry attestation_id; got {result:?}"
-    );
-    assert!(
-        result["blake3"].is_string(),
-        "result must carry blake3; got {result:?}"
-    );
-    assert!(
-        result["cose_envelope_hex"].is_string(),
-        "result must carry cose_envelope_hex; got {result:?}"
-    );
-    assert!(
-        !result["attestation_id"].as_str().unwrap().is_empty(),
-        "attestation_id must be non-empty"
-    );
+    assert_eq!(stored["attestation_id"], replay["attestation_id"]);
+    for identity in [author, reader] {
+        let rows = result(
+            &server
+                .call_tool(
+                    Some(identity),
+                    "mnemonic_recall_a2a",
+                    json!({"context_id":"fixture-ctx","sealed":true}),
+                )
+                .await,
+        );
+        assert_eq!(rows["attestations"].as_array().unwrap().len(), 1);
+        assert_eq!(rows["attestations"][0]["cose_envelope_hex"], v["sealed"]);
+        assert_eq!(rows["attestations"][0]["signer_pubkey"], author);
+    }
+    for identity in [None, Some(outsider)] {
+        let rows = result(
+            &server
+                .call_tool(
+                    identity,
+                    "mnemonic_recall_a2a",
+                    json!({"context_id":"fixture-ctx","sealed":true}),
+                )
+                .await,
+        );
+        assert!(rows["attestations"].as_array().unwrap().is_empty());
+    }
+    let guard = server.state.store.lock().unwrap();
+    let (content, privacy, blob): (String, String, Vec<u8>) = guard
+        .conn()
+        .query_row(
+            "SELECT content,privacy,sealed_blob FROM attestations WHERE attestation_id=?1",
+            [stored["attestation_id"].as_str().unwrap()],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+    assert!(content.is_empty());
+    assert_eq!(privacy, "sealed");
+    assert!(!blob.is_empty());
+    let count: i64 = guard
+        .conn()
+        .query_row("SELECT COUNT(*) FROM attestation_embeddings", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(count, 0);
 }
 
-// ── 2. recall_a2a returns the row attested above ──────────────────────────────
-
 #[tokio::test]
-async fn recall_a2a_returns_attested_row() {
+async fn a2a_rejects_wrong_signer_unsigned_and_tool_binding_mismatch() {
     let server = TestServer::builder().build();
-    let sub = server.server_pubkey();
-    let ctx = "ctx-test-recall-002";
-
-    // First, attest.
-    let attest_resp = server
+    let v = vectors();
+    let author = v["author"]["pubkey_base58"].as_str().unwrap();
+    let outsider = v["outsider"]["pubkey_base58"].as_str().unwrap();
+    for args in [
+        json!({"kind":"message","context_id":"fixture-ctx","payload":v["payload"]}),
+        {
+            let mut a = signed_args(&v, "sealed");
+            a["sealed"] = json!(false);
+            a
+        },
+        {
+            let mut a = signed_args(&v, "sealed");
+            a["context_id"] = json!("wrong");
+            a
+        },
+        {
+            let mut a = signed_args(&v, "sealed");
+            a["kind"] = json!("artifact");
+            a
+        },
+        {
+            let mut a = signed_args(&v, "sealed");
+            a["prev_id"] = json!("forged-parent");
+            a
+        },
+    ] {
+        let resp = server
+            .call_tool(Some(author), "mnemonic_attest_a2a", args)
+            .await;
+        assert!(resp.envelope["error"].is_object());
+    }
+    assert!(server
         .call_tool(
-            Some(&sub),
+            Some(outsider),
             "mnemonic_attest_a2a",
-            json!({
-                "kind": "task",
-                "payload": minimal_task(ctx),
-                "context_id": ctx,
-            }),
+            signed_args(&v, "sealed")
         )
-        .await;
-    assert_eq!(attest_resp.status, axum::http::StatusCode::OK);
-    assert!(attest_resp.envelope["error"].is_null());
-
-    let attest_text = attest_resp.envelope["result"]["content"][0]["text"]
-        .as_str()
-        .expect("content text");
-    let attest_result: serde_json::Value =
-        serde_json::from_str(attest_text).expect("content JSON");
-    let expected_id = attest_result["attestation_id"]
-        .as_str()
-        .expect("attestation_id in attest result");
-
-    // Now recall.  recall_a2a is free — pass an auth header to keep it
-    // simple (the tool does not require one, but callers may include it).
-    let recall_resp = server
-        .call_tool(
-            Some(&sub),
-            "mnemonic_recall_a2a",
-            json!({ "context_id": ctx }),
-        )
-        .await;
+        .await
+        .envelope["error"]
+        .is_object());
     assert_eq!(
-        recall_resp.status,
-        axum::http::StatusCode::OK,
-        "recall_a2a must return 200: {:?}",
-        recall_resp.envelope
-    );
-    assert!(
-        recall_resp.envelope["error"].is_null(),
-        "recall_a2a must not return error: {:?}",
-        recall_resp.envelope
-    );
-
-    let recall_text = recall_resp.envelope["result"]["content"][0]["text"]
-        .as_str()
-        .expect("recall content text");
-    let recall_result: serde_json::Value =
-        serde_json::from_str(recall_text).expect("recall content JSON");
-
-    let attestations = recall_result["attestations"]
-        .as_array()
-        .expect("attestations array in recall result");
-    assert!(
-        !attestations.is_empty(),
-        "recall_a2a must return at least one row for context_id={ctx}"
-    );
-
-    let ids: Vec<&str> = attestations
-        .iter()
-        .filter_map(|a| a["attestation_id"].as_str())
-        .collect();
-    assert!(
-        ids.contains(&expected_id),
-        "recall_a2a must include the attested id {expected_id}; got {ids:?}"
+        server
+            .state
+            .store
+            .lock()
+            .unwrap()
+            .conn()
+            .query_row("SELECT COUNT(*) FROM attestations", [], |r| r
+                .get::<_, i64>(0))
+            .unwrap(),
+        0
     );
 }
 
-// ── 3. attest_a2a is paid on x402 deploy — 402 without bearer ────────────────
+#[tokio::test]
+async fn filters_apply_before_limit_and_parent_is_signed_and_context_bound() {
+    let server = TestServer::builder().build();
+    let v = vectors();
+    let author = Keypair::new_from_array([1; 32]);
+    let sub = author.pubkey().to_string();
+    let parent = result(
+        &server
+            .call_tool(Some(&sub), "mnemonic_attest_a2a", signed_args(&v, "sealed"))
+            .await,
+    );
+    let parent_id = parent["attestation_id"].as_str().unwrap();
+    let payload = json!({"artifactId":"art","parts":[]});
+    let signed = prepare_signed_a2a(
+        &author,
+        "artifact",
+        payload,
+        "fixture-ctx",
+        Some(parent_id.into()),
+        "2026-10-01T00:00:01Z",
+        None,
+    )
+    .unwrap();
+    result(&server.call_tool(Some(&sub),"mnemonic_attest_a2a",json!({"kind":"artifact","context_id":"fixture-ctx","prev_id":parent_id,"signed":hex::encode(signed),"sealed":false})).await);
+    let rows = result(
+        &server
+            .call_tool(
+                Some(&sub),
+                "mnemonic_recall_a2a",
+                json!({"context_id":"fixture-ctx","kind":"message","limit":1,"sealed":true}),
+            )
+            .await,
+    );
+    assert_eq!(rows["attestations"][0]["attestation_id"], parent_id);
+    let rows = result(
+        &server
+            .call_tool(
+                Some(&sub),
+                "mnemonic_recall_a2a",
+                json!({"context_id":"fixture-ctx","sealed":false}),
+            )
+            .await,
+    );
+    assert_eq!(rows["attestations"][0]["prev_id"], parent_id);
+}
 
 #[tokio::test]
-async fn attest_a2a_payment_required_without_bearer() {
-    // Build a server with x402 payment mode.
-    let server = TestServer::builder().payment_mode("x402").build();
-    let ctx = "ctx-test-payment-003";
-
-    // Call WITHOUT auth header (sub = None) — the middleware allowlist does
-    // NOT include mnemonic_attest_a2a, so this hits the payment gate on the
-    // non-authenticated path.
-    let resp = server
-        .call_tool(
-            None, // no auth header
-            "mnemonic_attest_a2a",
-            json!({
-                "kind": "task",
-                "payload": minimal_task(ctx),
-                "context_id": ctx,
-            }),
-        )
-        .await;
-
-    // x402 gate fires before or at JWT auth: expect 402 or 401.
-    // Both are acceptable — the key requirement is that the tool does NOT
-    // succeed (no 200 with a valid attestation_id).
-    assert!(
-        resp.status == axum::http::StatusCode::PAYMENT_REQUIRED
-            || resp.status == axum::http::StatusCode::UNAUTHORIZED,
-        "attest_a2a without auth on x402 deploy must return 402 or 401; got {}",
-        resp.status
+async fn sealed_a2a_store_survives_reopen_and_parent_failure_is_atomic() {
+    let temp = tempfile::NamedTempFile::new().unwrap();
+    let v = vectors();
+    let bytes = hex::decode(v["stream"].as_str().unwrap()).unwrap();
+    let verified = mnemonic_core::codec::a2a::signed::verify_signed_a2a(&bytes, None).unwrap();
+    {
+        let store = mnemonic_core::storage::SqliteStore::open(temp.path()).unwrap();
+        store.save_signed_a2a(&bytes, &verified).unwrap();
+    }
+    let store = mnemonic_core::storage::SqliteStore::open(temp.path()).unwrap();
+    assert_eq!(
+        store
+            .recall_signed_a2a(
+                v["reader"]["pubkey_base58"].as_str().unwrap(),
+                "fixture-ctx",
+                None,
+                Some(true),
+                100
+            )
+            .unwrap()
+            .len(),
+        1
+    );
+    let author = Keypair::new_from_array([1; 32]);
+    let signed = prepare_signed_a2a(
+        &author,
+        "message",
+        v["payload"].clone(),
+        "fixture-ctx",
+        Some("missing-parent".into()),
+        "2026-10-01T00:00:00Z",
+        None,
+    )
+    .unwrap();
+    let failed = mnemonic_core::codec::a2a::signed::verify_signed_a2a(&signed, None).unwrap();
+    assert!(store.save_signed_a2a(&signed, &failed).is_err());
+    assert_eq!(
+        store
+            .conn()
+            .query_row("SELECT COUNT(*) FROM attestations", [], |r| r
+                .get::<_, i64>(0))
+            .unwrap(),
+        1
     );
 }
 
-// ── 4. recall_a2a is free — 200 without bearer ───────────────────────────────
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires built SDK and real WASM; run after building packages/sdk"]
+async fn sdk_http_sealed_end_to_end() {
+    let server = TestServer::builder().build();
+    let v = vectors();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let router = server.app.clone();
+    let task = tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap();
+    let output = tokio::process::Command::new("node")
+        .arg(root.join("packages/sdk/scripts/test-sealed-a2a-e2e.mjs"))
+        .env("A2A_TEST_URL", format!("http://{address}"))
+        .env(
+            "A2A_AUTHOR_JWT",
+            server.mint_jwt(v["author"]["pubkey_base58"].as_str().unwrap()),
+        )
+        .env(
+            "A2A_READER_JWT",
+            server.mint_jwt(v["reader"]["pubkey_base58"].as_str().unwrap()),
+        )
+        .env(
+            "A2A_OUTSIDER_JWT",
+            server.mint_jwt(v["outsider"]["pubkey_base58"].as_str().unwrap()),
+        )
+        .output()
+        .await
+        .unwrap();
+    task.abort();
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let guard = server.state.store.lock().unwrap();
+    let count: i64 = guard
+        .conn()
+        .query_row(
+            "SELECT COUNT(*) FROM attestations WHERE privacy='sealed' AND content=''",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 4);
+    let embeddings: i64 = guard
+        .conn()
+        .query_row("SELECT COUNT(*) FROM attestation_embeddings", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(embeddings, 0);
+}
 
 #[tokio::test]
-async fn recall_a2a_free_without_bearer() {
+async fn valid_client_signature_reaches_paywall_and_invalid_never_does() {
     let server = TestServer::builder().payment_mode("x402").build();
-
-    // Call WITHOUT auth. recall_a2a is read-only and free; it must return 200
-    // even on an x402 deploy and even when the context_id has no rows (empty
-    // attestations array is the correct shape, not an error).
-    let resp = server
+    let v = vectors();
+    let author = v["author"]["pubkey_base58"].as_str().unwrap();
+    let valid = server
         .call_tool(
-            None,
-            "mnemonic_recall_a2a",
-            json!({ "context_id": "ctx-empty-no-rows" }),
+            Some(author),
+            "mnemonic_attest_a2a",
+            signed_args(&v, "sealed"),
         )
         .await;
+    assert_eq!(valid.status, axum::http::StatusCode::PAYMENT_REQUIRED);
+    let mut args = signed_args(&v, "sealed");
+    args["signed"] = json!("00");
+    let invalid = server
+        .call_tool(Some(author), "mnemonic_attest_a2a", args)
+        .await;
+    assert_eq!(invalid.status, axum::http::StatusCode::BAD_REQUEST);
+    assert_eq!(server.attestation_count(author), 0);
+    result(
+        &server
+            .call_tool(
+                Some(author),
+                "mnemonic_recall_a2a",
+                json!({"context_id":"fixture-ctx"}),
+            )
+            .await,
+    );
+}
 
-    assert_eq!(
-        resp.status,
-        axum::http::StatusCode::OK,
-        "recall_a2a must be free (200) even on x402 deploy: {:?}",
-        resp.envelope
+#[tokio::test]
+async fn withdrawn_recipient_loses_recall_and_unrelated_parent_cannot_be_linked() {
+    let server = TestServer::builder().build();
+    let v = vectors();
+    let author = v["author"]["pubkey_base58"].as_str().unwrap();
+    let reader = v["reader"]["pubkey_base58"].as_str().unwrap();
+    let parent = result(
+        &server
+            .call_tool(
+                Some(author),
+                "mnemonic_attest_a2a",
+                signed_args(&v, "sealed"),
+            )
+            .await,
     );
-    assert!(
-        resp.envelope["error"].is_null(),
-        "recall_a2a must not return JSON-RPC error: {:?}",
-        resp.envelope
+    let outsider = Keypair::new_from_array([3; 32]);
+    let signed = prepare_signed_a2a(
+        &outsider,
+        "message",
+        v["payload"].clone(),
+        "fixture-ctx",
+        Some(parent["attestation_id"].as_str().unwrap().into()),
+        "2026-10-01T00:00:00Z",
+        None,
+    )
+    .unwrap();
+    let response=server.call_tool(Some(&outsider.pubkey().to_string()),"mnemonic_attest_a2a",json!({"kind":"message","context_id":"fixture-ctx","signed":hex::encode(signed),"prev_id":parent["attestation_id"]})).await;
+    assert!(response.envelope["error"].is_object());
+    server
+        .state
+        .store
+        .lock()
+        .unwrap()
+        .conn()
+        .execute(
+            "UPDATE grants SET withdrawn_at='2026-10-01T00:00:01Z' WHERE reader_kid=?1",
+            [reader],
+        )
+        .unwrap();
+    let rows = result(
+        &server
+            .call_tool(
+                Some(reader),
+                "mnemonic_recall_a2a",
+                json!({"context_id":"fixture-ctx"}),
+            )
+            .await,
     );
+    assert!(rows["attestations"].as_array().unwrap().is_empty());
+    let own = result(
+        &server
+            .call_tool(
+                Some(author),
+                "mnemonic_recall_a2a",
+                json!({"context_id":"fixture-ctx"}),
+            )
+            .await,
+    );
+    assert_eq!(own["attestations"].as_array().unwrap().len(), 1);
 }
