@@ -12,7 +12,7 @@ import { fileURLToPath } from "node:url";
 
 import { Command } from "commander";
 
-import { runA2AAttest, runA2ARecall, runA2AVerify } from "../src/commands/a2a.js";
+import { runA2AAttest, runA2ARecall, runA2AVerify, runA2ARestore } from "../src/commands/a2a.js";
 import {
   runErc8004Feedback,
   runErc8004FeedbackVerify,
@@ -347,6 +347,10 @@ export function buildProgram(): Command {
     .requiredOption("--file <path>", "path to a JSON file containing the A2A object")
     .requiredOption("--context <id>", "context identifier")
     .option("--prev <id>", "link to a prior attestation")
+    .option("--prev-locator <locator>", "external parent ar:// locator")
+    .option("--recipients-file <path>", "seal for signed AgentCards with pinned card-signing keys")
+    .option("--chunk-size <n>", "seal a stream with this chunk size", Number)
+    .option("--mode <mode>", "local or anchored", "anchored")
     .option("--base-url <url>", "override the server base URL")
     .action(
       async (cmdOpts: {
@@ -354,15 +358,23 @@ export function buildProgram(): Command {
         file: string;
         context: string;
         prev?: string;
+        prevLocator?: string;
+        recipientsFile?: string;
+        chunkSize?: number;
+        mode?: "local"|"anchored";
         baseUrl?: string;
       }) => {
         const kind = cmdOpts.kind as "task" | "message" | "artifact";
         await runA2AAttest({
           ...rootOpts(program),
+          ...(cmdOpts.mode?{mode:cmdOpts.mode}:{}),
           kind,
           file: cmdOpts.file,
           context: cmdOpts.context,
+          ...(cmdOpts.prevLocator?{prevLocator:cmdOpts.prevLocator}:{}),
           ...(cmdOpts.prev !== undefined ? { prev: cmdOpts.prev } : {}),
+          ...(cmdOpts.recipientsFile ? {recipientsFile:cmdOpts.recipientsFile}:{}),
+          ...(cmdOpts.chunkSize !== undefined ? {chunkSize:cmdOpts.chunkSize}:{}),
           ...(cmdOpts.baseUrl !== undefined ? { baseUrl: cmdOpts.baseUrl } : {}),
         });
       }
@@ -378,17 +390,26 @@ export function buildProgram(): Command {
       "filter by kind: task, message, artifact, or all",
       "all"
     )
+    .option("--sealed", "return sealed records only")
+    .option("--open-author <pubkey>", "verify this author and decrypt locally")
+    .option("--mode <mode>", "local or anchored", "anchored")
     .option("--base-url <url>", "override the server base URL")
     .action(
       async (cmdOpts: {
         context: string;
         limit?: number;
+        sealed?: boolean;
+        openAuthor?: string;
         kind?: string;
+        mode?: "local"|"anchored";
         baseUrl?: string;
       }) => {
         await runA2ARecall({
           ...rootOpts(program),
+          ...(cmdOpts.mode?{mode:cmdOpts.mode}:{}),
           context: cmdOpts.context,
+          ...(cmdOpts.sealed ? {sealed:true}:{}),
+          ...(cmdOpts.openAuthor ? {openAuthor:cmdOpts.openAuthor}:{}),
           ...(cmdOpts.limit !== undefined ? { limit: cmdOpts.limit } : {}),
           ...(cmdOpts.kind
             ? { kind: cmdOpts.kind as "task" | "message" | "artifact" | "all" }
@@ -397,6 +418,15 @@ export function buildProgram(): Command {
         });
       }
     );
+
+  a2a.command("restore").description("restore signed context without MCP login")
+    .requiredOption("--context <id>","context")
+    .requiredOption("--authors <keys...>","independently trusted authors")
+    .option("--heads <ids...>","pinned heads to prove ancestry")
+    .option("--gateway-url <url>","payload gateway")
+    .option("--index-url <url>","GraphQL index")
+    .option("--index-flavour <flavour>","irys or arweave","irys")
+    .action(async(opts)=>runA2ARestore({...rootOpts(program),...opts}));
 
   a2a
     .command("verify")

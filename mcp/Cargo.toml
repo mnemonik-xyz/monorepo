@@ -172,7 +172,7 @@ trajectory-experimental = ["mnemonic-core/trajectory-experimental"]
 # compile this in. See Task 8 § Step 1 in work/mnemonic-integrations/tasks/8.md.
 # Activates the optional `tempfile` dep so `mock_state()` can mint per-test
 # scratch SQLite databases.
-test-support = ["dep:tempfile"]
+test-support = ["dep:tempfile", "mnemonic-core/test-support"]
 
 # Pin the Google OAuth integration test to the `test-support` feature so
 # Cargo emits a clear "test requires feature test-support, not running"

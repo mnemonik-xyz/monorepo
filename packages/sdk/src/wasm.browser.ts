@@ -14,14 +14,7 @@
 //     over HTTP(S). The Chrome extension serves `wasm/mnemonic_core_bg.wasm`
 //     from its packaged bundle origin — no `file://` quirks.
 
-interface MnemonicCoreModule {
-  default?: (input?: unknown) => Promise<unknown>;
-  generate_keypair: () => unknown;
-  sign_challenge: (kp: unknown, bytes: Uint8Array) => Uint8Array;
-  sign_cose_payload: (payload: Uint8Array, kp: unknown) => Uint8Array;
-  import_keypair_json: (s: string) => unknown;
-  export_keypair_json: (kp: unknown) => string;
-}
+import type { MnemonicCoreModule } from "./wasm.js";
 
 let modulePromise: Promise<MnemonicCoreModule> | null = null;
 

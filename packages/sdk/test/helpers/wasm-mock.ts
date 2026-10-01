@@ -52,6 +52,9 @@ function hexOf(bytes: Uint8Array): string {
 }
 
 export function buildWasmMock(): {
+  verify_a2a: (bytes:Uint8Array,author:string)=>string;
+  prepare_a2a: (kp: unknown, kind: string, payload: string, context: string, prev: string | undefined, created: string, recipients: string | undefined, chunkSize: number | undefined) => Uint8Array;
+  x25519_secret_from_seed: (seed: Uint8Array) => Uint8Array;
   generate_keypair: () => KeypairJson;
   sign_challenge: (kp: KeypairJson | unknown, bytes: Uint8Array) => Uint8Array;
   sign_cose_payload: (
@@ -106,6 +109,11 @@ export function buildWasmMock(): {
   }
 
   return {
+    verify_a2a(bytes,author){return JSON.stringify({binding:JSON.parse(new TextDecoder().decode(bytes)),signer:author,content_hash:"mock-hash"});},
+    prepare_a2a(_kp,kind,payload,context,prev,created,recipients) {
+      return new TextEncoder().encode(JSON.stringify({kind,payload:recipients?{...JSON.parse(payload),parts:[{kind:"data",mimeType:"application/vnd.mnemonic.sealed+cbor",data:{sealed:"mock",grants:["mock"]}}]}:JSON.parse(payload),context_id:context,prev_id:prev,created_at:created,sealed:!!recipients}));
+    },
+    x25519_secret_from_seed(seed) { return seed; },
     generate_keypair(): KeypairJson {
       const seed = ed.utils.randomPrivateKey();
       const pub = ed.getPublicKey(seed);

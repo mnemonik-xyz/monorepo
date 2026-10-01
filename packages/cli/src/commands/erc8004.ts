@@ -53,8 +53,8 @@ export async function runErc8004Feedback(opts: FeedbackOptions): Promise<void> {
     const guard = await checkSelfPromotion({
       agentId: opts.agentId,
       clientAddress: opts.clientAddress,
-      chainId: opts.chainId,
-      rpcUrl: opts.rpcUrl,
+      ...(opts.chainId !== undefined ? { chainId: opts.chainId } : {}),
+      ...(opts.rpcUrl !== undefined ? { rpcUrl: opts.rpcUrl } : {}),
     });
     for (const w of guard.warnings) warn(w, opts);
     if (guard.status === "self" || guard.status === "operator" || guard.status === "approved") {

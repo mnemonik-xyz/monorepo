@@ -39,7 +39,7 @@
 // inline rather than importing the relative `.d.ts` so that source-side
 // `tsc -b` does not require the WASM artifact to exist before
 // `build:wasm` runs.
-interface MnemonicCoreModule {
+export interface MnemonicCoreModule {
   // `--target web` exports a `default` init function. With no argument it
   // resolves the .wasm via `fetch(import.meta.url)`; with a BufferSource
   // argument it instantiates from those bytes directly (used on Node/Bun/Deno
@@ -50,6 +50,11 @@ interface MnemonicCoreModule {
   sign_cose_payload: (payload: Uint8Array, kp: unknown) => Uint8Array;
   import_keypair_json: (s: string) => unknown;
   export_keypair_json: (kp: unknown) => string;
+  prepare_a2a?: (kp: unknown, kind: string, payload: string, context: string, prev: string | undefined, createdAt: string, recipients: string | undefined, chunkSize: number | undefined) => Uint8Array;
+  open_a2a?: (kp: unknown, signed: Uint8Array, author: string, encryptionSecret: Uint8Array | undefined) => string;
+  verify_a2a_parent?: (childHex:string,parentHex:string)=>void;
+  verify_a2a?: (signed: Uint8Array, author: string) => string;
+  x25519_secret_from_seed?: (seed: Uint8Array) => Uint8Array;
   // T5: sealed-memory bindings
   seal_memory?: (
     inner_json: Uint8Array,

@@ -82,7 +82,7 @@ impl ArweaveClient {
         self.network
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn new_for_test(base_url: String) -> Self {
         let upload_url = format!("{}/upload", base_url);
         Self {
@@ -156,6 +156,58 @@ impl ArweaveClient {
             .as_str()
             .map(|s| s.to_string())
             .context("no id in irys response")
+    }
+
+    /// Deterministic ANS-104 ID. Format-2 local uploads do not satisfy this contract.
+    pub fn item_id(
+        &self,
+        data: &[u8],
+        keypair: &Keypair,
+        extra_tags: &[(&str, &str)],
+    ) -> anyhow::Result<String> {
+        use base64::Engine as _;
+        use sha2::{Digest, Sha256};
+        anyhow::ensure!(
+            self.bypass_local_routing || !self.is_local(),
+            "A2A requires ANS-104 upload backend"
+        );
+        let mut tags = vec![
+            ("Content-Type", "application/octet-stream"),
+            ("App-Name", "mnemonic-protocol"),
+        ];
+        tags.extend_from_slice(extra_tags);
+        let item = build_data_item(keypair, data, &tags);
+        Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(Sha256::digest(&item[2..66])))
+    }
+
+    /// Bounded A2A fetch; no caller-controlled URL or cross-origin redirect.
+    pub async fn read_a2a(&self, id: &str) -> anyhow::Result<Vec<u8>> {
+        anyhow::ensure!(
+            id.len() == 43
+                && id
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_'),
+            "invalid A2A locator"
+        );
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()?;
+        let mut r = client
+            .get(format!("{}/{}", self.base_url, id))
+            .send()
+            .await?
+            .error_for_status()?;
+        anyhow::ensure!(
+            r.content_length().is_none_or(|n| n <= 1048576),
+            "A2A blob too large"
+        );
+        let mut out = Vec::new();
+        while let Some(chunk) = r.chunk().await? {
+            anyhow::ensure!(out.len() + chunk.len() <= 1048576, "A2A blob too large");
+            out.extend_from_slice(&chunk);
+        }
+        Ok(out)
     }
 
     pub async fn read(&self, tx_id: &str) -> anyhow::Result<Vec<u8>> {

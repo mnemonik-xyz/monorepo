@@ -5,7 +5,7 @@
 //! - Arweave payload: COSE_Sign1 envelope (not raw JSON)
 //! - Solana anchor: {"h": blake3_hash, "a": arweave_tx, "v": 2}
 
-use solana_sdk::signature::{Keypair, Signer};
+use solana_sdk::signature::Keypair;
 
 use std::time::Duration;
 
@@ -1032,7 +1032,14 @@ async fn sign_memory_deferred(
             drop(sealed_art.k);
 
             let metadata = serde_json::Value::Object(serde_json::Map::new());
-            (outer_cbor, content_hash, String::new(), vec![], true, metadata)
+            (
+                outer_cbor,
+                content_hash,
+                String::new(),
+                vec![],
+                true,
+                metadata,
+            )
         } else {
             // ── Plain (public) path ───────────────────────────────────────────
             // 1. Embed (CPU-bound, can't defer)
@@ -1067,7 +1074,14 @@ async fn sign_memory_deferred(
             let canonical_cbor = to_canonical_cbor(&artifact, &schema::MEMORY_V1)
                 .map_err(|e| anyhow::anyhow!("canonical CBOR encode failed: {e}"))?;
             let content_hash = blake3_hash(&canonical_cbor);
-            (canonical_cbor, content_hash, content.to_string(), embedding, false, metadata)
+            (
+                canonical_cbor,
+                content_hash,
+                content.to_string(),
+                embedding,
+                false,
+                metadata,
+            )
         };
 
     // Wave 2 — programmatic client-signing handoff.
@@ -1764,11 +1778,10 @@ pub async fn perform_delivery_check(
     // `solana_tx` is retained in the function signature for the stage-3 recall
     // label and for tracing; it is no longer passed into `verify_cose`.
     let _ = solana_tx;
-    let verify_result =
-        match verify_cose(&refetched, Some(content_hash), None, arweave_tx) {
-            Ok(v) => v,
-            Err(_) => return Err("verify"),
-        };
+    let verify_result = match verify_cose(&refetched, Some(content_hash), None, arweave_tx) {
+        Ok(v) => v,
+        Err(_) => return Err("verify"),
+    };
     if verify_result["status"].as_str() != Some("verified") {
         return Err("verify");
     }
@@ -2820,15 +2833,17 @@ pub async fn recall_with_sealed(
     };
 
     // Label standard results.
-    let (mut labelled_results, std_boundary) = label_recall_results(std_results, Some(owner_pubkey));
-    let boundary = std_boundary.unwrap_or_else(|| {
-        uuid::Uuid::new_v4().simple().to_string()[..16].to_string()
-    });
+    let (mut labelled_results, std_boundary) =
+        label_recall_results(std_results, Some(owner_pubkey));
+    let boundary =
+        std_boundary.unwrap_or_else(|| uuid::Uuid::new_v4().simple().to_string()[..16].to_string());
 
     // 2. Sealed rows — open with owner's X25519 secret.
     let sealed_rows: Vec<mnemonic_core::storage::sqlite::SealedRow> = {
         let store_g = store.lock().unwrap();
-        store_g.list_sealed(owner_pubkey, None, limit).unwrap_or_default()
+        store_g
+            .list_sealed(owner_pubkey, None, limit)
+            .unwrap_or_default()
     };
 
     let mut any_foreign = false;
@@ -2846,8 +2861,11 @@ pub async fn recall_with_sealed(
                 // Try to open each sealed blob.
                 if let Ok(inner_bytes) = open_memory(&row.sealed_blob, &x25519_secret) {
                     // Decode the inner MEMORY_V1 JSON.
-                    if let Ok(inner_json) = mnemonic_core::codec::canonical::from_canonical_cbor(&inner_bytes) {
-                        let inner_content = inner_json["content"].as_str().unwrap_or("").to_string();
+                    if let Ok(inner_json) =
+                        mnemonic_core::codec::canonical::from_canonical_cbor(&inner_bytes)
+                    {
+                        let inner_content =
+                            inner_json["content"].as_str().unwrap_or("").to_string();
                         let author_did = format!("did:sol:{}", row.signer_pubkey);
                         labelled_results.push(serde_json::json!({
                             "attestation_id": row.attestation_id,
@@ -2877,10 +2895,12 @@ pub async fn recall_with_sealed(
             if let Ok(body) = resp.json::<serde_json::Value>().await {
                 if let Some(grants) = body["grants"].as_array() {
                     // Get the X25519 secret to open targeted grants.
-                    let x25519_secret_opt = unlock_cache.get_or_unlock(|| {
-                        let kp = keypair.keypair()?;
-                        Ok(*x25519_secret_from_solana_keypair(kp))
-                    }).ok();
+                    let x25519_secret_opt = unlock_cache
+                        .get_or_unlock(|| {
+                            let kp = keypair.keypair()?;
+                            Ok(*x25519_secret_from_solana_keypair(kp))
+                        })
+                        .ok();
 
                     for grant in grants {
                         let grant_cose_b64 = match grant["grant_cose_b64"].as_str() {
@@ -2913,7 +2933,8 @@ pub async fn recall_with_sealed(
                             // Fetch the sealed blob from the store by content_hash.
                             let sealed_blob_opt = {
                                 let store_g = store.lock().unwrap();
-                                store_g.list_sealed(owner_pubkey, None, 1000)
+                                store_g
+                                    .list_sealed(owner_pubkey, None, 1000)
                                     .unwrap_or_default()
                                     .into_iter()
                                     .find(|r| r.content_hash == memory_hash)
@@ -2926,12 +2947,20 @@ pub async fn recall_with_sealed(
                             };
 
                             // Open with K.
-                            if let Ok(inner_bytes) = mnemonic_core::sealed::open_with_key(&sealed_blob, &k) {
-                                if let Ok(inner_json) = mnemonic_core::codec::canonical::from_canonical_cbor(&inner_bytes) {
-                                    let inner_content = inner_json["content"].as_str().unwrap_or("").to_string();
+                            if let Ok(inner_bytes) =
+                                mnemonic_core::sealed::open_with_key(&sealed_blob, &k)
+                            {
+                                if let Ok(inner_json) =
+                                    mnemonic_core::codec::canonical::from_canonical_cbor(
+                                        &inner_bytes,
+                                    )
+                                {
+                                    let inner_content =
+                                        inner_json["content"].as_str().unwrap_or("").to_string();
                                     any_foreign = true;
                                     let author_did = format!("did:sol:{author_pubkey}");
-                                    let framed = frame_untrusted(&inner_content, &author_did, &boundary);
+                                    let framed =
+                                        frame_untrusted(&inner_content, &author_did, &boundary);
                                     labelled_results.push(serde_json::json!({
                                         "memory_hash": memory_hash,
                                         "content": framed,
@@ -3129,7 +3158,9 @@ pub async fn recall_with_hosted_rk(
     // 2. Fetch sealed-index rows.
     let index_rows: Vec<SealedIndexRow> = {
         let store_g = store.lock().unwrap();
-        store_g.list_sealed_index(owner_pubkey, limit).unwrap_or_default()
+        store_g
+            .list_sealed_index(owner_pubkey, limit)
+            .unwrap_or_default()
     };
 
     // 3. Decrypt embeddings, rank, open top-k.
@@ -3149,7 +3180,9 @@ pub async fn recall_with_hosted_rk(
             continue;
         }
         let row_emb: Vec<f32> = emb_pt
-            .as_chunks::<4>().0.iter()
+            .as_chunks::<4>()
+            .0
+            .iter()
             .map(|c| f32::from_le_bytes(*c))
             .collect();
 
@@ -3244,7 +3277,6 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     }
     dot / (mag_a * mag_b)
 }
-
 
 // ── Tests ────────────────────────────────────────────────────────────────────
 
@@ -3850,7 +3882,10 @@ mod sign_memory_tests {
         );
         assert!(entry.is_sealed, "is_sealed must be true");
         // outer CBOR must be present (it's the SEALED_V1 bytes).
-        assert!(!entry.canonical_cbor.is_empty(), "outer CBOR must be non-empty");
+        assert!(
+            !entry.canonical_cbor.is_empty(),
+            "outer CBOR must be non-empty"
+        );
     }
 
     /// TDD anchor: local + private stores a sealed row that `open_memory`
@@ -3883,9 +3918,7 @@ mod sign_memory_tests {
 
         // The sealed row exists in the store.
         let store_g = store.lock().unwrap();
-        let sealed = store_g
-            .list_sealed(&owner, None, 5)
-            .expect("list_sealed");
+        let sealed = store_g.list_sealed(&owner, None, 5).expect("list_sealed");
         assert_eq!(sealed.len(), 1, "exactly one sealed row");
         assert!(!sealed[0].sealed_blob.is_empty(), "sealed_blob non-empty");
 
@@ -3896,12 +3929,12 @@ mod sign_memory_tests {
         let seed: [u8; 32] = kp.to_bytes()[..32].try_into().expect("32 bytes");
         let dalek_sk = DalekSk::from_bytes(&seed);
         let x25519_sk = *x25519_secret_from_ed25519(&dalek_sk);
-        let inner = open_memory(&sealed[0].sealed_blob, &x25519_sk)
-            .expect("open_memory must succeed");
+        let inner =
+            open_memory(&sealed[0].sealed_blob, &x25519_sk).expect("open_memory must succeed");
         // The inner CBOR must contain the original content.
         let inner_json: serde_json::Value =
             mnemonic_core::codec::canonical::from_canonical_cbor(&inner)
-            .expect("inner CBOR decodes");
+                .expect("inner CBOR decodes");
         assert_eq!(
             inner_json["content"].as_str().unwrap(),
             content,
@@ -4408,8 +4441,8 @@ mod unlock_cache_recall_tests {
             "created_at": &now,
             "tags": serde_json::json!([]),
         });
-        let inner_cbor = to_canonical_cbor(&inner_artifact, &schema::MEMORY_V1)
-            .expect("inner CBOR encode");
+        let inner_cbor =
+            to_canonical_cbor(&inner_artifact, &schema::MEMORY_V1).expect("inner CBOR encode");
 
         let artifact = seal_memory(
             &inner_cbor,
@@ -4486,7 +4519,7 @@ mod unlock_cache_recall_tests {
                 10,
                 &owner_pubkey,
                 &unlock_cache,
-                "",  // no hosted endpoint
+                "", // no hosted endpoint
                 &client,
             )
             .await;
@@ -4519,8 +4552,8 @@ mod unlock_cache_recall_tests {
             "created_at": "2026-09-28T00:00:00Z",
             "tags": serde_json::json!([]),
         });
-        let inner = to_canonical_cbor(&inner_artifact, &schema::MEMORY_V1)
-            .expect("inner CBOR encode");
+        let inner =
+            to_canonical_cbor(&inner_artifact, &schema::MEMORY_V1).expect("inner CBOR encode");
 
         let artifact = seal_memory(
             &inner,
@@ -4561,9 +4594,8 @@ mod unlock_cache_recall_tests {
             let s = SqliteStore::open(tmp.path()).unwrap();
             let rows = s.list_sealed(&owner_pubkey, None, 10).unwrap();
             assert!(!rows.is_empty(), "list_sealed returned 0 rows");
-            let x25519 = x25519_secret_from_solana_keypair(
-                &Keypair::try_from(&kp_bytes[..]).unwrap()
-            );
+            let x25519 =
+                x25519_secret_from_solana_keypair(&Keypair::try_from(&kp_bytes[..]).unwrap());
             let inner = mnemonic_core::sealed::open_memory(&rows[0].sealed_blob, &x25519)
                 .expect("direct open_memory failed");
             let parsed = mnemonic_core::codec::canonical::from_canonical_cbor(&inner)
@@ -4606,148 +4638,103 @@ mod unlock_cache_recall_tests {
 
 // ── A2A MCP tools ─────────────────────────────────────────────────────────────
 
-/// `mnemonic_attest_a2a` handler.
-///
-/// Attests an A2A object (task / message / artifact) using the operator's
-/// signing keypair and the `mnemonic-a2a` adapter. Returns
-/// `{attestation_id, blake3, cose_envelope_hex}`.
-///
-/// In `local` storage mode every attestation gets a synthetic `local:<uuid>`
-/// arweave_tx (the a2a adapter already does this internally). Full-mode Arweave
-/// anchoring for A2A events is opt-in via a future `anchor: true` flag and is
-/// not yet implemented.
-pub fn attest_a2a(
-    keypair_lazy: &LazyKeypair,
+/// Verify client artifacts and store only external delivery receipts.
+#[allow(clippy::too_many_arguments)]
+pub async fn ingest_a2a(
     store: &std::sync::Mutex<SqliteStore>,
+    arweave: &mnemonic_core::arweave::ArweaveClient,
+    operator: &LazyKeypair,
+    signed_hex: &str,
+    owner: &str,
     kind: &str,
-    payload: &serde_json::Value,
-    context_id: &str,
-    prev_id: Option<&str>,
+    context: &str,
+    sealed: bool,
+    prev: Option<&str>,
+    prev_locator: Option<&str>,
 ) -> Result<serde_json::Value, JsonRpcError> {
-    let kp = match signing_keypair(keypair_lazy) {
-        Ok(kp) => kp,
-        Err(ToolError::TypedRpc(e)) => return Err(e),
-        Err(ToolError::Other(e)) => return Err(JsonRpcError::simple(-32603, e.to_string())),
-    };
-
-    let store_guard = store
-        .lock()
-        .map_err(|_| JsonRpcError::simple(-32603, "store mutex poisoned"))?;
-
-    let attestation_id = match kind {
-        "task" => {
-            let task: mnemonic_a2a::Task =
-                serde_json::from_value(payload.clone()).map_err(|e| {
-                    JsonRpcError::simple(-32602, format!("payload is not a valid Task: {e}"))
-                })?;
-            mnemonic_a2a::attest_task(&*store_guard, &task, kp, prev_id)
-                .map_err(|e| JsonRpcError::simple(-32603, e.to_string()))?
+    let invalid = |e: anyhow::Error| JsonRpcError::simple(-32602, e.to_string());
+    if signed_hex.len() > mnemonic_core::codec::a2a::signed::MAX_A2A_BYTES * 2 {
+        return Err(JsonRpcError::simple(-32602, "A2A envelope too large"));
+    }
+    let signed = hex::decode(signed_hex).map_err(|e| invalid(e.into()))?;
+    let v = mnemonic_a2a::validate_signed_a2a(&signed, owner, kind, context, sealed, prev)
+        .map_err(invalid)?;
+    if prev.is_some() {
+        let locator = prev_locator
+            .and_then(|s| s.strip_prefix("ar://"))
+            .ok_or_else(|| JsonRpcError::simple(-32602, "ParentLocatorRequired"))?;
+        let bytes = arweave
+            .read_a2a(locator)
+            .await
+            .map_err(|_| JsonRpcError::simple(-32011, "ParentUnavailable"))?;
+        let parent =
+            mnemonic_core::codec::a2a::signed::verify_signed_a2a(&bytes, None).map_err(invalid)?;
+        mnemonic_core::codec::a2a::signed::verify_parent_link(&v, &parent).map_err(invalid)?;
+    } else if prev_locator.is_some() {
+        return Err(JsonRpcError::simple(
+            -32602,
+            "root cannot have parent locator",
+        ));
+    }
+    let kp = operator.keypair().map_err(invalid)?;
+    let tags = [
+        ("Mnemonic-Type", "a2a"),
+        ("Producer", owner),
+        ("Context-Id", context),
+        ("Content-Hash", v.content_hash.as_str()),
+    ];
+    let id = arweave.item_id(&signed, kp, &tags).map_err(invalid)?;
+    {
+        let guard = store
+            .lock()
+            .map_err(|_| JsonRpcError::simple(-32603, "store mutex poisoned"))?;
+        guard.record_a2a_receipt(&v, &id, false).map_err(invalid)?;
+    }
+    let delivered = arweave.read_a2a(&id).await;
+    if let Ok(bytes) = delivered {
+        if bytes != signed {
+            return Err(JsonRpcError::simple(-32011, "delivery bytes mismatch"));
         }
-        "message" => {
-            let msg: mnemonic_a2a::Message =
-                serde_json::from_value(payload.clone()).map_err(|e| {
-                    JsonRpcError::simple(-32602, format!("payload is not a valid Message: {e}"))
-                })?;
-            mnemonic_a2a::attest_message(&*store_guard, &msg, kp, prev_id)
-                .map_err(|e| JsonRpcError::simple(-32603, e.to_string()))?
+    } else {
+        let uploaded = arweave
+            .write_item(&signed, kp, &tags)
+            .await
+            .map_err(|_| JsonRpcError::simple(-32011, "upload unavailable"))?;
+        if uploaded != id {
+            return Err(JsonRpcError::simple(-32011, "upload locator mismatch"));
         }
-        "artifact" => {
-            let art: mnemonic_a2a::A2aArtifact =
-                serde_json::from_value(payload.clone()).map_err(|e| {
-                    JsonRpcError::simple(
-                        -32602,
-                        format!("payload is not a valid A2aArtifact: {e}"),
-                    )
-                })?;
-            mnemonic_a2a::attest_artifact(&*store_guard, &art, context_id, kp, prev_id)
-                .map_err(|e| JsonRpcError::simple(-32603, e.to_string()))?
+        let bytes = arweave
+            .read_a2a(&id)
+            .await
+            .map_err(|_| JsonRpcError::simple(-32011, "delivery unavailable"))?;
+        if bytes != signed {
+            return Err(JsonRpcError::simple(-32011, "delivery bytes mismatch"));
         }
-        _ => {
-            return Err(JsonRpcError::simple(
-                -32602,
-                format!("unknown kind {kind:?}; expected task | message | artifact"),
-            ))
-        }
-    };
-
-    // Retrieve the stored COSE envelope hex (stored in arweave_tx column by
-    // attest_jcs internally). attest_jcs stores `local:<attestation_id>` in
-    // solana_tx, so use find_by_tx on that synthetic id.
-    let local_tx = format!("local:{attestation_id}");
-    // find_by_tx is owner-scoped; use the signer pubkey as owner (A2A rows
-    // are written with owner_pubkey == signer_pubkey by attest_jcs).
-    let signer_pubkey = kp.pubkey().to_string();
-    let row = store_guard
-        .find_by_tx(&local_tx, &signer_pubkey)
-        .map_err(|e| JsonRpcError::simple(-32603, format!("find_by_tx: {e}")))?;
-
-    let (cose_envelope_hex, blake3) = match row {
-        Some(r) => (r.arweave_tx, r.content_hash),
-        None => (String::new(), String::new()),
-    };
-
-    Ok(serde_json::json!({
-        "attestation_id": attestation_id,
-        "blake3": blake3,
-        "cose_envelope_hex": cose_envelope_hex,
-    }))
+    }
+    {
+        let guard = store
+            .lock()
+            .map_err(|_| JsonRpcError::simple(-32603, "store mutex poisoned"))?;
+        guard.record_a2a_receipt(&v, &id, true).map_err(invalid)?;
+    }
+    Ok(
+        serde_json::json!({"attestation_id":format!("a2a:{}",v.content_hash),"blake3":v.content_hash,"sealed":sealed,"arweave_tx":id,"locator":format!("ar://{id}"),"write_mode":"anchored"}),
+    )
 }
 
-/// `mnemonic_recall_a2a` handler.
-///
-/// Returns all attestation rows stored under `context_id`, newest first.
-/// `kind` (optional, default `"all"`) filters by the tag added by `attest_*`:
-/// `"task"` → tag `"a2a-task"`, `"message"` → `"a2a-message"`,
-/// `"artifact"` → `"a2a-artifact"`. `limit` caps the returned rows.
-pub fn recall_a2a(
+pub fn recall_signed_a2a(
     store: &std::sync::Mutex<SqliteStore>,
-    context_id: &str,
-    limit: Option<usize>,
+    owner: &str,
+    context: &str,
     kind: Option<&str>,
+    sealed: Option<bool>,
+    limit: usize,
 ) -> Result<serde_json::Value, JsonRpcError> {
-    let store_guard = store
+    let guard = store
         .lock()
         .map_err(|_| JsonRpcError::simple(-32603, "store mutex poisoned"))?;
-
-    let rows = mnemonic_a2a::recall_by_context(&*store_guard, context_id, limit)
-        .map_err(|e| JsonRpcError::simple(-32603, e.to_string()))?;
-
-    // Optional kind filter: map the user-facing kind name to the internal tag.
-    let kind_tag: Option<&str> = match kind {
-        None | Some("all") => None,
-        Some("task") => Some("a2a-task"),
-        Some("message") => Some("a2a-message"),
-        Some("artifact") => Some("a2a-artifact"),
-        Some(other) => {
-            return Err(JsonRpcError::simple(
-                -32602,
-                format!("unknown kind {other:?}; expected task | message | artifact | all"),
-            ))
-        }
-    };
-
-    // Filter rows by tag when a kind was specified. AttestationRow does not
-    // carry tags directly; filter is a no-op when kind == None / "all".
-    // Tags are stored in the separate `attestation_tags` table and not
-    // returned in AttestationRow, so we skip tag-filtering here and return
-    // all rows for the context_id (the kind filter is advisory for the
-    // caller's display logic). This is correct because the a2a adapter
-    // already segregates rows by kind via the tag mechanism, and callers
-    // who need strict kind-isolation should query by separate context_ids.
-    let _ = kind_tag; // acknowledged: filtering skipped, all rows returned
-
-    let items: Vec<serde_json::Value> = rows
-        .into_iter()
-        .map(|r| {
-            serde_json::json!({
-                "attestation_id": r.attestation_id,
-                "content_hash": r.content_hash,
-                "solana_tx": r.solana_tx,
-                "cose_envelope_hex": r.arweave_tx,
-                "signer_pubkey": r.signer_pubkey,
-            })
-        })
-        .collect();
-
-    Ok(serde_json::json!({ "attestations": items }))
+    let rows = guard
+        .recall_signed_a2a(owner, context, kind, sealed, limit)
+        .map_err(|e| JsonRpcError::simple(-32602, e.to_string()))?;
+    Ok(serde_json::json!({"receipts":rows}))
 }

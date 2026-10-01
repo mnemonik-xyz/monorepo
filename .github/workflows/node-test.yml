@@ -142,6 +142,10 @@ jobs:
         working-directory: packages/sdk
         run: bun test
 
+      - name: Sealed A2A SDK to HTTP MCP round-trip
+        if: matrix.runtime == 'node-22'
+        run: cargo test -p mnemonic-mcp --features test-support --test integration_a2a_mcp_tools sdk_http_sealed_end_to_end -- --ignored
+
       - name: CLI tests
         working-directory: packages/cli
         run: bun test

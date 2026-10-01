@@ -89,6 +89,7 @@ async function makeClient(responses: Array<{ status?: number; body: unknown }>):
     jwt: "test-jwt",
     fetch: fetchImpl,
   });
+  client.setKeypair(keypair);
   return { client, calls };
 }
 
@@ -141,7 +142,7 @@ describe("attestA2ATask", () => {
     expect(reqBody.params.name).toBe("mnemonic_attest_a2a");
     expect(reqBody.params.arguments.kind).toBe("task");
     expect(reqBody.params.arguments.context_id).toBe("ctx-abc");
-    const payload = reqBody.params.arguments.payload as A2ATask;
+    const payload = JSON.parse(new TextDecoder().decode(Uint8Array.from((reqBody.params.arguments.signed as string).match(/../g)!.map(s=>parseInt(s,16))))).payload as A2ATask;
     expect(payload.id).toBe("task-001");
   });
 
@@ -149,7 +150,7 @@ describe("attestA2ATask", () => {
     const { client, calls } = await makeClient([
       { body: mcpResult({ attestation_id: "att-2" }) },
     ]);
-    await client.attestA2ATask(TASK, "ctx-abc", { prevId: "att-prev" });
+    await client.attestA2ATask(TASK, "ctx-abc", { prevId: "att-prev",prevLocator:"ar://"+"A".repeat(43) });
     const args = (calls[0]!.body as { params: { arguments: Record<string, unknown> } }).params.arguments;
     expect(args.prev_id).toBe("att-prev");
   });

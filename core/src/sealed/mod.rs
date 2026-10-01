@@ -24,3 +24,5 @@ pub use content::{
 };
 pub use keys::{x25519_public_from_ed25519, x25519_secret_from_ed25519, x25519_secret_from_solana_keypair};
 pub use wrap::{unwrap_key, wrap_key, WrapResult};
+
+pub mod stream;

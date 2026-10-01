@@ -671,3 +671,15 @@ external parent validation (19), external discovery (20), and chain restoration
 with receipt deletion (21). API and link-policy details are proposed for review;
 no full-index completeness or new context write capability is implied. Task 14
 and #242 remain open. Existing #61/#74 obligations are not waived.
+
+
+## A2A recovery implementation draft (2026-10-01)
+
+External original-byte upload, metadata receipts, external parent verification,
+agent-local indexing, SDK discovery and pinned-head graph reconstruction are
+implemented in the implementation branch. Real SDK/WASM HTTP tests restore and
+open after deleting all receipts and disabling MCP, then extend after restart.
+Tasks 18–21 remain pending review and full acceptance: production index smoke,
+final strict checks and complete adversarial coverage have not been demonstrated.
+No #61 live-stream or #74 DID scope waiver is implied. Draft SQL artifact storage
+is superseded; no automatic migration/deletion of old artifacts is performed.

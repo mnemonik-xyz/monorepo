@@ -33,8 +33,10 @@ export type {
   A2APart,
   A2ATask,
   AttestA2AOptions,
+  A2ARecipientCard,
   AttestationId,
   Attestation,
+  SealedA2AStream,
   Embedder,
   GrantEntry,
   KeypairProvider,
@@ -84,6 +86,7 @@ export {
   SEALED_CBOR_MEDIA_TYPE,
   buildSealedDataPart,
   extractSealedDataPart,
+  verifyA2AAttestation,
 } from "./a2a.js";
 export type { SealedA2ADataPart, SealedA2APartPayload } from "./a2a.js";
 
@@ -112,3 +115,5 @@ export type {
   RefreshAccessTokenInput,
   RefreshAccessTokenResult,
 } from "./oauth.js";
+
+export type { A2AIndexStore, A2ARestoreOptions, A2ARestoreReport } from "./types.js";
