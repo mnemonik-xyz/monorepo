@@ -658,3 +658,16 @@ async Mutex across `.await` is correct and expected.
   skip gracefully rather than failing.
 - **3 note:** D-7 VACUUM/backup rotation procedure should be documented in
   decisions.md or an ops runbook if in-place sealing is ever run.
+
+## Proposed A2A recovery contract (2026-10-01)
+
+Owner reiterated that hosted MCP SQL stores utility/configuration data, not
+memory artifacts, and challenged anchor recovery after SQL loss. Client-side
+creation and signing remain fixed inputs. Previous draft A2A SQL artifact-storage
+claims are superseded by this boundary; the refactor is not yet shipped.
+
+[A2A recovery spec](a2a-recovery-spec.md) separates storage/local recall (task 18),
+external parent validation (19), external discovery (20), and chain restoration
+with receipt deletion (21). API and link-policy details are proposed for review;
+no full-index completeness or new context write capability is implied. Task 14
+and #242 remain open. Existing #61/#74 obligations are not waived.
