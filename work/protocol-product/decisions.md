@@ -35,3 +35,12 @@ Append-only. Status changes require a new dated entry.
 
 No recommendation here authorizes token issuance, a treasury transaction or customer legal terms.
 Documentation acceptance does not mark implementation shipped.
+
+## 2026-10-01 — Multi-agent continuity demonstration
+
+The owner requested a proof of concept with real-life roles and flow.
+Proposed scenario: research handoff across independently operated agents.
+The claim is verifiable memory provenance and continuity, with client-held keys.
+It does not claim truthful reasoning, undisclosed-history completeness or provider-free availability.
+See [proof-of-concept.md](proof-of-concept.md) and [task 8](tasks/8.md).
+This is a proposed demonstration choice; no passing implementation is reported.
