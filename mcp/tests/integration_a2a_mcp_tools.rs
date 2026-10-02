@@ -515,6 +515,25 @@ async fn sdk_migrated_sealed_stream_recipient_continues_through_independent_oper
             ),
         }
     }
+    // An isolated installed candidate may provide its own copy of the demo script.
+    // Validate before opening any services; the repository path remains the default.
+    let script = match std::env::var_os("MNEMONIC_DEMO_SDK_SCRIPT") {
+        Some(path) => {
+            let path = std::path::PathBuf::from(path);
+            assert!(
+                path.is_absolute(),
+                "MNEMONIC_DEMO_SDK_SCRIPT must be an absolute path"
+            );
+            assert!(
+                path.is_file(),
+                "MNEMONIC_DEMO_SDK_SCRIPT must name an existing file: {}",
+                path.display()
+            );
+            path
+        }
+        None => std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../packages/sdk/scripts/test-migrated-a2a-e2e.mjs"),
+    };
     let (source_url, source, source_task) = remote().await;
     let (destination_url, destination, destination_task) = remote().await;
     let original = TestServer::builder()
@@ -530,8 +549,6 @@ async fn sdk_migrated_sealed_stream_recipient_continues_through_independent_oper
     let fixtures = vectors();
     let author = fixtures["author"]["pubkey_base58"].as_str().unwrap();
     let reader = fixtures["reader"]["pubkey_base58"].as_str().unwrap();
-    let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../packages/sdk/scripts/test-migrated-a2a-e2e.mjs");
     let backup_passphrase = Keypair::new().pubkey().to_string();
     let created = tokio::process::Command::new("node")
         .arg(&script)

@@ -3,6 +3,7 @@
 import { parseArgs } from 'node:util';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { createHash } from 'node:crypto';
+import { validateSubmission, summarizeVisibility } from './protocol-live-observation.mjs';
 import {
   IrysDiscoverySource, ArweaveDiscoverySource, ArweaveStorageAdapter,
   verifyA2AAttestation,
@@ -14,6 +15,8 @@ const { values } = parseArgs({ options: {
   gateway: { type: 'string', default: 'https://gateway.irys.xyz' },
   author: { type: 'string' }, context: { type: 'string' },
   head: { type: 'string' }, locator: { type: 'string' },
+  'submitted-at': { type: 'string' }, 'submission-evidence': { type: 'string' },
+  'expected-envelope-sha256': { type: 'string' },
   samples: { type: 'string', default: '2' },
   'interval-ms': { type: 'string', default: '1000' },
 } });
@@ -34,6 +37,8 @@ if (pins.some(key => values[key]) && !pinned) throw new Error('supply all four i
 if (pinned && (!/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(values.author) ||
   !/^a2a:[0-9a-f]{64}$/.test(values.head) || !/^ar:\/\/[A-Za-z0-9_-]{43}$/.test(values.locator) ||
   values.context.length > 1024)) throw new Error('invalid fixture pins');
+
+const submission = validateSubmission(values, pinned);
 
 async function jsonRequest(url, query, variables) {
   const response = await fetch(url, { method: 'POST', redirect: 'error', credentials: 'omit',
@@ -80,6 +85,7 @@ async function fixtureObservation() {
   for (const [name, source] of [
     ['irys', new IrysDiscoverySource(values.irys)], ['arweave', new ArweaveDiscoverySource(values.arweave)],
   ]) {
+    const queryStartedAt = new Date().toISOString();
     let cursor, pages = 0, found = false; const seen = new Set();
     try {
       do {
@@ -89,16 +95,19 @@ async function fixtureObservation() {
         if (cursor && seen.has(cursor)) throw new Error('cursor loop');
         if (cursor) seen.add(cursor);
       } while (cursor && pages < 3);
-      observations[name] = { status: cursor ? 'budget_exhausted' : 'exhausted', pages, expected_locator_present: found };
-    } catch (error) { observations[name] = { status: 'unavailable', pages, error: error.message.slice(0, 200) }; }
+      observations[name] = { status: cursor ? 'budget_exhausted' : 'exhausted', pages, expected_locator_present: found, started_at: queryStartedAt, finished_at: new Date().toISOString() };
+    } catch (error) { observations[name] = { status: 'unavailable', pages, started_at: queryStartedAt, finished_at: new Date().toISOString(), error: error.message.slice(0, 200) }; }
   }
   try {
     const adapter = new ArweaveStorageAdapter(values.gateway);
     const bytes = await adapter.fetch(values.locator);
+    const envelopeDigest = createHash('sha256').update(bytes).digest('hex');
+    if (values['expected-envelope-sha256'] && envelopeDigest !== values['expected-envelope-sha256']) throw new Error('fixture envelope digest mismatch');
     const verified = await verifyA2AAttestation(Buffer.from(bytes).toString('hex'), values.author);
     if (`a2a:${verified.content_hash}` !== values.head || verified.binding.context_id !== values.context) throw new Error('fixture identity/context mismatch');
     return { status: 'verified', indexes: observations, bytes: bytes.length,
-      envelope_sha256: createHash('sha256').update(bytes).digest('hex'),
+      envelope_sha256: envelopeDigest, verified_at: new Date().toISOString(),
+      exact_envelope_pin_checked: Boolean(values['expected-envelope-sha256']),
       artifact_id: values.head, author: verified.signer, sealed: verified.binding.sealed };
   } catch (error) { return { status: 'unverified', indexes: observations, error: error.message.slice(0, 200) }; }
 }
@@ -106,6 +115,7 @@ async function fixtureObservation() {
 const report = { version: 1, started_at: new Date().toISOString(),
   endpoints: { irys: values.irys, arweave: values.arweave, gateway: values.gateway },
   mode: 'read_only_no_credentials', pinned_fixture: pinned ? Object.fromEntries(pins.map(key => [key, values[key]])) : null,
+  submission, expected_envelope_sha256: values['expected-envelope-sha256'] ?? null,
   observations: [], limits: ['Inventory capped at one page of 100; scoped fixture scans capped at three pages.',
     'Public inventory IDs are untrusted hints; non-current locator shapes are counted, not silently converted.',
     'No artifact was uploaded, no payment was submitted, no private content is emitted.',
@@ -124,6 +134,7 @@ for (let sample = 0; sample < samples; sample++) {
 report.finished_at = new Date().toISOString();
 report.positive_fixture_observed = pinned && report.observations.every(({ fixture }) =>
   fixture.status === 'verified' && Object.values(fixture.indexes).some(index => index.expected_locator_present));
+report.visibility = summarizeVisibility(report.observations, submission);
 report.release_gate = 'not_established';
 console.log(JSON.stringify(report, null, 2));
 process.exitCode = report.positive_fixture_observed ? 0 : 2;
