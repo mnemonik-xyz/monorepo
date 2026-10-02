@@ -176,3 +176,27 @@ Task 5 remains in progress: mocked operators and storage do not establish live d
 Tasks 6, 8 and 12 retain their release prerequisites. Accurate source documentation and a capability matrix were updated now to prevent stale claims.
 Task 7 has no customer evidence or outreach; no product demand is inferred from these tests.
 No merge, deployment, package publication or repository extraction has been performed.
+
+
+## 2026-10-02 — Task 5 evidence and README values
+
+After merge `7dc5079`, three agents independently audited A2A acceptance, strengthened the operator-switch drill, investigated build failures and rewrote the README.
+The README now leads with client-private preparation, verifiable authorship, client-owned copies and an exit path. Source capabilities remain distinct from hosted/released support.
+The documented standalone CLI init/sign/open sequence passed using a temporary file-backed identity.
+
+Commit `98d18d0` adds a combined real SDK/WASM HTTP drill with signed checkpoints/manifests, exact-envelope comparisons, sealed streams/grants, source/operator shutdown, SQL loss and fresh-recipient continuation through independently keyed O2.
+Actual two-operator uploads deduplicate to the same signed artifact; invalid parent variants produce no uploads or financial operations.
+The evidence exposed and fixed HTTP prevalidation that mislabeled a retriable parent outage as invalid input.
+All 11 tests passed after correction; strict MCP Clippy passed.
+The enumeration example now rejects an empty memo comparison as inconclusive, verified with local mock GraphQL/RPC services.
+
+Commit `6301dea` corrects missing conformance lock entries and missing Docker workspace members, both predating PR #267.
+Clean isolated webapp install/build and 16 sealed-view tests passed; isolated Docker-context Cargo metadata passed.
+Pinned published WASM still lacks the sealed opener; the page reports unsupported crypto rather than bypassing checks.
+Cloudflare dashboard logs were not available, so its exact build failure cause is not inferred from the GitHub workflow failures.
+
+Live read-only observations found 24 Irys App-Name candidates but zero A2A candidates; the Arweave index returned zero for both filters.
+The [release-evidence record](release-evidence.md) preserves endpoints, timestamps, scan bounds and the JSON observation record.
+Exit 2 from the probe explicitly means no positive pinned A2A fixture was established.
+Task 5 and existing A2A acceptance remain in progress. Known synthetic fixture pins, submission time/lag observations and configured live operator evidence are still required.
+No payment, deployment, package publication, customer outreach or issue closure was performed.

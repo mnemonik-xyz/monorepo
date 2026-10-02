@@ -1,6 +1,6 @@
 # AGENTS.md — Mnemonic Protocol
 
-> This file describes how AI agents can discover and use the Mnemonic Protocol service. It is the human-readable companion to [`/.well-known/agent.json`](https://mnemonik.xyz/.well-known/agent.json) (machine-readable card served from the site root).
+> This file describes how AI agents can discover and use the Mnemonic Protocol service. It is the human-readable companion to [`/.well-known/agent.json`](https://www.mnemonik.xyz/.well-known/agent.json) (machine-readable card served from the site root).
 
 Mnemonic Protocol is itself an *agent service*: an MCP server that any AI agent can call to give itself persistent, verifiable memory. This document tells other agents (and the humans configuring them) how to plug in.
 
@@ -11,8 +11,8 @@ Mnemonic Protocol is itself an *agent service*: an MCP server that any AI agent 
 # Pair with the webapp identity (open mnemonik.xyz/install, click Send to CLI):
 npx @mnemonik-xyz/cli init --ticket <uuid>
 npx @mnemonik-xyz/cli login
-npx @mnemonik-xyz/cli sign "first memory"            # local write: private (owner-only), not encrypted
-npx @mnemonik-xyz/cli sign "public claim" --anchor   # signed with your key, anchored on-chain (plain text on Arweave)
+npx @mnemonik-xyz/cli sign "first memory"            # local sealed ciphertext; file-backed identity required
+npx @mnemonik-xyz/cli sign "public claim" --public --anchor # explicit plaintext publication
 
 # Or standalone (CLI-only): npx @mnemonik-xyz/cli init --standalone
 # The CLI renews an expired session automatically (refresh token); log in one time.
@@ -41,7 +41,7 @@ For Claude / Cursor / VS Code / Windsurf — install from [mnemonik.xyz/install]
 |---|---|---|---|
 | MCP (HTTP) | `https://mcp.mnemonik.xyz/mcp` | OAuth 2.1 + PKCE | Production. JSON-RPC 2.0. |
 | MCP (stdio) | `npx @mnemonik-xyz/cli mcp` | local keypair | For agents that prefer stdio transport. |
-| Agent card | `https://mnemonik.xyz/.well-known/agent.json` | none | Discovery. |
+| Agent card | `https://www.mnemonik.xyz/.well-known/agent.json` | none | Discovery. |
 | OAuth metadata | `https://mcp.mnemonik.xyz/.well-known/oauth-authorization-server` | none | RFC 8414. |
 | Health | `https://mcp.mnemonik.xyz/health` | none | `{"status":"ok"}` |
 
@@ -115,4 +115,4 @@ Reference verifier code is in `core/src/codec/sign.rs` (`verify_artifact`) and `
 
 ## For LLM crawlers
 
-A simplified, machine-friendly summary of this site is at [`/llms.txt`](https://mnemonik.xyz/llms.txt). The canonical agent-discovery surface is [`/.well-known/agent.json`](https://mnemonik.xyz/.well-known/agent.json).
+A simplified, machine-friendly summary of this site is at [`/llms.txt`](https://mnemonik.xyz/llms.txt). The canonical agent-discovery surface is [`/.well-known/agent.json`](https://www.mnemonik.xyz/.well-known/agent.json).

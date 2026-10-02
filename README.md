@@ -1,346 +1,145 @@
 # Mnemonic Protocol
 
-> **Verifiable, persistent memory for AI agents — signed, anchored on Solana, exposed over MCP.**
+**Signed memory that agents can keep, verify, and recover beyond one service.**
 
 [![CI](https://github.com/mnemonik-xyz/monorepo/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/mnemonik-xyz/monorepo/actions/workflows/ci.yml)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](./LICENSE)
-[![npm: cli](https://img.shields.io/npm/v/%40mnemonik-xyz%2Fcli.svg?label=%40mnemonik-xyz%2Fcli)](https://www.npmjs.com/package/@mnemonik-xyz/cli)
-[![npm: sdk](https://img.shields.io/npm/v/%40mnemonik-xyz%2Fsdk.svg?label=%40mnemonik-xyz%2Fsdk)](https://www.npmjs.com/package/@mnemonik-xyz/sdk)
-[![npm: mcp](https://img.shields.io/npm/v/%40mnemonik-xyz%2Fmcp.svg?label=%40mnemonik-xyz%2Fmcp)](https://www.npmjs.com/package/@mnemonik-xyz/mcp)
-[![container: ghcr.io](https://img.shields.io/badge/ghcr.io-mnemonic--mcp-2496ED?logo=docker&logoColor=white)](https://github.com/mnemonik-xyz/monorepo/pkgs/container/mnemonic-mcp)
+[![npm: cli](https://img.shields.io/npm/v/%40mnemonik-xyz%2Fcli.svg?label=cli)](https://www.npmjs.com/package/@mnemonik-xyz/cli)
+[![npm: sdk](https://img.shields.io/npm/v/%40mnemonik-xyz%2Fsdk.svg?label=sdk)](https://www.npmjs.com/package/@mnemonik-xyz/sdk)
 
-**Live:** [mnemonik.xyz](https://mnemonik.xyz) · **Hosted MCP:** `https://mcp.mnemonik.xyz/mcp` · **Discord:** [discord.gg/ws6wruJj](https://discord.gg/ws6wruJj)
+[Website](https://mnemonik.xyz) · [Install and connect](https://mnemonik.xyz/install) · [CLI](./packages/cli/README.md) · [SDK](./packages/sdk/README.md) · [Discord](https://discord.gg/ws6wruJj)
 
-**Docs:** [Quickstart](./docs/QUICKSTART.md) · [Tool reference](./docs/tools.md) · [Whitepaper](./docs/WHITEPAPER.md) · [Yellow paper](./docs/YELLOWPAPER.md) · [How it works](./docs/how-it-works.md) · [Comparisons](./docs/comparisons.md) · [AGENTS.md](./AGENTS.md)
+Agents change runtimes. Services change operators. A useful memory should survive both.
+Mnemonic makes memory a signed artifact that a client can retain, copy, and verify independently.
+The operator provides delivery and discovery services; its database is not the authority for the artifact's author or contents.
 
-```bash
-# Recommended: pair with the webapp (open mnemonik.xyz/install, click
-# "Send to CLI", paste the ticket UUID below):
-npx @mnemonik-xyz/cli init --ticket <uuid> && npx @mnemonik-xyz/cli login && npx @mnemonik-xyz/cli sign "first memory"
+The goal is practical: save private memory, recover it in a fresh client, and continue with another operator.
+Recovery requires the original bytes, the necessary keys, and independently trusted authors and checkpoints.
+It restores recorded memory, not a running process, tool credentials, or unfinished actions.
 
-# Or standalone (CLI-only, no webapp pairing):
-npx @mnemonik-xyz/cli init --standalone && npx @mnemonik-xyz/cli login && npx @mnemonik-xyz/cli sign "first memory"
-```
+## What we build around
 
-Mnemonic gives an AI agent a persistent and verifiable artifact/memory layer: signed memories that can be semantically recalled, independently verified, and optionally anchored on-chain.
+- **Privacy at preparation.** Clients encrypt and sign sealed memories before sending them for storage. The prepared-artifact path does not send plaintext to the operator.
+- **Verification without an account.** Retained signed bytes can be checked against a trusted author's key without the original operator or its SQL records.
+- **A local copy you control.** Local sealed CLI writes need no hosted service. Clients can retain original artifacts and encrypted recovery backups.
+- **An exit path.** Storage migration copies original signed bytes. Authenticated locator manifests describe new locations without changing authorship or signed parent references.
+- **Open implementation.** Artifact formats, verification code, client libraries, and recovery tools live in this Apache-2.0 repository.
 
----
+A signature proves authorship and integrity under the trusted key. It does not prove that a claim is true or provide a trusted timestamp alone.
+Encryption protects content; public storage can still expose metadata. Lost decryption keys cannot be reconstructed from signatures.
 
-## Introduction
+## Start locally
 
-AI agents forget. Conversations, decisions, and learned context vanish between sessions, and when they do survive, there is no way for anyone else to verify what the agent actually remembered or claimed.
+This README describes the current source. Published packages and hosted deployments can lag behind it.
+See the [implementation evidence](./work/protocol-product/implementation-evidence.md) for tested behavior and remaining acceptance work.
 
-**Mnemonic Protocol** is a verifiable memory layer for AI agents. An agent writes a memory; anyone can later check *who* wrote it, *that it has not changed*, and *when it existed* — without trusting the agent, or us.
-
-### What happens to a memory
-
-Every memory an agent saves is:
-
-- **Semantically embedded** so it can be recalled by meaning, not by keyword.
-- **Compressed** with TurboQuant, so a portable form of the embedding travels inside the artifact itself.
-- **Canonicalized** to deterministic CBOR and hashed with blake3, so the same content always produces the same fingerprint.
-- **Signed** as a COSE_Sign1 artifact under an Ed25519 identity, so authorship is cryptographically provable.
-- **Optionally anchored** on Arweave (durable storage) and Solana (timestamped anchor), so third parties can independently verify the memory existed at a point in time.
-
-### You keep the key
-
-Signing is **non-custodial**. The private key lives with the client — your CLI, your browser, your agent — and the server never holds it.
-
-Over HTTP, an anchored (`participate`) write returns the canonical bundle unsigned. Your client signs it locally and posts the signature. A `local` write gets no signature: the server stores only its hash, under your identity, so it never asks for your key. The operator's own key signs only on the stdio path, where it is the key of the local agent. Anything else is refused outright, in code:
-
-```
-refusing to operator-sign a memory owned by a different identity;
-remote writes must be client-signed via the deferred path
-```
-
-This is what makes "agent X claimed Y" checkable by a third party. If we could sign on your behalf, we could forge your memories, and the signature would prove nothing.
-
-### You choose what goes on-chain
-
-Every write carries an explicit intent, chosen per request — not a server-wide setting:
-
-| | `local` | `participate` |
-|---|---|---|
-| Where it lives | The node's own SQLite | Arweave bytes + a Solana SPL Memo, plus SQLite |
-| Cost | Free, always | Priced by the operator |
-| Who can verify | You, from the signature and hash | Anyone, against public chains |
-
-`local` is the default and is free by construction, not by configuration. A `participate` write counts as delivered only after the anchored bytes pass a recall-and-verify round-trip; if that fails the memory is demoted to `local` and **you are not charged**. Both kinds coexist in one database, and recall spans them.
-
-### How you reach it
-
-The protocol is exposed through the [Model Context Protocol](https://modelcontextprotocol.io/) (MCP), so any MCP-compatible client — Claude, Cursor, VS Code, Windsurf, custom agents — can use it as a drop-in memory backend over HTTP or stdio. There is also a [CLI](./packages/cli/), a [TypeScript SDK](./packages/sdk/), and a browser extension.
-
-### Why it matters
-
-- **Persistent memory across sessions and models.** A memory signed by one agent is readable and verifiable by any other.
-- **Verifiable claims.** When an agent says "I remembered X on date Y," that claim can be checked against an on-chain anchor and a signed artifact — not just taken on faith.
-- **Portable.** Artifacts are self-describing (typed schema, canonical encoding, embedded compression metadata) and can be rehydrated anywhere.
-- **Offline-first.** `local` writes need no chain, no payment, and no network beyond the embedder — good for development, demos, and memories that were never meant to leave the machine.
-
-New here? [**Quickstart**](./docs/QUICKSTART.md) gets you a signed memory in three commands; [**docs/tools.md**](./docs/tools.md) is the full tool reference.
-
-### Repository layout
-
-A Cargo workspace with two crates, plus the TypeScript clients and the webapp:
-
-```
-core/      # mnemonic-core — library: codec, identity, embed, compress, storage, solana, arweave, lineage
-mcp/       # mnemonic-mcp  — binary: MCP server (HTTP + stdio), payment gate, pricing engine
-packages/  # npm clients: cli, sdk, mcp (shim), extension
-webapp/    # mnemonik.xyz — install / approve / blog surfaces
-docs/      # protocol docs: quickstart, tool reference, whitepaper, specs, research
-work/      # active features / bugs (spec-driven work); completed/ is archived
-.claude/
-└── skills/
-    └── project-knowledge/   # architecture, patterns, deployment docs for AI agents
-CLAUDE.md
-Cargo.toml
-```
-
-The MCP server is the user-facing entrypoint. The core library is where the protocol primitives live.
-
----
-
-## Foundational research
-
-Mnemonic builds on the [Mnemonic Protocol Foundational Paper](docs/research/paper.pdf), which motivates the project's core thesis: agent memory must be semantic, attributable, and operationally cheap. Deeper protocol design notes live in [docs/research/](docs/research/).
-
----
-
-## Quick start
-
-Requires Rust stable.
+Build the CLI from this checkout with Node.js 20+, Rust, and `wasm-pack` installed:
 
 ```bash
-# build
-cargo build --release
+npm install
+npm run build --workspace @mnemonik-xyz/sdk
+npm run build --workspace @mnemonik-xyz/cli
 
-# run the MCP server over HTTP (local storage mode, no blockchain, no payment)
-STORAGE_MODE=local PAYMENT_MODE=none \
-  ./target/release/mnemonic-mcp --transport http --port 3000
+# Create a standalone identity, then save a sealed memory locally.
+node packages/cli/dist/bin/mnemonic.js init --standalone
+node packages/cli/dist/bin/mnemonic.js sign "Remember why we chose this design"
 
-# or over stdio (for local MCP clients)
-./target/release/mnemonic-mcp --transport stdio
+# Use the memory_hash printed by sign.
+node packages/cli/dist/bin/mnemonic.js open <memory_hash>
 ```
 
-Health check:
+Standalone initialization creates a file-backed identity with restricted file permissions. Existing identities are preserved unless you explicitly replace them.
+The current offline CLI write requires a file-backed key; it refuses an identity stored only in the OS keychain.
+The CLI saves the original signed ciphertext locally. Keep your identity and backups safe; another key cannot open an owner-only memory.
+The SDK's default local cache lasts only for the client session. Applications must supply durable storage or export a backup.
+
+For a published CLI, use `npx @mnemonik-xyz/cli` and consult its version's command help.
+To use a webapp identity, open [Install](https://mnemonik.xyz/install), choose **Send to CLI**, then run `init --ticket <uuid>`.
+
+External delivery is explicit and can require authentication and payment:
 
 ```bash
-curl http://localhost:3000/health
+node packages/cli/dist/bin/mnemonic.js login
+
+# Encrypt locally, retain the original, then request external delivery.
+node packages/cli/dist/bin/mnemonic.js sign "Private project context" --anchor
+
+# Explicit public plaintext publication.
+node packages/cli/dist/bin/mnemonic.js sign "A public claim" --public --anchor
 ```
 
-Test MCP handshake:
+Public plaintext writes use the legacy server-prepared flow, which sends content to the operator.
+Current external delivery uses Arweave/Irys. New writes do not require a Solana memo; historical memo verification and discovery remain available.
 
-```bash
-curl -s http://localhost:3000/mcp \
-  -H 'content-type: application/json' \
-  -d '{"jsonrpc":"2.0","id":1,"method":"initialize"}'
-```
+## Recovery and portability
 
-Run the test suite:
+A recovery checkpoint records the trusted scope, expected heads, and artifact locations under an independently pinned owner's signature.
+An encrypted backup can carry that checkpoint and explicitly supplied key material.
+Clients fetch original bytes, verify them, open permitted content, and rebuild a local index.
 
-```bash
-cargo test --workspace
-```
+Recovery reports missing parents, unavailable sources, invalid artifacts, and competing branches.
+Completion is relative to trusted expected heads. Discovery cannot prove that an unknown newer branch does not exist.
 
-Enable local ONNX embeddings (`fastembed`) when you want real semantic recall:
-
-```bash
-cargo build --release --features local-embed
-```
-
----
-
-## MCP tools
-
-The server exposes **8 tools** over JSON-RPC at `POST /mcp` (and stdio):
-
-| Tool | Purpose |
+| Source capability | Scope and limits |
 |---|---|
-| `mnemonic_whoami` | Server identity (Ed25519 pubkey, DIDs, storage mode, attestation count) plus the capability envelope (`supported_modes`, `default_mode`, `participate_cost`) |
-| `mnemonic_sign_memory` | Embed + compress + canonicalize (CBOR) + hash (blake3) + sign (COSE_Sign1) + persist. Takes an optional per-request `mode: "local" \| "participate"` |
-| `mnemonic_check_pending` | Resolve a deferred-sign `correlation_id` to its final on-chain state |
-| `mnemonic_recall` | Semantic search over stored embeddings (SQLite) |
-| `mnemonic_verify` | Verify a memory by `solana_tx` and/or `arweave_tx` (version-aware) |
-| `mnemonic_prove_identity` | Sign an arbitrary challenge with the server key |
-| `mnemonic_publish_post` | Publish a signed public blog post (agent-native publishing) |
-| `request_public_write_confirmation` | Internal ceremony gate before a public on-chain write (not user-facing) |
+| Client-prepared memory | Local encryption and signing; exact-byte external delivery. Hosted private recall and the old sealed-session store are retired |
+| Local recall | SDK support with a caller-supplied local embedder. General sealed recall is not yet exposed by the CLI |
+| Authenticated recovery | Checkpoint verification, encrypted backups, and verified memory/A2A recovery APIs. Keys and accessible artifact bytes remain necessary |
+| A2A recovery and continuation | Signed parent validation, recipient grants, and completed encrypted streams. Tested with real cryptography and mocked external services |
+| A2A storage migration | Arweave fetch adapter and configured HTTP object-storage adapter; signed locator manifests preserve original bytes. Use the standalone migration/restore APIs |
+| Delivery and payment | Separate delivery and settlement states, bounded retries, and same-byte resubmission. Payment acceptance alone does not establish delivery |
 
-Three further tools — `mnemonic_attest_step`, `mnemonic_attest_verdict`, and
-`mnemonic_verify_trajectory` — are **experimental** and compiled in only with
-`--features trajectory-experimental` (not in `default`). Enumerate any server's
-live surface with a `tools/list` call.
+Local tests exercise SQL loss, storage-source shutdown, and continuation through another operator.
+These tests do not establish live provider availability, index freshness, or release readiness.
+The [release evidence](./work/protocol-product/release-evidence.md) records current drills and live observations; the [acceptance reconciliation](./work/sealed-memories/a2a-acceptance-reconciliation.md) tracks the remaining gates.
 
-**→ Full reference with inputs, outputs, auth, and the write-mode howto: [docs/tools.md](./docs/tools.md).**
+## Integrate or run an operator
 
-Current artifact format: **canonical CBOR + COSE_Sign1, blake3 hashing**. Older SHA-256/JSON artifacts are still verifiable via a legacy fallback path.
+Use the [TypeScript SDK](./packages/sdk/README.md) for client preparation, verification, local indexing, and recovery.
+Use the [CLI](./packages/cli/README.md) for identity and local artifact persistence.
+The [MCP launcher](./packages/mcp/README.md) connects supported agent clients; the hosted endpoint is `https://mcp.mnemonik.xyz/mcp`.
 
-### The deferred-signing flow
+Inspect each deployment's advertised capabilities before using it.
+MCP includes historical server-prepared tools whose privacy boundaries differ from the client-prepared API.
+See the [tool reference](./docs/tools.md), [agent guide](./AGENTS.md), and [hosted service card](https://www.mnemonik.xyz/.well-known/agent.json). The [card source](./webapp/public/.well-known/agent.json) defines the repository version; inspect the deployed response separately.
 
-The mechanics behind [You keep the key](#you-keep-the-key). A JWT `participate`
-write, or a JWT write without a `mode` field, returns `{status:
-"awaiting_signature", correlation_id, approve_url, ...}`. The client signs the
-canonical bundle locally and posts it back to `/api/sign-callback`. Only then is
-anything persisted or anchored. `mnemonic_check_pending` resolves the
-`correlation_id` to the final state. Bundles expire after 300 seconds. A JWT
-write with `mode: "local"` is stored at once as a hash-only row, with no
-signature. Inline signing happens only on the stdio path, where the key is the
-key of the local agent. Full detail in
-[docs/tools.md](./docs/tools.md#mnemonic_sign_memory).
+The focused implementation guides describe current boundaries:
 
----
+- [Client-prepared memory](./docs/client-prepared-memory.md): preparation, persistence, ingestion, and recall.
+- [Recovery checkpoints](./docs/recovery-checkpoints.md): trust pins, backups, key recovery, and verified restore.
+- [Sealed A2A](./docs/sealed-a2a.md): grants, parent validation, discovery, and continuation.
+- [Storage portability](./docs/storage-portability.md): adapter capabilities, manifests, migration, and destination recovery.
+- [Payment and delivery retries](./docs/artifact-payment-retries.md): durable receipts and interrupted operations.
 
-## Programmatic access
+For operator setup, see [Dockerfile](./Dockerfile), [Compose](./docker-compose.yml), and the [deployment guide](./.claude/skills/project-knowledge/references/deployment.md).
+Configuration is defined in [mcp/src/config.rs](./mcp/src/config.rs).
 
-Two npm packages let you drive the same hosted MCP server without writing your own JSON-RPC client. Both reuse the OAuth 2.1 + PKCE handshake and the COSE_Sign1 signing substrate that the Cursor / VS Code / Claude.ai connectors and the webapp use — only the renderer differs.
+## Develop and contribute
 
-- [`@mnemonik-xyz/cli`](packages/cli/) — `mnemonic` binary for terminal use. Recommended setup: open `mnemonik.xyz/install` → click "Send to CLI" → `mnemonic init --ticket <uuid> && mnemonic login && mnemonic sign "hello"`. Standalone mode (`mnemonic init --standalone`) is also available for CLI-only use. `mnemonic sign` makes a private local write from your public key only. `mnemonic sign --anchor` signs with your private key and anchors the memory on-chain. The CLI renews an expired session automatically with a refresh token.
-- [`@mnemonik-xyz/sdk`](packages/sdk/) — runtime-agnostic TypeScript SDK (`MnemonicClient`, `LocalSigner`, `Keypair`, OAuth helpers). Pure ESM; runs on Node 20+, Bun, Deno, and modern browsers.
+| Path | Purpose |
+|---|---|
+| [core/](./core/) | Rust artifact formats, signing, encryption, verification, storage access, and recovery |
+| [mcp/](./mcp/) | HTTP and stdio service, ingestion, delivery, authentication, and payments |
+| [mnemonic-a2a/](./mnemonic-a2a/) and [bridge-a2a/](./bridge-a2a/) | A2A models and integration |
+| [packages/](./packages/) | TypeScript SDK, CLI, MCP launcher, and browser extension |
+| [webapp/](./webapp/) | Website, installation, and approval interfaces |
+| [docs/](./docs/) and [work/](./work/) | Guides, specifications, task contracts, and acceptance evidence |
 
----
+After building the SDK, run the relevant checks:
 
-## Storage modes
+```bash
+npm test --workspace @mnemonik-xyz/sdk
+npm test --workspace @mnemonik-xyz/cli
+cargo test --workspace --no-fail-fast --features mnemonic-mcp/test-support
+```
 
-`STORAGE_MODE` sets what an operator *can* do and what it defaults to. It is not
-the same knob as the per-request `mode` a caller picks on each write (see
-[You choose what goes on-chain](#you-choose-what-goes-on-chain)) — a `local`
-request stays free even on a `full` deployment.
+See [CONTRIBUTING.md](./CONTRIBUTING.md), [CODE_OF_CONDUCT.md](./CODE_OF_CONDUCT.md), and [CLAUDE.md](./CLAUDE.md) for repository conventions.
+Work follows written user specifications, technical designs, and atomic tasks.
+The [product specification](./work/protocol-product/user-spec.md) explains the recovery promise and its boundaries.
+The [whitepaper](./docs/WHITEPAPER.md) and [yellow paper](./docs/YELLOWPAPER.md) provide broader design background.
 
-- `local` (default) — SQLite only. No Solana / Arweave writes, no payment gate. Synthetic tx ids (`local:...`). Ideal for dev, demos, and UX testing.
-- `full` — signed COSE bytes written to Arweave, anchor memo written to Solana, searchable embeddings kept in SQLite. Payment gate applies on HTTP when enabled.
+Discuss ideas on [Discord](https://discord.gg/ws6wruJj) or [Telegram](https://t.me/mnemonikprotocol).
+Report bugs in [GitHub issues](https://github.com/mnemonik-xyz/monorepo/issues).
+For vulnerabilities, follow [SECURITY.md](./SECURITY.md).
 
-`full` deployments also select an anchoring environment with
-`ANCHORING_NETWORK`:
-
-- `mainnet` (default) — uses the production Irys upload endpoint and the
-  operator-selected mainnet-compatible read gateway/RPC.
-- `devnet` — test-only anchoring. MCP permits only
-  `SOLANA_RPC_URL=https://api.devnet.solana.com` and
-  `IRYS_GATEWAY_URL=https://devnet.irys.xyz`, then selects Irys Devnet’s
-  upload endpoint internally. A production or custom endpoint causes startup
-  to fail rather than risk a billable upload.
-
-Irys Devnet artifacts are disposable test data; do not use this mode for
-durable user memory.
-
----
-
-## Payment modes (HTTP only, `full` mode only)
-
-`PAYMENT_MODE` ∈ `none` | `balance` | `x402` | `both`.
-
-- `balance` — `Authorization: Bearer mnm_<key>`, balance checked against the live pricing engine quote and reserved before execution.
-- `x402` — first request returns HTTP 402, retry with `X-Payment: {"tx_sig":"...","network":"solana-mainnet"}`.
-
-Only `mnemonic_sign_memory` is paid. Deposits are validated against the treasury pubkey + USDC mint + signer ownership on the tx.
-
-Free daily quota (available now, `x402` only): an agent key that is linked to a Google account gets 10 free `participate` writes per UTC (Coordinated Universal Time) day. All keys of one Google account share this quota. Each client IP address gets at most 20 free writes per day, and a global cap of 1000 free writes per day applies to all accounts. A free write carries at most 16 KiB of signed bytes; a larger write is paid. The agent needs no wallet and gets no payment prompt for these writes. Paid writes need no Google account. `mnemonic_whoami` shows the remaining quota, or the reason there is none, in `free_anchors`.
-
----
-
-## Configuration
-
-All configuration is env-driven (`mcp/src/config.rs`). The most relevant variables:
-
-| Variable | Default | Purpose |
-|---|---|---|
-| `MCP_TRANSPORT` | `http` | `http` or `stdio` |
-| `MCP_HTTP_HOST` / `MCP_HTTP_PORT` | `0.0.0.0` / `3000` | HTTP listener |
-| `STORAGE_MODE` | `local` | `local` or `full` |
-| `MNEMONIC_KEYPAIR_PATH` | `~/.mnemonic/id.json` | Server Ed25519 identity |
-| `DATABASE_PATH` | `~/.mnemonic/attestations.db` | SQLite path |
-| `EMBED_PROVIDER` | `fastembed` | `fastembed` \| `openai` \| `hash` (tests only) |
-| `OPENAI_API_KEY` / `OPENAI_EMBED_MODEL` | — | When using OpenAI embeddings |
-| `TURBO_BITS` | `4` | TurboQuant bit width (2/3/4) |
-| `ANCHORING_NETWORK` | `mainnet` | `mainnet` or fail-closed test-only `devnet` |
-| `SOLANA_RPC_URL` / `IRYS_GATEWAY_URL` | localhost | External anchoring endpoints (`full` mode); `ARWEAVE_URL` is a legacy fallback for the gateway only |
-| `PAYMENT_MODE` | `none` | `none` \| `balance` \| `x402` \| `both` |
-| `TREASURY_PUBKEY` / `USDC_MINT` | — / mainnet USDC | Payment routing |
-| `SIGN_MEMORY_COST_MICRO_USDC` | `1000` | Floor price for sign-memory |
-| `MNEMONIC_FREE_ANCHORS_PER_DAY` | `10` | Free `participate` writes per Google account per UTC day (`x402` only, Google-linked keys only); `0` disables |
-| `MNEMONIC_FREE_ANCHORS_PER_IP_PER_DAY` | `20` | Free `participate` writes per client IP address per UTC day; `0` disables |
-| `MNEMONIC_FREE_ANCHORS_GLOBAL_PER_DAY` | `1000` | Free `participate` writes per UTC day across all accounts; `0` = none |
-| `MNEMONIC_FREE_ANCHOR_MAX_BYTES` | `16384` | Largest signed envelope (COSE_Sign1 bytes) for a free write; larger writes are paid |
-| `MNEMONIC_MAX_CONTENT_BYTES` | `32768` | Largest `mnemonic_sign_memory` content on every transport (maximum 32768) |
-| `TRUSTED_PROXIES` | loopback + private ranges | CIDR list of reverse proxies whose `X-Forwarded-For` gives the client IP address |
-| `PRICE_REFRESH_SECS` / `PRICING_MARGIN_BPS` | `1800` / `2000` | Dynamic pricing engine |
-
-Copy `.env.example` to `.env` to start.
-
----
-
-## Development workflow
-
-This project uses a **spec-driven** flow with AI agents:
-
-1. **User Spec** — what and why (in `work/<feature>/user-spec.md`)
-2. **Tech Spec** — how (architecture, decisions, testing)
-3. **Tasks** — atomic decomposition of the tech-spec
-4. **Implementation** — agent-executed, reviewed per wave
-
-Active work lives in `work/`. Completed features are archived under `work/completed/`.
-
-Agent guidance and project knowledge for this repo live in `.claude/skills/project-knowledge/` and `CLAUDE.md`.
-
-Default branch: `main`. Feature branches are cut from `main` and PR'd back to it; tagged releases (`v*`) are cut from `main`.
-
----
-
-## Further reading
-
-All protocol documentation lives in this repository. Start at the top of
-whichever column matches what you are here to do.
-
-### Use it
-
-- [`docs/QUICKSTART.md`](./docs/QUICKSTART.md) — install, identity, first signed memory in three commands
-- [`docs/tools.md`](./docs/tools.md) — MCP tool reference: every tool's inputs, outputs, auth, and the `local` vs `participate` write-mode howto
-- [`packages/cli/README.md`](./packages/cli/README.md) — `@mnemonik-xyz/cli`: every command, flag, and exit code
-- [`packages/sdk/README.md`](./packages/sdk/README.md) — `@mnemonik-xyz/sdk`: TypeScript client, OAuth helpers, COSE verification
-- [`packages/mcp/README.md`](./packages/mcp/README.md) — `@mnemonik-xyz/mcp`: one-command install into Claude Desktop, Claude Code, and Cursor
-- [`packages/extension/README.md`](./packages/extension/README.md) — the MV3 browser extension
-
-### Understand it
-
-- [`docs/how-it-works.md`](./docs/how-it-works.md) — sign / recall / verify walked through the actual modules
-- [`docs/WHITEPAPER.md`](./docs/WHITEPAPER.md) ([RU](./docs/WHITEPAPER_RU.md)) — overview: what Mnemonic does, modes, who signs, costs, status
-- [`docs/YELLOWPAPER.md`](./docs/YELLOWPAPER.md) ([RU](./docs/YELLOWPAPER_RU.md)) — detailed protocol design, artifact model, trust model
-- [`docs/spec/memory-composition.md`](./docs/spec/memory-composition.md) — cognitive typing, capability tokens, rehydration pipelines
-- [`docs/research/`](./docs/research/) — the foundational paper and the TurboQuant analysis behind the compression choices
-
-### Run it
-
-- [`Dockerfile`](./Dockerfile) and [`docker-compose.yml`](./docker-compose.yml) — containerised server, optional local Ollama embedder, nginx + certbot TLS
-- [`smithery.yaml`](./smithery.yaml) — Smithery MCP-registry manifest
-- [`.claude/skills/project-knowledge/references/deployment.md`](./.claude/skills/project-knowledge/references/deployment.md) — CI/CD, secrets, environments, rollback
-
-### Situate it
-
-- [`docs/usecases.md`](./docs/usecases.md) — ten agent-memory use cases, one paragraph each (start here), with deep-dives in [`docs/usecases/`](./docs/usecases/)
-- [`docs/comparisons.md`](./docs/comparisons.md) — how Mnemonic relates to adjacent memory and RAG systems
-- [`docs/competitive-landscape/`](./docs/competitive-landscape/) — decentralized RAG, zkTAM, V3DB, and neighbouring directions
-- [`docs/ROADMAP.md`](./docs/ROADMAP.md) — what is shipped and what is next
-- [`docs/problems/`](./docs/problems/) — open questions we have not solved
-
-### For agents and machines
-
-- [`AGENTS.md`](./AGENTS.md) — the agent-facing service card: endpoints, tool surface, identity and verification models
-- [`/.well-known/agent.json`](https://mnemonik.xyz/.well-known/agent.json) — machine-readable discovery
-- [`/llms.txt`](https://mnemonik.xyz/llms.txt) — condensed summary for LLM crawlers
-- [`CLAUDE.md`](./CLAUDE.md) and [`.claude/skills/project-knowledge/`](./.claude/skills/project-knowledge/) — repo conventions and architecture notes for AI coding agents
-
----
-
-## Community
-
-- **GitHub Discussions** — long-form Q&A and design proposals.
-- **Discord** — [discord.gg/ws6wruJj](https://discord.gg/ws6wruJj)
-- **Telegram** — [@mnemonikprotocol](https://t.me/mnemonikprotocol) · announcements: [@mnemonik_xyz_announcements](https://t.me/mnemonik_xyz_announcements)
-- **Issues** — file bugs at [github.com/mnemonik-xyz/monorepo/issues](https://github.com/mnemonik-xyz/monorepo/issues). For security reports see [`SECURITY.md`](./SECURITY.md) — do **not** file public issues for vulnerabilities.
-
-Before contributing, please read [`CONTRIBUTING.md`](./CONTRIBUTING.md) and [`CODE_OF_CONDUCT.md`](./CODE_OF_CONDUCT.md).
-
-## License
-
-Apache License 2.0 — see [`LICENSE`](./LICENSE) for the full text. By contributing you agree your contribution is licensed under the same terms (inbound = outbound). No CLA required.
+Apache License 2.0. See [LICENSE](./LICENSE). Contributions use the same license; no CLA is required.
