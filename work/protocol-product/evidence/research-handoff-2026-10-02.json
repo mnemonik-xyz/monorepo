@@ -1,0 +1,117 @@
+{
+  "artifacts": [
+    {
+      "artifactId": "a2a:bc4ee08674d32b615b0439bf556cfeb6238558ec61a2ed00557a4180e6ac71c0",
+      "author": "AKnL4NNf3DGWZJS6cPknBuEGnVsV4A4m5tgebLHaRSZ9",
+      "grants": 1,
+      "label": "R",
+      "locator": "blob://7fdba7bf40e2e7c41e3ea80c69c5fecce74dc40d053522c5f9127e94368f8905",
+      "originalSha256": "7fdba7bf40e2e7c41e3ea80c69c5fecce74dc40d053522c5f9127e94368f8905",
+      "prevId": null,
+      "recipientOpened": true,
+      "streamChunks": 0
+    },
+    {
+      "artifactId": "a2a:c52383b04ed7452b8b646aee15bdb1b597c9b350c2603aaee3e4558d3e723f91",
+      "author": "AKnL4NNf3DGWZJS6cPknBuEGnVsV4A4m5tgebLHaRSZ9",
+      "grants": 1,
+      "label": "S",
+      "locator": "blob://a83917d064e26d9349b010a5ee8c2d41392d22bbb84430f57dffc5aff9cb363d",
+      "originalSha256": "a83917d064e26d9349b010a5ee8c2d41392d22bbb84430f57dffc5aff9cb363d",
+      "prevId": "a2a:bc4ee08674d32b615b0439bf556cfeb6238558ec61a2ed00557a4180e6ac71c0",
+      "recipientOpened": true,
+      "streamChunks": 14
+    },
+    {
+      "artifactId": "a2a:6ec1f6c9a38dc597d767eab6441de7e830ac6bce816d9038f1076144ea409179",
+      "author": "9hSR6S7WPtxmTojgo6GG3k4yDPecgJY292j7xrsUGWBu",
+      "grants": 1,
+      "label": "V",
+      "locator": "blob://7694291663aa94af3c2669e67305cc1cbcd0591ad994d24acb0a357a237a3291",
+      "originalSha256": "7694291663aa94af3c2669e67305cc1cbcd0591ad994d24acb0a357a237a3291",
+      "prevId": "a2a:c52383b04ed7452b8b646aee15bdb1b597c9b350c2603aaee3e4558d3e723f91",
+      "recipientOpened": true,
+      "streamChunks": 0
+    },
+    {
+      "artifactId": "a2a:69a75a06ed20faf223636249703e8a6937edb3926e7c20813da9968321b1f807",
+      "author": "9hSR6S7WPtxmTojgo6GG3k4yDPecgJY292j7xrsUGWBu",
+      "grants": 1,
+      "label": "W",
+      "locator": "ar://40RyDrjkOqJc1s_jSCz0wfk53SmV_SPhuZntPEqRr4A",
+      "originalSha256": "25c0cffb5007efa372651d8fd9cf15feaaec44cebffd9cfc624df3a8f9c6e1b1",
+      "prevId": "a2a:6ec1f6c9a38dc597d767eab6441de7e830ac6bce816d9038f1076144ea409179",
+      "recipientOpened": true,
+      "streamChunks": 0
+    }
+  ],
+  "checks": {
+    "checkpointAuthenticated": true,
+    "completeToHeads": true,
+    "exactOriginalBytes": true,
+    "manifestAuthenticated": true,
+    "operatorPayloadTablesEmpty": true,
+    "originalOperatorOffline": true,
+    "originalSourceOffline": true,
+    "privateKeysPublished": false,
+    "replacementReceiptCount": 1,
+    "restoredIdentity": true
+  },
+  "environment": "local_mock_services_real_sdk_wasm",
+  "failures": [
+    {
+      "detail": "Real SDK/WASM rejects outsider access to the recovered sealed source stream.",
+      "name": "outsider_open_S",
+      "status": "rejected"
+    },
+    {
+      "detail": "Original router stopped and database dropped; fresh B restored R/S/V and delivered W through O2.",
+      "name": "O1_shutdown_and_receipt_loss",
+      "status": "recovered"
+    },
+    {
+      "detail": "Original storage erased and listener stopped; exact migrated bytes restored from configured destination.",
+      "name": "original_storage_shutdown",
+      "status": "recovered"
+    }
+  ],
+  "limitations": [
+    "Synthetic local storage and operators; no live-provider durability claim.",
+    "B uses its restored identity; this does not provision a new independently trusted identity.",
+    "Full task8 failure matrix and live task5 prerequisites remain open."
+  ],
+  "operators": {
+    "O1": "EGmT28RkRtdcYC5H5m6ktmk7x47U2eJrsbitgqcZXKL1",
+    "O2": "CCPCgpBRGGykfKjHMeNW249AMXNxwhZ7z2ssebroWTrF"
+  },
+  "phases": [
+    {
+      "name": "collector_authored_R_S",
+      "status": "passed"
+    },
+    {
+      "name": "reviewer_discovered_opened_and_authored_V",
+      "status": "passed"
+    },
+    {
+      "name": "exact_byte_storage_migration",
+      "status": "passed"
+    },
+    {
+      "name": "fresh_B_encrypted_identity_restore",
+      "status": "passed"
+    },
+    {
+      "name": "recipient_recovered_R_S_V",
+      "status": "passed"
+    },
+    {
+      "name": "W_delivered_through_O2",
+      "status": "passed"
+    }
+  ],
+  "recoveredHeads": [
+    "a2a:6ec1f6c9a38dc597d767eab6441de7e830ac6bce816d9038f1076144ea409179"
+  ],
+  "version": 1
+}

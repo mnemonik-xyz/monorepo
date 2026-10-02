@@ -432,6 +432,15 @@ async fn unsupported_paid_a2a_rail_fails_closed_without_upload_or_settlement() {
 #[tokio::test]
 #[ignore = "requires built SDK and real WASM"]
 async fn sdk_migrated_sealed_stream_recipient_continues_through_independent_operator() {
+    // Invalidate previous success before any network, SDK, or assertion can fail.
+    if let Ok(directory) = std::env::var("MNEMONIC_DEMO_EVIDENCE_DIR") {
+        let path = std::path::Path::new(&directory).join("report.json");
+        match std::fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => panic!("cannot invalidate previous demo report {}: {error}", path.display()),
+        }
+    }
     let (source_url, source, source_task) = remote().await;
     let (destination_url, destination, destination_task) = remote().await;
     let original = TestServer::builder().arweave_gateway(source_url.clone()).build();
@@ -445,9 +454,11 @@ async fn sdk_migrated_sealed_stream_recipient_continues_through_independent_oper
     let reader = fixtures["reader"]["pubkey_base58"].as_str().unwrap();
     let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../packages/sdk/scripts/test-migrated-a2a-e2e.mjs");
+    let backup_passphrase = Keypair::new().pubkey().to_string();
     let created = tokio::process::Command::new("node").arg(&script)
         .env("A2A_OPERATOR_URL", &original_url).env("A2A_SOURCE_URL", &source_url)
         .env("A2A_DESTINATION_URL", &destination_url).env("A2A_JWT", original.mint_jwt(author))
+        .env("A2A_READER_JWT", original.mint_jwt(reader)).env("A2A_BACKUP_PASSPHRASE", &backup_passphrase)
         .output().await.unwrap();
     assert!(created.status.success(), "{}", String::from_utf8_lossy(&created.stderr));
     let packet: Value = serde_json::from_slice(&created.stdout).unwrap();
@@ -459,7 +470,8 @@ async fn sdk_migrated_sealed_stream_recipient_continues_through_independent_oper
         for bytes in source_bytes.values() {
             let digest = hex::encode(Sha256::digest(bytes));
             assert_eq!(migrated.get(&digest).unwrap(), bytes);
-            let verified = verify_signed_a2a(bytes, Some(author)).unwrap();
+            let verified = verify_signed_a2a(bytes, None).unwrap();
+            assert_eq!(packet["authors"][format!("a2a:{}", verified.content_hash)], verified.signer);
             assert_eq!(packet["originals"][format!("a2a:{}", verified.content_hash)], hex::encode(bytes));
         }
     }
@@ -488,6 +500,7 @@ async fn sdk_migrated_sealed_stream_recipient_continues_through_independent_oper
         .env("A2A_OPERATOR_URL", replacement_url).env("A2A_ORIGINAL_OPERATOR", original_url)
         .env("A2A_SOURCE_URL", source_url).env("A2A_DESTINATION_URL", destination_url)
         .env("A2A_JWT", replacement.mint_jwt(reader)).env("A2A_RECOVERY_PACKET", packet.to_string())
+        .env("A2A_BACKUP_PASSPHRASE", &backup_passphrase)
         .output().await.unwrap();
     assert!(recovered.status.success(), "{}", String::from_utf8_lossy(&recovered.stderr));
     let continued: Value = serde_json::from_slice(&recovered.stdout).unwrap();
@@ -502,6 +515,25 @@ async fn sdk_migrated_sealed_stream_recipient_continues_through_independent_oper
     let receipt_count: i64 = replacement.state.store.lock().unwrap().conn()
         .query_row("SELECT COUNT(*) FROM a2a_anchor_receipts", [], |row| row.get(0)).unwrap();
     assert_eq!(receipt_count, 1, "O2 has only the new child receipt, no restored SQL history");
+    // Export only observed checks and public routing/identity metadata, never the recovery packet.
+    let mut evidence = continued["evidence"].clone();
+    evidence["operators"] = json!({"O1":original_operator_key,"O2":replacement.state.keypair.pubkey_base58()});
+    evidence["checks"]["originalOperatorOffline"] = json!(true);
+    evidence["checks"]["originalSourceOffline"] = json!(true);
+    evidence["checks"]["operatorPayloadTablesEmpty"] = json!(true);
+    evidence["checks"]["replacementReceiptCount"] = json!(receipt_count);
+    evidence["failures"].as_array_mut().unwrap().extend([
+        json!({"name":"O1_shutdown_and_receipt_loss","status":"recovered","detail":"Original router stopped and database dropped; fresh B restored R/S/V and delivered W through O2."}),
+        json!({"name":"original_storage_shutdown","status":"recovered","detail":"Original storage erased and listener stopped; exact migrated bytes restored from configured destination."}),
+    ]);
+    assert_eq!(evidence["artifacts"].as_array().unwrap().len(), 4);
+    if let Ok(directory) = std::env::var("MNEMONIC_DEMO_EVIDENCE_DIR") {
+        let directory = std::path::Path::new(&directory);
+        std::fs::create_dir_all(directory).unwrap();
+        let path = directory.join("report.json");
+        std::fs::write(&path, serde_json::to_vec_pretty(&evidence).unwrap()).unwrap();
+        eprintln!("Research handoff evidence: {}", path.display());
+    }
     replacement_task.abort();
     destination_task.abort();
 }
