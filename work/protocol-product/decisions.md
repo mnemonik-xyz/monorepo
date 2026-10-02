@@ -225,3 +225,20 @@ No implementation commit is assigned to this preparation before it is committed.
 No deployment, npm publication, live payment or customer outreach was performed.
 
 Preparation implementation: `355fa84` (research handoff, recorded evidence viewer, isolated package drill). Documentation in the following commit records the remaining release gates.
+
+## 2026-10-02 — Repeatable local failure evidence
+
+After merges #269 (`3505527`) and #270 (`66ce3af`), three agents independently
+implemented crypto, discovery/fork and financial fault observations. Root
+integrated a sequential runner, required-control checks and the billing view.
+The ten required scenario injections passed with real cryptography and local
+synthetic services. Financial receipt fixtures are seeded, not live charges.
+The report retains separate payment, delivery and new-receipt persistence states.
+
+Review strengthened stale-output invalidation and rejects failed handoffs during
+composition. Eight Node tests, the combined three-test drill, scoped financial
+suite, browser checks and workspace formatting pass. Full commands and limits
+are in [release evidence](release-evidence.md). Task 8's local matrix gap is
+closed; its task 5 dependency, live provider evidence and A-17 remain open.
+
+Implementation and recorded combined evidence: `ce05357`.

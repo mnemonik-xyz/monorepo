@@ -1,6 +1,7 @@
 # Multi-agent continuity proof of concept
 
-Status: planned demonstration. This document reports no implemented or passing demo.
+Status: local synthetic implementation and recorded evidence are available in the
+[demo guide](../../docs/research-handoff-demo.md). Live-provider acceptance remains open.
 Related: [technical contract](tech-spec.md), [acceptance](acceptance.md),
 [A2A recovery](../sealed-memories/a2a-recovery-spec.md).
 

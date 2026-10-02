@@ -3,8 +3,8 @@
 This repeatable preparation fixture uses the real SDK, WebAssembly, signatures,
 encryption, grants and HTTP operator handlers. Storage, discovery and both
 operators run on loopback. It makes no live-provider retention or deployment
-claim. Task 8 remains in progress while live task 5 prerequisites and the full
-failure matrix remain open.
+claim. Task 8 remains in progress while live task 5 prerequisites remain open.
+The command below executes the local failure matrix.
 
 ## Run
 
@@ -14,34 +14,37 @@ artifacts are absent. Build them separately before starting concurrent native
 Cargo work; the SDK build script recreates the shared WASM directories.
 
 ```sh
-MNEMONIC_DEMO_EVIDENCE_DIR="$PWD/target/protocol-demo" \
-CARGO_INCREMENTAL=0 cargo test -p mnemonic-mcp --features test-support \
-  --test integration_a2a_mcp_tools \
-  sdk_migrated_sealed_stream_recipient_continues_through_independent_operator \
-  -- --ignored --nocapture
+node scripts/run-protocol-demo.mjs
 ```
 
-After a successful run, `target/protocol-demo/report.json` contains a versioned
-artifact timeline and observed checks. The test deletes an existing `report.json`
-before starting the scenario, so a failed attempt cannot leave an older success
-report at that path. Compilation failures occur before the test starts; check the
-command exit status before viewing any report. The generated report contains public author/operator keys,
-artifact identifiers, hashes, locators, counts and check results. It excludes
-private keys, JWTs, passphrases, encrypted identity backups, original envelopes
-and payload plaintext. Loopback locators describe that completed test run;
-the listeners stop when the test ends.
+This runs the handoff, cryptographic/discovery injections and separate financial
+fault tests sequentially. After every required assertion passes it combines their
+observations into `target/protocol-demo/report.json` and `report.html`.
+Open that HTML file in your browser. The failure view includes separate payment,
+delivery and receipt-persistence observations. The handoff itself is unpaid;
+financial tests seed accepted mock-provider receipts and do not execute settlement.
 
-To render the recorded evidence into a local viewer after the command succeeds:
+The runner removes older combined JSON and HTML before compiling or testing.
+A failed run leaves `run-status.json` marked failed, with no combined success
+report. Each attempt retains its component reports in a fresh `run-*` directory
+for diagnosis. Those partial reports do not establish an overall pass.
+The viewer displays recorded evidence; it does not contact services or trigger
+injections. Fault controls run in the command-line harness.
+
+Reports contain public author/operator keys, artifact identifiers, hashes,
+locators and observed checks. They exclude private keys, JWTs, passphrases,
+identity backups, original envelopes and payload plaintext. Local service
+listeners stop when their tests finish.
+
+To render an archived report without re-running its assertions:
 
 ```sh
 node scripts/render-protocol-demo.mjs \
   target/protocol-demo/report.json target/protocol-demo/report.html
 ```
 
-Open `target/protocol-demo/report.html` in your browser. The viewer displays the
-recorded report; it does not contact the stopped services or run live fault
-controls. Render it again after each successful demo. An HTML file left from a
-previous run remains a historical snapshot, not evidence of the latest attempt.
+This only renders a historical snapshot. It does not independently verify the
+original signatures or establish a new successful drill.
 
 ## Story and evidence
 
@@ -77,9 +80,20 @@ does not save a new recovery checkpoint to W.
 
 ## Failure controls and limits
 
-The main demo executes source shutdown, O1 shutdown/receipt loss, and an outsider
-attempt to open S. Only those executed controls appear in its JSON `failures`
-array. The same integration binary separately covers the following controls:
+The combined runner covers the ten injections in the
+[scenario specification](../work/protocol-product/proof-of-concept.md): changed
+signed bytes, ciphertext tampering after public hash repair, forged discovery
+tags, outsider opening, a missing parent, discovery outage, index lag with known
+locators, a valid fork, receipt write failure and settled-delivery failure.
+
+The ciphertext test deliberately uses the synthetic author's signing key to
+re-sign repaired public metadata: public verification succeeds before real AEAD
+decryption rejects the changed ciphertext. This does not demonstrate a signature
+forgery. Discovery controls use synthetic provider responses with real verification
+and graph recovery. Payment controls exercise durable states using seeded
+provider receipts; they do not prove live settlement, refunds or provider behavior.
+
+The integration binary also separately covers these related controls:
 
 | Test | Control |
 |---|---|
@@ -95,8 +109,7 @@ CARGO_INCREMENTAL=0 cargo test -p mnemonic-mcp --features test-support \
   --test integration_a2a_mcp_tools -- --include-ignored --nocapture
 ```
 
-These controls do not cover every injection in the
-[scenario specification](../work/protocol-product/proof-of-concept.md).
+The local matrix does not close the live-provider acceptance gates.
 Signed research can still be false. Grant eligibility does not establish general
 project authority. Mock discovery does not prove live-provider coverage, and
 successful delivery does not promise indefinite availability. See the
