@@ -1,185 +1,90 @@
 # Mnemonic Protocol Yellow Paper: Verifiable Memory Infrastructure for AI Agents
 
-**Draft:** v0.5  
-**Date:** 24 September 2026  
-**Status:** Working draft  
-**Overview for readers:** [Whitepaper](./WHITEPAPER.md). This yellow paper is the detailed technical specification. Some parts describe designs that are not implemented yet (see §12).  
+**Draft:** v0.6
+**Date:** 2 October 2026
+**Status:** Working draft
+**Overview for readers:** [Whitepaper](./WHITEPAPER.md). This paper combines the current source contract with explicitly labeled design proposals. The [source capability matrix](./source-capabilities.md) defines implemented scope at `26a9550`; it is not a release or live-service claim. The Russian edition describes an earlier revision.
 
 ---
 
 ## Abstract
 
-AI agents accumulate crucial operational context across distinct sessions, tools, and 
-providers. This contextual state encompasses user preferences, extracted factual 
-knowledge, refined procedures, volatile working states, and persistent identity 
-profiles. While valuable, modern agentic memory remains fragile: it is bound to 
-isolated providers, siloed in proprietary formats, unverifiable by third parties, 
-and incapable of seamless migration across heterogeneous runtimes. As agents transition 
-toward true autonomy over extended temporal horizons, the lack of a memory layer with 
-cryptographic provenance shifts from a local bottleneck to a systemic coordination failure.
+Mnemonic represents agent memory as signed artifacts that clients can retain and verify independently of the original operator.
+Client-prepared sealed memory is encrypted before delivery. The operator receives original signed ciphertext and public metadata.
+Authenticated checkpoints, retained keys and accessible artifact bytes permit recovery without the old operational SQL database.
+Recovery establishes ancestry to trusted heads, not global completeness or a provably newest state.
 
-The Mnemonic Protocol introduces a decentralized, verifiable memory layer for autonomous 
-AI agents. It formalizes agentic memory as a portable, cryptographically signed artifact 
-that is content-addressed, strongly typed, and strictly lineage-linked. The protocol 
-categorizes memory into five distinct primitive types: episodic, semantic, procedural, 
-working, and identity. Each memory artifact is irrevocably bound to an operator’s 
-cryptographic identity via a digital signature over its content identifier.
-
-Because artifacts are completely decoupled from specific runtime environments, sovereignty 
-belongs entirely to the signing operator. This design enables secure cross-runtime 
-transport through an explicit cryptographic handshake governed by capability tokens. When 
-rehydrating memory into a target runtime, the raw underlying data is processed through 
-a strict isolation boundary. This safe-injection framing structurally isolates historical 
-data to mitigate memory-mediated prompt injections across trust boundaries. Because the 
-underlying raw memory state is bound to operator identity rather than a specific platform, 
-an agent's accumulated knowledge can migrate across model providers without structural 
-loss of history.
-
-Mnemonic remains agnostic to the underlying storage and anchoring infrastructure. Storage 
-topologies can be flexibly configured as local, hosted, or decentralized, provided the 
-anchoring backend yields a verifiable cryptographic inclusion proof linking a 
-content-addressed hash to a public, immutable timestamp. The protocol enforces two 
-absolute invariants across all deployments: validation is deterministic and free of 
-protocol-enforced transaction tolls for any network participant, and data self-hosting 
-is universally guaranteed. By removing central gating mechanisms, the protocol achieves 
-true structural trustlessness. 
-
-Positioned within the modular stack, Mnemonic complements adjacent standards: Agent-to-Agent 
-(A2A) protocols enable dynamic interoperability in motion, the Model Context Protocol 
-(MCP) establishes interoperability in tool capability, and Mnemonic guarantees coherence 
-over time. The core thesis of this work is definitive: trustless agents cannot exist 
-without trustless agentic memory.
+The source supports general-memory preparation and recovery, plus A2A discovery, sealed grants, completed streams and bounded storage migration.
+Local integration drills use real cryptography and mocked external services; live availability and release acceptance remain separate.
+Five cognitive schemas, capability-token delegation, safe-injection framing and ERC-8004 integration below are design proposals.
+They are not implemented requirements or security guarantees.
 
 ---
 
 ## 1. Introduction
 
-Autonomous artificial intelligence entities inherently experience state volatility. An agent's operational context regularly vanishes upon session termination, provider restarts, model migrations, or workflow transitions across disparate tooling layers. Even when persistent storage is utilized, the resulting memory layer typically remains captured by isolated providers, formatted within proprietary database schemas, and structurally unverifiable by external network participants.
+An agent's saved context can outlive its runtime when the client retains a portable record and the keys needed to verify and open it.
+Mnemonic separates that record from the operator's search and delivery services.
+Original signatures remain verifiable after byte-preserving copying; storage and discovery still determine which bytes can be found.
 
-For simple conversational assistants, context erasure is merely an inefficiency. However, for autonomous systems generating research, compliance records, cryptographic audits, financial state transitions, or strategic operational plans, memory volatility represents a fundamental failure of trust. The core architectural challenge is not merely whether an agent can maintain historical continuity, but whether an independent verifier can mathematically audit *what* the agent recalled, *when* the state was anchored, *which* entity authorized the write, and whether the underlying record was subsequently altered.
-
-The baseline industry approach mitigates this by expanding context windows or snapshotting raw attention states. While this preserves short-term continuity within an isolated execution environment, it fails to address portability, auditability, or long-term efficiency. Raw transformer attention weights are model-specific, high-dimensional, computationally expensive to transport, and impossible for decoupled external systems to parse semantically. Conversely, standard proprietary chat histories are human-readable but remain siloed within the hosting platform's data layer.
-
-The Mnemonic Protocol departs from raw state persistence by establishing a primitive unit: the **typed memory artifact**. A memory artifact formalizes human-readable data wrapped in an explicit cognitive classification. Let an artifact $A$ be defined as the tuple:
-
-$$A = \langle C, R, \vec{v}_M, \Sigma \rangle$$
-
-Here, $C$ represents the canonical content payload, and $R$ denotes its declared cognitive role type:
-
-$$R \in \{\text{Episodic}, \text{Semantic}, \text{Procedural}, \text{Working}, \text{Identity}\}$$
-
-The vector $\vec{v}_M \in \mathbb{R}^d$ represents the semantic embedding generated by a model $M$. To ensure multi-model compatibility, the protocol treats $\vec{v}_M$ as an ephemeral acceleration attribute tied to model $M$, while treating the underlying content $C$ as the permanent, universally portable source of truth. The artifact is sealed by a cryptographic signature block $\Sigma$, establishing a verifiable commitment trail that can be queried via semantic similarity, inspected by human operators, and deterministically verified by independent nodes.
-
-Memory sovereignty resides with the operator who signs the state, rather than the runtime environment that executes the model. Because the artifact's signature block $\Sigma = \text{Sign}_{\text{sk}}(\text{CID}(A))$ relies entirely on public-key cryptography, the underlying knowledge graph remains structurally valid across heterogeneous LLM providers, agentic frameworks, and physical infrastructure. An operator can safely migrate an agent's accumulated history from one execution runtime to another without invalidating or re-signing historical records.
-
-The underlying physical storage layer is strictly decoupled from the protocol's state guarantees. Storage topologies can be flexibly mapped to local key-value stores, hosted cloud infrastructure, or decentralized content-addressed networks. Storage backends function as pluggable modules rather than a forced compromise between high-throughput local caching and trustless decentralized persistence. The authorship, integrity, and cryptographic lineage of a memory artifact remain invariant regardless of the physical storage topology; the choice of backend simply dictates data availability, retrieval latency, and the immutable strength of the third-party timestamp proofs.
-
-This structural paradigm shift is critical for multi-agent systems. While contemporary Agent-to-Agent (A2A) and coordination protocols safely orchestrate ephemeral message routing and task allocation, they lack a native mechanism to guarantee durable, portable, and attestable memory. The Mnemonic Protocol operates directly underneath these execution frameworks, providing a universal cryptographic substrate that ensures autonomous agents remain functionally coherent over arbitrary temporal horizons.
-
+Embeddings accelerate search and can be rebuilt for a different model.
+They do not establish truth or provide an authoritative version of the signed content.
+The current formats permit recovery without requiring an embedding.
 
 ## 2. Problem Statement
 
-Contemporary agentic memory management architectures generally converge into three paradigms, each exhibiting distinct structural limitations:
+Recovery must distinguish trustworthy bytes from routing hints, preserve original authorship, and expose incomplete results.
+It must also keep private content on the client during preparation and opening.
+These requirements differ from complete process migration or preservation of an agent's external credentials and unfinished actions.
 
-1. **In-Context Windows:** Provide low-latency, high-fidelity state access but are strictly ephemeral, volatile, and bounded by the transformer’s context capacity.
-2. **Application-Native Caches:** Persist state across execution cycles but are structurally siloed within proprietary platform boundaries or vendor-specific databases.
-3. **External Vector Databases:** Support decoupled semantic retrieval over arbitrary scales but lack native cryptographic primitives to verify data provenance, state integrity, linear temporal ordering, or non-repudiation.
+Further design goals include richer memory types, delegated access policies and safer consumption of untrusted text.
+The proposals below do not establish those features as available or prove that an LLM will obey framing markers.
 
-While these paradigms satisfy basic retrieval requirements, they fail to provide a portable, trustless execution layer. If an autonomous agent transitions between heterogeneous execution runtimes, its accumulated context cannot migrate seamlessly. If an historical memory entry is maliciously altered or suppressed, downstream consuming systems possess no mechanism to detect the mutation. Furthermore, when an agent executes a high-value state transition (e.g., a financial transaction or compliance attestation) based on historical context, independent nodes cannot audit the exact state of the memory graph as it existed at the time of execution.
+## 3. Current Source Contract
 
-Two core structural failures compound this trust deficit, neither of which can be resolved by existing memory storage paradigms:
+### 3.1 Authorship and exact bytes
 
-### I. Cognitive Homogeneity vs. Structured Lifecycles
-Standard persistence layers treat memory as an undifferentiated collection of raw strings or flat vector coordinates. In reality, an agent's cognitive state possesses explicit structural topography:
+A client-prepared artifact carries the author's signature over the format's signed payload.
+COSE verification checks its signature structure; it is not equivalent to signing an arbitrary bare content identifier.
+A verifier must independently pin the expected author rather than trusting the envelope's embedded key alone.
+Ed25519 signatures and BLAKE3 hashes establish integrity, not truth, trusted time, or key custody.
 
+`MEMORY_V1` identifiers and parent identifiers need not be content hashes.
+Verified memory graph recovery therefore pins the author and exact-envelope digest for each head and ancestor.
+A2A parent identifiers bind content hashes; verification also checks context and author/recipient eligibility.
+Neither graph contract makes an untrusted index authoritative for the latest head.
 
+### 3.2 Client privacy and local persistence
 
-* **Working State:** Highly transient, high-turnover execution context.
-* **Episodic Memory:** Immutable, sequentially ordered event logs.
-* **Semantic Knowledge:** Evolving conceptual associations.
-* **Procedural Memory:** Deterministic execution logic and tool schemas.
-* **Identity Profiles:** Persistent, self-referential behavioral constraints.
+The prepared sealed path encrypts and signs before sending bytes to the operator.
+The SDK retains bytes in its session cache; durable persistence belongs to the caller.
+The CLI persists sealed bytes locally. Local signing still requires the identity key.
+Legacy server-prepared signing sends plaintext to the operator and has a different privacy boundary.
+Explicit HTTP local writes are rejected; plain stdio-local rows are not signed portable artifacts.
 
-When storage systems erase these distinctions, they prevent the application of per-kind retention lifecycles, block fine-grained cryptographic access scoping, and preclude runtime security engines from making differentiated safety evaluations (e.g., treating volatile working memory with a higher risk profile than immutable identity baselines).
+### 3.3 Recovery and independence
 
-### II. Unprotected Trust-Boundary Crossings
-When an autonomous entity or external runtime transmits historical context to an independent peer, the exchange surfaces three simultaneous vulnerabilities:
+Recovery checks original signatures, trusted authors, artifact kind and signed parent bindings before importing content.
+Checkpoint owners and scope are supplied independently of the fetched checkpoint.
+Keys, original bytes and trusted expected heads remain recovery prerequisites.
+`completeToHeads` covers only the supplied heads' ancestry; omissions, forks and source errors remain visible.
 
-1. **Authorization Decay:** Access management must be cryptographically expressible, delegable, and revocable without introducing a central authentication authority.
-2. **Transit Tampering:** The receiving runtime must mathematically confirm that the received context matches the exact state sealed by the originating operator's keypair, that historical lineage remains unbroken, and that associated timestamp claims are valid.
-3. **Memory-Mediated Prompt Injection:** Historical memory entries frequently contain untrusted natural language data. A naive injection of raw retrieved historical text into a target runtime's context window exposes the model to control-flow hijacking. Let this attack surface be modeled where an adversarial payload $x_{\text{adv}}$ embedded within a memory entry $m \in \Omega_t$ moves the runtime state outside the permitted policy set $\mathcal{S}_{\text{policy}}$:
+An operator's SQL receipt is not evidence of artifact authorship or exact external bytes.
+However, financial records remain necessary for safe payment replay and reconciliation.
+Recovery of memory does not imply recovery of lost payment state or complete agent execution state.
 
-$$\exists m \in \Omega_t \text{ containing } x_{\text{adv}} \implies \delta(\Omega_t, I_t) \notin \mathcal{S}_{\text{policy}}$$
+### 3.4 Scope of design proposals
 
----
+The following sections retain proposals for cognitive schemas, capability tokens, framing, batch anchors and additional storage backends.
+They do not define shipped requirements. Current APIs and supported routes are listed in [source capabilities](./source-capabilities.md).
 
-### Architectural Requirements
+## 4. Proposed Composition Model
 
-To establish a verifiably robust memory layer, a protocol must satisfy the following technical invariants:
+**Design only:** the complete pipeline in this section is not implemented. Embedding, framing and capability-token stages are not required for current sealed preparation.
 
-| Property | Technical Specification |
-| :--- | :--- |
-| **Persistence** | Lifecycle independence from localized execution runtimes and model providers. |
-| **Semantic Recall** | Sublinear vector search capabilities operating over multi-dimensional embedding spaces. |
-| **Provenance** | Cryptographic binding of individual memory artifacts to an asymmetric keypair ($A \mapsto \text{Sign}_{\text{sk}}(\cdot)$). |
-| **Integrity** | Deterministic, out-of-band verification of data state via immutable cryptographic content identifiers (CIDs). |
-| **Portability** | Universal data serialization format decoupling raw historical artifacts from model-specific embeddings. |
-| **Cognitive Typing** | Explicit architectural categorization into discrete schemas to enforce per-kind runtime policies. |
-| **Capability-Scoped Sharing** | Decentralized authorization mediated through cryptographically signed, bounded, and revocable capability grants $\kappa$. |
-| **Safe Injection Boundary** | Execution of an isolation operator $\Pi_\kappa$ that reformats data to neutralize memory-mediated prompt injections. |
-| **Economic Viability** | Verification is local and cheap: one hash pass over the artifact bytes plus one signature check. No protocol transaction fees. |
+Effective agentic memory infrastructure must simultaneously satisfy four conditions: it must be semantically expressive, cryptographically attributable, portable across heterogeneous runtimes, and computationally inexpensive to maintain.
 
-## 3. Protocol Contract
-
-This section enumerates the structural, protocol-level invariants that any compliant Mnemonic deployment must guarantee. These primitives represent invariant mathematical contracts rather than malleable implementation choices. They remain structurally binding across all physical backend configurations—whether localized, cloud-hosted, on-chain, or hybrid—independent of the operational status of any single network participant.
-
-### 3.1 Immutable Core Commitments
-
-#### I. Typed, Signed, Content-Addressed Artifacts
-All memory states are serialized using deterministic Concise Binary Object Representation (CBOR), hashed to yield a unique Content Identifier ($\text{CID}$), and signed via asymmetric cryptography linked to the operator's root identity keypair:
-
-$$\Sigma = \text{Sign}_{\text{sk}}(\text{CID}(A))$$
-
-#### II. Cognitive Typing Topology
-Every memory artifact must explicitly declare a discrete cognitive role $R$ within its signed header metadata. Downstream consumers enforce distinct execution, pruning, and retention lifecycles based on this type allocation.
-
-#### III. Content-Addressed Directed Acyclic Graph (DAG) Lineage
-Historical state transitions are modeled as a first-class, append-only cryptographic Directed Acyclic Graph (DAG). Every sequential artifact $A_t$ embeds the content hash of its direct historical ancestor:
-
-$$A_t = \langle C, R, \vec{v}_M, \text{CID}(A_{t-1}) \rangle$$
-
-This design ensures that parent-child relationships are universally verifiable, traversable during audit procedures, and compatible with Merkle-batched anchoring operations.
-
-#### IV. Physical Storage Agnosticism
-The cryptographic proof systems governing authorship, state integrity, lineage tracking, and capability authorization remain entirely invariant relative to the underlying storage substrate. The protocol layer functions independently of the byte-delivery mechanics.
-
-#### V. Decoupled Asynchronous Anchoring
-Global temporal anchoring via third-party immutable timestamps represents a composable, opt-in layer stacked above baseline signature verification. The system distinguishes between *locally final* signed states and *globally final* anchored states to optimize for throughput while remaining resilient against history-withholding or truncation maneuvers.
-
-#### VI. Capability-Scoped Access Control
-Cross-runtime memory synchronization is mediated exclusively through cryptographically signed, bounded, and revocable capability tokens $\kappa$. Access rights are evaluated non-interactively without relying on ambient trust or centralized lookup registries.
-
-#### VII. Deterministic Rehydration Pipeline
-Memory artifacts migrating into a target execution environment must transit a strict, non-bypassable compilation pipeline. The composition of this pipeline ensures state validity and isolates the model from injection vectors:
-
-$$I_{\text{runtime}} = (f_{\text{frame}} \circ f_{\text{format}} \circ f_{\text{decompress}} \circ f_{\text{rank}} \circ f_{\text{filter}} \circ f_{\text{verify}})(\mathcal{A}_{\text{raw}}, \kappa)$$
-
-*Note:* Data remains highly compressed on the network and retrieval paths ($f_{\text{filter}}, f_{\text{rank}}$), undergoing decompression ($f_{\text{decompress}}$) only immediately prior to semantic formatting and safe execution framing.
-
-#### VIII. Zero-Gate Verification
-Verifying one artifact costs one hash pass over its bytes plus one signature check. It does not depend on network size. Lineage checks grow linearly with the length of the checked chain. Any network participant possessing an artifact can execute verification out-of-band without encountering protocol transaction fees, network tolls, or centralized coordinator gateways.
-
-#### IX. Autonomous Self-Hosting Equity
-The protocol guarantees universal data-plane and verification autonomy. Any operator can deploy a fully compliant node to read, write, and verify states independently, without structural dependence on, or rent extraction from, external peer operations.
-
-#### X. Operator Pluralism
-The validation architecture enforces absolute structural neutrality. No node or service provider occupies a privileged cryptographic tier; verification logic evaluates state validity strictly based on cryptographic signatures and ledger proofs, independent of the entity responsible for state generation or storage hosting.
-
-## 4. Core Insight
-
-Effective agentic memory infrastructure must simultaneously satisfy four conditions: it must be semantically expressive, cryptographically attributable, portable across heterogeneous runtimes, and computationally inexpensive to maintain. 
-
-Raw transformer attention states and Key-Value (KV) caches represent the wrong abstraction layer for portable memory. Transformer attention architectures are inherently model-specific, mathematically opaque, dimensionally massive, and entirely uninterpretable by humans or external verification systems. 
+Raw transformer attention states and Key-Value (KV) caches represent the wrong abstraction layer for portable memory. Transformer attention architectures are inherently model-specific, mathematically opaque, dimensionally massive, and entirely uninterpretable by humans or external verification systems.
 
 Conversely, the Mnemonic Protocol introduces **typed memory artifacts** as the fundamental unit of state. These artifacts are compact, structurally inspectable, universally portable, and natively optimized for modern search and retrieval mechanics.
 
@@ -199,7 +104,7 @@ QUANTIZE        ──► Apply TurboQuant Scalar Compression to v_q ∈ ℤ_�
 ENCAPSULATE     ──► Bind Content, v_q, Type Meta, and Parent CID
 CANONICALIZE    ──► Serialize Structure to Deterministic cCBOR
 HASH            ──► Compute Content Identifier (CID) via BLAKE3
-SEAL            ──► Sign CID via Ed25519 to Produce COSE_Sign1 Envelope
+SIGN            ──► Sign the COSE_Sign1 signature structure with Ed25519
 PERSIST         ──► Write Sealed Envelope to Distributed Storage Layers
 ```
 
@@ -228,7 +133,7 @@ The protocol reference framework utilizes **TurboQuant Scalar Quantization** to 
 
 The protocol-level production and transfer mechanisms form a symmetric, closed-loop cryptographic composition. An artifact generated and signed by the Sign Pipeline within an originating execution runtime serves as the direct, immutable input to the Share / Rehydrate Pipeline of an external, receiving runtime. Both independent environments evaluate and verify the exact same canonical byte array against the same asymmetric public-key identity structure.
 
-This mathematical invariance guarantees that memory portability functions as a structural property of the network rather than an optimization goal.
+Copying exact signed bytes preserves their signature. Usable recovery still depends on supported formats, trusted keys, accessible ancestry and compatible client tools.
 
 #### 4.3.1 Canonical Sign Pipeline Specification
 The transformation of raw cognitive data into a sealed, verifiable state object proceeds through the following deterministic execution path:
@@ -241,7 +146,7 @@ QUANTIZE        ──► Apply TurboQuant Scalar Compression to v_q ∈ ℤ_�
 ENCAPSULATE     ──► Bind Content, v_q, Type Meta, and Parent CID
 CANONICALIZE    ──► Serialize Structure to Deterministic cCBOR
 HASH            ──► Compute Content Identifier (CID) via BLAKE3
-SEAL            ──► Sign CID via Ed25519 to Produce COSE_Sign1 Envelope
+SIGN            ──► Sign the COSE_Sign1 signature structure with Ed25519
 PERSIST         ──► Write Sealed Envelope to Distributed Storage Layers
 RECALL          ──► Query and Retrieve via Semantic Search (today: f32 cosine, local SQLite)
 AUDIT           ──► Out-of-Band Verification against Producer, Lineage, and Ledger Anchors
@@ -279,76 +184,54 @@ The protocol reference architecture utilizes TurboQuant Scalar Quantization to e
 
 ## 5. Architecture Overview
 
-The Mnemonic Protocol is structured into two horizontal execution layers and a vertical taxonomy of consumption surfaces. The **Protocol Layer** establishes invariant specifications for data serialization, cryptographic identity attribution, and verification semantics. The **Backend Layer** governs the physical lifecycle and persistence parameters of individual artifacts. 
+The Rust core and SDK implement artifact cryptography and verification.
+Client storage/index interfaces retain and recover artifacts; operator services handle authenticated delivery, discovery and operational metadata.
+Interfaces have distinct capabilities. There is no universal backend trait implemented by every client surface.
 
-This architecture is completely decoupled: all protocol-level guarantees regarding state authorship, cryptographic integrity, historic lineage, and capability authorization hold true regardless of the underlying persistence engine. Backend targets differ exclusively in availability guarantees, retrieval latencies, operational overhead, and the deterministic strength of their third-party timestamp proofs.
+### 5.1 Protocol Layer
 
-Consumers interact with the system through **Integration Surfaces**. Because every surface implements the uniform protocol layer and interfaces with a generalized backend trait, storage allocation remains an out-of-band execution parameter configured per artifact.
-
----
-
-### 5.1 The Protocol Layer (Storage-Independent)
-
-The protocol layer comprises six mathematical primitives that function completely independent of physical persistence topologies:
-
-*   **Canonical Serialization:** Enforces strict, deterministic data layout configurations using **Concise Binary Object Representation (CBOR)** as defined in Request for Comments (RFC) 8949 Section 4.2.
-*   **Cryptographic Content Addressing:** Generation of unique **Content Identifiers (CIDs)** by executing a **BLAKE3** cryptographic hash over the serialized binary stream.
-*   **Signed Enveloping:** Encapsulation of artifacts inside a **CBOR Object Signing and Encryption (COSE)** single-signer framework (`COSE_Sign1`), utilizing **Edwards-curve Digital Signature Algorithm (Ed25519)** keys. Producer identities are resolved via standardized **Decentralized Identifiers (DIDs)** (including `did:key` and `did:sol`).
-*   **Typed Schema Registry:** Structured, versioned object definitions defining precise semantics for `memory.episodic`, `memory.semantic`, `memory.procedural`, `memory.working`, `memory.identity`, `rag.context`, `agent.state`, and `capability.token`.
-*   **Lineage Directed Acyclic Graph (DAG):** Immutable parent-child linking achieved by nesting ancestor CIDs inside down-stream payloads, natively enforcing cycle-detection and ancestral path traversal.
-*   **Capability Tokens:** Cryptographically signed, granular authorization structures mapping access rights over defined lineage subtrees.
-
-Verification requires only the raw artifact bytes, the producer's public key, and the associated capability token. This layout yields a fundamental portability property:
-
-$$\text{Verify}(\text{Bytes}_{\text{local}}) \equiv \text{Verify}(\text{Bytes}_{\text{ledger}})$$
-
----
+Supported formats define serialization, signature verification, author identity, encryption and parent bindings.
+A caller checks original bytes under an independently trusted author key.
+Copying those bytes to another backend preserves their signature, but does not establish availability or authorize a new reader.
+Formal capability tokens and the five cognitive schemas remain proposals.
 
 ### 5.2 Integration Surfaces
 
-The protocol layer interfaces with external execution environments through specialized surface boundaries, all wrapping the core `StorageBackend` abstraction trait:
+The SDK provides client preparation and recovery APIs. The CLI adds local identity and ciphertext persistence.
+MCP exposes HTTP and stdio operations; legacy server-prepared methods have different privacy and storage contracts.
+Browser and extension compatibility must be validated for their actual built version.
+See [source capabilities](./source-capabilities.md) for the supported surface and artifact combinations.
 
-*   **`core`:** The foundational native protocol library, distributed as an optimized **Rust crate** and a compiled **WebAssembly (WASM)** binary matrix. It governs pure cryptographic and serialization state machines without prescribing I/O mechanics.
-*   **`cli`:** A terminal-native **Command-Line Interface** client optimized for local operations, automated ingestion scripts, and infrastructure configurations.
-*   **`sdk`:** An embeddable **Software Development Kit** application library. It empowers runtimes with native self-anchoring capabilities, allowing systems to publish ledger commitments without intermediary coordinators.
-*   **`mcp`:** A networked interface conforming to the **Model Context Protocol (MCP)** specification over standard input/output (stdio) or HTTP transports. It functions as the native translation gateway for autonomous LLM agents, routing state interaction through structured tool calling.
-*   **`browser-extension`:** A client-side browser integration layer utilizing the WASM distribution of `core`, enabling web-based agents to interface directly with local or public protocol nodes.
+### 5.3 Implemented Storage Adapters
 
----
+The SDK declares adapter capabilities explicitly: fetch, upload, discovery and retention/consistency descriptions.
+Its `ArweaveStorageAdapter` supports bounded fetch; it does not upload or bypass ingestion payment gates.
+Its `HttpObjectStorageAdapter` supports immutable object PUT and fetch under a configured origin.
+Both enforce 1 MiB objects and a 10-second deadline; arbitrary locator hosts and redirects are rejected.
+The object server must enforce its own access and retention policy.
 
-### 5.3 The Storage Backend Abstraction
+A2A migration verifies original envelopes and copies them unchanged.
+An owner-signed locator manifest binds the checkpoint, artifact authors, identifiers and exact-envelope digests to destination locators.
+The standalone restore API supports those manifests; generic import still follows the Arweave gateway route.
+No general-purpose storage trait implies support for every provider or artifact kind.
 
-Physical data interaction is isolated through a uniform interface trait:
+### 5.4 Supported Backend Matrix
 
-```rust
-trait StorageBackend {
-    async fn put(&self, artifact: &SignedArtifact) -> Result<BackendRef>;
-    async fn get(&self, reference: &BackendRef) -> Result<SignedArtifact>;
-    async fn list(&self, filter: &Filter) -> Result<Vec<BackendRef>>;
-    fn capabilities(&self) -> BackendCapabilities;
-}
+| Backend | Source support | Boundary |
+|---|---|---|
+| Client local storage/index | Retain original artifacts and rebuild local indexes | Default SDK caches are session-only |
+| Arweave/Irys | Ingestion upload/read-back; separate provider-specific discovery | Availability and index lag are external dependencies |
+| Configured HTTP object origin | A2A exact-byte migration and destination restore | No deployed service, retention SLA or discovery adapter supplied |
+| Historical Solana memo source | Legacy verification/discovery | No mandatory memo on new shared ingestion |
+| IPFS/Filecoin/other providers | Design examples only | No supported adapter claimed |
 
-```
-
-The `BackendCapabilities` matrix details targeted execution profiles: data durability limits, third-party timestamp proofs, censorship resistance factors, random-access lookup latencies, and real-time computation fees calculated in fractional units of stable currencies. Vector-space similarity execution is explicitly separated via a decoupled `RecallIndex` trait to keep search pipelines from distorting the underlying persistence architecture.
-
----
-
-### 5.4 Backend Matrix Topologies
-
-| Storage Topology | Durability Boundary | Third-Party Timestamp | Latency Profile | Write Cost Target | Primary Protocol Utilization |
-| --- | --- | --- | --- | --- | --- |
-| **Local Cache** (SQLite) | Operator Endpoint | Non-Existent | < 10 ms | 0 | Volatile Working State, Local Query Index |
-| **Cloud Object Store** | Enterprise SLA | Provider-Trusted | 10–100 ms | Minimal | Team Environments, Private Intranet Context |
-| **P2P Network** (IPFS) | Node Participation | Weak (DHT Metrics) | 100 ms–3000 ms | Extremely Low | Distributed Public Context, Open Datasets |
-| **Permanent Web** (Arweave) | Inter-Generational | Block Order Traversal | 1 s–10 s | Fixed Single-Pay | Long-Lived Attestations, Audit Ledger State |
-| **On-Chain Anchor** | Immutable Ledger | Absolute Consensus | Consensual Bounded | Batched Marginal | High-Value Cryptographic Non-Repudiation |
-
----
+See [storage portability](./storage-portability.md) for exact capabilities and routing restrictions.
 
 ### 5.5 Separation of Consensus Layers
 
-Public ledger anchoring is treated as an optional optimization vector rather than a system dependency. Mnemonic guarantees core cryptographic integrity and authorship signatures entirely out-of-band without referencing public consensus layers.
+**Design discussion:** batching and consensus inclusion proofs below are not general-memory delivery requirements.
+
+Public ledger anchoring is optional. A client can verify a retained signed envelope against an independently trusted author key without consulting a public ledger.
 
 Ledger anchors are selectively applied based on specific operational constraints:
 
@@ -358,24 +241,20 @@ Ledger anchors are selectively applied based on specific operational constraints
 
 ---
 
-### 5.6 Cryptographic Anchoring
+### 5.6 Current External Delivery
 
-Ledger anchoring upgrades signature-based assertions by introducing third-party public timestamps and preventing historical backdating attacks.
+Shared ingestion validates the signed artifact and any external parent before payment or upload.
+It binds a durable operation to the author, original envelope digest, backend and locator.
+It uploads original bytes, fetches the locator, and compares exact bytes before reporting verified delivery.
+Receipt persistence is reported separately from external delivery.
+New writes do not require a Solana memo.
 
-The current implementation anchors each memory in its own transactions. It does these steps:
+A signature or successful storage fetch does not establish a trusted timestamp.
+Historical Solana evidence can be checked separately when present.
+A failed delivery does not imply no payment occurred: payment acceptance and delivery are independent states.
+See [payment retries](./artifact-payment-retries.md).
 
-```text
-[Signed COSE_Sign1 Envelope]
-
-UPLOAD          ──► Write COSE bytes to Arweave (tags: Producer, Created-At)
-MEMO            ──► Write Solana SPL Memo {h: content hash, a: Arweave tx, m: embed model, v: 3}
-PERSIST         ──► Save the row in local SQLite (write_mode = anchored)
-CONFIRM         ──► Read the bytes back from Arweave, recompute hash, verify signature
-DEMOTE ON FAIL  ──► If CONFIRM fails: keep row as local, return error, charge nothing
-
-```
-
-Batch anchoring (§5.6.1) is a design. It is not implemented for memories. The experimental trajectory feature (`trajectory-experimental`) builds batch roots.
+The following batching/finality models are design proposals, not the current shared coordinator's state machine.
 
 #### 5.6.1 Lineage-Driven Merkle Batching
 
@@ -398,43 +277,35 @@ Because anchoring processes run asynchronously across distributed validation env
 
 ### 5.7 Protocol Economics
 
-Mnemonic structurally isolates the non-monetizable protocol validation layer from the monetizable infrastructure service layer. This ensures the protocol remains an open public good while accommodating commercial scaling models.
+Local verification of retained bytes requires no protocol transaction or account.
+Clients and operators still incur computing, storage and network costs.
+Service operators can publish quotes and quota rules; this paper promises no fixed price or free allocation.
 
-#### 5.7.1 Structural Free Operations
+The shared prepared-memory/A2A coordinator supports the Universal Paywall exact rail.
+Other rails fail closed on that path. Legacy callback interfaces retain separate migration behavior.
+An accepted payment can coexist with retryable or terminal delivery failure.
+Retries use the same original bytes and durable operation, quote and provider receipt.
+These replay guarantees depend on retained financial records and provider idempotency.
+Record loss requires reconciliation, not a new charge by default.
+Terminal failure records a pending operator remedy; no automatic refund or service credit is implemented.
 
-The protocol enforces that two operational fields can never be subject to rent extraction or gating by any network entity:
+New operation rows contain metadata rather than artifact payloads.
+Historical paid staging is retained until identical client resubmission drains its payload columns.
+An upgraded database cannot be described as payload-free before that drain and operational retention review.
 
-* **State Verification:** Checking a signature and a content hash is a small local computation per artifact (linear in artifact size; lineage checks linear in chain length). It runs without network tolls.
-* **Deployment Independence:** Any entity can spin up an autonomous node across `cli`, `sdk`, or `browser-extension` surfaces to read and sign blocks without paying fees to external operators.
+### 5.8 Current Execution Lifecycles
 
-#### 5.7.2 Service-Layer Monetization
-
-Operators providing real-world computing, storage allocation, and network bandwidth are free to structure commercial pricing parameters for:
-
-* Executing consensus transactions and processing on-chain ledger anchors.
-* Providing high-availability, globally distributed permanent storage slots.
-* Running high-throughput vector embedding models and accelerated semantic query workloads.
-* Managing corporate capability tracking, identity registries, and automated auditing trails.
-
-#### 5.7.3 Operator Pluralism
-
-The validation layer maintains absolute neutrality. There are no canonical data coordinators, structurally privileged master nodes, or restricted identity registries. Because artifacts are portable by signature and self-describing via cCBOR, users can migrate across commercial operators or drop back to raw self-hosting without fracturing their agent's historical context graph.
-
-The two protocol-level paths exposed to the user surface this split directly. A `local` write (default on `mnemonic_sign_memory`) realizes §5.7.1: the artifact stays on the user's own filesystem or self-hosted node, hash and lineage verification runs locally and free (a `local` write stores a hash and no signature), and no operator can gate it. An `anchored` write realizes §5.7.2: durable anchoring on Arweave + Solana with operator-priced service work (storage allocation, consensus anchoring, optional embedding compute), where "delivered" is defined as anchored AND verified by a recall round-trip — never a silent receipt. The `mode` field is a per-request user choice; the same keypair and the same API serve both, so users move freely between the two as §5.7.3 requires. See `work/modes-user-choice/user-spec.md` for the canonical model.
-
----
-
-### 5.8 Core Execution Lifecycles
-
-* **Sign:** The pipeline maps context inputs to full-precision embeddings, applies TurboQuant compression to form the portable $\vec{v}_q$ wire coordinate, serializes the data layout to deterministic cCBOR, and appends the Ed25519 signature envelope. The block is then pushed concurrently to the active local index and designated cold storage backends.
-* **Recall:** Inbound queries are transformed via the target embedding model. The system maps the query vector against the local hot database, executing accelerated similarity scoring over cached vectors to return the top-$K$ candidate matches. Cold-storage elements are only retrieved if local index bounds indicate a cache miss.
-* **Verify:** Reads raw bytes from any active backend reference, re-computes the BLAKE3 content hash over the payload fields, and verifies the Ed25519 signature against the extracted public key identity. If an anchor proof is present, it validates inclusion against the target consensus state root.
-
-
+- **Prepare:** construct, optionally encrypt, and sign locally; retain original bytes before requesting delivery.
+- **Deliver:** validate, resolve payment/quota, upload and verify exact fetched bytes; report financial and persistence outcomes separately.
+- **Recall:** use the appropriate local or legacy public index. SDK sealed recall requires a caller-supplied local embedder.
+- **Recover:** verify envelopes and trusted ancestry, open locally with required keys, then rebuild the client index.
+- **Migrate:** for supported A2A artifacts, copy exact envelopes and authenticate new locators without changing signed parent bindings.
 
 ## 6. Artifact Serialization and Object Model
 
-To guarantee absolute out-of-band verifiability, the Mnemonic Protocol mandates a strict, deterministic object layout model. Because independent nodes must evaluate identical binary payloads to derive matching cryptographic content identifiers, the protocol decouples raw logical data from local execution representations through an invariant serialization specification.
+**Design boundary:** the cognitive-schema registry below is proposed. Current `MEMORY_V1`, `SEALED_V1` and A2A schemas remain authoritative in source; no automatic five-schema migration is claimed.
+
+Each supported artifact format defines its serialization and verification rules. The proposed schema model below must not replace current signed field order or identifier semantics.
 
 ### 6.1 The Schema Registry Matrix
 
@@ -457,7 +328,7 @@ The protocol organizes all historical context states into a strongly typed schem
 
 ```
 
-*Implementation status:* the five cognitive schemas are a design. They are not implemented. The current engine uses one flat `memory` schema (`MEMORY_V1`) for all memories. A future engine would map legacy `memory` blocks to `memory.episodic`.
+*Implementation status:* the five cognitive schemas are a design. They are not implemented. General memory uses `MEMORY_V1` and `SEALED_V1`; A2A has separate typed envelopes. A future engine would map legacy `memory` blocks to `memory.episodic`.
 
 ---
 
@@ -465,7 +336,7 @@ The protocol organizes all historical context states into a strongly typed schem
 
 An artifact's raw information is completely invariant across versions. Any structural modifications, field insertions, or attribute deprecations dictate an explicit schema version iteration, preventing state drift within established historical sequences.
 
-To guarantee that independent validation nodes produce matching binary footprints, all fields must be processed through a deterministic serialization operator:
+The proposed model uses deterministic serialization to produce matching bytes from matching inputs:
 
 ```text
 [Raw Payload Attributes]
@@ -499,27 +370,21 @@ While the fundamental serialization rules establish the layout of an isolated me
 
 | Subsection | Status |
 |---|---|
-| §7.1 Cognitive typing (five schemas) | Design, not implemented. One flat `memory` schema is used. |
-| §7.2 Capability tokens (formal `capability.token` schema) | Design, not implemented. Grants deliver the content key `K` directly (not a scoped token). Grant-based access is available now; full capability-token delegation is planned. |
-| §7.3 Sharing handshake (ECDH tunnel) | Simplified form available now: a `GRANT_V1` record wraps `K` with the reader's X25519 public key via HPKE (RFC 9180). The full multi-step mutual authentication handshake is a design. |
-| §7.4 Rehydration pipeline | Design, not implemented. Recall returns stored text directly after client-side decryption for sealed rows. |
-| §7.5 Safe-injection framing | Design, not implemented. Recalled text is returned without isolation markers. |
-| §7.6 Portability | Available now for signed records. A record verifies the same way on any backend. |
+| §7.1 Five cognitive schemas | Design; not a required field of every current artifact |
+| §7.2 Scoped/revocable capability tokens | Design; delivered decryption keys cannot be revoked from their recipients |
+| §7.3 Multi-step sharing handshake | Design; existing cryptographic wraps and A2A embedded grants do not implement the full handshake |
+| §7.4 Full rehydration pipeline | Design; current recovery verifies, opens and rebuilds supported local indexes |
+| §7.5 Safe-injection framing | Design; model behavior is not guaranteed |
+| §7.6 Portability | Original signatures survive byte-preserving copying; supported adapters and recovery inputs still matter |
 
-Today, an authenticated recall returns only the caller's own memories, private and public. An anonymous recall returns only public memories (`visibility = 'public'`) of all users. The server never returns a private memory to a caller other than its owner. A memory with no `visibility` value counts as private. A `local` write is always private. An `anchored` write with `visibility = 'public'` puts plain text on Arweave; the server stores it as public with `plaintext_on_arweave = 1`, and a migration relabelled older anchored rows that were marked private.
+Current client-prepared sealed content stays encrypted at the operator.
+Hosted sealed storage, recall-session creation and new general-grant publication are retired (HTTP 410).
+SDK private recall uses a supplied local embedder; CLI general sealed recall is unsupported.
+Legacy public/owner recall remains a separate server-index contract, not independent discovery or private sealed search.
 
-**Sealed memories (available now on client-side paths).** A sealed write
-encrypts the `MEMORY_V1` inner artifact with a random content key `K` and
-stores only the `SEALED_V1` outer ciphertext. Recall over sealed memories
-decrypts on the client. A grant record delivers `K` wrapped to a reader's
-X25519 key. The server holds only the ciphertext and is never required to
-decrypt. An opt-in hosted recall session decrypts transiently server-side.
-Revocation is not possible after a grant is delivered; the UI and
-`mnemonic_share` state this before delivery. `mnemonic_recall` reports
-`sealed_hidden` when the caller has sealed memories the current key has
-not unlocked.
-
----
+A2A supports embedded recipient grants and completed sealed streams.
+General grant reads remain, but the new shared coordinator does not publish independent grant artifacts.
+See [source capabilities](./source-capabilities.md) rather than inferring surface support from the proposed protocol below.
 
 ### 7.1 Cognitive Typing Semantics
 
@@ -543,7 +408,7 @@ Cross-runtime data synchronization is authorized non-interactively using **Capab
 
 $$\kappa = \langle \text{Subject}, \mathcal{S}_{\text{scope}}, \mathcal{P}_{\text{perms}}, T_{\text{exp}}, \Sigma_{\text{issuer}} \rangle$$
 
-Where $\mathcal{S}_{\text{scope}}$ defines explicit access constraints mapping over specific lineage subtrees, cognitive categories, or metadata attribute filters. 
+Where $\mathcal{S}_{\text{scope}}$ defines explicit access constraints mapping over specific lineage subtrees, cognitive categories, or metadata attribute filters.
 
 To maintain low-latency out-of-band execution, the protocol optimizes for short-lived tokens governed by a strict Time-to-Live ($TTL$) constraint, mitigating the need for global, real-time online validation checks. When long-lived access authorizations are required, the token payload forces an explicit network policy rule requiring nodes to evaluate token hashes against an immutable ledger revocation map or cryptographic nullifier accumulator set ($\mathcal{R}$):
 
@@ -553,7 +418,7 @@ $$\text{Valid}(\kappa) \iff \text{Verify}(\Sigma_{\text{issuer}}) \equiv \text{T
 
 ### 7.3 The Trust-Boundary Sharing Handshake
 
-When a memory payload transitions across a distinct infrastructure boundary, the originating and receiving runtimes execute a formal cryptographic handshake protocol. This interaction sequence guarantees three properties:
+The proposed, unimplemented sharing handshake would authenticate participating runtimes and protect transit. Its intended properties are:
 
 1. **Mutual Identity Authentication:** Exchange and verification of asymmetric peer keypairs via decentralized identifier schemas.
 2. **Dynamic Scope Intersection:** Calculation of the active read boundary, computed as the strict intersection of the token's explicit capability scope ($\mathcal{S}_{\text{scope}}$) and the sender's real-time localized disclosure policies.
@@ -575,116 +440,89 @@ FILTER      ──► Prune Artifact Collections Outside of Active Capability Sc
 RANK        ──► Score Vector Proximity using Accelerated Integer Dot Products over v_q
 DECOMPRESS  ──► Hydrate Selected Top-M TurboQuant Vectors back to float32 Precision
 FORMAT      ──► Map cCBOR Struct Attributes into Target Text Templates
-FRAME       ──► Enclose Formatted Context within Non-Bypassable Isolation Tags
+FRAME       ──► Add reference-data framing markers (model compliance is not guaranteed)
 INJECT      ──► Push Securely Framed Memory block directly to the Active Model Context
 
 ```
 
-By enforcing this sequence, the runtime guarantees that data compression ($v_q$) is leveraged on the high-throughput network and indexing paths, undergoing decompression only immediately prior to string compilation and isolation framing.
+This proposed sequence delays decompression until formatting. It does not describe the current local recall implementation, which ranks uncompressed embeddings.
 
 ---
 
 ### 7.5 Safe Injection (Context Framing)
 
-Because untrusted historical memory sequences can easily mimic instructions, naive concatenation of historical text strings directly into an LLM's context window exposes the target entity to control-flow hijacking. Mnemonic addresses this vulnerability at the rehydration boundary through a non-bypassable semantic isolation framing operator:
+Because untrusted historical memory sequences can easily mimic instructions, naive concatenation of historical text strings directly into an LLM's context window exposes the target entity to control-flow hijacking. The proposed framing operator labels reference data at the rehydration boundary; it does not prevent a model from obeying malicious content:
 
 $$f_{\text{frame}}(D, R) = \big[ \text{Tag}_{\text{begin}}(R, \alpha) \;\parallel\; D \;\parallel\; \text{Tag}_{\text{end}}(R) \big]$$
 
-The framing operator isolates the data block using unique structural boundaries that instruct the receiving model's attention mechanism to treat the enclosed payload exclusively as static source reference content rather than executable prompt logic. The framing layer scales its validation strictness parameter ($\alpha$) dynamically based on the cognitive role, applying maximum isolation bounds to `memory.identity` data blocks.
+The markers request that a consuming model treat the enclosed text as reference data. Their effectiveness and any role-specific policy require independent evaluation.
 
-While enforcing this contract depends on the cooperation of the receiving Large Language Model (LLM) runtime, target nodes publish signed execution compliance attestations alongside their workflow receipts. If an injection exploit occurs, this attestation serves as an unalterable cryptographic proof of runtime negligence during forensic state audits.
+Framing requires cooperation from the consuming runtime. The proposed attestation would record a claim about processing, not prove safe model behavior or assign responsibility for an exploit.
 
 ---
 
 ### 7.6 Continuous Cross-Runtime Portability
 
-The composition of these security boundaries yields true **coherence over time** as a hard property of the network. Because authorship signatures, causal lineages, and payload integrities are irrevocably bound to an operator's cryptographic public key rather than a transient application server, the underlying memory graph remains invariant across infrastructure migrations.
+Signed authorship and parent bindings belong to the artifact rather than the service that stores it. Verification can be repeated after migration.
 
-Consequently, an operator can seamlessly transition an autonomous agent's complete history across distinct model architectures, framework providers, and local execution nodes without invalidating, re-indexing, or re-signing historical context records.
+Original signatures remain valid when exact bytes move. Recovery still requires supported formats, accessible ancestry, trusted checkpoints and keys. A new runtime may need to rebuild or re-embed its local search index; complete execution-state migration is not provided.
 
 
 ## 8. Cryptographic Trust Model and Security Boundaries
 
-The Mnemonic Protocol strictly decouples its core cryptographic execution guarantees from application-level runtime behaviors. The foundational trust properties of the system are enforced directly by asymmetric digital signatures and deterministic binary serialization rules. Layered above this invariant substrate are pluggable consensus mechanisms, capability-scoped access tokens, and auditable handshake protocols that establish independent third-party timestamps, revocable delegation paths, and tamper-proof transmission records.
+The current implementation verifies signatures and supported parent/encryption bindings.
+Capability-token delegation, safe framing and the full sharing handshake are separate proposals, not assumptions of the current verifier.
 
----
+### 8.1 Implemented Security Boundaries
 
-### 8.1 Active Protocol Guarantees
+- **Integrity:** envelope verification detects changes to signed bytes under the expected key.
+- **Authorship:** callers independently pin trusted authors; embedded keys alone do not establish trust.
+- **Parent validation:** A2A verifies signed parent hash, context and eligible author/recipient before child delivery.
+- **Memory graph binding:** generic memory recovery requires author and exact-envelope pins for ancestors as well as heads.
+- **Private preparation:** the client-prepared sealed request excludes plaintext and decryption keys. Public fields, sizes and access timing remain visible.
+- **Storage independence:** exact copied envelopes retain their original signatures. Supported routing and byte availability remain operational prerequisites.
+- **Recovery bounds:** source errors, missing parents and forks are reported. Completeness is relative to trusted heads only.
 
-Any compliant Mnemonic deployment natively enforces the following security boundaries:
+COSE signatures authenticate signed structures, not arbitrary bare IDs.
+No deployed tokenized-isolation, dual-signed sharing receipt or general batched-timestamp guarantee is implied.
 
-```text
-[Mnemonic Cryptographic Guarantees]
-   ├── State Integrity      ──► Deterministic cCBOR + BLAKE3 Content Identifier (CID)
-   ├── Provenance Auditing  ──► Ed25519 Signature over CID Bounds Identity
-   ├── Lineage Invariance   ──► Ancestral Hash Insertion Detects Interior History Mutation
-   ├── Fabric Independence  ──► State Validity Holds Invariant Across Local & On-Chain Layers
-   ├── Temporal Verification──► Amortized Merkle-Ledger Anchoring Yields Immutability Proofs
-   └── Tokenized Isolation  ──► Non-Interactive O(1) Out-of-Band Access Control Bounds
+### 8.2 Explicit Non-Guarantees
 
-```
+Signatures do not prove semantic truth, possession of an uncompromised key, or a trusted creation time.
+An index may omit new heads; exhaustion cannot establish global completeness.
+A signed timestamp is an author's claim unless separately supported by validated external evidence.
 
-* **Cryptographic State Integrity:** Every artifact is locked within a unique Content Identifier ($\text{CID}$) computed via a **BLAKE3** hash over a deterministic **Concise Binary Object Representation (CBOR)** payload map. Post-signature state tampering evaluates to an invalid hash state and is intercepted out-of-band by any processing node.
-* **Definitive Provenance Attestation:** Memory artifacts are cryptographically bound to an **Edwards-curve Digital Signature Algorithm (Ed25519)** public key. The same key yields the producer's **Decentralized Identifier (DID)** (`did:sol`, `did:key`). Authorship signatures cannot be forged or disavowed.
-* **Lineage Invariance and Deletion Tracking:** Because parent-child relationships are embedded directly within content-hashed fields, the system treats an agent's memory timeline as a cryptographic history chain. Any attempts to alter, inject, or delete historical data nodes within the lineage sequence breaks the downstream hash chain up to the current tip, rendering history manipulation instantly visible:
+General sealed memory uses XChaCha20-Poly1305 content encryption and HPKE recipient wraps with key commitment checks.
+The verifier accepts supported canonical CBOR inner memory and the existing SDK JSON representation.
+A2A sealing has its own signed binding and recipient-card validation contract.
+See [sealed A2A](./sealed-a2a.md) for its completed-stream boundaries.
 
-$$\text{BLAKE3}\big(\text{cCBOR}(A_i')\big) \neq \text{CID}(A_i) \implies \text{LineageVerification}(\mathcal{H}) = \bot$$
+Required decryption keys cannot be recovered from signatures alone.
+Readers who already obtained keys or plaintext can retain copies; grants are not retroactively revocable.
+Hosted decryption sessions are retired. Legacy server-prepared signing still exposes content to that operator before signing.
 
-* **Storage-Fabric Independence:** Validation results evaluate symmetrically whether an artifact is read from a high-throughput local SQLite cache, transmitted via a peer-to-peer network, or retrieved from a permanent storage ledger (such as Arweave).
-* **Asynchronous Temporal Verification:** When public ledger anchoring is active, the system generates mathematical inclusion proofs linking batched Merkle roots directly to consensus state checkpoints, providing a robust defense against historical backdating attacks.
-* **Tokenized Isolation Scoping:** Cross-runtime data synchronization requires a valid capability token. Consuming entities can verify authorization rights and delegation chains back to the root keyholder non-interactively without relying on central lookup tables.
-* **Auditable State Transitions:** The peer-to-peer sharing handshake outputs a dual-signed transaction receipt node. This block is concurrently appended to the lineage trees of both participating entities, turning data transit events into clear historical landmarks.
-* **Decoupled Verification Autonomy:** State verification is a small local computation per artifact (one hash pass plus one signature check) and runs locally without checking in with central authorization gateways or paying protocol processing tolls.
+Current recovery does not impose prompt-injection framing or prove that embeddings or search results are truthful or complete.
+It does not restore live process state, resolve all multi-writer conflicts, or guarantee downstream model behavior.
+Financial-state loss is separate from recoverable memory-state loss.
 
----
+### 8.3 Extension Boundary
 
-### 8.2 Explicit Protocol Non-Guarantees (Out-of-Scope)
+Future formats and backends need explicit versioning, declared capabilities and acceptance evidence.
+Current signatures do not establish compatibility with an unimplemented extension.
 
-To maintain an un-compromised core execution layer, the protocol deliberately bounds its technical perimeter. The following operational elements are excluded from the version 1 specification:
+## 9. Proposed ERC-8004 Integration
 
-* **Semantic Veracity of Content:** The protocol validates data provenance, payload integrity, and temporal sequence, but cannot evaluate whether the natural language assertions written inside a memory block are factually true or coherent.
-* **Front-Running State-Withholding Attacks:** While the protocol instantly catches interior context deletions or historical tree forks, it cannot compel a malicious local node to write or broadcast a newly generated memory node at the current operational tip.
-* **Sealed memory encryption design.** The `SEALED_V1` artifact type provides
-  client-side encryption of memory content. The plaintext `MEMORY_V1` inner
-  artifact is encrypted with XChaCha20-Poly1305 under a random 32-byte content
-  key `K`. The outer `SEALED_V1` holds the ciphertext, a key commitment
-  `kc = blake3("mnemonic sealed v1 key commitment", K)`, and one or more HPKE
-  wraps of `K`. The Ed25519 identity key is mapped to X25519 via the birational
-  map (`VerifyingKey::to_montgomery`). The HPKE suite is
-  X25519HkdfSha256 (KEM `0x0020`) / HkdfSha256 (KDF `0x0001`) /
-  ChaCha20Poly1305 (AEAD `0x0003`). The signed COSE_Sign1 envelope covers the
-  outer ciphertext, not the plaintext. This is available now for client-side
-  paths (local MCP, CLI, extension, webapp). **Explicit limits:** revocation is
-  not possible after a grant delivers `K` to a reader. An opt-in hosted recall
-  session decrypts transiently server-side; that exposure is stated to the user
-  before they opt in. A hosted MCP call delivers the plaintext to the server
-  over TLS; only a client-side component can seal before the text leaves the
-  device (finding F2 in `work/sealed-memories/tech-spec.md`).
+**Unimplemented design:** this section is a historical integration proposal, not a deployed registry, interoperability certification, price quote or acceptance result.
 
-* **Unilateral Runtime Enforcement:** The protocol cannot physically compel a degraded or malicious downstream Large Language Model (LLM) execution container to respect isolation framing tags. Mnemonic guarantees the *generation* and *cryptographic attribution* of compliance markers; downstream processing vulnerabilities are isolated via signed compliance attestations that expose negligent runtimes to forensic accountability during system audits.
-* **Concurrent Multi-Writer Consensus Semantics:** Version 1 enforces point-to-point capability scoping and append-only linear chains. It does not establish multi-party conflict-resolution topologies, Conflict-Free Replicated Data Type (CRDT) mechanics, or state convergence models for shared memory zones experiencing concurrent, distributed writes.
-* **Zero-Knowledge (ZK) Proof Matrices:** Version 1 does not generate cryptographic succinctness proofs verifying that vector embeddings were generated faithfully by a specific model weights file, or that a retrieved top-$K$ result collection matches the true mathematical closest coordinates of a sealed dataset.
-
----
-
-### 8.3 Architectural Roadmap Synergy
-
-These security boundaries are deliberate architectural parameters. By confining the version 1 runtime strictly to what deterministic serialization, digital signatures, and asymmetric handshakes can verify, the protocol remains lightweight, low-latency, and highly embeddable.
-
-The structural decisions implemented in this phase—specifically content-addressed indexing and clear lineage linking—ensure that the resulting data topology remains compatible with future cryptographic extensions, including multi-writer state synchronization arrays and Zero-Knowledge validity proofs of semantic retrieval accuracy.
-
-
-## 9. Structural Alignment with ERC-8004 (Trustless Agents Standard)
-
-*Implementation status:* this section is a design. None of the ERC-8004 paths (§9.2–§9.5) or the `did:mnemonic` method are implemented. ERC-8004 itself is a Draft proposal ([EIP-8004](https://eips.ethereum.org/EIPS/eip-8004), status: Draft).
+*Implementation status:* this section is a design. None of the ERC-8004 paths (§9.2–§9.5) or the `did:mnemonic` method are implemented. The external specification is maintained separately at [EIP-8004](https://eips.ethereum.org/EIPS/eip-8004); this paper does not certify its current status or compatibility.
 
 The Mnemonic Protocol is engineered with the explicit intent to extend the **ERC-8004 ("Trustless Agents")** framework, serving as its definitive off-chain **Signed-Memory and Lineage Trust Extension**. By interfacing directly alongside decentralized identity singletons, machine micropayment protocols, and peer-to-peer messaging layers, the protocol introduces a fully compatible, content-addressed state-plane substrate to the Web3 agent ecosystem.
 
 ### 9.1 Technical Division of Labor and Core Thesis
 
-The ERC-8004 standard defines three public, on-chain registries to govern decentralized machine networks: **Identity** (ERC-721 tokenized credentials), **Reputation** (subjective network performance signals), and **Validation** (consensus-driven work audits). To retain strict execution efficiency and gas cost viability on execution layers, ERC-8004 leaves long-term context retention, vector-space indexing, and context window isolation out of scope. 
+The ERC-8004 standard defines three public, on-chain registries to govern decentralized machine networks: **Identity** (ERC-721 tokenized credentials), **Reputation** (subjective network performance signals), and **Validation** (consensus-driven work audits). To retain strict execution efficiency and gas cost viability on execution layers, ERC-8004 leaves long-term context retention, vector-space indexing, and context window isolation out of scope.
 
-Mnemonic introduces a critical fourth trust category: **Cryptographically Verifiable Agent Memory**. An agent’s historical memory—what it learned, when, from which data ingredients, and under whose authority—represents a more robust security signal than flat network uptime metrics or subjective client ratings. 
+Mnemonic introduces a critical fourth trust category: **Cryptographically Verifiable Agent Memory**. An agent’s historical memory—what it learned, when, from which data ingredients, and under whose authority—represents a more robust security signal than flat network uptime metrics or subjective client ratings.
 
 ```text
 [THE FOUR PILLARS OF ARCHITECTURAL SYNCHRONIZATION]
@@ -709,7 +547,7 @@ The unified division of labor is unambiguous: **ERC-8004** makes autonomous agen
 
 ### 9.2 Path P1: The Validation Registry — Mnemonic as a Cryptographic State Oracle
 
-Unlike compute-heavy stake-secured re-execution or hardware-dependent Trusted Execution Environment (TEE) validation tracks, memory validation relies entirely on pure, low-overhead cryptography. It evaluates more than an isolated task output; it validates the structural integrity of the agent's complete history profile.
+Unlike compute-heavy stake-secured re-execution or hardware-dependent Trusted Execution Environment (TEE) validation tracks, memory validation relies entirely on pure, low-overhead cryptography. It would validate the supplied history relative to independently trusted heads, without proving global completeness.
 
 #### 9.2.1 On-Chain Request Interface
 
@@ -719,7 +557,7 @@ When an agent submits an output trajectory for audit under an ERC-8004 workflow,
 validationRequest(
     validatorAddress = 0xMnemonicValidatorAddress,
     agentId = 42,
-    requestURI = "ipfs://bafybeiccanonicalmemorybatch...", 
+    requestURI = "ipfs://bafybeiccanonicalmemorybatch...",
     requestHash = keccak256(canonical_cbor_payload_bytes)
 )
 
@@ -827,114 +665,43 @@ Mnemonic supports a family of agent-memory patterns. Each item below links to a 
 10. [Reliability Oracle for Orchestration](./usecases/reliability-oracle-for-orchestration.md)
 
 
-## 11. Analysis of Related Work
+## 11. Relationship to Storage and Search
 
-The architecture of the Mnemonic Protocol occupies a unique position at the convergence point of vector indexing, decentralized data persistence, and cryptographic verification frameworks:
+Vector indexes serve retrieval; signed artifacts serve provenance and integrity checks.
+A client can rebuild an index from supported verified artifacts without treating the old index as authoritative.
+Different embedding models can require re-embedding rather than reuse of old vectors.
 
-```text
-[Mnemonic System Topography]
+External storage supplies bytes. It does not establish the expected author or completeness of a recovered history.
+Discovery services supply candidate locators that must be verified before import.
+The currently implemented backend routes are narrower than the architectural examples in this paper.
+ERC-8004 integration remains a proposal under §9.
 
-                     Vector Databases & RAG
-                     (High-Performance Search)
-                               │
-            ┌──────────────────┴──────────────────┐
-            ▼                                     ▼
- Decentralized Storage ──►  [MNEMONIC PROTOCOL]  ◄── Blockchain Consensus
- (Arweave / IPFS Bytes)     (Deterministic Lineage)   (ERC-8004 Registries)
-            ▲                                     ▲
-            └──────────────────┬──────────────────┘
-                               │
-                      Verifiable Identity
-                     (DID & COSE Signatures)
+## 12. Current Source Status
 
-```
+The [source capability matrix](./source-capabilities.md) is the implementation boundary at `26a9550`.
+It distinguishes artifact kinds, client operations, backend adapters and unsupported routes.
+Source support is not a claim about published packages or a hosted deployment.
 
-* **Vector Search & Retrieval-Augmented Generation (RAG):** Standard vector databases focus entirely on scaling coordinate similarity lookups. They treat data as mutable text blocks and lack native tools to handle cryptographic signatures, non-repudiation, or multi-hop lineage proofs. Mnemonic introduces an abstraction layer above the index, transforming raw vector pools into cryptographically signed data envelopes.
-* **Decentralized Persistence Topologies:** Content-addressed storage platforms (such as the InterPlanetary File System [IPFS] and Filecoin) and permanent webs (such as Arweave) excel at ensuring public data availability. However, they possess no native awareness of cognitive agent schemas, vector space optimization matrices, or context window safety boundaries. Mnemonic wraps these storage fabrics in a unified protocol layer, adding cognitive typing, deterministic rehydration pipelines, and prompt isolation framing.
-* **ERC-8004 On-Chain Registries (Trustless Agents):** A Draft Ethereum standard proposal ([EIP-8004](https://eips.ethereum.org/EIPS/eip-8004)) for the decentralized machine-to-machine economy. ERC-8004 defines a lightweight framework for cross-organizational agent discovery, reputation auditing, and validation across three singleton smart contract registries (Identity, Reputation, and Validation).
+### 12.1 Implemented Scope
 
-The Mnemonic Protocol is engineered with the explicit intent to extend the **ERC-8004 ("Trustless Agents")** framework, serving as its definitive off-chain **Signed-Memory and Lineage Trust Extension**. Where ERC-8004 standardizes the on-chain pointer skeletal tracking for global lookup, Mnemonic provides the thick, off-chain content-addressed cryptographic Directed Acyclic Graph (DAG) representing the agent's actual underlying memory and operational lineage history.
+- Rust core and WASM verification, signing, encryption and supported artifact recovery.
+- CLI local sealed persistence; SDK client preparation and caller-owned index integration.
+- Shared prepared-memory and A2A delivery with exact read-back, metadata receipts and durable financial operations.
+- Independently authenticated checkpoints and encrypted client backups.
+- Bounded A2A discovery, verified import, recipient opening, completed streams and external-parent continuation.
+- A2A exact-byte storage migration through declared Arweave-fetch and configured HTTP-object adapters.
+- Historical Solana verification/discovery, legacy public indexing and server-prepared signing with explicit privacy boundaries.
 
-When a task requires third-party validation under an ERC-8004 execution flow, the immutable target hash is mapped directly to a Mnemonic batch root content identifier:
+MCP transport and tool exposure depend on the build and deployment.
+Use the [tool reference](./tools.md) and deployed capability response; do not infer capabilities from a fixed tool count in a paper.
+Hosted local writes are rejected. The client's default local sealed cache is not hosted persistence.
 
-$$taskDataHash = \text{CID}(R_{\text{batch}})$$
+### 12.2 Unsupported or Design-Only Scope
 
-This design allows smart contract validation engines to securely evaluate an agent's memory-trace execution proofs before triggering conditional value settlement or logging performance metrics to the public reputation registry.
-
-The protocol optimization strategy prioritizes pragmatic, near-term scalability: asymmetric digital signatures, deterministic Concise Binary Object Representation (cCBOR) serialization, and fast vector quantization models (TurboQuant) are leveraged to keep computational costs exceptionally low today. This lightweight foundation ensures that the underlying data layout remains structurally compatible with future modular updates, including Zero-Knowledge embedding accuracy verifications and succinct validity proofs of semantic retrieval correctness.
-
-
-
-## 12. Current Implementation Status and Compliance Mapping
-
-The reference implementation of the Mnemonic Protocol is a Rust Model Context Protocol (MCP) server (crate version 0.2.x). It implements a subset of this specification. This section lists what is available now (§12.1) and what is not implemented yet (§12.2). Where this section and other sections disagree, this section is correct.
-
----
-
-### 12.1 Active Inherent Capabilities (Implemented)
-
-The active runtime environment enforces the following protocol primitives directly within its native Rust execution layer:
-
-#### I. Transport & Interface Layers
-*   **Multi-Transport MCP Middleware:** Two transports: standard input/output (`stdio`) and HTTP. The HTTP endpoint `/mcp` returns chunked newline-delimited JSON (`application/x-ndjson`).
-*   **MCP Tools:** eight tools: `mnemonic_whoami`, `mnemonic_sign_memory`, `mnemonic_recall`, `mnemonic_verify`, `mnemonic_prove_identity`, `mnemonic_check_pending`, `request_public_write_confirmation` and `mnemonic_publish_post`. The server never signs a user's memory or post. The client signs each hosted `anchored` write. A hosted `local` write has no signature: the server stores only its BLAKE3 hash, under the identity of the user.
-
-#### II. Cryptography & Serialization
-*   **Deterministic Binary Layout:** Strict serialization of artifact payloads matching the **Concise Binary Object Representation (CBOR)** validation mechanics defined in RFC 8949 Section 4.2.
-*   **Content-Addressed Hashing:** Generation of unique object identifiers by executing high-throughput **BLAKE3** cryptographic hashes over canonical serialized byte streams.
-*   **Cryptographic Envelope Sealing:** Encapsulation of context blocks using the **CBOR Object Signing and Encryption (COSE)** standard (`COSE_Sign1`), utilizing asymmetric **Ed25519** key matrices.
-*   **Decentralized Identity Routing:** Direct derivation of persistent operator identities via `did:key` and `did:sol` cryptographic public key resolution paths.
-
-#### III. Vector Mechanics & Lineage Tracking
-*   **Quantized Wire Formats:** In-memory execution of the **TurboQuant Scalar Quantization** engine, compressing high-dimensional vector embeddings down to a 2-to-4 bit per-dimension metadata allocation footprint for lightweight transit.
-*   **Accelerated Local Indexing:** Local retrieval cascades executing similarity calculations over full-precision embedding attributes cached within an optimized SQLite storage layer.
-*   **DAG Lineage Traversal:** A robust local adjacency matrix engine modeling parent-child artifact networks with integrated runtime cycle detection and directional Breadth-First Search (BFS) path operations (`Ancestors`, `Descendants`, `Both` directions).
-
-#### IV. Settlement & Persistence Topologies
-*   **Consensus Ledger Anchoring:** Pluggable integration paths routing batched artifact commitments directly to Arweave permanent storage and Solana consensus blocks.
-*   **Payments:** **x402** (payment over HTTP status 402) in USDC for anchored writes. Custodial balances and API keys were removed. Local writes and verification are free.
-
----
-
-### 12.2 Target Migration Delta (Under Active Development)
-
-Capabilities currently outside the version 0.2 reference profile are mapped below to their target implementation tracks:
-
-```text
-[V1 SPECIFICATION DELTA MATRIX]
-
-PROTOCOL PLANE REFINEMENTS
-   ├── Storage Trait   ──► Shift Monolithic Local/Full Flags to Decentralized Backend Trait
-   ├── Schema Typing   ──► Transition Flat memory Fields to the 5 Core Cognitive Schemas
-   └── Authorization   ──► Integrate Capability Tokens, Subtree Delegations, & Nullifier Sets
-REHYDRATION BOUNDARY CONFORMANCE
-   ├── Pipeline Stages ──► Implement Sequential Filter, Rank, Decompress, & Format Hooks
-   └── Context Framing ──► Enforce Safe-Injection Markers & Framing-Compliance Attestations
-DISTRIBUTION MATRIX EXPANSION
-   ├── Web Fabric      ──► (done) Core Primitives compiled to WebAssembly (WASM)
-   └── Client Surfaces ──► (done) Standalone cli and sdk npm packages
-
-```
-
-#### I. Protocol Plane Refinements
-
-* **Decoupled Backend Traits:** Transitioning the current monolithic `local`/`full` runtime configurations into the generalized, per-artifact `StorageBackend` abstraction trait specified in Section 5.3.
-* **Cognitive Schema Verification:** Graduating the system from the legacy, undifferentiated `memory` schema to the five distinct cognitive spaces (`memory.episodic`, `memory.semantic`, `memory.procedural`, `memory.working`, `memory.identity`).
-* *Backward-Compatibility Invariant:* The current engine employs an automated fallback wrapper that maps legacy `memory` payloads directly to the `memory.episodic` validation space during structural audits.
-
-
-* **Decentralized Capabilities:** Implementation of the formal `capability.token` schema topology, including delegated chain-of-authority traversals and asynchronous revocation accumulator checks.
-
-#### II. Rehydration Boundary Conformance
-
-* **Sequential Pipeline Cascades:** Expansion of the rehydration logic beyond raw signature verification to execute the complete, deterministic sequence of compilation stages: `filter` $\to$ `rank` $\to$ `decompress` $\to$ `format` $\to$ `frame` $\to$ `inject`.
-* **Context Isolation:** Native integration of target-specific safe-injection framing markers and on-chain framing-compliance attestation schemas to insulate host LLM execution environments from semantic control-flow exploits.
-
-#### III. Distribution Matrix Expansion
-
-* **WebAssembly Core Compilation:** Available now. `core` compiles to WASM (`core/src/wasm/`); the npm SDK (`packages/sdk`) ships it.
-* **Decoupled System Distributables:** Available now. The CLI (`packages/cli`) and the SDK (`packages/sdk`) are separate npm packages. The MCP server binary is distributed through `packages/mcp`.
-
+The five cognitive schemas, formal capability tokens, full sharing handshake, safe-injection framing and general memory batch anchoring remain proposals.
+No automatic legacy-to-cognitive-schema conversion is claimed.
+General-memory migration, independent grant migration and actual SSE stream migration are outside the current locator-manifest API.
+Published-package drills, live provider discovery/retention and deployment acceptance require separate recorded evidence.
 
 ## 13. Empirical Evaluation and Performance Metrics
 
@@ -979,14 +746,14 @@ The real corpus is small. A standard benchmark set (MTEB or BEIR) is needed for 
 
 ---
 
-### 13.3 Anchoring Cost and Latency
+### 13.3 External Delivery Cost and Latency
 
-- **Local write (SQLite):** no network, no fee. Latency is **not measured** as a benchmark.
-- **Anchored write (Arweave + Solana):** each memory uses its own Arweave upload and its own Solana memo (§5.6). Latency is **not measured** as a benchmark. It depends on the Arweave gateway and Solana confirmation.
-- **Price:** the operator charges `max(minimum, (Irys + Solana fee) × SOL/USD × 1.2)`. The default minimum is 0.001 USDC (`mcp/src/pricing.rs`, `mcp/src/config.rs`).
-- **Batch anchoring** (§5.6.1) is a design. With a batch of $N$ memories, the ledger cost per memory would fall as $1/N$:
+Current prepared delivery uploads original bytes and verifies read-back; it does not add a mandatory Solana memo.
+Production delivery latency and end-to-end settled cost are not established by the local drills.
+Prices and quota depend on the configured operator and accepted quote.
+Historical pricing formulas are not a current user-facing quote or a promise about every payment rail.
 
-$$T_{\text{amortized}} = \frac{T_{\text{batch\_compile}} + T_{\text{ledger}}}{N}$$
+Batch anchoring remains a separate design proposal. It does not describe the shared ingestion coordinator.
 
 ---
 
@@ -1002,39 +769,23 @@ These statements are covered by automated tests:
 
 * **Tampered payload:** changing bytes inside a COSE_Sign1 envelope makes verification fail (`core/tests/integration_cbor.rs`, `test_tampered_cose_detected`).
 * **Lineage cycles:** writing an artifact that would create a cycle is refused with `CYCLE_DETECTED` (`core/src/lineage/mod.rs`).
-* **Failed anchoring:** if the Arweave upload, the Solana memo or the read-back check fails, the memory is kept as `local` and no payment is charged. On the hosted paid path, the delivery is marked as retryable.
+* **Failed delivery:** payment and delivery status remain separate. Retry uses the original envelope and durable operation; settled payment can coexist with failed delivery. Terminal failures need an operator remedy. See [payment evidence](./artifact-payment-retries.md).
+* **Recovery and migration:** local SDK/WASM HTTP drills cover SQL loss, exact-byte destination recovery and independent operator continuation. External services are mocked; see [acceptance evidence](../work/sealed-memories/a2a-acceptance-reconciliation.md).
 
 ---
 
 ## 14. Limitations and Open Questions
 
-### 14.1 Cryptographic Erasure and the Immutability Paradox
+### 14.1 Key Loss and Retained Copies
 
-Because Mnemonic constructs an unalterable, content-addressed ledger tracking an agent's historical lineage, any structural mutation or deleting of historical interior nodes breaks the downstream cascading **BLAKE3** hash pointers, invalidating the entire ancestral chain up to the current tip. This creates a direct architectural collision with global privacy mandates such as the **General Data Protection Regulation (GDPR) "Right to be Forgotten"** or the **California Consumer Privacy Act (CCPA)**.
-
-To resolve the tension between immutable lineage verification and regulatory erasure requirements, the protocol establishes a standard for **Cryptographic Shredding**:
-
-```text
-[CRYPTOGRAPHIC SHREDDING COMPLIANCE MATRIX]
-
-  IMMUTABLE CELL LAYER                   ENCRYPTED VALUE BOUNDARY
- ┌──────────────────────────────┐       ┌──────────────────────────────┐
- │    Canonical cCBOR Header    │ ────► │  AEAD Ciphertext Envelope C  │
- │  (Immutable CID Lineage Hash)│       │  (Plaintext Memory Content)  │
- └──────────────┬───────────────┘       └──────────────┬───────────────┘
-                │                                      │
-                ▼                                      ▼
-    Lineage Chain Stays Valid               Shred(K) ──► Payload Noise (⊥)
-
-```
-
-By mandating that sensitive categories like `memory.identity` encrypt their content payloads under localized, granular keys ($K_{\text{cell}}$) prior to binary serialization, compliance engines can permanently erase private content blocks by wiping the associated decryption key. This procedure converts the targeted ciphertext into mathematically un-recoverable entropy ($\bot$) while leaving the structural metadata fields and content identifiers completely intact.
-
----
+Deleting a key can prevent future opening only when no usable copy of that key or plaintext remains.
+Recipients, backups and external storage can retain copies outside the author's control.
+Signatures and public metadata remain visible even when content cannot be opened.
+The implementation does not guarantee deletion of all copies or make a legal-compliance determination.
 
 ### 14.2 Asynchronous Multi-Writer Consistency and Convergence Semantics
 
-While version 0.2 handles point-to-point data transmission through capability-scoped authorization handshakes, managing shared tracking zones with multiple concurrent writers requires a definitive distributed systems convergence strategy. Because the protocol relies on immutable records, concurrent mutations cannot utilize destructive multi-master overwrites.
+Current A2A recovery preserves forks rather than resolving every multi-writer conflict. Capability-scoped authorization handshakes and convergence rules remain design proposals. Because the protocol relies on immutable records, concurrent mutations cannot utilize destructive multi-master overwrites.
 
 Diverging state traces are modeled as explicit branch splits inside the lineage tree. When two nodes simultaneously publish updates over a common base ancestor, the system requires the generation of a multi-parent merge block:
 
@@ -1076,9 +827,9 @@ The protocol does not execute structural updates via in-place state mutation. In
 
 ### 14.5 Framing-Compliance Ecosystem Standards
 
-While Mnemonic mathematically guarantees the composition and cryptographic validation of safe-injection isolation markers, the absolute enforcement of these boundaries depends entirely on the processing behavior of the target Large Language Model (LLM) container.
+Safe-injection markers and framing-compliance attestations are unimplemented proposals. Even signed markers would authenticate a framing claim, not prove that a consuming model respected it.
 
-The standardization of the global **Framing-Compliance Attestation Registry** requires active inter-organization coordination. Establishing uniform, cross-framework marker standards across diverse open-source and proprietary model runtime families (including OpenAI, Anthropic, and localized open weights servers) remains a key operational hurdle for the version 1.0 roadmap.
+A possible framing-attestation registry would require a separate specification and evaluation across consuming runtimes. No implemented registry, interoperability result or release commitment is claimed here.
 
 ---
 
@@ -1091,17 +842,19 @@ Achieving complete, production-grade interoperability mandates a comprehensive c
 * Simulating edge-case failures across decentralized infrastructures, testing node behaviors during permanent storage dropouts, consensus mempool transaction drops, and corrupt local caching events.
 
 
-## 15. Roadmap
+## 15. Remaining Work
 
-- **Now (P0):** free anchoring quota (100 per identity per week), clear payment steps in the SDK and web app, simpler install.
-- **Next (P1):** `public` and `sealed` memory modes, grants to readers chosen after the write, import with author provenance, anonymous verification by link, safe-injection framing (§7.5).
-- **Later (P2):** shared spaces, capability tokens (§7.2), the five cognitive schemas (§7.1), batch anchoring (§5.6.1), ERC-8004 integration (§9).
-
-The owner-facing plan is in `work/presentable-mvp/plan.md`.
+Live discovery, release artifacts and deployment drills remain separate from passing local tests.
+Additional artifact/backend support must declare its capabilities and provide recovery evidence before being described as available.
+Formal capability tokens, cognitive schemas, framing, batching and ERC-8004 integration remain design work without release commitments here.
+The active [product work](../work/protocol-product/README.md) records scope and acceptance.
 
 ## 16. Conclusion
 
-Mnemonic treats agent memory as signed, content-addressed records that belong to the operator's key, not to a runtime. The reference implementation delivers the core of this model today: canonical CBOR, BLAKE3 hashes, COSE_Sign1 signatures by the user's own key, local recall, and optional Arweave + Solana anchoring with a verified round trip. Sharing, typed memory, capability tokens and safe-injection framing are designs (§7, §12.2). They are the next steps.
+Mnemonic provides signed artifacts, private client preparation and recovery tools that can operate without the original operator's SQL history.
+Recoverability depends on retained bytes, keys, independently trusted checkpoints and supported adapters.
+Exact-byte migration preserves original signatures; it does not establish global completeness, trusted time, or permanent availability.
+Current scope and evidence are listed in [source capabilities](./source-capabilities.md).
 
 ---
 

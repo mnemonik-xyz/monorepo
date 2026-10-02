@@ -1,4 +1,12 @@
-# Containerized deploy — Mnemonic MCP
+# Standalone container deploy — Mnemonic MCP
+
+This guide describes a **separately provisioned standalone host**. The current
+hosted production service instead uses the coding-fabric-owned stack at
+`/opt/mnemonik-server` (configurable), its existing data/key mounts and shared
+Caddy. The manual [Deploy MCP workflow](../../.github/workflows/deploy-mcp.yml)
+reuses that stack; it must not install this standalone nginx/Certbot stack there.
+See the [pilot preparation runbook](../../work/protocol-product/pilot-runbook.md)
+for candidate evidence, backup and financial-state-preserving rollback gates.
 
 Full docker-compose stack: **mcp** (Rust HTTP server, fastembed) + **ollama**
 (chat LLM) + **nginx** (TLS + reverse proxy + static webapp) + **certbot**
@@ -14,7 +22,7 @@ needs Docker — no Rust/Node toolchain, no on-box compile.
 | `mcp/deploy/compose.env.example` | Template → copy to `mcp.env`, fill secrets. |
 | `mcp/deploy/init-letsencrypt.sh` | One-time TLS bootstrap (nginx↔certbot chicken-and-egg). |
 | `.github/workflows/build-mcp-image.yml` | Build + push image to GHCR. |
-| `.github/workflows/deploy-mcp.yml` | Manual pull + `compose up -d` on the VPS. |
+| `.github/workflows/deploy-mcp.yml` | Hosted fabric stack only; not a standalone-host installer. |
 
 ## Fresh VPS — first deploy (Case A: same domain, new box)
 
@@ -64,7 +72,9 @@ docker compose --env-file mcp.env ps
 The `mcp` container generates its Ed25519 keypair into the `mcp-keypair` volume
 on first boot. **To preserve the existing server identity** (pubkey
 `DYVu4Bry3BzGVsR3Hj2iGVT5fNdWFoHw2zRxsdTmrG25`) and prior attestations, copy the
-old `keypair/id.json` and `data/attestations.db` into the volumes before step 8:
+old `keypair/id.json` and a **consistent, offline or SQLite-backup-produced**
+`data/attestations.db` into the volumes before step 8. These copy examples assume
+the source database is already safely snapshotted and the destination is stopped:
 
 ```bash
 docker run --rm -v monorepo_mcp-keypair:/k -v "$PWD/keypair":/src alpine \
@@ -74,14 +84,27 @@ docker run --rm -v monorepo_mcp-data:/d -v "$PWD/data":/src alpine \
 ```
 
 ## Routine updates
-Push to `main` → `build-mcp-image.yml` publishes `:latest`. Then ship it:
-Actions UI → **Deploy MCP** → `apply` (pins `MCP_IMAGE_TAG`, `compose pull`,
-`up -d`, health-gates, prunes). Or on the box: `docker compose --env-file
-mcp.env pull mcp && docker compose --env-file mcp.env up -d`.
+A successful image workflow publishes an image to GHCR; it does not deploy it.
+Record the resolved image digest and confirm reader/schema compatibility before
+an update. On a standalone host, select the verified image tag in the local
+Compose configuration, then pull and recreate the service using that host's
+existing project and mounts. Do not recreate data volumes.
+
+For the hosted fabric service, use the manual **Deploy MCP** workflow after
+approval. Its `main` ref maps to mutable `latest`; `v*` or `sha-*` refs select
+image tags. Check the resolved digest before the change. This workflow changes
+the fabric Compose image field; it does not use the standalone `MCP_IMAGE_TAG`
+update procedure.
 
 ## Rollback
-Deploy MCP → `rollback` with `ref: vX.Y.Z` (a tag GHCR already has an image
-for). Sets `MCP_IMAGE_TAG=vX.Y.Z` and recreates the container. Seconds, no build.
+Before changing binaries, take a consistent SQLite backup and preserve keys,
+configuration and all financial replay records. A live `.db` copy alone can
+omit WAL transactions. Test the previous reader against current data in staging.
+Do not replace the live financial database with an older snapshot or remove
+volumes to make rollback work. Use the verified previous image with existing
+mounts and verify paid-operation retries, artifact reads and identity afterward.
+The hosted workflow's `rollback` action replaces an image; it does not prove
+schema compatibility or automatically back up and reconcile financial state.
 
 ## Split host (Ollama or nginx elsewhere)
 Everything is co-located by default. To move a piece to another host, edit

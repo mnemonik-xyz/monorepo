@@ -32,6 +32,7 @@ Encryption protects content; public storage can still expose metadata. Lost decr
 
 This README describes the current source. Published packages and hosted deployments can lag behind it.
 See the [implementation evidence](./work/protocol-product/implementation-evidence.md) for tested behavior and remaining acceptance work.
+The [capability matrix](./docs/source-capabilities.md), [local research handoff demo](./docs/research-handoff-demo.md), and [pilot runbook](./work/protocol-product/pilot-runbook.md) describe source support, repeatable evidence, and the remaining release gates.
 
 Build the CLI from this checkout with Node.js 20+, Rust, and `wasm-pack` installed:
 

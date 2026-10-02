@@ -32,6 +32,9 @@ Product delivery does not depend on token issuance or a new blockchain.
 | [Repository plan](repository-plan.md) | Proposed extraction boundaries and versioning |
 | [Flows](flows.md) | Information, recovery and payment diagrams |
 | [Shipping plan](shipping-plan.md) | Implementation order, release evidence and customer pilots |
+| [Source capabilities](../../docs/source-capabilities.md) | Tested source support and explicit release limits |
+| [Research handoff demo](../../docs/research-handoff-demo.md) | Repeatable synthetic recovery and continuation evidence |
+| [Pilot runbook](pilot-runbook.md) | Candidate provenance, backups, rollback and release gates |
 | [Tasks](tasks/1.md) | Ordered implementation work |
 
 ## Existing contracts

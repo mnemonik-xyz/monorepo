@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-**Mnemonic Protocol** — verifiable, persistent memory for AI agents. A memory is embedded, TurboQuant-compressed, canonicalized to deterministic CBOR, blake3-hashed, COSE_Sign1-signed with an Ed25519 identity, and optionally delivered to Arweave/Irys (original signed bytes); Solana memos remain a legacy verification/discovery source. It is exposed over MCP (Model Context Protocol), a CLI, a TypeScript SDK, a browser extension and a webapp.
+**Mnemonic Protocol** — signed memory artifacts and recovery tools for AI agents. Client-prepared sealed memory is encrypted and signed locally; external delivery retains original bytes. Embeddings and TurboQuant support particular search/artifact paths, not every memory. Plain stdio-local rows are unsigned. Arweave/Irys provides current external delivery; Solana memos remain a legacy verification/discovery source. Source capabilities, supported artifact/backend combinations and release limits are listed in [docs/source-capabilities.md](docs/source-capabilities.md).
 
 **Default branch:** `main`. Branch from `main` (`feat/*`, `fix/*`, `claude/*`) and PR back to `main`. Tagged releases (`v*`) are cut from `main`.
 
@@ -19,7 +19,7 @@ cargo build --workspace
 cargo build -p mnemonic-mcp --release --features local-embed   # MCP binary with local embedder
 cargo fmt --all -- --check                                     # format gate
 cargo clippy --workspace --all-targets --features mnemonic-mcp/test-support -- -D warnings
-cargo test --workspace --no-fail-fast --features mnemonic-mcp/test-support   # full suite (~890 tests)
+cargo test --workspace --no-fail-fast --features mnemonic-mcp/test-support   # full workspace suite
 cargo test -p mnemonic-core <test_name>                        # one core test
 cargo test -p mnemonic-mcp --features test-support --test public_read_routes   # one mcp integration file
 cargo bench -p mnemonic-core                                   # cbor_codec, decompress, decompress_fidelity*
@@ -54,13 +54,15 @@ The extension (`packages/extension`) tests run with `bun test` in CI.
 
 ## Architecture
 
-Cargo workspace (`resolver = "2"`) with two members, plus an npm workspace:
+Cargo workspace (`resolver = "2"`) with four members, plus an npm workspace:
 
 - **`core/` (`mnemonic-core`)** — all domain logic. Modules in `core/src/lib.rs`:
   - Portable (also build for wasm32): `codec` (canonical CBOR, blake3 hash, COSE sign/verify, schema), `compress` (TurboQuant), `identity` (keypair, OS keychain / file / memory key stores, lazy creation), `merkle`, `rebuild` (reconstruct a recall row from signed artifact bytes, so a client can restore its index from Arweave).
   - Native only (`cfg(not(target_arch = "wasm32"))`): `arweave`, `embed`, `encrypt`, `lineage`, `restore` (rebuild the index from Arweave), `solana`, `storage`.
   - Feature-gated: `trajectory` (`trajectory-experimental`), `wasm` (wasm32 + `wasm` feature; wasm-bindgen wrappers used by the SDK, webapp and extension).
 - **`mcp/` (`mnemonic-mcp`)** — library + binary. `main.rs` (clap, subcommands `mcp-stdio`, `logout`, `identity`, `restore`, `export`), `mcp.rs` (JSON-RPC dispatch, tool list, `McpState`), `tools.rs` (tool handlers), `api.rs` (REST routes), `oauth/` (OAuth 2.1 + PKCE, Google sign-in, refresh tokens), `pending.rs` + `approval.rs` (deferred signing), `payment.rs` / `pricing.rs` (x402). Domain types come from `mnemonic_core::` — never re-declare `codec`, `storage` etc. inside `mcp/src/`.
+- **`mnemonic-a2a/` (`mnemonic-a2a`)** — A2A models and attestation integration.
+- **`bridge-a2a/` (`bridge-a2a`)** — A2A JSON-RPC sidecar bridge using `mnemonic-a2a`.
 - **`packages/`** — `sdk` (`@mnemonik-xyz/sdk`, TS client + WASM core), `cli` (`@mnemonik-xyz/cli`), `mcp` (`@mnemonik-xyz/mcp`, npm launcher that downloads the Rust binary per platform), `extension` (browser extension).
 - **`webapp/`** — React + Vite site (mnemonik.xyz), prerendered, Playwright e2e.
 - **`tests/cross-lang/`** — Rust ↔ Node keychain interop script.
@@ -95,9 +97,11 @@ successful index scan alone does not prove complete history. See
 [client-prepared memory](docs/client-prepared-memory.md) and
 [recovery checkpoints](docs/recovery-checkpoints.md).
 
-**Backing up.** `mnemonic-mcp export` writes every row this identity owns to stdout as JSON Lines, oldest first, so two exports diff readably. Owner-scoped, with no cross-owner variant: that would be a bulk disclosure primitive. `content` is empty for a row a hosted operator wrote under the anchored path — it never had the text — and `arweave_tx` is where those bytes live.
+**Backing up.** `mnemonic-mcp export` emits this identity's existing index rows as JSON Lines, oldest first. It is owner-scoped and is not a complete artifact/key backup. New prepared-artifact receipts do not create plaintext index rows. Retain original signed envelopes and use the client checkpoint/encrypted-backup APIs for independent recovery. Legacy public or server-prepared index content can still exist.
 
-**Restoring from the chain.** `mnemonic-mcp restore` rebuilds the local index from Arweave: it enumerates candidates from configured sources for this wallet (Solana memo history first — it is authoritative for legacy items, since gateways never indexed the old Irys bundles — then the gateway index), fetches each artifact, COSE-verifies it, and writes the verified rows. Only memories authored by this identity are imported, because the enumeration sources are wallet-scoped and an operator wallet anchored items for many identities. Idempotent, and `--dry-run` reports without writing. `core/src/restore/` splits network work (`fetch_restorable`) from store work (`apply_restore`) so the `!Send` store mutex can never be held across an `.await`.
+**Restoring the local index.** `mnemonic-mcp restore` merges candidate discovery from configured provider-specific GraphQL and historical Solana memos. Both are discovery sources, not authorities for authorship or completeness. `enumerate_anchored` reports each source's exhaustion, failure, partial results or budget limit. Successful candidates survive another source's failure; the command reports incomplete discovery after retaining verified imports. `fetch_restorable` verifies envelopes, supports `memory.v1`, checks signed producer identity and reports sealed items as requiring client-local recovery. `apply_restore` imports only this identity's records after network work completes; `--dry-run` skips writes. Never hold the `!Send` store mutex across `.await`.
+
+**Private and graph recovery.** `rebuild::recover_memory` and `restore::fetch_recovered_memories` accept a pinned author and optional X25519 key in the client process. They recover supported public/sealed content without relying on operator SQL. `recover_memory_set` requires author and exact-envelope digest pins for every head and ancestor, because general-memory IDs alone are not content-addressed. A2A has separate signed parent-hash/context/recipient checks. A successful scan cannot prove a newest head or global completeness; authenticated checkpoints define only expected ancestry. See [recovery checkpoints](docs/recovery-checkpoints.md) and [storage portability](docs/storage-portability.md).
 
 **Mode names.** The two modes say *where the memory lives*: `local` = the agent's own machine only, `anchored` = Arweave. `anchored` was called `participate` before 2026-09-27. The old token is still accepted on input (`WriteMode::from_str_strict`, a serde alias, and a `write_mode` column normalising migration) but is never emitted. Remove the alias once the release that introduced `anchored` is the oldest supported client. See `work/arweave-as-source-of-truth/`.
 
@@ -112,7 +116,11 @@ is needed for encryption/signing/opening, including sealed local writes. Plain
 legacy local writes need no keychain access. The agent may store its own sealed
 bytes locally; the current hosted ingestion path retains metadata only.
 
-**Payment** (`PAYMENT_MODE`, HTTP only): `none` | `x402`. The custodial `balance`/`both` modes were removed; `check_payment` fail-closes on any other value. `mnemonic_sign_memory` in `anchored` mode and `mnemonic_attest_a2a` are paid tools on x402 deployments. `mnemonic_recall_a2a` is always free (read-only). On `x402`, a key linked to a Google account first gets a free daily quota of anchored writes, counted per Google account (`MNEMONIC_FREE_ANCHORS_PER_DAY`, 10), per real client IP (`MNEMONIC_FREE_ANCHORS_PER_IP_PER_DAY`, 20, via `TRUSTED_PROXIES` in `client_ip.rs`) and globally (`MNEMONIC_FREE_ANCHORS_GLOBAL_PER_DAY`, 1000) for COSE bytes up to `MNEMONIC_FREE_ANCHOR_MAX_BYTES` (16 KiB): the pre-parking gate only peeks, `/api/sign-callback` consumes one at anchor time and refunds it on failure, but not the global counter once the chain write started (`payment.rs` § free daily anchor quota).
+**Payment** (`PAYMENT_MODE`, HTTP only): `none` | `x402`. The removed `balance`/`both` modes fail closed. Shared prepared-memory/A2A ingestion supports the Universal Paywall exact rail; other rails fail closed there. Legacy deferred callbacks retain separate interfaces. Read-only verification and A2A recall do not invoke payment.
+
+**Free quota.** On paid HTTP deployments, a Google-linked signer may qualify under account, real-client-IP and global UTC-day limits. Source defaults are `MNEMONIC_FREE_ANCHORS_PER_DAY=10`, `MNEMONIC_FREE_ANCHORS_PER_IP_PER_DAY=20`, `MNEMONIC_FREE_ANCHORS_GLOBAL_PER_DAY=1000`, and `MNEMONIC_FREE_ANCHOR_MAX_BYTES=16384`; these are configurable defaults, not a service entitlement. `PAYMENT_MODE=none` and stdio do not consume those counters. The legacy pre-parking gate only peeks. Shared ingestion validates the artifact first, claims eligible quota against the durable operation, and avoids another allocation for revalidated existing exact bytes. Cancellation or failure refunds a reservation only after durable payment eligibility is safely reset; otherwise the reservation stays consumed. The global budget remains spent after an external write attempt. Quota refunds are not financial refunds.
+
+**Financial state and retention.** Payment acceptance and delivery are independent. Retry uses the same original bytes, operation and validated provider receipt. Lost financial metadata requires reconciliation. Terminal failed delivery records `remedy_pending`; refunds or credits require an operator action and evidence. New delivery/callback staging records contain metadata only. Historical paid payload staging remains an explicit upgrade exception until identical client resubmission drains it; backups and journals have separate retention. Never delete the only undelivered historical copy merely to claim a payload-free database. See [payment retries](docs/artifact-payment-retries.md).
 
 **Hard architectural rules** (audit-enforced):
 
