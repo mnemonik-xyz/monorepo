@@ -422,3 +422,26 @@ backends, Cloudflare Workers smoke).
 ## License
 
 Apache-2.0.
+
+## Sealed A2A
+
+All A2A attestations are signed locally. Use `sealed: { recipients }` on
+`attestA2AMessage`/`attestA2AArtifact`, then `recallA2AContext(context, {sealed:true})`
+and `openA2AAttestation(row, trustedAuthor)` on the recipient client. A recipient
+is `{card, trustedCardSigner}`; the card must carry a valid detached EdDSA JWS.
+`verifyA2AAttestation(hex, trustedAuthor)` needs no private key. Optional
+`sealed.chunkSize` seals a completed payload into a verified chunk chain.
+See [the contract and threat notes](../../docs/sealed-a2a.md).
+
+
+### A2A recovery (draft)
+
+A2A artifacts are signed on the client and stored externally on Arweave/Irys.
+Hosted MCP returns metadata receipts; clients fetch, verify and decrypt locally.
+SDK `restoreA2AContext(context, {expectedAuthors, heads})` needs no MCP login.
+Configure payload gateway/index URL and index flavour separately. Completeness
+means verified ancestry to pinned heads, not exhaustive index enumeration.
+Local mode uses an agent-owned index; SDK defaults to session-only memory.
+CLI provides `a2a attest --mode local`, `a2a recall --mode local`, and
+`a2a restore --context ID --authors KEY --heads HEAD`. Anchored non-root writes
+accept `--prev-locator ar://ID`. See `docs/sealed-a2a.md` for limits and validation.

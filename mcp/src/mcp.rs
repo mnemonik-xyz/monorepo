@@ -1182,53 +1182,34 @@ fn tool_definitions() -> Value {
         },
         {
             "name": "mnemonic_attest_a2a",
-            "description": "Attest an A2A (Agent-to-Agent) protocol v1 object — task, message, or artifact — with a COSE_Sign1 Ed25519 signature. The attestation is stored locally (synthetic local: id) and linked to the supplied context_id for multi-turn session grouping. Returns {attestation_id, blake3, cose_envelope_hex}. This tool is paid on x402 deployments.",
+            "description": "Verify a client-signed A2A binding and upload original bytes to Arweave/Irys. Hosted SQL keeps delivery receipts only. Returns attestation_id, blake3, locator and sealed flag.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "kind": {
-                        "type": "string",
-                        "enum": ["task", "message", "artifact"],
-                        "description": "A2A object type to attest",
-                    },
-                    "payload": {
-                        "type": "object",
-                        "description": "The A2A object body (must conform to the A2A v1 wire schema for the given kind)",
-                    },
-                    "context_id": {
-                        "type": "string",
-                        "description": "A2A contextId — groups all attested objects belonging to one conversation or workflow",
-                    },
-                    "prev_id": {
-                        "type": "string",
-                        "description": "Optional parent attestation_id for lineage tracking",
-                    },
+                    "kind": {"type":"string","enum":["task","message","artifact"]},
+                    "context_id": {"type":"string"},
+                    "signed": {"type":"string","description":"Hex COSE_Sign1 over mnemonic.a2a.signed.v1; signed in the client"},
+                    "sealed": {"type":"boolean","default":false},
+                    "prev_locator": {"type":"string","description":"External parent locator ar://id"},
+                "mode": {"type":"string","enum":["anchored"]},
+                "prev_id": {"type":"string"}
                 },
-                "required": ["kind", "payload", "context_id"],
-            },
+                "required": ["kind","context_id","signed"]
+            }
         },
         {
             "name": "mnemonic_recall_a2a",
-            "description": "Return attestation rows stored under a given A2A context_id, newest first. Optional kind filter (task | message | artifact | all) and limit. Free — no payment required.",
+            "description": "Return optional delivery receipt metadata for the authenticated author or named grant recipient. Clients fetch and verify external bytes and decrypt locally. Free; receipts are not the recovery source.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "context_id": {
-                        "type": "string",
-                        "description": "A2A contextId to query",
-                    },
-                    "limit": {
-                        "type": "integer",
-                        "description": "Maximum number of rows to return (default: all)",
-                    },
-                    "kind": {
-                        "type": "string",
-                        "enum": ["task", "message", "artifact", "all"],
-                        "description": "Filter by A2A object type (default: all)",
-                    },
+                    "context_id":{"type":"string"},
+                    "limit":{"type":"integer","minimum":1,"maximum":1000,"default":100},
+                    "kind":{"type":"string","enum":["task","message","artifact","all"]},
+                    "sealed":{"type":"boolean","description":"Optional sealed/plaintext filter"}
                 },
-                "required": ["context_id"],
-            },
+                "required":["context_id"]
+            }
         },
     ]);
 
@@ -1925,9 +1906,71 @@ pub async fn mcp_handler(
             }
         }
     } else if is_attest_a2a && state.payment_mode != "none" {
+        // Verify client authorship and binding before charging or claiming a nonce.
+        let validation = async {
+            anyhow::ensure!(jwt_sub.is_some(), "authentication required");
+            let args = req
+                .params
+                .get("arguments")
+                .ok_or_else(|| anyhow::anyhow!("arguments required"))?;
+            anyhow::ensure!(
+                args.get("mode").is_none_or(|v| v == "anchored"),
+                "local mode requires agent-owned storage"
+            );
+            let signed = args["signed"]
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("signed required"))?;
+            anyhow::ensure!(
+                signed.len() <= mnemonic_core::codec::a2a::signed::MAX_A2A_BYTES * 2,
+                "A2A envelope too large"
+            );
+            let sealed = match args.get("sealed") {
+                None => false,
+                Some(Value::Bool(b)) => *b,
+                _ => anyhow::bail!("invalid sealed"),
+            };
+            let prev = match args.get("prev_id") {
+                None => None,
+                Some(Value::String(s)) => Some(s.as_str()),
+                _ => anyhow::bail!("invalid prev_id"),
+            };
+            let child = mnemonic_a2a::validate_signed_a2a(
+                &hex::decode(signed)?,
+                &owner_pubkey,
+                args["kind"]
+                    .as_str()
+                    .ok_or_else(|| anyhow::anyhow!("kind required"))?,
+                args["context_id"]
+                    .as_str()
+                    .ok_or_else(|| anyhow::anyhow!("context required"))?,
+                sealed,
+                prev,
+            )?;
+            if prev.is_some() {
+                let id = args["prev_locator"]
+                    .as_str()
+                    .and_then(|s| s.strip_prefix("ar://"))
+                    .ok_or_else(|| anyhow::anyhow!("ParentLocatorRequired"))?;
+                let bytes = state
+                    .arweave
+                    .read_a2a(id)
+                    .await
+                    .map_err(|_| anyhow::anyhow!("ParentUnavailable"))?;
+                let parent = mnemonic_core::codec::a2a::signed::verify_signed_a2a(&bytes, None)?;
+                mnemonic_core::codec::a2a::signed::verify_parent_link(&child, &parent)?;
+            }
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+        if let Err(error) = validation {
+            return ndjson_response(
+                StatusCode::BAD_REQUEST,
+                &serde_json::json!({"jsonrpc":"2.0", "id":req.id,"error":{"code":-32602,"message":error.to_string()}}),
+            );
+        }
         // Payment gate for `mnemonic_attest_a2a`. Simpler than sign_memory:
         // no WriteMode complexity, no free-anchor-quota, no deferred-signing
-        // flow — A2A attestations are always synchronous local-row writes.
+        // flow — A2A attestations deliver client-signed external artifacts.
         let gate = payment::check_payment(
             &headers,
             &state.payment_mode,
@@ -1987,7 +2030,9 @@ pub async fn mcp_handler(
                                     tracing::warn!(tx_sig = %proof.tx_sig, error = %error, "x402 nonce release failed (attest_a2a)");
                                 }
                             }
-                            Err(_) => tracing::warn!("x402 nonce release (attest_a2a): store mutex poisoned"),
+                            Err(_) => tracing::warn!(
+                                "x402 nonce release (attest_a2a): store mutex poisoned"
+                            ),
                         }
                     }
                 }
@@ -2590,12 +2635,12 @@ async fn handle_tool_call(
                         &args.get("memory_hash").cloned().unwrap_or(Value::Null),
                     )
                 })?;
-            let reader = args
-                .get("reader")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| {
-                    invalid_params("reader", &args.get("reader").cloned().unwrap_or(Value::Null))
-                })?;
+            let reader = args.get("reader").and_then(|v| v.as_str()).ok_or_else(|| {
+                invalid_params(
+                    "reader",
+                    &args.get("reader").cloned().unwrap_or(Value::Null),
+                )
+            })?;
             // Build a correlation_id for the grant-signing flow. The webapp
             // reads this to render the signing page; the client polls via
             // mnemonic_check_pending (re-using the same correlation_id semantics).
@@ -2616,37 +2661,84 @@ async fn handle_tool_call(
         // `is_attest_a2a` predicate). No WriteMode/mode field — A2A
         // attestations are always stored as local rows by the adapter.
         "mnemonic_attest_a2a" => {
+            if transport == crate::tools::Transport::Http && jwt_sub.is_none() {
+                return Err(JsonRpcError::simple(-32001, "authentication required"));
+            }
             let kind = args
                 .get("kind")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| invalid_params("kind", &args.get("kind").cloned().unwrap_or(serde_json::Value::Null)))?;
-            let payload = args
-                .get("payload")
-                .cloned()
-                .ok_or_else(|| invalid_params("payload", &serde_json::Value::Null))?;
-            let context_id = args
+                .and_then(Value::as_str)
+                .ok_or_else(|| invalid_params("kind", &Value::Null))?;
+            let context = args
                 .get("context_id")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| invalid_params("context_id", &args.get("context_id").cloned().unwrap_or(serde_json::Value::Null)))?;
-            let prev_id = args.get("prev_id").and_then(|v| v.as_str());
-            tools::attest_a2a(
-                &state.keypair,
-                &state.store,
-                kind,
-                &payload,
-                context_id,
-                prev_id,
-            )?
+                .and_then(Value::as_str)
+                .ok_or_else(|| invalid_params("context_id", &Value::Null))?;
+            let sealed = match args.get("sealed") {
+                None => false,
+                Some(Value::Bool(b)) => *b,
+                Some(v) => return Err(invalid_params("sealed", v)),
+            };
+            let prev = match args.get("prev_id") {
+                None => None,
+                Some(Value::String(s)) => Some(s.as_str()),
+                Some(v) => return Err(invalid_params("prev_id", v)),
+            };
+            if args.get("mode").is_some_and(|v| v != "anchored") {
+                return Err(JsonRpcError::simple(
+                    -32010,
+                    "local mode requires agent-owned storage",
+                ));
+            }
+            if let Some(signed) = args.get("signed") {
+                let signed = signed
+                    .as_str()
+                    .ok_or_else(|| invalid_params("signed", signed))?;
+                tools::ingest_a2a(
+                    &state.store,
+                    &state.arweave,
+                    &state.keypair,
+                    signed,
+                    owner_pubkey,
+                    kind,
+                    context,
+                    sealed,
+                    prev,
+                    args.get("prev_locator")
+                        .map(|v| v.as_str().ok_or_else(|| invalid_params("prev_locator", v)))
+                        .transpose()?,
+                )
+                .await?
+            } else {
+                return Err(invalid_params("signed", &Value::Null));
+            }
         }
-        // mnemonic_recall_a2a — A2A recall by context_id (free, read-only).
         "mnemonic_recall_a2a" => {
-            let context_id = args
+            let context = args
                 .get("context_id")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| invalid_params("context_id", &args.get("context_id").cloned().unwrap_or(serde_json::Value::Null)))?;
-            let limit = args.get("limit").and_then(|v| v.as_u64()).map(|n| n as usize);
-            let kind = args.get("kind").and_then(|v| v.as_str());
-            tools::recall_a2a(&state.store, context_id, limit, kind)?
+                .and_then(Value::as_str)
+                .ok_or_else(|| invalid_params("context_id", &Value::Null))?;
+            let limit = match args.get("limit") {
+                None => 100,
+                Some(v) => v
+                    .as_u64()
+                    .filter(|n| (1..=1000).contains(n))
+                    .ok_or_else(|| invalid_params("limit", v))? as usize,
+            };
+            let kind = match args.get("kind") {
+                None => None,
+                Some(Value::String(s)) => Some(s.as_str()),
+                Some(v) => return Err(invalid_params("kind", v)),
+            };
+            let sealed = match args.get("sealed") {
+                None => None,
+                Some(Value::Bool(b)) => Some(*b),
+                Some(v) => return Err(invalid_params("sealed", v)),
+            };
+            // Anonymous recall must not inherit the fallback operator identity.
+            if transport == crate::tools::Transport::Http && jwt_sub.is_none() {
+                serde_json::json!({"attestations":[]})
+            } else {
+                tools::recall_signed_a2a(&state.store, owner_pubkey, context, kind, sealed, limit)?
+            }
         }
         _ => {
             return Err(JsonRpcError::simple(
@@ -2824,9 +2916,7 @@ mod transport_tests {
             blog_rebuild_hook: None,
             chain_stats: None,
             unlock_cache: mnemonic_core::identity::UnlockCache::with_ttl(None),
-            recall_sessions: Arc::new(tokio::sync::Mutex::new(
-                crate::api::RecallSessionMap::new(),
-            )),
+            recall_sessions: Arc::new(tokio::sync::Mutex::new(crate::api::RecallSessionMap::new())),
         })
     }
 

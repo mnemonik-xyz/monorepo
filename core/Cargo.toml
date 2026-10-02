@@ -59,6 +59,7 @@ rsa = "0.9"
 rand = "0.8"
 
 [features]
+test-support = []
 default = []
 local-embed = ["fastembed"]
 openssl-vendored = ["openssl-sys/vendored"]
@@ -154,3 +155,7 @@ wasm-bindgen-test = "=0.3.50"
 
 [[example]]
 name = "enumerate"
+
+[[example]]
+name = "emit_sealed_a2a"
+required-features = ["a2a-experimental"]

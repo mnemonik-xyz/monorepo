@@ -12,6 +12,7 @@ pub mod extension;
 pub mod message;
 pub mod part;
 pub mod sealed_part;
+pub mod signed;
 pub mod task;
 
 pub use artifact::A2aArtifact;

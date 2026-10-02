@@ -93,6 +93,7 @@ export async function checkSelfPromotion(
     );
     if (ownerResult) {
       const owner = decodeAddress(ownerResult);
+      if (!owner) throw new Error("invalid ownerOf response");
       if (owner && owner.toLowerCase() === clientLower) {
         return { status: "self", warnings };
       }

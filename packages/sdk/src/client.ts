@@ -1,3 +1,4 @@
+import { importA2AAttestation, restoreA2AContext } from "./a2a-recovery.js";
 // MnemonicClient — stateless wrapper over the hosted MCP HTTP surface.
 //
 // 5 tool methods (whoami, signMemory, recall, verify, proveIdentity) plus
@@ -32,6 +33,7 @@ import {
   attestA2AMessage,
   attestA2ATask,
   recallA2AContext,
+  openA2AAttestation,
 } from "./a2a.js";
 import { coseSignPayload } from "./cose.js";
 import {
@@ -114,6 +116,18 @@ export class MnemonicClient {
   /** Single in-flight refresh, shared by concurrent tool calls. */
   private refreshInFlight: Promise<string | undefined> | null = null;
 
+  private a2aIndex!: import("./types.js").A2AIndexStore;
+  private a2aGatewayUrl!: string;
+  private a2aDiscoveryConfig!: {url:string;flavour:'irys'|'arweave'};
+  setA2AIndexStore(store:import("./types.js").A2AIndexStore):void {this.a2aIndex=store;}
+  _a2aIndexStore(){return this.a2aIndex;}
+  _a2aGateway(){return this.a2aGatewayUrl;}
+  _a2aDiscovery(){return this.a2aDiscoveryConfig;}
+  async _a2aExternal(url:string,init:RequestInit={}):Promise<Response>{
+    return this.fetchImpl(url,{...init,redirect:'error',credentials:'omit',signal:init.signal?AbortSignal.any([init.signal,AbortSignal.timeout(10000)]):AbortSignal.timeout(10000)});
+  }
+  importA2AAttestation(locator:string,author:string){return importA2AAttestation.call(this,locator,author);}
+  restoreA2AContext(context:string,opts:import("./types.js").A2ARestoreOptions){return restoreA2AContext.call(this,context,opts);}
   constructor(config: MnemonicClientConfig) {
     if (!config.baseUrl || !/^https?:\/\//.test(config.baseUrl)) {
       throw new UserError(
@@ -127,6 +141,12 @@ export class MnemonicClient {
     // `https://host/mcp` not `https://host//mcp`.
     this.baseUrl = config.baseUrl.replace(/\/+$/, "");
     this.signer = config.signer;
+    const rows=new Map<string,Attestation>();
+    this.a2aIndex=config.a2aIndex??{list:async()=>[...rows.values()].map(r=>structuredClone(r)),put:async row=>{rows.set(row.attestationId,structuredClone(row));}};
+    this.a2aGatewayUrl=(config.a2aGatewayUrl??'https://gateway.irys.xyz').replace(/\/+$/,'');
+    if(config.a2aIndexFlavour!==undefined&&!['irys','arweave'].includes(config.a2aIndexFlavour))throw new UserError('invalid A2A index flavour');
+    this.a2aDiscoveryConfig={url:config.a2aIndexUrl??'https://uploader.irys.xyz/graphql',flavour:config.a2aIndexFlavour??'irys'};
+    for(const url of [this.a2aGatewayUrl,this.a2aDiscoveryConfig.url])if(!/^https?:\/\//.test(url))throw new UserError('invalid external A2A endpoint');
     if (config.jwt !== undefined) this.jwt = config.jwt;
     this.fetchImpl = config.fetch ?? globalThis.fetch.bind(globalThis);
     if (config.keypairProvider) this.keypairProvider = config.keypairProvider;
@@ -669,7 +689,8 @@ export class MnemonicClient {
     }
 
     // Derive X25519 secret from Ed25519 keypair seed (first 32 bytes).
-    const ed25519Secret = new Uint8Array(keypairJson.secret.slice(0, 32));
+    if (!wasm.x25519_secret_from_seed) throw new ServerError("X25519 derivation binding unavailable");
+    const ed25519Secret = wasm.x25519_secret_from_seed(new Uint8Array(keypairJson.secret.slice(0,32)));
     let innerBytes: Uint8Array;
     try {
       innerBytes = wasm.open_memory(outerCbor, ed25519Secret);
@@ -678,7 +699,7 @@ export class MnemonicClient {
         `openMemory: decryption failed — ${describeError(e)}`,
         e
       );
-    }
+    } finally { ed25519Secret.fill(0); }
 
     const innerText = new TextDecoder().decode(innerBytes);
     let content = innerText;
@@ -895,7 +916,7 @@ export class MnemonicClient {
         `importLink: decryption failed — ${describeError(e)}`,
         e
       );
-    }
+    } finally { kBytes.fill(0); }
 
     const innerText = new TextDecoder().decode(innerBytes);
     let content = innerText;
@@ -1115,6 +1136,17 @@ export class MnemonicClient {
     opts?: RecallA2AContextOptions
   ): Promise<Attestation[]> {
     return recallA2AContext.call(this, contextId, opts);
+  }
+
+  /** Verify the expected author and decrypt recalled bytes in this client. */
+  openA2AAttestation(attestation: Attestation, expectedAuthor: string, encryptionSecret?: Uint8Array): Promise<Record<string,unknown>> {
+    return openA2AAttestation.call(this,attestation,expectedAuthor,encryptionSecret);
+  }
+
+  /** @internal */
+  async _resolveA2AKeypair(): Promise<KeypairJson> {
+    const kp = await this.resolveKeypairJson();
+    return {secret:[...kp.secret],pubkey_base58:kp.pubkey_base58};
   }
 
   /**
@@ -1534,7 +1566,8 @@ async function verifySealedBundleIfNeeded(
   }
 
   // Derive X25519 secret from Ed25519 seed (first 32 bytes of the keypair secret).
-  const ed25519Secret = new Uint8Array(keypairJson.secret.slice(0, 32));
+  if (!wasm.x25519_secret_from_seed) throw new ServerError("X25519 derivation binding unavailable");
+  const ed25519Secret = wasm.x25519_secret_from_seed(new Uint8Array(keypairJson.secret.slice(0,32)));
 
   let innerBytes: Uint8Array;
   try {
@@ -1544,7 +1577,7 @@ async function verifySealedBundleIfNeeded(
       `signMemory: SEALED_V1 bundle could not be decrypted — ${describeError(e)}`,
       e
     );
-  }
+  } finally { ed25519Secret.fill(0); }
 
   // Parse inner JSON and compare content.
   const innerText = new TextDecoder().decode(innerBytes);

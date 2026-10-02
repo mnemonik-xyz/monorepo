@@ -80,6 +80,26 @@ describe("runA2AAttest", () => {
     return path;
   }
 
+  it("forwards sealed recipient and chunk options into a client-signed write", async () => {
+    const file = writeFixture("message.json", {messageId:"sealed",role:"agent",parts:[]});
+    const recipientsFile = writeFixture("recipients.json", [{card:{name:"reader"},trustedCardSigner:"pinned"}]);
+    globalThis.fetch = vi.fn(async (_url, init) => {
+      const args=JSON.parse(init!.body as string).params.arguments;
+      expect(args.sealed).toBe(true);
+      expect(typeof args.signed).toBe("string");
+      expect(args.payload).toBeUndefined();
+      return mcpReply({attestation_id:"sealed-cli"});
+    });
+    await runA2AAttest({kind:"message",file,context:"ctx",recipientsFile,chunkSize:64});
+  });
+
+  it("rejects chunk size without recipients before sending a write", async () => {
+    const file=writeFixture("message.json",{messageId:"msg",role:"agent",parts:[]});
+    globalThis.fetch=vi.fn();
+    await expect(runA2AAttest({kind:"message",file,context:"ctx",chunkSize:64})).rejects.toThrow("requires --recipients-file");
+    expect(globalThis.fetch).not.toHaveBeenCalled();
+  });
+
   it("attests a task file and prints attestation_id", async () => {
     const file = writeFixture("task.json", TASK_FIXTURE);
     globalThis.fetch = vi.fn(async () =>

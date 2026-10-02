@@ -869,3 +869,113 @@ pub fn rebuild_row(cose_bytes: &[u8]) -> Result<JsValue, JsValue> {
     serde_wasm_bindgen::to_value(&out)
         .map_err(|e| JsValue::from_str(&format!("rebuild_row: serialise failed: {e}")))
 }
+
+/// Client-sign plain or sealed A2A bindings. Recipients are pinned, signed cards.
+#[cfg(feature = "a2a-experimental")]
+#[wasm_bindgen]
+pub fn prepare_a2a(
+    keypair_json: JsValue,
+    kind: &str,
+    payload_json: &str,
+    context_id: &str,
+    prev_id: Option<String>,
+    created_at: &str,
+    recipients_json: Option<String>,
+    chunk_size: Option<u32>,
+) -> Result<Vec<u8>, JsValue> {
+    if payload_json.len() > crate::codec::a2a::signed::MAX_A2A_BYTES / 2
+        || recipients_json
+            .as_ref()
+            .is_some_and(|s| s.len() > crate::codec::a2a::signed::MAX_A2A_BYTES)
+    {
+        return Err(JsValue::from_str("A2A input too large"));
+    }
+    let kp = keypair_from_json(keypair_json_from_value(keypair_json)?)?;
+    let payload =
+        serde_json::from_str(payload_json).map_err(|e| JsValue::from_str(&e.to_string()))?;
+    let recipients: Option<Vec<crate::codec::a2a::signed::RecipientCard>> = recipients_json
+        .map(|s| serde_json::from_str(&s))
+        .transpose()
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    let result = if let Some(size) = chunk_size {
+        let recipients = recipients
+            .as_ref()
+            .ok_or_else(|| JsValue::from_str("stream recipients required"))?;
+        crate::codec::a2a::signed::prepare_signed_a2a_stream(
+            &kp,
+            kind,
+            payload,
+            context_id,
+            prev_id,
+            created_at,
+            recipients,
+            size as usize,
+        )
+    } else {
+        crate::codec::a2a::signed::prepare_signed_a2a(
+            &kp,
+            kind,
+            payload,
+            context_id,
+            prev_id,
+            created_at,
+            recipients.as_deref(),
+        )
+    };
+    result.map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+/// Verify every signature and sealed chain, then open locally for this identity.
+#[cfg(feature = "a2a-experimental")]
+#[wasm_bindgen]
+pub fn open_a2a(
+    keypair_json: JsValue,
+    signed: &[u8],
+    expected_author: &str,
+    encryption_secret: Option<Vec<u8>>,
+) -> Result<String, JsValue> {
+    let kp = keypair_from_json(keypair_json_from_value(keypair_json)?)?;
+    let secret = encryption_secret.map(zeroize::Zeroizing::new);
+    let arr = secret
+        .as_ref()
+        .map(|s| s.as_slice().try_into())
+        .transpose()
+        .map_err(|_| JsValue::from_str("encryption secret must be 32 bytes"))?;
+    let result = crate::codec::a2a::signed::open_signed_a2a(signed, &kp, expected_author, arr)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    serde_json::to_string(&result).map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+/// Verify public signatures and the sealed hash chain, without decrypting.
+#[cfg(feature = "a2a-experimental")]
+#[wasm_bindgen]
+pub fn verify_a2a(signed: &[u8], expected_author: &str) -> Result<String, JsValue> {
+    let v = crate::codec::a2a::signed::verify_signed_a2a(signed, Some(expected_author))
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    serde_json::to_string(
+        &serde_json::json!({"binding":v.binding,"signer":v.signer,"content_hash":v.content_hash}),
+    )
+    .map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+/// Derive the scalar using the same core function as native recipients.
+#[wasm_bindgen]
+pub fn x25519_secret_from_seed(seed: &[u8]) -> Result<Vec<u8>, JsValue> {
+    let bytes: [u8; 32] = seed
+        .try_into()
+        .map_err(|_| JsValue::from_str("seed must be 32 bytes"))?;
+    let key = ed25519_dalek::SigningKey::from_bytes(&bytes);
+    Ok(crate::sealed::x25519_secret_from_ed25519(&key).to_vec())
+}
+
+/// Check signed lineage without decrypting or trusting local metadata.
+#[cfg(feature = "a2a-experimental")]
+#[wasm_bindgen]
+pub fn verify_a2a_parent(child_hex: &str, parent_hex: &str) -> Result<(), JsValue> {
+    use crate::codec::a2a::signed::{verify_parent_link, verify_signed_a2a};
+    let child = hex::decode(child_hex).map_err(|e| JsValue::from_str(&e.to_string()))?;
+    let parent = hex::decode(parent_hex).map_err(|e| JsValue::from_str(&e.to_string()))?;
+    let child = verify_signed_a2a(&child, None).map_err(|e| JsValue::from_str(&e.to_string()))?;
+    let parent = verify_signed_a2a(&parent, None).map_err(|e| JsValue::from_str(&e.to_string()))?;
+    verify_parent_link(&child, &parent).map_err(|e| JsValue::from_str(&e.to_string()))
+}
