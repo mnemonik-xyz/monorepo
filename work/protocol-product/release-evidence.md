@@ -192,3 +192,49 @@ acceptance. Task 8 remains in progress under that dependency. Live pinned fixtur
 recovery, submission lag, independent deployed operators and released-artifact
 A-17/rollback still require separate evidence. No deployment, npm publication,
 paid request or customer outreach occurred.
+
+## Clean candidate build and installed recovery after PR #271 — 2026-10-02
+
+Runner, probe and recorded evidence: `dbddc5c`.
+`node scripts/check-built-candidate.mjs` passed against committed source
+`b0a3f11778c2a33271d39b5a448e39240d2de833`. The
+[build/provenance report](evidence/built-candidate-2026-10-02.json) records the
+source tree/archive, source lockfiles, actual tool versions, installed dependency
+versions/integrities, all 221 shipped SDK/CLI file hashes and 11 harness hashes.
+Both source lockfiles remained unchanged. The build used a fresh source archive
+and Cargo target directory, followed by tarball installation outside the checkout.
+The CLI resolved the installed candidate SDK; installed bytes matched packed
+contents before the drill and remained unchanged afterward.
+
+The installed CLI passed sealed local save and fresh-process open with fetch
+rejected. The installed SDK passed encrypted backup restore, exact-byte backend
+migration, O1/source shutdown, continuation through O2 and the ten local failure
+injections. Its [combined recovery report](evidence/installed-recovery-2026-10-02.json)
+is pinned by SHA-256 in the provenance record. The three selected Rust tests in
+the combined runner passed. MCP remains a source harness, not an installed or
+deployed release. Financial controls still use seeded mock-provider receipts.
+
+Six new offline Node tests passed: candidate file/symlink checks, failed-build
+status/cleanup, and four submission/visibility summarizer cases. Workspace
+rustfmt, syntax and diff checks pass. No existing workspace build output or
+node_modules directory was overwritten. Temporary source/install/identity
+folders were removed.
+
+This supersedes the earlier unknown-prebuilt-output limitation for these recorded
+tarballs only. One observed clean build is not a bit-for-bit reproducibility
+claim. The tarballs remain unpublished SDK/CLI source version 0.3.0; no package
+release, deployed operator validation or rollback/A-17 acceptance is inferred.
+
+The [read-only probe guide](../../docs/live-observation-probe.md) adds optional
+original-envelope digest and independently recorded submission inputs, per-source
+scan timestamps and eventual visibility summaries. Reported latency is a
+conditional upper bound, not exact ingestion lag. Caller-provided submission
+provenance is not authenticated by the probe. Existing all-sample visibility
+exit behavior and `release_gate: not_established` remain unchanged.
+No new live observation was run without fixture pins.
+
+Tracked configuration contains no usable pinned live A2A fixture or independent
+staging O2 endpoint. The historical paywall staging procedure is explicitly
+marked superseded where it assumes stored payloads/background retries/Solana
+memos. Task 5 remains open for real pins, observed submission and configured
+operators; task 12 remains open for published-artifact and operational acceptance.
