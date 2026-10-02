@@ -242,3 +242,22 @@ are in [release evidence](release-evidence.md). Task 8's local matrix gap is
 closed; its task 5 dependency, live provider evidence and A-17 remain open.
 
 Implementation and recorded combined evidence: `ce05357`.
+
+## 2026-10-02 — Installed candidate recovery and live probe readiness
+
+After PR #271 (`b0a3f11`), the clean candidate runner built committed source in
+isolation and exercised the installed tarballs. All 221 SDK/CLI shipped file
+hashes matched the packed contents and remained unchanged through save/open,
+backup restore, migration, operator switching and the local failure matrix.
+Source/lock/toolchain and 11 harness hashes distinguish candidate and test inputs.
+Root review added runtime/HEAD rechecks and cleanup protections. Six offline
+Node tests and the three-test installed recovery runner passed; formatting passes.
+
+The read-only live probe now records conditional visibility timing and optional
+original-envelope pins. No live observation is claimed without real fixture
+pins. No tracked independent staging configuration was found. The older paywall
+procedure is labeled historical rather than treated as a usable current rollout.
+Task 5 and task 12 release gates remain open. No publication, deployment, payment
+or customer outreach occurred. See [release evidence](release-evidence.md).
+
+Implementation and recorded candidate evidence: `dbddc5c`.

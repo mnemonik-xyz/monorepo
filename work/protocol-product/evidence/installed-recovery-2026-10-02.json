@@ -1,0 +1,215 @@
+{
+  "version": 1,
+  "environment": "local_mock_services_real_sdk_wasm",
+  "artifacts": [
+    {
+      "label": "R",
+      "artifactId": "a2a:d145781bbb8510a31348d7e198079696b5d5647db7d03785c34aeab0bf3863a9",
+      "author": "AKnL4NNf3DGWZJS6cPknBuEGnVsV4A4m5tgebLHaRSZ9",
+      "prevId": null,
+      "locator": "blob://e28b505b87078dacf118e4646100610def0e314940a9a0e8f044daf945dbb9be",
+      "originalSha256": "e28b505b87078dacf118e4646100610def0e314940a9a0e8f044daf945dbb9be",
+      "recipientOpened": true,
+      "streamChunks": 0,
+      "grants": 1
+    },
+    {
+      "label": "S",
+      "artifactId": "a2a:e3e7d49f089c20b4c3629870ebd3950df0ff2d2368dce2d8f2350693457c2187",
+      "author": "AKnL4NNf3DGWZJS6cPknBuEGnVsV4A4m5tgebLHaRSZ9",
+      "prevId": "a2a:d145781bbb8510a31348d7e198079696b5d5647db7d03785c34aeab0bf3863a9",
+      "locator": "blob://5660255d850b85fa5159ba0c49281a18536d9dcf11798c059195d2665d09afe7",
+      "originalSha256": "5660255d850b85fa5159ba0c49281a18536d9dcf11798c059195d2665d09afe7",
+      "recipientOpened": true,
+      "streamChunks": 14,
+      "grants": 1
+    },
+    {
+      "label": "V",
+      "artifactId": "a2a:2de9873a31bb7f2a274b0d5547809622d2f54830915be99cb6ae848af9ad3590",
+      "author": "9hSR6S7WPtxmTojgo6GG3k4yDPecgJY292j7xrsUGWBu",
+      "prevId": "a2a:e3e7d49f089c20b4c3629870ebd3950df0ff2d2368dce2d8f2350693457c2187",
+      "locator": "blob://b8dbc2352053cdae245861fc7c5db3fc0a0e4c1dfd94cdb5620a9f3932bd77f2",
+      "originalSha256": "b8dbc2352053cdae245861fc7c5db3fc0a0e4c1dfd94cdb5620a9f3932bd77f2",
+      "recipientOpened": true,
+      "streamChunks": 0,
+      "grants": 1
+    },
+    {
+      "label": "W",
+      "artifactId": "a2a:8ac97ee8c9926fc1e36f97ca8aed16d7f6afa8784c1541edb1d55eec23087b5a",
+      "author": "9hSR6S7WPtxmTojgo6GG3k4yDPecgJY292j7xrsUGWBu",
+      "prevId": "a2a:2de9873a31bb7f2a274b0d5547809622d2f54830915be99cb6ae848af9ad3590",
+      "locator": "ar://Q3fZRc3jP5iMR3vyqQiFKvqQnns4QTSOj83Gcyd7Uw0",
+      "originalSha256": "7745b310da2377baad5e491d4ab94af362d8489602ff3da05f881dc62e732e94",
+      "recipientOpened": true,
+      "streamChunks": 0,
+      "grants": 1
+    }
+  ],
+  "operators": {
+    "O1": "9AF1GjdHgokfLJhVGfLpHrvZR7midhQmAzdbSfbJVpdq",
+    "O2": "6sEf6M4ydZgV3gGNJPhmuGzqt646gJZoLJbMcn97XPW6"
+  },
+  "recoveredHeads": [
+    "a2a:2de9873a31bb7f2a274b0d5547809622d2f54830915be99cb6ae848af9ad3590"
+  ],
+  "checks": {
+    "checkpointAuthenticated": true,
+    "manifestAuthenticated": true,
+    "exactOriginalBytes": true,
+    "completeToHeads": true,
+    "restoredIdentity": true,
+    "privateKeysPublished": false,
+    "originalOperatorOffline": true,
+    "originalSourceOffline": true,
+    "operatorPayloadTablesEmpty": true,
+    "replacementReceiptCount": 1
+  },
+  "billing": [
+    {
+      "scenario": "verified_delivery_receipt_write_failure",
+      "paymentStatus": "not_required",
+      "deliveryStatus": "verified",
+      "receiptPersisted": false,
+      "detail": "Unpaid fixture; PRAGMA query_only rejects receipt writes after verified external delivery."
+    },
+    {
+      "scenario": "settled_receipt_write_failure",
+      "paymentStatus": "settled",
+      "deliveryStatus": "verified",
+      "receiptPersisted": false,
+      "detail": "Accepted payment receipt was seeded, not obtained from a live payment provider."
+    },
+    {
+      "scenario": "settled_upload_failed",
+      "paymentStatus": "settled",
+      "deliveryStatus": "failed_retryable",
+      "receiptPersisted": false,
+      "detail": "HTTP 503 after mocked upload failure; no new verified delivery receipt returned. Payment receipt was seeded and remains retained."
+    },
+    {
+      "scenario": "settled_upload_retry",
+      "paymentStatus": "settled",
+      "deliveryStatus": "verified",
+      "receiptPersisted": true,
+      "detail": "Mock storage failure recovered; one financial row and unchanged seeded receipt. No payment provider configured; no real settlement proven."
+    },
+    {
+      "scenario": "terminal_remedy",
+      "paymentStatus": "remedy_pending",
+      "deliveryStatus": "failed_terminal",
+      "receiptPersisted": false,
+      "detail": "No new verified delivery receipt returned; historical receipt retained. Remedy request visible, no refund or credit executed."
+    }
+  ],
+  "phases": [
+    {
+      "name": "collector_authored_R_S",
+      "status": "passed"
+    },
+    {
+      "name": "reviewer_discovered_opened_and_authored_V",
+      "status": "passed"
+    },
+    {
+      "name": "exact_byte_storage_migration",
+      "status": "passed"
+    },
+    {
+      "name": "fresh_B_encrypted_identity_restore",
+      "status": "passed"
+    },
+    {
+      "name": "recipient_recovered_R_S_V",
+      "status": "passed"
+    },
+    {
+      "name": "W_delivered_through_O2",
+      "status": "passed"
+    }
+  ],
+  "failures": [
+    {
+      "name": "changed_artifact_bytes",
+      "status": "rejected",
+      "detail": "Changed signed-envelope bytes fail real SDK verification; no artifact enters the local index."
+    },
+    {
+      "name": "ciphertext_repaired_public_hashes",
+      "status": "rejected",
+      "detail": "Ciphertext changed, all public stream hashes/head repaired, and fixture-author transport re-signed. Public verification passes; authenticated local decryption rejects. No malicious envelope uploaded."
+    },
+    {
+      "name": "forged_index_tags",
+      "status": "rejected",
+      "detail": "Forged author and context hints each pass metadata scoping but fail against fetched original signed bytes; neither candidate is imported."
+    },
+    {
+      "name": "outsider_fetch_open",
+      "status": "rejected",
+      "detail": "Outsider fetches and verifies exact public ciphertext, but real SDK/WASM denies plaintext opening."
+    },
+    {
+      "name": "omitted_required_parent",
+      "status": "passed",
+      "detail": "Mock index omitted required S (a2a:e3e7d49f089c20b4c3629870ebd3950df0ff2d2368dce2d8f2350693457c2187); only R imported. Signed V stayed incomplete despite exhausted discovery."
+    },
+    {
+      "name": "index_outage_vs_empty",
+      "status": "passed",
+      "detail": "Mock HTTP 503 reported unavailable with an error and no exhausted scan; an empty successful page reported exhausted. Neither completed the pinned head."
+    },
+    {
+      "name": "index_lag_known_locator_recovery",
+      "status": "passed",
+      "detail": "Mock lag first withheld S/V, then a later scan recovered exact R/S/V. Pinned locators also completed ancestry with discovery unavailable or disabled; source uncertainty remained visible."
+    },
+    {
+      "name": "valid_fork_preserved",
+      "status": "passed",
+      "detail": "Real SDK/WASM signed a competing reviewer child of S. Restore retained both valid branches and exact V bytes; both pinned heads completed, while no-head recovery remained unknown."
+    },
+    {
+      "name": "outsider_open_S",
+      "status": "rejected",
+      "detail": "Real SDK/WASM rejects outsider access to the recovered sealed source stream."
+    },
+    {
+      "name": "O1_shutdown_and_receipt_loss",
+      "status": "recovered",
+      "detail": "Original router stopped and database dropped; fresh B restored R/S/V and delivered W through O2."
+    },
+    {
+      "name": "original_storage_shutdown",
+      "status": "recovered",
+      "detail": "Original storage erased and listener stopped; exact migrated bytes restored from configured destination."
+    },
+    {
+      "name": "receipt_database_read_only",
+      "status": "recovered",
+      "detail": "Exact external bytes remained verified while receipt persistence failed; same locator and one stored blob."
+    },
+    {
+      "name": "settled_upload_failure",
+      "status": "recovered",
+      "detail": "Mock upload returned 503; identical resubmission delivered with the original seeded receipt and one financial operation."
+    },
+    {
+      "name": "terminal_delivery_failure",
+      "status": "rejected",
+      "detail": "Attempt count seeded to seven, eighth failed upload entered remedy_pending; repeated request stayed terminal at eight."
+    },
+    {
+      "name": "lost_financial_metadata",
+      "status": "passed",
+      "detail": "Exact external delivery remained verified while payment was unknown and reconciliation required."
+    }
+  ],
+  "limitations": [
+    "Synthetic local storage and operators; no live-provider durability claim.",
+    "B uses its restored identity; this does not provision a new independently trusted identity.",
+    "This unpaid handoff excludes financial controls; the combined runner records them separately. Live task5 prerequisites remain open.",
+    "Financial controls use a seeded accepted mock-provider receipt, not a live charge or refund. They run separately from the unpaid R/S/V/W handoff."
+  ]
+}

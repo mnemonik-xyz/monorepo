@@ -1,0 +1,506 @@
+{
+  "version": 1,
+  "kind": "unpublished_clean_source_candidate",
+  "status": "passed",
+  "started_at": "2026-10-02T13:28:43.436Z",
+  "packages": [
+    {
+      "name": "@mnemonik-xyz/sdk",
+      "version": "0.3.0",
+      "filename": "mnemonik-xyz-sdk-0.3.0.tgz",
+      "sha256": "b654966d1a1ab9b557c178abfdd2a410145a167898079dc28a49cb5875793c4b",
+      "npm_integrity": "sha512-HGpM58fwoaQv1XVqa2WeTGTBH3L85QHXNZg1E73ixJB868PN6Tvpz1GEdL/qW3I2VA7Zjo+5ocKAJVtrQA+FnA==",
+      "installed_files_sha256": {
+        "README.md": "402f2e5255a3446e2dc432c71cc74dfabe5681221acb5f1f18cae85c2bdc703a",
+        "dist/a2a-recovery.d.ts": "11d50d5433707c3a56816bb9df12350e19053d705ea641aec68fac9be0a94902",
+        "dist/a2a-recovery.d.ts.map": "5ec4815953f45a09a86cb5a1cdf6036a9eaef7dfe14cc82a7614bbfdce07012e",
+        "dist/a2a-recovery.js": "cdd5e0d9c5ff77599c8136861b94f852f77959f393e55d7dc4c542896aada597",
+        "dist/a2a-recovery.js.map": "ffd97bc87a208d8813cab345a3d5530ebde63c5893dbe929a9f2c88959433fa2",
+        "dist/a2a.d.ts": "94f168d1ac0ebc0f6780bc96c626c1e81663e8775dee9d41e31ffc0c921088ea",
+        "dist/a2a.d.ts.map": "7e4c436b594e4043d6866f719082918720ddc7500a3df045935900d5af820a81",
+        "dist/a2a.js": "c563e4912eb5699dd468bad4cb35bcc1764cfe34725a814778e22a53cba6d620",
+        "dist/a2a.js.map": "08c8b25232c0d3275d3feb69e0a0032f4436aea6e2364fb47b31ef31426a3538",
+        "dist/backup.d.ts": "6e1b147735f442afbed7f49f3f26e3385c4ee7b67c01b4d654ca2cba8e1d4cc8",
+        "dist/backup.d.ts.map": "385cdd9a612751197d5069308a67c49a344b549c4017b47cf7f1ff9c946f853e",
+        "dist/backup.js": "6feeade75f2e31c39682e49f3ccdb6fe173a208de1c687b1de47516e3af6cfa3",
+        "dist/backup.js.map": "08abe09bd8b52d9be10ba41603daec10b8491a8b6cdefe1acdb892c9cf5eede7",
+        "dist/browser.d.ts": "d16531634e7e33f26a215d386590334cb0b9e7abc5f13d922a559375e38375d6",
+        "dist/browser.d.ts.map": "a5563fa104fff4a5c6ef3e58db903bf42d5a2c62104be6f009b0f98ae468a3fa",
+        "dist/browser.js": "dfd04984789de551c4eb661b6ca1409359774ff7d3a132318c86d849efe0442f",
+        "dist/browser.js.map": "7a6f4e560dc950bd75a242e7ef6ba5c7440d89b18b269f26e55143a08bedb721",
+        "dist/checkpoint.d.ts": "1051ce0049a9b6469d74d61545be339a34368526064c14a13c1f70a6aa79501b",
+        "dist/checkpoint.d.ts.map": "a86188d1f5fcc0155c03493ffb8dae400b76cd601b87940c13232af44e0c5574",
+        "dist/checkpoint.js": "268b114dbc98a872c3cb7f2eece10505688c3ca086b9324c95ee82d2580fa165",
+        "dist/checkpoint.js.map": "8b0a27f69437ad5b1dd34f056858d9af27745e5036e3dcb55925a5e5c169ee86",
+        "dist/client.d.ts": "2f04a43710e192c8bb0c53b1cac0a7c84f9c6d87b2ccb31914b63342f85e20e4",
+        "dist/client.d.ts.map": "90e55e0ca8d8238261681148b8815ad586041e23685d9d792b3538514a450133",
+        "dist/client.js": "57b37cc708b20d59035986d8e102cc5cf26dc8fe041d10413ecc3c247e2bb0cb",
+        "dist/client.js.map": "588e6af1f68be4ab677fc5497b3a22b7eb773e6e927cf56663f98500ec8bc7a7",
+        "dist/cose.d.ts": "304c9669f1ebad1590d8a5a8c591571e28f6c54fef645cfd4e54b3514e9c6b50",
+        "dist/cose.d.ts.map": "9d62b220f324aacf3be27ab65349727e0bb86e3ff719e4af9bd31dbb9a9dd289",
+        "dist/cose.js": "6215028d14f091a20c53bb5cc8be9e3794fc46362943ba7bd168265a7484233f",
+        "dist/cose.js.map": "abd5c6b50fdd64bd5f19ee2d29ae12928f6028fda56ac784842cba48503a3809",
+        "dist/discovery.d.ts": "e04e851e6630fcafb751fe65ee1ecf24dbf74b456c67112b380573d2edb90950",
+        "dist/discovery.d.ts.map": "f54781318d8cbb8765e4552e53efae190dcc127ef13a264ab8b842f09204f2ad",
+        "dist/discovery.js": "aa306cc37e3e840c4092c4e020ff3fc39aea484c8d223c771bb8c7c23203e6a1",
+        "dist/discovery.js.map": "43a0dafa4e6fdb2b97debfd2d948421dea60c39f166583d2252a084022a3ec39",
+        "dist/erc8004/abi.d.ts": "3882ae4266c5836e3341bfedc9db63b62f1186ea95cd272526dccd49f9393d06",
+        "dist/erc8004/abi.d.ts.map": "99e5e8c4ea8350b67de3de9a76021095717e0e5869e1ecc46489e23304362651",
+        "dist/erc8004/abi.js": "b88c27a5ef9d59af9660ea4db80cdee130cf090979f272c6285fb516cb7a3ae5",
+        "dist/erc8004/abi.js.map": "f8db78b8399f3a7e1499d69275d41744e5f0053e5d988cdc6767694be5dad0af",
+        "dist/erc8004/evm.d.ts": "b3f89b814d45b29a2225e9ded217272505374f5fe61a334e2e0065b576a4fe1e",
+        "dist/erc8004/evm.d.ts.map": "42f72e402b613698fac67e716dbff1f7978c9eff014cfd98b7ab661ce199158b",
+        "dist/erc8004/evm.js": "18e537071b630232ca66789402a33f3665bab2f868704060f83a443a72d7378f",
+        "dist/erc8004/evm.js.map": "78ddd052e1a5556f66d0e0e134eef63ef59545df8d3d1c04944e327a3dd8e127",
+        "dist/erc8004/feedback.d.ts": "c67079c1f114756a6aec1aaa202bc0da4e96eac95e2de35b2325326080adcaff",
+        "dist/erc8004/feedback.d.ts.map": "bf37d612dc9577b6f4a98a341458ddb54d88ca92cc7df22dca8ca1f08f7b1390",
+        "dist/erc8004/feedback.js": "443cb18cd758fd92fd55dac254a54f71a6afa9dbe7fc8b902849c3861c542c55",
+        "dist/erc8004/feedback.js.map": "2554ee87b6974dfe70687ca6c566571e2e2aafa71ca3b92f9a050d6834921c4c",
+        "dist/erc8004/jcs.d.ts": "f4ca8eadca50777d65e18fe955831555f01877e9736ceacfd218f4748cf4470e",
+        "dist/erc8004/jcs.d.ts.map": "970c747807ad477ace68622d4fe4a62a0b32afb3e3fd110c9bd184cb4e37c2b4",
+        "dist/erc8004/jcs.js": "8a124223462b0552acbbd8fabbc10506743b430b68ef35f3248d87bbad266613",
+        "dist/erc8004/jcs.js.map": "d8495481e7479aeac28b9ce9475a7fe65a5f2094a26fc847c8a8c02fa7979246",
+        "dist/erc8004/registry.d.ts": "40b8a68450f94077515f99f0faf449c8ff0af2584cc31b5ca5fe1b589c04c15d",
+        "dist/erc8004/registry.d.ts.map": "2b1b52eb6d3e705fb65c9f76e45a5b716fb2aa6f3f943f7d509ee6b3b2cd8b06",
+        "dist/erc8004/registry.js": "2eca9f24b752428a70ece811f45dd2fc96f545073fb38383d2248bd3de19015b",
+        "dist/erc8004/registry.js.map": "fe58e5742c03ae7f669d8a9087974dce18ae60d757fc8f038c5b920aa58e793c",
+        "dist/erc8004/self-promotion.d.ts": "c915f44e75c41cf4ce79a8d25682fa8b27d15e39fb9f9ba322eef5c2c9615090",
+        "dist/erc8004/self-promotion.d.ts.map": "b523b4a976eaa85c98051ed83ae1d7ee6e1861168b339a5592b25d9278ac678f",
+        "dist/erc8004/self-promotion.js": "b37f8df3565c1aa026d71bf766305e29eb46195ea74cf015fe28b5a6c2208b51",
+        "dist/erc8004/self-promotion.js.map": "27864cfbf766b6d235da3cde7b63c0978362bd00c62c63579d1ae248eea765d2",
+        "dist/erc8004/types.d.ts": "e89a1d51ae14fd357c7cc49e5177572f4919044c193a7759bfb2b107c4dacdc9",
+        "dist/erc8004/types.d.ts.map": "bb25498c4e1e6863f92c4928d954c02f3d9df21bfeda492912565fc8e83a445b",
+        "dist/erc8004/types.js": "793376f797a5760ebd48d2cd6f87d4a12eda3aa2dcd2909eb328a4ac385fa92d",
+        "dist/erc8004/types.js.map": "4b652c317b6b7afef1b47dbc9ea2e2ed588c582dc23dc5272cebd561e7c05d59",
+        "dist/errors.d.ts": "aa1119a626f7689008567a3bea2aa3b2d3f2e681d19cbb2e3f505f1834e06505",
+        "dist/errors.d.ts.map": "90b1f7dba19ebaf505b4ec178259ae77f3eda545234c87578e40459502af57ca",
+        "dist/errors.js": "28b42bde1ada605f4373d3741bbb6b600633b344eae97a8bb52ff4cc6052d9b4",
+        "dist/errors.js.map": "6d5029ed61f6c4c9b31c3f1cac4a5c06470cb986ee71b4129fc5bf1a2a9a6c69",
+        "dist/index.d.ts": "57e395cfc1134a4057340d51676df6c157f701d96e138da0b5c1c175167ea807",
+        "dist/index.d.ts.map": "8e85346b6b7eb55a3eb78181bcdcb0afdd55680fb1a5e449e9100e262b371d95",
+        "dist/index.js": "c08f6c5b9aa41319be992c69296805d12d6e560b25358879121e7f52e600358a",
+        "dist/index.js.map": "e90cca58c3747e98e6d2056deb55e87c317afd5367559d5c0270eb30e8b3f161",
+        "dist/keypair.d.ts": "547421b601163658029f98bc0299f05945d5c22464b37f5ddda817d5d34e4727",
+        "dist/keypair.d.ts.map": "b7c271eedce05737045c3952a2b679750b721700ab4430f215fbd01aadf08d4b",
+        "dist/keypair.js": "fed432e190ad656df7f86be19f4caa5c5674f79a7cbcf5b33ad3c612a54b11b2",
+        "dist/keypair.js.map": "f93958ef3cb264bf8b2ad9b7aea80533f8b4dbd244423dd709e3ebeb073daa6c",
+        "dist/oauth.d.ts": "c0abf43c0b65581b9efd12334af80a000c81b7fe6c8d0bf3ca2595a9d6e611fb",
+        "dist/oauth.d.ts.map": "ebf2c261a66c45f60fa2eac12c3014c368340d71773e62b2897a487e964085a9",
+        "dist/oauth.js": "e6c4dbffbb83ae11d7f9b1b8661dbbdd413bd1d987da47cbb87b5973ecc83028",
+        "dist/oauth.js.map": "26686b4642f47ec5fda7ab980fbbf9e354bf53bca6f55ded75f890ad6ef891d7",
+        "dist/signer.d.ts": "579ff4a84589fd5f54869ad2ebf60823bc9bd8238384bcb082f1f609c2d28e47",
+        "dist/signer.d.ts.map": "004a4e8c99318f51696d820128ccc703d737f39ff8b5910a62b8c5b0496c088e",
+        "dist/signer.js": "f4ae2fea63f03e9df9b1463e87ec503cc002b835657f45c0576c8a77c69a1bad",
+        "dist/signer.js.map": "fe9970be281ca599ff78e53cd0d77d8fc7f710b225c1e89492e9a6faf7a1c9cf",
+        "dist/storage-portability.d.ts": "50556a5096b83d3dfb9131dc641463fe0379cbb447b6f0e073124951e4857aa6",
+        "dist/storage-portability.d.ts.map": "8d3e92a87e54d7d23a5e7cb516d420dce45927265c12eaf94c225771f7b293f1",
+        "dist/storage-portability.js": "5218ed28f6bdb8f8c92f110e2abaa258a144e18a1dd0567382390ccb38956ac7",
+        "dist/storage-portability.js.map": "0f1fa2f6088976354032b12a208c65680f135752d7a5ec90261f0863e024194e",
+        "dist/storage.d.ts": "f3ab1ae96ff09e88b996970e5415aa7cb1ddd17bb74da453fbf6eb70324eff2b",
+        "dist/storage.d.ts.map": "a8da18af2d4d6fbbce2be6d1969573e60b8c5bf32a9fd9b0afd98dea22e27e6a",
+        "dist/storage.js": "4195249520972ac4afd56f628ecfd3d81a3a496a891da265088124ed5edf5745",
+        "dist/storage.js.map": "71cba77b7d68bccc2f18518a93f48fb199cadd6b9e8a3e119a4c9a6767641447",
+        "dist/types.d.ts": "7d5b8d2ac1e7ea3c561b95b71cace61ba758879f978ce71091158556dc943d3b",
+        "dist/types.d.ts.map": "7e6158b39764f83bde47bda1e6052351eb1b48e2bbeff438069baece2d796059",
+        "dist/types.js": "d0b13da821d19e2bfa2885c0ca2173c57a3581fde221f6cd1553bce4c63e2a48",
+        "dist/types.js.map": "e9906647df2b6420796d6943a7e8d2375d277f5a4070b7109bf4d531d7e85154",
+        "dist/wasm/mnemonic_core.d.ts": "3c29a0b7599893c81175b92133558a502f1ef9a12b4947759ca7802743179bd5",
+        "dist/wasm/mnemonic_core.js": "3bd6a5ba8214c6ff159168d91e0f8e45c1be10daf1d81a99207311834658f07e",
+        "dist/wasm/mnemonic_core_bg.wasm": "9eeebab9ff031670f151521ef0d8ddeface8d24b2852e36a81a0f61a71dae12b",
+        "dist/wasm/mnemonic_core_bg.wasm.d.ts": "8d6784a808cb816597ac70f7c97bb735c02e1f53d3248eafb2fb6a3718cb6edf",
+        "dist/wasm.browser.d.ts": "84ffb4f6fb3871e2717edc26fd7afc95811b8add0995d375b6e43919ff90a477",
+        "dist/wasm.browser.d.ts.map": "e1b6e397c3f6b798b102709f1b68888a86770e5ee05eb547d91a83d95f632a16",
+        "dist/wasm.browser.js": "c6d7f1219fc0d3ab77c21ffd8c36cdb2292da6f2ac76a63ea9a186c2d5be5399",
+        "dist/wasm.browser.js.map": "858c45398dba166c62c227425dc74b16e14e554b561c01d94af00c271f5ea554",
+        "dist/wasm.d.ts": "fcd3250699234f1801abfeac7c2e5bb52c2fe5742e97952850d9f3c3eec64ab8",
+        "dist/wasm.d.ts.map": "73d80a359a1827aaa437176dbe0d30cf13e969ad50450072318576453486e5ef",
+        "dist/wasm.js": "0c95495d705395a3d0b91e9322c95cf110f23ddb7d2bc7d627281d2269802d99",
+        "dist/wasm.js.map": "8ef721eaa9012035d5194ba006d7096d6171bd076cf9f9ea1f44464af1594380",
+        "package.json": "b29dcf8b0cf9089c62cbdbd8e54da588dd1804f6aaeeda1346be8dd6e669cd7c"
+      }
+    },
+    {
+      "name": "@mnemonik-xyz/cli",
+      "version": "0.3.0",
+      "filename": "mnemonik-xyz-cli-0.3.0.tgz",
+      "sha256": "acfe1984431b67f26d4891dc59908aee9c05a445c42d639c0ae985849c807215",
+      "npm_integrity": "sha512-G/sTyWfcEVtyiHysUvbH1S5hLjZJLbebe22Nbg0/KtFlltDyKH/P1bb8v/+o+QCTvXrI2tj+Amf8d1e2cI273Q==",
+      "installed_files_sha256": {
+        "README.md": "9eecb7077b3dfb774cde93ef0e8a62b8a16a9efefd691a712fd266e9be8e936d",
+        "dist/bin/mnemonic.d.ts": "43c339ec040153f658cbd7aa4120dd05d0f49884bd3d7b55c804bbcf59c7ef05",
+        "dist/bin/mnemonic.d.ts.map": "e63f3045d87ca863d752e885691d380f5ab5828d2548c89174397fe8148a00cd",
+        "dist/bin/mnemonic.js": "1c89b427f866de3dc7c12f6c37ac500d670ad0d2bdba91dfca8d44d371664158",
+        "dist/bin/mnemonic.js.map": "eb569d44471483a5fd2f24f5fa7da1e208b0680fb8d73b2a214114af49813921",
+        "dist/src/a2a-index.d.ts": "9a43a53de2c5ce27ae2318e7f887894db58e93a6096c59cc4fd787466d8e4ffa",
+        "dist/src/a2a-index.d.ts.map": "4291707304f27b0c7f59320b558ea88990602f3bb5f6135689ac905fbff9a323",
+        "dist/src/a2a-index.js": "0af5ba7723defc53e2b4e65c673fc53c6ea8a96fc6b39621f8dfee397a0ef888",
+        "dist/src/a2a-index.js.map": "202f4f72709f2ef0540c97c2c29553c5516346acc17f7d38ed899c82d3d2abd0",
+        "dist/src/commands/a2a.d.ts": "ebf7a81f14b8fd98d2c1ad889cdbe1bb029fb9a3b99edc73b1ae1897cae6a309",
+        "dist/src/commands/a2a.d.ts.map": "fbb80e83b8eea9b9a29eae0e50bccbde95faa88c28ed867be9cb89167b2526e8",
+        "dist/src/commands/a2a.js": "84e6aead46a88ab9f505a700923d4ab0f3ced5baf33d8295a32c64887320b479",
+        "dist/src/commands/a2a.js.map": "f8a29b76035168a34ce4e917d85c3f0429b12873aef45f7383206fe066414933",
+        "dist/src/commands/erc8004.d.ts": "c2ac00f6d46f81127a7d674211d002f421b4cb5c58a3f7cc62f7a93602c46a51",
+        "dist/src/commands/erc8004.d.ts.map": "082731fba25af995a6b3b8c9b2cf61b9023bf7613edf8442ffd22b28be0a03a7",
+        "dist/src/commands/erc8004.js": "4ee4cc00ad87d2a428b335bb4a5c5f56760466c6e2b0a71c7014f9afd8bb429f",
+        "dist/src/commands/erc8004.js.map": "c8414bf59c79ee8e8bde053e156b7eda7567cf6e3311c1f7eb2d07506c8012ea",
+        "dist/src/commands/grants.d.ts": "c1e7482b42c36b5669f4b3cfefeb091e6511358d0eb5461efcdb91f43c960c2d",
+        "dist/src/commands/grants.d.ts.map": "479d691b076537dbed02fea3c54f5f7f088f6ef0853b8b06621ab502ada1c51a",
+        "dist/src/commands/grants.js": "7afe9621e620686009f69b01b0f22abd6009cf8621ac0dfc76e4f0a6951e7542",
+        "dist/src/commands/grants.js.map": "9875040b05535f3c9a9d3a430d0792195eb323fcfb872af18e72915488d93313",
+        "dist/src/commands/identity.d.ts": "fd1558a0fba9ea6570280d4d4e6b602978424cd40ccb222d2d6f545f57c62216",
+        "dist/src/commands/identity.d.ts.map": "05086386a29eb5e91dca5b73f5683ca459fc047a8cdebce2b036e2a7c7008214",
+        "dist/src/commands/identity.js": "44e02ec91d3fbae1c6ae0efc89ef0dc3ef08a6c1e997545999197314dfed302d",
+        "dist/src/commands/identity.js.map": "8e3b6f93ecd2cd7c45e0a44ee62119500ad06907e19f36dd6bdc8a8edf95fe53",
+        "dist/src/commands/init.d.ts": "2facdc83d78a59279e9938fc936cac736e25cc432ed4c8ff90c4b45a7e73ed93",
+        "dist/src/commands/init.d.ts.map": "bb3e8a59772ecb7d63fb6b625024246c8f67d99f9164fdb8899b42bcef20da4e",
+        "dist/src/commands/init.js": "39268e900104015f384335a6259b4932744c9446667f80224c68ec244271abbc",
+        "dist/src/commands/init.js.map": "9f785dc3efb2c35f688fadad30cce0297ba923e9056c44bfcd43888b62eb2d51",
+        "dist/src/commands/login.d.ts": "e8fc97640190a2674d863135931740fa5f9443ce1a55d37a88e5c9654c434afb",
+        "dist/src/commands/login.d.ts.map": "7cb52f65fc0b7b016fa531bb92f46e80dd6eb306b84cf96b254444463c2e44dd",
+        "dist/src/commands/login.js": "cd65a0232fbb41607dcb1c39365a26492e3e36a4802a0f3407a7237ec31b772f",
+        "dist/src/commands/login.js.map": "964757b4c4ebc000b38ce0b9983aa0ad2695560780c600f06dabe02321243363",
+        "dist/src/commands/open.d.ts": "8928c1da798771a95c42488374121f9c991351215ed6514188c1fa910413ca61",
+        "dist/src/commands/open.d.ts.map": "68ee173cfddf68f16631b3f7e227f4486cef1eb443fc5ce591b4278669811e1c",
+        "dist/src/commands/open.js": "9e11978d3ce25158b74c6550962731a383bac833e31bd1ce27c33f9344a24336",
+        "dist/src/commands/open.js.map": "f53bde38c7d38891afef01e223147696ad938506d8912d783e1f953b96f97879",
+        "dist/src/commands/prove.d.ts": "01717bea7c8bc1dcb67d6efa6151a979909a9e6c369d99f28a82c9432b5e3ded",
+        "dist/src/commands/prove.d.ts.map": "918df309417452e185a47d22d26e20dd6413d32c59b899dff92baaef461f16ac",
+        "dist/src/commands/prove.js": "d3c5382be29b5267a64895d187acc84286fee88d3c4e563bedfa7139f01f8645",
+        "dist/src/commands/prove.js.map": "0ac12c2befd2e6b56ebcd3bbb79368e0257a7775386b444267c90a2c0d023028",
+        "dist/src/commands/recall.d.ts": "6a1d8890180246dd12ff1cf4bffab1447e3a63ac4d910fd12bf756567829edc4",
+        "dist/src/commands/recall.d.ts.map": "4934a7aa9de9e6729409ae077f63c960ded8242d53fed5917b5ea2a4baa3dd70",
+        "dist/src/commands/recall.js": "d7edbc3cc33ddc2a35e3bca4eb31e5dee8176c8dec8e63755c46788b7892b844",
+        "dist/src/commands/recall.js.map": "42501fe1634e18c643ae1fc06ada07f6ee4fbf763f42c4ca14c2b7df1d0c3645",
+        "dist/src/commands/share.d.ts": "504cad8691b5690e4f13952a3800e77b0379014f748a19a6213d1f112e817d74",
+        "dist/src/commands/share.d.ts.map": "7bc258c5592fdc0e4a805e9c981706cf231557eac2f7f4781cce015a9d481910",
+        "dist/src/commands/share.js": "bc124a0b585edff842514759a96368f3f9b2e212916afdd88fb55e5eb7803fb4",
+        "dist/src/commands/share.js.map": "38c35eb7b8a29754640ac3433fe212a1b7e70c3f92fa2d0a59138d1da4a60338",
+        "dist/src/commands/sign.d.ts": "2a9e50b4506fd226f5eafd35d1ec50cbf3e70575abdecdd03872d8d15d9f322b",
+        "dist/src/commands/sign.d.ts.map": "ce69471a31fc56545dfbbedcabaef21aa6d7b81b2530d4ce947ed250aad8ec36",
+        "dist/src/commands/sign.js": "76bca4abc97d6e8f76354731290d0a4021874f6355838fa52a3dcf522c986e03",
+        "dist/src/commands/sign.js.map": "9e82dac8726706fecd5d93517db2ea4ad9ff4e44bb08d913c095d29cc14fdc4c",
+        "dist/src/commands/verify.d.ts": "f6f7d305f542ee66f107358380e9663fee047da40bba93bd43a0ddf2c193eeb0",
+        "dist/src/commands/verify.d.ts.map": "fe7ea53cd2f0fb21ccb8cb33d49409f4dee0efe55c0ca6ce8d6b47383ec9d176",
+        "dist/src/commands/verify.js": "3249260335d39e6f608daa0d96288bdcb8b931d16942fdd336932ae6b00b4f66",
+        "dist/src/commands/verify.js.map": "4c52c29cbde59938a5f2b43688eb06da43e6ffc9e9940a8a4d484760374132ff",
+        "dist/src/commands/whoami.d.ts": "ae3996d5ade1023361ec32f3a1f8451f09f139852a34d6f7e5bd59af01a17079",
+        "dist/src/commands/whoami.d.ts.map": "3053ffabf8866c981291fefa17da319689564692603cda60775d2757c8a2c1fb",
+        "dist/src/commands/whoami.js": "ec8cfa380708d87ea57532d88820a87dd94a94544a6be023eede9fac7902171c",
+        "dist/src/commands/whoami.js.map": "5e2689b08fba2c4d3106fc382fb250159e8e4d40d32035a1e55497e1213a8f48",
+        "dist/src/config.d.ts": "4284fcc55a3792dc88489c5ccc8523e232ce0401f52e9ab414ba8566eaa85308",
+        "dist/src/config.d.ts.map": "a5c789f48ebfb679044034e8c162b57eb91128ad8b97d58b7aa8b7ea4f4d314b",
+        "dist/src/config.js": "650f04b3e4a70cf18098a98baccea2f6342da3bfb48f47fd02331f205ce50159",
+        "dist/src/config.js.map": "39c0dca9b0b2c43f72c7b924bdd2c366c293174a8997d8eb1225ec47d04e2337",
+        "dist/src/errors.d.ts": "b36e0309f8b426f6308b7e4acdca8ef3de79688366cefb1389471909b4fcc400",
+        "dist/src/errors.d.ts.map": "c9ccfe499b608e10bd24630093b082b47db5ab1a536bf5d0dedcbb151cb98ad6",
+        "dist/src/errors.js": "72e10ccf727d094adb0b02321fa1c9ab78063f5d3647ad391697229baca9130a",
+        "dist/src/errors.js.map": "d083bbc37cfffc8739c9cb4e34f64af984aa4610d65db81497822677c0653790",
+        "dist/src/identity/ensure.d.ts": "120b8a2dbc22c46e38ef70efb99f997cffde06db2359561274b43c311cb85c77",
+        "dist/src/identity/ensure.d.ts.map": "dd75f2c7f45b5a584805770543daff5215595762c920b3774e92c87bbd8000cc",
+        "dist/src/identity/ensure.js": "e92146a13c8d47e1dcecc568209bc2ba85b26536da8f8915ffdaee6e0966e0d0",
+        "dist/src/identity/ensure.js.map": "666627974f29f2802bba7b7842608ef2af2c86db8c752cde46c2114fbe814ce9",
+        "dist/src/identity/keystore-file.d.ts": "7b38ed51d2a4ef1a98b886e22f87de8d98f504ae4abf3bc198aa628690a9a9a9",
+        "dist/src/identity/keystore-file.d.ts.map": "3fe80a68c504fff6a5776d33d26c4394d69f61d1e287a92dacf0a7480ced6910",
+        "dist/src/identity/keystore-file.js": "379b5b847a9e2fbc79c959594da2f3dab9c1d1ed372f0ae95325e106f1ad31cd",
+        "dist/src/identity/keystore-file.js.map": "5682381cb9fed561fd5d5945ca47800cfcf657ef37d7e7c970af975c2208a4cf",
+        "dist/src/identity/keystore-memory.d.ts": "b55bc9cc17a8a5f8b5d427acd0d2222695d4e3c1924aa92f7e26838c45ab655b",
+        "dist/src/identity/keystore-memory.d.ts.map": "67756bddd89e71d7b3f486bf8578421f104d7494fb83950fc6668ec292c10750",
+        "dist/src/identity/keystore-memory.js": "7d7841546de8acc031f7fb6d19b5b2fed97ae099288b2cad2ef50fac281579c7",
+        "dist/src/identity/keystore-memory.js.map": "318bb5d41a1c169d381c4a2bf37ff4738c4a673779ac80fa8368ad9a4e0d1207",
+        "dist/src/identity/keystore-os.d.ts": "05492e405b82ee0a7b73e11b64edf00203796e8261968a5733f07372aef18000",
+        "dist/src/identity/keystore-os.d.ts.map": "f8719ce86fe2a927a1b2d39168d661049b1dc74c5218a8baf588d860fb3afac6",
+        "dist/src/identity/keystore-os.js": "5c49735db9b0f3d5de7ffb9f8be1060543602b8db8091bed2e181e46d6580392",
+        "dist/src/identity/keystore-os.js.map": "346e3ca1e6598436e9da44164b2761940656a09eeaa276255b64715097df3be0",
+        "dist/src/identity/keystore.d.ts": "3e799799ea643477a87f2a42dfc55d2bda7d2be036e60917643170def1241d75",
+        "dist/src/identity/keystore.d.ts.map": "7216dc33dc837a5c25a4a5d3fa82c3226a169c213235383d36b16e4371c3d4d0",
+        "dist/src/identity/keystore.js": "7a6a5e1bbe33dac3f54dcb19a1bd6028bad4b0f8be4b962cf64df72f17062926",
+        "dist/src/identity/keystore.js.map": "174cbac4a1bdb38558ca266c10dd5b8599708282572fe99e08ba5b62c401b75a",
+        "dist/src/identity/lazy-signer.d.ts": "878efdbd87e383dd70b81322aa37031a3ff82d8916c128e6144a9e1a9c11e651",
+        "dist/src/identity/lazy-signer.d.ts.map": "f8663dd6ce20f779b6f252e4143276db8c8ac71f19644af76ee1b171a939ae58",
+        "dist/src/identity/lazy-signer.js": "8bff53262ef328a11113a7379b9aff0d505e2cc4fb9cdb058a4ba569c9cd2da6",
+        "dist/src/identity/lazy-signer.js.map": "bd5344db4f3ee0493d1d0b453040e30cfca46eb8e6c3c7300f9ba808e79f4816",
+        "dist/src/index.d.ts": "f667f6b1d66ba55f0dcd27f5ff050063fecfe289bad00e8c5d48344a775c1439",
+        "dist/src/index.d.ts.map": "04a090e9708bb9af89837fd811f712ca70032be2c246c7d3b8f6a01a25090f0d",
+        "dist/src/index.js": "fa68a61bc8cd01a1bb6c6eaab2f5ebf3155045315beb2b53b4c670b95b602bdb",
+        "dist/src/index.js.map": "48e3aa815b2df9048fe3dbdfea1dd1ab29c9c81a3d69781ded53bb6fed15cca2",
+        "dist/src/output.d.ts": "640583ff9732194b52210ef04073c101fc5c22f797224e8ddf82d466f4cdc9fe",
+        "dist/src/output.d.ts.map": "ae56551f9c758a8368c60bc35703aa63043287e6ed49a305a95fc8260b287728",
+        "dist/src/output.js": "b4baa5dc4608ec0e1f094dee861a96ce78e4d544f809faa9b543bf9213009e81",
+        "dist/src/output.js.map": "2e0cacd63e148dd5c1e522a533dd4b5aaff8e7de999349de34f1324db07b0914",
+        "dist/src/preflight.d.ts": "66463f8473d1c32aff7639e1b8faba995a5a106aa6419de73950b870457c4cc5",
+        "dist/src/preflight.d.ts.map": "f71f66999116b6484fea71b057990d079ddfec6071a4c98682f205a5c2c80332",
+        "dist/src/preflight.js": "57a400a037722febab8e6b35b876053d60295d1a26c37c9b405bae7053418070",
+        "dist/src/preflight.js.map": "a67da4b4a9e8fc6273a452944ab8533552e831178faa9eb92bbdf1b1934a9866",
+        "dist/src/sealed-store.d.ts": "26e6f9ba08c7f28f32185af3e97c152c5025f8714643fef0c0ecddbc8a12364a",
+        "dist/src/sealed-store.d.ts.map": "7b981348ff0dca5a4c5fe7d88865e1beaf6a4a4b1639347c09400f3bdf1556c4",
+        "dist/src/sealed-store.js": "f44d08ede03e8be872b1a71d58d46fa6b6c32ddb976ac2a8d090773eb0a77365",
+        "dist/src/sealed-store.js.map": "5ff95bf4b57d8398a21391cfdeb981f0c0e2bd381768998dcb450eb6623298f4",
+        "dist/src/session.d.ts": "4e03c0d3bb48b3ff79d8a3d06da6f28dc73eb3904f0dd599693557b3219330b5",
+        "dist/src/session.d.ts.map": "6930e644138ba79f2f86f50ccfb7430f02e1f091848747646d0a4f6f83a1fd19",
+        "dist/src/session.js": "975277c84f42a92875e9368d1ae37e92cc5f27823e2dbd1e097d9373947b155a",
+        "dist/src/session.js.map": "33b8e3a41ceb31bdc4574185d3b06b75f08b98bd2739f2403da3b522a88cbc44",
+        "dist/tsconfig.tsbuildinfo": "7dec1b5180c04daf087f37ee50fab5157e4c33ad4d8ce4a9c82ad29ca7f84413",
+        "package.json": "8fe9d3d5f8ff7460607204ef2d776ca9a66f74748fb5cd3da0ffd7c806337cec"
+      }
+    }
+  ],
+  "checks": [
+    {
+      "name": "clean_source_sdk_wasm_cli_build",
+      "status": "passed"
+    },
+    {
+      "name": "isolated_tarball_install_and_cli_sdk_resolution",
+      "status": "passed"
+    },
+    {
+      "name": "installed_cli_offline_save_fresh_process_open",
+      "status": "passed"
+    },
+    {
+      "name": "installed_sdk_backup_restore_migration_operator_switch_and_failures",
+      "status": "passed"
+    },
+    {
+      "name": "shipped_package_files_unchanged_by_drill",
+      "status": "passed"
+    }
+  ],
+  "limits": [
+    "One clean build with recorded toolchain, not a bit-for-bit reproducibility proof.",
+    "Dependency installation and build tools may use the network; artifact/operator services in the drill are local mocks.",
+    "SDK and CLI are installed tarballs. MCP is the source test harness, not a deployed or published operator.",
+    "No registry publication, live payment, live provider retention, deployed rollback or A-17 release acceptance."
+  ],
+  "source_revision": "b0a3f11778c2a33271d39b5a448e39240d2de833",
+  "source_archive_sha256": "3a0e67ffdf909320af17c27338bd9332bb824028260ab2ad0d8d82e879346427",
+  "source_tree": "992de4466ad1d7ab5d0795718e5d72743be32ad0",
+  "lockfiles": {
+    "npm": "8f62646a6940cc2ea88028f99613af4c9f19284d4dc84a4dc9db34812b03790f",
+    "cargo": "5a8ccc92f7b99ca709760cd7ec3d2d5b6b697ace4239d87ab4d6ef2efd506dbb"
+  },
+  "toolchain": {
+    "platform": "darwin",
+    "architecture": "arm64",
+    "node": "v20.19.1",
+    "npm": "10.8.2",
+    "rustc": "rustc 1.98.0 (88d9e12ae 2026-08-18)\nbinary: rustc\ncommit-hash: 88d9e12ae178fab0fb5cc050a94da85685d449ea\ncommit-date: 2026-08-18\nhost: aarch64-apple-darwin\nrelease: 1.98.0\nLLVM version: 22.1.8",
+    "cargo": "cargo 1.98.0 (797e8a9bc 2026-08-05)",
+    "wasm_pack": "wasm-pack 0.14.0",
+    "wasm_opt": "wasm-opt version 129"
+  },
+  "commands": [
+    [
+      "npm",
+      "ci",
+      "--ignore-scripts",
+      "--no-audit",
+      "--no-fund"
+    ],
+    [
+      "npm",
+      "run",
+      "build",
+      "--workspace",
+      "@mnemonik-xyz/sdk"
+    ],
+    [
+      "npm",
+      "run",
+      "build",
+      "--workspace",
+      "@mnemonik-xyz/cli"
+    ]
+  ],
+  "installed_lock_sha256": "6d45b4da08631068b390840aef44bc3d303a672f8dbfffdaa71cee4a7b431dbe",
+  "installed_dependencies": {
+    "node_modules/@mnemonik-xyz/cli": {
+      "version": "0.3.0",
+      "integrity": "sha512-G/sTyWfcEVtyiHysUvbH1S5hLjZJLbebe22Nbg0/KtFlltDyKH/P1bb8v/+o+QCTvXrI2tj+Amf8d1e2cI273Q=="
+    },
+    "node_modules/@mnemonik-xyz/sdk": {
+      "version": "0.3.0",
+      "integrity": "sha512-HGpM58fwoaQv1XVqa2WeTGTBH3L85QHXNZg1E73ixJB868PN6Tvpz1GEdL/qW3I2VA7Zjo+5ocKAJVtrQA+FnA=="
+    },
+    "node_modules/@napi-rs/keyring": {
+      "version": "1.3.0",
+      "integrity": "sha512-WrOw/bcXm0f9qHkumlT1QlArXSTWqaY9sunsDpOk+yCCorCKMxvWT/a3xko4EYHVdeZoh00yI2TydXn6eyICDA=="
+    },
+    "node_modules/@napi-rs/keyring-darwin-arm64": {
+      "version": "1.3.0",
+      "integrity": "sha512-pl76hJvdYUBn6I24bXiOBMA9nbDapo3I5B+f3OorjDU4dUMSypXeKbOVehJe8fhgTiH24flMyTS3aAIy43xegQ=="
+    },
+    "node_modules/@napi-rs/keyring-darwin-x64": {
+      "version": "1.3.0",
+      "integrity": "sha512-YcJtEV5LA3cvA4z3BurgxH5IhTsW1JfIvcAAcqcecwk06Si9F9NqkxbZVIfDwQ8oRHgaBmT3zZJnLAotCrVahw=="
+    },
+    "node_modules/@napi-rs/keyring-freebsd-x64": {
+      "version": "1.3.0",
+      "integrity": "sha512-vlLf31TGhfRAaxLDBhg8b89ss0HHD/lyNmL5F3UjSaz5CUXElsJmKYq9fqA/B+cZKUEUcLHHGhF0I/CqcFdaVw=="
+    },
+    "node_modules/@napi-rs/keyring-linux-arm-gnueabihf": {
+      "version": "1.3.0",
+      "integrity": "sha512-KiWdMMu/Inz/bHHIAGrnF7r54FZDYXuHO6UFF/rhIrshUsxbMG1Rl9lEymNtqqsVo927G0VYcb02FzWQ3iBQRQ=="
+    },
+    "node_modules/@napi-rs/keyring-linux-arm64-gnu": {
+      "version": "1.3.0",
+      "integrity": "sha512-eyKGpY40lm9Jvs1aD294XRH4y7+TlJM0YVAryZeXA6TX0mb4gMkxVXwSQv7MCwgah7raeUd0dKUb4BPAYIgcMg=="
+    },
+    "node_modules/@napi-rs/keyring-linux-arm64-musl": {
+      "version": "1.3.0",
+      "integrity": "sha512-iIK6JWHXAJqDrEyLY3TmswwloVyt2vj+04TZnew+uSJ9gnDO8EwRbp3/iw3LpWaXiDO7VomGO6y8I0Id8uBZSw=="
+    },
+    "node_modules/@napi-rs/keyring-linux-riscv64-gnu": {
+      "version": "1.3.0",
+      "integrity": "sha512-/PGqrwn6EwgtK6vccASSXJRfOSP4vN1F4ASsIQ+7MdrK6hNvAJ1FZPrIuD5gGGdxezo3F++To2Wq7DbuGIeuNQ=="
+    },
+    "node_modules/@napi-rs/keyring-linux-x64-gnu": {
+      "version": "1.3.0",
+      "integrity": "sha512-2PDK1WKWTu9lBGq9VvNEkSlQD3O7YwVpmnyN2M3cy4v7NJ/8gDMd9GXv3G+FVXN13uhp4gnnPBS+ScefmEeD2A=="
+    },
+    "node_modules/@napi-rs/keyring-linux-x64-musl": {
+      "version": "1.3.0",
+      "integrity": "sha512-oJ2HkX8YUo46QBkn0pG+HuIKQNqr523q6vBobCn+P95s4C4K6/kLBqHY/1bg5J4ap31DzsznhnFKcfBNBsjCnw=="
+    },
+    "node_modules/@napi-rs/keyring-win32-arm64-msvc": {
+      "version": "1.3.0",
+      "integrity": "sha512-tOd3c/uAaeoE4ycVlmAdSvygz0Zt3zdca6Y7gokBeIbaRDWpjDIUOpU3MvML59XAaqyuKGsVVu0F/DZb1lHPmw=="
+    },
+    "node_modules/@napi-rs/keyring-win32-ia32-msvc": {
+      "version": "1.3.0",
+      "integrity": "sha512-sPSqeAFZMGqP1R++M2JTza7GQJJ/TpCo6JU6Vcd4jnebvOaEDs9b7eipakU1PJdSvhpC2yXMCNRk9gXfrhuwHQ=="
+    },
+    "node_modules/@napi-rs/keyring-win32-x64-msvc": {
+      "version": "1.3.0",
+      "integrity": "sha512-4DnCWXwDc0HRKwyRlG5y0VhKZW2tNRQfKKfyj6IX/KWfDNyq9hn4n+GL1auyDcOO/v8PwnhmYo2+rOOqCkvvOg=="
+    },
+    "node_modules/@noble/curves": {
+      "version": "1.9.7",
+      "integrity": "sha512-gbKGcRUYIjA3/zCCNaWDciTMFI0dCkvou3TL8Zmy5Nc7sJ47a0jtOeZoTaMxkuqRo9cRhjOdZJXegxYE5FN/xw=="
+    },
+    "node_modules/@noble/curves/node_modules/@noble/hashes": {
+      "version": "1.8.0",
+      "integrity": "sha512-jCs9ldd7NwzpgXDIf6P3+NrHh9/sD6CQdxHyjQI+h/6rDNo88ypBxxz45UDuZHz9r3tNz7N/VInSVoVdtXEI4A=="
+    },
+    "node_modules/@noble/ed25519": {
+      "version": "2.3.0",
+      "integrity": "sha512-M7dvXL2B92/M7dw9+gzuydL8qn/jiqNHaoR3Q+cb1q1GHV7uwE17WCyFMG+Y+TZb5izcaXk5TdJRrDUxHXL78A=="
+    },
+    "node_modules/@noble/hashes": {
+      "version": "2.4.0",
+      "integrity": "sha512-X5XaVWZIBCT7HHZGm5I7ZQXDwLG+bGXuSrMQAW+7Zvl87h1kmc1ZB1VSRJcpUfoUrGQp4Fkoxm5kZ+Ms+aW+eA=="
+    },
+    "node_modules/base-x": {
+      "version": "5.0.1",
+      "integrity": "sha512-M7uio8Zt++eg3jPj+rHMfCC+IuygQHHCOU+IYsVtik6FWjuYpVt/+MRKcgsAMHh8mMFAwnB+Bs+mTrFiXjMzKg=="
+    },
+    "node_modules/bs58": {
+      "version": "6.0.0",
+      "integrity": "sha512-PD0wEnEYg6ijszw/u8s+iI3H17cTymlrwkKhDhPZq+Sokl3AU4htyBFTjAeNAlCCmg0f53g6ih3jATyCKftTfw=="
+    },
+    "node_modules/bundle-name": {
+      "version": "4.1.1",
+      "integrity": "sha512-DdH81/zPLVS11EUgWq3tEu/xn+EzljlMYooDNdzWEnFha3R3NBMpMV1UqYIpjYHV/SgpFKMIX1Oh7o06SjM/oA=="
+    },
+    "node_modules/commander": {
+      "version": "14.0.3",
+      "integrity": "sha512-H+y0Jo/T1RZ9qPP4Eh1pkcQcLRglraJaSLoyOtHxu6AapkjWVCy2Sit1QQ4x3Dng8qDlSsZEet7g5Pq06MvTgw=="
+    },
+    "node_modules/default-browser": {
+      "version": "5.5.1",
+      "integrity": "sha512-m1pAzaJgZ/gssEqlOhJkPJp8Xly7QyW6xcrkUa2KKcDeDSEMP7X8xipU3snUcfisTQx0w1AGae+9UtJSfVnXGw=="
+    },
+    "node_modules/default-browser-id": {
+      "version": "5.0.1",
+      "integrity": "sha512-x1VCxdX4t+8wVfd1so/9w+vQ4vx7lKd2Qp5tDRutErwmR85OgmfX7RlLRMWafRMY7hbEiXIbudNrjOAPa/hL8Q=="
+    },
+    "node_modules/define-lazy-prop": {
+      "version": "3.0.0",
+      "integrity": "sha512-N+MeXYoqr3pOgn8xfyRPREN7gHakLYjhsHhWGT3fWAiL4IkAt0iDw14QiiEm2bE30c5XX5q0FtAA3CK5f9/BUg=="
+    },
+    "node_modules/is-docker": {
+      "version": "3.0.0",
+      "integrity": "sha512-eljcgEDlEns/7AXFosB5K/2nCM4P7FQPkGc/DWLy5rmFEWvZayGrik1d9/QIY5nJ4f9YsVvBkA6kJpHn9rISdQ=="
+    },
+    "node_modules/is-in-ssh": {
+      "version": "1.0.0",
+      "integrity": "sha512-jYa6Q9rH90kR1vKB6NM7qqd1mge3Fx4Dhw5TVlK1MUBqhEOuCagrEHMevNuCcbECmXZ0ThXkRm+Ymr51HwEPAw=="
+    },
+    "node_modules/is-inside-container": {
+      "version": "1.0.0",
+      "integrity": "sha512-KIYLCCJghfHZxqjYBE7rEy0OBuTd5xCHS7tHVgvCLkx7StIoaxwNW3hCALgEUjFfeRk+MG/Qxmp/vtETEF3tRA=="
+    },
+    "node_modules/is-wsl": {
+      "version": "3.1.1",
+      "integrity": "sha512-e6rvdUCiQCAuumZslxRJWR/Doq4VpPR82kqclvcS0efgt430SlGIk05vdCN58+VrzgtIcfNODjozVielycD4Sw=="
+    },
+    "node_modules/kleur": {
+      "version": "4.1.5",
+      "integrity": "sha512-o+NO+8WrRiQEE4/7nwRJhN1HWpVmJm511pBHUxPLtp0BUISzlBplORYSmTclCnJvQq2tKu/sgl3xVpkc7ZWuQQ=="
+    },
+    "node_modules/open": {
+      "version": "11.0.4",
+      "integrity": "sha512-++Zlftm0kVLPmzC06t6epuWmcRMDbI4z5P3NNX979WA/k23+NtSOynEGzsVfZwguKw2mi5umVgnBlJQMwRz4Pg=="
+    },
+    "node_modules/powershell-utils": {
+      "version": "0.2.1",
+      "integrity": "sha512-C+y9x90UElAddDZmV4qOx9W53B61PO7cIqWz2dQsWlwswuq4mr8NEwytdGKboYbQlGZ3awrkTeNvcZiZNHnQ8A=="
+    },
+    "node_modules/qrcode-terminal": {
+      "version": "0.12.0",
+      "integrity": "sha512-EXtzRZmC+YGmGlDFbXKxQiMZNwCLEO6BANKXG4iCtSIM0yqc/pappSx3RIKr4r0uh5JsBckOXeKrB3Iz7mdQpQ=="
+    },
+    "node_modules/run-applescript": {
+      "version": "7.1.0",
+      "integrity": "sha512-DPe5pVFaAsinSaV6QjQ6gdiedWDcRCbUuiQfQa2wmWV7+xC9bGulGI8+TdRmoFkAPaBXk8CrAbnlY2ISniJ47Q=="
+    },
+    "node_modules/tweetnacl": {
+      "version": "1.0.3",
+      "integrity": "sha512-6rt+RN7aOi1nGMyC4Xa5DdYiukl2UWCbcJft7YhxReBGQD7OAM8Pbxw6YMo4r2diNEA8FEmu32YOn9rhaiE5yw=="
+    },
+    "node_modules/wsl-utils": {
+      "version": "1.0.1",
+      "integrity": "sha512-c16PKLIRxBYpR3jSWsdS7SFp0COm5SOQdiFjY818dYFHJbMGuLBszpF07LBWmOS1uzrHa9VGdynsEgoeKy0oOQ=="
+    }
+  },
+  "harness_files_sha256": {
+    "packages/sdk/scripts/test-migrated-a2a-e2e.mjs": "6edfcd76b04efbd691a3b9c075ccca1056422a2e541b57ec882e5787160405fa",
+    "packages/sdk/scripts/research-crypto-failures.mjs": "6368401d158173785dfea91c55c0bb11185e13b907845fff7cbc262906d4c372",
+    "packages/sdk/scripts/research-discovery-failures.mjs": "d31d1691387ad3541cdf793106b5a74848a1125fd8967964c9829560a9a25476",
+    "packages/sdk/test/fixtures/sealed-a2a.json": "b9c7e2617068f902bddb109c150fde17236314fdbf02906cdf6a2862ce64a00c",
+    "mcp/tests/integration_a2a_mcp_tools.rs": "a94837fc0f0b7a0aa7c3c9d10bf2bb487c2e241e720ab5929456dcde3f2170ef",
+    "mcp/tests/signed_ingestion.rs": "4586bbe436866c6b950e1a906f611a23090efc83f14c900fb34170cb57dac739",
+    "scripts/run-protocol-demo.mjs": "197b963deebf62240660b8cfc7b94934e2cc26dfda528ddf550dc62f9c26f620",
+    "scripts/render-protocol-demo.mjs": "c79e5c1ef65ca50639a0336268bfb27fd269714456c41200825f8174c7c0ee80",
+    "scripts/check-built-candidate.mjs": "f2878e332cff972dd661246afcb121d66539581317888a7994105d5ba5734f4d",
+    "mcp/tests/_helpers/delivery_harness.rs": "9ea679072a809c92e2f74eb92104287add3c027349ffc4499edc8cfe65687edd",
+    "mcp/tests/_helpers/mod.rs": "fb0c5527fa70520052db0dfc3813f0499d4d863866e4e1959fba8d67e4c7f877"
+  },
+  "recovery": {
+    "report_sha256": "651ff85c6420dd0d4a03c8a61910d1b3fee0a729b9cfa2f59fce2a6f6489a76d",
+    "controls": [
+      "changed_artifact_bytes",
+      "ciphertext_repaired_public_hashes",
+      "forged_index_tags",
+      "outsider_fetch_open",
+      "omitted_required_parent",
+      "index_outage_vs_empty",
+      "index_lag_known_locator_recovery",
+      "valid_fork_preserved",
+      "outsider_open_S",
+      "O1_shutdown_and_receipt_loss",
+      "original_storage_shutdown",
+      "receipt_database_read_only",
+      "settled_upload_failure",
+      "terminal_delivery_failure",
+      "lost_financial_metadata"
+    ],
+    "artifact_ids": [
+      "a2a:d145781bbb8510a31348d7e198079696b5d5647db7d03785c34aeab0bf3863a9",
+      "a2a:e3e7d49f089c20b4c3629870ebd3950df0ff2d2368dce2d8f2350693457c2187",
+      "a2a:2de9873a31bb7f2a274b0d5547809622d2f54830915be99cb6ae848af9ad3590",
+      "a2a:8ac97ee8c9926fc1e36f97ca8aed16d7f6afa8784c1541edb1d55eec23087b5a"
+    ]
+  },
+  "finished_at": "2026-10-02T13:29:16.154Z"
+}

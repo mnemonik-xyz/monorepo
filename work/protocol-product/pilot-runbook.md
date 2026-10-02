@@ -70,6 +70,18 @@ workspace source imports and stale build output cannot satisfy the drill.
 Do not call this a released-artifact A-17 pass until actual released artifacts
 are installed and exercised.
 
+For clean build provenance and installed SDK backup/restore, backend migration
+and operator continuation, use the [clean candidate recovery drill](../../docs/candidate-recovery-drill.md):
+
+```sh
+node scripts/check-built-candidate.mjs
+```
+
+This archives committed source, builds SDK/WASM/CLI in isolation, compares
+installed files with packed bytes and records exact toolchain/harness hashes.
+Its top-level report must pass. It still uses local operator/storage fixtures
+and unpublished tarballs; it does not clear A-17.
+
 The [candidate package probe](../../scripts/check-local-packages.mjs) packs
 already-built SDK/CLI output, installs both tarballs outside the workspace, then
 runs standalone identity creation, sealed local save and fresh-process open:

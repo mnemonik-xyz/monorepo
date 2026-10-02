@@ -1,10 +1,18 @@
 ---
-updated: 2026-07-15
-status: phase-1-staging-runbook
+updated: 2026-10-02
+status: historical-phase-1-staging-runbook
 scope: exact-payment-only
 ---
 
 # Paid anchoring staging operations runbook
+
+> Historical phase-1 procedure. Current client-prepared ingestion uses client
+> resubmission of original bytes and metadata-only new delivery records; it does
+> not require new Solana memos. The staged-payload/background-worker assumptions
+> below are not the current rollout procedure. Use the
+> [pilot recovery runbook](../protocol-product/pilot-runbook.md) and
+> [current payment retries](../../docs/artifact-payment-retries.md).
+> This document does not establish an available, configured staging deployment.
 
 This runbook is for the isolated Base Sepolia staging environment. It is not a
 mainnet launch procedure. Its purpose is to detect and remedy a *settled* exact
