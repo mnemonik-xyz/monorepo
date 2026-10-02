@@ -1,0 +1,45 @@
+{
+  "version": 1,
+  "kind": "unpublished_source_candidate",
+  "checkout_revision": "26a9550a89465f3bf00de2267d752037c82a625d",
+  "build_provenance": "prebuilt_output_not_rebuilt_by_this_probe",
+  "status": "passed",
+  "started_at": "2026-10-02T12:43:59.682Z",
+  "packages": [
+    {
+      "name": "@mnemonik-xyz/sdk",
+      "version": "0.3.0",
+      "filename": "mnemonik-xyz-sdk-0.3.0.tgz",
+      "sha256": "a2ec76f88152dd373b3583f0374a81116bab0e22d1f4887c0351251938d4f8fe",
+      "npm_integrity": "sha512-l1tV4+2zvYPSixCEaI8KnvYoadt+/envOERbEHv/XUGxQqfCZa6xNmwuYsWcw7bP9A+jyBuoCCacbKg5dR3pvg=="
+    },
+    {
+      "name": "@mnemonik-xyz/cli",
+      "version": "0.3.0",
+      "filename": "mnemonik-xyz-cli-0.3.0.tgz",
+      "sha256": "27d29d210d44428e9086d3b44396b5d266039e21bbfc8b17cfe54778b8d9eb04",
+      "npm_integrity": "sha512-YpN+CSeBzxVWsaClUhdbSxLDsds41tPbHtGYx+uNTnL2sphYe+NK+MklcKAgQ+Z8pGeRK8iqC1pjFH2QnvZAQw=="
+    }
+  ],
+  "checks": [
+    {
+      "name": "isolated_tarball_install",
+      "status": "passed"
+    },
+    {
+      "name": "fresh_standalone_identity",
+      "status": "passed"
+    },
+    {
+      "name": "offline_sealed_save_and_fresh_process_open",
+      "status": "passed"
+    }
+  ],
+  "limits": [
+    "Requires previously built SDK and CLI output; does not establish the build provenance of that output.",
+    "npm dependency installation uses the registry; identity/save/open commands reject HTTP fetch.",
+    "Local sealed save/open only: no hosted delivery, paid operation or published-release claim."
+  ],
+  "memory_hash": "70cd33ca48ccc3491086728f4625f66e79e033956f93c23f2ccafc2300b7f727",
+  "finished_at": "2026-10-02T12:44:01.357Z"
+}

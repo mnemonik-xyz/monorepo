@@ -200,3 +200,28 @@ The [release-evidence record](release-evidence.md) preserves endpoints, timestam
 Exit 2 from the probe explicitly means no positive pinned A2A fixture was established.
 Task 5 and existing A2A acceptance remain in progress. Known synthetic fixture pins, submission time/lag observations and configured live operator evidence are still required.
 No payment, deployment, package publication, customer outreach or issue closure was performed.
+
+## 2026-10-02 — Source-candidate release preparation
+
+Following merged PR #268 (`26a9550`), tasks 6, 8 and 12 move to in-progress
+preparation without changing dependencies or declaring release acceptance.
+Accurate source documentation, a repeatable local demonstration and a runbook
+can advance while task 5's positive live evidence remains open.
+
+The capability matrix separates source support from deployed/published support.
+The research handoff integration binary passed 11 tests; its static report viewer
+passed three tests and a Chrome visual check. The isolated candidate tarball
+probe passed install, standalone identity, sealed save and fresh-process open.
+Its recorded hashes were checked before archiving the report. These are
+unpublished prebuilt candidates: checkout identity does not establish build
+provenance, and local save/open does not establish hosted recovery or A-17.
+
+The CI image build for `26a9550` succeeded and published manifest-list digest
+`sha256:113a30acc0905ea1b1af36b06521540981d0b196eae078dde102a8ead6099348`.
+Build publication is distinct from deployment. The runbook preserves existing
+fabric/Caddy ownership and financial replay/key/checkpoint data across rollback.
+See [release evidence](release-evidence.md) for commands, reports and limitations.
+No implementation commit is assigned to this preparation before it is committed.
+No deployment, npm publication, live payment or customer outreach was performed.
+
+Preparation implementation: `355fa84` (research handoff, recorded evidence viewer, isolated package drill). Documentation in the following commit records the remaining release gates.

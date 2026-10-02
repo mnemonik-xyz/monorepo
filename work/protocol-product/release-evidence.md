@@ -95,3 +95,50 @@ A-8/A-9/A-12 have stronger local integrated evidence. Task 5 remains in progress
 The missing live input is an independently pinned synthetic A2A fixture plus supported staging/operator configuration and a recorded submission observation for lag.
 Positive live fetch, recipient recovery and independent deployed-operator continuation must be recorded separately from this local drill.
 The release package/install/rollback drill, customer evidence and task 14/#242/#233 closure remain separate.
+
+## Source-candidate preparation after PR #268 — 2026-10-02
+
+Baseline checkout: `26a9550a89465f3bf00de2267d752037c82a625d`. Demo, viewer, package probe and recorded reports: commit `355fa84`. Tasks 6, 8 and 12 are
+in progress; their dependencies and full acceptance requirements are retained.
+
+The [source capability matrix](../../docs/source-capabilities.md) separates
+implemented interfaces from released/hosted support. The [research handoff demo](../../docs/research-handoff-demo.md)
+records a synthetic R/S/V/W chain, separate collector/reviewer authors and
+restored reviewer continuation through O2. Its [recorded report](evidence/research-handoff-2026-10-02.json)
+contains public identifiers and checks, not private keys or plaintext. The full local
+integration binary passed **11 tests**. Storage, discovery and operators remain
+loopback services; the complete scenario failure matrix and live prerequisites
+remain open.
+
+The static evidence viewer passed **three tests** with
+`node --test scripts/render-protocol-demo.test.mjs`; a Chrome visual check also
+passed. Rendering an evidence report does not independently verify its original
+signatures or reproduce the underlying protocol drill.
+
+`node scripts/check-local-packages.mjs` passed isolated tarball installation,
+fresh standalone identity creation, sealed local save and fresh-process open.
+The [package report](evidence/source-package-drill-2026-10-02.json) has status
+`passed`; its recorded SHA-256 values were checked against the generated SDK
+and CLI tarballs before copying this evidence. Its `checkout_revision` identifies
+the checkout observed by the probe. The probe packs prebuilt output without
+rebuilding it, so that revision does not establish build provenance. Source
+package versions in the report do not establish registry publication. npm
+installation uses the registry; subsequent CLI commands reject global fetch.
+No hosted delivery, paid operation, migration or released-package A-17 pass is
+inferred from this local save/open check.
+
+[Image build 37006876302](https://github.com/mnemonik-xyz/monorepo/actions/runs/37006876302)
+succeeded for `26a9550` and published `sha-26a9550` and `latest` with manifest-list
+digest `sha256:113a30acc0905ea1b1af36b06521540981d0b196eae078dde102a8ead6099348`.
+This supersedes the earlier absence of a complete container build observation;
+it does not establish deployment or runtime/rollback compatibility.
+
+The [pilot runbook](pilot-runbook.md) distinguishes production's fabric/Caddy
+stack from standalone nginx, preserves financial replay state during backup
+and rollback, and lists candidate provenance and measured operational gates.
+Task 5 remains open for positive pinned live recovery/discovery, observed
+submission lag and separately deployed operator evidence. No deployment,
+package publication, live payment, customer outreach or issue closure was
+performed by this preparation.
+
+Additional checks: failed package-probe and failed demo runs invalidate older passing JSON reports; the focused demo rerun passed. Chrome exercised all four views at mobile width without overflow or JavaScript errors. `git diff --check` passed. `cargo fmt --all -- --check` remains failing with formatting differences across existing workspace files (including untouched bridge/core files); no workspace-wide reformat was included.
