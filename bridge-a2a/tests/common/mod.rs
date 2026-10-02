@@ -61,9 +61,7 @@ impl AttestationStore for InMemoryA2aStore {
             return Err(anyhow::anyhow!("injected write failure"));
         }
         let mut map = self.rows.lock().unwrap();
-        let existing_ctx = map
-            .get(attestation_id)
-            .and_then(|r| r.context_id.clone());
+        let existing_ctx = map.get(attestation_id).and_then(|r| r.context_id.clone());
         map.insert(
             attestation_id.to_string(),
             InMemRow {

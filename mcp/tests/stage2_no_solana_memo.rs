@@ -207,7 +207,9 @@ async fn anchored_write_makes_no_solana_rpc_call() {
             );
         }
         Err(mnemonic_mcp::tools::ToolError::Other(e)) => {
-            panic!("sign_memory failed with non-typed error (expected DeliveryNotConfirmed): {e:#}");
+            panic!(
+                "sign_memory failed with non-typed error (expected DeliveryNotConfirmed): {e:#}"
+            );
         }
     }
 }
@@ -247,8 +249,7 @@ async fn legacy_row_with_real_solana_tx_still_verifies() {
     let content_hash = signed.content_hash.clone();
     let cose_bytes = signed.cose_bytes.clone();
 
-    let legacy_sol_tx =
-        "LEGACY_SOL_SIG_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    let legacy_sol_tx = "LEGACY_SOL_SIG_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
     let legacy_ar_tx = "LEGACY_AR_TX_AAAAAAAAAAAAAAAAAAAAAA";
 
     // Arweave mock: GET /<ar_tx> → COSE bytes.
@@ -315,8 +316,7 @@ async fn legacy_row_with_real_solana_tx_still_verifies() {
     }
 
     // Call verify with mock SolanaClient + ArweaveClient pointing at the mock servers.
-    let solana_client =
-        mnemonic_core::solana::SolanaClient::new(&solana_server.base_url());
+    let solana_client = mnemonic_core::solana::SolanaClient::new(&solana_server.base_url());
     let arweave_client = ArweaveClient::new(&arweave_server.base_url());
     let embedder = Box::new(mnemonic_mcp::test_support::StubEmbedder::default());
     let compressor = mnemonic_core::compress::EmbeddingCompressor::new(8, 4, 42);
@@ -379,8 +379,7 @@ async fn restore_covers_memo_and_no_memo_rows() {
 
     let signed_legacy =
         sign_artifact(&artifact_legacy, &schema::MEMORY_V1, &kp).expect("sign legacy");
-    let signed_new =
-        sign_artifact(&artifact_new, &schema::MEMORY_V1, &kp).expect("sign new");
+    let signed_new = sign_artifact(&artifact_new, &schema::MEMORY_V1, &kp).expect("sign new");
 
     let legacy_ar_tx = "RESTORE_LEGACY_AR_TX";
     let new_ar_tx = "RESTORE_NEW_AR_TX";

@@ -8,17 +8,14 @@ mod common;
 use common::InMemoryA2aStore;
 
 use bridge_a2a::attest::attest_message_send;
+use bridge_a2a::config::FailureMode;
 use bridge_a2a::idem::IdempotencyCache;
 use bridge_a2a::lineage::LineageMap;
-use bridge_a2a::config::FailureMode;
 
 use mnemonic_a2a::recall_by_context;
 use solana_sdk::signature::Keypair;
 
-fn make_message_send_request(
-    message_id: &str,
-    context_id: Option<&str>,
-) -> serde_json::Value {
+fn make_message_send_request(message_id: &str, context_id: Option<&str>) -> serde_json::Value {
     let mut msg = serde_json::json!({
         "role": "user",
         "messageId": message_id,
@@ -77,8 +74,7 @@ fn message_send_injects_attestation_id() {
     assert!(!att_id.is_empty(), "attestation_id must be non-empty");
 
     // recall_by_context must return the same attestation.
-    let rows = recall_by_context(&store, ctx, None)
-        .expect("recall_by_context must not fail");
+    let rows = recall_by_context(&store, ctx, None).expect("recall_by_context must not fail");
     assert!(
         !rows.is_empty(),
         "at least one attestation must be stored under contextId"
@@ -86,7 +82,10 @@ fn message_send_injects_attestation_id() {
 
     // The message attestation row id must be in the stored rows.
     let found = rows.iter().any(|r| r.attestation_id == att_id);
-    assert!(found, "attestation_id from response must appear in stored rows");
+    assert!(
+        found,
+        "attestation_id from response must appear in stored rows"
+    );
 }
 
 #[test]

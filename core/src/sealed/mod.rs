@@ -22,7 +22,9 @@ pub use api::{
 pub use content::{
     decrypt_content, encrypt_content, key_commitment, pad_to_bucket, unpad, BUCKET_SIZE,
 };
-pub use keys::{x25519_public_from_ed25519, x25519_secret_from_ed25519, x25519_secret_from_solana_keypair};
+pub use keys::{
+    x25519_public_from_ed25519, x25519_secret_from_ed25519, x25519_secret_from_solana_keypair,
+};
 pub use wrap::{unwrap_key, wrap_key, WrapResult};
 
 pub mod stream;

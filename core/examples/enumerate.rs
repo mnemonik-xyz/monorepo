@@ -30,8 +30,8 @@ async fn main() -> anyhow::Result<()> {
         std::process::exit(3);
     });
 
-    let irys_url = std::env::var("IRYS_GRAPHQL_URL")
-        .unwrap_or_else(|_| DEFAULT_IRYS_GRAPHQL.to_string());
+    let irys_url =
+        std::env::var("IRYS_GRAPHQL_URL").unwrap_or_else(|_| DEFAULT_IRYS_GRAPHQL.to_string());
     let irys_only = std::env::var("IRYS_ONLY").is_ok();
 
     // Validate the pubkey decodes as valid base58.
@@ -72,8 +72,8 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // ── Enumerate via Solana memos ─────────────────────────────────────────
-    let rpc_url = std::env::var("SOLANA_RPC_URL")
-        .unwrap_or_else(|_| DEFAULT_SOLANA_RPC.to_string());
+    let rpc_url =
+        std::env::var("SOLANA_RPC_URL").unwrap_or_else(|_| DEFAULT_SOLANA_RPC.to_string());
     println!("Enumerating via Solana memos ({rpc_url})...");
 
     let solana_client = SolanaClient::new(&rpc_url);
@@ -97,7 +97,10 @@ async fn main() -> anyhow::Result<()> {
     println!("Results:");
     println!("  In memos, not in Irys  : {}", missing.len());
     println!("  In Irys, not in memos  : {}", irys_only_items.len());
-    println!("  In both                : {}", memo_txs.intersection(&irys_txs).count());
+    println!(
+        "  In both                : {}",
+        memo_txs.intersection(&irys_txs).count()
+    );
     println!();
 
     if memo_txs.is_empty() {
@@ -109,7 +112,10 @@ async fn main() -> anyhow::Result<()> {
         println!("Stage 2 (stop writing memos) is safe to proceed.");
         std::process::exit(0);
     } else {
-        println!("GATE: FAIL ✗ — Irys is missing {} items that memos have:", missing.len());
+        println!(
+            "GATE: FAIL ✗ — Irys is missing {} items that memos have:",
+            missing.len()
+        );
         for tx in missing.iter().take(20) {
             println!("  MISSING: {tx}");
         }

@@ -181,16 +181,15 @@ pub fn unwrap_key(
 
     let aad = canonical_aad(ct_hash, author_did)?;
 
-    let plaintext =
-        hpke::single_shot_open::<ChaCha20Poly1305, HkdfSha256, X25519HkdfSha256>(
-            &OpModeR::Base,
-            &sk,
-            &enc_key,
-            INFO,
-            wk,
-            &aad,
-        )
-        .map_err(|_| WrapError::OpenFailed)?;
+    let plaintext = hpke::single_shot_open::<ChaCha20Poly1305, HkdfSha256, X25519HkdfSha256>(
+        &OpModeR::Base,
+        &sk,
+        &enc_key,
+        INFO,
+        wk,
+        &aad,
+    )
+    .map_err(|_| WrapError::OpenFailed)?;
 
     if plaintext.len() != 32 {
         return Err(WrapError::OpenFailed);
@@ -227,7 +226,7 @@ mod tests {
 
         let result = wrap_key(&k, &pk_r, &ct_hash, author_did).expect("wrap failed");
         assert_eq!(result.enc.len(), 32); // X25519 encapsulated key
-        assert_eq!(result.wk.len(), 48);  // 32 key + 16 tag
+        assert_eq!(result.wk.len(), 48); // 32 key + 16 tag
 
         let recovered = unwrap_key(&result.enc, &result.wk, &sk_r, &ct_hash, author_did)
             .expect("unwrap failed");
@@ -321,7 +320,13 @@ mod tests {
         let did = "did:mnemonik:author";
 
         let result = wrap_key(&k, &pk_r, &ct_hash, did).unwrap();
-        let err = unwrap_key(&result.enc, &result.wk, &sk_r, &ct_hash, "did:mnemonik:other");
+        let err = unwrap_key(
+            &result.enc,
+            &result.wk,
+            &sk_r,
+            &ct_hash,
+            "did:mnemonik:other",
+        );
         assert_eq!(err, Err(WrapError::OpenFailed));
     }
 
@@ -400,8 +405,8 @@ mod tests {
         // We can't pass a length mismatch via the &[u8;32] sig, so test with
         // the Deserializable path directly.
         let bad_pk_bytes = [0u8; 32]; // all-zero pk; hpke may or may not reject
-        // This tests the code path; actual rejection depends on hpke internals.
-        // We just verify it doesn't panic.
+                                      // This tests the code path; actual rejection depends on hpke internals.
+                                      // We just verify it doesn't panic.
         let _ = wrap_key(&k, &bad_pk_bytes, &ct_hash, "did:test");
     }
 }

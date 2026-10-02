@@ -46,8 +46,9 @@ fn attest_jcs<S: A2aStore>(
 
     // Human-readable content: the JCS bytes as a UTF-8 string (JCS is always
     // valid UTF-8 since it produces ASCII/UTF-8 JSON).
-    let content =
-        std::str::from_utf8(jcs_bytes).context("JCS bytes are not valid UTF-8")?.to_string();
+    let content = std::str::from_utf8(jcs_bytes)
+        .context("JCS bytes are not valid UTF-8")?
+        .to_string();
 
     // Tags: "a2a" marker + the kind sub-tag.
     let tags = vec!["a2a".to_string(), kind_tag.to_string()];

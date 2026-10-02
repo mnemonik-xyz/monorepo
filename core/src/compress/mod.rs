@@ -226,7 +226,10 @@ mod tests {
             .map(|(a, b)| (a - b).powi(2))
             .sum::<f32>()
             / original.len() as f32;
-        assert!(mse < MAX_ROUNDTRIP_MSE_4BIT_128, "MSE {mse} exceeded threshold {MAX_ROUNDTRIP_MSE_4BIT_128}");
+        assert!(
+            mse < MAX_ROUNDTRIP_MSE_4BIT_128,
+            "MSE {mse} exceeded threshold {MAX_ROUNDTRIP_MSE_4BIT_128}"
+        );
     }
 
     #[test]
@@ -306,11 +309,24 @@ mod tests {
     fn test_compress_single_element() {
         let c = EmbeddingCompressor::new(1, 4, 42);
         let compressed = c.compress(&[0.5]);
-        assert_eq!(compressed.dim, 1, "compressed.dim must match constructor dim");
-        assert_eq!(compressed.bit_width, 4, "compressed.bit_width must match constructor bit_width");
+        assert_eq!(
+            compressed.dim, 1,
+            "compressed.dim must match constructor dim"
+        );
+        assert_eq!(
+            compressed.bit_width, 4,
+            "compressed.bit_width must match constructor bit_width"
+        );
         let restored = c.decompress(&compressed);
-        assert_eq!(restored.len(), 1, "decompress must return 1-element vec for dim=1");
+        assert_eq!(
+            restored.len(),
+            1,
+            "decompress must return 1-element vec for dim=1"
+        );
         let mse = (0.5_f32 - restored[0]).powi(2);
-        assert!(mse < MAX_ROUNDTRIP_MSE_4BIT_1, "single-element MSE {mse} exceeded threshold {MAX_ROUNDTRIP_MSE_4BIT_1}");
+        assert!(
+            mse < MAX_ROUNDTRIP_MSE_4BIT_1,
+            "single-element MSE {mse} exceeded threshold {MAX_ROUNDTRIP_MSE_4BIT_1}"
+        );
     }
 }

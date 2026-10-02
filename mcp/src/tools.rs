@@ -1589,7 +1589,9 @@ async fn sign_memory_inline(
         )
     };
     let receipt_persisted = persistence.is_ok();
-    if write_mode == WriteMode::Local { persistence?; }
+    if write_mode == WriteMode::Local {
+        persistence?;
+    }
 
     // 6b. Delivery confirmation — Anchored ONLY. T3 (modes-user-choice).
     //
@@ -1734,10 +1736,17 @@ pub async fn perform_delivery_check(
     timeout: Duration,
 ) -> Result<(), &'static str> {
     let refetched = arweave_refetch_with_budget(arweave, arweave_tx, timeout)
-        .await.map_err(|_| "refetch")?;
-    if refetched != original_bytes { return Err("verify"); }
+        .await
+        .map_err(|_| "refetch")?;
+    if refetched != original_bytes {
+        return Err("verify");
+    }
     let verified = cose_verify(&refetched, Some(content_hash)).map_err(|_| "verify")?;
-    if !verified.valid || !verified.algorithm_valid || !verified.cose_signature || verified.signer != expected_author {
+    if !verified.valid
+        || !verified.algorithm_valid
+        || !verified.cose_signature
+        || verified.signer != expected_author
+    {
         return Err("verify");
     }
     Ok(())
@@ -1855,8 +1864,12 @@ pub async fn confirm_delivery_or_demote(
     ctx: DeliveryContext<'_>,
 ) -> anyhow::Result<DeliveryOutcome> {
     match perform_delivery_check(
-        ctx.arweave, ctx.arweave_tx, ctx.content_hash, ctx.signer_pubkey,
-        ctx.original_bytes, ctx.timeout,
+        ctx.arweave,
+        ctx.arweave_tx,
+        ctx.content_hash,
+        ctx.signer_pubkey,
+        ctx.original_bytes,
+        ctx.timeout,
     )
     .await
     {
@@ -4402,8 +4415,8 @@ pub async fn ingest_a2a(
     let v = mnemonic_a2a::validate_signed_a2a(&signed, owner, kind, context, sealed, prev)
         .map_err(invalid)?;
     if prev.is_some() {
-        let locator = prev_locator
-            .ok_or_else(|| JsonRpcError::simple(-32602, "ParentLocatorRequired"))?;
+        let locator =
+            prev_locator.ok_or_else(|| JsonRpcError::simple(-32602, "ParentLocatorRequired"))?;
         let bytes = arweave
             .read_parent_locator(locator)
             .await
@@ -4424,8 +4437,11 @@ pub async fn ingest_a2a(
         ("Content-Hash", v.content_hash.as_str()),
     ];
     let id = crate::ingestion::deliver_exact(arweave, operator, &signed, &tags)
-        .await.map_err(|_| JsonRpcError::simple(-32011, "delivery unavailable"))?;
-    let receipt_persisted = store.lock().ok()
+        .await
+        .map_err(|_| JsonRpcError::simple(-32011, "delivery unavailable"))?;
+    let receipt_persisted = store
+        .lock()
+        .ok()
         .is_some_and(|guard| guard.record_a2a_receipt(&v, &id, true).is_ok());
     Ok(
         serde_json::json!({"attestation_id":format!("a2a:{}",v.content_hash),"blake3":v.content_hash,"sealed":sealed,"arweave_tx":id,"locator":format!("ar://{id}"),"write_mode":"anchored","delivery_status":"verified","receipt_persisted":receipt_persisted}),

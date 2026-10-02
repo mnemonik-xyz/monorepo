@@ -89,7 +89,9 @@ fn context_isolation_with_mixed_types() {
     // Message in ctx_A.
     let msg = Message {
         role: "agent".to_string(),
-        parts: vec![Part::Text { text: "hello".to_string() }],
+        parts: vec![Part::Text {
+            text: "hello".to_string(),
+        }],
         message_id: "m-a-001".to_string(),
         task_id: None,
         context_id: Some(ctx_a.to_string()),
@@ -100,7 +102,9 @@ fn context_isolation_with_mixed_types() {
     let art = A2aArtifact {
         artifact_id: Some("art-b-001".to_string()),
         name: None,
-        parts: vec![Part::Text { text: "b content".to_string() }],
+        parts: vec![Part::Text {
+            text: "b content".to_string(),
+        }],
     };
     attest_artifact(&store, &art, ctx_b, &kp, None).unwrap();
 

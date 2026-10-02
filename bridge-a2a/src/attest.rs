@@ -8,12 +8,14 @@ use serde_json::Value;
 use solana_sdk::signature::Keypair;
 use tracing::{debug, error, warn};
 
-use mnemonic_a2a::{attest_artifact, attest_message, attest_task, A2aArtifact, A2aStore, Message, Task};
+use mnemonic_a2a::{
+    attest_artifact, attest_message, attest_task, A2aArtifact, A2aStore, Message, Task,
+};
 use mnemonic_core::codec::a2a::task::TaskArtifact;
 use mnemonic_core::storage::traits::AttestationStore;
 
 use crate::config::FailureMode;
-use crate::idem::{IdempotencyKey, IdempotencyCache};
+use crate::idem::{IdempotencyCache, IdempotencyKey};
 use crate::lineage::LineageMap;
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -74,9 +76,7 @@ pub fn extract_artifacts_from_task(task: &Task) -> Vec<A2aArtifact> {
 
 /// Returns the RPC method string from a JSON-RPC request body.
 pub fn rpc_method(body: &Value) -> &str {
-    body.get("method")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
+    body.get("method").and_then(|v| v.as_str()).unwrap_or("")
 }
 
 /// Returns the `taskId` from request params.
@@ -148,7 +148,10 @@ pub fn attest_message_send<S: A2aStore>(
 
     // Idempotency: return cached result for retries.
     if let Some(cached_id) = idem.check(&idem_key) {
-        debug!("message/send: idempotency hit for message_id={:?}", message_id);
+        debug!(
+            "message/send: idempotency hit for message_id={:?}",
+            message_id
+        );
         let ctx_id = msg
             .context_id
             .as_deref()
@@ -187,17 +190,11 @@ pub fn attest_message_send<S: A2aStore>(
             Ok(task_att_id) => {
                 lineage.advance(&task_ctx, &task_att_id);
                 for artifact in extract_artifacts_from_task(&task) {
-                    if let Err(e) = attest_artifact(
-                        store,
-                        &artifact,
-                        &task_ctx,
-                        keypair,
-                        Some(&task_att_id),
-                    ) {
+                    if let Err(e) =
+                        attest_artifact(store, &artifact, &task_ctx, keypair, Some(&task_att_id))
+                    {
                         if *failure_mode == FailureMode::AttestStrict {
-                            return Err(format!(
-                                "attest-strict: artifact attestation failed: {e}"
-                            ));
+                            return Err(format!("attest-strict: artifact attestation failed: {e}"));
                         }
                         warn!("artifact attestation failed (best-effort): {e}");
                     }
@@ -278,13 +275,9 @@ pub fn attest_tasks_get<S: A2aStore>(
     lineage.advance(&ctx_id, &att_id);
 
     for artifact in extract_artifacts_from_task(&task) {
-        if let Err(e) =
-            attest_artifact(store, &artifact, &ctx_id, keypair, Some(&att_id))
-        {
+        if let Err(e) = attest_artifact(store, &artifact, &ctx_id, keypair, Some(&att_id)) {
             if *failure_mode == FailureMode::AttestStrict {
-                return Err(format!(
-                    "attest-strict: artifact attestation failed: {e}"
-                ));
+                return Err(format!("attest-strict: artifact attestation failed: {e}"));
             }
             warn!("artifact attestation failed (best-effort): {e}");
         }

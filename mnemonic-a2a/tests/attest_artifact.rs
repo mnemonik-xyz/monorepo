@@ -25,13 +25,11 @@ fn artifact_roundtrip_attest_recall_verify() {
     let art = sample_artifact();
 
     // Attest.
-    let id = attest_artifact(&store, &art, ctx, &kp, None)
-        .expect("attest_artifact must succeed");
+    let id = attest_artifact(&store, &art, ctx, &kp, None).expect("attest_artifact must succeed");
     assert!(!id.is_empty());
 
     // Recall.
-    let rows = recall_by_context(&store, ctx, None)
-        .expect("recall_by_context must succeed");
+    let rows = recall_by_context(&store, ctx, None).expect("recall_by_context must succeed");
     assert_eq!(rows.len(), 1);
 
     let row = &rows[0];
@@ -59,12 +57,16 @@ fn artifact_two_in_same_context() {
     let art1 = A2aArtifact {
         artifact_id: Some("art-1".to_string()),
         name: None,
-        parts: vec![Part::Text { text: "first".to_string() }],
+        parts: vec![Part::Text {
+            text: "first".to_string(),
+        }],
     };
     let art2 = A2aArtifact {
         artifact_id: Some("art-2".to_string()),
         name: None,
-        parts: vec![Part::Text { text: "second".to_string() }],
+        parts: vec![Part::Text {
+            text: "second".to_string(),
+        }],
     };
 
     attest_artifact(&store, &art1, ctx, &kp, None).unwrap();

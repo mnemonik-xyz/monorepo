@@ -18,15 +18,15 @@ use axum::{
 };
 use http_body_util::BodyExt;
 use mnemonic_core::{
-    codec::{sign::sign_cose, canonical::to_canonical_cbor},
+    codec::{canonical::to_canonical_cbor, sign::sign_cose},
     storage::WriteMode,
 };
 use mnemonic_mcp::{
     mcp::{mcp_handler, McpState},
     oauth::{self, OAuthState},
     sealed_routes::{
-        anchor_sealed_handler, delete_grant_handler, embed_handler, list_grants_handler,
-        list_sealed_handler, store_sealed_handler, create_grant_handler,
+        anchor_sealed_handler, create_grant_handler, delete_grant_handler, embed_handler,
+        list_grants_handler, list_sealed_handler, store_sealed_handler,
     },
     test_support::{mint_jwt, mock_state},
 };
@@ -77,8 +77,8 @@ async fn post_bytes(
     let resp = app.clone().oneshot(req).await.unwrap();
     let status = resp.status();
     let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-    let json: Value =
-        serde_json::from_slice(&bytes).unwrap_or(Value::String(String::from_utf8_lossy(&bytes).into()));
+    let json: Value = serde_json::from_slice(&bytes)
+        .unwrap_or(Value::String(String::from_utf8_lossy(&bytes).into()));
     (status, json)
 }
 
@@ -100,8 +100,8 @@ async fn call_tool(app: Router, jwt: &str, name: &str, args: Value) -> (StatusCo
     let resp = app.oneshot(req).await.unwrap();
     let status = resp.status();
     let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-    let json: Value =
-        serde_json::from_slice(&bytes).unwrap_or(Value::String(String::from_utf8_lossy(&bytes).into()));
+    let json: Value = serde_json::from_slice(&bytes)
+        .unwrap_or(Value::String(String::from_utf8_lossy(&bytes).into()));
     (status, json)
 }
 
@@ -114,11 +114,8 @@ fn make_signed_cose(keypair: &Keypair, producer_did: &str) -> Vec<u8> {
         "producer": producer_did,
         "created_at": "2026-09-28T00:00:00Z",
     });
-    let cbor = to_canonical_cbor(
-        &payload,
-        &mnemonic_core::codec::schema::SEALED_V1,
-    )
-    .unwrap_or_else(|_| serde_json::to_vec(&payload).unwrap());
+    let cbor = to_canonical_cbor(&payload, &mnemonic_core::codec::schema::SEALED_V1)
+        .unwrap_or_else(|_| serde_json::to_vec(&payload).unwrap());
     sign_cose(&cbor, keypair).expect("sign_cose failed")
 }
 
@@ -152,7 +149,9 @@ async fn anchor_sealed_rejects_wrong_producer() {
     .await;
 
     assert!(
-        status == StatusCode::BAD_REQUEST || status == StatusCode::FORBIDDEN || status == StatusCode::UNAUTHORIZED,
+        status == StatusCode::BAD_REQUEST
+            || status == StatusCode::FORBIDDEN
+            || status == StatusCode::UNAUTHORIZED,
         "expected 403/401 for cross-owner COSE, got {status}: {body}"
     );
 }
@@ -180,17 +179,19 @@ async fn retired_store_sealed_never_writes_embedding_row() {
     )
     .await;
 
-    assert_eq!(status, StatusCode::GONE, "hosted local store must fail: {body}");
+    assert_eq!(
+        status,
+        StatusCode::GONE,
+        "hosted local store must fail: {body}"
+    );
 
     // Verify no embedding row was written.
     let store = state.store.lock().unwrap();
     let embedding_count: i64 = store
         .conn()
-        .query_row(
-            "SELECT COUNT(*) FROM attestation_embeddings",
-            [],
-            |r| r.get(0),
-        )
+        .query_row("SELECT COUNT(*) FROM attestation_embeddings", [], |r| {
+            r.get(0)
+        })
         .unwrap_or(0);
     assert_eq!(
         embedding_count, 0,
@@ -296,7 +297,11 @@ async fn mnemonic_share_returns_awaiting_signature() {
     });
     let (status, envelope) = call_tool(app, &jwt, "mnemonic_share", args).await;
 
-    assert_eq!(status, StatusCode::OK, "mnemonic_share should return 200: {envelope}");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "mnemonic_share should return 200: {envelope}"
+    );
 
     // The result is wrapped in MCP content envelope.
     let result_text = envelope["result"]["content"][0]["text"]
@@ -361,7 +366,11 @@ async fn mnemonic_verify_returns_sealed_for_sealed_row() {
     });
     let (status, envelope) = call_tool(app, &jwt, "mnemonic_verify", args).await;
 
-    assert_eq!(status, StatusCode::OK, "verify should return 200: {envelope}");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "verify should return 200: {envelope}"
+    );
 
     let result_text = envelope["result"]["content"][0]["text"]
         .as_str()
@@ -451,11 +460,8 @@ async fn retired_grant_write_preserves_existing_read_and_withdrawal() {
         "reader_kid": "did:sol:ReaderABC",
         "author": format!("did:sol:{author_pubkey}"),
     });
-    let cbor = to_canonical_cbor(
-        &grant_payload,
-        &mnemonic_core::codec::schema::GRANT_V1,
-    )
-    .unwrap_or_else(|_| serde_json::to_vec(&grant_payload).unwrap());
+    let cbor = to_canonical_cbor(&grant_payload, &mnemonic_core::codec::schema::GRANT_V1)
+        .unwrap_or_else(|_| serde_json::to_vec(&grant_payload).unwrap());
     let cose_bytes = sign_cose(&cbor, &author_kp).expect("sign grant");
     let cose_b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &cose_bytes);
 
@@ -476,10 +482,26 @@ async fn retired_grant_write_preserves_existing_read_and_withdrawal() {
     let status = resp.status();
     let bytes = resp.into_body().collect().await.unwrap().to_bytes();
     let created: Value = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(status, StatusCode::GONE, "POST /api/grants must be retired: {created}");
+    assert_eq!(
+        status,
+        StatusCode::GONE,
+        "POST /api/grants must be retired: {created}"
+    );
     let grant_id = "legacy-grant".to_string();
     // Existing receipts remain readable/withdrawable; migration never erases them.
-    state.store.lock().unwrap().save_grant(&grant_id, &"d".repeat(64), Some("did:sol:ReaderABC"), &cose_bytes, &author_pubkey, "2026-10-02T00:00:00Z").unwrap();
+    state
+        .store
+        .lock()
+        .unwrap()
+        .save_grant(
+            &grant_id,
+            &"d".repeat(64),
+            Some("did:sol:ReaderABC"),
+            &cose_bytes,
+            &author_pubkey,
+            "2026-10-02T00:00:00Z",
+        )
+        .unwrap();
 
     // GET /api/grants?reader=did:sol:ReaderABC
     let req = Request::builder()

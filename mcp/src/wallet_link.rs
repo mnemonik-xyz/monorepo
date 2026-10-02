@@ -193,8 +193,7 @@ mod tests {
         let now = Utc::now();
 
         // Create a challenge for operation-A with chain 31337.
-        let challenge_a =
-            create_or_get_challenge(&conn, "op-a", "subject-a", 31_337, now).unwrap();
+        let challenge_a = create_or_get_challenge(&conn, "op-a", "subject-a", 31_337, now).unwrap();
         assert!(challenge_message(&challenge_a).contains("operation_id: op-a"));
         assert!(challenge_message(&challenge_a).contains("chain_id: 31337"));
 

@@ -93,6 +93,10 @@ pub struct Cli {
     pub context_strategy: ContextStrategy,
 
     /// Failure mode for attestation errors.
-    #[arg(long, env = "BRIDGE_FAILURE_MODE", default_value = "attest-best-effort")]
+    #[arg(
+        long,
+        env = "BRIDGE_FAILURE_MODE",
+        default_value = "attest-best-effort"
+    )]
     pub failure_mode: FailureMode,
 }

@@ -83,7 +83,10 @@ fn replay_same_request_one_message_row() {
         .expect("second response must have attestation_id");
 
     // Both responses return the *same* attestation_id (idempotency).
-    assert_eq!(id1, id2, "idempotent replay must return the same attestation_id");
+    assert_eq!(
+        id1, id2,
+        "idempotent replay must return the same attestation_id"
+    );
 
     // The store must have exactly one row for the message attestation
     // (the task attestation from the response result is also a row, so we

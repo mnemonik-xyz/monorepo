@@ -1965,9 +1965,15 @@ pub async fn mcp_handler(
                     .ok_or_else(|| anyhow::anyhow!("ParentLocatorRequired"))?;
                 // Reject malformed hints before distinguishing network unavailability.
                 let valid_locator = if let Some(id) = locator.strip_prefix("ar://") {
-                    id.len() == 43 && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+                    id.len() == 43
+                        && id
+                            .bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
                 } else if let Some(digest) = locator.strip_prefix("blob://") {
-                    digest.len() == 64 && digest.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                    digest.len() == 64
+                        && digest
+                            .bytes()
+                            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
                 } else {
                     false
                 };
@@ -2000,24 +2006,35 @@ pub async fn mcp_handler(
             }
         };
         let descriptor = crate::ingestion::ValidatedMemory {
-            author: child.signer.clone(), kind: "a2a".into(),
+            author: child.signer.clone(),
+            kind: "a2a".into(),
             content_hash: child.content_hash.clone(),
             envelope_digest: mnemonic_core::codec::hash::hash_bytes(&signed_bytes),
         };
         let response = crate::ingestion::ingest_validated(
-            state.clone(), claims.expect("validated authenticated A2A"), headers,
-            client_ip, axum::body::Bytes::from(signed_bytes), descriptor,
+            state.clone(),
+            claims.expect("validated authenticated A2A"),
+            headers,
+            client_ip,
+            axum::body::Bytes::from(signed_bytes),
+            descriptor,
             Some(child.binding.context_id.clone()),
-        ).await;
+        )
+        .await;
         let status = response.status();
         let payment_header = response.headers().get("payment-required").cloned();
-        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024).await
-            .ok().and_then(|b|serde_json::from_slice::<Value>(&b).ok())
-            .unwrap_or_else(||serde_json::json!({"error":"invalid coordinator response"}));
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .ok()
+            .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+            .unwrap_or_else(|| serde_json::json!({"error":"invalid coordinator response"}));
         if status.is_success() && body["delivery_status"] == "verified" {
             let locator = body["arweave_tx"].as_str().unwrap_or("");
-            let receipt_persisted = state.store.lock().ok()
-                .is_some_and(|store|store.record_a2a_receipt(&child, locator, true).is_ok());
+            let receipt_persisted = state
+                .store
+                .lock()
+                .ok()
+                .is_some_and(|store| store.record_a2a_receipt(&child, locator, true).is_ok());
             let result = serde_json::json!({
                 "attestation_id":format!("a2a:{}",child.content_hash),
                 "blake3":child.content_hash,"sealed":child.binding.sealed,
@@ -2025,13 +2042,21 @@ pub async fn mcp_handler(
                 "delivery_status":"verified","receipt_persisted":receipt_persisted,
                 "operation_id":body["operation_id"],"payment_status":body["payment_status"]
             });
-            ndjson_response(StatusCode::OK,&serde_json::json!({"jsonrpc":"2.0","id":req.id,
-                "result":{"content":[{"type":"text","text":result.to_string()}]}}))
+            ndjson_response(
+                StatusCode::OK,
+                &serde_json::json!({"jsonrpc":"2.0","id":req.id,
+                "result":{"content":[{"type":"text","text":result.to_string()}]}}),
+            )
         } else {
-            let mut response=ndjson_response(status,&serde_json::json!({"jsonrpc":"2.0","id":req.id,
+            let mut response = ndjson_response(
+                status,
+                &serde_json::json!({"jsonrpc":"2.0","id":req.id,
                 "error":{"code":if status==StatusCode::PAYMENT_REQUIRED{-32012}else{-32013},
-                    "message":"artifact ingestion pending or unavailable","data":body}}));
-            if let Some(value)=payment_header {response.headers_mut().insert("payment-required",value);}
+                    "message":"artifact ingestion pending or unavailable","data":body}}),
+            );
+            if let Some(value) = payment_header {
+                response.headers_mut().insert("payment-required", value);
+            }
             response
         }
     } else {
@@ -2423,8 +2448,15 @@ async fn handle_tool_call(
 
                 // Hosted recall never opens sealed payloads or recall keys.
                 let store = state.store.lock().unwrap();
-                tools::recall(&state.keypair, &store, state.embedder.as_ref(),
-                    query, limit, recall_owner, visibility_filter)
+                tools::recall(
+                    &state.keypair,
+                    &store,
+                    state.embedder.as_ref(),
+                    query,
+                    limit,
+                    recall_owner,
+                    visibility_filter,
+                )
             }
         }
         "mnemonic_check_pending" => {

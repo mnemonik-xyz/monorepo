@@ -18,12 +18,12 @@ use hpke::{
     kem::{Kem as KemTrait, X25519HkdfSha256},
     Serializable,
 };
+use mnemonic_core::codec::sign::{sign_cose, verify_sealed};
+use mnemonic_core::sealed::keys::x25519_secret_from_ed25519;
 use mnemonic_core::sealed::{
     link_fragment, make_grant, open_grant, open_memory, open_with_key, parse_link_fragment,
     seal_memory, x25519_public_from_ed25519,
 };
-use mnemonic_core::sealed::keys::x25519_secret_from_ed25519;
-use mnemonic_core::codec::sign::{sign_cose, verify_sealed};
 use solana_sdk::signature::Signer;
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -57,13 +57,19 @@ fn wasm_binding_seal_open_round_trip() {
     let artifact = seal_test(inner, &sk);
 
     // outer_cbor and content_hash are what the binding returns to JS.
-    assert!(!artifact.outer_cbor.is_empty(), "outer_cbor must not be empty");
-    assert_eq!(artifact.content_hash.len(), 32, "content_hash must be 32 bytes");
+    assert!(
+        !artifact.outer_cbor.is_empty(),
+        "outer_cbor must not be empty"
+    );
+    assert_eq!(
+        artifact.content_hash.len(),
+        32,
+        "content_hash must be 32 bytes"
+    );
 
     // open_memory binding: derive X25519 secret from the author's signing key.
     let x25519_sk = *x25519_secret_from_ed25519(&sk);
-    let recovered = open_memory(&artifact.outer_cbor, &x25519_sk)
-        .expect("open_memory failed");
+    let recovered = open_memory(&artifact.outer_cbor, &x25519_sk).expect("open_memory failed");
     assert_eq!(recovered, inner, "round-trip content mismatch");
 }
 
@@ -85,8 +91,7 @@ fn wasm_binding_open_with_key_round_trip() {
     let sk = test_signing_key();
     let inner = b"bearer link content";
     let artifact = seal_test(inner, &sk);
-    let recovered = open_with_key(&artifact.outer_cbor, &artifact.k)
-        .expect("open_with_key failed");
+    let recovered = open_with_key(&artifact.outer_cbor, &artifact.k).expect("open_with_key failed");
     assert_eq!(recovered, inner);
 }
 
@@ -120,7 +125,10 @@ fn wasm_binding_make_open_grant_anonymous() {
 
     // Anonymous grants ignore the X25519 secret.
     let k_recovered = open_grant(&grant_cbor, &[0u8; 32]).expect("open_grant failed");
-    assert_eq!(*k_recovered, *artifact.k, "K mismatch after anonymous grant round-trip");
+    assert_eq!(
+        *k_recovered, *artifact.k,
+        "K mismatch after anonymous grant round-trip"
+    );
 }
 
 // ── make_grant + open_grant — targeted ──────────────────────────────────────
@@ -133,8 +141,7 @@ fn wasm_binding_make_open_grant_targeted() {
 
     let memory_hash: [u8; 32] = artifact.content_hash[..32].try_into().unwrap();
 
-    let (reader_sk_hpke, reader_pk_hpke) =
-        X25519HkdfSha256::gen_keypair(&mut rand_core::OsRng);
+    let (reader_sk_hpke, reader_pk_hpke) = X25519HkdfSha256::gen_keypair(&mut rand_core::OsRng);
     let reader_sk_bytes: [u8; 32] = reader_sk_hpke.to_bytes().into();
     let reader_pk_bytes: [u8; 32] = reader_pk_hpke.to_bytes().into();
 
@@ -171,10 +178,11 @@ fn wasm_binding_x25519_public_from_ed25519_matches_native() {
 fn wasm_binding_x25519_public_from_ed25519_invalid_key_rejected() {
     // All-zero public key maps to the neutral element → small-order rejection.
     // A random invalid byte sequence that isn't a valid Edwards point also errs.
-    let bad = [0x37u8, 0x37u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8,
-               0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8,
-               0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8,
-               0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8];
+    let bad = [
+        0x37u8, 0x37u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8,
+        0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8,
+        0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8,
+    ];
     assert!(x25519_public_from_ed25519(&bad).is_err());
 }
 
@@ -201,10 +209,8 @@ fn wasm_binding_parse_link_fragment_bad_base64_fails() {
 
 #[test]
 fn wasm_binding_parse_link_fragment_wrong_length_fails() {
-    let short = base64::Engine::encode(
-        &base64::engine::general_purpose::URL_SAFE_NO_PAD,
-        [0u8; 16],
-    );
+    let short =
+        base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, [0u8; 16]);
     assert!(parse_link_fragment(&format!("k={short}")).is_err());
 }
 
@@ -306,7 +312,10 @@ fn wasm_binding_golden_vector_structural_invariants() {
 
     // Structural invariant A: content_hash is blake3 of outer_cbor.
     let expected_hash = blake3::hash(&artifact.outer_cbor).as_bytes().to_vec();
-    assert_eq!(artifact.content_hash, expected_hash, "content_hash must equal blake3(outer_cbor)");
+    assert_eq!(
+        artifact.content_hash, expected_hash,
+        "content_hash must equal blake3(outer_cbor)"
+    );
 
     // Structural invariant B: outer_cbor round-trips through open_memory.
     let x25519_sk = *x25519_secret_from_ed25519(&sk);
@@ -322,10 +331,11 @@ fn wasm_binding_golden_vector_structural_invariants() {
         .expect("from_canonical_cbor");
     let obj = payload.as_object().expect("outer_cbor is a map");
     let kc_b64 = obj["kc"].as_str().expect("kc field");
-    let kc_bytes = base64::Engine::decode(
-        &base64::engine::general_purpose::STANDARD,
-        kc_b64,
-    ).expect("kc base64");
+    let kc_bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, kc_b64)
+        .expect("kc base64");
     let expected_kc = mnemonic_core::sealed::key_commitment(&artifact.k);
-    assert_eq!(kc_bytes, expected_kc, "kc in CBOR must match key_commitment(K)");
+    assert_eq!(
+        kc_bytes, expected_kc,
+        "kc in CBOR must match key_commitment(K)"
+    );
 }

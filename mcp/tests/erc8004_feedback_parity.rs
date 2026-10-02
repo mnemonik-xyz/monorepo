@@ -17,8 +17,7 @@ use alloy_primitives::keccak256;
 
 /// Path to the fixture, relative to this crate's manifest directory (`mcp/`).
 /// The workspace root is one level up from `mcp/`.
-const FIXTURE_RELATIVE: &str =
-    "../packages/sdk/test/fixtures/erc8004-feedback-v1.json";
+const FIXTURE_RELATIVE: &str = "../packages/sdk/test/fixtures/erc8004-feedback-v1.json";
 
 /// The expected 4-byte selector for `giveFeedback`.
 /// Source: `docs/spec/erc8004-feedback-v1.md`, pinned in Wave 1.
@@ -45,8 +44,8 @@ fn parse_hex(s: &str) -> Vec<u8> {
 /// `CARGO_MANIFEST_DIR` is set by Cargo at compile time to the directory
 /// containing `mcp/Cargo.toml`, so `../packages/sdk/...` reaches the workspace.
 fn fixture_path() -> std::path::PathBuf {
-    let manifest = std::env::var("CARGO_MANIFEST_DIR")
-        .expect("CARGO_MANIFEST_DIR must be set by cargo test");
+    let manifest =
+        std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR must be set by cargo test");
     std::path::Path::new(&manifest).join(FIXTURE_RELATIVE)
 }
 
@@ -98,7 +97,9 @@ fn erc8004_payload_hash_parity() {
 
     // Parse the full document from documentJson.
     let document: serde_json::Value = serde_json::from_str(
-        fixture["documentJson"].as_str().expect("documentJson is a string"),
+        fixture["documentJson"]
+            .as_str()
+            .expect("documentJson is a string"),
     )
     .expect("documentJson is valid JSON");
 
@@ -129,7 +130,8 @@ fn erc8004_give_feedback_selector_parity() {
     let actual_selector: [u8; 4] = hash[..4].try_into().unwrap();
 
     assert_eq!(
-        actual_selector, EXPECTED_SELECTOR,
+        actual_selector,
+        EXPECTED_SELECTOR,
         "giveFeedback selector mismatch.\n\
          Computed: 0x{}\n\
          Expected: 0x{}\n\

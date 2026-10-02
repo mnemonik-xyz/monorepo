@@ -54,12 +54,18 @@ impl UnlockCache {
             .and_then(|s| s.parse::<u64>().ok())
             .filter(|&n| n > 0)
             .map(Duration::from_secs);
-        Self { inner: Mutex::new(None), ttl }
+        Self {
+            inner: Mutex::new(None),
+            ttl,
+        }
     }
 
     /// Construct with an explicit TTL.  `None` means process lifetime.
     pub fn with_ttl(ttl: Option<Duration>) -> Self {
-        Self { inner: Mutex::new(None), ttl }
+        Self {
+            inner: Mutex::new(None),
+            ttl,
+        }
     }
 
     /// Return the cached X25519 secret, or unlock it via `keychain_fn` and

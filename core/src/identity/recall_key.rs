@@ -53,9 +53,7 @@ pub enum RecallKeyError {
 impl From<hpke::HpkeError> for RecallKeyError {
     fn from(e: hpke::HpkeError) -> Self {
         match e {
-            hpke::HpkeError::EncapError | hpke::HpkeError::DecapError => {
-                RecallKeyError::SealFailed
-            }
+            hpke::HpkeError::EncapError | hpke::HpkeError::DecapError => RecallKeyError::SealFailed,
             hpke::HpkeError::SealError => RecallKeyError::SealFailed,
             hpke::HpkeError::OpenError => RecallKeyError::OpenFailed,
             _ => RecallKeyError::SealFailed,
@@ -124,16 +122,15 @@ pub fn unwrap_rk(
     let sk = <X25519HkdfSha256 as KemTrait>::PrivateKey::from_bytes(owner_x25519_sk)
         .map_err(|_| RecallKeyError::InvalidSecretKey)?;
 
-    let plaintext =
-        hpke::single_shot_open::<ChaCha20Poly1305, HkdfSha256, X25519HkdfSha256>(
-            &OpModeR::Base,
-            &sk,
-            &enc_key,
-            INFO,
-            wk,
-            b"", // must match AAD used during seal
-        )
-        .map_err(|_| RecallKeyError::OpenFailed)?;
+    let plaintext = hpke::single_shot_open::<ChaCha20Poly1305, HkdfSha256, X25519HkdfSha256>(
+        &OpModeR::Base,
+        &sk,
+        &enc_key,
+        INFO,
+        wk,
+        b"", // must match AAD used during seal
+    )
+    .map_err(|_| RecallKeyError::OpenFailed)?;
 
     if plaintext.len() != 32 {
         return Err(RecallKeyError::OpenFailed);
