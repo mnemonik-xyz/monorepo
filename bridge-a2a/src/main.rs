@@ -6,7 +6,11 @@
 use std::net::SocketAddr;
 
 use axum::{routing::any, Router};
-use bridge_a2a::{config::{Cli, StorageMode}, middleware, state::AppState};
+use bridge_a2a::{
+    config::{Cli, StorageMode},
+    middleware,
+    state::AppState,
+};
 use clap::Parser;
 use mnemonic_core::storage::SqliteStore;
 use solana_sdk::signature::Keypair;
@@ -30,9 +34,7 @@ async fn main() -> anyhow::Result<()> {
     );
 
     if cli.storage == StorageMode::Full {
-        tracing::warn!(
-            "storage=full is not yet implemented; falling back to local SQLite"
-        );
+        tracing::warn!("storage=full is not yet implemented; falling back to local SQLite");
     }
     let store = SqliteStore::open(std::path::Path::new(&cli.db_path))?;
 
@@ -70,8 +72,8 @@ fn load_or_generate_keypair(path: Option<&str>) -> anyhow::Result<Keypair> {
             Ok(kp)
         }
         Some(p) => {
-            let raw = std::fs::read(p)
-                .with_context(|| format!("failed to read keypair file: {p}"))?;
+            let raw =
+                std::fs::read(p).with_context(|| format!("failed to read keypair file: {p}"))?;
             let bytes: Vec<u8> = serde_json::from_slice(&raw)
                 .with_context(|| format!("keypair file is not a JSON byte array: {p}"))?;
             Keypair::try_from(bytes.as_slice())

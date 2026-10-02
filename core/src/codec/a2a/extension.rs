@@ -224,7 +224,10 @@ mod tests {
     fn extract_absent() {
         let card = card_without_extension();
         let ext = extract_x_mnemonic(&card).unwrap();
-        assert!(ext.is_none(), "extension must not be found in empty extensions array");
+        assert!(
+            ext.is_none(),
+            "extension must not be found in empty extensions array"
+        );
     }
 
     #[test]
@@ -246,7 +249,10 @@ mod tests {
 
         let json_str = serde_json::to_string(&original).unwrap();
         let restored: XMnemonicExtension = serde_json::from_str(&json_str).unwrap();
-        assert_eq!(original, restored, "serde round-trip must be byte-for-byte equal");
+        assert_eq!(
+            original, restored,
+            "serde round-trip must be byte-for-byte equal"
+        );
 
         // Verify the serialized form is stable across two calls.
         let json_str2 = serde_json::to_string(&original).unwrap();
@@ -283,7 +289,8 @@ mod tests {
     #[test]
     fn reject_null_payload_signature() {
         let card = card_with_extension("3MrF7MAkQV3vNtNPeXqfWtLFGNYFMmT2gkS5PVJGQ1ej");
-        let bad_sig = json!({ "payload": null, "protected": "eyJhbGciOiJFZERTQSJ9", "signature": "AAAA" });
+        let bad_sig =
+            json!({ "payload": null, "protected": "eyJhbGciOiJFZERTQSJ9", "signature": "AAAA" });
 
         let err = verify_card_covers_extension(&card, &[bad_sig]);
         assert!(err.is_err(), "null payload must fail");
@@ -362,20 +369,15 @@ mod tests {
             val["ed25519_pubkey_base58"],
             "3MrF7MAkQV3vNtNPeXqfWtLFGNYFMmT2gkS5PVJGQ1ej"
         );
-        assert_eq!(
-            val["attestation_endpoint"],
-            "https://api.mnemonik.xyz/a2a"
-        );
+        assert_eq!(val["attestation_endpoint"], "https://api.mnemonik.xyz/a2a");
         assert_eq!(val["conformance_version"], "1");
     }
 
     #[test]
     fn build_extension_no_endpoint() {
-        let val =
-            build_x_mnemonic_extension("3MrF7MAkQV3vNtNPeXqfWtLFGNYFMmT2gkS5PVJGQ1ej", None);
+        let val = build_x_mnemonic_extension("3MrF7MAkQV3vNtNPeXqfWtLFGNYFMmT2gkS5PVJGQ1ej", None);
         assert!(
-            val.get("attestation_endpoint").is_none()
-                || val["attestation_endpoint"].is_null(),
+            val.get("attestation_endpoint").is_none() || val["attestation_endpoint"].is_null(),
             "absent endpoint must not appear in serialized object"
         );
     }

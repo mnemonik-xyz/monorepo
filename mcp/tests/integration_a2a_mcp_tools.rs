@@ -48,7 +48,8 @@ async fn read(
         .ok_or(axum::http::StatusCode::NOT_FOUND)
 }
 async fn unexpected_payment(State(s): State<Remote>) -> axum::http::StatusCode {
-    s.payment_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    s.payment_calls
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     axum::http::StatusCode::INTERNAL_SERVER_ERROR
 }
 
@@ -379,7 +380,6 @@ async fn failed_delivery_is_pending_and_retry_uses_existing_remote_bytes() {
     task.abort();
 }
 
-
 /// A genuinely fresh operator reads the migrated parent from another backend.
 /// The original storage listener is stopped and its receipt rows are gone.
 #[tokio::test]
@@ -389,41 +389,112 @@ async fn independent_operator_continues_from_migrated_parent_without_source() {
     let kp = Keypair::new();
     let owner = kp.pubkey().to_string();
     let payload = json!({"messageId":"parent","role":"agent","contextId":"migration","parts":[{"kind":"text","text":"parent"}]});
-    let parent = prepare_signed_a2a(&kp,"message",payload.clone(),"migration",None,"2026-10-02T00:00:00Z",None).unwrap();
-    let receipt = result(&original.call_tool(Some(&owner),"mnemonic_attest_a2a",json!({"kind":"message","context_id":"migration","signed":hex::encode(&parent)})).await);
-    let (destination_url,destination,destination_task) = remote().await;
-    let digest=hex::encode(Sha256::digest(&parent));
+    let parent = prepare_signed_a2a(
+        &kp,
+        "message",
+        payload.clone(),
+        "migration",
+        None,
+        "2026-10-02T00:00:00Z",
+        None,
+    )
+    .unwrap();
+    let receipt = result(
+        &original
+            .call_tool(
+                Some(&owner),
+                "mnemonic_attest_a2a",
+                json!({"kind":"message","context_id":"migration","signed":hex::encode(&parent)}),
+            )
+            .await,
+    );
+    let (destination_url, destination, destination_task) = remote().await;
+    let digest = hex::encode(Sha256::digest(&parent));
     // Exact copy into the other backend; identity/signature remain unchanged.
-    destination.blobs.lock().unwrap().insert(digest.clone(),parent.clone());
-    original.state.store.lock().unwrap().conn().execute_batch("DELETE FROM a2a_anchor_readers; DELETE FROM a2a_anchor_receipts;").unwrap();
+    destination
+        .blobs
+        .lock()
+        .unwrap()
+        .insert(digest.clone(), parent.clone());
+    original
+        .state
+        .store
+        .lock()
+        .unwrap()
+        .conn()
+        .execute_batch("DELETE FROM a2a_anchor_readers; DELETE FROM a2a_anchor_receipts;")
+        .unwrap();
     source.blobs.lock().unwrap().clear();
     source_task.abort();
-    let replacement=TestServer::builder().arweave_gateway(destination_url.clone()).parent_blob_origin(destination_url.clone()).build();
-    assert_ne!(original.state.keypair.pubkey_base58(),replacement.state.keypair.pubkey_base58());
-    let id=receipt["attestation_id"].as_str().unwrap();
-    let child=prepare_signed_a2a(&kp,"message",payload.clone(),"migration",Some(id.into()),"2026-10-02T00:00:01Z",None).unwrap();
-    let args=json!({"kind":"message","context_id":"migration","signed":hex::encode(child),"prev_id":id,"prev_locator":format!("blob://{digest}")});
-    let continued=result(&replacement.call_tool(Some(&owner),"mnemonic_attest_a2a",args.clone()).await);
-    assert_eq!(continued["delivery_status"],"verified");
+    let replacement = TestServer::builder()
+        .arweave_gateway(destination_url.clone())
+        .parent_blob_origin(destination_url.clone())
+        .build();
+    assert_ne!(
+        original.state.keypair.pubkey_base58(),
+        replacement.state.keypair.pubkey_base58()
+    );
+    let id = receipt["attestation_id"].as_str().unwrap();
+    let child = prepare_signed_a2a(
+        &kp,
+        "message",
+        payload.clone(),
+        "migration",
+        Some(id.into()),
+        "2026-10-02T00:00:01Z",
+        None,
+    )
+    .unwrap();
+    let args = json!({"kind":"message","context_id":"migration","signed":hex::encode(child),"prev_id":id,"prev_locator":format!("blob://{digest}")});
+    let continued = result(
+        &replacement
+            .call_tool(Some(&owner), "mnemonic_attest_a2a", args.clone())
+            .await,
+    );
+    assert_eq!(continued["delivery_status"], "verified");
     no_memories(&replacement);
     // Disabling the opt-in origin rejects that same hint rather than fetching arbitrary URLs.
-    let disabled=TestServer::builder().arweave_gateway(destination_url).build();
-    assert!(disabled.call_tool(Some(&owner),"mnemonic_attest_a2a",args.clone()).await.envelope["error"].is_object());
+    let disabled = TestServer::builder()
+        .arweave_gateway(destination_url)
+        .build();
+    assert!(disabled
+        .call_tool(Some(&owner), "mnemonic_attest_a2a", args.clone())
+        .await
+        .envelope["error"]
+        .is_object());
     // A blob at the right path with wrong bytes cannot authorize a continuation.
-    destination.blobs.lock().unwrap().get_mut(&digest).unwrap()[0]^=1;
-    assert!(replacement.call_tool(Some(&owner),"mnemonic_attest_a2a",args).await.envelope["error"].is_object());
+    destination.blobs.lock().unwrap().get_mut(&digest).unwrap()[0] ^= 1;
+    assert!(replacement
+        .call_tool(Some(&owner), "mnemonic_attest_a2a", args)
+        .await
+        .envelope["error"]
+        .is_object());
     destination_task.abort();
 }
 
 #[tokio::test]
 async fn unsupported_paid_a2a_rail_fails_closed_without_upload_or_settlement() {
-    let (url,remote,task)=remote().await;
-    let server=TestServer::builder().arweave_gateway(url).payment_mode("x402").build();
-    let v=vectors();let author=v["author"]["pubkey_base58"].as_str().unwrap();
-    let r=server.call_tool(Some(author),"mnemonic_attest_a2a",json!({"kind":"message","context_id":"fixture-ctx","signed":v["plain"]})).await;
-    assert_eq!(r.status,axum::http::StatusCode::SERVICE_UNAVAILABLE);
-    assert!(r.envelope["error"]["data"]["error"].as_str().unwrap().contains("no payment accepted"));
-    assert!(remote.blobs.lock().unwrap().is_empty());no_memories(&server);
+    let (url, remote, task) = remote().await;
+    let server = TestServer::builder()
+        .arweave_gateway(url)
+        .payment_mode("x402")
+        .build();
+    let v = vectors();
+    let author = v["author"]["pubkey_base58"].as_str().unwrap();
+    let r = server
+        .call_tool(
+            Some(author),
+            "mnemonic_attest_a2a",
+            json!({"kind":"message","context_id":"fixture-ctx","signed":v["plain"]}),
+        )
+        .await;
+    assert_eq!(r.status, axum::http::StatusCode::SERVICE_UNAVAILABLE);
+    assert!(r.envelope["error"]["data"]["error"]
+        .as_str()
+        .unwrap()
+        .contains("no payment accepted"));
+    assert!(remote.blobs.lock().unwrap().is_empty());
+    no_memories(&server);
     task.abort();
 }
 
@@ -438,29 +509,46 @@ async fn sdk_migrated_sealed_stream_recipient_continues_through_independent_oper
         match std::fs::remove_file(&path) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => panic!("cannot invalidate previous demo report {}: {error}", path.display()),
+            Err(error) => panic!(
+                "cannot invalidate previous demo report {}: {error}",
+                path.display()
+            ),
         }
     }
     let (source_url, source, source_task) = remote().await;
     let (destination_url, destination, destination_task) = remote().await;
-    let original = TestServer::builder().arweave_gateway(source_url.clone()).build();
+    let original = TestServer::builder()
+        .arweave_gateway(source_url.clone())
+        .build();
     let original_operator_key = original.state.keypair.pubkey_base58();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let original_url = format!("http://{}", listener.local_addr().unwrap());
     let app = original.app.clone();
-    let original_task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
+    let original_task = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
     let fixtures = vectors();
     let author = fixtures["author"]["pubkey_base58"].as_str().unwrap();
     let reader = fixtures["reader"]["pubkey_base58"].as_str().unwrap();
     let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../packages/sdk/scripts/test-migrated-a2a-e2e.mjs");
     let backup_passphrase = Keypair::new().pubkey().to_string();
-    let created = tokio::process::Command::new("node").arg(&script)
-        .env("A2A_OPERATOR_URL", &original_url).env("A2A_SOURCE_URL", &source_url)
-        .env("A2A_DESTINATION_URL", &destination_url).env("A2A_JWT", original.mint_jwt(author))
-        .env("A2A_READER_JWT", original.mint_jwt(reader)).env("A2A_BACKUP_PASSPHRASE", &backup_passphrase)
-        .output().await.unwrap();
-    assert!(created.status.success(), "{}", String::from_utf8_lossy(&created.stderr));
+    let created = tokio::process::Command::new("node")
+        .arg(&script)
+        .env("A2A_OPERATOR_URL", &original_url)
+        .env("A2A_SOURCE_URL", &source_url)
+        .env("A2A_DESTINATION_URL", &destination_url)
+        .env("A2A_JWT", original.mint_jwt(author))
+        .env("A2A_READER_JWT", original.mint_jwt(reader))
+        .env("A2A_BACKUP_PASSPHRASE", &backup_passphrase)
+        .output()
+        .await
+        .unwrap();
+    assert!(
+        created.status.success(),
+        "{}",
+        String::from_utf8_lossy(&created.stderr)
+    );
     let packet: Value = serde_json::from_slice(&created.stdout).unwrap();
     let source_bytes = source.blobs.lock().unwrap().clone();
     assert_eq!(source_bytes.len(), 3);
@@ -471,8 +559,14 @@ async fn sdk_migrated_sealed_stream_recipient_continues_through_independent_oper
             let digest = hex::encode(Sha256::digest(bytes));
             assert_eq!(migrated.get(&digest).unwrap(), bytes);
             let verified = verify_signed_a2a(bytes, None).unwrap();
-            assert_eq!(packet["authors"][format!("a2a:{}", verified.content_hash)], verified.signer);
-            assert_eq!(packet["originals"][format!("a2a:{}", verified.content_hash)], hex::encode(bytes));
+            assert_eq!(
+                packet["authors"][format!("a2a:{}", verified.content_hash)],
+                verified.signer
+            );
+            assert_eq!(
+                packet["originals"][format!("a2a:{}", verified.content_hash)],
+                hex::encode(bytes)
+            );
         }
     }
     no_memories(&original);
@@ -487,37 +581,79 @@ async fn sdk_migrated_sealed_stream_recipient_continues_through_independent_oper
     source_task.abort();
     let _ = source_task.await;
     assert!(reqwest::get(format!("{source_url}/graphql")).await.is_err());
-    assert!(reqwest::get(format!("{original_url}/health")).await.is_err());
-    let replacement = TestServer::builder().arweave_gateway(destination_url.clone())
-        .parent_blob_origin(destination_url.clone()).build();
-    assert_ne!(original_operator_key, replacement.state.keypair.pubkey_base58());
+    assert!(reqwest::get(format!("{original_url}/health"))
+        .await
+        .is_err());
+    let replacement = TestServer::builder()
+        .arweave_gateway(destination_url.clone())
+        .parent_blob_origin(destination_url.clone())
+        .build();
+    assert_ne!(
+        original_operator_key,
+        replacement.state.keypair.pubkey_base58()
+    );
     no_memories(&replacement);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let replacement_url = format!("http://{}", listener.local_addr().unwrap());
     let app = replacement.app.clone();
-    let replacement_task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
-    let recovered = tokio::process::Command::new("node").arg(&script).arg("restore")
-        .env("A2A_OPERATOR_URL", replacement_url).env("A2A_ORIGINAL_OPERATOR", original_url)
-        .env("A2A_SOURCE_URL", source_url).env("A2A_DESTINATION_URL", destination_url)
-        .env("A2A_JWT", replacement.mint_jwt(reader)).env("A2A_RECOVERY_PACKET", packet.to_string())
+    let replacement_task = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let recovered = tokio::process::Command::new("node")
+        .arg(&script)
+        .arg("restore")
+        .env("A2A_OPERATOR_URL", replacement_url)
+        .env("A2A_ORIGINAL_OPERATOR", original_url)
+        .env("A2A_SOURCE_URL", source_url)
+        .env("A2A_DESTINATION_URL", destination_url)
+        .env("A2A_JWT", replacement.mint_jwt(reader))
+        .env("A2A_RECOVERY_PACKET", packet.to_string())
         .env("A2A_BACKUP_PASSPHRASE", &backup_passphrase)
-        .output().await.unwrap();
-    assert!(recovered.status.success(), "{}", String::from_utf8_lossy(&recovered.stderr));
+        .output()
+        .await
+        .unwrap();
+    assert!(
+        recovered.status.success(),
+        "{}",
+        String::from_utf8_lossy(&recovered.stderr)
+    );
     let continued: Value = serde_json::from_slice(&recovered.stdout).unwrap();
     assert_eq!(continued["restored"], 3);
     assert_eq!(continued["completeToHeads"], true);
     let child_bytes = hex::decode(continued["original"].as_str().unwrap()).unwrap();
     let child = verify_signed_a2a(&child_bytes, Some(reader)).unwrap();
-    assert_eq!(child.binding.prev_id.as_deref(), continued["parent"].as_str());
-    let child_locator = continued["locator"].as_str().unwrap().strip_prefix("ar://").unwrap();
-    assert_eq!(destination.blobs.lock().unwrap()[child_locator], child_bytes);
+    assert_eq!(
+        child.binding.prev_id.as_deref(),
+        continued["parent"].as_str()
+    );
+    let child_locator = continued["locator"]
+        .as_str()
+        .unwrap()
+        .strip_prefix("ar://")
+        .unwrap();
+    assert_eq!(
+        destination.blobs.lock().unwrap()[child_locator],
+        child_bytes
+    );
     no_memories(&replacement);
-    let receipt_count: i64 = replacement.state.store.lock().unwrap().conn()
-        .query_row("SELECT COUNT(*) FROM a2a_anchor_receipts", [], |row| row.get(0)).unwrap();
-    assert_eq!(receipt_count, 1, "O2 has only the new child receipt, no restored SQL history");
+    let receipt_count: i64 = replacement
+        .state
+        .store
+        .lock()
+        .unwrap()
+        .conn()
+        .query_row("SELECT COUNT(*) FROM a2a_anchor_receipts", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(
+        receipt_count, 1,
+        "O2 has only the new child receipt, no restored SQL history"
+    );
     // Export only observed checks and public routing/identity metadata, never the recovery packet.
     let mut evidence = continued["evidence"].clone();
-    evidence["operators"] = json!({"O1":original_operator_key,"O2":replacement.state.keypair.pubkey_base58()});
+    evidence["operators"] =
+        json!({"O1":original_operator_key,"O2":replacement.state.keypair.pubkey_base58()});
     evidence["checks"]["originalOperatorOffline"] = json!(true);
     evidence["checks"]["originalSourceOffline"] = json!(true);
     evidence["checks"]["operatorPayloadTablesEmpty"] = json!(true);
@@ -544,12 +680,23 @@ async fn two_operator_uploads_have_distinct_locators_and_sdk_verified_dedup() {
     let (url, remote, task) = remote().await;
     let first = TestServer::builder().arweave_gateway(url.clone()).build();
     let second = TestServer::builder().arweave_gateway(url.clone()).build();
-    assert_ne!(first.state.keypair.pubkey_base58(), second.state.keypair.pubkey_base58());
+    assert_ne!(
+        first.state.keypair.pubkey_base58(),
+        second.state.keypair.pubkey_base58()
+    );
     let v = vectors();
     let owner = v["author"]["pubkey_base58"].as_str().unwrap();
     let args = json!({"kind":"message", "context_id":v["context_id"], "signed":v["plain"]});
-    let a = result(&first.call_tool(Some(owner), "mnemonic_attest_a2a", args.clone()).await);
-    let b = result(&second.call_tool(Some(owner), "mnemonic_attest_a2a", args).await);
+    let a = result(
+        &first
+            .call_tool(Some(owner), "mnemonic_attest_a2a", args.clone())
+            .await,
+    );
+    let b = result(
+        &second
+            .call_tool(Some(owner), "mnemonic_attest_a2a", args)
+            .await,
+    );
     assert_eq!(a["attestation_id"], b["attestation_id"]);
     assert_ne!(a["locator"], b["locator"]);
     assert_eq!(remote.uploads.load(std::sync::atomic::Ordering::SeqCst), 2);
@@ -561,11 +708,22 @@ async fn two_operator_uploads_have_distinct_locators_and_sdk_verified_dedup() {
     no_memories(&second);
     let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../packages/sdk/scripts/test-migrated-a2a-e2e.mjs");
-    let output = tokio::process::Command::new("node").arg(script).arg("dedup")
+    let output = tokio::process::Command::new("node")
+        .arg(script)
+        .arg("dedup")
         .env("A2A_SOURCE_URL", url)
-        .env("A2A_DEDUP_PACKET", json!({"id":a["attestation_id"]}).to_string())
-        .output().await.unwrap();
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        .env(
+            "A2A_DEDUP_PACKET",
+            json!({"id":a["attestation_id"]}).to_string(),
+        )
+        .output()
+        .await
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let report: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(report["verifiedCandidates"], 2);
     assert_eq!(report["artifacts"], 1);
@@ -576,22 +734,40 @@ async fn two_operator_uploads_have_distinct_locators_and_sdk_verified_dedup() {
 async fn invalid_external_parents_fail_before_upload_or_payment() {
     let (url, remote, task) = remote().await;
     let config = mnemonic_mcp::universal_paywall::UniversalPaywallConfig {
-        url: format!("{url}/paywall"), api_key: "test-only".into(), network: "eip155:84532".into(),
+        url: format!("{url}/paywall"),
+        api_key: "test-only".into(),
+        network: "eip155:84532".into(),
         asset: "0x0000000000000000000000000000000000000001".into(),
         pay_to: "0x0000000000000000000000000000000000000002".into(),
-        payer_wallet: String::new(), approval_url_base: String::new(),
+        payer_wallet: String::new(),
+        approval_url_base: String::new(),
     };
-    let server = TestServer::builder().arweave_gateway(url).payment_mode("x402")
-        .universal_paywall(config).build();
+    let server = TestServer::builder()
+        .arweave_gateway(url)
+        .payment_mode("x402")
+        .universal_paywall(config)
+        .build();
     let author = Keypair::new();
     let outsider = Keypair::new();
     let make = |key: &Keypair, context: &str, label: &str, prev: Option<String>| {
         let payload = json!({"messageId":label,"role":"agent","contextId":context,"parts":[{"kind":"text","text":label}]});
-        prepare_signed_a2a(key, "message", payload, context, prev, "2026-10-02T00:00:00Z", None).unwrap()
+        prepare_signed_a2a(
+            key,
+            "message",
+            payload,
+            context,
+            prev,
+            "2026-10-02T00:00:00Z",
+            None,
+        )
+        .unwrap()
     };
     let parent = make(&author, "parent-ctx", "parent", None);
     let wrong = make(&author, "parent-ctx", "different-parent", None);
-    let parent_id = format!("a2a:{}", verify_signed_a2a(&parent, None).unwrap().content_hash);
+    let parent_id = format!(
+        "a2a:{}",
+        verify_signed_a2a(&parent, None).unwrap().content_hash
+    );
     let good_locator = "A".repeat(43);
     let wrong_locator = "B".repeat(43);
     let corrupt_locator = "C".repeat(43);
@@ -604,19 +780,69 @@ async fn invalid_external_parents_fail_before_upload_or_payment() {
         blobs.insert(corrupt_locator.clone(), corrupt);
     }
     let cases = [
-        ("wrong hash", &author, "parent-ctx", Some(wrong_locator), "parent hash mismatch"),
-        ("wrong context", &author, "another-ctx", Some(good_locator.clone()), "parent context mismatch"),
-        ("ineligible writer", &outsider, "parent-ctx", Some(good_locator), "parent link not eligible"),
-        ("corrupt signature", &author, "parent-ctx", Some(corrupt_locator), "signature"),
-        ("unavailable", &author, "parent-ctx", Some("D".repeat(43)), "ParentUnavailable"),
-        ("missing locator", &author, "parent-ctx", None, "ParentLocatorRequired"),
-        ("malformed locator", &author, "parent-ctx", Some("invalid-id".into()), "invalid parent locator"),
+        (
+            "wrong hash",
+            &author,
+            "parent-ctx",
+            Some(wrong_locator),
+            "parent hash mismatch",
+        ),
+        (
+            "wrong context",
+            &author,
+            "another-ctx",
+            Some(good_locator.clone()),
+            "parent context mismatch",
+        ),
+        (
+            "ineligible writer",
+            &outsider,
+            "parent-ctx",
+            Some(good_locator),
+            "parent link not eligible",
+        ),
+        (
+            "corrupt signature",
+            &author,
+            "parent-ctx",
+            Some(corrupt_locator),
+            "signature",
+        ),
+        (
+            "unavailable",
+            &author,
+            "parent-ctx",
+            Some("D".repeat(43)),
+            "ParentUnavailable",
+        ),
+        (
+            "missing locator",
+            &author,
+            "parent-ctx",
+            None,
+            "ParentLocatorRequired",
+        ),
+        (
+            "malformed locator",
+            &author,
+            "parent-ctx",
+            Some("invalid-id".into()),
+            "invalid parent locator",
+        ),
     ];
     for (label, signer, context, locator, expected_message) in cases {
         let child = make(signer, context, label, Some(parent_id.clone()));
         let mut args = json!({"kind":"message","context_id":context,"signed":hex::encode(child),"prev_id":parent_id});
-        if let Some(locator) = locator { args["prev_locator"] = json!(format!("ar://{locator}")); }
-        let response = server.call_tool(Some(&signer.pubkey().to_string()), "mnemonic_attest_a2a", args).await;
+        if let Some(locator) = locator {
+            args["prev_locator"] = json!(format!("ar://{locator}"));
+        }
+        let response = server
+            .call_tool(
+                Some(&signer.pubkey().to_string()),
+                "mnemonic_attest_a2a",
+                args,
+            )
+            .await;
         let (status, code) = if label == "unavailable" {
             (axum::http::StatusCode::SERVICE_UNAVAILABLE, -32011)
         } else {
@@ -626,12 +852,33 @@ async fn invalid_external_parents_fail_before_upload_or_payment() {
         assert_eq!(response.envelope["error"]["code"], code);
         let message = response.envelope["error"]["message"].as_str().unwrap();
         assert!(message.contains(expected_message), "{label}: {message}");
-        if label != "unavailable" { assert_ne!(message, "ParentUnavailable"); }
-        assert_eq!(remote.uploads.load(std::sync::atomic::Ordering::SeqCst), 0, "{label}");
-        assert_eq!(remote.payment_calls.load(std::sync::atomic::Ordering::SeqCst), 0, "{label}");
+        if label != "unavailable" {
+            assert_ne!(message, "ParentUnavailable");
+        }
+        assert_eq!(
+            remote.uploads.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "{label}"
+        );
+        assert_eq!(
+            remote
+                .payment_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "{label}"
+        );
         let store = server.state.store.lock().unwrap();
-        for table in ["paid_operations", "delivery_operations", "a2a_anchor_receipts"] {
-            let count: i64 = store.conn().query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| row.get(0)).unwrap();
+        for table in [
+            "paid_operations",
+            "delivery_operations",
+            "a2a_anchor_receipts",
+        ] {
+            let count: i64 = store
+                .conn()
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
             assert_eq!(count, 0, "{label}: {table}");
         }
     }

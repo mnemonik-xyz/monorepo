@@ -212,4 +212,3 @@ pub trait AttestationStore {
         Ok(Vec::new())
     }
 }
-

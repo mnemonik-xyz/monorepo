@@ -8,9 +8,9 @@
 
 use std::sync::Arc;
 
+use mnemonic_core::identity::recall_key::{generate_rk, wrap_rk};
 use mnemonic_mcp::api::{get_active_rk, RecallSession};
 use mnemonic_mcp::test_support::mock_state;
-use mnemonic_core::identity::recall_key::{generate_rk, wrap_rk};
 
 // ── Tests ────────────────────────────────────────────────────────────────────
 
@@ -60,7 +60,10 @@ async fn insert_and_retrieve_session() {
     }
 
     let after_delete = get_active_rk(&state.recall_sessions, owner).await;
-    assert!(after_delete.is_none(), "session should be gone after deletion");
+    assert!(
+        after_delete.is_none(),
+        "session should be gone after deletion"
+    );
 }
 
 /// An expired session is lazily evicted by `get_active_rk`.
@@ -122,12 +125,9 @@ async fn recall_key_wrap_unwrap_round_trip() {
 
     // Unwrap using the server's bootstrap secret key.
     let server_sk: [u8; 32] = state.bootstrap_server_x25519_secret.to_bytes();
-    let recovered = mnemonic_core::identity::recall_key::unwrap_rk(
-        &wrapped.enc,
-        &wrapped.wk,
-        &server_sk,
-    )
-    .expect("unwrap_rk failed");
+    let recovered =
+        mnemonic_core::identity::recall_key::unwrap_rk(&wrapped.enc, &wrapped.wk, &server_sk)
+            .expect("unwrap_rk failed");
 
     assert_eq!(*recovered, rk, "recovered RK must match original");
 }
@@ -161,8 +161,12 @@ async fn session_isolation_between_owners() {
         );
     }
 
-    let ra = get_active_rk(&state.recall_sessions, owner_a).await.unwrap();
-    let rb = get_active_rk(&state.recall_sessions, owner_b).await.unwrap();
+    let ra = get_active_rk(&state.recall_sessions, owner_a)
+        .await
+        .unwrap();
+    let rb = get_active_rk(&state.recall_sessions, owner_b)
+        .await
+        .unwrap();
 
     assert_eq!(*ra, rk_a, "owner A gets their own RK");
     assert_eq!(*rb, rk_b, "owner B gets their own RK");
@@ -172,11 +176,15 @@ async fn session_isolation_between_owners() {
     state.recall_sessions.lock().await.remove(owner_a);
 
     assert!(
-        get_active_rk(&state.recall_sessions, owner_a).await.is_none(),
+        get_active_rk(&state.recall_sessions, owner_a)
+            .await
+            .is_none(),
         "owner A session should be gone"
     );
     assert!(
-        get_active_rk(&state.recall_sessions, owner_b).await.is_some(),
+        get_active_rk(&state.recall_sessions, owner_b)
+            .await
+            .is_some(),
         "owner B session should still exist"
     );
 }
@@ -203,5 +211,8 @@ async fn process_restart_drops_all_sessions() {
     // Simulate restart by creating a fresh state (new process has no sessions).
     let state2 = mock_state();
     let rk = get_active_rk(&state2.recall_sessions, owner).await;
-    assert!(rk.is_none(), "new state (simulated restart) must have no sessions");
+    assert!(
+        rk.is_none(),
+        "new state (simulated restart) must have no sessions"
+    );
 }

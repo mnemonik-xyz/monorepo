@@ -102,7 +102,13 @@ pub fn encrypt_content(
     let nonce_ga: &chacha20poly1305::XNonce = nonce.into();
 
     cipher
-        .encrypt(nonce_ga, Payload { msg: plaintext, aad: ad })
+        .encrypt(
+            nonce_ga,
+            Payload {
+                msg: plaintext,
+                aad: ad,
+            },
+        )
         .map_err(|_| ContentError::EncryptFailed)
 }
 
@@ -174,7 +180,10 @@ mod tests {
 
     #[test]
     fn unpad_too_short_returns_error() {
-        assert_eq!(unpad(&[0x01, 0x02, 0x03]), Err(ContentError::PaddedBufferTooShort));
+        assert_eq!(
+            unpad(&[0x01, 0x02, 0x03]),
+            Err(ContentError::PaddedBufferTooShort)
+        );
     }
 
     #[test]

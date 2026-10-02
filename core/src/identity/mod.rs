@@ -14,11 +14,11 @@ pub use keystore::{KeyStore, KeystoreEntry, KeystoreError};
 pub use keystore_file::FileKeyStore;
 pub use keystore_os::OsKeyStore;
 pub use lazy::LazyKeypair;
-pub use unlock_cache::UnlockCache;
 pub use token_store::{
     delete_token, delete_token_at, read_token, read_token_from, save_token, save_token_to,
     token_path, TokenJson, TokenStoreError,
 };
+pub use unlock_cache::UnlockCache;
 
 use solana_sdk::pubkey::Pubkey;
 use solana_sdk::signature::{Keypair, Signer};

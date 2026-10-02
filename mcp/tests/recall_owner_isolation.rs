@@ -125,7 +125,13 @@ fn extract_correlation_id(body: &Value) -> String {
 /// Uses the default visibility (private = sealed). For the recall-isolation
 /// test, memories are seeded directly via `save_attestation` so they appear
 /// in the embedding index (sealed rows are not vector-searchable by design).
-async fn _one_attestation_sealed(app: &Router, kp: &Keypair, token: &str, pubkey: &str, content: &str) {
+async fn _one_attestation_sealed(
+    app: &Router,
+    kp: &Keypair,
+    token: &str,
+    pubkey: &str,
+    content: &str,
+) {
     let body = post_jsonrpc(
         app,
         serde_json::json!({
@@ -187,13 +193,22 @@ async fn test_recall_filters_by_owner_pubkey_and_anonymous_returns_401() {
         ] {
             let id = uuid::Uuid::new_v4().to_string();
             let hash = blake3::hash(content.as_bytes()).to_hex().to_string();
-            store.save_attestation(
-                &id, content, &hash, &[], &format!("local:{}", &id[..8]),
-                &format!("local:{}", &hash[..16]), owner, owner, &now,
-                mnemonic_core::storage::WriteMode::Local,
-                mnemonic_core::storage::Visibility::Public,
-                &stub_embedding,
-            ).expect("save_attestation");
+            store
+                .save_attestation(
+                    &id,
+                    content,
+                    &hash,
+                    &[],
+                    &format!("local:{}", &id[..8]),
+                    &format!("local:{}", &hash[..16]),
+                    owner,
+                    owner,
+                    &now,
+                    mnemonic_core::storage::WriteMode::Local,
+                    mnemonic_core::storage::Visibility::Public,
+                    &stub_embedding,
+                )
+                .expect("save_attestation");
         }
     }
 

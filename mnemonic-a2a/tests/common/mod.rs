@@ -6,10 +6,10 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use mnemonic_core::storage::traits::{AttestationRow, AttestationStore, ReconstructionInputs};
-use mnemonic_core::storage::{Visibility, WriteMode};
-use mnemonic_core::storage::SearchResult;
 use mnemonic_a2a::A2aStore;
+use mnemonic_core::storage::traits::{AttestationRow, AttestationStore, ReconstructionInputs};
+use mnemonic_core::storage::SearchResult;
+use mnemonic_core::storage::{Visibility, WriteMode};
 
 /// Row stored in `InMemoryA2aStore`.
 #[derive(Clone)]
@@ -65,9 +65,7 @@ impl AttestationStore for InMemoryA2aStore {
     ) -> anyhow::Result<()> {
         let mut map = self.rows.lock().unwrap();
         // Preserve existing context_id on UPDATE (INSERT OR REPLACE behaviour).
-        let existing_ctx = map
-            .get(attestation_id)
-            .and_then(|r| r.context_id.clone());
+        let existing_ctx = map.get(attestation_id).and_then(|r| r.context_id.clone());
         map.insert(
             attestation_id.to_string(),
             Row {

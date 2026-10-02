@@ -619,12 +619,12 @@ pub fn seal_memory(
     producer: &str,
     created_at: &str,
 ) -> Result<JsValue, JsValue> {
-    let pub_bytes: [u8; 32] = author_ed25519_pub
-        .try_into()
-        .map_err(|_| JsValue::from_str(&format!(
+    let pub_bytes: [u8; 32] = author_ed25519_pub.try_into().map_err(|_| {
+        JsValue::from_str(&format!(
             "seal_memory: author_ed25519_pub must be 32 bytes, got {}",
             author_ed25519_pub.len()
-        )))?;
+        ))
+    })?;
 
     let mut rng = rand_core::OsRng;
     let artifact = crate::sealed::seal_memory(
@@ -656,17 +656,14 @@ pub fn seal_memory(
 /// The `x25519_secret` copy is zeroized after use.
 #[wasm_bindgen]
 pub fn open_memory(outer_cbor: &[u8], x25519_secret: &[u8]) -> Result<Vec<u8>, JsValue> {
-    let secret = zeroize::Zeroizing::new(
-        x25519_secret.to_vec(),
-    );
-    let key: [u8; 32] = secret.as_slice()
-        .try_into()
-        .map_err(|_| JsValue::from_str(&format!(
+    let secret = zeroize::Zeroizing::new(x25519_secret.to_vec());
+    let key: [u8; 32] = secret.as_slice().try_into().map_err(|_| {
+        JsValue::from_str(&format!(
             "open_memory: x25519_secret must be 32 bytes, got {}",
             x25519_secret.len()
-        )))?;
-    crate::sealed::open_memory(outer_cbor, &key)
-        .map_err(|e| JsValue::from_str(&e.to_string()))
+        ))
+    })?;
+    crate::sealed::open_memory(outer_cbor, &key).map_err(|e| JsValue::from_str(&e.to_string()))
 }
 
 /// Open a sealed memory when `K` is already known (bearer links / grants).
@@ -676,14 +673,13 @@ pub fn open_memory(outer_cbor: &[u8], x25519_secret: &[u8]) -> Result<Vec<u8>, J
 #[wasm_bindgen]
 pub fn open_with_key(outer_cbor: &[u8], k: &[u8]) -> Result<Vec<u8>, JsValue> {
     let secret = zeroize::Zeroizing::new(k.to_vec());
-    let key: [u8; 32] = secret.as_slice()
-        .try_into()
-        .map_err(|_| JsValue::from_str(&format!(
+    let key: [u8; 32] = secret.as_slice().try_into().map_err(|_| {
+        JsValue::from_str(&format!(
             "open_with_key: k must be 32 bytes, got {}",
             k.len()
-        )))?;
-    crate::sealed::open_with_key(outer_cbor, &key)
-        .map_err(|e| JsValue::from_str(&e.to_string()))
+        ))
+    })?;
+    crate::sealed::open_with_key(outer_cbor, &key).map_err(|e| JsValue::from_str(&e.to_string()))
 }
 
 /// Build an unsigned GRANT_V1 CBOR artifact.
@@ -709,27 +705,24 @@ pub fn make_grant(
     created_at: &str,
 ) -> Result<Vec<u8>, JsValue> {
     let k_secret = zeroize::Zeroizing::new(k.to_vec());
-    let k_arr: [u8; 32] = k_secret.as_slice()
-        .try_into()
-        .map_err(|_| JsValue::from_str(&format!(
-            "make_grant: k must be 32 bytes, got {}",
-            k.len()
-        )))?;
-    let hash_arr: [u8; 32] = memory_hash
-        .try_into()
-        .map_err(|_| JsValue::from_str(&format!(
+    let k_arr: [u8; 32] = k_secret.as_slice().try_into().map_err(|_| {
+        JsValue::from_str(&format!("make_grant: k must be 32 bytes, got {}", k.len()))
+    })?;
+    let hash_arr: [u8; 32] = memory_hash.try_into().map_err(|_| {
+        JsValue::from_str(&format!(
             "make_grant: memory_hash must be 32 bytes, got {}",
             memory_hash.len()
-        )))?;
+        ))
+    })?;
 
     let reader_pk_arr: Option<[u8; 32]> = match reader_pk {
         Some(ref rpk) => {
-            let arr: [u8; 32] = rpk.as_slice()
-                .try_into()
-                .map_err(|_| JsValue::from_str(&format!(
+            let arr: [u8; 32] = rpk.as_slice().try_into().map_err(|_| {
+                JsValue::from_str(&format!(
                     "make_grant: reader_pk must be 32 bytes, got {}",
                     rpk.len()
-                )))?;
+                ))
+            })?;
             Some(arr)
         }
         None => None,
@@ -755,12 +748,12 @@ pub fn make_grant(
 #[wasm_bindgen]
 pub fn open_grant(grant_cbor: &[u8], x25519_secret: &[u8]) -> Result<Vec<u8>, JsValue> {
     let secret = zeroize::Zeroizing::new(x25519_secret.to_vec());
-    let key: [u8; 32] = secret.as_slice()
-        .try_into()
-        .map_err(|_| JsValue::from_str(&format!(
+    let key: [u8; 32] = secret.as_slice().try_into().map_err(|_| {
+        JsValue::from_str(&format!(
             "open_grant: x25519_secret must be 32 bytes, got {}",
             x25519_secret.len()
-        )))?;
+        ))
+    })?;
     let k = crate::sealed::open_grant(grant_cbor, &key)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
     Ok(k.to_vec())
@@ -771,12 +764,12 @@ pub fn open_grant(grant_cbor: &[u8], x25519_secret: &[u8]) -> Result<Vec<u8>, Js
 /// Returns the 32-byte X25519 public key as a `Uint8Array`.
 #[wasm_bindgen]
 pub fn x25519_public_from_ed25519(ed25519_pub: &[u8]) -> Result<Vec<u8>, JsValue> {
-    let pub_bytes: [u8; 32] = ed25519_pub
-        .try_into()
-        .map_err(|_| JsValue::from_str(&format!(
+    let pub_bytes: [u8; 32] = ed25519_pub.try_into().map_err(|_| {
+        JsValue::from_str(&format!(
             "x25519_public_from_ed25519: ed25519_pub must be 32 bytes, got {}",
             ed25519_pub.len()
-        )))?;
+        ))
+    })?;
     crate::sealed::x25519_public_from_ed25519(&pub_bytes)
         .map(|k| k.to_vec())
         .map_err(|e| JsValue::from_str(&e.to_string()))
@@ -813,8 +806,7 @@ pub fn parse_link_fragment(fragment: &str) -> Result<Vec<u8>, JsValue> {
 /// signature and extracts the header fields.
 #[wasm_bindgen]
 pub fn verify_sealed(cose_bytes: &[u8]) -> Result<JsValue, JsValue> {
-    let sv = crate::codec::sign::verify_sealed(cose_bytes)
-        .map_err(|e| JsValue::from_str(&e))?;
+    let sv = crate::codec::sign::verify_sealed(cose_bytes).map_err(|e| JsValue::from_str(&e))?;
 
     #[derive(serde::Serialize)]
     struct SealedVerificationJs {

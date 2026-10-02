@@ -20,5 +20,5 @@ pub use sqlite::{
     effective_visibility, is_anchored_arweave_tx, BlogPost, NonPublicAnchorKeys, PublicArtifact,
     PublicStats, SealedIndexRow, SqliteStore, TimelineBucket,
 };
-pub use traits::{AttestationRow, ReconstructionInputs, SearchResult};
 pub use traits::AttestationStore;
+pub use traits::{AttestationRow, ReconstructionInputs, SearchResult};

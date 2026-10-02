@@ -185,12 +185,11 @@ async fn test_full_lifecycle_sign_callback_410_on_replay() {
         let sealed = store
             .list_sealed(&user_pubkey, None, 5)
             .expect("list_sealed ok");
-        assert_eq!(
-            sealed.len(),
-            1,
-            "expected 1 sealed row, got {sealed:?}"
+        assert_eq!(sealed.len(), 1, "expected 1 sealed row, got {sealed:?}");
+        assert!(
+            !sealed[0].sealed_blob.is_empty(),
+            "sealed_blob must be non-empty"
         );
-        assert!(!sealed[0].sealed_blob.is_empty(), "sealed_blob must be non-empty");
         // The `count` helper counts ALL rows (plaintext + sealed).
         assert_eq!(store.count(&user_pubkey).expect("count"), 1);
     }
@@ -264,11 +263,10 @@ async fn test_programmatic_client_sign_without_pending_get() {
         let sealed = store
             .list_sealed(&user_pubkey, None, 5)
             .expect("list_sealed ok");
-        assert_eq!(
-            sealed.len(),
-            1,
-            "expected 1 sealed row, got {sealed:?}"
+        assert_eq!(sealed.len(), 1, "expected 1 sealed row, got {sealed:?}");
+        assert!(
+            !sealed[0].sealed_blob.is_empty(),
+            "sealed_blob must be non-empty"
         );
-        assert!(!sealed[0].sealed_blob.is_empty(), "sealed_blob must be non-empty");
     }
 }

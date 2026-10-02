@@ -48,7 +48,10 @@ pub async fn anchor_sealed_handler(
 
 /// Hosted local writes are retired. Store signed bytes on the agent's device.
 pub async fn store_sealed_handler() -> Response {
-    error_resp(StatusCode::GONE, "hosted local storage retired; retain sealed bytes on the client")
+    error_resp(
+        StatusCode::GONE,
+        "hosted local storage retired; retain sealed bytes on the client",
+    )
 }
 
 // ── GET /api/sealed ───────────────────────────────────────────────────────────
@@ -140,7 +143,10 @@ pub async fn list_grants_handler(
     let reader = match q.reader {
         Some(r) => r,
         None => {
-            return error_resp(StatusCode::BAD_REQUEST, "reader query parameter is required");
+            return error_resp(
+                StatusCode::BAD_REQUEST,
+                "reader query parameter is required",
+            );
         }
     };
     let rows = {

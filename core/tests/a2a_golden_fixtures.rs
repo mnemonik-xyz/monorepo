@@ -100,7 +100,9 @@ fn make_task_entry(name: &str, task: &Task, kp: &Keypair) -> A2aGoldenEntry {
 fn make_artifact_entry(name: &str, art: &A2aArtifact, kp: &Keypair) -> A2aGoldenEntry {
     let a2a_json = serde_json::to_string(art).expect("A2aArtifact JSON");
     let jcs = art.to_jcs_bytes().expect("A2aArtifact JCS");
-    let cose = art.to_canonical_envelope(kp, None).expect("A2aArtifact COSE");
+    let cose = art
+        .to_canonical_envelope(kp, None)
+        .expect("A2aArtifact COSE");
     A2aGoldenEntry {
         name: name.to_string(),
         a2a_json,

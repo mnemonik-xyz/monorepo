@@ -94,9 +94,7 @@ pub enum SealedPartError {
 /// - [`SealedPartError::BadEd25519Pubkey`] — base58 decode fails or length ≠ 32.
 /// - [`SealedPartError::KeyConvert`] — the Ed25519 → X25519 conversion fails
 ///   (e.g. small-order point).
-pub fn recipient_x25519_from_agent_card(
-    agent_card: &Value,
-) -> Result<[u8; 32], SealedPartError> {
+pub fn recipient_x25519_from_agent_card(agent_card: &Value) -> Result<[u8; 32], SealedPartError> {
     // Extract the x-mnemonic extension.
     let ext: XMnemonicExtension = {
         let extensions = agent_card.get("extensions");
@@ -171,9 +169,7 @@ pub fn build_sealed_data_part(sealed_cbor: &[u8], grants: &[Vec<u8>]) -> Part {
 /// - [`SealedPartError::DeserializePayload`] — the `data` field cannot be parsed.
 /// - [`SealedPartError::BadBase64Sealed`] — the `sealed` string is not valid base64.
 /// - [`SealedPartError::BadBase64Grant`] — a `grants` entry is not valid base64.
-pub fn extract_sealed_data_part(
-    part: &Part,
-) -> Result<(Vec<u8>, Vec<Vec<u8>>), SealedPartError> {
+pub fn extract_sealed_data_part(part: &Part) -> Result<(Vec<u8>, Vec<Vec<u8>>), SealedPartError> {
     let (data, mime_type) = match part {
         Part::Data { data, mime_type } => (data, mime_type),
         _ => return Err(SealedPartError::NotADataPart),
@@ -209,8 +205,8 @@ pub fn extract_sealed_data_part(
 mod tests {
     use super::*;
     use crate::codec::a2a::extension::build_x_mnemonic_extension;
-    use crate::sealed::{seal_memory, SealError};
     use crate::sealed::keys::{x25519_public_from_ed25519, x25519_secret_from_ed25519};
+    use crate::sealed::{seal_memory, SealError};
     use ed25519_dalek::SigningKey;
     use serde_json::json;
 
@@ -236,8 +232,8 @@ mod tests {
     fn recipient_x25519_extracted_from_card() {
         let sk = test_signing_key();
         let card = agent_card_for(&sk);
-        let x25519 = recipient_x25519_from_agent_card(&card)
-            .expect("must extract X25519 from valid card");
+        let x25519 =
+            recipient_x25519_from_agent_card(&card).expect("must extract X25519 from valid card");
         // Should match the direct derivation.
         let expected = x25519_public_from_ed25519(&sk.verifying_key().to_bytes()).unwrap();
         assert_eq!(x25519, expected);
@@ -277,8 +273,7 @@ mod tests {
         let fake_grant = b"fake-grant-cbor-bytes";
         let part = build_sealed_data_part(fake_cbor, &[fake_grant.to_vec()]);
 
-        let (got_cbor, got_grants) =
-            extract_sealed_data_part(&part).expect("extract must succeed");
+        let (got_cbor, got_grants) = extract_sealed_data_part(&part).expect("extract must succeed");
         assert_eq!(got_cbor, fake_cbor);
         assert_eq!(got_grants.len(), 1);
         assert_eq!(got_grants[0], fake_grant);
@@ -298,7 +293,9 @@ mod tests {
 
     #[test]
     fn extract_non_data_part_fails() {
-        let part = Part::Text { text: "hello".to_string() };
+        let part = Part::Text {
+            text: "hello".to_string(),
+        };
         assert!(matches!(
             extract_sealed_data_part(&part),
             Err(SealedPartError::NotADataPart)
@@ -352,10 +349,10 @@ mod tests {
         // Extract and open.
         let (sealed_cbor, grants) = extract_sealed_data_part(&part).unwrap();
         // Open via the grant (recipient uses open_grant + open_with_key).
-        let k_from_grant =
-            crate::sealed::open_grant(&grants[0], &recipient_x25519_sec).expect("open_grant failed");
-        let recovered =
-            crate::sealed::open_with_key(&sealed_cbor, &k_from_grant).expect("open_with_key failed");
+        let k_from_grant = crate::sealed::open_grant(&grants[0], &recipient_x25519_sec)
+            .expect("open_grant failed");
+        let recovered = crate::sealed::open_with_key(&sealed_cbor, &k_from_grant)
+            .expect("open_with_key failed");
         assert_eq!(recovered, inner);
     }
 
@@ -442,8 +439,7 @@ mod tests {
         let mut prev = root_hash;
 
         for (idx, &chunk) in chunks.iter().enumerate() {
-            let sc = seal_chunk(chunk, &k, idx as u64, &prev, &mut rng)
-                .expect("seal_chunk failed");
+            let sc = seal_chunk(chunk, &k, idx as u64, &prev, &mut rng).expect("seal_chunk failed");
             prev = sc.hash;
             sealed_chunks.push(sc);
         }
@@ -451,8 +447,7 @@ mod tests {
         // Open all chunks in order.
         let mut prev = root_hash;
         for (idx, sc) in sealed_chunks.iter().enumerate() {
-            let pt = open_chunk(&sc.sealed_cbor, &k, idx as u64, &prev)
-                .expect("open_chunk failed");
+            let pt = open_chunk(&sc.sealed_cbor, &k, idx as u64, &prev).expect("open_chunk failed");
             assert_eq!(pt, chunks[idx]);
             prev = sc.hash;
         }

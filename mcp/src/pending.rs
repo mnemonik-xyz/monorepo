@@ -548,7 +548,18 @@ mod tests {
         let p = PendingBundles::new(10, 300, 5);
         let (c, e, h, cb, tg, md) = dummy_entry("hello");
         let id = p
-            .insert("u".into(), c, e, h, cb, tg, md, WriteMode::Anchored, Visibility::Private, false)
+            .insert(
+                "u".into(),
+                c,
+                e,
+                h,
+                cb,
+                tg,
+                md,
+                WriteMode::Anchored,
+                Visibility::Private,
+                false,
+            )
             .await
             .unwrap();
         assert_eq!(id.len(), 36, "correlation_id is uuidv4 (36 chars)");
@@ -563,7 +574,18 @@ mod tests {
         for i in 0..4 {
             let (c, e, h, cb, tg, md) = dummy_entry(&format!("c{i}"));
             let id = p
-                .insert(format!("user{i}"), c, e, h, cb, tg, md, WriteMode::Anchored, Visibility::Private, false)
+                .insert(
+                    format!("user{i}"),
+                    c,
+                    e,
+                    h,
+                    cb,
+                    tg,
+                    md,
+                    WriteMode::Anchored,
+                    Visibility::Private,
+                    false,
+                )
                 .await
                 .unwrap();
             ids.push(id);
@@ -592,7 +614,18 @@ mod tests {
         let p = PendingBundles::new(10, 300, 5);
         let (c, e, h, cb, tg, md) = dummy_entry("expires");
         let id = p
-            .insert("u".into(), c, e, h, cb, tg, md, WriteMode::Anchored, Visibility::Private, false)
+            .insert(
+                "u".into(),
+                c,
+                e,
+                h,
+                cb,
+                tg,
+                md,
+                WriteMode::Anchored,
+                Visibility::Private,
+                false,
+            )
             .await
             .unwrap();
 
@@ -614,20 +647,53 @@ mod tests {
         for i in 0..3 {
             let (c, e, h, cb, tg, md) = dummy_entry(&format!("c{i}"));
             ok_ids.push(
-                p.insert("u".into(), c, e, h, cb, tg, md, WriteMode::Anchored, Visibility::Private, false)
-                    .await
-                    .unwrap(),
+                p.insert(
+                    "u".into(),
+                    c,
+                    e,
+                    h,
+                    cb,
+                    tg,
+                    md,
+                    WriteMode::Anchored,
+                    Visibility::Private,
+                    false,
+                )
+                .await
+                .unwrap(),
             );
         }
         let (c, e, h, cb, tg, md) = dummy_entry("over");
         let result = p
-            .insert("u".into(), c, e, h, cb, tg, md, WriteMode::Anchored, Visibility::Private, false)
+            .insert(
+                "u".into(),
+                c,
+                e,
+                h,
+                cb,
+                tg,
+                md,
+                WriteMode::Anchored,
+                Visibility::Private,
+                false,
+            )
             .await;
         assert!(matches!(result, Err(PendingError::PerUserCapExceeded)));
         // Other users unaffected.
         let (c, e, h, cb, tg, md) = dummy_entry("other");
         assert!(p
-            .insert("v".into(), c, e, h, cb, tg, md, WriteMode::Anchored, Visibility::Private, false)
+            .insert(
+                "v".into(),
+                c,
+                e,
+                h,
+                cb,
+                tg,
+                md,
+                WriteMode::Anchored,
+                Visibility::Private,
+                false
+            )
             .await
             .is_ok());
         let _ = ok_ids;
@@ -639,7 +705,18 @@ mod tests {
         let huge = "x".repeat(MAX_CONTENT_BYTES + 1);
         let (_, e, h, cb, tg, md) = dummy_entry("ignored");
         let result = p
-            .insert("u".into(), huge, e, h, cb, tg, md, WriteMode::Anchored, Visibility::Private, false)
+            .insert(
+                "u".into(),
+                huge,
+                e,
+                h,
+                cb,
+                tg,
+                md,
+                WriteMode::Anchored,
+                Visibility::Private,
+                false,
+            )
             .await;
         assert!(matches!(result, Err(PendingError::OversizedPayload)));
     }
@@ -652,7 +729,18 @@ mod tests {
         let metadata = serde_json::json!({"big": big_str});
         let (c, e, h, cb, tg, _) = dummy_entry("c");
         let result = p
-            .insert("u".into(), c, e, h, cb, tg, metadata, WriteMode::Anchored, Visibility::Private, false)
+            .insert(
+                "u".into(),
+                c,
+                e,
+                h,
+                cb,
+                tg,
+                metadata,
+                WriteMode::Anchored,
+                Visibility::Private,
+                false,
+            )
             .await;
         assert!(matches!(result, Err(PendingError::OversizedPayload)));
     }
@@ -662,7 +750,18 @@ mod tests {
         let p = PendingBundles::new(10, 300, 5);
         let (c, e, h, cb, tg, md) = dummy_entry("c");
         let id = p
-            .insert("alice".into(), c, e, h, cb, tg, md, WriteMode::Anchored, Visibility::Private, false)
+            .insert(
+                "alice".into(),
+                c,
+                e,
+                h,
+                cb,
+                tg,
+                md,
+                WriteMode::Anchored,
+                Visibility::Private,
+                false,
+            )
             .await
             .unwrap();
         let r = p.get(&id, "bob").await;
@@ -676,7 +775,18 @@ mod tests {
         let p = PendingBundles::new(10, 300, 5);
         let (c, e, h, cb, tg, md) = dummy_entry("once");
         let id = p
-            .insert("u".into(), c, e, h, cb, tg, md, WriteMode::Anchored, Visibility::Private, false)
+            .insert(
+                "u".into(),
+                c,
+                e,
+                h,
+                cb,
+                tg,
+                md,
+                WriteMode::Anchored,
+                Visibility::Private,
+                false,
+            )
             .await
             .unwrap();
 
@@ -699,7 +809,18 @@ mod tests {
         let p = PendingBundles::new(10, 300, 5);
         let (c, e, h, cb, tg, md) = dummy_entry("c");
         let id = p
-            .insert("alice".into(), c, e, h, cb, tg, md, WriteMode::Anchored, Visibility::Private, false)
+            .insert(
+                "alice".into(),
+                c,
+                e,
+                h,
+                cb,
+                tg,
+                md,
+                WriteMode::Anchored,
+                Visibility::Private,
+                false,
+            )
             .await
             .unwrap();
         let result = p.consume(&id, "bob").await;
@@ -745,7 +866,18 @@ mod tests {
         let p = PendingBundles::new(10, 300, 5);
         let (c, e, h, cb, tg, md) = dummy_entry("c");
         let id = p
-            .insert("u".into(), c, e, h, cb, tg, md, WriteMode::Anchored, Visibility::Private, false)
+            .insert(
+                "u".into(),
+                c,
+                e,
+                h,
+                cb,
+                tg,
+                md,
+                WriteMode::Anchored,
+                Visibility::Private,
+                false,
+            )
             .await
             .unwrap();
         assert_eq!(p.user_count("u").await, 1);

@@ -17,7 +17,9 @@ use zeroize::Zeroizing;
 
 use crate::codec::canonical::to_canonical_cbor;
 use crate::codec::schema::{GRANT_V1, SEALED_V1};
-use crate::sealed::content::{decrypt_content, encrypt_content, key_commitment, pad_to_bucket, unpad};
+use crate::sealed::content::{
+    decrypt_content, encrypt_content, key_commitment, pad_to_bucket, unpad,
+};
 use crate::sealed::keys::x25519_public_from_ed25519;
 use crate::sealed::wrap::{unwrap_key, wrap_key};
 
@@ -156,19 +158,25 @@ pub fn seal_memory(
     // 9. Compute content_hash (blake3 of the canonical CBOR bytes).
     let content_hash = blake3::hash(&outer_cbor).as_bytes().to_vec();
 
-    Ok(SealedArtifact { outer_cbor, content_hash, k })
+    Ok(SealedArtifact {
+        outer_cbor,
+        content_hash,
+        k,
+    })
 }
 
 // ─── open helpers ────────────────────────────────────────────────────────────
 
 /// Parse the canonical CBOR of a SEALED_V1 artifact back to a JSON value.
 fn parse_sealed_cbor(outer_cbor: &[u8]) -> Result<serde_json::Value, SealError> {
-    crate::codec::canonical::from_canonical_cbor(outer_cbor)
-        .map_err(SealError::Malformed)
+    crate::codec::canonical::from_canonical_cbor(outer_cbor).map_err(SealError::Malformed)
 }
 
 /// Extract a base64-decoded bytes field from the parsed JSON payload.
-fn get_bytes_field(obj: &serde_json::Map<String, serde_json::Value>, field: &str) -> Result<Vec<u8>, SealError> {
+fn get_bytes_field(
+    obj: &serde_json::Map<String, serde_json::Value>,
+    field: &str,
+) -> Result<Vec<u8>, SealError> {
     let b64 = obj
         .get(field)
         .and_then(|v| v.as_str())
@@ -187,7 +195,9 @@ fn get_bytes_field(obj: &serde_json::Map<String, serde_json::Value>, field: &str
 /// unpads the inner memory JSON.
 pub fn open_memory(outer_cbor: &[u8], x25519_secret: &[u8; 32]) -> Result<Vec<u8>, SealError> {
     let payload = parse_sealed_cbor(outer_cbor)?;
-    let obj = payload.as_object().ok_or_else(|| SealError::Malformed("not a CBOR map".into()))?;
+    let obj = payload
+        .as_object()
+        .ok_or_else(|| SealError::Malformed("not a CBOR map".into()))?;
 
     let nonce_bytes = get_bytes_field(obj, "nonce")?;
     let ct_bytes = get_bytes_field(obj, "ct")?;
@@ -260,7 +270,9 @@ pub fn open_memory(outer_cbor: &[u8], x25519_secret: &[u8; 32]) -> Result<Vec<u8
 /// Open a sealed memory when `K` is already known (bearer links / grants).
 pub fn open_with_key(outer_cbor: &[u8], k: &[u8; 32]) -> Result<Vec<u8>, SealError> {
     let payload = parse_sealed_cbor(outer_cbor)?;
-    let obj = payload.as_object().ok_or_else(|| SealError::Malformed("not a CBOR map".into()))?;
+    let obj = payload
+        .as_object()
+        .ok_or_else(|| SealError::Malformed("not a CBOR map".into()))?;
 
     let nonce_bytes = get_bytes_field(obj, "nonce")?;
     let ct_bytes = get_bytes_field(obj, "ct")?;
@@ -308,27 +320,28 @@ pub fn make_grant(
 ) -> Result<Vec<u8>, SealError> {
     let memory_hash_b64 = base64::engine::general_purpose::STANDARD.encode(memory_hash);
 
-    let (enc_b64, wk_b64, reader_did): (String, String, Option<String>) = if let Some(rpk) = reader_pk {
-        // Targeted grant: wrap K for the reader.
-        // Use memory_hash as ct_hash in the HPKE AAD so that open_grant can
-        // reconstruct the same AAD from the grant alone (no outer_cbor needed).
-        let _ = outer_cbor; // not needed for AAD
+    let (enc_b64, wk_b64, reader_did): (String, String, Option<String>) =
+        if let Some(rpk) = reader_pk {
+            // Targeted grant: wrap K for the reader.
+            // Use memory_hash as ct_hash in the HPKE AAD so that open_grant can
+            // reconstruct the same AAD from the grant alone (no outer_cbor needed).
+            let _ = outer_cbor; // not needed for AAD
 
-        // reader_pk is an X25519 public key (32 bytes), not Ed25519.
-        let wrap = wrap_key(k, rpk, memory_hash, author_did)?;
+            // reader_pk is an X25519 public key (32 bytes), not Ed25519.
+            let wrap = wrap_key(k, rpk, memory_hash, author_did)?;
 
-        let enc = base64::engine::general_purpose::STANDARD.encode(&wrap.enc);
-        let wk = base64::engine::general_purpose::STANDARD.encode(&wrap.wk);
-        // We don't have the reader DID here — caller must set it separately.
-        // For now use a placeholder that the caller can replace, but the spec
-        // says `reader` is optional, so we omit it when we don't know it.
-        (enc, wk, None)
-    } else {
-        // Anonymous grant: store K directly as `enc`, empty `wk`.
-        let enc = base64::engine::general_purpose::STANDARD.encode(k);
-        let wk = base64::engine::general_purpose::STANDARD.encode(b"");
-        (enc, wk, None)
-    };
+            let enc = base64::engine::general_purpose::STANDARD.encode(&wrap.enc);
+            let wk = base64::engine::general_purpose::STANDARD.encode(&wrap.wk);
+            // We don't have the reader DID here — caller must set it separately.
+            // For now use a placeholder that the caller can replace, but the spec
+            // says `reader` is optional, so we omit it when we don't know it.
+            (enc, wk, None)
+        } else {
+            // Anonymous grant: store K directly as `enc`, empty `wk`.
+            let enc = base64::engine::general_purpose::STANDARD.encode(k);
+            let wk = base64::engine::general_purpose::STANDARD.encode(b"");
+            (enc, wk, None)
+        };
 
     let mut artifact = serde_json::json!({
         "type": "grant",
@@ -357,10 +370,15 @@ pub fn make_grant(
 ///
 /// Parses the GRANT_V1 CBOR, uses the recipient's X25519 secret to unwrap the
 /// content key, and returns it wrapped in [`Zeroizing`].
-pub fn open_grant(grant_cbor: &[u8], x25519_secret: &[u8; 32]) -> Result<Zeroizing<[u8; 32]>, SealError> {
-    let payload = crate::codec::canonical::from_canonical_cbor(grant_cbor)
-        .map_err(SealError::Malformed)?;
-    let obj = payload.as_object().ok_or_else(|| SealError::Malformed("not a CBOR map".into()))?;
+pub fn open_grant(
+    grant_cbor: &[u8],
+    x25519_secret: &[u8; 32],
+) -> Result<Zeroizing<[u8; 32]>, SealError> {
+    let payload =
+        crate::codec::canonical::from_canonical_cbor(grant_cbor).map_err(SealError::Malformed)?;
+    let obj = payload
+        .as_object()
+        .ok_or_else(|| SealError::Malformed("not a CBOR map".into()))?;
 
     let enc = get_bytes_field(obj, "enc")?;
     let wk = get_bytes_field(obj, "wk")?;
@@ -478,11 +496,13 @@ pub fn open_chunk(
     // Decode CBOR.
     let value: serde_json::Value = ciborium::de::from_reader(sealed_cbor)
         .map_err(|e| SealError::Malformed(format!("chunk cbor decode: {e}")))?;
-    let obj = value.as_object()
+    let obj = value
+        .as_object()
         .ok_or_else(|| SealError::Malformed("chunk: not a map".into()))?;
 
     // Check sequence index.
-    let idx = obj.get("idx")
+    let idx = obj
+        .get("idx")
         .and_then(|v| v.as_u64())
         .ok_or_else(|| SealError::Malformed("chunk: missing 'idx'".into()))?;
     if idx != expected_idx {
@@ -544,8 +564,8 @@ pub fn parse_link_fragment(fragment: &str) -> Result<Zeroizing<[u8; 32]>, SealEr
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ed25519_dalek::SigningKey;
     use crate::sealed::keys::x25519_secret_from_ed25519;
+    use ed25519_dalek::SigningKey;
 
     fn test_signing_key() -> SigningKey {
         SigningKey::from_bytes(&[0x42u8; 32])
@@ -579,8 +599,7 @@ mod tests {
         let artifact = seal_test_memory(inner, &sk);
 
         let x25519_sk = test_author_x25519(&sk);
-        let recovered = open_memory(&artifact.outer_cbor, &x25519_sk)
-            .expect("open_memory failed");
+        let recovered = open_memory(&artifact.outer_cbor, &x25519_sk).expect("open_memory failed");
         assert_eq!(recovered, inner);
     }
 
@@ -604,7 +623,9 @@ mod tests {
         let payload = crate::codec::canonical::from_canonical_cbor(&artifact.outer_cbor).unwrap();
         let obj = payload.as_object().unwrap();
         let kc_b64 = obj["kc"].as_str().unwrap();
-        let kc_bytes = base64::engine::general_purpose::STANDARD.decode(kc_b64).unwrap();
+        let kc_bytes = base64::engine::general_purpose::STANDARD
+            .decode(kc_b64)
+            .unwrap();
         let expected_kc = key_commitment(&artifact.k);
         assert_eq!(kc_bytes, expected_kc);
     }
@@ -632,8 +653,8 @@ mod tests {
         let artifact = seal_test_memory(inner, &sk);
 
         // open_with_key uses K directly (from SealedArtifact).
-        let recovered = open_with_key(&artifact.outer_cbor, &artifact.k)
-            .expect("open_with_key failed");
+        let recovered =
+            open_with_key(&artifact.outer_cbor, &artifact.k).expect("open_with_key failed");
         assert_eq!(recovered, inner);
     }
 
@@ -671,8 +692,7 @@ mod tests {
         .expect("make_grant failed");
 
         // open_grant with any X25519 secret (anonymous grant ignores it).
-        let k_recovered = open_grant(&grant_cbor, &[0u8; 32])
-            .expect("open_grant failed");
+        let k_recovered = open_grant(&grant_cbor, &[0u8; 32]).expect("open_grant failed");
         assert_eq!(*k_recovered, *artifact.k);
     }
 
@@ -696,7 +716,10 @@ mod tests {
 
         let payload = crate::codec::canonical::from_canonical_cbor(&grant_cbor).unwrap();
         let obj = payload.as_object().unwrap();
-        assert!(obj.get("reader").is_none(), "anonymous grant must have no 'reader' field");
+        assert!(
+            obj.get("reader").is_none(),
+            "anonymous grant must have no 'reader' field"
+        );
     }
 
     // ── make_grant + open_grant round-trip (targeted) ──────────────────────
@@ -727,8 +750,8 @@ mod tests {
         )
         .expect("make_grant targeted failed");
 
-        let k_recovered = open_grant(&grant_cbor, &reader_sk_bytes)
-            .expect("open_grant targeted failed");
+        let k_recovered =
+            open_grant(&grant_cbor, &reader_sk_bytes).expect("open_grant targeted failed");
         assert_eq!(*k_recovered, *artifact.k);
     }
 

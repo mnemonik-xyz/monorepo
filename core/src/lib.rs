@@ -45,9 +45,9 @@ pub mod encrypt;
 // derivation from the identity keypair.  Pure crypto — available on every
 // target.  The RNG path (OsRng / getrandom) is gated internally so the WASM
 // build uses WebCrypto via getrandom's `js` feature.
-pub mod sealed;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod lineage;
+pub mod sealed;
 // Restore a recall index from Arweave (work/arweave-as-source-of-truth Wave 3).
 // Native-only because enumeration and fetching use `reqwest`; the per-artifact
 // rebuild it calls is portable and also exported to wasm.

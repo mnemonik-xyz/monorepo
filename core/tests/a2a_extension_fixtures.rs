@@ -36,8 +36,7 @@ mod fixture_tests {
             .expect("extension must be present");
 
         assert_eq!(
-            ext.uri,
-            "https://mnemonik.xyz/extensions/x-mnemonic/v1",
+            ext.uri, "https://mnemonik.xyz/extensions/x-mnemonic/v1",
             "extension URI must match"
         );
         assert_eq!(
