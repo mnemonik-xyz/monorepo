@@ -69,3 +69,24 @@ New contracts: [indexer](indexer-spec.md), [portability](storage-portability-spe
 Tasks 9–12 cover implementation and planning follow-up.
 Existing A2A tasks 18–21 remain authoritative for their signed bindings and recovery paths.
 No implementation gap or product-demand hypothesis closes from this documentation change.
+
+## 2026-10-02 — Task 1 baseline and claim map
+
+Reviewed source revision `89532db4556e53e81b5243c57535a76046c08207`, including implementation #265 and planning #266.
+Three parallel source audits covered ingestion, A2A recovery, payment and decoupling.
+The [baseline audit](baseline-audit.md) maps F1–F13 and all seventeen acceptance claims to current paths or remaining tasks.
+
+F6's former operator-signing and SQL-artifact description is superseded by `979c590`.
+Existing sealed tasks 18–21 remain in progress; their merged implementation does not complete acceptance.
+Other findings remain open. General delivery still depends on SQL, and paid retries retain content and signed bytes.
+The direct sealed anchor route bypasses shared gates and still submits a Solana memo.
+Ordinary memo removal therefore does not prove universal removal or a passed enumeration gate.
+
+Checks: a local path checker validated Markdown targets in this package and the edited decoupling/A2A task records.
+A dependency traversal validated all twelve product tasks without cycles. `git diff --check` passed.
+Test references were inspected, not executed. No live-source, production, payment or customer evidence was generated.
+Task 1 closes its audit scope only. No implementation finding, provider claim or product hypothesis closes.
+The implementation source revision above is the evidence baseline; this audit adds no runtime implementation.
+
+Tasks 2, 4, 9 and 11 can now proceed with explicit file ownership.
+Task 7 can prepare research, but contacting people still requires explicit outreach authorization.

@@ -106,3 +106,15 @@ before stage 2 starts. This requires running against real data with
 ## Stage 2 shipped (2026-09-28)
 WriteMode::Anchored no longer writes SPL Memos. New rows store solana_tx = ''.
 Memo readers (read_memo, list_memo_anchors, parse_anchor_memo) stay intact.
+
+## 2026-10-02 — Baseline reconciliation
+
+Reviewed `89532db4556e53e81b5243c57535a76046c08207` through parallel static audits.
+The stage 2 shipped entry applies to ordinary memory helpers and the sign callback.
+The direct sealed anchor route still submits a memo.
+No passing live T2 parity evidence was found in the reviewed records.
+The recorded HTTP 403 from A2A discovery is not successful enumeration evidence.
+T2 stays pending. T3 records partial implementation with acceptance outstanding.
+The task instructions now use the actual enumeration example's environment variables.
+No gate is waived, and no runtime behavior changes in this audit.
+See [baseline audit](../protocol-product/baseline-audit.md).
