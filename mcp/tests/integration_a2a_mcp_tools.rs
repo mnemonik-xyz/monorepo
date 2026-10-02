@@ -65,6 +65,7 @@ async fn remote() -> (String, Remote, tokio::task::JoinHandle<()>) {
     let app = Router::new()
         .route("/upload", post(upload))
         .route("/graphql", post(query))
+        .route("/objects/{id}", get(read))
         .route("/{id}", get(read))
         .with_state(s.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -350,5 +351,53 @@ async fn failed_delivery_is_pending_and_retry_uses_existing_remote_bytes() {
     );
     assert_eq!(s.blobs.lock().unwrap().len(), 1);
     no_memories(&server);
+    task.abort();
+}
+
+
+/// A genuinely fresh operator reads the migrated parent from another backend.
+/// The original storage listener is stopped and its receipt rows are gone.
+#[tokio::test]
+async fn independent_operator_continues_from_migrated_parent_without_source() {
+    let (source_url, source, source_task) = remote().await;
+    let original = TestServer::builder().arweave_gateway(source_url).build();
+    let kp = Keypair::new();
+    let owner = kp.pubkey().to_string();
+    let payload = json!({"messageId":"parent","role":"agent","contextId":"migration","parts":[{"kind":"text","text":"parent"}]});
+    let parent = prepare_signed_a2a(&kp,"message",payload.clone(),"migration",None,"2026-10-02T00:00:00Z",None).unwrap();
+    let receipt = result(&original.call_tool(Some(&owner),"mnemonic_attest_a2a",json!({"kind":"message","context_id":"migration","signed":hex::encode(&parent)})).await);
+    let (destination_url,destination,destination_task) = remote().await;
+    let digest=hex::encode(Sha256::digest(&parent));
+    // Exact copy into the other backend; identity/signature remain unchanged.
+    destination.blobs.lock().unwrap().insert(digest.clone(),parent.clone());
+    original.state.store.lock().unwrap().conn().execute_batch("DELETE FROM a2a_anchor_readers; DELETE FROM a2a_anchor_receipts;").unwrap();
+    source.blobs.lock().unwrap().clear();
+    source_task.abort();
+    let replacement=TestServer::builder().arweave_gateway(destination_url.clone()).parent_blob_origin(destination_url.clone()).build();
+    assert_ne!(original.state.keypair.pubkey_base58(),replacement.state.keypair.pubkey_base58());
+    let id=receipt["attestation_id"].as_str().unwrap();
+    let child=prepare_signed_a2a(&kp,"message",payload.clone(),"migration",Some(id.into()),"2026-10-02T00:00:01Z",None).unwrap();
+    let args=json!({"kind":"message","context_id":"migration","signed":hex::encode(child),"prev_id":id,"prev_locator":format!("blob://{digest}")});
+    let continued=result(&replacement.call_tool(Some(&owner),"mnemonic_attest_a2a",args.clone()).await);
+    assert_eq!(continued["delivery_status"],"verified");
+    no_memories(&replacement);
+    // Disabling the opt-in origin rejects that same hint rather than fetching arbitrary URLs.
+    let disabled=TestServer::builder().arweave_gateway(destination_url).build();
+    assert!(disabled.call_tool(Some(&owner),"mnemonic_attest_a2a",args.clone()).await.envelope["error"].is_object());
+    // A blob at the right path with wrong bytes cannot authorize a continuation.
+    destination.blobs.lock().unwrap().get_mut(&digest).unwrap()[0]^=1;
+    assert!(replacement.call_tool(Some(&owner),"mnemonic_attest_a2a",args).await.envelope["error"].is_object());
+    destination_task.abort();
+}
+
+#[tokio::test]
+async fn unsupported_paid_a2a_rail_fails_closed_without_upload_or_settlement() {
+    let (url,remote,task)=remote().await;
+    let server=TestServer::builder().arweave_gateway(url).payment_mode("x402").build();
+    let v=vectors();let author=v["author"]["pubkey_base58"].as_str().unwrap();
+    let r=server.call_tool(Some(author),"mnemonic_attest_a2a",json!({"kind":"message","context_id":"fixture-ctx","signed":v["plain"]})).await;
+    assert_eq!(r.status,axum::http::StatusCode::SERVICE_UNAVAILABLE);
+    assert!(r.envelope["error"]["data"]["error"].as_str().unwrap().contains("no payment accepted"));
+    assert!(remote.blobs.lock().unwrap().is_empty());no_memories(&server);
     task.abort();
 }

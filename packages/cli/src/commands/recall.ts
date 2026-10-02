@@ -4,16 +4,8 @@
 // the hits. Default top-k = 5; `--tag` is shorthand for a single-element
 // `tags` filter.
 //
-// With `--sealed`: also calls `client.recallSealed(query, {topK})` and merges
-// the results.  The sealed recall embeds the query locally and ranks sealed
-// memories by cosine similarity — the server never sees the plaintext query.
-// This reads the private key (once) to open sealed memories and rebuild the
-// local index.
-//
-// Works from the public key alone (without --sealed): never reads the private
-// key or the OS keychain. An expired token is renewed silently only when that
-// needs no keychain access (see `session.ts`); otherwise a clear hint is
-// printed rather than a silent anonymous (public-pool) recall.
+// Sealed recall requires caller-local indexing and an explicit local embedder.
+// This CLI does not provide those facilities; reject before disclosing the query.
 
 import { fromSdkError, UserError } from "../errors.js";
 import { format, type OutputOptions } from "../output.js";
@@ -23,7 +15,7 @@ export interface RecallOptions extends OutputOptions {
   topK?: number;
   tag?: string;
   baseUrl?: string;
-  /** `--sealed`: also recall sealed memories, merging with server results. */
+  /** Legacy flag; fails before network until a caller-local index/embedder is provided. */
   sealed?: boolean;
 }
 
@@ -38,19 +30,12 @@ export async function runRecall(
     throw new UserError("query is required: `mnemonic recall <query>`");
   }
 
+  if (opts.sealed) throw new UserError("CLI sealed recall is unavailable: use SDK recallSealed with a caller-local embedder and locally prepared memories. No query was sent.");
+
   const baseUrl =
     opts.baseUrl ?? process.env.MNEMONIC_BASE_URL ?? DEFAULT_BASE_URL;
   const topK = typeof opts.topK === "number" ? opts.topK : DEFAULT_TOP_K;
-  const withSealed = opts.sealed === true;
-
-  // Pre-flight (identity/JWT mismatch) runs inside, BEFORE any fetch.
-  // For sealed recall we need the keypair; otherwise public key only.
-  const { client, signer } = await openSession(baseUrl, opts, withSealed);
-
-  if (withSealed) {
-    // Provide keypair for sealed index recall.
-    client.setKeypairProvider(() => signer.keypair());
-  }
+  const { client } = await openSession(baseUrl, opts, false);
 
   let result;
   try {
@@ -62,16 +47,7 @@ export async function runRecall(
     throw fromSdkError(e);
   }
 
-  // Optionally merge sealed recall results.
-  type SealedRow = { memoryHash: string; similarity: number };
-  let sealedHits: SealedRow[] = [];
-  if (withSealed) {
-    try {
-      sealedHits = await client.recallSealed(query, { topK });
-    } catch (e) {
-      throw fromSdkError(e);
-    }
-  }
+  const sealedHits: Array<{memoryHash:string;similarity:number}> = [];
 
   format({ result, sealedHits }, opts, (_d, _color) => {
     const lines: string[] = [];

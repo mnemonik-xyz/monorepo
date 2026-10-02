@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-**Mnemonic Protocol** — verifiable, persistent memory for AI agents. A memory is embedded, TurboQuant-compressed, canonicalized to deterministic CBOR, blake3-hashed, COSE_Sign1-signed with an Ed25519 identity, and optionally anchored on Arweave (bytes) + Solana (SPL Memo). It is exposed over MCP (Model Context Protocol), a CLI, a TypeScript SDK, a browser extension and a webapp.
+**Mnemonic Protocol** — verifiable, persistent memory for AI agents. A memory is embedded, TurboQuant-compressed, canonicalized to deterministic CBOR, blake3-hashed, COSE_Sign1-signed with an Ed25519 identity, and optionally delivered to Arweave/Irys (original signed bytes); Solana memos remain a legacy verification/discovery source. It is exposed over MCP (Model Context Protocol), a CLI, a TypeScript SDK, a browser extension and a webapp.
 
 **Default branch:** `main`. Branch from `main` (`feat/*`, `fix/*`, `claude/*`) and PR back to `main`. Tagged releases (`v*`) are cut from `main`.
 
@@ -67,31 +67,56 @@ Cargo workspace (`resolver = "2"`) with two members, plus an npm workspace:
 
 **MCP tools.** Default builds expose 11 tools: `mnemonic_whoami`, `mnemonic_sign_memory`, `mnemonic_check_pending`, `mnemonic_recall`, `mnemonic_verify`, `mnemonic_prove_identity`, `mnemonic_publish_post`, `request_public_write_confirmation`, `mnemonic_share`, `mnemonic_attest_a2a`, `mnemonic_recall_a2a`. `--features trajectory-experimental` adds `mnemonic_attest_step`, `mnemonic_attest_verdict`, `mnemonic_verify_trajectory`. Reference: `docs/tools.md`.
 
-**Signing is non-custodial.** Only `anchored` (on-chain) writes carry a signature. Over HTTP, a JWT `anchored` write (or a write with no `mode`, as legacy SDK and extension clients send) returns `{status: "awaiting_signature", correlation_id, approve_url, ...}`. The client signs the canonical bundle locally and posts it to `/api/sign-callback`. `mnemonic_check_pending` resolves the final state. Pending bundles expire after 300 s. A JWT write with explicit `mode: "local"` is stored inline as a hash-only row owned by the JWT subject: no signature, no client keychain access. The operator key signs a memory inline only on `tools::Transport::Stdio` with owner == operator (the local agent's own identity). `tools.rs` refuses operator signing for another owner or over HTTP — keep it that way. The server wallet signs only transport records as fee payer (Arweave DataItem, Solana memo transaction); verifiers use the COSE `kid`.
+**Signing and privacy boundaries.** Legacy HTTP `mnemonic_sign_memory` sends
+plaintext to the operator for artifact preparation, then uses client COSE signing
+through `/api/sign-callback`. This is not client-private preparation. Explicit
+HTTP `mode: "local"` is rejected. Omitted legacy modes follow server configuration.
+Plain stdio local writes are unsigned; client-prepared sealed local artifacts are
+signed and require the identity key. Only the owner/operator's stdio identity
+may sign a memory inline; preserve that guard.
 
-**Data flow (`sign_memory`):** text → `embed::Embedder` → `compress` (TurboQuant, `TURBO_BITS`, default 4) → `codec::canonical` (CBOR) → blake3 → `codec::sign` (COSE_Sign1, Ed25519) → for `anchored`: Arweave upload + Solana SPL Memo (JSON with `h` = content hash) → `storage::sqlite` (`AttestationStore`). `recall` searches uncompressed f32 embeddings in SQLite — but a **hosted** operator stores neither the text nor the embedding for an `anchored` write (`work/arweave-as-source-of-truth` D-2): Arweave holds the bytes, the Solana memo holds the hash, and the operator keeps only an anchor index. So hosted `recall` cannot return anchored memories, and `search` drops rows that carry no vector rather than returning an unscoreable hit with empty content. A client rebuilds its own index with `mnemonic-mcp restore` and searches locally. A locally installed server is unaffected: there the SQLite is the agent's own machine.
+**Client-prepared delivery.** SDK `sealMemory` encrypts and signs locally.
+`mode: "store"` means a session-only client cache, requiring caller-owned durable
+backup. `mode: "anchor"` submits complete COSE bytes to `/api/ingest-artifact`.
+Public MEMORY_V1 preparation is also local and publication requires explicit
+consent. Memory and HTTP A2A adapters validate signatures, identity and parents
+before shared quota/payment/delivery coordination. Original bytes are fetched
+and compared exactly; receipt persistence is a separate diagnostic. New hosted
+receipts contain metadata, not memory/grant/vector payloads. Legacy retained
+staging is migration data and must not be mistaken for the new storage boundary.
 
-**Data flow — sealed write mode (client-side paths).** On client-side paths (local MCP, CLI, extension, webapp), `core/src/sealed/api.rs::seal_memory` runs before the network call: inner `MEMORY_V1` CBOR → OsRng `K` (32 bytes) → derive X25519 key from Ed25519 identity (`VerifyingKey::to_montgomery`) → XChaCha20-Poly1305 encrypt → HPKE wrap `K` to author's X25519 key → compute `kc = blake3::derive_key("mnemonic sealed v1 key commitment", K)` → zeroize `K` → assemble `SEALED_V1` outer artifact → sign outer CBOR (anchored writes only) → store `sealed_blob` in SQLite, `content` column empty. Sealed recall decrypts on the client using `open_memory(sealed_blob, x25519_secret)`. The server never sees plaintext. See `core/src/sealed/` and `docs/how-it-works.md`.
+**Recall.** Hosted semantic recall searches available hosted index rows;
+metadata-only anchored receipts have no vector and do not become searchable
+plaintext. HTTP recall never decrypts sealed payloads. Hosted recall-key sessions,
+new general-memory grant storage and hosted `/api/store-sealed` writes are retired.
+SDK sealed recall opens the local cache and requires an explicit local embedder.
+Client recovery preserves original signatures and reports source failures; a
+successful index scan alone does not prove complete history. See
+[client-prepared memory](docs/client-prepared-memory.md) and
+[recovery checkpoints](docs/recovery-checkpoints.md).
 
 **Backing up.** `mnemonic-mcp export` writes every row this identity owns to stdout as JSON Lines, oldest first, so two exports diff readably. Owner-scoped, with no cross-owner variant: that would be a bulk disclosure primitive. `content` is empty for a row a hosted operator wrote under the anchored path — it never had the text — and `arweave_tx` is where those bytes live.
 
-**Restoring from the chain.** `mnemonic-mcp restore` rebuilds the local index from Arweave: it enumerates every item this wallet anchored (Solana memo history first — it is authoritative for legacy items, since gateways never indexed the old Irys bundles — then the gateway index), fetches each artifact, COSE-verifies it, and writes the verified rows. Only memories authored by this identity are imported, because the enumeration sources are wallet-scoped and an operator wallet anchored items for many identities. Idempotent, and `--dry-run` reports without writing. `core/src/restore/` splits network work (`fetch_restorable`) from store work (`apply_restore`) so the `!Send` store mutex can never be held across an `.await`.
+**Restoring from the chain.** `mnemonic-mcp restore` rebuilds the local index from Arweave: it enumerates candidates from configured sources for this wallet (Solana memo history first — it is authoritative for legacy items, since gateways never indexed the old Irys bundles — then the gateway index), fetches each artifact, COSE-verifies it, and writes the verified rows. Only memories authored by this identity are imported, because the enumeration sources are wallet-scoped and an operator wallet anchored items for many identities. Idempotent, and `--dry-run` reports without writing. `core/src/restore/` splits network work (`fetch_restorable`) from store work (`apply_restore`) so the `!Send` store mutex can never be held across an `.await`.
 
 **Mode names.** The two modes say *where the memory lives*: `local` = the agent's own machine only, `anchored` = Arweave. `anchored` was called `participate` before 2026-09-27. The old token is still accepted on input (`WriteMode::from_str_strict`, a serde alias, and a `write_mode` column normalising migration) but is never emitted. Remove the alias once the release that introduced `anchored` is the oldest supported client. See `work/arweave-as-source-of-truth/`.
 
-**Anchored artifacts are self-describing.** An `anchored` write adds four OPTIONAL signed fields so the Arweave copy alone can rebuild a recall row: top-level `visibility` and `anchor`, plus `metadata.turbo_seed` and — for public memories only — `metadata.embedding_f32` (the exact vector). A `local` write adds none of them, because local rows carry no signature and are verified by reconstruction from columns (`rebuild_content_hash`), whose field list is fixed. `embedding_f32` is withheld from private memories on purpose: an embedding inverts to an approximation of its source text, and Arweave is permanent and public. Never make these fields required and never reorder `MEMORY_V1.cbor_field_order` — either moves every existing `content_hash`.
+**Anchored artifacts are self-describing.** An `anchored` write adds four OPTIONAL signed fields so the Arweave copy alone can rebuild a recall row: top-level `visibility` and `anchor`, plus `metadata.turbo_seed` and — for public memories only — `metadata.embedding_f32` (the exact vector). A plain legacy `sign_memory` local write adds none of them, because those rows carry no signature and are verified by reconstruction from columns (`rebuild_content_hash`), whose field list is fixed. `embedding_f32` is withheld from private memories on purpose: an embedding inverts to an approximation of its source text, and Arweave is permanent and public. Never make these fields required and never reorder `MEMORY_V1.cbor_field_order` — either moves every existing `content_hash`.
 
 **`local` is refused over HTTP.** An explicit `mode: "local"` on the HTTP transport returns `-32010 UnsupportedMode` with `supported: ["anchored"]`. `local` means the memory stays on the agent's own machine, and a hosted deploy cannot provide that — a "local" write there would be a row in the operator's database, which is the custodial tier the binary mode model retires (`work/binary-mode-cleanup/`). Install the server locally for free local storage, or use `anchored`. A request that omits `mode` still resolves from the operator's configuration, so clients that never learned the field are unaffected. On stdio, `local` works as before: there the operator key *is* the agent's own identity.
 
-**Write modes.** `STORAGE_MODE` (default `local`) sets the operator's capability/default, not a global switch. Each `mnemonic_sign_memory` request may set `mode: "local" | "anchored"`; requests without it fall back to the env var (legacy clients). Rows carry a `write_mode` column, and recall spans both modes for one owner. An `anchored` write succeeds only after the anchored bytes pass a recall + verify round-trip; on failure the row is demoted to `local` and nothing is charged. Rationale: `work/modes-user-choice/`.
+**Write modes.** `STORAGE_MODE` (default `local`) sets the operator's capability/default, not a global switch. Each `mnemonic_sign_memory` request may set `mode: "local" | "anchored"`; requests without it fall back to the env var (legacy clients). Rows carry a `write_mode` column, and recall spans both modes for one owner. Delivery succeeds after exact-byte external fetch and signature/author verification; SQL receipt persistence is separate. Payment settlement can precede delivery. Retry and remedy states are distinct; never promise no charge on every delivery failure. Rationale: `work/modes-user-choice/`.
 
-**Sealed write mode** is orthogonal to `local` / `anchored`. A sealed write encrypts the inner artifact client-side before the request leaves the device (on client-side paths). The `sealed_blob` column in SQLite holds the outer `SEALED_V1` CBOR; `content` is empty. A sealed `local` write is an encrypted row in the local SQLite. A sealed `anchored` write anchors the ciphertext. The keychain is opened to derive the X25519 key; it is never opened for a plain `local` write. See `core/src/sealed/` and the sealed boundary table in `.claude/skills/project-knowledge/references/threat-model.md`.
+**Sealed write mode** is orthogonal to local/external storage. The identity key
+is needed for encryption/signing/opening, including sealed local writes. Plain
+legacy local writes need no keychain access. The agent may store its own sealed
+bytes locally; the current hosted ingestion path retains metadata only.
 
 **Payment** (`PAYMENT_MODE`, HTTP only): `none` | `x402`. The custodial `balance`/`both` modes were removed; `check_payment` fail-closes on any other value. `mnemonic_sign_memory` in `anchored` mode and `mnemonic_attest_a2a` are paid tools on x402 deployments. `mnemonic_recall_a2a` is always free (read-only). On `x402`, a key linked to a Google account first gets a free daily quota of anchored writes, counted per Google account (`MNEMONIC_FREE_ANCHORS_PER_DAY`, 10), per real client IP (`MNEMONIC_FREE_ANCHORS_PER_IP_PER_DAY`, 20, via `TRUSTED_PROXIES` in `client_ip.rs`) and globally (`MNEMONIC_FREE_ANCHORS_GLOBAL_PER_DAY`, 1000) for COSE bytes up to `MNEMONIC_FREE_ANCHOR_MAX_BYTES` (16 KiB): the pre-parking gate only peeks, `/api/sign-callback` consumes one at anchor time and refunds it on failure, but not the global counter once the chain write started (`payment.rs` § free daily anchor quota).
 
 **Hard architectural rules** (audit-enforced):
 
-1. Payment logic (`check_payment`, `verify_usdc_transfer`, x402 nonce handling, `record_attestation_cost`, `get_pnl_stats`) lives only in `mcp/src/payment.rs`. `pricing.rs` lives in `mcp/`. Nothing payment-related in `core/`.
+1. Rail and price policy live in `mcp/src/payment.rs` and `pricing.rs`. `ingestion.rs`, `delivery_operation.rs` and `paid_operation.rs` coordinate immutable operations and retries. Nothing payment-related belongs in `core/`.
 2. `verify_usdc_transfer` is a standalone function taking `&SolanaClient`, not a method on it.
 3. No `HashEmbedder` anywhere — use `MockEmbedder` in `#[cfg(test)]` blocks.
 4. `core/` never depends on `mcp/`. The dependency graph is one-way.

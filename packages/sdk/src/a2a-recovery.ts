@@ -1,4 +1,5 @@
 /** External A2A discovery: indexes supply hints; only original signatures establish trust. */
+import { IrysDiscoverySource, ArweaveDiscoverySource, DiscoveryError } from './discovery.js';
 import { IntegrityError, UserError } from './errors.js';
 import { verifyA2AAttestation } from './a2a.js';
 import type { Attestation, A2AIndexStore, A2ARestoreOptions, A2ARestoreReport } from './types.js';
@@ -28,6 +29,10 @@ export async function decodeAttestation(bytes:Uint8Array,author:string,locator?:
     sealed:b.sealed,payload:b.payload,coseEnvelopeHex:hex,...(locator?{locator}:{}),
     ...(b.stream?{stream:b.stream}:{}),...(b.sealed?{sealedPayload:(b.payload.parts as any[])[0].data}:{})};
 }
+function validatedLocator(locator:string):string {
+  if(!/^ar:\/\/[A-Za-z0-9_-]{43}$/.test(locator))throw new UserError('invalid ar:// A2A locator');
+  return locator.slice(5);
+}
 export async function fetchAttestation(this:RecoveryHost,locator:string,author:string):Promise<Attestation> {
   if(!/^ar:\/\/[A-Za-z0-9_-]{43}$/.test(locator))throw new UserError('invalid ar:// A2A locator');
   const response=await this._a2aExternal(`${this._a2aGateway()}/${locator.slice(5)}`);
@@ -54,49 +59,63 @@ export async function verifyParent(child:Attestation,parent:Attestation):Promise
 export async function restoreA2AContext(this:RecoveryHost,context:string,opts:A2ARestoreOptions):Promise<A2ARestoreReport> {
   if(!context||!opts.expectedAuthors.length||opts.expectedAuthors.some(a=>!a))throw new UserError('context and pinned authors required');
   const authors=[...new Set(opts.expectedAuthors)].sort();const cfg=this._a2aDiscovery();
-  const scope=JSON.stringify([context,authors,cfg.url,cfg.flavour]);
+  const source=opts.discoverySource === false ? undefined : opts.discoverySource ?? (cfg.flavour === 'irys'
+    ? new IrysDiscoverySource(cfg.url, this._a2aExternal.bind(this))
+    : new ArweaveDiscoverySource(cfg.url, this._a2aExternal.bind(this)));
+  const scope=JSON.stringify(['a2a',context,authors,source?.identity??'disabled',source?.supportedBackends??[]]);
   if(opts.checkpoint && opts.checkpoint.scope!==scope)throw new UserError('checkpoint scope mismatch');
   const maxPages=opts.maxPages??100,maxCandidates=opts.maxCandidates??10000;
   if(!Number.isInteger(maxPages)||maxPages<1||maxPages>100||!Number.isInteger(maxCandidates)||maxCandidates<1||maxCandidates>10000)throw new UserError('invalid discovery budget');
-  const report:A2ARestoreReport={attestations:[],scanExhausted:false,budgetExhausted:false,missingParents:[],invalidCandidates:[],completeToHeads:false,completeness:'unknown'};
+  const report:A2ARestoreReport={attestations:[],scanExhausted:false,budgetExhausted:false,missingParents:[],invalidCandidates:[],completeToHeads:false,completeness:'unknown',source:{source:source?.identity??'disabled',status:source?'partial':'disabled',pages:0,candidates:0}};
   const verified=new Map<string,Attestation>();
   for(const row of [...await this._a2aIndexStore().list(),...(opts.checkpoint?.staged??[])])if(row.contextId===context&&row.coseEnvelopeHex&&row.signerPubkey&&authors.includes(row.signerPubkey)){
     try {const v=await decodeAttestation(Uint8Array.from(row.coseEnvelopeHex.match(/../g)!.map(s=>parseInt(s,16))),row.signerPubkey,row.locator);if(v.contextId===context)verified.set(v.attestationId,v);}catch{/* keep bad local metadata out of graph */}
   }
-  let cursor=opts.checkpoint?.cursor;const seen=new Set<string>();let count=0;
-  const tags=[{name:'App-Name',values:['mnemonic-protocol']},{name:'Mnemonic-Type',values:['a2a']},{name:'Context-Id',values:[context]},{name:'Producer',values:authors}];
-  for(let page=0;page<maxPages;page++) {
+  let cursor=opts.checkpoint?.cursor;const seen=new Set<string>(opts.checkpoint?.seenCursors??[]);let count=0;
+  for(let page=0;source && page<maxPages;page++) {
     try {
       opts.signal?.throwIfAborted();
-      const query=`query($tags:[TagFilter!]!,$after:String){transactions(first:100,tags:$tags,after:$after${cfg.flavour==='arweave'?',sort:HEIGHT_ASC':''}){edges{cursor node{id tags{name value}}}pageInfo{hasNextPage}}}`;
-      const response=await this._a2aExternal(cfg.url,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({query,variables:{tags,after:cursor??null}}),...(opts.signal?{signal:opts.signal}:{})});
-      const data=JSON.parse(new TextDecoder().decode(await boundedBody(response)));
-      if(data.errors?.length)throw new Error('GraphQL errors');
-      const tx=data.data?.transactions;
-      if(!Array.isArray(tx?.edges)||typeof tx.pageInfo?.hasNextPage!=='boolean')throw new Error('malformed index response');
-      // Finish whole pages so the cursor never skips unfetched candidates.
-      if(count+tx.edges.length>maxCandidates){report.budgetExhausted=true;break;}
-      for(let i=0;i<tx.edges.length;i+=4){
-        const batch=tx.edges.slice(i,i+4);
-        const results=await Promise.allSettled(batch.map(async(edge:any)=>{
-          const id=edge.node?.id;if(typeof id!=='string'||!/^[A-Za-z0-9_-]{43}$/.test(id))throw new Error('invalid index ID');
-          if(!Array.isArray(edge.node.tags))throw new Error('missing tags');
-          for(const tag of tags){const values=edge.node.tags.filter((t:any)=>t.name===tag.name).map((t:any)=>t.value);if(values.length!==1||!tag.values.includes(values[0]))throw new Error('conflicting discovery tags');}
-          const author=edge.node.tags.find((t:any)=>t.name==='Producer').value;
-          const row=await fetchAttestation.call(this,`ar://${id}`,author);
+      const result=await source.page({artifactKind:'a2a',context,expectedAuthors:[...authors]},cursor,opts.signal);
+      report.source.pages++;
+      if(!Array.isArray(result.candidates)||result.candidates.length>100||
+         (result.nextCursor!==undefined&&(typeof result.nextCursor!=='string'||!result.nextCursor)))
+        throw new DiscoveryError('malformed','malformed discovery page');
+      // Finish whole pages; a continuation must never skip unprocessed candidates.
+      if(count+result.candidates.length>maxCandidates){report.budgetExhausted=true;break;}
+      for(let i=0;i<result.candidates.length;i+=4){
+        opts.signal?.throwIfAborted();
+        const batch=result.candidates.slice(i,i+4);
+        const results=await Promise.allSettled(batch.map(async(candidate)=>{
+          if(candidate.backend!=='arweave'||!source.supportedBackends.includes(candidate.backend))throw new Error('unsupported discovery backend');
+          const metadata=candidate.metadata;
+          // Metadata is optional. If provided, conflicting scoped hints are rejected.
+          const required:Record<string,string[]>={'App-Name':['mnemonic-protocol'],'Mnemonic-Type':['a2a'],'Context-Id':[context],'Producer':authors};
+          if(metadata)for(const [name,allowed] of Object.entries(required)){
+            const values=metadata[name];if(!values||values.length!==1||!allowed.includes(values[0]!))throw new Error('conflicting discovery tags');
+          }
+          const response=await this._a2aExternal(`${this._a2aGateway()}/${validatedLocator(candidate.locator)}`,opts.signal?{signal:opts.signal}:undefined);
+          const bytes=await boundedBody(response);
+          let row:Attestation|undefined;
+          // A source may suggest a pinned author, but cannot extend the trusted set.
+          for(const author of metadata?.Producer??authors){try{row=await decodeAttestation(bytes,author,candidate.locator);break;}catch{}}
+          if(!row)throw new IntegrityError('signature does not match pinned authors');
           if(row.contextId!==context)throw new Error('signed context mismatch');
-          const hashes=edge.node.tags.filter((t:any)=>t.name==='Content-Hash');if(hashes.length!==1||hashes[0].value!==row.contentHash)throw new Error('binding hash tag mismatch');
+          if(metadata){const hashes=metadata['Content-Hash'];if(!hashes||hashes.length!==1||hashes[0]!==row.contentHash)throw new Error('binding hash tag mismatch');}
           return row;
         }));
-        for(let j=0;j<results.length;j++){const r=results[j]!;count++;if(r.status==='fulfilled')verified.set(r.value.attestationId,r.value);else report.invalidCandidates.push({locator:String(batch[j]?.node?.id??''),reason:String(r.reason)});}
+        for(let j=0;j<results.length;j++){const r=results[j]!;count++;if(r.status==='fulfilled')verified.set(r.value.attestationId,r.value);else report.invalidCandidates.push({locator:String(batch[j]?.locator??''),reason:String(r.reason)});}
       }
-      if(!tx.pageInfo.hasNextPage){report.scanExhausted=true;break;}
-      const next=tx.edges.at(-1)?.cursor;if(typeof next!=='string'||seen.has(next)||next===cursor)throw new Error('cursor loop');seen.add(next);cursor=next;
+      opts.signal?.throwIfAborted();
+      if(result.nextCursor===undefined){report.scanExhausted=true;report.source.status='exhausted';break;}
+      const next=result.nextCursor;if(seen.has(next)||next===cursor)throw new DiscoveryError('malformed','cursor loop');seen.add(next);cursor=next;
       if(page===maxPages-1||count>=maxCandidates){report.budgetExhausted=true;break;}
-    }catch(e){report.error=String(e);break;}
+    }catch(e){report.error=String(e);report.source.status=opts.signal?.aborted?'cancelled':e instanceof DiscoveryError?e.status:'unavailable';report.source.error=report.error;break;}
   }
-  if(!report.scanExhausted)report.checkpoint={scope,...(cursor?{cursor}:{}),staged:[...verified.values()]};
-  for(const [id,hint] of Object.entries(opts.parentLocators??{}))if(!verified.has(id)){
+  report.source.candidates=count;
+  if(report.budgetExhausted)report.source.status='budget_exhausted';
+  if(cursor)report.source.cursor=cursor;
+  if(source&&!report.scanExhausted)report.checkpoint={scope,...(cursor?{cursor}:{}),seenCursors:[...seen],staged:[...verified.values()]};
+  for(const [id,hint] of Object.entries(opts.parentLocators??{}))if(!opts.signal?.aborted&&!verified.has(id)){
     try{if(!authors.includes(hint.author))throw new Error('untrusted parent author');const row=await fetchAttestation.call(this,hint.locator,hint.author);if(row.attestationId!==id||row.contextId!==context)throw new Error('parent locator mismatch');verified.set(id,row);}catch(e){report.invalidCandidates.push({locator:hint.locator,reason:String(e)});}
   }
   const good=new Set<string>(),bad=new Set<string>(),visiting=new Set<string>();

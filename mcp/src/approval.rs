@@ -240,9 +240,9 @@ async fn settle_handler(
         );
     };
     let client = UniversalPaywallClient::new(cfg);
-    let existing_receipt = match state.store.lock() {
+    let operation = match state.store.lock() {
         Ok(store) => match paid_operation::get(store.conn(), &req.operation_id) {
-            Ok(Some(operation)) => operation.provider_receipt_json,
+            Ok(Some(operation)) => operation,
             Ok(None) => return error_resp(StatusCode::NOT_FOUND, "operation not found"),
             Err(_) => {
                 return error_resp(
@@ -258,17 +258,27 @@ async fn settle_handler(
             )
         }
     };
-    if let Some(receipt_json) = existing_receipt {
-        let receipt = match serde_json::from_str::<PaymentReceipt>(&receipt_json) {
-            Ok(receipt) => receipt,
-            Err(_) => {
-                return error_resp(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "stored receipt unavailable",
-                )
-            }
-        };
-        return settled_response(receipt);
+    if operation.artifact_hash != req.binding.artifact_hash
+        || operation.subject_hash != req.binding.payer_subject
+        || !operation
+            .payer_wallet
+            .as_deref()
+            .is_some_and(|wallet| same_address(wallet, &req.binding.payer_wallet))
+    {
+        return error_resp(
+            StatusCode::BAD_REQUEST,
+            "payment binding differs from stored operation",
+        );
+    }
+    match paid_operation::settled_receipt(&operation) {
+        Ok(Some(receipt)) => return settled_response(receipt),
+        Ok(None) => {}
+        Err(_) => {
+            return error_resp(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "stored receipt requires reconciliation",
+            )
+        }
     }
 
     // The browser must settle precisely the provider-issued immutable quote,
@@ -280,7 +290,10 @@ async fn settle_handler(
             return error_resp(StatusCode::BAD_REQUEST, "payment quote unavailable");
         }
     };
-    if quote.binding != req.binding {
+    if quote.binding != req.binding
+        || operation.quote_id.as_deref() != Some(quote.quote_id.as_str())
+        || operation.binding_digest.as_deref() != Some(quote.binding_digest.as_str())
+    {
         return error_resp(
             StatusCode::BAD_REQUEST,
             "payment binding does not match provider quote",
@@ -307,7 +320,11 @@ async fn settle_handler(
         );
     }
     match client
-        .settle_exact(&req.binding, &req.authorization.authorization)
+        .settle_exact(
+            &req.binding,
+            &quote.binding_digest,
+            &req.authorization.authorization,
+        )
         .await
     {
         Ok(receipt) => {
@@ -341,13 +358,13 @@ async fn settle_handler(
                     Ok(store) => paid_operation::get(store.conn(), &req.operation_id)
                         .ok()
                         .flatten()
-                        .and_then(|operation| operation.provider_receipt_json),
+                        .and_then(|operation| {
+                            paid_operation::settled_receipt(&operation).ok().flatten()
+                        }),
                     Err(_) => None,
                 };
-                if let Some(receipt_json) = concurrent_receipt {
-                    if let Ok(receipt) = serde_json::from_str::<PaymentReceipt>(&receipt_json) {
-                        return settled_response(receipt);
-                    }
+                if let Some(receipt) = concurrent_receipt {
+                    return settled_response(receipt);
                 }
                 return error_resp(
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -379,9 +396,75 @@ fn settled_response(receipt: PaymentReceipt) -> Response {
         .into_response()
 }
 
+/// Financial settlement and external delivery are independent observations.
+/// Call only after validating the operation's resume capability.
+fn delivery_status_fields(
+    conn: &rusqlite::Connection,
+    operation: &paid_operation::PaidOperation,
+) -> anyhow::Result<serde_json::Value> {
+    if let Some(delivery) = crate::delivery_operation::get(conn, &operation.operation_id)? {
+        let action = match delivery.delivery_status.as_str() {
+            "verified" => "none",
+            "failed_terminal" => "review_remedy",
+            _ if delivery.payment_status == "required" => "complete_payment_then_resubmit",
+            _ => "resubmit_original_signed_bytes",
+        };
+        return Ok(serde_json::json!({
+            "payment_status": delivery.payment_status,
+            "delivery_status": delivery.delivery_status,
+            "retry_action": action,
+            "error_code": delivery.error_code,
+            "remedy_reference": delivery.remedy_reference,
+        }));
+    }
+    let attempt: Option<(String, Option<String>)> = conn.query_row(
+        "SELECT state, last_error FROM paid_artifact_delivery_attempts WHERE correlation_id = ?1",
+        [&operation.operation_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    ).optional()?;
+    let terminal = operation.state == paid_operation::PaidOperationState::Abandoned
+        || operation.state == paid_operation::PaidOperationState::RefundPending
+        || attempt
+            .as_ref()
+            .is_some_and(|(state, _)| state == "abandoned");
+    let verified = operation.state == paid_operation::PaidOperationState::Anchored
+        || attempt
+            .as_ref()
+            .is_some_and(|(state, _)| state == "completed");
+    let settled = paid_operation::settled_receipt(operation)?.is_some();
+    let payment = if terminal && settled {
+        "remedy_pending"
+    } else if settled {
+        "settled"
+    } else {
+        "required"
+    };
+    let delivery = if verified {
+        "verified"
+    } else if terminal {
+        "failed_terminal"
+    } else if operation.state == paid_operation::PaidOperationState::DeliveryRetryable {
+        "failed_retryable"
+    } else {
+        match attempt.as_ref().map(|(state, _)| state.as_str()) {
+            Some("delivery_retryable") => "failed_retryable",
+            Some("uploading") => "uploading",
+            _ => "verification_pending",
+        }
+    };
+    Ok(serde_json::json!({
+        "payment_status": payment,
+        "delivery_status": delivery,
+        "retry_action": if verified { "none" } else if terminal { "review_remedy" }
+            else if settled { "resubmit_original_signed_bytes" } else { "complete_payment_then_resubmit" },
+        "error_code": attempt.and_then(|(_, error)| error),
+        "remedy_reference": serde_json::Value::Null,
+    }))
+}
+
 /// GET /api/operations/:operation_id — return durable, non-secret operation
-/// state. The operation ID is an unguessable capability issued only with the
-/// client-signed artifact; raw EIP-3009 payloads are never returned.
+/// state after validating the resume capability. Raw EIP-3009 payloads are
+/// never returned.
 async fn operation_status_handler(
     State(state): State<Arc<McpState>>,
     Path(operation_id): Path<String>,
@@ -429,12 +512,34 @@ async fn operation_status_handler(
     if query.resume_token.len() != expected.len() || query.resume_token != expected {
         return error_resp(StatusCode::UNAUTHORIZED, "invalid resume capability");
     }
+    let delivery = match state.store.lock() {
+        Ok(store) => match delivery_status_fields(store.conn(), &operation) {
+            Ok(fields) => fields,
+            Err(_) => {
+                return error_resp(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "delivery state unavailable",
+                )
+            }
+        },
+        Err(_) => {
+            return error_resp(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "delivery state unavailable",
+            )
+        }
+    };
     (StatusCode::OK, Json(serde_json::json!({
         "operation_id": operation.operation_id,
         "state": operation.state.as_str(),
         "quote_id": operation.quote_id,
         "expires_at": operation.quote_expires_at,
         "receipt": operation.provider_receipt_json.and_then(|value| serde_json::from_str::<serde_json::Value>(&value).ok()),
+        "payment_status": delivery["payment_status"],
+        "delivery_status": delivery["delivery_status"],
+        "retry_action": delivery["retry_action"],
+        "error_code": delivery["error_code"],
+        "remedy_reference": delivery["remedy_reference"],
     }))).into_response()
 }
 
@@ -578,4 +683,93 @@ pub fn router(state: Arc<McpState>) -> Router<()> {
         .route("/api/chains/{chain_id}", get(chain_handler))
         .route("/api/mock-sign", post(mock_sign_handler))
         .with_state(state)
+}
+
+#[cfg(test)]
+mod delivery_status_tests {
+    use super::*;
+
+    fn fixture() -> (rusqlite::Connection, paid_operation::PaidOperation) {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        paid_operation::migrate_paid_operations(&conn).unwrap();
+        crate::paid_artifact::migrate_paid_artifact_staging(&conn).unwrap();
+        crate::delivery_operation::migrate(&conn).unwrap();
+        let operation = paid_operation::create_or_get(
+            &conn,
+            paid_operation::NewPaidOperation {
+                operation_id: "status-op",
+                subject_hash: "owner",
+                artifact_hash: "digest",
+                created_at: "2026-10-02T00:00:00Z",
+            },
+        )
+        .unwrap();
+        (conn, operation)
+    }
+
+    #[test]
+    fn settled_legacy_failure_is_not_reported_as_unpaid_or_delivered() {
+        let (conn, mut operation) = fixture();
+        let payload = serde_json::json!({"version":1,"service_id":"mock-provider","operation_id":"status-op","scheme":"exact","binding_digest":"binding","payer_wallet":"wallet","amount":"1000","asset":"asset","network":"network","pay_to":"merchant","settlement_tx":"tx","settled_at":"2026-10-02T00:00:00Z"});
+        let mut receipt = payload.clone();
+        receipt.as_object_mut().unwrap().remove("version");
+        receipt.as_object_mut().unwrap().remove("service_id");
+        receipt["status"] = serde_json::json!("settled");
+        receipt["receipt"] = serde_json::json!({"payload":payload,"signature":{"algorithm":"ed25519","key_id":"mock","value":"signature"}});
+        operation.provider_receipt_json = Some(receipt.to_string());
+        operation.binding_digest = Some("binding".into());
+        operation.payer_wallet = Some("wallet".into());
+        operation.state = paid_operation::PaidOperationState::DeliveryRetryable;
+        let status = delivery_status_fields(&conn, &operation).unwrap();
+        assert_eq!(status["payment_status"], "settled");
+        assert_eq!(status["delivery_status"], "failed_retryable");
+        assert_eq!(status["retry_action"], "resubmit_original_signed_bytes");
+        operation.state = paid_operation::PaidOperationState::RefundPending;
+        let status = delivery_status_fields(&conn, &operation).unwrap();
+        assert_eq!(status["payment_status"], "remedy_pending");
+        assert_eq!(status["delivery_status"], "failed_terminal");
+    }
+
+    #[test]
+    fn malformed_legacy_receipt_is_not_reported_as_settled() {
+        let (conn, mut operation) = fixture();
+        operation.provider_receipt_json = Some("{}".into());
+        operation.state = paid_operation::PaidOperationState::PaymentReady;
+        assert!(delivery_status_fields(&conn, &operation).is_err());
+    }
+
+    #[test]
+    fn durable_delivery_and_remedy_override_stale_aggregate_state() {
+        let (conn, operation) = fixture();
+        use crate::delivery_operation as delivery;
+        delivery::bind(
+            &conn,
+            "status-op",
+            "owner",
+            &"a".repeat(64),
+            12,
+            "arweave",
+            "locator",
+            true,
+            0,
+        )
+        .unwrap();
+        delivery::acquire(&conn, "status-op", "lease", 1).unwrap();
+        delivery::payment_settled(&conn, "status-op", "lease", 2).unwrap();
+        delivery::release(
+            &conn,
+            "status-op",
+            "lease",
+            "failed_terminal",
+            Some("provider_unavailable"),
+            3,
+        )
+        .unwrap();
+        delivery::record_remedy(&conn, "status-op", "credit:test-reference", 4).unwrap();
+        let status = delivery_status_fields(&conn, &operation).unwrap();
+        assert_eq!(status["payment_status"], "remedied");
+        assert_eq!(status["delivery_status"], "failed_terminal");
+        assert_eq!(status["remedy_reference"], "credit:test-reference");
+        assert_eq!(status["error_code"], "provider_unavailable");
+    }
 }

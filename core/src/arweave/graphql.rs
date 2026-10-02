@@ -130,29 +130,60 @@ impl GraphQlClient {
         &self,
         owner_addresses: &[String],
     ) -> anyhow::Result<Vec<AnchoredItem>> {
-        let mut items = Vec::new();
-        let mut cursor: Option<String> = None;
+        let report = self.scan_anchored(owner_addresses, MAX_PAGES).await;
+        anyhow::ensure!(
+            report.exhausted,
+            "{}",
+            report
+                .error
+                .unwrap_or_else(|| "discovery budget exhausted".into())
+        );
+        Ok(report.items)
+    }
 
-        for _ in 0..MAX_PAGES {
-            let page = self.fetch_page(owner_addresses, cursor.as_deref()).await?;
-            let PageResult {
-                items: page_items,
-                next_cursor,
-            } = page;
-            items.extend(page_items);
-            match next_cursor {
-                Some(c) => cursor = Some(c),
-                None => break,
+    /// Preserve fetched pages on outage, cursor loops or budget exhaustion.
+    pub async fn scan_anchored(
+        &self,
+        owner_addresses: &[String],
+        max_pages: usize,
+    ) -> crate::restore::SourceScan<AnchoredItem> {
+        let mut report = crate::restore::SourceScan::default();
+        let mut cursor: Option<String> = None;
+        let mut seen = std::collections::HashSet::new();
+        if !(1..=MAX_PAGES).contains(&max_pages) {
+            report.error = Some("invalid discovery page budget".into());
+            return report;
+        }
+        for _ in 0..max_pages {
+            let page = match self.fetch_page(owner_addresses, cursor.as_deref()).await {
+                Ok(page) => page,
+                Err(e) => {
+                    report.error = Some(e.to_string());
+                    break;
+                }
+            };
+            report.items.extend(page.items);
+            match page.next_cursor {
+                Some(c) => {
+                    if !seen.insert(c.clone()) {
+                        report.error = Some("discovery cursor loop".into());
+                        break;
+                    }
+                    cursor = Some(c);
+                }
+                None => {
+                    report.exhausted = true;
+                    break;
+                }
             }
         }
-
-        // Irys returns newest-first (no server-side sort); order oldest-first
-        // client-side. Arweave uses HEIGHT_ASC so pages already arrive in order.
+        report.budget_exhausted = !report.exhausted && report.error.is_none();
         if self.flavour == GatewayFlavour::Irys {
-            items.sort_by_key(|i| i.block_time.unwrap_or(i64::MAX));
+            report
+                .items
+                .sort_by_key(|i| i.block_time.unwrap_or(i64::MAX));
         }
-
-        Ok(items)
+        report
     }
 
     async fn fetch_page(
@@ -266,7 +297,9 @@ fn parse_page(json: &serde_json::Value, flavour: GatewayFlavour) -> anyhow::Resu
         last_cursor = edge["cursor"].as_str().map(str::to_string);
     }
 
-    let has_next = tx["pageInfo"]["hasNextPage"].as_bool().unwrap_or(false);
+    let has_next = tx["pageInfo"]["hasNextPage"]
+        .as_bool()
+        .context("graphql missing pageInfo.hasNextPage")?;
     // A gateway claiming hasNextPage with an empty/cursorless page would
     // loop forever — treat it as the final page instead.
     let next_cursor = if has_next { last_cursor } else { None };

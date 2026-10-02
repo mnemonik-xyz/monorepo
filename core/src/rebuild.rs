@@ -5,9 +5,9 @@
 //! COSE artifact bytes (the same bytes uploaded to Arweave), it reconstructs
 //! the index row — content, owner, tags, content_hash, and the embedding — so
 //! the operator's (or anyone's) vector store can be regenerated from the
-//! durable artifacts alone. Combined with the per-owner Merkle commitment
-//! ([`crate::merkle`]), a rebuilt index is *checkable*: recompute the root from
-//! the rebuilt set and compare to the anchored one.
+//! durable artifacts alone. SQL Merkle inclusion proofs do not establish that
+//! the recovered set is complete. Completeness requires independently trusted
+//! expected heads and verified ancestry; unrecorded newer heads remain unknown.
 //!
 //! Reconstruction trusts only cryptographically valid artifacts: every input
 //! is COSE-verified before any field is extracted, so a tampered or unsigned
@@ -221,14 +221,11 @@ pub const LEGACY_TURBO_SEED: u64 = 42;
 /// commitment check inside `open_memory` still ensures the ciphertext was not
 /// tampered with.
 #[cfg(not(target_arch = "wasm32"))]
-pub fn rebuild_sealed_row(
-    cose_bytes: &[u8],
-    x25519_secret: &[u8; 32],
-) -> Result<Vec<u8>, String> {
+pub fn rebuild_sealed_row(cose_bytes: &[u8], x25519_secret: &[u8; 32]) -> Result<Vec<u8>, String> {
     use coset::CborSerializable;
 
-    let cose_sign1 = coset::CoseSign1::from_slice(cose_bytes)
-        .map_err(|e| format!("invalid COSE_Sign1: {e}"))?;
+    let cose_sign1 =
+        coset::CoseSign1::from_slice(cose_bytes).map_err(|e| format!("invalid COSE_Sign1: {e}"))?;
     let payload = cose_sign1
         .payload
         .as_ref()
@@ -299,4 +296,294 @@ pub fn rebuild_row_self_describing(cose_bytes: &[u8]) -> Result<RebuiltRow, Stri
 
     let compressor = EmbeddingCompressor::new(compressed.dim, compressed.bit_width, seed);
     rebuild_row(cose_bytes, &compressor)
+}
+
+/// Structured recovery failures; unsupported formats never masquerade as empty success.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct RecoveryError {
+    pub code: &'static str,
+    pub message: String,
+}
+impl RecoveryError {
+    fn new(code: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+        }
+    }
+}
+
+/// Complete client-local recovery, retaining the exact original signed envelope.
+/// Plaintext is never an operator receipt and must only enter the owner's local store.
+#[derive(Debug, Clone)]
+pub struct RecoveredMemory {
+    pub envelope: Vec<u8>,
+    pub envelope_digest: String,
+    pub author: String,
+    pub artifact_id: String,
+    pub sealed: bool,
+    pub plaintext: Vec<u8>,
+    pub memory: serde_json::Value,
+}
+
+/// Verify identity before kind dispatch or decryption. The expected author must
+/// come from caller trust, never from discovery tags alone. Grants and A2A use
+/// their dedicated recovery paths and are explicitly unsupported here.
+pub fn recover_memory(
+    bytes: &[u8],
+    expected_author: &str,
+    x25519_secret: Option<&[u8; 32]>,
+) -> Result<RecoveredMemory, RecoveryError> {
+    if bytes.len() > 1048576 {
+        return Err(RecoveryError::new("too_large", "artifact exceeds 1 MiB"));
+    }
+    let verified =
+        verify_artifact(bytes, None).map_err(|e| RecoveryError::new("invalid_envelope", e))?;
+    if !verified.valid || verified.signer != expected_author {
+        return Err(RecoveryError::new(
+            "untrusted_author",
+            "signature or pinned author mismatch",
+        ));
+    }
+    let outer = from_canonical_cbor(&verified.payload)
+        .map_err(|e| RecoveryError::new("malformed_payload", e))?;
+    let expected_producer = format!("did:sol:{expected_author}");
+    if outer["producer"].as_str() != Some(expected_producer.as_str()) {
+        return Err(RecoveryError::new(
+            "author_binding",
+            "producer differs from signer",
+        ));
+    }
+    let sealed = match (outer["type"].as_str(), outer["schema_version"].as_u64()) {
+        (Some("memory"), Some(1)) => false,
+        (Some("sealed"), Some(1)) => true,
+        _ => {
+            return Err(RecoveryError::new(
+                "unsupported_kind",
+                "supported kinds: memory.v1, sealed.v1",
+            ))
+        }
+    };
+    let plaintext = if sealed {
+        let key = x25519_secret.ok_or_else(|| {
+            RecoveryError::new(
+                "key_required",
+                "sealed recovery requires a backed-up decryption key",
+            )
+        })?;
+        crate::sealed::open_memory(&verified.payload, key).map_err(|_| {
+            RecoveryError::new(
+                "open_failed",
+                "complete plaintext could not be authenticated",
+            )
+        })?
+    } else {
+        verified.payload
+    };
+    // The existing SDK seals JSON; native producers also seal canonical CBOR.
+    // Neither format changes the signed outer identity or exact plaintext bytes.
+    let memory = match from_canonical_cbor(&plaintext) {
+        Ok(memory) => memory,
+        Err(_) if sealed => serde_json::from_slice(&plaintext)
+            .map_err(|e| RecoveryError::new("malformed_memory", e.to_string()))?,
+        Err(e) => return Err(RecoveryError::new("malformed_memory", e)),
+    };
+    if memory["type"] != "memory"
+        || memory.get("schema_version").is_some_and(|v| v != 1)
+        || (!sealed && memory["schema_version"] != 1)
+    {
+        return Err(RecoveryError::new(
+            "unsupported_inner_kind",
+            "inner payload must be memory.v1 or legacy sealed memory JSON",
+        ));
+    }
+    let artifact_id = outer["artifact_id"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| RecoveryError::new("malformed_memory", "missing signed artifact ID"))?
+        .to_string();
+    if memory
+        .get("producer")
+        .is_some_and(|v| v.as_str() != Some(expected_producer.as_str()))
+        || memory
+            .get("artifact_id")
+            .is_some_and(|v| v.as_str() != Some(artifact_id.as_str()))
+        || !memory["content"].is_string()
+    {
+        return Err(RecoveryError::new(
+            "memory_binding",
+            "inner identity, author or content mismatch",
+        ));
+    }
+    Ok(RecoveredMemory {
+        envelope: bytes.to_vec(),
+        envelope_digest: crate::codec::hash::hash_bytes(bytes),
+        author: expected_author.to_owned(),
+        artifact_id,
+        sealed,
+        plaintext,
+        memory,
+    })
+}
+
+/// Graph evidence relative only to caller-pinned heads. This never proves that
+/// an index disclosed every artifact, fork or newer head.
+#[derive(Debug, Default)]
+pub struct MemoryRecoveryReport {
+    pub memories: Vec<RecoveredMemory>,
+    pub rejected: Vec<(usize, RecoveryError)>,
+    pub missing_parents: Vec<String>,
+    pub forks: Vec<String>,
+    pub invalid_heads: Vec<String>,
+    pub invalid_artifacts: Vec<String>,
+    pub complete_to_heads: bool,
+}
+
+/// Independent checkpoint binding. MEMORY_V1 IDs alone are not content addressed.
+#[derive(Debug, Clone)]
+pub struct MemoryRecoveryHead {
+    pub artifact_id: String,
+    pub envelope_digest: String,
+    pub author: String,
+}
+
+/// Verify every candidate before interpreting signed parent references. Duplicate
+/// IDs with different envelopes are ambiguous and cannot satisfy pinned heads.
+pub fn recover_memory_set(
+    candidates: &[(&[u8], &str)],
+    x25519_secret: Option<&[u8; 32]>,
+    heads: &[MemoryRecoveryHead],
+    trusted_ancestry: &[MemoryRecoveryHead],
+) -> MemoryRecoveryReport {
+    use std::collections::{BTreeSet, HashMap, HashSet};
+    let mut report = MemoryRecoveryReport::default();
+    let mut rows = HashMap::<String, RecoveredMemory>::new();
+    let mut ambiguous = HashSet::new();
+    for (index, (bytes, author)) in candidates.iter().enumerate() {
+        match recover_memory(bytes, author, x25519_secret) {
+            Err(e) => report.rejected.push((index, e)),
+            Ok(row) => {
+                if rows
+                    .get(&row.artifact_id)
+                    .is_some_and(|old| old.envelope != row.envelope)
+                {
+                    ambiguous.insert(row.artifact_id.clone());
+                    report.rejected.push((
+                        index,
+                        RecoveryError::new(
+                            "ambiguous_id",
+                            "conflicting signed artifacts share an ID",
+                        ),
+                    ));
+                } else {
+                    rows.insert(row.artifact_id.clone(), row);
+                }
+            }
+        }
+    }
+    // MEMORY_V1 links names, not content hashes. Every ancestry node must
+    // therefore be pinned independently, not only the requested head.
+    for (id, row) in &rows {
+        if !heads.iter().chain(trusted_ancestry).any(|pin| {
+            pin.artifact_id == *id
+                && pin.author == row.author
+                && pin.envelope_digest == row.envelope_digest
+        }) {
+            ambiguous.insert(id.clone());
+        }
+    }
+    let mut edges = HashMap::<String, Vec<String>>::new();
+    let mut children = HashMap::<String, HashSet<String>>::new();
+    for (id, row) in &rows {
+        let parent_value = row.memory.get("parents");
+        let parents = match parent_value {
+            None => Vec::new(),
+            Some(serde_json::Value::Array(values))
+                if values.len() <= crate::codec::schema::MAX_PARENTS =>
+            {
+                let parsed: Option<Vec<String>> = values
+                    .iter()
+                    .map(|p| {
+                        p["artifact_id"]
+                            .as_str()
+                            .filter(|id| !id.is_empty())
+                            .map(str::to_owned)
+                    })
+                    .collect();
+                match parsed {
+                    Some(p) => p,
+                    None => {
+                        ambiguous.insert(id.clone());
+                        Vec::new()
+                    }
+                }
+            }
+            _ => {
+                ambiguous.insert(id.clone());
+                Vec::new()
+            }
+        };
+        for parent in &parents {
+            children
+                .entry(parent.clone())
+                .or_default()
+                .insert(id.clone());
+        }
+        edges.insert(id.clone(), parents);
+    }
+    let mut missing = BTreeSet::new();
+    for parents in edges.values() {
+        for parent in parents {
+            if !edges.contains_key(parent) {
+                missing.insert(parent.clone());
+            }
+        }
+    }
+    // Resolve one ancestry level per pass; bounded work, no recursive stack or
+    // exponential revisits when many descendants share the same parents.
+    let mut good = HashSet::new();
+    for _ in 0..crate::codec::schema::MAX_DEPTH {
+        let next: Vec<String> = edges
+            .iter()
+            .filter(|(id, parents)| {
+                !ambiguous.contains(*id)
+                    && !good.contains(*id)
+                    && parents.iter().all(|p| good.contains(p))
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        if next.is_empty() {
+            break;
+        }
+        good.extend(next);
+    }
+    for head in heads {
+        let binding_matches = rows.get(&head.artifact_id).is_some_and(|row| {
+            row.envelope_digest == head.envelope_digest && row.author == head.author
+        });
+        if !good.contains(&head.artifact_id) || !binding_matches {
+            report.invalid_heads.push(head.artifact_id.clone());
+        }
+    }
+    report.invalid_artifacts = rows
+        .keys()
+        .filter(|id| !good.contains(*id))
+        .cloned()
+        .collect();
+    report.invalid_artifacts.sort();
+    report.complete_to_heads = !heads.is_empty() && report.invalid_heads.is_empty();
+    report.missing_parents = missing.into_iter().collect();
+    report.forks = children
+        .into_iter()
+        .filter_map(|(parent, children)| (children.len() > 1).then_some(parent))
+        .collect();
+    report.forks.sort();
+    report.memories = rows
+        .into_iter()
+        .filter_map(|(id, row)| good.contains(&id).then_some(row))
+        .collect();
+    report
+        .memories
+        .sort_by(|a, b| a.artifact_id.cmp(&b.artifact_id));
+    report
 }

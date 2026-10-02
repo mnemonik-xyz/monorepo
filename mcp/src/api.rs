@@ -124,38 +124,13 @@ impl axum::extract::FromRequestParts<Arc<McpState>> for ClientIp {
     }
 }
 
-/// Resume a bounded batch of already-settled delivery attempts. This uses the
-/// same cryptographic callback path as the browser, but only from durable
-/// staged bytes; it never possesses or submits a payment authorization.
-pub async fn resume_due_paid_deliveries(state: Arc<McpState>) -> usize {
-    let now = chrono::Utc::now().to_rfc3339();
-    let ids = match state.store.lock() {
-        Ok(store) => {
-            crate::paid_artifact::due_delivery_retries(store.conn(), &now, 16).unwrap_or_default()
-        }
-        Err(_) => return 0,
-    };
-    let mut resumed = 0;
-    for correlation_id in ids {
-        let staged = match state.store.lock() {
-            Ok(store) => crate::paid_artifact::get_staged_cose(store.conn(), &correlation_id)
-                .ok()
-                .flatten(),
-            Err(_) => None,
-        };
-        let Some(staged) = staged else { continue };
-        let request = SignCallbackRequest {
-            correlation_id,
-            cose_signed_bytes: base64::Engine::encode(
-                &base64::engine::general_purpose::STANDARD,
-                staged.cose_sign1,
-            ),
-            signer_pubkey: staged.signer_pubkey,
-        };
-        let _ = sign_callback_handler(State(state.clone()), ClientIp(None), Json(request)).await;
-        resumed += 1;
-    }
-    resumed
+/// Compatibility entry point for the retired hosted-payload retry worker.
+/// Retries now require identical client-owned bytes through the callback.
+#[allow(dead_code)] // Compatibility API; source-free retries require client resubmission.
+pub async fn resume_due_paid_deliveries(_state: Arc<McpState>) -> usize {
+    // No autonomous worker may read hosted source bytes. The client resubmits
+    // its original signed envelope to resume the same durable operation.
+    0
 }
 
 /// Successful response of `POST /api/sign-callback`.
@@ -218,9 +193,13 @@ pub async fn sign_callback_handler(
         Ok(e) => e,
         Err(PendingError::NotFound) => match state.store.lock() {
             Ok(store) => {
-                match paid_artifact::get_staged_delivery_context(store.conn(), &req.correlation_id)
-                {
-                    Ok(Some(context)) => context.into_pending_entry(),
+                match paid_artifact::resubmitted_context(
+                    store.conn(),
+                    &req.correlation_id,
+                    &cose_bytes,
+                    &req.signer_pubkey,
+                ) {
+                    Ok(Some(context)) => context,
                     Ok(None) => {
                         return error_resp(
                             StatusCode::GONE,
@@ -644,6 +623,29 @@ pub async fn sign_callback_handler(
         Err(_) => return error_resp(StatusCode::INTERNAL_SERVER_ERROR, "store unavailable"),
     };
     if let Some((existing_id, solana_tx, arweave_tx)) = existing_anchor {
+        if crate::tools::perform_delivery_check(
+            &state.arweave,
+            &arweave_tx,
+            &entry.content_hash,
+            &req.signer_pubkey,
+            &cose_bytes,
+            state.delivery_refetch_timeout,
+        )
+        .await
+        .is_err()
+        {
+            if let Some(attempt) = &delivery_attempt {
+                if let Ok(store) = state.store.lock() {
+                    let _ = paid_artifact::mark_delivery_retryable(
+                        store.conn(),
+                        attempt,
+                        "external_reverification_pending",
+                        &now,
+                    );
+                }
+            }
+            return (StatusCode::SERVICE_UNAVAILABLE,Json(serde_json::json!({"operation_id":req.correlation_id,"payment_status":if is_paid_anchored{"settled"}else{"not_required"},"delivery_status":"verification_pending","retry_action":"resubmit_same_operation_and_original_bytes"}))).into_response();
+        }
         drop(free_anchor.take());
         if let Some(attempt) = &delivery_attempt {
             if let Ok(store) = state.store.lock() {
@@ -671,6 +673,14 @@ pub async fn sign_callback_handler(
             arweave_url: links.arweave_url,
             already_anchored: true,
         };
+        let mut body = serde_json::to_value(body).expect("serializable receipt");
+        body["operation_id"] = serde_json::json!(req.correlation_id);
+        body["payment_status"] = serde_json::json!(if is_paid_anchored {
+            "settled"
+        } else {
+            "not_required"
+        });
+        body["delivery_status"] = serde_json::json!("verified");
         return (StatusCode::OK, Json(body)).into_response();
     }
     let attestation_id = existing_row.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
@@ -704,7 +714,71 @@ pub async fn sign_callback_handler(
         // Sealed entries get an additional `Mnemonic-Type: sealed` tag so
         // gateway queries can distinguish them without fetching the payload.
         let producer_did = format!("did:sol:{}", req.signer_pubkey);
-        let ar_tx = if let Some(existing) = delivery_attempt
+        let ar_tx = if let Some(attempt) = &delivery_attempt {
+            // Use a stable signed timestamp, never a retry's wall clock.
+            let payload =
+                mnemonic_core::codec::canonical::from_canonical_cbor(&entry.canonical_cbor)
+                    .unwrap_or_default();
+            let created = payload["created_at"].as_str().unwrap_or("");
+            let mut tags = vec![("Producer", producer_did.as_str()), ("Created-At", created)];
+            if entry.is_sealed {
+                tags.push(("Mnemonic-Type", "sealed"));
+            }
+            let computed = match state
+                .keypair
+                .keypair()
+                .and_then(|kp| state.arweave.item_id(&cose_bytes, kp, &tags))
+            {
+                Ok(id) => id,
+                Err(_) => {
+                    return error_resp(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "operator identity unavailable",
+                    )
+                }
+            };
+            let expected = attempt.arweave_tx.clone().unwrap_or(computed.clone());
+            if let Ok(store) = state.store.lock() {
+                if paid_artifact::record_arweave_uploaded(store.conn(), attempt, &expected, &now)
+                    .is_err()
+                {
+                    return error_resp(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "delivery locator persistence failed",
+                    );
+                }
+            } else {
+                return error_resp(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "delivery state unavailable",
+                );
+            }
+            let delivered = if expected != computed {
+                // A pre-upgrade locator has immutable historical upload tags.
+                // Never substitute a differently tagged upload silently.
+                match state.arweave.read_a2a(&expected).await {
+                    Ok(found) if found == cose_bytes => Ok(expected),
+                    _ => Err(anyhow::anyhow!("legacy locator unavailable")),
+                }
+            } else {
+                crate::ingestion::deliver_exact(&state.arweave, &state.keypair, &cose_bytes, &tags)
+                    .await
+            };
+            match delivered {
+                Ok(id) => id,
+                Err(_) => {
+                    if let Ok(store) = state.store.lock() {
+                        let _ = paid_artifact::mark_delivery_retryable(
+                            store.conn(),
+                            attempt,
+                            "delivery_unavailable",
+                            &now,
+                        );
+                    }
+                    return (StatusCode::SERVICE_UNAVAILABLE,Json(serde_json::json!({"operation_id":req.correlation_id,"payment_status":if attempt.attempts>=8{"remedy_pending"}else{"settled"},"delivery_status":if attempt.attempts>=8{"failed_terminal"}else{"failed_retryable"},"retry_action":if attempt.attempts>=8{"contact_operator_for_refund_or_credit"}else{"resubmit_same_operation_and_original_bytes"}}))).into_response();
+                }
+            }
+        } else if let Some(existing) = delivery_attempt
             .as_ref()
             .and_then(|attempt| attempt.arweave_tx.clone())
         {
@@ -736,14 +810,14 @@ pub async fn sign_callback_handler(
                 ("Created-At", now.as_str()),
                 ("Mnemonic-Type", "sealed"),
             ];
-            let ar_tags: &[(&str, &str)] = if entry.is_sealed { sealed_tags } else { base_tags };
+            let ar_tags: &[(&str, &str)] = if entry.is_sealed {
+                sealed_tags
+            } else {
+                base_tags
+            };
             let uploaded = match state
                 .arweave
-                .write_item(
-                    &cose_bytes,
-                    operator_keypair,
-                    ar_tags,
-                )
+                .write_item(&cose_bytes, operator_keypair, ar_tags)
                 .await
             {
                 Ok(t) => t,
@@ -851,7 +925,11 @@ pub async fn sign_callback_handler(
                 &req.signer_pubkey, // owner = same pubkey
                 &now,
                 entry.write_mode,
-                &cose_bytes,
+                if entry.write_mode == WriteMode::Anchored {
+                    &[]
+                } else {
+                    &cose_bytes
+                },
             )
         } else {
             // Plain path (public or non-sealed private).
@@ -896,15 +974,14 @@ pub async fn sign_callback_handler(
         }
         save_res
     };
-    if let Err(e) = persist_res {
-        // Persistence failed AFTER the LRU consumed the entry AND after any
-        // on-chain anchor was written. The user's bundle is gone. Surface a
-        // 500 — the failure mode here is operator-visible (DB I/O / disk
-        // full) rather than user-fixable.
-        return error_resp(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            &format!("persist failed: {e}"),
-        );
+    let receipt_persisted = persist_res.is_ok();
+    if is_local_write {
+        if let Err(e) = persist_res {
+            return error_resp(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("persist failed: {e}"),
+            );
+        }
     }
 
     // T3 (round-2): extend the delivery guarantee to the deferred-signing
@@ -925,6 +1002,7 @@ pub async fn sign_callback_handler(
     if !is_local_write {
         let ctx = crate::tools::DeliveryContext {
             arweave: &state.arweave,
+            original_bytes: &cose_bytes,
             store: &state.store,
             timeout: state.delivery_refetch_timeout,
             attestation_id: &attestation_id,
@@ -1006,10 +1084,7 @@ pub async fn sign_callback_handler(
             if let Err(error) =
                 paid_artifact::mark_delivery_completed(store.conn(), attempt, &solana_tx, &now)
             {
-                return error_resp(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    &format!("delivery state failed: {error}"),
-                );
+                tracing::warn!(error=%error,"verified delivery metadata persistence failed");
             }
         }
     }
@@ -1027,6 +1102,15 @@ pub async fn sign_callback_handler(
         arweave_url: links.arweave_url,
         already_anchored: false,
     };
+    let mut body = serde_json::to_value(body).expect("serializable receipt");
+    body["operation_id"] = serde_json::json!(req.correlation_id);
+    body["payment_status"] = serde_json::json!(if is_paid_anchored {
+        "settled"
+    } else {
+        "not_required"
+    });
+    body["receipt_persisted"] = serde_json::json!(receipt_persisted);
+    body["delivery_status"] = serde_json::json!(if is_local_write { "local" } else { "verified" });
     (StatusCode::OK, Json(body)).into_response()
 }
 
@@ -2797,9 +2881,10 @@ fn agent_card_json() -> serde_json::Value {
         Some(pubkey) => {
             use mnemonic_core::codec::a2a::build_x_mnemonic_extension;
             let attestation_endpoint = format!("{origin}/a2a");
-            serde_json::json!([
-                build_x_mnemonic_extension(&pubkey, Some(&attestation_endpoint))
-            ])
+            serde_json::json!([build_x_mnemonic_extension(
+                &pubkey,
+                Some(&attestation_endpoint)
+            )])
         }
         None => serde_json::json!([]),
     };
@@ -3012,111 +3097,12 @@ pub struct RecallSession {
 /// Map from `owner_pubkey` → `RecallSession`.  Never written to disk.
 pub type RecallSessionMap = HashMap<String, RecallSession>;
 
-/// Request body for `POST /api/recall-session`.
-#[derive(Debug, Deserialize)]
-pub struct RecallSessionStartRequest {
-    /// HPKE encapsulated key (base64-standard, 32 bytes for X25519).
-    pub enc: String,
-    /// HPKE ciphertext wrapping the RK (base64-standard, 48 bytes).
-    pub wk: String,
-    /// Requested session TTL in seconds (max 3600).
-    #[serde(default)]
-    pub ttl_secs: Option<u64>,
-}
-
-/// `POST /api/recall-session` — unwrap the owner's recall key and store it in RAM.
-///
-/// Auth: Bearer JWT (same middleware as the rest of `/api/…`).
-pub async fn recall_session_start_handler(
-    State(state): State<Arc<McpState>>,
-    Extension(claims): Extension<Claims>,
-    Json(req): Json<RecallSessionStartRequest>,
-) -> Response {
-    let owner = &claims.sub;
-
-    // Decode enc / wk.
-    let enc_bytes = match base64::Engine::decode(
-        &base64::engine::general_purpose::STANDARD,
-        req.enc.as_bytes(),
-    ) {
-        Ok(b) => b,
-        Err(e) => {
-            return error_resp(
-                StatusCode::BAD_REQUEST,
-                &format!("enc is not valid base64: {e}"),
-            );
-        }
-    };
-    let wk_bytes = match base64::Engine::decode(
-        &base64::engine::general_purpose::STANDARD,
-        req.wk.as_bytes(),
-    ) {
-        Ok(b) => b,
-        Err(e) => {
-            return error_resp(
-                StatusCode::BAD_REQUEST,
-                &format!("wk is not valid base64: {e}"),
-            );
-        }
-    };
-
-    // Resolve TTL — cap at RECALL_SESSION_MAX_TTL_SECS.
-    let ttl_secs = req
-        .ttl_secs
-        .unwrap_or(RECALL_SESSION_MAX_TTL_SECS)
-        .min(RECALL_SESSION_MAX_TTL_SECS);
-
-    // Unwrap the recall key.  The owner must have wrapped their RK to their own
-    // X25519 key and supplied the (enc, wk) blob via this request.
-    // V1: the client wraps the plaintext RK to the server's static x25519 key.
-    // This lets the webapp unwrap the stored enc+wk locally, then re-wrap the
-    // plaintext RK to this server key to hand it over for the session.
-    let server_x25519_sk: [u8; 32] = state.bootstrap_server_x25519_secret.to_bytes();
-    let rk = match mnemonic_core::identity::recall_key::unwrap_rk(
-        &enc_bytes,
-        &wk_bytes,
-        &server_x25519_sk,
-    ) {
-        Ok(rk) => rk,
-        Err(e) => {
-            return error_resp(
-                StatusCode::UNAUTHORIZED,
-                &format!("recall key unwrap failed: {e}"),
-            );
-        }
-    };
-
-    let now_str = chrono::Utc::now().to_rfc3339();
-    let expires_at = Instant::now() + std::time::Duration::from_secs(ttl_secs);
-
-    {
-        let mut sessions = state.recall_sessions.lock().await;
-        sessions.insert(
-            owner.clone(),
-            RecallSession {
-                rk,
-                expires_at,
-                started_at: now_str.clone(),
-            },
-        );
-    }
-
-    tracing::info!(
-        owner_pubkey = %owner,
-        ttl_secs = ttl_secs,
-        started_at = %now_str,
-        "recall session started"
-    );
-
-    (
-        StatusCode::OK,
-        Json(serde_json::json!({
-            "status": "ok",
-            "ttl_secs": ttl_secs,
-            "started_at": now_str,
-        })),
+/// Hosted decryption sessions are retired; never consume an incoming recall key.
+pub async fn recall_session_start_handler() -> Response {
+    error_resp(
+        StatusCode::GONE,
+        "hosted decryption retired; restore and decrypt on the client",
     )
-        .into_response()
 }
 
 /// `DELETE /api/recall-session` — terminate the caller's active recall session.
@@ -3127,7 +3113,8 @@ pub async fn recall_session_delete_handler(
     let owner = &claims.sub;
     let mut sessions = state.recall_sessions.lock().await;
 
-    if let Some(session) = sessions.remove(owner) {
+    if let Some(mut session) = sessions.remove(owner) {
+        session.rk.fill(0);
         let duration_secs = session
             .expires_at
             .checked_duration_since(Instant::now())
@@ -3150,6 +3137,8 @@ pub async fn recall_session_delete_handler(
 ///
 /// Expired sessions are lazily evicted here.  Returns a copy of the 32-byte
 /// RK so callers do not need to hold the `Mutex` guard across `.await`.
+#[cfg(any(test, feature = "test-support"))]
+#[allow(dead_code)] // Used by integration tests through the library, not the binary.
 pub async fn get_active_rk(
     sessions: &tokio::sync::Mutex<RecallSessionMap>,
     owner_pubkey: &str,

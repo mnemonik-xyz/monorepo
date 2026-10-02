@@ -13,6 +13,17 @@
 
 // ── T2: client + signer + keypair + types + errors ──────────────────────────
 export { MnemonicClient } from "./client.js";
+export { IrysDiscoverySource, ArweaveDiscoverySource, DiscoveryError } from "./discovery.js";
+export type {
+  DiscoverySource, DiscoveryScope, DiscoveryCandidate, DiscoveryPage,
+  DiscoveryStatus, DiscoveryDiagnostics,
+} from "./discovery.js";
+export {
+  signRecoveryCheckpoint, verifyRecoveryCheckpoint, checkpointA2ARestoreOptions,
+} from "./checkpoint.js";
+export type { RecoveryCheckpoint, SignedRecoveryCheckpoint } from "./checkpoint.js";
+export { createRecoveryBackup, openRecoveryBackup } from "./backup.js";
+export type { RecoveryBackup } from "./backup.js";
 export { coseSignPayload } from "./cose.js";
 export {
   AuthError,
@@ -117,3 +128,6 @@ export type {
 } from "./oauth.js";
 
 export type { A2AIndexStore, A2ARestoreOptions, A2ARestoreReport } from "./types.js";
+
+export * from "./storage.js";
+export * from "./storage-portability.js";

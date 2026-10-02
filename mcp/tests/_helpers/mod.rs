@@ -77,6 +77,7 @@ pub const TEST_REFRESH_SALT: [u8; 32] = [0xABu8; 32];
 /// touched the OAuth surface keep getting 404 on those paths.
 pub struct TestServerBuilder {
     arweave_gateway: Option<String>,
+    parent_blob_origin: Option<String>,
     storage_mode: String,
     payment_mode: String,
     sign_memory_cost_micro_usdc: i64,
@@ -91,6 +92,7 @@ impl Default for TestServerBuilder {
     fn default() -> Self {
         Self {
             arweave_gateway: None,
+            parent_blob_origin: None,
             storage_mode: "local".into(),
             payment_mode: "none".into(),
             sign_memory_cost_micro_usdc: 0,
@@ -104,6 +106,11 @@ impl Default for TestServerBuilder {
 }
 
 impl TestServerBuilder {
+    pub fn parent_blob_origin(mut self, origin: String) -> Self {
+        self.parent_blob_origin = Some(origin);
+        self
+    }
+
     pub fn arweave_gateway(mut self, url: String) -> Self {
         self.arweave_gateway = Some(url);
         self
@@ -207,6 +214,18 @@ impl TestServerBuilder {
             if let Some(url) = self.arweave_gateway {
                 inner.arweave = mnemonic_core::arweave::ArweaveClient::new_for_test(url);
             }
+            if let Some(origin) = self.parent_blob_origin {
+                // Replace the freshly created test backend before sharing state.
+                let backend = std::mem::replace(
+                    &mut inner.arweave,
+                    mnemonic_core::arweave::ArweaveClient::new_for_test(
+                        "http://127.0.0.1:0".into(),
+                    ),
+                );
+                inner.arweave = backend
+                    .try_with_parent_blob_origin(Some(&origin))
+                    .expect("valid test parent origin");
+            }
             if let Some(limits) = self.free_anchors {
                 inner.free_anchors = limits;
             }
@@ -260,6 +279,22 @@ impl TestServerBuilder {
             .route("/mcp", post(mcp_handler))
             .route("/api/pending/{correlation_id}", get(get_pending_handler))
             .route("/api/sign-callback", post(sign_callback_handler))
+            .route(
+                "/api/ingest-artifact",
+                post(mnemonic_mcp::ingestion::ingest_handler),
+            )
+            .route(
+                "/api/store-sealed",
+                post(mnemonic_mcp::sealed_routes::store_sealed_handler),
+            )
+            .route(
+                "/api/anchor-sealed",
+                post(mnemonic_mcp::sealed_routes::anchor_sealed_handler),
+            )
+            .route(
+                "/api/recall-session",
+                post(mnemonic_mcp::api::recall_session_start_handler),
+            )
             .layer(middleware::from_fn_with_state(
                 oauth_state.clone(),
                 oauth::bearer_auth_middleware,

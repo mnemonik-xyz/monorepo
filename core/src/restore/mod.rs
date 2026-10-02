@@ -67,40 +67,79 @@ pub struct RestoreReport {
     pub failed: Vec<(String, String)>,
 }
 
-/// Collect every `arweave_tx` this wallet ever anchored, from both sources.
-///
-/// `solana_wallet` is the fee-payer that wrote the memos; `arweave_addresses`
-/// are the gateway owner addresses to enumerate. A failure of either source is
-/// tolerated: the other still returns items, and a restore from one source is
-/// better than no restore. Both failing yields an empty list, not an error, so
-/// the caller can distinguish "nothing anchored" from "could not reach the
-/// network" by looking at `report.failed`.
+/// Results retain verified discovery hints even when a later page fails.
+#[derive(Debug, Clone)]
+pub struct SourceScan<T> {
+    pub items: Vec<T>,
+    pub exhausted: bool,
+    pub budget_exhausted: bool,
+    pub error: Option<String>,
+}
+impl<T> Default for SourceScan<T> {
+    fn default() -> Self {
+        Self {
+            items: Vec::new(),
+            exhausted: false,
+            budget_exhausted: false,
+            error: None,
+        }
+    }
+}
+/// Independent source status. Exhaustion is not proof of global completeness.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct SourceDiagnostic {
+    pub source: &'static str,
+    pub status: &'static str,
+    pub count: usize,
+    pub error: Option<String>,
+}
+impl<T> SourceScan<T> {
+    fn diagnostic(&self, source: &'static str) -> SourceDiagnostic {
+        SourceDiagnostic {
+            source,
+            status: if self.exhausted {
+                "exhausted"
+            } else if self.budget_exhausted {
+                "budget_exhausted"
+            } else if self.items.is_empty() {
+                "failed"
+            } else {
+                "partial"
+            },
+            count: self.items.len(),
+            error: self.error.clone(),
+        }
+    }
+}
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct EnumerationReport {
+    pub items: Vec<(String, Option<String>)>,
+    pub sources: Vec<SourceDiagnostic>,
+}
+/// Preserve successful candidates and every source error independently.
 pub async fn enumerate_anchored(
     gql: &GraphQlClient,
     solana: &SolanaClient,
     solana_wallet: &str,
     arweave_addresses: &[String],
-) -> Vec<(String, Option<String>)> {
+) -> EnumerationReport {
+    let mut report = EnumerationReport::default();
     let mut seen = std::collections::HashSet::new();
-    let mut out: Vec<(String, Option<String>)> = Vec::new();
-
-    // Memo history first: it carries the Solana tx, which the gateway cannot
-    // know, and it is the authoritative source for legacy items.
-    if let Ok(anchors) = solana.list_memo_anchors(solana_wallet).await {
-        for a in anchors {
-            if seen.insert(a.arweave_tx.clone()) {
-                out.push((a.arweave_tx, Some(a.solana_tx)));
-            }
+    let memos = solana.scan_memo_anchors(solana_wallet, 1000).await;
+    report.sources.push(memos.diagnostic("solana"));
+    for a in memos.items {
+        if seen.insert(a.arweave_tx.clone()) {
+            report.items.push((a.arweave_tx, Some(a.solana_tx)));
         }
     }
-    if let Ok(items) = gql.list_anchored(arweave_addresses).await {
-        for i in items {
-            if seen.insert(i.arweave_tx.clone()) {
-                out.push((i.arweave_tx, None));
-            }
+    let index = gql.scan_anchored(arweave_addresses, 10000).await;
+    report.sources.push(index.diagnostic("graphql"));
+    for i in index.items {
+        if seen.insert(i.arweave_tx.clone()) {
+            report.items.push((i.arweave_tx, None));
         }
     }
-    out
+    report
 }
 
 /// Fetch and verify every enumerated item. Network only — no store access.
@@ -120,6 +159,52 @@ pub async fn fetch_restorable(
                 continue;
             }
         };
+        // Kind selection follows signature verification. This legacy index
+        // command has no decryption key; sealed callers use fetch_recovered_memories.
+        let verified = match crate::codec::sign::verify_artifact(&bytes, None) {
+            Ok(v) if v.valid => v,
+            _ => {
+                failed.push((
+                    arweave_tx.clone(),
+                    "invalid_envelope: signature verification failed".into(),
+                ));
+                continue;
+            }
+        };
+        let artifact = match crate::codec::canonical::from_canonical_cbor(&verified.payload) {
+            Ok(v) => v,
+            Err(e) => {
+                failed.push((arweave_tx.clone(), format!("malformed_payload: {e}")));
+                continue;
+            }
+        };
+        match (
+            artifact["type"].as_str(),
+            artifact["schema_version"].as_u64(),
+        ) {
+            (Some("memory"), Some(1)) => {}
+            (Some("sealed"), Some(1)) => {
+                failed.push((
+                    arweave_tx.clone(),
+                    "key_required: use client-local sealed recovery".into(),
+                ));
+                continue;
+            }
+            _ => {
+                failed.push((
+                    arweave_tx.clone(),
+                    "unsupported_kind: legacy index supports memory.v1".into(),
+                ));
+                continue;
+            }
+        }
+        if artifact["producer"].as_str() != Some(format!("did:sol:{}", verified.signer).as_str()) {
+            failed.push((
+                arweave_tx.clone(),
+                "author_binding: producer differs from signer".into(),
+            ));
+            continue;
+        }
         match rebuild_row_self_describing(&bytes) {
             Ok(row) => items.push(RestorableItem {
                 arweave_tx: arweave_tx.clone(),
@@ -211,4 +296,40 @@ pub fn apply_restore(
     }
 
     report
+}
+
+/// Fetch known locators with an independently pinned author per item. Network
+/// or malformed candidates cannot suppress successfully recovered memories.
+/// Complete plaintext stays in the caller's local process.
+pub async fn fetch_recovered_memories(
+    gateway: &ArweaveClient,
+    candidates: &[(String, String)],
+    x25519_secret: Option<&[u8; 32]>,
+) -> (
+    Vec<crate::rebuild::RecoveredMemory>,
+    Vec<(String, crate::rebuild::RecoveryError)>,
+) {
+    let mut items = Vec::new();
+    let mut failed = Vec::new();
+    for (locator, author) in candidates {
+        // The same bounded, fixed-origin ANS-104 read applies to memory bytes.
+        let bytes = match gateway.read_a2a(locator).await {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                failed.push((
+                    locator.clone(),
+                    crate::rebuild::RecoveryError {
+                        code: "fetch_failed",
+                        message: e.to_string(),
+                    },
+                ));
+                continue;
+            }
+        };
+        match crate::rebuild::recover_memory(&bytes, author, x25519_secret) {
+            Ok(item) => items.push(item),
+            Err(e) => failed.push((locator.clone(), e)),
+        }
+    }
+    (items, failed)
 }

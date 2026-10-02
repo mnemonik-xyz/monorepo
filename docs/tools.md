@@ -4,6 +4,26 @@ Every tool the Mnemonic MCP server exposes over JSON-RPC 2.0, with its inputs,
 outputs, and auth requirements. Source of truth: `mcp/src/mcp.rs`
 (`tool_definitions()` for the schemas, the `call_tool` dispatch for behaviour).
 
+The source refactor adds [binary signed-artifact ingestion](./client-prepared-memory.md)
+and [client recovery checkpoints](./recovery-checkpoints.md).
+Their migration guides define retired sealed-storage and hosted-decryption routes.
+Source support does not establish deployment or published-package availability.
+
+## Source capability boundaries
+
+| Path | Preparation and storage | Limitation |
+|---|---|---|
+| Plain stdio local memory | Agent-owned store; legacy unsigned row | Not an external signed artifact |
+| SDK sealed `store` | Client encryption/signature and session cache | Caller must persist bytes and keys |
+| Client-prepared external memory | Signed original bytes externally; hosted metadata | Explicit public consent for plaintext; verify receipt independently |
+| HTTP A2A external delivery | Client-signed bytes, shared operation coordinator | Parent verification and supported payment rail required |
+| Hosted semantic recall | Available searchable index rows | No sealed decryption or completeness guarantee |
+| SDK sealed recall | Local opening and caller-supplied embedder | Only the client's restored/cached corpus |
+| General-memory grant creation | Retired hosted writer and SDK method | Existing grant reads/withdrawal retained |
+
+This matrix describes source behavior. Live-provider, package-install and pilot
+release drills remain separate evidence gates.
+
 **Endpoints**
 
 | Transport | Address | Auth |
@@ -18,7 +38,7 @@ the reference you come back to.
 
 ## Tool index
 
-The default build advertises **9 tools**. Three more appear only when the server
+The default build advertises **11 tools**. Three more appear only when the server
 is compiled with the `trajectory-experimental` cargo feature.
 
 | Tool | Auth | Paid | Purpose |
@@ -30,8 +50,10 @@ is compiled with the `trajectory-experimental` cargo feature.
 | [`mnemonic_verify`](#mnemonic_verify) | required on HTTP | no | Verify an attestation against its chain anchors |
 | [`mnemonic_prove_identity`](#mnemonic_prove_identity) | required on HTTP | no | Sign an arbitrary challenge with the server key |
 | [`mnemonic_publish_post`](#mnemonic_publish_post) | required | no | Publish a signed public blog post |
-| [`mnemonic_share`](#mnemonic_share) | required | no | Grant a reader access to a sealed memory |
+| [`mnemonic_share`](#mnemonic_share) | required | no | Legacy approval-URL handoff; not grant delivery |
 | [`request_public_write_confirmation`](#request_public_write_confirmation) | — | no | Internal ceremony gate (not user-facing) |
+| [`mnemonic_attest_a2a`](#client-signed-a2a-tools) | required | external writes on paid operators | Deliver client-signed A2A bytes |
+| [`mnemonic_recall_a2a`](#client-signed-a2a-tools) | required | no | Read authorized A2A receipt metadata |
 | [`mnemonic_attest_step`](#mnemonic_attest_step) ⚗️ | required | no | Append a hash-linked trajectory step |
 | [`mnemonic_attest_verdict`](#mnemonic_attest_verdict) ⚗️ | required | no | Record an independent judge's verdict |
 | [`mnemonic_verify_trajectory`](#mnemonic_verify_trajectory) ⚗️ | required on HTTP | no | Verify a trajectory end-to-end |
@@ -42,8 +64,9 @@ The Auth column applies to the HTTP transport. The stdio transport uses the
 local keypair and needs no token. Refer to
 [Authentication over HTTP](#authentication-over-http).
 
-Only `mnemonic_sign_memory` is ever charged, and only for `anchored` writes on
-an operator that has a payment mode enabled. Everything else is free.
+External memory and A2A delivery can require payment on paid operators.
+Read tools do not charge. Rail support and quota are operator capabilities;
+see [Payment](#payment).
 
 ---
 
@@ -205,8 +228,10 @@ on a `PAYMENT_MODE=x402` deploy that supports `anchored`:
 
 ## `mnemonic_sign_memory`
 
-Embed → compress (TurboQuant) → canonical CBOR → blake3 → COSE_Sign1
-(`anchored` only) → persist.
+Legacy flow: operator receives plaintext, embeds and prepares canonical CBOR;
+the client signs anchored bundles. Noncustodial signing is not client-private
+preparation. Use [client-prepared ingestion](./client-prepared-memory.md) for
+local encryption and signing before HTTP.
 
 **Input:**
 
@@ -221,7 +246,7 @@ the shape. Only an `anchored` write gets a signature. A local write stores a
 hash and signs nothing, so it never opens an operating system (OS) keychain
 prompt.
 
-### Inline — stdio, or an explicit local write over HTTP
+### Inline stdio and HTTP mode restrictions
 
 The server returns the finished attestation in these cases (available now):
 
@@ -284,7 +309,8 @@ Complete it one of two ways:
    `mnemonic_check_pending`. The SDK's `MnemonicClient.signMemory()` does this
    for you.
 
-No SQLite row, Arweave upload, or Solana memo exists until the callback lands.
+A pending signature does not establish external delivery. New deliveries do
+not require Solana memos. Financial replay metadata may exist before delivery.
 Bundles expire after 300 seconds.
 
 ---
@@ -311,8 +337,9 @@ Resolves a deferred-sign `correlation_id`. Poll after `awaiting_signature`.
 ## `mnemonic_recall`
 
 Semantic search: the query is embedded with the same provider used at sign time,
-then cosine-scored against the uncompressed f32 embeddings in SQLite. No chain
-calls — recall is a local read.
+then cosine-scored against available f32 embeddings in the server index.
+HTTP recall does not open sealed content; client sealed recall is a separate
+offline path. Metadata-only anchored receipts are not searchable memory rows.
 
 **Input:**
 
@@ -325,7 +352,7 @@ calls — recall is a local read.
 
 | Caller | Scope |
 |---|---|
-| Authenticated (JWT) | Your own corpus, across both visibilities and **both** `local` and `anchored` writes |
+| Authenticated (JWT) | Searchable rows in your own corpus; rows without embeddings are excluded |
 | Anonymous | The cross-owner **public** pool only (`visibility = 'public'`) |
 
 **Private rows go only to their owner** (available now):
@@ -337,9 +364,8 @@ calls — recall is a local read.
 - A row with no `visibility` value (a legacy row) counts as private. The
   database migration sets these rows to `private`.
 - A local write is always private.
-- An anchored `anchored` write is always public, whatever `visibility` the
-  request sets. Its content is plain text on Arweave, so the server does not
-  call it private.
+- An unencrypted externally stored memory is public plaintext. A sealed
+  artifact contains ciphertext; external storage alone does not make it plaintext.
 
 Returns the top-k rows ordered by cosine score, joined to their attestation
 metadata.
@@ -347,24 +373,15 @@ metadata.
 Each result has a `plaintext_on_arweave` field. It is `true` when the
 content went to Arweave as plain text.
 
-**Sealed memories and `sealed_hidden`.** When an authenticated caller has
-sealed memories that the current session key has not decrypted, the result
-includes a `sealed_hidden` integer field and a note. Sealed rows that have
-been decrypted by the recall key are included in results with `sealed: true`.
-Anonymous callers never see sealed rows.
+**Sealed memories and `sealed_hidden`.** HTTP recall can report that legacy
+sealed rows exist, but never decrypts them. Hosted recall-key sessions are retired.
+Use client-side recovery and an explicit local embedder to open and rank sealed
+memories. Anonymous callers never receive private sealed rows.
 
-> **Warning: anchored memories are public plain text today.** A
-> `anchored` (anchored) write puts the content as plain text on Arweave.
-> Anyone can read Arweave, and nobody can delete it. The server stores such a
-> row as `public` with `plaintext_on_arweave: true`. "Private" means only
-> that this server shows a local row to its owner; the server does not
-> encrypt it. Sealed (encrypted) anchored writes are planned (design:
-> `work/sealed-memories/`). Until they ship, do not anchor content that must
-> stay secret.
->
-> Rows that were anchored and marked `private` before 2026-09-27 are now
-> `public`. The database migration relabels them and records the time in the
-> `relabelled_public_at` column.
+The current source supports client-prepared sealed external delivery. The legacy
+`signMemory` preparation flow still sends plaintext to the operator. Historical
+plaintext artifacts remain public even if their old row label said `private`.
+Do not confuse ciphertext delivery with a promise that every client path seals.
 
 ---
 
@@ -387,9 +404,9 @@ is the hash of the `SEALED_V1` outer ciphertext. The verify result confirms
 the COSE_Sign1 signature over the ciphertext and the on-chain hash match.
 It does not decrypt the content.
 
-The chain-anchored path additionally fetches the SPL Memo, parses its
-`{h, a, v}` payload, and confirms the on-chain hash and Arweave tx match the
-stored row — that is what makes the claim third-party checkable.
+Legacy artifacts with a Solana transaction additionally verify its memo.
+New delivery verification checks the original signed bytes and expected author
+without requiring a Solana memo or operator receipt row.
 
 You do not need this server to verify a memory. See
 [Verifying without Mnemonic](./QUICKSTART.md#5-verify-independently) for the
@@ -431,40 +448,16 @@ no on-chain anchoring in V1.
 
 ## `mnemonic_share`
 
-Grant a reader access to a sealed memory. The server builds a `GRANT_V1`
-record that wraps the content key `K` to the reader's X25519 public key using
-HPKE, and signs it with the author's key via the deferred-sign flow. The
-server never sees `K`.
+This legacy tool returns a browser approval URL using `memory_hash` and `reader`.
+Its `awaiting_signature` response is only a UI handoff, not evidence that a grant
+was signed, persisted or delivered. It does not establish a complete sharing flow.
 
-Available now. Requires authentication.
-
-**Input:**
-
-| Field | Type | Required | Notes |
-|---|---|---|---|
-| `attestation_id` | `string` | yes | The sealed memory to share |
-| `reader_pubkey` | `string` | yes | The reader's Ed25519 public key (base58). Derived to X25519 server-side for the HPKE wrap. |
-| `link` | `boolean` | no | When `true`, returns a bearer link with `K` in the URL fragment instead of (or in addition to) a grant record. The server never sees `K` in the fragment. |
-
-**Returns** (deferred-sign flow, same as `mnemonic_sign_memory`):
-
-```jsonc
-{
-  "status": "awaiting_signature",
-  "correlation_id": "<uuid>",
-  "approve_url": "https://mnemonik.xyz/approve?...",
-  "expires_in": 300
-}
-```
-
-After the caller signs and posts to `/api/sign-callback`, the grant is
-stored. The reader can then call `mnemonic_recall` (or use the SDK) to
-open the sealed memory.
-
-**Revocation limit.** Once the grant is delivered, revocation is not possible.
-The reader can keep a copy of `K`. To stop future access, create a new version
-of the memory with a new `K` and do not grant the reader access to the new version.
-This limit is stated in the tool output before the grant is signed.
+New hosted `POST /api/grants` writes and SDK `share` are retired in the current
+source migration. Existing grant reads and withdrawal remain available. Retain
+and distribute signed grants client-side, or use sealed A2A recipient grants.
+See [client-prepared memory](./client-prepared-memory.md) for compatibility limits.
+A recipient who already has a content key can retain it; withdrawal cannot erase
+that key or previously decrypted data.
 
 ---
 
@@ -536,16 +529,16 @@ switch. The write mode is a per-request user choice on `mnemonic_sign_memory`.
 
 | | `local` | `anchored` |
 |---|---|---|
-| Storage | Operator's SQLite only | Arweave bytes + Solana SPL Memo, plus SQLite |
-| Tx ids | Synthetic `local:...` | Real `arweave_tx` / `solana_tx` |
+| Storage | Agent-owned store (stdio/client) | External original signed bytes; hosted metadata receipts |
+| Tx ids | Synthetic `local:...` for legacy stdio rows | External locator; Solana IDs only on legacy artifacts |
 | Cost | Free | Priced by the operator (`anchored_cost` from `whoami`) |
-| Signed by | Nobody (hash-only row, no keychain prompt) | The author: the client over HTTP, the local agent key over stdio |
-| Verifiable by third parties | Hash only | Signature, hash, **and** independent on-chain timestamp |
+| Signed by | Plain legacy rows unsigned; sealed SDK/A2A local artifacts signed | Author identity |
+| Verifiable by third parties | Depends on the local artifact format | Signature and content hash; bounded availability observation |
 
 Choosing one:
 
 ```jsonc
-// explicit local — free, stays on the node
+// stdio only: explicit local stays on the agent node
 { "name": "mnemonic_sign_memory",
   "arguments": { "content": "a private note", "mode": "local" } }
 
@@ -561,16 +554,13 @@ Rules worth knowing:
 - **Asking for `anchored` on a local-only operator** returns a typed
   `UnsupportedMode` error listing `supported_modes` — it does not silently
   downgrade.
-- **An `anchored` write only succeeds after the anchored bytes pass a
-  recall+verify round-trip.** On failure the row is demoted to `local` and **no
-  payment is charged**. "Delivered" means anchored *and* verified, never a
-  silent receipt.
-- **Both modes coexist in one database** for a single owner, tagged by the
-  `write_mode` column, and `recall` spans both. Mixing them is by design.
-- **An `anchored` write is public plain text today.** The content goes to
-  Arweave as plain text, which anyone can read. The server stores the row as
-  `public` with `plaintext_on_arweave: true`, even if the request sets
-  `visibility: "private"`. Sealed (encrypted) anchored writes are planned.
+- **Delivery and payment are independent states.** Exact-byte external verification
+  establishes delivery even if receipt persistence fails. Settlement can precede
+  delivery; terminal paid failures require an explicit remedy state.
+- **Local and external records may coexist**, but hosted metadata-only receipts
+  do not provide plaintext semantic recall. Recover and search locally.
+- **Public memory is plaintext; sealed memory is ciphertext.** Choose client
+  preparation deliberately. Legacy server-prepared signing exposes input text.
 
 Rationale and the full decision log: `work/modes-user-choice/user-spec.md` and
 `work/modes-user-choice/decisions.md`; whitepaper §5.7.
@@ -579,138 +569,41 @@ Rationale and the full decision log: `work/modes-user-choice/user-spec.md` and
 
 ## Payment
 
-Payment applies only on HTTP, only in `full` mode, and only to
-`mnemonic_sign_memory` `anchored` writes. `PAYMENT_MODE` ∈ `none` |
-`balance` | `x402` | `both`.
+`PAYMENT_MODE` is `none` or `x402`; removed custodial `balance`/`both` modes
+fail closed. Client-prepared memory and HTTP A2A delivery use one immutable
+operation coordinator. Supported paid delivery uses the configured Universal
+Paywall rail with a linked wallet, quote and exact envelope digest. Unsupported
+rails fail before payment/upload. Legacy deferred signing has separate migration
+compatibility; it must not be presented as client-private preparation.
 
-- `balance` — send `Authorization: Bearer mnm_<key>`. The balance is checked
-  against the live pricing quote and reserved before execution.
-- `x402` — the first request returns HTTP 402; retry with
-  `X-Payment: {"tx_sig":"...","network":"solana-mainnet"}`.
-
-`whoami`, `recall`, `verify`, `prove_identity`, `check_pending`, and
-`publish_post` are always free.
+Payment can settle before external delivery. Responses report payment and delivery
+states separately. A settled retry reuses its operation identity and original
+bytes; it must not create a second charge. Terminal delivery failure produces a
+visible remedy state, not an automatic claim that the payment was refunded.
+Read tools and `publish_post` do not charge.
 
 ### Free daily quota
 
-Available now, on `PAYMENT_MODE=x402` over HTTP. An agent key that is linked to
-a Google account gets free `anchored` writes every UTC day before payment is
-required. The agent needs no wallet and gets no payment prompt for these
-writes. Paid writes (x402) do not need a Google account.
+On eligible paid deployments, a key linked to a Google account can use free
+external writes within configured per-account, real-client-IP and global limits.
+Defaults are 10/account/day, 20/IP/day, 1000/global/day and 16 KiB per envelope.
+`whoami` reports applicable quota and denial reasons. The coordinator claims
+quota after validation. A confirmed retry of the same original bytes does not
+consume another allocation. A failed free delivery refunds the eligible quota;
+the global upload budget may remain consumed once an upload was attempted.
+Stdio and `PAYMENT_MODE=none` do not charge.
 
-A free write must pass all of these checks:
+### Bounds and retries
 
-1. **Google account.** The signer's Ed25519 key is linked to a Google account.
-   The server reads the link from its `google_identity_links` table. The browser
-   extension creates the link at Google sign-in (`POST /oauth/google/link`,
-   with a possession proof for the key). All keys that link to one Google
-   account share one quota. A key without a link, or a call without a JWT,
-   gets no free write.
-2. **Per-account quota.** The Google account has free writes left today.
-3. **Per-IP share.** The client IP address of the agent that made the
-   `mnemonic_sign_memory` call has free writes left today. The server groups
-   IPv6 addresses by their /64 prefix.
-4. **Global cap.** Free writes of all accounts together are below the daily
-   cap. This cap limits the chain fees that the operator pays.
-5. **Size.** The signed envelope (COSE_Sign1 bytes, which the server uploads to
-   Arweave) is not larger than `MNEMONIC_FREE_ANCHOR_MAX_BYTES`. A typical
-   memory of 1 KiB text makes an envelope of about 1.7 KiB.
+Binary ingestion accepts at most 1 MiB of complete signed COSE bytes; free quota
+has its smaller configured bound. Requests must retain original bytes through
+wallet approval, payment and retry. Resubmitting different bytes under the same
+operation ID is rejected. Hosted financial/replay metadata remains durable;
+client-side resubmission replaces autonomous SQL artifact staging.
 
-The operator sets these limits:
-
-| Variable | Default | Meaning |
-|---|---|---|
-| `MNEMONIC_FREE_ANCHORS_PER_DAY` | `10` | Free writes per Google account per UTC day. `0` disables the quota. |
-| `MNEMONIC_FREE_ANCHORS_PER_IP_PER_DAY` | `20` | Free writes per client IP address per UTC day. `0` disables the quota. |
-| `MNEMONIC_FREE_ANCHORS_GLOBAL_PER_DAY` | `1000` | Free writes per UTC day for all accounts together. `0` means no free writes. |
-| `MNEMONIC_FREE_ANCHOR_MAX_BYTES` | `16384` | Largest COSE_Sign1 envelope, in bytes, for a free write. A larger write uses the paid path. |
-| `TRUSTED_PROXIES` | loopback + private ranges | Reverse proxies whose `X-Forwarded-For` header gives the client IP address. |
-
-The quota follows these rules:
-
-- A free write uses the quota only when the anchor is confirmed. The quota
-  counts the write when the client posts the signed bundle to
-  `/api/sign-callback`. A bundle that expires unsigned uses nothing.
-- If the write fails before the server starts a chain write, the server gives
-  back all three counters.
-- If the write fails after the server started the Arweave upload (for example,
-  the delivery check fails and the row is demoted to `local`), the server gives
-  back the account and IP counters. The global counter stays used, because
-  the operator paid the chain fees.
-- The server counts the IP address of the agent that parked the bundle. The IP
-  address of the browser that posts the signature does not count.
-- The server takes the client IP address from `X-Forwarded-For` only when the
-  TCP (Transmission Control Protocol) peer is a trusted proxy. It uses the
-  rightmost address that is not a trusted proxy. From any other peer, the
-  server ignores `X-Forwarded-For` and `X-Real-IP`.
-- A request with an `X-Payment` header uses the paid path. It does not use the
-  quota.
-- `PAYMENT_MODE=none` is free already and does not count writes. Stdio is
-  never charged.
-- All counters start again at UTC midnight.
-- The server stores only hashes of Google account IDs and IP addresses in the
-  counter table. The IP hash uses a secret salt.
-
-When no free write is available, the payment-required responses add a
-`free_anchors` block (the same shape as in `mnemonic_whoami`) with a
-`reason`. This applies to the HTTP 402 of `mnemonic_sign_memory` and to the
-wallet-link (HTTP 428) and payment (HTTP 402) steps of `/api/sign-callback`. The
-block tells the agent why it must pay. A write that is too large gets HTTP 402
-with `reason: "too_large"`, and the server keeps no parked bundle. If a parked
-bundle loses its free write before the callback (for example, you parked more
-bundles than you have free writes), `/api/sign-callback` returns HTTP 402 with
-`status: "payment_required"`. The bundle stays parked. To pay, call
-`mnemonic_sign_memory` again with `X-Payment`.
-
-### Content size limit
-
-Available now. `mnemonic_sign_memory` refuses `content` larger than
-`MNEMONIC_MAX_CONTENT_BYTES` (default and maximum 32768 bytes) on every
-transport and in both modes. The error is JSON-RPC (JSON Remote Procedure Call)
-`-32602`. The HTTP server also limits the request body: 1 MiB on `/mcp` and
-2 MB on `/api/sign-callback`.
-
-### Replay protection
-
-Available now. The server gives these guarantees:
-
-- `/api/sign-callback` anchors one bundle at most once. A second post of the
-  same `correlation_id` (also a concurrent one) gets HTTP 410 and uses no free
-  write. A bundle expires after 300 seconds.
-- If an artifact with the same `content_hash` is already anchored, the callback
-  returns the existing anchor with `already_anchored: true`. It writes nothing
-  new, charges nothing and uses no free write.
-- One x402 payment (`X-Payment` transaction) pays for one call. The server
-  reserves the payment before the call. Two concurrent calls with one payment
-  cannot both succeed. A failed call releases the payment for a retry. EVM
-  (Ethereum Virtual Machine) transaction hashes are compared in lowercase.
-
----|---|---|
-| `MNEMONIC_FREE_ANCHORS_PER_DAY` | `10` | Free writes per key per UTC day. `0` disables the quota. |
-| `MNEMONIC_FREE_ANCHORS_GLOBAL_PER_DAY` | `1000` | Free writes per UTC day for all keys together. `0` means no free writes. |
-
-The global cap exists because a new key costs nothing to make. The quota
-follows these rules:
-
-- A free write uses the quota only when the anchor is confirmed. The quota
-  counts the write when the client posts the signed bundle to
-  `/api/sign-callback`. A bundle that expires unsigned uses nothing.
-- If the delivery check fails, the server demotes the row to `local` and gives
-  the free write back.
-- A request with an `X-Payment` header uses the paid path. It does not use the
-  quota.
-- `PAYMENT_MODE=none` is free already and does not count writes. Stdio is
-  never charged.
-- Both counters start again at UTC midnight.
-
-When no free write is left, the payment-required responses add a
-`free_anchors` block (the same shape as in `mnemonic_whoami`). This applies to
-the HTTP 402 of `mnemonic_sign_memory` and to the wallet-link (HTTP 428) and
-payment (HTTP 402) steps of `/api/sign-callback`. The block tells the agent why
-it must pay. If a parked bundle loses its free write before the callback (for example,
-you parked more bundles than you have free writes), `/api/sign-callback`
-returns HTTP 402 with `status: "payment_required"`. The bundle stays parked.
-To pay, call `mnemonic_sign_memory` again with `X-Payment`.
+Use the source [ingestion guide](./client-prepared-memory.md) for SDK retry APIs,
+structured HTTP 402/428 responses, and retired routes. Mocked tests do not establish
+live payment-provider or published-package readiness.
 
 ---
 

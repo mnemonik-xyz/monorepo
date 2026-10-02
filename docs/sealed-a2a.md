@@ -35,8 +35,8 @@ It does not prove that the sender encrypted useful or truthful content.
 
 | Tool | Inputs | Output |
 |---|---|---|
-| `mnemonic_attest_a2a` | `kind`, `context_id`, `signed` (hex COSE), optional `sealed` (default false), `prev_id` | `attestation_id`, `blake3`, `cose_envelope_hex`, `sealed`, `sealed_payload` |
-| `mnemonic_recall_a2a` | `context_id`, optional `kind`, `limit` (1–1000), `sealed` | `attestations[]` with actual kind/time/context/parent/signer/hash, original COSE, public payload, sealed DataPart and optional stream |
+| `mnemonic_attest_a2a` | `kind`, `context_id`, `signed` (hex COSE), optional `sealed` (default false), `prev_id`, `prev_locator` | `attestation_id`, `blake3`, `sealed`, `arweave_tx`, `locator`, delivery status and receipt persistence result |
+| `mnemonic_recall_a2a` | `context_id`, optional `kind`, `limit` (1–1000), `sealed` | `receipts[]`; the SDK fetches and verifies original artifacts before returning attestations |
 
 The COSE payload is JCS of `mnemonic.a2a.signed.v1`: `kind`, `context_id`,
 `prev_id`, `created_at`, `sealed`, `payload`, and optional `stream`. Every tool
@@ -148,3 +148,61 @@ workspace run passed 1,265 tests; sequential doctest rerun resolved concurrent
 build crate-version mismatches. The live Irys query returned HTTP
 403 in this environment; production index recovery remains unverified. Tasks 18–21 and task 14/#242 are not closed by
 publishing this draft. Review against the merged recovery specification.
+
+## Replaceable discovery sources
+
+Available now in the SDK: pass `discoverySource` to `restoreA2AContext` to select an index adapter.
+`IrysDiscoverySource` and `ArweaveDiscoverySource` use their respective GraphQL schemas.
+Custom adapters implement `DiscoverySource` and return candidate locators with optional public metadata.
+The client verifies original bytes against the caller's independently trusted authors.
+An adapter cannot expand that trusted set.
+
+```ts
+const source = new IrysDiscoverySource('https://uploader.irys.xyz/graphql');
+const report = await client.restoreA2AContext(contextId, {
+  expectedAuthors: [trustedAuthor],
+  heads: authenticatedHeads,
+  discoverySource: source,
+  maxPages: 10,
+  maxCandidates: 1000,
+});
+```
+
+`report.source` records source identity, status, page count, candidate count, and any continuation cursor.
+Statuses distinguish exhausted scans, budgets, unavailable sources, malformed responses, cancellation, and disabled discovery.
+Continuation checkpoints bind the context, authors, source identity, and supported backends.
+Changing an endpoint or index flavour requires a fresh scan.
+Previously verified local entries remain available during partial scans or source replacement.
+
+Pass `discoverySource: false` and explicit `parentLocators` to recover known artifacts without an index.
+The locator map can contain pinned heads and their required ancestors.
+Each entry binds an artifact ID to its locator and independently trusted author.
+A complete scan does not establish global completeness.
+`completeToHeads` only establishes verified ancestry for the caller's pinned heads.
+
+Built-in adapters omit credentials, reject redirects, and bound each page request and body read to 15 seconds.
+Responses have a one-MiB size limit; pages contain at most 100 candidates.
+Adapters expose only public routing metadata and never receive content keys or private recall data.
+Custom adapter implementations must preserve these privacy and network limits.
+
+Validation uses real signed fixtures with mocked providers.
+It covers replacement, duplicates, omission, lag, forged hints, unavailable sources, cursor loops, and scan budgets.
+These tests do not establish live index availability or production enumeration parity.
+
+
+### Shared ingestion and migrated parents
+
+HTTP `mnemonic_attest_a2a` validates signature, bindings and the external parent
+before passing original signed bytes to the same durable operation coordinator
+as memory ingestion. Retries use the same digest-bound operation; the earlier
+bespoke settlement/nonce path is retired. Unsupported payment rails fail closed
+before payment/upload. Supported rail and financial acceptance evidence belongs
+to product task 3. The response retains A2A IDs/locators and adds operation and
+payment state. External success remains distinct from SQL receipt persistence.
+
+For migrated parents, operators can opt into `MNEMONIC_PARENT_BLOB_ORIGIN`.
+`blob://<sha256>` locators resolve only under that configured origin's
+`/objects/<digest>` endpoint, with bounded reads, no redirects, and digest/signature/
+parent-link validation. The default is disabled. An independent-operator test
+stops the old storage listener, clears original receipts, and continues against
+copied exact parent bytes; this uses local mocked services, not production storage.

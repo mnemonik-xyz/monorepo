@@ -49,6 +49,7 @@ import { runWhoami } from "../src/commands/whoami.js";
 import { identityPath, readTokenFile, saveToken } from "../src/config.js";
 import { UserError } from "../src/errors.js";
 import {
+  signedDeliveryResponse,
   clearWasmMock,
   installWasmMock,
   makeJwt,
@@ -218,18 +219,11 @@ describe("mnemonic sign write modes", () => {
     expect(ks.gets).toBe(0); // must not read keychain
   });
 
-  it("--public sends mode=local to /mcp (plaintext) and reads no keychain", async () => {
+  it("--public without --anchor fails before HTTP or keychain access", async () => {
     saveValidToken();
     const calls = installFetch(() => rpc(storedRow));
-    await runSign("note", {
-      content: "note",
-      baseUrl: BASE,
-      public: true,
-      json: true,
-    });
-    expect(calls).toHaveLength(1);
-    expect(toolName(calls[0]!)).toBe("mnemonic_sign_memory");
-    expect(toolArgs(calls[0]!).mode).toBe("local");
+    await expect(runSign("note", {content:"note",baseUrl:BASE,public:true})).rejects.toThrow(/--public without --anchor/);
+    expect(calls).toHaveLength(0);
     expect(ks.gets).toBe(0);
   });
 
@@ -248,15 +242,14 @@ describe("mnemonic sign write modes", () => {
     expect(err).toBeInstanceOf(UserError);
     expect((err as Error).message).toMatch(/--anchor/);
     expect(ks.gets).toBe(0);
-    expect(calls).toHaveLength(1); // pending bundle never fetched
+    expect(calls).toHaveLength(0); // rejected before legacy server preparation
   });
 
-  it("--anchor sends to /api/anchor-sealed and reads the key (keychain-backed stub)", async () => {
+  it("--anchor sends to /api/ingest-artifact and reads the key (keychain-backed stub)", async () => {
     saveValidToken();
     const calls = installFetch((c) => {
-      if (c.url.endsWith("/api/anchor-sealed")) {
-        return json({ memory_hash: "cafebabe" });
-      }
+      const delivered = signedDeliveryResponse(c.url);
+      if (delivered) return delivered;
       return json({}, 404);
     });
     await runSign("claim", {
@@ -265,7 +258,7 @@ describe("mnemonic sign write modes", () => {
       anchor: true,
       json: true,
     });
-    expect(calls.some((c) => c.url.endsWith("/api/anchor-sealed"))).toBe(true);
+    expect(calls.some((c) => c.url.endsWith("/api/ingest-artifact"))).toBe(true);
     expect(ks.gets).toBe(1); // one keychain read for --anchor
   });
 
@@ -401,16 +394,15 @@ describe("silent session renewal", () => {
     const calls = installFetch((c) => {
       const o = oauthRoutes(c, rotated);
       if (o) return o;
-      // Default --anchor now uses sealMemory → /api/anchor-sealed.
-      if (c.url.endsWith("/api/anchor-sealed")) {
-        return json({ memory_hash: "cafebabe" });
-      }
+      // Default --anchor now uses sealMemory → /api/ingest-artifact.
+      const delivered = signedDeliveryResponse(c.url);
+      if (delivered) return delivered;
       return json({}, 404);
     });
     await runSign("claim", { content: "claim", baseUrl: BASE, anchor: true });
     // OAuth renewal + sealed anchor (no MCP call).
     expect(calls.some((c) => c.url.includes("/oauth/"))).toBe(true);
-    expect(calls.some((c) => c.url.endsWith("/api/anchor-sealed"))).toBe(true);
+    expect(calls.some((c) => c.url.endsWith("/api/ingest-artifact"))).toBe(true);
     expect(readTokenFile().refresh_token).toBe("rt-from-login");
     expect(ks.gets).toBe(1); // one read, shared by login + signature
   });

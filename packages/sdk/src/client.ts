@@ -1,4 +1,4 @@
-import { importA2AAttestation, restoreA2AContext } from "./a2a-recovery.js";
+import { boundedBody, decodeAttestation, fetchAttestation, importA2AAttestation, restoreA2AContext } from "./a2a-recovery.js";
 // MnemonicClient — stateless wrapper over the hosted MCP HTTP surface.
 //
 // 5 tool methods (whoami, signMemory, recall, verify, proveIdentity) plus
@@ -17,10 +17,9 @@ import { importA2AAttestation, restoreA2AContext } from "./a2a-recovery.js";
 // stored jwt_sub for that correlation_id, AND COSE_Sign1 verifies against
 // signer_pubkey).
 //
-// Exception — `mode: "local"`: the server stores a hash-only row and answers
-// step 1 with `{attestation_id, content_hash, write_mode: "local"}` (no
-// `correlation_id`). Steps 2-4 are skipped and no keypair is needed, so a
-// lazy keypair source (`setKeypairProvider`) is never invoked.
+// Explicit HTTP `mode: "local"` is rejected by current servers. Legacy
+// responses remain readable for migration; client-owned sealed storage uses
+// sealMemory({ mode: "store" }) and caller persistence of its returned bytes.
 //
 // Access-token refresh (issue #33): with a `tokenRefresher`, `callTool`
 // renews the JWT before it expires and retries once after a 401/403.
@@ -96,6 +95,7 @@ const REFRESH_SKEW_MS = 60_000;
  */
 export class MnemonicClient {
   private readonly baseUrl: string;
+  private readonly sealedLocal = new Map<string, { outerCbor: Uint8Array; signedBytes: Uint8Array }>();
   private readonly signer: SignerInterface;
   private jwt: string | undefined;
   private readonly fetchImpl: typeof fetch;
@@ -443,7 +443,7 @@ export class MnemonicClient {
     opts: { topK?: number; tags?: string[] } = {}
   ): Promise<RecallResult> {
     const args: Record<string, unknown> = { query };
-    if (typeof opts.topK === "number") args.top_k = opts.topK;
+    if (typeof opts.topK === "number") args.limit = opts.topK;
     if (opts.tags && opts.tags.length > 0) args.tags = opts.tags;
     const result = await this.callTool("mnemonic_recall", args);
     const raw = isRecord(result) ? result : {};
@@ -453,17 +453,18 @@ export class MnemonicClient {
       ? raw.results
       : [];
     const hits: RecallHit[] = hitsRaw.filter(isRecord).map((h) => ({
+      ...h,
       attestationId:
         typeof h.attestation_id === "string" ? h.attestation_id : "",
       content: typeof h.content === "string" ? h.content : "",
       similarity: typeof h.similarity === "number" ? h.similarity : 0,
-      ...(typeof h.signed_at === "string" ? { signedAt: h.signed_at } : {}),
+      ...(typeof h.signed_at === "string" ? { signedAt: h.signed_at } : typeof h.created_at === "string" ? { signedAt: h.created_at } : {}),
       ...(Array.isArray(h.tags)
         ? { tags: h.tags.filter((t) => typeof t === "string") as string[] }
         : {}),
     }));
-    const total = typeof raw.total === "number" ? raw.total : hits.length;
-    return { hits, total };
+    const total = typeof raw.total_attestations === "number" ? raw.total_attestations : typeof raw.total === "number" ? raw.total : hits.length;
+    return { hits, total, evidence: raw };
   }
 
   /**
@@ -542,7 +543,7 @@ export class MnemonicClient {
   // ------------------------------------------------------------------------
 
   /**
-   * End-to-end seal a memory and store it on the Mnemonic server.
+   * Encrypt and sign a memory locally, then optionally deliver its signed bytes.
    *
    * The content is encrypted client-side with a fresh ephemeral key before
    * leaving this device. The server never sees the plaintext.
@@ -562,16 +563,19 @@ export class MnemonicClient {
     if (typeof content !== "string" || content.length === 0) {
       throw new UserError("sealMemory: content must be a non-empty string");
     }
+    if (opts.mode !== "store" && opts.mode !== "anchor") throw new UserError("sealMemory: mode must be store or anchor");
     const keypairJson = await this.resolveKeypairJson();
     const wasm = await loadWasm();
 
     // Derive author's Ed25519 public key bytes (32 bytes) from keypair.
     const ed25519Pub = new Uint8Array(keypairJson.secret.slice(32, 64));
 
-    // Build inner memory JSON.
+    // Preserve the existing seal_memory JSON contract; bind both inner and outer identity.
+    const artifactId = `art:${randomHex(16)}`;
+    const now = new Date().toISOString();
     const innerObj: Record<string, unknown> = {
-      type: "memory",
-      content,
+      artifact_id: artifactId, type: "memory", schema_version: 1,
+      producer: `did:sol:${keypairJson.pubkey_base58}`, created_at: now, content,
     };
     if (opts.tags && opts.tags.length > 0) innerObj.tags = opts.tags;
     const innerJson = new TextEncoder().encode(JSON.stringify(innerObj));
@@ -582,16 +586,17 @@ export class MnemonicClient {
         "sealMemory: WASM seal_memory binding not available"
       );
     }
-    const artifactId = `art:${randomHex(16)}`;
-    const now = new Date().toISOString();
     const sealResult = wasm.seal_memory(
       innerJson,
       ed25519Pub,
       artifactId,
-      `did:key:${keypairJson.pubkey_base58}`,
+      `did:sol:${keypairJson.pubkey_base58}`,
       now
     ) as { outer_cbor: Uint8Array; content_hash: Uint8Array } | null;
 
+    // serde-wasm-bindgen serializes Vec<u8> as JS arrays in released builds.
+    if (sealResult && Array.isArray(sealResult.outer_cbor)) sealResult.outer_cbor = Uint8Array.from(sealResult.outer_cbor);
+    if (sealResult && Array.isArray(sealResult.content_hash)) sealResult.content_hash = Uint8Array.from(sealResult.content_hash);
     if (
       !sealResult ||
       !(sealResult.outer_cbor instanceof Uint8Array) ||
@@ -600,90 +605,86 @@ export class MnemonicClient {
       throw new ServerError("sealMemory: WASM seal_memory returned unexpected shape");
     }
 
-    const endpoint =
-      opts.mode === "anchor" ? "/api/anchor-sealed" : "/api/store-sealed";
-    const url = `${this.baseUrl}${endpoint}`;
-    const body: Record<string, unknown> = {
-      outer_cbor: bytesToBase64(sealResult.outer_cbor),
-      content_hash: bytesToHex(sealResult.content_hash),
-    };
-    if (opts.tags && opts.tags.length > 0) body.tags = opts.tags;
+    const signedBytes = await coseSignPayload(sealResult.outer_cbor, keypairJson);
+    const memoryHash = bytesToHex(sealResult.content_hash);
+    this.sealedLocal.set(memoryHash, {outerCbor: sealResult.outer_cbor.slice(), signedBytes: signedBytes.slice()});
+    // "store" is now genuinely local: callers persist returned bytes for restart recovery.
+    if (opts.mode === "store") return {memoryHash, signedBytes, outerCbor: sealResult.outer_cbor.slice()};
+    const receipt = await this.ingestPreparedMemory(signedBytes);
+    if (receipt.content_hash !== memoryHash || receipt.author !== keypairJson.pubkey_base58) {
+      throw new IntegrityError("sealMemory: receipt identity mismatch");
+    }
+    return {memoryHash, signedBytes, outerCbor: sealResult.outer_cbor.slice(), locator: receipt.locator as string, receipt};
+  }
 
-    const headers: Record<string, string> = {
-      "Content-Type": "application/json",
-    };
+  /** Prepare public MEMORY_V1 locally, without submitting or disclosing it. */
+  async preparePublicMemory(content: string, opts: {tags?: string[]} = {}): Promise<{signedBytes: Uint8Array; contentHash: string}> {
+    if (typeof content !== "string" || !content) throw new UserError("preparePublicMemory: content required");
+    const kp=await this.resolveKeypairJson();
+    const wasm=await loadWasm();
+    if (!wasm.to_canonical_cbor_bytes || !wasm.blake3_hash_hex) throw new ServerError("canonical memory WASM bindings unavailable");
+    const payload=wasm.to_canonical_cbor_bytes({artifact_id:`art:${randomHex(16)}`,type:"memory",schema_version:1,content,producer:`did:sol:${kp.pubkey_base58}`,created_at:new Date().toISOString(),visibility:"public",...(opts.tags?{tags:opts.tags}:{})});
+    return {signedBytes:await coseSignPayload(payload,kp),contentHash:wasm.blake3_hash_hex(payload)};
+  }
+
+  /** Obtain original prepared bytes after a failed delivery, for caller-owned backup/retry. */
+  preparedSealedMemories(): Array<{memoryHash: string; outerCbor: Uint8Array; signedBytes: Uint8Array}> {
+    return [...this.sealedLocal].map(([memoryHash, row]) => ({memoryHash, outerCbor: row.outerCbor.slice(), signedBytes: row.signedBytes.slice()}));
+  }
+
+  /** Deliver original signed bytes. Public MEMORY_V1 requires explicit disclosure consent.
+   * Retry the SAME bytes after payment/delivery failures; do not reseal.
+   */
+  async ingestPreparedMemory(signedBytes: Uint8Array, opts: {publicConsent?: boolean; operationId?: string; paymentHeaders?: Record<string,string>} = {}): Promise<Record<string, unknown>> {
+    if (!(signedBytes instanceof Uint8Array) || signedBytes.length === 0 || signedBytes.length > 1048576) throw new UserError("invalid signed artifact size");
+    const headers: Record<string,string> = {...opts.paymentHeaders, "Content-Type":"application/cbor", "x-mnemonic-mode":"anchored"};
     if (this.jwt) headers.Authorization = `Bearer ${this.jwt}`;
-
-    const res = await safeFetch(this.fetchImpl, url, {
-      method: "POST",
-      headers,
-      body: JSON.stringify(body),
-    });
-    if (res.status === 401 || res.status === 403) {
-      throw new AuthError(`sealMemory: unauthorized (HTTP ${res.status})`);
+    if (opts.publicConsent) headers["x-mnemonic-public-consent"] = "true";
+    if (opts.operationId) headers["x-mnemonic-operation-id"] = opts.operationId;
+    const response = await safeFetch(this.fetchImpl, `${this.baseUrl}/api/ingest-artifact`, {method:"POST", headers, body: signedBytes as BodyInit});
+    if (response.status === 401 || response.status === 403) throw new AuthError(`ingestion unauthorized (HTTP ${response.status})`);
+    if (!response.ok) {
+      const detail=await readBodySafely(response);
+      let structured: unknown; try {structured=JSON.parse(detail);} catch {structured={error:detail};}
+      throw new ServerError(`ingestion failed (HTTP ${response.status}); retain original signed bytes`,response.status,{response:structured,paymentRequired:response.headers.get("payment-required"),operationId:opts.operationId});
     }
-    if (!res.ok) {
-      const detail = await readBodySafely(res);
-      throw new ServerError(
-        `sealMemory: failed (HTTP ${res.status}) ${detail}`,
-        res.status
-      );
-    }
-    const resBody = (await res.json().catch(() => ({}))) as Record<
-      string,
-      unknown
-    >;
-    const memoryHash =
-      typeof resBody.memory_hash === "string"
-        ? resBody.memory_hash
-        : bytesToHex(sealResult.content_hash);
-
-    return { memoryHash };
+    const receipt = await response.json() as Record<string,unknown>;
+    if (receipt.delivery_status !== "verified" || typeof receipt.locator !== "string" || !/^ar:\/\/[A-Za-z0-9_-]{43}$/.test(receipt.locator)) throw new IntegrityError("invalid delivery receipt");
+    const fetched = await boundedBody(await this._a2aExternal(`${this._a2aGateway()}/${receipt.locator.slice(5)}`));
+    if (fetched.length !== signedBytes.length || fetched.some((b,i)=>b!==signedBytes[i])) throw new IntegrityError("external delivery bytes mismatch");
+    return receipt;
   }
 
   /**
-   * Fetch a sealed blob by its content hash and decrypt it using the
+   * Open a session-cached sealed payload by hash, or restored bytes using the
    * identity's X25519 key (derived from the bound Ed25519 keypair).
    *
    * @param hashOrBytes - Hex content hash string or raw bytes of the outer
    *                      CBOR (if the caller already has them).
+   * @param opts.expectedHash - Optional BLAKE3 hash of the original outer bytes;
+   *                            checked before key access and decryption.
    * @returns The plaintext content and the raw inner JSON bytes.
    * @throws `UserError` if no keypair is bound.
    * @throws `IntegrityError` if decryption fails (wrong key or tampered).
    * @throws `AuthError` / `ServerError` on HTTP errors.
    */
-  async openMemory(hashOrBytes: string | Uint8Array): Promise<OpenMemoryResult> {
+  async openMemory(hashOrBytes: string | Uint8Array, opts: {expectedHash?: string} = {}): Promise<OpenMemoryResult> {
     let outerCbor: Uint8Array;
     if (hashOrBytes instanceof Uint8Array) {
       outerCbor = hashOrBytes;
     } else {
-      // Fetch outer CBOR from server by hash.
-      const keypairJson = await this.resolveKeypairJson();
-      const url = `${this.baseUrl}/api/sealed/${encodeURIComponent(hashOrBytes)}`;
-      const headers: Record<string, string> = { Accept: "application/cbor" };
-      if (this.jwt) headers.Authorization = `Bearer ${keypairJson.pubkey_base58}`;
-      const res = await safeFetch(this.fetchImpl, url, {
-        method: "GET",
-        headers,
-      });
-      if (res.status === 401 || res.status === 403) {
-        throw new AuthError(`openMemory: unauthorized (HTTP ${res.status})`);
-      }
-      if (res.status === 404) {
-        throw new ServerError(`openMemory: memory not found (${hashOrBytes})`, 404);
-      }
-      if (!res.ok) {
-        const detail = await readBodySafely(res);
-        throw new ServerError(
-          `openMemory: failed (HTTP ${res.status}) ${detail}`,
-          res.status
-        );
-      }
-      outerCbor = new Uint8Array(await res.arrayBuffer());
+      const local = this.sealedLocal.get(hashOrBytes);
+      if (!local) throw new UserError("openMemory: restore original outer CBOR from your backup; hosted blob storage is retired");
+      outerCbor = local.outerCbor.slice();
     }
 
-    const keypairJson = await this.resolveKeypairJson();
     const wasm = await loadWasm();
+    if (opts.expectedHash !== undefined) {
+      if (!/^[a-f0-9]{64}$/.test(opts.expectedHash)) throw new UserError("openMemory: invalid expected hash");
+      if (!wasm.blake3_hash_hex) throw new ServerError("openMemory: hash verification binding unavailable");
+      if (wasm.blake3_hash_hex(outerCbor) !== opts.expectedHash) throw new IntegrityError("openMemory: ciphertext hash mismatch");
+    }
+    const keypairJson = await this.resolveKeypairJson();
     if (!wasm.open_memory) {
       throw new ServerError("openMemory: WASM open_memory binding not available");
     }
@@ -731,117 +732,7 @@ export class MnemonicClient {
     memoryHash: string,
     target: ShareTarget
   ): Promise<ShareResult> {
-    const keypairJson = await this.resolveKeypairJson();
-    const wasm = await loadWasm();
-
-    // Fetch outer CBOR to extract K.
-    const url = `${this.baseUrl}/api/sealed/${encodeURIComponent(memoryHash)}`;
-    const headers: Record<string, string> = { Accept: "application/cbor" };
-    if (this.jwt) headers.Authorization = `Bearer ${this.jwt}`;
-    const res = await safeFetch(this.fetchImpl, url, { method: "GET", headers });
-    if (res.status === 401 || res.status === 403) {
-      throw new AuthError(`share: unauthorized (HTTP ${res.status})`);
-    }
-    if (!res.ok) {
-      const detail = await readBodySafely(res);
-      throw new ServerError(`share: failed to fetch memory (HTTP ${res.status}) ${detail}`, res.status);
-    }
-    const outerCbor = new Uint8Array(await res.arrayBuffer());
-
-    // Open memory to recover K — we need the author's X25519 secret.
-    if (!wasm.open_memory) {
-      throw new ServerError("share: WASM open_memory binding not available");
-    }
-    // We need K specifically, not the inner content. Use open_memory to get K
-    // indirectly by making a grant. For anonymous link we can use open_memory
-    // to verify we can decrypt, then use link_fragment to encode K.
-    // Actually we need K directly. We get it by opening the memory and
-    // then building a grant or link.
-
-    const ed25519Secret = new Uint8Array(keypairJson.secret.slice(0, 32));
-
-    if (target === "link") {
-      // For anonymous link, we post to /api/grants to create an anonymous grant
-      // and get back the fragment.
-      const grantUrl = `${this.baseUrl}/api/grants`;
-      const grantHeaders: Record<string, string> = {
-        "Content-Type": "application/json",
-      };
-      if (this.jwt) grantHeaders.Authorization = `Bearer ${this.jwt}`;
-      const grantRes = await safeFetch(this.fetchImpl, grantUrl, {
-        method: "POST",
-        headers: grantHeaders,
-        body: JSON.stringify({ memory_hash: memoryHash, type: "link" }),
-      });
-      if (grantRes.status === 401 || grantRes.status === 403) {
-        throw new AuthError(`share: unauthorized (HTTP ${grantRes.status})`);
-      }
-      if (!grantRes.ok) {
-        const detail = await readBodySafely(grantRes);
-        throw new ServerError(
-          `share: failed to create link grant (HTTP ${grantRes.status}) ${detail}`,
-          grantRes.status
-        );
-      }
-      const grantBody = (await grantRes.json().catch(() => ({}))) as Record<string, unknown>;
-      const fragment = typeof grantBody.fragment === "string" ? grantBody.fragment : "";
-      const linkUrl = typeof grantBody.url === "string"
-        ? grantBody.url
-        : `${this.baseUrl}/open/${memoryHash}#${fragment}`;
-      return { type: "link", url: linkUrl };
-    }
-
-    // Targeted grant: build GRANT_V1 CBOR locally.
-    if (!wasm.make_grant || !wasm.open_memory) {
-      throw new ServerError("share: WASM make_grant binding not available");
-    }
-    const memHashBytes = hexToBytes(memoryHash);
-    if (memHashBytes.length !== 32) {
-      throw new UserError(`share: memoryHash must be a 64-hex string (32 bytes), got ${memoryHash.length} hex chars`);
-    }
-
-    // We need K. Open the memory as author to get K back.
-    // The WASM doesn't expose K directly from open_memory, so we use make_grant
-    // with a known anonymous grant to get K out, then re-wrap for the reader.
-    // Alternative: use the server's /api/grants endpoint.
-    const readerPk = target.x25519Pub;
-    const authorDid = `did:key:${keypairJson.pubkey_base58}`;
-    const now = new Date().toISOString();
-
-    // Post to server to create a targeted grant (server has K).
-    const grantUrl = `${this.baseUrl}/api/grants`;
-    const grantHeaders: Record<string, string> = {
-      "Content-Type": "application/json",
-    };
-    if (this.jwt) grantHeaders.Authorization = `Bearer ${this.jwt}`;
-    const grantRes = await safeFetch(this.fetchImpl, grantUrl, {
-      method: "POST",
-      headers: grantHeaders,
-      body: JSON.stringify({
-        memory_hash: memoryHash,
-        type: "targeted",
-        reader: target.kid,
-        reader_x25519_pub: bytesToBase64(readerPk),
-      }),
-    });
-    if (grantRes.status === 401 || grantRes.status === 403) {
-      throw new AuthError(`share: unauthorized (HTTP ${grantRes.status})`);
-    }
-    if (!grantRes.ok) {
-      const detail = await readBodySafely(grantRes);
-      throw new ServerError(
-        `share: failed to create targeted grant (HTTP ${grantRes.status}) ${detail}`,
-        grantRes.status
-      );
-    }
-    const grantBody = (await grantRes.json().catch(() => ({}))) as Record<string, unknown>;
-    const grantCborB64 = typeof grantBody.grant_cbor === "string" ? grantBody.grant_cbor : null;
-    if (grantCborB64) {
-      return { type: "grant", grantCbor: base64ToBytes(grantCborB64) };
-    }
-    // Fallback: build GRANT_V1 locally if server doesn't return it.
-    // We use a dummy K (open_memory doesn't expose K) — the server path is preferred.
-    throw new ServerError("share: server did not return grant_cbor");
+    throw new UserError("share: hosted grant creation is retired; distribute signed grants client-side or use sealed A2A recipient grants");
   }
 
   /**
@@ -972,103 +863,21 @@ export class MnemonicClient {
     });
   }
 
-  /**
-   * Recall sealed memories by semantic similarity.
-   *
-   * Fetches the full sealed index from `GET /api/sealed`, embeds the query
-   * locally (using the pluggable `Embedder`), ranks results by cosine
-   * similarity, and returns the top-k hits. The server never sees the
-   * plaintext query — ranking is fully local.
-   *
-   * @param query - Query string to rank against.
-   * @param opts  - Optional `topK` and custom `embedder`.
-   * @returns Ranked `SealedHit[]`, best first.
-   * @throws `AuthError` / `ServerError` on HTTP errors.
+  /** Rank this client's sealed cache using an explicitly supplied local embedder.
+   * No plaintext query, memory, embedding or recall key is sent to the operator.
    */
-  async recallSealed(
-    query: string,
-    opts: RecallSealedOptions = {}
-  ): Promise<SealedHit[]> {
-    const topK = opts.topK ?? 10;
-
-    // Resolve embedder: use provided one or default to POST /api/embed.
-    const embedder: Embedder = opts.embedder ?? {
-      embed: async (text: string): Promise<Float32Array> => {
-        const url = `${this.baseUrl}/api/embed`;
-        const headers: Record<string, string> = {
-          "Content-Type": "application/json",
-          Accept: "application/json",
-        };
-        if (this.jwt) headers.Authorization = `Bearer ${this.jwt}`;
-        const res = await safeFetch(this.fetchImpl, url, {
-          method: "POST",
-          headers,
-          body: JSON.stringify({ text }),
-        });
-        if (!res.ok) {
-          const detail = await readBodySafely(res);
-          throw new ServerError(
-            `recallSealed/embed: failed (HTTP ${res.status}) ${detail}`,
-            res.status
-          );
-        }
-        const body = (await res.json()) as Record<string, unknown>;
-        const vec = Array.isArray(body.embedding) ? body.embedding : [];
-        return new Float32Array(vec as number[]);
-      },
-    };
-
-    // Fetch sealed index.
-    const indexUrl = `${this.baseUrl}/api/sealed`;
-    const indexHeaders: Record<string, string> = { Accept: "application/json" };
-    if (this.jwt) indexHeaders.Authorization = `Bearer ${this.jwt}`;
-    const indexRes = await safeFetch(this.fetchImpl, indexUrl, {
-      method: "GET",
-      headers: indexHeaders,
-    });
-    if (indexRes.status === 401 || indexRes.status === 403) {
-      throw new AuthError(`recallSealed: unauthorized (HTTP ${indexRes.status})`);
+  async recallSealed(query: string, opts: RecallSealedOptions = {}): Promise<SealedHit[]> {
+    const topK=opts.topK??10;
+    if (!Number.isSafeInteger(topK) || topK < 1) throw new UserError("recallSealed: topK must be positive");
+    if (!opts.embedder) throw new UserError("recallSealed: supply a local embedder; hosted embedding is not a private recall path");
+    const queryVector=await opts.embedder.embed(query);
+    const hits: SealedHit[]=[];
+    for (const [memoryHash,row] of this.sealedLocal) {
+      const opened=await this.openMemory(row.outerCbor);
+      const embedding=await opts.embedder.embed(opened.content);
+      hits.push({memoryHash,similarity:cosineSimilarity(queryVector,embedding)});
     }
-    if (!indexRes.ok) {
-      const detail = await readBodySafely(indexRes);
-      throw new ServerError(
-        `recallSealed: failed to fetch index (HTTP ${indexRes.status}) ${detail}`,
-        indexRes.status
-      );
-    }
-    const indexBody = (await indexRes.json().catch(() => ({ items: [] }))) as Record<
-      string,
-      unknown
-    >;
-    const items = Array.isArray(indexBody.items) ? indexBody.items : [];
-
-    // Embed the query locally.
-    const queryVec = await embedder.embed(query);
-
-    // Score each item and rank.
-    type ScoredItem = { memoryHash: string; similarity: number };
-    const scored: ScoredItem[] = [];
-    for (const item of items) {
-      if (!isRecord(item)) continue;
-      const hash = typeof item.memory_hash === "string" ? item.memory_hash : "";
-      if (!hash) continue;
-      const embedding = Array.isArray(item.embedding)
-        ? new Float32Array(item.embedding as number[])
-        : null;
-      if (!embedding || embedding.length === 0) {
-        scored.push({ memoryHash: hash, similarity: 0 });
-        continue;
-      }
-      const sim = cosineSimilarity(queryVec, embedding);
-      scored.push({ memoryHash: hash, similarity: sim });
-    }
-
-    // Sort descending by similarity, take top-k.
-    scored.sort((a, b) => b.similarity - a.similarity);
-    return scored.slice(0, topK).map((s) => ({
-      memoryHash: s.memoryHash,
-      similarity: s.similarity,
-    }));
+    return hits.sort((a,b)=>b.similarity-a.similarity).slice(0,topK);
   }
 
   // ------------------------------------------------------------------------
@@ -1149,6 +958,22 @@ export class MnemonicClient {
     return {secret:[...kp.secret],pubkey_base58:kp.pubkey_base58};
   }
 
+  /** Resume a retained A2A artifact without resigning/resealing it. */
+  async retryA2ADelivery(attestationId: string, opts: {operationId?: string; paymentHeaders?: Record<string,string>; prevLocator?: string} = {}): Promise<Attestation> {
+    const rows=await this.a2aIndex.list();
+    const retained=rows.find(r=>r.attestationId===attestationId);
+    if (!retained?.coseEnvelopeHex || !retained.signerPubkey) throw new UserError("retryA2ADelivery: original signed bytes are unavailable");
+    const row=await decodeAttestation(hexToBytes(retained.coseEnvelopeHex),retained.signerPubkey);
+    const parentLocator=opts.prevLocator??rows.find(r=>r.attestationId===row.prevId)?.locator;
+    if (row.prevId && !parentLocator) throw new UserError("ParentLocatorRequired");
+    const headers={...opts.paymentHeaders,...(opts.operationId?{"x-mnemonic-operation-id":opts.operationId}:{})};
+    const result=await this.callTool("mnemonic_attest_a2a",{kind:row.kind,context_id:row.contextId,signed:row.coseEnvelopeHex,sealed:row.sealed,mode:"anchored",...(row.prevId?{prev_id:row.prevId,prev_locator:parentLocator}:{})},headers);
+    if (!isRecord(result) || result.attestation_id!==row.attestationId || typeof result.locator!=="string") throw new IntegrityError("A2A retry receipt identity mismatch");
+    const delivered=await fetchAttestation.call(this,result.locator,row.signerPubkey!);
+    if (delivered.coseEnvelopeHex!==row.coseEnvelopeHex) throw new IntegrityError("A2A retry delivery mismatch");
+    await this.a2aIndex.put(delivered);return delivered;
+  }
+
   /**
    * Internal bridge so A2A mixin functions can call `callTool` without
    * exposing it on the public surface. Named `_callToolA2A` to signal that
@@ -1158,9 +983,10 @@ export class MnemonicClient {
    */
   _callToolA2A(
     name: string,
-    args: Record<string, unknown>
+    args: Record<string, unknown>,
+    extraHeaders: Record<string,string> = {}
   ): Promise<unknown> {
-    return this.callTool(name, args);
+    return this.callTool(name, args, extraHeaders);
   }
 
   // ------------------------------------------------------------------------
@@ -1235,19 +1061,20 @@ export class MnemonicClient {
    */
   private async callTool(
     name: string,
-    args: Record<string, unknown>
+    args: Record<string, unknown>,
+    extraHeaders: Record<string,string> = {}
   ): Promise<unknown> {
     const refresher = this.tokenRefresher;
-    if (!refresher) return this.callToolOnce(name, args);
+    if (!refresher) return this.callToolOnce(name, args, extraHeaders);
     if (this.jwtNeedsRefresh()) await this.refreshJwt(refresher);
     try {
-      return await this.callToolOnce(name, args);
+      return await this.callToolOnce(name, args, extraHeaders);
     } catch (e) {
       if (!(e instanceof AuthError)) throw e;
       const before = this.jwt;
       const fresh = await this.refreshJwt(refresher);
       if (!fresh || fresh === before) throw e;
-      return this.callToolOnce(name, args);
+      return this.callToolOnce(name, args, extraHeaders);
     }
   }
 
@@ -1263,7 +1090,8 @@ export class MnemonicClient {
    */
   private async callToolOnce(
     name: string,
-    args: Record<string, unknown>
+    args: Record<string, unknown>,
+    extraHeaders: Record<string,string> = {}
   ): Promise<unknown> {
     const url = `${this.baseUrl}/mcp`;
     const body = {
@@ -1274,6 +1102,7 @@ export class MnemonicClient {
     };
 
     const headers: Record<string, string> = {
+      ...extraHeaders,
       "Content-Type": "application/json",
       Accept: "application/json",
     };
@@ -1295,7 +1124,8 @@ export class MnemonicClient {
       const detail = await readBodySafely(res);
       throw new ServerError(
         `${name} failed: HTTP ${res.status} ${detail}`,
-        res.status
+        res.status,
+        {response: (() => {try {return JSON.parse(detail);} catch {return {error:detail};}})(), paymentRequired:res.headers.get("payment-required")}
       );
     }
 

@@ -69,13 +69,20 @@ describe("runRecall", () => {
     );
   }
 
+  it("rejects sealed recall before disclosing a private query", async () => {
+    const fetchMock = vi.fn();
+    globalThis.fetch = fetchMock;
+    await expect(runRecall("private query",{sealed:true})).rejects.toThrow(/No query was sent/);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("happy path: passes topK + tag through to /mcp", async () => {
     const fetchMock = vi.fn(
       async (_input: RequestInfo | URL, init?: RequestInit) => {
         const body = JSON.parse(String(init?.body ?? "{}"));
         const args = body.params?.arguments ?? {};
         expect(args.query).toBe("hello");
-        expect(args.top_k).toBe(3);
+        expect(args.limit).toBe(3);
         expect(args.tags).toEqual(["foo"]);
         return recallResponse(
           [
@@ -105,7 +112,7 @@ describe("runRecall", () => {
       async (_input: RequestInfo | URL, init?: RequestInit) => {
         const body = JSON.parse(String(init?.body ?? "{}"));
         const args = body.params?.arguments ?? {};
-        expect(args.top_k).toBe(5);
+        expect(args.limit).toBe(5);
         return recallResponse([], 0);
       }
     );

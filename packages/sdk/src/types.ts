@@ -147,6 +147,7 @@ export type VerifyResult =
 
 /** A single hit from `recall`. Server-defined fields are passed through. */
 export interface RecallHit {
+  [key: string]: unknown;
   attestationId: string;
   content: string;
   similarity: number;
@@ -158,6 +159,8 @@ export interface RecallResult {
   hits: RecallHit[];
   /** Total matching attestations on the server side. */
   total: number;
+  /** Unmodified server evidence; inclusion is not a completeness guarantee. */
+  evidence?: Record<string, unknown>;
 }
 
 /**
@@ -197,8 +200,8 @@ export type SealMode = "anchor" | "store";
 export interface SealMemoryOptions {
   mode: SealMode;
   tags?: string[];
-  /** Custom embedder for `recallSealed`. If provided, used to produce the
-   *  embedding vector that is stored alongside the sealed blob. */
+  /** Local embedder for client-side matching; embeddings are not uploaded.
+   *  Pass an embedder explicitly when calling `recallSealed`. */
   embedder?: Embedder;
 }
 
@@ -207,6 +210,11 @@ export interface SealMemoryResult {
   /** blake3 content hash (hex) of the sealed outer CBOR, i.e. the memory's
    *  globally unique identifier. */
   memoryHash: string;
+  /** Original signed bytes to retain for independent recovery and exact retries. */
+  signedBytes?: Uint8Array;
+  outerCbor?: Uint8Array;
+  locator?: string;
+  receipt?: Record<string, unknown>;
 }
 
 /** Result of `openMemory`. */
@@ -426,12 +434,15 @@ export interface RecallA2AContextOptions {
 export interface A2AIndexStore { list(): Promise<Attestation[]>; put(row:Attestation): Promise<void>; }
 export interface A2ARestoreOptions {
  expectedAuthors:string[]; heads?:string[]; maxPages?:number; maxCandidates?:number;
- checkpoint?:{scope:string;cursor?:string;staged?:Attestation[]}; signal?:AbortSignal;
+ /** Replace discovery, or use false for explicit-locator/local recovery only. */
+ discoverySource?:import('./discovery.js').DiscoverySource | false;
+ checkpoint?:{scope:string;cursor?:string;seenCursors?:string[];staged?:Attestation[]}; signal?:AbortSignal;
  parentLocators?:Record<string,{locator:string;author:string}>;
 }
 export interface A2ARestoreReport {
  attestations:Attestation[]; scanExhausted:boolean; budgetExhausted:boolean;
+ source:import('./discovery.js').DiscoveryDiagnostics;
  missingParents:string[]; invalidCandidates:{locator:string;reason:string}[];
  completeToHeads:boolean; completeness:'unknown'|'complete_to_heads';
- checkpoint?:{scope:string;cursor?:string;staged?:Attestation[]}; error?:string;
+ checkpoint?:{scope:string;cursor?:string;seenCursors?:string[];staged?:Attestation[]}; error?:string;
 }

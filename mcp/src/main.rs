@@ -6,7 +6,9 @@ mod client_ip;
 mod config;
 mod confirmation_token;
 mod cors_policy;
+mod delivery_operation;
 mod escrow;
+mod ingestion;
 mod llm;
 mod mcp;
 mod oauth;
@@ -332,7 +334,9 @@ async fn main() -> anyhow::Result<()> {
     // because it needs the gateway, RPC and database paths, and before any
     // server wiring because it exits when done.
     if let Some(Command::Restore { dry_run }) = cli.command {
-        use mnemonic_core::arweave::graphql::{solana_pubkey_to_arweave_address, GraphQlClient};
+        use mnemonic_core::arweave::graphql::{
+            flavour_from_url, solana_pubkey_to_arweave_address, GatewayFlavour, GraphQlClient,
+        };
         use mnemonic_core::arweave::ArweaveClient;
         use mnemonic_core::solana::SolanaClient;
 
@@ -347,7 +351,8 @@ async fn main() -> anyhow::Result<()> {
         eprintln!("mnemonic: restoring memories for {owner}");
 
         let solana = SolanaClient::new(&cfg.solana_rpc_url);
-        let gateway = ArweaveClient::new(&cfg.arweave_url);
+        let gateway = ArweaveClient::new(&cfg.arweave_url)
+            .try_with_parent_blob_origin(cfg.parent_blob_origin.as_deref())?;
         // NOTE the two distinct config fields, which are easy to confuse:
         //   `chain_stats_graphql_url` — the GraphQL INDEX endpoint
         //                               (`https://arweave.net/graphql`).
@@ -358,31 +363,52 @@ async fn main() -> anyhow::Result<()> {
         // Passing the gateway URL here silently enumerates nothing: the payload
         // host answers a GraphQL POST with an empty body, and an empty index is
         // indistinguishable from a failed query.
-        let gql = GraphQlClient::new(&cfg.chain_stats_graphql_url);
+        let flavour = flavour_from_url(&cfg.chain_stats_graphql_url);
+        let gql = GraphQlClient::new_with_flavour(&cfg.chain_stats_graphql_url, flavour);
         // A gateway owner filter is an optimisation, not a requirement: the memo
         // history already enumerates the historical items, and `list_anchored`
         // treats an empty address list as "tag-only". So a derivation failure
         // degrades the search rather than aborting the restore.
-        let arweave_addresses: Vec<String> = match solana_pubkey_to_arweave_address(&owner) {
-            Ok(addr) => vec![addr],
-            Err(e) => {
-                eprintln!(
+        let arweave_addresses: Vec<String> = if flavour == GatewayFlavour::Irys {
+            vec![owner.clone()]
+        } else {
+            match solana_pubkey_to_arweave_address(&owner) {
+                Ok(addr) => vec![addr],
+                Err(e) => {
+                    eprintln!(
                     "mnemonic: could not derive the Arweave address ({e}); enumerating by tag only"
                 );
-                Vec::new()
+                    Vec::new()
+                }
             }
         };
 
         let enumerated =
             mnemonic_core::restore::enumerate_anchored(&gql, &solana, &owner, &arweave_addresses)
                 .await;
+        let source_failed = enumerated
+            .sources
+            .iter()
+            .any(|source| source.status != "exhausted");
+        for source in &enumerated.sources {
+            eprintln!(
+                "mnemonic: discovery source {}: {}, {} candidate(s)",
+                source.source, source.status, source.count
+            );
+            if let Some(error) = &source.error {
+                eprintln!(
+                    "mnemonic: discovery source {} failed: {error}",
+                    source.source
+                );
+            }
+        }
         eprintln!(
             "mnemonic: {} anchored item(s) found on chain",
-            enumerated.len()
+            enumerated.items.len()
         );
 
         let (items, fetch_failed) =
-            mnemonic_core::restore::fetch_restorable(&gateway, &enumerated).await;
+            mnemonic_core::restore::fetch_restorable(&gateway, &enumerated.items).await;
         for (tx, reason) in &fetch_failed {
             eprintln!("mnemonic: skipping {tx}: {reason}");
         }
@@ -391,10 +417,14 @@ async fn main() -> anyhow::Result<()> {
             let mine = items.iter().filter(|i| i.row.owner_pubkey == owner).count();
             println!(
                 "dry run: {} enumerated, {} verified, {} authored by this identity, {} unreadable",
-                enumerated.len(),
+                enumerated.items.len(),
                 items.len(),
                 mine,
                 fetch_failed.len()
+            );
+            anyhow::ensure!(
+                !source_failed,
+                "restore discovery was incomplete; inspect source diagnostics"
             );
             return Ok(());
         }
@@ -416,10 +446,11 @@ async fn main() -> anyhow::Result<()> {
         println!(
             "restored {} of {} anchored item(s); {} belong to another identity; {} failed",
             report.restored,
-            enumerated.len(),
+            enumerated.items.len(),
             report.skipped_other_owner,
             report.failed.len() + fetch_failed.len()
         );
+        anyhow::ensure!(!source_failed, "restore imported verified candidates, but discovery was incomplete; inspect source diagnostics");
         return Ok(());
     }
 
@@ -529,7 +560,10 @@ async fn main() -> anyhow::Result<()> {
                 r.write_mode,
                 &sealed_art.outer_cbor,
             ) {
-                eprintln!("mnemonic: save_sealed_attestation failed for {}: {e}", r.attestation_id);
+                eprintln!(
+                    "mnemonic: save_sealed_attestation failed for {}: {e}",
+                    r.attestation_id
+                );
                 failed_count += 1;
                 continue;
             }
@@ -539,10 +573,7 @@ async fn main() -> anyhow::Result<()> {
         if sealed_count > 0 {
             let _ = store.conn().execute_batch("VACUUM");
         }
-        println!(
-            "sealed {} row(s); {} failed",
-            sealed_count, failed_count
-        );
+        println!("sealed {} row(s); {} failed", sealed_count, failed_count);
         return Ok(());
     }
 
@@ -830,6 +861,11 @@ async fn main() -> anyhow::Result<()> {
     payment::init_payment_schema(store.conn())?;
     paid_operation::migrate_paid_operations(store.conn())?;
     paid_artifact::migrate_paid_artifact_staging(store.conn())?;
+    delivery_operation::migrate(store.conn())?;
+    let legacy_staged = paid_artifact::legacy_retained_count(store.conn())?;
+    if legacy_staged > 0 {
+        tracing::warn!(legacy_staged, "legacy paid artifacts await verified client resubmission; payload retention has not yet drained");
+    }
     wallet_link::migrate_wallet_links(store.conn())?;
     payment::migrate_free_anchor_usage(store.conn())?;
     // F1 fix (Task 6, D-8): relabel legacy anchored rows that were stored as
@@ -1035,7 +1071,8 @@ async fn main() -> anyhow::Result<()> {
     let state = Arc::new(mcp::McpState {
         keypair,
         solana: solana::SolanaClient::new(&cfg.solana_rpc_url),
-        arweave: arweave::ArweaveClient::new_with_network(&cfg.arweave_url, irys_network),
+        arweave: arweave::ArweaveClient::new_with_network(&cfg.arweave_url, irys_network)
+            .try_with_parent_blob_origin(cfg.parent_blob_origin.as_deref())?,
         store: std::sync::Mutex::new(store),
         embedder,
         compressor,
@@ -1100,25 +1137,11 @@ async fn main() -> anyhow::Result<()> {
         unlock_cache: mnemonic_core::identity::UnlockCache::with_ttl(
             cfg.unlock_ttl_secs.map(std::time::Duration::from_secs),
         ),
-        recall_sessions: std::sync::Arc::new(tokio::sync::Mutex::new(
-            api::RecallSessionMap::new(),
-        )),
+        recall_sessions: std::sync::Arc::new(tokio::sync::Mutex::new(api::RecallSessionMap::new())),
     });
 
-    // Retry only already-settled paid deliveries. The worker re-enters the
-    // staged delivery path and has no payment proof or settlement authority.
-    if state.universal_paywall.is_some() {
-        let retry_state = state.clone();
-        tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
-                let resumed = api::resume_due_paid_deliveries(retry_state.clone()).await;
-                if resumed > 0 {
-                    tracing::info!(resumed, "resumed due paid delivery attempts");
-                }
-            }
-        });
-    }
+    // Delivery retries require the client's original signed bytes. No hosted
+    // payload worker runs; durable financial records survive resubmission.
 
     // Chain-stats refresh loop: snapshot immediately (the landing page
     // should not wait an hour after a restart), then on the configured
@@ -1449,6 +1472,7 @@ async fn run_http(
             axum::routing::get(api::get_pending_handler),
         )
         .route("/api/sign-callback", post(api::sign_callback_handler))
+        .route("/api/ingest-artifact", post(ingestion::ingest_handler))
         // Task 10 — sealed-memory routes (all require Bearer JWT).
         .route(
             "/api/anchor-sealed",
@@ -1464,8 +1488,7 @@ async fn run_http(
         )
         .route(
             "/api/grants",
-            post(sealed_routes::create_grant_handler)
-                .get(sealed_routes::list_grants_handler),
+            post(sealed_routes::create_grant_handler).get(sealed_routes::list_grants_handler),
         )
         .route(
             "/api/grants/{id}",
@@ -1503,8 +1526,7 @@ async fn run_http(
         // Task 13 — hosted recall session (opt-in, in-RAM only).
         .route(
             "/api/recall-session",
-            post(api::recall_session_start_handler)
-                .delete(api::recall_session_delete_handler),
+            post(api::recall_session_start_handler).delete(api::recall_session_delete_handler),
         )
         .layer(middleware::from_fn_with_state(
             oauth_state.clone(),

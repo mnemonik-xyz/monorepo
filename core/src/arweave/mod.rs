@@ -50,6 +50,7 @@ pub struct ArweaveClient {
     upload_url: String,
     network: IrysNetwork,
     bypass_local_routing: bool,
+    parent_blob_origin: Option<String>,
     client: reqwest::Client,
 }
 
@@ -64,6 +65,7 @@ impl ArweaveClient {
             upload_url: network.upload_url().to_string(),
             network,
             bypass_local_routing: false,
+            parent_blob_origin: None,
             client: http_client(),
         }
     }
@@ -90,6 +92,7 @@ impl ArweaveClient {
             upload_url,
             network: IrysNetwork::Mainnet,
             bypass_local_routing: true,
+            parent_blob_origin: None,
             client: reqwest::Client::new(),
         }
     }
@@ -208,6 +211,79 @@ impl ArweaveClient {
             out.extend_from_slice(&chunk);
         }
         Ok(out)
+    }
+
+    /// Enable portable parent fetches from one independently configured object
+    /// origin. Locator input can never choose an origin, path prefix or redirect.
+    pub fn try_with_parent_blob_origin(mut self, origin: Option<&str>) -> anyhow::Result<Self> {
+        let Some(origin) = origin else {
+            return Ok(self);
+        };
+        let url = reqwest::Url::parse(origin)?;
+        anyhow::ensure!(
+            matches!(url.scheme(), "http" | "https")
+                && url.host_str().is_some()
+                && url.username().is_empty()
+                && url.password().is_none()
+                && matches!(url.path(), "" | "/")
+                && url.query().is_none()
+                && url.fragment().is_none(),
+            "parent blob origin must be an HTTP(S) origin without credentials or path"
+        );
+        self.parent_blob_origin = Some(url.origin().ascii_serialization());
+        Ok(self)
+    }
+
+    /// Resolve supported parent hints without consulting operator receipt SQL.
+    pub async fn read_parent_locator(&self, locator: &str) -> anyhow::Result<Vec<u8>> {
+        if let Some(id) = locator.strip_prefix("ar://") {
+            return self.read_a2a(id).await;
+        }
+        let digest = locator
+            .strip_prefix("blob://")
+            .ok_or_else(|| anyhow::anyhow!("unsupported parent locator backend"))?;
+        anyhow::ensure!(
+            digest.len() == 64
+                && digest
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+            "invalid blob digest"
+        );
+        let origin = self
+            .parent_blob_origin
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("blob parent backend is not configured"))?;
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()?;
+        let mut response = client
+            .get(format!("{origin}/objects/{digest}"))
+            .send()
+            .await?
+            .error_for_status()?;
+        anyhow::ensure!(
+            response.status().is_success(),
+            "parent blob returned non-success status"
+        );
+        anyhow::ensure!(
+            response.content_length().is_none_or(|n| n <= 1048576),
+            "parent blob too large"
+        );
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response.chunk().await? {
+            anyhow::ensure!(
+                bytes.len() + chunk.len() <= 1048576,
+                "parent blob too large"
+            );
+            bytes.extend_from_slice(&chunk);
+        }
+        use sha2::Digest;
+        anyhow::ensure!(
+            hex::encode(sha2::Sha256::digest(&bytes)) == digest,
+            "parent blob digest mismatch"
+        );
+        Ok(bytes)
     }
 
     pub async fn read(&self, tx_id: &str) -> anyhow::Result<Vec<u8>> {

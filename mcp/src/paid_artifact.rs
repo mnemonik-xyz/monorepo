@@ -1,15 +1,13 @@
-//! Versioned binding and durable staging for a paid, client-signed artifact.
+//! Versioned binding and byte-free retry metadata for paid client artifacts.
 //!
 //! A payment must commit to the exact COSE_Sign1 envelope that the client
 //! produced, rather than to editor content or to an unsigned CBOR payload.
 //! The domain separator makes this hash unambiguous and leaves room for a
 //! future envelope format without changing the meaning of existing receipts.
 //!
-//! Staging is deliberately separate from `paid_operations`: payment metadata
-//! must not acquire artifact bytes. The enclosing SQLite store already holds
-//! private attestation content under Mnemonic's at-rest access model; staging
-//! uses that same local trust boundary until the artifact is anchored or
-//! abandoned.
+//! New records retain author and digest, never source bytes. Historical staging
+//! remains untouched on boot until identical client resubmission drains it.
+//! The client must retain the original envelope; autonomous upload retries stop.
 
 use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, Utc};
@@ -96,7 +94,7 @@ CREATE TABLE IF NOT EXISTS paid_delivery_review_cases (
     FOREIGN KEY(correlation_id) REFERENCES paid_artifact_delivery_attempts(correlation_id)
 );";
 
-/// A verified signed envelope held while payment completes.
+/// Metadata binding; cose_sign1 is empty for all new records.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StagedPaidArtifact {
     pub correlation_id: String,
@@ -107,9 +105,7 @@ pub struct StagedPaidArtifact {
     pub updated_at: String,
 }
 
-/// The private local context required to perform delivery after payment.
-/// This is separate from payment metadata and retained only under Mnemonic's
-/// existing SQLite at-rest trust boundary.
+/// Legacy-compatible metadata row. Payload fields are empty for new writes.
 #[derive(Debug, Clone)]
 pub struct StagedDeliveryContext {
     // Reserved for the in-flight paid-anchoring work; not yet read from the
@@ -164,7 +160,7 @@ pub fn migrate_paid_artifact_staging(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-/// Persist a verified client-signed envelope exactly once.
+/// Persist its verified author and envelope digest, never its source bytes.
 ///
 /// A reused correlation id is allowed only when it refers to the identical
 /// signer and signed envelope. This prevents a second callback from swapping
@@ -191,7 +187,7 @@ pub fn stage_verified_cose(
             correlation_id,
             signer_pubkey,
             artifact_hash,
-            cose_sign1,
+            Vec::<u8>::new(),
             now
         ],
     )
@@ -199,13 +195,21 @@ pub fn stage_verified_cose(
 
     let staged = get_staged_cose(conn, correlation_id)?
         .ok_or_else(|| anyhow!("staged paid artifact disappeared"))?;
-    if staged.signer_pubkey != signer_pubkey
-        || staged.artifact_hash != artifact_hash
-        || staged.cose_sign1 != cose_sign1
-    {
+    if staged.signer_pubkey != signer_pubkey || staged.artifact_hash != artifact_hash {
         return Err(anyhow!("paid_artifact_correlation_conflict"));
     }
-    Ok(staged)
+    // Old deployments retained bytes. Drain only after the client resubmits
+    // the identical verified envelope; boot migrations never discard them.
+    if !staged.cose_sign1.is_empty() {
+        conn.execute(
+            "UPDATE paid_artifact_staging SET cose_sign1=X'' WHERE correlation_id=?1",
+            [correlation_id],
+        )?;
+    }
+    Ok(StagedPaidArtifact {
+        cose_sign1: Vec::new(),
+        ..staged
+    })
 }
 
 pub fn get_staged_cose(
@@ -231,19 +235,17 @@ pub fn get_staged_cose(
     .context("read staged paid artifact")
 }
 
-/// Persist the entire delivery context at the same point as the verified
-/// signature. This allows a restarted MCP to resume from the same signed
-/// artifact rather than requesting a new quote or recomputing an embedding.
+/// Persist only the content hash, owner, write mode and expiry. Restarted
+/// callbacks reconstruct transient context from identical client resubmission.
 pub fn stage_delivery_context(
     conn: &Connection,
     correlation_id: &str,
     entry: &PendingEntry,
     now: &str,
 ) -> Result<()> {
-    let tags_json = serde_json::to_string(&entry.tags).context("serialize staged tags")?;
-    let metadata_json =
-        serde_json::to_string(&entry.metadata).context("serialize staged metadata")?;
-    let embedding = encode_embedding(&entry.embedding);
+    let tags_json = "[]";
+    let metadata_json = "{}";
+    let embedding: Vec<u8> = vec![];
     conn.execute(
         "INSERT INTO paid_artifact_delivery_context \
          (correlation_id, signer_pubkey, content, embedding, content_hash, canonical_cbor, tags_json, metadata_json, write_mode, expires_at, created_at, updated_at) \
@@ -252,10 +254,10 @@ pub fn stage_delivery_context(
         params![
             correlation_id,
             entry.jwt_sub,
-            entry.content,
+            "",
             embedding,
             entry.content_hash,
-            entry.canonical_cbor,
+            Vec::<u8>::new(),
             tags_json,
             metadata_json,
             entry.write_mode.as_str(),
@@ -269,12 +271,64 @@ pub fn stage_delivery_context(
         .ok_or_else(|| anyhow!("staged delivery context disappeared"))?;
     if staged.signer_pubkey != entry.jwt_sub
         || staged.content_hash != entry.content_hash
-        || staged.canonical_cbor != entry.canonical_cbor
         || staged.write_mode != entry.write_mode
     {
         return Err(anyhow!("paid_artifact_context_conflict"));
     }
+    conn.execute("UPDATE paid_artifact_delivery_context SET content='',embedding=X'',canonical_cbor=X'',tags_json='[]',metadata_json='{}' WHERE correlation_id=?1", [correlation_id])?;
     Ok(())
+}
+
+/// Metadata-only visibility into upgrade retention. No source bytes leave this API.
+pub fn legacy_retained_count(conn: &Connection) -> Result<u64> {
+    Ok(conn.query_row("SELECT COUNT(*) FROM paid_artifact_staging s LEFT JOIN paid_artifact_delivery_context c USING(correlation_id) WHERE length(s.cose_sign1)>0 OR length(c.content)>0 OR length(c.embedding)>0 OR length(c.canonical_cbor)>0", [], |r| r.get(0))?)
+}
+
+/// Reconstruct transient context only from the client's identical signed bytes.
+pub fn resubmitted_context(
+    conn: &Connection,
+    correlation_id: &str,
+    bytes: &[u8],
+    author: &str,
+) -> Result<Option<PendingEntry>> {
+    let Some(staged) = get_staged_cose(conn, correlation_id)? else {
+        return Ok(None);
+    };
+    anyhow::ensure!(
+        staged.signer_pubkey == author && staged.artifact_hash == hash_client_signed_cose(bytes),
+        "resubmission binding mismatch"
+    );
+    let Some(context) = get_staged_delivery_context(conn, correlation_id)? else {
+        return Ok(None);
+    };
+    let verified = mnemonic_core::codec::sign::verify_artifact(bytes, Some(&context.content_hash))
+        .map_err(anyhow::Error::msg)?;
+    anyhow::ensure!(
+        verified.valid && verified.signer == author,
+        "invalid resubmission signature"
+    );
+    let payload = mnemonic_core::codec::canonical::from_canonical_cbor(&verified.payload)
+        .map_err(anyhow::Error::msg)?;
+    let mut entry = context.into_pending_entry();
+    entry.canonical_cbor = verified.payload;
+    entry.content = payload["content"].as_str().unwrap_or("").into();
+    entry.embedding = vec![];
+    entry.tags = payload["tags"]
+        .as_array()
+        .map(|v| {
+            v.iter()
+                .filter_map(|v| v.as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default();
+    entry.metadata = payload["metadata"].clone();
+    entry.is_sealed = payload["type"] == "sealed";
+    entry.visibility = if payload["visibility"] == "public" {
+        mnemonic_core::storage::Visibility::Public
+    } else {
+        mnemonic_core::storage::Visibility::Private
+    };
+    Ok(Some(entry))
 }
 
 pub fn get_staged_delivery_context(
@@ -383,19 +437,23 @@ pub fn acquire_delivery_attempt(
         {
             return Ok(None);
         }
-        conn.execute(
+        let changed=conn.execute(
             "UPDATE paid_artifact_delivery_attempts SET state = ?1, attempts = ?2, lease_id = ?3, \
-             lease_expires_at = ?4, updated_at = ?5 WHERE correlation_id = ?6",
+             lease_expires_at = ?4, updated_at = ?5 WHERE correlation_id = ?6 AND attempts = ?7 AND state NOT IN ('completed','abandoned') AND (lease_expires_at IS NULL OR lease_expires_at <= ?5)",
             params![
                 "anchoring",
                 attempts + 1,
                 lease_id,
                 lease_expires_at,
                 now,
-                correlation_id
+                correlation_id,
+                attempts
             ],
         )
         .context("reacquire paid delivery attempt")?;
+        if changed != 1 {
+            return Ok(None);
+        }
         return Ok(Some(DeliveryAttempt {
             correlation_id: correlation_id.into(),
             state,
@@ -405,13 +463,17 @@ pub fn acquire_delivery_attempt(
             lease_id: lease_id.into(),
         }));
     }
-    conn.execute(
-        "INSERT INTO paid_artifact_delivery_attempts \
+    let changed = conn
+        .execute(
+            "INSERT INTO paid_artifact_delivery_attempts \
          (correlation_id, state, attempts, lease_id, lease_expires_at, created_at, updated_at) \
-         VALUES (?1, 'anchoring', 1, ?2, ?3, ?4, ?4)",
-        params![correlation_id, lease_id, lease_expires_at, now],
-    )
-    .context("create paid delivery attempt")?;
+         VALUES (?1, 'anchoring', 1, ?2, ?3, ?4, ?4) ON CONFLICT(correlation_id) DO NOTHING",
+            params![correlation_id, lease_id, lease_expires_at, now],
+        )
+        .context("create paid delivery attempt")?;
+    if changed != 1 {
+        return Ok(None);
+    }
     Ok(Some(DeliveryAttempt {
         correlation_id: correlation_id.into(),
         state: "anchoring".into(),
@@ -429,8 +491,8 @@ pub fn record_arweave_uploaded(
     now: &str,
 ) -> Result<()> {
     let changed = conn.execute(
-        "UPDATE paid_artifact_delivery_attempts SET state = 'arweave_uploaded', arweave_tx = ?1, updated_at = ?2 \
-         WHERE correlation_id = ?3 AND lease_id = ?4 AND arweave_tx IS NULL",
+        "UPDATE paid_artifact_delivery_attempts SET state = 'verification_pending', arweave_tx = ?1, updated_at = ?2 \
+         WHERE correlation_id = ?3 AND lease_id = ?4 AND (arweave_tx IS NULL OR arweave_tx = ?1)",
         params![arweave_tx, now, attempt.correlation_id, attempt.lease_id],
     ).context("record paid Arweave delivery")?;
     if changed != 1 {
@@ -475,6 +537,7 @@ pub fn mark_delivery_retryable(
     Ok(())
 }
 
+#[allow(dead_code)]
 pub fn due_delivery_retries(conn: &Connection, now: &str, limit: usize) -> Result<Vec<String>> {
     let mut statement = conn.prepare(
         "SELECT correlation_id FROM paid_artifact_delivery_attempts \
@@ -529,6 +592,7 @@ pub fn mark_delivery_completed(
     Ok(())
 }
 
+#[allow(dead_code)]
 fn encode_embedding(embedding: &[f32]) -> Vec<u8> {
     embedding
         .iter()
@@ -598,7 +662,7 @@ mod tests {
     }
 
     #[test]
-    fn delivery_context_round_trips_without_reembedding() {
+    fn delivery_context_retains_only_identity_without_source_bytes() {
         let conn = Connection::open_in_memory().unwrap();
         migrate_paid_artifact_staging(&conn).unwrap();
         let entry = PendingEntry {
@@ -622,9 +686,9 @@ mod tests {
             .unwrap()
             .unwrap()
             .into_pending_entry();
-        assert_eq!(recovered.content, entry.content);
-        assert_eq!(recovered.embedding, entry.embedding);
-        assert_eq!(recovered.canonical_cbor, entry.canonical_cbor);
+        assert!(recovered.content.is_empty());
+        assert!(recovered.embedding.is_empty());
+        assert!(recovered.canonical_cbor.is_empty());
         assert_eq!(recovered.write_mode, WriteMode::Anchored);
         assert!(claim_delivery_context(&conn, "correlation", "later").unwrap());
         assert!(!claim_delivery_context(&conn, "correlation", "again").unwrap());
@@ -782,9 +846,14 @@ mod tests {
         let expected_hash = hash_client_signed_cose(cose_bytes);
 
         // Stage the COSE envelope.
-        let staged =
-            stage_verified_cose(&conn, "corr-1", "signer-1", cose_bytes, "2026-07-15T00:00:00Z")
-                .unwrap();
+        let staged = stage_verified_cose(
+            &conn,
+            "corr-1",
+            "signer-1",
+            cose_bytes,
+            "2026-07-15T00:00:00Z",
+        )
+        .unwrap();
         assert_eq!(
             staged.artifact_hash, expected_hash,
             "staged artifact_hash must equal hash_client_signed_cose result"
@@ -832,5 +901,65 @@ mod tests {
             .contains("operation_id_conflict"),
             "a settled receipt cannot be reused for a different artifact"
         );
+    }
+}
+
+#[cfg(test)]
+mod resubmission_tests {
+    use super::*;
+    use solana_sdk::signature::{Keypair, Signer};
+    #[test]
+    fn restart_rebuilds_only_from_identical_client_bytes_and_drains_legacy_on_resubmission() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate_paid_artifact_staging(&conn).unwrap();
+        let kp = Keypair::new();
+        let author = kp.pubkey().to_string();
+        let payload = serde_json::json!({"artifact_id":"one","type":"memory","schema_version":1,"producer":format!("did:sol:{author}"),"content":"private payload","created_at":"2026-10-02T00:00:00Z","tags":["private-tag"]});
+        let signed = mnemonic_core::codec::sign::sign_artifact(
+            &payload,
+            &mnemonic_core::codec::schema::MEMORY_V1,
+            &kp,
+        )
+        .unwrap();
+        let entry = PendingEntry {
+            jwt_sub: author.clone(),
+            content: "private payload".into(),
+            embedding: vec![1.0],
+            content_hash: signed.content_hash.clone(),
+            canonical_cbor: signed.canonical_cbor.clone(),
+            tags: vec!["private-tag".into()],
+            metadata: serde_json::json!({}),
+            write_mode: WriteMode::Anchored,
+            visibility: mnemonic_core::storage::Visibility::Private,
+            is_sealed: false,
+            free_quota: false,
+            requester_ip: None,
+            exp: Utc::now(),
+        };
+        stage_verified_cose(&conn, "op", &author, &signed.cose_bytes, "now").unwrap();
+        stage_delivery_context(&conn, "op", &entry, "now").unwrap();
+        let retained:i64=conn.query_row("SELECT length(s.cose_sign1)+length(c.content)+length(c.embedding)+length(c.canonical_cbor) FROM paid_artifact_staging s JOIN paid_artifact_delivery_context c USING(correlation_id)",[],|r|r.get(0)).unwrap();
+        assert_eq!(retained, 0);
+        let recovered = resubmitted_context(&conn, "op", &signed.cose_bytes, &author)
+            .unwrap()
+            .unwrap();
+        assert_eq!(recovered.content, "private payload");
+        assert_eq!(recovered.canonical_cbor, signed.canonical_cbor);
+        assert!(resubmitted_context(&conn, "op", b"changed", &author).is_err());
+        assert!(resubmitted_context(&conn, "op", &signed.cose_bytes, "other").is_err());
+        // Simulate an old deployment. Boot preserves original pending bytes.
+        conn.execute(
+            "UPDATE paid_artifact_staging SET cose_sign1=?1",
+            [&signed.cose_bytes],
+        )
+        .unwrap();
+        conn.execute("UPDATE paid_artifact_delivery_context SET content='legacy private payload',canonical_cbor=?1",[&signed.canonical_cbor]).unwrap();
+        migrate_paid_artifact_staging(&conn).unwrap();
+        assert_eq!(legacy_retained_count(&conn).unwrap(), 1);
+        assert!(stage_verified_cose(&conn, "op", &author, b"different", "later").is_err());
+        assert_eq!(legacy_retained_count(&conn).unwrap(), 1);
+        stage_verified_cose(&conn, "op", &author, &signed.cose_bytes, "later").unwrap();
+        stage_delivery_context(&conn, "op", &entry, "later").unwrap();
+        assert_eq!(legacy_retained_count(&conn).unwrap(), 0);
     }
 }

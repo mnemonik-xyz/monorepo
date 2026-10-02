@@ -177,7 +177,7 @@ export function buildProgram(): Command {
   program
     .command("sign [content]")
     .description(
-      "save a memory (content from arg or stdin). Default: sealed local write (E2E encrypted, key from file). --anchor seals and anchors on-chain. --public writes plaintext (legacy path).",
+      "save a memory (content from arg or stdin). Default: sealed local write (E2E encrypted, key from file). --anchor delivers signed ciphertext externally. --public requires --anchor (legacy plaintext path).",
     )
     .option("--tags <list>", "comma-separated tags")
     .option(
@@ -187,7 +187,7 @@ export function buildProgram(): Command {
     .option("--participate", "alias for --anchor")
     .option(
       "--public",
-      "plaintext write (legacy local/anchored path; no E2E encryption)",
+      "plaintext public write (requires --anchor; legacy preparation path)",
     )
     .option("--base-url <url>", "override the server base URL")
     .action(
@@ -233,7 +233,7 @@ export function buildProgram(): Command {
 
   program
     .command("share <hash>")
-    .description("create a share link or targeted grant for a sealed memory")
+    .description("retired hosted sharing command; prints migration guidance")
     .option("--link", "create an anonymous bearer link with embedded key")
     .option("--to <did|key>", "grant access to a specific reader DID or key")
     .option("--base-url <url>", "override the server base URL")
@@ -267,11 +267,11 @@ export function buildProgram(): Command {
   program
     .command("recall <query>")
     .description(
-      "recall similar memories (public key only; no keychain access). Add --sealed to also search sealed memories.",
+      "recall similar memories (public key only; no keychain access). Sealed recall requires the SDK with a local embedder.",
     )
     .option("--top-k <n>", "max hits to return", (v) => parseInt(v, 10), 5)
     .option("--tag <tag>", "filter by a single tag")
-    .option("--sealed", "also recall sealed memories (reads private key)")
+    .option("--sealed", "unsupported: use SDK recallSealed with a local embedder")
     .option("--base-url <url>", "override the server base URL")
     .action(
       async (

@@ -50,3 +50,60 @@ it('resumes with staged signed children when their parent appears on a later pag
  const first=await client(fetcher).restoreA2AContext(v.context_id,{expectedAuthors:[v.author.pubkey_base58],maxPages:1});expect(first.attestations).toHaveLength(0);expect(first.checkpoint?.staged).toHaveLength(1);
  const resumed=await client(fetcher).restoreA2AContext(v.context_id,{expectedAuthors:[v.author.pubkey_base58],heads:[`a2a:${child.node.tags.find(t=>t.name==='Content-Hash')!.value}`],checkpoint:first.checkpoint!});expect(resumed.completeToHeads).toBe(true);expect(resumed.attestations).toHaveLength(2);
 });
+
+describe('replaceable discovery sources',()=>{
+ it('replaces Irys with Arweave across duplicate locators and ordering without changing verified identity',async()=>{
+   const {IrysDiscoverySource,ArweaveDiscoverySource}=await import('../src/discovery.js');
+   const first=edge();const duplicate=edge();duplicate.node.id='B'.repeat(43);duplicate.cursor=duplicate.node.id;
+   const results=[];
+   for(const Source of [IrysDiscoverySource,ArweaveDiscoverySource]){
+     const transport=remote(Source===IrysDiscoverySource?[first,duplicate]:[duplicate,first]);
+     const source=new Source('https://index.invalid/graphql',transport);
+     const c=client(transport);const r=await c.restoreA2AContext(v.context_id,{expectedAuthors:[v.author.pubkey_base58],discoverySource:source});
+     expect(r.source.status).toBe('exhausted');expect(r.attestations).toHaveLength(1);results.push(r.attestations[0]!.attestationId);
+   }
+   expect(results[0]).toBe(results[1]);
+ });
+ it('retains verified local entries during index omission and recovers known heads with indexes disabled',async()=>{
+   const hash=edge().node.tags.find(t=>t.name==='Content-Hash')!.value;const head=`a2a:${hash}`;
+   const c=client(remote([edge()]));await c.restoreA2AContext(v.context_id,{expectedAuthors:[v.author.pubkey_base58]});
+   const missing={identity:'omitting-index',supportedBackends:['arweave'],page:async()=>({candidates:[]})};
+   const retained=await c.restoreA2AContext(v.context_id,{expectedAuthors:[v.author.pubkey_base58],heads:[head],discoverySource:missing});
+   expect(retained.completeToHeads).toBe(true);expect(retained.attestations).toHaveLength(1);
+   const cold=client(remote([]));const absent=await cold.restoreA2AContext(v.context_id,{expectedAuthors:[v.author.pubkey_base58],heads:[head],discoverySource:missing});
+   expect(absent.scanExhausted).toBe(true);expect(absent.completeness).toBe('unknown');
+   const restored=await cold.restoreA2AContext(v.context_id,{expectedAuthors:[v.author.pubkey_base58],heads:[head],discoverySource:false,parentLocators:{[head]:{author:v.author.pubkey_base58,locator:`ar://${id}`}}});
+   expect(restored.source.status).toBe('disabled');expect(restored.scanExhausted).toBe(false);expect(restored.completeToHeads).toBe(true);
+ });
+ it('does not expand author trust from replacement metadata and rejects incompatible cursors',async()=>{
+   const c=client(remote([edge()],v.stream,true));const first=await c.restoreA2AContext(v.context_id,{expectedAuthors:[v.author.pubkey_base58],maxPages:1});
+   const forged={identity:'replacement',supportedBackends:['arweave'],page:async()=>({candidates:[{backend:'arweave',locator:`ar://${id}`} ]})};
+   await expect(c.restoreA2AContext(v.context_id,{expectedAuthors:[v.author.pubkey_base58],discoverySource:forged,checkpoint:first.checkpoint!})).rejects.toThrow('scope mismatch');
+   const fresh=client(remote([]));const rejected=await fresh.restoreA2AContext(v.context_id,{expectedAuthors:[v.outsider.pubkey_base58],discoverySource:forged});
+   expect(rejected.attestations).toHaveLength(0);expect(rejected.invalidCandidates[0]!.reason).toContain('pinned authors');
+ });
+ it('reports outage, malformed pages, cancellation and total-candidate limits separately',async()=>{
+   const authors=[v.author.pubkey_base58];
+   const down=client((async()=>new Response('unavailable',{status:503})) as typeof fetch);
+   expect((await down.restoreA2AContext(v.context_id,{expectedAuthors:authors})).source.status).toBe('unavailable');
+   const malformed=client((async()=>Response.json({data:{}})) as typeof fetch);
+   expect((await malformed.restoreA2AContext(v.context_id,{expectedAuthors:authors})).source.status).toBe('malformed');
+   const abort=new AbortController();abort.abort();const c=client(remote([]));
+   expect((await c.restoreA2AContext(v.context_id,{expectedAuthors:authors,signal:abort.signal})).source.status).toBe('cancelled');
+   const budget=await client(remote([edge(),edge()])).restoreA2AContext(v.context_id,{expectedAuthors:authors,maxCandidates:1});
+   expect(budget.source.status).toBe('budget_exhausted');expect(budget.source.candidates).toBe(0);expect(budget.checkpoint?.cursor).toBeUndefined();
+ });
+});
+
+it('handles index lag on a later scan and preserves competing signed branches',async()=>{
+ const firstBytes=wasm.prepare_a2a(v.author,'message',JSON.stringify(v.payload),v.context_id,undefined,v.created_at,undefined,undefined);
+ const firstHex=Array.from(firstBytes,n=>n.toString(16).padStart(2,'0')).join('');
+ const secondBytes=wasm.prepare_a2a(v.author,'message',JSON.stringify(v.payload),v.context_id,undefined,'2026-10-02T00:00:00Z',undefined,undefined);
+ const secondHex=Array.from(secondBytes,n=>n.toString(16).padStart(2,'0')).join('');
+ const first=edge(firstHex),second=edge(secondHex);second.node.id='B'.repeat(43);second.cursor=second.node.id;
+ let visible=false;
+ const fetcher=(async(url:any)=>String(url).includes('index.invalid')?Response.json({data:{transactions:{edges:visible?[second,first]:[],pageInfo:{hasNextPage:false}}}}):new Response(String(url).endsWith(second.node.id)?secondBytes:firstBytes)) as typeof fetch;
+ const c=client(fetcher);const opts={expectedAuthors:[v.author.pubkey_base58],heads:[first,second].map(e=>'a2a:'+e.node.tags.find(t=>t.name==='Content-Hash')!.value)};
+ const lagged=await c.restoreA2AContext(v.context_id,opts);expect(lagged.completeness).toBe('unknown');expect(lagged.source.status).toBe('exhausted');
+ visible=true;const recovered=await c.restoreA2AContext(v.context_id,opts);expect(recovered.attestations).toHaveLength(2);expect(recovered.completeToHeads).toBe(true);
+});

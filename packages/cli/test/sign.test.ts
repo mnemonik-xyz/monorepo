@@ -39,11 +39,11 @@ describe("runSign", () => {
     );
   });
 
-  it("UserError if identity exists but token is missing", async () => {
+  it("anchored write requires a token", async () => {
     // Generate a real identity via the WASM mock.
     const kp = mock.generate_keypair();
     saveIdentityJson(kp);
-    await expect(runSign("hello", { content: "hello" })).rejects.toBeInstanceOf(
+    await expect(runSign("hello", { content: "hello", anchor:true })).rejects.toBeInstanceOf(
       UserError
     );
   });
@@ -111,7 +111,7 @@ describe("runSign", () => {
       content: "hello",
       baseUrl: "http://test",
       tags: "a, b",
-      public: true, // use plaintext path to test signMemory flow
+      public: true, anchor: true, // use plaintext path to test signMemory flow
     });
     expect(fetchMock).toHaveBeenCalled();
     const calls = fetchMock.mock.calls.map((c) => String(c[0]));
@@ -175,7 +175,7 @@ describe("runSign", () => {
     const err = await runSign("hello", {
       content: "hello",
       baseUrl: "http://test",
-      public: true, // use plaintext path to trigger the signMemory/sign-callback flow
+      public: true, anchor: true, // use plaintext path to trigger the signMemory/sign-callback flow
     }).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(UserError);
     const msg = (err as UserError).message;
@@ -185,7 +185,7 @@ describe("runSign", () => {
     expect(msg).toContain(jwtRealSub);
   });
 
-  it("ServerError (exit 2) when /api/store-sealed returns 500 (default sealed path)", async () => {
+  it("ServerError (exit 2) when signed artifact ingestion returns 500", async () => {
     const kp = mock.generate_keypair();
     saveIdentityJson(kp);
     const sub = kp.pubkey_base58;
@@ -205,12 +205,12 @@ describe("runSign", () => {
     globalThis.fetch = fetchMock as never;
 
     await expect(
-      runSign("hello", { content: "hello", baseUrl: "http://test" })
+      runSign("hello", { content: "hello", baseUrl: "http://test", anchor: true })
     ).rejects.toMatchObject({ exitCode: 2 });
     // Re-run a fresh call to assert the error class — vitest rejects.toBeInstanceOf
     // collapses with toMatchObject above so we re-run a second time.
     await expect(
-      runSign("hello", { content: "hello", baseUrl: "http://test" })
+      runSign("hello", { content: "hello", baseUrl: "http://test", anchor: true })
     ).rejects.toBeInstanceOf(ServerError);
   });
 });

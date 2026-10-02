@@ -196,6 +196,64 @@ pub fn get(conn: &Connection, operation_id: &str) -> Result<Option<PaidOperation
     .transpose()
 }
 
+/// Validate a cached provider receipt before using it as settled evidence.
+/// Historical malformed receipts fail closed and require reconciliation.
+pub fn settled_receipt(
+    operation: &PaidOperation,
+) -> Result<Option<crate::universal_paywall::PaymentReceipt>> {
+    use crate::universal_paywall::{
+        validate_payment_receipt, OperationBinding, OperationScope, PaymentReceipt,
+    };
+    let Some(raw) = operation.provider_receipt_json.as_deref() else {
+        return Ok(None);
+    };
+    anyhow::ensure!(
+        matches!(
+            operation.state,
+            PaidOperationState::PaymentReady
+                | PaidOperationState::Anchoring
+                | PaidOperationState::VerifyingDelivery
+                | PaidOperationState::Anchored
+                | PaidOperationState::DeliveryRetryable
+                | PaidOperationState::RefundPending
+                | PaidOperationState::Abandoned
+        ),
+        "stored receipt state conflict"
+    );
+    let receipt: PaymentReceipt =
+        serde_json::from_str(raw).context("invalid stored payment receipt")?;
+    let digest = operation
+        .binding_digest
+        .as_deref()
+        .ok_or_else(|| anyhow!("stored quote digest missing"))?;
+    let wallet = operation
+        .payer_wallet
+        .as_ref()
+        .ok_or_else(|| anyhow!("stored payer missing"))?;
+    // Amount and network were checked before initial persistence. Recheck the
+    // durable quote digest, operation and wallet plus nested receipt consistency.
+    let binding = OperationBinding {
+        version: 1,
+        operation_id: operation.operation_id.clone(),
+        payer_subject: String::new(),
+        payer_wallet: wallet.clone(),
+        artifact_hash: operation.artifact_hash.clone(),
+        amount: receipt.amount.clone(),
+        asset: receipt.asset.clone(),
+        network: receipt.network.clone(),
+        pay_to: receipt.pay_to.clone(),
+        expires_at: String::new(),
+        nonce: String::new(),
+        scope: OperationScope {
+            workspace_hash: None,
+            visibility: String::new(),
+            action: String::new(),
+        },
+    };
+    validate_payment_receipt(&receipt, &binding, digest)?;
+    Ok(Some(receipt))
+}
+
 /// Move an operation only from an expected state. This makes a duplicate
 /// browser callback or recovery worker observe a conflict instead of silently
 /// overwriting a newer state.
@@ -506,7 +564,8 @@ mod tests {
         )
         .unwrap();
         mark_payment_authorizing(&conn, "reload-op", "2026-07-15T10:00:02Z").unwrap();
-        let first_receipt_json = r#"{"operation_id":"reload-op","status":"settled","settlement_tx":"0xabc"}"#;
+        let first_receipt_json =
+            r#"{"operation_id":"reload-op","status":"settled","settlement_tx":"0xabc"}"#;
         let settled = record_provider_receipt(
             &conn,
             "reload-op",
@@ -580,14 +639,11 @@ mod tests {
         .unwrap();
 
         // Delivery succeeds: record the delivery receipt and transition to anchored.
-        let delivery_evidence = r#"{"arweave_tx":"AR1234","solana_tx":"SOL5678","recall_verified":true}"#;
-        let anchored = record_delivery_receipt(
-            &conn,
-            "retry-op",
-            delivery_evidence,
-            "2026-07-15T11:01:00Z",
-        )
-        .unwrap();
+        let delivery_evidence =
+            r#"{"arweave_tx":"AR1234","solana_tx":"SOL5678","recall_verified":true}"#;
+        let anchored =
+            record_delivery_receipt(&conn, "retry-op", delivery_evidence, "2026-07-15T11:01:00Z")
+                .unwrap();
         assert_eq!(anchored.state, PaidOperationState::Anchored);
         assert_eq!(
             anchored.delivery_receipt_json.as_deref(),

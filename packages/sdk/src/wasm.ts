@@ -47,6 +47,8 @@ export interface MnemonicCoreModule {
   default?: (input?: unknown) => Promise<unknown>;
   generate_keypair: () => unknown;
   sign_challenge: (kp: unknown, bytes: Uint8Array) => Uint8Array;
+  to_canonical_cbor_bytes?: (value: unknown) => Uint8Array;
+  blake3_hash_hex?: (bytes: Uint8Array) => string;
   sign_cose_payload: (payload: Uint8Array, kp: unknown) => Uint8Array;
   import_keypair_json: (s: string) => unknown;
   export_keypair_json: (kp: unknown) => string;
