@@ -102,3 +102,77 @@ Checks: inspected manifests, build scripts and release workflows; local Markdown
 No runtime tests were needed for this planning change. No registry publication status was inferred from source versions.
 Task 11 closes planning only. Repository names, ownership and extraction remain proposals.
 No repository, deployment, package publication or code move was performed.
+
+## 2026-10-02 — Task 9 replaceable discovery
+
+Implemented SDK discovery interfaces and Irys/Arweave adapters with source-bound continuation and explicit disabled-discovery recovery.
+Source diagnostics preserve outage, malformed responses, budgets and cancellation instead of presenting empty success.
+Artifact signatures and pinned authors retain authority; changing the index cannot add trusted identities.
+Root review added credential omission, redirect refusal and deadlines spanning response-body reads.
+
+Checks: 21 SDK discovery/recovery tests passed with rebuilt real WebAssembly and mocked external sources.
+`npx tsc --noEmit -p packages/sdk/tsconfig.json` passed.
+Tests include replacement, reordered duplicates, competing roots, omission, lag, forged hints, cursor loops and known-locator bypass.
+Task 9 closes its implementation acceptance. Live-provider claims remain gated by task 5 and A-13.
+
+## 2026-10-02 — Task 4 recovery and authenticated backup
+
+Implemented source diagnostics with retained partial pages and explicit scan budgets.
+The local restore command now reports incomplete discovery and uses the correct Irys owner filter.
+Added native verified-kind recovery, exact-envelope retention, complete plaintext and structured unsupported/key errors.
+SDK checkpoints authenticate scope, identity, heads and locators; portable backups encrypt explicit caller-owned key material.
+
+Root review found that memory IDs alone cannot pin legacy memory bytes.
+The native graph therefore requires independently authenticated author/digest bindings for heads and every ancestor.
+Cross-review also aligned existing SDK JSON plaintext with native CBOR recovery without rewriting signed formats.
+Checkpoint verification snapshots caller data before asynchronous verification; multi-locator selection cannot silently discard alternatives.
+
+Checks passed: 15 native recovery/restore tests, 11 GraphQL tests, one memo enumeration test and seven SDK checkpoint tests.
+SDK TypeScript checking and strict core-library clippy passed.
+Task 4 closes implementation acceptance for declared interfaces. Live providers and released-package recovery remain task 5 gates.
+
+## 2026-10-02 — Parallel implementation readiness
+
+Tasks 2 and 3 share a final metadata-only acceptance condition.
+Task 3 may start after task 2's shared ingestion interface passes focused review and tests.
+Task 2's final paid-path and storage acceptance stays open until task 3 integration passes.
+This distinction avoids a circular acceptance gate without declaring either implementation complete early.
+Task 10 starts after the ingestion interface, recovery/checkpoints and discovery interfaces are available and tested.
+It must still pass integrated migration and continuation tests before closure.
+
+
+## 2026-10-02 — Task 10 bounded storage portability
+
+Owner-signed locator manifests bind routing alternatives to authenticated checkpoints.
+The SDK copies exact original bytes and validates destination-only pinned ancestry.
+The MCP resolver accepts blob digests only through an explicitly configured origin.
+Independent operator continuation was tested after source shutdown and receipt deletion.
+
+Checks passed: five SDK storage tests, seven checkpoint tests, one native resolver test, and the MCP independent-operator continuation test.
+The latest full SDK run passed 365 tests across 29 files.
+This closes task 10's declared A2A implementation scope, including embedded grants and completed streams.
+The [evidence matrix](implementation-evidence.md) separates these mocked services from live evidence.
+General-memory migration and standalone grant/SSE migration are not supported by this interface.
+No production backend, permanent retention or published-package readiness is claimed.
+
+
+## 2026-10-02 — Integrated implementation and task 2/3 acceptance
+
+Implementation commit `9fc8e42` contains shared client-prepared ingestion, metadata-only new retry records, authenticated recovery, replaceable discovery and bounded A2A storage migration.
+Three agents worked on independent areas; root review integrated payment, recovery, CLI and acceptance evidence.
+Cross-review fixed quota cancellation state, provider/cached receipt bindings, checkpoint mutation, memory identity pins, storage budgets and CLI durability/private-query handling.
+
+Final checks passed: 1,305 Rust workspace tests (seven ignored); 365 SDK tests; 190 CLI tests (two skipped).
+The normally ignored real SDK/WASM HTTP checks ran explicitly and passed: two signed-memory/recall tests and one A2A SQL-loss recovery test.
+SDK/CLI builds, strict core/MCP Clippy and local documentation checks passed.
+See the [implementation evidence matrix](implementation-evidence.md) for exact commands and limits.
+
+Tasks 2 and 3 close implementation acceptance for their declared interfaces.
+Tasks 4, 9 and 10 have implementation evidence in the same commit; task 11 remains a planning-only completion.
+Historical paid staging is deliberately retained until identical verified resubmission drains it.
+The configured payment provider remains a trust anchor; no live settlement or detached provider-signature verification is claimed.
+
+Task 5 remains in progress: mocked operators and storage do not establish live discovery, deployed independent-operator support or a released-package drill.
+Tasks 6, 8 and 12 retain their release prerequisites. Accurate source documentation and a capability matrix were updated now to prevent stale claims.
+Task 7 has no customer evidence or outreach; no product demand is inferred from these tests.
+No merge, deployment, package publication or repository extraction has been performed.

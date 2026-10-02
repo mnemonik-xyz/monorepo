@@ -68,7 +68,7 @@ Move selected paths with history preservation after an inventory review. Never c
 |---|---|
 | [SDK WASM script](../../packages/sdk/scripts/build-wasm.sh) uses root-relative paths and shared `core/pkg*` outputs | Fetch a pinned core source/artifact; isolate web and node outputs; verify digests |
 | [Webapp WASM script](../../webapp/scripts/build-wasm.sh) builds the same crate | Pin compatible core version and declare generated artifact provenance |
-| [SDK TypeScript config](../../packages/sdk/tsconfig.json) and [CLI config](../../packages/cli/tsconfig.json) assume workspace builds | Test clean packed-package installation outside this checkout |
+| [SDK build scripts](../../packages/sdk/package.json) and [CLI's SDK dependency](../../packages/cli/package.json) use local workspace build ordering | Test clean packed-package installation outside this checkout |
 | [Rust CI](../../.github/workflows/ci.yml) compiles the complete workspace | Add a pinned cross-repository integration matrix before separating crates |
 | [Node CI](../../.github/workflows/node-test.yml) regenerates Rust fixtures and runs real HTTP/WASM tests | Keep parity and integrated recovery jobs against released component combinations |
 | [Release workflow](../../.github/workflows/release.yml) uses one tag family for binaries, npm and registry metadata | Define component release tags and compatibility manifest; preserve checksums and provenance |

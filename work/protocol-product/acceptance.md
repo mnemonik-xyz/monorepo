@@ -1,6 +1,6 @@
 # Acceptance and release evidence
 
-Status: planned tests. None are reported as run by this documentation package.
+Status: acceptance requirements. See the [implementation evidence matrix](implementation-evidence.md) for executed local tests and remaining release gates. This specification alone establishes no passing result.
 
 | Test | Required observation | Blocks claim |
 |---|---|---|

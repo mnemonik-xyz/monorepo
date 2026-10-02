@@ -50,3 +50,13 @@ Follow the existing A2A contract's wider closure requirements.
 Customer demand, retention requirements, key backup usability and sustained availability remain unmeasured here.
 Customer pilots and recovery drills must supply that evidence.
 Current backend discovery remains a provider dependency even after MCP SQL dependency ends.
+
+
+## Implementation follow-up — `9fc8e42`
+
+The table above remains the historical baseline. The [implementation evidence matrix](implementation-evidence.md) records the subsequent code review and executed tests.
+F1–F5, F7–F8 and F10–F12 now have implementation evidence for the declared client-prepared ingestion, native recovery and retry interfaces.
+This is not a blanket migration claim: legacy server-prepared signing and undrained historical paid staging remain explicit exceptions.
+F6 retains the existing A2A tasks' wider acceptance ownership even though the final explicit SQL-loss integration test passed.
+F9's technical checkpoint support is implemented; completeness claims still require accurate source/release documentation.
+F13 remains a release-documentation/live-provider gate. The new source capability matrix does not establish deployment or published-package readiness.
