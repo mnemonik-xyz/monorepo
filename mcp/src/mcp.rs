@@ -32,6 +32,18 @@ use mnemonic_core::storage::{SqliteStore, WriteMode};
 use std::convert::Infallible;
 use std::sync::Arc;
 
+/// Typed marker keeps transient external parent failure out of invalid-params errors.
+#[derive(Debug)]
+struct ParentUnavailable;
+
+impl std::fmt::Display for ParentUnavailable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ParentUnavailable")
+    }
+}
+
+impl std::error::Error for ParentUnavailable {}
+
 /// Build-time-generated skill manifest constants, projected from
 /// `mcp/assets/skills/*.md` by `mcp/build.rs`. Three slots per skill —
 /// `*_FULL_MARKDOWN`, `*_PURPOSE_PLUS_TRIGGER`, `*_PURPOSE_ONE_LINER` —
@@ -1951,11 +1963,20 @@ pub async fn mcp_handler(
                 let locator = args["prev_locator"]
                     .as_str()
                     .ok_or_else(|| anyhow::anyhow!("ParentLocatorRequired"))?;
+                // Reject malformed hints before distinguishing network unavailability.
+                let valid_locator = if let Some(id) = locator.strip_prefix("ar://") {
+                    id.len() == 43 && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+                } else if let Some(digest) = locator.strip_prefix("blob://") {
+                    digest.len() == 64 && digest.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                } else {
+                    false
+                };
+                anyhow::ensure!(valid_locator, "invalid parent locator");
                 let bytes = state
                     .arweave
                     .read_parent_locator(locator)
                     .await
-                    .map_err(|_| anyhow::anyhow!("ParentUnavailable"))?;
+                    .map_err(|_| anyhow::Error::new(ParentUnavailable))?;
                 let parent = mnemonic_core::codec::a2a::signed::verify_signed_a2a(&bytes, None)?;
                 mnemonic_core::codec::a2a::signed::verify_parent_link(&child, &parent)?;
             } else if args.get("prev_locator").is_some() {
@@ -1967,11 +1988,16 @@ pub async fn mcp_handler(
         let (signed_bytes, child) = match validation {
             Ok(validated) => validated,
             Err(error) => {
-            return ndjson_response(
-                StatusCode::BAD_REQUEST,
-                &serde_json::json!({"jsonrpc":"2.0", "id":req.id,"error":{"code":-32602,"message":error.to_string()}}),
-            );
-        }
+                let (status, code) = if error.is::<ParentUnavailable>() {
+                    (StatusCode::SERVICE_UNAVAILABLE, -32011)
+                } else {
+                    (StatusCode::BAD_REQUEST, -32602)
+                };
+                return ndjson_response(
+                    status,
+                    &serde_json::json!({"jsonrpc":"2.0", "id":req.id,"error":{"code":code,"message":error.to_string()}}),
+                );
+            }
         };
         let descriptor = crate::ingestion::ValidatedMemory {
             author: child.signer.clone(), kind: "a2a".into(),
