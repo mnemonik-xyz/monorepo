@@ -21,6 +21,7 @@ Product delivery does not depend on token issuance or a new blockchain.
 | [Product plan](product-plan.md) | Packaging, sales tests and funding choices |
 | [Gap register](gaps.md) | Code evidence, remaining work and closure tests |
 | [Baseline audit](baseline-audit.md) | Current paths, existing tests and claim-to-release map |
+| [Repository inventory](repository-inventory.md) | Package boundaries, migration work and proposed extraction gates |
 | [Decisions](decisions.md) | Owner inputs, recommendations and open choices |
 | [Proof of concept](proof-of-concept.md) | Research handoff roles, flow and failure demonstration |
 | [Acceptance plan](acceptance.md) | Evidence required before product claims |

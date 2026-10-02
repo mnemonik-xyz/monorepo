@@ -2,6 +2,8 @@
 
 Status: proposal. The owner requested discussion, not creation of new repositories.
 
+The [inventory and migration proposal](repository-inventory.md) records task 11's reviewed baseline and extraction gates.
+
 ## Recommendation
 
 Extract the protocol contract first.

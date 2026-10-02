@@ -90,3 +90,15 @@ The implementation source revision above is the evidence baseline; this audit ad
 
 Tasks 2, 4, 9 and 11 can now proceed with explicit file ownership.
 Task 7 can prepare research, but contacting people still requires explicit outreach authorization.
+
+## 2026-10-02 — Task 11 repository extraction proposal
+
+The [repository inventory](repository-inventory.md) completes the requested planning deliverable at source baseline `89532db`.
+It inventories four Rust crates and six npm manifests, with source versions and local build dependencies.
+It maps specification ownership, vectors, relative links, release jobs and registry metadata to required migration work.
+It proposes compatibility manifests and extraction gates E1–E6.
+
+Checks: inspected manifests, build scripts and release workflows; local Markdown target checks and `git diff --check` passed.
+No runtime tests were needed for this planning change. No registry publication status was inferred from source versions.
+Task 11 closes planning only. Repository names, ownership and extraction remain proposals.
+No repository, deployment, package publication or code move was performed.
